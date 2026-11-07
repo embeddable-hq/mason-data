@@ -64,7 +64,7 @@ CLI lacks).
   what }]` from the SAME `NextStep` list the human output prints, and refuses a key the spec does not declare —
   `CommandSpec.json` names the answer's top-level keys, its usage's `--json` line names each (`tests/cli-help.test.ts`),
   so the help and the answer cannot drift. A list is wrapped (`{ tables: […], next }`), never printed bare. The EXIT CODE
-  is part of the contract: 0 done, 1 failed (said), 2 a wrong command line, 124 `mason wait`, `mason deploy`, `mason replica create` or `mason replica delete` timed out. Human output goes
+  is part of the contract: 0 done, 1 failed (said), 2 a wrong command line, 124 a command ran out of time (`TIMEOUT_COMMANDS`: `wait`, `deploy`, `replica create`, `replica delete`, `login`, `share`, `ui --ssh`). Every `--timeout` and `--step` is ONE duration grammar (`parseDuration`, src/lib/table-sync.ts: a bare number is seconds, `<n>s|m|h|d`), `<duration>` in each usage; a wrong option is answered with `did you mean` over the spec's options and the synopsis alone (`synopsis`). Human output goes
   to stdout, progress to stderr. **The answer reaches a pipe whole**: a pipe takes writes asynchronously and
   `process.exit` drops what is queued, so the process exits only through `exitWhenWritten` (src/cli/main.ts), once both
   streams are written (`tests/cli-pipe.test.ts`; `tests/conventions.test.ts` refuses another `process.exit` in src/cli).
@@ -360,7 +360,7 @@ CLI lacks).
   never its URL —, `roleProblems` against the tables the sources file names, `readGenerated`'s refusals said), connects
   to no database, and refuses what a start would refuse, sending nothing. The files are `projectFiles` alone, held to
   the contract's bounds (`deployFiles`), and every file the check read is among them. A literal `url:` with its password
-  is refused: the service keeps the files. The wait is bounded by `--timeout` (`parseDuration`, the interval grammar);
+  is refused: the service keeps the files. The wait is bounded by `--timeout` (`parseDuration`, the one duration grammar, 1s to 24h);
   an answer that cannot say is a wait, never an outcome; exit 0 only on `running`, a refusal is the replica's failure's
   words as they came, each one line, its code the CLI's (`failureShape`: `refused` / `failed`, the service's in `why`,
   its next step the CLI's: the service's `next` is never read), exit 1, a status or phase outside the closed sets a failure, the deploy's id held to its
@@ -370,11 +370,13 @@ CLI lacks).
   service on 127.0.0.1; every run's output held to carrying no token).
 - **`mason replica create | list | status | delete` and `mason token create | list | revoke` are clients of the same service**
   (src/cli/replica-hosted.ts, src/cli/token-hosted.ts; docs/HOSTED-API.md "Replicas", "CI tokens"), with deploy's and
-  `user --replica`'s decisions, never new ones: `replicaNamed` / `orgNamed` / `tokenFor` (src/cli/replica.ts), every
+  `user --replica`'s decisions, never new ones: `replicaOf` (the argument, else `--replica`, else `MASON_REPLICA`, said on stderr when it chose) / `orgOf` (the argument or `--org`) / `tokenFor` (src/cli/replica.ts), every
   string of an answer to `carriesNoSecret` before its grammar (a check's and a pending change's words alone are free
   text, masked), the code by status, the next step the CLI's (naming the role that may), the output's gate held from
-  the login on. **The database's URL is read by the variable the sources file names, by `readSource` alone**, never
-  from argv; a `url:` written in the file is refused; it is sent once, in the creation's body, and its password held
+  the login on. **The database's URL is read from the person or the pipe alone** (issue 720; src/cli/secret-input.ts:
+  a hidden prompt on a terminal, raw mode put back on every way out, else stdin whole, bounded), never from argv, `.env`
+  or the shell: a command line holding a URL is refused before anything else reads it (`urlInArgs`, exit 2, never
+  repeated); the sources file gives only the variable's name (`readSourceFile`), and a `url:` written in it is refused; it is sent once, in the creation's body, and its password held
   as a secret of the command in the ONE list every boundary reads (`urlPassword`; the exact test, the masks, the gate),
   each comparing it with a text by ONE READING of both (`readUnits`, src/cli/hosted.ts: case, `%XX`, NFKD, accents,
   format and control characters, escapes, white space; PR 660's class round); one under `MIN_PASSWORD`, or one the
@@ -385,15 +387,19 @@ CLI lacks).
   (tests/cli-replica.test.ts, tests/cli-token.test.ts). **`delete` is asked for twice**: on the line, and typed back
   exactly by a person at a terminal (what was typed never printed), else `--yes`; without either, a wrong line (exit 2)
   before a byte is sent. It waits for the deletion's stage `finished` within `--timeout` (124 past it), each step said
-  once in the service's words, then each source's slot: dropped and verified gone, none there (exit 0), or NOT verified
-  gone (exit 1). **The statement a person runs by hand is Mason's own** (`byHandOf`: `dropStatements`,
+  once in the service's words, then each source's slot: dropped and verified gone, none there, or confirmed by a person
+  (exit 0). **A slot NOT verified gone is stage `needs_person`**: the service keeps the replica until the slot is seen
+  gone or a person confirms it, so the wait stops AT ONCE (waiting brings nothing), the statement is printed and the
+  failure says what the person does then (`failed`, exit 1: not deleted); a `finished` deletion with a slot not
+  verified gone is outside the contract. **The statement a person runs by hand is Mason's own** (`byHandOf`: `dropStatements`,
   src/cli/replication-mode.ts, the one authority; `listSlotsStatement` when the slot's name is not known), rendered from the
   names the service gives, each held to `PG_NAME` first (a name outside it refuses the answer); a service's `byHand` is
   advisory, a string put to the exact test and never printed, compared or depended on (PR 687's review, B1: a text
   compared on two sides was a fact derived twice). Every statement a person pastes is written by `pasteLines` alone, on
   its own line, indented, never broken by the CLI and never inside a failure's words (a value to paste, as a CI token
-  is: PR 687's N1, PR 660's B2). A deletion is held present exactly while the
-  state is `deleting` or `deleted`, its stage the state's (`heldDeletion`); `status` shows it the same way
+  is: PR 687's N1, PR 660's B2). A deletion is carried only while the state is `deleting` or `deleted`, always while
+  `deleted`, its stage the state's (`heldDeletion`); a replica `deleting` may carry none (deleted another way), said as
+  being deleted and nothing invented, and one present but malformed refuses the answer; `status` shows it the same way
   (`deletionReport`), exit 0 (tests/cli-replica-delete.test.ts).
 - **The road to production is commands too** (the journey from running it locally to deploying it in production; the
   README's "Going to production", `mason help production` offline). Only the project folder
@@ -428,8 +434,8 @@ A new refusal a developer can meet gets a test asserted on its whole text (`test
 
 ## What review probes
 
-Run each probe that applies before a push: the harness's implement and fix prompts say so, and its review runs them
-again at every round. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+Run each probe that applies: the implementer before each push, and the fresh reviewer at each review (CLAUDE.md
+"How work is done here", steps 3 and 4). A new probe is proposed to the owner; each bullet names the PR or issue it was met in.
 
 - An operator setting given junk (`abc`, `0`, `-1`, `1.5`, `2000`): refused naming the variable and its range, never run
   on a library's reading of it (PR 148).

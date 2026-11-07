@@ -9,6 +9,7 @@ paths:
   - "src/duck/jsonb-order.ts"
   - "src/duck/jsonb.ts"
   - "src/duck/late.ts"
+  - "src/duck/libc-bound.ts"
   - "src/duck/libc-order.ts"
   - "src/duck/pg-eval-worker.ts"
   - "src/duck/pg-eval.ts"
@@ -303,8 +304,14 @@ paths:
 
 - **A numeric the plan decides exactly is compared by its EXACT KEY, never its double** (`exactKey`, src/duck/rewrite.ts;
   PR 207's class round): a quotient or an avg the engine holds as a double equates values Postgres tells apart past 17
-  digits, so DISTINCT, DISTINCT ON, GROUP BY (beside the value), PARTITION BY, count(DISTINCT), `=` and `<>` read the
-  program's value without trailing zeros (`__mason_numeric_key`); a form where no key can be placed (a grouping set,
+  digits, so DISTINCT, DISTINCT ON, GROUP BY, PARTITION BY, count(DISTINCT), `=` and `<>` read the
+  program's value without trailing zeros (`__mason_numeric_key`). **A GROUP BY groups by the key ALONE, computed in ONE
+  call a row** (`__mason_numeric_program_key`, issue 665: beside the value, the double, the program and the key were
+  three calls a row, 3x the time): the expression is recorded `cells` (`grouping`), and decidedByKey marks its columns
+  (`readPerGroup`) so the walk reads each through any_value once every rule above it has read the expression as
+  Postgres's analysis typed its shape — the list's double, a cast, its text, HAVING, the ORDER BY's exact order key,
+  WITH TIES and a carried program's cells are each computed per GROUP, never inside any_value per row
+  (`tests/duck-plans.test.ts` "issue 665", FUNCTION_ROWS); a form where no key can be placed (a grouping set,
   another aggregate's DISTINCT, a set operation without ALL, a JOIN … USING or NATURAL JOIN on a subquery's quotient,
   `refuseMergedExact`) is refused, `numeric-quotient-equality`; IN a list keys every item (issue 358); = ANY, IS
   DISTINCT FROM, NULLIF, CASE x WHEN, < and > are the listed difference `numeric-quotient-compare`. A new context that
@@ -408,6 +415,20 @@ paths:
   `libc-locale-unread` where ASCII or Latin does. No ICU in it: a new case the read does not follow is a refusal by
   name, a decided difference, or a read of it. `tests/duck-libc-order.test.ts` holds the key's mechanics,
   `tests/integration/duck-libc-read.itest.ts` the order against the source, the oracle's `every value` the statements.
+- **A libc key is computed for a top N's and a min / max's candidates alone** (`src/duck/libc-bound.ts`, issue 666: the
+  JavaScript key on every row was 10-15 s over 5 M rows, past the timeout at 93 M). Each value's two NATIVE bounds
+  (`regexp_extract`, `lower`, `regexp_replace`) are written from the `LibcOrder` read for that collcollate, never a
+  table by hand: an order whose printable ASCII's folded bytes do not order its weights has none. Their marks (the
+  text's end, below and above every weight) are written after the weights and never read from the value: whether it
+  ended in the run is decided from the value itself, since a value may hold any control character (PR 675). The proof obligation,
+  hi(a) < lo(b) implies libcKey(a) < libcKey(b) at the first level, lo <= hi, equal strings equal bounds, is held over the
+  ENGINE's expressions by `holdBounds` (tests/libc-order-fixture.ts): the hand order's `l·`, U+212A, U+0130 and marks in
+  `libc bound:`, the source's order in the read test's `bound`. The threshold's subquery clones the SELECT's one FROM
+  item and WHERE, so it holds only where they read the same rows twice: nothing volatile, no window or set-returning
+  list, no aggregate but the min / max's own, no LIMIT, DISTINCT ON or sample inside but a role's barrier; a cloned
+  walled read is counted as a wall. Anything else is sent as written (a join, GROUP BY, DISTINCT, WITH TIES, a set
+  operation, a window, FILTER). Detector: `libc top N:` (tests/duck-wire.test.ts) and the `text under libc:` plan
+  entries and rows test (tests/duck-plans.test.ts), the oracle's `text top N:` and `text min/max:`.
 - **A tie under ICU is two strings, ordered by their bytes** (U+FE0F is ignorable there): every order under ICU ends in
   the bytes, `sortKeys`, `icuKey`, `textMinMax`.
 - **A refusal raised at a row never quotes the row** (issue 128): it reaches any user, in a tool's error box and the
@@ -422,8 +443,8 @@ paths:
 
 ## What review probes
 
-Run each probe that applies before a push: the harness's implement and fix prompts say so, and its review runs them
-again at every round. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+Run each probe that applies: the implementer before each push, and the fresh reviewer at each review (CLAUDE.md
+"How work is done here", steps 3 and 4). A new probe is proposed to the owner; each bullet names the PR or issue it was met in.
 
 - A constant as a key in ORDER BY, DISTINCT ON, WITH TIES and a window, by name, by number and as itself (`1 AS one`,
   `1.5::numeric`, `'1.5'::numeric`, `2147483648::int`, `'abc'::text::int`, every key a constant): a literal the engine
@@ -577,3 +598,40 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
   answers the picked row's numeric (OID 1700, `16.000000000000000`, `0.75625000000000000000`). The decision: order by
   the exact key, answer the picked row's value, never the key, while the readers that only order or test nullness stay
   answered (`refusal-wider-than-the-wrong-answer` above); `order-key-bytes-as-result` (PR 506; issues 486, 538).
+- A value holding the very byte a bound, key or run uses to mark its own end, at the head and the base over a synthetic
+  `t (id int PRIMARY KEY, a int, b text)` under a libc collation, with rows `'abc'`, `'ab' || chr(2) || 'cd'`,
+  `chr(2) || 'zz'`, `'a' || chr(2) || 'z'` beside `'aa'`, `'aaz'`, `'b'`, `'zzz'`: `SELECT id, b FROM t ORDER BY b, id
+  LIMIT 2`, `ORDER BY b DESC, id LIMIT 5`, `ORDER BY b DESC NULLS LAST`, `ORDER BY b || 'x'`, an alias, a CTE, `b IN
+  (SELECT b … ORDER BY b DESC LIMIT 5)`, `SELECT min(b), max(b) FROM t`, a correlated `(SELECT min(b) …)`; and the same
+  with chr(1) and chr(127): a control character glibc ignores at the first levels is read as the end-of-text mark, so
+  the row sorts by its prefix alone, is dropped from a DESC top N, or swaps min and max, silently. The decision: no
+  in-band sentinel; the end of a value is known from the value itself (the run's length against the text's, or an
+  anchored pattern), and the property test's strings are drawn from a pool holding every byte the bounds use;
+  `sentinel-byte-the-data-can-hold` (PR 675).
+- GROUPING() of an expression the engine groups by a key in its place (an exact quotient), in every clause that can
+  hold one, at the head and the base over `t (id int primary key, a int, b text, c numeric(10,2), d char(4))` with
+  NULLs, duplicates and ties: `SELECT c / 3 AS q, grouping(c / 3), count(*) FROM t GROUP BY 1 ORDER BY 1`, by `GROUP BY
+  c / 3`, two arguments `grouping(c / 3, a)`, in HAVING (`HAVING grouping(c / 3) = 0`), in ORDER BY, in DISTINCT ON
+  (`SELECT DISTINCT ON (grouping(c / 3)) c / 3 AS q FROM t GROUP BY 1 ORDER BY grouping(c / 3), 1`), in a named WINDOW
+  (`WINDOW w AS (ORDER BY grouping(c / 3), c / 3)`), the same over `ceil(c / 7.0)` and a jsonb keyed column: the
+  argument written as the expression's value, which is no engine group column, or rewritten in a list of clauses that
+  misses one, 42804 "GROUPING child … must be a grouping column". The decision: every GroupingFunc of the SELECT, found
+  by walking its whole body (not a list of clauses), reads its arguments' engine GROUP BY entries from the one record
+  keyedGroups placed; `grouping-of-keyed-expression-reads-value` (PR 674).
+- A SubLink's test expression over a grouped expression, at the head and the base over the same `t`: `SELECT c / 3 AS
+  q, count(*) FROM t GROUP BY 1 HAVING c / 3 IN (SELECT c / 5 FROM t) ORDER BY 1`, `= ANY (…)`, `NOT IN (…)`, `(c / 3)
+  > ALL (…)`, in the list (`c / 3 IN (SELECT c / 5 FROM t) AS listed`), in the ORDER BY, correlated (`… HAVING c / 3 IN
+  (SELECT e.c / 3 FROM e WHERE e.a = t.a)`): the test expression walked at the subselect's depth, so its column of this
+  query is left unmarked and sent bare, 42803 where Postgres answers. The decision: a SubLink's test expression belongs
+  to the query holding the SubLink and is walked at that query's depth, only the subselect one deeper;
+  `sublink-testexpr-walked-at-inner-depth` (PR 674).
+- A char(n) compared through a SubLink (IN, = ANY, < ALL, a row IN) with a subselect of every form, at the head and the
+  base over the same `t` with `d` 'ab' in some rows, 'cd' and NULL in others, ungrouped and under `GROUP BY id`: `SELECT
+  id, d IN (SELECT 'ab') AS m FROM t ORDER BY 1`, `(b, d) IN (SELECT 'x', 'ab')`, `d = ANY (SELECT 'ab')`, `d IN (VALUES
+  ('ab'::char(4)))`, `d IN (SELECT s.* FROM (SELECT d FROM t WHERE id = 1) s)`, `(id, a, b, c, d) IN (TABLE t)`, `d IN
+  (SELECT d … UNION / UNION ALL / INTERSECT / EXCEPT SELECT d …)`, `d IN (SELECT d … UNION SELECT 'zz')`, `d < ALL
+  (SELECT d … UNION SELECT d …)`: the char(n) side trimmed (or kept padded) on one operand only, because the subselect's
+  side is written only when its plain target list is reachable, so equal values never compare equal, a silent wrong
+  answer. The decision: the two operands are compared under the one type Postgres's analysis of the SubLink's operator
+  resolved, written together or not at all, the subselect's side over its output columns whatever its form;
+  `char-padding-in-sublink-test` (PR 674).

@@ -26,7 +26,7 @@
 import { maskPasswordKeyword } from "../lib/secret-mask.ts";
 import type { DuckDBValue } from "@duckdb/node-api";
 import { MASON_SCHEMA, type DuckStore } from "./store.ts";
-import { Batches, History, Streak } from "./history.ts";
+import { Batches, History, Streak, cutoff } from "./history.ts";
 
 /** One restart of the run as its supervisor records it in `.mason/restarts.json` (src/cli/supervise.ts, a process of
  *  its own): when, why the run stopped, how long it had been up. */
@@ -149,9 +149,11 @@ export class SyncEvents {
     this.lost.succeeded((n) => this.log(`sync events: recording again; ${n} event(s) were not recorded (the log has them)`));
   }
 
-  /** Deletes the events older than the retention; the count is said when there were any. */
+  /** Deletes the events older than the retention; the count is said when there were any. The retention is counted back
+   *  from the module's ONE clock (`now`, which stamps each event), never the engine's `now()`: two clocks disagree
+   *  whenever the clock is given, and a trim by the other deleted what the given clock still kept. */
   async trim(): Promise<number> {
-    const r = await this.history.writer.runAndReadAll(`DELETE FROM ${EVENTS_TABLE} WHERE happened_at < now() - INTERVAL (${this.days}) DAY`);
+    const r = await this.history.writer.runAndReadAll(`DELETE FROM ${EVENTS_TABLE} WHERE happened_at < $1::TIMESTAMPTZ`, [cutoff(this.now(), this.days)]);
     const n = Number(r.getRowsJS()[0]?.[0] ?? 0);
     if (n > 0) this.log(`sync events: deleted ${n} event(s) older than ${this.days} days (MASON_HISTORY_DAYS)`);
     return n;

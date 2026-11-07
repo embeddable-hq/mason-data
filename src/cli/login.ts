@@ -23,7 +23,7 @@ import { environmentToken, readLogins, TOKEN_ENV, writeLogins, type Login, type 
 import { DEFAULT_SERVICE_URL, expired, isFailure, pollToken, revoke, serviceOf, serviceText, startDevice, whoAmI, type DeviceCode, type Me, type Service } from "./hosted.ts";
 import { err as styleErr, out as styleOut, stepRenderer, type Style } from "./style.ts";
 import { holdOutput } from "./output-gate.ts";
-import { openBrowser } from "./ui.ts";
+import { OPENABLE, openBrowser } from "./ui.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 /** Everything these commands print can hold the service's text, so it is drawn in serviceStyle (src/cli/command.ts):
@@ -56,6 +56,9 @@ export const LOGIN: CommandSpec = {
 
   --json    as data, once signed in: { service (its address), email, name, orgs: [{ slug, name, role }], file (where
             the login is kept), replaced (null, or the login it replaced: { email, revoked }), next }
+
+  Exit status: 0 signed in; 1 refused or failed (said); 2 a wrong command line; 124 the code expired before it
+  was approved (run mason login again).
 `,
   options: { json: { type: "boolean", default: false } },
   json: ["service", "email", "name", "orgs", "file", "replaced", "next"],
@@ -77,16 +80,13 @@ export const LOGOUT: CommandSpec = {
     MASON_CLOUD_URL=http://127.0.0.1:8080 mason logout    a service on this machine
 
   --json    as data: { service, signedOut (a saved login was removed), email (its account, null when there was
-            none), revoked (true, false when the service did not take it, null when there was nothing to revoke),
-            revokeError (why not, else null), environmentToken (MASON_TOKEN is set, and still used), file, next }
+            none), loginRevoked (true, false when the service did not take it, null when there was nothing to
+            revoke), revoked (the same, kept until 1.0), revokeError (why not, else null), environmentToken
+            (MASON_TOKEN is set, and still used), file, next }
 `,
   options: { json: { type: "boolean", default: false } },
-  json: ["service", "signedOut", "email", "revoked", "revokeError", "environmentToken", "file", "next"],
+  json: ["service", "signedOut", "email", "loginRevoked", "revoked", "revokeError", "environmentToken", "file", "next"],
 };
-
-/** Where a person may approve the code, for the browser to open: a plain https (or this machine's http) URL, and none
- *  of the characters a shell or `cmd /c start` reads (the service's URL is not ours). */
-const OPENABLE = /^https?:\/\/[A-Za-z0-9.:[\]-]+(?:\/[A-Za-z0-9._~/?=+-]*)?$/;
 
 /** An organisation as a line: its slug, its name when it says more, the role. */
 const orgLine = (o: Me["orgs"][number]): string => `${o.slug}${o.name && o.name !== o.slug ? ` (${o.name})` : ""}, ${o.role}`;
@@ -233,7 +233,7 @@ export async function logout(argv: string[]): Promise<number> {
   if (entry !== undefined || env !== null) holdOutput({ command: "logout", json, secrets: [...(entry ? [entry.token] : []), ...(env !== null ? [env] : [])] });
   if (entry === undefined) {
     const next: NextStep[] = [["mason login", `sign this machine in to ${service.base}`]];
-    if (json) { out(jsonText(LOGOUT, { service: service.base, signedOut: false, email: null, revoked: null, revokeError: null, environmentToken: fromEnv, file: read.file }, next)); return 0; }
+    if (json) { out(jsonText(LOGOUT, { service: service.base, signedOut: false, email: null, loginRevoked: null, revoked: null, revokeError: null, environmentToken: fromEnv, file: read.file }, next)); return 0; }
     out(reportText({ headline: `This machine is not signed in to ${service.base}`, details: [["file", read.file]], tips: envTip, next }, outStyle()));
     return 0;
   }
@@ -246,7 +246,7 @@ export async function logout(argv: string[]): Promise<number> {
   const email = serviceText(entry.email, 320, [entry.token]);
   const next: NextStep[] = [["mason login", `sign in to ${service.base} again`]];
   if (json) {
-    out(jsonText(LOGOUT, { service: service.base, signedOut: true, email, revoked: revokeError === null, revokeError, environmentToken: fromEnv, file: written.file }, next));
+    out(jsonText(LOGOUT, { service: service.base, signedOut: true, email, loginRevoked: revokeError === null, revoked: revokeError === null, revokeError, environmentToken: fromEnv, file: written.file }, next));
     return 0;
   }
   const notRevoked: string | undefined = revokeError === null ? undefined

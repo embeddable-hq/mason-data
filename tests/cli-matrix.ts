@@ -67,7 +67,7 @@ export const MATRIX_ARGS: Readonly<Record<string, readonly string[]>> = {
  * form of each is its command's line above; a line a state runs is a process, and the matrix is the suite's slowest).
  */
 export const MATRIX_MORE: Readonly<Record<string, ReadonlyArray<readonly string[]>>> = {
-  user: [["disable", "no_such_user"], ["enable", "no_such_user"]],
+  user: [["disable", "no_such_user"], ["enable", "no_such_user"], ["from", "no_such_user", "10.0.0.0/8"]],
   logs: [["--events"], ["--running"], ["--requests"]],
   // a generated table named: below a run the state's answer, with one no such table
   wait: [["no_such_table", "--timeout", "1"]],
@@ -132,20 +132,20 @@ syncBuiltinESMExports();
   return { NODE_OPTIONS: `--import=${pathToFileURL(hook).href}` };
 }
 
-/** One `mason` command as a process: its exit, its two streams, how long it took. Killed after `timeoutMs`. `input`: what
- *  its stdin reads, then its end (else it reads nothing). */
-export function runMason(cwd: string, argv: string[], env: Record<string, string>, timeoutMs = 60_000, main = MAIN, input?: string): Promise<Answer> {
+/** One `mason` command as a process: its exit, its two streams, how long it took. Killed after `timeoutMs`. */
+export function runMason(cwd: string, argv: string[], env: Record<string, string>, timeoutMs = 60_000, main = MAIN, stdin?: string): Promise<Answer> {
   const t0 = Date.now();
   return new Promise((resolve) => {
-    const child = input === undefined ? spawn(process.execPath, [main, ...argv], { cwd, env, stdio: ["ignore", "pipe", "pipe"] }) : spawn(process.execPath, [main, ...argv], { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
-    if (input !== undefined) {
-      // a command that exits without reading its stdin closes the pipe first: EPIPE is that, and nothing else is expected
-      child.stdin?.on("error", (e: NodeJS.ErrnoException) => { if (e.code !== "EPIPE") throw e; });
-      child.stdin?.end(input);
+    // stdin: none (/dev/null), or `stdin` written whole and closed (a pipe: `mason replica create`'s URL)
+    const child = spawn(process.execPath, [main, ...argv], { cwd, env, stdio: [stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
+    if (stdin !== undefined) {
+      // a command that refuses before it reads stdin closes it: EPIPE then is the command's choice, said by its answer
+      child.stdin!.on("error", (e: NodeJS.ErrnoException) => { if (e.code !== "EPIPE") throw e; });
+      child.stdin!.end(stdin);
     }
     let stdout = "", stderr = "";
-    child.stdout.on("data", (b: Buffer) => { stdout += b.toString(); });
-    child.stderr.on("data", (b: Buffer) => { stderr += b.toString(); });
+    child.stdout!.on("data", (b: Buffer) => { stdout += b.toString(); });
+    child.stderr!.on("data", (b: Buffer) => { stderr += b.toString(); });
     const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
     child.on("close", (code, signal) => { clearTimeout(timer); resolve({ argv, code, signal, stdout, stderr, ms: Date.now() - t0 }); });
   });

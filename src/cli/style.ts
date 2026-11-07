@@ -191,6 +191,11 @@ export function stepRenderer(o: { line: (text: string) => void; live?: { write: 
     done(text?: string): void { end(`${s.green(live ? "✔" : "✓")} ${text ?? label ?? ""}`); },
     fail(text?: string): void { end(`${s.red(live ? "✘" : "✗")} ${text ?? label ?? ""}`); },
     print(text: string): void { clear(); o.line(text); draw(); },
+    /** the step still turning, said in new words (a count that moves: how long it has waited); a step begun if none is */
+    relabel(text: string): void {
+      if (label === null) { label = text; if (live) { draw(); timer = setInterval(draw, 80); timer.unref(); } return; }
+      label = text; draw();
+    },
     /** a step still turning: its label (null when none) */
     open: (): string | null => label,
   };

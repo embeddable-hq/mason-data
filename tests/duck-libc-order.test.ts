@@ -18,7 +18,8 @@ import { startPostgresApi, type PgApiServer } from "../src/api/postgres/server.t
 import { mintToken, tokenProblem } from "../src/duck/token.ts";
 import type { PgSchema } from "../src/api/postgres/schema.ts";
 import type { LibcOrder } from "../src/duck/libc-order.ts";
-import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
+import { handLibcOrder, holdBounds, lettersOf, randomStrings } from "./libc-order-fixture.ts";
+import { withLookups } from "../src/duck/libc-order.ts";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "duck-libc-"));
 after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -310,3 +311,84 @@ test("collation: an order read under a named collation wraps every text the read
   }
 });
 
+
+/** en_US's ASCII as glibc reads it (`$` and the digits below the letters, a letter's cases one weight, the rest of the
+ *  punctuation and the space none), and beside it what a column holds of the rest: `l` + U+00B7 a contraction of a
+ *  weight of its own (glibc's `l·`), U+212A KELVIN SIGN and U+0130 the letter of their case, é, ß as ss, Hangul, an
+ *  emoji and its selector, a combining acute of no first level; U+E000 and U+0378 not covered (refused) */
+/** the control characters the bounds once wrote as marks (issue 666, review r1: `E`, chr(2), appended to the value was
+ *  taken for the end of the text where the value held one), which glibc ignores at the first three levels: a value may
+ *  hold them, so the hand order covers them and the property draws them */
+const CONTROL = "\u0001\u0002\u007f";
+function boundOrder(): LibcOrder {
+  const punctuation = [..." !\"#%&'()*+,-./:;<=>?@[\\]^_`{|}~"].join("");
+  const o = handLibcOrder(["$", ..."0123456789", ...lettersOf({ e: "é", i: "İ", k: "K" }), "ⱼ"],
+    [punctuation + "·" + CONTROL, "가", "❤️́"], { expansions: { "ß": "ss" } });
+  const element = { l1: [o.l1[0x2c7c]!], l2: [1], l3: [1], l4: [o.l4[0x6c]!], back: false };
+  o.contractions.set(0x6c, [{ rest: [0xb7], element }]);
+  o.contractions.set(0x4c, [{ rest: [0xb7], element: { ...element, l3: [2049] } }]);
+  return withLookups(o);
+}
+
+test("libc bound: hi(a) < lo(b) orders the keys at the first level, lo <= hi, equal strings equal bounds, as the engine computes them", async () => {
+  const o = boundOrder();
+  const { BOUND_CHARS } = await import("../src/duck/libc-bound.ts");
+  const ascii = Array.from({ length: 0x7f - 0x20 }, (_, i) => String.fromCharCode(0x20 + i));
+  const pool = [...ascii, ..."abcAB01$ -.", "l·", "L·", "K", "İ", "é", "é", "ß", "가", "❤️", "", "͸"];
+  pool.push(...CONTROL);
+  const long = "abcdefghij".repeat(6);
+  const strings = [...randomStrings(pool, 20_000, 8, 0x5eed),
+    "abc", "ab\u0002cd", "aa", "a\u0002z", "aaz", "\u0002zz", "b", "\u0001", "\u0002", "\u007f", "ab\u0002", "ab\u007f", "ab\u0001c",
+    "cel·la", "cella", "celLa", "cel·La", "cel·", "cell", "celm", "", " ", "$5", "5", "-5", "k", "K", "K", "Kb", "kb", "istanbul", "İstanbul",
+    long, `${long}a`, `${long}b`, `${long}·`, `${long}l·`, long.slice(0, BOUND_CHARS), long.slice(0, BOUND_CHARS + 1), `${long.slice(0, BOUND_CHARS)}é`];
+  const { failures, ruledOut } = await holdBounds(o, strings);
+  assert.deepEqual(failures, []);
+  assert.ok(ruledOut > strings.length / 2, `a top 1 rules out ${ruledOut} of ${strings.length}`);
+});
+
+test("libc bound: an order whose characters' bytes do not order their weights has none, and an unread one none", async () => {
+  const { boundOf } = await import("../src/duck/libc-bound.ts");
+  const { emptyLibcOrder } = await lib();
+  assert.notEqual(boundOf(boundOrder()), null);
+  // digits after the letters, a and b swapped: the folded bytes would order them otherwise
+  assert.equal(boundOf(handLibcOrder([...lettersOf(), ..."0123456789"], [" "])), null);
+  assert.equal(boundOf(handLibcOrder(["bB", "aA", ...lettersOf().slice(2)], [" "])), null);
+  // a letter's cases two weights: one byte each would be two, but A < a < B must hold; folded they are one
+  assert.equal(boundOf(handLibcOrder(["a", "A", "b", "B"], [" "])), null);
+  assert.equal(boundOf({ ...emptyLibcOrder("tr_TR.utf8", null), unread: true }), null);
+  assert.equal(boundOf({ ...emptyLibcOrder("en_US.UTF-8", null), bytes: true }), null);
+});
+
+test("libc bound: a top N and a min / max key their candidates alone, so a value of an uncovered character outside them answers; one inside refuses", async () => {
+  const store = await DuckStore.open(path.join(dir, "bound.db"), () => undefined);
+  let api: PgApiServer | null = null;
+  const KEY = "k".repeat(48);
+  try {
+    await store.writer.run("CREATE TABLE public.t (id INTEGER PRIMARY KEY, s VARCHAR)");
+    await store.writer.run("INSERT INTO public.t VALUES (1, 'b'), (2, 'a'), (3, 'B'), (4, 'zz' || chr(57344)), (5, NULL), (6, 'Ab'), (7, 'c')");
+    const schema: PgSchema = { database: "app", tables: [{ name: "t", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "s", type: "text" }] }] };
+    const duck = await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, null, boundOrder());
+    api = await startPostgresApi({
+      port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test",
+      authenticate: (password) => { const p = tokenProblem(KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
+      schema: () => schema,
+      record: () => undefined, log: () => undefined, duck,
+    });
+    const c = new pg.Client({ host: "127.0.0.1", port: api.port, user: "me", password: mintToken(KEY, 600).token, database: "app" });
+    await c.connect();
+    try {
+      const rows = async (sql: string): Promise<unknown[][]> => (await c.query({ text: sql, rowMode: "array" })).rows;
+      const uncovered = (e: pg.DatabaseError): boolean => e.code === "0A000" && /Mason gap libc-uncovered/.test(e.message);
+      // 'zz' + U+E000 sorts after the first two by its leading ASCII: never keyed, so answered (main refused it)
+      assert.deepEqual(await rows("SELECT id, s FROM t ORDER BY s LIMIT 2"), [[2, "a"], [6, "Ab"]]);
+      assert.deepEqual(await rows("SELECT id, s FROM t ORDER BY s NULLS FIRST, id LIMIT 3"), [[5, null], [2, "a"], [6, "Ab"]]);
+      assert.deepEqual(await rows("SELECT min(s), count(*) FROM t"), [["a", "7"]]);
+      // the value among the candidates: refused by name, as every sort over it was
+      for (const sql of ["SELECT id, s FROM t ORDER BY s DESC LIMIT 2", "SELECT max(s) FROM t", "SELECT id FROM t ORDER BY s LIMIT 7", "SELECT id FROM t ORDER BY s"]) {
+        await assert.rejects(c.query(sql), uncovered, sql);
+      }
+      // a grouped min keys every group's rows, as written
+      await assert.rejects(c.query("SELECT id % 2, min(s) FROM t GROUP BY 1"), uncovered);
+    } finally { await c.end(); }
+  } finally { await api?.close(); store.close(); }
+});

@@ -77,7 +77,9 @@ roles:
       }
       for (const [gap, sql] of [
         ["libc-uncovered", "SELECT label FROM notes ORDER BY label"],
-        ["libc-uncovered", "SELECT min(label) FROM notes"],
+        // max, not min: a min / max keys its candidates alone (src/duck/libc-bound.ts, issue 666), and the row holding
+        // the uncovered mark is max's candidate, never min's ('plain' is before it whatever follows the mark)
+        ["libc-uncovered", "SELECT max(label) FROM notes"],
         ["libc-uncovered", "SELECT id FROM notes WHERE label > 'a'"],
         ["zone-abbreviation", "SELECT ts AT TIME ZONE zone FROM notes WHERE id = 2"],
         ["numeric-exact-sum", "SELECT sum(big::numeric) FROM notes"],

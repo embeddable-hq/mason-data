@@ -23,7 +23,7 @@ const ME_TWO = { email: "ada@example.com", name: "Ada", orgs: [{ slug: "acme", n
 
 /** The one line the token made is printed on: the token alone. */
 const CI_LINE = /^masondata_ci_[A-Za-z0-9_-]{43}$/;
-const OWN_STEP = /^ {2}(mason login|mason token (create --replica (\S+)|list( \S+)?|revoke \S+ --org \S+))(\s|$)/;
+const OWN_STEP = /^ {2}(mason login|mason token (--help|create --replica (\S+)|list( \S+)?|revoke \S+ --org \S+))(\s|$)/;
 const LINES: Lines = {
   heads: ["Made a CI token for ", "Revoked the CI token ", "No CI tokens that act, in ", "✘ mason token: ", "✗ mason token: ", "Tip: Store it now, ", "Tip: It acts on ", "Tip: acme has more ",
     ...["token", "id", "name", "scopes", "expires", "why", "fix"].map((l) => `  ${l} `)],
@@ -127,6 +127,9 @@ test("mason token list and revoke: the tokens that act, each value held, never a
   assert.equal(one.a.code, 0, one.a.stderr);
   assert.match(one.a.stdout, new RegExp(`^2 CI tokens that act, in acme\\n {2}${ID} {3}github-actions: acme/shop, deploy, until ${LATER.replace(/\./g, "\\.")}, last used never, made by ada@example\\.com\\n {2}b2 {3}deploy-bot: acme/shop, deploy and users, until `));
   assert.match(one.a.stdout, /\nTip: acme has more CI tokens than the service lists at once/);
+  // --org names it as the argument does (as mason token revoke and mason replica list take it): the same request, the same answer
+  const org = await hosted(v1, ["list", "--org", "acme"]);
+  assert.deepEqual([org.a.code, org.requests.map((q) => q.path), org.a.stdout], [0, [TOKENS], one.a.stdout]);
   // every organisation the login is an admin or an owner of: acme and gamma, never the viewer's beta
   const all = await hosted(v1, ["list", "--json"], { me: ok(ME_TWO) });
   assert.equal(all.a.code, 0, all.a.stdout);
@@ -138,7 +141,7 @@ test("mason token list and revoke: the tokens that act, each value held, never a
   const rv = await hosted(v1, ["revoke", ID, "--org", "acme", "--json"]);
   assert.equal(rv.a.code, 0, rv.a.stdout);
   assert.deepEqual(rv.requests.map((q) => [q.method, q.path, q.body]), [["POST", `${TOKENS}/${ID}/revoke`, ""]]);
-  assert.deepEqual(JSON.parse(rv.a.stdout), { revoked: { org: "acme", id: ID, name: "github-actions" }, next: [{ command: "mason token list acme", what: "the organisation's CI tokens" }] });
+  assert.deepEqual(JSON.parse(rv.a.stdout), { revokedToken: { org: "acme", id: ID, name: "github-actions" }, revoked: { org: "acme", id: ID, name: "github-actions" }, next: [{ command: "mason token list acme", what: "the organisation's CI tokens" }] });
   // without --org: the login's one organisation it may revoke in; of two, it asks which (exit 2), nothing revoked
   const solo = await hosted(v1, ["revoke", ID], { me: ok({ ...ME_TWO, orgs: [ME_TWO.orgs[0], ME_TWO.orgs[1]] }) });
   assert.equal(solo.a.code, 0, solo.a.stderr);
@@ -173,7 +176,7 @@ test("mason token: a wrong line is refused here, exit 2, and nothing is sent —
     for (const argv of [[], ["frobnicate"], ["create"], ["create", "acme/shop"], ["create", "--replica", "acme"], ["create", "--replica", "acme/shop", "--scope", "admin"],
       ["create", "--replica", "acme/shop", "--scope", "deploy", "--scope", "deploy"], ["create", "--replica", "acme/shop", "--name", ""], ["create", "--replica", "acme/shop", "--name", "a\nb"],
       ["create", "--replica", "acme/shop", "--name", "x".repeat(65)], ["create", "--replica", "acme/shop", "--days", "0"], ["create", "--replica", "acme/shop", "--days", "366"],
-      ["create", "--replica", "acme/shop", "--days", "1.5"], ["revoke"], ["revoke", "../x"], ["revoke", "a", "b"], ["revoke", "a", "--org", "Acme"], ["list", "Acme"], ["list", "--org", "acme"],
+      ["create", "--replica", "acme/shop", "--days", "1.5"], ["revoke"], ["revoke", "../x"], ["revoke", "a", "b"], ["revoke", "a", "--org", "Acme"], ["list", "Acme"], ["list", "--org", "Acme"], ["list", "acme", "--org", "beta"], ["create", "--replica", "acme/shop", "--org", "acme"],
       ["list", "--scope", "deploy"], ["revoke", "a", "--replica", "acme/shop"]]) {
       const a = await runMason(home(), ["token", ...argv, "--json"], envFor(home(), fake.url, { MASON_TOKEN: newToken() }));
       assert.equal(a.code, 2, `${argv.join(" ")}: ${a.stdout}`);

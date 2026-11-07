@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * THE MASON WORK BOARD (CLAUDE.md "The board says where each piece is"): the one way a session moves an issue's card
+ * THE MASON WORK BOARD (CLAUDE.md "How work is done here"): the one way a session moves an issue's card
  * or makes a sub-issue, so every status is one of the board's and every sub-issue is on it.
  *
  *   scripts/board.ts status <issue> <status>                          move the issue's card (added to the board if it
@@ -24,7 +24,7 @@ const PROJECT = "PVT_kwDOCDaQzM4BprO_";
 const STATUS_FIELD = "PVTSSF_lADOCDaQzM4BprO_zhoFwPg";
 /** each status and its option on the board's Status field, in the order a piece of work moves through them */
 export const STATUSES: Record<string, string> = {
-  "Backlog": "0f003a08", "In progress": "490160e7", "Implementing": "80d23f4a", "In review": "d50b167f",
+  "Backlog": "0f003a08", "Up next": "833812b7", "In progress": "490160e7", "Implementing": "80d23f4a", "In review": "d50b167f",
   "Fixing": "a58cbd95", "CI / queued": "d0db6aca", "Needs Tom": "213d1ef4", "Done": "4d66b2dd",
 };
 const SEVERITY_FIELD = "PVTSSF_lADOCDaQzM4BprO_zhoJbcA";

@@ -16,7 +16,7 @@ import * as path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { domainToASCII, domainToUnicode, fileURLToPath, pathToFileURL } from "node:url";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
-import { exitOf, FAILURE_CODES } from "../src/cli/command.ts";
+import { exitOf, FAILURE_CODES, type FailureCode } from "../src/cli/command.ts";
 
 export const MAIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "main.ts");
 
@@ -279,7 +279,9 @@ export interface Lines { heads: readonly string[]; steps: readonly string[]; own
   unbroken?: (line: string) => boolean }
 
 export function seenProblems(text: string, width: number | null, failed: boolean | null = null, lines?: Lines): string[] {
-  const heads = lines?.heads ?? HEADS, steps = lines?.steps ?? STEP_HEADS;
+  // every hosted command that names a replica says on stderr when MASON_REPLICA chose it (src/cli/replica.ts envChoseText;
+  // these tests name acme/shop)
+  const heads = [...(lines?.heads ?? HEADS), "using MASON_REPLICA=acme/shop "], steps = lines?.steps ?? STEP_HEADS;
   const p: string[] = [];
   let afterNext = false, nexts = 0, failures = 0;
   for (const { line, byTerminal } of seen(text, width, lines?.unbroken)) {
@@ -304,7 +306,7 @@ function terminalEnv(width: number, stdin = false): Record<string, string> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-terminal-"));
   made.push(dir);
   const hook = path.join(dir, "terminal.mjs");
-  // a person at it (`stdin`): its stdin says it is the terminal too, and what they type is the run's `input`
+  // a person at it (`stdin`): its stdin says it is the terminal too, and what they type is the run's `stdin`
   fs.writeFileSync(hook, `${stdin ? `Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });\n` : ""}for (const s of [process.stdout, process.stderr]) {
   Object.defineProperty(s, "isTTY", { value: true, configurable: true });
   Object.defineProperty(s, "columns", { value: ${width}, configurable: true });
@@ -319,21 +321,22 @@ function terminalEnv(width: number, stdin = false): Record<string, string> {
  * is the CLI's; and every line a person sees is one the CLI began (`seenProblems`) — at `terminal` columns for a run on
  * a terminal, the logical lines of a pipe otherwise.
  */
-export async function mason(h: string, argv: string[], env: Record<string, string>, o: { timeoutMs?: number; terminal?: number; lines?: Lines; input?: string; prompt?: string } = {}): Promise<Answer> {
-  const a = await runMason(h, argv, o.terminal ? { ...env, ...terminalEnv(o.terminal, o.input !== undefined) } : env, o.timeoutMs ?? 60_000, undefined, o.input);
+export async function mason(h: string, argv: string[], env: Record<string, string>, o: { timeoutMs?: number; terminal?: number; lines?: Lines; stdin?: string; prompt?: string } = {}): Promise<Answer> {
+  // a `prompt` is a person typing `stdin` at the terminal: its stdin says it is the terminal too
+  const a = await runMason(h, argv, o.terminal ? { ...env, ...terminalEnv(o.terminal, o.prompt !== undefined) } : env, o.timeoutMs ?? 60_000, undefined, o.stdin);
   ANSWERS.push(a);
   // what a person sees at a terminal they type at: the terminal echoes the line typed after the run's `prompt`
   const echoed = (text: string): string => {
-    const at = o.prompt === undefined || o.input === undefined || !o.terminal ? -1 : text.indexOf(o.prompt);
-    const line = o.input?.split("\n")[0] ?? "";
-    return at < 0 ? text : `${text.slice(0, at + o.prompt!.length)}${line}${o.input!.includes("\n") ? "\n" : ""}${text.slice(at + o.prompt!.length)}`;
+    const at = o.prompt === undefined || o.stdin === undefined || !o.terminal ? -1 : text.indexOf(o.prompt);
+    const line = o.stdin?.split("\n")[0] ?? "";
+    return at < 0 ? text : `${text.slice(0, at + o.prompt!.length)}${line}${o.stdin!.includes("\n") ? "\n" : ""}${text.slice(at + o.prompt!.length)}`;
   };
   const line = `mason ${argv.join(" ")}${o.terminal ? ` (a terminal ${o.terminal} wide)` : ""}`;
   const json = argv.includes("--json");
   if (json && a.code !== 0) {
     const e = (JSON.parse(a.stdout) as { error?: { code?: string } }).error;
     assert.ok(e?.code !== undefined && Object.hasOwn(FAILURE_CODES, e.code), `${line}: code ${e?.code} is not one of FAILURE_CODES`);
-    assert.equal(a.code, exitOf({ message: "", code: e.code }), `${line}: exit ${a.code}, where ${e.code} exits ${exitOf({ message: "", code: e.code })}`);
+    assert.equal(a.code, exitOf({ message: "", code: e.code as FailureCode }), `${line}: exit ${a.code}, where ${e.code} exits ${exitOf({ message: "", code: e.code as FailureCode })}`);
   }
   for (const [stream, text] of json ? [["stderr", echoed(a.stderr)]] as const : [["stdout", a.stdout], ["stderr", echoed(a.stderr)]] as const) {
     const p = seenProblems(text, o.terminal ?? null, stream === "stderr" && !json ? a.code !== 0 : null, o.lines);

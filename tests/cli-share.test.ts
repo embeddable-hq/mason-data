@@ -598,12 +598,12 @@ describe("mason share, against a real run and a stub tunnel", { timeout: 300_000
     await gone(rb.port);
   });
 
-  test("the tunnel's output not understood: a clear failure in the time given, nothing left open", async () => {
+  test("the tunnel's output not understood: a clear failure in the time given (exit 124, a timeout), nothing left open", async () => {
     mode("noisy");
     try {
       const began = Date.now();
       const s = startShare(["--timeout", "1"]);
-      assert.equal(await s.exited, 1);
+      assert.equal(await s.exited, 124);
       assert.ok(Date.now() - began < 20_000, `the time given is 1 s, and it took ${Date.now() - began} ms`);
       assert.match(s.stderr(), /^✗ mason share: the tunnel gave no address in 1 s$/m);
       assert.match(s.stderr(), /why +ssh printed: the new format of a tunnel service/);
@@ -703,7 +703,7 @@ describe("mason share, against a real run and a stub tunnel", { timeout: 300_000
       const v = JSON.parse(refused.stdout) as { error: { code: string; message: string }; next: Array<{ command: string }> };
       assert.equal(v.error.code, "usage");
       assert.equal(v.error.message, "mason/roles.yml names 2 roles: mason share needs to know which one this address reads as");
-      assert.deepEqual(v.next.map((n) => n.command), ["mason share --role everything", "mason share --role buyers"]);
+      assert.deepEqual(v.next.map((n) => n.command), ["mason share --role everything", "mason share --role buyers", "mason share --help"]);
       const person = await mason(["share"]);
       assert.equal(person.code, 2, "no terminal, so no question: the same refusal");
       assert.match(person.stderr, /--role buyers: reads 1 synced table: public\.customers/);

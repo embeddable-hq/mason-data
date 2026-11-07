@@ -30,11 +30,18 @@ paths:
 - **A disabled user is KEPT with `disabledAt` and its id** (`mason user disable`): `LiveUsers` still holds it, so its
   login is judged whole first — a wrong password stays 28P01 — and only then refused `user_disabled` (the listener's
   28000); its sessions end at their next statement; `enable` deletes the field, so the same password connects again.
+- **A user's address ranges are a field of its row** (`MasonUser.from`, `mason user add --from`, `mason user from`),
+  read by ONE grammar (src/lib/cidr.ts, `MASON_PG_PROXY_FROM`'s too) and judged BEFORE the password on the session's
+  `clientAddr`, again before every statement: outside them is `ADDRESS_NOT_ALLOWED` (the listener's 28000 "no entry
+  for host …"), a null address is outside every list, and while any user has ranges a name that is no user is refused in
+  the same words AND the same work (`LiveUsers` parses the ranges once per read of the file and judges a missing name
+  against the longest list, so the answer's time does not differ either): a limited user cannot be told from a missing
+  one, though a user with no ranges still answers a wrong password 28P01 (tests/duck-users-address-wire.test.ts).
 
 ## What review probes
 
-Run each probe that applies before a push: the harness's implement and fix prompts say so, and its review runs them
-again at every round. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+Run each probe that applies: the implementer before each push, and the fresh reviewer at each review (CLAUDE.md
+"How work is done here", steps 3 and 4). A new probe is proposed to the owner; each bullet names the PR or issue it was met in.
 
 - A share's password on the run's port, a user's password or a token on a share, a share whose role the roles file
   changes while it is open: a refusal that names what it was given and its way out (PR 142; issue 91).

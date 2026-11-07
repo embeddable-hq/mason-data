@@ -205,6 +205,44 @@ test("publication: at the top names the publication replication reads, a ${VARIA
   assert.deepEqual(problems("kind: postgres\nurl: x\npublcation: app_pub\ntables: {}\n"), ["unexpected key publcation — did you mean `publication`? — a source file takes kind, url, database, sync, publication, tables"]);
 });
 
+test("publication: or url: naming one of Mason's own settings (${MASON_…}) is refused when the file is read, its value never shown (issue 718)", () => {
+  const SECRET = "secret-marker-7f3a9c";
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-sources-own-"));
+  try {
+    const folder = path.join(root, "mason");
+    fs.mkdirSync(path.join(folder, "sources"), { recursive: true });
+    const write = (body: string): void => fs.writeFileSync(path.join(folder, "sources", "app.yml"), `kind: postgres\n${body}sync: replication\ntables: {}\n`);
+    const env = { MASON_API_KEY: SECRET, mason_api_key: SECRET, MASON_TOKEN: SECRET, PG_PUBLICATION: "app_pub", DATABASE_URL: "postgres://u:p@h/db" };
+    fs.writeFileSync(path.join(root, ".env"), `MASON_API_KEY=${SECRET}\n`);
+    const pubWay = "write publication: ${PG_PUBLICATION}, the publication's name, or publication: null and Mason makes its own";
+    const urlWay = "write url: ${DATABASE_URL} (or ${MASON_DATABASE_URL}), or a postgres:// URL";
+    // every spelling YAML reads as ${MASON_API_KEY} is refused alike: the check is on the value parsed, not the text
+    const cases: Array<[string, string]> = [
+      ["url: ${DATABASE_URL}\npublication: ${MASON_API_KEY}\n", `publication: \${MASON_API_KEY} names one of Mason's own settings (MASON_*), which a sources file may not read — ${pubWay}`],
+      ['url: ${DATABASE_URL}\npublication: "\\x24{MASON_API_KEY}"\n', `publication: \${MASON_API_KEY} names one of Mason's own settings (MASON_*), which a sources file may not read — ${pubWay}`],
+      ['url: ${DATABASE_URL}\n"publication": " ${mason_api_key} "\n', `publication: \${mason_api_key} names one of Mason's own settings (MASON_*), which a sources file may not read — ${pubWay}`],
+      ["url: ${MASON_TOKEN}\n", `url: \${MASON_TOKEN} names one of Mason's own settings (MASON_*), which a sources file may not read — ${urlWay}`],
+      ["url: ${MASON_API_KEY}\npublication: ${PG_PUBLICATION}\n", `url: \${MASON_API_KEY} names one of Mason's own settings (MASON_*), which a sources file may not read — ${urlWay}`],
+    ];
+    for (const [body, problem] of cases) {
+      write(body);
+      for (const o of [{}, { shellFirst: true }]) {
+        const f = S.readSource(folder, root, env, o) as Failure;
+        assert.deepEqual([f.code, f.message, f.fix], ["bad_source", `mason/sources/app.yml: ${problem}`, "edit mason/sources/app.yml, then run the command again"], body);
+        assert.ok(!JSON.stringify(f).includes(SECRET), `the value is never shown: ${body}`);
+      }
+      assert.deepEqual(problems(fs.readFileSync(path.join(folder, "sources", "app.yml"), "utf8")), [problem], body);
+    }
+    // the source's URL mason init writes stays: ${MASON_DATABASE_URL}, and any variable of the app's own
+    write("url: ${MASON_DATABASE_URL}\npublication: ${PG_PUBLICATION}\n");
+    const ok = S.readSource(folder, root, { MASON_DATABASE_URL: "postgres://u:p@h/db", PG_PUBLICATION: "app_pub" }) as Sources.ProjectSource;
+    assert.deepEqual([ok.resolved, ok.publicationName], ["postgres://u:p@h/db", "app_pub"]);
+    // MASON_DATABASE_URL is a URL, never a publication's name
+    write("url: ${DATABASE_URL}\npublication: ${MASON_DATABASE_URL}\n");
+    assert.equal((S.readSource(folder, root, env) as Failure).code, "bad_source");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("the file read: one source per project, its URL from .env.local, .env or the shell — or what to write", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-sources-"));
   try {
@@ -431,8 +469,11 @@ test("sync: every mistake on one report, at its key, with the line to write — 
   assert.equal(one("replication 5m"), "sync: replication takes no interval: write replication, or poll 5m");
   assert.equal(one("poll 5 minutes"), 'sync: "5 minutes": write poll 5m');
   assert.equal(one("poll 1.5h"), "sync: 1.5h: an interval is a whole number — write poll 90m");
-  assert.equal(one("poll 2d"), "sync: 2d: d is not a unit of an interval — days are hours: write poll 48h");
-  assert.equal(one("poll soon"), 'sync: "soon" is not an interval: an interval is <n>s, <n>m or <n>h, a whole number, at least 1s (poll 5s, poll 5m or poll 1h)');
+  // d is a unit, as on every command line (src/lib/table-sync.ts parseDuration); a bare number is said with its unit
+  assert.equal(one("poll 2d"), "sync: 2d is over the longest interval, 24h: write poll 24h, or off with mason sync <table> run by a scheduler");
+  assert.deepEqual((parse(`${head}sync: poll 1d\ntables: {}\n`) as Sources.SourceFile).sync, { mode: "poll", every: "1d", seconds: 86_400 });
+  assert.equal(one("poll 30"), "sync: 30 has no unit: write poll 30s for seconds (or m, h, d)");
+  assert.equal(one("poll soon"), 'sync: "soon" is not an interval: an interval is <n>s, <n>m, <n>h or <n>d, a whole number, at least 1s (poll 5s, poll 5m or poll 1h)');
   assert.equal(one("off 5m"), "sync: off takes no interval: write off, or poll 5m");
   // at most a day (a longer one is off and mason sync from a scheduler; a huge one was an instant past a Date's range and
   // broke every status line), and one spelling of each interval (05s and 5s would read as a change of sync)

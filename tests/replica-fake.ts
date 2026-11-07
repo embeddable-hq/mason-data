@@ -13,7 +13,14 @@ import type { Answer } from "./cli-matrix.ts";
 export const AT = "2026-11-02T10:00:00.000Z";
 /** The database's password: long enough (12) to be held by the exact test and the output's gate, as the token is. */
 export const PASSWORD = "Zq8vLm2Xr7Tp";
-export const URL_ = `postgres://app_reader:${PASSWORD}@db.example:5432/app`;
+/** A mark found nowhere but in the URL given on stdin: no run's output, command line or log may hold it. */
+export const URL_MARK = "u7rlmark3r";
+export const URL_ = `postgres://app_reader:${PASSWORD}@db-${URL_MARK}.example:5432/app`;
+/** What the project's .env holds under the variable the sources file names: never read by mason replica create, never
+ *  sent, never printed (issue 720: the URL is asked for, or read from stdin). */
+export const ENV_MARK = "envdecoy5q";
+export const ENV_PASSWORD = "Envpw4Rz9Qx2";
+export const ENV_URL = `postgres://env_reader:${ENV_PASSWORD}@db-${ENV_MARK}.example:5432/app`;
 export const REPLICAS = "/v1/replicas/acme";
 export const ONE = `${REPLICAS}/shop`;
 export const replicaOf = (more: Record<string, unknown> = {}): Record<string, unknown> =>
@@ -28,33 +35,39 @@ export const OWN_STEP = /^ {2}(mason login|mason doctor|mason replica (create|li
 export const LINES: Lines = {
   heads: ["Created ", "Creating ", "acme/shop on ", "No replicas yet in ", "Mason's checks of the database ", "✘ mason replica: ", "✗ mason replica: ",
     "  ok ", "  !  ", "  !! ", "  ?  ", "  The creation's answer was lost ", "  checking: ", "  creating: ", "Tip: The service does not keep ", "Tip: acme has more ",
-    ...["state", "region", "size", "host", "created", "allowlist", "pending", "why", "fix"].map((l) => `  ${l} `)],
+    "Tip: Its allowlist, ", "DATABASE_URL, the database's URL ", "using MASON_REPLICA=",
+    ...["state", "region", "size", "host", "created", "allowlist", "page", "pending", "why", "fix"].map((l) => `  ${l} `)],
   steps: ["  mason login", "  mason doctor", "  mason replica ", "  mason deploy ", "  mason token "], ownStep: OWN_STEP,
   row: (line) => /^\d+ replicas? in /.test(line) || /^ {2}(acme|beta)\/[a-z]+ /.test(line),
 };
 
-/** A project whose sources file names its database by DATABASE_URL, set in its .env (or as `env` says). */
-export function project(o: { url?: string | null; file?: string } = {}): string {
+/** A project whose sources file names its database by DATABASE_URL, which its .env sets to `ENV_URL` (`env: null`: no .env). */
+export function project(o: { env?: null; file?: string } = {}): string {
   const root = home();
   fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
   fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
   fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: "shop", folder: "mason", remote: false, apiKey: "k".repeat(48), sourceServer: null, running: null, lastRun: null }), { mode: 0o600 });
   fs.writeFileSync(path.join(root, "mason", "sources", "app.yml"), o.file ?? "kind: postgres\nurl: ${DATABASE_URL}\ntables:\n  orders: {}\n");
-  if (o.url !== null) fs.writeFileSync(path.join(root, ".env"), `DATABASE_URL=${o.url ?? URL_}\n`);
+  if (o.env !== null) fs.writeFileSync(path.join(root, ".env"), `DATABASE_URL=${ENV_URL}\n`);
   return root;
 }
 
-/** One run in `cwd` against a fresh fake whose replica endpoints `v1` answers, signed in by MASON_TOKEN; its requests. */
-export async function hosted(v1: (r: Req) => Reply | Promise<Reply>, argv: string[], o: { cwd?: string; token?: string; terminal?: number; me?: Reply; lines?: Lines; input?: string } = {}): Promise<{ a: Answer; requests: Req[]; token: string; url: string }> {
+/** One run in `cwd` against a fresh fake whose replica endpoints `v1` answers, signed in by MASON_TOKEN, `stdin` piped to
+ *  it (the database's URL: `URL_` unless said), or `input` typed at the terminal (a person answering a prompt); its
+ *  requests. */
+export async function hosted(v1: (r: Req) => Reply | Promise<Reply>, argv: string[], o: { cwd?: string; token?: string; terminal?: number; me?: Reply; lines?: Lines; stdin?: string; input?: string; env?: Record<string, string> } = {}): Promise<{ a: Answer; requests: Req[]; token: string; url: string }> {
   const token = o.token ?? newToken("pat"); SECRETS.push(token);
   const fake = await fakeService({ v1, ...(o.me ? { me: o.me } : {}) });
   const h = home();
   try {
-    const a = await mason(o.cwd ?? h, ["replica", ...argv], envFor(h, fake.url, { MASON_TOKEN: token }), { lines: o.lines ?? LINES, ...(o.terminal ? { terminal: o.terminal } : {}),
-      ...(o.input !== undefined ? { input: o.input, prompt: "> " } : {}) });
+    const a = await mason(o.cwd ?? h, ["replica", ...argv], envFor(h, fake.url, { MASON_TOKEN: token, ...o.env }), { lines: o.lines ?? LINES, ...(o.terminal ? { terminal: o.terminal } : {}),
+      ...(o.input !== undefined ? { stdin: o.input, prompt: "> " } : { stdin: o.stdin ?? URL_ }) });
     // the database's URL: never its password, in any form a run prints
     for (const text of [a.stdout, a.stderr]) assert.ok(!text.includes(PASSWORD) && !text.toLowerCase().includes(PASSWORD.toLowerCase()), `mason replica ${argv.join(" ")} printed the database's password:\n${a.stdout}${a.stderr}`);
     assert.ok(!a.argv.some((x) => x.includes(PASSWORD) || x.includes("postgres://")), "the URL is never on the command line");
+    // the URL given, and the one .env holds, are never printed, in part or whole; the one .env holds is never sent
+    for (const mark of [URL_MARK, ENV_MARK, ENV_PASSWORD]) assert.ok(!(a.stdout + a.stderr).toLowerCase().includes(mark.toLowerCase()), `mason replica ${argv.join(" ")} printed ${mark}:\n${a.stdout}${a.stderr}`);
+    assert.ok(!fake.requests.some((r) => r.body.includes(ENV_MARK) || r.body.includes(ENV_PASSWORD)), "the URL in .env is never read, so never sent");
     return { a, requests: fake.requests.filter((r) => r.path.startsWith("/v1/")), token, url: fake.url };
   } finally { await fake.close(); }
 }

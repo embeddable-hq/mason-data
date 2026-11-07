@@ -5,6 +5,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { DESTROY_USAGE, removeProject, destroy } from "../src/cli/machine.ts";
+import * as machine from "../src/cli/machine.ts";
+
+/** `mason destroy --dry-run`'s plan, read from the module's namespace so this file loads where it is not yet */
+const destroyPlan: typeof machine.destroyPlan = (...a) => {
+  assert.equal(typeof machine.destroyPlan, "function", "src/cli/machine.ts destroyPlan: mason destroy --dry-run");
+  return machine.destroyPlan(...a);
+};
 import { DUCK_FILE, isProject, newConfig, readProject, writeConfig, type Project } from "../src/cli/project.ts";
 import type { DevRun } from "../src/cli/runs.ts";
 
@@ -196,5 +203,73 @@ test("a project in replication mode takes its slot and publication with it; when
       dropReplication: async (s, o) => { asked.push({ database: s.database, ...o }); return [`replication slot ${o.slot}`, `publication ${o.publication}`]; },
     });
     assert.deepEqual(asked, [{ database: "shop_dev", slot: "mason_dev_shop", publication: "mason_dev_shop", owned: true }]);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test("mason destroy --dry-run: what would go — the slot and publication on the database, the synced data and state — and nothing changed, nothing stopped, the database never asked", async () => {
+  const { home, shop } = fakeProject();
+  try {
+    fs.writeFileSync(path.join(shop.dir, DUCK_FILE), "x");
+    fs.writeFileSync(path.join(shop.dir, "mason.log"), "log\n");
+    fs.writeFileSync(path.join(shop.dir, "users.json"), "{}\n");
+    const cfg = project(shop.root).config;
+    cfg.changes = "replication";
+    writeConfig(shop.dir, cfg);
+    const before = fs.readdirSync(shop.dir).sort();
+    const config = fs.readFileSync(path.join(shop.dir, "config.json"), "utf8");
+    const chunks: string[] = [], errs: string[] = [];
+    const io = { out: (m: string) => { chunks.push(`${m}\n`); }, err: (m: string) => { errs.push(`${m}\n`); } };
+    const untouched = { removeProject: async (): Promise<string[]> => { throw new Error("a dry run removes nothing"); } };
+    assert.equal(await destroy(["--dry-run", "--json"], { io, cwd: shop.root, ...untouched }), 0, errs.join(""));
+    const stateDir = path.join(shop.root, ".mason");
+    assert.deepEqual(JSON.parse(chunks.join("")), { dryRun: true, destroyed: { project: "shop",
+      removedItems: ["replication slot mason_dev_shop_shop_dev on shop_dev", "publication mason_dev_shop_shop_dev on shop_dev", `${stateDir}/ (duck.db, mason.log)`],
+      replication: { database: "shop_dev", slot: "mason_dev_shop_shop_dev", publication: "mason_dev_shop_shop_dev" }, error: null },
+      next: [{ command: "mason destroy", what: "remove them" }] });
+    chunks.length = 0;
+    assert.equal(await destroy(["--dry-run"], { io, cwd: shop.root, ...untouched }), 0, errs.join(""));
+    assert.equal(chunks.join("").replace(/destroy +remove/, "destroy  remove"), `mason destroy would remove shop's synced data and state; nothing was changed\n` +
+      `  would remove   replication slot mason_dev_shop_shop_dev on shop_dev, publication mason_dev_shop_shop_dev on shop_dev, ${stateDir}/ (duck.db, mason.log)\n` +
+      `  would keep     your files in ${shop.folder}, .mason/config.json and the users\n\nNext:\n  mason destroy  remove them\n`);
+    assert.deepEqual(fs.readdirSync(shop.dir).sort(), before, "nothing removed");
+    assert.equal(fs.readFileSync(path.join(shop.dir, "config.json"), "utf8"), config, "the config as it was");
+    // a publication the operator named is its owner's: never dropped, so never listed
+    cfg.publication = "app_pub";
+    writeConfig(shop.dir, cfg);
+    const named = await destroyPlan(project(shop.root), { state: async () => ({ kind: "none", run: null }), supervisor: () => null });
+    assert.deepEqual(named.replication, { database: "shop_dev", slot: "mason_dev_shop_shop_dev", publication: null });
+    assert.ok(!named.items.some((i) => i.startsWith("publication")), named.items.join("\n"));
+    // a run up is stopped first; a supervisor between restarts too; neither is signalled by a dry run
+    const run = (p: Project): DevRun => ({ name: "shop", root: p.root, home: p.dir, folder: p.folder, pid: 4242, apiKey: "k", control: { url: "c", token: "t" },
+      postgresUrl: "postgresql://127.0.0.1:5433/shop", postgresListener: { host: "127.0.0.1", tls: null } });
+    assert.equal((await destroyPlan(project(shop.root), { state: async (p) => ({ kind: "up", run: run(p) }), supervisor: () => null })).items[0], "Mason (pid 4242), stopped first");
+    assert.equal((await destroyPlan(project(shop.root), { state: async () => ({ kind: "none", run: null }), supervisor: () => 77 })).items[0],
+      "its supervisor (pid 77), stopped first: it is about to start Mason again");
+    // a hung run: destroy would remove nothing, said as its failure, exit 1
+    const hung = await destroyPlan(project(shop.root), { state: async (p) => ({ kind: "hung", run: run(p) }), supervisor: () => null });
+    assert.deepEqual([hung.items, hung.replication], [[], null]);
+    assert.match(hung.error ?? "", /^Mason for shop is running \(pid 4242\) but does not answer its commands, so mason destroy would remove nothing: mason stop ends it/);
+    errs.length = 0;
+    assert.equal(await destroy(["--dry-run"], { io, cwd: shop.root, ...untouched, destroyPlan: async () => hung }), 1);
+    assert.match(errs.join(""), /mason destroy: shop: Mason for shop is running \(pid 4242\)[^\n]*\n {2}fix {3}nothing was changed \(a dry run\)\n/);
+    // a url: edited since names another database: the rest would go, the slot would not, said
+    cfg.publication = null;
+    cfg.sourceServer = { systemIdentifier: "7", database: "shop_old" };
+    writeConfig(shop.dir, cfg);
+    const moved = await destroyPlan(project(shop.root), { state: async () => ({ kind: "none", run: null }), supervisor: () => null });
+    assert.equal(moved.replication?.database, "shop_old", "named where the slot is: the database the synced data came from");
+    assert.match(moved.error ?? "", /^the rest would go, but not its publication and replication slot: the sources file names shop_dev now, and the synced data came from shop_old/);
+    assert.deepEqual(fs.readdirSync(shop.dir).sort(), before, "still nothing removed");
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test("mason destroy --json: destroyed names what went in its own words, and removed stays beside it until 1.0", async () => {
+  const { home, shop } = fakeProject();
+  try {
+    const chunks: string[] = [];
+    const io = { out: (m: string) => { chunks.push(`${m}\n`); }, err: (m: string) => { chunks.push(`${m}\n`); } };
+    assert.equal(await destroy(["--json"], { io, cwd: shop.root, removeProject: async () => [".mason/duck.db"] }), 0);
+    assert.deepEqual(JSON.parse(chunks.join("")), { dryRun: false, destroyed: { project: "shop", removedItems: [".mason/duck.db"], replication: null, error: null },
+      removed: [{ name: "shop", removed: [".mason/duck.db"] }], next: [{ command: "mason start", what: "syncs the tables again" }] });
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });

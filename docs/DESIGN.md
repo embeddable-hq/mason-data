@@ -485,223 +485,23 @@ table (and the source password) through the attachment. Others, each fixed with 
 | a catalog portal closed by another session's Sync (every six-card Metabase dashboard) | a catalog statement's portal runs whole at its Bind |
 | one node placed in two arms of a CASE, the second left unqualified | a node is placed once (`nodesPlacedTwice`, held to none) |
 
-### The independent review (2026-10-28)
+### How work is reviewed (Tom, 2026-11-06)
 
-**Decision.** Every PR is read for wrong answers by a reader in a fresh context before a person sees it, and its
-findings go back to the author in one message (CLAUDE.md "How work is done here", "The loop").
+**Decision (Tom, 2026-11-06).** The work runs as CLAUDE.md "How work is done here" says: a coordinator, an implementer
+and a fresh reviewer per piece, a short list of what blocks, one re-check of a fix, and the coordinator merges. Findings
+that do not block are notes in the review, never issues.
 
-**Why.** Three PRs landed in one day — three rewrites for a BI tool's slow shapes (date_trunc of a timestamptz, a
-LEFT lateral of json rows, the nulls idiom), jsonb's order and equality, and that order stored as a column — each by an
-agent whose own oracle run showed zero differences over about 21,000 statements. Independent readers of the diffs,
-handed the code and not the authors' reports, found eleven wrong answers between them, every one a shape the authors'
-statements had not held: a grouped jsonb sorted by its ordinal or output name sorted by its text (a clone dropped the
-node's type); the nulls idiom folded a bare name an output alias shadowed, and an integer ordinal; a three-argument
-date_trunc never read a NULL or row-held zone for seconds and below; jsonb equality under glibc refused whole tables
-holding an emoji's variation selector, where equality needs no collation; a mark a write stored after a key was counted
-exact was read as a key. The authors fixed each with a test shown to fail without it, and the oracle gained the shapes.
+**Why.** From 2026-10-28 the loop grew a scripted harness: a prompt renderer for every stage, Review records and their
+statistics, design reviews and class rounds, the evidence each path owed, and a filed issue for every finding that did
+not block. In ten days it reached about 17,000 lines with its tests, 39 of 185 merged PRs were about it, and 523 issues
+were filed, 380 of them open. Most were rare shapes no BI tool sends, and about 60 were bugs of the harness itself. The
+work it found was real, but it cost more than it was worth, and it grew every time it was used. The harness, its
+history and its measurements are in git before this change: `git show 9e20f15:docs/DESIGN.md`, "The independent
+review", and `git show 9e20f15:.claude/workflows/pr-loop-slim.js`.
 
-**What it cost.** Two implementations of 1 h 45 and 1 h 49 ran side by side; a review took 9 to 15 minutes; the fix
-rounds took 44 minutes and 1 h 28 (three batches of findings, three cycles); CI about 12 minutes a run, six runs,
-mostly overlapped. The batch landed in a little over three hours: the slowest implementation, one review cycle, and the
-CI runs that gated the merges — not the sum of the parts. Where time was spent on nothing new: each agent ran the full
-oracle several times while iterating, and one built a 20 M-row dataset twice.
-
-**A finding is a failure, never a patch (2026-11-01).** PR 170 (key-first GROUP BY, issue 134) took five findings of
-one class in four rounds: a sort key written as a constant, which the engine reads as an ordinal or refuses. The CI
-oracle found a text literal; then a second statement of the same shape; a re-check found a chain of casts and a
-derived table's `1 AS one` read through the table around it; the next a cast of a typed literal (`2147483648::int`,
-which Postgres evaluates at planning and refuses); the next a regression of that fix (`1.5::numeric`, now kept and
-written as a bare `1.5`). Every round the coordinator forwarded the reviewer's suggested edit as the fix, in 20 to 30
-calls, and the author applied it, correctly; the reviewer had named the class in round three ("the constant is decided
-from syntax where it should be decided from the analysis", CLAUDE.md's "a fact derived in several places") and the
-class was never the round's task. Neither the size of the pieces nor the agents' effort explained it: an author handed
-a patch applies the patch. So a finding goes back as the statement, Postgres's answer and Mason's, with its class; and
-the second finding of a class on one PR turns the next round into a class round, which writes the class's cases down
-first, tests each against Postgres, then fixes the decision. Its first such round ran at high effort, to see whether
-effort changes the count.
-
-**The loop as workflows, and the base's findings filed (Tom, 2026-11-01).** PR 207 took three rounds over a numeric
-quotient computed as a double, and the wrong answer grew each round: main had given it since before the PR, so the PR
-chased a class it did not make. A finding the base already answers wrong is now the base's: one issue per class, never
-a fix in the PR, and never counted toward the PR's class rule. PR 170 and PR 207 met one class, which per-PR counting
-could not see, so a run's classes carry to the PR stacked on it. The coordinator ran the loop by hand; it now runs as
-`.claude/workflows/pr-loop.js` and `.claude/workflows/issue-loop.js`, started with the Workflow tool, each stage an
-agent and the scripts' logic held by `tests/workflows.test.ts`. The brief and the plan moved to Opus with implementation, and Fable is kept for the reviews,
-where outreading the author is the point.
-
-**Passing the review the first time (Tom, 2026-11-01).** By the coordinator's count of fix rounds over the last 25
-merged PRs that change `src/`, about 45% needed at most one and about 55% at most two. GitHub counts 17 commits on
-PR 170, 12 on PR 156, 8 on PR 149, 6 each on PRs 109 and 163, and 5 on PR 135. The aim is about 90% passing Fable's
-review the first or second time. PR 202 (generated tables, stage 3; open, 10 commits) took six review rounds by the
-coordinator's count, and its root cause was a design nobody reviewed. At its head, its refusal reasons were decided by
-a walk over the raw parse tree (`seen` and `formsOf` in `src/duck/generated-plan.ts`), guessing types from lists of
-function names, where Postgres's analysis already held every node's result type (`src/duck/pgtree.ts` reads them)
-and "Postgres decides, DuckDB computes" is CLAUDE.md's first principle. Every round's wording finding traced back to
-that guess; each fix layered another guess on it, and each class round's brief described the syntax walk as the
-decision, so the class rounds built more of the wrong design. What the reviews caught, the brief had never given the
-author: a rule the project already has, not applied ("Postgres decides", "a fact derived in several places", "A
-refusal on the wire is Postgres's", "An APPROXIMATE value cannot be compared for equality"); the reviewer's probes,
-which the author never ran (wrap the expression in `* 2`, coalesce or round, nest it, change the input type, put the
-table on an outer join's nullable side, pass a parameter, prepare before a SET, run the real run and not only the unit
-world); unverified assumptions about the engine or the real run; and context lost between rounds, each fix round a
-fresh agent seeing only the latest findings. CI was red at PR 202's first commit (`checks`, a unit shard and
-`integration (rest)` failed), and rounds 1 and 2 never heard of it, since the loop read CI only once the reviews were
-clean. So `pr-loop.js` gained six phases and changed its rounds twice:
-- **Design** and **Design review**: an Opus note before code, naming each fact's authority, which Fable reviews
-  against that code; after two rounds the run goes on, carrying what is still open in its result and status.
-- **Probe**: before every review, a fresh Opus with no stake in the code runs the `## What review probes` of the
-  rules files the diff touches, the reviews' own probes and the note's shapes; this PR's findings are fixed before
-  Fable reads the head, at most two rounds a push, counted apart from the review's. The probe is the author's check
-  and the review the gate, so a probe that fails is noted and the review goes on.
-- **Learn**: once the reviews are clean and before the CI loop, each class met becomes a bullet in its rules file's
-  section, so the next PR's probe runs it. Its commit is neither probed nor reviewed, so its files are read from git
-  and a head that changed anything outside `.claude/rules/` stops the run. `tests/workflows.test.ts` holds every
-  rules file to the heading, and `tests/conventions.test.ts` every bullet to the PR or issue it was met in.
-- **Record**: every exit with a PR posts a `Review record` on it, and `scripts/review-stats.ts` turns the records into
-  the number that says whether this worked: of the PRs that reached a review, the share whose first review found
-  nothing of theirs, and whose first or second did; runs that stopped before a review are counted apart.
-- **Link**: PR 202 said "Part of #175", which GitHub does not link, and the board never saw it: the prompt asked for
-  `Closes` and nothing read it. After the implement push the run now asks GitHub whether the PR closes its
-  sub-issue, fixes the body once if not, and stops if it still does not. GitHub links a closing keyword only on a PR
-  into the default branch, so for a stacked PR the body's keyword is read instead.
-- The rounds: every fix round is handed the note and every earlier round, probe and review, with what each judged
-  correct; and CI is read beside each review, a red run going back with the review's findings in the same fix. Beside
-  a clean review there is no fix round to join, and the CI stage reads the failure again after Learn.
-
-**Only a blocking finding sends a PR back (Tom, 2026-11-01).** PR 202 took eight review rounds. Rounds 1 to 4 and 8
-found real wrong answers or a crash; rounds 5 to 7 found only the quality of refusal messages (a reason, a HINT, a
-DETAIL), about two hours of rounds on a PR whose answers were by then right, and PR 207 spent rounds the same way. The
-owner's words: "It's super important that we don't let any real correctness or security bugs get through. But if you
-determine that the feedback items don't block the current PR and instead go into a new issue, that feels like a good
-way to move forwards." So every finding the probe and the review report carries a severity (the `FINDINGS` schema in
-`pr-loop.js` requires it). Blocking: `wrong-answer` (where Mason answers, it answers differently from Postgres: rows,
-text, types or OIDs, order, SQLSTATE), `crash` (a crash, a hang, a stuck state such as a table left `building`),
-`data-loss`, `security`, `regression` (what the base got right is now wrong or refused), and a red CI. Not blocking:
-`message` (a refusal's wording, reason, HINT or DETAIL, or a way out that does not work, when the refusal itself is
-right), `over-refusal` (Mason refuses where Postgres answers and the base refused too: safe, and a gap), `docs`,
-`quality`. When the reviewer is unsure, the finding is blocking, and so is a finding with no severity or one the
-script does not know: the line errs toward a fix round, never toward a wrong answer merged. Only the PR's blocking
-findings make a fix or probe-fix round, count toward the class rule and are learnt; a round with only non-blocking
-findings is clean. The others are filed at the run's exit beside the base's, one issue per class, each saying it was
-met in the PR's review and deferred, and listed in the Review record's `deferred`; `scripts/review-stats.ts` counts a
-first review as passed when it found nothing blocking, and reads a record written before severity as all blocking,
-since every finding then made a round.
-
-**A review runs statements at scale (Tom, 2026-11-01).** An A/B on issue 192 (WITH TIES): a review that only read
-the code passed an implementation clean. Three later checks ran 300 to 500 statements each against Postgres 18 and
-Mason side by side, with the base beside them, and found two regressions and about four new wrong answers in that same
-implementation. What found them was not the feature's own syntax but forms nobody wrote — `TABLE t` for `SELECT * FROM
-t`, a VALUES arm first in a set operation, an empty input under a bound, a `char(n)` arm beside a text arm, a negative
-or NULL count or offset, a quotient in a numeric arm beside an integer arm, an exact numeric read through a derived
-table or a CTE — and a sweep of the PLAIN form of each code path the diff touched: the regression was `SELECT * FROM t
-UNION ALL TABLE t ORDER BY 1 LIMIT 2`, which has no new syntax at all. Each check cost about what the reading review
-did in tokens (172k to 250k, against 197k), because its statements were batched: one `scripts/duck-repro.ts` call
-runs dozens, its output goes to a file, and only the differences are read. The cost is wall time, two to three times.
-So the probe and every review in `pr-loop.js` run their statements that way, at the head and the base: the forms are one
-list (`VARIANT_FORMS`, over synthetic tables), a full review aims for hundreds and a re-check for a narrower set, and
-a statement the base matched and the head does not is a `regression`, blocking. Each reports `statementsRun` and
-`statementsMatched`, which the Review record sums and `scripts/review-stats.ts` prints. Statements are what the
-engine's and the listener's paths owe, and only theirs: PR 245's second round found every PR made to run SQL, so a PR
-of the CLI, the web page, a script, a workflow or docs could never pass. So the evidence is read from the diff's paths,
-which the review reports (`changedPaths`): a path in `STATEMENT_PATHS` (the `paths:` of `.claude/rules/duck-*.md`
-and `postgres-api.md`, held equal by `tests/workflows.test.ts`, and `src/cdc/`) owes statements, and every other
-path owes checks, what it changed run at the head and the base (`checksRun`: a `mason` command, a script, a test
-file; never SQL). A review or re-check that showed none of what it owed, or gave no valid count, or did not say its
-paths, is never a clean round: the run stops `unreviewed`, saying what to install or run (`psql`
-on PATH, Docker or `itEnv` for statements; the command, script or tests for checks), issue-loop goes no further, and
-the record counts the round as no review (PR 245's first review found such a round passing as reviewed); a probe that
-showed none is noted, as a failed probe is. The statements' Postgres is the file the `itEnv` argument names, or a
-throwaway `postgres:18` container of the stage's own, removed when done, whose URL no prompt prints.
-
-A file is the wrong grain for a path two subsystems share (issue 286, 2026-11-02): PR 280 changed one line of
-`src/cli/dev.ts`, a sweep of tunnel files at start, and since three engine rules files list `dev.ts` (so their rules
-load when it is edited), its review ran 332 statements that told it nothing. So a SHARED path, one in `STATEMENT_PATHS`
-and in the `paths:` of `cli.md` or `web-ui.md` (`HOST_PATHS`; today `dev.ts`, `generated-files.ts`, `mason.cjs`,
-`pool-size.cjs`), owes by its hunks. `scripts/evidence-owed.ts <base> <head>` decides them with TypeScript's checker:
-a hunk reaches the engine when a name on a changed line (added lines in the head's tree, removed ones in the base's,
-aliases followed) resolves to a declaration in a path that owes statements, so `store.query` counts though it names no
-import. A shared path with no such hunk owes checks; one that is not `.ts`, added or deleted, or that does not parse,
-owes statements, since "couldn't tell" is never checks. The review reports the shared paths it agrees owe checks
-(`checksOnly`), and overrides the script by leaving one out, when a hunk changes the flow or the arguments into an
-engine call without naming an engine symbol; a waiver of any other path, or one that cannot be read, waives nothing.
-The script is also the one reader of the rules' front matter, which `tests/workflows.test.ts` imports.
-
-One process, not three (Tom, 2026-11-02; issue 386). Experiment 1, on issue 192, ran the `pr-loop.js` harness against
-ONE persistent Opus agent that was sent each review's findings by message. The harness had run 5.5 h, with 2 design,
-7 probe and 4 review rounds, and was still in CI; it used about 2.3 M Opus output tokens. The persistent agent was clean
-and green in 1 h 51 min, and it took about 1.0 M Opus output tokens over all its rounds, the later fix rounds included.
-The difference was continuity: a fix round rebuilt no context. Experiment 2 raced that agent, kept by a coordinator
-(the pr-persistent skill), against `pr-loop-slim.js`, the harness without its design review and probe, whose fixers
-read a `## Handoff` comment. On issue 137 it was a tie: 49 min for the skill (PR 279) and about 48 min for slim (PR 280,
-the coordinator's count), and both were clean at the first review. On issue 176 the skill's PR 272 was clean at its
-second review. At its second review slim's PR 274 had two new wrong answers of its own, and it was stopped. Tom then
-ran the skill with a Sonnet coordinator per issue, and decided: "As far as I'm concerned, this new process has won. The
-others weren't faster, better or cheaper." So `pr-loop.js` and `issue-loop.js` are retired. `pr-loop-slim.js` stays as
-the source the skill renders every prompt from, not as a process of its own. The top session's queue is a skill too
-(`.claude/skills/up-next/SKILL.md`). issue-loop's split moved into the Brief, as a verdict it may return in place of a
-brief: the pieces, each able to ship alone, in order, and which are stacked. The run then makes a sub-issue per piece,
-posts the plan and stops, and the top session starts each piece. Before, an issue too big for one PR was seen only if the top session
-spotted it, or late, as rounds piled up or the four-round bound stopped a run. `issue-loop.js` ran its pieces by
-`workflow('pr-loop')`, and a Workflow script cannot hold an implementer across rounds, since an `agent()` is one-shot.
-
-**The reviewer moves to Opus at high effort (Tom, 2026-11-03).** Tom: "From now on, let's change our reviews to use
-Opus with High effort, instead of Fable" (issue 605). The rule it replaces, from PR 170's era ("The loop as workflows"
-above), had the reviews on Fable, never Opus, because the reader must outread the author: a stronger model was what
-made the review independent. Now every review, a full one and each fix's narrow re-check alike, runs on the same model
-as the author at the same effort (`ON.review` in `.claude/workflows/pr-loop-slim.js`, the one value every review
-stage reads). Its independence is carried by the rest of what made a review independent all along: a fresh agent,
-never the implementer, given the diff and the code and never the author's report or its `## Handoff`, and its own runs
-of what the diff changed at the head and the base. What to watch is the number `scripts/review-stats.ts` prints, the
-share of reviewed PRs whose first review found nothing blocking, before and after this switch: a share that rises with
-no fall in what CI's oracle and the merged PRs later show wrong would say the reviews got easier to pass, not the PRs
-better.
-
-**A PR's scope stops growing by itself (Tom, 2026-11-03; issue 649).** PR 582 (issue 212) took eight review rounds and
-did not finish. The reviews were accurate: every blocking finding was a real wrong answer or regression, run at the
-head and at main. The loop around them let the PR's scope grow. Three things did it, and each got a decision.
-- **The bound was overridden.** The four-round bound fired after round 4, and the top session overrode it four times,
-  each round fixing the last one's findings and meeting new ones. Now a run that reaches the bound stops with a status
-  that begins `shrink:` (`pr-loop-slim.js`, as a conflict's begins `conflict:`). It names the last head a review found
-  clean, read from the script's own history, and its default next step is to narrow the PR to its safe subset: refuse
-  by name what the base refused, revert what has no clean review, and file the rest as one new issue. The top session
-  starts that as a new run of the issue at once (`shrinkOf`, `.claude/skills/up-next/SKILL.md`). Another round past
-  the bound is the owner's word only. The shrink counts against the bound it enforces: a shrink run that reaches its
-  own bound stops with `bound:`, which starts nothing by itself and goes to the owner.
-- **A regeneration admitted what nobody reviewed.** Round 3 was clean. The next CI fix regenerated the allowlist
-  (`node scripts/oracle-legs.ts --write`) and admitted a function main refused by name, for every shape, because the
-  oracle's few shapes matched; rounds 4 to 8 were that admission's forms. Now a stage that may regenerate returns
-  `admitted`, every piece its push adds to `src/duck/verified.ts`, each judged against the issue's scope: kept refused
-  by name with an issue filed, or left for the next review to sweep in the variant forms at the head and the base. The
-  file is generated and CI holds it equal to what the oracle answers alike, so a piece is kept refused only through
-  what the generator reads (a `refused` entry of `src/duck/gaps.ts` that the rewrite raises, or no oracle statement of
-  the PR's verifying it), never by an entry taken out by hand, which the next regeneration adds back. Every
-  review reads the file's diff itself, since an author's report is never evidence.
-- **A class round decided by form.** The slim loop had no design review. Two class rounds then decided by a list of
-  spellings, and one named an authority (the engine's prepared types) that does not exist where the rewrite decides.
-  Now a class round's decision and its authority are written in the PR's `## Design` first, and a fresh Opus at high
-  effort checks against the code that the authority exists at the decision point and covers every form, running the
-  cases, before any code; two design reviews at most, which never count toward the bound.
-
-**Detector:** `tests/workflows.test.ts` (the tests named for issue 649) runs the script and the render through each.
-
-### Who may give an agent words (Tom, 2026-11-02)
-
-**Decision.** The agents that work this repository (the up-next session, its coordinators, and the Opus
-agents they start) read an issue's or a PR's people-written text, its title, body, comments, reviews, inline review
-comments and search results, only through one script, `scripts/gh-text.ts` (issue 438). It reads GitHub's REST
-`author_association` on each item and keeps OWNER, MEMBER and COLLABORATOR, an allowlist, so every other value, a
-missing one, and one GitHub adds later are left out; what it left out it names by count and kind ("2 comments by others
-not read"), never by text or login, so the reader knows something was dropped. Every list is read with `--paginate`.
-The up-next session checks an issue's author before it starts a run (`gh-text.ts author <n>`), and sends an issue by
-anyone else to Needs Tom. `scripts/review-stats.ts` imports the same list, so a Review record counts only when the
-repository's people posted it. **Why.** The repository is public, and the agents treated whatever an issue, a PR or
-their comments said as their task, whoever wrote it; until then nothing read who wrote it. One script, one list: a
-second list in a second reader is CLAUDE.md's "a fact derived in several places". Left as they were: `gh pr diff`
-(code only those with write access push), GitHub's own values (`mergeable`, `state`, `headRefOid`,
-`closedByPullRequestsReferences`), the checks and CI's logs. Open: who can move a card onto Up next (the board's base
-role cannot be read through the API); the author check covers an issue by anyone else wherever its card is.
-**Detector:** `tests/workflows.test.ts` ("github text") renders every stage of `pr-loop-slim.js` and both skills and
-finds no other read of an issue's or a PR's text, and runs the script against a stub `gh`.
+**Kept.** The fresh reviewer that runs what changed instead of reading it; the oracle as the arbiter of a wrong answer;
+a test seen failing without its fix; the coordinator alone merging, pinned to the head read; and acting only on words
+from the repository's people, since anyone can open an issue here.
 
 ### Issue labels and a bug's Severity (Tom, 2026-11-01)
 
@@ -753,6 +553,11 @@ Medium, 2 Low, none Critical) and 29 features.
 **Detector.** The board's view "Bugs by severity" (`is:open label:bug`, sorted by Severity), where a bug with no
 Severity shows at the bottom. An issue with neither label is seen only by reading the list. There is no automatic
 check. A script that lists an open issue with neither label, or a bug with no Severity, would be one; it is not built.
+
+**Where a filed issue goes (Tom, 2026-11-03, issue 667).** "Only critical ones should go straight to up next": a run's
+File stage labels each new issue and judges a bug's Severity, and pr-loop-slim.js alone decides its column (a Critical
+bug to Up next, every other new issue to Backlog) and renders the `board` stage's commands; the column a run reports is
+read from what that stage says it ran, so a move that failed is said with the command to run, never assumed done.
 
 ### The plan fixture (2026-10-28)
 
@@ -2753,6 +2558,69 @@ placed among them by the same binary search, but through a shifted string for ea
 
 ICU had the same class in another place: U+FE0F is ignorable there, so `x` and `x` + U+FE0F tied, and a tie is two
 strings Postgres orders by their bytes. A sort under ICU now ends in the bytes, and `<`, GREATEST, min and max compare ICU's key and the bytes.
+
+### The libc key for the candidates alone (2026-11-03, issue 666)
+
+The key above is one JavaScript call a row, on the executor's one thread: `min(s), max(s)` of a text under en_US.utf8
+took 13.7 s over 0.9 M rows of a real database where Postgres took 0.33 s, and a table preview (`ORDER BY s LIMIT 50`)
+over 93 M rows hit the 300 s timeout. A top N and a min or max need the key for a few rows, so each row first gets two
+native bounds of its key, `lo(s)` and `hi(s)`, texts the engine compares by their bytes, and the key is computed only for
+the rows the bounds cannot rule out (Postgres's abbreviated keys, made exact by bounds). How they are built from the
+order read from the source, why `hi(a) < lo(b)` orders `a` before `b`, and which statements are bounded, is the header
+of `src/duck/libc-bound.ts`; the property is held over the engine's own expressions, on a hand order with contractions,
+expansions and ignorables (`tests/duck-libc-order.test.ts`) and on the real en_US.utf8 order read from Postgres 18
+(`tests/integration/duck-libc-read.itest.ts`).
+
+The decisions, each measured or tested:
+- **The bounds are native and cheap, or nothing is gained.** The first form wrote each weight by `translate` and matched
+  the run with a counted regular expression: 1 µs a row, and min/max over 5 M rows took 18.5 s, slower than main's 11.9.
+  `left`, one plain `regexp_extract`, `lower` and one `regexp_replace` cost 0.05 µs a row (271 ms over 5 M, against
+  `translate`'s 4,785 ms). That needs the order's folded characters' bytes to order as their weights do, which en_US's
+  printable ASCII does (`$` < digits < letters, `A` = `a`); an order whose do not gets no bounds (`boundOf` is null), and
+  its statements run as written.
+- **The run is 48 characters** (`BOUND_CHARS`). Shorter than the prefix a column's values share, it tells no row apart:
+  over 5 M URLs of one 25-character prefix (`https://example.com/item/<n>`), a run of 16 or 24 left all 5 M rows
+  candidates of `min` and of a `LIMIT 50`, and 32, 48 or 96 left 1 and 50. The bounds' time hardly moves with it (both
+  bounds over the 5 M rows: 1.9 to 2.5 s at every length, measured beside other gates at a load of 60 on ten cores, so
+  within noise); 48 leaves room for a longer shared prefix.
+- **The threshold reads the statement's own rows**: its FROM item and WHERE cloned, a role's walled read included and
+  counted as one more wall (tests/duck-roles-barrier-wire.test.ts), and only where reading them twice reads the same
+  rows (nothing volatile, no window or set-returning select list, no LIMIT or sample inside). Everything else, a join,
+  a set operation, GROUP BY, DISTINCT, WITH TIES, a grouped or FILTER'd min, runs as written and as fast as before.
+- **NULL rows are never candidates** unless the sort puts them first: a sentinel in the threshold's `count(*) >= n`
+  case and the row's `coalesce` keep them out (61,490 NULL rows were keyed for a `LIMIT 50` before it).
+
+Measured on a laptop, Postgres 18 in a container, a table of `(id bigint, s text, u text)` where `s` is two words and a
+number (`Kilo apple, 4711`, a NULL in a thousand) and `u` a URL of one shared prefix; Mason's time is the best of three
+over the wire, the source's beside it:
+
+| statement | 5 M rows, main | 5 M rows, this change | 5 M, Postgres |
+|---|---|---|---|
+| `min(s), max(s)` | 11.9 s | 1.16 s | 0.16 s |
+| `* ORDER BY s LIMIT 50` | 11.7 s | 0.60 s | 0.11 s |
+| Metabase's preview, `ORDER BY s ASC LIMIT 2000` | 10.2 s | 0.62 s | 0.18 s |
+| the same, `DESC` | 10.4 s | 0.66 s | 0.17 s |
+| `ORDER BY s, id LIMIT 50 OFFSET 1000` | 10.2 s | 0.63 s | 0.17 s |
+| `min(u), max(u)`, the shared prefix | 15.1 s | 1.86 s | 0.65 s |
+| `* ORDER BY u LIMIT 50` | 13.9 s | 0.88 s | 0.39 s |
+| `ORDER BY u DESC LIMIT 2000` | 13.7 s | 0.97 s | 1.91 s |
+
+Over 20 M rows of the same shape, with the laptop shared by other sessions' gates (load 7 at the start of the head's
+run and 35 at its end; main's ran at 90 and 10 to 30):
+
+| statement | 20 M rows, main | 20 M rows, this change | 20 M, Postgres |
+|---|---|---|---|
+| `min(s), max(s)` | past the 300 s timeout | 5.2 s | 0.54 s |
+| `id, s ORDER BY s LIMIT 50` | 153 s (past 300 s at load 90) | 2.4 s | 0.57 s |
+| Metabase's preview, `ASC LIMIT 2000` | past the 300 s timeout | 2.7 s | 0.61 s |
+| the same, `DESC` | 115 s | 2.3 s | 0.44 s |
+| `* ORDER BY u LIMIT 50` | 124 s | 5.3 s | 1.80 s |
+| `min(u), max(u)` | not run | 7.2 s | 2.90 s |
+
+93 M rows were not measured. Extrapolated linearly from 20 M, the change's statements take 10 to 34 s there, under the
+300 s timeout that main's met. What is left is the bounds, one native pass over every row: the key itself is computed
+for 1 to 81,920 rows of 1 M (tests/duck-plans.test.ts), never for every row. A `DESC` sort whose NULLs come first keys
+every NULL row, as they are all candidates.
 
 ## Measurements
 

@@ -13,12 +13,16 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { PassThrough } from "node:stream";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRunServer, listenOnLoopback, runState, type RunContext } from "../src/cli/run-server.ts";
 import { parseSource } from "../src/cli/preflight.ts";
 import { serveSettings } from "../src/cli/serve.ts";
+import * as uiSsh from "../src/cli/ui-ssh.ts";
 import { exitFailure, FrameLink, sshArgs, targetProblem } from "../src/cli/ui-ssh.ts";
 import { matrixEnv, runMason } from "./cli-matrix.ts";
+
+// src/cli/ui-ssh.ts BRIDGE_EXIT_MS (held equal below), by value so the file loads against a tree without it (scripts/fails-without.ts)
+const BRIDGE_EXIT_MS = 5_000;
 
 const MAIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "main.ts");
 const made: string[] = [];
@@ -226,6 +230,171 @@ test("the run going away ends the tunnel: said, not silent", { timeout: 60_000 }
   } finally { s.close(); }
 });
 
+/**
+ * `mason ui --bridge` as ssh starts it, its stdin a pipe this test holds. `blocked`: a preload busy-waits on the main
+ * thread once the test, having read the hello, writes the file it watches: as a wedged call would, nothing on the main
+ * event loop runs again.
+ */
+async function bridgeProcess(root: string, blocked: boolean): Promise<{ child: ChildProcess; err: () => string; done: Promise<{ code: number | null; signal: NodeJS.Signals | null; at: number }> }> {
+  const args = [MAIN, "ui", "--bridge", "--local-port", "40999"];
+  const dir = temp("bridge-hook"), block = path.join(dir, "block-now");
+  if (blocked) {
+    const hook = path.join(dir, "block.mjs");
+    fs.writeFileSync(hook, `import * as fs from "node:fs";
+import { isMainThread } from "node:worker_threads";
+if (isMainThread) {
+  const look = setInterval(() => { if (fs.existsSync(${JSON.stringify(block)})) { clearInterval(look); for (;;) { /* the main loop, wedged */ } } }, 20);
+  look.unref();
+}
+`);
+    args.unshift("--import", pathToFileURL(hook).href);
+  }
+  const child = spawn(process.execPath, args, { cwd: root, env: matrixEnv(), stdio: ["pipe", "pipe", "pipe"] });
+  held.add(child);
+  let out = "", err = "";
+  child.stderr!.on("data", (b: Buffer) => { err += b.toString(); });
+  const done = new Promise<{ code: number | null; signal: NodeJS.Signals | null; at: number }>((r) => child.on("close", (code, signal) => { held.delete(child); r({ code, signal, at: Date.now() }); }));
+  await new Promise<void>((resolve, reject) => {
+    child.stdout!.on("data", (b: Buffer) => { out += b.toString(); if (out.includes("\n")) resolve(); });
+    void done.then((d) => reject(new Error(`the bridge ended (${d.code ?? d.signal}) before its hello: ${out}${err}`)));
+    setTimeout(() => reject(new Error(`no hello in 20 s: ${out}${err}`)), 20_000).unref();
+  });
+  assert.match(out, /^MASON-UI-BRIDGE \{"protocol":1,.*"ticket":/, "the tunnel opened");
+  if (blocked) { fs.writeFileSync(block, "now"); await new Promise((r) => setTimeout(r, 200)); }
+  return { child, err: () => err, done };
+}
+
+const within = <T>(p: Promise<T>, ms: number, what: string): Promise<T> => Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(what)), ms).unref())]);
+
+test("the bridge ends at once, exit 0, when its stdin ends: the laptop's ssh gone", { timeout: 60_000 }, async () => {
+  const s = await server();
+  try {
+    const b = await bridgeProcess(s.root, false);
+    await new Promise((r) => setTimeout(r, 500));
+    assert.ok(!isGone(b.child.pid!), `the bridge ended with its stdin open: ${b.err()}`);
+    const closed = Date.now();
+    b.child.stdin!.end();
+    const d = await within(b.done, BRIDGE_EXIT_MS, `the bridge was still running ${BRIDGE_EXIT_MS} ms after its stdin closed: ${b.err()}`);
+    assert.deepEqual({ code: d.code, signal: d.signal }, { code: 0, signal: null }, b.err());
+    assert.ok(d.at - closed < 2_000, `it took ${d.at - closed} ms`);
+    assert.doesNotMatch(b.err(), /ended now/, "the watchdog is not how an ordinary bridge ends");
+  } finally { s.close(); }
+});
+
+test("a bridge whose main thread is blocked: never ended while its stdin is open, ended within the bound once it closes, and said", { timeout: 60_000 }, async () => {
+  const s = await server();
+  try {
+    assert.equal((uiSsh as Record<string, unknown>).BRIDGE_EXIT_MS, BRIDGE_EXIT_MS, "the bound this test holds is the bridge's");
+    const b = await bridgeProcess(s.root, true);
+    // past the bound with stdin open: the watchdog waits on stdin's end, never on time alone
+    await new Promise((r) => setTimeout(r, BRIDGE_EXIT_MS + 1_500));
+    assert.ok(!isGone(b.child.pid!), `the bridge was ended with its stdin open: ${b.err()}`);
+    assert.equal(b.err(), "", "nothing said while it runs");
+    const closed = Date.now();
+    b.child.stdin!.end();
+    const d = await within(b.done, BRIDGE_EXIT_MS + 3_000, `a blocked bridge was still running ${BRIDGE_EXIT_MS + 3_000} ms after its stdin closed: ${b.err()}`);
+    assert.equal(d.signal, "SIGKILL", `ended by its watchdog: ${JSON.stringify(d)} ${b.err()}`);
+    assert.ok(d.at - closed >= BRIDGE_EXIT_MS - 200, `ended ${d.at - closed} ms after stdin closed: before its bound`);
+    assert.equal(b.err(), `mason ui --bridge: its stdin closed ${BRIDGE_EXIT_MS / 1000} s ago and it had not ended (its main thread is blocked): ended now, and the tunnel with it\n`);
+    // the run hears its tunnel end with the process
+    for (let i = 0; i < 100 && !s.logs.some((l) => /closed/.test(l)); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(s.logs.some((l) => /closed/.test(l)), `the run's log: ${s.logs.join("\n")}`);
+  } finally { s.close(); }
+});
+
+/** A process's resident memory, in bytes (`ps`, so macOS as Linux), or null once it is gone. */
+const rssOf = async (pid: number): Promise<number | null> => {
+  const r = await new Promise<string>((resolve) => {
+    const ps = spawn("ps", ["-o", "rss=", "-p", String(pid)], { stdio: ["ignore", "pipe", "ignore"] });
+    let out = "";
+    ps.stdout.on("data", (b: Buffer) => { out += b.toString(); });
+    ps.on("close", () => resolve(out.trim()));
+  });
+  return /^\d+$/.test(r) ? Number(r) * 1024 : null;
+};
+
+test("a laptop that floods a blocked bridge: the bridge holds a bounded window of it, then drops what follows, and still ends when stdin closes", { timeout: 240_000 }, async (t) => {
+  const s = await server();
+  try {
+    const b = await bridgeProcess(s.root, true);
+    const pid = b.child.pid!;
+    const before = (await rssOf(pid))!;
+    let peak = before;
+    const sampling = setInterval(() => { void rssOf(pid).then((r) => { if (r !== null && r > peak) peak = r; }); }, 100);
+    // one connection opened, then 256 MiB of its data, in frames as the laptop's end writes them; a byte counts once the
+    // pipe took it (the write's callback), never while it waits in this process. The volume is the property's, not a
+    // throughput: 256 times the window, and twice the memory bound below, so a bridge that holds what it reads fails
+    // that bound; no wall-clock bound is put on pushing it (the pipe's speed is the machine's load), only the test's own
+    const FRAME = 64 * 1024, TOTAL = 256 * 1024 * 1024;
+    const head = (type: number, length: number): Buffer => { const h = Buffer.alloc(9); h.writeUInt8(type, 0); h.writeUInt32BE(1, 1); h.writeUInt32BE(length, 5); return h; };
+    const payload = Buffer.alloc(FRAME, 0x61);
+    let accepted = 0;
+    const atStart: number[] = [];
+    const stdin = b.child.stdin!;
+    stdin.write(head(1, 0));
+    const flood = (async () => {
+      for (let sent = 0; sent < TOTAL; sent += FRAME) {
+        const chunk = Buffer.concat([head(2, FRAME), payload]);
+        if (!stdin.write(chunk, () => { accepted += chunk.length; })) await new Promise((r) => stdin.once("drain", r));
+      }
+      // the callbacks come in order: this one's is the last
+      await new Promise((r) => stdin.write(Buffer.alloc(0), r));
+    })();
+    // before the bound: the window and the pipe, no more
+    await new Promise((r) => setTimeout(r, BRIDGE_EXIT_MS - 2_000));
+    atStart.push(accepted);
+    // past the stuck point the reader drops, so the pipe takes it all: a reader that never drops waits here until the
+    // test's own timeout, the failure
+    await flood.finally(() => { clearInterval(sampling); });
+    t.diagnostic(`taken before the bound: ${atStart[0]} bytes; in all: ${accepted}; resident memory ${Math.round(before / 1048576)} MiB before, ${Math.round(peak / 1048576)} MiB at its peak`);
+    assert.ok(atStart[0]! < 8 * 1024 * 1024, `${atStart[0]} bytes taken before the main thread was taken for stuck: past the window`);
+    assert.ok(accepted >= TOTAL, `the laptop's writes waited for ever once the main thread was stuck: ${accepted} bytes taken`);
+    assert.ok(!isGone(pid), "ended with stdin open");
+    // the window is 1 MiB; the rest is read buffers the reader dropped and has not yet collected (about 60 MiB measured)
+    assert.ok(peak - before < 128 * 1024 * 1024, `resident memory grew ${Math.round((peak - before) / 1024 / 1024)} MiB under the flood`);
+    const closed = Date.now();
+    stdin.end();
+    // the bound plus a margin for a loaded machine: what is held is that the end is heard and the watchdog fires
+    const d = await within(b.done, BRIDGE_EXIT_MS + 15_000, `a flooded, blocked bridge was still running ${BRIDGE_EXIT_MS + 15_000} ms after its stdin closed: ${b.err()}`);
+    assert.equal(d.signal, "SIGKILL", `${JSON.stringify(d)} ${b.err()}`);
+    assert.ok(d.at - closed >= BRIDGE_EXIT_MS - 200, `ended ${d.at - closed} ms after stdin closed: before its bound`);
+    assert.match(b.err(), /its stdin closed 5 s ago and it had not ended/);
+  } finally { s.close(); }
+});
+
+test("a main thread that is alive but takes nothing (a page that reads nothing): the reader holds its window and waits with it, never drops, and, the pipe paused, does not hear stdin's end", { timeout: 60_000 }, async () => {
+  // the stdin thread on its own, its main thread played by a script that beats as the bridge's does and acknowledges
+  // nothing, as FrameLink paused by a page's full socket does
+  const dir = temp("bridge-reader");
+  const main = path.join(dir, "main.mjs");
+  const reader = path.resolve(path.dirname(MAIN), "bridge-stdin.ts");
+  fs.writeFileSync(main, `import { Worker } from "node:worker_threads";
+const w = new Worker(${JSON.stringify(reader)}, { workerData: { exitMs: 1000, windowBytes: 65536 }, execArgv: [] });
+w.on("message", (m) => { if (!("data" in m)) process.stderr.write(JSON.stringify(m) + "\\n"); });
+setInterval(() => { w.postMessage({ beat: true }); }, 200);
+`);
+  const child = spawn(process.execPath, [main], { stdio: ["pipe", "ignore", "pipe"] });
+  held.add(child);
+  let said = "";
+  child.stderr!.on("data", (b: Buffer) => { said += b.toString(); });
+  const done = new Promise<void>((r) => child.on("close", () => { held.delete(child); r(); }));
+  let accepted = 0;
+  let open = true;
+  const chunk = Buffer.alloc(64 * 1024, 0x61);
+  void (async () => { while (open) { if (!child.stdin!.write(chunk, () => { accepted += chunk.length; })) await new Promise((r) => child.stdin!.once("drain", r)); } })();
+  // three times the stuck bound with the window full
+  await new Promise((r) => setTimeout(r, 3_000));
+  open = false;
+  assert.ok(accepted < 1024 * 1024, `${accepted} bytes taken: the reader read past its window`);
+  assert.doesNotMatch(said, /dropped/, "a main thread that beats is waiting, not stuck: nothing it is owed is dropped");
+  child.stdin!.destroy();
+  await new Promise((r) => setTimeout(r, 2_000));
+  assert.doesNotMatch(said, /"end"/, "the pipe paused, its end is not heard: the bridge waits on the page, as it always did");
+  assert.ok(!isGone(child.pid!));
+  child.kill("SIGKILL");
+  await done;
+});
+
 const refused = async (bin: string, root: string, extra: Record<string, string>, args: string[] = ["--timeout", "20"]): Promise<{ code: number | null; error: { code: string; message: string; why?: string; fix?: string }; next: Array<{ command: string }> }> => {
   const a = await runMason(temp("laptop"), ["ui", "--ssh", "deploy@mason.example", "--mason", remote(root), "--json", ...args], env(bin, extra));
   return { code: a.code, ...JSON.parse(a.stdout) as { error: { code: string; message: string }; next: Array<{ command: string }> } };
@@ -266,6 +435,7 @@ test("each failure is one report with its way out, in the failure shape, and no 
 
     const late = await refused(ssh.bin, s.root, { FAKE_SSH: "silent" }, ["--timeout", "1"]);
     assert.equal(late.error.message, "no answer from deploy@mason.example in 1 s");
+    assert.deepEqual([late.code, late.error.code], [124, "timeout"], "ran out of time: exit 124, as every timeout");
     assert.ok(isGone(Number(fs.readFileSync(ssh.pid, "utf8"))), "the ssh that said nothing is ended");
   } finally { s.close(); }
 

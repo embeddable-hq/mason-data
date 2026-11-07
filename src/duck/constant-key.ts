@@ -50,7 +50,8 @@ export function keysBound(keys: Keys, clause: "sorted" | "distinct", known: Read
   const first = [...new Set(listed.filter((e) => keys.entries[e]?.first === e))];
   const choices = open.map((i) => {
     const k = known[i] as Unbound;
-    return first.filter((e) => (k.reads === null || keys.entries[e]!.reads === k.reads) && (k.constant === null || keys.entries[e]!.constant === k.constant));
+    return first.filter((e) => (k.reads === null || keys.entries[e]!.reads === k.reads) && (k.constant === null || keys.entries[e]!.constant === k.constant)
+      && (k.groupings === undefined || keys.entries[e]!.groupings.length === k.groupings));
   });
   const agreed = known.map((k) => typeof k === "number" ? { entry: k as number | null, constant: constant(k) } : { entry: null, constant: null });
   if (open.length === 0) return agreed;
@@ -80,7 +81,11 @@ export function keysBound(keys: Keys, clause: "sorted" | "distinct", known: Read
 
 /** what is known of a key Postgres bound by equality, from its own text: whether it reads a column (null for unknown),
  *  and whether it is a Const where an expression of the same text was analysed elsewhere (null for none) */
-export interface Unbound { reads: boolean | null; constant: boolean | null }
+export interface Unbound {
+  reads: boolean | null; constant: boolean | null;
+  /** how many GROUPING(…) it holds outside its subqueries, where known: an equal entry holds as many (PR 674) */
+  groupings?: number;
+}
 
 /**
  * A KEY WRITTEN AS A BARE LITERAL that the analysis did not call constant (a rewrite that wrote a value it computed):

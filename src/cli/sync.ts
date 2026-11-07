@@ -6,7 +6,7 @@
  * polled: its answer is where the stream is, beside the polled ones'. The run's `POST /api/sync` (src/cli/run-server.ts) answers it, through the sync's own
  * poll (`Sync.pollNow`).
  */
-import { failed, jsonText, parseCommand, reportText, type CommandSpec, type NextStep } from "./command.ts";
+import { failed, failureCode, jsonText, parseCommand, reportText, type CommandSpec, type NextStep } from "./command.ts";
 import { out as styleOut } from "./style.ts";
 import { callRun } from "./control.ts";
 import { reach } from "./state.ts";
@@ -18,7 +18,7 @@ import { syncedText, syncWords } from "../lib/table-sync.ts";
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 const n = (x: number): string => x.toLocaleString("en-US");
 
-export const SYNC_USAGE = `usage: mason sync <table>… [--json]
+export const SYNC_USAGE = `usage: mason sync (<table>… | --all) [--json]
 
   Brings these synced tables up to date now: it reads what changed in your database since Mason last read them —
   the rows inserted or updated, and the ones deleted — in one transaction, as a poll does (each one scans its table
@@ -30,7 +30,9 @@ export const SYNC_USAGE = `usage: mason sync <table>… [--json]
 
     mason sync orders
     mason sync orders public.events
+    mason sync --all               every table the sources file names (each one a scan of its table)
 
+  --all    every table the sources file names, instead of naming them
   --json   as data: { syncedAt, tables: [{ table, changed, deleted, rows, ms }] (the tables polled), streamed (the
            tables whose sync: is replication, not polled: [{ table, position, state, why }]), next }
 `;
@@ -40,7 +42,7 @@ export const SYNC: CommandSpec & { needs: "run" } = {
   name: "sync",
   summary: "bring these synced tables up to date now: mason sync orders (a table whose sync is off is read again only so)",
   usage: SYNC_USAGE,
-  options: { json: { type: "boolean" } },
+  options: { json: { type: "boolean" }, all: { type: "boolean" } },
   json: ["syncedAt", "tables", "streamed", "next"],
 };
 
@@ -73,14 +75,20 @@ export async function sync(argv: string[]): Promise<number> {
   if (typeof f === "number") return f;
   const json = f.values.json === true;
   const names = [...new Set(f.positionals)];
-  if (!names.length) return failed("sync", { message: "name a table: mason sync orders (mason status lists the added ones)", code: "usage", usage: SYNC_USAGE }, { json });
+  const all = f.values.all === true;
+  if (all && names.length) return failed("sync", { message: `--all syncs every added table: name tables (${names.join(" ")}) or --all, not both`, code: "usage", usage: SYNC_USAGE }, { json });
+  if (!names.length && !all) return failed("sync", { message: "name a table: mason sync orders (mason status lists the added ones), or mason sync --all", code: "usage", usage: SYNC_USAGE }, { json });
   const w = await reach(SYNC, json);
   if (w === null || !("run" in w)) return 1;
   const run = w.run;
   return guarded("sync", json, async () => {
     const s = await readState(run);
     const added = s.tables.filter((t) => t.added);
-    const picked: string[] = [];
+    // --all: every table the sources file names, as the run read it
+    const picked: string[] = all ? added.map((t) => t.table) : [];
+    if (all && !picked.length) {
+      return failed("sync", { message: "no table is added yet, so there is nothing to sync", code: "nothing_yet", next: [["mason tables", "the database's tables"], ["mason add <table>", "add one to the sources file"]] }, { json });
+    }
     for (const name of names) {
       const t = findTable(added, name);
       if (!("message" in t)) { picked.push(t.table); continue; }
@@ -97,12 +105,12 @@ export async function sync(argv: string[]): Promise<number> {
     // a sync scans each table whole on the database (and waits for a copy under way): minutes, not the commands' 30 s
     const r = await callRun(run, "POST", "/api/sync", { tables: picked }, 60 * 60_000);
     if (r.status !== 200) {
-      const code = typeof r.body.code === "string" ? r.body.code : r.status === 404 ? "not_found" : "failed";
+      const code = failureCode(r.body.code, r.status === 404 ? "not_found" : "failed");
       return failed("sync", { message: `${picked.join(", ")} ${picked.length === 1 ? "was" : "were"} not synced`, code, why: String(r.body.error),
         next: [["mason status", "each synced table"], ["mason logs", "the run's log"]] }, { json });
     }
     const b = r.body as unknown as { at: string; tables: PolledTable[]; streamed?: StreamedAnswer[] };
-    const next: NextStep[] = [[`mason sync ${names.join(" ")}`, "sync again, whenever you need it current"], ["mason status", "how each table is kept current, and when it was last synced"]];
+    const next: NextStep[] = [[all ? "mason sync --all" : `mason sync ${names.join(" ")}`, "sync again, whenever you need it current"], ["mason status", "how each table is kept current, and when it was last synced"]];
     if (json) { out(jsonText(SYNC, { syncedAt: b.at, tables: b.tables, ...(b.streamed ? { streamed: b.streamed } : {}) }, next)); return 0; }
     out(reportText({ ...syncedReport(b, picked, added.filter((t) => picked.includes(t.table))), next }, styleOut()));
     return 0;

@@ -15,7 +15,7 @@ test("a guide or command mason does not have is refused, listing the guides; the
   const r = spawnSync(process.execPath, [MAIN, "help", "nope"], { encoding: "utf8" });
   assert.equal(r.status, 2);
   // a failure's shape (src/cli/command.ts failureText): what is wrong, why, then Next
-  assert.match(r.stderr, new RegExp(`^✗ mason help: there is no command or guide "nope"\\n {2}why {3}the guides: ${Object.keys(GUIDES).join(", ")}\\n\\nNext:\\n {2}mason help {2}`));
+  assert.match(r.stderr, new RegExp(`^✗ mason help: there is no command or guide "nope"\\n {2}why {3}the guides: ${Object.keys(GUIDES).join(", ")}\\n {2}fix {3}name a command or a guide mason help lists\\n\\nNext:\\n {2}mason help {2}[^\\n]*\\n {2}mason help --help {2}`));
   for (const g of Object.keys(GUIDES) as Array<keyof typeof GUIDES>) {
     const guide = spawnSync(process.execPath, [MAIN, "help", g], { encoding: "utf8" });
     assert.equal(guide.status, 0, g);
@@ -23,11 +23,13 @@ test("a guide or command mason does not have is refused, listing the guides; the
   }
   const old = spawnSync(process.execPath, [MAIN, "docs"], { encoding: "utf8" });
   assert.equal(old.status, 2);
-  assert.match(old.stderr, /mason docs is now mason help\n\nNext:\n {2}mason help agent .*\n {2}mason help production /);
+  assert.match(old.stderr, /mason docs is now mason help\n {2}fix {3}run the command that does it now: the next steps name it\n\nNext:\n {2}mason help agent .*\n {2}mason help production /);
 });
 
 test("every guide names only commands and flags mason has, and no path the package does not ship", async () => {
-  const { COMMANDS } = await import("../src/cli/registry.ts");
+  // mason version is answered by main.ts before the registry, described by its own spec
+  const { COMMANDS: REGISTRY, VERSION } = await import("../src/cli/registry.ts");
+  const COMMANDS = [...REGISTRY, VERSION];
   for (const g of Object.keys(GUIDES) as Array<keyof typeof GUIDES>) {
     const text = await guideText(g);
     // a command line (indented, after an environment variable or not) or a command with a flag in the prose

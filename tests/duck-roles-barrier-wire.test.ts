@@ -287,3 +287,47 @@ test("the LIMIT alone holds every shape, the try wall off by its test-only switc
     await expressionAboveTheFilter(false);
   } finally { wallSwitch.statistics = true; }
 });
+
+// ISSUE 666: a top N and a min / max of a text under a libc order read their threshold (src/duck/libc-bound.ts) through
+// the SAME walled read as the statement, filter, barrier and wall: a threshold read of the bare table would come from
+// hidden rows (tenant 3's even ids), and drop visible ones. Each walled read cloned is one more wall
+test("libc top N: a filtered role's top N and min / max under a libc order read their threshold through the same walled read", async () => {
+  const { BARRIER, STATISTICS_WALL } = await import("../src/duck/row-filter.ts");
+  const { handLibcOrder, lettersOf } = await import("./libc-order-fixture.ts");
+  const r = await import("../src/cli/roles.ts");
+  const file = r.parseRolesText(ROLES, FILE);
+  assert.ok(!("problems" in file), JSON.stringify(file));
+  const grants = r.resolveRoles(file, copied, dir);
+  assert.ok(!("message" in grants), JSON.stringify(grants));
+  const live = { file: FILE, grants, problem: null, default: null };
+  const order = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({})], [" "], { collate: "en_US.utf8" });
+  const libc = await startPostgresApi({
+    port: 0, host: "127.0.0.1", tls: null, database: "shop", masonVersion: "test",
+    authenticate: (_p, user) => { const u = users[user]; return u === undefined ? {} : { user, ...u }; },
+    roles: () => live,
+    schema: () => schema, record: () => undefined, log: (l) => { logged.push(l); },
+    duck: await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, undefined, order),
+  });
+  const c = new pg.Client({ host: "127.0.0.1", port: libc.port, database: "shop", user: "scalar", password: "x" });
+  await c.connect();
+  try {
+    await store.writer.run("CREATE OR REPLACE VIEW hand_orders AS SELECT * FROM public.orders WHERE tenant_id = 1");
+    // digits alone: the order's first level is their bytes', so the engine's own sort of the visible rows is the answer
+    for (const [sql, reference] of [
+      ["SELECT id FROM orders ORDER BY id::text LIMIT 5", "SELECT id FROM hand_orders ORDER BY id::VARCHAR LIMIT 5"],
+      ["SELECT id FROM orders ORDER BY id::text DESC LIMIT 4 OFFSET 2", "SELECT id FROM hand_orders ORDER BY id::VARCHAR DESC LIMIT 4 OFFSET 2"],
+      ["SELECT min(id::text), max(id::text) FROM orders", "SELECT min(id::VARCHAR), max(id::VARCHAR) FROM hand_orders"],
+    ] as const) {
+      logged.length = 0;
+      const got = (await c.query({ text: sql, rowMode: "array", types: { getTypeParser: () => (v: string) => v } } as pg.QueryConfig)).rows as string[][];
+      const want = (await store.writer.runAndReadAll(reference)).getRowsJS().map((row) => row.map(String));
+      assert.deepEqual(got, want, sql);
+      const line = logged.findLast((l) => l.startsWith("statement: "));
+      assert.ok(line !== undefined, sql);
+      assert.match(line, /regexp_extract\(/, `${sql}: bounded`);
+      const walls = line.split(STATISTICS_WALL).length - 1, barriers = line.split(BARRIER).length - 1;
+      assert.equal(walls, barriers, `${sql}: each barrier walled, the threshold's too: ${line}`);
+      assert.ok(barriers >= 2, `${sql}: the threshold read through the filter: ${line}`);
+    }
+  } finally { await c.end(); await libc.close(); }
+});

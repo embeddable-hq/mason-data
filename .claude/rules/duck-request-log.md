@@ -47,10 +47,15 @@ paths:
   The copy's memory is `duckdb_memory()`; a copy's bytes are its distinct blocks from `pragma_storage_info`
   (metadata only, but it grows with rows × columns, so never per request; docs/DESIGN.md "Observability" has the
   measurement). `mason usage` and `GET /api/usage` read them.
+- **A history table is trimmed by its module's ONE clock** (`cutoff`, src/duck/history.ts: the instant `days` before the
+  module's `now`, the clock that stamps its rows), never the engine's `now()` beside it: the sync's events and the usage
+  samples took a given clock and trimmed by the engine's, so a test's fixed clock lost its rows once the real date
+  passed the retention, and CI went red on every PR (issue 705). Detector: tests/duck-events.test.ts (a clock a year
+  behind and a year ahead) and tests/duck-usage.test.ts.
 
 ## What review probes
 
-Run each probe that applies before a push: the harness's implement and fix prompts say so, and its review runs them
-again at every round. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+Run each probe that applies: the implementer before each push, and the fresh reviewer at each review (CLAUDE.md
+"How work is done here", steps 3 and 4). A new probe is proposed to the owner; each bullet names the PR or issue it was met in.
 
-- None recorded yet; the harness's Learn step adds them.
+- None recorded yet.

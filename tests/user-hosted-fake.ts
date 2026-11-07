@@ -17,13 +17,13 @@ after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true 
 export const R = "acme/shop";
 export const USERS = "/v1/replicas/acme/shop/users";
 /** The steps under Next: and in --json, the CLI's own: the local command's, each naming the replica, or mason login. */
-export const OWN_STEP = /^ {2}(mason login|mason user (add|list|remove|enable|disable)( \S+)? --replica acme\/shop)(\s|$)/;
+export const OWN_STEP = /^ {2}(mason login|mason user (add|list|remove|enable|disable|from)( \S+)?( --any)? --replica acme\/shop)(\s|$)/;
 /** The lines mason user begins (tests/hosted-fake.ts's rule, in its words); a list's row is begun by a user's name. On a
  *  terminal `width` wide a head longer than the line may be broken by the CLI within a word, exactly at its limit. */
 export const linesFor = (names: readonly string[] = [], width: number | null = null): Lines => {
   const heads = ["The user ", "No users yet for ", "✘ mason user: ", "✗ mason user: ",
-    "Tip: Paste it into the tool now: ", "Tip: It never expires: ", "Tip: Rotating the API key ", "Tip: Last used: ", "Tip: Adding ", "Tip: It connects no more until ",
-    ...["url", "psql", "user", "password", "database", "attributes", "role", "host", "port", "ssl mode", "disabled", "added", "sessions", "why", "fix"].map((l) => `  ${l} `)];
+    "Tip: Paste it into the tool now: ", "Tip: It never expires: ", "Tip: Rotating the API key ", "Tip: Last used: ", "Tip: Adding ", "Tip: It connects no more until ", "Tip: A connection from any other address ",
+    ...["url", "psql", "user", "password", "database", "attributes", "role", "from", "host", "port", "ssl mode", "disabled", "added", "sessions", "why", "fix"].map((l) => `  ${l} `)];
   return { heads, steps: ["  mason user ", "  mason login"], ownStep: OWN_STEP,
     row: (line) => /^\d+ users?( |$)/.test(line) || (((m) => m !== null && names.includes(m[1]!))(/^ {2}([a-z0-9][a-z0-9_.-]*)( |$)/.exec(line)))
       || (width !== null && [...line].length === width - 1 && heads.some((h) => h.startsWith(line))) };

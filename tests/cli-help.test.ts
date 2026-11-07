@@ -3,16 +3,22 @@
  * are src/cli/command.ts's; this holds every command in the registry to them, so a
  * command added later is held to them the day it is added: its own --help (and `mason help <name>`), a usage that
  * starts with its name and shows an example, every option its parser takes named in that usage, a line in
- * `mason --help`, and a wrong option answered with what is wrong and the usage.
+ * `mason --help`, and a wrong option answered with what is wrong, the closest option and the synopsis (never the whole
+ * usage: `mason <name> --help` for more).
  */
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as path from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { COMMANDS, STEPS, topUsage } from "../src/cli/registry.ts";
 import { GUIDES } from "../src/cli/guides.ts";
 import { PLAIN } from "../src/cli/style.ts";
+import * as commandModule from "../src/cli/command.ts";
+// read from the module's namespace: at a commit without synopsis the file loads, and the tests fail by name
+const synopsis = (c: { name: string; usage: string }): string => (commandModule as unknown as { synopsis?: (c: { name: string; usage: string }) => string }).synopsis?.(c) ?? "(no synopsis)";
 
 const MAIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "main.ts");
 const mason = (...args: string[]) => spawnSync(process.execPath, [MAIN, ...args], { encoding: "utf8", env: { ...process.env, HOME: "/nonexistent-home" } });
@@ -42,15 +48,159 @@ for (const c of COMMANDS) {
       assert.equal(r.status, 0, `mason ${args.join(" ")}: ${r.stderr}`);
       assert.equal(r.stdout, c.usage, `mason ${args.join(" ")} prints the usage`);
     }
-    // a wrong option: what is wrong, then the usage, exit 2
+    // a wrong option: what is wrong and every option, then the synopsis and where the rest is, exit 2
     const wrong = mason(c.name, "--no-such-option");
     assert.equal(wrong.status, 2, `${c.name}: ${wrong.stderr}`);
-    assert.match(wrong.stderr, new RegExp(`^✗ mason ${c.name}: .*no-such-option`));
-    assert.ok(wrong.stderr.endsWith(c.usage), "followed by the usage");
+    assert.match(wrong.stderr, new RegExp(`^✗ mason ${c.name}: there is no option --no-such-option\n {2}fix {3}its options are `));
+    for (const opt of Object.keys(c.options)) assert.ok(wrong.stderr.includes(`--${opt}`), `${c.name}: --${opt} is named`);
+    assert.ok(wrong.stderr.endsWith(synopsis(c)), "followed by the synopsis");
+    assert.ok(synopsis(c).startsWith(`usage: mason ${c.name}`) && synopsis(c).endsWith(`\n\nmason ${c.name} --help for more\n`), synopsis(c));
+    if (synopsis(c).length < c.usage.length) assert.ok(!wrong.stderr.includes(c.usage), "never the whole usage");
     // listed in mason --help, with its summary
     assert.ok(topUsage().includes(`mason ${c.name}`) && topUsage().includes(c.summary), "listed in mason --help");
   });
 }
+
+test("every wrong command line, whatever check refused it, ends its next steps with mason <cmd> --help and carries a fix", () => {
+  // the usage failures raised inside commands (wait, deploy, user, token, …) answered with next: [] and no fix
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "mason-usage-"));
+  try {
+    const lines: string[][] = [["wait", "--timeout", "soon"], ["deploy", "stray"], ["user"], ["user", "frob"], ["token"], ["replica", "bogus"], ["sync"], ["logs", "-n", "x"],
+      ["cancel"], ["init", "a", "b"], ["usage", "stray"], ["help", "a", "b"], ["status", "--jsn"]];
+    for (const args of lines) {
+      const r = spawnSync(process.execPath, [MAIN, ...args, "--json"], { cwd, encoding: "utf8", env: { ...process.env, HOME: "/nonexistent-home", MASON_REPLICA: "", MASON_TOKEN: "" } });
+      assert.equal(r.status, 2, `mason ${args.join(" ")}: ${r.stdout}${r.stderr}`);
+      const j = JSON.parse(r.stdout) as { error: { code: string; fix?: string }; next: Array<{ command: string }> };
+      assert.equal(j.error.code, "usage", `mason ${args.join(" ")}`);
+      assert.ok(j.error.fix, `mason ${args.join(" ")}: a fix`);
+      assert.equal(j.next.at(-1)?.command, `mason ${args[0]} --help`, `mason ${args.join(" ")}: its usage last among the next steps`);
+    }
+    // a command's own way out is kept, the usage after it; for a person too, and no command's line gets the step twice
+    const cancel = spawnSync(process.execPath, [MAIN, "cancel"], { cwd, encoding: "utf8" });
+    assert.match(cancel.stderr, /^✗ mason cancel: name the session: mason cancel <session>\n {2}fix {3}mason logs --running lists each statement running with its session\n\nNext:\n {2}mason logs --running +.*\n {2}mason cancel --help +its usage, with every option\n\nusage: mason cancel/);
+    const typo = spawnSync(process.execPath, [MAIN, "status", "--jsn"], { cwd, encoding: "utf8" });
+    assert.equal(typo.stderr.split("\n  mason status --help ").length - 1, 1, typo.stderr);
+    // no command: mason --help
+    const none = JSON.parse(spawnSync(process.execPath, [MAIN, "statsu", "--json"], { cwd, encoding: "utf8" }).stdout) as { error: { fix?: string }; next: Array<{ command: string }> };
+    assert.deepEqual([none.error.fix, none.next.map((n) => n.command)], ["name a command mason --help lists", ["mason --help"]]);
+  } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+  // decided where every failure is said: a usage failure from anywhere, and nothing else
+  const { usageWayOut } = commandModule as unknown as { usageWayOut?: (cmd: string, f: { message: string; code: string; fix?: string; next?: ReadonlyArray<readonly [string, string?]> }) => unknown };
+  assert.ok(usageWayOut, "usageWayOut is exported");
+  assert.deepEqual(usageWayOut("x", { message: "m", code: "usage", fix: "f" }), { message: "m", code: "usage", fix: "f", next: [["mason x --help", "its usage, with every option"]] });
+  assert.deepEqual(usageWayOut("x", { message: "m", code: "failed" }), { message: "m", code: "failed" }, "only a wrong command line");
+});
+
+test("mason <cmd> --help --json, mason help <cmd> --json and mason help --json: each command's spec as data, read from its CommandSpec", () => {
+  const { specJson, TIMEOUT_COMMANDS } = commandModule as unknown as { specJson?: (c: unknown) => Record<string, unknown>; TIMEOUT_COMMANDS: string };
+  assert.ok(specJson, "specJson is exported");
+  const all = mason("help", "--json");
+  assert.equal(all.status, 0, all.stderr);
+  const help = JSON.parse(all.stdout) as { version: string; commands: Array<Record<string, unknown> & { name: string }>; guides: Array<{ name: string; summary: string }>; failureCodes: Array<{ code: string; meaning: string }>; next: unknown[] };
+  assert.deepEqual(Object.keys(help), ["version", "commands", "guides", "failureCodes", "next"]);
+  assert.deepEqual(help.commands.map((c) => c.name), [...COMMANDS.map((c) => c.name), "version"], "every command, then mason version");
+  assert.deepEqual(help.guides.map((g) => g.name), Object.keys(GUIDES));
+  assert.deepEqual(help.failureCodes.map((c) => c.code), Object.keys(commandModule.FAILURE_CODES));
+  assert.deepEqual(JSON.parse(mason("--help", "--json").stdout), help, "mason --help --json is the same");
+  for (const c of COMMANDS) {
+    const spec = help.commands.find((s) => s.name === c.name)!;
+    assert.deepEqual(spec, specJson(c), `${c.name}: mason help --json carries its spec`);
+    // the shape, declared and stable
+    assert.deepEqual(Object.keys(spec), ["name", "summary", "usage", "forms", "options", "json", "needs", "stdout", "exitCodes"], c.name);
+    assert.equal(spec.usage, c.usage, `${c.name}: the usage --help prints`);
+    const options = spec.options as Array<{ name: string; short: string | null; type: string; multiple: boolean; default: unknown; value: string | null }>;
+    assert.deepEqual(options.map((o) => o.name).sort(), [...Object.keys(c.options), "help"].map((o) => `--${o}`).sort(), `${c.name}: every option the parser takes`);
+    for (const o of options) {
+      const d = o.name === "--help" ? { type: "boolean", short: "h" } : c.options[o.name.slice(2)]!;
+      assert.equal(o.type, d.type, `${c.name} ${o.name}`);
+      assert.equal(o.short, d.short ? `-${d.short}` : null, `${c.name} ${o.name}`);
+      assert.equal(o.type === "string", o.value !== null, `${c.name} ${o.name}: a string option's placeholder, from the usage (${o.value})`);
+    }
+    assert.deepEqual(spec.json, c.json ? [...c.json] : null, `${c.name}: its --json keys`);
+    assert.deepEqual(spec.needs, c.needs ?? null);
+    const codes = (spec.exitCodes as Array<{ code: number }>).map((e) => e.code);
+    assert.deepEqual(codes, ["wait", "share", "ui", "login", "replica", "deploy"].includes(c.name) ? [0, 1, 2, 124] : [0, 1, 2], `${c.name}: its exit codes (${TIMEOUT_COMMANDS})`);
+    // the same from its own --help --json and mason help <name> --json: { command, next }
+    for (const args of [[c.name, "--help", "--json"], ["help", c.name, "--json"]]) {
+      const r = mason(...args);
+      assert.equal(r.status, 0, `mason ${args.join(" ")}: ${r.stderr}`);
+      const j = JSON.parse(r.stdout) as { command: unknown; next: unknown[] };
+      assert.deepEqual(Object.keys(j), ["command", "next"]);
+      assert.deepEqual(j.command, spec, `mason ${args.join(" ")}`);
+    }
+  }
+  // the forms and their positionals, as the synopsis writes them
+  const forms = (name: string) => (help.commands.find((s) => s.name === name)!.forms as Array<{ synopsis: string; positionals: string[] }>);
+  assert.deepEqual(forms("add").map((f) => f.positionals), [["<table>…"]]);
+  assert.deepEqual(forms("init").map((f) => f.positionals), [["[- | <postgres url> | demo]"]]);
+  // each form of mason user is its verb, then its words (the verbs read from the synopsis, so a new one needs no edit here)
+  for (const f of forms("user")) assert.equal(f.positionals[0], f.synopsis.split(" ")[2], f.synopsis);
+  assert.deepEqual(forms("user").find((f) => f.positionals[0] === "add")?.positionals, ["add", "<name>"], "--role, --set and --replica are options");
+  assert.deepEqual(forms("user").find((f) => f.positionals[0] === "list")?.positionals, ["list"]);
+  for (const f of forms("ui")) assert.deepEqual(f.positionals, [], `${f.synopsis}: --ssh <user@server> is an option and its value`);
+  assert.deepEqual(forms("replica").map((f) => f.positionals)[2], ["status", "<org>/<name>"]);
+  assert.deepEqual(forms("status"), [{ synopsis: "mason status [--json]", positionals: [] }]);
+  // mason mcp, whose stdout is a protocol's and takes no --json, has a spec as data too
+  assert.equal((JSON.parse(mason("mcp", "--help", "--json").stdout) as { command: { stdout: string; json: null } }).command.stdout, "protocol");
+  // a guide as data, and a wrong line under --json still a failure
+  const guide = JSON.parse(mason("help", "agent", "--json").stdout) as { guide: { name: string; text: string } };
+  assert.equal(guide.guide.name, "agent");
+  assert.match(guide.guide.text, /^DRIVING MASON FROM A CODING AGENT/);
+  const nope = mason("help", "nope", "--json");
+  assert.equal(nope.status, 2);
+  assert.equal((JSON.parse(nope.stdout) as { error: { code: string } }).error.code, "usage");
+});
+
+test("mason version --json is { version, next }; mason version, --version and -v print the version alone", async () => {
+  const plain = mason("version");
+  assert.equal(plain.status, 0);
+  assert.match(plain.stdout, /^\S+\n$/);
+  for (const args of [["--version"], ["-v"]]) assert.equal(mason(...args).stdout, plain.stdout, args[0]);
+  for (const args of [["version", "--json"], ["--version", "--json"]]) {
+    const r = mason(...args);
+    assert.equal(r.status, 0);
+    assert.deepEqual(JSON.parse(r.stdout), { version: plain.stdout.trim(), next: [] }, args.join(" "));
+  }
+  const spec = JSON.parse(mason("help", "version", "--json").stdout) as { command: { name: string; json: string[] } };
+  assert.deepEqual([spec.command.name, spec.command.json], ["version", ["version", "next"]]);
+  // what its spec says it takes is what it parses, under each of its names: --help, --help --json, a wrong option or an argument (exit 2)
+  const { VERSION } = await import("../src/cli/registry.ts");
+  for (const name of ["version", "--version", "-v"]) {
+    for (const h of ["--help", "-h"]) assert.deepEqual([mason(name, h).status, mason(name, h).stdout], [0, VERSION.usage], `mason ${name} ${h}`);
+    const asData = mason(name, "--help", "--json");
+    assert.equal(asData.status, 0);
+    assert.deepEqual(JSON.parse(asData.stdout), spec, `mason ${name} --help --json is its spec, as mason help version --json says it`);
+    for (const wrong of [["--bogus"], ["stray"]]) {
+      const r = mason(name, ...wrong, "--json");
+      assert.equal(r.status, 2, `mason ${name} ${wrong.join(" ")}: ${r.stdout}`);
+      const j = JSON.parse(r.stdout) as { error: { code: string }; next: Array<{ command: string }> };
+      assert.deepEqual([j.error.code, j.next.at(-1)?.command], ["usage", "mason version --help"], `mason ${name} ${wrong.join(" ")}`);
+    }
+  }
+});
+
+test("a wrong option is said in the CLI's words: the closest option, a value missing or not taken; never Node's advice about --", () => {
+  const typo = mason("status", "--jsn");
+  assert.equal(typo.status, 2);
+  assert.match(typo.stderr, /^✗ mason status: there is no option --jsn — did you mean `--json`\?\n {2}fix {3}its options are --json, --help\n/);
+  assert.doesNotMatch(typo.stderr, /positional argument|place it at the end/);
+  assert.ok(typo.stderr.endsWith("usage: mason status [--json]\n\nmason status --help for more\n"), typo.stderr);
+  const j = mason("status", "--jsn", "--json");
+  assert.equal(j.status, 2);
+  assert.deepEqual(JSON.parse(j.stdout), { error: { code: "usage", message: "there is no option --jsn — did you mean `--json`?", fix: "its options are --json, --help" },
+    next: [{ command: "mason status --help", what: "its usage, with every option" }] });
+  const missing = mason("logs", "-n");
+  assert.match(missing.stderr, /^✗ mason logs: -n \(--lines\) needs a value: -n <value>\n/);
+  const value = mason("wait", "--json=yes");
+  assert.match(value.stderr, /^✗ mason wait: --json takes no value: write --json alone\n/);
+  assert.equal(value.status, 2);
+});
+
+test("every flag that takes a duration says <duration> in its command's usage (one grammar, src/lib/table-sync.ts parseDuration)", () => {
+  const taking = COMMANDS.flatMap((c) => ["timeout", "step"].filter((k) => k in c.options).map((k) => [c, k] as const));
+  assert.deepEqual(taking.map(([c, k]) => `${c.name} --${k}`), ["wait --timeout", "share --timeout", "ui --timeout", "usage --step", "replica --timeout", "deploy --timeout"]);
+  for (const [c, k] of taking) assert.match(c.usage, new RegExp(`--${k} <duration>`), `mason ${c.name} --${k}`);
+});
 
 test("mason --help lists the commands; a misspelt one is answered with the closest", () => {
   const help = mason("--help");
@@ -142,7 +292,7 @@ test("every command that takes --json declares its answer's keys, ends them with
     assert.throws(() => jsonText(c, { nope: 1 }), new RegExp(`mason ${c.name} --json: nope is not in its spec's json keys`));
     assert.deepEqual(JSON.parse(jsonText(c, {}, [["mason x", "y"]])), { next: [{ command: "mason x", what: "y" }] });
   }
-  assert.deepEqual(COMMANDS.filter((c) => !("json" in c.options)).map((c) => c.name), ["help", "mcp"], "the one that prints text alone (mason help agent says so), and the one whose stdout is a protocol's; mason logs --json is its lines, or with --requests the request log");
+  assert.deepEqual(COMMANDS.filter((c) => !("json" in c.options)).map((c) => c.name), ["mcp"], "the one whose stdout is a protocol's (mason help --json is the specs); mason logs --json is its lines, or with --requests the request log");
   // a command takes no --json exactly when it prints text alone or its stdout is a protocol's
   assert.deepEqual(COMMANDS.filter((c) => c.stdout === "protocol").map((c) => c.name), ["mcp"]);
 });
@@ -161,7 +311,9 @@ test("a command whose stdout is a protocol's says every failure on stderr, --jso
 test("mason help mcp's Claude Code lines name the server BEFORE --env (claude mcp add's --env takes every value after it)", async () => {
   const { MCP } = await import("../src/cli/mcp.ts");
   const lines = MCP.usage.split("\n").filter((l) => /^\s+claude mcp add /.test(l));
-  assert.ok(lines.length >= 2 && lines.some((l) => l.includes("--env")), MCP.usage);
+  assert.ok(lines.length >= 1 && lines.some((l) => l.includes("--env")), MCP.usage);
+  // no example puts the user's password on a command line (ps shows it): the URL goes in MASON_URL
+  assert.deepEqual(MCP.usage.split("\n").filter((l) => /^\s+(claude mcp add|mason mcp)\b.*--url/.test(l)), [], "no example passes --url");
   for (const l of lines) {
     const words = l.trim().split(/\s+/);
     const name = words.indexOf("mason");
@@ -182,7 +334,7 @@ test("the --json shapes of the commands that change what is copied name the sour
   const keys = (name: string): readonly string[] | undefined => COMMANDS.find((c) => c.name === name)?.json;
   assert.deepEqual(keys("tables"), ["database", "source", "tables", "next"], "the source file the tables are read against");
   assert.deepEqual(keys("add"), ["added", "file", "error", "next"], "the sources file it wrote");
-  assert.deepEqual(keys("remove"), ["removed", "file", "next"], "the sources file it wrote");
+  assert.deepEqual(keys("remove"), ["dryRun", "removedTables", "removed", "file", "next"], "the sources file it wrote");
   assert.deepEqual(keys("init"), ["name", "root", "folder", "config", "demo", "source", "roles", "generated", "database", "warnings", "next"], "the source file, the roles file and the demo's generated table it wrote");
   assert.ok(keys("status")?.includes("source") && !keys("status")?.includes("sources"), "status names its source, the database, with the sources file in it");
   assert.deepEqual(COMMANDS.filter((c) => c.json?.some((k) => /model/i.test(k))).map((c) => c.name), [], "no command answers with a model");
@@ -213,15 +365,22 @@ test("a failure is one shape for a person and for a program: what, why, fix, nex
   const outs: string[] = [], errs: string[] = [];
   const io = { out: (m: string) => { outs.push(m); }, err: (m: string) => { errs.push(m); } };
   assert.equal(failed("x", { message: "m", code: "usage", usage: "usage: mason x\n" }, { json: false, io }), 2);
-  assert.equal(errs[0], "✗ mason x: m\n\nusage: mason x", "a wrong line's usage follows, for a person");
+  assert.equal(errs[0], "✗ mason x: m\n  fix   write the line as its usage says (mason x --help)\n\nNext:\n  mason x --help                                its usage, with every option\n\nusage: mason x",
+    "a wrong line's way out, then its usage, for a person");
   assert.equal(failed("x", { message: "m", code: "usage" }, { json: true, io }), 2);
-  assert.deepEqual(JSON.parse(outs[0]!), { error: { code: "usage", message: "m" }, next: [] }, "under --json the usage is not spliced in: mason x --help is");
+  assert.deepEqual(JSON.parse(outs[0]!), { error: { code: "usage", message: "m", fix: "write the line as its usage says (mason x --help)" }, next: [{ command: "mason x --help", what: "its usage, with every option" }] },
+    "under --json the usage is not spliced in: mason x --help is");
   assert.equal(failed("wait", { message: "m", code: "timeout" }, { json: true, io }), 124);
   assert.equal(failed("x", { message: "m", code: "failed", exit: 3 }, { json: true, io }), 3);
   assert.equal(failed("x", { problem: "p", code: "no_project" }, { json: false, io }), 1, "a Problem (its message under problem) is a failure too");
   assert.equal(errs[errs.length - 1], "✗ mason x: p");
   // every code has one sentence, and the guide lists them (tests/cli-guides.test.ts reads the guide)
   for (const [code, what] of Object.entries(FAILURE_CODES)) assert.ok(/^[a-z_]+$/.test(code) && what.length > 10, code);
+  // the set is closed: a hung run's not_answering is in it, and a code another process sent outside it becomes ours
+  const { failureCode, TIMEOUT_COMMANDS } = await import("../src/cli/command.ts");
+  assert.ok(Object.hasOwn(FAILURE_CODES, "not_answering"));
+  assert.deepEqual([failureCode("not_found", "failed"), failureCode("frobnicated", "failed"), failureCode(7, "usage")], ["not_found", "failed", "usage"]);
+  for (const c of ["mason wait", "mason deploy", "mason replica create", "mason login", "mason share", "mason ui --ssh"]) assert.ok(TIMEOUT_COMMANDS.includes(c), c);
 });
 
 // A FAILURE IS DRAWN BY ITS STREAM (the red ✘ and the bold message never showed on a person's terminal — mason

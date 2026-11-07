@@ -319,8 +319,8 @@ export const DOCS_TESTS: ReadonlyArray<{ file: string; pattern?: string }> = [
   // the README's install and doctor lines
   { file: "tests/cli-doctor.test.ts" },
   // every test command a doc instructs (`git ls-files '*.md'`) is one the hook lets through; the file's others read no doc
-  { file: "tests/hooks.test.ts", pattern: "test-timeout: every test command the docs and the harness instruct" },
-  // release-notes/next.md names the numeric forms; the file's other tests are the engine's
+  { file: "tests/hooks.test.ts", pattern: "test-timeout: every test command the docs instruct" },
+  // release-notes/v0.9.0.md names the numeric forms; the file's other tests are the engine's
   { file: "tests/duck-generated.test.ts", pattern: "the guide, the rules file and the release note name the numeric forms" },
   // `--write` renders README.md's block and docs/SQL-SUPPORT.md, held byte for byte to the committed ones; the file's
   // other tests are the legs' partition and balance, which read no doc

@@ -257,7 +257,9 @@ test("initialize, tools/list and resources: exactly the four tools with their sc
     assert.deepEqual((await c.request("no/such")).error, { code: -32601, message: "there is no method no/such" });
   } finally { assert.equal(await c.close(), 0, "stdin closed: it ends, exit 0"); }
   assert.ok(c.lines.every((l) => (JSON.parse(l) as { jsonrpc?: string }).jsonrpc === "2.0"), "stdout: JSON-RPC frames alone");
-  assert.match(c.stderr, /^\[mason mcp\] serving postgres:\/\/claude:\*\*\*\*@127\.0\.0\.1:\d+\/shop as claude, over MCP on stdio, until stdin closes\n$/);
+  // --url with the password: taken, and warned on stderr with the safer form, the password never repeated
+  assert.ok(!c.stderr.includes(url.replace(/^.*:(mason_[^@]+)@.*$/, "$1")), "the password is never repeated");
+  assert.match(c.stderr, /^\[mason mcp\] warning: --url holds the user's password, which ps shows to this machine's users: put the URL in the server's environment as MASON_URL instead \(claude mcp add mason --env MASON_URL=… -- mason mcp\)\n\[mason mcp\] serving postgres:\/\/claude:\*\*\*\*@127\.0\.0\.1:\d+\/shop as claude, over MCP on stdio, until stdin closes\n$/);
 });
 
 test("JSON-RPC's edges: a parse error, an invalid request or id, a notification, a batch, a string id, a version it does not speak", async () => {
@@ -585,7 +587,7 @@ test("no URL, a bad one, nothing listening, a refused password: the failure shap
   const wrong = await runMason(dir, ["mcp", "--url", url.replace(/:mason_[^@]+@/, ":mason_nope@")], env);
   assert.equal(wrong.code, 1);
   assert.equal(wrong.stdout, "");
-  assert.match(wrong.stderr, /^✗ mason mcp: 127\.0\.0\.1:\d+ refused user claude: password authentication failed for user "claude": not a Mason user's password or token: .+\n {2}why {3}a tool that keeps one password connects as a user: .+\n {2}fix {3}the URL mason user add printed for this user: a user removed \(mason user list\), or added under another API key, connects no more\n/);
+  assert.match(wrong.stderr, /^\[mason mcp\] warning: --url holds the user's password, which ps shows to this machine's users: put the URL in the server's environment as MASON_URL instead \(claude mcp add mason --env MASON_URL=… -- mason mcp\)\n✗ mason mcp: 127\.0\.0\.1:\d+ refused user claude: password authentication failed for user "claude": not a Mason user's password or token: .+\n {2}why {3}a tool that keeps one password connects as a user: .+\n {2}fix {3}the URL mason user add printed for this user: a user removed \(mason user list\), or added under another API key, connects no more\n/);
   assert.doesNotMatch(wrong.stderr, /mason_nope/, "the password is never printed");
   // --json changes none of it: stdout is the protocol's, so every failure to start is on stderr
   for (const [cwd, argv, extra] of [[root, ["mcp", "--json"], {}], [dir, ["mcp", "--json"], { MASON_URL: "postgres://claude:x@127.0.0.1:1/shop" }]] as const) {

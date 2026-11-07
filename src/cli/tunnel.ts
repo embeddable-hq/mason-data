@@ -166,7 +166,7 @@ export function startTunnel(plan: TunnelPlan, o: { timeoutMs: number; onPid?: (p
     const timer = setTimeout(() => {
       stop();
       const said = lastLines(output, plan.token);
-      settle({ message: `the tunnel gave no address in ${Math.round(o.timeoutMs / 1000)} s`, code: "failed", why: said === "" ? `${plan.bin} printed nothing` : `${plan.bin} printed: ${said}`,
+      settle({ message: `the tunnel gave no address in ${Math.round(o.timeoutMs / 1000)} s`, code: "timeout", why: said === "" ? `${plan.bin} printed nothing` : `${plan.bin} printed: ${said}`,
         fix: `its output is the service's, and may have changed: this Mason cannot read it${plan.via === "pinggy" ? ", and --via bore is another tunnel" : ""}. Nothing was left open` });
     }, o.timeoutMs);
     const read = (b: Buffer): void => {

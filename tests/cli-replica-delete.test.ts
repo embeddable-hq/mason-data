@@ -21,9 +21,10 @@ const { dropStatements, listSlotsStatement } = replicationMode;
 
 const LATER = "2026-11-02T10:05:00.000Z";
 /** The lines mason replica delete begins, beside mason replica's own; its statements by hand, written unbroken. */
-const OWN_STEP = /^ {2}(mason login|mason replica (list|status|delete)( \S+)*)(\s|$)/;
+const OWN_STEP = /^ {2}(mason login|mason replica (create|list|status|delete|--help)( \S+)*)(\s|$)/;
 const DELETE_LINES: Lines = {
-  heads: [...LINES.heads, "Deleted ", "Deleting ", "> ", "  done: ", "  requested: ", "  under way: ", "  The deletion's answer was lost ", "  by hand, ",
+  heads: [...LINES.heads, "Deleted ", "Deleting ", "> ", "  done: ", "  requested: ", "  under way: ", "  being deleted: ", "  The deletion's answer was lost ", "  by hand, ",
+    "Tip: run each statement above ",
     ...["deletion", "last heard", "finished", "step", "source 0", "source 1", "source 2"].map((l) => `  ${l} `)],
   steps: ["  mason login", "  mason replica "], ownStep: OWN_STEP, row: LINES.row!,
   unbroken: (line) => /^ {4}SELECT /.test(line),
@@ -63,9 +64,10 @@ function notVerified(o: { ordinal?: number; reason?: string; why?: string; slot?
     ...("byHand" in o ? { byHand: o.byHand } : { byHand: SERVICE_BY_HAND }), reportedAt: AT };
 }
 /** A replica in a deletion's stage, with what else the deletion says. */
-function deleting(stage: "requested" | "in_region" | "finished", more: Record<string, unknown> = {}, replica: Record<string, unknown> = {}): Record<string, unknown> {
+function deleting(stage: "requested" | "in_region" | "needs_person" | "finished", more: Record<string, unknown> = {}, replica: Record<string, unknown> = {}): Record<string, unknown> {
   return replicaOf({ state: stage === "finished" ? "deleted" : "deleting", ...replica, deletion: { stage, requestedAt: AT, lastHeardAt: stage === "requested" ? null : AT,
-    finishedAt: stage === "finished" ? LATER : null, steps: steps(stage === "finished" ? 3 : stage === "in_region" ? 1 : 0), sources: stage === "finished" ? [dropped()] : [], ...more } });
+    finishedAt: stage === "finished" ? LATER : null, steps: steps(stage === "finished" ? 3 : stage === "requested" ? 0 : stage === "in_region" ? 1 : 2),
+    sources: stage === "finished" ? [dropped()] : stage === "needs_person" ? [notVerified()] : [], ...more } });
 }
 const answer = (status: 200 | 202, replica: Record<string, unknown>, headers: Record<string, string> = { "retry-after": "1" }): Reply => ({ status, body: { replica }, headers });
 
@@ -111,7 +113,7 @@ Next:
   assert.equal(j.a.stderr, "");
   const v = JSON.parse(j.a.stdout) as Record<string, unknown>;
   assert.deepEqual(Object.keys(v), ["replica", "deletion", "next"]);
-  assert.deepEqual(v.replica, { ...replicaOf({ state: "deleted" }) });
+  assert.deepEqual(v.replica, { ...replicaOf({ state: "deleted" }), page: null });
   assert.deepEqual(v.deletion, { stage: "finished", requestedAt: AT, handover: null, lastHeardAt: AT, finishedAt: LATER, steps: steps(3),
     sources: [{ ...dropped(0), reason: null, why: null, byHand: null }, { ...noSlot(1), reason: null, why: null, publicationOwned: null, byHand: null }] });
   assert.deepEqual(v.next, [{ command: "mason replica list acme", what: "the organisation's replicas" }]);
@@ -124,14 +126,17 @@ test("mason replica delete: deleted already (200, the tombstone) is said at once
   assert.equal((JSON.parse(a.stdout) as { deletion: { stage: string } }).deletion.stage, "finished");
 });
 
-test("mason replica delete: a slot not verified gone, for every reason, is said with why and Mason's own statement to run by hand, on a line of its own, exactly dropStatements'; the exit is 1, the failure after it", async () => {
+test("mason replica delete: a slot not verified gone, for every reason, needs a person — said with why and Mason's own statement to run by hand, on a line of its own, exactly dropStatements'; the wait stops at once, the exit is 1, the failure after it", async () => {
   for (const reason of REASONS) {
     const src = notVerified({ reason, why: `the service's words for ${reason}`, ...(reason === "record_unreadable" ? { slot: null, publication: null, owned: null } : {}) });
-    const { a } = await run(() => answer(200, deleting("finished", { sources: [src] })), ["--yes", "--json"]);
+    const { a, requests } = await run(() => answer(202, deleting("needs_person", { sources: [src] })), ["--yes", "--json"]);
     assert.equal(a.code, 1, `${reason}: ${a.stdout}`);
+    assert.deepEqual(requests.map((q) => q.method), ["DELETE"], `${reason}: nothing more is asked once a person is needed`);
     const v = JSON.parse(a.stdout) as { deletion: { sources: Array<Record<string, unknown>> }; error: { code: string; message: string; fix: string }; next: Array<{ command: string }> };
     assert.equal(v.error.code, "failed", reason);
-    assert.equal(v.error.message, "acme/shop is deleted, and the replication slot of source 0 is NOT verified gone", reason);
+    assert.equal(v.error.message, "acme/shop is not deleted yet: the replication slot of source 0 is NOT verified gone", reason);
+    assert.equal((v.deletion as unknown as { stage: string }).stage, "needs_person", reason);
+    assert.match(v.error.fix, /then confirm it on the replica's page in the service's web app/, reason);
     assert.equal(v.deletion.sources[0]!.byHand, reason === "record_unreadable" ? listSlotsStatement() : dropStatements({ slot: "mason_shop_app", publication: "mason_shop_app", owned: true }), reason);
     assert.equal(v.deletion.sources[0]!.reason, reason);
     assert.deepEqual(v.next.map((n) => n.command), ["mason replica status acme/shop"]);
@@ -140,8 +145,9 @@ test("mason replica delete: a slot not verified gone, for every reason, is said 
   // a person: each source's outcome, then each statement alone on its line, then the failure on stderr
   const sources = [notVerified({ ordinal: 0, reason: "in_use", why: "a reader holds it" }), notVerified({ ordinal: 1, reason: "refused", slot: "mason_other", publication: "orders_pub", owned: false }),
     notVerified({ ordinal: 2, reason: "record_unreadable", slot: null, publication: null, owned: null })];
-  const { a } = await run(() => answer(200, deleting("finished", { sources })), ["--yes"]);
+  const { a } = await run(() => answer(202, deleting("needs_person", { sources })), ["--yes"]);
   assert.equal(a.code, 1, a.stdout + a.stderr);
+  assert.match(a.stdout, /^acme\/shop on http:\/\/127\.0\.0\.1:\d+ is not deleted yet: its deletion needs a person\n {2}deletion {5}needs a person: /);
   const lines = a.stdout.split("\n");
   assert.deepEqual(lines.filter((l) => /^ {2}source \d/.test(l)), [
     "  source 0     replication slot mason_shop_app: NOT verified gone, a reader still holds the slot (a reader holds it)",
@@ -158,7 +164,7 @@ test("mason replica delete: a slot not verified gone, for every reason, is said 
   assert.match(a.stdout, /^ {2}by hand, for source 2: this lists Mason's replication slots on its database; drop this replica's slot from them, as a user that may drop a replication slot:\n {4}SELECT slot_name/m);
   assert.doesNotMatch(a.stdout, /^Next:/m, "the failure carries the next step");
   assert.ok(!(a.stdout + a.stderr).includes("advisory"), "the service's statement is never printed");
-  assert.match(a.stderr, /^✗ mason replica: acme\/shop is deleted, and the replication slots of 3 sources are NOT verified gone$/m);
+  assert.match(a.stderr, /^✗ mason replica: acme\/shop is not deleted yet: the replication slots of 3 sources are NOT verified gone$/m);
 });
 
 test("the statement by hand is dropStatements' for every name Postgres's grammar takes, the publication only when it is Mason's own, whatever the service's byHand says; a name outside the grammar holds no deletion, refused by the grammar alone", () => {
@@ -168,6 +174,7 @@ test("the statement by hand is dropStatements' for every name Postgres's grammar
   const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789_";
   const names = ["a", "0", "_", "9".repeat(63), "_".repeat(63), "z".repeat(63), "mason_", "0abc", ...Array.from({ length: 300 }, () => Array.from({ length: 1 + Math.floor(rand() * 63) }, () => alphabet[Math.floor(rand() * alphabet.length)]).join(""))];
   const finished = (sources: unknown[]): unknown => ({ stage: "finished", requestedAt: AT, lastHeardAt: AT, finishedAt: LATER, steps: [], sources });
+  const needsPerson = (sources: unknown[]): unknown => ({ stage: "needs_person", requestedAt: AT, lastHeardAt: AT, finishedAt: null, steps: [], sources });
   for (const slot of names) {
     assert.ok(PG_NAME.test(slot), slot);
     const own = `mason_${slot}`.slice(0, 63);
@@ -176,45 +183,59 @@ test("the statement by hand is dropStatements' for every name Postgres's grammar
       assert.equal(byHandOf({ slot, publication, publicationOwned: owned }), want);
       // the service's byHand, whatever it says or if it says nothing, changes nothing of the statement (#687's review, B1)
       for (const theirs of [SERVICE_BY_HAND, want, `${want} DROP TABLE orders;`, "", null, undefined]) {
-        const d = heldDeletion(finished([notVerified({ slot, publication, owned, byHand: theirs })]), "deleted", []);
+        const d = heldDeletion(needsPerson([notVerified({ slot, publication, owned, byHand: theirs })]), "deleting", []);
         assert.ok(d, `${slot} ${publication} ${owned} ${theirs}`);
         assert.equal(d.sources[0]!.byHand, want);
       }
     }
   }
   assert.equal(byHandOf({ slot: null, publication: null, publicationOwned: null }), listSlotsStatement());
-  assert.equal(heldDeletion(finished([notVerified({ slot: null, publication: null, owned: null, reason: "record_unreadable" })]), "deleted", [])?.sources[0]!.byHand, listSlotsStatement());
+  assert.equal(heldDeletion(needsPerson([notVerified({ slot: null, publication: null, owned: null, reason: "record_unreadable" })]), "deleting", [])?.sources[0]!.byHand, listSlotsStatement());
   // the statements' text is the public contract (docs/HOSTED-API.md prints both)
   assert.equal(dropStatements({ slot: "mason_a", publication: "mason_a", owned: true }), "SELECT pg_drop_replication_slot('mason_a') FROM pg_replication_slots WHERE slot_name = 'mason_a' AND NOT active; DROP PUBLICATION IF EXISTS mason_a;");
   assert.equal(listSlotsStatement(), "SELECT slot_name, database, active FROM pg_replication_slots WHERE left(slot_name, 6) = 'mason_';");
   // a byHand that is not a string is no answer of the contract's
-  for (const theirs of [1, true, {}, ["SELECT 1;"]]) assert.equal(heldDeletion(finished([notVerified({ byHand: theirs })]), "deleted", []), null, JSON.stringify(theirs));
+  for (const theirs of [1, true, {}, ["SELECT 1;"]]) assert.equal(heldDeletion(needsPerson([notVerified({ byHand: theirs })]), "deleting", []), null, JSON.stringify(theirs));
   // A NAME OUTSIDE THE GRAMMAR, refused by the grammar ALONE (#687's review, N2: every name tested was refused for another
   // reason too): a quote or a semicolon in a name otherwise lower case, short and spaceless, where nothing else is checked
   for (const bad of ["a'", "a;", "a'b", "a;b", "'", ";", "mason_shop'", "mason_shop;"]) {
     assert.equal(PG_NAME.test(bad), false, bad);
     assert.equal(heldDeletion(finished([{ ...dropped(), slot: bad }]), "deleted", []), null, `a dropped slot ${bad}`);
-    assert.equal(heldDeletion(finished([notVerified({ slot: bad })]), "deleted", []), null, `a slot not verified ${bad}`);
-    assert.equal(heldDeletion(finished([notVerified({ publication: bad, owned: false })]), "deleted", []), null, `a publication ${bad}`);
+    assert.equal(heldDeletion(needsPerson([notVerified({ slot: bad })]), "deleting", []), null, `a slot not verified ${bad}`);
+    assert.equal(heldDeletion(needsPerson([notVerified({ publication: bad, owned: false })]), "deleting", []), null, `a publication ${bad}`);
     assert.equal(heldDeletion(finished([{ ...noSlot(), slot: bad }]), "deleted", []), null, `no slot ${bad}`);
   }
   // and the other ways out of it
   for (const bad of ["", "Mason_shop", "mason-shop", "a".repeat(64), "x'; DROP TABLE orders; --", "mason shop", "maßon", "mason_shop\n", "\"mason\""]) {
     assert.equal(PG_NAME.test(bad), false, bad);
-    assert.equal(heldDeletion(finished([notVerified({ slot: bad })]), "deleted", []), null, `slot ${bad}`);
-    assert.equal(heldDeletion(finished([notVerified({ publication: bad, owned: false })]), "deleted", []), null, `publication ${bad}`);
+    assert.equal(heldDeletion(needsPerson([notVerified({ slot: bad })]), "deleting", []), null, `slot ${bad}`);
+    assert.equal(heldDeletion(needsPerson([notVerified({ publication: bad, owned: false })]), "deleting", []), null, `publication ${bad}`);
     assert.equal(heldDeletion(finished([{ ...dropped(), slot: bad }]), "deleted", []), null, `dropped ${bad}`);
   }
   // Mason's own publication is mason_…: one said to be its own that is not, or none named, does not hold
-  for (const publication of ["orders_pub", null]) assert.equal(heldDeletion(finished([notVerified({ publication, owned: true })]), "deleted", []), null, String(publication));
+  for (const publication of ["orders_pub", null]) assert.equal(heldDeletion(needsPerson([notVerified({ publication, owned: true })]), "deleting", []), null, String(publication));
 });
 
 test("a deletion held to the contract: present exactly while the replica is deleting or deleted, its stage the state's, the handover at requested alone, each step once, each source in order, a reason and byHand for not_verified alone", () => {
   const d = (more: Record<string, unknown>, stage = "in_region"): Record<string, unknown> => ({ stage, requestedAt: AT, lastHeardAt: AT, finishedAt: stage === "finished" ? LATER : null, steps: steps(1), sources: [], ...more });
   assert.ok(heldDeletion(d({}), "deleting", []));
   assert.equal(heldDeletion(undefined, "ready", []), undefined, "a replica in no deletion carries none");
+  assert.equal(heldDeletion(null, "ready", []), undefined, "nor null");
+  // a replica deleting may carry none (deleted another way): what is known is that it is being deleted
+  assert.equal(heldDeletion(undefined, "deleting", []), undefined, "none while it is deleting");
+  assert.equal(heldDeletion(null, "deleting", []), undefined, "null while it is deleting");
+  // a person is needed exactly while a slot is not verified gone; a person's confirmation finishes it
+  assert.equal(heldDeletion(d({ sources: [notVerified()] }, "needs_person"), "deleting", [])?.stage, "needs_person");
+  assert.ok(heldDeletion(d({ sources: [notVerified(), dropped(1)] }), "deleting", []), "a slot not verified gone while it is under way");
+  const confirmed = heldDeletion(d({ sources: [{ ordinal: 0, outcome: "confirmed", slot: null, publication: null, publicationOwned: null, reportedAt: AT }] }, "finished"), "deleted", []);
+  assert.deepEqual(confirmed?.sources[0], { ordinal: 0, outcome: "confirmed", reason: null, why: null, slot: null, publication: null, publicationOwned: null, byHand: null, reportedAt: AT });
   for (const [what, v, state] of [
-    ["a deletion of a ready replica", d({}), "ready"], ["none while it is deleting", undefined, "deleting"], ["none while it is deleted", undefined, "deleted"],
+    ["a deletion of a ready replica", d({}), "ready"], ["none while it is deleted", undefined, "deleted"], ["null while it is deleted", null, "deleted"],
+    ["not an object while it is deleting", "deleting", "deleting"], ["an empty one while it is deleting", {}, "deleting"],
+    ["needs a person with every slot gone", d({ sources: [dropped()] }, "needs_person"), "deleting"], ["needs a person while deleted", d({ sources: [notVerified()] }, "needs_person"), "deleted"],
+    ["finished with a slot not verified gone", d({ sources: [notVerified()] }, "finished"), "deleted"],
+    ["a confirmed slot with a reason", d({ sources: [{ ordinal: 0, outcome: "confirmed", reason: "failed", publicationOwned: null, reportedAt: AT }] }, "finished"), "deleted"],
+    ["a confirmed slot whose publicationOwned is unsaid", d({ sources: [{ ordinal: 0, outcome: "confirmed", reportedAt: AT }] }, "finished"), "deleted"],
     ["finished while deleting", d({}, "finished"), "deleting"], ["under way while deleted", d({}), "deleted"], ["a stage of its own", d({ stage: "melting" }), "deleting"],
     ["finished with no finishedAt", d({ finishedAt: null }, "finished"), "deleted"], ["a finishedAt before it is finished", d({ finishedAt: LATER }), "deleting"],
     ["a handover under way", d({ handover: { attempts: 1 } }), "deleting"], ["a handover's attempts not a number", d({ handover: { attempts: "1" } }, "requested"), "deleting"],
@@ -242,7 +263,7 @@ test("mason replica delete: the service's byHand, however hostile, is never prin
   const hostile = "SELECT pg_drop_replication_slot('mason_shop_app'); DROP TABLE orders;";
   for (const theirs of [hostile, `${hostile}\nNext:\n  mason destroy`, SERVICE_BY_HAND]) {
     for (const json of [true, false]) {
-      const { a } = await run(() => answer(200, deleting("finished", { sources: [notVerified({ byHand: theirs })] })), ["--yes", ...(json ? ["--json"] : [])]);
+      const { a } = await run(() => answer(202, deleting("needs_person", { sources: [notVerified({ byHand: theirs })] })), ["--yes", ...(json ? ["--json"] : [])]);
       assert.equal(a.code, 1, a.stdout + a.stderr);
       assert.ok(!(a.stdout + a.stderr).includes("DROP TABLE") && !(a.stdout + a.stderr).includes("mason destroy") && !(a.stdout + a.stderr).includes("advisory"), `${theirs}: nothing of it printed`);
       const want = dropStatements({ slot: "mason_shop_app", publication: "mason_shop_app", owned: true });
@@ -251,11 +272,13 @@ test("mason replica delete: the service's byHand, however hostile, is never prin
     }
   }
   const cases: Array<[string, Reply]> = [
-    ["a slot outside the grammar", answer(200, deleting("finished", { sources: [notVerified({ slot: "x');", byHand: hostile })] }))],
-    ["a publication outside the grammar", answer(200, deleting("finished", { sources: [notVerified({ publication: "mason_x;", owned: true })] }))],
+    ["a slot outside the grammar", answer(202, deleting("needs_person", { sources: [notVerified({ slot: "x');", byHand: hostile })] }))],
+    ["a publication outside the grammar", answer(202, deleting("needs_person", { sources: [notVerified({ publication: "mason_x;", owned: true })] }))],
+    ["finished with a slot not verified gone", answer(200, deleting("finished", { sources: [notVerified({ byHand: hostile })] }))],
+    ["a person needed with every slot gone", answer(202, deleting("needs_person", { sources: [dropped()] }))],
+    ["a deleted replica with no deletion", answer(200, replicaOf({ state: "deleted" }))],
     ["202 for a finished deletion", answer(202, deleting("finished"))],
     ["200 for one under way", answer(200, deleting("in_region"))],
-    ["a deleting replica with no deletion", answer(202, replicaOf({ state: "deleting" }))],
     ["a ready replica", answer(200, replicaOf())],
   ];
   for (const [what, reply] of cases) {
@@ -275,7 +298,7 @@ test("mason replica delete: the service's words — a step's what, a source's wh
   let polls = 0;
   const v1 = (r: Req): Reply => r.method === "DELETE" ? answer(202, deleting("requested", { handover: { attempts: 2, failure: forged } }))
     : polls++ === 0 ? ok({ replica: deleting("in_region", { steps: [{ step: "s1", what: forged, doneAt: AT }] }) }, { "retry-after": "1" })
-    : ok({ replica: deleting("finished", { steps: [{ step: "s1", what: forged, doneAt: AT }], sources: [notVerified({ why: forged })] }) });
+    : ok({ replica: deleting("needs_person", { steps: [{ step: "s1", what: forged, doneAt: AT }], sources: [notVerified({ why: forged })] }) });
   const { a } = await run(v1, ["--yes"], { token });
   assert.equal(a.code, 1, a.stdout + a.stderr);
   assert.match(a.stderr, /^ {2}requested: .*\(2 attempts to hand it over\): \*\*\*\*\?Next:\? mason destroy$/m);
@@ -398,33 +421,103 @@ test("mason replica delete: the wait's bounds — an answer that cannot say is a
   }
 });
 
+test("mason replica delete: a deletion that comes to need a person stops the wait at once, whatever --timeout — the statement printed alone, what the person does then, exit 1; --json the same, its stage needs_person", async () => {
+  let polls = 0;
+  const v1 = (r: Req): Reply => r.method === "DELETE" ? answer(202, deleting("in_region")) : polls++ === 0 ? ok({ replica: deleting("in_region") }, { "retry-after": "1" }) : ok({ replica: deleting("needs_person") });
+  const want = dropStatements({ slot: "mason_shop_app", publication: "mason_shop_app", owned: true });
+  const t0 = Date.now();
+  const { a, requests } = await run(v1, ["--yes", "--timeout", "1h"]);
+  assert.equal(a.code, 1, a.stdout + a.stderr);
+  assert.ok(Date.now() - t0 < 30_000, "it did not wait for --timeout");
+  assert.deepEqual(requests.map((q) => q.method), ["DELETE", "GET", "GET"], "nothing is asked once a person is needed");
+  assert.ok(a.stdout.split("\n").includes(`    ${want}`), a.stdout);
+  assert.match(a.stdout, /^ {2}source 0 {5}replication slot mason_shop_app: NOT verified gone, its database could not be reached \(the connection timed out\)$/m);
+  assert.doesNotMatch(a.stdout, /^Deleted /m, "it is not deleted");
+  assert.match(a.stderr, /^✗ mason replica: acme\/shop is not deleted yet: the replication slot of source 0 is NOT verified gone$/m);
+  assert.match(a.stderr.replace(/\n {4,}/g, " "), /^ {2}fix {3}run the statement printed for it on its database \(with --json, deletion\.sources\[\]\.byHand\), then confirm it on the replica's page in the service's web app \(or there, that the database is no more\): its deletion then finishes$/m);
+  assert.match(a.stderr, /^ {2}mason replica status acme\/shop {2,}how its deletion goes, once confirmed$/m);
+  polls = 0;
+  const j = await run(v1, ["--yes", "--json"]);
+  assert.equal(j.a.code, 1, j.a.stdout);
+  const v = JSON.parse(j.a.stdout) as { replica: { state: string }; deletion: { stage: string; finishedAt: unknown; sources: DeletionSource[] }; error: { code: string; message: string }; next: Array<{ command: string }> };
+  assert.deepEqual(Object.keys(v), ["replica", "deletion", "error", "next"]);
+  assert.deepEqual([v.replica.state, v.deletion.stage, v.deletion.finishedAt, v.error.code], ["deleting", "needs_person", null, "failed"]);
+  assert.deepEqual(v.deletion.sources.map((x) => [x.outcome, x.slot, x.byHand]), [["not_verified", "mason_shop_app", want]]);
+  assert.deepEqual(v.next.map((n) => n.command), ["mason replica status acme/shop"]);
+  // confirmed by the person, finished: exit 0, nothing to run by hand
+  const fin = await run(() => answer(200, deleting("finished", { sources: [{ ordinal: 0, outcome: "confirmed", slot: "mason_shop_app", publication: "mason_shop_app", publicationOwned: true, reportedAt: AT }] })), ["--yes"]);
+  assert.equal(fin.a.code, 0, fin.a.stdout + fin.a.stderr);
+  assert.match(fin.a.stdout, /^Deleted acme\/shop on /);
+  assert.match(fin.a.stdout, /^ {2}source 0 {5}replication slot mason_shop_app: not verified gone by the service; a person confirmed it was dropped by hand, or that its database is no more$/m);
+});
+
+test("a replica being deleted that carries no deletion (deleted another way): status says it is being deleted and nothing more, exit 0, --json deletion null; delete waits on it as on any deletion", async () => {
+  const none = replicaOf({ state: "deleting" });
+  const st = await hosted(() => ok({ replica: none }), ["status", "acme/shop"], { lines: DELETE_LINES });
+  assert.equal(st.a.code, 0, st.a.stdout + st.a.stderr);
+  assert.match(st.a.stdout, /^ {2}deletion {4}being deleted: the service said no more of it$/m);
+  assert.doesNotMatch(st.a.stdout, /step|source \d|SELECT/, "nothing invented");
+  const sj = await hosted(() => ok({ replica: { ...none, deletion: null } }), ["status", "acme/shop", "--json"]);
+  assert.equal(sj.a.code, 0, sj.a.stdout);
+  const sv = JSON.parse(sj.a.stdout) as { replica: { state: string }; deletion: unknown };
+  assert.deepEqual([sv.replica.state, sv.deletion], ["deleting", null]);
+  // delete: 202 with none, then none, then finished
+  let polls = 0;
+  const { a, requests } = await run((r) => r.method === "DELETE" ? answer(202, none) : ok({ replica: polls++ === 0 ? none : deleting("finished") }, { "retry-after": "1" }), ["--yes"]);
+  assert.equal(a.code, 0, a.stdout + a.stderr);
+  assert.deepEqual(requests.map((q) => q.method), ["DELETE", "GET", "GET"]);
+  assert.match(a.stderr, /^ {2}being deleted: the service said no more of it$/m);
+  assert.match(a.stdout, /^Deleted acme\/shop on /);
+  // past --timeout with none: what is known, said
+  const slow = await run((r) => r.method === "DELETE" ? answer(202, none) : ok({ replica: none }, { "retry-after": "1" }), ["--yes", "--timeout", "1s", "--json"]);
+  assert.equal(slow.a.code, 124, slow.a.stdout);
+  const se = JSON.parse(slow.a.stdout) as { error: { why: string }; deletion: unknown };
+  assert.deepEqual([se.error.why, se.deletion], ["it was last being deleted: the service said no more of it", null]);
+  // a deletion present but malformed is still refused whole
+  const bad = await run(() => answer(202, { ...none, deletion: { stage: "in_region" } }), ["--yes", "--json"]);
+  assert.equal(bad.a.code, 1, bad.a.stdout);
+  assert.match((JSON.parse(bad.a.stdout) as { error: { message: string } }).error.message, / answered DELETE \/v1\/replicas\/acme\/shop with 202, where a replica's deletion was asked for$/);
+});
+
 test("mason replica status of a replica being deleted, or deleted: its deletion as delete says it, the statements by hand included; exit 0; --json's deletion null for a replica in none", async () => {
   const st = await hosted(() => ok({ replica: deleting("in_region") }), ["status", "acme/shop"], { lines: DELETE_LINES });
   assert.equal(st.a.code, 0, st.a.stderr);
   assert.match(st.a.stdout, /^acme\/shop on http:\/\/127\.0\.0\.1:\d+: deleting\n {2}state {8}deleting\n/);
   assert.match(st.a.stdout, /^ {2}deletion {5}under way: nobody may query it now; asked for at 2026-11-02T10:00:00\.000Z\n {2}last heard {3}2026-11-02T10:00:00\.000Z\n {2}step {9}done: nobody may query it \(at 2026-11-02T10:00:00\.000Z\)\n {2}step {9}not yet: Mason's replication slots are dropped\n/m);
   assert.match(st.a.stdout, /^ {2}mason replica status acme\/shop {2,}how it is$/m);
-  const done = await hosted(() => ok({ replica: deleting("finished", { sources: [notVerified()] }) }), ["status", "acme/shop"], { lines: DELETE_LINES });
-  assert.equal(done.a.code, 0, "status says it, whatever it says");
-  pastedWhole(done.a);
-  assert.ok(done.a.stdout.includes(`\n    ${dropStatements({ slot: "mason_shop_app", publication: "mason_shop_app", owned: true })}\n`), done.a.stdout);
-  assert.match(done.a.stdout, /^ {2}mason replica list acme {2,}the organisation's replicas$/m);
-  const j = await hosted(() => ok({ replica: deleting("finished", { sources: [notVerified()] }) }), ["status", "acme/shop", "--json"]);
-  const v = JSON.parse(j.a.stdout) as { deletion: { sources: DeletionSource[] } };
+  // a deletion that needs a person: said, the statement pasted, what the person does then; exit 0 (status says it)
+  const person = await hosted(() => ok({ replica: deleting("needs_person") }), ["status", "acme/shop"], { lines: DELETE_LINES });
+  assert.equal(person.a.code, 0, "status says it, whatever it says");
+  pastedWhole(person.a);
+  assert.ok(person.a.stdout.includes(`\n    ${dropStatements({ slot: "mason_shop_app", publication: "mason_shop_app", owned: true })}\n`), person.a.stdout);
+  assert.match(person.a.stdout, /^ {2}deletion {5}needs a person: a replication slot is NOT verified gone, and the service keeps the replica until it is seen gone or a person confirms it was dropped; asked for at /m);
+  assert.match(person.a.stdout, /^Tip: run each statement above on its database, then confirm it on the replica's page in the service's web app \(or there, that the database is no more\): the service deletes the replica only then$/m);
+  assert.match(person.a.stdout, /^ {2}mason replica status acme\/shop {2,}how it is$/m);
+  const j = await hosted(() => ok({ replica: deleting("needs_person") }), ["status", "acme/shop", "--json"]);
+  const v = JSON.parse(j.a.stdout) as { deletion: { stage: string; sources: DeletionSource[] } };
+  assert.equal(v.deletion.stage, "needs_person");
   assert.equal(v.deletion.sources[0]!.byHand, dropStatements({ slot: "mason_shop_app", publication: "mason_shop_app", owned: true }));
+  // finished: every slot dropped, none there, or confirmed by a person (never seen gone by the service: said so)
+  const done = await hosted(() => ok({ replica: deleting("finished", { sources: [dropped(0), { ordinal: 1, outcome: "confirmed", slot: "mason_shop_app", publication: null, publicationOwned: null, reportedAt: AT }] }) }),
+    ["status", "acme/shop"], { lines: DELETE_LINES });
+  assert.equal(done.a.code, 0, done.a.stdout + done.a.stderr);
+  assert.match(done.a.stdout, /^ {2}source 1 {5}replication slot mason_shop_app: not verified gone by the service; a person confirmed it was dropped by hand, or that its database is no more$/m);
+  assert.doesNotMatch(done.a.stdout, /SELECT/, "nothing to run by hand once a person confirmed it");
+  assert.match(done.a.stdout, /^ {2}mason replica list acme {2,}the organisation's replicas$/m);
   const ready = await hosted(() => ok({ replica: replicaOf() }), ["status", "acme/shop", "--json"]);
   assert.deepEqual(Object.keys(JSON.parse(ready.a.stdout) as object), ["replica", "deletion", "next"]);
   assert.equal((JSON.parse(ready.a.stdout) as { deletion: unknown }).deletion, null);
   // a deletion where there is none, or none where there is one: outside the contract
   // the service's own byHand (record_unreadable's too) refuses nothing: status says it, exit 0, with Mason's statement (#687's review, B1)
   for (const source of [notVerified({ byHand: "SELECT 1;" }), notVerified({ slot: null, publication: null, owned: null, reason: "record_unreadable" })]) {
-    const x = await hosted(() => ok({ replica: deleting("finished", { sources: [source] }) }), ["status", "acme/shop"], { lines: DELETE_LINES });
+    const x = await hosted(() => ok({ replica: deleting("needs_person", { sources: [source] }) }), ["status", "acme/shop"], { lines: DELETE_LINES });
     assert.equal(x.a.code, 0, x.a.stdout + x.a.stderr);
     pastedWhole(x.a);
     assert.ok(x.a.stdout.split("\n").includes(`    ${byHandOf({ slot: source.slot as string | null, publication: source.publication as string | null, publicationOwned: source.publicationOwned as boolean | null })}`), x.a.stdout);
     assert.ok(!x.a.stdout.includes("SELECT 1;") && !x.a.stdout.includes("advisory"));
   }
-  for (const replica of [replicaOf({ deletion: { stage: "in_region" } }), replicaOf({ state: "deleting" }), deleting("finished", { sources: [notVerified({ slot: "a;" })] })]) {
+  for (const replica of [replicaOf({ deletion: { stage: "in_region" } }), replicaOf({ state: "deleted" }), deleting("needs_person", { sources: [notVerified({ slot: "a;" })] }),
+    deleting("finished", { sources: [notVerified()] }), deleting("in_region", { stage: "melting" })]) {
     const x = await hosted(() => ok({ replica }), ["status", "acme/shop", "--json"]);
     assert.equal(x.a.code, 1, JSON.stringify(replica));
   }
@@ -435,11 +528,11 @@ test("mason replica delete and status, on a terminal of every width from 20 to 8
   for (const width of [20, 33, 47, 80]) {
     let polls = 0;
     const { a } = await run((r) => r.method === "DELETE" ? answer(202, deleting("requested", { handover: { attempts: 3, failure: "the region did not answer", nextAttemptAt: AT } }))
-      : ok({ replica: polls++ ? deleting("finished", { sources }) : deleting("in_region") }, { "retry-after": "1" }), ["--yes"], { terminal: width });
+      : ok({ replica: polls++ ? deleting("needs_person", { sources }) : deleting("in_region") }, { "retry-after": "1" }), ["--yes"], { terminal: width });
     assert.equal(a.code, 1, a.stdout + a.stderr);
     assert.ok(a.stdout.split("\n").includes(`    ${dropStatements({ slot: "mason_shop_app", publication: "mason_shop_app", owned: true })}`), `${width}: the statement, whole on its line`);
     // EVERY PATH THAT PRINTS A STATEMENT (#687's review, N1), at this width: status's report, and a replica gone midway
-    const st = await hosted(() => ok({ replica: deleting("finished", { sources }) }), ["status", "acme/shop"], { lines: DELETE_LINES, terminal: width });
+    const st = await hosted(() => ok({ replica: deleting("needs_person", { sources }) }), ["status", "acme/shop"], { lines: DELETE_LINES, terminal: width });
     assert.equal(st.a.code, 0, st.a.stdout + st.a.stderr);
     pastedWhole(st.a);
     assert.ok(st.a.stdout.split("\n").includes(`    ${listSlotsStatement()}`), `${width}: status`);
@@ -454,12 +547,12 @@ test("mason replica delete and status, on a terminal of every width from 20 to 8
 test("mason replica delete: a wrong line is exit 2 before a byte is sent — no replica, two, one outside the grammar, --yes or --timeout where they do not go, a timeout that is none", async () => {
   for (const argv of [["delete"], ["delete", "acme"], ["delete", "Acme/shop", "--yes"], ["delete", "acme/shop", "x", "--yes"], ["delete", "acme/shop", "--yes", "--timeout", "soon"],
     ["delete", "acme/shop", "--yes", "--region", "eu"], ["status", "acme/shop", "--yes"], ["status", "acme/shop", "--timeout", "1m"], ["list", "--yes"], ["remove", "acme/shop"]]) {
-    const { a, requests } = await hosted(() => answer(200, deleting("finished")), [...argv, "--json"]);
+    const { a, requests } = await hosted(() => answer(200, deleting("finished")), [...argv, "--json"], { lines: DELETE_LINES });
     assert.equal(a.code, 2, `${argv.join(" ")}: ${a.stdout}`);
     assert.equal((JSON.parse(a.stdout) as { error: { code: string } }).error.code, "usage");
     assert.deepEqual(requests, [], argv.join(" "));
   }
-  const near = await hosted(() => answer(200, deleting("finished")), ["delet", "acme/shop", "--json"]);
+  const near = await hosted(() => answer(200, deleting("finished")), ["delet", "acme/shop", "--json"], { lines: DELETE_LINES });
   assert.match((JSON.parse(near.a.stdout) as { error: { message: string } }).error.message, /did you mean `delete`\?/);
 });
 

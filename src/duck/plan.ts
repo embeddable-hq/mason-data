@@ -17,6 +17,7 @@ import type { SessionState } from "../api/postgres/catalog.ts";
 import { argumentTypes, describeKeys, nameUserKeys, heldUses, nullTested, resolvedKeys } from "./resolved.ts";
 import { expandViews, MAX_VIEW_DEPTH, viewRefused } from "./views.ts";
 import { selectListAfterLimit } from "./late.ts";
+import { libcBounded } from "./libc-bound.ts";
 import { pgTyplen } from "./types.ts";
 import type { CopyState } from "./sync.ts";
 import { giveTurns, datumText, masonCalls, rewrite, treeDifference, Unrewritable, type EnumTypes, type RowColumn } from "./rewrite.ts";
@@ -110,6 +111,18 @@ export interface PlannedSql {
   readonly unboundedLateral?: true;
   readonly [PLANNED]: true;
 }
+
+/**
+ * EVERY TYPE THAT HOLDS A CITEXT, to any depth, by the catalog's structure: citext itself; an array by its element
+ * (`typelem`, a nested array is the same type); a domain by its base (`typbasetype`); a composite by its attributes; a
+ * range by its subtype and a multirange by its range (PR 674 shrink 2: an array of citext compared by bytes in a
+ * quantified subquery). One recursive term, since Postgres takes the recursive reference once.
+ */
+export const CITEXT_HELD = "WITH RECURSIVE held(oid) AS (SELECT oid FROM pg_type WHERE typname = 'citext' UNION " +
+  "SELECT t.oid FROM pg_type t, held h WHERE t.typelem = h.oid OR t.typbasetype = h.oid " +
+  "OR (t.typrelid <> 0 AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped AND a.atttypid = h.oid)) " +
+  "OR EXISTS (SELECT 1 FROM pg_range r WHERE (r.rngtypid = t.oid AND r.rngsubtype = h.oid) OR (r.rngmultitypid = t.oid AND r.rngtypid = h.oid))) " +
+  "SELECT oid::text FROM held";
 
 /**
  * `verified`: what the oracle has held to Postgres (src/duck/verified.ts). A statement using anything else is REFUSED,
@@ -456,6 +469,9 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // the SOURCE's OID for them (`userTypes`, from the copy), never the catalog's
   let resolved = resolvedKeys(analysis.tree);
   const catalogTypes = new Map<number, string>();
+  // every type that holds a citext anywhere in its structure (`CITEXT_HELD`): the rewrite refuses one where it would
+  // compare it by bytes (rewrite.ts `holdsCitext`)
+  const citextHeld = new Set<number>();
   const enumLabels = new Map<number, string[]>(), enumArrays = new Map<number, number>();
   const enums: EnumTypes = { labels: enumLabels, arrays: enumArrays };
   const fields = analysis.fields === null ? null : analysis.fields.map((f) => ({ ...f }));
@@ -465,6 +481,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   const used = new Set([...analysis.types.values()].flat().map((t) => t.type).filter((o) => o >= 16384));
   if ([...resolved].some((k) => /\bu\d+/.test(k)) || fields?.some((f) => f.oid >= 16384) || used.size > 0) {
     for (const [oid, name] of await catalogRows(catalog, "SELECT oid::text, typname FROM pg_type WHERE oid >= 16384 AND typtype IN ('b', 'd', 'e')")) catalogTypes.set(Number(oid), name!);
+    for (const [oid] of await catalogRows(catalog, CITEXT_HELD)) citextHeld.add(Number(oid));
     // an enum's labels in their declared order, by its OID and its array type's: DuckDB is handed each value as its ENUM
     for (const [oid, array, label] of await catalogRows(catalog, "SELECT t.oid::text, t.typarray::text, e.enumlabel FROM pg_type t JOIN pg_enum e ON e.enumtypid = t.oid ORDER BY t.oid, e.enumsortorder")) {
       const labels = enumLabels.get(Number(oid)) ?? [];
@@ -504,7 +521,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   try { collations = await resolver.prepare((sql) => catalogRows(catalog, sql), collationOids(analysis.tree)); }
   catch (e) { throw e instanceof Unrewritable ? unrewritableError(e, text) : e; }
   const analysed = performance.now();
-  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts });
+  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts });
   try {
     ({ tree, withTies, exact, clock, jsonReads, unboundedLateral } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them
@@ -528,6 +545,10 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   const lateWall = walls !== null ? { alias: walls.alias, added: 0 } : null;
   tree = await selectListAfterLimit(tree as Record<string, unknown>, analysis.tree, () => joinKeys(catalog, analysis.tree),
     { volatile: (functions) => volatileFunctions(catalog, functions), wall: lateWall }) ?? tree;
+  // a top N and a min or max under a libc order keyed for their candidates alone (src/duck/libc-bound.ts): after the
+  // late select list, whose inner query holds the sort and the limit; a walled read it reads again is one more wall
+  tree = await libcBounded(tree as Record<string, unknown>, analysis.tree, { order: (collate) => resolver.libcOrder(collate),
+    volatile: (functions) => volatileFunctions(catalog, functions), wall: lateWall }) ?? tree;
   // ONLY WHAT THE ORACLE VERIFIED: after the rewrite, so a construct the rewrite refuses by name (with its own way out)
   // says so first
   const keys = [...resolved].sort();

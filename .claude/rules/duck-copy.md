@@ -125,8 +125,8 @@ paths:
 
 ## What review probes
 
-Run each probe that applies before a push: the harness's implement and fix prompts say so, and its review runs them
-again at every round. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+Run each probe that applies: the implementer before each push, and the fresh reviewer at each review (CLAUDE.md
+"How work is done here", steps 3 and 4). A new probe is proposed to the owner; each bullet names the PR or issue it was met in.
 
 - A table holding every held built-in type and its array (point, money, macaddr, cidr, bit, tsvector, a range, `oid[]`):
   the copy writes what the poll and the stream write, and an older copy's layout is caught (PR 153).

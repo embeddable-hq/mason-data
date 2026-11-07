@@ -4,8 +4,8 @@
  *
  *   node scripts/wait-file.ts <path> <seconds>
  *
- * The pr-persistent skill's coordinator runs it in the background on each stage's results file, so it wakes whether or
- * not the agent's completion notice reaches it (issue 304). It was a shell loop (`for i in $(seq 120); do [ -s <path> ]
+ * An agent runs it on a file `scripts/done-file.ts` writes, to wait on a gate that outlasts one tool call (issue 504);
+ * it once waited on a workflow stage's results file (issue 304). It was a shell loop (`for i in $(seq 120); do [ -s <path> ]
  * …`), which Claude Code's worktree guard may refuse in an isolated agent, so it is one plain command (issue 322).
  *
  * Exit codes: 0 the file is there and not empty, 8 the deadline passed without it, 2 usage. Any other exit (1 is
