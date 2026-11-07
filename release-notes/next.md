@@ -36,6 +36,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **`mason doctor`'s warnings about a role that may write end in one plain sentence**: "Mason only reads, but, for
+  security reasons, we recommend using a role that only reads". The warning codes, and the statements that make such
+  a role, are unchanged.
 - **Every list flag takes a comma list or the flag repeated, meaning the same**: `mason add orders --columns id
   --columns status` is `--columns id,status`, and so for `--include`, `--key`, `mason logs --outcome`, `mason user add
   --from` and `mason token create --scope` (`--scope deploy,users`). `mason user add --set` stays one value a flag: a value may hold a comma.
