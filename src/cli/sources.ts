@@ -46,6 +46,17 @@ const KEYS = ["kind", "url", "database", "sync", "publication", "tables"] as con
 const ENTRY_KEYS = ["columns", "exclude", "key", "sync"] as const;
 const ENV_REF = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/;
 
+/**
+ * A `${NAME}` naming one of Mason's own settings (`MASON_*`, such as `MASON_API_KEY`): refused where the file is read,
+ * before anything resolves it, because a project may be someone else's and the value would be printed or sent as the
+ * publication's name (issue 718). `url:` keeps `${MASON_DATABASE_URL}`, the source's URL `mason init` reads and writes.
+ */
+const ownSetting = (name: string, key: "url" | "publication"): string | null =>
+  !/^MASON_/i.test(name) || (key === "url" && name === "MASON_DATABASE_URL") ? null :
+    `${key}: \${${name}} names one of Mason's own settings (MASON_*), which a sources file may not read — ` +
+    (key === "url" ? "write url: ${DATABASE_URL} (or ${MASON_DATABASE_URL}), or a postgres:// URL" :
+      "write publication: ${PG_PUBLICATION}, the publication's name, or publication: null and Mason makes its own");
+
 /** A table the file names, as it names it. */
 export interface TableEntry {
   /** the key as written: `orders` (in public) or `billing.invoices` */
@@ -220,7 +231,9 @@ export function parseSourceText(text: string, name: string, file: string): Sourc
   else {
     const m = ENV_REF.exec(v.url.trim());
     const bare = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(v.url.trim());
-    if (m) url = { env: m[1]! };
+    const own = m ? ownSetting(m[1]!, "url") : null;
+    if (own !== null) problems.push(own);
+    else if (m) url = { env: m[1]! };
     else if (bare) problems.push(`url: $${bare[1]} — write \${${bare[1]}}: a variable is named in braces`);
     else if (v.url.includes("${")) problems.push("url: holds a ${NAME} inside a longer value (not shown: it may hold a password) — write the URL whole, or ${NAME} alone: the whole URL in one variable, like ${DATABASE_URL}");
     else url = { literal: v.url.trim() };
@@ -240,7 +253,11 @@ export function parseSourceText(text: string, name: string, file: string): Sourc
     const p = typeof v.publication === "string" ? v.publication.trim() : "";
     const m = ENV_REF.exec(p);
     if (p === "") problems.push("publication: write publication: ${PG_PUBLICATION}, or a publication's name (publication: null and Mason makes its own)");
-    else if (m) publication = { env: m[1]! };
+    else if (m) {
+      const own = ownSetting(m[1]!, "publication");
+      if (own !== null) problems.push(own);
+      else publication = { env: m[1]! };
+    }
     else if (p.includes("$")) problems.push(`publication: ${JSON.stringify(p)} — write \${NAME} alone, like \${PG_PUBLICATION}, or the publication's name`);
     else publication = { literal: p };
   }
