@@ -13,3 +13,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   the start is refused, saying why), a stale one a crash left is replaced, anything else at the path is refused and left
   alone, and it is removed on exit. A request on it passes the same guard as one through `mason ui --ssh`. Unset,
   nothing changes; `mason start` refuses it.
+- **`mason serve` can serve a web page that only shows: set `MASON_UI_READ_ONLY=1`.** The page then offers no Add,
+  Remove, Sync, Disable, Enable, Cancel, Add a user or Connect from anywhere, and refuses every change it is sent,
+  through `mason ui --ssh` or the socket alike, saying the page is read-only here. What it shows is unchanged. The
+  `mason` commands beside the server are unchanged too (`MASON_PROJECT_READONLY=1` refuses their edits of the project's
+  files). Anything but `0` or `1` refuses the start; `mason start` refuses it.

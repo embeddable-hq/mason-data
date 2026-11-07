@@ -69,11 +69,8 @@
   </section>
   <section id="page-users" aria-labelledby="users-h" hidden>
     <div class="page-head"><h2 id="users-h">Users</h2><p class="desc">A user is the name and password psql, a BI tool or your app connects to Mason with; it does not expire. The same users as <code>mason user</code>.</p></div>
-    <form id="add-user" class="formcard" autocomplete="off">
-      <label for="user-name">Name</label>
-      <input id="user-name" name="name" required placeholder="metabase" spellcheck="false" autocapitalize="off">
-      <button type="submit" class="primary">Add a user</button>
-    </form>
+    <!-- the add form is the page's (src/web/pages/users.js renderAddUser): none on a read-only page -->
+    <div id="add-user-box"></div>
     <div id="action"></div>
     <div id="added"></div>
     <div id="users-connect"></div>

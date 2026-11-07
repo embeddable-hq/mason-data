@@ -23,6 +23,7 @@ import { connectDatabase, databaseSettingRefusal } from "../lib/database-name.ts
 import { changesRetired, pollMsRetired } from "../lib/table-sync.ts";
 import { readSource, sourcesTop, writtenDatabase, type ProjectSource } from "./sources.ts";
 import { UI_SOCKET_SETTING } from "./ui-socket.ts";
+import { UI_READ_ONLY_SETTING, uiReadOnlySetting } from "./ui-read-only.ts";
 
 export const STATE_DIR = ".mason";
 const CONFIG = "config.json";
@@ -351,6 +352,13 @@ export function startSettingRefusal(p: Project, env: NodeJS.ProcessEnv, o: { ser
   if (changes !== null) return { code: "refused", ...changes };
   const database = o.serve ? null : databaseSettingRefusal(env, top().shown);
   if (database !== null) return { code: "refused", ...database };
+  // a read-only page is a server's (src/cli/ui-read-only.ts): a value not 0 or 1 refuses either start, and 1 mason start's
+  const pageReadOnly = uiReadOnlySetting(env);
+  if (typeof pageReadOnly !== "boolean") return { message: pageReadOnly.problem, code: "refused", fix: `set ${UI_READ_ONLY_SETTING}=1 or ${UI_READ_ONLY_SETTING}=0, or unset it` };
+  if (!o.serve && pageReadOnly) {
+    return { message: `${UI_READ_ONLY_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",
+      fix: `unset ${UI_READ_ONLY_SETTING}: mason start's page is yours alone, on this machine` };
+  }
   // the page's Unix socket is a server's (src/cli/ui-socket.ts): a laptop's page is opened with mason ui
   if (!o.serve && env[UI_SOCKET_SETTING]) {
     return { message: `${UI_SOCKET_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",

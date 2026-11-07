@@ -100,7 +100,8 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   opened with the run's token (`POST /api/ui/tunnel`, its connection IS the tunnel) is the guard's only way to add a
   Host**: its port's two loopback names, while it lasts, never a wider rule; the laptop gets a one-use ticket, never the
   token. Detectors: tests/cli-ui-ssh.test.ts, tests/cli-security.test.ts. Under `mason serve` a control that could only
-  fail is absent (`sourcesReadOnly`) and a failure the page words itself says `mason ui --ssh` (`overTunnel`).
+  fail is absent (`sourcesReadOnly`; under `MASON_UI_READ_ONLY=1` every control that changes anything, `pageReadOnly`,
+  and every request of the page but a GET or a HEAD refused by rule, src/cli/ui-read-only.ts) and a failure the page words itself says `mason ui --ssh` (`overTunnel`).
   `mason ui` refuses a run that serves no page, by asking it, and refuses on a server, naming `--ssh`.
 - **Polling, not server-sent events, until a page needs fresher than 2 s** (`POLL_MS`): a poll is a request the guard
   already judges. ONLY THE PAGE SHOWN is asked (and, beside a page that does not read it, the state the sidebar names the project from, once a minute: `SHELL_STATE`), each of its reads at its own rate (`reads()`: `{ path, everyMs }`, the

@@ -14,7 +14,7 @@
  */
 import { esc, n, msText, bytesText, fileSize, duration, details, createOpenSet, cards, card, empty, panel, skeleton, sortTh, sortedBy, nextSort, readPart, usagePath, utcMinute,
   RANGES, DEFAULT_RANGE, rangeOf, isLive, rangeEvery, firstLine, spanText, agoText, utcText, clientText, clip, TITLE_MAX, unsupportedEntry, renderFailure, json, pop, fresh, actId,
-  statementCell, POLL_MS } from "../shared.js";
+  statementCell, POLL_MS, readOnlyLine } from "../shared.js";
 import { spark, seriesChart, seriesOf, drawable } from "../charts.js";
 
 const EVERY_MS = 60_000;
@@ -166,8 +166,9 @@ export function statementCards(day, line = () => "", label = "last 24 hours", hr
  * popover beside its Cancel (`pop`: no row is inserted, so none below moves; its Cancel stays, held down); `outcome` is
  * what the last cancel answered (a Failure, or `{ cancelled, at }`), a popover beside the row it was for — or beside the
  * part when that statement has ended since — gone by itself after OUTCOME_MS at `now` (a refusal stays until dismissed).
+ * `readOnly`: `/api/state` `pageReadOnly` (MASON_UI_READ_ONLY=1) — no Cancel, and no column for it.
  */
-export function renderRunning(running, asking = null, outcome = null, now = Date.now()) {
+export function renderRunning(running, asking = null, outcome = null, now = Date.now(), readOnly = null) {
   const pops = [];
   const said = fresh(outcome, now) ? outcome : null;
   let shown = false;
@@ -182,11 +183,11 @@ export function renderRunning(running, asking = null, outcome = null, now = Date
     if (said !== null && said.key === key) { shown = true; pops.push(pop(anchor, outcomeHtml(said))); }
     return `<tr><td>${r.session}</td><td>${r.statement}</td><td><span class="clip" title="${esc(r.user)}">${esc(r.user)}</span></td><td><span class="clip" title="${esc(clientText(r.applicationName))}">${esc(clientText(r.applicationName))}</span></td>` +
       `<td class="num"><time data-tick datetime="${esc(r.startedAt)}" title="started ${esc(utcText(r.startedAt))} UTC">${esc(spanText(r.runningMs / 1000))}</time></td><td class="num">${esc(plural(r.rows, "row"))} sent</td>` +
-      `<td>${statementCell(r.query)}</td><td class="act" id="${esc(anchor)}">${asking === key ? `<button type="button" class="danger small" aria-expanded="true" disabled>Cancel</button>` : `<button type="button" class="danger small" data-ask-cancel="${esc(key)}">Cancel</button>`}</td></tr>`;
+      `<td>${statementCell(r.query)}</td>${readOnly !== null ? "" : `<td class="act" id="${esc(anchor)}">${asking === key ? `<button type="button" class="danger small" aria-expanded="true" disabled>Cancel</button>` : `<button type="button" class="danger small" data-ask-cancel="${esc(key)}">Cancel</button>`}</td>`}</tr>`;
   }).join("");
   const table = running.length
     ? `<div class="scroll"><table class="running"><thead><tr><th scope="col">Session</th><th scope="col" title="the statement's number in its session, as mason cancel --statement takes it">No.</th><th scope="col">User</th><th scope="col">Client</th>` +
-      `<th scope="col" class="num">Running for</th><th scope="col">Rows</th><th scope="col">Statement</th><th scope="col"></th></tr></thead><tbody>${rows}</tbody></table></div>`
+      `<th scope="col" class="num">Running for</th><th scope="col">Rows</th><th scope="col">Statement</th>${readOnly !== null ? "" : `<th scope="col"></th>`}</tr></thead><tbody>${rows}</tbody></table></div>`
     : empty("No statement is running now.");
   // the statement ended since: said beside the part, which is there whatever it lists
   if (said !== null && !shown) pops.push(pop("usage-running", outcomeHtml(said)));
@@ -377,16 +378,19 @@ export const page = {
         const a = ctx.read(activity());
         const running = live ? ctx.read(RUNNING)?.body : undefined;
         const sessions = live ? ctx.read(STATE)?.body?.sessions : undefined;
+        // a read-only page (MASON_UI_READ_ONLY=1) offers no Cancel
+        const readOnly = ctx.read(STATE)?.body?.pageReadOnly ?? null;
         const now = ctx.now().getTime();
         return {
-          "usage-kpis": renderUsageKpis({ activity: a === undefined ? undefined : a.body ?? { failure: a.failure }, usage: ctx.read(samples())?.body, sessions, running: running?.running, range }),
+          // a read-only page (MASON_UI_READ_ONLY=1): why no statement has a Cancel, as Tables and Users say it
+          "usage-kpis": readOnlyLine("Statements are not cancelled", readOnly) + renderUsageKpis({ activity: a === undefined ? undefined : a.body ?? { failure: a.failure }, usage: ctx.read(samples())?.body, sessions, running: running?.running, range }),
           "usage-charts": renderCharts(ctx.read(samples())?.body, range),
           "usage-connected-h": live ? "Connected now" : `Connected in ${esc(span)}`,
           "usage-connected": live ? renderSessions(sessions, SESSIONS_TOP, range) : part(activity(), (b) => renderClients(b.clients, { range, now, total: b.clientsTotal.clients }), false),
           "usage-running-h": live ? "Running now" : `Slowest in ${esc(span)}`,
-          "usage-running-lead": live ? `As <code>mason logs --running</code> lists them. Cancel stops one, as <code>mason cancel</code> does.`
+          "usage-running-lead": live ? `As <code>mason logs --running</code> lists them.${readOnly !== null ? "" : ` Cancel stops one, as <code>mason cancel</code> does.`}`
             : `The statements that took longest to complete, as the request log recorded them.`,
-          "usage-running": live ? (running ? renderRunning(running.running, m.asking, m.outcome, now) : "") : part(activity(), (b) => renderSlowest(b.slowest, { range, now }), false),
+          "usage-running": live ? (running ? renderRunning(running.running, m.asking, m.outcome, now, readOnly) : "") : part(activity(), (b) => renderSlowest(b.slowest, { range, now }), false),
           unsupported: part(unsupportedPath(range), (b) => renderUnsupported(b, span), true),
           "usage-hourly": part(samples(), (b) => renderUsage(b, opened.has, m.sort), true),
           "usage-sizes": part(samples(), (b) => renderCopySizes(b.copySizes), false),

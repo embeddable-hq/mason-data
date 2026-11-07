@@ -3,7 +3,7 @@
  * POST /api/users/<name>/disable and /enable, DELETE /api/users/<name>. An added user's password lives in this page's memory until the person dismisses it, never in
  * storage, a URL or a log line.
  */
-import { actId, badge, button, code, copyable, copyClick, duration, empty, esc, json, panel, pop, renderFailure, ROOMS, serverHostNote, status, utcMinute } from "../shared.js";
+import { actId, badge, button, code, copyable, copyClick, duration, empty, esc, json, panel, pop, renderFailure, ROOMS, serverHostNote, status, utcMinute, readOnlyLine } from "../shared.js";
 
 /** The users as the page reads them: with each one's last use (`mason user list` asks the same), then every 30 s. */
 const USERS = "api/users?lastUsed=1";
@@ -50,17 +50,20 @@ export const attributesText = (a) => Object.entries(a).map(([k, v]) => `${k}=${t
  * user held to it is refused (57P03), said above the table as `mason user list`'s tip says it (src/cli/roles.ts
  * rolesProblemText, held equal by tests/web-page.test.ts) and in each user's role; beside the role, the user's
  * attributes (its row filters' values) and, where it lacks one its role's filters read, that its statements are refused.
+ * `readOnly`: `/api/state` `pageReadOnly` (MASON_UI_READ_ONLY=1) — no Disable, Enable or Remove, and the page says why.
  */
-export function renderUsers(list, confirming = null, now = Date.now(), refused = null, roles = null) {
+export function renderUsers(list, confirming = null, now = Date.now(), refused = null, roles = null, readOnly = null) {
   const users = [...list.users.filter((u) => u.removedAt == null), ...list.users.filter((u) => u.removedAt != null)];
-  if (!users.length) return empty("No users yet", `A user is the name and password psql, a BI tool or your app connects with. Add one above, as ${code("mason user add <name>")} does: its URL, password included, is shown once.`);
+  const why = readOnlyLine("Users are not added, disabled or removed", readOnly);
+  if (!users.length) return why + empty("No users yet", readOnly !== null ? `A user is the name and password psql, a BI tool or your app connects with, as ${code("mason user add <name>")} adds one.`
+    : `A user is the name and password psql, a BI tool or your app connects with. Add one above, as ${code("mason user add <name>")} does: its URL, password included, is shown once.`);
   const note = (what, text) => text ? `<p class="dim">${esc(what)}: ${esc(text)}.</p>` : "";
   const broken = roles && roles.problem != null ? roles : null;
   const brokenNote = broken ? `<p class="warn">${esc(`${broken.file ?? "mason/roles.yml"} cannot be read as it is now, so every statement of a user held to it is refused: ${broken.problem}`)}</p>` : "";
   // a Remove's or a Disable's question is a popover beside the user's actions (`pop`), never a row: no row below it moves
   const pops = [];
   const ask = askOf(confirming);
-  return brokenNote + panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col" class="role">Role</th><th scope="col" class="status">Status</th><th scope="col" class="added">Added</th><th scope="col" class="num last">Last used</th><th scope="col" class="act"></th></tr></thead><tbody>${users.map((u) => {
+  return why + brokenNote + panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col" class="role">Role</th><th scope="col" class="status">Status</th><th scope="col" class="added">Added</th><th scope="col" class="num last">Last used</th><th scope="col" class="act"></th></tr></thead><tbody>${users.map((u) => {
     const active = u.removedAt == null;
     const last = lastUsedText(u, list.lastUsedNote, list.requestLogDays, now);
     const lastCell = !active ? "" : u.lastUsedAt != null
@@ -85,7 +88,7 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
       `${active && !disabled && !u.live ? ` <span class="warn">does not connect: the API key was rotated since it was added</span>` : ""}</td>` +
       `<td class="mono">${esc(stamp(u.addedAt))} UTC</td><td class="num">${lastCell}</td>` +
       // Queries: its statements of the last 24 hours on Observability › Queries (a removed user's too: its past)
-      `<td class="act" id="${esc(anchor)}"><a class="btn small" href="${esc(userQueriesHref(u.name))}" title="the statements ${esc(u.name)} sent in the last 24 hours">Queries</a>${!active ? "" : ` ${toggle(u, disabled, asking === "disable")} ${asking === "remove" ? button("Remove", {}, "danger small", { disabled: true, expanded: true })
+      `<td class="act" id="${esc(anchor)}"><a class="btn small" href="${esc(userQueriesHref(u.name))}" title="the statements ${esc(u.name)} sent in the last 24 hours">Queries</a>${!active || readOnly !== null ? "" : ` ${toggle(u, disabled, asking === "disable")} ${asking === "remove" ? button("Remove", {}, "danger small", { disabled: true, expanded: true })
         : button("Remove", { remove: u.name }, "danger small")}`}</td></tr>`;
   }).join("")}</tbody></table>`) + pops.join("") + note("Last used", list.lastUsedNote);
 }
@@ -105,6 +108,18 @@ export function renderUsersConnect(pg, served = false) {
     `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v)}</dd>`).join("")}</dl>` +
     (served ? `<p class="tip">${serverHostNote(pg)}</p>` : "") +
     `<p class="tip">A user's name and password go in place of ${code("<user>")} and ${code("<password>")}. The password is shown once, when the user is added: lost, remove the user and add it again.</p></div>`;
+}
+
+/**
+ * THE ADD FORM, from `/api/state` (`state`: its body, undefined until it is read): Name and Add a user, as `mason user
+ * add <name>` — none while the state is unread, and none under `pageReadOnly` (MASON_UI_READ_ONLY=1), where it could
+ * only fail. Written the same while nothing changes, so a poll never rewrites it under a name being typed.
+ */
+export function renderAddUser(state) {
+  if (state === undefined || state === null || (state.pageReadOnly ?? null) !== null) return "";
+  return `<form id="add-user" class="formcard" autocomplete="off"><label for="user-name">Name</label>` +
+    `<input id="user-name" name="name" required placeholder="metabase" spellcheck="false" autocapitalize="off">` +
+    `<button type="submit" class="primary">Add a user</button></form>`;
 }
 
 /** A user's statements: Observability › Queries filtered to it, over the last 24 hours (Now's 15 minutes would mostly be empty). */
@@ -192,7 +207,8 @@ export const page = {
         const u = users();
         return {
           // the roles file's state is the run's (/api/state roles): a file that cannot be read refuses every user held to it
-          users: u ? renderUsers(u, m.confirming, ctx.now().getTime(), m.refused, ctx.read(STATE)?.body?.roles ?? null) : "",
+          users: u ? renderUsers(u, m.confirming, ctx.now().getTime(), m.refused, ctx.read(STATE)?.body?.roles ?? null, ctx.read(STATE)?.body?.pageReadOnly ?? null) : "",
+          "add-user-box": renderAddUser(ctx.read(STATE)?.body),
           "users-connect": renderUsersConnect(ctx.read(STATE)?.body?.postgres, ctx.read(STATE)?.body?.served === true),
           added: m.added ? renderAdded(m.added) : "",
           action: m.actionFailure ? renderFailure(m.actionFailure) : "",

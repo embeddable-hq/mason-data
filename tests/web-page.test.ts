@@ -622,6 +622,127 @@ test("a project deployed read-only (MASON_PROJECT_READONLY=1): the state the run
   for (const control of ["data-remove-table", "data-add-table", "data-choose"]) assert.ok(open.includes(control), control);
 });
 
+// ------------------------------------------------------------------ a read-only page (MASON_UI_READ_ONLY=1, issue 747)
+
+/** Every control a page wrote that sends a change (src/web/pages/*.js): a button or a form by its marker. */
+const WRITE_CONTROLS = ["data-sync-table", "data-remove-table", "data-confirm-remove-table", "data-add-table", "data-choose", 'id="add-user"', "data-remove=", "data-confirm-remove=",
+  "data-disable=", "data-confirm-disable=", "data-enable=", "data-ask-cancel", "data-confirm-cancel", "data-share-ask", "data-share-open", "data-share-stop"];
+/** The buttons a read-only page may write: each only shows, copies or moves what is shown, and sends no change. */
+const VIEW_BUTTONS = /^data-(copy|dismiss-[a-z-]+|pop-close|sort-table|sort-key|show-more|show-all|refresh-range|older|newest|open)$/;
+
+/** Every page of the app over a fake run whose state is `state`, a statement running and a user: what each page wrote. */
+async function everyPage(state: unknown): Promise<string> { return (await pageByPage(state)).all; }
+/** The same, each page's parts apart: `byPage.get(id)` is what the page `id` wrote. */
+async function pageByPage(state: unknown): Promise<{ all: string; byPage: Map<string, string> }> {
+  const run = fakeRun();
+  run.answers.set("GET api/state", () => new Response(JSON.stringify(state), { status: 200 }));
+  run.answers.set("GET api/running", () => new Response(JSON.stringify({ running: [{ session: 4, statement: 9, user: "metabase", applicationName: "Metabase", method: "QUERY",
+    startedAt: "2026-10-27T09:10:00.000Z", runningMs: 1500, rows: 0, query: "SELECT count(*) FROM orders", queryTruncated: false }] }), { status: 200 }));
+  run.answers.set("GET api/users?lastUsed=1", () => new Response(JSON.stringify({ users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", live: true },
+    { name: "old", id: "fedcba9876543210", addedAt: "2026-10-27T09:10:11.000Z", disabledAt: "2026-10-27T10:00:00.000Z", live: true }] }), { status: 200 }));
+  const app = fn<[unknown], App>("createApp")(run.fetch);
+  const byPage = new Map<string, string>();
+  for (const id of ["status", "tables", "queries", "users", "usage", "syncs"]) {
+    app.show(id);
+    await app.poll();
+    byPage.set(id, Object.values(app.view()).join("\n"));
+  }
+  return { all: [...byPage.values()].join("\n"), byPage };
+}
+
+test("a read-only page (pageReadOnly): no page writes a control that sends a change — no Add, Remove, Sync, Columns…, Disable, Enable, Cancel, Add a user or Connect from anywhere; unset, each is there", async () => {
+  const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
+  const open = await everyPage(CATALOG_STATE);
+  for (const control of WRITE_CONTROLS.filter((c) => !/confirm|share-open|share-stop/.test(c))) assert.ok(open.includes(control), `without the setting: ${control}`);
+  const shown = await everyPage({ ...CATALOG_STATE, pageReadOnly: why });
+  for (const control of WRITE_CONTROLS) assert.ok(!shown.includes(control), `read-only: ${control}`);
+  // BY RULE, NOT BY THE LIST ABOVE: every button a read-only page writes only shows, copies or moves what is shown
+  const buttons = [...shown.matchAll(/<button\b([^>]*)>/g)].map((m) => [...m[1]!.matchAll(/\b(data-[a-z-]+)/g)].map((d) => d[1]!).filter((d) => d !== "data-room"));
+  for (const data of buttons) assert.ok(data.length > 0 && data.every((d) => VIEW_BUTTONS.test(d)), `a button that may send a change: ${data.join(" ")}`);
+  assert.ok(!/<form\b(?![^>]*id="request-filters")/.test(shown), "no form but the request log's filters");
+  // viewing is unchanged: the tables, the users, the statement running and where to connect are all there
+  for (const said of ["public.customers", "public.accounts", "metabase", "SELECT count(*) FROM orders", "connect-psql"]) assert.ok(shown.includes(said), said);
+  assert.ok(textOf(shown).includes(`Tables are not added, removed or synced from this page: ${why}.`));
+  assert.ok(textOf(shown).includes(`Users are not added, disabled or removed from this page: ${why}.`));
+});
+
+test("a read-only page: no add, create or write link anywhere — the Connect panel's Create a user on the Overview and on Queries' empty log included; the Overview and Usage say why; unset, all as before", async () => {
+  const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
+  // what leads to adding or creating something: a button-styled link to the page that does it, or its words
+  const LEADS = [/Create a user/, /Add a table/, /Add a user/, /Connect from anywhere/, /<a class="btn[^"]*" href="#users"/, /<a class="btn[^"]*" href="#tables[^"]*"/, /Cancel stops one/];
+  const open = await pageByPage(CATALOG_STATE);
+  const shown = await pageByPage({ ...CATALOG_STATE, pageReadOnly: why });
+  for (const lead of LEADS) assert.ok(!lead.test(shown.all), `read-only: ${lead}`);
+  // the Connect panel is on the Overview and on Queries' empty log, and keeps its URL, psql and Copy on both
+  for (const id of ["status", "queries"]) {
+    assert.match(open.byPage.get(id)!, /<a class="btn[^"]*" href="#users">Create a user<\/a>/, `unset: Connect's Create a user on ${id}`);
+    assert.match(shown.byPage.get(id)!, /data-copy="connect-url"[\s\S]*data-copy="connect-psql"/, `read-only: Connect's URL and psql on ${id}`);
+    assert.ok(textOf(shown.byPage.get(id)!).replace(/ :/g, ":").includes("A user's name and password go in place of <user>:<password>: mason user add <name> prints the whole URL once."), id);
+  }
+  // the Overview and Usage say why their controls are missing, as Tables and Users do; unset, none says it
+  const lines = new Map([["status", `Nothing is shared, added or created from this page: ${why}.`], ["usage", `Statements are not cancelled from this page: ${why}.`],
+    ["tables", `Tables are not added, removed or synced from this page: ${why}.`], ["users", `Users are not added, disabled or removed from this page: ${why}.`]]);
+  for (const [id, line] of lines) {
+    assert.ok(textOf(shown.byPage.get(id)!).includes(line), `${id}: ${line}`);
+    assert.match(shown.byPage.get(id)!, new RegExp(`<p class="count">${line.split(":")[0]!}`), `${id}: in the Tables and Users lines' style`);
+    assert.ok(!open.byPage.get(id)!.includes("read-only here"), `unset: ${id} says nothing of it`);
+  }
+  assert.match(open.byPage.get("usage")!, /Cancel stops one, as <code>mason cancel<\/code> does\./, "unset: Usage's lead names Cancel");
+  assert.match(shown.byPage.get("usage")!, /As <code>mason logs --running<\/code> lists them\./, "read-only: the lead without Cancel");
+  // the renderer alone: Connect with the setting, and without it as before
+  const renderConnect = fn<[unknown, unknown], string>("renderConnect");
+  const pg = CATALOG_STATE.postgres;
+  assert.ok(!renderConnect(pg, { first: true, readOnly: why }).includes("Create a user"));
+  assert.equal(renderConnect(pg, { first: true, readOnly: null }), renderConnect(pg, { first: true }), "unset: Connect as before");
+  assert.equal(fn<[string, unknown], string>("readOnlyLine")("Statements are not cancelled", null), "");
+});
+
+test("a read-only page: each renderer alone writes no control that changes anything — Tables, Users, the statements running, the share and the checklist", async () => {
+  const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
+  const ro = { ...CATALOG_STATE, pageReadOnly: why };
+  const tables = fn<[unknown], string>("renderTables")(ro);
+  for (const c of ["data-sync-table", "data-remove-table", "data-add-table", "data-choose"]) assert.ok(!tables.includes(c), c);
+  assert.match(tables, /View events/, "a link to what happened stays");
+  const list = { users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", live: true }, { name: "old", id: "fedcba9876543210", addedAt: "2026-10-27T09:10:11.000Z", disabledAt: "2026-10-27T10:00:00.000Z", live: true }] };
+  const users = fn<[unknown, unknown, number, unknown, unknown, unknown], string>("renderUsers")(list, null, Date.now(), null, null, why);
+  for (const c of ["data-remove=", "data-disable=", "data-enable="]) assert.ok(!users.includes(c), c);
+  assert.match(users, />Queries</, "a user's statements stay");
+  assert.ok(fn<[unknown, unknown, number, unknown, unknown], string>("renderUsers")(list, null, Date.now(), null, null).includes("data-enable="), "unset: Enable is there");
+  assert.equal(fn<[unknown], string>("renderAddUser")(ro), "");
+  assert.equal(fn<[unknown], string>("renderAddUser")(undefined), "", "no form before the state says whether it may be used");
+  const running = [{ session: 4, statement: 9, user: "metabase", applicationName: "Metabase", method: "QUERY", startedAt: "2026-10-27T09:10:00.000Z", runningMs: 1500, rows: 0, query: "SELECT 1", queryTruncated: false }];
+  const renderRunning = fn<[unknown, unknown, unknown, number, unknown], string>("renderRunning");
+  assert.ok(!renderRunning(running, null, null, Date.now(), why).includes("data-ask-cancel"));
+  assert.ok(renderRunning(running, null, null, Date.now(), null).includes("data-ask-cancel"));
+  assert.equal(fn<[unknown], string>("renderShare")(ro), "");
+  assert.match(fn<[unknown], string>("renderShare")(CATALOG_STATE), /data-share-ask/);
+  const { renderChecklist: checklist } = await import(path.join(WEB, "pages", "status.js") as string) as { renderChecklist: (s: unknown, q: unknown, u: unknown) => string };
+  const noneYet = { queries: { week: { completed: 0 } } }, nobody = { users: [] };
+  const fresh = { ...NONE, pageReadOnly: why };
+  assert.ok(!/href="#users"|Add a table/.test(checklist(fresh, noneYet, nobody)), "the checklist sends no one to add what the page refuses");
+  assert.match(checklist(NONE, noneYet, nobody), /Add a table/);
+});
+
+test("the state says pageReadOnly: why under MASON_UI_READ_ONLY=1 as the run reads it, null without; and nothing else of the state changes", () => {
+  const ctxOf = (pageReadOnly?: boolean) => ({
+    source, facts: () => ({ version: 160000, versionText: "16.4", standby: false, tables: TABLES, systemIdentifier: null }), warnings: [], replication: () => null,
+    page: true, served: true, ...(pageReadOnly === undefined ? {} : { pageReadOnly }), users: { file: "/app/.mason/users.json", apiKey: "k".repeat(32), database: "shop", postgresUrl: "postgresql://127.0.0.1:5433/shop" },
+    folder: () => "/app/mason", root: "/app", home: "/app/.mason", version: "0.9.0", startedAt: Date.parse("2026-10-27T09:00:00.000Z"),
+    sources: () => ({ file: sourceFile, problem: null }), listener: { openSessions: () => ({ open: 0, byClient: [] }) },
+    duck: { file: "/app/.mason/duck.db", requests: { days: 7 }, restarts: () => [], disk: () => ({ path: "/app/.mason", freeBytes: null, projectedBytes: null }) },
+  }) as unknown as RunContext;
+  const now = Date.parse("2026-10-27T10:00:00.000Z");
+  const on = runState(ctxOf(true), [], null, now) as RunState & { sourcesReadOnly: unknown };
+  const off = runState(ctxOf(), [], null, now) as RunState;
+  assert.equal(on.pageReadOnly, "the web page is read-only here (MASON_UI_READ_ONLY=1)");
+  assert.equal(off.pageReadOnly, null);
+  assert.equal((runState(ctxOf(false), [], null, now) as RunState).pageReadOnly, null);
+  const { pageReadOnly: _a, sourcesReadOnly: _b, ...rest } = on;
+  const { pageReadOnly: _c, sourcesReadOnly: _d, ...restOff } = off as typeof on;
+  assert.deepEqual(JSON.parse(JSON.stringify(rest)), JSON.parse(JSON.stringify(restOff)));
+  assert.ok(commands.STATUS.json!.includes("pageReadOnly"), "mason status --json declares it");
+});
+
 test("a server's Connect says the URL's host is the server's own view of itself; a laptop's page says nothing of it", async () => {
   const renderConnect = fn<[unknown, unknown?], string>("renderConnect");
   const { renderUsersConnect } = await import(path.join(WEB, "pages", "users.js") as string) as { renderUsersConnect: (pg: unknown, served?: boolean) => string };
@@ -2247,8 +2368,9 @@ test("Tables and Users: the sections are a page head, the cards' part and a tool
   assert.match(tables, /<div class="field grow"><label for="tables-filter">Search the tables<\/label>\s*<input type="search" id="tables-filter"[^>]*><\/div>/);
   assert.match(tables, /<div class="field"><label for="tables-show">Show<\/label>\s*<select id="tables-show">[\s\S]*?<\/select><\/div>/);
   assert.match(users, /<div class="page-head"><h2 id="users-h">Users<\/h2>/);
-  assert.match(users, /<form id="add-user" class="formcard"[^>]*>[\s\S]*<button type="submit" class="primary">Add a user<\/button>/);
-  assert.ok(users.indexOf('id="add-user"') < users.indexOf('id="added"') && users.indexOf('id="added"') < users.indexOf('id="users"'), "the form, the password just shown, the users");
+  // the form is the page's own once the state is read (renderAddUser: none on a read-only page), in its place
+  assert.match(fn<[unknown], string>("renderAddUser")(CATALOG_STATE), /^<form id="add-user" class="formcard"[^>]*>[\s\S]*<button type="submit" class="primary">Add a user<\/button><\/form>$/);
+  assert.ok(users.indexOf('id="add-user-box"') < users.indexOf('id="added"') && users.indexOf('id="added"') < users.indexOf('id="users"'), "the form, the password just shown, the users");
 });
 
 test("Tables: the cards are the tables added of all, those synced, those failed and the copies' rows; none before there is a table", () => {
