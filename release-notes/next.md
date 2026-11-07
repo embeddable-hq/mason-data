@@ -6,6 +6,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   address or the server does not answer within `--timeout`** (as `mason wait`, `mason deploy`, `mason replica create`
   and `mason login` already exit when they run out of time). Every other failure of both still exits 1.
 
+- **`mason replica create` no longer reads the database's URL from `.env`, `.env.local` or the shell.** On a terminal
+  it asks for the URL and reads it without showing it; otherwise it reads it from stdin. A script that relied on
+  `DATABASE_URL` being set pipes it instead: `printf '%s\n' "$DATABASE_URL" | mason replica create acme/shop --region
+  <region> --size 50`, or `... < url.txt`, or from your secret store's command. With nothing on stdin it now stops,
+  sending nothing. The sources file still names the variable (`url: ${DATABASE_URL}`): the replica reads the URL by
+  that name, and it must be `DATABASE_URL`, the one a replica sets: a sources file naming another is refused before the
+  URL is asked for. The URL must carry a password and a database name, take no query parameter but `sslmode`, name one
+  host, and use a port of 1024 or above; each is refused before anything is sent.
+
 ## New
 
 - **A Mason user can be limited to the addresses it connects from**: `mason user add looker --from 203.0.113.0/24
@@ -19,6 +28,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **A database URL on `mason replica`'s command line is refused** (exit 2), never repeated, with the line to run
+  instead: a command line is kept in shell history and shown to every process on the machine, so if it held a real
+  password, change it.
+- **`mason replica create` prints the replica's page**, where its allowlist (the addresses that may query it) is set,
+  and `--json` gives it as `replica.page` (`null` when the service names none); `mason replica status` prints it too.
 - **While any user has an address list, a user name that is no user is refused `28000` with the same words as a wrong
   address**, instead of `28P01`, so a connection from outside cannot tell a user with a list from a name that is no
   user. A user without a list still answers a wrong password `28P01`, so its name can be told apart. A project where no
