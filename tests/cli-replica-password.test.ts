@@ -38,12 +38,12 @@ test("the database's password is held by ONE reading at every boundary: echoed b
   const passwords = ["Ünïcödé-straße", "!*!*!*!*zz"];
   const jobs: Array<() => Promise<string | null>> = [];
   for (const password of passwords) {
-    const root = project({ url: urlOf(password) });
+    const root = project();
     for (const [what, form] of ECHO_FORMS) for (const [slot, reply] of SLOTS) for (const json of [false, true]) {
       // one form a run, both readers: a person's every other pair, --json the rest
       if ((ECHO_FORMS.findIndex(([w]) => w === what) + SLOTS.findIndex(([s]) => s === slot)) % 2 !== (json ? 1 : 0)) continue;
       jobs.push(async () => {
-        const { a, requests } = await hosted(() => reply(form(password)), ["create", "acme/shop", "--region", "eu", "--size", "50", ...(json ? ["--json"] : [])], { cwd: root });
+        const { a, requests } = await hosted(() => reply(form(password)), ["create", "acme/shop", "--region", "eu", "--size", "50", ...(json ? ["--json"] : [])], { cwd: root, stdin: urlOf(password) });
         if (requests.length === 0 || JSON.parse(requests[0]!.body).sources[0].url !== urlOf(password)) return `${password}: the URL was not sent as it was read`;
         return printsWhole(a.stdout + a.stderr, password) ? `${JSON.stringify(password)} ${what} in ${slot}${json ? " (--json)" : ""} was printed:\n${a.stdout}${a.stderr}` : null;
       });
@@ -58,7 +58,7 @@ test("the database's password is held by ONE reading at every boundary: echoed b
 async function notSent(password: string, json: boolean): Promise<{ a: Answer; sent: number }> {
   const fake = await fakeService({ v1: () => created() });
   try {
-    const a = await runMason(project({ url: urlOf(password) }), ["replica", "create", "acme/shop", "--region", "eu", "--size", "50", ...(json ? ["--json"] : [])], envFor(home(), fake.url, { MASON_TOKEN: newToken() }));
+    const a = await runMason(project(), ["replica", "create", "acme/shop", "--region", "eu", "--size", "50", ...(json ? ["--json"] : [])], envFor(home(), fake.url, { MASON_TOKEN: newToken() }), 60_000, undefined, urlOf(password));
     return { a, sent: fake.requests.length };
   } finally { await fake.close(); }
 }
@@ -69,8 +69,8 @@ test("a password under 8 characters, in the one reading — however it is writte
       const { a, sent } = await notSent(short, json);
       const said = json ? (JSON.parse(a.stdout) as { error: { code: string; message: string } }).error : null;
       assert.equal(a.code, 1, `${JSON.stringify(short)}: ${a.stdout}${a.stderr}`);
-      if (said) assert.deepEqual([said.code, said.message], ["refused", "the password in DATABASE_URL (DATABASE_URL in .env) is shorter than the 8 characters this command sends"]);
-      else assert.match(a.stderr, /^✗ mason replica: the password in DATABASE_URL \(DATABASE_URL in \.env\) is shorter than the 8 characters this command sends$/m);
+      if (said) assert.deepEqual([said.code, said.message], ["refused", "the password in the URL given for DATABASE_URL (read from stdin) is shorter than the 8 characters this command sends"]);
+      else assert.match(a.stderr, /^✗ mason replica: the password in the URL given for DATABASE_URL \(read from stdin\) is shorter than the 8 characters this command sends$/m);
       assert.equal(sent, 0, `${JSON.stringify(short)}: nothing sent`);
     }
   }
@@ -83,14 +83,14 @@ test("a password the CLI's own words hold (its lines, its steps, the replica's n
       const all = a.stdout + a.stderr;
       assert.equal(a.code, 1, `${password}: ${all}`);
       assert.equal(sent, 0, `${password}: nothing sent`);
-      assert.match(all, /the password in DATABASE_URL \(DATABASE_URL in \.env\) is in the words this command prints itself/, password);
+      assert.match(all, /the password in the URL given for DATABASE_URL \(read from stdin\) is in the words this command prints itself/, password);
       assert.doesNotMatch(all, /the service's answer|sign in again/, `${password}: never the service's fault`);
     }
   }
   // the honest runs of a password the CLI's words do not hold: made, ready, exit 0, both readers alike
   for (const password of ["Zq8vLm2Xr7Tp", "Ünïcödé-pw", "!*!*!*!*zz"]) {
     for (const json of [[], ["--json"]]) {
-      const { a } = await hosted(() => created(), ["create", "acme/shop", "--region", "eu", "--size", "50", ...json], { cwd: project({ url: urlOf(password) }) });
+      const { a } = await hosted(() => created(), ["create", "acme/shop", "--region", "eu", "--size", "50", ...json], { cwd: project(), stdin: urlOf(password) });
       assert.equal(a.code, 0, `${password} ${json.join("")}: ${a.stdout}${a.stderr}`);
       assert.ok(!printsWhole(a.stdout + a.stderr, password));
     }
