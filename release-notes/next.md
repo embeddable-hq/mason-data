@@ -36,6 +36,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   take `--org` as well as the argument. When `MASON_REPLICA` chose the replica, every such command says so on stderr
   (`using MASON_REPLICA=acme/shop`), and `mason user … --replica` names the replica in its headline and in a `replica`
   key of its `--json` answer.
+- **`mason ui --replica <org>/<name>` opens a hosted replica's web page in your browser**, for the organisation's owner:
+  the service answers an address that opens the page once, for a few minutes, and the CLI opens it (`--no-open` prints
+  it instead, `--json` gives `{ url, replica, expiresAt }`). The page is read-only: a replica's users are still changed
+  with `mason user … --replica`. Another login, or a CI token, is refused with the service's
+  words; a replica not ready yet is said with when to try again. `MASON_REPLICA` in the environment turns `mason ui` to
+  that replica's page too, said on stderr, unless `--ssh` names a server.
 - **`not_answering`** (a run that is alive and does not answer, the way out `mason stop`) is now listed among the
   failure codes `mason help agent` names, and a failure never carries a code outside that list.
 - **`mason deploy` waits while its replica is being created**: when the service answers that the replica is being

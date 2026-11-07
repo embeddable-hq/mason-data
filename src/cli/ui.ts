@@ -12,6 +12,9 @@
  * `--ssh <user@server>` (src/cli/ui-ssh.ts, docs/WEB-UI.md "On a server") opens a server's page from this machine, through
  * the machine's own ssh, and stays in the foreground until Ctrl-C, as `mason share` does; it needs no project here. Its
  * URL carries a ticket for one use, never the run's token, which stays on the server. `--bridge` is what it runs there.
+ *
+ * `--replica <org>/<name>` (else `MASON_REPLICA`; src/cli/ui-hosted.ts, docs/HOSTED-API.md "A replica's page") opens a
+ * replica's page on a hosted Mason service: one request, whose one-use address is opened as this command opens a run's.
  */
 import { spawn } from "node:child_process";
 import { failed, jsonText, parseCommand, reportText, type CommandSpec, type NextStep } from "./command.ts";
@@ -21,6 +24,8 @@ import { version } from "./version.ts";
 import { RunUnreachable } from "./control.ts";
 import type { DevRun } from "./runs.ts";
 import { parseDuration } from "../lib/table-sync.ts";
+import { replicaOf } from "./replica.ts";
+import { hostedUi } from "./ui-hosted.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 const say = (m: string): void => { process.stderr.write(`${m}\n`); };
@@ -33,6 +38,7 @@ export const UI: CommandSpec & { needs: "run" } = {
   summary: "the status, tables, users and statements, in your browser",
   usage: `usage: mason ui [--no-open] [--json]
        mason ui --ssh <user@server> [--mason <command>] [--timeout <duration>] [--no-open] [--json]
+       mason ui --replica <org>/<name> [--no-open] [--json]
 
   Opens the running Mason's web page in your browser, refreshed while the tab is open: the Overview (what mason status
   says: whether the synced data is ready, the database, the sync, the statements and the recent errors); the Tables (add,
@@ -56,7 +62,14 @@ export const UI: CommandSpec & { needs: "run" } = {
     mason ui --ssh deploy@mason.example.com
     mason ui --ssh deploy@mason.example.com --mason "docker exec -i mason-mason-1 mason"
     mason ui --ssh deploy@mason.example.com --mason "cd /var/lib/mason && mason" --timeout 120 --no-open
+    mason ui --replica acme/shop     a replica's page on a hosted Mason service
     mason ui --bridge --local-port 51000      what --ssh runs on the server; its stdout is a stream, not for reading
+
+  --replica opens the page of a replica on a hosted Mason service (else MASON_REPLICA, unless --ssh or --bridge names
+  the target), for the organisation's owner alone: the service answers an address that opens it once, for a few
+  minutes. The page is read-only: the service refuses changes through it, so add or remove users with mason user …
+  --replica. It needs no project here, and goes with --no-open and --json alone. Opened in your browser, the address is
+  not printed: run it again for another tab. A replica not ready yet is said, with when to try again.
 
   --no-open            print the URL only
   --ssh <target>       the server, as you give it to ssh: user@server, or a Host of your ssh config
@@ -65,14 +78,17 @@ export const UI: CommandSpec & { needs: "run" } = {
                        2m): a passphrase or a touch counts; past it, exit 124
   --bridge             the server's end of --ssh, on stdin and stdout
   --local-port <n>     the port the browser names, for --bridge: the laptop's
+  --replica <org>/<name> a replica on a hosted Mason service, as the service lists it
   --json               as data: { url (with this run's token; with --ssh a ticket for one use; null when Ctrl-C came
-                       before the server answered, as port is, exit 0), port, server, project,
-                       version (with --ssh: the server's Mason, for what its answer may lack) }, next; it never opens a
+                       before the server answered, as port is, exit 0; with --replica the one-use address), port, server,
+                       project, version (with --ssh: the server's Mason, for what its answer may lack), replica
+                       (with --replica: "<org>/<name>"), expiresAt (with --replica: until when the address opens it)
+                       }, next; it never opens a
                        browser. With --ssh it then holds the tunnel: the end is on stderr, exit 0 for Ctrl-C or SIGTERM, 1 otherwise
 `,
   options: { "no-open": { type: "boolean", default: false }, json: { type: "boolean", default: false }, ssh: { type: "string" }, mason: { type: "string" },
-    timeout: { type: "string" }, bridge: { type: "boolean", default: false }, "local-port": { type: "string" } },
-  json: ["url", "port", "server", "project", "version", "next"],
+    timeout: { type: "string" }, bridge: { type: "boolean", default: false }, "local-port": { type: "string" }, replica: { type: "string" } },
+  json: ["url", "port", "server", "project", "version", "replica", "expiresAt", "next"],
 };
 
 const NEXT: readonly NextStep[] = [["mason status", "the same, in this terminal"], ["mason user list", "the users"]];
@@ -84,6 +100,10 @@ export function openCommand(platform: NodeJS.Platform, url: string): [command: s
   if (platform === "win32") return ["cmd", ["/c", "start", "", url]];
   return ["xdg-open", [url]];
 }
+
+/** An address Mason hands the browser by itself (a sign-in page, a replica's page): a plain https (or this machine's
+ *  http) URL, and none of the characters a shell or `cmd /c start` reads (the service's URL is not ours). */
+export const OPENABLE = /^https?:\/\/[A-Za-z0-9.:[\]-]+(?:\/[A-Za-z0-9._~/?=+-]*)?$/;
 
 /** Open `url` in the browser: null once the opener started, else why it could not (the URL is printed either way). */
 export function openBrowser(url: string): Promise<string | null> {
@@ -149,9 +169,14 @@ export async function ui(argv: string[]): Promise<number> {
   const f = parseCommand(UI, argv);
   if (typeof f === "number") return f;
   const json = f.values.json === true;
-  const v = f.values as { ssh?: string; mason?: string; timeout?: string; bridge: boolean; "local-port"?: string; "no-open": boolean };
+  const v = f.values as { ssh?: string; mason?: string; timeout?: string; bridge: boolean; "local-port"?: string; "no-open": boolean; replica?: string };
   const wrong = (message: string): number => failed("ui", { message, code: "usage", usage: UI.usage }, { json });
   if (f.positionals.length) return wrong(`mason ui takes no argument: ${f.positionals.join(" ")}`);
+  if (v.replica !== undefined) {
+    const beside = ([["--ssh", v.ssh !== undefined], ["--bridge", v.bridge], ["--mason", v.mason !== undefined], ["--timeout", v.timeout !== undefined],
+      ["--local-port", v["local-port"] !== undefined]] as Array<[string, boolean]>).filter(([, given]) => given).map(([name]) => name);
+    if (beside.length) return wrong(`--replica opens a hosted replica's page: it goes with --no-open and --json alone, not ${beside.join(", ")}`);
+  }
   if (v.bridge) {
     if (v.ssh !== undefined || v.mason !== undefined || v.timeout !== undefined || json) return wrong("--bridge is mason ui --ssh's own end on the server: it goes with --local-port alone");
     const port = Number(v["local-port"]);
@@ -169,6 +194,10 @@ export async function ui(argv: string[]): Promise<number> {
     const seconds = read.seconds;
     return overSsh(v.ssh, v.mason ?? "mason", seconds * 1000, !v["no-open"], json);
   }
+  // a replica on a hosted service (--replica, else MASON_REPLICA): --ssh and --bridge name their own target, above
+  const replica = replicaOf(v.replica, UI.usage);
+  if (replica !== null && "message" in replica) return failed("ui", replica, { json });
+  if (replica !== null) return hostedUi(replica, { open: !v["no-open"], json });
   const w = await reach(UI, json);
   if (w === null || w.state !== "up") return 1;
   const run = w.run;

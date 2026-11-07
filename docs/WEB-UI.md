@@ -10,6 +10,7 @@ mason ui --no-open    # prints its URL only
 mason ui --json       # { url, port, next }
 
 mason ui --ssh deploy@mason.example.com    # a server's page, from your machine ("On a server", below)
+mason ui --replica acme/shop               # a hosted replica's page, for its organisation's owner (docs/HOSTED-API.md)
 ```
 
 ## What it shows
