@@ -4,7 +4,14 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { DESTROY_USAGE, destroyPlan, removeProject, destroy } from "../src/cli/machine.ts";
+import { DESTROY_USAGE, removeProject, destroy } from "../src/cli/machine.ts";
+import * as machine from "../src/cli/machine.ts";
+
+/** `mason destroy --dry-run`'s plan, read from the module's namespace so this file loads where it is not yet */
+const destroyPlan: typeof machine.destroyPlan = (...a) => {
+  assert.equal(typeof machine.destroyPlan, "function", "src/cli/machine.ts destroyPlan: mason destroy --dry-run");
+  return machine.destroyPlan(...a);
+};
 import { DUCK_FILE, isProject, newConfig, readProject, writeConfig, type Project } from "../src/cli/project.ts";
 import type { DevRun } from "../src/cli/runs.ts";
 
