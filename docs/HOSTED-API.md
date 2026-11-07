@@ -129,7 +129,7 @@ checked before a byte is sent).
 | Subcommand | Request | Who | `200` / `201` |
 |---|---|---|---|
 | `list [<org>]` | `GET /v1/replicas/{org}` | a login, any role | `{ replicas: [Replica], more }` |
-| `create <org>/<name>` | `POST /v1/replicas/{org}` | a login, an admin or an owner | `201 { replica: Replica, checks: [SourceChecks] }` |
+| `create <org>/<name>` (or `--replica`, `MASON_REPLICA`) | `POST /v1/replicas/{org}` | a login, an admin or an owner | `201 { replica: Replica, checks: [SourceChecks] }` |
 | `status <org>/<name>` | `GET /v1/replicas/{org}/{name}` | a login, any role; a CI token made for that replica | `{ replica: Replica }` |
 
 `list` with no `<org>` asks `GET /v1/me` for the login's organisations (at most 20; past that it asks for one), then
@@ -137,7 +137,9 @@ each one's list. `more` is `true` when the organisation has more replicas than t
 
 ### `POST /v1/replicas/{org}`
 
-`Content-Type: application/json`, at most 64 KiB:
+What the CLI sends: `POST /v1/replicas/{org}`, the organisation in the path (as `{org}` of the replica named by the
+argument, `--replica` or `MASON_REPLICA`), `Authorization: Bearer <token>`, `Content-Type: application/json`, at most
+64 KiB:
 
 ```json
 { "name": "shop", "region": "<region>", "sizeGb": 50, "sources": [{ "name": "app", "variable": "DATABASE_URL", "url": "postgres://…" }] }
@@ -148,20 +150,33 @@ each one's list. `more` is `true` when the organisation has more replicas than t
   holds, in GB. The CLI checks only their form (a region's name, `--size` a whole number); which ones exist is the
   service's to say, and it refuses another with `400`, naming the field.
 - `sources` holds exactly one source for now: `name` is the project's sources file's name without `.yml`; `variable`
-  the variable it reads the URL from (`url: ${DATABASE_URL}`); `url` that variable's value, `postgres://` or
-  `postgresql://`, at most 2 KiB. A service may take a `ca` too (PEM `CERTIFICATE` blocks); the CLI sends none yet.
+  the variable the replica reads the URL from (`url: ${DATABASE_URL}`); `url` the URL as the person typed it or stdin
+  gave it (below), `postgres://` or `postgresql://`, at most 2 KiB. A service may take a `ca` too (PEM `CERTIFICATE` blocks); the CLI sends none yet.
 - Any other key is refused (`400`).
 
-**The URL.** The CLI reads it from `.env.local`, `.env` or the shell, by the variable the sources file names (the
-reader `mason start` uses), and from nowhere else: no flag takes it, so it never reaches a command line. A sources file
-with a `url:` written in it is refused before anything is sent: the replica reads its database's URL from a variable of
-its own environment, and a literal would be kept with the project's files. A value Mason could not connect by is
-refused too, and never repeated. The URL is sent this once, for Mason's checks of the database from the replica's side;
-a service never repeats it. The CLI holds its password as a secret of the command beside the token, in the ONE list
-every boundary reads: the exact test of every value (an answer that carries it in a value held to a grammar, or in a
-key, is refused whole), the masks of free text (a check's words, a refusal's, the system's words for an answer that
-did not come), and the output's gate. Each compares it with a text by ONE READING of both (`readUnits` in
-src/cli/hosted.ts), so it is found whatever form it is echoed in:
+**The URL.** The CLI never takes it from a flag, an argument, `.env.local`, `.env` or the shell. It reads it from the
+person or the pipe:
+
+- on a terminal (stdin a TTY), it asks on stderr (`DATABASE_URL, the database's URL (not shown; Ctrl-C cancels):`)
+  and reads one line with the terminal's echo off (raw mode), so nothing typed is shown or kept in a terminal's
+  history; Ctrl-C, Ctrl-D or Enter on an empty line cancels before anything is sent, and the terminal is put back on
+  every way out;
+- otherwise it reads stdin whole, at most 2 KiB after one trailing newline (`\n` or `\r\n`) is trimmed, within 60 s:
+  `mason replica create acme/shop --region <region> --size 50 < url.txt`, or piped from a secret store's command. An
+  empty stdin, more than one line or more than 2 KiB is refused, sending nothing.
+
+A command line that holds a URL (`://`, `postgres:`, or a `password=`), in any argument or flag, is refused before
+anything else is read (exit 2), never repeated, with the line to run instead. The sources file gives the variable's
+NAME alone (`url: ${DATABASE_URL}`), which is sent as `variable` and which the replica reads the URL by; a sources
+file with a `url:` written in it is refused before anything is sent: the replica reads its database's URL from a
+variable of its own environment, and a literal would be kept with the project's files. A value Mason could not
+connect by is refused too, and never repeated. The URL is sent this once, for Mason's checks of the database from the
+replica's side; a service never repeats it. The CLI holds its password as a secret of the command beside the token,
+in the ONE list every boundary reads: the exact test of every value (an answer that carries it in a value held to a
+grammar, or in a key, is refused whole), the masks of free text (a check's words, a refusal's, the system's words for
+an answer that did not come), and the output's gate, which holds it before anything after the question is written.
+Each compares it with a text by ONE READING of both (`readUnits` in src/cli/hosted.ts), so it is found whatever form
+it is echoed in:
 
 - its case (upper, lower, mixed; `ß` and `SS` alike);
 - `%XX` escapes, of any or every byte, UTF-8 decoded;
@@ -233,9 +248,10 @@ list <org>` for a `404`, else the same `mason replica create`.
 | `state` | `checking` (its checks run; nothing made yet), `creating` (its region makes it), `ready`, `failed` (its region did not make it, after every attempt: an admin tries again in the web app), `deleting` or `deleted` |
 | `createdAt` | ISO 8601 with its zone |
 | `allowlist` | the address ranges that may query it, each IPv4 or IPv6 with its prefix length; at most 1000 |
+| `page` | optional: the replica's page in the service's web app, where its allowlist is set; an absolute URL on the service's own origin, with no user or password, tested as the URL parser prints it (one elsewhere refuses the answer). `mason replica create` prints it when the replica is ready, `status` beside its other facts |
 | `pending` | what of its region's work is not done, at most 16: `[{ change: "create" \| "allowlist", state: "pending" \| "failed", attempts, failure?, nextAttemptAt? }]`, `failure` a sentence (said as one line), `nextAttemptAt` ISO 8601 |
 
-`--json` prints each replica with these keys, `failure` and `nextAttemptAt` `null` when absent.
+`--json` prints each replica with these keys, `page`, `failure` and `nextAttemptAt` `null` when absent.
 
 **What is tested first.** Before any value is held to its grammar, every string of each answer, each key included, is
 put to the exact test (`carriesNoSecret`: the token and the URL's password, and the shapes of a token or a password),

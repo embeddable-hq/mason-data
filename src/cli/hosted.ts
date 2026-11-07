@@ -636,7 +636,7 @@ export interface DeviceCode { deviceCode: string; userCode: string; verification
  * the mask would change is no page to send a person to: either refuses it. An honest page is refused by the mask with
  * a probability under 1 in a million (it must hold 3 runs of 4 of a 43-character body by chance).
  */
-function pageUrl(service: Service, v: unknown, secrets: readonly string[]): { href: string } | { elsewhere: string } | null {
+export function pageUrl(service: Service, v: unknown, secrets: readonly string[]): { href: string } | { elsewhere: string } | null {
   if (!str(v, 2048)) return null;
   let u: URL;
   try { u = new URL(v); } catch { return null; }

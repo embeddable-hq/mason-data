@@ -320,8 +320,8 @@ function terminalEnv(width: number): Record<string, string> {
  * is the CLI's; and every line a person sees is one the CLI began (`seenProblems`) — at `terminal` columns for a run on
  * a terminal, the logical lines of a pipe otherwise.
  */
-export async function mason(h: string, argv: string[], env: Record<string, string>, o: { timeoutMs?: number; terminal?: number; lines?: Lines } = {}): Promise<Answer> {
-  const a = await runMason(h, argv, o.terminal ? { ...env, ...terminalEnv(o.terminal) } : env, o.timeoutMs ?? 60_000);
+export async function mason(h: string, argv: string[], env: Record<string, string>, o: { timeoutMs?: number; terminal?: number; lines?: Lines; stdin?: string } = {}): Promise<Answer> {
+  const a = await runMason(h, argv, o.terminal ? { ...env, ...terminalEnv(o.terminal) } : env, o.timeoutMs ?? 60_000, undefined, o.stdin);
   ANSWERS.push(a);
   const line = `mason ${argv.join(" ")}${o.terminal ? ` (a terminal ${o.terminal} wide)` : ""}`;
   const json = argv.includes("--json");
