@@ -301,7 +301,7 @@ test("mason wait <generated table>, Mason up: 0 once it holds what was synced, 1
     const none = await runMason(p.root, ["wait", "monthly", "--json"], matrixEnv());
     assert.equal(none.code, 1, none.stdout + none.stderr);
     const n = (JSON.parse(none.stdout) as { error: { code: string; message: string; fix: string } }).error;
-    assert.deepEqual([n.code, n.message, n.fix], ["not_found", 'there is no added or generated table "monthly"', "name one of: daily, weekly, broken"]);
+    assert.deepEqual([n.code, n.message, n.fix], ["not_found", 'there is no added or generated table "monthly"', "name one of: orders, events, fresh, daily, weekly, broken"]);
   } finally { p.close(); }
 });
 
