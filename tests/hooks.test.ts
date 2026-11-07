@@ -213,8 +213,164 @@ test("no-rerun: reading a run is allowed", () => {
   for (const command of ["gh run view 123 --log-failed", "gh run list", "echo gh run rerun"]) assertAllowed("no-rerun", command);
 });
 
+// ------------------------------------------------------------------ the coordinator writes no change itself
+
+// issue 741: a coordinator wrote five changes itself. The repository is $CLAUDE_PROJECT_DIR; a sub-agent carries agent_id.
+const COORD_SAYS = /: the coordinator writes no change itself \(CLAUDE\.md "How work is done here", \.claude\/skills\/coordinate\/SKILL\.md\): start an implementer, or send this to the PR's implementer with SendMessage$/;
+
+/** A repository of its own in a temp folder, with a worktree folder, a git index and the root CLAUDE.md. */
+function repo(t: { after: (fn: () => void) => void }): string {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "coordinator-writes-")));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(dir, ".claude", "worktrees", "x", "app"), { recursive: true });
+  fs.mkdirSync(path.join(dir, "app"));
+  execFileSync("git", ["init", "-q", dir]);
+  return dir;
+}
+
+function coordinator(root: string, input: Record<string, unknown>, who: Record<string, unknown> = {}): { code: number | null; stderr: string } {
+  const r = spawnSync(process.execPath, [hook("coordinator-writes")], {
+    input: JSON.stringify({ hook_event_name: "PreToolUse", cwd: root, ...input, ...who }), encoding: "utf8", timeout: 30_000,
+    env: { ...process.env, CLAUDE_PROJECT_DIR: root },
+  });
+  return { code: r.status, stderr: r.stderr };
+}
+
+const edit = (tool: string, file: string): Record<string, unknown> =>
+  ({ tool_name: tool, tool_input: tool === "NotebookEdit" ? { notebook_path: file } : { file_path: file, content: "x" } });
+const shell = (command: string): Record<string, unknown> => ({ tool_name: "Bash", tool_input: { command } });
+
+function refused(root: string, input: Record<string, unknown>): void {
+  const r = coordinator(root, input);
+  assert.equal(r.code, 2, `refused from the top session: ${JSON.stringify(input)}\n${r.stderr}`);
+  assert.match(r.stderr.trimEnd(), COORD_SAYS, JSON.stringify(input));
+  assert.equal(r.stderr.trimEnd().split("\n").length, 1, `one line: ${r.stderr}`);
+  const sub = coordinator(root, input, SUB);
+  assert.deepEqual([sub.code, sub.stderr], [0, ""], `a sub-agent is never affected: ${JSON.stringify(input)}`);
+}
+
+function letThrough(root: string, input: Record<string, unknown>): void {
+  const r = coordinator(root, input);
+  assert.deepEqual([r.code, r.stderr], [0, ""], `allowed: ${JSON.stringify(input)}`);
+}
+
+test("coordinator-writes: an edit of the repository's code or a worktree's files is refused from the top session, never from a sub-agent", (t) => {
+  const root = repo(t);
+  for (const tool of ["Edit", "Write", "NotebookEdit"]) {
+    for (const file of [
+      path.join(root, "app", "a.ts"),
+      path.join(root, "app", "new", "deep.ts"),
+      path.join(root, "README.md"),
+      path.join(root, ".github", "workflows", "ci.yml"),
+      path.join(root, ".claude", "worktrees", "x", "app", "a.ts"),
+      // a worktree's own CLAUDE.md and .claude/ are a branch's files
+      path.join(root, ".claude", "worktrees", "x", "CLAUDE.md"),
+      path.join(root, ".claude", "worktrees", "x", ".claude", "settings.json"),
+      path.join(root, "docs", "CLAUDE.md"),
+      // relative to the cwd, and through ..
+      "app/a.ts",
+      path.join(root, ".claude", "..", "app", "a.ts"),
+      path.join(root, ".claude", "skills", "..", "..", "app", "a.ts"),
+      ".claude/worktrees/x/app/a.ts",
+    ]) refused(root, edit(tool, file));
+  }
+  // a link under .claude/ that points into the code is the code
+  fs.symlinkSync(path.join(root, "app"), path.join(root, ".claude", "app-link"));
+  refused(root, edit("Write", path.join(root, ".claude", "app-link", "a.ts")));
+});
+
+test("coordinator-writes: the root CLAUDE.md, .claude/ outside its worktrees and a file outside the repository are allowed", (t) => {
+  const root = repo(t);
+  for (const file of [
+    path.join(root, "CLAUDE.md"),
+    "CLAUDE.md",
+    path.join(root, ".claude", "skills", "coordinate", "SKILL.md"),
+    path.join(root, ".claude", "settings.json"),
+    path.join(root, ".claude", "rules", "cli.md"),
+    path.join(os.tmpdir(), "scratchpad", "notes.txt"),
+    path.join(root, "..", "elsewhere.ts"),
+  ]) letThrough(root, edit("Write", file));
+});
+
+test("coordinator-writes: a git command that lands a change is refused from the top session, in every shape a session types", (t) => {
+  const root = repo(t);
+  for (const command of [
+    "git commit -am x",
+    "git push -u origin claude/x",
+    "git merge origin/main",
+    "git merge --no-edit origin/main",
+    "git cherry-pick abc123",
+    "git rebase origin/main",
+    "git am < x.patch",
+    "git apply x.patch",
+    "git revert HEAD",
+    "git -C .claude/worktrees/x commit -m x",
+    "git -C /tmp/w push",
+    "cd w && git commit -m x",
+    "git status && git push",
+    "bash -c 'git commit -m x'",
+    "GIT_DIR=x git commit -m x",
+    "git push --abort",
+  ]) refused(root, shell(command));
+  refused(root, { tool_name: "mcp__github__push_files", tool_input: { owner: "o", repo: "r", branch: "b", files: [] } });
+  refused(root, { tool_name: "mcp__github__create_or_update_file", tool_input: { path: "app/a.ts" } });
+  refused(root, { tool_name: "mcp__github__delete_file", tool_input: { path: "app/a.ts" } });
+});
+
+test("coordinator-writes: reading git, withdrawing a merge and the worktrees' housekeeping are allowed", (t) => {
+  const root = repo(t);
+  for (const command of [
+    "git merge --abort", "git rebase --abort", "git cherry-pick --abort", "git log --oneline -5", "git diff main...HEAD",
+    "git status", "git fetch origin", "git worktree add .claude/worktrees/y -b claude/y origin/main",
+    "git worktree remove .claude/worktrees/y", "git branch -D claude/y", "gh pr merge 12 --squash --match-head-commit abc",
+    "echo git commit",
+  ]) letThrough(root, shell(command));
+});
+
+test("coordinator-writes: a lone git commit of CLAUDE.md and .claude/ staged in the root is allowed; anything else staged, or that it cannot tell, is refused", (t) => {
+  const root = repo(t);
+  const write = (rel: string): void => {
+    fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+    fs.writeFileSync(path.join(root, rel), "x\n");
+  };
+  const git = (...a: string[]): void => { execFileSync("git", ["-C", root, ...a]); };
+  // nothing staged: nothing to tell from
+  refused(root, shell("git commit -m x"));
+  write("CLAUDE.md");
+  write(".claude/skills/coordinate/SKILL.md");
+  git("add", "CLAUDE.md", ".claude/skills");
+  for (const command of ["git commit -m 'process: one line'", "git commit -q -m x -m y", "git commit --message=x", "git commit -F msg.txt -s"]) {
+    letThrough(root, shell(command));
+  }
+  // flags that commit what the index does not show yet, a commit beside another command, or from another directory
+  for (const command of ["git commit -a -m x", "git commit -m x app/a.ts", "git commit --amend -m x", "git commit -p -m x",
+    "git add -A && git commit -m x", "git -C . commit -m x", "GIT_INDEX_FILE=/tmp/i git commit -m x", "git commit -m x && git push"]) {
+    refused(root, shell(command));
+  }
+  // a worktree's CLAUDE.md is a branch's file
+  write(".claude/worktrees/x/CLAUDE.md");
+  git("add", "-f", ".claude/worktrees/x/CLAUDE.md");
+  refused(root, shell("git commit -m x"));
+  git("rm", "-q", "--cached", ".claude/worktrees/x/CLAUDE.md");
+  letThrough(root, shell("git commit -m x"));
+  write("app/a.ts");
+  git("add", "app/a.ts");
+  refused(root, shell("git commit -m x"));
+  // a rename into .claude/ still deletes the code it came from
+  git("rm", "-q", "--cached", "app/a.ts");
+  execFileSync("git", ["-C", root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base"]);
+  write("app/b.ts");
+  git("add", "app/b.ts");
+  execFileSync("git", ["-C", root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "b"]);
+  git("mv", "app/b.ts", ".claude/b.ts");
+  refused(root, shell("git commit -m x"));
+  // a cwd outside any repository: git cannot answer
+  const r = coordinator(root, { ...shell("git commit -m x"), cwd: os.tmpdir() });
+  assert.equal(r.code, 2, r.stderr);
+});
+
 test("the PreToolUse hooks let every other tool through, and allow on an empty or malformed input", () => {
-  for (const name of ["test-timeout", "merge-head", "no-rerun", "wake-up"]) {
+  for (const name of ["test-timeout", "merge-head", "no-rerun", "coordinator-writes", "wake-up"]) {
     if (name !== "wake-up") {
       const r = run(name, { hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: "/x" } });
       assert.deepEqual([r.code, r.stderr], [0, ""], name);

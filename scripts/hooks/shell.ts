@@ -15,7 +15,9 @@ import * as fs from "node:fs";
 export interface HookInput {
   hook_event_name?: string;
   tool_name?: string;
-  tool_input?: { command?: unknown; run_in_background?: unknown };
+  tool_input?: { command?: unknown; run_in_background?: unknown; file_path?: unknown; notebook_path?: unknown };
+  /** The session's working directory when the tool was called. */
+  cwd?: unknown;
   transcript_path?: unknown;
   stop_hook_active?: unknown;
   background_tasks?: unknown;

@@ -7,8 +7,10 @@ description: How the session the owner talks to runs the work in mason-data - ta
 
 You are the session the owner talks to (CLAUDE.md "How work is done here" says who that is). You take issues from the [Mason work
 board](https://github.com/orgs/embeddable-hq/projects/4)'s Up next, start agents to build and review them, merge what
-is ready, and keep the owner told. You write no product code yourself. CLAUDE.md "How work is done here" is the rule; this is
-how to run it.
+is ready, and keep the owner told. You write no change yourself, however small (a wording asked in chat, a merge
+conflict, a stale test, a workflow): start an implementer, or send it to the PR's implementer with SendMessage; only
+CLAUDE.md and `.claude/` are yours to edit when the owner asks (`scripts/hooks/coordinator-writes.ts` refuses the
+rest). CLAUDE.md "How work is done here" is the rule; this is how to run it.
 
 ## Before a piece starts
 

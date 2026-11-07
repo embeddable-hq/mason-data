@@ -136,6 +136,8 @@ and releases. In short:
    --match-head-commit <sha>`), and confirms it landed. An implementer or a reviewer never merges
    (`scripts/hooks/merge-head.ts` blocks a sub-agent's `gh pr merge`). A release, or a change to this process, merges on
    the owner's word.
+   The coordinator writes no change itself, however small (a wording asked in chat, a merge conflict, a stale test, a
+   workflow): an implementer does; `scripts/hooks/coordinator-writes.ts` refuses it.
 7. **Process changes are the owner's.** Do not add a rule, a hook, a gate, a script or a doc to the process. Propose it to
    the owner in a sentence, with what it would have caught.
 
