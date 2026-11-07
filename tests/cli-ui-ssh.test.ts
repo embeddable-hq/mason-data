@@ -592,9 +592,9 @@ test("mason serve's settings: the page's port is a setting, and an address for i
   const cwd = temp("serve-settings");
   const ok = serveSettings(base, cwd);
   assert.ok(!("message" in ok));
-  if (!("message" in ok)) assert.deepEqual(ok.ui, { port: 4039, named: false });
+  if (!("message" in ok)) assert.deepEqual(ok.ui, { port: 4039, named: false, socket: null });
   const named = serveSettings({ ...base, MASON_UI_PORT: "4100" }, cwd);
-  if ("message" in named) assert.fail(named.message); else assert.deepEqual(named.ui, { port: 4100, named: true });
+  if ("message" in named) assert.fail(named.message); else assert.deepEqual(named.ui, { port: 4100, named: true, socket: null });
   const host = serveSettings({ ...base, MASON_UI_HOST: "0.0.0.0" }, cwd);
   assert.ok("message" in host);
   if ("message" in host) assert.match(host.message, /MASON_UI_HOST is set, and the web page has no address but 127\.0\.0\.1: remove it/);

@@ -95,7 +95,7 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   without `tests/cli-security.test.ts` and `tests/cli-run-server.test.ts`.
 - **On loopback alone, under both runs**: the page listens only through `listenOnLoopback` (src/cli/run-server.ts), which
   takes no address, because off loopback it would need TLS and a login, which are not designed; `MASON_UI_HOST` set
-  refuses `mason serve`. `mason serve`'s page is reached with `mason ui --ssh` (src/cli/ui-ssh.ts, docs/WEB-UI.md "On a
+  refuses `mason serve`. `MASON_UI_SOCKET` adds a Unix socket for a process on the same machine (src/cli/ui-socket.ts): 0600, in a folder only Mason's user can write, a stale one replaced and nothing else at the path removed, gone on exit; a request on it is the run's own request behind the same guard, never trusted for arriving there (tests/cli-ui-socket.test.ts). `mason serve`'s page is reached with `mason ui --ssh` (src/cli/ui-ssh.ts, docs/WEB-UI.md "On a
   server"): a bridge beside the run, over ssh's stdio, never `ssh -L` and never a published port. **A `PageTunnel`
   opened with the run's token (`POST /api/ui/tunnel`, its connection IS the tunnel) is the guard's only way to add a
   Host**: its port's two loopback names, while it lasts, never a wider rule; the laptop gets a one-use ticket, never the
