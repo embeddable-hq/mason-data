@@ -1383,10 +1383,10 @@ test("mason start --port is now --ui-port: the exact line to run and exit 2, sta
       assert.equal(json.code, 2, json.stdout + json.stderr);
       const want = `${line} --json`;
       assert.deepEqual(JSON.parse(json.stdout), { error: { code: "usage", message: "--port is now --ui-port", why, fix: want },
-        next: [{ command: want, what: "Mason, its web page and the commands on that port" }] });
+        next: [{ command: want, what: "Mason, its web page and the commands on that port" }, { command: "mason start --help", what: "its usage, with every option" }] });
       const person = await runMason(root, ["start", ...flags], matrixEnv());
       assert.equal(person.code, 2);
-      assert.equal(person.stderr, `✗ mason start: --port is now --ui-port\n  why   ${why}\n  fix   ${line}\n\nNext:\n  ${line.padEnd(44)}  Mason, its web page and the commands on that port\n`);
+      assert.equal(person.stderr, `✗ mason start: --port is now --ui-port\n  why   ${why}\n  fix   ${line}\n\nNext:\n  ${line.padEnd(44)}  Mason, its web page and the commands on that port\n  ${"mason start --help".padEnd(44)}  its usage, with every option\n`);
     }
     const both = await runMason(root, ["start", "--poll", "--port", "4100", "--json"], matrixEnv());
     assert.equal(both.code, 2);
@@ -1421,8 +1421,8 @@ test("mason -C <folder> runs a command as if started there; a folder missing, a 
       [["-C"], "-C needs a folder: mason -C <folder> <command>"]] as Array<[string[], string]>) {
       const a = await runMason(away, argv, matrixEnv());
       assert.equal(a.code, 2, a.stdout + a.stderr);
-      if (argv.includes("--json")) assert.deepEqual(JSON.parse(a.stdout), { error: { code: "usage", message, fix }, next: [] });
-      else assert.equal(a.stderr, `✗ mason: ${message}\n  fix   ${fix}\n`);
+      if (argv.includes("--json")) assert.deepEqual(JSON.parse(a.stdout), { error: { code: "usage", message, fix }, next: [{ command: "mason --help", what: "every command" }] });
+      else assert.equal(a.stderr, `✗ mason: ${message}\n  fix   ${fix}\n\nNext:\n  ${"mason --help".padEnd(44)}  every command\n`);
     }
   } finally { fs.rmSync(root, { recursive: true, force: true }); fs.rmSync(away, { recursive: true, force: true }); }
 });
