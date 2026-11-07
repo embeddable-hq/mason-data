@@ -46,7 +46,7 @@ test("a superuser, itself or by a membership it may SET ROLE to: ONE warning, ro
   const self = roleChecks(facts({ roles: [{ name: "app", self: true, superuser: true, bypassrls: true }], relations: [rel("public.orders", { owned: true })] }), ask());
   assert.deepEqual(self.map((c) => [c.code, c.ok, c.warn]), [["role_superuser", true, true]]);
   assert.equal(self[0]!.detail, "app is a superuser: it may write to, alter or drop anything on this database. " +
-    "Mason only reads, so a role that may write lets a Mason bug or a stolen URL change your database: sync as a role that only reads");
+    "Mason only reads, but, for security reasons, we recommend using a role that only reads");
   const member = roleChecks(facts({ roles: [{ name: "app", self: true, superuser: false, bypassrls: false }, { name: "admins", self: false, superuser: true, bypassrls: false }] }), ask());
   assert.deepEqual(member.map((c) => c.code), ["role_superuser"]);
   assert.match(member[0]!.detail, /^app is a member of admins, a superuser: it may SET ROLE to it/);
@@ -143,7 +143,7 @@ test("THE CLASS: SECURITY DEFINER code it reaches whose owner may write is LISTE
   assert.equal(said("role_may_run_definer_code"), `app ${LISTING}`);
   assert.equal(said("role_reaches_foreign_server"), "app may write the foreign table(s) public.remote_orders, and has a user mapping (its own or PUBLIC's) on loopback, which it may use: " +
     "what it sends there runs as the mapping's user, and the server may be this very database");
-  assert.equal(said("role_may_become_another"), "app has ADMIN OPTION on writers: it may grant itself that role and its privileges; " +
+  assert.equal(said("role_may_become_another"), "app has ADMIN OPTION on writers; " +
     "has CREATEROLE, which before Postgres 16 lets it grant itself any role but a superuser; holds pg_execute_server_program: the server's programs or files, as its operating-system user");
   // the way out changes no role's privileges but the new one's: what every role reaches is said, never revoked
   const fix = readOnlyFix(f, ask());
