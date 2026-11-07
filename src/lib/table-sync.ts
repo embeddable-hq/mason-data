@@ -229,9 +229,14 @@ function saidInTheFile(what: { sync: boolean; publication: boolean }): string {
  * every one given on ONE report, one coherent way out (a publication goes with replication). Null when none is given.
  * Read from the raw command line, before the options are parsed, so a removed flag is answered as removed and never
  * as an unknown option.
+ *
+ * `--port` IS NOW `--ui-port` (issue 729: it is the web page's and the commands' port, as MASON_UI_PORT is on a server,
+ * and read as the Postgres API's): answered on the same report with the line to run — `start`, built from the flags
+ * mason start takes alone, so nothing else of the line is repeated. `sync`: a sources-file flag was given.
  */
-export function removedStartFlags(argv: readonly string[], top: () => SourcesTop): { message: string; why: string; fix: string } | null {
-  let replication = false, poll = false, publication: string | null | undefined;
+export function removedStartFlags(argv: readonly string[], top: () => SourcesTop): { message: string; why: string; fix: string; start: string; sync: boolean } | null {
+  let replication = false, poll = false, publication: string | null | undefined, port = false;
+  const kept: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--") break;
@@ -239,9 +244,17 @@ export function removedStartFlags(argv: readonly string[], top: () => SourcesTop
     else if (a === "--poll" || a.startsWith("--poll=")) poll = true;
     else if (a.startsWith("--publication=")) publication = a.slice("--publication=".length) || null;
     else if (a === "--publication") { const v = argv[i + 1]; publication = v !== undefined && !v.startsWith("-") ? v : null; }
+    else if (a === "--port" || a.startsWith("--port=")) {
+      const v = a === "--port" ? argv[i + 1] : a.slice("--port=".length);
+      if (a === "--port" && v !== undefined && !v.startsWith("-")) i++;
+      port = true;
+      kept.push(`--ui-port ${v !== undefined && /^\d{1,5}$/.test(v) ? v : "<n>"}`);
+    } else if (a === "--attach" || a === "--self-signed-tls" || a === "--json") kept.push(a);
   }
   const given = [...(replication ? ["--replication"] : []), ...(poll ? ["--poll"] : []), ...(publication !== undefined ? ["--publication"] : [])];
-  if (given.length === 0) return null;
+  const start = port ? ["mason start", ...kept].join(" ") : "mason start";
+  const portSaid = { message: "--port is now --ui-port", why: "it is the port of the web page and the mason commands (MASON_UI_PORT on a server), never the Postgres API's (MASON_PG_PORT)" };
+  if (given.length === 0) return port ? { ...portSaid, fix: start, start, sync: false } : null;
   const t = top();
   const named = given.length === 1 ? `${given[0]} is gone` : `${given.slice(0, -1).join(", ")} and ${given.at(-1)} are gone`;
   const pub = publication === undefined ? null : topEdit(t, "publication", [publication ?? "<name>"]);
@@ -263,8 +276,9 @@ export function removedStartFlags(argv: readonly string[], top: () => SourcesTop
     fix = `${edit} (${edit.startsWith("keep ") ? "every table is polled already; a table's entry may say its own"
       : "any interval: poll 5s, poll 1h; or sync: off, the default, and mason sync <table> when you need it"})`;
   }
-  return { message: `${named}: the sources file says it now`, why: saidInTheFile({ sync: replication || poll, publication: publication !== undefined }),
-    fix: `${fix}, then mason start` };
+  const why = saidInTheFile({ sync: replication || poll, publication: publication !== undefined });
+  if (!port) return { message: `${named}: the sources file says it now`, why, fix: `${fix}, then mason start`, start, sync: true };
+  return { message: `${named}: the sources file says it now; ${portSaid.message}`, why: `${why}; ${portSaid.why}`, fix: `${fix}, then ${start}`, start, sync: true };
 }
 
 /**

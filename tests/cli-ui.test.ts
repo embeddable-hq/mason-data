@@ -9,6 +9,7 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createRunServer, type RunContext } from "../src/cli/run-server.ts";
 import { parseSource } from "../src/cli/preflight.ts";
 import { matrixEnv, runMason } from "./cli-matrix.ts";
@@ -68,6 +69,36 @@ test("mason ui --no-open: the URL for the person at this terminal, and nothing o
     assert.match(a.stdout, /^Mason's web page\n {2}url {7}http:\/\/127\.0\.0\.1:\d+\/\?token=u{64}\n {2}project {3}shop\n/);
     assert.match(a.stdout, /Tip: The URL carries this run's token, traded for a cookie on the first visit: paste it nowhere else\./);
     assert.match(a.stdout, /Next:\n {2}mason status +the same, in this terminal/);
+  } finally { p.close(); }
+});
+
+test("mason ui opens a browser only when its stdout is a terminal: in a pipe it prints the address alone", { skip: process.platform === "darwin" || process.platform === "win32" ? "the opener faked is xdg-open" : false }, async () => {
+  const p = await upProject(true);
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "mason-ui-opener-"));
+  made.push(bin);
+  // a fake xdg-open that records what it was asked to open, first on PATH
+  const opened = path.join(bin, "opened");
+  fs.writeFileSync(path.join(bin, "xdg-open"), `#!/bin/sh\nprintf '%s' "$1" > "${opened}"\n`, { mode: 0o755 });
+  // the seam for a terminal, as tests/hosted-fake.ts terminalEnv's: a preload that makes stdout say it is one
+  const hook = path.join(bin, "terminal.mjs");
+  fs.writeFileSync(hook, `Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });\n`);
+  const env = matrixEnv({ PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`, NO_COLOR: "1" });
+  try {
+    const piped = await runMason(p.root, ["ui"], env);
+    assert.equal(piped.code, 0, piped.stderr);
+    assert.match(piped.stdout, /^Mason's web page\n {2}url {7}http:\/\/127\.0\.0\.1:\d+\/\?token=u{64}\n/);
+    assert.ok(!fs.existsSync(opened), "no browser opened for a pipe");
+    const terminal = await runMason(p.root, ["ui"], { ...env, NODE_OPTIONS: `--import=${pathToFileURL(hook).href}` });
+    assert.equal(terminal.code, 0, terminal.stderr);
+    assert.match(terminal.stdout, /^Mason's web page, opened in your browser\n/);
+    for (let i = 0; i < 50 && !fs.existsSync(opened); i++) await new Promise((r) => setTimeout(r, 100));
+    assert.equal(fs.readFileSync(opened, "utf8"), `http://127.0.0.1:${p.port}/?token=${TOKEN}`);
+    fs.rmSync(opened);
+    // --no-open on a terminal: none
+    const noOpen = await runMason(p.root, ["ui", "--no-open"], { ...env, NODE_OPTIONS: `--import=${pathToFileURL(hook).href}` });
+    assert.match(noOpen.stdout, /^Mason's web page\n/);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.ok(!fs.existsSync(opened));
   } finally { p.close(); }
 });
 

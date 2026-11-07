@@ -1342,3 +1342,121 @@ test("mason start --replication, --poll and --publication are gone: each answers
     assert.match((JSON.parse(away.stdout) as { error: { fix: string } }).error.fix, /^write sync: poll 5m at the top of mason\/sources\/<name>\.yml /);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+// ------------------------------------------------------------------ the command line's arguments (issue 729)
+
+/** A project folder Mason is not running for: a config, a sources file, no run. */
+function stoppedProject(name: string): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `mason-${name}-`));
+  fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
+  fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
+  fs.writeFileSync(path.join(root, "mason", "sources", "shop.yml"), "kind: postgres\nurl: postgres://mason:secret@127.0.0.1:1/shop\ntables:\n  orders: {}\n");
+  fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name, folder: "mason", remote: false, apiKey: "k".repeat(48), sourceServer: null, running: null }), { mode: 0o600 });
+  return root;
+}
+
+test("mason status, stop and logs take no argument: mason stop myproject is a wrong line (exit 2), never this folder's project stopped", async () => {
+  const root = stoppedProject("args");
+  try {
+    for (const cmd of ["status", "stop", "logs"]) {
+      const json = await runMason(root, [cmd, "myproject", "--json"], matrixEnv());
+      assert.equal(json.code, 2, `${cmd}: ${json.stdout}${json.stderr}`);
+      assert.deepEqual(JSON.parse(json.stdout), { error: { code: "usage", message: "it takes no argument (myproject): a project is its folder",
+        fix: `run it in the project's folder: cd <folder> && mason ${cmd}, or mason -C <folder> ${cmd}` },
+        next: [{ command: `mason ${cmd} --help`, what: "its usage, with every option" }] });
+      const person = await runMason(root, [cmd, "myproject", "other"], matrixEnv());
+      assert.equal(person.code, 2);
+      assert.equal(person.stdout, "");
+      assert.match(person.stderr, new RegExp(`^✗ mason ${cmd}: it takes no argument \\(myproject other\\): a project is its folder\\n`));
+      assert.match(person.stderr, new RegExp(`\\nusage: mason ${cmd}\\b[^]*\\nmason ${cmd} --help for more\\n$`), "the synopsis, not the whole usage");
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("mason start --port is now --ui-port: the exact line to run and exit 2, starting nothing; with a removed sync flag, one report", async () => {
+  const root = stoppedProject("ui-port");
+  try {
+    const why = "it is the port of the web page and the mason commands (MASON_UI_PORT on a server), never the Postgres API's (MASON_PG_PORT)";
+    for (const [flags, line] of [[["--port", "4100"], "mason start --ui-port 4100"], [["--attach", "--port=4100"], "mason start --attach --ui-port 4100"],
+      [["--port"], "mason start --ui-port <n>"], [["--port", "x; rm -rf /"], "mason start --ui-port <n>"]] as Array<[string[], string]>) {
+      const json = await runMason(root, ["start", ...flags, "--json"], matrixEnv());
+      assert.equal(json.code, 2, json.stdout + json.stderr);
+      const want = `${line} --json`;
+      assert.deepEqual(JSON.parse(json.stdout), { error: { code: "usage", message: "--port is now --ui-port", why, fix: want },
+        next: [{ command: want, what: "Mason, its web page and the commands on that port" }, { command: "mason start --help", what: "its usage, with every option" }] });
+      const person = await runMason(root, ["start", ...flags], matrixEnv());
+      assert.equal(person.code, 2);
+      assert.equal(person.stderr, `✗ mason start: --port is now --ui-port\n  why   ${why}\n  fix   ${line}\n\nNext:\n  ${line.padEnd(44)}  Mason, its web page and the commands on that port\n  ${"mason start --help".padEnd(44)}  its usage, with every option\n`);
+    }
+    const both = await runMason(root, ["start", "--poll", "--port", "4100", "--json"], matrixEnv());
+    assert.equal(both.code, 2);
+    const e = (JSON.parse(both.stdout) as { error: { message: string; fix: string } }).error;
+    assert.equal(e.message, "--poll is gone: the sources file says it now; --port is now --ui-port");
+    assert.match(e.fix, /, then mason start --ui-port 4100 --json$/);
+    assert.ok(!fs.existsSync(path.join(root, ".mason", "dev.log")), "nothing was spawned");
+    // the new name is read: a wrong value is the new flag's
+    const bad = await runMason(root, ["start", "--ui-port", "0", "--attach", "--json"], matrixEnv());
+    assert.equal(bad.code, 2);
+    assert.match((JSON.parse(bad.stdout) as { error: { message: string } }).error.message, /^--ui-port must be a port number \(1-65535\), not "0"$/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("mason -C <folder> runs a command as if started there; a folder missing, a file or none is a wrong line (exit 2)", async () => {
+  const root = stoppedProject("chdir");
+  const away = fs.mkdtempSync(path.join(os.tmpdir(), "mason-away-"));
+  try {
+    const here = await runMason(root, ["status", "--json"], matrixEnv());
+    const there = await runMason(away, ["-C", root, "status", "--json"], matrixEnv());
+    assert.equal(there.code, here.code, there.stdout + there.stderr);
+    assert.deepEqual(JSON.parse(there.stdout), JSON.parse(here.stdout));
+    assert.match(there.stdout, /chdir/, "the project of the folder named");
+    // relative, and each -C from the last, as git's
+    const rel = await runMason(path.dirname(root), ["-C", ".", "-C", path.basename(root), "status", "--json"], matrixEnv());
+    assert.deepEqual(JSON.parse(rel.stdout), JSON.parse(here.stdout));
+    const file = path.join(away, "f.txt");
+    fs.writeFileSync(file, "");
+    const fix = "mason -C <folder> <command>: the command runs as if started in that folder";
+    for (const [argv, message] of [[["-C", path.join(away, "nope"), "status", "--json"], `-C ${JSON.stringify(path.join(away, "nope"))}: there is no such folder`],
+      [["-C", file, "status", "--json"], `-C ${JSON.stringify(file)}: it is not a folder`],
+      [["-C"], "-C needs a folder: mason -C <folder> <command>"]] as Array<[string[], string]>) {
+      const a = await runMason(away, argv, matrixEnv());
+      assert.equal(a.code, 2, a.stdout + a.stderr);
+      if (argv.includes("--json")) assert.deepEqual(JSON.parse(a.stdout), { error: { code: "usage", message, fix }, next: [{ command: "mason --help", what: "every command" }] });
+      else assert.equal(a.stderr, `✗ mason: ${message}\n  fix   ${fix}\n\nNext:\n  ${"mason --help".padEnd(44)}  every command\n`);
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); fs.rmSync(away, { recursive: true, force: true }); }
+});
+
+test("a list flag takes a comma list or the flag repeated, meaning the same: --columns, --include, --key, --outcome, --scope", async () => {
+  const C = await import("../src/cli/command.ts") as unknown as Record<string, unknown>;
+  const listFlag = C.listFlag as ((v: unknown) => string | undefined) | undefined;
+  assert.equal(typeof listFlag, "function", "src/cli/command.ts reads a list flag (listFlag)");
+  const parse = C.parseCommand as (spec: unknown, argv: string[]) => { values: Record<string, unknown>; positionals: string[] };
+  const read = (argv: string[]): unknown => { const f = parse(commands.ADD, argv); return addSpecs(f.positionals, listFlag!(f.values.columns), listFlag!(f.values.include), listFlag!(f.values.key)); };
+  assert.deepEqual(read(["orders", "--columns", "id", "--columns", "status,total"]), read(["orders", "--columns", "id,status,total"]));
+  assert.deepEqual(read(["orders", "--include", "token", "--include", "secret"]), read(["orders", "--include", "token,secret"]));
+  assert.deepEqual(read(["orders", "--key", "a", "--key", "b"]), [{ table: "orders", columns: ["*"], key: ["a", "b"] }]);
+  assert.equal(listFlag!(undefined), undefined);
+  const root = stoppedProject("lists");
+  try {
+    // --outcome repeated: each one read (the second is the one refused), as in a comma list
+    const outcomes = await runMason(root, ["logs", "--requests", "--outcome", "ok", "--outcome", "bogus", "--json"], matrixEnv());
+    assert.equal(outcomes.code, 2, outcomes.stdout + outcomes.stderr);
+    assert.match((JSON.parse(outcomes.stdout) as { error: { message: string } }).error.message, /^--outcome "bogus" is none of ok, refused, failed, cancelled/);
+    const fine = await runMason(root, ["logs", "--requests", "--outcome", "ok", "--outcome", "failed", "--json"], matrixEnv());
+    assert.notEqual(fine.code, 2, fine.stdout + fine.stderr);
+    // --scope as a comma list: each scope read and held to the closed set, before any service is asked
+    const scopes = await runMason(root, ["token", "create", "--replica", "acme/shop", "--scope", "deploy,bogus", "--json"], matrixEnv());
+    assert.equal(scopes.code, 2, scopes.stdout + scopes.stderr);
+    assert.match((JSON.parse(scopes.stdout) as { error: { message: string } }).error.message, /^--scope "bogus" is not a scope/);
+    const twice = await runMason(root, ["token", "create", "--replica", "acme/shop", "--scope", "deploy,users", "--scope=deploy", "--json"], matrixEnv());
+    assert.equal(twice.code, 2);
+    assert.equal((JSON.parse(twice.stdout) as { error: { message: string } }).error.message, "a --scope is named twice");
+    // --from as a comma list: each range read by the one grammar (the second is the one refused), as when repeated
+    const ranges = await runMason(root, ["user", "add", "looker", "--from", "10.0.0.0/8,10.0.0.0/33", "--json"], matrixEnv());
+    assert.equal(ranges.code, 2, ranges.stdout + ranges.stderr);
+    const repeated = await runMason(root, ["user", "add", "looker", "--from", "10.0.0.0/8", "--from", "10.0.0.0/33", "--json"], matrixEnv());
+    assert.deepEqual(JSON.parse(ranges.stdout), JSON.parse(repeated.stdout));
+    assert.match((JSON.parse(ranges.stdout) as { error: { message: string } }).error.message, /10\.0\.0\.0\/33/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

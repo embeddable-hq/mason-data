@@ -5,7 +5,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A script that reads the exit code of `mason share` or `mason ui --ssh` sees 124, not 1, when the tunnel gives no
   address or the server does not answer within `--timeout`** (as `mason wait`, `mason deploy`, `mason replica create`
   and `mason login` already exit when they run out of time). Every other failure of both still exits 1.
-
+- **`mason start --port <n>` is now `mason start --ui-port <n>`**: it was always the web page's and the commands' port
+  (`MASON_UI_PORT` on a server), never the Postgres API's. The old flag starts nothing: it answers with the line to run
+  and exit 2.
+- **`mason status`, `mason stop` and `mason logs` refuse an argument** (exit 2): `mason stop myproject` stopped the
+  project of the folder it ran in, whatever it named. Run them in the project's folder, or with `mason -C <folder>`.
+- **`mason ui` opens a browser only when its output is a terminal**, as `mason login` does; in a pipe or a coding
+  agent's shell it prints the address alone, as `--no-open` does.
 - **`mason replica create` no longer reads the database's URL from `.env`, `.env.local` or the shell.** On a terminal
   it asks for the URL and reads it without showing it; otherwise it reads it from stdin. A script that relied on
   `DATABASE_URL` being set pipes it instead: `printf '%s\n' "$DATABASE_URL" | mason replica create acme/shop --region
@@ -17,6 +23,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## New
 
+- **`mason -C <folder> <command>`** runs any command as if started in that folder, as `git -C` and `make -C` do; a
+  folder that is missing or cannot be read is a wrong command line (exit 2).
 - **A Mason user can be limited to the addresses it connects from**: `mason user add looker --from 203.0.113.0/24
   --from 2001:db8:7::/48`, `mason user from looker 198.51.100.0/24` to replace the list, `mason user from looker --any`
   to remove it; `mason user list` shows each user's list (`from` in `--json`, `null` for any address), and `mason user
@@ -36,6 +44,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   statement to run on that database, and exits 1; run it, as a user that may drop a replication slot, then confirm on
   the replica's page in the service's web app, and the deletion finishes. `mason replica status` shows a deletion in
   progress the same way, and a replica deleted from the web app as being deleted.
+- **Every list flag takes a comma list or the flag repeated, meaning the same**: `mason add orders --columns id
+  --columns status` is `--columns id,status`, and so for `--include`, `--key`, `mason logs --outcome`, `mason user add
+  --from` and `mason token create --scope` (`--scope deploy,users`). `mason user add --set` stays one value a flag: a value may hold a comma.
 - **A database URL on `mason replica`'s command line is refused** (exit 2), never repeated, with the line to run
   instead: a command line is kept in shell history and shown to every process on the machine, so if it held a real
   password, change it.

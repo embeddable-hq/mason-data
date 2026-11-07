@@ -28,7 +28,7 @@
  *   createdAt, expiresAt, lastUsedAt   rows, --json                         `isServiceTime` (lastUsedAt or null)
  *   more                               a tip, --json                        a boolean
  */
-import { endText, failed, jsonText, parseCommand, reportText, serviceStyle, strict, type CommandSpec, type Failure, type NextStep } from "./command.ts";
+import { endText, failed, jsonText, listFlag, parseCommand, reportText, serviceStyle, strict, type CommandSpec, type Failure, type NextStep } from "./command.ts";
 import { call, carriesNoSecret, echoesSecret, isFailure, isServiceTime, serviceFailure, serviceOf, serviceText, unexpected, type Answer, type Service } from "./hosted.ts";
 import { loginOrgs, orgNamed, orgOf, REPLICA_PART, replicaOf, tokenFor } from "./replica.ts";
 import { refusedNext } from "./replica-hosted.ts";
@@ -83,7 +83,8 @@ export const TOKEN: CommandSpec = {
     mason token revoke 3f1c9a2e --org acme
 
   --replica <org>/<name>   create: the replica it acts on (else MASON_REPLICA)
-  --scope <scope>          create: what it may do, deploy or users; repeat it for both (default deploy)
+  --scope <scope,…>        create: what it may do, deploy or users; both: --scope deploy,users or the flag twice
+                           (default deploy)
   --name <name>            create: what the list calls it, 1 to 64 characters (default ${DEFAULT_NAME})
   --days <n>               create: the days it acts, 1 to ${MAX_DAYS} (default ${DEFAULT_DAYS})
   --org <org>              list: the organisation, in place of the argument; revoke: the organisation it is of
@@ -187,7 +188,9 @@ export async function token(argv: string[]): Promise<number> {
   const r = replicaOf(typeof f.values.replica === "string" ? f.values.replica : undefined, TOKEN.usage);
   if (r === null) return usage("mason token create names the replica it acts on", "--replica <org>/<name>, or MASON_REPLICA=<org>/<name>");
   if (isFailure(r)) return fail(r, json);
-  const asked = Array.isArray(f.values.scope) ? f.values.scope.filter((x): x is string => typeof x === "string") : [];
+  // a comma list or the flag repeated, the same (src/cli/command.ts listFlag)
+  const listed = listFlag(f.values.scope);
+  const asked = listed === undefined ? [] : listed.split(",");
   for (const s of asked) if (!(SCOPES as readonly string[]).includes(s)) return usage(`--scope ${JSON.stringify(serviceText(s, 100))} is not a scope${didYouMean(s, SCOPES)}`, `a CI token's scopes are ${SCOPES.join(" and ")}`);
   if (new Set(asked).size !== asked.length) return usage("a --scope is named twice", "name each scope once");
   const scopes = (asked.length ? asked : ["deploy"]) as Scope[];
