@@ -85,7 +85,7 @@ test("the old names answer with the new ones; mason start takes no URL", () => {
   }
   const start = spawnSync(process.execPath, [MAIN, "start", "postgres://u@localhost/app"], { encoding: "utf8" });
   assert.equal(start.status, 2);
-  assert.match(start.stderr, /✗ mason start: it takes no database URL: the project has one\n {2}why {3}mason init <url> made it; \.mason\/config\.json holds it\n\nusage: mason start/);
+  assert.match(start.stderr, /✗ mason start: it takes no database URL: the project has one\n {2}why {3}mason init <url> made it; \.mason\/config\.json holds it\n {2}fix {3}run mason start alone\n\nNext:\n {2}mason start --help {2,}its usage, with every option\n\nusage: mason start/);
 });
 
 test("a name from the folder; .gitignore gains .mason/ once; the URL from .env.local, .env, then the shell", () => {
@@ -199,7 +199,8 @@ test("mason init writes the project — config, the sources file, the URL in .en
       "\nNext:\n" +
       "  mason init postgres://user:password@localhost:5432/your_app  its URL, given\n" +
       "  mason init                                    again, once .env has MASON_DATABASE_URL or DATABASE_URL\n" +
-      "  mason init demo                               a demo database Mason makes itself: nothing to install\n");
+      "  mason init demo                               a demo database Mason makes itself: nothing to install\n +
+      "  mason init --help                             its usage, with every option\n");
     const noneJson = await quiet((io) => init(["--json"], three, { io, env: {} }));
     assert.equal(noneJson.value, 2);
     const noneAnswer = JSON.parse(noneJson.out) as { error: { code: string; message: string; fix: string }; next: Array<{ command: string; what: string }> };
@@ -583,7 +584,8 @@ test("mason init in a clone naming ${MASON_DATABASE_URL}: read from the shell an
       "  fix   put it in this folder's .env as MASON_DATABASE_URL=postgres://… (the variable mason/sources/app.yml names), or give its URL on the command line: mason init writes it there\n" +
       "\nNext:\n" +
       "  mason init postgres://user:password@localhost:5432/your_app  its URL, given: written to .env as MASON_DATABASE_URL\n" +
-      "  mason init                                    again, once .env has MASON_DATABASE_URL\n");
+      "  mason init                                    again, once .env has MASON_DATABASE_URL\n +
+      "  mason init --help                             its usage, with every option\n");
     assert.equal(n.out, "");
     assert.ok(!fs.existsSync(path.join(none.dir, ".mason")), "no config written");
     assert.equal(fs.readFileSync(path.join(none.dir, ".env"), "utf8"), envText);

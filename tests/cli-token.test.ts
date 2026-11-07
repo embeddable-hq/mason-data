@@ -23,7 +23,7 @@ const ME_TWO = { email: "ada@example.com", name: "Ada", orgs: [{ slug: "acme", n
 
 /** The one line the token made is printed on: the token alone. */
 const CI_LINE = /^masondata_ci_[A-Za-z0-9_-]{43}$/;
-const OWN_STEP = /^ {2}(mason login|mason token (create --replica (\S+)|list( \S+)?|revoke \S+ --org \S+))(\s|$)/;
+const OWN_STEP = /^ {2}(mason login|mason token (--help|create --replica (\S+)|list( \S+)?|revoke \S+ --org \S+))(\s|$)/;
 const LINES: Lines = {
   heads: ["Made a CI token for ", "Revoked the CI token ", "No CI tokens that act, in ", "✘ mason token: ", "✗ mason token: ", "Tip: Store it now, ", "Tip: It acts on ", "Tip: acme has more ",
     ...["token", "id", "name", "scopes", "expires", "why", "fix"].map((l) => `  ${l} `)],

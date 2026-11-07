@@ -514,7 +514,7 @@ test("mason deploy: the replica is --replica, else MASON_REPLICA, each part held
   const { root } = project();
   let r = await deployWith({}, root, []);
   assert.equal(r.a.code, 2);
-  assert.match(r.a.stderr, /^✗ mason deploy: no replica named\n {2}why {3}a deploy goes to one replica of the service\n {2}fix {3}name it: mason deploy --replica <org>\/<name>, or set MASON_REPLICA=<org>\/<name>\n\nusage: mason deploy/);
+  assert.match(r.a.stderr, /^✗ mason deploy: no replica named\n {2}why {3}a deploy goes to one replica of the service\n {2}fix {3}name it: mason deploy --replica <org>\/<name>, or set MASON_REPLICA=<org>\/<name>\n\nNext:\n {2}mason deploy --help {2,}its usage, with every option\n\nusage: mason deploy/);
   assert.deepEqual(r.requests, []);
   for (const bad of ["acme", "Acme/shop", "acme/shop/x", "-acme/shop", "acme/", "../x/shop", `acme/${"a".repeat(64)}`]) {
     r = await deployWith({}, root, [`--replica=${bad}`, "--json"]);

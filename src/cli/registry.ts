@@ -110,7 +110,7 @@ async function runDev(argv: string[]): Promise<number> {
   const v = f.values as { port?: string; attach: boolean; json: boolean; "self-signed-tls": boolean };
   if (f.positionals.length) {
     // the database is the project's now: a URL here is the old habit, answered with the new way
-    return failed("start", { message: "it takes no database URL: the project has one", code: "usage", why: "mason init <url> made it; .mason/config.json holds it", usage: DEV.usage }, { json: v.json });
+    return failed("start", { message: "it takes no database URL: the project has one", code: "usage", why: "mason init <url> made it; .mason/config.json holds it", fix: "run mason start alone", usage: DEV.usage }, { json: v.json });
   }
   const port = v.port === undefined ? DEFAULT_UI_PORT : Number(v.port);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) return failed("start", { message: `--port must be a port number (1-65535), not ${JSON.stringify(v.port)}`, code: "usage" }, { json: v.json });

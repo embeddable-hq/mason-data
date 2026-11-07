@@ -1160,7 +1160,8 @@ test("mason start --replication, --poll and --publication are gone: each answers
     fs.writeFileSync(path.join(root, "mason", "sources", "shop.yml"), "kind: postgres\nurl: postgres://mason:secret@127.0.0.1:1/shop\ntables:\n  orders: {}\n");
     fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: "gone", folder: "mason", remote: false, apiKey: "k".repeat(48), sourceServer: null, running: null }), { mode: 0o600 });
     const syncWhy = "how each table is kept current is its sync: in the sources file (at the top for every table, on an entry for that one), so what runs is what is committed";
-    const next = [{ command: "mason start", what: "each table kept current as its sync: says" }, { command: "mason help production", what: "sync: and publication:, and what each needs" }];
+    const next = [{ command: "mason start", what: "each table kept current as its sync: says" }, { command: "mason help production", what: "sync: and publication:, and what each needs" },
+      { command: "mason start --help", what: "its usage, with every option" }];
     const cases: Array<[string[], { message: string; why: string; fix: string }]> = [
       [["--replication"], { message: "--replication is gone: the sources file says it now", why: syncWhy,
         fix: "write sync: replication at the top of mason/sources/shop.yml, then mason start" }],
@@ -1184,7 +1185,8 @@ test("mason start --replication, --poll and --publication are gone: each answers
       assert.equal(person.code, 2, person.stdout + person.stderr);
       assert.equal(person.stdout, "");
       assert.equal(person.stderr, `✗ mason start: ${want.message}\n  why   ${want.why}\n  fix   ${want.fix}\n\nNext:\n` +
-        `  mason start                                   each table kept current as its sync: says\n  mason help production                         sync: and publication:, and what each needs\n`);
+        `  mason start                                   each table kept current as its sync: says\n  mason help production                         sync: and publication:, and what each needs\n` +
+        `  mason start --help                            its usage, with every option\n`);
       const json = await runMason(root, ["start", ...flags, "--json"], matrixEnv());
       assert.equal(json.code, 2, json.stdout + json.stderr);
       assert.deepEqual(JSON.parse(json.stdout), { error: { code: "usage", ...want }, next });

@@ -537,7 +537,9 @@ export function failed(cmd: string, f: Failure | Problem, o: { json: boolean; io
 export function usageWayOut(cmd: string, f: Failure): Failure {
   if (f.code !== "usage") return f;
   const help = cmd ? `mason ${cmd} --help` : "mason --help";
-  const next: readonly NextStep[] = f.next?.some(([c]) => c === help) ? f.next : [...(f.next ?? []), [help, cmd ? "its usage, with every option" : "every command"]];
+  // `mason help <cmd>` is the same page, so a failure that names it already says where the usage is
+  const said = (c: string): boolean => c === help || (cmd !== "" && c === `mason help ${cmd}`);
+  const next: readonly NextStep[] = f.next?.some(([c]) => said(c)) ? f.next : [...(f.next ?? []), [help, cmd ? "its usage, with every option" : "every command"]];
   return { ...f, next, fix: f.fix ?? (cmd ? `write the line as its usage says (mason ${cmd} --help)` : "name a command mason --help lists") };
 }
 
