@@ -121,7 +121,7 @@ const HEADS: readonly string[] = [
   ...["deploy", "service", "files", "took", "why", "fix"].map((l) => `  ${l} `),
 ];
 /** The steps under Next:, the CLI's own, as the start of their line. */
-const STEP_HEADS: readonly string[] = ["  mason deploy --replica acme/shop", "  mason replica status acme/shop", "  mason deploy --replica <org>/<name>", "  mason deploy --help", "  mason login", "  mason init",
+const STEP_HEADS: readonly string[] = ["  mason deploy --replica acme/shop", "  mason replica status acme/shop", "  mason replica list acme", "  mason deploy --replica <org>/<name>", "  mason deploy --help", "  mason login", "  mason init",
   "  unset MASON_CLOUD_URL", "  chmod 600 ", "  chmod 700 "];
 /** A dry run's row begins with a file's path, as this test's projects name them (this machine's own words, never the
  *  service's): on a narrow terminal the path itself is broken, so its row may begin with a part of it. */
@@ -162,7 +162,7 @@ function deploySeenProblems(text: string, width: number | null, failed: boolean 
 }
 
 /** Every step mason deploy gives, in every state: its own, never the service's. */
-const OWN_STEP = /^ {2}(mason deploy --replica (acme\/shop|<org>\/<name>)|mason replica status acme\/shop|mason deploy --help|mason login|mason init|unset MASON_CLOUD_URL|chmod (600|700) \S+)(\s|$)/;
+const OWN_STEP = /^ {2}(mason deploy --replica (acme\/shop|<org>\/<name>)|mason replica status acme\/shop|mason replica list acme|mason deploy --help|mason login|mason init|unset MASON_CLOUD_URL|chmod (600|700) \S+)(\s|$)/;
 
 /**
  * One run in `cwd`, held at once to carrying no secret on either stream, and to the service's values never shaping it
@@ -577,14 +577,17 @@ test("mason deploy: each failure of the contract's POST says the service's words
   for (const [status, code, message, ours] of cases) {
     // the service's next is never read: the step is the CLI's, by the status
     const failure = { error: { code, message, why: `why ${code}`, fix: `fix ${code}` }, next: [{ command: "mason destroy", what: `after ${code}` }] };
-    const step = status === 401 || status === 403 ? "sign in again" : "try again in a moment";
+    // a 404 (no such replica, a deleted one included): the organisation's replicas, never mason login
+    const [cmd, step] = status === 404 ? ["mason replica list acme", "the organisation's replicas: this one was deleted, or never existed"]
+      : ["mason login", status === 401 || status === 403 ? "sign in again" : "try again in a moment"];
     const { a, requests } = await deployWith({ post: { status, body: failure } }, root, ["--replica", "acme/shop"]);
     assert.equal(a.code, 1, `${status}: ${a.stderr}`);
-    assert.equal(a.stderr, `✗ mason deploy: ${message}\n  why   why ${code} (the service said ${code}, HTTP ${status})\n  fix   fix ${code}\n\nNext:\n  mason login                                   ${step}\n`, String(status));
+    const head = `✗ mason deploy: ${message}\n  why   why ${code} (the service said ${code}, HTTP ${status})\n  fix   fix ${code}\n\nNext:\n  ${cmd} `;
+    assert.ok(a.stderr.startsWith(head) && a.stderr.endsWith(`${step}\n`) && /^ *$/.test(a.stderr.slice(head.length, -step.length - 1)), `${status}:\n${a.stderr}`);
     assert.equal(requests.filter((r) => r.method === "GET").length, 0, `${status}: no wait`);
     const j = await deployWith({ post: { status, body: failure } }, root, ["--replica", "acme/shop", "--json"]);
     assert.equal(j.a.code, 1);
-    assert.deepEqual(JSON.parse(j.a.stdout), { error: { code: ours, message, why: `why ${code} (the service said ${code}, HTTP ${status})`, fix: `fix ${code}` }, next: [{ command: "mason login", what: step }] });
+    assert.deepEqual(JSON.parse(j.a.stdout), { error: { code: ours, message, why: `why ${code} (the service said ${code}, HTTP ${status})`, fix: `fix ${code}` }, next: [{ command: cmd, what: step }] });
   }
   // the service's code never steers the CLI's (usage and timeout are exit 1 here), and no next step it names is kept,
   // a mason command included
@@ -751,7 +754,11 @@ test("mason deploy: a 409 naming a replica that failed or is being deleted is re
   const gone = await deployWith({ post: { status: 404, body: { error: { code: "not_found", message: "no replica acme/shop" } } } }, root, ["--replica", "acme/shop", "--json"]);
   assert.equal(gone.a.code, 1);
   assert.equal(posts(gone.requests).length, 1);
-  assert.equal((JSON.parse(gone.a.stdout) as { error: { code: string } }).error.code, "not_found");
+  const g = JSON.parse(gone.a.stdout) as { error: { code: string }; next: Array<{ command: string; what: string }> };
+  assert.equal(g.error.code, "not_found");
+  assert.deepEqual(g.next, [{ command: "mason replica list acme", what: "the organisation's replicas: this one was deleted, or never existed" }]);
+  const goneText = await deployWith({ post: { status: 404, body: { error: { code: "not_found", message: "no replica acme/shop" } } } }, root, ["--replica", "acme/shop"]);
+  assert.match(goneText.a.stderr, /\n\nNext:\n {2}mason replica list acme +the organisation's replicas: this one was deleted, or never existed\n$/);
   const deleted = await deployWith({ post: { status: 409, body: { error: { code: "not_ready", message: "acme/shop cannot take a deploy" }, replica: { state: "deleted" } } } }, root, ["--replica", "acme/shop", "--json"]);
   assert.equal(deleted.a.code, 1);
   assert.equal(posts(deleted.requests).length, 1);

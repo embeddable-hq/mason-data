@@ -62,7 +62,7 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { errorJson, exitOf, failed, jsonText, parseCommand, reportText, serviceStyle, strict, type CommandSpec, type Failure, type NextStep } from "./command.ts";
-import { call, carriesNoSecret, failureShape, isFailure, isServiceTime, serviceFailure, serviceOf, serviceText, unexpected, type Answer } from "./hosted.ts";
+import { call, carriesNoSecret, failureShape, isFailure, isServiceTime, serviceFailure, serviceNext, serviceOf, serviceText, unexpected, type Answer } from "./hosted.ts";
 import { replicaOf, replicaText, REPLICA_ENV, tokenFor, type Replica } from "./replica.ts";
 import { holdOutput } from "./output-gate.ts";
 import { maskedUrl } from "./preflight.ts";
@@ -519,7 +519,10 @@ export async function deploy(argv: string[]): Promise<number> {
     // a 409 that names the replica's state: it cannot take a deploy (failed, being deleted), never sent again;
     // the next step is the replica's status, the CLI's own (never the generic "mason login")
     const refused = sent.status === 409 ? replicaStateOf(sent.json, REFUSED_STATES) : null;
-    if (refused === null) return fail(serviceFailure(sent, secrets) ?? unexpected(service, sent, "a deploy was sent"), { json });
+    // a 404: no such replica, a deleted one included (its name is freed): the organisation's replicas, never mason login
+    const notFound = (st: number): NextStep[] => st === 404
+      ? [[`mason replica list ${r.org}`, "the organisation's replicas: this one was deleted, or never existed"]] : serviceNext(st);
+    if (refused === null) return fail(serviceFailure(sent, secrets, notFound) ?? unexpected(service, sent, "a deploy was sent"), { json });
     const f = serviceFailure(sent, secrets, () => [statusStep]);
     if (f === null) return fail(unexpected(service, sent, "a deploy was sent"), { json });
     return fail({ ...f, why: `${name} ${REFUSED_STATES[refused]}; ${f.why}`,
