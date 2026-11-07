@@ -21,7 +21,7 @@ if (command !== undefined) {
     if (argv.includes("--disable-auto")) continue;
     const pr = argv.slice(3).find((w) => !w.startsWith("-")) ?? "<n>";
     if (subAgent(input)) {
-      block(`a sub-agent never merges nor queues a merge (CLAUDE.md "Who merges what"): report PR ${pr} and the head you read to the session that started you; the top session reads the diff and merges it (.claude/skills/up-next/SKILL.md)`);
+      block(`a sub-agent never merges nor queues a merge (CLAUDE.md "Who merges what"): report PR ${pr} and the head you read to the session that started you; the coordinator reads the diff and merges it (.claude/skills/coordinate/SKILL.md)`);
     }
     if (argv.some((w) => w === "--match-head-commit" || w.startsWith("--match-head-commit="))) continue;
     block(`gh pr merge needs --match-head-commit, so a push after your read is not merged unread: ${text} --match-head-commit $(gh pr view ${pr} --json headRefOid --jq .headRefOid), once that head has been read`);

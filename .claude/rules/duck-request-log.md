@@ -58,4 +58,4 @@ paths:
 Run each probe that applies: the implementer before each push, and the fresh reviewer at each review (CLAUDE.md
 "How work is done here", steps 3 and 4). A new probe is proposed to the owner; each bullet names the PR or issue it was met in.
 
-- None recorded yet; the harness's Learn step adds them.
+- None recorded yet.

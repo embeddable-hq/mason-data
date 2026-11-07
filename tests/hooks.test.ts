@@ -155,7 +155,7 @@ test("merge-head: a merge pinned to its head, and other gh commands, are allowed
 // the main session's carries none, and a `--agent` main session agent_type alone (code.claude.com/docs/en/hooks).
 const SUB = { agent_id: "a1b2c3", agent_type: "general-purpose" };
 const as = (who: Record<string, unknown>, command: string): unknown => ({ ...(bash(command) as object), ...who });
-const SUB_AGENT_SAYS = /^a sub-agent never merges nor queues a merge \(CLAUDE\.md "Who merges what"\): report PR (\d+|<n>) and the head you read to the session that started you; the top session reads the diff and merges it \(\.claude\/skills\/up-next\/SKILL\.md\)$/;
+const SUB_AGENT_SAYS = /^a sub-agent never merges nor queues a merge \(CLAUDE\.md "Who merges what"\): report PR (\d+|<n>) and the head you read to the session that started you; the coordinator reads the diff and merges it \(\.claude\/skills\/coordinate\/SKILL\.md\)$/;
 
 test("merge-head: a sub-agent's gh pr merge is blocked, pinned or not, queued or not, in every shape a session types", () => {
   for (const command of [
