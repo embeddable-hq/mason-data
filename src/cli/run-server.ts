@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 import { readBody, sendJson } from "../lib/http-json.ts";
 import { projectFingerprint } from "../lib/project-files.ts";
 import { guard, newTunnel, SECURITY_HEADERS, type PageTunnel } from "./security.ts";
+import { PAGE_READ_ONLY, PAGE_READ_ONLY_WHY, pageWrite } from "./ui-read-only.ts";
 import { maskedUrl, type Source, type SourceFacts } from "./preflight.ts";
 import { errorJson, nextJson, type Failure, type NextStep } from "./command.ts";
 import { phaseCounts, readiness, syncTotals, tableSync, type SyncFacts, type SyncTotals } from "./readiness.ts";
@@ -75,6 +76,8 @@ export interface RunContext {
   page: boolean;
   /** this is `mason serve`'s run: the page is read through `mason ui --ssh`, and says what that changes */
   served?: boolean;
+  /** MASON_UI_READ_ONLY=1 (src/cli/ui-read-only.ts): every change the page asks for is refused, and it offers none */
+  pageReadOnly?: boolean;
   /** the project's database is the demo database this run hosts (`mason init demo`, src/cli/demo.ts): mason status says so */
   demo?: boolean;
   /** the project's users (src/cli/user.ts): what `/api/users` lists and changes, with the functions `mason user` calls —
@@ -196,6 +199,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     // why the page offers no Add or Remove, or null: the project's files deployed read-only (MASON_PROJECT_READONLY), or
     // a server's project folder mounted read-only — a control that can only fail is not offered
     sourcesReadOnly: sourcesReadOnly(ctx, sources.file?.file ?? null),
+    // why the page offers no control that changes anything (MASON_UI_READ_ONLY=1, src/cli/ui-read-only.ts), or null:
+    // every change it would send is refused
+    pageReadOnly: ctx.pageReadOnly === true ? PAGE_READ_ONLY_WHY : null,
     source: { url: maskedUrl(ctx.source.url), host: ctx.source.host, database: ctx.source.database, remote: ctx.source.remote, demo: ctx.demo === true,
       // `replication` while a table's sync is replication (the run streams), else `poll`: each table's own is its kept
       version: facts.versionText, standby: facts.standby, changes: repl !== null ? "replication" : "poll", name: sources.file?.name ?? null, file: sources.file?.file ?? null,
@@ -636,6 +642,9 @@ export function createRunServer(ctx: RunContext): http.Server {
       res.writeHead(v.status, { "Content-Type": "text/plain; charset=utf-8" }).end(`${v.reason}\n`);
       return;
     }
+    // A READ-ONLY PAGE (MASON_UI_READ_ONLY=1): every change the page asks for is refused by rule, before any route is
+    // read, so a route added later is refused too; the commands' requests (the run's token) are served as before
+    if (ctx.pageReadOnly === true && pageWrite(req.method, req.headers.authorization)) { sendFailure(res, 403, PAGE_READ_ONLY); return; }
     const url = new URL(req.url ?? "/", `http://127.0.0.1:${ctx.port}`);
     void (async () => {
       try {

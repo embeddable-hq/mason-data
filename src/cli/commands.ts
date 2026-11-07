@@ -128,6 +128,9 @@ export interface RunState {
   /** why the page offers no Add or Remove (the project's files deployed read-only, MASON_PROJECT_READONLY; a server's
    *  sources file that cannot be written), or null: src/cli/run-server.ts sourcesReadOnly */
   sourcesReadOnly?: string | null;
+  /** why the page offers no control that changes anything (MASON_UI_READ_ONLY=1, src/cli/ui-read-only.ts), or null:
+   *  src/cli/run-server.ts runState; a run from before it has none */
+  pageReadOnly?: string | null;
   /** the roles file (mason/roles.yml, src/cli/roles.ts) as the listener reads it now: the roles by name, and what is
    *  wrong with it (every statement of a user with a role is refused while there is); absent from a run before roles */
   roles?: { file: string | null; roles: string[]; problem: string | null; default: string | null; all?: string[];
@@ -428,7 +431,8 @@ const STATUS_USAGE = `usage: mason status [--json]
     readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), served (this is
     mason serve's run: mason ui --ssh opens its page), sourcesReadOnly (why the page offers no Add or Remove — the
     project's files deployed read-only, MASON_PROJECT_READONLY, which mason add and mason remove refuse too, or a
-    server's sources file it cannot write — or null), next }.
+    server's sources file it cannot write — or null), pageReadOnly (why the page changes nothing: mason serve with
+    MASON_UI_READ_ONLY=1, which refuses every change the page sends — or null), next }.
     Each table's kept is how it is kept current now (absent for a table the sync does not hold):
     { by: poll, sync: { mode: off } or { mode: poll, every (30s), seconds } (its entry's sync:, else the file's,
     else off), syncedAt (its last whole read or poll), nextAt (when its next poll is due; null: off, or not polled
@@ -470,7 +474,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
   json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "generatedTables", "queries", "slowQueries", "refusedQueries",
-    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly",
+    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "pageReadOnly",
     "roles", "share", "shareEnded", "lastRun", "lastStop", "hung", "next"],
 };
 

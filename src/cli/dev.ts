@@ -30,6 +30,7 @@ import type { Server } from "node:http";
 import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, readSourceFacts, remoteConfirmation, remoteWarning, type SourceFacts } from "./preflight.ts";
+import { uiReadOnlySetting } from "./ui-read-only.ts";
 import { createRunServer, listenOnLoopback, metricsFacts, usageFacts, type RunContext } from "./run-server.ts";
 import type { RunMetrics } from "./metrics.ts";
 import { readGenerated } from "./generated-files.ts";
@@ -639,6 +640,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     version: o.version, startedAt,
     // the web page (mason ui): on loopback alone, so mason serve's is reached through mason ui --ssh
     page: true, served: o.serve !== undefined,
+    // MASON_UI_READ_ONLY=1: a server's page refuses every change it asks for (mason start refuses the setting above)
+    pageReadOnly: o.serve !== undefined && uiReadOnlySetting(process.env) === true,
     demo: cfg.demo === true,
     users: { file: path.join(home, USERS_FILE), apiKey: cfg.apiKey, database, postgresUrl },
     // the roles as the listener holds them: their row filters checked by its catalog (a filter Postgres refuses is a problem)

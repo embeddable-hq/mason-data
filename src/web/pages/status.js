@@ -398,10 +398,12 @@ export function renderChecklist(s, queries, users) {
   const answered = queries.queries.week.completed > 0;
   if (copied && user && answered) return "";
   const copying = added && !copied && copyingCount(s) > 0;
+  // a read-only page (MASON_UI_READ_ONLY=1) sends no one to add what it would refuse to add
+  const looks = (s.pageReadOnly ?? null) !== null;
   const steps = [
     ["Mason is running", true, ""],
-    ["A table synced", copied, copying ? `<span class="dim">syncing now</span>` : added ? "" : `<a class="btn small primary" href="${LINKS.tables}">Add a table</a>`],
-    ["A user created", user, `<a class="btn small${copied ? " primary" : ""}" href="#users">Create a user</a>`],
+    ["A table synced", copied, copying ? `<span class="dim">syncing now</span>` : added || looks ? "" : `<a class="btn small primary" href="${LINKS.tables}">Add a table</a>`],
+    ["A user created", user, looks ? "" : `<a class="btn small${copied ? " primary" : ""}" href="#users">Create a user</a>`],
     // the psql line is Connect's (rendered under the checklist once a table is added): its Copy copies it
     ["A first statement answered", answered, copied ? `${`<button type="button" class="small${user ? " primary" : ""}" data-copy="connect-psql">Copy the psql line</button>`} <span class="dim">then run a select on a synced table</span>` : ""],
   ];
@@ -446,7 +448,8 @@ const endsLine = (endsAt, now) => endsAt === null || endsAt === undefined ? "It 
  * offered, the answer that opened it — the password is in it alone — and the failure). Nothing under `mason serve`.
  */
 export function renderShare(s, m = NO_SHARE, now = Date.now()) {
-  if (s?.served === true) return "";
+  // a server's run has no share to open, and a read-only page (MASON_UI_READ_ONLY=1) opens nothing
+  if (s?.served === true || (s?.pageReadOnly ?? null) !== null) return "";
   const open = pageShareOf(s);
   const head = `<p class="connect-title share-title">Connect from anywhere</p>`;
   const ask = button("Connect from anywhere", { shareAsk: "" }, "", { disabled: m.phase === "asking" || m.phase === "opening" });

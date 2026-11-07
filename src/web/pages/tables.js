@@ -199,8 +199,10 @@ export function renderTables(s, ui = {}) {
   const { removing = null, choosing = null, columns = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], adding = [], shares = new Map(), before = new Map(), synced = null, open = () => false, limit = TABLE_ROWS } = ui;
   const now = ui.now ?? Date.now();
   if (!s.tables.length) return empty(`${s.source.database} has no table this user can read.`);
-  // why no table can be added or removed from here (a server's sources file this run cannot write), or null
-  const readOnly = s.sourcesReadOnly ?? null;
+  // why the page changes nothing (MASON_UI_READ_ONLY=1: not even a Sync), or null
+  const viewOnly = s.pageReadOnly ?? null;
+  // why no table can be added or removed from here (that, or a server's sources file this run cannot write), or null
+  const readOnly = viewOnly ?? s.sourcesReadOnly ?? null;
   const stream = s.stream ? new Map(streamRows(s.stream, now).tables) : null;
   // SEVEN NARROW COLUMNS OF FIXED WIDTHS, NOTHING LONG IN A CELL, AND NOTHING A CLICK INSERTS: a table's state is its word
   // over its copy's bar (a line kept for it when it has none); its last sync an age over how long it took; whatever is
@@ -227,7 +229,7 @@ export function renderTables(s, ui = {}) {
       // Sync now → Syncing… → Synced ✓ in the one room (ROOMS.sync), so the actions never move
       // View events: its sync events, on Observability › Sync events (a link: it goes to another page)
       ? `<a class="btn small" href="${esc(syncsHref(t.table))}">View events</a> ` +
-        (syncing.includes(t.table) ? button("Syncing…", {}, "small", { room: ROOMS.sync, disabled: true }) : button(syncedNow ? "Synced ✓" : "Sync now", { syncTable: t.table }, "small", { room: ROOMS.sync })) + " " +
+        (viewOnly ? "" : syncing.includes(t.table) ? button("Syncing…", {}, "small", { room: ROOMS.sync, disabled: true }) : button(syncedNow ? "Synced ✓" : "Sync now", { syncTable: t.table }, "small", { room: ROOMS.sync })) + " " +
         // while it asks, Remove stays where it was, held down: the question beside it answers it
         (readOnly ? "" : asking ? button("Remove", {}, "danger small", { disabled: true, expanded: true }) : button("Remove", { removeTable: t.table }, "danger small"))
       // a sources file this run cannot write (`s.sourcesReadOnly`, a server's): no control that could only fail
@@ -288,7 +290,8 @@ export function renderTables(s, ui = {}) {
   const matching = filter.trim() ? `<p class="count dim">${n(shown.length)} with “${esc(filter.trim())}” in the name</p>` : "";
   const sizesFailed = added && sizes && "failure" in sizes ? `<p class="count">The synced tables' own sizes: could not read them (${esc(firstLine(sizes.failure.message))}; ${code("mason usage")} has them)</p>` : "";
   const rowsHtml_ = written.map(line).join("");
-  return stray + (readOnly === null ? "" : `<p class="count">Tables are not added or removed from this page: ${esc(readOnly)}.</p>`) +
+  return stray + (viewOnly !== null ? `<p class="count">Tables are not added, removed or synced from this page: ${esc(viewOnly)}.</p>`
+    : readOnly === null ? "" : `<p class="count">Tables are not added or removed from this page: ${esc(readOnly)}.</p>`) +
     (added ? "" : empty("No table added yet", readOnly === null ? `Add one from the list, as ${code("mason add <table>")} does.` : `The sources file names the tables to sync.`)) + matching +
     panel(`<table class="catalog"><thead><tr>${head.map(([h, c]) => `<th scope="col"${c ? ` class="${c}"` : ""}>${h}</th>`).join("")}</tr></thead>` +
       `<tbody>${rowsHtml_}</tbody></table>`) + pops.join("") + moreRows("tables", Math.min(limit, shown.length), shown.length, TABLE_ROWS) +

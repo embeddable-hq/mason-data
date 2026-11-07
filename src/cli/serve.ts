@@ -40,6 +40,7 @@ import { imagePinProblem, PIN_FILE } from "../lib/project-version.ts";
 import { commandPinProblem } from "./pin.ts";
 import { listenOnUiSocket, prepareUiSocket, uiSocketSetting, type UiSocket } from "./ui-socket.ts";
 import { recordRefusal } from "./replication-mode.ts";
+import { PAGE_READ_ONLY_WHY, uiReadOnlySetting } from "./ui-read-only.ts";
 import { changesRetiredText, pollMsRetiredText, type SourcesTop } from "../lib/table-sync.ts";
 import { historyDaysSetting, historyDaysWrongText } from "../duck/history.ts";
 import { DEFAULT_MEMORY_RULE, memoryProblems, memoryProblemText, memorySize, MEMORY_FLOOR_BYTES } from "../duck/store.ts";
@@ -90,6 +91,9 @@ export const SERVE: CommandSpec = {
                             a local reverse proxy): made mode 0600 in a folder only Mason's user can write (else the
                             start is refused), a stale one replaced, removed on exit; a request on it passes the same
                             guard as mason ui --ssh's (default unset: none)
+    MASON_UI_READ_ONLY      1 when the web page should only show: it offers no control that changes anything, and
+                            refuses every change it is sent, through mason ui --ssh or the socket alike; the mason
+                            commands beside it are unchanged (default 0)
     MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
@@ -181,6 +185,9 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   // a host would only be believed: the page has no address but loopback, and running on while one is asked for would hide that
   const socket = uiSocketSetting(env, cwd);
   if (socket !== null && typeof socket !== "string") wrong.push(socket.problem);
+  // the read-only page (src/cli/ui-read-only.ts): 1 or 0, anything else refused here, never read as off
+  const pageReadOnly = uiReadOnlySetting(env);
+  if (typeof pageReadOnly !== "boolean") wrong.push(pageReadOnly.problem);
   if (env.MASON_UI_HOST) wrong.push("MASON_UI_HOST is set, and the web page has no address but 127.0.0.1: remove it (mason ui --ssh <user@server> opens the page from your machine)");
   if (wrong.length) {
     return { message: `${wrong.length === 1 ? "a setting is" : `${wrong.length} settings are`} missing or wrong: ${wrong.join("; ")}`, code: "bad_config",
@@ -460,6 +467,7 @@ export async function serve(argv: string[]): Promise<number> {
   say(`  metrics   http://${s.health.host}:${s.health.port}/metrics`);
   for (const l of socketSaid) say(`  ${l}`);
   if (page !== null) say(`  web page  ${page.file} (a Unix socket, mode 0600: a request on it passes the same guard as mason ui --ssh's)`);
+  if (uiReadOnlySetting(process.env) === true) say(`  web page  ${PAGE_READ_ONLY_WHY}: it refuses every change it is sent; the mason commands beside it are unchanged`);
   // the run reads the project of the folder it runs in (src/cli/project.ts): the data folder's
   process.chdir(s.data);
   let code: number;

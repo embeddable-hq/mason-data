@@ -264,6 +264,14 @@ listens, and every browser connection crosses that one ssh connection as frames 
   the path (a file, a link, another user's socket, one a process answers on) is refused and left as it is; it is removed
   on exit. A request on it is judged by the same guard as one through `mason ui --bridge`: it reaches the page with the
   run's token, or as a tunnel opened with that token (its ticket, then its cookie), never for arriving on the socket.
+- **A page that only shows: `MASON_UI_READ_ONLY=1`.** For a page shown to someone who should only look (behind a
+  reverse proxy, on the socket), `mason serve` with it set makes the page offer no control that changes anything — no
+  Add, Remove, Sync, Disable, Enable, Cancel, Add a user or Connect from anywhere — and its server refuses every request
+  of the page that is not a GET or a HEAD, whatever its path, with "the web page is read-only here" in the failure shape
+  (`src/cli/ui-read-only.ts`). Viewing is unchanged. It covers the page alone: a request with the run's token is the
+  `mason` commands' (`mason add`, `mason sync`, `mason cancel` beside the server, and the tunnel `mason ui --ssh`
+  opens), served as before; `MASON_PROJECT_READONLY=1` is what refuses the commands' edits of the project's files.
+  Anything but `0` or `1` refuses the start; `mason start` refuses it.
 - **Another page's cookie crosses too.** A browser keeps cookies by host, not port, so a local `mason start`'s cookie for
   127.0.0.1 is sent through the tunnel in the Cookie header. Each cookie is named for its port, and the server reads
   only the one for the Host it was asked by, so that one is ignored, though it does reach the server.
