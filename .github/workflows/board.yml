@@ -92,14 +92,15 @@ jobs:
                     nodes {
                       status: fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
                       content { ... on Issue { id number state repository { nameWithOwner } labels(first: 20) { nodes { name } }
-                        closedByPullRequestsReferences(first: 5, includeClosedPrs: false) { nodes { isDraft } } } }
+                        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { isDraft state } } } }
                     }
                   } } } }`, { id: project.id, after })).node.items;
                 for (const item of page.nodes) {
                   const issue = item.content;
                   if (!issue?.number || issue.repository.nameWithOwner !== `${owner}/${repo}`) continue;
                   seen++;
-                  const prs = issue.closedByPullRequestsReferences.nodes;
+                  // a merged PR still comes back with includeClosedPrs: false; only an open one decides
+                  const prs = issue.closedByPullRequestsReferences.nodes.filter(p => p.state === "OPEN");
                   const waiting = issue.labels.nodes.some(l => l.name === LABEL);
                   const want = issue.state === "CLOSED" ? "Done"
                     : waiting || prs.length === 0 ? null
@@ -136,8 +137,8 @@ jobs:
               if (action === "labeled") return setStatus(issue.node_id, WAITING);
               const prs = (await github.graphql(`
                 query($id: ID!) { node(id: $id) { ... on Issue {
-                  closedByPullRequestsReferences(first: 5, includeClosedPrs: false) { nodes { isDraft } }
-                } } }`, { id: issue.node_id })).node.closedByPullRequestsReferences.nodes;
+                  closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { isDraft state } }
+                } } }`, { id: issue.node_id })).node.closedByPullRequestsReferences.nodes.filter(p => p.state === "OPEN");
               const status = prs.length === 0 ? "Backlog" : prs.some(p => !p.isDraft) ? "In review" : "In progress";
               return setStatus(issue.node_id, status);
             }
