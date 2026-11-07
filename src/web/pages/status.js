@@ -483,7 +483,7 @@ export const UNSUPPORTED_LIMIT = 100;
 
 /** What the page reads every 30 s beside the state: the request log's summary, the recent errors, and the last day's
  *  unsupported SQL. */
-const SLOWER = ["/api/queries", `/api/events?failed=1&limit=${RECENT_ERRORS}`, `/api/requests?failed=1&limit=${RECENT_ERRORS}`, `/api/unsupported?limit=${UNSUPPORTED_LIMIT}`, "/api/users"];
+const SLOWER = ["api/queries", `api/events?failed=1&limit=${RECENT_ERRORS}`, `api/requests?failed=1&limit=${RECENT_ERRORS}`, `api/unsupported?limit=${UNSUPPORTED_LIMIT}`, "api/users"];
 
 /** A read as `renderStatus` takes it: the body, or `{ failure }` when it could not be read; undefined before any read. */
 const asRequest = (r) => r === undefined ? undefined : r.failure ? { failure: r.failure } : r.body;
@@ -499,12 +499,12 @@ export const page = {
     const share = createShare(ctx);
     return {
       model: { open: opened.open, share: share.m },
-      reads: () => [{ path: "/api/state", everyMs: POLL_MS }, ...SLOWER.map((path) => ({ path, everyMs: 30_000 })), { path: HOURLY, everyMs: 60_000 }],
+      reads: () => [{ path: "api/state", everyMs: POLL_MS }, ...SLOWER.map((path) => ({ path, everyMs: 30_000 })), { path: HOURLY, everyMs: 60_000 }],
       actions: share.actions,
-      afterRead: () => share.afterRead(ctx.read("/api/state")?.body),
+      afterRead: () => share.afterRead(ctx.read("api/state")?.body),
       input: (target) => share.input(target),
       view() {
-        const st = ctx.read("/api/state");
+        const st = ctx.read("api/state");
         if (!st?.body) return { status: st?.failure ? "" : skeleton(4) };
         const [queries, events, requests, unsupported, users] = SLOWER.map((p) => asRequest(ctx.read(p)));
         return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, events, requests, unsupported, users, usage: ctx.read(HOURLY)?.body, open: opened.has, shares: monotone.of(st.body), before: monotone.before, share: share.m }) };
@@ -535,8 +535,8 @@ export function createShare(ctx) {
   const beat = async () => {
     if (beating === null) return;
     const user = beating.user;
-    const r = await ctx.ask(`/api/share/${encodeURIComponent(user)}/beat`, json("POST"));
-    if ("failure" in r && r.failure.code === "not_found" && beating?.user === user) { ended(user, r.failure.message.replace(/^.*?; it ended: /, "")); await ctx.refresh(["/api/state"]); }
+    const r = await ctx.ask(`api/share/${encodeURIComponent(user)}/beat`, json("POST"));
+    if ("failure" in r && r.failure.code === "not_found" && beating?.user === user) { ended(user, r.failure.message.replace(/^.*?; it ended: /, "")); await ctx.refresh(["api/state"]); }
   };
   const startBeats = (user, everyMs = BEAT_MS) => {
     if (beating?.user === user) return;
@@ -547,7 +547,7 @@ export function createShare(ctx) {
     /** Connect from anywhere: what a share would read, then the question */
     async shareAsk() {
       Object.assign(m, NO_SHARE, { phase: "asking" });
-      const r = await ctx.ask("/api/share/choices");
+      const r = await ctx.ask("api/share/choices");
       if (m.phase !== "asking") return;
       if ("failure" in r) { m.phase = "refused"; m.failure = r.failure; return; }
       m.choices = r.body.choices;
@@ -561,17 +561,17 @@ export function createShare(ctx) {
       if (m.phase !== "asking" || m.choices === null) return;
       const role = m.choices.length > 0 ? m.role : null;
       Object.assign(m, { phase: "opening", failure: null });
-      const r = await ctx.ask("/api/share", json("POST", { from: "page", confirmed: true, ...(role !== null ? { role } : {}) }));
+      const r = await ctx.ask("api/share", json("POST", { from: "page", confirmed: true, ...(role !== null ? { role } : {}) }));
       if ("failure" in r) { m.phase = "refused"; m.failure = r.failure; return; }
       Object.assign(m, { phase: "open", opened: { ...r.body, seen: false } });
       startBeats(r.body.user, r.body.beatMs);
-      await ctx.refresh(["/api/state"]);
+      await ctx.refresh(["api/state"]);
     },
     async shareStop(user) {
-      const r = await ctx.ask(`/api/share/${encodeURIComponent(user)}`, json("DELETE"));
+      const r = await ctx.ask(`api/share/${encodeURIComponent(user)}`, json("DELETE"));
       if ("failure" in r && r.failure.code !== "not_found") { m.phase = "refused"; m.failure = r.failure; return; }
       ended(user, "Stop sharing, on this page");
-      await ctx.refresh(["/api/state"]);
+      await ctx.refresh(["api/state"]);
     },
     shareBeat: beat,
   };

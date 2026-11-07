@@ -62,7 +62,7 @@ import { page as usagePage } from "./pages/usage.js";
 import { page as syncsPage } from "./pages/syncs.js";
 
 /** What the shell itself reads when the page shown does not: the state (the sidebar's project, badge and version). */
-const SHELL_STATE = { path: "/api/state", everyMs: 60_000 };
+const SHELL_STATE = { path: "api/state", everyMs: 60_000 };
 
 /** A text that moves with the clock (an age, a running time), and a part's HTML without them: `paint` sets those
  *  texts in place when nothing else changed. */
@@ -182,7 +182,7 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
   // every answer passes here: on a server's page a failure the page words itself is the tunnel's (`overTunnel`)
   const ask = async (path, init) => {
     const r = await asked(path, init);
-    return "failure" in r && store.get("/api/state")?.body?.served === true ? { failure: overTunnel(r.failure) } : r;
+    return "failure" in r && store.get("api/state")?.body?.served === true ? { failure: overTunnel(r.failure) } : r;
   };
   const first = parseHash(shown);
   const m = { shown: first.id, range: rangeOf(first.params.range), pollFailure: null, updatedAt: null, rangeReadAt: null };
@@ -236,7 +236,7 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
       afterRead();
     },
     view() {
-      const st = store.get("/api/state")?.body;
+      const st = store.get("api/state")?.body;
       return {
         nav: renderNav(m.shown, m.range),
         // the range control in the shown view's header row (each group page's own slot; the others empty)

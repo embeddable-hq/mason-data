@@ -22,10 +22,23 @@ test("the token in the URL is traded for an HttpOnly, SameSite=Strict cookie, an
   assert.equal(v.ok, false);
   assert.ok(!v.ok && v.status === 303);
   if (!v.ok && v.status === 303) {
-    assert.equal(v.location, "/x?a=1");
+    assert.equal(v.location, "./x?a=1");
     assert.match(v.setCookie!, /^mason_dev_4039=[0-9a-f]{64}; HttpOnly; SameSite=Strict; Path=\/$/);
   }
   assert.equal(setCookieHeader("x", 4039), "mason_dev_4039=x; HttpOnly; SameSite=Strict; Path=/");
+});
+
+test("the trade's redirect is relative to the address asked, so a page a proxy serves under a prefix lands back there", () => {
+  // the server sees /?token=… whatever prefix a reverse proxy stripped; the browser resolves Location against what IT asked
+  const at = (url: string) => { const v = guard({ method: "GET", url, host: "127.0.0.1:4039" }, port, token); assert.ok(!v.ok && v.status === 303); return v.location; };
+  assert.equal(at(`/?token=${token}`), "./");
+  assert.equal(new URL(at(`/?token=${token}`), `https://example.com/tools/mason/?token=${token}`).href, "https://example.com/tools/mason/");
+  assert.equal(new URL(at(`/?token=${token}`), `http://127.0.0.1:4039/?token=${token}`).href, "http://127.0.0.1:4039/", "mason ui's own URL, at /");
+  assert.equal(new URL(at(`/x?a=1&token=${token}`), `https://example.com/p/x?a=1&token=${token}`).href, "https://example.com/p/x?a=1");
+  // a tunnel's ticket alike
+  const t = newTunnel(51000, 1000);
+  const v = guard({ method: "GET", url: `/?ticket=${t.ticket}`, host: "127.0.0.1:51000" }, port, token, [t], 1000);
+  assert.ok(!v.ok && v.status === 303 && v.location === "./");
 });
 
 test("a request with the run's cookie is served; without it, or with another run's, refused", () => {
@@ -111,7 +124,7 @@ test("a tunnel adds its port's two loopback names and nothing else, for as long 
   const v = at({ host: "LOCALHOST:51000", url: `/x?a=1&ticket=${ticket}` });
   assert.ok(!v.ok && v.status === 303);
   if (!v.ok && v.status === 303) {
-    assert.equal(v.location, "/x?a=1");
+    assert.equal(v.location, "./x?a=1");
     assert.equal(v.setCookie, setCookieHeader(t.session, 51000));
     assert.ok(!v.setCookie!.includes(token));
   }

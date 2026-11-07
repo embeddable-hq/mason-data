@@ -225,6 +225,12 @@ Origin. Each `mason start` makes a new token: after a restart the page says so, 
 `mason start` prints `Web UI  mason ui` and `mason status` the page's URL without the token; the token is written
 nowhere else.
 
+The page names nothing root-absolute: its files, every answer it asks for and every module it imports are relative
+to its own address, and the first visit's redirect is too (`./`). So it works unchanged at `/` and under any prefix a
+reverse proxy serves it at, with no setting, as long as that address ends in `/` (`https://example.com/tools/mason/`)
+and the proxy sends the run's own Host, and its Origin on a change, which the guard checks (`tests/web-page.test.ts`
+refuses a root-absolute path).
+
 ## On a server
 
 `mason serve` serves the same page, on the server's loopback and nowhere else: nothing about it is public, and no

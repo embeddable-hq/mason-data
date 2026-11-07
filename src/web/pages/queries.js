@@ -14,7 +14,7 @@
 import { msText, agoText, bytesText, esc, firstLine, n, empty, renderFailure, rowsHtml, utcText, utcMsText, details, createOpenSet, status,
   clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, clientText, renderConnect, copyClick, UNLISTED_STATEMENTS, statementCell, rangeEvery } from "../shared.js";
 
-const STATE = "/api/state";
+const STATE = "api/state";
 const NEWEST_EVERY_MS = 5000;
 /** The newest page while a search is set: a search reads every statement's text of the range (7 days of a busy log,
  *  ~0.6 s a read), so it is read every 30 s, not 5 — said under the log (SEARCH_NOTE). */
@@ -103,7 +103,7 @@ export function requestsPath(filters, before, range = DEFAULT_RANGE) {
   if (filters.slow) p.set("slow", "1");
   if (filters.search) p.set("search", filters.search);
   if (before) p.set("before", before);
-  return `/api/requests?${p.toString()}`;
+  return `api/requests?${p.toString()}`;
 }
 
 export const page = {

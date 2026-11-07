@@ -141,7 +141,7 @@ test("through the tunnel: the ticket trades once for a cookie, the guard holds, 
     const ticket = new URL(url).search;
     const traded = await ask(port, { path: `/${ticket}` });
     assert.equal(traded.status, 303);
-    assert.equal(traded.headers.location, "/");
+    assert.equal(traded.headers.location, "./");
     const set = traded.headers["set-cookie"]![0]!;
     assert.match(set, new RegExp(`^mason_dev_${port}=[0-9a-f]{64}; HttpOnly; SameSite=Strict; Path=/$`));
     const cookie = set.split(";")[0]!;
