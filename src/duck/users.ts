@@ -24,11 +24,19 @@
  * user's session, the file read again when its inode, size or mtime moved), so a removal refuses the next connection
  * at once and ends the sessions that user holds at their next statement, without a restart. FAIL CLOSED: a file that
  * cannot be read refuses every user login with the reason (57P03, "could not tell"), never "live"; no file is no users.
+ *
+ * A USER'S ADDRESS RANGES (`from`, `mason user add --from`, `mason user from`): where it may connect from, read by the one
+ * grammar `MASON_PG_PROXY_FROM` is read by (src/lib/cidr.ts). Judged at login BEFORE the password, on the session's own
+ * address (`Session.clientAddr`, the PROXY header's client behind a named proxy), and again before each statement; an
+ * address that could not be read is outside every list (fail closed). While any user has ranges, a name that is no user
+ * is refused in the same words, and with the same work, as an address outside them: a limited user cannot be told from
+ * a missing one by the answer or its time (a user with no ranges still answers a wrong password 28P01).
  */
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { ApiError, USER_DISABLED } from "../api/error.ts";
+import { ADDRESS_NOT_ALLOWED, ApiError, USER_DISABLED } from "../api/error.ts";
+import { cidrOf, cidrText, inRanges, rangeOf, type Range } from "../lib/cidr.ts";
 import type { PgApiOptions, PgToken } from "../api/postgres/server.ts";
 import { tokenProblem } from "./token.ts";
 import { ATTRIBUTE_NAME_RE, type AttributeValues } from "./row-filter.ts";
@@ -58,7 +66,44 @@ export interface MasonUser {
   /** its attribute values (`mason user add … --set tenant=42`, a list's by repeating it), which its role's row filters
    *  read (src/duck/row-filter.ts); absent: none */
   attributes?: Record<string, string | string[]> | undefined;
+  /** the addresses it may connect from (`mason user add … --from`, `mason user from`): IPv4 and IPv6 ranges, or single
+   *  addresses, read by src/lib/cidr.ts; absent: any address, as before */
+  from?: string[] | undefined;
 }
+
+/**
+ * A user's address ranges as given (`--from`, the file, `/api/users`): each read by the one grammar (src/lib/cidr.ts
+ * `cidrOf`), written back in its one form (`cidrText`: `10.0.0.0/16`, `2001:db8::/32`, `192.0.2.10`), a range given
+ * twice once; or every entry that is not a range, each with what is wrong. An empty list is no list of ranges: the way
+ * to any address is to have none (`mason user from <name> --any`).
+ */
+export function userRanges(list: readonly string[]): { from: string[]; ranges: Range[] } | { problem: string } {
+  if (list.length === 0) return { problem: "no address range: name one or more (10.0.0.0/16, 2001:db8::/32, 192.0.2.10)" };
+  if (list.length > MAX_RANGES) return { problem: `${list.length} address ranges: a user takes at most ${MAX_RANGES}` };
+  const from: string[] = [], ranges: Range[] = [], wrong: string[] = [];
+  for (const entry of list) {
+    const c = cidrOf(entry);
+    if ("problem" in c) { wrong.push(c.problem); continue; }
+    const t = cidrText(c);
+    if (!from.includes(t)) { from.push(t); ranges.push(rangeOf(c)); }
+  }
+  return wrong.length ? { problem: wrong.join("; ") } : { from, ranges };
+}
+
+/** The most address ranges one user takes (all input is untrusted: a bound). */
+export const MAX_RANGES = 100;
+
+/** Whether a user may connect from `address` (`Session.clientAddr`): any address when it has no ranges; with ranges, one
+ *  in them, and never an address that could not be read (null), nor any when its ranges cannot be read (fail closed). */
+export function addressAllowed(u: Pick<MasonUser, "from">, address: string | null): boolean {
+  if (u.from === undefined) return true;
+  if (address === null) return false;
+  const r = userRanges(u.from);
+  return !("problem" in r) && inRanges(r.ranges, address);
+}
+
+/** an address as a refusal says it */
+export const addressShown = (address: string | null): string => address === null ? "an address that could not be read" : address;
 
 /** a user's attributes as the file keeps them: a name each, a string or a list of strings */
 function attributesValid(v: unknown): v is Record<string, string | string[]> {
@@ -126,7 +171,11 @@ function parseUsers(file: string, text: string): UsersRead {
     if (typeof o !== "object" || o === null || typeof o.name !== "string" || !USER_NAME_RE.test(o.name) || typeof o.id !== "string" || !/^[0-9a-f]{16}$/.test(o.id) ||
       typeof o.addedAt !== "string" || typeof o.key !== "string" || (o.role !== undefined && (typeof o.role !== "string" || !ROLE_RE.test(o.role))) ||
       (o.attributes !== undefined && !attributesValid(o.attributes))) {
-      return { problem: `${file}: users[${i}] is not { name, id, addedAt, key, role?, attributes?[, removedAt][, disabledAt] } as mason user add writes it` };
+      return { problem: `${file}: users[${i}] is not { name, id, addedAt, key, role?, attributes?, from?[, removedAt][, disabledAt] } as mason user add writes it` };
+    }
+    if (o.from !== undefined) {
+      const r = Array.isArray(o.from) && o.from.every((x) => typeof x === "string") ? userRanges(o.from as string[]) : { problem: "not a list of strings" };
+      if ("problem" in r) return { problem: `${file}: users[${i}].from is not a list of address ranges as mason user from writes it: ${r.problem}` };
     }
     if (o.removedAt !== undefined && typeof o.removedAt !== "string") {
       return { problem: `${file}: users[${i}].removedAt is not a timestamp as mason user remove writes it` };
@@ -135,7 +184,7 @@ function parseUsers(file: string, text: string): UsersRead {
       return { problem: `${file}: users[${i}].disabledAt is not a timestamp as mason user disable writes it` };
     }
     users.push({ name: o.name, id: o.id, addedAt: o.addedAt, key: o.key, ...(typeof o.role === "string" ? { role: o.role } : {}),
-      ...(attributesValid(o.attributes) ? { attributes: o.attributes } : {}),
+      ...(attributesValid(o.attributes) ? { attributes: o.attributes } : {}), ...(Array.isArray(o.from) ? { from: o.from as string[] } : {}),
       ...(o.removedAt !== undefined ? { removedAt: o.removedAt } : {}), ...(o.disabledAt !== undefined ? { disabledAt: o.disabledAt } : {}) });
   }
   return { users };
@@ -199,6 +248,11 @@ export class LiveUsers {
   private readonly apiKey: string;
   private seen: string | null = null;
   private read: UsersRead = { users: [] };
+  /** each live user's ranges, parsed once per read of the file (so a login or a statement costs a lookup, never a parse) */
+  private ranges = new Map<string, Range[]>();
+  /** the longest of those lists: what a name that is no user is judged against, so its refusal costs what a limited
+   *  user's does and the time of the answer does not tell them apart */
+  private decoy: Range[] = [];
 
   constructor(file: string, apiKey: string) { this.file = file; this.apiKey = apiKey; }
 
@@ -215,17 +269,48 @@ export class LiveUsers {
       // a removed user is kept in the file for the list: it is no user to the listener
       this.read = "problem" in r ? r : { users: r.users.filter(isActive) };
       this.seen = stamp;
+      this.ranges = new Map();
+      this.decoy = [];
+      for (const u of "problem" in this.read ? [] : this.read.users) {
+        if (u.from === undefined) continue;
+        const parsed = userRanges(u.from);
+        // the file was read whole, so every list parses; one that would not stays out of the map, which refuses it
+        if ("problem" in parsed) continue;
+        this.ranges.set(u.id, parsed.ranges);
+        if (parsed.ranges.length > this.decoy.length) this.decoy = parsed.ranges;
+      }
     }
     return this.read;
   }
 
-  /** A connection's password, read as a user's: the session's token, or why it is refused. */
-  login(user: string, password: string): PgToken {
+  /** Whether `address` is inside `ranges` (null: no list, any address); an address not read is inside none. The ranges
+   *  are the parsed ones this read of the file holds, so this is a comparison, never a parse. */
+  private inside(ranges: readonly Range[] | null, address: string | null): boolean {
+    if (ranges === null) return true;
+    return address !== null && inRanges(ranges, address);
+  }
+
+  /**
+   * A connection's password, read as a user's: the session's token, or why it is refused. `from` is the client's address
+   * (`Session.clientAddr`; null when it could not be read). THE ADDRESS IS JUDGED FIRST, before the password: the user
+   * the startup packet names, held to its ranges (`inside`); and while any user has ranges, a name that is no
+   * user is refused the same way (`ADDRESS_NOT_ALLOWED`, whose words the listener writes from the name and the address
+   * alone), so a connection from outside cannot tell a limited user from a missing one by its answer. Only the log line
+   * says which (the ApiError's message).
+   */
+  login(user: string, password: string, from: string | null = null): PgToken {
     const m = PASSWORD_RE.exec(password);
     if (m === null) throw refusal(401, "not a Mason user's password: mason user add <name> makes a user and prints its password", user);
     const [, id, given] = m as unknown as [string, string, string];
     const now = this.now();
     if ("problem" in now) throw refusal(503, `the list of users cannot be read, so no user can connect: ${now.problem}`, user);
+    const named = now.users.find((u) => u.name === user);
+    // the same work on both sides: a limited user's own list, or for a name that is no user the longest list there is
+    const inside = this.inside(named === undefined ? this.decoy : named.from === undefined ? null : this.ranges.get(named.id) ?? [], from);
+    if (named !== undefined ? !inside : this.decoy.length > 0) {
+      throw refusal(401, named !== undefined ? `the user "${user}" may not connect from ${addressShown(from)}, outside its address ranges (mason user list shows them)`
+        : `no user "${user}" (from ${addressShown(from)}): refused as an address outside a user's ranges is, since some users have ranges`, user, ADDRESS_NOT_ALLOWED);
+    }
     const found = now.users.find((u) => u.id === id);
     const verifies = (name: string): boolean => crypto.timingSafeEqual(Buffer.from(mac(this.apiKey, name, id)), Buffer.from(given));
     if (found === undefined) {
@@ -250,13 +335,17 @@ export class LiveUsers {
    * token as the file has the user NOW — its role as `mason user add --role` wrote it, so a role given or taken
    * applies at the user's next statement, without a restart.
    */
-  recheck(token: PgToken): PgToken {
+  recheck(token: PgToken, from: string | null = null): PgToken {
     if (token.user === undefined) return token;
     const now = this.now();
     if ("problem" in now) throw refusal(503, `the list of users cannot be read: ${now.problem}`, token.user);
     const found = now.users.find((u) => u.id === token.jti && u.name === token.user);
     if (found === undefined) throw refusal(401, `the user "${token.user}" was removed`, token.user);
     if (isDisabled(found)) throw refusal(401, `the user "${token.user}" was disabled`, token.user, USER_DISABLED);
+    // its ranges changed since it logged in: a session from outside them ends, as a new connection would be refused
+    if (!this.inside(found.from === undefined ? null : this.ranges.get(found.id) ?? [], from)) {
+      throw refusal(401, `the user "${token.user}" may not connect from ${addressShown(from)}: its address ranges are ${found.from!.join(", ")}`, token.user, ADDRESS_NOT_ALLOWED);
+    }
     if (found.role === token.role && JSON.stringify(found.attributes ?? null) === JSON.stringify(token.attributes ?? null)) return token;
     const { role: _was, attributes: _had, ...rest } = token;
     return { ...rest, ...(found.role !== undefined ? { role: found.role } : {}), ...attributesOf(found) };
@@ -278,14 +367,14 @@ export const disabledMessage = (name: string): string => `role "${name}" is not 
  */
 export function listenerLogins(users: LiveUsers, apiKey: string): Pick<PgApiOptions, "authenticate" | "recheck" | "recheckMs"> {
   return {
-    authenticate: (password, user) => {
-      if (isUserPassword(password)) return users.login(user, password);
+    authenticate: (password, user, from) => {
+      if (isUserPassword(password)) return users.login(user, password, from ?? null);
       if (password.startsWith(SHARE_PASSWORD_PREFIX)) throw new Error("a mason share password logs in only at the address mason share printed, never on this port");
       const problem = tokenProblem(apiKey, password);
       if (problem !== null) throw new Error(problem);
       return { filters: [], subject: undefined };
     },
-    recheck: async (t) => users.recheck(t),
+    recheck: async (t, from) => users.recheck(t, from ?? null),
     recheckMs: 0,
   };
 }

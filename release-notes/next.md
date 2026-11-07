@@ -13,13 +13,28 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **`mason ui` opens a browser only when its output is a terminal**, as `mason login` does; in a pipe or a coding
   agent's shell it prints the address alone, as `--no-open` does.
 
+## New
+
+- **A Mason user can be limited to the addresses it connects from**: `mason user add looker --from 203.0.113.0/24
+  --from 2001:db8:7::/48`, `mason user from looker 198.51.100.0/24` to replace the list, `mason user from looker --any`
+  to remove it; `mason user list` shows each user's list (`from` in `--json`, `null` for any address), and `mason user
+  … --replica` carries it. A connection from any other address is refused before its password is checked, as Postgres
+  refuses one no `pg_hba.conf` line takes (`28000`, `no entry for host "…", user "…"`), and a session held when the list
+  changes ends at its next statement if its address is outside it. Behind a TCP proxy the address is the client its
+  PROXY header carries (`MASON_PG_PROXY_FROM`). Users without a list connect as before, and `.mason/users.json` files
+  written before are read unchanged.
+
 ## What changes
 
 - **`mason -C <folder> <command>`** runs any command as if started in that folder, as `git -C` and `make -C` do; a
   folder that is missing or cannot be read is a wrong command line (exit 2).
 - **Every list flag takes a comma list or the flag repeated, meaning the same**: `mason add orders --columns id
-  --columns status` is `--columns id,status`, and so for `--include`, `--key`, `mason logs --outcome` and `mason token
-  create --scope` (`--scope deploy,users`). `mason user add --set` stays one value a flag: a value may hold a comma.
+  --columns status` is `--columns id,status`, and so for `--include`, `--key`, `mason logs --outcome`, `mason user add
+  --from` and `mason token create --scope` (`--scope deploy,users`). `mason user add --set` stays one value a flag: a value may hold a comma.
+- **While any user has an address list, a user name that is no user is refused `28000` with the same words as a wrong
+  address**, instead of `28P01`, so a connection from outside cannot tell a user with a list from a name that is no
+  user. A user without a list still answers a wrong password `28P01`, so its name can be told apart. A project where no
+  user has a list answers as before.
 - **Every `--timeout`, and `mason usage --step`, takes one form of duration**: a bare number is seconds, as before for
   `wait`, `share` and `ui --ssh`, and `30s`, `10m`, `1h` or `1d` (`5 minutes`, `2 days` too). So `mason wait --timeout 10m`
   and `mason deploy --timeout 600` now work; nothing that worked before stops working. `--since` and `--until` take the

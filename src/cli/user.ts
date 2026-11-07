@@ -11,11 +11,11 @@
  * called by the run's command server; so are `disableUser` and `enableUser`.
  */
 import * as path from "node:path";
-import { failed, jsonText, parseCommand, reportText, strict, withEnd, type CommandSpec, type Failure, type NextStep } from "./command.ts";
+import { failed, jsonText, listFlag, parseCommand, reportText, strict, withEnd, type CommandSpec, type Failure, type NextStep } from "./command.ts";
 import { reach } from "./state.ts";
 import { callRun, RunUnreachable } from "./control.ts";
 import { connectionUrl, listenerTips, postgresLink, psqlLine, type PostgresLink } from "./pg-url.ts";
-import { changeUsers, isActive, isDisabled, keyFingerprint, newUserId, readUsers, underKey, userPassword, USER_NAME_RE, USER_NAME_RULE, USERS_FILE, type MasonUser } from "../duck/users.ts";
+import { changeUsers, isActive, isDisabled, keyFingerprint, newUserId, readUsers, underKey, userPassword, userRanges, USER_NAME_RE, USER_NAME_RULE, USERS_FILE, type MasonUser } from "../duck/users.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { out as styleOut, type Style } from "./style.ts";
 import { NO_ROLES, type RoleGrants, type RolesLive } from "../duck/grants.ts";
@@ -34,7 +34,8 @@ export const USER: CommandSpec & { needs: "project" } = {
   needs: "project",
   name: "user",
   summary: "the users the Postgres API takes: a name and a password that does not expire, for a BI tool or an app",
-  usage: `usage: mason user add <name> [--role <role>] [--set <attribute>=<value> …] [--replica <org>/<name>] [--json]
+  usage: `usage: mason user add <name> [--role <role>] [--set <attribute>=<value> …] [--from <range> …] [--replica <org>/<name>] [--json]
+       mason user from <name> <range> … | --any [--replica <org>/<name>] [--json]
        mason user list [--replica <org>/<name>] [--json]
        mason user disable <name> [--replica <org>/<name>] [--json]
        mason user enable <name> [--replica <org>/<name>] [--json]
@@ -87,7 +88,19 @@ export const USER: CommandSpec & { needs: "project" } = {
   statement, never answered with no rows: add it again with the --set. Postgres refuses a where: it cannot read
   when the running Mason reads the file, at its key.
 
+  --from <range> limits the addresses the user connects from (repeat --from for each, or a comma list): an IPv4 or IPv6 range with its
+  prefix length (10.0.0.0/16, 2001:db8::/32) or one address (192.0.2.10). A connection from any other address is
+  refused before its password is checked, as Postgres refuses one no pg_hba.conf line takes (28000, no entry for host
+  …), and in the same words for a name that is no user while any user has ranges, so a user with ranges cannot be
+  told from a missing one (a user without ranges still answers a wrong password 28P01). An address that cannot be read (a public share's socket) is refused too. Behind a TCP proxy the address is
+  the client its PROXY header carries (MASON_PG_PROXY_FROM). A user added without --from connects from any address.
+  mason user from <name> <range> … replaces a user's ranges, and mason user from <name> --any removes them; the sessions
+  it holds from an address outside its new ranges end at their next statement.
+
     mason user add metabase                    a user for Metabase: its password and the URL to paste
+    mason user add looker --from 203.0.113.0/24 --from 2001:db8:7::/48    connects from these alone
+    mason user from looker 198.51.100.0/24     its ranges replaced
+    mason user from looker --any               it connects from any address again
     mason user add agent --role agent          a user held to the role agent
     mason user add acme --role tenant --set tenant=42      the rows of tenant 42
     mason user add emea --role region --set regions=eu --set regions=uk
@@ -100,8 +113,8 @@ export const USER: CommandSpec & { needs: "project" } = {
 
   --replica <org>/<name> manages the users of a replica on a hosted Mason service instead of this project's (else
   MASON_REPLICA, said on stderr when it chose; each part lower case letters, digits and -): the same subcommands,
-  --role and --set, the same output and --json, which names the replica in its headline and its replica key, the
-  replica's Mason checking each as it does here. It needs no project here, and reads and writes
+  --role, --set and --from, the same output and --json, which names the replica in its headline and its replica key,
+  the replica's Mason checking each as it does here. It needs no project here, and reads and writes
   nothing of one. The login is MASON_TOKEN, else this machine's (mason login); the service is MASON_CLOUD_URL, else
   the default. A refusal is the service's words, each one line, its code the CLI's own by the HTTP status (not_found,
   refused, failed: never usage), exit 1.
@@ -109,20 +122,23 @@ export const USER: CommandSpec & { needs: "project" } = {
   <name>    ${USER_NAME_RULE}
   --json    as data: add { user (the name), id, addedAt, password, database, role (the role it reads as: its own
             or the file's default; absent when none), attributes? ({ name: value, or [values] for a list }), roleFrom (file: its own --role; default: the file's default;
-            none), readsNothing (true: no role under a file with no default), and once Mason runs url, psql (the
+            none), readsNothing (true: no role under a file with no default), from? (its address ranges, as given
+            to --from in their one form; absent: any address), and once Mason runs url, psql (the
             psql line for url), host, port, sslmode }; list { users: [{ name, id, addedAt, removedAt (null for a user
-            not removed), disabledAt (null for a user not disabled), live (connects now), role?, attributes?,
+            not removed), disabledAt (null for a user not disabled), live (connects now), from (its address ranges;
+            null: any address), role?, attributes?,
             missingAttributes? (the attributes its role's filters read that it lacks: refused until added again), roleFrom, readsNothing?,
             roleKnown? (the roles file names its own role now), lastUsedAt (its newest statement, null when none within
             requestLogDays), url (to paste, without the password; null for a removed user or when Mason is not running) }],
             lastUsedNote (why lastUsedAt is unknown, else null), urlNote (why url is null, else null), requestLogDays
             (null when unknown) }; disable { disabled: { name, id, addedAt, disabledAt }, already (it was disabled
-            before) }; enable { enabled: { name, id, addedAt }, already (it was not disabled) }; remove { removed: { name,
+            before) }; enable { enabled: { name, id, addedAt }, already (it was not disabled) }; from { changed: { name, id,
+            addedAt, from (its ranges now; null: any address) }, already (they were these before) }; remove { removed: { name,
             id, addedAt, removedAt } }; next. With --replica (or MASON_REPLICA) every answer also has replica ("<org>/<name>":
             the replica it acted on), and a project's never does
 `,
-  options: { json: { type: "boolean", default: false }, role: { type: "string" }, set: { type: "string", multiple: true }, replica: { type: "string" } },
-  json: ["replica", "user", "id", "addedAt", "password", "url", "psql", "host", "port", "database", "sslmode", "role", "attributes", "roleFrom", "readsNothing", "users", "disabled", "enabled", "already", "removed", "lastUsedNote", "urlNote", "requestLogDays", "next"],
+  options: { json: { type: "boolean", default: false }, role: { type: "string" }, set: { type: "string", multiple: true }, from: { type: "string", multiple: true }, any: { type: "boolean", default: false }, replica: { type: "string" } },
+  json: ["replica", "user", "id", "addedAt", "password", "url", "psql", "host", "port", "database", "sslmode", "role", "attributes", "roleFrom", "readsNothing", "users", "disabled", "enabled", "already", "removed", "from", "changed", "lastUsedNote", "urlNote", "requestLogDays", "next"],
 };
 
 
@@ -143,6 +159,8 @@ const liveOf = (u: MasonUser, apiKey: string): boolean => underKey(u, apiKey);
  * names it now (false: its statements are refused until it does).
  */
 export interface UserRow { name: string; id: string; addedAt: string; removedAt: string | null; disabledAt: string | null; live: boolean; lastUsedAt: string | null; url: string | null;
+  /** its address ranges (src/duck/users.ts `from`); null: any address */
+  from: string[] | null;
   role?: string; attributes?: Record<string, string | string[]>; missingAttributes?: string[]; roleFrom: RoleFrom; readsNothing?: true; roleKnown?: boolean }
 
 export const NOT_RUNNING_LAST_USED = "unknown: Mason is not running, and the request log is only read by a running Mason (mason start)";
@@ -169,6 +187,8 @@ export interface AddedUser {
   user: string; id: string; addedAt: string; password: string; database: string;
   url?: string; psql?: string; host?: string; port?: number; sslmode?: string;
   role?: string; attributes?: Record<string, string | string[]>; roleFrom: RoleFrom; readsNothing?: true;
+  /** its address ranges, in their one form; absent: any address */
+  from?: string[];
   replaced: boolean;
 }
 
@@ -346,7 +366,7 @@ export const disableEffect = (name: string): string =>
 export const disabledText = (disabledAt: string): string => `Disabled ${stamp(disabledAt)} UTC`;
 
 /** Why `name` is not one `mason user <verb>` takes (a usage failure), or null. */
-export function userNameProblem(verb: "add" | "remove" | "disable" | "enable", name: string | undefined): string | null {
+export function userNameProblem(verb: "add" | "remove" | "disable" | "enable" | "from", name: string | undefined): string | null {
   if (name === undefined) return `mason user ${verb} <name>: which user`;
   if (!USER_NAME_RE.test(name)) return `${JSON.stringify(name)} is not a user name: ${USER_NAME_RULE}`;
   return null;
@@ -366,7 +386,7 @@ export function listUsers(file: string, apiKey: string, link: PostgresLink | nul
     fix: `repair ${file}, or move it aside, which removes every user` };
   // roleKnown only where the file can be read: under a problem the listener refuses every user held to it for the FILE
   return { users: r.users.map((u) => ({ name: u.name, id: u.id, addedAt: u.addedAt, removedAt: u.removedAt ?? null, disabledAt: u.disabledAt ?? null,
-    live: isActive(u) && !isDisabled(u) && liveOf(u, apiKey),
+    live: isActive(u) && !isDisabled(u) && liveOf(u, apiKey), from: u.from ?? null,
     lastUsedAt: null, url: link !== null && isActive(u) ? connectionUrl(link, u.name, null) : null,
     ...roleFields(u, roles), ...(u.attributes !== undefined ? { attributes: u.attributes } : {}),
     ...((m) => m === undefined ? {} : { missingAttributes: m.missing })(usersMissingAttributes([u], roles)[0]),
@@ -399,9 +419,11 @@ export async function withLastUsed(rows: readonly UserRow[], requests: { lastUse
  * ADD A USER to `file` under its lock: a new id, its password (said here, once, and kept nowhere), and — `link`, where
  * the run's Postgres API listens, when it is up — the URL to paste. A name taken by a live user is refused.
  */
-export function addUser(file: string, apiKey: string, name: string, o: { link: PostgresLink | null; database: string; role?: string; roles?: RolesLive; attributes?: Record<string, string | string[]> }): AddedUser | Failure {
+export function addUser(file: string, apiKey: string, name: string, o: { link: PostgresLink | null; database: string; role?: string; roles?: RolesLive; attributes?: Record<string, string | string[]>; from?: readonly string[] }): AddedUser | Failure {
   const usage = userNameProblem("add", name);
   if (usage !== null) return { message: usage, code: "usage" };
+  const ranges = o.from === undefined ? null : rangesToSet(o.from, `mason user add ${name}`);
+  if (ranges !== null && "message" in ranges) return ranges;
   const fingerprint = keyFingerprint(apiKey);
   let added: MasonUser | undefined;
   let replaced = false;
@@ -414,7 +436,7 @@ export function addUser(file: string, apiKey: string, name: string, o: { link: P
       replaced = was !== undefined;
       const now = new Date().toISOString();
       added = { name, id: newUserId(), addedAt: now, key: fingerprint, ...(o.role !== undefined ? { role: o.role } : {}),
-        ...(o.attributes !== undefined && Object.keys(o.attributes).length > 0 ? { attributes: o.attributes } : {}) };
+        ...(o.attributes !== undefined && Object.keys(o.attributes).length > 0 ? { attributes: o.attributes } : {}), ...(ranges !== null ? { from: ranges.from } : {}) };
       return [...users.map((u) => u === was ? { ...u, removedAt: now } : u), added];
     });
   } catch (e) { return cantChange(file, e); }
@@ -429,8 +451,55 @@ export function addUser(file: string, apiKey: string, name: string, o: { link: P
   const { link } = o;
   return { user: u.name, id: u.id, addedAt: u.addedAt, password, database: link?.database ?? o.database,
     ...(link !== null ? { url: connectionUrl(link, u.name, password), psql: psqlLine(connectionUrl(link, u.name, password)), host: link.host, port: link.port, sslmode: link.sslmode ?? "disable" } : {}),
-    ...roleFields(u, o.roles ?? NO_ROLES), ...(u.attributes !== undefined ? { attributes: u.attributes } : {}), replaced };
+    ...roleFields(u, o.roles ?? NO_ROLES), ...(u.attributes !== undefined ? { attributes: u.attributes } : {}), ...(u.from !== undefined ? { from: u.from } : {}), replaced };
 }
+
+/** Address ranges as `--from` (or `/api/users`' `from`) gives them, each read by the one grammar (src/duck/users.ts
+ *  `userRanges`) and in its one form; or a wrong line (`usage`), every entry that is not a range said, nothing written. */
+export function rangesToSet(given: readonly string[], line: string): { from: string[] } | Failure {
+  const r = userRanges(given);
+  if ("problem" in r) return { message: `${line}: ${r.problem}`, code: "usage", fix: "an IPv4 or IPv6 range with its prefix length (10.0.0.0/16, 2001:db8::/32) or one address (192.0.2.10), one --from each" };
+  return { from: r.from };
+}
+
+/** What `mason user from --json` answers, beside `next`. */
+export type FromChanged = { changed: { name: string; id: string; addedAt: string; from: string[] | null }; already: boolean };
+
+/**
+ * SET A USER'S ADDRESS RANGES in `file` under its lock, replacing those it had (`from`: the ranges as given; null: any
+ * address, its ranges removed). The listener reads them at the user's next connection and at each statement of a session
+ * it holds, so a session from outside the new ranges ends there. The same ranges as now are said so (`already`), nothing
+ * written. A range that is not one is a wrong line, nothing written.
+ */
+export function setUserFrom(file: string, name: string, from: readonly string[] | null): FromChanged | Failure {
+  const usage = userNameProblem("from", name);
+  if (usage !== null) return { message: usage, code: "usage" };
+  const ranges = from === null ? null : rangesToSet(from, `mason user from ${name}`);
+  if (ranges !== null && "message" in ranges) return ranges;
+  const next = ranges === null ? undefined : ranges.from;
+  let found: MasonUser | undefined;
+  let live: string[] = [];
+  let r;
+  try {
+    r = changeUsers(file, (users) => {
+      found = users.find((u) => u.name === name && isActive(u));
+      live = users.filter(isActive).map((u) => u.name);
+      if (found === undefined) return { refused: "unknown" };
+      if (JSON.stringify(found.from ?? null) === JSON.stringify(next ?? null)) return { refused: "already" };
+      return users.map((u) => { if (u !== found) return u; const { from: _, ...rest } = u; return next === undefined ? rest : { ...rest, from: next }; });
+    });
+  } catch (e) { return cantChange(file, e); }
+  if (found === undefined) return noSuchUser(name, live);
+  const u = found;
+  return { changed: { name: u.name, id: u.id, addedAt: u.addedAt, from: next ?? null }, already: !Array.isArray(r) };
+}
+
+/** a user's ranges as `mason user` says them: `10.0.0.0/16, 2001:db8::/32`, or any address */
+export const rangesText = (from: readonly string[] | null | undefined): string => from === null || from === undefined ? "any address" : from.join(", ");
+
+/** What to run after a `mason user from`. */
+export const fromNext = (name: string, from: readonly string[] | null): NextStep[] => [["mason user list", "the users and the addresses each connects from"],
+  ...(from !== null ? [[`mason user from ${name} --any`, "it connects from any address again"] as NextStep] : [])];
 
 /** REMOVE A USER from `file` under its lock: it connects no more. A name the file lacks is refused with the closest it has. */
 export function removeUser(file: string, name: string): { removed: { name: string; id: string; addedAt: string; removedAt: string } } | Failure {
@@ -530,7 +599,7 @@ export function listText(of: string, l: UserList, roles: RolesLive, next: readon
   const rolesFileShown = roles.file ?? `mason/${ROLES_FILE}`;
   // the last use in the words the web page's Users page says it too (lastUsedText): "last used" before a time or "unknown"
   const used = (u: UserRow): string => { const t = lastUsedText(u.lastUsedAt, lastUsedNote, requestLogDays, u.addedAt); return t === "never" ? "never used" : t.startsWith("not used") ? t : `last used ${t}`; };
-  const lines = active.map((u) => `  ${s.cyan(u.name.padEnd(width))}   ${u.role !== undefined ? `role ${u.role}${u.roleFrom === "default" ? " (default)" : ""}${u.attributes !== undefined ? ` (${attributesText(u.attributes)})` : ""}   ` : ""}${s.dim(`id ${u.id} · added ${stamp(u.addedAt)} UTC · ${used(u)}`)}` +
+  const lines = active.map((u) => `  ${s.cyan(u.name.padEnd(width))}   ${u.role !== undefined ? `role ${u.role}${u.roleFrom === "default" ? " (default)" : ""}${u.attributes !== undefined ? ` (${attributesText(u.attributes)})` : ""}   ` : ""}${u.from !== null ? `from ${rangesText(u.from)}   ` : ""}${s.dim(`id ${u.id} · added ${stamp(u.addedAt)} UTC · ${used(u)}`)}` +
     (u.disabledAt !== null ? `   ${s.yellow(`${disabledText(u.disabledAt)}: does not connect until mason user enable ${u.name}`)}`
       : u.live ? "" : `   ${s.yellow("does not connect: the API key was rotated since it was added")}`) +
     (u.roleKnown === false ? `   ${s.yellow(`its role ${u.role} is not in the roles file: its statements are refused`)}` : "") +
@@ -575,6 +644,15 @@ export const enabledReport = (r: Enabled, next: readonly NextStep[], s: Style = 
     details: [["user", e.name], ["added", e.addedAt]], next }, s);
 };
 
+/** `mason user from` for a person. `up`: Mason runs, so a session from outside the new ranges ends at its next statement. */
+export const fromReport = (r: FromChanged, up: boolean, next: readonly NextStep[], s: Style = styleOut()): string => {
+  const c = r.changed;
+  return reportText({ headline: r.already ? `The user ${c.name} connects from ${rangesText(c.from)} already: nothing changed`
+    : c.from === null ? `The user ${c.name} connects from any address now` : `The user ${c.name} connects from ${rangesText(c.from)} alone now`,
+    details: [["user", c.name], ["from", rangesText(c.from)], ...(r.already || c.from === null ? [] : [["sessions", up ? "those it holds from another address end at their next statement" : "none: Mason is not running"] as const])],
+    tips: c.from === null ? [] : ["A connection from any other address is refused before its password is checked (28000, no entry for host …)."], next }, s);
+};
+
 /** `mason user remove` for a person. */
 export const removedReport = (r: Removed, up: boolean, next: readonly NextStep[], s: Style = styleOut(), on?: string): string => {
   const gone = r.removed;
@@ -597,6 +675,7 @@ export function addedReport(r: Omit<AddedUser, "replaced"> & { replaced?: boolea
       ...(r.url !== undefined && r.psql !== undefined ? [["url", r.url] as const, ["psql", r.psql] as const] : []),
       ["user", r.user], ["password", r.password], ["database", r.database],
       ...(r.attributes !== undefined ? [["attributes", attributesText(r.attributes)] as const] : []),
+      ...(r.from !== undefined ? [["from", `${rangesText(r.from)} (it connects from these alone)`] as const] : []),
       ...(r.roleFrom === "file" ? [["role", `${r.role!} (mason/${ROLES_FILE} names what it reads)`] as const]
         : r.roleFrom === "default" ? [["role", `${r.role!} (the file's default: ${roles.file ?? `mason/${ROLES_FILE}`})`] as const]
         : r.readsNothing === true ? [["role", `none, and ${roles.file ?? `mason/${ROLES_FILE}`} names no default: it reads nothing until one is written`] as const] : []),
@@ -622,19 +701,31 @@ export async function user(argv: string[]): Promise<number> {
   const json = f.values.json === true;
   const usage = (message: string): number => failed("user", { message, code: "usage", usage: USER.usage }, { json });
   const [verb, name, ...rest] = f.positionals;
-  const VERBS = ["add", "list", "disable", "enable", "remove"];
-  if (verb === undefined) return usage("add, list, disable, enable or remove: mason user add <name> makes a user");
-  if (!VERBS.includes(verb)) return usage(`there is no mason user ${verb}: add, list, disable, enable or remove${didYouMean(verb, VERBS)}`);
-  if (verb === "list" ? name !== undefined : rest.length) return usage(`mason user ${verb} takes ${verb === "list" ? "no name" : "one name"}: ${[name, ...rest].filter(Boolean).join(" ")} is too many`);
+  const VERBS = ["add", "list", "from", "disable", "enable", "remove"];
+  if (verb === undefined) return usage("add, list, from, disable, enable or remove: mason user add <name> makes a user");
+  if (!VERBS.includes(verb)) return usage(`there is no mason user ${verb}: add, list, from, disable, enable or remove${didYouMean(verb, VERBS)}`);
+  if (verb === "list" ? name !== undefined : verb !== "from" && rest.length) return usage(`mason user ${verb} takes ${verb === "list" ? "no name" : "one name"}: ${[name, ...rest].filter(Boolean).join(" ")} is too many`);
+  // the address ranges: --from on add, the positionals of from (or its --any); each read by the one grammar, a wrong one a
+  // wrong line before anything is read, written or sent
+  // a comma list or the flag repeated, the same (src/cli/command.ts listFlag): a range holds no comma
+  const fromList = listFlag(f.values.from);
+  const fromFlags = fromList === undefined ? [] : fromList.split(",");
+  if (fromFlags.length > 0 && verb !== "add") return usage(`--from goes with mason user add: mason user add <name> --from ${fromFlags[0]!}${verb === "from" ? `, or mason user from <name> ${fromFlags[0]!}` : ""}`);
+  const any = f.values.any === true;
+  if (any && verb !== "from") return usage("--any goes with mason user from: mason user from <name> --any removes its address ranges");
+  if (verb === "from" && any === (rest.length > 0)) return usage(any ? `mason user from ${name ?? "<name>"}: --any or ranges, not both` : `mason user from ${name ?? "<name>"}: which addresses — one or more ranges (10.0.0.0/16, 2001:db8::/32, 192.0.2.10), or --any`);
+  const given = verb === "add" ? (fromFlags.length > 0 ? fromFlags : null) : verb === "from" && !any ? rest : null;
   const role = typeof f.values.role === "string" ? f.values.role : undefined;
   if (role !== undefined && verb !== "add") return usage(`--role goes with mason user add: mason user add <name> --role ${role}`);
   const sets = Array.isArray(f.values.set) ? f.values.set.filter((x): x is string => typeof x === "string") : [];
   if (sets.length > 0 && verb !== "add") return usage(`--set goes with mason user add: mason user add <name> --role <role> --set ${sets[0]!}`);
   for (const arg of sets) { const s = setOf(arg); if (typeof s === "string") return usage(s); }
   if (verb !== "list") {
-    const problem = userNameProblem(verb as "add" | "remove" | "disable" | "enable", name);
+    const problem = userNameProblem(verb as "add" | "remove" | "disable" | "enable" | "from", name);
     if (problem !== null) return usage(problem);
   }
+  const ranges = given === null ? null : rangesToSet(given, `mason user ${verb} ${name!}`);
+  if (ranges !== null && "message" in ranges) return failed("user", { ...ranges, usage: USER.usage }, { json });
   // A REPLICA ON A HOSTED MASON SERVICE (--replica, else MASON_REPLICA): its users, asked of the service with the same
   // request the run's /api/users takes, printed by the renderers above; nothing of a project here is read or written
   const replica = replicaOf(typeof f.values.replica === "string" ? f.values.replica : undefined, USER.usage);
@@ -642,7 +733,7 @@ export async function user(argv: string[]): Promise<number> {
   if (replica !== null) {
     const named = role === undefined ? null : roleNameProblem(role);
     if (named !== null) return usage(named);
-    return hostedUser(replica, { verb: verb as "add" | "list" | "disable" | "enable" | "remove", name, role, sets, json });
+    return hostedUser(replica, { verb: verb as "add" | "list" | "from" | "disable" | "enable" | "remove", name, role, sets, from: ranges?.from ?? null, json });
   }
   const w = await reach(USER, json);
   if (w === null || w.project === null) return 1;
@@ -678,6 +769,15 @@ export async function user(argv: string[]): Promise<number> {
     const next = listNext(users);
     if (json) { out(jsonText(USER, { users, lastUsedNote, urlNote, requestLogDays }, next)); return 0; }
     out(listText(project.config.name, { users, lastUsedNote, urlNote, requestLogDays }, roles, next));
+    return 0;
+  }
+
+  if (verb === "from") {
+    const r = setUserFrom(file, name!, ranges?.from ?? null);
+    if ("message" in r) return failed("user", r, { json });
+    const next = fromNext(r.changed.name, r.changed.from);
+    if (json) { out(jsonText(USER, r, next)); return 0; }
+    out(fromReport(r, w.state === "up", next));
     return 0;
   }
 
@@ -723,7 +823,7 @@ export async function user(argv: string[]): Promise<number> {
   // the attributes the role declares, every one, and none other: refused before writing, as the role is
   const attributes = attributesToAdd(name!, role ?? userRole({}, roles).role, sets, roles);
   if ("refused" in attributes) return failed("user", attributes.refused, { json });
-  const r = addUser(file, apiKey, name!, { link, database, roles, ...(role !== undefined ? { role } : {}), attributes: attributes.values });
+  const r = addUser(file, apiKey, name!, { link, database, roles, ...(role !== undefined ? { role } : {}), attributes: attributes.values, ...(ranges !== null ? { from: ranges.from } : {}) });
   if ("message" in r) return failed("user", r, { json });
   const { replaced: _, ...added } = r;
   const next = addedNext(r.user, link !== null);
