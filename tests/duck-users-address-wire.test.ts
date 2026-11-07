@@ -121,7 +121,7 @@ test("a user with ranges connects from an address in them and is refused from an
   // judged before the password: a wrong one from outside is the same refusal, never 28P01
   const wrong = await refused(direct.port, "bi", "mason_1111111111111111_00000000000000000000000000000000");
   assert.deepEqual([wrong.code, wrong.message], ["28000", 'no entry for host "127.0.0.1", user "bi"']);
-  assert.ok(logs.some((l) => /refused: the user "bi" may not connect from 127\.0\.0\.1: its address ranges are 203\.0\.113\.0\/24, 2001:db8:7::\/48/.test(l)), "the log says the address and the ranges");
+  assert.ok(logs.some((l) => /refused: the user "bi" may not connect from 127\.0\.0\.1, outside its address ranges \(mason user list shows them\)/.test(l)), "the log says the address");
   // through the proxy, the client its header carries
   await connects(await fakeProxy(proxied.port, wire.proxyV2Inet4("203.0.113.40", 50000)), "bi", await password("bi", BI));
   await connects(await fakeProxy(proxied.port, wire.proxyV2Inet6("20010db8000700000000000000000009", 50000)), "bi", await password("bi", BI));

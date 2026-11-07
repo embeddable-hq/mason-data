@@ -29,7 +29,8 @@
  * grammar `MASON_PG_PROXY_FROM` is read by (src/lib/cidr.ts). Judged at login BEFORE the password, on the session's own
  * address (`Session.clientAddr`, the PROXY header's client behind a named proxy), and again before each statement; an
  * address that could not be read is outside every list (fail closed). While any user has ranges, a name that is no user
- * is refused in the same words as an address outside them, so the refusal does not say who exists.
+ * is refused in the same words, and with the same work, as an address outside them: a limited user cannot be told from
+ * a missing one by the answer or its time (a user with no ranges still answers a wrong password 28P01).
  */
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
@@ -247,6 +248,11 @@ export class LiveUsers {
   private readonly apiKey: string;
   private seen: string | null = null;
   private read: UsersRead = { users: [] };
+  /** each live user's ranges, parsed once per read of the file (so a login or a statement costs a lookup, never a parse) */
+  private ranges = new Map<string, Range[]>();
+  /** the longest of those lists: what a name that is no user is judged against, so its refusal costs what a limited
+   *  user's does and the time of the answer does not tell them apart */
+  private decoy: Range[] = [];
 
   constructor(file: string, apiKey: string) { this.file = file; this.apiKey = apiKey; }
 
@@ -263,14 +269,31 @@ export class LiveUsers {
       // a removed user is kept in the file for the list: it is no user to the listener
       this.read = "problem" in r ? r : { users: r.users.filter(isActive) };
       this.seen = stamp;
+      this.ranges = new Map();
+      this.decoy = [];
+      for (const u of "problem" in this.read ? [] : this.read.users) {
+        if (u.from === undefined) continue;
+        const parsed = userRanges(u.from);
+        // the file was read whole, so every list parses; one that would not stays out of the map, which refuses it
+        if ("problem" in parsed) continue;
+        this.ranges.set(u.id, parsed.ranges);
+        if (parsed.ranges.length > this.decoy.length) this.decoy = parsed.ranges;
+      }
     }
     return this.read;
+  }
+
+  /** Whether `address` is inside `ranges` (null: no list, any address); an address not read is inside none. The ranges
+   *  are the parsed ones this read of the file holds, so this is a comparison, never a parse. */
+  private inside(ranges: readonly Range[] | null, address: string | null): boolean {
+    if (ranges === null) return true;
+    return address !== null && inRanges(ranges, address);
   }
 
   /**
    * A connection's password, read as a user's: the session's token, or why it is refused. `from` is the client's address
    * (`Session.clientAddr`; null when it could not be read). THE ADDRESS IS JUDGED FIRST, before the password: the user
-   * the startup packet names, held to its ranges (`addressAllowed`); and while any user has ranges, a name that is no
+   * the startup packet names, held to its ranges (`inside`); and while any user has ranges, a name that is no
    * user is refused the same way (`ADDRESS_NOT_ALLOWED`, whose words the listener writes from the name and the address
    * alone), so a connection from outside cannot tell a limited user from a missing one by its answer. Only the log line
    * says which (the ApiError's message).
@@ -282,8 +305,10 @@ export class LiveUsers {
     const now = this.now();
     if ("problem" in now) throw refusal(503, `the list of users cannot be read, so no user can connect: ${now.problem}`, user);
     const named = now.users.find((u) => u.name === user);
-    if (named !== undefined ? !addressAllowed(named, from) : now.users.some((u) => u.from !== undefined)) {
-      throw refusal(401, named !== undefined ? `the user "${user}" may not connect from ${addressShown(from)}: its address ranges are ${named.from!.join(", ")}`
+    // the same work on both sides: a limited user's own list, or for a name that is no user the longest list there is
+    const inside = this.inside(named === undefined ? this.decoy : named.from === undefined ? null : this.ranges.get(named.id) ?? [], from);
+    if (named !== undefined ? !inside : this.decoy.length > 0) {
+      throw refusal(401, named !== undefined ? `the user "${user}" may not connect from ${addressShown(from)}, outside its address ranges (mason user list shows them)`
         : `no user "${user}" (from ${addressShown(from)}): refused as an address outside a user's ranges is, since some users have ranges`, user, ADDRESS_NOT_ALLOWED);
     }
     const found = now.users.find((u) => u.id === id);
@@ -318,7 +343,7 @@ export class LiveUsers {
     if (found === undefined) throw refusal(401, `the user "${token.user}" was removed`, token.user);
     if (isDisabled(found)) throw refusal(401, `the user "${token.user}" was disabled`, token.user, USER_DISABLED);
     // its ranges changed since it logged in: a session from outside them ends, as a new connection would be refused
-    if (!addressAllowed(found, from)) {
+    if (!this.inside(found.from === undefined ? null : this.ranges.get(found.id) ?? [], from)) {
       throw refusal(401, `the user "${token.user}" may not connect from ${addressShown(from)}: its address ranges are ${found.from!.join(", ")}`, token.user, ADDRESS_NOT_ALLOWED);
     }
     if (found.role === token.role && JSON.stringify(found.attributes ?? null) === JSON.stringify(token.attributes ?? null)) return token;

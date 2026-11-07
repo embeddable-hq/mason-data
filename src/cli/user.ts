@@ -91,8 +91,8 @@ export const USER: CommandSpec & { needs: "project" } = {
   --from <range> limits the addresses the user connects from (repeat --from for each): an IPv4 or IPv6 range with its
   prefix length (10.0.0.0/16, 2001:db8::/32) or one address (192.0.2.10). A connection from any other address is
   refused before its password is checked, as Postgres refuses one no pg_hba.conf line takes (28000, no entry for host
-  …), and in the same words for a name that is no user while any user has ranges, so the refusal says nothing of who
-  exists. An address that cannot be read (a public share's socket) is refused too. Behind a TCP proxy the address is
+  …), and in the same words for a name that is no user while any user has ranges, so a user with ranges cannot be
+  told from a missing one (a user without ranges still answers a wrong password 28P01). An address that cannot be read (a public share's socket) is refused too. Behind a TCP proxy the address is
   the client its PROXY header carries (MASON_PG_PROXY_FROM). A user added without --from connects from any address.
   mason user from <name> <range> … replaces a user's ranges, and mason user from <name> --any removes them; the sessions
   it holds from an address outside its new ranges end at their next statement.

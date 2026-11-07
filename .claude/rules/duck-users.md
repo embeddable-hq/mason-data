@@ -32,9 +32,11 @@ paths:
   28000); its sessions end at their next statement; `enable` deletes the field, so the same password connects again.
 - **A user's address ranges are a field of its row** (`MasonUser.from`, `mason user add --from`, `mason user from`),
   read by ONE grammar (src/lib/cidr.ts, `MASON_PG_PROXY_FROM`'s too) and judged BEFORE the password on the session's
-  `clientAddr` (`addressAllowed`), again before every statement: outside them is `ADDRESS_NOT_ALLOWED` (the listener's
-  28000 "no entry for host …"), a null address is outside every list, and while any user has ranges a name that is no
-  user is refused in the same words, so the answer never says who exists (tests/duck-users-address-wire.test.ts).
+  `clientAddr`, again before every statement: outside them is `ADDRESS_NOT_ALLOWED` (the listener's 28000 "no entry
+  for host …"), a null address is outside every list, and while any user has ranges a name that is no user is refused in
+  the same words AND the same work (`LiveUsers` parses the ranges once per read of the file and judges a missing name
+  against the longest list, so the answer's time does not differ either): a limited user cannot be told from a missing
+  one, though a user with no ranges still answers a wrong password 28P01 (tests/duck-users-address-wire.test.ts).
 
 ## What review probes
 

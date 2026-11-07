@@ -14,5 +14,6 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 ## What changes
 
 - **While any user has an address list, a user name that is no user is refused `28000` with the same words as a wrong
-  address**, instead of `28P01`, so a connection from outside cannot tell which names exist. A project where no user has
-  a list answers as before.
+  address**, instead of `28P01`, so a connection from outside cannot tell a user with a list from a name that is no
+  user. A user without a list still answers a wrong password `28P01`, so its name can be told apart. A project where no
+  user has a list answers as before.
