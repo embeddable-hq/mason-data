@@ -215,7 +215,7 @@ test("the next command follows the first failing check, in the order a first ses
   // the demo database is down until its run is up: mason start is the way out, not a URL to fix
   const demoProject = { ...project, config: { ...project.config, demo: true } } as typeof project;
   assert.deepEqual(nextSteps([ok("node"), bad("database")], null, demoProject), [["mason start", "hosts the demo database, then syncs its tables"]]);
-  assert.equal(first([ok("node"), ok("memory")], null, null), "mason init | mason init postgres://user:password@localhost:5432/your_app");
+  assert.equal(first([ok("node"), ok("memory")], null, null), "mason init | mason init - < db-url.txt", "the URL on stdin, never a password on the command line");
   assert.equal(first([ok("node"), ok("database")], null, project), "mason start");
   assert.equal(first([ok("node"), bad("mason start")], run, project), "mason logs | mason stop");
   assert.equal(first([ok("node"), ok("mason start"), bad("project")], run, project), "mason wait");

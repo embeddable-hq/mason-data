@@ -80,11 +80,12 @@ export const LOGOUT: CommandSpec = {
     MASON_CLOUD_URL=http://127.0.0.1:8080 mason logout    a service on this machine
 
   --json    as data: { service, signedOut (a saved login was removed), email (its account, null when there was
-            none), revoked (true, false when the service did not take it, null when there was nothing to revoke),
-            revokeError (why not, else null), environmentToken (MASON_TOKEN is set, and still used), file, next }
+            none), loginRevoked (true, false when the service did not take it, null when there was nothing to
+            revoke), revoked (the same, kept until 1.0), revokeError (why not, else null), environmentToken
+            (MASON_TOKEN is set, and still used), file, next }
 `,
   options: { json: { type: "boolean", default: false } },
-  json: ["service", "signedOut", "email", "revoked", "revokeError", "environmentToken", "file", "next"],
+  json: ["service", "signedOut", "email", "loginRevoked", "revoked", "revokeError", "environmentToken", "file", "next"],
 };
 
 /** An organisation as a line: its slug, its name when it says more, the role. */
@@ -232,7 +233,7 @@ export async function logout(argv: string[]): Promise<number> {
   if (entry !== undefined || env !== null) holdOutput({ command: "logout", json, secrets: [...(entry ? [entry.token] : []), ...(env !== null ? [env] : [])] });
   if (entry === undefined) {
     const next: NextStep[] = [["mason login", `sign this machine in to ${service.base}`]];
-    if (json) { out(jsonText(LOGOUT, { service: service.base, signedOut: false, email: null, revoked: null, revokeError: null, environmentToken: fromEnv, file: read.file }, next)); return 0; }
+    if (json) { out(jsonText(LOGOUT, { service: service.base, signedOut: false, email: null, loginRevoked: null, revoked: null, revokeError: null, environmentToken: fromEnv, file: read.file }, next)); return 0; }
     out(reportText({ headline: `This machine is not signed in to ${service.base}`, details: [["file", read.file]], tips: envTip, next }, outStyle()));
     return 0;
   }
@@ -245,7 +246,7 @@ export async function logout(argv: string[]): Promise<number> {
   const email = serviceText(entry.email, 320, [entry.token]);
   const next: NextStep[] = [["mason login", `sign in to ${service.base} again`]];
   if (json) {
-    out(jsonText(LOGOUT, { service: service.base, signedOut: true, email, revoked: revokeError === null, revokeError, environmentToken: fromEnv, file: written.file }, next));
+    out(jsonText(LOGOUT, { service: service.base, signedOut: true, email, loginRevoked: revokeError === null, revoked: revokeError === null, revokeError, environmentToken: fromEnv, file: written.file }, next));
     return 0;
   }
   const notRevoked: string | undefined = revokeError === null ? undefined

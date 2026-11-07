@@ -264,7 +264,7 @@ test("mason logout: revokes the token (RFC 7009 form), removes this service's lo
     assert.equal(mode(credentials(h)), "600");
     const again = await mason(h, ["logout", "--json"], envFor(h, fake.url));
     assert.equal(again.code, 0);
-    assert.deepEqual(JSON.parse(again.stdout), { service: fake.url, signedOut: false, email: null, revoked: null, revokeError: null, environmentToken: false, file: credentials(h),
+    assert.deepEqual(JSON.parse(again.stdout), { service: fake.url, signedOut: false, email: null, loginRevoked: null, revoked: null, revokeError: null, environmentToken: false, file: credentials(h),
       next: [{ command: "mason login", what: `sign this machine in to ${fake.url}` }] });
     assert.equal(fake.requests.length, 1, "nothing to revoke: nothing sent");
   } finally { await fake.close(); }
@@ -281,7 +281,7 @@ test("mason logout with the service down, or refusing: the login is still remove
   const a = await mason(h, ["logout", "--json"], envFor(h, url));
   assert.equal(a.code, 0, a.stdout + a.stderr);
   const v = JSON.parse(a.stdout) as Record<string, unknown>;
-  assert.deepEqual([v.signedOut, v.revoked, v.email], [true, false, "ada@example.com"]);
+  assert.deepEqual([v.signedOut, v.revoked, v.loginRevoked, v.email], [true, false, false, "ada@example.com"]);
   assert.match(String(v.revokeError), new RegExp(`^could not reach ${url.replace(/[.]/g, "\\.")} \\(ECONNREFUSED`));
   assert.deepEqual(saved(h).logins, {}, "removed here");
   writeSaved(h, { [url]: { token, email: "ada@example.com", savedAt: "2026-11-01T00:00:00.000Z" } });

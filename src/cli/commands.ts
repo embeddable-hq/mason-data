@@ -26,7 +26,7 @@ import { listenerText } from "./pg-tls.ts";
 import type { RefusedQuery, SlowQuery } from "./run-server.ts";
 import { entriesOfLines, logLineText } from "../lib/log-buffer.ts";
 import { LogReader, logPath } from "../lib/log-read.ts";
-import { catalogTable, entryName, looksSecret, tableNameProblem, type CatalogColumn, type CatalogTable, type ProjectSource } from "./sources.ts";
+import { catalogTable, entryName, findEntry, looksSecret, tableNameProblem, type CatalogColumn, type CatalogTable, type ProjectSource } from "./sources.ts";
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
 import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFacts, type SourceTable } from "./preflight.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
@@ -42,6 +42,7 @@ import type { ShareEnded, ShareState } from "./share-run.ts";
 import { DEFAULT_REQUEST_LIMIT, eventLimit, MAX_SEARCH, SLOW_MS, requestFilter, requestFilterParams, type FilterKey } from "./request-filter.ts";
 import { countsText } from "../duck/stream.ts";
 import { agoText, BIG_TABLE_ROWS, parseDuration, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
+import { didYouMean } from "../lib/did-you-mean.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 const err = (m: string): void => { process.stderr.write(`${m}\n`); };
@@ -1274,7 +1275,7 @@ export function addedLines(b: PickResult, file: string): { line: string; notes: 
 
 // ------------------------------------------------------------------ mason remove
 
-const REMOVE_USAGE = `usage: mason remove <table>… [--json]
+const REMOVE_USAGE = `usage: mason remove <table>… [--dry-run] [--json]
 
   Takes tables out of the project: each one's entry in the sources file (mason/sources/<name>.yml) is removed, the
   rest of the file as it was. With Mason running it stops syncing the table and drops its synced data at once; with Mason
@@ -1284,8 +1285,12 @@ const REMOVE_USAGE = `usage: mason remove <table>… [--json]
 
     mason remove customers
     mason remove customers billing.invoices     several at once
+    mason remove customers --dry-run            what it would remove, changing nothing
 
-  --json   as data: { removed (the tables, schema.table), file (the sources file), next }
+  --dry-run  say which entries would go, and change nothing: the file is read, never written, and neither Mason nor
+             the database is asked
+  --json     as data: { dryRun, removedTables (the tables, schema.table; on a dry run, the ones that would go), removed
+             (the same, kept until 1.0; not on a dry run), file (the sources file), next }
 `;
 
 export const REMOVE: CommandSpec & { needs: "project" } = {
@@ -1294,8 +1299,8 @@ export const REMOVE: CommandSpec & { needs: "project" } = {
   name: "remove",
   summary: "take tables out of the sources file: mason remove customers (its synced data is dropped)",
   usage: REMOVE_USAGE,
-  options: { json: { type: "boolean" } },
-  json: ["removed", "file", "next"],
+  options: { json: { type: "boolean" }, "dry-run": { type: "boolean" } },
+  json: ["dryRun", "removedTables", "removed", "file", "next"],
 };
 
 export async function remove(argv: string[]): Promise<number> {
@@ -1310,6 +1315,7 @@ export async function remove(argv: string[]): Promise<number> {
   // read-only, as mason add (src/cli/project.ts projectWriteRefusal): refused before the run or the database is asked
   const readOnly = projectWriteRefusal(where.project.root, process.env);
   if (readOnly !== null) return failed("remove", readOnly, { json });
+  if (f.values["dry-run"] === true) return removeDryRun(where.project, where.state === "up", names, json);
   if (where.state === "up") {
     // Mason up: the run removes it and drops the copy at once (src/cli/run-server.ts removeTables)
     const run = where.run;
@@ -1330,9 +1336,45 @@ function removedAnswer(r: Edited<RemoveResult>, names: readonly string[], runnin
   const b = r.ok;
   const next: NextStep[] = running ? [["mason status", "the tables left"]]
     : [["mason start", "Mason in the background, for this project: it syncs the tables left"], ["mason status", "the tables left"]];
-  if (json) { out(jsonText(REMOVE, { removed: b.removed, file: b.file }, next)); return 0; }
+  if (json) { out(jsonText(REMOVE, { dryRun: false, removed: b.removed, removedTables: b.removed, file: b.file }, next)); return 0; }
   const rel = path.relative(process.cwd(), b.file);
   out(reportText({ ...removedReport(b.removed, rel.startsWith("..") ? b.file : rel, { running }), next }, styleOut()));
+  return 0;
+}
+
+/**
+ * `mason remove --dry-run`: the entries the sources file would lose, CHANGING NOTHING — read as the edit reads the file
+ * (`sourceToEdit`: its refusals said the same), each name found as the edit finds it (`findEntry`); neither the run nor
+ * the database is asked, so the file's other entries are not checked against the database here, as the edit does.
+ */
+async function removeDryRun(p: Project, up: boolean, names: readonly string[], json: boolean): Promise<number> {
+  if (!up) {
+    const st = await runState(p);
+    // a hung run refuses the edit itself (withoutRun): a dry run says what the edit would
+    if (st.kind === "hung") return failed("remove", { ...asFailure(notAnswering(p, st.run)), code: "unreachable" }, { json });
+  }
+  const r = edited(() => {
+    const at = sourceToEdit(p.folder, p.root, () => projectSource(p));
+    const tables = names.map((n) => {
+      const e = findEntry(at.parsed, n);
+      if ("problem" in e) throw new Refusal(e.usage ? 400 : 404, e.problem);
+      return e.table;
+    });
+    return { removed: [...new Set(tables)], file: at.file };
+  });
+  if (!("ok" in r)) {
+    return failed("remove", { message: `${names.join(", ")} would not be removed`, code: r.status === 404 ? "not_found" : r.status === 400 ? "usage" : "refused", why: r.error,
+      fix: "nothing was changed (a dry run)", next: [["mason status", "the tables added"]] }, { json });
+  }
+  const b = r.ok;
+  const next: NextStep[] = [[`mason remove ${names.join(" ")}`, "remove them"]];
+  if (json) { out(jsonText(REMOVE, { dryRun: true, removedTables: b.removed, file: b.file }, next)); return 0; }
+  const rel = path.relative(process.cwd(), b.file);
+  const one = b.removed.length === 1;
+  out(reportText({ headline: `mason remove would remove ${b.removed.join(", ")}; nothing was changed`, details: [["from", rel.startsWith("..") ? b.file : rel]],
+    tips: [up ? `Mason would stop syncing ${one ? "it" : "them"} and drop ${one ? "its" : "their"} synced data at once`
+      : `what an earlier run synced of ${one ? "it" : "them"} would be dropped at the next mason start`,
+    "mason remove also checks the file's other entries against the database, which a dry run does not ask"], next }, styleOut()));
   return 0;
 }
 
@@ -1354,15 +1396,17 @@ export function waitTable(t: TableState): Pick<TableState, "table" | "copy" | "e
   return { table: t.table, copy: t.copy, error: t.error, ...(t.kept ? { kept: t.kept } : {}), ...(t.sync ? { sync: t.sync } : {}) };
 }
 
-const WAIT_USAGE = `usage: mason wait [<generated table>] [--timeout <duration>] [--json]
+const WAIT_USAGE = `usage: mason wait [<table>…] [--timeout <duration>] [--json]
 
   Waits until every added table is synced and served, showing every added table on a line of its own: 100% for the
   finished (in the order they finished), a bar for the ones still syncing, at the bottom. Run it after mason add.
-  Named, a generated table instead: waits until it holds every change Mason had synced when the wait began, across its
+  Named synced tables: waits for those alone, until the first sync of each is done and it is served. Named, a
+  generated table (alone) instead: waits until it holds every change Mason had synced when the wait began, across its
   chain (the tables it is generated from, and theirs), so what is read from it next includes them.
 
     mason add orders && mason wait
     mason wait --timeout 1h       a large table: wait up to an hour
+    mason wait orders customers   these synced tables only
     mason wait daily_requests     a generated table: until it holds what is synced now
 
   --timeout <duration>  how long to wait (default 600, seconds; 10m, 1h); the sync goes on after, and mason wait
@@ -1401,7 +1445,7 @@ export function sayAgain(what: string, said: string, saidAt: number, now: number
 export const WAIT: CommandSpec & { needs: "run" } = {
   needs: "run",
   name: "wait",
-  summary: "wait until every added table is synced, or a generated table holds what is synced now (1: a failure)",
+  summary: "wait until every added table (or those named) is synced, or a generated table holds what is synced now (1: a failure)",
   usage: WAIT_USAGE,
   options: { json: { type: "boolean" }, timeout: { type: "string" } },
   json: ["ready", "failed", "waiting", "timedOut", "tables", "stream", "generatedTable", "error", "next"],
@@ -1414,12 +1458,19 @@ export async function wait(argv: string[]): Promise<number> {
   const read = parseDuration(typeof f.values.timeout === "string" ? f.values.timeout : "600");
   if ("problem" in read) return failed("wait", { message: `--timeout ${read.problem}`, code: "usage", usage: WAIT_USAGE }, { json });
   const timeout = read.seconds;
-  if (f.positionals.length > 1) return failed("wait", { message: `name one generated table, not ${f.positionals.length}`, code: "usage", usage: WAIT_USAGE }, { json });
-  const named = f.positionals[0];
+  const named = [...new Set(f.positionals)];
   const run = await runOr(WAIT, json);
   if (!run) return 1;
-  if (named !== undefined) return waitGenerated(run, named, timeout, json);
   return guarded("wait", json, async () => {
+    // tables named: a generated table alone waits for its chain; synced tables for their first syncs alone
+    let only: ReadonlySet<string> | null = null;
+    if (named.length) {
+      const pick = waitPick(await readState(run), named);
+      if ("message" in pick) return failed("wait", pick, { json });
+      if ("generated" in pick) return waitGenerated(run, pick.generated, timeout, json);
+      only = new Set(pick.tables);
+    }
+    const again = named.length ? `mason wait ${named.join(" ")}` : "mason wait";
     const until = Date.now() + timeout * 1000;
     // a terminal gets the block — every added table on its line (tableLines), then the stream — redrawn in place;
     // anything else (a coding agent's shell, a log) the block when what is under way changes, and every 30 s, so a
@@ -1446,10 +1497,18 @@ export async function wait(argv: string[]): Promise<number> {
     };
     for (;;) {
       // a copy's rate and progress are the run's own, measured per chunk (src/duck/sync.ts copyProgressNow)
-      const s = await readState(run);
+      const all = await readState(run);
+      // named tables: the wait reads them alone, so its lines, its readiness and its answer are theirs
+      const s = only === null ? all : { ...all, tables: all.tables.filter((t) => only.has(t.table)) };
       const r = readiness(s);
       const done = r.ready || r.failed.length > 0;
       const picked = s.tables.filter((t) => t.added);
+      // a table named and removed while it is waited for (mason remove, the page) has nothing left to wait for
+      if (only !== null && picked.length < only.size) {
+        const gone = [...only].filter((n) => !picked.some((t) => t.table === n));
+        return failed("wait", { message: `${gone.join(", ")} ${gone.length === 1 ? "is" : "are"} not added any more`, code: "not_found",
+          next: [["mason status", "the added tables"]] }, { json });
+      }
       // the outcome and what to run next, the same for a person and under --json
       const readyNext: NextStep[] = picked.length ? [...READY_STEPS] : addSteps(s.tables);
       const failure: Failure | null = r.failed.length
@@ -1458,7 +1517,7 @@ export async function wait(argv: string[]): Promise<number> {
             next: [["mason logs", "the detail of each failure"], ["mason status", "the rest of the project"]] }
         : !done && Date.now() >= until
         ? { message: `not ready after ${timeout} s`, code: "timeout", why: r.waiting.join("\n"), fix: "nothing stopped: the syncs go on",
-            next: [["mason wait", "keep waiting (--timeout <duration> for longer)"], ["mason status", "what Mason is doing"]] }
+            next: [[again, "keep waiting (--timeout <duration> for longer)"], ["mason status", "what Mason is doing"]] }
         : null;
       if (json && (done || failure)) {
         out(jsonText(WAIT, { ...r, timedOut: !done, tables: picked.map(waitTable),
@@ -1470,7 +1529,9 @@ export async function wait(argv: string[]): Promise<number> {
       const meanwhile: NextStep[] = done ? [] : [...(copied ? [["mason user add <name>", "a user for your BI tool or psql: a synced table can be queried now"] as NextStep] : []), ["mason status", "what Mason is doing"]];
       show([...tableLines(s), ...(s.stream ? ["Stream:", ...streamLines(s.stream).map((l) => `  ${l}`)] : [])], meanwhile);   // done: the meanwhile Next is dropped
       if (r.ready) {
-        const head = !picked.length ? "Nothing to wait for: no table added yet." : "Ready: every added table is synced and served.";
+        const head = !picked.length ? "Nothing to wait for: no table added yet."
+          : only !== null ? `Ready: ${picked.map((t) => t.table).join(", ")} ${picked.length === 1 ? "is" : "are"} synced and served.`
+          : "Ready: every added table is synced and served.";
         if (!json) out(withEnd(picked.length ? styleOut().green(head) : head, { next: readyNext }));
         return 0;
       }
@@ -1478,6 +1539,41 @@ export async function wait(argv: string[]): Promise<number> {
       await new Promise((res) => setTimeout(res, 1000));
     }
   });
+}
+
+/**
+ * WHAT `mason wait <table>…` WAITS FOR: a generated table named alone (its chain: `waitGenerated`), or synced tables, each
+ * found among the added ones as `mason sync` finds them (`findTable`) — a table of the database not added, or a name
+ * nothing has, refused with the way out.
+ */
+export function waitPick(s: Pick<RunState, "tables" | "generatedTables">, names: readonly string[]): { generated: string } | { tables: string[] } | Failure {
+  const generated = s.generatedTables ?? [];
+  const added = s.tables.filter((t) => t.added);
+  const tables: string[] = [];
+  for (const name of names) {
+    const g = generated.find((t) => t.table === name || t.table === `public.${name}`);
+    if (g !== undefined) {
+      if (names.length > 1) {
+        return { message: `${entryName(g.table)} is a generated table, which is waited for alone`, code: "usage",
+          fix: `mason wait ${entryName(g.table)}, then mason wait ${names.filter((n) => n !== name).join(" ")}`, next: [["mason wait --help", "what a wait waits for"]] };
+      }
+      return { generated: name };
+    }
+    const t = findTable(added, name);
+    if (!("message" in t)) { tables.push(t.table); continue; }
+    // a table of the database that is not added is told so, with the command that adds it
+    const db = findTable(s.tables, name);
+    if ("message" in db && db.code === "usage") return db;
+    if (!("message" in db)) {
+      return { message: `${db.table} is not added, so Mason does not sync it`, code: "not_found", fix: `mason add ${tableArg(db.table)}`, next: [["mason status", "the added tables"]] };
+    }
+    const choices = [...added.flatMap((x) => [x.table, tableArg(x.table)]), ...generated.map((x) => entryName(x.table))];
+    const named = [...added.map((x) => tableArg(x.table)), ...generated.map((x) => entryName(x.table))];
+    return { message: `there is no added or generated table ${JSON.stringify(name)}${didYouMean(name, choices)}`, code: "not_found",
+      ...(named.length ? { fix: `name one of: ${named.join(", ")}` } : {}),
+      next: [["mason status", "the added tables and the generated ones"], ["mason tables", "the database's tables"]] };
+  }
+  return { tables: [...new Set(tables)] };
 }
 
 /** `mason wait <generated table>`: until it holds every change synced when the wait began (src/cli/readiness.ts

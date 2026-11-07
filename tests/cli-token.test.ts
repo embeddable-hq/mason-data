@@ -141,7 +141,7 @@ test("mason token list and revoke: the tokens that act, each value held, never a
   const rv = await hosted(v1, ["revoke", ID, "--org", "acme", "--json"]);
   assert.equal(rv.a.code, 0, rv.a.stdout);
   assert.deepEqual(rv.requests.map((q) => [q.method, q.path, q.body]), [["POST", `${TOKENS}/${ID}/revoke`, ""]]);
-  assert.deepEqual(JSON.parse(rv.a.stdout), { revoked: { org: "acme", id: ID, name: "github-actions" }, next: [{ command: "mason token list acme", what: "the organisation's CI tokens" }] });
+  assert.deepEqual(JSON.parse(rv.a.stdout), { revokedToken: { org: "acme", id: ID, name: "github-actions" }, revoked: { org: "acme", id: ID, name: "github-actions" }, next: [{ command: "mason token list acme", what: "the organisation's CI tokens" }] });
   // without --org: the login's one organisation it may revoke in; of two, it asks which (exit 2), nothing revoked
   const solo = await hosted(v1, ["revoke", ID], { me: ok({ ...ME_TWO, orgs: [ME_TWO.orgs[0], ME_TWO.orgs[1]] }) });
   assert.equal(solo.a.code, 0, solo.a.stderr);

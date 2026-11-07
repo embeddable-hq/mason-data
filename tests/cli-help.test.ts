@@ -191,7 +191,9 @@ test("a command whose stdout is a protocol's says every failure on stderr, --jso
 test("mason help mcp's Claude Code lines name the server BEFORE --env (claude mcp add's --env takes every value after it)", async () => {
   const { MCP } = await import("../src/cli/mcp.ts");
   const lines = MCP.usage.split("\n").filter((l) => /^\s+claude mcp add /.test(l));
-  assert.ok(lines.length >= 2 && lines.some((l) => l.includes("--env")), MCP.usage);
+  assert.ok(lines.length >= 1 && lines.some((l) => l.includes("--env")), MCP.usage);
+  // no example puts the user's password on a command line (ps shows it): the URL goes in MASON_URL
+  assert.deepEqual(MCP.usage.split("\n").filter((l) => /^\s+(claude mcp add|mason mcp)\b.*--url/.test(l)), [], "no example passes --url");
   for (const l of lines) {
     const words = l.trim().split(/\s+/);
     const name = words.indexOf("mason");
@@ -212,7 +214,7 @@ test("the --json shapes of the commands that change what is copied name the sour
   const keys = (name: string): readonly string[] | undefined => COMMANDS.find((c) => c.name === name)?.json;
   assert.deepEqual(keys("tables"), ["database", "source", "tables", "next"], "the source file the tables are read against");
   assert.deepEqual(keys("add"), ["added", "file", "error", "next"], "the sources file it wrote");
-  assert.deepEqual(keys("remove"), ["removed", "file", "next"], "the sources file it wrote");
+  assert.deepEqual(keys("remove"), ["dryRun", "removedTables", "removed", "file", "next"], "the sources file it wrote");
   assert.deepEqual(keys("init"), ["name", "root", "folder", "config", "demo", "source", "roles", "generated", "database", "warnings", "next"], "the source file, the roles file and the demo's generated table it wrote");
   assert.ok(keys("status")?.includes("source") && !keys("status")?.includes("sources"), "status names its source, the database, with the sources file in it");
   assert.deepEqual(COMMANDS.filter((c) => c.json?.some((k) => /model/i.test(k))).map((c) => c.name), [], "no command answers with a model");
