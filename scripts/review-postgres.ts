@@ -37,14 +37,34 @@ function fail(line: string): never {
 }
 const pause = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
 
-/** Removes the container and its env file; true when `docker inspect` then fails, as it must for a container gone. */
-function remove(name: string): { gone: boolean; why: string } {
-  const rm = docker(["rm", "-f", "-v", name]);
+type Presence = { kind: "present"; status: string } | { kind: "absent" } | { kind: "unknown"; why: string };
+/** A failed probe is unknown unless Docker explicitly says this object does not exist. */
+function inspect(name: string): Presence {
+  const r = docker(["inspect", "--format", "{{.State.Status}}", name]);
+  if (r.error !== undefined) return { kind: "unknown", why: `could not run docker inspect: ${r.error.message}` };
+  if (r.status === 0) return { kind: "present", status: r.stdout.trim() };
+  const stderr = r.stderr.trim();
+  if (r.status !== null && [
+    `error: no such object: ${name}`,
+    `error response from daemon: no such container: ${name}`,
+  ].includes(stderr.toLowerCase())) return { kind: "absent" };
+  return { kind: "unknown", why: `could not tell whether it exists: docker inspect failed (exit ${r.status}): ${stderr || "no diagnostic"}` };
+}
+
+/** Delete the env file only after explicit absence, never after an unknown probe or a failed removal. */
+function remove(name: string): { gone: true; alreadyGone: boolean } | { gone: false; why: string } {
+  const before = inspect(name);
+  if (before.kind === "unknown") return { gone: false, why: before.why };
+  if (before.kind === "present") {
+    const rm = docker(["rm", "-f", "-v", name]);
+    if (rm.error !== undefined) return { gone: false, why: `could not run docker rm: ${rm.error.message}` };
+    if (rm.status !== 0) return { gone: false, why: `docker rm failed (exit ${rm.status}): ${(rm.stderr || rm.stdout).trim()}` };
+    const after = inspect(name);
+    if (after.kind === "unknown") return { gone: false, why: after.why };
+    if (after.kind === "present") return { gone: false, why: `docker inspect still finds it (${after.status})` };
+  }
   fs.rmSync(envFileOf(name), { force: true });
-  const inspect = docker(["inspect", "--format", "{{.State.Status}}", name]);
-  if (inspect.error !== undefined) return { gone: false, why: `could not run docker inspect: ${inspect.error.message}` };
-  if (inspect.status === 0) return { gone: false, why: `docker inspect still finds it (${inspect.stdout.trim()}); docker rm said: ${(rm.stderr || rm.stdout).trim()}` };
-  return { gone: true, why: "" };
+  return { gone: true, alreadyGone: before.kind === "absent" };
 }
 
 function start(): void {
@@ -81,8 +101,8 @@ function start(): void {
 
 function stop(name: string): void {
   const r = remove(name);
-  if (!r.gone) fail(`${name} is not gone: ${r.why}`);
-  process.stdout.write(`removed ${name}, and deleted its env file\n`);
+  if (!r.gone) fail(`could not confirm ${name} is gone: ${r.why}; check Docker's daemon and context, then retry \`node scripts/review-postgres.ts stop ${name}\``);
+  process.stdout.write(`${r.alreadyGone ? `${name} was already gone` : `removed ${name}`}, and deleted its env file\n`);
 }
 
 const [cmd, name, ...rest] = process.argv.slice(2);
