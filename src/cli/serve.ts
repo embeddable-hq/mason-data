@@ -457,16 +457,12 @@ export async function serve(argv: string[]): Promise<number> {
     if ("message" in opened) return failed("serve", opened, { json });
     page = opened;
   }
-  // the run's file: its folder and its path held to the bar now, a stale one removed; written once the run answers
-  // (asserted wide: they are set in the run's hooks, which the compiler does not follow)
+  // the run's file: written once the run answers (asserted wide: they are set in the run's hooks, which the compiler
+  // does not follow)
   let runFile = null as UiRunFile | null;
   let runFileFailed = null as Failure | null;
-  if (s.ui.runFile !== null) {
-    const prepared = await prepareUiRunFile(s.ui.runFile, (l) => socketSaid.push(l));
-    if (prepared !== null) { page?.close(); return failed("serve", prepared, { json }); }
-  }
-  // a SIGTERM before the run has its own stop (it is still connecting) ends the process by its default action, which runs
-  // no finally: the socket is removed first, then the signal raised again as it was
+  // a SIGTERM before the run has its own stop (the run file's check, the run still connecting) ends the process by its
+  // default action, which runs no finally: the socket is removed first, then the signal raised again as it was
   const early = (signal: NodeJS.Signals): void => {
     if (process.listenerCount(signal) > 1) return;   // the run's stop is in place: it stops, and the finally removes it
     page?.close();
@@ -476,6 +472,11 @@ export async function serve(argv: string[]): Promise<number> {
   };
   const unhookEarly = (): void => { process.removeListener("SIGTERM", early); process.removeListener("SIGINT", early); };
   if (page !== null) { process.on("SIGTERM", early); process.on("SIGINT", early); }
+  // its folder and its path held to the bar now, a stale one removed (its run asked, up to 2 s: the handler is in place)
+  if (s.ui.runFile !== null) {
+    const prepared = await prepareUiRunFile(s.ui.runFile, (l) => socketSaid.push(l));
+    if (prepared !== null) { page?.close(); unhookEarly(); return failed("serve", prepared, { json }); }
+  }
   const startedAt = Date.now();
   let state: ServePhase = { phase: "starting" };
   const health = healthServer(() => state, startedAt, say, { socket: page?.file ?? null, readOnly: uiReadOnlySetting(process.env) === true });
@@ -510,17 +511,18 @@ export async function serve(argv: string[]): Promise<number> {
           if (s.ui.runFile !== null) {
             const w = writeUiRunFile(s.ui.runFile, run.page, (l) => say(`  ${l}`));
             if ("message" in w) {
-              // fail closed: a supervisor would wait on a file that never comes, so the run stops and the serve exits 1
+              // fail closed: a supervisor would wait on a file that never comes, so the run stops, never says it is
+              // ready, records why, and the serve exits 1
               runFileFailed = w;
               say(`  ${w.message}: Mason stops (${w.fix})`);
               state = { phase: "stopping" };
-              process.kill(process.pid, "SIGTERM");
-              return;
+              return `stopped: the run file (${UI_RUN_FILE_SETTING}) could not be written: ${w.message.slice(`${UI_RUN_FILE_SETTING}=`.length)}`;
             }
             runFile = w;
             say(`  run file  ${w.file} (the web page's port and the run's token, mode 0600)`);
           }
           state = { phase: "ready", tables: run.tables, metrics: run.metrics };
+          return null;
         },
         stopping: () => { state = { phase: "stopping" }; page?.close(); runFile?.remove(); },
         ...(page !== null ? { page: page.attach, socket: page.file } : {}) } });

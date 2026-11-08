@@ -353,3 +353,70 @@ test("mason serve writes the run file once it answers: 0600, the page's port and
     }
   } finally { await source.close(); }
 });
+
+test("a run file that cannot be written when the run answers stops it: no ready line, /healthz never ready, exit 1, lastStop says why, and what was put at the path is left as it is", { timeout: 120_000 }, async () => {
+  const dir = temp();
+  const source = await DemoSource.open({ dir: path.join(dir, "db"), port: 0, log: () => undefined });
+  try {
+    const data = path.join(dir, "data");
+    fs.mkdirSync(path.join(data, ".mason"), { recursive: true, mode: 0o700 });
+    const runFile = path.join(data, ".mason", "run.json");
+    const health = await unassignedPort();
+    const env = { PATH: process.env.PATH ?? "", HOME: dir, DATABASE_URL: source.url, MASON_API_KEY: KEY,
+      MASON_DATA: data, MASON_PROJECT: path.join(dir, "project"), MASON_HEALTH_PORT: String(health), MASON_HEALTH_HOST: "127.0.0.1",
+      MASON_PG_PORT: String(await unassignedPort()), MASON_UI_PORT: String(await unassignedPort()), MASON_UI_RUN_FILE: runFile };
+    const a = serveRun(dir, env);
+    let everReady = false;
+    try {
+      // the start checked the path (nothing there) and says it; something is put there before the run answers
+      for (let i = 0; i < 200 && !a.out().includes("  run file  "); i++) await new Promise((r) => setTimeout(r, 25));
+      assert.match(a.out(), /written once Mason answers/, a.out());
+      fs.writeFileSync(runFile, "someone else's\n", { mode: 0o600 });
+      const exited = a.exited.then((code) => ({ code }));
+      for (;;) {
+        const r = await Promise.race([exited, new Promise<null>((res) => setTimeout(() => res(null), 100))]);
+        if (r !== null) break;
+        try { if ((await fetch(`http://127.0.0.1:${health}/healthz`)).status === 200) everReady = true; }
+        catch (e) { if (!/fetch failed/.test((e as Error).message)) throw e; }   // not listening yet, or gone
+      }
+    } finally { a.kill(); }
+    assert.equal(await a.exited, 1, a.out());
+    assert.equal(everReady, false, "/healthz never said ready");
+    assert.ok(!a.out().includes("mason start: ready"), `no ready line:\n${a.out()}`);
+    assert.match(a.out(), new RegExp(`MASON_UI_RUN_FILE=${runFile.replace(/\./g, "\\.")}: something was put at the path after the start checked it, and Mason writes over nothing: Mason stops`));
+    assert.equal(fs.readFileSync(runFile, "utf8"), "someone else's\n", "left as it is");
+    const cfg = JSON.parse(fs.readFileSync(path.join(data, ".mason", "config.json"), "utf8")) as { running: unknown; lastStop: { how: string } };
+    assert.equal(cfg.running, null);
+    assert.equal(cfg.lastStop.how, `stopped: the run file (MASON_UI_RUN_FILE) could not be written: ${runFile}: something was put at the path after the start checked it, and Mason writes over nothing`);
+  } finally { await source.close(); }
+});
+
+test("a SIGTERM while the start asks a stale run file's run (up to 2 s) removes the page's socket", { timeout: 60_000 }, async () => {
+  const dir = temp();
+  // the stale file's port takes the connection and never answers: the check waits on it
+  const sockets: net.Socket[] = [];
+  const hung = net.createServer((s) => { sockets.push(s); }).listen(0, "127.0.0.1");
+  await new Promise((r) => hung.once("listening", r));
+  try {
+    const data = path.join(dir, "data");
+    fs.mkdirSync(path.join(data, ".mason"), { recursive: true, mode: 0o700 });
+    const socket = path.join(data, ".mason", "ui.sock");
+    const runFile = path.join(data, ".mason", "run.json");
+    fs.writeFileSync(runFile, JSON.stringify({ port: (hung.address() as net.AddressInfo).port, token: "old" }), { mode: 0o600 });
+    const env = { PATH: process.env.PATH ?? "", HOME: dir, DATABASE_URL: "postgres://mason:secret@127.0.0.1:1/app", MASON_API_KEY: KEY,
+      MASON_DATA: data, MASON_PROJECT: path.join(data, "project"), MASON_HEALTH_PORT: String(await unassignedPort()), MASON_HEALTH_HOST: "127.0.0.1",
+      MASON_UI_SOCKET: socket, MASON_UI_RUN_FILE: runFile };
+    const a = serveRun(dir, env);
+    try {
+      for (let i = 0; i < 200 && sockets.length === 0; i++) await new Promise((r) => setTimeout(r, 25));
+      assert.equal(sockets.length, 1, `the check asks the stale run:\n${a.out()}`);
+      assert.ok(fs.existsSync(socket), "the socket is made before the check");
+    } finally { a.kill(); }
+    await a.exited;
+    assert.equal(fs.existsSync(socket), false, `the socket removed:\n${a.out()}`);
+    assert.ok(fs.existsSync(runFile), "the stale file, never judged, is left as it is");
+  } finally {
+    for (const s of sockets) s.destroy();
+    hung.close();
+  }
+});

@@ -85,10 +85,11 @@ export interface ServeHooks {
   /** each line of the run's log, as it is written to .mason/mason.log: a container's log is its stdout */
   log: (line: string) => void;
   /** the run answers: its listener is up and its tables are added (they may still be copying); `metrics` reads what
-   *  `GET /metrics` says (src/cli/run-server.ts `metricsFacts`) */
+   *  `GET /metrics` says (src/cli/run-server.ts `metricsFacts`). Returns null, or why a step of the serve's own failed:
+   *  the run then stops with that as its lastStop, and never says it is ready */
   ready: (run: { tables: () => CopyState[]; metrics: () => Promise<Omit<RunMetrics, "uptimeSeconds">>;
     /** the page's port on 127.0.0.1 and the run's token: what MASON_UI_RUN_FILE writes (src/cli/ui-run-file.ts) */
-    page: { port: number; token: string } }) => void;
+    page: { port: number; token: string } }) => string | null;
   /** a SIGTERM or SIGINT is stopping it */
   stopping: () => void;
   /** the page's Unix socket (MASON_UI_SOCKET, src/cli/ui-socket.ts) is given the run's server, whose requests it serves */
@@ -712,6 +713,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // the stop is in place BEFORE the ready line: a supervisor or a test signals on reading it, and a SIGTERM that found
   // no handler would end the run with the default action, never recording `running: null`
   let stopping = false;
+  // the run's own stop, for a step of a serve's ready that failed (`ServeHooks.ready`): its words are what lastStop says
+  let stopFor: (how: string) => void = () => undefined;
   const stopped = new Promise<number>((resolve) => {
     // a crash of the engine's thread: the run exits 1 with its reason in V8's fatal form, which the supervisor reads
     // (src/cli/supervise.ts crashReason), and its config still says it runs, so the supervisor starts it again
@@ -733,7 +736,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
         resolve(1);
       })();
     };
-    const stop = (signal: NodeJS.Signals): void => {
+    const stop = (signal: NodeJS.Signals, how?: string): void => {
       if (stopping) return;
       stopping = true;
       o.serve?.stopping();
@@ -765,7 +768,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
           (repl.owned ? "" : `; publication ${repl.publication} is its owner's, left as it is`));
         cfg.running = null;
         // how it ended, for mason status once it is gone (a kill records nothing: mason stop writes that one)
-        cfg.lastStop = { at: new Date().toISOString(), how: signal === "SIGINT" ? "stopped from its terminal (SIGINT)" : `stopped by mason stop, or a shutdown (${signal})` };
+        cfg.lastStop = { at: new Date().toISOString(), how: how ?? (signal === "SIGINT" ? "stopped from its terminal (SIGINT)" : `stopped by mason stop, or a shutdown (${signal})`) };
         writeConfig(home, cfg);
         log.end();
         resolve(0);
@@ -773,6 +776,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     };
     process.on("SIGINT", stop);
     process.on("SIGTERM", stop);
+    stopFor = (how) => { stop("SIGTERM", how); };
   });
   say("");
   say(`  Postgres  ${withPlaceholders(postgresUrl)}  (mason user add <name> makes a user)`);
@@ -783,7 +787,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const elsewhere = elsewhereTip(pgTls.listener);
   if (elsewhere) say(`  ${elsewhere}`);
   // before the ready line: what a serve writes when it answers (MASON_UI_RUN_FILE) is there when a supervisor reads it
-  o.serve?.ready({ tables: () => sync.state(), metrics: () => metricsFacts(runCtx), page: { port: setupPort, token } });
+  // a step of it that failed stops the run, said in its words, and the ready line is never printed: it did not get ready
+  const notReady = o.serve?.ready({ tables: () => sync.state(), metrics: () => metricsFacts(runCtx), page: { port: setupPort, token } }) ?? null;
+  if (notReady !== null) { stopFor(notReady); return await stopped; }
   say(READY);
   say("");
   return await stopped;
