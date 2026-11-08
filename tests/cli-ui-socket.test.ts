@@ -220,7 +220,7 @@ test("MASON_UI_SOCKET is a setting of mason serve's, on its one report and in it
   for (const e of [env, { ...env, MASON_UI_SOCKET: "" }]) {
     const s = serveSettings(e, "/srv");
     assert.ok(!("message" in s));
-    assert.deepEqual(s.ui, { port: 4039, named: false, socket: null });
+    assert.deepEqual(s.ui, { port: 4039, named: false, socket: null, runFile: null });
     assert.equal(uiSocketSetting(e, "/srv"), null);
   }
   const s = serveSettings({ ...env, MASON_UI_SOCKET: "data/.mason/ui.sock" }, "/srv");

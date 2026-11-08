@@ -2386,6 +2386,11 @@ test("the Overview: Mason's version and uptime, the restarts, the disk and the s
   assert.doesNotMatch(textOf(renderFacts(bare, NOW)), /Mason \d|Restarts|Disk|Sessions/, "a run that says none of it: nothing");
   assert.match(textOf(renderFacts(RUNNING, NOW)), /Mason \S+ · one process/, "the run's own state says them (runState)");
   assert.match(textOf(renderFacts({ ...RUNNING, sessions: { error: "no listener\nmore" } } as never, NOW)), /Sessions could not be read: no listener/);
+  // mason serve with MASON_UI_SOCKET (status --json pageSocket): said, never its path; none, nothing
+  const onSocket = textOf(renderFacts({ ...RUNNING, pageSocket: "/run/mason/ui.sock" } as never, NOW));
+  assert.match(onSocket, /Web page served on a Unix socket on the server too \(MASON_UI_SOCKET\)/);
+  assert.ok(!onSocket.includes("/run/mason"), "no path");
+  assert.doesNotMatch(textOf(renderFacts({ ...RUNNING, pageSocket: null } as never, NOW)), /Unix socket/);
 });
 
 test("Usage: who is connected now — a row per user and client with its open sessions and what it runs, and its statements on Queries; none is said, an error is unknown", async () => {
