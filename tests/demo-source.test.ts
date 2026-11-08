@@ -354,7 +354,7 @@ test("a chunk out of memory switches the copy to one reader as it is seen: while
     assert.deepEqual((await store.writer.runAndReadAll(`SELECT ${digest} FROM public.order_items`)).getRowsJS()[0]!.map(String), source, "the synced table equals the source");
   } finally {
     await sync.stop();
-    store.close();
+    await store.close();
   }
 });
 
