@@ -113,7 +113,7 @@ Next:
   assert.equal(j.a.stderr, "");
   const v = JSON.parse(j.a.stdout) as Record<string, unknown>;
   assert.deepEqual(Object.keys(v), ["replica", "deletion", "next"]);
-  assert.deepEqual(v.replica, { ...replicaOf({ state: "deleted" }), page: null });
+  assert.deepEqual(v.replica, { ...replicaOf({ state: "deleted" }), page: null, mason: null });
   assert.deepEqual(v.deletion, { stage: "finished", requestedAt: AT, handover: null, lastHeardAt: AT, finishedAt: LATER, steps: steps(3),
     sources: [{ ...dropped(0), reason: null, why: null, byHand: null }, { ...noSlot(1), reason: null, why: null, publicationOwned: null, byHand: null }] });
   assert.deepEqual(v.next, [{ command: "mason replica list acme", what: "the organisation's replicas" }]);

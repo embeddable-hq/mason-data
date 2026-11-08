@@ -8,6 +8,16 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   DEFINER listing's "We recommend reviewing each…" too), and beside `fix`, unchanged, `fixSql` is the SQL to run on the
   primary and `fixThen` the steps after it. On a terminal the lines read as before but for the new sentence.
 
+- **`mason replica upgrade <org>/<name>` moves a hosted replica to the newest Mason its service offers**, asking for
+  the name to be typed back at a terminal (`--yes` elsewhere), since Mason on it restarts and its connections drop; it
+  waits for the upgrade within `--timeout`. A newer release line is installed beside the one the replica runs, and
+  starts with the first deploy of a project pinned to it. `mason replica status` shows the Mason a replica runs, the
+  newest offered and one installed (`replica.mason` in `--json`), where the service says them.
+- **`mason deploy` refuses, before it sends, a project the replica would not run**: when the service says the
+  replica's Mason and the `mason.yml` pin fits neither the version it runs nor one installed, it names both and the
+  ways out (write the project for the replica's version, or `mason replica upgrade`). A service that does not say the
+  version, or an answer this version cannot read, leaves the check to the replica, as before.
+
 ## What was wrong and is now right
 
 - **A refused connection over TLS is told why.** Behind a TCP proxy over TLS, a refused connection (a wrong password,

@@ -62,8 +62,9 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { errorJson, exitOf, failed, jsonText, parseCommand, reportText, serviceStyle, strict, type CommandSpec, type Failure, type NextStep } from "./command.ts";
-import { call, carriesNoSecret, failureShape, isFailure, isServiceTime, serviceFailure, serviceNext, serviceOf, serviceText, unexpected, type Answer } from "./hosted.ts";
+import { call, carriesNoSecret, carriesSecret, failureShape, isFailure, isServiceTime, serviceFailure, serviceNext, serviceOf, serviceText, unexpected, type Answer } from "./hosted.ts";
 import { replicaOf, replicaText, REPLICA_ENV, tokenFor, type Replica } from "./replica.ts";
+import { pinRefusal, replicaAnswer, wordless } from "./replica-hosted.ts";
 import { holdOutput } from "./output-gate.ts";
 import { maskedUrl } from "./preflight.ts";
 import { folderPlace, theProject, type Project } from "./project.ts";
@@ -156,6 +157,12 @@ export const DEPLOY: CommandSpec & { needs: "project" } = {
   While the replica is being created (or the service asks for a wait: too many deploys at once), it waits as the
   service asks and sends the deploy again, within --timeout, saying the replica's state and how long it has waited.
   A replica that failed or is being deleted is refused: mason replica status says its state.
+  Before it sends, it asks the replica's Mason version: a project whose mason.yml pin the replica would not run
+  (neither the version it runs nor a newer one it has installed) is refused, naming both, with the ways out
+  (write the project for the replica's Mason, or mason replica upgrade). A service that does not say the
+  version, or whose answer cannot be read, leaves the check to the replica, which refuses such a project itself;
+  an answer that carries the login's token, or a token's shape, anywhere (its words included) is refused, and
+  nothing is sent.
 
   Exit status: 0 the replica runs it (or a dry run printed); 1 refused here or by the service, refused by Mason on
   the replica (its words printed as they came, the code the CLI's own), the deploy failed, or the service answered
@@ -403,6 +410,23 @@ function replicaStateOf<K extends string>(json: unknown, states: Record<K, strin
 }
 /** A wait, as a person reads it: whole seconds, then minutes and seconds. */
 const waited = (ms: number): string => { const n = Math.floor(ms / 1000); return n < 60 ? `${n} s` : `${Math.floor(n / 60)} min ${n % 60} s`; };
+/**
+ * WHETHER NO STRING OF AN ANSWER, ITS WORDS INCLUDED, CARRIES THE TOKEN OR ITS SHAPE: each key and value read raw, as the
+ * masks read the service's words (a stringified answer escapes control characters, whose letters would break the run
+ * the test reads). Password shapes are not tested here: free text holds ordinary words. Called once `carriesNoSecret`
+ * has held the answer to its depth.
+ */
+function wordsCarryNoSecret(json: unknown, secrets: readonly string[]): boolean {
+  const stack: unknown[] = [json];
+  while (stack.length) {
+    const v = stack.pop();
+    if (typeof v === "string") { if (carriesSecret(v, secrets, { passwords: false })) return false; continue; }
+    if (typeof v !== "object" || v === null) continue;
+    if (Array.isArray(v)) { stack.push(...v); continue; }
+    for (const [k, x] of Object.entries(v)) { if (carriesSecret(k, secrets, { passwords: false })) return false; stack.push(x); }
+  }
+  return true;
+}
 const stateLine = (s: DeployState): string => `${STATUS_WORDS[s.status]}${s.phase ? ` (${PHASES[s.phase]})` : ""}`;
 
 export async function deploy(argv: string[]): Promise<number> {
@@ -469,6 +493,27 @@ export async function deploy(argv: string[]): Promise<number> {
   const steps = stepRenderer({ line: say, live: terminal ? process.stderr : null, style: s });
   const name = replicaText(r);
   const statusStep: NextStep = [`mason replica status ${name}`, "the replica's state"];
+
+  // THE REPLICA'S MASON, where the service says it (docs/HOSTED-API.md "What the CLI checks before it sends anything"):
+  // a project whose pin fits neither the version the replica runs nor the newer one it has installed is refused here,
+  // naming both, before anything is sent (the replica's own image would refuse it, in words a hosted user cannot act
+  // on). Only a 200 this CLI reads whole, saying the replica's Mason, decides: one it cannot read (outside the contract
+  // it knows: a newer service's change, a version it does not take, not JSON), a service that says none, no answer or
+  // any other status cannot tell, and the deploy is sent as before, the replica's image still holding the pin. But an
+  // answer carrying a secret — in any value, its words included — is refused whole, as every answer is.
+  const pin = readPin(project.folder);
+  if (!("problem" in pin) && pin.pin !== null) {
+    const asked = await call(service, "GET", `/v1/replicas/${r.org}/${r.name}`, { token });
+    if (!isFailure(asked) && asked.status === 200) {
+      const j = asked.json;
+      if (j !== undefined && (!carriesNoSecret(wordless(j), secrets) || !wordsCarryNoSecret(j, secrets))) {
+        return fail(unexpected(service, asked, "the replica's Mason version was asked for"), { json });
+      }
+      const mason = replicaAnswer(service, asked, r, secrets)?.replica.mason ?? null;
+      const refusal = mason === null ? null : pinRefusal(r, mason, pin.pin, shownPath(project.root, pin.file));
+      if (refusal !== null) return fail(refusal, { json });
+    }
+  }
 
   // THE DEPLOY, SENT: 201 and its id, else the service's failure as it worded it. A 503 (the replica is being made, or
   // its machine is not connected; or the service is full) or a 429 (too many deploys at once) says NO deploy was made:

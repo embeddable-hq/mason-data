@@ -44,8 +44,13 @@ export function sameLine(a: Version, b: Version): boolean {
   return a.major === b.major && (a.major > 0 || a.minor === b.minor);
 }
 
-const older = (a: Version, b: Version): boolean =>
+/** Whether `a` is an older version than `b`. */
+export const older = (a: Version, b: Version): boolean =>
   a.major !== b.major ? a.major < b.major : a.minor !== b.minor ? a.minor < b.minor : a.patch < b.patch;
+
+/** Whether a Mason of version `running` runs a project pinned to `pin`: the same release line, at the pin's patch or
+ *  later (the one rule `pinProblem` refuses by, and a hosted replica's version is held to by `mason deploy`). */
+export const pinFits = (pin: Version, running: Version): boolean => sameLine(pin, running) && !older(running, pin);
 
 /** Why a project may not run: what is wrong, and each way out, a clause in lower case with no stop (none when the file
  *  itself is the problem, which says what to write). `mason start` says them as sentences of one line, `mason serve` as a
@@ -61,7 +66,7 @@ export interface PinReader { what: string; run: (pinned: string) => string }
  * Allowed: the same release line, at the pin's patch or later.
  */
 function pinProblem(pin: Version, running: Version, file: string, reader: PinReader): PinRefusal | null {
-  if (sameLine(pin, running) && !older(running, pin)) return null;
+  if (pinFits(pin, running)) return null;
   const p = versionText(pin), r = versionText(running), { what } = reader, run = reader.run(p);
   if (sameLine(pin, running)) {
     return { problem: `${file} pins Mason ${p}, and ${what} is ${r}, older than it: the project may use a fix or a key ${r} does not have`, ways: [run] };

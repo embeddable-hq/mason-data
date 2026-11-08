@@ -435,7 +435,7 @@ export function jsonText(spec: CommandSpec, value: Record<string, unknown>, next
 }
 
 /** The commands that can run out of time, exit 124 (code `timeout`): the one list the codes and the agent's guide say. */
-export const TIMEOUT_COMMANDS = "mason wait, mason deploy, mason replica create, mason replica delete, mason login (its code expired), mason share and mason ui --ssh (no address or answer in time)";
+export const TIMEOUT_COMMANDS = "mason wait, mason deploy, mason replica create, mason replica delete, mason replica upgrade, mason login (its code expired), mason share and mason ui --ssh (no address or answer in time)";
 
 /**
  * THE CODES A FAILURE CARRIES, a closed set a program can branch on (`mason help agent` lists them): `Failure.code` is
