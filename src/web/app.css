@@ -497,8 +497,11 @@ table.catalog tbody tr:hover > td.act { background: var(--hover); }
 tr.removed > * { color: var(--muted); }
 form.formcard { margin: 0 0 var(--space-5); padding: var(--space-3) var(--space-4); background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); }
 form.formcard input { width: 18em; }
-/* a label and its control on one line, wrapped together on a phone (the Users form's Role) */
-form.formcard .pair { display: inline-block; white-space: nowrap; }
+/* the Users form's Role: its label and select wrap together on a phone, the select shrinking to the card (a long role's
+   name cut in the closed box, whole in the open list), so the page never scrolls sideways */
+#add-user .role-field { display: inline-flex; align-items: center; gap: var(--space-2); max-width: 100%; min-width: 0; vertical-align: middle; }
+#add-user .role-field label { flex: none; }
+#add-user .role-field select { flex: 0 1 auto; min-width: 0; max-width: 100%; text-overflow: ellipsis; }
 /* ---------------------------------------------------------------- Connect: the URL, its psql line, Create a user */
 /* a box whose title sits on its top edge, as a fieldset's legend does (Connect, Getting started, a chart's name) */
 .connect { background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-4) var(--space-5); margin: var(--space-6) 0 var(--space-6); }

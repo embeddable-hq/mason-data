@@ -861,7 +861,7 @@ test("the users' add form: a Role choice where the roles file names roles, its d
   // /api/state's roles as the run says them (runState over a roles file): a hostile name escaped, as everything is
   const state = stateOf([], { roles: rolesLive(["everything", "agent", "<b>x\"y</b>"], "everything") });
   const form = renderAddUser(state);
-  assert.match(form, /<span class="pair"><label for="user-role">Role<\/label> <select id="user-role" name="role"><option value="" selected>everything \(default\)<\/option><option value="agent">agent<\/option><option value="&lt;b&gt;x&quot;y&lt;\/b&gt;">&lt;b&gt;x&quot;y&lt;\/b&gt;<\/option><\/select><\/span>/);
+  assert.match(form, /<span class="role-field"><label for="user-role">Role<\/label> <select id="user-role" name="role"><option value="" selected>everything \(default\)<\/option><option value="agent">agent<\/option><option value="&lt;b&gt;x&quot;y&lt;\/b&gt;">&lt;b&gt;x&quot;y&lt;\/b&gt;<\/option><\/select><\/span>/);
   assert.ok(!form.includes("<b>"), "a role's name is text, never markup");
   assert.equal((form.match(/ selected/g) ?? []).length, 1, "one choice preselected: the default");
   assert.ok(form.indexOf('id="user-name"') < form.indexOf('id="user-role"') && form.indexOf('id="user-role"') < form.indexOf('type="submit"'), "Name, Role, Add a user");
@@ -876,6 +876,13 @@ test("the users' add form: a Role choice where the roles file names roles, its d
   assert.equal(renderAddUser({ ...state, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" }), "", "read-only: no form, no choice");
   // no --set: attributes stay the command's
   assert.ok(!/name="set"|attribute/i.test(form));
+  // a long role (63 characters, the longest a name may be) or no default's words never widen the page on a phone: the
+  // select shrinks to the card (min-width: 0 in its flex row, max-width: 100%), the rule this form's own
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rule = (sel: string) => css.match(new RegExp(`(?:^|\\})\\s*${sel.replace(/[.#]/g, "\\$&")}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
+  assert.match(rule("#add-user .role-field"), /display: inline-flex;[\s\S]*max-width: 100%;/);
+  assert.match(rule("#add-user .role-field select"), /min-width: 0;[\s\S]*max-width: 100%;/);
+  assert.ok(!/white-space: nowrap/.test(rule("#add-user .role-field")), "nothing holds the pair wider than the card");
 });
 
 test("the app: the add form's role is sent as role (none for the default, as mason user add with no --role); the run's refusal of it is shown", async () => {

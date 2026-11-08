@@ -132,7 +132,7 @@ function roleChoice(r) {
   if (!r || r.file == null || r.problem != null || !Array.isArray(r.roles) || r.roles.length === 0) return "";
   const dflt = r.default != null && r.roles.includes(r.default) ? r.default : null;
   const first = dflt !== null ? `<option value="" selected>${esc(dflt)} (default)</option>` : `<option value="" selected>no role: its statements are refused</option>`;
-  return ` <span class="pair"><label for="user-role">Role</label> <select id="user-role" name="role">${first}` +
+  return ` <span class="role-field"><label for="user-role">Role</label> <select id="user-role" name="role">${first}` +
     `${r.roles.filter((n) => n !== dflt).map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("")}</select></span> `;
 }
 
