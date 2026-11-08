@@ -283,12 +283,20 @@ function via(x: Pick<RelationFact, "kind" | "entry">): string {
   return said[x.kind];
 }
 
-const WHY = "Mason only reads, but, for security reasons, we recommend using a role that only reads";
+/** Why a role warning is said: its `why`, after its facts on a terminal. */
+const WHY = "Mason never writes, but a role that can only read is safer";
+/** The SECURITY DEFINER listing's own `why`: what it writes is in each function's body, for a person to review. */
+const DEFINER_WHY = "We recommend reviewing each: whether it writes a synced table, and who may call it";
 
-/** The checks of the role, from its facts: one warning per code that applies, else one line saying it only reads. */
+/**
+ * The checks of the role, from its facts: one warning per code that applies, else one line saying it only reads. A
+ * warning's parts stay apart for a tool (`detail` the facts, `why`, `fix` whole and as `fixSql` and `fixThen`); a
+ * terminal prints `detail. why` (src/cli/doctor.ts `checkText`).
+ */
 export function roleChecks(f: RoleFacts, ask: RoleAsk): Check[] {
-  const fix = readOnlyFix(f, ask);
-  const warn = (code: RoleCode, detail: string): Check => ({ name: "role", ok: true, warn: true, code, detail: `${detail}. ${WHY}`, fix });
+  const way = readOnlyWayOut(f, ask);
+  const fix = fixText(way);
+  const warn = (code: RoleCode, detail: string): Check => ({ name: "role", ok: true, warn: true, code, detail, why: WHY, fix, fixSql: way.sql, fixThen: way.then });
   const out: Check[] = [];
   const supers = f.roles.filter((r) => r.superuser);
   if (supers.length) {
@@ -336,17 +344,17 @@ export function roleChecks(f: RoleFacts, ask: RoleAsk): Check[] {
   // SECURITY DEFINER code: what it writes is in its body, which the catalog does not say, so it is LISTED for a person
   // to review, never "fixed" by a statement that changes another role's privileges, and never taken for "only reads"
   const definers = definerLine(f);
-  if (out.length) return definers === null ? out : [...out, { name: "role", ok: true, warn: true, code: "role_may_run_definer_code", detail: `${f.user} ${definers}` }];
+  if (out.length) return definers === null ? out : [...out, { name: "role", ok: true, warn: true, code: "role_may_run_definer_code", detail: `${f.user} ${definers}`, why: DEFINER_WHY }];
   const unread = f.missing.length ? ` (not asked of ${list(f.missing)}, which the database does not have: mason start says so)` : "";
   const synced = f.relations.filter((x) => x.kind === "table").length;
   const itself = "not a superuser, no BYPASSRLS, no ADMIN OPTION, no server roles, no foreign server" + (synced ? `, and it neither owns nor may write to the ${synced} synced table(s) — ` +
     "nor to their partitions, inheritance children or parents, the tables their foreign keys act on, or the views and rules that write them — " +
     "nor CREATE in their schemas" : ", and no table is added yet (the tables are asked once one is)");
-  if (definers !== null) return [{ name: "role", ok: true, warn: true, code: "role_may_run_definer_code", detail: `${f.user} may not write the synced tables itself: ${itself}. But it ${definers}${unread}` }];
+  if (definers !== null) return [{ name: "role", ok: true, warn: true, code: "role_may_run_definer_code", detail: `${f.user} may not write the synced tables itself: ${itself}. But it ${definers}${unread}`, why: DEFINER_WHY }];
   return [{ name: "role", ok: true, detail: `${f.user} only reads: ${itself}, and it reaches no SECURITY DEFINER code whose owner may write${unread}` }];
 }
 
-/** "may run 2 SECURITY DEFINER function(s) of roles that may write the synced tables: …; what they write is not known", or null */
+/** "may run 2 SECURITY DEFINER function(s) of roles that may write the synced tables — …", or null (its `why` is DEFINER_WHY) */
 function definerLine(f: RoleFacts): string | null {
   if (!f.definers.length) return null;
   const each = f.definers.map((d) => {
@@ -356,8 +364,7 @@ function definerLine(f: RoleFacts): string | null {
       ...(d.unchecked ? ["Postgres calls it for an aggregate, a type, an operator or the like, never asking EXECUTE"] : [])];
     return `${d.name} runs as ${d.owner}${d.ownerSuperuser ? ", a superuser" : ", which may write the synced tables"}: ${how.join("; ")}`;
   });
-  return `may run ${f.definers.length} SECURITY DEFINER function(s) of roles that may write the synced tables — ${each.join("; ")}. ` +
-    "We recommend reviewing each: whether it writes a synced table, and who may call it";
+  return `may run ${f.definers.length} SECURITY DEFINER function(s) of roles that may write the synced tables — ${each.join("; ")}`;
 }
 
 /** The line a check is when the role could not be asked: said, never taken for "only reads". */
@@ -387,6 +394,14 @@ export function readerUrl(url: string, role: string): string {
  * holds and reaches too, and is SAID in a comment, for the database's owner to decide.
  */
 export function readOnlyFix(f: RoleFacts, ask: RoleAsk): string {
+  return fixText(readOnlyWayOut(f, ask));
+}
+
+/** The way out whole, as a terminal prints it: the SQL, then the steps after it. */
+const fixText = (way: { sql: string; then: string }): string => `${way.sql}\nthen: ${way.then}`;
+
+/** The way out's two parts: the SQL to run on the primary (its comments included), and the steps after it. */
+function readOnlyWayOut(f: RoleFacts, ask: RoleAsk): { sql: string; then: string } {
   let role: string = READER_ROLE;
   for (let n = 2; f.taken.includes(role); n++) role = `${READER_ROLE}${n}`;
   const tables = f.relations.filter((x) => x.kind === "table");
@@ -425,8 +440,8 @@ export function readOnlyFix(f: RoleFacts, ask: RoleAsk): string {
   // the app's own DATABASE_URL stays the app's: Mason's gets a variable of its own
   const variable = ask.urlVariable === null || ask.urlVariable === "DATABASE_URL" ? "MASON_DATABASE_URL" : ask.urlVariable;
   const own = variable !== ask.urlVariable;
-  lines.push(`then: set ${variable}=${readerUrl(ask.url, role)} ${own ? "in .env" : `where it is set now (${ask.urlFrom})`}` +
+  const then = `set ${variable}=${readerUrl(ask.url, role)} ${own ? "in .env" : `where it is set now (${ask.urlFrom})`}` +
     `${own ? ` and write url: \${${variable}} in ${ask.file}` : ""}${ownPublication ? `${own ? "," : " and"} publication: ${role} at its top` : ""}` +
-    "; mason doctor checks it again, and a running Mason reads it at its next start (mason stop, then mason start)");
-  return lines.join("\n");
+    "; mason doctor checks it again, and a running Mason reads it at its next start (mason stop, then mason start)";
+  return { sql: lines.join("\n"), then };
 }

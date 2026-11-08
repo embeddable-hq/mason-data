@@ -441,6 +441,26 @@ const DATA_ROW = 0x44;
 /** the first byte of a TLS handshake record (a ClientHello): never a startup packet's, whose length's high byte is 0
  *  under MAX_STARTUP_LENGTH, and never SSLRequest's (length 8) */
 const TLS_HANDSHAKE = 0x16;
+/** how long a closed session's socket waits for what was written to it to reach the client before it is destroyed:
+ *  the bound on a client that reads nothing */
+const CLOSE_FLUSH_MS = 5_000;
+/**
+ * Closes `socket` once what was written to it has left: destroy() alone drops what is still queued, and over TLS a write
+ * completes only on the loop's next turn, so a FATAL's ErrorResponse written in the same turn as the answer before it
+ * never reached the client (issue 585). Postgres flushes before it closes too. A client that reads nothing holds the
+ * socket `ms` at most.
+ */
+export function closeFlushed(socket: net.Socket, ms = CLOSE_FLUSH_MS): void {
+  if (socket.destroyed) return;
+  if (socket.writableFinished) { socket.destroy(); return; }
+  const timer = setTimeout(() => socket.destroy(), ms);
+  timer.unref();
+  socket.once("close", () => clearTimeout(timer));
+  socket.once("finish", () => socket.destroy());
+  socket.end();
+}
+/** `Session.end`'s: what was just sent reaches the client before its socket closes */
+const FLUSHED = { flush: true } as const;
 
 /** 1-based CHARACTER position of a byte offset into `sql`, as Postgres counts it. */
 const positionOf = (sql: string, byteOffset: number | null): number | undefined =>
@@ -862,6 +882,8 @@ class Session {
 
   private attach(socket: net.Socket): void {
     socket.on("data", (data: Buffer) => {
+      // a closed session's socket is read, never acted on, while its last bytes leave (`closeFlushed`)
+      if (this.phase === "closed") return;
       // a named proxy's PROXY header comes first, before anything else on the connection is looked at
       const chunk = this.proxyHead === null ? data : this.readProxy(data);
       if (chunk === null || chunk.length === 0) return;
@@ -874,7 +896,12 @@ class Session {
       }
       this.decoder.push(chunk); void this.drain();
     });
-    socket.on("error", (err: Error) => { this.server.log(`session ${this.id}: socket error: ${err.message}`); this.end("socket error"); });
+    socket.on("error", (err: Error) => {
+      // once closed, a client that resets the connection before its last bytes leave ends nothing more
+      if (this.phase === "closed") return;
+      this.server.log(`session ${this.id}: socket error: ${err.message}`);
+      this.end("socket error");
+    });
     socket.on("close", () => this.end("closed by the client"));
   }
 
@@ -933,7 +960,9 @@ class Session {
     this.fatal("08P01", "a PROXY protocol header, which this server takes only from the addresses of its own proxy");
   }
 
-  end(why: string): void {
+  /** Ends the session. `FLUSHED` when what was just sent must reach the client first (a FATAL's ErrorResponse, the
+   *  answers before a Terminate): the socket then closes once they have left (`closeFlushed`), else at once. */
+  end(why: string, o: { flush?: boolean } = {}): void {
     if (this.phase === "closed") return;
     const wasReady = this.phase === "ready";
     this.phase = "closed";
@@ -942,7 +971,7 @@ class Session {
     this.door.logins?.settled(this);
     if (wasReady) this.server.log(`session ${this.id} closed: ${why}`);
     this.running?.abort();
-    this.socket.destroy();
+    if (o.flush === true) closeFlushed(this.socket); else this.socket.destroy();
     this.server.forget(this);
     this.dropPortals();
     // its DuckDB connection: closed now when no statement runs on it, else by `settled` once the interrupted statement
@@ -971,7 +1000,7 @@ class Session {
         try { m = this.decoder.next(); } catch (err) {
           const e = asPgError(err, "");
           this.send(errorResponse({ ...e.fields, severity: "FATAL" }));
-          this.end(`protocol error: ${e.message}`);
+          this.end(`protocol error: ${e.message}`, FLUSHED);
           return;
         }
         if (m === null) return;
@@ -983,7 +1012,7 @@ class Session {
           const e = asPgError(err, "");
           this.server.log(`session ${this.id}: ${e.message}`);
           this.send(errorResponse({ ...e.fields, severity: "FATAL" }));
-          this.end(`internal error: ${e.message}`);
+          this.end(`internal error: ${e.message}`, FLUSHED);
           return;
         }
       }
@@ -1021,7 +1050,7 @@ class Session {
     switch (m.type) {
       case "Query": return this.simpleQuery(m.sql);
       case "Parse": case "Bind": case "Describe": case "Execute": case "Close": case "Sync": case "Flush": return this.extended(m);
-      case "Terminate": this.end("terminated by the client"); return;
+      case "Terminate": this.end("terminated by the client", FLUSHED); return;
       case "Password": case "Startup": case "SSLRequest": case "GSSENCRequest": case "CancelRequest":
         this.fatal("08P01", `a ${m.type} message after the session started`);
         return;
@@ -1033,7 +1062,7 @@ class Session {
 
   private fatal(code: string, message: string, hint?: string): void {
     this.send(errorResponse({ severity: "FATAL", code, message, hint }));
-    this.end(`fatal: ${message}`);
+    this.end(`fatal: ${message}`, FLUSHED);
   }
 
   // ---------------------------------------------------------------- startup
@@ -1157,7 +1186,7 @@ class Session {
         const response = errorResponse({ ...refused.fields, severity: "FATAL" });
         if (this.door.refused?.(this.user) !== false) this.recordRequest(refused, undefined, err.userName, [response]);
         this.send(response);
-        this.end("authentication failed");
+        this.end("authentication failed", FLUSHED);
         return;
       }
       // a revocation record that could not be read is no wrong password: the server could not tell, said as such
@@ -1177,7 +1206,7 @@ class Session {
       const response = errorResponse({ ...refused.fields, severity: "FATAL" });
       if (this.door.refused?.(this.user) !== false) this.recordRequest(refused, undefined, err instanceof ApiError ? err.userName : undefined, [response]);
       this.send(response);
-      this.end("authentication failed");
+      this.end("authentication failed", FLUSHED);
       return;
     }
     if (this.phase !== "password") return;   // the socket closed while the ledger was read

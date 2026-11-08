@@ -88,8 +88,12 @@ async function fakeProxy(target: number, header: Buffer): Promise<number> {
     open.add(client); open.add(upstream);
     upstream.write(header);
     client.pipe(upstream); upstream.pipe(client);
-    const done = (): void => { client.destroy(); upstream.destroy(); open.delete(client); open.delete(upstream); };
-    for (const s of [client, upstream]) { s.on("error", done); s.on("close", done); }
+    // one side gone ENDS the other once what it was given has left, as a proxy does: destroying it dropped the
+    // listener's last bytes still being piped (issue 585)
+    for (const [s, other] of [[client, upstream], [upstream, client]] as const) {
+      s.on("error", () => other.end());
+      s.on("close", () => { open.delete(s); other.end(); });
+    }
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   proxies.push({ close: () => new Promise<void>((resolve) => { for (const s of open) s.destroy(); server.close(() => resolve()); }) });

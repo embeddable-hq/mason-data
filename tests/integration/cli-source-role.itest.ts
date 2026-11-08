@@ -55,7 +55,8 @@ after(() => {
   for (const r of [...made, ...ROLES]) psql(adminUrl, `DROP ROLE IF EXISTS "${r}"`);
 });
 
-interface DoctorCheck { name: string; ok: boolean | null; detail: string; warn?: boolean; code?: string; fix?: string }
+interface DoctorCheck { name: string; ok: boolean | null; detail: string; why?: string; warn?: boolean; code?: string; fix?: string; fixSql?: string; fixThen?: string }
+const WHY = "Mason never writes, but a role that can only read is safer";
 interface Ran { status: number | null; stdout: string; stderr: string }
 function doctor(user: string, password = "pw", json = true): Ran & { checks: DoctorCheck[] } {
   fs.writeFileSync(path.join(root, ".env"), `DATABASE_URL=${urlAs(user, password)}\n`);
@@ -146,14 +147,21 @@ test("mason doctor says whether the user Mason connects as could write: a reader
     const owns = doctor(owner);
     assert.equal(owns.status, 0, `a warning leaves the exit 0:\n${owns.stdout}`);
     assert.deepEqual(roleLines(owns).map((c) => [c.code, c.ok, c.warn]), [["role_owns_table", true, true]]);
-    assert.match(roleLines(owns)[0]!.detail, new RegExp(`^${owner} owns billing\\.Line Items\\. `));
+    const own = roleLines(owns)[0]!;
+    assert.equal(own.detail, `${owner} owns billing.Line Items`, "the facts alone");
+    // --json gives the parts apart: why, and the way out whole, as its SQL for the primary and the steps after it
+    assert.equal(own.why, WHY);
+    assert.match(own.fixSql!, /^-- as the database's owner \(on the primary\):\nCREATE ROLE mason_reader\d* LOGIN /);
+    assert.doesNotMatch(own.fixSql!, /^then:/m);
+    assert.match(own.fixThen!, /^set MASON_DATABASE_URL=postgres:\/\/mason_reader\d*:<its password>@.* in \.env and write url: .*; mason doctor checks it again/);
+    assert.equal(own.fix, `${own.fixSql}\nthen: ${own.fixThen}`);
 
     // UPDATE through a group (NOINHERIT), DELETE on a partition, INSERT on one column
     const member_ = doctor(member);
     assert.equal(member_.status, 0, member_.stdout);
     const writes = roleLines(member_);
     assert.deepEqual(writes.map((c) => c.code), ["role_writes_table"], JSON.stringify(writes));
-    assert.equal(writes[0]!.detail.split(". Mason only reads")[0],
+    assert.equal(writes[0]!.detail,
       `${member} may INSERT on billing.Line Items; UPDATE on public.orders (through ${writers}, which it is a member of); DELETE on public.events_2026 (a partition of public.events)`);
 
     // a superuser: one warning, whatever follows from it
@@ -164,7 +172,7 @@ test("mason doctor says whether the user Mason connects as could write: a reader
     // as a person: the warning marked, the way out once under it
     const text = doctor(member, "pw", false);
     assert.equal(text.status, 0, text.stdout);
-    assert.match(text.stdout, /^ {2}! +role +\S+ may INSERT on billing\.Line Items;/m);
+    assert.match(text.stdout, /^ {2}! +role +\S+ may INSERT on billing\.Line Items;.*\(a partition of public\.events\)\. Mason never writes, but a role that can only read is safer$/m);
     assert.equal(text.stdout.split("CREATE ROLE ").length, 2, `the way out, once:\n${text.stdout}`);
   });
 
@@ -173,7 +181,7 @@ test("a write through another relation is warned of: an updatable view over a vi
     // through a view over a view of a synced table, and into its INHERITS child; never through a view that takes no write
     const views = roleLines(doctor(viewer));
     assert.deepEqual(views.map((c) => c.code), ["role_writes_table"], JSON.stringify(views));
-    assert.equal(views[0]!.detail.split(". Mason only reads")[0], `${viewer} may INSERT on public.ledger_2026 (a child of public.ledger, by INHERITS: its rows are public.ledger's); ` +
+    assert.equal(views[0]!.detail, `${viewer} may INSERT on public.ledger_2026 (a child of public.ledger, by INHERITS: its rows are public.ledger's); ` +
       "UPDATE on public.orders_vv (a view that writes public.orders)");
     // what the doctor says, Postgres does: both write the synced rows (this test's own database)
     psql(urlAs(viewer), "UPDATE public.orders_vv SET amount = amount + 1 WHERE id = 1; INSERT INTO public.ledger_2026 VALUES (7, 70)");
@@ -186,7 +194,7 @@ test("the catalog's own functions decide, whatever the role's search_path puts a
     // the catalog's functions, whatever the role's search_path puts ahead of them
     const shadowed = roleLines(doctor(shadow));
     assert.deepEqual(shadowed.map((c) => c.code), ["role_writes_table"], JSON.stringify(shadowed));
-    assert.match(shadowed[0]!.detail, new RegExp(`^${shadow} may UPDATE on public\\.ledger\\. `));
+    assert.equal(shadowed[0]!.detail, `${shadow} may UPDATE on public.ledger`);
   });
 
 test("Postgres 16's membership options: one with neither INHERIT nor SET gives the role nothing of the group's",
@@ -198,7 +206,7 @@ test("Postgres 16's membership options: one with neither INHERIT nor SET gives t
 // THE CLASS: every way Postgres lets a role change a synced table's rows without a privilege on it, each said by the
 // doctor and then done by Postgres (in this test's own database), or refused by both
 const said = (name: string): DoctorCheck[] => roleLines(doctor(rv(name)));
-const head = (c: DoctorCheck | undefined): string => (c?.detail ?? "").split(". Mason only reads")[0]!;
+const head = (c: DoctorCheck | undefined): string => c?.detail ?? "";
 const skipNoDb = { skip: adminUrl ? false : "IT_POSTGRES_URL is not set", timeout: 300_000 };
 
 test("THE CLASS: a foreign key's ON DELETE and ON UPDATE CASCADE write the synced rows, through a chain of two; TRUNCATE … CASCADE is refused, and no route", skipNoDb, () => {
@@ -226,12 +234,13 @@ test("THE CLASS: an UPDATE of an INHERITS grandparent writes the synced child's 
 test("THE CLASS: SECURITY DEFINER code whose owner may write: a function it may call, a trigger on a table it may write", skipNoDb, () => {
   const definer = said("definer");
   assert.deepEqual(definer.map((c) => c.code), ["role_may_run_definer_code"], JSON.stringify(definer));
-  assert.match(head(definer[0]), / may not write the synced tables itself: .* But it may run 1 SECURITY DEFINER function\(s\) of roles that may write the synced tables — public\.bump_orders\(\) runs as \S+, a superuser: it may call it\. We recommend reviewing each/);
+  assert.match(head(definer[0]), / may not write the synced tables itself: .* But it may run 1 SECURITY DEFINER function\(s\) of roles that may write the synced tables — public\.bump_orders\(\) runs as \S+, a superuser: it may call it$/);
+  assert.equal(definer[0]!.why, "We recommend reviewing each: whether it writes a synced table, and who may call it");
   psql(urlAs(rv("definer")), "SELECT public.bump_orders()");
   assert.equal(psql(db, "SELECT amount FROM public.orders WHERE id = 2"), "1020");
   const trigger = said("trigger");
   assert.deepEqual(trigger.map((c) => c.code), ["role_may_run_definer_code"], JSON.stringify(trigger));
-  assert.match(head(trigger[0]), /— public\.inbox_to_ledger\(\) runs as \S+, a superuser: a trigger on public\.inbox, which it may write, calls it\. /);
+  assert.match(head(trigger[0]), /— public\.inbox_to_ledger\(\) runs as \S+, a superuser: a trigger on public\.inbox, which it may write, calls it$/);
   psql(urlAs(rv("trigger")), "INSERT INTO public.inbox VALUES (900, 9)");
   assert.equal(psql(db, "SELECT amount FROM public.ledger WHERE id = 900"), "9");
 });
@@ -242,7 +251,7 @@ test("THE CLASS: an event trigger's and an aggregate's SECURITY DEFINER function
   try {
     const event = roleLines(doctor(reader));
     assert.deepEqual(event.map((c) => c.code), ["role_may_run_definer_code"], JSON.stringify(event));
-    assert.match(head(event[0]), /— public\.on_ddl\(\) runs as \S+, a superuser: an event trigger calls it on any DDL, even one refused, never asking EXECUTE\. /);
+    assert.match(head(event[0]), /— public\.on_ddl\(\) runs as \S+, a superuser: an event trigger calls it on any DDL, even one refused, never asking EXECUTE$/);
     assert.equal(event[0]!.fix, undefined, "listed to review, never fixed: no statement for this role alone decides it");
     psql(urlAs(reader), "CREATE TEMP TABLE scratch (x int)");
     assert.equal(psql(db, "SELECT count(*) FROM public.ledger WHERE id = 901"), "1", "a reader's own temporary table wrote a synced row");
@@ -252,7 +261,7 @@ test("THE CLASS: an event trigger's and an aggregate's SECURITY DEFINER function
   try {
     const agg = roleLines(doctor(reader));
     assert.deepEqual(agg.map((c) => c.code), ["role_may_run_definer_code"], JSON.stringify(agg));
-    assert.match(head(agg[0]), /— public\.sneaky_step\(integer, integer\) runs as \S+, a superuser: Postgres calls it for an aggregate, a type, an operator or the like, never asking EXECUTE\. /);
+    assert.match(head(agg[0]), /— public\.sneaky_step\(integer, integer\) runs as \S+, a superuser: Postgres calls it for an aggregate, a type, an operator or the like, never asking EXECUTE$/);
     psql(urlAs(reader), "SELECT public.sneaky(x) FROM (VALUES (1)) AS v(x)");
     assert.equal(psql(db, "SELECT count(*) FROM public.ledger WHERE id = 902"), "1", "an aggregate anyone may call ran it as its owner, EXECUTE revoked");
   } finally { psql(db, "DROP AGGREGATE public.sneaky(int); DROP FUNCTION public.sneaky_step(int, int)"); }
@@ -324,7 +333,8 @@ test("a typical application's SECURITY DEFINER code (a policy's, a view's, a seq
     assert.deepEqual(lines.map((c) => [c.code, c.fix]), [["role_may_run_definer_code", undefined]], `no write warning, only the listing:\n${JSON.stringify(lines)}`);
     assert.match(lines[0]!.detail, new RegExp(`^${role} may not write the synced tables itself: .* But it may run 3 SECURITY DEFINER function\\(s\\) of roles that may write the synced tables — ` +
       `public\\.current_tenant\\(\\) runs as ${appOwner}, which may write the synced tables: every role may call it \\(PUBLIC's EXECUTE\\); ` +
-      `public\\.fmt_money\\(integer\\) runs as ${appOwner}, .*; public\\.next_order_number\\(\\) runs as ${appOwner}, .*\\. We recommend reviewing each`));
+      `public\\.fmt_money\\(integer\\) runs as ${appOwner}, .*; public\\.next_order_number\\(\\) runs as ${appOwner}, [^;]*$`));
+    assert.equal(lines[0]!.why, "We recommend reviewing each: whether it writes a synced table, and who may call it");
     assert.doesNotMatch(lines[0]!.detail, /public\.audit\(\)/, "an audit trigger on a table it may not write never reaches it");
     // the application's own role works as before: its policy's function, its view's, its trigger's
     assert.equal(psql(urlAs(appWeb), "SET app.tenant = 't1'; SELECT count(*) FROM public.customers"), "1");

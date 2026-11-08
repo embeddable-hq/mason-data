@@ -88,8 +88,11 @@ async function fakeProxy(target: number, header: Buffer): Promise<number> {
     open.add(c); open.add(up);
     up.write(header);
     c.pipe(up); up.pipe(c);
-    const done = (): void => { c.destroy(); up.destroy(); open.delete(c); open.delete(up); };
-    for (const s of [c, up]) { s.on("error", done); s.on("close", done); }
+    // one side gone ends the other once what it was given has left, never drops it (issue 585)
+    for (const [s, other] of [[c, up], [up, c]] as const) {
+      s.on("error", () => other.end());
+      s.on("close", () => { open.delete(s); other.end(); });
+    }
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   proxies.push({ close: () => new Promise<void>((resolve) => { for (const s of open) s.destroy(); server.close(() => resolve()); }) });
