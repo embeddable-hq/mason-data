@@ -19,7 +19,7 @@ import { BackendDecoder, cstr, frame, int32 } from "../src/api/postgres/protocol
 import { PgConnection, PgError } from "../src/cdc/pg-wire.ts";
 import { checkSource, parseSource, readSourceFacts } from "../src/cli/preflight.ts";
 import { DuckStore } from "../src/duck/store.ts";
-import { Sync } from "../src/duck/sync.ts";
+import { Sync, type ChunkEvent } from "../src/duck/sync.ts";
 import * as syncCommand from "../src/cli/sync.ts";
 
 // imported when the tests run: at a commit without the module the file still loads, and each test fails by name
@@ -276,6 +276,82 @@ test("the copy reads the demo database with three readers in parallel chunks, ev
     assert.equal(await copied("orders"), afterChange.orders, "the new order is in the copy");
     assert.equal(await copied("order_items"), afterChange.order_items, "its items too");
     assert.deepEqual((await store.writer.runAndReadAll(`SELECT status FROM public.orders WHERE id = ${id}`)).getRowsJS(), [["pending"]]);
+  } finally {
+    await sync.stop();
+    store.close();
+  }
+});
+
+test("a chunk out of memory switches the copy to one reader as it is seen: while its rollback waits no other reader takes a chunk, and the table equals the source", async () => {
+  const s = await shared();
+  const dir = tmp("oom");
+  dirs.push(dir);
+  const c = await connect(s);
+  let facts;
+  try { facts = await readSourceFacts(c, new Map()); } finally { c.close(); }
+  const parsed = parseSource(s.url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "duck.db"), (l) => logged.push(l), { memoryLimit: "256MB" });
+  // THE WINDOW HELD OPEN: the ROLLBACK of the chunk that ran out answers only once another reader starts a chunk it took
+  // after the out-of-memory, or after 3 s. Held after it ran, not before: the other readers' commits wait on it
+  let oomAt: number | null = null, held = false;
+  let release: () => void = () => {};
+  const gate = new Promise<void>((ok) => { release = ok; });
+  const real = store.instance.connect.bind(store.instance);
+  (store.instance as { connect: typeof real }).connect = async () => {
+    const conn = await real();
+    const run = conn.run.bind(conn);
+    conn.run = async (sql, values) => {
+      const r = await run(sql, values);
+      if (sql === "ROLLBACK" && oomAt !== null && !held) { held = true; setTimeout(release, 3_000); await gate; }
+      return r;
+    };
+    return conn;
+  };
+  const events: ChunkEvent[] = [];
+  // a chunk TAKEN after the out-of-memory: its reader's commit before it came after (a reader takes its next chunk as it
+  // commits one, so a chunk read after the out-of-memory but taken before it is the one it held)
+  const takenAfter = (i: number): boolean => {
+    const e = events[i]!;
+    const before = events.slice(0, i).findLastIndex((x) => x.reader === e.reader);
+    return oomAt !== null && e.phase === "read" && e.reader !== events[oomAt]!.reader && before > oomAt && events[before]!.phase === "committed";
+  };
+  const onChunk = (e: ChunkEvent): void => {
+    events.push(e);
+    if (e.phase !== "read") return;
+    if (oomAt === null && events.filter((x) => x.phase === "read").length === 2) {
+      oomAt = events.length - 1;
+      throw new Error("Out of Memory Error: could not allocate block of size 256.0 KiB (128.0 MiB/128.0 MiB used)");
+    }
+    if (takenAfter(events.length - 1)) release();
+  };
+  // small chunks (1,200 rows), so order_items is read by three readers side by side
+  const sync = new Sync(store, parsed.source, "demo", (l) => logged.push(l), 3_600_000, "poll", null, { copyParallel: 3, copyChunkRows: 1_200, onChunk });
+  try {
+    await sync.open();
+    await sync.setTables(facts.tables.filter((t) => t.table === "order_items"));
+    await sync.once();
+    const said = logged.join("\n");
+    assert.deepEqual(sync.state().map((x) => [x.source, x.phase, x.error]), [["public.order_items", "copied", null]], said);
+    assert.ok(held, `the rollback of the chunk that ran out was held\n${said}`);
+    // no other reader takes a chunk once the out-of-memory is seen: it reads at most the one it held
+    const taken = events.flatMap((e, i) => takenAfter(i) ? [[e.reader, e.first, e.end]] : []);
+    assert.deepEqual(taken, [], `chunks taken after the out-of-memory by another reader\n${said}`);
+    const oom = events[oomAt!]!;
+    for (const r of new Set(events.map((e) => e.reader))) {
+      if (r === oom.reader) continue;
+      assert.ok(events.slice(oomAt! + 1).filter((e) => e.phase === "read" && e.reader === r).length <= 1, `reader ${r} read more than the chunk it held\n${said}`);
+    }
+    // every page read once: the committed chunks tile the heap, the range that ran out among them
+    const committed = events.filter((e) => e.phase === "committed").sort((a, b) => a.first - b.first);
+    committed.forEach((e, i) => assert.equal(e.first, i === 0 ? 0 : committed[i - 1]!.end, `the chunks tile the heap: ${JSON.stringify(committed.map((x) => [x.first, x.end]))}`));
+    assert.equal(committed.at(-1)!.end, null, "the last chunk is open-ended");
+    const digest = "count(*), sum(id), sum(order_id), sum(product_id), sum(quantity), sum(unit_price)";
+    const pgc = await connect(s);
+    let source;
+    try { source = (await pgc.query(`SELECT ${digest} FROM order_items`)).rows[0]!.map(String); } finally { pgc.close(); }
+    assert.deepEqual((await store.writer.runAndReadAll(`SELECT ${digest} FROM public.order_items`)).getRowsJS()[0]!.map(String), source, "the synced table equals the source");
   } finally {
     await sync.stop();
     store.close();
