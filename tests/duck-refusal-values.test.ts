@@ -99,5 +99,5 @@ roles:
         assert.ok(!/U\+[0-9A-F]{4}/.test(said) && !said.includes(MARK), `${sql} says a row's character: ${said}`);
       }
     } finally { await c.end(); }
-  } finally { await api?.close(); store.close(); }
+  } finally { await api?.close(); await store.close(); }
 });

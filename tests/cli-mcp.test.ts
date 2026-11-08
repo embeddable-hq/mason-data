@@ -145,7 +145,7 @@ after(async () => {
   control.close();
   await api.close();
   await ledger.close();
-  store.close();
+  await store.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

@@ -265,7 +265,7 @@ test("two connections append to one table at once and both commit; a chunk recor
     await a.run("COMMIT");
     await assert.rejects(b.run("COMMIT"), /PRIMARY KEY or UNIQUE constraint violation: duplicate key "public\.t, 20"/);
   } finally {
-    a.closeSync(); b.closeSync(); await sync.stop(); store.close();
+    a.closeSync(); b.closeSync(); await sync.stop(); await store.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -293,7 +293,7 @@ test("a copy in progress from the Mason of one reader becomes its committed chun
       ["source", "snapshot", "columns", "exact", "pages", "updated_at"]);
     assert.ok(logged.includes("2 sync(s) in progress were begun by a Mason that read one chunk at a time: each continues where it was"), logged.join("\n"));
   } finally {
-    await sync.stop(); store.close();
+    await sync.stop(); await store.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

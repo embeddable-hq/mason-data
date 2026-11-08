@@ -74,7 +74,7 @@ async function aRun(body: (r: Run) => Promise<void>): Promise<void> {
     const rows = async (): Promise<number[]> => [Number(st().rows), await one(`SELECT "rows" FROM ${MASON_SCHEMA}.copy_state WHERE source = 'public.t'`), await one("SELECT count(*) FROM public.t")];
     await body({ store, sync, events, st, apply, rows });
   } finally {
-    store.close();
+    await store.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }

@@ -146,7 +146,7 @@ test("the swap waits for the writer's turn: a write holding the turn keeps the o
     w.sync.generated.changed("public.events");
     w.reached.length = 0;
     try {
-      for (const end = Date.now() + 10_000; !w.reached.includes("committed") && Date.now() < end;) { await w.sync.generated.review(); await new Promise((r) => setTimeout(r, 10)); }
+      for (const end = Date.now() + BUILD_BOUND_MS; !w.reached.includes("committed") && Date.now() < end;) { await w.sync.generated.review(); await new Promise((r) => setTimeout(r, 10)); }
       assert.ok(w.reached.includes("committed"), "the run wrote and committed its table");
       await new Promise((r) => setTimeout(r, 200));
       assert.ok(!w.reached.includes("swapped"), "and has not swapped it in while the writer's turn is held");
@@ -296,7 +296,7 @@ test("a table whose file goes is dropped, from the file and the catalog; one wit
     await w.until(built);
     w.remove("counts");
     // the run that built it may still be ending: the table waits for it, and goes at the review after
-    for (const end = Date.now() + 10_000; w.sync.generated.status().length > 0 && Date.now() < end;) {
+    for (const end = Date.now() + BUILD_BOUND_MS; w.sync.generated.status().length > 0 && Date.now() < end;) {
       await w.sync.generated.review();
       await new Promise((r) => setTimeout(r, 20));
     }
@@ -319,7 +319,7 @@ test("a commit that lands while a run is going is in the next one: the run took 
     await w.store.writer.run("INSERT INTO public.events VALUES (11, 7, 'query', 'ok', '11', '2026-01-03 00:00:00+00', NULL, 1, NULL)");
     w.sync.generated.changed("public.events");
     await w.sync.generated.review();
-    for (const end = Date.now() + 10_000; !w.reached.includes("snapshot") && Date.now() < end;) { await new Promise((r) => setTimeout(r, 10)); await w.sync.generated.review(); }
+    for (const end = Date.now() + BUILD_BOUND_MS; !w.reached.includes("snapshot") && Date.now() < end;) { await new Promise((r) => setTimeout(r, 10)); await w.sync.generated.review(); }
     assert.ok(w.reached.includes("snapshot"), "the run took its snapshot");
     assert.equal(w.status().state, "behind", "what a run carries is not in the table yet");
     assert.ok(w.status().behindSeconds > 0);
@@ -492,7 +492,7 @@ test("a synced table that takes the name while a run is going is never written o
     w.sync.generated.changed("public.events");
     w.reached.length = 0;
     const dropped = (): boolean => w.logged.some((l) => /public\.counts: a synced table now holds its name, so what this run built was dropped/.test(l));
-    for (const end = Date.now() + 10_000; !dropped() && Date.now() < end;) { await w.sync.generated.review(); await new Promise((r) => setTimeout(r, 10)); }
+    for (const end = Date.now() + BUILD_BOUND_MS; !dropped() && Date.now() < end;) { await w.sync.generated.review(); await new Promise((r) => setTimeout(r, 10)); }
     assert.ok(w.reached.includes("committed"), "the run wrote and committed its table");
     assert.ok(dropped(), w.logged.join("\n"));
     assert.ok(!w.reached.includes("swapped"), "and never swapped it in");

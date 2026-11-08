@@ -90,7 +90,7 @@ before(async () => {
 after(async () => {
   await api.close();
   await ledger.close();
-  store.close();
+  await store.close();
   await new Promise<void>((resolve) => control.close(() => resolve()));
   fs.rmSync(dir, { recursive: true, force: true });
 });

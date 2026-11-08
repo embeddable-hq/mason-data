@@ -45,7 +45,7 @@ before(async () => {
 after(async () => {
   await client.end();
   await api.close();
-  store.close();
+  await store.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

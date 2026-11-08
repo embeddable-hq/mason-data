@@ -136,7 +136,7 @@ test("the copy and the stream keep DuckDB equal to the source through every kind
 
     // A RESTART: the slot resumes where DuckDB's record says; nothing is copied or caught up again
     await sync.stop();
-    store.close();
+    await store.close();
     psql(url, "INSERT INTO items VALUES (80, 'while stopped', 8, NULL, NULL); DELETE FROM items WHERE id = 1; INSERT INTO shop.lines VALUES (5, 1, 1)");
     store = await DuckStore.open(file, (l) => logged.push(l));
     sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", names);
@@ -158,7 +158,7 @@ test("the copy and the stream keep DuckDB equal to the source through every kind
     assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]), [["public.items", "copied", null], ["shop.lines", "copied", null], ["public.later", "copied", null]]);
   } finally {
     await sync.stop();
-    store.close();
+    await store.close();
   }
 });
 
@@ -177,7 +177,7 @@ test("a project that polled is caught up by one poll when it starts replicating:
     await sync.open();
     sync.setTables([T!]);
     await sync.once();
-  } finally { await sync.stop(); store.close(); }
+  } finally { await sync.stop(); await store.close(); }
   // changed while nothing reads it, before any slot exists: only a poll can see these
   psql(url, "UPDATE t SET v = 'before the slot' WHERE id = 1; DELETE FROM t WHERE id = 2; INSERT INTO t VALUES (21, 'new')");
   store = await DuckStore.open(file, (l) => logged.push(l));
@@ -194,7 +194,7 @@ test("a project that polled is caught up by one poll when it starts replicating:
     psql(url, "UPDATE t SET v = 'streamed' WHERE id = 3");
     await sync.caughtUp();
     assert.equal(await rowsOf(store, "SELECT id, v FROM public.t ORDER BY 1"), psql(url, "SELECT id, v FROM t ORDER BY 1"));
-  } finally { await sync.stop(); store.close(); }
+  } finally { await sync.stop(); await store.close(); }
 });
 
 test("every type arrives through the stream as the copy stores it; a numeric wider than its copy copies the table again", { skip }, async () => {
@@ -225,7 +225,7 @@ test("every type arrives through the stream as the copy stores it; a numeric wid
     const s2 = await DuckStore.open(f, () => undefined);
     const y = new Sync(s2, parsed.source, db, () => undefined, 3_600_000, "poll");
     try { await y.open(); y.setTables([TYPED!]); await y.once(); return await rowsOf(s2, "SELECT COLUMNS(*)::VARCHAR FROM public.typed ORDER BY id"); }
-    finally { await y.stop(); s2.close(); }
+    finally { await y.stop(); await s2.close(); }
   };
   try {
     await sync.open();
@@ -252,7 +252,7 @@ test("every type arrives through the stream as the copy stores it; a numeric wid
     psql(url, "UPDATE typed SET vc = 'still streamed' WHERE id = 3");
     await sync.caughtUp();
     assert.equal(await rowsOf(store, "SELECT vc FROM public.typed WHERE id = 3"), "still streamed");
-  } finally { await sync.stop(); store.close(); }
+  } finally { await sync.stop(); await store.close(); }
 });
 
 // A BULK CHANGE ON A BIG TABLE (a migration's UPDATE over tens of millions of rows, one Postgres
@@ -368,7 +368,7 @@ test("a table copies beside the stream: the others stay current and the slot mov
     big.release();
     reader.closeSync();
     await sync.stop();
-    store.close();
+    await store.close();
   }
 });
 
@@ -428,7 +428,7 @@ test("a NAMED publication is read as it is, never altered: a table it lacks is r
     psql(url, "UPDATE a SET v = 'beside the refusal' WHERE id = 4; INSERT INTO b VALUES (12, 'b12'); INSERT INTO c VALUES (2, 'c2')");
     await same("a refused table beside them");
     assert.deepEqual(sync.state().filter((s) => s.source !== "public.c").map((s) => [s.source, s.phase, s.error]), [["public.a", "copied", null], ["public.b", "copied", null]]);
-  } finally { await sync.stop(); store.close(); }
+  } finally { await sync.stop(); await store.close(); }
 
   assert.equal(definition(), defined, "no CREATE, ALTER or DROP PUBLICATION ran: the definition is byte-equal");
   assert.equal(tables(), published, "pg_publication_tables is unchanged");
@@ -460,7 +460,7 @@ test("a named publication that cannot carry the copy is refused in the developer
       if (sync.state().some((s) => s.phase === "copied")) await sync.caughtUp();
       return { states: sync.state(), logged };
     }
-    finally { await sync.stop(); store.close(); }
+    finally { await sync.stop(); await store.close(); }
   };
   const before = psql(url, "SELECT pubname, xmin FROM pg_publication ORDER BY 1") + psql(url, "SELECT prpubid, prrelid, xmin FROM pg_publication_rel ORDER BY 1, 2");
 
@@ -574,7 +574,7 @@ test("the stream says where it is: a table joins and leaves on a line with its p
     assert.equal(logged.filter((l) => / (joins|leaves) the stream /.test(l)).length, 3, `a line per join and leave, never per batch:\n${logged.join("\n")}`);
   } finally {
     await sync.stop();
-    store.close();
+    await store.close();
   }
 });
 
@@ -695,7 +695,7 @@ test("a table's columns changed in the sources file while its table copies: copi
     if (trickle.exitCode === null) { psql(url, "INSERT INTO stop_writing VALUES (1)"); await trickled.catch((e: unknown) => { console.error(`the writing app: ${String(e)}`); }); }
     reader.closeSync();
     await sync.stop();
-    store.close();
+    await store.close();
   }
 });
 
@@ -846,7 +846,7 @@ test("a batch open across a table's copies keeps only what it decoded since the 
     for (const s of every) s.go();
     reader.closeSync();
     await sync.stop();
-    store.close();
+    await store.close();
   }
 });
 
@@ -899,7 +899,7 @@ test("a column dropped on the database while streaming refuses that table by nam
   } finally {
     reader.closeSync();
     await sync.stop();
-    store.close();
+    await store.close();
   }
 });
 
@@ -969,7 +969,7 @@ test("a mixed project: an off table unchanged, a poll 1s table polled beside the
     assert.deepEqual(asked.tables.map((t) => [t.table, t.rows]), [["public.manual", 5]]);
     assert.deepEqual(asked.streamed?.map((t) => [t.table, t.state]), [["public.ra", "streamed"]]);
     assert.ok(await same("manual"), "mason sync syncs the off table");
-  } finally { await sync.stop(); store.close(); }
+  } finally { await sync.stop(); await store.close(); }
 });
 
 // A CHANGE OF A TABLE'S SYNC KEEPS ITS COPY in every direction, caught up by ONE poll, never copied again — live
@@ -1039,7 +1039,7 @@ test("a switch in each direction keeps the copy, caught up by one poll; the slot
     psql(url, "UPDATE a SET v = 'streamed again' WHERE id = 6");
     await sync.caughtUp();
     assert.ok(await same("a"));
-  } finally { await sync.stop(); store.close(); }
+  } finally { await sync.stop(); await store.close(); }
 
   // BY HAND, while Mason is down: a replication → poll, b poll → replication — each caught up at the start
   psql(url, "UPDATE a SET v = 'while down' WHERE id = 7; UPDATE b SET v = 'while down' WHERE id = 7; INSERT INTO a VALUES (100, 'down'); INSERT INTO b VALUES (100, 'down')");
@@ -1061,7 +1061,7 @@ test("a switch in each direction keeps the copy, caught up by one poll; the slot
     psql(url, "UPDATE b SET v = 'streamed after the restart' WHERE id = 8");
     await sync.caughtUp();
     assert.ok(await same("b"));
-  } finally { await sync.stop(); store.close(); }
+  } finally { await sync.stop(); await store.close(); }
 });
 
 test("a named publication is never altered by a sync change: a replicated table it lacks is refused with its ADD TABLE line, the polled table beside it goes on", { skip }, async () => {
@@ -1098,7 +1098,7 @@ test("a named publication is never altered by a sync change: a replicated table 
     await sync.caughtUp();
     assert.ok(await same("a"), "the carried table streams on");
     await until(() => same("c"), "the polled table polled on", logged, 10_000);
-  } finally { await sync.stop(); store.close(); }
+  } finally { await sync.stop(); await store.close(); }
   assert.equal(definition(), defined, "the named publication is never altered: byte-equal, its catalog row's version included");
 });
 
@@ -1132,5 +1132,5 @@ test("REPLICA IDENTITY NOTHING under sync: replication is refused at the file's 
     assert.equal(psql(url, `SELECT count(*) FROM pg_publication WHERE pubname = '${tag}_ri'`), "0", "no publication carries it");
     psql(url, "UPDATE a SET v = 'polled' WHERE id = 1");
     await until(async () => await rowsOf(store, "SELECT v FROM public.a WHERE id = 1") === "polled", "the polled table polled on", logged, 10_000);
-  } finally { await sync.stop(); store.close(); }
+  } finally { await sync.stop(); await store.close(); }
 });

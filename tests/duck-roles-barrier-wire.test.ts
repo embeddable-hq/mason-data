@@ -101,7 +101,7 @@ before(async () => {
 after(async () => {
   for (const c of clients) await c.end().catch((e: Error) => console.error(`a client's end: ${e.message}`));
   await api.close();
-  store.close();
+  await store.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });
 const client = (user: string): pg.Client => clients[Object.keys(users).indexOf(user)]!;

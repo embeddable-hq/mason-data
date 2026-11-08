@@ -188,7 +188,7 @@ test("mason_statements_total is a COUNTER: counted as the listener records each 
   const { UsageSampler } = await import("../src/duck/usage.ts" as string) as Usage;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-metrics-"));
   const store = await DuckStore.open(path.join(dir, "duck.db"), () => undefined, { memoryLimit: "512MiB" });
-  after(() => { store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  after(async () => { await store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
   let clock = Date.parse("2026-10-30T09:00:00.000Z");
   const u = await UsageSampler.open(store, () => undefined, { days: 7, now: () => clock, sampleMs: 3_600_000, sizeEveryMs: 3_600_000 });
   u.start(async () => usage);

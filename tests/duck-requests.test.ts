@@ -17,7 +17,7 @@ import type { ApiLogRow } from "../src/api/request-log.ts";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-requests-"));
 const store = await DuckStore.open(path.join(dir, "duck.db"), () => undefined);
-after(() => { store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+after(async () => { await store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
 
 const row = (o: Partial<ApiLogRow> & { requestId: string }): ApiLogRow => ({
   at: new Date(), method: "QUERY", status: 200, durationMs: 12, client: "postgres:Metabase", payload: "SELECT 1", payloadTruncated: false, ...o,

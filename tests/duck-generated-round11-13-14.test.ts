@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { stopParser } from "../src/api/postgres/parser.ts";
 import type { GeneratedHost } from "../src/duck/generated.ts";
 import { planDefinition, storedColumns, type EngineTypes } from "../src/duck/generated-plan.ts";
-import { built, COUNTS, withWorld } from "./duck-generated-world.ts";
+import { BUILD_BOUND_MS, built, COUNTS, withWorld } from "./duck-generated-world.ts";
 import { DEEP_DEPTH, DEEP_DEPTHS, deepChains } from "./deep-chains.ts";
 import { scheduled, overLedger, type R11Node, R11_NODES } from "./duck-generated-ledger.ts";
 
@@ -71,7 +71,7 @@ test("round 13: a check while a run holds its transaction open never touches the
       await w.store.writer.run("INSERT INTO public.events VALUES (11, 7, 'query', 'ok', '11', '2026-01-03 00:00:00+00', NULL, 1, NULL)");
       w.sync.generated.changed("public.events");
       await w.sync.generated.review();
-      for (const end = Date.now() + 10_000; !w.reached.includes("snapshot") && Date.now() < end;) { await new Promise((r) => setTimeout(r, 10)); await w.sync.generated.review(); }
+      for (const end = Date.now() + BUILD_BOUND_MS; !w.reached.includes("snapshot") && Date.now() < end;) { await new Promise((r) => setTimeout(r, 10)); await w.sync.generated.review(); }
       assert.ok(w.reached.includes("snapshot"), "the run holds its transaction open at its snapshot");
       // every call on the run's connection from here until the release is the check's, since the run is held
       const run = (w.sync as unknown as { generatedLane: { conn: Record<string, unknown> } }).generatedLane.conn;

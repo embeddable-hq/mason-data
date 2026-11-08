@@ -19,7 +19,7 @@ const usage = (): Promise<Usage> => import("../src/duck/usage.ts" as string) as 
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-usage-"));
 const store = await DuckStore.open(path.join(dir, "duck.db"), () => undefined, { memoryLimit: "512MiB" });
-after(() => { store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+after(async () => { await store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
 
 const facts = { copyBytes: 12_345, totals: { added: 3, copied: 2, failed: 1, rows: 1_000 }, oldestSyncSeconds: 42.5, streamLag: { bytes: 2_048, seconds: 1.5 }, copied: [] as string[],
   slotWalHeldBytes: 4_096, diskFreeBytes: 80 * 2 ** 30, sessionsOpen: 3, tables: { total: 3, copied: 2, copying: 0, waiting: 0, failed: 1 },
@@ -303,7 +303,7 @@ test("a samples table a run before a column made gains it, and a sample is writt
     assert.deepEqual(got.map((x) => x.sessionsOpen), [3, 0], "the sessions open");
     await u.close();
   } finally {
-    old.close();
+    await old.close();
     fs.rmSync(d, { recursive: true, force: true });
   }
 });
