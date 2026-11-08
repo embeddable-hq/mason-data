@@ -86,7 +86,7 @@ async function withSync<T>(t: Started, use: (sync: SyncClass, logged: string[], 
     await sync.setTables(t.tables);
     return await use(sync, logged, events);
   } finally {
-    store.close();
+    await store.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }

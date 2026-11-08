@@ -16,6 +16,7 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { execFileSync } from "node:child_process";
@@ -182,6 +183,78 @@ test("every synchronous close on the engine's thread is one read against the rul
   const executorFiles = fs.readdirSync(path.join(ROOT, "tests")).filter((f) => f.startsWith("duck-executor"));
   assert.ok(executorFiles.includes("duck-executor.test.ts") && executorFiles.includes("duck-executor-harness.ts"), executorFiles.join(", "));
   for (const f of executorFiles) assert.doesNotMatch(fs.readFileSync(path.join(ROOT, "tests", f), "utf8"), /\bspawnSync\(/, f);
+});
+
+/**
+ * A TEST AWAITS ITS STORE'S CLOSE (issue 537): a test file whose tests had all passed aborted at exit in CI,
+ * `terminate called after throwing an instance of 'Napi::Error'`, twice; both ended their `after()` with `store.close()`
+ * not awaited, then removed the store's folder, under `--test-force-exit`, so the process could exit while the engine's
+ * worker was still closing. A close not awaited is a DuckStore's `close()` whose promise is dropped: an expression
+ * statement, or `void`. Read by the type checker, so a store held under any name is seen. Returns `file:line` hits.
+ */
+export function floatingStoreCloses(files: readonly string[]): string[] {
+  const parsed = ts.getParsedCommandLineOfConfigFile(path.join(ROOT, "tsconfig.json"), {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic: (d) => { throw new Error(ts.flattenDiagnosticMessageText(d.messageText, "\n")); } });
+  assert.ok(parsed !== undefined, "tsconfig.json is read");
+  const program = ts.createProgram(files, parsed.options);
+  const checker = program.getTypeChecker();
+  const hits: string[] = [];
+  for (const file of files) {
+    const sf = program.getSourceFile(file);
+    assert.ok(sf !== undefined, `${file} is in the program`);
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "close") {
+        let up = node.parent;
+        while (ts.isParenthesizedExpression(up)) up = up.parent;
+        const held = checker.typeToString(checker.getNonNullableType(checker.getTypeAtLocation(node.expression.expression)));
+        if ((ts.isExpressionStatement(up) || ts.isVoidExpression(up)) && held === "DuckStore") {
+          hits.push(`${path.relative(ROOT, file)}:${sf.getLineAndCharacterOfPosition(node.getStart()).line + 1}`);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+  }
+  return hits;
+}
+
+test("every test awaits its store's close: a close left running when the process exits aborted it (issue 537)", () => {
+  const files: string[] = [];
+  const walk = (dir: string): void => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const at = path.join(dir, e.name);
+      if (e.isDirectory()) walk(at);
+      else if (e.name.endsWith(".ts")) files.push(at);
+    }
+  };
+  walk(path.join(ROOT, "tests"));
+  assert.ok(files.length >= 100 && files.some((f) => f.includes(`${path.sep}integration${path.sep}`)), `the tests to read: ${files.length}`);
+  assert.deepEqual(floatingStoreCloses(files), [], "a store's close not awaited: write `await store.close()`, and make the function around it async");
+});
+
+test("the store-close guard catches the real thing, under any name, and leaves an awaited or returned close alone", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "store-close-guard-"));
+  try {
+    const file = path.join(dir, "x.test.ts");
+    fs.writeFileSync(file, [
+      `import { DuckStore } from ${JSON.stringify(path.join(ROOT, "src", "duck", "store.ts"))};`,
+      "export async function f(store: DuckStore, own: DuckStore | undefined, w: { store: DuckStore }, other: { close(): Promise<void> }): Promise<void> {",
+      "  store.close();",
+      "  own?.close();",
+      "  void w.store.close();",
+      "  (store.close());",
+      "  await store.close();",
+      "  other.close();",
+      "  await Promise.all([store.close()]);",
+      "}",
+      "export const g = (store: DuckStore): Promise<void> => store.close();",
+      "export function h(store: DuckStore): Promise<void> { return store.close(); }",
+      "",
+    ].join("\n"));
+    const at = path.relative(ROOT, file);
+    assert.deepEqual(floatingStoreCloses([file]), [3, 4, 5, 6].map((l) => `${at}:${l}`));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 /**

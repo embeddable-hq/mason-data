@@ -278,7 +278,7 @@ test("the copy reads the demo database with three readers in parallel chunks, ev
     assert.deepEqual((await store.writer.runAndReadAll(`SELECT status FROM public.orders WHERE id = ${id}`)).getRowsJS(), [["pending"]]);
   } finally {
     await sync.stop();
-    store.close();
+    await store.close();
   }
 });
 
@@ -314,7 +314,7 @@ test("a sync asked by hand (mason sync, the page's Sync now) is a synced event i
     assert.match(synced[0]!.message, /^synced by hand: [\d,]+ changed, [\d,]+ deleted, [\d,]+ rows now · [\d.]+ (ms|s)$/);
   } finally {
     await sync.stop();
-    store.close();
+    await store.close();
   }
 });
 

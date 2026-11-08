@@ -175,7 +175,7 @@ test("the stored value is the function's answer for every JSON shape, and the re
     assert.equal(await at(0, { steps: '["arr",-1]', either: false, canonical: true }), "30");
     assert.equal(await at(1, { steps: '["o"]', either: false, canonical: true }), "{}");
     assert.equal(await at(0, { steps: '["s"]', either: false, canonical: true }), '"text 0"');
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });
 
 /** a keeper over `store`'s table `public.docs`, its host's writer turns counted */
@@ -237,7 +237,7 @@ test("a backfill fills a path's rows a chunk a writer's turn, then the path is r
     // never in a statement that lists the table's columns: the view of the visible ones
     assert.deepEqual(await rows(store, `SELECT column_name FROM duckdb_columns() WHERE database_name = '${route.VISIBLE_CATALOG}' AND table_name = 'docs' ORDER BY column_index`), [["id"], ["j"], ["k"]]);
     await keeper.stop();
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });
 
 test("a read is answered from its stored column only once it is ready, every read is recorded, and a * never lists the column", async () => {
@@ -304,7 +304,7 @@ test("a read is answered from its stored column only once it is ready, every rea
     assert.doesNotMatch(shadow.sql.text, new RegExp(route.VISIBLE_CATALOG));
     await keeper.stop();
     reader.closeSync();
-  } finally { store.close(); await pglite.close(); }
+  } finally { await store.close(); await pglite.close(); }
 });
 
 // THE REVIEW OF THE NATIVE READ: the stored read's THEN arm places the column in every arm of the read's
@@ -335,7 +335,7 @@ test("a stored read names its JSON column in every place as Postgres resolved it
     }
     await keeper.stop();
     reader.closeSync();
-  } finally { store.close(); await pglite.close(); }
+  } finally { await store.close(); await pglite.close(); }
 });
 
 // ------------------------------------------------------------------------------------------------- the write paths
@@ -437,7 +437,7 @@ test("the stream's write by key and its unchanged-TOAST updates compute each sto
       assert.equal(await one(store, `SELECT ${ident(route.hiddenName(reads[0]!))} FROM public.docs WHERE id = 100000`), '"carried"', kind);
       assert.equal(await one(store, `SELECT ${ident(route.hiddenName(reads[1]!))} FROM public.docs WHERE id = 100000`), '{"c": 1}', kind);
       await current(store, [...reads], route);
-    } finally { store.close(); }
+    } finally { await store.close(); }
   }
 });
 
@@ -452,7 +452,7 @@ test("the poll's write by key computes each stored path, a whole stage or a piec
       await writeStaged(store.writer, DOCS, "public.docs", "temp.main.stage", " WHERE rowid >= 1 AND rowid < 2", sync.kept);
       assert.deepEqual(await rows(store, `SELECT id, ${ident(route.hiddenName(reads[0]!))} FROM public.docs WHERE id IN (5, 200000) ORDER BY id`), [[5, '"polled"'], [200000, '"polled new"']], kind);
       await current(store, [...reads], route);
-    } finally { store.close(); }
+    } finally { await store.close(); }
   }
 });
 
@@ -478,7 +478,7 @@ test("a copy's side table gets every stored path before its swap; a column the n
       await current(store, reads.filter((r) => r.column === "j"), route);
       // the view lists the new copy's columns
       assert.deepEqual(await rows(store, `SELECT column_name FROM duckdb_columns() WHERE database_name = '${route.VISIBLE_CATALOG}' AND table_name = 'docs' ORDER BY column_index`), [["id"], ["j"]]);
-    } finally { store.close(); }
+    } finally { await store.close(); }
   }
 });
 
@@ -500,8 +500,8 @@ test("a table removed leaves no stored path, and turned off every stored column 
       assert.equal(off.ready(STORED[0]!), null);
       assert.match(logged.join("\n"), /turned off .*dropped 1 stored column/);
       await off.stop();
-    } finally { again.store.close(); }
-  } finally { store.close(); }
+    } finally { await again.store.close(); }
+  } finally { await store.close(); }
 });
 
 // ---------------------------------------------------------------------------------------------------------- review findings
@@ -577,7 +577,7 @@ test("a READY path is read from its stored column alone: the plan reads no docum
     assert.deepEqual(keeper.ready(s), { name: h, exact: true }, "settled: read by its column alone again");
     await keeper.stop();
     reader.closeSync();
-  } finally { store.close(); await pglite.close(); }
+  } finally { await store.close(); await pglite.close(); }
 });
 
 // A JSONB'S ORDER STORED (src/duck/kept-route.ts ORDER_STEPS): `ORDER BY j` over 20 M rows took 19 s through the key's
@@ -669,7 +669,7 @@ test("a jsonb's order is stored as its key: the function's on every row under C,
       }
       reader.closeSync();
       await keeper.stop();
-    } finally { store.close(); await pglite.close(); }
+    } finally { await store.close(); await pglite.close(); }
   }
 });
 
@@ -719,7 +719,7 @@ test("a stored jsonb key is its collation's: until the listener says which no pl
     assert.ok(again !== null && readyName(again) !== h, "ready again, as another column (ICU's key)");
     assert.match(icu.keeper.status().find((p) => p.state === "ready")!.why, new RegExp(`read by ${kept.KEEP_AFTER_STATEMENTS} statements`));
     await icu.keeper.stop();
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });
 
 // A MARK WRITTEN AFTER READY (the review of PR #14): under a libc collation the stream or the poll may write at any time a
@@ -787,7 +787,7 @@ test("a jsonb's key marked by a write after it was counted exact is never read a
     assert.equal(route.hiddenName({ ...order, steps: `order:${kept.orderId!({ kind: "libc", icu: "en_us" }, smallLibcOrder())}` }), h);
     reader.closeSync();
     await keeper.stop();
-  } finally { store.close(); await pglite.close(); }
+  } finally { await store.close(); await pglite.close(); }
 });
 
 test("a jsonb's key stored by another version of its encoding or of DuckDB is dropped when the collation is told, and stored again", async () => {
@@ -818,7 +818,7 @@ test("a jsonb's key stored by another version of its encoding or of DuckDB is dr
     await next.keeper.keepNow!([order]);
     assert.equal(readyName(next.keeper.ready(order)), now, "stored again, this version's");
     await next.keeper.stop();
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });
 
 // A JSONB'S EQUALITY STORED UNDER LIBC (src/duck/kept-route.ts EQUAL_STEPS): under a libc collation equality reads the C
@@ -934,7 +934,7 @@ test("under a libc collation a jsonb's equality is stored as the C key, a second
     assert.match(said, /GROUP BY j \(its jsonb equality.*1 row\(s\) its function could not read .*Mason bug/, said);
     reader.closeSync();
     await keeper.stop();
-  } finally { store.close(); await pglite.close(); }
+  } finally { await store.close(); await pglite.close(); }
 });
 
 test("a jsonb's stored C key lives as the order's: swept across starts, dropped when its version moves, when the collation is not libc, and turned off", async () => {
@@ -1014,7 +1014,7 @@ test("a jsonb's stored C key lives as the order's: swept across starts, dropped 
     assert.equal(off.keeper.ready(EQUAL), null);
     assert.deepEqual(await rows(store, "SELECT count(*) FROM duckdb_columns() WHERE table_name = 'docs' AND starts_with(column_name, '__mason_json_')"), [[0n]]);
     await off.keeper.stop();
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });
 
 test("a jsonb's C key waits for a libc collation: no row or column before the collation is told, stored after it, dropped when it turns C", async () => {
@@ -1053,7 +1053,7 @@ test("a jsonb's C key waits for a libc collation: no row or column before the co
     assert.match(c.host.logged.join("\n"), /GROUP BY j \(its jsonb equality.*no longer stored/);
     assert.equal(c.keeper.ready(EQUAL), null, "equality now reads the order's key, not stored here yet");
     await c.keeper.stop();
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });
 
 // A KIND THIS MASON DOES NOT KNOW (the review of PR #21): an earlier release met `order:…` and `equal:…` rows and parsed
@@ -1099,7 +1099,7 @@ test("a stored read of a kind this Mason does not know is inert: its ledger row 
     const off = await keeperOver(store, kept, { enabled: false });
     assert.ok(off.keeper.status().some((p) => p.steps === "future:x"));
     await off.keeper.stop();
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });
 
 /** a libc order small enough to write by hand (as tests/duck-libc-order.test.ts writes one): letters with case and
@@ -1154,7 +1154,7 @@ test("a path's spellings and its -> and ->> are ONE stored column, each read fro
     assert.equal(route.readKey(path('["o","a","b"]', true, true)), route.readKey(path('["o","a","b"]', false, true)));
     await keeper.stop();
     reader.closeSync();
-  } finally { store.close(); await pglite.close(); }
+  } finally { await store.close(); await pglite.close(); }
 });
 
 test("adding a stored path's column writes no value into its rows, and holds the writer's turn a fraction of a default's", async () => {
@@ -1209,7 +1209,7 @@ test("adding a stored path's column writes no value into its rows, and holds the
     assert.ok(add.ms < old.ms, `the add's turn (${add.ms.toFixed(0)} ms) is shorter than the old add's (${old.ms.toFixed(0)} ms)`);
     assert.equal(keeper.status()[0]?.state, "backfilling");
     await keeper.stop();
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });
 
 test("the policy weighs a path's reads against its fill's estimate; a path the cost holds back says so", async () => {
@@ -1273,7 +1273,7 @@ test("the policy weighs a path's reads against its fill's estimate; a path the c
     assert.deepEqual(keeper.status().map((p) => p.state), ["ready"]);
     assert.match(keeper.status()[0]!.why, /read by 4 statements taking 10 min 3.5 s in all|read by 4 statements taking 10 min 4 s in all/);
     await keeper.stop();
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });
 
 type Fill = { rows: number; bytesPerRow: number; seconds: number; basis?: string; rowsPerSecond?: number | null };
@@ -1340,7 +1340,7 @@ test("a fill's estimate is modelled from its JSON column's bytes on disk, then f
     assert.ok(key !== undefined && key.fill !== null, JSON.stringify(again.status().map((p) => [p.steps, p.state, p.why])));
     assert.equal(key.fill.basis, "disk", `a key's fill is modelled, not priced by a path's: ${JSON.stringify(key.fill)}`);
     await again.stop();
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });
 
 test("a review runs while a fill runs: the waiting rows' evidence is current, and a path decided meanwhile is queued behind the fill", async () => {
@@ -1404,5 +1404,5 @@ test("a review runs while a fill runs: the waiting rows' evidence is current, an
     assert.ok(of(filling)!.readyAt! <= of(later)!.readyAt!, "the queued one filled after");
     for (const p of [of(filling)!, of(later)!]) assert.equal(await one(store, `SELECT count(*) FROM public.docs WHERE ${ident(p.name)} IS NULL`), 0n, p.name);
     await keeper.stop();
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });

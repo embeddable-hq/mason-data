@@ -2,21 +2,62 @@
  * THE EXECUTOR'S STARVATION STRESS (src/duck/executor.ts; tests/duck-executor.test.ts has the worker's story): a file of its
  * own so CI's unit shards can place it apart from the executor's other long tests (scripts/ci-shards.ts).
  */
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
-import { CALLING, JWIDE_ROWS, ROWS, client, jwideBuild, logged, ping, released, store, timed, useServer } from "./duck-executor-harness.ts";
+import type pg from "pg";
+import { CALLING, JWIDE_ROWS, ROWS, api, client, jwideBuild, logged, ping, released, store, timed, useServer } from "./duck-executor-harness.ts";
 
 useServer({ wide: true, jwide: true });
+
+/**
+ * A HEAVY STATEMENT THAT ENDS WITH ITS TEST (issue 651): one left running past its test (the test's timeout fired, or
+ * an assertion threw before its `await`) kept the engine's threads busy for minutes, and its loop of small statements
+ * spinning, so on a loaded CI runner every file beside this one starved (a generated table took 15 s to build) and this
+ * file's next test counted the last one's function calls as its own. So `heavy` sends `sql` on `c` and cancels it
+ * (`api.cancel`, as `mason cancel` does, again every 100 ms until it ends, since a cancel that lands while it is planned
+ * finds nothing running) at its own bound, short of the test's timeout, or when the test is cancelled (`t.signal`).
+ * `end`, in the test's `finally`, cancels it and waits for its answer and then for a `SELECT 1` on its session, which
+ * waits for the statement's release: no heavy statement outlives its test, pass or fail.
+ */
+function heavy(t: TestContext, c: pg.Client, sql: string, boundMs: number): { answer: Promise<pg.QueryResult | Error>; running: () => boolean; end: () => Promise<void> } {
+  const session = (c as unknown as { processID: number }).processID;
+  let running = true;
+  let ticker: NodeJS.Timeout | undefined;
+  const answer = c.query(sql).then((r) => r, (e: Error) => e).finally(() => { running = false; clearInterval(ticker); });
+  const stop = (): void => {
+    if (!running || ticker !== undefined) return;
+    api.cancel(session);
+    ticker = setInterval(() => { if (running) api.cancel(session); }, 100);
+  };
+  const bound = setTimeout(stop, boundMs);
+  t.signal.addEventListener("abort", stop, { once: true });
+  return {
+    answer, running: () => running,
+    end: async () => {
+      clearTimeout(bound);
+      t.signal.removeEventListener("abort", stop);
+      stop();
+      await answer;
+      await c.query("SELECT 1");
+    },
+  };
+}
+/** the heavy statement's rows, or a failure naming why it has none (cancelled at its bound, or its own error) */
+const rowsOf = (r: pg.QueryResult | Error, sql: string): pg.QueryResult["rows"] => {
+  if (r instanceof Error) assert.fail(`${sql}: ${r.message}`);
+  return r.rows;
+};
 
 test("a statement calling a Mason function on every row starves no one but its thread: another session, a new login and the command server answer within a second", { timeout: 120_000 }, async (t) => {
   const a = await client();
   const login = (): Promise<number> => (async () => { const c = await client(); try { return (await c.query("SELECT 1 AS one")).rows[0].one as number; } finally { await c.end(); } })();
+  let slow: ReturnType<typeof heavy> | undefined;
   try {
     const idle = await timed(login);
     const from = logged.length;
     const t0 = Date.now();
-    const slow = a.query(CALLING);
+    slow = heavy(t, a, CALLING, 90_000);
     await sleep(500);
     assert.ok(!released(from), "the calling statement is still running when the others ask (make ROWS larger if this machine is faster)");
     const other = await timed(login);
@@ -30,8 +71,8 @@ test("a statement calling a Mason function on every row starves no one but its t
     const copied = await timed(async () => { const c = await client(); try { return (await c.query("SELECT count(*) AS n FROM small")).rows[0].n as string; } finally { await c.end(); } });
     t.diagnostic(`a statement over a copied table: ${Math.round(copied.ms)} ms (the calling statement had run ${Date.now() - t0} ms when it was answered)`);
     assert.equal(copied.value, "10");
-    assert.equal(String((await slow).rows[0].count), String(ROWS), "and the calling statement answers");
-  } finally { await a.end(); }
+    assert.equal(String(rowsOf(await slow.answer, CALLING)[0].count), String(ROWS), "and the calling statement answers");
+  } finally { try { await slow?.end(); } finally { await a.end(); } }
 });
 
 // A SMALL STATEMENT NEVER WAITS FOR A HEAVY ONE'S CALLS (issue 127, src/duck/functions.ts `registerTurn`): `select count(*)`
@@ -39,7 +80,7 @@ test("a statement calling a Mason function on every row starves no one but its t
 // statement of about 2,400 vectors holds the executor's loop 1,000 calls at a time without the turn, so a small statement
 // waits for at least 40 % of it; with the turn the loop turns every few calls, and the small statement's eight turns are
 // about 3 %. A count alone would not do: small statements are answered before the calls reach their full rate.
-for (const [shape, heavy, rows] of [
+for (const [shape, sql, rows] of [
   ["a numeric bin", "SELECT floor(n / 0.05) * 0.05 AS bin, count(*) FROM wide GROUP BY 1", 1000],
   ["a week of the year, as a BI tool writes it", "SELECT ceil((extract(doy FROM ts)::integer + 6) / 7.0) AS week, count(*) FROM wide GROUP BY 1", 54],
   ["to_char", "SELECT to_char(ts, 'YYYY-MM') AS month, count(*) FROM wide GROUP BY 1", 24],
@@ -48,23 +89,22 @@ for (const [shape, heavy, rows] of [
 ] as const) {
   test(`small statements go on being answered beside ${shape}`, { timeout: 180_000 }, async (t) => {
     const a = await client(), b = await client();
+    const t0 = Date.now();
+    const q = heavy(t, a, sql, 150_000);
     try {
-      let running = true;
-      const t0 = Date.now();
-      const q = a.query(heavy).finally(() => { running = false; });
       let answered = 0, slowest = 0;
-      while (running) {
+      while (q.running()) {
         const small = await timed(() => b.query("SELECT 1 FROM small LIMIT 1"));
-        if (!running) break;
+        if (!q.running()) break;
         answered++;
         slowest = Math.max(slowest, small.ms);
       }
-      const r = await q;
+      const r = await q.answer;
       t.diagnostic(`${answered} small statements in the ${Date.now() - t0} ms of ${shape}, the slowest ${Math.round(slowest)} ms`);
-      assert.equal(r.rows.length, rows, "and the heavy statement answers");
+      assert.equal(rowsOf(r, sql).length, rows, "and the heavy statement answers");
       assert.ok(answered >= 5, `${answered} small statements were answered in the ${Date.now() - t0} ms of ${shape}: it held the executor's loop`);
       assert.ok(slowest < (Date.now() - t0) * 0.2, `a small statement waited ${Math.round(slowest)} ms of the ${Date.now() - t0} ms of ${shape}: it held the executor's loop`);
-    } finally { await a.end(); await b.end(); }
+    } finally { try { await q.end(); } finally { await a.end(); await b.end(); } }
   });
 }
 
@@ -81,34 +121,35 @@ test("a small statement is not held by a native @> or -> over wide jsonb documen
   t.diagnostic(`jwide: ${JWIDE_ROWS} rows of 20 kB documents built in ${Math.round(jwideBuild.ms)} ms`);
   const calls = async (): Promise<number> => [...(await store.functionCalls()).values()].reduce((x, y) => x + y, 0);
   const median = (xs: number[]): number => { const s = [...xs].sort((x, y) => x - y); return s.length === 0 ? Infinity : s[Math.floor((s.length - 1) / 2)]!; };
-  for (const [heavy, want] of [
+  for (const [sql, want] of [
     [`SELECT count(*) FROM jwide WHERE j @> '{"a": 1}'`, JWIDE_ROWS / 50],
     ["SELECT count(*) FROM jwide WHERE (j -> 'a') IS NOT NULL", JWIDE_ROWS],
     [`SELECT count(*) FROM jwide WHERE j @> '{"b": "v3"}'`, Math.floor((JWIDE_ROWS - 4) / 7) + 1],
   ] as const) {
     const a = await client(), b = await client();
+    let q: ReturnType<typeof heavy> | undefined;
     try {
       await a.query("SET statement_timeout = 30000");
       const before = await calls();
-      let running = true;
       const t0 = Date.now();
-      const q = a.query(heavy).then((r) => String(r.rows[0].count), (e: Error) => `failed: ${e.message}`).finally(() => { running = false; });
+      q = heavy(t, a, sql, 45_000);
       const waits: number[] = [];
-      while (running) {
+      while (q.running()) {
         const small = await timed(() => b.query("SELECT 1 FROM small LIMIT 1"));
-        if (!running && waits.length > 0) break;
+        if (!q.running() && waits.length > 0) break;
         waits.push(small.ms);
         if (small.ms > 2000 || Date.now() - t0 > 30_000) break;
       }
-      const count = await q;
+      const r = await q.answer;
+      const count = r instanceof Error ? `failed: ${r.message}` : String(r.rows[0].count);
       const heavyMs = Date.now() - t0;
       const hops = (await calls()) - before;
-      t.diagnostic(`${heavy}: ${heavyMs} ms, ${hops} function calls; ${waits.length} small statements beside it, median ${Math.round(median(waits))} ms, worst ${Math.round(Math.max(...waits))} ms`);
-      assert.equal(hops, 0, `${heavy} reached a function ${hops} times (the turn's included)`);
-      assert.equal(count, String(want), `${heavy} answers`);
-      assert.ok(waits.length >= 5, `${waits.length} small statements were answered beside ${heavy} in ${heavyMs} ms`);
-      assert.ok(median(waits) <= 500, `the small statement's median wait beside ${heavy} was ${Math.round(median(waits))} ms`);
-      assert.ok(Math.max(...waits) <= 2000, `a small statement waited ${Math.round(Math.max(...waits))} ms beside ${heavy}`);
-    } finally { await a.end(); await b.end(); }
+      t.diagnostic(`${sql}: ${heavyMs} ms, ${hops} function calls; ${waits.length} small statements beside it, median ${Math.round(median(waits))} ms, worst ${Math.round(Math.max(...waits))} ms`);
+      assert.equal(hops, 0, `${sql} reached a function ${hops} times (the turn's included)`);
+      assert.equal(count, String(want), `${sql} answers`);
+      assert.ok(waits.length >= 5, `${waits.length} small statements were answered beside ${sql} in ${heavyMs} ms`);
+      assert.ok(median(waits) <= 500, `the small statement's median wait beside ${sql} was ${Math.round(median(waits))} ms`);
+      assert.ok(Math.max(...waits) <= 2000, `a small statement waited ${Math.round(Math.max(...waits))} ms beside ${sql}`);
+    } finally { try { await q?.end(); } finally { await a.end(); await b.end(); } }
   }
 });

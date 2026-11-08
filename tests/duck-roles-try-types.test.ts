@@ -15,7 +15,7 @@ import { BARRIER, STATISTICS_WALL } from "../src/duck/row-filter.ts";
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "duck-roles-try-"));
 let store: DuckStore;
 before(async () => { store = await DuckStore.open(path.join(dir, "duck.db"), () => undefined); });
-after(() => { store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+after(async () => { await store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
 
 /** each column with a value at an edge of its type (a second row is NULL throughout) */
 const COLUMNS: ReadonlyArray<[string, string, string]> = [

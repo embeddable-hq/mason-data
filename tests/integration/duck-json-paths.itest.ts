@@ -182,7 +182,7 @@ test("a stored path equals Postgres's read after the copy, every poll, and a cop
       (await Promise.all(READS.filter((r) => r.read.column === "j").map((r) => hiddenOf({ source: "public.docs", ...r.read })))).sort(), "only j's stored columns are left");
   } finally {
     await sync.stop();
-    store.close();
+    await store.close();
   }
 });
 
@@ -232,6 +232,6 @@ test("a stored path equals Postgres's read after every batch the stream applies,
     assert.deepEqual(sync.kept.status().map((p) => p.state), READS.map(() => "ready"));
   } finally {
     await sync.stop();
-    store.close();
+    await store.close();
   }
 });

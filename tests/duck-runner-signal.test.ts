@@ -19,7 +19,7 @@ import { explainOptions } from "../src/api/postgres/explain.ts";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-duck-signal-"));
 const store = await DuckStore.open(path.join(dir, "signal.db"), () => undefined);
-after(() => { store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+after(async () => { await store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
 
 const SESSION = { timeZone: "UTC", searchPath: "public", dateStyle: "ISO, MDY", settings: {} };
 const SQL = { text: "SELECT 1 AS one", functions: [] } as never;   // see the header: the runner's signal handling, not the planner

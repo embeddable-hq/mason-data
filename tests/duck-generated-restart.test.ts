@@ -14,7 +14,7 @@ import { spawnSync } from "node:child_process";
 import { MASON_SCHEMA } from "../src/duck/store.ts";
 import { stopParser } from "../src/api/postgres/parser.ts";
 import type { GeneratedStep } from "../src/duck/generated.ts";
-import { built, COUNTS, withWorld } from "./duck-generated-world.ts";
+import { BUILD_BOUND_MS, built, COUNTS, withWorld } from "./duck-generated-world.ts";
 
 after(() => stopParser());
 
@@ -114,7 +114,7 @@ test("after a restart, a base whose last sync is not the one the snapshot saw co
       w.sync.generated.changed("public.events");
       w.reached.length = 0;
       try {
-        for (const end = Date.now() + 10_000; !w.reached.includes("snapshot") && Date.now() < end;) { await w.sync.generated.review(); await new Promise((r) => setTimeout(r, 10)); }
+        for (const end = Date.now() + BUILD_BOUND_MS; !w.reached.includes("snapshot") && Date.now() < end;) { await w.sync.generated.review(); await new Promise((r) => setTimeout(r, 10)); }
         assert.ok(w.reached.includes("snapshot"));
         // a poll that began before the snapshot commits after it: its time is its start, before the snapshot, and its
         // mark dies with the process

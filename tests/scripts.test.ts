@@ -357,18 +357,31 @@ test("done-file: writes the command's end, and only its end, to a file wait-file
   const WAIT = path.join(ROOT, "scripts", "wait-file.ts");
   try {
     const done = path.join(dir, "done");
+    const go = path.join(dir, "go");
     fs.writeFileSync(done, "exit 0\n");
-    // a command that runs a while: a stale done file is removed at once, and the file appears only at the end
-    const child = spawn(process.execPath, [SCRIPT, done, process.execPath, "-e", "setTimeout(() => process.exit(3), 600)"], { stdio: "ignore" });
-    const t0 = Date.now();
-    await new Promise((r) => setTimeout(r, 200));
-    assert.ok(!fs.existsSync(done), "an earlier run's done file is gone before the command ends");
-    const waited = spawnSync(process.execPath, [WAIT, done, "20"], { encoding: "utf8", env: { ...process.env, WAIT_FILE_INTERVAL_MS: "50" }, timeout: 30_000 });
-    assert.equal(waited.status, 0, "wait-file ends once the command has ended");
-    assert.ok(Date.now() - t0 >= 550, "and not before");
-    const code = await new Promise<number | null>((resolve) => (child.exitCode !== null ? resolve(child.exitCode) : child.on("exit", resolve)));
-    assert.equal(code, 3, "done-file exits with the command's code");
-    assert.equal(fs.readFileSync(done, "utf8"), "exit 3\n");
+    // a command that runs until the test lets it end (`go` written): a stale done file is removed before it ends, and
+    // the file appears only at the end. Held by the order of events, never a time: a Node child's start under load
+    // outlasted the 200 ms this once slept (issue 651).
+    const child = spawn(process.execPath, [SCRIPT, done, process.execPath, "-e", `const fs = require("node:fs"); setInterval(() => { if (fs.existsSync(${JSON.stringify(go)})) process.exit(3); }, 20);`], { stdio: "ignore" });
+    try {
+      for (const end = Date.now() + 60_000; fs.existsSync(done);) {
+        assert.ok(Date.now() < end, "an earlier run's done file is removed when done-file starts");
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.equal(child.exitCode, null, "an earlier run's done file is gone before the command ends");
+      const early = spawnSync(process.execPath, [WAIT, done, "1"], { encoding: "utf8", env: { ...process.env, WAIT_FILE_INTERVAL_MS: "50" }, timeout: 30_000 });
+      assert.equal(early.status, 8, "wait-file does not end while the command runs");
+      assert.ok(!fs.existsSync(done), "no done file while the command runs");
+      fs.writeFileSync(go, "");
+      const waited = spawnSync(process.execPath, [WAIT, done, "60"], { encoding: "utf8", env: { ...process.env, WAIT_FILE_INTERVAL_MS: "50" }, timeout: 90_000 });
+      assert.equal(waited.status, 0, "wait-file ends once the command has ended");
+      const code = await new Promise<number | null>((resolve) => (child.exitCode !== null ? resolve(child.exitCode) : child.on("exit", resolve)));
+      assert.equal(code, 3, "done-file exits with the command's code");
+      assert.equal(fs.readFileSync(done, "utf8"), "exit 3\n");
+    } finally {
+      // a failure above never leaves the command waiting for ever: `go` ends it (done-file passes it no signal of ours)
+      fs.writeFileSync(go, "");
+    }
     // output is the command's, passed through
     const out = spawnSync(process.execPath, [SCRIPT, done, process.execPath, "-e", "console.log('gate output')"], { encoding: "utf8" });
     assert.equal(out.status, 0);
