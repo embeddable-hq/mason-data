@@ -13,7 +13,7 @@ import { GAPS, type GapId } from "../src/duck/gaps.ts";
 import { collationMet, staleDecisions } from "./integration/oracle/known.ts";
 import { emptyShapeCount, NEW_SHAPES, shapeProblems, sumShapeTallies, type ShapeTally } from "./integration/oracle/shape-names.ts";
 import { staleOrDead, STAGES, deadGaps, filesFromLegs, FIXTURE_FILE, foldProblems, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, VERIFIED_FILE, verifiedDiff, wholeRunProblems, runProblems, writeFromLegs, Clock, FIRST_LEG_RUNS_STAGES, partition, readWeights, timesLine, weightKey, weightsFromLegs, legScales, legsBalance, balanceLines, LEGS_APART_MS, weightsText, writeWeights, WEIGHTS_FILE, type Decision, type LegReport, type Measured, type Tallies, type Weights } from "../scripts/oracle-legs.ts";
-import { reportName } from "../scripts/ci-layout.ts";
+import { reportName, SHARDS } from "../scripts/ci-layout.ts";
 import { VERIFIED } from "../src/duck/verified.ts";
 import type { GapTally } from "./integration/oracle/gap-tally.ts";
 import { README_END, README_START, renderGaps, renderReadmeSupport, spliceReadme, type AloneTallies } from "./sql-support.ts";
@@ -138,11 +138,13 @@ test("the committed weights are the file the legs read, and a leg's clock gives 
 });
 
 /** the legs, each timed as a leg times itself: `SELECT 0` 120 s, every other text 200 ms, the stages in leg 1 */
-const timed = (): [LegReport, LegReport] => legs().map((r): LegReport => ({ ...r, times: {
+/** the legs, timed; `of`: how many (the programs, as CI runs them, read SHARDS.oracle) */
+const timedOf = (of: number): LegReport[] => Array.from({ length: of }, (_, i) => report(i + 1, of)).map((r): LegReport => ({ ...r, times: {
   fixed: { setup: 20000, "first sync": 5000 },
   stages: r.leg === 1 ? { roles: 30000, "row filters": 15000, settings: 1000, "setting scripts": 4000 } : {},
   statements: Object.fromEntries([...statements, ...apart].filter((q) => r.asked[PHASES[0]]!.includes(statementId(q))).map((q) => [weightKey(q.sql), { ms: q.sql === "SELECT 0" ? 120000 : 200, name: q.name }])),
-} })) as LegReport[] as [LegReport, LegReport];
+} }));
+const timed = (): [LegReport, LegReport] => timedOf(2) as [LegReport, LegReport];
 
 test("--weights lists each text above the threshold by the key the split reads, the stages' total, and the mean of the rest", () => {
   const got = weightsFromLegs(timed(), 2, "123", 1000);
@@ -179,7 +181,10 @@ test("--weights refuses a report from before the timing, naming the leg and the 
   const root = path.join(tmp, "repo"), dir = path.join(tmp, "download");
   fs.mkdirSync(path.dirname(path.join(root, WEIGHTS_FILE)), { recursive: true });
   fs.writeFileSync(path.join(root, WEIGHTS_FILE), "was\n");
-  for (const r of [a, old]) { fs.mkdirSync(path.join(dir, `ran-oracle-${r.leg}`), { recursive: true }); fs.writeFileSync(path.join(dir, `ran-oracle-${r.leg}`, reportName(r.leg)), JSON.stringify(r)); }
+  // writeWeights reads SHARDS.oracle legs, as CI runs it: leg 2 of those from before the timing
+  const ran = timedOf(SHARDS.oracle);
+  const { times: _t2, ...oldLeg } = ran[1]!;
+  for (const r of ran.map((x) => x.leg === 2 ? oldLeg : x)) { fs.mkdirSync(path.join(dir, `ran-oracle-${r.leg}`), { recursive: true }); fs.writeFileSync(path.join(dir, `ran-oracle-${r.leg}`, reportName(r.leg)), JSON.stringify(r)); }
   const refused = writeWeights(dir, root, "4242", 1000);
   assert.equal(refused.code, 1);
   assert.match(refused.err.join("\n"), /leg\(s\) 2 of 4242 has no times[\s\S]*nothing written/);
@@ -188,7 +193,7 @@ test("--weights refuses a report from before the timing, naming the leg and the 
   assert.deepEqual(foldProblems([a, old], 2, fixture, listed), []);
   const [c, d] = legsOfTheRepo();
   assert.ok(!("problems" in filesFromLegs([c, d], 2, fs.readFileSync(path.join(ROOT, VERIFIED_FILE), "utf8"))), "legs with no times still write verified.ts and the fixture");
-  fs.writeFileSync(path.join(dir, "ran-oracle-2", reportName(2)), JSON.stringify(b));
+  fs.writeFileSync(path.join(dir, "ran-oracle-2", reportName(2)), JSON.stringify(ran[1]));
   const done = writeWeights(dir, root, "4242", 1000);
   assert.equal(done.code, 0, done.err.join("\n"));
   assert.equal(fs.readFileSync(path.join(root, WEIGHTS_FILE), "utf8"), weightsText({ from: "4242", above: 1000, stages: 50000, default: 200, statements: { [weightKey("SELECT 0")]: { ms: 120000, name: "statement 0" } } }));
@@ -345,27 +350,29 @@ test("a failure of the allowlist or the fixture names the command that writes th
 
 /** Two legs whose sums are the committed fixture and the committed allowlist, every count split between them (the
  *  fixture's 3669 statements as the whole, partitioned by `partition` as CI's are) */
-function legsOfTheRepo(): [LegReport, LegReport] {
+function legsOfTheRepo(): [LegReport, LegReport] { return repoLegs(2) as [LegReport, LegReport]; }
+/** `of` legs of the repo as legsOfTheRepo's two are: leg 1 takes the remainder of each count, the gaps it has whole */
+function repoLegs(of: number): LegReport[] {
   type Fixture = Tallies & { gaps: { copyPhase: GapTally; everyAsk: GapTally & { asked: number } }; measured: Measured };
   const was = JSON.parse(fs.readFileSync(path.join(ROOT, FIXTURE_FILE), "utf8")) as Fixture;
   const many = Array.from({ length: was.statements }, (_, i) => ({ group: "g", name: `s${i}`, sql: `SELECT ${i}` }));
   const all = many.map((q) => ({ id: statementId(q), name: q.name }));
-  const half = (n: number, leg: number): number => leg === 1 ? Math.ceil(n / 2) : Math.floor(n / 2);
+  const half = (n: number, leg: number): number => Math.floor(n / of) + (leg - 1 < n % of ? 1 : 0);
   const halves = <T extends Record<string, number>>(o: T, leg: number): T => Object.fromEntries(Object.entries(o).map(([k, n]) => [k, half(n, leg)])) as T;
-  // leg 2 lists the gaps in the other order, and leaves out every other one (leg 1 has it whole): the sums are by id
+  // every leg but 1 lists the gaps in the other order, and leaves out every other one (leg 1 has it whole): the sums are by id
   const split = (counts: GapTally["refused"], leg: number): GapTally["refused"] => Object.fromEntries((leg === 1 ? Object.entries(counts) : Object.entries(counts).reverse())
     .flatMap(([id, c]) => Object.keys(counts).indexOf(id) % 2 === 1 ? (leg === 1 ? [[id, c!]] : []) : [[id, halves(c!, leg)]]));
   const tally = (t: GapTally, leg: number): GapTally => ({ refused: split(t.refused, leg), decided: split(t.decided, leg) });
   const keys = [...VERIFIED.keys()];
-  const legOfText = partition(many, 2, NONE);
-  const leg = (n: 1 | 2): LegReport => {
+  const legOfText = partition(many, of, NONE);
+  const leg = (n: number): LegReport => {
     const mine = many.filter((q) => legOfText.get(q.sql) === n).map(statementId);
     const verified = keys.filter((_, i) => i % 3 === 0 || i % 2 === n - 1).reverse();   // some in both legs, in no order
-    return { leg: n, of: 2, whole: all, asked: Object.fromEntries(PHASES.map((p) => [p, mine])), stages: n === 1 ? Object.fromEntries(STAGES.map((s) => [s, 1])) : {}, shaped: 0,
+    return { leg: n, of, whole: all, asked: Object.fromEntries(PHASES.map((p) => [p, mine])), stages: n === 1 ? Object.fromEntries(STAGES.map((s) => [s, 1])) : {}, shaped: 0,
       tallies: { statements: mine.length, mason: halves(was.mason, n), duckdb: halves(was.duckdb, n) }, copyPhase: tally(was.gaps.copyPhase, n), everyAsk: tally(was.gaps.everyAsk, n),
       decisions: [], verified, names: Object.fromEntries(verified.map((k) => [k, VERIFIED.get(k)!])), asks: half(was.gaps.everyAsk.asked, n), measured: was.measured, differences: 0 };
   };
-  return [leg(1), leg(2)];
+  return Array.from({ length: of }, (_, i) => leg(i + 1));
 }
 
 test("--write gives src/duck/verified.ts and the fixture byte for byte as a whole run's UPDATE_VERIFIED=1 and UPDATE_FIXTURE=1 wrote them", () => {
@@ -414,22 +421,22 @@ const COMMIT_FOUR = `oracle legs: read the diff, then commit the four files: ${F
 
 test("--write over a folder as `gh run download` leaves it: the four files rewritten to what the legs measured, and nothing when a leg is missing", (t) => {
   const { root, dir, seeded, read } = staleRoot(t);
-  const reports = legsOfTheRepo();
+  const reports = repoLegs(SHARDS.oracle);
   for (const r of reports) { fs.mkdirSync(path.join(dir, `ran-oracle-${r.leg}`), { recursive: true }); fs.writeFileSync(path.join(dir, `ran-oracle-${r.leg}`, reportName(r.leg)), JSON.stringify(r)); }
   fs.rmSync(path.join(dir, "ran-oracle-2", reportName(2)));
   const missing = writeFromLegs(dir, root);
   assert.equal(missing.code, 1);
   assert.match(missing.err.join("\n"), /nothing written/);
   for (const f of FOUR) assert.equal(read(f), seeded[f], `${f} as seeded`);
-  fs.writeFileSync(path.join(dir, "ran-oracle-2", reportName(2)), JSON.stringify(reports[1]));
+  fs.writeFileSync(path.join(dir, "ran-oracle-2", reportName(2)), JSON.stringify(reports[1]!));
   const done = writeFromLegs(dir, root);
   assert.equal(done.code, 0, done.err.join("\n"));
   assert.deepEqual(done.out, [...FOUR.map((f) => `oracle legs: wrote ${f}`), COMMIT_FOUR]);
   // README.md's hand-written text is the repo's too, so the whole file is: only the block was replaced
   for (const f of FOUR) assert.equal(read(f), fs.readFileSync(path.join(ROOT, f), "utf8"), f);
   // what else a whole run asserts is said after writing, and fails
-  reports[0].differences = 2;
-  fs.writeFileSync(path.join(dir, "ran-oracle-1", reportName(1)), JSON.stringify(reports[0]));
+  reports[0]!.differences = 2;
+  fs.writeFileSync(path.join(dir, "ran-oracle-1", reportName(1)), JSON.stringify(reports[0]!));
   const differ = writeFromLegs(dir, root);
   assert.equal(differ.code, 1);
   assert.deepEqual(differ.out, FOUR.map((f) => `oracle legs: unchanged ${f}`));
@@ -438,7 +445,7 @@ test("--write over a folder as `gh run download` leaves it: the four files rewri
 
 test("--write renders the docs from the verified list it writes, never the one the process imported", (t) => {
   const { root, dir, read } = staleRoot(t);
-  const reports = legsOfTheRepo();
+  const reports = repoLegs(SHARDS.oracle);
   for (const r of reports) { r.verified = r.verified.filter((k) => k !== "aggregate:2050"); delete r.names["aggregate:2050"]; fs.writeFileSync(path.join(dir, reportName(r.leg)), JSON.stringify(r)); }
   const done = writeFromLegs(dir, root);
   assert.equal(done.code, 0, done.err.join("\n"));
@@ -454,10 +461,10 @@ test("--write renders the docs from the verified list it writes, never the one t
 
 test("--write renders the docs from the tallies it writes, never the repo's fixture", (t) => {
   const { root, dir, read } = staleRoot(t);
-  const reports = legsOfTheRepo();
+  const reports = repoLegs(SHARDS.oracle);
   // 700 statements moved from exact to a wrong value in leg 1: the sums kept, the percentage moved
-  reports[0].tallies.duckdb.exact! -= 700;
-  reports[0].tallies.duckdb.value! += 700;
+  reports[0]!.tallies.duckdb.exact! -= 700;
+  reports[0]!.tallies.duckdb.value! += 700;
   for (const r of reports) fs.writeFileSync(path.join(dir, reportName(r.leg)), JSON.stringify(r));
   const done = writeFromLegs(dir, root);
   assert.equal(done.code, 0, done.err.join("\n"));
@@ -473,7 +480,7 @@ test("--write renders the docs from the tallies it writes, never the repo's fixt
 
 test("--write with a README that has no generated block writes nothing, naming README.md and both lines", (t) => {
   const { root, dir, seeded, read } = staleRoot(t, "# readme\n");
-  for (const r of legsOfTheRepo()) fs.writeFileSync(path.join(dir, reportName(r.leg)), JSON.stringify(r));
+  for (const r of repoLegs(SHARDS.oracle)) fs.writeFileSync(path.join(dir, reportName(r.leg)), JSON.stringify(r));
   const got = writeFromLegs(dir, root);
   assert.equal(got.code, 1);
   assert.deepEqual(got.out, []);
@@ -485,7 +492,7 @@ test("--write with a README that has no generated block writes nothing, naming R
 
 test("--write as a whole run: a stale decision or a dead gap writes the fixture and leaves src/duck/verified.ts and the docs as they were", (t) => {
   const { root, dir, seeded, seed, read } = staleRoot(t);
-  const reports = legsOfTheRepo();
+  const reports = repoLegs(SHARDS.oracle);
   for (const r of reports) r.decisions = [{ sql: "/x/", why: "why", differed: false, decided: true }];
   const run = (): ReturnType<typeof writeFromLegs> => {
     seed();
