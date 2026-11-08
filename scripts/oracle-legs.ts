@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * THE ORACLE IN LEGS (.github/workflows/ci.yml; tests/integration/README.md). CI runs tests/integration/duck-oracle.itest.ts
- * as two jobs, `IT_ORACLE_LEG=1/2` and `2/2` (`scripts/ci-shards.ts run oracle <n>`), each with its own Postgres, its own copy and both rounds of changes, each
+ * as one job a leg, `IT_ORACLE_LEG=1/3` to `3/3` (`scripts/ci-shards.ts run oracle <n>`; SHARDS.oracle legs), each with its own Postgres, its own copy and both rounds of changes, each
  * asking the statements `partition` gives it. A statement that no leg asks is a statement nobody holds to Postgres, and a
  * green run would never say so; and what a whole run asserts at its end (no stale decision, no dead gap, the allowlist
  * exactly what was verified, the tallies the fixture's) is false of a part. So a leg asserts neither, and writes a

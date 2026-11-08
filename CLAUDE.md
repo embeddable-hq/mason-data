@@ -152,7 +152,7 @@ that will wake you; the Stop hook `scripts/hooks/wake-up.ts` warns when that hap
 
 ## Local gates
 
-**CI is the full gate**: it runs the unit tests in shards, the image, the oracle in two legs and the integration tests
+**CI is the full gate**: it runs the unit tests in shards, the image, the oracle in three legs and the integration tests
 on every push. Locally:
 - **While working, the tests nearest the change**: `node --test --test-timeout=<ms> --test-force-exit <file>`, with
   `--test-name-pattern` for one test, and `IT_ORACLE_ONLY=<regex>` for the oracle's statements it touches. Both flags

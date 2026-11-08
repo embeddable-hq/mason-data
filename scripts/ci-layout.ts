@@ -10,7 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 /** The shards of each kind; `.github/workflows/ci.yml`'s matrices say the same (tests/ci-shards.test.ts). */
-export const SHARDS = { unit: 3, rest: 2, oracle: 2 } as const;
+export const SHARDS = { unit: 4, rest: 3, oracle: 3 } as const;
 
 /** The report an oracle leg writes */
 export const reportName = (leg: number): string => `duck-oracle-leg-${leg}.json`;
