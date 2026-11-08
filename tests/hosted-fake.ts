@@ -154,6 +154,49 @@ export function bodyShown(text: string, token: string, known: ReadonlyArray<stri
 
 /** Every secret any run may have seen, and every answer: the last test holds them apart. */
 export const SECRETS: string[] = [];
+/** Every body a fake service of these tests served, in order: what `inputsOf` reads of what a run was served. */
+export const SERVED: string[] = [];
+
+/** The text of every file under `dir`, followed but for a folder's link; false when one could not be read. */
+function readTree(dir: string, out: string[]): boolean {
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+  catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return true; return false; }
+  let ok = true;
+  for (const d of entries) {
+    const p = path.join(dir, d.name);
+    if (d.isDirectory()) { ok = readTree(p, out) && ok; continue; }
+    // a file a run removed while it was read was read before the run, or after it: gone is not unreadable
+    try { if (!fs.statSync(p).isDirectory()) out.push(fs.readFileSync(p, "utf8")); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") ok = false; }
+  }
+  return ok;
+}
+
+/**
+ * THE SECRETS ONE RUN COULD HAVE SEEN (issue 732), to hold its output to `bodyShown` with: a random token another run
+ * made shares a quarter of its body with a command's own words, or a list's random names, now and then, so a run is held
+ * to the tokens it was given, never to every token its file made. Given is: in its argv, its environment or its stdin;
+ * in a file under its folder, its home or its XDG_CONFIG_HOME, before it ran or after; or in a body a fake served while
+ * it ran. A token is found there by 11 of its body's characters in a row, in any case, `%XX` escapes read
+ * (`showsRun`, which chance meets once in 36^11). A file it could not read, it cannot tell: every secret is held.
+ * Call it before the run; `seen` after it.
+ */
+export function inputsOf(dirs: ReadonlyArray<string | undefined>, argv: readonly string[], env: Record<string, string>, stdin?: string): { seen: (secrets: readonly string[]) => string[] } {
+  const where = [...new Set([...dirs, env.HOME, env.XDG_CONFIG_HOME].filter((d): d is string => !!d))];
+  const given = [...argv, ...Object.values(env), stdin ?? ""];
+  let ok = where.every((d) => readTree(d, given));
+  const from = SERVED.length;
+  return {
+    seen: (secrets) => {
+      const all = [...given, ...SERVED.slice(from)];
+      ok = where.every((d) => readTree(d, all)) && ok;
+      if (!ok) return [...secrets];
+      const text = all.join("\n").replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16)));
+      return secrets.filter((s) => showsRun(text, s));
+    },
+  };
+}
 export const ANSWERS: Answer[] = [];
 const made: string[] = [];
 after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true }); });
@@ -197,8 +240,10 @@ export async function fakeService(script: Script): Promise<{ url: string; reques
         : script.v1 ? await script.v1(r)
         : { status: 404, body: { error: { code: "not_found", message: "no such endpoint" }, next: [] } };
       if (reply === "drop") { req.socket.destroy(); return; }
+      const sent = reply.raw ?? (reply.json ?? (reply.body === undefined ? "" : JSON.stringify(reply.body))).replaceAll(BASE, `http://127.0.0.1:${port}`);
+      SERVED.push(JSON.stringify(reply.headers ?? {}), sent);
       res.writeHead(reply.status, { "content-type": reply.raw === undefined ? "application/json" : "text/html", ...reply.headers });
-      res.end(reply.raw ?? (reply.json ?? (reply.body === undefined ? "" : JSON.stringify(reply.body))).replaceAll(BASE, `http://127.0.0.1:${port}`));
+      res.end(sent);
     });
   });
   let port = 0;
@@ -323,6 +368,7 @@ function terminalEnv(width: number, stdin = false): Record<string, string> {
  */
 export async function mason(h: string, argv: string[], env: Record<string, string>, o: { timeoutMs?: number; terminal?: number; lines?: Lines; stdin?: string; prompt?: string } = {}): Promise<Answer> {
   // a `prompt` is a person typing `stdin` at the terminal: its stdin says it is the terminal too
+  const given = inputsOf([h], argv, env, o.stdin);
   const a = await runMason(h, argv, o.terminal ? { ...env, ...terminalEnv(o.terminal, o.prompt !== undefined) } : env, o.timeoutMs ?? 60_000, undefined, o.stdin);
   ANSWERS.push(a);
   // what a person sees at a terminal they type at: the terminal echoes the line typed after the run's `prompt`
@@ -354,6 +400,9 @@ export async function mason(h: string, argv: string[], env: Record<string, strin
   for (const s of SECRETS) {
     assert.ok(!a.stdout.includes(s) && !a.stderr.includes(s), `${line} printed a secret:\n${a.stdout}\n${a.stderr}`);
     assert.ok(!a.stdout.includes(s.slice(-43)) && !a.stderr.includes(s.slice(-43)), `${line} printed a secret's body`);
+  }
+  // a quarter in some form, of a token this run was given (`inputsOf`): chance meets one of hundreds now and then
+  for (const s of given.seen(SECRETS)) {
     assert.ok(!bodyShown(`${a.stdout}\n${a.stderr}`, s, [h, env.HOME, env.MASON_CLOUD_URL]), `${line} printed more than a quarter of a secret's body, in some form:\n${a.stdout}\n${a.stderr}`);
   }
   return a;
