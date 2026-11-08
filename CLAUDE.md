@@ -120,9 +120,10 @@ and releases. In short:
    paths fall under (`.claude/rules/`).
 4. **A fresh reviewer** (another agent, never the implementer, not given its report) reads the diff and the issue and
    RUNS what changed, at the head and at main. It is on Opus at medium effort, and at high effort when the diff touches
-   `src/duck/`, `src/api/` or `src/cdc/`, where a wrong answer is Mason's worst failure. For such a diff it runs the
-   statement shapes the change touches, and their variants (each in a subquery, a CTE, a join, a UNION arm, with GROUP
-   BY and ORDER BY, over NULLs and every type the column can hold, as a tool might send it; `.claude/rules/duck-rewrite.md`
+   `src/duck/`, `src/api/` or `src/cdc/`, where a wrong answer is Mason's worst failure, or what decides who reaches the
+   run or its data (`src/cli/security.ts`, `src/cli/run-server.ts`, `src/cli/ui-*.ts`, `src/duck/users.ts`). For an
+   engine diff it runs the statement shapes the change touches, and their variants (each in a subquery, a CTE, a join,
+   a UNION arm, with GROUP BY and ORDER BY, over NULLs and every type the column can hold, as a tool might send it; `.claude/rules/duck-rewrite.md`
    names the shapes a rewrite must answer), through `scripts/duck-repro.ts` against a real Postgres at the head and
    at main; a statement main answered that the head no longer answers the same is a regression. It also runs the
    `## What review probes` of every rules file the diff's paths fall under. **Only these block**: a wrong
