@@ -126,7 +126,7 @@ Everything goes in `/mnt/mason/deploy`, so `.env` is on the Volume too. **`mason
 container runs as `node`.
 
 ```bash
-TAG=0.10.0    # the release you run
+TAG=0.11.0    # the release you run
 curl -fsSL https://raw.githubusercontent.com/embeddable-hq/mason-data/v$TAG/deploy/mason-data/compose.yml \
   | ssh root@$IP 'umask 077; cd /mnt/mason/deploy; cat > compose.yml; mkdir -p mason; chown 1000:1000 mason; chmod 755 mason
     { printf "MASON_API_KEY=%s\n" "$(openssl rand -hex 24)"; printf "MASON_PG_SELF_SIGNED_TLS=1\nMASON_TAG='$TAG'\n"; } > .env'
