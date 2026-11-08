@@ -160,7 +160,9 @@ export const DEPLOY: CommandSpec & { needs: "project" } = {
   Before it sends, it asks the replica's Mason version: a project whose mason.yml pin the replica would not run
   (neither the version it runs nor a newer one it has installed) is refused, naming both, with the ways out
   (write the project for the replica's Mason, or mason replica upgrade). A service that does not say the
-  version, or whose answer cannot be read, leaves the check to the replica, which refuses such a project itself.
+  version, or whose answer cannot be read, leaves the check to the replica, which refuses such a project itself;
+  an answer that carries the login's token, or a token's shape, anywhere (its words included) is refused, and
+  nothing is sent.
 
   Exit status: 0 the replica runs it (or a dry run printed); 1 refused here or by the service, refused by Mason on
   the replica (its words printed as they came, the code the CLI's own), the deploy failed, or the service answered
@@ -408,6 +410,23 @@ function replicaStateOf<K extends string>(json: unknown, states: Record<K, strin
 }
 /** A wait, as a person reads it: whole seconds, then minutes and seconds. */
 const waited = (ms: number): string => { const n = Math.floor(ms / 1000); return n < 60 ? `${n} s` : `${Math.floor(n / 60)} min ${n % 60} s`; };
+/**
+ * WHETHER NO STRING OF AN ANSWER, ITS WORDS INCLUDED, CARRIES THE TOKEN OR ITS SHAPE: each key and value read raw, as the
+ * masks read the service's words (a stringified answer escapes control characters, whose letters would break the run
+ * the test reads). Password shapes are not tested here: free text holds ordinary words. Called once `carriesNoSecret`
+ * has held the answer to its depth.
+ */
+function wordsCarryNoSecret(json: unknown, secrets: readonly string[]): boolean {
+  const stack: unknown[] = [json];
+  while (stack.length) {
+    const v = stack.pop();
+    if (typeof v === "string") { if (carriesSecret(v, secrets, { passwords: false })) return false; continue; }
+    if (typeof v !== "object" || v === null) continue;
+    if (Array.isArray(v)) { stack.push(...v); continue; }
+    for (const [k, x] of Object.entries(v)) { if (carriesSecret(k, secrets, { passwords: false })) return false; stack.push(x); }
+  }
+  return true;
+}
 const stateLine = (s: DeployState): string => `${STATUS_WORDS[s.status]}${s.phase ? ` (${PHASES[s.phase]})` : ""}`;
 
 export async function deploy(argv: string[]): Promise<number> {
@@ -487,7 +506,7 @@ export async function deploy(argv: string[]): Promise<number> {
     const asked = await call(service, "GET", `/v1/replicas/${r.org}/${r.name}`, { token });
     if (!isFailure(asked) && asked.status === 200) {
       const j = asked.json;
-      if (j !== undefined && (!carriesNoSecret(wordless(j), secrets) || carriesSecret(JSON.stringify(j), secrets, { passwords: false }))) {
+      if (j !== undefined && (!carriesNoSecret(wordless(j), secrets) || !wordsCarryNoSecret(j, secrets))) {
         return fail(unexpected(service, asked, "the replica's Mason version was asked for"), { json });
       }
       const mason = replicaAnswer(service, asked, r, secrets)?.replica.mason ?? null;

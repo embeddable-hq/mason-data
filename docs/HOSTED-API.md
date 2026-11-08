@@ -275,7 +275,7 @@ service asks for (`the service asks for another try in 30 s`); the CLI does not 
 
 **A `pending` change a CLI does not know is held back.** A CLI refuses a replica's answer whose `pending[].change` is
 outside the set it knows, so a service sends a change only to a CLI that knows it: it reads the CLI's version from
-`User-Agent: mason-cli/<version>` (`dev`, a checkout's, counts as current) and leaves out of `pending` an entry whose
+`User-Agent: mason-cli/<version>` (`dev`, a checkout's, and `main-<sha>`, the image built from main, are no release and count as current) and leaves out of `pending` an entry whose
 change that version does not know, so an older CLI does not see it. `"upgrade"` is sent only to `mason-cli` 0.12.0 or
 later.
 

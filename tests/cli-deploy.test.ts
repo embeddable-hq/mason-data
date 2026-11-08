@@ -1153,6 +1153,21 @@ test("mason deploy asks the replica's Mason before it sends: a pin that fits nei
     assert.match((JSON.parse(a.stdout) as { error: { message: string } }).error.message, /answered GET \/v1\/replicas\/acme\/shop with 200, where the replica's Mason version was asked for$/, where);
     assert.deepEqual(requests, [], `${where}: nothing sent`);
   }
+  // the token's body split by a control character or an ANSI code, every 4 or 8 characters, in the service's words: read
+  // raw, as the masks read them (a stringified answer escapes them, and its letters break the run), refused whole —
+  // whether the answer is one this CLI cannot read or one it reads and whose Mason fits the pin
+  for (const sep of ["\n", "\t", "\u0000", "\u001b[31m"]) for (const size of [4, 8]) for (const readable of [false, true]) {
+    const token = newToken("ci"); SECRETS.push(token);
+    const body = token.replace(/^masondata_ci_/, "");
+    const words = `it said ${(body.match(new RegExp(`.{1,${size}}`, "g")) ?? []).join(sep)}`;
+    const what = `${JSON.stringify(sep)} every ${size}, ${readable ? "a readable 200" : "an unreadable 200"}`;
+    const replica = ok200(readable ? { pending: [{ change: "upgrade", state: "failed", attempts: 1, failure: words }], mason: { version: "0.7.0", latest: "0.7.0" } }
+      : { pending: [{ change: "resize", state: "failed", attempts: 1, failure: words }] });
+    const { a, requests } = await deployWith({ replica }, root, ["--replica", "acme/shop", "--json"], { MASON_TOKEN: token });
+    assert.equal(a.code, 1, `${what}: ${a.stdout}`);
+    assert.match((JSON.parse(a.stdout) as { error: { message: string } }).error.message, /where the replica's Mason version was asked for$/, what);
+    assert.deepEqual(requests, [], `${what}: nothing sent`);
+  }
   // a project with no mason.yml is unpinned: nothing asked, as the image runs it
   const { root: bare } = project({ "mason.yml": null });
   const unpinned = await deployWith({ replica: replicaSaying({ version: "0.6.5", latest: "0.6.5" }) }, bare, ["--replica", "acme/shop", "--json"]);
