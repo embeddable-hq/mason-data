@@ -64,6 +64,10 @@ mason ui --ssh deploy@mason.example.com --mason "docker exec -i mason-mason-1 ma
 with real SSH and a container on one machine, not yet with this compose file on a real server:
 [`docs/WEB-UI.md`](../../docs/WEB-UI.md#on-a-server) says what has been.
 
+A process on this machine that lists the tables and adds or removes them for a project (a supervisor, a service that
+hosts Mason) asks the run over `MASON_UI_SOCKET` with the token from `MASON_UI_RUN_FILE`, as `mason add` does:
+[`docs/WEB-UI.md`](../../docs/WEB-UI.md#an-operators-table-edits) has the routes, their answers and their refusals.
+
 ## Metrics
 
 `GET /metrics` on the health port (4140, beside `/healthz`) is Mason's numbers in Prometheus's text format: tables by

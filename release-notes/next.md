@@ -7,6 +7,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   its own next step: `detail` is now the facts alone (the sentence it ended with moved to a new key, `why`; the SECURITY
   DEFINER listing's "We recommend reviewing each…" too), and beside `fix`, unchanged, `fixSql` is the SQL to run on the
   primary and `fixThen` the steps after it. On a terminal the lines read as before but for the new sentence.
+- **A process beside `mason serve` can rely on the table list and on adding and removing tables.** `GET /api/state`
+  (its `tables`), `GET /api/tables/<table>/columns`, `POST /api/pick` and `POST /api/remove`, reached over
+  `MASON_UI_SOCKET` with the token from `MASON_UI_RUN_FILE`, are now a documented contract: their bodies, answers and
+  refusals keep their shape within a release line (docs/WEB-UI.md "An operator's table edits"). `MASON_UI_READ_ONLY=1`
+  refuses the page's edits, never a request with the run's token. Nothing about them changed.
 
 ## What was wrong and is now right
 

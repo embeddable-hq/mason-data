@@ -353,6 +353,99 @@ that holds.
 Kubernetes has no SSH, and Fargate, Cloud Run, Azure Container Apps, Fly and Railway have tooling of their own: none is
 covered.
 
+## An operator's table edits
+
+An *operator* is a process on the same machine as `mason serve` (a supervisor, or a service that hosts Mason and lets a
+project's owner pick tables in its own app). It lists the database's tables and adds or removes them by asking the run,
+the way `mason add` and `mason remove` do while Mason is up. So the edit goes through the same catalog checks, the
+same sources-file grammar and the same refusals. Never write the sources file by hand beside a run, and never through
+the page. Within a release line, these routes keep the shapes below. `tests/cli-operator-tables.test.ts` pins each
+status, key and refusal, so changing one is a deliberate contract change, said in the release notes.
+
+**How it reaches the run.** Over `MASON_UI_SOCKET` (or the loopback port), with the port and the token from the file
+`MASON_UI_RUN_FILE` names (`{ "port", "token" }`). Every request carries:
+
+- `Host: 127.0.0.1:<port>`, with the run file's port, on the socket as well;
+- `Authorization: Bearer <token>`, the run's token: it grants the commands' writes, so treat it as `.mason/config.json`
+  is treated;
+- `Content-Type: application/json` and a JSON body of at most 64 KiB, on a POST. No `Origin` is needed.
+
+The guard answers before any route, in plain text, not JSON: `421` for another Host, `403` for no token or another
+token (`the Authorization header does not carry this run's token`).
+
+**`MASON_UI_READ_ONLY=1` refuses the page, not the operator.** A request with no `Authorization` (the page's, by its
+cookie) that is not a GET or a HEAD is refused `403` with "the web page is read-only here". A request with the run's
+token is served, read-only or not. `MASON_PROJECT_READONLY=1` refuses the operator's edits too (below).
+
+**Every refusal** is `{ "error": <message>, "failure": { "code", "message", "why"?, "fix"?, "next": [{ "command",
+"what"? }] } }`, the CLI's failure shape, worded by the code `mason add` and `mason remove` call. `why` and `fix` are
+there when the refusal has them. Beside the read-only page's `403`, the status follows the code: `400` `usage`, `404` `not_found`, `409` `refused`,
+`500` `failed`. A `500` is the run's own failure (the sources file could not be written, say), with `mason logs` as
+its next step. A body that is not JSON is `400` (`the body is not JSON: …`).
+
+### The table list: `GET /api/state`
+
+The run's state, lean: no table's columns. `?columns=1` adds them, which is most of its bytes. The parts an operator
+reads:
+
+- `tables`: every table of the database the source's user can read, added or not. Each has `table` (`schema.table`),
+  `rows` (the catalog's estimate, or null), `bytes`, `key` (its primary key's columns, `[]` for none), `comment`,
+  `added`, `reason` (why `mason add` without a key cannot add it: no primary key, with the `--key` to name; null for a
+  table that can be added and for one added), `addedColumns` and `copyKey` (what its entry syncs, and the key it names;
+  null when not added), `copy` (its first sync: `{ phase, rowsCopied, updatedAt }`, or null) and `error`. An added
+  table also has `sync`: `state` (`waiting`, `syncing`, `synced`, `behind`, `failed`), `syncedAt`, `syncSeconds`,
+  `syncedBy`, `ageSeconds`, `asOf`, `promisedSeconds`, `behindBySeconds`, `behindWhy`. Once the sync holds it there are
+  also `kept` (how it is kept current now: `by` is `poll`, with its `sync`, or `replication` or `recopy`) and `duck`.
+- `source.sync`: the file's own `sync:` (`default`, and `written`), which every entry follows unless its own says
+  otherwise.
+- `sourcesReadOnly`: why the page offers no Add or Remove, or null. Either the project is deployed read-only, which
+  refuses an edit `409`, or the server cannot write the sources file, which fails an edit `500` `failed`.
+- `pageReadOnly`: the page's read-only reason, or null. It does not apply to the operator.
+
+**One table's columns: `GET /api/tables/<table>/columns`**, with `<table>` URL-encoded (`public.orders`). The answer
+has `table` and `columns`, each column with `name`, `type`, `nullable`, `comment` and `references` (`{ table, column }`
+for a foreign key, else null). A table the catalog lacks is `404` `not_found`. A name that is not properly URL-encoded is
+`400` `usage`.
+
+### Add a table: `POST /api/pick`
+
+`{ "table": "public.orders", "picked": true, "columns"?: [...], "key"?: [...], "sync"?: "poll 5m", "keep"?: true }`:
+
+- `columns`: the columns to sync (the key is always added), or `["*"]` for every one (the default);
+- `key`: for a table with no primary key, the NOT NULL columns of a unique index;
+- `sync`: `off`, `poll <interval>` or `replication`, in the sources file's grammar;
+- `keep: true` changes only the `sync:` of a table already added. A table added with a `key` names it again.
+
+`"picked": false` removes the table, as `POST /api/remove` does with a single name.
+
+The answer is `200` with `table`, `file` (the sources file, absolute), `entry` (its key in the file), `columns`, `exclude`,
+`key`, `addedKey` (key columns added to `columns`), `skippedSecrets` (columns that look secret, which every-column
+left out), `already` (the file said so already, and nothing was written), `sync` (`{ value, from }`, where `from` is
+`entry`, `file` or `default`), `bigOff` (a big table under a polling default, written `sync: off`), `notReplicated`
+(why a table under a replication default is polled, or null), `pollCost` (what a frequent poll of a big table costs the
+database, or null), and `state`, the lean state after the edit. The table's first sync starts at once.
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `usage` | the body lacks `table` or `picked` (`send { table, picked, columns?, key?, sync?, keep? }`); `sync`, `columns` or `key` malformed; a column the table lacks; a `key` for a table with a primary key; a `key` that does not tell its rows apart; `sync: replication` for a table that cannot be replicated |
+| 404 | `not_found` | `<table> is not a table of <database> that this user can read` |
+| 409 | `refused` | no primary key and no `key` (`<table> cannot be added: no primary key: …`); the project's files are read-only (`MASON_PROJECT_READONLY=1`, with `why`, `fix`, `next`); another entry of the file fails against the database (`… fix it first`); the file's `url:` now names another database; a switch to replication the database cannot serve (the file is put back) |
+
+### Remove tables: `POST /api/remove`
+
+`{ "tables": ["orders", "billing.invoices"] }`, each as the file names it or as `schema.table`. The answer is `200`
+with `removed` (the tables whose entries were cut, as `schema.table`), `file` (the sources file, absolute) and
+`state`, the lean state after the edit. The tables' synced data is dropped at once.
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `usage` | `tables` is not a non-empty list of strings (`send { tables: [name, …] }`); a name that is not a table's name |
+| 404 | `not_found` | a name the file does not have, with the closest one it has |
+| 409 | `refused` | the project's files are read-only; an entry that stays fails against the database; the file's `url:` now names another database |
+
+Nothing an operator asks for is answered or logged with the token. The run logs `added <table> to <file>` and
+`removed <table> from <file>`.
+
 ## Building it out
 
 The page is plain HTML, CSS and JavaScript modules under `src/web/` — a shell (`app.js`), what the pages share
