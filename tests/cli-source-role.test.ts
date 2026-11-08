@@ -24,6 +24,9 @@ const facts = (o: Partial<RoleFacts> = {}): RoleFacts => ({
   definers: [], foreignTables: [], mappedServers: [], adminOf: [], createRole: false, serverRoles: [],
   missing: [], taken: [], rdsReplication: false, ...o,
 });
+/** The sentence every role warning ends with on a terminal, its `why` in --json. */
+const WHY = "Mason never writes, but a role that can only read is safer";
+const DEFINER_WHY = "We recommend reviewing each: whether it writes a synced table, and who may call it";
 const ask = (o: Partial<RoleAsk> = {}): RoleAsk => ({
   tables: [{ schema: "public", table: "orders" }, { schema: "billing", table: "Invoices" }], replicated: [], publication: null,
   urlVariable: "DATABASE_URL", urlFrom: "DATABASE_URL in .env", file: "mason/sources/shop.yml", url: "postgres://app:secret@db.internal:5432/shop?sslmode=require", ...o,
@@ -45,11 +48,11 @@ test("a superuser, itself or by a membership it may SET ROLE to: ONE warning, ro
   const { roleChecks } = await roleModule();
   const self = roleChecks(facts({ roles: [{ name: "app", self: true, superuser: true, bypassrls: true }], relations: [rel("public.orders", { owned: true })] }), ask());
   assert.deepEqual(self.map((c) => [c.code, c.ok, c.warn]), [["role_superuser", true, true]]);
-  assert.equal(self[0]!.detail, "app is a superuser. " +
-    "Mason only reads, but, for security reasons, we recommend using a role that only reads");
+  assert.equal(self[0]!.detail, "app is a superuser", "the facts alone");
+  assert.equal(self[0]!.why, WHY);
   const member = roleChecks(facts({ roles: [{ name: "app", self: true, superuser: false, bypassrls: false }, { name: "admins", self: false, superuser: true, bypassrls: false }] }), ask());
   assert.deepEqual(member.map((c) => c.code), ["role_superuser"]);
-  assert.match(member[0]!.detail, /^app is a member of admins, a superuser\. Mason only reads/);
+  assert.equal(member[0]!.detail, "app is a member of admins, a superuser");
 });
 
 test("BYPASSRLS, an owner, a write privilege and CREATE: a warning each, with its code and its route (a member role, PUBLIC, a partition)", async () => {
@@ -71,7 +74,7 @@ test("BYPASSRLS, an owner, a write privilege and CREATE: a warning each, with it
     assert.deepEqual([c.name, c.ok, c.warn], ["role", true, true], "a warning, never a failure");
     assert.ok(c.fix?.includes("CREATE ROLE mason_reader LOGIN PASSWORD '<a new password>';"), "each gives the way out");
   }
-  const detail = (code: string) => checks.find((c) => c.code === code)!.detail.split(". Mason only reads")[0];
+  const detail = (code: string) => checks.find((c) => c.code === code)!.detail;
   assert.equal(detail("role_bypassrls"), "app has BYPASSRLS (through writers, which it is a member of)");
   assert.equal(detail("role_owns_table"), "app owns public.orders and billing.Invoices (through writers, which it is a member of)");
   // billing.Invoices is owned: its owner's line says it, the privileges an owner holds are not said again
@@ -97,8 +100,8 @@ test("a write through another relation is named by its route: a partition, an IN
     rel("public.orders_log", { kind: "rule", entry: "public.orders", privileges: [{ role: "PUBLIC", privileges: ["INSERT"] }] })] });
   const checks = roleChecks(f, ask());
   assert.deepEqual(checks.map((c) => c.code), ["role_owns_table", "role_writes_table"]);
-  assert.match(checks[0]!.detail, /^app owns public\.orders_2026 \(a child of public\.orders, by INHERITS: its rows are public\.orders's\)\. Mason only reads/);
-  assert.match(checks[1]!.detail, /^app may UPDATE on public\.orders_v \(a view that writes public\.orders\); INSERT on public\.orders_log \(its rules write public\.orders\) \(granted to PUBLIC, which every role is\)\. /);
+  assert.equal(checks[0]!.detail, "app owns public.orders_2026 (a child of public.orders, by INHERITS: its rows are public.orders's)");
+  assert.equal(checks[1]!.detail, "app may UPDATE on public.orders_v (a view that writes public.orders); INSERT on public.orders_log (its rules write public.orders) (granted to PUBLIC, which every role is)");
   const fix = readOnlyFix(f, ask());
   assert.match(fix, /^GRANT SELECT ON public\.orders, billing\."Invoices" TO mason_reader;$/m, "SELECT on the synced tables, never on a route");
   assert.match(fix, /^-- PUBLIC holds INSERT on public\.orders_log, so the new role does too/m, "PUBLIC's write through a route is said too");
@@ -111,7 +114,7 @@ test("THE CLASS: an INHERITS parent and a table a foreign key acts on are routes
     rel("public.accounts", { kind: "referenced", entry: "billing.Invoices", privileges: [{ role: "app", privileges: ["DELETE"] }] })] });
   const [writes] = roleChecks(f, ask());
   assert.equal(writes!.code, "role_writes_table");
-  assert.equal(writes!.detail.split(". Mason only reads")[0], "app may UPDATE, TRUNCATE on public.base (an INHERITS parent of public.orders: an UPDATE, DELETE or TRUNCATE of it reaches public.orders's rows); " +
+  assert.equal(writes!.detail, "app may UPDATE, TRUNCATE on public.base (an INHERITS parent of public.orders: an UPDATE, DELETE or TRUNCATE of it reaches public.orders's rows); " +
     "DELETE on public.accounts (a foreign key's ON DELETE or ON UPDATE action carries its changes to billing.Invoices, as its owner)");
 });
 
@@ -127,19 +130,19 @@ test("THE CLASS: SECURITY DEFINER code it reaches whose owner may write is LISTE
     "public.copy_in() runs as writers, which may write the synced tables: a trigger on public.inbox, which it may write, calls it; " +
     "public.on_ddl() runs as admin, a superuser: an event trigger calls it on any DDL, even one refused, never asking EXECUTE; " +
     "public.sum_in(integer, integer) runs as admin, a superuser: Postgres calls it for an aggregate, a type, an operator or the like, never asking EXECUTE; " +
-    "public.mine() runs as admin, a superuser: it may call it. " +
-    "We recommend reviewing each: whether it writes a synced table, and who may call it";
+    "public.mine() runs as admin, a superuser: it may call it";
   // alone: never "only reads", and no way out, since no statement for this role alone decides it
   const alone = roleChecks(facts({ definers }), ask());
   assert.deepEqual(alone.map((c) => [c.code, c.ok, c.warn, c.fix]), [["role_may_run_definer_code", true, true, undefined]]);
   assert.equal(alone[0]!.detail, "app may not write the synced tables itself: not a superuser, no BYPASSRLS, no ADMIN OPTION, no server roles, no foreign server, " +
     "and it neither owns nor may write to the 2 synced table(s) — nor to their partitions, inheritance children or parents, the tables their foreign keys act on, " +
     `or the views and rules that write them — nor CREATE in their schemas. But it ${LISTING}`);
+  assert.equal(alone[0]!.why, DEFINER_WHY, "its own recommendation, apart from the listing");
   // beside the other warnings: listed after them
   const f = facts({ definers, foreignTables: ["public.remote_orders"], mappedServers: ["loopback"], adminOf: ["writers"], createRole: true, serverRoles: ["pg_execute_server_program"] });
   const checks = roleChecks(f, ask());
   assert.deepEqual(checks.map((c) => c.code), ["role_reaches_foreign_server", "role_may_become_another", "role_may_run_definer_code"]);
-  const said = (code: string) => checks.find((c) => c.code === code)!.detail.split(". Mason only reads")[0];
+  const said = (code: string) => checks.find((c) => c.code === code)!.detail;
   assert.equal(said("role_may_run_definer_code"), `app ${LISTING}`);
   assert.equal(said("role_reaches_foreign_server"), "app may write the foreign table(s) public.remote_orders, and has a user mapping (its own or PUBLIC's) on loopback");
   assert.equal(said("role_may_become_another"), "app has ADMIN OPTION on writers; " +
@@ -151,6 +154,81 @@ test("THE CLASS: SECURITY DEFINER code it reaches whose owner may write is LISTE
   assert.match(fix, /^-- a user mapping FOR PUBLIC on loopback would serve it too/m);
   // a superuser's line stands alone
   assert.deepEqual(roleChecks({ ...f, roles: [{ name: "app", self: true, superuser: true, bypassrls: false }] }, ask()).map((c) => c.code), ["role_superuser"]);
+});
+
+// every kind of role warning at once (a superuser's stands alone, so it is its own facts)
+const everyKind = (): RoleFacts => facts({
+  roles: [{ name: "app", self: true, superuser: false, bypassrls: true }],
+  relations: [rel("public.orders", { owned: true, owner: "app" }), rel("billing.Invoices", { privileges: [{ role: "app", privileges: ["UPDATE"] }] })],
+  schemas: [{ name: "billing", sql: "billing", owner: "admin", owned: false, create: ["app"], publicCreate: false },
+    { name: "public", sql: "public", owner: "admin", owned: false, create: [], publicCreate: false }],
+  foreignTables: ["public.remote_orders"], adminOf: ["writers"],
+  definers: [{ name: "public.bump(integer)", owner: "admin", ownerSuperuser: true, callable: true, publicCallable: false, triggers: [], eventTrigger: false, unchecked: false }],
+});
+
+test("--json: each role warning's parts apart, for a tool: the facts, why, the way out whole, its SQL for the primary and the steps after it", async () => {
+  const { roleChecks, readOnlyFix } = await roleModule();
+  const { DOCTOR } = await doctorModule();
+  const { jsonText } = await import("../src/cli/command.ts");
+  const superuser = facts({ roles: [{ name: "app", self: true, superuser: true, bypassrls: false }] });
+  const checks = [...roleChecks(superuser, ask()), ...roleChecks(everyKind(), ask())];
+  // as mason doctor --json prints them (jsonText refuses a key its spec does not declare)
+  const printed = (JSON.parse(jsonText(DOCTOR, { ready: true, verdict: "Ready", checks }, [])) as { checks: Array<Record<string, unknown>> }).checks;
+  assert.deepEqual(printed.map((c) => c.code), ["role_superuser", "role_bypassrls", "role_owns_table", "role_writes_table", "role_creates_in_schema",
+    "role_reaches_foreign_server", "role_may_become_another", "role_may_run_definer_code"]);
+  assert.deepEqual(printed.map((c) => c.detail), ["app is a superuser", "app has BYPASSRLS", "app owns public.orders", "app may UPDATE on billing.Invoices",
+    "app may CREATE in schema billing", "app may write the foreign table(s) public.remote_orders", "app has ADMIN OPTION on writers",
+    "app may run 1 SECURITY DEFINER function(s) of roles that may write the synced tables — public.bump(integer) runs as admin, a superuser: it may call it"],
+  "the facts alone, no sentence after them");
+  const SQL = ["-- as the database's owner (on the primary):",
+    "CREATE ROLE mason_reader LOGIN PASSWORD '<a new password>';",
+    "GRANT CONNECT ON DATABASE shop TO mason_reader;",
+    "GRANT USAGE ON SCHEMA public, billing TO mason_reader;",
+    'GRANT SELECT ON public.orders, billing."Invoices" TO mason_reader;',
+    "-- and GRANT SELECT ON each view Mason should serve: it serves the views the role it connects as may read"].join("\n");
+  const THEN = "set MASON_DATABASE_URL=postgres://mason_reader:<its password>@db.internal:5432/shop?sslmode=require in .env and write url: ${MASON_DATABASE_URL} in mason/sources/shop.yml; " +
+    "mason doctor checks it again, and a running Mason reads it at its next start (mason stop, then mason start)";
+  for (const [c, f] of [[printed[0]!, superuser], ...printed.slice(1, -1).map((c) => [c, everyKind()] as const)] as const) {
+    assert.equal(c.why, WHY, String(c.code));
+    assert.equal(c.fixSql, SQL, String(c.code));
+    assert.equal(c.fixThen, THEN, String(c.code));
+    assert.equal(c.fix, `${SQL}\nthen: ${THEN}`, "the whole way out, as before, for a tool that reads it");
+    assert.equal(c.fix, readOnlyFix(f, ask()));
+  }
+  // the SECURITY DEFINER listing: its own why, and no way out (no statement for this role alone decides it)
+  const definer = printed.at(-1)!;
+  assert.deepEqual([definer.why, definer.fix, definer.fixSql, definer.fixThen], [DEFINER_WHY, undefined, undefined, undefined]);
+  // a way out with the publication Mason would make: still SQL apart from the steps
+  const streamed = roleChecks(everyKind(), ask({ replicated: ["billing.Invoices"] }))[0]!;
+  assert.match(streamed.fixSql!, /^CREATE PUBLICATION mason_reader FOR TABLE billing\."Invoices" .*;   -- Mason's own needs the tables' owner$/m);
+  assert.doesNotMatch(streamed.fixSql!, /^then:/m);
+  assert.match(streamed.fixThen!, /^set MASON_DATABASE_URL=.*, publication: mason_reader at its top; mason doctor checks it again/);
+  const { DOCTOR_USAGE } = await doctorModule();
+  assert.match(DOCTOR_USAGE, /checks: \[\{ name, ok, detail, why, warn, code, fix, fixSql, fixThen \}\]/);
+  for (const key of ["why (the role's warnings)", "fixSql: its SQL alone, to", "fixThen: the steps after it"]) assert.ok(DOCTOR_USAGE.includes(key), key);
+});
+
+test("on a terminal each role warning reads its facts then why, and the way out once under them, as before", async () => {
+  const { roleChecks } = await roleModule();
+  const { checkLines } = await doctorModule();
+  const { PLAIN } = await import("../src/cli/style.ts");
+  const checks = roleChecks(facts({ roles: [{ name: "app", self: true, superuser: false, bypassrls: true }],
+    definers: [{ name: "public.bump(integer)", owner: "admin", ownerSuperuser: true, callable: true, publicCallable: false, triggers: [], eventTrigger: false, unchecked: false }] }), ask());
+  assert.equal(checkLines([{ name: "node", ok: true, detail: "Node 26.0.0" }, ...checks], PLAIN, false).join("\n"), [
+    "  ok  node  Node 26.0.0",
+    "  !   role  app has BYPASSRLS. Mason never writes, but a role that can only read is safer",
+    "  !   role  app may run 1 SECURITY DEFINER function(s) of roles that may write the synced tables — public.bump(integer) runs as admin, a superuser: it may call it. " +
+      "We recommend reviewing each: whether it writes a synced table, and who may call it",
+    "",
+    "    -- as the database's owner (on the primary):",
+    "    CREATE ROLE mason_reader LOGIN PASSWORD '<a new password>';",
+    "    GRANT CONNECT ON DATABASE shop TO mason_reader;",
+    "    GRANT USAGE ON SCHEMA public, billing TO mason_reader;",
+    '    GRANT SELECT ON public.orders, billing."Invoices" TO mason_reader;',
+    "    -- and GRANT SELECT ON each view Mason should serve: it serves the views the role it connects as may read",
+    "    then: set MASON_DATABASE_URL=postgres://mason_reader:<its password>@db.internal:5432/shop?sslmode=require in .env and write url: ${MASON_DATABASE_URL} in mason/sources/shop.yml; " +
+      "mason doctor checks it again, and a running Mason reads it at its next start (mason stop, then mason start)",
+  ].join("\n"));
 });
 
 test("the way out: a role that may LOGIN and SELECT the synced tables alone, its URL in a variable of Mason's own", async () => {
@@ -222,7 +300,6 @@ test("a warning or a role it could not tell leaves the doctor ready (exit 0); th
   assert.deepEqual(unknown, { name: "role", ok: null, code: "role_unknown", detail: "could not tell whether the user Mason connects as may write to the database: permission denied for table pg_class" });
   assert.equal(verdictOf([unknown], null, null).ready, true);
   for (const code of ROLE_CODES) assert.ok(DOCTOR_USAGE.includes(code), code);
-  assert.match(DOCTOR_USAGE, /checks: \[\{ name, ok, detail, warn, code, fix \}\]/);
   assert.match(DOCTOR_USAGE, /a warning \(!\) and a check that could not tell \(\?\) are said, and leave it 0/);
 });
 
