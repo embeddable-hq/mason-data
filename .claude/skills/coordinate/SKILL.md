@@ -28,13 +28,16 @@ rest). CLAUDE.md "How work is done here" is the rule; this is how to run it.
 2. **The implementer** opens a draft PR that says `Closes #<issue>` at its first push, and marks it ready when done.
    It reports the PR number and its head commit.
 3. **Start a fresh reviewer** (Agent, `model: "opus"`, `effort: "medium"`, or `"high"` when the diff touches
-   `src/duck/`, `src/api/` or `src/cdc/`). Give it the PR number, the issue and the blocking list of CLAUDE.md step 4,
-   never the implementer's report. It runs what changed, at the head and at main (for an engine or listener diff, the
+   `src/duck/`, `src/api/`, `src/cdc/`, or what decides who reaches the run or its data: `src/cli/security.ts`,
+   `src/cli/run-server.ts`, `src/cli/ui-*.ts`, `src/duck/users.ts`). Give it the PR number, the issue and the blocking
+   list of CLAUDE.md step 4, never the implementer's report. It runs what changed, at the head and at main (for an engine or listener diff, the
    touched statement shapes and their variants through `scripts/duck-repro.ts`, and every applicable rules file's
    `## What review probes`: CLAUDE.md step 4), and reports each blocking finding as
    the input, what was expected and what happened, plus a short list of notes.
-4. **A blocking finding goes back** to the same implementer by SendMessage, as the failure, not the fix. The
-   implementer comes back in one push. A fresh reviewer re-checks the fix's own diff, once. If something blocking is
+4. **A blocking finding goes back** to the same implementer by SendMessage, as the failure, not the fix, and you
+   convert the PR to draft (`gh pr ready <n> --undo`; from a cloud session, which reaches no GraphQL,
+   `POST /repos/{o}/{r}/pulls/{n}/ccr/convert_to_draft`). The implementer comes back in one push and marks the PR
+   ready again with the fix. A fresh reviewer re-checks the fix's own diff, once. If something blocking is
    still open after that, ask the owner.
 5. **Merge** once nothing blocking is open, CI is green at the head, and you have read the whole diff, pinned to that
    head: `gh pr merge <n> --squash --delete-branch --match-head-commit <sha>`, or the GitHub tool's merge with
@@ -43,14 +46,16 @@ rest). CLAUDE.md "How work is done here" is the rule; this is how to run it.
 ## Waiting
 
 Agents run in the background and wake you when they finish. For CI, leave one background
-`node scripts/ci-wait.ts <pr> <seconds>`, or subscribe to the PR's activity where the session can. Never end a turn
-while waiting on something with no background job or subscription that will wake you.
+`node scripts/ci-wait.ts <pr> <seconds>`, never piped (its exit code is the verdict), or subscribe to the PR's
+activity where the session can. Never end a turn while waiting on something with no background job or subscription
+that will wake you.
 
 ## Asking the owner
 
 Ask the owner, and keep the other pieces going, for: a cut of an issue's scope; anything the security bar or CLAUDE.md does
 not settle; a release; a change to the process; a blocking finding still open after its re-check. Batch the questions,
-each with your recommendation and what you will do if they do not answer.
+each with your recommendation and what you will do if they do not answer. While a question waits, label its issue
+`needs-owner` (the board moves it to the owner's column), and remove the label once it is answered.
 
 ## Telling the owner
 

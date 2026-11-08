@@ -12,32 +12,50 @@ const ROOT = path.join(path.dirname(url.fileURLToPath(import.meta.url)), "..");
 
 const CI_WAIT_SCRIPT = path.join(ROOT, "scripts", "ci-wait.ts");
 
-type Step = { out: string; rc: number };
-const NO_CHECKS: Step = { out: "no checks reported on the 'issue-300-a-piece' branch", rc: 1 };
-const FAILING: Step = { out: "checks\tfail\t3m\thttps://github.com/embeddable-hq/mason-data/actions/runs/1/job/2", rc: 1 };
-const view = (mergeable: string, mergeStateStatus: string): Step => ({ out: JSON.stringify({ mergeable, mergeStateStatus }), rc: 0 });
+type Step = { out: string; rc: number; hang?: boolean };
+const SHA = "0123456789abcdef0123456789abcdef01234567";
+/** `GET /repos/{o}/{r}/pulls/<n>`'s answer, the fields ci-wait reads. */
+const pull = (mergeable: boolean | null, mergeable_state: string, sha = SHA): Step => ({ out: JSON.stringify({ number: 900, head: { sha }, mergeable, mergeable_state }), rc: 0 });
+type Run = [name: string, status: string, conclusion: string | null, id?: number];
+/** `GET /repos/{o}/{r}/commits/<sha>/check-runs`'s answer. */
+const runs = (...rs: Run[]): Step => ({ out: JSON.stringify({ total_count: rs.length, check_runs: rs.map(([name, status, conclusion, id], i) => ({ id: id ?? 100 + i, name, status, conclusion, html_url: `https://github.com/o/r/actions/runs/1/job/${id ?? 100 + i}` })) }), rc: 0 });
+const REQUIRED_NAMES = ["checks", "image", "integration (oracle)", "integration (rest)"];
+/** Every required check completed with `conclusion`, beside the jobs behind them. */
+const all = (conclusion: string, ...extra: Run[]): Step => runs(["build", "completed", "success"], ...REQUIRED_NAMES.map((n): Run => [n, "completed", conclusion]), ...extra);
+const GREEN = all("success");
 
-/** Runs the command in bash with a stub `gh` first on PATH (each subcommand answering its scripted steps in turn, the
+/** Runs the command in bash with a stub `gh` first on PATH (each REST call answering its scripted steps in turn, the
  * last repeated; a step with `hang` never returns) and no pause between passes; returns its output, exit code, time and
- * the stub's call log, each call with the time it started. */
-type Waited = { out: string; err: string; status: number | null; ms: number; first: string; views: string[]; checks: string[]; starts: number[]; t0: number };
-function runWait(cmd: string, scenario: { view: Array<Step & { hang?: boolean }>; checks: Array<Step & { hang?: boolean }> }, bash = true): Waited {
+ * the stub's call log, each call with the time it started. The stub is a bash script, never a Node one: Node's start
+ * under load pushed a call past the deadline the test holds (issue 405). */
+type Waited = { out: string; err: string; status: number | null; ms: number; first: string; pulls: string[]; checks: string[]; starts: number[] };
+function runWait(cmd: string, scenario: { pull: Step[]; runs: Step[] }, bash = true): Waited {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-wait-"));
   try {
-    fs.writeFileSync(path.join(dir, "scenario.json"), JSON.stringify(scenario));
+    for (const [kind, steps] of Object.entries(scenario)) {
+      fs.writeFileSync(path.join(dir, `${kind}.count`), String(steps.length));
+      steps.forEach((s, i) => {
+        fs.writeFileSync(path.join(dir, `${kind}.${i + 1}.out`), `${s.out}\n`);
+        fs.writeFileSync(path.join(dir, `${kind}.${i + 1}.rc`), String(s.rc));
+        if (s.hang) fs.writeFileSync(path.join(dir, `${kind}.${i + 1}.hang`), "");
+      });
+    }
     fs.writeFileSync(path.join(dir, "calls.log"), "");
-    fs.writeFileSync(path.join(dir, "gh"), `#!/usr/bin/env node
-const fs = require("node:fs");
-const dir = ${JSON.stringify(dir)};
-const a = process.argv.slice(2);
-const kind = a[0] === "pr" && a[1] === "view" ? "view" : a[0] === "pr" && a[1] === "checks" ? "checks" : "other";
-fs.appendFileSync(dir + "/calls.log", kind + " " + Date.now() + " " + a.join(" ") + "\\n");
-const steps = JSON.parse(fs.readFileSync(dir + "/scenario.json", "utf8"))[kind];
-if (!steps) { process.stderr.write("stub gh: unexpected call " + a.join(" ")); process.exit(2); }
-const n = fs.readFileSync(dir + "/calls.log", "utf8").split("\\n").filter((l) => l.startsWith(kind + " ")).length;
-const s = steps[Math.min(n, steps.length) - 1];
-if (s.hang) setInterval(() => {}, 1000);
-else { process.stdout.write(s.out + "\\n"); process.exit(s.rc); }
+    fs.writeFileSync(path.join(dir, "gh"), `#!/usr/bin/env bash
+d=${JSON.stringify(dir)}
+case "$1 $2" in
+  "api repos/{owner}/{repo}/pulls/"*) kind=pull ;;
+  "api repos/{owner}/{repo}/commits/"*"/check-runs"*) kind=runs ;;
+  *) kind=other ;;
+esac
+if [ -n "\${EPOCHREALTIME:-}" ]; then t=\${EPOCHREALTIME/[.,]/}; t=\${t:0:13}; else t=$(perl -MTime::HiRes=time -e 'printf "%d", time()*1000'); fi
+echo "$kind $t $*" >> "$d/calls.log"
+[ -f "$d/$kind.count" ] || { echo "stub gh: unexpected call $*" >&2; exit 2; }
+n=$(grep -c "^$kind " "$d/calls.log"); max=$(cat "$d/$kind.count")
+[ "$n" -gt "$max" ] && n=$max
+[ -e "$d/$kind.$n.hang" ] && exec sleep 1000
+cat "$d/$kind.$n.out"
+exit "$(cat "$d/$kind.$n.rc")"
 `, { mode: 0o755 });
     const env = { ...process.env, PATH: `${dir}:${process.env["PATH"]}`, CI_WAIT_INTERVAL_MS: "0" };
     const t0 = Date.now();
@@ -46,86 +64,117 @@ else { process.stdout.write(s.out + "\\n"); process.exit(s.rc); }
     assert.equal(r.error, undefined, `the wait ended within the test's bound: ${String(r.error)}`);
     const calls = fs.readFileSync(path.join(dir, "calls.log"), "utf8").split("\n").filter(Boolean).map((c) => c.split(" "));
     const line = (c: string[]) => [c[0], ...c.slice(2)].join(" ");
-    return { out: r.stdout, err: r.stderr, status: r.status, ms, first: r.stdout.split("\n")[0]!, t0, starts: calls.map((c) => Number(c[1])),
-      views: calls.filter((c) => c[0] === "view").map(line), checks: calls.filter((c) => c[0] === "checks").map(line) };
+    return { out: r.stdout, err: r.stderr, status: r.status, ms, first: r.stdout.split("\n")[0]!, starts: calls.map((c) => Number(c[1])),
+      pulls: calls.filter((c) => c[0] === "pull").map(line), checks: calls.filter((c) => c[0] !== "pull").map(line) };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }
 
-test("ci-wait: a conflicting PR is its own verdict at once, and mergeable is read beside gh pr checks", () => {
-  const name = "ci-wait";
+test("ci-wait: reads the PR and its head's required checks through REST alone, and a probe that cannot tell is a wait (issue 758)", () => {
   const cmd = `node ${ROOT}/scripts/ci-wait.ts 900 540`;
-  {
-    assert.ok(!fs.readFileSync(CI_WAIT_SCRIPT, "utf8").includes("\"--watch\""), "the wait never uses --watch");
-    // run by bash: no checks reported on a conflicting PR: conflict at once, in one pass
-    let w = runWait(cmd, { view: [view("CONFLICTING", "DIRTY")], checks: [NO_CHECKS] });
-    assert.match(w.first, /^PR 900: conflict\b/, `${name}: ${w.out}`);
-    assert.equal(w.status, 4, `${name}: conflict exits 4`);
-    assert.deepEqual([w.views.length, w.checks.length], [1, 1], `${name}: one pass`);
-    assert.ok(w.views[0]!.includes("pr view 900 --json mergeable,mergeStateStatus"), w.views[0]);
-    assert.match(w.out, /CONFLICTING/, "the mergeable read is printed for the record");
-    // a finished run at the head, green or red, of a PR that conflicts: conflict, read before the checks' verdict
-    w = runWait(cmd, { view: [view("CONFLICTING", "DIRTY")], checks: [{ out: "all passed", rc: 0 }] });
-    assert.match(w.first, /^PR 900: conflict\b/, `${name}: a stale green is not ready: ${w.out}`);
-    assert.equal(w.status, 4);
-    w = runWait(cmd, { view: [view("CONFLICTING", "DIRTY")], checks: [FAILING] });
-    assert.match(w.first, /^PR 900: conflict\b/, `${name}: a stale red is no CI failure: ${w.out}`);
-    assert.equal(w.status, 4, "never failed");
-    // MERGEABLE leaves the checks' logic as it was: no checks yet is a wait (BLOCKED is no verdict), then green
-    w = runWait(cmd, { view: [view("MERGEABLE", "BLOCKED")], checks: [NO_CHECKS, NO_CHECKS, { out: "all passed", rc: 0 }] });
-    assert.match(w.first, /^PR 900: green\b/, `${name}: ${w.out}`);
-    assert.equal(w.status, 0, "green exits 0");
-    assert.equal(w.checks.length, 3, `${name}: it waited two passes first`);
-    // UNKNOWN is "couldn't tell": a wait, then the conflict at the next pass
-    w = runWait(cmd, { view: [view("UNKNOWN", "UNKNOWN"), view("CONFLICTING", "DIRTY")], checks: [NO_CHECKS] });
-    assert.match(w.first, /^PR 900: conflict\b/, `${name}: ${w.out}`);
-    assert.equal(w.views.length, 2, `${name}: UNKNOWN waited one pass`);
-    // a gh pr view that fails is "couldn't tell", never a verdict, whatever the checks say
-    w = runWait(cmd, { view: [{ out: "error connecting to api.github.com", rc: 1 }, view("MERGEABLE", "CLEAN")], checks: [{ out: "pending", rc: 8 }, { out: "all passed", rc: 0 }] });
-    assert.match(w.first, /^PR 900: green\b/, `${name}: ${w.out}`);
-    assert.equal(w.views.length, 2, `${name}: the failed read waited one pass`);
-    w = runWait(cmd, { view: [{ out: "HTTP 401", rc: 1 }, view("MERGEABLE", "CLEAN")], checks: [{ out: "all passed", rc: 0 }] });
-    assert.equal(w.views.length, 2, `${name}: a green beside a failed read is not yet green`);
-    assert.equal(w.status, 0);
-    // DRAFT is no verdict: a draft gets CI
-    w = runWait(cmd, { view: [view("MERGEABLE", "DRAFT")], checks: [{ out: "pending", rc: 8 }, { out: "all passed", rc: 0 }] });
-    assert.match(w.first, /^PR 900: green\b/, `${name}: ${w.out}`);
-    assert.equal(w.checks.length, 2, `${name}: DRAFT waited on pending`);
-    // and a real failure on a mergeable PR is failed, as before
-    w = runWait(cmd, { view: [view("MERGEABLE", "CLEAN")], checks: [FAILING] });
-    assert.match(w.first, /^PR 900: failed \(last exit 1\)/, `${name}: ${w.out}`);
-    assert.equal(w.status, 3, "failed exits 3");
-    // an exit gh pr checks does not list is "couldn't tell": a wait, never green and never failed
-    w = runWait(cmd, { view: [view("MERGEABLE", "CLEAN")], checks: [{ out: "usage", rc: 2 }, { out: "?", rc: 4 }, { out: "gh: not found", rc: 127 }, { out: "all passed", rc: 0 }] });
-    assert.match(w.first, /^PR 900: green \(last exit 0\)/, `${name}: ${w.out}`);
-    assert.equal(w.checks.length, 4, `${name}: exits 2, 4 and 127 were each a wait`);
-    // mergeable is parsed, never grepped: another key order and spacing is the same field
-    w = runWait(cmd, { view: [{ out: '{"mergeStateStatus":"DIRTY","mergeable":"CONFLICTING"}', rc: 0 }], checks: [NO_CHECKS] });
-    assert.equal(w.status, 4, `${name}: ${w.out}`);
+  const src = fs.readFileSync(CI_WAIT_SCRIPT, "utf8");
+  assert.ok(!src.includes("\"--watch\""), "the wait never uses --watch");
+  for (const graphql of ["\"pr\"", "graphql"]) assert.ok(!src.includes(graphql), `no ${graphql} in the wait: gh pr view, checks and status use GraphQL, which a cloud session cannot reach`);
+  // green: the PR, then the head's check-runs, by REST; every required check passed (skipped passes a required check)
+  let w = runWait(cmd, { pull: [pull(true, "clean")], runs: [all("success", ["changes", "completed", "skipped"])] });
+  assert.match(w.first, /^PR 900: green at 0123456789abcdef0123456789abcdef01234567$/, w.out);
+  assert.equal(w.status, 0, "green exits 0");
+  assert.deepEqual(w.pulls, ["pull api repos/{owner}/{repo}/pulls/900"], "one pass, the PR read by REST");
+  assert.deepEqual(w.checks, [`runs api repos/{owner}/{repo}/commits/${SHA}/check-runs?filter=latest&per_page=100`], "the head's runs, by REST");
+  assert.match(w.out, /\npull \(exit 0\): mergeable true, mergeable_state clean\ncheck-runs \(exit 0\):\nchecks\tcompleted\tsuccess\t\S+\nimage\t/, "both reads printed for the record");
+  w = runWait(cmd, { pull: [pull(true, "blocked")], runs: [runs(...REQUIRED_NAMES.map((n): Run => [n, "completed", n === "image" ? "skipped" : "success"]))] });
+  assert.equal(w.status, 0, `skipped is a pass, blocked no verdict: ${w.out}`);
+  // red: any required check failed, cancelled or timed out is failed, at once, whatever the others are doing
+  for (const red of ["failure", "cancelled", "timed_out"]) {
+    w = runWait(cmd, { pull: [pull(true, "blocked")], runs: [runs(["checks", "in_progress", null], ["image", "completed", "success"], ["integration (oracle)", "completed", red])] });
+    assert.match(w.first, /^PR 900: failed at /, `${red}: ${w.out}`);
+    assert.equal(w.status, 3, `${red}: failed exits 3`);
+    assert.equal(w.pulls.length, 1, `${red}: in one pass`);
   }
+  // a failed job that no required check names is not the verdict: the required checks are
+  w = runWait(cmd, { pull: [pull(true, "clean")], runs: [all("success", ["oracle collation icu", "completed", "failure"])] });
+  assert.equal(w.status, 0, `a job outside the four is read through its required check: ${w.out}`);
+  // pending: a check in progress, then green
+  w = runWait(cmd, { pull: [pull(true, "blocked")], runs: [runs(...REQUIRED_NAMES.map((n): Run => [n, n === "checks" ? "in_progress" : "completed", n === "checks" ? null : "success"])), GREEN] });
+  assert.match(w.first, /^PR 900: green\b/, w.out);
+  assert.equal(w.checks.length, 2, "in_progress waited one pass");
+  // a required check missing (not reported yet, just after a push) is a wait, never green, even when the rest passed
+  w = runWait(cmd, { pull: [pull(true, "blocked")], runs: [runs(), runs(...REQUIRED_NAMES.filter((n) => n !== "image").map((n): Run => [n, "completed", "success"])), GREEN] });
+  assert.match(w.first, /^PR 900: green\b/, w.out);
+  assert.equal(w.checks.length, 3, `no runs, then image missing, each waited: ${w.out}`);
+  // the head's latest run of a name decides: a re-run's newer success over its first, cancelled, attempt is green
+  w = runWait(cmd, { pull: [pull(true, "clean")], runs: [all("success", ["checks", "completed", "cancelled", 1])] });
+  assert.equal(w.status, 0, `the older cancelled run of checks is superseded: ${w.out}`);
+  w = runWait(cmd, { pull: [pull(true, "clean")], runs: [all("success", ["checks", "completed", "cancelled", 999])] });
+  assert.equal(w.status, 3, `the newer cancelled run of checks is the verdict: ${w.out}`);
+  // a conclusion not named (stale) is couldn't tell, a wait
+  w = runWait(cmd, { pull: [pull(true, "clean")], runs: [all("stale"), GREEN] });
+  assert.equal(w.checks.length, 2, `stale waited: ${w.out}`);
+  // mergeable null (GitHub still computing it after a push) is couldn't tell: a wait, never a conflict and never green
+  w = runWait(cmd, { pull: [pull(null, "unknown"), pull(true, "clean")], runs: [GREEN] });
+  assert.match(w.first, /^PR 900: green\b/, w.out);
+  assert.equal(w.pulls.length, 2, `null waited a pass beside a green run: ${w.out}`);
+  w = runWait(cmd, { pull: [pull(null, "unknown"), pull(false, "dirty")], runs: [all("failure")] });
+  assert.equal(w.status, 4, `null beside a red run waited, then the conflict: ${w.out}`);
+  assert.equal(w.pulls.length, 2);
+  // a conflict is its own verdict, at once and final, over a finished green or red run (no workflow runs on it)
+  for (const r of [GREEN, all("failure"), runs()]) {
+    w = runWait(cmd, { pull: [pull(false, "dirty")], runs: [r] });
+    assert.match(w.first, /^PR 900: conflict at /, w.out);
+    assert.equal(w.status, 4, "conflict exits 4");
+    assert.deepEqual([w.pulls.length, w.checks.length], [1, 0], "one read: a conflict needs no checks");
+    assert.match(w.out, /mergeable false, mergeable_state dirty/, "the read is printed");
+  }
+  // a probe that fails or does not parse is couldn't tell, a wait, whatever the other says
+  for (const bad of [{ out: "gh: Not Found (HTTP 404)", rc: 1 }, { out: "<html>bad gateway</html>", rc: 0 }, { out: JSON.stringify({ head: { sha: "x" }, mergeable: true }), rc: 0 }, { out: "", rc: 127 }]) {
+    w = runWait(cmd, { pull: [bad, pull(true, "clean")], runs: [GREEN] });
+    assert.match(w.first, /^PR 900: green\b/, `${bad.out}: ${w.out}`);
+    assert.deepEqual([w.pulls.length, w.checks.length], [2, 1], `a PR read that failed (${bad.out}) waited, and read no checks`);
+  }
+  for (const bad of [{ out: "gh: HTTP 502", rc: 1 }, { out: "{\"check_runs\":", rc: 0 }, { out: "{\"message\":\"x\"}", rc: 0 }]) {
+    w = runWait(cmd, { pull: [pull(true, "clean")], runs: [bad, GREEN] });
+    assert.match(w.first, /^PR 900: green\b/, `${bad.out}: ${w.out}`);
+    assert.equal(w.checks.length, 2, `a check-runs read that failed (${bad.out}) waited`);
+  }
+  // both answers are parsed, never grepped: another key order is the same field
+  w = runWait(cmd, { pull: [{ out: `{"mergeable_state":"dirty","mergeable":false,"head":{"ref":"x","sha":"${SHA}"}}`, rc: 0 }], runs: [GREEN] });
+  assert.equal(w.status, 4, w.out);
 });
 
-test("ci-wait: bounded, a deadline no pass starts after, a gh that never returns killed, and its verdict exits never 1", () => {
-  // pending for ever: exit 8 at the deadline, no pass started after it, three parts printed
-  let w = runWait("900 2", { view: [view("MERGEABLE", "CLEAN")], checks: [{ out: "pending", rc: 8 }] }, false);
+test("ci-wait: its required checks are the four ci.yml names", () => {
+  const src = fs.readFileSync(CI_WAIT_SCRIPT, "utf8");
+  const list = /^export const REQUIRED = (\[[^\]]*\]) as const;$/m.exec(src)?.[1];
+  assert.ok(list, "REQUIRED is one list");
+  const required = JSON.parse(list) as string[];
+  assert.deepEqual(required, REQUIRED_NAMES);
+  const named = (text: string, re: RegExp) => [...(re.exec(text)?.[1] ?? "").matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+  assert.deepEqual(named(fs.readFileSync(path.join(ROOT, ".github/workflows/ci.yml"), "utf8"), /THE FOUR REQUIRED CHECKS ARE ([^:]*):/), required, "ci.yml's header");
+  const workflow = fs.readFileSync(path.join(ROOT, ".github/workflows/ci.yml"), "utf8");
+  for (const n of required) assert.ok(workflow.includes(`\n    name: ${n}\n`) || new RegExp(`\\n  ${n}:\\n(?!    name:)`).test(workflow), `ci.yml has a job named ${n}`);
+});
+
+test("ci-wait: bounded, a deadline no call starts after, a gh that never returns killed, and its verdict exits never 1", () => {
+  // pending for ever: exit 8 at the deadline, no call started after it, three parts printed
+  let w = runWait("900 2", { pull: [pull(true, "blocked")], runs: [runs(["checks", "in_progress", null])] }, false);
   assert.equal(w.status, 8, w.out + w.err);
-  assert.match(w.first, /^PR 900: pending \(last exit 8\)$/);
-  assert.match(w.out, /\nmergeable \(exit 0\): \{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"\}\npending\n$/, "its three parts");
+  assert.match(w.first, /^PR 900: pending at 0123456789abcdef0123456789abcdef01234567$/);
+  assert.match(w.out, /\npull \(exit 0\): mergeable true, mergeable_state blocked\ncheck-runs \(exit 0\):\nchecks\tin_progress\t-\t\S+\nimage\tmissing\nintegration \(oracle\)\tmissing\nintegration \(rest\)\tmissing\n$/, "its three parts");
   assert.ok(w.ms < 2000 + 3000, `within the bound and a call's kill: ${w.ms} ms`);
-  for (const t of w.starts) assert.ok(t - w.t0 < 2000 + 1000, `a call started ${t - w.t0} ms in, past the 2 s deadline`);
-  // a gh pr checks that never returns is killed at the deadline (gh, a Go program, ignores an alarm)
-  w = runWait("900 3", { view: [view("MERGEABLE", "CLEAN")], checks: [{ out: "", rc: 0, hang: true }] }, false);
+  // the deadline is set before the first call, so measured from that call's start, which leaves Node's own start out
+  for (const t of w.starts) assert.ok(t - w.starts[0]! < 2000 + 500, `a call started ${t - w.starts[0]!} ms after the first, past the 2 s deadline`);
+  // a check-runs read that never returns is killed at the deadline (gh, a Go program, ignores an alarm)
+  w = runWait("900 3", { pull: [pull(true, "clean")], runs: [{ out: "", rc: 0, hang: true }] }, false);
   assert.equal(w.status, 8, w.out + w.err);
   assert.ok(w.ms >= 2900 && w.ms < 3000 + 4000, `killed near its deadline: ${w.ms} ms`);
-  assert.match(w.first, /^PR 900: pending \(last exit 137\)$/);
-  assert.match(w.out, /\nmergeable \(exit 0\): [^\n]*MERGEABLE[^\n]*\n[^\n]*killed after \d+ s, past its bound/, "its three parts, the kill said");
+  assert.match(w.first, /^PR 900: pending at /);
+  assert.match(w.out, /\npull \(exit 0\): [^\n]*\ncheck-runs \(exit 137\): \(gh api repos\/\{owner\}\/\{repo\}\/commits\/[^\n]* killed after \d+ s, past its bound\)\n$/, "its three parts, the kill said");
   // usage: exit 2, one line naming the cap, gh never called
   for (const args of ["", "abc 10", "900 0", "900 -5", "900 x", "900 571", "900 10 extra"]) {
-    w = runWait(args, { view: [view("MERGEABLE", "CLEAN")], checks: [{ out: "all passed", rc: 0 }] }, false);
+    w = runWait(args, { pull: [pull(true, "clean")], runs: [GREEN] }, false);
     assert.equal(w.status, 2, `"${args}": ${w.err}`);
     assert.match(w.err, /^usage: node scripts\/ci-wait\.ts <pr> <seconds>: [^\n]*from 1 to 570[^\n]*\n$/, `"${args}": one usage line naming the cap`);
-    assert.equal(w.views.length + w.checks.length, 0, `"${args}": gh is never called`);
+    assert.equal(w.pulls.length + w.checks.length, 0, `"${args}": gh is never called`);
   }
   // its verdicts' exit codes are its own, never Node's 1 (an uncaught error), and the cap fits the Bash tool's bound
   const src = fs.readFileSync(CI_WAIT_SCRIPT, "utf8");
