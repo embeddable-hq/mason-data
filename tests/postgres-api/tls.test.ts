@@ -13,8 +13,10 @@ import * as tls from "node:tls";
 import pg from "pg";
 import { ApiError } from "../../src/api/error.ts";
 import { startPostgresApi, type PgApiOptions, type PgApiServer, type ShareDoor, type ShareSocket } from "../../src/api/postgres/server.ts";
+// a namespace import: a name missing from the module is a failure of the test that calls it, never of the whole file
+import * as apiServer from "../../src/api/postgres/server.ts";
 import { selfSignedCertificate } from "../../src/cli/self-signed-cert.ts";
-import { password, query, replies, startup, terminate } from "./wire.ts";
+import { password, query, replies, startup, sync, terminate } from "./wire.ts";
 
 const pair = selfSignedCertificate("mason-tls-test");
 const logs: string[] = [];
@@ -143,6 +145,67 @@ test("a direct TLS start: a connection that opens with a ClientHello is TLS at o
   const p = client(plain, false);
   await p.connect();
   try { assert.equal(await one(p, "SELECT 1"), "1"); } finally { await p.end(); }
+});
+
+/** every message a direct TLS connection is answered once `bytes` are sent in ONE write (so in one TLS record, read in
+ *  one turn of the server's loop), until the server closes it */
+const answeredOverTls = async (bytes: Buffer): Promise<string[]> => {
+  const s = tls.connect({ host: "127.0.0.1", port: secure.port, rejectUnauthorized: false, ALPNProtocols: ["postgresql"] });
+  await new Promise<void>((resolve, reject) => { s.once("secureConnect", resolve); s.once("error", reject); });
+  return replies(await new Promise<Buffer>((resolve, reject) => {
+    const got: Buffer[] = [];
+    s.on("data", (b: Buffer) => got.push(b));
+    s.on("error", reject);
+    s.on("close", () => resolve(Buffer.concat(got)));
+    s.write(bytes);
+  })).map((m) => (m.type === "ErrorResponse" ? `ErrorResponse ${m.fields.S} ${m.fields.C}` : m.type));
+};
+
+// over TLS a write completes on the loop's next turn: a socket destroyed in the turn that wrote an answer dropped it
+// (issue 585), so a FATAL's ErrorResponse, or the answers before a Terminate, never reached a client that pipelines
+test("over TLS what is sent before the server closes reaches the client: a refused password's FATAL, a FATAL after other answers, the answers before a Terminate", async () => {
+  const login = [startup({ user: "anyone", database: "shop" })];
+  const without = (types: string[]): string[] => types.filter((t) => t !== "ParameterStatus");
+  assert.deepEqual(await answeredOverTls(Buffer.concat([...login, password("not-a-token")])),
+    ["AuthenticationCleartextPassword", "ErrorResponse FATAL 28P01"], "a wrong password sent with the startup, as a driver behind a proxy does");
+  assert.deepEqual(without(await answeredOverTls(Buffer.concat([...login, password("good-token"), sync(), password("again")]))),
+    ["AuthenticationCleartextPassword", "AuthenticationOk", "BackendKeyData", "ReadyForQuery", "ReadyForQuery", "ErrorResponse FATAL 08P01"]);
+  assert.deepEqual(without(await answeredOverTls(Buffer.concat([...login, password("good-token"), sync(), sync(), terminate()]))),
+    ["AuthenticationCleartextPassword", "AuthenticationOk", "BackendKeyData", "ReadyForQuery", "ReadyForQuery", "ReadyForQuery"]);
+});
+
+test("a closed session's last bytes: all of them reach a client that reads, and one that reads nothing holds the socket no longer than the bound", async () => {
+  const connected = async (): Promise<{ server: net.Socket; client: net.Socket; done: () => void }> => {
+    const listener = net.createServer();
+    await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve));
+    const accepted = new Promise<net.Socket>((resolve) => listener.once("connection", resolve));
+    const client = net.connect((listener.address() as net.AddressInfo).port, "127.0.0.1");
+    const server = await accepted;
+    return { server, client, done: () => { client.destroy(); server.destroy(); listener.close(); } };
+  };
+  // more than any kernel buffers between the two: most of it is still queued in the process when the close is asked
+  const big = Buffer.alloc(96 * 1024 * 1024, 7);
+
+  const reads = await connected();
+  try {
+    let received = 0;
+    const ended = new Promise<void>((resolve) => { reads.client.on("data", (b: Buffer) => { received += b.length; }); reads.client.on("end", resolve); });
+    reads.server.write(big);
+    apiServer.closeFlushed(reads.server, 60_000);
+    await ended;
+    assert.equal(received, big.length, "every byte written before the close");
+  } finally { reads.done(); }
+
+  const stuck = await connected();
+  try {
+    stuck.client.pause();
+    stuck.server.write(big);
+    const started = Date.now();
+    const closed = new Promise<void>((resolve) => stuck.server.once("close", () => resolve()));
+    apiServer.closeFlushed(stuck.server, 200);
+    await closed;
+    assert.ok(Date.now() - started < 5_000, `destroyed at the bound, not when the client reads: ${Date.now() - started} ms`);
+  } finally { stuck.done(); }
 });
 
 /** psql's major version on PATH, or null without one */
