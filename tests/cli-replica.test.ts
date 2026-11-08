@@ -57,7 +57,7 @@ Next:
   assert.equal(j.a.code, 0, j.a.stdout);
   const v = JSON.parse(j.a.stdout) as Record<string, unknown>;
   assert.deepEqual(Object.keys(v), ["replica", "checks", "next"]);
-  assert.deepEqual(v.replica, { ...replicaOf(), page: null, pending: [] });
+  assert.deepEqual(v.replica, { ...replicaOf(), page: null, pending: [], mason: null });
   assert.deepEqual(v.checks, [{ source: "app", outcome: "passed", missing: [],
     checks: [{ name: "connects", status: "ok", detail: "Postgres 16 answers", fix: null }, { name: "the role", status: "warn", detail: "it may write to a synced table", fix: "a role that only reads" }] }]);
   assert.equal(j.a.stderr, "", "--json prints no progress");

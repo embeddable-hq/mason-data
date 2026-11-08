@@ -31,7 +31,11 @@ interface Script {
   post?: Reply | ((n: number) => Reply);
   /** the n-th GET's answer (0-based) */
   get?: (n: number) => Reply;
+  /** the answer to GET /v1/replicas/acme/shop, the replica's Mason asked before the POST (none: 404, as before there was one) */
+  replica?: Reply;
 }
+/** The replica's own path: its Mason is asked there before a deploy is sent (docs/HOSTED-API.md). */
+const REPLICA_PATH = "/v1/replicas/acme/shop";
 
 const CREATED = "2026-11-02T10:00:00Z";
 const ID = "dep_01abc";
@@ -51,6 +55,7 @@ async function fakeService(script: Script): Promise<{ url: string; requests: Req
       requests.push({ method: req.method ?? "", path: p, headers: req.headers, body: Buffer.concat(chunks).toString("utf8"), at: Date.now() });
       const reply: Reply = req.method === "POST" && p === "/v1/replicas/acme/shop/deploys" ? (typeof script.post === "function" ? script.post(posts++) : script.post ?? queued)
         : req.method === "GET" && p === `/v1/replicas/acme/shop/deploys/${ID}` ? (script.get ?? (() => at("running")))(gets++)
+        : req.method === "GET" && p === REPLICA_PATH && script.replica !== undefined ? script.replica
         : { status: 404, body: { error: { code: "not_found", message: "no such endpoint" }, next: [] } };
       if (reply === "drop") { req.socket.destroy(); return; }
       const sent = reply.raw ?? reply.json ?? (reply.body === undefined ? "" : JSON.stringify(reply.body));
@@ -123,7 +128,7 @@ const HEADS: readonly string[] = [
   ...["deploy", "service", "files", "took", "why", "fix"].map((l) => `  ${l} `),
 ];
 /** The steps under Next:, the CLI's own, as the start of their line. */
-const STEP_HEADS: readonly string[] = ["  mason deploy --replica acme/shop", "  mason replica status acme/shop", "  mason replica list acme", "  mason deploy --replica <org>/<name>", "  mason deploy --help", "  mason login", "  mason init",
+const STEP_HEADS: readonly string[] = ["  mason deploy --replica acme/shop", "  mason replica status acme/shop", "  mason replica upgrade acme/shop", "  mason replica list acme", "  mason deploy --replica <org>/<name>", "  mason deploy --help", "  mason login", "  mason init",
   "  unset MASON_CLOUD_URL", "  chmod 600 ", "  chmod 700 "];
 /** A dry run's row begins with a file's path, as this test's projects name them (this machine's own words, never the
  *  service's): on a narrow terminal the path itself is broken, so its row may begin with a part of it. */
@@ -164,7 +169,7 @@ function deploySeenProblems(text: string, width: number | null, failed: boolean 
 }
 
 /** Every step mason deploy gives, in every state: its own, never the service's. */
-const OWN_STEP = /^ {2}(mason deploy --replica (acme\/shop|<org>\/<name>)|mason replica status acme\/shop|mason replica list acme|mason deploy --help|mason login|mason init|unset MASON_CLOUD_URL|chmod (600|700) \S+)(\s|$)/;
+const OWN_STEP = /^ {2}(mason deploy --replica (acme\/shop|<org>\/<name>)|mason replica (status|upgrade) acme\/shop|mason replica list acme|mason deploy --help|mason login|mason init|unset MASON_CLOUD_URL|chmod (600|700) \S+)(\s|$)/;
 
 /**
  * One run in `cwd`, held at once to carrying no secret on either stream, and to the service's values never shaping it
@@ -213,8 +218,9 @@ async function mason(cwd: string, argv: string[], env: Record<string, string>, o
   return a;
 }
 
-/** A run against a fresh fake, signed in by MASON_TOKEN; the fake's requests with it. */
-async function deployWith(script: Script, cwd: string, argv: string[], extra: Record<string, string> = {}, o: { terminal?: number } = {}): Promise<{ a: Answer; requests: Req[]; url: string; token: string; home: string }> {
+/** A run against a fresh fake, signed in by MASON_TOKEN; the fake's requests to the deploys with it (`requests`), and its
+ *  questions of the replica's Mason apart (`asked`). */
+async function deployWith(script: Script, cwd: string, argv: string[], extra: Record<string, string> = {}, o: { terminal?: number } = {}): Promise<{ a: Answer; requests: Req[]; asked: Req[]; url: string; token: string; home: string }> {
   // a token the caller gives is its own to record
   const token = extra.MASON_TOKEN ?? newToken("ci");
   if (extra.MASON_TOKEN === undefined) SECRETS.push(token);
@@ -222,7 +228,7 @@ async function deployWith(script: Script, cwd: string, argv: string[], extra: Re
   try {
     const h = temp("mason-home-");
     const a = await mason(cwd, ["deploy", ...argv], envFor(h, fake.url, { MASON_TOKEN: token, ...extra }), o);
-    return { a, requests: fake.requests, url: fake.url, token, home: h };
+    return { a, requests: fake.requests.filter((r) => r.path !== REPLICA_PATH), asked: fake.requests.filter((r) => r.path === REPLICA_PATH), url: fake.url, token, home: h };
   } finally { await fake.close(); }
 }
 
@@ -1076,6 +1082,64 @@ test("mason deploy: the output's gate refuses no honest deploy by chance — its
   assert.equal(m.refused, 0, `${m.refused} of 2000 honest deploys refused`);
   assert.ok(m.bound < 1e-6, `the bound at ECHO_RUN: ${m.bound}`);
   assert.ok(m.shortRefused > 0 && m.shortRefused <= m.shortBound, `a run of 5: ${m.shortRefused}, its bound ${m.shortBound}`);
+});
+
+/** A replica as the service says it (docs/HOSTED-API.md `Replica`), with the Mason it runs when `mason` is given. */
+const replicaSaying = (mason?: unknown): Reply => ({ status: 200, body: { replica: { org: "acme", name: "shop", region: "eu", sizeGb: 50, hostId: "brisk-otter-4821", state: "ready",
+  createdAt: CREATED, allowlist: [], pending: [], ...(mason === undefined ? {} : { mason }) } } });
+
+test("mason deploy asks the replica's Mason before it sends: a pin that fits neither the version it runs nor the one installed is refused, naming both, nothing sent; one that fits either is sent; a service that says none, or does not answer the question, leaves the pin to the replica (issue 764)", async () => {
+  const { root } = project();   // mason.yml pins 0.7.0
+  // the pin fits: the version it runs (same line, at or past the pin), or the newer one installed
+  for (const mason of [{ version: "0.7.0", latest: "0.7.0" }, { version: "0.7.3", latest: "0.9.0", next: null }, { version: "0.6.5", latest: "0.7.4", next: "0.7.1" }]) {
+    const { a, requests, asked } = await deployWith({ replica: replicaSaying(mason) }, root, ["--replica", "acme/shop", "--json"]);
+    assert.equal(a.code, 0, `${JSON.stringify(mason)}: ${a.stdout}`);
+    assert.deepEqual(asked.map((q) => `${q.method} ${q.body}`), ["GET "], JSON.stringify(mason));
+    assert.ok(asked[0]!.at <= requests[0]!.at, "asked before the POST");
+    assert.equal(posts(requests).length, 1, JSON.stringify(mason));
+  }
+  // older than the pin's line: the service offers one that runs it — upgrade is a way out
+  const older = await deployWith({ replica: replicaSaying({ version: "0.6.5", latest: "0.7.4", next: null }) }, root, ["--replica", "acme/shop"]);
+  assert.equal(older.a.code, 1, older.a.stderr);
+  assert.deepEqual(older.requests, [], "nothing sent");
+  assert.equal(older.a.stderr, "✗ mason deploy: mason/mason.yml pins Mason 0.7.0, and acme/shop runs Mason 0.6.5: it would not run the project\n" +
+    "  why   a replica runs a project pinned to the release line of the Mason it runs (0.6.x), at that version or older; nothing was sent\n" +
+    "  fix   write the project for Mason 0.6.5: its mason command is npx @mason-data/cli@0.6.5 (read the release notes between the two, change what they say, then set version: 0.6.5 in mason/mason.yml); or upgrade the replica to Mason 0.7.4, which runs the project as it is: mason replica upgrade acme/shop\n\n" +
+    "Next:\n  mason replica upgrade acme/shop               move it to Mason 0.7.4\n  mason replica status acme/shop                its Mason version\n");
+  // newer than the pin's line, with a newer line installed too: no upgrade runs it; write the project for the one installed
+  const newer = await deployWith({ replica: replicaSaying({ version: "0.8.1", latest: "0.9.2", next: "0.9.2" }) }, root, ["--replica", "acme/shop", "--json"]);
+  assert.equal(newer.a.code, 1, newer.a.stdout);
+  assert.deepEqual(newer.requests, []);
+  const e = JSON.parse(newer.a.stdout) as { error: { code: string; message: string; why: string; fix: string }; next: Array<{ command: string }> };
+  assert.deepEqual([e.error.code, e.error.message], ["refused", "mason/mason.yml pins Mason 0.7.0, and acme/shop runs Mason 0.8.1, with 0.9.2 installed: it would not run the project"]);
+  assert.match(e.error.why, /\(0\.8\.x\), at that version or older, or to the line of the one installed \(0\.9\.x\), which then starts; nothing was sent$/);
+  assert.match(e.error.fix, /^write the project for Mason 0\.9\.2: its mason command is npx @mason-data\/cli@0\.9\.2 /);
+  assert.doesNotMatch(e.error.fix, /upgrade/);
+  assert.deepEqual(e.next.map((n) => n.command), ["mason replica status acme/shop"]);
+  // a newer patch of the pin's line than the replica runs: refused, as the image would
+  const patch = await deployWith({ replica: replicaSaying({ version: "0.6.9", latest: "0.6.9" }) }, root, ["--replica", "acme/shop", "--json"]);
+  assert.equal(patch.a.code, 1);
+  // a service that says no version (an older one), a status other than 200, no answer: sent, the replica holds the pin
+  for (const [what, replica] of [["no mason key", replicaSaying()], ["mason: null", replicaSaying(null)], ["404", undefined],
+    ["500", { status: 500, body: { error: { code: "failed", message: "x" } } }], ["no answer", "drop"]] as Array<[string, Reply | undefined]>) {
+    const { a, requests, asked } = await deployWith(replica === undefined ? {} : { replica }, root, ["--replica", "acme/shop", "--json"]);
+    assert.equal(a.code, 0, `${what}: ${a.stdout}`);
+    assert.equal(asked.length, 1, what);
+    assert.equal(posts(requests).length, 1, what);
+  }
+  // a 200 outside the contract — a version not x.y.z, versions out of order, a mason that is no object — refuses, nothing sent
+  for (const mason of [{ version: "v0.7.0", latest: "0.7.0" }, { version: "0.7.0", latest: "0.6.0" }, { version: "0.7.0", latest: "0.8.0", next: "0.7.0" },
+    { version: "0.7.0", latest: "0.8.0", next: "0.9.0" }, { version: "0.7.0" }, "0.7.0", { version: "0.7.0-rc1", latest: "0.7.0" }]) {
+    const { a, requests } = await deployWith({ replica: replicaSaying(mason) }, root, ["--replica", "acme/shop", "--json"]);
+    assert.equal(a.code, 1, `${JSON.stringify(mason)}: ${a.stdout}`);
+    assert.match((JSON.parse(a.stdout) as { error: { message: string } }).error.message, /the replica's Mason version was asked for|answered/, JSON.stringify(mason));
+    assert.deepEqual(requests, [], `${JSON.stringify(mason)}: nothing sent`);
+  }
+  // a project with no mason.yml is unpinned: nothing asked, as the image runs it
+  const { root: bare } = project({ "mason.yml": null });
+  const unpinned = await deployWith({ replica: replicaSaying({ version: "0.6.5", latest: "0.6.5" }) }, bare, ["--replica", "acme/shop", "--json"]);
+  assert.equal(unpinned.a.code, 0, unpinned.a.stdout);
+  assert.deepEqual(unpinned.asked, []);
 });
 
 test("no run of mason deploy printed a token, nor anything shaped as one", () => {
