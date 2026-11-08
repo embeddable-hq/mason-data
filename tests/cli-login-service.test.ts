@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import { BASE, DEVICE, ME, SECRETS, bodyOf, bodyCovered, bodyShown, credentials, echoForms, echoToken, envFor, fakeService, granted, home, mason, newToken, measureGate, noTokenLeaked, punyLabels, runForms, runToken, saved, showsRun, writeSaved, type Reply, type Script } from "./hosted-fake.ts";
+import { BASE, DEVICE, ME, SECRETS, bodyOf, bodyCovered, bodyShown, credentials, echoForms, echoToken, envFor, fakeService, granted, home, inputsOf, mason, newToken, measureGate, noTokenLeaked, punyLabels, runForms, runToken, saved, showsRun, writeSaved, type Reply, type Script } from "./hosted-fake.ts";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -544,6 +544,47 @@ test("mason logout: a revoke's answer is never read but for its status — one c
       } finally { await fake.close(); }
     });
   }
+});
+
+test("each run is held to a quarter of the tokens it was given, not of every token its file made (issue 732): a token that shares 15 in a row with a refused login's own words fails no run it was not given, and fails one it was given; a token is given by argv, the environment, stdin, a file in the home or a body served while the run ran; a folder it cannot read holds every token", async () => {
+  // its body's first 15 are "limitingsignins", the words of a refused login read past their spaces (written in parts,
+  // so no line here is shaped as a token)
+  const collider = ["masondata", "pat", ["limitingsignins", "Zq8Wn2Lp5ToMv6Rc1Xd9B4xTy3Hs"].join("")].join("_");
+  const fake = await fakeService({ device: { status: 429, body: { error: "slow_down" } } });
+  try {
+    const h = home(), env = envFor(h, fake.url);
+    const refused = await runMason(h, ["login"], env);
+    assert.equal(refused.code, 1, refused.stderr);
+    assert.ok(bodyShown(`${refused.stdout}\n${refused.stderr}`, collider, [h, fake.url]), `the token shares more than a quarter with what the run printed, so a run held to every token fails:\n${refused.stderr}`);
+    SECRETS.push(collider);
+    try {
+      // not given it: held to it no longer
+      assert.equal((await mason(h, ["login"], env)).code, 1);
+      // given it (in a variable the CLI never reads), the same words: held to it, and refused
+      await assert.rejects(mason(h, ["login"], { ...env, GIVEN: collider }), /printed more than a quarter of a secret's body/);
+    } finally { SECRETS.splice(SECRETS.indexOf(collider), 1); }
+  } finally { await fake.close(); }
+  const [given, other] = [newToken(), newToken()];
+  const seen = async (o: { argv?: string[]; env?: Record<string, string>; stdin?: string; file?: string; served?: string }): Promise<string[]> => {
+    const d = home();
+    const watch = inputsOf([d], o.argv ?? [], { HOME: d, ...o.env }, o.stdin);
+    if (o.file !== undefined) writeSaved(d, { [o.file]: { token: o.file, email: "a@example.com", savedAt: "2026-11-02T10:00:00Z" } });
+    if (o.served !== undefined) {
+      const fake = await fakeService({ me: { status: 200, body: { note: o.served } } });
+      try { await fetch(`${fake.url}/v1/me`).then((r) => r.text()); } finally { await fake.close(); }
+    }
+    return watch.seen([given, other]);
+  };
+  const lower = bodyOf(given).toLowerCase(), split = bodyOf(given).match(/.{1,11}/g)!.join("/");
+  assert.deepEqual(await seen({ argv: ["--name", split] }), [given], "argv, its body split");
+  assert.deepEqual(await seen({ env: { MASON_TOKEN: given } }), [given], "the environment");
+  assert.deepEqual(await seen({ stdin: `${lower}\n` }), [given], "stdin, in lower case");
+  assert.deepEqual(await seen({ file: given }), [given], "a file in the home, written while it ran");
+  assert.deepEqual(await seen({ served: [...given].map((c) => `%${c.charCodeAt(0).toString(16)}`).join("") }), [given], "a body served while it ran, URL-encoded");
+  assert.deepEqual(await seen({}), [], "given nothing");
+  const file = path.join(home(), "a-file");
+  fs.writeFileSync(file, "x");
+  assert.deepEqual(inputsOf([file], [], {}).seen([given, other]), [given, other], "a folder it cannot read: every token");
 });
 
 test("no token reaches any stdout or stderr of mason login or mason logout, in any run of this file, success or failure", () => {

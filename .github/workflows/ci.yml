@@ -9,11 +9,11 @@
 # skip the job that would say so. tests/ci-shards.test.ts holds this file to all of it.
 #
 #   checks                  build (once: typecheck, the CLI, the platform packages, the install, shellcheck), and
-#                           unit (1-3): every tests/**/*.test.ts file in exactly one shard (`scripts/ci-shards.ts verify`)
+#                           unit (1-4): every tests/**/*.test.ts file in exactly one shard (`scripts/ci-shards.ts verify`)
 #                           (a docs-only run: docs, the unit tests that read a doc, in place of both)
 #   image                   the image builds and answers (a docs-only run builds none, and says so)
-#   integration (rest)      rest shard (1-2): every integration file but the oracle, in exactly one shard
-#   integration (oracle)    oracle leg (1-2): each the copy, the rounds of changes and its share of the statements; the
+#   integration (rest)      rest shard (1-3): every integration file but the oracle, in exactly one shard
+#   integration (oracle)    oracle leg (1-3): each the copy, the rounds of changes and its share of the statements; the
 #                           check holds the legs to the whole (`scripts/oracle-legs.ts`)
 #
 # THE DOCS PATH. `changes` reads what the pull request changed, from git on the merge CI checked out
@@ -159,7 +159,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
 
@@ -302,7 +302,7 @@ jobs:
       fail-fast: false
       matrix:
         kind: [oracle]
-        shard: [1, 2]
+        shard: [1, 2, 3]
     # The Postgres every file copies from. Each file writes only inside a database it creates and drops; the stream
     # needs wal_level=logical (set below: a service takes no command line). psql is on the runner image.
     services: &postgres-service
@@ -411,7 +411,7 @@ jobs:
           retention-days: 7
           overwrite: true
 
-  # REQUIRED. Fails unless both legs and both collations succeeded (on a docs-only run: were skipped), and together the
+  # REQUIRED. Fails unless every leg and both collations succeeded (on a docs-only run: were skipped), and together the
   # legs asked every statement in every phase and hold what a whole run asserts at its end: no stale decision, no dead
   # gap, src/duck/verified.ts, the fixture's tallies.
   integration-oracle:
@@ -453,7 +453,7 @@ jobs:
       fail-fast: false
       matrix:
         kind: [rest]
-        shard: [1, 2]
+        shard: [1, 2, 3]
     services: *postgres-service
     env: *postgres-env
     steps: *integration-steps

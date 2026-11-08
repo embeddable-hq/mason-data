@@ -80,14 +80,14 @@ export class PageShares {
     const mine = { user, tunnel: null as OpenTunnel | null, timer: this.lapse(user) };
     this.current = mine;
     // however it ends (Stop sharing, no beat, its tunnel, the run stopping), the tunnel's client goes with it
-    shares.onEnd(user, () => { clearTimeout(mine.timer); mine.tunnel?.stop(); if (this.current === mine) this.current = null; });
+    shares.onEnd(user, () => { clearTimeout(mine.timer); void mine.tunnel?.stop(); if (this.current === mine) this.current = null; });
     const plan = tunnelPlan("pinggy", { port: opened.port, home: this.deps.home, token: null });
     const t = await (this.deps.start ?? startTunnel)(plan, { timeoutMs: this.deps.timeoutMs ?? TIMEOUT_MS, onPid: (pid) => { shares.update(user, { pid, via: plan.via, state: "opening" }); } });
     if ("message" in t) { await shares.close(user, "its tunnel did not open"); return { failure: pageFailure(t, plan) }; }
-    if (this.current !== mine) { t.stop(); return { failure: this.endedWhileOpening(user) }; }
+    if (this.current !== mine) { await t.stop(); return { failure: this.endedWhileOpening(user) }; }
     mine.tunnel = t;
     const probe = await (this.deps.probe ?? probeShare)(t, opened.fingerprint);
-    if (this.current !== mine) { t.stop(); return { failure: this.endedWhileOpening(user) }; }
+    if (this.current !== mine) { await t.stop(); return { failure: this.endedWhileOpening(user) }; }
     if (probe === "other") {
       await shares.close(user, "its address answered with another certificate");
       return { failure: { message: `${t.host}:${t.port} is not this share: something else answers there`, code: "failed", why: "the tunnel gave that address, and the certificate there is not this share's",

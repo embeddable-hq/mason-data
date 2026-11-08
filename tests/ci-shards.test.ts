@@ -35,8 +35,8 @@ test("every test file of the tree is in exactly one shard, the oracle in none bu
     assert.ok(!files.includes(ORACLE));
   }
   assert.ok(testFiles("unit", ROOT).includes("tests/postgres-api/catalog.test.ts"), "a subfolder's files are found, as npm test finds them");
-  assert.deepEqual([shardFiles("oracle", 1, ROOT), shardFiles("oracle", 2, ROOT)], [[ORACLE], [ORACLE]]);
-  assert.throws(() => shardFiles("unit", SHARDS.unit + 1, ROOT), /has shards 1 to 3/);
+  assert.deepEqual(Array.from({ length: SHARDS.oracle }, (_, i) => shardFiles("oracle", i + 1, ROOT)), Array.from({ length: SHARDS.oracle }, () => [ORACLE]));
+  assert.throws(() => shardFiles("unit", SHARDS.unit + 1, ROOT), new RegExp(`has shards 1 to ${SHARDS.unit}`));
 });
 
 test("the executor's three stress tests land in different shards", () => {
@@ -67,7 +67,7 @@ test("a shard with no file is an error: `node --test` alone would run every test
   assert.deepEqual(shardCommand("unit", 1, ["a"], "o"), { args: ["--test", ...gate.TEST_BOUND_ARGS, "--test-reporter=spec", "--test-reporter-destination=stdout",
     `--test-reporter=${path.join(ROOT, "scripts", "test-times.ts")}`, `--test-reporter-destination=${path.join("o", "test-times-unit-1.json")}`, "a"], env: {} });
   assert.deepEqual(shardCommand("rest", 2, ["a"], "o"), { args: ["--test", "--test-concurrency=1", "a"], env: {} });
-  assert.deepEqual(shardCommand("oracle", 2, ["a"], "o").env, { IT_ORACLE_LEG: "2/2", IT_ORACLE_LEG_REPORT: path.join("o", "duck-oracle-leg-2.json") });
+  assert.deepEqual(shardCommand("oracle", 2, ["a"], "o").env, { IT_ORACLE_LEG: `2/${SHARDS.oracle}`, IT_ORACLE_LEG_REPORT: path.join("o", "duck-oracle-leg-2.json") });
   // a unit shard's ALONE files: one at a time, under the same bound and the same two reporters, their times apart (issue 338)
   assert.throws(() => aloneCommand(1, [], "o"), /has no ALONE file/);
   assert.deepEqual(aloneCommand(3, ["b"], "o"), { args: ["--test", ...gate.TEST_BOUND_ARGS, "--test-concurrency=1", "--test-reporter=spec", "--test-reporter-destination=stdout",
@@ -76,13 +76,14 @@ test("a shard with no file is an error: `node --test` alone would run every test
 
 test("verify fails on a file in no shard, in two, on one not in the tree, and on a shard that left no record", () => {
   const rec = (shard: number, files: string[]): ShardRecord => ({ kind: "unit", shard, files, exit: 0 });
-  const tree = ["a", "b", "c"];
-  assert.deepEqual(coverageProblems("unit", [rec(1, ["a"]), rec(2, ["b"]), rec(3, ["c"])], tree), []);
-  assert.deepEqual(coverageProblems("unit", [rec(1, ["a"]), rec(2, ["b"]), rec(3, [])], tree), ["c ran in no unit shard"]);
-  assert.deepEqual(coverageProblems("unit", [rec(1, ["a", "c"]), rec(2, ["b"]), rec(3, ["c"])], tree), ["c ran in unit shards 1 and 3"]);
-  assert.deepEqual(coverageProblems("unit", [rec(1, ["a", "z"]), rec(2, ["b"]), rec(3, ["c"])], tree), ["z ran in unit shard 1 but is not in the tree"]);
-  assert.deepEqual(coverageProblems("unit", [rec(1, ["a", "b"]), rec(3, ["c"])], tree), ["unit: the records are of shard(s) 1,3, where 1,2,3 must each have run once"]);
-  assert.deepEqual(coverageProblems("oracle", [{ kind: "oracle", shard: 1, files: ["o"], exit: 0 }], ["o"]), ["oracle: the records are of shard(s) 1, where 1,2 must each have run once"]);
+  const tree = ["a", "b", "c", "d"];
+  assert.equal(SHARDS.unit, 4, "the records below are of four unit shards");
+  assert.deepEqual(coverageProblems("unit", [rec(1, ["a"]), rec(2, ["b"]), rec(3, ["c"]), rec(4, ["d"])], tree), []);
+  assert.deepEqual(coverageProblems("unit", [rec(1, ["a"]), rec(2, ["b"]), rec(3, []), rec(4, ["d"])], tree), ["c ran in no unit shard"]);
+  assert.deepEqual(coverageProblems("unit", [rec(1, ["a", "c"]), rec(2, ["b"]), rec(3, ["c"]), rec(4, ["d"])], tree), ["c ran in unit shards 1 and 3"]);
+  assert.deepEqual(coverageProblems("unit", [rec(1, ["a", "z"]), rec(2, ["b"]), rec(3, ["c"]), rec(4, ["d"])], tree), ["z ran in unit shard 1 but is not in the tree"]);
+  assert.deepEqual(coverageProblems("unit", [rec(1, ["a", "b"]), rec(3, ["c"]), rec(4, ["d"])], tree), ["unit: the records are of shard(s) 1,3,4, where 1,2,3,4 must each have run once"]);
+  assert.deepEqual(coverageProblems("oracle", [{ kind: "oracle", shard: 1, files: ["o"], exit: 0 }], ["o"]), ["oracle: the records are of shard(s) 1, where 1,2,3 must each have run once"]);
 });
 
 test("only success passes: a failed, skipped or cancelled job, or none, fails the check", () => {
@@ -151,17 +152,18 @@ const program = (script: string, args: string[], env: Record<string, string> = {
   return { status: r.status, out: r.stdout + r.stderr };
 };
 
-function legsFolder(t: { after(f: () => void): void }): { dir: string; reports: [LegReport, LegReport] } {
+/** A folder of SHARDS.oracle legs' reports, a statement to each: the programs read SHARDS.oracle as CI runs them */
+function legsFolder(t: { after(f: () => void): void }): { dir: string; reports: LegReport[] } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "oracle-legs-"));
   t.after(() => { fs.rmSync(dir, { recursive: true, force: true }); });
   const fixture = JSON.parse(fs.readFileSync(path.join(ROOT, "tests/fixtures/oracle-duckdb-alone.json"), "utf8")) as Pick<LegReport["tallies"], "mason" | "duckdb">;
-  const statements = [1, 2].map((n) => ({ group: "g", name: `statement ${n}`, sql: `SELECT ${n}` }));
+  const statements = Array.from({ length: SHARDS.oracle }, (_, i) => i + 1).map((n) => ({ group: "g", name: `statement ${n}`, sql: `SELECT ${n}` }));
   const whole = statements.map((q) => ({ id: statementId(q), name: q.name }));
-  const leg = (n: 1 | 2): LegReport => ({ leg: n, of: 2, whole, asked: Object.fromEntries(PHASES.map((p) => [p, [whole[n - 1]!.id]])), stages: n === 1 ? Object.fromEntries(STAGES.map((s) => [s, 1])) : {}, shaped: 0,
+  const leg = (n: number): LegReport => ({ leg: n, of: SHARDS.oracle, whole, asked: Object.fromEntries(PHASES.map((p) => [p, [whole[n - 1]!.id]])), stages: n === 1 ? Object.fromEntries(STAGES.map((s) => [s, 1])) : {}, shaped: 0,
     tallies: { statements: 1, mason: n === 1 ? fixture.mason : {}, duckdb: n === 1 ? fixture.duckdb : {} }, copyPhase: { refused: {}, decided: {} },
     everyAsk: { refused: {}, decided: n === 1 ? Object.fromEntries(Object.keys(GAPS).map((id) => [id, { planted: 1, natural: 0 }])) : {} }, decisions: [], verified: n === 1 ? [...VERIFIED.keys()] : [], names: n === 1 ? Object.fromEntries(VERIFIED) : {}, asks: 3,
     measured: { what: "w", machine: "linux x64", postgres: "PostgreSQL 18 on x86_64-pc-linux-gnu", collation: "en_US.utf8 (c)", shapes: true }, differences: 0 });
-  return { dir, reports: [leg(1), leg(2)] };
+  return { dir, reports: statements.map((_, i) => leg(i + 1)) };
 }
 const write = (dir: string, reports: readonly LegReport[]): void => { for (const r of reports) fs.writeFileSync(path.join(dir, reportName(r.leg)), JSON.stringify(r)); };
 
@@ -170,14 +172,13 @@ test("scripts/oracle-legs.ts run as CI runs it: exit 0 on legs that are the whol
   write(dir, reports);
   const good = program("oracle-legs.ts", [dir]);
   assert.equal(good.status, 0, good.out);
-  assert.match(good.out, /oracle legs: 1 \+ 1 = 2 statements, each asked in all 3 phases by exactly one leg/);
-  reports[1].asked[PHASES[2]] = [];
+  assert.ok(good.out.includes(`oracle legs: ${reports.map(() => 1).join(" + ")} = ${SHARDS.oracle} statements, each asked in all 3 phases by exactly one leg`), good.out);
+  reports[1]!.asked[PHASES[2]] = [];
   write(dir, reports);
   const bad = program("oracle-legs.ts", [dir]);
   assert.equal(bad.status, 1, bad.out);
   assert.match(bad.out, /no leg asked "statement 2"/);
-  fs.rmSync(path.join(dir, reportName(1)));
-  fs.rmSync(path.join(dir, reportName(2)));
+  for (const r of reports) fs.rmSync(path.join(dir, reportName(r.leg)));
   const none = program("oracle-legs.ts", [dir]);
   assert.equal(none.status, 1, none.out);
   assert.match(none.out, /the reports are of leg\(s\) none/);
@@ -202,14 +203,14 @@ test("scripts/oracle-legs.ts run as CI runs it says the legs' balance after the 
   write(dir, reports);
   const untimed = program("oracle-legs.ts", [dir]);
   assert.equal(untimed.status, 0, untimed.out);
-  assert.match(untimed.out, /oracle legs: balance: not measured: the report of leg\(s\) 1, 2 has no times/);
+  assert.match(untimed.out, new RegExp(`oracle legs: balance: not measured: the report of leg\\(s\\) ${reports.map((r) => r.leg).join(", ")} has no times`));
   assert.doesNotMatch(untimed.out, /::warning/);
   // 120 s apart on matching runners: warned, naming this run's --weights only behind earlier runs past the target too, and still 0
   const timed = reports.map((r, i) => ({ ...r, times: { fixed: { setup: 68000 }, stages: {}, statements: { [`k${i}`]: { ms: i === 0 ? 750000 : 630000, name: `statement ${i + 1}` } }, cpu: "c × 4" } }));
   write(dir, timed);
   const apart = program("oracle-legs.ts", [dir], { GITHUB_RUN_ID: "123" });
   assert.equal(apart.status, 0, apart.out);
-  assert.match(apart.out, /oracle legs: 1 \+ 1 = 2 statements[\s\S]*oracle leg 1: balance: setup 68\.0 s; statements and stages 750\.0 s as run, 750\.0 s in one machine's seconds; runner: c × 4\n[\s\S]*oracle legs: balance: 120\.0 s apart as run, 120\.0 s in one machine's seconds/);
+  assert.match(apart.out, /oracle legs: 1 \+ 1 [\s\S]*oracle leg 1: balance: setup 68\.0 s; statements and stages 750\.0 s as run, 750\.0 s in one machine's seconds; runner: c × 4\n[\s\S]*oracle legs: balance: 120\.0 s apart as run, 120\.0 s in one machine's seconds/);
   assert.match(apart.out, /^::warning title=oracle legs::the legs are 120\.0 s apart in one machine's seconds, past the target of 60\.0 s.*earlier runs whose legs ran on matching CPUs were also past the target.*`node scripts\/oracle-legs\.ts --weights 123`/m);
   // the same gap on different CPUs (issue 347): warned without any --weights, and still 0
   const drawn = timed.map((r, i) => ({ ...r, times: { ...r.times, cpu: i === 0 ? "c × 4" : "d × 4" } }));
@@ -314,7 +315,7 @@ test("a unit shard's record carries its files' times, its wall time and its CPU,
   const out = path.join(root, "ran");
   const r = node([path.join(root, "scripts", "ci-shards.ts"), "run", "unit", "1"], root, { CI_SHARD_DIR: out });
   assert.equal(r.status, 0, r.out);
-  assert.match(r.out, /unit shard 1 of 3: 1 file\(s\), about 1\.0 s of test time/);
+  assert.match(r.out, new RegExp(`unit shard 1 of ${SHARDS.unit}: 1 file\\(s\\), about 1\\.0 s of test time`));
   const record = JSON.parse(fs.readFileSync(path.join(out, "ran-unit-1.json"), "utf8")) as ShardRecord;
   assert.deepEqual(record.files, [names[0]]);
   assert.deepEqual(Object.keys(record.times ?? {}), [names[0]]);
@@ -364,7 +365,7 @@ test("an ALONE file counts SIDE_BY_SIDE times over: the files beside it in its s
   // the tree's ALONE files are unit test files of this tree, none APART, each in exactly one shard
   const files = testFiles("unit", ROOT);
   for (const f of ALONE) assert.ok(files.includes(f) && !APART.includes(f), f);
-  const placed = ALONE.map((f) => [1, 2, 3].filter((n) => shardFiles("unit", n, ROOT).includes(f)));
+  const placed = ALONE.map((f) => Array.from({ length: SHARDS.unit }, (_, i) => i + 1).filter((n) => shardFiles("unit", n, ROOT).includes(f)));
   assert.deepEqual(placed.map((p) => p.length), ALONE.map(() => 1));
   assert.equal(NEAR_BOUND_MS, gate.TEST_TIMEOUT_MS / 2);
 });
@@ -377,7 +378,7 @@ test("a unit shard runs its ALONE files after its others, one at a time, and rec
   const names = ["x.test.ts", "y.test.ts", "z.test.ts", "w.test.ts"].map(T);
   const root = tree(t, { [solo]: marked(solo, 300), [other]: marked(other, 300), ...Object.fromEntries(names.map((f) => [f, marked(f, 200)])) },
     { default: 1000, files: { [solo]: 100, [other]: 100 } });
-  const shard = [1, 2, 3].find((n) => shardFiles("unit", n, root).includes(solo))!;
+  const shard = Array.from({ length: SHARDS.unit }, (_, i) => i + 1).find((n) => shardFiles("unit", n, root).includes(solo))!;
   const mine = shardFiles("unit", shard, root);
   assert.ok(mine.length > 1, `the ALONE file shares its shard: ${mine.join(", ")}`);
   const out = path.join(root, "ran"), marks = path.join(root, "marks.txt");
@@ -403,13 +404,14 @@ test("verify unit warns of a test near its bound: a file not ALONE is told to be
   assert.deepEqual(nearBoundLines([rec(1, { [T("fine.test.ts")]: NEAR_BOUND_MS }), { kind: "unit", shard: 2, files: [], exit: 0 }]), [], "at the line, or a record from before the longest tests, warns of nothing");
 });
 
-test("the rest shards keep their hand weights: the integration files' partition is the base's", () => {
+test("the rest shards are weighed by their files' measured seconds, and a file not listed by REST_UNLISTED", () => {
   const rest = weightOf("rest", ROOT);
-  const hand: Array<[string, number]> = [["duck-stream", 90], ["duck-poll", 77], ["cli-upgrade", 73], ["cli-sources", 30], ["duck-serve", 23], ["duck-json-paths", 11], ["not-listed", 3]];
+  const hand: Array<[string, number]> = [["duck-generated", 316], ["duck-pool", 219], ["duck-poll", 160], ["duck-secret", 141], ["duck-stream", 136], ["duck-libc-read", 129],
+    ["cli-upgrade", 123], ["cli-sources", 82], ["duck-serve", 74], ["duck-json-paths", 14], ["cli-source-role", 14], ["not-listed", 3]];
   assert.deepEqual(hand.map(([f]) => rest(T(`integration/${f}.itest.ts`)) / 1000), hand.map(([, s]) => s));
 });
 
-/** the records of three unit shards over the tree's files, with what each is given */
+/** the records of the unit shards over the tree's files, with what each is given */
 function unitRecords(dir: string, each: (shard: number) => Partial<ShardRecord>): void {
   for (let shard = 1; shard <= SHARDS.unit; shard++) fs.writeFileSync(path.join(dir, `ran-unit-${shard}.json`), JSON.stringify({ kind: "unit", shard, files: shardFiles("unit", shard, ROOT), exit: 0, ...each(shard) }));
 }
@@ -421,14 +423,14 @@ const tmp = (t: { after(f: () => void): void }): string => {
 
 test("verify unit says each shard's wall time and CPU and the gap, warns past a minute, and never moves the exit code", (t) => {
   const near = tmp(t);
-  unitRecords(near, (n) => ({ wallMs: [540000, 560000, 580000][n - 1]!, cpu: `cpu ${n} × 4` }));
+  unitRecords(near, (n) => ({ wallMs: [540000, 560000, 580000, 550000][n - 1]!, cpu: `cpu ${n} × 4` }));
   const ok = program("ci-shards.ts", ["verify", "unit", near], { GITHUB_RUN_ID: "123" });
   assert.equal(ok.status, 0, ok.out);
   assert.match(ok.out, /unit shard 1: balance: 540\.0 s as run, \d+ file\(s\); runner: cpu 1 × 4\n/);
   assert.match(ok.out, /unit shards: balance: 40\.0 s apart as run, shard 3 the slowest and 1 the fastest \(the target: 60\.0 s or less\)/);
   assert.doesNotMatch(ok.out, /::warning/);
   const far = tmp(t);
-  unitRecords(far, (n) => ({ wallMs: [220000, 1090000, 310000][n - 1]! }));
+  unitRecords(far, (n) => ({ wallMs: [220000, 1090000, 310000, 300000][n - 1]! }));
   const apart = program("ci-shards.ts", ["verify", "unit", far], { GITHUB_RUN_ID: "123" });
   assert.equal(apart.status, 0, apart.out);
   assert.match(apart.out, /^::warning title=unit shards::the unit shards ran 870\.0 s apart, past the target of 60\.0 s: rebalance with `node scripts\/ci-shards\.ts weights 123`/m);
@@ -438,14 +440,14 @@ test("verify unit says each shard's wall time and CPU and the gap, warns past a 
   // one file's floor (PR 346's second run): the slowest shard's longest file alone is past the target from the fastest,
   // so the warning names that file, never a rebalance that cannot close it
   const floor = tmp(t);
-  unitRecords(floor, (n) => ({ wallMs: [351600, 376100, 860000][n - 1]!, times: Object.fromEntries(shardFiles("unit", n, ROOT).map((f, i) => [f, n === 3 && i === 0 ? 852800 : 4000])) }));
+  unitRecords(floor, (n) => ({ wallMs: [351600, 376100, 860000, 360000][n - 1]!, times: Object.fromEntries(shardFiles("unit", n, ROOT).map((f, i) => [f, n === 3 && i === 0 ? 852800 : 4000])) }));
   const held = program("ci-shards.ts", ["verify", "unit", floor], { GITHUB_RUN_ID: "123" });
   assert.equal(held.status, 0, held.out);
   const first3 = shardFiles("unit", 3, ROOT)[0]!;
   assert.ok(held.out.includes(`::warning title=unit shards::the unit shards ran 508.4 s apart, past the target of 60.0 s, and no split closes it: ${first3} alone took 852.8 s of shard 3's 860.0 s, where the fastest shard took 351.6 s`), held.out);
   assert.doesNotMatch(held.out, /weights 123/);
   // within the target of the fastest, the longest file is no floor: rebalance
-  unitRecords(floor, (n) => ({ wallMs: [351600, 376100, 860000][n - 1]!, times: Object.fromEntries(shardFiles("unit", n, ROOT).map((f, i) => [f, n === 3 && i === 0 ? 400000 : 4000])) }));
+  unitRecords(floor, (n) => ({ wallMs: [351600, 376100, 860000, 360000][n - 1]!, times: Object.fromEntries(shardFiles("unit", n, ROOT).map((f, i) => [f, n === 3 && i === 0 ? 400000 : 4000])) }));
   assert.match(program("ci-shards.ts", ["verify", "unit", floor], { GITHUB_RUN_ID: "123" }).out, /::warning title=unit shards::.*rebalance with `node scripts\/ci-shards\.ts weights 123`/);
   // a file left out: 1 by coverage, the warning beside it
   const record1 = path.join(far, "ran-unit-1.json");
@@ -462,7 +464,7 @@ test("verify unit over records from before the timing: coverage decides, the bal
   unitRecords(old, () => ({}));
   const r = program("ci-shards.ts", ["verify", "unit", old]);
   assert.equal(r.status, 0, r.out);
-  assert.match(r.out, /unit shards: balance: not measured: the record of unit shard\(s\) 1, 2, 3 has no wall time/);
+  assert.match(r.out, /unit shards: balance: not measured: the record of unit shard\(s\) 1, 2, 3, 4 has no wall time/);
   const one = tmp(t);
   unitRecords(one, (n) => (n === 2 ? {} : { wallMs: 500000 }));
   const r2 = program("ci-shards.ts", ["verify", "unit", one]);
@@ -471,11 +473,11 @@ test("verify unit over records from before the timing: coverage decides, the bal
   assert.doesNotMatch(r2.out, /apart|::warning/);
 });
 
-/** three synthetic records as `gh run download` leaves them (a folder each), timed unless `each` says otherwise */
+/** four synthetic records as `gh run download` leaves them (a folder each), timed unless `each` says otherwise */
 // (a field `each` sets to undefined is left out of the record, as JSON leaves it)
 function timedRecords(dir: string, each: (shard: number) => Record<string, unknown> = () => ({})): Record<string, number> {
   const ms: Record<string, number> = { [T("a.test.ts")]: 300000, [T("b.test.ts")]: 120000, [T("c.test.ts")]: 2000, [T("d.test.ts")]: 5000, [T("e.test.ts")]: 9000, [T("f.test.ts")]: 40000 };
-  const shards = [[T("a.test.ts")], [T("b.test.ts"), T("c.test.ts")], [T("d.test.ts"), T("e.test.ts"), T("f.test.ts")]];
+  const shards = [[T("a.test.ts")], [T("b.test.ts"), T("c.test.ts")], [T("d.test.ts"), T("e.test.ts")], [T("f.test.ts")]];
   shards.forEach((files, i) => {
     const folder = path.join(dir, `ran-unit-${i + 1}`);
     fs.mkdirSync(folder, { recursive: true });
@@ -501,8 +503,8 @@ test("weights refuses records that cannot give the fixture, and writes nothing",
   const root = tree(t, {}, { default: 1, files: {} });
   const before = fs.readFileSync(path.join(root, UNIT_WEIGHTS_FILE), "utf8");
   const cases: Array<[string, (dir: string) => void, RegExp]> = [
-    ["shard 3 missing", (dir) => { timedRecords(dir); fs.rmSync(path.join(dir, "ran-unit-3"), { recursive: true }); }, /the records are of shard\(s\) 1,2, where 1,2,3/],
-    ["shard 2 twice", (dir) => { timedRecords(dir); fs.mkdirSync(path.join(dir, "again")); fs.copyFileSync(path.join(dir, "ran-unit-2", "ran-unit-2.json"), path.join(dir, "again", "ran-unit-2.json")); }, /shard\(s\) 1,2,2,3/],
+    ["shard 3 missing", (dir) => { timedRecords(dir); fs.rmSync(path.join(dir, "ran-unit-3"), { recursive: true }); }, /the records are of shard\(s\) 1,2,4, where 1,2,3,4/],
+    ["shard 2 twice", (dir) => { timedRecords(dir); fs.mkdirSync(path.join(dir, "again")); fs.copyFileSync(path.join(dir, "ran-unit-2", "ran-unit-2.json"), path.join(dir, "again", "ran-unit-2.json")); }, /shard\(s\) 1,2,2,3,4/],
     ["shard 2 untimed", (dir) => { timedRecords(dir, (n) => (n === 2 ? { times: undefined } : {})); }, /the record of unit shard 2 of .* has no times/],
     ["shard 3 failed", (dir) => { timedRecords(dir, (n) => (n === 3 ? { exit: 1 } : {})); }, /unit shard 3 of .* exited 1/],
     ["a file untimed", (dir) => { timedRecords(dir, (n) => (n === 1 ? { times: {} } : {})); }, /a\.test\.ts ran in unit shard 1 of .* but has no time/],

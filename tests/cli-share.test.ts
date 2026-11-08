@@ -31,7 +31,7 @@ import type { ShareDoor, ShareSocket } from "../src/api/postgres/server.ts";
 // read from the modules when the tests run: the file loads at a commit without them, and each test fails by name
 // (scripts/fails-without.ts)
 const absent = (): Record<string, unknown> => ({});
-const { lastLines, pinggyConfig, probeShare, tunnelAddress, tunnelEnds, tunnelPlan } = await import("../src/cli/tunnel.ts" as string).catch(absent) as typeof import("../src/cli/tunnel.ts");
+const { lastLines, pinggyConfig, probeShare, startTunnel, tunnelAddress, tunnelEnds, tunnelPlan } = await import("../src/cli/tunnel.ts" as string).catch(absent) as typeof import("../src/cli/tunnel.ts");
 const { newSharePassword, RunShares, shareRole, shareSecret, tunnelReport } = await import("../src/cli/share-run.ts" as string).catch(absent) as typeof import("../src/cli/share-run.ts");
 const { chosenRole, inOrder } = await import("../src/cli/share.ts" as string).catch(absent) as typeof import("../src/cli/share.ts");
 
@@ -301,6 +301,20 @@ test("the certificate that cannot be made is the command's failure, and leaves n
   assert.equal(shares.state(), null);
 });
 
+test("a tunnel's stop settles once its client is gone: SIGTERM, and SIGKILL past a grace for a client that ignores it", async () => {
+  const plan = { ...tunnelPlan("bore", { port: 1, home: os.tmpdir(), token: null }), bin: "/bin/sh",
+    args: ["-c", "trap '' TERM; echo 'listening at 127.0.0.1:4321'; while :; do sleep 0.1; done"] };
+  const t = await startTunnel(plan, { timeoutMs: 10_000 });
+  assert.ok(!("message" in t), JSON.stringify(t));
+  assert.equal(t.port, 4321);
+  assert.ok(alive(t.pid));
+  const began = Date.now();
+  await t.stop();
+  assert.equal(alive(t.pid), false, "the client outlived its stop");
+  assert.ok(Date.now() - began < 10_000, `stop took ${Date.now() - began} ms`);
+  assert.match(await t.ended, /SIGKILL/);
+});
+
 test("the probe: nothing listening is no verdict, a server that takes no TLS is another thing", async () => {
   const closed = await new Promise<number>((resolve) => { const s = net.createServer(); s.listen(0, "127.0.0.1", () => { const a = s.address() as net.AddressInfo; s.close(() => resolve(a.port)); }); });
   assert.equal(await probeShare({ host: "127.0.0.1", port: closed }, "AA", 2_000), "unknown");
@@ -364,6 +378,7 @@ mode=$(cat "$STUB_STATE/mode" 2>/dev/null || echo ok)
 case "$mode" in
   silent) ;;
   noisy) echo "the new format of a tunnel service" ;;
+  deaf) trap '' TERM; echo "the new format of a tunnel service" ;;
   fail) echo "$MASON_STUB_LINE" >&2; exit 255 ;;
   other) echo "tcp://127.0.0.1:$(cat "$STUB_STATE/other-port")" ;;
   bore) echo "listening at 127.0.0.1:$port" ;;
@@ -613,6 +628,19 @@ describe("mason share, against a real run and a stub tunnel", { timeout: 300_000
     } finally { mode("ok"); }
   });
 
+  test("a tunnel client that ignores SIGTERM is killed before the command says nothing was left open", async () => {
+    mode("deaf");
+    try {
+      const s = startShare(["--timeout", "1"]);
+      assert.equal(await s.exited, 124, s.stderr());
+      assert.match(s.stderr(), /Nothing was left open/);
+      assert.deepEqual(stubAlive(), []);
+    } finally {
+      mode("ok");
+      for (const pid of stubAlive()) process.kill(pid, "SIGKILL");
+    }
+  });
+
   test("an address that is not this share is refused, never reported", async () => {
     mode("other");
     fs.writeFileSync(path.join(stubState, "other-port"), String(pgPort));
@@ -847,7 +875,7 @@ function fakeTunnel(o: { fail?: Failure } = {}): { start: NonNullable<import("..
       if (o.fail !== undefined) return o.fail;
       opts.onPid?.(4242);
       const ended = new Promise<string>((r) => { finish = r; });
-      return { host: "relay.example", port: 41234, endsAt: new Date(Date.now() + 3_600_000).toISOString(), pid: 4242, ended, stop: () => { stops++; finish("it was ended (SIGTERM)"); } };
+      return { host: "relay.example", port: 41234, endsAt: new Date(Date.now() + 3_600_000).toISOString(), pid: 4242, ended, stop: async () => { stops++; finish("it was ended (SIGTERM)"); } };
     },
   };
 }

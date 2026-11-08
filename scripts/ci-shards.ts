@@ -46,17 +46,23 @@ export type Kind = keyof typeof SHARDS;
 export const isKind = (k: string | undefined): k is Kind => k === "unit" || k === "rest" || k === "oracle";
 
 /**
- * Seconds of test time on CI's runner, about (`slowest tests` in a job's log), to balance the REST shards. Only the
- * files that matter are here: a stale number costs balance, never coverage, and a file not listed counts as
- * `REST_UNLISTED`, so a new one lands in the lightest shard. The unit shards are weighed by tests/fixtures/unit-weights.json.
+ * Seconds of test time on CI's runner, to balance the REST shards: each file's top-level tests summed from the rest
+ * shards' logs of run 42469071319 (7769438). Only the files that matter are here: a stale number costs balance, never
+ * coverage, and a file not listed counts as `REST_UNLISTED`, so a new one lands in the lightest shard. The unit shards
+ * are weighed by tests/fixtures/unit-weights.json.
  */
 const REST_WEIGHTS: Readonly<Record<string, number>> = {
-  "tests/integration/duck-stream.itest.ts": 90,
-  "tests/integration/duck-poll.itest.ts": 77,
-  "tests/integration/cli-upgrade.itest.ts": 73,
-  "tests/integration/cli-sources.itest.ts": 30,
-  "tests/integration/duck-serve.itest.ts": 23,
-  "tests/integration/duck-json-paths.itest.ts": 11,
+  "tests/integration/duck-generated.itest.ts": 316,
+  "tests/integration/duck-pool.itest.ts": 219,
+  "tests/integration/duck-poll.itest.ts": 160,
+  "tests/integration/duck-secret.itest.ts": 141,
+  "tests/integration/duck-stream.itest.ts": 136,
+  "tests/integration/duck-libc-read.itest.ts": 129,
+  "tests/integration/cli-upgrade.itest.ts": 123,
+  "tests/integration/cli-sources.itest.ts": 82,
+  "tests/integration/duck-serve.itest.ts": 74,
+  "tests/integration/duck-json-paths.itest.ts": 14,
+  "tests/integration/cli-source-role.itest.ts": 14,
 };
 const REST_UNLISTED = 3;
 /** The executor's stress tests fill every core they get: one to a shard, before anything else is placed. */
@@ -70,9 +76,12 @@ export const APART: readonly string[] = ["tests/duck-executor-slow-vector.test.t
  * run alone in 41444899410 and 41447115368: round 12 90-143 s, round 6 100-102 s, round 7 95-96 s): its shard runs it
  * after its other files, one ALONE file at a time (`aloneCommand`), so nothing runs beside it, and `partition` counts it
  * SIDE_BY_SIDE times over, the shard's wall it takes. `verify unit` warns of a file not listed whose longest test ran
- * past NEAR_BOUND_MS (`nearBoundLines`); the bound itself is never loosened.
+ * past NEAR_BOUND_MS (`nearBoundLines`); the bound itself is never loosened. With four unit shards (issue 757, run
+ * 42477046051) cli-share's longest test took 269.9 s, cli-replica-password's 267.8 s and cli-state-matrix's 201.3 s beside
+ * their shards' other files: listed too.
  */
-export const ALONE: readonly string[] = ["tests/duck-generated-round12.test.ts", "tests/duck-generated-round6.test.ts", "tests/duck-generated-round7-8.test.ts"];
+export const ALONE: readonly string[] = ["tests/duck-generated-round12.test.ts", "tests/duck-generated-round6.test.ts", "tests/duck-generated-round7-8.test.ts",
+  "tests/cli-share.test.ts", "tests/cli-replica-password.test.ts", "tests/cli-state-matrix.test.ts"];
 /** Half the per-test bound: a test past it on one runner's draw is one draw from the bound on a slower one */
 export const NEAR_BOUND_MS = TEST_TIMEOUT_MS / 2;
 /** The files a unit shard runs at once: Node's default, os.availableParallelism() - 1, on CI's 4-vCPU runners */
