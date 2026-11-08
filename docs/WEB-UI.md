@@ -294,9 +294,11 @@ listens, and every browser connection crosses that one ssh connection as frames 
   opens), served as before; `MASON_PROJECT_READONLY=1` is what refuses the commands' edits of the project's files.
   Anything but `0` or `1` refuses the start; `mason start` refuses it.
 - **In the image, Mason's user is uid 1000, gid 1000 (`node`), and stays so**: an image that changes it names it under
-  "Before you upgrade" in its release notes (deploy/mason-data/README.md). A supervisor that creates the socket's folder
-  makes it owned by `1000:1000`, mode 0700, where the container mounts it, and checks that the socket is owned by uid
-  1000 before it connects.
+  "Before you upgrade" in its release notes (deploy/mason-data/README.md). A supervisor that creates the folder of the
+  socket or the run file makes it owned by `1000:1000`, mode 0700, where the container mounts it (the one folder rule of
+  both: owned by Mason's uid, no group or other write, never a link), and checks that the socket or the file is owned by
+  uid 1000 before it connects or reads. The run file is 0600 and uid 1000's, so a supervisor reads it as uid 1000 or as
+  root, never as another user.
 - **Another page's cookie crosses too.** A browser keeps cookies by host, not port, so a local `mason start`'s cookie for
   127.0.0.1 is sent through the tunnel in the Cookie header. Each cookie is named for its port, and the server reads
   only the one for the Host it was asked by, so that one is ignored, though it does reach the server.
