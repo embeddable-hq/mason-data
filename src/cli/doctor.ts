@@ -53,11 +53,14 @@ export const DOCTOR_USAGE = `usage: mason doctor [--json]
   Exit status: 0 nothing failed — a warning (!) and a check that could not tell (?) are said, and leave it 0; 1
   something failed (said, with the way out).
 
-  The --json answer: { ready, verdict, checks: [{ name, ok, detail, warn, code, fix }], next: [{ command, what }] }; ok
-    is true, false, or null when it could not tell; warn (only when true): fine to run, but said loudly; code
-    (the role's lines): ${ROLE_CODES.slice(0, 5).join(", ")},
+  The --json answer: { ready, verdict, checks: [{ name, ok, detail, why, warn, code, fix, fixSql, fixThen }],
+    next: [{ command, what }] }; ok is true, false, or null when it could not tell; warn (only when true): fine to
+    run, but said loudly; code (the role's lines):
+    ${ROLE_CODES.slice(0, 5).join(", ")},
     ${ROLE_CODES.slice(5).join(", ")};
-    fix (with code): the statements and the edit that make a role that only reads
+    why (the role's warnings): why it is said, which a terminal prints after the detail ("<detail>. <why>");
+    fix (with code): the statements and the edit that make a role that only reads, whole; fixSql: its SQL alone, to
+    run on the primary; fixThen: the steps after it (fix is fixSql, then a line "then: <fixThen>")
 `;
 
 export const DOCTOR: CommandSpec = {
@@ -75,9 +78,16 @@ export interface Check {
   warn?: true;
   /** a stable name for what the line found, for an agent (the role's: `ROLE_CODES`) */
   code?: string;
+  /** why the line is said, apart from its facts for a tool; a terminal prints it after the detail (`checkText`) */
+  why?: string;
   /** the way out as statements and lines to change, printed under the checks once however many lines share it */
   fix?: string;
+  /** `fix`'s parts for a tool: the SQL to run on the primary, and the steps after it (`fix` is both, joined by "then: ") */
+  fixSql?: string; fixThen?: string;
 }
+
+/** A check's text as a person reads it: its facts, then why it is said. */
+export const checkText = (c: Pick<Check, "detail" | "why">): string => c.why === undefined ? c.detail : `${c.detail}. ${c.why}`;
 
 /** The ports a mason start takes by default, and what listens on each. */
 export const PORTS: ReadonlyArray<[port: number, what: string]> = [[DEFAULT_UI_PORT, "the mason commands"], [DEFAULT_PG_PORT, "the Postgres API"]];
@@ -273,6 +283,22 @@ function markOf(c: Check, s: Style): string {
   return c.ok === false ? s.red("!! ") : c.ok === null ? s.yellow("?  ") : c.warn === true ? s.yellow("!  ") : s.green("ok ");
 }
 
+/** The checks as a person reads them: each one's mark by its state, its text wrapped under its column, then each way out once. */
+export function checkLines(checks: readonly Check[], s: Style, running: boolean): string[] {
+  const lines: string[] = [];
+  const w = Math.max(...checks.map((c) => c.name.length));
+  for (const c of checks) {
+    if (running && c.name === "mason start" && c.ok === true) continue;   // the verdict line said it
+    lines.push(`  ${markOf(c, s)} ${c.name.padEnd(w)}  ${wrap(checkText(c), s.width, 2 + 3 + 1 + w + 2)}`);
+  }
+  // a way out several lines share, once, under them: SQL as what you type, the rest as its words
+  for (const fix of new Set(checks.map((c) => c.fix).filter((x): x is string => x !== undefined))) {
+    lines.push("");
+    for (const line of fix.split("\n")) lines.push(`    ${/;(\s+--.*)?$/.test(line) ? s.cyan(line) : line.startsWith("--") ? s.dim(line) : wrap(line, s.width, 4)}`);
+  }
+  return lines;
+}
+
 export async function doctor(argv: string[], deps: { which?: (cwd: string) => ReturnType<typeof theRun> } = {}): Promise<number> {
   const f = parseCommand(DOCTOR, argv);
   if (typeof f === "number") return f;
@@ -305,20 +331,10 @@ export async function doctor(argv: string[], deps: { which?: (cwd: string) => Re
   const next = nextSteps(checks, run, project);
   const { ready, verdict } = verdictOf(checks, run, project);
   if (f.values.json) { out(jsonText(DOCTOR, { ready, verdict, checks }, next)); return ready ? 0 : 1; }
-  // on a terminal: the verdict green or red, each check's mark by its state, its detail wrapped under its column
+  // on a terminal: the verdict green or red, then the checks
   const s = styleOut();
   out(s.bold(ready ? s.green(verdict) : s.red(verdict)));
-  const w = Math.max(...checks.map((c) => c.name.length));
-  for (const c of checks) {
-    if (run !== null && c.name === "mason start" && c.ok === true) continue;   // the verdict line said it
-    const mark = markOf(c, s);
-    out(`  ${mark} ${c.name.padEnd(w)}  ${wrap(c.detail, s.width, 2 + 3 + 1 + w + 2)}`);
-  }
-  // a way out several lines share, once, under them: SQL as what you type, the rest as its words
-  for (const fix of new Set(checks.map((c) => c.fix).filter((x): x is string => x !== undefined))) {
-    out("");
-    for (const line of fix.split("\n")) out(`    ${/;(\s+--.*)?$/.test(line) ? s.cyan(line) : line.startsWith("--") ? s.dim(line) : wrap(line, s.width, 4)}`);
-  }
+  for (const line of checkLines(checks, s, run !== null)) out(line);
   if (run !== null) out(s.dim(`  its synced data and its state in ${run.home}. mason status for the details`));
   if (run === null || !ready) out(nextBlock(next));
   return ready ? 0 : 1;
