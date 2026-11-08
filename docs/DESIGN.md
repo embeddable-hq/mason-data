@@ -2389,8 +2389,9 @@ money, and are the owner's call.
 
 **Revisited (2026-11-08, issue 757): a shard more in every group, unit 4, oracle 3, rest 3.** The third leg was rejected
 above only while other jobs were slower; the owner asked for one more shard in each group at once. A run took 20.1 min to
-its last required check on main (42472233683: unit (1) 19.7 min), and 13.7 min on PR 769's (42475981142), where the
-oracle's legs became the slowest jobs (11.1 to 13.2 min, against 10.4 min or less for every unit and rest shard). The
+its last required check on main (42472233683: unit (1) 19.7 min), and 13.05 min on PR 769's (42477046051, at 214c0a7),
+where unit (4) was the slowest job (12.7 min) and the oracle's three legs were balanced, 23 s apart in one machine's
+seconds (11.6 to 12.3 min). The
 rest shards' hand table was rewritten from measured seconds at the same time: it had estimated 163 s for a shard that ran
 847 s, and four of the heaviest files were not listed in it.
 
