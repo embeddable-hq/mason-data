@@ -18,7 +18,7 @@ const events = (): Promise<Events> => import("../src/duck/events.ts" as string) 
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-events-"));
 const store = await DuckStore.open(path.join(dir, "duck.db"), () => undefined);
-after(() => { store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+after(async () => { await store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
 
 test("every event is read back as the sync recorded it, newest last; --failed is the failures alone; the newest n; from a time on", async () => {
   const { SyncEvents, EVENTS_TABLE } = await events();

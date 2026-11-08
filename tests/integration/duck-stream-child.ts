@@ -32,5 +32,5 @@ try {
   process.stdout.write(`${JSON.stringify({ error: (e as Error).message, logged })}\n`);
 } finally {
   await sync.stop();
-  store.close();
+  await store.close();
 }

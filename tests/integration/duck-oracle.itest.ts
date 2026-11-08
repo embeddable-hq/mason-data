@@ -321,7 +321,7 @@ after(async () => {
   if (server) await server.close();
   // the sync's next pass is a timer: left running, it holds the process open after a failed assertion
   await sync?.stop();
-  store?.close();
+  await store?.close();
   fs.rmSync(dir, { recursive: true, force: true });
   if (adminUrl) psql(adminUrl, `DROP DATABASE IF EXISTS ${tag} WITH (FORCE)`);
   // the role cases' login role (its grants went with the database)

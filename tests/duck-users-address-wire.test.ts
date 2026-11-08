@@ -76,7 +76,7 @@ after(async () => {
   await direct?.close();
   await proxied?.close();
   await ledger.close();
-  store.close();
+  await store.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

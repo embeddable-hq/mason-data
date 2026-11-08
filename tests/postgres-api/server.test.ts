@@ -82,7 +82,7 @@ before(async () => {
 });
 after(async () => {
   await server.close();
-  store.close();
+  await store.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

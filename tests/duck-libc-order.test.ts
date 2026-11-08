@@ -104,7 +104,7 @@ test("the order is read from the database once, kept in the copy, and read again
     await store.writer.run(`UPDATE _mason.libc_order SET data = '{"collate":"en_US.utf8","version":"2.42","l1":[],"l4":[],"covered":[],"expansions":[]}'`);
     assert.equal((await store.libcOrder("en_US.utf8", "2.42", read)).read, true);
     assert.equal(reads, 3);
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });
 
 test("ORDER BY, < and min / max under a libc collation follow the order read, through the wire", async () => {
@@ -146,7 +146,7 @@ test("ORDER BY, < and min / max under a libc collation follow the order read, th
       assert.deepEqual((await rows("SELECT * FROM coll, (VALUES ('a'), ('B')) AS v WHERE id = 2 ORDER BY 3")).map((r) => r[2]), ["a", "B"]);
       assert.deepEqual((await rows("SELECT * FROM coll, (VALUES ('B', 1), ('a', 2)) AS v WHERE id = 2 ORDER BY column1")).map((r) => r[2]), ["a", "B"]);
     } finally { await c.end(); }
-  } finally { await api?.close(); store.close(); }
+  } finally { await api?.close(); await store.close(); }
 });
 
 /** `source` as the database, comparing as `holdLibcOrder` asks */
@@ -267,7 +267,7 @@ test("an order not followed refuses text by Mason gap libc-locale-unread, and th
       assert.deepEqual((await rows("SELECT count(*) FROM coll WHERE s = 'a'")).flat(), ["1"]);
       assert.deepEqual((await rows("SELECT count(*) FROM (SELECT s FROM coll GROUP BY s) g")).flat(), ["3"]);
     } finally { await c.end(); }
-  } finally { await api?.close(); store.close(); }
+  } finally { await api?.close(); await store.close(); }
 });
 
 test("a libc locale whose order is the bytes' is served as bytes", async () => {
@@ -276,7 +276,7 @@ test("a libc locale whose order is the bytes' is served as bytes", async () => {
   try {
     const duck = await store.listener({ provider: "c", collate: "en_US.UTF-8", locale: null }, null, { ...emptyLibcOrder("en_US.UTF-8", null), bytes: true });
     assert.deepEqual(duck.collation, { kind: "bytes" });
-  } finally { store.close(); }
+  } finally { await store.close(); }
 });
 
 test("the kept order is keyed on the collation library's version now, so a glibc upgrade reads it again", async () => {
@@ -390,5 +390,5 @@ test("libc bound: a top N and a min / max key their candidates alone, so a value
       // a grouped min keys every group's rows, as written
       await assert.rejects(c.query("SELECT id % 2, min(s) FROM t GROUP BY 1"), uncovered);
     } finally { await c.end(); }
-  } finally { await api?.close(); store.close(); }
+  } finally { await api?.close(); await store.close(); }
 });

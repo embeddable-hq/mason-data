@@ -79,7 +79,7 @@ test("a copy an older Mason made with a held column stored otherwise is read aga
     assert.ok(!after.logs.some((l) => l.includes(HELD_LAYOUT)), after.logs.join("\n"));
     await after.sync.stop();
   } finally {
-    store.close();
+    await store.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

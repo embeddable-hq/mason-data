@@ -396,7 +396,7 @@ before(async () => {
 });
 after(async () => {
   await api.close();
-  store.close();
+  await store.close();
   await truth.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -1258,7 +1258,7 @@ test("DuckDB's memory is bounded: half the RAM, or what leaves the reserve, unle
     await own.writer.run("CHECKPOINT");
     const compression = (await own.writer.runAndReadAll("SELECT column_name, compression FROM pragma_storage_info('packed') WHERE segment_type IN ('VARCHAR', 'BIGINT') GROUP BY 1, 2 ORDER BY 1, 2")).getRowsJS();
     assert.deepEqual(compression, [["i", "BitPacking"], ["j", "ZSTD"]], "the string column ZSTD, the integer its own");
-  } finally { own.close(); }
+  } finally { await own.close(); }
   // the shared store took the default: half the RAM, or of the container's limit, or what leaves the reserve beside it
   // when that is less (in whole MiB, DEFAULT_MEMORY_LIMIT; issue 301), as DuckDB prints it: to a tenth of its unit
   const total = machineMemoryBytes();
