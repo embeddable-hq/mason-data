@@ -409,20 +409,37 @@ test("a source view left out is one line naming what it reads, said once per sch
 });
 
 test("an idle timer stops the instance, and the next run starts it again", async () => {
-  const lines: string[] = [];
-  const idle = new PgCatalog(schema, { idleMs: 200, log: (l) => lines.push(l) });
+  // no fixed margin is read against the clock (issue 775): the test waits for the stop, then holds WHEN it came
+  // against what it sent. Each bound is one the timer owes under any load: a stop never earlier than the idle period
+  // after the last call, by Date.now() as the timer itself measures it.
+  const lines: { at: number; line: string }[] = [];
+  const said = (part: string): number => lines.filter((l) => l.line.includes(part)).length;
+  const idle = new PgCatalog(schema, { idleMs: 200, log: (line) => lines.push({ at: Date.now(), line }) });
+  const stopped = async (): Promise<number> => {
+    for (const end = Date.now() + 30_000; Date.now() < end; await new Promise((r) => setTimeout(r, 5))) {
+      const line = lines.find((l) => l.line.startsWith("catalog: PGlite stopped after"));
+      if (line !== undefined) return line.at;
+    }
+    assert.fail(`no idle stop within 30 s:\n${lines.map((l) => l.line).join("\n")}`);
+  };
   try {
     assert.deepEqual(rowsOf(await idle.run(simpleQuery("SELECT 1"))), [["1"]]);
     assert.equal(idle.started, true);
+    // armed in the same turn as the idle timer and for half its period, this sleep's timer always fires first, so the
+    // call below is queued ahead of the timer's stop, whatever the load
     await new Promise((r) => setTimeout(r, 100));
+    const called = Date.now();
     await idle.query("SELECT 1"); // a call inside the period pushes the stop back
-    await new Promise((r) => setTimeout(r, 150));
-    assert.equal(idle.started, true, "stopped before 200 ms of idleness");
-    await new Promise((r) => setTimeout(r, 350));
+    assert.equal(said("stopped"), 0, `the call came inside the period:\n${lines.map((l) => l.line).join("\n")}`);
+    assert.equal(idle.started, true);
+    const at = await stopped();
+    assert.ok(at - called >= 200, `stopped ${at - called} ms after the call, before 200 ms of idleness`);
     assert.equal(idle.started, false);
-    assert.equal(lines.at(-1), "catalog: PGlite stopped after 0 s idle");
+    assert.deepEqual(lines.map((l) => l.line).filter((l) => l.includes("stopped")), ["catalog: PGlite stopped after 0 s idle"]);
+    assert.equal(said("PGlite started"), 1, "one start before the stop");
     assert.deepEqual(rowsOf(await idle.run(simpleQuery("SELECT 2"))), [["2"]]);
     assert.equal(idle.started, true);
+    assert.equal(said("PGlite started"), 2, "the next run started it again");
   } finally {
     await idle.stop();
   }
