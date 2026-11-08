@@ -289,6 +289,8 @@ export function renderFacts(s, now = Date.now()) {
   const d = s.disk;
   rows.push(...diskRows(d).map(([k, v]) => factRow(k, v, d.freeBytes === null || (d.projectedBytes !== null && d.projectedBytes > d.freeBytes))));
   rows.push(...sessionsRows(s.sessions).map(([k, v]) => factRow(k, v)));
+  // `pageSocket` (mason serve with MASON_UI_SOCKET): said without its path, as the page shows no absolute path
+  if (typeof s.pageSocket === "string") rows.push(factRow("Web page", "served on a Unix socket on the server too (MASON_UI_SOCKET)"));
   return `<table class="facts-table"><caption>Mason</caption><tbody>${rows.join("")}</tbody></table>`;
 }
 

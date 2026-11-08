@@ -78,6 +78,8 @@ export interface RunContext {
   served?: boolean;
   /** MASON_UI_READ_ONLY=1 (src/cli/ui-read-only.ts): every change the page asks for is refused, and it offers none */
   pageReadOnly?: boolean;
+  /** MASON_UI_SOCKET (src/cli/ui-socket.ts): the Unix socket the page is served on too, or null */
+  pageSocket?: string | null;
   /** the project's database is the demo database this run hosts (`mason init demo`, src/cli/demo.ts): mason status says so */
   demo?: boolean;
   /** the project's users (src/cli/user.ts): what `/api/users` lists and changes, with the functions `mason user` calls —
@@ -202,6 +204,8 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     // why the page offers no control that changes anything (MASON_UI_READ_ONLY=1, src/cli/ui-read-only.ts), or null:
     // every change it would send is refused
     pageReadOnly: ctx.pageReadOnly === true ? PAGE_READ_ONLY_WHY : null,
+    // the Unix socket the page is served on too (MASON_UI_SOCKET), or null: mason status says it
+    pageSocket: ctx.pageSocket ?? null,
     source: { url: maskedUrl(ctx.source.url), host: ctx.source.host, database: ctx.source.database, remote: ctx.source.remote, demo: ctx.demo === true,
       // `replication` while a table's sync is replication (the run streams), else `poll`: each table's own is its kept
       version: facts.versionText, standby: facts.standby, changes: repl !== null ? "replication" : "poll", name: sources.file?.name ?? null, file: sources.file?.file ?? null,
@@ -646,48 +650,52 @@ export function createRunServer(ctx: RunContext): http.Server {
     // read, so a route added later is refused too; the commands' requests (the run's token) are served as before
     if (ctx.pageReadOnly === true && pageWrite(req.method, req.headers.authorization)) { sendFailure(res, 403, PAGE_READ_ONLY); return; }
     const url = new URL(req.url ?? "/", `http://127.0.0.1:${ctx.port}`);
+    // HEAD IS GET BY RULE, never route by route: routed as a GET, answered with its status and headers, and its body
+    // dropped by Node's own response to a HEAD. It passes nothing GET does not: the guard and the read-only rule above
+    // have judged it as the HEAD it is, and only GET routes are reached, none of which changes anything.
+    const method = req.method === "HEAD" ? "GET" : req.method;
     void (async () => {
       try {
-        const file = req.method === "GET" || req.method === "HEAD" ? page.get(url.pathname) : undefined;
+        const file = method === "GET" ? page.get(url.pathname) : undefined;
         if (file !== undefined) {
           res.writeHead(200, { "Content-Type": file.type, "Content-Length": file.body.length, ...(file.immutable ? { "Cache-Control": IMMUTABLE } : {}) })
-            .end(req.method === "HEAD" ? undefined : file.body);
-        } else if (req.method === "GET" && url.pathname === "/api/ping") {
+            .end(file.body);
+        } else if (method === "GET" && url.pathname === "/api/ping") {
           // what proves a run is up (src/cli/runs.ts answers): this token answered, by this process
           sendJson(res, 200, { pid: process.pid });
-        } else if (req.method === "GET" && url.pathname === "/api/state") {
+        } else if (method === "GET" && url.pathname === "/api/state") {
           // lean, as the page polls it; ?columns=1 with each table's columns (mason status --json)
           sendJson(res, 200, await state(ctx, url.searchParams.get("columns") === "1"));
-        } else if (req.method === "GET" && /^\/api\/tables\/[^/]+\/columns$/.test(url.pathname)) {
+        } else if (method === "GET" && /^\/api\/tables\/[^/]+\/columns$/.test(url.pathname)) {
           // one table's columns, read when the page's Columns… form opens (never with the state, polled every 2 s)
           let table: string;
           try { table = decodeURIComponent(url.pathname.split("/")[3]!); }
           catch { throw new Refusal(400, `${url.pathname} does not name a table: GET /api/tables/<schema.table, URL-encoded>/columns`); }
           sendJson(res, 200, tableColumns(ctx, table));
-        } else if (req.method === "GET" && url.pathname === "/api/slow") {
+        } else if (method === "GET" && url.pathname === "/api/slow") {
           // the last day's slow statements, from the request log (src/duck/requests.ts)
           sendJson(res, 200, { slow: await ctx.duck.requests.slow(SLOW_MS), slowMs: SLOW_MS });
-        } else if (req.method === "GET" && url.pathname === "/api/refused") {
+        } else if (method === "GET" && url.pathname === "/api/refused") {
           sendJson(res, 200, await ctx.duck.requests.refused());
-        } else if (req.method === "GET" && url.pathname === "/api/unsupported") {
+        } else if (method === "GET" && url.pathname === "/api/unsupported") {
           // the refused statements grouped by the unsupported SQL they used (src/duck/gaps.ts): mason status
           sendJson(res, 200, await unsupported(ctx, url.searchParams));
-        } else if (req.method === "GET" && url.pathname === "/api/requests") {
+        } else if (method === "GET" && url.pathname === "/api/requests") {
           // the filters, read as mason logs --requests reads its options (src/cli/request-filter.ts)
           const q = requestFilter(requestFilterText(url.searchParams));
           if ("message" in q) { sendFailure(res, 400, q); return; }
           sendJson(res, 200, { ...await ctx.duck.requests.page(q), keptDays: ctx.duck.requests.days });
-        } else if (req.method === "GET" && url.pathname === "/api/queries") {
+        } else if (method === "GET" && url.pathname === "/api/queries") {
           // the last day's and week's statements in one scan of the request log (mason status); asked on its own, never
           // with /api/state, which the page asks every 2 s
           // (cached SUMMARY_TTL_MS: up to 30 s old)
           sendJson(res, 200, { queries: await summary() });
-        } else if (req.method === "GET" && url.pathname === "/api/activity") {
+        } else if (method === "GET" && url.pathname === "/api/activity") {
           // one time range's statements, clients and slowest (the Usage page's), from the request log
           sendJson(res, 200, await activity(ctx, url.searchParams));
-        } else if (req.method === "GET" && url.pathname === "/api/running") {
+        } else if (method === "GET" && url.pathname === "/api/running") {
           sendJson(res, 200, { running: ctx.listener.running() });
-        } else if (req.method === "POST" && url.pathname === "/api/cancel") {
+        } else if (method === "POST" && url.pathname === "/api/cancel") {
           const body = JSON.parse(await readBody(req, 64 * 1024)) as { session?: unknown; statement?: unknown };
           const whole = (x: unknown): x is number => typeof x === "number" && Number.isInteger(x) && x >= 1;
           if (!whole(body.session)) throw new Refusal(400, "send { session }: the session's number, as mason logs --running lists it");
@@ -702,20 +710,20 @@ export function createRunServer(ctx: RunContext): http.Server {
           }
           if ("unknown" in r) { sendFailure(res, 404, { message: `no session ${r.unknown} is open`, code: "not_found", why: "it ended, or never was", next: [running] }); return; }
           sendFailure(res, 409, { message: `session ${r.idle} is running no statement: nothing to cancel`, code: "refused", why: "its statement ended, or it is between two", next: [running] });
-        } else if (req.method === "GET" && url.pathname === "/api/logs") {
+        } else if (method === "GET" && url.pathname === "/api/logs") {
           // the run's last log entries from memory (mason serve has no file to read): { at, text } each, oldest first
           const lines = Number(url.searchParams.get("lines") ?? Math.min(40, ctx.logs.capacity));
           if (!Number.isInteger(lines) || lines < 1 || lines > ctx.logs.capacity) throw new Refusal(400, `lines is a whole number of log entries, 1 to ${ctx.logs.capacity} (all the run keeps)`);
           const sinceText = url.searchParams.get("since");
           const since = sinceText === null ? undefined : timeParam("since", sinceText, Date.now());
           sendJson(res, 200, { lines: ctx.logs.recent({ lines, ...(since !== undefined ? { since } : {}) }), kept: ctx.logs.capacity });
-        } else if (req.method === "GET" && url.pathname === "/api/events") {
+        } else if (method === "GET" && url.pathname === "/api/events") {
           // the sync's events and the run's restarts, newest last (src/duck/events.ts): mason logs --events, mason status
           sendJson(res, 200, await events(ctx, url.searchParams));
-        } else if (req.method === "GET" && url.pathname === "/api/usage") {
+        } else if (method === "GET" && url.pathname === "/api/usage") {
           // usage over time, a sample a minute (src/duck/usage.ts): mason usage
           sendJson(res, 200, await usage(ctx, url.searchParams));
-        } else if (req.method === "POST" && url.pathname === "/api/pick") {
+        } else if (method === "POST" && url.pathname === "/api/pick") {
           const body = JSON.parse(await readBody(req, 64 * 1024)) as { table?: unknown; picked?: unknown; columns?: unknown; key?: unknown; sync?: unknown; keep?: unknown };
           if (typeof body.table !== "string" || typeof body.picked !== "boolean") throw new Refusal(400, "send { table, picked, columns?, key?, sync?, keep? }");
           // a sync by the sources file's own grammar (src/lib/table-sync.ts), as mason add --sync reads it
@@ -743,17 +751,17 @@ export function createRunServer(ctx: RunContext): http.Server {
             ctx.sourcesChanged();
             sendJson(res, 200, { ...r, state: await state(ctx) });
           }
-        } else if (req.method === "POST" && url.pathname === "/api/ui/tunnel") {
+        } else if (method === "POST" && url.pathname === "/api/ui/tunnel") {
           await openTunnel(ctx, tunnels, req, res);
-        } else if (req.method === "POST" && url.pathname === "/api/share") {
+        } else if (method === "POST" && url.pathname === "/api/share") {
           await openShare(ctx, req, res);
-        } else if (req.method === "GET" && url.pathname === "/api/share/choices") {
+        } else if (method === "GET" && url.pathname === "/api/share/choices") {
           // what a share with no role named reads, or the roles to choose from: the page asks before it asks the person
           if (ctx.pageShares === undefined) { sendFailure(res, 409, SERVED_SHARE); return; }
           const r = await ctx.pageShares.choices();
           if ("failure" in r && r.choices === undefined) { sendFailure(res, statusOf(r.failure), r.failure); return; }
           sendJson(res, 200, "failure" in r ? { choices: r.choices } : { choices: [], role: r.role, reads: r.reads });
-        } else if ((req.method === "POST" && /^\/api\/share\/[^/]+\/beat$/.test(url.pathname)) || (req.method === "DELETE" && /^\/api\/share\/[^/]+$/.test(url.pathname))) {
+        } else if ((method === "POST" && /^\/api\/share\/[^/]+\/beat$/.test(url.pathname)) || (method === "DELETE" && /^\/api\/share\/[^/]+$/.test(url.pathname))) {
           // the page's share: a beat holds it, a DELETE is Stop sharing; a share of mason share's is its command's to end
           if (ctx.pageShares === undefined || ctx.shares === undefined) { sendFailure(res, 409, SERVED_SHARE); return; }
           let user: string;
@@ -763,17 +771,17 @@ export function createRunServer(ctx: RunContext): http.Server {
           if (from === "command") { sendFailure(res, 409, { message: `the share ${user} is mason share's: Ctrl-C in its terminal ends it`, code: "refused" }); return; }
           const ended = ctx.shares.ended;
           const why = ended?.user === user ? `: ${ended.why}` : "";
-          const ok = req.method === "DELETE" ? await ctx.pageShares.stop(user) : ctx.pageShares.beat(user);
+          const ok = method === "DELETE" ? await ctx.pageShares.stop(user) : ctx.pageShares.beat(user);
           if (!ok) { sendFailure(res, 404, { message: `the share ${user} is not open${why === "" ? "" : `; it ended${why}`}`, code: "not_found", fix: "Connect from anywhere opens a new one, with a new address and password" }); return; }
           sendJson(res, 200, { ok: true });
-        } else if (req.method === "POST" && /^\/api\/share\/[^/]+$/.test(url.pathname)) {
+        } else if (method === "POST" && /^\/api\/share\/[^/]+$/.test(url.pathname)) {
           // what the command knows of its tunnel, as it knows it: mason status says it, and the run stops the client
           const body = tunnelReport(JSON.parse(await readBody(req, 64 * 1024)));
           if (body === null) throw new Refusal(400, "send { via?, host?, port?, endsAt?, state?, pid? }: what the command knows of its tunnel");
           const user = decodeURIComponent(url.pathname.slice("/api/share/".length));
           if (ctx.shares?.update(user, body) !== true) { sendFailure(res, 404, { message: `no share ${user} is open`, code: "not_found" }); return; }
           sendJson(res, 200, { ok: true });
-        } else if (req.method === "GET" && url.pathname === "/api/users") {
+        } else if (method === "GET" && url.pathname === "/api/users") {
           // mason user list --json's shape: the users, and whether each connects (and with ?lastUsed=1 when each was last used)
           const r = listUsers(ctx.users.file, ctx.users.apiKey, postgresLink(ctx.users.postgresUrl), ctx.roles?.() ?? NO_ROLES);
           if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
@@ -782,7 +790,7 @@ export function createRunServer(ctx: RunContext): http.Server {
           const used = url.searchParams.get("lastUsed") === "1" ? await withLastUsed(r.users, ctx.duck.requests, ctx.log)
             : { users: r.users, lastUsedNote: LAST_USED_NOT_ASKED, requestLogDays: ctx.duck.requests.days };
           sendJson(res, 200, { ...used, urlNote: null, next: nextJson([["mason user add <name>", "a user for a tool: its password and URL, printed once"]]) });
-        } else if (req.method === "POST" && url.pathname === "/api/users") {
+        } else if (method === "POST" && url.pathname === "/api/users") {
           const body = JSON.parse(await readBody(req, 64 * 1024)) as { name?: unknown; role?: unknown; set?: unknown; from?: unknown };
           if (typeof body.name !== "string") throw new Refusal(400, "send { name }: the user's name");
           if (body.role !== undefined && typeof body.role !== "string") throw new Refusal(400, "send { name, role }: the role's name, a string");
@@ -802,7 +810,7 @@ export function createRunServer(ctx: RunContext): http.Server {
           const { replaced, ...added } = r;
           ctx.log(`user ${added.user} added${replaced ? " (in place of one the API key's rotation had removed)" : ""}`);
           sendJson(res, 200, { ...added, next: nextJson(addedNext(added.user, true)) });
-        } else if (req.method === "POST" && /^\/api\/users\/[^/]+\/from$/.test(url.pathname)) {
+        } else if (method === "POST" && /^\/api\/users\/[^/]+\/from$/.test(url.pathname)) {
           // mason user from --json's shape, through its own function: the user's address ranges replaced (null: any address)
           let name: string;
           try { name = decodeURIComponent(url.pathname.split("/")[3]!); }
@@ -813,7 +821,7 @@ export function createRunServer(ctx: RunContext): http.Server {
           if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
           if (!r.already) ctx.log(`user ${r.changed.name} connects from ${rangesText(r.changed.from)}`);
           sendJson(res, 200, { ...r, next: nextJson(fromNext(r.changed.name, r.changed.from)) });
-        } else if (req.method === "POST" && /^\/api\/users\/[^/]+\/(disable|enable)$/.test(url.pathname)) {
+        } else if (method === "POST" && /^\/api\/users\/[^/]+\/(disable|enable)$/.test(url.pathname)) {
           // mason user disable|enable --json's shape, through its own functions: kept, its password unchanged
           const [, , , encoded, verb] = url.pathname.split("/") as [string, string, string, string, "disable" | "enable"];
           let name: string;
@@ -830,7 +838,7 @@ export function createRunServer(ctx: RunContext): http.Server {
             if (!r.already) ctx.log(`user ${r.enabled.name} enabled`);
             sendJson(res, 200, { ...r, next: nextJson(enabledNext(r.enabled.name)) });
           }
-        } else if (req.method === "DELETE" && url.pathname.startsWith("/api/users/")) {
+        } else if (method === "DELETE" && url.pathname.startsWith("/api/users/")) {
           let name: string;
           try { name = decodeURIComponent(url.pathname.slice("/api/users/".length)); }
           catch { throw new Refusal(400, `${url.pathname} does not name a user: DELETE /api/users/<name>`); }
@@ -838,12 +846,12 @@ export function createRunServer(ctx: RunContext): http.Server {
           if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
           ctx.log(`user ${r.removed.name} removed`);
           sendJson(res, 200, { ...r, next: nextJson(REMOVED_NEXT) });
-        } else if (req.method === "POST" && url.pathname === "/api/sync") {
+        } else if (method === "POST" && url.pathname === "/api/sync") {
           const body = JSON.parse(await readBody(req, 64 * 1024)) as { tables?: unknown };
           if (!Array.isArray(body.tables) || !body.tables.length || !body.tables.every((x) => typeof x === "string")) throw new Refusal(400, "send { tables: [schema.table, …] }");
           try { sendJson(res, 200, await ctx.duck.poll(body.tables as string[])); }
           catch (e) { if (e instanceof PollRefused) { sendFailure(res, e.code === "not_found" ? 404 : 409, { message: e.message, code: e.code }, { code: e.code }); return; } throw e; }
-        } else if (req.method === "POST" && url.pathname === "/api/remove") {
+        } else if (method === "POST" && url.pathname === "/api/remove") {
           const body = JSON.parse(await readBody(req, 64 * 1024)) as { tables?: unknown };
           if (!Array.isArray(body.tables) || !body.tables.length || !body.tables.every((m) => typeof m === "string")) throw new Refusal(400, "send { tables: [name, …] }");
           const r = removeTables(ctx, body.tables as string[]);

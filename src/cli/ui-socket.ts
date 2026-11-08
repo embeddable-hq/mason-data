@@ -42,7 +42,7 @@ export function uiSocketSetting(env: Readonly<Record<string, string | undefined>
 const refused = (file: string, problem: string, fix: string): Failure =>
   ({ message: `${UI_SOCKET_SETTING}=${file}: ${problem}`, code: "refused", why: "the socket is how a process on this machine reaches the web page, so only Mason's user may make or replace it", fix });
 
-const octal = (mode: number): string => `0${(mode & 0o777).toString(8)}`;
+export const octal = (mode: number): string => `0${(mode & 0o777).toString(8)}`;
 
 /** Whether a process answers on the socket at `file`: true, false (nothing listens), or the error that left it unknown. */
 function answers(file: string): Promise<boolean | Error> {
@@ -55,19 +55,34 @@ function answers(file: string): Promise<boolean | Error> {
 }
 
 /**
+ * THE FOLDER OF A FILE ONLY MASON'S USER MAY MAKE (the page's socket, the run's file, src/cli/ui-run-file.ts): a folder,
+ * not a link to one, owned by Mason's user, which no group or other can write; null, or what is wrong and the way out.
+ * Fails closed: a folder it cannot read is refused. `what` names the file in the way out ("socket", "run file").
+ */
+export function ownFolderProblem(file: string, what: string, uid: number): { problem: string; fix: string } | null {
+  const dir = path.dirname(file);
+  const ownFolder = `mkdir -m 700 ${dir} as Mason's user, or name a ${what} in a folder that is only its own (the data folder's .mason/ is)`;
+  let d: fs.Stats;
+  try { d = fs.lstatSync(dir); }
+  catch (e) { return { problem: `its folder ${dir} cannot be read: ${(e as NodeJS.ErrnoException).code === "ENOENT" ? "it does not exist" : (e as Error).message}`, fix: ownFolder }; }
+  if (d.isSymbolicLink()) {
+    let real: string;
+    try { real = fs.realpathSync(dir); } catch (e) { real = `it names nothing that can be read: ${(e as Error).message}`; }
+    return { problem: `its folder ${dir} is a symbolic link`, fix: `name the ${what} in the folder itself (${real}), not through a link to it` };
+  }
+  if (!d.isDirectory()) return { problem: `${dir} is not a folder`, fix: ownFolder };
+  if (d.uid !== uid) return { problem: `its folder ${dir} is owned by uid ${d.uid}, not Mason's user (uid ${uid})`, fix: ownFolder };
+  if ((d.mode & 0o022) !== 0) return { problem: `its folder ${dir} can be written by others than Mason's user (mode ${octal(d.mode)})`, fix: `chmod go-w ${dir}, or ${ownFolder}` };
+  return null;
+}
+
+/**
  * The folder and the path held to the bar (the header): null when the socket may be made, after a stale one is removed
  * (`said` is told), or the refusal. Fails closed: a fact it cannot read refuses.
  */
 export async function prepareUiSocket(file: string, said: (line: string) => void, uid: number = process.getuid!()): Promise<Failure | null> {
-  const dir = path.dirname(file);
-  const ownFolder = `mkdir -m 700 ${dir} as Mason's user, or name a socket in a folder that is only its own (the data folder's .mason/ is)`;
-  let d: fs.Stats;
-  try { d = fs.lstatSync(dir); }
-  catch (e) { return refused(file, `its folder ${dir} cannot be read: ${(e as NodeJS.ErrnoException).code === "ENOENT" ? "it does not exist" : (e as Error).message}`, ownFolder); }
-  if (d.isSymbolicLink()) return refused(file, `its folder ${dir} is a symbolic link`, `name the socket in the folder itself (${fs.realpathSync(dir)}), not through a link to it`);
-  if (!d.isDirectory()) return refused(file, `${dir} is not a folder`, ownFolder);
-  if (d.uid !== uid) return refused(file, `its folder ${dir} is owned by uid ${d.uid}, not Mason's user (uid ${uid})`, ownFolder);
-  if ((d.mode & 0o022) !== 0) return refused(file, `its folder ${dir} can be written by others than Mason's user (mode ${octal(d.mode)})`, `chmod go-w ${dir}, or ${ownFolder}`);
+  const folder = ownFolderProblem(file, "socket", uid);
+  if (folder !== null) return refused(file, folder.problem, folder.fix);
   let f: fs.Stats;
   try { f = fs.lstatSync(file); }
   catch (e) {

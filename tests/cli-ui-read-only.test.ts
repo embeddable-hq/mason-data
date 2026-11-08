@@ -146,6 +146,32 @@ test("read-only: viewing is unchanged — a GET or a HEAD of every path is never
   assert.ok(!fs.existsSync(path.join(root, "users.json")));
 });
 
+test("HEAD on every path of the server answers what GET answers — its status and content type — without the body, by the page and by the commands, read-only or not; nothing changes (issue 754)", async () => {
+  for (const o of [{}, { pageReadOnly: true }]) {
+    const { ctx, changes, root } = await listening(o);
+    const asks: Array<[string, (method: string) => Record<string, string>]> = [
+      ["the page", (method) => pageHeaders(ctx.port, method)],
+      ["the commands", () => ({ Host: `127.0.0.1:${ctx.port}`, Authorization: `Bearer ${TOKEN}` })],
+    ];
+    for (const [who, headers] of asks) {
+      for (const p of routesOfTheServer()) {
+        const get = await call({ port: ctx.port, method: "GET", path: p, headers: headers("GET") });
+        const head = await call({ port: ctx.port, method: "HEAD", path: p, headers: headers("HEAD") });
+        const at = `${who}: HEAD ${p} (${JSON.stringify(o)})`;
+        assert.equal(head.status, get.status, at);
+        assert.equal(head.headers["content-type"], get.headers["content-type"], at);
+        assert.equal(head.text, "", `${at}: no body`);
+      }
+      // a GET route answers 200 to a HEAD: the API's, not only the page's files
+      for (const p of ["/api/state", "/api/ping", "/api/users"]) assert.equal((await call({ port: ctx.port, method: "HEAD", path: p, headers: headers("HEAD") })).status, 200, `${who}: HEAD ${p}`);
+      // a POST-only route is not reached by a HEAD: as a GET, it is no route
+      for (const p of ["/api/sync", "/api/cancel", "/api/pick", "/api/remove", "/api/ui/tunnel"]) assert.equal((await call({ port: ctx.port, method: "HEAD", path: p, headers: headers("HEAD") })).status, 404, `${who}: HEAD ${p}`);
+    }
+    assert.deepEqual(changes, [], "a HEAD changes nothing");
+    assert.ok(!fs.existsSync(path.join(root, "users.json")));
+  }
+});
+
 test("read-only: the commands' requests (the run's token) are served as before — mason sync, mason cancel — the page alone is read-only", async () => {
   const { ctx, changes } = await listening({ pageReadOnly: true });
   const bearer = (method: string) => ({ Host: `127.0.0.1:${ctx.port}`, Authorization: `Bearer ${TOKEN}`, ...(method === "GET" ? {} : { "Content-Type": "application/json" }) });
