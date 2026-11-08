@@ -18,6 +18,7 @@ import { newConfig, readProject, writeConfig } from "../src/cli/project.ts";
 import { imagePinProblem } from "../src/lib/project-version.ts";
 import type { CopyState } from "../src/duck/sync.ts";
 import { unassignedPort } from "./test-ports.ts";
+import { DemoSource } from "../src/demo/source.ts";
 import { containerMemoryEnv, matrixEnv, runMason } from "./cli-matrix.ts";
 
 // read from the module, not imported by name: the file loads at a commit without them (scripts/fails-without.ts)
@@ -646,4 +647,30 @@ test("mason serve --help lists every setting a server sets: PG_PUBLICATION besid
   assert.doesNotMatch(usage, /MASON_CHANGES/);
   // behind a TCP proxy: the PROXY header's addresses, unset by default
   assert.match(usage, /\n {4}MASON_PG_PROXY_FROM {5}behind a TCP proxy or load balancer that sends the PROXY protocol v2: its own addresses,\n[^]*\(default unset:\n {28}none is read\)\n/);
+});
+
+test("a serve stopped by a signal records how, in words: SIGTERM is mason stop or a shutdown, SIGINT its terminal — never the signal's number", { timeout: 180_000 }, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-serve-stop-"));
+  const source = await DemoSource.open({ dir: path.join(dir, "db"), port: 0, log: () => undefined });
+  try {
+    for (const [signal, how] of [["SIGTERM", "stopped by mason stop, or a shutdown (SIGTERM)"], ["SIGINT", "stopped from its terminal (SIGINT)"]] as const) {
+      const data = path.join(dir, signal);
+      fs.mkdirSync(data);
+      const env = { PATH: process.env.PATH ?? "", HOME: dir, DATABASE_URL: source.url, MASON_API_KEY: KEY, MASON_DATA: data, MASON_PROJECT: path.join(dir, `project-${signal}`),
+        MASON_HEALTH_PORT: String(await unassignedPort()), MASON_HEALTH_HOST: "127.0.0.1", MASON_PG_PORT: String(await unassignedPort()), MASON_UI_PORT: String(await unassignedPort()) };
+      const child = spawn(process.execPath, [MAIN, "serve"], { cwd: dir, env, stdio: ["ignore", "pipe", "pipe"] });
+      let out = "";
+      child.stdout.on("data", (d) => { out += String(d); });
+      child.stderr.on("data", (d) => { out += String(d); });
+      const exited = new Promise<number | null>((r) => child.once("exit", (code) => r(code)));
+      try {
+        for (let i = 0; i < 1200 && !out.includes("mason start: ready"); i++) await new Promise((r) => setTimeout(r, 50));
+        assert.match(out, /mason start: ready/, out);
+      } finally { child.kill(signal); }
+      assert.equal(await exited, 0, out);
+      const cfg = JSON.parse(fs.readFileSync(path.join(data, ".mason", "config.json"), "utf8")) as { running: unknown; lastStop: { how: unknown } };
+      assert.equal(cfg.running, null);
+      assert.equal(cfg.lastStop.how, how, `${signal}:\n${out}`);
+    }
+  } finally { await source.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });

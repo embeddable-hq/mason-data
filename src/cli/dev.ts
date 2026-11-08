@@ -774,8 +774,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
         resolve(0);
       })();
     };
-    process.on("SIGINT", stop);
-    process.on("SIGTERM", stop);
+    // wrapped: Node calls a signal's listener with (name, number), and the number must never be read as `how`
+    process.on("SIGINT", () => { stop("SIGINT"); });
+    process.on("SIGTERM", () => { stop("SIGTERM"); });
     stopFor = (how) => { stop("SIGTERM", how); };
   });
   say("");
