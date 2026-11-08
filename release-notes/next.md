@@ -15,3 +15,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   statements and Terminate together sometimes lost the last answers: Mason closed the connection before what it had
   just sent had left. It now closes once that has left, and a client that reads nothing holds the connection five
   seconds at most.
+- **A tunnel client is gone before `mason share` says nothing was left open.** When the tunnel gave no address in
+  the time given, or Mason stopped under a share, `mason share` sent its client SIGTERM and exited at once, so a
+  client that ignored SIGTERM kept running after it. The client is now waited for, and killed if it is still there
+  2 seconds later.
