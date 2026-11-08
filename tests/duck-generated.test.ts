@@ -474,12 +474,24 @@ test("a synced table that takes a generated table's name is never written over: 
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("a synced table that takes the name while a run is going is never written over: the run's swap looks on the writer's turn, and drops what it built", { skip: "quarantined: #209" }, async () => {
+test("a synced table that takes the name while a run is going is never written over: the run's swap looks on the writer's turn, and drops what it built", async () => {
   let take: (() => Promise<void>) | null = null;
   await withWorld({ counts: COUNTS }, async (w) => {
     await w.until(built);
-    const host = (w.sync.generated as unknown as { host: { added(name: string): "copied" | "adding" | "view" | null } }).host;
+    const host = (w.sync.generated as unknown as { host: { added(name: string): "copied" | "adding" | "view" | null; log(line: string): void } }).host;
     const was = host.added.bind(host);
+    // the entry as the drop leaves it, read in the drop's own tick: a review the loop below has in flight goes on past the
+    // drop, sees the synced table at the name and lets the name go (`release`), which clears the mark too (#209)
+    const entries = (w.sync.generated as unknown as { entries: Map<string, { dirtySince: number | null; taken: number | null; deployed: unknown }> }).entries;
+    let atDrop: { dirtySince: number | null; taken: number | null } | undefined;
+    const said = host.log.bind(host);
+    host.log = (line) => {
+      if (/^public\.counts: a synced table now holds its name, so what this run built was dropped/.test(line)) {
+        const e = entries.get("public.counts");
+        atDrop = e === undefined ? undefined : { dirtySince: e.dirtySince, taken: e.taken };
+      }
+      said(line);
+    };
     // between the run's commit and its swap, `mason add counts` lands: the copy's swap puts the synced table at the name
     take = async () => {
       take = null;
@@ -500,10 +512,12 @@ test("a synced table that takes the name while a run is going is never written o
     assert.deepEqual(await w.rows("SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE 'counts%' AND table_name <> 'counts'"), [[0n]], "what the run built is dropped");
     // the change the run was built for is still not in the generated table: should the sources file be reverted before
     // the next review, the entry is still dirty, so a run picks it up rather than serving the rows from before it
-    const entry = (w.sync.generated as unknown as { entries: Map<string, { dirtySince: number | null; taken: number | null }> }).entries.get("public.counts");
-    assert.ok(entry !== undefined, "the entry is still there until the next review lets the name go");
-    assert.equal(entry.taken, null, "the run's mark is released");
-    assert.notEqual(entry.dirtySince, null, "and the change it took is dirty again");
+    assert.ok(atDrop !== undefined, "the entry is still there until the next review lets the name go");
+    assert.equal(atDrop.taken, null, "the run's mark is released");
+    assert.notEqual(atDrop.dirtySince, null, "and the change it took is dirty again");
+    // and once a review has let the name go, nothing was lost: with nothing deployed, a revert queues a full first build
+    const entry = entries.get("public.counts");
+    assert.ok(entry === undefined || entry.dirtySince !== null || entry.deployed === null, "the change is dirty, or the name was let go");
   }, { onStep: (s) => s === "committed" ? take?.() : undefined });
 });
 
