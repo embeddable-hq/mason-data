@@ -1,26 +1,29 @@
 #!/usr/bin/env node
 /**
- * ONE BOUNDED WAIT ON A PR's CI (CLAUDE.md "Local gates": a `gh pr checks` loop with a deadline, never `--watch`).
+ * ONE BOUNDED WAIT ON A PR's CI (CLAUDE.md "Waiting": a loop with a deadline, never `gh pr checks --watch`).
  *
  *   node scripts/ci-wait.ts <pr> <seconds>
  *
- * Each pass reads `gh pr view <pr> --json mergeable,mergeStateStatus` FIRST, then `gh pr checks <pr>`. GitHub runs no
- * pull_request workflow on a PR with a merge conflict, so there "no checks reported" never ends (issue 255): mergeable
- * CONFLICTING is the verdict conflict, at once and final, even over a finished green or red run. UNKNOWN (computed
- * lazily after a push), any other value, or a `gh pr view` that fails is "couldn't tell", a wait; only MERGEABLE lets
- * the checks decide. mergeStateStatus (DRAFT, BLOCKED, BEHIND, ...) is printed, never a verdict. `gh pr checks` exits 0
- * when all passed, 8 while any is pending, 1 on a failure, and also 1 with "no checks reported" just after a push, which
- * is a wait; any other code is "couldn't tell", a wait. mergeable is read from the JSON, parsed, never grepped.
+ * REST ONLY: `gh pr view --json`, `gh pr checks` and `gh pr status` go through GitHub's GraphQL API, which a cloud
+ * session cannot reach, so there every PR read as pending, and a red one was once read as green (issue 758). Each pass
+ * reads `gh api repos/{owner}/{repo}/pulls/<pr>` (gh fills the repository from the checkout's remote) FIRST:
+ * `mergeable` false is the verdict conflict, at once and final, since GitHub runs no pull_request workflow on a PR with
+ * a merge conflict, so its checks never come (issue 255); null (computed lazily after a push), or a read that fails or
+ * does not parse, is "couldn't tell", a wait; only true lets the checks decide. `mergeable_state` (blocked, behind,
+ * draft, ...) is printed, never a verdict. Then `gh api repos/{owner}/{repo}/commits/<head.sha>/check-runs`: the HEAD's
+ * runs only (a superseded run's cancelled jobs are on an older commit), the latest of each name. Of the REQUIRED checks:
+ * any one failed, cancelled, timed out, needing action or failed to start is failed; all of them success, skipped or
+ * neutral (what a required check passes on) is green; one not there yet, not completed, or a conclusion not named here
+ * is a wait. A read that fails or does not parse is "couldn't tell", a wait. Both answers are parsed, never grepped.
  *
  * It was a shell loop written into the harness's prompts, which Claude Code's worktree guard refuses in an isolated
  * agent (`$SECONDS` arithmetic, `$(…)`, `<<<`), so each agent improvised its own (issue 322): it is one plain command.
  *
  * Exit codes are the verdicts, and never Node's own 1: 0 green, 3 failed, 4 conflict, 8 pending (the deadline passed
- * with no verdict), 2 usage. Any other exit (1 is an uncaught error) is "couldn't tell".
- * It prints three parts: `PR <n>: <verdict> (last exit <rc>)`, `mergeable (exit <mrc>): <gh pr view's output>`, then the
- * last `gh pr checks` output.
+ * with no verdict), 2 usage. Any other exit (1 is an uncaught error) is "couldn't tell". Never pipe it: the exit code is
+ * the verdict. It prints `PR <n>: <verdict> at <head sha>`, then the PR's read, then each required check's.
  *
- * BOUNDED: a deadline from a monotonic clock; no pass starts after it; every gh call is killed with SIGKILL at the time
+ * BOUNDED: a deadline from a monotonic clock; no call starts after it; every gh call is killed with SIGKILL at the time
  * left (at most 60 s; gh is a Go program, which ignores an alarm). `seconds` is capped so the wait and its last call end
  * inside the Bash tool's 600000 ms. CI_WAIT_INTERVAL_MS sets the pause between passes (10 s); only the tests set it.
  */
@@ -28,11 +31,15 @@ import { spawn } from "node:child_process";
 
 /** The largest wait: it, the last call's second of grace and Node's start end inside the Bash tool's 600 s. */
 export const MAX_SECONDS = 570;
+/** The checks the ruleset on main requires (.github/workflows/ci.yml's header names them; tests/scripts.test.ts holds the two equal). */
+export const REQUIRED = ["checks", "image", "integration (oracle)", "integration (rest)"] as const;
 const CALL_MS = 60_000;
 const VERDICT = { green: 0, failed: 3, conflict: 4, pending: 8 } as const;
 type Verdict = keyof typeof VERDICT;
 /** A call killed past its bound reads as the shell's 128 + SIGKILL; gh not found, as the shell's 127. */
 const KILLED = 137, NOT_RUN = 127;
+const PASSED = new Set(["success", "skipped", "neutral"]);
+const RED = new Set(["failure", "cancelled", "timed_out", "action_required", "startup_failure"]);
 
 const now = (): number => performance.now();
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -64,15 +71,47 @@ function gh(args: string[], ms: number): Promise<{ code: number; out: string }> 
   });
 }
 
-/** mergeable from `gh pr view --json`'s output, or null when it cannot be read ("couldn't tell"). */
-function mergeableOf(text: string): string | null {
+const record = (v: unknown): Record<string, unknown> | null => v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : null;
+function parse(text: string): unknown {
   try {
-    const v = JSON.parse(text) as unknown;
-    return v !== null && typeof v === "object" && typeof (v as Record<string, unknown>)["mergeable"] === "string" ? (v as Record<string, string>)["mergeable"]! : null;
+    return JSON.parse(text) as unknown;
   } catch {
     // not JSON (an error page, a partial read): couldn't tell, which is a wait
     return null;
   }
+}
+
+/** The PR's head and mergeable from `GET /pulls/<n>`, or null when it cannot be read ("couldn't tell"). */
+type Pull = { sha: string; mergeable: boolean | null; state: string };
+function pullOf(text: string): Pull | null {
+  const v = record(parse(text));
+  const sha = record(v?.["head"])?.["sha"];
+  const mergeable = v?.["mergeable"];
+  if (typeof sha !== "string" || !/^[0-9a-f]{40}$/.test(sha) || !(mergeable === null || typeof mergeable === "boolean")) return null;
+  return { sha, mergeable, state: typeof v?.["mergeable_state"] === "string" ? v["mergeable_state"] : "?" };
+}
+
+/** Each required check's latest run at the head from `GET /commits/<sha>/check-runs`, or null when it cannot be read. */
+type Run = { status: string; conclusion: string | null; url: string };
+function runsOf(text: string): Map<string, Run | undefined> | null {
+  const list = record(parse(text))?.["check_runs"];
+  if (!Array.isArray(list)) return null;
+  const latest = new Map<string, Run & { id: number }>();
+  for (const item of list) {
+    const r = record(item);
+    const name = r?.["name"], id = r?.["id"], status = r?.["status"], conclusion = r?.["conclusion"];
+    if (typeof name !== "string" || typeof id !== "number" || typeof status !== "string" || !(conclusion === null || typeof conclusion === "string")) return null;
+    // a re-run at the same commit is a newer run of the same name: the newest decides
+    if ((latest.get(name)?.id ?? -1) < id) latest.set(name, { id, status, conclusion, url: typeof r?.["html_url"] === "string" ? r["html_url"] : "" });
+  }
+  return new Map(REQUIRED.map((n) => [n, latest.get(n)]));
+}
+
+function checksVerdict(runs: Map<string, Run | undefined>): Verdict {
+  const all = [...runs.values()];
+  if (all.some((r) => r?.status === "completed" && RED.has(r.conclusion ?? ""))) return "failed";
+  if (all.every((r) => r?.status === "completed" && PASSED.has(r.conclusion ?? ""))) return "green";
+  return "pending";
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -86,26 +125,32 @@ async function main(argv: string[]): Promise<number> {
   const interval = Number(process.env["CI_WAIT_INTERVAL_MS"] ?? 10_000);
   const deadline = now() + Number(secArg) * 1000;
   const left = (): number => deadline - now();
-  // a call gets the time left, at least a second (so a pass begun just in time reads something), at most CALL_MS
+  // a call gets the time left, at least a second (so a call begun just in time reads something), at most CALL_MS
   const bound = (): number => Math.min(CALL_MS, Math.max(1000, left()));
-  let st: Verdict = "pending", rc: number | null = null, mrc: number | null = null, mg = "", out = "";
+  let st: Verdict = "pending", sha = "unknown", pullLine = "pull: not read", checkLines = "check-runs: not read";
   while (left() > 0) {
-    const v = await gh(["pr", "view", pr, "--json", "mergeable,mergeStateStatus"], bound());
-    mrc = v.code;
-    mg = v.out;
-    const c = await gh(["pr", "checks", pr], bound());
-    rc = c.code;
-    out = c.out;
-    const mergeable = mrc === 0 ? mergeableOf(mg) : null;
-    if (mergeable === "CONFLICTING") { st = "conflict"; break; }
-    if (mergeable === "MERGEABLE") {
-      if (rc === 0) { st = "green"; break; }
-      if (rc === 1 && !out.includes("no checks reported")) { st = "failed"; break; }
+    const p = await gh(["api", `repos/{owner}/{repo}/pulls/${pr}`], bound());
+    const pull = p.code === 0 ? pullOf(p.out) : null;
+    pullLine = pull ? `pull (exit 0): mergeable ${String(pull.mergeable)}, mergeable_state ${pull.state}` : `pull (exit ${p.code}): ${p.out}`;
+    if (!pull) checkLines = "check-runs: not read";
+    else {
+      if (pull.sha !== sha) checkLines = "check-runs: not read";
+      sha = pull.sha;
+      if (pull.mergeable === false) { st = "conflict"; checkLines = "check-runs: not read (a conflict runs no checks)"; break; }
+      // past the deadline no call starts: the last pass's check-runs stay printed, for the record
+      if (left() <= 0) break;
+      const c = await gh(["api", `repos/{owner}/{repo}/commits/${pull.sha}/check-runs?filter=latest&per_page=100`], bound());
+      const runs = c.code === 0 ? runsOf(c.out) : null;
+      checkLines = runs
+        ? `check-runs (exit 0):\n${[...runs].map(([n, r]) => r ? `${n}\t${r.status}\t${r.conclusion ?? "-"}\t${r.url}` : `${n}\tmissing`).join("\n")}`
+        : `check-runs (exit ${c.code}): ${c.out}`;
+      const v = runs && pull.mergeable === true ? checksVerdict(runs) : "pending";
+      if (v !== "pending") { st = v; break; }
     }
     if (left() <= 0) break;
     await sleep(Math.max(0, Math.min(Number.isFinite(interval) ? interval : 10_000, left())));
   }
-  process.stdout.write(`PR ${pr}: ${st} (last exit ${rc ?? "none"})\nmergeable (exit ${mrc ?? "none"}): ${mg}\n${out}\n`);
+  process.stdout.write(`PR ${pr}: ${st} at ${sha}\n${pullLine}\n${checkLines}\n`);
   return VERDICT[st];
 }
 
