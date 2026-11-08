@@ -273,6 +273,12 @@ service asks for (`the service asks for another try in 30 s`); the CLI does not 
 | `mason` | optional: the Mason it runs, `{ version, latest, next }`. `version` is the Mason version the replica runs; `latest` the newest the service offers, never older than `version`; `next` a newer version already installed on the replica, which starts with the first deploy of a project pinned to its release line (newer than `version`, never newer than `latest`), or `null` (or absent) for none. Each version is `x.y.z` (digits, no `v`, nothing after). Absent or `null` for a service that does not say it: `mason replica status` then shows no version, and `mason deploy` leaves the pin to the replica. One present that does not hold refuses the answer whole. `status` shows it as a row, and names `mason replica upgrade` as a next step while the replica is `ready` and `latest` is newer than both `version` and `next` |
 | `deletion` | in one replica's answer (`GET …/{name}`, a `DELETE`'s): [`Deletion`](#deletion), always while `state` is `deleted`, optional while it is `deleting` (absent or `null` for a replica deleted another way, as from the service's web app: the CLI then says it is being deleted and nothing more), and never in any other state. One present is held whole: a malformed one refuses the answer |
 
+**A `pending` change a CLI does not know is held back.** A CLI refuses a replica's answer whose `pending[].change` is
+outside the set it knows, so a service sends a change only to a CLI that knows it: it reads the CLI's version from
+`User-Agent: mason-cli/<version>` (`dev`, a checkout's, counts as current) and leaves out of `pending` an entry whose
+change that version does not know, so an older CLI does not see it. `"upgrade"` is sent only to `mason-cli` 0.12.0 or
+later.
+
 `--json` prints each replica with these keys, `page`, `failure`, `nextAttemptAt` and `mason` `null` when absent; `status` and
 `delete` print its deletion beside it, as `deletion` (`null` while it is in none, or when the service gave none).
 
@@ -518,10 +524,14 @@ When the answer is `200` and carries `Replica`'s `mason`, a project the replica 
 anything is sent: its pin must fit `mason.version` or `mason.next`, by the image's own rule (the same release line, at
 that version or later than the pin). The refusal (code `refused`, exit 1) names the pin and both versions, and the ways
 out: write the project for the replica's Mason (`npx @mason-data/cli@<version>` is its mason command), or `mason
-replica upgrade <org>/<name>` when `mason.latest` would run it. A `200` without `mason` (a service that does not say
-it), any other status and no answer leave the check to the replica, whose image refuses such a project itself, and the
-deploy is sent as before; a `200` outside the contract is refused, as every answer is. A project with no `mason.yml`
-is not checked, as the image runs it. No database is connected
+replica upgrade <org>/<name>` when `mason.latest` would run it. Everything else cannot tell, and the deploy is sent as
+before, the check left to the replica, whose image refuses such a project itself: a `200` without `mason` (a service
+that does not say it), a `200` this CLI cannot read (outside `Replica` as it knows it: a `pending` change it does not
+know, a `mason` it does not take, another replica's name, not JSON), any other status, and no answer. One exception: a
+`200` that carries the token or the shape of one, in any value or in the service's words, is refused whole (code
+`failed`, exit 1, nothing sent), as every answer is. `mason replica status` and `mason replica upgrade` hold the same
+answer strictly: there an answer outside the contract is refused. A project with no `mason.yml` is not checked, as the
+image runs it. No database is connected
 to. A project a start would refuse is refused here, in the CLI's failure shape, and nothing is sent. A sources file
 whose `url:` is written with its password is refused too: the service keeps the files, and a secret is never one of
 them (`url: ${DATABASE_URL}`, with `DATABASE_URL` set on the replica, is the way).

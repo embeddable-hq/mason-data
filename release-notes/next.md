@@ -16,7 +16,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **`mason deploy` refuses, before it sends, a project the replica would not run**: when the service says the
   replica's Mason and the `mason.yml` pin fits neither the version it runs nor one installed, it names both and the
   ways out (write the project for the replica's version, or `mason replica upgrade`). A service that does not say the
-  version leaves the check to the replica, as before.
+  version, or an answer this version cannot read, leaves the check to the replica, as before.
 
 ## What was wrong and is now right
 

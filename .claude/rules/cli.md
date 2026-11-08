@@ -404,7 +404,7 @@ CLI lacks).
   else `--yes`) and waits within `--timeout` until the replica carries no pending `upgrade`; a replica's `mason`
   (`version`, `latest`, `next`, each `x.y.z`, in order) is held whole or refuses the answer, and `mason deploy` refuses a
   pin that fits neither `version` nor `next` (`pinRefusal`, by `pinFits`, the image's rule) before it sends, where a 200
-  says them; a service that says none leaves the pin to the replica (tests/cli-replica-upgrade.test.ts).
+  says them; a service that says none, or an answer it cannot read (unless it carries a secret), leaves the pin to the replica (tests/cli-replica-upgrade.test.ts).
 - **The road to production is commands too** (the journey from running it locally to deploying it in production; the
   README's "Going to production", `mason help production` offline). Only the project folder
   travels. **`mason.yml` pins the version** the project is written for (src/lib/project-version.ts: init writes it,

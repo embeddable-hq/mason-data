@@ -1088,7 +1088,7 @@ test("mason deploy: the output's gate refuses no honest deploy by chance — its
 const replicaSaying = (mason?: unknown): Reply => ({ status: 200, body: { replica: { org: "acme", name: "shop", region: "eu", sizeGb: 50, hostId: "brisk-otter-4821", state: "ready",
   createdAt: CREATED, allowlist: [], pending: [], ...(mason === undefined ? {} : { mason }) } } });
 
-test("mason deploy asks the replica's Mason before it sends: a pin that fits neither the version it runs nor the one installed is refused, naming both, nothing sent; one that fits either is sent; a service that says none, or does not answer the question, leaves the pin to the replica (issue 764)", async () => {
+test("mason deploy asks the replica's Mason before it sends: a pin that fits neither the version it runs nor the one installed is refused, naming both, nothing sent; one that fits either is sent; a service that says none, or does not answer the question, leaves the pin to the replica, and so does an answer it cannot read, unless it carries the token (issue 764)", async () => {
   const { root } = project();   // mason.yml pins 0.7.0
   // the pin fits: the version it runs (same line, at or past the pin), or the newer one installed
   for (const mason of [{ version: "0.7.0", latest: "0.7.0" }, { version: "0.7.3", latest: "0.9.0", next: null }, { version: "0.6.5", latest: "0.7.4", next: "0.7.1" }]) {
@@ -1127,13 +1127,31 @@ test("mason deploy asks the replica's Mason before it sends: a pin that fits nei
     assert.equal(asked.length, 1, what);
     assert.equal(posts(requests).length, 1, what);
   }
-  // a 200 outside the contract — a version not x.y.z, versions out of order, a mason that is no object — refuses, nothing sent
-  for (const mason of [{ version: "v0.7.0", latest: "0.7.0" }, { version: "0.7.0", latest: "0.6.0" }, { version: "0.7.0", latest: "0.8.0", next: "0.7.0" },
-    { version: "0.7.0", latest: "0.8.0", next: "0.9.0" }, { version: "0.7.0" }, "0.7.0", { version: "0.7.0-rc1", latest: "0.7.0" }]) {
-    const { a, requests } = await deployWith({ replica: replicaSaying(mason) }, root, ["--replica", "acme/shop", "--json"]);
-    assert.equal(a.code, 1, `${JSON.stringify(mason)}: ${a.stdout}`);
-    assert.match((JSON.parse(a.stdout) as { error: { message: string } }).error.message, /the replica's Mason version was asked for|answered/, JSON.stringify(mason));
-    assert.deepEqual(requests, [], `${JSON.stringify(mason)}: nothing sent`);
+  // a 200 this CLI cannot read — a version it does not take or out of order, a mason that is no object, a pending change
+  // of a newer service's, another replica's name, deleted with no deletion, not JSON — cannot tell: sent, as before
+  const ok200 = (replica: Record<string, unknown>): Reply => ({ status: 200, body: { replica: { ...(replicaSaying() as { body: { replica: Record<string, unknown> } }).body.replica, ...replica } } });
+  const unread: Array<[string, Reply]> = [
+    ...[{ version: "v0.6.0", latest: "0.6.0" }, { version: "0.6.0", latest: "0.5.0" }, { version: "0.6.0", latest: "0.8.0", next: "0.6.0" },
+      { version: "0.6.0", latest: "0.8.0", next: "0.9.0" }, { version: "0.6.0" }, "0.6.0", { version: "0.13.0-rc1", latest: "0.13.0-rc1" }].map((m): [string, Reply] => [JSON.stringify(m), replicaSaying(m)]),
+    ["an unknown pending change", ok200({ pending: [{ change: "resize", state: "pending", attempts: 0 }], mason: { version: "0.6.0", latest: "0.6.0" } })],
+    ["another name", ok200({ name: "other", mason: { version: "0.6.0", latest: "0.6.0" } })],
+    ["deleted with no deletion", ok200({ state: "deleted", mason: { version: "0.6.0", latest: "0.6.0" } })],
+    ["not JSON", { status: 200, raw: "<html>a proxy's page</html>" }],
+  ];
+  for (const [what, replica] of unread) {
+    const { a, requests, asked } = await deployWith({ replica }, root, ["--replica", "acme/shop", "--json"]);
+    assert.equal(a.code, 0, `${what}: ${a.stdout}`);
+    assert.equal(asked.length, 1, what);
+    assert.equal(posts(requests).length, 1, `${what}: sent, the pin left to the replica`);
+  }
+  // but an answer carrying the token — in a value, or in the service's words — is refused whole, nothing sent
+  for (const where of ["value", "words"] as const) {
+    const token = newToken("ci"); SECRETS.push(token);
+    const replica = where === "value" ? ok200({ hostId: token }) : ok200({ pending: [{ change: "resize", state: "failed", attempts: 1, failure: `it said ${token}` }] });
+    const { a, requests } = await deployWith({ replica }, root, ["--replica", "acme/shop", "--json"], { MASON_TOKEN: token });
+    assert.equal(a.code, 1, `${where}: ${a.stdout}`);
+    assert.match((JSON.parse(a.stdout) as { error: { message: string } }).error.message, /answered GET \/v1\/replicas\/acme\/shop with 200, where the replica's Mason version was asked for$/, where);
+    assert.deepEqual(requests, [], `${where}: nothing sent`);
   }
   // a project with no mason.yml is unpinned: nothing asked, as the image runs it
   const { root: bare } = project({ "mason.yml": null });

@@ -62,9 +62,9 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { errorJson, exitOf, failed, jsonText, parseCommand, reportText, serviceStyle, strict, type CommandSpec, type Failure, type NextStep } from "./command.ts";
-import { call, carriesNoSecret, failureShape, isFailure, isServiceTime, serviceFailure, serviceNext, serviceOf, serviceText, unexpected, type Answer } from "./hosted.ts";
+import { call, carriesNoSecret, carriesSecret, failureShape, isFailure, isServiceTime, serviceFailure, serviceNext, serviceOf, serviceText, unexpected, type Answer } from "./hosted.ts";
 import { replicaOf, replicaText, REPLICA_ENV, tokenFor, type Replica } from "./replica.ts";
-import { pinRefusal, replicaAnswer } from "./replica-hosted.ts";
+import { pinRefusal, replicaAnswer, wordless } from "./replica-hosted.ts";
 import { holdOutput } from "./output-gate.ts";
 import { maskedUrl } from "./preflight.ts";
 import { folderPlace, theProject, type Project } from "./project.ts";
@@ -160,7 +160,7 @@ export const DEPLOY: CommandSpec & { needs: "project" } = {
   Before it sends, it asks the replica's Mason version: a project whose mason.yml pin the replica would not run
   (neither the version it runs nor a newer one it has installed) is refused, naming both, with the ways out
   (write the project for the replica's Mason, or mason replica upgrade). A service that does not say the
-  version, or does not answer that question, leaves the check to the replica, which refuses such a project itself.
+  version, or whose answer cannot be read, leaves the check to the replica, which refuses such a project itself.
 
   Exit status: 0 the replica runs it (or a dry run printed); 1 refused here or by the service, refused by Mason on
   the replica (its words printed as they came, the code the CLI's own), the deploy failed, or the service answered
@@ -478,16 +478,20 @@ export async function deploy(argv: string[]): Promise<number> {
   // THE REPLICA'S MASON, where the service says it (docs/HOSTED-API.md "What the CLI checks before it sends anything"):
   // a project whose pin fits neither the version the replica runs nor the newer one it has installed is refused here,
   // naming both, before anything is sent (the replica's own image would refuse it, in words a hosted user cannot act
-  // on). Only a 200 that says the replica's Mason decides: a service that says none (an older one), no answer, or any
-  // other status sends the deploy as before, the replica's image still holding the pin; an answer outside the contract
-  // is refused, as every one is.
+  // on). Only a 200 this CLI reads whole, saying the replica's Mason, decides: one it cannot read (outside the contract
+  // it knows: a newer service's change, a version it does not take, not JSON), a service that says none, no answer or
+  // any other status cannot tell, and the deploy is sent as before, the replica's image still holding the pin. But an
+  // answer carrying a secret — in any value, its words included — is refused whole, as every answer is.
   const pin = readPin(project.folder);
   if (!("problem" in pin) && pin.pin !== null) {
     const asked = await call(service, "GET", `/v1/replicas/${r.org}/${r.name}`, { token });
     if (!isFailure(asked) && asked.status === 200) {
-      const held = replicaAnswer(service, asked, r, secrets);
-      if (held === null) return fail(unexpected(service, asked, "the replica's Mason version was asked for"), { json });
-      const refusal = held.replica.mason === null ? null : pinRefusal(r, held.replica.mason, pin.pin, shownPath(project.root, pin.file));
+      const j = asked.json;
+      if (j !== undefined && (!carriesNoSecret(wordless(j), secrets) || carriesSecret(JSON.stringify(j), secrets, { passwords: false }))) {
+        return fail(unexpected(service, asked, "the replica's Mason version was asked for"), { json });
+      }
+      const mason = replicaAnswer(service, asked, r, secrets)?.replica.mason ?? null;
+      const refusal = mason === null ? null : pinRefusal(r, mason, pin.pin, shownPath(project.root, pin.file));
       if (refusal !== null) return fail(refusal, { json });
     }
   }
