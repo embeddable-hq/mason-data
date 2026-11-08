@@ -3514,6 +3514,11 @@ export class Sync {
           } catch (e) {
             const at = live.reading.indexOf(slot);
             if (at >= 0) live.reading.splice(at, 1);
+            // ONE READER FROM THE MOMENT THE OUT-OF-MEMORY IS SEEN, before its ROLLBACK yields: the rollback frees what
+            // held the others' commits, so a reader set free there would take a full-size chunk beside it
+            const outOfMemory = failure === null && !recopy && pgErrorOf(e, "").fields.code === "53200";
+            const was = { sole, memoryPages };
+            if (outOfMemory) sole ??= k;
             // rolled back, so its connection reads on: a ROLLBACK out of memory itself (measured, with other readers'
             // chunks in flight) is tried again while the others' memory is given back, for about two seconds
             let rolledBack = !inTx;
@@ -3529,7 +3534,7 @@ export class Sync {
                 break;
               }
             }
-            if (failure === null && !recopy && rolledBack && pgErrorOf(e, "").fields.code === "53200") {
+            if (outOfMemory && failure === null && rolledBack) {
               giveBack(gaps, range);
               live.untaken = gapPages(gaps, p.pages);
               if (chunkSize <= 1 && alone) {
@@ -3537,8 +3542,6 @@ export class Sync {
                 fail(new Error(tooLargeText(t.source, `one page of its table${rpp === null ? "" : ` (about ${Math.max(1, Math.round(rpp)).toLocaleString("en-US")} row(s))`}, read alone, ran out of memory`, limit)));
                 return;
               }
-              const was = { sole, memoryPages };
-              sole ??= k;
               memoryPages = Math.max(1, Math.min(memoryPages, Math.floor(chunkSize / 2)));
               live.readers = 1;
               live.chunkPages = Math.min(memoryPages, live.chunkPages);
