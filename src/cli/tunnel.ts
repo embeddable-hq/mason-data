@@ -137,8 +137,9 @@ export interface OpenTunnel {
   host: string; port: number; endsAt: string | null; pid: number;
   /** settles when the client ended, with what it last said */
   ended: Promise<string>;
-  /** ends the client (a `kill -9` of this command leaves that to the run: src/cli/share-run.ts) */
-  stop(): void;
+  /** ends the client, settling once it is gone: SIGTERM, then SIGKILL past a grace, each wait bounded (a `kill -9` of
+   * this command leaves that to the run: src/cli/share-run.ts) */
+  stop(): Promise<void>;
 }
 
 /** Starts a tunnel client and reads its address: the tunnel, or why not. `onPid`: as soon as there is a process. */
@@ -151,10 +152,23 @@ export function startTunnel(plan: TunnelPlan, o: { timeoutMs: number; onPid?: (p
     const child: ChildProcess = spawn(plan.bin, plan.args, { stdio: ["pipe", "pipe", "pipe"], env: plan.env, detached: true });
     let output = "", settled = false, finished: (why: string) => void = () => undefined;
     const ended = new Promise<string>((r) => { finished = r; });
-    const stop = (): void => {
-      if (child.exitCode !== null || child.signalCode !== null) return;
+    let gone: () => void = () => undefined;
+    const exited = new Promise<void>((r) => { gone = r; });
+    const running = (): boolean => child.pid !== undefined && child.exitCode === null && child.signalCode === null;
+    // awaited before anything says "nothing was left open": a client that ignores SIGTERM would outlive this command, as
+    // a timer of this process dies with it. Its timers are held (not unref'd) so the wait ends, and bounded so it cannot hang.
+    const stop = (): Promise<void> => {
+      if (!running()) return Promise.resolve();
       child.kill("SIGTERM");
-      setTimeout(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }, STOP_GRACE_MS).unref();
+      const waited = (ms: number): Promise<boolean> => {
+        let t: NodeJS.Timeout | undefined;
+        return Promise.race([exited.then(() => true), new Promise<boolean>((r) => { t = setTimeout(() => r(false), ms); })]).finally(() => clearTimeout(t));
+      };
+      return waited(STOP_GRACE_MS).then(async (out) => {
+        if (out || !running()) return;
+        child.kill("SIGKILL");
+        await waited(STOP_GRACE_MS);
+      });
     };
     const settle = (v: OpenTunnel | Failure): void => {
       if (settled) return;
@@ -164,10 +178,13 @@ export function startTunnel(plan: TunnelPlan, o: { timeoutMs: number; onPid?: (p
       resolve(v);
     };
     const timer = setTimeout(() => {
-      stop();
+      if (settled) return;
+      // held settled while the client goes, so an address printed meanwhile is no tunnel; said only once it is gone
+      settled = true;
+      forget();
       const said = lastLines(output, plan.token);
-      settle({ message: `the tunnel gave no address in ${Math.round(o.timeoutMs / 1000)} s`, code: "timeout", why: said === "" ? `${plan.bin} printed nothing` : `${plan.bin} printed: ${said}`,
-        fix: `its output is the service's, and may have changed: this Mason cannot read it${plan.via === "pinggy" ? ", and --via bore is another tunnel" : ""}. Nothing was left open` });
+      void stop().then(() => resolve({ message: `the tunnel gave no address in ${Math.round(o.timeoutMs / 1000)} s`, code: "timeout", why: said === "" ? `${plan.bin} printed nothing` : `${plan.bin} printed: ${said}`,
+        fix: `its output is the service's, and may have changed: this Mason cannot read it${plan.via === "pinggy" ? ", and --via bore is another tunnel" : ""}. Nothing was left open` }));
     }, o.timeoutMs);
     const read = (b: Buffer): void => {
       output = (output + b.toString("utf8")).slice(-KEPT_BYTES);
@@ -182,6 +199,7 @@ export function startTunnel(plan: TunnelPlan, o: { timeoutMs: number; onPid?: (p
     child.stdin!.on("error", () => undefined);
     child.on("spawn", () => o.onPid?.(child.pid!));
     child.on("error", (e: NodeJS.ErrnoException) => {
+      if (child.pid === undefined) gone();
       if (e.code !== "ENOENT") { settle({ message: `${plan.bin} could not be started: ${e.message}`, code: "failed" }); return; }
       settle({ message: `${plan.bin} is not on this machine's PATH, and --via ${plan.via} needs it`, code: "not_found", fix: `install ${plan.install}${plan.via === "pinggy" ? ", or use --via bore" : ", or use --via pinggy, which needs only ssh"}`,
         next: [[`mason share --via ${plan.via === "pinggy" ? "bore" : "pinggy"}`, "the other tunnel"]] });
@@ -195,7 +213,7 @@ export function startTunnel(plan: TunnelPlan, o: { timeoutMs: number; onPid?: (p
     };
     // 'close' waits for its pipes, which a grandchild can hold for ever: 'exit' ends the wait
     let code: number | null = null, signal: NodeJS.Signals | null = null;
-    child.on("exit", (c, s) => { code = c; signal = s; setTimeout(() => over(c, s), 200).unref(); });
+    child.on("exit", (c, s) => { code = c; signal = s; gone(); setTimeout(() => over(c, s), 200).unref(); });
     child.on("close", () => over(code, signal));
   });
 }

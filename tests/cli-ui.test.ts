@@ -168,7 +168,7 @@ async function shareServer(served: boolean) {
   const shares = new RunShares({ listener: { openShare: async () => ({ port: 40001, sessions: 0, endSessions: () => 0, close: async () => undefined }), checkRoles: async () => NO_ROLES }, database: "shop", log: (l) => logged.push(l),
     stopTunnel: () => undefined, certificate: () => ({ cert: Buffer.from("c"), key: Buffer.from("k"), fingerprint: "AA:BB" }) });
   const pageShares = new PageShares({ shares, home: root, log: (l) => logged.push(l), probe: async () => "same",
-    start: async () => { tunnels++; return { host: "relay.example", port: 41234, endsAt: null, pid: 4242, ended: new Promise<string>(() => undefined), stop: () => { stops++; } }; } });
+    start: async () => { tunnels++; return { host: "relay.example", port: 41234, endsAt: null, pid: 4242, ended: new Promise<string>(() => undefined), stop: async () => { stops++; } }; } });
   const ctx = { source, port: 0, token: TOKEN, page: true, served, root, home: path.join(root, ".mason"), log: (l: string) => logged.push(l), ...(served ? {} : { shares, pageShares }) } as unknown as RunContext;
   const server = createRunServer(ctx);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));

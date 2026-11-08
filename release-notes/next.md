@@ -15,3 +15,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   statements and Terminate together sometimes lost the last answers: Mason closed the connection before what it had
   just sent had left. It now closes once that has left, and a client that reads nothing holds the connection five
   seconds at most.
+- **A tunnel client is gone before `mason share` says nothing was left open.** When the tunnel gave no address in
+  the time given, or Mason stopped under a share, `mason share` sent its client SIGTERM and exited at once, so a
+  client that ignored SIGTERM kept running after it. The client is now waited for, and killed if it is still there
+  2 seconds later.
+- **A first sync whose chunk ran out of memory now goes on with one reader at once.** It promised to, but while the
+  chunk that ran out was rolled back, another reader could take a new chunk of full size beside it, at the moment memory
+  was shortest; a test saw it in about 1 run in 25. No rows were lost or read twice: the range that ran out was read
+  again, by smaller chunks.

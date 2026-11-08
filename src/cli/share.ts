@@ -187,7 +187,7 @@ async function holding(h: Holding): Promise<number> {
     const t = await startTunnel(plan, { timeoutMs: h.timeoutMs, onPid: (pid) => { void tell({ pid, via: plan.via, state: "opening" }); } });
     if ("message" in t) return t;
     const checked = await verified(t, opened.fingerprint);
-    if (typeof checked !== "boolean") { t.stop(); return checked; }
+    if (typeof checked !== "boolean") { await t.stop(); return checked; }
     return { tunnel: t, verified: checked };
   };
   const plan = h.plan();
@@ -230,14 +230,13 @@ async function holding(h: Holding): Promise<number> {
   for (;;) {
     const end = await Promise.race([stop, runEnded, tunnel.ended.then((why) => ({ tunnelEnded: why }))]);
     if (typeof end === "string") {
-      tunnel.stop();
-      await Promise.race([tunnel.ended, new Promise((r) => setTimeout(r, 2_500).unref())]);
+      await tunnel.stop();
       held.close();
       if (json) say("The share ended.");
       else out(reportText({ headline: "The share ended: its address no longer answers, and its password no longer works", next: [["mason share", "a new address and a new password"]] }));
       return 0;
     }
-    if ("runEnded" in end) { tunnel.stop(); held.close(); return failed("share", ended(end.runEnded), { json: false }); }
+    if ("runEnded" in end) { await tunnel.stop(); held.close(); return failed("share", ended(end.runEnded), { json: false }); }
     if (!plan.reconnects) { held.close(); return failed("share", { ...ended(`its tunnel closed (${end.tunnelEnded})`), fix: "a free tunnel lasts about an hour: the address is gone, and the password no longer works" }, { json: false }); }
     const again = await reconnect({ open, tell, why: end.tunnelEnded, stop, runEnded, was: tunnel });
     if (again === null) continue;   // a signal or the run's end: the next turn of the loop reads it
