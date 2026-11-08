@@ -22,6 +22,9 @@ docker compose exec mason mason user add metabase   # a user for the BI tool: th
 - **The container runs as `node` (uid 1000), not root.** On a machine where you are root, such as a fresh VM, `mkdir -p
   mason` makes a folder it cannot write, and the container restarts in a loop with `EACCES` on `/mason/project/sources`.
   Run `chown -R 1000:1000 mason` before `docker compose up -d`.
+  **The uid and gid 1000 (`node`) are stable**: an image that changes them names it under "Before you upgrade" in its
+  release notes. So a supervisor on the same machine may create `MASON_UI_SOCKET`'s folder owned by `1000:1000`, mode
+  0700, and check that the socket it connects to is owned by uid 1000.
 - **`./mason` is the project folder** (`sources/`, `mason.yml`). `mason add` adds the table to its sources file
   (`sources/<database>.yml`, written at the first start from `DATABASE_URL`); commit it.
   On a server built from your repo, mount the committed folder instead and nothing is added by hand.

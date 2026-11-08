@@ -260,6 +260,12 @@ jobs:
       - name: the mason command inside it answers
         if: ${{ needs.changes.outputs.docs != 'true' }}
         run: docker run --rm --entrypoint mason mason-data:ci --version
+      - name: it runs as uid 1000 (node), the user a supervisor creates the socket's folder for (deploy/mason-data/README.md)
+        if: ${{ needs.changes.outputs.docs != 'true' }}
+        run: |
+          id=$(docker run --rm --entrypoint id mason-data:ci)
+          echo "$id"
+          case "$id" in "uid=1000(node) gid=1000(node) "*|"uid=1000(node) gid=1000(node)") ;; *) echo "the image must run as uid=1000(node) gid=1000(node)"; exit 1 ;; esac
       - name: the engine, PGlite and libpg-query load and answer on the image's Node
         if: ${{ needs.changes.outputs.docs != 'true' }}
         timeout-minutes: 5

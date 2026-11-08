@@ -4,6 +4,7 @@
  * - CI's major: `ciFacts(ci.yml).nodeMajor` in scripts/gate.ts, the one reader of ci.yml's `node-version`;
  * - the majors whose V8 aborts a process now and then: NODE_WITHOUT_THE_FIX below, the one list.
  * tests/conventions.test.ts holds every workflow and the image to them; tests/cli-doctor.test.ts holds the READMEs.
+ * The image's user (uid 1000, `node`) is read here too, beside its Node, since both come from its `FROM` (issue 756).
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -26,6 +27,17 @@ export const NODE_WITHOUT_THE_FIX: ReadonlySet<number> = new Set([24]);
 /** CI's Node major, as scripts/gate.ts reads it from .github/workflows/ci.yml (never a literal here). */
 export function ciNodeMajor(root: string = ROOT): string {
   return ciFacts(fs.readFileSync(path.join(root, CI_FILE), "utf8")).nodeMajor;
+}
+
+/** the official Node image's name, as a `FROM` may spell it (`node`, `library/node`, `docker.io/library/node`) */
+const OFFICIAL_NODE = /^(?:(?:[^/]+\/)?library\/)?node$/;
+
+/** A `FROM`'s image without its flags, `AS <stage>` or digest, and the name before its tag. */
+function fromImage(rest: string): { image: string; name: string } {
+  const image = rest.trim().split(/\s+/).find((w) => !w.startsWith("--")) ?? "";
+  const ref = image.split("@")[0] ?? "";
+  const colon = ref.indexOf(":", ref.lastIndexOf("/") + 1);
+  return { image, name: colon === -1 ? ref : ref.slice(0, colon) };
 }
 
 /** A Dockerfile's instructions, each with the line it starts on: comments dropped, `\` continuations joined. */
@@ -66,7 +78,7 @@ export function imageNodeProblems(file: string, src: string, ciMajor: string): {
     const tag = colon === -1 ? "" : ref.slice(colon + 1);
     const where = `${file}:${line} FROM ${image}`;
     if (name.includes("$")) { nodeFroms++; problems.push(`${where}: the image's name is a variable, so which Node it runs cannot be told; ${wayOut}`); continue; }
-    if (!/^(?:(?:[^/]+\/)?library\/)?node$/.test(name)) continue;
+    if (!OFFICIAL_NODE.test(name)) continue;
     nodeFroms++;
     const major = tag.includes("$") ? undefined : /^v?(\d+)(?=$|[.-])/.exec(tag)?.[1];
     if (major === undefined) problems.push(`${where}: the tag names no Node major, so which Node it runs cannot be told; ${wayOut}`);
@@ -92,4 +104,38 @@ export function docNodeProblems(file: string, src: string, floor: string, ciMajo
     else if (!allowed.has(version)) problems.push(`${where}: names a Node no authority holds (the floor ${floor}, CI's ${ciMajor}, or one without the fix: ${[...NODE_WITHOUT_THE_FIX].join(", ")})`);
   }
   return { floorMentions, problems };
+}
+
+/** the user the image runs as, the one a supervisor on the same machine creates the page socket's folder for */
+export const IMAGE_USER = { name: "node", uid: 1000, gid: 1000 } as const;
+
+/**
+ * THE IMAGE RUNS AS uid 1000 (issue 756): a supervisor on the same machine creates `MASON_UI_SOCKET`'s folder for that
+ * uid and checks the socket's owner, and deploy/mason-data/README.md says it is stable. So the final stage must be FROM
+ * the official Node image (whose `node` user is uid 1000, gid 1000) and its last `USER` must be `node` or 1000 (with
+ * `node` or 1000 as the group, if one is named). No `USER` is root; a base of another image, a stage by name or a
+ * variable cannot be told, and "cannot tell" is never a pass.
+ */
+export function imageUserProblems(file: string, src: string): string[] {
+  const wayOut = `the image runs as uid ${IMAGE_USER.uid} (${IMAGE_USER.name}) by promise (deploy/mason-data/README.md): keep the final stage FROM node:<major>-slim with USER ${IMAGE_USER.name}, or name the change under "Before you upgrade" in its release notes and change this check with it`;
+  let from: { line: number; image: string; name: string } | undefined;
+  let user: { line: number; value: string } | undefined;
+  for (const { line, text } of dockerInstructions(src)) {
+    const f = /^\s*FROM\s+(.*)$/i.exec(text);
+    if (f !== null) { from = { line, ...fromImage(f[1] ?? "") }; user = undefined; continue; }
+    const u = /^\s*USER\s+(.*)$/i.exec(text);
+    if (u !== null) user = { line, value: (u[1] ?? "").trim() };
+  }
+  if (from === undefined) return [`${file}: no FROM, so the image's user cannot be told; ${wayOut}`];
+  const problems: string[] = [];
+  if (!OFFICIAL_NODE.test(from.name)) problems.push(`${file}:${from.line} FROM ${from.image}: the final stage is not the official Node image, so its user's uid cannot be told; ${wayOut}`);
+  if (user === undefined) problems.push(`${file}: the final stage has no USER, so the image runs as root; ${wayOut}`);
+  else {
+    const ok = (part: string, id: number) => part === IMAGE_USER.name || part === String(id);
+    const [u, g, ...more] = user.value.split(":");
+    if (more.length > 0 || !ok(u ?? "", IMAGE_USER.uid) || (g !== undefined && !ok(g, IMAGE_USER.gid))) {
+      problems.push(`${file}:${user.line} USER ${user.value}: the image would not run as uid ${IMAGE_USER.uid} (${IMAGE_USER.name}); ${wayOut}`);
+    }
+  }
+  return problems;
 }

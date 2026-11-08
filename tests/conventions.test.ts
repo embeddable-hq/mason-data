@@ -20,7 +20,7 @@ import * as path from "node:path";
 import * as url from "node:url";
 import { execFileSync } from "node:child_process";
 import ts from "typescript";
-import { ciNodeMajor, imageNodeProblems, NODE_WITHOUT_THE_FIX } from "./node-versions.ts";
+import { ciNodeMajor, imageNodeProblems, imageUserProblems, NODE_WITHOUT_THE_FIX } from "./node-versions.ts";
 
 const ROOT = path.join(path.dirname(url.fileURLToPath(import.meta.url)), "..");
 
@@ -1282,6 +1282,33 @@ test("the image guard catches the real thing", () => {
   assert.deepEqual(imageNodeProblems("D", "FROM debian:bookworm-slim\nFROM node:26-slim AS n\nFROM n\n", ci), { nodeFroms: 1, problems: [] }, "another image, and a stage by name, are no Node");
   assert.deepEqual(imageNodeProblems("D", "# FROM node:24-slim\nRUN true\n", ci), { nodeFroms: 0, problems: [] }, "a comment is no instruction");
   assert.deepEqual(of("FROM \\\n  node:24-slim\n"), [`D:1 FROM node:24-slim: the image runs Node 24 and CI runs Node 26; ${way}`], "a continued line is one instruction");
+});
+
+test("the image runs as uid 1000 (node), the user a supervisor creates the socket's folder for", () => {
+  const src = fs.readFileSync(path.join(ROOT, DOCKERFILE), "utf8");
+  assert.match(src, /^USER /m, `the guard reads ${DOCKERFILE}'s USER: has the file moved?`);
+  assert.deepEqual(imageUserProblems(DOCKERFILE, src), []);
+});
+
+test("the image user guard catches the real thing", () => {
+  const of = (src: string) => imageUserProblems("D", src);
+  for (const ok of ["FROM node:26-slim\nUSER node\n", "FROM node:26-slim\nUSER node:node\n", "FROM node:26-slim\nUSER 1000:1000\n",
+    "FROM node:26-alpine\nuser node\n", "FROM debian:bookworm-slim AS x\nUSER root\nFROM docker.io/library/node:26-slim\nUSER node\n",
+    "FROM node:26-slim\nUSER root\nRUN true\nUSER node\nCMD [\"mason\"]\n"]) {
+    assert.deepEqual(of(ok), [], ok);
+  }
+  const one = (src: string, re: RegExp, why: string) => { const found = of(src); assert.equal(found.length, 1, `${why}: ${JSON.stringify(found)}`); assert.match(found[0] ?? "", re, why); assert.match(found[0] ?? "", /Before you upgrade/, `${why}: the way out`); };
+  one("FROM node:26-slim\nUSER root\n", /^D:2 USER root: the image would not run as uid 1000/, "root");
+  one("FROM node:26-slim\nUSER node\nUSER mason\n", /^D:3 USER mason/, "the last USER is the one");
+  one("FROM node:26-slim\nUSER node:0\n", /USER node:0/, "the group too");
+  one("FROM node:26-slim\nUSER 1001\n", /USER 1001/, "another uid");
+  one("FROM node:26-slim\nUSER $U\n", /USER \$U/, "a variable cannot be told");
+  one("FROM node:26-slim\nRUN true\n", /no USER, so the image runs as root/, "no USER");
+  one("FROM node:26-slim\nUSER node\nFROM node:26-slim\nRUN true\n", /no USER/, "the final stage's USER, not an earlier stage's");
+  one("FROM debian:bookworm-slim\nUSER node\n", /^D:1 FROM debian:bookworm-slim: the final stage is not the official Node image/, "another base");
+  one("FROM node:26-slim AS n\nFROM n\nUSER node\n", /FROM n: the final stage is not/, "a stage by name cannot be told");
+  one("ARG BASE=node:26-slim\nFROM ${BASE}\nUSER node\n", /FROM \$\{BASE\}: the final stage is not/, "a variable base cannot be told");
+  one("# FROM node:26-slim\nUSER node\n", /^D: no FROM/, "a comment is no instruction");
 });
 
 /** the calls of a statement's plan (`duck.plan(…)`) that do not pass the session's `grants`, by their first line */
