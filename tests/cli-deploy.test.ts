@@ -14,7 +14,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import { projectFiles } from "../src/lib/project-files.ts";
 import { exitOf, FAILURE_CODES, type FailureCode } from "../src/cli/command.ts";
-import { bodyCovered, bodyShown, echoForms, echoToken, measureGate, runForms, runToken, seen, showsRun } from "./hosted-fake.ts";
+import { bodyCovered, bodyShown, echoForms, echoToken, inputsOf, measureGate, runForms, runToken, seen, SERVED, showsRun } from "./hosted-fake.ts";
 import { pathToFileURL } from "node:url";
 
 const newToken = (kind: "pat" | "ci" = "pat"): string => `masondata_${kind}_${randomBytes(32).toString("base64url")}`;
@@ -53,8 +53,10 @@ async function fakeService(script: Script): Promise<{ url: string; requests: Req
         : req.method === "GET" && p === `/v1/replicas/acme/shop/deploys/${ID}` ? (script.get ?? (() => at("running")))(gets++)
         : { status: 404, body: { error: { code: "not_found", message: "no such endpoint" }, next: [] } };
       if (reply === "drop") { req.socket.destroy(); return; }
+      const sent = reply.raw ?? reply.json ?? (reply.body === undefined ? "" : JSON.stringify(reply.body));
+      SERVED.push(JSON.stringify(reply.headers ?? {}), sent);
       res.writeHead(reply.status, { "content-type": reply.raw === undefined ? "application/json" : "text/html", ...reply.headers });
-      res.end(reply.raw ?? reply.json ?? (reply.body === undefined ? "" : JSON.stringify(reply.body)));
+      res.end(sent);
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -171,6 +173,7 @@ const OWN_STEP = /^ {2}(mason deploy --replica (acme\/shop|<org>\/<name>)|mason 
  * it the CLI's; and no --json string holds a line break.
  */
 async function mason(cwd: string, argv: string[], env: Record<string, string>, o: { timeoutMs?: number; terminal?: number } = {}): Promise<Answer> {
+  const given = inputsOf([cwd], argv, env);
   const a = await runMason(cwd, argv, o.terminal ? { ...env, ...terminalEnv(o.terminal) } : env, o.timeoutMs ?? 60_000);
   ANSWERS.push(a);
   const line = `mason ${argv.join(" ")}${o.terminal ? ` (a terminal ${o.terminal} wide)` : ""}`;
@@ -202,6 +205,9 @@ async function mason(cwd: string, argv: string[], env: Record<string, string>, o
   for (const s of SECRETS) {
     assert.ok(!a.stdout.includes(s) && !a.stderr.includes(s), `${line} printed a secret:\n${a.stdout}\n${a.stderr}`);
     assert.ok(!a.stdout.includes(s.slice(-43)) && !a.stderr.includes(s.slice(-43)), `${line} printed a secret's body`);
+  }
+  // a quarter in some form, of a token this run was given (`inputsOf`): chance meets one of hundreds now and then
+  for (const s of given.seen(SECRETS)) {
     assert.ok(!bodyShown(`${a.stdout}\n${a.stderr}`, s, [cwd, env.HOME, env.MASON_CLOUD_URL]), `${line} printed more than a quarter of a secret's body, in some form:\n${a.stdout}\n${a.stderr}`);
   }
   return a;
@@ -1047,6 +1053,7 @@ async function idFake(id: string, script: Script): Promise<{ url: string; close:
     req.on("end", () => {
       const p = new URL(req.url ?? "/", "http://x").pathname;
       const reply = (req.method === "POST" && p === "/v1/replicas/acme/shop/deploys" ? script.post : p === `/v1/replicas/acme/shop/deploys/${id}` ? script.get!(gets++) : { status: 404, body: {} }) as Exclude<Reply, "drop">;
+      SERVED.push(JSON.stringify(reply.headers ?? {}), JSON.stringify(reply.body));
       res.writeHead(reply.status, { "content-type": "application/json", ...reply.headers });
       res.end(JSON.stringify(reply.body));
     });
