@@ -97,7 +97,11 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
 - **Tables**, a table not added: its rows, its key and why it cannot be added as it is. **Add** syncs every column, as
   `mason add <table>` does; **Columns…** opens a form to tick the columns to sync; **Name its key…** does the same for a
   table with no primary key.
-- **Users** (`#users`): a form that adds a user by name. Its password, URL and psql line are shown once, in a card with
+- **Users** (`#users`): a form that adds a user by name and, where `mason/roles.yml` names roles and reads as it is, a
+  **Role** as `mason user add --role` (the roles from `/api/state` `roles`, `mason status --json`'s): the file's
+  `default:` is chosen first, marked (default), and sends no role, so the user follows the default as one added with no
+  `--role` does; with no default the first choice is no role. The run judges the role, and its refusal is shown. `--set`
+  attributes stay the command's. Its password, URL and psql line are shown once, in a card with
   Copy buttons, with a link to Queries, where its statements will show; Mason keeps no copy, so they are never shown again.
 - **Users**, Connect: once for the run, where a tool connects — host, port, database and SSL mode, each with **Copy**,
   and the URL and psql line with `<user>:<password>` in place — as `mason status` says it. No user's row carries a URL:
