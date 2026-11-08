@@ -428,7 +428,7 @@ test("an idle timer stops the instance, and the next run starts it again", async
   }
 });
 
-test("a statement past the deadline is refused naming it, the instance is replaced, and the event loop ran meanwhile", { skip: "quarantined: #232" }, async () => {
+test("a statement past the deadline is refused naming it, the instance is replaced, and the event loop ran meanwhile", async () => {
   // PGlite runs synchronously on the thread that hosts it: on the main thread one catalog statement stalled every
   // session and every HTTP request (review of #480). On its worker, a timer here keeps firing while it spins.
   const lines: string[] = [];
@@ -436,13 +436,18 @@ test("a statement past the deadline is refused naming it, the instance is replac
   let ticks = 0;
   const timer = setInterval(() => { ticks += 1; }, 20);
   try {
+    // started first, and timed from the statement alone: the start has its own, longer deadline (MIN_START_MS), and on a
+    // loaded machine it took the whole call past the bound (#232)
+    assert.deepEqual(rowsOf(await slow.run(simpleQuery("SELECT 1"))), [["1"]]);
+    ticks = 0;
     const started = Date.now();
     await assert.rejects(slow.run(simpleQuery("SELECT count(*) FROM generate_series(1, 4000000000)")), (e: Error) => {
       assert.match(e.message, /^the catalog did not answer .* within 0\.3 s, so Mason started it again \(the next statement is answered as usual; MASON_PG_CATALOG_TIMEOUT_MS raises the deadline\)/);
       assert.doesNotMatch(e.message, /pglite/i, "what a client reads names no engine");
       return true;
     });
-    assert.ok(Date.now() - started < 5_000, "the deadline fired");
+    const took = Date.now() - started;
+    assert.ok(took < 5_000, `the deadline fired: refused after ${took} ms`);
     assert.ok(ticks >= 5, `the event loop was blocked: ${ticks} tick(s) in 300 ms`);
     assert.equal(slow.started, false);
     assert.deepEqual(rowsOf(await slow.run(simpleQuery("SELECT 1"))), [["1"]]);

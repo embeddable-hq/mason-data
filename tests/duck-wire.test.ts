@@ -1359,14 +1359,19 @@ test("past what may spill is 53400 and a full disk 53100, each with the way out,
   assert.equal(pgErrorOf(new Error("Conversion Error: Could not convert string 'No space left on device' to INT32"), "SELECT 1").fields.code, "22P02");
 });
 
-test("a statement past what may spill fails alone, 53400, and the session goes on", { skip: "quarantined: #221" }, async () => {
+test("a statement past what may spill fails alone, 53400, and the session goes on", async () => {
   const memory = String((await store.writer.runAndReadAll("SELECT current_setting('memory_limit')")).getRows()[0]![0]);
   const spill = String((await store.writer.runAndReadAll("SELECT current_setting('max_temp_directory_size')")).getRows()[0]![0]);
   const c = await client();
   try {
     await store.writer.run("SET memory_limit = '40MB'");
+    const spills = "SELECT count(*) AS n FROM (SELECT DISTINCT v || repeat('x', 300) AS w FROM big) d";
+    assert.equal((await c.query(spills)).rows[0].n, "150000", "with room on disk it completes in 40MB");
     await store.writer.run("SET GLOBAL max_temp_directory_size = '2MiB'");
-    await assert.rejects(c.query("SELECT v || repeat('x', 300) AS w FROM big ORDER BY w DESC"),
+    // a DISTINCT that spills and answers one row completes in 40MB with room on disk (above), so only the spill's ceiling
+    // can stop it. A sorted result of every row (#221) did not fit in 40MB whatever the disk, so which limit the engine
+    // said first followed its threads' timing.
+    await assert.rejects(c.query(spills),
       (e: pg.DatabaseError) => e.code === "53400" && /room on disk/.test(e.message) && /MASON_SPILL_LIMIT/.test(e.hint ?? "") && !/duckdb|\.tmp/i.test(`${e.message} ${e.detail ?? ""}`));
   } finally {
     await store.writer.run(`SET memory_limit = '${memory.replace(" ", "")}'`);
