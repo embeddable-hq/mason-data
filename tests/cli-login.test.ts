@@ -23,10 +23,14 @@ test("mason login: the page and the code on stderr at once, before it is approve
     child.stdout.on("data", (b: Buffer) => { stdout += b.toString(); });
     const seen = new Promise<void>((resolve) => child.stderr.on("data", (b: Buffer) => { stderr += b.toString(); if (stderr.includes("Waiting for the code")) resolve(); }));
     const closed = new Promise<number | null>((resolve) => child.on("close", resolve));
-    await Promise.race([seen, new Promise((_, reject) => setTimeout(() => reject(new Error(`no code on stderr within 10 s:\n${stderr}`)), 10_000))]);
+    let ended = false;
+    void closed.then(() => { ended = true; });
+    // awaited, never timed: the child's own start is what a loaded machine slows (0.8 s at rest, past 10 s under load,
+    // #606); an exit before the code fails at once with what it said, and a hang is the test's own timeout
+    assert.ok(await Promise.race([seen.then(() => true), closed.then(() => false)]), `mason login ended before it showed the code:\n${stderr}`);
     // said while the service still answers pending: an agent can pass it on before the wait ends
     // and the service has answered a poll pending
-    for (let i = 0; i < 100 && !fake.requests.some((r) => r.path === "/oauth/token"); i++) await new Promise((r) => setTimeout(r, 50));
+    while (!ended && !fake.requests.some((r) => r.path === "/oauth/token")) await new Promise((r) => setTimeout(r, 50));
     assert.ok(fake.requests.some((r) => r.path === "/oauth/token"), "a poll was answered pending");
     assert.equal(stdout, "", "nothing on stdout before it ends");
     assert.equal(stderr, `To sign in to ${fake.url}, open this page and approve the code:\n  page   ${fake.url}/device?user_code=WDJBMJHT\n  code   WDJB-MJHT (the page shows it: check they match)\n` +
