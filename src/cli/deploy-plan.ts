@@ -23,7 +23,7 @@ import { bytesText } from "./commands.ts";
 /** How many tables' sizes an answer may carry. */
 export const MAX_SIZED_TABLES = 10_000;
 /** The longest table name an answer may carry. */
-const MAX_TABLE_NAME = 300;
+export const MAX_TABLE_NAME = 300;
 
 /** A table's size, as the replica counts it: null where it does not know. */
 export interface TableSize { table: string; rows: number | null; bytes: number | null }
@@ -66,6 +66,28 @@ export function heldProject(v: unknown): ReplicaProject | null | undefined {
     tables.push({ table: t.table, rows: typeof t.rows === "number" ? t.rows : null, bytes: typeof t.bytes === "number" ? t.bytes : null });
   }
   return { files, tables };
+}
+
+/**
+ * THE TABLES A SERVICE'S `unconfirmed_removal` REFUSAL SAYS THE DEPLOY REMOVES (docs/HOSTED-API.md "What the deploy
+ * changes"): its `removes`, held — `undefined` when it says none (an older service); `"unknown"` when it says it could
+ * not tell; the list, each `{ table, rows, bytes }` once, when it names them; null when it does not hold (an empty
+ * list, past a bound, a size that is no count, or a name that is not printable as it came: one line, within
+ * `MAX_TABLE_NAME`, nothing `serviceText` would mask or replace). A name is sent back as confirmed exactly as it came,
+ * so it must be exactly what a person was shown.
+ */
+export function heldRemoves(v: unknown, secrets: readonly string[]): TableSize[] | "unknown" | null | undefined {
+  if (v === undefined) return undefined;
+  if (v === "unknown") return "unknown";
+  if (!Array.isArray(v) || v.length === 0 || v.length > MAX_SIZED_TABLES) return null;
+  const out: TableSize[] = [], seen = new Set<string>();
+  for (const t of v) {
+    if (!obj(t) || typeof t.table !== "string" || t.table === "" || t.table.length > MAX_TABLE_NAME || seen.has(t.table) || !count(t.rows) || !count(t.bytes)) return null;
+    if (serviceText(t.table, MAX_TABLE_NAME, secrets) !== t.table) return null;
+    seen.add(t.table);
+    out.push({ table: t.table, rows: typeof t.rows === "number" ? t.rows : null, bytes: typeof t.bytes === "number" ? t.bytes : null });
+  }
+  return out;
 }
 
 /** One side of a plan: what a project's files say, as Mason reads them. */
@@ -176,8 +198,8 @@ export function sizeText(t: TableSize): string {
   return parts.length ? parts.join(", ") : "size not known";
 }
 
-/** The tables a plan removes, each with its size, in a line. */
-export const removedText = (plan: Plan): string => plan.tables.removed.map((t) => `${t.table} (${sizeText(t)})`).join(", ");
+/** Tables removed, each with its size, in a line. */
+export const removedText = (removed: readonly TableSize[]): string => removed.map((t) => `${t.table} (${sizeText(t)})`).join(", ");
 
 /** What a re-sync of a removed table costs, in the CLI's words (said in the plan, the question and the refusal). */
 export const RESYNC = "its synced data is dropped, and syncing it again is a new first sync, reading every row from the source";

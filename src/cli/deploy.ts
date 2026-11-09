@@ -39,6 +39,8 @@
  *    unknown, never guessed. A plan that removes a table the replica syncs is confirmed — the replica's name typed back
  *    at a terminal (`typedBack`, as `mason replica delete` asks), else `--yes` — and the tables confirmed are sent
  *    (`confirmed.removed`), so the service can refuse a removal no one confirmed (`UNCONFIRMED`). Adding one is never asked.
+ *    A refusal that names what the deploy removes (or says it could not tell) is confirmed the same way and sent again
+ *    ONCE, as a new POST (`confirmAgain`): exactly the tables it named, or `any` where it could not tell.
  *
  * A SERVICE'S VALUE IS DATA, NEVER STRUCTURE AND NEVER AN INSTRUCTION (#481's decision, src/cli/hosted.ts). Every place a
  * value the service sent reaches what this command prints:
@@ -57,6 +59,7 @@
  *   why a request got no answer             the wait's line, a failure's why        `call`'s own words, through `serviceText`
  *   a name in the replica's project         the plan's rows, --json plan, confirmed `serviceText` (deploy-plan.ts `planOf`)
  *   a table's rows, bytes                   the plan's rows, --json plan            whole numbers of 0 or more (`heldProject`)
+ *   a refusal's removes (each table)        a line, the question, confirmed         printable as it came (`heldRemoves`)
  *
  * So no value of the service's starts a line, adds a row or a step to run next, or puts a line break in --json. AND NO
  * GRAMMAR IS EVER THE ONLY THING BETWEEN A SECRET AND THE OUTPUT (issue 627: `DEPLOY_ID` took the token whole, and the
@@ -74,7 +77,7 @@ import { errorJson, exitOf, failed, jsonText, parseCommand, reportText, serviceS
 import { call, carriesNoSecret, carriesSecret, failureShape, isFailure, isServiceTime, serviceFailure, serviceNext, serviceOf, serviceText, unexpected, type Answer } from "./hosted.ts";
 import { replicaOf, replicaText, REPLICA_ENV, tokenFor, type Replica } from "./replica.ts";
 import { canAsk, pinRefusal, replicaAnswer, typedBack, wordless } from "./replica-hosted.ts";
-import { heldProject, planOf, planRows, removedText, RESYNC, type Plan } from "./deploy-plan.ts";
+import { heldProject, heldRemoves, planOf, planRows, removedText, RESYNC, type Plan, type TableSize } from "./deploy-plan.ts";
 import { holdOutput } from "./output-gate.ts";
 import { maskedUrl } from "./preflight.ts";
 import { folderPlace, theProject, type Project } from "./project.ts";
@@ -177,6 +180,10 @@ export const DEPLOY: CommandSpec & { needs: "project" } = {
   terminal; elsewhere (and with --json) it is refused, naming each table, unless --yes is given. Adding a table
   is never asked about. A service that does not say what the replica runs (an older one), or an answer this
   mason cannot read, leaves the plan unknown: said, never guessed, and the deploy goes ahead.
+  The service refuses a deploy that removes a table not confirmed: when its refusal names the tables, they are
+  said and confirmed the same way (typed back, else --yes), and the deploy is sent again once, a new deploy, its
+  removal confirmed as named (the clock of --timeout starts again); when it says it could not tell which tables,
+  the confirmation accepts any removal: any synced table the deploy removes will be dropped.
   It asks the replica's Mason version too: a project whose mason.yml pin the replica would not run
   (neither the version it runs nor a newer one it has installed) is refused, naming both, with the ways out
   (write the project for the replica's Mason, or mason replica upgrade). A service that does not say the
@@ -198,14 +205,16 @@ export const DEPLOY: CommandSpec & { needs: "project" } = {
     columns, key, sync: { from, to } | null }] }, generatedTables: { added, removed,
     changed }, roles: { added, removed, changed, default: { from, to } | null }, pin:
     { from, to } | null }; rows and bytes null where not known; null when it cannot be
-    shown), planUnknown (why it cannot be shown, else null), deploy ({ id, status (queued,
+    shown), planUnknown (why it cannot be shown, else null), confirmed (the removal the deploy
+    sent as confirmed: { removed: [table], any (present, true, when any removal was accepted) };
+    null when none), deploy ({ id, status (queued,
     applying, starting, running, refused, failed), phase (null, checking, writing,
     restarting, syncing), createdAt, finishedAt };
     null on a dry run), error (when the replica refused it, it failed or the wait timed out:
     { code, message, why, fix }), next }
 `,
   options: { replica: { type: "string" }, "dry-run": { type: "boolean", default: false }, yes: { type: "boolean", default: false }, timeout: { type: "string" }, json: { type: "boolean", default: false } },
-  json: ["dryRun", "replica", "service", "files", "totalBytes", "warnings", "plan", "planUnknown", "deploy", "error", "next"],
+  json: ["dryRun", "replica", "service", "files", "totalBytes", "warnings", "plan", "planUnknown", "confirmed", "deploy", "error", "next"],
 };
 
 /** A file as it is sent: its path (relative to the project folder, `/` between its parts), size in bytes, sha256 of its
@@ -364,8 +373,14 @@ type Phase = keyof typeof PHASES;
 /** The phases each status may carry; a phase beside any other status is outside the contract. */
 const PHASES_OF: Partial<Record<Status, readonly Phase[]>> = { applying: ["checking", "writing"], starting: ["restarting", "syncing"] };
 
-/** The deploy as the service says it (docs/HOSTED-API.md), its status and phase each one of the contract's closed set. */
-export interface DeployState { id: string; status: Status; phase: Phase | null; createdAt: string; finishedAt: string | null; failure: Failure | null }
+/** The deploy as the service says it (docs/HOSTED-API.md), its status and phase each one of the contract's closed set.
+ *  `removal`: when the service refused it as `unconfirmed_removal`, what its refusal says the deploy removes — the
+ *  tables, `"unknown"` (it could not tell), or null (it says neither: an older service); else null. */
+export interface DeployState { id: string; status: Status; phase: Phase | null; createdAt: string; finishedAt: string | null; failure: Failure | null; removal: { removes: TableSize[] | "unknown" | null } | null }
+
+/** What a deploy says was confirmed of its removals (`confirmed` in the POST's body): the tables named, and, only on a
+ *  service's refusal that could not tell which, `any` — every synced table the deploy removes may be dropped. */
+export interface Confirmed { removed: string[]; any?: true }
 
 const obj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
@@ -395,7 +410,7 @@ export function deployStateOf(json: unknown, id: string | null, secrets: readonl
   }
   if (!isServiceTime(d.createdAt) || (d.finishedAt !== undefined && d.finishedAt !== null && !isServiceTime(d.finishedAt))) return null;
   // a refusal or a failure carries the failure shape (its code, message, why, fix and next in one object), and nothing else does
-  let failure: Failure | null = null;
+  let failure: Failure | null = null, removal: DeployState["removal"] = null;
   if (status === "refused" || status === "failed") {
     if (!obj(d.failure)) return null;
     failure = failureShape(d.failure, secrets, status === "refused"
@@ -405,11 +420,16 @@ export function deployStateOf(json: unknown, id: string | null, secrets: readonl
     if (failure === null) return null;
     // the service refused a removal not confirmed (an older CLI's deploy, or what the replica runs changed since the
     // plan was shown): the way out is the CLI's own, the plan shown again and the question asked
-    if (status === "refused" && d.failure.code === UNCONFIRMED && again[0] !== undefined) {
-      failure = { ...failure, fix: `${again[0][0]} again: it shows what the deploy removes and asks for it to be confirmed (or add --yes, where no person is asked)` };
-    }
+    if (status === "refused" && d.failure.code === UNCONFIRMED) {
+      if (again[0] !== undefined) failure = { ...failure, fix: `${again[0][0]} again: it shows what the deploy removes and asks for it to be confirmed (or add --yes, where no person is asked)` };
+      // what it removes, as the refusal names it (the names already put to the exact test above): one that does not hold
+      // is outside the contract, never a list half read
+      const removes = heldRemoves(d.failure.removes, secrets);
+      if (removes === null) return null;
+      removal = { removes: removes ?? null };
+    } else if (d.failure.removes !== undefined) return null;
   } else if (d.failure !== undefined && d.failure !== null) return null;
-  return { id: d.id, status, phase, createdAt: d.createdAt, finishedAt: typeof d.finishedAt === "string" ? d.finishedAt : null, failure };
+  return { id: d.id, status, phase, createdAt: d.createdAt, finishedAt: typeof d.finishedAt === "string" ? d.finishedAt : null, failure, removal };
 }
 
 /** A status for a person, its phase beside it. */
@@ -566,7 +586,7 @@ export async function deploy(argv: string[]): Promise<number> {
         planned = now;
       }
     }
-    if (json) { out(jsonText(DEPLOY, { dryRun: true, ...base, plan: planned.plan, planUnknown: planned.unknown, deploy: null }, next)); return 0; }
+    if (json) { out(jsonText(DEPLOY, { dryRun: true, ...base, plan: planned.plan, planUnknown: planned.unknown, confirmed: null, deploy: null }, next)); return 0; }
     const w = Math.max(...files.map((x) => x.path.length)), sw = Math.max(...files.map((x) => bytes(x.size).length));
     // the files, then what they change (its heading and rows), then what to run next
     const st = outStyle();
@@ -584,7 +604,9 @@ export async function deploy(argv: string[]): Promise<number> {
   holdOutput({ command: "deploy", json, secrets: [token] });
   const secrets = [token];
   const where = `/v1/replicas/${r.org}/${r.name}/deploys`;
-  const started = Date.now(), deadline = started + timeout.seconds * 1000;
+  const started = Date.now();
+  // the clock of a send and its wait: started again for the one resend, once a person (or --yes) confirmed it
+  let deadline = started + timeout.seconds * 1000;
 
   const s = errStyle();
   // a spinner turns only on a terminal wide enough for a label beside its frame; else each line is said once, as on a pipe
@@ -600,20 +622,12 @@ export async function deploy(argv: string[]): Promise<number> {
   // A TABLE THE REPLICA SYNCS, REMOVED: its synced data is dropped, and a re-sync reads every row from the source again, so it
   // is confirmed — typed back by a person at a terminal, else --yes on the line; never asked about an added one
   const removed = planned.plan?.tables.removed ?? [];
-  if (removed.length && f.values.yes !== true) {
-    const these = removed.length === 1 ? "it" : "them";
-    if (!canAsk(json)) {
-      return fail({ message: `the deploy removes ${removed.length} table${removed.length === 1 ? "" : "s"} ${name} syncs: ${removedText(planned.plan!)}`, code: "refused",
-        why: `of a removed table, ${RESYNC}: such a deploy is confirmed at a terminal, or with --yes; nothing was sent`,
-        fix: `if ${removed.length === 1 ? "it is" : "they are"} meant to go: mason deploy --replica ${name} --yes; if not, add ${these} back to the sources file`,
-        next: [[`mason deploy --replica ${name} --yes`, `deploy, removing ${these}`]] }, { json });
-    }
-    say(`Removing ${removed.length === 1 ? "a table" : `${removed.length} tables`} from ${name} drops ${removed.length === 1 ? "its" : "their"} synced data, and syncing ${removed.length === 1 ? "it" : "one"} again is a new first sync, reading every row from the source. Type ${name} to deploy, anything else to keep ${name} as it is.`);
-    if (!await typedBack(name)) {
-      return fail({ message: `nothing was deployed to ${name}: what was typed is not its name`, code: "refused",
-        why: "a deploy that removes a table the replica syncs is confirmed by typing the replica's name back exactly (nothing trimmed, nothing re-cased)",
-        fix: `run it again and type ${name}; where no person is asked, mason deploy --replica ${name} --yes`, next: [[`mason deploy --replica ${name}`, "ask again"]] }, { json });
-    }
+  const yes = f.values.yes === true;
+  const words = removalWords(name);
+  if (removed.length && !yes) {
+    if (!canAsk(json)) return fail(words.unconfirmed(removed, "nothing was sent"), { json });
+    say(words.question(removed));
+    if (!await typedBack(name)) return fail(words.mistyped, { json });
   }
 
   // THE DEPLOY, SENT: 201 and its id, else the service's failure as it worded it. A 503 (the replica is being made, or
@@ -622,132 +636,198 @@ export async function deploy(argv: string[]): Promise<number> {
   // answer is ever sent again: a POST that may have made a deploy would make a second.
   // the tables whose removal was confirmed, as the plan named them: a service refuses a deploy that would remove one
   // this list lacks (an older CLI's, or a plan that went stale), so nothing skips the question
-  const body = { files: files.map(({ path: p, sha256, content }) => ({ path: p, sha256, content })), client: { version: version() },
-    ...(removed.length ? { confirmed: { removed: removed.map((x) => x.table) } } : {}) };
-  let waitSaid = "", waitSaidAt = 0, waitLine: string | null = null;
-  let sent = await call(service, "POST", where, { token, json: body });
-  while (!isFailure(sent) && (sent.status === 503 || sent.status === 429)) {
-    const asked: Answer = sent;
-    // nothing of a wait's answer is printed but its status and the replica's state (in the CLI's words); still, an
-    // answer that carries the token anywhere but a failure's words is refused whole, as every answer is
-    const j = asked.json;
-    const keys = obj(j) && obj(j.error) ? { ...j, error: { ...j.error, message: null, why: null, fix: null } } : j;
-    if (!carriesNoSecret(keys, secrets)) {
-      if (terminal && waitLine !== null) steps.fail(waitLine);
-      return fail(unexpected(service, asked, "a deploy was sent"), { json });
-    }
-    const st = asked.status === 503 ? replicaStateOf(j, WAITING_STATES) : null;
-    const reason = asked.status === 429 ? "too many deploys are being sent at once"
-      : st !== null ? `${name} ${WAITING_STATES[st]}` : "the service cannot take a deploy just now";
-    const resendAt = Date.now() + (asked.retryAfter !== null ? asked.retryAfter * 1000 : RESEND_MS);
-    for (;;) {
-      waitLine = `Waiting to send the deploy: ${reason} (HTTP ${asked.status}); waited ${waited(Date.now() - started)}`;
-      if (terminal) steps.relabel(clipped(waitLine)!);
-      else if (!json) {
-        // a line when what it waits on changes, and every 30 s while it does not (`sayAgain`, as mason wait says its block)
-        const what = waitLine.replace(/; waited .*$/, "");
-        if (sayAgain(what, waitSaid, waitSaidAt, Date.now())) { say(`  ${waitLine}`); waitSaid = what; waitSaidAt = Date.now(); }
+  let confirmed: Confirmed | null = removed.length ? { removed: removed.map((x) => x.table) } : null;
+  // ONE RESEND AT MOST (round 1): a service that refused the deploy as unconfirmed_removal, naming what it removes (or
+  // that it could not tell), took nothing — the refused deploy is final, the replica runs what it ran — so a new POST,
+  // its removal confirmed as the refusal named it, is a new deploy; a second refusal is said as it came
+  send: for (let round = 0; ; round++) {
+    const body = { files: files.map(({ path: p, sha256, content }) => ({ path: p, sha256, content })), client: { version: version() },
+      ...(confirmed !== null ? { confirmed } : {}) };
+    let waitSaid = "", waitSaidAt = 0, waitLine: string | null = null;
+    let sent = await call(service, "POST", where, { token, json: body });
+    while (!isFailure(sent) && (sent.status === 503 || sent.status === 429)) {
+      const asked: Answer = sent;
+      // nothing of a wait's answer is printed but its status and the replica's state (in the CLI's words); still, an
+      // answer that carries the token anywhere but a failure's words is refused whole, as every answer is
+      const j = asked.json;
+      const keys = obj(j) && obj(j.error) ? { ...j, error: { ...j.error, message: null, why: null, fix: null } } : j;
+      if (!carriesNoSecret(keys, secrets)) {
+        if (terminal && waitLine !== null) steps.fail(waitLine);
+        return fail(unexpected(service, asked, "a deploy was sent"), { json });
       }
-      const left = Math.min(resendAt, deadline) - Date.now();
-      if (left <= 0) break;
-      await sleep(Math.min(TICK_MS, left));
+      const st = asked.status === 503 ? replicaStateOf(j, WAITING_STATES) : null;
+      const reason = asked.status === 429 ? "too many deploys are being sent at once"
+        : st !== null ? `${name} ${WAITING_STATES[st]}` : "the service cannot take a deploy just now";
+      const resendAt = Date.now() + (asked.retryAfter !== null ? asked.retryAfter * 1000 : RESEND_MS);
+      for (;;) {
+        waitLine = `Waiting to send the deploy: ${reason} (HTTP ${asked.status}); waited ${waited(Date.now() - started)}`;
+        if (terminal) steps.relabel(clipped(waitLine)!);
+        else if (!json) {
+          // a line when what it waits on changes, and every 30 s while it does not (`sayAgain`, as mason wait says its block)
+          const what = waitLine.replace(/; waited .*$/, "");
+          if (sayAgain(what, waitSaid, waitSaidAt, Date.now())) { say(`  ${waitLine}`); waitSaid = what; waitSaidAt = Date.now(); }
+        }
+        const left = Math.min(resendAt, deadline) - Date.now();
+        if (left <= 0) break;
+        await sleep(Math.min(TICK_MS, left));
+      }
+      if (Date.now() >= deadline) {
+        if (terminal) steps.fail(waitLine);
+        return fail({ message: `the deploy to ${name} was not sent within ${timeout.every}`, code: "timeout",
+          why: `the service asked to wait: ${reason} (HTTP ${asked.status}); no deploy was made`,
+          fix: `mason deploy again once ${name} is ready (mason replica status ${name} says its state); a longer wait is --timeout 30m`,
+          next: [statusStep, [`mason deploy --replica ${name}`, "deploy again"]] }, { json });
+      }
+      sent = await call(service, "POST", where, { token, json: body });
     }
-    if (Date.now() >= deadline) {
-      if (terminal) steps.fail(waitLine);
-      return fail({ message: `the deploy to ${name} was not sent within ${timeout.every}`, code: "timeout",
-        why: `the service asked to wait: ${reason} (HTTP ${asked.status}); no deploy was made`,
-        fix: `mason deploy again once ${name} is ready (mason replica status ${name} says its state); a longer wait is --timeout 30m`,
-        next: [statusStep, [`mason deploy --replica ${name}`, "deploy again"]] }, { json });
+    if (terminal && waitLine !== null) steps.done(waitLine);
+    if (isFailure(sent)) {
+      return fail({ ...sent, why: `${sent.why ?? ""}${sent.why ? "; " : ""}whether the deploy was made is not known`,
+        fix: `${sent.fix ?? "check this machine is online"}, then mason deploy again (a deploy still running is refused as busy)` }, { json });
     }
-    sent = await call(service, "POST", where, { token, json: body });
-  }
-  if (terminal && waitLine !== null) steps.done(waitLine);
-  if (isFailure(sent)) {
-    return fail({ ...sent, why: `${sent.why ?? ""}${sent.why ? "; " : ""}whether the deploy was made is not known`,
-      fix: `${sent.fix ?? "check this machine is online"}, then mason deploy again (a deploy still running is refused as busy)` }, { json });
-  }
-  if (sent.status !== 201) {
-    // a 409 that names the replica's state: it cannot take a deploy (failed, being deleted), never sent again;
-    // the next step is the replica's status, the CLI's own (never the generic "mason login")
-    const refused = sent.status === 409 ? replicaStateOf(sent.json, REFUSED_STATES) : null;
-    // a 404: no such replica, a deleted one included (its name is freed): the organisation's replicas, never mason login
-    const notFound = (st: number): NextStep[] => st === 404
-      ? [[`mason replica list ${r.org}`, "the organisation's replicas: this one was deleted, or never existed"]] : serviceNext(st);
-    if (refused === null) return fail(serviceFailure(sent, secrets, notFound) ?? unexpected(service, sent, "a deploy was sent"), { json });
-    const f = serviceFailure(sent, secrets, () => [statusStep]);
-    if (f === null) return fail(unexpected(service, sent, "a deploy was sent"), { json });
-    return fail({ ...f, why: `${name} ${REFUSED_STATES[refused]}; ${f.why}`,
-      fix: f.fix ?? `a replica takes a deploy only once it is ready: mason replica status ${name} says its state` }, { json });
-  }
-  // what to run after a refused or failed deploy: the CLI's own step, never one the service names
-  const again: NextStep[] = [[`mason deploy --replica ${name}`, "deploy again, once what it says is fixed"]];
-  const first = deployStateOf(sent.json, null, secrets, again);
-  if (first === null || first.status !== "queued") return fail(unexpected(service, sent, "a deploy was sent"), { json });
-  const id = first.id;
-  if (!json) say(`Sent ${files.length} file${files.length === 1 ? "" : "s"} (${bytes(totalBytes)}) to ${name} on ${service.base}: deploy ${id}`);
+    if (sent.status !== 201) {
+      // a 409 that names the replica's state: it cannot take a deploy (failed, being deleted), never sent again;
+      // the next step is the replica's status, the CLI's own (never the generic "mason login")
+      const refused = sent.status === 409 ? replicaStateOf(sent.json, REFUSED_STATES) : null;
+      // a 404: no such replica, a deleted one included (its name is freed): the organisation's replicas, never mason login
+      const notFound = (st: number): NextStep[] => st === 404
+        ? [[`mason replica list ${r.org}`, "the organisation's replicas: this one was deleted, or never existed"]] : serviceNext(st);
+      if (refused === null) return fail(serviceFailure(sent, secrets, notFound) ?? unexpected(service, sent, "a deploy was sent"), { json });
+      const f = serviceFailure(sent, secrets, () => [statusStep]);
+      if (f === null) return fail(unexpected(service, sent, "a deploy was sent"), { json });
+      return fail({ ...f, why: `${name} ${REFUSED_STATES[refused]}; ${f.why}`,
+        fix: f.fix ?? `a replica takes a deploy only once it is ready: mason replica status ${name} says its state` }, { json });
+    }
+    // what to run after a refused or failed deploy: the CLI's own step, never one the service names
+    const again: NextStep[] = [[`mason deploy --replica ${name}`, "deploy again, once what it says is fixed"]];
+    const first = deployStateOf(sent.json, null, secrets, again);
+    if (first === null || first.status !== "queued") return fail(unexpected(service, sent, "a deploy was sent"), { json });
+    const id = first.id;
+    if (!json) say(`Sent ${files.length} file${files.length === 1 ? "" : "s"} (${bytes(totalBytes)}) to ${name} on ${service.base}: deploy ${id}`);
 
-  // THE WAIT: a line when the state changes (and every 30 s while it does not), a spinner beside it on a terminal
-  let state = first, said = "", saidAt = 0, unsure: string | null = null, unsureSaid: string | null = null;
-  const show = (line: string): void => {
-    if (json) return;
-    // on a terminal: the step that ends is said whole (a line the CLI breaks), the one that turns cut to one line
-    if (terminal) { if (line !== said) { if (said !== "") steps.done(said); steps.begin(clipped(line)!); said = line; } return; }
-    if (sayAgain(line, said, saidAt, Date.now())) { say(`  ${line}`); said = line; saidAt = Date.now(); }
-  };
-  show(stateLine(state));
-  let waitMs = sent.retryAfter !== null ? sent.retryAfter * 1000 : POLL_MS;
-  const ended = (error: Failure | null): number => {
-    const value = { dryRun: false, ...base, plan: planned.plan, planUnknown: planned.unknown, deploy: { id, status: state.status, phase: state.phase, createdAt: state.createdAt, finishedAt: state.finishedAt } };
-    if (json) {
-      if (error === null) { out(jsonText(DEPLOY, value, NEXT_AGAIN(r))); return 0; }
-      out(jsonText(DEPLOY, { ...value, error: errorJson(error) }, error.next ?? []));
-      return exitOf(error);
+    // THE WAIT: a line when the state changes (and every 30 s while it does not), a spinner beside it on a terminal
+    let state = first, said = "", saidAt = 0, unsure: string | null = null, unsureSaid: string | null = null;
+    const show = (line: string): void => {
+      if (json) return;
+      // on a terminal: the step that ends is said whole (a line the CLI breaks), the one that turns cut to one line
+      if (terminal) { if (line !== said) { if (said !== "") steps.done(said); steps.begin(clipped(line)!); said = line; } return; }
+      if (sayAgain(line, said, saidAt, Date.now())) { say(`  ${line}`); said = line; saidAt = Date.now(); }
+    };
+    show(stateLine(state));
+    let waitMs = sent.retryAfter !== null ? sent.retryAfter * 1000 : POLL_MS;
+    const ended = (error: Failure | null): number => {
+      const value = { dryRun: false, ...base, plan: planned.plan, planUnknown: planned.unknown, confirmed, deploy: { id, status: state.status, phase: state.phase, createdAt: state.createdAt, finishedAt: state.finishedAt } };
+      if (json) {
+        if (error === null) { out(jsonText(DEPLOY, value, NEXT_AGAIN(r))); return 0; }
+        out(jsonText(DEPLOY, { ...value, error: errorJson(error) }, error.next ?? []));
+        return exitOf(error);
+      }
+      // the step it ended on: the outcome's own line when it has one, else (a timeout, an answer outside the contract) the last
+      const line = FINAL.has(state.status) ? stateLine(state) : null;
+      // (on a terminal the step turning is ticked and the outcome is a line of its own; a refusal replaces the step it ended)
+      if (terminal) {
+        if (error === null) { if (line !== null && line !== said) { steps.done(said); steps.begin(clipped(line)!); said = line; } steps.done(said); }
+        else steps.fail(line ?? said);
+      }
+      else if (line !== null && line !== said) say(`  ${line}`);
+      if (error !== null) return fail(error, { json: false });
+      out(reportText({ headline: `Deployed to ${replicaText(r)}: the replica runs it`,
+        details: [["deploy", id], ["service", service.base], ["files", `${files.length} (${bytes(totalBytes)})`], ["took", `${Math.max(1, Math.round((Date.now() - started) / 1000))} s`]],
+        next: NEXT_AGAIN(r) }, outStyle()));
+      return 0;
+    };
+    /**
+     * THE SERVICE REFUSED A REMOVAL NOT CONFIRMED, naming the tables (or saying it could not tell): they are said, then
+     * confirmed as before a send — the replica's name typed back at a terminal, else --yes — and what is confirmed is
+     * returned for the one resend: exactly the tables named, or, where it could not tell, `any`. Else the exit.
+     */
+    const confirmAgain = async (removes: TableSize[] | "unknown"): Promise<Confirmed | number> => {
+      const any = removes === "unknown";
+      if (!yes && !canAsk(json)) {
+        const refusal = any ? words.unknown(id) : words.unconfirmed(removes, `the service did not take deploy ${id}`);
+        return ended(refusal);
+      }
+      // the refused deploy's step ends here, as an outcome's does; then what it removes, and the question or --yes
+      if (terminal) steps.fail(stateLine(state));
+      else if (!json && stateLine(state) !== said) say(`  ${stateLine(state)}`);
+      const what = any ? `it could not tell which tables ${name} syncs the deploy removes` : `it removes ${removedText(removes)}, whose removal was not confirmed`;
+      if (yes) {
+        if (!json) say(`The service did not take deploy ${id}: ${what}; --yes ${any ? "accepts any removal" : "confirms it"}: sending the deploy again`);
+      } else {
+        say(`The service did not take deploy ${id}: ${what}.`);
+        say(any ? words.anyQuestion : words.question(removes));
+        if (!await typedBack(name)) return fail(words.mistyped, { json });
+      }
+      return any ? { removed: confirmed?.removed ?? [], any: true } : { removed: removes.map((t) => t.table) };
+    };
+    for (;;) {
+      if (FINAL.has(state.status)) {
+        if (state.status === "running") return ended(null);
+        const removal = state.removal;
+        if (removal !== null && removal.removes !== null && round === 0) {
+          const again = await confirmAgain(removal.removes);
+          if (typeof again === "number") return again;
+          confirmed = again;
+          deadline = Date.now() + timeout.seconds * 1000;
+          continue send;
+        }
+        // a service that names no table, and a plan this mason could not show: deploying again asks nothing, so the way
+        // out is the sources file's
+        if (removal !== null && removal.removes === null && planned.plan === null) {
+          return ended({ ...state.failure!, fix: `the service did not say which tables, and what ${name} runs cannot be shown here: keep in the sources file each table its message names; a service that names them in its refusal lets mason deploy ask to confirm their removal` });
+        }
+        // Mason on the replica refused it, or it failed: its words as they came, never re-worded; its code the CLI's (exit 1)
+        return ended(state.failure!);
+      }
+      const left = deadline - Date.now();
+      if (left <= 0) {
+        return ended({ message: `deploy ${id} to ${replicaText(r)} did not finish within ${timeout.every}`, code: "timeout",
+          why: unsure !== null ? `the service could not say how it is going: ${unsure}` : `it was last: ${stateLine(state)}`,
+          fix: `nothing was stopped, and it may still finish: the service's web app shows deploy ${id} of ${replicaText(r)}, as GET ${where}/${id} does (the hosted API); a longer wait is --timeout 30m`,
+          next: [] });
+      }
+      await sleep(Math.min(waitMs, left));
+      const a = await call(service, "GET", `${where}/${id}`, { token });
+      waitMs = POLL_MS;
+      // an answer that cannot say how it goes is a wait, never an outcome: the timeout bounds it
+      if (isFailure(a) || a.status === 429 || a.status >= 500) {
+        unsure = isFailure(a) ? serviceText(`${a.message}${a.why ? ` (${a.why})` : ""}`, 300, secrets) : `${a.what} answered ${a.status}`;
+        if (!isFailure(a) && a.retryAfter !== null) waitMs = a.retryAfter * 1000;
+        // on a terminal a note above the turning step, which goes on (the step is not over); elsewhere the step's line again
+        if (terminal) { if (unsure !== unsureSaid) steps.print(s.dim(`  the service could not say more just now (${unsure}): asking again`)); unsureSaid = unsure; }
+        else show(`${stateLine(state)}; the service could not say more just now (${unsure}): asking again`);
+        continue;
+      }
+      if (a.retryAfter !== null) waitMs = a.retryAfter * 1000;
+      // a refusal of the question (the token revoked meanwhile, the replica gone) is the service's, as it worded it
+      if (a.status !== 200) return ended(serviceFailure(a, secrets) ?? unexpected(service, a, "the deploy's state was asked for"));
+      const now = deployStateOf(a.json, id, secrets, again);
+      if (now === null) return ended(unexpected(service, a, "the deploy's state was asked for"));
+      state = now; unsure = null; unsureSaid = null;
+      if (!FINAL.has(state.status)) show(stateLine(state));
     }
-    // the step it ended on: the outcome's own line when it has one, else (a timeout, an answer outside the contract) the last
-    const line = FINAL.has(state.status) ? stateLine(state) : null;
-    // (on a terminal the step turning is ticked and the outcome is a line of its own; a refusal replaces the step it ended)
-    if (terminal) {
-      if (error === null) { if (line !== null && line !== said) { steps.done(said); steps.begin(clipped(line)!); said = line; } steps.done(said); }
-      else steps.fail(line ?? said);
-    }
-    else if (line !== null && line !== said) say(`  ${line}`);
-    if (error !== null) return fail(error, { json: false });
-    out(reportText({ headline: `Deployed to ${replicaText(r)}: the replica runs it`,
-      details: [["deploy", id], ["service", service.base], ["files", `${files.length} (${bytes(totalBytes)})`], ["took", `${Math.max(1, Math.round((Date.now() - started) / 1000))} s`]],
-      next: NEXT_AGAIN(r) }, outStyle()));
-    return 0;
-  };
-  for (;;) {
-    if (FINAL.has(state.status)) {
-      if (state.status === "running") return ended(null);
-      // Mason on the replica refused it, or it failed: its words as they came, never re-worded; its code the CLI's (exit 1)
-      return ended(state.failure!);
-    }
-    const left = deadline - Date.now();
-    if (left <= 0) {
-      return ended({ message: `deploy ${id} to ${replicaText(r)} did not finish within ${timeout.every}`, code: "timeout",
-        why: unsure !== null ? `the service could not say how it is going: ${unsure}` : `it was last: ${stateLine(state)}`,
-        fix: `nothing was stopped, and it may still finish: the service's web app shows deploy ${id} of ${replicaText(r)}, as GET ${where}/${id} does (the hosted API); a longer wait is --timeout 30m`,
-        next: [] });
-    }
-    await sleep(Math.min(waitMs, left));
-    const a = await call(service, "GET", `${where}/${id}`, { token });
-    waitMs = POLL_MS;
-    // an answer that cannot say how it goes is a wait, never an outcome: the timeout bounds it
-    if (isFailure(a) || a.status === 429 || a.status >= 500) {
-      unsure = isFailure(a) ? serviceText(`${a.message}${a.why ? ` (${a.why})` : ""}`, 300, secrets) : `${a.what} answered ${a.status}`;
-      if (!isFailure(a) && a.retryAfter !== null) waitMs = a.retryAfter * 1000;
-      // on a terminal a note above the turning step, which goes on (the step is not over); elsewhere the step's line again
-      if (terminal) { if (unsure !== unsureSaid) steps.print(s.dim(`  the service could not say more just now (${unsure}): asking again`)); unsureSaid = unsure; }
-      else show(`${stateLine(state)}; the service could not say more just now (${unsure}): asking again`);
-      continue;
-    }
-    if (a.retryAfter !== null) waitMs = a.retryAfter * 1000;
-    // a refusal of the question (the token revoked meanwhile, the replica gone) is the service's, as it worded it
-    if (a.status !== 200) return ended(serviceFailure(a, secrets) ?? unexpected(service, a, "the deploy's state was asked for"));
-    const now = deployStateOf(a.json, id, secrets, again);
-    if (now === null) return ended(unexpected(service, a, "the deploy's state was asked for"));
-    state = now; unsure = null; unsureSaid = null;
-    if (!FINAL.has(state.status)) show(stateLine(state));
   }
+}
+
+/** THE WORDS OF A REMOVAL'S CONFIRMATION, for a plan's removal and for a service's refusal alike: the question, the
+ *  refusal where no person is asked, and the answer to a name mistyped. */
+function removalWords(name: string) {
+  return {
+    question: (removed: readonly TableSize[]): string => `Removing ${removed.length === 1 ? "a table" : `${removed.length} tables`} from ${name} drops ${removed.length === 1 ? "its" : "their"} synced data, and syncing ${removed.length === 1 ? "it" : "one"} again is a new first sync, reading every row from the source. Type ${name} to deploy, anything else to keep ${name} as it is.`,
+    anyQuestion: `Any synced table this deploy removes will be dropped, and syncing one again is a new first sync, reading every row from the source. Type ${name} to deploy, anything else to keep ${name} as it is.`,
+    unconfirmed: (removed: readonly TableSize[], said: string): Failure => {
+      const these = removed.length === 1 ? "it" : "them";
+      return { message: `the deploy removes ${removed.length} table${removed.length === 1 ? "" : "s"} ${name} syncs: ${removedText(removed)}`, code: "refused",
+        why: `of a removed table, ${RESYNC}: such a deploy is confirmed at a terminal, or with --yes; ${said}`,
+        fix: `if ${removed.length === 1 ? "it is" : "they are"} meant to go: mason deploy --replica ${name} --yes; if not, add ${these} back to the sources file`,
+        next: [[`mason deploy --replica ${name} --yes`, `deploy, removing ${these}`]] };
+    },
+    unknown: (id: string): Failure => ({ message: `the service could not tell which tables ${name} syncs the deploy removes, and did not take deploy ${id}`, code: "refused",
+      why: "such a deploy goes ahead only once any removal is accepted, at a terminal or with --yes: any synced table it removes is dropped, and syncing one again is a new first sync, reading every row from the source",
+      fix: `if any table it removes may go: mason deploy --replica ${name} --yes; if not, keep in the sources file every table ${name} syncs`,
+      next: [[`mason deploy --replica ${name} --yes`, "deploy, accepting any removal"]] }),
+    mistyped: { message: `nothing was deployed to ${name}: what was typed is not its name`, code: "refused",
+      why: "a deploy that removes a table the replica syncs is confirmed by typing the replica's name back exactly (nothing trimmed, nothing re-cased)",
+      fix: `run it again and type ${name}; where no person is asked, mason deploy --replica ${name} --yes`, next: [[`mason deploy --replica ${name}`, "ask again"]] } satisfies Failure,
+  };
 }

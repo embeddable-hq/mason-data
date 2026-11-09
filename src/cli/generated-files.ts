@@ -50,7 +50,10 @@ export function parseGeneratedText(text: string, name: { schema: string; table: 
   const at = { name: `${name.schema}.${name.table}`, schema: name.schema, table: name.table, file };
   const doc = parseDocument(text, { uniqueKeys: true });
   if (doc.errors.length) return { ...at, kind: null, refusals: [refusal(null, `it is not YAML: ${doc.errors[0]!.message.split("\n")[0]}`)] };
-  const v: unknown = doc.toJS();
+  // a file the YAML library refuses to expand (more aliases than it takes, issue 550's review) is the file's problem
+  let v: unknown;
+  try { v = doc.toJS(); }
+  catch (e) { return { ...at, kind: null, refusals: [refusal(null, `it cannot be read as values: ${(e as Error).message.split("\n")[0]}`)] }; }
   if (!isPlain(v)) return { ...at, kind: null, refusals: [refusal(null, `it is ${v === null || v === undefined ? "empty" : "not a mapping"}`, ["write kind: scheduled, target_lag: 5m and sql: SELECT …"])] };
   const refusals: GeneratedRefusal[] = [];
   for (const k of Object.keys(v)) if (!KEYS.includes(k)) refusals.push(refusal(k, `is not a key${didYouMean(k, KEYS)}`, [`a generated table takes ${KEYS.join(", ")}`]));

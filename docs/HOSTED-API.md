@@ -561,7 +561,8 @@ Before it sends, the CLI shows what the deploy changes on the replica, worked ou
 the tables it adds (each a first sync, with its size where the service says it), the tables it removes (their synced
 data dropped), the tables whose columns, key or `sync:` change, the generated tables and roles it adds, removes or
 changes, the default role, and the pin. `mason deploy --dry-run` prints it too, when a replica is named and the
-machine is signed in; `--json` carries it as `plan` (`null`, with `planUnknown` saying why, when it cannot be shown).
+machine is signed in; `--json` carries it as `plan` (`null`, with `planUnknown` saying why, when it cannot be shown),
+and what the deploy sent as confirmed as `confirmed`.
 
 **The question.** The service says what the replica runs in the answer to `GET /v1/replicas/{org}/{name}?project=1`:
 beside `replica`, an optional `project`.
@@ -599,7 +600,8 @@ before it is sent. The CLI names each table with its size (or "size not known"):
 - `--yes` goes ahead without asking.
 
 Adding a table is never asked about: it costs a first sync, not synced data. A deploy that removes no table goes ahead
-without asking. When the plan cannot be shown, nothing is asked: the replica's own check below is the guard.
+without asking. When the plan cannot be shown, nothing is asked before the deploy is sent: the service's check below is
+the guard, and its refusal, naming the tables, is what the CLI asks about.
 
 **The service refuses a removal not confirmed.** So that an older CLI, or a direct call to this API, cannot skip the
 question, the deploy carries the tables whose removal was confirmed (`confirmed.removed`, below), and a service holds
@@ -610,14 +612,48 @@ What the service compares:
   name is in `public`), against those the deploy's sources file names;
 - each table the first names and the second does not is removed, and must be in `confirmed.removed`;
 - a deploy that removes one it lacks is `refused`, the replica left running what it ran before and its synced data
-  kept, with the failure code `unconfirmed_removal`, its `message` naming each such table and its size;
+  kept, with the failure code `unconfirmed_removal`, its `message` naming each such table and its size, and its
+  `removes` listing EVERY table the deploy removes (below);
 - where the service cannot tell (it cannot read either sources file, or cannot reach what the replica runs), it fails
-  closed: it refuses the same way, its `message` saying it could not tell.
+  closed: it refuses the same way, its `message` saying it could not tell and its `removes` `"unknown"` — unless the
+  deploy carries `confirmed.any: true` (below), which accepts any removal.
 
-The CLI prints the failure's words as they came (code `refused`, exit 1, `(the service said unconfirmed_removal)` at
-the end of `why`) and gives its own way out: run `mason deploy --replica <org>/<name>` again, which shows the plan and
-asks (or `--yes`). This also catches a plan gone stale: the replica's tables changed between the question and the
-deploy.
+**What the refusal names.** The deploy's `failure` (`GET …/deploys/{id}`, below) carries, beside its words, one key more
+for this code alone:
+
+```json
+{ "deploy": { "id": "dep_01HZX…", "status": "refused", "createdAt": "…", "finishedAt": "…", "failure": {
+  "code": "unconfirmed_removal", "message": "the files remove public.items, which acme/shop syncs, and its removal was not confirmed",
+  "removes": [{ "table": "public.items", "rows": 1200000, "bytes": 734003200 }] } } }
+```
+
+| `removes` | Meaning | Held to |
+|---|---|---|
+| a list | every table the deploy removes (`schema.table`, as the replica's sources file names it in full), confirmed or not | 1 to 10,000 entries, each `{ table, rows, bytes }` once: `table` at most 300 characters, ONE printable line as it is (no line break, control, zero-width, format or bidi character, no run of spaces, nothing shaped as a token), `rows` and `bytes` whole numbers of 0 or more or `null` where not known |
+| `"unknown"` | the service could not tell which tables the deploy removes | |
+| absent | an older service: it names none | |
+
+`removes` beside any other code or status, or one that does not hold, is outside the contract (the CLI fails, naming
+the request and its status). Every string of it is put to the exact test first, as every answer's is: one that carries
+the token is refused whole.
+
+**The CLI recovers from it, once.** The refused deploy is final, and took nothing: the replica runs what it ran.
+
+- A list: the CLI names each table with its size, and confirms their removal as it confirms a plan's (typed back at a
+  terminal, else `--yes`; without either, refused, code `refused`, exit 1, naming the tables, its way out
+  `mason deploy --replica <org>/<name> --yes`). Confirmed, it sends the deploy again, as a NEW `POST` (a new deploy,
+  a new id), with `confirmed.removed` exactly the list named, and waits on it, its `--timeout` started again.
+- `"unknown"`: the same, but what is confirmed is that any synced table the deploy removes will be dropped (the
+  question says so in those words); the resend carries `confirmed.any: true`. The CLI sends it only on such a
+  refusal, never otherwise.
+- Absent: as before, the failure's words as they came (code `refused`, exit 1, `(the service said
+  unconfirmed_removal)` at the end of `why`) and the CLI's own way out: run `mason deploy --replica <org>/<name>`
+  again, which shows the plan and asks (or `--yes`); when the plan could not be shown either, keep in the sources file
+  the tables the message names.
+- The resend is made at most once: a second refusal is said as it came. A resend refused `503` or `429` is waited on
+  as any POST is.
+
+This also catches a plan gone stale: the replica's tables changed between the question and the deploy.
 
 ### What the database must serve
 
@@ -666,9 +702,14 @@ written. The CLI prints the failure's words as they came, as for any refused dep
   file the replica had and the list lacks is removed. A deploy never merges.
 - `client.version` is the CLI's version (`dev` from a checkout).
 - `confirmed` is optional, `{ "removed": ["billing.invoices", "public.items"] }`: the tables (`schema.table`, as the
-  plan named them) whose removal a person confirmed, or `--yes` did. The CLI sends it only when its plan removes a
-  table. A service refuses a deploy that removes a table this list lacks ("What the deploy changes", above); a
-  service that does not know the key ignores it.
+  plan, or a refusal's `removes`, named them) whose removal a person confirmed, or `--yes` did. The CLI sends it only
+  when its plan removes a table, or when it sends a deploy again after an `unconfirmed_removal` refusal. A service
+  refuses a deploy that removes a table this list lacks ("What the deploy changes", above); a service that does not
+  know the key ignores it.
+- `confirmed.any` is optional, `true` alone: any synced table the deploy removes may be dropped, whether or not
+  `removed` names it (`removed` is then what the CLI's plan named, `[]` when it had none). A service takes it in place
+  of the comparison only when it cannot tell what the deploy removes; the CLI sends it only after a refusal whose
+  `removes` is `"unknown"`, confirmed by a person told exactly that, or by `--yes`.
 - The service checks the bounds above, each `sha256` against its `content`, and the path grammar: past a bound is
   `413 too_large`, a `sha256` or a path that does not hold `422 invalid` (the table below). It may refuse a body over
   8 MiB with `413` before reading it.
@@ -730,7 +771,7 @@ When no answer comes back to the POST, whether the deploy was made is not known:
 | `id` | the id the POST answered |
 | `status` | `queued`, `applying`, `starting`, `running`, `refused` or `failed` (below) |
 | `phase` | optional: what is under way within the status, one of a closed set (below); absent or `null` for none |
-| `failure` | present when, and only when, `status` is `refused` or `failed`: `{ code, message, why?, fix? }`, the failure shape's `error` (a `next` beside them is never read) |
+| `failure` | present when, and only when, `status` is `refused` or `failed`: `{ code, message, why?, fix? }`, the failure shape's `error` (a `next` beside them is never read); for `unconfirmed_removal`, `removes` too ("What the deploy changes") |
 | `createdAt` | when the POST was taken: ISO 8601 with its zone |
 | `finishedAt` | when it reached `running`, `refused` or `failed`: ISO 8601 with its zone; absent before |
 
@@ -740,7 +781,7 @@ When no answer comes back to the POST, whether the deploy was made is not known:
 | `applying` | Mason on the replica checks the files and takes them | waits |
 | `starting` | Mason on the replica starts on the new files, until it serves | waits |
 | `running` | the replica runs these files: Mason there serves from them | exit 0 |
-| `refused` | Mason on the replica refused the files (a sources file naming a table the database lacks, a database that cannot serve them: "What the database must serve", a pin of another release line), or the service did (a table removed whose removal was not confirmed: `unconfirmed_removal`, above): `failure` is the refusal. The replica runs what it ran before | prints `failure`'s words as they came, code `refused`, exit 1 (for `unconfirmed_removal`, its way out the CLI's own: deploy again, to be asked) |
+| `refused` | Mason on the replica refused the files (a sources file naming a table the database lacks, a database that cannot serve them: "What the database must serve", a pin of another release line), or the service did (a table removed whose removal was not confirmed: `unconfirmed_removal`, above, with its `removes`): `failure` is the refusal. The replica runs what it ran before | prints `failure`'s words as they came, code `refused`, exit 1 (for `unconfirmed_removal`, the CLI asks to confirm what its `removes` names and sends the deploy again once, above; without `removes`, its way out the CLI's own: deploy again, to be asked) |
 | `failed` | the deploy could not finish for a reason that is not the files' (the machine, the service): `failure` says what happened and what the replica runs now | prints `failure`'s words as they came, code `failed`, exit 1 |
 
 | `phase` | With `status` | The CLI says |

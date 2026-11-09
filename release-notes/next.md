@@ -9,6 +9,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   at a terminal; in CI, from a coding agent and with `--json` it is now refused, naming each table and its size,
   unless you add `--yes`. Adding a table is never asked about. A service that does not say what the replica runs
   leaves the plan unknown, said, and the deploy goes on.
+- **When the service refuses a deploy for removing tables nobody confirmed, `mason deploy` asks and sends it again**:
+  the tables the refusal names are said with their sizes and confirmed as above (typed back, else `--yes`), and the
+  deploy is sent once more, removing exactly those. Where the service could not tell which tables go (it cannot read
+  the sources file the replica runs), the question says any synced table the deploy removes will be dropped, so a
+  deploy that fixes that file is no longer refused for ever. `--json` carries what was confirmed as `confirmed`.
+- **A generated table's file whose YAML expands too many aliases is refused as that file's mistake**, as a sources or
+  roles file's is, where `mason deploy` stopped on an internal error.
 - **`mason serve --check` says whether the database can serve the project, before anything changes**: every problem
   at once, each with its fix — a table it lacks or the user cannot read, a column or key, and for `sync: replication`
   the role, `wal_level`, a free slot and the publication's tables (with the `ALTER PUBLICATION` its owner runs) — or

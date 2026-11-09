@@ -39,6 +39,8 @@ const REPLICA_PATH = "/v1/replicas/acme/shop";
 
 const CREATED = "2026-11-02T10:00:00Z";
 const ID = "dep_01abc";
+/** The id of a deploy sent again (a new POST is a new deploy). */
+const ID2 = "dep_02def";
 const queued: Reply = { status: 201, body: { deploy: { id: ID, status: "queued", createdAt: CREATED } }, headers: { "retry-after": "1" } };
 const at = (status: string, more: Record<string, unknown> = {}): Reply => ({ status: 200, headers: { "retry-after": "1" },
   body: { deploy: { id: ID, status, createdAt: CREATED, ...(["running", "refused", "failed"].includes(status) ? { finishedAt: "2026-11-02T10:01:00Z" } : {}), ...more } } });
@@ -54,7 +56,7 @@ async function fakeService(script: Script): Promise<{ url: string; requests: Req
       const u = new URL(req.url ?? "/", "http://x"), p = u.pathname;
       requests.push({ method: req.method ?? "", path: p, search: u.search, headers: req.headers, body: Buffer.concat(chunks).toString("utf8"), at: Date.now() });
       const reply: Reply = req.method === "POST" && p === "/v1/replicas/acme/shop/deploys" ? (typeof script.post === "function" ? script.post(posts++) : script.post ?? queued)
-        : req.method === "GET" && p === `/v1/replicas/acme/shop/deploys/${ID}` ? (script.get ?? (() => at("running")))(gets++)
+        : req.method === "GET" && [ID, ID2].some((id) => p === `/v1/replicas/acme/shop/deploys/${id}`) ? (script.get ?? (() => at("running")))(gets++)
         : req.method === "GET" && p === REPLICA_PATH && script.replica !== undefined ? script.replica
         : { status: 404, body: { error: { code: "not_found", message: "no such endpoint" }, next: [] } };
       if (reply === "drop") { req.socket.destroy(); return; }
@@ -129,6 +131,8 @@ const HEADS: readonly string[] = [
   ...["deploy", "service", "files", "took", "why", "fix"].map((l) => `  ${l} `),
   // what the deploy changes, shown before it is sent (a row each), and the question a removal asks
   "What the deploy changes on ", ...["adds", "removes", "changes"].map((v) => `  ${v} `), "Removing ", "> ",
+  // a service's refusal of a removal not confirmed, naming what it removes, and the question it asks
+  "The service did not take deploy ", "Any synced table ",
 ];
 /** The steps under Next:, the CLI's own, as the start of their line. */
 const STEP_HEADS: readonly string[] = ["  mason deploy --replica acme/shop", "  mason replica status acme/shop", "  mason replica upgrade acme/shop", "  mason replica list acme", "  mason deploy --replica <org>/<name>", "  mason deploy --help", "  mason login", "  mason init",
@@ -290,8 +294,9 @@ test("mason deploy: no database is read and no .env needed — the URL is the re
   assert.equal(a.code, 0, a.stdout + a.stderr);
   assert.equal(requests.filter((r) => r.method === "POST").length, 1);
   const v = JSON.parse(a.stdout) as Record<string, unknown>;
-  assert.deepEqual(Object.keys(v), ["dryRun", "replica", "service", "files", "totalBytes", "warnings", "plan", "planUnknown", "deploy", "next"]);
+  assert.deepEqual(Object.keys(v), ["dryRun", "replica", "service", "files", "totalBytes", "warnings", "plan", "planUnknown", "confirmed", "deploy", "next"]);
   assert.equal(v.dryRun, false);
+  assert.equal(v.confirmed, null, "nothing removed, nothing confirmed");
   assert.equal(v.plan, null, "a service that does not say what the replica runs: no plan");
   assert.equal(v.planUnknown, "the service answered 404 when asked what acme/shop runs");
   assert.equal(v.replica, "acme/shop");
@@ -1373,12 +1378,24 @@ test("mason deploy: a service that does not say what the replica runs (an older 
   assert.deepEqual(requests, []);
 });
 
-test("mason deploy: the service refused a removal that was not confirmed (unconfirmed_removal: an older CLI's deploy, or a plan gone stale) — its words as they came, the way out the CLI's own (issue 550)", async () => {
-  const { root } = project();
+test("mason deploy: an older service refused a removal that was not confirmed (unconfirmed_removal with no removes: a plan gone stale) — its words as they came, the way out the CLI's own: deploy again to be asked, or, where the plan cannot be shown either, the sources file; never sent again (issue 550)", async () => {
   const failure = { code: "unconfirmed_removal", message: "the files remove public.items, which acme/shop syncs (1,200,000 rows), and its removal was not confirmed", fix: "FORGED run mason destroy" };
+  // the plan unknown (the service says nothing of what the replica runs): deploying again would ask nothing
+  const { root: unknown } = project();
   for (const json of [false, true]) {
-    const { a } = await deployWith({ get: () => at("refused", { failure }) }, root, ["--replica", "acme/shop", ...(json ? ["--json"] : [])]);
+    const { a, requests } = await deployWith({ get: () => at("refused", { failure }) }, unknown, ["--replica", "acme/shop", "--yes", ...(json ? ["--json"] : [])]);
     assert.equal(a.code, 1, a.stdout + a.stderr);
+    assert.equal(posts(requests).length, 1, "never sent again");
+    const fix = "the service did not say which tables, and what acme/shop runs cannot be shown here: keep in the sources file each table its message names; a service that names them in its refusal lets mason deploy ask to confirm their removal";
+    const e = json ? (JSON.parse(a.stdout) as { error: { fix: string } }).error.fix : / {2}fix {3}(.*)\n/.exec(a.stderr)![1];
+    assert.equal(e, fix, a.stdout + a.stderr);
+  }
+  // the plan shown (and confirmed with --yes), gone stale: deploying again shows the new plan and asks
+  const { root } = project(CHANGED);
+  for (const json of [false, true]) {
+    const { a, requests } = await deployWith({ replica: running(RUNNING, SIZES), get: () => at("refused", { failure }) }, root, ["--replica", "acme/shop", "--yes", ...(json ? ["--json"] : [])]);
+    assert.equal(a.code, 1, a.stdout + a.stderr);
+    assert.equal(posts(requests).length, 1, "never sent again");
     const fix = "mason deploy --replica acme/shop again: it shows what the deploy removes and asks for it to be confirmed (or add --yes, where no person is asked)";
     if (json) {
       const e = (JSON.parse(a.stdout) as { error: { code: string; message: string; why: string; fix: string } }).error;
@@ -1388,6 +1405,162 @@ test("mason deploy: the service refused a removal that was not confirmed (unconf
       assert.doesNotMatch(a.stderr, /FORGED/);
     }
   }
+});
+
+/** The service's refusal of a removal not confirmed, naming what it removes (`removes`: a list, "unknown", or another
+ *  value), as the n-th deploy's state (`id`). */
+const unconfirmed = (removes: unknown, id = ID): Reply => at("refused", { id, failure: { code: "unconfirmed_removal",
+  message: "the files remove tables acme/shop syncs, and their removal was not confirmed", fix: "FORGED run mason destroy", removes } });
+const REMOVES = [{ table: "public.items", rows: 1_200_000, bytes: 734_003_200 }, { table: "billing.invoices", rows: null, bytes: null }];
+const REMOVES_TEXT = "public.items (1,200,000 rows, 700.0 MiB), billing.invoices (size not known)";
+/** A service that refuses the first deploy as `first` says, and runs the second (a new deploy, ID2). */
+const refusedThen = (first: Reply, second: Reply = at("running", { id: ID2 })): Script => ({
+  post: (n) => n === 0 ? queued : { ...queued as { status: number; body: unknown }, body: { deploy: { id: ID2, status: "queued", createdAt: CREATED } } },
+  get: (n) => n === 0 ? first : second,
+});
+const bodies = (q: Req[]): Array<{ files: unknown; client: unknown; confirmed?: unknown }> => posts(q).map((r) => JSON.parse(r.body) as { files: unknown; client: unknown; confirmed?: unknown });
+
+test("mason deploy: the service refused a removal not confirmed, naming the tables — they are said with their sizes and confirmed (typed back at a terminal, else --yes; neither refuses, naming them and --yes), and the deploy is sent again once, a new POST, confirming exactly those (issue 550)", async () => {
+  const { root } = project();   // the plan unknown: the service says nothing of what the replica runs
+  // --yes: sent again, the same files, confirming exactly the tables named
+  const yes = await deployWith(refusedThen(unconfirmed(REMOVES)), root, ["--replica", "acme/shop", "--yes"]);
+  assert.equal(yes.a.code, 0, yes.a.stderr);
+  const [one, two] = bodies(yes.requests);
+  assert.equal(posts(yes.requests).length, 2);
+  assert.equal(one!.confirmed, undefined, "the first deploy confirmed nothing: its plan was unknown");
+  assert.deepEqual(two, { ...one, confirmed: { removed: ["public.items", "billing.invoices"] } });
+  assert.match(afterPlan(yes.a.stderr), new RegExp(`^Sent 3 files .*: deploy ${ID}\n {2}Queued: .*\n {2}Refused by Mason on the replica\nThe service did not take deploy ${ID}: it removes ${REMOVES_TEXT.replace(/[().]/g, "\\$&")}, whose removal was not confirmed; --yes confirms it: sending the deploy again\nSent 3 files .*: deploy ${ID2}\n`), yes.a.stderr);
+  assert.match(yes.a.stdout, /^Deployed to acme\/shop: the replica runs it\n {2}deploy +dep_02def\n/);
+  // --yes --json: what was confirmed, and the deploy that runs
+  const j = await deployWith(refusedThen(unconfirmed(REMOVES)), root, ["--replica", "acme/shop", "--yes", "--json"]);
+  assert.equal(j.a.code, 0, j.a.stdout);
+  const v = JSON.parse(j.a.stdout) as { confirmed: unknown; deploy: { id: string; status: string } };
+  assert.deepEqual([v.confirmed, v.deploy.id, v.deploy.status], [{ removed: ["public.items", "billing.invoices"] }, ID2, "running"]);
+  assert.equal(j.a.stderr, "");
+  // neither a terminal nor --yes (and --json): refused, naming the tables and the way out; never sent again
+  for (const json of [false, true]) {
+    const { a, requests } = await deployWith(refusedThen(unconfirmed(REMOVES)), root, ["--replica", "acme/shop", ...(json ? ["--json"] : [])]);
+    assert.equal(a.code, 1, a.stdout + a.stderr);
+    assert.equal(posts(requests).length, 1, "never sent again");
+    const error = { code: "refused", message: `the deploy removes 2 tables acme/shop syncs: ${REMOVES_TEXT}`,
+      why: `of a removed table, its synced data is dropped, and syncing it again is a new first sync, reading every row from the source: such a deploy is confirmed at a terminal, or with --yes; the service did not take deploy ${ID}`,
+      fix: "if they are meant to go: mason deploy --replica acme/shop --yes; if not, add them back to the sources file" };
+    if (json) {
+      const out = JSON.parse(a.stdout) as { error: unknown; next: unknown; deploy: { id: string; status: string }; confirmed: unknown };
+      assert.deepEqual([out.error, out.next, out.deploy.id, out.deploy.status, out.confirmed], [error, [{ command: "mason deploy --replica acme/shop --yes", what: "deploy, removing them" }], ID, "refused", null]);
+    } else assert.ok(a.stderr.endsWith(`✗ mason deploy: ${error.message}\n  why   ${error.why}\n  fix   ${error.fix}\n\nNext:\n  mason deploy --replica acme/shop --yes        deploy, removing them\n`), a.stderr);
+  }
+  // at a terminal: the tables said, the question asked; the name typed back sends it again, anything else nothing
+  const typed = await deployWith(refusedThen(unconfirmed(REMOVES)), root, ["--replica", "acme/shop"], {}, { terminal: 200, input: "acme/shop\n" });
+  assert.equal(typed.a.code, 0, typed.a.stderr);
+  assert.match(typed.a.stderr.replace(/\n {4}/g, " "), new RegExp(`\nThe service did not take deploy ${ID}: it removes ${REMOVES_TEXT.replace(/[().]/g, "\\$&")}, whose removal was not confirmed\.\nRemoving 2 tables from acme/shop drops their synced data, .* Type acme/shop to deploy, anything else to keep acme/shop as it is\.\n> acme/shop\n`));
+  assert.deepEqual(bodies(typed.requests)[1]!.confirmed, { removed: ["public.items", "billing.invoices"] });
+  for (const input of ["acme/other\n", ""]) {
+    const { a, requests } = await deployWith(refusedThen(unconfirmed(REMOVES)), root, ["--replica", "acme/shop"], {}, { terminal: 200, input });
+    assert.equal(a.code, 1, `${JSON.stringify(input)}: ${a.stderr}`);
+    assert.equal(posts(requests).length, 1, `${JSON.stringify(input)}: never sent again`);
+    assert.match(a.stderr, /✗ mason deploy: nothing was deployed to acme\/shop: what was typed is not its name\n/);
+  }
+});
+
+test("mason deploy: a deploy is sent again at most once — a second unconfirmed_removal refusal is said as it came, exit 1 (issue 550)", async () => {
+  const { root } = project();
+  for (const json of [false, true]) {
+    const { a, requests } = await deployWith(refusedThen(unconfirmed(REMOVES), unconfirmed(REMOVES, ID2)), root, ["--replica", "acme/shop", "--yes", ...(json ? ["--json"] : [])]);
+    assert.equal(a.code, 1, a.stdout + a.stderr);
+    assert.equal(posts(requests).length, 2, "sent again once, never twice");
+    const message = "the files remove tables acme/shop syncs, and their removal was not confirmed";
+    if (json) assert.deepEqual((JSON.parse(a.stdout) as { error: { message: string; why: string } }).error.message, message);
+    else assert.match(a.stderr, new RegExp(`✗ mason deploy: ${message}\n {2}why {3}the service said unconfirmed_removal\n`));
+  }
+});
+
+test("mason deploy: the service could not tell which tables the deploy removes — any removal is accepted only with --yes or typed back after a question that says any synced table it removes will be dropped, and the resend says any; without either, refused, the way out --yes (issue 550)", async () => {
+  const { root } = project();
+  const yes = await deployWith(refusedThen(unconfirmed("unknown")), root, ["--replica", "acme/shop", "--yes", "--json"]);
+  assert.equal(yes.a.code, 0, yes.a.stdout);
+  assert.deepEqual(bodies(yes.requests).map((b) => b.confirmed), [undefined, { removed: [], any: true }]);
+  assert.deepEqual((JSON.parse(yes.a.stdout) as { confirmed: unknown }).confirmed, { removed: [], any: true });
+  const said = await deployWith(refusedThen(unconfirmed("unknown")), root, ["--replica", "acme/shop", "--yes"]);
+  assert.equal(said.a.code, 0, said.a.stderr);
+  assert.match(said.a.stderr, new RegExp(`\nThe service did not take deploy ${ID}: it could not tell which tables acme/shop syncs the deploy removes; --yes accepts any removal: sending the deploy again\n`));
+  // a plan this mason showed and confirmed, which the service could not tell: what it confirmed is sent beside any
+  const { root: changed } = project(CHANGED);
+  const both = await deployWith({ ...refusedThen(unconfirmed("unknown")), replica: running(RUNNING, SIZES) }, changed, ["--replica", "acme/shop", "--yes"]);
+  assert.equal(both.a.code, 0, both.a.stderr);
+  assert.deepEqual(bodies(both.requests).map((b) => b.confirmed), [{ removed: ["billing.invoices", "public.items"] }, { removed: ["billing.invoices", "public.items"], any: true }]);
+  // at a terminal: the question says, plainly, that any synced table the deploy removes will be dropped
+  const typed = await deployWith(refusedThen(unconfirmed("unknown")), root, ["--replica", "acme/shop"], {}, { terminal: 200, input: "acme/shop\n" });
+  assert.equal(typed.a.code, 0, typed.a.stderr);
+  assert.match(typed.a.stderr.replace(/\n {4}/g, " "), /\nAny synced table this deploy removes will be dropped, and syncing one again is a new first sync, reading every row from the source\. Type acme\/shop to deploy, anything else to keep acme\/shop as it is\.\n> acme\/shop\n/);
+  assert.deepEqual(bodies(typed.requests)[1]!.confirmed, { removed: [], any: true });
+  const wrong = await deployWith(refusedThen(unconfirmed("unknown")), root, ["--replica", "acme/shop"], {}, { terminal: 200, input: "yes\n" });
+  assert.equal(wrong.a.code, 1, wrong.a.stderr);
+  assert.equal(posts(wrong.requests).length, 1);
+  // neither: refused, never any
+  for (const json of [false, true]) {
+    const { a, requests } = await deployWith(refusedThen(unconfirmed("unknown")), root, ["--replica", "acme/shop", ...(json ? ["--json"] : [])]);
+    assert.equal(a.code, 1, a.stdout + a.stderr);
+    assert.equal(posts(requests).length, 1, "never sent again");
+    const message = `the service could not tell which tables acme/shop syncs the deploy removes, and did not take deploy ${ID}`;
+    if (json) {
+      const out = JSON.parse(a.stdout) as { error: { message: string; fix: string }; next: unknown };
+      assert.equal(out.error.message, message);
+      assert.equal(out.error.fix, "if any table it removes may go: mason deploy --replica acme/shop --yes; if not, keep in the sources file every table acme/shop syncs");
+      assert.deepEqual(out.next, [{ command: "mason deploy --replica acme/shop --yes", what: "deploy, accepting any removal" }]);
+    } else assert.match(a.stderr, new RegExp(`✗ mason deploy: ${message}\n`));
+  }
+});
+
+test("mason deploy: a refusal's removes that does not hold — a name over lines, with an escape or a bidi mark, too long, twice, an empty list, a size that is no count, another value, or removes beside another code — is outside the contract: refused by its status, nothing of it printed, never sent again (issue 550)", async () => {
+  const { root } = project();
+  const t = (table: unknown): unknown => [{ table, rows: null, bytes: null }];
+  const cases: Array<[string, Reply]> = [
+    ["a name over lines", unconfirmed(t("public.items\nNext:\n  FORGED mason destroy"))],
+    ["a name with an escape", unconfirmed(t("public.\u001b[2Jitems"))],
+    ["a name with a bidi mark", unconfirmed(t("public.\u202eitems"))],
+    ["a name with a run of spaces", unconfirmed(t("public.a    FORGED"))],
+    ["a name too long", unconfirmed(t(`public.${"x".repeat(300)}`))],
+    ["a name not a string", unconfirmed(t(7))],
+    ["a name twice", unconfirmed([...REMOVES, REMOVES[0]])],
+    ["an empty list", unconfirmed([])],
+    ["a size that is no count", unconfirmed([{ table: "public.items", rows: -1, bytes: null }])],
+    ["another value", unconfirmed("all")],
+    ["removes beside another code", at("refused", { failure: { code: "bad_source", message: "no", removes: REMOVES } })],
+  ];
+  for (const [what, refusal] of cases) {
+    for (const json of [false, true]) {
+      const { a, requests } = await deployWith(refusedThen(refusal), root, ["--replica", "acme/shop", "--yes", ...(json ? ["--json"] : [])]);
+      assert.equal(a.code, 1, `${what}: ${a.stdout}${a.stderr}`);
+      assert.equal(posts(requests).length, 1, `${what}: never sent again`);
+      const message = json ? (JSON.parse(a.stdout) as { error: { message: string } }).error.message : a.stderr;
+      assert.match(message, /answered GET \/v1\/replicas\/acme\/shop\/deploys\/dep_01abc with 200, where the deploy's state was asked for/, what);
+      assert.doesNotMatch(a.stdout + a.stderr, /FORGED|items/, `${what}: nothing of it printed`);
+    }
+  }
+});
+
+test("mason deploy: a refusal whose removes carries the token — a table named with it, or with its body — is refused whole, as every answer is: nothing of it printed, never sent again (issue 550)", async () => {
+  const { root } = project();
+  for (const shape of [(k: string) => `public.${k}`, (k: string) => `public.t_${k.slice(-43).toLowerCase()}`]) {
+    const token = newToken("ci"); SECRETS.push(token);
+    for (const json of [false, true]) {
+      const { a, requests } = await deployWith(refusedThen(unconfirmed([{ table: shape(token), rows: null, bytes: null }])), root, ["--replica", "acme/shop", "--yes", ...(json ? ["--json"] : [])], { MASON_TOKEN: token });
+      assert.equal(a.code, 1, a.stdout + a.stderr);
+      assert.equal(posts(requests).length, 1, "never sent again");
+      const message = json ? (JSON.parse(a.stdout) as { error: { message: string } }).error.message : a.stderr;
+      assert.match(message, /answered GET \/v1\/replicas\/acme\/shop\/deploys\/dep_01abc with 200, where the deploy's state was asked for/);
+      assert.doesNotMatch(a.stdout + a.stderr, /public\.t_|public\.masondata/);
+    }
+  }
+});
+
+test("mason deploy --dry-run: a generated table's file whose YAML expands more aliases than the reader takes is that file's problem, said as a start says it, never a crash (issue 550)", async () => {
+  const { root } = project({ "generated_tables/daily.yml": `${DAILY}x: &x 1\nl: [${Array(120).fill("*x").join(", ")}]\n` });
+  const { a } = await deployWith({}, root, ["--replica", "acme/shop", "--dry-run"]);
+  assert.equal(a.code, 0, a.stderr);
+  assert.match(a.stderr, /mason\/generated_tables\/daily\.yml: it cannot be read as values: /);
+  assert.match(a.stdout, /^Would send 4 files, /);
 });
 
 test("no run of mason deploy printed a token, nor anything shaped as one", () => {
