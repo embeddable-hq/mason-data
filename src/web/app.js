@@ -99,12 +99,57 @@ const hashOfPage = (p) => p.hash ?? p.id;
  * none, or one it does not know, the Overview) and the parameters after its `?` (`range=7d`, `show=failed`).
  */
 export function parseHash(hash) {
+  const { id, params } = readHash(hash);
+  return { id, params };
+}
+
+/** `parseHash`'s reading, and whether the hash NAMES its page (`#overview`, `#users?x=1`, an alias) rather than landing
+ *  on the Overview for naming none. */
+function readHash(hash) {
   const raw = String(hash ?? "").replace(/^#/, "");
   const at = raw.indexOf("?");
   const where = at < 0 ? raw : raw.slice(0, at);
   const params = Object.fromEntries(new URLSearchParams(at < 0 ? "" : raw.slice(at + 1)));
-  const page = PAGES.find((p) => hashOfPage(p) === where)?.id ?? ALIASES[where] ?? "status";
-  return { id: page, params };
+  const named = PAGES.find((p) => hashOfPage(p) === where)?.id ?? ALIASES[where];
+  return { id: named ?? "status", params, named: named !== undefined };
+}
+
+/**
+ * THE SIDEBAR AS THE HOST SAYS IT (`/api/state` `pageNav`: mason serve's MASON_UI_NAV_<ITEM>_URL and MASON_UI_NAV_LINKS,
+ * validated by the run at its start, src/cli/ui-nav.ts): each item the state names, by its key there, is this page.
+ */
+const NAV_ITEM_PAGES = { overview: "status", tables: "tables", users: "users", queries: "queries", usage: "usage", syncEvents: "syncs" };
+
+/** The pages the host replaced, each with its URL (a Map of page id → URL); empty when the state names none. */
+export function replacedPages(nav) {
+  const items = nav !== null && typeof nav === "object" && nav.items !== null && typeof nav.items === "object" ? nav.items : {};
+  return new Map(Object.entries(NAV_ITEM_PAGES).filter(([k]) => typeof items[k] === "string").map(([k, id]) => [id, items[k]]));
+}
+
+/** The host's own links the state names (`pageNav.links`), each `{ label, url }`; [] when none. */
+export const hostLinks = (nav) => Array.isArray(nav?.links) ? nav.links.filter((l) => typeof l?.label === "string" && typeof l?.url === "string") : [];
+
+/** Where a hash goes instead when it names a page the host replaced: its URL, else null (a hash naming no page is none). */
+export function elsewhere(hash, nav) {
+  const r = readHash(hash);
+  return r.named ? replacedPages(nav).get(r.id) ?? null : null;
+}
+
+/** An `href="#…"` attribute as a page writes it (its `&` escaped): what `retarget` reads. */
+const HASH_HREF = new RegExp('href="(#[^"]*)"', "g");
+
+/**
+ * EVERY LINK OF MASON'S OWN INTO A REPLACED VIEW GOES TO THE HOST'S PAGE: each `href="#…"` in a part's HTML whose hash
+ * names a replaced page becomes that URL, in the same tab and sending no referrer — the Overview's "Create a user", its
+ * cards, a client's Queries, whatever page wrote it, so no page module needs to know. One pass over what the page writes
+ * (`view()`), and the same rule over the document's own links (`start`), by `elsewhere`.
+ */
+export function retarget(html, nav) {
+  if (replacedPages(nav).size === 0) return html;
+  return html.replace(HASH_HREF, (whole, h) => {
+    const url = elsewhere(h.replace(/&amp;/g, "&"), nav);
+    return url === null ? whole : `href="${esc(url)}" rel="noreferrer"`;
+  });
 }
 
 /** A page's address with its parameters (`hashOf("queries", { range: "7d" })` → `#observability/queries?range=7d`); the
@@ -127,22 +172,31 @@ export function tabs() {
   return list;
 }
 
-/** One link of the nav: its icon and its label (the label is the link's name; on the icon rail, its tooltip). */
-const navLink = (p, shown, href) =>
-  `<a href="${esc(href)}"${p.id === shown ? ` aria-current="page"` : ""}>${icon(NAV_ICONS[p.id] ?? "")}<span class="label">${esc(p.title)}</span></a>`;
+/** One link of the nav: its icon and its label (the label is the link's name; on the icon rail, its tooltip). A page the
+ *  host replaced (`replaced`, its URL) keeps both and goes there, in the same tab, never the current page. */
+const navLink = (p, shown, href, replaced = undefined) => replaced !== undefined
+  ? `<a href="${esc(replaced)}" rel="noreferrer">${icon(NAV_ICONS[p.id] ?? "")}<span class="label">${esc(p.title)}</span></a>`
+  : `<a href="${esc(href)}"${p.id === shown ? ` aria-current="page"` : ""}>${icon(NAV_ICONS[p.id] ?? "")}<span class="label">${esc(p.title)}</span></a>`;
 
 /**
  * THE SIDEBAR'S NAV: a link per page, each with its icon, the page shown marked as the current page; a group (the
  * Observability views) is a heading over its pages' links, always shown, each keeping the range they share — so the
- * hash is the state, and a link followed keeps the time range chosen.
+ * hash is the state, and a link followed keeps the time range chosen. With the host's sidebar (`nav`, `/api/state`
+ * `pageNav`): a page it replaced links to its URL, and its own links are a group of their own at the end, each with the
+ * link icon, its label as TEXT (escaped: `<b>` reads as `<b>`), in the same tab.
  */
-export const renderNav = (shown, range = DEFAULT_RANGE) => `<ul>${tabs().map((t) => {
-  const own = PAGES.find((p) => p.id === t.id);
-  if (own) return `<li>${navLink(own, shown, hashOf(own.id))}</li>`;
-  const pages = t.pages.map((id) => PAGES.find((p) => p.id === id));
-  return `<li class="group"><p class="group-title" id="nav-${esc(t.id)}">${esc(t.title)}</p><ul aria-labelledby="nav-${esc(t.id)}">` +
-    pages.map((p) => `<li>${navLink(p, shown, hashOf(p.id, { range }))}</li>`).join("") + `</ul></li>`;
-}).join("")}</ul>`;
+export const renderNav = (shown, range = DEFAULT_RANGE, nav = null) => {
+  const replaced = replacedPages(nav);
+  const links = hostLinks(nav);
+  return `<ul>${tabs().map((t) => {
+    const own = PAGES.find((p) => p.id === t.id);
+    if (own) return `<li>${navLink(own, shown, hashOf(own.id), replaced.get(own.id))}</li>`;
+    const pages = t.pages.map((id) => PAGES.find((p) => p.id === id));
+    return `<li class="group"><p class="group-title" id="nav-${esc(t.id)}">${esc(t.title)}</p><ul aria-labelledby="nav-${esc(t.id)}">` +
+      pages.map((p) => `<li>${navLink(p, shown, hashOf(p.id, { range }), replaced.get(p.id))}</li>`).join("") + `</ul></li>`;
+  }).join("")}${links.length ? `<li class="group host-links"><ul aria-label="Links">${links.map((l) =>
+    `<li><a href="${esc(l.url)}" rel="noreferrer">${icon("link")}<span class="label">${esc(l.label)}</span></a></li>`).join("")}</ul></li>` : ""}</ul>`;
+};
 
 /**
  * THE TIME RANGE OF A GROUP'S PAGE (the Observability views'), written beside the view's title in ONE header row (its
@@ -262,10 +316,36 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
     },
     /** The link back the state names (`pageBack`), or null: set on the sidebar by `setBack`, never written as HTML. */
     back() { return store.get("api/state")?.body?.pageBack ?? null; },
+    /** The sidebar as the host says it (`pageNav`), or null: undefined until the state is first read (not yet known). */
+    nav() { const st = store.get("api/state")?.body; return st === undefined ? undefined : st.pageNav ?? null; },
+    /**
+     * WHERE THE PAGE GOES INSTEAD OF A HASH, once the state says the host's sidebar: `{ url }` for a hash that names a
+     * page the host replaced (`#users`, `#users?x=1`, an old alias of it) — the host's page; `{ hash }` for one that
+     * names no page (none, or one unknown), which lands on the Overview, when the Overview is replaced — the first page
+     * of Mason's own, so opening the page never leaves it; else null (also before the state is read).
+     */
+    leave(hash) {
+      const nav = app.nav();
+      if (nav === undefined || nav === null) return null;
+      const url = elsewhere(hash, nav);
+      if (url !== null) return { url };
+      const r = readHash(hash);
+      const replaced = replacedPages(nav);
+      if (r.named || !replaced.has(r.id)) return null;
+      const first = PAGES.find((p) => !replaced.has(p.id));
+      return first === undefined ? null : { hash: hashOf(first.id) };
+    },
     view() {
       const st = store.get("api/state")?.body;
+      const nav = st?.pageNav ?? null;
+      // every link of Mason's own into a view the host replaced goes to its page, whichever part wrote it
+      return Object.fromEntries(Object.entries(app.parts(st)).map(([k, html]) => [k, retarget(html, nav)]));
+    },
+    /** Every part of the page as its renderer wrote it (`view` sends each link into a replaced view elsewhere). */
+    parts(st) {
+      const nav = st?.pageNav ?? null;
       return {
-        nav: renderNav(m.shown, m.range),
+        nav: renderNav(m.shown, m.range, nav),
         // the range control in the shown view's header row (each group page's own slot; the others empty)
         ...Object.fromEntries(PAGES.filter((p) => p.parent).map((p) => [`range-${p.id}`, p.id === m.shown ? renderSubnav(m.shown, m.range, st?.engine?.keptDays, m.rangeReadAt) : ""])),
         where: st ? renderWhere(st) : "",
@@ -310,6 +390,19 @@ export function start(doc, win) {
   let pressedAt = null;
   // the link back as last set (`setBack`): JSON of `pageBack`, undefined before the first paint
   let backWritten;
+  // the host's sidebar as last applied to the document's own links: JSON of `pageNav`
+  let navWritten;
+  // A HASH OF A VIEW THE HOST REPLACED IS LEFT FOR ITS PAGE (`app.leave`): replaced in the history, so Back does not
+  // land on it again; once per URL, however many paints follow before the browser leaves. A hash naming no page, with
+  // the Overview replaced, is the first page of Mason's own. True when the page is leaving.
+  let leaving = null;
+  const leave = () => {
+    const to = app.leave(win.location.hash);
+    if (to === null) return false;
+    if ("hash" in to) { win.location.replace(to.hash); return false; }
+    if (leaving !== to.url) { leaving = to.url; win.location.replace(to.url); }
+    return true;
+  };
   // the shown page's charts, drawn after each write (src/web/charts.js); a document that cannot hold one draws none
   const charts = typeof doc.querySelectorAll === "function" && typeof win.getComputedStyle === "function" ? createCharts({ doc, win }) : null;
   const paint = () => {
@@ -334,6 +427,18 @@ export function start(doc, win) {
     const back = app.back();
     const backKey = JSON.stringify(back);
     if (backKey !== backWritten) { backWritten = backKey; setBack(doc.getElementById("back"), doc.getElementById("back-label"), back); }
+    // the host's sidebar, once the state says it: the document's own links into a replaced view (index.html's, which
+    // no part writes) sent where `retarget` sends the parts', and a hash of a replaced view left for the host's page
+    const nav = app.nav();
+    const navKey = JSON.stringify(nav ?? null);
+    if (nav !== undefined && navKey !== navWritten) {
+      navWritten = navKey;
+      for (const a of typeof doc.querySelectorAll === "function" ? doc.querySelectorAll('a[href^="#"]') : []) {
+        const url = elsewhere(a.getAttribute("href"), nav);
+        if (url !== null) { a.setAttribute("href", url); a.setAttribute("rel", "noreferrer"); }
+      }
+    }
+    leave();
     if (charts !== null) void charts.mount(app.pages.get(app.model.shown).charts?.() ?? {});
     place();
   };
@@ -430,7 +535,12 @@ export function start(doc, win) {
   }, true);
   doc.addEventListener("pointerdown", () => { pressedAt = Date.now(); });
   for (const type of ["pointerup", "pointercancel"]) doc.addEventListener(type, () => { pressedAt = null; win.setTimeout(paint, 0); });
-  win.addEventListener?.("hashchange", () => { if (menuOpen) setMenu(false, true); app.show(win.location.hash, { doc }); paint(); void poll(); });
+  win.addEventListener?.("hashchange", () => {
+    if (menuOpen) setMenu(false, true);
+    // a replaced view's hash is not shown, nor read: the page leaves for the host's
+    if (leave()) return;
+    app.show(win.location.hash, { doc }); paint(); void poll();
+  });
   win.addEventListener?.("scroll", place, { capture: true, passive: true });
   win.addEventListener?.("resize", place);
   if (charts !== null) {

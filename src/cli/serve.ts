@@ -46,6 +46,7 @@ import { prepareUiRunFile, uiRunFileSetting, UI_RUN_FILE_SETTING, writeUiRunFile
 import { recordRefusal } from "./replication-mode.ts";
 import { UI_READ_ONLY_ALLOW_SETTING, UI_READ_ONLY_SETTING, uiReadOnlyAllowSetting, uiReadOnlySetting } from "./ui-read-only.ts";
 import { BACK_LABEL_MAX, BACK_URL_MAX, uiBackLinkSetting } from "./ui-back-link.ts";
+import { NAV_LINKS_MAX, navLines, navOf, uiNavSetting } from "./ui-nav.ts";
 import { changesRetiredText, pollMsRetiredText, type SourcesTop } from "../lib/table-sync.ts";
 import { historyDaysSetting, historyDaysWrongText } from "../duck/history.ts";
 import { DEFAULT_MEMORY_RULE, memoryProblems, memoryProblemText, memorySize, MEMORY_FLOOR_BYTES } from "../duck/store.ts";
@@ -123,6 +124,13 @@ export const SERVE: CommandSpec = {
                             at most ${BACK_URL_MAX} characters; any other scheme is refused (default unset: no link)
     MASON_UI_BACK_LABEL     the link's label, plain text on one line, at most ${BACK_LABEL_MAX} characters; set alone it is
                             refused (default Back)
+    MASON_UI_NAV_<ITEM>_URL  an item of the web page's sidebar links to the host's own page instead, in the same tab,
+                            keeping its label and icon; Mason's own links to that view and its address (#users) go
+                            there too. <ITEM> is OVERVIEW, TABLES, USERS, QUERIES, USAGE or SYNC_EVENTS; the URL is
+                            read as MASON_UI_BACK_URL is; what the server answers is unchanged (default unset)
+    MASON_UI_NAV_LINKS      the host's own links in the sidebar, a group of their own, in the same tab: a JSON list
+                            of at most ${NAV_LINKS_MAX} {"label": …, "url": …}, each label and URL read as the link back's;
+                            anything else is refused (default unset: none)
     MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
@@ -235,6 +243,9 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   // the link back to the site that links to the page (src/cli/ui-back-link.ts): a path or an http(s) URL, else refused here
   const backLink = uiBackLinkSetting(env);
   if (backLink !== null && "problem" in backLink) wrong.push(backLink.problem);
+  // the sidebar as the host says it (src/cli/ui-nav.ts): each URL read as the link back's, the links a short JSON list
+  const nav = uiNavSetting(env);
+  if (nav !== null && "problem" in nav) wrong.push(nav.problem);
   if (env.MASON_UI_HOST) wrong.push("MASON_UI_HOST is set, and the web page has no address but 127.0.0.1: remove it (mason ui --ssh <user@server> opens the page from your machine)");
   if (wrong.length) {
     return { message: `${wrong.length === 1 ? "a setting is" : `${wrong.length} settings are`} missing or wrong: ${wrong.join("; ")}`, code: "bad_config",
@@ -536,6 +547,7 @@ export async function serve(argv: string[]): Promise<number> {
   if (page !== null) say(`  web page  ${page.file} (a Unix socket, mode 0600: a request on it passes the same guard as mason ui --ssh's)`);
   const backLink = uiBackLinkSetting(process.env);
   if (backLink !== null && !("problem" in backLink)) say(`  web page  a link back at the top of its sidebar, ${JSON.stringify(backLink.label)} (MASON_UI_BACK_URL)`);
+  for (const l of navLines(navOf(uiNavSetting(process.env)))) say(`  web page  ${l}`);
   const pageAllow = uiReadOnlyAllowSetting(process.env);
   if (uiReadOnlySetting(process.env) === true) {
     say(Array.isArray(pageAllow) && pageAllow.includes("tables")
