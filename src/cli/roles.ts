@@ -139,7 +139,11 @@ export function parseRolesText(text: string, file: string): RolesFile | { proble
   // the YAML library's first line ends "… at line 1, column 18:" before a snippet of the file: the snippet is dropped,
   // and its colon with it, so the problem reads whole on one line (a tip, a log line)
   if (doc.errors.length) return { problems: [`it is not YAML: ${doc.errors[0]!.message.split("\n")[0]!.replace(/:\s*$/, "")}`] };
-  const v: unknown = doc.toJS();
+  // a document the library parses can still refuse to become values (more aliases than it expands), and throws: a
+  // problem of the file, never a crash
+  let v: unknown;
+  try { v = doc.toJS(); }
+  catch (e) { return { problems: [`it cannot be read as values: ${(e as Error).message.split("\n")[0]}`] }; }
   if (!isPlain(v)) return { problems: [`it is ${v === null || v === undefined ? "empty" : "not a mapping"}: a roles file is roles: { <role>: { tables: { orders: {} } } }`] };
   const problems: string[] = [];
   for (const k of Object.keys(v)) if (k !== "roles" && k !== "default") problems.push(`unexpected key ${k}${didYouMean(k, ["default", "roles"])} — a roles file takes default and roles`);

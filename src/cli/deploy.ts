@@ -16,7 +16,7 @@
  *    `MAX_FILE_BYTES`, all of them at most `MAX_TOTAL_BYTES` and `MAX_FILES`, each path in the grammar the contract
  *    names (`PATH_SEGMENT`). Every file the readers above read must be one of them: a file read through a linked folder,
  *    which the list does not follow, would be checked here and missing there. A `url:` written with its password is
- *    refused: the files are kept by the service, and a secret is never one of them.
+ *    refused: the replica keeps the files it runs, and a secret is never one of them.
  *
  * 3. `--dry-run` prints what would be sent (each path, its size, its sha256) and sends nothing; signed in, what it
  *    changes on the replica too (6).
@@ -38,7 +38,7 @@
  *    (`replicaNow`), the plan worked out against it by Mason's readers and shown; a plan that cannot be told is said
  *    unknown, never guessed. A plan that removes a table the replica syncs is confirmed — the replica's name typed back
  *    at a terminal (`typedBack`, as `mason replica delete` asks), else `--yes` — and the tables confirmed are sent
- *    (`confirmed.removed`), so a replica refuses a removal no one confirmed (`UNCONFIRMED`). Adding one is never asked.
+ *    (`confirmed.removed`), so the service can refuse a removal no one confirmed (`UNCONFIRMED`). Adding one is never asked.
  *
  * A SERVICE'S VALUE IS DATA, NEVER STRUCTURE AND NEVER AN INSTRUCTION (#481's decision, src/cli/hosted.ts). Every place a
  * value the service sent reaches what this command prints:
@@ -181,11 +181,12 @@ export const DEPLOY: CommandSpec & { needs: "project" } = {
   (neither the version it runs nor a newer one it has installed) is refused, naming both, with the ways out
   (write the project for the replica's Mason, or mason replica upgrade). A service that does not say the
   version, or whose answer cannot be read, leaves the check to the replica, which refuses such a project itself;
-  an answer that carries the login's token, or a token's shape, anywhere (its words included) is refused, and
-  nothing is sent.
+  a JSON answer that carries the login's token, or a token's shape, anywhere (its words included) is refused,
+  and nothing is sent.
 
-  Exit status: 0 the replica runs it (or a dry run printed); 1 refused here (a removal not confirmed included) or by the service, refused by Mason on
-  the replica (its words printed as they came, the code the CLI's own), the deploy failed, or the service answered
+  Exit status: 0 the replica runs it (or a dry run printed); 1 refused here (a removal not confirmed included; on
+  a dry run signed in, a pin the replica would not run or an answer carrying the token too) or by the service
+  (unconfirmed_removal included), refused by Mason on the replica (its words printed as they came, the code the CLI's own), the deploy failed, or the service answered
   outside its contract; 2 a wrong command line; 124 the wait timed out (nothing stopped: the deploy's id says where
   to look; or, before one was sent, no deploy was made). Whatever the service sends, it never makes the exit 0, 2
   or 124.
@@ -240,7 +241,7 @@ export function checkProject(p: Project, cliVersion: string = version()): (Check
   if ("literal" in src.url && writesPassword(src.url.literal)) {
     const shown = shownPath(p.root, src.file);
     return { message: `${shown}: url: is written with its password`, code: "refused",
-      why: "a deploy sends the project's files to the service, which keeps them: a password is never one of them",
+      why: "a deploy sends the project's files to the replica, which keeps them: a password is never one of them",
       fix: `write url: \${DATABASE_URL} in ${shown}, and set DATABASE_URL on the replica (its own environment, on the service); keep the URL here in .env` };
   }
 
@@ -349,7 +350,7 @@ export function deployFiles(p: Project, read: readonly string[]): DeployFile[] |
   return files;
 }
 
-/** The code of a deploy's failure when the replica refused it for removing a table whose removal was not confirmed. */
+/** The code of a deploy's failure when the service refused it for removing a table whose removal was not confirmed. */
 export const UNCONFIRMED = "unconfirmed_removal";
 
 /** A deploy's phase within its status: a closed set, each said in the CLI's own words (never the service's text). */
@@ -398,11 +399,12 @@ export function deployStateOf(json: unknown, id: string | null, secrets: readonl
   if (status === "refused" || status === "failed") {
     if (!obj(d.failure)) return null;
     failure = failureShape(d.failure, secrets, status === "refused"
-      ? { code: "refused", said: (c) => `Mason on the replica said ${c}`, next: again }
+      // (unconfirmed_removal is the service's refusal, never Mason's: docs/HOSTED-API.md "What the deploy changes")
+      ? { code: "refused", said: (c) => c === UNCONFIRMED ? `the service said ${c}` : `Mason on the replica said ${c}`, next: again }
       : { code: "failed", said: (c) => `the service said ${c}`, next: again });
     if (failure === null) return null;
-    // a replica that refused a removal not confirmed (an older CLI's deploy, or what it runs changed since the plan was
-    // shown): the way out is the CLI's own, the plan shown again and the question asked
+    // the service refused a removal not confirmed (an older CLI's deploy, or what the replica runs changed since the
+    // plan was shown): the way out is the CLI's own, the plan shown again and the question asked
     if (status === "refused" && d.failure.code === UNCONFIRMED && again[0] !== undefined) {
       failure = { ...failure, fix: `${again[0][0]} again: it shows what the deploy removes and asks for it to be confirmed (or add --yes, where no person is asked)` };
     }
@@ -618,8 +620,8 @@ export async function deploy(argv: string[]): Promise<number> {
   // its machine is not connected; or the service is full) or a 429 (too many deploys at once) says NO deploy was made:
   // the same body is sent again after the wait it asks (`Retry-After`, else RESEND_MS), within --timeout. No other
   // answer is ever sent again: a POST that may have made a deploy would make a second.
-  // the tables whose removal was confirmed, as the plan named them: a replica that would remove one this list lacks
-  // refuses the deploy (an older CLI's, or a plan that went stale), so nothing skips the question
+  // the tables whose removal was confirmed, as the plan named them: a service refuses a deploy that would remove one
+  // this list lacks (an older CLI's, or a plan that went stale), so nothing skips the question
   const body = { files: files.map(({ path: p, sha256, content }) => ({ path: p, sha256, content })), client: { version: version() },
     ...(removed.length ? { confirmed: { removed: removed.map((x) => x.table) } } : {}) };
   let waitSaid = "", waitSaidAt = 0, waitLine: string | null = null;

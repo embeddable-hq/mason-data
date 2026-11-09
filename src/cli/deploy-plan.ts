@@ -85,7 +85,14 @@ const roleText = (r: unknown): string => JSON.stringify(r, (_k, v: unknown) => v
 /** A generated table's name from its file: `daily.yml` is `public.daily`, `billing.daily.yml` `billing.daily`. */
 const generatedName = (file: string): string => { const stem = file.replace(/\.ya?ml$/, ""); return stem.includes(".") ? stem : `public.${stem}`; };
 
+/** One side, or why it cannot be read: whatever a reader throws on a file (the service's files are anyone's) is the
+ *  file's problem, never a crash of the deploy. */
 function sideOf(files: ReadonlyArray<{ path: string; sha256: string; content: string }>, whose: string): Side | { problem: string } {
+  try { return readSide(files, whose); }
+  catch (e) { return { problem: `${whose} files cannot be read here: ${(e as Error).message.split("\n")[0]}` }; }
+}
+
+function readSide(files: ReadonlyArray<{ path: string; sha256: string; content: string }>, whose: string): Side | { problem: string } {
   const cannot = (file: string, problem: string): { problem: string } => ({ problem: `${whose} ${file} cannot be read here: ${problem}` });
   const sources = files.filter((f) => /^sources\/[^/]+\.ya?ml$/.test(f.path));
   if (sources.length > 1) return { problem: `${whose} files hold ${sources.length} sources files, where a project has one` };

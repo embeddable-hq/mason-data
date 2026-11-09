@@ -213,7 +213,11 @@ const notMapping = (v: unknown): string => `it is ${v === null || v === undefine
 export function parseSourceText(text: string, name: string, file: string): SourceFile | { problems: string[] } {
   const doc = parseDocument(text, { uniqueKeys: true });
   if (doc.errors.length) return { problems: [`it is not YAML: ${doc.errors[0]!.message.split("\n")[0]}`] };
-  const v: unknown = doc.toJS();
+  // a document the library parses can still refuse to become values (more aliases than it expands: a file built to
+  // exhaust memory), and throws: a problem of the file, never a crash
+  let v: unknown;
+  try { v = doc.toJS(); }
+  catch (e) { return { problems: [`it cannot be read as values: ${(e as Error).message.split("\n")[0]}`] }; }
   if (!isPlain(v)) return { problems: [notMapping(v)] };
   const problems: string[] = [];
   for (const k of Object.keys(v)) {
@@ -367,7 +371,13 @@ export function writtenDatabase(folder: string, root: string): { database: strin
   const text = fs.readFileSync(file, "utf8");
   const doc = parseDocument(text, { uniqueKeys: true });
   if (doc.errors.length) return sourceFailure(file, root, [`it is not YAML: ${doc.errors[0]!.message.split("\n")[0]}`]);
-  if (!isMap(doc.contents)) return sourceFailure(file, root, [notMapping(doc.toJS())]);
+  if (!isMap(doc.contents)) {
+    // (a document whose values the library refuses to expand throws: said as the file's problem, never a crash)
+    let v: unknown;
+    try { v = doc.toJS(); }
+    catch (e) { return sourceFailure(file, root, [`it cannot be read as values: ${(e as Error).message.split("\n")[0]}`]); }
+    return sourceFailure(file, root, [notMapping(v)]);
+  }
   const named = databaseKey(doc, text);
   return "problem" in named ? sourceFailure(file, root, [named.problem]) : named;
 }

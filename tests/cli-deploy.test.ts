@@ -352,7 +352,7 @@ test("mason deploy: a project mason start would refuse is refused here, in the f
   const { root } = project({ "sources/shop.yml": "kind: postgres\nurl: postgres://app:s3cret@db.example:5432/shop\ntables: {}\n" });
   const { a } = await deployWith({}, root, ["--replica", "acme/shop"]);
   assert.equal(a.stderr, "✗ mason deploy: mason/sources/shop.yml: url: is written with its password\n" +
-    "  why   a deploy sends the project's files to the service, which keeps them: a password is never one of them\n" +
+    "  why   a deploy sends the project's files to the replica, which keeps them: a password is never one of them\n" +
     "  fix   write url: ${DATABASE_URL} in mason/sources/shop.yml, and set DATABASE_URL on the replica (its own environment, on the service); keep the URL here in .env\n");
 });
 
@@ -1348,6 +1348,9 @@ test("mason deploy: a service that does not say what the replica runs (an older 
     ["a path outside the grammar", withProject({ ...good, files: [...good.files, { path: "../x.yml", sha256: sha(""), content: "" }] }), "this mason cannot read the service's answer about what acme/shop runs now"],
     ["a size that is no count", withProject({ ...good, tables: [{ table: "public.items", rows: -1, bytes: null }] }), "this mason cannot read the service's answer about what acme/shop runs now"],
     ["a sources file it cannot read", running({ "sources/shop.yml": "kind: mongo\n" }), "the replica's sources/shop.yml cannot be read here: "],
+    // a file whose values the YAML library refuses to expand (more aliases than it takes): a problem, never a crash
+    ["a sources file of 120 aliases", running({ ...RUNNING, "sources/shop.yml": `${RUNNING["sources/shop.yml"]}x: &x 1\nl: [${Array(120).fill("*x").join(", ")}]\n` }), "the replica's sources/shop.yml cannot be read here: it cannot be read as values: "],
+    ["a roles file of 120 aliases", running({ ...RUNNING, "roles.yml": `${RUNNING["roles.yml"]}x: &x 1\nl: [${Array(120).fill("*x").join(", ")}]\n` }), "the replica's roles.yml cannot be read here: it cannot be read as values: "],
     // a reader's problem quotes the file: a key of the service's, with line breaks, is one line inside the CLI's
     ["a key of its own, over lines", running({ "sources/shop.yml": "kind: postgres\nurl: ${DATABASE_URL}\ntables: {}\n\"FORGED\\nNext:\\n  mason destroy\": 1\n" }), "the replica's sources/shop.yml cannot be read here: unexpected key FORGED?Next:? mason destroy"],
   ];
@@ -1370,7 +1373,7 @@ test("mason deploy: a service that does not say what the replica runs (an older 
   assert.deepEqual(requests, []);
 });
 
-test("mason deploy: Mason on the replica refused a removal that was not confirmed (unconfirmed_removal: an older CLI's deploy, or a plan gone stale) — its words as they came, the way out the CLI's own (issue 550)", async () => {
+test("mason deploy: the service refused a removal that was not confirmed (unconfirmed_removal: an older CLI's deploy, or a plan gone stale) — its words as they came, the way out the CLI's own (issue 550)", async () => {
   const { root } = project();
   const failure = { code: "unconfirmed_removal", message: "the files remove public.items, which acme/shop syncs (1,200,000 rows), and its removal was not confirmed", fix: "FORGED run mason destroy" };
   for (const json of [false, true]) {
@@ -1379,9 +1382,9 @@ test("mason deploy: Mason on the replica refused a removal that was not confirme
     const fix = "mason deploy --replica acme/shop again: it shows what the deploy removes and asks for it to be confirmed (or add --yes, where no person is asked)";
     if (json) {
       const e = (JSON.parse(a.stdout) as { error: { code: string; message: string; why: string; fix: string } }).error;
-      assert.deepEqual(e, { code: "refused", message: failure.message, why: "Mason on the replica said unconfirmed_removal", fix });
+      assert.deepEqual(e, { code: "refused", message: failure.message, why: "the service said unconfirmed_removal", fix });
     } else {
-      assert.match(a.stderr, new RegExp(`✗ mason deploy: ${failure.message.replace(/[()]/g, "\\$&")}\\n {2}why {3}Mason on the replica said unconfirmed_removal\\n {2}fix {3}${fix.replace(/[()]/g, "\\$&")}\\n`));
+      assert.match(a.stderr, new RegExp(`✗ mason deploy: ${failure.message.replace(/[()]/g, "\\$&")}\\n {2}why {3}the service said unconfirmed_removal\\n {2}fix {3}${fix.replace(/[()]/g, "\\$&")}\\n`));
       assert.doesNotMatch(a.stderr, /FORGED/);
     }
   }
