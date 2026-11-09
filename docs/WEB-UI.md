@@ -359,19 +359,24 @@ An *operator* is a process on the same machine as `mason serve` (a supervisor, o
 project's owner pick tables in its own app). It lists the database's tables and adds or removes them by asking the run,
 the way `mason add` and `mason remove` do while Mason is up. So the edit goes through the same catalog checks, the
 same sources-file grammar and the same refusals. Never write the sources file by hand beside a run, and never through
-the page. Within a release line, these routes keep the shapes below. `tests/cli-operator-tables.test.ts` pins each
-status, key and refusal, so changing one is a deliberate contract change, said in the release notes.
+the page. Within a release line, these routes keep the shapes below. `tests/cli-operator-tables.test.ts` pins every
+status, key and refusal listed here, so changing one is a deliberate contract change, said in the release notes.
 
 **How it reaches the run.** Over `MASON_UI_SOCKET` (or the loopback port), with the port and the token from the file
 `MASON_UI_RUN_FILE` names (`{ "port", "token" }`). Every request carries:
 
-- `Host: 127.0.0.1:<port>`, with the run file's port, on the socket as well;
+- `Host: 127.0.0.1:<port>` (or `localhost:<port>`), with the run file's port, on the socket as well;
 - `Authorization: Bearer <token>`, the run's token: it grants the commands' writes, so treat it as `.mason/config.json`
   is treated;
-- `Content-Type: application/json` and a JSON body of at most 64 KiB, on a POST. No `Origin` is needed.
+- on a POST, a JSON body of at most 64 KiB. It is read as JSON whatever its `Content-Type`, and no `Origin` is
+  needed.
 
-The guard answers before any route, in plain text, not JSON: `421` for another Host, `403` for no token or another
-token (`the Authorization header does not carry this run's token`).
+The guard answers before any route, in plain text, not JSON:
+
+- `421` for another Host (`this server answers only as 127.0.0.1:<port> …`);
+- `403` for another token (`the Authorization header does not carry this run's token`);
+- `403` for no token and no cookie (`this is mason start's command server for the mason command: a request carries the
+  run's token (Authorization: Bearer, from .mason/config.json)`).
 
 **`MASON_UI_READ_ONLY=1` refuses the page, not the operator.** A request with no `Authorization` (the page's, by its
 cookie) that is not a GET or a HEAD is refused `403` with "the web page is read-only here". A request with the run's
@@ -379,9 +384,10 @@ token is served, read-only or not. `MASON_PROJECT_READONLY=1` refuses the operat
 
 **Every refusal** is `{ "error": <message>, "failure": { "code", "message", "why"?, "fix"?, "next": [{ "command",
 "what"? }] } }`, the CLI's failure shape, worded by the code `mason add` and `mason remove` call. `why` and `fix` are
-there when the refusal has them. Beside the read-only page's `403`, the status follows the code: `400` `usage`, `404` `not_found`, `409` `refused`,
-`500` `failed`. A `500` is the run's own failure (the sources file could not be written, say), with `mason logs` as
-its next step. A body that is not JSON is `400` (`the body is not JSON: …`).
+there when the refusal has them. Beside the read-only page's `403`, the status follows the code: `400` `usage`,
+`404` `not_found`, `409` `refused`, `500` `failed`. A `500` is the run's own failure (a sources file it cannot read
+or write, say), with `mason logs` as its next step, and is said once in the run's log. A body that is not JSON is
+`400` (`the body is not JSON: …`).
 
 ### The table list: `GET /api/state`
 
@@ -392,10 +398,15 @@ reads:
   `rows` (the catalog's estimate, or null), `bytes`, `key` (its primary key's columns, `[]` for none), `comment`,
   `added`, `reason` (why `mason add` without a key cannot add it: no primary key, with the `--key` to name; null for a
   table that can be added and for one added), `addedColumns` and `copyKey` (what its entry syncs, and the key it names;
-  null when not added), `copy` (its first sync: `{ phase, rowsCopied, updatedAt }`, or null) and `error`. An added
+  null when not added), `copy` (its first sync, below, or null) and `error`. An added
   table also has `sync`: `state` (`waiting`, `syncing`, `synced`, `behind`, `failed`), `syncedAt`, `syncSeconds`,
   `syncedBy`, `ageSeconds`, `asOf`, `promisedSeconds`, `behindBySeconds`, `behindWhy`. Once the sync holds it there are
   also `kept` (how it is kept current now: `by` is `poll`, with its `sync`, or `replication` or `recopy`) and `duck`.
+- `copy`, null until the sync reaches the table, is `phase` (`copying`, `done` or `failed`), `rowsCopied` (the rows
+  read so far, or the copy's rows once done) and `updatedAt` (when it was copied, `""` before). It also has `progress`
+  while its chunks are read (`chunksDone`, `chunksTotal`, `reading`, `readingSeconds`, `rowsReading`, `rowsPerSecond`,
+  `bytesPerSecond`, `secondsLeft`, `share`), and `retired` when a done copy is in a layout this Mason no longer keeps
+  (it serves as it was until it is synced again).
 - `source.sync`: the file's own `sync:` (`default`, and `written`), which every entry follows unless its own says
   otherwise.
 - `sourcesReadOnly`: why the page offers no Add or Remove, or null. Either the project is deployed read-only, which

@@ -16,7 +16,8 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRunServer, type RunContext } from "../src/cli/run-server.ts";
 import { parseSource, type SourceTable } from "../src/cli/preflight.ts";
-import { readSource, newSourceText } from "../src/cli/sources.ts";
+import { readSource, newSourceText, replicatedEntries, entryName } from "../src/cli/sources.ts";
+import { liveReadinessFailure } from "../src/cli/replication-mode.ts";
 import { listenOnUiSocket, prepareUiSocket } from "../src/cli/ui-socket.ts";
 import { prepareUiRunFile, writeUiRunFile } from "../src/cli/ui-run-file.ts";
 import type { CopyState } from "../src/duck/sync.ts";
@@ -45,10 +46,11 @@ const URL_ = "postgres://me@localhost:5432/app";
 const parsed = parseSource(URL_);
 const source = "source" in parsed ? parsed.source : assert.fail(parsed.problem);
 
-interface Operator { socket: string; port: number; token: string; root: string; sourceFile: string; logged: string[]; changed: () => number; setCopies: (c: CopyState[]) => void }
+interface Operator { socket: string; port: number; token: string; root: string; sourceFile: string; logged: string[]; changed: () => number; setCopies: (c: CopyState[]) => void;
+  setTables: (t: SourceTable[]) => void }
 
 /** `mason serve`'s run as an operator meets it: a project with a sources file, the server on a Unix socket, the run file. */
-async function operator(o: { pageReadOnly?: boolean } = {}): Promise<Operator> {
+async function operator(o: { pageReadOnly?: boolean; runUrl?: string; checkReplication?: RunContext["checkReplication"] } = {}): Promise<Operator> {
   const root = temp();
   const folder = path.join(root, "mason");
   const sourceFile = path.join(folder, "sources", "app.yml");
@@ -57,9 +59,10 @@ async function operator(o: { pageReadOnly?: boolean } = {}): Promise<Operator> {
   const logged: string[] = [];
   let changed = 0;
   let copies: CopyState[] = [];
+  let tables: SourceTable[] = TABLES;
   const read = (): ReturnType<RunContext["readSource"]> => readSource(folder, root, {});
   const ctx = {
-    source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables: TABLES, systemIdentifier: null }), warnings: [], replication: () => null,
+    source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables, systemIdentifier: null }), warnings: [], replication: () => null,
     port: 4039, token: TOKEN, page: true, served: true, ...(o.pageReadOnly === undefined ? {} : { pageReadOnly: o.pageReadOnly }),
     users: { file: path.join(root, "users.json"), apiKey: "k".repeat(48), database: "app", postgresUrl: "postgresql://localhost:5433/app" },
     folder: () => folder, root, home: path.join(root, ".mason"), version: "test", startedAt: Date.now(),
@@ -68,7 +71,7 @@ async function operator(o: { pageReadOnly?: boolean } = {}): Promise<Operator> {
     sourcesChanged: () => { changed++; }, log: (m: string) => { logged.push(m); seen.push(m); },
     listener: { openSessions: () => ({ open: 0, byClient: [] }), running: () => [], cancel: (session: number) => ({ unknown: session }) },
     logs: { capacity: 10, recent: () => [] },
-    readSource: read, runUrl: URL_,
+    readSource: read, runUrl: o.runUrl ?? URL_, ...(o.checkReplication ? { checkReplication: o.checkReplication } : {}),
     duck: { copies: () => copies, file: path.join(root, "duck.db"), poll: async () => ({ at: "2026-11-08T10:00:00.000Z", tables: [] }),
       stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }), restarts: () => [], requests: { days: 7 } },
   } as unknown as RunContext;
@@ -85,7 +88,7 @@ async function operator(o: { pageReadOnly?: boolean } = {}): Promise<Operator> {
   const written = writeUiRunFile(runFile, { port: ctx.port, token: TOKEN }, () => undefined);
   if ("message" in written) assert.fail(written.message);
   const { port, token } = JSON.parse(fs.readFileSync(runFile, "utf8")) as { port: number; token: string };
-  return { socket, port, token, root, sourceFile, logged, changed: () => changed, setCopies: (c) => { copies = c; } };
+  return { socket, port, token, root, sourceFile, logged, changed: () => changed, setCopies: (c) => { copies = c; }, setTables: (t) => { tables = t; } };
 }
 
 interface Answer { status: number; type: string | undefined; text: string }
@@ -169,6 +172,25 @@ test("an added table in the list: added, its columns and its sync's state; once 
   assert.equal((t.copy as { phase: string }).phase, "done");
 });
 
+test("a table's copy: phase copying (with progress while its chunks are read), done (with retired in an old layout) or failed; none while waiting", async () => {
+  const op = await operator();
+  for (const t of ["public.customers", "public.orders"]) assert.equal((await ask(op, "POST", "/api/pick", { body: { table: t, picked: true } })).status, 200);
+  const progress = { chunksDone: 2, chunksTotal: 8, reading: 2, readingSeconds: 3, rowsReading: 10, rowsPerSecond: 100, bytesPerSecond: 8000, secondsLeft: 60, share: 0.25 };
+  const copyOf = async (c: CopyState): Promise<Record<string, unknown> | null> => {
+    op.setCopies([c]);
+    const t = (json(await ask(op, "GET", "/api/state")) as { tables: Array<Record<string, unknown>> }).tables.find((x) => x.table === c.source)!;
+    return t.copy as Record<string, unknown> | null;
+  };
+  const base = { source: "public.customers", rows: null, bytes: 8192, seconds: null, copiedAt: null, error: null };
+  assert.deepEqual(await copyOf({ ...base, phase: "copying", rowsSoFar: 40, progress } as CopyState), { phase: "copying", rowsCopied: 40, updatedAt: "", progress });
+  assert.deepEqual(await copyOf({ ...base, phase: "copying", rowsSoFar: 40 } as CopyState), { phase: "copying", rowsCopied: 40, updatedAt: "" }, "progress only while chunks are read");
+  assert.deepEqual(await copyOf({ ...base, phase: "copied", rows: 3, copiedAt: "2026-11-08T10:00:00.000Z", retired: "an older layout" } as CopyState),
+    { phase: "done", rowsCopied: 3, updatedAt: "2026-11-08T10:00:00.000Z", retired: "an older layout" });
+  assert.deepEqual(await copyOf({ ...base, phase: "failed", rowsSoFar: 5, error: "boom" } as CopyState), { phase: "failed", rowsCopied: 5, updatedAt: "" });
+  assert.equal(await copyOf({ ...base, phase: "waiting" } as CopyState), null, "waiting: no copy yet");
+  op.setCopies([]);
+});
+
 test("POST /api/pick adds a table: 200 with what was written and the state after; the same again is already: true; picked: false removes it", async () => {
   const op = await operator();
   const before = fs.readFileSync(op.sourceFile, "utf8");
@@ -194,6 +216,7 @@ test("POST /api/pick adds a table: 200 with what was written and the state after
 
   const removed = json(await ask(op, "POST", "/api/pick", { body: { table: "public.events", picked: false } }));
   assert.deepEqual(keys(removed), REMOVE_ANSWER);
+  for (const t of (removed.state as { tables: object[] }).tables) assert.deepEqual(keys(t), LEAN_TABLE, "the lean state");
   assert.deepEqual(removed.removed, ["public.events"]);
   assert.equal(fs.readFileSync(op.sourceFile, "utf8"), before, "every other byte as it was");
 });
@@ -209,6 +232,8 @@ test("POST /api/pick's refusals: status, code and sentence in the failure shape,
     [{ table: "public.customers", picked: true, key: [] }, 400, "usage", "key is a list of column names"],
     [{ table: "public.customers", picked: true, key: ["id"] }, 400, "usage", "public.customers has a primary key (id), which Mason keys it by: leave --key out"],
     [{ table: "public.customers", picked: true, columns: ["nme"] }, 400, "usage", /nme/],
+    [{ table: "public.events", picked: true, key: ["id"] }, 400, "usage", "tables.events.key: no unique index of public.events is over (id), so two of its rows may share them and Mason could not tell them apart — name the columns of one: key: [tenant_id, id] (its unique index events_tenant_id_id_key)"],
+    [{ table: "public.events", picked: true, key: ["tenant_id", "id"], sync: "replication" }, 400, "usage", /^public\.events cannot be kept current by logical replication: /],
     [{ table: "public.nope", picked: true }, 404, "not_found", "public.nope is not a table of app that this user can read"],
     [{ table: "public.logs", picked: true }, 409, "refused", "public.logs cannot be added: no primary key: name the columns that tell its rows apart, mason add logs --key <column>,…"],
     [{ table: "public.customers", picked: false }, 404, "not_found", /customers/],
@@ -246,6 +271,7 @@ test("POST /api/remove: 200 { removed, file, state }; a name the file lacks 404 
   for (const t of ["public.customers", "public.orders"]) assert.equal((await ask(op, "POST", "/api/pick", { body: { table: t, picked: true } })).status, 200);
   const missing = refusal(await ask(op, "POST", "/api/remove", { body: { tables: ["customer"] } }), 404, "not_found");
   assert.match(missing.message, /customers/, "the closest it has");
+  assert.equal(refusal(await ask(op, "POST", "/api/remove", { body: { tables: ["a.b.c"] } }), 400, "usage").message.length > 0, true, "a name that is no table's name");
   for (const body of [{}, { tables: [] }, { tables: "customers" }, { tables: [1] }]) {
     assert.equal(refusal(await ask(op, "POST", "/api/remove", { body }), 400, "usage").message, "send { tables: [name, …] }", JSON.stringify(body));
   }
@@ -263,14 +289,70 @@ test("the guard before every route: no token, another token, or another Host is 
   const before = fs.readFileSync(op.sourceFile, "utf8");
   const body = { table: "public.customers", picked: true };
   const none = await ask(op, "POST", "/api/pick", { body, as: "nobody" });
-  assert.equal(none.status, 403);
+  assert.deepEqual([none.status, none.text], [403, "this is mason start's command server for the mason command: a request carries the run's token (Authorization: Bearer, from .mason/config.json)\n"]);
   assert.match(String(none.type), /^text\/plain/);
   const wrong = await ask(op, "POST", "/api/pick", { body, headers: { Authorization: "Bearer not-the-token" } });
   assert.deepEqual([wrong.status, wrong.text], [403, "the Authorization header does not carry this run's token\n"]);
   const host = await ask(op, "POST", "/api/pick", { body, headers: { Host: "mason.internal" } });
   assert.equal(host.status, 421);
   assert.match(host.text, /^this server answers only as 127\.0\.0\.1:4039/);
+  assert.equal((await ask(op, "GET", "/api/state", { headers: { Host: `localhost:${op.port}` } })).status, 200, "localhost:<port> is the same Host");
+  assert.equal((await ask(op, "GET", "/api/state", { headers: { "Content-Type": "text/plain" } })).status, 200);
+  const untyped = await ask(op, "POST", "/api/remove", { raw: JSON.stringify({ tables: ["nope"] }), headers: { "Content-Type": "text/plain" } });
+  assert.equal(untyped.status, 404, "the body is read as JSON whatever its Content-Type");
   assert.equal(fs.readFileSync(op.sourceFile, "utf8"), before);
+});
+
+test("an edit while the file's url: names another database than the run syncs is refused 409, nothing written", async () => {
+  const op = await operator({ runUrl: "postgres://me@localhost:5432/other" });
+  const before = fs.readFileSync(op.sourceFile, "utf8");
+  for (const [p, body] of [["/api/pick", { table: "public.customers", picked: true }], ["/api/remove", { tables: ["customers"] }]] as const) {
+    const f = refusal(await ask(op, "POST", p, { body }), 409, "refused");
+    assert.equal(f.message, "mason/sources/app.yml: url: now names postgres://me@localhost:5432/app (mason/sources/app.yml), and this run syncs postgres://me@localhost:5432/other: " +
+      "mason stop && mason start syncs from the new one, then add or remove the table", p);
+  }
+  assert.equal(fs.readFileSync(op.sourceFile, "utf8"), before);
+  assert.equal(op.changed(), 0);
+});
+
+test("a live switch to sync: replication the database cannot serve is refused 409 with what it lacks; the file is put back byte for byte", async () => {
+  const op = await operator({ checkReplication: async (file) => {
+    const replicated = replicatedEntries(file).map((e) => entryName(e.table));
+    return replicated.length === 0 ? null : liveReadinessFailure({ refused: [{ name: "wal_level", ok: false, detail: "replica: logical replication needs logical" }], warnings: [] },
+      replicated, "mason/sources/app.yml", "app");
+  } });
+  assert.equal((await ask(op, "POST", "/api/pick", { body: { table: "public.customers", picked: true } })).status, 200);
+  const before = fs.readFileSync(op.sourceFile, "utf8");
+  const f = refusal(await ask(op, "POST", "/api/pick", { body: { table: "public.customers", picked: true, sync: "replication", keep: true } }), 409, "refused");
+  assert.equal(f.message, "customers cannot be kept current by logical replication from app: wal_level");
+  assert.ok(f.why && f.fix);
+  assert.equal(fs.readFileSync(op.sourceFile, "utf8"), before, "the file as it was");
+  assert.equal(op.changed(), 1, "the run is told of the add alone, not of the edit it did not take");
+});
+
+test("an edit while another entry of the file fails against the database is refused 409 — a remove and an add — nothing written", async () => {
+  const op = await operator();
+  for (const t of ["public.customers", "public.orders"]) assert.equal((await ask(op, "POST", "/api/pick", { body: { table: t, picked: true } })).status, 200);
+  const before = fs.readFileSync(op.sourceFile, "utf8");
+  op.setTables(TABLES.filter((t) => t.source !== "public.orders"));   // dropped on the database since
+  const f = refusal(await ask(op, "POST", "/api/remove", { body: { tables: ["customers"] } }), 409, "refused");
+  assert.match(f.message, /orders/);
+  assert.match(f.message, / — fix it first, then remove customers$/);
+  assert.equal(fs.readFileSync(op.sourceFile, "utf8"), before);
+  // an add is held to the same: the file's other entries must hold first
+  const added = refusal(await ask(op, "POST", "/api/pick", { body: { table: "public.events", picked: true, key: ["tenant_id", "id"] } }), 409, "refused");
+  assert.match(added.message, / — fix it first, then add events$/);
+  assert.equal(fs.readFileSync(op.sourceFile, "utf8"), before);
+});
+
+test("the run's own failure is 500 failed, with mason logs next: a sources file it cannot read", async () => {
+  const op = await operator();
+  fs.rmSync(op.sourceFile);
+  fs.mkdirSync(op.sourceFile);   // a folder where the file was: reading it fails
+  const f = refusal(await ask(op, "POST", "/api/pick", { body: { table: "public.customers", picked: true } }), 500, "failed");
+  assert.match(f.message, /EISDIR/);
+  assert.deepEqual(f.next, [{ command: "mason logs", what: "the run's log: what it was doing" }]);
+  assert.ok(op.logged.some((l) => l.startsWith("command server: POST /api/pick failed: ")), "said once in the run's log");
 });
 
 test("MASON_UI_READ_ONLY=1 refuses the page, not the operator: without the token an edit is refused 403, with it served", async () => {
@@ -301,7 +383,7 @@ test("the doc names every key of the contract: the lean table, a column, the pic
   const doc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "docs", "WEB-UI.md"), "utf8");
   const section = doc.split("\n## An operator's table edits\n")[1]?.split("\n## ")[0];
   assert.ok(section !== undefined, "docs/WEB-UI.md has the section");
-  for (const k of [...LEAN_TABLE, ...PICK_ANSWER, ...REMOVE_ANSWER, ...COLUMN, "kept", "sync", "sourcesReadOnly", "pageReadOnly"]) assert.ok(section.includes(`\`${k}\``), k);
+  for (const k of [...LEAN_TABLE, ...PICK_ANSWER, ...REMOVE_ANSWER, ...COLUMN, "kept", "sync", "sourcesReadOnly", "pageReadOnly", "phase", "rowsCopied", "updatedAt", "progress", "retired", "copying", "done", "failed"]) assert.ok(section.includes(`\`${k}\``), k);
   for (const route of ["GET /api/state", "GET /api/tables/<table>/columns", "POST /api/pick", "POST /api/remove", "MASON_UI_SOCKET", "MASON_UI_RUN_FILE", "MASON_UI_READ_ONLY"]) {
     assert.ok(section.includes(route), route);
   }
