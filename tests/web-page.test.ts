@@ -1017,29 +1017,57 @@ test("in the browser: opening a replaced view's hash, or following one, replaces
   // opened at #users: once the state says so, the address is replaced (Back does not land on it again), once
   const run = withNav();
   const b = fakeBrowser(run, "#users");
-  await b.settle();
+  await until(() => b.replaced.length > 0);
   assert.deepEqual(b.replaced, ["/host/users"]);
+  // (a wait for what must NOT happen: a delay too short only weakens it, never fails it)
   b.tick(); await b.settle();
   assert.deepEqual(b.replaced, ["/host/users"], "asked once, however many paints follow");
   // opened with no hash, the Overview replaced: Mason's first page of its own, its hash replaced
   const bare = fakeBrowser(withNav());
-  await bare.settle();
+  await until(() => /<a href="#tables" aria-current="page">/.test(bare.el("nav").html), "the Tables page shown");
   assert.deepEqual(bare.replaced, ["#tables"]);
-  assert.match(bare.el("nav").html, /<a href="#tables" aria-current="page">/, "the Tables page shown");
   assert.match(bare.el("nav").html, /<a href="https:\/\/console\.example\.com\/" rel="noreferrer"><span class="icon" aria-hidden="true">[\s\S]*?<\/span><span class="label">Overview<\/span><\/a>/);
   assert.ok(bare.el("nav").html.includes('<span class="label">&lt;b&gt;Billing&lt;/b&gt;</span>'), "the host's link, its label text");
   // a link of the page's followed to a replaced view: left at once, its reads never asked
   const r2 = withNav();
   const nb = fakeBrowser(r2, "#tables");
-  await nb.settle();
+  await until(() => nb.el("nav").html.includes("Billing") && /<a href="#tables" aria-current="page">/.test(nb.el("nav").html), "the Tables page shown, the state's sidebar on it");
   const before = r2.asked.length;
-  nb.go("#users"); await nb.settle();
+  nb.go("#users");
+  await until(() => nb.replaced.length > 0);
+  await nb.settle();
   assert.deepEqual(nb.replaced, ["/host/users"]);
   assert.ok(!r2.asked.slice(before).some((a) => a.startsWith("GET api/users")), "the replaced view is not read");
-  // unset: nothing leaves
-  const plain = fakeBrowser(fakeRun(), "#users");
-  await plain.settle();
+  // unset: nothing leaves (the Users page shown once the state is read)
+  const plainRun = fakeRun();
+  const plain = fakeBrowser(plainRun, "#users");
+  await until(() => plainRun.asked.some((a) => a.startsWith("GET api/users")) && plain.el("page-users").hidden === false, "the Users page shown and read");
   assert.deepEqual(plain.replaced, []);
+});
+
+test("in the browser: items whose URLs are this page under each other's hash (/#tables, /#users) leave once and stop, never back and forth for ever (the tab hung)", async () => {
+  for (const [items, opened, shown] of [
+    [{ users: "/#tables", tables: "/#users" }, "#users", "tables"],
+    [{ users: "/#tables", tables: "/#queries", queries: "/#users" }, "#users", "tables"],
+    [{ users: "/#tables", tables: "/#users" }, "#tables", "users"],
+  ] as const) {
+    const run = fakeRun();
+    run.answers.set("GET api/state", () => new Response(JSON.stringify({ ...CATALOG_STATE, pageNav: { items, links: [] } }), { status: 200 }));
+    const b = fakeBrowser(run, opened);
+    await until(() => b.el(`page-${shown}`).hidden === false, `${JSON.stringify(items)}: ${shown} shown`);
+    await b.settle();
+    assert.equal(b.replaced.length, 1, `${JSON.stringify(items)}: left once (${b.replaced.length})`);
+    // a hash typed afterwards shows its own view: the page never leaves again for one of its own addresses
+    b.go("#users");
+    await until(() => b.el("page-users").hidden === false, "users shown");
+    assert.equal(b.replaced.length, 1);
+  }
+  // a single one pointing into the page: one hop, then the page it points to
+  const run = fakeRun();
+  run.answers.set("GET api/state", () => new Response(JSON.stringify({ ...CATALOG_STATE, pageNav: { items: { users: "/#tables" }, links: [] } }), { status: 200 }));
+  const b = fakeBrowser(run, "#users");
+  await until(() => b.el("page-tables").hidden === false);
+  assert.deepEqual(b.replaced, ["/#tables"]);
 });
 
 test("a server's Connect says the URL's host is the server's own view of itself; a laptop's page says nothing of it", async () => {
@@ -1448,12 +1476,22 @@ test("the page names nothing root-absolute: every asset, API path and import is 
   for (const ok of [`fetch("api/state")`, `<link href="app.css">`, `"<svg/>"`, `<path d="M3 3z"/>`, `x.split("//")`]) assert.ok(!new RegExp(rootAbsolute.source).test(ok), ok);
 });
 
+/** Wait until `cond` holds, checked every 5 ms, failing by name after `ms`: a wait on the condition, never on a delay a
+ *  busy machine outruns. */
+async function until(cond: () => boolean, what = "the condition", ms = 5000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > end) assert.fail(`${what}: not met in ${ms} ms`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 /** The page in a fake browser: elements whose innerHTML reads back as a browser serialises it (a bare data-x attribute
  *  as data-x="", an apostrophe in text as itself), the listeners `start` adds, the interval it sets, and a FormData
  *  that reads a form's ticked boxes from the fake form. */
 function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "") {
   // an element's attributes, and what holds the focus: a target `{ in: "sidebar" }` is inside the element of that id
-  interface FakeEl { id: string; writes: number; html: string; innerHTML: string; attrs: Map<string, string>; addEventListener: () => void;
+  interface FakeEl { id: string; writes: number; html: string; hidden?: boolean; innerHTML: string; attrs: Map<string, string>; addEventListener: () => void;
     setAttribute(k: string, v: string): void; removeAttribute(k: string): void; contains(t: { in?: string } | null): boolean; focus(): void; querySelector(sel: string): FakeEl }
   const els = new Map<string, FakeEl>();
   const el = (id: string): FakeEl => els.get(id) ?? (els.set(id, { id, writes: 0, html: "", attrs: new Map(), addEventListener: () => undefined,
@@ -1467,7 +1505,14 @@ function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "") {
   const onWin = new Map<string, () => void>();
   // what the page replaced the address with (a replaced view's URL, or a hash of its own, which the browser then says)
   const replaced: string[] = [];
-  const location = { hash, replace(u: string) { replaced.push(u); if (u.startsWith("#")) { location.hash = u; setTimeout(() => onWin.get("hashchange")!(), 0); } } };
+  // A URL that is this page under another hash (`#tables`, or `/#tables` with the page served at the host's root) stays
+  // in the document and says a hashchange, as a browser does; past 20 the fake stops answering, so a page that would
+  // leave for ever fails its test instead of hanging it
+  const location = { hash, replace(u: string) {
+    replaced.push(u);
+    const at = /^\/?#/.exec(u);
+    if (at !== null && replaced.length <= 20) { location.hash = u.slice(at[0].length - 1); setTimeout(() => onWin.get("hashchange")!(), 0); }
+  } };
   let tick: (() => void) | null = null;
   class FormData { readonly ticked: Record<string, string[]>; constructor(form: { ticked: Record<string, string[]> }) { this.ticked = form.ticked; } getAll(name: string) { return this.ticked[name] ?? []; } }
   fn<[unknown, unknown], void>("start")(doc, { fetch: (p: string, i?: { method?: string; body?: string }) => run.fetch(p, i), FormData, location, addEventListener: (type: string, f: () => void) => { onWin.set(type, f); },

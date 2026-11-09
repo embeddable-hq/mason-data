@@ -395,12 +395,19 @@ export function start(doc, win) {
   // A HASH OF A VIEW THE HOST REPLACED IS LEFT FOR ITS PAGE (`app.leave`): replaced in the history, so Back does not
   // land on it again; once per URL, however many paints follow before the browser leaves. A hash naming no page, with
   // the Overview replaced, is the first page of Mason's own. True when the page is leaving.
-  let leaving = null;
-  const leave = () => {
+  // AT MOST ONCE A DOCUMENT: a host's URL may be this very page under another hash (`/#tables`, when a proxy serves the
+  // page at the host's root: no check at the start can tell), and two such items sent the page from one to the other for
+  // ever, the tab hung. So a hash that arrives AFTER the page was left (`arrived`) means the URL it left for was this
+  // page: it never leaves again, and shows what each hash names, its own view included.
+  let left = null;
+  let looped = false;
+  const leave = (arrived = false) => {
+    if (arrived && left !== null) looped = true;
+    if (looped) return false;
     const to = app.leave(win.location.hash);
     if (to === null) return false;
     if ("hash" in to) { win.location.replace(to.hash); return false; }
-    if (leaving !== to.url) { leaving = to.url; win.location.replace(to.url); }
+    if (left !== to.url) { left = to.url; win.location.replace(to.url); }
     return true;
   };
   // the shown page's charts, drawn after each write (src/web/charts.js); a document that cannot hold one draws none
@@ -538,7 +545,7 @@ export function start(doc, win) {
   win.addEventListener?.("hashchange", () => {
     if (menuOpen) setMenu(false, true);
     // a replaced view's hash is not shown, nor read: the page leaves for the host's
-    if (leave()) return;
+    if (leave(true)) return;
     app.show(win.location.hash, { doc }); paint(); void poll();
   });
   win.addEventListener?.("scroll", place, { capture: true, passive: true });
