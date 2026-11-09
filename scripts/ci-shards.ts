@@ -334,6 +334,8 @@ export const DOCS_TESTS: ReadonlyArray<{ file: string; pattern?: string }> = [
   // `--write` renders README.md's block and docs/SQL-SUPPORT.md, held byte for byte to the committed ones; the file's
   // other tests are the legs' partition and balance, which read no doc
   { file: "tests/oracle-legs.test.ts", pattern: "^--write" },
+  // docs/WEB-UI.md "An operator's table edits" names every key of the contract; the file's other tests read no doc
+  { file: "tests/cli-operator-tables.test.ts", pattern: "^the doc names every key of the contract" },
 ];
 
 /** The `node` invocations of the docs job: the per-test bound before the files (CI never runs `npm test`), the files
