@@ -138,6 +138,13 @@ main, #poll { max-width: var(--width); margin: 0 auto; padding-left: var(--gutte
 .where { margin: 0; font-size: var(--text-sm); font-weight: 500; color: var(--chrome-fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 auto; }
 .where:empty::before { content: "…"; color: var(--chrome-muted); }
 .side-body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+/* the link back to the site that links to the page (MASON_UI_BACK_URL): a quiet row above the mark, the chrome's own words */
+.back { display: flex; align-items: center; gap: var(--space-2); min-height: 28px; padding: 0 var(--space-2); min-width: 0;
+  color: var(--chrome-muted); font-size: var(--text-sm); text-decoration: none; }
+.back[hidden] { display: none; }
+.back:hover { color: var(--chrome-fg); background: var(--hover); text-decoration: none; }
+.back-arrow { flex: none; }
+.back-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 /* the nav: full-width rows, the page shown a pale stone row with the patina at its edge */
 .nav { flex: 1 1 auto; overflow-y: auto; padding: var(--space-4) 0; }
 .nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0; }
@@ -171,7 +178,8 @@ main, #poll { max-width: var(--width); margin: 0 auto; padding-left: var(--gutte
   .content { margin-left: var(--rail-w); }
   .side-head { align-items: center; padding: var(--space-4) 0 var(--space-3); }
   .brand { padding: 0; }
-  .brand-name, .where { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .brand-name, .where, .back-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .back { justify-content: center; padding: 0; width: 36px; }
   .project { border: 0; background: none; padding: 0; min-height: 20px; justify-content: center; }
   .project .badge { padding: 0 4px; font-size: 10px; height: 18px; }
   .nav { padding: var(--space-2) 0 var(--space-3); overflow: visible; }
@@ -190,6 +198,8 @@ main, #poll { max-width: var(--width); margin: 0 auto; padding-left: var(--gutte
   .content { margin-left: 0; }
   .side-head { flex-direction: row; align-items: center; gap: var(--space-2); height: 100%; padding: 0 var(--space-4) 0 var(--space-2); border-bottom: 0; }
   .brand { padding: 0; }
+  .back { padding: 0; width: 32px; min-height: 40px; justify-content: center; flex: none; }
+  .back-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
   .project { flex: 1 1 auto; border: 0; background: none; padding: 0; min-height: 0; }
   .where { flex: 0 1 auto; }
   .menu-button { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; padding: 0; border: 0; background: none; box-shadow: none; color: var(--chrome-fg); flex: none; }

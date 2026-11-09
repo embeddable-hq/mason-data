@@ -293,6 +293,20 @@ listens, and every browser connection crosses that one ssh connection as frames 
   `mason` commands' (`mason add`, `mason sync`, `mason cancel` beside the server, and the tunnel `mason ui --ssh`
   opens), served as before; `MASON_PROJECT_READONLY=1` is what refuses the commands' edits of the project's files.
   Anything but `0` or `1` refuses the start; `mason start` refuses it.
+- **A link back to the site that links to the page: `MASON_UI_BACK_URL` and `MASON_UI_BACK_LABEL`.** For a page opened
+  from another application (a portal, a hosted service's console), `mason serve` with `MASON_UI_BACK_URL` set shows
+  "← Back" (or "← " and `MASON_UI_BACK_LABEL`) at the top of the sidebar, above the project, on every page, in the same
+  tab; on the icon rail and the phone's bar the arrow alone, the label its name and tooltip. The URL is a path on the
+  page's host (`/something`) or an `https://` or `http://` URL with no user or password, printable ASCII, at most 2048
+  characters; any other scheme (`javascript:`, `data:`), a `//host`, a backslash, or a path whose dot segments lead to
+  `//`, refuses the start, as do a label with a control or format character, of white space alone, past 64
+  characters, or set without the URL (`src/cli/ui-back-link.ts`). **A path is read from the host's root, never from the
+  path the page is served under**: behind a reverse proxy that serves the page at `https://example.com/mason/`,
+  `MASON_UI_BACK_URL=/app` goes to `https://example.com/app`; name the prefix in the path when the link should stay under it. The
+  page is given the URL as the URL parser serialises it (`/api/state` `pageBack: { url, label }`, `mason status --json`
+  too) and sets it as the link's `href` attribute and the label as its text, never as HTML; the link carries
+  `rel="noreferrer"` beside the page's `Referrer-Policy: no-referrer`, so the page's address never reaches the other
+  site. It works with `MASON_UI_READ_ONLY=1`; unset, nothing changes. `mason start` refuses both.
 - **In the image, Mason's user is uid 1000, gid 1000 (`node`), and stays so**: an image that changes it names it under
   "Before you upgrade" in its release notes (deploy/mason-data/README.md). A supervisor that creates the folder of the
   socket or the run file makes it owned by `1000:1000`, mode 0700, where the container mounts it (the one folder rule of
