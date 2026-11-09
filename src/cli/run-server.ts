@@ -29,7 +29,7 @@ import { readBody, sendJson } from "../lib/http-json.ts";
 import { projectFingerprint } from "../lib/project-files.ts";
 import { guard, newTunnel, SECURITY_HEADERS, type PageTunnel } from "./security.ts";
 import type { BackLink } from "./ui-back-link.ts";
-import { PAGE_READ_ONLY, PAGE_READ_ONLY_WHY, pageWrite } from "./ui-read-only.ts";
+import { PAGE_READ_ONLY_WHY, pageAllows, pageReadOnlyRefusal, pageWrite, type PageArea } from "./ui-read-only.ts";
 import { maskedUrl, type Source, type SourceFacts } from "./preflight.ts";
 import { errorJson, nextJson, type Failure, type NextStep } from "./command.ts";
 import { phaseCounts, readiness, syncTotals, tableSync, type SyncFacts, type SyncTotals } from "./readiness.ts";
@@ -79,6 +79,9 @@ export interface RunContext {
   served?: boolean;
   /** MASON_UI_READ_ONLY=1 (src/cli/ui-read-only.ts): every change the page asks for is refused, and it offers none */
   pageReadOnly?: boolean;
+  /** MASON_UI_READ_ONLY_ALLOW (src/cli/ui-read-only.ts): what a read-only page may still change (`tables`), validated at
+   *  the start; read only under `pageReadOnly` */
+  pageReadOnlyAllow?: readonly PageArea[];
   /** MASON_UI_BACK_URL and MASON_UI_BACK_LABEL (src/cli/ui-back-link.ts): the page's link back to the site that links to
    *  it, validated at the start, or null */
   pageBack?: BackLink | null;
@@ -208,6 +211,8 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     // why the page offers no control that changes anything (MASON_UI_READ_ONLY=1, src/cli/ui-read-only.ts), or null:
     // every change it would send is refused
     pageReadOnly: ctx.pageReadOnly === true ? PAGE_READ_ONLY_WHY : null,
+    // what that page may still change (MASON_UI_READ_ONLY_ALLOW: `tables`), [] when nothing or when it is not read-only
+    pageReadOnlyAllow: ctx.pageReadOnly === true ? [...(ctx.pageReadOnlyAllow ?? [])] : [],
     // the page's link back to the site that links to it (MASON_UI_BACK_URL, src/cli/ui-back-link.ts), or null
     pageBack: ctx.pageBack ?? null,
     // the Unix socket the page is served on too (MASON_UI_SOCKET), or null: mason status says it
@@ -652,10 +657,14 @@ export function createRunServer(ctx: RunContext): http.Server {
       res.writeHead(v.status, { "Content-Type": "text/plain; charset=utf-8" }).end(`${v.reason}\n`);
       return;
     }
-    // A READ-ONLY PAGE (MASON_UI_READ_ONLY=1): every change the page asks for is refused by rule, before any route is
-    // read, so a route added later is refused too; the commands' requests (the run's token) are served as before
-    if (ctx.pageReadOnly === true && pageWrite(req.method, req.headers.authorization)) { sendFailure(res, 403, PAGE_READ_ONLY); return; }
     const url = new URL(req.url ?? "/", `http://127.0.0.1:${ctx.port}`);
+    // A READ-ONLY PAGE (MASON_UI_READ_ONLY=1): every change the page asks for is refused by rule, before any route is
+    // read, so a route added later is refused too — but the exact routes of an area MASON_UI_READ_ONLY_ALLOW names, by
+    // the pathname the routes below read; the commands' requests (the run's token) are served as before
+    if (ctx.pageReadOnly === true && pageWrite(req.method, req.headers.authorization) && !pageAllows(ctx.pageReadOnlyAllow ?? [], req.method, url.pathname)) {
+      sendFailure(res, 403, pageReadOnlyRefusal(ctx.pageReadOnlyAllow ?? []));
+      return;
+    }
     // HEAD IS GET BY RULE, never route by route: routed as a GET, answered with its status and headers, and its body
     // dropped by Node's own response to a HEAD. It passes nothing GET does not: the guard and the read-only rule above
     // have judged it as the HEAD it is, and only GET routes are reached, none of which changes anything.

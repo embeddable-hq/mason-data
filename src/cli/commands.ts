@@ -131,6 +131,9 @@ export interface RunState {
   /** why the page offers no control that changes anything (MASON_UI_READ_ONLY=1, src/cli/ui-read-only.ts), or null:
    *  src/cli/run-server.ts runState; a run from before it has none */
   pageReadOnly?: string | null;
+  /** what that page still allows (MASON_UI_READ_ONLY_ALLOW: `tables`), [] when nothing or not read-only:
+   *  src/cli/run-server.ts runState; a run from before it has none */
+  pageReadOnlyAllow?: string[];
   /** the page's link back to the site that links to it (mason serve with MASON_UI_BACK_URL, src/cli/ui-back-link.ts),
    *  or null: src/cli/run-server.ts runState; a run from before it has none */
   pageBack?: { url: string; label: string } | null;
@@ -438,7 +441,8 @@ const STATUS_USAGE = `usage: mason status [--json]
     mason serve's run: mason ui --ssh opens its page), sourcesReadOnly (why the page offers no Add or Remove — the
     project's files deployed read-only, MASON_PROJECT_READONLY, which mason add and mason remove refuse too, or a
     server's sources file it cannot write — or null), pageReadOnly (why the page changes nothing: mason serve with
-    MASON_UI_READ_ONLY=1, which refuses every change the page sends — or null), pageBack ({ url, label }: the
+    MASON_UI_READ_ONLY=1, which refuses every change the page sends — or null), pageReadOnlyAllow (what that page
+    still changes: [tables] with MASON_UI_READ_ONLY_ALLOW=tables, else []), pageBack ({ url, label }: the
     page's link back to the site that links to it, mason serve with MASON_UI_BACK_URL — or null), pageSocket (the Unix socket the
     page is served on too: mason serve with MASON_UI_SOCKET — or null), next }.
     Each table's kept is how it is kept current now (absent for a table the sync does not hold):
@@ -482,7 +486,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
   json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "generatedTables", "queries", "slowQueries", "refusedQueries",
-    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "pageReadOnly", "pageBack", "pageSocket",
+    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "pageReadOnly", "pageReadOnlyAllow", "pageBack", "pageSocket",
     "roles", "share", "shareEnded", "lastRun", "lastStop", "hung", "next"],
 };
 

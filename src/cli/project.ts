@@ -25,7 +25,7 @@ import { readSource, sourcesTop, writtenDatabase, type ProjectSource } from "./s
 import { UI_SOCKET_SETTING } from "./ui-socket.ts";
 import { UI_RUN_FILE_SETTING } from "./ui-run-file.ts";
 import { backLinkSettingsSet, uiBackLinkSetting } from "./ui-back-link.ts";
-import { UI_READ_ONLY_SETTING, uiReadOnlySetting } from "./ui-read-only.ts";
+import { UI_READ_ONLY_ALLOW_SETTING, UI_READ_ONLY_SETTING, uiReadOnlyAllowSetting, uiReadOnlySetting } from "./ui-read-only.ts";
 
 export const STATE_DIR = ".mason";
 const CONFIG = "config.json";
@@ -361,6 +361,14 @@ export function startSettingRefusal(p: Project, env: NodeJS.ProcessEnv, o: { ser
     return { message: `${UI_READ_ONLY_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",
       fix: `unset ${UI_READ_ONLY_SETTING}: mason start's page is yours alone, on this machine` };
   }
+  // what a read-only page still allows is a server's too; a value that is not an area, or one beside no read-only
+  // page, refuses either start
+  if (!o.serve && env[UI_READ_ONLY_ALLOW_SETTING]) {
+    return { message: `${UI_READ_ONLY_ALLOW_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",
+      fix: `unset ${UI_READ_ONLY_ALLOW_SETTING}: mason start's page is yours alone, on this machine` };
+  }
+  const pageAllow = uiReadOnlyAllowSetting(env);
+  if (!Array.isArray(pageAllow)) return { message: pageAllow.problem, code: "refused", fix: `set ${UI_READ_ONLY_ALLOW_SETTING}=tables beside ${UI_READ_ONLY_SETTING}=1, or unset it` };
   // the page's Unix socket is a server's (src/cli/ui-socket.ts): a laptop's page is opened with mason ui
   if (!o.serve && env[UI_SOCKET_SETTING]) {
     return { message: `${UI_SOCKET_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",

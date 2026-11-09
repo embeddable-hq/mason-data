@@ -57,12 +57,13 @@ function routesOfTheServer(): string[] {
 }
 
 /** A server's run, with every change it could make recorded: the users' file, the sources file told, a poll, a cancel. */
-function runServer(o: { pageReadOnly?: boolean } = {}): { server: http.Server; ctx: RunContext; changes: string[]; root: string } {
+function runServer(o: { pageReadOnly?: boolean; pageReadOnlyAllow?: string[] } = {}): { server: http.Server; ctx: RunContext; changes: string[]; root: string } {
   const root = temp();
   const changes: string[] = [];
   const ctx = {
     source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables: [], systemIdentifier: null }), warnings: [], replication: () => null,
     port: 0, token: TOKEN, page: true, served: true, ...(o.pageReadOnly === undefined ? {} : { pageReadOnly: o.pageReadOnly }),
+    ...(o.pageReadOnlyAllow === undefined ? {} : { pageReadOnlyAllow: o.pageReadOnlyAllow }),
     users: { file: path.join(root, "users.json"), apiKey: KEY, database: "shop", postgresUrl: "postgresql://localhost:5433/shop" },
     folder: () => null, root, home: root, version: "test", startedAt: Date.now(), sources: () => ({ file: null, problem: null }),
     sourcesChanged: () => { changes.push("sources"); }, log: () => undefined,
@@ -76,7 +77,7 @@ function runServer(o: { pageReadOnly?: boolean } = {}): { server: http.Server; c
   return { server: createRunServer(ctx), ctx, changes, root };
 }
 
-async function listening(o: { pageReadOnly?: boolean } = {}): Promise<ReturnType<typeof runServer>> {
+async function listening(o: { pageReadOnly?: boolean; pageReadOnlyAllow?: string[] } = {}): Promise<ReturnType<typeof runServer>> {
   const r = runServer(o);
   await new Promise<void>((resolve) => r.server.listen(0, "127.0.0.1", resolve));
   r.ctx.port = (r.server.address() as { port: number }).port;
@@ -260,4 +261,116 @@ test("MASON_UI_READ_ONLY is mason serve's: 1 or 0, anything else refused on its 
     assert.deepEqual(startSettingRefusal(p, { MASON_UI_READ_ONLY: "on" }, { serve }),
       { message: "MASON_UI_READ_ONLY=\"on\": 1 (the web page only shows, and changes nothing) or 0 (the default)", code: "refused", fix: "set MASON_UI_READ_ONLY=1 or MASON_UI_READ_ONLY=0, or unset it" });
   }
+});
+
+// ------------------------------------------------------------------ MASON_UI_READ_ONLY_ALLOW=tables (issue 789)
+
+const uiReadOnlyAllowSetting = readOnlyModule.uiReadOnlyAllowSetting ?? missing;
+/** The answer to a change outside the tables on a read-only page that still edits its tables. */
+const TABLES_REFUSAL = {
+  code: "refused", message: "the web page is read-only here (MASON_UI_READ_ONLY=1): it shows what Mason syncs, and changes nothing but its tables",
+  why: "Mason was started with MASON_UI_READ_ONLY=1 and MASON_UI_READ_ONLY_ALLOW=tables, so the page refuses every change but adding, removing and syncing tables",
+  fix: "make the change with the mason command where Mason runs, or ask whoever runs it", next: [],
+};
+/** The Tables page's changes: Add, Columns… and Name its key… (pick), Remove, Sync now — and nothing else. */
+const TABLE_ROUTES = new Set(["POST /api/pick", "POST /api/remove", "POST /api/sync"]);
+
+test("read-only with MASON_UI_READ_ONLY_ALLOW=tables: of every method to every path of the server, exactly the Tables page's changes are served; every other is refused 403 saying what is still allowed, and changes nothing", async () => {
+  const { ctx, changes, root } = await listening({ pageReadOnly: true, pageReadOnlyAllow: ["tables"] });
+  const body = JSON.stringify({ name: "grafana", tables: ["public.orders"], table: "public.orders", picked: true, session: 4, port: 50_000, from: "page", confirmed: true });
+  let served = 0;
+  for (const p of routesOfTheServer()) {
+    for (const method of WRITES) {
+      const a = await call({ port: ctx.port, method, path: p, headers: pageHeaders(ctx.port, method), body });
+      if (TABLE_ROUTES.has(`${method} ${p}`)) {
+        served++;
+        assert.notEqual(a.status, 403, `${method} ${p}: ${a.text}`);
+        assert.notDeepEqual(failureOf(a), TABLES_REFUSAL, `${method} ${p}`);
+      } else {
+        assert.equal(a.status, 403, `${method} ${p}`);
+        assert.deepEqual(failureOf(a), TABLES_REFUSAL, `${method} ${p}`);
+      }
+    }
+  }
+  assert.equal(served, 3, "the three routes are among the server's");
+  // the users, a cancel, a share: refused whatever the body, as before
+  for (const [method, p, b] of [["POST", "/api/users", { name: "grafana" }], ["DELETE", "/api/users/metabase", {}], ["POST", "/api/users/metabase/disable", {}],
+    ["POST", "/api/users/metabase/enable", {}], ["POST", "/api/cancel", { session: 4, statement: 9 }], ["POST", "/api/share", {}], ["POST", "/api/ui/tunnel", { port: 50_000 }]] as const) {
+    const a = await call({ port: ctx.port, method, path: p, headers: pageHeaders(ctx.port, method), body: JSON.stringify(b) });
+    assert.equal(a.status, 403, `${method} ${p}`);
+    assert.deepEqual(failureOf(a), TABLES_REFUSAL, `${method} ${p}`);
+  }
+  // EXACTLY the route, as the router reads it: a neighbour of an allowed path, another method on it, a route added later
+  for (const [method, p] of [["POST", "/api/pick/"], ["POST", "/api/pick/x"], ["POST", "//api/pick"], ["POST", "/api/PICK"], ["POST", "/api/%70ick"], ["POST", "/api/sync/x"],
+    ["PUT", "/api/pick"], ["PATCH", "/api/remove"], ["DELETE", "/api/sync"], ["OPTIONS", "/api/sync"], ["POST", "/api/tables/public.orders/columns"], ["POST", "/api/a-route-added-later"]] as const) {
+    const a = await call({ port: ctx.port, method, path: p, headers: pageHeaders(ctx.port, method), body });
+    assert.equal(a.status, 403, `${method} ${p}`);
+    assert.deepEqual(failureOf(a), TABLES_REFUSAL, `${method} ${p}`);
+  }
+  assert.ok(!changes.some((c) => c.startsWith("cancel")), "no cancel");
+  assert.ok(!fs.existsSync(path.join(root, "users.json")), "no user written");
+  // the Sync now the page sent was served
+  assert.ok(changes.includes("sync public.orders"), changes.join(", "));
+  const state = JSON.parse((await call({ port: ctx.port, path: "/api/state", headers: pageHeaders(ctx.port, "GET") })).text) as { pageReadOnly: unknown; pageReadOnlyAllow: unknown };
+  assert.deepEqual([state.pageReadOnly, state.pageReadOnlyAllow], ["the web page is read-only here (MASON_UI_READ_ONLY=1)", ["tables"]]);
+});
+
+test("the state's pageReadOnlyAllow: [tables] on a read-only page that allows them, [] on one that does not, and [] on a page that is not read-only whatever the run was handed", async () => {
+  const cases: Array<[{ pageReadOnly?: boolean; pageReadOnlyAllow?: string[] }, string[]]> = [
+    [{ pageReadOnly: true, pageReadOnlyAllow: ["tables"] }, ["tables"]], [{ pageReadOnly: true }, []], [{ pageReadOnly: true, pageReadOnlyAllow: [] }, []],
+    [{ pageReadOnlyAllow: ["tables"] }, []], [{}, []]];
+  for (const [o, allow] of cases) {
+    const { ctx } = await listening(o);
+    const state = JSON.parse((await call({ port: ctx.port, path: "/api/state", headers: pageHeaders(ctx.port, "GET") })).text) as { pageReadOnlyAllow: unknown };
+    assert.deepEqual(state.pageReadOnlyAllow, allow, JSON.stringify(o));
+  }
+  // read-only with nothing allowed: the refusal is as before, word for word
+  const { ctx } = await listening({ pageReadOnly: true, pageReadOnlyAllow: [] });
+  assert.deepEqual(failureOf(await call({ port: ctx.port, method: "POST", path: "/api/sync", headers: pageHeaders(ctx.port, "POST"), body: JSON.stringify({ tables: ["public.orders"] }) })), REFUSAL);
+});
+
+test("MASON_UI_READ_ONLY_ALLOW is mason serve's: tables beside MASON_UI_READ_ONLY=1, unset or empty nothing; anything else, or set beside no read-only page, refused on its one report; in its --help; mason start refuses it", () => {
+  for (const v of [undefined, ""]) assert.deepEqual(uiReadOnlyAllowSetting({ MASON_UI_READ_ONLY: "1", ...(v === undefined ? {} : { MASON_UI_READ_ONLY_ALLOW: v }) }), [], String(v));
+  assert.deepEqual(uiReadOnlyAllowSetting({ MASON_UI_READ_ONLY: "1", MASON_UI_READ_ONLY_ALLOW: "tables" }), ["tables"]);
+  assert.deepEqual(uiReadOnlyAllowSetting({}), [], "unset beside no read-only page: nothing");
+  const env = { DATABASE_URL: "postgres://mason:secret@db.internal:5432/app", MASON_API_KEY: KEY };
+  assert.ok(!("message" in serveSettings({ ...env, MASON_UI_READ_ONLY: "1", MASON_UI_READ_ONLY_ALLOW: "tables" }, "/srv")));
+  const words = "tables (a read-only page still allows adding, removing and syncing tables), or unset";
+  const wrong: Array<[string, string]> = [
+    ["table", ` — did you mean \`tables\`?`], ["Tables", ` — did you mean \`tables\`?`], [" tables", ` — did you mean \`tables\`?`],
+    ["users", ""], ["tables,users", ` — did you mean \`tables\`?`], ["*", ""], ["1", ""],
+  ];
+  for (const [v, mean] of wrong) {
+    const problem = `MASON_UI_READ_ONLY_ALLOW=${JSON.stringify(v)}: ${words}${mean}`;
+    assert.deepEqual(uiReadOnlyAllowSetting({ MASON_UI_READ_ONLY: "1", MASON_UI_READ_ONLY_ALLOW: v }), { problem }, v);
+    const s = serveSettings({ ...env, MASON_UI_READ_ONLY: "1", MASON_UI_READ_ONLY_ALLOW: v }, "/srv");
+    assert.ok("message" in s, v);
+    assert.equal(s.message, `a setting is missing or wrong: ${problem}`);
+  }
+  // beside no read-only page it is refused: the operator meant a read-only page, and would get a page that changes anything
+  const alone = "MASON_UI_READ_ONLY_ALLOW=tables is set without MASON_UI_READ_ONLY=1: it says what a read-only page still allows, and this page is not read-only (set MASON_UI_READ_ONLY=1, or unset MASON_UI_READ_ONLY_ALLOW)";
+  for (const ro of [undefined, "", "0"]) {
+    const set = { ...(ro === undefined ? {} : { MASON_UI_READ_ONLY: ro }), MASON_UI_READ_ONLY_ALLOW: "tables" };
+    assert.deepEqual(uiReadOnlyAllowSetting(set), { problem: alone }, String(ro));
+    const s = serveSettings({ ...env, ...set }, "/srv");
+    assert.ok("message" in s);
+    assert.equal(s.message, `a setting is missing or wrong: ${alone}`);
+  }
+  // a junk MASON_UI_READ_ONLY is said once, as its own problem
+  const junk = serveSettings({ ...env, MASON_UI_READ_ONLY: "yes", MASON_UI_READ_ONLY_ALLOW: "tables" }, "/srv");
+  assert.ok("message" in junk);
+  assert.equal(junk.message, `a setting is missing or wrong: MASON_UI_READ_ONLY="yes": 1 (the web page only shows, and changes nothing) or 0 (the default)`);
+  assert.match(SERVE.usage, /\n {4}MASON_UI_READ_ONLY_ALLOW {2}tables: a read-only page still adds, removes and syncs tables on its Tables page \(Add,\n/);
+
+  const dir = temp();
+  fs.mkdirSync(path.join(dir, "mason", "sources"), { recursive: true });
+  const p = { root: dir, folder: path.join(dir, "mason"), config: newConfig("shop", "mason", false) } as unknown as Parameters<typeof startSettingRefusal>[0];
+  assert.deepEqual(startSettingRefusal(p, { MASON_UI_READ_ONLY_ALLOW: "tables" }, { serve: false }),
+    { message: "MASON_UI_READ_ONLY_ALLOW is mason serve's setting, and mason start ignores no setting silently", code: "refused", fix: "unset MASON_UI_READ_ONLY_ALLOW: mason start's page is yours alone, on this machine" });
+  assert.equal(startSettingRefusal(p, { MASON_UI_READ_ONLY: "1", MASON_UI_READ_ONLY_ALLOW: "tables" }, { serve: true }), null, "mason serve's run takes it");
+  // the run refuses it too: never read as nothing allowed, nor as a page that is not read-only
+  const fix = "set MASON_UI_READ_ONLY_ALLOW=tables beside MASON_UI_READ_ONLY=1, or unset it";
+  assert.deepEqual(startSettingRefusal(p, { MASON_UI_READ_ONLY: "1", MASON_UI_READ_ONLY_ALLOW: "users" }, { serve: true }),
+    { message: `MASON_UI_READ_ONLY_ALLOW="users": ${words}`, code: "refused", fix });
+  assert.deepEqual(startSettingRefusal(p, { MASON_UI_READ_ONLY_ALLOW: "tables" }, { serve: true }), { message: alone, code: "refused", fix });
 });
