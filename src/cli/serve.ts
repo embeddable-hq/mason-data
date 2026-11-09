@@ -29,7 +29,8 @@
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as path from "node:path";
-import { failed, parseCommand, type CommandSpec, type Failure } from "./command.ts";
+import { failed, jsonText, parseCommand, reportText, type CommandSpec, type Failure, type NextStep } from "./command.ts";
+import { checkProjectSource, problemLine, SOURCE_PROBLEM_CODES } from "./source-check.ts";
 import { DEFAULT_UI_PORT, heldText, portHolder } from "./ports.ts";
 import { pgListenerAddress } from "../api/postgres/listener.ts";
 import { dev } from "./dev.ts";
@@ -56,7 +57,7 @@ import type { CopyState } from "../duck/sync.ts";
 export const SERVE: CommandSpec = {
   name: "serve",
   summary: "run Mason on a server or in a container, in the foreground, configured by the environment",
-  usage: `usage: mason serve [--json]
+  usage: `usage: mason serve [--check] [--json]
 
   Runs Mason as mason start --attach does, for a server or a container: nothing asked, its settings from the
   environment, its state in one folder (a volume), its log on stdout, GET /healthz for the platform's health check,
@@ -67,8 +68,17 @@ export const SERVE: CommandSpec = {
 
     DATABASE_URL=postgres://mason:…@db.internal:5432/app MASON_API_KEY=… mason serve
     docker compose exec mason mason add public.orders     beside it, in its container
+    MASON_PROJECT=/deploys/next mason serve --check      can the database serve these files? (nothing written)
 
-  --json   a refusal to start as data: { error, next }; once it serves, its output is its log
+  --check  check the project against the database, as the start would, and run nothing: every problem at once,
+           each with its fix — a table the sources file names that it lacks or this user cannot read (no SELECT, no
+           USAGE on its schema, row-level security that hides every row), a column or key, the tables under sync:
+           replication (wal_level, the role's REPLICATION, a free slot and WAL sender, the publication the file
+           names carrying each), the roles file — or the connection's own failure. Read-only on the database (SELECTs
+           on its catalogs); nothing is written, and the synced data is never opened, so it runs beside a serve of
+           the same volume (the project's slot in use is that serve's). A hosted service may run it on a deploy's new
+           files before it writes them. Exit 0 the database can serve it; 1 a problem (said), or a setting or file a start refuses
+  --json   as data: its shape is at the end (once it serves, its output is its log)
 
   Settings (the environment):
     DATABASE_URL            the database to sync from, as the sources file's url: \${DATABASE_URL} names it (the variable
@@ -121,10 +131,17 @@ export const SERVE: CommandSpec = {
     UV_THREADPOOL_SIZE      threads for running statements, one each, 1 to 1024 (default 32, lowered to fit a limit
                             on threads; one that does not fit, or is no such number, refuses the start)
 
-  Exit status: 0 stopped by SIGTERM or SIGINT; 1 it could not start (said); 2 a wrong command line.
+  Exit status: 0 stopped by SIGTERM or SIGINT (with --check: the database can serve the project); 1 it could not
+  start (said; with --check: a problem, said); 2 a wrong command line.
+
+  The --json answer: a refusal to start, { error, next }. With --check: { ok, tables, replicated, problems: [],
+    next } when the database can serve the project; else { error, problems: [{ code, table, message, fix, sql }],
+    next }, code one of ${Object.keys(SOURCE_PROBLEM_CODES).slice(0, 4).join(", ")},
+    ${Object.keys(SOURCE_PROBLEM_CODES).slice(4).join(", ")}; table (schema.table) and sql (what the database's
+    owner runs; Mason never does) null where none
 `,
-  options: { json: { type: "boolean", default: false } },
-  json: ["next"],
+  options: { check: { type: "boolean", default: false }, json: { type: "boolean", default: false } },
+  json: ["ok", "tables", "replicated", "problems", "next"],
 };
 
 /** What a serve is told by its environment. */
@@ -433,6 +450,7 @@ export async function serve(argv: string[]): Promise<number> {
   const existing = readProject(s.data);
   const unsaid = serveRecordRefusal(s, existing, process.env);
   if (unsaid !== null) return failed("serve", unsaid, { json });
+  if (f.values.check === true) return serveCheck(s, process.env, json);
   // the project folder: its sources file is the list of what is copied, one with no table written when there is none
   const made = serveSource(s, process.env);
   if ("message" in made) return failed("serve", made, { json });
@@ -539,4 +557,36 @@ export async function serve(argv: string[]): Promise<number> {
   if (code !== 0) return failed("serve", { message: "Mason did not start: what stopped it is said above", code: "failed",
     fix: "fix what it says, then start it again (a platform restarts it by itself)" }, { json: false });
   return 0;
+}
+
+/**
+ * `mason serve --check` (issue 779): the project folder's files against the database, as the start would hold them, and
+ * nothing run — every problem on ONE answer, each with its fix (src/cli/source-check.ts). Nothing is written: no config,
+ * no sources file (a folder with none is refused, never filled in), and the synced data is never opened, so it runs
+ * beside a serve of the same volume. A hosted service may run it on a deploy's new files before it writes them.
+ */
+export async function serveCheck(s: ServeSettings, env: NodeJS.ProcessEnv, json: boolean): Promise<number> {
+  const src = readSource(s.project, s.data, env, { shellFirst: true });
+  if ("message" in src) return failed("serve", src, { json });
+  let checked;
+  try { checked = await checkProjectSource(src, { name: s.name, folder: s.project, root: s.project, env }); }
+  catch (e) {
+    return failed("serve", { message: `the check could not finish: ${(e as Error).message}`, code: "failed",
+      fix: "check again; a check that cannot finish never says the database can serve the project", next: [["mason serve --check", "checks again"]] }, { json });
+  }
+  const { problems, tables, replicated } = checked;
+  if (problems.length === 0) {
+    const next: NextStep[] = [["mason serve", "runs the project"]];
+    if (json) { process.stdout.write(`${jsonText(SERVE, { ok: true, tables, replicated, problems: [] }, next)}\n`); return 0; }
+    say(reportText({ headline: "The database can serve this project; nothing was written", details: [["tables", String(tables)], ["replication", `${replicated} of them`]], next }));
+    return 0;
+  }
+  const f: Failure = {
+    message: `the database cannot serve this project as its files say: ${problems.length === 1 ? "1 problem" : `${problems.length} problems`}`, code: "refused",
+    why: problems.map((p) => `- ${problemLine(p)}`).join("\n"),
+    fix: "fix each as said — a statement is run by the database's owner, never by Mason — then check again; nothing was written or changed",
+    next: [["mason serve --check", "checks again"]],
+  };
+  // under --json the failure's shape, with the problems beside it as data
+  return failed("serve", f, { json, beside: { problems } });
 }

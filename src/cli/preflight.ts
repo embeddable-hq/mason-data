@@ -209,6 +209,9 @@ export interface SourceTable {
   /** what identifies a changed row to logical replication (pg_class.relreplident): `d` its primary key, `f` the whole
    *  row, `i` an index, `n` NOTHING — a table that cannot be under `sync: replication` (src/cli/sources.ts entryProblems) */
   replicaIdentity?: "d" | "n" | "f" | "i";
+  /** row-level security hides every row of it from this user (TABLES_SQL): the user's name. A SELECT answers no row
+   *  and no error, so it is never synced (src/cli/sources.ts entryProblems) */
+  rowSecurityHidesFrom?: string;
 }
 export interface UniqueKey {
   /** the index's name, as pg_indexes lists it */
@@ -309,6 +312,14 @@ export const TABLES_SQL = `SELECT json_agg(t ORDER BY t.schema, t.table)::text F
       THEN (SELECT coalesce(sum(pg_total_relation_size(pt.relid)), 0) FROM pg_partition_tree(c.oid) pt WHERE pt.isleaf)
       ELSE pg_total_relation_size(c.oid) END AS bytes,
     obj_description(c.oid, 'pg_class') AS comment,
+    -- ROW-LEVEL SECURITY THAT HIDES EVERY ROW FROM THIS USER (issue 779): on, applied to it (not the owner, or FORCE; not
+    -- a superuser or BYPASSRLS), and no permissive SELECT policy for PUBLIC or a role it has: a SELECT answers no row and
+    -- no error, so a sync would be an empty table. The user it hides them from, else null
+    CASE WHEN c.relrowsecurity AND (c.relforcerowsecurity OR NOT pg_has_role(c.relowner, 'USAGE'))
+      AND NOT EXISTS (SELECT FROM pg_roles r WHERE r.rolname = current_user AND (r.rolsuper OR r.rolbypassrls))
+      AND NOT EXISTS (SELECT FROM pg_policy p WHERE p.polrelid = c.oid AND p.polpermissive AND p.polcmd IN ('r', '*')
+        AND (0 = ANY (p.polroles) OR EXISTS (SELECT FROM unnest(p.polroles) pr(oid) WHERE pr.oid <> 0 AND pg_has_role(pr.oid, 'USAGE'))))
+      THEN current_user END AS row_security_hides_from,
     -- the primary key: only a valid index enforces it
     (SELECT coalesce(json_agg(a.attname ORDER BY k.n), '[]'::json)
       FROM pg_index i CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, n)
@@ -349,11 +360,13 @@ export const TABLES_SQL = `SELECT json_agg(t ORDER BY t.schema, t.table)::text F
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition
     AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%'
-    AND has_table_privilege(c.oid, 'SELECT')
+    -- readable: SELECT on the table AND USAGE on its schema, without which the SELECT is refused (issue 779)
+    AND has_table_privilege(c.oid, 'SELECT') AND has_schema_privilege(n.oid, 'USAGE')
 ) t`;
 
 interface TableRow {
   schema: string; table: string; oid: number; row_type_oid: number | string; replica_identity: string; reltuples: number; unanalysed: boolean; bytes: number; comment: string | null; key: string[];
+  row_security_hides_from: string | null;
   unique_keys: Array<{ name: string; constraint: boolean; nulls_not_distinct: boolean; columns: string[] }>;
   columns: Array<{ name: string; type: string; domain: boolean; type_kind: string; not_null: boolean; comment: string | null; type_oid: number | string; type_array_oid: number | string;
     default: string | null; identity: string; generated: string; sequence: string | null; collation: { schema: string; name: string } | null }>;
@@ -400,6 +413,7 @@ export async function readSourceFacts(pg: PgConnection, counted: Map<number, num
       uniqueKeys: t.unique_keys.map((u) => ({ name: u.name, columns: u.columns, constraint: u.constraint, nullsNotDistinct: u.nulls_not_distinct })),
       ...(Number(t.row_type_oid) > 0 ? { rowTypeOid: Number(t.row_type_oid) } : {}),
       ...(t.replica_identity === "d" || t.replica_identity === "n" || t.replica_identity === "f" || t.replica_identity === "i" ? { replicaIdentity: t.replica_identity } : {}),
+      ...(typeof t.row_security_hides_from === "string" ? { rowSecurityHidesFrom: t.row_security_hides_from } : {}),
     });
   }
   // the columns differ by version (datlocprovider from 15, daticulocale 15–16, datlocale from 17): read the row whole

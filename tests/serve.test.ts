@@ -674,3 +674,39 @@ test("a serve stopped by a signal records how, in words: SIGTERM is mason stop o
     }
   } finally { await source.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("mason serve --check: the database that cannot serve the project said as problems, text and --json, exit 1, nothing written; a folder with no sources file refused, never filled in", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-serve-check-"));
+  const port = await unassignedPort();
+  const env = { PATH: process.env.PATH ?? "", HOME: dir, DATABASE_URL: `postgres://mason:hunter2-secret@127.0.0.1:${port}/app`, MASON_API_KEY: KEY,
+    MASON_DATA: path.join(dir, "data"), MASON_PROJECT: path.join(dir, "project") };
+  fs.mkdirSync(env.MASON_DATA);
+  const run = (...args: string[]) => spawnSync(process.execPath, [MAIN, "serve", "--check", ...args], { cwd: dir, env, encoding: "utf8" });
+  // no sources file: a serve would write one; a check writes nothing
+  const bare = run("--json");
+  assert.equal(bare.status, 1, bare.stdout + bare.stderr);
+  assert.equal(JSON.parse(bare.stdout).error.code, "bad_source");
+  assert.equal(fs.existsSync(env.MASON_PROJECT), false, "no sources file written");
+  fs.mkdirSync(path.join(env.MASON_PROJECT, "sources"), { recursive: true });
+  fs.writeFileSync(path.join(env.MASON_PROJECT, "sources", "app.yml"), "kind: postgres\nurl: ${DATABASE_URL}\nsync: replication\ntables:\n  orders: {}\n");
+  const j = run("--json");
+  assert.equal(j.status, 1, j.stdout + j.stderr);
+  const answer = JSON.parse(j.stdout) as { error: { code: string; message: string }; problems: Array<Record<string, unknown>>; next: Array<{ command: string }> };
+  assert.deepEqual(Object.keys(answer), ["error", "problems", "next"]);
+  assert.equal(answer.error.code, "refused");
+  assert.equal(answer.error.message, "the database cannot serve this project as its files say: 1 problem");
+  assert.deepEqual(answer.problems.map((p) => [p.code, p.table, p.sql]), [["unreachable", null, null]]);
+  assert.equal(answer.problems[0]!.message, `could not connect to postgres://mason:****@127.0.0.1:${port}/app: nothing is listening on 127.0.0.1:${port}`);
+  assert.deepEqual(answer.next.map((n) => n.command), ["mason serve --check"]);
+  const text = run();
+  assert.equal(text.status, 1);
+  assert.match(text.stderr, /mason serve: the database cannot serve this project as its files say: 1 problem\n {2}why {3}- could not connect to postgres:\/\/mason:\*{4}@127\.0\.0\.1:\d+\/app: nothing is listening/);
+  for (const o of [j.stdout, j.stderr, text.stdout, text.stderr]) assert.doesNotMatch(o, /hunter2/);
+  assert.deepEqual(fs.readdirSync(env.MASON_DATA), [], "no state written: no config, no synced data opened");
+  assert.deepEqual(fs.readdirSync(path.join(env.MASON_PROJECT, "sources")), ["app.yml"]);
+  // the settings are held as a serve holds them, on their one report
+  const unset = spawnSync(process.execPath, [MAIN, "serve", "--check", "--json"], { cwd: dir, env: { ...env, MASON_API_KEY: "" }, encoding: "utf8" });
+  assert.equal(unset.status, 1);
+  assert.equal(JSON.parse(unset.stdout).error.code, "bad_config");
+});
