@@ -76,9 +76,11 @@ export function heldProject(v: unknown): ReplicaProject | null | undefined {
  * THE TABLES A SERVICE'S `unconfirmed_removal` REFUSAL SAYS THE DEPLOY REMOVES (docs/HOSTED-API.md "What the deploy
  * changes"): its `removes`, held — `undefined` when it says none (an older service); `"unknown"` when it says it could
  * not tell; the list, each `{ table, rows, bytes }` once, when it names them; null when it does not hold (an empty
- * list, past a bound, a size that is no count, or a name that is not printable as it came: one line, within
- * `MAX_TABLE_NAME`, nothing `serviceText` would replace, nothing it would mask: no secret or its shape). A name is sent back as confirmed exactly as it came,
- * so it must be exactly what a person was shown.
+ * list, past a bound, a size that is no count, or a name that is not printable as it came: one line within
+ * `MAX_TABLE_NAME`, nothing `serviceText`'s `oneLine` would replace). Each name is also put, alone, to the exact test
+ * (`carriesSecret`: `ECHO_RUN` of a held token's body in a row in that name, or a token's or a password's shape); the
+ * quarter-of-a-token accounting across what is printed is the output's gate's (src/cli/output-gate.ts), not this.
+ * A name is sent back as confirmed exactly as it came, so it must be exactly what a person was shown.
  */
 export function heldRemoves(v: unknown, secrets: readonly string[]): TableSize[] | "unknown" | null | undefined {
   if (v === undefined) return undefined;

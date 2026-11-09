@@ -64,6 +64,11 @@ mason ui --ssh deploy@mason.example.com --mason "docker exec -i mason-mason-1 ma
 with real SSH and a container on one machine, not yet with this compose file on a real server:
 [`docs/WEB-UI.md`](../../docs/WEB-UI.md#on-a-server) says what has been.
 
+A process on this machine that lists the tables and adds or removes them for a project (a supervisor, a service that
+hosts Mason) reaches the run over `MASON_UI_SOCKET` with the token from `MASON_UI_RUN_FILE`, and asks the run to make
+the edit, as `mason add` does:
+[`docs/WEB-UI.md`](../../docs/WEB-UI.md#an-operators-table-edits) has the routes, their answers and their refusals.
+
 ## Metrics
 
 `GET /metrics` on the health port (4140, beside `/healthz`) is Mason's numbers in Prometheus's text format: tables by
@@ -178,6 +183,8 @@ Per-table or per-user detail (which table is stale, who sent what) would need a 
 | `MASON_UI_SOCKET` | unset | a process on the host (a supervisor, a local reverse proxy) should reach the page without a published port: Mason serves it on this Unix socket too, mode 0600, in a folder only its user can write, behind the same guard as `mason ui --ssh` ("The web page") |
 | `MASON_UI_RUN_FILE` | unset | a process on the host supervises Mason and opens a tunnel to the page: once Mason answers it writes `{ "port", "token" }` to this file, and nothing else; the token grants what the token grants (the `mason` commands' writes as well as a tunnel), so the file is written whole, mode 0600, in a folder only its user can write, never over a file that is not a stale one of its own, and removed on exit ("The web page"); `/healthz` says `page: { socket, readOnly }` from the start |
 | `MASON_UI_READ_ONLY` | `0` | the page is shown to someone who should only look: `1` makes it offer no control that changes anything, and refuses every change it is sent (through `mason ui --ssh` or the socket alike); the `mason` commands beside the server are unchanged; anything but `0` or `1` refuses the start ("The web page") |
+| `MASON_UI_BACK_URL` | unset | the page is opened from another application (a portal, a hosted service's console): the top of its sidebar links back to this address, in the same tab, sending no referrer. A path on the page's host (`/something`, read from the host's root, whatever path a reverse proxy serves the page under) or an `https://` or `http://` URL, with no user or password, printable ASCII, at most 2048 characters; any other scheme (`javascript:`, `data:`), a `//host` or a backslash refuses the start ("The web page") |
+| `MASON_UI_BACK_LABEL` | `Back` | the link back should name where it goes: plain text on one line, shown as text, at most 64 characters; set without `MASON_UI_BACK_URL`, a control character or white space alone refuses the start |
 | `MASON_PG_DATABASE` | `mason` | the sources file has no `database:` and a tool must keep the database name it has (a different `database:` in the file is refused) |
 | `MASON_DUCKDB_MEMORY` | half the container's memory limit, or what leaves 2.5 GiB beside it when that is less, never under 128 MiB; under 3 GiB, unset, a start warns that the system may stop it | the container's limit is not what the copy should have half of, or you choose its share under 3 GiB yourself ("Memory") |
 | `MASON_SPILL_LIMIT` | half of what is free on the disk, followed as it fills | statements fail with 53400 on a disk with room to give them (never past 90% of what is free) |

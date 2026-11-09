@@ -16,6 +16,9 @@
      beside it. Below 1000 px the sidebar is an icon rail; below 640 px a top bar whose menu button opens the nav as a sheet -->
 <aside id="sidebar" class="sidebar">
   <div class="side-head">
+    <!-- the link back to the site that links to this page (mason serve's MASON_UI_BACK_URL): hidden until the state names
+         it, its href, title and label set by the script as an attribute and as text (src/web/app.js setBack), never as HTML -->
+    <a id="back" class="back" rel="noreferrer" hidden><span class="back-arrow" aria-hidden="true">←</span><span id="back-label" class="back-label"></span></a>
     <button type="button" id="menu-button" class="menu-button" data-menu aria-controls="side-body" aria-expanded="false"><span id="menu-icon"></span><span class="sr">Menu</span></button>
     <h1 class="brand"><span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor" focusable="false"><path d="M3 3h8.25v5H3zM12.75 3H21v5h-8.25zM3 9.5h3.5L8 14.5H3zM8 9.5h8l-1.5 5h-5zM17.5 9.5H21v5h-5zM3 16h6v5H3zM15 16h6v5h-6z"/></svg></span><span class="brand-name">Mason</span></h1>
     <div class="project"><p id="where" class="where"></p><span id="badge"></span></div>

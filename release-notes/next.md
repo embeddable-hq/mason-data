@@ -2,6 +2,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **`mason serve`'s web page can link back to the site that links to it**: set `MASON_UI_BACK_URL` to a path on the
+  page's host (`/something`) or an `https://` or `http://` URL, and the top of its sidebar shows "← Back" on every
+  page, in the same tab; `MASON_UI_BACK_LABEL` names it. Any other scheme, a URL with a user or password, or a control
+  character refuses the start. Unset, nothing changes. `mason start` refuses both.
+
 - **`mason deploy` shows what it changes on the replica, and asks before it removes a synced table**: the tables it
   adds (each a first sync) and removes, with their sizes where the service says them, the tables whose columns, key or
   `sync:` change, the generated tables and roles changed, and the pin — before it sends, and in `--dry-run` when signed
@@ -24,3 +29,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A table the user cannot read is now refused at the start, by name**: one whose schema it lacks `USAGE` on (the
   first sync failed on it before), and one whose row-level security has no policy for it (it was synced empty, without
   a word). The way out is said: the grant, a policy, or removing the entry.
+- **A process beside `mason serve` can rely on the table list and on adding and removing tables.** `GET /api/state`
+  (its `tables`), `GET /api/tables/<table>/columns`, `POST /api/pick` and `POST /api/remove`, reached over
+  `MASON_UI_SOCKET` with the token from `MASON_UI_RUN_FILE`, are now a documented contract: their bodies, answers and
+  refusals keep their shape within a release line (docs/WEB-UI.md "An operator's table edits"). `MASON_UI_READ_ONLY=1`
+  refuses the page's edits, never a request with the run's token. Nothing about them changed.

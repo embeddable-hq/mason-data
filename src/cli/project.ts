@@ -24,6 +24,7 @@ import { changesRetired, pollMsRetired } from "../lib/table-sync.ts";
 import { readSource, sourcesTop, writtenDatabase, type ProjectSource } from "./sources.ts";
 import { UI_SOCKET_SETTING } from "./ui-socket.ts";
 import { UI_RUN_FILE_SETTING } from "./ui-run-file.ts";
+import { backLinkSettingsSet, uiBackLinkSetting } from "./ui-back-link.ts";
 import { UI_READ_ONLY_SETTING, uiReadOnlySetting } from "./ui-read-only.ts";
 
 export const STATE_DIR = ".mason";
@@ -370,5 +371,13 @@ export function startSettingRefusal(p: Project, env: NodeJS.ProcessEnv, o: { ser
     return { message: `${UI_RUN_FILE_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",
       fix: `unset ${UI_RUN_FILE_SETTING}: mason ui opens this run's page, and the mason commands reach the run by themselves` };
   }
+  // the link back to the site that links to the page is a server's (src/cli/ui-back-link.ts): mason start's page has none
+  const back = backLinkSettingsSet(env);
+  if (!o.serve && back.length > 0) {
+    return { message: `${back.join(" and ")} ${back.length === 1 ? "is mason serve's setting" : "are mason serve's settings"}, and mason start ignores no setting silently`, code: "refused",
+      fix: `unset ${back.join(" and ")}: mason start's page is yours alone, opened with mason ui` };
+  }
+  const backLink = uiBackLinkSetting(env);
+  if (backLink !== null && "problem" in backLink) return { message: backLink.problem, code: "refused", fix: "set it as mason serve --help says, or unset it" };
   return null;
 }
