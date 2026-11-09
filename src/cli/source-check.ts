@@ -13,7 +13,7 @@
  * counts, nothing made, altered or dropped.
  */
 import type { PgConnection } from "../cdc/pg-wire.ts";
-import { connectSource, maskedUrl, parseSource, readSourceFacts, versionProblem, type SourceFacts } from "./preflight.ts";
+import { connectSource, maskedUrl, parseSource, readSourceFacts, versionProblem, type SourceFacts, type SourceTable } from "./preflight.ts";
 import { addedTables, copiedColumns, entryProblems, effectiveSync, replicatedEntries, shownPath, type ProjectSource, type SourceFile } from "./sources.ts";
 import { namedPublication, projectReplication, readinessVerdict } from "./replication-mode.ts";
 import { readServerFacts, readSlotFacts, type ProductionCheck, type ServerFacts } from "./replication-checks.ts";
@@ -50,12 +50,13 @@ export function tableCheck(src: SourceFile, facts: Pick<SourceFacts, "tables">, 
   const problems: SourceProblem[] = [];
   const ok = [];
   // every table the database has under sync: replication, with the columns its entry syncs, whatever else is wrong with
-  // it: what a named publication must carry, so its gaps are on the same answer
+  // it: what a named publication must carry, so its gaps are on the same answer — but never one that cannot be
+  // replicated (`unreplicable`), which no statement this check prints may name
   const streamed: AddedTable[] = [];
   for (const e of src.tables) {
     const t = facts.tables.find((x) => x.source === e.table);
     const sync = effectiveSync(src, e).sync;
-    if (t !== undefined && sync.mode === "replication") {
+    if (t !== undefined && sync.mode === "replication" && !unreplicable(t)) {
       const keep = new Set(copiedColumns(t, e));
       streamed.push({ ...t, columns: t.columns.filter((c) => keep.has(c.name)), foreignKeys: [], sync });
     }
@@ -72,6 +73,13 @@ export function tableCheck(src: SourceFile, facts: Pick<SourceFacts, "tables">, 
   if (!Array.isArray(added)) throw new Error(`the tables that passed were refused: ${added.message}`);
   return { problems, added, streamed };
 }
+
+/**
+ * A TABLE LOGICAL REPLICATION CANNOT CARRY (entryProblems refuses it under sync: replication): no primary key (with or
+ * without a `key:`), or REPLICA IDENTITY NOTHING. A publication carrying it makes the application's own UPDATEs and
+ * DELETEs on it fail ("does not have a replica identity and publishes updates"), so no publication statement may name it.
+ */
+export const unreplicable = (t: Pick<SourceTable, "key" | "replicaIdentity">): boolean => t.key.length === 0 || t.replicaIdentity === "n";
 
 /** What refuses logical replication, a problem each (pure): `readinessVerdict`'s refusals, in its words. */
 export function replicationProblems(refused: readonly ProductionCheck[], shown: string): SourceProblem[] {

@@ -76,8 +76,8 @@ export const SERVE: CommandSpec = {
            replication (wal_level, the role's REPLICATION, a free slot and WAL sender, the publication the file
            names carrying each), the roles file — or the connection's own failure. Read-only on the database (SELECTs
            on its catalogs); nothing is written, and the synced data is never opened, so it runs beside a serve of
-           the same volume (the project's slot in use is that serve's). A deploy runs it on the new files before it
-           changes anything. Exit 0 the database can serve it; 1 a problem (said), or a setting or file a start refuses
+           the same volume (the project's slot in use is that serve's). A hosted service may run it on a deploy's new
+           files before it writes them. Exit 0 the database can serve it; 1 a problem (said), or a setting or file a start refuses
   --json   as data: its shape is at the end (once it serves, its output is its log)
 
   Settings (the environment):
@@ -563,7 +563,7 @@ export async function serve(argv: string[]): Promise<number> {
  * `mason serve --check` (issue 779): the project folder's files against the database, as the start would hold them, and
  * nothing run — every problem on ONE answer, each with its fix (src/cli/source-check.ts). Nothing is written: no config,
  * no sources file (a folder with none is refused, never filled in), and the synced data is never opened, so it runs
- * beside a serve of the same volume. A deploy runs it on the new files before it changes anything.
+ * beside a serve of the same volume. A hosted service may run it on a deploy's new files before it writes them.
  */
 export async function serveCheck(s: ServeSettings, env: NodeJS.ProcessEnv, json: boolean): Promise<number> {
   const src = readSource(s.project, s.data, env, { shellFirst: true });

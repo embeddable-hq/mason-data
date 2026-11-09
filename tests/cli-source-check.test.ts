@@ -122,3 +122,24 @@ test("a database that cannot be reached is one problem, the connection's own wor
   assert.deepEqual([r.tables, r.replicated], [1, 0]);
   assert.doesNotMatch(JSON.stringify(r), /hunter2/);
 });
+
+test("a table replication cannot carry (no primary key, a key: or not; REPLICA IDENTITY NOTHING) gets its table problem alone: no publication statement names it, the publication there or not", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-check-"));
+  const facts = { tables: [table("public.orders"), table("public.nokey", { key: [], uniqueKeys: [{ name: "nokey_id", columns: ["id"], constraint: true, nullsNotDistinct: false }] }),
+    table("public.keyless", { key: [] }), table("public.ident_nothing", { replicaIdentity: "n" })] };
+  const src = fileOf("kind: postgres\nurl: ${DATABASE_URL}\nsync: replication\npublication: pub1\ntables:\n  orders: {}\n  nokey:\n    key: [id]\n  keyless: {}\n  ident_nothing: {}\n", root);
+  const r = check.tableCheck(src, facts, "shop", root);
+  assert.deepEqual(r.problems.map((p) => p.table), ["public.nokey", "public.keyless", "public.ident_nothing"], "each has its table problem");
+  assert.deepEqual(r.streamed.map((t) => t.source), ["public.orders"], "only what replication can carry is held to the publication");
+  const unreplicable = /nokey|keyless|ident_nothing/;
+  const identities = new Map(r.streamed.map((t) => [t.source, t.replicaIdentity ?? "d"]));
+  const catalog = [{ t: "public.orders", columns: ["id", "status"], in_publication: false, published: null, row_filter: null }];
+  // pub1 there, carrying nothing; pub1 missing: CREATE PUBLICATION … FOR TABLE names the tables held to it alone
+  for (const publication of [{ all_tables: false, publish: ["insert", "update", "delete"] }, null]) {
+    const v = namedPublicationVerdict(describedOf({ version: 160000, publication, others: [], tables: catalog }, "pub1"), r.streamed, identities);
+    const said = check.publicationProblems(v, "pub1", "sources/app.yml");
+    assert.equal(said.length, 1);
+    assert.match(said[0]!.sql ?? "", publication === null ? /^CREATE PUBLICATION pub1 FOR TABLE public\.orders \(id, status\)/ : /^ALTER PUBLICATION pub1 ADD TABLE public\.orders \(id, status\);$/);
+    for (const p of said) for (const text of [p.sql ?? "", p.fix, p.message]) assert.doesNotMatch(text, unreplicable);
+  }
+});

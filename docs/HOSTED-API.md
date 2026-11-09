@@ -622,9 +622,10 @@ deploy.
 ### What the database must serve
 
 The CLI never holds the database's URL (the replica's environment does), so what the files ask of the database can
-only be checked on the replica. A deploy the database cannot serve is refused there **before anything changes**: no
-file written, no sync started, no table dropped, the replica left running what it ran before. Its status is `refused`
-(below), and its failure's `message` names every problem at once, each with its fix, as `mason start` would say it:
+only be checked on the replica. Mason's image gives a service the check to do it with, below: run before the deploy's
+files are written, its refusal changes nothing — no file written, no sync started, no table dropped, the replica left
+running what it ran before — and a service that runs it marks the deploy `refused` (below) with its words, which name
+every problem at once, each with its fix, as `mason start` would say it:
 
 - a table the sources file names that the database lacks, or that the replica's user cannot read: no `SELECT`, no
   `USAGE` on its schema, or row-level security with no policy for that user (every row hidden);

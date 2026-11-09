@@ -70,7 +70,7 @@ test("mason serve --check names every problem the database has with the project,
   const said = first.answer.problems.map((p) => [p.code, p.table]);
   assert.deepEqual(said, [
     ["table", "public.nokey"], ["table", "public.vault"], ["missing_table", "hidden.t"], ["missing_table", "public.missing_one"],
-    ["replication", null], ["publication", "public.items"], ["publication", "public.nokey"], ["publication", "public.vault"]], first.out);
+    ["replication", null], ["publication", "public.items"], ["publication", "public.vault"]], first.out);
   const by = (code: string, t: string | null) => first.answer.problems.find((p) => p.code === code && p.table === t)!;
   assert.match(by("table", "public.vault").message, new RegExp(`row-level security on public\\.vault hides every row from ${role}`));
   assert.match(by("replication", null).message, new RegExp(`^replication role: ${role} may not open a replication connection`));
@@ -83,6 +83,27 @@ test("mason serve --check names every problem the database has with the project,
   const missingPub = check();
   assert.deepEqual(missingPub.answer.problems.map((p) => [p.code, p.table]), [["replication", null], ["publication", null]]);
   assert.match(missingPub.answer.problems[1]!.message, /no publication named no_such_pub\. Publications on this database: app_pub\./);
+
+  // a table replication cannot carry gets its table problem alone: following the check's own statements never breaks
+  // the application's UPDATEs and DELETEs (no primary key, a key: or not; REPLICA IDENTITY NOTHING), the publication
+  // there or not
+  psql(db, `CREATE TABLE ident_nothing (id int PRIMARY KEY); ALTER TABLE ident_nothing REPLICA IDENTITY NOTHING;
+    CREATE TABLE keyed (a int NOT NULL UNIQUE, b text); GRANT SELECT ON ident_nothing, keyed TO "${role}"`);
+  for (const pub of ["app_pub", "no_such_pub"]) {
+    write("  orders: {}\n  nokey: {}\n  keyed:\n    key: [a]\n  ident_nothing: {}\n  items: {}\n", pub);
+    const r = check();
+    assert.deepEqual(r.answer.problems.filter((p) => p.code === "table").map((p) => p.table), ["public.nokey", "public.keyed", "public.ident_nothing"], r.out);
+    const statements = r.answer.problems.filter((p) => p.code === "publication");
+    assert.equal(statements.length, 1, r.out);
+    for (const p of statements) for (const text of [p.sql ?? "", p.fix, p.message]) assert.doesNotMatch(text, /nokey|keyed|ident_nothing/, r.out);
+    // the check's own statement, run as said: the application's writes on every table still go through
+    if (pub === "app_pub") {
+      psql(db, statements[0]!.sql!);
+      psql(db, "INSERT INTO ident_nothing VALUES (1); UPDATE ident_nothing SET id = 2; DELETE FROM ident_nothing; INSERT INTO nokey VALUES (1, 'x'); DELETE FROM nokey; " +
+        "INSERT INTO keyed VALUES (1, 'x'); UPDATE keyed SET b = 'y'; DELETE FROM keyed");
+      psql(db, "ALTER PUBLICATION app_pub DROP TABLE items");
+    }
+  }
 
   // each fixed on the database, as the fixes say: the same project passes
   psql(db, `ALTER ROLE "${role}" REPLICATION; ALTER PUBLICATION app_pub ADD TABLE items, vault, hidden.t;
