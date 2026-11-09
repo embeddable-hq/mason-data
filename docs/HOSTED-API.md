@@ -22,7 +22,8 @@ the contract: a change to it is a change to both sides.
 - A form body is `application/x-www-form-urlencoded`; a JSON body (`mason deploy`'s) is `application/json`, UTF-8.
 - A redirect is never followed: it is a failure, so a Bearer header never travels to another address.
 - Each request has a 15 s time limit (60 s for a replica's creation, which waits on Mason's checks of the database). An
-  answer larger than 64 KiB is refused (1 MiB for a list: of a replica's users, of replicas, of CI tokens).
+  answer larger than 64 KiB is refused (1 MiB for a list: of a replica's users, of replicas, of CI tokens; 8 MiB for
+  the project a replica runs, which `mason deploy` asks for).
 - What comes back is untrusted. Each answer is held to the shape below. Anything else is a failure said by its status
   alone, never its body. A token is masked wherever it appears, and so is anything shaped as a Mason user's password
   (`mason_<16 hex>_<32 hex>`, whatever precedes it and in any case), except in the one answer that makes it (`mason
@@ -519,8 +520,10 @@ The project is checked on this machine by Mason's own readers, as `mason start` 
 `mason.yml` pin, the sources file, the roles file against the tables the sources file names, and the generated
 tables (a refused one is said, and does not stop the deploy, as it does not stop a start).
 
-**The replica's Mason.** Once signed in, and when the project has a pin, the CLI asks `GET /v1/replicas/{org}/{name}`.
-When the answer is `200` and carries `Replica`'s `mason`, a project the replica would not run is refused before
+**What the replica runs.** Once signed in, the CLI asks `GET /v1/replicas/{org}/{name}?project=1` (below, "What the
+deploy changes"), once, before anything is sent.
+
+**The replica's Mason.** When the project has a pin and the answer is `200` and carries `Replica`'s `mason`, a project the replica would not run is refused before
 anything is sent: its pin must fit `mason.version` or `mason.next`, by the image's own rule (the same release line, at
 that version or later than the pin). The refusal (code `refused`, exit 1) names the pin and both versions, and the ways
 out: write the project for the replica's Mason (`npx @mason-data/cli@<version>` is its mason command), or `mason
@@ -528,8 +531,8 @@ replica upgrade <org>/<name>` when `mason.latest` would run it. Everything else 
 before, the check left to the replica, whose image refuses such a project itself: a `200` without `mason` (a service
 that does not say it), a `200` this CLI cannot read (outside `Replica` as it knows it: a `pending` change it does not
 know, a `mason` it does not take, another replica's name, not JSON), any other status, and no answer. One exception: a
-`200` that carries the token or the shape of one, in any value or in the service's words, is refused whole (code
-`failed`, exit 1, nothing sent), as every answer is. `mason replica status` and `mason replica upgrade` hold the same
+`200` that carries the token or the shape of one, in any value (a file of the replica's project included) or in the
+service's words, is refused whole (code `failed`, exit 1, nothing sent), as every answer is. `mason replica status` and `mason replica upgrade` hold the same
 answer strictly: there an answer outside the contract is refused. A project with no `mason.yml` is not checked, as the
 image runs it. No database is connected
 to. A project a start would refuse is refused here, in the CLI's failure shape, and nothing is sent. A sources file
@@ -549,7 +552,63 @@ every `.yml` and `.yaml` under the folder (`mason/`), outside any folder or file
   SHA-256 of those bytes, as 64 lower-case hex digits.
 - At most 256 KiB (262,144 bytes) a file, 1 MiB (1,048,576 bytes) all the files' bytes together, and 500 files. The
   CLI refuses past any of them, naming the file or the sizes.
-- `mason deploy --dry-run` prints each path, its size and its sha256, and sends nothing (it needs no login).
+- `mason deploy --dry-run` prints each path, its size and its sha256, and sends nothing (it needs no login for
+  that; signed in, it also asks what the replica runs, and prints what the deploy changes there).
+
+### What the deploy changes
+
+Before it sends, the CLI shows what the deploy changes on the replica, worked out against what the replica runs now:
+the tables it adds (each a first sync, with its size where the service says it), the tables it removes (their synced
+data dropped), the tables whose columns, key or `sync:` change, the generated tables and roles it adds, removes or
+changes, the default role, and the pin. `mason deploy --dry-run` prints it too, when a replica is named and the
+machine is signed in; `--json` carries it as `plan` (`null`, with `planUnknown` saying why, when it cannot be shown).
+
+**The question.** The service says what the replica runs in the answer to `GET /v1/replicas/{org}/{name}?project=1`:
+beside `replica`, an optional `project`.
+
+```json
+{ "replica": { … }, "project": {
+  "files": [{ "path": "sources/app.yml", "sha256": "2aab…", "content": "kind: postgres\n…" }],
+  "tables": [{ "table": "public.orders", "rows": 1200000, "bytes": 734003200 }] } }
+```
+
+| Key | Held to |
+|---|---|
+| `files` | the project the replica runs now, whichever way it got there (a deploy, or the service's own web app), as a deploy sends files: each `path` in the deploy's grammar and once, `sha256` the SHA-256 of `content`'s UTF-8 bytes (checked), within the deploy's bounds (256 KiB a file, 1 MiB in all, 500 files). A replica that runs no project yet answers `[]` |
+| `tables` | at most 10,000 sizes, each `{ table, rows, bytes }`: `table` as the sources file names it in full (`schema.table`, at most 300 characters); `rows` and `bytes` whole numbers of 0 or more, or `null` where not known. For a table the replica syncs, its synced data's; the service may add others of the source's tables (an estimate, as `mason tables` gives one), so a deploy that adds one can say its size. A table missing from the list is said as "size not known" |
+
+- The `?project=1` query asks for `project`; without it (`mason replica status`) the answer is as before. Older
+  services ignore the query.
+- `project` absent or `null`: the service does not say (an older one, or one that cannot ask the replica just now).
+  The CLI then says the plan cannot be shown, and why, and the deploy goes on as before. It never guesses a plan.
+- A `project` outside the shape above (a path outside the grammar, a `sha256` that is not its content's, past a
+  bound, a size that is no count), or a file of it Mason's readers cannot read: the same, the plan unknown, said with
+  why.
+- Every string of it is put to the exact test first, as every answer's is; one that carries the token is refused
+  whole, nothing sent. Every name the CLI prints from it is one line, bounded and masked, as every value of a
+  service's is.
+
+**Removing a synced table is confirmed.** A removed table's synced data is dropped, and syncing it again is a new
+first sync, reading every row from the source, so a deploy whose plan removes one or more tables of what the replica runs now is confirmed
+before it is sent. The CLI names each table with its size (or "size not known"):
+
+- at a terminal, it asks for the replica's name (`<org>/<name>`) to be typed back exactly; anything else sends
+  nothing (code `refused`, exit 1);
+- without a terminal, and with `--json`, it is refused (code `refused`, exit 1, nothing sent), naming the tables and
+  their sizes, its way out `mason deploy --replica <org>/<name> --yes`;
+- `--yes` goes ahead without asking.
+
+Adding a table is never asked about: it costs a first sync, not synced data. A deploy that removes no table goes ahead
+without asking. When the plan cannot be shown, nothing is asked: the replica's own check below is the guard.
+
+**The replica refuses a removal not confirmed.** So that an older CLI, or a direct call to this API, cannot skip the
+question, the deploy carries the tables whose removal was confirmed (`confirmed.removed`, below), and Mason on the
+replica checks the files against what it runs: a deploy whose sources file leaves out a table the replica syncs now,
+and whose `confirmed.removed` does not name it, is `refused` (the replica runs what it ran before), with the failure
+code `unconfirmed_removal`; its `message` names each such table and its size. The CLI prints its words as they came
+(code `refused`, exit 1) and gives its own way out: run `mason deploy --replica <org>/<name>` again, which shows the
+plan and asks (or `--yes`). This also catches a plan gone stale: the replica's tables changed between the question
+and the deploy.
 
 ### `POST /v1/replicas/{org}/{name}/deploys`
 
@@ -562,6 +621,10 @@ every `.yml` and `.yaml` under the folder (`mason/`), outside any folder or file
 - `files` is the whole project, sorted by `path`, each path once. The replica's project becomes exactly these files: a
   file the replica had and the list lacks is removed. A deploy never merges.
 - `client.version` is the CLI's version (`dev` from a checkout).
+- `confirmed` is optional, `{ "removed": ["billing.invoices", "public.items"] }`: the tables (`schema.table`, as the
+  plan named them) whose removal a person confirmed, or `--yes` did. The CLI sends it only when its plan removes a
+  table. The replica refuses a deploy that removes a table this list lacks ("What the deploy changes", above); a
+  service that does not know the key ignores it.
 - The service checks the bounds above, each `sha256` against its `content`, and the path grammar: past a bound is
   `413 too_large`, a `sha256` or a path that does not hold `422 invalid` (the table below). It may refuse a body over
   8 MiB with `413` before reading it.
@@ -633,7 +696,7 @@ When no answer comes back to the POST, whether the deploy was made is not known:
 | `applying` | Mason on the replica checks the files and takes them | waits |
 | `starting` | Mason on the replica starts on the new files, until it serves | waits |
 | `running` | the replica runs these files: Mason there serves from them | exit 0 |
-| `refused` | Mason on the replica refused the files (a sources file naming a table the database lacks, a pin of another release line): `failure` is Mason's own failure. The replica runs what it ran before | prints `failure`'s words as they came, code `refused`, exit 1 |
+| `refused` | Mason on the replica refused the files (a sources file naming a table the database lacks, a pin of another release line, a table removed whose removal was not confirmed: `unconfirmed_removal`): `failure` is Mason's own failure. The replica runs what it ran before | prints `failure`'s words as they came, code `refused`, exit 1 (for `unconfirmed_removal`, its way out the CLI's own: deploy again, to be asked) |
 | `failed` | the deploy could not finish for a reason that is not the files' (the machine, the service): `failure` says what happened and what the replica runs now | prints `failure`'s words as they came, code `failed`, exit 1 |
 
 | `phase` | With `status` | The CLI says |
