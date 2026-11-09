@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 import { readBody, sendJson } from "../lib/http-json.ts";
 import { projectFingerprint } from "../lib/project-files.ts";
 import { guard, newTunnel, SECURITY_HEADERS, type PageTunnel } from "./security.ts";
+import type { BackLink } from "./ui-back-link.ts";
 import { PAGE_READ_ONLY, PAGE_READ_ONLY_WHY, pageWrite } from "./ui-read-only.ts";
 import { maskedUrl, type Source, type SourceFacts } from "./preflight.ts";
 import { errorJson, nextJson, type Failure, type NextStep } from "./command.ts";
@@ -78,6 +79,9 @@ export interface RunContext {
   served?: boolean;
   /** MASON_UI_READ_ONLY=1 (src/cli/ui-read-only.ts): every change the page asks for is refused, and it offers none */
   pageReadOnly?: boolean;
+  /** MASON_UI_BACK_URL and MASON_UI_BACK_LABEL (src/cli/ui-back-link.ts): the page's link back to the site that links to
+   *  it, validated at the start, or null */
+  pageBack?: BackLink | null;
   /** MASON_UI_SOCKET (src/cli/ui-socket.ts): the Unix socket the page is served on too, or null */
   pageSocket?: string | null;
   /** the project's database is the demo database this run hosts (`mason init demo`, src/cli/demo.ts): mason status says so */
@@ -204,6 +208,8 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     // why the page offers no control that changes anything (MASON_UI_READ_ONLY=1, src/cli/ui-read-only.ts), or null:
     // every change it would send is refused
     pageReadOnly: ctx.pageReadOnly === true ? PAGE_READ_ONLY_WHY : null,
+    // the page's link back to the site that links to it (MASON_UI_BACK_URL, src/cli/ui-back-link.ts), or null
+    pageBack: ctx.pageBack ?? null,
     // the Unix socket the page is served on too (MASON_UI_SOCKET), or null: mason status says it
     pageSocket: ctx.pageSocket ?? null,
     source: { url: maskedUrl(ctx.source.url), host: ctx.source.host, database: ctx.source.database, remote: ctx.source.remote, demo: ctx.demo === true,

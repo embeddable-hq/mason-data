@@ -745,6 +745,97 @@ test("the state says pageReadOnly: why under MASON_UI_READ_ONLY=1 as the run rea
   assert.ok(commands.STATUS.json!.includes("pageReadOnly"), "mason status --json declares it");
 });
 
+// ------------------------------------------------------------------ the link back to the site that links to the page (MASON_UI_BACK_URL, issue 786)
+
+/** An element as `setBack` uses it: its attributes, its text, whether it is hidden, and every innerHTML written (none may be). */
+function backEl() {
+  const attrs = new Map<string, string>();
+  const el = { attrs, hidden: true, textContent: "", htmlWrites: 0,
+    setAttribute(k: string, v: string) { attrs.set(k, String(v)); }, removeAttribute(k: string) { attrs.delete(k); },
+    set innerHTML(_v: string) { el.htmlWrites++; }, get innerHTML() { return ""; } };
+  return el;
+}
+
+test("the state says pageBack: the link the run was started with, null without; mason status --json declares it", () => {
+  const ctxOf = (pageBack?: { url: string; label: string } | null) => ({
+    source, facts: () => ({ version: 160000, versionText: "16.4", standby: false, tables: TABLES, systemIdentifier: null }), warnings: [], replication: () => null,
+    page: true, served: true, ...(pageBack === undefined ? {} : { pageBack }), users: { file: "/app/.mason/users.json", apiKey: "k".repeat(32), database: "shop", postgresUrl: "postgresql://127.0.0.1:5433/shop" },
+    folder: () => "/app/mason", root: "/app", home: "/app/.mason", version: "0.9.0", startedAt: Date.parse("2026-10-27T09:00:00.000Z"),
+    sources: () => ({ file: sourceFile, problem: null }), listener: { openSessions: () => ({ open: 0, byClient: [] }) },
+    duck: { file: "/app/.mason/duck.db", requests: { days: 7 }, restarts: () => [], disk: () => ({ path: "/app/.mason", freeBytes: null, projectedBytes: null }) },
+  }) as unknown as RunContext;
+  const now = Date.parse("2026-10-27T10:00:00.000Z");
+  const back = { url: "https://portal.example.com/apps", label: "Portal" };
+  const on = runState(ctxOf(back), [], null, now) as RunState & { pageBack?: unknown };
+  assert.deepEqual(on.pageBack, back);
+  assert.equal((runState(ctxOf(), [], null, now) as RunState & { pageBack?: unknown }).pageBack, null);
+  assert.equal((runState(ctxOf(null), [], null, now) as RunState & { pageBack?: unknown }).pageBack, null);
+  assert.ok(commands.STATUS.json!.includes("pageBack"), "mason status --json declares it");
+  assert.match(commands.STATUS.usage, /pageBack \(\{ url, label \}/);
+});
+
+test("setBack: the URL an href attribute, the label the element's TEXT (never HTML), no referrer; none: hidden with no href", () => {
+  const setBack = fn<[unknown, unknown, unknown], void>("setBack");
+  const link = backEl(), label = backEl();
+  setBack(link, label, { url: "/apps/portal", label: "Portal" });
+  assert.deepEqual([link.hidden, link.attrs.get("href"), link.attrs.get("rel"), link.attrs.get("title"), label.textContent], [false, "/apps/portal", "noreferrer", "Portal", "Portal"]);
+  // an operator's label that looks like markup is text: set as it is, never parsed, no element's HTML written
+  const markup = `<img src=x onerror="alert(1)"> & "Portal"`;
+  setBack(link, label, { url: "https://portal.example.com/", label: markup });
+  assert.equal(label.textContent, markup);
+  assert.equal(link.attrs.get("title"), markup);
+  assert.equal(link.attrs.get("href"), "https://portal.example.com/");
+  assert.equal(link.htmlWrites + label.htmlWrites, 0, "no innerHTML written");
+  // none (unset, a state that cannot say, a run from before it): hidden, with no href to follow
+  for (const none of [null, undefined, {}, { url: 1, label: "x" }, { url: "/x" }]) {
+    setBack(link, label, { url: "/x", label: "X" });
+    setBack(link, label, none);
+    assert.deepEqual([link.hidden, link.attrs.has("href"), link.attrs.has("title"), label.textContent], [true, false, false, ""], JSON.stringify(none));
+  }
+  setBack(null, null, { url: "/x", label: "X" });
+});
+
+test("the sidebar's link back: in index.html at the top of the sidebar, above the mark and the project, hidden and with no href until the state names one; styled for the rail and the phone", () => {
+  const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
+  const head = html.split('<div class="side-head">')[1]!.split('<div id="side-body"')[0]!;
+  const tags = [...head.matchAll(/<(a|button|h1|div)\b[^>]*>/g)].map((m) => m[0]);
+  assert.equal(tags[0], '<a id="back" class="back" rel="noreferrer" hidden>', "the first of the sidebar's head, no href before the script sets it");
+  assert.ok(head.indexOf('id="back"') < head.indexOf('class="brand"') && head.indexOf('class="brand"') < head.indexOf('class="project"'));
+  assert.match(head, /<span class="back-arrow" aria-hidden="true">←<\/span><span id="back-label" class="back-label"><\/span><\/a>/);
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
+  assert.match(css, /\.back\[hidden\] \{ display: none; \}/, "hidden stays hidden, whatever display .back sets");
+  assert.match(css, /\.brand-name, \.where, \.back-label \{ position: absolute;/, "the icon rail: the arrow alone, the label its name");
+});
+
+test("in the browser: the state's pageBack is the sidebar's link on every page, read-only too; without it, nothing is shown", async () => {
+  const back = { url: "/apps/portal", label: "<b>Portal</b>" };
+  for (const state of [{ ...CATALOG_STATE, pageBack: back }, { ...CATALOG_STATE, pageBack: back, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" }]) {
+    const run = fakeRun();
+    run.answers.set("GET api/state", () => new Response(JSON.stringify(state), { status: 200 }));
+    const { el, go, settle } = fakeBrowser(run);
+    await settle();
+    for (const hash of ["#overview", "#tables", "#users", "#observability/queries", "#observability/usage", "#observability/syncs"]) {
+      go(hash); await settle();
+      const link = el("back") as unknown as { hidden: boolean; attrs: Map<string, string>; html: string };
+      const label = el("back-label") as unknown as { textContent: string; html: string };
+      assert.deepEqual([link.hidden, link.attrs.get("href"), link.attrs.get("rel"), label.textContent], [false, "/apps/portal", "noreferrer", "<b>Portal</b>"], hash);
+      assert.equal(link.html + label.html, "", `${hash}: written as an attribute and a text, never as HTML`);
+    }
+  }
+  const run = fakeRun();
+  run.answers.set("GET api/state", () => new Response(JSON.stringify({ ...CATALOG_STATE, pageBack: null }), { status: 200 }));
+  const { el, settle } = fakeBrowser(run);
+  await settle();
+  const link = el("back") as unknown as { hidden?: boolean; attrs: Map<string, string> };
+  assert.notEqual(link.hidden, false, "unset: the link stays hidden");
+  assert.equal(link.attrs.has("href"), false);
+  // a state from before it (no pageBack) shows none either
+  const old = fakeRun();
+  const { el: oldEl, settle: oldSettle } = fakeBrowser(old);
+  await oldSettle();
+  assert.notEqual((oldEl("back") as unknown as { hidden?: boolean }).hidden, false);
+});
+
 test("a server's Connect says the URL's host is the server's own view of itself; a laptop's page says nothing of it", async () => {
   const renderConnect = fn<[unknown, unknown?], string>("renderConnect");
   const { renderUsersConnect } = await import(path.join(WEB, "pages", "users.js") as string) as { renderUsersConnect: (pg: unknown, served?: boolean) => string };

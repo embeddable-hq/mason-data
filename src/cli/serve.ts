@@ -45,6 +45,7 @@ import { listenOnUiSocket, prepareUiSocket, uiSocketSetting, type UiSocket } fro
 import { prepareUiRunFile, uiRunFileSetting, UI_RUN_FILE_SETTING, writeUiRunFile, type UiRunFile } from "./ui-run-file.ts";
 import { recordRefusal } from "./replication-mode.ts";
 import { UI_READ_ONLY_SETTING, uiReadOnlySetting } from "./ui-read-only.ts";
+import { BACK_LABEL_MAX, BACK_URL_MAX, uiBackLinkSetting } from "./ui-back-link.ts";
 import { changesRetiredText, pollMsRetiredText, type SourcesTop } from "../lib/table-sync.ts";
 import { historyDaysSetting, historyDaysWrongText } from "../duck/history.ts";
 import { DEFAULT_MEMORY_RULE, memoryProblems, memoryProblemText, memorySize, MEMORY_FLOOR_BYTES } from "../duck/store.ts";
@@ -112,6 +113,12 @@ export const SERVE: CommandSpec = {
     MASON_UI_READ_ONLY      1 when the web page should only show: it offers no control that changes anything, and
                             refuses every change it is sent, through mason ui --ssh or the socket alike; the mason
                             commands beside it are unchanged (default 0)
+    MASON_UI_BACK_URL       a link back to the site that links to the web page, at the top of its sidebar, in the same
+                            tab: a path on the page's host (/something, from the host's root, whatever path the page
+                            is served under) or an https:// or http:// URL, with no user or password, printable ASCII,
+                            at most ${BACK_URL_MAX} characters; any other scheme is refused (default unset: no link)
+    MASON_UI_BACK_LABEL     the link's label, plain text on one line, at most ${BACK_LABEL_MAX} characters; set alone it is
+                            refused (default Back)
     MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
@@ -218,6 +225,9 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   // the read-only page (src/cli/ui-read-only.ts): 1 or 0, anything else refused here, never read as off
   const pageReadOnly = uiReadOnlySetting(env);
   if (typeof pageReadOnly !== "boolean") wrong.push(pageReadOnly.problem);
+  // the link back to the site that links to the page (src/cli/ui-back-link.ts): a path or an http(s) URL, else refused here
+  const backLink = uiBackLinkSetting(env);
+  if (backLink !== null && "problem" in backLink) wrong.push(backLink.problem);
   if (env.MASON_UI_HOST) wrong.push("MASON_UI_HOST is set, and the web page has no address but 127.0.0.1: remove it (mason ui --ssh <user@server> opens the page from your machine)");
   if (wrong.length) {
     return { message: `${wrong.length === 1 ? "a setting is" : `${wrong.length} settings are`} missing or wrong: ${wrong.join("; ")}`, code: "bad_config",
@@ -517,6 +527,8 @@ export async function serve(argv: string[]): Promise<number> {
   for (const l of socketSaid) say(`  ${l}`);
   if (s.ui.runFile !== null) say(`  run file  ${s.ui.runFile}: written once Mason answers (mode 0600; it holds the run's token)`);
   if (page !== null) say(`  web page  ${page.file} (a Unix socket, mode 0600: a request on it passes the same guard as mason ui --ssh's)`);
+  const backLink = uiBackLinkSetting(process.env);
+  if (backLink !== null && !("problem" in backLink)) say(`  web page  a link back at the top of its sidebar, ${JSON.stringify(backLink.label)} (MASON_UI_BACK_URL)`);
   if (uiReadOnlySetting(process.env) === true) say(`  web page  read-only (${UI_READ_ONLY_SETTING}=1): it refuses every change it is sent; the mason commands beside it are unchanged`);
   // the run reads the project of the folder it runs in (src/cli/project.ts): the data folder's
   process.chdir(s.data);

@@ -2,6 +2,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **`mason serve`'s web page can link back to the site that links to it**: set `MASON_UI_BACK_URL` to a path on the
+  page's host (`/something`) or an `https://` or `http://` URL, and the top of its sidebar shows "← Back" on every
+  page, in the same tab; `MASON_UI_BACK_LABEL` names it. Any other scheme, a URL with a user or password, or a control
+  character refuses the start. Unset, nothing changes. `mason start` refuses both.
+
 - **`mason deploy` shows what it changes on the replica, and asks before it removes a synced table**: the tables it
   adds (each a first sync) and removes, with their sizes where the service says them, the tables whose columns, key or
   `sync:` change, the generated tables and roles changed, and the pin — before it sends, and in `--dry-run` when signed

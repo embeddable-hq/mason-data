@@ -165,6 +165,31 @@ export function renderSubnav(shown, range = DEFAULT_RANGE, keptDays = undefined,
     : `<span class="as-of">${asOf ? `<span class="dim" title="read once when chosen; Now follows what happens">as of ${esc(asOf.toISOString().slice(11, 19))} UTC</span> ` : ""}<button type="button" class="small" data-refresh-range>Refresh</button></span>`);
 }
 
+/**
+ * THE LINK BACK TO THE SITE THAT LINKS TO THE PAGE (`/api/state` `pageBack`: mason serve's MASON_UI_BACK_URL and
+ * MASON_UI_BACK_LABEL, validated by the run at its start, src/cli/ui-back-link.ts), at the top of the sidebar: "← label",
+ * in the same tab. Set THROUGH THE DOM — the URL an `href` attribute, the label an element's text — never as HTML, so
+ * an operator's text is never markup; `rel="noreferrer"` beside the page's own no-referrer policy, so the page's address
+ * never reaches the other site. Hidden, with no href, when the state names none (unset: nothing changes).
+ */
+export function setBack(link, label, back) {
+  if (!link || !label) return;
+  const shown = back !== null && typeof back === "object" && typeof back.url === "string" && typeof back.label === "string";
+  if (!shown) {
+    link.hidden = true;
+    link.removeAttribute("href");
+    link.removeAttribute("title");
+    label.textContent = "";
+    return;
+  }
+  link.setAttribute("href", back.url);
+  link.setAttribute("rel", "noreferrer");
+  // the label is the link's name; on the icon rail and the phone's bar, where only the arrow shows, its tooltip too
+  link.setAttribute("title", back.label);
+  label.textContent = back.label;
+  link.hidden = false;
+}
+
 /** The heading's line: the database the run copies, and its sources file's name when that is another. */
 function renderWhere(s) {
   return `${esc(s.source.database)}${s.source.name && s.source.name !== s.source.database ? ` · source ${esc(s.source.name)}` : ""}`;
@@ -235,6 +260,8 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
       m.pollFailure = own?.failure ?? null;
       afterRead();
     },
+    /** The link back the state names (`pageBack`), or null: set on the sidebar by `setBack`, never written as HTML. */
+    back() { return store.get("api/state")?.body?.pageBack ?? null; },
     view() {
       const st = store.get("api/state")?.body;
       return {
@@ -281,6 +308,8 @@ export function start(doc, win) {
   // between its press and its release, and the click would be lost. At most PRESS_HOLD_MS: a press whose release the
   // page never sees (released outside the window, a gesture the browser took over) froze every part for good
   let pressedAt = null;
+  // the link back as last set (`setBack`): JSON of `pageBack`, undefined before the first paint
+  let backWritten;
   // the shown page's charts, drawn after each write (src/web/charts.js); a document that cannot hold one draws none
   const charts = typeof doc.querySelectorAll === "function" && typeof win.getComputedStyle === "function" ? createCharts({ doc, win }) : null;
   const paint = () => {
@@ -301,6 +330,10 @@ export function start(doc, win) {
       }
       el.innerHTML = html;
     }
+    // the link back, when the state names one: an attribute and a text, set only when it changed
+    const back = app.back();
+    const backKey = JSON.stringify(back);
+    if (backKey !== backWritten) { backWritten = backKey; setBack(doc.getElementById("back"), doc.getElementById("back-label"), back); }
     if (charts !== null) void charts.mount(app.pages.get(app.model.shown).charts?.() ?? {});
     place();
   };
