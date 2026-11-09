@@ -11,7 +11,7 @@
  */
 import { createHash } from "node:crypto";
 import { MAX_FILE_BYTES, MAX_FILES, MAX_TOTAL_BYTES, PATH_SEGMENT } from "./deploy.ts";
-import { serviceText } from "./hosted.ts";
+import { carriesSecret, oneLine, serviceText } from "./hosted.ts";
 import { effectiveSync, parseSourceText } from "./sources.ts";
 import { parseRolesText, ROLES_FILE } from "./roles.ts";
 import { GENERATED_DIR } from "./generated-files.ts";
@@ -25,6 +25,10 @@ export const MAX_SIZED_TABLES = 10_000;
 /** The longest table name an answer may carry. */
 export const MAX_TABLE_NAME = 300;
 
+/** How large a deploy's state may be: a refusal's `removes` at its documented largest (`MAX_SIZED_TABLES` entries, each
+ *  name `MAX_TABLE_NAME` UTF-16 units written as `\uXXXX` escapes, 6 bytes each, and 128 bytes for its keys, counts and
+ *  spacing), and 64 KiB for the rest (a failure's words, each escaped), in whole KiB. From the bounds, so the two never drift apart. */
+export const MAX_DEPLOY_ANSWER = Math.ceil((MAX_SIZED_TABLES * (MAX_TABLE_NAME * 6 + 128) + 64 * 1024) / 1024) * 1024;
 /** A table's size, as the replica counts it: null where it does not know. */
 export interface TableSize { table: string; rows: number | null; bytes: number | null }
 /** The project a replica runs now, as the service says it: its files (as a deploy sends them) and its tables' sizes. */
@@ -73,7 +77,7 @@ export function heldProject(v: unknown): ReplicaProject | null | undefined {
  * changes"): its `removes`, held — `undefined` when it says none (an older service); `"unknown"` when it says it could
  * not tell; the list, each `{ table, rows, bytes }` once, when it names them; null when it does not hold (an empty
  * list, past a bound, a size that is no count, or a name that is not printable as it came: one line, within
- * `MAX_TABLE_NAME`, nothing `serviceText` would mask or replace). A name is sent back as confirmed exactly as it came,
+ * `MAX_TABLE_NAME`, nothing `serviceText` would replace, nothing it would mask: no secret or its shape). A name is sent back as confirmed exactly as it came,
  * so it must be exactly what a person was shown.
  */
 export function heldRemoves(v: unknown, secrets: readonly string[]): TableSize[] | "unknown" | null | undefined {
@@ -83,7 +87,8 @@ export function heldRemoves(v: unknown, secrets: readonly string[]): TableSize[]
   const out: TableSize[] = [], seen = new Set<string>();
   for (const t of v) {
     if (!obj(t) || typeof t.table !== "string" || t.table === "" || t.table.length > MAX_TABLE_NAME || seen.has(t.table) || !count(t.rows) || !count(t.bytes)) return null;
-    if (serviceText(t.table, MAX_TABLE_NAME, secrets) !== t.table) return null;
+    // (pure tests: `serviceText` would record what it prints, and a name is tested here, not printed yet)
+    if (oneLine(t.table) !== t.table || carriesSecret(t.table, secrets)) return null;
     seen.add(t.table);
     out.push({ table: t.table, rows: typeof t.rows === "number" ? t.rows : null, bytes: typeof t.bytes === "number" ? t.bytes : null });
   }
@@ -198,8 +203,14 @@ export function sizeText(t: TableSize): string {
   return parts.length ? parts.join(", ") : "size not known";
 }
 
-/** Tables removed, each with its size, in a line. */
-export const removedText = (removed: readonly TableSize[]): string => removed.map((t) => `${t.table} (${sizeText(t)})`).join(", ");
+/** How many removed tables a line names, the rest counted: a person reads a list, never thousands of names. */
+const NAMED_IN_A_LINE = 50;
+/** Tables removed, each with its size, in a line: the first `NAMED_IN_A_LINE`, then how many more (--json names each). */
+export const removedText = (removed: readonly TableSize[]): string => {
+  const named = removed.slice(0, NAMED_IN_A_LINE).map((t) => `${t.table} (${sizeText(t)})`).join(", ");
+  const more = removed.length - NAMED_IN_A_LINE;
+  return more > 0 ? `${named}, and ${more.toLocaleString("en-US")} more` : named;
+};
 
 /** What a re-sync of a removed table costs, in the CLI's words (said in the plan, the question and the refusal). */
 export const RESYNC = "its synced data is dropped, and syncing it again is a new first sync, reading every row from the source";

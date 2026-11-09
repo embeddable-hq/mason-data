@@ -136,20 +136,26 @@ export function serviceText(s: string, max: number, secrets: readonly string[] =
   let t = maskSecrets(s, secrets, shown);
   // the value as masked, read as the exact test reads it (with and without its escapes), before a line is made of it
   if (echoesSecret(t, secrets)) return "****";
-  // C0 (newline, return and tab with it), DEL and C1 (NEL with it); the zero-width and directional marks; the line and
-  // paragraph separators; the bidi embeddings, overrides and isolates; the byte-order mark
-  t = t.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, "?");
-  // and a lone surrogate, which is no character: --json would write it as an escape (`\udc00`), whose letters and
-  // digits a reader reads (PR 645's review, round 2)
-  t = t.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "?");
-  // and no run of spaces: a value padded to a terminal's width aligns nothing, and leaves no gap to break at a column of
-  // its choosing (src/cli/command.ts breaks every line that holds it: serviceStyle)
-  t = t.replace(/\s+/g, " ").trim();
+  t = oneLine(t);
   const chars = [...t];
   const line = chars.length > max ? `${chars.slice(0, max).join("")}…` : t;
   // and what is printed is what is tested (PR 645's review): the line as it leaves, put to the exact test too — its
   // changes replace a character by a separator or cut the end, which join nothing, so this holds what they keep so
   return echoesSecret(line, secrets) ? "****" : line;
+}
+
+/** `t` AS ONE LINE, as `serviceText` prints a value (pure: no secret read, nothing recorded): every character that would
+ *  break or reorder a line replaced by `?`, and no run of spaces. A value equal to its `oneLine` prints as it is. */
+export function oneLine(s: string): string {
+  // C0 (newline, return and tab with it), DEL and C1 (NEL with it); the zero-width and directional marks; the line and
+  // paragraph separators; the bidi embeddings, overrides and isolates; the byte-order mark
+  let t = s.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, "?");
+  // and a lone surrogate, which is no character: --json would write it as an escape (`\udc00`), whose letters and
+  // digits a reader reads (PR 645's review, round 2)
+  t = t.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "?");
+  // and no run of spaces: a value padded to a terminal's width aligns nothing, and leaves no gap to break at a column of
+  // its choosing (src/cli/command.ts breaks every line that holds it: serviceStyle)
+  return t.replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -523,7 +529,11 @@ export async function call(service: Service, method: "GET" | "POST" | "DELETE", 
   }
   const max = o.maxBytes ?? MAX_BODY_BYTES;
   const text = await boundedText(res, max);
-  if (text === null) return { message: `${service.base} answered ${what} with more than ${max / 1024} KiB`, code: "failed", why: "no documented answer is that large" };
+  if (text === null || text === TOO_LARGE_TEXT) {
+    const f: Failure = { message: `${service.base} answered ${what} with more than ${max / 1024} KiB`, code: "failed", why: "no documented answer is that large" };
+    if (text === TOO_LARGE_TEXT) TOO_LARGE.add(f);
+    return f;
+  }
   let json: unknown;
   if (/^application\/(?:[\w.+-]+\+)?json\b/i.test(res.headers.get("content-type") ?? "")) {
     try { json = JSON.parse(text); } catch { json = undefined; }
@@ -541,8 +551,14 @@ function reachError(e: unknown, ms: number): string {
   return cause?.message ?? err.message ?? String(e);
 }
 
-/** The body as text, or null past `max` bytes (the rest is not read). */
-async function boundedText(res: Response, max: number): Promise<string | null> {
+/** The failures of `call` that are an answer past its bound, which came whole up to it: an answer, never a wait (a body
+ *  cut off midway is no answer, and a caller may wait on it). */
+const TOO_LARGE = new WeakSet<Failure>();
+const TOO_LARGE_TEXT = Symbol("too large");
+export const tooLarge = (f: Failure): boolean => TOO_LARGE.has(f);
+
+/** The body as text; null when it was cut off midway; `TOO_LARGE_TEXT` past `max` bytes (the rest is not read). */
+async function boundedText(res: Response, max: number): Promise<string | null | typeof TOO_LARGE_TEXT> {
   if (!res.body) return "";
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -553,7 +569,7 @@ async function boundedText(res: Response, max: number): Promise<string | null> {
     catch { return null; }   // a body cut off midway is no answer: said as one the caller cannot read
     if (r.done) break;
     size += r.value.byteLength;
-    if (size > max) { await reader.cancel(); return null; }
+    if (size > max) { await reader.cancel(); return TOO_LARGE_TEXT; }
     chunks.push(r.value);
   }
   return Buffer.concat(chunks).toString("utf8");

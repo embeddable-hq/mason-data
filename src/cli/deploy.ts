@@ -74,10 +74,10 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { errorJson, exitOf, failed, jsonText, parseCommand, reportText, serviceStyle, strict, withEnd, type CommandSpec, type Failure, type NextStep } from "./command.ts";
-import { call, carriesNoSecret, carriesSecret, failureShape, isFailure, isServiceTime, serviceFailure, serviceNext, serviceOf, serviceText, unexpected, type Answer } from "./hosted.ts";
+import { call, tooLarge, carriesNoSecret, carriesSecret, failureShape, isFailure, isServiceTime, serviceFailure, serviceNext, serviceOf, serviceText, unexpected, type Answer } from "./hosted.ts";
 import { replicaOf, replicaText, REPLICA_ENV, tokenFor, type Replica } from "./replica.ts";
 import { canAsk, pinRefusal, replicaAnswer, typedBack, wordless } from "./replica-hosted.ts";
-import { heldProject, heldRemoves, planOf, planRows, removedText, RESYNC, type Plan, type TableSize } from "./deploy-plan.ts";
+import { heldProject, heldRemoves, MAX_DEPLOY_ANSWER, planOf, planRows, removedText, RESYNC, type Plan, type TableSize } from "./deploy-plan.ts";
 import { holdOutput } from "./output-gate.ts";
 import { maskedUrl } from "./preflight.ts";
 import { folderPlace, theProject, type Project } from "./project.ts";
@@ -750,9 +750,9 @@ export async function deploy(argv: string[]): Promise<number> {
       // the refused deploy's step ends here, as an outcome's does; then what it removes, and the question or --yes
       if (terminal) steps.fail(stateLine(state));
       else if (!json && stateLine(state) !== said) say(`  ${stateLine(state)}`);
-      const what = any ? `it could not tell which tables ${name} syncs the deploy removes` : `it removes ${removedText(removes)}, whose removal was not confirmed`;
+      const what = any ? `it could not tell which tables ${name} syncs the deploy removes` : `not every table the deploy removes was confirmed; it removes ${removedText(removes)}`;
       if (yes) {
-        if (!json) say(`The service did not take deploy ${id}: ${what}; --yes ${any ? "accepts any removal" : "confirms it"}: sending the deploy again`);
+        if (!json) say(`The service did not take deploy ${id}: ${what}; --yes ${any ? "accepts any removal" : "confirms them"}: sending the deploy again`);
       } else {
         say(`The service did not take deploy ${id}: ${what}.`);
         say(any ? words.anyQuestion : words.question(removes));
@@ -787,8 +787,12 @@ export async function deploy(argv: string[]): Promise<number> {
           next: [] });
       }
       await sleep(Math.min(waitMs, left));
-      const a = await call(service, "GET", `${where}/${id}`, { token });
+      const a = await call(service, "GET", `${where}/${id}`, { token, maxBytes: MAX_DEPLOY_ANSWER });
       waitMs = POLL_MS;
+      // an answer past even that bound came, and cannot be read: an outcome not known, never a wait to time out on
+      if (isFailure(a) && tooLarge(a)) {
+        return ended({ ...a, fix: `what deploy ${id} did is not known here: the service's web app shows it, as GET ${where}/${id} does (the hosted API)`, next: [] });
+      }
       // an answer that cannot say how it goes is a wait, never an outcome: the timeout bounds it
       if (isFailure(a) || a.status === 429 || a.status >= 500) {
         unsure = isFailure(a) ? serviceText(`${a.message}${a.why ? ` (${a.why})` : ""}`, 300, secrets) : `${a.what} answered ${a.status}`;

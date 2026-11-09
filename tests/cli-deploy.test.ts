@@ -61,7 +61,9 @@ async function fakeService(script: Script): Promise<{ url: string; requests: Req
         : { status: 404, body: { error: { code: "not_found", message: "no such endpoint" }, next: [] } };
       if (reply === "drop") { req.socket.destroy(); return; }
       const sent = reply.raw ?? reply.json ?? (reply.body === undefined ? "" : JSON.stringify(reply.body));
-      SERVED.push(JSON.stringify(reply.headers ?? {}), sent);
+      // (a body over 1 MB is the refusal at its documented largest, synthetic names that carry no token: read for every
+      // token of this file by `inputsOf`, it would take minutes)
+      SERVED.push(JSON.stringify(reply.headers ?? {}), sent.length > 1_000_000 ? "" : sent);
       res.writeHead(reply.status, { "content-type": reply.raw === undefined ? "application/json" : "text/html", ...reply.headers });
       res.end(sent);
     });
@@ -230,7 +232,7 @@ async function mason(cwd: string, argv: string[], env: Record<string, string>, o
 
 /** A run against a fresh fake, signed in by MASON_TOKEN; the fake's requests to the deploys with it (`requests`), and its
  *  questions of the replica's Mason apart (`asked`). */
-async function deployWith(script: Script, cwd: string, argv: string[], extra: Record<string, string> = {}, o: { terminal?: number; input?: string } = {}): Promise<{ a: Answer; requests: Req[]; asked: Req[]; url: string; token: string; home: string }> {
+async function deployWith(script: Script, cwd: string, argv: string[], extra: Record<string, string> = {}, o: { terminal?: number; input?: string; timeoutMs?: number } = {}): Promise<{ a: Answer; requests: Req[]; asked: Req[]; url: string; token: string; home: string }> {
   // a token the caller gives is its own to record
   const token = extra.MASON_TOKEN ?? newToken("ci");
   if (extra.MASON_TOKEN === undefined) SECRETS.push(token);
@@ -1429,7 +1431,7 @@ test("mason deploy: the service refused a removal not confirmed, naming the tabl
   assert.equal(posts(yes.requests).length, 2);
   assert.equal(one!.confirmed, undefined, "the first deploy confirmed nothing: its plan was unknown");
   assert.deepEqual(two, { ...one, confirmed: { removed: ["public.items", "billing.invoices"] } });
-  assert.match(afterPlan(yes.a.stderr), new RegExp(`^Sent 3 files .*: deploy ${ID}\n {2}Queued: .*\n {2}Refused by Mason on the replica\nThe service did not take deploy ${ID}: it removes ${REMOVES_TEXT.replace(/[().]/g, "\\$&")}, whose removal was not confirmed; --yes confirms it: sending the deploy again\nSent 3 files .*: deploy ${ID2}\n`), yes.a.stderr);
+  assert.match(afterPlan(yes.a.stderr), new RegExp(`^Sent 3 files .*: deploy ${ID}\n {2}Queued: .*\n {2}Refused by Mason on the replica\nThe service did not take deploy ${ID}: not every table the deploy removes was confirmed; it removes ${REMOVES_TEXT.replace(/[().]/g, "\\$&")}; --yes confirms them: sending the deploy again\nSent 3 files .*: deploy ${ID2}\n`), yes.a.stderr);
   assert.match(yes.a.stdout, /^Deployed to acme\/shop: the replica runs it\n {2}deploy +dep_02def\n/);
   // --yes --json: what was confirmed, and the deploy that runs
   const j = await deployWith(refusedThen(unconfirmed(REMOVES)), root, ["--replica", "acme/shop", "--yes", "--json"]);
@@ -1453,13 +1455,47 @@ test("mason deploy: the service refused a removal not confirmed, naming the tabl
   // at a terminal: the tables said, the question asked; the name typed back sends it again, anything else nothing
   const typed = await deployWith(refusedThen(unconfirmed(REMOVES)), root, ["--replica", "acme/shop"], {}, { terminal: 200, input: "acme/shop\n" });
   assert.equal(typed.a.code, 0, typed.a.stderr);
-  assert.match(typed.a.stderr.replace(/\n {4}/g, " "), new RegExp(`\nThe service did not take deploy ${ID}: it removes ${REMOVES_TEXT.replace(/[().]/g, "\\$&")}, whose removal was not confirmed\.\nRemoving 2 tables from acme/shop drops their synced data, .* Type acme/shop to deploy, anything else to keep acme/shop as it is\.\n> acme/shop\n`));
+  assert.match(typed.a.stderr.replace(/\n {4}/g, " "), new RegExp(`\nThe service did not take deploy ${ID}: not every table the deploy removes was confirmed; it removes ${REMOVES_TEXT.replace(/[().]/g, "\\$&")}\.\nRemoving 2 tables from acme/shop drops their synced data, .* Type acme/shop to deploy, anything else to keep acme/shop as it is\.\n> acme/shop\n`));
   assert.deepEqual(bodies(typed.requests)[1]!.confirmed, { removed: ["public.items", "billing.invoices"] });
   for (const input of ["acme/other\n", ""]) {
     const { a, requests } = await deployWith(refusedThen(unconfirmed(REMOVES)), root, ["--replica", "acme/shop"], {}, { terminal: 200, input });
     assert.equal(a.code, 1, `${JSON.stringify(input)}: ${a.stderr}`);
     assert.equal(posts(requests).length, 1, `${JSON.stringify(input)}: never sent again`);
     assert.match(a.stderr, /✗ mason deploy: nothing was deployed to acme\/shop: what was typed is not its name\n/);
+  }
+});
+
+test("mason deploy: a refusal at the documented maximum — 10,000 tables, each name 300 characters written as \\uXXXX escapes, every size at its largest — is read whole, said and confirmed, and sent again confirming all of them; an answer past even that bound is a failure saying the outcome is not known, never a wait (issue 550)", { timeout: 300_000 }, async () => {
+  const { root } = project();
+  // a name of 300 characters, each as its escape: `public.` then the entry's number, padded with x
+  const name = (i: number): string => `public.t${String(i).padStart(5, "0")}`.padEnd(300, "x");
+  const escaped = (t: string): string => [...t].map((c) => `\\u${c.codePointAt(0)!.toString(16).padStart(4, "0")}`).join("");
+  const big = Number.MAX_SAFE_INTEGER;
+  const entries = Array.from({ length: 10_000 }, (_, i) => `{ "table": "${escaped(name(i))}", "rows": ${big}, "bytes": ${big} }`);
+  const refusal = (n: number): Reply => ({ status: 200, headers: { "retry-after": "1" }, json: `{"deploy":{"id":"${ID}","status":"refused","createdAt":"${CREATED}","finishedAt":"2026-11-02T10:01:00Z","failure":{"code":"unconfirmed_removal","message":"the files remove tables acme/shop syncs","removes":[${entries.slice(0, n).join(",\n  ")}]}}}` });
+  const largest = refusal(10_000);
+  assert.ok((largest as { json: string }).json.length > 18_000_000, "the answer is at its documented largest");
+  // (a person's run: --json would carry all 10,000 names back, 3 MB this test's every check would read again)
+  const { a, requests } = await deployWith(refusedThen(largest), root, ["--replica", "acme/shop", "--yes"], {}, { timeoutMs: 240_000 });
+  assert.equal(a.code, 0, `${a.stderr.slice(0, 600)} … ${a.stderr.slice(-1500)}`);
+  // a person reads the first 50 names, and how many more
+  assert.match(a.stderr, new RegExp(`^The service did not take deploy ${ID}: not every table the deploy removes was confirmed; it removes ${name(0)} \\(9,007,199,254,740,991 rows, [^)]*\\), .*${name(49)} \\([^)]*\\), and 9,950 more; --yes confirms them: sending the deploy again$`, "m"));
+  const sent = bodies(requests)[1]!.confirmed as { removed: string[] };
+  assert.equal(sent.removed.length, 10_000);
+  assert.deepEqual([sent.removed[0], sent.removed[9_999]], [name(0), name(9_999)]);
+  // past the bound (padded with spaces JSON allows): a failure, the outcome not known, before any --timeout
+  const over: Reply = { status: 200, headers: { "retry-after": "1" }, json: `${(largest as { json: string }).json}${" ".repeat(1_000_000)}` };
+  for (const json of [false, true]) {
+    const r = await deployWith(refusedThen(over), root, ["--replica", "acme/shop", "--yes", "--timeout", "2m", ...(json ? ["--json"] : [])], {}, { timeoutMs: 240_000 });
+    assert.equal(r.a.code, 1, r.a.stdout + r.a.stderr);
+    assert.equal(posts(r.requests).length, 1, "never sent again");
+    const e = json ? (JSON.parse(r.a.stdout) as { error: { code: string; message: string; fix: string } }).error : null;
+    if (e) {
+      assert.equal(e.code, "failed");
+      assert.match(e.message, /answered GET \/v1\/replicas\/acme\/shop\/deploys\/dep_01abc with more than 18893 KiB$/);
+      assert.match(e.fix, /^what deploy dep_01abc did is not known here: /);
+    } else assert.match(r.a.stderr, /✗ mason deploy: .* with more than 18893 KiB\n {2}why {3}no documented answer is that large\n {2}fix {3}what deploy dep_01abc did is not known here/);
+    assert.ok(r.a.ms < 60_000, `failed at once, never waited out --timeout (${r.a.ms} ms)`);
   }
 });
 

@@ -634,12 +634,15 @@ for this code alone:
 | absent | an older service: it names none | |
 
 `removes` beside any other code or status, or one that does not hold, is outside the contract (the CLI fails, naming
-the request and its status). Every string of it is put to the exact test first, as every answer's is: one that carries
+the request and its status). The CLI reads an answer to `GET …/deploys/{id}` up to 18,893 KiB (19,346,432 bytes): 10,000 entries at
+their largest, each name written in `\uXXXX` escapes, and 64 KiB for the rest. A larger one cannot be read: the CLI
+fails (code `failed`, exit 1), saying the deploy's outcome is not known here, never waits it out as a timeout. Every string of it is put to the exact test first, as every answer's is: one that carries
 the token is refused whole.
 
 **The CLI recovers from it, once.** The refused deploy is final, and took nothing: the replica runs what it ran.
 
-- A list: the CLI names each table with its size, and confirms their removal as it confirms a plan's (typed back at a
+- A list: the CLI names each table with its size (in a line a person reads, the first 50 and how many more; `--json`
+  carries each in `confirmed`), and confirms their removal as it confirms a plan's (typed back at a
   terminal, else `--yes`; without either, refused, code `refused`, exit 1, naming the tables, its way out
   `mason deploy --replica <org>/<name> --yes`). Confirmed, it sends the deploy again, as a NEW `POST` (a new deploy,
   a new id), with `confirmed.removed` exactly the list named, and waits on it, its `--timeout` started again.
