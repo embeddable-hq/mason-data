@@ -293,6 +293,16 @@ listens, and every browser connection crosses that one ssh connection as frames 
   `mason` commands' (`mason add`, `mason sync`, `mason cancel` beside the server, and the tunnel `mason ui --ssh`
   opens), served as before; `MASON_PROJECT_READONLY=1` is what refuses the commands' edits of the project's files.
   Anything but `0` or `1` refuses the start; `mason start` refuses it.
+- **A read-only page that still edits its tables: `MASON_UI_READ_ONLY_ALLOW=tables`.** For a page embedded in a site
+  that does the rest itself (its users, say), `MASON_UI_READ_ONLY=1` beside it keeps the Tables page's Add, Columns…,
+  Name its key…, Remove and Sync now, and the Overview's Add a table. The server lets through exactly those routes
+  (`POST /api/pick`, `POST /api/remove`, `POST /api/sync`) and refuses every other change of the page as before — a
+  user added, disabled, enabled or removed, a statement cancelled, a share, a route added later — with "the web page is
+  read-only here" and a `why` that says what is still allowed; the pages for those still say why they offer nothing,
+  and `/api/state` says `pageReadOnlyAllow: ["tables"]`. `MASON_PROJECT_READONLY=1` still wins: a project deployed as
+  committed offers no Add or Remove and refuses them `409`, as without the allowance (Sync now stays). `tables` is the
+  only value; anything else (with a `did you mean`), or the setting beside no `MASON_UI_READ_ONLY=1`, refuses the start:
+  an allowance on a page that is not read-only says a read-only page was meant and not had. `mason start` refuses it.
 - **A link back to the site that links to the page: `MASON_UI_BACK_URL` and `MASON_UI_BACK_LABEL`.** For a page opened
   from another application (a portal, a hosted service's console), `mason serve` with `MASON_UI_BACK_URL` set shows
   "← Back" (or "← " and `MASON_UI_BACK_LABEL`) at the top of the sidebar, above the project, on every page, in the same
@@ -394,7 +404,9 @@ The guard answers before any route, in plain text, not JSON:
 
 **`MASON_UI_READ_ONLY=1` refuses the page, not the operator.** A request with no `Authorization` (the page's, by its
 cookie) that is not a GET or a HEAD is refused `403` with "the web page is read-only here". A request with the run's
-token is served, read-only or not. `MASON_PROJECT_READONLY=1` refuses the operator's edits too (below).
+token is served, read-only or not. With `MASON_UI_READ_ONLY_ALLOW=tables`, the page's `POST /api/pick`, `/api/remove` and
+`/api/sync` are served too, and every other change of the page refused. `MASON_PROJECT_READONLY=1` refuses the operator's
+edits too (below).
 
 **Every refusal** is `{ "error": <message>, "failure": { "code", "message", "why"?, "fix"?, "next": [{ "command",
 "what"? }] } }`, the CLI's failure shape, worded by the code `mason add` and `mason remove` call. `why` and `fix` are
@@ -426,6 +438,7 @@ reads:
 - `sourcesReadOnly`: why the page offers no Add or Remove, or null. Either the project is deployed read-only, which
   refuses an edit `409`, or the server cannot write the sources file, which fails an edit `500` `failed`.
 - `pageReadOnly`: the page's read-only reason, or null. It does not apply to the operator.
+- `pageReadOnlyAllow`: what that page still changes, `["tables"]` with `MASON_UI_READ_ONLY_ALLOW=tables`, else `[]`.
 
 **One table's columns: `GET /api/tables/<table>/columns`**, with `<table>` URL-encoded (`public.orders`). The answer
 has `table` and `columns`, each column with `name`, `type`, `nullable`, `comment` and `references` (`{ table, column }`

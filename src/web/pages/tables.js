@@ -10,7 +10,7 @@
  * `copySizes` every minute; a table's columns once, when its Columns… or Name its key… form opens
  * (`GET /api/tables/<table>/columns`, `columnsPath`).
  */
-import { msText, bytesText, button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText, pop, fresh, actId, ROOMS, POLL_MS, readOnlyLine } from "../shared.js";
+import { msText, bytesText, button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText, pop, fresh, actId, ROOMS, POLL_MS, readOnlyLine, tablesReadOnly } from "../shared.js";
 import { copyBar, copyingCount, createMonotone, tableLine } from "./status.js";
 
 /** `/api/usage` asked for the copies' own sizes alone: the last minute's samples (none needed), and `copySizes`. */
@@ -199,8 +199,9 @@ export function renderTables(s, ui = {}) {
   const { removing = null, choosing = null, columns = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], adding = [], shares = new Map(), before = new Map(), synced = null, open = () => false, limit = TABLE_ROWS } = ui;
   const now = ui.now ?? Date.now();
   if (!s.tables.length) return empty(`${s.source.database} has no table this user can read.`);
-  // why the page changes nothing (MASON_UI_READ_ONLY=1: not even a Sync), or null
-  const viewOnly = s.pageReadOnly ?? null;
+  // why the page changes nothing (MASON_UI_READ_ONLY=1: not even a Sync), or null — null when its tables are still its
+  // own (MASON_UI_READ_ONLY_ALLOW=tables)
+  const viewOnly = tablesReadOnly(s);
   // why no table can be added or removed from here (that, or a server's sources file this run cannot write), or null
   const readOnly = viewOnly ?? s.sourcesReadOnly ?? null;
   const stream = s.stream ? new Map(streamRows(s.stream, now).tables) : null;

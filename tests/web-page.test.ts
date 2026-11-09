@@ -725,6 +725,47 @@ test("a read-only page: each renderer alone writes no control that changes anyth
   assert.match(checklist(NONE, noneYet, nobody), /Add a table/);
 });
 
+test("a read-only page that still edits its tables (pageReadOnlyAllow: [tables]): Tables has Add, Columns…, Name its key…, Remove and Sync now; every other page writes no control that sends a change, and says why (issue 789)", async () => {
+  const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
+  const state = { ...CATALOG_STATE, pageReadOnly: why, pageReadOnlyAllow: ["tables"] };
+  const shown = await pageByPage(state);
+  const tables = fn<[unknown], string>("renderTables")(state);
+  for (const control of ["data-add-table", "data-choose", "data-sync-table", "data-remove-table"]) assert.ok(tables.includes(control), `Tables: ${control}`);
+  assert.match(textOf(tables), /Name its key…/, "a table with no primary key offers its key");
+  assert.ok(!textOf(shown.all).includes("Tables are not added"), "Tables says nothing is refused");
+  for (const control of ["data-add-table", "data-choose", "data-sync-table", "data-remove-table"]) assert.ok(shown.all.includes(control), `the app: ${control}`);
+  // BY RULE over every page the app wrote: every button but the Tables page's own only shows, copies or moves what is shown
+  const TABLE_BUTTONS = /^data-(add-table|choose|sync-table|remove-table)$/;
+  for (const control of WRITE_CONTROLS.filter((c) => !TABLE_BUTTONS.test(c.replace(/=$/, "")))) assert.ok(!shown.all.includes(control), control);
+  const buttons = [...shown.all.matchAll(/<button\b([^>]*)>/g)].map((m) => [...m[1]!.matchAll(/\b(data-[a-z-]+)/g)].map((d) => d[1]!).filter((d) => d !== "data-room"));
+  for (const data of buttons) assert.ok(data.length > 0 && data.every((d) => VIEW_BUTTONS.test(d) || TABLE_BUTTONS.test(d)), `a button that may send a change: ${data.join(" ")}`);
+  assert.ok(!/Create a user|Add a user|Connect from anywhere|<a class="btn[^"]*" href="#users"/.test(shown.all), "a lead to a user or a share");
+  // each page says why it offers no change, the Overview now without the tables
+  for (const [id, line] of [["status", `No user is created and nothing is shared from this page: ${why}.`], ["users", `Users are not added, disabled or removed from this page: ${why}.`],
+    ["usage", `Statements are not cancelled from this page: ${why}.`]] as const) assert.ok(textOf(shown.byPage.get(id)!).includes(line), `${id}: ${line}`);
+  assert.ok(!textOf(shown.byPage.get("status")!).includes("Nothing is shared, added or created"));
+  // the checklist sends a person to add a table, never to create a user
+  const { renderChecklist: checklist } = await import(path.join(WEB, "pages", "status.js") as string) as { renderChecklist: (s: unknown, q: unknown, u: unknown) => string };
+  const noneYet = { queries: { week: { completed: 0 } } }, nobody = { users: [] };
+  const fresh = checklist({ ...NONE, pageReadOnly: why, pageReadOnlyAllow: ["tables"] }, noneYet, nobody);
+  assert.match(fresh, /Add a table/);
+  assert.ok(!/href="#users"/.test(fresh), "no Create a user");
+  // an allowance the page does not know is no allowance; without the page read-only it changes nothing
+  const renderTables = fn<[unknown], string>("renderTables");
+  assert.ok(!renderTables({ ...CATALOG_STATE, pageReadOnly: why, pageReadOnlyAllow: ["users"] }).includes("data-add-table"));
+  assert.equal(renderTables({ ...CATALOG_STATE, pageReadOnlyAllow: ["tables"] }), renderTables(CATALOG_STATE));
+});
+
+test("MASON_PROJECT_READONLY=1 wins over the allowance: a read-only page that edits its tables offers no Add, Columns…, Name its key… or Remove on a project deployed as committed, and says why; Sync now stays (issue 789)", () => {
+  const renderTables = fn<[unknown], string>("renderTables");
+  const projectWhy = "the project's files are read-only here (MASON_PROJECT_READONLY=1); edit them where they are committed, and deploy";
+  const html = renderTables({ ...CATALOG_STATE, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)", pageReadOnlyAllow: ["tables"], sourcesReadOnly: projectWhy, served: true });
+  for (const control of ["data-remove-table", "data-add-table", "data-choose"]) assert.ok(!html.includes(control), control);
+  assert.match(html, /data-sync-table/);
+  assert.ok(textOf(html).includes(`Tables are not added or removed from this page: ${projectWhy}.`));
+  assert.equal(html, renderTables({ ...CATALOG_STATE, sourcesReadOnly: projectWhy, served: true }), "as on a page that is not read-only");
+});
+
 test("the state says pageReadOnly: why under MASON_UI_READ_ONLY=1 as the run reads it, null without; and nothing else of the state changes", () => {
   const ctxOf = (pageReadOnly?: boolean) => ({
     source, facts: () => ({ version: 160000, versionText: "16.4", standby: false, tables: TABLES, systemIdentifier: null }), warnings: [], replication: () => null,
@@ -743,6 +784,7 @@ test("the state says pageReadOnly: why under MASON_UI_READ_ONLY=1 as the run rea
   const { pageReadOnly: _c, sourcesReadOnly: _d, ...restOff } = off as typeof on;
   assert.deepEqual(JSON.parse(JSON.stringify(rest)), JSON.parse(JSON.stringify(restOff)));
   assert.ok(commands.STATUS.json!.includes("pageReadOnly"), "mason status --json declares it");
+  assert.ok(commands.STATUS.json!.includes("pageReadOnlyAllow"), "mason status --json declares what that page still allows");
 });
 
 // ------------------------------------------------------------------ the link back to the site that links to the page (MASON_UI_BACK_URL, issue 786)

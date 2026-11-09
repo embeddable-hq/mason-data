@@ -14,8 +14,18 @@
  * commands', and is served as before: `mason add`, `mason sync`, `mason cancel`, and the tunnel `mason ui --ssh` opens to
  * show the page. Whoever can read that token can edit the project's files and `.mason/users.json` themselves, so
  * refusing them here would protect nothing; MASON_PROJECT_READONLY is the setting that refuses the commands' edits.
+ *
+ * `MASON_UI_READ_ONLY_ALLOW=tables` (issue 789): A READ-ONLY PAGE THAT STILL EDITS ITS TABLES, for a page embedded in a
+ * site that does the rest itself (its users, say). It lets through exactly the Tables page's changes — the method and the
+ * path the router reads (`AREA_ROUTES`: Add, Columns… and Name its key… are `POST /api/pick`, Remove `POST /api/remove`,
+ * Sync now `POST /api/sync`), never a prefix and never a pattern — and every other change the page asks for is refused
+ * by the same rule as before: still REFUSED BY RULE, the allowance a closed list of exact routes. Those routes ask
+ * `projectWriteRefusal` as before, so `MASON_PROJECT_READONLY=1` still refuses an Add or a Remove. Set without
+ * `MASON_UI_READ_ONLY=1` it refuses the start: an allowance on a page that is not read-only says the operator meant a
+ * read-only page and did not get one.
  */
 import type { Failure } from "./command.ts";
+import { didYouMean } from "../lib/did-you-mean.ts";
 
 export const UI_READ_ONLY_SETTING = "MASON_UI_READ_ONLY";
 
@@ -35,6 +45,49 @@ export const PAGE_READ_ONLY: Failure = {
   message: `${PAGE_READ_ONLY_WHY}: it shows what Mason syncs, and changes nothing`, code: "refused",
   why: `Mason was started with ${UI_READ_ONLY_SETTING}=1, so the page refuses every change, whatever it asks`,
   fix: "make the change with the mason command where Mason runs, or ask whoever runs it",
+};
+
+export const UI_READ_ONLY_ALLOW_SETTING = "MASON_UI_READ_ONLY_ALLOW";
+
+/** What a read-only page may still change, each a page of its own: `tables` alone for now. */
+export const PAGE_AREAS = ["tables"] as const;
+export type PageArea = typeof PAGE_AREAS[number];
+
+/** Each area's changes: the method and the exact path the run's server routes it by (src/cli/run-server.ts). */
+const AREA_ROUTES: Readonly<Record<PageArea, ReadonlyArray<readonly [method: string, path: string]>>> = {
+  // Add, Columns… and Name its key… (POST /api/pick), Remove (POST /api/remove), Sync now (POST /api/sync)
+  tables: [["POST", "/api/pick"], ["POST", "/api/remove"], ["POST", "/api/sync"]],
+};
+
+/** What each area lets the page do, in the words the refusal and `mason serve --help` say. */
+const AREA_WORDS: Readonly<Record<PageArea, string>> = { tables: "adding, removing and syncing tables" };
+
+/**
+ * MASON_UI_READ_ONLY_ALLOW as the environment says it: the areas (none when unset or empty), or what is wrong with it —
+ * a value that is not an area, or one set while MASON_UI_READ_ONLY is not 1 (a junk MASON_UI_READ_ONLY is its own
+ * problem, said by `uiReadOnlySetting`).
+ */
+export function uiReadOnlyAllowSetting(env: Readonly<Record<string, string | undefined>>): PageArea[] | { problem: string } {
+  const v = env[UI_READ_ONLY_ALLOW_SETTING];
+  if (v === undefined || v === "") return [];
+  if (!(PAGE_AREAS as readonly string[]).includes(v)) {
+    return { problem: `${UI_READ_ONLY_ALLOW_SETTING}=${JSON.stringify(v)}: ${PAGE_AREAS.join(", ")} (a read-only page still allows ${AREA_WORDS.tables}), or unset${didYouMean(v, PAGE_AREAS)}` };
+  }
+  if (uiReadOnlySetting(env) === false) {
+    return { problem: `${UI_READ_ONLY_ALLOW_SETTING}=${v} is set without ${UI_READ_ONLY_SETTING}=1: it says what a read-only page still allows, and this page is not read-only (set ${UI_READ_ONLY_SETTING}=1, or unset ${UI_READ_ONLY_ALLOW_SETTING})` };
+  }
+  return [v as PageArea];
+}
+
+/** Whether a change the page asks for is one an allowed area makes: its method and its path exactly, as routed. */
+export const pageAllows = (allow: readonly PageArea[], method: string | undefined, pathname: string): boolean =>
+  allow.some((a) => AREA_ROUTES[a].some(([m, p]) => m === method && p === pathname));
+
+/** The answer to a change the page asks for that no allowed area makes: PAGE_READ_ONLY, its why naming what is allowed. */
+export const pageReadOnlyRefusal = (allow: readonly PageArea[]): Failure => allow.length === 0 ? PAGE_READ_ONLY : {
+  ...PAGE_READ_ONLY,
+  message: `${PAGE_READ_ONLY_WHY}: it shows what Mason syncs, and changes nothing but its tables`,
+  why: `Mason was started with ${UI_READ_ONLY_SETTING}=1 and ${UI_READ_ONLY_ALLOW_SETTING}=${allow.join(",")}, so the page refuses every change but ${allow.map((a) => AREA_WORDS[a]).join(" and ")}`,
 };
 
 /**

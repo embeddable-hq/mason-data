@@ -21,7 +21,7 @@ const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "
   slow: "#observability/queries?slow=1&range=24h", failedQueries: "#observability/queries?status=refused-or-failed&range=24h", failedEvents: "#observability/syncs?failures=1&range=7d" };
 import { msText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
   utcMinute, oneLine, clientText, eventCells, unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, renderConnect, copyClick,
-  badge, button, copyable, pop, renderFailure, json, readOnlyLine } from "../shared.js";
+  badge, button, copyable, pop, renderFailure, json, readOnlyLine, tablesReadOnly } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
 
 /** How many recent errors of each kind are shown: mason status's (src/cli/commands.ts `RECENT_ERRORS`, held equal by the tests). */
@@ -400,11 +400,13 @@ export function renderChecklist(s, queries, users) {
   const answered = queries.queries.week.completed > 0;
   if (copied && user && answered) return "";
   const copying = added && !copied && copyingCount(s) > 0;
-  // a read-only page (MASON_UI_READ_ONLY=1) sends no one to add what it would refuse to add
+  // a read-only page (MASON_UI_READ_ONLY=1) sends no one to add what it would refuse to add: a user, and a table unless
+  // its tables are still its own (MASON_UI_READ_ONLY_ALLOW=tables)
   const looks = (s.pageReadOnly ?? null) !== null;
+  const tablesLook = tablesReadOnly(s) !== null;
   const steps = [
     ["Mason is running", true, ""],
-    ["A table synced", copied, copying ? `<span class="dim">syncing now</span>` : added || looks ? "" : `<a class="btn small primary" href="${LINKS.tables}">Add a table</a>`],
+    ["A table synced", copied, copying ? `<span class="dim">syncing now</span>` : added || tablesLook ? "" : `<a class="btn small primary" href="${LINKS.tables}">Add a table</a>`],
     ["A user created", user, looks ? "" : `<a class="btn small${copied ? " primary" : ""}" href="#users">Create a user</a>`],
     // the psql line is Connect's (rendered under the checklist once a table is added): its Copy copies it
     ["A first statement answered", answered, copied ? `${`<button type="button" class="small${user ? " primary" : ""}" data-copy="connect-psql">Copy the psql line</button>`} <span class="dim">then run a select on a synced table</span>` : ""],
@@ -429,7 +431,7 @@ export function renderStatus(s, o = {}) {
   const connect = added ? renderConnect(s.postgres, { first, served: s.served === true, table: s.tables.find((t) => t.added && t.copy?.phase === "done")?.table ?? null,
     share: renderShare(s, o.share ?? NO_SHARE, now), readOnly: s.pageReadOnly ?? null }) : "";
   // a read-only page (MASON_UI_READ_ONLY=1): why it offers no share, no user and no table to add, as Tables and Users say it
-  return readOnlyLine("Nothing is shared, added or created", s.pageReadOnly) + renderHealth(s) + renderChecklist(s, o.queries, o.users) + renderKpis(s, { ...o, now }) + (first ? connect : "") + renderProgress(s, o.open, o.shares, o.before) + renderFacts(s, now) + (first ? "" : connect) + renderStream(s, now) +
+  return readOnlyLine(tablesReadOnly(s) === null ? "No user is created and nothing is shared" : "Nothing is shared, added or created", s.pageReadOnly) + renderHealth(s) + renderChecklist(s, o.queries, o.users) + renderKpis(s, { ...o, now }) + (first ? connect : "") + renderProgress(s, o.open, o.shares, o.before) + renderFacts(s, now) + (first ? "" : connect) + renderStream(s, now) +
     (added ? renderQueries(o.queries) : "") + (added ? renderRecentErrors(o.events, o.requests, o.unsupported) : "");
 }
 

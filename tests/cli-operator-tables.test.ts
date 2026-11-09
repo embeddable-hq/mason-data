@@ -47,10 +47,10 @@ const parsed = parseSource(URL_);
 const source = "source" in parsed ? parsed.source : assert.fail(parsed.problem);
 
 interface Operator { socket: string; port: number; token: string; root: string; sourceFile: string; logged: string[]; changed: () => number; setCopies: (c: CopyState[]) => void;
-  setTables: (t: SourceTable[]) => void }
+  setTables: (t: SourceTable[]) => void; polled: string[] }
 
 /** `mason serve`'s run as an operator meets it: a project with a sources file, the server on a Unix socket, the run file. */
-async function operator(o: { pageReadOnly?: boolean; runUrl?: string; checkReplication?: RunContext["checkReplication"] } = {}): Promise<Operator> {
+async function operator(o: { pageReadOnly?: boolean; pageReadOnlyAllow?: string[]; runUrl?: string; checkReplication?: RunContext["checkReplication"] } = {}): Promise<Operator> {
   const root = temp();
   const folder = path.join(root, "mason");
   const sourceFile = path.join(folder, "sources", "app.yml");
@@ -60,10 +60,12 @@ async function operator(o: { pageReadOnly?: boolean; runUrl?: string; checkRepli
   let changed = 0;
   let copies: CopyState[] = [];
   let tables: SourceTable[] = TABLES;
+  const polled: string[] = [];
   const read = (): ReturnType<RunContext["readSource"]> => readSource(folder, root, {});
   const ctx = {
     source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables, systemIdentifier: null }), warnings: [], replication: () => null,
     port: 4039, token: TOKEN, page: true, served: true, ...(o.pageReadOnly === undefined ? {} : { pageReadOnly: o.pageReadOnly }),
+    ...(o.pageReadOnlyAllow === undefined ? {} : { pageReadOnlyAllow: o.pageReadOnlyAllow }),
     users: { file: path.join(root, "users.json"), apiKey: "k".repeat(48), database: "app", postgresUrl: "postgresql://localhost:5433/app" },
     folder: () => folder, root, home: path.join(root, ".mason"), version: "test", startedAt: Date.now(),
     // the run's own read of the file, as `sourcesChanged` leaves it (src/cli/dev.ts `added`: set before it returns)
@@ -72,7 +74,7 @@ async function operator(o: { pageReadOnly?: boolean; runUrl?: string; checkRepli
     listener: { openSessions: () => ({ open: 0, byClient: [] }), running: () => [], cancel: (session: number) => ({ unknown: session }) },
     logs: { capacity: 10, recent: () => [] },
     readSource: read, runUrl: o.runUrl ?? URL_, ...(o.checkReplication ? { checkReplication: o.checkReplication } : {}),
-    duck: { copies: () => copies, file: path.join(root, "duck.db"), poll: async () => ({ at: "2026-11-08T10:00:00.000Z", tables: [] }),
+    duck: { copies: () => copies, file: path.join(root, "duck.db"), poll: async (t: string[]) => { polled.push(...t); return { at: "2026-11-08T10:00:00.000Z", tables: [] }; },
       stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }), restarts: () => [], requests: { days: 7 } },
   } as unknown as RunContext;
   const server = createRunServer(ctx);
@@ -88,7 +90,7 @@ async function operator(o: { pageReadOnly?: boolean; runUrl?: string; checkRepli
   const written = writeUiRunFile(runFile, { port: ctx.port, token: TOKEN }, () => undefined);
   if ("message" in written) assert.fail(written.message);
   const { port, token } = JSON.parse(fs.readFileSync(runFile, "utf8")) as { port: number; token: string };
-  return { socket, port, token, root, sourceFile, logged, changed: () => changed, setCopies: (c) => { copies = c; }, setTables: (t) => { tables = t; } };
+  return { socket, port, token, root, sourceFile, logged, changed: () => changed, setCopies: (c) => { copies = c; }, setTables: (t) => { tables = t; }, polled };
 }
 
 interface Answer { status: number; type: string | undefined; text: string }
@@ -371,6 +373,53 @@ test("MASON_UI_READ_ONLY=1 refuses the page, not the operator: without the token
   const removed = await ask(op, "POST", "/api/remove", { body: { tables: ["customers"] } });
   assert.equal(removed.status, 200, removed.text);
   assert.equal(fs.readFileSync(op.sourceFile, "utf8"), before);
+});
+
+test("MASON_UI_READ_ONLY_ALLOW=tables: the read-only page adds a table (every column, Columns…, Name its key…), removes one (Remove, and a pick undone) and syncs one; a user, a cancel and a share are still refused 403 (issue 789)", async () => {
+  const op = await operator({ pageReadOnly: true, pageReadOnlyAllow: ["tables"] });
+  const before = fs.readFileSync(op.sourceFile, "utf8");
+  const page = async (p: string, body: unknown): Promise<Record<string, unknown>> => { const a = await ask(op, "POST", p, { body, as: "page" }); assert.equal(a.status, 200, `${p}: ${a.text}`); return json(a); };
+  // Add (every column), Columns… (the ticked ones), Name its key… (a table with no primary key)
+  assert.equal((await page("/api/pick", { table: "public.customers", picked: true })).already, false);
+  assert.deepEqual((await page("/api/pick", { table: "public.orders", picked: true, columns: ["id"] })).columns, ["id"]);
+  assert.deepEqual((await page("/api/pick", { table: "public.events", picked: true, key: ["tenant_id", "id"] })).key, ["tenant_id", "id"]);
+  const added = fs.readFileSync(op.sourceFile, "utf8");
+  for (const t of ["customers:", "orders:", "events:", "key: [tenant_id, id]"]) assert.ok(added.includes(t), `${t} in ${added}`);
+  // Sync now
+  assert.deepEqual((await page("/api/sync", { tables: ["public.customers"] })).tables, []);
+  assert.deepEqual(op.polled, ["public.customers"]);
+  // Remove, and a pick undone
+  assert.deepEqual((await page("/api/remove", { tables: ["customers", "orders"] })).removed, ["public.customers", "public.orders"]);
+  assert.deepEqual((await page("/api/pick", { table: "public.events", picked: false })).removed, ["public.events"]);
+  assert.equal(fs.readFileSync(op.sourceFile, "utf8"), before, "every edit undone, byte for byte");
+  // everything else the page sends is refused, saying what is still allowed
+  for (const [method, p, body] of [["POST", "/api/users", { name: "grafana" }], ["DELETE", "/api/users/grafana", {}], ["POST", "/api/users/grafana/disable", {}],
+    ["POST", "/api/cancel", { session: 4, statement: 9 }], ["POST", "/api/share", {}]] as const) {
+    const f = refusal(await ask(op, method, p, { body, as: "page" }), 403, "refused");
+    assert.equal(f.message, "the web page is read-only here (MASON_UI_READ_ONLY=1): it shows what Mason syncs, and changes nothing but its tables", `${method} ${p}`);
+    assert.equal(f.why, "Mason was started with MASON_UI_READ_ONLY=1 and MASON_UI_READ_ONLY_ALLOW=tables, so the page refuses every change but adding, removing and syncing tables");
+  }
+  assert.ok(!fs.existsSync(path.join(op.root, "users.json")), "no user written");
+  const state = json(await ask(op, "GET", "/api/state", { as: "page" }));
+  assert.deepEqual([state.pageReadOnly, state.pageReadOnlyAllow, state.sourcesReadOnly], ["the web page is read-only here (MASON_UI_READ_ONLY=1)", ["tables"], null]);
+});
+
+test("MASON_PROJECT_READONLY=1 wins over MASON_UI_READ_ONLY_ALLOW=tables: the page's Add and Remove are refused 409 as the project's, Sync now still served (issue 789)", async () => {
+  const op = await operator({ pageReadOnly: true, pageReadOnlyAllow: ["tables"] });
+  const before = fs.readFileSync(op.sourceFile, "utf8");
+  const was = process.env.MASON_PROJECT_READONLY;
+  process.env.MASON_PROJECT_READONLY = "1";
+  try {
+    const state = json(await ask(op, "GET", "/api/state", { as: "page" }));
+    assert.match(String(state.sourcesReadOnly), /^the project's files are read-only here \(MASON_PROJECT_READONLY=1\); /, "the page offers no Add or Remove");
+    for (const [p, body] of [["/api/pick", { table: "public.customers", picked: true }], ["/api/pick", { table: "public.events", picked: true, key: ["tenant_id", "id"] }],
+      ["/api/pick", { table: "public.customers", picked: false }], ["/api/remove", { tables: ["customers"] }]] as const) {
+      const f = refusal(await ask(op, "POST", p, { body, as: "page" }), 409, "refused");
+      assert.equal(f.message, "the project's files are read-only here (MASON_PROJECT_READONLY=1)", p);
+    }
+    assert.equal(fs.readFileSync(op.sourceFile, "utf8"), before, "nothing written");
+    assert.equal((await ask(op, "POST", "/api/sync", { body: { tables: ["public.customers"] }, as: "page" })).status, 200, "a sync writes no project file");
+  } finally { if (was === undefined) delete process.env.MASON_PROJECT_READONLY; else process.env.MASON_PROJECT_READONLY = was; }
 });
 
 test("the token reaches no answer and no log line", () => {

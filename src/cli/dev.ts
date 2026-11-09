@@ -30,7 +30,7 @@ import type { Server } from "node:http";
 import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, readSourceFacts, remoteConfirmation, remoteWarning, type SourceFacts } from "./preflight.ts";
-import { uiReadOnlySetting } from "./ui-read-only.ts";
+import { uiReadOnlyAllowSetting, uiReadOnlySetting, type PageArea } from "./ui-read-only.ts";
 import { backLinkOf, uiBackLinkSetting } from "./ui-back-link.ts";
 import { createRunServer, listenOnLoopback, metricsFacts, usageFacts, type RunContext } from "./run-server.ts";
 import type { RunMetrics } from "./metrics.ts";
@@ -68,6 +68,9 @@ import { textEntry } from "../lib/log.ts";
 import { LogBuffer } from "../lib/log-buffer.ts";
 import { logPath } from "../lib/log-read.ts";
 import { BIG_TABLE_ROWS, syncText, type TableSync } from "../lib/table-sync.ts";
+
+/** MASON_UI_READ_ONLY_ALLOW's areas, or none when it is wrong (the start refused it first: never read as more). */
+const allowedOf = (a: ReturnType<typeof uiReadOnlyAllowSetting>): PageArea[] => Array.isArray(a) ? a : [];
 
 export interface DevOptions {
   /** the port the commands reach the run on (src/cli/run-server.ts), or the next free one */
@@ -648,6 +651,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     page: true, served: o.serve !== undefined,
     // MASON_UI_READ_ONLY=1: a server's page refuses every change it asks for (mason start refuses the setting above)
     pageReadOnly: o.serve !== undefined && uiReadOnlySetting(process.env) === true,
+    // MASON_UI_READ_ONLY_ALLOW=tables: what that page may still change (refused at the start when wrong, so a problem
+    // here is read as nothing allowed: fail closed)
+    pageReadOnlyAllow: o.serve !== undefined ? allowedOf(uiReadOnlyAllowSetting(process.env)) : [],
     // MASON_UI_BACK_URL: a server's page links back to the site that links to it (mason start refuses the setting above)
     pageBack: o.serve !== undefined ? backLinkOf(uiBackLinkSetting(process.env)) : null,
     // MASON_UI_SOCKET: the page on a Unix socket too (src/cli/ui-socket.ts), or null

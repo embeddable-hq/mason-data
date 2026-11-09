@@ -500,6 +500,10 @@ export function renderConnect(pg, { first = false, table = null, served = false,
  *  not done from it ("Tables are not added, removed or synced") — as the Tables and Users pages say it; "" when it may. */
 export const readOnlyLine = (what, why) => why == null ? "" : `<p class="count">${esc(what)} from this page: ${esc(why)}.</p>`;
 
+/** Why the page changes no table (`/api/state` `pageReadOnly`), or null — null too on a read-only page whose tables are
+ *  still changed from it (`pageReadOnlyAllow` has `tables`: MASON_UI_READ_ONLY_ALLOW=tables, whose routes the run serves). */
+export const tablesReadOnly = (s) => (s?.pageReadOnlyAllow ?? []).includes("tables") ? null : s?.pageReadOnly ?? null;
+
 /** On a server's page the Postgres URL's host is the server's own view of itself: said beside it, as a tool elsewhere needs the server's address. */
 export const serverHostNote = (pg) => `This is the address on the server: from elsewhere a tool connects to the server's own address, in place of ${code(pg.host ?? "localhost")}.`;
 

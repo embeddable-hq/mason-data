@@ -44,7 +44,7 @@ import { commandPinProblem } from "./pin.ts";
 import { listenOnUiSocket, prepareUiSocket, uiSocketSetting, type UiSocket } from "./ui-socket.ts";
 import { prepareUiRunFile, uiRunFileSetting, UI_RUN_FILE_SETTING, writeUiRunFile, type UiRunFile } from "./ui-run-file.ts";
 import { recordRefusal } from "./replication-mode.ts";
-import { UI_READ_ONLY_SETTING, uiReadOnlySetting } from "./ui-read-only.ts";
+import { UI_READ_ONLY_ALLOW_SETTING, UI_READ_ONLY_SETTING, uiReadOnlyAllowSetting, uiReadOnlySetting } from "./ui-read-only.ts";
 import { BACK_LABEL_MAX, BACK_URL_MAX, uiBackLinkSetting } from "./ui-back-link.ts";
 import { changesRetiredText, pollMsRetiredText, type SourcesTop } from "../lib/table-sync.ts";
 import { historyDaysSetting, historyDaysWrongText } from "../duck/history.ts";
@@ -113,6 +113,10 @@ export const SERVE: CommandSpec = {
     MASON_UI_READ_ONLY      1 when the web page should only show: it offers no control that changes anything, and
                             refuses every change it is sent, through mason ui --ssh or the socket alike; the mason
                             commands beside it are unchanged (default 0)
+    MASON_UI_READ_ONLY_ALLOW  tables: a read-only page still adds, removes and syncs tables on its Tables page (Add,
+                            Columns…, Name its key…, Remove, Sync now), and refuses every other change; anything else,
+                            or set without MASON_UI_READ_ONLY=1, is refused; MASON_PROJECT_READONLY=1 still refuses
+                            an Add or a Remove (default unset: nothing)
     MASON_UI_BACK_URL       a link back to the site that links to the web page, at the top of its sidebar, in the same
                             tab: a path on the page's host (/something, from the host's root, whatever path the page
                             is served under) or an https:// or http:// URL, with no user or password, printable ASCII,
@@ -225,6 +229,9 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   // the read-only page (src/cli/ui-read-only.ts): 1 or 0, anything else refused here, never read as off
   const pageReadOnly = uiReadOnlySetting(env);
   if (typeof pageReadOnly !== "boolean") wrong.push(pageReadOnly.problem);
+  // what a read-only page still allows (src/cli/ui-read-only.ts): tables, and only beside MASON_UI_READ_ONLY=1
+  const pageAllow = uiReadOnlyAllowSetting(env);
+  if (!Array.isArray(pageAllow)) wrong.push(pageAllow.problem);
   // the link back to the site that links to the page (src/cli/ui-back-link.ts): a path or an http(s) URL, else refused here
   const backLink = uiBackLinkSetting(env);
   if (backLink !== null && "problem" in backLink) wrong.push(backLink.problem);
@@ -529,7 +536,12 @@ export async function serve(argv: string[]): Promise<number> {
   if (page !== null) say(`  web page  ${page.file} (a Unix socket, mode 0600: a request on it passes the same guard as mason ui --ssh's)`);
   const backLink = uiBackLinkSetting(process.env);
   if (backLink !== null && !("problem" in backLink)) say(`  web page  a link back at the top of its sidebar, ${JSON.stringify(backLink.label)} (MASON_UI_BACK_URL)`);
-  if (uiReadOnlySetting(process.env) === true) say(`  web page  read-only (${UI_READ_ONLY_SETTING}=1): it refuses every change it is sent; the mason commands beside it are unchanged`);
+  const pageAllow = uiReadOnlyAllowSetting(process.env);
+  if (uiReadOnlySetting(process.env) === true) {
+    say(Array.isArray(pageAllow) && pageAllow.includes("tables")
+      ? `  web page  read-only (${UI_READ_ONLY_SETTING}=1) but its tables (${UI_READ_ONLY_ALLOW_SETTING}=tables): it refuses every other change it is sent; the mason commands beside it are unchanged`
+      : `  web page  read-only (${UI_READ_ONLY_SETTING}=1): it refuses every change it is sent; the mason commands beside it are unchanged`);
+  }
   // the run reads the project of the folder it runs in (src/cli/project.ts): the data folder's
   process.chdir(s.data);
   let code: number;
