@@ -301,3 +301,10 @@ test("a generated table is a table to a role: tables: all reads it, a list reads
   assert.deepEqual(r.roleProblems(file, [...copied, { source: "public.daily", columns: [], pending: true }]), []);
   assert.ok(r.roleProblems(file, copied).some((p) => /daily/.test(p)), "a table nothing declares is still refused");
 });
+
+test("a roles file whose values the YAML library refuses to expand (more aliases than it takes) is a problem of the file, never a throw", async () => {
+  const r = await roles();
+  const read = r.parseRolesText(`roles: {}\nx: &x 1\nl: [${Array(120).fill("*x").join(", ")}]\n`, FILE);
+  assert.ok("problems" in read, JSON.stringify(read));
+  assert.match(read.problems[0]!, /^it cannot be read as values: \S/);
+});

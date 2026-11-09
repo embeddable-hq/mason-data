@@ -1151,14 +1151,14 @@ async function create(r: Replica, o: { region: string; sizeGb: number; timeout: 
 
 /** Whether a person is there to type the replica's name back: a terminal both ways, and no --json (never an environment
  *  variable: src/cli/share.ts's rule). */
-const canAsk = (json: boolean): boolean => !json && process.stdin.isTTY === true && process.stderr.isTTY === true;
+export const canAsk = (json: boolean): boolean => !json && process.stdin.isTTY === true && process.stderr.isTTY === true;
 
 /**
  * A PERSON TYPES THE REPLICA'S NAME BACK: whether they typed exactly it (nothing trimmed or re-cased, as the service takes
  * the confirm). What was typed is never printed: it may be anything, a secret pasted in the wrong place. The terminal
  * echoes it, as a terminal does; the CLI writes nothing of it.
  */
-async function typedBack(name: string): Promise<boolean> {
+export async function typedBack(name: string): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: false });
   const closed = once(rl, "close").then(() => null);
   const answer = await Promise.race([rl.question("> "), closed]);

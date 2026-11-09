@@ -710,3 +710,9 @@ test("every retired setting's way out, applied as written to a file mason init w
     }
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test("a file whose values the YAML library refuses to expand (more aliases than it takes: a file built to exhaust memory) is a problem of the file, never a throw", () => {
+  const text = `kind: postgres\nurl: \${DATABASE_URL}\ntables: {}\nx: &x 1\nl: [${Array(120).fill("*x").join(", ")}]\n`;
+  assert.deepEqual(problems(text).map((p) => p.replace(/: .*$/, ":")), ["it cannot be read as values:"]);
+  assert.match(problems(text)[0]!, /^it cannot be read as values: \S/);
+});
