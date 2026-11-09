@@ -435,7 +435,7 @@ export function jsonText(spec: CommandSpec, value: Record<string, unknown>, next
 }
 
 /** The commands that can run out of time, exit 124 (code `timeout`): the one list the codes and the agent's guide say. */
-export const TIMEOUT_COMMANDS = "mason wait, mason deploy, mason replica create, mason replica delete, mason login (its code expired), mason share and mason ui --ssh (no address or answer in time)";
+export const TIMEOUT_COMMANDS = "mason wait, mason deploy, mason replica create, mason replica delete, mason replica upgrade, mason login (its code expired), mason share and mason ui --ssh (no address or answer in time)";
 
 /**
  * THE CODES A FAILURE CARRIES, a closed set a program can branch on (`mason help agent` lists them): `Failure.code` is
@@ -532,8 +532,8 @@ export function errorJson(f: Failure): { code: string; message: string; why?: st
 }
 
 /** The failure as a program reads it: `{"error": {code, message, why?, fix?}, "next": […]}`. */
-export function failureJson(f: Failure): string {
-  return JSON.stringify({ error: errorJson(f), next: nextJson(f.next) }, null, 2);
+export function failureJson(f: Failure, beside: Record<string, unknown> = {}): string {
+  return JSON.stringify({ error: errorJson(f), ...beside, next: nextJson(f.next) }, null, 2);
 }
 
 /**
@@ -541,10 +541,11 @@ export function failureJson(f: Failure): string {
  * person on stderr (failureText), under --json as one JSON document on stdout (failureJson), so a program that asked for
  * data never has to read prose. tests/conventions.test.ts refuses a `mason <cmd>: …` written to stderr any other way.
  */
-export function failed(cmd: string, f: Failure | Problem, o: { json: boolean; io?: Io; style?: Style }): number {
+export function failed(cmd: string, f: Failure | Problem, o: { json: boolean; io?: Io; style?: Style; beside?: Record<string, unknown> }): number {
   const n = usageWayOut(cmd, asFailure(f));
   const io = o.io ?? STDIO;
-  if (o.json) io.out(failureJson(n)); else io.err(failureText(cmd, n, o.style ?? failureStyle(io)));
+  // `beside`: data a failure carries under --json next to `error` (mason serve --check's problems), declared by its usage
+  if (o.json) io.out(failureJson(n, o.beside)); else io.err(failureText(cmd, n, o.style ?? failureStyle(io)));
   return exitOf(n);
 }
 

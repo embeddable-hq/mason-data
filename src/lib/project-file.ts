@@ -35,9 +35,19 @@ const isPlain = (v: unknown): v is Record<string, unknown> => typeof v === "obje
 export function readProjectSettings(project: string): ProjectSettings | { problem: string; file: string } {
   const file = path.join(project, PROJECT_FILE);
   if (!fs.existsSync(file)) return { pin: null, file };
+  let text: string;
+  // (a file that cannot be read was said as one that is not YAML, its reason beside it: kept)
+  try { text = fs.readFileSync(file, "utf8"); }
+  catch (e) { return { problem: `${file}: is not YAML: ${(e as Error).message.split("\n")[0]}`, file }; }
+  return parseProjectText(text, file);
+}
+
+/** A mason.yml's text read, `file` naming it in a problem: the one reading of the file, whether it is on this machine or
+ *  the text a replica runs (src/cli/deploy-plan.ts). */
+export function parseProjectText(text: string, file: string): ProjectSettings | { problem: string; file: string } {
   const fail = (problem: string): { problem: string; file: string } => ({ problem: `${file}: ${problem}`, file });
   let doc: unknown;
-  try { doc = parse(fs.readFileSync(file, "utf8")); }
+  try { doc = parse(text); }
   catch (e) { return fail(`is not YAML: ${(e as Error).message.split("\n")[0]}`); }
   const noVersion = { problem: `${file} names no version: write version: <x.y.z>, the Mason version the project is written for`, file };
   if (doc === null || doc === undefined) return noVersion;

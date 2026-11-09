@@ -38,6 +38,7 @@ import { appEnvValue, ENV_FILE } from "../lib/dotenv.ts";
 import { closest, didYouMean } from "../lib/did-you-mean.ts";
 import type { Failure, NextStep } from "./command.ts";
 import { maskedUrl, type SourceTable } from "./preflight.ts";
+import { pgIdent } from "../cdc/pg-wire.ts";
 import type { AddedTable } from "../duck/sync.ts";
 import { DEFAULT_SYNC, parseSync, syncText, type SourcesTop, type TableSync } from "../lib/table-sync.ts";
 
@@ -213,7 +214,11 @@ const notMapping = (v: unknown): string => `it is ${v === null || v === undefine
 export function parseSourceText(text: string, name: string, file: string): SourceFile | { problems: string[] } {
   const doc = parseDocument(text, { uniqueKeys: true });
   if (doc.errors.length) return { problems: [`it is not YAML: ${doc.errors[0]!.message.split("\n")[0]}`] };
-  const v: unknown = doc.toJS();
+  // a document the library parses can still refuse to become values (more aliases than it expands: a file built to
+  // exhaust memory), and throws: a problem of the file, never a crash
+  let v: unknown;
+  try { v = doc.toJS(); }
+  catch (e) { return { problems: [`it cannot be read as values: ${(e as Error).message.split("\n")[0]}`] }; }
   if (!isPlain(v)) return { problems: [notMapping(v)] };
   const problems: string[] = [];
   for (const k of Object.keys(v)) {
@@ -367,7 +372,13 @@ export function writtenDatabase(folder: string, root: string): { database: strin
   const text = fs.readFileSync(file, "utf8");
   const doc = parseDocument(text, { uniqueKeys: true });
   if (doc.errors.length) return sourceFailure(file, root, [`it is not YAML: ${doc.errors[0]!.message.split("\n")[0]}`]);
-  if (!isMap(doc.contents)) return sourceFailure(file, root, [notMapping(doc.toJS())]);
+  if (!isMap(doc.contents)) {
+    // (a document whose values the library refuses to expand throws: said as the file's problem, never a crash)
+    let v: unknown;
+    try { v = doc.toJS(); }
+    catch (e) { return sourceFailure(file, root, [`it cannot be read as values: ${(e as Error).message.split("\n")[0]}`]); }
+    return sourceFailure(file, root, [notMapping(v)]);
+  }
   const named = databaseKey(doc, text);
   return "problem" in named ? sourceFailure(file, root, [named.problem]) : named;
 }
@@ -496,6 +507,13 @@ export function entryProblems(t: SourceTable | undefined, e: TableEntry, all: re
     const unique = (t.uniqueKeys ?? []).find((u) => u.columns.every((c) => t.columns.find((x) => x.name === c)?.notNull === true));
     out.push(`${at}: ${t.source} has no primary key, so Mason cannot tell its rows apart — name the columns that do: key: [${unique ? unique.columns.join(", ") : "…"}]` +
       `${unique ? ` (its unique index ${unique.name})` : ""}`);
+  }
+  // a SELECT answers no row and no error: the synced table would be empty, said as though it were the table's
+  if (t.rowSecurityHidesFrom !== undefined) {
+    const user = pgIdent(t.rowSecurityHidesFrom);
+    out.push(`${at}: row-level security on ${t.source} hides every row from ${t.rowSecurityHidesFrom} (no SELECT policy for it, and it is not the owner or BYPASSRLS), ` +
+      `so its synced table would be empty — the table's owner adds a policy for the rows Mason may read (CREATE POLICY mason_read ON ${t.source} FOR SELECT TO ${user} USING (…);), ` +
+      "or remove its entry");
   }
   for (const k of (e.key ?? t.key).filter((k) => e.exclude.includes(k))) out.push(`${at}.exclude: ${k} is ${t.source}'s key, which is always synced — take it out of exclude`);
   // a table that identifies no changed row: a publication carrying its updates would make the app's own UPDATEs and

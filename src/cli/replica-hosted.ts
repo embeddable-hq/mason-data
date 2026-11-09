@@ -1,5 +1,5 @@
 /**
- * `mason replica create | list | status | delete` — A HOSTED MASON SERVICE'S REPLICAS, by its documented API alone
+ * `mason replica create | list | status | delete | upgrade` — A HOSTED MASON SERVICE'S REPLICAS, by its documented API alone
  * (docs/HOSTED-API.md "Replicas"). Each is a client of it, as `mason deploy` and `mason user --replica` are:
  *
  *   create <org>/<name>   POST /v1/replicas/{org}  { name, region, sizeGb, sources: [{ name, variable, url }] }
@@ -9,6 +9,9 @@
  *   delete <org>/<name>   DELETE /v1/replicas/{org}/{name}  { confirm: "<org>/<name>" }  202 (or 200, done already)
  *                         { replica }, then GET …/{name} until its deletion is finished, needs a person (a slot not
  *                         verified gone: it stops at once, exit 1) or is past --timeout
+ *   upgrade <org>/<name>  POST /v1/replicas/{org}/{name}/upgrade  { client }  202 { replica } (its pending change
+ *                         "upgrade"), or 200 when it has the newest Mason already; then GET …/{name} until it carries
+ *                         none (ready), its upgrade failed, or past --timeout
  *
  * A DELETION'S SQL IS MASON'S OWN (docs/HOSTED-API.md, `DELETE /v1/replicas/{org}/{name}` and `DeletionSource`): for a source whose replication slot was not
  * verified gone, the statement a person runs by hand is rendered here, by `dropStatements` (src/cli/replication-mode.ts,
@@ -42,6 +45,7 @@
  *   region, hostId                          rows, --json                              `REGION`, `HOST_ID`
  *   sizeGb, attempts                        rows, --json                              whole numbers, bounded
  *   state, outcome, status, change          rows (the CLI's words), --json            closed sets (`STATES`, …)
+ *   mason's version, latest, next           a row, the deploy's refusal, --json       `x.y.z` (`MASON_VERSION`), in order
  *   createdAt, nextAttemptAt                rows, --json                              `isServiceTime`
  *   allowlist                               a row, --json                             each `CIDR`, at most `MAX_ALLOWLIST`
  *   page                                    a row, --json                             on the service's own origin (`pageUrl`)
@@ -78,6 +82,7 @@ import { sayAgain } from "./commands.ts";
 import { version } from "./version.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { dropStatements, listSlotsStatement } from "./replication-mode.ts";
+import { older, parseVersion, pinFits, versionText, type Version } from "../lib/project-version.ts";
 import { err as styleErr, out as styleOut, PLAIN, type Style } from "./style.ts";
 
 /** How long the creation's POST may take: the service answers once Mason's checks of the source are done. */
@@ -97,6 +102,8 @@ const HOST_ID = /^[a-z0-9][a-z0-9-]{0,62}$/;
 /** An address range of an allowlist: IPv4 or IPv6, with its prefix length. */
 const CIDR = /^(?:\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}|[0-9a-fA-F:.]{2,45}\/\d{1,3})$/;
 const SIZE = /^[1-9]\d{0,5}$/;
+/** A Mason release's version, as a replica's `mason` key says it: `x.y.z`, nothing before or after. */
+const MASON_VERSION = /^(0|[1-9]\d{0,3})\.(0|[1-9]\d{0,3})\.(0|[1-9]\d{0,5})$/;
 
 export const STATES = ["checking", "creating", "ready", "failed", "deleting", "deleted"] as const;
 export type ReplicaState = typeof STATES[number];
@@ -108,8 +115,13 @@ export interface HostedReplica {
   org: string; name: string; region: string; sizeGb: number; hostId: string; state: ReplicaState; createdAt: string; allowlist: string[];
   /** its page in the service's web app, where its allowlist is set: on the service's own origin; null when none is named */
   page: string | null;
-  pending: Array<{ change: "create" | "allowlist"; state: "pending" | "failed"; attempts: number; failure: string | null; nextAttemptAt: string | null }>;
+  pending: Array<{ change: "create" | "allowlist" | "upgrade"; state: "pending" | "failed"; attempts: number; failure: string | null; nextAttemptAt: string | null }>;
+  /** the Mason it runs, the newest the service offers, and a newer one installed that starts with the first deploy pinned
+   *  to its release line; null when the service says none (an older service) */
+  mason: MasonVersions | null;
 }
+/** A replica's Mason, as the service says it: each `x.y.z`. */
+export interface MasonVersions { version: string; latest: string; next: string | null }
 /** Mason's checks of one source, as the service says them, every word one line. */
 export interface SourceChecks {
   source: string; outcome: typeof OUTCOMES[number];
@@ -118,11 +130,12 @@ export interface SourceChecks {
 
 export const REPLICA: CommandSpec = {
   name: "replica",
-  summary: "a hosted Mason service's replicas: create one for this project's database, list them, say how one is, delete one",
+  summary: "a hosted Mason service's replicas: create one for this project's database, list, status, delete, upgrade",
   usage: `usage: mason replica create <org>/<name> --region <region> --size <gb> [--timeout <duration>] [--json] [< url]
        mason replica list [<org> | --org <org>] [--json]
        mason replica status <org>/<name> | --replica <org>/<name> [--json]
        mason replica delete <org>/<name> | --replica <org>/<name> [--yes] [--timeout <duration>] [--json]
+       mason replica upgrade <org>/<name> | --replica <org>/<name> [--yes] [--timeout <duration>] [--json]
 
   A replica is Mason run for you by a hosted Mason service, on a machine of its own, syncing this project's
   database. mason deploy then sends it the project's files, and mason token create a CI token for it.
@@ -132,14 +145,17 @@ export const REPLICA: CommandSpec = {
     mason replica list
     mason replica status acme/shop --json
     mason replica delete acme/shop
+    mason replica upgrade acme/shop --yes
 
-  --replica <org>/<name>   create, status, delete: the replica, in place of the argument (else MASON_REPLICA)
+  --replica <org>/<name>   create, status, delete, upgrade: the replica, in place of the argument (else MASON_REPLICA)
   --org <org>              list: the organisation, in place of the argument
   --region <region>        create: the region it runs in, one the service offers
   --size <gb>              create: the synced data it holds, in GB, one size the service offers (50)
   --timeout <duration>     create: how long to wait for its region to make it; delete: for its deletion to finish
-                           or to need a person (default ${DEFAULT_TIMEOUT}; 1s to 24h; a bare number is seconds)
-  --yes                    delete: delete it without asking for its name to be typed back (CI, a coding agent)
+                           or to need a person; upgrade: for its upgrade to finish (default ${DEFAULT_TIMEOUT}; 1s
+                           to 24h; a bare number is seconds)
+  --yes                    delete, upgrade: go ahead without asking for its name to be typed back (CI, a coding
+                           agent)
   --json                   as data: its shape is at the end
 
   The replica can also be named as every other command names one, --replica <org>/<name> (else MASON_REPLICA, said
@@ -166,8 +182,9 @@ export const REPLICA: CommandSpec = {
 
   list says the replicas of <org>, or of every organisation of this login when none is named (a CI token names
   one); status says one replica: its state (checking, creating, ready, failed, deleting, deleted), its region and
-  size, its host, its allowlist (the addresses that may query it), what of its region's work is not done, and,
-  while it is deleted, its deletion as delete says it.
+  size, its host, its allowlist (the addresses that may query it), the Mason version it runs (and the newest the
+  service offers, and a newer one installed, when the service says them), what of its region's work is not
+  done, and, while it is deleted, its deletion as delete says it.
 
   delete deletes one, for good: the replica and its synced data go, and Mason's replication slot on its
   database is dropped. At a terminal it asks for <org>/<name> to be typed back; elsewhere (and with --json) it
@@ -181,21 +198,32 @@ export const REPLICA: CommandSpec = {
   service gives; whatever statement the service sends beside it is never printed. A replica deleted another
   way (as from the web app) may be said only as being deleted, when the service says no more of it.
 
+  upgrade moves a replica to the newest Mason the service offers. Mason on it restarts: every connection to it
+  drops, and queries are refused until it is back. Within its release line it then runs the newest version; a
+  newer release line is installed beside the one it runs, and starts with the first mason deploy of a project
+  pinned to that line (mason.yml), so a project written for the line it runs goes on running. At a terminal it
+  asks for <org>/<name> to be typed back; elsewhere (and with --json) it needs --yes. An owner of the
+  organisation upgrades one (a CI token upgrades none). It waits until the upgrade is done (--timeout bounds that
+  wait; it goes on all the same). A replica that has the newest Mason already is said so, and nothing changes.
+
   The login is MASON_TOKEN, else this machine's (mason login); the service is MASON_CLOUD_URL, else the default.
   Progress goes to stderr; the answer is printed when it ends.
 
-  Exit status: 0 the replica is ready (create), said (list, status), or deleted, every replication slot dropped,
-  none there or confirmed by a person (delete); 1 not signed in, the URL not given (cancelled, stdin empty, more
+  Exit status: 0 the replica is ready (create), said (list, status), deleted, every replication slot dropped,
+  none there or confirmed by a person (delete), or upgraded or current already (upgrade); 1 not signed in, the URL not given (cancelled, stdin empty, more
   than one line or past 2 KiB: nothing sent), refused by the service (its words printed as they came, the code
   the CLI's own), not made (the checks failed: each is said), its region could not make it, its deletion needs a
   person (a slot NOT verified gone: the statement to run is printed, and the replica is kept until it is
-  confirmed), or the service answered outside its contract; 2 a wrong command line (delete without a terminal
-  and without --yes); 124 the wait timed out (nothing stopped: mason replica status says how it goes). Whatever
+  confirmed), its upgrade failed, or the service answered outside its contract; 2 a wrong command line (delete
+  or upgrade without a terminal and without --yes); 124 the wait timed out (nothing stopped: mason replica status says how it goes). Whatever
   the service sends, it never makes the exit 0, 2 or 124.
 
-  The --json answer, once it ends: { replica (create, status, delete: { org, name, region, sizeGb, hostId,
-    state, createdAt, allowlist, page (its page, null when the service names none), pending: [{ change
-    (create, allowlist), state (pending, failed), attempts, failure, nextAttemptAt }] }), deletion (status,
+  The --json answer, once it ends: { replica (create, status, delete, upgrade: { org, name, region, sizeGb,
+    hostId, state, createdAt, allowlist, page (its page, null when the service names none), pending: [{ change
+    (create, allowlist, upgrade), state (pending, failed), attempts, failure, nextAttemptAt }], mason ({
+    version (the Mason it runs), latest (the newest the service offers), next (a newer one installed, which
+    starts with the first deploy pinned to its line; null for none) }, null when the service says none) }),
+    already (upgrade: true when it had the newest Mason already, and nothing changed), deletion (status,
     delete: null while it is in none, or when the service gave none; { stage (requested, in_region,
     needs_person, finished), requestedAt, handover: { attempts, failure, nextAttemptAt } or null,
     lastHeardAt, finishedAt, steps: [{ step, what, doneAt }], sources: [{ ordinal, outcome (dropped,
@@ -204,12 +232,12 @@ export const REPLICA: CommandSpec = {
     (not_verified: Mason's statement to run by hand), reportedAt }] }), checks (create: [{ source, outcome
     (passed, failed, unknown), checks: [{ name, status (ok, warn, failed, unknown), detail, fix }],
     missing }], null when the service's answer was lost), replicas (list: each as replica is), more (list:
-    true when an organisation has more than the service lists), error (create, delete: when it was not
-    made, failed, needs a person, was refused or the wait timed out: { code, message, why, fix }), next }
+    true when an organisation has more than the service lists), error (create, delete, upgrade: when it was
+    not made, failed, needs a person, was refused or the wait timed out: { code, message, why, fix }), next }
 `,
   options: { replica: { type: "string" }, org: { type: "string" }, region: { type: "string" }, size: { type: "string" }, timeout: { type: "string" },
     yes: { type: "boolean", default: false }, json: { type: "boolean", default: false } },
-  json: ["replica", "deletion", "checks", "replicas", "more", "error", "next"],
+  json: ["replica", "already", "deletion", "checks", "replicas", "more", "error", "next"],
 };
 
 /** Everything this command prints can hold the service's text, so it is all drawn in serviceStyle (src/cli/command.ts). */
@@ -270,14 +298,75 @@ export function heldReplica(v: unknown, asked: { org: string; name?: string }, s
   }
   const pending: HostedReplica["pending"] = [];
   for (const p of v.pending) {
-    if (!obj(p) || (p.change !== "create" && p.change !== "allowlist") || (p.state !== "pending" && p.state !== "failed") || !whole(p.attempts, 0, 1_000_000)) return null;
+    if (!obj(p) || (p.change !== "create" && p.change !== "allowlist" && p.change !== "upgrade") || (p.state !== "pending" && p.state !== "failed") || !whole(p.attempts, 0, 1_000_000)) return null;
     if (p.failure !== undefined && p.failure !== null && typeof p.failure !== "string") return null;
     if (p.nextAttemptAt !== undefined && p.nextAttemptAt !== null && !isServiceTime(p.nextAttemptAt)) return null;
     pending.push({ change: p.change, state: p.state, attempts: p.attempts as number, failure: words(p.failure, 500, secrets),
       nextAttemptAt: typeof p.nextAttemptAt === "string" ? p.nextAttemptAt : null });
   }
+  const mason = heldMason(v.mason);
+  if (mason === null) return null;
   return { org: v.org, name: v.name, region: v.region, sizeGb: v.sizeGb as number, hostId: v.hostId, state: v.state as ReplicaState,
-    createdAt: v.createdAt as string, allowlist: [...v.allowlist as string[]], page, pending };
+    createdAt: v.createdAt as string, allowlist: [...v.allowlist as string[]], page, pending, mason: mason ?? null };
+}
+
+/** A version of `MASON_VERSION`'s grammar, read; null for any other value. */
+export function masonVersion(v: unknown): Version | null {
+  return typeof v === "string" && MASON_VERSION.test(v) ? parseVersion(v) : null;
+}
+
+/**
+ * A REPLICA'S MASON, held: `version` and `latest` each `x.y.z`, `latest` not older than `version`; `next` null (or
+ * absent) or `x.y.z`, newer than `version` and not newer than `latest`. `undefined` when the service says none (absent or
+ * `null`: an older service); null when it does not hold, which refuses the answer whole.
+ */
+export function heldMason(v: unknown): MasonVersions | null | undefined {
+  if (absent(v)) return undefined;
+  if (!obj(v)) return null;
+  const version = masonVersion(v.version), latest = masonVersion(v.latest);
+  if (version === null || latest === null || older(latest, version)) return null;
+  if (absent(v.next)) return { version: v.version as string, latest: v.latest as string, next: null };
+  const next = masonVersion(v.next);
+  if (next === null || !older(version, next) || older(latest, next)) return null;
+  return { version: v.version as string, latest: v.latest as string, next: v.next as string };
+}
+
+/** A version's release line, as a person reads it: `0.9.x` before 1.0, `1.x` from it. */
+export function lineOf(version: string): string {
+  const v = parseVersion(version)!;
+  return v.major > 0 ? `${v.major}.x` : `${v.major}.${v.minor}.x`;
+}
+
+/** A replica's Mason, as a row: the version it runs, a newer one installed, and the newest the service offers. */
+export function masonWords(m: MasonVersions): string {
+  const next = m.next === null ? "" : `; ${m.next} installed, which starts with the first deploy pinned to ${lineOf(m.next)}`;
+  const newest = m.latest === m.version || m.latest === m.next ? `${m.next === null ? "," : ";"} the newest the service offers` : `; the newest the service offers is ${m.latest}`;
+  return `${m.version}${next}${newest}`;
+}
+
+/** Whether the service offers a newer Mason than the replica runs or has installed, and no upgrade is under way. */
+export function upgradable(r: HostedReplica): boolean {
+  return r.mason !== null && r.mason.latest !== r.mason.version && r.mason.latest !== r.mason.next && !r.pending.some((p) => p.change === "upgrade" && p.state === "pending");
+}
+
+/**
+ * WHETHER A PROJECT PINNED TO `pin` RUNS ON THE REPLICA (`mason deploy`, before it sends): it does on the version the
+ * replica runs, or on the newer one it has installed (`next`, which starts with that deploy), by the one rule of the
+ * pin (`pinFits`, src/lib/project-version.ts). The refusal when neither, naming both and the ways out: write the project
+ * for the replica's Mason, or upgrade the replica when the service offers a version the pin fits. Null when it runs.
+ */
+export function pinRefusal(r: Replica, m: MasonVersions, pin: Version, file: string): Failure | null {
+  const runs = parseVersion(m.version)!, next = m.next === null ? null : parseVersion(m.next)!;
+  if (pinFits(pin, runs) || (next !== null && pinFits(pin, next))) return null;
+  const name = replicaText(r), p = versionText(pin), target = m.next ?? m.version;
+  const upgrade = pinFits(pin, parseVersion(m.latest)!);
+  const ways = [`write the project for Mason ${target}: its mason command is npx @mason-data/cli@${target} (read the release notes between the two, change what they say, then set version: ${target} in ${file})`,
+    ...(upgrade ? [`upgrade the replica to Mason ${m.latest}, which runs the project as it is: mason replica upgrade ${name}`] : [])];
+  return { message: `${file} pins Mason ${p}, and ${name} runs Mason ${m.version}${m.next === null ? "" : `, with ${m.next} installed`}: it would not run the project`,
+    code: "refused",
+    why: `a replica runs a project pinned to the release line of the Mason it runs (${lineOf(m.version)}), at that version or older${m.next === null ? "" : `, or to the line of the one installed (${lineOf(m.next)}), which then starts`}; nothing was sent`,
+    fix: ways.join("; or "),
+    next: [...(upgrade ? [[`mason replica upgrade ${name}`, `move it to Mason ${m.latest}`] as NextStep] : []), [`mason replica status ${name}`, "its Mason version"]] };
 }
 
 /** Mason's checks, held: one entry at most, for the source sent, each check's status and the outcome closed sets, every
@@ -429,6 +518,7 @@ const STATE_WORDS: Record<ReplicaState, string> = {
   deleting: "deleting",
   deleted: "deleted",
 };
+const CHANGE_WORDS: Record<HostedReplica["pending"][number]["change"], string> = { create: "its creation", allowlist: "its allowlist", upgrade: "its upgrade" };
 const MARKS: Record<SourceChecks["checks"][number]["status"], string> = { ok: "ok", warn: "! ", failed: "!!", unknown: "? " };
 
 /** Each check, one line each: its mark, its name and its detail, its fix beside it; the checks not run, a line. */
@@ -446,7 +536,8 @@ function rows(r: HostedReplica): Array<[string, string]> {
     ["state", STATE_WORDS[r.state]], ["region", r.region], ["size", `${r.sizeGb} GB of synced data`], ["host", r.hostId], ["created", r.createdAt],
     ["allowlist", r.allowlist.length ? r.allowlist.join(", ") : "none: no address may query it yet"],
     ...(r.page !== null ? [["page", r.page] as [string, string]] : []),
-    ...r.pending.map((p): [string, string] => ["pending", `${p.change === "create" ? "its creation" : "its allowlist"} ${p.state === "failed" ? "failed" : "is under way"}` +
+    ...(r.mason !== null ? [["mason", masonWords(r.mason)] as [string, string]] : []),
+    ...r.pending.map((p): [string, string] => ["pending", `${CHANGE_WORDS[p.change]} ${p.state === "failed" ? "failed" : "is under way"}` +
       ` (${p.attempts} attempt${p.attempts === 1 ? "" : "s"}${p.nextAttemptAt ? `, the next at ${p.nextAttemptAt}` : ""})${p.failure ? `: ${p.failure}` : ""}`]),
   ];
 }
@@ -593,13 +684,13 @@ export async function replica(argv: string[]): Promise<number> {
   const json = f.values.json === true;
   const usage = (message: string, fix?: string): number => fail({ message, code: "usage", ...(fix ? { fix } : {}), usage: REPLICA.usage }, json);
   const [verb, arg, ...rest] = f.positionals;
-  const VERBS = ["create", "list", "status", "delete"];
-  if (verb === undefined) return usage("create, list, status or delete: mason replica list says the replicas");
-  if (!VERBS.includes(verb)) return usage(`there is no mason replica ${verb}: create, list, status or delete${didYouMean(verb, VERBS)}`);
+  const VERBS = ["create", "list", "status", "delete", "upgrade"];
+  if (verb === undefined) return usage("create, list, status, delete or upgrade: mason replica list says the replicas");
+  if (!VERBS.includes(verb)) return usage(`there is no mason replica ${verb}: create, list, status, delete or upgrade${didYouMean(verb, VERBS)}`);
   if (rest.length) return usage(`mason replica ${verb} takes ${verb === "list" ? "one organisation at most" : "one replica"}: ${rest.join(" ")} is too many`);
   for (const k of ["region", "size"] as const) if (verb !== "create" && f.values[k] !== undefined) return usage(`--${k} goes with mason replica create`);
-  if (verb !== "create" && verb !== "delete" && f.values.timeout !== undefined) return usage("--timeout goes with mason replica create and mason replica delete");
-  if (verb !== "delete" && f.values.yes === true) return usage("--yes goes with mason replica delete");
+  if (verb !== "create" && verb !== "delete" && verb !== "upgrade" && f.values.timeout !== undefined) return usage("--timeout goes with mason replica create, delete and upgrade");
+  if (verb !== "delete" && verb !== "upgrade" && f.values.yes === true) return usage("--yes goes with mason replica delete and upgrade");
   const flag = (k: "replica" | "org"): string | undefined => typeof f.values[k] === "string" ? f.values[k] : undefined;
   if (verb === "list") {
     if (flag("replica") !== undefined) return usage("--replica goes with mason replica create and status", "name the organisation: mason replica list <org>, or --org <org>");
@@ -613,15 +704,16 @@ export async function replica(argv: string[]): Promise<number> {
   if (r === null) return usage(`mason replica ${verb} names the replica: mason replica ${verb} <org>/<name>`, `or --replica <org>/<name>, or ${REPLICA_ENV}=<org>/<name>`);
   if (isFailure(r)) return fail(r, json);
   if (verb === "status") return status(r, json);
-  if (verb === "delete") {
+  if (verb === "delete" || verb === "upgrade") {
     const timeout = parseDuration(typeof f.values.timeout === "string" ? f.values.timeout : DEFAULT_TIMEOUT, { min: MIN_POLL_SECONDS, max: MAX_POLL_SECONDS });
     if ("problem" in timeout) return usage(`--timeout ${timeout.problem}`);
-    // a deletion is asked for twice: on the line, and typed back by a person at a terminal, else by --yes
+    // a deletion (and an upgrade, which drops every connection) is asked for twice: on the line, and typed back by a
+    // person at a terminal, else by --yes
     if (f.values.yes !== true && !canAsk(json)) {
-      return usage(`mason replica delete asks for ${replicaText(r)} to be typed back at a terminal, and ${json ? "--json is no terminal" : "there is none here"}`,
-        `say it on the line: mason replica delete ${replicaText(r)} --yes`);
+      return usage(`mason replica ${verb} asks for ${replicaText(r)} to be typed back at a terminal, and ${json ? "--json is no terminal" : "there is none here"}`,
+        `say it on the line: mason replica ${verb} ${replicaText(r)} --yes`);
     }
-    return remove(r, { timeout, yes: f.values.yes === true }, json);
+    return verb === "delete" ? remove(r, { timeout, yes: f.values.yes === true }, json) : upgrade(r, { timeout, yes: f.values.yes === true }, json);
   }
   const region = typeof f.values.region === "string" ? f.values.region : undefined;
   const size = typeof f.values.size === "string" ? f.values.size : undefined;
@@ -647,7 +739,7 @@ function signedIn(asked: string, again: string, json: boolean, more: readonly st
 /** One replica's answer (`GET …/{name}`, a deletion's): its strings put to the exact test first, its words masked, by
  *  the one list; the replica and its deletion (null when it is in none, or the service gave none while it is being
  *  deleted), or null when either does not hold. */
-function replicaAnswer(service: Service, a: Answer, asked: Replica, secrets: readonly string[]): { replica: HostedReplica; deletion: Deletion | null } | null {
+export function replicaAnswer(service: Service, a: Answer, asked: Replica, secrets: readonly string[]): { replica: HostedReplica; deletion: Deletion | null } | null {
   if (!obj(a.json) || !carriesNoSecret(wordless(a.json), secrets)) return null;
   const replica = heldReplica(a.json.replica, asked, secrets, service);
   if (replica === null) return null;
@@ -665,7 +757,7 @@ async function status(r: Replica, json: boolean): Promise<number> {
   const answer = replicaAnswer(service, a, r, secrets);
   if (answer === null) return fail(unexpected(service, a, "a replica's state was asked for"), json);
   const { replica: held, deletion } = answer;
-  const next = nextOf(held);
+  const next = [...nextOf(held), ...(held.state === "ready" && upgradable(held) ? [[`mason replica upgrade ${replicaText(r)}`, `move it to Mason ${held.mason!.latest}`] as NextStep] : [])];
   if (json) { out(jsonText(REPLICA, { replica: held, deletion }, next)); return 0; }
   out(deletionReport({ headline: `${replicaText(r)} on ${service.base}: ${held.state}`, details: [...rows(held), ...deletionDetails(held.state, deletion)], deletion,
     ...(deletion?.stage === "needs_person" ? { tips: [NEEDS_PERSON_TIP] } : {}), next }, outStyle()));
@@ -786,8 +878,8 @@ export function printedCorpus(c: CreateRun, tail = 256): string[] {
   const failure = (f: Failure): string => failureText("replica", f, PLAIN);
   const asJson = (v: Record<string, unknown>, next: readonly NextStep[]): string => jsonText(REPLICA, v, next);
   const sample = (state: ReplicaState, pending: HostedReplica["pending"] = [], page: string | null = P): HostedReplica =>
-    ({ org: c.r.org, name: c.r.name, region: c.region, sizeGb: c.sizeGb, hostId: P, state, createdAt: P, allowlist: [], page, pending });
-  const pendings: Array<HostedReplica["pending"]> = [[], ...(["create", "allowlist"] as const).flatMap((change) => (["pending", "failed"] as const).flatMap((st) =>
+    ({ org: c.r.org, name: c.r.name, region: c.region, sizeGb: c.sizeGb, hostId: P, state, createdAt: P, allowlist: [], page, pending, mason: null });
+  const pendings: Array<HostedReplica["pending"]> = [[], ...(["create", "allowlist", "upgrade"] as const).flatMap((change) => (["pending", "failed"] as const).flatMap((st) =>
     [0, 1, 2].map((attempts) => [{ change, state: st, attempts, failure: P, nextAttemptAt: P }])))];
   const checks: SourceChecks[] = OUTCOMES.map((outcome) => ({ source: c.source, outcome, checks: CHECK_STATUSES.map((status) => ({ name: P, status, detail: P, fix: P })), missing: [P] }));
   const ends: Array<{ stdout: string } | { stderr: string }> = [];
@@ -806,6 +898,10 @@ export function printedCorpus(c: CreateRun, tail = 256): string[] {
     { stdout: asJson({ replica: sample("creating", [], null), checks, error: errorJson(f) }, f.next ?? []) }, { stdout: asJson({ checks, error: errorJson(f) }, f.next ?? []) });
   for (const pending of pendings) for (const next of nexts) {
     ends.push({ stdout: w.report(sample("ready", pending), next, PLAIN) }, { stdout: w.report(sample("ready", pending, null), next, PLAIN) }, { stdout: asJson({ replica: sample("ready", pending), checks }, next) }, { stdout: asJson({ replica: sample("ready", pending, null), checks }, next) }, { stdout: asJson({ replica: sample("ready", pending), checks: null }, next) });
+  }
+  // a replica that says its Mason: each way its row reads (the versions are digits, no word of a password's)
+  for (const mason of [{ version: "0.0.0", latest: "0.0.0", next: null }, { version: "0.0.0", latest: "0.0.1", next: null }, { version: "0.0.0", latest: "0.1.0", next: "0.1.0" }, { version: "0.0.0", latest: "0.2.0", next: "0.1.0" }]) {
+    for (const next of nexts) ends.push({ stdout: w.report({ ...sample("ready"), mason }, next, PLAIN) }, { stdout: asJson({ replica: { ...sample("ready"), mason }, checks }, next) });
   }
   // the lines on stderr before an end, in the order they are printed: the progress, the checks or a lost answer's line,
   // then the wait's lines (each state, as it is or unsure), in both orders
@@ -1055,14 +1151,14 @@ async function create(r: Replica, o: { region: string; sizeGb: number; timeout: 
 
 /** Whether a person is there to type the replica's name back: a terminal both ways, and no --json (never an environment
  *  variable: src/cli/share.ts's rule). */
-const canAsk = (json: boolean): boolean => !json && process.stdin.isTTY === true && process.stderr.isTTY === true;
+export const canAsk = (json: boolean): boolean => !json && process.stdin.isTTY === true && process.stderr.isTTY === true;
 
 /**
  * A PERSON TYPES THE REPLICA'S NAME BACK: whether they typed exactly it (nothing trimmed or re-cased, as the service takes
  * the confirm). What was typed is never printed: it may be anything, a secret pasted in the wrong place. The terminal
  * echoes it, as a terminal does; the CLI writes nothing of it.
  */
-async function typedBack(name: string): Promise<boolean> {
+export async function typedBack(name: string): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: false });
   const closed = once(rl, "close").then(() => null);
   const answer = await Promise.race([rl.question("> "), closed]);
@@ -1215,5 +1311,119 @@ async function remove(r: Replica, o: { timeout: { every: string; seconds: number
     // a deletion does not end otherwise than finished: a replica in none now is outside the contract
     if (now === null || !begun(now.replica)) return ended(unexpected(service, a, step));
     state = now.replica; deletion = now.deletion;
+  }
+}
+
+// ------------------------------------------------------------------ upgrade
+
+/** EVERY WORD AN UPGRADE PRINTS OF ITS OWN, by the builders it prints with; what the service sends goes in where a
+ *  builder takes it, held and masked. */
+export function upgradeWords(r: Replica, base: string, every: string) {
+  const name = replicaText(r);
+  const again: NextStep = [`mason replica upgrade ${name}`, "upgrade it again (a repeat changes nothing)"];
+  const status = statusStep(r);
+  const at = (seconds: number): string => new Date(Date.now() + seconds * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const versionOf = (x: HostedReplica): string => x.mason === null ? "" : x.mason.next !== null ? `: Mason ${x.mason.next} is installed, and starts with the first deploy pinned to ${lineOf(x.mason.next)}` : `: it runs Mason ${x.mason.version}`;
+  return {
+    again, status,
+    ask: `Upgrading ${name} on ${base} moves it to the newest Mason the service offers, and restarts Mason on it: every connection to it drops, and queries are refused until it is back. Type ${name} to upgrade it, anything else to keep it as it is.`,
+    notTyped: { message: `${name} was not upgraded: what was typed is not its name`, code: "refused",
+      why: "an upgrade restarts Mason on the replica, so it is asked for twice: on the command line, and typed back exactly (nothing trimmed, nothing re-cased)",
+      fix: `run it again and type ${name}; where no person is asked, mason replica upgrade ${name} --yes`, next: [[`mason replica upgrade ${name}`, "ask again"]] } as Failure,
+    progress: `Upgrading ${name} on ${base}: waiting up to ${every} for it to be done`,
+    waiting: (x: HostedReplica, unsure: string | null): string => {
+      const p = x.pending.find((y) => y.change === "upgrade");
+      const said = p === undefined ? STATE_WORDS[x.state] : `its upgrade is under way (${p.attempts} attempt${p.attempts === 1 ? "" : "s"}${p.nextAttemptAt ? `, the next at ${p.nextAttemptAt}` : ""})`;
+      return unsure === null ? said : `${said}; the service could not say more just now (${unsure}): asking again`;
+    },
+    headline: (x: HostedReplica): string => `Upgraded ${name} on ${base}${versionOf(x)}`,
+    already: (x: HostedReplica): string => `Nothing to upgrade: ${name} on ${base} has the newest Mason the service offers${x.mason === null ? "" : ` (${x.mason.latest})`}`,
+    /** a newer release line installed: what makes it start */
+    nextTip: (m: MasonVersions): string => `Mason ${m.next} starts with the first mason deploy of a project pinned to ${lineOf(m.next!)}: read its release notes, change what they say, set version: ${m.next} in mason.yml (its mason command is npx @mason-data/cli@${m.next}), then mason deploy --replica ${name}; until then the replica runs ${m.version}, and a project pinned to ${lineOf(m.version)} as before`,
+    /** a refusal's next step, the CLI's own, by the status */
+    refusedNext: (st: number, retryAfter: number | null): NextStep[] => {
+      if (st === 401 || st === 403) return [["mason login", `sign in as an owner of ${r.org}: an owner upgrades a replica (a CI token upgrades none)`]];
+      if (st === 404) return [listStep(r.org)];
+      if (st === 409) return [[status[0], "its state: it upgrades once it is ready, and no other change of it is under way"]];
+      if (st === 429 || st === 503) return [[again[0], retryAfter !== null ? `again after ${at(retryAfter)} (in ${retryAfter} s), when the service takes it` : "again later: the service did not say when"]];
+      return [again];
+    },
+    lostFailure: (sent: Failure): Failure => ({ ...sent, why: `${sent.why ?? "no answer"}; whether its upgrade began is not known`,
+      fix: `mason replica status ${name} says whether its upgrade is under way; if it is not, upgrade it again (a repeat changes nothing)`, next: [status, again] }),
+    failed: (why: string): Failure => ({ message: `${name} was not upgraded: its upgrade failed`, code: "failed", ...(why ? { why } : {}),
+      fix: `mason replica status ${name} says what it runs; upgrade it again, or ask the service`, next: [status, again] }),
+    notReady: (st: ReplicaState): Failure => ({ message: `${name} is ${st === "deleting" ? "being deleted" : st === "deleted" ? "deleted" : "failed"}: its upgrade did not finish`, code: "failed",
+      why: `it was ${STATE_WORDS[st]} while it was upgraded`, fix: `mason replica status ${name} says how it is`, next: [status] }),
+    timedOut: (x: HostedReplica): Failure => ({ message: `${name}'s upgrade did not finish within ${every}`, code: "timeout", why: `it was last: ${x.pending.some((y) => y.change === "upgrade") ? "its upgrade under way" : STATE_WORDS[x.state]}`,
+      fix: `nothing was stopped, and its upgrade goes on: mason replica status ${name} says how it goes; a longer wait is --timeout 30m`, next: [status] }),
+    gone: (): Failure => ({ message: `the service has no ${name} now`, code: "not_found", why: "it was being upgraded, and the service has no record of it now: deleted meanwhile",
+      fix: `mason replica list ${r.org} says the organisation's replicas`, next: [listStep(r.org)] }),
+  };
+}
+
+/** Its upgrade, as the replica carries it: under way, failed, or none. */
+const upgradeOf = (x: HostedReplica): HostedReplica["pending"][number] | undefined => x.pending.find((p) => p.change === "upgrade");
+
+async function upgrade(r: Replica, o: { timeout: { every: string; seconds: number }; yes: boolean }, json: boolean): Promise<number> {
+  const name = replicaText(r);
+  const s = signedIn("a replica is upgraded", `mason replica upgrade ${name}`, json);
+  if (isFailure(s)) return fail(s, json);
+  const { service, token } = s, secrets = [token];
+  const w = upgradeWords(r, service.base, o.timeout.every);
+  // A PERSON TYPES IT BACK (else --yes said it on the line): nothing is sent before
+  if (!o.yes) {
+    say(w.ask);
+    if (!(await typedBack(name))) return fail(w.notTyped, json);
+  }
+  const where = `/v1/replicas/${r.org}/${r.name}`;
+  const step = "a replica's upgrade was asked for";
+  if (!json) say(w.progress);
+
+  // THE UPGRADE: 202 under way (its pending change "upgrade"), 200 nothing to do (none under way), else why not
+  const sent = await call(service, "POST", `${where}/upgrade`, { token, json: { client: { version: version() } } });
+  // no answer: whether it began is not known, and a repeat changes nothing, so it is said, never guessed
+  if (isFailure(sent)) return fail(w.lostFailure({ ...sent, why: serviceText(sent.why ?? sent.message, 300, secrets) }), json);
+  if (sent.status !== 200 && sent.status !== 202) return fail(serviceFailure(sent, secrets, (st) => w.refusedNext(st, sent.retryAfter)) ?? unexpected(service, sent, step), json);
+  const held = replicaAnswer(service, sent, r, secrets);
+  const under = (x: HostedReplica): boolean => upgradeOf(x)?.state === "pending";
+  if (held === null || (sent.status === 202) !== under(held.replica)) return fail(unexpected(service, sent, step), json);
+  let state = held.replica, waitMs = sent.retryAfter !== null ? sent.retryAfter * 1000 : REPLICA_POLL_MS;
+  const ended = (error: Failure | null, already = false): number => {
+    const next = error === null ? nextOf(state) : error.next ?? [];
+    if (json) { out(jsonText(REPLICA, { replica: state, already, ...(error ? { error: errorJson(error) } : {}) }, next)); return error ? exitOf(error) : 0; }
+    if (error !== null) return fail(error, false);
+    const tips = state.mason?.next ? [w.nextTip(state.mason)] : [];
+    out(reportText({ headline: already ? w.already(state) : w.headline(state), details: rows(state), tips, next }, outStyle()));
+    return 0;
+  };
+  if (sent.status === 200) return ended(null, true);
+
+  // THE WAIT: until the replica carries no upgrade and is ready, bounded by --timeout
+  const deadline = Date.now() + o.timeout.seconds * 1000;
+  let said = "", saidAt = 0;
+  const show = (line: string): void => { if (!json && sayAgain(line, said, saidAt, Date.now())) { say(`  ${line}`); said = line; saidAt = Date.now(); } };
+  for (;;) {
+    const p = upgradeOf(state);
+    if (p?.state === "failed") return ended(w.failed(p.failure ?? ""));
+    if (state.state === "deleting" || state.state === "deleted" || state.state === "failed") return ended(w.notReady(state.state));
+    if (p === undefined && state.state === "ready") return ended(null);
+    show(w.waiting(state, null));
+    const left = deadline - Date.now();
+    if (left <= 0) return ended(w.timedOut(state));
+    await sleep(Math.min(waitMs, left));
+    const a = await call(service, "GET", where, { token });
+    waitMs = REPLICA_POLL_MS;
+    // an answer that cannot say how it goes is a wait, never an outcome: the timeout bounds it
+    if (isFailure(a) || a.status === 429 || a.status >= 500) {
+      if (!isFailure(a) && a.retryAfter !== null) waitMs = a.retryAfter * 1000;
+      show(w.waiting(state, isFailure(a) ? serviceText(a.why ?? a.message, 300, secrets) : `${a.what} answered ${a.status}`));
+      continue;
+    }
+    if (a.retryAfter !== null) waitMs = a.retryAfter * 1000;
+    if (a.status === 404) return ended(w.gone());
+    if (a.status !== 200) return ended(serviceFailure(a, secrets, (st) => refusedNext(st, r.org, "a member", w.status)) ?? unexpected(service, a, step));
+    const now = replicaAnswer(service, a, r, secrets);
+    if (now === null) return ended(unexpected(service, a, step));
+    state = now.replica;
   }
 }

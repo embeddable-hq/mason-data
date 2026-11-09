@@ -23,7 +23,7 @@ const ANSWERS: Answer[] = [];
 const made: string[] = [];
 after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true }); });
 
-interface Req { method: string; path: string; headers: http.IncomingHttpHeaders; body: string; at: number }
+interface Req { method: string; path: string; search: string; headers: http.IncomingHttpHeaders; body: string; at: number }
 /** `json`: a JSON body as text (one too deep for JSON.stringify to write); `raw`: a body that is not JSON. */
 type Reply = { status: number; body?: unknown; raw?: string; json?: string; headers?: Record<string, string> } | "drop";
 interface Script {
@@ -31,7 +31,11 @@ interface Script {
   post?: Reply | ((n: number) => Reply);
   /** the n-th GET's answer (0-based) */
   get?: (n: number) => Reply;
+  /** the answer to GET /v1/replicas/acme/shop, the replica's Mason asked before the POST (none: 404, as before there was one) */
+  replica?: Reply;
 }
+/** The replica's own path: its Mason is asked there before a deploy is sent (docs/HOSTED-API.md). */
+const REPLICA_PATH = "/v1/replicas/acme/shop";
 
 const CREATED = "2026-11-02T10:00:00Z";
 const ID = "dep_01abc";
@@ -47,10 +51,11 @@ async function fakeService(script: Script): Promise<{ url: string; requests: Req
     const chunks: Buffer[] = [];
     req.on("data", (b: Buffer) => chunks.push(b));
     req.on("end", () => {
-      const p = new URL(req.url ?? "/", "http://x").pathname;
-      requests.push({ method: req.method ?? "", path: p, headers: req.headers, body: Buffer.concat(chunks).toString("utf8"), at: Date.now() });
+      const u = new URL(req.url ?? "/", "http://x"), p = u.pathname;
+      requests.push({ method: req.method ?? "", path: p, search: u.search, headers: req.headers, body: Buffer.concat(chunks).toString("utf8"), at: Date.now() });
       const reply: Reply = req.method === "POST" && p === "/v1/replicas/acme/shop/deploys" ? (typeof script.post === "function" ? script.post(posts++) : script.post ?? queued)
         : req.method === "GET" && p === `/v1/replicas/acme/shop/deploys/${ID}` ? (script.get ?? (() => at("running")))(gets++)
+        : req.method === "GET" && p === REPLICA_PATH && script.replica !== undefined ? script.replica
         : { status: 404, body: { error: { code: "not_found", message: "no such endpoint" }, next: [] } };
       if (reply === "drop") { req.socket.destroy(); return; }
       const sent = reply.raw ?? reply.json ?? (reply.body === undefined ? "" : JSON.stringify(reply.body));
@@ -95,10 +100,11 @@ const envFor = (h: string, url: string, extra: Record<string, string> = {}): Rec
 
 /** The terminal a run is given (`{ terminal: 80 }`): a preload that makes its stdout and stderr say they are a terminal
  *  that wide, colour off (as tests/hosted-fake.ts gives login's runs; nothing in src/ reads a test's variable). */
-function terminalEnv(width: number): Record<string, string> {
+function terminalEnv(width: number, typing = false): Record<string, string> {
   const dir = temp("mason-terminal-");
   const hook = path.join(dir, "terminal.mjs");
-  fs.writeFileSync(hook, `for (const s of [process.stdout, process.stderr]) {
+  // `typing`: a person types at it, so its stdin says it is the terminal too
+  fs.writeFileSync(hook, `${typing ? "Object.defineProperty(process.stdin, \"isTTY\", { value: true, configurable: true });\n" : ""}for (const s of [process.stdout, process.stderr]) {
   Object.defineProperty(s, "isTTY", { value: true, configurable: true });
   Object.defineProperty(s, "columns", { value: ${width}, configurable: true });
 }
@@ -121,13 +127,15 @@ const HEADS: readonly string[] = [
   "  the service could not say more just now ", "  ! ", "using MASON_REPLICA=acme/shop ",
   ...["  ", ...["✔", "✓", "✘", "✗", ...FRAMES].map((m) => `${m} `)].map((m) => `${m}Waiting to send the deploy: `),
   ...["deploy", "service", "files", "took", "why", "fix"].map((l) => `  ${l} `),
+  // what the deploy changes, shown before it is sent (a row each), and the question a removal asks
+  "What the deploy changes on ", ...["adds", "removes", "changes"].map((v) => `  ${v} `), "Removing ", "> ",
 ];
 /** The steps under Next:, the CLI's own, as the start of their line. */
-const STEP_HEADS: readonly string[] = ["  mason deploy --replica acme/shop", "  mason replica status acme/shop", "  mason replica list acme", "  mason deploy --replica <org>/<name>", "  mason deploy --help", "  mason login", "  mason init",
+const STEP_HEADS: readonly string[] = ["  mason deploy --replica acme/shop", "  mason replica status acme/shop", "  mason replica upgrade acme/shop", "  mason replica list acme", "  mason deploy --replica <org>/<name>", "  mason deploy --help", "  mason login", "  mason init",
   "  unset MASON_CLOUD_URL", "  chmod 600 ", "  chmod 700 "];
 /** A dry run's row begins with a file's path, as this test's projects name them (this machine's own words, never the
  *  service's): on a narrow terminal the path itself is broken, so its row may begin with a part of it. */
-const DRY_PATHS = ["generated_tables/weekly.yml", "mason.yml", "roles.yml", "sources/shop.yml"];
+const DRY_PATHS = ["generated_tables/daily.yml", "generated_tables/weekly.yml", "mason.yml", "roles.yml", "sources/shop.yml"];
 const dryRow = (line: string): boolean => {
   const m = /^ {2}(\S+)( |$)/.exec(line);
   return m !== null && DRY_PATHS.some((p) => p === m[1] || (p.startsWith(m[1]!) && m[2] === ""));
@@ -164,7 +172,7 @@ function deploySeenProblems(text: string, width: number | null, failed: boolean 
 }
 
 /** Every step mason deploy gives, in every state: its own, never the service's. */
-const OWN_STEP = /^ {2}(mason deploy --replica (acme\/shop|<org>\/<name>)|mason replica status acme\/shop|mason replica list acme|mason deploy --help|mason login|mason init|unset MASON_CLOUD_URL|chmod (600|700) \S+)(\s|$)/;
+const OWN_STEP = /^ {2}(mason deploy --replica (acme\/shop|<org>\/<name>)|mason replica (status|upgrade) acme\/shop|mason replica list acme|mason deploy --help|mason login|mason init|unset MASON_CLOUD_URL|chmod (600|700) \S+)(\s|$)/;
 
 /**
  * One run in `cwd`, held at once to carrying no secret on either stream, and to the service's values never shaping it
@@ -172,9 +180,12 @@ const OWN_STEP = /^ {2}(mason deploy --replica (acme\/shop|<org>\/<name>)|mason 
  * code's; no line begins with what a hostile value carried (FORGED); each stream has one Next: at most, every step under
  * it the CLI's; and no --json string holds a line break.
  */
-async function mason(cwd: string, argv: string[], env: Record<string, string>, o: { timeoutMs?: number; terminal?: number } = {}): Promise<Answer> {
+async function mason(cwd: string, argv: string[], env: Record<string, string>, o: { timeoutMs?: number; terminal?: number; input?: string } = {}): Promise<Answer> {
   const given = inputsOf([cwd], argv, env);
-  const a = await runMason(cwd, argv, o.terminal ? { ...env, ...terminalEnv(o.terminal) } : env, o.timeoutMs ?? 60_000);
+  const ran = await runMason(cwd, argv, o.terminal ? { ...env, ...terminalEnv(o.terminal, o.input !== undefined) } : env, o.timeoutMs ?? 60_000, undefined, o.input);
+  // what a person sees at a terminal they type at: the terminal echoes the line typed after the prompt ("> ")
+  const at = o.input === undefined || !o.terminal ? -1 : ran.stderr.indexOf("\n> ") + 1;
+  const a = at <= 0 ? ran : { ...ran, stderr: `${ran.stderr.slice(0, at + 2)}${o.input!.split("\n")[0]}${o.input!.includes("\n") ? "\n" : ""}${ran.stderr.slice(at + 2)}` };
   ANSWERS.push(a);
   const line = `mason ${argv.join(" ")}${o.terminal ? ` (a terminal ${o.terminal} wide)` : ""}`;
   if (argv.includes("--json") && a.code !== 0) {
@@ -213,8 +224,9 @@ async function mason(cwd: string, argv: string[], env: Record<string, string>, o
   return a;
 }
 
-/** A run against a fresh fake, signed in by MASON_TOKEN; the fake's requests with it. */
-async function deployWith(script: Script, cwd: string, argv: string[], extra: Record<string, string> = {}, o: { terminal?: number } = {}): Promise<{ a: Answer; requests: Req[]; url: string; token: string; home: string }> {
+/** A run against a fresh fake, signed in by MASON_TOKEN; the fake's requests to the deploys with it (`requests`), and its
+ *  questions of the replica's Mason apart (`asked`). */
+async function deployWith(script: Script, cwd: string, argv: string[], extra: Record<string, string> = {}, o: { terminal?: number; input?: string } = {}): Promise<{ a: Answer; requests: Req[]; asked: Req[]; url: string; token: string; home: string }> {
   // a token the caller gives is its own to record
   const token = extra.MASON_TOKEN ?? newToken("ci");
   if (extra.MASON_TOKEN === undefined) SECRETS.push(token);
@@ -222,11 +234,14 @@ async function deployWith(script: Script, cwd: string, argv: string[], extra: Re
   try {
     const h = temp("mason-home-");
     const a = await mason(cwd, ["deploy", ...argv], envFor(h, fake.url, { MASON_TOKEN: token, ...extra }), o);
-    return { a, requests: fake.requests, url: fake.url, token, home: h };
+    return { a, requests: fake.requests.filter((r) => r.path !== REPLICA_PATH), asked: fake.requests.filter((r) => r.path === REPLICA_PATH), url: fake.url, token, home: h };
   } finally { await fake.close(); }
 }
 
 const sha = (b: Buffer | string): string => createHash("sha256").update(b).digest("hex");
+/** A run's stderr after the plan's line where the fake says nothing of what the replica runs (it answers 404): the line
+ *  that says the plan cannot be shown, which every deploy begins with before it sends (its own tests below). */
+const afterPlan = (stderr: string): string => stderr.replace(/^What the deploy changes on acme\/shop cannot be shown: the service answered 404 when asked what acme\/shop runs\n/, "");
 
 test("mason deploy: the files sent are projectFiles of the project folder, whole, each with its sha256 — never .env, .mason/, a dotfile or a file that is not YAML; then the replica runs it", async () => {
   const { root, folder } = project({
@@ -275,8 +290,10 @@ test("mason deploy: no database is read and no .env needed — the URL is the re
   assert.equal(a.code, 0, a.stdout + a.stderr);
   assert.equal(requests.filter((r) => r.method === "POST").length, 1);
   const v = JSON.parse(a.stdout) as Record<string, unknown>;
-  assert.deepEqual(Object.keys(v), ["dryRun", "replica", "service", "files", "totalBytes", "warnings", "deploy", "next"]);
+  assert.deepEqual(Object.keys(v), ["dryRun", "replica", "service", "files", "totalBytes", "warnings", "plan", "planUnknown", "deploy", "next"]);
   assert.equal(v.dryRun, false);
+  assert.equal(v.plan, null, "a service that does not say what the replica runs: no plan");
+  assert.equal(v.planUnknown, "the service answered 404 when asked what acme/shop runs");
   assert.equal(v.replica, "acme/shop");
   assert.deepEqual(v.deploy, { id: ID, status: "running", phase: null, createdAt: CREATED, finishedAt: "2026-11-02T10:01:00Z" });
   assert.equal(a.stderr, "", "--json prints no progress");
@@ -297,6 +314,7 @@ test("mason deploy --dry-run: each path, its size and its sha256, and no request
     const total = rows.reduce((n, r) => n + r.size, 0);
     assert.equal(a.stdout, `Would send 3 files, ${total} bytes, to acme/shop on ${fake.url}; nothing was sent\n` +
       rows.map((r) => `  ${r.path.padEnd(w)}   ${`${r.size} bytes`.padStart(sw)}   sha256 ${r.sha256}\n`).join("") +
+      `What the deploy changes on acme/shop cannot be shown: this machine is not signed in to ${fake.url}\n` +
       "\nNext:\n  mason deploy --replica acme/shop              send it\n");
     const j = await mason(root, ["deploy", "--dry-run", "--json"], env);
     assert.equal(j.code, 0, j.stdout);
@@ -306,6 +324,7 @@ test("mason deploy --dry-run: each path, its size and its sha256, and no request
     assert.deepEqual(v.files, rows);
     assert.equal(v.totalBytes, total);
     assert.equal(v.deploy, null);
+    assert.deepEqual([(v as { plan?: unknown }).plan, (v as { planUnknown?: unknown }).planUnknown], [null, "no replica is named (--replica <org>/<name>, signed in, shows it)"]);
     assert.deepEqual(fake.requests, [], "a dry run makes no request");
   } finally { await fake.close(); }
 });
@@ -333,7 +352,7 @@ test("mason deploy: a project mason start would refuse is refused here, in the f
   const { root } = project({ "sources/shop.yml": "kind: postgres\nurl: postgres://app:s3cret@db.example:5432/shop\ntables: {}\n" });
   const { a } = await deployWith({}, root, ["--replica", "acme/shop"]);
   assert.equal(a.stderr, "✗ mason deploy: mason/sources/shop.yml: url: is written with its password\n" +
-    "  why   a deploy sends the project's files to the service, which keeps them: a password is never one of them\n" +
+    "  why   a deploy sends the project's files to the replica, which keeps them: a password is never one of them\n" +
     "  fix   write url: ${DATABASE_URL} in mason/sources/shop.yml, and set DATABASE_URL on the replica (its own environment, on the service); keep the URL here in .env\n");
 });
 
@@ -589,7 +608,8 @@ test("mason deploy: each failure of the contract's POST says the service's words
     const { a, requests } = await deployWith({ post: { status, body: failure } }, root, ["--replica", "acme/shop"]);
     assert.equal(a.code, 1, `${status}: ${a.stderr}`);
     const head = `✗ mason deploy: ${message}\n  why   why ${code} (the service said ${code}, HTTP ${status})\n  fix   fix ${code}\n\nNext:\n  ${cmd} `;
-    assert.ok(a.stderr.startsWith(head) && a.stderr.endsWith(`${step}\n`) && /^ *$/.test(a.stderr.slice(head.length, -step.length - 1)), `${status}:\n${a.stderr}`);
+    const said = afterPlan(a.stderr);
+    assert.ok(said.startsWith(head) && said.endsWith(`${step}\n`) && /^ *$/.test(said.slice(head.length, -step.length - 1)), `${status}:\n${a.stderr}`);
     assert.equal(requests.filter((r) => r.method === "GET").length, 0, `${status}: no wait`);
     const j = await deployWith({ post: { status, body: failure } }, root, ["--replica", "acme/shop", "--json"]);
     assert.equal(j.a.code, 1);
@@ -648,7 +668,7 @@ test("mason deploy: the phases are said as they change, in the CLI's words, then
   const { a, requests } = await deployWith({ get: (n) => steps[Math.min(n, steps.length - 1)]! }, root, ["--replica", "acme/shop"]);
   assert.equal(a.code, 0, a.stderr);
   assert.equal(requests.filter((r) => r.method === "GET").length, 8);
-  const lines = a.stderr.trimEnd().split("\n");
+  const lines = afterPlan(a.stderr).trimEnd().split("\n");
   assert.equal(lines[0], `Sent 3 files (${lines[0]!.match(/\((\d+) bytes\)/)![1]} bytes) to acme/shop on ${a.stderr.match(/on (http:\/\/127\.0\.0\.1:\d+)/)![1]}: deploy dep_01abc`);
   assert.deepEqual(lines.slice(1, 4), [
     "  Queued: waiting for its turn on the replica",
@@ -677,7 +697,7 @@ test("mason deploy: a POST answered 503 (the replica checked, created, its machi
   assert.equal(sent.length, 4);
   assert.ok(sent.every((p) => p.body === sent[0]!.body && p.headers.authorization === sent[0]!.headers.authorization), "the same deploy each time");
   for (let i = 1; i < sent.length; i++) assert.ok(sent[i]!.at - sent[i - 1]!.at >= 900, `the Retry-After of 1 s was kept: ${sent[i]!.at - sent[i - 1]!.at} ms`);
-  const lines = a.stderr.trimEnd().split("\n");
+  const lines = afterPlan(a.stderr).trimEnd().split("\n");
   assert.match(lines[0]!, /^ {2}Waiting to send the deploy: acme\/shop is being checked \(Mason checks its database\) \(HTTP 503\); waited \d+ s$/);
   assert.match(lines[1]!, /^ {2}Waiting to send the deploy: acme\/shop is being created \(HTTP 503\); waited [1-9]\d* s$/);
   assert.match(lines[2]!, /^ {2}Waiting to send the deploy: acme\/shop is ready, and the machine it runs on is not connected just now \(HTTP 503\); waited [1-9]\d* s$/);
@@ -692,7 +712,7 @@ test("mason deploy: a POST answered 503 (the replica checked, created, its machi
     const r = await deployWith({ post: (n) => n === 0 ? first : queued }, root, ["--replica", "acme/shop"]);
     assert.equal(r.a.code, 0, r.a.stderr);
     assert.equal(posts(r.requests).length, 2, said);
-    assert.ok(r.a.stderr.startsWith(`  Waiting to send the deploy: ${said}; waited `), r.a.stderr);
+    assert.ok(afterPlan(r.a.stderr).startsWith(`  Waiting to send the deploy: ${said}; waited `), r.a.stderr);
   }
 
   // --json: nothing but the answer on stdout, nothing of the wait on stderr either
@@ -749,7 +769,7 @@ test("mason deploy: a 409 naming a replica that failed or is being deleted is re
     const { a, requests } = await deployWith({ post: reply }, root, ["--replica", "acme/shop"]);
     assert.equal(a.code, 1, a.stderr);
     assert.equal(requests.length, 1, `${state}: one POST, nothing else`);
-    assert.match(a.stderr, new RegExp(`^✗ mason deploy: acme/shop cannot take a deploy\\n {2}why {3}${said}; it is ${state} \\(the service said not_ready, HTTP 409\\)\\n {2}fix {3}a replica takes a deploy only once it is ready: mason replica status acme/shop says its state\\n\\nNext:\\n {2}mason replica status acme/shop +the replica's state\\n$`), state);
+    assert.match(afterPlan(a.stderr), new RegExp(`^✗ mason deploy: acme/shop cannot take a deploy\\n {2}why {3}${said}; it is ${state} \\(the service said not_ready, HTTP 409\\)\\n {2}fix {3}a replica takes a deploy only once it is ready: mason replica status acme/shop says its state\\n\\nNext:\\n {2}mason replica status acme/shop +the replica's state\\n$`), state);
     const j = await deployWith({ post: reply }, root, ["--replica", "acme/shop", "--json"]);
     assert.equal(j.a.code, 1);
     assert.deepEqual(JSON.parse(j.a.stdout), { error: { code: "refused", message: "acme/shop cannot take a deploy", why: `${said}; it is ${state} (the service said not_ready, HTTP 409)`,
@@ -1076,6 +1096,298 @@ test("mason deploy: the output's gate refuses no honest deploy by chance — its
   assert.equal(m.refused, 0, `${m.refused} of 2000 honest deploys refused`);
   assert.ok(m.bound < 1e-6, `the bound at ECHO_RUN: ${m.bound}`);
   assert.ok(m.shortRefused > 0 && m.shortRefused <= m.shortBound, `a run of 5: ${m.shortRefused}, its bound ${m.shortBound}`);
+});
+
+/** A replica as the service says it (docs/HOSTED-API.md `Replica`), with the Mason it runs when `mason` is given. */
+const replicaSaying = (mason?: unknown): Reply => ({ status: 200, body: { replica: { org: "acme", name: "shop", region: "eu", sizeGb: 50, hostId: "brisk-otter-4821", state: "ready",
+  createdAt: CREATED, allowlist: [], pending: [], ...(mason === undefined ? {} : { mason }) } } });
+
+test("mason deploy asks the replica's Mason before it sends: a pin that fits neither the version it runs nor the one installed is refused, naming both, nothing sent; one that fits either is sent; a service that says none, or does not answer the question, leaves the pin to the replica, and so does an answer it cannot read, unless it carries the token (issue 764)", async () => {
+  const { root } = project();   // mason.yml pins 0.7.0
+  // the pin fits: the version it runs (same line, at or past the pin), or the newer one installed
+  for (const mason of [{ version: "0.7.0", latest: "0.7.0" }, { version: "0.7.3", latest: "0.9.0", next: null }, { version: "0.6.5", latest: "0.7.4", next: "0.7.1" }]) {
+    const { a, requests, asked } = await deployWith({ replica: replicaSaying(mason) }, root, ["--replica", "acme/shop", "--json"]);
+    assert.equal(a.code, 0, `${JSON.stringify(mason)}: ${a.stdout}`);
+    assert.deepEqual(asked.map((q) => `${q.method} ${q.body}`), ["GET "], JSON.stringify(mason));
+    assert.ok(asked[0]!.at <= requests[0]!.at, "asked before the POST");
+    assert.equal(posts(requests).length, 1, JSON.stringify(mason));
+  }
+  // older than the pin's line: the service offers one that runs it — upgrade is a way out
+  const older = await deployWith({ replica: replicaSaying({ version: "0.6.5", latest: "0.7.4", next: null }) }, root, ["--replica", "acme/shop"]);
+  assert.equal(older.a.code, 1, older.a.stderr);
+  assert.deepEqual(older.requests, [], "nothing sent");
+  assert.equal(older.a.stderr, "✗ mason deploy: mason/mason.yml pins Mason 0.7.0, and acme/shop runs Mason 0.6.5: it would not run the project\n" +
+    "  why   a replica runs a project pinned to the release line of the Mason it runs (0.6.x), at that version or older; nothing was sent\n" +
+    "  fix   write the project for Mason 0.6.5: its mason command is npx @mason-data/cli@0.6.5 (read the release notes between the two, change what they say, then set version: 0.6.5 in mason/mason.yml); or upgrade the replica to Mason 0.7.4, which runs the project as it is: mason replica upgrade acme/shop\n\n" +
+    "Next:\n  mason replica upgrade acme/shop               move it to Mason 0.7.4\n  mason replica status acme/shop                its Mason version\n");
+  // newer than the pin's line, with a newer line installed too: no upgrade runs it; write the project for the one installed
+  const newer = await deployWith({ replica: replicaSaying({ version: "0.8.1", latest: "0.9.2", next: "0.9.2" }) }, root, ["--replica", "acme/shop", "--json"]);
+  assert.equal(newer.a.code, 1, newer.a.stdout);
+  assert.deepEqual(newer.requests, []);
+  const e = JSON.parse(newer.a.stdout) as { error: { code: string; message: string; why: string; fix: string }; next: Array<{ command: string }> };
+  assert.deepEqual([e.error.code, e.error.message], ["refused", "mason/mason.yml pins Mason 0.7.0, and acme/shop runs Mason 0.8.1, with 0.9.2 installed: it would not run the project"]);
+  assert.match(e.error.why, /\(0\.8\.x\), at that version or older, or to the line of the one installed \(0\.9\.x\), which then starts; nothing was sent$/);
+  assert.match(e.error.fix, /^write the project for Mason 0\.9\.2: its mason command is npx @mason-data\/cli@0\.9\.2 /);
+  assert.doesNotMatch(e.error.fix, /upgrade/);
+  assert.deepEqual(e.next.map((n) => n.command), ["mason replica status acme/shop"]);
+  // a newer patch of the pin's line than the replica runs: refused, as the image would
+  const patch = await deployWith({ replica: replicaSaying({ version: "0.6.9", latest: "0.6.9" }) }, root, ["--replica", "acme/shop", "--json"]);
+  assert.equal(patch.a.code, 1);
+  // a service that says no version (an older one), a status other than 200, no answer: sent, the replica holds the pin
+  for (const [what, replica] of [["no mason key", replicaSaying()], ["mason: null", replicaSaying(null)], ["404", undefined],
+    ["500", { status: 500, body: { error: { code: "failed", message: "x" } } }], ["no answer", "drop"]] as Array<[string, Reply | undefined]>) {
+    const { a, requests, asked } = await deployWith(replica === undefined ? {} : { replica }, root, ["--replica", "acme/shop", "--json"]);
+    assert.equal(a.code, 0, `${what}: ${a.stdout}`);
+    assert.equal(asked.length, 1, what);
+    assert.equal(posts(requests).length, 1, what);
+  }
+  // a 200 this CLI cannot read — a version it does not take or out of order, a mason that is no object, a pending change
+  // of a newer service's, another replica's name, deleted with no deletion, not JSON — cannot tell: sent, as before
+  const ok200 = (replica: Record<string, unknown>): Reply => ({ status: 200, body: { replica: { ...(replicaSaying() as { body: { replica: Record<string, unknown> } }).body.replica, ...replica } } });
+  const unread: Array<[string, Reply]> = [
+    ...[{ version: "v0.6.0", latest: "0.6.0" }, { version: "0.6.0", latest: "0.5.0" }, { version: "0.6.0", latest: "0.8.0", next: "0.6.0" },
+      { version: "0.6.0", latest: "0.8.0", next: "0.9.0" }, { version: "0.6.0" }, "0.6.0", { version: "0.13.0-rc1", latest: "0.13.0-rc1" }].map((m): [string, Reply] => [JSON.stringify(m), replicaSaying(m)]),
+    ["an unknown pending change", ok200({ pending: [{ change: "resize", state: "pending", attempts: 0 }], mason: { version: "0.6.0", latest: "0.6.0" } })],
+    ["another name", ok200({ name: "other", mason: { version: "0.6.0", latest: "0.6.0" } })],
+    ["deleted with no deletion", ok200({ state: "deleted", mason: { version: "0.6.0", latest: "0.6.0" } })],
+    ["not JSON", { status: 200, raw: "<html>a proxy's page</html>" }],
+  ];
+  for (const [what, replica] of unread) {
+    const { a, requests, asked } = await deployWith({ replica }, root, ["--replica", "acme/shop", "--json"]);
+    assert.equal(a.code, 0, `${what}: ${a.stdout}`);
+    assert.equal(asked.length, 1, what);
+    assert.equal(posts(requests).length, 1, `${what}: sent, the pin left to the replica`);
+  }
+  // but an answer carrying the token — in a value, or in the service's words — is refused whole, nothing sent
+  for (const where of ["value", "words"] as const) {
+    const token = newToken("ci"); SECRETS.push(token);
+    const replica = where === "value" ? ok200({ hostId: token }) : ok200({ pending: [{ change: "resize", state: "failed", attempts: 1, failure: `it said ${token}` }] });
+    const { a, requests } = await deployWith({ replica }, root, ["--replica", "acme/shop", "--json"], { MASON_TOKEN: token });
+    assert.equal(a.code, 1, `${where}: ${a.stdout}`);
+    assert.match((JSON.parse(a.stdout) as { error: { message: string } }).error.message, /answered GET \/v1\/replicas\/acme\/shop\?project=1 with 200, where what the replica runs was asked for$/, where);
+    assert.deepEqual(requests, [], `${where}: nothing sent`);
+  }
+  // the token's body split by a control character or an ANSI code, every 4 or 8 characters, in the service's words: read
+  // raw, as the masks read them (a stringified answer escapes them, and its letters break the run), refused whole —
+  // whether the answer is one this CLI cannot read or one it reads and whose Mason fits the pin
+  for (const sep of ["\n", "\t", "\u0000", "\u001b[31m"]) for (const size of [4, 8]) for (const readable of [false, true]) {
+    const token = newToken("ci"); SECRETS.push(token);
+    const body = token.replace(/^masondata_ci_/, "");
+    const words = `it said ${(body.match(new RegExp(`.{1,${size}}`, "g")) ?? []).join(sep)}`;
+    const what = `${JSON.stringify(sep)} every ${size}, ${readable ? "a readable 200" : "an unreadable 200"}`;
+    const replica = ok200(readable ? { pending: [{ change: "upgrade", state: "failed", attempts: 1, failure: words }], mason: { version: "0.7.0", latest: "0.7.0" } }
+      : { pending: [{ change: "resize", state: "failed", attempts: 1, failure: words }] });
+    const { a, requests } = await deployWith({ replica }, root, ["--replica", "acme/shop", "--json"], { MASON_TOKEN: token });
+    assert.equal(a.code, 1, `${what}: ${a.stdout}`);
+    assert.match((JSON.parse(a.stdout) as { error: { message: string } }).error.message, /where what the replica runs was asked for$/, what);
+    assert.deepEqual(requests, [], `${what}: nothing sent`);
+  }
+  // a project with no mason.yml is unpinned: no version refuses it, as the image runs it (the replica is still asked
+  // what it runs, for the plan)
+  const { root: bare } = project({ "mason.yml": null });
+  const unpinned = await deployWith({ replica: replicaSaying({ version: "0.6.5", latest: "0.6.5" }) }, bare, ["--replica", "acme/shop", "--json"]);
+  assert.equal(unpinned.a.code, 0, unpinned.a.stdout);
+  assert.equal(unpinned.asked.length, 1);
+  assert.equal(posts(unpinned.requests).length, 1);
+});
+
+/** The replica's answer with the project it runs now (docs/HOSTED-API.md "What the deploy changes"): `files` (relative
+ *  path → text) and its tables' sizes, beside a replica that says no Mason version (so no pin is checked). */
+const running = (files: Record<string, string>, tables: Array<{ table: string; rows: number | null; bytes: number | null }> = []): Reply => {
+  const r = replicaSaying() as { status: number; body: { replica: Record<string, unknown> } };
+  return { status: 200, body: { replica: r.body.replica, project: {
+    files: Object.entries(files).sort(([a], [b]) => a < b ? -1 : 1).map(([p, content]) => ({ path: p, sha256: sha(content), content })), tables } } };
+};
+/** What the replica runs in the plan's tests: three tables kept off, the generated table daily, two roles, pin 0.6.0. */
+const RUNNING = {
+  "sources/shop.yml": "kind: postgres\nurl: ${DATABASE_URL}\nsync: off\ntables:\n  orders: {}\n  customers:\n    columns: [id, name]\n  items: {}\n  events:\n    key: [id]\n  billing.invoices: {}\n",
+  "mason.yml": "version: 0.6.0\n",
+  "roles.yml": "default: everything\nroles:\n  everything:\n    tables: all\n  agent:\n    tables:\n      orders: {}\n  bi:\n    tables: all\n",
+  "generated_tables/daily.yml": DAILY,
+  "generated_tables/old.yml": DAILY,
+};
+const SIZES = [{ table: "public.items", rows: 1_200_000, bytes: 734_003_200 }, { table: "billing.invoices", rows: null, bytes: 2048 }, { table: "public.payments", rows: 5, bytes: null }];
+/** The project deployed over it: every kind of change at once. */
+const CHANGED = {
+  "sources/shop.yml": "kind: postgres\nurl: ${DATABASE_URL}\nsync: off\ntables:\n  orders:\n    sync: poll 30s\n  customers:\n    columns: [id, name, email]\n  events:\n    key: [uuid]\n  payments: {}\n",
+  "roles.yml": "default: agent\nroles:\n  everything:\n    tables: all\n  agent:\n    tables:\n      orders: {}\n      customers: {}\n  analyst:\n    tables:\n      orders: {}\n",
+  "generated_tables/daily.yml": DAILY.replace("count(*)", "count(*) + 0"),
+  "generated_tables/weekly.yml": DAILY,
+};
+const PLAN = {
+  tables: {
+    added: [{ table: "public.payments", rows: 5, bytes: null }],
+    removed: [{ table: "billing.invoices", rows: null, bytes: 2048 }, { table: "public.items", rows: 1_200_000, bytes: 734_003_200 }],
+    changed: [
+      { table: "public.customers", columns: true, key: false, sync: null },
+      { table: "public.events", columns: false, key: true, sync: null },
+      { table: "public.orders", columns: false, key: false, sync: { from: "off", to: "poll 30s" } },
+    ],
+  },
+  generatedTables: { added: ["public.weekly"], removed: ["public.old"], changed: ["public.daily"] },
+  roles: { added: ["analyst"], removed: ["bi"], changed: ["agent"], default: { from: "everything", to: "agent" } },
+  pin: { from: "0.6.0", to: "0.7.0" },
+};
+/** The plan's rows, as a person reads them. */
+const PLAN_ROWS = [
+  "adds     table public.payments (5 rows): its first sync starts",
+  "removes  table billing.invoices (2.0 KiB): its synced data is dropped, and syncing it again is a new first sync, reading every row from the source",
+  "removes  table public.items (1,200,000 rows, 700.0 MiB): its synced data is dropped, and syncing it again is a new first sync, reading every row from the source",
+  "changes  table public.customers: its columns",
+  "changes  table public.events: its key",
+  "changes  table public.orders: its sync (off to poll 30s)",
+  "adds     generated table public.weekly",
+  "removes  generated table public.old",
+  "changes  generated table public.daily",
+  "adds     role analyst",
+  "removes  role bi",
+  "changes  role agent",
+  "changes  the default role: everything to agent",
+  "changes  the pin: Mason 0.6.0 to Mason 0.7.0",
+];
+const REMOVED = "billing.invoices (2.0 KiB), public.items (1,200,000 rows, 700.0 MiB)";
+
+test("mason deploy shows what it changes on the replica, worked out against what the replica runs now — tables added and removed with their sizes, columns, key and sync changed, generated tables, roles, the default role and the pin — in --dry-run and before a deploy, as rows and in --json (issue 550)", async () => {
+  const { root } = project(CHANGED);
+  // --dry-run --json: the plan in its declared shape, nothing sent; the replica asked for what it runs
+  const dry = await deployWith({ replica: running(RUNNING, SIZES) }, root, ["--replica", "acme/shop", "--dry-run", "--json"]);
+  assert.equal(dry.a.code, 0, dry.a.stdout);
+  const v = JSON.parse(dry.a.stdout) as { plan: unknown; planUnknown: unknown; deploy: unknown };
+  assert.deepEqual(v.plan, PLAN);
+  assert.equal(v.planUnknown, null);
+  assert.equal(v.deploy, null);
+  assert.deepEqual(dry.asked.map((q) => `${q.method} ${q.search}`), ["GET ?project=1"]);
+  assert.deepEqual(dry.requests, [], "a dry run sends nothing");
+  // --dry-run for a person: each change a row, after the files
+  const said = await deployWith({ replica: running(RUNNING, SIZES) }, root, ["--replica", "acme/shop", "--dry-run"]);
+  assert.equal(said.a.code, 0, said.a.stderr);
+  const rows = said.a.stdout.split("\n").filter((l) => /^ {2}(adds|removes|changes) /.test(l)).map((l) => l.trim().replace(/^(\S+) +/, (_m, verb: string) => `${verb.padEnd(9)}`));
+  assert.deepEqual(rows, PLAN_ROWS);
+  // a deploy (with --yes: it removes two tables) shows the plan first, on stderr, then sends; --json carries it at the end
+  const sent = await deployWith({ replica: running(RUNNING, SIZES) }, root, ["--replica", "acme/shop", "--yes"]);
+  assert.equal(sent.a.code, 0, sent.a.stderr);
+  const lines = sent.a.stderr.split("\n");
+  assert.equal(lines[0], "What the deploy changes on acme/shop:");
+  assert.deepEqual(lines.slice(1, 1 + PLAN_ROWS.length), PLAN_ROWS.map((r) => `  ${r}`));
+  assert.match(lines[1 + PLAN_ROWS.length]!, /^Sent 5 files /);
+  const j = await deployWith({ replica: running(RUNNING, SIZES) }, root, ["--replica", "acme/shop", "--yes", "--json"]);
+  assert.equal(j.a.code, 0, j.a.stdout);
+  assert.deepEqual((JSON.parse(j.a.stdout) as { plan: unknown }).plan, PLAN);
+  assert.equal(j.a.stderr, "");
+  // the same files the replica runs: a plan that changes nothing, said so; and a replica that runs no project yet: all added
+  const { root: same } = project();
+  const files = Object.fromEntries(projectFiles(path.join(same, "mason")).map((f) => [path.relative(path.join(same, "mason"), f), fs.readFileSync(f, "utf8")]));
+  const none = await deployWith({ replica: running(files) }, same, ["--replica", "acme/shop"]);
+  assert.equal(none.a.code, 0, none.a.stderr);
+  assert.match(none.a.stderr, /^What the deploy changes on acme\/shop: none of its tables, generated tables, roles or pin\nSent /);
+  const fresh = await deployWith({ replica: running({}) }, same, ["--replica", "acme/shop", "--dry-run", "--json"]);
+  const p = (JSON.parse(fresh.a.stdout) as { plan: typeof PLAN }).plan;
+  assert.deepEqual(p.tables.added.map((t) => t.table), ["public.customers", "public.orders"]);
+  assert.deepEqual([p.tables.removed, p.roles.added, p.pin], [[], ["agent", "everything"], { from: null, to: "0.7.0" }]);
+});
+
+test("mason deploy: a deploy that removes a table the replica syncs is confirmed — the replica's name typed back at a terminal, else refused naming each table and its size unless --yes, with --json too; the tables confirmed are sent; an added table is never asked about (issue 550)", async () => {
+  const { root } = project(CHANGED);
+  const confirmed = (q: Req[]): unknown => (JSON.parse(posts(q)[0]!.body) as { confirmed?: unknown }).confirmed;
+  // no terminal, no --yes: refused, naming the tables, the way out --yes; nothing sent
+  for (const json of [false, true]) {
+    const { a, requests } = await deployWith({ replica: running(RUNNING, SIZES) }, root, ["--replica", "acme/shop", ...(json ? ["--json"] : [])]);
+    assert.equal(a.code, 1, a.stdout + a.stderr);
+    assert.deepEqual(requests, [], "nothing sent");
+    const message = `the deploy removes 2 tables acme/shop syncs: ${REMOVED}`;
+    const why = "of a removed table, its synced data is dropped, and syncing it again is a new first sync, reading every row from the source: such a deploy is confirmed at a terminal, or with --yes; nothing was sent";
+    const fix = "if they are meant to go: mason deploy --replica acme/shop --yes; if not, add them back to the sources file";
+    if (json) {
+      assert.deepEqual(JSON.parse(a.stdout), { error: { code: "refused", message, why, fix }, next: [{ command: "mason deploy --replica acme/shop --yes", what: "deploy, removing them" }] });
+    } else {
+      assert.ok(a.stderr.endsWith(`✗ mason deploy: ${message}\n  why   ${why}\n  fix   ${fix}\n\nNext:\n  mason deploy --replica acme/shop --yes        deploy, removing them\n`), a.stderr);
+    }
+  }
+  // --yes (no terminal, and with --json): sent, the tables confirmed named in the request
+  for (const argv of [["--yes"], ["--yes", "--json"]]) {
+    const { a, requests } = await deployWith({ replica: running(RUNNING, SIZES) }, root, ["--replica", "acme/shop", ...argv]);
+    assert.equal(a.code, 0, a.stdout + a.stderr);
+    assert.deepEqual(confirmed(requests), { removed: ["billing.invoices", "public.items"] });
+  }
+  // at a terminal: the question names the replica, and its name typed back sends it; anything else sends nothing
+  const typed = await deployWith({ replica: running(RUNNING, SIZES) }, root, ["--replica", "acme/shop"], {}, { terminal: 200, input: "acme/shop\n" });
+  assert.equal(typed.a.code, 0, typed.a.stderr);
+  assert.match(typed.a.stderr.replace(/\n {4}/g, " "), /^Removing 2 tables from acme\/shop drops their synced data, and syncing one again is a new first sync, reading every row from the source\. Type acme\/shop to deploy, anything else to keep acme\/shop as it is\.\n> acme\/shop\n/m);
+  assert.deepEqual(confirmed(typed.requests), { removed: ["billing.invoices", "public.items"] });
+  for (const input of ["acme/other\n", "ACME/SHOP\n", "", "yes\n"]) {
+    const { a, requests } = await deployWith({ replica: running(RUNNING, SIZES) }, root, ["--replica", "acme/shop"], {}, { terminal: 200, input });
+    assert.equal(a.code, 1, `${JSON.stringify(input)}: ${a.stderr}`);
+    assert.deepEqual(requests, [], `${JSON.stringify(input)}: nothing sent`);
+    assert.match(a.stderr, /✗ mason deploy: nothing was deployed to acme\/shop: what was typed is not its name\n/);
+  }
+  // --json at a terminal is never asked: refused without --yes
+  const j = await deployWith({ replica: running(RUNNING, SIZES) }, root, ["--replica", "acme/shop", "--json"], {}, { terminal: 80, input: "acme/shop\n" });
+  assert.equal(j.a.code, 1, j.a.stdout);
+  assert.deepEqual(j.requests, []);
+  // a removed table the replica gives no size of: said so, and asked about all the same
+  const unsized = await deployWith({ replica: running(RUNNING) }, root, ["--replica", "acme/shop", "--json"]);
+  assert.equal((JSON.parse(unsized.a.stdout) as { error: { message: string } }).error.message, "the deploy removes 2 tables acme/shop syncs: billing.invoices (size not known), public.items (size not known)");
+  // adds alone (and changes): never asked, no terminal needed, nothing confirmed in the request
+  const { root: adds } = project({ "sources/shop.yml": `${SOURCE}  payments: {}\n` });
+  const added = await deployWith({ replica: running({ "sources/shop.yml": SOURCE.replace("sync: off", "sync: poll 1m") }, SIZES) }, adds, ["--replica", "acme/shop"]);
+  assert.equal(added.a.code, 0, added.a.stderr);
+  assert.match(added.a.stderr, /^ {2}adds {5}table public\.payments \(5 rows\): its first sync starts$/m);
+  assert.deepEqual(Object.keys(JSON.parse(posts(added.requests)[0]!.body) as object), ["files", "client"]);
+});
+
+test("mason deploy: a service that does not say what the replica runs (an older one), or says it in a shape this mason cannot read, leaves the plan unknown — said with why, never guessed — and the deploy goes on; one whose project carries the token is refused whole (issue 550)", async () => {
+  const { root } = project(CHANGED);
+  const base = (replicaSaying() as { body: { replica: Record<string, unknown> } }).body.replica;
+  const withProject = (project: unknown): Reply => ({ status: 200, body: { replica: base, project } });
+  const good = (running(RUNNING) as { body: { project: { files: Array<Record<string, unknown>> } } }).body.project;
+  const cases: Array<[string, Reply | undefined, string]> = [
+    ["no project key", replicaSaying(), "the service does not say what acme/shop runs now"],
+    ["project: null", withProject(null), "the service does not say what acme/shop runs now"],
+    ["a 404", undefined, "the service answered 404 when asked what acme/shop runs"],
+    ["a sha256 that is not its content's", withProject({ ...good, files: good.files.map((f, i) => i === 0 ? { ...f, sha256: "0".repeat(64) } : f) }), "this mason cannot read the service's answer about what acme/shop runs now"],
+    ["a path outside the grammar", withProject({ ...good, files: [...good.files, { path: "../x.yml", sha256: sha(""), content: "" }] }), "this mason cannot read the service's answer about what acme/shop runs now"],
+    ["a size that is no count", withProject({ ...good, tables: [{ table: "public.items", rows: -1, bytes: null }] }), "this mason cannot read the service's answer about what acme/shop runs now"],
+    ["a sources file it cannot read", running({ "sources/shop.yml": "kind: mongo\n" }), "the replica's sources/shop.yml cannot be read here: "],
+    // a file whose values the YAML library refuses to expand (more aliases than it takes): a problem, never a crash
+    ["a sources file of 120 aliases", running({ ...RUNNING, "sources/shop.yml": `${RUNNING["sources/shop.yml"]}x: &x 1\nl: [${Array(120).fill("*x").join(", ")}]\n` }), "the replica's sources/shop.yml cannot be read here: it cannot be read as values: "],
+    ["a roles file of 120 aliases", running({ ...RUNNING, "roles.yml": `${RUNNING["roles.yml"]}x: &x 1\nl: [${Array(120).fill("*x").join(", ")}]\n` }), "the replica's roles.yml cannot be read here: it cannot be read as values: "],
+    // a reader's problem quotes the file: a key of the service's, with line breaks, is one line inside the CLI's
+    ["a key of its own, over lines", running({ "sources/shop.yml": "kind: postgres\nurl: ${DATABASE_URL}\ntables: {}\n\"FORGED\\nNext:\\n  mason destroy\": 1\n" }), "the replica's sources/shop.yml cannot be read here: unexpected key FORGED?Next:? mason destroy"],
+  ];
+  for (const [what, replica, why] of cases) {
+    const { a, requests } = await deployWith(replica === undefined ? {} : { replica }, root, ["--replica", "acme/shop", "--json"]);
+    assert.equal(a.code, 0, `${what}: ${a.stdout}`);
+    assert.equal(posts(requests).length, 1, `${what}: sent, never asked`);
+    const v = JSON.parse(a.stdout) as { plan: unknown; planUnknown: string };
+    assert.equal(v.plan, null, what);
+    assert.ok(v.planUnknown.startsWith(why), `${what}: ${v.planUnknown}`);
+    const t = await deployWith(replica === undefined ? {} : { replica }, root, ["--replica", "acme/shop"]);
+    assert.equal(t.a.code, 0, what);
+    assert.ok(t.a.stderr.startsWith(`What the deploy changes on acme/shop cannot be shown: ${why}`), `${what}: ${t.a.stderr}`);
+  }
+  // a project whose file carries the token: refused whole, as every answer is, nothing sent
+  const token = newToken("ci"); SECRETS.push(token);
+  const { a, requests } = await deployWith({ replica: running({ ...RUNNING, "notes.yml": `x: ${token}\n` }) }, root, ["--replica", "acme/shop", "--json"], { MASON_TOKEN: token });
+  assert.equal(a.code, 1, a.stdout);
+  assert.match((JSON.parse(a.stdout) as { error: { message: string } }).error.message, /answered GET \/v1\/replicas\/acme\/shop\?project=1 with 200, where what the replica runs was asked for$/);
+  assert.deepEqual(requests, []);
+});
+
+test("mason deploy: the service refused a removal that was not confirmed (unconfirmed_removal: an older CLI's deploy, or a plan gone stale) — its words as they came, the way out the CLI's own (issue 550)", async () => {
+  const { root } = project();
+  const failure = { code: "unconfirmed_removal", message: "the files remove public.items, which acme/shop syncs (1,200,000 rows), and its removal was not confirmed", fix: "FORGED run mason destroy" };
+  for (const json of [false, true]) {
+    const { a } = await deployWith({ get: () => at("refused", { failure }) }, root, ["--replica", "acme/shop", ...(json ? ["--json"] : [])]);
+    assert.equal(a.code, 1, a.stdout + a.stderr);
+    const fix = "mason deploy --replica acme/shop again: it shows what the deploy removes and asks for it to be confirmed (or add --yes, where no person is asked)";
+    if (json) {
+      const e = (JSON.parse(a.stdout) as { error: { code: string; message: string; why: string; fix: string } }).error;
+      assert.deepEqual(e, { code: "refused", message: failure.message, why: "the service said unconfirmed_removal", fix });
+    } else {
+      assert.match(a.stderr, new RegExp(`✗ mason deploy: ${failure.message.replace(/[()]/g, "\\$&")}\\n {2}why {3}the service said unconfirmed_removal\\n {2}fix {3}${fix.replace(/[()]/g, "\\$&")}\\n`));
+      assert.doesNotMatch(a.stderr, /FORGED/);
+    }
+  }
 });
 
 test("no run of mason deploy printed a token, nor anything shaped as one", () => {
