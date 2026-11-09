@@ -94,12 +94,28 @@ export function namedPublicationVerdict(described: DescribedPublication, tables:
  * written otherwise (one line) is its own first line.
  */
 export function gapLine(gap: string): string {
+  const sql = gapStatements(gap);
+  const first = gap.split("\n")[0]!;
+  if (sql === null) return `${first} — or give its entry sync: poll <interval> in the sources file, which needs no publication`;
+  return `${first} — the database's owner runs ${sql} — or give its entry sync: poll <interval> in the sources file, which needs no publication`;
+}
+
+/** The statements of a gap's "Expected" block on one line (what its owner runs), or null for a gap written otherwise. */
+export function gapStatements(gap: string): string | null {
   const lines = gap.split("\n");
   const at = lines.findIndex((l) => l.startsWith("Expected ("));
-  if (at < 0) return `${lines[0]!} — or give its entry sync: poll <interval> in the sources file, which needs no publication`;
+  if (at < 0) return null;
   const end = lines.findIndex((l, i) => i > at && l.trim() === "");
-  const sql = lines.slice(at + 1, end < 0 ? undefined : end).map((l) => l.trim()).filter((l) => !l.startsWith("(")).join(" ");
-  return `${lines[0]!} — the database's owner runs ${sql} — or give its entry sync: poll <interval> in the sources file, which needs no publication`;
+  return lines.slice(at + 1, end < 0 ? undefined : end).map((l) => l.trim()).filter((l) => !l.startsWith("(")).join(" ");
+}
+
+/** What a gap says is wrong, on one line: its missing pieces, row filters, publish list, or the publication not found
+ *  (this module's own lines), else its first line (issue 779: one problem of a check's answer). */
+export function gapProblem(gap: string): string {
+  const said = gap.split("\n").map((l) => l.trim())
+    .filter((l) => /^(missing|row filter): /.test(l) || l.startsWith("it publishes ") || l.startsWith("Found: no publication"))
+    .map((l) => l.replace(/ \(read by Mason's sync\)$/, ""));
+  return said.length ? said.join("; ") : gap.split("\n")[0]!;
 }
 
 // ------------------------------------------------------------------ the check

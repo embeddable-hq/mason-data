@@ -619,6 +619,40 @@ the end of `why`) and gives its own way out: run `mason deploy --replica <org>/<
 asks (or `--yes`). This also catches a plan gone stale: the replica's tables changed between the question and the
 deploy.
 
+### What the database must serve
+
+The CLI never holds the database's URL (the replica's environment does), so what the files ask of the database can
+only be checked on the replica. A deploy the database cannot serve is refused there **before anything changes**: no
+file written, no sync started, no table dropped, the replica left running what it ran before. Its status is `refused`
+(below), and its failure's `message` names every problem at once, each with its fix, as `mason start` would say it:
+
+- a table the sources file names that the database lacks, or that the replica's user cannot read: no `SELECT`, no
+  `USAGE` on its schema, or row-level security with no policy for that user (every row hidden);
+- a column or `key:` the table lacks, a table with no primary key, a replica identity that cannot be replicated;
+- for the tables whose `sync:` is `replication`: `wal_level` not `logical`, a user that may not replicate (no
+  `REPLICATION`, or the provider's role), no free replication slot or WAL sender, a read replica before Postgres 16,
+  and the publication the file names missing, or not carrying a table (the fix names its statement, e.g. `ALTER
+  PUBLICATION mason ADD TABLE public.orders;`, which the database's owner runs: Mason never alters it);
+- the roles file naming a column a synced table lacks;
+- the database not reachable with the replica's URL: the connection's own failure, never a deploy applied blind.
+
+Mason's image answers this as `mason serve --check` (its usage has the details), run with the replica's environment
+and `MASON_PROJECT` naming the deploy's files: read-only on the database, writing nothing, and never opening the synced
+data, so it runs beside the replica's running Mason. Its `--json` answer carries the problems as data:
+
+```json
+{ "error": { "code": "refused", "message": "the database cannot serve this project as its files say: 1 problem", "why": "…", "fix": "…" },
+  "problems": [{ "code": "publication", "table": "public.orders", "message": "publication mason: missing: public.orders",
+    "fix": "the database's owner runs ALTER PUBLICATION mason ADD TABLE public.orders (id, status); …",
+    "sql": "ALTER PUBLICATION mason ADD TABLE public.orders (id, status);" }], "next": [ … ] }
+```
+
+`code` is one of `unreachable`, `version`, `missing_table`, `table`, `replication`, `publication`, `roles`; `table`
+(`schema.table`) and `sql` are `null` where there is none; exit 0 when the database can serve the project, 1 when not.
+A service runs it in a deploy's `checking` phase and passes its words on as the deploy's `failure`; whether it does is
+the service's, and a service that does not leaves the replica's start to refuse such a project, after its files are
+written. The CLI prints the failure's words as they came, as for any refused deploy.
+
 ### `POST /v1/replicas/{org}/{name}/deploys`
 
 `Content-Type: application/json`:
@@ -705,7 +739,7 @@ When no answer comes back to the POST, whether the deploy was made is not known:
 | `applying` | Mason on the replica checks the files and takes them | waits |
 | `starting` | Mason on the replica starts on the new files, until it serves | waits |
 | `running` | the replica runs these files: Mason there serves from them | exit 0 |
-| `refused` | Mason on the replica refused the files (a sources file naming a table the database lacks, a pin of another release line), or the service did (a table removed whose removal was not confirmed: `unconfirmed_removal`, above): `failure` is the refusal. The replica runs what it ran before | prints `failure`'s words as they came, code `refused`, exit 1 (for `unconfirmed_removal`, its way out the CLI's own: deploy again, to be asked) |
+| `refused` | Mason on the replica refused the files (a sources file naming a table the database lacks, a database that cannot serve them: "What the database must serve", a pin of another release line), or the service did (a table removed whose removal was not confirmed: `unconfirmed_removal`, above): `failure` is the refusal. The replica runs what it ran before | prints `failure`'s words as they came, code `refused`, exit 1 (for `unconfirmed_removal`, its way out the CLI's own: deploy again, to be asked) |
 | `failed` | the deploy could not finish for a reason that is not the files' (the machine, the service): `failure` says what happened and what the replica runs now | prints `failure`'s words as they came, code `failed`, exit 1 |
 
 | `phase` | With `status` | The CLI says |
