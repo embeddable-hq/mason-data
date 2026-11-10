@@ -40,7 +40,7 @@ import { NO_ROLES, type RolesLive } from "../duck/grants.ts";
 import { addedNext, addUser, attributesToAdd, disabledNext, disableUser, enabledNext, enableUser, fromNext, listUsers, rangesText, removeUser, REMOVED_NEXT, roleToAdd, setUserFrom, withLastUsed } from "./user.ts";
 import { userRole } from "./roles.ts";
 import type { RunState } from "./commands.ts";
-import { postgresFacts, postgresLink } from "./pg-url.ts";
+import { clientLink, postgresFacts } from "./pg-url.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
 import { catalogTable, parseSourceText, shownPath, type CatalogColumn, type ProjectSource, type SourceFile } from "./sources.ts";
 import { projectWriteRefusal } from "./project.ts";
@@ -96,7 +96,8 @@ export interface RunContext {
   /** the project's users (src/cli/user.ts): what `/api/users` lists and changes, with the functions `mason user` calls —
    *  the list (.mason/users.json), the API key their passwords are made with, the database a user connects to, and
    *  where the Postgres API listens (the run's recorded URL), for the URL an added user is shown */
-  users: { file: string; apiKey: string; database: string; postgresUrl: string };
+  /** `postgresPublicUrl`: MASON_PG_PUBLIC_URL's address, recorded (src/cli/pg-url.ts `clientLink`), or null */
+  users: { file: string; apiKey: string; database: string; postgresUrl: string; postgresPublicUrl?: string | null };
   /** the project's roles as the listener holds them now (src/cli/roles.ts LiveRoles): what `mason user add --role`
    *  is checked against while the run is up, and what `/api/state` says of them; absent: a run with no roles file */
   roles?: () => RolesLive;
@@ -236,7 +237,7 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     folder, project, tables,
     // where a tool connects (the Postgres API's URL, the credentials' place shown, and its psql line): the web page's
     // Connect panel, as mason status --json says it (src/cli/pg-url.ts postgresFacts)
-    postgres: postgresFacts(ctx.users.postgresUrl),
+    postgres: postgresFacts(ctx.users),
     // the copies in all: tables added, copied, failed, their rows, the latest sync (the file's size is engine.bytes)
     totals: syncTotals(tables.filter((t) => t.added).length, copies),
     // the run itself: its version, since when it is up, and its supervisor's restarts (ONE reader, restartsFact, which
@@ -806,7 +807,7 @@ export function createRunServer(ctx: RunContext): http.Server {
           sendJson(res, 200, { ok: true });
         } else if (method === "GET" && url.pathname === "/api/users") {
           // mason user list --json's shape: the users, and whether each connects (and with ?lastUsed=1 when each was last used)
-          const r = listUsers(ctx.users.file, ctx.users.apiKey, postgresLink(ctx.users.postgresUrl), ctx.roles?.() ?? NO_ROLES);
+          const r = listUsers(ctx.users.file, ctx.users.apiKey, clientLink(ctx.users), ctx.roles?.() ?? NO_ROLES);
           if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
           // the last use is a scan of the request log (~0.15 s on a week of 50 statements a second): only when asked
           // (?lastUsed=1: mason user list, the Users page every 30 s), never for the Overview's poll, which does not show it
@@ -827,7 +828,7 @@ export function createRunServer(ctx: RunContext): http.Server {
           const attributes = attributesToAdd(body.name, typeof body.role === "string" ? body.role : userRole({}, rolesNow).role, (body.set as string[] | undefined) ?? [], rolesNow);
           if ("refused" in attributes) { sendFailure(res, statusOf(attributes.refused), attributes.refused); return; }
           // mason user add --json's shape: its password, once, and the URL to paste (this run is up, so it has one)
-          const r = addUser(ctx.users.file, ctx.users.apiKey, body.name, { link: postgresLink(ctx.users.postgresUrl), database: ctx.users.database, roles: ctx.roles?.() ?? NO_ROLES,
+          const r = addUser(ctx.users.file, ctx.users.apiKey, body.name, { link: clientLink(ctx.users), database: ctx.users.database, roles: ctx.roles?.() ?? NO_ROLES,
             ...(typeof body.role === "string" ? { role: body.role } : {}), attributes: attributes.values, ...(Array.isArray(body.from) ? { from: body.from as string[] } : {}) });
           if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
           const { replaced, ...added } = r;

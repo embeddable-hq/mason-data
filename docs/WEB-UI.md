@@ -382,7 +382,10 @@ under the server's own Host it needs the run's token, which never reaches your m
   statement and the users work as they do on your machine.
 - **A closed tunnel says `mason ui --ssh`**, never `mason start`.
 - **Connect says what its URL's host is**: the Postgres API's address as the server sees it, often `localhost`, which a
-  tool elsewhere replaces with the server's own address.
+  tool elsewhere replaces with the server's own address. With `MASON_PG_PUBLIC_URL` set (the address a client reaches,
+  behind a load balancer or a DNS name: docs/POSTGRES-API.md "The address clients reach"), Connect, the Users page's
+  Connect and a user's card print that address, its port and its `sslmode`, and say nothing of the host
+  (`/api/state` `postgres.public`).
 
 `mason ui` on the server itself is refused, naming `--ssh`: nobody sits at a browser there. `mason status` says the same line.
 

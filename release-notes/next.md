@@ -7,6 +7,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   no primary key, `null` when `mason add` would refuse it), and each column's `secret`: whether `mason add` leaves it
   out as a secret unless named. A tool that writes the sources file itself can write what `mason add` would, without
   copying its rule.
+- **Behind a load balancer, a proxy or a DNS name, the URLs Mason prints can name the address clients reach**:
+  `mason serve` with `MASON_PG_PUBLIC_URL=postgres://db.example.com:5433/?sslmode=verify-full` makes `mason status`,
+  `mason user add` and `list`, and the web page's Connect panels and "Copy the psql line" print that host, port,
+  database (optional; the one Mason answers as when none) and `sslmode` (required), and drops the note to replace the
+  host. A user, a password, any other parameter, or an `sslmode` other than `disable`, `require`, `verify-ca` or
+  `verify-full` refuses the start; `mason start` refuses the setting. Unset, nothing changes.
+
 - **A read-only web page can still edit its tables**: `mason serve` with `MASON_UI_READ_ONLY=1` and
   `MASON_UI_READ_ONLY_ALLOW=tables` keeps Add, Columns…, Name its key…, Remove and Sync now on the Tables page, and
   still refuses every other change the page sends (users, cancelling a statement, sharing). `MASON_PROJECT_READONLY=1`

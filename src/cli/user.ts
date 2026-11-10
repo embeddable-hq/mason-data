@@ -14,7 +14,7 @@ import * as path from "node:path";
 import { failed, jsonText, listFlag, parseCommand, reportText, strict, withEnd, type CommandSpec, type Failure, type NextStep } from "./command.ts";
 import { reach } from "./state.ts";
 import { callRun, RunUnreachable } from "./control.ts";
-import { connectionUrl, listenerTips, postgresLink, psqlLine, type PostgresLink } from "./pg-url.ts";
+import { clientLink, connectionUrl, listenerTips, psqlLine, type PostgresLink } from "./pg-url.ts";
 import { changeUsers, isActive, isDisabled, keyFingerprint, newUserId, readUsers, underKey, userPassword, userRanges, USER_NAME_RE, USER_NAME_RULE, USERS_FILE, type MasonUser } from "../duck/users.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { out as styleOut, type Style } from "./style.ts";
@@ -674,7 +674,7 @@ export const removedReport = (r: Removed, up: boolean, next: readonly NextStep[]
  * known). `roles`: the roles as a command beside them sees them (the file's name in the role row; NO_ROLES where none
  * can be read here); `listener`: how this run listens (its tips), null where it is not known here.
  */
-export function addedReport(r: Omit<AddedUser, "replaced"> & { replaced?: boolean }, o: { roles: RolesLive; listener: PostgresListener | null; next: readonly NextStep[]; on?: string }, s: Style = styleOut()): string {
+export function addedReport(r: Omit<AddedUser, "replaced"> & { replaced?: boolean }, o: { roles: RolesLive; listener: PostgresListener | null; link?: PostgresLink | null; next: readonly NextStep[]; on?: string }, s: Style = styleOut()): string {
   const { roles } = o;
   return reportText({
     headline: `The user ${userOn(r.user, o.on)} added${r.replaced === true ? " (in place of one the API key's rotation had removed)" : ""}: its password is printed this once`,
@@ -692,7 +692,7 @@ export function addedReport(r: Omit<AddedUser, "replaced"> & { replaced?: boolea
       "Paste it into the tool now: Mason keeps no copy of the password. Lost, remove the user and add it again.",
       ...(r.readsNothing === true ? [`Its statements are refused until it has a role: ${noRoleWayOut(r.user, roles.file ?? `mason/${ROLES_FILE}`, exampleRole(roles))}.`] : []),
       ...(r.url === undefined ? ["Mason is not running: mason start, then mason status says the host and port this user connects to."] : []),
-      ...listenerTips(o.listener),
+      ...listenerTips(o.listener, o.link ?? null),
       "It never expires: mason user remove ends it, at once and for every session it holds.",
       "Rotating the API key (apiKey in .mason/config.json, MASON_API_KEY under mason serve) removes every user at once.",
     ],
@@ -751,7 +751,7 @@ export async function user(argv: string[]): Promise<number> {
   if (verb === "list") {
     const up = w.state === "up" ? w.run : null;
     const roles = await rolesBeside(project, up);
-    const r = listUsers(file, apiKey, up !== null ? postgresLink(up.postgresUrl) : null, roles);
+    const r = listUsers(file, apiKey, up !== null ? clientLink(up) : null, roles);
     if ("message" in r) return failed("user", r, { json });
     // the last use is the run's (its request log is in the copy's file, which only the run opens): asked of its command
     // server, which lists the same file. A run that cannot say is SAID, never guessed.
@@ -817,7 +817,7 @@ export async function user(argv: string[]): Promise<number> {
 
   // add
   const run = w.state === "up" ? w.run : null;
-  const link: PostgresLink | null = run ? postgresLink(run.postgresUrl) : null;
+  const link: PostgresLink | null = run ? clientLink(run) : null;
   // the role must be one the roles file names NOW (the listener's reading while the run is up): refused before writing
   const roles = await rolesBeside(project, run);
   if (role !== undefined) {
@@ -835,6 +835,6 @@ export async function user(argv: string[]): Promise<number> {
   const { replaced: _, ...added } = r;
   const next = addedNext(r.user, link !== null);
   if (json) { out(jsonText(USER, added, next)); return 0; }
-  out(addedReport(r, { roles, listener: run?.postgresListener ?? null, next }));
+  out(addedReport(r, { roles, listener: run?.postgresListener ?? null, link, next }));
   return 0;
 }
