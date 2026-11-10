@@ -17,8 +17,11 @@ import { DuckStore } from "../src/duck/store.ts";
 import { RequestLedger } from "../src/duck/requests.ts";
 import { startPostgresApi, type DuckOptions, type DuckRunner, type PgApiServer } from "../src/api/postgres/server.ts";
 import { mintToken, tokenProblem } from "../src/duck/token.ts";
-import { MAX_STORED_PLAN_BYTES, SLOW_MS, storedPlan, type ApiLogRow } from "../src/api/request-log.ts";
-import { DETAILS_HIDDEN } from "../src/duck/explain.ts";
+import type { ApiLogRow, StoredPlan } from "../src/api/request-log.ts";
+import { SLOW_MS } from "../src/cli/request-filter.ts";
+// what this change adds, read when a test runs: the file loads without it, so each test fails by its name where it is missing
+const requestLog = await import("../src/api/request-log.ts") as unknown as { MAX_STORED_PLAN_BYTES: number; storedPlan: (text: string) => StoredPlan };
+const explainModule = await import("../src/duck/explain.ts") as unknown as { DETAILS_HIDDEN: string };
 import type { PgSchema } from "../src/api/postgres/schema.ts";
 
 const API_KEY = "k".repeat(48);
@@ -149,11 +152,11 @@ test("a refused statement, a cancelled one and an EXPLAIN have no plan, however 
 });
 
 test("a plan past the cap is cut at a line and says so", async () => {
-  const cut = storedPlan(Array.from({ length: 2000 }, (_, i) => `line ${i} ${"é".repeat(5)}`).join("\n"));
+  const cut = requestLog.storedPlan(Array.from({ length: 2000 }, (_, i) => `line ${i} ${"é".repeat(5)}`).join("\n"));
   assert.equal(cut.truncated, true);
-  assert.ok(Buffer.byteLength(cut.text) <= MAX_STORED_PLAN_BYTES);
+  assert.ok(Buffer.byteLength(cut.text) <= requestLog.MAX_STORED_PLAN_BYTES);
   assert.match(cut.text, /line \d+ é{5}$/, "whole lines, never half a character");
-  assert.deepEqual(storedPlan("short"), { text: "short", truncated: false });
+  assert.deepEqual(requestLog.storedPlan("short"), { text: "short", truncated: false });
   // through the wire: a statement whose SQL sent to the engine alone is past the cap
   const api = await listener(0);
   const n = await count();
@@ -162,7 +165,7 @@ test("a plan past the cap is cut at a line and says so", async () => {
   try { await c.query(wide); } finally { await c.end(); }
   const [row] = await since(n);
   assert.equal(row!.planTruncated, true);
-  assert.ok(Buffer.byteLength(row!.plan ?? "") <= MAX_STORED_PLAN_BYTES && (row!.plan ?? "").startsWith("Mason: answered from the synced table public.orders"));
+  assert.ok(Buffer.byteLength(row!.plan ?? "") <= requestLog.MAX_STORED_PLAN_BYTES && (row!.plan ?? "").startsWith("Mason: answered from the synced table public.orders"));
 });
 
 test("at most one plan at a time: a slow statement that ends while another's plan is recorded has none, said once, and counted when one is recorded again", async () => {
@@ -209,7 +212,7 @@ test("a statement bound with values: its plan is the one its values made, its op
   assert.equal(rows.length, 2);
   for (const r of rows) {
     const plan = r.plan ?? "";
-    assert.ok(plan.includes(`Note: ${DETAILS_HIDDEN}`), plan);
+    assert.ok(plan.includes(`Note: ${explainModule.DETAILS_HIDDEN}`), plan);
     assert.match(plan, /\(rows=\d+\)/, "the operators and their estimates are kept");
     assert.ok(!plan.includes("987654") && !plan.includes("zz-secret-zz"), `no bound value: ${plan}`);
   }
