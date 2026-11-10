@@ -37,10 +37,10 @@ test("every request is read back as the listener built it: the statement, the ou
   assert.deepEqual(all.map((r) => r.requestId), ["a1", "a2", "a3"], "newest last");
   assert.deepEqual(all[0], { requestId: "a1", startedAt: new Date(t0).toISOString(), session: 4, applicationName: "Metabase", clientAddress: "203.0.113.7", tokenName: "", user: "", role: "", attributes: null, method: "QUERY", outcome: "ok", status: "completed",
     sqlstate: null, message: null, detail: null, hint: null, rows: 20, durationMs: 12, endedAt: new Date(t0 + 12).toISOString(), bytesSent: 812,
-    query: "SELECT id FROM public.orders LIMIT 20", queryTruncated: false }, "ended: started + its duration; the bytes the listener counted; the client's address as client_addr");
+    query: "SELECT id FROM public.orders LIMIT 20", queryTruncated: false, plan: null, planTruncated: false }, "ended: started + its duration; the bytes the listener counted; the client's address as client_addr");
   assert.deepEqual(all[1], { requestId: "a2", startedAt: new Date(t0 + 1000).toISOString(), session: 4, applicationName: "", clientAddress: null, tokenName: "bi-tool", user: "", role: "", attributes: null, method: "EXECUTE", outcome: "refused", status: "failed",
     sqlstate: "42P01", message: 'relation "nope" does not exist', detail: "the detail", hint: "the hint", rows: null, durationMs: 3, endedAt: new Date(t0 + 1003).toISOString(),
-    bytesSent: null, query: "SELECT * FROM nope", queryTruncated: false },
+    bytesSent: null, query: "SELECT * FROM nope", queryTruncated: false, plan: null, planTruncated: false },
     "a client with no application_name is '', never the log's placeholder");
   assert.deepEqual([all[2]!.outcome, all[2]!.queryTruncated], ["failed", true]);
   assert.deepEqual((await ledger.recent({ limit: 10, failed: true })).map((r) => r.requestId), ["a2", "a3"], "--failed: the refused and failed ones");
