@@ -60,6 +60,7 @@ import { page as queriesPage } from "./pages/queries.js";
 import { page as usersPage } from "./pages/users.js";
 import { page as usagePage } from "./pages/usage.js";
 import { page as syncsPage } from "./pages/syncs.js";
+import { NAV_ITEM_VIEWS, VIEW_HASHES, viewOfHash } from "./routes.js";
 
 /** What the shell itself reads when the page shown does not: the state (the sidebar's project, badge and version). */
 const SHELL_STATE = { path: "api/state", everyMs: 60_000 };
@@ -89,41 +90,24 @@ const GROUPS = { observability: { title: "Observability" } };
 /** Each page's icon in the nav (Lucide's names, src/web/shared.js ICONS): the shell's, so a page module stays its own. */
 export const NAV_ICONS = { status: "layout-dashboard", tables: "table", users: "users", queries: "square-terminal", usage: "chart-column", syncs: "logs" };
 
-/** The hashes of before the Observability group, and the group's own: each lands on the view it was (`#status` the Overview). */
-const ALIASES = { status: "status", queries: "queries", usage: "usage", logs: "syncs", syncs: "syncs", "observability/logs": "syncs", observability: "queries" };
-
-const hashOfPage = (p) => p.hash ?? p.id;
+/** A page's own hash: src/web/routes.js's, the one list the router and the run's check of the host's sidebar read. */
+const hashOfPage = (p) => VIEW_HASHES[p.id] ?? p.id;
 
 /**
  * WHAT A HASH SHOWS: the page (`#tables`, `#observability/usage`, an old one — `#status`, `#queries` — the view it was;
- * none, or one it does not know, the Overview) and the parameters after its `?` (`range=7d`, `show=failed`).
+ * none, or one it does not know, the Overview) and the parameters after its `?` (`range=7d`, `show=failed`). Read by
+ * src/web/routes.js `viewOfHash`, which the run's check of MASON_UI_NAV_* reads too.
  */
 export function parseHash(hash) {
-  const { id, params } = readHash(hash);
+  const { id, params } = viewOfHash(hash);
   return { id, params };
 }
 
-/** `parseHash`'s reading, and whether the hash NAMES its page (`#overview`, `#users?x=1`, an alias) rather than landing
- *  on the Overview for naming none. */
-function readHash(hash) {
-  const raw = String(hash ?? "").replace(/^#/, "");
-  const at = raw.indexOf("?");
-  const where = at < 0 ? raw : raw.slice(0, at);
-  const params = Object.fromEntries(new URLSearchParams(at < 0 ? "" : raw.slice(at + 1)));
-  const named = PAGES.find((p) => hashOfPage(p) === where)?.id ?? ALIASES[where];
-  return { id: named ?? "status", params, named: named !== undefined };
-}
-
-/**
- * THE SIDEBAR AS THE HOST SAYS IT (`/api/state` `pageNav`: mason serve's MASON_UI_NAV_<ITEM>_URL and MASON_UI_NAV_LINKS,
- * validated by the run at its start, src/cli/ui-nav.ts): each item the state names, by its key there, is this page.
- */
-const NAV_ITEM_PAGES = { overview: "status", tables: "tables", users: "users", queries: "queries", usage: "usage", syncEvents: "syncs" };
-
-/** The pages the host replaced, each with its URL (a Map of page id → URL); empty when the state names none. */
+/** The pages the host replaced (`/api/state` `pageNav.items`, by src/web/routes.js `NAV_ITEM_VIEWS`), each with its
+ *  URL (a Map of page id → URL); empty when the state names none. */
 export function replacedPages(nav) {
   const items = nav !== null && typeof nav === "object" && nav.items !== null && typeof nav.items === "object" ? nav.items : {};
-  return new Map(Object.entries(NAV_ITEM_PAGES).filter(([k]) => typeof items[k] === "string").map(([k, id]) => [id, items[k]]));
+  return new Map(Object.entries(NAV_ITEM_VIEWS).filter(([k]) => typeof items[k] === "string").map(([k, id]) => [id, items[k]]));
 }
 
 /** The host's own links the state names (`pageNav.links`), each `{ label, url }`; [] when none. */
@@ -131,7 +115,7 @@ export const hostLinks = (nav) => Array.isArray(nav?.links) ? nav.links.filter((
 
 /** Where a hash goes instead when it names a page the host replaced: its URL, else null (a hash naming no page is none). */
 export function elsewhere(hash, nav) {
-  const r = readHash(hash);
+  const r = viewOfHash(hash);
   return r.named ? replacedPages(nav).get(r.id) ?? null : null;
 }
 
@@ -329,7 +313,7 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
       if (nav === undefined || nav === null) return null;
       const url = elsewhere(hash, nav);
       if (url !== null) return { url };
-      const r = readHash(hash);
+      const r = viewOfHash(hash);
       const replaced = replacedPages(nav);
       if (r.named || !replaced.has(r.id)) return null;
       const first = PAGES.find((p) => !replaced.has(p.id));
@@ -393,21 +377,18 @@ export function start(doc, win) {
   // the host's sidebar as last applied to the document's own links: JSON of `pageNav`
   let navWritten;
   // A HASH OF A VIEW THE HOST REPLACED IS LEFT FOR ITS PAGE (`app.leave`): replaced in the history, so Back does not
-  // land on it again; once per URL, however many paints follow before the browser leaves. A hash naming no page, with
-  // the Overview replaced, is the first page of Mason's own. True when the page is leaving.
-  // AT MOST ONCE A DOCUMENT: a host's URL may be this very page under another hash (`/#tables`, when a proxy serves the
-  // page at the host's root: no check at the start can tell), and two such items sent the page from one to the other for
-  // ever, the tab hung. So a hash that arrives AFTER the page was left (`arrived`) means the URL it left for was this
-  // page: it never leaves again, and shows what each hash names, its own view included.
-  let left = null;
-  let looped = false;
+  // land on it again; once per URL and hash, however many paints follow before the browser leaves — a hash that arrives
+  // later (`arrived`: typed, or followed) leaves again, whatever became of the last leave (a navigation stopped, a 204,
+  // a URL that is this page). No loop can follow: mason serve refuses a URL whose fragment names a replaced view
+  // (src/cli/ui-nav.ts). A hash naming no page, with the Overview replaced, is the first page of Mason's own. True
+  // when the page is leaving.
+  let leaving = null;
   const leave = (arrived = false) => {
-    if (arrived && left !== null) looped = true;
-    if (looped) return false;
+    if (arrived) leaving = null;
     const to = app.leave(win.location.hash);
     if (to === null) return false;
     if ("hash" in to) { win.location.replace(to.hash); return false; }
-    if (left !== to.url) { left = to.url; win.location.replace(to.url); }
+    if (leaving !== to.url) { leaving = to.url; win.location.replace(to.url); }
     return true;
   };
   // the shown page's charts, drawn after each write (src/web/charts.js); a document that cannot hold one draws none

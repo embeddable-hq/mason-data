@@ -328,7 +328,12 @@ listens, and every browser connection crosses that one ssh connection as frames 
   again. With the Overview replaced, the page opened with no address shows its first item not replaced. The URL is read
   exactly as `MASON_UI_BACK_URL`'s (`src/cli/ui-back-link.ts`, the one reading): a path from the host's root or an
   `https://` / `http://` URL, printable ASCII, no user or password, at most 2048 characters; anything else refuses the
-  start. **It is a link, not a refusal**: the run still answers that view's endpoints (`/api/users`), and what a page
+  start. **A URL whose `#fragment` names a view that is replaced refuses the start too** (`/#tables` beside
+  `MASON_UI_NAV_TABLES_URL`, `/?a#queries`, `https://example.com/#status` beside `MASON_UI_NAV_OVERVIEW_URL`, or
+  `/#users` as `MASON_UI_NAV_USERS_URL` itself): where the URL is the page itself (a proxy serving it at that path), the
+  page would leave one replaced view for another for ever. The fragment is read as the page's router reads the address
+  (`src/web/routes.js`, the one list of its hashes, aliases included); a fragment naming a view that is not replaced
+  (`/#tables` with Tables kept), or none, is taken. **It is a link, not a refusal**: the run still answers that view's endpoints (`/api/users`), and what a page
   may change is still `MASON_UI_READ_ONLY` and `MASON_UI_READ_ONLY_ALLOW`'s to say — set them beside it when the host's
   page is the only place a change should be made. A `MASON_UI_NAV_*` name that is none of these (`MASON_UI_NAV_USER_URL`)
   refuses the start, with a `did you mean`. `/api/state` and `mason status --json` say `pageNav: { items, links }`

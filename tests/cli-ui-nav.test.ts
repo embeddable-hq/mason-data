@@ -139,6 +139,56 @@ test("MASON_UI_NAV_LINKS refused at every entrance, each problem saying the entr
   assert.match(String((uiNavSetting({ MASON_UI_NAV_LINKS: JSON.stringify([{ label: "x", url: "/x", ["k‮".repeat(3)]: 1 }]) }) as { problem: string }).problem), /entry 1 has a key, which a link does not take/);
 });
 
+test("a URL whose fragment names a view that is replaced refuses the start, at every entrance: the page would go round in a loop (two and three items, aliases and sub-routes, /?a#tables, https://, itself); one naming a view not replaced, or none, is taken", () => {
+  const loop = (setting: string, view: string, by: string) => `${setting} is set to a URL whose #fragment names the page's ${view} view, which ${by}: ` +
+    "where the URL is this page, it would send the page round in a loop. Name the host's page without that fragment, or with one of a view no MASON_UI_NAV_*_URL replaces";
+  const U = "MASON_UI_NAV_USERS_URL", T = "MASON_UI_NAV_TABLES_URL", Q = "MASON_UI_NAV_QUERIES_URL", O = "MASON_UI_NAV_OVERVIEW_URL", S = "MASON_UI_NAV_SYNC_EVENTS_URL";
+  const cases: Array<[Record<string, string>, string[]]> = [
+    // two items, each the other's (the review's B1: loaded one and the other for ever)
+    [{ [U]: "/#tables", [T]: "/#users" }, [loop(T, "Users", `${U} replaces`), loop(U, "Tables", `${T} replaces`)]],
+    [{ [U]: "/?a#tables", [T]: "/?b#users" }, [loop(T, "Users", `${U} replaces`), loop(U, "Tables", `${T} replaces`)]],
+    // three in a ring: each URL names a replaced view
+    [{ [U]: "/#tables", [T]: "/#observability/queries", [Q]: "/#users" },
+      [loop(T, "Queries", `${Q} replaces`), loop(U, "Tables", `${T} replaces`), loop(Q, "Users", `${U} replaces`)]],
+    // aliases and sub-routes, as the page's router maps them; an https:// URL as a path
+    [{ [U]: "https://console.example.com/mason/#queries?range=7d", [Q]: "/q" }, [loop(U, "Queries", `${Q} replaces`)]],
+    [{ [U]: "/#observability", [Q]: "/q" }, [loop(U, "Queries", `${Q} replaces`)]],
+    [{ [U]: "/#status", [O]: "/o" }, [loop(U, "Overview", `${O} replaces`)]],
+    [{ [U]: "/#overview?x=1", [O]: "/o" }, [loop(U, "Overview", `${O} replaces`)]],
+    [{ [U]: "/#logs", [S]: "/s" }, [loop(U, "Sync events", `${S} replaces`)]],
+    [{ [U]: "/#observability/logs", [S]: "/s" }, [loop(U, "Sync events", `${S} replaces`)]],
+    // itself
+    [{ [U]: "/#users" }, [loop(U, "Users", "it replaces itself")]],
+    [{ [U]: "/#users?tab=1" }, [loop(U, "Users", "it replaces itself")]],
+    [{ [O]: "https://console.example.com/#status" }, [loop(O, "Overview", "it replaces itself")]],
+  ];
+  for (const [env, problems] of cases) {
+    const problem = problems.join("; ");
+    const e = everyEntrance(env);
+    assert.deepEqual(e.setting, { problem }, JSON.stringify(env));
+    assert.equal(e.report, `a setting is missing or wrong: ${problem}`, JSON.stringify(env));
+    assert.equal(e.run, problem, JSON.stringify(env));
+  }
+  // taken: a fragment naming a view NOT replaced (a single pointer into the page), naming none, or no fragment
+  for (const [env, items] of [
+    [{ [U]: "/#tables" }, { users: "/#tables" }],
+    [{ [U]: "/?a#observability/usage?range=7d", [T]: "/#overview" }, { users: "/?a#observability/usage?range=7d", tables: "/#overview" }],
+    [{ [U]: "/#top", [T]: "/t#" }, { users: "/#top", tables: "/t" }],
+    [{ [O]: "/" }, { overview: "/" }],
+    [{ [U]: "/#%75sers" }, { users: "/#%75sers" }],
+  ] as const) {
+    const e = everyEntrance(env);
+    assert.deepEqual(e.setting, { items, links: [] }, JSON.stringify(env));
+    assert.equal(e.report, null, JSON.stringify(env));
+  }
+});
+
+test("the sidebar's items are the page's own: each NAV_ITEMS key is a view of src/web/routes.js, the one list the router reads", async () => {
+  const routes = await import("../src/web/routes.js" as string) as { NAV_ITEM_VIEWS: Record<string, string>; VIEW_HASHES: Record<string, string> };
+  assert.deepEqual(navModule.NAV_ITEMS!.map((i) => i.item), Object.keys(routes.NAV_ITEM_VIEWS));
+  assert.deepEqual(Object.values(routes.NAV_ITEM_VIEWS).sort(), Object.keys(routes.VIEW_HASHES).sort(), "every view an item");
+});
+
 test("a MASON_UI_NAV_* that is no setting refuses the start with a did you mean, never ignored; with the others' problems on one line", () => {
   const list = "MASON_UI_NAV_OVERVIEW_URL, MASON_UI_NAV_TABLES_URL, MASON_UI_NAV_USERS_URL, MASON_UI_NAV_QUERIES_URL, MASON_UI_NAV_USAGE_URL, MASON_UI_NAV_SYNC_EVENTS_URL, MASON_UI_NAV_LINKS";
   const cases: Array<[Record<string, string>, string]> = [

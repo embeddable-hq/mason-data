@@ -1038,6 +1038,11 @@ test("in the browser: opening a replaced view's hash, or following one, replaces
   await nb.settle();
   assert.deepEqual(nb.replaced, ["/host/users"]);
   assert.ok(!r2.asked.slice(before).some((a) => a.startsWith("GET api/users")), "the replaced view is not read");
+  // the browser did not leave (the navigation stopped, the host answered 204): the hash typed again leaves again
+  nb.go("#tables"); nb.go("#users");
+  await until(() => nb.replaced.length === 2, "left again");
+  assert.deepEqual(nb.replaced, ["/host/users", "/host/users"]);
+  assert.ok(!r2.asked.slice(before).some((a) => a.startsWith("GET api/users")), "the replaced view is still not read");
   // unset: nothing leaves (the Users page shown once the state is read)
   const plainRun = fakeRun();
   const plain = fakeBrowser(plainRun, "#users");
@@ -1045,29 +1050,18 @@ test("in the browser: opening a replaced view's hash, or following one, replaces
   assert.deepEqual(plain.replaced, []);
 });
 
-test("in the browser: items whose URLs are this page under each other's hash (/#tables, /#users) leave once and stop, never back and forth for ever (the tab hung)", async () => {
-  for (const [items, opened, shown] of [
-    [{ users: "/#tables", tables: "/#users" }, "#users", "tables"],
-    [{ users: "/#tables", tables: "/#queries", queries: "/#users" }, "#users", "tables"],
-    [{ users: "/#tables", tables: "/#users" }, "#tables", "users"],
-  ] as const) {
-    const run = fakeRun();
-    run.answers.set("GET api/state", () => new Response(JSON.stringify({ ...CATALOG_STATE, pageNav: { items, links: [] } }), { status: 200 }));
-    const b = fakeBrowser(run, opened);
-    await until(() => b.el(`page-${shown}`).hidden === false, `${JSON.stringify(items)}: ${shown} shown`);
-    await b.settle();
-    assert.equal(b.replaced.length, 1, `${JSON.stringify(items)}: left once (${b.replaced.length})`);
-    // a hash typed afterwards shows its own view: the page never leaves again for one of its own addresses
-    b.go("#users");
-    await until(() => b.el("page-users").hidden === false, "users shown");
-    assert.equal(b.replaced.length, 1);
-  }
-  // a single one pointing into the page: one hop, then the page it points to
+test("in the browser: an item pointing into the page at a view not replaced (/#tables, the page at the host's root) is one hop to that view; a replaced view's hash typed later leaves again", async () => {
+  // (a loop of such items cannot be configured: mason serve refuses a URL whose fragment names a replaced view,
+  // tests/cli-ui-nav.test.ts)
   const run = fakeRun();
   run.answers.set("GET api/state", () => new Response(JSON.stringify({ ...CATALOG_STATE, pageNav: { items: { users: "/#tables" }, links: [] } }), { status: 200 }));
   const b = fakeBrowser(run, "#users");
-  await until(() => b.el("page-tables").hidden === false);
+  await until(() => b.el("page-tables").hidden === false, "the Tables page shown");
   assert.deepEqual(b.replaced, ["/#tables"]);
+  b.go("#users");
+  await until(() => b.replaced.length === 2, "left again");
+  await until(() => b.el("page-tables").hidden === false && b.el("page-users").hidden === true, "back on Tables");
+  assert.deepEqual(b.replaced, ["/#tables", "/#tables"]);
 });
 
 test("a server's Connect says the URL's host is the server's own view of itself; a laptop's page says nothing of it", async () => {

@@ -22,6 +22,17 @@
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { linkLabel, linkUrl, type PageLink } from "./ui-back-link.ts";
 
+/**
+ * THE PAGE'S ADDRESSES, as its router reads them (src/web/routes.js, the one list: the page imports it too), so what a
+ * URL's fragment names here is what the page would show. Plain JavaScript beside the code (copied whole by
+ * cli/build.ts), hence its shape declared here.
+ */
+interface PageRoutes {
+  NAV_ITEM_VIEWS: Readonly<Record<string, string>>;
+  viewOfHash(hash: string): { id: string; named: boolean };
+}
+const routes = await import("../web/routes.js" as string) as PageRoutes;
+
 /** The sidebar's items, in its order: the key `/api/state` `pageNav.items` names it by, its setting, its label. */
 export const NAV_ITEMS = [
   { item: "overview", setting: "MASON_UI_NAV_OVERVIEW_URL", label: "Overview" },
@@ -77,6 +88,32 @@ function navLinks(text: string): PageLink[] | string[] {
   return problems.length > 0 ? problems : links;
 }
 
+/** A base the parser resolves a path against, only to read its fragment: never shown, never fetched. */
+const FRAGMENT_BASE = "http://path.invalid";
+
+/**
+ * NO URL OF AN ITEM MAY NAME A VIEW THE HOST REPLACED (issue 789's review): a URL is this very page whenever its path is
+ * where a proxy serves it (`/#tables` at the host's root, `/?a#tables`, an https:// URL of the page's own host), which
+ * no check here can tell — and the page leaves a replaced view's hash for its URL, so `MASON_UI_NAV_USERS_URL=/#tables`
+ * beside `MASON_UI_NAV_TABLES_URL=/#users` sent the browser from one to the other for ever, a load each. Every loop
+ * passes through such a URL, so refusing it makes none possible. Its fragment is read as the page's router reads the
+ * address (src/web/routes.js `viewOfHash`: raw, its `?…` inside the hash, every alias and sub-route of a view); one that
+ * names no view (none, `#`, `#top`) lands on the page's first view of its own and is taken.
+ */
+function loopProblems(items: PageNav["items"]): string[] {
+  const replacedBy = new Map(NAV_ITEMS.filter((i) => items[i.item] !== undefined).map((i) => [routes.NAV_ITEM_VIEWS[i.item], i]));
+  return NAV_ITEMS.flatMap((i) => {
+    const url = items[i.item];
+    if (url === undefined) return [];
+    const hash = new URL(url, FRAGMENT_BASE).hash;
+    const view = hash === "" ? null : routes.viewOfHash(hash);
+    const other = view?.named === true ? replacedBy.get(view.id) : undefined;
+    if (other === undefined) return [];
+    return [`${i.setting} is set to a URL whose #fragment names the page's ${other.label} view, which ${other === i ? "it replaces itself" : `${other.setting} replaces`}: ` +
+      `where the URL is this page, it would send the page round in a loop. Name the host's page without that fragment, or with one of a view no MASON_UI_NAV_*_URL replaces`];
+  });
+}
+
 /**
  * The sidebar as the environment says it: null when no setting of it is set (or each is set empty, or the list is
  * `[]`), else the items replaced and the host's links, or what is wrong — every problem of every setting, on one line.
@@ -95,6 +132,7 @@ export function uiNavSetting(env: Readonly<Record<string, string | undefined>>):
     const url = linkUrl(text, `${i.setting} is set`, `the ${i.label} item's link`);
     if (typeof url === "string") items[i.item] = url; else problems.push(url.problem);
   }
+  problems.push(...loopProblems(items));
   const linksText = env[UI_NAV_LINKS_SETTING] ?? "";
   const links = linksText === "" ? [] : navLinks(linksText);
   if (links.length > 0 && typeof links[0] === "string") problems.push(...links as string[]);

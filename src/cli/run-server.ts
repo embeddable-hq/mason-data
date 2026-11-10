@@ -501,6 +501,7 @@ export const PAGE_ROUTES: Readonly<Record<string, readonly [file: string, type: 
   "/app.js": ["app.js", "text/javascript; charset=utf-8"],
   "/app.css": ["app.css", "text/css; charset=utf-8"],
   // the shell's shared helpers and one module per page (src/web/app.js has the page module contract)
+  "/routes.js": ["routes.js", "text/javascript; charset=utf-8"],
   "/shared.js": ["shared.js", "text/javascript; charset=utf-8"],
   "/pages/status.js": ["pages/status.js", "text/javascript; charset=utf-8"],
   "/pages/tables.js": ["pages/tables.js", "text/javascript; charset=utf-8"],

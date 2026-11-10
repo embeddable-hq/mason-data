@@ -11,6 +11,7 @@
  * empty and unfiltered, how to connect (`renderConnect`), so the first statement is a paste away. Usage's rows lead here
  * filtered (`route`: `?user=`, `?client=`, `?slow=1`, `?status=`).
  */
+import { VIEW_HASHES } from "../routes.js";
 import { msText, agoText, bytesText, esc, firstLine, n, empty, renderFailure, rowsHtml, utcText, utcMsText, details, createOpenSet, status,
   clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, clientText, renderConnect, copyClick, UNLISTED_STATEMENTS, statementCell, rangeEvery } from "../shared.js";
 
@@ -108,7 +109,7 @@ export function requestsPath(filters, before, range = DEFAULT_RANGE) {
 
 export const page = {
   id: "queries",
-  hash: "observability/queries",
+  hash: VIEW_HASHES.queries,
   parent: "observability",
   title: "Queries",
   create(ctx) {

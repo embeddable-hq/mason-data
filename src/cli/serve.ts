@@ -127,7 +127,9 @@ export const SERVE: CommandSpec = {
     MASON_UI_NAV_<ITEM>_URL  an item of the web page's sidebar links to the host's own page instead, in the same tab,
                             keeping its label and icon; Mason's own links to that view and its address (#users) go
                             there too. <ITEM> is OVERVIEW, TABLES, USERS, QUERIES, USAGE or SYNC_EVENTS; the URL is
-                            read as MASON_UI_BACK_URL is; what the server answers is unchanged (default unset)
+                            read as MASON_UI_BACK_URL is, and refused when its #fragment names a view that is
+                            replaced (/#users beside MASON_UI_NAV_USERS_URL: the page would go round in a loop);
+                            what the server answers is unchanged (default unset)
     MASON_UI_NAV_LINKS      the host's own links in the sidebar, a group of their own, in the same tab: a JSON list
                             of at most ${NAV_LINKS_MAX} {"label": …, "url": …}, each label and URL read as the link back's;
                             anything else is refused (default unset: none)

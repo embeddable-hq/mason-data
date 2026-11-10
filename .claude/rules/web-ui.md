@@ -18,7 +18,7 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   `observability/queries`; its id when it says none) and its `?` parameters (`range`, `show`, `slow`, `status`,
   `failures`) are read by ONE function (`parseHash`), written by one (`hashOf`), and a page takes the parameters it knows
   in its `route(params, { doc })`. The hashes of before (`#status`, `#queries`, `#usage`, `#logs`, `#observability`) are
-  `ALIASES` of the view they were: a bookmark lands where it did (`tests/web-page.test.ts` holds each).
+  `ALIASES` (src/web/routes.js, the one list of the page's addresses, which the run's check of `MASON_UI_NAV_*` reads too) of the view they were: a bookmark lands where it did (`tests/web-page.test.ts` holds each).
 - **A page with a `parent` is in its group** (`observability`, `GROUPS`): its link is under the group's heading in the
   sidebar (always shown, the current page the view itself, `aria-current`), and its views share
   `ctx.range()` — `RANGES` in src/web/shared.js (Now · Last hour · 24 hours · 7 days · 30 days · 90 days, Now by default), each its `since`
