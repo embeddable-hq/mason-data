@@ -505,11 +505,17 @@ export const isServiceTime = (v: unknown): v is string => typeof v === "string" 
  * answer, or a Failure when none came back whole: not reached, a redirect, larger than `maxBytes` (`MAX_BODY_BYTES`
  * unless the contract documents another bound for this request), no answer within `timeoutMs` (`REQUEST_MS` unless the
  * contract documents a longer wait: a replica's creation). A status is the caller's to read.
+ *
+ * Every request is on a connection of its own (`Connection: close`; issue 803): a connection kept from the last answer
+ * may have been closed by the service while this process was busy reading that answer (a deploy's refusal at its
+ * documented largest takes seconds, longer than a server's idle timeout on a loaded machine), and a request written onto
+ * it fails with EPIPE, a deploy's outcome then not known. A command sends a handful of requests: a new connection each
+ * costs nothing it would notice.
  */
 export async function call(service: Service, method: "GET" | "POST" | "DELETE", path: string, o: { form?: Record<string, string>; json?: unknown; token?: string; maxBytes?: number; timeoutMs?: number } = {}): Promise<Answer | Failure> {
   const what = `${method} ${path}`;
   const secrets = o.token ? [o.token] : [];
-  const headers: Record<string, string> = { "User-Agent": `mason-cli/${version()}`, Accept: "application/json" };
+  const headers: Record<string, string> = { "User-Agent": `mason-cli/${version()}`, Accept: "application/json", Connection: "close" };
   if (o.form) headers["Content-Type"] = "application/x-www-form-urlencoded";
   if (o.json !== undefined) headers["Content-Type"] = "application/json";
   const body = o.form ? new URLSearchParams(o.form).toString() : o.json !== undefined ? JSON.stringify(o.json) : undefined;

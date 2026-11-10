@@ -23,7 +23,8 @@ const ANSWERS: Answer[] = [];
 const made: string[] = [];
 after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true }); });
 
-interface Req { method: string; path: string; search: string; headers: http.IncomingHttpHeaders; body: string; at: number }
+/** `conn`: the number of the connection it came on, 1 for the fake's first */
+interface Req { method: string; path: string; search: string; headers: http.IncomingHttpHeaders; body: string; at: number; conn: number }
 /** `json`: a JSON body as text (one too deep for JSON.stringify to write); `raw`: a body that is not JSON. */
 type Reply = { status: number; body?: unknown; raw?: string; json?: string; headers?: Record<string, string> } | "drop";
 interface Script {
@@ -48,13 +49,14 @@ const at = (status: string, more: Record<string, unknown> = {}): Reply => ({ sta
 /** A fake service: answers as `script` says, records every request. */
 async function fakeService(script: Script): Promise<{ url: string; requests: Req[]; close: () => Promise<void> }> {
   const requests: Req[] = [];
-  let gets = 0, posts = 0;
+  let gets = 0, posts = 0, conns = 0;
+  const connOf = new WeakMap<object, number>();
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (b: Buffer) => chunks.push(b));
     req.on("end", () => {
       const u = new URL(req.url ?? "/", "http://x"), p = u.pathname;
-      requests.push({ method: req.method ?? "", path: p, search: u.search, headers: req.headers, body: Buffer.concat(chunks).toString("utf8"), at: Date.now() });
+      requests.push({ method: req.method ?? "", path: p, search: u.search, headers: req.headers, body: Buffer.concat(chunks).toString("utf8"), at: Date.now(), conn: connOf.get(req.socket) ?? 0 });
       const reply: Reply = req.method === "POST" && p === "/v1/replicas/acme/shop/deploys" ? (typeof script.post === "function" ? script.post(posts++) : script.post ?? queued)
         : req.method === "GET" && [ID, ID2].some((id) => p === `/v1/replicas/acme/shop/deploys/${id}`) ? (script.get ?? (() => at("running")))(gets++)
         : req.method === "GET" && p === REPLICA_PATH && script.replica !== undefined ? script.replica
@@ -68,6 +70,7 @@ async function fakeService(script: Script): Promise<{ url: string; requests: Req
       res.end(sent);
     });
   });
+  server.on("connection", (s) => { connOf.set(s, ++conns); });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as { port: number }).port;
   return { url: `http://127.0.0.1:${port}`, requests, close: () => new Promise((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }) };
@@ -1497,6 +1500,16 @@ test("mason deploy: a refusal at the documented maximum — 10,000 tables, each 
     } else assert.match(r.a.stderr, /✗ mason deploy: .* with more than 18893 KiB\n {2}why {3}no documented answer is that large\n {2}fix {3}what deploy dep_01abc did is not known here/);
     assert.ok(r.a.ms < 60_000, `failed at once, never waited out --timeout (${r.a.ms} ms)`);
   }
+});
+
+test("mason deploy: every request to the service is on a connection of its own, never one kept from an earlier answer, which the service may have closed while the CLI read that answer — the resend's EPIPE under load (issue 803)", async () => {
+  const { root } = project();
+  const { a, requests, asked } = await deployWith(refusedThen(unconfirmed(REMOVES)), root, ["--replica", "acme/shop", "--yes"]);
+  assert.equal(a.code, 0, a.stderr);
+  const all = [...asked, ...requests].sort((x, y) => x.at - y.at);
+  assert.deepEqual(all.map((r) => r.method), ["GET", "POST", "GET", "POST", "GET"], "the replica asked, sent, refused, sent again, running");
+  assert.deepEqual(all.map((r) => r.conn), [1, 2, 3, 4, 5], "a connection each");
+  for (const r of all) assert.equal(r.headers.connection, "close", `${r.method} ${r.path}`);
 });
 
 test("mason deploy: a deploy is sent again at most once — a second unconfirmed_removal refusal is said as it came, exit 1 (issue 550)", async () => {
