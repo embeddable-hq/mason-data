@@ -2,6 +2,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- The web page's Tables no longer offers Add for a table whose row-level security hides every row from the user Mason
+  connects as. The page now says why the table cannot be added, in the same words as `mason tables` and `mason add`:
+  the policy the table's owner adds, then the `mason add` to run.
+- When the database cannot be reached, `mason doctor`'s next step now says where the URL is: the variable the sources
+  file names, in `.env`. Before, it said `.mason/config.json`, which does not hold the URL.
+
 - `mason add` now leaves out a column that looks like a secret however its name is written. Before, only lowercase
   snake_case names were recognised, so camelCase, PascalCase, UPPER_SNAKE or kebab-case columns such as `passwordHash`,
   `apiKey`, `accessToken` or `API_TOKEN` were synced by `mason add <table>` with no `exclude:` and no warning, and any

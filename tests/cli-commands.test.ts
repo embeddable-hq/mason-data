@@ -804,6 +804,12 @@ test("mason doctor --tables: mason tables --json's tables on the checks' one con
     assert.equal(down.code, 1);
     assert.equal(down.answer.checks.find((x) => x.name === "database")?.ok, false);
     assert.ok(!("tables" in down.answer), JSON.stringify(down.answer));
+    // its Next names where the URL is — the sources file's variable in .env — never .mason/config.json (issue 802)
+    fs.writeFileSync(file, "kind: postgres\nurl: ${DATABASE_URL}\ntables: {}\n");
+    fs.writeFileSync(path.join(app, ".env"), "DATABASE_URL=postgresql://mason:pw@127.0.0.1:1/shop\n");
+    const viaEnv = await doctor(["--json"]);
+    assert.equal(viaEnv.code, 1);
+    assert.deepEqual(viaEnv.answer.next, [{ command: "mason start", what: "once the connection works (the detail above says how; its URL: DATABASE_URL in .env)" }]);
     // no project here: no database is named before mason init, so none is read
     const bare = fs.mkdtempSync(path.join(root, "bare-"));
     const none = await runMason(bare, ["doctor", "--json", "--tables"], env);

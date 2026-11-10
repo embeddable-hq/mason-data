@@ -8,7 +8,7 @@ import { failed, jsonText, nextBlock, parseCommand, type CommandSpec, type NextS
 import { out as styleOut, wrap, type Style } from "./style.ts";
 import { DEFAULT_UI_PORT, heldPgPort, namedPgPort, portHolder, type PortHolder } from "./ports.ts";
 import { callRun, RunUnreachable } from "./control.ts";
-import { readiness, tableJson, tableListLines, type RunState } from "./commands.ts";
+import { noTableLine, readiness, tableJson, tableListLines, type RunState } from "./commands.ts";
 import { connectSource, maskedUrl, parseSource, readSourceFacts, versionProblem, type ConnectContext } from "./preflight.ts";
 import { theRun, type DevRun } from "./runs.ts";
 import { projectSource, type Project } from "./project.ts";
@@ -69,7 +69,9 @@ export const DOCTOR_USAGE = `usage: mason doctor [--tables] [--json]
     present whenever the database's catalog was read, [] when this user can read no table, and given though another
     check failed (ready stays false, exit 1); absent when the catalog was not read: no project here (no database is
     named before mason init), a sources file that cannot be read, or a database that could not be reached or read
-    (its line says why)
+    (its line says why: before mason start, the database line; with Mason running, the role line, ok null, when
+    the database could not be reached, else a line of its own, name "tables", ok null, its detail why the tables
+    could not be read)
 `;
 
 export const DOCTOR: CommandSpec = {
@@ -194,7 +196,7 @@ export async function databaseChecks(url: string, o: ConnectContext & { role?: R
     // a catalog this user cannot read (a revoked grant, a server shutting down): the database's failing line, never a crash
     try { facts = await readSourceFacts(connected.pg); }
     catch (e) { return { checks: [{ name: "database", ok: false, detail: `${maskedUrl(parsed.source.url)}: could not read ${parsed.source.database}'s tables: ${(e as Error).message}` }] }; }
-    const listed = o.list ? { tables: listTables(o.list, { tables: facts.tables, database: parsed.source.database }) } : {};
+    const listed = o.list ? { tables: listTables(o.list, { tables: facts.tables, database: parsed.source.database }), database: parsed.source.database } : {};
     const tooOld = versionProblem(facts);
     if (tooOld) return { checks: [{ name: "database", ok: false, detail: `${maskedUrl(parsed.source.url)}: ${tooOld}` }], ...listed };
     const database: Check = { name: "database", ok: true, detail: `${maskedUrl(parsed.source.url)}: Postgres ${facts.versionText}${facts.standby ? " (a read replica)" : ""}, ${facts.tables.length} table(s) this user can read` };
@@ -203,7 +205,7 @@ export async function databaseChecks(url: string, o: ConnectContext & { role?: R
 }
 
 /** What the database's checks found, and the tables listed from the catalog they read (`--tables`): absent when it was not read. */
-export interface DatabaseRead { checks: Check[]; tables?: ListedTable[] }
+export interface DatabaseRead { checks: Check[]; tables?: ListedTable[]; /** the database they were read from, with `tables` */ database?: string }
 
 /** The role's lines, from its one catalog read; a read that failed is "could not tell", never "only reads". */
 async function askRole(pg: Pick<PgConnection, "query">, ask: RoleAsk): Promise<Check[]> {
@@ -242,7 +244,7 @@ export async function runRoleChecks(project: Project, list = false): Promise<Dat
     if (!list) return { checks };
     try {
       const facts = await readSourceFacts(connected.pg);
-      return { checks, tables: listTables(src, { tables: facts.tables, database: parsed.source.database }) };
+      return { checks, tables: listTables(src, { tables: facts.tables, database: parsed.source.database }), database: parsed.source.database };
     } catch (e) {
       // the tables asked for and not read: said, never an empty list
       return { checks: [...checks, { name: "tables", ok: null, detail: `${maskedUrl(parsed.source.url)}: could not read ${parsed.source.database}'s tables: ${(e as Error).message}` }] };
@@ -276,14 +278,16 @@ export async function runChecks(run: DevRun): Promise<Check[]> {
   return checks;
 }
 
-/** What to run next, from what the checks found. */
-export function nextSteps(checks: readonly Check[], run: DevRun | null, project: Project | null): NextStep[] {
+/** What to run next, from what the checks found. `urlFrom`: where the project's database URL is, as the sources file
+ *  reads it (`ProjectSource.from`: `DATABASE_URL in .env`, or the file itself for a URL written in it); null when the
+ *  file could not be read (its line says why). */
+export function nextSteps(checks: readonly Check[], run: DevRun | null, project: Project | null, urlFrom: string | null = null): NextStep[] {
   const bad = (name: string): boolean => checks.some((c) => c.name === name && c.ok === false);
   if (bad("node")) return [["mason doctor", `again, once Node ${NODE_MIN} or later is installed`]];
   if (bad("project") && run === null) return [["mason doctor", "again, once .mason/config.json is repaired or moved aside (the detail above says how)"]];
   // the demo database is hosted by the run itself (src/cli/demo.ts): down until mason start makes it
   if (bad("database") && project?.config.demo === true) return [["mason start", "hosts the demo database, then syncs its tables"]];
-  if (bad("database")) return [["mason start", `once the connection works (the detail above says how; the URL is in ${project ? `${project.dir}/config.json` : ".mason/config.json"})`]];
+  if (bad("database")) return [["mason start", `once the connection works (the detail above says how${urlFrom !== null ? `; its URL: ${urlFrom}` : ""})`]];
   if (project === null) return [
     ["mason init", "in your app's folder: the database from MASON_DATABASE_URL or DATABASE_URL in .env.local, .env or the shell"],
     ["mason init - < db-url.txt", "or its URL on stdin"],
@@ -343,7 +347,9 @@ export async function doctor(argv: string[], deps: { which?: (cwd: string) => Re
   const checks: Check[] = [];
   // the tables listed from the catalog the checks read (--tables): undefined when it was not read
   let tables: ListedTable[] | undefined;
-  const take = (r: DatabaseRead): void => { checks.push(...r.checks); tables = r.tables; };
+  // where the project's database URL is (the sources file's `from`), for the Next a failing database line gets
+  let urlFrom: string | null = null, database = "";
+  const take = (r: DatabaseRead): void => { checks.push(...r.checks); tables = r.tables; database = r.database ?? ""; };
   if (run === null) {
     checks.push(nodeCheck());
     checks.push(memoryCheck());
@@ -355,7 +361,10 @@ export async function doctor(argv: string[], deps: { which?: (cwd: string) => Re
       if ("message" in src) checks.push({ name: "database", ok: false, detail: `${src.message}${src.why ? `: ${src.why.replace(/\n/g, "; ")}` : ""}. ${src.fix?.split("\n")[0] ?? ""}`.trim() });
       // the demo database is Mason's own, inside the run: whom it connects as is not the person's to change
       else if (project.config.demo === true) take(await databaseChecks(src.resolved, { demo: true, name: src.from, ...(list ? { list: src } : {}) }));
-      else take(await databaseChecks(src.resolved, { role: roleAsk(src, project.root), name: src.from, ...(list ? { list: src } : {}) }));
+      else {
+        urlFrom = src.from;
+        take(await databaseChecks(src.resolved, { role: roleAsk(src, project.root), name: src.from, ...(list ? { list: src } : {}) }));
+      }
     }
     // a project here whose config cannot be read: init would refuse, so "Ready: mason init" would send a person nowhere
     if ("code" in which && which.code === "bad_config") checks.push({ name: "project", ok: false, detail: `${which.problem}. ${(which.fix ?? "").replace(/^./, (c) => c.toUpperCase())}`.trim() });
@@ -363,7 +372,7 @@ export async function doctor(argv: string[], deps: { which?: (cwd: string) => Re
     checks.push(...await runChecks(run));
     if (project) take(await runRoleChecks(project, list));
   }
-  const next = nextSteps(checks, run, project);
+  const next = nextSteps(checks, run, project, urlFrom);
   const { ready, verdict } = verdictOf(checks, run, project);
   if (f.values.json) { out(jsonText(DOCTOR, { ready, verdict, checks, ...(tables ? { tables: tables.map(tableJson) } : {}) }, next)); return ready ? 0 : 1; }
   // on a terminal: the verdict green or red, then the checks
@@ -372,7 +381,7 @@ export async function doctor(argv: string[], deps: { which?: (cwd: string) => Re
   for (const line of checkLines(checks, s, run !== null)) out(line);
   if (run !== null) out(s.dim(`  its synced data and its state in ${run.home}. mason status for the details`));
   // --tables for a person: the tables read, a line each as mason tables lists them (absent: the database's line says why)
-  if (tables) { out(""); for (const line of tables.length ? tableListLines(tables) : ["no table this user can read"]) out(line); }
+  if (tables) { out(""); for (const line of tables.length ? tableListLines(tables) : [noTableLine(database)]) out(line); }
   if (run === null || !ready) out(nextBlock(next));
   return ready ? 0 : 1;
 }

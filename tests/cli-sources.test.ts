@@ -675,10 +675,20 @@ test("mason tables' entry for each table is mason add's, decided in one place: i
       }
       const of = (name: string) => listed.find((t) => t.table === name)!;
       assert.deepEqual(of("public.customers").entry, { customers: {} }, "added: its entry as the file says it");
-      assert.deepEqual([of("public.hidden").entry, of("public.hidden").reason?.startsWith("tables.hidden: row-level security on public.hidden hides every row from mason")], [null, true],
-        "a table mason add refuses for another reason than its key: no entry, and the refusal as its reason");
-      assert.match(of("public.hidden_log").reason!, /^no primary key: name the columns that tell its rows apart, mason add hidden_log --key id \(its unique index hidden_log_id_key\); with it, tables\.hidden_log: row-level security on public\.hidden_log hides every row/,
-        "no primary key, and refused even with the --key it names: both said");
+      // row-level security, said in a table's words (issue 802): no `tables.<entry>:`, no "remove its entry", the
+      // mason add to run once a policy is there; mason add's refusal the same words
+      const policy = (t: string) => `row-level security on public.${t} hides every row from mason (no SELECT policy for it, and it is not the owner or BYPASSRLS), ` +
+        `so its synced table would be empty — the table's owner adds a policy for the rows Mason may read (CREATE POLICY mason_read ON public.${t} FOR SELECT TO "mason" USING (…);), `;
+      assert.deepEqual([of("public.hidden").entry, of("public.hidden").reason], [null, `${policy("hidden")}then mason add hidden`],
+        "a table row-level security hides: no entry, and its reason in mason add's words for a table");
+      assert.equal(said(() => E.addEntry(edit(text), db, "public.hidden")), `public.hidden cannot be added: ${policy("hidden")}then mason add hidden`);
+      assert.equal(of("public.hidden_log").reason,
+        `${policy("hidden_log")}then mason add hidden_log --key id (no primary key: its unique index hidden_log_id_key tells its rows apart)`,
+        "no primary key as well: one reason, the --key in its mason add");
+      assert.equal(said(() => E.addEntry(edit(text), db, "public.hidden_log", ["*"], ["id"])), `public.hidden_log cannot be added: ${policy("hidden_log")}then mason add hidden_log --key id`);
+      assert.equal(said(() => E.addEntry(edit(text), db, "public.hidden_log")), `public.hidden_log cannot be added: ${of("public.hidden_log").reason}`);
+      // the run's state (the web page's Tables) says the same reason: one function, catalogTable's
+      for (const name of ["public.hidden", "public.hidden_log"]) assert.equal(S.catalogTable(db.tables.find((t) => t.source === name)!, undefined).reason, of(name).reason, name);
       if (top === "sync: poll 5m\n") assert.deepEqual(of("public.events_big").entry, { events_big: { sync: "off" } }, "a big table under a polling file: written off");
       if (top === "sync: replication\n") {
         assert.deepEqual(of("public.audit").entry, { audit: { sync: "poll 5m" } }, "REPLICA IDENTITY NOTHING under a replicating file: polled");
