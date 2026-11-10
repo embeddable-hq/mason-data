@@ -17,9 +17,9 @@
  * command line did not match `start … --attach`, so a hung server read as not running and its project as free). Every
  * run, however it was started (`mason start`, `mason serve` in the image or by hand, under a supervisor, through npx or
  * a checkout), records its own pid and its own start (`processStart`) in `running`, and the pid is that run only while
- * the process holding it started at that same moment. A check that cannot tell (no start recorded, a platform that
- * cannot read one) is hung, never none: `mason destroy` and `mason start` refuse, and `mason stop` kills nothing it
- * cannot name.
+ * the process holding it started at that same moment. A record an earlier Mason wrote (no start) is judged by the
+ * command line as before (`EARLIER_RUN`, now `serve` too). A check that cannot tell is hung, never none, and nothing
+ * is done under it: `mason destroy`, `mason start` and `mason stop` refuse, the way out the person's (`notAnswering`).
  */
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -96,8 +96,8 @@ export function notAnswering(p: Project, run: DevRun, unsure: string | null = nu
   if (unsure !== null) {
     return { problem: `Mason for ${p.config.name} may be running (pid ${run.pid}) but does not answer its commands (${run.control.url}, 3 s)`, code: "not_answering",
       why: `Mason cannot tell whether pid ${run.pid} is still its run: ${unsure}`,
-      fix: `ps -p ${run.pid} says what it is; end it yourself if it is Mason (kill ${run.pid}): mason stop signals no process it cannot name`,
-      next: [["mason stop", `forget pid ${run.pid} without signalling it; its synced data stays`], ["mason logs", "what the run was doing"]] };
+      fix: `ps -p ${run.pid} says what it is: if it is Mason, end it (kill -9 ${run.pid}), then run the command again; if it is another program, set "running" to null in ${p.dir}/config.json. Until then mason stop signals nothing and mason destroy removes nothing`,
+      next: [["mason logs", "what the run was doing"]] };
   }
   return { problem: `Mason for ${p.config.name} is running (pid ${run.pid}) but does not answer its commands (${run.control.url}, 3 s)`, code: "not_answering",
     why: "a statement may be holding its main thread",
@@ -130,10 +130,33 @@ export function processStart(pid: number): string | null {
   return at === "" ? null : `ps:${at}`;
 }
 
+/** What process `pid` runs, its arguments joined by spaces; null when this system does not say (gone, /proc hidden, no ps). */
+export function commandLine(pid: number): string | null {
+  if (process.platform === "linux") {
+    try { return fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0+$/, "").replaceAll("\0", " "); }
+    catch {
+      // gone, or /proc not readable here: "cannot tell", never "not Mason"
+      return null;
+    }
+  }
+  if (process.platform === "win32") return null;
+  const ps = spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8" });
+  return ps.status === 0 && ps.stdout.trim() !== "" ? ps.stdout.trim() : null;
+}
+
+/** A RUN AN EARLIER MASON RECORDED (no `started`) is known as earlier Masons knew it, by its command line: `mason start`'s
+ *  background run (`… start … --attach`, src/cli/background.ts) and `mason serve` from any entrance (the image's and the
+ *  package's `mason.cjs`, a checkout's `main.ts`, the package's `main.js`, a `mason` on the PATH). */
+const EARLIER_RUN = [/ start\b.*--attach\b/, /(^|[\s/])(mason(\.cjs)?|main\.[jt]s) serve(\s|$)/];
+
 /** Whether `pid` is the run that recorded `started` (`processStart`): yes, no (another process holds the number now),
- *  or cannot tell, with why. */
+ *  or cannot tell, with why. A record with no start (an earlier Mason's) is judged by the command line, as it was. */
 export function masonProcess(pid: number, started: string | null): { is: true } | { is: false } | { is: "unknown"; why: string } {
-  if (started === null) return { is: "unknown", why: "its config records no start for the run (an older Mason started it)" };
+  if (started === null) {
+    const line = commandLine(pid);
+    if (line === null) return { is: "unknown", why: `its config records no start for the run (an earlier Mason started it), and this system did not say what pid ${pid} runs` };
+    return EARLIER_RUN.some((re) => re.test(line)) ? { is: true } : { is: false };
+  }
   const now = processStart(pid);
   if (now === null) return { is: "unknown", why: `this system did not say when pid ${pid} started` };
   return now === started ? { is: true } : { is: false };

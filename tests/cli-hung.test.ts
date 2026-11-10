@@ -124,32 +124,56 @@ test("a pid another process holds now (it started after the run recorded its sta
   }
 });
 
-test("a silent pid with no start recorded cannot be told: hung to status and destroy, and mason stop forgets it without a signal", async () => {
+// A RECORD AN EARLIER MASON WROTE (no start: the upgrade's path) is judged at least as well as that Mason judged it
+// (the review of PR 806): its run, `start --attach` or `serve`, is hung and mason stop ends it before mason destroy;
+// a pid another program holds is no run
+for (const [how, args] of [["mason start (--attach)", ["start", "--attach"]], ["mason serve", ["/app/src/cli/mason.cjs", "serve"]]] as const) {
+test(`a run an earlier Mason recorded (${how}, no start), stopped by SIGSTOP: mason stop kills it, then mason destroy removes the synced data`, { timeout: 120_000 }, async () => {
+  const run = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", ...args], { stdio: "ignore" });
+  const root = hungProject(run.pid!, {});
+  fs.writeFileSync(path.join(root, ".mason", "duck.db"), "the synced data");
+  try {
+    process.kill(run.pid!, "SIGSTOP");
+    const env = matrixEnv();
+    const st = await runMason(root, ["status", "--json"], env);
+    assert.equal(st.code, 1, st.stdout);
+    const data = JSON.parse(st.stdout) as { hung: { pid: number; problem: string; why: string } };
+    assert.equal(data.hung.pid, run.pid);
+    assert.match(data.hung.problem, new RegExp(`^Mason for shop is running \\(pid ${run.pid}\\) but does not answer its commands`));
+    const refused = await runMason(root, ["destroy", "--json"], env);
+    assert.equal(refused.code, 1, refused.stdout);
+    assert.equal(fs.readFileSync(path.join(root, ".mason", "duck.db"), "utf8"), "the synced data");
+    const stop = await runMason(root, ["stop", "--json"], env);
+    assert.equal(stop.code, 0, stop.stdout);
+    const said = JSON.parse(stop.stdout) as { stopped: string[]; killed: boolean };
+    assert.deepEqual([said.stopped, said.killed], [["shop"], true]);
+    assert.equal(alive(run.pid!), false, "the run is gone before anything is removed");
+    const destroy = await runMason(root, ["destroy", "--json"], env);
+    assert.equal(destroy.code, 0, destroy.stdout);
+    assert.equal(fs.existsSync(path.join(root, ".mason", "duck.db")), false);
+  } finally {
+    if (run.pid !== undefined && alive(run.pid)) run.kill("SIGKILL");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+}
+
+test("a record an earlier Mason wrote (no start) whose pid another program holds now: not running, and start and destroy go on", async () => {
   const other = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
   const root = hungProject(other.pid!, {});
   try {
     const env = matrixEnv();
     const st = await runMason(root, ["status", "--json"], env);
-    assert.equal(st.code, 1, st.stdout);
-    const data = JSON.parse(st.stdout) as { running: boolean; hung: { pid: number; problem: string; why: string } };
-    assert.equal(data.hung.pid, other.pid);
-    assert.match(data.hung.problem, new RegExp(`^Mason for shop may be running \\(pid ${other.pid}\\) but does not answer its commands`));
-    assert.equal(data.hung.why, `Mason cannot tell whether pid ${other.pid} is still its run: its config records no start for the run (an older Mason started it)`);
+    assert.equal(st.code, 0, st.stdout);
+    const data = JSON.parse(st.stdout) as { running: boolean; hung?: unknown };
+    assert.equal(data.running, false);
+    assert.equal(data.hung, undefined);
+    // the project has nothing to start (no sources file): start fails on that, never on the pid
+    const start = await runMason(root, ["start", "--json"], env);
+    assert.doesNotMatch(start.stdout, /not_answering/);
     const destroy = await runMason(root, ["destroy", "--json"], env);
-    assert.equal(destroy.code, 1, destroy.stdout);
-    const stop = await runMason(root, ["stop", "--json"], env);
-    assert.equal(stop.code, 0, stop.stdout);
-    const said = JSON.parse(stop.stdout) as { stopped: string[]; forgotten: { pid: number; why: string } };
-    assert.deepEqual(said.stopped, []);
-    assert.equal(said.forgotten.pid, other.pid);
-    assert.equal(alive(other.pid!), true, "a pid Mason cannot name is never signalled");
-    const after = readProject(root);
-    assert.ok(after !== null && "config" in after);
-    assert.equal(after.config.running, null);
-    assert.match(after.config.lastStop?.how ?? "", new RegExp(`^forgotten by mason stop: pid ${other.pid} did not answer and Mason could not tell it was its run`));
-    const again = await runMason(root, ["status"], env);
-    assert.equal(again.code, 0, again.stderr);
-    assert.match(again.stdout, /^Status: not running\n/);
+    assert.equal(destroy.code, 0, destroy.stdout);
+    assert.equal(alive(other.pid!), true, "another program's pid is never signalled");
   } finally {
     if (other.pid !== undefined && alive(other.pid)) other.kill("SIGKILL");
     fs.rmSync(root, { recursive: true, force: true });

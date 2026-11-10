@@ -37,7 +37,7 @@ import * as seed from "../src/demo/seed.ts";
 import { parseGeneratedText, readGenerated } from "../src/cli/generated-files.ts";
 import { parseSql, stopParser } from "../src/api/postgres/parser.ts";
 import { appDatabaseUrl } from "../src/lib/dotenv.ts";
-import { answers, endRun, liveRun, masonProcess, processStart, runOf, runState } from "../src/cli/runs.ts";
+import { answers, endRun, liveRun, masonProcess, notAnswering, processStart, runOf, runState } from "../src/cli/runs.ts";
 
 const MAIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "main.ts");
 const tmp = (): string => fs.mkdtempSync(path.join(os.tmpdir(), "mason-project-"));
@@ -410,7 +410,15 @@ test("a process's start, as a run records it: the same at every reading, another
   assert.equal(processStart(Number(child.stdout)), null, "a pid that is gone: nothing to read");
   assert.deepEqual(masonProcess(process.pid, mine), { is: true });
   assert.deepEqual(masonProcess(process.pid, `${mine}0`), { is: false }, "the number held by a process that started at another moment");
-  assert.deepEqual(masonProcess(process.pid, null), { is: "unknown", why: "its config records no start for the run (an older Mason started it)" });
+  // a record an earlier Mason wrote (no start) is judged by the command line, as it was: this test runner is no run
+  assert.deepEqual(masonProcess(process.pid, null), { is: false });
+  // a pid that cannot be told: the way out is the person's, and nothing it suggests acts under the process
+  const p = { root: "/r", dir: "/r/.mason", folder: "/r/mason", config: newConfig("shop", "mason", false) } as Project;
+  const run = { name: "shop", root: "/r", home: "/r/.mason", folder: "/r/mason", pid: 4242, apiKey: "k", control: { url: "http://127.0.0.1:1", token: "t" }, postgresUrl: "postgresql://127.0.0.1:1/shop", postgresListener: { host: "127.0.0.1", tls: null } };
+  const said = notAnswering(p, run, "cannot say");
+  assert.equal(said.problem, "Mason for shop may be running (pid 4242) but does not answer its commands (http://127.0.0.1:1, 3 s)");
+  assert.equal(said.fix, 'ps -p 4242 says what it is: if it is Mason, end it (kill -9 4242), then run the command again; if it is another program, set "running" to null in /r/.mason/config.json. Until then mason stop signals nothing and mason destroy removes nothing');
+  assert.deepEqual(said.next, [["mason logs", "what the run was doing"]]);
 });
 
 test("ending a hung run: SIGTERM, then SIGKILL once the grace is over, and the pid waited for", async () => {

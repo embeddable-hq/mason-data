@@ -8,7 +8,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { STDIO, failed, jsonText, parseCommand, reportText, withEnd, type CommandSpec, type Io, type NextStep } from "./command.ts";
-import { alive, END_GRACE_MS, runState } from "./runs.ts";
+import { alive, END_GRACE_MS, notAnswering, runState, type DevRun } from "./runs.ts";
 import { stopSupervisor, supervisorOf } from "./supervise.ts";
 import { STATE_DIR, isProject, projectSource, readProject, theProject, writeConfig, type Project } from "./project.ts";
 import { parseSource, type Source } from "./preflight.ts";
@@ -52,6 +52,12 @@ export const DESTROY: CommandSpec & { needs: "project" } = {
 };
 
 /** Wait for `pid` to exit after SIGTERM; throws when it does not within 90 s. */
+/** A silent pid Mason cannot tell is its run, in notAnswering's words (why, then the person's way out), on one line. */
+function unsureText(p: Project, run: DevRun, unsure: string): string {
+  const said = notAnswering(p, run, unsure);
+  return `${said.why ?? ""}; ${said.fix ?? ""}`;
+}
+
 async function stopPid(pid: number, what: string, isAlive: (pid: number) => boolean, kill: (pid: number) => void = (p) => process.kill(p, "SIGTERM")): Promise<void> {
   kill(pid);
   const until = Date.now() + 90_000;
@@ -67,6 +73,8 @@ export async function removeProject(p: Project, o: { isAlive?: (pid: number) => 
   // A RUN THAT IS ALIVE AND DOES NOT ANSWER (src/cli/runs.ts "alive and silent"; on the test server the copy
   // was deleted under it, and the hung process kept the 58 GB file open): nothing is removed; mason stop ends it first
   if (st.kind === "hung") {
+    // a pid Mason cannot tell is its run (src/cli/runs.ts masonProcess): the way out is the person's, never mason stop's SIGKILL
+    if (st.unsure !== undefined) throw new Error(`Mason for ${p.config.name} may be running (pid ${st.run.pid}): ${unsureText(p, st.run, st.unsure)}, so nothing was removed`);
     throw new Error(`Mason for ${p.config.name} is running (pid ${st.run.pid}) but does not answer its commands, so nothing was removed: mason stop ends it (SIGKILL after ${END_GRACE_MS / 1000} s), then mason destroy`);
   }
   const run = st.run;
@@ -157,6 +165,7 @@ export interface DestroyPlan {
 export async function destroyPlan(p: Project, o: { state?: typeof runState; supervisor?: (home: string) => number | null } = {}): Promise<DestroyPlan> {
   const st = await (o.state ?? runState)(p);
   if (st.kind === "hung") {
+    if (st.unsure !== undefined) return { items: [], replication: null, error: `Mason for ${p.config.name} may be running (pid ${st.run.pid}): ${unsureText(p, st.run, st.unsure)}, so mason destroy would remove nothing` };
     return { items: [], replication: null, error: `Mason for ${p.config.name} is running (pid ${st.run.pid}) but does not answer its commands, so mason destroy would remove nothing: mason stop ends it (SIGKILL after ${END_GRACE_MS / 1000} s), then mason destroy` };
   }
   const items: string[] = [];

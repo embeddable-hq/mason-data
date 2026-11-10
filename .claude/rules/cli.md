@@ -202,9 +202,10 @@ CLI lacks).
   nothing under it. **The run is known by what it records, never by its command line** (issue 798: `mason serve`'s
   did not match `start … --attach`, and a hung server read as not running): every run records its own start beside its
   pid (`running.started`, `processStart`: /proc's boot id and start ticks on Linux, `ps -o lstart` in UTC elsewhere),
-  and the pid is the run only while the process holding it started then. A pid it cannot tell (no start recorded, a
-  platform that cannot say) is hung, never none, and `mason stop` forgets it without a signal (`forgotten`), the kill
-  left to the person. The supervisor is known by its command line under BOTH its names (`supervise.ts` in a checkout,
+  and the pid is the run only while the process holding it started then. A record an earlier Mason wrote (no start) is
+  judged by its command line as that Mason judged it (`EARLIER_RUN`: `start … --attach`, and `serve` from every
+  entrance). A pid it cannot tell (a platform that says neither) is hung, never none, and nothing acts under it:
+  `mason stop`, `start` and `destroy` refuse, and the way out is the person's (`ps -p`, kill it or clear `running`). The supervisor is known by its command line under BOTH its names (`supervise.ts` in a checkout,
   `supervise.js` in the package: `isSupervisorCommand`); a process known by the checkout's name alone is never found
   by the package, which is what every user runs.
 - **A database is the project's, and a moved one is noticed** (a database that moves to a different host is the same

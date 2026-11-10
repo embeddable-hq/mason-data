@@ -53,6 +53,11 @@ test("removing a running project stops Mason first, then removes its copy and st
       /^Error: Mason for shop is running \(pid 4242\) but does not answer its commands, so nothing was removed: mason stop ends it \(SIGKILL after 15 s\), then mason destroy$/);
     assert.ok(fs.existsSync(path.join(shop.dir, DUCK_FILE)), "the copy is kept under a hung run");
     assert.deepEqual(killed, [4242], "nothing signalled");
+    // a pid Mason cannot tell is its run (issue 798): nothing removed, and the way out is the person's, never stop's SIGKILL
+    const unsure = removeProject(shop, { state: async (p) => ({ kind: "hung", run: run(p), unsure: "cannot say" }), kill: (pid) => { killed.push(pid); }, stopSupervisor: async () => null });
+    await assert.rejects(unsure, (e: Error) => /^Mason for shop may be running \(pid 4242\): Mason cannot tell whether pid 4242 is still its run: cannot say; ps -p 4242 says what it is: .* so nothing was removed$/.test(e.message) && !/SIGKILL|mason stop ends/.test(e.message));
+    assert.ok(fs.existsSync(path.join(shop.dir, DUCK_FILE)), "the copy is kept under a pid that may be the run");
+    assert.deepEqual(killed, [4242], "nothing signalled");
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 
@@ -249,6 +254,9 @@ test("mason destroy --dry-run: what would go — the slot and publication on the
     const hung = await destroyPlan(project(shop.root), { state: async (p) => ({ kind: "hung", run: run(p) }), supervisor: () => null });
     assert.deepEqual([hung.items, hung.replication], [[], null]);
     assert.match(hung.error ?? "", /^Mason for shop is running \(pid 4242\) but does not answer its commands, so mason destroy would remove nothing: mason stop ends it/);
+    const unsure = await destroyPlan(project(shop.root), { state: async (p) => ({ kind: "hung", run: run(p), unsure: "cannot say" }), supervisor: () => null });
+    assert.match(unsure.error ?? "", /^Mason for shop may be running \(pid 4242\): Mason cannot tell whether pid 4242 is still its run: cannot say; .* so mason destroy would remove nothing$/);
+    assert.doesNotMatch(unsure.error ?? "", /SIGKILL|mason stop ends/);
     errs.length = 0;
     assert.equal(await destroy(["--dry-run"], { io, cwd: shop.root, ...untouched, destroyPlan: async () => hung }), 1);
     assert.match(errs.join(""), /mason destroy: shop: Mason for shop is running \(pid 4242\)[^\n]*\n {2}fix {3}nothing was changed \(a dry run\)\n/);

@@ -1074,7 +1074,7 @@ async function databaseTables(p: Project): Promise<{ database: string; name: str
 async function withoutRun(cmd: string, p: Project, json: boolean): Promise<{ db: EditCatalog; tables: CatalogTable[]; file: string; edit: () => EditTarget } | null> {
   const st = await runState(p);
   // a hung run is Mason running and not answering: FAILURE_CODES' unreachable
-  if (st.kind === "hung") { failed(cmd, { ...asFailure(notAnswering(p, st.run)), code: "unreachable" }, { json }); return null; }
+  if (st.kind === "hung") { failed(cmd, { ...asFailure(notAnswering(p, st.run, st.unsure ?? null)), code: "unreachable" }, { json }); return null; }
   if (st.kind === "up") {
     failed(cmd, { message: `Mason started for ${p.config.name} while mason ${cmd} ran`, code: "refused", fix: `run mason ${cmd} again: it asks the run, which syncs at once` }, { json });
     return null;
@@ -1406,7 +1406,7 @@ async function removeDryRun(p: Project, up: boolean, names: readonly string[], j
   if (!up) {
     const st = await runState(p);
     // a hung run refuses the edit itself (withoutRun): a dry run says what the edit would
-    if (st.kind === "hung") return failed("remove", { ...asFailure(notAnswering(p, st.run)), code: "unreachable" }, { json });
+    if (st.kind === "hung") return failed("remove", { ...asFailure(notAnswering(p, st.run, st.unsure ?? null)), code: "unreachable" }, { json });
   }
   const r = edited(() => {
     const at = sourceToEdit(p.folder, p.root, () => projectSource(p));
@@ -1956,7 +1956,7 @@ const STOP_USAGE = `usage: mason stop [--json]
 
     mason stop
 
-  --json    as data: { stopped: [name], killed (a run that did not answer and ignored SIGTERM), supervisor (its pid, when one was stopped), forgotten ({ pid, why }: a silent pid not known to be the run's, not signalled), next }
+  --json    as data: { stopped: [name], killed (a run that did not answer and ignored SIGTERM), supervisor (its pid, when one was stopped), next }
 
   mason destroy removes the synced data and the state too (your files stay), to free the disk or begin again.
 `;
@@ -1967,7 +1967,7 @@ export const STOP: CommandSpec & { needs: "project" } = {
   summary: "stop Mason for this folder's project (the synced data stays: the next mason start resumes)",
   usage: STOP_USAGE,
   options: { json: { type: "boolean" } },
-  json: ["stopped", "killed", "supervisor", "forgotten", "next"],
+  json: ["stopped", "killed", "supervisor", "next"],
 };
 
 export async function stop(argv: string[]): Promise<number> {
@@ -1978,19 +1978,10 @@ export async function stop(argv: string[]): Promise<number> {
   const json = f.values.json === true;
   const next: NextStep[] = [["mason start", "resume, in seconds (in the project's folder)"], ["mason destroy", "remove its synced data and its state; your files stay"]];
   const r = await theRun(process.cwd());
-  if ("problem" in r && r.hung !== undefined && r.unsure !== undefined) {
-    // A SILENT PID MASON CANNOT TELL IS STILL ITS RUN (src/cli/runs.ts masonProcess: a run an older Mason recorded, a
-    // platform that cannot say when a process started): never signalled — it may be anyone's process now — and the
-    // record forgotten, so the project is not held for ever by a number; whether to kill it is the person's, said
-    const hung = r.hung;
-    const recorded = readProject(hung.root);
-    const how = `pid ${hung.pid} did not answer and Mason could not tell it was its run (${r.unsure}), so it was not signalled`;
-    if (isProject(recorded)) { recorded.config.running = null; recorded.config.lastStop = { at: new Date().toISOString(), how: `forgotten by mason stop: ${how}` }; writeConfig(recorded.dir, recorded.config); }
-    if (json) { out(jsonText(STOP, { stopped: [], forgotten: { pid: hung.pid, why: r.unsure } }, next)); return 0; }
-    out(reportText({ headline: `Forgot ${hung.name}'s run, pid ${hung.pid}, without stopping it`, details: [["why", how],
-      ["kept", "its synced data and its state"]], tips: [`ps -p ${hung.pid} says what it is: if it is Mason, kill ${hung.pid} before mason start or mason destroy`], next }));
-    return 0;
-  }
+  // A SILENT PID MASON CANNOT TELL IS ITS RUN (src/cli/runs.ts masonProcess: a platform that cannot say what it runs):
+  // never signalled — it may be anyone's process now — and nothing forgotten, so nothing after this (a destroy) acts
+  // under a process that may be the run; the way out is the person's, said (notAnswering)
+  if ("problem" in r && r.hung !== undefined && r.unsure !== undefined) return failed("stop", asFailure(r), { json });
   if ("problem" in r && r.hung !== undefined) {
     // A RUN THAT DOES NOT ANSWER (src/cli/runs.ts "alive and silent"): its supervisor first, so it is not started again
     // over the kill, then SIGTERM and, after the grace, SIGKILL; the run could not record that it stopped, so stop does
