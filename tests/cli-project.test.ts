@@ -37,7 +37,7 @@ import * as seed from "../src/demo/seed.ts";
 import { parseGeneratedText, readGenerated } from "../src/cli/generated-files.ts";
 import { parseSql, stopParser } from "../src/api/postgres/parser.ts";
 import { appDatabaseUrl } from "../src/lib/dotenv.ts";
-import { answers, endRun, liveRun, masonProcess, processStart, runArguments, runOf, runState } from "../src/cli/runs.ts";
+import { answers, endRun, liveRun, masonProcess, processStart, runOf, runState } from "../src/cli/runs.ts";
 
 const MAIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "main.ts");
 const tmp = (): string => fs.mkdtempSync(path.join(os.tmpdir(), "mason-project-"));
@@ -407,33 +407,19 @@ test("a process's start, as a run records it: the same at every reading, another
   assert.equal(processStart(Number(child.stdout)), null, "a pid that is gone: nothing to read");
   assert.equal(masonProcess(process.pid, mine), true);
   assert.equal(masonProcess(process.pid, `${mine}0`), false, "the number held by a process that started at another moment");
-  // a record an earlier Mason wrote (no start) is judged by the arguments: this test runner is no run
+  // a record an earlier Mason wrote (no start) is judged by the earlier check: this test runner is no run
   assert.equal(masonProcess(process.pid, null), false);
 });
 
-test("a run by its arguments, field by field: node, Mason's entry, then serve or start … --attach (issue 798, the review of PR 806)", () => {
-  for (const args of [["node", "/app/src/cli/mason.cjs", "serve"], ["/usr/local/bin/node", "/x/node_modules/@mason-data/cli/dist/src/cli/mason.cjs", "serve"],
-    ["node", "/repo/src/cli/main.ts", "serve"], ["node", "/x/dist/src/cli/main.js", "serve"], ["node", "/usr/local/bin/mason", "serve"],
-    ["/opt/node/bin/node", "/app/src/cli/mason.cjs", "start", "--attach"], ["node", "/app/src/cli/mason.cjs", "start", "--self-signed-tls", "--attach"]]) {
-    assert.equal(runArguments(args), true, args.join(" "));
-  }
-  // what a command line joined by spaces mistook for a run (B4): another program naming the words, or Mason's words elsewhere
-  for (const args of [["tail", "-f", "mason serve notes.txt"], ["vim", "mason serve notes"], ["grep", "-r", "mason serve", "."], ["docker", "compose", "exec", "mason", "mason", "serve"],
-    ["node", "-e", "setInterval(() => {}, 1000)", "start", "--attach"], ["node", "/app/src/cli/mason.cjs", "status"], ["node", "/app/src/cli/mason.cjs", "start"],
-    ["node", "/app/server.js", "serve"], ["python3", "/app/src/cli/mason.cjs", "serve"], ["node"], []]) {
-    assert.equal(runArguments(args), false, args.join(" "));
-  }
-});
-
-test("a pid neither reader can say (Windows, a /proc this user may not read) is no run, as before; a start that cannot be read is judged by the arguments", () => {
-  const none = { start: () => null, args: () => null };
-  assert.equal(masonProcess(4242, null, none), false, "B3: no start recorded, nothing readable: none, as main read it");
-  assert.equal(masonProcess(4242, "linux:b:1", none), false, "a start recorded, nothing readable: none");
-  const serve = { start: () => null, args: () => ["node", "/app/src/cli/mason.cjs", "serve"] };
-  assert.equal(masonProcess(4242, "linux:b:1", serve), true, "the start not readable now: the arguments decide");
-  assert.equal(masonProcess(4242, null, serve), true);
-  // the start, where it is read, decides alone: another process whose arguments are a run's is not this run
-  assert.equal(masonProcess(4242, "linux:b:1", { start: () => "linux:b:2", args: () => ["node", "/app/src/cli/mason.cjs", "serve"] }), false);
+test("where a start is not recorded, or cannot be read now, the earlier check decides, as it did before issue 798", () => {
+  const unreadable = (earlier: boolean) => ({ start: () => null, earlier: () => earlier });
+  assert.equal(masonProcess(4242, null, unreadable(true)), true, "an earlier Mason's record: the earlier check's yes");
+  assert.equal(masonProcess(4242, null, unreadable(false)), false, "an earlier Mason's record: the earlier check's no");
+  assert.equal(masonProcess(4242, "linux:b:1", unreadable(false)), false, "a start recorded and not readable now (Windows, hidepid): the earlier check");
+  assert.equal(masonProcess(4242, "linux:b:1", unreadable(true)), true);
+  // the start, where it is read, decides alone: another process whose command line is a run's is not this run
+  assert.equal(masonProcess(4242, "linux:b:1", { start: () => "linux:b:2", earlier: () => true }), false);
+  assert.equal(masonProcess(4242, "linux:b:1", { start: () => "linux:b:1", earlier: () => false }), true);
 });
 
 test("ending a hung run: SIGTERM, then SIGKILL once the grace is over, and the pid waited for", async () => {

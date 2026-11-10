@@ -13,14 +13,13 @@
  * the number is another process's), and that does not answer is HUNG (`runState`): a command says so and names the way
  * out, `mason stop` ends it (`endRun`: SIGTERM, then SIGKILL), and `mason destroy` removes nothing under it.
  *
- * WHICH PROCESS IS THE RUN is what the run itself records where the process can be read (issue 798: a `mason serve`
- * run's command line did not match `start … --attach`, so a hung server read as not running and its project as free).
- * Every run, however it was started (`mason start`, `mason serve` in the image or by hand, under a supervisor, through
- * npx or a checkout), records its own pid and its own start (`processStart`) in `running`, and the pid is that run only
- * while the process holding it started at that same moment. Where that start cannot be read, or the record has none (an
- * earlier Mason wrote it, or a platform that cannot say), the pid is a run when its arguments are a run's
- * (`runArguments`: node, Mason's entry, then `serve` or `start … --attach`); a process neither can read is no run, as
- * before (Windows, a /proc this user may not read).
+ * WHICH PROCESS IS THE RUN is what the run itself records (issue 798: a `mason serve` run's command line did not match
+ * `start … --attach`, so a hung server read as not running and its project as free). Every run, however it was started
+ * (`mason start`, `mason serve` in the image or by hand, under a supervisor, through npx or a checkout), records its own
+ * pid and its own start (`processStart`) in `running`, and the pid is that run only while the process holding it
+ * started at that same moment. A record with no start (an earlier Mason wrote it, or a platform that cannot say), and a
+ * recorded start this system cannot read now (Windows, a /proc this user may not read), are judged by the earlier
+ * check, unchanged (`earlierCheck`: ps's command line, `start … --attach`): nothing reads worse than it did.
  */
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -111,7 +110,7 @@ export function processStart(pid: number): string | null {
       boot = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
       stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
     } catch {
-      // gone, or /proc not readable here (hidepid): not said, and the arguments are asked instead (`masonProcess`)
+      // gone, or /proc not readable here (hidepid): not said, and the earlier check decides (`masonProcess`)
       return null;
     }
     // field 2 is the command's name in parentheses, which may hold anything: the fields after its LAST ")" are fixed
@@ -124,39 +123,19 @@ export function processStart(pid: number): string | null {
   return at === "" ? null : `ps:${at}`;
 }
 
-/** The arguments process `pid` was started with: /proc's own fields on Linux; elsewhere ps's line split at its spaces
- *  (an argument holding a space is read as two: the best ps can say); null when this system does not say
- *  (gone, a /proc this user may not read, no ps). */
-export function commandArgs(pid: number): string[] | null {
-  if (process.platform === "linux") {
-    try { return fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0$/, "").split("\0"); }
-    catch {
-      // gone, or not readable here: not said, which `masonProcess` reads as no run, as before
-      return null;
-    }
-  }
-  if (process.platform === "win32") return null;
+/** THE EARLIER CHECK, as Mason before issue 798 made it, unchanged: whether `pid`'s command line is `mason start`'s
+ *  background run (`… start … --attach`, src/cli/background.ts). ps exits 1 for a pid that is gone. */
+export function earlierCheck(pid: number): boolean {
   const ps = spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8" });
-  const line = ps.status === 0 ? ps.stdout.trim() : "";
-  return line === "" ? null : line.split(/\s+/);
+  return ps.status === 0 && / start\b.*--attach\b/.test(ps.stdout);
 }
 
-/** Whether `args` are a Mason run's, field by field: node, then Mason's entry (`mason`, `mason.cjs`, a checkout's
- *  `main.ts`, the package's `main.js`), then `serve`, or `start` with `--attach` among the rest (src/cli/background.ts). */
-export function runArguments(args: readonly string[]): boolean {
-  const base = (a: string | undefined): string => (a ?? "").split(/[\\/]/).pop() ?? "";
-  if (!/^node(\.exe)?$/.test(base(args[0])) || !["mason", "mason.cjs", "main.ts", "main.js"].includes(base(args[1]))) return false;
-  return args[2] === "serve" || (args[2] === "start" && args.slice(3).includes("--attach"));
-}
-
-/** Whether `pid` is the run that recorded `started` (`processStart`): its start where it can be read; else, or where the
- *  record has none (an earlier Mason's), its arguments (`runArguments`); a process neither says is no run, as before. */
+/** Whether `pid` is the run that recorded `started` (`processStart`): its start, where one is recorded and can be read
+ *  now; else the earlier check (`earlierCheck`), so a record an earlier Mason wrote is judged as that Mason judged it. */
 export function masonProcess(pid: number, started: string | null,
-  read: { start: (pid: number) => string | null; args: (pid: number) => string[] | null } = { start: processStart, args: commandArgs }): boolean {
+  read: { start: (pid: number) => string | null; earlier: (pid: number) => boolean } = { start: processStart, earlier: earlierCheck }): boolean {
   const now = started === null ? null : read.start(pid);
-  if (now !== null) return now === started;
-  const args = read.args(pid);
-  return args !== null && runArguments(args);
+  return now !== null ? now === started : read.earlier(pid);
 }
 
 export type RunState = { kind: "up"; run: DevRun } | { kind: "hung"; run: DevRun } | { kind: "none"; run: null };

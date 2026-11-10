@@ -203,10 +203,9 @@ CLI lacks).
   not match `start … --attach`, and a hung server read as not running): the run writes its own start beside its pid
   (`running.started`, src/cli/dev.ts; `processStart`: /proc's boot id and start ticks on Linux, `ps -o lstart` in UTC
   elsewhere, none on Windows), and where a start is recorded and can be read the pid is the run only while it is the
-  same. Otherwise (no start recorded — an earlier Mason's record — or none readable now) the pid is the run when its
-  arguments are a run's, field by field (`runArguments`: node, then `mason`, `mason.cjs`, `main.ts` or `main.js`, then
-  `serve`, or `start` with `--attach` after it; /proc's fields on Linux, ps's line split at its spaces elsewhere); a
-  process neither can read (Windows, a /proc this user may not read) is no run, as before. The supervisor is known by its command line under BOTH its names (`supervise.ts` in a checkout,
+  same. A record with no start (an earlier Mason's, or one written on Windows) and a start that cannot be read now (a
+  /proc this user may not read) are judged by the earlier check, unchanged (`earlierCheck`: `ps -o command=` matching
+  `start … --attach`), so a `mason serve` an earlier Mason started reads as not running when it hangs, as it did. The supervisor is known by its command line under BOTH its names (`supervise.ts` in a checkout,
   `supervise.js` in the package: `isSupervisorCommand`); a process known by the checkout's name alone is never found
   by the package, which is what every user runs.
 - **A database is the project's, and a moved one is noticed** (a database that moves to a different host is the same
