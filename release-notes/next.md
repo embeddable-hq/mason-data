@@ -19,6 +19,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- The web page's Users says where each user connects from ("from anywhere", or its address ranges), and sets it as `mason user add --from` and `mason user from` do: the add form's **Connects from** (From anywhere, the default, or Only from these addresses, comma-separated), and **From…** beside each user. A range Mason cannot read is refused in its own words.
+- `MASON_UI_READ_ONLY_ALLOW` takes `users`, alone or with tables (`tables,users`): a read-only page (`MASON_UI_READ_ONLY=1`) then still adds, disables, enables and removes users and changes where they connect from — exactly `POST /api/users`, `POST /api/users/<name>/disable`, `/enable` and `/from`, and `DELETE /api/users/<name>` — and refuses every other change as before. The value is read strictly: an item that is not `tables` or `users`, an empty one, or one named twice refuses the start, with a `did you mean`; the refusal no longer quotes the value. If you set it, check it against these rules before upgrading.
+- `DELETE /api/users/<name>` takes the name as one path segment: a path with more segments under it is no route (404).
 - `MASON_UI_NAV_LINKS` refuses `mason serve`'s start when an entry has a key written twice (`{"label":"a","label":"b",…}`), naming the entry; it was read as its last value. A key a link does not take is named by its place in the entry, never quoted. `mason start` with a `MASON_UI_NAV_*` name that is no setting now says it is not a setting, with a `did you mean`.
 - `MASON_PG_PUBLIC_URL` takes a host name with an underscore (a Docker service's name) and one written with its trailing dot, printed as written; it refuses a host label over 63 characters, an IPv4 address with a number over 255, and an IPv6 address with a zone id (`%eth0`), at the start. Beside it, `mason user add` still gives a self-signed listener certificate's SHA-256.
 

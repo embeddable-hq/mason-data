@@ -131,7 +131,7 @@ export interface RunState {
   /** why the page offers no control that changes anything (MASON_UI_READ_ONLY=1, src/cli/ui-read-only.ts), or null:
    *  src/cli/run-server.ts runState; a run from before it has none */
   pageReadOnly?: string | null;
-  /** what that page still allows (MASON_UI_READ_ONLY_ALLOW: `tables`), [] when nothing or not read-only:
+  /** what that page still allows (MASON_UI_READ_ONLY_ALLOW: `tables`, `users`), [] when nothing or not read-only:
    *  src/cli/run-server.ts runState; a run from before it has none */
   pageReadOnlyAllow?: string[];
   /** the page's link back to the site that links to it (mason serve with MASON_UI_BACK_URL, src/cli/ui-back-link.ts),
@@ -447,7 +447,7 @@ const STATUS_USAGE = `usage: mason status [--json]
     project's files deployed read-only, MASON_PROJECT_READONLY, which mason add and mason remove refuse too, or a
     server's sources file it cannot write — or null), pageReadOnly (why the page changes nothing: mason serve with
     MASON_UI_READ_ONLY=1, which refuses every change the page sends — or null), pageReadOnlyAllow (what that page
-    still changes: [tables] with MASON_UI_READ_ONLY_ALLOW=tables, else []), pageBack ({ url, label }: the
+    still changes: [tables], [users] or [tables, users] as MASON_UI_READ_ONLY_ALLOW names them, else []), pageBack ({ url, label }: the
     page's link back to the site that links to it, mason serve with MASON_UI_BACK_URL — or null), pageNav ({ items, links }: the sidebar's
     items that link to the host's own pages instead — items has overview, tables, users, queries, usage or syncEvents,
     each the URL it links to, mason serve with MASON_UI_NAV_<ITEM>_URL — and the host's links, [{ url, label }], with

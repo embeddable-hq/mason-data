@@ -514,6 +514,12 @@ form.formcard input { width: 18em; }
 #add-user .role-field { display: inline-flex; align-items: center; gap: var(--space-2); max-width: 100%; min-width: 0; vertical-align: middle; }
 #add-user .role-field label { flex: none; }
 #add-user .role-field select { flex: 0 1 auto; min-width: 0; max-width: 100%; text-overflow: ellipsis; }
+/* Connects from (the add form's and From…'s): from anywhere, or only from the ranges typed — the box shown only then */
+fieldset.connects { border: 0; padding: 0; margin: var(--space-2) 0; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
+fieldset.connects legend { float: left; margin-right: var(--space-2); padding: 0; color: var(--fg); font-size: var(--text-sm); }
+fieldset.connects input[type="radio"] { width: auto; min-width: 0; height: auto; accent-color: var(--accent); }
+fieldset.connects .ranges input { width: 22em; max-width: 100%; }
+fieldset.connects:has(input[value="any"]:checked) .ranges { display: none; }
 /* ---------------------------------------------------------------- Connect: the URL, its psql line, Create a user */
 /* a box whose title sits on its top edge, as a fieldset's legend does (Connect, Getting started, a chart's name) */
 .connect { background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-4) var(--space-5); margin: var(--space-6) 0 var(--space-6); }
@@ -568,11 +574,13 @@ table.users td .warn { display: block; white-space: normal; min-width: 14em; }
 @media (max-width: 1100px) { table.users code.name { max-width: 18ch; } }
 table.users td { white-space: nowrap; }
 /* FIXED COLUMNS, as the tables' catalog's: Disable → "Disabled <when>" widens no column and moves no button */
-table.users { table-layout: fixed; width: 100%; min-width: 960px; }
+table.users { table-layout: fixed; width: 100%; min-width: 1180px; }
 table.users th.status { width: 224px; }
+/* where a user connects from: "from anywhere" or its ranges, cut with their whole the title */
+table.users th.from { width: 170px; }
 table.users th.added { width: 188px; }
 table.users th.last { width: 150px; }
-table.users th.act { width: 240px; }
+table.users th.act { width: 304px; }
 table.users td { overflow: hidden; text-overflow: ellipsis; }
 #page-users td.mono { white-space: nowrap; }
 #page-users .added { border-left-color: var(--warn); border-radius: var(--radius-lg); padding: var(--space-4) var(--space-5); margin: 0 0 var(--space-4); }

@@ -22,7 +22,7 @@ const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "
 import { VIEW_HASHES } from "../routes.js";
 import { msText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
   utcMinute, oneLine, clientText, eventCells, unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, renderConnect, copyClick,
-  badge, button, copyable, pop, renderFailure, json, readOnlyLine, tablesReadOnly } from "../shared.js";
+  badge, button, copyable, pop, renderFailure, json, readOnlyLine, tablesReadOnly, usersReadOnly } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
 
 /** How many recent errors of each kind are shown: mason status's (src/cli/commands.ts `RECENT_ERRORS`, held equal by the tests). */
@@ -401,9 +401,9 @@ export function renderChecklist(s, queries, users) {
   const answered = queries.queries.week.completed > 0;
   if (copied && user && answered) return "";
   const copying = added && !copied && copyingCount(s) > 0;
-  // a read-only page (MASON_UI_READ_ONLY=1) sends no one to add what it would refuse to add: a user, and a table unless
-  // its tables are still its own (MASON_UI_READ_ONLY_ALLOW=tables)
-  const looks = (s.pageReadOnly ?? null) !== null;
+  // a read-only page (MASON_UI_READ_ONLY=1) sends no one to add what it would refuse to add: a user unless its users
+  // are still its own (MASON_UI_READ_ONLY_ALLOW=users), and a table unless its tables are (=tables)
+  const looks = usersReadOnly(s) !== null;
   const tablesLook = tablesReadOnly(s) !== null;
   const steps = [
     ["Mason is running", true, ""],
@@ -418,6 +418,11 @@ export function renderChecklist(s, queries, users) {
     `</ol></div>`;
 }
 
+/** What a read-only page's Overview does not do (`readOnlyLine`'s words), by what it still may (MASON_UI_READ_ONLY_ALLOW):
+ *  never a share; a table unless `tables`, a user unless `users`. */
+const readOnlyWhat = (tables, users) => tables && users ? "Nothing is shared" : tables ? "No user is created and nothing is shared"
+  : users ? "Nothing is shared or added" : "Nothing is shared, added or created";
+
 /**
  * THE OVERVIEW from `/api/state` and the request log's reads (`o.queries`, `o.events`, `o.requests`, `o.unsupported`, `o.usage`:
  * each the body, or `{ failure }`; `o.now` the clock; `o.open(key)` whether a details is open): the word, the cards,
@@ -430,9 +435,9 @@ export function renderStatus(s, o = {}) {
   // day's and week's statements, read as none), else after the facts, for the next tool
   const first = isFirstConnect(o.queries);
   const connect = added ? renderConnect(s.postgres, { first, served: s.served === true, table: s.tables.find((t) => t.added && t.copy?.phase === "done")?.table ?? null,
-    share: renderShare(s, o.share ?? NO_SHARE, now), readOnly: s.pageReadOnly ?? null }) : "";
+    share: renderShare(s, o.share ?? NO_SHARE, now), readOnly: usersReadOnly(s) }) : "";
   // a read-only page (MASON_UI_READ_ONLY=1): why it offers no share, no user and no table to add, as Tables and Users say it
-  return readOnlyLine(tablesReadOnly(s) === null ? "No user is created and nothing is shared" : "Nothing is shared, added or created", s.pageReadOnly) + renderHealth(s) + renderChecklist(s, o.queries, o.users) + renderKpis(s, { ...o, now }) + (first ? connect : "") + renderProgress(s, o.open, o.shares, o.before) + renderFacts(s, now) + (first ? "" : connect) + renderStream(s, now) +
+  return readOnlyLine(readOnlyWhat(tablesReadOnly(s) === null, usersReadOnly(s) === null), s.pageReadOnly) + renderHealth(s) + renderChecklist(s, o.queries, o.users) + renderKpis(s, { ...o, now }) + (first ? connect : "") + renderProgress(s, o.open, o.shares, o.before) + renderFacts(s, now) + (first ? "" : connect) + renderStream(s, now) +
     (added ? renderQueries(o.queries) : "") + (added ? renderRecentErrors(o.events, o.requests, o.unsupported) : "");
 }
 

@@ -1,9 +1,9 @@
 /**
- * THE USERS PAGE (#users): what `mason user list|add|disable|enable|remove` does — GET /api/users, POST /api/users,
- * POST /api/users/<name>/disable and /enable, DELETE /api/users/<name>. An added user's password lives in this page's memory until the person dismisses it, never in
+ * THE USERS PAGE (#users): what `mason user list|add|from|disable|enable|remove` does — GET /api/users, POST /api/users,
+ * POST /api/users/<name>/from, /disable and /enable, DELETE /api/users/<name>. An added user's password lives in this page's memory until the person dismisses it, never in
  * storage, a URL or a log line.
  */
-import { actId, badge, button, code, copyable, copyClick, duration, empty, esc, json, panel, pop, renderFailure, ROOMS, serverHostNote, status, utcMinute, readOnlyLine } from "../shared.js";
+import { actId, badge, button, code, copyable, copyClick, duration, empty, esc, json, panel, pop, renderFailure, ROOMS, serverHostNote, status, utcMinute, readOnlyLine, usersReadOnly } from "../shared.js";
 
 /** The users as the page reads them: with each one's last use (`mason user list` asks the same), then every 30 s. */
 const USERS = "api/users?lastUsed=1";
@@ -32,6 +32,38 @@ export const disableEffect = (name) =>
 /** A disabled user's state, as `mason user list` says it (src/cli/user.ts `disabledText`, held equal by the tests). */
 export const disabledText = (disabledAt) => `Disabled ${stamp(disabledAt)} UTC`;
 
+/** A user's address ranges as `mason user` says them (src/cli/user.ts `rangesText`, held equal by the tests): the
+ *  ranges, or any address. */
+export const rangesText = (from) => from === null || from === undefined ? "any address" : from.join(", ");
+
+/** Where a user connects from, in its row: "from anywhere", or "from" its ranges (`rangesText`). */
+export const fromText = (from) => from === null || from === undefined ? "from anywhere" : `from ${rangesText(from)}`;
+
+/**
+ * THE "CONNECTS FROM" CHOICE, as `mason user add --help` says it: from anywhere (no --from, the default: no `from` is
+ * sent) or only from these addresses (--from <range>, a comma list as `--from a,b` takes it). `id`: the form's own, so
+ * two forms on the page never share an input's id; `from`: the ranges it opens with (null: from anywhere). The page
+ * never judges a range: the run reads each, and its refusal is said as the run words it (one grammar, the server's).
+ */
+export function connectsChoice(id, from = null) {
+  const only = Array.isArray(from);
+  return `<fieldset class="connects"><legend>Connects from</legend>` +
+    `<label class="tick"><input type="radio" name="connects" value="any"${only ? "" : " checked"}> From anywhere</label>` +
+    `<label class="tick"><input type="radio" name="connects" value="only"${only ? " checked" : ""}> Only from these addresses</label>` +
+    `<span class="ranges"><label class="sr" for="${esc(id)}-from">Address ranges, comma-separated</label>` +
+    `<input id="${esc(id)}-from" name="from" spellcheck="false" autocapitalize="off" placeholder="192.0.2.0/24, 2001:db8::/32" value="${esc(only ? from.join(", ") : "")}"></span></fieldset>`;
+}
+
+/**
+ * What a "Connects from" choice sends (`elements`: the form's): null for from anywhere — the add form sends no `from`
+ * then, the change `{ from: null }` (mason user from --any) — else the ranges typed, split at each comma and trimmed, an
+ * empty one dropped: `--from a,b`'s list. Nothing more is judged here; none typed is sent as none, for the run to refuse.
+ */
+export function rangesOf(elements) {
+  if ((elements?.connects?.value ?? "any") !== "only") return null;
+  return String(elements.from?.value ?? "").split(",").map((r) => r.trim()).filter((r) => r !== "");
+}
+
 /** The question being asked, from a model's `confirming`: a name alone is Remove's (as before), else `{ name, verb }`. */
 const askOf = (confirming) => confirming === null || confirming === undefined ? null : typeof confirming === "string" ? { name: confirming, verb: "remove" } : confirming;
 
@@ -50,7 +82,11 @@ export const attributesText = (a) => Object.entries(a).map(([k, v]) => `${k}=${t
  * user held to it is refused (57P03), said above the table as `mason user list`'s tip says it (src/cli/roles.ts
  * rolesProblemText, held equal by tests/web-page.test.ts) and in each user's role; beside the role, the user's
  * attributes (its row filters' values) and, where it lacks one its role's filters read, that its statements are refused.
- * `readOnly`: `/api/state` `pageReadOnly` (MASON_UI_READ_ONLY=1) — no Disable, Enable or Remove, and the page says why.
+ * `readOnly`: `/api/state` `pageReadOnly` (MASON_UI_READ_ONLY=1) — no From…, Disable, Enable or Remove, and the page
+ * says why; null on a page whose users are still its own (MASON_UI_READ_ONLY_ALLOW=users: `usersReadOnly`). Each user's
+ * addresses (`from`, `mason user list --json`'s: its ranges, or null for any address) are said in their own column;
+ * From… asks, in a popover as Disable does, where it connects from (`confirming` { name, verb: "from" }) — the choice
+ * the add form offers, opened at its ranges now — and sends POST /api/users/<name>/from.
  */
 export function renderUsers(list, confirming = null, now = Date.now(), refused = null, roles = null, readOnly = null) {
   const users = [...list.users.filter((u) => u.removedAt == null), ...list.users.filter((u) => u.removedAt != null)];
@@ -63,7 +99,7 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
   // a Remove's or a Disable's question is a popover beside the user's actions (`pop`), never a row: no row below it moves
   const pops = [];
   const ask = askOf(confirming);
-  return why + brokenNote + panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col" class="role">Role</th><th scope="col" class="status">Status</th><th scope="col" class="added">Added</th><th scope="col" class="num last">Last used</th><th scope="col" class="act"></th></tr></thead><tbody>${users.map((u) => {
+  return why + brokenNote + panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col" class="role">Role</th><th scope="col" class="status">Status</th><th scope="col" class="from">Connects</th><th scope="col" class="added">Added</th><th scope="col" class="num last">Last used</th><th scope="col" class="act"></th></tr></thead><tbody>${users.map((u) => {
     const active = u.removedAt == null;
     const last = lastUsedText(u, list.lastUsedNote, list.requestLogDays, now);
     const lastCell = !active ? "" : u.lastUsedAt != null
@@ -75,6 +111,12 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
       `<p class="pop-actions">${button(`Remove ${u.name}`, { confirmRemove: u.name }, "danger small")} ${button("Cancel", { cancelRemove: "", popClose: "" }, "small")}</p>`, { kind: "dialog", label: `Remove ${u.name}?` }));
     else if (asking === "disable") pops.push(pop(anchor, `<p class="confirm">Disable ${esc(u.name)}? ${esc(disableEffect(u.name))}</p>` +
       `<p class="pop-actions">${button(`Disable ${u.name}`, { confirmDisable: u.name }, "danger small")} ${button("Cancel", { cancelRemove: "", popClose: "" }, "small")}</p>`, { kind: "dialog", label: `Disable ${u.name}?` }));
+    // the form's first input is its choice (a dialog's first box takes the focus): the user it changes is last, hidden
+    else if (asking === "from") pops.push(pop(anchor, `<form id="user-from" class="from-form" autocomplete="off">` +
+      `<p class="ask-from">Where ${esc(u.name)} connects from, as ${code(`mason user from ${u.name}`)} sets it: the sessions it holds from another address end at their next statement.</p>` +
+      connectsChoice("user-from", u.from ?? null) +
+      `<p class="pop-actions"><button type="submit" class="primary small">Change ${esc(u.name)}</button> ${button("Cancel", { cancelRemove: "", popClose: "" }, "small")}</p>` +
+      `<input type="hidden" name="user" value="${esc(u.name)}"></form>`, { kind: "dialog", label: `Where ${u.name} connects from` }));
     else if (refused?.name === u.name) pops.push(pop(anchor, `${renderFailure(refused.failure)}<p class="pop-actions">${button("Dismiss", { dismissRefused: "", popClose: "" }, "small")}</p>`));
     return `<tr${active ? "" : ` class="removed"`}><th scope="row"><code class="name" title="${esc(u.name)}">${esc(u.name)}</code> <span class="dim">id ${esc(u.id)}</span></th>` +
       // the role it reads as (src/cli/roles.ts userRole): its own (mason user add --role) — one the roles file does not name,
@@ -86,9 +128,12 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
           `${u.missingAttributes ? ` <span class="warn">${esc(`no value for ${u.missingAttributes.join(", ")}: its statements are refused`)}</span>` : ""}`}</td>` +
       `<td>${!active ? status("unknown", `Removed ${stamp(u.removedAt)} UTC`) : disabled ? status("warn", disabledText(u.disabledAt)) : status("ok", "Active")}` +
       `${active && !disabled && !u.live ? ` <span class="warn">does not connect: the API key was rotated since it was added</span>` : ""}</td>` +
+      // where it connects from (mason user list's `from …`; none said there: any address)
+      `<td class="from">${active ? `<span title="${esc(fromText(u.from))}">${esc(fromText(u.from))}</span>` : ""}</td>` +
       `<td class="mono">${esc(stamp(u.addedAt))} UTC</td><td class="num">${lastCell}</td>` +
       // Queries: its statements of the last 24 hours on Observability › Queries (a removed user's too: its past)
-      `<td class="act" id="${esc(anchor)}"><a class="btn small" href="${esc(userQueriesHref(u.name))}" title="the statements ${esc(u.name)} sent in the last 24 hours">Queries</a>${!active || readOnly !== null ? "" : ` ${toggle(u, disabled, asking === "disable")} ${asking === "remove" ? button("Remove", {}, "danger small", { disabled: true, expanded: true })
+      `<td class="act" id="${esc(anchor)}"><a class="btn small" href="${esc(userQueriesHref(u.name))}" title="the statements ${esc(u.name)} sent in the last 24 hours">Queries</a>${!active || readOnly !== null ? "" : ` ${toggle(u, disabled, asking === "disable")} ${asking === "from" ? button("From…", {}, "small", { disabled: true, expanded: true })
+        : button("From…", { from: u.name }, "small")} ${asking === "remove" ? button("Remove", {}, "danger small", { disabled: true, expanded: true })
         : button("Remove", { remove: u.name }, "danger small")}`}</td></tr>`;
   }).join("")}</tbody></table>`) + pops.join("") + note("Last used", list.lastUsedNote);
 }
@@ -117,13 +162,15 @@ export function renderUsersConnect(pg, served = false) {
  * choice too, as `--role`: the first option is what `mason user add <name>` gives with no `--role` — the file's
  * `default:`, marked and sending no role, so the user follows the default as the CLI's does; or, with no default, no
  * role — then each other role, sent as `role`. The server judges the role (src/cli/user.ts roleToAdd). Written the
- * same while nothing changes, so a poll never rewrites it under a name being typed.
+ * same while nothing changes, so a poll never rewrites it under a name being typed. Then Connects from, as `--from`
+ * (`connectsChoice`): from anywhere, the default, sends no `from`; only from these addresses sends the ranges typed.
+ * Shown under MASON_UI_READ_ONLY=1 too when its users are the page's own (MASON_UI_READ_ONLY_ALLOW=users).
  */
 export function renderAddUser(state) {
-  if (state === undefined || state === null || (state.pageReadOnly ?? null) !== null) return "";
+  if (state === undefined || state === null || usersReadOnly(state) !== null) return "";
   return `<form id="add-user" class="formcard" autocomplete="off"><label for="user-name">Name</label>` +
     `<input id="user-name" name="name" required placeholder="metabase" spellcheck="false" autocapitalize="off">` +
-    roleChoice(state.roles) + `<button type="submit" class="primary">Add a user</button></form>`;
+    roleChoice(state.roles) + connectsChoice("add-user") + `<button type="submit" class="primary">Add a user</button></form>`;
 }
 
 /** The add form's Role choice from `/api/state` `roles`: "" with no roles file, one naming none, or one that cannot be
@@ -167,13 +214,15 @@ export const page = {
   id: "users",
   title: "Users",
   create(ctx) {
-    const m = { actionFailure: null, added: null, confirming: null, refused: null };
+    // held: what From… opened over ({ list, now, state }), so a poll never rewrites its form under what is being typed
+    const m = { actionFailure: null, added: null, confirming: null, refused: null, held: null };
     const users = () => ctx.read(USERS)?.body ?? null;
     const actions = {
-      /** `role`: the Role choice's, sent as mason user add --role; "" or none: no role, as with no --role */
-      async addUser(name, role = "") {
+      /** `role`: the Role choice's, sent as mason user add --role; "" or none: no role, as with no --role. `from`: the
+       *  ranges, as mason user add --from; null or none: none sent, from anywhere */
+      async addUser(name, role = "", from = null) {
         m.actionFailure = null;
-        const r = await ctx.ask(USERS_POST, json("POST", { name, ...(role ? { role } : {}) }));
+        const r = await ctx.ask(USERS_POST, json("POST", { name, ...(role ? { role } : {}), ...(from !== null ? { from } : {}) }));
         if ("failure" in r) { m.actionFailure = r.failure; return false; }
         m.added = r.body;
         await ctx.refresh([USERS]);
@@ -181,7 +230,24 @@ export const page = {
       },
       askRemove(name) { m.confirming = name; m.actionFailure = null; m.refused = null; },
       askDisable(name) { m.confirming = { name, verb: "disable" }; m.actionFailure = null; m.refused = null; },
-      cancelRemove() { m.confirming = null; },
+      /** From…: where it connects from, asked in a popover over the list as it stands (held: no poll rewrites it) */
+      askFrom(name) {
+        m.confirming = { name, verb: "from" }; m.actionFailure = null; m.refused = null;
+        m.held = { list: users(), now: ctx.now().getTime(), state: ctx.read(STATE)?.body ?? null };
+      },
+      cancelRemove() { m.confirming = null; m.held = null; },
+      /** From… answered: POST /api/users/<name>/from (mason user from's own function) — `from` its ranges, or null for any
+       *  address (--any); a refusal, worded by the run, said beside the user's actions as a Disable's is */
+      async changeFrom(name, from) {
+        m.actionFailure = null;
+        m.refused = null;
+        const r = await ctx.ask(`api/users/${encodeURIComponent(name)}/from`, json("POST", { from }));
+        m.confirming = null;
+        m.held = null;
+        if ("failure" in r) { m.refused = { name, failure: r.failure }; return false; }
+        await ctx.refresh([USERS]);
+        return true;
+      },
       /** Disable once asked, Enable at once: POST /api/users/<name>/disable|enable (mason user's own functions); a
        *  refusal is said beside the user's actions, as a Remove's is */
       async toggleUser(name, verb) {
@@ -215,14 +281,17 @@ export const page = {
         const u = users();
         // the user asked about went (removed), or is disabled already (by mason user disable): the question goes
         const ask = askOf(m.confirming);
-        if (ask !== null && u !== null && !u.users.some((x) => x.name === ask.name && x.removedAt == null && (ask.verb !== "disable" || x.disabledAt == null))) m.confirming = null;
+        if (ask !== null && u !== null && !u.users.some((x) => x.name === ask.name && x.removedAt == null && (ask.verb !== "disable" || x.disabledAt == null))) { m.confirming = null; m.held = null; }
       },
       actions,
       view() {
-        const u = users();
+        // while From… asks, the list as it opened (`held`): its form is never rewritten under what is being typed
+        const h = m.held !== null && askOf(m.confirming)?.verb === "from" ? m.held : null;
+        const u = h !== null ? h.list : users();
+        const state = h !== null ? h.state : ctx.read(STATE)?.body ?? null;
         return {
           // the roles file's state is the run's (/api/state roles): a file that cannot be read refuses every user held to it
-          users: u ? renderUsers(u, m.confirming, ctx.now().getTime(), m.refused, ctx.read(STATE)?.body?.roles ?? null, ctx.read(STATE)?.body?.pageReadOnly ?? null) : "",
+          users: u ? renderUsers(u, m.confirming, h !== null ? h.now : ctx.now().getTime(), m.refused, state?.roles ?? null, usersReadOnly(state)) : "",
           "add-user-box": renderAddUser(ctx.read(STATE)?.body),
           "users-connect": renderUsersConnect(ctx.read(STATE)?.body?.postgres, ctx.read(STATE)?.body?.served === true),
           added: m.added ? renderAdded(m.added) : "",
@@ -230,9 +299,10 @@ export const page = {
         };
       },
       submit(form) {
+        if (form.id === "user-from") return actions.changeFrom(form.elements.user.value, rangesOf(form.elements));
         if (form.id !== "add-user") return null;
         const input = form.elements.name;
-        return actions.addUser(input.value.trim(), form.elements.role?.value ?? "").then((ok) => { if (ok) input.value = ""; });
+        return actions.addUser(input.value.trim(), form.elements.role?.value ?? "", rangesOf(form.elements)).then((ok) => { if (ok) input.value = ""; });
       },
       click(d, button, { doc, win }) {
         if (d.remove !== undefined) return actions.askRemove(d.remove) ?? true;
@@ -240,6 +310,7 @@ export const page = {
         if (d.confirmRemove !== undefined) return actions.confirmRemove(d.confirmRemove);
         if (d.disable !== undefined) return actions.askDisable(d.disable) ?? true;
         if (d.confirmDisable !== undefined) return actions.confirmDisable(d.confirmDisable);
+        if (d.from !== undefined) return actions.askFrom(d.from) ?? true;
         if (d.enable !== undefined) return actions.enableUser(d.enable);
         if (d.dismissAdded !== undefined) return actions.dismissAdded() ?? true;
         if (d.dismissRefused !== undefined) return actions.dismissRefused() ?? true;

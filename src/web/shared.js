@@ -505,6 +505,10 @@ export const readOnlyLine = (what, why) => why == null ? "" : `<p class="count">
  *  still changed from it (`pageReadOnlyAllow` has `tables`: MASON_UI_READ_ONLY_ALLOW=tables, whose routes the run serves). */
 export const tablesReadOnly = (s) => (s?.pageReadOnlyAllow ?? []).includes("tables") ? null : s?.pageReadOnly ?? null;
 
+/** Why the page changes no user (`/api/state` `pageReadOnly`), or null — null too on a read-only page whose users are
+ *  still changed from it (`pageReadOnlyAllow` has `users`: MASON_UI_READ_ONLY_ALLOW=users, whose routes the run serves). */
+export const usersReadOnly = (s) => (s?.pageReadOnlyAllow ?? []).includes("users") ? null : s?.pageReadOnly ?? null;
+
 /** On a server's page the Postgres URL's host is the server's own view of itself: said beside it, as a tool elsewhere
  *  needs the server's address. "" off a server, and where the URL is the address a client reaches (`pg.public`: mason
  *  serve's MASON_PG_PUBLIC_URL, src/cli/pg-url.ts clientLink). */
