@@ -393,6 +393,21 @@ export function start(doc, win) {
     if (leaving !== to.url) { leaving = to.url; win.location.replace(to.url); }
     return true;
   };
+  // A TOGGLE KEEPS THE FOCUS across a rewrite of its part (issue 816; issue 70's probe): a details' summary or a button
+  // naming a details' key (`data-expand`, a request's statement), found again in the new HTML by its key and kind —
+  // a row's toggle pressed, then a poll, then Tab moves on from that row, never from the top of the page
+  const focusedToggle = (el) => {
+    const a = doc.activeElement;
+    if (!a || a === el || !el.contains?.(a)) return null;
+    if (a.tagName === "SUMMARY" && typeof a.parentElement?.dataset?.open === "string") return { summary: a.parentElement.dataset.open };
+    if (typeof a.dataset?.expand === "string") return { expand: a.dataset.expand };
+    return null;
+  };
+  const refocus = (el, f) => {
+    const all = [...(el.querySelectorAll?.("details[data-open] > summary, button[data-expand]") ?? [])];
+    const t = all.find((x) => "summary" in f ? x.tagName === "SUMMARY" && x.parentElement?.dataset?.open === f.summary : x.dataset?.expand === f.expand);
+    t?.focus?.({ preventScroll: true });
+  };
   // the shown page's charts, drawn after each write (src/web/charts.js); a document that cannot hold one draws none
   const charts = typeof doc.querySelectorAll === "function" && typeof win.getComputedStyle === "function" ? createCharts({ doc, win }) : null;
   const paint = () => {
@@ -411,7 +426,9 @@ export function start(doc, win) {
         const times = [...el.querySelectorAll("time[data-tick]")];
         if (times.length === texts.length) { times.forEach((t, i) => { t.innerHTML = texts[i]; }); continue; }
       }
+      const focused = focusedToggle(el);
       el.innerHTML = html;
+      if (focused !== null) refocus(el, focused);
     }
     // the link back, when the state names one: an attribute and a text, set only when it changed
     const back = app.back();

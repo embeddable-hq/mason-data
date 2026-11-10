@@ -12,7 +12,7 @@
  * filtered (`route`: `?user=`, `?client=`, `?slow=1`, `?status=`).
  */
 import { VIEW_HASHES } from "../routes.js";
-import { msText, agoText, bytesText, esc, firstLine, n, empty, renderFailure, rowsHtml, utcText, utcMsText, details, createOpenSet, status,
+import { statementMsText, agoText, bytesText, esc, firstLine, n, empty, renderFailure, rowsHtml, utcText, utcMsText, details, createOpenSet, status,
   clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, clientText, renderConnect, copyClick, UNLISTED_STATEMENTS, statementCell, rangeEvery } from "../shared.js";
 
 const STATE = "api/state";
@@ -36,13 +36,20 @@ const REQUEST_SORTS = { started: (r) => Date.parse(r.startedAt), duration: (r) =
 /** The request log's order unless a header is clicked: newest first. */
 const NEWEST_FIRST = { key: "started", dir: "desc" };
 
+/** The statement cell's toggle (issue 816): the same expanded row as the id's, by the same key and open state, so the
+ *  way to the whole statement is where the reader looks for it: its label the +/− the id's summary draws, its name what it opens. */
+const EXPAND_NAME = "Show the whole statement";
+const expandButton = (key, open) =>
+  `<button type="button" class="expand" data-expand="${esc(key)}" aria-expanded="${open ? "true" : "false"}" aria-label="${EXPAND_NAME}" title="${EXPAND_NAME}"><span aria-hidden="true">${open ? "−" : "+"}</span></button>`;
+
 /**
  * THE REQUEST LOG (`mason logs --requests --json`'s shape: { requests, keptDays, before }), newest first (the command
  * prints the oldest of the page first; a table reads the other way): a dot and the status word, the id's first 8
  * characters, when it started (how long ago; the UTC time is its title and in its details), the duration, user, client,
  * rows, and the statement (cut to a line, at most two in the cell, at most TITLE_MAX characters its title) over its
- * error's first line. Each row EXPANDS (its id is the toggle: a `details` keyed by the request's id, `isOpen` the page's
- * open set, so a poll that rewrites the log keeps it open) into the whole id, when it started and ended, the bytes sent,
+ * error's first line. Each row EXPANDS (its id is a toggle — a `details` keyed by the request's id — and so is the `+`
+ * beside its statement, `expandButton`, the same key: `isOpen` the page's open set, so a poll that rewrites the log keeps
+ * it open, and both toggles say the same) into the whole id, when it started and ended, the bytes sent,
  * the statement and the error — each the first STATEMENT_MAX characters, and said so when cut. `sort` ({ key, dir }:
  * started, duration or rows) orders the page shown, said under it when it is not the newest first. **Older** when the
  * page has an older one (`before`), **Newest** when the page shown is not the newest. `filtered`: the empty sentence
@@ -68,9 +75,9 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
     const row = `<tr class="s-${esc(word.toLowerCase())}"><td>${status(kind, word)}</td>` +
       `<td class="id">${details(key, r.requestId.slice(0, 8), "", open)}</td>` +
       `<td class="when"><time data-tick datetime="${esc(r.startedAt)}" title="${esc(utcText(r.startedAt))} UTC">${esc(agoText(r.startedAt, now))}</time></td>` +
-      `<td class="num">${esc(msText(r.durationMs))}</td><td><span class="clip" title="${esc(r.user || r.tokenName)}">${esc(r.user || (r.tokenName ? `token ${r.tokenName}` : ""))}</span></td>` +
+      `<td class="num">${esc(statementMsText(r.durationMs))}</td><td><span class="clip" title="${esc(r.user || r.tokenName)}">${esc(r.user || (r.tokenName ? `token ${r.tokenName}` : ""))}</span></td>` +
       `<td><span class="clip" title="${esc(clientText(r.applicationName))}">${esc(clientText(r.applicationName))}</span></td>` +
-      `<td class="num">${r.rows === null ? "" : esc(n(r.rows))}</td><td class="stmt-cell">${statementCell(r.query)}${error}</td></tr>`;
+      `<td class="num">${r.rows === null ? "" : esc(n(r.rows))}</td><td class="stmt-cell"><div class="stmt-line">${statementCell(r.query)}${expandButton(key, open)}</div>${error}</td></tr>`;
     // the rest of a request is its expanded row: the whole id, when it started and ended, the bytes sent, the statement and error (each capped)
     const stmt = capped(r.query || "(no statement)", STATEMENT_MAX, "mason logs --requests --json");
     const err = capped(r.message ?? "", STATEMENT_MAX, "mason logs --requests --json");
@@ -183,6 +190,8 @@ export const page = {
         // Connect's Copy buttons, in the request log's empty state
         if (d.copy !== undefined) return copyClick(d, button, env);
         if (d.sortTable === "requests") return actions.sortRequests(d.sortKey) ?? true;
+        // the statement's toggle: the row's one open state, as its id's summary opens and closes it
+        if (d.expand !== undefined) return opened.toggle({ dataset: { open: d.expand }, open: !opened.has(d.expand), clicked: true });
         if (d.older !== undefined) return actions.olderRequests();
         if (d.newest !== undefined) return actions.newestRequests();
         if (d.clearFilters !== undefined) { doc.getElementById("request-filters")?.reset?.(); return actions.filterRequests({}); }
