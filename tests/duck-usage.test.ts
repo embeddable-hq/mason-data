@@ -128,20 +128,103 @@ test("90 days of samples (129,600, one a minute) re-bucketed a day a point in on
   await store.writer.run(`DELETE FROM ${USAGE_TABLE}`);
 });
 
-test("a copy with no block of its own yet (its rows still in the write-ahead log) is not measured, never said as 0 bytes", async () => {
+test("a copy small enough to stay in the write-ahead log is measured at the first measure after its sync, never as 0 bytes: a checkpoint first, on the samples' own connection; an empty copy takes none (issue 815)", async () => {
   const { UsageSampler } = await usage();
   const clock = Date.parse("2026-10-28T12:00:00.000Z");
+  const file = path.join(dir, "duck.db");
+  const walBytes = (): number => (fs.existsSync(`${file}.wal`) ? fs.statSync(`${file}.wal`).size : 0);
   await store.writer.run("CHECKPOINT");
   await store.writer.run(`CREATE SCHEMA IF NOT EXISTS app`);
-  await store.writer.run(`CREATE TABLE app.fresh AS SELECT i AS id FROM range(1000) t(i)`);
-  const u = await UsageSampler.open(store, () => undefined, { days: 7, now: () => clock, sampleMs: NEVER, sizeEveryMs: 1 });
+  // the issue's: 25,000 keyed rows over 4 columns, all of them in the write-ahead log (DuckDB checkpoints by itself at 16 MiB)
+  await store.writer.run(`CREATE TABLE app.fresh AS SELECT i AS id, i * 7 AS amount, 'name ' || i AS name, TIMESTAMP '2026-01-01' + to_seconds(i) AS at FROM range(25000) t(i)`);
+  await store.writer.run(`CREATE TABLE app.empty (id BIGINT)`);
+  assert.ok(walBytes() > 100_000, `its rows are in the write-ahead log: ${walBytes()} bytes`);
+  const said: string[] = [];
+  const u = await UsageSampler.open(store, (l) => said.push(l), { days: 7, now: () => clock, sampleMs: NEVER, sizeEveryMs: 10 * 60_000 });
   try {
-    u.start(async () => ({ ...facts, copied: ["app.fresh"] }));
+    u.start(async () => ({ ...facts, copied: ["app.empty"] }));
     await u.sample();
-    assert.deepEqual((await u.copySizes()).filter((c) => c.table === "app.fresh"), [], "not measured until its rows are in the file");
+    assert.deepEqual(await u.copySizes(), [], "an empty copy has nothing to measure");
+    assert.equal(said.filter((l) => /checkpointed/.test(l)).length, 0, `no checkpoint for an empty copy: ${said.join(" | ")}`);
+    await store.writer.run(`DELETE FROM _mason.copy_sizes`);
+    const u2 = await UsageSampler.open(store, (l) => said.push(l), { days: 7, now: () => clock, sampleMs: NEVER, sizeEveryMs: 10 * 60_000 });
+    try {
+      u2.start(async () => ({ ...facts, copied: ["app.fresh", "app.empty"] }));
+      await u2.sample();
+      const sizes = await u2.copySizes();
+      assert.deepEqual(sizes.map((c) => c.table), ["app.fresh"], "measured at the first measure, the empty one not");
+      assert.ok(sizes[0]!.bytes >= 65_536, `its blocks, never 0: ${sizes[0]!.bytes}`);
+      assert.match(said.join("\n"), /^usage: 1 synced table\(s\) had all their rows in the write-ahead log; checkpointed in \d+ ms to measure their size$/m);
+      assert.ok(walBytes() < 100_000, `written into the file: the log is ${walBytes()} bytes`);
+    } finally { await u2.close(); }
   } finally {
     await u.close();
     await store.writer.run(`DROP TABLE app.fresh`);
+    await store.writer.run(`DROP TABLE app.empty`);
+    await store.writer.run(`DELETE FROM _mason.copy_sizes`);
+  }
+});
+
+test("a copy with blocks of its own is measured without a checkpoint: rows added since stay in the write-ahead log", async () => {
+  const { UsageSampler } = await usage();
+  const clock = Date.parse("2026-10-28T12:30:00.000Z");
+  const file = path.join(dir, "duck.db");
+  await store.writer.run(`CREATE SCHEMA IF NOT EXISTS app`);
+  await store.writer.run(`CREATE TABLE app.kept AS SELECT i AS id, 'row ' || i AS note FROM range(5000) t(i)`);
+  await store.writer.run("CHECKPOINT");
+  await store.writer.run(`INSERT INTO app.kept SELECT i, 'later ' || i FROM range(5000, 6000) t(i)`);
+  const wal = fs.statSync(`${file}.wal`).size;
+  const said: string[] = [];
+  const u = await UsageSampler.open(store, (l) => said.push(l), { days: 7, now: () => clock, sampleMs: NEVER, sizeEveryMs: 1 });
+  try {
+    u.start(async () => ({ ...facts, copied: ["app.kept"] }));
+    await u.sample();
+    assert.equal((await u.copySizes())[0]?.table, "app.kept");
+    assert.equal(said.filter((l) => /checkpointed/.test(l)).length, 0, `no checkpoint: ${said.join(" | ")}`);
+    assert.ok(fs.statSync(`${file}.wal`).size >= wal, "the log left as it was");
+  } finally {
+    await u.close();
+    await store.writer.run(`DROP TABLE app.kept`);
+    await store.writer.run(`DELETE FROM _mason.copy_sizes`);
+  }
+});
+
+test("a checkpoint refused beside another connection's update is said once, and the copy is measured at the next sample, not the next 10 min", async () => {
+  const { UsageSampler } = await usage();
+  let clock = Date.parse("2026-10-28T13:30:00.000Z");
+  await store.writer.run("CHECKPOINT");
+  await store.writer.run(`CREATE SCHEMA IF NOT EXISTS app`);
+  await store.writer.run(`CREATE TABLE app.other AS SELECT i AS id FROM range(100) t(i)`);
+  await store.writer.run("CHECKPOINT");
+  await store.writer.run(`CREATE TABLE app.late AS SELECT i AS id, 'row ' || i AS note FROM range(2000) t(i)`);
+  const said: string[] = [];
+  const u = await UsageSampler.open(store, (l) => said.push(l), { days: 7, now: () => clock, sampleMs: NEVER, sizeEveryMs: 10 * 60_000 });
+  // a swap's or a stored path's backfill: an update open on another connection
+  const other = await store.instance.connect();
+  try {
+    await other.run("BEGIN TRANSACTION");
+    await other.run("UPDATE app.other SET id = id + 1 WHERE id < 10");
+    u.start(async () => ({ ...facts, copied: ["app.late"] }));
+    await u.sample();
+    assert.deepEqual(await u.copySizes(), [], "not measured while the checkpoint is refused, never 0");
+    clock += 60_000;
+    await u.sample();
+    assert.deepEqual(await u.copySizes(), [], "refused again");
+    const refusals = said.filter((l) => /writing the synced tables' rows from the write-ahead log into the file to measure their size failed: .*CHECKPOINT/.test(l));
+    assert.equal(refusals.length, 1, `said once: ${said.join(" | ")}`);
+    assert.equal(said.filter((l) => /measuring each synced table's size failed/.test(l)).length, 0, "no failure of the measure");
+    await other.run("ROLLBACK");
+    clock += 60_000;
+    await u.sample();
+    const [s] = await u.copySizes();
+    assert.equal(s?.table, "app.late", "measured a minute later, within the 10 min");
+    assert.ok(s!.bytes > 0);
+    assert.match(said.join("\n"), /^usage: writing the synced tables' rows from the write-ahead log into the file to measure their size again; 2 time\(s\) it was not$/m);
+  } finally {
+    other.closeSync();
+    await u.close();
+    await store.writer.run(`DROP TABLE app.late`);
+    await store.writer.run(`DROP TABLE app.other`);
     await store.writer.run(`DELETE FROM _mason.copy_sizes`);
   }
 });

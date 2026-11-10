@@ -283,7 +283,7 @@ export function renderTables(s, ui = {}) {
     }
     return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}${said_ ? " has-note" : ""}"><th scope="row" class="name"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
       `<td class="state">${state}${bar}</td>${cell(rows, "num")}${cell(f.key, "mono", f.key)}${last}` +
-      `${t.added ? (sizeOf.has(t.table) ? cell(bytesText(sizeOf.get(t.table)), "num") : cell("—", "num", "not measured yet: a synced table's size is measured every 10 min")) : cell("", "num")}` +
+      `${t.added ? (sizeOf.has(t.table) ? cell(bytesText(sizeOf.get(t.table)), "num") : cell("—", "num", "not measured yet: a synced table with rows is measured within 10 min of its first sync, and every 10 min after")) : cell("", "num")}` +
       `<td class="act" id="${esc(anchor)}">${act}</td></tr>` + note;
   };
   const added = s.tables.filter((t) => t.added).length;

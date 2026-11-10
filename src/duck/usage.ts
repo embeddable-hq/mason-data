@@ -31,6 +31,18 @@
  * columns), so a 200 M-row table of 20 columns is about half a second — hence every 10 minutes, never per request. It is
  * the size as of the last checkpoint (rows in the write-ahead log are not in a block yet).
  *
+ * A COPY WHOSE ROWS ARE ALL IN THE WRITE-AHEAD LOG has no block to count, and Mason never checkpointed, so DuckDB wrote
+ * them to the file only once the log passed its 16 MiB or the store closed: a 25,000-row table went unmeasured for the
+ * life of a run (issue 815). So a measure that finds a served copy with rows and no block of its own CHECKPOINTS first,
+ * on the samples' own connection, then measures it. Measured (docs/DESIGN.md "Measurements", "A small table's size"):
+ * 38–92 ms for a log of 1–3 MiB, 135–192 ms for one of 9 MiB, and beside it a 230 ms aggregate over 20 M rows within
+ * its noise and a poll's 500-row transaction +2 ms at p95, +11–24 ms at most — where DuckDB's own checkpoint, at the
+ * threshold, runs INSIDE the commit that crossed it, taking that poll from 5 ms to 88–122 ms. It writes what DuckDB's own
+ * would write later, and it is taken only while a copy is unmeasured that way (a small copy's first sync, or its swap),
+ * never at every measure. DuckDB refuses a checkpoint while another connection's transaction has updated rows or changed
+ * the catalog (a swap, a stored path's backfill): refused, it is said once per streak and those copies are measured again
+ * at the next sample, a minute later, not ten.
+ *
  * The Postgres catalog never lists `_mason`, so a tool connected to the listener cannot read the samples.
  */
 import type { DuckDBValue } from "@duckdb/node-api";
@@ -238,6 +250,8 @@ export class UsageSampler {
   private take: (() => Promise<UsageFacts>) | null = null;
   private lastSized = -Infinity;
   private sizedOnce = false;
+  /** the copies the last measure could not size because its checkpoint was refused: measured again at the next sample */
+  private unsized = new Set<string>();
   /** a streak of failures, said once: what failed (a sample taken, written, sized), and how many */
   private readonly lost = new Map<string, Streak>();
   private closed = false;
@@ -355,7 +369,7 @@ export class UsageSampler {
     if (now - this.lastSized >= (this.options.sizeEveryMs ?? SIZE_EVERY_MS)) {
       this.lastSized = now;
       await this.size(facts.copied, now);
-    }
+    } else if (this.unsized.size > 0) await this.size(facts.copied.filter((t) => this.unsized.has(t)), now);
   }
 
   /** the copy's memory in use: DuckDB's buffer manager's counters, summed */
@@ -364,10 +378,12 @@ export class UsageSampler {
     return v === null || v === undefined ? null : Number(v);
   }
 
-  /** Each served copy's own bytes, written as one batch (see the module's comment for how, and what it costs). */
+  /** Each served copy's own bytes, written as one batch (see the module's comment for how, what it costs, and when it
+   *  checkpoints first). */
   private async size(copied: readonly string[], now: number): Promise<void> {
     const t0 = performance.now();
     const rows: Array<[string, number]> = [];
+    const unsized = new Set<string>();
     try {
       const want = new Set(copied);
       const tables = (await this.history.reader.runAndReadAll(`SELECT schema_name, table_name FROM duckdb_tables() WHERE NOT internal AND database_name = current_database() AND schema_name <> '${MASON_SCHEMA}'`))
@@ -375,25 +391,24 @@ export class UsageSampler {
       // THE COPY'S OWN database: pragma_database_size() has a row for every attached one, and the in-memory catalog the
       // visible names live in (src/duck/kept.ts) has block_size 0 — read first, it made every copy "0 B"
       const block = Number((await this.history.reader.runAndReadAll("SELECT block_size FROM pragma_database_size() WHERE database_name = current_database()")).getRowsJS()[0]![0]);
+      const inLog: Array<[name: string, q: string]> = [];
       for (const [schema, table] of tables) {
         const name = `${schema}.${table}`;
         if (!want.has(name)) continue;
         const q = `${quote(schema)}.${quote(table)}`;
-        let blocks: number;
-        try {
-          blocks = Number((await this.history.reader.runAndReadAll(`WITH s AS (SELECT block_id, additional_block_ids FROM pragma_storage_info($1) WHERE persistent), ` +
-            `b AS (SELECT block_id FROM s WHERE block_id >= 0 UNION SELECT unnest(additional_block_ids) FROM s) SELECT count(*) FROM b`, [q])).getRowsJS()[0]![0]);
-        } catch (e) {
-          // a copy dropped since the list was read (mason remove; a copy swapped in again): not sized this time, by design.
-          // Anything else is the sizing's failure, said
-          if (/does not exist/i.test((e as Error).message)) continue;
-          throw e;
-        }
-        // NO BLOCK of its own yet is not 0 bytes: its rows are still in the write-ahead log (a small copy is written to
-        // the file only at a checkpoint), so it is not measured this time — a page said "0.0 KiB" for a 5,000-row copy
-        if (blocks === 0) continue;
-        rows.push([name, blocks * block]);
+        const b = await this.blocksOf(q);
+        if (b === null) continue;
+        // NO BLOCK of its own yet is not 0 bytes (a page said "0.0 KiB" for a 5,000-row copy): its rows are all in the
+        // write-ahead log, held in memory, measured after the checkpoint below. With none in memory either it is empty
+        if (b.blocks === 0) { if (b.inMemory > 0) inLog.push([name, q]); continue; }
+        rows.push([name, b.blocks * block]);
       }
+      if (inLog.length > 0 && await this.checkpoint(inLog.length)) {
+        for (const [name, q] of inLog) {
+          const b = await this.blocksOf(q);
+          if (b !== null && b.blocks > 0) rows.push([name, b.blocks * block]);
+        }
+      } else for (const [name] of inLog) unsized.add(name);
       if (rows.length > 0) {
         const sql = `INSERT INTO ${SIZES_TABLE} (sampled_at, table_name, bytes) VALUES ` + rows.map((_, i) => `($1::TIMESTAMPTZ, $${i * 2 + 2}, $${i * 2 + 3})`).join(", ");
         const values: DuckDBValue[] = [new Date(now).toISOString(), ...rows.flat()];
@@ -403,10 +418,48 @@ export class UsageSampler {
     } catch (e) {
       this.failure("measuring each synced table's size", e);
       return;
+    } finally {
+      this.unsized = unsized;
     }
     this.ok("measuring each synced table's size");
     // the first measure of a run is said with its time: what it costs on this machine's copies, read from the log
     if (!this.sizedOnce) { this.sizedOnce = true; this.log(`usage: measured ${rows.length} synced tables' own size in ${Math.round(performance.now() - t0)} ms (every ${Math.round((this.options.sizeEveryMs ?? SIZE_EVERY_MS) / 60_000)} min)`); }
+  }
+
+  /** A copy's distinct persistent blocks, and its segments held in memory (rows in the write-ahead log); null for a
+   *  copy dropped since the list was read (mason remove; a copy swapped in again): not sized this time, by design.
+   *  Anything else is the sizing's failure, thrown. */
+  private async blocksOf(q: string): Promise<{ blocks: number; inMemory: number } | null> {
+    try {
+      const [blocks, inMemory] = (await this.history.reader.runAndReadAll(`WITH s AS (SELECT block_id, additional_block_ids, persistent FROM pragma_storage_info($1)), ` +
+        `b AS (SELECT block_id FROM s WHERE persistent AND block_id >= 0 UNION SELECT unnest(additional_block_ids) FROM s WHERE persistent) ` +
+        `SELECT (SELECT count(*) FROM b), (SELECT count(*) FROM s WHERE NOT persistent)`, [q])).getRowsJS()[0]!.map(Number) as [number, number];
+      return { blocks, inMemory };
+    } catch (e) {
+      if (/does not exist/i.test((e as Error).message)) return null;
+      throw e;
+    }
+  }
+
+  /**
+   * A CHECKPOINT on the samples' own connection, so `n` copies whose rows are all in the write-ahead log have blocks to
+   * count: true when it was taken. DuckDB's refusal beside another connection's update or catalog change is no failure
+   * of the measure: said once per streak, and false, so those copies are measured again at the next sample. Anything
+   * else is thrown: the measure's failure, said.
+   */
+  private async checkpoint(n: number): Promise<boolean> {
+    const what = "writing the synced tables' rows from the write-ahead log into the file to measure their size";
+    const t0 = performance.now();
+    try {
+      await this.history.writer.run("CHECKPOINT");
+    } catch (e) {
+      if (!/Cannot CHECKPOINT/i.test((e as Error).message)) throw e;
+      this.failure(what, e);
+      return false;
+    }
+    this.ok(what);
+    this.log(`usage: ${n} synced table(s) had all their rows in the write-ahead log; checkpointed in ${Math.round(performance.now() - t0)} ms to measure their size`);
+    return true;
   }
 
   /** Deletes the samples and sizes older than the retention, counted back from the module's ONE clock (`now`, which
