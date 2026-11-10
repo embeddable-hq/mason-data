@@ -47,6 +47,7 @@ import { recordRefusal } from "./replication-mode.ts";
 import { UI_READ_ONLY_ALLOW_SETTING, UI_READ_ONLY_SETTING, uiReadOnlyAllowSetting, uiReadOnlySetting } from "./ui-read-only.ts";
 import { BACK_LABEL_MAX, BACK_URL_MAX, uiBackLinkSetting } from "./ui-back-link.ts";
 import { NAV_LINKS_MAX, navLines, navOf, uiNavSetting } from "./ui-nav.ts";
+import { pgPublicUrlSetting, PUBLIC_SSLMODES } from "./pg-public-url.ts";
 import { changesRetiredText, pollMsRetiredText, type SourcesTop } from "../lib/table-sync.ts";
 import { historyDaysSetting, historyDaysWrongText } from "../duck/history.ts";
 import { DEFAULT_MEMORY_RULE, memoryProblems, memoryProblemText, memorySize, MEMORY_FLOOR_BYTES } from "../duck/store.ts";
@@ -136,6 +137,12 @@ export const SERVE: CommandSpec = {
     MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
+    MASON_PG_PUBLIC_URL     the Postgres API's address as a client reaches it, behind a load balancer, a proxy or a DNS
+                            name: postgres://<host>:<port>/<database>?sslmode=<mode>, the database optional (the
+                            run's), the port 5432 when none, sslmode required (${PUBLIC_SSLMODES.join(", ")}), no user,
+                            no password and no other parameter (refused); every URL printed for a client to paste
+                            (mason status, mason user add, the web page) is built from it (default unset: the
+                            listener's own address)
     MASON_PG_PROXY_FROM     behind a TCP proxy or load balancer that sends the PROXY protocol v2: its own addresses,
                             CIDRs comma-separated (10.0.0.0/16); a connection from one must begin with a header, whose
                             client the request log names; a header from any other address is refused (default unset:
@@ -248,6 +255,9 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   // the sidebar as the host says it (src/cli/ui-nav.ts): each URL read as the link back's, the links a short JSON list
   const nav = uiNavSetting(env);
   if (nav !== null && "problem" in nav) wrong.push(nav.problem);
+  // the address a client reaches (src/cli/pg-public-url.ts): its one reading, refused here with the rest
+  const publicUrl = pgPublicUrlSetting(env);
+  if (publicUrl !== null && "problem" in publicUrl) wrong.push(publicUrl.problem);
   if (env.MASON_UI_HOST) wrong.push("MASON_UI_HOST is set, and the web page has no address but 127.0.0.1: remove it (mason ui --ssh <user@server> opens the page from your machine)");
   if (wrong.length) {
     return { message: `${wrong.length === 1 ? "a setting is" : `${wrong.length} settings are`} missing or wrong: ${wrong.join("; ")}`, code: "bad_config",

@@ -22,7 +22,7 @@
  */
 import { failed, parseCommand, type CommandSpec, type Failure, type NextStep } from "./command.ts";
 import { whereIs } from "./state.ts";
-import { withPlaceholders } from "./pg-url.ts";
+import { clientLink, shownUrl } from "./pg-url.ts";
 import { maskedUrl, parseSource, type Source } from "./preflight.ts";
 import { version } from "./version.ts";
 import { PgConnection, PgError, pgIdent, pgLiteral, socketErrorText, type ExtendedResult } from "../cdc/pg-wire.ts";
@@ -87,7 +87,7 @@ async function theUrl(given: string | undefined, cwd: string): Promise<{ url: st
   const w = await whereIs(cwd);
   if (w.state === "up") {
     return { message: NEED_URL, code: "refused",
-      why: `Mason is running for ${w.project.config.name} (${withPlaceholders(w.run.postgresUrl)}); an agent connects as a user of its own, and mason mcp makes none by itself`,
+      why: `Mason is running for ${w.project.config.name} (${shownUrl(clientLink(w.run))}); an agent connects as a user of its own, and mason mcp makes none by itself`,
       fix: "mason user add claude prints the URL, once; then MASON_URL=\"<that URL>\" in the client's config for mason mcp",
       next: [ADD_STEP, HELP_STEP] };
   }

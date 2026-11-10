@@ -52,7 +52,8 @@ import { RequestLedger, REQUESTS_TABLE } from "../duck/requests.ts";
 import { historyDaysSetting } from "../duck/history.ts";
 import { EVENTS_TABLE, SyncEvents } from "../duck/events.ts";
 import { USAGE_TABLE, UsageSampler } from "../duck/usage.ts";
-import { withPlaceholders } from "./pg-url.ts";
+import { clientLink, shownUrl } from "./pg-url.ts";
+import { pgPublicUrlSetting, publicUrlText } from "./pg-public-url.ts";
 import { UI } from "./ui.ts";
 import { cliPinProblem, ensurePin } from "./pin.ts";
 import { DEFAULT_MEMORY_LIMIT, DuckStore, DUCKDB_VERSION, machineMemory, memoryProblems, memoryProblemText, memoryWarning } from "../duck/store.ts";
@@ -491,6 +492,11 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   if (pg.said) say(`  ${pg.said}`);
   const pgAddress = { host: listen.host, port: listen.port };
   const postgresUrl = postgresApiUrl(pgAddress, database, { tls: pgTls.tls !== null });
+  // MASON_PG_PUBLIC_URL: the address a client reaches, a server's (mason start refuses it, and a value it cannot read
+  // refused the start already: startSettingRefusal); recorded beside the listener's, read by clientLink alone
+  const publicSetting = o.serve !== undefined ? pgPublicUrlSetting(process.env) : null;
+  const postgresPublicUrl = publicSetting !== null && !("problem" in publicSetting) ? publicUrlText(publicSetting) : null;
+  const pgClient = clientLink({ postgresUrl, postgresPublicUrl });
   // A LIBC COLLATION'S ORDER IS READ FROM THE DATABASE (src/duck/libc-order.ts): once, a few read-only SELECTs, kept in
   // the copy and read again when the database's collation version moves (an OS upgrade's glibc)
   let libc: LibcOrder | undefined;
@@ -663,7 +669,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     // MASON_UI_SOCKET: the page on a Unix socket too (src/cli/ui-socket.ts), or null
     pageSocket: o.serve?.socket ?? null,
     demo: cfg.demo === true,
-    users: { file: path.join(home, USERS_FILE), apiKey: cfg.apiKey, database, postgresUrl },
+    users: { file: path.join(home, USERS_FILE), apiKey: cfg.apiKey, database, postgresUrl, postgresPublicUrl },
     // the roles as the listener holds them: their row filters checked by its catalog (a filter Postgres refuses is a problem)
     roles: () => api.roles(),
     ...(shares !== undefined ? { shares, pageShares: new PageShares({ shares, home, log: logLine }) } : {}),
@@ -706,7 +712,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     })().catch((e: unknown) => logLine(`catalog refresh failed: ${(e as Error).message}`));
   }, 10_000);
   const tablesSet = added();
-  cfg.running = { pid: process.pid, controlUrl: `http://127.0.0.1:${setupPort}`, token, postgresUrl, postgresListener: pgTls.listener };
+  cfg.running = { pid: process.pid, controlUrl: `http://127.0.0.1:${setupPort}`, token, postgresUrl, ...(postgresPublicUrl !== null ? { postgresPublicUrl } : {}), postgresListener: pgTls.listener };
   cfg.lastRun = new Date().toISOString();
   writeConfig(home, cfg);
   done(`Mason is up: ${sync.state().length} table(s) added, kept current: ${syncMode === "poll" ? `as each table's sync: says${syncCounts(sources.tables)}` +
@@ -793,12 +799,13 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     stopFor = (how) => { stop("SIGTERM", how); };
   });
   say("");
-  say(`  Postgres  ${withPlaceholders(postgresUrl)}  (mason user add <name> makes a user)`);
+  say(`  Postgres  ${shownUrl(pgClient)}  (mason user add <name> makes a user)`);
   // the web page by its command, never its URL: the URL carries the run's token, and this goes to dev.log
   // its words are mason ui's summary (mason --help's), so the two never drift
   if (o.serve === undefined) say(`  Web UI  mason ui  (${UI.summary})`);
   if (demoChangeMs !== null) say(`  Demo  a new order lands every ${demoChangeMs / 1000} s: mason status shows the synced data keeping up`);
-  const elsewhere = elsewhereTip(pgTls.listener);
+  // where a client reaches a public address, the listener's own is no tip
+  const elsewhere = pgClient.public === true ? null : elsewhereTip(pgTls.listener);
   if (elsewhere) say(`  ${elsewhere}`);
   // before the ready line: what a serve writes when it answers (MASON_UI_RUN_FILE) is there when a supervisor reads it
   // a step of it that failed stops the run, said in its words, and the ready line is never printed: it did not get ready
