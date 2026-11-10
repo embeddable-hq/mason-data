@@ -15,7 +15,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Failure, FailureCode } from "./command.ts";
 import type { SourceTable } from "./preflight.ts";
-import { addedTables, catalogTable, chooseColumns, effectiveSync, entryFields, entryName, entryProblems, findEntry, parseSourceText, sourceFailure, sourceFileNames, sourcesDir,
+import { addedTables, catalogTable, chooseColumns, effectiveSync, entryFields, entryName, entryProblems, findEntry, looksSecret, parseSourceText, sourceFailure, sourceFileNames, sourcesDir,
   unaddableReason, usableUniqueKey, withEntrySync, withoutTable, withTable, type CatalogColumn, type CatalogTable, type EntryFields, type ProjectSource, type SourceFile,
   type TableEntry, type WrittenEntry } from "./sources.ts";
 import { BIG_TABLE_ROWS, COSTLY_POLL_ROWS, COSTLY_POLL_SECONDS, syncText, type TableSync } from "../lib/table-sync.ts";
@@ -245,9 +245,12 @@ export function listTables(file: SourceFile, db: EditCatalog): ListedTable[] {
         reason = reason === null ? e.message : key !== null ? `${reason}; with it, ${e.message}` : reason;
       }
     }
-    // the columns every-column leaves out, by the same rule against the key it is synced by
-    const chosen = chooseColumns(t, ["*"], entry?.key ?? null);
-    const skipped = "problem" in chosen ? [] : chosen.skipped;
+    // the columns every-column leaves out, by the same rule against the key it is synced by: its primary key, else the
+    // entry's key: — FAIL CLOSED, a key: the file gets wrong (a column the table lacks, a key: beside a primary key)
+    // never un-flags a column: the rule is then asked against the table's own key alone, which every column passes
+    const asked = chooseColumns(t, ["*"], t.key.length ? null : entry?.key ?? null);
+    const chosen = "problem" in asked ? chooseColumns(t, ["*"], null) : asked;
+    const skipped = "problem" in chosen ? t.columns.map((c) => c.name).filter(looksSecret) : chosen.skipped;
     return { ...catalog, reason, columns: catalog.columns.map((c) => ({ ...c, secret: skipped.includes(c.name) })),
       entry: entry === null ? null : { [entry.name]: entryFields(entry) } };
   });

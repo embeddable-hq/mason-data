@@ -652,6 +652,15 @@ test("mason tables' entry for each table is mason add's, decided in one place: i
       }
       assert.deepEqual(of("public.orders").columns.filter((c) => c.secret).map((c) => c.name), ["api_token"]);
     }
+    // FAIL CLOSED: a key: the file gets wrong never un-flags a column that looks like a secret — one naming a column the
+    // table lacks (with or without a primary key), and one naming the secret beside a primary key
+    const logins = table({ table: "logins", key: [], columns: [col("id", "bigint", true), col("token")] });
+    const wrong = `kind: postgres\nurl: postgres://me@localhost/shop\ntables:\n  orders:\n    key: [nosuch]\n  logins:\n    key: [nosuch]\n`;
+    const flagged = (text: string, name: string): string[] => E.listTables(S.parseSourceText(text, "app", file) as Sources.SourceFile, { tables: [...CATALOG, logins], database: "shop" })
+      .find((t) => t.table === name)!.columns.filter((c) => c.secret).map((c) => c.name);
+    assert.deepEqual(flagged(wrong, "public.orders"), ["api_token"], "key: naming a column the table lacks, beside a primary key");
+    assert.deepEqual(flagged(wrong, "public.logins"), ["token"], "key: naming a column the table lacks, no primary key");
+    assert.deepEqual(flagged(wrong.replace("  orders:\n    key: [nosuch]", "  orders:\n    key: [api_token]"), "public.orders"), ["api_token"], "key: naming the secret beside a primary key");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

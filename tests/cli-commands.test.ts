@@ -677,6 +677,11 @@ test("mason tables --json: each table's entry and each column's secret are what 
     const person = await runMason(app, ["tables", "vault"], matrixEnv());
     assert.match(person.stdout, /^ {2}api_token +text +\(looks like a secret: left out unless named\)$/m);
     assert.match(person.stdout, /^ {2}token_id +bigint$/m);
+    // a hand-written key: naming a column the table lacks never un-flags one (fail closed), as a person and in --json
+    fs.writeFileSync(file, `${empty.replace("tables: {}\n", "tables:\n")}  vault:\n    key: [nosuch]\n`);
+    const broken = await runMason(app, ["tables", "vault"], matrixEnv());
+    assert.match(broken.stdout, /^ {2}api_token +text +\(looks like a secret: left out unless named\)$/m, broken.stdout + broken.stderr);
+    assert.deepEqual((await listed("vault"))[0]!.columns.filter((x) => x.secret).map((x) => x.name), ["password_hash", "api_token"]);
   } finally {
     await source.close();
     fs.rmSync(root, { recursive: true, force: true });
