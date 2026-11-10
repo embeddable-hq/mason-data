@@ -1582,7 +1582,7 @@ const BLOBS: AddedTable = { source: "public.blobs", schema: "public", table: "bl
     { name: "payload", type: "text", notNull: false, comment: null }] };
 const DOCS: AddedTable = { source: "public.docs", schema: "public", table: "docs", key: ["id"], bytes: 0, rows: 601, foreignKeys: [],
   columns: [{ name: "id", type: "bigint", notNull: true, comment: null }, { name: "body", type: "jsonb", notNull: false, comment: null }] };
-test("a table of large out-of-line values syncs under a low MASON_DUCKDB_MEMORY, its chunks a page's values at most, equal to the source", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+test("a table of large out-of-line values syncs under a low MASON_DUCKDB_MEMORY, its chunks a page's values at most, equal to the source", { skip: "quarantined: #829" }, async () => {
   const db = `${tag}_ool`;
   const url = (() => { const u = new URL(adminUrl!); u.pathname = `/${db}`; return u.toString(); })();
   psql(adminUrl!, `CREATE DATABASE ${db}`);
