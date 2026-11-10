@@ -8,6 +8,7 @@
  * `withoutPlaceholders` maps the shown form back to it.
  */
 import { shellWord } from "../lib/shell-word.ts";
+import { CommandFailed } from "./command.ts";
 import { elsewhereTip } from "./pg-tls.ts";
 import { PUBLIC_URL_RECORD, readPublicUrl, type PublicSslmode } from "./pg-public-url.ts";
 import type { PostgresListener } from "./project.ts";
@@ -48,10 +49,16 @@ function urlWith(link: PostgresLink, credential: string): string {
 export function clientLink(run: { postgresUrl: string; postgresPublicUrl?: string | null | undefined }): PostgresLink {
   const own = postgresLink(run.postgresUrl);
   if (run.postgresPublicUrl === undefined || run.postgresPublicUrl === null) return own;
-  // a record read from .mason/config.json was checked by loadProject (a bad one is a broken project, never this); one
-  // that reaches here unreadable fails closed, its words naming the record, never the setting
+  // a record this Mason cannot read (an older Mason's, with a value it refuses, or one edited) fails closed: no URL is
+  // printed from it, and the words name the record, never the setting. Only a command that prints a client's URL
+  // meets it (the project is not broken: a start overwrites the record, and stop, logs and doctor never read it)
   const p = readPublicUrl(run.postgresPublicUrl, PUBLIC_URL_RECORD);
-  if ("problem" in p) throw new Error(`the recorded public address of the Postgres API cannot be read: ${p.problem}`);
+  if ("problem" in p) {
+    throw new CommandFailed({ message: `the run's record of the address clients reach cannot be read: ${p.problem}`, code: "failed",
+      why: "a Mason before this one, or an edit, wrote an address this Mason does not take; no URL is printed from it",
+      fix: "mason stop, then start the run again (mason serve, with MASON_PG_PUBLIC_URL as mason serve --help says, or unset): the start writes the record again, and the synced data and the users stay",
+      next: [["mason stop", "stop the run: its synced data and users stay"]] });
+  }
   const link: PostgresLink = { url: "", host: p.host, port: p.port, database: p.database ?? own.database, sslmode: p.sslmode, public: true };
   return { ...link, url: urlWith(link, "").replace(/^postgres:\/\/@/, "postgresql://") };
 }

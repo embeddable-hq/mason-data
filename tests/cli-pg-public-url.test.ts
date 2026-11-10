@@ -181,7 +181,7 @@ test("one builder: unset, every URL is the listener's as before; set, its host, 
   assert.equal(pgUrl.connectionUrl(clientLink({ ...own, postgresPublicUrl: "postgresql://mason_db:5433/?sslmode=disable" }), "u", null), "postgres://u@mason_db:5433/shop?sslmode=disable");
   // a record that cannot be read fails closed, its words naming the record, never the setting
   assert.throws(() => clientLink({ ...own, postgresPublicUrl: "postgresql://u:hunter2@db.example.com/?sslmode=require" }), (e: Error) =>
-    e.message === "the recorded public address of the Postgres API cannot be read: running.postgresPublicUrl is set to a URL with a user or a password in it, which every page and command would print: remove them (a user's name and password are mason user add's)");
+    e.message === "the run's record of the address clients reach cannot be read: .mason/config.json's running.postgresPublicUrl is set to a URL with a user or a password in it, which every page and command would print: remove them (a user's name and password are mason user add's)");
 });
 
 /** A run's command server over a project folder whose config records it, with MASON_PG_PUBLIC_URL's address or none. */
@@ -277,29 +277,63 @@ test("every surface beside a run prints the URL from the one builder: mason stat
   assert.match((own.page as { url: string }).url, /^postgres:\/\/superset:[^@]+@localhost:5433\/shop\?sslmode=require$/);
 });
 
-test("a run's record of the address that cannot be read (.mason/config.json tampered with) is a broken project at every command, named as the record, never the setting, the value never quoted", async () => {
+const RECORD_WAY_OUT = "mason stop, then start the run again (mason serve, with MASON_PG_PUBLIC_URL as mason serve --help says, or unset): the start writes the record again, and the synced data and the users stay";
+
+test("upgrade: a record an older Mason wrote with an address this one refuses (a run killed, its record left) strands nothing — the project reads, mason serve's start overwrites it, and the commands that reach, stop or inspect the run answer", async () => {
+  // what v0.14.0 recorded for MASON_PG_PUBLIC_URL=postgres://192.0.2:5433/?sslmode=require (it took a numeric last
+  // label), and for the other hosts this Mason now refuses; the run was killed (-KILL), so its record stays
+  const { app, close } = await runningProject(null);
+  await close();
+  const dead = (await import("node:child_process")).spawnSync(process.execPath, ["-e", ""]).pid;
+  const file = path.join(app, ".mason", "config.json");
+  const cfg = JSON.parse(fs.readFileSync(file, "utf8")) as { running: Record<string, unknown> };
+  for (const recorded of ["postgresql://192.0.2:5433/?sslmode=require", "postgresql://999.999.999.999:5433/?sslmode=require",
+    `postgresql://${"a".repeat(64)}.example.com:5433/?sslmode=require`, "postgresql://[fe80::1%eth0]:5433/?sslmode=require"]) {
+    cfg.running.postgresPublicUrl = recorded;
+    cfg.running.pid = dead;
+    fs.writeFileSync(file, JSON.stringify(cfg), { mode: 0o600 });
+    const existing = projectModule.readProject(app);
+    assert.ok(existing !== null && !("broken" in existing), `${recorded}: the project reads (${existing !== null && "broken" in existing ? existing.broken : ""})`);
+    // mason serve's start, the setting corrected or unset: the config it writes over the record, the synced data resumed
+    for (const set of [{ MASON_PG_PUBLIC_URL: "postgres://192.0.2.10:5433/?sslmode=require" }, {}]) {
+      const settings = serveSettings({ ...ENV, MASON_DATA: app, MASON_NAME: "shop", ...set }, app);
+      assert.ok(!("message" in settings), JSON.stringify(settings));
+      const c = serveModule.serveConfig(settings, existing);
+      assert.ok(!("message" in c), `${recorded}: ${JSON.stringify(c)}`);
+      assert.deepEqual(c.said, [`the synced data in ${path.join(app, ".mason")}, resumed`]);
+    }
+    for (const argv of [["status", "--json"], ["stop", "--json"], ["user", "add", "metabase", "--json"], ["destroy", "--dry-run", "--json"]]) {
+      const r = await runMason(app, argv, matrixEnv());
+      const out = JSON.parse(r.stdout) as { error?: { code: string } };
+      assert.notEqual(out.error?.code, "bad_config", `${recorded}: mason ${argv.join(" ")}: ${r.stdout}${r.stderr}`);
+      assert.ok(!/bug in mason/.test(r.stdout + r.stderr), `${recorded}: mason ${argv.join(" ")}: ${r.stdout}${r.stderr}`);
+    }
+  }
+});
+
+test("a live run's record of the address that cannot be read (.mason/config.json edited) fails closed where a client's URL would be printed, named as the record, never the setting, the value never quoted, the way out keeping the data", async () => {
   const { app, close } = await runningProject("postgresql://db.example.com:6432/?sslmode=verify-full");
   try {
     const file = path.join(app, ".mason", "config.json");
     const cfg = JSON.parse(fs.readFileSync(file, "utf8")) as { running: Record<string, unknown> };
     for (const [recorded, problem] of [
-      ["postgresql://u:hunter2@db.example.com:6432/?sslmode=verify-full", "running.postgresPublicUrl is set to a URL with a user or a password in it, which every page and command would print: remove them (a user's name and password are mason user add's)"],
-      ["postgresql://hunter2.example.com:6432/?sslmode=prefer", "running.postgresPublicUrl is set to a URL whose sslmode is not one of disable, require, verify-ca, verify-full (a client that falls back to plain would send a password in clear)"],
-      ["hunter2://db.example.com/?sslmode=require", "running.postgresPublicUrl is set to a URL of another scheme than postgres:// or postgresql://: postgres://<host>:<port>/<database>?sslmode=<mode>"],
+      ["postgresql://u:hunter2@db.example.com:6432/?sslmode=verify-full", "a URL with a user or a password in it, which every page and command would print: remove them (a user's name and password are mason user add's)"],
+      ["postgresql://hunter2.example.com:6432/?sslmode=prefer", "a URL whose sslmode is not one of disable, require, verify-ca, verify-full (a client that falls back to plain would send a password in clear)"],
+      ["hunter2://db.example.com/?sslmode=require", "a URL of another scheme than postgres:// or postgresql://: postgres://<host>:<port>/<database>?sslmode=<mode>"],
     ] as const) {
       cfg.running.postgresPublicUrl = recorded;
       fs.writeFileSync(file, JSON.stringify(cfg), { mode: 0o600 });
-      const want = `this folder's Mason project cannot be read: ${file}: ${problem} (mason serve records it from MASON_PG_PUBLIC_URL at its start)`;
+      const want = `the run's record of the address clients reach cannot be read: .mason/config.json's running.postgresPublicUrl is set to ${problem}`;
       for (const argv of [["status", "--json"], ["user", "add", "metabase", "--json"]]) {
         const r = await runMason(app, argv, matrixEnv());
         assert.equal(r.code, 1, `${argv.join(" ")}: ${r.stdout}${r.stderr}`);
-        const err = (JSON.parse(r.stdout) as { error: { code: string; message: string } }).error;
-        assert.deepEqual({ code: err.code, message: err.message }, { code: "bad_config", message: want }, argv.join(" "));
-        assert.ok(!r.stdout.includes("hunter2") && !r.stderr.includes("hunter2") && !/bug in mason/.test(r.stdout + r.stderr), `${argv.join(" ")}: never quoted, never a bug`);
+        const err = (JSON.parse(r.stdout) as { error: { code: string; message: string; fix: string } }).error;
+        assert.deepEqual({ code: err.code, message: err.message, fix: err.fix }, { code: "failed", message: want, fix: RECORD_WAY_OUT }, argv.join(" "));
+        assert.ok(!(r.stdout + r.stderr).includes("hunter2") && !/bug in mason|MASON_PG_PUBLIC_URL is set/.test(r.stdout + r.stderr), `${argv.join(" ")}: never quoted, never a bug, never the setting`);
       }
       const text = await runMason(app, ["status"], matrixEnv());
       assert.equal(text.code, 1);
-      assert.ok(text.stderr.includes(problem) && !text.stderr.includes("hunter2") && !/bug in mason/.test(text.stdout + text.stderr), text.stdout + text.stderr);
+      assert.ok(text.stderr.includes(want) && !text.stderr.includes("hunter2") && !/bug in mason/.test(text.stdout + text.stderr), text.stdout + text.stderr);
     }
   } finally { await close(); }
 });

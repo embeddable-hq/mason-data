@@ -45,7 +45,7 @@ const LIBPQ_PORT = 5432;
 export interface PublicPostgres { host: string; port: number; database: string | null; sslmode: PublicSslmode }
 
 /** What the run's record of the address is called where a refusal names it (`readPublicUrl`'s `subject`). */
-export const PUBLIC_URL_RECORD = "running.postgresPublicUrl";
+export const PUBLIC_URL_RECORD = ".mason/config.json's running.postgresPublicUrl";
 
 /** One label of a host name: letters, digits, `-` and `_`, neither end a `-`. */
 const LABEL = /^[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?$/;
