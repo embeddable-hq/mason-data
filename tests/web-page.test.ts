@@ -1493,9 +1493,12 @@ test("the page's files fetch nothing from elsewhere and never touch the token: t
     const code = text.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
     // the hash chooses the page shown (#status): it never holds the token, which the first request traded for the cookie
     // and dropped from the address; every other part of `location` (search, href) is refused, as the cookie and storage are.
-    // `location.replace(…)` reads nothing: it leaves for a page the host replaced a view with (MASON_UI_NAV_*, issue 789)
-    assert.ok(!/\blocation\b(?!\.hash\b|\.replace\()|document\.cookie|localStorage|sessionStorage|indexedDB|[?&]token=|\.token\b/.test(code),
+    // `location.replace(…)` reads nothing: it leaves for a page the host replaced a view with (MASON_UI_NAV_*, issue 789),
+    // at app.js's two call sites alone (`leave`'s answer, a hash or the host's URL), each pinned so a new one is seen
+    assert.ok(!/\blocation\b(?!\.hash\b|\.replace\(to\.(?:hash|url)\))|document\.cookie|localStorage|sessionStorage|indexedDB|[?&]token=|\.token\b/.test(code),
       `${f}: the cookie carries the token; the page's script never reads it, the address (but its hash) or storage`);
+    assert.deepEqual([...code.matchAll(/\blocation\.replace\([^)]*\)/g)].map((m) => m[0]),
+      f === "app.js" ? ["location.replace(to.hash)", "location.replace(to.url)"] : [], `${f}: the page leaves only where app.js's leave says`);
     // every module it imports is the page's own, a route of PAGE_ROUTES (tests/cli-run-server.test.ts serves each)
     // (a vendored module keeps its own name: Lucide's icons are .mjs, src/web/vendor/README.md)
     for (const m of code.matchAll(/\bfrom\s+"([^"]+)"|\bimport\s*\(\s*"([^"]+)"/g)) assert.match(m[1] ?? m[2]!, /^\.\.?\/(?:[\w/.-]+\.js|vendor\/[\w.-]+\/[\w.-]+\.mjs)$/, `${f} imports ${m[1] ?? m[2]} by a relative path`);

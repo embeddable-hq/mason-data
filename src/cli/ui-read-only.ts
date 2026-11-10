@@ -20,9 +20,9 @@
  * path the router reads (`AREA_ROUTES`: Add, Columns… and Name its key… are `POST /api/pick`, Remove `POST /api/remove`,
  * Sync now `POST /api/sync`), never a prefix and never a pattern — and every other change the page asks for is refused
  * by the same rule as before: still REFUSED BY RULE, the allowance a closed list of exact routes. Those routes ask
- * `projectWriteRefusal` as before, so `MASON_PROJECT_READONLY=1` still refuses an Add or a Remove. Set without
- * `MASON_UI_READ_ONLY=1` it refuses the start: an allowance on a page that is not read-only says the operator meant a
- * read-only page and did not get one.
+ * `projectWriteRefusal` as before, so `MASON_PROJECT_READONLY=1` still refuses an Add or a Remove. Set empty, it is
+ * unset. Set without `MASON_UI_READ_ONLY=1` it refuses the start: an allowance on a page that is not read-only says the
+ * operator meant a read-only page and did not get one.
  */
 import type { Failure } from "./command.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";

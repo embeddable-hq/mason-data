@@ -25,7 +25,7 @@ import { readSource, sourcesTop, writtenDatabase, type ProjectSource } from "./s
 import { UI_SOCKET_SETTING } from "./ui-socket.ts";
 import { UI_RUN_FILE_SETTING } from "./ui-run-file.ts";
 import { backLinkSettingsSet, uiBackLinkSetting } from "./ui-back-link.ts";
-import { navSettingsSet, uiNavSetting } from "./ui-nav.ts";
+import { NAV_SETTINGS, navSettingsSet, notNavSettings, uiNavSetting } from "./ui-nav.ts";
 import { PG_PUBLIC_URL_SETTING, pgPublicUrlSetting } from "./pg-public-url.ts";
 import { UI_READ_ONLY_ALLOW_SETTING, UI_READ_ONLY_SETTING, uiReadOnlyAllowSetting, uiReadOnlySetting } from "./ui-read-only.ts";
 
@@ -398,8 +398,11 @@ export function startSettingRefusal(p: Project, env: NodeJS.ProcessEnv, o: { ser
   // the sidebar as the host says it is a server's too (src/cli/ui-nav.ts): mason start's page is Mason's alone
   const nav = navSettingsSet(env);
   if (!o.serve && nav.length > 0) {
-    return { message: `${nav.join(" and ")} ${nav.length === 1 ? "is mason serve's setting" : "are mason serve's settings"}, and mason start ignores no setting silently`, code: "refused",
-      fix: `unset ${nav.join(" and ")}: mason start's page is yours alone, opened with mason ui` };
+    // a name that is no setting is said so, in mason serve's words, never called mason serve's
+    const serves = nav.filter((k) => NAV_SETTINGS.includes(k));
+    const said = [...notNavSettings(env),
+      ...(serves.length > 0 ? [`${serves.join(" and ")} ${serves.length === 1 ? "is mason serve's setting" : "are mason serve's settings"}, and mason start ignores no setting silently`] : [])];
+    return { message: said.join("; "), code: "refused", fix: `unset ${nav.join(" and ")}: mason start's page is yours alone, opened with mason ui` };
   }
   const navSetting = uiNavSetting(env);
   if (navSetting !== null && "problem" in navSetting) return { message: navSetting.problem, code: "refused", fix: "set them as mason serve --help says, or unset them" };

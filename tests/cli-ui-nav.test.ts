@@ -99,33 +99,33 @@ test("an item's URL refused as the link back's, at every entrance, naming the se
 
 test("MASON_UI_NAV_LINKS refused at every entrance, each problem saying the entry and the way out: not JSON, not a list, too many, an entry not an object, a key it does not take, no label or url, a bad label or URL, too long", () => {
   const at = "MASON_UI_NAV_LINKS";
-  const control = `${at}' entry 1's label has a control or format character (a line break, a tab, a direction mark): the link's label is one line of plain text`;
+  const control = `${at}'s entry 1's label has a control or format character (a line break, a tab, a direction mark): the link's label is one line of plain text`;
   const link = (o: Record<string, unknown>) => JSON.stringify([o]);
   const cases: Array<[string, string]> = [
     ["{label: Billing}", `${at} is not JSON: write a list of links, [{"label":"Billing","url":"/billing"}]`],
     [`{"label":"Billing","url":"/billing"}`, `${at} is not a list: write a list of links, [{"label":"Billing","url":"/billing"}]`],
     ["null", `${at} is not a list: write a list of links, [{"label":"Billing","url":"/billing"}]`],
     [JSON.stringify(Array.from({ length: 6 }, (_, i) => ({ label: `L${i}`, url: `/l${i}` }))), `${at} has 6 links, and the sidebar takes at most 5: keep the ones the page's readers need`],
-    [`["/billing"]`, `${at}' entry 1 is not an object: each link is {"label": …, "url": …}`],
-    [`[[1]]`, `${at}' entry 1 is not an object: each link is {"label": …, "url": …}`],
-    [link({ lable: "Billing", url: "/billing" }), `${at}' entry 1 has "lable", which a link does not take — did you mean \`label\`?: a link is {"label": …, "url": …}; ${at}' entry 1 has no label: give it "label", the text the sidebar shows`],
-    [link({ label: "Billing", url: "/billing", target: "_blank" }), `${at}' entry 1 has "target", which a link does not take: a link is {"label": …, "url": …}`],
-    [link({ url: "/billing" }), `${at}' entry 1 has no label: give it "label", the text the sidebar shows`],
-    [link({ label: "Billing" }), `${at}' entry 1 has no url: give it "url", a path on this host (/something) or an https:// URL`],
-    [link({ label: 7, url: 8 }), `${at}' entry 1 has no label: give it "label", the text the sidebar shows; ${at}' entry 1 has no url: give it "url", a path on this host (/something) or an https:// URL`],
+    [`["/billing"]`, `${at}'s entry 1 is not an object: each link is {"label": …, "url": …}`],
+    [`[[1]]`, `${at}'s entry 1 is not an object: each link is {"label": …, "url": …}`],
+    [link({ lable: "Billing", url: "/billing" }), `${at}'s entry 1 has a key a link does not take (its 1st) — did you mean \`label\`?: a link is {"label": …, "url": …}; ${at}'s entry 1 has no label: give it "label", the text the sidebar shows`],
+    [link({ label: "Billing", url: "/billing", target: "_blank" }), `${at}'s entry 1 has a key a link does not take (its 3rd): a link is {"label": …, "url": …}`],
+    [link({ url: "/billing" }), `${at}'s entry 1 has no label: give it "label", the text the sidebar shows`],
+    [link({ label: "Billing" }), `${at}'s entry 1 has no url: give it "url", a path on this host (/something) or an https:// URL`],
+    [link({ label: 7, url: 8 }), `${at}'s entry 1 has no label: give it "label", the text the sidebar shows; ${at}'s entry 1 has no url: give it "url", a path on this host (/something) or an https:// URL`],
     [link({ label: "Bill\ning", url: "/billing" }), control],
     [link({ label: "‮Billing", url: "/billing" }), control],
-    [link({ label: "  ", url: "/billing" }), `${at}' entry 1's label is white space alone: name the link`],
-    [link({ label: "é".repeat(65), url: "/billing" }), `${at}' entry 1's label is 65 characters, and the link's label is at most 64: name a shorter one`],
-    [link({ label: "Billing", url: "javascript:alert(1)" }), `${at}' entry 1 has its url set to a javascript: URL: a path on this host (/something), or an https:// or http:// URL`],
-    [link({ label: "Billing", url: "data:text/html,x" }), `${at}' entry 1 has its url set to a data: URL: a path on this host (/something), or an https:// or http:// URL`],
-    [link({ label: "Billing", url: "//evil.example.com" }), `${at}' entry 1 has its url set to a URL that starts with //, which a browser reads as another host: a path starts with one /, a URL with https://`],
-    [link({ label: "Billing", url: "/\\evil.example.com" }), `${at}' entry 1 has its url set to a URL with a backslash, which a browser reads as /: write / or %5C`],
-    [link({ label: "Billing", url: "https://admin:hunter2@evil.example.com/" }), `${at}' entry 1 has its url set to a URL with a user or a password in it, which the page would show to everyone who opens it: remove them`],
-    [link({ label: "Billing", url: "/a\tb" }), `${at}' entry 1 has its url set to a URL with a control character, a space or a character outside ASCII: write a host in its xn-- form and the rest %-encoded`],
-    [link({ label: "Billing", url: `/${"a".repeat(2048)}` }), `${at}' entry 1 has its url set to 2049 characters, and a link is at most 2048: name a shorter one`],
+    [link({ label: "  ", url: "/billing" }), `${at}'s entry 1's label is white space alone: name the link`],
+    [link({ label: "é".repeat(65), url: "/billing" }), `${at}'s entry 1's label is 65 characters, and the link's label is at most 64: name a shorter one`],
+    [link({ label: "Billing", url: "javascript:alert(1)" }), `${at}'s entry 1 has its url set to a javascript: URL: a path on this host (/something), or an https:// or http:// URL`],
+    [link({ label: "Billing", url: "data:text/html,x" }), `${at}'s entry 1 has its url set to a data: URL: a path on this host (/something), or an https:// or http:// URL`],
+    [link({ label: "Billing", url: "//evil.example.com" }), `${at}'s entry 1 has its url set to a URL that starts with //, which a browser reads as another host: a path starts with one /, a URL with https://`],
+    [link({ label: "Billing", url: "/\\evil.example.com" }), `${at}'s entry 1 has its url set to a URL with a backslash, which a browser reads as /: write / or %5C`],
+    [link({ label: "Billing", url: "https://admin:hunter2@evil.example.com/" }), `${at}'s entry 1 has its url set to a URL with a user or a password in it, which the page would show to everyone who opens it: remove them`],
+    [link({ label: "Billing", url: "/a\tb" }), `${at}'s entry 1 has its url set to a URL with a control character, a space or a character outside ASCII: write a host in its xn-- form and the rest %-encoded`],
+    [link({ label: "Billing", url: `/${"a".repeat(2048)}` }), `${at}'s entry 1 has its url set to 2049 characters, and a link is at most 2048: name a shorter one`],
     [JSON.stringify([{ label: "Billing", url: "/billing" }, { label: "\t", url: "ftp://x" }]),
-      `${at}' entry 2's label has a control or format character (a line break, a tab, a direction mark): the link's label is one line of plain text; ${at}' entry 2 has its url set to a ftp: URL: a path on this host (/something), or an https:// or http:// URL`],
+      `${at}'s entry 2's label has a control or format character (a line break, a tab, a direction mark): the link's label is one line of plain text; ${at}'s entry 2 has its url set to a ftp: URL: a path on this host (/something), or an https:// or http:// URL`],
     [" ".repeat(16_385), `${at} is 16385 characters, and the list is at most 16384: name fewer or shorter links`],
   ];
   for (const [text, problem] of cases) {
@@ -135,8 +135,52 @@ test("MASON_UI_NAV_LINKS refused at every entrance, each problem saying the entr
     assert.equal(e.run, problem, text.slice(0, 80));
     assert.ok(!e.report!.includes("hunter2") && !e.report!.includes("evil"), "a value is never quoted");
   }
-  // a key that is not short plain text is not quoted either
-  assert.match(String((uiNavSetting({ MASON_UI_NAV_LINKS: JSON.stringify([{ label: "x", url: "/x", ["k‮".repeat(3)]: 1 }]) }) as { problem: string }).problem), /entry 1 has a key, which a link does not take/);
+});
+
+test("a key of a MASON_UI_NAV_LINKS entry that a link does not take is never quoted, whatever it is (a secret pasted as a key): its place is named", () => {
+  const at = "MASON_UI_NAV_LINKS";
+  const takes = (n: string) => `${at}'s entry 1 has a key a link does not take (its ${n}): a link is {"label": …, "url": …}`;
+  for (const [text, problem] of [
+    [`[{"label":"Billing","url":"/billing","password=hunter2":1}]`, takes("3rd")],
+    [`[{"hunter2":"x","label":"Billing","url":"/billing"}]`, takes("1st")],
+    [JSON.stringify([{ label: "Billing", ["k‮".repeat(3)]: 1, url: "/billing" }]), takes("2nd")],
+    [`[{"label":"Billing","url":"/billing","1":2}]`, takes("3rd")],
+    [`[{"label":"Billing","url":"/billing","a":1,"b":2,"c":3,"d":4,"e":5,"f":6,"g":7,"h":8,"i":9}]`,
+      ["3rd", "4th", "5th", "6th", "7th", "8th", "9th", "10th", "11th"].map(takes).join("; ")],
+  ] as const) {
+    const e = everyEntrance({ MASON_UI_NAV_LINKS: text });
+    assert.deepEqual(e.setting, { problem }, text);
+    assert.equal(e.report, `a setting is missing or wrong: ${problem}`, text);
+    assert.equal(e.run, problem, text);
+    for (const secret of ["hunter2", "password", "k‮"]) assert.ok(!e.report!.includes(secret), `${text}: the key is never quoted`);
+  }
+});
+
+test("a key written twice in a MASON_UI_NAV_LINKS entry refuses the start, naming the entry and the places, as JSON.parse reads the keys (escapes, white space before the colon), never a key nested in a value", () => {
+  const at = "MASON_UI_NAV_LINKS";
+  const twice = (entry: number, key: string, places: string) => `${at}'s entry ${entry} has ${key} twice (its ${places}), and JSON keeps only the last: write each key once`;
+  for (const [text, problem] of [
+    [`[{"label":"a","label":"b","url":"/x"}]`, twice(1, `"label"`, "1st, 2nd")],
+    [`[{"label":"a","url":"/x","\\u006cabel":"b"}]`, twice(1, `"label"`, "1st, 3rd")],
+    [`[{"url":"/x" , "label" \n : "a","url"\t:"/y"}]`, twice(1, `"url"`, "1st, 3rd")],
+    [`[{"label":"a","url":"/x","url":"/y","url":"/z"}]`, `${at}'s entry 1 has "url" 3 times (its 2nd, 3rd, 4th), and JSON keeps only the last: write each key once`],
+    [`[{"label":"a","url":"/x","hunter2":1,"hunter2":2}]`,
+      `${at}'s entry 1 has a key a link does not take (its 3rd): a link is {"label": …, "url": …}; ${twice(1, "a key", "3rd, 4th")}`],
+    // the entry is the list's, counted past strings holding commas, brackets, braces, colons and escaped quotes
+    [`["a,[{\\"label\\":1,\\"label\\":2}]:", {"label":"a","url":"/x"}, {"label":"b","url":"/y","label":"c"}]`,
+      `${at}'s entry 1 is not an object: each link is {"label": …, "url": …}; ${twice(3, `"label"`, "1st, 3rd")}`],
+    // a key nested in a value is not the entry's: the value is refused as it is
+    [`[{"label":{"label":1,"label":2},"url":"/x"}]`, `${at}'s entry 1 has no label: give it "label", the text the sidebar shows`],
+  ] as const) {
+    const e = everyEntrance({ MASON_UI_NAV_LINKS: text });
+    assert.deepEqual(e.setting, { problem }, text);
+    assert.equal(e.report, `a setting is missing or wrong: ${problem}`, text);
+    assert.equal(e.run, problem, text);
+  }
+  // a key that is a string's text, or a value equal to a key, is no repeat
+  for (const text of [`[{"label":"url","url":"/label"}]`, `[{"label":"a\\"label\\":","url":"/x"}]`]) {
+    assert.equal(everyEntrance({ MASON_UI_NAV_LINKS: text }).report, null, text);
+  }
 });
 
 test("a URL whose fragment names a view that is replaced refuses the start, at every entrance: the page would go round in a loop (two and three items, aliases and sub-routes, /?a#tables, https://, itself); one naming a view not replaced, or none, is taken", () => {
@@ -221,7 +265,15 @@ test("mason serve's: in its --help with the other MASON_UI_* settings, said at i
   assert.deepEqual(startSettingRefusal(p, { MASON_UI_NAV_LINKS: "nope", MASON_UI_NAV_OVERVIEW_URL: "javascript:x" }, { serve: false }),
     { message: "MASON_UI_NAV_OVERVIEW_URL and MASON_UI_NAV_LINKS are mason serve's settings, and mason start ignores no setting silently", code: "refused",
       fix: "unset MASON_UI_NAV_OVERVIEW_URL and MASON_UI_NAV_LINKS: mason start's page is yours alone, opened with mason ui" });
+  // a name that is no setting is said so, as mason serve says it (with its did you mean), never called mason serve's
+  const list = "MASON_UI_NAV_OVERVIEW_URL, MASON_UI_NAV_TABLES_URL, MASON_UI_NAV_USERS_URL, MASON_UI_NAV_QUERIES_URL, MASON_UI_NAV_USAGE_URL, MASON_UI_NAV_SYNC_EVENTS_URL, MASON_UI_NAV_LINKS";
+  assert.deepEqual(startSettingRefusal(p, { MASON_UI_NAV_FOO: "1" }, { serve: false }),
+    { message: `MASON_UI_NAV_FOO is not a setting: the sidebar's settings are ${list}`, code: "refused",
+      fix: "unset MASON_UI_NAV_FOO: mason start's page is yours alone, opened with mason ui" });
   assert.equal(startSettingRefusal(p, { MASON_UI_NAV_USER_URL: "/x" }, { serve: false })?.message,
-    "MASON_UI_NAV_USER_URL is mason serve's setting, and mason start ignores no setting silently", "a misspelt one too");
+    `MASON_UI_NAV_USER_URL is not a setting — did you mean \`MASON_UI_NAV_USERS_URL\`?: the sidebar's settings are ${list}`, "a misspelt one");
+  assert.equal(startSettingRefusal(p, { MASON_UI_NAV_USER_URL: "/x", MASON_UI_NAV_LINKS: "[]" }, { serve: false })?.message,
+    `MASON_UI_NAV_USER_URL is not a setting — did you mean \`MASON_UI_NAV_USERS_URL\`?: the sidebar's settings are ${list}; ` +
+    "MASON_UI_NAV_LINKS is mason serve's setting, and mason start ignores no setting silently", "beside one of mason serve's");
   assert.equal(startSettingRefusal(p, { MASON_UI_NAV_USERS_URL: "" }, { serve: false }), null, "set empty is unset");
 });

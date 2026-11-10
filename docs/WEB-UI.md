@@ -301,8 +301,9 @@ listens, and every browser connection crosses that one ssh connection as frames 
   read-only here" and a `why` that says what is still allowed; the pages for those still say why they offer nothing,
   and `/api/state` says `pageReadOnlyAllow: ["tables"]`. `MASON_PROJECT_READONLY=1` still wins: a project deployed as
   committed offers no Add or Remove and refuses them `409`, as without the allowance (Sync now stays). `tables` is the
-  only value; anything else (with a `did you mean`), or the setting beside no `MASON_UI_READ_ONLY=1`, refuses the start:
-  an allowance on a page that is not read-only says a read-only page was meant and not had. `mason start` refuses it.
+  only value; set empty, it counts as unset. Anything else (with a `did you mean`), or the setting beside no
+  `MASON_UI_READ_ONLY=1`, refuses the start: an allowance on a page that is not read-only says a read-only page was meant
+  and not had. `mason start` refuses it.
 - **A link back to the site that links to the page: `MASON_UI_BACK_URL` and `MASON_UI_BACK_LABEL`.** For a page opened
   from another application (a portal, a hosted service's console), `mason serve` with `MASON_UI_BACK_URL` set shows
   "← Back" (or "← " and `MASON_UI_BACK_LABEL`) at the top of the sidebar, above the project, on every page, in the same
@@ -342,9 +343,9 @@ listens, and every browser connection crosses that one ssh connection as frames 
   as a group of their own at the end of the sidebar's nav, each with a link icon, in the same tab, sending no referrer:
   `MASON_UI_NAV_LINKS='[{"label":"Billing","url":"/billing"}]'`. Each URL is read as the link back's, each label as
   `MASON_UI_BACK_LABEL` is (one line of plain text, at most 64 characters, never white space alone) and rendered as
-  text, never as HTML. Text that is not JSON, not a list, more than 5 links, an entry that is not an object or has a key
-  other than `label` and `url`, or a label or URL that is wrong refuses the start, every problem on one line, naming the
-  entry. `mason start` refuses both settings, as the other `MASON_UI_*` server settings.
+  text, never as HTML. Text that is not JSON, not a list, more than 5 links, an entry that is not an object, has a key
+  other than `label` and `url` (named by its place, never quoted) or a key written twice (JSON would keep the last
+  silently), or a label or URL that is wrong refuses the start, every problem on one line, naming the entry. `mason start` refuses both settings, as the other `MASON_UI_*` server settings.
 - **In the image, Mason's user is uid 1000, gid 1000 (`node`), and stays so**: an image that changes it names it under
   "Before you upgrade" in its release notes (deploy/mason-data/README.md). A supervisor that creates the folder of the
   socket or the run file makes it owned by `1000:1000`, mode 0700, where the container mounts it (the one folder rule of
