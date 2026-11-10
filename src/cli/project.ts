@@ -170,6 +170,9 @@ export function readProject(root: string): Project | BrokenProject | null {
     const bad = typeof r !== "object" || !Number.isInteger(run.pid) ? ["pid"]
       : [...RUNNING.filter((k) => typeof run[k] !== "string"), ...(run.postgresPublicUrl !== undefined && typeof run.postgresPublicUrl !== "string" ? ["postgresPublicUrl (a string, when there is one)"] : []), ...(run.started !== undefined && typeof run.started !== "string" ? ["started (a string, when there is one)"] : []),...(typeof (run.postgresListener as { host?: unknown } | null)?.host !== "string" ? ["postgresListener"] : [])];
     if (bad.length) return { root, dir, file, broken: `its "running" has no ${bad.join(", ")} (mason start writes the whole of it, or null when stopped)` };
+    // running.postgresPublicUrl's VALUE is not read here: a record an older Mason wrote with a value this one refuses
+    // (or one edited) must not make the project broken — a start overwrites it, and stop, logs, doctor and destroy
+    // never print it. The one reader that prints from it, clientLink (src/cli/pg-url.ts), fails closed, naming it
   }
   return { root, dir, folder: path.resolve(root, config.folder), config };
 }

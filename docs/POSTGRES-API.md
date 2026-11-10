@@ -364,13 +364,16 @@ ClientHello, such as a platform's generic TLS terminator re-encrypting to Mason)
 connection that opens with a ClientHello and says why in its log (it has no certificate to answer one with).
 
 **The address clients reach** (`mason serve` behind a load balancer, a proxy or a DNS name): the listener records
-where it listens, `localhost:5433` on a server, which is the server's own view of itself. `MASON_PG_PUBLIC_URL` says
+where it listens, `127.0.0.1:5433` with the default `MASON_PG_HOST` (the host it is given; `localhost` where it
+listens on every address, `0.0.0.0` or `::`), which is the server's own view of itself. `MASON_PG_PUBLIC_URL` says
 the address a client reaches instead, `postgres://<host>:<port>/<database>?sslmode=<mode>`
 (`MASON_PG_PUBLIC_URL=postgres://db.example.com:5433/?sslmode=verify-full`), and every URL Mason prints for a client
 to paste is built from it by one builder (src/cli/pg-url.ts `clientLink`): `mason status` (`postgres`, with `public:
 true` only then, under `--json`; the listener's own address stays its `Listener` row), `mason user add` and `list`, and the web
-page's Connect panels and psql line, with no note to replace the host. What it may hold: a host (a name, an IPv4
-address, an IPv6 one in brackets), a port (5432 when none), a database (the one Mason answers as when none; one named is
+page's Connect panels and psql line, with no note to replace the host (`mason user add` still gives a self-signed
+listener certificate's SHA-256: behind a TCP pass-through it is the certificate a client meets). What it may hold: a host (a name, each label 1-63
+letters, digits, `-` or `_`, a trailing `.` kept as written; an IPv4 address, four numbers 0-255; an IPv6 one in
+brackets, with no zone id: `%eth0` names an interface of one machine), a port (5432 when none), a database (the one Mason answers as when none; one named is
 printed as it is, for a proxy that maps names) and `sslmode`, required, one of `disable`, `require`, `verify-ca`,
 `verify-full` (`allow` and `prefer` fall back to plain, a password in clear). A user, a password, any other parameter,
 a fragment or anything else refuses the start, naming the setting and never repeating the value. Mason cannot see what
