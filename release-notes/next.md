@@ -31,6 +31,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `--json` still gives numbers. A chart's axis, a statement still running, a sync's time, an interval and an age keep
   their form. On Observability › Queries, the Statement cell
   now has its own `+` beside the statement. It opens and closes the same row as the Query id's `+`.
+- A site that embeds `mason serve`'s web page can show its own facts inside it, in the page's look: an entry of
+  `MASON_UI_NAV_LINKS` may be `{"label": …, "view": "host/status.json"}`, a view in the sidebar at `#host/<n>`, and
+  `MASON_UI_OVERVIEW_CARD=host/card.json` adds one card to the Overview. Each is JSON the page reads from a path
+  relative to its own address (so the site's proxy answers it), every string shown as text, links held to
+  `MASON_UI_BACK_URL`'s rules; an answer it cannot read is shown as the view's failure. docs/WEB-UI.md "Host views"
+  has the shape. Unset, the page is unchanged; `mason start` refuses `MASON_UI_OVERVIEW_CARD`.
+- The web page's Users says where each user connects from ("from anywhere", or its address ranges), and sets it as `mason user add --from` and `mason user from` do: the add form's **Connects from** (From anywhere, the default, or Only from these addresses, comma-separated), and the "from …" line under each user's role. A range Mason cannot read is refused in its own words.
+- `MASON_UI_READ_ONLY_ALLOW` takes `users`, alone or with tables (`tables,users`): a read-only page (`MASON_UI_READ_ONLY=1`) then still adds, disables, enables and removes users and changes where they connect from — exactly `POST /api/users`, `POST /api/users/<name>/disable`, `/enable` and `/from`, and `DELETE /api/users/<name>` — and refuses every other change as before. The value is read strictly: an item that is not `tables` or `users`, an empty one, or one named twice refuses the start, with a `did you mean`; the refusal no longer quotes the value. If you set it, check it against these rules before upgrading.
+- `DELETE /api/users/<name>` takes the name as one path segment: a path with more segments under it is no route (404).
 - `MASON_UI_NAV_LINKS` refuses `mason serve`'s start when an entry has a key written twice (`{"label":"a","label":"b",…}`), naming the entry; it was read as its last value. A key a link does not take is named by its place in the entry, never quoted. `mason start` with a `MASON_UI_NAV_*` name that is no setting now says it is not a setting, with a `did you mean`.
 - On the web page, what an action answered (Tables' Add, Remove and Sync now, Usage's cancel of a statement) now stays
   beside its button until it is dismissed, by its Dismiss, by Escape, or by the next action's answer or question. Before,

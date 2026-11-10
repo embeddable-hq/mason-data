@@ -44,9 +44,10 @@ import { commandPinProblem } from "./pin.ts";
 import { listenOnUiSocket, prepareUiSocket, uiSocketSetting, type UiSocket } from "./ui-socket.ts";
 import { prepareUiRunFile, uiRunFileSetting, UI_RUN_FILE_SETTING, writeUiRunFile, type UiRunFile } from "./ui-run-file.ts";
 import { recordRefusal } from "./replication-mode.ts";
-import { UI_READ_ONLY_ALLOW_SETTING, UI_READ_ONLY_SETTING, uiReadOnlyAllowSetting, uiReadOnlySetting } from "./ui-read-only.ts";
+import { pageAllowsText, UI_READ_ONLY_ALLOW_SETTING, UI_READ_ONLY_SETTING, uiReadOnlyAllowSetting, uiReadOnlySetting } from "./ui-read-only.ts";
 import { BACK_LABEL_MAX, BACK_URL_MAX, uiBackLinkSetting } from "./ui-back-link.ts";
 import { NAV_LINKS_MAX, navLines, navOf, uiNavSetting } from "./ui-nav.ts";
+import { UI_OVERVIEW_CARD_SETTING, overviewCardOf, uiOverviewCardSetting } from "./ui-host-view.ts";
 import { pgPublicUrlSetting, PUBLIC_SSLMODES } from "./pg-public-url.ts";
 import { changesRetiredText, pollMsRetiredText, type SourcesTop } from "../lib/table-sync.ts";
 import { historyDaysSetting, historyDaysWrongText } from "../duck/history.ts";
@@ -116,9 +117,13 @@ export const SERVE: CommandSpec = {
                             refuses every change it is sent, through mason ui --ssh or the socket alike; the mason
                             commands beside it are unchanged (default 0)
     MASON_UI_READ_ONLY_ALLOW  tables: a read-only page still adds, removes and syncs tables on its Tables page (Add,
-                            Columns…, Name its key…, Remove, Sync now), and refuses every other change; anything else,
-                            or set without MASON_UI_READ_ONLY=1, is refused; MASON_PROJECT_READONLY=1 still refuses
-                            an Add or a Remove (default unset: nothing)
+                            Columns…, Name its key…, Remove, Sync now: POST /api/pick, /api/remove, /api/sync);
+                            users: it still adds, disables, enables and removes users and changes the addresses they
+                            connect from on its Users page (POST /api/users, POST /api/users/<name>/disable, /enable
+                            and /from, DELETE /api/users/<name>); tables,users both. It refuses every other change; an
+                            item that is not one of these, empty or named twice, or the setting without
+                            MASON_UI_READ_ONLY=1, is refused; MASON_PROJECT_READONLY=1 still refuses a table's Add or
+                            Remove (default unset: nothing)
     MASON_UI_BACK_URL       a link back to the site that links to the web page, at the top of its sidebar, in the same
                             tab: a path on the page's host (/something, from the host's root, whatever path the page
                             is served under) or an https:// or http:// URL, with no user or password, printable ASCII,
@@ -133,7 +138,14 @@ export const SERVE: CommandSpec = {
                             what the server answers is unchanged (default unset)
     MASON_UI_NAV_LINKS      the host's own links in the sidebar, a group of their own, in the same tab: a JSON list
                             of at most ${NAV_LINKS_MAX} {"label": …, "url": …}, each label and URL read as the link back's;
-                            anything else is refused (default unset: none)
+                            or {"label": …, "view": …}, a view of the host's the page shows inside itself at #host/<n>
+                            (n its place in the list): its JSON read from the path, relative to the page's own
+                            address (host/status.json: no scheme, no //, no leading /, no .. segment), and shown as
+                            text in the page's look (docs/WEB-UI.md "Host views"); anything else is refused
+                            (default unset: none)
+    MASON_UI_OVERVIEW_CARD  a card of the host's on the web page's Overview, beside Mason's own: the same JSON as a
+                            view's, read from a path relative to the page's own address, read as a view's is
+                            (default unset: none)
     MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
@@ -255,6 +267,9 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   // the sidebar as the host says it (src/cli/ui-nav.ts): each URL read as the link back's, the links a short JSON list
   const nav = uiNavSetting(env);
   if (nav !== null && "problem" in nav) wrong.push(nav.problem);
+  // the host's card on the Overview (src/cli/ui-host-view.ts): a path relative to the page's address, else refused here
+  const card = uiOverviewCardSetting(env);
+  if (card !== null && typeof card !== "string") wrong.push(card.problem);
   // the address a client reaches (src/cli/pg-public-url.ts): its one reading, refused here with the rest
   const publicUrl = pgPublicUrlSetting(env);
   if (publicUrl !== null && "problem" in publicUrl) wrong.push(publicUrl.problem);
@@ -560,10 +575,13 @@ export async function serve(argv: string[]): Promise<number> {
   const backLink = uiBackLinkSetting(process.env);
   if (backLink !== null && !("problem" in backLink)) say(`  web page  a link back at the top of its sidebar, ${JSON.stringify(backLink.label)} (MASON_UI_BACK_URL)`);
   for (const l of navLines(navOf(uiNavSetting(process.env)))) say(`  web page  ${l}`);
+  const card = overviewCardOf(uiOverviewCardSetting(process.env));
+  if (card !== null) say(`  web page  the host's card on its Overview, read from the page's address (${UI_OVERVIEW_CARD_SETTING})`);
   const pageAllow = uiReadOnlyAllowSetting(process.env);
   if (uiReadOnlySetting(process.env) === true) {
-    say(Array.isArray(pageAllow) && pageAllow.includes("tables")
-      ? `  web page  read-only (${UI_READ_ONLY_SETTING}=1) but its tables (${UI_READ_ONLY_ALLOW_SETTING}=tables): it refuses every other change it is sent; the mason commands beside it are unchanged`
+    const allowed = Array.isArray(pageAllow) ? pageAllowsText(pageAllow) : null;
+    say(Array.isArray(pageAllow) && allowed !== null
+      ? `  web page  read-only (${UI_READ_ONLY_SETTING}=1) but ${allowed} (${UI_READ_ONLY_ALLOW_SETTING}=${pageAllow.join(",")}): it refuses every other change it is sent; the mason commands beside it are unchanged`
       : `  web page  read-only (${UI_READ_ONLY_SETTING}=1): it refuses every change it is sent; the mason commands beside it are unchanged`);
   }
   // the run reads the project of the folder it runs in (src/cli/project.ts): the data folder's

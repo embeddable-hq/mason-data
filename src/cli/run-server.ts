@@ -80,7 +80,7 @@ export interface RunContext {
   served?: boolean;
   /** MASON_UI_READ_ONLY=1 (src/cli/ui-read-only.ts): every change the page asks for is refused, and it offers none */
   pageReadOnly?: boolean;
-  /** MASON_UI_READ_ONLY_ALLOW (src/cli/ui-read-only.ts): what a read-only page may still change (`tables`), validated at
+  /** MASON_UI_READ_ONLY_ALLOW (src/cli/ui-read-only.ts): what a read-only page may still change (`tables`, `users`), validated at
    *  the start; read only under `pageReadOnly` */
   pageReadOnlyAllow?: readonly PageArea[];
   /** MASON_UI_BACK_URL and MASON_UI_BACK_LABEL (src/cli/ui-back-link.ts): the page's link back to the site that links to
@@ -89,6 +89,9 @@ export interface RunContext {
   /** MASON_UI_NAV_<ITEM>_URL and MASON_UI_NAV_LINKS (src/cli/ui-nav.ts): the sidebar's items replaced by the host's pages,
    *  and the host's own links, validated at the start, or null. Links only: what the server answers is unchanged */
   pageNav?: PageNav | null;
+  /** MASON_UI_OVERVIEW_CARD (src/cli/ui-host-view.ts): the path, relative to the page's address, the Overview reads the
+   *  host's card from, validated at the start, or null. The page reads it, never the server */
+  pageCard?: string | null;
   /** MASON_UI_SOCKET (src/cli/ui-socket.ts): the Unix socket the page is served on too, or null */
   pageSocket?: string | null;
   /** the project's database is the demo database this run hosts (`mason init demo`, src/cli/demo.ts): mason status says so */
@@ -220,12 +223,14 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     // why the page offers no control that changes anything (MASON_UI_READ_ONLY=1, src/cli/ui-read-only.ts), or null:
     // every change it would send is refused
     pageReadOnly: ctx.pageReadOnly === true ? PAGE_READ_ONLY_WHY : null,
-    // what that page may still change (MASON_UI_READ_ONLY_ALLOW: `tables`), [] when nothing or when it is not read-only
+    // what that page may still change (MASON_UI_READ_ONLY_ALLOW: `tables`, `users`), [] when nothing or when it is not read-only
     pageReadOnlyAllow: ctx.pageReadOnly === true ? [...(ctx.pageReadOnlyAllow ?? [])] : [],
     // the page's link back to the site that links to it (MASON_UI_BACK_URL, src/cli/ui-back-link.ts), or null
     pageBack: ctx.pageBack ?? null,
     // the sidebar as the host says it (MASON_UI_NAV_*, src/cli/ui-nav.ts): { items, links }, or null
     pageNav: ctx.pageNav ?? null,
+    // the host's card on the Overview (MASON_UI_OVERVIEW_CARD, src/cli/ui-host-view.ts): its path, or null
+    pageCard: ctx.pageCard ?? null,
     // the Unix socket the page is served on too (MASON_UI_SOCKET), or null: mason status says it
     pageSocket: ctx.pageSocket ?? null,
     source: { url: maskedUrl(ctx.source.url), host: ctx.source.host, database: ctx.source.database, remote: ctx.source.remote, demo: ctx.demo === true,
@@ -514,6 +519,9 @@ export const PAGE_ROUTES: Readonly<Record<string, readonly [file: string, type: 
   "/pages/users.js": ["pages/users.js", "text/javascript; charset=utf-8"],
   "/pages/usage.js": ["pages/usage.js", "text/javascript; charset=utf-8"],
   "/pages/syncs.js": ["pages/syncs.js", "text/javascript; charset=utf-8"],
+  // the host's views and card (MASON_UI_NAV_LINKS' views, MASON_UI_OVERVIEW_CARD): read, held to their shape, rendered
+  "/host-view.js": ["host-view.js", "text/javascript; charset=utf-8"],
+  "/pages/host.js": ["pages/host.js", "text/javascript; charset=utf-8"],
   // the charts (src/web/charts.js over uPlot) and what the page vendors whole, pinned, with its licence
   // (src/web/vendor/README.md): served from here, never fetched from elsewhere — a box without internet reads it all
   "/charts.js": ["charts.js", "text/javascript; charset=utf-8"],
@@ -531,6 +539,7 @@ export const PAGE_ROUTES: Readonly<Record<string, readonly [file: string, type: 
   "/vendor/lucide-1.56.0/layout-dashboard.mjs": ["vendor/lucide-1.56.0/layout-dashboard.mjs", "text/javascript; charset=utf-8"],
   "/vendor/lucide-1.56.0/logs.mjs": ["vendor/lucide-1.56.0/logs.mjs", "text/javascript; charset=utf-8"],
   "/vendor/lucide-1.56.0/link.mjs": ["vendor/lucide-1.56.0/link.mjs", "text/javascript; charset=utf-8"],
+  "/vendor/lucide-1.56.0/panel-top.mjs": ["vendor/lucide-1.56.0/panel-top.mjs", "text/javascript; charset=utf-8"],
   "/vendor/lucide-1.56.0/menu.mjs": ["vendor/lucide-1.56.0/menu.mjs", "text/javascript; charset=utf-8"],
   "/vendor/lucide-1.56.0/square-terminal.mjs": ["vendor/lucide-1.56.0/square-terminal.mjs", "text/javascript; charset=utf-8"],
   "/vendor/lucide-1.56.0/table.mjs": ["vendor/lucide-1.56.0/table.mjs", "text/javascript; charset=utf-8"],
@@ -866,7 +875,8 @@ export function createRunServer(ctx: RunContext): http.Server {
             if (!r.already) ctx.log(`user ${r.enabled.name} enabled`);
             sendJson(res, 200, { ...r, next: nextJson(enabledNext(r.enabled.name)) });
           }
-        } else if (method === "DELETE" && url.pathname.startsWith("/api/users/")) {
+        } else if (method === "DELETE" && /^\/api\/users\/[^/]+$/.test(url.pathname)) {
+          // one segment, the user's name encoded (a name holds no `/`): the route MASON_UI_READ_ONLY_ALLOW=users names
           let name: string;
           try { name = decodeURIComponent(url.pathname.slice("/api/users/".length)); }
           catch { throw new Refusal(400, `${url.pathname} does not name a user: DELETE /api/users/<name>`); }

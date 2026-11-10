@@ -13,7 +13,7 @@
  */
 import { VIEW_HASHES } from "../routes.js";
 import { statementMsText, agoText, bytesText, esc, firstLine, n, empty, renderFailure, rowsHtml, utcText, utcMsText, details, createOpenSet, status,
-  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, clientText, renderConnect, copyClick, UNLISTED_STATEMENTS, statementCell, rangeEvery } from "../shared.js";
+  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, clientText, renderConnect, copyClick, UNLISTED_STATEMENTS, statementCell, rangeEvery, usersReadOnly } from "../shared.js";
 
 const STATE = "api/state";
 const NEWEST_EVERY_MS = 5000;
@@ -164,7 +164,7 @@ export const page = {
         const s = ctx.read(STATE)?.body;
         return {
           "request-log": (log?.failure ? renderFailure(log.failure) : "") + (log?.body ? renderRequests(log.body, { paged: m.before !== null, filtered: filtered(), isOpen: opened.has, now: ctx.now().getTime(), sort: m.sort,
-            span: m.filters.since ? "" : (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span, connect: renderConnect(s?.postgres, { first: true, table: s?.tables?.find((t) => t.added && t.copy?.phase === "done")?.table ?? null, readOnly: s?.pageReadOnly ?? null }) }) : "") +
+            span: m.filters.since ? "" : (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span, connect: renderConnect(s?.postgres, { first: true, table: s?.tables?.find((t) => t.added && t.copy?.phase === "done")?.table ?? null, readOnly: usersReadOnly(s) }) }) : "") +
             (log?.body && m.filters.search && m.before === null ? `<p class="dim refresh-note">${esc(SEARCH_NOTE)}</p>` : ""),
         };
       },

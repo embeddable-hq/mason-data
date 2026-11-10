@@ -101,6 +101,12 @@
     <div id="syncs-events"></div>
     <div id="syncs-run"></div>
   </section>
+  <!-- a view of the host's (mason serve's MASON_UI_NAV_LINKS { label, view }), at #host/<n>: its title and its sections
+       written by the script from the host's JSON, as text (src/web/pages/host.js) -->
+  <section id="page-host" aria-labelledby="host-h" hidden>
+    <div class="page-head"><h2 id="host-h">Host view</h2><p class="desc">What the site that serves this page says of this server, in its own words.</p></div>
+    <div id="host-view"></div>
+  </section>
 </main>
 </div>
 <noscript><p>This page needs JavaScript. <code>mason status</code>, <code>mason tables</code>, <code>mason user list</code>, <code>mason logs</code> and <code>mason usage</code> say the same in a terminal.</p></noscript>

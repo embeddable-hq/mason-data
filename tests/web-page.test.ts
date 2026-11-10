@@ -39,7 +39,7 @@ const fn = <A extends unknown[], R>(name: string): Fn<A, R> => {
 interface Failure { code: string; message: string; why?: string; fix?: string; next?: Array<{ command: string; what?: string }> }
 interface App {
   model: Record<string, unknown>;
-  show(page: string, env?: unknown): void; poll(): Promise<void>; addUser(name: string, role?: string): Promise<boolean>; askRemove(name: string): void; cancelRemove(): void;
+  show(page: string, env?: unknown): void; poll(): Promise<void>; settled(): Promise<unknown>; addUser(name: string, role?: string): Promise<boolean>; askRemove(name: string): void; cancelRemove(): void;
   confirmRemove(name: string): Promise<boolean>; dismissAdded(): void; view(): Record<string, string>;
   addTable(table: string, columns?: string[], key?: string[]): Promise<boolean>; choose(table: string): Promise<boolean>; cancelChoose(): void;
   askRemoveTable(table: string): void; cancelRemoveTable(): void; confirmRemoveTable(table: string): Promise<boolean>; dismissOutcome(): void;
@@ -488,8 +488,8 @@ test("the users: a user's role (mason user add --role) in its own column; one th
     // stage 1b (src/cli/roles.ts userRole): one reading as the roles file's default, one the file holds to nothing (no default:)
     { name: "dflt", id: "0000000000000003", ...at, role: "everything", roleFrom: "default" },
     { name: "bare", id: "0000000000000004", ...at, roleFrom: "none", readsNothing: true }], lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, Date.parse("2026-10-29T09:00:00.000Z"));
-  assert.match(textOf(html), /^User Role Status Added Last used agent id 0000000000000001 agent Active .* old id 0000000000000002 gone not in the roles file: its statements are refused Active /);
-  assert.match(textOf(html), /dflt id 0000000000000003 everything \(default\) Active .* bare id 0000000000000004 no role, and the roles file names no default: its statements are refused Active /);
+  assert.match(textOf(html), /^User Role Status Added Last used agent id 0000000000000001 agent from anywhere Active .* old id 0000000000000002 gone not in the roles file: its statements are refused from anywhere Active /);
+  assert.match(textOf(html), /dflt id 0000000000000003 everything \(default\) from anywhere Active .* bare id 0000000000000004 no role, and the roles file names no default: its statements are refused from anywhere Active /);
 });
 
 test("the users: a user's attributes beside its role in mason user list's words; one its role's filters read and it lacks, said refused", async () => {
@@ -503,7 +503,7 @@ test("the users: a user's attributes beside its role in mason user list's words;
   const html = renderUsers({ users: [{ name: "acme", id: "0000000000000001", ...at, role: "tenant", roleFrom: "file", roleKnown: true, attributes: values },
     { name: "stale", id: "0000000000000002", ...at, role: "tenant", roleFrom: "file", roleKnown: true, attributes: { tenant: "7" }, missingAttributes: ["regions"] }],
     lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, Date.parse("2026-10-29T09:00:00.000Z"));
-  assert.match(textOf(html), /acme id 0000000000000001 tenant tenant=42, regions=\[eu, uk\] Active .* stale id 0000000000000002 tenant tenant=7 no value for regions: its statements are refused Active /);
+  assert.match(textOf(html), /acme id 0000000000000001 tenant tenant=42, regions=\[eu, uk\] from anywhere Active .* stale id 0000000000000002 tenant tenant=7 no value for regions: its statements are refused from anywhere Active /);
 });
 
 test("the users: a row each, active first then removed without Remove; Remove asks first; none is said", () => {
@@ -514,7 +514,7 @@ test("the users: a row each, active first then removed without Remove; Remove as
   lastUsedNote: null, urlNote: null, requestLogDays: 7 };
   const NOW_U = Date.parse("2026-10-28T09:15:59.000Z");
   const html = renderUsers(list, null, NOW_U);
-  assert.match(textOf(html), /User Role Status Added Last used metabase id 0123456789abcdef every table Active 2026-10-27 09:10 UTC 60 min ago Queries Disable Remove grafana id fedcba9876543210 every table Active does not connect: the API key was rotated since it was added 2026-10-20 08:00 UTC not used in the last 7 days Queries Disable Remove old id aaaaaaaaaaaaaaaa every table Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC/);
+  assert.match(textOf(html), /User Role Status Added Last used metabase id 0123456789abcdef every table from anywhere Active 2026-10-27 09:10 UTC 60 min ago Queries Disable Remove grafana id fedcba9876543210 every table from anywhere Active does not connect: the API key was rotated since it was added 2026-10-20 08:00 UTC not used in the last 7 days Queries Disable Remove old id aaaaaaaaaaaaaaaa every table Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC/);
   // the last use is an age with its UTC time in a title (mason user list's words); status is a dot and a word
   assert.match(html, /<td class="num"><span title="2026-10-28 08:15 UTC">60 min ago<\/span><\/td>/);
   assert.deepEqual([...html.matchAll(/<span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`),
@@ -549,7 +549,7 @@ test("the users while the roles file cannot be read: mason user list's tip, word
   const problem = "mason/roles.yml: it is not YAML: Flow sequence in block collection must be sufficiently indented and end with a ] at line 1, column 18";
   const html = renderUsers(list, null, NOW_R, null, { file: "mason/roles.yml", roles: [], problem, default: null, all: [] });
   assert.ok(textOf(html).startsWith(`${rolesProblemText("mason/roles.yml", problem)} User Role Status Added Last used `), textOf(html));
-  assert.match(textOf(html), /metabase id 0123456789abcdef refused: the roles file cannot be read Active 2026-10-27 .* agent id 0000000000000001 refused: the roles file cannot be read Active 2026-10-29/);
+  assert.match(textOf(html), /metabase id 0123456789abcdef refused: the roles file cannot be read from anywhere Active 2026-10-27 .* agent id 0000000000000001 refused: the roles file cannot be read from anywhere Active 2026-10-29/);
   // a readable file: nothing said; the page's own roles are the state's (/api/state roles), read beside the users
   assert.doesNotMatch(textOf(renderUsers(list, null, NOW_R, null, { file: "mason/roles.yml", roles: ["agent"], problem: null, default: null, all: [] })), /cannot be read/);
   assert.doesNotMatch(textOf(renderUsers(list, null, NOW_R, null, null)), /cannot be read/);
@@ -689,7 +689,7 @@ test("a read-only page (pageReadOnly): no page writes a control that sends a cha
   // viewing is unchanged: the tables, the users, the statement running and where to connect are all there
   for (const said of ["public.customers", "public.accounts", "metabase", "SELECT count(*) FROM orders", "connect-psql"]) assert.ok(shown.includes(said), said);
   assert.ok(textOf(shown).includes(`Tables are not added, removed or synced from this page: ${why}.`));
-  assert.ok(textOf(shown).includes(`Users are not added, disabled or removed from this page: ${why}.`));
+  assert.ok(textOf(shown).includes(`Users are not added, changed, disabled or removed from this page: ${why}.`));
 });
 
 test("a read-only page: no add, create or write link anywhere — the Connect panel's Create a user on the Overview and on Queries' empty log included; the Overview and Usage say why; unset, all as before", async () => {
@@ -707,7 +707,7 @@ test("a read-only page: no add, create or write link anywhere — the Connect pa
   }
   // the Overview and Usage say why their controls are missing, as Tables and Users do; unset, none says it
   const lines = new Map([["status", `Nothing is shared, added or created from this page: ${why}.`], ["usage", `Statements are not cancelled from this page: ${why}.`],
-    ["tables", `Tables are not added, removed or synced from this page: ${why}.`], ["users", `Users are not added, disabled or removed from this page: ${why}.`]]);
+    ["tables", `Tables are not added, removed or synced from this page: ${why}.`], ["users", `Users are not added, changed, disabled or removed from this page: ${why}.`]]);
   for (const [id, line] of lines) {
     assert.ok(textOf(shown.byPage.get(id)!).includes(line), `${id}: ${line}`);
     assert.match(shown.byPage.get(id)!, new RegExp(`<p class="count">${line.split(":")[0]!}`), `${id}: in the Tables and Users lines' style`);
@@ -765,7 +765,7 @@ test("a read-only page that still edits its tables (pageReadOnlyAllow: [tables])
   for (const data of buttons) assert.ok(data.length > 0 && data.every((d) => VIEW_BUTTONS.test(d) || TABLE_BUTTONS.test(d)), `a button that may send a change: ${data.join(" ")}`);
   assert.ok(!/Create a user|Add a user|Connect from anywhere|<a class="btn[^"]*" href="#users"/.test(shown.all), "a lead to a user or a share");
   // each page says why it offers no change, the Overview now without the tables
-  for (const [id, line] of [["status", `No user is created and nothing is shared from this page: ${why}.`], ["users", `Users are not added, disabled or removed from this page: ${why}.`],
+  for (const [id, line] of [["status", `No user is created and nothing is shared from this page: ${why}.`], ["users", `Users are not added, changed, disabled or removed from this page: ${why}.`],
     ["usage", `Statements are not cancelled from this page: ${why}.`]] as const) assert.ok(textOf(shown.byPage.get(id)!).includes(line), `${id}: ${line}`);
   assert.ok(!textOf(shown.byPage.get("status")!).includes("Nothing is shared, added or created"));
   // the checklist sends a person to add a table, never to create a user
@@ -1187,7 +1187,7 @@ test("the app: a poll writes the shown page and when, reading only its endpoints
   await app.poll();
   // a page shown is read again whatever its rates (show marks every read stale): the shell's state with it
   assert.deepEqual(run.asked, ["GET api/users?lastUsed=1", "GET api/state"]);
-  assert.match(textOf(app.view().users!), /^User Role Status Added Last used metabase id 0123456789abcdef every table Active 2026-10-27 09:10 UTC not used in the last \? days Queries Disable Remove$/);
+  assert.match(textOf(app.view().users!), /^User Role Status Added Last used metabase id 0123456789abcdef every table from anywhere Active 2026-10-27 09:10 UTC not used in the last \? days Queries Disable Remove$/);
   app.show("status");
   // the run stops
   run.answers.clear();
@@ -1377,6 +1377,192 @@ test("the app: Disable asks first and its confirm sends POST api/users/<name>/di
   assert.deepEqual(run.asked, ["POST api/users/metabase/enable", "GET api/users?lastUsed=1"]);
   assert.match(textOf(app.view().users!), /Active .* Disable Remove$/);
   assert.equal(popsOf(app.view().users!).length, 0, "the refusal went with the answer");
+});
+
+// ------------------------------------------------------------------ where a user connects from (mason user add --from, mason user from; issue 813)
+
+test("the users: each user's addresses on a line under its role, as mason user says them — from its ranges, or from anywhere; the line is its From…; a removed user's none; read-only, the words alone", async () => {
+  const renderUsers = fn<[unknown, unknown, number?, unknown?, unknown?, unknown?], string>("renderUsers");
+  const { rangesText } = await import("../src/cli/user.ts");
+  const page = await import(path.join(WEB, "pages", "users.js") as string) as { rangesText: (f: unknown) => string; fromText: (f: unknown) => string };
+  for (const f of [null, undefined, ["192.0.2.0/24"], ["192.0.2.0/24", "2001:db8::/32", "198.51.100.7/32"]]) assert.equal(page.rangesText(f), rangesText(f as string[] | null), JSON.stringify(f));
+  const at = { addedAt: "2026-10-27T09:10:11.000Z", live: true, lastUsedAt: null, url: null };
+  const list = { users: [{ name: "looker", id: "0000000000000001", ...at, removedAt: null, from: ["192.0.2.0/24", "2001:db8::/32"] }, { name: "metabase", id: "0000000000000002", ...at, removedAt: null, from: null },
+    { name: "old", id: "0000000000000003", ...at, removedAt: "2026-10-28T09:00:00.000Z", from: ["192.0.2.0/24"] }], lastUsedNote: null, urlNote: null, requestLogDays: 7 };
+  const html = renderUsers(list, null, Date.parse("2026-10-29T09:00:00.000Z"));
+  assert.match(textOf(html), /^User Role Status Added Last used looker id 0000000000000001 every table from 192\.0\.2\.0\/24, 2001:db8::\/32 Active 2026-10-27 09:10 UTC .* Queries Disable Remove metabase id 0000000000000002 every table from anywhere Active 2026-10-27 /);
+  // the line is its From…, its whole the title (the column cuts it); no column of its own, no button in the actions
+  assert.match(html, /<span class="dim">every table<\/span><button type="button" class="from-line" data-from="looker" title="from 192\.0\.2\.0\/24, 2001:db8::\/32: change where looker connects from">from 192\.0\.2\.0\/24, 2001:db8::\/32<\/button><\/td>/);
+  assert.equal([...html.matchAll(/<th scope="col"/g)].length, 6, "the columns as before");
+  assert.ok(![...html.matchAll(/<td class="act"[^>]*>(.*?)<\/td>/gs)].some((m) => m[1]!.includes("data-from")), "the actions as before");
+  assert.ok(!/data-from="old"/.test(html) && !/<tr class="removed">.*?from-line/s.test(html), "a removed user connects from nowhere: nothing said");
+  // asking: its line held, disabled, as Disable is
+  assert.match(renderUsers(list, { name: "looker", verb: "from" }), /<button type="button" class="from-line" title="[^"]*" aria-expanded="true" disabled>from 192\.0\.2\.0\/24, 2001:db8::\/32<\/button>/);
+  // read-only: the words alone, never a control
+  const ro = renderUsers(list, null, Date.parse("2026-10-29T09:00:00.000Z"), null, null, "the web page is read-only here (MASON_UI_READ_ONLY=1)");
+  assert.match(ro, /<span class="from-line" title="from anywhere">from anywhere<\/span>/);
+  assert.ok(!/data-from=/.test(ro));
+});
+
+test("the users: From… asks where the user connects from in a popover beside its actions, as Disable asks, opened at its ranges now; no row inserted", () => {
+  const renderUsers = fn<[unknown, unknown, number?, unknown?], string>("renderUsers");
+  const at = { addedAt: "2026-10-27T09:10:11.000Z", live: true, lastUsedAt: null, url: null, removedAt: null };
+  const list = { users: [{ name: "looker", id: "0000000000000001", ...at, from: ["192.0.2.0/24", "2001:db8::/32"] }, { name: "metabase", id: "0000000000000002", ...at, from: null }], lastUsedNote: null, urlNote: null, requestLogDays: 7 };
+  const asking = renderUsers(list, { name: "looker", verb: "from" });
+  const pops = popsOf(asking);
+  assert.equal(pops.length, 1);
+  assert.equal(pops[0]!.anchor, "act-users-looker");
+  assert.match(pops[0]!.html, /^<div class="pop ask" data-anchor="act-users-looker" role="dialog" aria-label="Where looker connects from">/);
+  assert.equal(textOf(pops[0]!.html), "Where looker connects from, as mason user from looker sets it: the sessions it holds from another address end at their next statement. Connects from From anywhere Only from these addresses Address ranges, comma-separated Change looker Cancel");
+  assert.match(pops[0]!.html, /<input type="radio" name="connects" value="only" checked>/, "opened at its ranges");
+  assert.match(pops[0]!.html, /<input id="user-from-from" name="from"[^>]* value="192\.0\.2\.0\/24, 2001:db8::\/32">/);
+  assert.match(pops[0]!.html, /<input type="hidden" name="user" value="looker"><\/form>/);
+  assert.match(pops[0]!.html, /data-pop-close/, "Escape presses its Cancel");
+  assert.ok(!/pattern=|required/.test(pops[0]!.html), "the run judges each range, never the page");
+  // its From… held where it was while it asks; no row and no cell added
+  assert.match(asking, /<button type="button" class="from-line" title="[^"]*" aria-expanded="true" disabled>from 192\.0\.2\.0\/24, 2001:db8::\/32<\/button>/, "its line held while it asks");
+  assert.equal(textOf(withoutPops(asking)), textOf(renderUsers(list, null)), "the rows say what they said");
+  // a user from anywhere opens at From anywhere, its box empty
+  const any = popOf(renderUsers(list, { name: "metabase", verb: "from" }), "act-users-metabase");
+  assert.match(any, /<input type="radio" name="connects" value="any" checked>/);
+  assert.match(any, /name="from"[^>]* value="">/);
+});
+
+test("the add form: Connects from, in mason user add's words — From anywhere (the default, no from sent) or Only from these addresses, a comma list as --from takes it, the run judging each", async () => {
+  const renderAddUser = fn<[unknown], string>("renderAddUser");
+  const form = renderAddUser(CATALOG_STATE);
+  assert.match(textOf(form), /Name Connects from From anywhere Only from these addresses Address ranges, comma-separated Add a user$/);
+  assert.match(form, /<input type="radio" name="connects" value="any" checked> From anywhere/, "from anywhere is the default, as mason user add with no --from");
+  assert.match(form, /<input type="radio" name="connects" value="only"> Only from these addresses/);
+  assert.match(form, /<input id="add-user-from" name="from" spellcheck="false" autocapitalize="off" placeholder="192\.0\.2\.0\/24, 2001:db8::\/32" value="">/);
+  assert.ok(!/pattern=/.test(form), "never validated in the page");
+  const { rangesOf } = await import(path.join(WEB, "pages", "users.js") as string) as { rangesOf: (e: unknown) => string[] | null };
+  assert.equal(rangesOf({ connects: { value: "any" }, from: { value: "192.0.2.0/24" } }), null, "from anywhere: what is typed is not sent");
+  assert.equal(rangesOf({}), null, "no choice: from anywhere");
+  assert.deepEqual(rangesOf({ connects: { value: "only" }, from: { value: " 192.0.2.0/24 ,2001:db8::/32, " } }), ["192.0.2.0/24", "2001:db8::/32"]);
+  assert.deepEqual(rangesOf({ connects: { value: "only" }, from: { value: "not a range" } }), ["not a range"], "sent as typed: the run refuses it");
+  assert.deepEqual(rangesOf({ connects: { value: "only" }, from: { value: "" } }), [], "none: sent as none, for the run to refuse");
+});
+
+test("the app: the add form sends from only when Only from these addresses is chosen; the run's refusal of a range is shown as the run words it", async () => {
+  const run = fakeRun();
+  run.answers.set("GET api/state", answer(CATALOG_STATE));
+  const app = fn<[unknown], App & { pages: Map<string, { submit(f: unknown): Promise<void> | null }> }>("createApp")(run.fetch);
+  app.show("users");
+  await app.poll();
+  assert.match(app.view()["add-user-box"]!, /name="connects" value="only"/);
+  const password = `mason_0123456789abcdef_${"b".repeat(32)}`;
+  run.answers.set("POST api/users", () => new Response(JSON.stringify({ user: "grafana", id: "0123456789abcdef", addedAt: "2026-10-27T09:11:00.000Z", password, database: "shop",
+    url: `postgres://grafana:${password}@127.0.0.1:5433/shop`, next: [] }), { status: 200 }));
+  const users = app.pages.get("users")!;
+  await users.submit({ id: "add-user", elements: { name: { value: "grafana" }, role: { value: "" }, connects: { value: "any" }, from: { value: "192.0.2.0/24" } } });
+  assert.ok(run.asked.includes(`POST api/users ${JSON.stringify({ name: "grafana" })}`), run.asked.join("\n"));
+  app.dismissAdded();
+  run.asked.length = 0;
+  await users.submit({ id: "add-user", elements: { name: { value: "looker" }, role: { value: "" }, connects: { value: "only" }, from: { value: "192.0.2.0/24, 2001:db8::/32" } } });
+  assert.ok(run.asked.includes(`POST api/users ${JSON.stringify({ name: "looker", from: ["192.0.2.0/24", "2001:db8::/32"] })}`), run.asked.join("\n"));
+  app.dismissAdded();
+  // a range the run cannot read: its refusal (src/cli/user.ts rangesToSet), as the run words it, and no password card
+  const failure = { code: "usage", message: "mason user add looker: 192.0.2.0/33: a prefix length of 0 to 32", fix: "an IPv4 or IPv6 range with its prefix length (10.0.0.0/16, 2001:db8::/32) or one address (192.0.2.10), one --from each", next: [] };
+  run.answers.set("POST api/users", () => new Response(JSON.stringify({ error: failure.message, failure }), { status: 400 }));
+  const input = { value: "looker" };
+  await users.submit({ id: "add-user", elements: { name: input, role: { value: "" }, connects: { value: "only" }, from: { value: "192.0.2.0/33" } } });
+  assert.equal(textOf(app.view().action!), `✗ ${failure.message} fix ${failure.fix}`);
+  assert.equal(app.view().added, "");
+  assert.equal(input.value, "looker", "refused: the name stays to fix");
+});
+
+test("the app: From… sends POST api/users/<name>/from — the ranges, or null for from anywhere — and reads the users again; held while it asks; a refusal is said beside the user's actions", async () => {
+  const run = fakeRun();
+  const looker = { name: "looker", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", live: true, from: ["192.0.2.0/24"] };
+  run.answers.set("GET api/users?lastUsed=1", answer({ users: [looker] }));
+  const app = fn<[unknown], App & { pages: Map<string, { submit(f: unknown): Promise<void> | null; click(d: unknown, b: unknown, env: unknown): unknown }> }>("createApp")(run.fetch);
+  app.show("users");
+  await app.poll();
+  const users = app.pages.get("users")!;
+  users.click({ from: "looker" }, null, {});
+  const asking = app.view().users!;
+  assert.match(popOf(asking, "act-users-looker"), /<form id="user-from"/);
+  // HELD while it asks: a poll whose list moved does not rewrite the form under what is being typed
+  run.answers.set("GET api/users?lastUsed=1", answer({ users: [{ ...looker, lastUsedAt: "2026-10-27T09:12:00.000Z", from: ["198.51.100.0/24"] }] }));
+  await app.poll();
+  assert.equal(app.view().users, asking, "the list as it opened");
+  // Change: the ranges typed, as mason user from looker 198.51.100.0/24 2001:db8::/32
+  run.answers.set("POST api/users/looker/from", answer({ changed: { name: "looker", id: looker.id, addedAt: looker.addedAt, from: ["198.51.100.0/24", "2001:db8::/32"] }, already: false, next: [] }));
+  run.answers.set("GET api/users?lastUsed=1", answer({ users: [{ ...looker, from: ["198.51.100.0/24", "2001:db8::/32"] }] }));
+  run.asked.length = 0;
+  await users.submit({ id: "user-from", elements: { user: { value: "looker" }, connects: { value: "only" }, from: { value: "198.51.100.0/24, 2001:db8::/32" } } });
+  assert.deepEqual(run.asked, [`POST api/users/looker/from ${JSON.stringify({ from: ["198.51.100.0/24", "2001:db8::/32"] })}`, "GET api/users?lastUsed=1"]);
+  assert.equal(app.model.confirming, null);
+  assert.equal(popsOf(app.view().users!).length, 0);
+  assert.match(textOf(app.view().users!), /from 198\.51\.100\.0\/24, 2001:db8::\/32 Active /);
+  // From anywhere: null, as mason user from looker --any
+  run.answers.set("GET api/users?lastUsed=1", answer({ users: [{ ...looker, from: null }] }));
+  run.asked.length = 0;
+  users.click({ from: "looker" }, null, {});
+  await users.submit({ id: "user-from", elements: { user: { value: "looker" }, connects: { value: "any" }, from: { value: "198.51.100.0/24" } } });
+  assert.equal(run.asked[0], `POST api/users/looker/from ${JSON.stringify({ from: null })}`);
+  assert.match(textOf(app.view().users!), /from anywhere Active /);
+  // refused (a range the run cannot read): the run's words in a popover beside the user's actions, until dismissed
+  const failure = { code: "usage", message: "mason user from looker: 192.0.2.0/33: a prefix length of 0 to 32", next: [] };
+  run.answers.set("POST api/users/looker/from", () => new Response(JSON.stringify({ error: failure.message, failure }), { status: 400 }));
+  users.click({ from: "looker" }, null, {});
+  await users.submit({ id: "user-from", elements: { user: { value: "looker" }, connects: { value: "only" }, from: { value: "192.0.2.0/33" } } });
+  assert.equal(textOf(popOf(app.view().users!, "act-users-looker")), `✗ ${failure.message} Dismiss`);
+  // Cancel: the question goes, and the list is the latest again
+  users.click({ from: "looker" }, null, {});
+  app.cancelRemove();
+  assert.equal(popsOf(app.view().users!).length, 0);
+});
+
+test("a read-only page that still manages its users (pageReadOnlyAllow: [users]): Users has Add a user, Connects from, From…, Disable, Enable and Remove; every other page writes no control that sends a change — Tables none — and says why (issue 813)", async () => {
+  const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
+  const state = { ...CATALOG_STATE, pageReadOnly: why, pageReadOnlyAllow: ["users"] };
+  const shown = await pageByPage(state);
+  const users = shown.byPage.get("users")!;
+  for (const control of ['id="add-user"', 'name="connects"', "data-from=", "data-disable=", "data-enable=", "data-remove="]) assert.ok(users.includes(control), `Users: ${control}`);
+  assert.ok(!textOf(users).includes("Users are not added"), "Users says nothing is refused");
+  // BY RULE over every page the app wrote: every button but the Users page's own only shows, copies or moves what is shown
+  const USER_BUTTONS = /^data-(from|disable|enable|remove)$/;
+  for (const control of WRITE_CONTROLS.filter((c) => c !== 'id="add-user"' && !USER_BUTTONS.test(c.replace(/=$/, "")))) assert.ok(!shown.all.includes(control), control);
+  const buttons = [...shown.all.replace(/<form id="add-user"[\s\S]*?<\/form>/g, "").matchAll(/<button\b([^>]*)>/g)].map((m) => [...m[1]!.matchAll(/\b(data-[a-z-]+)/g)].map((d) => d[1]!).filter((d) => d !== "data-room"));
+  for (const data of buttons) assert.ok(data.length > 0 && data.every((d) => VIEW_BUTTONS.test(d) || USER_BUTTONS.test(d)), `a button that may send a change: ${data.join(" ")}`);
+  assert.ok(!/<form\b(?![^>]*id="(request-filters|add-user)")/.test(shown.all), "no form but the request log's filters and Add a user");
+  assert.ok(!/Add a table|Connect from anywhere|<a class="btn[^"]*" href="#tables[^"]*"/.test(shown.all), "no lead to a table or a share");
+  // each page says why it offers no change: the Overview without the users, Tables and Usage as before
+  for (const [id, line] of [["status", `Nothing is shared or added from this page: ${why}.`], ["tables", `Tables are not added, removed or synced from this page: ${why}.`],
+    ["usage", `Statements are not cancelled from this page: ${why}.`]] as const) assert.ok(textOf(shown.byPage.get(id)!).includes(line), `${id}: ${line}`);
+  // Connect's Create a user and the checklist's, never Add a table
+  assert.match(shown.byPage.get("status")!, /<a class="btn[^"]*" href="#users">Create a user<\/a>/);
+  const { renderChecklist: checklist } = await import(path.join(WEB, "pages", "status.js") as string) as { renderChecklist: (s: unknown, q: unknown, u: unknown) => string };
+  const noneYet = { queries: { week: { completed: 0 } } }, nobody = { users: [] };
+  const fresh = checklist({ ...NONE, pageReadOnly: why, pageReadOnlyAllow: ["users"] }, noneYet, nobody);
+  assert.match(fresh, /href="#users">Create a user/);
+  assert.ok(!/Add a table/.test(fresh));
+  // the renderers alone: an allowance the page does not know is no allowance; without the page read-only nothing changes
+  const renderAddUser = fn<[unknown], string>("renderAddUser");
+  assert.equal(renderAddUser(state), renderAddUser(CATALOG_STATE), "the add form as on a page that is not read-only");
+  assert.equal(renderAddUser({ ...CATALOG_STATE, pageReadOnly: why, pageReadOnlyAllow: ["tables"] }), "", "only tables allowed: no form");
+  assert.equal(renderAddUser({ ...CATALOG_STATE, pageReadOnly: why, pageReadOnlyAllow: ["user"] }), "", "an area the page does not know");
+  assert.equal(renderAddUser({ ...CATALOG_STATE, pageReadOnlyAllow: ["users"] }), renderAddUser(CATALOG_STATE));
+});
+
+test("a read-only page that still changes its tables and its users (pageReadOnlyAllow: [tables, users]): both pages' controls; the Overview says only that nothing is shared; Cancel and the share still absent (issue 813)", async () => {
+  const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
+  const shown = await pageByPage({ ...CATALOG_STATE, pageReadOnly: why, pageReadOnlyAllow: ["tables", "users"] });
+  for (const control of ["data-add-table", "data-sync-table", "data-remove-table", 'id="add-user"', "data-from=", "data-disable="]) assert.ok(shown.all.includes(control), control);
+  for (const control of ["data-ask-cancel", "data-share-ask"]) assert.ok(!shown.all.includes(control), control);
+  assert.ok(textOf(shown.byPage.get("status")!).includes(`Nothing is shared from this page: ${why}.`));
+  assert.ok(textOf(shown.byPage.get("usage")!).includes(`Statements are not cancelled from this page: ${why}.`));
+  assert.ok(!/are not added/.test(textOf(shown.all)), "Tables and Users say nothing is refused");
+});
+
+test("a read-only page that changes its tables alone (pageReadOnlyAllow: [tables]): Users writes no From…, and no form (issue 813)", async () => {
+  const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
+  const shown = await pageByPage({ ...CATALOG_STATE, pageReadOnly: why, pageReadOnlyAllow: ["tables"] });
+  const users = shown.byPage.get("users")!;
+  for (const control of ['id="add-user"', 'name="connects"', "data-from=", "data-disable=", "data-enable=", "data-remove="]) assert.ok(!users.includes(control), control);
+  assert.ok(textOf(users).includes(`Users are not added, changed, disabled or removed from this page: ${why}.`));
 });
 
 test("the app: Add sends POST api/pick, says what was added beside its table's actions, and reads the state again: the copy shows starting", async () => {
@@ -1719,7 +1905,9 @@ test("the shell: a sidebar nav — Overview · Tables · Users, the Observabilit
   const pages = (page as unknown as { PAGES?: Array<{ id: string; title: string; hash?: string; parent?: string; create: unknown }> }).PAGES;
   assert.ok(Array.isArray(pages), "src/web/app.js exports PAGES");
   assert.deepEqual(pages!.map((p) => [p.id, p.title, p.hash ?? p.id, p.parent ?? ""]), [["status", "Overview", "overview", ""], ["tables", "Tables", "tables", ""], ["users", "Users", "users", ""],
-    ["queries", "Queries", "observability/queries", "observability"], ["usage", "Usage", "observability/usage", "observability"], ["syncs", "Sync events", "observability/syncs", "observability"]]);
+    ["queries", "Queries", "observability/queries", "observability"], ["usage", "Usage", "observability/usage", "observability"], ["syncs", "Sync events", "observability/syncs", "observability"],
+    // a host's view (MASON_UI_NAV_LINKS' views): its section and its route, but no link of Mason's own nav (`nav: false`)
+    ["host", "Host view", "host", ""]]);
   const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
   const { PAGE_ROUTES } = await import("../src/cli/run-server.ts") as { PAGE_ROUTES: Record<string, readonly [string, string]> };
   for (const p of pages!) {
@@ -2432,7 +2620,7 @@ test("the users: read with their last use, every 30 s, the state beside them; Co
   assert.deepEqual(await asked(), [], "not at the 2 s poll");
   t += 28_000;
   assert.deepEqual(await asked(), [U, "GET api/state"], "then every 30 s, the state with them (the Connect panel's)");
-  assert.match(textOf(app.view().users!), /metabase id 0123456789abcdef every table Active 2026-10-27 09:10 UTC never Queries Disable Remove old id aaaaaaaaaaaaaaaa every table Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC Queries$/);
+  assert.match(textOf(app.view().users!), /metabase id 0123456789abcdef every table from anywhere Active 2026-10-27 09:10 UTC never Queries Disable Remove old id aaaaaaaaaaaaaaaa every table Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC Queries$/);
   // Copy (the Connect panel's): the page's own handler writes the text as shown, and keeps it nowhere
   const written: string[] = [];
   const doc = { getElementById: (id: string) => id === "users-connect-host" ? { textContent: "127.0.0.1" } : null };
@@ -3007,7 +3195,7 @@ test("the vendored files: each a route, whole, pinned in its folder's name, with
   const vendor = webFiles().filter((f) => f.startsWith(`vendor${path.sep}`)).map((f) => f.split(path.sep).join("/")).sort();
   assert.deepEqual(vendor, ["vendor/README.md", "vendor/geist-1.7.2/Geist-Variable.woff2", "vendor/geist-1.7.2/GeistMono-Variable.woff2", "vendor/geist-1.7.2/LICENSE.txt",
     "vendor/lucide-1.56.0/LICENSE.txt", "vendor/lucide-1.56.0/chart-column.mjs", "vendor/lucide-1.56.0/layout-dashboard.mjs", "vendor/lucide-1.56.0/link.mjs", "vendor/lucide-1.56.0/logs.mjs",
-    "vendor/lucide-1.56.0/menu.mjs", "vendor/lucide-1.56.0/square-terminal.mjs", "vendor/lucide-1.56.0/table.mjs", "vendor/lucide-1.56.0/users.mjs", "vendor/lucide-1.56.0/x.mjs",
+    "vendor/lucide-1.56.0/menu.mjs", "vendor/lucide-1.56.0/panel-top.mjs", "vendor/lucide-1.56.0/square-terminal.mjs", "vendor/lucide-1.56.0/table.mjs", "vendor/lucide-1.56.0/users.mjs", "vendor/lucide-1.56.0/x.mjs",
     "vendor/uplot-1.6.32/LICENSE.txt", "vendor/uplot-1.6.32/uPlot.esm.js", "vendor/uplot-1.6.32/uPlot.min.css",
     "vendor/zilla-slab-5.3.0/LICENSE.txt", "vendor/zilla-slab-5.3.0/zilla-slab-latin-700-normal.woff2"]);
   const types: Record<string, string> = { woff2: "font/woff2", js: "text/javascript; charset=utf-8", mjs: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8", txt: "text/plain; charset=utf-8", md: "text/plain; charset=utf-8" };
@@ -4147,6 +4335,8 @@ test("layout guard: a click moves no row and no column — a question, a form an
     ["the Users page's Disable", renderUsers(users, null), renderUsers(users, { name: "b", verb: "disable" }), "act-users-b"],
     ["the Users page's Disable, refused", renderUsers(users, null), renderUsers(users, null, Date.now(), { name: "b", failure }), "act-users-b"],
     ["the Users page's Enable, refused", renderUsers(disabledUsers, null), renderUsers(disabledUsers, null, Date.now(), { name: "b", failure }), "act-users-b"],
+    ["the Users page's From…", renderUsers(users, null), renderUsers(users, { name: "b", verb: "from" }), "act-users-b"],
+    ["the Users page's From…, refused", renderUsers(users, null), renderUsers(users, null, Date.now(), { name: "b", failure }), "act-users-b"],
     ["Running now's Cancel", renderRunning(RUNNING_NOW, null), renderRunning(RUNNING_NOW, "12:45"), "act-running-12:45"],
     ["Running now's Cancel, answered", renderRunning(RUNNING_NOW, null), renderRunning(RUNNING_NOW, null, { key: "12:45", cancelled: RUNNING_NOW[0] }), "act-running-12:45"],
   ];
@@ -4201,6 +4391,17 @@ test("layout guard: a click moves no row and no column — a question, a form an
   // the users' too: Disable says "Disabled <when>", wider than Active, and must widen no column (found in the browser)
   assert.match(rule("table.users"), /table-layout: fixed; width: 100%; min-width: \d+px/);
   for (const c of ["status", "added", "last", "act"]) assert.match(rule(`table.users th.${c}`), /width: \d+px/, `the users' ${c} column has its width`);
+  // THE USERS FIT THEIR CARD AT A LAPTOP'S WIDTH (PR 820's review: a column and a button more scrolled the table 182 px at
+  // 1280, its actions off the card): its least width at most 960 px, and its fixed columns leave User and Role 100 px each
+  // in the ~998 px card of a 1280 px window (measured in Chromium: 110 px each)
+  const px = (sel: string) => Number(/width: (\d+)px/.exec(rule(sel))![1]);
+  assert.ok(Number(/min-width: (\d+)px/.exec(rule("table.users"))![1]) <= 960, "the users' least width");
+  assert.ok(["status", "added", "last", "act"].reduce((s, c) => s + px(`table.users th.${c}`), 0) + 2 * 100 <= 998, "User and Role keep their room at 1280");
+  // where it scrolls (a narrower window, a phone), a row's actions stay pinned at the card's right, and a name never runs into its Role
+  assert.match(rule("table.users td.act"), /position: sticky; right: 0/);
+  const phone = css.slice(css.lastIndexOf("@media (max-width: 640px)", css.indexOf("  table.users { display: table; }")));
+  assert.ok(css.includes("  table.users { display: table; }") && phone.indexOf("table.users { display: table; }") < phone.indexOf("\n}"), "on a phone the card scrolls, so the actions pin");
+  assert.match(rule('table.users th[scope="row"]'), /overflow: hidden/);
   const heads = [...html.matchAll(/<th scope="col" class="([^"]+)">/g)].map((m) => m[1]!.split(" ").pop()!);
   assert.deepEqual(heads, ["name", "state", "rows", "key", "last", "size", "act"]);
   for (const c of heads.filter((x) => x !== "name")) assert.match(rule(`table.catalog th.${c}`), /width: \d+px/, `the ${c} column has its width`);
@@ -4665,4 +4866,389 @@ test("Connect from anywhere over a fake run: asked once, opened confirmed with t
   await (again as unknown as { actions: Record<string, (u: string) => Promise<void>> }).actions.shareStop!("share_a1b2c3");
   assert.equal(again.m.phase, "ended");
   assert.equal(intervals[1]!.cleared, true);
+});
+
+// ------------------------------------------------------------------ the host's views and card (issue 814)
+
+/** A host's view as a site supplies it: every string a trap a renderer that writes HTML would fall into. */
+const HOST_VIEW = {
+  title: "Server <b>one</b>",
+  refresh: 30,
+  sections: [
+    { heading: "Status", facts: [{ label: "State", value: "running", status: "ok" }, { label: "Version <script>alert(1)</script>", value: "<script>alert(2)</script>" },
+      { label: "Host", value: "db.example.com", copy: true }, { label: "Disk", value: "nearly full", status: "warn" }],
+      text: "Line one\n<img src=x onerror=alert(3)>", links: [{ label: "Upgrade", url: "/console/upgrade", primary: true }, { label: "Bad", url: "javascript:alert(4)" },
+        { label: "Docs <i>", url: "https://docs.example.com/a?b=1&c=2" }, { label: "Not one", url: "not a url" }] },
+    { heading: "<img src=x onerror=alert(5)>" },
+  ],
+};
+/** A host's card for the Overview. */
+const HOST_CARD = { title: "Plan <u>", sections: [{ heading: "Plan", facts: [{ label: "Tier", value: "<img src=x onerror=alert(6)>" }, { label: "Status", value: "Upgrade available", status: "warn" }],
+  links: [{ label: "Upgrade", url: "/console/plan" }] }] };
+/** The host's sidebar with a link and two views (#host/2 and #host/3). */
+const HOST_NAV = { items: {}, links: [{ label: "Billing", url: "/billing" }, { label: "Server", view: "host/status.json" }, { label: "<img src=x onerror=alert(7)>", view: "host/plans.json" }] };
+
+/** A fake run whose host answers `host/…` too: the page asks it relative to its own address, as it asks api/… . */
+function hostRun(state: unknown, host: Record<string, () => Response>) {
+  const run = fakeRun();
+  run.answers.set("GET api/state", () => new Response(JSON.stringify(state), { status: 200 }));
+  const fetch = async (p: string, init?: { method?: string; body?: string }): Promise<Response> => {
+    if (!p.startsWith("host/")) return run.fetch(p, init);
+    assert.equal(init?.method ?? "GET", "GET", "a host's view is only ever read");
+    run.asked.push(`GET ${p}`);
+    const a = host[p];
+    if (a === undefined) throw new TypeError("fetch failed");
+    return a();
+  };
+  return { ...run, fetch };
+}
+const jsonAnswer = (v: unknown) => () => new Response(JSON.stringify(v), { status: 200, headers: { "Content-Type": "application/json" } });
+
+test("a host's link is read in the page as the link back is on the server: hostLinkUrl accepts nothing src/cli/ui-back-link.ts linkUrl refuses, serialises what both take the same, and refuses a host with a % or a space whatever the URL parser does", async () => {
+  const { linkUrl } = await import("../src/cli/ui-back-link.ts");
+  const hostLinkUrl = fn<[unknown], string | null>("hostLinkUrl");
+  const server = (v: string) => { const r = linkUrl(v, "x", "y"); return typeof r === "string" ? r : null; };
+  // what both take, the same
+  const taken = ["/billing", "/a/../b", "/console/db/users?tab=1#x", "/a?q='1'&r=<2>", "/%2e%2e/x", "https://Console.Example.com", "HTTPS://console.example.com/a/../b?x=1#y",
+    "http://console.example.com:8080/p", "https://xn--bcher-kva.example/", "https://[::1]:8443/x", "https://console.example.com/%zz", "https://1.2.3.4/", "https://console.example.com./"];
+  for (const v of taken) { assert.notEqual(server(v), null, v); assert.equal(hostLinkUrl(v), server(v), v); }
+  // what the page refuses: every one linkUrl refuses, and a host it does not write by the strict pattern
+  const refused = ["/.//evil.example.com", "//evil.example.com/x", "/\\evil.example.com", "/a\tb", "/a b", "/a\u0000b", "/é", `/${"a".repeat(2048)}`, "javascript:alert(1)",
+    "JavaScript:alert(1)", "data:text/html,<script>alert(1)</script>", "vbscript:x", "billing", "", "not a url", "https://admin:hunter2@console.example.com/", "https://admin@console.example.com/",
+    "https:console.example.com", "https://", "https:///x", "ftp://console.example.com/", "mailto:a@example.com", "https://a_b.example/", "https://-a.example/"];
+  // a % in each place of a host, every byte: Chromium's parser took some of these that Node's refuses (https://a%20b)
+  const hex = Array.from({ length: 256 }, (_, i) => i.toString(16).toUpperCase().padStart(2, "0"));
+  const pct = hex.flatMap((x) => [`https://%${x}a.example/`, `https://a%${x}.example/`, `https://a.example%${x}/`, `https://a%${x}b/`, `https://[::1%${x}]/`, `http://%${x}/`,
+    `https://a.example:%${x}/`, `https://a.example:80%${x}/`]);
+  for (const v of [...refused, ...pct]) assert.equal(hostLinkUrl(v), null, v);
+  // never more than linkUrl takes, never serialised otherwise
+  for (const v of [...taken, ...refused, ...pct]) { const page = hostLinkUrl(v); assert.ok(page === null || page === server(v), v); }
+  // THE SAME, UNDER A PARSER THAT TAKES ANY HOST (as a browser's may): the page's own check refuses each, not the parser
+  const RealURL = globalThis.URL;
+  class LenientURL {
+    href: string; host: string; hostname: string; username = ""; password = ""; origin: string; pathname: string; search = ""; hash = "";
+    constructor(v: string, base?: string) {
+      if (base !== undefined) { const u = new RealURL(v, base); this.href = u.href; this.host = u.host; this.hostname = u.hostname; this.origin = u.origin; this.pathname = u.pathname; this.search = u.search; this.hash = u.hash; return; }
+      const host = /^[a-z]+:\/\/([^/?#]*)/i.exec(v)?.[1] ?? "";
+      this.host = host; this.hostname = host.replace(/:[^\]]*$/, ""); this.href = v.endsWith("/") ? v : `${v}/`; this.origin = ""; this.pathname = "/";
+    }
+  }
+  try {
+    (globalThis as { URL: unknown }).URL = LenientURL;
+    for (const v of [...pct, "https://a%20b", "https://%20evil.example", "https://[::1%30]/", "https://a b.example/", "https://admin@console.example.com/"]) assert.equal(hostLinkUrl(v), null, `lenient: ${v}`);
+  } finally { (globalThis as { URL: unknown }).URL = RealURL; }
+  for (const v of [null, 7, { url: "/x" }, ["/x"]]) assert.equal(hostLinkUrl(v), null, "a URL is text");
+});
+
+test("a host's view is held to its shape: taken and read whole, refresh held within its bounds, a link that fails the link rules dropped and counted; anything outside the shape refused in words, never quoting a value", () => {
+  const hostView = fn<[unknown], { view?: { title: string; refresh: number | null; sections: Array<{ heading: string; facts: unknown[]; text: string | null; links: unknown[]; dropped: number }> }; problem?: string }>("hostView");
+  const { view } = hostView(HOST_VIEW);
+  assert.ok(view);
+  assert.equal(view.title, "Server <b>one</b>");
+  assert.equal(view.refresh, 30);
+  assert.deepEqual(view.sections[0]!.links, [{ label: "Upgrade", url: "/console/upgrade", primary: true }, { label: "Docs <i>", url: "https://docs.example.com/a?b=1&c=2", primary: false }]);
+  assert.equal(view.sections[0]!.dropped, 2, "javascript: and a text that is no URL");
+  assert.deepEqual(view.sections[1], { heading: "<img src=x onerror=alert(5)>", facts: [], text: null, links: [], dropped: 0 }, "facts, text and links may be left out");
+  const refresh = (r: unknown) => hostView({ title: "t", sections: [], refresh: r }).view?.refresh;
+  assert.deepEqual([refresh(1), refresh(5), refresh(29.6), refresh(3600), refresh(999_999), hostView({ title: "t", sections: [] }).view?.refresh], [5, 5, 30, 3600, 3600, null]);
+  const many = (n: number, f: (i: number) => unknown) => Array.from({ length: n }, (_, i) => f(i));
+  const section = (s: Record<string, unknown>) => ({ title: "t", sections: [{ heading: "h", ...s }] });
+  const refused: Array<[unknown, string]> = [
+    [null, "it is not an object { title, sections }"],
+    [[HOST_VIEW], "it is not an object { title, sections }"],
+    ["running", "it is not an object { title, sections }"],
+    [{ title: "t" }, "its sections is not a list of at most 20"],
+    [{ title: "t", sections: {} }, "its sections is not a list of at most 20"],
+    [{ title: "t", sections: many(21, () => ({ heading: "h" })) }, "its sections is not a list of at most 20"],
+    [{ title: "t", sections: [], html: "<b>x</b>" }, `it has a key a view does not take ("html"): a view is { title, sections, refresh? }`],
+    [{ sections: [] }, "its title is not one line of text of at most 200 characters"],
+    [{ title: "a\nb", sections: [] }, "its title is not one line of text of at most 200 characters"],
+    [{ title: "‮evil", sections: [] }, "its title is not one line of text of at most 200 characters"],
+    [{ title: "t".repeat(201), sections: [] }, "its title is not one line of text of at most 200 characters"],
+    [{ title: "t", sections: [], refresh: "30" }, "its refresh is not a number of seconds"],
+    [{ title: "t", sections: [], refresh: -1 }, "its refresh is not a number of seconds"],
+    [{ title: "t", sections: ["x"] }, "sections[0] is not an object { heading, facts, text, links }"],
+    [{ title: "t", sections: [{ heading: "h", form: {} }] }, `sections[0] has a key a section does not take ("form"): a section is { heading, facts?, text?, links? }`],
+    [{ title: "t", sections: [{}] }, "sections[0].heading is not one line of text of at most 200 characters"],
+    [section({ text: 7 }), "sections[0].text is not text of at most 8000 characters"],
+    [section({ text: "a\u0007b" }), "sections[0].text is not text of at most 8000 characters"],
+    [section({ facts: many(51, () => ({ label: "l", value: "v" })) }), "sections[0].facts is not a list of at most 50"],
+    [section({ facts: [{ label: "l", value: 7 }] }), "sections[0].facts[0].value is not one line of text of at most 2000 characters"],
+    [section({ facts: [{ label: "l", value: "v", onclick: "x" }] }), "sections[0].facts[0] is not { label, value, copy?, status? }"],
+    [section({ facts: [{ label: "l", value: "v", status: "great" }] }), "sections[0].facts[0].status is not ok, warn or bad"],
+    [section({ facts: [{ label: "l", value: "v", copy: "yes" }] }), "sections[0].facts[0].copy is not true or false"],
+    [section({ links: [{ url: "/x" }] }), "sections[0].links[0].label is not one line of text of at most 200 characters"],
+    [section({ links: [{ label: "x", url: "/x", target: "_blank" }] }), "sections[0].links[0] is not { label, url, primary? }"],
+    [section({ links: many(21, () => ({ label: "x", url: "/x" })) }), "sections[0].links is not a list of at most 20"],
+  ];
+  for (const [v, problem] of refused) assert.deepEqual(hostView(v), { problem }, JSON.stringify(v)?.slice(0, 80));
+  assert.ok(!hostView({ title: "t", sections: [], ["hunter2‮".repeat(20)]: 1 }).problem!.includes("hunter2"), "a key past a line is not quoted");
+});
+
+test("a host's view and card as the page writes them: every string TEXT (a <script>, an <img onerror> stays text), a status its marker and its word, a fact to copy its Copy, a refused link said and never written", () => {
+  const hostView = fn<[unknown], { view: unknown }>("hostView");
+  const renderHostView = fn<[unknown, string?], string>("renderHostView");
+  const renderHostCard = fn<[unknown], string>("renderHostCard");
+  const html = renderHostView(hostView(HOST_VIEW).view, "view-2");
+  for (const bad of ["<script", "<img", "<b>", "<i>", "javascript:", "not a url"]) assert.ok(!html.includes(bad), `${bad} is never markup, nor a link refused`);
+  assert.ok(!/<[^>]*\sonerror=/i.test(html) && !html.includes("javascript:"));
+  const text = textOf(html);
+  for (const said of ["Status", "State", "running", "Version <script>alert(1)</script>", "<script>alert(2)</script>", "db.example.com", "Line one <img src=x onerror=alert(3)>",
+    "Upgrade", "Docs <i>", "<img src=x onerror=alert(5)>", "2 links left out: their URLs are neither a path on this host (/something) nor an https or http URL with its host."]) assert.ok(text.includes(said), said);
+  assert.match(html, /<span class="indicator ok"><span class="dot" aria-hidden="true"><\/span>running<\/span>/, "a status is the page's marker beside its word");
+  assert.match(html, /<span class="indicator warn"><span class="dot" aria-hidden="true"><\/span>nearly full<\/span>/);
+  assert.match(html, /<code id="host-view-2-0-2">db\.example\.com<\/code> <button type="button" class="small" data-copy="host-view-2-0-2"/, "a fact to copy, with its Copy");
+  assert.match(html, /<a class="btn small primary" href="\/console\/upgrade" rel="noreferrer">Upgrade<\/a> <a class="btn small" href="https:\/\/docs\.example\.com\/a\?b=1&amp;c=2" rel="noreferrer">Docs &lt;i&gt;<\/a>/,
+    "links in the same tab, the primary one the page's primary action, sending no referrer");
+  assert.ok(!/<form|<input|data-(?!copy|room)[a-z-]+=/.test(html), "no form and no button but Copy");
+  // the card: its title the card's label, its facts as rows, its links; every string text
+  const card = renderHostCard({ body: hostView(HOST_CARD).view, failure: null });
+  assert.match(card, /^<div class="card host-card"><p class="card-label">Plan &lt;u&gt;<\/p>/);
+  assert.ok(!card.includes("<img") && !card.includes("<u>"));
+  assert.ok(textOf(card).includes("Tier <img src=x onerror=alert(6)> Status Upgrade available Upgrade"), textOf(card));
+  assert.match(card, /<span class="indicator warn"><span class="dot" aria-hidden="true"><\/span>Upgrade available<\/span>/);
+  // its failure in the card, the last card read under it; before any read, that it is read
+  const failure = { code: "failed", message: "the host's view at host/card.json could not be read", why: "it answered HTTP 404" };
+  assert.match(textOf(renderHostCard({ body: hostView(HOST_CARD).view, failure })), /^Plan <u> ✗ the host's view at host\/card\.json could not be read: it answered HTTP 404 Tier/);
+  assert.equal(textOf(renderHostCard({ body: undefined, failure })), "The host's card unknown ✗ the host's view at host/card.json could not be read: it answered HTTP 404");
+  assert.equal(textOf(renderHostCard(undefined)), "The host's card Reading it…");
+});
+
+test("a host's view in the app: its link in the sidebar's host group, current while shown; read when shown and in the same poll the state names it; again every refresh while shown, never once another page is", async () => {
+  let t = Date.UTC(2026, 9, 27, 9, 0, 0);
+  const run = hostRun({ ...CATALOG_STATE, pageNav: HOST_NAV }, { "host/status.json": jsonAnswer(HOST_VIEW), "host/plans.json": jsonAnswer({ title: "Plans", sections: [] }) });
+  const app = fn<[unknown, () => Date, string], App>("createApp")(run.fetch, () => new Date(t), "#host/2");
+  const asked = async () => { run.asked.length = 0; await app.poll(); await app.settled(); return [...run.asked]; };
+  assert.deepEqual(await asked(), ["GET api/state", "GET host/status.json"], "opened at its address: the state, then the view it names, in one poll");
+  const v = app.view();
+  assert.equal(v["host-h"], "Server &lt;b&gt;one&lt;/b&gt;", "the view's own title, as text");
+  assert.ok(textOf(v["host-view"]!).includes("db.example.com"));
+  const navLinks = [...v.nav!.matchAll(/<li><a href="([^"]+)"([^>]*)>.*?<span class="label">(.*?)<\/span><\/a><\/li>/gs)].map((m) => [m[1], m[2], m[3]]).slice(-3);
+  assert.deepEqual(navLinks, [["/billing", ` rel="noreferrer"`, "Billing"], ["#host/2", ` aria-current="page"`, "Server"], ["#host/3", "", "&lt;img src=x onerror=alert(7)&gt;"]],
+    "a view links to its hash in the page, the current page while shown; a link elsewhere as before");
+  assert.match(v.nav!, /<a href="#host\/2" aria-current="page"><span class="icon" aria-hidden="true"><svg\s+class="lucide lucide-panel-top"/, "a view's icon is the page's panel, a link's the link");
+  assert.equal([...v.nav!.matchAll(/aria-current/g)].length, 1);
+  t += 2000;
+  assert.deepEqual(await asked(), [], "2 s on: nothing due (the state once a minute beside a view, the view every 30 s)");
+  t += 28_000;
+  assert.deepEqual(await asked(), ["GET host/status.json"], "its refresh: read again");
+  // another page shown: the view is never read
+  app.show("tables");
+  t += 60_000;
+  assert.ok(!(await asked()).some((a) => a.startsWith("GET host/")), "Tables shown: the view not read");
+  assert.equal(app.view()["host-view"], "", "nor written");
+  // the other view: its own path; the first, shown again, read again at once
+  app.show("#host/3");
+  assert.deepEqual(await asked(), ["GET api/state", "GET host/plans.json"], "shown: everything it reads, read again");
+  assert.equal(app.view()["host-h"], "Plans");
+  app.show("#host/2");
+  assert.deepEqual(await asked(), ["GET api/state", "GET host/status.json"], "shown again: read again");
+  // without refresh: read when shown, never again by time
+  const once = hostRun({ ...CATALOG_STATE, pageNav: HOST_NAV }, { "host/status.json": jsonAnswer({ ...HOST_VIEW, refresh: undefined }) });
+  const app2 = fn<[unknown, () => Date, string], App>("createApp")(once.fetch, () => new Date(t), "#host/2");
+  await app2.poll(); await app2.settled();
+  once.asked.length = 0;
+  for (let i = 0; i < 5; i++) { t += 3_600_000; await app2.poll(); await app2.settled(); }
+  assert.ok(!once.asked.includes("GET host/status.json"), "no refresh: not read again while shown");
+});
+
+test("a host's view that cannot be read is the view's own failure, in the Failure shape, never a blank page: nothing answers, a 404, not JSON, too large, outside the shape; the last view read stays under it", async () => {
+  const HOST_BYTES_MAX = page.HOST_BYTES_MAX as unknown as number;
+  assert.equal(HOST_BYTES_MAX, 256 * 1024);
+  const big = JSON.stringify({ title: "t", sections: [{ heading: "h", text: "x".repeat(HOST_BYTES_MAX) }] });
+  const failing: Array<[(() => Response) | undefined, string]> = [
+    [undefined, "nothing answered it (fetch failed)"],
+    [() => new Response("<html>Not found</html>", { status: 404 }), "it answered HTTP 404"],
+    [() => new Response("<html><body>a login page</body></html>", { status: 200 }), "its answer is not JSON"],
+    [() => new Response(big, { status: 200 }), "its answer is more than 256 KiB, the most a view is read"],
+    [() => new Response(JSON.stringify({ title: "t", sections: [], script: "alert(1)" }), { status: 200 }), `its answer is outside a view's shape: it has a key a view does not take ("script"): a view is { title, sections, refresh? }`],
+  ];
+  for (const [answer, why] of failing) {
+    const run = hostRun({ ...CATALOG_STATE, pageNav: HOST_NAV }, answer === undefined ? {} : { "host/status.json": answer });
+    const app = fn<[unknown, () => Date, string], App>("createApp")(run.fetch, () => new Date(), "#host/2");
+    await app.poll(); await app.settled();
+    const v = app.view();
+    assert.equal(textOf(v["host-view"]!), `✗ the host's view at host/status.json could not be read why ${why} fix the site that serves this page answers this path with a view's JSON, ` +
+      `{ title, sections: [{ heading, facts, links }] } (docs/WEB-UI.md "Host views"); on a page that no site serves, nothing does`, why);
+    assert.match(v["host-view"]!, /^<div class="failure" role="alert">/);
+    assert.equal(v.poll, "", "the run answered: no banner");
+    assert.equal(v["host-h"], "Server", "the sidebar's label until a view is read");
+  }
+  // a view read, then a failure: said over the last view, which stays
+  let ok = true;
+  const run = hostRun({ ...CATALOG_STATE, pageNav: HOST_NAV }, { "host/status.json": () => ok ? jsonAnswer(HOST_VIEW)() : new Response("x", { status: 502 }) });
+  let t = Date.UTC(2026, 9, 27, 9, 0, 0);
+  const app = fn<[unknown, () => Date, string], App>("createApp")(run.fetch, () => new Date(t), "#host/2");
+  await app.poll(); await app.settled();
+  ok = false; t += 30_000;
+  await app.poll(); await app.settled();
+  const text = textOf(app.view()["host-view"]!);
+  assert.ok(text.startsWith("✗ the host's view at host/status.json could not be read why it answered HTTP 502") && text.includes("db.example.com"), text);
+  // a place the state names no view at (a link elsewhere, past the list) says so, as a Failure
+  const none = hostRun({ ...CATALOG_STATE, pageNav: HOST_NAV }, {});
+  for (const h of ["#host/1", "#host/9"]) {
+    const a = fn<[unknown, () => Date, string], App>("createApp")(none.fetch, () => new Date(), h);
+    await a.poll(); await a.settled();
+    assert.match(textOf(a.view()["host-view"]!), /^✗ this page has no host's view \d why the address names a view of the host's sidebar/);
+  }
+});
+
+test("in the browser: a host's view has its own address — opened at it, followed to and from it, Back and Forward; a place the state names no view at, or no host at all, lands on Mason's first page", async () => {
+  const run = hostRun({ ...CATALOG_STATE, pageNav: HOST_NAV }, { "host/status.json": jsonAnswer(HOST_VIEW), "host/plans.json": jsonAnswer({ title: "Plans", sections: [] }) });
+  const b = fakeBrowser(run as unknown as ReturnType<typeof fakeRun>, "#host/2");
+  await until(() => b.el("page-host").hidden === false && textOf(b.el("host-view").html).includes("db.example.com"), "the view shown, read");
+  assert.equal(b.el("host-h").html, "Server &lt;b&gt;one&lt;/b&gt;");
+  assert.match(b.el("nav").html, /<a href="#host\/2" aria-current="page">/);
+  assert.deepEqual(b.replaced, []);
+  // to Tables (a link followed), Back to the view, Forward to Tables: each a hashchange, as the browser says it
+  b.go("#tables");
+  await until(() => b.el("page-tables").hidden === false && b.el("page-host").hidden === true, "Tables shown");
+  run.asked.length = 0;
+  b.go("#host/2");
+  await until(() => b.el("page-host").hidden === false && run.asked.includes("GET host/status.json"), "Back: the view shown, read again");
+  b.go("#host/3");
+  await until(() => b.el("host-h").html === "Plans", "the other view");
+  assert.match(b.el("nav").html, /<a href="#host\/3" aria-current="page">/);
+  b.go("#tables");
+  await until(() => b.el("page-tables").hidden === false, "Forward: Tables again");
+  // a place with no view (an older bookmark): replaced by Mason's first page of its own
+  const old = fakeBrowser(hostRun({ ...CATALOG_STATE, pageNav: HOST_NAV }, {}) as unknown as ReturnType<typeof fakeRun>, "#host/5");
+  await until(() => old.replaced.length > 0);
+  assert.deepEqual(old.replaced, ["#overview"]);
+  // unset (no host's sidebar): #host/1 is the Overview, as an unknown hash always was
+  const plainRun = fakeRun();
+  const plain = fakeBrowser(plainRun, "#host/1");
+  await until(() => plain.replaced.length > 0 && plain.el("page-status").hidden === false, "the Overview");
+  assert.deepEqual(plain.replaced, ["#overview"]);
+  assert.ok(!plainRun.asked.some((a) => a.startsWith("GET host/")));
+});
+
+test("the host's card on the Overview (pageCard): one card beside Mason's own, read with the Overview, again at its refresh; its failure in the card; the state says it and mason status --json declares it; unset, the Overview as before", async () => {
+  let t = Date.UTC(2026, 9, 27, 9, 0, 0);
+  let answer = jsonAnswer({ ...HOST_CARD, refresh: 60 });
+  const run = hostRun({ ...CATALOG_STATE, pageCard: "host/card.json" }, { "host/card.json": () => answer() });
+  const app = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => new Date(t));
+  run.asked.length = 0;
+  await app.poll(); await app.settled();
+  assert.deepEqual(run.asked, [...STATUS_FIRST, "GET host/card.json"], "read with the Overview's first reads");
+  const overview = app.view().status!;
+  const grid = /<div class="cards n(\d)">/.exec(overview);
+  const plain = fn<[unknown], App>("createApp")(fakeRun().fetch);
+  await plain.poll();
+  const before = Number(/<div class="cards n(\d)">/.exec(plain.view().status!)![1]);
+  assert.equal(Number(grid![1]), before + 1, "one more card than Mason's own");
+  assert.match(overview, /<div class="card host-card"><p class="card-label">Plan &lt;u&gt;<\/p>.*?<\/div><\/div>/s, "the host's card, last");
+  assert.ok(!overview.includes("<img src=x"));
+  run.asked.length = 0; t += 30_000; await app.poll(); await app.settled();
+  assert.ok(!run.asked.includes("GET host/card.json"), "30 s on: not yet");
+  run.asked.length = 0; t += 30_000; await app.poll(); await app.settled();
+  assert.ok(run.asked.includes("GET host/card.json"), "its refresh, 60 s: read again");
+  answer = () => new Response("nope", { status: 500 });
+  t += 60_000; await app.poll(); await app.settled();
+  assert.ok(textOf(app.view().status!).includes("Plan <u> ✗ the host's view at host/card.json could not be read: it answered HTTP 500 Tier"), "its failure said in the card, the last card under it");
+  // the state says it, and mason status --json declares it
+  const ctxOf = (pageCard?: unknown) => ({
+    source, facts: () => ({ version: 160000, versionText: "16.4", standby: false, tables: TABLES, systemIdentifier: null }), warnings: [], replication: () => null,
+    page: true, served: true, ...(pageCard === undefined ? {} : { pageCard }), users: { file: "/app/.mason/users.json", apiKey: "k".repeat(32), database: "shop", postgresUrl: "postgresql://127.0.0.1:5433/shop" },
+    folder: () => "/app/mason", root: "/app", home: "/app/.mason", version: "0.9.0", startedAt: Date.parse("2026-10-27T09:00:00.000Z"),
+    sources: () => ({ file: sourceFile, problem: null }), listener: { openSessions: () => ({ open: 0, byClient: [] }) },
+    duck: { file: "/app/.mason/duck.db", requests: { days: 7 }, restarts: () => [], disk: () => ({ path: "/app/.mason", freeBytes: null, projectedBytes: null }) },
+  }) as unknown as RunContext;
+  const now = Date.parse("2026-10-27T10:00:00.000Z");
+  assert.equal((runState(ctxOf("host/card.json"), [], null, now) as RunState).pageCard, "host/card.json");
+  assert.equal((runState(ctxOf(), [], null, now) as RunState).pageCard, null);
+  assert.ok(commands.STATUS.json!.includes("pageCard"), "mason status --json declares it");
+  assert.match(commands.STATUS.usage, /pageCard \(the path, relative to\s+the page's address, its Overview reads the host's card from/);
+  assert.match(commands.STATUS.usage, /a view\s+of the host's the page shows, \[\{ view, label \}\]/);
+  // unset: every part of every page as before, nothing read of a host
+  for (const state of [NONE, COPYING, CATALOG_STATE]) {
+    const open = await pageByPage(state);
+    const nulls = await pageByPage({ ...state, pageCard: null, pageNav: null });
+    assert.equal(nulls.all, open.all, "pageCard and pageNav null: the same page");
+    assert.ok(!open.all.includes("host-card") && !open.all.includes("#host/"));
+  }
+});
+
+
+/** A host that never sends its headers: the fetch never settles (and does not heed an abort). */
+const NEVER = (() => new Promise<Response>(() => undefined)) as unknown as () => Response;
+/** A host that answers 200, then 10 bytes every `ms` for ever, until its body is cancelled (`cancelled` says so). */
+function dripping(ms = 100): { answer: () => Response; cancelled: () => boolean } {
+  let cancelled = false;
+  const answer = () => {
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const body = new ReadableStream<Uint8Array>({
+      start(c) { c.enqueue(new TextEncoder().encode("{\"title\":\"")); timer = setInterval(() => c.enqueue(new TextEncoder().encode("aaaaaaaaaa")), ms); },
+      cancel() { cancelled = true; clearInterval(timer); },
+    });
+    return new Response(body, { status: 200 });
+  };
+  return { answer, cancelled: () => cancelled };
+}
+/** `p`, or a failure naming what was held up once `ms` pass. */
+const within = <T>(p: Promise<T>, what: string, ms = 1500): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([p, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what}: held up past ${ms} ms`)), ms); })]).finally(() => clearTimeout(timer));
+};
+
+test("a host that never answers, or drips for ever, holds up nothing: the view says it is being read while the run's own reads and every other page go on; its read ends at the deadline, aborted", async () => {
+  const nav = { items: {}, links: [{ label: "Server", view: "host/cur" }] };
+  for (const [name, host] of [["no headers", { answer: NEVER, cancelled: () => true }], ["a body that drips", dripping(20)]] as const) {
+    let t = Date.UTC(2026, 9, 27, 9, 0, 0);
+    const run = hostRun({ ...CATALOG_STATE, pageNav: nav }, { "host/cur": host.answer });
+    const app = fn<[unknown, () => Date, string], App>("createApp")(run.fetch, () => new Date(t), "#host/1");
+    await within(app.poll(), `${name}: the view's first poll`);
+    assert.ok(run.asked.includes("GET host/cur"), `${name}: the view is asked`);
+    assert.equal(textOf(app.view()["host-view"]!), "Reading the host's view…", `${name}: said as being read, never blank`);
+    run.asked.length = 0; t += 2000;
+    await within(app.poll(), `${name}: the next poll`);
+    assert.ok(!run.asked.includes("GET host/cur"), `${name}: one read of a path at a time, never a second beside it`);
+    // another page: read, whatever the host does
+    app.show("tables"); run.asked.length = 0;
+    await within(app.poll(), `${name}: Tables`);
+    assert.deepEqual(run.asked, ["GET api/state", "GET api/usage?since=1m"], `${name}: Tables' own reads`);
+    app.show("observability/queries"); run.asked.length = 0;
+    await within(app.poll(), `${name}: Queries`);
+    assert.ok(run.asked.includes("GET api/requests?since=15m"), `${name}: Queries' own reads`);
+  }
+  // the read itself ends at its deadline, as the view's failure, and stops reading a body that drips
+  const readHost = fn<[unknown, string, { deadlineMs: number }], Promise<{ failure?: { message: string; why: string } }>>("readHost");
+  const why = "it was not answered whole within 0.05 s";
+  const never = await within(readHost(NEVER as never, "host/cur", { deadlineMs: 50 }), "no headers: the deadline");
+  assert.equal(never.failure?.why, why);
+  let aborted = false;
+  const heeds = (_p: string, init: { signal?: AbortSignal }) => new Promise<Response>((_, reject) => { init.signal?.addEventListener("abort", () => { aborted = true; reject(new Error("aborted")); }); });
+  assert.equal((await within(readHost(heeds as never, "host/cur", { deadlineMs: 50 }), "an abort heeded")).failure?.why, why);
+  assert.ok(aborted, "the request is aborted at the deadline");
+  const drip = dripping(10);
+  const dripped = await within(readHost(() => drip.answer(), "host/cur", { deadlineMs: 80 }), "a body that drips: the deadline");
+  assert.equal(dripped.failure?.why, "it was not answered whole within 0.08 s");
+  await until(drip.cancelled, "the dripping body cancelled", 2000);
+  assert.equal(page.HOST_READ_MS as unknown as number, 10_000, "the page's own deadline");
+});
+
+test("a host's card that never answers holds up nothing: the Overview is written with the card being read, and read again at its own rate; in the browser, every other page goes on reading", async () => {
+  let t = Date.UTC(2026, 9, 27, 9, 0, 0);
+  const run = hostRun({ ...CATALOG_STATE, pageCard: "host/card" }, { "host/card": NEVER });
+  const app = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => new Date(t));
+  await within(app.poll(), "the Overview's first poll");
+  const overview = app.view().status!;
+  assert.ok(!textOf(overview).startsWith("Asking Mason"), "the Overview is written");
+  assert.match(overview, /<div class="card host-card"><p class="card-label">The host's card<\/p><p class="dim">Reading it…<\/p><\/div>/);
+  run.asked.length = 0; t += 2000;
+  await within(app.poll(), "the next poll");
+  assert.deepEqual(run.asked, ["GET api/state"], "the state at its rate; the card, in flight, not asked again");
+  // the reviewer's walk: a view that drips, then Tables, then Queries — each read, the sidebar's state with them
+  const drip = dripping(100);
+  const walk = hostRun({ ...CATALOG_STATE, pageNav: { items: {}, links: [{ label: "Server", view: "host/cur" }] }, pageCard: "host/card" }, { "host/cur": drip.answer, "host/card": NEVER });
+  const b = fakeBrowser(walk as unknown as ReturnType<typeof fakeRun>, "#host/1");
+  await until(() => walk.asked.includes("GET host/cur"), "the view asked");
+  b.go("#tables");
+  await until(() => walk.asked.includes("GET api/usage?since=1m") && b.el("page-tables").hidden === false, "Tables read and shown");
+  walk.asked.length = 0;
+  b.go("#observability/queries");
+  await until(() => walk.asked.includes("GET api/requests?since=15m"), "Queries read");
+  walk.asked.length = 0;
+  b.go("#overview");
+  await until(() => walk.asked.includes("GET api/queries") && /Reading it…/.test(b.el("status").html), "the Overview read and written, its card being read");
 });

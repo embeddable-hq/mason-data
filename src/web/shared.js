@@ -14,10 +14,11 @@ import logsIcon from "./vendor/lucide-1.56.0/logs.mjs";
 import menuIcon from "./vendor/lucide-1.56.0/menu.mjs";
 import xIcon from "./vendor/lucide-1.56.0/x.mjs";
 import linkIcon from "./vendor/lucide-1.56.0/link.mjs";
+import panelTop from "./vendor/lucide-1.56.0/panel-top.mjs";
 
 /** The icons the page draws, by Lucide's name: each an inline SVG in `currentColor` (its size and stroke the stylesheet's). */
 export const ICONS = { "layout-dashboard": layoutDashboard, table: tableIcon, users: usersIcon, "square-terminal": squareTerminal,
-  "chart-column": chartColumn, logs: logsIcon, menu: menuIcon, x: xIcon, link: linkIcon };
+  "chart-column": chartColumn, logs: logsIcon, menu: menuIcon, x: xIcon, link: linkIcon, "panel-top": panelTop };
 
 /** An icon, inline and decorative (the label beside it, or its control's own label, is what a reader hears):
  *  `icon("table")`. A name it does not know is no icon. */
@@ -377,7 +378,7 @@ export const cards = (list) => list.length ? `<div class="cards n${list.length}"
 export const panel = (html) => `<div class="panel">${html}</div>`;
 
 /** A button: `button("Sync", { sync: "public.orders" }, "primary")` → data-sync="public.orders"; `variant` primary,
- *  danger or "" (secondary), with " small" for a compact one in a row. */
+ *  danger or "" (secondary), with " small" for a compact one in a row. `title`: its whole, where the stylesheet cuts it. */
 export function button(label, data = {}, variant = "", { room = "", disabled = false, expanded = false, title = "" } = {}) {
   const attrs = Object.entries(data).map(([k, v]) => ` data-${k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}="${esc(v)}"`).join("");
   return `<button type="button"${variant ? ` class="${esc(variant)}"` : ""}${attrs}${room ? ` data-room="${esc(room)}"` : ""}${title ? ` title="${esc(title)}"` : ""}${expanded ? ` aria-expanded="true"` : ""}${disabled ? " disabled" : ""}>${esc(label)}</button>`;
@@ -503,6 +504,10 @@ export const readOnlyLine = (what, why) => why == null ? "" : `<p class="count">
 /** Why the page changes no table (`/api/state` `pageReadOnly`), or null — null too on a read-only page whose tables are
  *  still changed from it (`pageReadOnlyAllow` has `tables`: MASON_UI_READ_ONLY_ALLOW=tables, whose routes the run serves). */
 export const tablesReadOnly = (s) => (s?.pageReadOnlyAllow ?? []).includes("tables") ? null : s?.pageReadOnly ?? null;
+
+/** Why the page changes no user (`/api/state` `pageReadOnly`), or null — null too on a read-only page whose users are
+ *  still changed from it (`pageReadOnlyAllow` has `users`: MASON_UI_READ_ONLY_ALLOW=users, whose routes the run serves). */
+export const usersReadOnly = (s) => (s?.pageReadOnlyAllow ?? []).includes("users") ? null : s?.pageReadOnly ?? null;
 
 /** On a server's page the Postgres URL's host is the server's own view of itself: said beside it, as a tool elsewhere
  *  needs the server's address. "" off a server, and where the URL is the address a client reaches (`pg.public`: mason

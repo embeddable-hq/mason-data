@@ -103,16 +103,27 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
 - **Users** (`#users`): a form that adds a user by name and, where `mason/roles.yml` names roles and reads as it is, a
   **Role** as `mason user add --role` (the roles from `/api/state` `roles`, `mason status --json`'s): the file's
   `default:` is chosen first, marked (default), and sends no role, so the user follows the default as one added with no
-  `--role` does; with no default the first choice is no role. The run judges the role, and its refusal is shown. `--set`
+  `--role` does; with no default the first choice is no role. The run judges the role, and its refusal is shown. Then
+  **Connects from**, in `mason user add --help`'s words: **From anywhere**, the default, sends no `from` (as `mason user
+  add` with no `--from`), with no second question; **Only from these addresses** sends the ranges typed in one box,
+  comma-separated as `--from a,b` takes them (`192.0.2.0/24, 2001:db8::/32`), split at each comma and trimmed. The page
+  never checks a range: the run reads each, and a refused one is shown as the run's refusal. `--set`
   attributes stay the command's. Its password, URL and psql line are shown once, in a card with
   Copy buttons, with a link to Queries, where its statements will show; Mason keeps no copy, so they are never shown again.
 - **Users**, Connect: once for the run, where a tool connects — host, port, database and SSL mode, each with **Copy**,
   and the URL and psql line with `<user>:<password>` in place — as `mason status` says it. No user's row carries a URL:
   the card shown once when a user is added is the only place its password is copied.
-- **Users**, the list: each user's status (Active, Disabled and when, or Removed), when added, when last used, and
-  **Queries**, its statements. A user that no longer connects is flagged with why. **Disable** asks first (in a popover, in `mason
+- **Users**, the list: each user's role and, on a line under it, where it connects from ("from" its ranges as `mason
+  user list` says them, or "from anywhere": `from` in `mason user list --json`; cut by the column, its whole the
+  tooltip), its status (Active, Disabled and when, or Removed), when added, when last
+  used, and **Queries**, its statements. A user that no longer connects is flagged with why. **Disable** asks first (in a popover, in `mason
   user disable`'s words), then runs it; a disabled user's button says **Enable** in the same width, and runs `mason user
-  enable` at once. **Remove** asks first; a removed user stays listed, muted.
+  enable` at once. The "from …" line is a button: it asks where the user connects from in a popover beside the row's
+  actions, the add form's choice opened at its ranges now, and sends `POST /api/users/<name>/from` (`mason user from`:
+  the ranges, or `null` for from anywhere, `--any`); the list holds still while it asks, and a refusal is said in the
+  popover. **Remove** asks first; a removed user stays listed, muted. The table keeps its width (no column of its own),
+  fits its card in a 1280 px window, and where it scrolls (a narrower window, a phone) a row's actions stay pinned at
+  the card's right.
 - **Observability › Queries** (`#observability/queries`): the request log, and only that — who is connected, what runs
   and the range's numbers are on Usage.
 - **Queries**, the request log empty and unfiltered: its sentence, then Connect your first tool (as the Overview's).
@@ -303,10 +314,24 @@ listens, and every browser connection crosses that one ssh connection as frames 
   user added, disabled, enabled or removed, a statement cancelled, a share, a route added later — with "the web page is
   read-only here" and a `why` that says what is still allowed; the pages for those still say why they offer nothing,
   and `/api/state` says `pageReadOnlyAllow: ["tables"]`. `MASON_PROJECT_READONLY=1` still wins: a project deployed as
-  committed offers no Add or Remove and refuses them `409`, as without the allowance (Sync now stays). `tables` is the
-  only value; set empty, it counts as unset. Anything else (with a `did you mean`), or the setting beside no
-  `MASON_UI_READ_ONLY=1`, refuses the start: an allowance on a page that is not read-only says a read-only page was meant
-  and not had. `mason start` refuses it.
+  committed offers no Add or Remove and refuses them `409`, as without the allowance (Sync now stays).
+- **A read-only page that still manages its users: `MASON_UI_READ_ONLY_ALLOW=users`.** For a site that proxies the page
+  and lets its users' changes through its own checks, `MASON_UI_READ_ONLY=1` beside it keeps the Users page's Add a
+  user (with its Connects from), its "from …" line, **Disable**, **Enable** and **Remove**, and the Overview's Create a user. The
+  server lets through exactly these routes, each `<name>` exactly one path segment (a user's name, encoded), never a
+  prefix:
+  - `POST /api/users` (Add a user);
+  - `POST /api/users/<name>/disable`, `POST /api/users/<name>/enable`;
+  - `POST /api/users/<name>/from` (a user's "from …" line);
+  - `DELETE /api/users/<name>` (Remove).
+
+  Every other change of the page is refused as before — a table added, removed or synced, a statement cancelled, a
+  share, a route added later — and `/api/state` says `pageReadOnlyAllow: ["users"]`.
+- **Both: `MASON_UI_READ_ONLY_ALLOW=tables,users`** (in either order) lets through both lists, and `/api/state` says
+  `["tables", "users"]`. The value is a comma list read strictly: `tables`, `users`, or both; set empty, it counts as
+  unset. An item that is not one of them (with a `did you mean`, the item named by its place and never quoted), an
+  empty item, an area named twice, or the setting beside no `MASON_UI_READ_ONLY=1` refuses the start: an allowance on a
+  page that is not read-only says a read-only page was meant and not had. `mason start` refuses it.
 - **A link back to the site that links to the page: `MASON_UI_BACK_URL` and `MASON_UI_BACK_LABEL`.** For a page opened
   from another application (a portal, a hosted service's console), `mason serve` with `MASON_UI_BACK_URL` set shows
   "← Back" (or "← " and `MASON_UI_BACK_LABEL`) at the top of the sidebar, above the project, on every page, in the same
@@ -349,6 +374,9 @@ listens, and every browser connection crosses that one ssh connection as frames 
   text, never as HTML. Text that is not JSON, not a list, more than 5 links, an entry that is not an object, has a key
   other than `label` and `url` (named by its place, never quoted) or a key written twice (JSON would keep the last
   silently), or a label or URL that is wrong refuses the start, every problem on one line, naming the entry. `mason start` refuses both settings, as the other `MASON_UI_*` server settings.
+  An entry may name a **host view** instead of a link (`{ "label", "view" }`, below): exactly one of `url` and `view`,
+  both refused; it counts within the 5.
+- **The host's views and card: `MASON_UI_NAV_LINKS`' `view`, `MASON_UI_OVERVIEW_CARD`.** See "Host views" below.
 - **In the image, Mason's user is uid 1000, gid 1000 (`node`), and stays so**: an image that changes it names it under
   "Before you upgrade" in its release notes (deploy/mason-data/README.md). A supervisor that creates the folder of the
   socket or the run file makes it owned by `1000:1000`, mode 0700, where the container mounts it (the one folder rule of
@@ -412,6 +440,84 @@ that holds.
 Kubernetes has no SSH, and Fargate, Cloud Run, Azure Container Apps, Fly and Railway have tooling of their own: none is
 covered.
 
+## Host views
+
+A site that embeds the page (a hosted console behind its proxy) often has facts of its own about the server: its
+status, the versions it offers, how to connect from outside. It supplies them as **data**, and the page renders them
+**in its own look, inside the page**: the sidebar stays, only the content changes, and switching is as fast as between
+the Overview and Tables. Unset, nothing on the page changes.
+
+- **A view in the sidebar**: an entry of `MASON_UI_NAV_LINKS` with `view` in place of `url`,
+  `MASON_UI_NAV_LINKS='[{"label":"Server","view":"host/status.json"}]'`. Its link is among the host's links, with a
+  panel icon, and shows the view at the page's own address `#host/<n>` (`n` the entry's place in the list, from 1), so
+  Back, Forward and a bookmark work and the sidebar marks it as the current page. A `#host/<n>` that names no view (an
+  older bookmark, or a page with no host's sidebar) lands on the Overview, as an unknown address always has.
+- **A card on the Overview**: `MASON_UI_OVERVIEW_CARD=host/card.json`, the same JSON, shown as one more card after
+  Mason's own (its title the card's label, its facts as rows, its links under them).
+
+**The path is relative to the page's own address**, and the page reads it with a GET from its own origin, so the CSP's
+`default-src 'self'` holds and whatever serves the page answers it: a proxy serving the page at
+`https://example.com/mason/` is asked `https://example.com/mason/host/status.json`. On a bare `mason ui` the run's own
+server is asked, and answers 404, which the view shows as its failure. The path is read at the start
+(`src/cli/ui-host-view.ts` `viewPath`), and refused, naming the setting or the entry and never quoting the value, when
+it has a scheme (`https:`, `javascript:`), starts with `//` or `/`, has a `..` segment (written or `%2e`-encoded), a
+backslash, a `#fragment`, a character outside printable ASCII, or is past 2048 characters. `mason start` refuses
+`MASON_UI_OVERVIEW_CARD`, as the other server settings; `/api/state` and `mason status --json` say `pageNav.links`
+(`{ label, view }` among them) and `pageCard` (the path, or null).
+
+**When it is read**: when the view (or the Overview) is shown, and again every `refresh` seconds while it is shown and
+the tab is visible, held within 5 s and 1 h; without `refresh`, once each time it is shown. Nothing is cached beyond
+that: a view shown again is read again. A read is never awaited by the page's own polling, one is in flight per path at
+a time, and one not answered whole within 10 s (headers that never come, a body that drips) is aborted and shown as
+the view's failure: a host that hangs holds up neither the run's reads nor another page's.
+
+**The shape** (declared here and held in the page, `src/web/host-view.js` `hostView`):
+
+```json
+{
+  "title": "Server",
+  "refresh": 30,
+  "sections": [
+    {
+      "heading": "Status",
+      "facts": [
+        { "label": "State", "value": "running", "status": "ok" },
+        { "label": "Version", "value": "0.15.0" },
+        { "label": "Host", "value": "db.example.com", "copy": true }
+      ],
+      "text": "Upgrades run in the maintenance window.",
+      "links": [
+        { "label": "Upgrade available", "url": "/console/upgrade", "primary": true },
+        { "label": "Connect from outside", "url": "https://docs.example.com/connect" }
+      ]
+    }
+  ]
+}
+```
+
+- `title` (one line, at most 200 characters): the view's heading, or the card's label. `sections`: at most 20, each a
+  `heading` (one line), and optionally `facts` (at most 50), `text` (at most 8,000 characters, line breaks kept) and
+  `links` (at most 20). `refresh`: seconds, optional.
+- A fact is `{ label, value }` (one line each; a value at most 2,000 characters), with `copy: true` for a Copy button
+  beside it and `status` `ok`, `warn` or `bad` for the page's own marker beside its word (never colour alone).
+- A link is `{ label, url }`, with `primary: true` for the page's primary action. Its URL follows `MASON_UI_BACK_URL`'s
+  rules (a path from the host's root, or an `https://` / `http://` URL with no user or password), read in the page by
+  `hostLinkUrl`, which `tests/web-page.test.ts` holds to accept nothing the server's `linkUrl` refuses, and to write
+  what both take the same: the data arrives when the view is shown, never at the start, so the page reads it itself.
+  Its host is held to an explicit pattern too (DNS labels or an IPv6 literal, an optional port; never a `%` or a
+  space), before and after the URL parser reads it, since a browser's parser takes hosts Node's refuses. A link that fails them is **left out and
+  said** ("1 link left out"), never written. It opens in the same tab, sending no referrer.
+- **Every string is shown as text, never as HTML**: a `<script>` in a label reads as `<script>`. There are no forms and
+  no buttons that change anything (a change is the site's own page's job, behind its own sign-in); Copy is the one
+  button a view writes.
+- **An answer the page cannot read is the view's own failure**, in the page's Failure shape, never a blank page: nothing
+  answered, not answered whole within 10 s, an answer that is not 2xx, more than 256 KiB, not JSON, or outside the shape (a key the shape does not
+  take, a string too long or holding a control character, a list too long, a `status` other than the three). The last
+  view read stays under the failure. The card says its failure inside the card.
+
+These facts are the host's, not Mason's: `mason status` does not say them, and the page shows them as the host wrote
+them.
+
 ## An operator's table edits
 
 An *operator* is a process on the same machine as `mason serve` (a supervisor, or a service that hosts Mason and lets a
@@ -440,7 +546,8 @@ The guard answers before any route, in plain text, not JSON:
 **`MASON_UI_READ_ONLY=1` refuses the page, not the operator.** A request with no `Authorization` (the page's, by its
 cookie) that is not a GET or a HEAD is refused `403` with "the web page is read-only here". A request with the run's
 token is served, read-only or not. With `MASON_UI_READ_ONLY_ALLOW=tables`, the page's `POST /api/pick`, `/api/remove` and
-`/api/sync` are served too, and every other change of the page refused. `MASON_PROJECT_READONLY=1` refuses the operator's
+`/api/sync` are served too; with `users`, its `POST /api/users`, `POST /api/users/<name>/disable`, `/enable` and `/from`
+and `DELETE /api/users/<name>`; and every other change of the page refused. `MASON_PROJECT_READONLY=1` refuses the operator's
 edits too (below).
 
 **Every refusal** is `{ "error": <message>, "failure": { "code", "message", "why"?, "fix"?, "next": [{ "command",
@@ -475,9 +582,12 @@ reads:
 - `sourcesReadOnly`: why the page offers no Add or Remove, or null. Either the project is deployed read-only, which
   refuses an edit `409`, or the server cannot write the sources file, which fails an edit `500` `failed`.
 - `pageReadOnly`: the page's read-only reason, or null. It does not apply to the operator.
-- `pageReadOnlyAllow`: what that page still changes, `["tables"]` with `MASON_UI_READ_ONLY_ALLOW=tables`, else `[]`.
-- `pageNav`: the sidebar as the host says it, `{ items, links }` (`MASON_UI_NAV_<ITEM>_URL`, `MASON_UI_NAV_LINKS`), or
-  null. It changes no route the server answers.
+- `pageReadOnlyAllow`: what that page still changes, the areas `MASON_UI_READ_ONLY_ALLOW` names in this order
+  (`["tables"]`, `["users"]` or `["tables", "users"]`), else `[]`.
+- `pageNav`: the sidebar as the host says it, `{ items, links }` (`MASON_UI_NAV_<ITEM>_URL`, `MASON_UI_NAV_LINKS`; a
+  link is `{ label, url }`, a host's view `{ label, view }`), or null. It changes no route the server answers.
+- `pageCard`: the path, relative to the page's address, the Overview reads the host's card from
+  (`MASON_UI_OVERVIEW_CARD`), or null.
 
 **One table's columns: `GET /api/tables/<table>/columns`**, with `<table>` URL-encoded (`public.orders`). The answer
 has `table` and `columns`, each column with `name`, `type`, `nullable`, `comment` and `references` (`{ table, column }`
