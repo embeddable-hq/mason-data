@@ -45,7 +45,7 @@ import type { GeneratedStatus } from "../duck/generated.ts";
 import { catalogTable, parseSourceText, shownPath, type CatalogColumn, type ProjectSource, type SourceFile } from "./sources.ts";
 import { projectWriteRefusal } from "./project.ts";
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type PollMeasure, type RemoveResult } from "./source-edit.ts";
-import { PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamedAnswer, type StreamStatus } from "../duck/sync.ts";
+import { notAddedRefusal, PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamedAnswer, type StreamStatus } from "../duck/sync.ts";
 import { DEFAULT_SYNC, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
 import type { LogBuffer } from "../lib/log-buffer.ts";
 import type { ClientActivity, LedgerRequest, QueryWindow, RequestLedger, UnsupportedSql } from "../duck/requests.ts";
@@ -80,7 +80,7 @@ export interface RunContext {
   served?: boolean;
   /** MASON_UI_READ_ONLY=1 (src/cli/ui-read-only.ts): every change the page asks for is refused, and it offers none */
   pageReadOnly?: boolean;
-  /** MASON_UI_READ_ONLY_ALLOW (src/cli/ui-read-only.ts): what a read-only page may still change (`tables`), validated at
+  /** MASON_UI_READ_ONLY_ALLOW (src/cli/ui-read-only.ts): what a read-only page may still change (`tables`, `users`), validated at
    *  the start; read only under `pageReadOnly` */
   pageReadOnlyAllow?: readonly PageArea[];
   /** MASON_UI_BACK_URL and MASON_UI_BACK_LABEL (src/cli/ui-back-link.ts): the page's link back to the site that links to
@@ -203,6 +203,10 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
       // an added table's sync: synced, syncing, failed or waiting (src/cli/readiness.ts syncStateOf), when it was last
       // brought current, how long that took and by what, and how old that is now
       ...(c !== undefined || entry !== undefined ? { sync: tableSync(c, now) } : {}),
+      // an added table: why `mason sync <table>` (the page's Sync now) is refused now, in its own words, or null when it
+      // would run — the sync's one check, which pollNow refuses with (src/duck/sync.ts syncRefusal); one the sync does not
+      // hold yet (just added), pollNow's not_found
+      ...(c !== undefined || entry !== undefined ? { syncRefusal: c !== undefined ? c.syncRefusal ?? null : notAddedRefusal(t.source, copies.map((x) => x.source)).message } : {}),
     };
   });
   return {
@@ -219,7 +223,7 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     // why the page offers no control that changes anything (MASON_UI_READ_ONLY=1, src/cli/ui-read-only.ts), or null:
     // every change it would send is refused
     pageReadOnly: ctx.pageReadOnly === true ? PAGE_READ_ONLY_WHY : null,
-    // what that page may still change (MASON_UI_READ_ONLY_ALLOW: `tables`), [] when nothing or when it is not read-only
+    // what that page may still change (MASON_UI_READ_ONLY_ALLOW: `tables`, `users`), [] when nothing or when it is not read-only
     pageReadOnlyAllow: ctx.pageReadOnly === true ? [...(ctx.pageReadOnlyAllow ?? [])] : [],
     // the page's link back to the site that links to it (MASON_UI_BACK_URL, src/cli/ui-back-link.ts), or null
     pageBack: ctx.pageBack ?? null,
@@ -871,7 +875,8 @@ export function createRunServer(ctx: RunContext): http.Server {
             if (!r.already) ctx.log(`user ${r.enabled.name} enabled`);
             sendJson(res, 200, { ...r, next: nextJson(enabledNext(r.enabled.name)) });
           }
-        } else if (method === "DELETE" && url.pathname.startsWith("/api/users/")) {
+        } else if (method === "DELETE" && /^\/api\/users\/[^/]+$/.test(url.pathname)) {
+          // one segment, the user's name encoded (a name holds no `/`): the route MASON_UI_READ_ONLY_ALLOW=users names
           let name: string;
           try { name = decodeURIComponent(url.pathname.slice("/api/users/".length)); }
           catch { throw new Refusal(400, `${url.pathname} does not name a user: DELETE /api/users/<name>`); }

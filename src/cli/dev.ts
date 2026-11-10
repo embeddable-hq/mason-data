@@ -39,7 +39,7 @@ import type { RunMetrics } from "./metrics.ts";
 import { readGenerated } from "./generated-files.ts";
 import { addedTables, effectiveSync, entryName, replicatedEntries, rereadSources, shownPath, syncWritten, type RunSources, type SourceFile } from "./sources.ts";
 import { newToken } from "./security.ts";
-import { alive, liveRun } from "./runs.ts";
+import { alive, liveRun, processStart } from "./runs.ts";
 import { DEMO_DIR, DUCK_FILE, projectReadOnlySetting, projectSource, startSettingRefusal, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
 import { closedWithin, closingOnce, DEMO_STILL_CLOSING, demoChanges, demoChangesRefusal, demoPort, demoSettings, openDemo } from "./demo.ts";
 import { postgresApiUrl, readPgTls, type PgListenerSettings } from "../api/postgres/listener.ts";
@@ -716,7 +716,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     })().catch((e: unknown) => logLine(`catalog refresh failed: ${(e as Error).message}`));
   }, 10_000);
   const tablesSet = added();
-  cfg.running = { pid: process.pid, controlUrl: `http://127.0.0.1:${setupPort}`, token, postgresUrl, ...(postgresPublicUrl !== null ? { postgresPublicUrl } : {}), postgresListener: pgTls.listener };
+  // the run's own start beside its pid (src/cli/runs.ts masonProcess): how a command tells this run, alive and silent,
+  // from another process given the number later, whatever started it (mason start, mason serve, a supervisor, npx)
+  const started = processStart(process.pid);
+  cfg.running = { pid: process.pid, ...(started !== null ? { started } : {}), controlUrl: `http://127.0.0.1:${setupPort}`, token, postgresUrl, ...(postgresPublicUrl !== null ? { postgresPublicUrl } : {}), postgresListener: pgTls.listener };
   cfg.lastRun = new Date().toISOString();
   writeConfig(home, cfg);
   done(`Mason is up: ${sync.state().length} table(s) added, kept current: ${syncMode === "poll" ? `as each table's sync: says${syncCounts(sources.tables)}` +

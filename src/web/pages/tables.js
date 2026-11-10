@@ -10,7 +10,7 @@
  * `copySizes` every minute; a table's columns once, when its Columns… or Name its key… form opens
  * (`GET /api/tables/<table>/columns`, `columnsPath`).
  */
-import { msText, bytesText, button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText, pop, fresh, actId, ROOMS, POLL_MS, readOnlyLine, tablesReadOnly } from "../shared.js";
+import { msText, bytesText, button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText, pop, actId, ROOMS, POLL_MS, readOnlyLine, tablesReadOnly } from "../shared.js";
 import { copyBar, copyingCount, createMonotone, tableLine } from "./status.js";
 
 /** `/api/usage` asked for the copies' own sizes alone: the last minute's samples (none needed), and `copySizes`. */
@@ -192,7 +192,10 @@ export function renderTablesCards(s) {
  * one with no primary key. `ui.choosing` is the table whose form is open (`ui.ticked` its boxes ticked: { columns, key };
  * `ui.columns` its columns as read when it opened: { table, columns } | { table, failure }, null while read);
  * `ui.outcome` what the last add or remove answered ({ table, added } | { table, removed } | { table, failure }) and
- * `ui.synced` what the last sync did, each a popover beside its table's actions (`at`: when, gone after OUTCOME_MS at `ui.now`); `ui.syncing` the tables whose sync is asked; `ui.filter` the
+ * `ui.synced` what the last sync did, each a popover beside its table's actions, up until it is dismissed (its Dismiss,
+ * Escape, or the next action's answer or question in its place); `ui.syncing` the tables whose sync is asked. Sync now
+ * is offered disabled while the table's `syncRefusal` (`/api/state`: why `mason sync` of it is refused now, the sync's
+ * one check) is set, that reason its title, in the same room; `ui.filter` the
  * search box's text and `ui.show` the state filter (a key of SHOWS).
  */
 export function renderTables(s, ui = {}) {
@@ -225,12 +228,15 @@ export function renderTables(s, ui = {}) {
     const adding_ = adding.includes(t.table);
     const asking = removing === t.table;
     const anchor = actId("tables", t.table);
-    const syncedNow = synced?.table === t.table && !("failure" in synced) && fresh(synced, now);
+    const syncedNow = synced?.table === t.table && !("failure" in synced);
+    // why mason sync of it is refused now (its first sync not finished or failed, being read again, being caught up), or
+    // null: the server's words, from the check the sync refuses with — never derived here (absent from an older run: offered)
+    const syncRefused = t.syncRefusal ?? null;
     const act = adding_ ? button("Adding…", {}, "primary small", { disabled: true }) : t.added
       // Sync now → Syncing… → Synced ✓ in the one room (ROOMS.sync), so the actions never move
       // View events: its sync events, on Observability › Sync events (a link: it goes to another page)
       ? `<a class="btn small" href="${esc(syncsHref(t.table))}">View events</a> ` +
-        (viewOnly ? "" : syncing.includes(t.table) ? button("Syncing…", {}, "small", { room: ROOMS.sync, disabled: true }) : button(syncedNow ? "Synced ✓" : "Sync now", { syncTable: t.table }, "small", { room: ROOMS.sync })) + " " +
+        (viewOnly ? "" : syncing.includes(t.table) ? button("Syncing…", {}, "small", { room: ROOMS.sync, disabled: true }) : button(syncedNow ? "Synced ✓" : "Sync now", syncRefused === null ? { syncTable: t.table } : {}, "small", { room: ROOMS.sync, disabled: syncRefused !== null, title: syncRefused ?? "" })) + " " +
         // while it asks, Remove stays where it was, held down: the question beside it answers it
         (readOnly ? "" : asking ? button("Remove", {}, "danger small", { disabled: true, expanded: true }) : button("Remove", { removeTable: t.table }, "danger small"))
       // a sources file this run cannot write (`s.sourcesReadOnly`, a server's): no control that could only fail
@@ -268,11 +274,11 @@ export function renderTables(s, ui = {}) {
     const formOpen = choosing === t.table && !t.added;
     const refusedHere = outcome?.table === t.table && "failure" in outcome;
     if (formOpen) pops.push(pop(anchor, (refusedHere ? renderFailure(outcome.failure) : "") + pickForm(t, columns, ticked), { kind: "dialog", label: `Add ${name}` }));
-    if (outcome?.table === t.table && fresh(outcome, now) && !(formOpen && refusedHere)) {
+    if (outcome?.table === t.table && !(formOpen && refusedHere)) {
       pops.push(pop(anchor, "failure" in outcome ? `${renderFailure(outcome.failure)}${button("Dismiss", { dismissOutcome: "", popClose: "" }, "small")}`
         : "added" in outcome ? renderTableAdded(outcome.added, shownFileOf(s, outcome.added.file)) : renderTablesRemoved(outcome.removed, shownFileOf(s, outcome.removed.file))));
     }
-    if (synced?.table === t.table && fresh(synced, now)) {
+    if (synced?.table === t.table) {
       pops.push(pop(anchor, "failure" in synced ? `${renderFailure(synced.failure)}${button("Dismiss", { dismissSynced: "", popClose: "" }, "small")}` : renderSynced(synced.synced, t.table, s)));
     }
     return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}${said_ ? " has-note" : ""}"><th scope="row" class="name"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
@@ -333,7 +339,7 @@ export const page = {
         m.adding = m.adding.filter((x) => x !== table);
         // refused: said over the form, in its popover, written again with the boxes the person had ticked
         if ("failure" in r) { m.outcome = { table, failure: r.failure }; if (m.choosing === table) m.ticked = { columns, key }; return false; }
-        m.outcome = { table, added: r.body, at: ctx.now().getTime() }; m.choosing = null; m.columns = null; hold();
+        m.outcome = { table, added: r.body }; m.choosing = null; m.columns = null; hold();
         await ctx.refresh(["api/state"]);
         return true;
       },
@@ -355,7 +361,7 @@ export const page = {
         const r = await ctx.ask("api/remove", json("POST", { tables: [table] }));
         m.removing = null; hold();
         if ("failure" in r) { m.outcome = { table, failure: r.failure }; return false; }
-        m.outcome = { table, removed: r.body, at: ctx.now().getTime() };
+        m.outcome = { table, removed: r.body };
         await ctx.refresh(["api/state"]);
         return true;
       },
@@ -366,11 +372,13 @@ export const page = {
         m.outcome = null; m.synced = null;
         const r = await ctx.ask("api/sync", json("POST", { tables: [table] }));
         m.syncing = m.syncing.filter((x) => x !== table);
-        m.synced = "failure" in r ? { table, failure: r.failure } : { table, synced: r.body, at: ctx.now().getTime() };
+        m.synced = "failure" in r ? { table, failure: r.failure } : { table, synced: r.body };
         await ctx.refresh(["api/state"]);
         return !("failure" in r);
       },
       dismissSynced() { m.synced = null; },
+      /** Escape with no question open: the answer or refusal beside a row goes, as its Dismiss does */
+      dismissAnswer() { m.outcome = null; m.synced = null; },
       /** The search box's text: kept here, so every poll writes the lists filtered by it. */
       filterTables(text) { m.filter = text; m.limit = TABLE_ROWS; },
       /** The state filter beside it (a key of SHOWS; anything else is All). */
@@ -433,6 +441,8 @@ export const page = {
         return null;
       },
       toggle: (target) => opened.toggle(target),
+      /** Escape with no question or form open: the answer beside a row goes (null: none is shown) */
+      dismiss() { if (m.outcome === null && m.synced === null) return null; actions.dismissAnswer(); return true; },
       input(target) {
         if (target.id === "tables-show") return actions.showTables(target.value) ?? true;
         if (target.id !== "tables-filter") return null;

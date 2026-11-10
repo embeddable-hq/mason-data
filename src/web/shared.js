@@ -374,10 +374,10 @@ export const cards = (list) => list.length ? `<div class="cards n${list.length}"
 export const panel = (html) => `<div class="panel">${html}</div>`;
 
 /** A button: `button("Sync", { sync: "public.orders" }, "primary")` → data-sync="public.orders"; `variant` primary,
- *  danger or "" (secondary), with " small" for a compact one in a row. */
-export function button(label, data = {}, variant = "", { room = "", disabled = false, expanded = false } = {}) {
+ *  danger or "" (secondary), with " small" for a compact one in a row. `title`: its whole, where the stylesheet cuts it. */
+export function button(label, data = {}, variant = "", { room = "", disabled = false, expanded = false, title = "" } = {}) {
   const attrs = Object.entries(data).map(([k, v]) => ` data-${k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}="${esc(v)}"`).join("");
-  return `<button type="button"${variant ? ` class="${esc(variant)}"` : ""}${attrs}${room ? ` data-room="${esc(room)}"` : ""}${expanded ? ` aria-expanded="true"` : ""}${disabled ? " disabled" : ""}>${esc(label)}</button>`;
+  return `<button type="button"${variant ? ` class="${esc(variant)}"` : ""}${attrs}${room ? ` data-room="${esc(room)}"` : ""}${title ? ` title="${esc(title)}"` : ""}${expanded ? ` aria-expanded="true"` : ""}${disabled ? " disabled" : ""}>${esc(label)}</button>`;
 }
 
 /**
@@ -394,17 +394,12 @@ export const ROOMS = { sync: "Syncing…", add: "Adding…", copy: "Press ⌘C",
  * table and no row below moves (docs/WEB-UI.md "Presentation"): written into its part AFTER the table (never a row of
  * it), `position: fixed` and placed by `placePops` beside its anchor (`anchor`: an element's id, a row's actions cell)
  * after each write, and again on a scroll or a resize. `kind`: `dialog` (a question or a form: Escape presses its
- * `data-pop-close` button) or `status` (an answer: read out, and gone by itself — the page's OUTCOME_MS — unless it is a
- * refusal). `label` names a dialog for a screen reader.
+ * `data-pop-close` button) or `status` (an answer or a refusal: read out, and up until it is dismissed — its Dismiss,
+ * Escape (the page's `dismiss`), or the next action's answer or question in its place). `label` names a dialog for a
+ * screen reader.
  */
 export const pop = (anchor, html, { kind = "status", label = "" } = {}) =>
   `<div class="pop ${kind === "dialog" ? "ask" : "said"}" data-anchor="${esc(anchor)}" role="${kind === "dialog" ? "dialog" : "status"}"${label ? ` aria-label="${esc(label)}"` : ""}>${html}</div>`;
-
-/** How long what an action answered stays beside its button before it goes by itself (a refusal stays until dismissed). */
-export const OUTCOME_MS = 8000;
-
-/** Whether an answer recorded at `at` (ms) is still shown at `now`: a refusal always (until dismissed), else OUTCOME_MS. */
-export const fresh = (o, now) => o !== null && o !== undefined && ("failure" in o || o.at === undefined || now - o.at < OUTCOME_MS);
 
 /** An element's id for a row's actions cell (a popover's anchor): unique in the document, whatever the name holds. */
 export const actId = (page, key) => `act-${page}-${key}`;
@@ -505,6 +500,10 @@ export const readOnlyLine = (what, why) => why == null ? "" : `<p class="count">
 /** Why the page changes no table (`/api/state` `pageReadOnly`), or null — null too on a read-only page whose tables are
  *  still changed from it (`pageReadOnlyAllow` has `tables`: MASON_UI_READ_ONLY_ALLOW=tables, whose routes the run serves). */
 export const tablesReadOnly = (s) => (s?.pageReadOnlyAllow ?? []).includes("tables") ? null : s?.pageReadOnly ?? null;
+
+/** Why the page changes no user (`/api/state` `pageReadOnly`), or null — null too on a read-only page whose users are
+ *  still changed from it (`pageReadOnlyAllow` has `users`: MASON_UI_READ_ONLY_ALLOW=users, whose routes the run serves). */
+export const usersReadOnly = (s) => (s?.pageReadOnlyAllow ?? []).includes("users") ? null : s?.pageReadOnly ?? null;
 
 /** On a server's page the Postgres URL's host is the server's own view of itself: said beside it, as a tool elsewhere
  *  needs the server's address. "" off a server, and where the URL is the address a client reaches (`pg.public`: mason

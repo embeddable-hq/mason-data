@@ -70,6 +70,10 @@ export interface TableState extends Omit<CatalogTable, "columns"> {
   /** how the run keeps the copy current now — its sync, when it was last synced — the sync's one derivation (src/duck/sync.ts KeptCurrent): absent for a
    *  table the sync does not hold, and from a run before it was said */
   kept?: KeptCurrent;
+  /** why `mason sync <table>` is refused now, in its refusal's words (its first sync not finished or failed, being read
+   *  again whole, being caught up), or null when it would run: the sync's one check (src/duck/sync.ts syncRefusal);
+   *  absent from a run before it was said */
+  syncRefusal?: string | null;
 }
 export interface RunState {
   /** the database the run copies from: a JSON key named `source` is always this object, never a table (a table is `table`) */
@@ -131,7 +135,7 @@ export interface RunState {
   /** why the page offers no control that changes anything (MASON_UI_READ_ONLY=1, src/cli/ui-read-only.ts), or null:
    *  src/cli/run-server.ts runState; a run from before it has none */
   pageReadOnly?: string | null;
-  /** what that page still allows (MASON_UI_READ_ONLY_ALLOW: `tables`), [] when nothing or not read-only:
+  /** what that page still allows (MASON_UI_READ_ONLY_ALLOW: `tables`, `users`), [] when nothing or not read-only:
    *  src/cli/run-server.ts runState; a run from before it has none */
   pageReadOnlyAllow?: string[];
   /** the page's link back to the site that links to it (mason serve with MASON_UI_BACK_URL, src/cli/ui-back-link.ts),
@@ -422,7 +426,9 @@ const STATUS_USAGE = `usage: mason status [--json]
     replication, demo (the demo database this run hosts), textOrder (what reading the database's text order left to say), sync: { default (every table's sync unless its entry
     says its own: off, poll 30s), written (the file's top sync: says it; false: the default) } }, warnings, folder, project, tables: [{ table, rows,
     bytes, key, added, addedColumns, copy, error (why its sync failed: its first sync, or the poll, catch-up, stream or
-    publication check keeping a synced table current; null otherwise), kept, sync: { state (synced, syncing,
+    publication check keeping a synced table current; null otherwise), kept, syncRefusal (why mason sync <table> is
+    refused now, in its words: its first sync not finished or failed, being read again whole, being caught up; null
+    when it would run), sync: { state (synced, syncing,
     behind: served and kept but older than its sync: promises, failed, waiting), syncedAt (when
     it was last brought current), syncSeconds (how long that took), syncedBy (copy, poll, catch-up, stream),
     ageSeconds (how long ago that was), asOf (the time the synced data holds the database as of: kept's syncedAt),
@@ -450,7 +456,7 @@ const STATUS_USAGE = `usage: mason status [--json]
     project's files deployed read-only, MASON_PROJECT_READONLY, which mason add and mason remove refuse too, or a
     server's sources file it cannot write — or null), pageReadOnly (why the page changes nothing: mason serve with
     MASON_UI_READ_ONLY=1, which refuses every change the page sends — or null), pageReadOnlyAllow (what that page
-    still changes: [tables] with MASON_UI_READ_ONLY_ALLOW=tables, else []), pageBack ({ url, label }: the
+    still changes: [tables], [users] or [tables, users] as MASON_UI_READ_ONLY_ALLOW names them, else []), pageBack ({ url, label }: the
     page's link back to the site that links to it, mason serve with MASON_UI_BACK_URL — or null), pageNav ({ items, links }: the sidebar's
     items that link to the host's own pages instead — items has overview, tables, users, queries, usage or syncEvents,
     each the URL it links to, mason serve with MASON_UI_NAV_<ITEM>_URL — and the host's links, [{ url, label }] or a view

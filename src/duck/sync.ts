@@ -181,6 +181,11 @@ export class PollRefused extends Error {
   constructor(code: PollRefused["code"], message: string) { super(message); this.code = code; }
 }
 
+/** a sync by hand of a table the run does not hold (`Sync.pollNow`'s `not_found`, and `/api/state`'s `syncRefusal` of a
+ *  table not added): ONE wording, `known` the tables it holds (its `did you mean`) */
+export const notAddedRefusal = (source: string, known: readonly string[]): PollRefused =>
+  new PollRefused("not_found", `${source} is not added (mason add adds it)${didYouMean(source, [...known])}`);
+
 /** a statement interrupted, or never started, because the sync is stopping (`Sync.stop`): a stop, never a failure */
 export class Stopping extends Error {
   constructor() { super("Mason is stopping"); }
@@ -212,6 +217,10 @@ export interface CopyState {
   behind?: string;
   /** a copy or a catch-up of it is running now (one rebuild at a time): a table copied before serves that copy meanwhile */
   rebuilding?: "copy" | "catch-up";
+  /** why a sync by hand of it (`mason sync <table>`, the page's Sync now) is refused NOW, in the refusal's own words, or
+   *  null when it would run: `Sync.syncRefusal`, the one check `pollNow` refuses with. Present on every state a run's
+   *  `state` answers */
+  syncRefusal?: string | null;
   /** how the run keeps this copy current NOW (`Sync.keptOf`): present on every state a run's `state` answers */
   kept?: KeptCurrent;
 }
@@ -1515,7 +1524,9 @@ export class Sync {
         const synced = this.synced.get(s.source), behind = this.behind.get(s.source)?.why;
         const rebuilding = this.rebuildingNow?.source === s.source ? this.rebuildingNow.kind : undefined;
         return { ...s, ...(synced ? { synced } : {}), ...(behind !== undefined ? { behind } : {}), ...(rebuilding ? { rebuilding } : {}) };
-      });
+      })
+      // why a sync by hand of it would be refused now, from the one check pollNow refuses with (in memory: the page asks every 2 s)
+      .map((s) => { const t = this.tables.get(s.source); return t === undefined ? s : { ...s, syncRefusal: this.syncRefusal(t)?.message ?? null }; });
   }
 
   /**
@@ -1745,10 +1756,10 @@ export class Sync {
   }
 
   private async pollNowOf(sources: readonly string[]): Promise<{ at: string; tables: PolledTable[]; streamed?: StreamedAnswer[] }> {
-    if (this.mode === "recopy") throw new PollRefused("refused", "this run reads every table again whole at each pass (MASON_DUCK_SYNC=recopy), so there is nothing to poll");
+    if (this.mode === "recopy") throw this.recopyRefusal();
     const tables = sources.map((s) => {
       const t = this.tables.get(s);
-      if (t === undefined) throw new PollRefused("not_found", `${s} is not added (mason add adds it)${didYouMean(s, [...this.tables.keys()])}`);
+      if (t === undefined) throw notAddedRefusal(s, [...this.tables.keys()]);
       return t;
     });
     // a replicated table: the stream keeps it current, so nothing to poll — its answer is where the stream is, and its part
@@ -1761,15 +1772,7 @@ export class Sync {
     while (this.running !== null) await this.running;
     if (this.stopped) throw new Stopping();
     // asked after the pass ahead of it: that pass may have copied it, or failed its copy
-    for (const t of polled) {
-      const st = this.states.get(t.source);
-      if (st?.phase !== "copied") throw new PollRefused("nothing_yet", `${t.source} is not synced yet (${st?.phase === "failed" ? `its first sync failed: ${st.error ?? "mason logs says why"}` : "its first sync has not finished"}): mason wait waits for it`);
-      const again = this.readAgainWhy(t);
-      if (again !== null) throw new PollRefused("nothing_yet", `${t.source} is being read again whole (${again}): mason wait waits for it`);
-      const r = this.retired.get(t.source);
-      if (r !== undefined) throw new PollRefused("nothing_yet", `${t.source} is ${r.layout} (its synced data serves as it was): it is current once read again — mason wait waits for it`);
-      this.refuseRebuilding(t);
-    }
+    for (const t of polled) { const refused = this.syncRefusal(t); if (refused !== null) throw refused; }
     const poll = (async (): Promise<PolledTable[]> => {
       await this.onWriter(() => this.attach());
       try {
@@ -1835,12 +1838,41 @@ export class Sync {
     this.generatedCheck = null;
   }
 
+  /** a poll asked in a run that copies every table again whole at each pass: refused, whatever the table */
+  private recopyRefusal(): PollRefused {
+    return new PollRefused("refused", "this run reads every table again whole at each pass (MASON_DUCK_SYNC=recopy), so there is nothing to poll");
+  }
+
+  /**
+   * WHY A SYNC BY HAND OF AN ADDED TABLE IS REFUSED NOW, or null when it would run — the ONE check: `pollNowOf` throws it
+   * (once the pass ahead of it ended), and `state` carries its words as `syncRefusal` (`/api/state`, `mason status
+   * --json`), so the page offers Sync now exactly when `mason sync` would run. A replicated table is never refused (its
+   * answer is where the stream is). It reads only what the sync holds in memory: the page asks for it every 2 s.
+   */
+  private syncRefusal(t: AddedTable): PollRefused | null {
+    if (this.mode === "recopy") return this.recopyRefusal();
+    if (this.replicated(t)) return null;
+    const st = this.states.get(t.source);
+    if (st?.phase !== "copied") return new PollRefused("nothing_yet", `${t.source} is not synced yet (${st?.phase === "failed" ? `its first sync failed: ${st.error ?? "mason logs says why"}` : "its first sync has not finished"}): mason wait waits for it`);
+    const again = this.readAgainWhy(t);
+    if (again !== null) return new PollRefused("nothing_yet", `${t.source} is being read again whole (${again}): mason wait waits for it`);
+    const r = this.retired.get(t.source);
+    if (r !== undefined) return new PollRefused("nothing_yet", `${t.source} is ${r.layout} (its synced data serves as it was): it is current once read again — mason wait waits for it`);
+    return this.rebuildingRefusal(t);
+  }
+
   /** a poll asked of a table while it is rebuilt or not yet caught up: refused, by name (it is caught up when that ends) */
-  private refuseRebuilding(t: AddedTable): void {
+  private rebuildingRefusal(t: AddedTable): PollRefused | null {
     const now = this.rebuildingNow?.source === t.source ? this.rebuildingNow.kind : null;
-    if (now === null && !this.behind.has(t.source)) return;
+    if (now === null && !this.behind.has(t.source)) return null;
     const doing = now === "copy" ? "being read again whole" : `being caught up by one poll ${this.behind.get(t.source)?.why ?? ""}`.trimEnd();
-    throw new PollRefused("nothing_yet", `${t.source} is ${doing} (its synced data serves as it was): it is caught up by one poll when that ends, so there is nothing to poll — mason wait waits for it`);
+    return new PollRefused("nothing_yet", `${t.source} is ${doing} (its synced data serves as it was): it is caught up by one poll when that ends, so there is nothing to poll — mason wait waits for it`);
+  }
+
+  /** a poll asked of a table that a rebuild started on since it was asked: refused, by name */
+  private refuseRebuilding(t: AddedTable): void {
+    const refused = this.rebuildingRefusal(t);
+    if (refused !== null) throw refused;
   }
 
   /** the source's connection, as the sync's own reads and replication make it (never DuckDB's: that is `attach`) */

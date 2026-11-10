@@ -28,7 +28,7 @@ import { backLinkSettingsSet, uiBackLinkSetting } from "./ui-back-link.ts";
 import { UI_OVERVIEW_CARD_SETTING, uiOverviewCardSetting } from "./ui-host-view.ts";
 import { NAV_SETTINGS, navSettingsSet, notNavSettings, uiNavSetting } from "./ui-nav.ts";
 import { PG_PUBLIC_URL_SETTING, pgPublicUrlSetting } from "./pg-public-url.ts";
-import { UI_READ_ONLY_ALLOW_SETTING, UI_READ_ONLY_SETTING, uiReadOnlyAllowSetting, uiReadOnlySetting } from "./ui-read-only.ts";
+import { UI_READ_ONLY_ALLOW_FIX, UI_READ_ONLY_ALLOW_SETTING, UI_READ_ONLY_SETTING, uiReadOnlyAllowSetting, uiReadOnlySetting } from "./ui-read-only.ts";
 
 export const STATE_DIR = ".mason";
 const CONFIG = "config.json";
@@ -39,6 +39,10 @@ export const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,47}$/;
 
 export interface RunningState {
   pid: number;
+  /** when the run's process started, read by the run itself (src/cli/runs.ts `processStart`): the pid is the run only
+   *  while the process holding it started then (`masonProcess`); absent where the platform cannot say, and in a
+   *  record an earlier Mason wrote */
+  started?: string;
   /** the run's command server, which the commands ask with `token` (src/cli/control.ts) */
   controlUrl: string;
   token: string;
@@ -166,7 +170,7 @@ export function readProject(root: string): Project | BrokenProject | null {
   if (r !== undefined && r !== null) {
     const run = r as Record<string, unknown>;
     const bad = typeof r !== "object" || !Number.isInteger(run.pid) ? ["pid"]
-      : [...RUNNING.filter((k) => typeof run[k] !== "string"), ...(run.postgresPublicUrl !== undefined && typeof run.postgresPublicUrl !== "string" ? ["postgresPublicUrl (a string, when there is one)"] : []),...(typeof (run.postgresListener as { host?: unknown } | null)?.host !== "string" ? ["postgresListener"] : [])];
+      : [...RUNNING.filter((k) => typeof run[k] !== "string"), ...(run.postgresPublicUrl !== undefined && typeof run.postgresPublicUrl !== "string" ? ["postgresPublicUrl (a string, when there is one)"] : []), ...(run.started !== undefined && typeof run.started !== "string" ? ["started (a string, when there is one)"] : []),...(typeof (run.postgresListener as { host?: unknown } | null)?.host !== "string" ? ["postgresListener"] : [])];
     if (bad.length) return { root, dir, file, broken: `its "running" has no ${bad.join(", ")} (mason start writes the whole of it, or null when stopped)` };
     // running.postgresPublicUrl's VALUE is not read here: a record an older Mason wrote with a value this one refuses
     // (or one edited) must not make the project broken — a start overwrites it, and stop, logs, doctor and destroy
@@ -377,7 +381,7 @@ export function startSettingRefusal(p: Project, env: NodeJS.ProcessEnv, o: { ser
       fix: `unset ${UI_READ_ONLY_ALLOW_SETTING}: mason start's page is yours alone, on this machine` };
   }
   const pageAllow = uiReadOnlyAllowSetting(env);
-  if (!Array.isArray(pageAllow)) return { message: pageAllow.problem, code: "refused", fix: `set ${UI_READ_ONLY_ALLOW_SETTING}=tables beside ${UI_READ_ONLY_SETTING}=1, or unset it` };
+  if (!Array.isArray(pageAllow)) return { message: pageAllow.problem, code: "refused", fix: UI_READ_ONLY_ALLOW_FIX };
   // the page's Unix socket is a server's (src/cli/ui-socket.ts): a laptop's page is opened with mason ui
   if (!o.serve && env[UI_SOCKET_SETTING]) {
     return { message: `${UI_SOCKET_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",

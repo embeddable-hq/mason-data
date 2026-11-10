@@ -93,8 +93,9 @@ function folderIn(state: string): string {
   const config: Record<string, unknown> = { name: `matrix-${state.replace(/_/g, "-")}`, folder: "mason", remote: false,
     apiKey: "k".repeat(48), sourceServer: null, running: null, lastRun: null };
   if (state === "stale" || state === "squatted") {
-    // after a reboot the config still names the run; its pid is dead, or now another process's (this test's own)
-    config.running = { pid: state === "stale" ? deadPid() : process.pid, controlUrl: "http://127.0.0.1:1", token: "t".repeat(32), postgresUrl: "postgresql://127.0.0.1:1/matrix", postgresListener: { host: "127.0.0.1", tls: null } };
+    // after a reboot the config still names the run; its pid is dead, or now another process's (this test's own), which
+    // started at another moment than the run recorded (src/cli/runs.ts masonProcess)
+    config.running = { pid: state === "stale" ? deadPid() : process.pid, started: "linux:a-boot-before:1", controlUrl: "http://127.0.0.1:1", token: "t".repeat(32), postgresUrl: "postgresql://127.0.0.1:1/matrix", postgresListener: { host: "127.0.0.1", tls: null } };
   }
   // what a 0.7.0 start recorded for a project it streamed (v0.7.0 src/cli/dev.ts), under the file 0.7.0 wrote: no sync:
   if (state === "streamed_0_7") Object.assign(config, V0_7_STREAMED);
