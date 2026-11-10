@@ -242,6 +242,26 @@ test("a table's line is mason tables': its size, its key, and added or why it ca
     state: "cannot be added as it is: no primary key: name the columns that tell its rows apart, mason add event_log --key tenant_id,id (its unique index event_log_tenant_id_id_key)" });
 });
 
+test("a table row-level security hides: the page says mason tables' reason and offers no Add, which the run would refuse (issue 802)", async () => {
+  const { listTables } = await import("../src/cli/source-edit.ts");
+  const hidden: SourceTable = { ...table("vault", 40), rowSecurityHidesFrom: "mason" };
+  const hiddenKeyless: SourceTable = { ...KEYLESS, source: "public.vault_log", table: "vault_log", rowSecurityHidesFrom: "mason" };
+  const tables = [...CATALOG, hidden, hiddenKeyless];
+  const s = stateOf(THREE_COPIED(), { tables });
+  const listed = listTables(sourceFile as Exclude<typeof sourceFile, { problems: unknown }>, { tables, database: "shop" });
+  const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
+  const tableFacts = fn<[unknown], { size: string; key: string; state: string | null }>("tableFacts");
+  for (const name of ["public.vault", "public.vault_log"]) {
+    const t = s.tables.find((x) => x.table === name)!;
+    const cli = listed.find((x) => x.table === name)!;
+    assert.ok(cli.reason?.startsWith(`row-level security on ${name} hides every row from mason`), String(cli.reason));
+    assert.equal(t.reason, cli.reason, `${name}: the run's state and mason tables, one reason`);
+    assert.deepEqual(tableFacts(t), commands.tableFacts(cli), name);
+    const row = renderTables(s).split("<tr").find((r) => r.includes(`<code class="name" title="${name}">`))!;
+    assert.doesNotMatch(row, /data-add-table/, `${name}: no Add`);
+  }
+});
+
 test("a table added and tables removed are said as mason add and mason remove print them: the key added, a secret left out", () => {
   const cli = commands as unknown as { addedLines?: (b: unknown, file: string) => unknown; removedReport?: (r: string[], file: string) => unknown };
   assert.equal(typeof cli.addedLines, "function", "src/cli/commands.ts exports addedLines");

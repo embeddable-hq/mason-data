@@ -966,7 +966,7 @@ export async function tables(argv: string[]): Promise<number> {
     out(jsonText(TABLES, { database: s.database, source: { name: s.name, file: s.file }, tables: shown.map(tableJson) }, next));
     return 0;
   }
-  if (!shown.length) { out(`${s.database} has no table this user can read.`); return 0; }
+  if (!shown.length) { out(noTableLine(s.database)); return 0; }
   // one line per table unless a table is named or --all asks: 54 tables were 600 lines, and choosing what to
   // add needs the names, sizes and keys (an agent read them through --json and python, #409)
   if (!f.positionals.length && !f.values.all) {
@@ -1005,6 +1005,9 @@ export function tableJson(t: ListedTable): Record<string, unknown> {
     columns: t.columns.map((c) => ({ name: c.name, type: c.type, nullable: c.nullable, comment: c.comment, references: c.references, secret: c.secret })),
   };
 }
+
+/** What `mason tables` and `mason doctor --tables` say for a database with no table this user can read: one wording. */
+export const noTableLine = (database: string): string => `${database} has no table this user can read.`;
 
 /** The tables a line each, as `mason tables` lists them (and `mason doctor --tables`): its name, size, key and state. */
 export function tableListLines(shown: readonly CatalogTable[]): string[] {
@@ -1137,9 +1140,10 @@ const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--inclu
   sync: is replication is written sync: poll 5m and said. A table of tens of millions of rows set to poll more often
   than every minute is warned of, with an estimate of what each poll costs your database.
 
-  A column that looks like a secret (password, token, api_key, private_key, …) is left out unless named, and said:
-  it is written as exclude: [password_hash], since anyone with a user's password can read every synced column. Name
-  one with --columns or --include to have it.
+  A column that looks like a secret (password, token, api_key, private_key, …, its words read however the name is
+  written: passwordHash, apiKey, API_TOKEN) is left out unless named, and said: it is written as
+  exclude: [password_hash], since anyone with a user's password can read every synced column. Name one with --columns
+  or --include to have it.
 
   With Mason running the first sync starts at once; mason wait returns when it is done and the table is served. Before
   mason start (mason init && mason add orders && mason start) the entry is written, checked against the database as

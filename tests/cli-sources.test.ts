@@ -326,6 +326,40 @@ test("what looks like a secret: credentials' own words, never an identifier or a
   }
 });
 
+// ISSUE 797: the same words however a name is written — an ORM's camelCase and PascalCase, UPPER_SNAKE, kebab — and the
+// same identifier and time suffixes exempt in each form.
+test("what looks like a secret reads a name's words in any case: passwordHash, apiKey, API_TOKEN, Password; tokenId, apiKeyName are not", () => {
+  const forms: Record<string, (w: string[]) => string> = {
+    snake: (w) => w.join("_"),
+    camel: (w) => w.map((x, i) => i === 0 ? x : x[0]!.toUpperCase() + x.slice(1)).join(""),
+    pascal: (w) => w.map((x) => x[0]!.toUpperCase() + x.slice(1)).join(""),
+    upper: (w) => w.join("_").toUpperCase(),
+    kebab: (w) => w.join("-"),
+    acronym: (w) => w.map((x) => x === "api" || x === "ssh" ? x.toUpperCase() : x[0]!.toUpperCase() + x.slice(1)).join(""),
+  };
+  const secrets = [["password"], ["passwd"], ["pwd"], ["secret"], ["secrets"], ["token"], ["tokens"], ["apikey"], ["credential"], ["credentials"], ["salt"],
+    ["api", "key"], ["access", "key"], ["secret", "key"], ["private", "key"], ["ssh", "key"], ["signing", "key", "content"]];
+  const exempt = [["id"], ["ids"], ["at"], ["count"], ["type"], ["name"], ["kind"], ["hash", "algo"]];
+  for (const [form, write] of Object.entries(forms)) {
+    for (const s of secrets) {
+      // `…_key_content` is a secret at the name's end only, as main read it
+      const around = s.at(-1) === "content" ? [s, ["user", ...s]] : [s, ["hashed", ...s], [...s, "hash"], ["user", ...s, "value"]];
+      for (const w of around) assert.ok(S.looksSecret(write(w)), `${form}: ${write(w)} looks like a secret`);
+      for (const e of exempt) assert.ok(!S.looksSecret(write([...s, ...e])), `${form}: ${write([...s, ...e])} names an identifier or a time, not a secret`);
+    }
+  }
+  for (const c of ["passwordHash", "hashedPassword", "apiKey", "APIKey", "API_KEY", "api-key", "accessToken", "refreshToken", "Password", "API_TOKEN", "SSHKey",
+    "clientSecret", "oauth2Token", "isSecret"]) assert.ok(S.looksSecret(c), `${c} looks like a secret`);
+  // near misses: a secret word inside another word, a plural the rule never named, a word that only begins like one
+  for (const c of ["tokenId", "tokenID", "tokenIDs", "secretCount", "passwordType", "apiKeyName", "saltHashAlgo", "pwdChangedAt", "accessKeyId", "tokenizer",
+    "Tokenizer", "TOKENIZER", "passwords", "secretary", "Secretary", "salary", "keyboard", "monkey", "apiVersion", "API_VERSION", "keyContent", "key_content",
+    "primaryKey", "cacheKey", "userKey", "displayName"]) assert.ok(!S.looksSecret(c), `${c} does not`);
+  // at the name's very end only: a separator after a suffix is no identifier (fail closed, as main read it)
+  assert.ok(S.looksSecret("token_id_"));
+  assert.deepEqual(S.nameWords("APIKeyIDs"), ["api", "key", "ids"]);
+  assert.deepEqual(S.nameWords("user_PasswordHash-v2"), ["user", "password", "hash", "v2"]);
+});
+
 test("a key: must tell the rows apart as the database enforces it: NOT NULL columns, over a unique index — else refused at its key", () => {
   // the review of the sources file: a key with duplicates failed the copy as "Mason bug", retried for ever,
   // and duplicates after the copy made the poll's update and delete by key change both rows
@@ -641,10 +675,20 @@ test("mason tables' entry for each table is mason add's, decided in one place: i
       }
       const of = (name: string) => listed.find((t) => t.table === name)!;
       assert.deepEqual(of("public.customers").entry, { customers: {} }, "added: its entry as the file says it");
-      assert.deepEqual([of("public.hidden").entry, of("public.hidden").reason?.startsWith("tables.hidden: row-level security on public.hidden hides every row from mason")], [null, true],
-        "a table mason add refuses for another reason than its key: no entry, and the refusal as its reason");
-      assert.match(of("public.hidden_log").reason!, /^no primary key: name the columns that tell its rows apart, mason add hidden_log --key id \(its unique index hidden_log_id_key\); with it, tables\.hidden_log: row-level security on public\.hidden_log hides every row/,
-        "no primary key, and refused even with the --key it names: both said");
+      // row-level security, said in a table's words (issue 802): no `tables.<entry>:`, no "remove its entry", the
+      // mason add to run once a policy is there; mason add's refusal the same words
+      const policy = (t: string) => `row-level security on public.${t} hides every row from mason (no SELECT policy for it, and it is not the owner or BYPASSRLS), ` +
+        `so its synced table would be empty — the table's owner adds a policy for the rows Mason may read (CREATE POLICY mason_read ON public.${t} FOR SELECT TO "mason" USING (…);), `;
+      assert.deepEqual([of("public.hidden").entry, of("public.hidden").reason], [null, `${policy("hidden")}then mason add hidden`],
+        "a table row-level security hides: no entry, and its reason in mason add's words for a table");
+      assert.equal(said(() => E.addEntry(edit(text), db, "public.hidden")), `public.hidden cannot be added: ${policy("hidden")}then mason add hidden`);
+      assert.equal(of("public.hidden_log").reason,
+        `${policy("hidden_log")}then mason add hidden_log --key id (no primary key: its unique index hidden_log_id_key tells its rows apart)`,
+        "no primary key as well: one reason, the --key in its mason add");
+      assert.equal(said(() => E.addEntry(edit(text), db, "public.hidden_log", ["*"], ["id"])), `public.hidden_log cannot be added: ${policy("hidden_log")}then mason add hidden_log --key id`);
+      assert.equal(said(() => E.addEntry(edit(text), db, "public.hidden_log")), `public.hidden_log cannot be added: ${of("public.hidden_log").reason}`);
+      // the run's state (the web page's Tables) says the same reason: one function, catalogTable's
+      for (const name of ["public.hidden", "public.hidden_log"]) assert.equal(S.catalogTable(db.tables.find((t) => t.source === name)!, undefined).reason, of(name).reason, name);
       if (top === "sync: poll 5m\n") assert.deepEqual(of("public.events_big").entry, { events_big: { sync: "off" } }, "a big table under a polling file: written off");
       if (top === "sync: replication\n") {
         assert.deepEqual(of("public.audit").entry, { audit: { sync: "poll 5m" } }, "REPLICA IDENTITY NOTHING under a replicating file: polled");

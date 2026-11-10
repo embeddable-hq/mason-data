@@ -509,12 +509,8 @@ export function entryProblems(t: SourceTable | undefined, e: TableEntry, all: re
       `${unique ? ` (its unique index ${unique.name})` : ""}`);
   }
   // a SELECT answers no row and no error: the synced table would be empty, said as though it were the table's
-  if (t.rowSecurityHidesFrom !== undefined) {
-    const user = pgIdent(t.rowSecurityHidesFrom);
-    out.push(`${at}: row-level security on ${t.source} hides every row from ${t.rowSecurityHidesFrom} (no SELECT policy for it, and it is not the owner or BYPASSRLS), ` +
-      `so its synced table would be empty — the table's owner adds a policy for the rows Mason may read (CREATE POLICY mason_read ON ${t.source} FOR SELECT TO ${user} USING (…);), ` +
-      "or remove its entry");
-  }
+  const hidden = rowSecurityHides(t);
+  if (hidden !== null) out.push(`${at}: ${hidden}, or remove its entry`);
   for (const k of (e.key ?? t.key).filter((k) => e.exclude.includes(k))) out.push(`${at}.exclude: ${k} is ${t.source}'s key, which is always synced — take it out of exclude`);
   // a table that identifies no changed row: a publication carrying its updates would make the app's own UPDATEs and
   // DELETEs on it fail (the catalog says so; the file cannot), so it is never replicated
@@ -610,10 +606,28 @@ export function rereadSources(prev: RunSources, read: ProjectSource | Failure, r
  * add put a table's `password`, `deploy_key_content` and `warehouse_private_key` into a copy anyone with a user's
  * password can query, with no warning). By name alone — the database says nothing about a column's sensitivity — so the
  * words are credentials' own, and a suffix that names an identifier or a time (`token_id`, `secret_count`) is not one.
+ * A name's words are read however it is written (issue 797: an ORM's `passwordHash`, `apiKey`, `API_TOKEN` were synced
+ * unflagged): split at `_`, `-` or any other character but a letter or digit, and where a lowercase letter or digit
+ * meets an uppercase one or an acronym ends (`APIKey` → api, key; `tokenIDs` → token, ids), then compared in lowercase.
+ * This one function decides it: `mason add`'s `exclude:`, `mason tables`' note and its `--json` `secret` read it.
  */
-export const SECRET_WORDS = /(^|_)(password|passwd|pwd|secret|secrets|token|tokens|api_key|apikey|access_key|secret_key|private_key|ssh_key|credential|credentials|salt)(_|$)|_key_content$/;
+const SECRET_WORD = new Set(["password", "passwd", "pwd", "secret", "secrets", "token", "tokens", "apikey", "credential", "credentials", "salt"]);
+/** two words in a row that name a secret: `api_key`, `apiKey`, `API_KEY` */
+const SECRET_PAIR = new Set(["api key", "access key", "secret key", "private key", "ssh key"]);
+/** a last word (or the last two) naming an identifier, a count or a time: `token_id`, `secretCount`, `salt_hash_algo` —
+ *  at the name's very end, so `token_id_` stays one (fail closed, as before issue 797) */
+const NOT_SECRET_LAST = new Set(["id", "ids", "at", "count", "type", "name", "kind"]);
+/** a column name's words, lowercase: an acronym (a trailing `s` its plural), a word with its first letter capital or not, or digits */
+export function nameWords(column: string): string[] {
+  return (column.match(/[A-Z]{2,}s?(?![a-z])|[A-Z]?[a-z0-9]+|[A-Z0-9]+/g) ?? []).map((w) => w.toLowerCase());
+}
 export function looksSecret(column: string): boolean {
-  return SECRET_WORDS.test(column) && !/_(id|ids|at|count|type|name|kind|hash_algo)$/.test(column);
+  const w = nameWords(column);
+  const n = w.length;
+  const secret = w.some((x, i) => SECRET_WORD.has(x) || (i > 0 && SECRET_PAIR.has(`${w[i - 1]} ${x}`))) ||
+    (n >= 2 && w[n - 2] === "key" && w[n - 1] === "content" && (n >= 3 || !/^key/i.test(column)));  // something before it: `deploy_key_content`, never `key_content`
+  const exempt = n >= 2 && /[A-Za-z0-9]$/.test(column) && (NOT_SECRET_LAST.has(w[n - 1]!) || (n >= 3 && w[n - 2] === "hash" && w[n - 1] === "algo"));
+  return secret && !exempt;
 }
 
 /**
@@ -867,8 +881,40 @@ export function usableUniqueKey(t: SourceTable): { name: string; columns: string
   return (t.uniqueKeys ?? []).find((u) => u.columns.every((c) => t.columns.find((x) => x.name === c)?.notNull === true));
 }
 
-/** Why `mason add <t>` with no `--key` cannot add `t`, or null. */
-export function unaddableReason(t: SourceTable): string | null {
+/**
+ * Row-level security that hides every row of `t` from the user Mason reads as, said once — a SELECT answers no row and
+ * no error, so its synced table would be empty — with the policy its owner adds; null when none hides it. An entry
+ * (`entryProblems`) ends it with "or remove its entry"; a table not added (`unaddableReason`) with the `mason add` to
+ * run once the policy is there.
+ */
+export function rowSecurityHides(t: SourceTable): string | null {
+  if (t.rowSecurityHidesFrom === undefined) return null;
+  return `row-level security on ${t.source} hides every row from ${t.rowSecurityHidesFrom} (no SELECT policy for it, and it is not the owner or BYPASSRLS), ` +
+    `so its synced table would be empty — the table's owner adds a policy for the rows Mason may read (CREATE POLICY mason_read ON ${t.source} FOR SELECT TO ${pgIdent(t.rowSecurityHidesFrom)} USING (…);)`;
+}
+
+/**
+ * WHY `mason add <t>` CANNOT ADD `t`, or null: ONE reason for a table not added, read by `mason tables` and the run's
+ * state alike (`catalogTable`: the web page's Tables), and by `mason add`'s refusal (src/cli/source-edit.ts
+ * `plannedEntry`), so the page never offers an Add the run then refuses (issue 802). Row-level security that hides
+ * every row comes first, ending with the `mason add` to run once a policy is there (`key`: the `--key` asked; for a
+ * table with no primary key and none asked, the one its unique index names); else no primary key, naming the `--key`.
+ */
+export function unaddableReason(t: SourceTable, key: readonly string[] | null = null): string | null {
+  const unique = t.key.length ? undefined : usableUniqueKey(t);
+  const hidden = rowSecurityHides(t);
+  if (hidden !== null) {
+    const then = key !== null ? ` --key ${key.join(",")}`
+      : t.key.length ? ""
+      : unique ? ` --key ${unique.columns.join(",")} (no primary key: its unique index ${unique.name} tells its rows apart)`
+      : " --key <column>,… (no primary key: name the columns that tell its rows apart)";
+    return `${hidden}, then mason add ${entryName(t.source)}${then}`;
+  }
+  return noKeyReason(t);
+}
+
+/** Why `mason add <t>` with no `--key` cannot add `t` for its key alone (no primary key: the `--key` to name), or null. */
+export function noKeyReason(t: SourceTable): string | null {
   if (t.key.length) return null;
   const unique = usableUniqueKey(t);
   return `no primary key: name the columns that tell its rows apart, mason add ${entryName(t.source)} --key ${unique ? unique.columns.join(",") : "<column>,…"}${unique ? ` (its unique index ${unique.name})` : ""}`;
