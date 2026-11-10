@@ -2,6 +2,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- A preview of a join with a LIMIT and no ORDER BY (`SELECT a.*, b.* FROM a LEFT JOIN b ON a.id = b.a_id LIMIT 100`,
+  what a BI tool sends to show a table) now stops as soon as it has its rows. Before, where each join matched on a
+  primary key, Mason sorted every row of the join to keep its pages stable. That took seconds to tens of seconds over a
+  table of a hundred million rows; now it takes milliseconds. The pages of such a statement may now overlap, as they
+  already could over other joins: `LIMIT n OFFSET m` with no ORDER BY can show a row twice and skip another, as SQL and
+  Postgres allow. Add an ORDER BY where the pages matter.
+
 - How long a statement took, and the average, p50 and p95 of those times, are now always whole milliseconds with
   thousands separators (`19,800 ms`, `810 ms`, `27 ms`), so a column of them can be compared at a glance. Before, the
   unit changed at a second and at a minute (`19.8 s`, `2 min 5 s`). This applies on the web page (Observability ›
