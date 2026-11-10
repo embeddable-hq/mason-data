@@ -32,14 +32,21 @@ export const BACK_LABEL_DEFAULT = "Back";
 
 /** What `/api/state` `pageBack` says, and the page renders. */
 export interface BackLink { url: string; label: string }
+/** A link an operator puts in the page (the link back, a sidebar link of the host's: src/cli/ui-nav.ts), read by
+ *  `linkUrl` and `linkLabel`. */
+export type PageLink = BackLink;
 
 /** A base the parser resolves a path against, only to tell that it stayed a path: never shown, never fetched. */
 const PATH_BASE = "http://path.invalid";
 
-/** The URL as the page is given it, or what is wrong with it (the value itself never quoted: it may carry anything). */
-function backUrl(v: string): string | { problem: string } {
-  const at = `${UI_BACK_URL_SETTING} is set`;
-  if (v.length > BACK_URL_MAX) return { problem: `${at} to ${v.length} characters, and a link back is at most ${BACK_URL_MAX}: name a shorter one` };
+/**
+ * A LINK'S URL as the page is given it, or what is wrong with it (the value itself never quoted: it may carry anything).
+ * THE ONE READING of a URL an operator puts in the page — the link back's, and the sidebar's (src/cli/ui-nav.ts) — so
+ * the rules above are written once. `at` names the setting as the problem says it (`MASON_UI_BACK_URL is set`), `noun`
+ * what the length bounds (`a link back`).
+ */
+export function linkUrl(v: string, at: string, noun: string): string | { problem: string } {
+  if (v.length > BACK_URL_MAX) return { problem: `${at} to ${v.length} characters, and ${noun} is at most ${BACK_URL_MAX}: name a shorter one` };
   if (!/^[\x21-\x7e]*$/.test(v)) {
     return { problem: `${at} to a URL with a control character, a space or a character outside ASCII: write a host in its xn-- form and the rest %-encoded` };
   }
@@ -64,12 +71,16 @@ function backUrl(v: string): string | { problem: string } {
   return u.href;
 }
 
-/** The label as the page shows it, or what is wrong with it. */
-function backLabel(v: string): string | { problem: string } {
+/**
+ * A LINK'S LABEL as the page shows it, or what is wrong with it: the one reading of a label an operator puts in the page
+ * (the link back's, the sidebar's). `subject` names it as the problem says it (`MASON_UI_BACK_LABEL`), `blank` the way
+ * out of a label of white space alone.
+ */
+export function linkLabel(v: string, subject: string, blank: string): string | { problem: string } {
   const chars = [...v];
-  if (chars.length > BACK_LABEL_MAX) return { problem: `${UI_BACK_LABEL_SETTING} is ${chars.length} characters, and the link's label is at most ${BACK_LABEL_MAX}: name a shorter one` };
-  if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(v)) return { problem: `${UI_BACK_LABEL_SETTING} has a control or format character (a line break, a tab, a direction mark): the link's label is one line of plain text` };
-  if (v.trim() === "") return { problem: `${UI_BACK_LABEL_SETTING} is white space alone: name the link's label, or unset it (${BACK_LABEL_DEFAULT})` };
+  if (chars.length > BACK_LABEL_MAX) return { problem: `${subject} is ${chars.length} characters, and the link's label is at most ${BACK_LABEL_MAX}: name a shorter one` };
+  if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(v)) return { problem: `${subject} has a control or format character (a line break, a tab, a direction mark): the link's label is one line of plain text` };
+  if (v.trim() === "") return { problem: `${subject} is white space alone: ${blank}` };
   return v;
 }
 
@@ -83,8 +94,8 @@ export function uiBackLinkSetting(env: Readonly<Record<string, string | undefine
   if (urlText === "") {
     return labelText === "" ? null : { problem: `${UI_BACK_LABEL_SETTING} is set without ${UI_BACK_URL_SETTING}, and the page has no link to label: set ${UI_BACK_URL_SETTING} too, or unset it` };
   }
-  const url = backUrl(urlText);
-  const label = labelText === "" ? BACK_LABEL_DEFAULT : backLabel(labelText);
+  const url = linkUrl(urlText, `${UI_BACK_URL_SETTING} is set`, "a link back");
+  const label = labelText === "" ? BACK_LABEL_DEFAULT : linkLabel(labelText, UI_BACK_LABEL_SETTING, `name the link's label, or unset it (${BACK_LABEL_DEFAULT})`);
   const problems = [url, label].flatMap((x) => typeof x === "string" ? [] : [x.problem]);
   if (problems.length > 0) return { problem: problems.join("; ") };
   return { url: url as string, label: label as string };

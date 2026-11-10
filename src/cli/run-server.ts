@@ -29,6 +29,7 @@ import { readBody, sendJson } from "../lib/http-json.ts";
 import { projectFingerprint } from "../lib/project-files.ts";
 import { guard, newTunnel, SECURITY_HEADERS, type PageTunnel } from "./security.ts";
 import type { BackLink } from "./ui-back-link.ts";
+import type { PageNav } from "./ui-nav.ts";
 import { PAGE_READ_ONLY_WHY, pageAllows, pageReadOnlyRefusal, pageWrite, type PageArea } from "./ui-read-only.ts";
 import { maskedUrl, type Source, type SourceFacts } from "./preflight.ts";
 import { errorJson, nextJson, type Failure, type NextStep } from "./command.ts";
@@ -85,6 +86,9 @@ export interface RunContext {
   /** MASON_UI_BACK_URL and MASON_UI_BACK_LABEL (src/cli/ui-back-link.ts): the page's link back to the site that links to
    *  it, validated at the start, or null */
   pageBack?: BackLink | null;
+  /** MASON_UI_NAV_<ITEM>_URL and MASON_UI_NAV_LINKS (src/cli/ui-nav.ts): the sidebar's items replaced by the host's pages,
+   *  and the host's own links, validated at the start, or null. Links only: what the server answers is unchanged */
+  pageNav?: PageNav | null;
   /** MASON_UI_SOCKET (src/cli/ui-socket.ts): the Unix socket the page is served on too, or null */
   pageSocket?: string | null;
   /** the project's database is the demo database this run hosts (`mason init demo`, src/cli/demo.ts): mason status says so */
@@ -215,6 +219,8 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     pageReadOnlyAllow: ctx.pageReadOnly === true ? [...(ctx.pageReadOnlyAllow ?? [])] : [],
     // the page's link back to the site that links to it (MASON_UI_BACK_URL, src/cli/ui-back-link.ts), or null
     pageBack: ctx.pageBack ?? null,
+    // the sidebar as the host says it (MASON_UI_NAV_*, src/cli/ui-nav.ts): { items, links }, or null
+    pageNav: ctx.pageNav ?? null,
     // the Unix socket the page is served on too (MASON_UI_SOCKET), or null: mason status says it
     pageSocket: ctx.pageSocket ?? null,
     source: { url: maskedUrl(ctx.source.url), host: ctx.source.host, database: ctx.source.database, remote: ctx.source.remote, demo: ctx.demo === true,
@@ -495,6 +501,7 @@ export const PAGE_ROUTES: Readonly<Record<string, readonly [file: string, type: 
   "/app.js": ["app.js", "text/javascript; charset=utf-8"],
   "/app.css": ["app.css", "text/css; charset=utf-8"],
   // the shell's shared helpers and one module per page (src/web/app.js has the page module contract)
+  "/routes.js": ["routes.js", "text/javascript; charset=utf-8"],
   "/shared.js": ["shared.js", "text/javascript; charset=utf-8"],
   "/pages/status.js": ["pages/status.js", "text/javascript; charset=utf-8"],
   "/pages/tables.js": ["pages/tables.js", "text/javascript; charset=utf-8"],
@@ -518,7 +525,8 @@ export const PAGE_ROUTES: Readonly<Record<string, readonly [file: string, type: 
   "/vendor/lucide-1.56.0/chart-column.mjs": ["vendor/lucide-1.56.0/chart-column.mjs", "text/javascript; charset=utf-8"],
   "/vendor/lucide-1.56.0/layout-dashboard.mjs": ["vendor/lucide-1.56.0/layout-dashboard.mjs", "text/javascript; charset=utf-8"],
   "/vendor/lucide-1.56.0/logs.mjs": ["vendor/lucide-1.56.0/logs.mjs", "text/javascript; charset=utf-8"],
-  "/vendor/lucide-1.56.0/menu.mjs": ["vendor/lucide-1.56.0/menu.mjs", "text/javascript; charset=utf-8"],
+  "/vendor/lucide-1.56.0/link.mjs": ["vendor/lucide-1.56.0/link.mjs", "text/javascript; charset=utf-8"],
+  "/vendor/lucide-1.56.0/menu.mjs":["vendor/lucide-1.56.0/menu.mjs", "text/javascript; charset=utf-8"],
   "/vendor/lucide-1.56.0/square-terminal.mjs": ["vendor/lucide-1.56.0/square-terminal.mjs", "text/javascript; charset=utf-8"],
   "/vendor/lucide-1.56.0/table.mjs": ["vendor/lucide-1.56.0/table.mjs", "text/javascript; charset=utf-8"],
   "/vendor/lucide-1.56.0/users.mjs": ["vendor/lucide-1.56.0/users.mjs", "text/javascript; charset=utf-8"],

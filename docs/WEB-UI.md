@@ -317,6 +317,34 @@ listens, and every browser connection crosses that one ssh connection as frames 
   too) and sets it as the link's `href` attribute and the label as its text, never as HTML; the link carries
   `rel="noreferrer"` beside the page's `Referrer-Policy: no-referrer`, so the page's address never reaches the other
   site. It works with `MASON_UI_READ_ONLY=1`; unset, nothing changes. `mason start` refuses both.
+- **A sidebar item that links to the host's own page: `MASON_UI_NAV_<ITEM>_URL`.** For a page embedded in a site that
+  has its own page for part of what the sidebar shows (its users, say, managed with what Mason does not know), one
+  setting per item: `MASON_UI_NAV_OVERVIEW_URL`, `MASON_UI_NAV_TABLES_URL`, `MASON_UI_NAV_USERS_URL`,
+  `MASON_UI_NAV_QUERIES_URL`, `MASON_UI_NAV_USAGE_URL`, `MASON_UI_NAV_SYNC_EVENTS_URL`. The item keeps its label and
+  icon and links to that URL in the same tab, sending no referrer, on the full sidebar, the icon rail and the phone's
+  menu. Every link of Mason's own into that view goes there too — the Overview's Create a user and its Getting started
+  step, a card, a client's Queries, a table's sync events, a page's lead — and so does opening the view's address
+  (`#users`, `#users?…`, an old one such as `#queries`): the page replaces it with the URL, so Back does not land on it
+  again. With the Overview replaced, the page opened with no address shows its first item not replaced. The URL is read
+  exactly as `MASON_UI_BACK_URL`'s (`src/cli/ui-back-link.ts`, the one reading): a path from the host's root or an
+  `https://` / `http://` URL, printable ASCII, no user or password, at most 2048 characters; anything else refuses the
+  start. **A URL whose `#fragment` names a view that is replaced refuses the start too** (`/#tables` beside
+  `MASON_UI_NAV_TABLES_URL`, `/?a#queries`, `https://example.com/#status` beside `MASON_UI_NAV_OVERVIEW_URL`, or
+  `/#users` as `MASON_UI_NAV_USERS_URL` itself): where the URL is the page itself (a proxy serving it at that path), the
+  page would leave one replaced view for another for ever. The fragment is read as the page's router reads the address
+  (`src/web/routes.js`, the one list of its hashes, aliases included); a fragment naming a view that is not replaced
+  (`/#tables` with Tables kept), or none, is taken. **It is a link, not a refusal**: the run still answers that view's endpoints (`/api/users`), and what a page
+  may change is still `MASON_UI_READ_ONLY` and `MASON_UI_READ_ONLY_ALLOW`'s to say — set them beside it when the host's
+  page is the only place a change should be made. A `MASON_UI_NAV_*` name that is none of these (`MASON_UI_NAV_USER_URL`)
+  refuses the start, with a `did you mean`. `/api/state` and `mason status --json` say `pageNav: { items, links }`
+  (`items` by `overview`, `tables`, `users`, `queries`, `usage`, `syncEvents`, each the URL), or `null`.
+- **The host's own links in the sidebar: `MASON_UI_NAV_LINKS`.** A JSON list of at most 5 `{ "label", "url" }`, shown
+  as a group of their own at the end of the sidebar's nav, each with a link icon, in the same tab, sending no referrer:
+  `MASON_UI_NAV_LINKS='[{"label":"Billing","url":"/billing"}]'`. Each URL is read as the link back's, each label as
+  `MASON_UI_BACK_LABEL` is (one line of plain text, at most 64 characters, never white space alone) and rendered as
+  text, never as HTML. Text that is not JSON, not a list, more than 5 links, an entry that is not an object or has a key
+  other than `label` and `url`, or a label or URL that is wrong refuses the start, every problem on one line, naming the
+  entry. `mason start` refuses both settings, as the other `MASON_UI_*` server settings.
 - **In the image, Mason's user is uid 1000, gid 1000 (`node`), and stays so**: an image that changes it names it under
   "Before you upgrade" in its release notes (deploy/mason-data/README.md). A supervisor that creates the folder of the
   socket or the run file makes it owned by `1000:1000`, mode 0700, where the container mounts it (the one folder rule of
@@ -439,6 +467,8 @@ reads:
   refuses an edit `409`, or the server cannot write the sources file, which fails an edit `500` `failed`.
 - `pageReadOnly`: the page's read-only reason, or null. It does not apply to the operator.
 - `pageReadOnlyAllow`: what that page still changes, `["tables"]` with `MASON_UI_READ_ONLY_ALLOW=tables`, else `[]`.
+- `pageNav`: the sidebar as the host says it, `{ items, links }` (`MASON_UI_NAV_<ITEM>_URL`, `MASON_UI_NAV_LINKS`), or
+  null. It changes no route the server answers.
 
 **One table's columns: `GET /api/tables/<table>/columns`**, with `<table>` URL-encoded (`public.orders`). The answer
 has `table` and `columns`, each column with `name`, `type`, `nullable`, `comment` and `references` (`{ table, column }`

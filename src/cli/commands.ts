@@ -137,6 +137,10 @@ export interface RunState {
   /** the page's link back to the site that links to it (mason serve with MASON_UI_BACK_URL, src/cli/ui-back-link.ts),
    *  or null: src/cli/run-server.ts runState; a run from before it has none */
   pageBack?: { url: string; label: string } | null;
+  /** the sidebar as the host says it (mason serve with MASON_UI_NAV_<ITEM>_URL and MASON_UI_NAV_LINKS,
+   *  src/cli/ui-nav.ts): the items replaced, a URL each, and the host's links, or null: src/cli/run-server.ts runState;
+   *  a run from before it has none */
+  pageNav?: { items: Record<string, string>; links: Array<{ url: string; label: string }> } | null;
   /** the Unix socket the page is served on too (mason serve with MASON_UI_SOCKET), or null: src/cli/run-server.ts
    *  runState; a run from before it has none */
   pageSocket?: string | null;
@@ -443,7 +447,10 @@ const STATUS_USAGE = `usage: mason status [--json]
     server's sources file it cannot write — or null), pageReadOnly (why the page changes nothing: mason serve with
     MASON_UI_READ_ONLY=1, which refuses every change the page sends — or null), pageReadOnlyAllow (what that page
     still changes: [tables] with MASON_UI_READ_ONLY_ALLOW=tables, else []), pageBack ({ url, label }: the
-    page's link back to the site that links to it, mason serve with MASON_UI_BACK_URL — or null), pageSocket (the Unix socket the
+    page's link back to the site that links to it, mason serve with MASON_UI_BACK_URL — or null), pageNav ({ items, links }: the sidebar's
+    items that link to the host's own pages instead — items has overview, tables, users, queries, usage or syncEvents,
+    each the URL it links to, mason serve with MASON_UI_NAV_<ITEM>_URL — and the host's links, [{ url, label }], with
+    MASON_UI_NAV_LINKS — or null), pageSocket (the Unix socket the
     page is served on too: mason serve with MASON_UI_SOCKET — or null), next }.
     Each table's kept is how it is kept current now (absent for a table the sync does not hold):
     { by: poll, sync: { mode: off } or { mode: poll, every (30s), seconds } (its entry's sync:, else the file's,
@@ -486,7 +493,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
   json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "generatedTables", "queries", "slowQueries", "refusedQueries",
-    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "pageReadOnly", "pageReadOnlyAllow", "pageBack", "pageSocket",
+    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "pageReadOnly", "pageReadOnlyAllow", "pageBack", "pageNav", "pageSocket",
     "roles", "share", "shareEnded", "lastRun", "lastStop", "hung", "next"],
 };
 

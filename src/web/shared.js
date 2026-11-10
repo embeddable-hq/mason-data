@@ -13,10 +13,11 @@ import chartColumn from "./vendor/lucide-1.56.0/chart-column.mjs";
 import logsIcon from "./vendor/lucide-1.56.0/logs.mjs";
 import menuIcon from "./vendor/lucide-1.56.0/menu.mjs";
 import xIcon from "./vendor/lucide-1.56.0/x.mjs";
+import linkIcon from "./vendor/lucide-1.56.0/link.mjs";
 
 /** The icons the page draws, by Lucide's name: each an inline SVG in `currentColor` (its size and stroke the stylesheet's). */
 export const ICONS = { "layout-dashboard": layoutDashboard, table: tableIcon, users: usersIcon, "square-terminal": squareTerminal,
-  "chart-column": chartColumn, logs: logsIcon, menu: menuIcon, x: xIcon };
+  "chart-column": chartColumn, logs: logsIcon, menu: menuIcon, x: xIcon, link: linkIcon };
 
 /** An icon, inline and decorative (the label beside it, or its control's own label, is what a reader hears):
  *  `icon("table")`. A name it does not know is no icon. */

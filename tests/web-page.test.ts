@@ -878,6 +878,192 @@ test("in the browser: the state's pageBack is the sidebar's link on every page, 
   assert.notEqual((oldEl("back") as unknown as { hidden?: boolean }).hidden, false);
 });
 
+// ------------------------------------------------------------- the host's sidebar (MASON_UI_NAV_*, issue 789)
+
+/** Every page's item replaced by the host, a URL each (`/api/state` `pageNav.items`, by its key there). */
+const ALL_REPLACED = { overview: "/host/overview", tables: "/host/tables", users: "/host/users", queries: "https://console.example.com/queries", usage: "/host/usage?x=1&y=2", syncEvents: "/host/sync-events" };
+const PAGE_OF_ITEM: Record<string, string> = { overview: "status", tables: "tables", users: "users", queries: "queries", usage: "usage", syncEvents: "syncs" };
+const hashHrefs = (html: string): string[] => [...html.matchAll(/href="(#[^"]*)"/g)].map((m) => m[1]!.replace(/&amp;/g, "&"));
+
+test("the state says pageNav: the sidebar the run was started with, null without; mason status --json declares it", () => {
+  const ctxOf = (pageNav?: unknown) => ({
+    source, facts: () => ({ version: 160000, versionText: "16.4", standby: false, tables: TABLES, systemIdentifier: null }), warnings: [], replication: () => null,
+    page: true, served: true, ...(pageNav === undefined ? {} : { pageNav }), users: { file: "/app/.mason/users.json", apiKey: "k".repeat(32), database: "shop", postgresUrl: "postgresql://127.0.0.1:5433/shop" },
+    folder: () => "/app/mason", root: "/app", home: "/app/.mason", version: "0.9.0", startedAt: Date.parse("2026-10-27T09:00:00.000Z"),
+    sources: () => ({ file: sourceFile, problem: null }), listener: { openSessions: () => ({ open: 0, byClient: [] }) },
+    duck: { file: "/app/.mason/duck.db", requests: { days: 7 }, restarts: () => [], disk: () => ({ path: "/app/.mason", freeBytes: null, projectedBytes: null }) },
+  }) as unknown as RunContext;
+  const now = Date.parse("2026-10-27T10:00:00.000Z");
+  const nav = { items: { users: "/host/users" }, links: [{ label: "Billing", url: "/billing" }] };
+  assert.deepEqual((runState(ctxOf(nav), [], null, now) as RunState).pageNav, nav);
+  assert.equal((runState(ctxOf(), [], null, now) as RunState).pageNav, null);
+  assert.equal((runState(ctxOf(null), [], null, now) as RunState).pageNav, null);
+  assert.ok(commands.STATUS.json!.includes("pageNav"), "mason status --json declares it");
+  assert.match(commands.STATUS.usage, /pageNav \(\{ items, links \}/);
+});
+
+test("renderNav with the host's sidebar: a replaced item keeps its label and icon and links to the URL in the same tab, never current; the host's links a group of their own, each label TEXT", () => {
+  const renderNav = fn<[string, string?, unknown?], string>("renderNav");
+  // unset (null, none, a state from before it): as before
+  assert.equal(renderNav("users", "now", null), renderNav("users", "now"));
+  assert.equal(renderNav("users", "now", { items: {}, links: [] }), renderNav("users", "now"));
+  const nav = { items: { users: "/host/users?tab=db", syncEvents: "https://console.example.com/events" }, links: [{ label: "<script>alert(1)</script> & co", url: "/billing" }, { label: "Network", url: "https://console.example.com/net?a=1&b=2" }] };
+  const html = renderNav("users", "24h", nav);
+  assert.match(html, /<a href="\/host\/users\?tab=db" rel="noreferrer"><span class="icon" aria-hidden="true"><svg\s+class="lucide lucide-users"[\s\S]*?<\/svg><\/span><span class="label">Users<\/span><\/a>/, "its icon, its label, the host's URL");
+  assert.match(html, /<a href="https:\/\/console\.example\.com\/events" rel="noreferrer"><span class="icon" aria-hidden="true"><svg\s+class="lucide lucide-logs"[\s\S]*?<\/svg><\/span><span class="label">Sync events<\/span><\/a>/);
+  assert.ok(!html.includes('href="#users"') && !html.includes("#observability/syncs"), "no link to the replaced views' own hashes");
+  assert.ok(!html.includes('aria-current="page"'), "a replaced item is never the current page (the page left for it)");
+  assert.ok(!/target=/.test(html), "the same tab");
+  // the others as before, the range kept
+  assert.ok(html.includes('href="#tables"') && html.includes('href="#observability/queries?range=24h"'));
+  // the host's links: last, a group without a heading of Mason's, the link icon, the label escaped
+  const group = html.split('<li class="group host-links">')[1]!;
+  assert.ok(group !== undefined && html.endsWith("</ul></li></ul>"));
+  assert.match(group, /^<ul aria-label="Links"><li><a href="\/billing" rel="noreferrer"><span class="icon" aria-hidden="true"><svg\s+class="lucide lucide-link"/);
+  assert.ok(group.includes('<span class="label">&lt;script&gt;alert(1)&lt;/script&gt; &amp; co</span>'), "a label is text, never markup");
+  assert.ok(!html.includes("<script>"));
+  assert.ok(group.includes('href="https://console.example.com/net?a=1&amp;b=2" rel="noreferrer"'));
+  // links alone, no item replaced: every item as before, the group after them
+  const linksOnly = renderNav("status", "now", { items: {}, links: [{ label: "Billing", url: "/billing" }] });
+  assert.ok(linksOnly.startsWith(renderNav("status", "now").slice(0, -"</ul>".length)));
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
+  assert.match(css, /\.nav \.host-links \{ padding-top: var\(--space-3\); border-top: 1px solid var\(--line\); \}/);
+});
+
+test("every link of Mason's own into a replaced view goes to the host's page: the Overview's Create a user and Getting started, its cards and parts, Users' and Usage's Queries, Tables' sync events, Queries' and Usage's leads", async () => {
+  const retarget = fn<[string, unknown], string>("retarget");
+  const queriesHref = fn<[Record<string, string>, string], string>("queriesHref");
+  const shared = await import(path.join(WEB, "shared.js") as string) as { USERS_HASH: string };
+  const { userQueriesHref } = await import(path.join(WEB, "pages", "users.js") as string) as { userQueriesHref: (n: string) => string };
+  const { syncsHref } = await import(path.join(WEB, "pages", "tables.js") as string) as { syncsHref: (t: string) => string };
+  const nav = { items: ALL_REPLACED, links: [] };
+  // each builder of a link into a view, and an alias of before, sent to that view's URL; a hash naming no page is left alone
+  const cases: Array<[string, string]> = [[shared.USERS_HASH, "/host/users"], ["#overview", "/host/overview"], ["#status", "/host/overview"], ["#tables?show=failed", "/host/tables"],
+    [queriesHref({ user: "metabase", client: "Metabase" }, "24h"), "https://console.example.com/queries"], [userQueriesHref("metabase"), "https://console.example.com/queries"],
+    [syncsHref("public.orders"), "/host/sync-events"], ["#observability/usage?range=24h", "/host/usage?x=1&y=2"], ["#queries", "https://console.example.com/queries"], ["#logs", "/host/sync-events"]];
+  for (const [hash, url] of cases) {
+    const a = `<a class="btn small" href="${hash.replace(/&/g, "&amp;")}">x</a>`;
+    assert.equal(retarget(a, nav), `<a class="btn small" href="${url.replace(/&/g, "&amp;")}" rel="noreferrer">x</a>`, hash);
+    assert.equal(retarget(a, { items: {}, links: [] }), a, `${hash}: unset, as before`);
+    assert.equal(retarget(a, null), a);
+  }
+  assert.equal(retarget('<a href="#nowhere">x</a>', nav), '<a href="#nowhere">x</a>', "a hash that names no page is not a replaced view's");
+  // EVERY page, over states that write every lead (none added yet: Getting started; synced, failed: the cards and parts)
+  const states = [NONE, COPYING, CATALOG_STATE];
+  for (const state of states) {
+    const open = await pageByPage(state);
+    const all = await pageByPage({ ...state, pageNav: nav });
+    assert.ok(hashHrefs(open.all).length > 0, "unset: the pages link into each other");
+    assert.deepEqual(hashHrefs(all.all), [], "every item replaced: no link into a view of Mason's own is left");
+    // one at a time: each item's view's links, and only its, go to its URL
+    for (const [item, url] of Object.entries(ALL_REPLACED)) {
+      const one = await pageByPage({ ...state, pageNav: { items: { [item]: url }, links: [] } });
+      const left = hashHrefs(one.all);
+      assert.ok(left.every((h) => fn<[string], { id: string }>("parseHash")(h).id !== PAGE_OF_ITEM[item]), `${item}: no link to its view is left`);
+      const into = hashHrefs(open.all).filter((h) => fn<[string], { id: string }>("parseHash")(h).id === PAGE_OF_ITEM[item]).length;
+      const sent = one.all.split(`href="${url.replace(/&/g, "&amp;")}" rel="noreferrer"`).length - 1;
+      assert.ok(sent >= into && sent > 0, `${item}: each link into it (${into}) and its item go to its URL (${sent})`);
+      assert.equal(left.length, hashHrefs(open.all).length - into, `${item}: every other link as it was`);
+    }
+  }
+  // the ones named in the issue, by name: the Overview's Create a user (Connect) and its Getting started step
+  for (const pageNav of [null, { items: { users: "/host/users" }, links: [] }]) {
+    const run = fakeRun();
+    run.answers.set("GET api/state", () => new Response(JSON.stringify({ ...COPYING, pageNav }), { status: 200 }));
+    run.answers.set("GET api/users", () => new Response(JSON.stringify({ users: [] }), { status: 200 }));
+    const app = fn<[unknown], App>("createApp")(run.fetch);
+    await app.poll();
+    const overview = app.view().status!;
+    const leads = overview.match(/<a class="btn[^"]*" href="[^"]*"(?: rel="noreferrer")?>Create a user<\/a>/g) ?? [];
+    assert.equal(leads.length, 2, "Connect's Create a user and Getting started's step");
+    for (const a of leads) assert.ok(a.includes(pageNav === null ? 'href="#users">' : 'href="/host/users" rel="noreferrer">'), a);
+  }
+  // index.html's own links into a view (the Queries' and Usage's leads), which no part writes: the same rule over the document
+  const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
+  const main = html.split("<main>")[1]!;
+  const statics = hashHrefs(main);
+  assert.ok(statics.includes("#observability/usage") && statics.includes("#observability/queries"));
+  for (const h of statics) assert.notEqual(fn<[string, unknown], string | null>("elsewhere")(h, nav), null, `${h}: index.html's link follows a replaced view`);
+});
+
+test("leave: a hash naming a replaced view leaves for its URL (its parameters and an old alias too); none, with the Overview replaced, is Mason's first page of its own; before the state, nothing", async () => {
+  const run = fakeRun();
+  const app = fn<[unknown], App & { leave(h: string): unknown }>("createApp")(run.fetch);
+  assert.equal(app.leave("#users"), null, "the state not read yet: nothing known");
+  run.answers.set("GET api/state", () => new Response(JSON.stringify({ ...CATALOG_STATE, pageNav: { items: { overview: "/host", users: "/host/users", queries: "/q" }, links: [] } }), { status: 200 }));
+  await app.poll();
+  const cases: Array<[string, unknown]> = [["#users", { url: "/host/users" }], ["#users?x=1", { url: "/host/users" }], ["users", { url: "/host/users" }], ["#overview", { url: "/host" }],
+    ["#status", { url: "/host" }], ["#queries", { url: "/q" }], ["#observability/queries?range=7d&slow=1", { url: "/q" }], ["", { hash: "#tables" }], ["#", { hash: "#tables" }],
+    ["#nowhere", { hash: "#tables" }], ["#tables", null], ["#observability/usage", null]];
+  for (const [hash, want] of cases) assert.deepEqual(app.leave(hash), want, JSON.stringify(hash));
+  // the Overview kept: a hash naming nothing lands on it, as before
+  run.answers.set("GET api/state", () => new Response(JSON.stringify({ ...CATALOG_STATE, pageNav: { items: { users: "/host/users" }, links: [] } }), { status: 200 }));
+  await app.poll();
+  assert.equal(app.leave(""), null);
+  // every item replaced: a hash naming nothing stays (the page has no view of its own to go to)
+  run.answers.set("GET api/state", () => new Response(JSON.stringify({ ...CATALOG_STATE, pageNav: { items: ALL_REPLACED, links: [] } }), { status: 200 }));
+  await app.poll();
+  assert.equal(app.leave(""), null);
+  assert.deepEqual(app.leave("#tables"), { url: "/host/tables" });
+  // unset: never
+  run.answers.set("GET api/state", () => new Response(JSON.stringify(CATALOG_STATE), { status: 200 }));
+  await app.poll();
+  for (const h of ["#users", "", "#overview"]) assert.equal(app.leave(h), null);
+});
+
+test("in the browser: opening a replaced view's hash, or following one, replaces the address with the host's page — never shown, never read again; the host's links on every page", async () => {
+  const nav = { items: { users: "/host/users", overview: "https://console.example.com/" }, links: [{ label: "<b>Billing</b>", url: "/billing" }] };
+  const withNav = () => { const run = fakeRun(); run.answers.set("GET api/state", () => new Response(JSON.stringify({ ...CATALOG_STATE, pageNav: nav }), { status: 200 })); return run; };
+  // opened at #users: once the state says so, the address is replaced (Back does not land on it again), once
+  const run = withNav();
+  const b = fakeBrowser(run, "#users");
+  await until(() => b.replaced.length > 0);
+  assert.deepEqual(b.replaced, ["/host/users"]);
+  // (a wait for what must NOT happen: a delay too short only weakens it, never fails it)
+  b.tick(); await b.settle();
+  assert.deepEqual(b.replaced, ["/host/users"], "asked once, however many paints follow");
+  // opened with no hash, the Overview replaced: Mason's first page of its own, its hash replaced
+  const bare = fakeBrowser(withNav());
+  await until(() => /<a href="#tables" aria-current="page">/.test(bare.el("nav").html), "the Tables page shown");
+  assert.deepEqual(bare.replaced, ["#tables"]);
+  assert.match(bare.el("nav").html, /<a href="https:\/\/console\.example\.com\/" rel="noreferrer"><span class="icon" aria-hidden="true">[\s\S]*?<\/span><span class="label">Overview<\/span><\/a>/);
+  assert.ok(bare.el("nav").html.includes('<span class="label">&lt;b&gt;Billing&lt;/b&gt;</span>'), "the host's link, its label text");
+  // a link of the page's followed to a replaced view: left at once, its reads never asked
+  const r2 = withNav();
+  const nb = fakeBrowser(r2, "#tables");
+  await until(() => nb.el("nav").html.includes("Billing") && /<a href="#tables" aria-current="page">/.test(nb.el("nav").html), "the Tables page shown, the state's sidebar on it");
+  const before = r2.asked.length;
+  nb.go("#users");
+  await until(() => nb.replaced.length > 0);
+  await nb.settle();
+  assert.deepEqual(nb.replaced, ["/host/users"]);
+  assert.ok(!r2.asked.slice(before).some((a) => a.startsWith("GET api/users")), "the replaced view is not read");
+  // the browser did not leave (the navigation stopped, the host answered 204): the hash typed again leaves again
+  nb.go("#tables"); nb.go("#users");
+  await until(() => nb.replaced.length === 2, "left again");
+  assert.deepEqual(nb.replaced, ["/host/users", "/host/users"]);
+  assert.ok(!r2.asked.slice(before).some((a) => a.startsWith("GET api/users")), "the replaced view is still not read");
+  // unset: nothing leaves (the Users page shown once the state is read)
+  const plainRun = fakeRun();
+  const plain = fakeBrowser(plainRun, "#users");
+  await until(() => plainRun.asked.some((a) => a.startsWith("GET api/users")) && plain.el("page-users").hidden === false, "the Users page shown and read");
+  assert.deepEqual(plain.replaced, []);
+});
+
+test("in the browser: an item pointing into the page at a view not replaced (/#tables, the page at the host's root) is one hop to that view; a replaced view's hash typed later leaves again", async () => {
+  // (a loop of such items cannot be configured: mason serve refuses a URL whose fragment names a replaced view,
+  // tests/cli-ui-nav.test.ts)
+  const run = fakeRun();
+  run.answers.set("GET api/state", () => new Response(JSON.stringify({ ...CATALOG_STATE, pageNav: { items: { users: "/#tables" }, links: [] } }), { status: 200 }));
+  const b = fakeBrowser(run, "#users");
+  await until(() => b.el("page-tables").hidden === false, "the Tables page shown");
+  assert.deepEqual(b.replaced, ["/#tables"]);
+  b.go("#users");
+  await until(() => b.replaced.length === 2, "left again");
+  await until(() => b.el("page-tables").hidden === false && b.el("page-users").hidden === true, "back on Tables");
+  assert.deepEqual(b.replaced, ["/#tables", "/#tables"]);
+});
+
 test("a server's Connect says the URL's host is the server's own view of itself; a laptop's page says nothing of it", async () => {
   const renderConnect = fn<[unknown, unknown?], string>("renderConnect");
   const { renderUsersConnect } = await import(path.join(WEB, "pages", "users.js") as string) as { renderUsersConnect: (pg: unknown, served?: boolean) => string };
@@ -1257,8 +1443,9 @@ test("the page's files fetch nothing from elsewhere and never touch the token: t
     if (!f.endsWith(".js")) continue;
     const code = text.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
     // the hash chooses the page shown (#status): it never holds the token, which the first request traded for the cookie
-    // and dropped from the address; every other part of `location` (search, href) is refused, as the cookie and storage are
-    assert.ok(!/\blocation\b(?!\.hash\b)|document\.cookie|localStorage|sessionStorage|indexedDB|[?&]token=|\.token\b/.test(code),
+    // and dropped from the address; every other part of `location` (search, href) is refused, as the cookie and storage are.
+    // `location.replace(…)` reads nothing: it leaves for a page the host replaced a view with (MASON_UI_NAV_*, issue 789)
+    assert.ok(!/\blocation\b(?!\.hash\b|\.replace\()|document\.cookie|localStorage|sessionStorage|indexedDB|[?&]token=|\.token\b/.test(code),
       `${f}: the cookie carries the token; the page's script never reads it, the address (but its hash) or storage`);
     // every module it imports is the page's own, a route of PAGE_ROUTES (tests/cli-run-server.test.ts serves each)
     // (a vendored module keeps its own name: Lucide's icons are .mjs, src/web/vendor/README.md)
@@ -1283,12 +1470,22 @@ test("the page names nothing root-absolute: every asset, API path and import is 
   for (const ok of [`fetch("api/state")`, `<link href="app.css">`, `"<svg/>"`, `<path d="M3 3z"/>`, `x.split("//")`]) assert.ok(!new RegExp(rootAbsolute.source).test(ok), ok);
 });
 
+/** Wait until `cond` holds, checked every 5 ms, failing by name after `ms`: a wait on the condition, never on a delay a
+ *  busy machine outruns. */
+async function until(cond: () => boolean, what = "the condition", ms = 5000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > end) assert.fail(`${what}: not met in ${ms} ms`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 /** The page in a fake browser: elements whose innerHTML reads back as a browser serialises it (a bare data-x attribute
  *  as data-x="", an apostrophe in text as itself), the listeners `start` adds, the interval it sets, and a FormData
  *  that reads a form's ticked boxes from the fake form. */
 function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "") {
   // an element's attributes, and what holds the focus: a target `{ in: "sidebar" }` is inside the element of that id
-  interface FakeEl { id: string; writes: number; html: string; innerHTML: string; attrs: Map<string, string>; addEventListener: () => void;
+  interface FakeEl { id: string; writes: number; html: string; hidden?: boolean; innerHTML: string; attrs: Map<string, string>; addEventListener: () => void;
     setAttribute(k: string, v: string): void; removeAttribute(k: string): void; contains(t: { in?: string } | null): boolean; focus(): void; querySelector(sel: string): FakeEl }
   const els = new Map<string, FakeEl>();
   const el = (id: string): FakeEl => els.get(id) ?? (els.set(id, { id, writes: 0, html: "", attrs: new Map(), addEventListener: () => undefined,
@@ -1299,15 +1496,24 @@ function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "") {
     querySelector(sel: string) { return el(`${this.id} ${sel}`); } }), els.get(id)!);
   const on = new Map<string, (e: unknown) => Promise<void> | void>();
   const doc = { visibilityState: "visible", focused: "", getElementById: el, addEventListener: (type: string, f: (e: unknown) => void) => { on.set(type, f); } };
-  const location = { hash };
   const onWin = new Map<string, () => void>();
+  // what the page replaced the address with (a replaced view's URL, or a hash of its own, which the browser then says)
+  const replaced: string[] = [];
+  // A URL that is this page under another hash (`#tables`, or `/#tables` with the page served at the host's root) stays
+  // in the document and says a hashchange, as a browser does; past 20 the fake stops answering, so a page that would
+  // leave for ever fails its test instead of hanging it
+  const location = { hash, replace(u: string) {
+    replaced.push(u);
+    const at = /^\/?#/.exec(u);
+    if (at !== null && replaced.length <= 20) { location.hash = u.slice(at[0].length - 1); setTimeout(() => onWin.get("hashchange")!(), 0); }
+  } };
   let tick: (() => void) | null = null;
   class FormData { readonly ticked: Record<string, string[]>; constructor(form: { ticked: Record<string, string[]> }) { this.ticked = form.ticked; } getAll(name: string) { return this.ticked[name] ?? []; } }
   fn<[unknown, unknown], void>("start")(doc, { fetch: (p: string, i?: { method?: string; body?: string }) => run.fetch(p, i), FormData, location, addEventListener: (type: string, f: () => void) => { onWin.set(type, f); },
     setInterval: (f: () => void) => { tick = f; return 1; }, setTimeout: (f: () => void, ms: number) => setTimeout(f, ms) });
   /** the reader follows a link of the nav: the hash changes, and the browser says so */
   const go = (to: string) => { location.hash = to; onWin.get("hashchange")!(); };
-  return { el, on, doc, go, tick: () => tick!(), settle: () => new Promise((r) => setTimeout(r, 20)) };
+  return { el, on, doc, go, replaced, tick: () => tick!(), settle: () => new Promise((r) => setTimeout(r, 20)) };
 }
 
 test("in the browser: the phone's menu — its button opens the nav as a sheet, focus on its first link; Escape, a click outside, the focus leaving or a link followed close it", async () => {
@@ -2693,7 +2899,7 @@ test("the vendored files: each a route, whole, pinned in its folder's name, with
   const { PAGE_ROUTES } = await import("../src/cli/run-server.ts") as { PAGE_ROUTES: Record<string, readonly [string, string]> };
   const vendor = webFiles().filter((f) => f.startsWith(`vendor${path.sep}`)).map((f) => f.split(path.sep).join("/")).sort();
   assert.deepEqual(vendor, ["vendor/README.md", "vendor/geist-1.7.2/Geist-Variable.woff2", "vendor/geist-1.7.2/GeistMono-Variable.woff2", "vendor/geist-1.7.2/LICENSE.txt",
-    "vendor/lucide-1.56.0/LICENSE.txt", "vendor/lucide-1.56.0/chart-column.mjs", "vendor/lucide-1.56.0/layout-dashboard.mjs", "vendor/lucide-1.56.0/logs.mjs",
+    "vendor/lucide-1.56.0/LICENSE.txt", "vendor/lucide-1.56.0/chart-column.mjs", "vendor/lucide-1.56.0/layout-dashboard.mjs", "vendor/lucide-1.56.0/link.mjs", "vendor/lucide-1.56.0/logs.mjs",
     "vendor/lucide-1.56.0/menu.mjs", "vendor/lucide-1.56.0/square-terminal.mjs", "vendor/lucide-1.56.0/table.mjs", "vendor/lucide-1.56.0/users.mjs", "vendor/lucide-1.56.0/x.mjs",
     "vendor/uplot-1.6.32/LICENSE.txt", "vendor/uplot-1.6.32/uPlot.esm.js", "vendor/uplot-1.6.32/uPlot.min.css",
     "vendor/zilla-slab-5.3.0/LICENSE.txt", "vendor/zilla-slab-5.3.0/zilla-slab-latin-700-normal.woff2"]);

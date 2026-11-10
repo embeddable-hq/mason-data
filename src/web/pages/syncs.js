@@ -9,6 +9,7 @@
  * `/api/events` every 10 s while the range is Now, and `/api/logs` every 5 s ONLY WHILE the details is open (the page's own state: nothing is
  * read when it is closed); the events once when a range other than Now is chosen. A page module (src/web/app.js has the contract). Never the engine's name.
  */
+import { VIEW_HASHES } from "../routes.js";
 import { esc, agoText, utcText, badge, empty, panel, n, sortTh, nextSort, moreRows, readPart, eventCells, RANGES, DEFAULT_RANGE, rangeOf, rangeEvery } from "../shared.js";
 
 /** How many of the range's events are read (the newest), and how many of those the page writes at once. */
@@ -91,7 +92,7 @@ export function renderRawLog(open, inner) {
 
 export const page = {
   id: "syncs",
-  hash: "observability/syncs",
+  hash: VIEW_HASHES.syncs,
   parent: "observability",
   title: "Sync events",
   create(ctx) {

@@ -19,6 +19,7 @@
 // the Observability views' default, Now: a card that says 12 failed must land on the 12
 const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage?range=24h", queries: "#observability/queries?range=24h",
   slow: "#observability/queries?slow=1&range=24h", failedQueries: "#observability/queries?status=refused-or-failed&range=24h", failedEvents: "#observability/syncs?failures=1&range=7d" };
+import { VIEW_HASHES } from "../routes.js";
 import { msText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
   utcMinute, oneLine, clientText, eventCells, unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, renderConnect, copyClick,
   badge, button, copyable, pop, renderFailure, json, readOnlyLine, tablesReadOnly } from "../shared.js";
@@ -498,7 +499,7 @@ const asRequest = (r) => r === undefined ? undefined : r.failure ? { failure: r.
 
 export const page = {
   id: "status",
-  hash: "overview",
+  hash: VIEW_HASHES.status,
   title: "Overview",
   create(ctx) {
     // the details open (a copy's whole error), by key: a poll rewrites the section, and they stay open

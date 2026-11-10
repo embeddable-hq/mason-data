@@ -12,6 +12,7 @@
  * on Observability › Queries filtered so (`queriesHref`). Every number a chart draws is also text, in a card or the
  * samples' table. A page module (src/web/app.js has the contract). Never the engine's name.
  */
+import { VIEW_HASHES } from "../routes.js";
 import { esc, n, msText, bytesText, fileSize, duration, details, createOpenSet, cards, card, empty, panel, skeleton, sortTh, sortedBy, nextSort, readPart, usagePath, utcMinute,
   RANGES, DEFAULT_RANGE, rangeOf, isLive, rangeEvery, firstLine, spanText, agoText, utcText, clientText, clip, TITLE_MAX, unsupportedEntry, renderFailure, json, pop, fresh, actId,
   statementCell, POLL_MS, readOnlyLine } from "../shared.js";
@@ -323,7 +324,7 @@ export function renderCopySizes(sizes) {
 
 export const page = {
   id: "usage",
-  hash: "observability/usage",
+  hash: VIEW_HASHES.usage,
   parent: "observability",
   title: "Usage",
   create(ctx) {

@@ -32,6 +32,7 @@ import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, readSourceFacts, remoteConfirmation, remoteWarning, type SourceFacts } from "./preflight.ts";
 import { uiReadOnlyAllowSetting, uiReadOnlySetting, type PageArea } from "./ui-read-only.ts";
 import { backLinkOf, uiBackLinkSetting } from "./ui-back-link.ts";
+import { navOf, uiNavSetting } from "./ui-nav.ts";
 import { createRunServer, listenOnLoopback, metricsFacts, usageFacts, type RunContext } from "./run-server.ts";
 import type { RunMetrics } from "./metrics.ts";
 import { readGenerated } from "./generated-files.ts";
@@ -656,6 +657,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     pageReadOnlyAllow: o.serve !== undefined ? allowedOf(uiReadOnlyAllowSetting(process.env)) : [],
     // MASON_UI_BACK_URL: a server's page links back to the site that links to it (mason start refuses the setting above)
     pageBack: o.serve !== undefined ? backLinkOf(uiBackLinkSetting(process.env)) : null,
+    // MASON_UI_NAV_*: a server's sidebar, its items replaced by the host's pages and the host's links (mason start
+    // refuses them above)
+    pageNav: o.serve !== undefined ? navOf(uiNavSetting(process.env)) : null,
     // MASON_UI_SOCKET: the page on a Unix socket too (src/cli/ui-socket.ts), or null
     pageSocket: o.serve?.socket ?? null,
     demo: cfg.demo === true,
