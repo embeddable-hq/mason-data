@@ -7,12 +7,16 @@
  */
 import * as fs from "node:fs";
 
+const sizeOf = (f: string): number | null => {
+  try { return fs.statSync(f).size; }
+  catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw e; }
+};
+
+/** The write-ahead log's bytes: 0 when there is none (between checkpoints). */
+export function logBytes(file: string): number { return sizeOf(`${file}.wal`) ?? 0; }
+
 /** The file's bytes and its write-ahead log's (none between checkpoints), or null when the file is not there. */
 export function syncedDataBytes(file: string): number | null {
-  const size = (f: string): number | null => {
-    try { return fs.statSync(f).size; }
-    catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw e; }
-  };
-  const main = size(file);
-  return main === null ? null : main + (size(`${file}.wal`) ?? 0);
+  const main = sizeOf(file);
+  return main === null ? null : main + logBytes(file);
 }

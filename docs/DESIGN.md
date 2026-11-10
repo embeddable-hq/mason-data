@@ -2886,16 +2886,45 @@ The aggregate moved within its noise; a poll +2 ms at p95 and +11 – 24 ms at m
 runs INSIDE the commit that crosses the threshold: the same poll took 5 – 10 ms below it and 88 – 122 ms crossing it (5
 trials). A checkpoint taken earlier writes what that one would have written later. Bulk inserts of a full row group or
 more are written to the file as they commit (a 300,000-row table left 0 bytes of log), so what a checkpoint writes is
-small transactions' rows, bounded by the threshold: the page cache it could evict is that much, not measured on a
-machine whose cache is smaller than its table. DuckDB refuses a `CHECKPOINT` while another connection's open transaction
-has updated rows or changed the catalog ("Cannot CHECKPOINT: there are other write transactions active"), never beside a
-read, an insert or a delete.
+small transactions' rows. That is not bounded by the threshold: beside concurrent writers DuckDB skips its own
+checkpoint, and the review saw a log of 120 – 250 MB. The page cache it could evict was not measured on a machine whose
+cache is smaller than its table. DuckDB refuses a `CHECKPOINT` while another connection's open transaction has updated
+rows or changed the catalog ("Cannot CHECKPOINT: there are other write transactions active"), and while another is
+running an insert (8 of 8 tries during a first sync's chunks, the review); never beside a read, nor an open transaction
+that only inserted or deleted.
+
+**A checkpoint DuckDB cannot finish invalidates the database** (PR 826's review): on a 60 MB volume left 100 KiB free,
+the sampler's checkpoint of a 1.0 MB log failed "No space left on device", and every statement after it, before and after
+the space was freed, failed `XX000 … database has been invalidated` until the run restarted, while `mason status` said
+it ran; main kept serving the same volume, a write that did not fit failing its own commit alone. With 600 KiB free it
+succeeded. What a checkpoint needs, measured (each shape on a fresh file beside a checkpointed 2 M-row table, the file's
+growth and the engine's memory peak over what it held before):
+
+| what the log held | log | file grown | memory over |
+|---|---|---|---|
+| the issue's 25,000 rows × 4 columns | 918 KiB | 256 KiB | 0 |
+| 10 rows | 0.3 KiB | 256 KiB | 0.3 MiB |
+| 20 tables of 500 rows | 317 KiB | 5 MiB | 0.7 MiB |
+| 100,000 rows of 3 incompressible strings | 13.7 MiB | 4.5 MiB | 1.5 MiB |
+| 300 transactions of 2,000 rows | 10.8 MiB | 4.5 MiB | 2.8 MiB |
+| 400 values of 96 KB | 36.6 MiB | 256 KiB | 0 |
+| 50,000 rows deleted and inserted over the 2 M | 2.6 MiB | 2 MiB | 0 |
+
+So the rows take at most 0.8 times the log, and every table written takes a block (256 KiB) however few its rows. The
+sampler checkpoints only with room for twice the log and a block for every table of the file and 8 more, on the disk,
+and twice the log and an eighth of `store.memoryLimitBytes` free in the engine's memory; else it says the copies are not
+measured and why, and asks again at the next sample. With that guard the same 100 KiB volume skipped it, said so, served
+and wrote through the full disk, and measured the table once the space was freed. What it does not rule out: a checkpoint
+that fails for another reason (an I/O error; issue 371's merge of a first sync's out-of-line values, which DESIGN
+"Large values out of line" records failing under a memory limit, and whose memory the log does not show) invalidates the
+database as DuckDB's own checkpoint would, earlier than DuckDB would have taken it.
 
 **Decision.** A measure that finds a served copy with rows (segments in memory) and no block of its own checkpoints, on
-the samples' own connection (never the writer's turn, which a swap may hold), then measures it; a copy with blocks, and an
-empty one, take none, so it happens after a small copy's first sync or swap, not every 10 minutes. Refused, it is said
-once per streak and the copies left are measured again at the next sample, a minute later. **Where.** src/duck/usage.ts
-(`size`, `checkpoint`); tests/duck-usage.test.ts.
+the samples' own connection (never the writer's turn, which a swap may hold), when there is room, then measures it; a
+copy with blocks, and an empty one, take none, so it happens after a small copy's first sync or swap, not every 10
+minutes. Refused or skipped, it is said once per streak and the copies left are measured again at the next sample, a
+minute later — during a long first sync, once it ends. **Where.** src/duck/usage.ts (`size`, `checkpoint`,
+`checkpointRoom`); tests/duck-usage.test.ts.
 
 ### First copy, and the poll's cost on the source
 

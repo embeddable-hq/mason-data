@@ -165,6 +165,49 @@ test("a copy small enough to stay in the write-ahead log is measured at the firs
   }
 });
 
+test("on a near-full disk the checkpoint is not attempted (one DuckDB cannot finish invalidates the database): the copy is not measured, said once, never a 0, and the synced data keeps serving; measured once there is room (PR 826's review)", async () => {
+  const { UsageSampler } = await usage();
+  let clock = Date.parse("2026-10-28T12:10:00.000Z");
+  const file = path.join(dir, "duck.db");
+  const walBytes = (): number => (fs.existsSync(`${file}.wal`) ? fs.statSync(`${file}.wal`).size : 0);
+  await store.writer.run("CHECKPOINT");
+  await store.writer.run(`CREATE SCHEMA IF NOT EXISTS app`);
+  await store.writer.run(`CREATE TABLE app.full AS SELECT i AS id, i * 7 AS amount, 'name ' || i AS name, TIMESTAMP '2026-01-01' + to_seconds(i) AS at FROM range(25000) t(i)`);
+  const wal = walBytes();
+  assert.ok(wal > 100_000, `its rows are in the write-ahead log: ${wal} bytes`);
+  let free = 100 * 1024;
+  const asked: string[] = [];
+  const said: string[] = [];
+  const u = await UsageSampler.open(store, (l) => said.push(l), { days: 7, now: () => clock, sampleMs: NEVER, sizeEveryMs: 10 * 60_000,
+    diskFree: (d) => { asked.push(d); return free; } });
+  try {
+    u.start(async () => ({ ...facts, copied: ["app.full"] }));
+    await u.sample();
+    clock += 60_000;
+    await u.sample();
+    assert.deepEqual(await u.copySizes(), [], "not measured, never 0");
+    assert.ok(walBytes() >= wal, `no checkpoint attempted: the log kept (${walBytes()} of ${wal} bytes, the samples written beside)`);
+    assert.deepEqual([...new Set(asked)], [dir], "the disk the synced data is on");
+    const skips = said.filter((l) => /not measured/.test(l));
+    assert.deepEqual(skips.map((l) => l.replace(/\(100 KiB free, [\d.]+ MiB needed\)/, "(100 KiB free, N MiB needed)")),
+      ["usage: 1 synced table(s) not measured: too little free disk to write their rows into the file (100 KiB free, N MiB needed); measured at a sample once there is room, said once until then"], "said once");
+    assert.equal(said.filter((l) => /failed/.test(l)).length, 0, `no failure: ${said.join(" | ")}`);
+    const [[count, sum]] = (await store.writer.runAndReadAll("SELECT count(*), sum(amount) FROM app.full")).getRowsJS() as [[bigint, bigint]];
+    assert.deepEqual([Number(count), Number(sum)], [25000, 2187412500], "the synced data keeps serving");
+    free = 80 * 2 ** 30;
+    clock += 60_000;
+    await u.sample();
+    const [s] = await u.copySizes();
+    assert.equal(s?.table, "app.full", "measured at the next sample once there is room");
+    assert.ok(s!.bytes > 0);
+    assert.match(said.join("\n"), /^usage: measuring the synced tables whose rows are all in the write-ahead log again; 2 time\(s\) it was not$/m);
+  } finally {
+    await u.close();
+    await store.writer.run(`DROP TABLE app.full`);
+    await store.writer.run(`DELETE FROM _mason.copy_sizes`);
+  }
+});
+
 test("a copy with blocks of its own is measured without a checkpoint: rows added since stay in the write-ahead log", async () => {
   const { UsageSampler } = await usage();
   const clock = Date.parse("2026-10-28T12:30:00.000Z");
@@ -212,6 +255,7 @@ test("a checkpoint refused beside another connection's update is said once, and 
     assert.deepEqual(await u.copySizes(), [], "refused again");
     const refusals = said.filter((l) => /writing the synced tables' rows from the write-ahead log into the file to measure their size failed: .*CHECKPOINT/.test(l));
     assert.equal(refusals.length, 1, `said once: ${said.join(" | ")}`);
+    assert.ok(!refusals.some((l) => /FORCE/.test(l)), `no advice an operator cannot act on: ${refusals.join(" | ")}`);
     assert.equal(said.filter((l) => /measuring each synced table's size failed/.test(l)).length, 0, "no failure of the measure");
     await other.run("ROLLBACK");
     clock += 60_000;

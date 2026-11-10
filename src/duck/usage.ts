@@ -39,14 +39,19 @@
  * its noise and a poll's 500-row transaction +2 ms at p95, +11–24 ms at most — where DuckDB's own checkpoint, at the
  * threshold, runs INSIDE the commit that crossed it, taking that poll from 5 ms to 88–122 ms. It writes what DuckDB's own
  * would write later, and it is taken only while a copy is unmeasured that way (a small copy's first sync, or its swap),
- * never at every measure. DuckDB refuses a checkpoint while another connection's transaction has updated rows or changed
- * the catalog (a swap, a stored path's backfill): refused, it is said once per streak and those copies are measured again
- * at the next sample, a minute later, not ten.
+ * never at every measure. A checkpoint DuckDB cannot finish (the disk full, out of memory) INVALIDATES the database
+ * until the run restarts, where main went on serving a full disk, so it is taken only with room on the disk and in the
+ * engine's memory for what it writes (`checkpointRoom`), and skipped, said, otherwise. DuckDB refuses a checkpoint while
+ * another connection's transaction has updated rows or changed the catalog (a swap, a stored path's backfill), and while
+ * one is inserting (a first sync's chunks: small tables stay unmeasured until it ends). Refused or skipped, it is said
+ * once per streak and those copies are measured again at the next sample, a minute later.
  *
  * The Postgres catalog never lists `_mason`, so a tool connected to the listener cannot read the samples.
  */
 import type { DuckDBValue } from "@duckdb/node-api";
-import { MASON_SCHEMA, type DuckStore } from "./store.ts";
+import * as path from "node:path";
+import { freeBytesAt, MASON_SCHEMA, memorySize, type DuckStore } from "./store.ts";
+import { logBytes } from "./file-bytes.ts";
 import { History, Streak, cutoff } from "./history.ts";
 import { outcomeOf, type ApiLogRow, type Outcome } from "../api/request-log.ts";
 
@@ -238,6 +243,8 @@ export interface UsageOptions {
   /** a test's: the durations an interval keeps (DURATIONS_KEPT), and the reservoir's random draw in [0, 1) */
   durationsKept?: number;
   random?: () => number;
+  /** a test's: the bytes free on the disk at a folder (`freeBytesAt`) */
+  diskFree?: (dir: string) => number;
 }
 
 export class UsageSampler {
@@ -250,7 +257,8 @@ export class UsageSampler {
   private take: (() => Promise<UsageFacts>) | null = null;
   private lastSized = -Infinity;
   private sizedOnce = false;
-  /** the copies the last measure could not size because its checkpoint was refused: measured again at the next sample */
+  /** the copies the last measure could not size because its checkpoint was refused or skipped: measured again at the
+   *  next sample */
   private unsized = new Set<string>();
   /** a streak of failures, said once: what failed (a sample taken, written, sized), and how many */
   private readonly lost = new Map<string, Streak>();
@@ -262,9 +270,11 @@ export class UsageSampler {
   readonly days: number;
   readonly memoryLimitBytes: number;
   readonly sampleSeconds: number;
+  /** the synced data's file: its write-ahead log, and the disk it is on, sized before a checkpoint */
+  private readonly file: string;
 
-  private constructor(history: History, log: (line: string) => void, memoryLimitBytes: number, options: UsageOptions) {
-    this.history = history; this.log = log; this.options = options; this.days = options.days; this.memoryLimitBytes = memoryLimitBytes;
+  private constructor(history: History, log: (line: string) => void, file: string, memoryLimitBytes: number, options: UsageOptions) {
+    this.history = history; this.log = log; this.options = options; this.days = options.days; this.memoryLimitBytes = memoryLimitBytes; this.file = file;
     this.sampleSeconds = (options.sampleMs ?? SAMPLE_SECONDS * 1000) / 1000;
     this.last = this.now();
   }
@@ -273,7 +283,7 @@ export class UsageSampler {
    *  begins with `start`, once the run's facts can be read. */
   static async open(store: DuckStore, log: (line: string) => void, options: UsageOptions): Promise<UsageSampler> {
     const history = await History.open(store, [USAGE_DDL, ...USAGE_ADDED.map((c) => `ALTER TABLE ${USAGE_TABLE} ADD COLUMN IF NOT EXISTS ${c}`), SIZES_DDL]);
-    const u = new UsageSampler(history, log, store.memoryLimitBytes, options);
+    const u = new UsageSampler(history, log, store.file, store.memoryLimitBytes, options);
     await history.keepTrimmed(() => u.trim(), (e) => log(`usage: deleting the samples older than ${u.days} days failed: ${e.message}`));
     return u;
   }
@@ -403,7 +413,7 @@ export class UsageSampler {
         if (b.blocks === 0) { if (b.inMemory > 0) inLog.push([name, q]); continue; }
         rows.push([name, b.blocks * block]);
       }
-      if (inLog.length > 0 && await this.checkpoint(inLog.length)) {
+      if (inLog.length > 0 && await this.checkpoint(inLog.length, block)) {
         for (const [name, q] of inLog) {
           const b = await this.blocksOf(q);
           if (b !== null && b.blocks > 0) rows.push([name, b.blocks * block]);
@@ -443,23 +453,64 @@ export class UsageSampler {
 
   /**
    * A CHECKPOINT on the samples' own connection, so `n` copies whose rows are all in the write-ahead log have blocks to
-   * count: true when it was taken. DuckDB's refusal beside another connection's update or catalog change is no failure
-   * of the measure: said once per streak, and false, so those copies are measured again at the next sample. Anything
-   * else is thrown: the measure's failure, said.
+   * count: true when it was taken. TAKEN ONLY WITH ROOM FOR IT (`checkpointRoom`): a checkpoint DuckDB cannot finish —
+   * the disk full, out of memory — INVALIDATES THE DATABASE, every statement after it failing until the run restarts
+   * (PR 826's review: a full volume, where main went on serving and its writes failed alone). Without room it is
+   * skipped, said once per streak, never a 0. DuckDB's refusal beside another connection's update, catalog change or
+   * running insert is no failure of the measure either: said once per streak. Either way false, and those copies are
+   * measured again at the next sample. Anything else is thrown: the measure's failure, said.
    */
-  private async checkpoint(n: number): Promise<boolean> {
+  private async checkpoint(n: number, block: number): Promise<boolean> {
+    const short = await this.checkpointRoom(block);
+    const skipped = "measuring the synced tables whose rows are all in the write-ahead log";
+    if (short !== null) {
+      this.skip(skipped, `${n} synced table(s) not measured: ${short}; measured at a sample once there is room, said once until then`);
+      return false;
+    }
+    this.ok(skipped);
     const what = "writing the synced tables' rows from the write-ahead log into the file to measure their size";
     const t0 = performance.now();
     try {
       await this.history.writer.run("CHECKPOINT");
     } catch (e) {
       if (!/Cannot CHECKPOINT/i.test((e as Error).message)) throw e;
-      this.failure(what, e);
+      // DuckDB's own advice (FORCE CHECKPOINT) is none an operator can act on
+      this.failure(what, new Error((e as Error).message.replace(/\.?\s*Try using FORCE CHECKPOINT[\s\S]*$/i, "")));
       return false;
     }
     this.ok(what);
     this.log(`usage: ${n} synced table(s) had all their rows in the write-ahead log; checkpointed in ${Math.round(performance.now() - t0)} ms to measure their size`);
     return true;
+  }
+
+  /**
+   * WHY A CHECKPOINT HAS NO ROOM NOW, or null when it has. Measured (docs/DESIGN.md "A small table's size"): what a
+   * checkpoint added to the file was at most 0.8 times the log for rows, and one block (256 KiB) a table whose rows it
+   * wrote whatever their number (20 tables of 500 rows: a 317 KiB log, 5 MiB written); its memory peak at most 2.8 MiB
+   * over what the engine held, for logs up to 37 MiB. So the disk must have twice the log and a block for every table of
+   * the file and 8 more (its metadata); the engine's memory, below `store.memoryLimitBytes`, twice the log and an eighth
+   * of the limit (the share a first sync's chunk is held to, COPY_CHUNK_MEMORY_SHARE). A size that cannot be read is no
+   * room: a check that cannot tell refuses.
+   */
+  private async checkpointRoom(block: number): Promise<string | null> {
+    const log = logBytes(this.file);
+    const tables = Number((await this.history.reader.runAndReadAll("SELECT count(*) FROM duckdb_tables() WHERE database_name = current_database()")).getRowsJS()[0]![0]);
+    const diskNeeded = 2 * log + (tables + 8) * block;
+    const free = (this.options.diskFree ?? freeBytesAt)(path.dirname(this.file));
+    if (!(free >= diskNeeded)) return `too little free disk to write their rows into the file (${amount(free)} free, ${amount(diskNeeded)} needed)`;
+    const used = await this.copyMemory();
+    const memoryNeeded = 2 * log + this.memoryLimitBytes / 8;
+    if (used === null || !(this.memoryLimitBytes - used >= memoryNeeded)) {
+      return `too little of the synced data's memory free to write their rows into the file (${used === null ? "its use unknown" : `${amount(Math.max(0, this.memoryLimitBytes - used))} free`}, ${amount(memoryNeeded)} needed)`;
+    }
+    return null;
+  }
+
+  /** a skip, said once per streak in its own words (`ok` ends the streak) */
+  private skip(what: string, text: string): void {
+    const streak = this.lost.get(what) ?? new Streak();
+    this.lost.set(what, streak);
+    streak.failed(1, () => this.log(`usage: ${text}`));
   }
 
   /** Deletes the samples and sizes older than the retention, counted back from the module's ONE clock (`now`, which
@@ -509,6 +560,7 @@ export class UsageSampler {
 }
 
 const quote = (name: string): string => `"${name.replaceAll('"', '""')}"`;
+const amount = (bytes: number): string => (bytes >= 2 ** 20 ? memorySize(bytes) : `${Math.round(bytes / 1024)} KiB`);
 const num = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
 
 function sampleOf(r: Record<string, unknown>): UsageSample {

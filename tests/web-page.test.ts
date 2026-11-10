@@ -4275,7 +4275,7 @@ test("a page opened at its own address that reads no state (Users) still has the
 
 test("Tables: an added copy not measured yet says so (—, with why in its title), never 0 B", () => {
   const html = fn<[unknown, unknown?], string>("renderTables")(SYNCED, {});
-  assert.match(html, /<td class="num" title="not measured yet: a synced table with rows is measured within 10 min of its first sync, and every 10 min after">—<\/td>/);
+  assert.match(html, /<td class="num" title="not measured yet: a synced table(?:'|&#39;)s size is measured every 10 min; a small one once no first sync is running and the disk has room">—<\/td>/);
   assert.ok(!/\b0 B\b/.test(textOf(html)), "no 0 B");
   // a measure that is 0 (a file from an earlier run stored one) is not shown as a size either: the server skips it, the page never says 0 B for a copy
   assert.ok(!/\b0 B\b/.test(textOf(fn<[unknown, unknown?], string>("renderTables")(SYNCED, { sizes: { copySizes: [] } }))));

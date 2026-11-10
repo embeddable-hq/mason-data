@@ -47,8 +47,9 @@ paths:
   The copy's memory is `duckdb_memory()`; a copy's bytes are its distinct blocks from `pragma_storage_info`
   (metadata only, but it grows with rows × columns, so never per request; docs/DESIGN.md "Observability" has the
   measurement); a served copy with rows and no block (all of them in the write-ahead log) is CHECKPOINTED first, on the
-  samples' own connection, and measured again a minute later when DuckDB refuses it (issue 815; docs/DESIGN.md
-  "A small table's size"). `mason usage` and `GET /api/usage` read them.
+  samples' own connection, only with room on the disk and in the engine's memory for what it writes (a checkpoint
+  DuckDB cannot finish invalidates the database), and measured again a minute later when it is skipped or DuckDB
+  refuses it (issue 815; docs/DESIGN.md "A small table's size"). `mason usage` and `GET /api/usage` read them.
 - **A history table is trimmed by its module's ONE clock** (`cutoff`, src/duck/history.ts: the instant `days` before the
   module's `now`, the clock that stamps its rows), never the engine's `now()` beside it: the sync's events and the usage
   samples took a given clock and trimmed by the engine's, so a test's fixed clock lost its rows once the real date
