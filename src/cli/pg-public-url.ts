@@ -9,8 +9,10 @@
  * WHAT IT MAY HOLD, and nothing else (refused at the start, the value never quoted: an operator who pasted a URL with a
  * password must not see it in a log):
  *   - the scheme `postgres://` or `postgresql://`;
- *   - a host: a name or an IPv4 address (letters, digits, `.` and `-`; a name outside ASCII in its `xn--` form) or an
- *     IPv6 address in brackets;
+ *   - a host: a name (letters, digits, `-` and `_` — a Docker service's name has one —, each label 1-63 characters,
+ *     253 in all, a trailing `.` kept as written; a name outside ASCII in its `xn--` form), an IPv4 address (a host
+ *     whose last label is a number is one, as a URL parser reads it: four numbers 0-255, else refused) or an IPv6
+ *     address in brackets with no zone id (`%eth0` names an interface of one machine, which no client elsewhere has);
  *   - a port (1-65535); none is 5432, libpq's own default, written out in every URL Mason prints;
  *   - a database, optional: none is the one the run answers as; one named is printed as it is (a proxy that maps names);
  *   - `?sslmode=` disable, require, verify-ca or verify-full, REQUIRED: whether a client uses TLS on the way to the
@@ -42,12 +44,19 @@ const LIBPQ_PORT = 5432;
 /** The address a client reaches: `database` null is the run's own. */
 export interface PublicPostgres { host: string; port: number; database: string | null; sslmode: PublicSslmode }
 
+/** What the run's record of the address is called where a refusal names it (`readPublicUrl`'s `subject`). */
+export const PUBLIC_URL_RECORD = ".mason/config.json's running.postgresPublicUrl";
+
+/** One label of a host name: letters, digits, `-` and `_`, neither end a `-`. */
+const LABEL = /^[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?$/;
+
 /**
  * THE ONE READING of a public address, the setting's and the run's record of it (`running.postgresPublicUrl`, written
- * by `publicUrlText`) alike: the parts, or what is wrong with it in words that never quote the value.
+ * by `publicUrlText`) alike: the parts, or what is wrong with it in words that never quote the value. `subject` is
+ * what the words name: the setting, else the record (`PUBLIC_URL_RECORD`) where the run's record is read back.
  */
-export function readPublicUrl(v: string): PublicPostgres | { problem: string } {
-  const at = `${PG_PUBLIC_URL_SETTING} is set`;
+export function readPublicUrl(v: string, subject: string = PG_PUBLIC_URL_SETTING): PublicPostgres | { problem: string } {
+  const at = `${subject} is set`;
   const shape = "postgres://<host>:<port>/<database>?sslmode=<mode>";
   if (v.length > PUBLIC_URL_MAX) return { problem: `${at} to ${v.length} characters, and an address is at most ${PUBLIC_URL_MAX}: ${shape}` };
   if (!/^[\x21-\x7e]*$/.test(v)) return { problem: `${at} to a URL with a control character, a space or a character outside ASCII: write a host in its xn-- form and a database %-encoded` };
@@ -55,7 +64,7 @@ export function readPublicUrl(v: string): PublicPostgres | { problem: string } {
   // be what was written
   const m = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/.exec(v);
   const scheme = m?.[1]?.toLowerCase();
-  if (m === null || (scheme !== "postgres" && scheme !== "postgresql")) return { problem: `${at} to ${scheme === undefined ? "no URL" : `a URL of the scheme ${scheme}://`}: ${shape}` };
+  if (m === null || (scheme !== "postgres" && scheme !== "postgresql")) return { problem: `${at} to ${scheme === undefined ? "no URL" : "a URL of another scheme than postgres:// or postgresql://"}: ${shape}` };
   const [, , authority = "", path = "", query = "", fragment] = m;
   // a user or a password is refused before anything else is read: the authority's `@` alone says there is one
   if (authority.includes("@")) return { problem: `${at} to a URL with a user or a password in it, which every page and command would print: remove them (a user's name and password are mason user add's)` };
@@ -63,9 +72,11 @@ export function readPublicUrl(v: string): PublicPostgres | { problem: string } {
   const hp = /^(\[[^\]]*\]|[^:]*)(?::(.*))?$/.exec(authority)!;
   const hostText = hp[1]!, portText = hp[2];
   const ipv6 = hostText.startsWith("[");
-  const name = /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$/;
-  if (hostText === "" || (ipv6 ? !net.isIPv6(hostText.slice(1, -1)) : !name.test(hostText))) {
-    return { problem: `${at} to a URL with ${hostText === "" ? "no host" : "a host that is not a name or an address"}: a name (db.example.com), an IPv4 address, or an IPv6 one in brackets` };
+  // a zone id (`[fe80::1%eth0]`, `%25eth0` in a URL) names an interface of THIS machine: no client elsewhere reaches it,
+  // and it would need escaping in every URL printed. Refused by name, before the address is read (Node takes `%eth0`)
+  if (ipv6 && hostText.includes("%")) return { problem: `${at} to a URL with an IPv6 zone id (%…), which names an interface of one machine: write the address a client reaches, without it` };
+  if (hostText === "" || (ipv6 ? !net.isIPv6(hostText.slice(1, -1)) : !hostName(hostText))) {
+    return { problem: `${at} to a URL with ${hostText === "" ? "no host" : "a host that is not a name or an address"}: a name (db.example.com; each part 1-63 letters, digits, - or _), an IPv4 address (four numbers 0-255), or an IPv6 one in brackets` };
   }
   let port = LIBPQ_PORT;
   if (portText !== undefined) {
@@ -92,6 +103,16 @@ export function readPublicUrl(v: string): PublicPostgres | { problem: string } {
     return { problem: `${at} to a URL whose sslmode is not one of ${PUBLIC_SSLMODES.join(", ")}${mode === "allow" || mode === "prefer" ? " (a client that falls back to plain would send a password in clear)" : ""}` };
   }
   return { host: ipv6 ? hostText.slice(1, -1).toLowerCase() : hostText.toLowerCase(), port, database, sslmode: mode as PublicSslmode };
+}
+
+/** Whether `h` is a host name or an IPv4 address as a client resolves it: a name's labels (`LABEL`, 63 characters each,
+ *  253 in all, one trailing `.` allowed: an FQDN as written); a host whose last label is a number is an IPv4 address,
+ *  as a URL parser reads one, so it must be four numbers 0-255 (`999.999.999.999` and `db.1` refused). */
+function hostName(h: string): boolean {
+  const bare = h.endsWith(".") ? h.slice(0, -1) : h;
+  const labels = bare.split(".");
+  if (bare.length > 253 || !labels.every((l) => l.length <= 63 && LABEL.test(l))) return false;
+  return /^\d+$/.test(labels[labels.length - 1]!) ? net.isIPv4(h) : true;
 }
 
 /** The address as the environment says it: null when unset (or set empty), the parts, or what is wrong. */

@@ -139,10 +139,10 @@ export const SERVE: CommandSpec = {
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
     MASON_PG_PUBLIC_URL     the Postgres API's address as a client reaches it, behind a load balancer, a proxy or a DNS
                             name: postgres://<host>:<port>/<database>?sslmode=<mode>, the database optional (the
-                            run's), the port 5432 when none, sslmode required (${PUBLIC_SSLMODES.join(", ")}), no user,
-                            no password and no other parameter (refused); every URL printed for a client to paste
-                            (mason status, mason user add, the web page) is built from it (default unset: the
-                            listener's own address)
+                            run's), the port 5432 when none, sslmode required
+                            (${PUBLIC_SSLMODES.join(", ")}), no user, no password and no other
+                            parameter (refused); every URL printed for a client to paste (mason status, mason user
+                            add, the web page) is built from it (default unset: the listener's own address)
     MASON_PG_PROXY_FROM     behind a TCP proxy or load balancer that sends the PROXY protocol v2: its own addresses,
                             CIDRs comma-separated (10.0.0.0/16); a connection from one must begin with a header, whose
                             client the request log names; a header from any other address is refused (default unset:
