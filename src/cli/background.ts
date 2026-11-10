@@ -19,13 +19,13 @@ import { fileURLToPath } from "node:url";
 import { runnable } from "../lib/runnable.ts";
 import { LogReader, logPath } from "../lib/log-read.ts";
 import { READY, STEP_MARK } from "./dev.ts";
-import { liveRun } from "./runs.ts";
+import { notAnswering, runState } from "./runs.ts";
 import { projectSource, startSettingRefusal, theProject } from "./project.ts";
 import { runListenerSettings } from "./pg-tls.ts";
 import { demoChangesRefusal, demoPort } from "./demo.ts";
 import { recordRefusal } from "./replication-mode.ts";
 import { shownPath } from "./sources.ts";
-import { endText, failed, jsonText, nextBlock, type NextStep } from "./command.ts";
+import { asFailure, endText, failed, jsonText, nextBlock, type NextStep } from "./command.ts";
 import { historyDaysSetting } from "../duck/history.ts";
 import { memoryProblems } from "../duck/store.ts";
 import { DEV } from "./registry.ts";
@@ -66,7 +66,11 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
   const t = theProject(process.cwd());
   if ("problem" in t) return failed("start", t, { json: o.json });
   const home = t.project.dir;
-  const other = await liveRun(t.project);
+  const state = await runState(t.project);
+  // a run alive and silent still holds the synced data's file: a second run beside it is refused, with mason stop as the
+  // way out (src/cli/runs.ts "alive and silent"); one Mason cannot tell is its run is the person's (mason stop forgets it)
+  if (state.kind === "hung") return failed("start", asFailure(notAnswering(t.project, state.run, state.unsure ?? null)), { json: o.json });
+  const other = state.run;
   if (other !== null) {
     // running already is what start wants: said, exit 0, the same answer as a start (what is up, and what to run)
     if (o.json) { say(jsonText(DEV, { running: true, pid: other.pid, postgres: clientLink(other) }, [["mason status", "what it is doing"], ["mason stop", "stop it"]])); return 0; }

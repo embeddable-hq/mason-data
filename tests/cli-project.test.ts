@@ -37,7 +37,7 @@ import * as seed from "../src/demo/seed.ts";
 import { parseGeneratedText, readGenerated } from "../src/cli/generated-files.ts";
 import { parseSql, stopParser } from "../src/api/postgres/parser.ts";
 import { appDatabaseUrl } from "../src/lib/dotenv.ts";
-import { answers, endRun, liveRun, runOf, runState } from "../src/cli/runs.ts";
+import { answers, endRun, liveRun, masonProcess, processStart, runOf, runState } from "../src/cli/runs.ts";
 
 const MAIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "main.ts");
 const tmp = (): string => fs.mkdtempSync(path.join(os.tmpdir(), "mason-project-"));
@@ -391,12 +391,26 @@ test("a run is up only when it answers with its token and its pid: a pid alive a
     assert.equal(await liveRun(p, () => true, async () => false), null, "alive but not answering: not up");
     // A RUN THAT IS ALIVE AND DOES NOT ANSWER IS A THIRD STATE, never "not running" (the test server: a run
     // hung with its main thread blocked; mason stop said it was not running and mason destroy deleted its files under
-    // it). It is hung when its pid is a Mason run by its command line (a pid alive after a reboot is another process)
-    assert.deepEqual(await runState(p, () => true, async () => true, () => true), { kind: "up", run: runOf(p) });
-    assert.deepEqual(await runState(p, () => true, async () => false, () => true), { kind: "hung", run: runOf(p) });
-    assert.deepEqual(await runState(p, () => true, async () => false, () => false), { kind: "none", run: null }, "alive, silent, and not a Mason run: another process has the pid");
-    assert.deepEqual(await runState(p, () => false, async () => true, () => true), { kind: "none", run: null });
+    // it). It is hung when its pid is still the process the run recorded (a pid alive after a reboot is another process),
+    // and hung, unsure, when that cannot be told (issue 798: fail closed, never "none")
+    const yes = () => ({ is: true as const }), no = () => ({ is: false as const }), unknown = () => ({ is: "unknown" as const, why: "cannot say" });
+    assert.deepEqual(await runState(p, () => true, async () => true, yes), { kind: "up", run: runOf(p) });
+    assert.deepEqual(await runState(p, () => true, async () => false, yes), { kind: "hung", run: runOf(p) });
+    assert.deepEqual(await runState(p, () => true, async () => false, no), { kind: "none", run: null }, "alive, silent, and not the run: another process has the pid");
+    assert.deepEqual(await runState(p, () => true, async () => false, unknown), { kind: "hung", run: runOf(p), unsure: "cannot say" }, "cannot tell: hung, never none");
+    assert.deepEqual(await runState(p, () => false, async () => true, yes), { kind: "none", run: null });
   } finally { srv.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a process's start, as a run records it: the same at every reading, another process's never, a gone pid's unknown", () => {
+  const mine = processStart(process.pid);
+  assert.ok(mine !== null, "Linux and macOS say when a process started");
+  assert.equal(processStart(process.pid), mine);
+  const child = spawnSync(process.execPath, ["-e", `process.stdout.write(String(process.pid))`], { encoding: "utf8" });
+  assert.equal(processStart(Number(child.stdout)), null, "a pid that is gone: nothing to read");
+  assert.deepEqual(masonProcess(process.pid, mine), { is: true });
+  assert.deepEqual(masonProcess(process.pid, `${mine}0`), { is: false }, "the number held by a process that started at another moment");
+  assert.deepEqual(masonProcess(process.pid, null), { is: "unknown", why: "its config records no start for the run (an older Mason started it)" });
 });
 
 test("ending a hung run: SIGTERM, then SIGKILL once the grace is over, and the pid waited for", async () => {

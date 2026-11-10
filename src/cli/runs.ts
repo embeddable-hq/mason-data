@@ -9,11 +9,20 @@
  *
  * ALIVE AND SILENT IS A THIRD STATE (on the test server a run hung — its main thread blocked — with every port
  * held; `mason stop` read the silence as "not running" and `mason destroy` deleted the copy under it, which the hung
- * process kept open). A pid that is alive, whose command line is a Mason run's (`masonProcess`: after a reboot the
- * number is another process's), and that does not answer is HUNG (`runState`): a command says so and names the way
+ * process kept open). A pid that is alive, that is still the process the run recorded (`masonProcess`: after a reboot
+ * the number is another process's), and that does not answer is HUNG (`runState`): a command says so and names the way
  * out, `mason stop` ends it (`endRun`: SIGTERM, then SIGKILL), and `mason destroy` removes nothing under it.
+ *
+ * WHICH PROCESS IS THE RUN is what the run itself records, never its command line (issue 798: a `mason serve` run's
+ * command line did not match `start … --attach`, so a hung server read as not running and its project as free). Every
+ * run, however it was started (`mason start`, `mason serve` in the image or by hand, under a supervisor, through npx or
+ * a checkout), records its own pid and its own start (`processStart`) in `running`, and the pid is that run only while
+ * the process holding it started at that same moment. A check that cannot tell (no start recorded, a platform that
+ * cannot read one) is hung, never none: `mason destroy` and `mason start` refuse, and `mason stop` kills nothing it
+ * cannot name.
  */
 import { spawnSync } from "node:child_process";
+import * as fs from "node:fs";
 import { theProject, type PostgresListener, type Project } from "./project.ts";
 import type { Problem } from "./command.ts";
 
@@ -30,6 +39,8 @@ export interface DevRun {
   /** what the users' passwords are made with (src/duck/users.ts) */
   apiKey: string;
   control: { url: string; token: string };
+  /** when the run's process started, as the run recorded it (`processStart`), or null when the config has none */
+  started?: string | null;
   /** the Postgres API without credentials (`postgresql://<host>:<port>/<database>`; mason user add prints the URL a
    *  tool pastes) */
   postgresUrl: string;
@@ -50,7 +61,7 @@ export function runOf(p: Project, isAlive: (pid: number) => boolean = alive): De
   const r = p.config.running;
   if (!r || !isAlive(r.pid)) return null;
   return { name: p.config.name, root: p.root, home: p.dir, folder: p.folder, pid: r.pid, apiKey: p.config.apiKey,
-    control: { url: r.controlUrl, token: r.token }, postgresUrl: r.postgresUrl, postgresPublicUrl: r.postgresPublicUrl ?? null, postgresListener: r.postgresListener };
+    control: { url: r.controlUrl, token: r.token }, started: r.started ?? null, postgresUrl: r.postgresUrl, postgresPublicUrl: r.postgresPublicUrl ?? null, postgresListener: r.postgresListener };
 }
 
 /** What the run's command server says of itself (`/api/ping`: its pid), or null when nothing answers with the run's token. */
@@ -79,28 +90,67 @@ export function notRunning(p: Project): Problem {
 /** How long a hung run is given to leave on SIGTERM before SIGKILL (the test server's ignored SIGTERM for 15 s). */
 export const END_GRACE_MS = 15_000;
 
-/** What a command says of a run that is alive and does not answer: what to run, since nothing else reaches it. */
-export function notAnswering(p: Project, run: DevRun): Problem {
+/** What a command says of a run that is alive and does not answer: what to run, since nothing else reaches it. With
+ *  `unsure`, Mason cannot tell whether the pid is still the run's (`masonProcess`), so the way out is the person's. */
+export function notAnswering(p: Project, run: DevRun, unsure: string | null = null): Problem {
+  if (unsure !== null) {
+    return { problem: `Mason for ${p.config.name} may be running (pid ${run.pid}) but does not answer its commands (${run.control.url}, 3 s)`, code: "not_answering",
+      why: `Mason cannot tell whether pid ${run.pid} is still its run: ${unsure}`,
+      fix: `ps -p ${run.pid} says what it is; end it yourself if it is Mason (kill ${run.pid}): mason stop signals no process it cannot name`,
+      next: [["mason stop", `forget pid ${run.pid} without signalling it; its synced data stays`], ["mason logs", "what the run was doing"]] };
+  }
   return { problem: `Mason for ${p.config.name} is running (pid ${run.pid}) but does not answer its commands (${run.control.url}, 3 s)`, code: "not_answering",
     why: "a statement may be holding its main thread",
     next: [["mason stop", `end it (SIGTERM, then SIGKILL after ${END_GRACE_MS / 1000} s); its synced data stays and the next mason start resumes`], ["mason logs", "what it was doing"]] };
 }
 
-/** Whether `pid` is a Mason run, by its command line (`mason start … --attach`, src/cli/background.ts). ps exits 1 for a pid that is gone. */
-export function masonProcess(pid: number): boolean {
-  const ps = spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8" });
-  return ps.status === 0 && / start\b.*--attach\b/.test(ps.stdout);
+/**
+ * WHEN PROCESS `pid` STARTED, in a form two readings of one process always agree on and another process holding the
+ * number later (after a reboot, or a container's restart) never shares; null when this platform cannot say. Linux: the
+ * boot's id and the start in clock ticks since that boot, from /proc (the image has no ps, and a clock step moves
+ * neither); elsewhere (macOS, the BSDs) ps's start, read in UTC and the C locale so the reader's zone changes nothing.
+ */
+export function processStart(pid: number): string | null {
+  if (process.platform === "linux") {
+    let boot: string, stat: string;
+    try {
+      boot = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    } catch {
+      // gone, or /proc not readable here (hidepid): "cannot tell", which every caller treats as such, never as "not Mason"
+      return null;
+    }
+    // field 2 is the command's name in parentheses, which may hold anything: the fields after its LAST ")" are fixed
+    const ticks = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];   // field 22, starttime (index 0 is field 3)
+    return boot !== "" && ticks !== undefined && /^\d+$/.test(ticks) ? `linux:${boot}:${ticks}` : null;
+  }
+  if (process.platform === "win32") return null;
+  const ps = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: { ...process.env, TZ: "UTC", LC_ALL: "C" } });
+  const at = ps.status === 0 ? ps.stdout.trim() : "";
+  return at === "" ? null : `ps:${at}`;
 }
 
-export type RunState = { kind: "up"; run: DevRun } | { kind: "hung"; run: DevRun } | { kind: "none"; run: null };
+/** Whether `pid` is the run that recorded `started` (`processStart`): yes, no (another process holds the number now),
+ *  or cannot tell, with why. */
+export function masonProcess(pid: number, started: string | null): { is: true } | { is: false } | { is: "unknown"; why: string } {
+  if (started === null) return { is: "unknown", why: "its config records no start for the run (an older Mason started it)" };
+  const now = processStart(pid);
+  if (now === null) return { is: "unknown", why: `this system did not say when pid ${pid} started` };
+  return now === started ? { is: true } : { is: false };
+}
 
-/** The project's run: up (it answers), hung (alive, a Mason run, and silent), or none. */
+export type RunState = { kind: "up"; run: DevRun } | { kind: "hung"; run: DevRun; unsure?: string } | { kind: "none"; run: null };
+
+/** The project's run: up (it answers), hung (alive, still the process the run recorded, and silent — or silent and not
+ *  known either way, `unsure` saying why), or none. */
 export async function runState(p: Project, isAlive: (pid: number) => boolean = alive, ask: (r: DevRun) => Promise<boolean> = answers,
-  isMason: (pid: number) => boolean = masonProcess): Promise<RunState> {
+  isMason: typeof masonProcess = masonProcess): Promise<RunState> {
   const r = runOf(p, isAlive);
   if (r === null) return { kind: "none", run: null };
   if (await ask(r)) return { kind: "up", run: r };
-  return isMason(r.pid) ? { kind: "hung", run: r } : { kind: "none", run: null };
+  const m = isMason(r.pid, r.started ?? null);
+  if (m.is === false) return { kind: "none", run: null };
+  return m.is === true ? { kind: "hung", run: r } : { kind: "hung", run: r, unsure: m.why };
 }
 
 /** The project's run when it is up and answers; null when Mason is not running for it (a hung run is not up). */
@@ -131,12 +181,12 @@ export async function endRun(pid: number, deps: { kill?: (pid: number, signal: N
 }
 
 /** The run a command means: its project's (src/cli/project.ts theProject), up and answering; else why there is none. */
-export async function theRun(cwd: string): Promise<{ run: DevRun; project: Project } | (Problem & { project: Project | null; hung?: DevRun })> {
+export async function theRun(cwd: string): Promise<{ run: DevRun; project: Project } | (Problem & { project: Project | null; hung?: DevRun; unsure?: string })> {
   const t = theProject(cwd);
   if ("problem" in t) return { ...t, project: null };
   const st = await runState(t.project);
   if (st.kind === "up") return { run: st.run, project: t.project };
-  if (st.kind === "hung") return { ...notAnswering(t.project, st.run), project: t.project, hung: st.run };
+  if (st.kind === "hung") return { ...notAnswering(t.project, st.run, st.unsure ?? null), project: t.project, hung: st.run, ...(st.unsure === undefined ? {} : { unsure: st.unsure }) };
   return { ...notRunning(t.project), project: t.project };
 }
 

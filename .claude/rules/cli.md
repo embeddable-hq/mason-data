@@ -193,13 +193,18 @@ CLI lacks).
   verified gone; the next `mason start` copies again. `mason stop` keeps all of it.
 - **Alive and silent is a third state, never "not running"** (the test server: a hung run; `mason stop`
   said it was not running and `mason destroy` deleted the 58 GB copy under it, which the process kept open). A pid
-  that is alive, is a Mason run by its command line (`masonProcess`: after a reboot the number is another process's)
+  that is alive, is still the process the run recorded (`masonProcess`: after a reboot the number is another process's)
   and does not answer `/api/ping` is HUNG (`runState`, src/cli/runs.ts): every command says so with the way out
-  (`not_answering`), `mason status` says `hung` (exit 1), `mason stop` ends it — its supervisor is TOLD first and
+  (`not_answering`), `mason status` says `hung` (exit 1), `mason start` starts no second run beside it, `mason stop` ends it — its supervisor is TOLD first and
   waited for LAST (`signalSupervisor` … `endRun`: SIGTERM, then SIGKILL after 15 s … `supervisorGone`: the supervisor
   waits for the run, so a kill it was not told of is a crash to it, recorded as "often the system out of memory" and
   restarted from) — and records the stop in `config.lastStop` as the run does for its own, and `mason destroy` removes
-  nothing under it. The supervisor is known by its command line under BOTH its names (`supervise.ts` in a checkout,
+  nothing under it. **The run is known by what it records, never by its command line** (issue 798: `mason serve`'s
+  did not match `start … --attach`, and a hung server read as not running): every run records its own start beside its
+  pid (`running.started`, `processStart`: /proc's boot id and start ticks on Linux, `ps -o lstart` in UTC elsewhere),
+  and the pid is the run only while the process holding it started then. A pid it cannot tell (no start recorded, a
+  platform that cannot say) is hung, never none, and `mason stop` forgets it without a signal (`forgotten`), the kill
+  left to the person. The supervisor is known by its command line under BOTH its names (`supervise.ts` in a checkout,
   `supervise.js` in the package: `isSupervisorCommand`); a process known by the checkout's name alone is never found
   by the package, which is what every user runs.
 - **A database is the project's, and a moved one is noticed** (a database that moves to a different host is the same

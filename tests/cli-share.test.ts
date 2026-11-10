@@ -358,7 +358,7 @@ const peerCertificate = (port: number): Promise<tls.DetailedPeerCertificate> => 
   });
 });
 
-const config = (): { apiKey: string; running?: { pid: number; postgresUrl: string; controlUrl: string; token: string } | null } => JSON.parse(fs.readFileSync(path.join(home, "config.json"), "utf8"));
+const config = (): { apiKey: string; running?: { pid: number; started?: string; postgresUrl: string; controlUrl: string; token: string } | null } => JSON.parse(fs.readFileSync(path.join(home, "config.json"), "utf8"));
 
 /** the stub tunnel: records, prints its address, then does what `mode` says */
 const STUB = `#!/bin/sh
@@ -451,7 +451,7 @@ after(async () => {
     const sup = supervisorOf(home);
     if (sup !== null) process.kill(sup, "SIGKILL");
     const pid = config().running?.pid;
-    if (pid !== undefined && alive(pid) && masonProcess(pid)) process.kill(pid, "SIGKILL");
+    if (pid !== undefined && alive(pid) && masonProcess(pid, config().running?.started ?? null).is === true) process.kill(pid, "SIGKILL");
   }
   fs.rmSync(root, { recursive: true, force: true });
 });
