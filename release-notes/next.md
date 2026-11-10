@@ -2,6 +2,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **`mason tables --json` gives the entry `mason add` would write**: each table's `entry`, as the sources file's
+  `tables:` map holds it (`{ "orders": { "exclude": ["api_token"] } }`, a `key:` from its unique index for a table with
+  no primary key, `null` when `mason add` would refuse it), and each column's `secret`: whether `mason add` leaves it
+  out as a secret unless named. A tool that writes the sources file itself can write what `mason add` would, without
+  copying its rule.
 - **Behind a load balancer, a proxy or a DNS name, the URLs Mason prints can name the address clients reach**:
   `mason serve` with `MASON_PG_PUBLIC_URL=postgres://db.example.com:5433/?sslmode=verify-full` makes `mason status`,
   `mason user add` and `list`, and the web page's Connect panels and "Copy the psql line" print that host, port,

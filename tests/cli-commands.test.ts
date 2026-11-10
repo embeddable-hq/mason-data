@@ -617,6 +617,77 @@ test("mason add and mason remove with Mason stopped: the entry written and cut a
   assert.equal(fs.readFileSync(s.file, "utf8"), `kind: postgres\nurl: ${s.url}\ntables: {}\n`, "the last one gone: tables: {}");
 });
 
+// ISSUE 794: A TOOL THAT WRITES THE SOURCES FILE ITSELF writes what mason add would — `mason tables --json` gives each
+// table's entry and each column's secret flag from the one place mason add decides them (src/cli/source-edit.ts
+// plannedEntry). Held here by RUNNING mason add on each table and reading back what it wrote.
+test("mason tables --json: each table's entry and each column's secret are what mason add writes — a secret-looking column, no primary key, an ordinary table, one it refuses, one added", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-tables-entry-")));
+  const source = await DemoSource.open({ dir: path.join(root, "db"), port: 0, log: () => {} });
+  try {
+    const c = new pg.Client({ connectionString: source.url });
+    await c.connect();
+    try {
+      await c.query(`CREATE TABLE vault (id bigint PRIMARY KEY, label text, password_hash text, api_token text, token_id bigint);
+        CREATE TABLE ledger (account_id bigint NOT NULL, line_no int NOT NULL, amount numeric, signing_secret text, UNIQUE (account_id, line_no));
+        CREATE TABLE scratch (note text)`);
+    } finally { await c.end(); }
+    const app = path.join(root, "app");
+    const file = path.join(app, "mason", "sources", "shop.yml");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.join(app, ".mason"), { mode: 0o700 });
+    writeRunning(root, null);
+    const empty = `kind: postgres\nurl: ${source.url}\ntables: {}\n`;
+    fs.writeFileSync(file, empty);
+    type Listed = { table: string; addable: boolean; reason: string | null; added: boolean; entry: Record<string, Record<string, unknown>> | null; primaryKey: string[];
+      columns: Array<{ name: string; secret: boolean }> };
+    const listed = async (...names: string[]): Promise<Listed[]> => {
+      const r = await runMason(app, ["tables", ...names, "--json"], matrixEnv());
+      assert.equal(r.code, 0, r.stdout + r.stderr);
+      return (JSON.parse(r.stdout) as { tables: Listed[] }).tables;
+    };
+    const { parse } = await import("yaml");
+    const tables = await listed();
+    const of = (name: string): Listed => tables.find((t) => t.table === name)!;
+    assert.deepEqual(of("public.vault").entry, { vault: { exclude: ["password_hash", "api_token"] } }, "the secret-looking columns, as exclude:");
+    assert.deepEqual(of("public.vault").columns.map((x) => [x.name, x.secret]), [["id", false], ["label", false], ["password_hash", true], ["api_token", true], ["token_id", false]]);
+    assert.deepEqual([of("public.ledger").entry, of("public.ledger").addable], [{ ledger: { exclude: ["signing_secret"], key: ["account_id", "line_no"] } }, false],
+      "no primary key: its entry carries the --key its reason names, and mason add alone refuses it");
+    assert.match(of("public.ledger").reason!, /^no primary key: name the columns that tell its rows apart, mason add ledger --key account_id,line_no \(its unique index /);
+    assert.deepEqual([of("public.scratch").entry, of("public.scratch").addable], [null, false], "no key to name: mason add refuses it");
+    // EVERY TABLE, against mason add run on it alone, the file empty first: the entry written is the one listed
+    let compared = 0;
+    for (const t of tables) {
+      fs.writeFileSync(file, empty);
+      const key = t.entry === null ? undefined : Object.values(t.entry)[0]!["key"] as string[] | undefined;
+      const add = await runMason(app, ["add", t.table, ...(key ? ["--key", key.join(",")] : []), "--json"], matrixEnv());
+      if (t.entry === null) { assert.equal(add.code, 1, `${t.table}: refused by mason add too — ${add.stdout}`); continue; }
+      assert.equal(add.code, 0, `${t.table}: ${add.stdout}${add.stderr}`);
+      const written = (parse(fs.readFileSync(file, "utf8")) as { tables: Record<string, unknown> }).tables;
+      assert.deepEqual(written, t.entry, `${t.table}: the entry mason add wrote`);
+      const skipped = (JSON.parse(add.stdout) as { added: Array<{ skippedSecrets: string[] }> }).added[0]!.skippedSecrets;
+      assert.deepEqual(t.columns.filter((x) => x.secret).map((x) => x.name), skipped, `${t.table}: the columns marked secret are those mason add left out`);
+      compared++;
+    }
+    assert.ok(compared >= 4, `the demo's tables and two of ours compared (${compared})`);
+    // A TABLE ADDED: its entry as the file says it, written by hand or not
+    fs.writeFileSync(file, `${empty.replace("tables: {}\n", "tables:\n")}  vault:\n    columns: [id, label]\n    sync: poll 5m\n`);
+    const [vault] = await listed("vault");
+    assert.deepEqual([vault!.added, vault!.entry], [true, { vault: { columns: ["id", "label"], sync: "poll 5m" } }]);
+    // as a person: the same flag, said beside the column
+    const person = await runMason(app, ["tables", "vault"], matrixEnv());
+    assert.match(person.stdout, /^ {2}api_token +text +\(looks like a secret: left out unless named\)$/m);
+    assert.match(person.stdout, /^ {2}token_id +bigint$/m);
+    // a hand-written key: naming a column the table lacks never un-flags one (fail closed), as a person and in --json
+    fs.writeFileSync(file, `${empty.replace("tables: {}\n", "tables:\n")}  vault:\n    key: [nosuch]\n`);
+    const broken = await runMason(app, ["tables", "vault"], matrixEnv());
+    assert.match(broken.stdout, /^ {2}api_token +text +\(looks like a secret: left out unless named\)$/m, broken.stdout + broken.stderr);
+    assert.deepEqual((await listed("vault"))[0]!.columns.filter((x) => x.secret).map((x) => x.name), ["password_hash", "api_token"]);
+  } finally {
+    await source.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("mason add of a table a replicating file cannot replicate says it was written sync: poll 5m, why, and the alternatives", async () => {
   const { addedLines } = await import("../src/cli/commands.ts");
   const b = { table: "public.events", file: "/app/mason/sources/app.yml", entry: "events", columns: null, exclude: [], key: ["tenant_id", "id"], addedKey: [], skippedSecrets: [], already: false,

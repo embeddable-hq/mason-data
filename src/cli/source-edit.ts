@@ -15,8 +15,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Failure, FailureCode } from "./command.ts";
 import type { SourceTable } from "./preflight.ts";
-import { addedTables, chooseColumns, effectiveSync, entryName, entryProblems, findEntry, parseSourceText, sourceFailure, sourceFileNames, sourcesDir, unaddableReason,
-  withEntrySync, withoutTable, withTable, type ProjectSource, type SourceFile } from "./sources.ts";
+import { addedTables, catalogTable, chooseColumns, effectiveSync, entryFields, entryName, entryProblems, findEntry, looksSecret, parseSourceText, sourceFailure, sourceFileNames, sourcesDir,
+  unaddableReason, usableUniqueKey, withEntrySync, withoutTable, withTable, type CatalogColumn, type CatalogTable, type EntryFields, type ProjectSource, type SourceFile,
+  type TableEntry, type WrittenEntry } from "./sources.ts";
 import { BIG_TABLE_ROWS, COSTLY_POLL_ROWS, COSTLY_POLL_SECONDS, syncText, type TableSync } from "../lib/table-sync.ts";
 import { projectWriteRefusal } from "./project.ts";
 
@@ -144,15 +145,48 @@ export function addEntry(at: EditTarget, db: EditCatalog, table: string, columns
   o: { sync?: TableSync; keep?: boolean } = {}): PickResult {
   const t = db.tables.find((x) => x.source === table);
   if (!t) throw new Refusal(404, `${table} is not a table of ${db.database} that this user can read`);
+  const p = plannedEntry(at.parsed, db, t, columns, key, o, () => othersHold(at, db, [table], `add ${entryName(table)}`));
+  const { entry, was, keep } = p;
+  const same = was !== undefined && JSON.stringify([was.columns, was.exclude, was.key, was.sync]) === JSON.stringify([entry.columns, entry.exclude, entry.key, entry.sync]);
+  if (!same) {
+    const r = keep ? withEntrySync(at.text, was!, entry.sync) : withTable(at.text, entry);
+    if ("problem" in r) throw new Refusal(409, `${path.relative(at.root, at.file)} cannot be edited: ${r.problem}`);
+    fs.writeFileSync(at.file, r.text);
+  }
+  const eff = effectiveSync(at.parsed, entry);
+  return { table, file: at.file, entry: entry.name, columns: entry.columns, exclude: entry.exclude, key: entry.key, addedKey: p.addedKey, skippedSecrets: p.skipped, already: same,
+    sync: { value: syncText(eff.sync), from: eff.from }, bigOff: p.bigOff, notReplicated: p.notReplicated, pollCost: pollCost(t, eff.sync, db.measured?.(table) ?? null) };
+}
+
+/** The entry `mason add` decides for a table, before anything is written (`plannedEntry`). */
+export interface PlannedEntry {
+  entry: WrittenEntry & { sync: TableSync | null };
+  /** the file's entry for the table before, and whether only its sync is asked (`o.keep`) */
+  was: TableEntry | undefined; keep: boolean;
+  /** the key's columns added to a --columns list; the secret-looking columns every-column left out (sources.ts chooseColumns) */
+  addedKey: string[]; skipped: string[];
+  bigOff: boolean; notReplicated: string | null;
+}
+
+/**
+ * WHAT `mason add` WRITES FOR A TABLE, DECIDED IN ONE PLACE (issue 794: `mason tables --json` gives the same entry, so a
+ * tool that writes the sources file itself writes what `mason add` would): the columns (`chooseColumns`), the key, its
+ * sync, and every check of the entry against the database — or the `Refusal` `mason add` says. Nothing is written.
+ * `others` checks the file's other entries (`othersHold`), at the point `mason add` always has: after the columns, before
+ * the sync is checked.
+ */
+export function plannedEntry(file: SourceFile, db: EditCatalog, t: SourceTable, columns: readonly string[] = ["*"], key: readonly string[] | null = null,
+  o: { sync?: TableSync; keep?: boolean } = {}, others: () => void = () => {}): PlannedEntry {
+  const table = t.source;
   if (key !== null && t.key.length) throw new Refusal(400, `${table} has a primary key (${t.key.join(", ")}), which Mason keys it by: leave --key out`);
   if (key === null && !t.key.length) throw new Refusal(409, `${table} cannot be added: ${unaddableReason(t)}`);
-  const was = at.parsed.tables.find((e) => e.table === table);
+  const was = file.tables.find((e) => e.table === table);
   const keep = o.keep === true && was !== undefined;
   const chosen = keep ? { columns: was.columns, exclude: was.exclude, addedKey: [], skipped: [] } : chooseColumns(t, columns, key);
   if ("problem" in chosen) throw new Refusal(400, chosen.problem);
-  othersHold(at, db, [table], `add ${entryName(table)}`);
+  others();
   // its own sync: asked, else the one its entry has, else none (the file's) — but a new big table under a polling default
-  const fileSync = effectiveSync(at.parsed, undefined).sync;
+  const fileSync = effectiveSync(file, undefined).sync;
   const bigOff = o.sync === undefined && was === undefined && fileSync.mode === "poll" && t.rows !== null && t.rows > BIG_TABLE_ROWS;
   // a table logical replication cannot keep, under a file whose default is replication: polled, said (never refused for
   // the default it did not choose; its own --sync replication is refused at its entry, below)
@@ -163,24 +197,63 @@ export function addEntry(at: EditTarget, db: EditCatalog, table: string, columns
   // --sync replication asked of one: refused with the COMMAND to run (the person is at it), its own flags kept — the
   // file's words are for an entry written by hand (src/cli/sources.ts entryProblems)
   if (o.sync?.mode === "replication" && unreplicable !== null) {
-    const others = columns.filter((c) => c !== "*");
-    const flags = keep ? "" : `${columns.includes("*") ? (others.length ? ` --include ${others.join(",")}` : "") : ` --columns ${others.join(",")}`}${key !== null ? ` --key ${key.join(",")}` : ""}`;
+    const rest = columns.filter((c) => c !== "*");
+    const flags = keep ? "" : `${columns.includes("*") ? (rest.length ? ` --include ${rest.join(",")}` : "") : ` --columns ${rest.join(",")}`}${key !== null ? ` --key ${key.join(",")}` : ""}`;
     throw new Refusal(400, `${table} cannot be kept current by logical replication: ${unreplicable} — mason add ${entryName(table)}${flags} --sync "poll 5m" polls it instead`);
   }
   const sync: TableSync | null = o.sync ?? was?.sync ?? (bigOff ? { mode: "off" } : notReplicated !== null ? { mode: "poll", every: "5m", seconds: 300 } : null);
   const entry = { name: was?.name ?? entryName(table), table, columns: chosen.columns, exclude: chosen.exclude, key: keep ? was.key : key === null ? null : [...key], sync };
   // the entry itself, as the run will read it: a --key that does not tell the rows apart is refused here, not at the copy
-  const own = entryProblems(t, entry, db.tables, db.database, effectiveSync(at.parsed, entry).sync);
+  const own = entryProblems(t, entry, db.tables, db.database, effectiveSync(file, entry).sync);
   if (own.length) throw new Refusal(400, own.join("; "));
-  const same = was !== undefined && JSON.stringify([was.columns, was.exclude, was.key, was.sync]) === JSON.stringify([entry.columns, entry.exclude, entry.key, entry.sync]);
-  if (!same) {
-    const r = keep ? withEntrySync(at.text, was, sync) : withTable(at.text, entry);
-    if ("problem" in r) throw new Refusal(409, `${path.relative(at.root, at.file)} cannot be edited: ${r.problem}`);
-    fs.writeFileSync(at.file, r.text);
-  }
-  const eff = effectiveSync(at.parsed, entry);
-  return { table, file: at.file, entry: entry.name, columns: entry.columns, exclude: entry.exclude, key: entry.key, addedKey: chosen.addedKey, skippedSecrets: chosen.skipped, already: same,
-    sync: { value: syncText(eff.sync), from: eff.from }, bigOff, notReplicated, pollCost: pollCost(t, eff.sync, db.measured?.(table) ?? null) };
+  return { entry, was, keep, addedKey: chosen.addedKey, skipped: chosen.skipped, bigOff, notReplicated };
+}
+
+/** A table as `mason tables` lists it: the catalog's and the sources file's facts (sources.ts `catalogTable`), each
+ *  column's `secret`, and its `entry` in the sources file's keys. */
+export interface ListedTable extends Omit<CatalogTable, "columns"> {
+  columns: Array<CatalogColumn & {
+    /** it looks like a secret (sources.ts looksSecret) and `mason add` leaves it out of the entry (`exclude:`) unless
+     *  named (`--include`); false for a key column, which is always synced */
+    secret: boolean }>;
+  /** its entry as the sources file's `tables:` map holds it, `{ <name>: {} | { columns | exclude, key, sync } }` (sources.ts
+   *  `entryFields`): an added table's as the file says it; else what `mason add <table>` writes — with the `--key` its
+   *  `reason` names when it has no primary key —; null when `mason add` would refuse it (`reason` says why) */
+  entry: Record<string, EntryFields> | null;
+}
+
+/**
+ * THE DATABASE'S TABLES AS `mason tables` LISTS THEM, from a catalog already read (`readSourceFacts`) and the sources
+ * file — no read of its own, so `mason doctor` can list what it read too. A table not added gets the entry `mason add
+ * <table>` writes, decided by `plannedEntry` (never a second copy of its rule), and its refusal as its `reason`: no
+ * primary key keeps `unaddableReason`'s words (the entry then carries the `--key` they name, a unique index over NOT NULL
+ * columns, when it has one). The file's other entries are not checked here (`mason add` refuses while one fails).
+ */
+export function listTables(file: SourceFile, db: EditCatalog): ListedTable[] {
+  return db.tables.map((t) => {
+    const was = file.tables.find((e) => e.table === t.source);
+    const catalog = catalogTable(t, was);
+    let entry: WrittenEntry | null = was ?? null, reason = catalog.reason;
+    if (was === undefined) {
+      const key = t.key.length ? null : usableUniqueKey(t)?.columns ?? null;
+      try { entry = plannedEntry(file, db, t, ["*"], key).entry; }
+      catch (e) {
+        // a refusal is the table's answer, said as mason add says it; anything else is a bug, and goes on up
+        if (!(e instanceof Refusal)) throw e;
+        entry = null;
+        // refused with the --key its reason names (row-level security, say): both said, the --key alone would not do
+        reason = reason === null ? e.message : key !== null ? `${reason}; with it, ${e.message}` : reason;
+      }
+    }
+    // the columns every-column leaves out, by the same rule against the key it is synced by: its primary key, else the
+    // entry's key: — FAIL CLOSED, a key: the file gets wrong (a column the table lacks, a key: beside a primary key)
+    // never un-flags a column: the rule is then asked against the table's own key alone, which every column passes
+    const asked = chooseColumns(t, ["*"], t.key.length ? null : entry?.key ?? null);
+    const chosen = "problem" in asked ? chooseColumns(t, ["*"], null) : asked;
+    const skipped = "problem" in chosen ? t.columns.map((c) => c.name).filter(looksSecret) : chosen.skipped;
+    return { ...catalog, reason, columns: catalog.columns.map((c) => ({ ...c, secret: skipped.includes(c.name) })),
+      entry: entry === null ? null : { [entry.name]: entryFields(entry) } };
+  });
 }
 
 /** What `mason remove` did: the tables (schema.table) whose entries it cut, and the sources file, absolute. */
