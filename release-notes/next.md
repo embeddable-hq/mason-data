@@ -2,6 +2,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- The web page's Tables no longer offers Sync now, enabled, on a table whose sync would be refused: one still in its
+  first sync or waiting for it, one whose first sync failed, one being read again whole or being caught up. The
+  button is shown disabled there, and its tooltip says why, in the words `mason sync <table>` refuses with. `mason
+  status --json` says the same per table, as `syncRefusal` (null when a sync would run).
 - The web page's Tables no longer offers Add for a table whose row-level security hides every row from the user Mason
   connects as. The page now says why the table cannot be added, in the same words as `mason tables` and `mason add`:
   the policy the table's owner adds, then the `mason add` to run.
@@ -20,6 +24,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 ## What changes
 
 - `MASON_UI_NAV_LINKS` refuses `mason serve`'s start when an entry has a key written twice (`{"label":"a","label":"b",…}`), naming the entry; it was read as its last value. A key a link does not take is named by its place in the entry, never quoted. `mason start` with a `MASON_UI_NAV_*` name that is no setting now says it is not a setting, with a `did you mean`.
+- On the web page, what an action answered (Tables' Add, Remove and Sync now, Usage's cancel of a statement) now stays
+  beside its button until it is dismissed, by its Dismiss, by Escape, or by the next action's answer or question. Before,
+  it went by itself after 8 seconds, sometimes before it had been read. A refusal stays as before, and Escape dismisses
+  it too.
 - `MASON_PG_PUBLIC_URL` takes a host name with an underscore (a Docker service's name) and one written with its trailing dot, printed as written; it refuses a host label over 63 characters, an IPv4 address with a number over 255, and an IPv6 address with a zone id (`%eth0`), at the start. Beside it, `mason user add` still gives a self-signed listener certificate's SHA-256.
 
 ## What was wrong and is now right

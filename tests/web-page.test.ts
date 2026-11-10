@@ -1292,6 +1292,16 @@ test("the app: Remove asks first, Cancel takes it back, the confirm sends DELETE
   assert.match(textOf(app.view().users!), /Remove metabase\? It connects no more/);
   app.cancelRemove();
   assert.ok(!/It connects no more/.test(app.view().users!));
+  // a refusal is said beside the user's actions until it is dismissed: across polls, then Escape (the page's dismiss) takes it
+  app.askRemove("metabase");
+  const refusal = { code: "refused", message: "metabase cannot be removed now", next: [] };
+  run.answers.set("DELETE api/users/metabase", () => new Response(JSON.stringify({ error: refusal.message, failure: refusal }), { status: 409 }));
+  assert.equal(await app.confirmRemove("metabase"), false);
+  await app.poll();
+  assert.match(textOf(popOf(app.view().users!, "act-users-metabase")), /^✗ metabase cannot be removed now Dismiss$/, "a poll on: still said");
+  const users = (app as unknown as { pages: Map<string, { dismiss(): unknown }> }).pages.get("users")!;
+  assert.equal(users.dismiss(), true);
+  assert.equal(popsOf(app.view().users!).length, 0, "gone on Escape");
   app.askRemove("metabase");
   run.answers.set("DELETE api/users/metabase", () => new Response(JSON.stringify({ removed: { name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z" }, next: [] }), { status: 200 }));
   run.answers.set("GET api/users?lastUsed=1", () => new Response(JSON.stringify({ users: [] }), { status: 200 }));
@@ -2033,6 +2043,40 @@ test("Tables: each added table's state, rows, last sync and its age, how long it
   assert.match(renderTables(SYNCED, { sizes: USAGE, syncing: ["public.customers"] }), /<button type="button" class="small" data-room="Syncing…" disabled>Syncing…<\/button>/);
 });
 
+test("Tables: Sync now is written disabled, its title why, while the state says mason sync of the table is refused — syncing, waiting, failed, read again — and enabled for a synced one, in the same room (issue 812)", () => {
+  const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
+  // the reasons as the sync's state carries them (src/duck/sync.ts syncRefusal; tests/duck-sync-added.test.ts holds each
+  // to pollNow's refusal), through the server's runState
+  const why = {
+    orders: "public.orders is not synced yet (its first sync has not finished): mason wait waits for it",
+    events: "public.events is not synced yet (its first sync has not finished): mason wait waits for it",
+    failed: "public.orders is not synced yet (its first sync failed: could not read the next chunk): mason wait waits for it",
+    again: "public.events is being read again whole (its columns changed): mason wait waits for it",
+  };
+  const syncing = stateOf([{ ...copied("public.customers", 1200, "2026-10-27T09:00:01.000Z"), syncRefusal: null },
+    { source: "public.orders", phase: "copying", rows: null, bytes: null, seconds: null, copiedAt: null, error: null, rowsSoFar: 280_000, rowsEstimate: 2_000_000, progress, syncRefusal: why.orders },
+    { source: "public.events", phase: "waiting", rows: null, bytes: null, seconds: null, copiedAt: null, error: null, syncRefusal: why.events }]);
+  const failed = stateOf([{ ...copied("public.customers", 1200, "2026-10-27T09:00:01.000Z"), syncRefusal: null },
+    { source: "public.orders", phase: "failed", rows: null, bytes: null, seconds: null, copiedAt: null, error: "could not read the next chunk", syncRefusal: why.failed },
+    { ...copied("public.events", 30_000_000, "2026-10-27T09:04:00.000Z"), syncRefusal: why.again }]);
+  assert.equal(syncing.tables.find((t) => t.table === "public.orders")!.syncRefusal, why.orders, "/api/state carries the sync's reason");
+  const actions = (html: string, table: string) => [...html.matchAll(/<td class="act" id="act-tables-([^"]*)">(.*?)<\/td>/gs)].find((m) => m[1] === table)![2]!;
+  const disabled = (reason: string) => `<button type="button" class="small" data-room="Syncing…" title="${reason}" disabled>Sync now</button>`;
+  const enabled = (table: string) => `<button type="button" class="small" data-sync-table="${table}" data-room="Syncing…">Sync now</button>`;
+  for (const [state, table, reason, what] of [[syncing, "public.orders", why.orders, "syncing"], [syncing, "public.events", why.events, "waiting"],
+    [failed, "public.orders", why.failed, "failed"], [failed, "public.events", why.again, "read again"]] as const) {
+    assert.ok(actions(renderTables(state), table).includes(disabled(reason)), `${what}: Sync now disabled, its title why — ${actions(renderTables(state), table)}`);
+  }
+  for (const state of [syncing, failed]) assert.ok(actions(renderTables(state), "public.customers").includes(enabled("public.customers")), "a synced table: Sync now offered");
+  // a run from before the field: offered, as before
+  assert.ok(actions(renderTables(RUNNING), "public.orders").includes(enabled("public.orders")));
+  // the same room whichever it says: the row's actions are the same buttons, in the same order
+  const shape = (h: string) => h.replace(/ data-sync-table="[^"]*"| title="[^"]*"| disabled/g, "");
+  assert.equal(shape(actions(renderTables(syncing), "public.orders")), shape(actions(renderTables(RUNNING), "public.orders")), "nothing moves: one room");
+  const cells = (h: string) => [...h.matchAll(/<t[hd][^>]*>/g)].length;
+  assert.equal(cells(renderTables(syncing)), cells(renderTables(COPYING)), "no cell added");
+});
+
 test("Tables: what a sync did is said as mason sync says it, beside its Sync; a refusal is the server's Failure", async () => {
   const cli = syncCommand as unknown as { syncedReport?: (b: unknown, picked: string[], unsynced: unknown[]) => unknown };
   assert.equal(typeof cli.syncedReport, "function", "src/cli/sync.ts exports syncedReport");
@@ -2162,19 +2206,19 @@ test("running now: a row each in the commands' words — held equal to mason log
   assert.equal(textOf(renderRunning([], null)), "No statement is running now.");
 });
 
-test("running now: the answer to a cancel is said beside its row's Cancel, a refusal as the CLI's Failure, beside the part once the statement ended, and goes by itself", () => {
+test("running now: the answer to a cancel is said beside its row's Cancel, a refusal as the CLI's Failure, beside the part once the statement ended, and stays until dismissed", () => {
   const renderRunning = fn<[unknown[], string | null, unknown, number?], string>("renderRunning");
   const done = renderRunning(RUNNING_NOW, null, { key: "12:45", cancelled: RUNNING_NOW[0] });
-  assert.equal(textOf(popOf(done, "act-running-12:45")), "Cancelled session 12's statement: it ends now, and its client gets a \"canceling statement\" error.", "beside the row it was for");
+  assert.equal(textOf(popOf(done, "act-running-12:45")), "Cancelled session 12's statement: it ends now, and its client gets a \"canceling statement\" error. Dismiss", "beside the row it was for, with its Dismiss");
+  assert.match(popOf(done, "act-running-12:45"), /<button type="button" class="small" data-dismiss-cancelled data-pop-close>Dismiss<\/button>/);
   assert.equal(textOf(withoutPops(done)), textOf(renderRunning(RUNNING_NOW, null, null)), "no row inserted");
-  // a cancel's answer goes by itself after OUTCOME_MS; a refusal stays until dismissed
+  // a cancel's answer stays up until it is dismissed, however long, as a refusal does (issue 811)
   const at = Date.parse("2026-10-28T09:00:00.000Z");
-  assert.ok(popOf(renderRunning(RUNNING_NOW, null, { key: "12:45", cancelled: RUNNING_NOW[0], at }, at + 7_000), "act-running-12:45"));
-  assert.equal(popsOf(renderRunning(RUNNING_NOW, null, { key: "12:45", cancelled: RUNNING_NOW[0], at }, at + 8_000)).length, 0, "gone after 8 s");
+  assert.ok(popOf(renderRunning(RUNNING_NOW, null, { key: "12:45", cancelled: RUNNING_NOW[0] }, at + 3_600_000), "act-running-12:45"), "an hour on: still said");
   const refused = { key: "12:45", failure: { code: "refused", message: "session 12 runs another statement now (statement 46), not statement 45: nothing cancelled", why: "statement 45 ended, and the session began another",
     fix: "mason cancel 12 --statement 46 stops the one it runs now", next: [{ command: "mason logs --running", what: "the statements running now, with their sessions" }] } };
   assert.equal(textOf(popOf(renderRunning(RUNNING_NOW.slice(0, 1), null, { ...refused, at: 0 }, Date.now()), "act-running-12:45")), "✗ session 12 runs another statement now (statement 46), not statement 45: nothing cancelled why statement 45 ended, and the session began another fix mason cancel 12 --statement 46 stops the one it runs now Next: mason logs --running the statements running now, with their sessions Dismiss");
-  assert.equal(textOf(popOf(renderRunning([], null, { key: "12:45", cancelled: RUNNING_NOW[0] }), "usage-running")), "Cancelled session 12's statement: it ends now, and its client gets a \"canceling statement\" error.", "the statement ended: beside the part (Usage's)");
+  assert.equal(textOf(popOf(renderRunning([], null, { key: "12:45", cancelled: RUNNING_NOW[0] }), "usage-running")), "Cancelled session 12's statement: it ends now, and its client gets a \"canceling statement\" error. Dismiss", "the statement ended: beside the part (Usage's)");
 });
 
 test("the request log: a row each, newest first, in the commands' words — held equal to mason logs --requests' line — Older and Newest", () => {
@@ -2271,6 +2315,13 @@ test("the app: Usage's Cancel asks first; the confirm posts { session, statement
   assert.deepEqual(run.asked, [`POST api/cancel ${JSON.stringify({ session: 12, statement: 45 })}`, "GET api/running", "GET api/state"], "the statements running and who is connected, read again");
   assert.match(textOf(app.view()["usage-running"]!), /^Session No\. .* 13 7 .*Cancelled session 12's statement: it ends now/, "the statement ended: said beside the part");
   assert.match(popOf(app.view()["usage-running"]!, "usage-running"), /Cancelled session 12's statement/);
+  // the answer stays up across polls until it is dismissed: Escape (the page's dismiss) takes it (issue 811)
+  await app.poll();
+  assert.match(popOf(app.view()["usage-running"]!, "usage-running"), /Cancelled session 12's statement/, "a poll on: still said");
+  const usage = (app as unknown as { pages: Map<string, { dismiss(): unknown }> }).pages.get("usage")!;
+  assert.equal(usage.dismiss(), true);
+  assert.equal(popsOf(app.view()["usage-running"]!).length, 0, "gone on Escape");
+  assert.equal(usage.dismiss(), null, "nothing left to dismiss");
   // the session began another statement: the server refuses, and the page renders its Failure beside the row's Cancel
   const failure = { code: "refused", message: "session 13 runs another statement now (statement 8), not statement 7: nothing cancelled", why: "statement 7 ended, and the session began another",
     fix: "mason cancel 13 --statement 8 stops the one it runs now", next: [{ command: "mason logs --running", what: "the statements running now, with their sessions" }] };
@@ -4165,30 +4216,67 @@ test("layout guard: a click moves no row and no column — a question, a form an
   assert.match(rule("#page-queries tr.detail .detail-body"), /width: 0; min-width: 100%/);
 });
 
-test("an answer beside its button goes by itself after OUTCOME_MS; a refusal stays until dismissed", async () => {
+test("an answer beside its button stays up until it is dismissed — Dismiss, Escape, or the next action's answer or question — as a refusal does (issue 811)", async () => {
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
-  assert.equal((page as Record<string, unknown>).OUTCOME_MS, 8000);
+  assert.equal((page as Record<string, unknown>).OUTCOME_MS, undefined, "no answer goes by itself: no time it is shown for");
   const synced = { at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", changed: 1, deleted: 0, rows: 1201, ms: 40 }] };
-  const at = 1_000_000;
-  const shown = (now: number, o: Record<string, unknown>) => popsOf(renderTables(CATALOG_STATE, { ...o, now })).length;
-  assert.equal(shown(at + 7_999, { synced: { table: "public.customers", synced, at } }), 1);
-  assert.equal(shown(at + 8_000, { synced: { table: "public.customers", synced, at } }), 0, "a sync's answer, gone");
-  assert.match(renderTables(CATALOG_STATE, { synced: { table: "public.customers", synced, at }, now: at + 100 }), />Synced ✓<\/button>/, "the button says it meanwhile");
-  assert.match(renderTables(CATALOG_STATE, { synced: { table: "public.customers", synced, at }, now: at + 8_000 }), /data-room="Syncing…">Sync now<\/button>/, "then Sync now again");
-  assert.equal(shown(at + 8_000, { outcome: { table: "public.accounts", added: PICKED.secret, at } }), 0, "an add's answer, gone");
-  assert.equal(shown(at + 60_000, { synced: { table: "public.customers", failure: { code: "refused", message: "no" }, at } }), 1, "a refusal stays");
-  // the app stamps an answer with its clock, so the page shown a poll later has it gone
+  const hour = 3_600_000;
+  const shown = (o: Record<string, unknown>) => popsOf(renderTables(CATALOG_STATE, { ...o, now: Date.now() + hour })).length;
+  assert.equal(shown({ synced: { table: "public.customers", synced } }), 1, "a sync's answer, an hour on");
+  assert.match(renderTables(CATALOG_STATE, { synced: { table: "public.customers", synced }, now: Date.now() + hour }), />Synced ✓<\/button>/, "the button says it meanwhile");
+  assert.equal(shown({ outcome: { table: "public.accounts", added: PICKED.secret } }), 1, "an add's answer, an hour on");
+  assert.equal(shown({ synced: { table: "public.customers", failure: { code: "refused", message: "no" } } }), 1, "a refusal, as before");
+  // the app: each answer stays across polls long after it was given, and goes on Dismiss, on Escape and on the next action
   const run = fakeRun();
-  run.answers.set("GET api/state", answer(SYNCED));
+  run.answers.set("GET api/state", answer(CATALOG_STATE));
   let t = Date.parse("2026-10-27T09:05:30.000Z");
-  const app = fn<[unknown, () => Date], App & { syncTable(t: string): Promise<boolean> }>("createApp")(run.fetch, () => new Date(t));
+  type TablesApp = App & { syncTable(t: string): Promise<boolean>; dismissSynced(): void };
+  const app = fn<[unknown, () => Date], TablesApp>("createApp")(run.fetch, () => new Date(t));
   app.show("tables");
   await app.poll();
+  const tablesPage = (app as unknown as { pages: Map<string, { dismiss?: () => unknown }> }).pages.get("tables")!;
+  const pops = () => popsOf(app.view().tables!);
+  const later = async () => { t += hour; await app.poll(); };
+  // a sync's answer: an hour of polls on, still said; Dismiss takes it
   run.answers.set("POST api/sync", answer(synced));
   await app.syncTable("public.customers");
-  assert.equal(popsOf(app.view().tables!).length, 1);
-  t += 8_000;
-  assert.equal(popsOf(app.view().tables!).length, 0, "eight seconds on: gone, no click needed");
+  await later();
+  assert.deepEqual(pops().map((p) => p.anchor), ["act-tables-public.customers"], "a sync's answer, an hour of polls on");
+  app.dismissSynced();
+  assert.equal(pops().length, 0, "gone on Dismiss");
+  // an add's answer: still said an hour on; Escape (the page's dismiss) takes it
+  run.answers.set("POST api/pick", answer({ ...PICKED.secret, state: CATALOG_STATE }));
+  assert.equal(await app.addTable("public.accounts"), true);
+  await later();
+  assert.deepEqual(pops().map((p) => p.anchor), ["act-tables-public.accounts"], "an add's answer, an hour on");
+  assert.equal(tablesPage.dismiss!(), true, "Escape dismisses it");
+  assert.equal(pops().length, 0, "gone on Escape");
+  assert.equal(tablesPage.dismiss!(), null, "nothing shown: Escape has nothing to dismiss");
+  // the next action's answer takes the last one's place, and so does its question
+  await app.syncTable("public.customers");
+  await later();
+  run.answers.set("POST api/sync", answer({ ...synced, tables: [{ ...synced.tables[0]!, table: "public.orders" }] }));
+  await app.syncTable("public.orders");
+  assert.deepEqual(pops().map((p) => p.anchor), ["act-tables-public.orders"], "the next sync's answer in the last one's place");
+  app.askRemoveTable("public.customers");
+  assert.deepEqual(pops().map((p) => p.anchor), ["act-tables-public.customers"], "a question takes the answer away");
+  assert.match(pops()[0]!.html, /^<div class="pop ask"/);
+});
+
+test("Escape with no question open dismisses the answer beside a button, in the browser: the shell asks the page shown to dismiss it (issue 811)", async () => {
+  const run = fakeRun();
+  run.answers.set("GET api/state", answer(CATALOG_STATE));
+  const { el, on, settle } = fakeBrowser(run, "#tables");
+  await settle();
+  const press = (key: string) => on.get("keydown")!({ key, preventDefault: () => undefined });
+  const click = (dataset: Record<string, string>) => on.get("click")!({ target: { closest: (sel: string) => sel === "button" ? { dataset } : null } });
+  run.answers.set("POST api/sync", answer({ at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", changed: 1, deleted: 0, rows: 1201, ms: 40 }] }));
+  await click({ syncTable: "public.customers" });
+  await settle();
+  assert.match(el("tables").html, /Synced public\.customers:/, "the answer, said");
+  press("Escape");
+  await settle();
+  assert.ok(!/Synced public\.customers:/.test(el("tables").html), "Escape took it");
 });
 
 test("every added table has its bar on the Tables page, as mason status draws one for each: full when copied, red when failed, amber when not kept current, the shimmer while waiting", () => {

@@ -14,7 +14,7 @@
  */
 import { VIEW_HASHES } from "../routes.js";
 import { esc, n, msText, bytesText, fileSize, duration, details, createOpenSet, cards, card, empty, panel, skeleton, sortTh, sortedBy, nextSort, readPart, usagePath, utcMinute,
-  RANGES, DEFAULT_RANGE, rangeOf, isLive, rangeEvery, firstLine, spanText, agoText, utcText, clientText, clip, TITLE_MAX, unsupportedEntry, renderFailure, json, pop, fresh, actId,
+  RANGES, DEFAULT_RANGE, rangeOf, isLive, rangeEvery, firstLine, spanText, agoText, utcText, clientText, clip, TITLE_MAX, unsupportedEntry, renderFailure, json, pop, actId,
   statementCell, POLL_MS, readOnlyLine } from "../shared.js";
 import { spark, seriesChart, seriesOf, drawable } from "../charts.js";
 
@@ -118,10 +118,11 @@ const queriesLink = (user, client, range, label = "Queries") => `<a class="btn s
   ? `the statements ${user ? `of ${user}` : ""}${user && client ? " " : ""}${client ? `from ${client}` : ""} in ${RANGES[rangeOf(range)].span}`
   : `every statement in ${RANGES[rangeOf(range)].span}: a token's session that names no client cannot be told apart`)}">${esc(label)}</a>`;
 
-/** What a cancel answered, as `mason cancel` says it: its headline, or the refusal as the Failure. */
+/** What a cancel answered, as `mason cancel` says it: its headline, or the refusal as the Failure — each with Dismiss. */
 function outcomeHtml(o) {
-  if (o.failure) return `${renderFailure(o.failure)}<p class="pop-actions"><button type="button" class="small" data-dismiss-cancelled data-pop-close>Dismiss</button></p>`;
-  return `<p class="done"><span class="headline" title="SQLSTATE 57014">Cancelled session ${o.cancelled.session}'s statement: it ends now, and its client gets a "canceling statement" error.</span></p>`;
+  const dismiss = `<p class="pop-actions"><button type="button" class="small" data-dismiss-cancelled data-pop-close>Dismiss</button></p>`;
+  if (o.failure) return `${renderFailure(o.failure)}${dismiss}`;
+  return `<p class="done"><span class="headline" title="SQLSTATE 57014">Cancelled session ${o.cancelled.session}'s statement: it ends now, and its client gets a "canceling statement" error.</span></p>${dismiss}`;
 }
 
 /**
@@ -166,12 +167,13 @@ export function statementCards(day, line = () => "", label = "last 24 hours", hr
  * far, the statement — and Cancel. The one being cancelled (`asking`, `session:statement`) asks first, its question a
  * popover beside its Cancel (`pop`: no row is inserted, so none below moves; its Cancel stays, held down); `outcome` is
  * what the last cancel answered (a Failure, or `{ cancelled, at }`), a popover beside the row it was for — or beside the
- * part when that statement has ended since — gone by itself after OUTCOME_MS at `now` (a refusal stays until dismissed).
+ * part when that statement has ended since — up until it is dismissed (its Dismiss, Escape, or the next question in its
+ * place), a refusal as an answer.
  * `readOnly`: `/api/state` `pageReadOnly` (MASON_UI_READ_ONLY=1) — no Cancel, and no column for it.
  */
 export function renderRunning(running, asking = null, outcome = null, now = Date.now(), readOnly = null) {
   const pops = [];
-  const said = fresh(outcome, now) ? outcome : null;
+  const said = outcome ?? null;
   let shown = false;
   const rows = running.map((r) => {
     const key = keyOf(r.session, r.statement);
@@ -342,7 +344,7 @@ export const page = {
       async confirmCancelStatement(session, statement) {
         const r = await ctx.ask("api/cancel", json("POST", { session, statement }));
         m.asking = null;
-        m.outcome = "failure" in r ? { key: keyOf(session, statement), failure: r.failure } : { key: keyOf(session, statement), cancelled: r.body.cancelled, at: ctx.now().getTime() };
+        m.outcome = "failure" in r ? { key: keyOf(session, statement), failure: r.failure } : { key: keyOf(session, statement), cancelled: r.body.cancelled };
         // who is connected says its running statements too: both read again, so neither says the cancelled one runs
         await ctx.refresh([RUNNING, STATE]);
         return !("failure" in r);
@@ -362,6 +364,8 @@ export const page = {
       },
       actions,
       toggle: (target) => opened.toggle(target),
+      /** Escape with no question open: what the last cancel answered goes, as its Dismiss does (null: none is shown) */
+      dismiss() { if (m.outcome === null) return null; actions.dismissCancelled(); return true; },
       click(d) {
         if (d.sortTable === "hours") return actions.sortHours() ?? true;
         const pair = (v) => v.split(":").map(Number);

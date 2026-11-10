@@ -69,7 +69,9 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   open or a Remove asks, the list is FROZEN at the state it opened over (`held`, src/web/pages/tables.js: no refresh, however
   long), so a poll never rewrites it under the person; it is written from the latest state again at Add, Cancel or confirm.
   Sync is `POST /api/sync` `{ tables: [name] }` (`mason sync`), said beside its Sync as `mason sync` says it
-  (`syncedReport`, src/cli/sync.ts); the search box filters by name, and All / Added / Not added by state, in the page alone (the endpoint returns every table).
+  (`syncedReport`, src/cli/sync.ts), and written disabled, in its room, its title the reason, while `/api/state`
+  `tables[].syncRefusal` says why `mason sync` of it is refused now — the sync's one check, which `pollNow` refuses with
+  (`Sync.syncRefusal`, src/duck/sync.ts), never a check of the page's own; the search box filters by name, and All / Added / Not added by state, in the page alone (the endpoint returns every table).
 - **No framework, no build step, no CDN, nothing fetched from elsewhere**: plain HTML, CSS and ES modules importing each
   other by relative paths, served as they are (cli/build.ts copies `src/**` that is not TypeScript, subfolders too,
   cli/beside.ts), because Mason runs on boxes without internet and the page must work there whole. **A small dependency
@@ -182,8 +184,9 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
 - **A click moves no other row and no column** — a table that moves under the pointer loses the next click:
   a question (a Remove's, a Cancel's), a form (Columns…, Name its key…) and what an action answered are a POPOVER beside
   the button (`pop` and `placePops` of src/web/shared.js: written after the table, `position: fixed`, anchored to the
-  row's actions cell by its id, `actId`), never a row inserted and never in the actions' cell; an answer goes by itself
-  after `OUTCOME_MS` (`fresh`), a refusal stays until dismissed, and a new question takes the last answer away. A
+  row's actions cell by its id, `actId`), never a row inserted and never in the actions' cell; an answer, like a
+  refusal, stays until it is dismissed — its Dismiss, Escape (the page's `dismiss`, when no question is open), or the
+  next action's answer or question in its place (two lines a person may act on went mid-read: issue 811). A
   button whose label changes keeps the room of its longest (`ROOMS`: Sync → Syncing… → Synced ✓, Copy → Copied); one
   held while it asks stays where it was, disabled. The Tables list's columns are FIXED widths (`table-layout: fixed`,
   a width per header class, the name the column that gives), every row two lines (a table not added keeps its bar's

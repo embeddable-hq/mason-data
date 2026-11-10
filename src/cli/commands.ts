@@ -70,6 +70,10 @@ export interface TableState extends Omit<CatalogTable, "columns"> {
   /** how the run keeps the copy current now — its sync, when it was last synced — the sync's one derivation (src/duck/sync.ts KeptCurrent): absent for a
    *  table the sync does not hold, and from a run before it was said */
   kept?: KeptCurrent;
+  /** why `mason sync <table>` is refused now, in its refusal's words (its first sync not finished or failed, being read
+   *  again whole, being caught up), or null when it would run: the sync's one check (src/duck/sync.ts syncRefusal);
+   *  absent from a run before it was said */
+  syncRefusal?: string | null;
 }
 export interface RunState {
   /** the database the run copies from: a JSON key named `source` is always this object, never a table (a table is `table`) */
@@ -419,7 +423,9 @@ const STATUS_USAGE = `usage: mason status [--json]
     replication, demo (the demo database this run hosts), textOrder (what reading the database's text order left to say), sync: { default (every table's sync unless its entry
     says its own: off, poll 30s), written (the file's top sync: says it; false: the default) } }, warnings, folder, project, tables: [{ table, rows,
     bytes, key, added, addedColumns, copy, error (why its sync failed: its first sync, or the poll, catch-up, stream or
-    publication check keeping a synced table current; null otherwise), kept, sync: { state (synced, syncing,
+    publication check keeping a synced table current; null otherwise), kept, syncRefusal (why mason sync <table> is
+    refused now, in its words: its first sync not finished or failed, being read again whole, being caught up; null
+    when it would run), sync: { state (synced, syncing,
     behind: served and kept but older than its sync: promises, failed, waiting), syncedAt (when
     it was last brought current), syncSeconds (how long that took), syncedBy (copy, poll, catch-up, stream),
     ageSeconds (how long ago that was), asOf (the time the synced data holds the database as of: kept's syncedAt),

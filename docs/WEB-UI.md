@@ -89,11 +89,14 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   cannot be added, its stream state) is its note, a line of its own under the row, across every column — written for
   every row, empty when it says nothing, so a note that comes or goes moves no row. **View events** opens Sync events narrowed
   to that table; **Sync now** runs `mason sync` for it
-  (its button says Syncing…, then Synced ✓, in one width); **Remove** asks first, then runs `mason remove`. **Nothing a
-  click does moves another row or a column**: the columns are fixed widths, a question (Remove's), a form (Columns…) and
-  what an action answered are popovers beside the button, over the rows and never between them — an answer goes by
-  itself after 8 s, a refusal stays until dismissed — and only an expander the reader opens (a request's details, a
-  first sync's whole error) pushes the rows under it down.
+  (its button says Syncing…, then Synced ✓, in one width), and is shown disabled, with the reason as its title, while
+  `mason sync` of the table would be refused: its first sync not finished or failed, being read again whole, being
+  caught up (`/api/state` `tables[].syncRefusal`, the sync's own check); **Remove** asks first, then runs `mason remove`.
+  **Nothing a click does moves another row or a column**: the columns are fixed widths, a question (Remove's), a form
+  (Columns…) and what an action answered are popovers beside the button, over the rows and never between them — an
+  answer, like a refusal, stays until it is dismissed (its Dismiss, Escape, or the next action's answer or question in
+  its place) — and only an expander the reader opens (a request's details, a first sync's whole error) pushes the rows
+  under it down.
 - **Tables**, a table not added: its rows, its key and why it cannot be added as it is. **Add** syncs every column, as
   `mason add <table>` does; **Columns…** opens a form to tick the columns to sync; **Name its key…** does the same for a
   table with no primary key.
@@ -458,7 +461,9 @@ reads:
   table that can be added and for one added), `addedColumns` and `copyKey` (what its entry syncs, and the key it names;
   null when not added), `copy` (its first sync, below, or null) and `error`. An added
   table also has `sync`: `state` (`waiting`, `syncing`, `synced`, `behind`, `failed`), `syncedAt`, `syncSeconds`,
-  `syncedBy`, `ageSeconds`, `asOf`, `promisedSeconds`, `behindBySeconds`, `behindWhy`. Once the sync holds it there are
+  `syncedBy`, `ageSeconds`, `asOf`, `promisedSeconds`, `behindBySeconds`, `behindWhy`, and `syncRefusal`: why `mason
+  sync <table>` (Sync now) is refused now, in the words it refuses with (its first sync not finished or failed, being
+  read again whole, being caught up), or null when it would run. Once the sync holds it there are
   also `kept` (how it is kept current now: `by` is `poll`, with its `sync`, or `replication` or `recopy`) and `duck`.
 - `copy`, null until the sync reaches the table, is `phase` (`copying`, `done` or `failed`), `rowsCopied` (the rows
   read so far, or the copy's rows once done) and `updatedAt` (when it was copied, `""` before). It also has `progress`

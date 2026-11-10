@@ -405,6 +405,53 @@ test("mason sync of a table being read again says why, never that its first sync
   });
 });
 
+test("each table's state says why mason sync of it is refused now, in the words pollNow refuses with, or null when it runs (the page's Sync now, issue 812)", async () => {
+  const names = ["a", "b", "c", "d", "e", "f", "g", "h", "i"];
+  await withSync({ mode: "poll", tables: names.map((n) => table(n)),
+    seed: async (run) => { for (const n of ["a", "d", "e", "f", "g", "h", "i"]) { await run(copied(n)); await run(lastPoll(n)); } await run(copied("c", [column("id")], "failed", "could not read the next chunk")); } }, async (sync) => {
+    type Inner = { stopped: boolean; attach(): Promise<void>; states: Map<string, CopyState>; copiedAs: Map<string, string>; snapshots: Map<string, unknown>;
+      retired: Map<string, { layout: string; short: string }>; behind: Map<string, { why: string }>; rebuildingNow: { source: string; kind: string } | null };
+    const s = sync as unknown as Inner;
+    s.stopped = false;
+    s.attach = async () => { throw new Error("no source in this test"); };
+    try {
+      // b: waiting for its first sync (never seeded); c: its first sync failed; d: copying; e: its columns changed;
+      // f: a numeric outgrew its column; g: in a retired layout; h: being caught up; i: being read again whole now
+      s.states.set("public.d", { ...s.states.get("public.d")!, phase: "copying" });
+      s.copiedAs.set("public.e", "other columns");
+      s.snapshots.delete("public.f");
+      s.retired.set("public.g", { layout: "stored in key order with its index (an older layout)", short: "in an older layout" });
+      s.behind.set("public.h", { why: "after its whole read" });
+      s.rebuildingNow = { source: "public.i", kind: "copy" };
+      const refusalOf = async (n: string): Promise<string | null> => {
+        try { await sync.pollNow([`public.${n}`]); return null; }
+        catch (e) { return e instanceof syncModule.PollRefused ? e.message : null; }
+      };
+      const states = sync.state();
+      const json = JSON.parse(JSON.stringify(runState(runContext([...names.map((n) => table(n)), table("zz")], "poll"), states, null))) as RunState & { tables: { table: string; syncRefusal?: string | null }[] };
+      for (const n of [...names, "zz"]) {
+        const refused = await refusalOf(n);
+        if (n === "a") assert.equal(refused, null, "a copied table, current: mason sync runs it (here it fails on the source, never refused)");
+        else assert.ok(refused !== null, `public.${n} is refused`);
+        if (n !== "zz") assert.equal(states.find((x) => x.source === `public.${n}`)!.syncRefusal, refused, `public.${n}: the state's reason is pollNow's refusal`);
+        assert.equal(json.tables.find((x) => x.table === `public.${n}`)!.syncRefusal, refused, `public.${n}: /api/state says it as pollNow refuses`);
+      }
+      assert.match(states.find((x) => x.source === "public.b")!.syncRefusal!, /^public\.b is not synced yet \(its first sync has not finished\)/);
+      assert.match(states.find((x) => x.source === "public.c")!.syncRefusal!, /^public\.c is not synced yet \(its first sync failed: could not read the next chunk\)/);
+      assert.match(states.find((x) => x.source === "public.e")!.syncRefusal!, /^public\.e is being read again whole \(its columns changed\)/);
+      assert.match(states.find((x) => x.source === "public.h")!.syncRefusal!, /^public\.h is being caught up by one poll after its whole read/);
+    } finally { s.stopped = true; }
+  });
+  // a run that reads every table again whole: every table refused, in the one sentence
+  await withSync({ mode: "recopy", tables: [table("a")], seed: async (run) => { await run(copied("a")); await run(lastPoll("a")); } }, async (sync) => {
+    (sync as unknown as { stopped: boolean }).stopped = false;
+    const refused = await sync.pollNow(["public.a"]).then(() => null, (e: Error) => e.message);
+    assert.match(refused ?? "", /MASON_DUCK_SYNC=recopy/);
+    assert.equal(sync.state()[0]!.syncRefusal, refused);
+    (sync as unknown as { stopped: boolean }).stopped = true;
+  });
+});
+
 test("a table out of its copy is polled from then on: the timer is set again after its catch-up, and after a mason sync that held the pass slot", async () => {
   await withSync({ mode: "poll", tables: [{ ...table("a"), sync: every("30s", 30) }, { ...table("b"), sync: OFF }],
     seed: async (run) => { for (const n of ["a", "b"]) { await run(copied(n)); await run(lastPoll(n)); } } }, async (sync) => {

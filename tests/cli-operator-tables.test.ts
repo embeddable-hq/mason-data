@@ -161,14 +161,16 @@ test("an added table in the list: added, its columns and its sync's state; once 
   const op = await operator();
   assert.equal((await ask(op, "POST", "/api/pick", { body: { table: "public.customers", picked: true } })).status, 200);
   let t = (json(await ask(op, "GET", "/api/state")) as { tables: Array<Record<string, unknown>> }).tables.find((x) => x.table === "public.customers")!;
-  assert.deepEqual(keys(t), [...LEAN_TABLE, "sync"].sort());
+  assert.deepEqual(keys(t), [...LEAN_TABLE, "sync", "syncRefusal"].sort());
+  assert.equal(t.syncRefusal, "public.customers is not added (mason add adds it)", "the sync does not hold it yet: mason sync's own refusal (issue 812)");
   assert.equal(t.added, true);
   assert.deepEqual(t.addedColumns, ["id", "name"]);
   assert.deepEqual(keys(t.sync), ["ageSeconds", "asOf", "behindBySeconds", "behindWhy", "promisedSeconds", "state", "syncSeconds", "syncedAt", "syncedBy"]);
   const kept = { by: "poll" as const, sync: { mode: "poll" as const, every: "5m", seconds: 300 }, syncedAt: "2026-11-08T10:00:00.000Z", nextAt: "2026-11-08T10:05:00.000Z" };
   op.setCopies([{ source: "public.customers", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-11-08T10:00:00.000Z", error: null, kept }]);
   t = (json(await ask(op, "GET", "/api/state")) as { tables: Array<Record<string, unknown>> }).tables.find((x) => x.table === "public.customers")!;
-  assert.deepEqual(keys(t), [...LEAN_TABLE, "duck", "kept", "sync"].sort());
+  assert.deepEqual(keys(t), [...LEAN_TABLE, "duck", "kept", "sync", "syncRefusal"].sort());
+  assert.equal(t.syncRefusal, null, "the sync's state says none: mason sync runs it");
   assert.deepEqual(t.kept, kept);
   assert.deepEqual(keys(t.copy), ["phase", "rowsCopied", "updatedAt"]);
   assert.equal((t.copy as { phase: string }).phase, "done");
@@ -432,7 +434,7 @@ test("the doc names every key of the contract: the lean table, a column, the pic
   const doc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "docs", "WEB-UI.md"), "utf8");
   const section = doc.split("\n## An operator's table edits\n")[1]?.split("\n## ")[0];
   assert.ok(section !== undefined, "docs/WEB-UI.md has the section");
-  for (const k of [...LEAN_TABLE, ...PICK_ANSWER, ...REMOVE_ANSWER, ...COLUMN, "kept", "sync", "sourcesReadOnly", "pageReadOnly", "phase", "rowsCopied", "updatedAt", "progress", "retired", "copying", "done", "failed"]) assert.ok(section.includes(`\`${k}\``), k);
+  for (const k of [...LEAN_TABLE, ...PICK_ANSWER, ...REMOVE_ANSWER, ...COLUMN, "kept", "sync", "syncRefusal", "sourcesReadOnly", "pageReadOnly", "phase", "rowsCopied", "updatedAt", "progress", "retired", "copying", "done", "failed"]) assert.ok(section.includes(`\`${k}\``), k);
   for (const route of ["GET /api/state", "GET /api/tables/<table>/columns", "POST /api/pick", "POST /api/remove", "MASON_UI_SOCKET", "MASON_UI_RUN_FILE", "MASON_UI_READ_ONLY"]) {
     assert.ok(section.includes(route), route);
   }
