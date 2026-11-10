@@ -33,6 +33,8 @@
  *                      promise (the shell writes the page again once it settles)
  *       submit?(form, FormData)  a form submitted: null when not its, else a promise (the shell prevents the default)
  *       input?(target)  an input changed: null when not its
+ *       dismiss?()     Escape with no question or form open: the answer beside a button goes (as its Dismiss); null
+ *                      when none is shown
  *       toggle?(target)  a <details> opened or closed: null when not its, else a value or a promise (as `click`);
  *                      a details that must stay open across a refresh is `details(key, …)` of shared.js, its open set
  *                      `createOpenSet()` in the page's state, whose `toggle` this is. `target` is the element (its
@@ -433,7 +435,7 @@ export function start(doc, win) {
   // THE POPOVERS (a confirm, a form, an answer: `pop` of shared.js) placed beside their buttons after every write, and
   // again on a scroll or a resize; a question or a form that has just opened takes the focus (a form's first box, a
   // question's Cancel: never the destructive button, which Enter would press), and
-  // Escape answers it with its own Cancel (`data-pop-close`)
+  // Escape answers it with its own Cancel (`data-pop-close`); with none open, Escape dismisses an answer (the page's `dismiss`)
   let dialogs = new Set();
   const place = () => {
     const now = new Set();
@@ -477,7 +479,9 @@ export function start(doc, win) {
     if (e.key !== "Escape") return;
     if (menuOpen) { e.preventDefault?.(); setMenu(false, true); return; }
     const close = doc.querySelector?.(".pop.ask:not([hidden]) [data-pop-close]");
-    if (close) { e.preventDefault?.(); close.click(); }
+    if (close) { e.preventDefault?.(); close.click(); return; }
+    // no question open: the answer beside a button goes, as its Dismiss does (an answer stays up until dismissed)
+    if ((shownPage().dismiss?.() ?? null) !== null) { e.preventDefault?.(); paint(); }
   });
   doc.addEventListener("focusin", (e) => { if (menuOpen && !inMenu(e.target)) setMenu(false, false); });
   doc.addEventListener("submit", async (e) => {

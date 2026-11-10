@@ -37,7 +37,7 @@ import * as seed from "../src/demo/seed.ts";
 import { parseGeneratedText, readGenerated } from "../src/cli/generated-files.ts";
 import { parseSql, stopParser } from "../src/api/postgres/parser.ts";
 import { appDatabaseUrl } from "../src/lib/dotenv.ts";
-import { answers, endRun, liveRun, runOf, runState } from "../src/cli/runs.ts";
+import { answers, endRun, liveRun, masonProcess, processStart, runOf, runState } from "../src/cli/runs.ts";
 
 const MAIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "main.ts");
 const tmp = (): string => fs.mkdtempSync(path.join(os.tmpdir(), "mason-project-"));
@@ -391,12 +391,35 @@ test("a run is up only when it answers with its token and its pid: a pid alive a
     assert.equal(await liveRun(p, () => true, async () => false), null, "alive but not answering: not up");
     // A RUN THAT IS ALIVE AND DOES NOT ANSWER IS A THIRD STATE, never "not running" (the test server: a run
     // hung with its main thread blocked; mason stop said it was not running and mason destroy deleted its files under
-    // it). It is hung when its pid is a Mason run by its command line (a pid alive after a reboot is another process)
+    // it). It is hung when its pid is still the process the run recorded (a pid alive after a reboot is another process)
     assert.deepEqual(await runState(p, () => true, async () => true, () => true), { kind: "up", run: runOf(p) });
     assert.deepEqual(await runState(p, () => true, async () => false, () => true), { kind: "hung", run: runOf(p) });
-    assert.deepEqual(await runState(p, () => true, async () => false, () => false), { kind: "none", run: null }, "alive, silent, and not a Mason run: another process has the pid");
+    assert.deepEqual(await runState(p, () => true, async () => false, () => false), { kind: "none", run: null }, "alive, silent, and not the run: another process has the pid");
     assert.deepEqual(await runState(p, () => false, async () => true, () => true), { kind: "none", run: null });
   } finally { srv.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a process's start, as a run records it: the same at every reading, another process's never, a gone pid's unknown", () => {
+  const mine = processStart(process.pid);
+  assert.ok(mine !== null, "Linux and macOS say when a process started");
+  assert.equal(processStart(process.pid), mine);
+  const child = spawnSync(process.execPath, ["-e", `process.stdout.write(String(process.pid))`], { encoding: "utf8" });
+  assert.equal(processStart(Number(child.stdout)), null, "a pid that is gone: nothing to read");
+  assert.equal(masonProcess(process.pid, mine), true);
+  assert.equal(masonProcess(process.pid, `${mine}0`), false, "the number held by a process that started at another moment");
+  // a record an earlier Mason wrote (no start) is judged by the earlier check: this test runner is no run
+  assert.equal(masonProcess(process.pid, null), false);
+});
+
+test("where a start is not recorded, or cannot be read now, the earlier check decides, as it did before issue 798", () => {
+  const unreadable = (earlier: boolean) => ({ start: () => null, earlier: () => earlier });
+  assert.equal(masonProcess(4242, null, unreadable(true)), true, "an earlier Mason's record: the earlier check's yes");
+  assert.equal(masonProcess(4242, null, unreadable(false)), false, "an earlier Mason's record: the earlier check's no");
+  assert.equal(masonProcess(4242, "linux:b:1", unreadable(false)), false, "a start recorded and not readable now (Windows, hidepid): the earlier check");
+  assert.equal(masonProcess(4242, "linux:b:1", unreadable(true)), true);
+  // the start, where it is read, decides alone: another process whose command line is a run's is not this run
+  assert.equal(masonProcess(4242, "linux:b:1", { start: () => "linux:b:2", earlier: () => true }), false);
+  assert.equal(masonProcess(4242, "linux:b:1", { start: () => "linux:b:1", earlier: () => false }), true);
 });
 
 test("ending a hung run: SIGTERM, then SIGKILL once the grace is over, and the pid waited for", async () => {

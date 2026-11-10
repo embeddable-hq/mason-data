@@ -393,17 +393,12 @@ export const ROOMS = { sync: "Syncing…", add: "Adding…", copy: "Press ⌘C",
  * table and no row below moves (docs/WEB-UI.md "Presentation"): written into its part AFTER the table (never a row of
  * it), `position: fixed` and placed by `placePops` beside its anchor (`anchor`: an element's id, a row's actions cell)
  * after each write, and again on a scroll or a resize. `kind`: `dialog` (a question or a form: Escape presses its
- * `data-pop-close` button) or `status` (an answer: read out, and gone by itself — the page's OUTCOME_MS — unless it is a
- * refusal). `label` names a dialog for a screen reader.
+ * `data-pop-close` button) or `status` (an answer or a refusal: read out, and up until it is dismissed — its Dismiss,
+ * Escape (the page's `dismiss`), or the next action's answer or question in its place). `label` names a dialog for a
+ * screen reader.
  */
 export const pop = (anchor, html, { kind = "status", label = "" } = {}) =>
   `<div class="pop ${kind === "dialog" ? "ask" : "said"}" data-anchor="${esc(anchor)}" role="${kind === "dialog" ? "dialog" : "status"}"${label ? ` aria-label="${esc(label)}"` : ""}>${html}</div>`;
-
-/** How long what an action answered stays beside its button before it goes by itself (a refusal stays until dismissed). */
-export const OUTCOME_MS = 8000;
-
-/** Whether an answer recorded at `at` (ms) is still shown at `now`: a refusal always (until dismissed), else OUTCOME_MS. */
-export const fresh = (o, now) => o !== null && o !== undefined && ("failure" in o || o.at === undefined || now - o.at < OUTCOME_MS);
 
 /** An element's id for a row's actions cell (a popover's anchor): unique in the document, whatever the name holds. */
 export const actId = (page, key) => `act-${page}-${key}`;

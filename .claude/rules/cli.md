@@ -193,13 +193,19 @@ CLI lacks).
   verified gone; the next `mason start` copies again. `mason stop` keeps all of it.
 - **Alive and silent is a third state, never "not running"** (the test server: a hung run; `mason stop`
   said it was not running and `mason destroy` deleted the 58 GB copy under it, which the process kept open). A pid
-  that is alive, is a Mason run by its command line (`masonProcess`: after a reboot the number is another process's)
+  that is alive, is still the process the run recorded (`masonProcess`: after a reboot the number is another process's)
   and does not answer `/api/ping` is HUNG (`runState`, src/cli/runs.ts): every command says so with the way out
-  (`not_answering`), `mason status` says `hung` (exit 1), `mason stop` ends it — its supervisor is TOLD first and
+  (`not_answering`), `mason status` says `hung` (exit 1), `mason start` refuses before it spawns a run, `mason stop` ends it — its supervisor is TOLD first and
   waited for LAST (`signalSupervisor` … `endRun`: SIGTERM, then SIGKILL after 15 s … `supervisorGone`: the supervisor
   waits for the run, so a kill it was not told of is a crash to it, recorded as "often the system out of memory" and
   restarted from) — and records the stop in `config.lastStop` as the run does for its own, and `mason destroy` removes
-  nothing under it. The supervisor is known by its command line under BOTH its names (`supervise.ts` in a checkout,
+  nothing under it. **Which process is the run is what the run records** (issue 798: `mason serve`'s command line did
+  not match `start … --attach`, and a hung server read as not running): the run writes its own start beside its pid
+  (`running.started`, src/cli/dev.ts; `processStart`: /proc's boot id and start ticks on Linux, `ps -o lstart` in UTC
+  elsewhere, none on Windows), and where a start is recorded and can be read the pid is the run only while it is the
+  same. A record with no start (an earlier Mason's, or one written on Windows) and a start that cannot be read now (a
+  /proc this user may not read) are judged by the earlier check, unchanged (`earlierCheck`: `ps -o command=` matching
+  `start … --attach`), so a `mason serve` an earlier Mason started reads as not running when it hangs, as it did. The supervisor is known by its command line under BOTH its names (`supervise.ts` in a checkout,
   `supervise.js` in the package: `isSupervisorCommand`); a process known by the checkout's name alone is never found
   by the package, which is what every user runs.
 - **A database is the project's, and a moved one is noticed** (a database that moves to a different host is the same

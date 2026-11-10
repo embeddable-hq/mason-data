@@ -320,6 +320,8 @@ export const page = {
         if (d.dismissRefused !== undefined) return actions.dismissRefused() ?? true;
         return copyClick(d, button, { doc, win });
       },
+      /** Escape with no question open: a refusal beside a user goes, as its Dismiss does (null: none is shown) */
+      dismiss() { if (m.refused === null) return null; actions.dismissRefused(); return true; },
     };
   },
 };

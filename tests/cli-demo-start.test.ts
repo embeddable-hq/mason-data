@@ -62,7 +62,7 @@ const pgPort = await unassignedPort();
 // is seen keeping up within seconds
 const env = matrixEnv({ MASON_PG_PORT: String(pgPort), MASON_DEMO_CHANGE_MS: "300" });
 const mason = (argv: string[], timeoutMs = 120_000): Promise<Answer> => runMason(root, argv, env, timeoutMs);
-const config = (): { name: string; demo?: boolean; running?: { pid: number } | null } => JSON.parse(fs.readFileSync(path.join(home, "config.json"), "utf8"));
+const config = (): { name: string; demo?: boolean; running?: { pid: number; started?: string } | null } => JSON.parse(fs.readFileSync(path.join(home, "config.json"), "utf8"));
 const envUrl = (): string => /^DATABASE_URL=(.*)$/m.exec(fs.readFileSync(path.join(root, ".env"), "utf8"))?.[1] ?? "";
 let demoPort = 0;
 let demoUrl = "";
@@ -112,11 +112,11 @@ after(async () => {
     const stop = await mason(["stop"]);
     if (stop.code !== 0) process.stderr.write(`cli-demo-start: mason stop at the end failed:\n${said(stop)}\n`);
     // a run mason stop did not end: its supervisor first (so it starts nothing again), then the run, each a pid
-    // checked by its command line (a number alone may be another process's)
+    // checked against the start the run recorded (a number alone may be another process's)
     const sup = supervisorOf(home);
     if (sup !== null) { process.stderr.write(`cli-demo-start: killing the supervisor left behind (pid ${sup})\n`); process.kill(sup, "SIGKILL"); }
     const pid = config().running?.pid;
-    if (pid !== undefined && alive(pid) && masonProcess(pid)) { process.stderr.write(`cli-demo-start: killing the run left behind (pid ${pid})\n`); process.kill(pid, "SIGKILL"); }
+    if (pid !== undefined && alive(pid) && masonProcess(pid, config().running?.started ?? null)) { process.stderr.write(`cli-demo-start: killing the run left behind (pid ${pid})\n`); process.kill(pid, "SIGKILL"); }
   }
   fs.rmSync(root, { recursive: true, force: true });
 });
