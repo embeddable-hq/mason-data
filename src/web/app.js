@@ -28,7 +28,9 @@
  *                      reads it instead of the run's own read (a host's view: src/web/host-view.js `readHost`). The
  *                      FIRST is the page's own: its failure is the banner at the top (`poll`); the page renders the
  *                      others' failures itself. A read the page names once the poll's answers are in (a view the
- *                      state has just named) is read in the same poll.
+ *                      state has just named) is read in the same poll. A read with `ask` is NEVER awaited by the
+ *                      poll: it is stored when it settles (`onLate` paints then), one at a time per path, so a host
+ *                      that never answers holds up neither the run's reads nor another page's.
  *       view()         { <element id>: html }: the parts of its section it writes, from ctx.read and its own state
  *       actions        { name: fn }: what its buttons do, merged onto the app (the tests drive them); each re-reads
  *                      what it changed with ctx.refresh([path])
@@ -86,7 +88,7 @@ export { tableFacts, addedLines, removedReport, pickBody, columnsPath, renderTab
 export { renderUsers, renderAdded, renderAddUser, attributesText } from "./pages/users.js";
 export { renderRequests } from "./pages/queries.js";
 export { renderRunning, renderSessions, renderClients, renderSlowest, queriesHref } from "./pages/usage.js";
-export { hostLinkUrl, hostView, readHost, renderHostView, renderHostCard, renderHostPart, HOST_BYTES_MAX, REFRESH_MIN_S, REFRESH_MAX_S, HOST_LIMITS } from "./host-view.js";
+export { hostLinkUrl, hostView, readHost, renderHostView, renderHostCard, renderHostPart, HOST_BYTES_MAX, HOST_READ_MS, REFRESH_MIN_S, REFRESH_MAX_S, HOST_LIMITS } from "./host-view.js";
 export { hostViewAt } from "./pages/host.js";
 
 /** The pages, in the nav's order: a page with a `parent` is in its parent's group. */
@@ -273,6 +275,17 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
   };
   const pages = new Map();
   const afterRead = () => { for (const p of pages.values()) p.afterRead?.(); };
+  // THE READS OF ITS OWN IN FLIGHT (a host's view, `ask`), by path: never awaited by a poll, never asked twice at once;
+  // each stored when it settles, the page painted again then (`app.onLate`)
+  const aside = new Map();
+  const readAside = (r, at) => {
+    const p = Promise.resolve().then(() => r.ask(fetchFn))
+      // a reader that throws is a bug of the page's: said as the read's failure, never lost
+      .catch((e) => ({ failure: { code: "failed", message: `the read of ${r.path} failed: ${e?.message ?? String(e)}` } }))
+      .then((res) => { put(r.path, at, res); afterRead(); app.onLate?.(); })
+      .finally(() => aside.delete(r.path));
+    aside.set(r.path, p);
+  };
   const refresh = async (paths) => {
     const at = now().getTime();
     const rs = await Promise.all(paths.map((p) => ask(p)));
@@ -308,20 +321,28 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
       const pageReads = page.reads();
       const reads = pageReads.some((r) => r.path === SHELL_STATE.path) ? pageReads : [...pageReads, SHELL_STATE];
       const at = now().getTime();
-      const due = reads.filter((r) => r.everyMs <= POLL_MS || !store.has(r.path) || store.get(r.path).stale || at - store.get(r.path).at >= r.everyMs - POLL_MS / 2);
-      // a read of its own (a host's view) is asked its own way, never through the run's answers' wording
-      const read = (r) => r.ask !== undefined ? r.ask(fetchFn) : ask(r.path);
-      const rs = await Promise.all(due.map(read));
-      due.forEach((r, i) => put(r.path, at, rs[i]));
+      const due = reads.filter((r) => !aside.has(r.path) && (r.everyMs <= POLL_MS || !store.has(r.path) || store.get(r.path).stale || at - store.get(r.path).at >= r.everyMs - POLL_MS / 2));
+      // the run's reads are awaited; a read of its own (a host's view) is started beside them and never awaited
+      const runReads = async (list) => {
+        for (const r of list.filter((x) => x.ask !== undefined)) readAside(r, at);
+        const theRun = list.filter((x) => x.ask === undefined);
+        const rs = await Promise.all(theRun.map((r) => ask(r.path)));
+        theRun.forEach((r, i) => put(r.path, at, rs[i]));
+      };
+      await runReads(due);
       // what the page reads once these answered and it had not named (a view the state has just named): read now, not a poll later
-      const named = page.reads().filter((r) => !store.has(r.path));
-      if (named.length > 0) { const more = await Promise.all(named.map(read)); named.forEach((r, i) => put(r.path, at, more[i])); }
+      const named = page.reads().filter((r) => !store.has(r.path) && !aside.has(r.path));
+      if (named.length > 0) await runReads(named);
       // a range that is not Now says when it was read: its reads are the once-only ones
       if (due.some((r) => r.everyMs === Infinity)) m.rangeReadAt = now();
       const own = reads[0] === undefined ? undefined : store.get(reads[0].path);
       m.pollFailure = own?.failure ?? null;
       afterRead();
     },
+    /** Once every read of its own now in flight has settled (the tests' wait; the page paints on `onLate`). */
+    settled: () => Promise.all([...aside.values()]),
+    /** Called when a read of its own settles: the browser's paint (`start`). */
+    onLate: null,
     /** The link back the state names (`pageBack`), or null: set on the sidebar by `setBack`, never written as HTML. */
     back() { return store.get("api/state")?.body?.pageBack ?? null; },
     /** The sidebar as the host says it (`pageNav`), or null: undefined until the state is first read (not yet known). */
@@ -487,6 +508,8 @@ export function start(doc, win) {
     if (again) { again = false; await poll(); }
   };
   const shownPage = () => app.pages.get(app.model.shown);
+  // a host's view or card answered after its poll (never awaited by it): written then
+  app.onLate = () => paint();
   // what a page answered an event with: the page written at once (what the action set before it asked: Syncing…), and
   // again when it is answered
   const act = async (r) => { paint(); await r; paint(); };

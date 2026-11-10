@@ -369,6 +369,7 @@ table.errors td { overflow-wrap: anywhere; }
 .host-card .facts { margin-top: var(--space-1); }
 .host-card .host-heading { margin-top: var(--space-2); text-transform: uppercase; letter-spacing: 0.08em; }
 .host-card .host-failed .mark { color: var(--bad); }
+.host-section .copyrow, .host-card .copyrow { flex-wrap: wrap; } .host-section .copyrow code, .host-card .copyrow code { overflow-wrap: anywhere; min-width: 0; }
 tr.warn th, tr.warn td { color: var(--warn); }
 
 /* A COPY'S BAR (copyBar, src/web/pages/status.js): a thin rounded track and a solid fill to the share, its % at the end.

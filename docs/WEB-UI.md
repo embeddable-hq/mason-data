@@ -439,7 +439,9 @@ backslash, a `#fragment`, a character outside printable ASCII, or is past 2048 c
 
 **When it is read**: when the view (or the Overview) is shown, and again every `refresh` seconds while it is shown and
 the tab is visible, held within 5 s and 1 h; without `refresh`, once each time it is shown. Nothing is cached beyond
-that: a view shown again is read again.
+that: a view shown again is read again. A read is never awaited by the page's own polling, one is in flight per path at
+a time, and one not answered whole within 10 s (headers that never come, a body that drips) is aborted and shown as
+the view's failure: a host that hangs holds up neither the run's reads nor another page's.
 
 **The shape** (declared here and held in the page, `src/web/host-view.js` `hostView`):
 
@@ -472,14 +474,16 @@ that: a view shown again is read again.
   beside it and `status` `ok`, `warn` or `bad` for the page's own marker beside its word (never colour alone).
 - A link is `{ label, url }`, with `primary: true` for the page's primary action. Its URL follows `MASON_UI_BACK_URL`'s
   rules (a path from the host's root, or an `https://` / `http://` URL with no user or password), read in the page by
-  `hostLinkUrl`, which `tests/web-page.test.ts` holds equal to the server's `linkUrl` case by case: the data arrives
-  when the view is shown, never at the start, so the page reads it itself. A link that fails them is **left out and
+  `hostLinkUrl`, which `tests/web-page.test.ts` holds to accept nothing the server's `linkUrl` refuses, and to write
+  what both take the same: the data arrives when the view is shown, never at the start, so the page reads it itself.
+  Its host is held to an explicit pattern too (DNS labels or an IPv6 literal, an optional port; never a `%` or a
+  space), before and after the URL parser reads it, since a browser's parser takes hosts Node's refuses. A link that fails them is **left out and
   said** ("1 link left out"), never written. It opens in the same tab, sending no referrer.
 - **Every string is shown as text, never as HTML**: a `<script>` in a label reads as `<script>`. There are no forms and
   no buttons that change anything (a change is the site's own page's job, behind its own sign-in); Copy is the one
   button a view writes.
 - **An answer the page cannot read is the view's own failure**, in the page's Failure shape, never a blank page: nothing
-  answered, an answer that is not 2xx, more than 256 KiB, not JSON, or outside the shape (a key the shape does not
+  answered, not answered whole within 10 s, an answer that is not 2xx, more than 256 KiB, not JSON, or outside the shape (a key the shape does not
   take, a string too long or holding a control character, a list too long, a `status` other than the three). The last
   view read stays under the failure. The card says its failure inside the card.
 

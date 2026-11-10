@@ -10,10 +10,11 @@
  * READ IN THE PAGE, NOT AT THE START: the answer arrives when the view is shown, from whatever the proxy answers, so it is
  * untrusted data here — at most `HOST_BYTES_MAX` bytes, JSON, exactly the shape (a key it does not take, a string too
  * long or of a control character, a list too long is outside it), else the view's own failure (`renderFailure`). A
- * link's URL is read by the link back's rules (`hostLinkUrl`, held equal to src/cli/ui-back-link.ts `linkUrl` by
- * tests/web-page.test.ts: the page cannot import the CLI, and the server never sees this data); a link that fails them
- * is DROPPED and said, never rendered. `refresh` (seconds) is held within `REFRESH_MIN_S`..`REFRESH_MAX_S`; without
- * it, the view is read when it is shown and not again.
+ * link's URL is read by the link back's rules (`hostLinkUrl`, held by tests/web-page.test.ts to accept nothing
+ * src/cli/ui-back-link.ts `linkUrl` refuses: the page cannot import the CLI, and the server never sees this data); a
+ * link that fails them is DROPPED and said, never rendered. `refresh` (seconds) is held within
+ * `REFRESH_MIN_S`..`REFRESH_MAX_S`; without it, the view is read once each time it is shown. A read not answered whole
+ * within `HOST_READ_MS` is aborted and said as the view's failure.
  */
 import { esc, status, copyable, renderFailure } from "./shared.js";
 
@@ -33,8 +34,16 @@ const URL_MAX = 2048;
 const PATH_BASE = new URL("http:path.invalid").origin;
 
 /**
- * A LINK'S URL AS THE PAGE WRITES IT, or null: the link back's rules (src/cli/ui-back-link.ts `linkUrl`, which the
- * tests hold this to case by case): printable ASCII, no backslash, at most 2048 characters; a path from the host's root
+ * A HOST AS THE PAGE TAKES IT, before the URL parser reads it and after: DNS labels of letters, digits and `-` (a final
+ * `.` allowed), or an IPv6 literal of hex digits, `:` and `.` in brackets, with an optional port. Never a `%`, a space or
+ * anything else: a browser's URL parser is more lenient about a host than Node's (Chromium took the hosts `a%20b`
+ * and `[::1%30]`, which `linkUrl` refuses), so the page refuses them by this pattern, whatever the parser does.
+ */
+const STRICT_HOST = /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?$/;
+
+/**
+ * A LINK'S URL AS THE PAGE WRITES IT, or null: the link back's rules (src/cli/ui-back-link.ts `linkUrl`; the tests hold
+ * that this accepts nothing `linkUrl` refuses, and that what both accept is serialised the same): printable ASCII, no backslash, at most 2048 characters; a path from the host's root
  * (`/x`, never `//`, nor one the parser reads as leaving the host) as the parser serialises it; or an https: or http:
  * URL with a host and no user or password, as the parser serialises it. Anything else — `javascript:`,
  * `data:`, a relative path, text that is no URL — is null.
@@ -48,10 +57,12 @@ export function hostLinkUrl(v) {
     const served = `${u.pathname}${u.search}${u.hash}`;
     return u.origin !== PATH_BASE || served.startsWith("//") ? null : served;
   }
-  if (!/^https?:\/\//i.test(v)) return null;
+  const authority = /^https?:\/\/([^/?#]*)/i.exec(v)?.[1];
+  // the host as written, and as the parser read it: each held to the strict pattern (no user, no password, no `%`)
+  if (authority === undefined || !STRICT_HOST.test(authority)) return null;
   let u;
   try { u = new URL(v); } catch { return null; }
-  return u.username !== "" || u.password !== "" || u.hostname === "" ? null : u.href;
+  return u.username !== "" || u.password !== "" || u.hostname === "" || !STRICT_HOST.test(u.host) ? null : u.href;
 }
 
 /** A line of text: a string of at most `max` characters with no control, format or line-separator character. */
@@ -124,8 +135,12 @@ export function hostView(v) {
 export const hostFailure = (path, why) => ({ code: "failed", message: `the host's view at ${path} could not be read`, why,
   fix: "the site that serves this page answers this path with a view's JSON, { title, sections: [{ heading, facts, links }] } (docs/WEB-UI.md \"Host views\"); on a page that no site serves, nothing does" });
 
-/** The answer's text, or null once it passes `max` bytes (read no further than that). */
-async function boundedText(res, max) {
+/** The longest a host's read may take, its body whole, in ms: past it the read is aborted and said as its failure. */
+export const HOST_READ_MS = 10_000;
+
+/** The answer's text, or null once it passes `max` bytes (read no further than that); it stops reading once `signal`
+ *  is aborted (the deadline: a body that drips for ever). */
+async function boundedText(res, max, signal) {
   const length = Number(res.headers?.get?.("content-length") ?? NaN);
   if (Number.isFinite(length) && length > max) return null;
   const reader = res.body?.getReader?.();
@@ -134,6 +149,7 @@ async function boundedText(res, max) {
   let size = 0;
   for (;;) {
     const { done, value } = await reader.read();
+    if (signal?.aborted) { await reader.cancel().catch((e) => console.warn("the host's answer could not be cancelled", e)); throw new Error("aborted at the deadline"); }
     if (done) break;
     size += value.byteLength;
     if (size > max) { await reader.cancel().catch((e) => console.warn("the host's answer could not be cancelled", e)); return null; }
@@ -148,15 +164,27 @@ async function boundedText(res, max) {
 /**
  * READ A HOST'S VIEW over `fetchFn` (the browser's, or a test's) at `path`, relative to the page's own address:
  * `{ body }`, the view held to its shape (`hostView`), or `{ failure }` — nothing answered, not 2xx, more than
- * `HOST_BYTES_MAX` bytes, not JSON, or outside the shape.
+ * `HOST_BYTES_MAX` bytes, not JSON, outside the shape, or not answered whole within `deadlineMs` (headers that never
+ * come, a body that drips): then the request is aborted, and the answer is that failure, whatever the fetch does after.
  */
-export async function readHost(fetchFn, path) {
+export async function readHost(fetchFn, path, { deadlineMs = HOST_READ_MS, timers = globalThis } = {}) {
+  const ctl = typeof AbortController === "function" ? new AbortController() : null;
+  let timer;
+  const late = new Promise((resolve) => {
+    timer = timers.setTimeout(() => { ctl?.abort(); resolve({ failure: hostFailure(path, `it was not answered whole within ${deadlineMs / 1000} s`) }); }, deadlineMs);
+  });
+  try { return await Promise.race([readWhole(fetchFn, path, ctl?.signal), late]); }
+  finally { timers.clearTimeout(timer); }
+}
+
+/** `readHost`'s read, under its deadline's signal. */
+async function readWhole(fetchFn, path, signal) {
   let res;
-  try { res = await fetchFn(path, { credentials: "same-origin", headers: { Accept: "application/json" }, cache: "no-store" }); }
+  try { res = await fetchFn(path, { credentials: "same-origin", headers: { Accept: "application/json" }, cache: "no-store", ...(signal ? { signal } : {}) }); }
   catch (e) { return { failure: hostFailure(path, `nothing answered it (${e?.message ?? String(e)})`) }; }
   if (!res.ok) return { failure: hostFailure(path, `it answered HTTP ${res.status}`) };
   let text;
-  try { text = await boundedText(res, HOST_BYTES_MAX); }
+  try { text = await boundedText(res, HOST_BYTES_MAX, signal); }
   catch (e) { return { failure: hostFailure(path, `its answer could not be read (${e?.message ?? String(e)})`) }; }
   if (text === null) return { failure: hostFailure(path, `its answer is more than ${HOST_BYTES_MAX / 1024} KiB, the most a view is read`) };
   let v;
