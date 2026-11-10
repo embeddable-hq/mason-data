@@ -93,7 +93,7 @@ export function duration(seconds) {
 }
 
 /** A duration in milliseconds as a person reads it: `512 ms`, `13.7 s`, `2 min 5 s`, `1 h 4 min` (src/cli/readiness.ts
- *  `msText`, held equal by the tests): every statement's, sync's and percentile's time on the page. */
+ *  `msText`, held equal by the tests): a sync's time, an interval, an age on the page. A statement's is `statementMsText`. */
 export function msText(ms) {
   const v = Math.max(0, ms);
   if (Math.round(v) < 1000) return `${Math.round(v)} ms`;
@@ -104,6 +104,10 @@ export function msText(ms) {
   const m = Math.round(s / 60);
   return `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
 }
+
+/** A statement's time (its duration, a percentile of them): whole milliseconds with thousands separators, `19,800 ms`,
+ *  `810 ms` (src/lib/table-sync.ts `statementMsText`, held equal by the tests), so a column of them compares at a glance. */
+export const statementMsText = (ms) => `${n(Math.round(Math.max(0, ms)))} ms`;
 
 /** A span of seconds as the stream's lines say it: `0.3 s` under ten seconds, then `duration` (src/cli/commands.ts `spanText`). */
 export const spanText = (seconds) => seconds < 10 ? `${Math.max(0, seconds).toFixed(1)} s` : duration(seconds);

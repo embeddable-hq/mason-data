@@ -20,7 +20,7 @@ export function duration(seconds: number): string {
 }
 
 /** A duration in milliseconds as a person reads it (src/lib/table-sync.ts, where the sync reads it too). */
-export { msText } from "../lib/table-sync.ts";
+export { msText, statementMsText } from "../lib/table-sync.ts";
 
 export interface Readiness {
   /** true: every added table is copied */

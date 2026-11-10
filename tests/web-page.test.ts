@@ -192,6 +192,10 @@ test("the helpers: a share as the commands' percent, seconds left and a span as 
   const msText = fn<[number], string>("msText");
   for (const ms of [0, 3, 512.4, 999.4, 999.6, 1234, 13_703, 59_949, 59_960, 125_000, 3_599_400, 3_599_600, 3_840_000, 90_061_000, -5]) assert.equal(msText(ms), commands.msText(ms), `msText(${ms}) is the commands'`);
   assert.deepEqual([512, 13_703, 125_000].map(msText), ["512 ms", "13.7 s", "2 min 5 s"]);
+  // a STATEMENT's time: ONE formatter, the commands' (statementMsText), whole ms with separators (issue 816)
+  const statementMsText = fn<[number], string>("statementMsText");
+  for (const ms of [0, 0.4, 0.5, 27, 810, 999, 999.5, 1000, 19_800, 1_234_567, 90_061_000, -5]) assert.equal(statementMsText(ms), (commands as unknown as { statementMsText: (x: number) => string }).statementMsText(ms), `statementMsText(${ms}) is the commands'`);
+  assert.deepEqual([27, 810, 19_800, 1_234_567].map(statementMsText), ["27 ms", "810 ms", "19,800 ms", "1,234,567 ms"]);
   const agoText = fn<[string, number], string>("agoText"), at = Date.parse("2026-10-27T09:00:00Z");
   for (const s of [0, 1, 89, 90, 3600, 5399, 5400, 86_400, -5]) {
     const iso = new Date(at - s * 1000).toISOString();
@@ -2149,7 +2153,7 @@ test("the Overview: the word, the facts (tables synced N of M, rows, the last sy
     assert.doesNotMatch(html.slice(html.indexOf("<caption>Mason</caption>")), /<th scope="row">(Tables synced|Rows|Last sync|The synced data's file)<\/th>/, "a fact in ONE place: the cards' are not rows too");
     // the statements: a row per window, each count as mason status says it
     assert.match(text, /Statements \(the completed ones' time; mason logs --requests lists each\) Statements Completed Refused Failed Cancelled Average p50 p95 Rows sent Sent /);
-    assert.match(text, /Last day 1,234 1,200 30 3 1 42 ms 12 ms 380 ms 98,765 5\.1 MiB Last week 5,000 4,900 90 9 1 40 ms 11 ms 1\.3 s 400,000 900 B /);
+    assert.match(text, /Last day 1,234 1,200 30 3 1 42 ms 12 ms 380 ms 98,765 5\.1 MiB Last week 5,000 4,900 90 9 1 40 ms 11 ms 1,250 ms 400,000 900 B /);
     assert.match(text, /The request log keeps 3 days: MASON_HISTORY_DAYS\./);
     const cliQueries = plain(commands.queryLines(QUERIES.queries as never, PLAIN).join(" "));
     for (const v of ["1,234 statements: 1,200 completed, 30 refused, 3 failed, 1 cancelled", "42 ms / 12 ms / 380 ms", "98,765 rows, 5.1 MiB sent", "400,000 rows, 900 B sent"]) assert.ok(cliQueries.includes(v), `mason status says ${v}`);
@@ -2161,7 +2165,7 @@ test("the Overview: the word, the facts (tables synced N of M, rows, the last sy
     assert.match(text, /Sync errors \(the latest, newest last; mason logs --events lists each\) See all At \(UTC\) What Table Why 2026-10-27 09:03:10 poll_failed public\.orders poll: connection reset 2026-10-27 09:04:00 restart \(the sync\) the run was started again after it stopped/);
     assert.match(text, /Query errors \(the latest, newest last; mason logs --requests --failed lists each\) See all Started \(UTC\) Outcome Took Rows Who Statement Error 2026-10-27 09:02:00 refused 3 ms Metabase \(user metabase\) SELECT \* FROM nope relation "nope" does not exist /);
     assert.ok(html.includes('title="SQLSTATE 42P01">refused</td>') && !/\b(42P01|57014)\b/.test(text), "the SQLSTATE is a title, never the page's words");
-    assert.match(text, /cancelled 12\.3 s 10 rows \(no application_name\) SELECT (x, )+x… canceling statement due to user request/);
+    assert.match(text, /cancelled 12,345 ms 10 rows \(no application_name\) SELECT (x, )+x… canceling statement due to user request/);
     assert.ok(!/duckdb/i.test(html), "never the engine's name");
   });
 });
@@ -2414,7 +2418,7 @@ test("the request log: a row each, newest first, in the commands' words — held
   const html = renderRequests({ requests: REQUESTS, keptDays: 7, before: "2026-10-28T09:00:00.000Z~5" }, { now: Date.parse("2026-10-28T09:05:00.000Z") });
   const text = textOf(html);
   assert.match(text, /^Status Query id Started ↓ Duration ↕ User Client Rows ↕ Statement /, "no Ended or Bytes column: they are in the row's details; Started, Duration and Rows sort, the start newest first");
-  assert.match(text, /Cancelled r-new 4 min ago 1 min 30 s metabase \(no application_name\) SELECT pg_sleep\(100\) canceling statement due to user request Completed r-old 5 min ago 1\.2 s ana psql 1 SELECT count\(\*\) FROM orders Older$/);
+  assert.match(text, /Cancelled r-new 4 min ago 90,000 ms metabase \(no application_name\) SELECT pg_sleep\(100\) \+ canceling statement due to user request Completed r-old 5 min ago 1,234 ms ana psql 1 SELECT count\(\*\) FROM orders \+ Older$/);
   assert.equal([...html.matchAll(/<details data-open="request:r-(new|old)"><summary>r-(new|old)<\/summary><\/details>/g)].length, 2, "a details per row, closed, keyed by its request, its id the toggle");
   assert.ok(!/<details[^>]* open/.test(html) && !html.includes("Bytes sent"), "closed: the row's details are not written");
   // the status is a dot AND the word, from the ledger's outcome as mason logs --requests says it: completed ok, refused
@@ -2436,7 +2440,7 @@ test("the request log: a row each, newest first, in the commands' words — held
   assert.match(renderRequests({ requests: [REQUESTS[0]], keptDays: 7, before: null }, { now: Date.parse("2026-10-28T09:05:00.000Z") }), /<time [^>]*>5 min ago<\/time>/);
   // opened: the expanded row holds the whole id, when it started and ended, the bytes, the whole statement and error
   const opened = textOf(renderRequests({ requests: REQUESTS, keptDays: 7, before: null }, { isOpen: (k: string) => k === "request:r-old" }));
-  assert.match(opened, /Completed r-old .* SELECT count\(\*\) FROM orders Query id r-old Started \(UTC\) 2026-10-28 09:00:00\.000 Ended \(UTC\) 2026-10-28 09:00:01\.234 Bytes sent 2\.0 KiB SELECT count\(\*\) FROM orders$/);
+  assert.match(opened, /Completed r-old .* SELECT count\(\*\) FROM orders − Query id r-old Started \(UTC\) 2026-10-28 09:00:00\.000 Ended \(UTC\) 2026-10-28 09:00:01\.234 Bytes sent 2\.0 KiB SELECT count\(\*\) FROM orders$/);
   assert.ok(!/Query id r-new/.test(opened), "only the one opened");
   // the id is its first 8 characters, the whole one its title and in the details
   const long = renderRequests({ requests: [{ ...REQUESTS[0], requestId: "0b9e5c1e-0000-4000-8000-000000000001", query: "SELECT\n 1", message: "boom\nline 2", sqlstate: "XX000" }], keptDays: 7, before: null });
@@ -2447,7 +2451,7 @@ test("the request log: a row each, newest first, in the commands' words — held
   assert.ok(!html.includes("data-newest"), "the newest page has no Newest");
   for (const r of REQUESTS) {
     const line = commands.requestLine(r as never, PLAIN);
-    const words = [commands.msText(r.durationMs), r.query, ...(r.message ? [r.message.split("\n")[0]!] : [])];
+    const words = [commands.statementMsText(r.durationMs), r.query, ...(r.message ? [r.message.split("\n")[0]!] : [])];
     for (const w of words) { assert.ok(line.includes(w), `the CLI's line says ${w}`); assert.ok(text.includes(w), "and so does the page"); }
   }
   assert.match(textOf(renderRequests({ requests: [failedRequest], keptDays: 7, before: null }, { paged: true })), /Refused .* relation "nope" does not exist Newest$/);
@@ -2691,7 +2695,7 @@ test("Usage: each hour's cells are mason usage's (sampleLine), no sample yet is 
   const html0 = () => renderUsage(UL_USAGE);
   assert.match(text, /^From 2026-10-27 09:05 to 2026-10-28 09:05 UTC, 60 min a line \(a sample every 60 s, kept 7 days\)\./);
   // newest first; the time's header turns it round (the charts read left to right, oldest first)
-  assert.match(text, /Time \(UTC\) ↓ Statements Errors Rows sent Bytes sent p95 Size Rows Failing Oldest 2026-10-28 10:05 0 98,765 4\.4 MiB – – 12,345,678 – 2026-10-28 09:05 1,204 3 98,765 4\.4 MiB 1\.8 s 5\.0 GiB 12,345,678 1 75 s /);
+  assert.match(text, /Time \(UTC\) ↓ Statements Errors Rows sent Bytes sent p95 Size Rows Failing Oldest 2026-10-28 10:05 0 98,765 4\.4 MiB – – 12,345,678 – 2026-10-28 09:05 1,204 3 98,765 4\.4 MiB 1,830 ms 5\.0 GiB 12,345,678 1 75 s /);
   assert.match(textOf((renderUsage as unknown as (b: unknown, o?: unknown, s?: unknown) => string)(UL_USAGE, undefined, { key: "time", dir: "asc" })), /Time \(UTC\) ↑ .* Oldest 2026-10-28 09:05 1,204 .* 2026-10-28 10:05 0 /, "oldest first, asked");
   assert.match(html0(), /<th scope="col" aria-sort="descending"><button type="button" class="sort on" data-sort-table="hours" data-sort-key="time">Time \(UTC\)/);
   // the process's memory is not a default column: it is in a closed details of its own
@@ -3473,7 +3477,7 @@ test("Usage, a past range: who sent statements in it and the slowest that comple
   // the slowest: when, how long, who from where, the statement, and Queries (the slow ones of its client when it was slow)
   const slow = [{ ...REQUESTS[0]!, durationMs: 4200 }, { ...REQUESTS[0]!, requestId: "r-fast", startedAt: "2026-10-28T09:01:00.000Z", durationMs: 300, rows: null, query: "" }];
   const slowest = renderSlowest(slow, { range: "7d", now: Date.parse("2026-10-28T09:06:00.000Z") });
-  assert.equal(textOf(slowest), "Started Took User Client Rows Statement 6 min ago 4.2 s ana psql 1 SELECT count(*) FROM orders Queries 5 min ago 300 ms ana psql (no statement) Queries");
+  assert.equal(textOf(slowest), "Started Took User Client Rows Statement 6 min ago 4,200 ms ana psql 1 SELECT count(*) FROM orders Queries 5 min ago 300 ms ana psql (no statement) Queries");
   assert.match(slowest, /href="#observability\/queries\?user=ana&amp;client=psql&amp;slow=1&amp;range=7d"/, "a slow one: its client's slow statements");
   assert.match(slowest, /href="#observability\/queries\?user=ana&amp;client=psql&amp;range=7d"/, "one under a second: its client's statements");
   assert.match(slowest, /<code class="stmt" title="SELECT count\(\*\) FROM orders">SELECT count\(\*\) FROM orders<\/code>/, "the statement's cell is the request log's (statementCell)");
@@ -3497,7 +3501,7 @@ test("Usage: four charts of the hours — statements as bars, p95, the copy's si
   assert.deepEqual(Object.keys(specs(UL_USAGE)).filter((k) => !k.includes("spark")), ["usage-statements", "usage-copy-rows"], "p95 and the copy's size have one value in two hours: no trend, no chart");
   const s = specs({ ...UL_USAGE, samples: [SAMPLE, { ...IDLE, copyBytes: 6 * 2 ** 30, durationP95Ms: 40 }] });
   assert.deepEqual(Object.keys(s).filter((k) => !k.includes("spark")), ["usage-statements", "usage-p95", "usage-copy-bytes", "usage-copy-rows"], "in the page's order");
-  assert.equal(s["usage-p95"]!.format(1830.4), "1.8 s");
+  assert.equal(s["usage-p95"]!.format(1830.4), "1,830 ms");
   assert.equal(s["usage-statements"]!.kind, "bars"); assert.deepEqual(s["usage-statements"]!.y, [1204, 0]);
   assert.equal(s["usage-copy-bytes"]!.kind, "line"); assert.equal(s["usage-copy-bytes"]!.format(3 * 2 ** 30), "3.0 GiB", "a value as the tables say it");
   assert.deepEqual(s["usage-copy-rows"]!.y, [12_345_678, 12_345_678]);
@@ -3507,7 +3511,7 @@ test("Usage: four charts of the hours — statements as bars, p95, the copy's si
   assert.match(renderCharts(UL_USAGE), /aria-label="Statements an hour, the last 15 minutes"/, "the range's span in the label: Now's by default");
   assert.match(html, /<div class="chart-card"><p class="card-label" title="Statements an hour">Statements an hour<\/p><div class="chart series" data-chart="usage-statements" role="img" aria-label="Statements an hour, the last 24 hours"><\/div><\/div>/);
   // a series with one value is no trend: its card says the value, so the grid keeps its four cards
-  assert.match(textOf(html), /p95 duration One sample so far: 1\.8 s\. A chart needs two\./);
+  assert.match(textOf(html), /p95 duration One sample so far: 1,830 ms\. A chart needs two\./);
   assert.match(textOf(html), /Size of the synced data One sample so far: 5\.0 GiB\. A chart needs two\./);
   assert.equal([...html.matchAll(/<div class="chart-card/g)].length, 4);
   assert.doesNotMatch(renderCharts({ ...UL_USAGE, samples: [SAMPLE] }), /data-chart=/, "one hour is no trend: no chart");
@@ -4415,6 +4419,16 @@ test("layout guard: a click moves no row and no column — a question, a form an
   const opened = fn<[unknown, unknown?], string>("renderRequests")({ requests: [long], keptDays: 7, before: null }, { isOpen: () => true });
   assert.match(opened, /<tr class="detail"><td colspan="\d+"><div class="detail-body">.*<\/div><\/td><\/tr>/s);
   assert.match(rule("#page-queries tr.detail .detail-body"), /width: 0; min-width: 100%/);
+  // the statement's toggle (issue 816): opening from it changes no cell but the two toggles' state and inserts the
+  // expanded row alone; its glyph has a fixed width open or closed, and the statement keeps its two-line cut beside it
+  const page2 = { requests: REQUESTS, keptDays: 7, before: null };
+  const renderReq = fn<[unknown, unknown?], string>("renderRequests");
+  const shut = renderReq(page2), open1 = renderReq(page2, { isOpen: (k: string) => k === "request:r-new" });
+  const asClosed = (h: string) => h.replace(/<tr class="detail">.*?<\/tr>/s, "").replace(" open>", ">").replace('aria-expanded="true"', 'aria-expanded="false"').replace('aria-hidden="true">−<', 'aria-hidden="true">+<');
+  assert.equal(asClosed(open1), shut, "no cell written differently, no row inserted but the expanded one");
+  assert.match(rule("button.expand"), /flex: none;[^}]*width: 14px; height: 14px;/, "the toggle's room is fixed, + or −");
+  assert.match(rule("#page-queries table.requests .stmt-line > code.stmt"), /min-width: 0/, "the statement gives the room, cut as before");
+  assert.match(rule("code.stmt"), /-webkit-line-clamp: 2;/, "two lines at most");
 });
 
 test("an answer beside its button stays up until it is dismissed — Dismiss, Escape, or the next action's answer or question — as a refusal does (issue 811)", async () => {
@@ -4618,6 +4632,77 @@ test("a request's + opens on its click: the toggle event a repaint strands (the 
   // clicked again: closed
   await on.get("click")!({ target: { closest: (sel: string) => sel === "summary" ? { parentElement: { ...det, open: true } } : null }, preventDefault: () => undefined });
   assert.ok(!/<tr class="detail">/.test(el("request-log").html), "closed again");
+});
+
+test("the statement cell's toggle opens the same expanded row as the id's: one key, one open state, both toggles say it (issue 816)", async () => {
+  const renderRequests = fn<[unknown, unknown?], string>("renderRequests");
+  const page = { requests: REQUESTS, keptDays: 7, before: null };
+  const closed = renderRequests(page);
+  // the statement cell: the two-line statement and, beside it, a real control named for what it opens, closed
+  for (const id of ["r-new", "r-old"]) {
+    assert.match(closed, new RegExp(`<td class="stmt-cell"><div class="stmt-line"><code class="stmt"[^>]*>[^<]*</code><button type="button" class="expand" data-expand="request:${id}" aria-expanded="false" aria-label="Show the whole statement" title="Show the whole statement"><span aria-hidden="true">\\+</span></button></div>`),
+      `${id}: the statement's toggle, keyed as the id's details`);
+  }
+  assert.equal(textOf(closed).includes("Show the whole statement"), false, "the control's name is its aria-label, its label the + the id's summary draws");
+  assert.match(closed, /<\/code><button [^>]*><span aria-hidden="true">\+<\/span><\/button>/);
+  // opened (from either: one open state): both toggles say so, and the expanded row is written once
+  const opened = renderRequests(page, { isOpen: (k: string) => k === "request:r-old" });
+  assert.match(opened, /<details data-open="request:r-old" open><summary>r-old<\/summary><\/details>/, "the id's toggle open");
+  assert.match(opened, /data-expand="request:r-old" aria-expanded="true"[^>]*><span aria-hidden="true">−<\/span>/, "the statement's toggle open, its label −");
+  assert.match(opened, /data-expand="request:r-new" aria-expanded="false"/, "the other row's still closed");
+  assert.equal([...opened.matchAll(/<tr class="detail">/g)].length, 1, "one expanded row");
+
+  // the page: a press on the statement's toggle opens the row and the id's summary with it; the id's summary then closes both
+  const run = fakeRun();
+  run.answers.set("GET api/requests?since=15m", answer({ requests: REQUESTS, keptDays: 7, before: null }));
+  const { el, on, settle } = fakeBrowser(run, "#observability/queries");
+  await settle();
+  const press = (key: string) => on.get("click")!({ target: { closest: (sel: string) => sel === "button" ? { dataset: { expand: key } } : null }, preventDefault: () => undefined });
+  await press("request:r-new");
+  const log = () => el("request-log").html;
+  assert.match(log(), /<details data-open="request:r-new" open>/, "the id's toggle says open");
+  assert.match(log(), /data-expand="request:r-new" aria-expanded="true"/, "and so does the statement's");
+  assert.match(log(), /<tr class="detail">.*<dt>Query id<\/dt><dd>r-new<\/dd>/s, "the expanded row written");
+  const det = { tagName: "DETAILS", id: "", open: true, dataset: { open: "request:r-new" } };
+  await on.get("click")!({ target: { closest: (sel: string) => sel === "summary" ? { parentElement: det } : null }, preventDefault: () => undefined });
+  assert.ok(!/<tr class="detail">/.test(log()), "the id's summary closes the row the statement's toggle opened");
+  assert.match(log(), /data-expand="request:r-new" aria-expanded="false"/, "and the statement's toggle says closed");
+  await press("request:r-new"); await press("request:r-new");
+  assert.ok(!/<tr class="detail">/.test(log()), "the statement's toggle closes it too");
+});
+
+test("a toggle keeps the focus when a poll writes its row again: the statement's button, the id's summary (issue 816; issue 70's probe)", async (t) => {
+  let at = Date.parse("2026-10-28T09:05:00.000Z");
+  t.mock.timers.enable({ apis: ["Date"], now: at });
+  const run = fakeRun();
+  run.answers.set("GET api/requests?since=15m", answer({ requests: REQUESTS, keptDays: 7, before: null }));
+  const { el, doc, tick, settle } = fakeBrowser(run, "#observability/queries");
+  await settle();
+  const log = el("request-log") as unknown as { writes: number; querySelectorAll?: (s: string) => unknown[] };
+  const focused: string[] = [];
+  const button = (key: string) => ({ tagName: "BUTTON", dataset: { expand: key }, focus: () => { focused.push(`expand ${key}`); } });
+  const summary = (key: string) => ({ tagName: "SUMMARY", dataset: {}, parentElement: { dataset: { open: key } }, focus: () => { focused.push(`summary ${key}`); } });
+  // the part as the browser would have it after a rewrite: each row's two toggles
+  log.querySelectorAll = (sel: string) => sel === "details[data-open] > summary, button[data-expand]" ? ["request:r-new", "request:r-old"].flatMap((k) => [summary(k), button(k)]) : [];
+  const d = doc as unknown as { activeElement: unknown };
+  for (const [active, expected] of [[{ ...button("request:r-old"), in: "request-log" }, "expand request:r-old"], [{ ...summary("request:r-new"), in: "request-log" }, "summary request:r-new"]] as const) {
+    d.activeElement = active;
+    focused.length = 0;
+    const writes = log.writes;
+    // the log changed: the poll writes the part again
+    run.answers.set("GET api/requests?since=15m", answer({ requests: [...REQUESTS, { ...REQUESTS[1], requestId: `r-${writes}` }], keptDays: 7, before: null }));
+    t.mock.timers.setTime(at += 6000);
+    tick(); await settle();
+    assert.ok(log.writes > writes, "written again");
+    assert.deepEqual(focused, [expected], "the focus back on the control that held it");
+  }
+  // the focus elsewhere (outside the part): nothing focused
+  d.activeElement = { in: "sidebar", tagName: "A", dataset: {} };
+  focused.length = 0;
+  run.answers.set("GET api/requests?since=15m", answer({ requests: REQUESTS, keptDays: 7, before: null }));
+  t.mock.timers.setTime(at += 6000);
+  tick(); await settle();
+  assert.deepEqual(focused, []);
 });
 
 test("a summary's click: a link inside it keeps its own click, a details no page keeps is the browser's, an element disagreeing with the state is written again, the raw log opens", async () => {

@@ -303,9 +303,9 @@ export function changesRetiredText(env: Readonly<Record<string, string | undefin
 }
 
 /**
- * A DURATION IN MILLISECONDS as a person reads it, the one formatter of a statement's, a sync's or a percentile's time
- * (the web page's `msText`, src/web/shared.js, held equal by the tests): `512 ms` under a second, then `13.7 s`, then
- * `2 min 5 s`, then `1 h 4 min` (a 13,703 ms statement read as thirteen thousand of something).
+ * A DURATION IN MILLISECONDS as a person reads it, the one formatter of a sync's time, an interval or an age (the web
+ * page's `msText`, src/web/shared.js, held equal by the tests): `512 ms` under a second, then `13.7 s`, then `2 min 5 s`,
+ * then `1 h 4 min`. A statement's time is `statementMsText`'s.
  */
 export function msText(ms: number): string {
   const v = Math.max(0, ms);
@@ -316,6 +316,15 @@ export function msText(ms: number): string {
   if (s < 3600) return `${Math.floor(s / 60)} min${s % 60 ? ` ${s % 60} s` : ""}`;
   const m = Math.round(s / 60);
   return `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
+}
+
+/**
+ * A STATEMENT'S TIME (its duration, a percentile of them): always whole milliseconds with thousands separators,
+ * `27 ms`, `810 ms`, `19,800 ms`, so a column of them compares at a glance (`msText` switched units at a second and a
+ * minute: issue 816). The web page's `statementMsText` (src/web/shared.js), held equal by the tests.
+ */
+export function statementMsText(ms: number): string {
+  return `${Math.round(Math.max(0, ms)).toLocaleString("en-US")} ms`;
 }
 
 /**

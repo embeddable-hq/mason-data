@@ -13,7 +13,7 @@
  * samples' table. A page module (src/web/app.js has the contract). Never the engine's name.
  */
 import { VIEW_HASHES } from "../routes.js";
-import { esc, n, msText, bytesText, fileSize, duration, details, createOpenSet, cards, card, empty, panel, skeleton, sortTh, sortedBy, nextSort, readPart, usagePath, utcMinute,
+import { esc, n, statementMsText, bytesText, fileSize, duration, details, createOpenSet, cards, card, empty, panel, skeleton, sortTh, sortedBy, nextSort, readPart, usagePath, utcMinute,
   RANGES, DEFAULT_RANGE, rangeOf, isLive, rangeEvery, firstLine, spanText, agoText, utcText, clientText, clip, TITLE_MAX, unsupportedEntry, renderFailure, json, pop, actId,
   statementCell, POLL_MS, readOnlyLine } from "../shared.js";
 import { spark, seriesChart, seriesOf, drawable } from "../charts.js";
@@ -35,7 +35,7 @@ export function sampleCells(s) {
   const bad = s.statementsRefused + s.statementsFailed + s.statementsCancelled;
   return {
     time: utcMinute(s.at), statements: n(s.statements), errors: bad === 0 ? "" : n(bad),
-    rowsSent: n(s.rowsSent), bytesSent: bytesText(s.bytesSent), p95: s.durationP95Ms === null ? "–" : msText(s.durationP95Ms),
+    rowsSent: n(s.rowsSent), bytesSent: bytesText(s.bytesSent), p95: s.durationP95Ms === null ? "–" : statementMsText(s.durationP95Ms),
     copy: s.copyBytes === null ? "–" : fileSize(s.copyBytes), rows: n(s.copyRows), failing: s.tablesFailed === 0 ? "" : n(s.tablesFailed),
     oldest: s.oldestSyncSeconds === null ? "–" : duration(s.oldestSyncSeconds), lag: s.streamLagSeconds === null ? "–" : duration(s.streamLagSeconds),
     memory: `${fileSize(s.rssBytes)}${s.copyMemoryBytes === null ? "" : ` (engine ${fileSize(s.copyMemoryBytes)} of ${fileSize(s.copyMemoryLimitBytes)})`}`,
@@ -46,7 +46,7 @@ export function sampleCells(s) {
  *  says it), the axis's unit]. One series each, from a zero baseline. "Statements" is "Statements an hour" by the step. */
 const CHARTS = [
   ["usage-statements", "Statements", "statements", "bars", n, "count"],
-  ["usage-p95", "p95 duration", "durationP95Ms", "line", (v) => msText(v), "ms"],
+  ["usage-p95", "p95 duration", "durationP95Ms", "line", (v) => statementMsText(v), "ms"],
   ["usage-copy-bytes", "Size of the synced data", "copyBytes", "line", fileSize, "bytes"],
   ["usage-copy-rows", "Rows in the synced data", "copyRows", "line", n, "count"],
 ];
@@ -156,8 +156,8 @@ export function statementCards(day, line = () => "", label = "last 24 hours", hr
   return [
     card(`Statements, ${label}`, n(day.statements), `${n(day.completed)} completed`, line("statements"), "", hrefs.statements ?? ""),
     card(`Failed, ${label}`, n(failed), `${n(day.refused)} refused, ${n(day.failed)} failed${day.cancelled ? `, ${n(day.cancelled)} cancelled` : ""}`, line("failed"), failed ? "warn" : "", hrefs.failed ?? ""),
-    card(`p95, ${label}`, day.durationMs === null ? "–" : msText(day.durationMs.p95),
-      day.durationMs === null ? "no statement completed" : `average ${msText(day.durationMs.avg)} · p50 ${msText(day.durationMs.p50)}`, line("p95"), "", hrefs.p95 ?? ""),
+    card(`p95, ${label}`, day.durationMs === null ? "–" : statementMsText(day.durationMs.p95),
+      day.durationMs === null ? "no statement completed" : `average ${statementMsText(day.durationMs.avg)} · p50 ${statementMsText(day.durationMs.p50)}`, line("p95"), "", hrefs.p95 ?? ""),
   ];
 }
 
@@ -245,7 +245,7 @@ export function renderSlowest(list, { range = DEFAULT_RANGE, now = Date.now() } 
   if (!list.length) return empty(`No statement completed in ${span}.`);
   return `<div class="scroll"><table class="running"><thead><tr><th scope="col">Started</th><th scope="col" class="num">Took</th><th scope="col">User</th><th scope="col">Client</th>` +
     `<th scope="col" class="num">Rows</th><th scope="col">Statement</th><th scope="col" class="act"></th></tr></thead><tbody>` +
-    list.map((r) => `<tr><td><time data-tick datetime="${esc(r.startedAt)}" title="${esc(utcText(r.startedAt))} UTC">${esc(agoText(r.startedAt, now))}</time></td><td class="num">${esc(msText(r.durationMs))}</td>` +
+    list.map((r) => `<tr><td><time data-tick datetime="${esc(r.startedAt)}" title="${esc(utcText(r.startedAt))} UTC">${esc(agoText(r.startedAt, now))}</time></td><td class="num">${esc(statementMsText(r.durationMs))}</td>` +
       `<td><span class="clip" title="${esc(r.user || r.tokenName)}">${esc(r.user || (r.tokenName ? `token ${r.tokenName}` : ""))}</span></td><td><span class="clip" title="${esc(clientText(r.applicationName))}">${esc(clientText(r.applicationName))}</span></td>` +
       `<td class="num">${r.rows === null ? "" : esc(n(r.rows))}</td><td class="stmt-cell">${statementCell(r.query)}</td>` +
       `<td class="act"><a class="btn small" href="${esc(queriesHref({ user: r.user, client: r.applicationName, slow: r.durationMs >= 1000 ? "1" : "" }, range))}" title="its client's statements on Observability › Queries">Queries</a></td></tr>`).join("") +
