@@ -4,7 +4,7 @@
  * that took SLOW_MS or more has Mason's plain EXPLAIN of it on its row (the tables, the SQL sent to the engine, the
  * engine's operators with their estimates), recorded once it ended and never before its answer; a fast one, a refused
  * one and a cancelled one have none; a plan past the cap is cut and says so; at most one is recorded at a time (a
- * second slow statement meanwhile has none, said once in the log); a statement bound with values has its operators
+ * second slow statement meanwhile has none, said at most once a minute in the log, with the count); a statement bound with values has its operators
  * without their details; and the role is held as it is when the plan is recorded.
  */
 import { test, after, before } from "node:test";
@@ -168,7 +168,7 @@ test("a plan past the cap is cut at a line and says so", async () => {
   assert.ok(Buffer.byteLength(row!.plan ?? "") <= requestLog.MAX_STORED_PLAN_BYTES && (row!.plan ?? "").startsWith("Mason: answered from the synced table public.orders"));
 });
 
-test("at most one plan at a time: a slow statement that ends while another's plan is recorded has none, said once, and counted when one is recorded again", async () => {
+test("at most one plan at a time: a slow statement that ends while another's plan is recorded has none, said at most once a minute with how many, and the rest at the close", async () => {
   const api = await listener(0);
   const n = await count();
   said.length = 0;
@@ -182,7 +182,7 @@ test("at most one plan at a time: a slow statement that ends while another's pla
     await c.query("SELECT id FROM orders WHERE id = 2");
     await c.query("SELECT id FROM orders WHERE id = 3");
     assert.ok(Date.now() - first < 5_000);
-    assert.equal(said.filter((l) => /was not recorded: another slow statement's plan was being recorded/.test(l)).length, 1, `said once: ${said.join("\n")}`);
+    assert.deepEqual(said.filter((l) => /had no plan recorded/.test(l)).map((l) => l.replace(/session \d+/, "session N")), ["[postgres] request log: 1 slow statement(s) had no plan recorded (the latest session N): another slow statement's plan was being recorded, and Mason records one at a time; said at most once a minute"], `said once, the second within the minute counted: ${said.join("\n")}`);
     gate = null;
     open();
     await ledger.flush();
@@ -195,7 +195,10 @@ test("at most one plan at a time: a slow statement that ends while another's pla
     ["SELECT id FROM orders WHERE id = 3", false],
     ["SELECT id FROM orders WHERE id > 1", true],
   ]);
-  assert.ok(said.some((l) => /recording slow statements' plans again; 2 slow statement\(s\) had none recorded/.test(l)), said.join("\n"));
+  // what was counted since the last line is said at the close
+  await api.close();
+  servers.splice(servers.indexOf(api), 1);
+  assert.ok(said.includes("[postgres] request log: 1 slow statement(s) had no plan recorded (since the last line): another slow statement's plan was being recorded, and Mason records one at a time; said at most once a minute"), said.join("\n"));
 });
 
 test("a statement bound with values: its plan is the one its values made, its operators without their details, and no value in it", async () => {

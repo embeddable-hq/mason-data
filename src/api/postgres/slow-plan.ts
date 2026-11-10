@@ -11,17 +11,20 @@
  * waits for (src/duck/requests.ts). The answer to the client was sent before any of it starts.
  *
  * AT MOST ONE AT A TIME: a slow statement that ends while another's plan is being recorded gets none — never a queue,
- * which would grow exactly when the machine is struggling — and the dropped ones are said in the log once per streak,
- * with their count when one is recorded again. Each is bounded by `PLAN_DEADLINE_MS`; a stop aborts the one in flight.
+ * which would grow exactly when the machine is struggling — and the dropped ones are said in the log at most once a
+ * minute (`DROPS_SAID_EVERY_MS`), each line with how many since the last, and what is left at the close: under a stream
+ * of slow statements a line per drop, or per streak, would be a line every few milliseconds. Each is bounded by `PLAN_DEADLINE_MS`; a stop aborts the one in flight.
  * The measurements (what it costs the statements beside it) are docs/OBSERVABILITY.md's "The plan of a slow statement".
  */
 import { storedPlan, type StoredPlan } from "../request-log.ts";
-import { Streak } from "../../duck/history.ts";
 import type { DuckRunner } from "./server.ts";
 
 /** How long one plan may take: an EXPLAIN plans and reads the copies' row counts, ~100 ms on a loaded server; past this
  *  it is abandoned (interrupted) and the row is written without one. */
 export const PLAN_DEADLINE_MS = 30_000;
+
+/** The dropped plans are said at most this often, with how many since the last line. */
+export const DROPS_SAID_EVERY_MS = 60_000;
 
 /** What explains one statement, on the module's connection, under `signal`: its EXPLAIN's lines. Throws the session's
  *  refusal (its role now) or the engine's error. */
@@ -31,8 +34,9 @@ export class SlowPlans {
   private runner: Promise<DuckRunner> | null = null;
   /** the plan being recorded now: what `close` aborts and waits for */
   private current: { controller: AbortController; done: Promise<StoredPlan | null> } | null = null;
-  /** the plans not recorded because another was: said at the first of a streak, counted when one is recorded again */
-  private readonly dropped = new Streak();
+  /** the plans not recorded because another was, since the last line that said so, and when that line was */
+  private dropped = 0;
+  private droppedSaidAt = -Infinity;
   private closed = false;
   private readonly open: () => Promise<DuckRunner>;
   private readonly log: (line: string) => void;
@@ -42,13 +46,14 @@ export class SlowPlans {
   /**
    * The plan of a statement that just ended, recorded in the background: a promise of it (null where none could be
    * recorded: the run stopping, the deadline), or undefined when it is not asked — another plan is being recorded (said
-   * once per streak), or the listener is closing. `what` names the statement in the log (`session 3`). `hideErrors`: an
+   * at most once a minute, counted), or the listener is closing. `what` names the statement in the log (`session 3`). `hideErrors`: an
    * error's message is not kept (it could quote a bound value the row does not keep). Never throws.
    */
   record(what: string, explain: Explain, hideErrors: boolean): Promise<StoredPlan | null> | undefined {
     if (this.closed) return undefined;
     if (this.current !== null) {
-      this.dropped.failed(1, () => this.log(`request log: the plan of a slow statement (${what}) was not recorded: another slow statement's plan was being recorded, and Mason records one at a time; said once until one is recorded again`));
+      this.dropped++;
+      if (Date.now() - this.droppedSaidAt >= DROPS_SAID_EVERY_MS) this.sayDropped(`the latest ${what}`);
       return undefined;
     }
     const controller = new AbortController();
@@ -59,7 +64,6 @@ export class SlowPlans {
         // opened at the first slow statement, kept for the next; one that failed to open is asked again next time
         const runner = await (this.runner ??= this.open().catch((e: unknown) => { this.runner = null; throw e; }));
         const plan = storedPlan((await explain(runner, controller.signal)).join("\n"));
-        this.dropped.succeeded((n) => this.log(`request log: recording slow statements' plans again; ${n} slow statement(s) had none recorded, another's being recorded at the time`));
         return plan;
       } catch (e) {
         // TOLERATED, NARROWLY: the statement was answered and its row is written all the same. An abort is the run
@@ -81,9 +85,17 @@ export class SlowPlans {
     return done;
   }
 
+  /** the dropped plans since the last line, said; `latest` names the last one */
+  private sayDropped(latest: string): void {
+    this.log(`request log: ${this.dropped} slow statement(s) had no plan recorded (${latest}): another slow statement's plan was being recorded, and Mason records one at a time; said at most once a minute`);
+    this.dropped = 0;
+    this.droppedSaidAt = Date.now();
+  }
+
   /** The listener closing: the plan in flight aborted and waited for, the connection closed; nothing asked after. */
   async close(): Promise<void> {
     this.closed = true;
+    if (this.dropped > 0) this.sayDropped("since the last line");
     const current = this.current;
     if (current !== null) { current.controller.abort(new Error("the listener closed")); await current.done; }
     const runner = this.runner;

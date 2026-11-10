@@ -42,7 +42,7 @@ paths:
   and a hand-run EXPLAIN ANALYZE slowed a user's statement): a plain EXPLAIN (Mason's, src/duck/explain.ts) of the plan
   it RAN (never planned again: the catalog plans every session on one thread), with the values and session it ran
   under, its role held as it is then (a refusal is the plan's words), on a connection of its own; at most ONE in
-  flight, a second dropped (never queued) and said once per streak; a statement bound with values keeps its operators
+  flight, a second dropped (never queued) and said at most once a minute with their count; a statement bound with values keeps its operators
   without their details (`detailsHidden`); none for a refusal by an entry, a cancel, or a statement that never reached
   the engine. The row waits in the ledger for its plan (bounded, `PLAN_WAIT_MS`; written without it at the close),
   cut at `MAX_STORED_PLAN_BYTES` and said. Its cost beside fast statements is measured in docs/OBSERVABILITY.md "The

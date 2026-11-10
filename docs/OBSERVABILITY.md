@@ -274,7 +274,7 @@ How it is kept out of the answer's way (src/api/postgres/slow-plan.ts):
 - **Its own connection.** On the engine's side, the EXPLAIN's prepare and plan are asynchronous calls. They run on a
   libuv pool thread, never the executor worker's own thread, which only passes a few messages.
 - **One at a time.** At most one plan is in flight. A slow statement that ends meanwhile gets none, and the log says
-  so once per streak.
+  so at most once a minute, with how many.
 - **Bounded.** A deadline of 30 s, a cap of 8 KiB, and the stop aborts the plan in flight.
 
 **Measured** (a scratch script, not a test, on a shared 4-core sandbox with the load average 0.9 rising to 4.7 from

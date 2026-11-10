@@ -18,5 +18,5 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   Queries, or whole with the new `mason logs --requests --id <request id>`. A plan is at most 8 KiB and says when it
   was cut. One plan is recorded at a time: a slow statement that ends while another's is being recorded gets none, and
   the log says so. A statement bound with parameters has its operators recorded without their details, which could
-  show the values it was bound with. A refused or cancelled statement has no plan. It is kept as the request log is
-  (`MASON_HISTORY_DAYS`).
+  show the values it was bound with. A cancelled statement has no plan. Neither does one refused before it reached
+  the synced data, or refused as SQL Mason does not support. It is kept as the request log is (`MASON_HISTORY_DAYS`).
