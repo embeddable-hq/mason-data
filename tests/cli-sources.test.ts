@@ -619,7 +619,9 @@ test("mason tables' entry for each table is mason add's, decided in one place: i
   const big = table({ table: "events_big", rows: 22_000_000 });
   const hidden = table({ table: "hidden", rowSecurityHidesFrom: "mason" });
   const audit = table({ table: "audit", replicaIdentity: "n" });
-  const db = { tables: [...CATALOG, big, hidden, audit], database: "shop" };
+  const hiddenLog = table({ table: "hidden_log", key: [], rowSecurityHidesFrom: "mason",
+    uniqueKeys: [{ name: "hidden_log_id_key", columns: ["id"], constraint: true, nullsNotDistinct: false }] });
+  const db = { tables: [...CATALOG, big, hidden, audit, hiddenLog], database: "shop" };
   const edit = (text: string) => { fs.writeFileSync(file, text); return E.sourceToEdit(folder, root, () => S.readSource(folder, root, {})); };
   const said = (f: () => unknown): string => { try { f(); } catch (e) { return (e as Error).message; } return "taken"; };
   try {
@@ -641,6 +643,8 @@ test("mason tables' entry for each table is mason add's, decided in one place: i
       assert.deepEqual(of("public.customers").entry, { customers: {} }, "added: its entry as the file says it");
       assert.deepEqual([of("public.hidden").entry, of("public.hidden").reason?.startsWith("tables.hidden: row-level security on public.hidden hides every row from mason")], [null, true],
         "a table mason add refuses for another reason than its key: no entry, and the refusal as its reason");
+      assert.match(of("public.hidden_log").reason!, /^no primary key: name the columns that tell its rows apart, mason add hidden_log --key id \(its unique index hidden_log_id_key\); with it, tables\.hidden_log: row-level security on public\.hidden_log hides every row/,
+        "no primary key, and refused even with the --key it names: both said");
       if (top === "sync: poll 5m\n") assert.deepEqual(of("public.events_big").entry, { events_big: { sync: "off" } }, "a big table under a polling file: written off");
       if (top === "sync: replication\n") {
         assert.deepEqual(of("public.audit").entry, { audit: { sync: "poll 5m" } }, "REPLICA IDENTITY NOTHING under a replicating file: polled");

@@ -235,12 +235,14 @@ export function listTables(file: SourceFile, db: EditCatalog): ListedTable[] {
     const catalog = catalogTable(t, was);
     let entry: WrittenEntry | null = was ?? null, reason = catalog.reason;
     if (was === undefined) {
-      try { entry = plannedEntry(file, db, t, ["*"], t.key.length ? null : usableUniqueKey(t)?.columns ?? null).entry; }
+      const key = t.key.length ? null : usableUniqueKey(t)?.columns ?? null;
+      try { entry = plannedEntry(file, db, t, ["*"], key).entry; }
       catch (e) {
         // a refusal is the table's answer, said as mason add says it; anything else is a bug, and goes on up
         if (!(e instanceof Refusal)) throw e;
         entry = null;
-        reason ??= e.message;
+        // refused with the --key its reason names (row-level security, say): both said, the --key alone would not do
+        reason = reason === null ? e.message : key !== null ? `${reason}; with it, ${e.message}` : reason;
       }
     }
     // the columns every-column leaves out, by the same rule against the key it is synced by
