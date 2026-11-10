@@ -12,8 +12,9 @@
  * Every URL and label is read by the link back's ONE reading (src/cli/ui-back-link.ts `linkUrl`, `linkLabel`): a path
  * from the host's root or an `https://` / `http://` URL, printable ASCII, no user or password, at most 2048 characters;
  * a label of one line of plain text, at most 64 characters. Anything else refuses the start, every problem on one line,
- * never quoting a value. A `MASON_UI_NAV_*` name that is none of these refuses it too (with a `did you mean`): a
- * setting is never ignored. The page renders the labels as text and the URLs as attributes, never as HTML.
+ * never quoting a value or a key a link does not take (its place is named); a key written twice in an entry refuses it
+ * too, since JSON.parse keeps the last silently. A `MASON_UI_NAV_*` name that is none of these refuses it (with a
+ * `did you mean`), at `mason start` as at `mason serve`: a setting is never ignored. The page renders the labels as text and the URLs as attributes, never as HTML.
  *
  * WHAT THE SERVER ALLOWS IS NOT CHANGED: an item replaced is a link elsewhere, not a refusal — the run still answers that
  * view's endpoints (`/api/users`), and `MASON_UI_READ_ONLY` / `MASON_UI_READ_ONLY_ALLOW` (src/cli/ui-read-only.ts) are
@@ -59,8 +60,60 @@ export interface PageNav { items: Partial<Record<NavItem, string>>; links: PageL
 /** An example of the list, said in every problem with it. */
 const EXAMPLE = `[{"label":"Billing","url":"/billing"}]`;
 
-/** A key of an entry as a problem names it: quoted when it is short plain text, else not at all. */
-const keyName = (k: string): string => /^[\x20-\x7e]{1,32}$/.test(k) ? JSON.stringify(k) : "a key";
+/** The nth, as a problem counts a key's place in its entry. */
+const nth = (n: number): string => `${n}${n % 100 >= 11 && n % 100 <= 13 ? "th" : ["th", "st", "nd", "rd"][n % 10] ?? "th"}`;
+
+/** JSON's white space, the only characters that may stand between a key and its `:`. */
+const JSON_SPACE = new Set([" ", "\t", "\n", "\r"]);
+
+/**
+ * THE KEYS OF EACH ENTRY AS WRITTEN, in order and with every repeat — what JSON.parse does not say: it keeps a key
+ * written twice by its last value, silently. Read only from text JSON.parse has just accepted, so the one thing told here
+ * is where each string starts and ends (a `"` outside a string, to the next `"` no backslash escapes: valid JSON leaves
+ * no other reading), and every key is decoded by JSON.parse itself (`"\u006cabel"` is `label`), never by a second
+ * grammar. A key is a string whose next character but JSON's white space is `:`; an entry is a value directly in the
+ * list, counted by the list's commas; only the keys of an object directly in the list are kept.
+ */
+function writtenKeys(text: string): Map<number, string[]> {
+  const keys = new Map<number, string[]>();
+  let depth = 0, entry = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === "\"") {
+      let j = i + 1;
+      while (text[j] !== "\"") j += text[j] === "\\" ? 2 : 1;
+      let k = j + 1;
+      while (JSON_SPACE.has(text[k] ?? "")) k++;
+      if (depth === 2 && text[k] === ":") {
+        const at = keys.get(entry) ?? [];
+        at.push(JSON.parse(text.slice(i, j + 1)) as string);
+        keys.set(entry, at);
+      }
+      i = j;
+    } else if (c === "{" || c === "[") depth++;
+    else if (c === "}" || c === "]") depth--;
+    else if (c === "," && depth === 1) entry++;
+  }
+  return keys;
+}
+
+/** What is wrong with an entry's keys, never quoting one a link does not take: such a key may be anything, a secret too. */
+function keyProblems(entry: string, written: readonly string[], own: readonly string[]): string[] {
+  const distinct = [...new Set(written)];
+  // the reading above and JSON.parse disagree on what the keys are: refused, never guessed (fail closed)
+  if (distinct.length !== own.length || distinct.some((k) => !own.includes(k))) return [`${entry} could not be read key by key: write it as {"label": …, "url": …}`];
+  const problems: string[] = [];
+  for (const k of distinct) {
+    const places = written.flatMap((w, i) => w === k ? [i + 1] : []);
+    const known = k === "label" || k === "url";
+    if (!known) problems.push(`${entry} has a key a link does not take (its ${nth(places[0]!)})${didYouMean(k, ["label", "url"])}: a link is {"label": …, "url": …}`);
+    if (places.length > 1) {
+      problems.push(`${entry} has ${known ? `"${k}"` : "a key"} ${places.length === 2 ? "twice" : `${places.length} times`} (its ${places.map(nth).join(", ")}), ` +
+        "and JSON keeps only the last: write each key once");
+    }
+  }
+  return problems;
+}
 
 /** The host's links, or every problem with them. */
 function navLinks(text: string): PageLink[] | string[] {
@@ -73,13 +126,12 @@ function navLinks(text: string): PageLink[] | string[] {
   if (v.length > NAV_LINKS_MAX) return [`${at} has ${v.length} links, and the sidebar takes at most ${NAV_LINKS_MAX}: keep the ones the page's readers need`];
   const problems: string[] = [];
   const links: PageLink[] = [];
+  const written = writtenKeys(text);
   v.forEach((e: unknown, i) => {
-    const entry = `${at}' entry ${i + 1}`;
+    const entry = `${at}'s entry ${i + 1}`;
     if (e === null || typeof e !== "object" || Array.isArray(e)) { problems.push(`${entry} is not an object: each link is {"label": …, "url": …}`); return; }
     const o = e as Record<string, unknown>;
-    for (const k of Object.keys(o)) {
-      if (k !== "label" && k !== "url") problems.push(`${entry} has ${keyName(k)}, which a link does not take${didYouMean(k, ["label", "url"])}: a link is {"label": …, "url": …}`);
-    }
+    problems.push(...keyProblems(entry, written.get(i) ?? [], Object.keys(o)));
     const label = typeof o.label === "string" ? linkLabel(o.label, `${entry}'s label`, "name the link") : { problem: `${entry} has no label: give it "label", the text the sidebar shows` };
     const url = typeof o.url === "string" ? linkUrl(o.url, `${entry} has its url set`, "a link") : { problem: `${entry} has no url: give it "url", a path on this host (/something) or an https:// URL` };
     for (const x of [label, url]) if (typeof x !== "string") problems.push(x.problem);
@@ -114,17 +166,17 @@ function loopProblems(items: PageNav["items"]): string[] {
   });
 }
 
+/** Each `MASON_UI_NAV_*` set that is no setting, as a problem with a `did you mean`: `mason serve`'s words and `mason start`'s. */
+export const notNavSettings = (env: Readonly<Record<string, string | undefined>>): string[] =>
+  Object.keys(env).filter((k) => k.startsWith(NAV_PREFIX) && !NAV_SETTINGS.includes(k) && (env[k] ?? "") !== "")
+    .map((k) => `${k} is not a setting${didYouMean(k, NAV_SETTINGS)}: the sidebar's settings are ${NAV_SETTINGS.join(", ")}`);
+
 /**
  * The sidebar as the environment says it: null when no setting of it is set (or each is set empty, or the list is
  * `[]`), else the items replaced and the host's links, or what is wrong — every problem of every setting, on one line.
  */
 export function uiNavSetting(env: Readonly<Record<string, string | undefined>>): PageNav | null | { problem: string } {
-  const problems: string[] = [];
-  for (const k of Object.keys(env)) {
-    if (k.startsWith(NAV_PREFIX) && !NAV_SETTINGS.includes(k) && (env[k] ?? "") !== "") {
-      problems.push(`${k} is not a setting${didYouMean(k, NAV_SETTINGS)}: the sidebar's settings are ${NAV_SETTINGS.join(", ")}`);
-    }
-  }
+  const problems = notNavSettings(env);
   const items: PageNav["items"] = {};
   for (const i of NAV_ITEMS) {
     const text = env[i.setting] ?? "";

@@ -380,8 +380,8 @@ export function start(doc, win) {
   // land on it again; once per URL and hash, however many paints follow before the browser leaves — a hash that arrives
   // later (`arrived`: typed, or followed) leaves again, whatever became of the last leave (a navigation stopped, a 204,
   // a URL that is this page). No loop can follow: mason serve refuses a URL whose fragment names a replaced view
-  // (src/cli/ui-nav.ts). A hash naming no page, with the Overview replaced, is the first page of Mason's own. True
-  // when the page is leaving.
+  // (src/cli/ui-nav.ts). A hash naming no page, with the Overview replaced, is the first page of Mason's own.
+  // `leaving` is the URL the page is leaving for, else null.
   let leaving = null;
   const leave = (arrived = false) => {
     if (arrived) leaving = null;

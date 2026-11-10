@@ -527,7 +527,7 @@ export const PAGE_ROUTES: Readonly<Record<string, readonly [file: string, type: 
   "/vendor/lucide-1.56.0/layout-dashboard.mjs": ["vendor/lucide-1.56.0/layout-dashboard.mjs", "text/javascript; charset=utf-8"],
   "/vendor/lucide-1.56.0/logs.mjs": ["vendor/lucide-1.56.0/logs.mjs", "text/javascript; charset=utf-8"],
   "/vendor/lucide-1.56.0/link.mjs": ["vendor/lucide-1.56.0/link.mjs", "text/javascript; charset=utf-8"],
-  "/vendor/lucide-1.56.0/menu.mjs":["vendor/lucide-1.56.0/menu.mjs", "text/javascript; charset=utf-8"],
+  "/vendor/lucide-1.56.0/menu.mjs": ["vendor/lucide-1.56.0/menu.mjs", "text/javascript; charset=utf-8"],
   "/vendor/lucide-1.56.0/square-terminal.mjs": ["vendor/lucide-1.56.0/square-terminal.mjs", "text/javascript; charset=utf-8"],
   "/vendor/lucide-1.56.0/table.mjs": ["vendor/lucide-1.56.0/table.mjs", "text/javascript; charset=utf-8"],
   "/vendor/lucide-1.56.0/users.mjs": ["vendor/lucide-1.56.0/users.mjs", "text/javascript; charset=utf-8"],
