@@ -258,6 +258,44 @@ token; whether actions (Cancel, Sync) are ever served there or read-only for goo
 (as `mason user` is for the Postgres API). Recommended: **A, read-only, one secret, statement text included, TLS
 required**, then **C** for teams that already run Prometheus. C is built (above); A and B stay open.
 
+## The plan of a slow statement (issue 825, 2026-11-10)
+
+A statement that took `SLOW_MS` (1 s) or more has Mason's plain EXPLAIN of it on its request-log row: `plan`,
+`planTruncated` (`mason logs --requests --json`, `/api/requests`, the Queries page's row details,
+`mason logs --requests --id <id>`). Finding why a 20–46 s preview was slow had taken a hand-run EXPLAIN on the server. A
+hand-run `EXPLAIN ANALYZE` slowed a user's statement to 46 s, while a plain EXPLAIN (111 ms) showed the cause: the
+rewrite's `ORDER BY a.rowid, b.rowid`, and a Top N over a Hash Join estimated at ~165 M rows.
+
+How it is kept out of the answer's way (src/api/postgres/slow-plan.ts):
+- **Recorded after the answer is sent.** The row waits for its plan in the ledger (src/duck/requests.ts,
+  `PLAN_WAIT_MS`), never the client.
+- **Planned from what it ran.** It is the plan the statement ran (`DuckPlan`), with its values and session. Nothing is
+  planned again, so the catalog Postgres (one thread for every session's analysis) does nothing for it.
+- **Its own connection.** On the engine's side, the EXPLAIN's prepare and plan are asynchronous calls. They run on a
+  libuv pool thread, never the executor worker's own thread, which only passes a few messages.
+- **One at a time.** At most one plan is in flight. A slow statement that ends meanwhile gets none, and the log says
+  so once per streak.
+- **Bounded.** A deadline of 30 s, a cap of 8 KiB, and the stop aborts the plan in flight.
+
+**Measured** (a scratch script, not a test, on a shared 4-core sandbox with the load average 0.9 rising to 4.7 from
+other work; Node 26.13, `UV_THREADPOOL_SIZE=32` as Mason sets it):
+- **The setup.** A listener over a real store. Five sessions send 50 fast statements a second in all (a count over a
+  10,000-row table, 91 texts). Two other sessions run a slow statement back to back (a nested-loop join of 20,000²
+  pairs, ~2 s each), so about one plan a second is recorded.
+- **The configurations.** Each ran 30 s, interleaved, twice: plans off; on at SLOW_MS; and at 0 ms, where every
+  statement is slow, so a plan is always in flight (the worst case: ~30 plans a second, the rest dropped).
+
+| Plans | fast statements | p50 ms | p95 ms | p99 ms | EXPLAIN p50 / p95 ms |
+|---|---|---|---|---|---|
+| off (round 1, 2) | 1,505 / 1,503 | 9.5 / 10.2 | 25.6 / 32.1 | 40.2 / 54.2 | — |
+| at SLOW_MS (33 and 32 plans) | 1,502 / 1,499 | 10.4 / 10.5 | 30.1 / 31.0 | 71.3 / 88.6 | 13.7 / 40.3, 13.0 / 25.0 |
+| every statement (1,096 and 847 plans) | 1,504 / 1,500 | 9.7 / 11.1 | 33.9 / 37.9 | 51.1 / 86.2 | 10.5 / 21.6, 10.9 / 22.9 |
+
+At SLOW_MS, the fast statements' p50 and p95 are within the spread between the two rounds without plans. With a plan
+always in flight, the p95 is 2–6 ms higher, about the size of that spread. An EXPLAIN takes ~10–14 ms at p50. No
+design around it (a lower priority, waiting for an idle executor) was needed; measure again if what the plan reads
+grows (a copy's facts are read in memory; `duckdb_tables()` once).
+
 ## To come back to
 
 - **NEXT: a table just added shows its copy's progress at once.** Today, Add on the Tables page writes the sources
