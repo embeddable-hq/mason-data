@@ -4696,17 +4696,14 @@ test("a join's FROM items: a plain derived read is fetched by its row number, a 
       assert.doesNotMatch(await sent(sql), /__mason_r(id|\d)/, sql);
       assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
     }
-    // PAGES UNDER BOTH FAN-OUT DECISIONS. Proved: a plain read's key is its table's, through a view, a WITH query and a wrapper
+    // NO ORDER BY, NO SORT (issue 824): a plain read's key through a view, a WITH query and a wrapper, a key computed, a
+    // multiplying side, what is carried
     for (const sql of ["SELECT l.id, d.name FROM late l JOIN (SELECT id, name FROM late_c) d ON d.id = l.c LIMIT 3",
       "SELECT l.id, r.name FROM late l JOIN late_read r ON r.id = l.c LIMIT 3",
       "WITH w AS (SELECT id, name FROM late_c) SELECT l.id, w.name FROM late l LEFT JOIN w ON w.id = l.c LIMIT 3",
       "SELECT * FROM (SELECT l.id, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c) t LIMIT 3",
-      "SELECT * FROM late_joined LIMIT 3"]) {
-      assert.match(await sent(sql), /ORDER BY \w+\.(rowid|__mason_rid)\b.*\) AS __mason_late .*ORDER BY __mason_late\.__mason_r1/, sql);
-      assert.equal((await answer(c, sql)).rows.length, 3, sql);
-    }
-    // Not proved, no sort: a key computed, a multiplying side, what is carried
-    for (const sql of ["SELECT l.id, d.name FROM late l JOIN (SELECT id + 1 AS id, name FROM late_c) d ON d.id = l.c LIMIT 3",
+      "SELECT * FROM late_joined LIMIT 3",
+      "SELECT l.id, d.name FROM late l JOIN (SELECT id + 1 AS id, name FROM late_c) d ON d.id = l.c LIMIT 3",
       "SELECT x.id, y.c FROM (SELECT id, c FROM late) x JOIN (SELECT id, c FROM late) y ON y.c = x.c LIMIT 3",
       "SELECT * FROM (SELECT x.id, y.j FROM late x JOIN late y ON y.c = x.c) t LIMIT 3",
       "SELECT l.id, s.n FROM late l JOIN late_counts s ON s.c = l.c LIMIT 3"]) {
