@@ -970,11 +970,7 @@ export async function tables(argv: string[]): Promise<number> {
   // one line per table unless a table is named or --all asks: 54 tables were 600 lines, and choosing what to
   // add needs the names, sizes and keys (an agent read them through --json and python, #409)
   if (!f.positionals.length && !f.values.all) {
-    const w = Math.max(...shown.map((t) => t.table.length));
-    for (const t of shown) {
-      const l = tableFacts(t);
-      out(`${t.table.padEnd(w)}  ${l.size.padStart(18)}  ${l.key}${l.state ? `  · ${l.state}` : ""}`);
-    }
+    for (const line of tableListLines(shown)) out(line);
     out(nextBlock(next));
     return 0;
   }
@@ -1008,6 +1004,12 @@ export function tableJson(t: ListedTable): Record<string, unknown> {
     addable: t.reason === null, reason: t.reason, added: t.added, addedColumns: t.addedColumns, copyKey: t.copyKey, entry: t.entry,
     columns: t.columns.map((c) => ({ name: c.name, type: c.type, nullable: c.nullable, comment: c.comment, references: c.references, secret: c.secret })),
   };
+}
+
+/** The tables a line each, as `mason tables` lists them (and `mason doctor --tables`): its name, size, key and state. */
+export function tableListLines(shown: readonly CatalogTable[]): string[] {
+  const w = Math.max(...shown.map((t) => t.table.length));
+  return shown.map((t) => { const l = tableFacts(t); return `${t.table.padEnd(w)}  ${l.size.padStart(18)}  ${l.key}${l.state ? `  · ${l.state}` : ""}`; });
 }
 
 /** A table's line in `mason tables`: its size, its key, and added or why it cannot be added as it is (the web page's

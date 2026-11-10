@@ -688,6 +688,96 @@ test("mason tables --json: each table's entry and each column's secret are what 
   }
 });
 
+// ISSUE 794, ITS SECOND HALF: `mason doctor --json --tables` checks the database AND lists its tables on ONE connection,
+// from the catalog the checks read (src/cli/doctor.ts databaseChecks), in mason tables --json's shape. The connections are
+// counted by the database itself: every client's startup is traced (src/demo/source.ts `trace`).
+test("mason doctor --tables: mason tables --json's tables on the checks' one connection; given though a check fails, absent when the catalog was not read; unset, the answer as before", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-doctor-tables-")));
+  const started: string[] = [];
+  const source = await DemoSource.open({ dir: path.join(root, "db"), port: 0, log: () => {}, trace: (line) => { if (/ starts with /.test(line)) started.push(line); } });
+  try {
+    const c = new pg.Client({ connectionString: source.url });
+    await c.connect();
+    try {
+      await c.query(`CREATE TABLE vault (id bigint PRIMARY KEY, label text, password_hash text);
+        CREATE TABLE ledger (account_id bigint NOT NULL, line_no int NOT NULL, amount numeric, UNIQUE (account_id, line_no))`);
+    } finally { await c.end(); }
+    const app = path.join(root, "app");
+    const file = path.join(app, "mason", "sources", "shop.yml");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.join(app, ".mason"), { mode: 0o700 });
+    writeRunning(root, null);
+    // one table added by hand: its entry is the file's, the others' what mason add would write
+    fs.writeFileSync(file, `kind: postgres\nurl: ${source.url}\ntables:\n  vault:\n    columns: [id, label]\n`);
+    const env = matrixEnv();
+    type Doctor = { ready: boolean; verdict: string; checks: Array<{ name: string; ok: boolean | null }>; tables?: unknown[]; next: unknown[] };
+    const doctor = async (argv: string[], e = env): Promise<{ code: number | null; answer: Doctor }> => {
+      const r = await runMason(app, ["doctor", ...argv], e);
+      return { code: r.code, answer: JSON.parse(r.stdout) as Doctor };
+    };
+    const tables = await runMason(app, ["tables", "--json"], env);
+    assert.equal(tables.code, 0, tables.stdout + tables.stderr);
+    const listed = (JSON.parse(tables.stdout) as { tables: unknown[] }).tables;
+    assert.ok(listed.length >= 4, "the demo's tables and ours");
+
+    // THE FLAG SET: the same tables mason tables --json gives, on ONE connection to the database
+    started.length = 0;
+    const withTables = await doctor(["--json", "--tables"]);
+    assert.equal(started.length, 1, `one connection for the checks and the tables:\n${started.join("\n")}`);
+    assert.equal(withTables.code, 0, JSON.stringify(withTables.answer));
+    assert.deepEqual(withTables.answer.tables, listed);
+    assert.deepEqual(Object.keys(withTables.answer), ["ready", "verdict", "checks", "tables", "next"]);
+
+    // THE FLAG UNSET: the answer as it was — no tables key, the same checks, verdict and next
+    started.length = 0;
+    const without = await doctor(["--json"]);
+    assert.equal(started.length, 1);
+    assert.deepEqual(Object.keys(without.answer), ["ready", "verdict", "checks", "next"]);
+    assert.deepEqual({ ...withTables.answer, tables: undefined }, { ...without.answer, tables: undefined });
+
+    // A CHECK THAT FAILS WITHOUT STOPPING THE READ (a MASON_PG_PORT that is no port): the tables are still given, and
+    // the answer still fails
+    const failing = await doctor(["--json", "--tables"], { ...env, MASON_PG_PORT: "abc" });
+    assert.equal(failing.code, 1);
+    assert.equal(failing.answer.ready, false);
+    assert.equal(failing.answer.checks.find((x) => x.name === "ports")?.ok, false);
+    assert.deepEqual(failing.answer.tables, listed);
+
+    // WITH MASON RUNNING (its own checks never connect): the role's lines and the tables on the one connection they open
+    const { runRoleChecks } = await import("../src/cli/doctor.ts");
+    const { theProject } = await import("../src/cli/project.ts");
+    const found = theProject(app);
+    assert.ok("project" in found);
+    started.length = 0;
+    const running = await runRoleChecks(found.project, true) as unknown as { checks: unknown[]; tables?: Array<Parameters<typeof commands.tableJson>[0]> };
+    assert.equal(started.length, 1, started.join("\n"));
+    assert.deepEqual(running.tables?.map(commands.tableJson), listed);
+    assert.ok(running.checks.length > 0, "the role's lines too");
+
+    // AS A PERSON: the checks, then the tables a line each as mason tables lists them
+    const person = await runMason(app, ["doctor", "--tables"], env);
+    assert.equal(person.code, 0, person.stdout + person.stderr);
+    const tablesPerson = await runMason(app, ["tables"], env);
+    const lines = tablesPerson.stdout.split("\n\nNext:")[0]!;
+    assert.ok(lines.split("\n").length >= 4);
+    assert.ok(person.stdout.includes(`\n\n${lines}\n`), `${person.stdout}\n---\n${lines}`);
+
+    // THE CATALOG NOT READ: a database that does not answer — no tables key, never [] (the database's line says why)
+    fs.writeFileSync(file, `kind: postgres\nurl: postgresql://mason:pw@127.0.0.1:1/shop\ntables: {}\n`);
+    const down = await doctor(["--json", "--tables"]);
+    assert.equal(down.code, 1);
+    assert.equal(down.answer.checks.find((x) => x.name === "database")?.ok, false);
+    assert.ok(!("tables" in down.answer), JSON.stringify(down.answer));
+    // no project here: no database is named before mason init, so none is read
+    const bare = fs.mkdtempSync(path.join(root, "bare-"));
+    const none = await runMason(bare, ["doctor", "--json", "--tables"], env);
+    assert.ok(!("tables" in (JSON.parse(none.stdout) as object)), none.stdout);
+  } finally {
+    await source.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("mason add of a table a replicating file cannot replicate says it was written sync: poll 5m, why, and the alternatives", async () => {
   const { addedLines } = await import("../src/cli/commands.ts");
   const b = { table: "public.events", file: "/app/mason/sources/app.yml", entry: "events", columns: null, exclude: [], key: ["tenant_id", "id"], addedKey: [], skippedSecrets: [], already: false,
