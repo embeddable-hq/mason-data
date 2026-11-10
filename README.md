@@ -262,8 +262,9 @@ tables:
 ```
 
 - `mason add` writes these entries for you. To set a table's sync, run `mason add orders --sync "poll 30s"`.
-- `mason add` leaves out columns that look like secrets (`password`, `token`, `api_key`, …) unless you name them. It
-  lists them under `exclude:`. If you write `{}` by hand, every column is synced.
+- `mason add` leaves out columns that look like secrets (`password`, `token`, `api_key`, …, however the name is
+  written: `passwordHash`, `apiKey`, `API_TOKEN`) unless you name them. It lists them under `exclude:`.
+  If you write `{}` by hand, every column is synced.
 - Mason reads column types from your database each time it starts. You never write them in the file.
 - While Mason runs, `mason add` and `mason remove` take effect at once. They keep the rest of the file as it was,
   including comments. If you edit the file by hand, the change applies at the next `mason start`. If an entry has a

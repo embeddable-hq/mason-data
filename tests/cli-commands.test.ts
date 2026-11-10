@@ -688,7 +688,43 @@ test("mason tables --json: each table's entry and each column's secret are what 
   }
 });
 
-// ISSUE 794, ITS SECOND HALF: `mason doctor --json --tables` checks the database AND lists its tables on ONE connection,
+// ISSUE 797: A SECRET'S WORDS HOWEVER THE NAME IS WRITTEN — an ORM's camelCase columns (`passwordHash`, `apiKey`) were
+// synced by an every-column `mason add` with no exclude: and no note, the rule reading snake_case alone.
+test("mason add leaves out a camelCase secret too: passwordHash and apiKey are excluded and flagged, tokenId is not", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-secret-case-")));
+  const source = await DemoSource.open({ dir: path.join(root, "db"), port: 0, log: () => {} });
+  try {
+    const c = new pg.Client({ connectionString: source.url });
+    await c.connect();
+    try {
+      await c.query(`CREATE TABLE members ("id" bigint PRIMARY KEY, "displayName" text, "passwordHash" text, "apiKey" text, "tokenId" bigint)`);
+    } finally { await c.end(); }
+    const app = path.join(root, "app");
+    const file = path.join(app, "mason", "sources", "shop.yml");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.join(app, ".mason"), { mode: 0o700 });
+    writeRunning(root, null);
+    fs.writeFileSync(file, `kind: postgres\nurl: ${source.url}\ntables: {}\n`);
+    const listed = await runMason(app, ["tables", "members", "--json"], matrixEnv());
+    assert.equal(listed.code, 0, listed.stdout + listed.stderr);
+    const [members] = (JSON.parse(listed.stdout) as { tables: Array<{ entry: unknown; columns: Array<{ name: string; secret: boolean }> }> }).tables;
+    assert.deepEqual(members!.columns.map((x) => [x.name, x.secret]), [["id", false], ["displayName", false], ["passwordHash", true], ["apiKey", true], ["tokenId", false]]);
+    assert.deepEqual(members!.entry, { members: { exclude: ["passwordHash", "apiKey"] } });
+    const person = await runMason(app, ["tables", "members"], matrixEnv());
+    assert.match(person.stdout, /^ {2}apiKey +text +\(looks like a secret: left out unless named\)$/m, person.stdout + person.stderr);
+    const add = await runMason(app, ["add", "members", "--json"], matrixEnv());
+    assert.equal(add.code, 0, add.stdout + add.stderr);
+    assert.deepEqual((JSON.parse(add.stdout) as { added: Array<{ exclude: string[]; skippedSecrets: string[] }> }).added.map((a) => [a.exclude, a.skippedSecrets]),
+      [[["passwordHash", "apiKey"], ["passwordHash", "apiKey"]]]);
+    const { parse } = await import("yaml");
+    assert.deepEqual((parse(fs.readFileSync(file, "utf8")) as { tables: unknown }).tables, { members: { exclude: ["passwordHash", "apiKey"] } });
+  } finally {
+    await source.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ISSUE 794, ITS SECOND HALF:`mason doctor --json --tables` checks the database AND lists its tables on ONE connection,
 // from the catalog the checks read (src/cli/doctor.ts databaseChecks), in mason tables --json's shape. The connections are
 // counted by the database itself: every client's startup is traced (src/demo/source.ts `trace`).
 test("mason doctor --tables: mason tables --json's tables on the checks' one connection; given though a check fails, absent when the catalog was not read; unset, the answer as before", async () => {
