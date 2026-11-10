@@ -82,15 +82,16 @@ export const attributesText = (a) => Object.entries(a).map(([k, v]) => `${k}=${t
  * user held to it is refused (57P03), said above the table as `mason user list`'s tip says it (src/cli/roles.ts
  * rolesProblemText, held equal by tests/web-page.test.ts) and in each user's role; beside the role, the user's
  * attributes (its row filters' values) and, where it lacks one its role's filters read, that its statements are refused.
- * `readOnly`: `/api/state` `pageReadOnly` (MASON_UI_READ_ONLY=1) — no From…, Disable, Enable or Remove, and the page
- * says why; null on a page whose users are still its own (MASON_UI_READ_ONLY_ALLOW=users: `usersReadOnly`). Each user's
- * addresses (`from`, `mason user list --json`'s: its ranges, or null for any address) are said in their own column;
- * From… asks, in a popover as Disable does, where it connects from (`confirming` { name, verb: "from" }) — the choice
- * the add form offers, opened at its ranges now — and sends POST /api/users/<name>/from.
+ * `readOnly`: `/api/state` `pageReadOnly` (MASON_UI_READ_ONLY=1) — no Disable, Enable or Remove, its addresses said
+ * as text, and the page says why; null on a page whose users are still its own (MASON_UI_READ_ONLY_ALLOW=users:
+ * `usersReadOnly`). Each user's addresses (`from`, `mason user list --json`'s: its ranges, or null for any address) are a
+ * line under its role ("from anywhere", "from 192.0.2.0/24"), which is its From…: it asks, in a popover beside the
+ * row's actions as Disable does, where it connects from (`confirming` { name, verb: "from" }) — the choice the add form
+ * offers, opened at its ranges now — and sends POST /api/users/<name>/from.
  */
 export function renderUsers(list, confirming = null, now = Date.now(), refused = null, roles = null, readOnly = null) {
   const users = [...list.users.filter((u) => u.removedAt == null), ...list.users.filter((u) => u.removedAt != null)];
-  const why = readOnlyLine("Users are not added, disabled or removed", readOnly);
+  const why = readOnlyLine("Users are not added, changed, disabled or removed", readOnly);
   if (!users.length) return why + empty("No users yet", readOnly !== null ? `A user is the name and password psql, a BI tool or your app connects with, as ${code("mason user add <name>")} adds one.`
     : `A user is the name and password psql, a BI tool or your app connects with. Add one above, as ${code("mason user add <name>")} does: its URL, password included, is shown once.`);
   const note = (what, text) => text ? `<p class="dim">${esc(what)}: ${esc(text)}.</p>` : "";
@@ -99,7 +100,7 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
   // a Remove's or a Disable's question is a popover beside the user's actions (`pop`), never a row: no row below it moves
   const pops = [];
   const ask = askOf(confirming);
-  return why + brokenNote + panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col" class="role">Role</th><th scope="col" class="status">Status</th><th scope="col" class="from">Connects</th><th scope="col" class="added">Added</th><th scope="col" class="num last">Last used</th><th scope="col" class="act"></th></tr></thead><tbody>${users.map((u) => {
+  return why + brokenNote + panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col" class="role">Role</th><th scope="col" class="status">Status</th><th scope="col" class="added">Added</th><th scope="col" class="num last">Last used</th><th scope="col" class="act"></th></tr></thead><tbody>${users.map((u) => {
     const active = u.removedAt == null;
     const last = lastUsedText(u, list.lastUsedNote, list.requestLogDays, now);
     const lastCell = !active ? "" : u.lastUsedAt != null
@@ -125,15 +126,18 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
         : u.role === undefined ? `<span class="dim">every table</span>`
         : `${code(u.role)}${u.roleFrom === "default" ? ` <span class="dim">(default)</span>` : ""}${u.attributes ? ` <span class="dim">${esc(attributesText(u.attributes))}</span>` : ""}` +
           `${u.roleKnown === false ? ` <span class="warn">not in the roles file: its statements are refused</span>` : ""}` +
-          `${u.missingAttributes ? ` <span class="warn">${esc(`no value for ${u.missingAttributes.join(", ")}: its statements are refused`)}</span>` : ""}`}</td>` +
+          `${u.missingAttributes ? ` <span class="warn">${esc(`no value for ${u.missingAttributes.join(", ")}: its statements are refused`)}</span>` : ""}`}` +
+      // where it connects from, a line of its own under what it reads (mason user list's `from …`; none said there: any
+      // address), as the user's id is under its name — so a row stays two lines, a Disable moves no row, and the table
+      // keeps its width: no column of its own. Cut by the column, its whole the title; where the page may change it, the
+      // line is its From…, asked in a popover beside the row's actions
+      `${!active ? "" : readOnly !== null ? `<span class="from-line" title="${esc(fromText(u.from))}">${esc(fromText(u.from))}</span>`
+        : button(fromText(u.from), asking === "from" ? {} : { from: u.name }, "from-line", { disabled: asking === "from", expanded: asking === "from", title: `${fromText(u.from)}: change where ${u.name} connects from` })}</td>` +
       `<td>${!active ? status("unknown", `Removed ${stamp(u.removedAt)} UTC`) : disabled ? status("warn", disabledText(u.disabledAt)) : status("ok", "Active")}` +
       `${active && !disabled && !u.live ? ` <span class="warn">does not connect: the API key was rotated since it was added</span>` : ""}</td>` +
-      // where it connects from (mason user list's `from …`; none said there: any address)
-      `<td class="from">${active ? `<span title="${esc(fromText(u.from))}">${esc(fromText(u.from))}</span>` : ""}</td>` +
       `<td class="mono">${esc(stamp(u.addedAt))} UTC</td><td class="num">${lastCell}</td>` +
       // Queries: its statements of the last 24 hours on Observability › Queries (a removed user's too: its past)
-      `<td class="act" id="${esc(anchor)}"><a class="btn small" href="${esc(userQueriesHref(u.name))}" title="the statements ${esc(u.name)} sent in the last 24 hours">Queries</a>${!active || readOnly !== null ? "" : ` ${toggle(u, disabled, asking === "disable")} ${asking === "from" ? button("From…", {}, "small", { disabled: true, expanded: true })
-        : button("From…", { from: u.name }, "small")} ${asking === "remove" ? button("Remove", {}, "danger small", { disabled: true, expanded: true })
+      `<td class="act" id="${esc(anchor)}"><a class="btn small" href="${esc(userQueriesHref(u.name))}" title="the statements ${esc(u.name)} sent in the last 24 hours">Queries</a>${!active || readOnly !== null ? "" : ` ${toggle(u, disabled, asking === "disable")} ${asking === "remove" ? button("Remove", {}, "danger small", { disabled: true, expanded: true })
         : button("Remove", { remove: u.name }, "danger small")}`}</td></tr>`;
   }).join("")}</tbody></table>`) + pops.join("") + note("Last used", list.lastUsedNote);
 }

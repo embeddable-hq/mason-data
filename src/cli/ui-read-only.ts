@@ -102,7 +102,7 @@ export function uiReadOnlyAllowSetting(env: Readonly<Record<string, string | und
   for (const [i, item] of items.entries()) {
     const which = items.length === 1 ? "its value" : `its item ${i + 1} of ${items.length}`;
     if (item === "") return { problem: `${UI_READ_ONLY_ALLOW_SETTING}: ${which} is empty; it takes ${ALLOW_WORDS}` };
-    if (!(PAGE_AREAS as readonly string[]).includes(item)) return { problem: `${UI_READ_ONLY_ALLOW_SETTING}: ${which} is not an area${didYouMean(item, PAGE_AREAS)}; it takes ${ALLOW_WORDS}` };
+    if (!(PAGE_AREAS as readonly string[]).includes(item)) return { problem: `${UI_READ_ONLY_ALLOW_SETTING}: ${which} is not an area; it takes ${ALLOW_WORDS}${didYouMean(item, PAGE_AREAS)}` };
     const area = item as PageArea;
     if (seen.includes(area)) return { problem: `${UI_READ_ONLY_ALLOW_SETTING}: it names ${area} twice; it takes ${ALLOW_WORDS}` };
     seen.push(area);

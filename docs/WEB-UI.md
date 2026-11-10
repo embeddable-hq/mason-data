@@ -110,14 +110,17 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
 - **Users**, Connect: once for the run, where a tool connects — host, port, database and SSL mode, each with **Copy**,
   and the URL and psql line with `<user>:<password>` in place — as `mason status` says it. No user's row carries a URL:
   the card shown once when a user is added is the only place its password is copied.
-- **Users**, the list: each user's status (Active, Disabled and when, or Removed), where it connects from ("from" its
-  ranges as `mason user list` says them, or "from anywhere": `from` in `mason user list --json`), when added, when last
+- **Users**, the list: each user's role and, on a line under it, where it connects from ("from" its ranges as `mason
+  user list` says them, or "from anywhere": `from` in `mason user list --json`; cut by the column, its whole the
+  tooltip), its status (Active, Disabled and when, or Removed), when added, when last
   used, and **Queries**, its statements. A user that no longer connects is flagged with why. **Disable** asks first (in a popover, in `mason
   user disable`'s words), then runs it; a disabled user's button says **Enable** in the same width, and runs `mason user
-  enable` at once. **From…** asks where it connects from in a popover beside the row's actions, the add form's choice
-  opened at its ranges now, and sends `POST /api/users/<name>/from` (`mason user from`: the ranges, or `null` for from
-  anywhere, `--any`); the list holds still while it asks, and a refusal is said in the popover. **Remove** asks first; a
-  removed user stays listed, muted.
+  enable` at once. The "from …" line is a button: it asks where the user connects from in a popover beside the row's
+  actions, the add form's choice opened at its ranges now, and sends `POST /api/users/<name>/from` (`mason user from`:
+  the ranges, or `null` for from anywhere, `--any`); the list holds still while it asks, and a refusal is said in the
+  popover. **Remove** asks first; a removed user stays listed, muted. The table keeps its width (no column of its own),
+  fits its card in a 1280 px window, and where it scrolls (a narrower window, a phone) a row's actions stay pinned at
+  the card's right.
 - **Observability › Queries** (`#observability/queries`): the request log, and only that — who is connected, what runs
   and the range's numbers are on Usage.
 - **Queries**, the request log empty and unfiltered: its sentence, then Connect your first tool (as the Overview's).
@@ -311,12 +314,12 @@ listens, and every browser connection crosses that one ssh connection as frames 
   committed offers no Add or Remove and refuses them `409`, as without the allowance (Sync now stays).
 - **A read-only page that still manages its users: `MASON_UI_READ_ONLY_ALLOW=users`.** For a site that proxies the page
   and lets its users' changes through its own checks, `MASON_UI_READ_ONLY=1` beside it keeps the Users page's Add a
-  user (with its Connects from), **From…**, **Disable**, **Enable** and **Remove**, and the Overview's Create a user. The
+  user (with its Connects from), its "from …" line, **Disable**, **Enable** and **Remove**, and the Overview's Create a user. The
   server lets through exactly these routes, each `<name>` exactly one path segment (a user's name, encoded), never a
   prefix:
   - `POST /api/users` (Add a user);
   - `POST /api/users/<name>/disable`, `POST /api/users/<name>/enable`;
-  - `POST /api/users/<name>/from` (From…);
+  - `POST /api/users/<name>/from` (a user's "from …" line);
   - `DELETE /api/users/<name>` (Remove).
 
   Every other change of the page is refused as before — a table added, removed or synced, a statement cancelled, a

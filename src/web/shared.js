@@ -373,10 +373,10 @@ export const cards = (list) => list.length ? `<div class="cards n${list.length}"
 export const panel = (html) => `<div class="panel">${html}</div>`;
 
 /** A button: `button("Sync", { sync: "public.orders" }, "primary")` → data-sync="public.orders"; `variant` primary,
- *  danger or "" (secondary), with " small" for a compact one in a row. */
-export function button(label, data = {}, variant = "", { room = "", disabled = false, expanded = false } = {}) {
+ *  danger or "" (secondary), with " small" for a compact one in a row. `title`: its whole, where the stylesheet cuts it. */
+export function button(label, data = {}, variant = "", { room = "", disabled = false, expanded = false, title = "" } = {}) {
   const attrs = Object.entries(data).map(([k, v]) => ` data-${k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}="${esc(v)}"`).join("");
-  return `<button type="button"${variant ? ` class="${esc(variant)}"` : ""}${attrs}${room ? ` data-room="${esc(room)}"` : ""}${expanded ? ` aria-expanded="true"` : ""}${disabled ? " disabled" : ""}>${esc(label)}</button>`;
+  return `<button type="button"${variant ? ` class="${esc(variant)}"` : ""}${attrs}${room ? ` data-room="${esc(room)}"` : ""}${title ? ` title="${esc(title)}"` : ""}${expanded ? ` aria-expanded="true"` : ""}${disabled ? " disabled" : ""}>${esc(label)}</button>`;
 }
 
 /**

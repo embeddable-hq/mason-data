@@ -346,8 +346,11 @@ test("MASON_UI_READ_ONLY_ALLOW is mason serve's: tables, users or both (in eithe
     ["users,users", "it names users twice"], ["tables,users,tables", "it names tables twice"],
     ["*", "its value is not an area"], ["1", "its value is not an area"], ["tables,s3cr3t-v4lue", "its item 2 of 2 is not an area"], ["s3cr3t-v4lue", "its value is not an area"],
   ];
-  for (const [v, what] of wrong) {
-    const problem = `MASON_UI_READ_ONLY_ALLOW: ${what}; ${takes}`;
+  for (const [v, said] of wrong) {
+    // what is wrong, what it takes, then the area it is closest to — the guess last, never between the two ("?;")
+    const [what, mean] = said.split(" — ");
+    const problem = `MASON_UI_READ_ONLY_ALLOW: ${what}; ${takes}${mean === undefined ? "" : ` — ${mean}`}`;
+    assert.ok(!problem.includes("?;"), v);
     assert.deepEqual(uiReadOnlyAllowSetting({ MASON_UI_READ_ONLY: "1", MASON_UI_READ_ONLY_ALLOW: v }), { problem }, v);
     const s = serveSettings({ ...env, MASON_UI_READ_ONLY: "1", MASON_UI_READ_ONLY_ALLOW: v }, "/srv");
     assert.ok("message" in s, v);
@@ -386,7 +389,7 @@ test("MASON_UI_READ_ONLY_ALLOW is mason serve's: tables, users or both (in eithe
   // the run refuses it too: never read as nothing allowed, nor as a page that is not read-only
   const fix = "set MASON_UI_READ_ONLY_ALLOW to tables, users or tables,users beside MASON_UI_READ_ONLY=1, or unset it";
   assert.deepEqual(startSettingRefusal(p, { MASON_UI_READ_ONLY: "1", MASON_UI_READ_ONLY_ALLOW: "tables,usres" }, { serve: true }),
-    { message: `MASON_UI_READ_ONLY_ALLOW: its item 2 of 2 is not an area — did you mean \`users\`?; ${takes}`, code: "refused", fix });
+    { message: `MASON_UI_READ_ONLY_ALLOW: its item 2 of 2 is not an area; ${takes} — did you mean \`users\`?`, code: "refused", fix });
   assert.deepEqual(startSettingRefusal(p, { MASON_UI_READ_ONLY_ALLOW: "tables" }, { serve: true }), { message: alone("tables"), code: "refused", fix });
 });
 

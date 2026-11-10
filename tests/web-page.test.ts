@@ -484,8 +484,8 @@ test("the users: a user's role (mason user add --role) in its own column; one th
     // stage 1b (src/cli/roles.ts userRole): one reading as the roles file's default, one the file holds to nothing (no default:)
     { name: "dflt", id: "0000000000000003", ...at, role: "everything", roleFrom: "default" },
     { name: "bare", id: "0000000000000004", ...at, roleFrom: "none", readsNothing: true }], lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, Date.parse("2026-10-29T09:00:00.000Z"));
-  assert.match(textOf(html), /^User Role Status Connects Added Last used agent id 0000000000000001 agent Active .* old id 0000000000000002 gone not in the roles file: its statements are refused Active /);
-  assert.match(textOf(html), /dflt id 0000000000000003 everything \(default\) Active .* bare id 0000000000000004 no role, and the roles file names no default: its statements are refused Active /);
+  assert.match(textOf(html), /^User Role Status Added Last used agent id 0000000000000001 agent from anywhere Active .* old id 0000000000000002 gone not in the roles file: its statements are refused from anywhere Active /);
+  assert.match(textOf(html), /dflt id 0000000000000003 everything \(default\) from anywhere Active .* bare id 0000000000000004 no role, and the roles file names no default: its statements are refused from anywhere Active /);
 });
 
 test("the users: a user's attributes beside its role in mason user list's words; one its role's filters read and it lacks, said refused", async () => {
@@ -499,7 +499,7 @@ test("the users: a user's attributes beside its role in mason user list's words;
   const html = renderUsers({ users: [{ name: "acme", id: "0000000000000001", ...at, role: "tenant", roleFrom: "file", roleKnown: true, attributes: values },
     { name: "stale", id: "0000000000000002", ...at, role: "tenant", roleFrom: "file", roleKnown: true, attributes: { tenant: "7" }, missingAttributes: ["regions"] }],
     lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, Date.parse("2026-10-29T09:00:00.000Z"));
-  assert.match(textOf(html), /acme id 0000000000000001 tenant tenant=42, regions=\[eu, uk\] Active .* stale id 0000000000000002 tenant tenant=7 no value for regions: its statements are refused Active /);
+  assert.match(textOf(html), /acme id 0000000000000001 tenant tenant=42, regions=\[eu, uk\] from anywhere Active .* stale id 0000000000000002 tenant tenant=7 no value for regions: its statements are refused from anywhere Active /);
 });
 
 test("the users: a row each, active first then removed without Remove; Remove asks first; none is said", () => {
@@ -510,7 +510,7 @@ test("the users: a row each, active first then removed without Remove; Remove as
   lastUsedNote: null, urlNote: null, requestLogDays: 7 };
   const NOW_U = Date.parse("2026-10-28T09:15:59.000Z");
   const html = renderUsers(list, null, NOW_U);
-  assert.match(textOf(html), /User Role Status Connects Added Last used metabase id 0123456789abcdef every table Active from anywhere 2026-10-27 09:10 UTC 60 min ago Queries Disable From… Remove grafana id fedcba9876543210 every table Active does not connect: the API key was rotated since it was added from anywhere 2026-10-20 08:00 UTC not used in the last 7 days Queries Disable From… Remove old id aaaaaaaaaaaaaaaa every table Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC/);
+  assert.match(textOf(html), /User Role Status Added Last used metabase id 0123456789abcdef every table from anywhere Active 2026-10-27 09:10 UTC 60 min ago Queries Disable Remove grafana id fedcba9876543210 every table from anywhere Active does not connect: the API key was rotated since it was added 2026-10-20 08:00 UTC not used in the last 7 days Queries Disable Remove old id aaaaaaaaaaaaaaaa every table Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC/);
   // the last use is an age with its UTC time in a title (mason user list's words); status is a dot and a word
   assert.match(html, /<td class="num"><span title="2026-10-28 08:15 UTC">60 min ago<\/span><\/td>/);
   assert.deepEqual([...html.matchAll(/<span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`),
@@ -528,8 +528,8 @@ test("the users: a row each, active first then removed without Remove; Remove as
   assert.match(renderUsers({ users: [] }, null), /^<div class="empty">/);
   // last use unknown, or the URL unknown: the note why, as mason user list says it
   const unknown = textOf(renderUsers({ ...list, lastUsedNote: "unknown: the request log could not be read (busy)", urlNote: "Mason is not running" }, null, NOW_U));
-  assert.match(unknown, /Active from anywhere 2026-10-27 09:10 UTC 60 min ago/);
-  assert.match(unknown, /Active does not connect: the API key was rotated since it was added from anywhere 2026-10-20 08:00 UTC unknown /);
+  assert.match(unknown, /Active 2026-10-27 09:10 UTC 60 min ago/);
+  assert.match(unknown, /Active does not connect: the API key was rotated since it was added 2026-10-20 08:00 UTC unknown /);
   // the URL is the Connect panel's, never a row's: its note goes with it
   assert.match(unknown, /Last used: unknown: the request log could not be read \(busy\)\.$/);
 });
@@ -544,8 +544,8 @@ test("the users while the roles file cannot be read: mason user list's tip, word
   const NOW_R = Date.parse("2026-10-29T09:00:00.000Z");
   const problem = "mason/roles.yml: it is not YAML: Flow sequence in block collection must be sufficiently indented and end with a ] at line 1, column 18";
   const html = renderUsers(list, null, NOW_R, null, { file: "mason/roles.yml", roles: [], problem, default: null, all: [] });
-  assert.ok(textOf(html).startsWith(`${rolesProblemText("mason/roles.yml", problem)} User Role Status Connects Added Last used `), textOf(html));
-  assert.match(textOf(html), /metabase id 0123456789abcdef refused: the roles file cannot be read Active from anywhere 2026-10-27 .* agent id 0000000000000001 refused: the roles file cannot be read Active from anywhere 2026-10-29/);
+  assert.ok(textOf(html).startsWith(`${rolesProblemText("mason/roles.yml", problem)} User Role Status Added Last used `), textOf(html));
+  assert.match(textOf(html), /metabase id 0123456789abcdef refused: the roles file cannot be read from anywhere Active 2026-10-27 .* agent id 0000000000000001 refused: the roles file cannot be read from anywhere Active 2026-10-29/);
   // a readable file: nothing said; the page's own roles are the state's (/api/state roles), read beside the users
   assert.doesNotMatch(textOf(renderUsers(list, null, NOW_R, null, { file: "mason/roles.yml", roles: ["agent"], problem: null, default: null, all: [] })), /cannot be read/);
   assert.doesNotMatch(textOf(renderUsers(list, null, NOW_R, null, null)), /cannot be read/);
@@ -685,7 +685,7 @@ test("a read-only page (pageReadOnly): no page writes a control that sends a cha
   // viewing is unchanged: the tables, the users, the statement running and where to connect are all there
   for (const said of ["public.customers", "public.accounts", "metabase", "SELECT count(*) FROM orders", "connect-psql"]) assert.ok(shown.includes(said), said);
   assert.ok(textOf(shown).includes(`Tables are not added, removed or synced from this page: ${why}.`));
-  assert.ok(textOf(shown).includes(`Users are not added, disabled or removed from this page: ${why}.`));
+  assert.ok(textOf(shown).includes(`Users are not added, changed, disabled or removed from this page: ${why}.`));
 });
 
 test("a read-only page: no add, create or write link anywhere — the Connect panel's Create a user on the Overview and on Queries' empty log included; the Overview and Usage say why; unset, all as before", async () => {
@@ -703,7 +703,7 @@ test("a read-only page: no add, create or write link anywhere — the Connect pa
   }
   // the Overview and Usage say why their controls are missing, as Tables and Users do; unset, none says it
   const lines = new Map([["status", `Nothing is shared, added or created from this page: ${why}.`], ["usage", `Statements are not cancelled from this page: ${why}.`],
-    ["tables", `Tables are not added, removed or synced from this page: ${why}.`], ["users", `Users are not added, disabled or removed from this page: ${why}.`]]);
+    ["tables", `Tables are not added, removed or synced from this page: ${why}.`], ["users", `Users are not added, changed, disabled or removed from this page: ${why}.`]]);
   for (const [id, line] of lines) {
     assert.ok(textOf(shown.byPage.get(id)!).includes(line), `${id}: ${line}`);
     assert.match(shown.byPage.get(id)!, new RegExp(`<p class="count">${line.split(":")[0]!}`), `${id}: in the Tables and Users lines' style`);
@@ -761,7 +761,7 @@ test("a read-only page that still edits its tables (pageReadOnlyAllow: [tables])
   for (const data of buttons) assert.ok(data.length > 0 && data.every((d) => VIEW_BUTTONS.test(d) || TABLE_BUTTONS.test(d)), `a button that may send a change: ${data.join(" ")}`);
   assert.ok(!/Create a user|Add a user|Connect from anywhere|<a class="btn[^"]*" href="#users"/.test(shown.all), "a lead to a user or a share");
   // each page says why it offers no change, the Overview now without the tables
-  for (const [id, line] of [["status", `No user is created and nothing is shared from this page: ${why}.`], ["users", `Users are not added, disabled or removed from this page: ${why}.`],
+  for (const [id, line] of [["status", `No user is created and nothing is shared from this page: ${why}.`], ["users", `Users are not added, changed, disabled or removed from this page: ${why}.`],
     ["usage", `Statements are not cancelled from this page: ${why}.`]] as const) assert.ok(textOf(shown.byPage.get(id)!).includes(line), `${id}: ${line}`);
   assert.ok(!textOf(shown.byPage.get("status")!).includes("Nothing is shared, added or created"));
   // the checklist sends a person to add a table, never to create a user
@@ -1183,7 +1183,7 @@ test("the app: a poll writes the shown page and when, reading only its endpoints
   await app.poll();
   // a page shown is read again whatever its rates (show marks every read stale): the shell's state with it
   assert.deepEqual(run.asked, ["GET api/users?lastUsed=1", "GET api/state"]);
-  assert.match(textOf(app.view().users!), /^User Role Status Connects Added Last used metabase id 0123456789abcdef every table Active from anywhere 2026-10-27 09:10 UTC not used in the last \? days Queries Disable From… Remove$/);
+  assert.match(textOf(app.view().users!), /^User Role Status Added Last used metabase id 0123456789abcdef every table from anywhere Active 2026-10-27 09:10 UTC not used in the last \? days Queries Disable Remove$/);
   app.show("status");
   // the run stops
   run.answers.clear();
@@ -1312,8 +1312,8 @@ test("the users: a disabled user says Disabled and when, as mason user list does
   assert.deepEqual([...html.matchAll(/<span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`),
     ["ok Active", "warn Disabled 2026-10-28 09:00 UTC"]);
   assert.ok(!/rotated/.test(html), "a disabled user is said disabled, not as one the key's rotation stopped");
-  assert.match(html, /<td class="act" id="act-users-metabase"><a class="btn small" href="#observability\/queries\?user=metabase&amp;range=24h" title="the statements metabase sent in the last 24 hours">Queries<\/a> <button type="button" class="small" data-disable="metabase" data-room="Disable">Disable<\/button> <button type="button" class="small" data-from="metabase">From…<\/button> <button type="button" class="danger small" data-remove="metabase">Remove<\/button><\/td>/);
-  assert.match(html, /<td class="act" id="act-users-grafana"><a class="btn small" href="#observability\/queries\?user=grafana&amp;range=24h" title="the statements grafana sent in the last 24 hours">Queries<\/a> <button type="button" class="small" data-enable="grafana" data-room="Disable">Enable<\/button> <button type="button" class="small" data-from="grafana">From…<\/button> <button type="button" class="danger small" data-remove="grafana">Remove<\/button><\/td>/);
+  assert.match(html, /<td class="act" id="act-users-metabase"><a class="btn small" href="#observability\/queries\?user=metabase&amp;range=24h" title="the statements metabase sent in the last 24 hours">Queries<\/a> <button type="button" class="small" data-disable="metabase" data-room="Disable">Disable<\/button> <button type="button" class="danger small" data-remove="metabase">Remove<\/button><\/td>/);
+  assert.match(html, /<td class="act" id="act-users-grafana"><a class="btn small" href="#observability\/queries\?user=grafana&amp;range=24h" title="the statements grafana sent in the last 24 hours">Queries<\/a> <button type="button" class="small" data-enable="grafana" data-room="Disable">Enable<\/button> <button type="button" class="danger small" data-remove="grafana">Remove<\/button><\/td>/);
   assert.equal(popsOf(html).length, 0, "Enable asks nothing");
   const asking = renderUsers(list, { name: "metabase", verb: "disable" }, NOW_U);
   assert.equal(textOf(popOf(asking, "act-users-metabase")), "Disable metabase? It connects no more until mason user enable metabase, with the same password, and the sessions it holds end at their next statement. Disable metabase Cancel");
@@ -1349,7 +1349,7 @@ test("the app: Disable asks first and its confirm sends POST api/users/<name>/di
   assert.equal(await a.confirmDisable("metabase"), true);
   assert.deepEqual(run.asked, ["POST api/users/metabase/disable", "GET api/users?lastUsed=1"]);
   assert.equal(app.model.confirming, null);
-  assert.match(textOf(app.view().users!), /Disabled 2026-10-28 09:00 UTC .* Enable From… Remove/);
+  assert.match(textOf(app.view().users!), /Disabled 2026-10-28 09:00 UTC .* Enable Remove/);
   // Enable: no question; refused, said in a popover beside the user's actions until dismissed
   run.answers.set("POST api/users/metabase/enable", () => new Response(JSON.stringify({ error: "no", failure: { code: "failed", message: "the list of users could not be changed: busy", next: [] } }), { status: 500 }));
   run.asked.length = 0;
@@ -1361,13 +1361,13 @@ test("the app: Disable asks first and its confirm sends POST api/users/<name>/di
   run.asked.length = 0;
   assert.equal(await a.enableUser("metabase"), true);
   assert.deepEqual(run.asked, ["POST api/users/metabase/enable", "GET api/users?lastUsed=1"]);
-  assert.match(textOf(app.view().users!), /Active .* Disable From… Remove$/);
+  assert.match(textOf(app.view().users!), /Active .* Disable Remove$/);
   assert.equal(popsOf(app.view().users!).length, 0, "the refusal went with the answer");
 });
 
 // ------------------------------------------------------------------ where a user connects from (mason user add --from, mason user from; issue 813)
 
-test("the users: each user's addresses in its own column, as mason user says them — from its ranges, or from anywhere; a removed user's none", async () => {
+test("the users: each user's addresses on a line under its role, as mason user says them — from its ranges, or from anywhere; the line is its From…; a removed user's none; read-only, the words alone", async () => {
   const renderUsers = fn<[unknown, unknown, number?, unknown?, unknown?, unknown?], string>("renderUsers");
   const { rangesText } = await import("../src/cli/user.ts");
   const page = await import(path.join(WEB, "pages", "users.js") as string) as { rangesText: (f: unknown) => string; fromText: (f: unknown) => string };
@@ -1376,11 +1376,18 @@ test("the users: each user's addresses in its own column, as mason user says the
   const list = { users: [{ name: "looker", id: "0000000000000001", ...at, removedAt: null, from: ["192.0.2.0/24", "2001:db8::/32"] }, { name: "metabase", id: "0000000000000002", ...at, removedAt: null, from: null },
     { name: "old", id: "0000000000000003", ...at, removedAt: "2026-10-28T09:00:00.000Z", from: ["192.0.2.0/24"] }], lastUsedNote: null, urlNote: null, requestLogDays: 7 };
   const html = renderUsers(list, null, Date.parse("2026-10-29T09:00:00.000Z"));
-  assert.match(textOf(html), /^User Role Status Connects Added Last used looker id 0000000000000001 every table Active from 192\.0\.2\.0\/24, 2001:db8::\/32 2026-10-27 09:10 UTC .* Queries Disable From… Remove metabase id 0000000000000002 every table Active from anywhere 2026-10-27 /);
-  assert.match(html, /<td class="from"><span title="from 192\.0\.2\.0\/24, 2001:db8::\/32">from 192\.0\.2\.0\/24, 2001:db8::\/32<\/span><\/td>/, "cut by the column, its whole the title");
-  assert.match(html, /<tr class="removed">.*?<td class="from"><\/td>/s, "a removed user connects from nowhere: nothing said");
-  assert.ok(!/data-from="old"/.test(html), "a removed user has no From…");
-  assert.match(html, /<button type="button" class="small" data-from="looker">From…<\/button>/);
+  assert.match(textOf(html), /^User Role Status Added Last used looker id 0000000000000001 every table from 192\.0\.2\.0\/24, 2001:db8::\/32 Active 2026-10-27 09:10 UTC .* Queries Disable Remove metabase id 0000000000000002 every table from anywhere Active 2026-10-27 /);
+  // the line is its From…, its whole the title (the column cuts it); no column of its own, no button in the actions
+  assert.match(html, /<span class="dim">every table<\/span><button type="button" class="from-line" data-from="looker" title="from 192\.0\.2\.0\/24, 2001:db8::\/32: change where looker connects from">from 192\.0\.2\.0\/24, 2001:db8::\/32<\/button><\/td>/);
+  assert.equal([...html.matchAll(/<th scope="col"/g)].length, 6, "the columns as before");
+  assert.ok(![...html.matchAll(/<td class="act"[^>]*>(.*?)<\/td>/gs)].some((m) => m[1]!.includes("data-from")), "the actions as before");
+  assert.ok(!/data-from="old"/.test(html) && !/<tr class="removed">.*?from-line/s.test(html), "a removed user connects from nowhere: nothing said");
+  // asking: its line held, disabled, as Disable is
+  assert.match(renderUsers(list, { name: "looker", verb: "from" }), /<button type="button" class="from-line" title="[^"]*" aria-expanded="true" disabled>from 192\.0\.2\.0\/24, 2001:db8::\/32<\/button>/);
+  // read-only: the words alone, never a control
+  const ro = renderUsers(list, null, Date.parse("2026-10-29T09:00:00.000Z"), null, null, "the web page is read-only here (MASON_UI_READ_ONLY=1)");
+  assert.match(ro, /<span class="from-line" title="from anywhere">from anywhere<\/span>/);
+  assert.ok(!/data-from=/.test(ro));
 });
 
 test("the users: From… asks where the user connects from in a popover beside its actions, as Disable asks, opened at its ranges now; no row inserted", () => {
@@ -1399,7 +1406,7 @@ test("the users: From… asks where the user connects from in a popover beside i
   assert.match(pops[0]!.html, /data-pop-close/, "Escape presses its Cancel");
   assert.ok(!/pattern=|required/.test(pops[0]!.html), "the run judges each range, never the page");
   // its From… held where it was while it asks; no row and no cell added
-  assert.match(asking, /<button type="button" class="small" aria-expanded="true" disabled>From…<\/button>/);
+  assert.match(asking, /<button type="button" class="from-line" title="[^"]*" aria-expanded="true" disabled>from 192\.0\.2\.0\/24, 2001:db8::\/32<\/button>/, "its line held while it asks");
   assert.equal(textOf(withoutPops(asking)), textOf(renderUsers(list, null)), "the rows say what they said");
   // a user from anywhere opens at From anywhere, its box empty
   const any = popOf(renderUsers(list, { name: "metabase", verb: "from" }), "act-users-metabase");
@@ -1474,14 +1481,14 @@ test("the app: From… sends POST api/users/<name>/from — the ranges, or null 
   assert.deepEqual(run.asked, [`POST api/users/looker/from ${JSON.stringify({ from: ["198.51.100.0/24", "2001:db8::/32"] })}`, "GET api/users?lastUsed=1"]);
   assert.equal(app.model.confirming, null);
   assert.equal(popsOf(app.view().users!).length, 0);
-  assert.match(textOf(app.view().users!), /Active from 198\.51\.100\.0\/24, 2001:db8::\/32 /);
+  assert.match(textOf(app.view().users!), /from 198\.51\.100\.0\/24, 2001:db8::\/32 Active /);
   // From anywhere: null, as mason user from looker --any
   run.answers.set("GET api/users?lastUsed=1", answer({ users: [{ ...looker, from: null }] }));
   run.asked.length = 0;
   users.click({ from: "looker" }, null, {});
   await users.submit({ id: "user-from", elements: { user: { value: "looker" }, connects: { value: "any" }, from: { value: "198.51.100.0/24" } } });
   assert.equal(run.asked[0], `POST api/users/looker/from ${JSON.stringify({ from: null })}`);
-  assert.match(textOf(app.view().users!), /Active from anywhere /);
+  assert.match(textOf(app.view().users!), /from anywhere Active /);
   // refused (a range the run cannot read): the run's words in a popover beside the user's actions, until dismissed
   const failure = { code: "usage", message: "mason user from looker: 192.0.2.0/33: a prefix length of 0 to 32", next: [] };
   run.answers.set("POST api/users/looker/from", () => new Response(JSON.stringify({ error: failure.message, failure }), { status: 400 }));
@@ -1541,7 +1548,7 @@ test("a read-only page that changes its tables alone (pageReadOnlyAllow: [tables
   const shown = await pageByPage({ ...CATALOG_STATE, pageReadOnly: why, pageReadOnlyAllow: ["tables"] });
   const users = shown.byPage.get("users")!;
   for (const control of ['id="add-user"', 'name="connects"', "data-from=", "data-disable=", "data-enable=", "data-remove="]) assert.ok(!users.includes(control), control);
-  assert.ok(textOf(users).includes(`Users are not added, disabled or removed from this page: ${why}.`));
+  assert.ok(textOf(users).includes(`Users are not added, changed, disabled or removed from this page: ${why}.`));
 });
 
 test("the app: Add sends POST api/pick, says what was added beside its table's actions, and reads the state again: the copy shows starting", async () => {
@@ -2556,7 +2563,7 @@ test("the users: read with their last use, every 30 s, the state beside them; Co
   assert.deepEqual(await asked(), [], "not at the 2 s poll");
   t += 28_000;
   assert.deepEqual(await asked(), [U, "GET api/state"], "then every 30 s, the state with them (the Connect panel's)");
-  assert.match(textOf(app.view().users!), /metabase id 0123456789abcdef every table Active from anywhere 2026-10-27 09:10 UTC never Queries Disable From… Remove old id aaaaaaaaaaaaaaaa every table Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC Queries$/);
+  assert.match(textOf(app.view().users!), /metabase id 0123456789abcdef every table from anywhere Active 2026-10-27 09:10 UTC never Queries Disable Remove old id aaaaaaaaaaaaaaaa every table Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC Queries$/);
   // Copy (the Connect panel's): the page's own handler writes the text as shown, and keeps it nowhere
   const written: string[] = [];
   const doc = { getElementById: (id: string) => id === "users-connect-host" ? { textContent: "127.0.0.1" } : null };
@@ -4326,7 +4333,18 @@ test("layout guard: a click moves no row and no column — a question, a form an
   assert.match(rule("table.catalog"), /table-layout: fixed; width: 100%; min-width: \d+px/);
   // the users' too: Disable says "Disabled <when>", wider than Active, and must widen no column (found in the browser)
   assert.match(rule("table.users"), /table-layout: fixed; width: 100%; min-width: \d+px/);
-  for (const c of ["status", "from", "added", "last", "act"]) assert.match(rule(`table.users th.${c}`), /width: \d+px/, `the users' ${c} column has its width`);
+  for (const c of ["status", "added", "last", "act"]) assert.match(rule(`table.users th.${c}`), /width: \d+px/, `the users' ${c} column has its width`);
+  // THE USERS FIT THEIR CARD AT A LAPTOP'S WIDTH (PR 820's review: a column and a button more scrolled the table 182 px at
+  // 1280, its actions off the card): its least width at most 960 px, and its fixed columns leave User and Role 100 px each
+  // in the ~998 px card of a 1280 px window (measured in Chromium: 110 px each)
+  const px = (sel: string) => Number(/width: (\d+)px/.exec(rule(sel))![1]);
+  assert.ok(Number(/min-width: (\d+)px/.exec(rule("table.users"))![1]) <= 960, "the users' least width");
+  assert.ok(["status", "added", "last", "act"].reduce((s, c) => s + px(`table.users th.${c}`), 0) + 2 * 100 <= 998, "User and Role keep their room at 1280");
+  // where it scrolls (a narrower window, a phone), a row's actions stay pinned at the card's right, and a name never runs into its Role
+  assert.match(rule("table.users td.act"), /position: sticky; right: 0/);
+  const phone = css.slice(css.lastIndexOf("@media (max-width: 640px)", css.indexOf("  table.users { display: table; }")));
+  assert.ok(css.includes("  table.users { display: table; }") && phone.indexOf("table.users { display: table; }") < phone.indexOf("\n}"), "on a phone the card scrolls, so the actions pin");
+  assert.match(rule('table.users th[scope="row"]'), /overflow: hidden/);
   const heads = [...html.matchAll(/<th scope="col" class="([^"]+)">/g)].map((m) => m[1]!.split(" ").pop()!);
   assert.deepEqual(heads, ["name", "state", "rows", "key", "last", "size", "act"]);
   for (const c of heads.filter((x) => x !== "name")) assert.match(rule(`table.catalog th.${c}`), /width: \d+px/, `the ${c} column has its width`);
