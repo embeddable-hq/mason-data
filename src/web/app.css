@@ -633,6 +633,14 @@ table.users td { overflow: hidden; text-overflow: ellipsis; }
 #page-queries table.requests td.id { white-space: nowrap; }
 #page-queries table.requests td.id summary { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg); }
 #page-queries table.requests td.id details { margin: 0; }
+/* the statement's toggle beside its two lines (issue 816): the id's +/− drawn the same, the one open state both say;
+   its glyph is one width open or closed, so a click moves no column */
+#page-queries table.requests .stmt-line { display: flex; align-items: flex-start; gap: 6px; }
+#page-queries table.requests .stmt-line > code.stmt { flex: 0 1 auto; min-width: 0; }
+button.expand { all: unset; box-shadow: none; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-top: 2px;
+  border: 1px solid currentColor; color: var(--muted); font-family: var(--font-mono); font-size: 11px; line-height: 1; font-weight: 700; cursor: pointer; }
+button.expand:hover { color: var(--fg); }
+button.expand:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #page-queries table.requests td.when { white-space: nowrap; color: var(--muted); }
 #page-queries .err { margin-top: 2px; font-size: var(--text-xs); color: var(--bad); overflow-wrap: anywhere; }
 #page-queries tr.detail > td { background: var(--sunken); }
