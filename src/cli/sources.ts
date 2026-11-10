@@ -610,10 +610,28 @@ export function rereadSources(prev: RunSources, read: ProjectSource | Failure, r
  * add put a table's `password`, `deploy_key_content` and `warehouse_private_key` into a copy anyone with a user's
  * password can query, with no warning). By name alone — the database says nothing about a column's sensitivity — so the
  * words are credentials' own, and a suffix that names an identifier or a time (`token_id`, `secret_count`) is not one.
+ * A name's words are read however it is written (issue 797: an ORM's `passwordHash`, `apiKey`, `API_TOKEN` were synced
+ * unflagged): split at `_`, `-` or any other character but a letter or digit, and where a lowercase letter or digit
+ * meets an uppercase one or an acronym ends (`APIKey` → api, key; `tokenIDs` → token, ids), then compared in lowercase.
+ * This one function decides it: `mason add`'s `exclude:`, `mason tables`' note and its `--json` `secret` read it.
  */
-export const SECRET_WORDS = /(^|_)(password|passwd|pwd|secret|secrets|token|tokens|api_key|apikey|access_key|secret_key|private_key|ssh_key|credential|credentials|salt)(_|$)|_key_content$/;
+const SECRET_WORD = new Set(["password", "passwd", "pwd", "secret", "secrets", "token", "tokens", "apikey", "credential", "credentials", "salt"]);
+/** two words in a row that name a secret: `api_key`, `apiKey`, `API_KEY` */
+const SECRET_PAIR = new Set(["api key", "access key", "secret key", "private key", "ssh key"]);
+/** a last word (or the last two) naming an identifier, a count or a time: `token_id`, `secretCount`, `salt_hash_algo` —
+ *  at the name's very end, so `token_id_` stays one (fail closed, as before issue 797) */
+const NOT_SECRET_LAST = new Set(["id", "ids", "at", "count", "type", "name", "kind"]);
+/** a column name's words, lowercase: an acronym (a trailing `s` its plural), a word with its first letter capital or not, or digits */
+export function nameWords(column: string): string[] {
+  return (column.match(/[A-Z]{2,}s?(?![a-z])|[A-Z]?[a-z0-9]+|[A-Z0-9]+/g) ?? []).map((w) => w.toLowerCase());
+}
 export function looksSecret(column: string): boolean {
-  return SECRET_WORDS.test(column) && !/_(id|ids|at|count|type|name|kind|hash_algo)$/.test(column);
+  const w = nameWords(column);
+  const n = w.length;
+  const secret = w.some((x, i) => SECRET_WORD.has(x) || (i > 0 && SECRET_PAIR.has(`${w[i - 1]} ${x}`))) ||
+    (n >= 2 && w[n - 2] === "key" && w[n - 1] === "content" && (n >= 3 || !/^key/i.test(column)));  // something before it: `deploy_key_content`, never `key_content`
+  const exempt = n >= 2 && /[A-Za-z0-9]$/.test(column) && (NOT_SECRET_LAST.has(w[n - 1]!) || (n >= 3 && w[n - 2] === "hash" && w[n - 1] === "algo"));
+  return secret && !exempt;
 }
 
 /**

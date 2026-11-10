@@ -1137,9 +1137,10 @@ const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--inclu
   sync: is replication is written sync: poll 5m and said. A table of tens of millions of rows set to poll more often
   than every minute is warned of, with an estimate of what each poll costs your database.
 
-  A column that looks like a secret (password, token, api_key, private_key, …) is left out unless named, and said:
-  it is written as exclude: [password_hash], since anyone with a user's password can read every synced column. Name
-  one with --columns or --include to have it.
+  A column that looks like a secret (password, token, api_key, private_key, …, its words read however the name is
+  written: passwordHash, apiKey, API_TOKEN) is left out unless named, and said: it is written as
+  exclude: [password_hash], since anyone with a user's password can read every synced column. Name one with --columns
+  or --include to have it.
 
   With Mason running the first sync starts at once; mason wait returns when it is done and the table is served. Before
   mason start (mason init && mason add orders && mason start) the entry is written, checked against the database as

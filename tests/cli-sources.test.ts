@@ -326,6 +326,40 @@ test("what looks like a secret: credentials' own words, never an identifier or a
   }
 });
 
+// ISSUE 797: the same words however a name is written — an ORM's camelCase and PascalCase, UPPER_SNAKE, kebab — and the
+// same identifier and time suffixes exempt in each form.
+test("what looks like a secret reads a name's words in any case: passwordHash, apiKey, API_TOKEN, Password; tokenId, apiKeyName are not", () => {
+  const forms: Record<string, (w: string[]) => string> = {
+    snake: (w) => w.join("_"),
+    camel: (w) => w.map((x, i) => i === 0 ? x : x[0]!.toUpperCase() + x.slice(1)).join(""),
+    pascal: (w) => w.map((x) => x[0]!.toUpperCase() + x.slice(1)).join(""),
+    upper: (w) => w.join("_").toUpperCase(),
+    kebab: (w) => w.join("-"),
+    acronym: (w) => w.map((x) => x === "api" || x === "ssh" ? x.toUpperCase() : x[0]!.toUpperCase() + x.slice(1)).join(""),
+  };
+  const secrets = [["password"], ["passwd"], ["pwd"], ["secret"], ["secrets"], ["token"], ["tokens"], ["apikey"], ["credential"], ["credentials"], ["salt"],
+    ["api", "key"], ["access", "key"], ["secret", "key"], ["private", "key"], ["ssh", "key"], ["deploy", "key", "content"]];
+  const exempt = [["id"], ["ids"], ["at"], ["count"], ["type"], ["name"], ["kind"], ["hash", "algo"]];
+  for (const [form, write] of Object.entries(forms)) {
+    for (const s of secrets) {
+      // `…_key_content` is a secret at the name's end only, as main read it
+      const around = s.at(-1) === "content" ? [s, ["user", ...s]] : [s, ["hashed", ...s], [...s, "hash"], ["user", ...s, "value"]];
+      for (const w of around) assert.ok(S.looksSecret(write(w)), `${form}: ${write(w)} looks like a secret`);
+      for (const e of exempt) assert.ok(!S.looksSecret(write([...s, ...e])), `${form}: ${write([...s, ...e])} names an identifier or a time, not a secret`);
+    }
+  }
+  for (const c of ["passwordHash", "hashedPassword", "apiKey", "APIKey", "API_KEY", "api-key", "accessToken", "refreshToken", "Password", "API_TOKEN", "SSHKey",
+    "clientSecret", "oauth2Token", "isSecret"]) assert.ok(S.looksSecret(c), `${c} looks like a secret`);
+  // near misses: a secret word inside another word, a plural the rule never named, a word that only begins like one
+  for (const c of ["tokenId", "tokenID", "tokenIDs", "secretCount", "passwordType", "apiKeyName", "saltHashAlgo", "pwdChangedAt", "accessKeyId", "tokenizer",
+    "Tokenizer", "TOKENIZER", "passwords", "secretary", "Secretary", "salary", "keyboard", "monkey", "apiVersion", "API_VERSION", "keyContent", "key_content",
+    "primaryKey", "cacheKey", "userKey", "displayName"]) assert.ok(!S.looksSecret(c), `${c} does not`);
+  // at the name's very end only: a separator after a suffix is no identifier (fail closed, as main read it)
+  assert.ok(S.looksSecret("token_id_"));
+  assert.deepEqual(S.nameWords("APIKeyIDs"), ["api", "key", "ids"]);
+  assert.deepEqual(S.nameWords("user_PasswordHash-v2"), ["user", "password", "hash", "v2"]);
+});
+
 test("a key: must tell the rows apart as the database enforces it: NOT NULL columns, over a unique index — else refused at its key", () => {
   // the review of the sources file: a key with duplicates failed the copy as "Mason bug", retried for ever,
   // and duplicates after the copy made the poll's update and delete by key change both rows
