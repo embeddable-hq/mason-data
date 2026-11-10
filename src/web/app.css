@@ -303,6 +303,9 @@ label.tick code { overflow-wrap: normal; }
   .cards.n6 { grid-template-columns: repeat(3, 1fr); }
   .cards.n5 { grid-template-columns: repeat(6, 1fr); } .cards.n5 > * { grid-column: span 2; } .cards.n5 > :nth-child(n+4) { grid-column: span 3; }
 }
+/* seven (Mason's six and the host's card): four over three on a wide screen (a twelve-column grid), and below it as
+   auto-fit lays them, the odd last one spanning on a phone */
+@media (min-width: 1100px) { .cards.n7 { grid-template-columns: repeat(12, 1fr); } .cards.n7 > * { grid-column: span 3; } .cards.n7 > :nth-child(n+5) { grid-column: span 4; } }
 .card { background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-4); min-width: 0;
   display: flex; flex-direction: column; gap: var(--space-1); }
 .card-label { margin: 0; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
@@ -357,6 +360,15 @@ table.errors td { overflow-wrap: anywhere; }
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-1) var(--space-4); margin: 0; font-size: var(--text-sm); }
 .facts dt { color: var(--muted); }
 .facts dd { margin: 0; overflow-wrap: anywhere; font-family: var(--font-mono); }
+/* a host's view and card (src/web/host-view.js): its sections in the page's own look, its strings text */
+.host-section { padding: var(--space-4); overflow-x: visible; }
+.host-section h3 { margin: 0 0 var(--space-3); }
+.host-section table.facts-table { margin: 0 0 var(--space-3); }
+.host-text { white-space: pre-line; overflow-wrap: anywhere; }
+.host-links { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-2) 0 0; }
+.host-card .facts { margin-top: var(--space-1); }
+.host-card .host-heading { margin-top: var(--space-2); text-transform: uppercase; letter-spacing: 0.08em; }
+.host-card .host-failed .mark { color: var(--bad); }
 tr.warn th, tr.warn td { color: var(--warn); }
 
 /* A COPY'S BAR (copyBar, src/web/pages/status.js): a thin rounded track and a solid fill to the share, its % at the end.

@@ -7,7 +7,9 @@
  *     goes to that URL in the same tab; so does every link of Mason's own into that view (the Overview's "Create a
  *     user", a card's link), and opening the view's hash (`#users`) goes there too (src/web/app.js `retarget`, `leave`).
  *   - `MASON_UI_NAV_LINKS` ADDS THE HOST'S OWN LINKS, a JSON list of at most `NAV_LINKS_MAX` `{ "label", "url" }`, shown
- *     as a group of their own at the sidebar's foot, in the same tab.
+ *     as a group of their own at the sidebar's foot, in the same tab — or `{ "label", "view" }`, a HOST VIEW: a path
+ *     relative to the page's own address whose JSON the page renders inside itself, at its hash `#host/<n>` (n the
+ *     entry's place in the list; src/cli/ui-host-view.ts `viewPath` reads the path). Exactly one of `url` and `view`.
  *
  * Every URL and label is read by the link back's ONE reading (src/cli/ui-back-link.ts `linkUrl`, `linkLabel`): a path
  * from the host's root or an `https://` / `http://` URL, printable ASCII, no user or password, at most 2048 characters;
@@ -22,6 +24,7 @@
  */
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { linkLabel, linkUrl, type PageLink } from "./ui-back-link.ts";
+import { viewPath } from "./ui-host-view.ts";
 
 /**
  * THE PAGE'S ADDRESSES, as its router reads them (src/web/routes.js, the one list: the page imports it too), so what a
@@ -54,11 +57,19 @@ export const NAV_LINKS_TEXT_MAX = 16_384;
 export const NAV_SETTINGS: readonly string[] = [...NAV_ITEMS.map((i) => i.setting), UI_NAV_LINKS_SETTING];
 const NAV_PREFIX = "MASON_UI_NAV_";
 
-/** What `/api/state` `pageNav` says, and the page renders: the items replaced (each its URL), the host's links. */
-export interface PageNav { items: Partial<Record<NavItem, string>>; links: PageLink[] }
+/** A host's view in the sidebar: its label, and the path relative to the page's address the page reads it from. */
+export interface HostView { label: string; view: string }
+/** An entry of the host's links: a link elsewhere, or a view the page renders. */
+export type NavLink = PageLink | HostView;
+/** What `/api/state` `pageNav` says, and the page renders: the items replaced (each its URL), the host's links and views. */
+export interface PageNav { items: Partial<Record<NavItem, string>>; links: NavLink[] }
 
 /** An example of the list, said in every problem with it. */
 const EXAMPLE = `[{"label":"Billing","url":"/billing"}]`;
+/** What an entry is, said in every problem with its keys. */
+const SHAPE = `{"label": …, "url": …} or {"label": …, "view": …}`;
+/** The keys an entry takes. */
+const ENTRY_KEYS = ["label", "url", "view"];
 
 /** The nth, as a problem counts a key's place in its entry. */
 const nth = (n: number): string => `${n}${n % 100 >= 11 && n % 100 <= 13 ? "th" : ["th", "st", "nd", "rd"][n % 10] ?? "th"}`;
@@ -101,12 +112,12 @@ function writtenKeys(text: string): Map<number, string[]> {
 function keyProblems(entry: string, written: readonly string[], own: readonly string[]): string[] {
   const distinct = [...new Set(written)];
   // the reading above and JSON.parse disagree on what the keys are: refused, never guessed (fail closed)
-  if (distinct.length !== own.length || distinct.some((k) => !own.includes(k))) return [`${entry} could not be read key by key: write it as {"label": …, "url": …}`];
+  if (distinct.length !== own.length || distinct.some((k) => !own.includes(k))) return [`${entry} could not be read key by key: write it as ${SHAPE}`];
   const problems: string[] = [];
   for (const k of distinct) {
     const places = written.flatMap((w, i) => w === k ? [i + 1] : []);
-    const known = k === "label" || k === "url";
-    if (!known) problems.push(`${entry} has a key a link does not take (its ${nth(places[0]!)})${didYouMean(k, ["label", "url"])}: a link is {"label": …, "url": …}`);
+    const known = ENTRY_KEYS.includes(k);
+    if (!known) problems.push(`${entry} has a key a link does not take (its ${nth(places[0]!)})${didYouMean(k, ENTRY_KEYS)}: a link is ${SHAPE}`);
     if (places.length > 1) {
       problems.push(`${entry} has ${known ? `"${k}"` : "a key"} ${places.length === 2 ? "twice" : `${places.length} times`} (its ${places.map(nth).join(", ")}), ` +
         "and JSON keeps only the last: write each key once");
@@ -115,8 +126,8 @@ function keyProblems(entry: string, written: readonly string[], own: readonly st
   return problems;
 }
 
-/** The host's links, or every problem with them. */
-function navLinks(text: string): PageLink[] | string[] {
+/** The host's links and views, or every problem with them. */
+function navLinks(text: string): NavLink[] | string[] {
   const at = UI_NAV_LINKS_SETTING;
   if (text.length > NAV_LINKS_TEXT_MAX) return [`${at} is ${text.length} characters, and the list is at most ${NAV_LINKS_TEXT_MAX}: name fewer or shorter links`];
   let v: unknown;
@@ -125,17 +136,24 @@ function navLinks(text: string): PageLink[] | string[] {
   if (!Array.isArray(v)) return [`${at} is not a list: write a list of links, ${EXAMPLE}`];
   if (v.length > NAV_LINKS_MAX) return [`${at} has ${v.length} links, and the sidebar takes at most ${NAV_LINKS_MAX}: keep the ones the page's readers need`];
   const problems: string[] = [];
-  const links: PageLink[] = [];
+  const links: NavLink[] = [];
   const written = writtenKeys(text);
   v.forEach((e: unknown, i) => {
     const entry = `${at}'s entry ${i + 1}`;
-    if (e === null || typeof e !== "object" || Array.isArray(e)) { problems.push(`${entry} is not an object: each link is {"label": …, "url": …}`); return; }
+    if (e === null || typeof e !== "object" || Array.isArray(e)) { problems.push(`${entry} is not an object: each link is ${SHAPE}`); return; }
     const o = e as Record<string, unknown>;
     problems.push(...keyProblems(entry, written.get(i) ?? [], Object.keys(o)));
     const label = typeof o.label === "string" ? linkLabel(o.label, `${entry}'s label`, "name the link") : { problem: `${entry} has no label: give it "label", the text the sidebar shows` };
-    const url = typeof o.url === "string" ? linkUrl(o.url, `${entry} has its url set`, "a link") : { problem: `${entry} has no url: give it "url", a path on this host (/something) or an https:// URL` };
-    for (const x of [label, url]) if (typeof x !== "string") problems.push(x.problem);
-    if (typeof label === "string" && typeof url === "string") links.push({ label, url });
+    // exactly one of url (a link elsewhere) and view (a host view the page renders): both is a choice not made, refused
+    const isView = Object.hasOwn(o, "view") && !Object.hasOwn(o, "url");
+    const target = Object.hasOwn(o, "view") && Object.hasOwn(o, "url")
+      ? { problem: `${entry} has both "url" and "view": give it one, "url" for a link elsewhere or "view" for a view the page shows` }
+      : isView
+        ? typeof o.view === "string" ? viewPath(o.view, `${entry} has its view set`) : { problem: `${entry} has its view set to no text: give it "view", a path relative to the page's own address, host/status.json` }
+        : typeof o.url === "string" ? linkUrl(o.url, `${entry} has its url set`, "a link")
+          : { problem: `${entry} has no url: give it "url", a path on this host (/something) or an https:// URL, or "view", a path relative to the page's own address` };
+    for (const x of [label, target]) if (typeof x !== "string") problems.push(x.problem);
+    if (typeof label === "string" && typeof target === "string") links.push(isView ? { label, view: target } : { label, url: target });
   });
   return problems.length > 0 ? problems : links;
 }
@@ -189,7 +207,7 @@ export function uiNavSetting(env: Readonly<Record<string, string | undefined>>):
   const links = linksText === "" ? [] : navLinks(linksText);
   if (links.length > 0 && typeof links[0] === "string") problems.push(...links as string[]);
   if (problems.length > 0) return { problem: problems.join("; ") };
-  const hostLinks = links as PageLink[];
+  const hostLinks = links as NavLink[];
   return Object.keys(items).length === 0 && hostLinks.length === 0 ? null : { items, links: hostLinks };
 }
 
@@ -203,12 +221,15 @@ export const navSettingsSet = (env: Readonly<Record<string, string | undefined>>
 /** The sidebar a run's page is given: the setting's, else none (a problem refused the start before the run reads it). */
 export const navOf = (s: PageNav | null | { problem: string }): PageNav | null => s !== null && !("problem" in s) ? s : null;
 
-/** What `mason serve` says of it at its start, a line each: the items replaced, the host's links (labels as JSON). */
+/** What `mason serve` says of it at its start, a line each: the items replaced, the host's links and views (labels as JSON). */
 export function navLines(nav: PageNav | null): string[] {
   if (nav === null) return [];
   const replaced = NAV_ITEMS.filter((i) => nav.items[i.item] !== undefined);
+  const links = nav.links.filter((l) => "url" in l);
+  const views = nav.links.filter((l) => "view" in l);
   return [
     ...(replaced.length ? [`the sidebar's ${replaced.map((i) => i.label).join(", ")} ${replaced.length === 1 ? "links" : "link"} to the host's page${replaced.length === 1 ? "" : "s"} (${replaced.map((i) => i.setting).join(", ")})`] : []),
-    ...(nav.links.length ? [`the sidebar links to ${nav.links.map((l) => JSON.stringify(l.label)).join(", ")} (${UI_NAV_LINKS_SETTING})`] : []),
+    ...(links.length ? [`the sidebar links to ${links.map((l) => JSON.stringify(l.label)).join(", ")} (${UI_NAV_LINKS_SETTING})`] : []),
+    ...(views.length ? [`the sidebar shows the host's view${views.length === 1 ? "" : "s"} ${views.map((l) => JSON.stringify(l.label)).join(", ")}, read from the page's address (${UI_NAV_LINKS_SETTING})`] : []),
   ];
 }

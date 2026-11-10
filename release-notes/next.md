@@ -19,6 +19,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- A site that embeds `mason serve`'s web page can show its own facts inside it, in the page's look: an entry of
+  `MASON_UI_NAV_LINKS` may be `{"label": …, "view": "host/status.json"}`, a view in the sidebar at `#host/<n>`, and
+  `MASON_UI_OVERVIEW_CARD=host/card.json` adds one card to the Overview. Each is JSON the page reads from a path
+  relative to its own address (so the site's proxy answers it), every string shown as text, links held to
+  `MASON_UI_BACK_URL`'s rules; an answer it cannot read is shown as the view's failure. docs/WEB-UI.md "Host views"
+  has the shape. Unset, the page is unchanged; `mason start` refuses `MASON_UI_OVERVIEW_CARD`.
 - `MASON_UI_NAV_LINKS` refuses `mason serve`'s start when an entry has a key written twice (`{"label":"a","label":"b",…}`), naming the entry; it was read as its last value. A key a link does not take is named by its place in the entry, never quoted. `mason start` with a `MASON_UI_NAV_*` name that is no setting now says it is not a setting, with a `did you mean`.
 - `MASON_PG_PUBLIC_URL` takes a host name with an underscore (a Docker service's name) and one written with its trailing dot, printed as written; it refuses a host label over 63 characters, an IPv4 address with a number over 255, and an IPv6 address with a zone id (`%eth0`), at the start. Beside it, `mason user add` still gives a self-signed listener certificate's SHA-256.
 

@@ -24,6 +24,7 @@ import { msText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText
   utcMinute, oneLine, clientText, eventCells, unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, renderConnect, copyClick,
   badge, button, copyable, pop, renderFailure, json, readOnlyLine, tablesReadOnly } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
+import { readHost, hostEvery, hostKey, renderHostCard } from "../host-view.js";
 
 /** How many recent errors of each kind are shown: mason status's (src/cli/commands.ts `RECENT_ERRORS`, held equal by the tests). */
 export const RECENT_ERRORS = 5;
@@ -224,6 +225,8 @@ export const copyingCount = (s) => s.tables.filter((t) => t.added && tableLine(t
  * the copy's file (its size, or why it is unknown), and the last day's statements and their p95 from the request log
  * (`q`: `/api/queries`' body, or `{ failure }`). Each card's sparkline is the last 24 hours (`usage`), only where there
  * are two hours to draw; its numbers are the card's text either way. These facts are said here, and not in the facts table.
+ * With the host's card (`/api/state` `pageCard`, mason serve's MASON_UI_OVERVIEW_CARD; `o.hostCard` its read), it is one
+ * more card, last (src/web/host-view.js `renderHostCard`); without it, nothing changes.
  */
 export function renderKpis(s, o = {}) {
   const now = o.now ?? Date.now();
@@ -251,6 +254,7 @@ export function renderKpis(s, o = {}) {
           day.durationMs === null ? "no statement completed" : `average ${msText(day.durationMs.avg)} · p50 ${msText(day.durationMs.p50)}`, line("p95"), "", LINKS.slow));
     }
   }
+  if (typeof s.pageCard === "string") list.push(renderHostCard(o.hostCard));
   return cards(list);
 }
 
@@ -506,9 +510,16 @@ export const page = {
     const opened = createOpenSet();
     const monotone = createMonotone();
     const share = createShare(ctx);
+    // the host's card (MASON_UI_OVERVIEW_CARD), once the state names it: read when the Overview is shown, and again at
+    // its own `refresh` while it is (src/web/host-view.js)
+    const cardPath = () => { const p = ctx.read("api/state")?.body?.pageCard; return typeof p === "string" ? p : null; };
+    const hostCardReads = () => {
+      const p = cardPath();
+      return p === null ? [] : [{ path: hostKey(p), everyMs: hostEvery(ctx.read(hostKey(p))?.body), ask: (fetchFn) => readHost(fetchFn, p) }];
+    };
     return {
       model: { open: opened.open, share: share.m },
-      reads: () => [{ path: "api/state", everyMs: POLL_MS }, ...SLOWER.map((path) => ({ path, everyMs: 30_000 })), { path: HOURLY, everyMs: 60_000 }],
+      reads: () => [{ path: "api/state", everyMs: POLL_MS }, ...SLOWER.map((path) => ({ path, everyMs: 30_000 })), { path: HOURLY, everyMs: 60_000 }, ...hostCardReads()],
       actions: share.actions,
       afterRead: () => share.afterRead(ctx.read("api/state")?.body),
       input: (target) => share.input(target),
@@ -516,7 +527,7 @@ export const page = {
         const st = ctx.read("api/state");
         if (!st?.body) return { status: st?.failure ? "" : skeleton(4) };
         const [queries, events, requests, unsupported, users] = SLOWER.map((p) => asRequest(ctx.read(p)));
-        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, events, requests, unsupported, users, usage: ctx.read(HOURLY)?.body, open: opened.has, shares: monotone.of(st.body), before: monotone.before, share: share.m }) };
+        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, events, requests, unsupported, users, usage: ctx.read(HOURLY)?.body, hostCard: cardPath() === null ? undefined : ctx.read(hostKey(cardPath())), open: opened.has, shares: monotone.of(st.body), before: monotone.before, share: share.m }) };
       },
       toggle: (target) => opened.toggle(target),
       // Connect's Copy buttons, and Connect from anywhere's
