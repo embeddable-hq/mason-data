@@ -27,7 +27,7 @@ import { UI_RUN_FILE_SETTING } from "./ui-run-file.ts";
 import { backLinkSettingsSet, uiBackLinkSetting } from "./ui-back-link.ts";
 import { NAV_SETTINGS, navSettingsSet, notNavSettings, uiNavSetting } from "./ui-nav.ts";
 import { PG_PUBLIC_URL_SETTING, pgPublicUrlSetting } from "./pg-public-url.ts";
-import { UI_READ_ONLY_ALLOW_SETTING, UI_READ_ONLY_SETTING, uiReadOnlyAllowSetting, uiReadOnlySetting } from "./ui-read-only.ts";
+import { UI_READ_ONLY_ALLOW_FIX, UI_READ_ONLY_ALLOW_SETTING, UI_READ_ONLY_SETTING, uiReadOnlyAllowSetting, uiReadOnlySetting } from "./ui-read-only.ts";
 
 export const STATE_DIR = ".mason";
 const CONFIG = "config.json";
@@ -380,7 +380,7 @@ export function startSettingRefusal(p: Project, env: NodeJS.ProcessEnv, o: { ser
       fix: `unset ${UI_READ_ONLY_ALLOW_SETTING}: mason start's page is yours alone, on this machine` };
   }
   const pageAllow = uiReadOnlyAllowSetting(env);
-  if (!Array.isArray(pageAllow)) return { message: pageAllow.problem, code: "refused", fix: `set ${UI_READ_ONLY_ALLOW_SETTING}=tables beside ${UI_READ_ONLY_SETTING}=1, or unset it` };
+  if (!Array.isArray(pageAllow)) return { message: pageAllow.problem, code: "refused", fix: UI_READ_ONLY_ALLOW_FIX };
   // the page's Unix socket is a server's (src/cli/ui-socket.ts): a laptop's page is opened with mason ui
   if (!o.serve && env[UI_SOCKET_SETTING]) {
     return { message: `${UI_SOCKET_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",

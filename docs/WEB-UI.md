@@ -103,16 +103,27 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
 - **Users** (`#users`): a form that adds a user by name and, where `mason/roles.yml` names roles and reads as it is, a
   **Role** as `mason user add --role` (the roles from `/api/state` `roles`, `mason status --json`'s): the file's
   `default:` is chosen first, marked (default), and sends no role, so the user follows the default as one added with no
-  `--role` does; with no default the first choice is no role. The run judges the role, and its refusal is shown. `--set`
+  `--role` does; with no default the first choice is no role. The run judges the role, and its refusal is shown. Then
+  **Connects from**, in `mason user add --help`'s words: **From anywhere**, the default, sends no `from` (as `mason user
+  add` with no `--from`), with no second question; **Only from these addresses** sends the ranges typed in one box,
+  comma-separated as `--from a,b` takes them (`192.0.2.0/24, 2001:db8::/32`), split at each comma and trimmed. The page
+  never checks a range: the run reads each, and a refused one is shown as the run's refusal. `--set`
   attributes stay the command's. Its password, URL and psql line are shown once, in a card with
   Copy buttons, with a link to Queries, where its statements will show; Mason keeps no copy, so they are never shown again.
 - **Users**, Connect: once for the run, where a tool connects — host, port, database and SSL mode, each with **Copy**,
   and the URL and psql line with `<user>:<password>` in place — as `mason status` says it. No user's row carries a URL:
   the card shown once when a user is added is the only place its password is copied.
-- **Users**, the list: each user's status (Active, Disabled and when, or Removed), when added, when last used, and
-  **Queries**, its statements. A user that no longer connects is flagged with why. **Disable** asks first (in a popover, in `mason
+- **Users**, the list: each user's role and, on a line under it, where it connects from ("from" its ranges as `mason
+  user list` says them, or "from anywhere": `from` in `mason user list --json`; cut by the column, its whole the
+  tooltip), its status (Active, Disabled and when, or Removed), when added, when last
+  used, and **Queries**, its statements. A user that no longer connects is flagged with why. **Disable** asks first (in a popover, in `mason
   user disable`'s words), then runs it; a disabled user's button says **Enable** in the same width, and runs `mason user
-  enable` at once. **Remove** asks first; a removed user stays listed, muted.
+  enable` at once. The "from …" line is a button: it asks where the user connects from in a popover beside the row's
+  actions, the add form's choice opened at its ranges now, and sends `POST /api/users/<name>/from` (`mason user from`:
+  the ranges, or `null` for from anywhere, `--any`); the list holds still while it asks, and a refusal is said in the
+  popover. **Remove** asks first; a removed user stays listed, muted. The table keeps its width (no column of its own),
+  fits its card in a 1280 px window, and where it scrolls (a narrower window, a phone) a row's actions stay pinned at
+  the card's right.
 - **Observability › Queries** (`#observability/queries`): the request log, and only that — who is connected, what runs
   and the range's numbers are on Usage.
 - **Queries**, the request log empty and unfiltered: its sentence, then Connect your first tool (as the Overview's).
@@ -303,10 +314,24 @@ listens, and every browser connection crosses that one ssh connection as frames 
   user added, disabled, enabled or removed, a statement cancelled, a share, a route added later — with "the web page is
   read-only here" and a `why` that says what is still allowed; the pages for those still say why they offer nothing,
   and `/api/state` says `pageReadOnlyAllow: ["tables"]`. `MASON_PROJECT_READONLY=1` still wins: a project deployed as
-  committed offers no Add or Remove and refuses them `409`, as without the allowance (Sync now stays). `tables` is the
-  only value; set empty, it counts as unset. Anything else (with a `did you mean`), or the setting beside no
-  `MASON_UI_READ_ONLY=1`, refuses the start: an allowance on a page that is not read-only says a read-only page was meant
-  and not had. `mason start` refuses it.
+  committed offers no Add or Remove and refuses them `409`, as without the allowance (Sync now stays).
+- **A read-only page that still manages its users: `MASON_UI_READ_ONLY_ALLOW=users`.** For a site that proxies the page
+  and lets its users' changes through its own checks, `MASON_UI_READ_ONLY=1` beside it keeps the Users page's Add a
+  user (with its Connects from), its "from …" line, **Disable**, **Enable** and **Remove**, and the Overview's Create a user. The
+  server lets through exactly these routes, each `<name>` exactly one path segment (a user's name, encoded), never a
+  prefix:
+  - `POST /api/users` (Add a user);
+  - `POST /api/users/<name>/disable`, `POST /api/users/<name>/enable`;
+  - `POST /api/users/<name>/from` (a user's "from …" line);
+  - `DELETE /api/users/<name>` (Remove).
+
+  Every other change of the page is refused as before — a table added, removed or synced, a statement cancelled, a
+  share, a route added later — and `/api/state` says `pageReadOnlyAllow: ["users"]`.
+- **Both: `MASON_UI_READ_ONLY_ALLOW=tables,users`** (in either order) lets through both lists, and `/api/state` says
+  `["tables", "users"]`. The value is a comma list read strictly: `tables`, `users`, or both; set empty, it counts as
+  unset. An item that is not one of them (with a `did you mean`, the item named by its place and never quoted), an
+  empty item, an area named twice, or the setting beside no `MASON_UI_READ_ONLY=1` refuses the start: an allowance on a
+  page that is not read-only says a read-only page was meant and not had. `mason start` refuses it.
 - **A link back to the site that links to the page: `MASON_UI_BACK_URL` and `MASON_UI_BACK_LABEL`.** For a page opened
   from another application (a portal, a hosted service's console), `mason serve` with `MASON_UI_BACK_URL` set shows
   "← Back" (or "← " and `MASON_UI_BACK_LABEL`) at the top of the sidebar, above the project, on every page, in the same
@@ -440,7 +465,8 @@ The guard answers before any route, in plain text, not JSON:
 **`MASON_UI_READ_ONLY=1` refuses the page, not the operator.** A request with no `Authorization` (the page's, by its
 cookie) that is not a GET or a HEAD is refused `403` with "the web page is read-only here". A request with the run's
 token is served, read-only or not. With `MASON_UI_READ_ONLY_ALLOW=tables`, the page's `POST /api/pick`, `/api/remove` and
-`/api/sync` are served too, and every other change of the page refused. `MASON_PROJECT_READONLY=1` refuses the operator's
+`/api/sync` are served too; with `users`, its `POST /api/users`, `POST /api/users/<name>/disable`, `/enable` and `/from`
+and `DELETE /api/users/<name>`; and every other change of the page refused. `MASON_PROJECT_READONLY=1` refuses the operator's
 edits too (below).
 
 **Every refusal** is `{ "error": <message>, "failure": { "code", "message", "why"?, "fix"?, "next": [{ "command",
@@ -475,7 +501,8 @@ reads:
 - `sourcesReadOnly`: why the page offers no Add or Remove, or null. Either the project is deployed read-only, which
   refuses an edit `409`, or the server cannot write the sources file, which fails an edit `500` `failed`.
 - `pageReadOnly`: the page's read-only reason, or null. It does not apply to the operator.
-- `pageReadOnlyAllow`: what that page still changes, `["tables"]` with `MASON_UI_READ_ONLY_ALLOW=tables`, else `[]`.
+- `pageReadOnlyAllow`: what that page still changes, the areas `MASON_UI_READ_ONLY_ALLOW` names in this order
+  (`["tables"]`, `["users"]` or `["tables", "users"]`), else `[]`.
 - `pageNav`: the sidebar as the host says it, `{ items, links }` (`MASON_UI_NAV_<ITEM>_URL`, `MASON_UI_NAV_LINKS`), or
   null. It changes no route the server answers.
 
