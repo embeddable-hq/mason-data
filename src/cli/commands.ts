@@ -26,8 +26,8 @@ import { listenerText } from "./pg-tls.ts";
 import type { RefusedQuery, SlowQuery } from "./run-server.ts";
 import { entriesOfLines, logLineText } from "../lib/log-buffer.ts";
 import { LogReader, logPath } from "../lib/log-read.ts";
-import { catalogTable, entryName, findEntry, looksSecret, tableNameProblem, type CatalogColumn, type CatalogTable, type ProjectSource } from "./sources.ts";
-import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
+import { catalogTable, entryName, findEntry, tableNameProblem, type CatalogColumn, type CatalogTable, type ProjectSource } from "./sources.ts";
+import { addEntry, listTables, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type ListedTable, type PickResult, type RemoveResult } from "./source-edit.ts";
 import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFacts, type SourceTable } from "./preflight.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
 import { reach } from "./state.ts";
@@ -917,7 +917,14 @@ const TABLES_USAGE = `usage: mason tables [<table>…] [--all] [--json]
   The --json answer: { database, source: { name (the source's: its sources file's), file (the sources file) },
     tables: [{ table, rows, bytes, primaryKey, comment, addable,
     reason, added, addedColumns (the columns it syncs: null when not added), copyKey (the key: the sources
-    file keys it by, null: its primary key), columns: [{ name, type, nullable, comment, references }] }], next }
+    file keys it by, null: its primary key), entry, columns: [{ name, type, nullable, comment, references,
+    secret }] }], next }
+  entry is the table's entry as the sources file's tables: map holds it, as fields — { "<name>": {} } or
+  { "<name>": { exclude | columns, key, sync } } — to merge into tables: and write as YAML: an added table's as the
+  file says it; else what mason add <table> writes (decided by the same code), with the --key its reason names when
+  it has no primary key; null when mason add would refuse it (reason says why). It assumes the file's other entries
+  hold, as mason add checks first. secret: the column looks like a secret, so mason add leaves it out (exclude:)
+  unless named (--include); a key column is never left out.
 `;
 
 export const TABLES: CommandSpec & { needs: "project" } = {
@@ -955,11 +962,7 @@ export async function tables(argv: string[]): Promise<number> {
     ? (one ? [[`mason add ${tableArg(one.table)}`, `sync it into Mason (--columns ${one.columns.slice(0, 2).map((c) => c.name).join(",")}: those only)`]] : [])
     : addSteps(shown, "tables");
   if (json) {
-    out(jsonText(TABLES, { database: s.database, source: { name: s.name, file: s.file }, tables: shown.map((t) => ({
-      table: t.table, rows: t.rows, bytes: t.bytes, primaryKey: t.key, comment: t.comment,
-      addable: t.reason === null, reason: t.reason, added: t.added, addedColumns: t.addedColumns, copyKey: t.copyKey,
-      columns: t.columns.map((c) => ({ name: c.name, type: c.type, nullable: c.nullable, comment: c.comment, references: c.references })),
-    })) }, next));
+    out(jsonText(TABLES, { database: s.database, source: { name: s.name, file: s.file }, tables: shown.map(tableJson) }, next));
     return 0;
   }
   if (!shown.length) { out(`${s.database} has no table this user can read.`); return 0; }
@@ -984,7 +987,7 @@ export async function tables(argv: string[]): Promise<number> {
     const tw = Math.max(...t.columns.map((c) => c.type.length));
     for (const c of t.columns) {
       const notes = [c.nullable ? "" : "not null", c.references ? `→ ${c.references.table}.${c.references.column}` : "",
-        looksSecret(c.name) && !t.key.includes(c.name) ? "(looks like a secret: left out unless named)" : "", c.comment ? `-- ${c.comment}` : ""].filter(Boolean);
+        c.secret ? "(looks like a secret: left out unless named)" : "", c.comment ? `-- ${c.comment}` : ""].filter(Boolean);
       out(`  ${c.name.padEnd(w)}  ${c.type.padEnd(tw)}  ${notes.join("  ")}`.trimEnd());
     }
     out("");
@@ -992,6 +995,18 @@ export async function tables(argv: string[]): Promise<number> {
   // each table above ends with its blank line: the block's own is left out
   if (next.length) out(nextBlock(next).slice(1));
   return 0;
+}
+
+/**
+ * A TABLE IN `mason tables --json`'s SHAPE (`TABLES_USAGE` declares it), from a table `listTables` (src/cli/source-edit.ts)
+ * listed out of a catalog already read: what `mason doctor` calls to give the tables it read in the same shape.
+ */
+export function tableJson(t: ListedTable): Record<string, unknown> {
+  return {
+    table: t.table, rows: t.rows, bytes: t.bytes, primaryKey: t.key, comment: t.comment,
+    addable: t.reason === null, reason: t.reason, added: t.added, addedColumns: t.addedColumns, copyKey: t.copyKey, entry: t.entry,
+    columns: t.columns.map((c) => ({ name: c.name, type: c.type, nullable: c.nullable, comment: c.comment, references: c.references, secret: c.secret })),
+  };
 }
 
 /** A table's line in `mason tables`: its size, its key, and added or why it cannot be added as it is (the web page's
@@ -1038,11 +1053,11 @@ async function readCatalog(p: Project): Promise<{ src: ProjectSource; database: 
 }
 
 /** `mason tables` without the run: the database's tables, each as the run's state says it against the sources file
- *  (sources.ts catalogTable). */
-async function databaseTables(p: Project): Promise<{ database: string; name: string; file: string; tables: CatalogTable[] } | Failure> {
+ *  (sources.ts catalogTable), with the entry `mason add` writes for it (source-edit.ts listTables). */
+async function databaseTables(p: Project): Promise<{ database: string; name: string; file: string; tables: ListedTable[] } | Failure> {
   const c = await readCatalog(p);
   if ("message" in c) return c;
-  return { database: c.database, name: c.src.name, file: c.src.file, tables: c.facts.map((t) => catalogTable(t, c.src.tables.find((e) => e.table === t.source))) };
+  return { database: c.database, name: c.src.name, file: c.src.file, tables: listTables(c.src, { tables: c.facts, database: c.database }) };
 }
 
 /**

@@ -504,7 +504,7 @@ export function entryProblems(t: SourceTable | undefined, e: TableEntry, all: re
       if (sync.mode === "replication") out.push(`${at}: ${t.source} has no primary key, so logical replication cannot apply its changes by its key: (sync: replication) — give its entry sync: poll <interval> (poll 5m), or sync: off`);
     }
   } else if (!t.key.length) {
-    const unique = (t.uniqueKeys ?? []).find((u) => u.columns.every((c) => t.columns.find((x) => x.name === c)?.notNull === true));
+    const unique = usableUniqueKey(t);
     out.push(`${at}: ${t.source} has no primary key, so Mason cannot tell its rows apart — name the columns that do: key: [${unique ? unique.columns.join(", ") : "…"}]` +
       `${unique ? ` (its unique index ${unique.name})` : ""}`);
   }
@@ -650,13 +650,21 @@ const flowList = (xs: readonly string[]): string => `[${xs.map(yamlName).join(",
 /** An entry as `mason add` writes it: its columns, key and its own sync (none: it follows the file's) */
 export type WrittenEntry = Pick<TableEntry, "name" | "table" | "columns" | "exclude" | "key"> & { sync?: TableSync | null };
 
-/** An entry's lines at `indent`: `name: {}` on one line, else its keys a line each under it. */
+/** An entry's value as the sources file holds it, under its name in `tables:` — `{}`, or the keys it writes (`columns`,
+ *  `exclude`, `key`, `sync`) — the ONE place an entry's keys are chosen: `entryText` writes them, and `mason tables --json`
+ *  gives them as data (src/cli/source-edit.ts `listTables`). */
+export type EntryFields = { columns?: string[]; exclude?: string[]; key?: string[]; sync?: string };
+export function entryFields(e: Pick<WrittenEntry, "columns" | "exclude" | "key" | "sync">): EntryFields {
+  return {
+    ...(e.columns !== null ? { columns: [...e.columns] } : e.exclude.length ? { exclude: [...e.exclude] } : {}),
+    ...(e.key !== null ? { key: [...e.key] } : {}),
+    ...(e.sync ? { sync: syncText(e.sync) } : {}),
+  };
+}
+
+/** An entry's lines at `indent`: `name: {}` on one line, else its keys a line each under it (`entryFields`). */
 export function entryText(e: Omit<WrittenEntry, "table">, indent: string): string {
-  const body: string[] = [];
-  if (e.columns !== null) body.push(`columns: ${flowList(e.columns)}`);
-  else if (e.exclude.length) body.push(`exclude: ${flowList(e.exclude)}`);
-  if (e.key !== null) body.push(`key: ${flowList(e.key)}`);
-  if (e.sync) body.push(`sync: ${syncText(e.sync)}`);
+  const body = Object.entries(entryFields(e)).map(([k, v]) => `${k}: ${typeof v === "string" ? v : flowList(v)}`);
   if (!body.length) return `${indent}${yamlName(e.name)}: {}\n`;
   return `${indent}${yamlName(e.name)}:\n${body.map((b) => `${indent}  ${b}\n`).join("")}`;
 }
@@ -852,10 +860,17 @@ export interface CatalogTable {
   copyKey: string[] | null;
 }
 
+/** The unique index a table with no primary key could be keyed by — its first over NOT NULL columns only — or undefined:
+ *  the `--key` `unaddableReason` names, and the `key:` `mason tables --json` gives its entry (src/cli/source-edit.ts
+ *  `listTables`). */
+export function usableUniqueKey(t: SourceTable): { name: string; columns: string[] } | undefined {
+  return (t.uniqueKeys ?? []).find((u) => u.columns.every((c) => t.columns.find((x) => x.name === c)?.notNull === true));
+}
+
 /** Why `mason add <t>` with no `--key` cannot add `t`, or null. */
 export function unaddableReason(t: SourceTable): string | null {
   if (t.key.length) return null;
-  const unique = (t.uniqueKeys ?? []).find((u) => u.columns.every((c) => t.columns.find((x) => x.name === c)?.notNull === true));
+  const unique = usableUniqueKey(t);
   return `no primary key: name the columns that tell its rows apart, mason add ${entryName(t.source)} --key ${unique ? unique.columns.join(",") : "<column>,…"}${unique ? ` (its unique index ${unique.name})` : ""}`;
 }
 

@@ -2,6 +2,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **`mason tables --json` gives the entry `mason add` would write**: each table's `entry`, as the sources file's
+  `tables:` map holds it (`{ "orders": { "exclude": ["api_token"] } }`, a `key:` from its unique index for a table with
+  no primary key, `null` when `mason add` would refuse it), and each column's `secret`: whether `mason add` leaves it
+  out as a secret unless named. A tool that writes the sources file itself can write what `mason add` would, without
+  copying its rule.
 - **A read-only web page can still edit its tables**: `mason serve` with `MASON_UI_READ_ONLY=1` and
   `MASON_UI_READ_ONLY_ALLOW=tables` keeps Add, Columns…, Name its key…, Remove and Sync now on the Tables page, and
   still refuses every other change the page sends (users, cancelling a statement, sharing). `MASON_PROJECT_READONLY=1`

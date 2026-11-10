@@ -609,6 +609,48 @@ test("mason add's sync: --sync writes the entry's sync: alone, comments kept; a 
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("mason tables' entry for each table is mason add's, decided in one place: its sync under the file's default, a refusal as its reason, an added one's as the file says it (issue 794)", async () => {
+  const E = await import("../src/cli/source-edit.ts" as string) as typeof import("../src/cli/source-edit.ts");
+  const { parse } = await import("yaml");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-tables-entry-"));
+  const folder = path.join(root, "mason");
+  fs.mkdirSync(path.join(folder, "sources"), { recursive: true });
+  const file = path.join(folder, "sources", "app.yml");
+  const big = table({ table: "events_big", rows: 22_000_000 });
+  const hidden = table({ table: "hidden", rowSecurityHidesFrom: "mason" });
+  const audit = table({ table: "audit", replicaIdentity: "n" });
+  const db = { tables: [...CATALOG, big, hidden, audit], database: "shop" };
+  const edit = (text: string) => { fs.writeFileSync(file, text); return E.sourceToEdit(folder, root, () => S.readSource(folder, root, {})); };
+  const said = (f: () => unknown): string => { try { f(); } catch (e) { return (e as Error).message; } return "taken"; };
+  try {
+    for (const top of ["sync: poll 5m\n", "sync: replication\n", ""]) {
+      const text = `kind: postgres\nurl: postgres://me@localhost/shop\n${top}tables:\n  customers: {}\n`;
+      const listed = E.listTables(edit(text).parsed, db);
+      for (const t of listed.filter((x) => !x.added)) {
+        const key = t.entry === null ? null : Object.values(t.entry)[0]!.key ?? null;
+        if (t.entry === null) {
+          assert.match(said(() => E.addEntry(edit(text), db, t.table, ["*"], key)), /./, `${t.table}: mason add refuses it too`);
+          assert.ok(t.reason !== null, `${t.table}: its reason said`);
+          continue;
+        }
+        E.addEntry(edit(text), db, t.table, ["*"], key);
+        const written = (parse(fs.readFileSync(file, "utf8")) as { tables: Record<string, unknown> }).tables;
+        assert.deepEqual(written, { customers: {}, ...t.entry }, `${top.trim() || "no sync:"} — ${t.table}: the entry mason add wrote`);
+      }
+      const of = (name: string) => listed.find((t) => t.table === name)!;
+      assert.deepEqual(of("public.customers").entry, { customers: {} }, "added: its entry as the file says it");
+      assert.deepEqual([of("public.hidden").entry, of("public.hidden").reason?.startsWith("tables.hidden: row-level security on public.hidden hides every row from mason")], [null, true],
+        "a table mason add refuses for another reason than its key: no entry, and the refusal as its reason");
+      if (top === "sync: poll 5m\n") assert.deepEqual(of("public.events_big").entry, { events_big: { sync: "off" } }, "a big table under a polling file: written off");
+      if (top === "sync: replication\n") {
+        assert.deepEqual(of("public.audit").entry, { audit: { sync: "poll 5m" } }, "REPLICA IDENTITY NOTHING under a replicating file: polled");
+        assert.deepEqual(of("public.events").entry, { events: { key: ["tenant_id", "id"], sync: "poll 5m" } }, "no primary key under a replicating file: keyed and polled");
+      }
+      assert.deepEqual(of("public.orders").columns.filter((c) => c.secret).map((c) => c.name), ["api_token"]);
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("the run's re-read keeps the tables read before when the file goes silent on sync: over a recorded slot, said with the line; any sync: is taken, and a run with no slot is untouched", () => {
   const entry = "kind: postgres\nurl: x\ntables:\n  orders: {}\n";
   const reading = (text: string) => ({ ...(parse(text) as Sources.SourceFile), resolved: "x", from: "mason/sources/app.yml", publicationName: null });
