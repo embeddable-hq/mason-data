@@ -9,7 +9,7 @@
  */
 import { shellWord } from "../lib/shell-word.ts";
 import { elsewhereTip } from "./pg-tls.ts";
-import { readPublicUrl, type PublicSslmode } from "./pg-public-url.ts";
+import { PUBLIC_URL_RECORD, readPublicUrl, type PublicSslmode } from "./pg-public-url.ts";
 import type { PostgresListener } from "./project.ts";
 
 /** Where a tool connects. `public`: the address is MASON_PG_PUBLIC_URL's (src/cli/pg-public-url.ts), the one a client
@@ -48,7 +48,9 @@ function urlWith(link: PostgresLink, credential: string): string {
 export function clientLink(run: { postgresUrl: string; postgresPublicUrl?: string | null | undefined }): PostgresLink {
   const own = postgresLink(run.postgresUrl);
   if (run.postgresPublicUrl === undefined || run.postgresPublicUrl === null) return own;
-  const p = readPublicUrl(run.postgresPublicUrl);
+  // a record read from .mason/config.json was checked by loadProject (a bad one is a broken project, never this); one
+  // that reaches here unreadable fails closed, its words naming the record, never the setting
+  const p = readPublicUrl(run.postgresPublicUrl, PUBLIC_URL_RECORD);
   if ("problem" in p) throw new Error(`the recorded public address of the Postgres API cannot be read: ${p.problem}`);
   const link: PostgresLink = { url: "", host: p.host, port: p.port, database: p.database ?? own.database, sslmode: p.sslmode, public: true };
   return { ...link, url: urlWith(link, "").replace(/^postgres:\/\/@/, "postgresql://") };
@@ -76,12 +78,18 @@ export const postgresFacts = (run: { postgresUrl: string; postgresPublicUrl?: st
 };
 
 /** What a tool connecting to the listener should know: it listens on every address; its certificate is self-signed.
- *  None where the client reaches a public address (`link.public`): that address is the operator's, its TLS the sslmode's. */
+ *  Where the client reaches a public address (`link.public`) the address is the operator's, so the tip to put this
+ *  machine's address in place of localhost is not said; the self-signed certificate's SHA-256 still is (behind a TCP
+ *  pass-through it is the certificate a client meets), in words that presume no sslmode. */
 export function listenerTips(l: PostgresListener | null, link: PostgresLink | null = null): string[] {
-  if (l === null || link?.public === true) return [];
+  if (l === null) return [];
+  const fingerprint = l.fingerprint ?? "in mason status";
+  if (link?.public === true) {
+    return l.tls === "self-signed" ? [`The listener's certificate is self-signed: where a client reaches it through a TCP pass-through, that is the certificate it meets; to check it by hand, its SHA-256 is ${fingerprint}.`] : [];
+  }
   const elsewhere = elsewhereTip(l);
   return [
     ...(elsewhere ? [elsewhere] : []),
-    ...(l.tls === "self-signed" ? [`The certificate is self-signed: sslmode=require encrypts and checks no certificate; to check it by hand, its SHA-256 is ${l.fingerprint ?? "in mason status"}.`] : []),
+    ...(l.tls === "self-signed" ? [`The certificate is self-signed: sslmode=require encrypts and checks no certificate; to check it by hand, its SHA-256 is ${fingerprint}.`] : []),
   ];
 }

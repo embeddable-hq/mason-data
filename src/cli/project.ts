@@ -26,7 +26,7 @@ import { UI_SOCKET_SETTING } from "./ui-socket.ts";
 import { UI_RUN_FILE_SETTING } from "./ui-run-file.ts";
 import { backLinkSettingsSet, uiBackLinkSetting } from "./ui-back-link.ts";
 import { navSettingsSet, uiNavSetting } from "./ui-nav.ts";
-import { PG_PUBLIC_URL_SETTING, pgPublicUrlSetting } from "./pg-public-url.ts";
+import { PG_PUBLIC_URL_SETTING, PUBLIC_URL_RECORD, pgPublicUrlSetting, readPublicUrl } from "./pg-public-url.ts";
 import { UI_READ_ONLY_ALLOW_SETTING, UI_READ_ONLY_SETTING, uiReadOnlyAllowSetting, uiReadOnlySetting } from "./ui-read-only.ts";
 
 export const STATE_DIR = ".mason";
@@ -167,6 +167,12 @@ export function readProject(root: string): Project | BrokenProject | null {
     const bad = typeof r !== "object" || !Number.isInteger(run.pid) ? ["pid"]
       : [...RUNNING.filter((k) => typeof run[k] !== "string"), ...(run.postgresPublicUrl !== undefined && typeof run.postgresPublicUrl !== "string" ? ["postgresPublicUrl (a string, when there is one)"] : []),...(typeof (run.postgresListener as { host?: unknown } | null)?.host !== "string" ? ["postgresListener"] : [])];
     if (bad.length) return { root, dir, file, broken: `its "running" has no ${bad.join(", ")} (mason start writes the whole of it, or null when stopped)` };
+    // the address every URL printed for a client is built from (src/cli/pg-url.ts clientLink): read by the setting's
+    // one reading, named as the record, so a tampered one is a broken project at every command, never a URL printed
+    if (typeof run.postgresPublicUrl === "string") {
+      const p = readPublicUrl(run.postgresPublicUrl, PUBLIC_URL_RECORD);
+      if ("problem" in p) return { root, dir, file, broken: `${p.problem} (mason serve records it from ${PG_PUBLIC_URL_SETTING} at its start)` };
+    }
   }
   return { root, dir, folder: path.resolve(root, config.folder), config };
 }

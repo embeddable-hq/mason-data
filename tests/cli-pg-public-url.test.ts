@@ -55,6 +55,15 @@ test("taken: a host, a port (5432 when none), a database (the run's when none) a
     ["postgres://[2001:db8::1]:6432/?sslmode=disable", { host: "2001:db8::1", port: 6432, database: null, sslmode: "disable" }],
     ["postgres://192.0.2.10:5433/Sales%20DB?sslmode=verify-ca", { host: "192.0.2.10", port: 5433, database: "Sales DB", sslmode: "verify-ca" }],
     ["postgres://xn--bcher-kva.example.com:5433/?sslmode=require", { host: "xn--bcher-kva.example.com", port: 5433, database: null, sslmode: "require" }],
+    // a Docker service's name has an underscore; an FQDN may be written with its final dot, kept as written (issue 801)
+    ["postgres://mason_db:5433/?sslmode=disable", { host: "mason_db", port: 5433, database: null, sslmode: "disable" }],
+    ["postgres://_pg.db_1.example.com/?sslmode=require", { host: "_pg.db_1.example.com", port: 5432, database: null, sslmode: "require" }],
+    ["postgres://db.example.com.:5433/?sslmode=verify-full", { host: "db.example.com.", port: 5433, database: null, sslmode: "verify-full" }],
+    [`postgres://${"a".repeat(63)}.example.com/?sslmode=require`, { host: `${"a".repeat(63)}.example.com`, port: 5432, database: null, sslmode: "require" }],
+    [`postgres://${Array(4).fill("a".repeat(61)).join(".")}.abcde/?sslmode=require`, { host: `${Array(4).fill("a".repeat(61)).join(".")}.abcde`, port: 5432, database: null, sslmode: "require" }],
+    [`postgres://${Array(4).fill("a".repeat(61)).join(".")}.abcde./?sslmode=require`, { host: `${Array(4).fill("a".repeat(61)).join(".")}.abcde.`, port: 5432, database: null, sslmode: "require" }],
+    ["postgres://255.255.255.255/?sslmode=require", { host: "255.255.255.255", port: 5432, database: null, sslmode: "require" }],
+    ["postgres://db.example.1a/?sslmode=require", { host: "db.example.1a", port: 5432, database: null, sslmode: "require" }],
   ];
   for (const [v, want] of cases) {
     const e = everyEntrance(v);
@@ -71,7 +80,8 @@ test("taken: a host, a port (5432 when none), a database (the run's when none) a
 test("refused at every entrance of mason serve, naming the setting and the way out, never quoting the value: a user or password, another parameter, no or a falling-back sslmode, a bad host, port or path", () => {
   const at = "MASON_PG_PUBLIC_URL is set to";
   const shape = "postgres://<host>:<port>/<database>?sslmode=<mode>";
-  const host = `${at} a URL with a host that is not a name or an address: a name (db.example.com), an IPv4 address, or an IPv6 one in brackets`;
+  const host = `${at} a URL with a host that is not a name or an address: a name (db.example.com; each part 1-63 letters, digits, - or _), an IPv4 address (four numbers 0-255), or an IPv6 one in brackets`;
+  const zone = `${at} a URL with an IPv6 zone id (%…), which names an interface of one machine: write the address a client reaches, without it`;
   const port = `${at} a URL whose port is not 1-65535: name it, or leave out the : for 5432`;
   const secret = `${at} a URL with a user or a password in it, which every page and command would print: remove them (a user's name and password are mason user add's)`;
   const param = `${at} a URL with a parameter other than sslmode: the address takes sslmode alone; leave the rest out (a user and its password are mason user add's)`;
@@ -86,10 +96,23 @@ test("refused at every entrance of mason serve, naming the setting and the way o
     ["postgres://db.example.com:5433/?sslmode=allow", `${at} a URL whose sslmode is not one of disable, require, verify-ca, verify-full (a client that falls back to plain would send a password in clear)`],
     ["postgres://db.example.com:5433/?sslmode=hunter2", `${at} a URL whose sslmode is not one of disable, require, verify-ca, verify-full`],
     ["postgres://db.example.com/?sslmode=require&sslmode=disable", `${at} a URL with sslmode twice: name it once`],
-    ["https://db.example.com/", `${at} a URL of the scheme https://: ${shape}`],
+    ["https://db.example.com/", `${at} a URL of another scheme than postgres:// or postgresql://: ${shape}`],
+    // the scheme is never quoted either: a password pasted where the scheme goes
+    ["hunter2://db.example.com/?sslmode=require", `${at} a URL of another scheme than postgres:// or postgresql://: ${shape}`],
     ["db.example.com:5433", `${at} no URL: ${shape}`],
-    ["postgres://:5433/?sslmode=require", `${at} a URL with no host: a name (db.example.com), an IPv4 address, or an IPv6 one in brackets`],
-    ["postgres://db_x.example.com/?sslmode=require", host],
+    ["postgres://:5433/?sslmode=require", `${at} a URL with no host: a name (db.example.com; each part 1-63 letters, digits, - or _), an IPv4 address (four numbers 0-255), or an IPv6 one in brackets`],
+    [`postgres://${"a".repeat(64)}.example.com/?sslmode=require`, host],
+    [`postgres://${Array(4).fill("a".repeat(61)).join(".")}.abcdef/?sslmode=require`, host],
+    ["postgres://999.999.999.999/?sslmode=require", host],
+    ["postgres://192.0.2.256:5433/?sslmode=require", host],
+    ["postgres://192.0.2/?sslmode=require", host],
+    ["postgres://192.0.2.10./?sslmode=require", host],
+    ["postgres://db.example.123/?sslmode=require", host],
+    ["postgres://db..example.com/?sslmode=require", host],
+    ["postgres://db.example.com../?sslmode=require", host],
+    ["postgres://db-.example.com/?sslmode=require", host],
+    ["postgres://[fe80::1%eth0]:5433/?sslmode=require", zone],
+    ["postgres://[fe80::1%25eth0]/?sslmode=require", zone],
     ["postgres://-db.example.com/?sslmode=require", host],
     ["postgres://db%2eexample.com/?sslmode=require", host],
     ["postgres://[::1/?sslmode=require", host],
@@ -119,7 +142,10 @@ test("refused at every entrance of mason serve, naming the setting and the way o
 
 test("mason serve's: in its --help beside the other MASON_PG_* settings; mason start refuses it, naming it, valid or not", () => {
   assert.match(SERVE.usage, /\n {4}MASON_PG_PUBLIC_URL {5}the Postgres API's address as a client reaches it, behind a load balancer, a proxy or a DNS\n/);
-  assert.match(SERVE.usage, /sslmode required \(disable, require, verify-ca, verify-full\), no user,\n\s+no password and no other parameter \(refused\)/);
+  assert.match(SERVE.usage, /sslmode required\n\s+\(disable, require, verify-ca, verify-full\), no user, no password and no other\n\s+parameter \(refused\)/);
+  // every line of the entry within the help's column (issue 801: the interpolated modes ran past it)
+  const entry = SERVE.usage.slice(SERVE.usage.indexOf("    MASON_PG_PUBLIC_URL"), SERVE.usage.indexOf("    MASON_PG_PROXY_FROM")).split("\n").filter((l) => l !== "");
+  assert.ok(entry.length > 1 && entry.every((l) => l.length <= 120), entry.map((l) => `${l.length} ${l}`).join("\n"));
   assert.ok(SERVE.usage.indexOf("MASON_PG_PUBLIC_URL") > SERVE.usage.indexOf("MASON_PG_TLS_CERT, MASON_PG_TLS_KEY") && SERVE.usage.indexOf("MASON_PG_PUBLIC_URL") < SERVE.usage.indexOf("MASON_PG_PROXY_FROM"));
   const refusal = { message: "MASON_PG_PUBLIC_URL is mason serve's setting, and mason start ignores no setting silently", code: "refused",
     fix: "unset MASON_PG_PUBLIC_URL: mason start prints the address it listens on, and mason serve the one a server's clients reach" };
@@ -143,10 +169,19 @@ test("one builder: unset, every URL is the listener's as before; set, its host, 
   assert.equal(pgUrl.connectionUrl(pub, "metabase", "p@ss"), "postgres://metabase:p%40ss@db.example.com:6432/shop?sslmode=verify-full");
   assert.equal(clientLink({ ...own, postgresPublicUrl: "postgresql://[2001:db8::1]:5432/analytics?sslmode=disable" }).database, "analytics", "a database named: printed as it is");
   assert.equal(pgUrl.connectionUrl(clientLink({ ...own, postgresPublicUrl: "postgresql://[2001:db8::1]:5432/?sslmode=disable" }), "u", null), "postgres://u@[2001:db8::1]:5432/shop?sslmode=disable");
-  // the listener's tips are for its own address: a public one has none
+  // the listener's tip to put this machine's address in place of localhost is for its own address; the self-signed
+  // certificate's SHA-256 is said beside a public one too (issue 801: a TCP pass-through meets that certificate)
   const every = { host: "0.0.0.0", tls: "self-signed" as const, fingerprint: "AB:CD" };
   assert.equal(pgUrl.listenerTips(every, clientLink(own)).length, 2);
-  assert.deepEqual(pgUrl.listenerTips(every, pub), []);
+  assert.deepEqual(pgUrl.listenerTips(every, pub), ["The listener's certificate is self-signed: where a client reaches it through a TCP pass-through, that is the certificate it meets; to check it by hand, its SHA-256 is AB:CD."]);
+  assert.deepEqual(pgUrl.listenerTips({ host: "0.0.0.0", tls: "certificate" } as never, pub), [], "a CA's certificate: nothing to say");
+  assert.deepEqual(pgUrl.listenerTips({ host: "127.0.0.1", tls: "self-signed" } as never, pub), ["The listener's certificate is self-signed: where a client reaches it through a TCP pass-through, that is the certificate it meets; to check it by hand, its SHA-256 is in mason status."]);
+  // an FQDN with its final dot and a Docker service's name: in every URL as written
+  assert.equal(P.shownUrl!(clientLink({ ...own, postgresPublicUrl: "postgresql://db.example.com.:6432/?sslmode=require" })), "postgres://<user>:<password>@db.example.com.:6432/shop?sslmode=require");
+  assert.equal(pgUrl.connectionUrl(clientLink({ ...own, postgresPublicUrl: "postgresql://mason_db:5433/?sslmode=disable" }), "u", null), "postgres://u@mason_db:5433/shop?sslmode=disable");
+  // a record that cannot be read fails closed, its words naming the record, never the setting
+  assert.throws(() => clientLink({ ...own, postgresPublicUrl: "postgresql://u:hunter2@db.example.com/?sslmode=require" }), (e: Error) =>
+    e.message === "the recorded public address of the Postgres API cannot be read: running.postgresPublicUrl is set to a URL with a user or a password in it, which every page and command would print: remove them (a user's name and password are mason user add's)");
 });
 
 /** A run's command server over a project folder whose config records it, with MASON_PG_PUBLIC_URL's address or none. */
@@ -229,7 +264,8 @@ test("every surface beside a run prints the URL from the one builder: mason stat
     psql: `psql 'postgres://metabase:${encodeURIComponent(pwOwn)}@localhost:5433/shop?sslmode=require'`, host: "localhost", port: 5433, sslmode: "require", database: "shop" });
   assert.match(pub.addText as string, /^ {2}url +postgres:\/\/looker:[^@\s]+@db\.example\.com:6432\/shop\?sslmode=verify-full$/m);
   assert.match(pub.addText as string, /^ {2}host +db\.example\.com\n {2}port +6432\n {2}ssl mode +verify-full$/m);
-  assert.doesNotMatch(pub.addText as string, /put this machine's address|self-signed/, "no tip about the listener's own address");
+  assert.doesNotMatch(pub.addText as string, /put this machine's address/, "no tip about the listener's own address");
+  assert.match(pub.addText as string, /^Tip: The listener's certificate is self-signed: where a client reaches it through a TCP pass-through, that is the certificate it meets; to check it by hand, its SHA-256 is AB:CD\.$/m, "the certificate's SHA-256 is kept");
   assert.match(own.addText as string, /^ {2}url +postgres:\/\/looker:[^@\s]+@localhost:5433\/shop\?sslmode=require$/m);
   assert.match(own.addText as string, /put this machine's address or name in place of localhost/, "unset: the tip, as before");
   // mason user list: each user's URL without its password
@@ -239,4 +275,31 @@ test("every surface beside a run prints the URL from the one builder: mason stat
   const pageAdd = pub.page as { url: string; host: string; port: number; sslmode: string; password: string };
   assert.deepEqual([pageAdd.url, pageAdd.host, pageAdd.port, pageAdd.sslmode], [`postgres://superset:${encodeURIComponent(pageAdd.password)}@db.example.com:6432/shop?sslmode=verify-full`, "db.example.com", 6432, "verify-full"]);
   assert.match((own.page as { url: string }).url, /^postgres:\/\/superset:[^@]+@localhost:5433\/shop\?sslmode=require$/);
+});
+
+test("a run's record of the address that cannot be read (.mason/config.json tampered with) is a broken project at every command, named as the record, never the setting, the value never quoted", async () => {
+  const { app, close } = await runningProject("postgresql://db.example.com:6432/?sslmode=verify-full");
+  try {
+    const file = path.join(app, ".mason", "config.json");
+    const cfg = JSON.parse(fs.readFileSync(file, "utf8")) as { running: Record<string, unknown> };
+    for (const [recorded, problem] of [
+      ["postgresql://u:hunter2@db.example.com:6432/?sslmode=verify-full", "running.postgresPublicUrl is set to a URL with a user or a password in it, which every page and command would print: remove them (a user's name and password are mason user add's)"],
+      ["postgresql://hunter2.example.com:6432/?sslmode=prefer", "running.postgresPublicUrl is set to a URL whose sslmode is not one of disable, require, verify-ca, verify-full (a client that falls back to plain would send a password in clear)"],
+      ["hunter2://db.example.com/?sslmode=require", "running.postgresPublicUrl is set to a URL of another scheme than postgres:// or postgresql://: postgres://<host>:<port>/<database>?sslmode=<mode>"],
+    ] as const) {
+      cfg.running.postgresPublicUrl = recorded;
+      fs.writeFileSync(file, JSON.stringify(cfg), { mode: 0o600 });
+      const want = `this folder's Mason project cannot be read: ${file}: ${problem} (mason serve records it from MASON_PG_PUBLIC_URL at its start)`;
+      for (const argv of [["status", "--json"], ["user", "add", "metabase", "--json"]]) {
+        const r = await runMason(app, argv, matrixEnv());
+        assert.equal(r.code, 1, `${argv.join(" ")}: ${r.stdout}${r.stderr}`);
+        const err = (JSON.parse(r.stdout) as { error: { code: string; message: string } }).error;
+        assert.deepEqual({ code: err.code, message: err.message }, { code: "bad_config", message: want }, argv.join(" "));
+        assert.ok(!r.stdout.includes("hunter2") && !r.stderr.includes("hunter2") && !/bug in mason/.test(r.stdout + r.stderr), `${argv.join(" ")}: never quoted, never a bug`);
+      }
+      const text = await runMason(app, ["status"], matrixEnv());
+      assert.equal(text.code, 1);
+      assert.ok(text.stderr.includes(problem) && !text.stderr.includes("hunter2") && !/bug in mason/.test(text.stdout + text.stderr), text.stdout + text.stderr);
+    }
+  } finally { await close(); }
 });
