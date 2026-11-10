@@ -69,7 +69,8 @@ import type { RawStmt } from "libpg-query";
 import { catalogRows } from "../../duck/analyze.ts";
 import type { Planner } from "../../duck/generated-plan.ts";
 import { ADDRESS_NOT_ALLOWED, ApiError, USER_DISABLED } from "../error.ts";
-import { hashCaller, outcomeOf, storedPayload, type ApiLogRow } from "../request-log.ts";
+import { hashCaller, outcomeOf, SLOW_MS, storedPayload, type ApiLogRow, type StoredPlan } from "../request-log.ts";
+import { SlowPlans } from "./slow-plan.ts";
 import type { GapId } from "../../duck/gaps.ts";
 import { gapRefusal, StatementError, type DuckPlan } from "../../duck/statement.ts";
 import { canonicalZone } from "../../lib/timezone.ts";
@@ -193,6 +194,10 @@ export interface ExplainHow {
   rowFilters?: ReadonlyArray<{ table: string; words: string }>;
   /** every table the statement reads, for a statement with row filters: its table lines, never the engine's plan's */
   reads?: readonly string[];
+  /** the engine's operators and their estimates without their details (`Explained.detailsHidden`): a slow statement's
+   *  recorded plan (src/api/postgres/slow-plan.ts) of a statement bound with values, which a detail could print and the
+   *  request log does not keep */
+  detailsHidden?: boolean;
 }
 /** whether any role of the file filters rows (src/duck/row-filter.ts): nothing is checked, bound or keyed where none does */
 const filtersRows = (live: RolesLive): boolean => [...live.grants.values()].some((g) => g.filters !== undefined && g.filters.size > 0);
@@ -304,6 +309,9 @@ export interface PgApiOptions {
   schema(): PgSchema;
   /** the request log (src/duck/requests.ts): a row for every statement answered or refused, and every refused login */
   record(log: ApiLogRow): void;
+  /** a test's: the time from which a statement is slow and has its plan recorded (src/api/postgres/slow-plan.ts);
+   *  SLOW_MS (src/api/request-log.ts) when absent */
+  slowMs?: number | undefined;
   log?: ((line: string) => void) | undefined;
   /** log every statement text a session receives, and every refusal (`MASON_PG_TRACE=1`) */
   trace?: boolean | undefined;
@@ -695,6 +703,8 @@ const aborted = (): PgError => new PgError({ code: "25P02", message: "current tr
  * said when the portal is executed.
  */
 interface DuckCursor { answer: DuckAnswer; formats: readonly number[]; controller: AbortController; pending: Buffer[]; sent: number; done: boolean; failed?: unknown;
+  /** what the engine was asked to run: what a slow statement's plan is recorded from (`Ran`) */
+  ran: Ran;
   /** when its statement began (the request log's duration runs from it, however many Executes page the rows) */
   startedAt: number;
   /** its row of the request log is written: at its last row, by its refusal, or when it was dropped suspended */
@@ -707,7 +717,13 @@ interface DuckCursor { answer: DuckAnswer; formats: readonly number[]; controlle
  *  then (what this message sends is counted from there: one message is handled at a time, so nothing else is sent
  *  meanwhile), what its portal's earlier Executes sent (`carried`, `Portal.bytes`), the JSON paths it reads, and the
  *  rows sent so far while it runs */
-interface Asked { sql: string; method: string; startedAt: number; sentAt: number; carried?: number; jsonReads?: readonly string[]; rows?: number }
+interface Asked { sql: string; method: string; startedAt: number; sentAt: number; carried?: number; jsonReads?: readonly string[]; rows?: number;
+  /** set once the statement reached the engine: what its plan is recorded from, should it prove slow (`Ran`) */
+  ran?: Ran }
+
+/** A STATEMENT THE ENGINE RAN, as a slow one's plan is recorded from it (src/api/postgres/slow-plan.ts): the plan it ran
+ *  (never planned again), the values it was bound with (its parameters' and the clock's) and the session it ran under */
+interface Ran { plan: DuckPlan; values: readonly (string | null)[]; session: DuckSession }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // one connection
@@ -1535,11 +1551,11 @@ class Session {
    * read, a SET or a SHOW answered is the protocol's chatter, not recorded. Never throws: `record` buffers.
    */
   private recordRequest(answer: PgError | { rows: number; startedAt?: number }, sql?: string, refusedUser?: string, then: readonly Buffer[] = [],
-    of?: { method: string; jsonReads: readonly string[] | undefined; carried: number }): void {
+    of?: { method: string; jsonReads: readonly string[] | undefined; carried: number; ran: Ran }): void {
     // `of`: a statement recorded after its own messages (a portal dropped suspended), not the one being asked now: what
     // it sent is what its pages sent (`carried`), nothing since
     const asked: Asked | null = of === undefined ? this.asked
-      : { sql: sql ?? "", method: of.method, startedAt: Date.now(), sentAt: this.sentBytes, carried: of.carried, ...(of.jsonReads !== undefined ? { jsonReads: of.jsonReads } : {}) };
+      : { sql: sql ?? "", method: of.method, startedAt: Date.now(), sentAt: this.sentBytes, carried: of.carried, ran: of.ran, ...(of.jsonReads !== undefined ? { jsonReads: of.jsonReads } : {}) };
     const startedAt = (!(answer instanceof PgError) ? answer.startedAt : undefined) ?? asked?.startedAt ?? Date.now();
     const bytesSent = this.bytesFor(then, asked);
     // a refusal's statement is the one refuse() names (a simple Query's own statement, an Execute's portal's)
@@ -1547,8 +1563,10 @@ class Session {
     const user = this.token?.user ?? refusedUser;
     // the EFFECTIVE role: the user's own, else the roles file's default (what the statement was held to)
     const role = this.roleName();
+    const durationMs = Date.now() - startedAt;
+    const plan = this.slowPlan(answer, asked?.ran, durationMs);
     this.server.options.record({
-      requestId: crypto.randomUUID(), at: new Date(startedAt), method: asked?.method ?? "QUERY", durationMs: Date.now() - startedAt,
+      requestId: crypto.randomUUID(), at: new Date(startedAt), method: asked?.method ?? "QUERY", durationMs,
       client: `postgres:${this.vars.applicationName || "unnamed"}`, session: this.id, payload: stored.text, payloadTruncated: stored.truncated,
       caller: hashCaller(this.presented), bytesSent,
       ...(this.clientAddr !== null ? { clientAddress: this.clientAddr } : {}),
@@ -1561,7 +1579,33 @@ class Session {
             ...(answer.fields.detail ? { detail: answer.fields.detail } : {}), ...(answer.fields.hint ? { hint: answer.fields.hint } : {}),
             ...(answer.gap !== null ? { gap: answer.gap } : {}) }
         : { status: 200, rows: answer.rows }),
+      ...(plan !== undefined ? { plan } : {}),
     });
+  }
+
+  /**
+   * A SLOW STATEMENT'S PLAN, RECORDED IN THE BACKGROUND (src/api/postgres/slow-plan.ts; issue 825): asked of a statement
+   * that reached the engine (`ran`) and took SLOW_MS or more, answered or failed in the engine — never one Mason
+   * refused by a registry entry, nor one cancelled (a cancel or its timeout). The EXPLAIN is of the plan it ran, under
+   * the session it ran under, its role held as it is NOW (a refusal then is the plan's words); a statement whose role
+   * filters rows is explained with no engine plan, as EXPLAIN over the wire says it. A statement bound with values is
+   * explained with them (its plan is theirs), but its operators' details are not kept, since one could print a value
+   * the row does not keep (`detailsHidden`). Nothing here waits: the answer is sent, the row waits for its plan in the
+   * ledger.
+   */
+  private slowPlan(answer: PgError | { rows: number }, ran: Ran | undefined, durationMs: number): Promise<StoredPlan | null> | undefined {
+    if (ran === undefined || durationMs < (this.server.options.slowMs ?? SLOW_MS)) return undefined;
+    if (answer instanceof PgError && (answer.gap !== null || outcomeOf(answer.fields.code) === "cancelled")) return undefined;
+    const bound = ran.plan.params.length > 0;
+    return this.server.slowPlans.record(`session ${this.id}`, (runner, signal) => {
+      this.heldToRole(ran.plan);
+      const filtered = ran.plan.rowFilters ?? [];
+      return runner.explain(ran.plan.sql, filtered.length > 0 ? [] : ran.values, ran.session, signal,
+        { options: { analyze: false, verbose: false, costs: true, timing: false, summary: false, format: "text", ignored: [] }, fields: ran.plan.fields,
+          exact: ran.plan.exact ?? [], planning: ran.plan.timing ?? { analysisMs: 0, rewriteMs: 0 }, copies: copyFacts(this.server.options.duck.copies?.() ?? []),
+          ...(filtered.length > 0 ? { rowFilters: filtered, reads: (ran.plan.reads ?? []).map((r) => r.table) } : {}),
+          ...(bound ? { detailsHidden: true } : {}) });
+    }, bound);
   }
 
 
@@ -2010,12 +2054,16 @@ class Session {
     this.running = controller;
     try {
       const values = await this.duckValues(plan, params, clock);
-      const a = await runner.run(plan.sql, values, await this.duckSession(), controller.signal, plan.fields, plan.exact ?? []);
+      const session = await this.duckSession();
+      const a = await runner.run(plan.sql, values, session, controller.signal, plan.fields, plan.exact ?? []);
+      // it reached the engine: its plan can be recorded should it prove slow, answered or failed (recordRequest)
+      const ran: Ran = { plan, values, session };
+      if (this.asked !== null) this.asked.ran = ran;
       // a SELECT's analysis always has its RowDescription; without one, DuckDB's own columns are said as they are
       const fields = plan.fields !== null
         ? plan.fields.map((f, i) => ({ name: f.name, typeOid: a.columns[i]!.oid, typeSize: f.size, typeModifier: a.columns[i]!.oid === f.oid ? f.typmod : -1, format: formatAt(resultFormats, i) }))
         : a.columns.map((c, i) => ({ name: c.name, typeOid: c.oid, typeSize: c.size, typeModifier: -1, format: formatAt(resultFormats, i) }));
-      return { fields, cursor: { answer: a, formats: resultFormats, controller, pending: [], sent: 0, done: false, startedAt: this.asked?.startedAt ?? Date.now() } };
+      return { fields, cursor: { answer: a, formats: resultFormats, controller, pending: [], sent: 0, done: false, startedAt: this.asked?.startedAt ?? Date.now(), ran } };
     } finally { this.settled(); }
   }
 
@@ -2116,7 +2164,7 @@ class Session {
     const c = portal?.cursor;
     if (portal !== undefined && c !== undefined && c.suspended === true && c.recorded !== true && c.failed === undefined) {
       c.recorded = true;
-      this.recordRequest({ rows: c.sent, startedAt: c.startedAt }, portal.statement.sql, undefined, [], { method: "EXECUTE", jsonReads: portal.statement.duck?.jsonReads, carried: portal.bytes });
+      this.recordRequest({ rows: c.sent, startedAt: c.startedAt }, portal.statement.sql, undefined, [], { method: "EXECUTE", jsonReads: portal.statement.duck?.jsonReads, carried: portal.bytes, ran: c.ran });
     }
     c?.answer.close();
     this.portals.delete(name);
@@ -2608,6 +2656,8 @@ class Session {
       portal.fields = answer.fields;
     }
     const c = portal.cursor;
+    // a later Execute of a paged portal is a message of its own: its row (an answer or a failure) is the statement's
+    if (this.asked !== null) this.asked.ran = c.ran;
     if (c.failed !== undefined) throw c.failed;
     c.suspended = false;
     try {
@@ -2996,8 +3046,11 @@ class Server {
   private lastSchema: PgSchema;
   private lastRoles: RolesLive;
   options: PgApiOptions;
+  /** the plans of slow statements, one at a time, on a connection of their own (src/api/postgres/slow-plan.ts) */
+  readonly slowPlans: SlowPlans;
   constructor(options: PgApiOptions) {
     this.options = options;
+    this.slowPlans = new SlowPlans(() => this.options.duck.open(), (line) => this.log(line));
     this.door = { tls: options.tls === null ? null : tls.createSecureContext({ cert: options.tls.cert, key: options.tls.key }), authenticate: options.authenticate,
       recheck: options.recheck, recheckMs: options.recheckMs ?? DEFAULT_RECHECK_MS, who: "a mason user", loginHint: USER_LOGIN_HINT, public: false, logins: null,
       proxyFrom: options.proxyFrom ?? null };
@@ -3270,6 +3323,8 @@ export async function startPostgresApi(options: PgApiOptions): Promise<PgApiServ
       for (const s of [...server.sessions.values()]) s.end("server closing");
       await Promise.all([listener, ...shares].map(closeListener));
       shares.clear();
+      // a slow statement's plan in flight is abandoned (its row written without one) and its connection closed
+      await server.slowPlans.close();
       await server.catalog.stop();
       await stopParser();
     },

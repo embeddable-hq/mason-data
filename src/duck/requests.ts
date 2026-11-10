@@ -18,7 +18,7 @@
  * The Postgres catalog never lists `_mason`, so a tool connected to the listener cannot read the ledger.
  */
 import type { DuckDBValue } from "@duckdb/node-api";
-import { outcomeOf, outcomeSql, statusOf, type ApiLogRow, type Outcome, type RequestStatus } from "../api/request-log.ts";
+import { outcomeOf, outcomeSql, statusOf, type ApiLogRow, type Outcome, type RequestStatus, type StoredPlan } from "../api/request-log.ts";
 import { MASON_SCHEMA, type DuckStore } from "./store.ts";
 import { Batches, History, Streak } from "./history.ts";
 import { GAPS, type GapId } from "./gaps.ts";
@@ -38,6 +38,9 @@ export const REQUESTS_TABLE = `${MASON_SCHEMA}.requests`;
 
 const FLUSH_MS = 1000;
 const BATCH_ROWS = 1000;
+/** The longest a row waits for its plan (ApiLogRow.plan) before it is written without one: the plan's own deadline
+ *  (src/api/postgres/slow-plan.ts PLAN_DEADLINE_MS) with room to spare, so a plan that never settles costs no row. */
+export const PLAN_WAIT_MS = 45_000;
 
 /** A request's outcome in a word, from its SQLSTATE (src/api/request-log.ts: the listener's refusal line reads it too). */
 export { outcomeOf };
@@ -87,10 +90,16 @@ export interface LedgerRequest {
   /** the statement as the tool sent it, capped at 64 KiB (`queryTruncated` says when it was cut) */
   query: string;
   queryTruncated: boolean;
+  /** A SLOW STATEMENT'S PLAN (one that took SLOW_MS or more, src/api/postgres/slow-plan.ts): Mason's plain EXPLAIN of it,
+   *  run once it ended — the tables and how fresh each was, the SQL sent to the engine, the engine's operators with
+   *  their estimated rows — or a line saying why none could be recorded; null for every other row, and for a slow one
+   *  whose plan was not recorded (another's was being recorded: the log says so), cut at 8 KiB (`planTruncated`) */
+  plan: string | null;
+  planTruncated: boolean;
 }
 
 const COLUMNS = ["request_id", "started_at", "session", "application_name", "token_name", "user_name", "method", "sqlstate", "message", "detail", "hint",
-  "rows", "duration_ms", "query", "query_truncated", "seq", "json_reads", "bytes_sent", "gap", "role", "attributes", "client_addr"] as const;
+  "rows", "duration_ms", "query", "query_truncated", "seq", "json_reads", "bytes_sent", "gap", "role", "attributes", "client_addr", "plan", "plan_truncated"] as const;
 
 /** the ledger's DDL: one row per request, named for a developer who knows pg_stat_activity */
 /** a ledger made before `mason user` gains its column; a column added last is named in every INSERT */
@@ -130,21 +139,27 @@ export const REQUESTS_GAP_DDL = `ALTER TABLE ${REQUESTS_TABLE} ADD COLUMN IF NOT
  *  are NULL. */
 export const REQUESTS_CLIENT_ADDR_DDL = `ALTER TABLE ${REQUESTS_TABLE} ADD COLUMN IF NOT EXISTS client_addr VARCHAR`;
 
+/** A SLOW STATEMENT'S PLAN (ApiLogRow.plan; LedgerRequest.plan) and whether it was cut: NULL for every other row. A
+ *  ledger made before gains them; its old rows are NULL. */
+export const REQUESTS_PLAN_DDL = `ALTER TABLE ${REQUESTS_TABLE} ADD COLUMN IF NOT EXISTS plan VARCHAR`;
+export const REQUESTS_PLAN_TRUNCATED_DDL = `ALTER TABLE ${REQUESTS_TABLE} ADD COLUMN IF NOT EXISTS plan_truncated BOOLEAN`;
+
 export const REQUESTS_DDL = `CREATE TABLE IF NOT EXISTS ${REQUESTS_TABLE} (request_id VARCHAR, started_at TIMESTAMPTZ, session INTEGER, ` +
   `application_name VARCHAR, token_name VARCHAR, user_name VARCHAR, method VARCHAR, sqlstate VARCHAR, message VARCHAR, detail VARCHAR, hint VARCHAR, ` +
-  `"rows" BIGINT, duration_ms INTEGER, query VARCHAR, query_truncated BOOLEAN, seq BIGINT, json_reads VARCHAR, bytes_sent BIGINT, gap VARCHAR, role VARCHAR, attributes VARCHAR, client_addr VARCHAR)`;
+  `"rows" BIGINT, duration_ms INTEGER, query VARCHAR, query_truncated BOOLEAN, seq BIGINT, json_reads VARCHAR, bytes_sent BIGINT, gap VARCHAR, role VARCHAR, attributes VARCHAR, client_addr VARCHAR, plan VARCHAR, plan_truncated BOOLEAN)`;
 
-/** a row as the ledger buffers it: the listener's row and its number in arrival order */
-interface Numbered { row: ApiLogRow; seq: number }
+/** a row as the ledger buffers it: the listener's row, its number in arrival order, and its plan once it settled */
+interface Numbered { row: ApiLogRow; seq: number; plan?: StoredPlan | null }
 
 /** an ApiLogRow's values in COLUMNS' order */
-function valuesOf({ row: r, seq }: Numbered): DuckDBValue[] {
+function valuesOf({ row: r, seq, plan }: Numbered): DuckDBValue[] {
   const app = (r.client ?? "").replace(/^postgres:/, "");
   return [r.requestId, r.at.toISOString(), r.session ?? null, app === "unnamed" ? "" : app, r.tokenName ?? "", r.user ?? "", r.method,
     r.sqlstate ?? null, r.error === undefined || r.error === "" ? null : r.error, r.detail ?? null, r.hint ?? null,
     r.rows === undefined ? null : r.rows, Math.round(r.durationMs), r.payload ?? "", r.payloadTruncated === true, seq,
     r.jsonReads === undefined || r.jsonReads.length === 0 ? null : JSON.stringify(r.jsonReads), r.bytesSent === undefined ? null : r.bytesSent, r.gap ?? null, r.role ?? "",
-    r.attributes === undefined || Object.keys(r.attributes).length === 0 ? null : JSON.stringify(r.attributes), r.clientAddress ?? null];
+    r.attributes === undefined || Object.keys(r.attributes).length === 0 ? null : JSON.stringify(r.attributes), r.clientAddress ?? null,
+    plan?.text ?? null, plan === undefined || plan === null ? null : plan.truncated];
 }
 
 /** A ledger row as the commands read it. */
@@ -161,6 +176,7 @@ function requestOf(o: Record<string, unknown>): LedgerRequest {
     rows: o.rows === null ? null : Number(o.rows), durationMs: Number(o.duration_ms),
     endedAt: new Date(startedAt.getTime() + Number(o.duration_ms)).toISOString(), bytesSent: o.bytes_sent === null || o.bytes_sent === undefined ? null : Number(o.bytes_sent),
     query: String(o.query ?? ""), queryTruncated: o.query_truncated === true,
+    plan: typeof o.plan === "string" ? o.plan : null, planTruncated: o.plan_truncated === true,
   };
 }
 
@@ -184,6 +200,8 @@ export interface RequestQuery {
   search?: string | undefined;
   /** strictly older than this position (a page's `before`, parseRequestCursor) */
   before?: { at: string; seq: number } | undefined;
+  /** the one request of this id (`mason logs --requests --id`) */
+  id?: string | undefined;
 }
 
 /**
@@ -283,6 +301,9 @@ export class RequestLedger {
   /** rows lost since the last flush that succeeded: said once when the streak begins, and when it ends */
   private readonly lost = new Streak();
   private closed = false;
+  /** rows numbered and waiting for their plan (ApiLogRow.plan): each written once it settles, or at PLAN_WAIT_MS, or at
+   *  the close — whichever comes first, once */
+  private readonly waiting = new Map<Numbered, { settled: Promise<void>; timer: ReturnType<typeof setTimeout> }>();
 
   private readonly history: History;
   private readonly batches: Batches<Numbered>;
@@ -298,7 +319,8 @@ export class RequestLedger {
 
   /** The ledger of a store: its table made, the rows past the retention deleted, and a trim every hour. */
   static async open(store: DuckStore, log: (line: string) => void, options: LedgerOptions): Promise<RequestLedger> {
-    const history = await History.open(store, [REQUESTS_DDL, REQUESTS_USER_DDL, REQUESTS_SEQ_DDL, REQUESTS_JSON_DDL, REQUESTS_BYTES_DDL, REQUESTS_GAP_DDL, REQUESTS_ROLE_DDL, REQUESTS_ATTRIBUTES_DDL, REQUESTS_CLIENT_ADDR_DDL]);
+    const history = await History.open(store, [REQUESTS_DDL, REQUESTS_USER_DDL, REQUESTS_SEQ_DDL, REQUESTS_JSON_DDL, REQUESTS_BYTES_DDL, REQUESTS_GAP_DDL, REQUESTS_ROLE_DDL, REQUESTS_ATTRIBUTES_DDL, REQUESTS_CLIENT_ADDR_DDL,
+      REQUESTS_PLAN_DDL, REQUESTS_PLAN_TRUNCATED_DDL]);
     const ledger = new RequestLedger(history, log, options);
     ledger.next = Number((await history.reader.runAndReadAll(`SELECT coalesce(max(seq), -1) + 1 FROM ${REQUESTS_TABLE}`)).getRowsJS()[0]![0]);
     await history.keepTrimmed(() => ledger.trim(), (e) => log(`request log: deleting the requests older than ${ledger.days} days failed: ${e.message}`));
@@ -309,11 +331,39 @@ export class RequestLedger {
   record(row: ApiLogRow): void {
     // the listener closes before the ledger (mason stop), so nothing should arrive after: said if it does, never written
     if (this.closed) { this.log(`request log: a request after the log closed, not recorded (${row.requestId})`); return; }
-    this.batches.push({ row, seq: this.next++ });
+    const n: Numbered = { row, seq: this.next++ };
+    if (row.plan === undefined) { this.batches.push(n); return; }
+    // A SLOW STATEMENT'S ROW WAITS FOR ITS PLAN (src/api/postgres/slow-plan.ts), numbered now so it keeps its place: it
+    // is written with the plan, or without one past PLAN_WAIT_MS; a plan that failed is none (the recorder said why)
+    let release!: () => void;
+    const settled = new Promise<void>((resolve) => { release = resolve; });
+    const write = (plan: StoredPlan | null): void => {
+      const w = this.waiting.get(n);
+      if (w === undefined) return;
+      clearTimeout(w.timer);
+      this.waiting.delete(n);
+      this.batches.push({ ...n, plan });
+      release();
+    };
+    const timer = setTimeout(() => {
+      this.log(`request log: a slow statement's plan took more than ${PLAN_WAIT_MS / 1000} s; its request is recorded without it (${row.requestId})`);
+      write(null);
+    }, PLAN_WAIT_MS);
+    timer.unref();
+    this.waiting.set(n, { settled, timer });
+    row.plan.then(write, (e: unknown) => {
+      // the recorder never rejects; said all the same, never swallowed, and the row is written without a plan
+      this.log(`request log: a slow statement's plan failed: ${(e as Error).message} (${row.requestId})`);
+      write(null);
+    });
   }
 
-  /** Writes what is waiting, after any flush in flight. Resolves whether it was written or not (a failure is said). */
-  flush(): Promise<void> { return this.batches.flush(); }
+  /** Writes what is waiting — a row waiting for its plan once it has it — after any flush in flight. Resolves whether it
+   *  was written or not (a failure is said). */
+  async flush(): Promise<void> {
+    await Promise.all([...this.waiting.values()].map((w) => w.settled));
+    return this.batches.flush();
+  }
 
   private async write(rows: Numbered[]): Promise<void> {
     const width = COLUMNS.length;
@@ -379,6 +429,7 @@ export class RequestLedger {
     if (q.client !== undefined) where.push(`application_name = ${arg(q.client)}`);
     if (q.minMs !== undefined) where.push(`duration_ms >= ${arg(q.minMs)}`);
     // a substring, any case: contains() takes the text as it is (no LIKE pattern to escape); a scan of the kept days, as every filter is
+    if (q.id !== undefined) where.push(`request_id = ${arg(q.id)}`);
     if (q.search !== undefined) where.push(`contains(lower(coalesce(query, '')), lower(${arg(q.search)}))`);
     if (q.before !== undefined) {
       const at = arg(q.before.at, "::TIMESTAMPTZ");
@@ -523,6 +574,8 @@ export class RequestLedger {
   /** Writes what is waiting and closes the ledger's connections (mason stop). */
   async close(): Promise<void> {
     this.history.stopTrimming();
+    // a row still waiting for its plan is written now, without it: the listener closed first, so none is coming
+    for (const [n, w] of [...this.waiting]) { clearTimeout(w.timer); this.waiting.delete(n); this.batches.push({ ...n, plan: null }); }
     await this.flush();
     this.closed = true;
     this.history.closeConnections();

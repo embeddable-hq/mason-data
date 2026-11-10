@@ -17,7 +17,7 @@ same JSON; the web page and the managed service read those endpoints, never a se
 | `GET /api/activity?since=` | (the Usage page's) | one time range of the request log: `{ since, window, clients, clientsTotal, slowest, keptDays }` — its statements as the summary counts a day, who sent them (a row per user and client: statements, failed, sessions, last; the 50 with the most statements, `clientsTotal` the count of every client and session), the 10 slowest that completed |
 | `GET /api/slow`, `GET /api/refused` | `mason status` | the slow statements; the refused and failed ones, each distinct one once |
 | `GET /api/unsupported?since=&limit=` | `mason status` `unsupported` | the refused statements grouped by the registry entry (docs/SQL-SUPPORT.md) that refused them: `[{ gap, title, runs, users, clients, last, example }]`, the most refused first; a day and 10 entries by default |
-| `GET /api/requests?limit=&failed=&outcome=&since=&until=&user=&client=&slow=&search=&before=` | `mason logs --requests` | the request log, filtered and paged; `slow=1` (`--slow`) the ones that took `SLOW_MS` (1 s) or more, `search` (`--search`) a piece of the statement's text, any case |
+| `GET /api/requests?limit=&failed=&outcome=&since=&until=&user=&client=&slow=&search=&before=&id=` | `mason logs --requests` | the request log, filtered and paged; `slow=1` (`--slow`) the ones that took `SLOW_MS` (1 s) or more, `search` (`--search`) a piece of the statement's text, any case; `id` (`--id`, printed whole) one request; a slow one carries its `plan` ("The plan of a slow statement") |
 | `GET /api/events?limit=&since=&failed=` | `mason logs --events`; `mason status` `recentErrors.sync` | the sync's failures and events, and the run's restarts |
 | `GET /api/running`, `POST /api/cancel { session }` | `mason logs --running`, `mason cancel <session>` | the statements running now; stop one as a client's cancel does |
 | `GET /api/usage?since=&until=&step=` | `mason usage` | a sample a minute, re-bucketed by `step` (a point of more than a minute: its p50 / p95 are its statements', from the request log, never its worst minute's), and each copy's own size |
@@ -170,6 +170,7 @@ Key: ✅ built · ⏸ deferred
 | Cancel | ✅ | `POST /api/cancel`, `mason cancel <session>`, through the listener's one path |
 | User | ✅ | `user`; and the client's `applicationName` |
 | Query ID | ✅ | `requestId` |
+| The plan of a slow statement | ✅ | `plan`, `planTruncated` ("The plan of a slow statement" below): in the row's details, and whole in `mason logs --requests --id <requestId>` |
 | Rows scanned | ⏸ | **Decide later: may add cost to every query.** DuckDB reports it only with its profiler on per statement, whose cost is not measured. Measure (about half a day) before promising it. |
 | Filters: status, date, user | ✅ | `/api/requests`: outcome, `failed`, since / until, user, client, `slow`, `search`, and paging (`before`) |
 

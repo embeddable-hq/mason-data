@@ -11,6 +11,19 @@ import * as crypto from "node:crypto";
 /** Fail closed on the storage side: never let one request bloat the ledger. */
 export const MAX_STORED_PAYLOAD_BYTES = 64 * 1024;
 
+/** A statement answered in this many milliseconds or more is slow: what mason status lists, what the `slow` filter
+ *  keeps (`--slow`, `slow=1`, src/cli/request-filter.ts), and whose plan is recorded with its row
+ *  (src/api/postgres/slow-plan.ts). One constant, here, where the request log's row is defined. */
+export const SLOW_MS = 1000;
+
+/** The most of a slow statement's plan a row keeps (`storedPlan`): a few KiB, the operators and the SQL sent of a plan
+ *  a person reads; past it the plan is cut and says so. */
+export const MAX_STORED_PLAN_BYTES = 8 * 1024;
+
+/** A slow statement's plan as its row keeps it: Mason's EXPLAIN text, capped (`truncated`: cut before
+ *  MAX_STORED_PLAN_BYTES). */
+export interface StoredPlan { text: string; truncated: boolean }
+
 export interface ApiLogRow {
   requestId: string;
   at: Date;
@@ -54,6 +67,10 @@ export interface ApiLogRow {
   /** the bytes the listener sent the session for this statement: from its message's arrival to its last frame (its
    *  rows, its CommandComplete or ErrorResponse) — what it cost to send; absent where nothing was counted */
   bytesSent?: number | undefined;
+  /** A SLOW STATEMENT'S PLAN (src/api/postgres/slow-plan.ts): a plain EXPLAIN of it, run once it ended, off its
+   *  answer's path. The ledger holds the row until this settles (bounded) and writes the two together; it settles to
+   *  null where none was recorded. Absent: none asked (not slow, refused, cancelled, or another plan was being recorded) */
+  plan?: Promise<StoredPlan | null> | undefined;
 }
 
 /** The SQLSTATE of a cancelled statement: a CancelRequest, `mason cancel`, or a statement_timeout (Postgres's 57014). */
@@ -115,4 +132,15 @@ export function storedPayload(body: string): { text: string; truncated: boolean 
     text: buf.subarray(0, MAX_STORED_PAYLOAD_BYTES).toString("utf8"),
     truncated: true,
   };
+}
+
+/** A plan's text as a row keeps it: whole up to MAX_STORED_PLAN_BYTES, else cut at the last whole line before it (a
+ *  character boundary where one line is longer), `truncated` saying so. */
+export function storedPlan(text: string): StoredPlan {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.byteLength <= MAX_STORED_PLAN_BYTES) return { text, truncated: false };
+  // a half-written UTF-8 sequence at the cut decodes as U+FFFD: dropped, never stored as if the plan held it
+  const cut = buf.subarray(0, MAX_STORED_PLAN_BYTES).toString("utf8").replace(/�$/, "");
+  const line = cut.lastIndexOf("\n");
+  return { text: line > 0 ? cut.slice(0, line) : cut, truncated: true };
 }

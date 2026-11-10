@@ -204,6 +204,9 @@ function keptJson(f: CopyFacts | null, rows: boolean): Record<string, unknown> {
 /** what EXPLAIN says of a statement that reads a filtered table, in the place of the engine's plan */
 const FILTERED = "the engine's plan is not shown for a statement that reads a table the role filters: it would say what the engine knows of every row; a user with no row filter reads the full plan";
 
+/** what a recorded plan says of a statement bound with values, in the place of each operator's details */
+export const DETAILS_HIDDEN = "the engine's operators are recorded without their details (a filter, a sort key, a join's condition): the statement was bound with values, which a detail could print and the request log does not keep";
+
 /** what EXPLAIN says: Mason's two sections, DuckDB's plan, ANALYZE's times */
 export interface Explained {
   copies: Copy[];
@@ -215,6 +218,10 @@ export interface Explained {
   plan: PlanNode[];
   /** the statement reads a table the role filters: no engine plan, `plan` is empty, and nothing here came from the engine */
   filtered?: true;
+  /** the engine's operators are said without their details (`DETAILS_HIDDEN`): a slow statement's recorded plan of a
+   *  statement bound with values (src/api/postgres/slow-plan.ts), whose details could print a value its request-log row
+   *  does not keep */
+  detailsHidden?: true;
   analyzed?: {
     rows: number;
     /** the plan is DuckDB's profile of the statement; false: it wrote none (`UNPROFILED`), the plan is its EXPLAIN */
@@ -247,6 +254,7 @@ export function explainText(e: Explained, o: ExplainOptions): string[] {
   if (e.functions.length > 0) lines.push(`  Mason's functions the engine calls: ${e.functions.join(", ")}`);
   for (const name of o.ignored) lines.push(`  Note: ${name} has no meaning to the engine: ignored`);
   if (e.filtered === true) lines.push(`  Note: ${FILTERED}`);
+  if (e.detailsHidden === true && e.plan.length > 0) lines.push(`  Note: ${DETAILS_HIDDEN}`);
   if (e.analyzed?.profiled === false) lines.push(`  Note: ${UNPROFILED}`);
   else if (e.analyzed !== undefined && o.timing) lines.push("  Note: an operator's thread time is the engine's, summed over the threads that ran it and the operators under it: a parallel one's exceeds the Execution Time");
   const walk = (n: PlanNode, depth: number): void => {
@@ -256,7 +264,7 @@ export function explainText(e: Explained, o: ExplainOptions): string[] {
     const actual = n.actualRows === undefined ? "" : ` (actual rows=${n.actualRows}${o.timing && n.threadMs !== undefined ? `, thread time=${ms(n.threadMs)} ms` : ""})`;
     lines.push(`${lead}${operatorName(n.type)}${on === null ? "" : ` on ${qualifiedName(on)}`}${est}${actual}`);
     const pad = " ".repeat(depth === 0 ? 2 : 6 * depth + 2);
-    for (const [k, v] of Object.entries(n.extra)) if (o.verbose ? k !== "Table" : !VERBOSE_ONLY.has(k)) lines.push(`${pad}${k}: ${detail(v)}`);
+    if (e.detailsHidden !== true) for (const [k, v] of Object.entries(n.extra)) if (o.verbose ? k !== "Table" : !VERBOSE_ONLY.has(k)) lines.push(`${pad}${k}: ${detail(v)}`);
     for (const c of n.children) walk(c, depth + 1);
   };
   e.plan.forEach((n) => walk(n, 0));
@@ -279,7 +287,7 @@ export function explainJson(e: Explained, o: ExplainOptions): string {
       ...(on === null ? {} : { "Relation Name": on.name, Schema: on.schema }),
       ...(o.costs && n.estimate !== null ? { "Plan Rows": n.estimate } : {}),
       ...(n.actualRows === undefined ? {} : { "Actual Rows": n.actualRows, "Actual Loops": 1, ...(o.timing && n.threadMs !== undefined ? { "Engine Thread Time": Number(ms(n.threadMs)) } : {}) }),
-      ...Object.fromEntries(Object.entries(n.extra).filter(([k]) => o.verbose ? k !== "Table" : !VERBOSE_ONLY.has(k)).map(([k, v]) => [`Engine ${k}`, v])),
+      ...Object.fromEntries(Object.entries(e.detailsHidden === true ? {} : n.extra).filter(([k]) => o.verbose ? k !== "Table" : !VERBOSE_ONLY.has(k)).map(([k, v]) => [`Engine ${k}`, v])),
       ...(n.children.length === 0 ? {} : { Plans: n.children.map(node) }),
     };
   };
@@ -294,7 +302,7 @@ export function explainJson(e: Explained, o: ExplainOptions): string {
       "Computed After Engine": e.computed,
       "Mason Functions Engine Calls": e.functions,
       ...(o.ignored.length === 0 ? {} : { Ignored: o.ignored.map((n) => `${n} has no meaning to the engine`) }),
-      ...(e.filtered === true ? { Note: FILTERED } : e.analyzed?.profiled === false ? { Note: UNPROFILED } : {}),
+      ...(e.filtered === true ? { Note: FILTERED } : e.analyzed?.profiled === false ? { Note: UNPROFILED } : e.detailsHidden === true ? { Note: DETAILS_HIDDEN } : {}),
     },
   };
   if (e.analyzed !== undefined && o.summary) {

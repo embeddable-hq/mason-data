@@ -70,7 +70,7 @@ const pollNow = (sources: string[]): Promise<{ at: string; tables: PolledTable[]
 const asks: RequestQuery[] = [];
 const request: LedgerRequest = { requestId: "r1", startedAt: "2026-10-24T10:04:00.000Z", session: 3, applicationName: "Metabase", clientAddress: null, tokenName: "", user: "", role: "", attributes: null, method: "QUERY",
   outcome: "refused", status: "failed", sqlstate: "42P01", message: 'relation "nope" does not exist', detail: null, hint: null, rows: null, durationMs: 2,
-  endedAt: "2026-10-24T10:04:00.002Z", bytesSent: 120, query: "SELECT * FROM nope", queryTruncated: false };
+  endedAt: "2026-10-24T10:04:00.002Z", bytesSent: 120, query: "SELECT * FROM nope", queryTruncated: false, plan: null, planTruncated: false };
 const window = (days: number) => ({ days, covered: days, statements: 3, completed: 1, refused: 1, failed: 0, cancelled: 1, rows: 20, bytesSent: 900, durationMs: { avg: 5, p50: 5, p95: 5 } });
 const summary: QuerySummary = { keptDays: 7, day: window(1), week: window(7) };
 // the listener's statements running now, and its cancel (src/api/postgres/server.ts): a session running one, another idle

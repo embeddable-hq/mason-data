@@ -1693,7 +1693,7 @@ async function waitGenerated(run: DevRun, named: string, timeout: number, json: 
  *  by tests/web-page.test.ts): a scheduled poll that succeeds is no event, so a person who synced reads where it is. */
 export const EVENTS_LEAVE_OUT = "A scheduled poll that succeeds is not listed: the last one's result is each table's last sync (mason status, the Tables page's Last sync).";
 
-const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<filters>]] [--events [--failed]] [--running] [--json]
+const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<filters>] [--id <request id>]] [--events [--failed]] [--running] [--json]
 
   The last lines of Mason's log: every sync, poll and statement it ran, warnings and errors with their reasons —
   running or not.
@@ -1704,6 +1704,7 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     mason logs --requests --failed -n 20    the last 20 statements refused, failed or cancelled
     mason logs --requests --since 2h --user metabase --outcome failed,cancelled
     mason logs --requests --slow --search orders   the statements over orders that took a second or more
+    mason logs --requests --id <request id>   one request whole: its statement, its error, and a slow one's plan
     mason logs --events --failed  the sync's latest failures
     mason logs --running          the statements running now, and their sessions
 
@@ -1725,6 +1726,7 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
   --slow           with --requests: only the ones that took ${(SLOW_MS / 1000).toLocaleString("en-US")} s or more (the slow ones mason status lists)
   --search <text>  with --requests: only the statements whose text has it, in any case (at most ${MAX_SEARCH} characters)
   --before <pos>   with --requests: the page before: the position a page answered with (its last Next line)
+  --id <id>        with --requests: the one request of this id (a requestId of --json), printed whole with its plan
   --running        the statements running now (Mason must be running)
   --json           as data: its shape is at the end
 
@@ -1746,7 +1748,10 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     tokenName, user (the mason user), role, attributes (the user's values its role's row filters
     read, or null), method, outcome (ok, refused, failed, cancelled), status
     (completed, failed, cancelled: what a reader shows), sqlstate, message, detail, hint, rows,
-    bytesSent, durationMs, query, queryTruncated }], keptDays, before (the position of the page before,
+    bytesSent, durationMs, query, queryTruncated, plan (a statement that took ${(SLOW_MS / 1000).toLocaleString("en-US")} s or more: the
+    engine's plan of it, recorded once it ended — the tables and how fresh each was, the SQL sent to the engine, its
+    operators with their estimated rows — or why none could be; else null), planTruncated (cut at 8 KiB) }], keptDays,
+    before (the position of the page before,
     or null: none older) }; with --events { events: [{ at, kind (copy_failed, poll_failed,
     catch_up_failed, stream_failed, source_unreachable, restart, copied, recovered, synced (a sync
     asked by hand), sync_changed (a table's sync: changed)), failed, table (null: the whole sync),
@@ -1761,14 +1766,14 @@ export const LOGS: CommandSpec & { needs: "project" } = {
   usage: LOGS_USAGE,
   options: { lines: { type: "string", short: "n" }, follow: { type: "boolean", short: "f" }, start: { type: "boolean" },
     requests: { type: "boolean" }, events: { type: "boolean" }, failed: { type: "boolean" }, outcome: { type: "string", multiple: true }, since: { type: "string" },
-    until: { type: "string" }, user: { type: "string" }, client: { type: "string" }, slow: { type: "boolean" }, search: { type: "string" }, before: { type: "string" }, running: { type: "boolean" }, json: { type: "boolean" } },
+    until: { type: "string" }, user: { type: "string" }, client: { type: "string" }, slow: { type: "boolean" }, search: { type: "string" }, before: { type: "string" }, id: { type: "string" }, running: { type: "boolean" }, json: { type: "boolean" } },
   json: ["lines", "requests", "events", "keptDays", "before", "running", "next"],
 };
 
 /** the request log's filters as mason logs spells them: -n, --since, … (src/cli/request-filter.ts names each so) */
 const flagOf = (k: FilterKey): string => k === "limit" ? "-n" : `--${k}`;
 /** the filters of --requests (every one but -n) */
-const FILTER_FLAGS = ["failed", "outcome", "since", "until", "user", "client", "slow", "search", "before"] as const;
+const FILTER_FLAGS = ["failed", "outcome", "since", "until", "user", "client", "slow", "search", "before", "id"] as const;
 
 /**
  * One request of the run's ledger on one line (src/duck/requests.ts): when, the outcome and SQLSTATE, how long,
@@ -1781,6 +1786,34 @@ export function requestLine(r: LedgerRequest, st: Style): string {
   const who = `${r.applicationName || "(no application_name)"}${r.tokenName ? ` (token ${r.tokenName})` : ""}${r.user ? ` (user ${r.user})` : ""}`;
   return `${r.startedAt.slice(0, 19).replace("T", " ")}  ${paint(word.padEnd(15))}  ${statementMsText(r.durationMs).padStart(9)}  ${rows.padStart(11)}  ${who}  ` +
     `${oneLine(r.query, 120) || "(no statement)"}${r.message ? ` — ${firstLine(r.message)}` : ""}`;
+}
+
+/**
+ * ONE REQUEST WHOLE (`mason logs --requests --id`): its line, then every fact a row keeps as aligned rows, the statement
+ * whole (as kept: cut at 64 KiB, said), and a slow statement's plan line by line (cut at 8 KiB, said).
+ */
+export function requestDetail(r: LedgerRequest, st: Style): string {
+  const facts: Array<[string, string]> = [
+    ["request", r.requestId], ["started", r.startedAt], ["ended", r.endedAt], ["took", statementMsText(r.durationMs)],
+    ["outcome", `${r.outcome}${r.sqlstate ? ` (SQLSTATE ${r.sqlstate})` : ""}`], ["method", r.method],
+    ["session", r.session === null ? "-" : String(r.session)], ["client", r.applicationName || "(no application_name)"],
+    ...(r.clientAddress !== null && r.clientAddress !== undefined ? [["address", r.clientAddress] as [string, string]] : []),
+    ...(r.user ? [["user", r.user] as [string, string]] : []), ...(r.tokenName ? [["token", r.tokenName] as [string, string]] : []),
+    ...(r.role ? [["role", r.role] as [string, string]] : []),
+    ...(r.attributes !== null && r.attributes !== undefined ? [["attributes", Object.entries(r.attributes).map(([k, v]) => `${k}=${Array.isArray(v) ? v.join(",") : String(v)}`).join(" ")] as [string, string]] : []),
+    ["rows", r.rows === null ? "-" : n(r.rows)], ["bytes sent", r.bytesSent === null ? "-" : n(r.bytesSent)],
+    ...(r.message ? [["error", r.message] as [string, string]] : []), ...(r.detail ? [["detail", r.detail] as [string, string]] : []),
+    ...(r.hint ? [["hint", r.hint] as [string, string]] : []),
+  ];
+  const w = Math.max(...facts.map(([k]) => k.length));
+  const lines = [requestLine(r, st), "", ...facts.map(([k, v]) => `  ${st.dim(k.padEnd(w))}   ${v}`), "",
+    st.bold(`Statement${r.queryTruncated ? " (cut at 64 KiB)" : ""}:`), ...(r.query || "(no statement)").split("\n").map((l) => `  ${l}`)];
+  if (r.plan !== null) {
+    lines.push("", st.bold(`Plan, recorded once it ended${r.planTruncated ? " (cut at 8 KiB)" : ""}:`), ...r.plan.split("\n").map((l) => `  ${l}`));
+  } else if (r.durationMs >= SLOW_MS && r.outcome === "ok") {
+    lines.push("", st.dim("No plan was recorded for it: another slow statement's plan was being recorded at the time (mason logs says so), or it ran before plans were recorded."));
+  }
+  return lines.join("\n");
 }
 
 /** One statement running now on one line (src/api/postgres/server.ts RunningStatement): its session, how long, who, what. */
@@ -1822,7 +1855,13 @@ async function requestLogs(q: RequestQuery, json: boolean): Promise<number> {
     const keptDays = Number(reply.body.keptDays);
     const before = typeof reply.body.before === "string" ? reply.body.before : null;
     const filtered = q.failed === true || q.outcomes !== undefined || q.since !== undefined || q.until !== undefined || q.user !== undefined || q.client !== undefined ||
-      q.minMs !== undefined || q.search !== undefined;
+      q.minMs !== undefined || q.search !== undefined || q.id !== undefined;
+    // ONE REQUEST, BY ITS ID: printed whole, its plan with it; none of that id is the lookup's failure, said with the way out
+    if (q.id !== undefined && requests.length === 0) {
+      return failed("logs", { message: `no request ${q.id} in the request log`, code: "not_found",
+        why: `the log keeps ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_HISTORY_DAYS), and a statement that reads no synced table is not recorded`,
+        next: [["mason logs --requests --json", "the requests, each with its requestId"]] }, { json });
+    }
     const next: NextStep[] = [
       ...(before !== null ? [[olderPage(q, before), "the page before this one"] as NextStep] : []),
       ...(filtered ? [["mason logs --requests", "every request, answered or not"] as NextStep] : [["mason logs --requests --failed", "only the ones not answered"] as NextStep]),
@@ -1831,7 +1870,7 @@ async function requestLogs(q: RequestQuery, json: boolean): Promise<number> {
     if (json) { out(jsonText(LOGS, { requests, keptDays, before }, next)); return 0; }
     const st = styleOut();
     if (!requests.length) out(`No ${filtered ? "request that passes the filters" : "request"} in the last ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_HISTORY_DAYS).`);
-    for (const r of requests) out(requestLine(r, st));
+    for (const r of requests) out(q.id !== undefined ? requestDetail(r, st) : requestLine(r, st));
     out(endText({ next, ...(!requests.length && !filtered ? { tips: [`${UNLISTED_STATEMENTS}.`] } : {}) }, st));
     return 0;
   });
@@ -1917,7 +1956,7 @@ export async function logs(argv: string[]): Promise<number> {
     const text = (v: unknown): string | undefined => typeof v === "string" ? v : undefined;
     const q = requestFilter({ limit: text(f.values.lines), failed: f.values.failed === true, outcome: listFlag(f.values.outcome), since: text(f.values.since),
       until: text(f.values.until), user: text(f.values.user), client: text(f.values.client),
-      slow: f.values.slow === true, search: text(f.values.search), before: text(f.values.before) }, Date.now(), flagOf);
+      slow: f.values.slow === true, search: text(f.values.search), before: text(f.values.before), id: text(f.values.id) }, Date.now(), flagOf);
     if ("message" in q) return failed("logs", { ...q, usage: LOGS_USAGE }, { json });
     return requestLogs(q, json);
   }
