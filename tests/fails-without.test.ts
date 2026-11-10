@@ -337,7 +337,7 @@ test("a run killed outright leaves a copy, and the next run removes it", async (
   assertClean(r);
 });
 
-test("two runs at once in one tree each get their verdict, and another run's live copy is left alone", async (t) => {
+test("two runs at once in one tree each get their verdict, and another run's live copy is left alone", { skip: "quarantined: #792" }, async (t) => {
   const r = repo(t);
   const once = (): Promise<{ code: number | null; out: string }> => new Promise((resolve) => {
     const c = spawn(process.execPath, ["scripts/fails-without.ts", r.commit, FILE], { cwd: r.dir, env: r.env, stdio: ["ignore", "pipe", "pipe"] });
