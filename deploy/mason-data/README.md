@@ -173,6 +173,7 @@ Per-table or per-user detail (which table is stale, who sent what) would need a 
 | `MASON_PG_TLS_CERT`, `MASON_PG_TLS_KEY` | its certificate, required off loopback; or `MASON_PG_SELF_SIGNED_TLS=1` for one made in `.mason/`, or `MASON_PG_PLAIN=1` behind a TLS proxy of your own |
 | `MASON_PG_PROXY_FROM` | behind a TCP load balancer or proxy that sends the PROXY protocol v2 (an AWS NLB, HAProxy): the proxy's own addresses, CIDRs comma-separated, so the request log names each real client; a connection from one must begin with the header, and one from any other address is refused (default unset: none is read; [docs/POSTGRES-API.md](../../docs/POSTGRES-API.md) "Behind a TCP proxy") |
 | `MASON_PG_HOST`, `MASON_PG_PORT` | the Postgres API's address |
+| `MASON_PG_PUBLIC_URL` | behind a load balancer, a proxy or a DNS name: the Postgres API's address as a client reaches it, `postgres://<host>:<port>/<database>?sslmode=<mode>` (`postgres://db.example.com:5433/?sslmode=verify-full`). `mason status`, `mason user add` and the page's Connect print every URL to paste from it, and no note to replace the host. The database is optional (the one Mason answers as), the port 5432 when none, `sslmode` required (`disable`, `require`, `verify-ca` or `verify-full`: the TLS a client uses to reach that address, which Mason cannot check); a user, a password or any other parameter refuses the start (default unset: the listener's own address; [docs/POSTGRES-API.md](../../docs/POSTGRES-API.md) "The address clients reach") |
 
 **Worth deciding**:
 

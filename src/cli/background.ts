@@ -31,7 +31,7 @@ import { memoryProblems } from "../duck/store.ts";
 import { DEV } from "./registry.ts";
 import { UI } from "./ui.ts";
 import { out as styleOut, stepRenderer } from "./style.ts";
-import { postgresLink, withoutPlaceholders, type PostgresLink } from "./pg-url.ts";
+import { clientLink, postgresLink, withoutPlaceholders, type PostgresLink } from "./pg-url.ts";
 
 const say = (m: string): void => { process.stdout.write(`${m}\n`); };
 const MAIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "mason.cjs");
@@ -69,7 +69,7 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
   const other = await liveRun(t.project);
   if (other !== null) {
     // running already is what start wants: said, exit 0, the same answer as a start (what is up, and what to run)
-    if (o.json) { say(jsonText(DEV, { running: true, pid: other.pid, postgres: postgresLink(other.postgresUrl) }, [["mason status", "what it is doing"], ["mason stop", "stop it"]])); return 0; }
+    if (o.json) { say(jsonText(DEV, { running: true, pid: other.pid, postgres: clientLink(other) }, [["mason status", "what it is doing"], ["mason stop", "stop it"]])); return 0; }
     say(`Mason is already running for ${t.project.config.name} (pid ${other.pid}).`);
     say(nextBlock([["mason status", "what it is doing"], ["mason stop", "stop it"]]));
     return 0;

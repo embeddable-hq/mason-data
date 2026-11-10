@@ -492,7 +492,7 @@ export function renderConnect(pg, { first = false, table = null, served = false,
   return `<div class="connect${first ? " first" : ""}"><p class="connect-title">${first ? "Connect your first tool" : "Connect"}</p>` +
     (first ? `<p class="lead">Mason answers SQL over the Postgres protocol, as a read replica of your database would: point psql, a BI tool or your app's analytics code at this URL.</p>` : "") +
     `<dl class="facts"><dt>URL</dt><dd>${copyable("connect-url", pg.shown)}</dd><dt>psql</dt><dd>${copyable("connect-psql", pg.psql)}</dd>${tryIt}</dl>` +
-    (served ? `<p class="tip">${serverHostNote(pg)}</p>` : "") +
+    serverHostNote(pg, served) +
     (readOnly !== null ? `<p class="tip">A user's name and password go in place of ${code("<user>:<password>")}: ${code("mason user add <name>")} prints the whole URL once.</p>`
       : `<p class="tip"><a class="btn${first ? " primary" : ""}" href="${USERS_HASH}">Create a user</a> <span>Its name and password go in place of ${code("<user>:<password>")}: the Users page shows the whole URL once, as ${code("mason user add <name>")} prints it.</span></p>`) + `${share}</div>`;
 }
@@ -505,8 +505,11 @@ export const readOnlyLine = (what, why) => why == null ? "" : `<p class="count">
  *  still changed from it (`pageReadOnlyAllow` has `tables`: MASON_UI_READ_ONLY_ALLOW=tables, whose routes the run serves). */
 export const tablesReadOnly = (s) => (s?.pageReadOnlyAllow ?? []).includes("tables") ? null : s?.pageReadOnly ?? null;
 
-/** On a server's page the Postgres URL's host is the server's own view of itself: said beside it, as a tool elsewhere needs the server's address. */
-export const serverHostNote = (pg) => `This is the address on the server: from elsewhere a tool connects to the server's own address, in place of ${code(pg.host ?? "localhost")}.`;
+/** On a server's page the Postgres URL's host is the server's own view of itself: said beside it, as a tool elsewhere
+ *  needs the server's address. "" off a server, and where the URL is the address a client reaches (`pg.public`: mason
+ *  serve's MASON_PG_PUBLIC_URL, src/cli/pg-url.ts clientLink). */
+export const serverHostNote = (pg, served) => !served || pg.public === true ? ""
+  : `<p class="tip">This is the address on the server: from elsewhere a tool connects to the server's own address, in place of ${code(pg.host ?? "localhost")}.</p>`;
 
 /** Nothing to show, quietly: a title and a line under it (`hintHtml`: HTML, a command in code()). */
 export const empty = (title, hintHtml = "") => `<div class="empty"><p class="empty-title">${esc(title)}</p>${hintHtml ? `<p>${hintHtml}</p>` : ""}</div>`;

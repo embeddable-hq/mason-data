@@ -1075,6 +1075,35 @@ test("a server's Connect says the URL's host is the server's own view of itself;
   assert.doesNotMatch(textOf(renderUsersConnect(pg)), note);
 });
 
+test("MASON_PG_PUBLIC_URL: /api/state's postgres is the address a client reaches, every Connect panel prints it, and no note to replace the host", async () => {
+  const renderConnect = fn<[unknown, unknown?], string>("renderConnect");
+  const { renderUsersConnect } = await import(path.join(WEB, "pages", "users.js") as string) as { renderUsersConnect: (pg: unknown, served?: boolean) => string };
+  const ctxOf = (postgresPublicUrl?: string) => ({
+    source, facts: () => ({ version: 160000, versionText: "16.4", standby: false, tables: TABLES, systemIdentifier: null }), warnings: [], replication: () => null,
+    page: true, served: true, users: { file: "/app/.mason/users.json", apiKey: "k".repeat(32), database: "shop", postgresUrl: "postgresql://127.0.0.1:5433/shop?sslmode=require",
+      ...(postgresPublicUrl === undefined ? {} : { postgresPublicUrl }) },
+    folder: () => "/app/mason", root: "/app", home: "/app/.mason", version: "0.9.0", startedAt: Date.parse("2026-10-27T09:00:00.000Z"),
+    sources: () => ({ file: sourceFile, problem: null }), listener: { openSessions: () => ({ open: 0, byClient: [] }) },
+    duck: { file: "/app/.mason/duck.db", requests: { days: 7 }, restarts: () => [], disk: () => ({ path: "/app/.mason", freeBytes: null, projectedBytes: null }) },
+  }) as unknown as RunContext;
+  const now = Date.parse("2026-10-27T10:00:00.000Z");
+  const pub = (runState(ctxOf("postgresql://db.example.com:6432/?sslmode=verify-full"), [], null, now) as RunState).postgres!;
+  const own = (runState(ctxOf(), [], null, now) as RunState).postgres!;
+  assert.deepEqual(pub, { url: "postgresql://db.example.com:6432/shop?sslmode=verify-full", host: "db.example.com", port: 6432, database: "shop", sslmode: "verify-full", public: true,
+    shown: "postgres://<user>:<password>@db.example.com:6432/shop?sslmode=verify-full", psql: "psql 'postgres://<user>:<password>@db.example.com:6432/shop?sslmode=verify-full'" });
+  assert.deepEqual(own, { url: "postgresql://127.0.0.1:5433/shop?sslmode=require", host: "127.0.0.1", port: 5433, database: "shop", sslmode: "require",
+    shown: "postgres://<user>:<password>@127.0.0.1:5433/shop?sslmode=require", psql: "psql 'postgres://<user>:<password>@127.0.0.1:5433/shop?sslmode=require'" }, "unset: the listener's own, as before");
+  const note = /from elsewhere a tool connects to the server's own address/;
+  const overview = textOf(renderConnect(pub, { served: true }));
+  assert.match(overview, /URL postgres:\/\/<user>:<password>@db\.example\.com:6432\/shop\?sslmode=verify-full Copy psql psql 'postgres:\/\/<user>:<password>@db\.example\.com:6432\/shop\?sslmode=verify-full' Copy/);
+  assert.doesNotMatch(overview, note);
+  const users = textOf(renderUsersConnect(pub, true));
+  assert.match(users, /Host db\.example\.com Copy Port 6432 Copy Database shop Copy SSL mode verify-full Copy URL postgres:\/\/<user>:<password>@db\.example\.com:6432\/shop\?sslmode=verify-full Copy/);
+  assert.doesNotMatch(users, note);
+  assert.match(textOf(renderConnect(own, { served: true })), note, "the listener's own address on a server: the note, as before");
+  assert.match(textOf(renderUsersConnect(own, true)), note);
+});
+
 // ------------------------------------------------------------------ the app, over a fake fetch
 
 /** A fake run: its answers by method and path, and every request the page made. */
@@ -3820,8 +3849,11 @@ const NO_QUERIES = { queries: { keptDays: 7, day: { ...QUERIES.queries.day, stat
   week: { ...QUERIES.queries.week, covered: 7, statements: 0, completed: 0, refused: 0, failed: 0, cancelled: 0, rows: 0, bytesSent: 0, durationMs: null } } };
 /** Where this run's Postgres API listens, as mason status prints it (src/cli/pg-url.ts): the panel is held equal to it. */
 // read by name, so this file loads at a commit without it (scripts/fails-without.ts) and each test fails by name
-const SHOP_PG = (pgUrl as { postgresFacts?: (u: string) => { shown: string; psql: string } }).postgresFacts?.("postgresql://127.0.0.1:5433/shop")
-  ?? { shown: "postgres://<user>:<password>@127.0.0.1:5433/shop", psql: "psql 'postgres://<user>:<password>@127.0.0.1:5433/shop'" };
+// (it takes the run's record since MASON_PG_PUBLIC_URL; an older tree's takes the URL, and a record is no URL to it: the literal)
+const SHOP_PG = ((): { shown: string; psql: string } | undefined => {
+  try { return (pgUrl as { postgresFacts?: (r: { postgresUrl: string }) => { shown: string; psql: string } }).postgresFacts?.({ postgresUrl: "postgresql://127.0.0.1:5433/shop" }); }
+  catch (e) { if (e instanceof Error && /not a URL/.test(e.message)) return undefined; throw e; }
+})() ?? { shown: "postgres://<user>:<password>@127.0.0.1:5433/shop", psql: "psql 'postgres://<user>:<password>@127.0.0.1:5433/shop'" };
 
 test("the Overview, nothing asked yet: Connect your first tool under the cards — the URL and psql line mason status prints, each with Copy, and Create a user", () => {
   const html = fn<[unknown, unknown?], string>("renderStatus")(RUNNING, { queries: NO_QUERIES, now: NOW });

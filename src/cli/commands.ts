@@ -21,7 +21,7 @@ import { version } from "./version.ts";
 import { restartsFact, signalSupervisor, stopSupervisor, supervisorGone, type RestartsFact } from "./supervise.ts";
 import { DEMO_DIR, DUCK_FILE, STATE_DIR, databaseMoved, isProject, projectDatabase, projectSource, projectWriteRefusal, readProject, theProject, writeConfig, type Project } from "./project.ts";
 import { callRun, RunUnreachable } from "./control.ts";
-import { withPlaceholders, postgresFacts, postgresLink, type PostgresLink } from "./pg-url.ts";
+import { clientLink, postgresFacts, postgresLink, shownUrl, type PostgresLink } from "./pg-url.ts";
 import { listenerText } from "./pg-tls.ts";
 import type { RefusedQuery, SlowQuery } from "./run-server.ts";
 import { entriesOfLines, logLineText } from "../lib/log-buffer.ts";
@@ -411,8 +411,9 @@ const STATUS_USAGE = `usage: mason status [--json]
   added, its fill after the one under way), backfilling (its existing rows being filled, N %) or ready (read from its
   column). MASON_STORE_JSON_PATHS=off turns it off.
 
-  The --json answer: { running, pid, postgres: { url, host, port, database, sslmode (require when it is TLS), shown (the URL with
-    <user>:<password> in the credentials' place), psql (its psql line), listener:
+  The --json answer: { running, pid, postgres: { url, host, port, database, sslmode (require when it is TLS; with
+    MASON_PG_PUBLIC_URL its own), public (true, and only then present: the parts are mason serve's MASON_PG_PUBLIC_URL,
+    the address a client reaches, not the listener's), shown (the URL with <user>:<password> in the credentials' place), psql (its psql line), listener:
     { host (what it is bound to), tls (certificate, self-signed or null), fingerprint } }, source: { name (the
     source's: its sources file's), file (the sources file), shownFile (it from the project's root), url, database, remote, version, standby, changes,
     replication, demo (the demo database this run hosts), textOrder (what reading the database's text order left to say), sync: { default (every table's sync unless its entry
@@ -552,7 +553,7 @@ export async function status(argv: string[]): Promise<number> {
       : [["mason wait", "until it is done"]];
     if (json) {
       out(jsonText(STATUS, { running: true, pid: run.pid,
-        ...s, postgres: { ...postgresFacts(run.postgresUrl), listener: run.postgresListener }, queries, slowQueries: slow, refusedQueries: refused, refusedTotal, unsupported, recentErrors, readiness: r }, next));
+        ...s, postgres: { ...postgresFacts(run), listener: run.postgresListener }, queries, slowQueries: slow, refusedQueries: refused, refusedTotal, unsupported, recentErrors, readiness: r }, next));
       return 0;
     }
     const rows: Array<[string, string]> = [
@@ -565,7 +566,7 @@ export async function status(argv: string[]): Promise<number> {
       ...(s.totals ? [["Synced tables", totalsText(s.totals)] as [string, string]] : []),
       // the times its supervisor started it again (src/cli/supervise.ts): a run that crashed says so, never only in a log
       ...restartsRows(s.engine.restarts),
-      ["Postgres API", `${withPlaceholders(run.postgresUrl)}  (mason user add <name> makes a user)`],
+      ["Postgres API", `${shownUrl(clientLink(run))}  (mason user add <name> makes a user)`],
       ...sessionsRows(s.sessions),
       // what it serves: its address, TLS or plain (src/cli/pg-tls.ts)
       ["Listener", listenerText(run.postgresListener, postgresLink(run.postgresUrl).port)],
@@ -879,7 +880,7 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
       : `${version()}, pid ${hung.run.pid} · running but does not answer its commands: ${hung.problem.why}`],
     ["Synced data", bytes === null ? "none yet (mason start makes it)" : `${duckFile} · ${fileSize(bytes)}`],
     ...restartsRows(restarts),
-    ["Postgres API", hung === null ? `not running${connectName === null ? "" : ` (a tool connects with the database ${connectName})`}` : `${withPlaceholders(hung.run.postgresUrl)}  (held by the hung run; it may not answer)`],
+    ["Postgres API", hung === null ? `not running${connectName === null ? "" : ` (a tool connects with the database ${connectName})`}` : `${shownUrl(clientLink(hung.run))}  (held by the hung run; it may not answer)`],
   ] }, st));
   out("");
   if (!tables.length) out("No table added yet.");
