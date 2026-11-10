@@ -68,8 +68,8 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
   const home = t.project.dir;
   const state = await runState(t.project);
   // a run alive and silent still holds the synced data's file: a second run beside it is refused, with mason stop as the
-  // way out (src/cli/runs.ts "alive and silent"); one Mason cannot tell is its run is the person's (mason stop forgets it)
-  if (state.kind === "hung") return failed("start", asFailure(notAnswering(t.project, state.run, state.unsure ?? null)), { json: o.json });
+  // way out (src/cli/runs.ts "alive and silent")
+  if (state.kind === "hung") return failed("start", asFailure(notAnswering(t.project, state.run)), { json: o.json });
   const other = state.run;
   if (other !== null) {
     // running already is what start wants: said, exit 0, the same answer as a start (what is up, and what to run)

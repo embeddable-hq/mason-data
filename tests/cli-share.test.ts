@@ -451,7 +451,7 @@ after(async () => {
     const sup = supervisorOf(home);
     if (sup !== null) process.kill(sup, "SIGKILL");
     const pid = config().running?.pid;
-    if (pid !== undefined && alive(pid) && masonProcess(pid, config().running?.started ?? null).is === true) process.kill(pid, "SIGKILL");
+    if (pid !== undefined && alive(pid) && masonProcess(pid, config().running?.started ?? null)) process.kill(pid, "SIGKILL");
   }
   fs.rmSync(root, { recursive: true, force: true });
 });

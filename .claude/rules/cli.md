@@ -195,17 +195,18 @@ CLI lacks).
   said it was not running and `mason destroy` deleted the 58 GB copy under it, which the process kept open). A pid
   that is alive, is still the process the run recorded (`masonProcess`: after a reboot the number is another process's)
   and does not answer `/api/ping` is HUNG (`runState`, src/cli/runs.ts): every command says so with the way out
-  (`not_answering`), `mason status` says `hung` (exit 1), `mason start` starts no second run beside it, `mason stop` ends it — its supervisor is TOLD first and
+  (`not_answering`), `mason status` says `hung` (exit 1), `mason start` refuses before it spawns a run, `mason stop` ends it — its supervisor is TOLD first and
   waited for LAST (`signalSupervisor` … `endRun`: SIGTERM, then SIGKILL after 15 s … `supervisorGone`: the supervisor
   waits for the run, so a kill it was not told of is a crash to it, recorded as "often the system out of memory" and
   restarted from) — and records the stop in `config.lastStop` as the run does for its own, and `mason destroy` removes
-  nothing under it. **The run is known by what it records, never by its command line** (issue 798: `mason serve`'s
-  did not match `start … --attach`, and a hung server read as not running): every run records its own start beside its
-  pid (`running.started`, `processStart`: /proc's boot id and start ticks on Linux, `ps -o lstart` in UTC elsewhere),
-  and the pid is the run only while the process holding it started then. A record an earlier Mason wrote (no start) is
-  judged by its command line as that Mason judged it (`EARLIER_RUN`: `start … --attach`, and `serve` from every
-  entrance). A pid it cannot tell (a platform that says neither) is hung, never none, and nothing acts under it:
-  `mason stop`, `start` and `destroy` refuse, and the way out is the person's (`ps -p`, kill it or clear `running`). The supervisor is known by its command line under BOTH its names (`supervise.ts` in a checkout,
+  nothing under it. **Which process is the run is what the run records** (issue 798: `mason serve`'s command line did
+  not match `start … --attach`, and a hung server read as not running): the run writes its own start beside its pid
+  (`running.started`, src/cli/dev.ts; `processStart`: /proc's boot id and start ticks on Linux, `ps -o lstart` in UTC
+  elsewhere, none on Windows), and where a start is recorded and can be read the pid is the run only while it is the
+  same. Otherwise (no start recorded — an earlier Mason's record — or none readable now) the pid is the run when its
+  arguments are a run's, field by field (`runArguments`: node, then `mason`, `mason.cjs`, `main.ts` or `main.js`, then
+  `serve`, or `start` with `--attach` after it; /proc's fields on Linux, ps's line split at its spaces elsewhere); a
+  process neither can read (Windows, a /proc this user may not read) is no run, as before. The supervisor is known by its command line under BOTH its names (`supervise.ts` in a checkout,
   `supervise.js` in the package: `isSupervisorCommand`); a process known by the checkout's name alone is never found
   by the package, which is what every user runs.
 - **A database is the project's, and a moved one is noticed** (a database that moves to a different host is the same

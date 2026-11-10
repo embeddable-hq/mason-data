@@ -116,7 +116,7 @@ after(async () => {
     const sup = supervisorOf(home);
     if (sup !== null) { process.stderr.write(`cli-demo-start: killing the supervisor left behind (pid ${sup})\n`); process.kill(sup, "SIGKILL"); }
     const pid = config().running?.pid;
-    if (pid !== undefined && alive(pid) && masonProcess(pid, config().running?.started ?? null).is === true) { process.stderr.write(`cli-demo-start: killing the run left behind (pid ${pid})\n`); process.kill(pid, "SIGKILL"); }
+    if (pid !== undefined && alive(pid) && masonProcess(pid, config().running?.started ?? null)) { process.stderr.write(`cli-demo-start: killing the run left behind (pid ${pid})\n`); process.kill(pid, "SIGKILL"); }
   }
   fs.rmSync(root, { recursive: true, force: true });
 });

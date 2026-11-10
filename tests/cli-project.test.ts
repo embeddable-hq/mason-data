@@ -37,7 +37,7 @@ import * as seed from "../src/demo/seed.ts";
 import { parseGeneratedText, readGenerated } from "../src/cli/generated-files.ts";
 import { parseSql, stopParser } from "../src/api/postgres/parser.ts";
 import { appDatabaseUrl } from "../src/lib/dotenv.ts";
-import { answers, endRun, liveRun, masonProcess, notAnswering, processStart, runOf, runState } from "../src/cli/runs.ts";
+import { answers, endRun, liveRun, masonProcess, processStart, runArguments, runOf, runState } from "../src/cli/runs.ts";
 
 const MAIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "main.ts");
 const tmp = (): string => fs.mkdtempSync(path.join(os.tmpdir(), "mason-project-"));
@@ -391,14 +391,11 @@ test("a run is up only when it answers with its token and its pid: a pid alive a
     assert.equal(await liveRun(p, () => true, async () => false), null, "alive but not answering: not up");
     // A RUN THAT IS ALIVE AND DOES NOT ANSWER IS A THIRD STATE, never "not running" (the test server: a run
     // hung with its main thread blocked; mason stop said it was not running and mason destroy deleted its files under
-    // it). It is hung when its pid is still the process the run recorded (a pid alive after a reboot is another process),
-    // and hung, unsure, when that cannot be told (issue 798: fail closed, never "none")
-    const yes = () => ({ is: true as const }), no = () => ({ is: false as const }), unknown = () => ({ is: "unknown" as const, why: "cannot say" });
-    assert.deepEqual(await runState(p, () => true, async () => true, yes), { kind: "up", run: runOf(p) });
-    assert.deepEqual(await runState(p, () => true, async () => false, yes), { kind: "hung", run: runOf(p) });
-    assert.deepEqual(await runState(p, () => true, async () => false, no), { kind: "none", run: null }, "alive, silent, and not the run: another process has the pid");
-    assert.deepEqual(await runState(p, () => true, async () => false, unknown), { kind: "hung", run: runOf(p), unsure: "cannot say" }, "cannot tell: hung, never none");
-    assert.deepEqual(await runState(p, () => false, async () => true, yes), { kind: "none", run: null });
+    // it). It is hung when its pid is still the process the run recorded (a pid alive after a reboot is another process)
+    assert.deepEqual(await runState(p, () => true, async () => true, () => true), { kind: "up", run: runOf(p) });
+    assert.deepEqual(await runState(p, () => true, async () => false, () => true), { kind: "hung", run: runOf(p) });
+    assert.deepEqual(await runState(p, () => true, async () => false, () => false), { kind: "none", run: null }, "alive, silent, and not the run: another process has the pid");
+    assert.deepEqual(await runState(p, () => false, async () => true, () => true), { kind: "none", run: null });
   } finally { srv.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -408,17 +405,35 @@ test("a process's start, as a run records it: the same at every reading, another
   assert.equal(processStart(process.pid), mine);
   const child = spawnSync(process.execPath, ["-e", `process.stdout.write(String(process.pid))`], { encoding: "utf8" });
   assert.equal(processStart(Number(child.stdout)), null, "a pid that is gone: nothing to read");
-  assert.deepEqual(masonProcess(process.pid, mine), { is: true });
-  assert.deepEqual(masonProcess(process.pid, `${mine}0`), { is: false }, "the number held by a process that started at another moment");
-  // a record an earlier Mason wrote (no start) is judged by the command line, as it was: this test runner is no run
-  assert.deepEqual(masonProcess(process.pid, null), { is: false });
-  // a pid that cannot be told: the way out is the person's, and nothing it suggests acts under the process
-  const p = { root: "/r", dir: "/r/.mason", folder: "/r/mason", config: newConfig("shop", "mason", false) } as Project;
-  const run = { name: "shop", root: "/r", home: "/r/.mason", folder: "/r/mason", pid: 4242, apiKey: "k", control: { url: "http://127.0.0.1:1", token: "t" }, postgresUrl: "postgresql://127.0.0.1:1/shop", postgresListener: { host: "127.0.0.1", tls: null } };
-  const said = notAnswering(p, run, "cannot say");
-  assert.equal(said.problem, "Mason for shop may be running (pid 4242) but does not answer its commands (http://127.0.0.1:1, 3 s)");
-  assert.equal(said.fix, 'ps -p 4242 says what it is: if it is Mason, end it (kill -9 4242), then run the command again; if it is another program, set "running" to null in /r/.mason/config.json. Until then mason stop signals nothing and mason destroy removes nothing');
-  assert.deepEqual(said.next, [["mason logs", "what the run was doing"]]);
+  assert.equal(masonProcess(process.pid, mine), true);
+  assert.equal(masonProcess(process.pid, `${mine}0`), false, "the number held by a process that started at another moment");
+  // a record an earlier Mason wrote (no start) is judged by the arguments: this test runner is no run
+  assert.equal(masonProcess(process.pid, null), false);
+});
+
+test("a run by its arguments, field by field: node, Mason's entry, then serve or start … --attach (issue 798, the review of PR 806)", () => {
+  for (const args of [["node", "/app/src/cli/mason.cjs", "serve"], ["/usr/local/bin/node", "/x/node_modules/@mason-data/cli/dist/src/cli/mason.cjs", "serve"],
+    ["node", "/repo/src/cli/main.ts", "serve"], ["node", "/x/dist/src/cli/main.js", "serve"], ["node", "/usr/local/bin/mason", "serve"],
+    ["/opt/node/bin/node", "/app/src/cli/mason.cjs", "start", "--attach"], ["node", "/app/src/cli/mason.cjs", "start", "--self-signed-tls", "--attach"]]) {
+    assert.equal(runArguments(args), true, args.join(" "));
+  }
+  // what a command line joined by spaces mistook for a run (B4): another program naming the words, or Mason's words elsewhere
+  for (const args of [["tail", "-f", "mason serve notes.txt"], ["vim", "mason serve notes"], ["grep", "-r", "mason serve", "."], ["docker", "compose", "exec", "mason", "mason", "serve"],
+    ["node", "-e", "setInterval(() => {}, 1000)", "start", "--attach"], ["node", "/app/src/cli/mason.cjs", "status"], ["node", "/app/src/cli/mason.cjs", "start"],
+    ["node", "/app/server.js", "serve"], ["python3", "/app/src/cli/mason.cjs", "serve"], ["node"], []]) {
+    assert.equal(runArguments(args), false, args.join(" "));
+  }
+});
+
+test("a pid neither reader can say (Windows, a /proc this user may not read) is no run, as before; a start that cannot be read is judged by the arguments", () => {
+  const none = { start: () => null, args: () => null };
+  assert.equal(masonProcess(4242, null, none), false, "B3: no start recorded, nothing readable: none, as main read it");
+  assert.equal(masonProcess(4242, "linux:b:1", none), false, "a start recorded, nothing readable: none");
+  const serve = { start: () => null, args: () => ["node", "/app/src/cli/mason.cjs", "serve"] };
+  assert.equal(masonProcess(4242, "linux:b:1", serve), true, "the start not readable now: the arguments decide");
+  assert.equal(masonProcess(4242, null, serve), true);
+  // the start, where it is read, decides alone: another process whose arguments are a run's is not this run
+  assert.equal(masonProcess(4242, "linux:b:1", { start: () => "linux:b:2", args: () => ["node", "/app/src/cli/mason.cjs", "serve"] }), false);
 });
 
 test("ending a hung run: SIGTERM, then SIGKILL once the grace is over, and the pid waited for", async () => {

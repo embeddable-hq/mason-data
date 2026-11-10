@@ -1,17 +1,19 @@
 /**
  * A RUN THAT IS ALIVE AND DOES NOT ANSWER, as the commands meet it (the test server, SIGSTOP on the run):
  * `mason status` said "not running (last ran 2 min ago)" while the run held its ports; `mason stop` killed it, and the
- * only record of that stop was the supervisor's "crash". The run here is a process that recorded its own start as a run
- * does (src/cli/runs.ts processStart, masonProcess), whatever its command line — `start --attach`, or `mason serve`'s,
- * which read as not running (issue 798) — and whose control URL answers nothing. The commands run as processes
- * (tests/cli-matrix.ts). The stop's SIGKILL after 15 s is endRun's own test (tests/cli-project.test.ts).
+ * only record of that stop was the supervisor's "crash". The run here is a node process started with a Mason entry's
+ * arguments (`<dir>/src/cli/mason.cjs serve`, …: a file of this test's that waits), that recorded its own start as a run
+ * does (src/cli/runs.ts processStart, masonProcess) or, as an earlier Mason's record, none — `start --attach`, or `mason
+ * serve`'s, which read as not running (issue 798) — and whose control URL answers nothing. The commands run as
+ * processes (tests/cli-matrix.ts). The stop's SIGKILL after 15 s is endRun's own test (tests/cli-project.test.ts).
  */
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { newConfig, readProject, writeConfig } from "../src/cli/project.ts";
 import * as runs from "../src/cli/runs.ts";
 import { matrixEnv, runMason } from "./cli-matrix.ts";
@@ -22,6 +24,19 @@ const startOf = (pid: number): { started?: string } => {
   const s = (runs as { processStart?: (pid: number) => string | null }).processStart?.(pid) ?? null;
   return s === null ? {} : { started: s };
 };
+
+const ENTRIES = fs.mkdtempSync(path.join(os.tmpdir(), "mason-hung-entries-"));
+after(() => fs.rmSync(ENTRIES, { recursive: true, force: true }));
+/** A node process whose arguments are `node <ENTRIES>/<entry> ...args`, as a run's are; it waits until killed. */
+function fakeRun(entry: string, args: readonly string[]): ReturnType<typeof spawn> {
+  const file = path.join(ENTRIES, entry);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, "setInterval(() => {}, 1000);\n");
+  return spawn(process.execPath, [file, ...args], { stdio: "ignore" });
+}
+/** A process that is no run, named `argv0`, its arguments `args` (after node's own -e and --): another program's pid */
+const otherProgram = (argv0: string, args: readonly string[]): ReturnType<typeof spawn> =>
+  spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "--", ...args], { stdio: "ignore", argv0 });
 
 /** A project whose config names `pid` as its run (as a run writes it), last started 2 min ago; its root. */
 function hungProject(pid: number, recorded: { started?: string }): string {
@@ -35,11 +50,12 @@ function hungProject(pid: number, recorded: { started?: string }): string {
 }
 
 // every way a run is started: mason start's background run, and mason serve as the image, a checkout and npx run it
-for (const [how, args] of [["mason start (--attach)", ["start", "--attach"]], ["mason serve", ["serve"]],
-  ["mason serve from a checkout", ["/app/src/cli/main.ts", "serve"]], ["mason serve from the package", ["/root/.npm/_npx/0/node_modules/@mason-data/cli/dist/mason.cjs", "serve"]]] as const) {
+const WAYS = [["mason start (--attach)", "src/cli/mason.cjs", ["start", "--attach"]], ["mason serve in the image", "src/cli/mason.cjs", ["serve"]],
+  ["mason serve from a checkout", "src/cli/main.ts", ["serve"]], ["mason serve from the package", "dist/src/cli/main.js", ["serve"]], ["mason serve on the PATH", "bin/mason", ["serve"]]] as const;
+for (const [how, entry, args] of WAYS) {
 test(`${how}: mason status says hung, and mason stop ends the run and records the stop for the next status`, async () => {
   // a run that recorded its start, leaving on SIGTERM as a run whose main thread is free would (the kill is endRun's test)
-  const run = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", ...args], { stdio: "ignore" });
+  const run = fakeRun(entry, args);
   const root = hungProject(run.pid!, startOf(run.pid!));
   try {
     const env = matrixEnv();
@@ -78,7 +94,7 @@ test(`${how}: mason status says hung, and mason stop ends the run and records th
 }
 
 test("a hung mason serve run: mason destroy removes nothing and mason start starts no second run beside it", async () => {
-  const run = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "serve"], { stdio: "ignore" });
+  const run = fakeRun("src/cli/mason.cjs", ["serve"]);
   const root = hungProject(run.pid!, startOf(run.pid!));
   const duck = path.join(root, ".mason", "duck.db");
   fs.writeFileSync(duck, "the synced data");
@@ -104,7 +120,7 @@ test("a hung mason serve run: mason destroy removes nothing and mason start star
 });
 
 test("a pid another process holds now (it started after the run recorded its start) is no run: not running, never signalled", async () => {
-  const other = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "serve"], { stdio: "ignore" });
+  const other = fakeRun("src/cli/mason.cjs", ["serve"]);
   // the start a run recorded before a reboot: never this process's
   const root = hungProject(other.pid!, { started: "linux:a-boot-before:1" });
   try {
@@ -127,9 +143,9 @@ test("a pid another process holds now (it started after the run recorded its sta
 // A RECORD AN EARLIER MASON WROTE (no start: the upgrade's path) is judged at least as well as that Mason judged it
 // (the review of PR 806): its run, `start --attach` or `serve`, is hung and mason stop ends it before mason destroy;
 // a pid another program holds is no run
-for (const [how, args] of [["mason start (--attach)", ["start", "--attach"]], ["mason serve", ["/app/src/cli/mason.cjs", "serve"]]] as const) {
+for (const [how, entry, args] of [WAYS[0], WAYS[1]]) {
 test(`a run an earlier Mason recorded (${how}, no start), stopped by SIGSTOP: mason stop kills it, then mason destroy removes the synced data`, { timeout: 120_000 }, async () => {
-  const run = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", ...args], { stdio: "ignore" });
+  const run = fakeRun(entry, args);
   const root = hungProject(run.pid!, {});
   fs.writeFileSync(path.join(root, ".mason", "duck.db"), "the synced data");
   try {
@@ -159,7 +175,7 @@ test(`a run an earlier Mason recorded (${how}, no start), stopped by SIGSTOP: ma
 }
 
 test("a record an earlier Mason wrote (no start) whose pid another program holds now: not running, and start and destroy go on", async () => {
-  const other = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  const other = otherProgram("node", []);
   const root = hungProject(other.pid!, {});
   try {
     const env = matrixEnv();
@@ -178,4 +194,63 @@ test("a record an earlier Mason wrote (no start) whose pid another program holds
     if (other.pid !== undefined && alive(other.pid)) other.kill("SIGKILL");
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+// A PROGRAM THAT IS NOT MASON whose command line holds Mason's words (B4, the review of PR 806: the words joined by
+// spaces read as a serve, and mason stop SIGTERMed a tail): read field by field, it is no run, and nothing signals it
+for (const [argv0, args] of [["tail", ["-f", "mason serve notes.txt"]], ["vim", ["mason serve notes"]], ["grep", ["-r", "mason serve", "."]],
+  ["docker", ["compose", "exec", "mason", "mason", "serve"]]] as const) {
+test(`a record with no start whose pid is \`${argv0} ${args.join(" ")}\`: not running, and mason stop signals nothing`, async () => {
+  const other = otherProgram(argv0, args);
+  const root = hungProject(other.pid!, {});
+  try {
+    const env = matrixEnv();
+    const st = await runMason(root, ["status", "--json"], env);
+    assert.equal(st.code, 0, st.stdout);
+    assert.equal((JSON.parse(st.stdout) as { hung?: unknown }).hung, undefined);
+    const stop = await runMason(root, ["stop", "--json"], env);
+    assert.equal(stop.code, 0, stop.stdout);
+    assert.deepEqual((JSON.parse(stop.stdout) as { stopped: string[] }).stopped, []);
+    assert.equal(alive(other.pid!), true, "another program is never signalled");
+  } finally {
+    if (other.pid !== undefined && alive(other.pid)) other.kill("SIGKILL");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+}
+
+// WHERE NEITHER READER CAN SAY (B3, the review of PR 806: every command refused, the way out an edit of the config):
+// Windows, which has neither /proc nor ps, and a /proc this user may not read — as main read it, no run
+test("on Windows (no /proc, no ps), a record with no start whose pid is another program: not running, stop stops nothing, destroy goes on", async () => {
+  const preload = path.join(ENTRIES, "win32.mjs");
+  // src/cli/runs.ts alone sees Windows (the rest of the command still loads this machine's engine)
+  fs.writeFileSync(preload, `const real = process.platform;
+Object.defineProperty(process, "platform", { get: () => /src[\\\\/]cli[\\\\/]runs\\.ts/.test(new Error().stack ?? "") ? "win32" : real });
+`);
+  const other = otherProgram("node", []);
+  const root = hungProject(other.pid!, {});
+  try {
+    const env = matrixEnv({ NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`, PATH: path.dirname(process.execPath) });
+    const st = await runMason(root, ["status", "--json"], env);
+    assert.equal(st.code, 0, st.stdout + st.stderr);
+    assert.equal((JSON.parse(st.stdout) as { hung?: unknown }).hung, undefined);
+    const stop = await runMason(root, ["stop", "--json"], env);
+    assert.equal(stop.code, 0, stop.stdout);
+    assert.deepEqual((JSON.parse(stop.stdout) as { stopped: string[] }).stopped, []);
+    const start = await runMason(root, ["start", "--json"], env);
+    assert.doesNotMatch(start.stdout, /not_answering/);
+    const destroy = await runMason(root, ["destroy", "--json"], env);
+    assert.equal(destroy.code, 0, destroy.stdout);
+    assert.equal(alive(other.pid!), true);
+  } finally {
+    if (other.pid !== undefined && alive(other.pid)) other.kill("SIGKILL");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a pid whose /proc this user may not read (hidepid): no run, as main read it, whether or not a start is recorded", () => {
+  const unreadable = { start: () => null, args: () => null };
+  const isMason = runs.masonProcess as (pid: number, started: string | null, read: typeof unreadable) => unknown;
+  assert.equal(isMason(process.pid, null, unreadable), false);
+  assert.equal(isMason(process.pid, "linux:a-boot:1", unreadable), false);
 });

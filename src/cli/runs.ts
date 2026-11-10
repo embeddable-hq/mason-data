@@ -13,13 +13,14 @@
  * the number is another process's), and that does not answer is HUNG (`runState`): a command says so and names the way
  * out, `mason stop` ends it (`endRun`: SIGTERM, then SIGKILL), and `mason destroy` removes nothing under it.
  *
- * WHICH PROCESS IS THE RUN is what the run itself records, never its command line (issue 798: a `mason serve` run's
- * command line did not match `start … --attach`, so a hung server read as not running and its project as free). Every
- * run, however it was started (`mason start`, `mason serve` in the image or by hand, under a supervisor, through npx or
- * a checkout), records its own pid and its own start (`processStart`) in `running`, and the pid is that run only while
- * the process holding it started at that same moment. A record an earlier Mason wrote (no start) is judged by the
- * command line as before (`EARLIER_RUN`, now `serve` too). A check that cannot tell is hung, never none, and nothing
- * is done under it: `mason destroy`, `mason start` and `mason stop` refuse, the way out the person's (`notAnswering`).
+ * WHICH PROCESS IS THE RUN is what the run itself records where the process can be read (issue 798: a `mason serve`
+ * run's command line did not match `start … --attach`, so a hung server read as not running and its project as free).
+ * Every run, however it was started (`mason start`, `mason serve` in the image or by hand, under a supervisor, through
+ * npx or a checkout), records its own pid and its own start (`processStart`) in `running`, and the pid is that run only
+ * while the process holding it started at that same moment. Where that start cannot be read, or the record has none (an
+ * earlier Mason wrote it, or a platform that cannot say), the pid is a run when its arguments are a run's
+ * (`runArguments`: node, Mason's entry, then `serve` or `start … --attach`); a process neither can read is no run, as
+ * before (Windows, a /proc this user may not read).
  */
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -90,15 +91,8 @@ export function notRunning(p: Project): Problem {
 /** How long a hung run is given to leave on SIGTERM before SIGKILL (the test server's ignored SIGTERM for 15 s). */
 export const END_GRACE_MS = 15_000;
 
-/** What a command says of a run that is alive and does not answer: what to run, since nothing else reaches it. With
- *  `unsure`, Mason cannot tell whether the pid is still the run's (`masonProcess`), so the way out is the person's. */
-export function notAnswering(p: Project, run: DevRun, unsure: string | null = null): Problem {
-  if (unsure !== null) {
-    return { problem: `Mason for ${p.config.name} may be running (pid ${run.pid}) but does not answer its commands (${run.control.url}, 3 s)`, code: "not_answering",
-      why: `Mason cannot tell whether pid ${run.pid} is still its run: ${unsure}`,
-      fix: `ps -p ${run.pid} says what it is: if it is Mason, end it (kill -9 ${run.pid}), then run the command again; if it is another program, set "running" to null in ${p.dir}/config.json. Until then mason stop signals nothing and mason destroy removes nothing`,
-      next: [["mason logs", "what the run was doing"]] };
-  }
+/** What a command says of a run that is alive and does not answer: what to run, since nothing else reaches it. */
+export function notAnswering(p: Project, run: DevRun): Problem {
   return { problem: `Mason for ${p.config.name} is running (pid ${run.pid}) but does not answer its commands (${run.control.url}, 3 s)`, code: "not_answering",
     why: "a statement may be holding its main thread",
     next: [["mason stop", `end it (SIGTERM, then SIGKILL after ${END_GRACE_MS / 1000} s); its synced data stays and the next mason start resumes`], ["mason logs", "what it was doing"]] };
@@ -117,7 +111,7 @@ export function processStart(pid: number): string | null {
       boot = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
       stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
     } catch {
-      // gone, or /proc not readable here (hidepid): "cannot tell", which every caller treats as such, never as "not Mason"
+      // gone, or /proc not readable here (hidepid): not said, and the arguments are asked instead (`masonProcess`)
       return null;
     }
     // field 2 is the command's name in parentheses, which may hold anything: the fields after its LAST ")" are fixed
@@ -130,50 +124,50 @@ export function processStart(pid: number): string | null {
   return at === "" ? null : `ps:${at}`;
 }
 
-/** What process `pid` runs, its arguments joined by spaces; null when this system does not say (gone, /proc hidden, no ps). */
-export function commandLine(pid: number): string | null {
+/** The arguments process `pid` was started with: /proc's own fields on Linux; elsewhere ps's line split at its spaces
+ *  (an argument holding a space is read as two: the best ps can say); null when this system does not say
+ *  (gone, a /proc this user may not read, no ps). */
+export function commandArgs(pid: number): string[] | null {
   if (process.platform === "linux") {
-    try { return fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0+$/, "").replaceAll("\0", " "); }
+    try { return fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0$/, "").split("\0"); }
     catch {
-      // gone, or /proc not readable here: "cannot tell", never "not Mason"
+      // gone, or not readable here: not said, which `masonProcess` reads as no run, as before
       return null;
     }
   }
   if (process.platform === "win32") return null;
   const ps = spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8" });
-  return ps.status === 0 && ps.stdout.trim() !== "" ? ps.stdout.trim() : null;
+  const line = ps.status === 0 ? ps.stdout.trim() : "";
+  return line === "" ? null : line.split(/\s+/);
 }
 
-/** A RUN AN EARLIER MASON RECORDED (no `started`) is known as earlier Masons knew it, by its command line: `mason start`'s
- *  background run (`… start … --attach`, src/cli/background.ts) and `mason serve` from any entrance (the image's and the
- *  package's `mason.cjs`, a checkout's `main.ts`, the package's `main.js`, a `mason` on the PATH). */
-const EARLIER_RUN = [/ start\b.*--attach\b/, /(^|[\s/])(mason(\.cjs)?|main\.[jt]s) serve(\s|$)/];
-
-/** Whether `pid` is the run that recorded `started` (`processStart`): yes, no (another process holds the number now),
- *  or cannot tell, with why. A record with no start (an earlier Mason's) is judged by the command line, as it was. */
-export function masonProcess(pid: number, started: string | null): { is: true } | { is: false } | { is: "unknown"; why: string } {
-  if (started === null) {
-    const line = commandLine(pid);
-    if (line === null) return { is: "unknown", why: `its config records no start for the run (an earlier Mason started it), and this system did not say what pid ${pid} runs` };
-    return EARLIER_RUN.some((re) => re.test(line)) ? { is: true } : { is: false };
-  }
-  const now = processStart(pid);
-  if (now === null) return { is: "unknown", why: `this system did not say when pid ${pid} started` };
-  return now === started ? { is: true } : { is: false };
+/** Whether `args` are a Mason run's, field by field: node, then Mason's entry (`mason`, `mason.cjs`, a checkout's
+ *  `main.ts`, the package's `main.js`), then `serve`, or `start` with `--attach` among the rest (src/cli/background.ts). */
+export function runArguments(args: readonly string[]): boolean {
+  const base = (a: string | undefined): string => (a ?? "").split(/[\\/]/).pop() ?? "";
+  if (!/^node(\.exe)?$/.test(base(args[0])) || !["mason", "mason.cjs", "main.ts", "main.js"].includes(base(args[1]))) return false;
+  return args[2] === "serve" || (args[2] === "start" && args.slice(3).includes("--attach"));
 }
 
-export type RunState = { kind: "up"; run: DevRun } | { kind: "hung"; run: DevRun; unsure?: string } | { kind: "none"; run: null };
+/** Whether `pid` is the run that recorded `started` (`processStart`): its start where it can be read; else, or where the
+ *  record has none (an earlier Mason's), its arguments (`runArguments`); a process neither says is no run, as before. */
+export function masonProcess(pid: number, started: string | null,
+  read: { start: (pid: number) => string | null; args: (pid: number) => string[] | null } = { start: processStart, args: commandArgs }): boolean {
+  const now = started === null ? null : read.start(pid);
+  if (now !== null) return now === started;
+  const args = read.args(pid);
+  return args !== null && runArguments(args);
+}
 
-/** The project's run: up (it answers), hung (alive, still the process the run recorded, and silent — or silent and not
- *  known either way, `unsure` saying why), or none. */
+export type RunState = { kind: "up"; run: DevRun } | { kind: "hung"; run: DevRun } | { kind: "none"; run: null };
+
+/** The project's run: up (it answers), hung (alive, still the process the run recorded, and silent), or none. */
 export async function runState(p: Project, isAlive: (pid: number) => boolean = alive, ask: (r: DevRun) => Promise<boolean> = answers,
-  isMason: typeof masonProcess = masonProcess): Promise<RunState> {
+  isMason: (pid: number, started: string | null) => boolean = masonProcess): Promise<RunState> {
   const r = runOf(p, isAlive);
   if (r === null) return { kind: "none", run: null };
   if (await ask(r)) return { kind: "up", run: r };
-  const m = isMason(r.pid, r.started ?? null);
-  if (m.is === false) return { kind: "none", run: null };
-  return m.is === true ? { kind: "hung", run: r } : { kind: "hung", run: r, unsure: m.why };
+  return isMason(r.pid, r.started ?? null) ? { kind: "hung", run: r } : { kind: "none", run: null };
 }
 
 /** The project's run when it is up and answers; null when Mason is not running for it (a hung run is not up). */
@@ -204,12 +198,12 @@ export async function endRun(pid: number, deps: { kill?: (pid: number, signal: N
 }
 
 /** The run a command means: its project's (src/cli/project.ts theProject), up and answering; else why there is none. */
-export async function theRun(cwd: string): Promise<{ run: DevRun; project: Project } | (Problem & { project: Project | null; hung?: DevRun; unsure?: string })> {
+export async function theRun(cwd: string): Promise<{ run: DevRun; project: Project } | (Problem & { project: Project | null; hung?: DevRun })> {
   const t = theProject(cwd);
   if ("problem" in t) return { ...t, project: null };
   const st = await runState(t.project);
   if (st.kind === "up") return { run: st.run, project: t.project };
-  if (st.kind === "hung") return { ...notAnswering(t.project, st.run, st.unsure ?? null), project: t.project, hung: st.run, ...(st.unsure === undefined ? {} : { unsure: st.unsure }) };
+  if (st.kind === "hung") return { ...notAnswering(t.project, st.run), project: t.project, hung: st.run };
   return { ...notRunning(t.project), project: t.project };
 }
 

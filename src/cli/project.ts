@@ -39,7 +39,8 @@ export const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,47}$/;
 export interface RunningState {
   pid: number;
   /** when the run's process started, read by the run itself (src/cli/runs.ts `processStart`): the pid is the run only
-   *  while the process holding it started then (`masonProcess`); absent where the platform cannot say */
+   *  while the process holding it started then (`masonProcess`); absent where the platform cannot say, and in a
+   *  record an earlier Mason wrote */
   started?: string;
   /** the run's command server, which the commands ask with `token` (src/cli/control.ts) */
   controlUrl: string;
