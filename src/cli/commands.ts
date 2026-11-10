@@ -966,7 +966,7 @@ export async function tables(argv: string[]): Promise<number> {
     out(jsonText(TABLES, { database: s.database, source: { name: s.name, file: s.file }, tables: shown.map(tableJson) }, next));
     return 0;
   }
-  if (!shown.length) { out(`${s.database} has no table this user can read.`); return 0; }
+  if (!shown.length) { out(noTableLine(s.database)); return 0; }
   // one line per table unless a table is named or --all asks: 54 tables were 600 lines, and choosing what to
   // add needs the names, sizes and keys (an agent read them through --json and python, #409)
   if (!f.positionals.length && !f.values.all) {
@@ -1005,6 +1005,9 @@ export function tableJson(t: ListedTable): Record<string, unknown> {
     columns: t.columns.map((c) => ({ name: c.name, type: c.type, nullable: c.nullable, comment: c.comment, references: c.references, secret: c.secret })),
   };
 }
+
+/** What `mason tables` and `mason doctor --tables` say for a database with no table this user can read: one wording. */
+export const noTableLine = (database: string): string => `${database} has no table this user can read.`;
 
 /** The tables a line each, as `mason tables` lists them (and `mason doctor --tables`): its name, size, key and state. */
 export function tableListLines(shown: readonly CatalogTable[]): string[] {

@@ -509,12 +509,8 @@ export function entryProblems(t: SourceTable | undefined, e: TableEntry, all: re
       `${unique ? ` (its unique index ${unique.name})` : ""}`);
   }
   // a SELECT answers no row and no error: the synced table would be empty, said as though it were the table's
-  if (t.rowSecurityHidesFrom !== undefined) {
-    const user = pgIdent(t.rowSecurityHidesFrom);
-    out.push(`${at}: row-level security on ${t.source} hides every row from ${t.rowSecurityHidesFrom} (no SELECT policy for it, and it is not the owner or BYPASSRLS), ` +
-      `so its synced table would be empty — the table's owner adds a policy for the rows Mason may read (CREATE POLICY mason_read ON ${t.source} FOR SELECT TO ${user} USING (…);), ` +
-      "or remove its entry");
-  }
+  const hidden = rowSecurityHides(t);
+  if (hidden !== null) out.push(`${at}: ${hidden}, or remove its entry`);
   for (const k of (e.key ?? t.key).filter((k) => e.exclude.includes(k))) out.push(`${at}.exclude: ${k} is ${t.source}'s key, which is always synced — take it out of exclude`);
   // a table that identifies no changed row: a publication carrying its updates would make the app's own UPDATEs and
   // DELETEs on it fail (the catalog says so; the file cannot), so it is never replicated
@@ -885,8 +881,40 @@ export function usableUniqueKey(t: SourceTable): { name: string; columns: string
   return (t.uniqueKeys ?? []).find((u) => u.columns.every((c) => t.columns.find((x) => x.name === c)?.notNull === true));
 }
 
-/** Why `mason add <t>` with no `--key` cannot add `t`, or null. */
-export function unaddableReason(t: SourceTable): string | null {
+/**
+ * Row-level security that hides every row of `t` from the user Mason reads as, said once — a SELECT answers no row and
+ * no error, so its synced table would be empty — with the policy its owner adds; null when none hides it. An entry
+ * (`entryProblems`) ends it with "or remove its entry"; a table not added (`unaddableReason`) with the `mason add` to
+ * run once the policy is there.
+ */
+export function rowSecurityHides(t: SourceTable): string | null {
+  if (t.rowSecurityHidesFrom === undefined) return null;
+  return `row-level security on ${t.source} hides every row from ${t.rowSecurityHidesFrom} (no SELECT policy for it, and it is not the owner or BYPASSRLS), ` +
+    `so its synced table would be empty — the table's owner adds a policy for the rows Mason may read (CREATE POLICY mason_read ON ${t.source} FOR SELECT TO ${pgIdent(t.rowSecurityHidesFrom)} USING (…);)`;
+}
+
+/**
+ * WHY `mason add <t>` CANNOT ADD `t`, or null: ONE reason for a table not added, read by `mason tables` and the run's
+ * state alike (`catalogTable`: the web page's Tables), and by `mason add`'s refusal (src/cli/source-edit.ts
+ * `plannedEntry`), so the page never offers an Add the run then refuses (issue 802). Row-level security that hides
+ * every row comes first, ending with the `mason add` to run once a policy is there (`key`: the `--key` asked; for a
+ * table with no primary key and none asked, the one its unique index names); else no primary key, naming the `--key`.
+ */
+export function unaddableReason(t: SourceTable, key: readonly string[] | null = null): string | null {
+  const unique = t.key.length ? undefined : usableUniqueKey(t);
+  const hidden = rowSecurityHides(t);
+  if (hidden !== null) {
+    const then = key !== null ? ` --key ${key.join(",")}`
+      : t.key.length ? ""
+      : unique ? ` --key ${unique.columns.join(",")} (no primary key: its unique index ${unique.name} tells its rows apart)`
+      : " --key <column>,… (no primary key: name the columns that tell its rows apart)";
+    return `${hidden}, then mason add ${entryName(t.source)}${then}`;
+  }
+  return noKeyReason(t);
+}
+
+/** Why `mason add <t>` with no `--key` cannot add `t` for its key alone (no primary key: the `--key` to name), or null. */
+export function noKeyReason(t: SourceTable): string | null {
   if (t.key.length) return null;
   const unique = usableUniqueKey(t);
   return `no primary key: name the columns that tell its rows apart, mason add ${entryName(t.source)} --key ${unique ? unique.columns.join(",") : "<column>,…"}${unique ? ` (its unique index ${unique.name})` : ""}`;

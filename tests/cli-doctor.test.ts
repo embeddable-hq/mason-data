@@ -211,7 +211,10 @@ test("the next command follows the first failing check, in the order a first ses
   const bad = (name: string): Check => ({ name, ok: false, detail: "" });
   const first = (c: Check[], r: typeof run | null, p: typeof project | null): string => nextSteps(c, r, p).map(([cmd]) => cmd).join(" | ");
   assert.equal(first([bad("node"), bad("memory")], null, null), "mason doctor");
-  assert.match(nextSteps([ok("node"), bad("database")], null, project)[0]![1]!, /the URL is in \/app\/\.mason\/config\.json/);
+  // where the URL really is: the sources file's variable in .env, never .mason/config.json (issue 802)
+  assert.deepEqual(nextSteps([ok("node"), bad("database")], null, project, "DATABASE_URL in .env"),
+    [["mason start", "once the connection works (the detail above says how; its URL: DATABASE_URL in .env)"]]);
+  assert.deepEqual(nextSteps([ok("node"), bad("database")], null, project), [["mason start", "once the connection works (the detail above says how)"]]);
   // the demo database is down until its run is up: mason start is the way out, not a URL to fix
   const demoProject = { ...project, config: { ...project.config, demo: true } } as typeof project;
   assert.deepEqual(nextSteps([ok("node"), bad("database")], null, demoProject), [["mason start", "hosts the demo database, then syncs its tables"]]);

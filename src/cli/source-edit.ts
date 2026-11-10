@@ -15,7 +15,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Failure, FailureCode } from "./command.ts";
 import type { SourceTable } from "./preflight.ts";
-import { addedTables, catalogTable, chooseColumns, effectiveSync, entryFields, entryName, entryProblems, findEntry, looksSecret, parseSourceText, sourceFailure, sourceFileNames, sourcesDir,
+import { addedTables, catalogTable, chooseColumns, effectiveSync, entryFields, entryName, entryProblems, findEntry, looksSecret, noKeyReason, parseSourceText, sourceFailure, sourceFileNames, sourcesDir,
   unaddableReason, usableUniqueKey, withEntrySync, withoutTable, withTable, type CatalogColumn, type CatalogTable, type EntryFields, type ProjectSource, type SourceFile,
   type TableEntry, type WrittenEntry } from "./sources.ts";
 import { BIG_TABLE_ROWS, COSTLY_POLL_ROWS, COSTLY_POLL_SECONDS, syncText, type TableSync } from "../lib/table-sync.ts";
@@ -179,8 +179,11 @@ export function plannedEntry(file: SourceFile, db: EditCatalog, t: SourceTable, 
   o: { sync?: TableSync; keep?: boolean } = {}, others: () => void = () => {}): PlannedEntry {
   const table = t.source;
   if (key !== null && t.key.length) throw new Refusal(400, `${table} has a primary key (${t.key.join(", ")}), which Mason keys it by: leave --key out`);
-  if (key === null && !t.key.length) throw new Refusal(409, `${table} cannot be added: ${unaddableReason(t)}`);
   const was = file.tables.find((e) => e.table === table);
+  // a table not added that row-level security hides, said in a table's words (`unaddableReason`); an added one's entry
+  // in the file's, by entryProblems below
+  if (was === undefined && t.rowSecurityHidesFrom !== undefined) throw new Refusal(409, `${table} cannot be added: ${unaddableReason(t, key)}`);
+  if (key === null && !t.key.length) throw new Refusal(409, `${table} cannot be added: ${noKeyReason(t)}`);
   const keep = o.keep === true && was !== undefined;
   const chosen = keep ? { columns: was.columns, exclude: was.exclude, addedKey: [], skipped: [] } : chooseColumns(t, columns, key);
   if ("problem" in chosen) throw new Refusal(400, chosen.problem);
@@ -225,8 +228,8 @@ export interface ListedTable extends Omit<CatalogTable, "columns"> {
 /**
  * THE DATABASE'S TABLES AS `mason tables` LISTS THEM, from a catalog already read (`readSourceFacts`) and the sources
  * file — no read of its own, so `mason doctor` can list what it read too. A table not added gets the entry `mason add
- * <table>` writes, decided by `plannedEntry` (never a second copy of its rule), and its refusal as its `reason`: no
- * primary key keeps `unaddableReason`'s words (the entry then carries the `--key` they name, a unique index over NOT NULL
+ * <table>` writes, decided by `plannedEntry` (never a second copy of its rule), and its refusal as its `reason`: a
+ * table's own reason (row-level security, no primary key) keeps `unaddableReason`'s words, the run's state's too (the entry then carries the `--key` they name, a unique index over NOT NULL
  * columns, when it has one). The file's other entries are not checked here (`mason add` refuses while one fails).
  */
 export function listTables(file: SourceFile, db: EditCatalog): ListedTable[] {
@@ -241,8 +244,9 @@ export function listTables(file: SourceFile, db: EditCatalog): ListedTable[] {
         // a refusal is the table's answer, said as mason add says it; anything else is a bug, and goes on up
         if (!(e instanceof Refusal)) throw e;
         entry = null;
-        // refused with the --key its reason names (row-level security, say): both said, the --key alone would not do
-        reason = reason === null ? e.message : key !== null ? `${reason}; with it, ${e.message}` : reason;
+        // the table's own reason (`unaddableReason`, the run's state's too: row-level security, no primary key) stands;
+        // refused with the --key a no-key reason names, for something else, both said: the --key alone would not do
+        reason = reason === null ? e.message : key !== null && t.rowSecurityHidesFrom === undefined ? `${reason}; with it, ${e.message}` : reason;
       }
     }
     // the columns every-column leaves out, by the same rule against the key it is synced by: its primary key, else the
