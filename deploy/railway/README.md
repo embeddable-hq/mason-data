@@ -25,7 +25,7 @@ is none here.
 cd /mason/data
 mason tables
 mason add public.orders
-mason user add metabase      # the BI tool's user: URL and password, printed once (replace the host and port with the proxy's)
+mason user add metabase      # the BI tool's user: URL and password, printed once (with the proxy's host and port when MASON_PG_PUBLIC_URL names them)
 ```
 
 - **One replica, never more.** The copy is one file with one writer; Railway agrees: "Replicas cannot be used with

@@ -363,6 +363,22 @@ ClientHello, such as a platform's generic TLS terminator re-encrypting to Mason)
 127.0.0.1 behind it, or sets `MASON_PG_PLAIN=1` with the address its network reaches; a plain listener closes a
 connection that opens with a ClientHello and says why in its log (it has no certificate to answer one with).
 
+**The address clients reach** (`mason serve` behind a load balancer, a proxy or a DNS name): the listener records
+where it listens, `localhost:5433` on a server, which is the server's own view of itself. `MASON_PG_PUBLIC_URL` says
+the address a client reaches instead, `postgres://<host>:<port>/<database>?sslmode=<mode>`
+(`MASON_PG_PUBLIC_URL=postgres://db.example.com:5433/?sslmode=verify-full`), and every URL Mason prints for a client
+to paste is built from it by one builder (src/cli/pg-url.ts `clientLink`): `mason status` (`postgres`, with `public:
+true` only then, under `--json`; the listener's own address stays its `Listener` row), `mason user add` and `list`, and the web
+page's Connect panels and psql line, with no note to replace the host. What it may hold: a host (a name, an IPv4
+address, an IPv6 one in brackets), a port (5432 when none), a database (the one Mason answers as when none; one named is
+printed as it is, for a proxy that maps names) and `sslmode`, required, one of `disable`, `require`, `verify-ca`,
+`verify-full` (`allow` and `prefer` fall back to plain, a password in clear). A user, a password, any other parameter,
+a fragment or anything else refuses the start, naming the setting and never repeating the value. Mason cannot see what
+sits between the client and the listener, so the `sslmode` is the operator's word: `verify-full` needs a certificate a
+CA signed for that host at whatever terminates TLS, and `disable` in front of a listener that requires TLS works only
+through a proxy that encrypts on its side. `mason start` refuses it: on a laptop the address it listens on is the one
+it prints.
+
 **The parts of the URL**, for a driver's form:
 
 ```
@@ -602,6 +618,7 @@ whatever the session runs at that moment is stopped, as a `CancelRequest` stops 
 | `MASON_PG_PORT` | 5433, then the project's | the listener's port |
 | `MASON_PG_HOST` | 127.0.0.1 | the listener's address |
 | `MASON_PG_TLS_CERT`, `MASON_PG_TLS_KEY` | unset (plain) | PEM files; both or neither; with them TLS is required |
+| `MASON_PG_PUBLIC_URL` | unset | `mason serve`: the address a client reaches, `postgres://<host>:<port>/<database>?sslmode=<mode>`, which every URL printed for a client is built from ("The address clients reach"); anything else in it refuses the start, and `mason start` refuses it |
 | `MASON_PG_DATABASE` | `mason` | `mason serve`: the database name a tool connects with, for a sources file with no `database:`; the two must agree when both are set, and `mason start` refuses it (the sources file is what says it on a project) |
 | `MASON_PG_PROXY_FROM` | unset | behind a TCP proxy that sends the PROXY protocol v2: the proxy's own addresses, CIDRs comma-separated; a connection from one must begin with a header, whose client the request log names, and a header from any other address is refused ("Behind a TCP proxy") |
 | `MASON_PG_PLAIN` | unset | `1`: a plain listener off loopback is on a private network; without it (or TLS) such a listener refuses to start |

@@ -617,6 +617,167 @@ test("mason add and mason remove with Mason stopped: the entry written and cut a
   assert.equal(fs.readFileSync(s.file, "utf8"), `kind: postgres\nurl: ${s.url}\ntables: {}\n`, "the last one gone: tables: {}");
 });
 
+// ISSUE 794: A TOOL THAT WRITES THE SOURCES FILE ITSELF writes what mason add would — `mason tables --json` gives each
+// table's entry and each column's secret flag from the one place mason add decides them (src/cli/source-edit.ts
+// plannedEntry). Held here by RUNNING mason add on each table and reading back what it wrote.
+test("mason tables --json: each table's entry and each column's secret are what mason add writes — a secret-looking column, no primary key, an ordinary table, one it refuses, one added", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-tables-entry-")));
+  const source = await DemoSource.open({ dir: path.join(root, "db"), port: 0, log: () => {} });
+  try {
+    const c = new pg.Client({ connectionString: source.url });
+    await c.connect();
+    try {
+      await c.query(`CREATE TABLE vault (id bigint PRIMARY KEY, label text, password_hash text, api_token text, token_id bigint);
+        CREATE TABLE ledger (account_id bigint NOT NULL, line_no int NOT NULL, amount numeric, signing_secret text, UNIQUE (account_id, line_no));
+        CREATE TABLE scratch (note text)`);
+    } finally { await c.end(); }
+    const app = path.join(root, "app");
+    const file = path.join(app, "mason", "sources", "shop.yml");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.join(app, ".mason"), { mode: 0o700 });
+    writeRunning(root, null);
+    const empty = `kind: postgres\nurl: ${source.url}\ntables: {}\n`;
+    fs.writeFileSync(file, empty);
+    type Listed = { table: string; addable: boolean; reason: string | null; added: boolean; entry: Record<string, Record<string, unknown>> | null; primaryKey: string[];
+      columns: Array<{ name: string; secret: boolean }> };
+    const listed = async (...names: string[]): Promise<Listed[]> => {
+      const r = await runMason(app, ["tables", ...names, "--json"], matrixEnv());
+      assert.equal(r.code, 0, r.stdout + r.stderr);
+      return (JSON.parse(r.stdout) as { tables: Listed[] }).tables;
+    };
+    const { parse } = await import("yaml");
+    const tables = await listed();
+    const of = (name: string): Listed => tables.find((t) => t.table === name)!;
+    assert.deepEqual(of("public.vault").entry, { vault: { exclude: ["password_hash", "api_token"] } }, "the secret-looking columns, as exclude:");
+    assert.deepEqual(of("public.vault").columns.map((x) => [x.name, x.secret]), [["id", false], ["label", false], ["password_hash", true], ["api_token", true], ["token_id", false]]);
+    assert.deepEqual([of("public.ledger").entry, of("public.ledger").addable], [{ ledger: { exclude: ["signing_secret"], key: ["account_id", "line_no"] } }, false],
+      "no primary key: its entry carries the --key its reason names, and mason add alone refuses it");
+    assert.match(of("public.ledger").reason!, /^no primary key: name the columns that tell its rows apart, mason add ledger --key account_id,line_no \(its unique index /);
+    assert.deepEqual([of("public.scratch").entry, of("public.scratch").addable], [null, false], "no key to name: mason add refuses it");
+    // EVERY TABLE, against mason add run on it alone, the file empty first: the entry written is the one listed
+    let compared = 0;
+    for (const t of tables) {
+      fs.writeFileSync(file, empty);
+      const key = t.entry === null ? undefined : Object.values(t.entry)[0]!["key"] as string[] | undefined;
+      const add = await runMason(app, ["add", t.table, ...(key ? ["--key", key.join(",")] : []), "--json"], matrixEnv());
+      if (t.entry === null) { assert.equal(add.code, 1, `${t.table}: refused by mason add too — ${add.stdout}`); continue; }
+      assert.equal(add.code, 0, `${t.table}: ${add.stdout}${add.stderr}`);
+      const written = (parse(fs.readFileSync(file, "utf8")) as { tables: Record<string, unknown> }).tables;
+      assert.deepEqual(written, t.entry, `${t.table}: the entry mason add wrote`);
+      const skipped = (JSON.parse(add.stdout) as { added: Array<{ skippedSecrets: string[] }> }).added[0]!.skippedSecrets;
+      assert.deepEqual(t.columns.filter((x) => x.secret).map((x) => x.name), skipped, `${t.table}: the columns marked secret are those mason add left out`);
+      compared++;
+    }
+    assert.ok(compared >= 4, `the demo's tables and two of ours compared (${compared})`);
+    // A TABLE ADDED: its entry as the file says it, written by hand or not
+    fs.writeFileSync(file, `${empty.replace("tables: {}\n", "tables:\n")}  vault:\n    columns: [id, label]\n    sync: poll 5m\n`);
+    const [vault] = await listed("vault");
+    assert.deepEqual([vault!.added, vault!.entry], [true, { vault: { columns: ["id", "label"], sync: "poll 5m" } }]);
+    // as a person: the same flag, said beside the column
+    const person = await runMason(app, ["tables", "vault"], matrixEnv());
+    assert.match(person.stdout, /^ {2}api_token +text +\(looks like a secret: left out unless named\)$/m);
+    assert.match(person.stdout, /^ {2}token_id +bigint$/m);
+    // a hand-written key: naming a column the table lacks never un-flags one (fail closed), as a person and in --json
+    fs.writeFileSync(file, `${empty.replace("tables: {}\n", "tables:\n")}  vault:\n    key: [nosuch]\n`);
+    const broken = await runMason(app, ["tables", "vault"], matrixEnv());
+    assert.match(broken.stdout, /^ {2}api_token +text +\(looks like a secret: left out unless named\)$/m, broken.stdout + broken.stderr);
+    assert.deepEqual((await listed("vault"))[0]!.columns.filter((x) => x.secret).map((x) => x.name), ["password_hash", "api_token"]);
+  } finally {
+    await source.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ISSUE 794, ITS SECOND HALF: `mason doctor --json --tables` checks the database AND lists its tables on ONE connection,
+// from the catalog the checks read (src/cli/doctor.ts databaseChecks), in mason tables --json's shape. The connections are
+// counted by the database itself: every client's startup is traced (src/demo/source.ts `trace`).
+test("mason doctor --tables: mason tables --json's tables on the checks' one connection; given though a check fails, absent when the catalog was not read; unset, the answer as before", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-doctor-tables-")));
+  const started: string[] = [];
+  const source = await DemoSource.open({ dir: path.join(root, "db"), port: 0, log: () => {}, trace: (line) => { if (/ starts with /.test(line)) started.push(line); } });
+  try {
+    const c = new pg.Client({ connectionString: source.url });
+    await c.connect();
+    try {
+      await c.query(`CREATE TABLE vault (id bigint PRIMARY KEY, label text, password_hash text);
+        CREATE TABLE ledger (account_id bigint NOT NULL, line_no int NOT NULL, amount numeric, UNIQUE (account_id, line_no))`);
+    } finally { await c.end(); }
+    const app = path.join(root, "app");
+    const file = path.join(app, "mason", "sources", "shop.yml");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.join(app, ".mason"), { mode: 0o700 });
+    writeRunning(root, null);
+    // one table added by hand: its entry is the file's, the others' what mason add would write
+    fs.writeFileSync(file, `kind: postgres\nurl: ${source.url}\ntables:\n  vault:\n    columns: [id, label]\n`);
+    const env = matrixEnv();
+    type Doctor = { ready: boolean; verdict: string; checks: Array<{ name: string; ok: boolean | null }>; tables?: unknown[]; next: unknown[] };
+    const doctor = async (argv: string[], e = env): Promise<{ code: number | null; answer: Doctor }> => {
+      const r = await runMason(app, ["doctor", ...argv], e);
+      return { code: r.code, answer: JSON.parse(r.stdout) as Doctor };
+    };
+    const tables = await runMason(app, ["tables", "--json"], env);
+    assert.equal(tables.code, 0, tables.stdout + tables.stderr);
+    const listed = (JSON.parse(tables.stdout) as { tables: unknown[] }).tables;
+    assert.ok(listed.length >= 4, "the demo's tables and ours");
+
+    // THE FLAG SET: the same tables mason tables --json gives, on ONE connection to the database
+    started.length = 0;
+    const withTables = await doctor(["--json", "--tables"]);
+    assert.equal(started.length, 1, `one connection for the checks and the tables:\n${started.join("\n")}`);
+    assert.equal(withTables.code, 0, JSON.stringify(withTables.answer));
+    assert.deepEqual(withTables.answer.tables, listed);
+    assert.deepEqual(Object.keys(withTables.answer), ["ready", "verdict", "checks", "tables", "next"]);
+
+    // THE FLAG UNSET: the answer as it was — no tables key, the same checks, verdict and next
+    started.length = 0;
+    const without = await doctor(["--json"]);
+    assert.equal(started.length, 1);
+    assert.deepEqual(Object.keys(without.answer), ["ready", "verdict", "checks", "next"]);
+    assert.deepEqual({ ...withTables.answer, tables: undefined }, { ...without.answer, tables: undefined });
+
+    // A CHECK THAT FAILS WITHOUT STOPPING THE READ (a MASON_PG_PORT that is no port): the tables are still given, and
+    // the answer still fails
+    const failing = await doctor(["--json", "--tables"], { ...env, MASON_PG_PORT: "abc" });
+    assert.equal(failing.code, 1);
+    assert.equal(failing.answer.ready, false);
+    assert.equal(failing.answer.checks.find((x) => x.name === "ports")?.ok, false);
+    assert.deepEqual(failing.answer.tables, listed);
+
+    // WITH MASON RUNNING (its own checks never connect): the role's lines and the tables on the one connection they open
+    const { runRoleChecks } = await import("../src/cli/doctor.ts");
+    const { theProject } = await import("../src/cli/project.ts");
+    const found = theProject(app);
+    assert.ok("project" in found);
+    started.length = 0;
+    const running = await runRoleChecks(found.project, true) as unknown as { checks: unknown[]; tables?: Array<Parameters<typeof commands.tableJson>[0]> };
+    assert.equal(started.length, 1, started.join("\n"));
+    assert.deepEqual(running.tables?.map(commands.tableJson), listed);
+    assert.ok(running.checks.length > 0, "the role's lines too");
+
+    // AS A PERSON: the checks, then the tables a line each as mason tables lists them
+    const person = await runMason(app, ["doctor", "--tables"], env);
+    assert.equal(person.code, 0, person.stdout + person.stderr);
+    const tablesPerson = await runMason(app, ["tables"], env);
+    const lines = tablesPerson.stdout.split("\n\nNext:")[0]!;
+    assert.ok(lines.split("\n").length >= 4);
+    assert.ok(person.stdout.includes(`\n\n${lines}\n`), `${person.stdout}\n---\n${lines}`);
+
+    // THE CATALOG NOT READ: a database that does not answer — no tables key, never [] (the database's line says why)
+    fs.writeFileSync(file, `kind: postgres\nurl: postgresql://mason:pw@127.0.0.1:1/shop\ntables: {}\n`);
+    const down = await doctor(["--json", "--tables"]);
+    assert.equal(down.code, 1);
+    assert.equal(down.answer.checks.find((x) => x.name === "database")?.ok, false);
+    assert.ok(!("tables" in down.answer), JSON.stringify(down.answer));
+    // no project here: no database is named before mason init, so none is read
+    const bare = fs.mkdtempSync(path.join(root, "bare-"));
+    const none = await runMason(bare, ["doctor", "--json", "--tables"], env);
+    assert.ok(!("tables" in (JSON.parse(none.stdout) as object)), none.stdout);
+  } finally {
+    await source.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("mason add of a table a replicating file cannot replicate says it was written sync: poll 5m, why, and the alternatives", async () => {
   const { addedLines } = await import("../src/cli/commands.ts");
   const b = { table: "public.events", file: "/app/mason/sources/app.yml", entry: "events", columns: null, exclude: [], key: ["tenant_id", "id"], addedKey: [], skippedSecrets: [], already: false,

@@ -21,13 +21,13 @@ import { version } from "./version.ts";
 import { restartsFact, signalSupervisor, stopSupervisor, supervisorGone, type RestartsFact } from "./supervise.ts";
 import { DEMO_DIR, DUCK_FILE, STATE_DIR, databaseMoved, isProject, projectDatabase, projectSource, projectWriteRefusal, readProject, theProject, writeConfig, type Project } from "./project.ts";
 import { callRun, RunUnreachable } from "./control.ts";
-import { withPlaceholders, postgresFacts, postgresLink, type PostgresLink } from "./pg-url.ts";
+import { clientLink, postgresFacts, postgresLink, shownUrl, type PostgresLink } from "./pg-url.ts";
 import { listenerText } from "./pg-tls.ts";
 import type { RefusedQuery, SlowQuery } from "./run-server.ts";
 import { entriesOfLines, logLineText } from "../lib/log-buffer.ts";
 import { LogReader, logPath } from "../lib/log-read.ts";
-import { catalogTable, entryName, findEntry, looksSecret, tableNameProblem, type CatalogColumn, type CatalogTable, type ProjectSource } from "./sources.ts";
-import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
+import { catalogTable, entryName, findEntry, tableNameProblem, type CatalogColumn, type CatalogTable, type ProjectSource } from "./sources.ts";
+import { addEntry, listTables, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type ListedTable, type PickResult, type RemoveResult } from "./source-edit.ts";
 import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFacts, type SourceTable } from "./preflight.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
 import { reach } from "./state.ts";
@@ -411,8 +411,9 @@ const STATUS_USAGE = `usage: mason status [--json]
   added, its fill after the one under way), backfilling (its existing rows being filled, N %) or ready (read from its
   column). MASON_STORE_JSON_PATHS=off turns it off.
 
-  The --json answer: { running, pid, postgres: { url, host, port, database, sslmode (require when it is TLS), shown (the URL with
-    <user>:<password> in the credentials' place), psql (its psql line), listener:
+  The --json answer: { running, pid, postgres: { url, host, port, database, sslmode (require when it is TLS; with
+    MASON_PG_PUBLIC_URL its own), public (true, and only then present: the parts are mason serve's MASON_PG_PUBLIC_URL,
+    the address a client reaches, not the listener's), shown (the URL with <user>:<password> in the credentials' place), psql (its psql line), listener:
     { host (what it is bound to), tls (certificate, self-signed or null), fingerprint } }, source: { name (the
     source's: its sources file's), file (the sources file), shownFile (it from the project's root), url, database, remote, version, standby, changes,
     replication, demo (the demo database this run hosts), textOrder (what reading the database's text order left to say), sync: { default (every table's sync unless its entry
@@ -552,7 +553,7 @@ export async function status(argv: string[]): Promise<number> {
       : [["mason wait", "until it is done"]];
     if (json) {
       out(jsonText(STATUS, { running: true, pid: run.pid,
-        ...s, postgres: { ...postgresFacts(run.postgresUrl), listener: run.postgresListener }, queries, slowQueries: slow, refusedQueries: refused, refusedTotal, unsupported, recentErrors, readiness: r }, next));
+        ...s, postgres: { ...postgresFacts(run), listener: run.postgresListener }, queries, slowQueries: slow, refusedQueries: refused, refusedTotal, unsupported, recentErrors, readiness: r }, next));
       return 0;
     }
     const rows: Array<[string, string]> = [
@@ -565,7 +566,7 @@ export async function status(argv: string[]): Promise<number> {
       ...(s.totals ? [["Synced tables", totalsText(s.totals)] as [string, string]] : []),
       // the times its supervisor started it again (src/cli/supervise.ts): a run that crashed says so, never only in a log
       ...restartsRows(s.engine.restarts),
-      ["Postgres API", `${withPlaceholders(run.postgresUrl)}  (mason user add <name> makes a user)`],
+      ["Postgres API", `${shownUrl(clientLink(run))}  (mason user add <name> makes a user)`],
       ...sessionsRows(s.sessions),
       // what it serves: its address, TLS or plain (src/cli/pg-tls.ts)
       ["Listener", listenerText(run.postgresListener, postgresLink(run.postgresUrl).port)],
@@ -879,7 +880,7 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
       : `${version()}, pid ${hung.run.pid} · running but does not answer its commands: ${hung.problem.why}`],
     ["Synced data", bytes === null ? "none yet (mason start makes it)" : `${duckFile} · ${fileSize(bytes)}`],
     ...restartsRows(restarts),
-    ["Postgres API", hung === null ? `not running${connectName === null ? "" : ` (a tool connects with the database ${connectName})`}` : `${withPlaceholders(hung.run.postgresUrl)}  (held by the hung run; it may not answer)`],
+    ["Postgres API", hung === null ? `not running${connectName === null ? "" : ` (a tool connects with the database ${connectName})`}` : `${shownUrl(clientLink(hung.run))}  (held by the hung run; it may not answer)`],
   ] }, st));
   out("");
   if (!tables.length) out("No table added yet.");
@@ -917,7 +918,14 @@ const TABLES_USAGE = `usage: mason tables [<table>…] [--all] [--json]
   The --json answer: { database, source: { name (the source's: its sources file's), file (the sources file) },
     tables: [{ table, rows, bytes, primaryKey, comment, addable,
     reason, added, addedColumns (the columns it syncs: null when not added), copyKey (the key: the sources
-    file keys it by, null: its primary key), columns: [{ name, type, nullable, comment, references }] }], next }
+    file keys it by, null: its primary key), entry, columns: [{ name, type, nullable, comment, references,
+    secret }] }], next }
+  entry is the table's entry as the sources file's tables: map holds it, as fields — { "<name>": {} } or
+  { "<name>": { exclude | columns, key, sync } } — to merge into tables: and write as YAML: an added table's as the
+  file says it; else what mason add <table> writes (decided by the same code), with the --key its reason names when
+  it has no primary key; null when mason add would refuse it (reason says why). It assumes the file's other entries
+  hold, as mason add checks first. secret: the column looks like a secret, so mason add leaves it out (exclude:)
+  unless named (--include); a key column is never left out.
 `;
 
 export const TABLES: CommandSpec & { needs: "project" } = {
@@ -955,22 +963,14 @@ export async function tables(argv: string[]): Promise<number> {
     ? (one ? [[`mason add ${tableArg(one.table)}`, `sync it into Mason (--columns ${one.columns.slice(0, 2).map((c) => c.name).join(",")}: those only)`]] : [])
     : addSteps(shown, "tables");
   if (json) {
-    out(jsonText(TABLES, { database: s.database, source: { name: s.name, file: s.file }, tables: shown.map((t) => ({
-      table: t.table, rows: t.rows, bytes: t.bytes, primaryKey: t.key, comment: t.comment,
-      addable: t.reason === null, reason: t.reason, added: t.added, addedColumns: t.addedColumns, copyKey: t.copyKey,
-      columns: t.columns.map((c) => ({ name: c.name, type: c.type, nullable: c.nullable, comment: c.comment, references: c.references })),
-    })) }, next));
+    out(jsonText(TABLES, { database: s.database, source: { name: s.name, file: s.file }, tables: shown.map(tableJson) }, next));
     return 0;
   }
   if (!shown.length) { out(`${s.database} has no table this user can read.`); return 0; }
   // one line per table unless a table is named or --all asks: 54 tables were 600 lines, and choosing what to
   // add needs the names, sizes and keys (an agent read them through --json and python, #409)
   if (!f.positionals.length && !f.values.all) {
-    const w = Math.max(...shown.map((t) => t.table.length));
-    for (const t of shown) {
-      const l = tableFacts(t);
-      out(`${t.table.padEnd(w)}  ${l.size.padStart(18)}  ${l.key}${l.state ? `  · ${l.state}` : ""}`);
-    }
+    for (const line of tableListLines(shown)) out(line);
     out(nextBlock(next));
     return 0;
   }
@@ -984,7 +984,7 @@ export async function tables(argv: string[]): Promise<number> {
     const tw = Math.max(...t.columns.map((c) => c.type.length));
     for (const c of t.columns) {
       const notes = [c.nullable ? "" : "not null", c.references ? `→ ${c.references.table}.${c.references.column}` : "",
-        looksSecret(c.name) && !t.key.includes(c.name) ? "(looks like a secret: left out unless named)" : "", c.comment ? `-- ${c.comment}` : ""].filter(Boolean);
+        c.secret ? "(looks like a secret: left out unless named)" : "", c.comment ? `-- ${c.comment}` : ""].filter(Boolean);
       out(`  ${c.name.padEnd(w)}  ${c.type.padEnd(tw)}  ${notes.join("  ")}`.trimEnd());
     }
     out("");
@@ -992,6 +992,24 @@ export async function tables(argv: string[]): Promise<number> {
   // each table above ends with its blank line: the block's own is left out
   if (next.length) out(nextBlock(next).slice(1));
   return 0;
+}
+
+/**
+ * A TABLE IN `mason tables --json`'s SHAPE (`TABLES_USAGE` declares it), from a table `listTables` (src/cli/source-edit.ts)
+ * listed out of a catalog already read: what `mason doctor` calls to give the tables it read in the same shape.
+ */
+export function tableJson(t: ListedTable): Record<string, unknown> {
+  return {
+    table: t.table, rows: t.rows, bytes: t.bytes, primaryKey: t.key, comment: t.comment,
+    addable: t.reason === null, reason: t.reason, added: t.added, addedColumns: t.addedColumns, copyKey: t.copyKey, entry: t.entry,
+    columns: t.columns.map((c) => ({ name: c.name, type: c.type, nullable: c.nullable, comment: c.comment, references: c.references, secret: c.secret })),
+  };
+}
+
+/** The tables a line each, as `mason tables` lists them (and `mason doctor --tables`): its name, size, key and state. */
+export function tableListLines(shown: readonly CatalogTable[]): string[] {
+  const w = Math.max(...shown.map((t) => t.table.length));
+  return shown.map((t) => { const l = tableFacts(t); return `${t.table.padEnd(w)}  ${l.size.padStart(18)}  ${l.key}${l.state ? `  · ${l.state}` : ""}`; });
 }
 
 /** A table's line in `mason tables`: its size, its key, and added or why it cannot be added as it is (the web page's
@@ -1038,11 +1056,11 @@ async function readCatalog(p: Project): Promise<{ src: ProjectSource; database: 
 }
 
 /** `mason tables` without the run: the database's tables, each as the run's state says it against the sources file
- *  (sources.ts catalogTable). */
-async function databaseTables(p: Project): Promise<{ database: string; name: string; file: string; tables: CatalogTable[] } | Failure> {
+ *  (sources.ts catalogTable), with the entry `mason add` writes for it (source-edit.ts listTables). */
+async function databaseTables(p: Project): Promise<{ database: string; name: string; file: string; tables: ListedTable[] } | Failure> {
   const c = await readCatalog(p);
   if ("message" in c) return c;
-  return { database: c.database, name: c.src.name, file: c.src.file, tables: c.facts.map((t) => catalogTable(t, c.src.tables.find((e) => e.table === t.source))) };
+  return { database: c.database, name: c.src.name, file: c.src.file, tables: listTables(c.src, { tables: c.facts, database: c.database }) };
 }
 
 /**

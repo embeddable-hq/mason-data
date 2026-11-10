@@ -26,6 +26,7 @@ import { UI_SOCKET_SETTING } from "./ui-socket.ts";
 import { UI_RUN_FILE_SETTING } from "./ui-run-file.ts";
 import { backLinkSettingsSet, uiBackLinkSetting } from "./ui-back-link.ts";
 import { navSettingsSet, uiNavSetting } from "./ui-nav.ts";
+import { PG_PUBLIC_URL_SETTING, pgPublicUrlSetting } from "./pg-public-url.ts";
 import { UI_READ_ONLY_ALLOW_SETTING, UI_READ_ONLY_SETTING, uiReadOnlyAllowSetting, uiReadOnlySetting } from "./ui-read-only.ts";
 
 export const STATE_DIR = ".mason";
@@ -43,6 +44,9 @@ export interface RunningState {
   /** the Postgres API (docs/POSTGRES-API.md) without credentials, `postgresql://<host>:<port>/<database>`: where mason
    *  start told the listener to listen (src/api/postgres/listener.ts), and what mason user add prints a URL for */
   postgresUrl: string;
+  /** MASON_PG_PUBLIC_URL (mason serve, src/cli/pg-public-url.ts): the address a client reaches, in `publicUrlText`'s
+   *  form, which every URL printed for a client is built from (src/cli/pg-url.ts `clientLink`); absent where none is set */
+  postgresPublicUrl?: string;
   /** how the Postgres API listens (src/cli/pg-tls.ts): the address it is bound to (0.0.0.0 is every address, which the
    *  URL spells localhost) and its TLS — the certificate MASON_PG_TLS_CERT names, the project's self-signed one, or none —
    *  with the certificate's SHA-256 fingerprint. The URL carries `sslmode=require` when it is TLS */
@@ -161,7 +165,7 @@ export function readProject(root: string): Project | BrokenProject | null {
   if (r !== undefined && r !== null) {
     const run = r as Record<string, unknown>;
     const bad = typeof r !== "object" || !Number.isInteger(run.pid) ? ["pid"]
-      : [...RUNNING.filter((k) => typeof run[k] !== "string"), ...(typeof (run.postgresListener as { host?: unknown } | null)?.host !== "string" ? ["postgresListener"] : [])];
+      : [...RUNNING.filter((k) => typeof run[k] !== "string"), ...(run.postgresPublicUrl !== undefined && typeof run.postgresPublicUrl !== "string" ? ["postgresPublicUrl (a string, when there is one)"] : []),...(typeof (run.postgresListener as { host?: unknown } | null)?.host !== "string" ? ["postgresListener"] : [])];
     if (bad.length) return { root, dir, file, broken: `its "running" has no ${bad.join(", ")} (mason start writes the whole of it, or null when stopped)` };
   }
   return { root, dir, folder: path.resolve(root, config.folder), config };
@@ -396,5 +400,12 @@ export function startSettingRefusal(p: Project, env: NodeJS.ProcessEnv, o: { ser
   }
   const navSetting = uiNavSetting(env);
   if (navSetting !== null && "problem" in navSetting) return { message: navSetting.problem, code: "refused", fix: "set them as mason serve --help says, or unset them" };
+  // the address clients reach is a server's (src/cli/pg-public-url.ts): mason start's URL is this machine's own
+  if (!o.serve && env[PG_PUBLIC_URL_SETTING]) {
+    return { message: `${PG_PUBLIC_URL_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",
+      fix: `unset ${PG_PUBLIC_URL_SETTING}: mason start prints the address it listens on, and mason serve the one a server's clients reach` };
+  }
+  const publicUrl = pgPublicUrlSetting(env);
+  if (publicUrl !== null && "problem" in publicUrl) return { message: publicUrl.problem, code: "refused", fix: `set ${PG_PUBLIC_URL_SETTING} as mason serve --help says, or unset it` };
   return null;
 }

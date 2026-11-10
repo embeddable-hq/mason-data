@@ -33,6 +33,8 @@ export interface DevRun {
   /** the Postgres API without credentials (`postgresql://<host>:<port>/<database>`; mason user add prints the URL a
    *  tool pastes) */
   postgresUrl: string;
+  /** the address a client reaches, MASON_PG_PUBLIC_URL's (src/cli/pg-url.ts `clientLink`), or null */
+  postgresPublicUrl?: string | null;
   /** how it listens (src/cli/pg-tls.ts): its address and TLS */
   postgresListener: PostgresListener;
 }
@@ -48,7 +50,7 @@ export function runOf(p: Project, isAlive: (pid: number) => boolean = alive): De
   const r = p.config.running;
   if (!r || !isAlive(r.pid)) return null;
   return { name: p.config.name, root: p.root, home: p.dir, folder: p.folder, pid: r.pid, apiKey: p.config.apiKey,
-    control: { url: r.controlUrl, token: r.token }, postgresUrl: r.postgresUrl, postgresListener: r.postgresListener };
+    control: { url: r.controlUrl, token: r.token }, postgresUrl: r.postgresUrl, postgresPublicUrl: r.postgresPublicUrl ?? null, postgresListener: r.postgresListener };
 }
 
 /** What the run's command server says of itself (`/api/ping`: its pid), or null when nothing answers with the run's token. */

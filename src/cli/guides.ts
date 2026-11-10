@@ -194,7 +194,9 @@ ${codes}
 
   A FIRST SESSION, as a shell runs it:
     mason doctor --json && mason init --json
-    mason tables --json                       choose the tables (rows, key, whether one can be added)
+    mason tables --json                       choose the tables (rows, key, whether one can be added, the entry mason add writes)
+                                              (in a project, mason doctor --json --tables gives the checks and the same
+                                              tables on one connection to the database)
     mason add orders customers --json         added to the sources file, checked against the database
     mason start --json && mason wait --json   Mason in the background; until every added table is synced
     mason sync orders --json                  read what changed in it since (a table whose sync is off: only so)
