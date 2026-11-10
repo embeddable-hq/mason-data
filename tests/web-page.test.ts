@@ -39,7 +39,7 @@ const fn = <A extends unknown[], R>(name: string): Fn<A, R> => {
 interface Failure { code: string; message: string; why?: string; fix?: string; next?: Array<{ command: string; what?: string }> }
 interface App {
   model: Record<string, unknown>;
-  show(page: string, env?: unknown): void; poll(): Promise<void>; addUser(name: string, role?: string): Promise<boolean>; askRemove(name: string): void; cancelRemove(): void;
+  show(page: string, env?: unknown): void; poll(): Promise<void>; settled(): Promise<unknown>; addUser(name: string, role?: string): Promise<boolean>; askRemove(name: string): void; cancelRemove(): void;
   confirmRemove(name: string): Promise<boolean>; dismissAdded(): void; view(): Record<string, string>;
   addTable(table: string, columns?: string[], key?: string[]): Promise<boolean>; choose(table: string): Promise<boolean>; cancelChoose(): void;
   askRemoveTable(table: string): void; cancelRemoveTable(): void; confirmRemoveTable(table: string): Promise<boolean>; dismissOutcome(): void;
@@ -1901,7 +1901,9 @@ test("the shell: a sidebar nav — Overview · Tables · Users, the Observabilit
   const pages = (page as unknown as { PAGES?: Array<{ id: string; title: string; hash?: string; parent?: string; create: unknown }> }).PAGES;
   assert.ok(Array.isArray(pages), "src/web/app.js exports PAGES");
   assert.deepEqual(pages!.map((p) => [p.id, p.title, p.hash ?? p.id, p.parent ?? ""]), [["status", "Overview", "overview", ""], ["tables", "Tables", "tables", ""], ["users", "Users", "users", ""],
-    ["queries", "Queries", "observability/queries", "observability"], ["usage", "Usage", "observability/usage", "observability"], ["syncs", "Sync events", "observability/syncs", "observability"]]);
+    ["queries", "Queries", "observability/queries", "observability"], ["usage", "Usage", "observability/usage", "observability"], ["syncs", "Sync events", "observability/syncs", "observability"],
+    // a host's view (MASON_UI_NAV_LINKS' views): its section and its route, but no link of Mason's own nav (`nav: false`)
+    ["host", "Host view", "host", ""]]);
   const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
   const { PAGE_ROUTES } = await import("../src/cli/run-server.ts") as { PAGE_ROUTES: Record<string, readonly [string, string]> };
   for (const p of pages!) {
@@ -3189,7 +3191,7 @@ test("the vendored files: each a route, whole, pinned in its folder's name, with
   const vendor = webFiles().filter((f) => f.startsWith(`vendor${path.sep}`)).map((f) => f.split(path.sep).join("/")).sort();
   assert.deepEqual(vendor, ["vendor/README.md", "vendor/geist-1.7.2/Geist-Variable.woff2", "vendor/geist-1.7.2/GeistMono-Variable.woff2", "vendor/geist-1.7.2/LICENSE.txt",
     "vendor/lucide-1.56.0/LICENSE.txt", "vendor/lucide-1.56.0/chart-column.mjs", "vendor/lucide-1.56.0/layout-dashboard.mjs", "vendor/lucide-1.56.0/link.mjs", "vendor/lucide-1.56.0/logs.mjs",
-    "vendor/lucide-1.56.0/menu.mjs", "vendor/lucide-1.56.0/square-terminal.mjs", "vendor/lucide-1.56.0/table.mjs", "vendor/lucide-1.56.0/users.mjs", "vendor/lucide-1.56.0/x.mjs",
+    "vendor/lucide-1.56.0/menu.mjs", "vendor/lucide-1.56.0/panel-top.mjs", "vendor/lucide-1.56.0/square-terminal.mjs", "vendor/lucide-1.56.0/table.mjs", "vendor/lucide-1.56.0/users.mjs", "vendor/lucide-1.56.0/x.mjs",
     "vendor/uplot-1.6.32/LICENSE.txt", "vendor/uplot-1.6.32/uPlot.esm.js", "vendor/uplot-1.6.32/uPlot.min.css",
     "vendor/zilla-slab-5.3.0/LICENSE.txt", "vendor/zilla-slab-5.3.0/zilla-slab-latin-700-normal.woff2"]);
   const types: Record<string, string> = { woff2: "font/woff2", js: "text/javascript; charset=utf-8", mjs: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8", txt: "text/plain; charset=utf-8", md: "text/plain; charset=utf-8" };
@@ -4779,4 +4781,389 @@ test("Connect from anywhere over a fake run: asked once, opened confirmed with t
   await (again as unknown as { actions: Record<string, (u: string) => Promise<void>> }).actions.shareStop!("share_a1b2c3");
   assert.equal(again.m.phase, "ended");
   assert.equal(intervals[1]!.cleared, true);
+});
+
+// ------------------------------------------------------------------ the host's views and card (issue 814)
+
+/** A host's view as a site supplies it: every string a trap a renderer that writes HTML would fall into. */
+const HOST_VIEW = {
+  title: "Server <b>one</b>",
+  refresh: 30,
+  sections: [
+    { heading: "Status", facts: [{ label: "State", value: "running", status: "ok" }, { label: "Version <script>alert(1)</script>", value: "<script>alert(2)</script>" },
+      { label: "Host", value: "db.example.com", copy: true }, { label: "Disk", value: "nearly full", status: "warn" }],
+      text: "Line one\n<img src=x onerror=alert(3)>", links: [{ label: "Upgrade", url: "/console/upgrade", primary: true }, { label: "Bad", url: "javascript:alert(4)" },
+        { label: "Docs <i>", url: "https://docs.example.com/a?b=1&c=2" }, { label: "Not one", url: "not a url" }] },
+    { heading: "<img src=x onerror=alert(5)>" },
+  ],
+};
+/** A host's card for the Overview. */
+const HOST_CARD = { title: "Plan <u>", sections: [{ heading: "Plan", facts: [{ label: "Tier", value: "<img src=x onerror=alert(6)>" }, { label: "Status", value: "Upgrade available", status: "warn" }],
+  links: [{ label: "Upgrade", url: "/console/plan" }] }] };
+/** The host's sidebar with a link and two views (#host/2 and #host/3). */
+const HOST_NAV = { items: {}, links: [{ label: "Billing", url: "/billing" }, { label: "Server", view: "host/status.json" }, { label: "<img src=x onerror=alert(7)>", view: "host/plans.json" }] };
+
+/** A fake run whose host answers `host/…` too: the page asks it relative to its own address, as it asks api/… . */
+function hostRun(state: unknown, host: Record<string, () => Response>) {
+  const run = fakeRun();
+  run.answers.set("GET api/state", () => new Response(JSON.stringify(state), { status: 200 }));
+  const fetch = async (p: string, init?: { method?: string; body?: string }): Promise<Response> => {
+    if (!p.startsWith("host/")) return run.fetch(p, init);
+    assert.equal(init?.method ?? "GET", "GET", "a host's view is only ever read");
+    run.asked.push(`GET ${p}`);
+    const a = host[p];
+    if (a === undefined) throw new TypeError("fetch failed");
+    return a();
+  };
+  return { ...run, fetch };
+}
+const jsonAnswer = (v: unknown) => () => new Response(JSON.stringify(v), { status: 200, headers: { "Content-Type": "application/json" } });
+
+test("a host's link is read in the page as the link back is on the server: hostLinkUrl accepts nothing src/cli/ui-back-link.ts linkUrl refuses, serialises what both take the same, and refuses a host with a % or a space whatever the URL parser does", async () => {
+  const { linkUrl } = await import("../src/cli/ui-back-link.ts");
+  const hostLinkUrl = fn<[unknown], string | null>("hostLinkUrl");
+  const server = (v: string) => { const r = linkUrl(v, "x", "y"); return typeof r === "string" ? r : null; };
+  // what both take, the same
+  const taken = ["/billing", "/a/../b", "/console/db/users?tab=1#x", "/a?q='1'&r=<2>", "/%2e%2e/x", "https://Console.Example.com", "HTTPS://console.example.com/a/../b?x=1#y",
+    "http://console.example.com:8080/p", "https://xn--bcher-kva.example/", "https://[::1]:8443/x", "https://console.example.com/%zz", "https://1.2.3.4/", "https://console.example.com./"];
+  for (const v of taken) { assert.notEqual(server(v), null, v); assert.equal(hostLinkUrl(v), server(v), v); }
+  // what the page refuses: every one linkUrl refuses, and a host it does not write by the strict pattern
+  const refused = ["/.//evil.example.com", "//evil.example.com/x", "/\\evil.example.com", "/a\tb", "/a b", "/a\u0000b", "/é", `/${"a".repeat(2048)}`, "javascript:alert(1)",
+    "JavaScript:alert(1)", "data:text/html,<script>alert(1)</script>", "vbscript:x", "billing", "", "not a url", "https://admin:hunter2@console.example.com/", "https://admin@console.example.com/",
+    "https:console.example.com", "https://", "https:///x", "ftp://console.example.com/", "mailto:a@example.com", "https://a_b.example/", "https://-a.example/"];
+  // a % in each place of a host, every byte: Chromium's parser took some of these that Node's refuses (https://a%20b)
+  const hex = Array.from({ length: 256 }, (_, i) => i.toString(16).toUpperCase().padStart(2, "0"));
+  const pct = hex.flatMap((x) => [`https://%${x}a.example/`, `https://a%${x}.example/`, `https://a.example%${x}/`, `https://a%${x}b/`, `https://[::1%${x}]/`, `http://%${x}/`,
+    `https://a.example:%${x}/`, `https://a.example:80%${x}/`]);
+  for (const v of [...refused, ...pct]) assert.equal(hostLinkUrl(v), null, v);
+  // never more than linkUrl takes, never serialised otherwise
+  for (const v of [...taken, ...refused, ...pct]) { const page = hostLinkUrl(v); assert.ok(page === null || page === server(v), v); }
+  // THE SAME, UNDER A PARSER THAT TAKES ANY HOST (as a browser's may): the page's own check refuses each, not the parser
+  const RealURL = globalThis.URL;
+  class LenientURL {
+    href: string; host: string; hostname: string; username = ""; password = ""; origin: string; pathname: string; search = ""; hash = "";
+    constructor(v: string, base?: string) {
+      if (base !== undefined) { const u = new RealURL(v, base); this.href = u.href; this.host = u.host; this.hostname = u.hostname; this.origin = u.origin; this.pathname = u.pathname; this.search = u.search; this.hash = u.hash; return; }
+      const host = /^[a-z]+:\/\/([^/?#]*)/i.exec(v)?.[1] ?? "";
+      this.host = host; this.hostname = host.replace(/:[^\]]*$/, ""); this.href = v.endsWith("/") ? v : `${v}/`; this.origin = ""; this.pathname = "/";
+    }
+  }
+  try {
+    (globalThis as { URL: unknown }).URL = LenientURL;
+    for (const v of [...pct, "https://a%20b", "https://%20evil.example", "https://[::1%30]/", "https://a b.example/", "https://admin@console.example.com/"]) assert.equal(hostLinkUrl(v), null, `lenient: ${v}`);
+  } finally { (globalThis as { URL: unknown }).URL = RealURL; }
+  for (const v of [null, 7, { url: "/x" }, ["/x"]]) assert.equal(hostLinkUrl(v), null, "a URL is text");
+});
+
+test("a host's view is held to its shape: taken and read whole, refresh held within its bounds, a link that fails the link rules dropped and counted; anything outside the shape refused in words, never quoting a value", () => {
+  const hostView = fn<[unknown], { view?: { title: string; refresh: number | null; sections: Array<{ heading: string; facts: unknown[]; text: string | null; links: unknown[]; dropped: number }> }; problem?: string }>("hostView");
+  const { view } = hostView(HOST_VIEW);
+  assert.ok(view);
+  assert.equal(view.title, "Server <b>one</b>");
+  assert.equal(view.refresh, 30);
+  assert.deepEqual(view.sections[0]!.links, [{ label: "Upgrade", url: "/console/upgrade", primary: true }, { label: "Docs <i>", url: "https://docs.example.com/a?b=1&c=2", primary: false }]);
+  assert.equal(view.sections[0]!.dropped, 2, "javascript: and a text that is no URL");
+  assert.deepEqual(view.sections[1], { heading: "<img src=x onerror=alert(5)>", facts: [], text: null, links: [], dropped: 0 }, "facts, text and links may be left out");
+  const refresh = (r: unknown) => hostView({ title: "t", sections: [], refresh: r }).view?.refresh;
+  assert.deepEqual([refresh(1), refresh(5), refresh(29.6), refresh(3600), refresh(999_999), hostView({ title: "t", sections: [] }).view?.refresh], [5, 5, 30, 3600, 3600, null]);
+  const many = (n: number, f: (i: number) => unknown) => Array.from({ length: n }, (_, i) => f(i));
+  const section = (s: Record<string, unknown>) => ({ title: "t", sections: [{ heading: "h", ...s }] });
+  const refused: Array<[unknown, string]> = [
+    [null, "it is not an object { title, sections }"],
+    [[HOST_VIEW], "it is not an object { title, sections }"],
+    ["running", "it is not an object { title, sections }"],
+    [{ title: "t" }, "its sections is not a list of at most 20"],
+    [{ title: "t", sections: {} }, "its sections is not a list of at most 20"],
+    [{ title: "t", sections: many(21, () => ({ heading: "h" })) }, "its sections is not a list of at most 20"],
+    [{ title: "t", sections: [], html: "<b>x</b>" }, `it has a key a view does not take ("html"): a view is { title, sections, refresh? }`],
+    [{ sections: [] }, "its title is not one line of text of at most 200 characters"],
+    [{ title: "a\nb", sections: [] }, "its title is not one line of text of at most 200 characters"],
+    [{ title: "‮evil", sections: [] }, "its title is not one line of text of at most 200 characters"],
+    [{ title: "t".repeat(201), sections: [] }, "its title is not one line of text of at most 200 characters"],
+    [{ title: "t", sections: [], refresh: "30" }, "its refresh is not a number of seconds"],
+    [{ title: "t", sections: [], refresh: -1 }, "its refresh is not a number of seconds"],
+    [{ title: "t", sections: ["x"] }, "sections[0] is not an object { heading, facts, text, links }"],
+    [{ title: "t", sections: [{ heading: "h", form: {} }] }, `sections[0] has a key a section does not take ("form"): a section is { heading, facts?, text?, links? }`],
+    [{ title: "t", sections: [{}] }, "sections[0].heading is not one line of text of at most 200 characters"],
+    [section({ text: 7 }), "sections[0].text is not text of at most 8000 characters"],
+    [section({ text: "a\u0007b" }), "sections[0].text is not text of at most 8000 characters"],
+    [section({ facts: many(51, () => ({ label: "l", value: "v" })) }), "sections[0].facts is not a list of at most 50"],
+    [section({ facts: [{ label: "l", value: 7 }] }), "sections[0].facts[0].value is not one line of text of at most 2000 characters"],
+    [section({ facts: [{ label: "l", value: "v", onclick: "x" }] }), "sections[0].facts[0] is not { label, value, copy?, status? }"],
+    [section({ facts: [{ label: "l", value: "v", status: "great" }] }), "sections[0].facts[0].status is not ok, warn or bad"],
+    [section({ facts: [{ label: "l", value: "v", copy: "yes" }] }), "sections[0].facts[0].copy is not true or false"],
+    [section({ links: [{ url: "/x" }] }), "sections[0].links[0].label is not one line of text of at most 200 characters"],
+    [section({ links: [{ label: "x", url: "/x", target: "_blank" }] }), "sections[0].links[0] is not { label, url, primary? }"],
+    [section({ links: many(21, () => ({ label: "x", url: "/x" })) }), "sections[0].links is not a list of at most 20"],
+  ];
+  for (const [v, problem] of refused) assert.deepEqual(hostView(v), { problem }, JSON.stringify(v)?.slice(0, 80));
+  assert.ok(!hostView({ title: "t", sections: [], ["hunter2‮".repeat(20)]: 1 }).problem!.includes("hunter2"), "a key past a line is not quoted");
+});
+
+test("a host's view and card as the page writes them: every string TEXT (a <script>, an <img onerror> stays text), a status its marker and its word, a fact to copy its Copy, a refused link said and never written", () => {
+  const hostView = fn<[unknown], { view: unknown }>("hostView");
+  const renderHostView = fn<[unknown, string?], string>("renderHostView");
+  const renderHostCard = fn<[unknown], string>("renderHostCard");
+  const html = renderHostView(hostView(HOST_VIEW).view, "view-2");
+  for (const bad of ["<script", "<img", "<b>", "<i>", "javascript:", "not a url"]) assert.ok(!html.includes(bad), `${bad} is never markup, nor a link refused`);
+  assert.ok(!/<[^>]*\sonerror=/i.test(html) && !html.includes("javascript:"));
+  const text = textOf(html);
+  for (const said of ["Status", "State", "running", "Version <script>alert(1)</script>", "<script>alert(2)</script>", "db.example.com", "Line one <img src=x onerror=alert(3)>",
+    "Upgrade", "Docs <i>", "<img src=x onerror=alert(5)>", "2 links left out: their URLs are neither a path on this host (/something) nor an https or http URL with its host."]) assert.ok(text.includes(said), said);
+  assert.match(html, /<span class="indicator ok"><span class="dot" aria-hidden="true"><\/span>running<\/span>/, "a status is the page's marker beside its word");
+  assert.match(html, /<span class="indicator warn"><span class="dot" aria-hidden="true"><\/span>nearly full<\/span>/);
+  assert.match(html, /<code id="host-view-2-0-2">db\.example\.com<\/code> <button type="button" class="small" data-copy="host-view-2-0-2"/, "a fact to copy, with its Copy");
+  assert.match(html, /<a class="btn small primary" href="\/console\/upgrade" rel="noreferrer">Upgrade<\/a> <a class="btn small" href="https:\/\/docs\.example\.com\/a\?b=1&amp;c=2" rel="noreferrer">Docs &lt;i&gt;<\/a>/,
+    "links in the same tab, the primary one the page's primary action, sending no referrer");
+  assert.ok(!/<form|<input|data-(?!copy|room)[a-z-]+=/.test(html), "no form and no button but Copy");
+  // the card: its title the card's label, its facts as rows, its links; every string text
+  const card = renderHostCard({ body: hostView(HOST_CARD).view, failure: null });
+  assert.match(card, /^<div class="card host-card"><p class="card-label">Plan &lt;u&gt;<\/p>/);
+  assert.ok(!card.includes("<img") && !card.includes("<u>"));
+  assert.ok(textOf(card).includes("Tier <img src=x onerror=alert(6)> Status Upgrade available Upgrade"), textOf(card));
+  assert.match(card, /<span class="indicator warn"><span class="dot" aria-hidden="true"><\/span>Upgrade available<\/span>/);
+  // its failure in the card, the last card read under it; before any read, that it is read
+  const failure = { code: "failed", message: "the host's view at host/card.json could not be read", why: "it answered HTTP 404" };
+  assert.match(textOf(renderHostCard({ body: hostView(HOST_CARD).view, failure })), /^Plan <u> ✗ the host's view at host\/card\.json could not be read: it answered HTTP 404 Tier/);
+  assert.equal(textOf(renderHostCard({ body: undefined, failure })), "The host's card unknown ✗ the host's view at host/card.json could not be read: it answered HTTP 404");
+  assert.equal(textOf(renderHostCard(undefined)), "The host's card Reading it…");
+});
+
+test("a host's view in the app: its link in the sidebar's host group, current while shown; read when shown and in the same poll the state names it; again every refresh while shown, never once another page is", async () => {
+  let t = Date.UTC(2026, 9, 27, 9, 0, 0);
+  const run = hostRun({ ...CATALOG_STATE, pageNav: HOST_NAV }, { "host/status.json": jsonAnswer(HOST_VIEW), "host/plans.json": jsonAnswer({ title: "Plans", sections: [] }) });
+  const app = fn<[unknown, () => Date, string], App>("createApp")(run.fetch, () => new Date(t), "#host/2");
+  const asked = async () => { run.asked.length = 0; await app.poll(); await app.settled(); return [...run.asked]; };
+  assert.deepEqual(await asked(), ["GET api/state", "GET host/status.json"], "opened at its address: the state, then the view it names, in one poll");
+  const v = app.view();
+  assert.equal(v["host-h"], "Server &lt;b&gt;one&lt;/b&gt;", "the view's own title, as text");
+  assert.ok(textOf(v["host-view"]!).includes("db.example.com"));
+  const navLinks = [...v.nav!.matchAll(/<li><a href="([^"]+)"([^>]*)>.*?<span class="label">(.*?)<\/span><\/a><\/li>/gs)].map((m) => [m[1], m[2], m[3]]).slice(-3);
+  assert.deepEqual(navLinks, [["/billing", ` rel="noreferrer"`, "Billing"], ["#host/2", ` aria-current="page"`, "Server"], ["#host/3", "", "&lt;img src=x onerror=alert(7)&gt;"]],
+    "a view links to its hash in the page, the current page while shown; a link elsewhere as before");
+  assert.match(v.nav!, /<a href="#host\/2" aria-current="page"><span class="icon" aria-hidden="true"><svg\s+class="lucide lucide-panel-top"/, "a view's icon is the page's panel, a link's the link");
+  assert.equal([...v.nav!.matchAll(/aria-current/g)].length, 1);
+  t += 2000;
+  assert.deepEqual(await asked(), [], "2 s on: nothing due (the state once a minute beside a view, the view every 30 s)");
+  t += 28_000;
+  assert.deepEqual(await asked(), ["GET host/status.json"], "its refresh: read again");
+  // another page shown: the view is never read
+  app.show("tables");
+  t += 60_000;
+  assert.ok(!(await asked()).some((a) => a.startsWith("GET host/")), "Tables shown: the view not read");
+  assert.equal(app.view()["host-view"], "", "nor written");
+  // the other view: its own path; the first, shown again, read again at once
+  app.show("#host/3");
+  assert.deepEqual(await asked(), ["GET api/state", "GET host/plans.json"], "shown: everything it reads, read again");
+  assert.equal(app.view()["host-h"], "Plans");
+  app.show("#host/2");
+  assert.deepEqual(await asked(), ["GET api/state", "GET host/status.json"], "shown again: read again");
+  // without refresh: read when shown, never again by time
+  const once = hostRun({ ...CATALOG_STATE, pageNav: HOST_NAV }, { "host/status.json": jsonAnswer({ ...HOST_VIEW, refresh: undefined }) });
+  const app2 = fn<[unknown, () => Date, string], App>("createApp")(once.fetch, () => new Date(t), "#host/2");
+  await app2.poll(); await app2.settled();
+  once.asked.length = 0;
+  for (let i = 0; i < 5; i++) { t += 3_600_000; await app2.poll(); await app2.settled(); }
+  assert.ok(!once.asked.includes("GET host/status.json"), "no refresh: not read again while shown");
+});
+
+test("a host's view that cannot be read is the view's own failure, in the Failure shape, never a blank page: nothing answers, a 404, not JSON, too large, outside the shape; the last view read stays under it", async () => {
+  const HOST_BYTES_MAX = page.HOST_BYTES_MAX as unknown as number;
+  assert.equal(HOST_BYTES_MAX, 256 * 1024);
+  const big = JSON.stringify({ title: "t", sections: [{ heading: "h", text: "x".repeat(HOST_BYTES_MAX) }] });
+  const failing: Array<[(() => Response) | undefined, string]> = [
+    [undefined, "nothing answered it (fetch failed)"],
+    [() => new Response("<html>Not found</html>", { status: 404 }), "it answered HTTP 404"],
+    [() => new Response("<html><body>a login page</body></html>", { status: 200 }), "its answer is not JSON"],
+    [() => new Response(big, { status: 200 }), "its answer is more than 256 KiB, the most a view is read"],
+    [() => new Response(JSON.stringify({ title: "t", sections: [], script: "alert(1)" }), { status: 200 }), `its answer is outside a view's shape: it has a key a view does not take ("script"): a view is { title, sections, refresh? }`],
+  ];
+  for (const [answer, why] of failing) {
+    const run = hostRun({ ...CATALOG_STATE, pageNav: HOST_NAV }, answer === undefined ? {} : { "host/status.json": answer });
+    const app = fn<[unknown, () => Date, string], App>("createApp")(run.fetch, () => new Date(), "#host/2");
+    await app.poll(); await app.settled();
+    const v = app.view();
+    assert.equal(textOf(v["host-view"]!), `✗ the host's view at host/status.json could not be read why ${why} fix the site that serves this page answers this path with a view's JSON, ` +
+      `{ title, sections: [{ heading, facts, links }] } (docs/WEB-UI.md "Host views"); on a page that no site serves, nothing does`, why);
+    assert.match(v["host-view"]!, /^<div class="failure" role="alert">/);
+    assert.equal(v.poll, "", "the run answered: no banner");
+    assert.equal(v["host-h"], "Server", "the sidebar's label until a view is read");
+  }
+  // a view read, then a failure: said over the last view, which stays
+  let ok = true;
+  const run = hostRun({ ...CATALOG_STATE, pageNav: HOST_NAV }, { "host/status.json": () => ok ? jsonAnswer(HOST_VIEW)() : new Response("x", { status: 502 }) });
+  let t = Date.UTC(2026, 9, 27, 9, 0, 0);
+  const app = fn<[unknown, () => Date, string], App>("createApp")(run.fetch, () => new Date(t), "#host/2");
+  await app.poll(); await app.settled();
+  ok = false; t += 30_000;
+  await app.poll(); await app.settled();
+  const text = textOf(app.view()["host-view"]!);
+  assert.ok(text.startsWith("✗ the host's view at host/status.json could not be read why it answered HTTP 502") && text.includes("db.example.com"), text);
+  // a place the state names no view at (a link elsewhere, past the list) says so, as a Failure
+  const none = hostRun({ ...CATALOG_STATE, pageNav: HOST_NAV }, {});
+  for (const h of ["#host/1", "#host/9"]) {
+    const a = fn<[unknown, () => Date, string], App>("createApp")(none.fetch, () => new Date(), h);
+    await a.poll(); await a.settled();
+    assert.match(textOf(a.view()["host-view"]!), /^✗ this page has no host's view \d why the address names a view of the host's sidebar/);
+  }
+});
+
+test("in the browser: a host's view has its own address — opened at it, followed to and from it, Back and Forward; a place the state names no view at, or no host at all, lands on Mason's first page", async () => {
+  const run = hostRun({ ...CATALOG_STATE, pageNav: HOST_NAV }, { "host/status.json": jsonAnswer(HOST_VIEW), "host/plans.json": jsonAnswer({ title: "Plans", sections: [] }) });
+  const b = fakeBrowser(run as unknown as ReturnType<typeof fakeRun>, "#host/2");
+  await until(() => b.el("page-host").hidden === false && textOf(b.el("host-view").html).includes("db.example.com"), "the view shown, read");
+  assert.equal(b.el("host-h").html, "Server &lt;b&gt;one&lt;/b&gt;");
+  assert.match(b.el("nav").html, /<a href="#host\/2" aria-current="page">/);
+  assert.deepEqual(b.replaced, []);
+  // to Tables (a link followed), Back to the view, Forward to Tables: each a hashchange, as the browser says it
+  b.go("#tables");
+  await until(() => b.el("page-tables").hidden === false && b.el("page-host").hidden === true, "Tables shown");
+  run.asked.length = 0;
+  b.go("#host/2");
+  await until(() => b.el("page-host").hidden === false && run.asked.includes("GET host/status.json"), "Back: the view shown, read again");
+  b.go("#host/3");
+  await until(() => b.el("host-h").html === "Plans", "the other view");
+  assert.match(b.el("nav").html, /<a href="#host\/3" aria-current="page">/);
+  b.go("#tables");
+  await until(() => b.el("page-tables").hidden === false, "Forward: Tables again");
+  // a place with no view (an older bookmark): replaced by Mason's first page of its own
+  const old = fakeBrowser(hostRun({ ...CATALOG_STATE, pageNav: HOST_NAV }, {}) as unknown as ReturnType<typeof fakeRun>, "#host/5");
+  await until(() => old.replaced.length > 0);
+  assert.deepEqual(old.replaced, ["#overview"]);
+  // unset (no host's sidebar): #host/1 is the Overview, as an unknown hash always was
+  const plainRun = fakeRun();
+  const plain = fakeBrowser(plainRun, "#host/1");
+  await until(() => plain.replaced.length > 0 && plain.el("page-status").hidden === false, "the Overview");
+  assert.deepEqual(plain.replaced, ["#overview"]);
+  assert.ok(!plainRun.asked.some((a) => a.startsWith("GET host/")));
+});
+
+test("the host's card on the Overview (pageCard): one card beside Mason's own, read with the Overview, again at its refresh; its failure in the card; the state says it and mason status --json declares it; unset, the Overview as before", async () => {
+  let t = Date.UTC(2026, 9, 27, 9, 0, 0);
+  let answer = jsonAnswer({ ...HOST_CARD, refresh: 60 });
+  const run = hostRun({ ...CATALOG_STATE, pageCard: "host/card.json" }, { "host/card.json": () => answer() });
+  const app = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => new Date(t));
+  run.asked.length = 0;
+  await app.poll(); await app.settled();
+  assert.deepEqual(run.asked, [...STATUS_FIRST, "GET host/card.json"], "read with the Overview's first reads");
+  const overview = app.view().status!;
+  const grid = /<div class="cards n(\d)">/.exec(overview);
+  const plain = fn<[unknown], App>("createApp")(fakeRun().fetch);
+  await plain.poll();
+  const before = Number(/<div class="cards n(\d)">/.exec(plain.view().status!)![1]);
+  assert.equal(Number(grid![1]), before + 1, "one more card than Mason's own");
+  assert.match(overview, /<div class="card host-card"><p class="card-label">Plan &lt;u&gt;<\/p>.*?<\/div><\/div>/s, "the host's card, last");
+  assert.ok(!overview.includes("<img src=x"));
+  run.asked.length = 0; t += 30_000; await app.poll(); await app.settled();
+  assert.ok(!run.asked.includes("GET host/card.json"), "30 s on: not yet");
+  run.asked.length = 0; t += 30_000; await app.poll(); await app.settled();
+  assert.ok(run.asked.includes("GET host/card.json"), "its refresh, 60 s: read again");
+  answer = () => new Response("nope", { status: 500 });
+  t += 60_000; await app.poll(); await app.settled();
+  assert.ok(textOf(app.view().status!).includes("Plan <u> ✗ the host's view at host/card.json could not be read: it answered HTTP 500 Tier"), "its failure said in the card, the last card under it");
+  // the state says it, and mason status --json declares it
+  const ctxOf = (pageCard?: unknown) => ({
+    source, facts: () => ({ version: 160000, versionText: "16.4", standby: false, tables: TABLES, systemIdentifier: null }), warnings: [], replication: () => null,
+    page: true, served: true, ...(pageCard === undefined ? {} : { pageCard }), users: { file: "/app/.mason/users.json", apiKey: "k".repeat(32), database: "shop", postgresUrl: "postgresql://127.0.0.1:5433/shop" },
+    folder: () => "/app/mason", root: "/app", home: "/app/.mason", version: "0.9.0", startedAt: Date.parse("2026-10-27T09:00:00.000Z"),
+    sources: () => ({ file: sourceFile, problem: null }), listener: { openSessions: () => ({ open: 0, byClient: [] }) },
+    duck: { file: "/app/.mason/duck.db", requests: { days: 7 }, restarts: () => [], disk: () => ({ path: "/app/.mason", freeBytes: null, projectedBytes: null }) },
+  }) as unknown as RunContext;
+  const now = Date.parse("2026-10-27T10:00:00.000Z");
+  assert.equal((runState(ctxOf("host/card.json"), [], null, now) as RunState).pageCard, "host/card.json");
+  assert.equal((runState(ctxOf(), [], null, now) as RunState).pageCard, null);
+  assert.ok(commands.STATUS.json!.includes("pageCard"), "mason status --json declares it");
+  assert.match(commands.STATUS.usage, /pageCard \(the path, relative to\s+the page's address, its Overview reads the host's card from/);
+  assert.match(commands.STATUS.usage, /a view\s+of the host's the page shows, \[\{ view, label \}\]/);
+  // unset: every part of every page as before, nothing read of a host
+  for (const state of [NONE, COPYING, CATALOG_STATE]) {
+    const open = await pageByPage(state);
+    const nulls = await pageByPage({ ...state, pageCard: null, pageNav: null });
+    assert.equal(nulls.all, open.all, "pageCard and pageNav null: the same page");
+    assert.ok(!open.all.includes("host-card") && !open.all.includes("#host/"));
+  }
+});
+
+
+/** A host that never sends its headers: the fetch never settles (and does not heed an abort). */
+const NEVER = (() => new Promise<Response>(() => undefined)) as unknown as () => Response;
+/** A host that answers 200, then 10 bytes every `ms` for ever, until its body is cancelled (`cancelled` says so). */
+function dripping(ms = 100): { answer: () => Response; cancelled: () => boolean } {
+  let cancelled = false;
+  const answer = () => {
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const body = new ReadableStream<Uint8Array>({
+      start(c) { c.enqueue(new TextEncoder().encode("{\"title\":\"")); timer = setInterval(() => c.enqueue(new TextEncoder().encode("aaaaaaaaaa")), ms); },
+      cancel() { cancelled = true; clearInterval(timer); },
+    });
+    return new Response(body, { status: 200 });
+  };
+  return { answer, cancelled: () => cancelled };
+}
+/** `p`, or a failure naming what was held up once `ms` pass. */
+const within = <T>(p: Promise<T>, what: string, ms = 1500): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([p, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what}: held up past ${ms} ms`)), ms); })]).finally(() => clearTimeout(timer));
+};
+
+test("a host that never answers, or drips for ever, holds up nothing: the view says it is being read while the run's own reads and every other page go on; its read ends at the deadline, aborted", async () => {
+  const nav = { items: {}, links: [{ label: "Server", view: "host/cur" }] };
+  for (const [name, host] of [["no headers", { answer: NEVER, cancelled: () => true }], ["a body that drips", dripping(20)]] as const) {
+    let t = Date.UTC(2026, 9, 27, 9, 0, 0);
+    const run = hostRun({ ...CATALOG_STATE, pageNav: nav }, { "host/cur": host.answer });
+    const app = fn<[unknown, () => Date, string], App>("createApp")(run.fetch, () => new Date(t), "#host/1");
+    await within(app.poll(), `${name}: the view's first poll`);
+    assert.ok(run.asked.includes("GET host/cur"), `${name}: the view is asked`);
+    assert.equal(textOf(app.view()["host-view"]!), "Reading the host's view…", `${name}: said as being read, never blank`);
+    run.asked.length = 0; t += 2000;
+    await within(app.poll(), `${name}: the next poll`);
+    assert.ok(!run.asked.includes("GET host/cur"), `${name}: one read of a path at a time, never a second beside it`);
+    // another page: read, whatever the host does
+    app.show("tables"); run.asked.length = 0;
+    await within(app.poll(), `${name}: Tables`);
+    assert.deepEqual(run.asked, ["GET api/state", "GET api/usage?since=1m"], `${name}: Tables' own reads`);
+    app.show("observability/queries"); run.asked.length = 0;
+    await within(app.poll(), `${name}: Queries`);
+    assert.ok(run.asked.includes("GET api/requests?since=15m"), `${name}: Queries' own reads`);
+  }
+  // the read itself ends at its deadline, as the view's failure, and stops reading a body that drips
+  const readHost = fn<[unknown, string, { deadlineMs: number }], Promise<{ failure?: { message: string; why: string } }>>("readHost");
+  const why = "it was not answered whole within 0.05 s";
+  const never = await within(readHost(NEVER as never, "host/cur", { deadlineMs: 50 }), "no headers: the deadline");
+  assert.equal(never.failure?.why, why);
+  let aborted = false;
+  const heeds = (_p: string, init: { signal?: AbortSignal }) => new Promise<Response>((_, reject) => { init.signal?.addEventListener("abort", () => { aborted = true; reject(new Error("aborted")); }); });
+  assert.equal((await within(readHost(heeds as never, "host/cur", { deadlineMs: 50 }), "an abort heeded")).failure?.why, why);
+  assert.ok(aborted, "the request is aborted at the deadline");
+  const drip = dripping(10);
+  const dripped = await within(readHost(() => drip.answer(), "host/cur", { deadlineMs: 80 }), "a body that drips: the deadline");
+  assert.equal(dripped.failure?.why, "it was not answered whole within 0.08 s");
+  await until(drip.cancelled, "the dripping body cancelled", 2000);
+  assert.equal(page.HOST_READ_MS as unknown as number, 10_000, "the page's own deadline");
+});
+
+test("a host's card that never answers holds up nothing: the Overview is written with the card being read, and read again at its own rate; in the browser, every other page goes on reading", async () => {
+  let t = Date.UTC(2026, 9, 27, 9, 0, 0);
+  const run = hostRun({ ...CATALOG_STATE, pageCard: "host/card" }, { "host/card": NEVER });
+  const app = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => new Date(t));
+  await within(app.poll(), "the Overview's first poll");
+  const overview = app.view().status!;
+  assert.ok(!textOf(overview).startsWith("Asking Mason"), "the Overview is written");
+  assert.match(overview, /<div class="card host-card"><p class="card-label">The host's card<\/p><p class="dim">Reading it…<\/p><\/div>/);
+  run.asked.length = 0; t += 2000;
+  await within(app.poll(), "the next poll");
+  assert.deepEqual(run.asked, ["GET api/state"], "the state at its rate; the card, in flight, not asked again");
+  // the reviewer's walk: a view that drips, then Tables, then Queries — each read, the sidebar's state with them
+  const drip = dripping(100);
+  const walk = hostRun({ ...CATALOG_STATE, pageNav: { items: {}, links: [{ label: "Server", view: "host/cur" }] }, pageCard: "host/card" }, { "host/cur": drip.answer, "host/card": NEVER });
+  const b = fakeBrowser(walk as unknown as ReturnType<typeof fakeRun>, "#host/1");
+  await until(() => walk.asked.includes("GET host/cur"), "the view asked");
+  b.go("#tables");
+  await until(() => walk.asked.includes("GET api/usage?since=1m") && b.el("page-tables").hidden === false, "Tables read and shown");
+  walk.asked.length = 0;
+  b.go("#observability/queries");
+  await until(() => walk.asked.includes("GET api/requests?since=15m"), "Queries read");
+  walk.asked.length = 0;
+  b.go("#overview");
+  await until(() => walk.asked.includes("GET api/queries") && /Reading it…/.test(b.el("status").html), "the Overview read and written, its card being read");
 });

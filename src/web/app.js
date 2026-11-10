@@ -20,11 +20,17 @@
  *     hash    says another (`overview`, `observability/queries`): the address it is shown at
  *     title   its link in the nav (under its `parent`'s group, `observability`, whose pages share the time range:
  *             ctx.range()); its icon is the shell's (NAV_ICONS)
+ *     nav     false for a page that is no link of Mason's own nav (a host's view: its links are the host's entries)
  *     create(ctx) → {
- *       reads()        [{ path, everyMs }]: what it reads WHILE SHOWN, each at its own rate (everyMs ≤ POLL_MS: every
- *                      poll); a path is the store's key, so a path built from the page's own state (a filter, a page
- *                      of results) is read as that state changes. The FIRST is the page's own: its failure is the
- *                      banner at the top (`poll`); the page renders the others' failures itself.
+ *       reads()        [{ path, everyMs, ask? }]: what it reads WHILE SHOWN, each at its own rate (everyMs ≤ POLL_MS:
+ *                      every poll; Infinity: once, when shown); a path is the store's key, so a path built from the
+ *                      page's own state (a filter, a page of results) is read as that state changes; `ask(fetch)`
+ *                      reads it instead of the run's own read (a host's view: src/web/host-view.js `readHost`). The
+ *                      FIRST is the page's own: its failure is the banner at the top (`poll`); the page renders the
+ *                      others' failures itself. A read the page names once the poll's answers are in (a view the
+ *                      state has just named) is read in the same poll. A read with `ask` is NEVER awaited by the
+ *                      poll: it is stored when it settles (`onLate` paints then), one at a time per path, so a host
+ *                      that never answers holds up neither the run's reads nor another page's.
  *       view()         { <element id>: html }: the parts of its section it writes, from ctx.read and its own state
  *       actions        { name: fn }: what its buttons do, merged onto the app (the tests drive them); each re-reads
  *                      what it changed with ctx.refresh([path])
@@ -49,7 +55,8 @@
  *     }
  *     ctx = { ask(path, init) → { body } | { failure }, read(path) → { body, failure } | undefined (body: the last
  *             one read; failure: this read's, else null), refresh(paths) → Promise (read them now), now() → Date,
- *             range() → a key of RANGES: the time range the Observability pages share (from the hash) }
+ *             range() → a key of RANGES: the time range the Observability pages share (from the hash),
+ *             shown() → the id of the page shown }
  *
  * A page is registered by its import and its place in PAGES below, its route in PAGE_ROUTES, and its section in
  * index.html.
@@ -62,7 +69,8 @@ import { page as queriesPage } from "./pages/queries.js";
 import { page as usersPage } from "./pages/users.js";
 import { page as usagePage } from "./pages/usage.js";
 import { page as syncsPage } from "./pages/syncs.js";
-import { NAV_ITEM_VIEWS, VIEW_HASHES, viewOfHash } from "./routes.js";
+import { page as hostPage, hostViewAt } from "./pages/host.js";
+import { NAV_ITEM_VIEWS, VIEW_HASHES, HOST_PAGE, hostHash, viewOfHash } from "./routes.js";
 
 /** What the shell itself reads when the page shown does not: the state (the sidebar's project, badge and version). */
 const SHELL_STATE = { path: "api/state", everyMs: 60_000 };
@@ -82,9 +90,11 @@ export { tableFacts, addedLines, removedReport, pickBody, columnsPath, renderTab
 export { renderUsers, renderAdded, renderAddUser, attributesText } from "./pages/users.js";
 export { renderRequests } from "./pages/queries.js";
 export { renderRunning, renderSessions, renderClients, renderSlowest, queriesHref } from "./pages/usage.js";
+export { hostLinkUrl, hostView, readHost, renderHostView, renderHostCard, renderHostPart, HOST_BYTES_MAX, HOST_READ_MS, REFRESH_MIN_S, REFRESH_MAX_S, HOST_LIMITS } from "./host-view.js";
+export { hostViewAt } from "./pages/host.js";
 
 /** The pages, in the nav's order: a page with a `parent` is in its parent's group. */
-export const PAGES = [statusPage, tablesPage, usersPage, queriesPage, usagePage, syncsPage];
+export const PAGES = [statusPage, tablesPage, usersPage, queriesPage, usagePage, syncsPage, hostPage];
 
 /** The groups a parent stands for: its title, the heading of its pages in the nav. */
 const GROUPS = { observability: { title: "Observability" } };
@@ -112,8 +122,12 @@ export function replacedPages(nav) {
   return new Map(Object.entries(NAV_ITEM_VIEWS).filter(([k]) => typeof items[k] === "string").map(([k, id]) => [id, items[k]]));
 }
 
-/** The host's own links the state names (`pageNav.links`), each `{ label, url }`; [] when none. */
-export const hostLinks = (nav) => Array.isArray(nav?.links) ? nav.links.filter((l) => typeof l?.label === "string" && typeof l?.url === "string") : [];
+/** The host's own entries the state names (`pageNav.links`), each `{ label, url }` (a link elsewhere) or `{ label, view,
+ *  n }` (a view the page shows at `#host/<n>`, n its place in the list); [] when none. */
+export const hostLinks = (nav) => Array.isArray(nav?.links)
+  ? nav.links.flatMap((l, i) => typeof l?.label !== "string" ? [] : typeof l.url === "string" ? [{ label: l.label, url: l.url }]
+    : hostViewAt(nav, i + 1) !== null ? [{ label: l.label, view: l.view, n: i + 1 }] : [])
+  : [];
 
 /** Where a hash goes instead when it names a page the host replaced: its URL, else null (a hash naming no page is none). */
 export function elsewhere(hash, nav) {
@@ -141,7 +155,9 @@ export function retarget(html, nav) {
 /** A page's address with its parameters (`hashOf("queries", { range: "7d" })` → `#observability/queries?range=7d`); the
  *  default range is left out, so the plain address is Now. */
 export function hashOf(id, params = {}) {
-  const p = PAGES.find((x) => x.id === id) ?? PAGES[0];
+  // a host's view: its place in the host's links is its address
+  if (id === HOST_PAGE && params.view !== undefined) return hostHash(params.view);
+  const p = PAGES.find((x) => x.id === id && x.nav !== false) ?? PAGES[0];
   const q = new URLSearchParams(Object.entries(params).filter(([k, v]) => v !== undefined && v !== "" && !(k === "range" && v === DEFAULT_RANGE)));
   const qs = q.toString();
   return `#${hashOfPage(p)}${qs ? `?${qs}` : ""}`;
@@ -151,6 +167,7 @@ export function hashOf(id, params = {}) {
 export function tabs() {
   const list = [];
   for (const p of PAGES) {
+    if (p.nav === false) continue;
     if (!p.parent) { list.push({ id: p.id, title: p.title, pages: [p.id] }); continue; }
     const tab = list.find((t) => t.id === p.parent);
     if (tab) tab.pages.push(p.id); else list.push({ id: p.parent, title: GROUPS[p.parent]?.title ?? p.parent, pages: [p.id] });
@@ -169,9 +186,10 @@ const navLink = (p, shown, href, replaced = undefined) => replaced !== undefined
  * Observability views) is a heading over its pages' links, always shown, each keeping the range they share — so the
  * hash is the state, and a link followed keeps the time range chosen. With the host's sidebar (`nav`, `/api/state`
  * `pageNav`): a page it replaced links to its URL, and its own links are a group of their own at the end, each with the
- * link icon, its label as TEXT (escaped: `<b>` reads as `<b>`), in the same tab.
+ * link icon, its label as TEXT (escaped: `<b>` reads as `<b>`), in the same tab; a host's VIEW among them links to its
+ * hash in the page (`#host/<n>`), the current page while it is shown (`hostView`, its place).
  */
-export const renderNav = (shown, range = DEFAULT_RANGE, nav = null) => {
+export const renderNav = (shown, range = DEFAULT_RANGE, nav = null, hostView = null) => {
   const replaced = replacedPages(nav);
   const links = hostLinks(nav);
   return `<ul>${tabs().map((t) => {
@@ -180,8 +198,9 @@ export const renderNav = (shown, range = DEFAULT_RANGE, nav = null) => {
     const pages = t.pages.map((id) => PAGES.find((p) => p.id === id));
     return `<li class="group"><p class="group-title" id="nav-${esc(t.id)}">${esc(t.title)}</p><ul aria-labelledby="nav-${esc(t.id)}">` +
       pages.map((p) => `<li>${navLink(p, shown, hashOf(p.id, { range }), replaced.get(p.id))}</li>`).join("") + `</ul></li>`;
-  }).join("")}${links.length ? `<li class="group host-links"><ul aria-label="Links">${links.map((l) =>
-    `<li><a href="${esc(l.url)}" rel="noreferrer">${icon("link")}<span class="label">${esc(l.label)}</span></a></li>`).join("")}</ul></li>` : ""}</ul>`;
+  }).join("")}${links.length ? `<li class="group host-links"><ul aria-label="Links">${links.map((l) => l.view !== undefined
+    ? `<li><a href="${esc(hostHash(l.n))}"${shown === HOST_PAGE && String(hostView) === String(l.n) ? ` aria-current="page"` : ""}>${icon("panel-top")}<span class="label">${esc(l.label)}</span></a></li>`
+    : `<li><a href="${esc(l.url)}" rel="noreferrer">${icon("link")}<span class="label">${esc(l.label)}</span></a></li>`).join("")}</ul></li>` : ""}</ul>`;
 };
 
 /**
@@ -258,14 +277,27 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
   };
   const pages = new Map();
   const afterRead = () => { for (const p of pages.values()) p.afterRead?.(); };
+  // THE READS OF ITS OWN IN FLIGHT (a host's view, `ask`), by path: never awaited by a poll, never asked twice at once;
+  // each stored when it settles, the page painted again then (`app.onLate`)
+  const aside = new Map();
+  const readAside = (r, at) => {
+    const p = Promise.resolve().then(() => r.ask(fetchFn))
+      // a reader that throws is a bug of the page's: said as the read's failure, never lost
+      .catch((e) => ({ failure: { code: "failed", message: `the read of ${r.path} failed: ${e?.message ?? String(e)}` } }))
+      .then((res) => { put(r.path, at, res); afterRead(); app.onLate?.(); })
+      .finally(() => aside.delete(r.path));
+    aside.set(r.path, p);
+  };
   const refresh = async (paths) => {
     const at = now().getTime();
     const rs = await Promise.all(paths.map((p) => ask(p)));
     paths.forEach((p, i) => put(p, at, rs[i]));
     afterRead();
   };
-  const ctx = { ask, now, refresh, range: () => m.range, read: (path) => { const e = store.get(path); return e === undefined ? undefined : { body: e.body, failure: e.failure }; } };
+  const ctx = { ask, now, refresh, range: () => m.range, shown: () => m.shown, read: (path) => { const e = store.get(path); return e === undefined ? undefined : { body: e.body, failure: e.failure }; } };
   for (const p of PAGES) pages.set(p.id, p.create(ctx));
+  // the page first shown takes its parameters too, as `show` hands them (a host's view, its place)
+  pages.get(first.id).route?.(first.params, {});
   const app = {
     model: m,
     pages,
@@ -291,15 +323,28 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
       const pageReads = page.reads();
       const reads = pageReads.some((r) => r.path === SHELL_STATE.path) ? pageReads : [...pageReads, SHELL_STATE];
       const at = now().getTime();
-      const due = reads.filter((r) => r.everyMs <= POLL_MS || !store.has(r.path) || store.get(r.path).stale || at - store.get(r.path).at >= r.everyMs - POLL_MS / 2);
-      const rs = await Promise.all(due.map((r) => ask(r.path)));
-      due.forEach((r, i) => put(r.path, at, rs[i]));
+      const due = reads.filter((r) => !aside.has(r.path) && (r.everyMs <= POLL_MS || !store.has(r.path) || store.get(r.path).stale || at - store.get(r.path).at >= r.everyMs - POLL_MS / 2));
+      // the run's reads are awaited; a read of its own (a host's view) is started beside them and never awaited
+      const runReads = async (list) => {
+        for (const r of list.filter((x) => x.ask !== undefined)) readAside(r, at);
+        const theRun = list.filter((x) => x.ask === undefined);
+        const rs = await Promise.all(theRun.map((r) => ask(r.path)));
+        theRun.forEach((r, i) => put(r.path, at, rs[i]));
+      };
+      await runReads(due);
+      // what the page reads once these answered and it had not named (a view the state has just named): read now, not a poll later
+      const named = page.reads().filter((r) => !store.has(r.path) && !aside.has(r.path));
+      if (named.length > 0) await runReads(named);
       // a range that is not Now says when it was read: its reads are the once-only ones
       if (due.some((r) => r.everyMs === Infinity)) m.rangeReadAt = now();
       const own = reads[0] === undefined ? undefined : store.get(reads[0].path);
       m.pollFailure = own?.failure ?? null;
       afterRead();
     },
+    /** Once every read of its own now in flight has settled (the tests' wait; the page paints on `onLate`). */
+    settled: () => Promise.all([...aside.values()]),
+    /** Called when a read of its own settles: the browser's paint (`start`). */
+    onLate: null,
     /** The link back the state names (`pageBack`), or null: set on the sidebar by `setBack`, never written as HTML. */
     back() { return store.get("api/state")?.body?.pageBack ?? null; },
     /** The sidebar as the host says it (`pageNav`), or null: undefined until the state is first read (not yet known). */
@@ -312,13 +357,19 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
      */
     leave(hash) {
       const nav = app.nav();
-      if (nav === undefined || nav === null) return null;
+      if (nav === undefined) return null;
+      if (nav === null) return viewOfHash(hash).id === HOST_PAGE ? { hash: hashOf(PAGES[0].id) } : null;
       const url = elsewhere(hash, nav);
       if (url !== null) return { url };
       const r = viewOfHash(hash);
       const replaced = replacedPages(nav);
+      // a host's view the state does not name (a bookmark of an older sidebar): Mason's first page of its own
+      if (r.id === HOST_PAGE && hostViewAt(nav, r.params.view) === null) {
+        const own = PAGES.find((p) => p.nav !== false && !replaced.has(p.id));
+        return own === undefined ? null : { hash: hashOf(own.id) };
+      }
       if (r.named || !replaced.has(r.id)) return null;
-      const first = PAGES.find((p) => !replaced.has(p.id));
+      const first = PAGES.find((p) => p.nav !== false && !replaced.has(p.id));
       return first === undefined ? null : { hash: hashOf(first.id) };
     },
     view() {
@@ -331,7 +382,7 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
     parts(st) {
       const nav = st?.pageNav ?? null;
       return {
-        nav: renderNav(m.shown, m.range, nav),
+        nav: renderNav(m.shown, m.range, nav, pages.get(HOST_PAGE).model.view),
         // the range control in the shown view's header row (each group page's own slot; the others empty)
         ...Object.fromEntries(PAGES.filter((p) => p.parent).map((p) => [`range-${p.id}`, p.id === m.shown ? renderSubnav(m.shown, m.range, st?.engine?.keptDays, m.rangeReadAt) : ""])),
         where: st ? renderWhere(st) : "",
@@ -459,6 +510,8 @@ export function start(doc, win) {
     if (again) { again = false; await poll(); }
   };
   const shownPage = () => app.pages.get(app.model.shown);
+  // a host's view or card answered after its poll (never awaited by it): written then
+  app.onLate = () => paint();
   // what a page answered an event with: the page written at once (what the action set before it asked: Syncing…), and
   // again when it is answered
   const act = async (r) => { paint(); await r; paint(); };

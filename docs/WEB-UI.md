@@ -374,6 +374,9 @@ listens, and every browser connection crosses that one ssh connection as frames 
   text, never as HTML. Text that is not JSON, not a list, more than 5 links, an entry that is not an object, has a key
   other than `label` and `url` (named by its place, never quoted) or a key written twice (JSON would keep the last
   silently), or a label or URL that is wrong refuses the start, every problem on one line, naming the entry. `mason start` refuses both settings, as the other `MASON_UI_*` server settings.
+  An entry may name a **host view** instead of a link (`{ "label", "view" }`, below): exactly one of `url` and `view`,
+  both refused; it counts within the 5.
+- **The host's views and card: `MASON_UI_NAV_LINKS`' `view`, `MASON_UI_OVERVIEW_CARD`.** See "Host views" below.
 - **In the image, Mason's user is uid 1000, gid 1000 (`node`), and stays so**: an image that changes it names it under
   "Before you upgrade" in its release notes (deploy/mason-data/README.md). A supervisor that creates the folder of the
   socket or the run file makes it owned by `1000:1000`, mode 0700, where the container mounts it (the one folder rule of
@@ -436,6 +439,84 @@ that holds.
 
 Kubernetes has no SSH, and Fargate, Cloud Run, Azure Container Apps, Fly and Railway have tooling of their own: none is
 covered.
+
+## Host views
+
+A site that embeds the page (a hosted console behind its proxy) often has facts of its own about the server: its
+status, the versions it offers, how to connect from outside. It supplies them as **data**, and the page renders them
+**in its own look, inside the page**: the sidebar stays, only the content changes, and switching is as fast as between
+the Overview and Tables. Unset, nothing on the page changes.
+
+- **A view in the sidebar**: an entry of `MASON_UI_NAV_LINKS` with `view` in place of `url`,
+  `MASON_UI_NAV_LINKS='[{"label":"Server","view":"host/status.json"}]'`. Its link is among the host's links, with a
+  panel icon, and shows the view at the page's own address `#host/<n>` (`n` the entry's place in the list, from 1), so
+  Back, Forward and a bookmark work and the sidebar marks it as the current page. A `#host/<n>` that names no view (an
+  older bookmark, or a page with no host's sidebar) lands on the Overview, as an unknown address always has.
+- **A card on the Overview**: `MASON_UI_OVERVIEW_CARD=host/card.json`, the same JSON, shown as one more card after
+  Mason's own (its title the card's label, its facts as rows, its links under them).
+
+**The path is relative to the page's own address**, and the page reads it with a GET from its own origin, so the CSP's
+`default-src 'self'` holds and whatever serves the page answers it: a proxy serving the page at
+`https://example.com/mason/` is asked `https://example.com/mason/host/status.json`. On a bare `mason ui` the run's own
+server is asked, and answers 404, which the view shows as its failure. The path is read at the start
+(`src/cli/ui-host-view.ts` `viewPath`), and refused, naming the setting or the entry and never quoting the value, when
+it has a scheme (`https:`, `javascript:`), starts with `//` or `/`, has a `..` segment (written or `%2e`-encoded), a
+backslash, a `#fragment`, a character outside printable ASCII, or is past 2048 characters. `mason start` refuses
+`MASON_UI_OVERVIEW_CARD`, as the other server settings; `/api/state` and `mason status --json` say `pageNav.links`
+(`{ label, view }` among them) and `pageCard` (the path, or null).
+
+**When it is read**: when the view (or the Overview) is shown, and again every `refresh` seconds while it is shown and
+the tab is visible, held within 5 s and 1 h; without `refresh`, once each time it is shown. Nothing is cached beyond
+that: a view shown again is read again. A read is never awaited by the page's own polling, one is in flight per path at
+a time, and one not answered whole within 10 s (headers that never come, a body that drips) is aborted and shown as
+the view's failure: a host that hangs holds up neither the run's reads nor another page's.
+
+**The shape** (declared here and held in the page, `src/web/host-view.js` `hostView`):
+
+```json
+{
+  "title": "Server",
+  "refresh": 30,
+  "sections": [
+    {
+      "heading": "Status",
+      "facts": [
+        { "label": "State", "value": "running", "status": "ok" },
+        { "label": "Version", "value": "0.15.0" },
+        { "label": "Host", "value": "db.example.com", "copy": true }
+      ],
+      "text": "Upgrades run in the maintenance window.",
+      "links": [
+        { "label": "Upgrade available", "url": "/console/upgrade", "primary": true },
+        { "label": "Connect from outside", "url": "https://docs.example.com/connect" }
+      ]
+    }
+  ]
+}
+```
+
+- `title` (one line, at most 200 characters): the view's heading, or the card's label. `sections`: at most 20, each a
+  `heading` (one line), and optionally `facts` (at most 50), `text` (at most 8,000 characters, line breaks kept) and
+  `links` (at most 20). `refresh`: seconds, optional.
+- A fact is `{ label, value }` (one line each; a value at most 2,000 characters), with `copy: true` for a Copy button
+  beside it and `status` `ok`, `warn` or `bad` for the page's own marker beside its word (never colour alone).
+- A link is `{ label, url }`, with `primary: true` for the page's primary action. Its URL follows `MASON_UI_BACK_URL`'s
+  rules (a path from the host's root, or an `https://` / `http://` URL with no user or password), read in the page by
+  `hostLinkUrl`, which `tests/web-page.test.ts` holds to accept nothing the server's `linkUrl` refuses, and to write
+  what both take the same: the data arrives when the view is shown, never at the start, so the page reads it itself.
+  Its host is held to an explicit pattern too (DNS labels or an IPv6 literal, an optional port; never a `%` or a
+  space), before and after the URL parser reads it, since a browser's parser takes hosts Node's refuses. A link that fails them is **left out and
+  said** ("1 link left out"), never written. It opens in the same tab, sending no referrer.
+- **Every string is shown as text, never as HTML**: a `<script>` in a label reads as `<script>`. There are no forms and
+  no buttons that change anything (a change is the site's own page's job, behind its own sign-in); Copy is the one
+  button a view writes.
+- **An answer the page cannot read is the view's own failure**, in the page's Failure shape, never a blank page: nothing
+  answered, not answered whole within 10 s, an answer that is not 2xx, more than 256 KiB, not JSON, or outside the shape (a key the shape does not
+  take, a string too long or holding a control character, a list too long, a `status` other than the three). The last
+  view read stays under the failure. The card says its failure inside the card.
+
+These facts are the host's, not Mason's: `mason status` does not say them, and the page shows them as the host wrote
+them.
 
 ## An operator's table edits
 
@@ -503,8 +584,10 @@ reads:
 - `pageReadOnly`: the page's read-only reason, or null. It does not apply to the operator.
 - `pageReadOnlyAllow`: what that page still changes, the areas `MASON_UI_READ_ONLY_ALLOW` names in this order
   (`["tables"]`, `["users"]` or `["tables", "users"]`), else `[]`.
-- `pageNav`: the sidebar as the host says it, `{ items, links }` (`MASON_UI_NAV_<ITEM>_URL`, `MASON_UI_NAV_LINKS`), or
-  null. It changes no route the server answers.
+- `pageNav`: the sidebar as the host says it, `{ items, links }` (`MASON_UI_NAV_<ITEM>_URL`, `MASON_UI_NAV_LINKS`; a
+  link is `{ label, url }`, a host's view `{ label, view }`), or null. It changes no route the server answers.
+- `pageCard`: the path, relative to the page's address, the Overview reads the host's card from
+  (`MASON_UI_OVERVIEW_CARD`), or null.
 
 **One table's columns: `GET /api/tables/<table>/columns`**, with `<table>` URL-encoded (`public.orders`). The answer
 has `table` and `columns`, each column with `name`, `type`, `nullable`, `comment` and `references` (`{ table, column }`

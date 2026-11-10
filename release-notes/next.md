@@ -23,6 +23,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- A site that embeds `mason serve`'s web page can show its own facts inside it, in the page's look: an entry of
+  `MASON_UI_NAV_LINKS` may be `{"label": …, "view": "host/status.json"}`, a view in the sidebar at `#host/<n>`, and
+  `MASON_UI_OVERVIEW_CARD=host/card.json` adds one card to the Overview. Each is JSON the page reads from a path
+  relative to its own address (so the site's proxy answers it), every string shown as text, links held to
+  `MASON_UI_BACK_URL`'s rules; an answer it cannot read is shown as the view's failure. docs/WEB-UI.md "Host views"
+  has the shape. Unset, the page is unchanged; `mason start` refuses `MASON_UI_OVERVIEW_CARD`.
 - The web page's Users says where each user connects from ("from anywhere", or its address ranges), and sets it as `mason user add --from` and `mason user from` do: the add form's **Connects from** (From anywhere, the default, or Only from these addresses, comma-separated), and the "from …" line under each user's role. A range Mason cannot read is refused in its own words.
 - `MASON_UI_READ_ONLY_ALLOW` takes `users`, alone or with tables (`tables,users`): a read-only page (`MASON_UI_READ_ONLY=1`) then still adds, disables, enables and removes users and changes where they connect from — exactly `POST /api/users`, `POST /api/users/<name>/disable`, `/enable` and `/from`, and `DELETE /api/users/<name>` — and refuses every other change as before. The value is read strictly: an item that is not `tables` or `users`, an empty one, or one named twice refuses the start, with a `did you mean`; the refusal no longer quotes the value. If you set it, check it against these rules before upgrading.
 - `DELETE /api/users/<name>` takes the name as one path segment: a path with more segments under it is no route (404).

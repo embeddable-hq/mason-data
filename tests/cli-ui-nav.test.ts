@@ -106,13 +106,13 @@ test("MASON_UI_NAV_LINKS refused at every entrance, each problem saying the entr
     [`{"label":"Billing","url":"/billing"}`, `${at} is not a list: write a list of links, [{"label":"Billing","url":"/billing"}]`],
     ["null", `${at} is not a list: write a list of links, [{"label":"Billing","url":"/billing"}]`],
     [JSON.stringify(Array.from({ length: 6 }, (_, i) => ({ label: `L${i}`, url: `/l${i}` }))), `${at} has 6 links, and the sidebar takes at most 5: keep the ones the page's readers need`],
-    [`["/billing"]`, `${at}'s entry 1 is not an object: each link is {"label": …, "url": …}`],
-    [`[[1]]`, `${at}'s entry 1 is not an object: each link is {"label": …, "url": …}`],
-    [link({ lable: "Billing", url: "/billing" }), `${at}'s entry 1 has a key a link does not take (its 1st) — did you mean \`label\`?: a link is {"label": …, "url": …}; ${at}'s entry 1 has no label: give it "label", the text the sidebar shows`],
-    [link({ label: "Billing", url: "/billing", target: "_blank" }), `${at}'s entry 1 has a key a link does not take (its 3rd): a link is {"label": …, "url": …}`],
+    [`["/billing"]`, `${at}'s entry 1 is not an object: each link is {"label": …, "url": …} or {"label": …, "view": …}`],
+    [`[[1]]`, `${at}'s entry 1 is not an object: each link is {"label": …, "url": …} or {"label": …, "view": …}`],
+    [link({ lable: "Billing", url: "/billing" }), `${at}'s entry 1 has a key a link does not take (its 1st) — did you mean \`label\`?: a link is {"label": …, "url": …} or {"label": …, "view": …}; ${at}'s entry 1 has no label: give it "label", the text the sidebar shows`],
+    [link({ label: "Billing", url: "/billing", target: "_blank" }), `${at}'s entry 1 has a key a link does not take (its 3rd): a link is {"label": …, "url": …} or {"label": …, "view": …}`],
     [link({ url: "/billing" }), `${at}'s entry 1 has no label: give it "label", the text the sidebar shows`],
-    [link({ label: "Billing" }), `${at}'s entry 1 has no url: give it "url", a path on this host (/something) or an https:// URL`],
-    [link({ label: 7, url: 8 }), `${at}'s entry 1 has no label: give it "label", the text the sidebar shows; ${at}'s entry 1 has no url: give it "url", a path on this host (/something) or an https:// URL`],
+    [link({ label: "Billing" }), `${at}'s entry 1 has no url: give it "url", a path on this host (/something) or an https:// URL, or "view", a path relative to the page's own address`],
+    [link({ label: 7, url: 8 }), `${at}'s entry 1 has no label: give it "label", the text the sidebar shows; ${at}'s entry 1 has no url: give it "url", a path on this host (/something) or an https:// URL, or "view", a path relative to the page's own address`],
     [link({ label: "Bill\ning", url: "/billing" }), control],
     [link({ label: "‮Billing", url: "/billing" }), control],
     [link({ label: "  ", url: "/billing" }), `${at}'s entry 1's label is white space alone: name the link`],
@@ -139,7 +139,7 @@ test("MASON_UI_NAV_LINKS refused at every entrance, each problem saying the entr
 
 test("a key of a MASON_UI_NAV_LINKS entry that a link does not take is never quoted, whatever it is (a secret pasted as a key): its place is named", () => {
   const at = "MASON_UI_NAV_LINKS";
-  const takes = (n: string) => `${at}'s entry 1 has a key a link does not take (its ${n}): a link is {"label": …, "url": …}`;
+  const takes = (n: string) => `${at}'s entry 1 has a key a link does not take (its ${n}): a link is {"label": …, "url": …} or {"label": …, "view": …}`;
   for (const [text, problem] of [
     [`[{"label":"Billing","url":"/billing","password=hunter2":1}]`, takes("3rd")],
     [`[{"hunter2":"x","label":"Billing","url":"/billing"}]`, takes("1st")],
@@ -165,10 +165,10 @@ test("a key written twice in a MASON_UI_NAV_LINKS entry refuses the start, namin
     [`[{"url":"/x" , "label" \n : "a","url"\t:"/y"}]`, twice(1, `"url"`, "1st, 3rd")],
     [`[{"label":"a","url":"/x","url":"/y","url":"/z"}]`, `${at}'s entry 1 has "url" 3 times (its 2nd, 3rd, 4th), and JSON keeps only the last: write each key once`],
     [`[{"label":"a","url":"/x","hunter2":1,"hunter2":2}]`,
-      `${at}'s entry 1 has a key a link does not take (its 3rd): a link is {"label": …, "url": …}; ${twice(1, "a key", "3rd, 4th")}`],
+      `${at}'s entry 1 has a key a link does not take (its 3rd): a link is {"label": …, "url": …} or {"label": …, "view": …}; ${twice(1, "a key", "3rd, 4th")}`],
     // the entry is the list's, counted past strings holding commas, brackets, braces, colons and escaped quotes
     [`["a,[{\\"label\\":1,\\"label\\":2}]:", {"label":"a","url":"/x"}, {"label":"b","url":"/y","label":"c"}]`,
-      `${at}'s entry 1 is not an object: each link is {"label": …, "url": …}; ${twice(3, `"label"`, "1st, 3rd")}`],
+      `${at}'s entry 1 is not an object: each link is {"label": …, "url": …} or {"label": …, "view": …}; ${twice(3, `"label"`, "1st, 3rd")}`],
     // a key nested in a value is not the entry's: the value is refused as it is
     [`[{"label":{"label":1,"label":2},"url":"/x"}]`, `${at}'s entry 1 has no label: give it "label", the text the sidebar shows`],
   ] as const) {
@@ -276,4 +276,91 @@ test("mason serve's: in its --help with the other MASON_UI_* settings, said at i
     `MASON_UI_NAV_USER_URL is not a setting — did you mean \`MASON_UI_NAV_USERS_URL\`?: the sidebar's settings are ${list}; ` +
     "MASON_UI_NAV_LINKS is mason serve's setting, and mason start ignores no setting silently", "beside one of mason serve's");
   assert.equal(startSettingRefusal(p, { MASON_UI_NAV_USERS_URL: "" }, { serve: false }), null, "set empty is unset");
+});
+
+// ------------------------------------------------------------------ the host's views and card (issue 814)
+
+const hostModule = await import("../src/cli/ui-host-view.ts" as string).catch(() => ({})) as Partial<typeof import("../src/cli/ui-host-view.ts")>;
+const uiOverviewCardSetting = hostModule.uiOverviewCardSetting ?? missing;
+
+/** What every entrance of mason serve says of MASON_UI_OVERVIEW_CARD: the setting's own reading, the one report, the run's check. */
+function cardEntrance(v: string): { setting: unknown; report: string | null; run: string | null } {
+  const env = { MASON_UI_OVERVIEW_CARD: v };
+  const s = serveSettings({ ...ENV, ...env }, "/srv");
+  const r = startSettingRefusal(project(), env, { serve: true });
+  return { setting: uiOverviewCardSetting(env), report: "message" in s ? s.message : null, run: r === null ? null : r.message };
+}
+
+/** Each path a view or the card is refused for, and the problem's words after "<where> to ". */
+const WAY = "a path relative to the page's own address, host/status.json";
+const PATH_REFUSALS: Array<[string, string]> = [
+  ["https://console.example.com/status.json", `a URL with a scheme: ${WAY}`],
+  ["javascript:alert(1)", `a URL with a scheme: ${WAY}`],
+  ["data:application/json,{}", `a URL with a scheme: ${WAY}`],
+  ["//evil.example.com/x", `a path that starts with //, which a browser reads as another host: ${WAY}`],
+  ["/host/status.json", `a path from the host's root, which misses the page under a proxy's prefix: ${WAY}`],
+  ["../status.json", `a path with a .. segment, which climbs out of the page's address: ${WAY}`],
+  ["host/../../x", `a path with a .. segment, which climbs out of the page's address: ${WAY}`],
+  ["host/%2E%2e/x", `a path with a .. segment, which climbs out of the page's address: ${WAY}`],
+  ["host\\status.json", "a path with a backslash, which a browser reads as /: write / or %5C"],
+  ["host/a b", "a path with a control character, a space or a character outside ASCII: write it %-encoded"],
+  ["host/é", "a path with a control character, a space or a character outside ASCII: write it %-encoded"],
+  ["host/status.json#x", "a path with a #fragment, which is never sent: remove it"],
+  [`h/${"a".repeat(2047)}`, "2049 characters, and a view's path is at most 2048: name a shorter one"],
+];
+
+test("a host's view in MASON_UI_NAV_LINKS: { label, view } taken beside links, its path as written; counted within the 5; MASON_UI_OVERVIEW_CARD taken; unset or empty, none", () => {
+  const links = [{ label: "Billing", url: "/billing" }, { label: "Server", view: "host/status.json" }, { label: "<img src=x onerror=alert(1)>", view: "./a/b?x=1&y=..%2F" }];
+  const e = everyEntrance({ MASON_UI_NAV_LINKS: JSON.stringify(links) });
+  assert.deepEqual(e, { setting: { items: {}, links }, report: null, run: null });
+  const six = JSON.stringify(Array.from({ length: 6 }, (_, i) => ({ label: `V${i}`, view: `v/${i}` })));
+  assert.equal(everyEntrance({ MASON_UI_NAV_LINKS: six }).run, "MASON_UI_NAV_LINKS has 6 links, and the sidebar takes at most 5: keep the ones the page's readers need");
+  assert.deepEqual(cardEntrance("host/card.json"), { setting: "host/card.json", report: null, run: null });
+  assert.deepEqual(cardEntrance("card?for=overview"), { setting: "card?for=overview", report: null, run: null });
+  assert.equal(uiOverviewCardSetting({}), null);
+  assert.equal(uiOverviewCardSetting({ MASON_UI_OVERVIEW_CARD: "" }), null, "set empty is unset");
+});
+
+test("a host view's path and MASON_UI_OVERVIEW_CARD refused at every entrance, never quoting the value: a URL, //, /, .., a backslash, a space, a fragment, too long; both url and view; view not text", () => {
+  const at = "MASON_UI_NAV_LINKS";
+  for (const [v, why] of PATH_REFUSALS) {
+    const view = everyEntrance({ MASON_UI_NAV_LINKS: JSON.stringify([{ label: "Billing", url: "/billing" }, { label: "Server", view: v }]) });
+    const problem = `${at}'s entry 2 has its view set to ${why}`;
+    assert.deepEqual(view, { setting: { problem }, report: `a setting is missing or wrong: ${problem}`, run: problem }, v);
+    const card = cardEntrance(v);
+    const cardProblem = `MASON_UI_OVERVIEW_CARD is set to ${why}`;
+    assert.deepEqual(card, { setting: { problem: cardProblem }, report: `a setting is missing or wrong: ${cardProblem}`, run: cardProblem }, v);
+    for (const said of [view.report!, card.report!]) assert.ok(!said.includes("evil") && !said.includes("status.json#x") && !said.includes("alert"), `${v}: never quoted`);
+  }
+  const cases: Array<[unknown, string]> = [
+    [{ label: "Server", url: "/server", view: "host/status.json" }, `${at}'s entry 1 has both "url" and "view": give it one, "url" for a link elsewhere or "view" for a view the page shows`],
+    [{ label: "Server", view: 7 }, `${at}'s entry 1 has its view set to no text: give it "view", ${WAY}`],
+    [{ label: "Server", view: "" }, `${at}'s entry 1 has its view set to nothing: ${WAY}`],
+    [{ view: "host/status.json" }, `${at}'s entry 1 has no label: give it "label", the text the sidebar shows`],
+    [{ label: "Server", veiw: "host/status.json" }, `${at}'s entry 1 has a key a link does not take (its 2nd) — did you mean \`view\`?: a link is {"label": …, "url": …} or {"label": …, "view": …}; ` +
+      `${at}'s entry 1 has no url: give it "url", a path on this host (/something) or an https:// URL, or "view", a path relative to the page's own address`],
+  ];
+  for (const [entry, problem] of cases) {
+    const e = everyEntrance({ MASON_UI_NAV_LINKS: JSON.stringify([entry]) });
+    assert.deepEqual(e, { setting: { problem }, report: `a setting is missing or wrong: ${problem}`, run: problem }, JSON.stringify(entry));
+  }
+});
+
+test("the host's views and card are mason serve's: in its --help, said at its start; mason start refuses MASON_UI_OVERVIEW_CARD, valid or not", () => {
+  assert.match(SERVE.usage, /or \{"label": …, "view": …\}, a view of the host's the page shows inside itself at #host\/<n>/);
+  assert.match(SERVE.usage, /\n {4}MASON_UI_OVERVIEW_CARD {2}a card of the host's on the web page's Overview, beside Mason's own/);
+  assert.deepEqual(navLines({ items: {}, links: [{ label: "Billing", url: "/b" }, { label: "Server", view: "host/s" }, { label: "Plans", view: "host/p" }] }), [
+    `the sidebar links to "Billing" (MASON_UI_NAV_LINKS)`,
+    `the sidebar shows the host's views "Server", "Plans", read from the page's address (MASON_UI_NAV_LINKS)`]);
+  assert.deepEqual(navLines({ items: {}, links: [{ label: "Server", view: "host/s" }] }), [`the sidebar shows the host's view "Server", read from the page's address (MASON_UI_NAV_LINKS)`]);
+  const p = project();
+  for (const v of ["host/card.json", "https://evil.example.com/"]) {
+    assert.deepEqual(startSettingRefusal(p, { MASON_UI_OVERVIEW_CARD: v }, { serve: false }),
+      { message: "MASON_UI_OVERVIEW_CARD is mason serve's setting, and mason start ignores no setting silently", code: "refused",
+        fix: "unset MASON_UI_OVERVIEW_CARD: mason start's page is yours alone, opened with mason ui" }, v);
+  }
+  assert.equal(startSettingRefusal(p, { MASON_UI_OVERVIEW_CARD: "" }, { serve: false }), null, "set empty is unset");
+  // a view is an entry of MASON_UI_NAV_LINKS: mason start refuses it as it refuses the list
+  assert.equal(startSettingRefusal(p, { MASON_UI_NAV_LINKS: JSON.stringify([{ label: "Server", view: "host/s" }]) }, { serve: false })?.message,
+    "MASON_UI_NAV_LINKS is mason serve's setting, and mason start ignores no setting silently");
 });

@@ -1432,6 +1432,7 @@ const NOT_THE_DATA = [
   /\bphase = 'copied'/g,                                                                // SQL over _mason.copy_state
   /\b(?:usage-)?copy-(?:bytes|rows)\b/g, /\bwhat-copy\b/g,   // a holder's id and a CSS class: names in the page's code
   /syncedBy \(copy, poll/g, /totals: \{ added, copied, failed/g, /restart, copied, recovered, synced/g,   // --json's words, by their field
+  /\{ label, value, copy\?, status\? \}/g, /\.copy is not true or false/g,              // a host view's fact to the clipboard, by its field (src/web/host-view.js)
 ];
 
 /** Every string and template literal of a JS/TS source, as `{ line, text }`: a template's `${…}` read as code (its own
