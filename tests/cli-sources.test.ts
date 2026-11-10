@@ -338,7 +338,7 @@ test("what looks like a secret reads a name's words in any case: passwordHash, a
     acronym: (w) => w.map((x) => x === "api" || x === "ssh" ? x.toUpperCase() : x[0]!.toUpperCase() + x.slice(1)).join(""),
   };
   const secrets = [["password"], ["passwd"], ["pwd"], ["secret"], ["secrets"], ["token"], ["tokens"], ["apikey"], ["credential"], ["credentials"], ["salt"],
-    ["api", "key"], ["access", "key"], ["secret", "key"], ["private", "key"], ["ssh", "key"], ["deploy", "key", "content"]];
+    ["api", "key"], ["access", "key"], ["secret", "key"], ["private", "key"], ["ssh", "key"], ["signing", "key", "content"]];
   const exempt = [["id"], ["ids"], ["at"], ["count"], ["type"], ["name"], ["kind"], ["hash", "algo"]];
   for (const [form, write] of Object.entries(forms)) {
     for (const s of secrets) {
