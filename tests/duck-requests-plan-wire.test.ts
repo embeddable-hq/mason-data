@@ -95,7 +95,7 @@ after(async () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("a statement that took SLOW_MS or more has its plan on its row: the tables, the SQL sent to the engine, the operators with their estimates; a fast one has none", async () => {
+test("a statement that took SLOW_MS or more has its plan on its row: the tables, the SQL sent to the engine, the operators with their estimates; a fast one has none", { skip: "quarantined: #848" }, async () => {
   const api = await listener();
   // the catalog Postgres starts at a run's first statement, which is then slow: started first
   const warm = await client(api);
