@@ -70,6 +70,16 @@ paths:
   a request pending is given up on — every request told 57P02, the run told (`onCrash`) — and `close` settles within
   5 s whatever the worker does. A thread blocked inside native code is never ended by `terminate` or `process.exit`
   (measured), so a file given up on is never opened again in the process (`abandoned`); its supervisor's SIGKILL ends it.
+- **An instance DuckDB invalidated is a crash** (issue 830: a checkpoint that failed for disk space left the run
+  "running", every statement XX000 "database has been invalidated" for good, nothing restarting it): after any request
+  that failed, the worker probes the instance with `SELECT 1` on a connection of its own (`probeInstance`,
+  src/duck/executor-worker.ts; one at a time, waited for by the shutdown), and its own FATAL answer — the one kind that
+  invalidates (`invalidationOf`) — tells the executor, which dies as for a crash (`invalidated`: every request 57P02,
+  the run told through `onCrash` with `invalidatedReason`, the cause and the way out, the worker shut down, never
+  `abandoned`). The run exits for its supervisor (or `mason serve`'s platform) to open the file again; a request's own
+  failure is never read for it (a session's is re-worded by `pgErrorOf`). DuckDB's `debug_checkpoint_abort` raises the
+  same FATAL offline: `tests/duck-executor.test.ts` "the synced data invalidated", `tests/cli-supervise.test.ts` (the
+  same cause again said, a restart that cannot open said).
 - **The watch counts its own ticks and hears a beat, so it fires on nothing but a stuck thread** (issue 58): silence is
   unanswered pings on the MAIN thread's ticks, never the wall clock, so a main thread blocked or a process frozen counts
   nothing against a healthy worker, and every Mason function call and row bumps the BEAT (`beat`, src/duck/cancel.ts,

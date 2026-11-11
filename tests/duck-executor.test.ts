@@ -141,6 +141,67 @@ await import(${JSON.stringify(fileURLToPath(new URL("../src/duck/executor-worker
   }
 });
 
+// THE SYNCED DATA INVALIDATED (issue 830: a checkpoint that failed for disk space left the run alive and "running",
+// every statement XX000 "database has been invalidated", the request log failing, nothing restarting it). DuckDB's own
+// debug setting aborts a checkpoint with the same FATAL error a full disk raises, offline: the instance is invalidated
+// exactly as it was there. The run is told once, with the cause and the way out (src/cli/dev.ts exits for its supervisor,
+// or mason serve's platform, to open the file again), a session's later statement is told 57P02 and to reconnect, and
+// every synced row is there when the file is opened again.
+test("the synced data invalidated by a fatal error ends the run as a crash, its cause said, and every row is there on reopen", { timeout: 60_000 }, async () => {
+  const file = path.join(dir, "invalidated.db");
+  const ownLog: string[] = [];
+  const own = await DuckStore.open(file, (l) => { ownLog.push(l); });
+  const said: string[] = [];
+  own.onCrash((reason) => { said.push(reason); });
+  await own.writer.run("CREATE TABLE public.gen AS SELECT range::INTEGER AS id FROM range(50000)");
+  await own.writer.run("CREATE TABLE public.small AS SELECT range::INTEGER AS id FROM range(10)");
+  const server = await startPostgresApi({
+    port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test", product: "mason-data",
+    authenticate: (password) => { const p = tokenProblem(API_KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
+    schema: () => schema, record: () => undefined, log: () => undefined, duck: await own.listener(undefined),
+  });
+  const c = new pg.Client({ host: "127.0.0.1", port: server.port, database: "app", user: "mason", password: mintToken(API_KEY, 600).token });
+  await c.connect();
+  c.on("error", () => undefined);   // the session ended under it, as a crash ends it
+  let reopened: DuckStore | null = null;
+  try {
+    assert.equal(String((await c.query("SELECT count(*) AS n FROM small")).rows[0].n), "10", "served before");
+    await own.writer.run("SET debug_checkpoint_abort = 'before_header'");
+    await assert.rejects(own.writer.run("CHECKPOINT"), /^Error: FATAL Error: Failed to create checkpoint/);
+    for (const t = Date.now(); said.length === 0; await sleep(20)) if (Date.now() - t > 10_000) throw new Error(`the run was not told within 10 s\n${ownLog.join("\n")}`);
+    await sleep(200);
+    assert.equal(said.length, 1, "the run is told, once");
+    assert.match(said[0]!, /^the synced data met a fatal error and must be opened again \(Failed to create checkpoint because of error: Checkpoint aborted before header write/);
+    assert.match(said[0]!, /Nothing synced is lost: it is opened again when Mason starts again; if the restart meets the same error, mason logs says it/);
+    assert.doesNotMatch(said[0]!, /\n/, "one line: its supervisor reads the run's FATAL line by line");
+    assert.doesNotMatch(said[0]!, /duckdb/i, "the engine is not named to a user");
+    // a later statement is told the run stopped and to reconnect, never the engine's XX000 for ever
+    await assert.rejects(c.query("SELECT count(*) FROM small"), (x: pg.DatabaseError) =>
+      x.code === "57P02" && /the engine stopped/.test(x.message) && x.detail === said[0] && /reconnect/.test(x.hint ?? ""));
+    await own.close();
+    // opened again (as the restart opens it): every row
+    reopened = await DuckStore.open(file, (l) => { ownLog.push(l); });
+    assert.equal(String((await reopened.writer.runAndReadAll("SELECT count(*) FROM public.gen")).getRowsJS()[0]![0]), "50000");
+  } finally {
+    await c.end().catch((e: Error) => { if (!/not queryable|ended|terminated/i.test(e.message)) throw e; });
+    await server.close();
+    await own.close();
+    await reopened?.close();
+  }
+});
+
+test("only DuckDB's FATAL error invalidates; its original cause is read, and a full disk's way out is the disk", async () => {
+  const { invalidatedReason, invalidationOf } = await import("../src/duck/executor.ts");
+  assert.equal(invalidationOf(new Error("Binder Error: column \"x\" not found")), null);
+  assert.equal(invalidationOf(new Error("IO Error: No space left on device")), null, "a statement's spill on a full disk fails it alone (53100)");
+  assert.equal(invalidationOf(new Error("FATAL Error: Failed to create checkpoint because of error: Could not write file \"/d/.mason/duck.db\": No space left on device")),
+    "Failed to create checkpoint because of error: Could not write file \"/d/.mason/duck.db\": No space left on device");
+  assert.equal(invalidationOf(new Error("FATAL Error: Failed: database has been invalidated because of a previous fatal error. The database must be restarted prior to being used again.\nOriginal error: \"Failed to create checkpoint because of error: Could not write file \"/d/.mason/duck.db\": No space left on device\"")),
+    "Failed to create checkpoint because of error: Could not write file \"/d/.mason/duck.db\": No space left on device");
+  assert.match(invalidatedReason("Could not write file \"x\": No space left on device"), /; free disk where the synced data is \(\.mason\/\), or the restart meets the same error$/);
+  assert.equal(invalidatedReason("a\n  b"), invalidatedReason("a b"), "one line");
+});
+
 // ---------------------------------------------------------------------------------------------------------- review findings
 
 // A `SELECT *` OVER A COPY WITH A STORED JSON PATH CALLS NO FUNCTION (a review finding). It reads the copy's

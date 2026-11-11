@@ -227,6 +227,11 @@ test("/healthz: 503 while it starts and stops, 200 once it answers whatever its 
   assert.equal(starting.status, 503);
   assert.deepEqual({ ...starting.body, version: "-" }, { status: "starting", version: "-", uptimeSeconds: 5, page: { socket: null, readOnly: false } });
   assert.equal(healthBody({ phase: "stopping" }, t0, t0).status, 503);
+  // the engine stopped under the run (issue 830: the synced data invalidated): 503 "failed" until it exits, its cause in
+  // the log alone
+  const engineStopped = healthBody({ phase: "failed" }, t0, t0);
+  assert.equal(engineStopped.status, 503);
+  assert.deepEqual({ ...engineStopped.body, version: "-" }, { status: "failed", version: "-", uptimeSeconds: 0, page: { socket: null, readOnly: false } });
   const copy = (source: string, phase: CopyState["phase"]): CopyState => ({ source, phase, rows: null, bytes: null, seconds: null, copiedAt: null, error: phase === "failed" ? "boom" : null });
   const ready = healthBody({ phase: "ready", tables: () => [copy("public.orders", "copied"), copy("public.users", "copying"), copy("sales.secret_ledger", "failed")],
     metrics: async () => { throw new Error("/healthz never reads the metrics"); } }, t0, t0 + 60_000);

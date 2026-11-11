@@ -66,7 +66,7 @@ export function restartsFact(home: string, read: () => Restart[] = () => readRes
 
 /** Why a run died, in the words a person reads: V8's own fatal line when it printed one */
 export function crashReason(code: number | null, signal: NodeJS.Signals | null, fatal: string | null): string {
-  // Mason's own fatal line (src/cli/dev.ts: the engine's thread stopped) is said as Mason said it
+  // Mason's own fatal line (src/cli/dev.ts: the engine stopped) is said as Mason said it
   if (fatal !== null) return /heap out of memory/i.test(fatal) && !fatal.startsWith("Mason: ") ? "it ran out of JavaScript heap (V8: heap out of memory)"
     : fatal.startsWith("Mason: ") ? fatal.slice("Mason: ".length) : `V8: ${fatal}`;
   if (signal === "SIGKILL") return "it was killed (SIGKILL: often the system out of memory)";
@@ -188,6 +188,9 @@ export async function supervise(o: SuperviseOptions): Promise<number> {
       const c = child;
       const { code, signal } = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => c.once("exit", (code, signal) => resolve({ code, signal })));
       const { ready, fatal } = scanLog(o.logFile, from);
+      // a run started AGAIN that did not get ready (the synced data cannot be opened: a disk still full) is said here
+      // too: nobody reads its own lines any more, mason start returned long ago
+      if (!stopping && !ready && recent.length > 0) note(`the run started again did not get ready (${crashReason(code, signal, fatal)}): not starting it again. mason logs --start shows why; mason start starts it`);
       if (stopping || !ready || (code === 0 && signal === null)) return code ?? 1;
       const running = stillRunning(o.home, note);
       if (running === null) return code ?? 1;
@@ -206,9 +209,11 @@ export async function supervise(o: SuperviseOptions): Promise<number> {
       // said in the log, and the record starts again from this restart
       try { before = readRestarts(o.home); }
       catch (e) { note(`${RESTARTS_FILE} could not be read (${(e as Error).message}): it is written again from this restart`); }
+      // the same cause as the restart before it (a disk still full, issue 830): said, so a loop is never silent
+      const again = before[before.length - 1]?.reason === reason ? ", the same as its last restart: what stopped it is still there" : "";
       const restarts = [...before, { at: new Date(now()).toISOString(), reason, upSeconds }].slice(-20);
       fs.writeFileSync(path.join(o.home, RESTARTS_FILE), `${JSON.stringify({ restarts }, null, 2)}\n`, { mode: 0o600 });
-      note(`the run stopped (${reason}) after ${upSeconds} s: starting it again in ${wait / 1000} s (mason status shows each restart)`);
+      note(`the run stopped (${reason}) after ${upSeconds} s${again}: starting it again in ${wait / 1000} s (mason status shows each restart)`);
       // the same Postgres port, so a client's saved connection reaches the new run
       const port = running.postgresUrl === undefined ? "" : new URL(running.postgresUrl.replace(/^postgres(ql)?:/, "http:")).port;
       env = port !== "" && !process.env.MASON_PG_PORT ? { MASON_PG_PORT: port } : {};

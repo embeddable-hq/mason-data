@@ -17,7 +17,7 @@ import { FUNCTION_CALLS, FUNCTION_ROWS, registerLibcOrder, useCancelTable } from
 import { stopPgEval } from "./pg-eval.ts";
 import type { DuckAnswer, DuckSession } from "../api/postgres/server.ts";
 import { StatementError } from "./statement.ts";
-import { STOPPING, wireError, type Reply } from "./executor.ts";
+import { invalidationOf, STOPPING, wireError, type Reply } from "./executor.ts";
 
 const { cancels } = workerData as { cancels: Int32Array };
 useCancelTable(cancels);
@@ -208,6 +208,8 @@ async function answer(m: Request): Promise<{ value: unknown; transfer?: Transfer
       // for — never closed under (a task of it inside a call waits for this thread)
       for (const [n, calls] of connCalls) if (calls.size > 0) conns.get(n)?.interrupt();
       for (const calls of connCalls.values()) await Promise.allSettled([...calls]);
+      // the instance's check after a failure (`probeInstance`): none starts once stopping, one running ends first
+      while (probe !== null) await probe;
       for (const [n, c] of [...conns].reverse()) { conns.delete(n); c.closeSync(); }
       instance?.closeSync();
       instance = null;
@@ -218,6 +220,46 @@ async function answer(m: Request): Promise<{ value: unknown; transfer?: Transfer
   throw new Error(`the engine's thread was asked ${JSON.stringify(m.op)}, which it does not know (Mason bug: report it)`);
 }
 
+/**
+ * THE INSTANCE INVALIDATED (issue 830: a checkpoint that failed for disk space left a run alive, saying it was fine, and
+ * answering every statement XX000 "database has been invalidated" for good). DuckDB invalidates its instance on a FATAL
+ * error — a checkpoint that cannot write (a full disk, an I/O error), one out of memory — and from then on refuses every
+ * statement on every connection until the file is opened again. ONE detector, a PROBE, never a reading of a request's
+ * failure (a session's reaches here re-worded, src/duck/store.ts pgErrorOf, and a drained one only in the log): after
+ * any request that failed, a `SELECT 1` on a connection of its own (one probe at a time; a failure meanwhile asks for
+ * one more), its own failure read raw (`invalidationOf`: FATAL, the one kind that invalidates). That is the instance
+ * invalidated: posted once (`invalidated`, with DuckDB's original error), and the executor ends the run as a crash ends
+ * it (src/duck/executor.ts `invalidated`). Any other failure of the probe is said and tells nothing: the next failed
+ * request probes again. `probe` is the one in flight, which the shutdown waits for before it closes the instance
+ * (nothing is closed under a call).
+ */
+let probe: Promise<void> | null = null;
+let probeAgain = false;
+let invalidated = false;
+function probeInstance(): void {
+  if (instance === null || stopping || invalidated) return;
+  if (probe !== null) { probeAgain = true; return; }
+  const on = instance;
+  probe = (async () => {
+    let check: DuckDBConnection | null = null;
+    try {
+      check = await on.connect();
+      await check.run("SELECT 1");
+    } catch (e) {
+      const cause = invalidationOf(e);
+      if (cause !== null) { invalidated = true; port.postMessage({ invalidated: cause } satisfies Reply); }
+      else log(`the engine's check after a failed request failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      // its one statement settled and calls no Mason function: its close waits for no task
+      try { check?.closeSync(); }
+      catch (e) { log(`closing the engine's check connection failed: ${(e as Error).message}`); }
+    }
+  })().finally(() => {
+    probe = null;
+    if (probeAgain) { probeAgain = false; probeInstance(); }
+  });
+}
+
 port.on("message", (m: Request) => {
   // the executor's watch (src/duck/executor.ts SILENT_MS): answered at once, by a thread whose loop turns
   if (m.op === "ping") { port.postMessage({ pong: true } satisfies Reply); return; }
@@ -225,7 +267,8 @@ port.on("message", (m: Request) => {
     if (m.id === undefined) return;
     port.postMessage({ id: m.id, ok: true, value: r?.value ?? null } satisfies Reply, r?.transfer ?? []);
   }, (e: unknown) => {
-    if (m.id === undefined) { log(`${m.op} failed: ${e instanceof Error ? e.message : String(e)}`); return; }
-    port.postMessage({ id: m.id, ok: false, error: wireError(e) } satisfies Reply);
+    if (m.id === undefined) log(`${m.op} failed: ${e instanceof Error ? e.message : String(e)}`);
+    else port.postMessage({ id: m.id, ok: false, error: wireError(e) } satisfies Reply);
+    probeInstance();
   });
 });

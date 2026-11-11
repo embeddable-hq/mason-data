@@ -99,6 +99,9 @@ export interface ServeHooks {
     page: { port: number; token: string } }) => string | null;
   /** a SIGTERM or SIGINT is stopping it */
   stopping: () => void;
+  /** the engine stopped under it (its thread died, or the synced data was invalidated): the run ends, exit 1, for the
+   *  platform to start it again; its reason is in the log */
+  failed: () => void;
   /** the page's Unix socket (MASON_UI_SOCKET, src/cli/ui-socket.ts) is given the run's server, whose requests it serves */
   page?: (server: Server) => void;
   /** that socket's path: `/api/state` `pageSocket` */
@@ -439,13 +442,15 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const spillLimit = process.env.MASON_SPILL_LIMIT || undefined;
   try { store = await DuckStore.open(duckFile, (l) => logLine(`[engine] ${l}`), { ...(memoryLimit === undefined ? {} : { memoryLimit }), ...(spillLimit === undefined ? {} : { spillLimit }) }); }
   catch (e) { fail("Opening the synced data"); say(`  ${(e as Error).message}`); return 1; }
-  // THE COPY'S THREAD DYING (src/duck/executor.ts: V8 out of heap there, an uncaught error) ends the run, said, for its
-  // supervisor to start it again: every session's statement in flight was told 57P02, and nothing can be answered after
+  // THE COPY'S THREAD DYING (src/duck/executor.ts: V8 out of heap there, an uncaught error), or the synced data
+  // invalidated by a fatal error (a checkpoint on a full disk, issue 830), ends the run, said, for its supervisor (or
+  // mason serve's platform) to start it again: every session's statement in flight was told 57P02, and nothing can be
+  // answered after
   let crash: ((reason: string) => void) | null = null;
   store.onCrash((reason) => {
-    logLine(`[engine] the engine's thread stopped: ${reason}`);
+    logLine(`[engine] the engine stopped: ${reason}`);
     if (crash !== null) crash(reason);
-    else say(`  ! the engine's thread stopped: ${reason}`);
+    else say(`  ! the engine stopped: ${reason}`);
   });
   done(`the synced data in ${path.relative(project.root, duckFile)} (mason destroy deletes it; engine ${DUCKDB_VERSION}), at most ${(memoryLimit ?? DEFAULT_MEMORY_LIMIT).trim()} of memory (MASON_DUCKDB_MEMORY), spilling at most ${humanBytes(store.spillLimitBytes)} to ${path.relative(project.root, duckFile)}.tmp (MASON_SPILL_LIMIT)`);
   // UNDER THE MEMORY FLOOR the run goes on and warns (src/duck/store.ts memoryWarning, the one text): here at its start,
@@ -747,7 +752,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     crash = (reason: string): void => {
       if (stopping) return;
       stopping = true;
-      say(`FATAL ERROR: Mason: the engine's thread stopped (${reason})`);
+      say(`FATAL ERROR: Mason: the engine stopped (${reason})`);
+      o.serve?.failed();
       clearInterval(refreshFacts);
       hosted.stopChanges?.();
       server.close();

@@ -178,7 +178,7 @@ test("every synchronous close on the engine's thread is one read against the rul
   // a close of an open result waits for the query's tasks, and a task inside a Mason function waits for this thread
   const closes = (file: string): string[] => fs.readFileSync(path.join(ROOT, file), "utf8").split("\n").filter((l) => /\.closeSync\(\)/.test(l)).map((l) => l.trim());
   assert.deepEqual(closes("src/duck/store.ts"), ["result?.closeSync();", "this.conn.closeSync();"]);
-  assert.deepEqual(closes("src/duck/executor-worker.ts"), ["try { c?.closeSync(); }", "for (const [n, c] of [...conns].reverse()) { conns.delete(n); c.closeSync(); }", "instance?.closeSync();"]);
+  assert.deepEqual(closes("src/duck/executor-worker.ts"), ["try { c?.closeSync(); }", "for (const [n, c] of [...conns].reverse()) { conns.delete(n); c.closeSync(); }", "instance?.closeSync();", "try { check?.closeSync(); }"]);
   // and a test beside a running engine never blocks the main thread: its watch's ticks are that thread's
   const executorFiles = fs.readdirSync(path.join(ROOT, "tests")).filter((f) => f.startsWith("duck-executor"));
   assert.ok(executorFiles.includes("duck-executor.test.ts") && executorFiles.includes("duck-executor-harness.ts"), executorFiles.join(", "));

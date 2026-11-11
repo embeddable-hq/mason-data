@@ -242,7 +242,11 @@ export async function openDuck(file: string, settings: Record<string, string>): 
     const m = (e as Error).message;
     throw new Error(/lock/i.test(m)
       ? `Mason could not open the synced data ${file}: another process holds it (${m}). Is another mason start running for this project? mason status says`
-      : `Mason could not open the synced data ${file}: ${m}. mason destroy deletes the synced data, and the next mason start syncs again`);
+      // a full disk (issue 830: a restart after a checkpoint that could not write) is the disk's to fix, never the
+      // synced data's to delete: nothing synced is lost, and it opens once there is room
+      : /No space left on device|ENOSPC/i.test(m)
+        ? `Mason could not open the synced data ${file}: ${m}. The disk where it is is full: free disk there, then start Mason again; nothing synced is lost`
+        : `Mason could not open the synced data ${file}: ${m}. mason destroy deletes the synced data, and the next mason start syncs again`);
   }
   const writer = await instance.connect();
   await writer.run(`CREATE SCHEMA IF NOT EXISTS ${MASON_SCHEMA}`);
