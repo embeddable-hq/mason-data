@@ -1349,6 +1349,10 @@ test("mason wait is ready only once a first sync's catch-up poll is over, and sa
     const w = JSON.parse(json.stdout) as { ready: boolean; failed: string[]; waiting: string[]; timedOut: boolean; tables: Array<{ table: string; sync: { state: string } }>; error: { code: string } };
     assert.deepEqual([w.ready, w.failed, w.waiting, w.timedOut, w.error.code], [false, [], [caughtUp("big"), caughtUp("small")], true, "timeout"]);
     assert.deepEqual(w.tables.map((t) => [t.table, t.sync.state]), [["public.big", "catching-up"], ["public.small", "catching-up"]]);
+    // named: that table's first sync alone, its catch-up included
+    const named = await run(["wait", "big", "--timeout", "1", "--json"]);
+    assert.equal(named.code, 124, named.stdout + named.stderr);
+    assert.deepEqual((JSON.parse(named.stdout) as { waiting: string[] }).waiting, [caughtUp("big")]);
     const person = await run(["wait", "--timeout", "1"]);
     assert.equal(person.code, 124, person.stdout + person.stderr);
     assert.doesNotMatch(person.stdout + person.stderr, /NOT kept current|Ready/, "a catch-up is at work, not a fault, and the wait is not over");
