@@ -128,7 +128,7 @@ export function scannedTables(nodes: readonly PlanNode[]): TableName[] {
 // --------------------------------------------------------------------------------------------- the answer
 
 /** what the sync says of a copy (src/duck/sync.ts `Sync.state`, what `mason status` reads): the facts EXPLAIN says of it */
-export type CopyFacts = Pick<CopyState, "source" | "phase" | "error" | "rowsSoFar" | "kept">;
+export type CopyFacts = Pick<CopyState, "source" | "phase" | "error" | "rowsSoFar" | "kept" | "behind" | "rebuilding">;
 
 /** `rows`: DuckDB's estimate of the copy's rows (duckdb_tables().estimated_size), said as one; `facts`: the sync's
  *  (null: the sync has no record of the table) */
@@ -139,7 +139,8 @@ export interface Copy { table: string; rows: number | null; facts: CopyFacts | n
 /** the sync's states as EXPLAIN takes them across to the executor's thread (src/api/postgres/server.ts `duckExplain`):
  *  its facts alone, read at the EXPLAIN */
 export const copyFacts = (states: readonly CopyState[]): CopyFacts[] =>
-  states.map((s) => ({ source: s.source, phase: s.phase, error: s.error, ...(s.rowsSoFar !== undefined ? { rowsSoFar: s.rowsSoFar } : {}), ...(s.kept !== undefined ? { kept: s.kept } : {}) }));
+  states.map((s) => ({ source: s.source, phase: s.phase, error: s.error, ...(s.rowsSoFar !== undefined ? { rowsSoFar: s.rowsSoFar } : {}), ...(s.kept !== undefined ? { kept: s.kept } : {}),
+    ...(s.behind !== undefined ? { behind: s.behind } : {}), ...(s.rebuilding !== undefined ? { rebuilding: s.rebuilding } : {}) }));
 
 /** an ISO instant as EXPLAIN says one: `2026-10-27 19:58:39 UTC` */
 const utc = (iso: string): string => `${iso.slice(0, 19).replace("T", " ")} UTC`;
@@ -162,6 +163,12 @@ export function keptText(f: CopyFacts | null, now: number = Date.now(), rows = t
   const k = f.kept;
   if (k === undefined) return UNKNOWN;
   if (k.by === "generated") return k.text;
+  // in its one catch-up poll (after its whole read, a change of its sync, a slot new to it), as mason status says it
+  // (src/cli/readiness.ts `CATCHING_UP`, `syncStateOf`'s `catching-up`): at work, never "NOT kept current" (issue 834)
+  if (f.error === null && f.rebuilding !== "copy" && (f.behind !== undefined || f.rebuilding === "catch-up")) {
+    const at = k.by === "recopy" ? k.syncedAt ?? k.copiedAt : k.syncedAt;
+    return `being caught up by one poll for what changed since it was synced (${at == null ? "never synced" : `last synced ${agoText(at, now)} (${utc(at)})`})`;
+  }
   if (k.by === "poll") {
     const synced = k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)} (${utc(k.syncedAt)})`;
     if (k.pending !== undefined) return `NOT kept current (${synced}): ${k.pending}`;

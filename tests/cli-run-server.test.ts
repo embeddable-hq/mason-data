@@ -449,15 +449,15 @@ test("each table's sync: its state in one word, when it was last brought current
   // no kept on these states: nothing measured, nothing promised (src/cli/readiness.ts behindOf)
   const unmeasured = { asOf: null, promisedSeconds: null, behindBySeconds: null, behindWhy: null };
   assert.deepEqual(sync.get("public.customers"), { state: "synced", syncedAt: at, syncSeconds: 0.04, syncedBy: "poll", ageSeconds: 90.5, ...unmeasured }, "its poll's own time, and its age at the moment asked");
-  assert.deepEqual(sync.get("public.orders"), { state: "syncing", syncedAt: "2026-10-24T09:00:00.000Z", syncSeconds: 12.5, syncedBy: "copy", ageSeconds: 3690.5, ...unmeasured }, "copied, caught up by one poll now: syncing");
+  assert.deepEqual(sync.get("public.orders"), { state: "catching-up", syncedAt: "2026-10-24T09:00:00.000Z", syncSeconds: 12.5, syncedBy: "copy", ageSeconds: 3690.5, ...unmeasured }, "copied, caught up by one poll now: catching-up (issue 834)");
   assert.deepEqual(sync.get("public.logs"), { state: "failed", syncedAt: "2026-10-24T09:30:00.000Z", syncSeconds: null, syncedBy: "poll", ageSeconds: 1890.5, ...unmeasured }, "copied, its poll failed: failed, the copy as old as its last poll");
   assert.deepEqual(sync.get("public.Shouty"), { state: "waiting", syncedAt: null, syncSeconds: null, syncedBy: null, ageSeconds: null, ...unmeasured }, "not reached yet");
   assert.equal(sync.get("public.events"), undefined, "a table neither added nor copied has no sync");
   // copied: the three copies served; failed: their syncs that failed; rows: the copies' rows; the latest sync of any
   assert.deepEqual(s.totals, { added: 0, copied: 3, failed: 1, rows: 1_023, syncedAt: at });
   const { syncStateOf } = await import("../src/cli/readiness.ts") as unknown as { syncStateOf: (c: unknown) => string };
-  assert.deepEqual([{ phase: "copying", error: null }, { phase: "failed", error: "x" }, { phase: "copied", error: null, rebuilding: "copy" }, { phase: "copied", error: null }].map(syncStateOf),
-    ["syncing", "failed", "syncing", "synced"], "copying, a failed copy, a copy made again (the old one serves), served and kept current");
+  assert.deepEqual([{ phase: "copying", error: null }, { phase: "failed", error: "x" }, { phase: "copied", error: null, rebuilding: "copy" }, { phase: "copied", error: null }, { phase: "copied", error: null, behind: "after its whole read" }, { phase: "copied", error: null, rebuilding: "catch-up" }, { phase: "copied", error: null, behind: "after its whole read", rebuilding: "copy" }].map(syncStateOf),
+    ["syncing", "failed", "syncing", "synced", "catching-up", "catching-up", "syncing"], "copying, a failed copy, a copy made again (the old one serves), served and kept current, a catch-up owed, one ending, a copy again of one owed its catch-up");
 });
 
 // BEHIND, LEFT OUT, A FAILED CATCH-UP (issues 254, 106, 100, 82): what each row says through runState, at an injected now —
@@ -578,15 +578,46 @@ test("left out of a named publication, or its catch-up failed: a synced table wh
   assert.deepEqual([caught.sync.state, caught.readiness.ready, caught.word], ["failed", false, "Failed"]);
   assert.match(caught.readiness.failed[0]!, /^public\.customers: its catch-up poll failed/);
   assert.match(caught.line, /NOT kept current, its sync failed \(last synced 2 h ago\): it is caught up by one poll after its whole read first — after a failure, tried again after 12:05 UTC$/);
-  // a catch-up queued after a copy that went well: syncing, ready, never failed or behind
+  // a catch-up queued after a copy that went well: catching up, not ready yet (issue 834), never failed or behind
   const queued = await row254({ behind: "after its whole read", kept: { ...polledKept(7200, { pending: "it is caught up by one poll after its whole read first" }), pending: "it is caught up by one poll after its whole read first" } });
-  assert.deepEqual([queued.sync.state, queued.readiness.ready], ["syncing", true]);
+  assert.deepEqual([queued.sync.state, queued.readiness.ready], ["catching-up", false]);
   // #96 guard: a first sync that failed (out of memory) is said as it was
   const oom = await row254({ phase: "failed", rows: null, copiedAt: null, synced: undefined, error: "Out of Memory Error: could not allocate block of size 256.0 KiB" });
   assert.deepEqual([oom.sync.state, (oom.t.copy as { phase: string }).phase, oom.readiness.ready], ["failed", "failed", false]);
   assert.match(oom.line, /100% {2}its first sync failed: Out of Memory Error: could not allocate block/);
   // recovered: the error gone, synced again
   assert.deepEqual([(await row254({ kept: polledKept(60) })).readiness.ready], [true]);
+});
+
+test("in its one catch-up poll, for every sync — off, polled, replicated — and as it ends: catching-up, at work in cyan, never NOT kept current, and not ready (issue 834)", async () => {
+  const { CATCHING_UP } = await import("../src/cli/readiness.ts") as unknown as { CATCHING_UP: string };
+  const pending = "it is caught up by one poll after its whole read first";
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ["off", { behind: "after its whole read", rebuilding: "catch-up", kept: { ...polledKept(3, { mode: "off", pending: null }, { mode: "off" }), pending } }],
+    ["polled", { behind: "after its whole read", rebuilding: "catch-up", kept: { ...polledKept(3, { pending }), pending } }],
+    ["replicated", { behind: "after its whole read", rebuilding: "catch-up", kept: { by: "replication", slot: "s", state: "catching-up", why: "caught up by one poll after its whole read",
+      position: "0/1", lastCommit: null, notRunning: null, syncedAt: ago(3), ...promiseOf({ mode: "replication", pending: "caught up by one poll after its whole read" }) } }],
+    // its mark taken off on the writer's turn, the rebuild not ended yet: still its catch-up (the sync's words "its sync is ending")
+    ["ending", { rebuilding: "catch-up", kept: { ...polledKept(3, { pending: "its sync is ending: it is kept current from then on" }), pending: "its sync is ending: it is kept current from then on" } }],
+    // a slot new to the copy, queued: the stream's words, the same state
+    ["queued, a new slot", { behind: "after the slot was made", kept: { by: "replication", slot: "s", state: "catching-up", why: "caught up by one poll after the slot was made",
+      position: "0/1", lastCommit: null, notRunning: null, syncedAt: ago(3), ...promiseOf({ mode: "replication", pending: "caught up by one poll after the slot was made" }) } }],
+  ];
+  for (const [name, st] of cases) {
+    const r = await row254({ copiedAt: ago(3), synced: { at: ago(3), seconds: 600, by: "copy" }, ...st });
+    assert.equal(r.sync.state, "catching-up", name);
+    assert.equal(r.line.replace(/\s+/g, " "), `public.customers ████████████████████ 100% 1,000 rows · synced · ${CATCHING_UP} (last synced 3 s ago)`, name);
+    assert.equal(r.colour, "C", `${name}: at work, cyan`);
+    assert.deepEqual([r.readiness, r.word], [{ ready: false, failed: [], waiting: [`public.customers: ${CATCHING_UP}`] }, "Under way"], name);
+    assert.equal(r.totals.failed, 0, name);
+  }
+  // a re-read whole of a table owed its catch-up is a sync again (`syncing`), its copy serving; ready as before
+  const again = await row254({ behind: "after its whole read", rebuilding: "copy", kept: { ...polledKept(3, { pending: "it is being read whole" }), pending: "it is being read whole" } });
+  assert.deepEqual([again.sync.state, again.readiness.ready], ["syncing", true]);
+  // yellow stays for a table that should be kept current and is not: a stream not running, once its catch-up is over
+  const down = await row254({ kept: { by: "replication", slot: "s", state: "streamed", why: null, position: "0/1", lastCommit: null, notRunning: "it has not started yet: it starts at the next pass",
+    syncedAt: ago(30), ...promiseOf({ mode: "replication", notRunning: "it has not started yet: it starts at the next pass" }) } });
+  assert.deepEqual([down.sync.state, down.colour, down.readiness.ready], ["synced", "Y", true]);
 });
 
 test("an older run's state (sync and kept without what the sync promises) is read as before: no behind, no crash", async () => {

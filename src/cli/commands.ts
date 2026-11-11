@@ -31,7 +31,7 @@ import { addEntry, listTables, Refusal, removeEntries, sourceToEdit, type EditCa
 import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFacts, type SourceTable } from "./preflight.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
 import { reach } from "./state.ts";
-import { copyingText, copyProgress, duration, generatedReadiness, msText, statementMsText, readiness, readinessWord, type Readiness, type SyncFacts, type SyncTotals } from "./readiness.ts";
+import { CATCHING_UP, copyingText, copyProgress, duration, generatedReadiness, msText, statementMsText, readiness, readinessWord, type Readiness, type SyncFacts, type SyncTotals } from "./readiness.ts";
 import type { SyncEvent } from "../duck/events.ts";
 import type { CopyProgressView, KeptCurrent, StreamStatus } from "../duck/sync.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
@@ -229,13 +229,13 @@ export function addSteps(tables: ReadonlyArray<Omit<CatalogTable, "columns">>, f
 
 // ------------------------------------------------------------------ readiness (mason wait, mason status): src/cli/readiness.ts
 
-export { copyingText, copyProgress, duration, msText, statementMsText, readiness, readinessWord, type Readiness };
+export { CATCHING_UP, copyingText, copyProgress, duration, msText, statementMsText, readiness, readinessWord, type Readiness };
 
 /** A table line's bar in its state's colour (on a terminal): green copied, red failed, yellow served but not kept current, cyan at work
- *  (a table whose sync is off is copied as it asked: green). */
+ *  — its first sync, or its one catch-up poll (`CATCHING_UP`, issue 834) — (a table whose sync is off is copied as it asked: green). */
 export function paintBar(line: string, s: Style): string {
   const colour = / its first sync failed: | NOT kept current, its sync failed /.test(line) ? s.red : / NOT kept current | (—|·) behind by /.test(line) ? s.yellow
-    : / 100%  [\d,]+ rows · synced( · |$)/.test(line) ? s.green : s.cyan;
+    : line.includes(` · ${CATCHING_UP} (`) ? s.cyan : / 100%  [\d,]+ rows · synced( · |$)/.test(line) ? s.green : s.cyan;
   return line.replace(/(█+)(░*)|(░+)/, (_m, full: string | undefined, empty: string | undefined, none: string | undefined) =>
     full !== undefined ? `${colour(full)}${s.dim(empty ?? "")}` : s.dim(none ?? ""));
 }
@@ -254,12 +254,13 @@ const bar = (fraction: number): string => { const full = Math.round(Math.max(0, 
  */
 export function tableLines(s: RunState, now: number = Date.now()): string[] {
   const picked = s.tables.filter((t) => t.added);
-  // 0 done, 1 failed, 2 copying, 3 waiting for its copy
-  const rank = (t: TableState): number => t.error ? 1 : t.copy?.phase === "copying" ? 2 : !t.copy ? 3 : 0;
+  // 0 done, 1 failed, 2 copying or in its one catch-up poll (at work: issue 834), 3 waiting for its copy
+  const rank = (t: TableState): number => t.error ? 1 : t.copy?.phase === "copying" ? 2 : !t.copy ? 3 : t.sync?.state === "catching-up" ? 2 : 0;
   const rows = picked.map((t) => {
     const r = rank(t);
     let fraction: number, what: string;
-    if (r === 0) {
+    // served: its line says how it is kept (a catch-up's too, ranked at work)
+    if (r === 0 || r === 2 && t.copy?.phase === "done") {
       fraction = 1;
       const age = keptWords(t, now);
       what = `${n(t.copy?.rowsCopied ?? 0)} rows · synced${t.copy?.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}`;
@@ -287,6 +288,12 @@ export function tableLines(s: RunState, now: number = Date.now()): string[] {
  */
 export function keptAge(t: Pick<TableState, "table" | "kept" | "sync">, now: number = Date.now()): string | null {
   const k = t.kept;
+  // in its one catch-up poll (`tables[].sync.state`, the one word): at work, for every sync — `off` included, which is
+  // never kept current by design — so never "NOT kept current" (issue 834)
+  if (t.sync?.state === "catching-up" && k !== undefined && k.by !== "generated") {
+    const at = k.by === "recopy" ? k.syncedAt ?? k.copiedAt : k.syncedAt;
+    return `${CATCHING_UP} (${at === null ? "never synced" : `last synced ${agoText(at, now)}`})`;
+  }
   if (k?.by === "replication") {
     if (k.state !== "streamed") return `NOT kept current (${k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)}`}): ${k.why ?? "it is not streamed yet"}`;
     const at = `replicated, at ${k.position}, ${k.syncedAt === null ? "not synced yet" : agoText(k.syncedAt, now)}`;
@@ -429,7 +436,8 @@ const STATUS_USAGE = `usage: mason status [--json]
     bytes, key, added, addedColumns, copy, error (why its sync failed: its first sync, or the poll, catch-up, stream or
     publication check keeping a synced table current; null otherwise), kept, syncRefusal (why mason sync <table> is
     refused now, in its words: its first sync not finished or failed, being read again whole, being caught up; null
-    when it would run), sync: { state (synced, syncing,
+    when it would run), sync: { state (synced, syncing, catching-up: served and caught up by one poll
+    before it is kept current — after its whole read too,
     behind: served and kept but older than its sync: promises, failed, waiting), syncedAt (when
     it was last brought current), syncSeconds (how long that took), syncedBy (copy, poll, catch-up, stream),
     ageSeconds (how long ago that was), asOf (the time the synced data holds the database as of: kept's syncedAt),
@@ -1469,9 +1477,12 @@ export function waitTable(t: TableState): Pick<TableState, "table" | "copy" | "e
 const WAIT_USAGE = `usage: mason wait [<table>…] [--timeout <duration>] [--json]
 
   Waits until every added table is synced and served, showing every added table on a line of its own: 100% for the
-  finished (in the order they finished), a bar for the ones still syncing, at the bottom. Run it after mason add.
-  Named synced tables: waits for those alone, until the first sync of each is done and it is served. Named, a
-  generated table (alone) instead: waits until it holds every change Mason had synced when the wait began, across its
+  finished (in the order they finished), a bar for the ones still syncing, at the bottom. A first sync reads the
+  table as of its start, then catches it up by one poll for what changed meanwhile (sync: off too), as a table whose
+  sync: changed is caught up by one: it waits for that poll as well, so what is read next is as of then. Run it after
+  mason add.
+  Named synced tables: waits for those alone, until the first sync of each is done, its catch-up included, and it is
+  served. Named, a generated table (alone) instead: waits until it holds every change Mason had synced when the wait began, across its
   chain (the tables it is generated from, and theirs), so what is read from it next includes them.
 
     mason add orders && mason wait
@@ -1496,7 +1507,7 @@ const WAIT_USAGE = `usage: mason wait [<table>…] [--timeout <duration>] [--jso
     { by: poll, sync: { mode: off } or { mode: poll, every, seconds }, syncedAt (its last whole read
     or poll), nextAt (its next poll; null: off) }; kept's pending, when it applies, says why
     it is not kept current now, its phase included; sync as mason status --json says it: its state —
-    synced, syncing, behind, failed, waiting — asOf, promisedSeconds, behindBySeconds, behindWhy),
+    synced, syncing, catching-up, behind, failed, waiting — asOf, promisedSeconds, behindBySeconds, behindWhy),
     stream (replication mode: where the stream is, as mason status --json says it), error (on a
     failure or a timeout: { code, message, next }), next }
     Named, a generated table: the same ready, failed, waiting, timedOut, error and next, tables
