@@ -25,7 +25,8 @@ const table = (o: Partial<SourceTable> & { table: string }): SourceTable => ({
   source: `public.${o.table}`, schema: "public", key: ["id"], rows: 3, bytes: 8192, comment: null,
   columns: [col("id", "bigint"), col("name")], foreignKeys: [], ...o,
 });
-const TABLES = [table({ table: "orders" }), table({ table: "events", rows: 40_000_000 }), table({ table: "logs", key: [], columns: [{ ...col("id", "bigint"), notNull: true }, col("name")], uniqueKeys: [{ name: "logs_id_key", columns: ["id"], constraint: true, nullsNotDistinct: false }] }), table({ table: "audit", replicaIdentity: "n" })];
+const TABLES = [table({ table: "orders" }), table({ table: "events", rows: 40_000_000 }), table({ table: "logs", key: [], columns: [{ ...col("id", "bigint"), notNull: true }, col("name")], uniqueKeys: [{ name: "logs_id_key", columns: ["id"], constraint: true, nullsNotDistinct: false }] }), table({ table: "audit", replicaIdentity: "n" }),
+  table({ table: "orders2", columns: [col("id", "bigint"), col("status"), col("amount", "numeric")] })];
 
 // ------------------------------------------------------------------ the database's checks, over a fake connection
 
@@ -49,7 +50,7 @@ const OWN = { slot: "mason_app_app", publication: "mason_app_app", owned: true }
 const live = async (facts: Record<string, unknown>, o: { slot?: string[] | null; streaming?: boolean } = {}): Promise<{ checks: LiveCheck[]; sent: string[] }> => {
   assert.equal(typeof choice.sourceLiveChecks, "function", "src/cli/sync-choice.ts exports sourceLiveChecks");
   const f = fakePg(facts, o.slot ?? null);
-  return { checks: await choice.sourceLiveChecks!(f.pg, TABLES[0]!, { repl: OWN, streaming: o.streaming ?? false, file: null, shown: "mason/sources/app.yml" }), sent: f.sent };
+  return { checks: await choice.sourceLiveChecks!(f.pg, TABLES[0]!, { repl: OWN, streaming: o.streaming ?? false, columns: ["id", "name"], shown: "mason/sources/app.yml" }), sent: f.sent };
 };
 const refusedNames = (checks: LiveCheck[]): string[] => checks.filter((c) => c.state === "refused").map((c) => c.name);
 
@@ -135,6 +136,8 @@ const readFile = () => { const r = readSource(folder, path.join(root, "app"), {}
 // how many run at once
 let databaseChecks: LiveCheck[] = [{ name: "wal_level", state: "ok", detail: "logical" }];
 let checking = 0, mostAtOnce = 0, checked = 0;
+// the columns each check of the database was asked to hold a named publication to, in order
+const checkedColumns: Array<readonly string[] | undefined> = [];
 const ctx = {
   page: true, users: { file: path.join(root, "users.json"), apiKey: "k".repeat(48), database: "app", postgresUrl: "postgresql://127.0.0.1:5433/app" },
   source: parsed.source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables: TABLES, systemIdentifier: null }), warnings: [],
@@ -145,7 +148,8 @@ const ctx = {
   listener: { openSessions: () => ({ open: 0, byClient: [] }) },
   logs: { capacity: 1, recent: () => [] },
   duck: { copies: () => [], file: path.join(root, "duck.db"), stream: async () => null, disk: () => ({ path: root, freeBytes: null, projectedBytes: null }), requests: { days: 7 }, restarts: () => [] },
-  liveChecks: async () => {
+  liveChecks: async (_t: SourceTable, columns?: readonly string[]) => {
+    checkedColumns.push(columns);
     checking++; checked++; mostAtOnce = Math.max(mostAtOnce, checking);
     await new Promise((r) => setTimeout(r, 20));
     checking--;
@@ -266,6 +270,33 @@ test("saving Live reads the database's checks AGAIN: one that fails since the ch
     assert.equal(keyless.status, 400, keyless.text);
     assert.match(JSON.parse(keyless.text).failure.message, /^public\.logs cannot be kept current by logical replication: it has no primary key/);
   } finally { databaseChecks = [{ name: "wal_level", state: "ok", detail: "logical" }]; fs.writeFileSync(sourceFile, FILE_TEXT); }
+});
+
+test("saving Live holds a named publication to the columns of the entry the edit WILL write: a new add with --columns, and a re-add that narrows them (a review finding)", async () => {
+  try {
+    // a new table, its columns named: the check is asked of those two, never of every column the table has
+    checkedColumns.length = 0;
+    const added = await call("POST", "/api/pick", { body: { table: "public.orders2", picked: true, columns: ["id", "status"], sync: "replication" } });
+    assert.equal(added.status, 200, added.text);
+    assert.deepEqual(checkedColumns, [["id", "status"]]);
+    assert.ok(fs.readFileSync(sourceFile, "utf8").includes("  orders2:\n    columns: [id, status]\n    sync: replication\n"), fs.readFileSync(sourceFile, "utf8"));
+    // added with every column and polled; then re-added with two and Live: the two are asked, not the entry of before
+    fs.writeFileSync(sourceFile, `${FILE_TEXT}  orders2: {}\n`);
+    checkedColumns.length = 0;
+    const narrowed = await call("POST", "/api/pick", { body: { table: "public.orders2", picked: true, columns: ["id", "status"], sync: "replication" } });
+    assert.equal(narrowed.status, 200, narrowed.text);
+    assert.deepEqual(checkedColumns, [["id", "status"]]);
+    // only its sync changed (keep): the entry's own columns are the ones asked
+    fs.writeFileSync(sourceFile, `${FILE_TEXT}  orders2:\n    columns: [id, amount]\n`);
+    checkedColumns.length = 0;
+    assert.equal((await save("public.orders2", "replication")).status, 200);
+    assert.deepEqual(checkedColumns, [["id", "amount"]]);
+    // the Sync choice asks the entry's columns as the file has them
+    fs.writeFileSync(sourceFile, `${FILE_TEXT}  orders2:\n    columns: [id, status]\n`);
+    checkedColumns.length = 0;
+    await syncOf("public.orders2");
+    assert.deepEqual(checkedColumns, [["id", "status"]]);
+  } finally { fs.writeFileSync(sourceFile, FILE_TEXT); }
 });
 
 test("read-only: MASON_PROJECT_READONLY=1 refuses the save and writes nothing; the choice is still read (a GET), which the page shows without a control", async () => {

@@ -37,9 +37,10 @@ test("Live's checks name what the database lacks with its fix, pass once fixed, 
   psql(adminUrl!, `CREATE DATABASE "${tag}"`);
   psql(adminUrl!, `CREATE ROLE "${role}" LOGIN PASSWORD '${password}'`);
   const db = urlAs(null, tag);
-  psql(db, `CREATE TABLE orders (id int PRIMARY KEY, status text); CREATE TABLE other (id int PRIMARY KEY);
+  psql(db, `CREATE TABLE orders (id int PRIMARY KEY, status text); CREATE TABLE other (id int PRIMARY KEY); CREATE TABLE orders2 (id int PRIMARY KEY, status text, amount numeric);
     INSERT INTO orders SELECT g, 'new' FROM generate_series(1, 1000) g;
-    GRANT SELECT ON orders, other TO "${role}"; CREATE PUBLICATION app_pub FOR TABLE other`);
+    GRANT SELECT ON orders, other, orders2 TO "${role}"; CREATE PUBLICATION app_pub FOR TABLE other;
+    CREATE PUBLICATION narrow_pub FOR TABLE orders2 (id, status)`);
   const parsed = parseSource(urlAs(role, tag));
   assert.ok("source" in parsed);
   const repl = { slot: `${tag}_slot`, publication: "app_pub", owned: false };
@@ -47,13 +48,14 @@ test("Live's checks name what the database lacks with its fix, pass once fixed, 
   // checks never do)
   const read = await connectSource(parsed.source);
   assert.ok(!("failure" in read), "failure" in read ? read.failure.message : "");
-  const t = (await readSourceFacts(read.pg, undefined, { collations: false }).finally(() => read.pg.close())).tables.find((x) => x.source === "public.orders")!;
+  const catalog = (await readSourceFacts(read.pg, undefined, { collations: false }).finally(() => read.pg.close())).tables;
+  const t = catalog.find((x) => x.source === "public.orders")!;
   const run = async () => {
     const c = await connectSource(parsed.source);
     assert.ok(!("failure" in c), "failure" in c ? c.failure.message : "");
     const sent: string[] = [];
     const pg = { query: (sql: string) => { sent.push(sql); return c.pg.query(sql); } } as unknown as PgConnection;
-    try { return { checks: await sourceLiveChecks(pg, t, { repl, streaming: false, file: null, shown: "mason/sources/app.yml" }), sent }; } finally { c.pg.close(); }
+    try { return { checks: await sourceLiveChecks(pg, t, { repl, streaming: false, columns: t.columns.map((c) => c.name), shown: "mason/sources/app.yml" }), sent }; } finally { c.pg.close(); }
   };
   const scans = () => psql(db, "SELECT seq_scan + coalesce(idx_scan, 0) FROM pg_stat_user_tables WHERE relname = 'orders'");
 
@@ -81,4 +83,19 @@ test("Live's checks name what the database lacks with its fix, pass once fixed, 
   await new Promise((r) => setTimeout(r, 1500));
   assert.equal(scans(), before, "no scan of the table: nothing of its rows was read");
   assert.equal(psql(db, `SELECT count(*) FROM pg_replication_slots WHERE slot_name = '${repl.slot}'`), "0", "no slot made");
+
+  // A NAMED PUBLICATION WITH A COLUMN LIST (a review finding): held to the columns the entry syncs, and no more — an entry
+  // of id and status passes under `FOR TABLE orders2 (id, status)`; every column would need amount published too
+  const t2 = catalog.find((x) => x.source === "public.orders2")!;
+  const narrow = async (columns: string[]) => {
+    const c = await connectSource(parsed.source);
+    assert.ok(!("failure" in c), "failure" in c ? c.failure.message : "");
+    try { return (await sourceLiveChecks(c.pg, t2, { repl: { ...repl, publication: "narrow_pub" }, streaming: false, columns, shown: "mason/sources/app.yml" })).find((x) => x.name === "publication")!; }
+    finally { c.pg.close(); }
+  };
+  const two = await narrow(["id", "status"]);
+  assert.equal(two.state, "ok", JSON.stringify(two));
+  const every = await narrow(["id", "status", "amount"]);
+  assert.equal(every.state, "refused", JSON.stringify(every));
+  assert.match(every.detail, /amount/);
 });

@@ -41,7 +41,7 @@ import { addedTables, effectiveSync, entryName, replicatedEntries, rereadSources
 import { newToken } from "./security.ts";
 import { alive, liveRun, processStart } from "./runs.ts";
 import { DEMO_DIR, DUCK_FILE, projectReadOnlySetting, projectSource, startSettingRefusal, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
-import { sourceLiveChecks } from "./sync-choice.ts";
+import { LIVE_CHECKS_TIMEOUT_MS, sourceLiveChecks } from "./sync-choice.ts";
 import { closedWithin, closingOnce, DEMO_STILL_CLOSING, demoChanges, demoChangesRefusal, demoPort, demoSettings, openDemo } from "./demo.ts";
 import { postgresApiUrl, readPgTls, type PgListenerSettings } from "../api/postgres/listener.ts";
 import { connectDatabase } from "../lib/database-name.ts";
@@ -698,14 +698,19 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     // the database's checks for one table's logical replication, as the web page's Sync choice shows them and its save
     // reads them again (src/cli/sync-choice.ts): read-only, over one connection, closed. What cannot be read is a
     // refused check, never Live allowed; the database's address and user are never in what it answers
-    liveChecks: async (t) => {
+    liveChecks: async (t, columns) => {
       const file = sources.file;
       const shown = shownPath(project.root, (file ?? src).file);
       const demo = demoChangesRefusal(cfg, { sync: { mode: "replication" }, tables: [{ name: entryName(t.source), table: t.source, columns: null, exclude: [], key: null, sync: null }] }, shown);
       if (demo !== null) return [{ name: "database", state: "refused", detail: `${demo.message}: ${demo.why ?? ""}`.replace(/: $/, "") }];
       const c = await connectSource(source);
       if ("failure" in c) return [{ name: "database", state: "refused", detail: "Mason could not connect to the database to read its checks now: mason doctor says why" }];
-      try { return await sourceLiveChecks(c.pg, t, { repl, streaming: sync.streams(), file, shown }); }
+      try {
+        // bounded once connected: a query that hangs would hold the run's one-at-a-time checks, and every Sync choice and
+        // replication save behind them (SET is this session's alone: nothing on the database changes)
+        await c.pg.query(`SET statement_timeout = ${LIVE_CHECKS_TIMEOUT_MS}`);
+        return await sourceLiveChecks(c.pg, t, { repl, streaming: sync.streams(), columns, shown });
+      }
       catch (e) { return [{ name: "database", state: "refused", detail: `the database's checks could not be read: ${(e as Error).message}` }]; }
       finally { c.pg.close(); }
     },

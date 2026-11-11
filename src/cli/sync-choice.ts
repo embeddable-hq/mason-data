@@ -25,6 +25,10 @@ import { copiedColumns, effectiveSync, entryName, type SourceFile } from "./sour
 import { namedPublicationVerdict, readNamedPublication } from "../duck/publication.ts";
 import { BIG_TABLE_ROWS, parseSync, syncText } from "../lib/table-sync.ts";
 
+/** How long one of the checks' statements may run (`statement_timeout` on their connection): they read settings and the
+ *  catalog, milliseconds each, and one that hangs would hold every check queued behind it. */
+export const LIVE_CHECKS_TIMEOUT_MS = 10_000;
+
 /** The intervals the page offers a poll at: presets only, never a free interval (issue 840). */
 export const POLL_PRESETS = ["5m", "15m", "1h", "1d"] as const;
 
@@ -66,9 +70,10 @@ const REPLICA_IDENTITY: Record<string, string> = { d: "DEFAULT (its primary key)
 /**
  * THE DATABASE'S CHECKS FOR ONE TABLE, over the connection given (read-only: settings, the catalog, the statistics
  * views). `streaming`: this run reads the slot now, so its reader and its WAL sender are this run's own, never "another
- * reader" (`ownReaderFreed`). `entry`: the table's entry, for the columns a named publication must carry.
+ * reader" (`ownReaderFreed`). `columns`: the columns the table's entry syncs — at a save, the entry the edit WILL write —
+ * which a named publication must carry, and no more.
  */
-export async function sourceLiveChecks(pg: PgConnection, t: SourceTable, o: { repl: ProjectReplication; streaming: boolean; file: Pick<SourceFile, "tables"> | null; shown: string }): Promise<LiveCheck[]> {
+export async function sourceLiveChecks(pg: PgConnection, t: SourceTable, o: { repl: ProjectReplication; streaming: boolean; columns: readonly string[]; shown: string }): Promise<LiveCheck[]> {
   const read = { server: await readServerFacts(pg), slot: await readSlotFacts(pg, o.repl.slot) };
   const facts = o.streaming ? ownReaderFreed(read.server, read.slot) : read;
   const out = readinessChecks(facts.server, o.repl.slot, facts.slot, o.repl).map(asLive);
@@ -77,14 +82,20 @@ export async function sourceLiveChecks(pg: PgConnection, t: SourceTable, o: { re
     out.push({ name: "publication", state: "ok", detail: `${o.repl.publication}, Mason's own: Mason adds ${entryName(t.source)} to it` });
     return out;
   }
-  const entry = o.file?.tables.find((e) => e.table === t.source);
-  const keep = new Set(entry ? copiedColumns(t, entry) : t.columns.map((c) => c.name));
+  const keep = new Set(o.columns);
   const copied = [{ source: t.source, columns: t.columns.filter((c) => keep.has(c.name)) }];
   const verdict = namedPublicationVerdict(await readNamedPublication(pg, o.repl.publication, copied), copied, new Map([[t.source, t.replicaIdentity ?? "d"]]));
   const gaps = publicationProblems(verdict, o.repl.publication, o.shown);
   if (!gaps.length) out.push({ name: "publication", state: "ok", detail: `${o.repl.publication} carries ${entryName(t.source)}` });
   for (const p of gaps) out.push({ name: "publication", state: "refused", detail: p.sql === null ? `${p.message} — ${p.fix}` : p.message, ...(p.sql !== null ? { sql: p.sql } : {}) });
   return out;
+}
+
+/** The columns a table's entry in the file syncs (`copiedColumns`), every column for a table the file does not name:
+ *  what the Sync choice checks a named publication against. A save checks the entry it will write instead. */
+export function liveColumns(t: SourceTable, file: Pick<SourceFile, "tables"> | null): string[] {
+  const entry = file?.tables.find((e) => e.table === t.source);
+  return entry ? copiedColumns(t, entry) : t.columns.map((c) => c.name);
 }
 
 /** What the page offers for one table: its sync now, each poll's cost, and Live's checks (`database`: the database's,

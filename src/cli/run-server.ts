@@ -32,7 +32,7 @@ import type { BackLink } from "./ui-back-link.ts";
 import type { PageNav } from "./ui-nav.ts";
 import { PAGE_READ_ONLY_WHY, pageAllows, pageReadOnlyRefusal, pageWrite, type PageArea } from "./ui-read-only.ts";
 import { maskedUrl, type Source, type SourceFacts, type SourceTable } from "./preflight.ts";
-import { syncChoice, type LiveCheck, type SyncChoice } from "./sync-choice.ts";
+import { liveColumns, syncChoice, type LiveCheck, type SyncChoice } from "./sync-choice.ts";
 import { liveReadinessFailure } from "./replication-mode.ts";
 import { unreplicable } from "./source-check.ts";
 import { errorJson, nextJson, type Failure, type NextStep } from "./command.ts";
@@ -46,9 +46,9 @@ import { userRole } from "./roles.ts";
 import type { RunState } from "./commands.ts";
 import { clientLink, postgresFacts } from "./pg-url.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
-import { catalogTable, effectiveSync, entryName, parseSourceText, shownPath, type CatalogColumn, type ProjectSource, type SourceFile } from "./sources.ts";
+import { catalogTable, copiedColumns, effectiveSync, entryName, parseSourceText, shownPath, type CatalogColumn, type ProjectSource, type SourceFile } from "./sources.ts";
 import { projectWriteRefusal } from "./project.ts";
-import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type PollMeasure, type RemoveResult } from "./source-edit.ts";
+import { addEntry, plannedEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type PollMeasure, type RemoveResult } from "./source-edit.ts";
 import { notAddedRefusal, PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamedAnswer, type StreamStatus } from "../duck/sync.ts";
 import { DEFAULT_SYNC, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
 import type { LogBuffer } from "../lib/log-buffer.ts";
@@ -131,7 +131,7 @@ export interface RunContext {
   /** the database's checks for logical replication of one table (src/cli/sync-choice.ts `sourceLiveChecks`: read-only,
    *  over one connection it closes), or why they could not be read, as a refused check — what the web page's Sync choice
    *  shows and `/api/pick` re-reads at save. Absent: none can be read, so Live is refused (fail closed) */
-  liveChecks?: (table: SourceTable) => Promise<LiveCheck[]>;
+  liveChecks?: (table: SourceTable, columns: readonly string[]) => Promise<LiveCheck[]>;
   /** the sources file read as the run reads it, its URL resolved (src/cli/sources.ts readSource) */
   readSource: () => ProjectSource | Failure;
   /** the database's URL the run copies from, as the sources file resolved it at the start */
@@ -344,10 +344,14 @@ const NO_LIVE_CHECKS: LiveCheck = { name: "database", state: "refused", detail: 
  * poll offered costs the database, and Live's checks — the database's read now, over one connection (`live`: one check
  * at a time for the whole run). Read when the choice opens, never with `/api/state`.
  */
-export async function tableSyncChoice(ctx: RunContext, table: string, live: (t: SourceTable) => Promise<LiveCheck[]>): Promise<SyncChoice> {
+export async function tableSyncChoice(ctx: RunContext, table: string, live: Live): Promise<SyncChoice> {
   const t = catalogTableOf(ctx, table);
-  return syncChoice(t, ctx.sources().file, ctx.duck.measured?.(t.source) ?? null, await live(t));
+  const file = ctx.sources().file;
+  return syncChoice(t, file, ctx.duck.measured?.(t.source) ?? null, await live({ t, columns: liveColumns(t, file) }));
 }
+
+/** The database's checks for one table and the columns its entry syncs, one at a time for the run (`oneAtATime`). */
+type Live = (a: { t: SourceTable; columns: readonly string[] }) => Promise<LiveCheck[]>;
 
 /**
  * A SWITCH TO `sync: replication` SAVED WHILE THE RUN IS UP, held to the database's checks AGAIN, now (issue 840: a
@@ -356,12 +360,18 @@ export async function tableSyncChoice(ctx: RunContext, table: string, live: (t: 
  * its own words), nor of one whose sync is replication already (nothing switches), nor by a run that cannot read the
  * checks (a test's: `mason start` holds the file to them).
  */
-async function liveRefusal(ctx: RunContext, at: EditTarget, table: string, live: (t: SourceTable) => Promise<LiveCheck[]>): Promise<Failure | null> {
+async function liveRefusal(ctx: RunContext, at: EditTarget, table: string, columns: readonly string[], key: readonly string[] | null, o: { sync: TableSync; keep: boolean },
+  live: Live): Promise<Failure | null> {
   if (ctx.liveChecks === undefined) return null;
   const t = ctx.facts().tables.find((x) => x.source === table);
   const was = at.parsed.tables.find((e) => e.table === table);
   if (t === undefined || unreplicable(t) || (was !== undefined && effectiveSync(at.parsed, was).sync.mode === "replication")) return null;
-  const refused = (await live(t)).filter((c) => c.state === "refused");
+  // THE ENTRY THIS EDIT WILL WRITE, decided as `mason add` decides it (`plannedEntry`; a refusal of it is the edit's own,
+  // in its words): a named publication is held to the columns that entry syncs, never to the file's entry of before (none,
+  // for a table not added: every column) — a review finding: `--columns id,status` under a publication listing those two
+  // was refused for missing the column it leaves out
+  const entry = plannedEntry(at.parsed, catalogOf(ctx), t, columns, key, o).entry;
+  const refused = (await live({ t, columns: copiedColumns(t, entry) })).filter((c) => c.state === "refused");
   if (!refused.length) return null;
   return liveReadinessFailure({ refused: refused.map((c) => ({ name: c.name, ok: false, detail: c.detail, ...(c.sql !== undefined ? { sql: c.sql } : {}) })), warnings: [] },
     [entryName(table)], shownPath(ctx.root, at.file), ctx.source.database);
@@ -729,7 +739,7 @@ export function createRunServer(ctx: RunContext): http.Server {
   const tunnels: PageTunnel[] = [];
   // the database's checks for logical replication: one at a time for the whole run, never on a timer (the page reads
   // them when a table's Sync choice opens, and /api/pick again at save)
-  const live = oneAtATime((t: SourceTable) => ctx.liveChecks !== undefined ? ctx.liveChecks(t) : Promise.resolve([NO_LIVE_CHECKS]));
+  const live: Live = oneAtATime(({ t, columns }: { t: SourceTable; columns: readonly string[] }) => ctx.liveChecks !== undefined ? ctx.liveChecks(t, columns) : Promise.resolve([NO_LIVE_CHECKS]));
   // read once, here: nothing a request names is ever read from disk
   const page = ctx.page ? pageFiles() : new Map<string, PageFile>();
   return http.createServer((req, res) => {
@@ -840,7 +850,8 @@ export function createRunServer(ctx: RunContext): http.Server {
             // database cannot serve is undone below
             const at = sourceOnDisk(ctx);
             // a switch to replication: the database's checks read again now, before anything is written
-            const liveRefused = sync?.mode === "replication" ? await liveRefusal(ctx, at, body.table, live) : null;
+            const liveRefused = sync?.mode === "replication" ? await liveRefusal(ctx, at, body.table, (body.columns as string[] | undefined) ?? ["*"], (body.key as string[] | undefined) ?? null,
+              { sync, keep: body.keep === true }, live) : null;
             if (liveRefused !== null) { sendFailure(res, statusOf(liveRefused), liveRefused); return; }
             const r = pick(ctx, body.table, (body.columns as string[] | undefined) ?? ["*"], (body.key as string[] | undefined) ?? null, { ...(sync !== undefined ? { sync } : {}), keep: body.keep === true }, at);
             // A LIVE SWITCH INTO REPLICATION is held to the start's checks (wal_level, the role, a free slot): one the
