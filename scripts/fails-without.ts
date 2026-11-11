@@ -37,6 +37,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { setImmediate as yieldToSignals } from "node:timers/promises";
 import { TEST_BOUND_ARGS } from "./gate.ts";
+import { underLock } from "./worktree-lock.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -81,12 +82,25 @@ interface Run {
 const RESULT = /^\s*([✔✖]) (.*?) \(\d+(?:\.\d+)?ms\)(?: # .*)?$/;
 const git = (...a: string[]): string => execFileSync("git", a, { cwd: ROOT, encoding: "utf8", maxBuffer: 1 << 28 });
 
+/**
+ * ONE RUN AT A TIME CHANGES OR READS THIS REPOSITORY'S WORKTREES (issue 792). `git worktree add` reads every entry
+ * under .git/worktrees/ while another add is still writing its own, and fails on the half-written one
+ * (`fatal: failed to read .git/worktrees/tree1/commondir: Success`); `remove` reads them the same way. So every
+ * `git worktree` call here is made under one lock in the repository's common git dir, shared by all its checkouts,
+ * held only for the call and never across a test run (scripts/worktree-lock.ts: a killed holder's lock is taken over).
+ */
+let lockDir: string | null = null;
+function worktree(...a: string[]): string {
+  lockDir ??= path.join(path.resolve(ROOT, git("rev-parse", "--git-common-dir").trim()), "fails-without-worktrees.lock");
+  return underLock(lockDir, () => git("worktree", ...a), { onTakeOver: (pid) => console.log(`[fails-without] took over the worktree lock of a run that was killed (pid ${pid})`) });
+}
+
 const copyOf = (holder: string): string => path.join(holder, "tree");
 function removeCopy(holder: string): string | null {
   const steps: Array<() => void> = [
-    () => { if (fs.existsSync(path.join(copyOf(holder), ".git"))) git("worktree", "remove", "--force", copyOf(holder)); },
+    () => { if (fs.existsSync(path.join(copyOf(holder), ".git"))) worktree("remove", "--force", copyOf(holder)); },
     () => fs.rmSync(holder, { recursive: true, force: true }),
-    () => { git("worktree", "prune"); },
+    () => { worktree("prune"); },
   ];
   const failed: string[] = [];
   // every step runs: a registration the first one could not remove is what the last one is for
@@ -94,11 +108,11 @@ function removeCopy(holder: string): string | null {
     try { step(); } catch (e) { failed.push(e instanceof Error ? e.message : String(e)); }
   }
   if (fs.existsSync(holder)) return `${holder} is still there: ${failed.join("; ")}`;
-  return git("worktree", "list", "--porcelain").includes(holder) ? `${holder} is still registered: ${failed.join("; ")}` : null;
+  return worktree("list", "--porcelain").includes(holder) ? `${holder} is still registered: ${failed.join("; ")}` : null;
 }
 /** The copy of a run that was killed outright. Only of a pid that is dead: the worktrees of a repository are shared by all its checkouts, so a live one may be another session's. */
 function removeAbandonedCopies(): void {
-  for (const m of git("worktree", "list", "--porcelain").matchAll(/^worktree (.*)$/gm)) {
+  for (const m of worktree("list", "--porcelain").matchAll(/^worktree (.*)$/gm)) {
     const holder = path.dirname(m[1]!);
     if (path.basename(m[1]!) !== "tree" || !path.basename(holder).startsWith("fails-without-")) continue;
     // the pid is written before the copy is registered, so a registered copy with no pid is one the system's tmp cleaner took
@@ -116,7 +130,7 @@ function removeAbandonedCopies(): void {
 /** The tree as it stands now, in a repository of its own: this HEAD, this index, every file here as it is here. */
 function takeCopy(holder: string): void {
   const copy = copyOf(holder);
-  git("worktree", "add", "--quiet", "--detach", "--no-checkout", copy, "HEAD");
+  worktree("add", "--quiet", "--detach", "--no-checkout", copy, "HEAD");
   // Its index, so its `git ls-files` and `git status` are this tree's: a file staged here is tracked there
   // (--git-path answers from the folder it is asked in, absolute in a linked worktree and relative in a main checkout)
   fs.copyFileSync(path.resolve(ROOT, git("rev-parse", "--git-path", "index").trim()), path.resolve(copy, execFileSync("git", ["rev-parse", "--git-path", "index"], { cwd: copy, encoding: "utf8" }).trim()));
