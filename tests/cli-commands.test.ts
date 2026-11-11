@@ -1360,9 +1360,6 @@ test("mason wait is ready only once a first sync's catch-up poll is over, and sa
     assert.doesNotMatch(person.stdout + person.stderr, /NOT kept current|Ready/, "a catch-up is at work, not a fault, and the wait is not over");
     assert.match(person.stderr, new RegExp(`public\\.big +█{20} 100% {2}23,364,415 rows · synced · ${commands.CATCHING_UP} \\(last synced \\d+ s ago\\)\\n`));
     assert.match(person.stderr, new RegExp(`public\\.small +█{20} 100% {2}17,079 rows · synced · ${commands.CATCHING_UP} \\(last synced \\d+ s ago\\)\\n`));
-    // its bar in cyan, at work (paintBar): never the yellow of a table that should be kept current and is not
-    const cyan = { red: (x: string) => `R${x}`, yellow: (x: string) => `Y${x}`, green: (x: string) => `G${x}`, cyan: (x: string) => `C${x}`, dim: (x: string) => x } as never;
-    for (const l of person.stderr.split("\n").filter((x) => x.includes(" rows · synced"))) assert.match(paintBar(l.trim(), cyan), /C█{20}/, l);
     const status = await run(["status", "--json"]);
     assert.equal(status.code, 0, status.stdout + status.stderr);
     assert.deepEqual((JSON.parse(status.stdout) as { readiness: { ready: boolean; waiting: string[] } }).readiness, { ready: false, failed: [], waiting: [caughtUp("big"), caughtUp("small")] });

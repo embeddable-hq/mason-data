@@ -2,7 +2,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
-- **`mason wait` now waits for a table's catch-up poll** (after its first sync, a sync of it again whole, or a change of its `sync:`). A first sync reads the table as of its start,
+- **`mason wait` now waits for a table's catch-up poll** (after its first sync, a sync of it again whole, or a change of its `sync:` to `replication`). A first sync reads the table as of its start,
   then catches it up by one poll for what changed during the read, a `sync: off` table too; on a large table that poll
   is a scan of its own. `mason wait` said Ready while it ran, so a tool started on Ready read data as of the read's
   start, and the table's line said "NOT kept current" with a yellow bar. Now the table's line says it is being caught up

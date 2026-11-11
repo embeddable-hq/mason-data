@@ -474,6 +474,8 @@ const promiseOf = (o: Record<string, unknown>): Promise254 => {
 const every15 = { mode: "poll", every: "15m", seconds: 900 };
 const polledKept = (age: number, o: Record<string, unknown> = {}, sync: Record<string, unknown> = every15) =>
   ({ by: "poll", sync, syncedAt: ago(age), nextAt: null, ...promiseOf({ ...(sync.mode === "off" ? { mode: "off" } : {}), ...o }) });
+/** each colour as its letter, so a test reads which a bar was painted */
+const LETTERS = { red: (x: string) => `R${x}`, yellow: (x: string) => `Y${x}`, green: (x: string) => `G${x}`, cyan: (x: string) => `C${x}`, dim: (x: string) => x } as never;
 /** one copied table's row as mason status --json says it, added (as the sources file would say), and the commands over it */
 async function row254(st: Record<string, unknown>, now = NOW_254) {
   const runServer = await import("../src/cli/run-server.ts");
@@ -483,8 +485,10 @@ async function row254(st: Record<string, unknown>, now = NOW_254) {
   for (const t of s.tables) t.added = t.table === "public.customers";
   const t = s.tables.find((x) => x.table === "public.customers")!;
   const line = commands.tableLines(s as never, now).find((l) => l.startsWith("public.customers"))!;
-  return { t, sync: t.sync as Record<string, unknown>, line, readiness: commands.readiness(s as never), word: commands.readinessWord(commands.readiness(s as never)),
-    colour: commands.paintBar(line, { red: (x: string) => `R${x}`, yellow: (x: string) => `Y${x}`, green: (x: string) => `G${x}`, cyan: (x: string) => `C${x}`, dim: (x: string) => x } as never).match(/([RYGC])█/)?.[1],
+  // the bar's colour from the table's state (`tableRows`' tone), as mason status and a live mason wait paint it
+  const tone = (commands as unknown as { tableRows?: (s: never, now: number) => Array<{ line: string; tone: string }> }).tableRows?.(s as never, now).find((x) => x.line === line)?.tone;
+  return { t, sync: t.sync as Record<string, unknown>, line, tone, readiness: commands.readiness(s as never), word: commands.readinessWord(commands.readiness(s as never)),
+    colour: (commands.paintBar as (l: string, s: never, tone?: string) => string)(line, LETTERS, tone).match(/([RYGC])█/)?.[1],
     totals: (runServer.runState(ctx, [copy], null, now) as { totals: { failed: number } }).totals };
 }
 type RunStateLike = { tables: Array<{ table: string; added: boolean; error: string | null; sync?: unknown; copy: unknown }> };
@@ -591,6 +595,7 @@ test("left out of a named publication, or its catch-up failed: a synced table wh
 
 test("in its one catch-up poll, for every sync — off, polled, replicated — and as it ends: catching-up, at work in cyan, never NOT kept current, and not ready (issue 834)", async () => {
   const { CATCHING_UP } = await import("../src/cli/readiness.ts") as unknown as { CATCHING_UP: string };
+  const commands = await import("../src/cli/commands.ts");
   const pending = "it is caught up by one poll after its whole read first";
   const cases: Array<[string, Record<string, unknown>]> = [
     ["off", { behind: "after its whole read", rebuilding: "catch-up", kept: { ...polledKept(3, { mode: "off", pending: null }, { mode: "off" }), pending } }],
@@ -608,6 +613,13 @@ test("in its one catch-up poll, for every sync — off, polled, replicated — a
     assert.equal(r.sync.state, "catching-up", name);
     assert.equal(r.line.replace(/\s+/g, " "), `public.customers ████████████████████ 100% 1,000 rows · synced · ${CATCHING_UP} (last synced 3 s ago)`, name);
     assert.equal(r.colour, "C", `${name}: at work, cyan`);
+    // on a terminal of any width: a live mason wait cuts the line to it (`fit`) before it paints, and the colour is
+    // the table's state's, never the words the cut took away (the review: green at 80 to 120 columns)
+    assert.equal(r.tone, "cyan", name);
+    for (const columns of [80, 100, 120, 140, 200]) {
+      const w = columns - 3, cut = r.line.length > w ? `${r.line.slice(0, w - 1)}…` : r.line;
+      assert.match((commands.paintBar as (l: string, s: never, tone?: string) => string)(cut, LETTERS, r.tone), /C█{20}/, `${name} at ${columns} columns`);
+    }
     assert.deepEqual([r.readiness, r.word], [{ ready: false, failed: [], waiting: [`public.customers: ${CATCHING_UP}`] }, "Under way"], name);
     assert.equal(r.totals.failed, 0, name);
   }

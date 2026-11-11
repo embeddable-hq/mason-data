@@ -15,7 +15,7 @@
  */
 import type { ExplainOptions } from "../api/postgres/explain.ts";
 import type { CopyState, KeptCurrent } from "./sync.ts";
-import { agoText, syncText } from "../lib/table-sync.ts";
+import { agoText, CATCHING_UP, inCatchUp, syncText } from "../lib/table-sync.ts";
 
 type Body = Record<string, unknown>;
 
@@ -163,11 +163,11 @@ export function keptText(f: CopyFacts | null, now: number = Date.now(), rows = t
   const k = f.kept;
   if (k === undefined) return UNKNOWN;
   if (k.by === "generated") return k.text;
-  // in its one catch-up poll (after its whole read, a change of its sync, a slot new to it), as mason status says it
-  // (src/cli/readiness.ts `CATCHING_UP`, `syncStateOf`'s `catching-up`): at work, never "NOT kept current" (issue 834)
-  if (f.error === null && f.rebuilding !== "copy" && (f.behind !== undefined || f.rebuilding === "catch-up")) {
+  // in its one catch-up poll, as mason status says it — the one derivation and the one sentence (src/lib/table-sync.ts
+  // `inCatchUp`, `CATCHING_UP`; `syncStateOf`'s `catching-up`): at work, never "NOT kept current" (issue 834)
+  if (inCatchUp(f)) {
     const at = k.by === "recopy" ? k.syncedAt ?? k.copiedAt : k.syncedAt;
-    return `being caught up by one poll for what changed since it was synced (${at == null ? "never synced" : `last synced ${agoText(at, now)} (${utc(at)})`})`;
+    return `${CATCHING_UP} (${at == null ? "never synced" : `last synced ${agoText(at, now)} (${utc(at)})`})`;
   }
   if (k.by === "poll") {
     const synced = k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)} (${utc(k.syncedAt)})`;
