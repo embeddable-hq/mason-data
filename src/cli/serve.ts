@@ -429,7 +429,10 @@ export function serveRecordRefusal(s: ServeSettings, existing: Project | BrokenP
  *  `metricsFacts`): required, so no ready phase exists where /healthz says ready and /metrics `mason_ready 0`. */
 export type ServePhase = { phase: "starting" }
   | { phase: "ready"; tables: () => CopyState[]; metrics: () => Promise<Omit<RunMetrics, "uptimeSeconds">> }
-  | { phase: "stopping" };
+  | { phase: "stopping" }
+  /** the engine stopped under the run (its thread died, or the synced data was invalidated, issue 830): it exits 1 for
+   *  the platform to start it again, its reason in the log — never on this unauthenticated answer */
+  | { phase: "failed" };
 
 /**
  * WHERE THE WEB PAGE IS SERVED, as /healthz says it from the start: the Unix socket's path (MASON_UI_SOCKET) or null, and
@@ -552,6 +555,8 @@ export async function serve(argv: string[]): Promise<number> {
   }
   const startedAt = Date.now();
   let state: ServePhase = { phase: "starting" };
+  /** the engine stopped under the run (`ServeHooks.failed`): how the serve's last word says its exit */
+  let engineStopped = false;
   const health = healthServer(() => state, startedAt, say, { socket: page?.file ?? null, readOnly: uiReadOnlySetting(process.env) === true });
   const listening = await new Promise<Error | null>((resolve) => {
     health.once("error", resolve);
@@ -609,6 +614,7 @@ export async function serve(argv: string[]): Promise<number> {
           return null;
         },
         stopping: () => { state = { phase: "stopping" }; page?.close(); runFile?.remove(); },
+        failed: () => { state = { phase: "failed" }; engineStopped = true; page?.close(); runFile?.remove(); },
         ...(page !== null ? { page: page.attach, socket: page.file } : {}) } });
   } finally {
     // removed whatever ended the run: a stop, a crash of the engine's thread, or a start that failed
@@ -620,6 +626,9 @@ export async function serve(argv: string[]): Promise<number> {
     await new Promise<void>((resolve) => health.close(() => resolve()));
   }
   if (runFileFailed !== null) return failed("serve", runFileFailed, { json: false });
+  // the engine stopped after the run was ready: a crash, said as one (its FATAL line is above), for the platform's restart
+  if (code !== 0 && engineStopped) return failed("serve", { message: "Mason stopped: the engine stopped under it, as said above", code: "failed",
+    fix: "it is started again by its platform or supervisor, which opens the synced data again; when it says the same again, fix what it says (free disk, if it is full)" }, { json: false });
   if (code !== 0) return failed("serve", { message: "Mason did not start: what stopped it is said above", code: "failed",
     fix: "fix what it says, then start it again (a platform restarts it by itself)" }, { json: false });
   return 0;

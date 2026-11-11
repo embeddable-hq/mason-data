@@ -30,6 +30,11 @@
  * with the reason, and its supervisor starts it again (src/cli/dev.ts, src/cli/supervise.ts); DuckDB recovers the copy
  * from its write-ahead log. A native abort ends the whole process, as it always did. The worker is not restarted in
  * place: every connection the sync holds would be gone under it.
+ *
+ * AN INSTANCE DuckDB INVALIDATED (a FATAL error: a checkpoint that could not write for a full disk, issue 830) is a
+ * crash too: it answers nothing until the file is opened again, so the worker's probe (executor-worker.ts
+ * `probeInstance`) tells the executor, which ends the run the same way, the cause and the way out in its reason
+ * (`invalidatedReason`).
  */
 import { Worker, type TransferListItem } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
@@ -153,7 +158,30 @@ export function wireError(e: unknown): WireError {
   if (e instanceof NumericError) return { kind: "numeric", message: e.message, sqlstate: e.sqlstate, gap: e.gap, detail: e.detail };
   return { kind: "error", message: e instanceof Error ? e.message : String(e), name: e instanceof Error ? e.name : "Error" };
 }
-export type Reply = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: WireError } | { log: string } | { pong: true };
+export type Reply = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: WireError } | { log: string } | { pong: true }
+  /** the instance was invalidated (executor-worker.ts `probeInstance`): DuckDB's original error */
+  | { invalidated: string };
+
+/** DuckDB's FATAL error, the one kind that invalidates its instance (executor-worker.ts `probeInstance` reads it on its
+ *  own probe's failure, never on a statement's): its original cause — the error that invalidated it, which DuckDB quotes
+ *  in every later refusal — else null for any other error */
+export function invalidationOf(e: unknown): string | null {
+  const m = e instanceof Error ? e.message : String(e);
+  if (!/^FATAL Error: /.test(m)) return null;
+  const original = /\nOriginal error: "([\s\S]*)"\s*$/.exec(m)?.[1];
+  return (original ?? m.replace(/^FATAL Error: /, "")).trim();
+}
+
+/** Why the run ends when the instance was invalidated, in a person's words (the run's FATAL line, the supervisor's
+ *  restart, mason status, a session's 57P02 DETAIL): the cause, that nothing synced is lost, and the way out. A full
+ *  disk names its own way out; anything else is opened again at the restart, and said again if it comes back. */
+export function invalidatedReason(cause: string): string {
+  // one line: the run's FATAL line is read back by its supervisor line by line (src/cli/supervise.ts scanLog)
+  cause = cause.replace(/\s+/g, " ").trim();
+  const disk = /No space left on device|disk is full|ENOSPC/i.test(cause);
+  return `the synced data met a fatal error and must be opened again (${cause}). Nothing synced is lost: it is opened again when Mason starts again` +
+    (disk ? "; free disk where the synced data is (.mason/), or the restart meets the same error" : "; if the restart meets the same error, mason logs says it (report it)");
+}
 
 /** the worker is gone: what every request in flight, and every later one, is answered. `stopped`: by the run's own stop
  *  (`close`), not a crash */
@@ -274,6 +302,7 @@ export class Executor {
       this.unanswered = 0;
       if ("pong" in m) return;
       if ("log" in m) { this.log(m.log); return; }
+      if ("invalidated" in m) { this.invalidated(m.invalidated); return; }
       if (m.id === this.shutdownId) {
         if (!m.ok) this.log(`closing the engine failed: ${errorOf(m.error).message}`);
         this.shutdownAnswered();
@@ -318,6 +347,19 @@ export class Executor {
     if (this.gone !== null) return;
     this.abandoned = reason;
     this.die(reason, false);
+    void this.shutDown();
+  }
+
+  /** the instance invalidated (issue 830; executor-worker.ts `probeInstance`): it answers nothing any more, so it is
+   *  what a crash is — every request in flight and later told 57P02 with the reason, the run told (`onCrash`: it exits
+   *  for its supervisor or its platform to start it again, which opens the file again) — and the worker asked to shut
+   *  down, its connections and the instance closed. Not `abandoned`: the thread is not stuck, and once its shutdown
+   *  answered the file may be opened again. During the run's own stop it is said, and the stop goes on. */
+  private invalidated(cause: string): void {
+    if (this.gone !== null) return;
+    const reason = invalidatedReason(cause);
+    if (this.closing) this.log(`the synced data met a fatal error while closing: ${reason}`);
+    this.die(reason);
     void this.shutDown();
   }
 

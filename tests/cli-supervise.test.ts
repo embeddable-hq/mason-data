@@ -13,10 +13,13 @@ import * as path from "node:path";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { matrixEnv, runMason } from "./cli-matrix.ts";
+import { invalidatedReason } from "../src/duck/executor.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SUPERVISE = path.join(ROOT, "src", "cli", "supervise.ts");
 const PG_URL = "postgresql://127.0.0.1:54987/sup";
+/** what the run says when the synced data was invalidated by a checkpoint on a full disk (src/cli/dev.ts, issue 830) */
+const INVALIDATED = `the engine stopped (${invalidatedReason("Failed to create checkpoint because of error: Could not write file \"/d/.mason/duck.db\": No space left on device")})`;
 
 /**
  * NO WAIT HERE IS UNBOUNDED, AND NO FAILED TEST LEAVES A PROCESS BEHIND (CI hung 30 minutes in this file: a test raced
@@ -56,6 +59,8 @@ const n = (fs.existsSync(starts) ? Number(fs.readFileSync(starts, "utf8")) : 0) 
 fs.writeFileSync(starts, String(n));
 fs.appendFileSync(path.join(home, "ports"), (process.env.MASON_PG_PORT ?? "-") + "\\n");
 if (mode === "fail") { process.stderr.write("mason start: the database refused the password\\n"); process.exit(3); }
+// the synced data cannot be opened again: the disk is still full (src/duck/store.ts openDuck)
+if (mode === "invalidated-then-fail" && n > 1) { process.stdout.write("mason start: Mason could not open the synced data: No space left on device\\n"); process.exit(1); }
 const file = path.join(home, "config.json");
 const write = (c) => { fs.writeFileSync(file + ".tmp", JSON.stringify(c)); fs.renameSync(file + ".tmp", file); };
 const cfg = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -65,7 +70,9 @@ write(cfg);
 process.on("SIGTERM", () => { cfg.running = null; write(cfg); process.exit(0); });
 process.stdout.write("mason start: ready\\n");
 const heap = () => { process.stderr.write("FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\\n"); process.exit(134); };
+const invalidated = () => { process.stdout.write("FATAL ERROR: Mason: " + ${JSON.stringify(INVALIDATED)} + "\\n"); process.exit(1); };
 if ((mode === "crash-once" && n === 1) || mode === "crash-always") setTimeout(heap, 30);
+else if (mode === "invalidated-always" || (mode === "invalidated-then-fail" && n === 1)) setTimeout(invalidated, 30);
 else if (mode === "killed-once" && n === 1) setTimeout(() => process.kill(process.pid, "SIGKILL"), 30);
 else if (mode === "hang") { process.removeAllListeners("SIGTERM"); process.on("SIGTERM", () => {}); setInterval(() => {}, 1000); }   // a blocked main thread: SIGTERM never acted on
 else setInterval(() => {}, 1000);
@@ -283,6 +290,33 @@ test("a run that keeps dying is given up on after RESTART_LIMIT restarts in the 
   assert.equal(startsOf(p.home), RESTART_LIMIT + 1);
   assert.deepEqual(waits, [1_000, 2_000, 5_000, 15_000, 30_000], "each restart waits longer than the one before");
   assert.match(fs.readFileSync(p.log, "utf8"), new RegExp(`its ${RESTART_LIMIT + 1}th crash in 10 minutes: not restarting again`));
+});
+
+// ISSUE 830: the synced data invalidated (a checkpoint on a full disk) ends the run with its cause; a restart that meets
+// the same cause again says so, never a silent loop, and a restart that cannot even open the file is said too
+test("a run whose synced data keeps failing for the same cause is restarted with that cause said each time, the repeat named, then given up on", { timeout: 60_000 }, async () => {
+  const { supervise, RESTART_LIMIT } = await import(SUPERVISE) as typeof import("../src/cli/supervise.ts");
+  const p = project();
+  const code = await supervise({ home: p.home, logFile: p.log, sleep: async () => undefined,
+    start: (_env, fd) => spawn(process.execPath, [p.fake, p.home, "invalidated-always"], { stdio: ["ignore", fd, fd] }) });
+  assert.equal(code, 1);
+  assert.equal(startsOf(p.home), RESTART_LIMIT + 1);
+  const restarts = JSON.parse(fs.readFileSync(path.join(p.home, "restarts.json"), "utf8")) as { restarts: Array<{ reason: string }> };
+  assert.deepEqual(restarts.restarts.map((r) => r.reason), Array(RESTART_LIMIT).fill(INVALIDATED), "each restart records the cause, for mason status");
+  const notes = fs.readFileSync(p.log, "utf8").split("\n").filter((l) => l.startsWith("mason supervisor: "));
+  assert.match(notes[0]!, /the run stopped \(the engine stopped \(the synced data met a fatal error .*No space left on device.*free disk where the synced data is.*\)\) after \d+ s: starting it again in 1 s/);
+  for (const n of notes.slice(1, RESTART_LIMIT)) assert.match(n, /after \d+ s, the same as its last restart: what stopped it is still there: starting it again/);
+  assert.match(notes[RESTART_LIMIT]!, new RegExp(`its ${RESTART_LIMIT + 1}th crash in 10 minutes: not restarting again`));
+});
+
+test("a run started again that cannot get ready (the disk still full) is said by the supervisor, and not started again", { timeout: 60_000 }, async () => {
+  const { supervise } = await import(SUPERVISE) as typeof import("../src/cli/supervise.ts");
+  const p = project();
+  const code = await supervise({ home: p.home, logFile: p.log, sleep: async () => undefined,
+    start: (_env, fd) => spawn(process.execPath, [p.fake, p.home, "invalidated-then-fail"], { stdio: ["ignore", fd, fd] }) });
+  assert.equal(code, 1);
+  assert.equal(startsOf(p.home), 2);
+  assert.match(fs.readFileSync(p.log, "utf8"), /mason supervisor: the run started again did not get ready \(it exited with code 1\): not starting it again\. mason logs --start shows why; mason start starts it/);
 });
 
 test("mason status says the restarts: how many, and the last one's reason", async () => {
