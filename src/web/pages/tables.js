@@ -283,7 +283,7 @@ export function renderTables(s, ui = {}) {
     }
     return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}${said_ ? " has-note" : ""}"><th scope="row" class="name"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
       `<td class="state">${state}${bar}</td>${cell(rows, "num")}${cell(f.key, "mono", f.key)}${last}` +
-      `${t.added ? (sizeOf.has(t.table) ? cell(bytesText(sizeOf.get(t.table)), "num") : cell("—", "num", "not measured yet: a synced table's size is measured every 10 min")) : cell("", "num")}` +
+      `${t.added ? (sizeOf.has(t.table) ? cell(bytesText(sizeOf.get(t.table)), "num") : cell("—", "num", "not measured yet: a synced table's size is measured every 10 min once its rows are written into the file; a small table's can wait in the write-ahead log until the log passes 16 MiB or Mason stops")) : cell("", "num")}` +
       `<td class="act" id="${esc(anchor)}">${act}</td></tr>` + note;
   };
   const added = s.tables.filter((t) => t.added).length;
@@ -303,7 +303,7 @@ export function renderTables(s, ui = {}) {
     panel(`<table class="catalog"><thead><tr>${head.map(([h, c]) => `<th scope="col"${c ? ` class="${c}"` : ""}>${h}</th>`).join("")}</tr></thead>` +
       `<tbody>${rowsHtml_}</tbody></table>`) + pops.join("") + moreRows("tables", Math.min(limit, shown.length), shown.length, TABLE_ROWS) +
     (!shown.length ? `<p class="dim">No ${show === "added" ? "added " : show === "failed" ? "failed " : show === "not-added" ? "table that is not added, " : ""}table${filter.trim() ? `'s name has “${esc(filter.trim())}”` : ""}.</p>` : "") + sizesFailed +
-    (added ? `<p class="dim">A synced table's own size is measured every 10 minutes (${code("mason usage")}).</p>` : "");
+    (added ? `<p class="dim">A synced table's own size is measured every 10 minutes, once its rows are written into the file (${code("mason usage")}).</p>` : "");
 }
 
 export const page = {

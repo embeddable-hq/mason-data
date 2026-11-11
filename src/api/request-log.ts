@@ -134,13 +134,31 @@ export function storedPayload(body: string): { text: string; truncated: boolean 
   };
 }
 
-/** A plan's text as a row keeps it: whole up to MAX_STORED_PLAN_BYTES, else cut at the last whole line before it (a
- *  character boundary where one line is longer), `truncated` saying so. */
+/** The most of one line of a plan a row keeps (`storedPlan`): a long "Sent to the engine:" line (a BI tool's 40 KB
+ *  UNION of 400 arms) keeps its head, so the operators after it fit in the cap. */
+export const MAX_STORED_PLAN_LINE_BYTES = 2 * 1024;
+
+/** `text`'s first `bytes` bytes, never half a character: a half-written UTF-8 sequence at the cut decodes as U+FFFD,
+ *  dropped, never stored as if the plan held it */
+const headOf = (text: string, bytes: number): string => Buffer.from(text, "utf8").subarray(0, bytes).toString("utf8").replace(/�$/, "");
+
+/**
+ * A plan's text as a row keeps it, `truncated` saying when anything was cut. First, each line longer than
+ * MAX_STORED_PLAN_LINE_BYTES keeps its head and says on the line it was cut and how long it was: a long statement's SQL
+ * line never pushes the engine's operators out (the reason the plan is kept). Then, past MAX_STORED_PLAN_BYTES in all,
+ * the plan is cut at the last whole line before the cap.
+ */
 export function storedPlan(text: string): StoredPlan {
-  const buf = Buffer.from(text, "utf8");
-  if (buf.byteLength <= MAX_STORED_PLAN_BYTES) return { text, truncated: false };
-  // a half-written UTF-8 sequence at the cut decodes as U+FFFD: dropped, never stored as if the plan held it
-  const cut = buf.subarray(0, MAX_STORED_PLAN_BYTES).toString("utf8").replace(/�$/, "");
+  let truncated = false;
+  const lines = text.split("\n").map((line) => {
+    const bytes = Buffer.byteLength(line, "utf8");
+    if (bytes <= MAX_STORED_PLAN_LINE_BYTES) return line;
+    truncated = true;
+    return `${headOf(line, MAX_STORED_PLAN_LINE_BYTES)} … (this line is cut here: ${bytes.toLocaleString("en-US")} bytes in all)`;
+  });
+  const joined = lines.join("\n");
+  if (Buffer.byteLength(joined, "utf8") <= MAX_STORED_PLAN_BYTES) return { text: joined, truncated };
+  const cut = headOf(joined, MAX_STORED_PLAN_BYTES);
   const line = cut.lastIndexOf("\n");
   return { text: line > 0 ? cut.slice(0, line) : cut, truncated: true };
 }

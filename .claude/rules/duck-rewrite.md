@@ -128,15 +128,13 @@ paths:
     expression meets only the rows the filter keeps and none of the table-wide statistics the wall hides; one whose
     filter holds a volatile function keeps its form, since read twice it could keep other rows, and each walled read
     fetched is one more wall `wallStatistics` is told of (`LateContext.wall`), so every one is still walled. A list of a derived read now raises on the rows
-    chosen alone (`limit-errors`). A LIMIT with no ORDER BY takes the same path: sorted by the row numbers of the
-    tables read ONLY where `fanOutBounded` (src/duck/distinct-key.ts) proves the join bounded, from the analysis and the
-    catalog's pg_index (every join equates a whole primary key of a table, or of a plain read of one by a bare output
-    column, its side holds once, so a key the first join repeats proves nothing the second time), because a parallel join's rows change order each run and an unsorted LIMIT's
-    pages overlap, and the sort makes the LIMIT a full join (74 s against milliseconds at 100 billion joined rows); else
-    row numbers with no sort at all, which keeps the memory win and stops early, and whose pages CAN OVERLAP, as before
-    PR 118. The proof decides cost and pages, never an answer, so what it cannot show goes unsorted. OFFSET alone and
-    LIMIT ALL stay as they were, and `afterLimit` still needs a sort. `tests/duck-distinct-key.test.ts` holds the proof,
-    the plan fixture and `tests/duck-wire.test.ts` each side, `oracle/unordered-limit.ts` the rows. ("A top N over joined tables");
+    chosen alone (`limit-errors`). A LIMIT with no ORDER BY takes the same path, its row numbers chosen with NO SORT,
+    inside or out, a join of keys included, which keeps the memory win and stops early; its pages CAN OVERLAP, as SQL
+    and Postgres allow (issue 824, the owner's decision of 2026-11-10): a sort by row number for stable pages is a top
+    N over every joined row, 19.8–46.6 s for a 100-row preview of a 25 k × 153 M-row LEFT JOIN, and its exact cheaper
+    form (the preserved side limited first) still reads the big table's whole join column. OFFSET alone and LIMIT ALL
+    stay as they were, and `afterLimit` still needs a sort. The plan fixture and `tests/duck-wire.test.ts` hold the
+    form, `oracle/unordered-limit.ts` the rows. ("A top N over joined tables");
   - **a grouped top N on a whole primary key reads its table's columns after the LIMIT** (`keyFirst`, src/duck/late.ts,
     issue 134, step 6): where the analysis proves a table's WHOLE primary key grouped (`keyGrouped`, pg_index's primary
     key only), the groups are formed as written with `any_value(t.rowid)`, the HAVING, ORDER BY and LIMIT applied, and

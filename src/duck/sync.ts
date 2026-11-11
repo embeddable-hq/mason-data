@@ -53,6 +53,7 @@
  * Read-only on the source (CLAUDE.md): only SELECTs, through a READ_ONLY attachment.
  */
 import type { DuckStore } from "./store.ts";
+import { syncedDataBytes } from "./file-bytes.ts";
 import { DEFAULT_MEMORY_RULE, freeBytesAt, MASON_SCHEMA, NO_ROLE_SESSION, pgErrorOf, SessionSetup } from "./store.ts";
 
 /** the session the generated tables' run passes the Mason functions: no slot of the cancel table (src/duck/cancel.ts
@@ -3365,15 +3366,9 @@ export class Sync {
     catch (e) { return { path: dir, freeBytes: null, projectedBytes, error: `the free space where the synced data is could not be read: ${this.errorText(e)}` }; }
   }
 
-  /** The DuckDB file's bytes with its write-ahead log's (what a copy adds lands in the log until a checkpoint). */
-  private fileBytes(): number {
-    let n = 0;
-    for (const f of [this.store.file, `${this.store.file}.wal`]) {
-      try { n += fs.statSync(f).size; }
-      catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }   // no log between checkpoints
-    }
-    return n;
-  }
+  /** The DuckDB file's bytes with its write-ahead log's (what a copy adds lands in the log until a checkpoint): the one
+   *  reader of them (src/duck/file-bytes.ts). */
+  private fileBytes(): number { return syncedDataBytes(this.store.file) ?? 0; }
 
   /** Why the copy of `t` must stop now — what its pages left would add is more than the disk has free — or null. What
    *  it projects is kept on the copy's `live` (`diskStatus` says it). */

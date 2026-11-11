@@ -23,7 +23,7 @@ import type { CopyState } from "./sync.ts";
 import { giveTurns, datumText, masonCalls, rewrite, treeDifference, Unrewritable, type EnumTypes, type RowColumn } from "./rewrite.ts";
 import type { CollationResolver, StatementCollations } from "./collation.ts";
 import { exposes, hideKept, readKey, searchSchemas, type KeptLookup, type KeptRoutes } from "./kept-route.ts";
-import { distinctCountTables, distinctKeyCounts, fanOutTables, groupedLimitTables, primaryKeysOf, uniqueColumnsOf, uniqueColumnsSql } from "./distinct-key.ts";
+import { distinctCountTables, distinctKeyCounts, groupedLimitTables, primaryKeysOf, uniqueColumnsOf, uniqueColumnsSql } from "./distinct-key.ts";
 import type { PrimaryKeys } from "./distinct-key.ts";
 import { enforceGrants, type RoleGrants } from "./grants.ts";
 import { attributeRefused, expandRowFilters, wallStatistics, wallSwitch, type Walls } from "./row-filter.ts";
@@ -55,10 +55,10 @@ async function distinctKeys(catalog: (bytes: Uint8Array) => Promise<Uint8Array>,
   return distinctKeyCounts(tree, uniqueColumnsOf(await catalogRows(catalog, uniqueColumnsSql(relids))));
 }
 
-/** the primary keys that may prove a LIMIT with no ORDER BY's joins bounded, or a grouped LIMIT grouped by a whole key
- *  (src/duck/late.ts), read only for a statement that has one */
+/** the primary keys that may prove a grouped LIMIT grouped by a whole key (src/duck/late.ts `keyFirst`), read only for a
+ *  statement that has one */
 async function joinKeys(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, tree: PgAnalysis["tree"]): Promise<PrimaryKeys> {
-  const relids = [...new Set([...fanOutTables(tree), ...groupedLimitTables(tree)])].sort((a, b) => a - b);
+  const relids = groupedLimitTables(tree);
   return relids.length === 0 ? new Map() : primaryKeysOf(await catalogRows(catalog, uniqueColumnsSql(relids)));
 }
 

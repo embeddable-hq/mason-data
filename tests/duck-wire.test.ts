@@ -160,7 +160,7 @@ const DDL = [
   "CREATE TABLE public.late (id INTEGER PRIMARY KEY, j JSON, k INTEGER, c INTEGER)",
   "INSERT INTO public.late SELECT range::INTEGER, json_object('n', CASE WHEN range = 2000 THEN 'x' ELSE range::VARCHAR END), (2000 - range)::INTEGER, (range % 50)::INTEGER FROM range(1, 2001)",
   "CREATE TABLE public.late_c (id INTEGER PRIMARY KEY, name VARCHAR)",
-  // a composite primary key, and a table the catalog declares no key of (the fan-out guard, src/duck/distinct-key.ts)
+  // a composite primary key, and a table the catalog declares no key of (keyFirst, and joins of no key)
   "CREATE TABLE public.late_p (c INTEGER, line INTEGER, note VARCHAR, PRIMARY KEY (c, line))",
   "INSERT INTO public.late_p SELECT (range % 50)::INTEGER, (range // 50)::INTEGER, 'n' || range FROM range(200)",
   "CREATE TABLE public.late_n (id INTEGER, c INTEGER)",
@@ -4696,17 +4696,14 @@ test("a join's FROM items: a plain derived read is fetched by its row number, a 
       assert.doesNotMatch(await sent(sql), /__mason_r(id|\d)/, sql);
       assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
     }
-    // PAGES UNDER BOTH FAN-OUT DECISIONS. Proved: a plain read's key is its table's, through a view, a WITH query and a wrapper
+    // NO ORDER BY, NO SORT (issue 824): a plain read's key through a view, a WITH query and a wrapper, a key computed, a
+    // multiplying side, what is carried
     for (const sql of ["SELECT l.id, d.name FROM late l JOIN (SELECT id, name FROM late_c) d ON d.id = l.c LIMIT 3",
       "SELECT l.id, r.name FROM late l JOIN late_read r ON r.id = l.c LIMIT 3",
       "WITH w AS (SELECT id, name FROM late_c) SELECT l.id, w.name FROM late l LEFT JOIN w ON w.id = l.c LIMIT 3",
       "SELECT * FROM (SELECT l.id, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c) t LIMIT 3",
-      "SELECT * FROM late_joined LIMIT 3"]) {
-      assert.match(await sent(sql), /ORDER BY \w+\.(rowid|__mason_rid)\b.*\) AS __mason_late .*ORDER BY __mason_late\.__mason_r1/, sql);
-      assert.equal((await answer(c, sql)).rows.length, 3, sql);
-    }
-    // Not proved, no sort: a key computed, a multiplying side, what is carried
-    for (const sql of ["SELECT l.id, d.name FROM late l JOIN (SELECT id + 1 AS id, name FROM late_c) d ON d.id = l.c LIMIT 3",
+      "SELECT * FROM late_joined LIMIT 3",
+      "SELECT l.id, d.name FROM late l JOIN (SELECT id + 1 AS id, name FROM late_c) d ON d.id = l.c LIMIT 3",
       "SELECT x.id, y.c FROM (SELECT id, c FROM late) x JOIN (SELECT id, c FROM late) y ON y.c = x.c LIMIT 3",
       "SELECT * FROM (SELECT x.id, y.j FROM late x JOIN late y ON y.c = x.c) t LIMIT 3",
       "SELECT l.id, s.n FROM late l JOIN late_counts s ON s.c = l.c LIMIT 3"]) {
@@ -4724,7 +4721,7 @@ test("a join's FROM items: a plain derived read is fetched by its row number, a 
     // a parameter in a derived list is one value, in both reads of it
     assert.deepEqual((await c.query({ text: "SELECT l.id, d.p, d.name FROM late l LEFT JOIN (SELECT id, $1::int AS p, name FROM late_c WHERE id > $2) d ON d.id = l.c ORDER BY l.id LIMIT 3", values: [7, 1], rowMode: "array" })).rows,
       (await postgres("SELECT l.id, d.p, d.name FROM late l LEFT JOIN (SELECT id, $1::int AS p, name FROM late_c WHERE id > $2) d ON d.id = l.c ORDER BY l.id LIMIT 3", [7, 1])).rows.map((r) => [Number(r[0]), r[1] === null ? null : Number(r[1]), r[2]]));
-    // what is carried has no row number: a keyed WITH query read twice is proved bounded, and goes unsorted all the same
+    // what is carried has no row number: a keyed WITH query read twice goes unsorted, as every LIMIT with no ORDER BY does
     assert.doesNotMatch(await sent("WITH t AS (SELECT id, name FROM late_c) SELECT l.id, x.name, y.name AS other FROM late l JOIN t x ON x.id = l.c JOIN t y ON y.id = l.c LIMIT 3"), /ORDER BY/);
     // a prepared statement run after a SET reads the setting where it runs
     const prepared = { name: "derived", text: "SELECT l.id, d.name FROM late l JOIN (SELECT id, name FROM late_c) d ON d.id = l.c ORDER BY l.id LIMIT $1" };
@@ -4802,8 +4799,10 @@ test("a subquery in the select list is computed for the chosen rows alone, and o
 });
 
 // ISSUE 105, the same preview with no ORDER BY: which rows a LIMIT keeps is defined by no one, so what is held is what
-// is defined: how many, each a row of the whole join, none more often than the join holds it, and a page of one list
-test("a LIMIT with no ORDER BY over joined tables chooses its rows by row number, sorted where the join is proved bounded, and they are rows of the join", async () => {
+// is defined: how many, each a row of the whole join, none more often than the join holds it. ISSUE 824 (the owner's
+// decision, 2026-11-10): never sorted by row number, a join of keys included, so the statement stops early; its pages
+// may overlap, as SQL and Postgres allow
+test("a LIMIT with no ORDER BY over joined tables chooses its rows by row number with no sort, and they are rows of the join", async () => {
   const c = await client();
   const one = (v: unknown): unknown => typeof v === "string" ? v.replaceAll('": ', '":') : v;
   const key = (r: unknown[]): string => JSON.stringify(r.map(one));
@@ -4827,65 +4826,70 @@ test("a LIMIT with no ORDER BY over joined tables chooses its rows by row number
     return left;
   };
   const JOINS = "FROM late l JOIN late_c c ON c.id = l.c";
-  /** the statement's rows held, and its form: sorted by row number where the proof holds, else row numbers with no sort */
-  const held = async (list: string, from: string, tail: string, values?: unknown[], unbounded = false): Promise<void> => {
+  const LEFT = "FROM late l LEFT JOIN late_c c ON c.id = l.c";
+  /** the statement's rows held, and its form: row numbers chosen with no sort, inside or out */
+  const held = async (list: string, from: string, tail: string, values?: unknown[]): Promise<void> => {
     const sql = `SELECT ${list} ${from} ${tail}`;
     const [got, limited, whole] = [await answer(c, sql, values), await postgres(sql, values), await postgres(`SELECT ${list} ${from}`)];
     assert.deepEqual(got.fields, limited.fields, sql);
     assert.equal(got.rows.length, limited.rows.length, sql);
     within(got.rows, whole.rows, sql);
-    const written = await sent(sql, values);
-    if (unbounded) assert.match(written, /rowid AS __mason_r1(?!.* ORDER BY ).*\) AS __mason_late LEFT JOIN /, sql);
-    else assert.match(written, /rowid AS __mason_r1.* ORDER BY \w+\.rowid.*\) AS __mason_late LEFT JOIN .*ORDER BY __mason_late\.__mason_r1/, sql);
+    assert.match(await sent(sql, values), /(rowid|__mason_rid) AS __mason_r1(?!.* ORDER BY ).*\) AS __mason_late LEFT JOIN /, sql);
   };
-  const unsorted = (list: string, from: string, tail: string, values?: unknown[]): Promise<void> => held(list, from, tail, values, true);
   try {
+    // A JOIN OF KEYS, each outer join's preserved side read first or not, which issue 105 sorted: the issue's own shape,
+    // a LEFT join of a small table's key to a big one, first
+    await held("l.*, c.*", LEFT, "LIMIT 7 OFFSET 0");
     await held("l.*, c.*", JOINS, "LIMIT 7 OFFSET 0");
-    await unsorted("l.id, l.j, c.name", "FROM late l LEFT JOIN late_c c ON c.id = l.c + 40", "LIMIT 2000"); // a key equated with an expression proves nothing
     await held("l.id, c.id AS c, c.name", "FROM late l RIGHT JOIN late_c c ON c.id = l.c AND l.id < 20", "LIMIT 60");
-    await unsorted("l.id, c.id AS c, c.name", "FROM late l FULL JOIN late_c c ON c.id = l.c + 40 AND l.id < 20", "LIMIT 2000 OFFSET 1990");
+    await held("l.id, c.id AS c, c.name", "FROM late l FULL JOIN late_c c ON c.id = l.c", "LIMIT 60 OFFSET 1950");
     await held("l.id, c.name", "FROM late l, late_c c WHERE c.id = l.c", "LIMIT 3");
-    await unsorted("l.id, c.name", "FROM late l, late_c c", "LIMIT 5 OFFSET 7"); // every pair
-    await unsorted("l.id, y.id AS y, y.c", "FROM late l JOIN late y ON y.c = l.c", "LIMIT 9"); // a self-join that multiplies
-    // EACH SIDE OF THE FAN-OUT GUARD (src/duck/distinct-key.ts fanOutBounded). Proved: the key on either side, and whole
     await held("c.name, l.id", "FROM late_c c JOIN late l ON l.c = c.id", "LIMIT 9");
     await held("l.id, c.name", "FROM late l RIGHT JOIN late_c c ON c.id = l.c", "LIMIT 9");
     await held("x.note, p.note AS n", "FROM late_p x JOIN late_p p ON p.c = x.c AND p.line = x.line", "LIMIT 9");
+    await held("l.id, c.name, m.id AS m", "FROM late l LEFT JOIN late_c c ON c.id = l.c LEFT JOIN late m ON m.id = l.k", "LIMIT 9 OFFSET 4"); // a chain
     await held("l.id, c.name, m.id AS m", "FROM late l JOIN late_c c ON c.id = l.c JOIN late m ON m.id = l.k", "LIMIT 9"); // a star
-    // not proved: many to many under each join kind, a composite key in part, no key at all, an OR, a chasm
-    for (const kind of ["JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"]) await unsorted("l.id, y.id AS y", `FROM late l ${kind} late y ON y.c = l.c`, "LIMIT 40 OFFSET 5");
-    await unsorted("l.id, p.note", "FROM late l JOIN late_p p ON p.c = l.c", "LIMIT 9");
-    await unsorted("l.id, n.id AS n", "FROM late l JOIN late_n n ON n.id = l.c", "LIMIT 9");
-    await unsorted("l.id, c.name", "FROM late l JOIN late_c c ON c.id = l.c OR c.id = l.k", "LIMIT 9");
-    await unsorted("c.name, a.id, b.id AS b", "FROM late_c c JOIN late a ON a.c = c.id JOIN late b ON b.c = c.id", "LIMIT 9");
-    await unsorted("a.j, b.j AS k, c.name", "FROM late_c c LEFT JOIN late a ON a.c = c.id LEFT JOIN late b ON b.c = c.id", "LIMIT 9 OFFSET 3"); // wide columns read after the limit
-    await unsorted("*", "FROM late l JOIN late y ON y.c = l.c", "LIMIT 3");
-    await unsorted("l.id, y.j", "FROM late l JOIN late y ON y.c = l.c", "LIMIT $1 OFFSET $2", [3, 1]);
-    // two queries alike, one proved and one not: not proved, whichever this SELECT is
-    assert.doesNotMatch(await sent("SELECT * FROM (SELECT l.id FROM late l JOIN late_c c ON c.id = l.c LIMIT 3) s, (SELECT l.id AS i FROM late l JOIN late_c c ON c.name = l.j ->> 'n' LIMIT 3) t LIMIT 2"), /ORDER BY \w+\.rowid/);
+    await held("d.id, c.name", "FROM (SELECT id, c, k + 1 AS k1 FROM late WHERE id > 3) d LEFT JOIN late_c c ON c.id = d.c", "LIMIT 5 OFFSET 2"); // a plain derived read
     await held("c.name", JOINS, "LIMIT 2000"); // a row number repeated, one table read
     await held("l.id, c.name", JOINS, "LIMIT 0");
-    await held("l.id, c.name", JOINS, "LIMIT 3 OFFSET 100000");
+    await held("l.id, c.name", LEFT, "LIMIT 3 OFFSET 100000");
     await held("l.id, c.name", `${JOINS} WHERE c.name = 'c7'`, "LIMIT 3");
+    await held("l.id, c.name", `${LEFT} WHERE l.k > 5`, "LIMIT 3");
     await held("upper(c.name) AS u, l.j ->> 'n' AS n", JOINS, "LIMIT 3");
-    await unsorted("*", "FROM late l LEFT JOIN late_c c ON c.id = l.c + 1000", "LIMIT 3");
     await held("l.id, c.name", JOINS, "FETCH FIRST 2 ROWS ONLY");
-    await held("l.id, c.name", JOINS, "LIMIT $1 OFFSET $2", [3, 1]);
+    await held("l.id, c.name", LEFT, "LIMIT $1 OFFSET $2", [3, 1]);
+    // and what issue 134 left unsorted already: a key equated with an expression, every pair, a join that multiplies,
+    // under each join kind, a composite key in part, no key at all, an OR, a chasm
+    await held("l.id, l.j, c.name", "FROM late l LEFT JOIN late_c c ON c.id = l.c + 40", "LIMIT 2000");
+    await held("l.id, c.id AS c, c.name", "FROM late l FULL JOIN late_c c ON c.id = l.c + 40 AND l.id < 20", "LIMIT 2000 OFFSET 1990");
+    await held("l.id, c.name", "FROM late l, late_c c", "LIMIT 5 OFFSET 7");
+    await held("l.id, y.id AS y, y.c", "FROM late l JOIN late y ON y.c = l.c", "LIMIT 9");
+    for (const kind of ["JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"]) await held("l.id, y.id AS y", `FROM late l ${kind} late y ON y.c = l.c`, "LIMIT 40 OFFSET 5");
+    await held("l.id, p.note", "FROM late l JOIN late_p p ON p.c = l.c", "LIMIT 9");
+    await held("l.id, n.id AS n", "FROM late l JOIN late_n n ON n.id = l.c", "LIMIT 9");
+    await held("l.id, c.name", "FROM late l JOIN late_c c ON c.id = l.c OR c.id = l.k", "LIMIT 9");
+    await held("c.name, a.id, b.id AS b", "FROM late_c c JOIN late a ON a.c = c.id JOIN late b ON b.c = c.id", "LIMIT 9");
+    await held("a.j, b.j AS k, c.name", "FROM late_c c LEFT JOIN late a ON a.c = c.id LEFT JOIN late b ON b.c = c.id", "LIMIT 9 OFFSET 3"); // wide columns read after the limit
+    await held("*", "FROM late l JOIN late y ON y.c = l.c", "LIMIT 3");
+    await held("l.id, y.j", "FROM late l JOIN late y ON y.c = l.c", "LIMIT $1 OFFSET $2", [3, 1]);
+    await held("*", "FROM late l LEFT JOIN late_c c ON c.id = l.c + 1000", "LIMIT 3");
+    assert.doesNotMatch(await sent("SELECT * FROM (SELECT l.id FROM late l JOIN late_c c ON c.id = l.c LIMIT 3) s, (SELECT l.id AS i FROM late l JOIN late_c c ON c.name = l.j ->> 'n' LIMIT 3) t LIMIT 2"), /ORDER BY \w+\.rowid/);
     // a prepared statement, run again with another LIMIT and after a SET
-    const prepared = { name: "unsorted", text: `SELECT l.id, c.name ${JOINS} LIMIT $1`, rowMode: "array" as const };
+    const prepared = { name: "unsorted", text: `SELECT l.id, c.name ${LEFT} LIMIT $1`, rowMode: "array" as const };
     assert.equal((await c.query({ ...prepared, values: [2] })).rows.length, 2);
     await c.query("SET TimeZone = 'Asia/Tokyo'");
     assert.equal((await c.query({ ...prepared, values: [5] })).rows.length, 5);
-    // PAGES: a statement run page by page reads every row of the join once
-    const whole = (await postgres(`SELECT l.id, c.name ${JOINS}`)).rows;
-    const pages: unknown[][] = [];
-    for (let offset = 0; offset < whole.length; offset += 300) pages.push(...(await answer(c, `SELECT l.id, c.name ${JOINS} LIMIT 300 OFFSET ${offset}`)).rows);
-    assert.equal(pages.length, whole.length);
-    assert.deepEqual([...within(pages, whole, "the pages").values()].filter((n) => n !== 0), [], "every row of the join read once");
-    // ONE LIST OF ROWS, the page of it asked for: every table read in the order, each row number once more outside. On
-    // tables this small DuckDB's join is in order whatever the plan, so the plan is what is held
-    assert.match(await sent(`SELECT l.j, c.name ${JOINS} LIMIT 3 OFFSET 2`), /ORDER BY l\.rowid, c\.rowid LIMIT 3 OFFSET 2 \) AS __mason_late .*ORDER BY __mason_late\.__mason_r1, __mason_late\.__mason_r2/);
-    assert.match(await sent(`SELECT c.name ${JOINS} LIMIT 3`), /ORDER BY c\.rowid LIMIT 3 \) AS __mason_late .*ORDER BY __mason_late\.__mason_r1/, "a table unread is no key: its rows read alike");
+    // PAGES: each page's rows are rows of the join, as many as Postgres's page holds; which rows, and whether two pages
+    // overlap, is defined by no one (the owner's decision, issue 824)
+    const whole = (await postgres(`SELECT l.id, c.name ${LEFT}`)).rows;
+    for (let offset = 0; offset < whole.length; offset += 300) {
+      const page = (await answer(c, `SELECT l.id, c.name ${LEFT} LIMIT 300 OFFSET ${offset}`)).rows;
+      assert.equal(page.length, Math.min(300, whole.length - offset), `OFFSET ${offset}`);
+      within(page, whole, `OFFSET ${offset}`);
+    }
+    // ONE TABLE'S ROW NUMBERS EACH, no sort inside or out, the LIMIT and OFFSET the statement's own
+    assert.match(await sent(`SELECT l.j, c.name ${LEFT} LIMIT 3 OFFSET 2`),
+      /^statement: .*\( SELECT l\.rowid AS __mason_r1, c\.rowid AS __mason_r2 FROM late AS l LEFT JOIN late_c AS c ON c\.id = l\.c LIMIT 3 OFFSET 2 \) AS __mason_late LEFT JOIN late AS l ON l\.rowid = __mason_late\.__mason_r1 LEFT JOIN late_c AS c ON c\.rowid = __mason_late\.__mason_r2$/);
     // a row number exists of a table alone, and a statement with no limit in fact has nothing to choose
     for (const sql of [`SELECT l.id, c.name ${JOINS}`, `SELECT l.id, c.name ${JOINS} OFFSET 1990`, `SELECT l.id, c.name ${JOINS} LIMIT ALL`, `SELECT l.id, c.name ${JOINS} LIMIT NULL`,
       `SELECT l.id, c.name ${JOINS} LIMIT NULL::int OFFSET 1990`, "SELECT l.id, l.j ->> 'n' FROM late l LIMIT 3",

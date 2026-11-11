@@ -1827,8 +1827,12 @@ failures 7 days): with Now the default, a card of 12 failed statements once land
 growing with rows × columns, so it is sampled every 10 minutes, never per request; `duckdb_memory()` under 1 ms. A
 `count(*)` after a stream batch that wrote by key was a scan, 12 ms on 20 M rows, so a copy's rows are kept by the
 batch's own inserts less its deletes. A copy with no persistent block yet (its rows still in the write-ahead log) was
-measured "0.0 KiB" for 5,000 rows, so it is not measured until it has one; and the file's block size read without
-`current_database()` was the in-memory catalog's 0, which made every copy 0 B.
+measured "0.0 KiB" for 5,000 rows, so it is not measured until it has one — and since Mason never checkpointed, a small
+copy may not have one for the life of a run (issue 815); the sampler never checkpoints to give it one (the owner,
+2026-11-11: "Measurements", "A small table's size"), and the page and `mason usage` say why it has no size; and the
+file's block size read without
+`current_database()` was the in-memory catalog's 0, which made every copy 0 B. The synced data's file is the file and
+its write-ahead log (src/duck/file-bytes.ts, the one reader): the file alone read 12 KiB beside a log of 1.3 MB.
 
 **`/metrics`: numbers only, no auth (2026-10-30).** Of the three ways docs/OBSERVABILITY.md "Access" costed to give a
 DevOps team more than `/healthz`, the owner chose to build C first: `GET /metrics` on `mason serve`'s health port, in
@@ -2717,7 +2721,7 @@ never, most pages differed when asked twice, and at `LIMIT 100` over the first 3
 pages. The numbered form (`row_number() OVER ()` over the chosen rows, kept outside) cost 0.04 to 0.08 s where the sort costs
 0.04 to 0.58 s and kept that overlap.
 
-**The sort has a price, accepted for stable pages.** A top N over row numbers is a full join where a streaming LIMIT stops
+**The sort has a price, accepted for stable pages** (until issue 824, below). A top N over row numbers is a full join where a streaming LIMIT stops
 early, so its cost grows with the join, and a narrow join that used to stop early pays it with nothing spilled to save. An
 unsorted row-number inner query costs about what the old plan did, at the price of overlapping pages. Over a 50 M-row table,
 min of 3 warm runs:
@@ -2733,7 +2737,7 @@ min of 3 warm runs:
 
 `LIMIT -1` is refused 42804 where Postgres says 2201W, with or without a join: not this path's.
 
-**The sort only where the join is proved bounded (issue 134, 2026-10-31).** That price was measured on joins that do not
+**The sort only where the join is proved bounded (issue 134, 2026-10-31; no sort at all since issue 824, below).** That price was measured on joins that do not
 multiply. Where a join multiplies, the top N over row numbers runs the entire join, and a statement that used to stop in
 milliseconds runs for minutes. So the row numbers are sorted only where `fanOutBounded` (src/duck/distinct-key.ts) proves
 the join's rows linear in its tables: every join equates a whole primary key of a table its side holds at most once, from
@@ -2767,6 +2771,45 @@ none, so such a copy goes unsorted too. The comma form is proved on the WHERE's 
 WHERE over a `CROSS JOIN` is not.
 
 
+**No sort at all (issue 824, decided by the owner on 2026-11-10).** A BI tool's preview of a join on a hosted replica
+(2 vCPU, 8 GiB, a gp3 volume at 125 MB/s), `SELECT a.*, b.* FROM small a LEFT JOIN big b ON a.id = b.small_id LIMIT 100
+OFFSET 0` over 25 k × 153 M rows with two wide jsonb columns in `big`, took 19.8 s, and 46.6 s on a later run. `a.id` is a
+primary key, so the join was proved bounded and its row numbers were sorted: a hash join of about 153 M rows into `Top N
+100`. On a cold disk most of that time is spent reading `big`'s join column, about 2.4 GB of uuids. The streaming form
+(`FROM (SELECT * FROM small LIMIT 100) a LEFT JOIN big b …`) took 26 ms and read 193 rows of `big`.
+
+The exact rewrite that keeps stable pages was measured before it was built. Every row of a LEFT JOIN's preserved side
+yields a row, so only that side's first OFFSET + LIMIT rows by row number can be in the page: limit it first, then
+join and sort. It answers the same rows, but it is not cheap. The sort still needs every `big` row that matches those
+100 rows, and nothing indexes `b.small_id`, so `big`'s whole join column is still read. At 153 M rows on a cold disk
+that is about 19 s again. The owner's decision: **never sort by row number for an unsorted LIMIT over joined tables.**
+The rows are chosen by row number with no sort, so the wide columns stay out of the join and the statement stops
+early. Pages of such a statement may overlap, as SQL and Postgres allow. The rows of each answer are still rows of
+the join, each as often as the join holds it. Stable pages could come back if issue 824's second part measures an
+index or clustering on the join column and the owner accepts its cost. With the sort gone, `fanOutBounded` decided
+nothing and was removed, and a preview of a join no longer reads the catalog's primary keys.
+
+A synthetic copy of the issue's shape: `small` has 25 k rows and a uuid key. `big` has 30 M rows (what this machine's
+disk held), with a uuid foreign key spread over `small` by hash, two JSON columns of about 100 bytes, and 1.4 GB in the
+file. `mid` has 300 k rows and an integer key. Each cell is the engine's SQL as Mason sends it, warm, 2 threads, the
+minimum of 3 runs, on a 4-core machine at load 5. "Rows of `big` read" is EXPLAIN ANALYZE's `rows_scanned` of the join's
+scan of `big`, without the fetch of the 100 rows chosen:
+
+| `LIMIT 100`, no ORDER BY | sorted by row number (before) | no sort (after) | rows of `big` read, before / after |
+|---|---|---|---|
+| `small LEFT JOIN big` (the issue's) | 588 ms | 7 ms | 30,000,000 / 4,096 |
+| the same, `OFFSET 2,000,000` | 6,125 ms | 55 ms | 30,000,000 / 2,004,096 |
+| `big JOIN small` (inner) | 15 ms | 7 ms | 245,760 / 4,096 |
+| the same, `OFFSET 2,000,000` | 1,540 ms | 59 ms | 30,000,000 / 2,004,096 |
+| `small LEFT JOIN big WHERE small.n >= 20000` | 303 ms | 5 ms | 30,000,000 / 4,096 |
+| `small LEFT JOIN big WHERE big.cat = 7` (1 row in 1,000) | 146 ms | 125 ms | 30,000,000 / 30,000,000 |
+| `small LEFT JOIN big LEFT JOIN mid` | 1,167 ms | 28 ms | 30,000,000 / 4,096 |
+| the exact form, `small` limited first, then joined and sorted (not built) | 116–149 ms | | 30,000,000 |
+| the issue's hand form, `(SELECT * FROM small LIMIT 100) a LEFT JOIN big b` | | 4 ms | 26,624 |
+
+A WHERE on the big side that keeps few rows still reads the table until it has its rows, sorted or not. The cold
+numbers, on a machine whose page cache is smaller than the table, are issue 824's second part.
+
 **A join's FROM items (issue 134, step 2, 2026-10-31).** `joinRows` stopped at a table, so a view, a WITH query, a tool's
 wrapper and a derived side each carried every wide column through the join again. The issue's comment measured the shapes
 by hand; the real rewrite, through the listener, over 8 M facts, 3 M rows of about 3 kB and a 2 GB limit (minimum of three
@@ -2788,7 +2831,7 @@ Decided: a wrapper folds by substitution, as Postgres pulls a subquery up, becau
 two columns of one name by position; the substitution is sound because nothing folded is volatile and nothing reads
 from outside it. A fetch keeps a nullable side's derived form, and DuckDB moved a computed list above the join in every
 plan measured, so a raising value on a row left out stayed unread (`limit-errors`, held by the oracle). A plain read
-counts for `fanOutBounded`, its bare outputs as its table's columns; what is carried has no row number and goes unsorted
+counted for `fanOutBounded` (until issue 824), its bare outputs as its table's columns; what is carried has no row number and goes unsorted
 even where the proof holds. A statement with a role's filtered read kept its form until step 4 reviewed the barrier.
 
 Decided (2026-11-01, issue 134 step 4): a role's filtered read takes the late fetch too, its rows chosen inside the
@@ -2857,6 +2900,69 @@ columns Postgres merged because a copy's own table has hidden columns a NATURAL 
 NATURAL of no column in common, which Postgres reads as every pair. It is written so in EVERY statement, by the rewrite
 (`naturalWritten`), not by the rows a LIMIT chooses alone: written there first, a count, a sort with no LIMIT and a list
 that reads no table still reached DuckDB as NATURAL and were refused (the review of PR 155).
+
+### A small table's size: not measured until DuckDB's own checkpoint (issue 815; the owner, 2026-11-11)
+
+**What was wrong.** A copy's size is its distinct blocks (`pragma_storage_info`), and a copy whose rows are all in the
+write-ahead log has none. Mason never checkpointed, and DuckDB checkpoints by itself only when the log passes
+`checkpoint_threshold` (16 MiB) or the store closes, so a 25,000-row table synced in under a second stayed unmeasured
+for the life of a run, its page saying the size was coming. DuckDB says nothing of the bytes a segment held in memory
+(`pragma_storage_info` gives a transient segment no block and no size, `estimated_size` is a row count, and the log is
+the whole instance's), so there is no estimate to give without a checkpoint. PR 826 first had the usage sampler
+checkpoint before measuring such a copy; what that cost, and why it was dropped, follow.
+
+**Measured** (DuckDB 2.0.0 through the store's own executor, Node 26, a 4-vCPU 15 GiB VM; synthetic: a checkpointed
+20 M-row, 5-column table, 242 MB; one change per run — a `CHECKPOINT` on a connection of its own, against the same run
+without it, 10 trials an arm, each from an empty log; beside it on two other connections an aggregate over the 20 M rows
+in a loop, ~230 ms, and a poll's transaction in a loop, 500 rows deleted and inserted by key in a 1 M-row table):
+
+| what the log held | checkpoint | aggregate p50 / p95, without → with | poll p50 / p95 / max, without → with |
+|---|---|---|---|
+| a 25,000-row, 4-column table (0.9 MiB, the issue's) | 38 – 67 ms | 255 / 296 → 255 / 291 ms | 8.3 / 16.8 / 43 → 8.0 / 18.7 / 54 ms |
+| 400 transactions of 2,000 rows (9 MiB) | 135 – 192 ms | 246 / 291 → 255 / 310 ms | 8.0 / 15.9 / 42 → 8.1 / 18.4 / 62 ms |
+| 50,000 rows deleted and inserted over the 20 M (2.8 MiB) | 62 – 92 ms | 284 / 311 → 269 / 324 ms | 9.6 / 18.6 / 32 → 9.4 / 18.9 / 56 ms |
+
+The aggregate moved within its noise; a poll +2 ms at p95 and +11 – 24 ms at most: cheap. DuckDB's own checkpoint, by contrast,
+runs INSIDE the commit that crosses the threshold: the same poll took 5 – 10 ms below it and 88 – 122 ms crossing it (5
+trials). A checkpoint taken earlier writes what that one would have written later. Bulk inserts of a full row group or
+more are written to the file as they commit (a 300,000-row table left 0 bytes of log), so what a checkpoint writes is
+small transactions' rows. That is not bounded by the threshold: beside concurrent writers DuckDB skips its own
+checkpoint, and the review saw a log of 120 – 250 MB. The page cache it could evict was not measured on a machine whose
+cache is smaller than its table. DuckDB refuses a `CHECKPOINT` while another connection's open transaction has updated
+rows or changed the catalog ("Cannot CHECKPOINT: there are other write transactions active"), and while another is
+running an insert (8 of 8 tries during a first sync's chunks, the review); never beside a read, nor an open transaction
+that only inserted or deleted.
+
+**A checkpoint DuckDB cannot finish invalidates the database** (PR 826's review): on a 60 MB volume left 100 KiB free,
+the sampler's checkpoint of a 1.0 MB log failed "No space left on device", and every statement after it, before and after
+the space was freed, failed `XX000 … database has been invalidated` until the run restarted, while `mason status` said
+it ran; main kept serving the same volume, a write that did not fit failing its own commit alone. With 600 KiB free it
+succeeded. What a checkpoint needs, measured (each shape on a fresh file beside a checkpointed 2 M-row table, the file's
+growth and the engine's memory peak over what it held before):
+
+| what the log held | log | file grown | memory over |
+|---|---|---|---|
+| the issue's 25,000 rows × 4 columns | 918 KiB | 256 KiB | 0 |
+| 10 rows | 0.3 KiB | 256 KiB | 0.3 MiB |
+| 20 tables of 500 rows | 317 KiB | 5 MiB | 0.7 MiB |
+| 100,000 rows of 3 incompressible strings | 13.7 MiB | 4.5 MiB | 1.5 MiB |
+| 300 transactions of 2,000 rows | 10.8 MiB | 4.5 MiB | 2.8 MiB |
+| 400 values of 96 KB | 36.6 MiB | 256 KiB | 0 |
+| 50,000 rows deleted and inserted over the 2 M | 2.6 MiB | 2 MiB | 0 |
+
+So the rows take at most 0.8 times the log, and every table written takes a block (256 KiB) however few its rows. A
+fix round guarded the checkpoint with that room (twice the log and a block for every table and 8 more on the disk; twice
+the log and an eighth of `store.memoryLimitBytes` in the engine's memory), and the same 100 KiB volume then skipped it and
+kept serving. What a guard cannot rule out: a checkpoint that fails for another reason (an I/O error; issue 371's merge
+of a first sync's out-of-line values, which "Large values out of line" records failing under a memory limit, and whose
+memory the log does not show) invalidates the database, earlier than DuckDB's own would have been taken.
+
+**Decision (the owner, 2026-11-11).** The sampler never checkpoints. A checkpoint's failure is fatal to the instance —
+the review's near-full disk — and a size is not worth a new way to stop a run serving. A served copy with rows and no
+block of its own is not measured and never written as 0; the Tables view's tooltip and `mason usage` say why (its rows
+are written into the file at DuckDB's own checkpoint, when the log passes 16 MiB, or when Mason stops). What the change
+kept: the synced data's file counts its write-ahead log (src/duck/file-bytes.ts `syncedDataBytes`, the one reader).
+**Where.** src/duck/usage.ts (`size`), src/duck/file-bytes.ts; tests/duck-usage.test.ts, tests/cli-run-server.test.ts.
 
 ### First copy, and the poll's cost on the source
 

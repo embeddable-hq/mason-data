@@ -40,23 +40,20 @@
  *
  * A LIMIT WITH NO ORDER BY is written the same way (a statement with no limit in fact, OFFSET alone or LIMIT ALL, stays
  * as it was: every row comes back, and reading each again saves nothing), for the join's memory, where the last table is
- * on the hash join's build side. Its keys are the row numbers of the tables read ONLY WHERE THE JOIN'S ROWS ARE PROVED
- * BOUNDED (`fanOutBounded`, src/duck/distinct-key.ts: every join equates a whole primary key of a table its side holds
- * once, from the analysis and the catalog's pg_index). That sort is for pages: which rows such a statement answers is
- * defined by no one, but DuckDB's parallel join hands the same statement's rows back in another order each run, and a
- * LIMIT over them overlaps its neighbouring pages (about a third of the rows of a join paged to its end came back twice;
- * one thread, none; a Postgres of one plan, in practice none). The top N on row numbers is a full join where a streaming
- * LIMIT stops early, so its cost grows with the join: over 50 M rows, a narrow `dim LEFT JOIN big LIMIT 100` takes 134 ms
- * against 1 ms, 1332 ms against 10 ms at OFFSET 2,000,000, and that is accepted for stable pages. Its order is total
- * over what is read: two rows of equal row numbers are the same output.
+ * on the hash join's build side: its rows are chosen on row numbers WITH NO SORT AT ALL, inside or out, so wide columns
+ * stay out of the join and the statement stops early.
  *
- * WHAT IS GIVEN UP WHERE THE PROOF FAILS: the sort. A join the proof cannot bound may multiply (a self-join on a column
- * of few values, 100 billion joined rows: 74 s sorted, milliseconds not; docs/DESIGN.md "A top N over joined tables"), so
- * its rows are chosen on row numbers with no sort at all, inside or out: wide columns still stay out of the join, and
- * the statement still stops early. ITS PAGES CAN OVERLAP AGAIN, as they could before PR 118: a many-to-many join, a cross
- * join, a key in part, a table with no primary key and a join on an expression all pay this, and a tool that pages one
- * can see rows twice and others never. The rows of each answer are still rows of the join, each as often as the join
- * holds it: the proof decides the cost and the pages, never an answer, so the safe side of a proof that fails is no sort.
+ * WHAT IS GIVEN UP: STABLE PAGES (issue 824, the owner's decision of 2026-11-10). Which rows such a statement answers is
+ * defined by no one, and DuckDB's parallel join hands the same statement's rows back in another order each run, so a
+ * LIMIT over them can overlap its neighbouring pages: a tool that pages a join to its end can see rows twice and others
+ * never. That is SQL's contract, and Postgres promises no more. From PR 118 until issue 824 the row numbers were sorted
+ * where `fanOutBounded` proved the join bounded, for stable pages, but that sort is a top N over every joined row where
+ * the streaming LIMIT stops early: a tool's preview, `small a LEFT JOIN big b ON a.id = b.small_id LIMIT 100`, took
+ * 19.8–46.6 s on a 2 vCPU replica at 25 k × 153 M rows, against 26 ms for the streaming form. Its exact cheaper form
+ * (the preserved side limited to its first OFFSET + LIMIT rows first, then joined and sorted) still reads the big
+ * table's whole join column, which nothing indexes: 116–146 ms warm against 5 ms unsorted at 30 M rows, about 19 s cold
+ * at 153 M; so no sort at all (docs/DESIGN.md "A top N over joined tables"). The rows of each answer are still rows of
+ * the join, each as often as the join holds it.
  *
  * `afterLimit` still needs a sort: the keys put its rows back, and a list of no key has none.
  *
@@ -160,7 +157,7 @@
  * here (`limit-errors`).
  */
 import { FIRST_USER_OID, type TreeNode, type TreeValue } from "./pgtree.ts";
-import { distinctGrouping, fanOutBounded, keyGrouped, projectionOnly } from "./distinct-key.ts";
+import { distinctGrouping, keyGrouped, projectionOnly } from "./distinct-key.ts";
 import type { PrimaryKeys } from "./distinct-key.ts";
 import { constantExpression, evaluated } from "./constant-key.ts";
 
@@ -325,16 +322,17 @@ const UNKNOWN: LateContext = { volatile: async (functions) => new Set(functions)
 /**
  * The statement with every sorted, limited SELECT written with its select list computed after its limit (see above),
  * or null where none is. `tree` is the rewrite's DuckDB tree, `analysis` Postgres's of the original, `keys` reads the
- * catalog's primary keys of the tables `fanOutTables` names: only for a statement this may write, so a tool's
- * `SELECT count(*) … JOIN … LIMIT 2000` costs no round trip to the catalog.
+ * catalog's primary keys of the tables `groupedLimitTables` names, for `keyFirst`: only for a statement that groups with
+ * a limit, so a tool's `SELECT count(*) … JOIN … LIMIT 2000` and a preview of a join cost no round trip to the catalog.
  */
 export async function selectListAfterLimit(tree: AstNode, analysis: TreeValue, keys: () => Promise<PrimaryKeys>, context: LateContext = UNKNOWN): Promise<AstNode | null> {
   const strict = rowWiseStatement(analysis);
   const around = strict || rowWiseAround(analysis);
-  if (!around && !groupsWithLimit(analysis)) return null;
+  const grouped = groupsWithLimit(analysis);
+  if (!around && !grouped) return null;
   const volatile = await context.volatile(derivedFunctions(analysis));
   const wall = context.wall;
-  const relations = relationsOf(analysis, await keys(), volatile, wall?.alias ?? null);
+  const relations = relationsOf(analysis, grouped ? await keys() : new Map(), volatile, wall?.alias ?? null);
   let changed = false;
   const written = (select: AstNode): AstNode | null => {
     const grouped = keyFirst(select, relations);
@@ -730,13 +728,13 @@ const RTE_RELATION = "0", RTE_SUBQUERY = "1", RTE_JOIN = "2", RTE_CTE = "6", RTE
 /** ctematerialized: CTEMaterializeAlways */
 const MATERIALIZED = "1";
 
-/** a query of the analysed statement: what it reads, FROM item by FROM item (a join itself is no item), whether its rows
- *  are proved bounded by its tables', and whether each of its rows is one row of its FROM. `merged` is each column a
+/** a query of the analysed statement: what it reads, FROM item by FROM item (a join itself is no item), and whether
+ *  each of its rows is one row of its FROM. `merged` is each column a
  *  USING or NATURAL join merged, by the name a bare reference reads it by, and how the rows' fetch reads it: null where
  *  only the join can (it is carried). `joins` is each JOIN's merged columns, in the order the tree meets its joins.
  *  `volatileOutputs` is the outputs a sort reads that hold a volatile function, by place, `volatileKeys` whether any sort
  *  key does, and `sorts` how many keys Postgres sorts by: a rewrite that wrote them as others (a collation's) repeats a value */
-interface Query { items: Relation[]; bounded: boolean; rowWise: boolean; listReads: string[]; listSubLinks: number; merged: Array<[string, AstNode | null]>; joins: string[][]; volatileOutputs: number[]; volatileKeys: boolean; sorts: number;
+interface Query { items: Relation[]; rowWise: boolean; listReads: string[]; listSubLinks: number; merged: Array<[string, AstNode | null]>; joins: string[][]; volatileOutputs: number[]; volatileKeys: boolean; sorts: number;
   /** the tables whose whole primary key the query groups by (`keyGrouped`), by alias, with the key's columns by name */
   keyed: Array<{ alias: string; key: string[] }>;
   /** whether the query is a SELECT DISTINCT that is a grouping on its list (`distinctGrouping`) */
@@ -908,7 +906,7 @@ function relationsOf(analysis: TreeValue, keys: PrimaryKeys, volatile: ReadonlyS
     // (a grouped query's RTE_GROUP entry, Postgres 17+, is no FROM item: it holds what the GROUP BY groups)
     const items = treeList(q.rtable).filter((e): e is TreeNode => isTreeNode(e) && e.rtekind !== RTE_JOIN && e.rtekind !== RTE_GROUP).map(relation);
     const computed = computedSorts(q).filter((c) => holdsVolatile(c.expr, volatile));
-    return { items, bounded: fanOutBounded(q, keys), rowWise: rowWiseQuery(q), listReads: listSubLinkReads(q) ?? [], listSubLinks: subLinksIn(treeList(q.targetList)), ...mergedColumns(q),
+    return { items, rowWise: rowWiseQuery(q), listReads: listSubLinkReads(q) ?? [], listSubLinks: subLinksIn(treeList(q.targetList)), ...mergedColumns(q),
       volatileOutputs: computed.flatMap((c) => c.output === null ? [] : [c.output]), volatileKeys: computed.length > 0, sorts: treeList(q.sortClause).length, keyed: keyedTables(q, keys), distinct: distinctGrouping(q),
       distinctOn: q.hasDistinctOn === "true", volatileOn: onTargets(q).some((t) => holdsVolatile(t.expr, volatile)) };
   };
@@ -1382,11 +1380,8 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
     if (listed[i]!.kind === "walled") return isFetched(i) ? walledExposed(n, wall!) : n;
     return kindOf(n) === "RangeVar" && listed[i]!.kind === "table" ? ownTable(bodyOf(n)) : n;
   });
-  // no sort of its own: the row numbers are the order where the join is proved bounded, so a page of the statement is
-  // one page of one list; otherwise none, or a join that multiplies is run whole. Two queries alike must both be proved.
-  // What is carried has no row number, so with one (a keyed WITH query read twice) they would be no total order
-  const pagedInOrder = sorts.length === 0 && carried.length === 0 && (query === first ? named.every((q) => q.bounded) : query.bounded);
-  const order = (node: AstNode): AstNode => ({ SortBy: { node, sortby_dir: "SORTBY_DEFAULT", sortby_nulls: "SORTBY_NULLS_DEFAULT" } });
+  // (with no sort of its own, its row numbers are sorted nowhere, inside or out: a sort by them would be a top N over
+  // every row of the join where the statement stops early; issue 824, see above)
   // (the written sort is never the inner's: the outer sorts the rows the inner fetched)
   const { withClause: _with, sortClause: _sorts, ...body } = s;
   const left = isObject(s.withClause) ? (s.withClause.ctes as AstNode[]).filter((c) => !withs.used.has(String(bodyOf(c).ctename))) : [];
@@ -1396,7 +1391,7 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
     ...keys.map((k, i) => ({ ResTarget: { name: `__mason_o${i + 1}`, val: k } })),
   ],
   // (a volatile key is sorted by the output that holds it: said twice, it would be two values)
-  ...(sorts.length > 0 ? { sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: volatileKeys ? ref(`__mason_o${i + 1}`) : keys[i] } })) } : pagedInOrder ? { sortClause: fetched.map((t) => order(structuredClone(t.id))) } : {}) };
+  ...(sorts.length > 0 ? { sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: volatileKeys ? ref(`__mason_o${i + 1}`) : keys[i] } })) } : {}) };
   let joined: AstNode = { RangeSubselect: { subquery: { SelectStmt: inner }, alias: { aliasname: LATE } } };
   // the fetch reads a walled read through itself again, filter, barrier and wall: one more wall each
   let walls = 0;
@@ -1411,8 +1406,7 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
   return { walls, select: { SelectStmt: {
     targetList: list,
     fromClause: [joined],
-    ...(sorts.length > 0 ? { sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: ref(LATE, `__mason_o${i + 1}`) } })) }
-      : pagedInOrder ? { sortClause: fetched.map((_t, i) => order(ref(LATE, `__mason_r${i + 1}`))) } : {}),
+    ...(sorts.length > 0 ? { sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: ref(LATE, `__mason_o${i + 1}`) } })) } : {}),
     limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
   } } };
 }

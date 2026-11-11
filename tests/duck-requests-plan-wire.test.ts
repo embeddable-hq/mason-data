@@ -151,21 +151,40 @@ test("a refused statement, a cancelled one and an EXPLAIN have no plan, however 
   assert.match(rows[3]!.plan ?? "", /Sent to the engine: SELECT id \/\/ \(qty - qty\)/);
 });
 
-test("a plan past the cap is cut at a line and says so", async () => {
+test("a plan past the cap is cut and says so: a long line keeps its head, so a long statement's operators are kept; past the cap in all, at a whole line", async () => {
   const cut = requestLog.storedPlan(Array.from({ length: 2000 }, (_, i) => `line ${i} ${"é".repeat(5)}`).join("\n"));
   assert.equal(cut.truncated, true);
   assert.ok(Buffer.byteLength(cut.text) <= requestLog.MAX_STORED_PLAN_BYTES);
   assert.match(cut.text, /line \d+ é{5}$/, "whole lines, never half a character");
   assert.deepEqual(requestLog.storedPlan("short"), { text: "short", truncated: false });
+  // ONE LONG LINE (a BI tool's long statement as sent to the engine) keeps its head; the lines after it are kept
+  const long = requestLog.storedPlan(`Mason: answered\n  Sent to the engine: SELECT ${"é".repeat(20_000)}\nHash Join  (rows=3)`);
+  assert.equal(long.truncated, true);
+  assert.match(long.text, /^Mason: answered\n {2}Sent to the engine: SELECT é+ … \(this line is cut here: 40,029 bytes in all\)\nHash Join {2}\(rows=3\)$/);
+  assert.ok(Buffer.byteLength(long.text) < 2_200, "the line's head, never half a character");
   // through the wire: a statement whose SQL sent to the engine alone is past the cap
   const api = await listener(0);
   const n = await count();
   const c = await client(api);
   const wide = `SELECT ${Array.from({ length: 600 }, (_, i) => `id + ${i} AS column_number_${i}`).join(", ")} FROM orders`;
-  try { await c.query(wide); } finally { await c.end(); }
-  const [row] = await since(n);
-  assert.equal(row!.planTruncated, true);
-  assert.ok(Buffer.byteLength(row!.plan ?? "") <= requestLog.MAX_STORED_PLAN_BYTES && (row!.plan ?? "").startsWith("Mason: answered from the synced table public.orders"));
+  // a UNION of 400 arms, ~40 KB, as a BI tool writes one: its operators past the cap too
+  const union = Array.from({ length: 400 }, (_, i) => `SELECT id, ${i} AS arm_number FROM orders WHERE qty > ${i}`).join(" UNION ALL ");
+  try {
+    await c.query(wide);
+    // its plan recorded before the next ends: one at a time
+    await ledger.flush();
+    await c.query(union);
+  } finally { await c.end(); }
+  const rows = await since(n);
+  assert.deepEqual(rows.map((r) => r.query), [wide, union]);
+  for (const r of rows) {
+    const plan = r.plan ?? "";
+    assert.equal(r.planTruncated, true);
+    assert.ok(Buffer.byteLength(plan) <= requestLog.MAX_STORED_PLAN_BYTES, `${Buffer.byteLength(plan)} bytes`);
+    assert.match(plan, /^Mason: answered from the synced table public\.orders/);
+    assert.match(plan, /^ {2}Sent to the engine: .+ … \(this line is cut here: [\d,]+ bytes in all\)$/m, "the SQL line keeps its head and says it was cut");
+    assert.match(plan, /Table Scan on public\.orders {2}\(rows=\d+\)/, `the engine's operators are kept: ${plan.slice(0, 3000)}`);
+  }
 });
 
 test("at most one plan at a time: a slow statement that ends while another's plan is recorded has none, said at most once a minute with how many, and the rest at the close", async () => {
@@ -176,12 +195,12 @@ test("at most one plan at a time: a slow statement that ends while another's pla
   gate = new Promise((resolve) => { open = resolve; });
   const c = await client(api);
   try {
-    const first = Date.now();
-    // the answers come at once: the plan held in flight delays none of them
+    // THE ANSWERS COME WHILE THE FIRST PLAN IS HELD IN FLIGHT (the gate stays shut until all three are answered): had a
+    // plan delayed an answer, these would wait for the gate, which opens only after them. No clock: a cold catalog's
+    // first statement took 4-7 s under load, which a time bound read as the plan's
     await c.query("SELECT id FROM orders WHERE id = 1");
     await c.query("SELECT id FROM orders WHERE id = 2");
     await c.query("SELECT id FROM orders WHERE id = 3");
-    assert.ok(Date.now() - first < 5_000);
     assert.deepEqual(said.filter((l) => /had no plan recorded/.test(l)).map((l) => l.replace(/session \d+/, "session N")), ["[postgres] request log: 1 slow statement(s) had no plan recorded (the latest session N): another slow statement's plan was being recorded, and Mason records one at a time; said at most once a minute"], `said once, the second within the minute counted: ${said.join("\n")}`);
     gate = null;
     open();

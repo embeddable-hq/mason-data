@@ -141,9 +141,11 @@ const REWRITTEN: Shape[] = [
   // joinRows (src/duck/late.ts, issue 105): a table preview over joined tables, its rows chosen by row number
   { name: "a top N over joins: a *, sorted by a column's number", sql: "SELECT c.*, o.id FROM customers c LEFT JOIN orders o ON c.id = o.customer_id ORDER BY 1, 2 LIMIT 100" },
   { name: "a top N over joins: every table's columns", sql: "SELECT c.*, o.*, i.* FROM customers c LEFT JOIN orders o ON c.id = o.customer_id LEFT JOIN order_items i ON o.id = i.order_id ORDER BY (c.created_at) IS NULL ASC, c.created_at DESC LIMIT 100 OFFSET 0" },
+  // a LIMIT with no ORDER BY over joins (issue 824, the owner's decision of 2026-11-10): row numbers with no sort, a join of
+  // keys or not, so no TOP_N and no ORDER_BY: a limit that stops early. The issue's preview first, a small table LEFT
+  // JOINed to a big one on its key
+  { name: "a LIMIT with no ORDER BY, a small table LEFT JOINed to a big one on its key: no sort", sql: "SELECT c.*, o.* FROM customers c LEFT JOIN orders o ON c.id = o.customer_id LIMIT 100 OFFSET 0" },
   { name: "a LIMIT with no ORDER BY over joins: every table's columns", sql: "SELECT c.*, o.*, i.* FROM customers c LEFT JOIN orders o ON c.id = o.customer_id LEFT JOIN order_items i ON o.id = i.order_id LIMIT 100 OFFSET 0" },
-  // the fan-out guard (src/duck/distinct-key.ts fanOutBounded): above, every join on a key, sorted by row number; here a
-  // join that multiplies, row numbers with no sort: no TOP_N, a limit that stops early
   { name: "a LIMIT with no ORDER BY over a many-to-many join: every table's columns, no sort", sql: "SELECT c.*, o.* FROM customers c JOIN orders o ON c.tenant_id = o.tenant_id LIMIT 100 OFFSET 0" },
   // a join's FROM items (src/duck/late.ts, issue 134): a tool's wrapper and a view folded into the join, a derived side and
   // a WITH query fetched by row number, an aggregated side carried, a wrapper that multiplies with no sort
@@ -151,7 +153,7 @@ const REWRITTEN: Shape[] = [
   { name: "a top N over a view of joins, sorted by its output", sql: "SELECT * FROM customer_orders ORDER BY created_at DESC LIMIT 100" },
   { name: "a top N over a WITH query of joins, sorted", sql: "WITH j AS (SELECT o.id, o.meta, c.created_at FROM orders o JOIN customers c ON c.id = o.customer_id) SELECT * FROM j ORDER BY created_at DESC LIMIT 100" },
   { name: "a top N beside a plain derived side, sorted", sql: "SELECT c.id, o.meta, o.notes FROM customers c LEFT JOIN (SELECT id, customer_id, meta, notes FROM orders WHERE amount > 1) o ON o.customer_id = c.id ORDER BY c.created_at DESC LIMIT 100" },
-  { name: "a LIMIT with no ORDER BY beside a plain derived side on its key: sorted by row number", sql: "SELECT o.meta, d.name FROM orders o JOIN (SELECT id, name FROM customers) d ON d.id = o.customer_id LIMIT 100" },
+  { name: "a LIMIT with no ORDER BY beside a plain derived side on its key: no sort", sql: "SELECT o.meta, d.name FROM orders o JOIN (SELECT id, name FROM customers) d ON d.id = o.customer_id LIMIT 100" },
   { name: "a top N beside a WITH query", sql: "WITH c AS (SELECT id, name FROM customers WHERE tenant_id = 'acme') SELECT o.meta, c.name FROM orders o JOIN c ON c.id = o.customer_id ORDER BY o.id DESC LIMIT 100" },
   { name: "a top N beside an aggregated side, carried", sql: "SELECT o.id, o.meta, s.n FROM orders o JOIN (SELECT customer_id, count(*) AS n FROM order_items i JOIN orders x ON x.id = i.order_id GROUP BY customer_id) s ON s.customer_id = o.customer_id ORDER BY o.id DESC LIMIT 100" },
   // merged columns and computed keys (issue 134, step 3): a USING and a NATURAL of the wide table by row number, read through

@@ -45,7 +45,8 @@ paths:
   flight, a second dropped (never queued) and said at most once a minute with their count; a statement bound with values keeps its operators
   without their details (`detailsHidden`); none for a refusal by an entry, a cancel, or a statement that never reached
   the engine. The row waits in the ledger for its plan (bounded, `PLAN_WAIT_MS`; written without it at the close),
-  cut at `MAX_STORED_PLAN_BYTES` and said. Its cost beside fast statements is measured in docs/OBSERVABILITY.md "The
+  cut and said: a line past `MAX_STORED_PLAN_LINE_BYTES` keeps its head (a long statement's SQL never pushes the
+  operators out), then the whole at `MAX_STORED_PLAN_BYTES`, at a line. Its cost beside fast statements is measured in docs/OBSERVABILITY.md "The
   plan of a slow statement". Detector: tests/duck-requests-plan-wire.test.ts.
 - **Usage over time is a row of `_mason.usage` a minute, and each copy's own bytes a row of `_mason.copy_sizes` every 10
   minutes, kept as the request log is** (src/duck/usage.ts `UsageSampler`; the run had only the moment): on connections
@@ -58,7 +59,10 @@ paths:
   long as samples fail): exact up to it, a uniform reservoir past it.
   The copy's memory is `duckdb_memory()`; a copy's bytes are its distinct blocks from `pragma_storage_info`
   (metadata only, but it grows with rows × columns, so never per request; docs/DESIGN.md "Observability" has the
-  measurement). `mason usage` and `GET /api/usage` read them.
+  measurement); a served copy with rows and no block (all of them in the write-ahead log) is NOT measured and never
+  written as 0, and the sampler NEVER checkpoints to measure it: a checkpoint DuckDB cannot finish (a full disk, out of
+  memory) invalidates the database until the run restarts (the owner, 2026-11-11; docs/DESIGN.md "A small table's
+  size"). `mason usage` and `GET /api/usage` read them.
 - **A history table is trimmed by its module's ONE clock** (`cutoff`, src/duck/history.ts: the instant `days` before the
   module's `now`, the clock that stamps its rows), never the engine's `now()` beside it: the sync's events and the usage
   samples took a given clock and trimmed by the engine's, so a test's fixed clock lost its rows once the real date

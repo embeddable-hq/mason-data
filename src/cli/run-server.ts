@@ -36,6 +36,7 @@ import { errorJson, nextJson, type Failure, type NextStep } from "./command.ts";
 import { phaseCounts, readiness, syncTotals, tableSync, type SyncFacts, type SyncTotals } from "./readiness.ts";
 import { restartsFact, type Restart } from "./supervise.ts";
 import { withRestarts, type SyncEvents } from "../duck/events.ts";
+import { syncedDataBytes } from "../duck/file-bytes.ts";
 import { NO_ROLES, type RolesLive } from "../duck/grants.ts";
 import { addedNext, addUser, attributesToAdd, disabledNext, disableUser, enabledNext, enableUser, fromNext, listUsers, rangesText, removeUser, REMOVED_NEXT, roleToAdd, setUserFrom, withLastUsed } from "./user.ts";
 import { userRole } from "./roles.ts";
@@ -289,9 +290,10 @@ function sourcesReadOnly(ctx: RunContext, file: string | null): string | null {
   catch (e) { return `the sources file cannot be written on this server (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}): commit a change to it, and deploy`; }
 }
 
-/** a file's size, or null where it cannot be read (the run's own DuckDB file: it exists while the run does) */
+/** the synced data's size, its write-ahead log's included (src/duck/file-bytes.ts, the one reader), or null where it
+ *  cannot be read (the run's own DuckDB file: it exists while the run does) */
 function fileBytes(file: string): number | null {
-  try { return fs.statSync(file).size; } catch { return null; }   // a size is a nicety of mason status: unknown, not an error
+  try { return syncedDataBytes(file); } catch { return null; }   // a size is a nicety of mason status: unknown, not an error
 }
 
 /** `RunState.roles` (src/cli/commands.ts): the file, the roles it names and what is wrong with it now */

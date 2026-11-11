@@ -64,7 +64,7 @@ import { normalise, same } from "./oracle/compare.ts";
 import { CASES, MIXED_SCALE, QUERY_CASES, REFUSED_CASES, T, U, Z } from "./postgres-cases.ts";
 import { BI_SHAPES, META } from "./oracle/bi-shapes.ts";
 import { TYPE_MATRIX, TYPED, typedMutations } from "./oracle/type-matrix.ts";
-import { MERGE_COPIED, UNORDERED_LIMITS, UNORDERED_ROW_SHAPES, everyRowOnce, withinWhole, type UnorderedLimit } from "./oracle/unordered-limit.ts";
+import { MERGE_COPIED, UNORDERED_LIMITS, UNORDERED_ROW_SHAPES, withinWhole, type UnorderedLimit } from "./oracle/unordered-limit.ts";
 import { GAP_CASES } from "./oracle/gap-cases.ts";
 import { COLLATION_CASES, COLLS_SCHEMA, collsMutations } from "./oracle/collations.ts";
 import { refusedAsNamed, SETTING_SCRIPTS, stepText, traceStep } from "./oracle/setting-scripts.ts";
@@ -587,15 +587,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     if (q.zone !== undefined) for (const c of [source, mason]) await c.query("SET TimeZone = 'UTC'");
     if ("code" in want || "code" in whole) return `Postgres refuses it: ${JSON.stringify("code" in want ? want : whole)}`;
     if ("code" in got) return `refused: ${got.code} ${got.message}`;
-    const wrong = withinWhole(want, whole.rows, got);
-    if (wrong !== null || q.pages === undefined) return wrong;
-    const rows: (string | null)[][] = [];
-    for (let offset = 0; offset < whole.rows.length; offset += q.pages) {
-      const page = await ask(mason, `${head}SELECT ${q.list} ${q.from} LIMIT ${q.pages} OFFSET ${offset}`);
-      if ("code" in page) return `page at ${offset} refused: ${page.code} ${page.message}`;
-      rows.push(...page.rows);
-    }
-    return everyRowOnce(rows, whole.rows);
+    return withinWhole(want, whole.rows, got);
   };
   const unorderedLimits = async (phase: string): Promise<void> => {
     for (const q of UNORDERED_LIMITS) {

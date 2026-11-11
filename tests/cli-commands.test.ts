@@ -917,7 +917,7 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
       assert.ok(Date.parse(usageAsks[0]!.until) >= t0 - 1000, "until now");
       assert.match(person.stdout, /^Usage from \d{4}-\d\d-\d\d \d\d:\d\d to .* UTC, 10 min a line \(a sample every 60 s, kept 7 days\):\n/);
       assert.ok(person.stdout.includes(`\n${sampleLine(sample, false)}\n`), person.stdout);
-      assert.match(person.stdout, /Each synced table's own size \(measured every 10 min\):\n {2}public\.orders {2}\s+3\.0 MiB {2}at 09:10 UTC\n/);
+      assert.match(person.stdout, /Each synced table's own size \(measured every 10 min\):\n {2}public\.orders {2}\s+3\.0 MiB {2}at 09:10 UTC\n {2}a table is measured once its rows are written into the file: a small table's can wait in the write-ahead log until it passes 16 MiB or Mason stops\n/);
       assert.match(person.stdout, /\nNext:/);
       const json = await runMason(app, ["usage", "--step", "0", "--json"], matrixEnv());
       assert.equal(json.code, 0, json.stderr);

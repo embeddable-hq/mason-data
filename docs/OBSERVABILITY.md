@@ -38,7 +38,7 @@ sampled once a minute where it moves):
   (`.mason/restarts.json`, the last 20), read by ONE function (src/cli/supervise.ts `restartsFact`) that `mason status`
   reads with Mason stopped too.
 - `disk` — `{ path, freeBytes, copyBytes, projectedBytes, error? }`: free where the copy's file is (the sync's own
-  `diskFree`, the measure a copy is held to), the file (`engine.bytes`), and while copies run what their pages left are
+  `diskFree`, the measure a copy is held to), the file and its write-ahead log (`engine.bytes`), and while copies run what their pages left are
   projected to add (`copyDiskProjection`, as each chunk's check last computed it; null while none can say). A `statfs`, no
   query. Sampled as `diskFreeBytes` (re-bucketed, the lowest).
 - `sessions` — `{ open, byClient: [{ user, client, open, running }] }`: the Postgres API's sessions logged in now, by
@@ -141,7 +141,7 @@ Key: ✅ built · ⏸ deferred
 | Tables synced, N of M | ✅ | `/api/state` `tables` |
 | Total rows | ✅ | `totals.rows`; a copy's rows are counted after every batch |
 | Last successful sync | ✅ | `totals.syncedAt` and `tables[].sync` (`syncedAt`, `syncedBy`); in replication mode the stream's last batch |
-| Storage used | ✅ | `engine.bytes`, the copy's file |
+| Storage used | ✅ | `engine.bytes`, the copy's file and its write-ahead log |
 | Queries, last 24 h / 7 d | ✅ | `queries` (`/api/queries`), from the request log (`_mason.requests`); 7 days is its default retention |
 | Query duration | ✅ | `queries`: average, and p50 / p95 (an average alone hides the slow ones) |
 | Recent errors | ✅ | `recentErrors`: `sync` (the sync events record, step 2) and `queries` (the request log's failures) |

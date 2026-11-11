@@ -642,6 +642,22 @@ test("usage over time: /api/usage passes since, until and step to the samples, a
   } finally { usageSamples = []; }
 });
 
+test("the synced data's file is its bytes AND its write-ahead log's: a small table's rows sit in the log, so the file alone read 12 KiB beside 1.3 MB (issue 815)", async () => {
+  const runServer = await import("../src/cli/run-server.ts");
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "mason-wal-"));
+  try {
+    const file = path.join(d, "duck.db");
+    fs.writeFileSync(file, "x".repeat(12_288));
+    fs.writeFileSync(`${file}.wal`, "w".repeat(1_300_000));
+    const c: RunContext = { ...ctx, duck: { ...ctx.duck, file } };
+    const state = runServer.runState(c, [], null) as { engine: { bytes: number | null }; disk: { copyBytes: number | null } };
+    assert.equal(state.engine.bytes, 1_312_288, "the file and its log");
+    assert.equal(state.disk.copyBytes, 1_312_288, "one fact");
+    fs.rmSync(`${file}.wal`);
+    assert.equal((runServer.runState(c, [], null) as { engine: { bytes: number } }).engine.bytes, 12_288, "no log between checkpoints: the file alone");
+  } finally { fs.rmSync(d, { recursive: true, force: true }); }
+});
+
 test("a usage sample reads /api/state's own facts: the copy file's bytes, the totals, the stalest ADDED table's age, the stream's lag, the copies served", async () => {
   const runServer = await import("../src/cli/run-server.ts") as unknown as { usageFacts?: (c: RunContext, now?: number) => Promise<unknown>; runState: typeof import("../src/cli/run-server.ts").runState };
   assert.equal(typeof runServer.usageFacts, "function", "src/cli/run-server.ts usageFacts");
