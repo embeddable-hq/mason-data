@@ -18,6 +18,8 @@ import * as path from "node:path";
 import * as tls from "node:tls";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
+// node-postgres's own reader of a connection string, asked for libpq's meaning of sslmode=require
+import { parse as parseConnectionString, toClientConfig } from "pg-connection-string";
 import { DuckDBInstance } from "@duckdb/node-api";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import { alive, masonProcess } from "../src/cli/runs.ts";
@@ -484,7 +486,9 @@ describe("mason share, against a real run and a stub tunnel", { timeout: 300_000
     const r = await reported(s);
     const out = s.stdout();
     assert.match(r.password, SHARE_PASSWORD_RE, "the report's password row, as it was made");
-    assert.match(out, /^Sharing the synced data with a tool outside this machine$/m);
+    // the first line is the URL a tool pastes: the share's own user, password, address and database, TLS required
+    const url = `postgres://${r.user}:${r.password}@${r.host}:${r.port}/${encodeURIComponent(r.database)}?sslmode=require`;
+    assert.equal(out.split("\n")[0], `Try mason with your favorite postgres client: ${url}`);
     assert.doesNotMatch(out.split("\n")[0]!, /pinggy/i, "the tunnel's vendor is in no headline");
     assert.equal(r.host, "127.0.0.1");
     assert.notEqual(r.port, pgPort);
@@ -512,6 +516,13 @@ describe("mason share, against a real run and a stub tunnel", { timeout: 300_000
     assert.equal((await secure.query("SHOW ssl")).rows[0].ssl, "on");
     assert.ok(Number((await secure.query("SELECT count(*) AS n FROM orders")).rows[0].n) > 0);
     await assert.rejects(client(r.port, r, false).connect(), (e: pg.DatabaseError) => e.code === "28000" && /requires TLS/.test(e.message));
+    // the headline's URL, exactly as printed, read as libpq reads it (sslmode=require: encrypted, no certificate checked)
+    const printed = out.split("\n")[0]!.replace(/^Try mason with your favorite postgres client: /, "");
+    const byUrl = new pg.Client({ ...toClientConfig(parseConnectionString(printed, { useLibpqCompat: true })), connectionTimeoutMillis: 10_000 });
+    await byUrl.connect();
+    assert.equal((await byUrl.query("SELECT current_setting('ssl') AS ssl")).rows[0].ssl, "on");
+    assert.ok(Number((await byUrl.query("SELECT count(*) AS n FROM orders")).rows[0].n) > 0);
+    await byUrl.end();
     // the run's own port still takes a plain connection, and not this password
     await assert.rejects(client(pgPort, r, false).connect(), (e: pg.DatabaseError) => e.code === "28P01" && /a mason share password logs in only at the address mason share printed, never on this port/.test(e.message));
     const user = await mason(["user", "add", "local"]);
@@ -584,9 +595,10 @@ describe("mason share, against a real run and a stub tunnel", { timeout: 300_000
     const v = await until(() => { try { return JSON.parse(s.stdout()) as Record<string, unknown>; } catch { return null; } }, "one JSON object");
     assert.deepEqual(Object.keys(v), ["share", "next"]);
     const share = v.share as Record<string, unknown>;
-    assert.deepEqual(Object.keys(share), ["host", "port", "database", "user", "password", "sslmode", "fingerprint", "role", "reads", "via", "endsAt", "verified"]);
+    assert.deepEqual(Object.keys(share), ["url", "host", "port", "database", "user", "password", "sslmode", "fingerprint", "role", "reads", "via", "endsAt", "verified"]);
     assert.match(share.password as string, SHARE_PASSWORD_RE);
     assert.equal(share.sslmode, "require");
+    assert.equal(share.url, `postgres://${share.user as string}:${share.password as string}@${share.host as string}:${share.port as number}/${encodeURIComponent(share.database as string)}?sslmode=require`, "the URL a person is shown");
     assert.equal(share.verified, true, "the address answered with the share's own certificate");
     assert.equal(share.role, "everything");
     fs.writeFileSync(path.join(stubState, "drop"), "");

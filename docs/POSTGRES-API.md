@@ -80,7 +80,7 @@ A hosted BI tool cannot reach `127.0.0.1`. To try Mason from one, `mason share` 
 run on your laptop, through a free tunnel service, with nothing else to set up:
 
 ```bash
-mason share                 # the host, port, database, user and password to type in; Ctrl-C ends it
+mason share                 # a URL to paste, and the host, port, database, user and password to type in; Ctrl-C ends it
 mason share --role sales    # what it reads: a role of mason/roles.yml
 mason share --via bore      # another tunnel (cargo install bore-cli); the default needs only ssh
 ```
