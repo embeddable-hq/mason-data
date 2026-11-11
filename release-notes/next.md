@@ -17,3 +17,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `--json` still gives numbers. A chart's axis, a statement still running, a sync's time, an interval and an age keep
   their form. On Observability › Queries, the Statement cell
   now has its own `+` beside the statement. It opens and closes the same row as the Query id's `+`.
+
+## What was wrong and is now right
+
+- The Overview's "The synced data's file" card, `mason status`, `mason usage` and `mason_copy_bytes` now count the synced
+  data's write-ahead log: they read 12 KiB for a file whose log held 1.3 MB.
+- A small synced table's size is shown once its rows are written into the file, which happens when the write-ahead log
+  passes 16 MiB or Mason stops. Until then the Tables view and `mason usage` say so. Before, the page said the size was
+  coming at the next measurement, and for a small table it could never come.

@@ -31,6 +31,13 @@
  * columns), so a 200 M-row table of 20 columns is about half a second — hence every 10 minutes, never per request. It is
  * the size as of the last checkpoint (rows in the write-ahead log are not in a block yet).
  *
+ * A COPY WHOSE ROWS ARE ALL IN THE WRITE-AHEAD LOG IS NOT MEASURED, never said as 0: DuckDB writes them into the file
+ * only at its own checkpoint (the log past 16 MiB, or the store closed at mason stop), and a small copy's may wait there
+ * for the life of a run (issue 815). The sampler NEVER checkpoints to measure one (the owner, 2026-11-11): a checkpoint
+ * DuckDB cannot finish — a full disk, out of memory — invalidates the database until the run restarts, and a size is not
+ * worth a new way to stop a run serving (docs/DESIGN.md "A small table's size"). The page and `mason usage` say why
+ * such a table has no size.
+ *
  * The Postgres catalog never lists `_mason`, so a tool connected to the listener cannot read the samples.
  */
 import type { DuckDBValue } from "@duckdb/node-api";
@@ -390,7 +397,8 @@ export class UsageSampler {
           throw e;
         }
         // NO BLOCK of its own yet is not 0 bytes: its rows are still in the write-ahead log (a small copy is written to
-        // the file only at a checkpoint), so it is not measured this time — a page said "0.0 KiB" for a 5,000-row copy
+        // the file only at DuckDB's own checkpoint, which this never takes: see the module's comment), so it is not
+        // measured this time — a page said "0.0 KiB" for a 5,000-row copy
         if (blocks === 0) continue;
         rows.push([name, blocks * block]);
       }

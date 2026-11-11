@@ -41,6 +41,7 @@ import type { RunningStatement, SessionsOpen } from "../api/postgres/server.ts";
 import type { ShareEnded, ShareState } from "./share-run.ts";
 import { DEFAULT_REQUEST_LIMIT, eventLimit, MAX_SEARCH, SLOW_MS, requestFilter, requestFilterParams, type FilterKey } from "./request-filter.ts";
 import { countsText } from "../duck/stream.ts";
+import { syncedDataBytes } from "../duck/file-bytes.ts";
 import { agoText, BIG_TABLE_ROWS, parseDuration, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 
@@ -436,7 +437,7 @@ const STATUS_USAGE = `usage: mason status [--json]
     (how far past it, 0 when not; null when nothing is promised), behindWhy (why, while behind; else null) }, … }], totals: { added, copied, failed, rows (the synced tables' rows),
     syncedAt (the latest sync of any) }, engine: { file, bytes, keptDays (MASON_HISTORY_DAYS), version (the run's), startedAt,
     uptimeSeconds, restarts (the times its supervisor started the run again: { count, last: { at, why, upSeconds }
-    or null }, or { error }) }, disk: { path (where the synced data's file is), freeBytes, copyBytes (the file),
+    or null }, or { error }) }, disk: { path (where the synced data's file is), freeBytes, copyBytes (the file and its write-ahead log),
     projectedBytes (what the first syncs running are projected to add; null: none, or too early to say), error },
     sessions: { open (the Postgres API's sessions logged in), byClient: [{ user ('' a token's), client (its
     application_name), open, running }] }, share: (null, or what mason share has open) { port, fingerprint, sessions,
@@ -865,8 +866,8 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
   const connect = projectDatabase(project);
   const connectName = typeof connect === "string" ? connect : null;
   const duckFile = path.join(project.dir, DUCK_FILE);
-  // the copy's file, when a run has made one: its size says what the next mason start resumes with
-  const bytes = fs.existsSync(duckFile) ? fs.statSync(duckFile).size : null;
+  // the copy's file and its write-ahead log, when a run has made one: its size says what the next mason start resumes with
+  const bytes = syncedDataBytes(duckFile);
   const restarts = restartsFact(project.dir);
   const lastStop = project.config.lastStop ?? null;
   const next: readonly NextStep[] = hung === null ? ("message" in src && src.next?.length ? src.next : [["mason start", "start Mason for this project: what it synced is kept, and polled again"]])

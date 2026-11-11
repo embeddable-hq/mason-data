@@ -128,20 +128,56 @@ test("90 days of samples (129,600, one a minute) re-bucketed a day a point in on
   await store.writer.run(`DELETE FROM ${USAGE_TABLE}`);
 });
 
-test("a copy with no block of its own yet (its rows still in the write-ahead log) is not measured, never said as 0 bytes", async () => {
+test("a copy small enough to stay in the write-ahead log is not measured, never said as 0 bytes, and the sampler never checkpoints to measure it: a checkpoint DuckDB cannot finish invalidates the database (issue 815, the owner 2026-11-11)", async () => {
   const { UsageSampler } = await usage();
   const clock = Date.parse("2026-10-28T12:00:00.000Z");
+  const file = path.join(dir, "duck.db");
+  const walBytes = (): number => (fs.existsSync(`${file}.wal`) ? fs.statSync(`${file}.wal`).size : 0);
   await store.writer.run("CHECKPOINT");
   await store.writer.run(`CREATE SCHEMA IF NOT EXISTS app`);
-  await store.writer.run(`CREATE TABLE app.fresh AS SELECT i AS id FROM range(1000) t(i)`);
+  // the issue's: 25,000 keyed rows over 4 columns, all of them in the write-ahead log (DuckDB checkpoints by itself at 16 MiB)
+  await store.writer.run(`CREATE TABLE app.fresh AS SELECT i AS id, i * 7 AS amount, 'name ' || i AS name, TIMESTAMP '2026-01-01' + to_seconds(i) AS at FROM range(25000) t(i)`);
+  const wal = walBytes();
+  assert.ok(wal > 100_000, `its rows are in the write-ahead log: ${wal} bytes`);
+  const persistent = async (): Promise<number> => Number((await store.writer.runAndReadAll(`SELECT count(*) FROM pragma_storage_info('app.fresh') WHERE persistent`)).getRowsJS()[0]![0]);
   const u = await UsageSampler.open(store, () => undefined, { days: 7, now: () => clock, sampleMs: NEVER, sizeEveryMs: 1 });
   try {
     u.start(async () => ({ ...facts, copied: ["app.fresh"] }));
     await u.sample();
-    assert.deepEqual((await u.copySizes()).filter((c) => c.table === "app.fresh"), [], "not measured until its rows are in the file");
+    await u.sample();
+    assert.deepEqual((await u.copySizes()).filter((c) => c.table === "app.fresh"), [], "not measured until its rows are in the file, never 0");
+    assert.equal(Number((await store.writer.runAndReadAll(`SELECT count(*) FROM _mason.copy_sizes WHERE table_name = 'app.fresh'`)).getRowsJS()[0]![0]), 0, "no row written for it, not even a 0");
+    // no checkpoint was taken: its rows are still in the log, and the module issues none
+    assert.equal(await persistent(), 0, "its rows still in the write-ahead log");
+    assert.ok(walBytes() >= wal, `the log kept: ${walBytes()} of ${wal} bytes`);
+    const code = fs.readFileSync(new URL("../src/duck/usage.ts", import.meta.url), "utf8").split("\n").filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l)).join("\n");
+    assert.doesNotMatch(code, /CHECKPOINT/i, "the sampler issues no checkpoint");
   } finally {
     await u.close();
     await store.writer.run(`DROP TABLE app.fresh`);
+    await store.writer.run(`DELETE FROM _mason.copy_sizes`);
+  }
+});
+
+test("a copy with blocks of its own is measured without a checkpoint: rows added since stay in the write-ahead log", async () => {
+  const { UsageSampler } = await usage();
+  const clock = Date.parse("2026-10-28T12:30:00.000Z");
+  const file = path.join(dir, "duck.db");
+  await store.writer.run(`CREATE SCHEMA IF NOT EXISTS app`);
+  await store.writer.run(`CREATE TABLE app.kept AS SELECT i AS id, 'row ' || i AS note FROM range(5000) t(i)`);
+  await store.writer.run("CHECKPOINT");
+  await store.writer.run(`INSERT INTO app.kept SELECT i, 'later ' || i FROM range(5000, 6000) t(i)`);
+  const wal = fs.statSync(`${file}.wal`).size;
+  const said: string[] = [];
+  const u = await UsageSampler.open(store, (l) => said.push(l), { days: 7, now: () => clock, sampleMs: NEVER, sizeEveryMs: 1 });
+  try {
+    u.start(async () => ({ ...facts, copied: ["app.kept"] }));
+    await u.sample();
+    assert.equal((await u.copySizes())[0]?.table, "app.kept");
+    assert.ok(fs.statSync(`${file}.wal`).size >= wal, "the log left as it was");
+  } finally {
+    await u.close();
+    await store.writer.run(`DROP TABLE app.kept`);
     await store.writer.run(`DELETE FROM _mason.copy_sizes`);
   }
 });

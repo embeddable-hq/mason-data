@@ -108,7 +108,7 @@ export function metricsText(f: MetricsFacts): string {
       ...metric("mason_uptime_seconds", "gauge", "Seconds since mason serve started.", [{ value: r.uptimeSeconds }]),
       ...metric("mason_tables", "gauge", "The synced tables the run holds, by phase (a removed table's data is held until dropped).",
         TABLE_PHASES.map((phase) => ({ labels: { phase }, value: u.tables[phase] }))),
-      ...metric("mason_copy_bytes", "gauge", "The size of the synced data's file on disk, bytes.", [{ value: u.copyBytes }]),
+      ...metric("mason_copy_bytes", "gauge", "The size of the synced data's file and its write-ahead log on disk, bytes.", [{ value: u.copyBytes }]),
       ...metric("mason_copy_rows", "gauge", "The rows of the synced tables served.", [{ value: u.totals.rows }]),
       // absent, not NaN, before any added table was synced: nothing has an age yet (see the module's comment)
       ...metric("mason_sync_oldest_age_seconds", "gauge", "Seconds since the stalest added table was last brought current; absent before any sync.",
