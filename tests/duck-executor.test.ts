@@ -19,7 +19,6 @@ import type { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { DuckStore } from "../src/duck/store.ts";
-import { invalidatedReason, invalidationOf } from "../src/duck/executor.ts";
 import { startPostgresApi } from "../src/api/postgres/server.ts";
 import { mintToken, tokenProblem } from "../src/duck/token.ts";
 import { API_KEY, CALLED, CALLING, client, dir, inProcess, logged, nodeProcess, released, schema, store, timed, useServer } from "./duck-executor-harness.ts";
@@ -191,7 +190,8 @@ test("the synced data invalidated by a fatal error ends the run as a crash, its 
   }
 });
 
-test("only DuckDB's FATAL error invalidates; its original cause is read, and a full disk's way out is the disk", () => {
+test("only DuckDB's FATAL error invalidates; its original cause is read, and a full disk's way out is the disk", async () => {
+  const { invalidatedReason, invalidationOf } = await import("../src/duck/executor.ts");
   assert.equal(invalidationOf(new Error("Binder Error: column \"x\" not found")), null);
   assert.equal(invalidationOf(new Error("IO Error: No space left on device")), null, "a statement's spill on a full disk fails it alone (53100)");
   assert.equal(invalidationOf(new Error("FATAL Error: Failed to create checkpoint because of error: Could not write file \"/d/.mason/duck.db\": No space left on device")),

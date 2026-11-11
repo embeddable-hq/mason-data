@@ -13,13 +13,14 @@ import * as path from "node:path";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { matrixEnv, runMason } from "./cli-matrix.ts";
-import { invalidatedReason } from "../src/duck/executor.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SUPERVISE = path.join(ROOT, "src", "cli", "supervise.ts");
 const PG_URL = "postgresql://127.0.0.1:54987/sup";
 /** what the run says when the synced data was invalidated by a checkpoint on a full disk (src/cli/dev.ts, issue 830) */
-const INVALIDATED = `the engine stopped (${invalidatedReason("Failed to create checkpoint because of error: Could not write file \"/d/.mason/duck.db\": No space left on device")})`;
+const INVALIDATED = "the engine stopped (the synced data met a fatal error and must be opened again (Failed to create checkpoint because of error: " +
+  "Could not write file \"/d/.mason/duck.db\": No space left on device). Nothing synced is lost: it is opened again when Mason starts again; " +
+  "free disk where the synced data is (.mason/), or the restart meets the same error)";
 
 /**
  * NO WAIT HERE IS UNBOUNDED, AND NO FAILED TEST LEAVES A PROCESS BEHIND (CI hung 30 minutes in this file: a test raced
