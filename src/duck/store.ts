@@ -457,6 +457,14 @@ export function failureOf(signal: AbortSignal, e: unknown, sql: string): Stateme
   return e instanceof StatementError ? e : pgErrorOf(e, sql);
 }
 
+/** THE MEMORY LIMIT REACHED, in each sentence DuckDB 2.0.0's buffer manager says it in (its strings: "could not
+ *  allocate block", "failed to allocate data", "failed to pin block", "failed to reserve memory data", each "of size
+ *  <n> (<used>/<limit> used)"). A statement's says it as "Out of Memory Error", which is 53200 whatever its sentence;
+ *  a COMMIT's as "TransactionContext Error: Failed to commit: <sentence>", read by this one pattern (measured on a
+ *  chunk's commit of large values: "failed to pin block …" and "could not allocate block … (734.2 MiB/732.4 MiB used)") */
+const BUFFER_LIMIT_REACHED = /(?:could not allocate block|failed to (?:allocate data|pin block|reserve memory data)) of size [^()\n]* \([^()\n]*\/[^()\n]* used\)/;
+const COMMIT_LIMIT_REACHED = new RegExp(`^Failed to commit: ${BUFFER_LIMIT_REACHED.source}`);
+
 export function pgErrorOf(err: unknown, sql: string): StatementError {
   if (err instanceof StatementError) return err;
   const full = err instanceof Error ? err.message : String(err);
@@ -505,9 +513,10 @@ export function pgErrorOf(err: unknown, sql: string): StatementError {
     : kind === "Out of Range" ? "22003"
     : kind === "Interrupt" || /INTERRUPT/i.test(full) ? "57014"
     : kind === "Out of Memory" ? "53200"
-    // a commit that could not pin or allocate a block is the same limit reached, under the transaction's own kind
-    // (measured on DuckDB 2.0.0: "Failed to commit: failed to pin block of size 1.0 MiB (365.7 MiB/366.2 MiB used)")
-    : kind === "TransactionContext" && /^Failed to commit: failed to (?:pin block|allocate data) of size .* used\)/.test(message) ? "53200"
+    // a commit that ran out is the same limit reached, under the transaction's own kind, in ANY of the sentences the
+    // engine's buffer manager says it in (`BUFFER_LIMIT_REACHED`; issue 829: "could not allocate block" at a chunk's
+    // commit was read as XX000 and failed the first sync where it reads on smaller)
+    : kind === "TransactionContext" && COMMIT_LIMIT_REACHED.test(message) ? "53200"
     : kind === "Not implemented" ? "0A000"
     : kind === "Invalid Input" ? "22023"
     : "XX000";
