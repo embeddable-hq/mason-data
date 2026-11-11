@@ -337,7 +337,22 @@ test("a run killed outright leaves a copy, and the next run removes it", async (
   assertClean(r);
 });
 
-test("two runs at once in one tree each get their verdict, and another run's live copy is left alone", { skip: "quarantined: #792" }, async (t) => {
+test("the worktree lock of a run killed while it held it is taken over, and released", (t) => {
+  const r = repo(t);
+  // a pid that is dead: a child that has exited
+  const dead = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }).stdout;
+  const lock = path.join(r.dir, ".git", "fails-without-worktrees.lock");
+  fs.writeFileSync(lock, dead);
+  const x = run(r, FILE);
+  assert.equal(x.code, 0, x.out);
+  assert.match(x.out, new RegExp(`took over the worktree lock of a run that was killed \\(pid ${dead}\\)`));
+  assert.match(x.out, /PROVED: 2 test\(s\)/);
+  assert.equal(fs.existsSync(lock), false, "the lock is released");
+  assert.deepEqual(fs.readdirSync(path.join(r.dir, ".git")).filter((f) => f.startsWith("fails-without-worktrees.lock")), []);
+  assertClean(r);
+});
+
+test("two runs at once in one tree each get their verdict, and another run's live copy is left alone", async (t) => {
   const r = repo(t);
   const once = (): Promise<{ code: number | null; out: string }> => new Promise((resolve) => {
     const c = spawn(process.execPath, ["scripts/fails-without.ts", r.commit, FILE], { cwd: r.dir, env: r.env, stdio: ["ignore", "pipe", "pipe"] });

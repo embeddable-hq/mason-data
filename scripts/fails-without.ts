@@ -81,12 +81,54 @@ interface Run {
 const RESULT = /^\s*([✔✖]) (.*?) \(\d+(?:\.\d+)?ms\)(?: # .*)?$/;
 const git = (...a: string[]): string => execFileSync("git", a, { cwd: ROOT, encoding: "utf8", maxBuffer: 1 << 28 });
 
+/**
+ * ONE RUN AT A TIME CHANGES OR READS THIS REPOSITORY'S WORKTREES (issue 792). `git worktree add` reads every entry
+ * under .git/worktrees/ while another add is still writing its own, and fails on the half-written one
+ * (`fatal: failed to read .git/worktrees/tree1/commondir: Success`); `remove` reads them the same way. So every
+ * `git worktree` call here is made under a lock file in the repository's common git dir, shared by all its checkouts,
+ * held only for the call and never across a test run. A lock whose pid is dead (a run killed while it held it) is taken
+ * over; one held past LOCK_WAIT_MS is an error that names it.
+ */
+const LOCK_WAIT_MS = 120_000;
+const pause = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
+const alive = (pid: number): boolean => {
+  try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code !== "ESRCH"; }
+};
+let lockFile: string | null = null;
+function underWorktreeLock<T>(fn: () => T): T {
+  lockFile ??= path.join(path.resolve(ROOT, git("rev-parse", "--git-common-dir").trim()), "fails-without-worktrees.lock");
+  const lock = lockFile;
+  const until = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    try { fs.writeFileSync(lock, String(process.pid), { flag: "wx" }); break; }
+    catch (e) { if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; }
+    let holder: number;
+    try { holder = Number(fs.readFileSync(lock, "utf8")); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") continue; throw e; } // released between the two
+    // an empty file is a holder between its create and its write: alive, wait for it
+    if (holder > 0 && !alive(holder)) {
+      // taken over by a rename, so two runs that both saw the dead pid cannot both remove it (the second's fails
+      // ENOENT); what was renamed is read again, and a live holder's lock that came in between is put back
+      const taken = `${lock}.${process.pid}`;
+      try { fs.renameSync(lock, taken); } catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") continue; throw e; }
+      const was = Number(fs.readFileSync(taken, "utf8"));
+      if (was === holder) { fs.rmSync(taken); console.log(`[fails-without] took over the worktree lock of a run that was killed (pid ${holder})`); continue; }
+      fs.linkSync(taken, lock); // EEXIST throws: two holders would be worse than an error
+      fs.rmSync(taken);
+    }
+    if (Date.now() > until) throw new Error(`${lock} is held by pid ${holder} for over ${LOCK_WAIT_MS / 1000} s: run again once that run ends, or remove the file if no fails-without run is running`);
+    pause(20);
+  }
+  try { return fn(); } finally { fs.rmSync(lock, { force: true }); }
+}
+const worktree = (...a: string[]): string => underWorktreeLock(() => git("worktree", ...a));
+
 const copyOf = (holder: string): string => path.join(holder, "tree");
 function removeCopy(holder: string): string | null {
   const steps: Array<() => void> = [
-    () => { if (fs.existsSync(path.join(copyOf(holder), ".git"))) git("worktree", "remove", "--force", copyOf(holder)); },
+    () => { if (fs.existsSync(path.join(copyOf(holder), ".git"))) worktree("remove", "--force", copyOf(holder)); },
     () => fs.rmSync(holder, { recursive: true, force: true }),
-    () => { git("worktree", "prune"); },
+    () => { worktree("prune"); },
   ];
   const failed: string[] = [];
   // every step runs: a registration the first one could not remove is what the last one is for
@@ -94,11 +136,11 @@ function removeCopy(holder: string): string | null {
     try { step(); } catch (e) { failed.push(e instanceof Error ? e.message : String(e)); }
   }
   if (fs.existsSync(holder)) return `${holder} is still there: ${failed.join("; ")}`;
-  return git("worktree", "list", "--porcelain").includes(holder) ? `${holder} is still registered: ${failed.join("; ")}` : null;
+  return worktree("list", "--porcelain").includes(holder) ? `${holder} is still registered: ${failed.join("; ")}` : null;
 }
 /** The copy of a run that was killed outright. Only of a pid that is dead: the worktrees of a repository are shared by all its checkouts, so a live one may be another session's. */
 function removeAbandonedCopies(): void {
-  for (const m of git("worktree", "list", "--porcelain").matchAll(/^worktree (.*)$/gm)) {
+  for (const m of worktree("list", "--porcelain").matchAll(/^worktree (.*)$/gm)) {
     const holder = path.dirname(m[1]!);
     if (path.basename(m[1]!) !== "tree" || !path.basename(holder).startsWith("fails-without-")) continue;
     // the pid is written before the copy is registered, so a registered copy with no pid is one the system's tmp cleaner took
@@ -116,7 +158,7 @@ function removeAbandonedCopies(): void {
 /** The tree as it stands now, in a repository of its own: this HEAD, this index, every file here as it is here. */
 function takeCopy(holder: string): void {
   const copy = copyOf(holder);
-  git("worktree", "add", "--quiet", "--detach", "--no-checkout", copy, "HEAD");
+  worktree("add", "--quiet", "--detach", "--no-checkout", copy, "HEAD");
   // Its index, so its `git ls-files` and `git status` are this tree's: a file staged here is tracked there
   // (--git-path answers from the folder it is asked in, absolute in a linked worktree and relative in a main checkout)
   fs.copyFileSync(path.resolve(ROOT, git("rev-parse", "--git-path", "index").trim()), path.resolve(copy, execFileSync("git", ["rev-parse", "--git-path", "index"], { cwd: copy, encoding: "utf8" }).trim()));
