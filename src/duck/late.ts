@@ -57,6 +57,17 @@
  *
  * `afterLimit` still needs a sort: the keys put its rows back, and a list of no key has none.
  *
+ * A SORT BY THE PRESERVED SIDE ALONE LIMITS THAT SIDE FIRST (issue 824, part 2: `small a LEFT JOIN big b ON a.id =
+ * b.small_id ORDER BY a.created LIMIT 100` joined and sorted every row of `big` to keep 100). Where an outer join keeps
+ * every row of one FROM item and every sort key and the WHERE read that item alone, only its first OFFSET + LIMIT rows
+ * in the statement's order can be in the page, each yielding at least one joined row: the inner query reads it as
+ * `(SELECT *, t.rowid AS __mason_rid FROM t WHERE … ORDER BY <the keys> LIMIT <OFFSET + LIMIT>) AS t` and joins, sorts
+ * and limits as written (`preservedFirst` holds the proof and where it does not apply). Measured over 25 k × 30 M rows,
+ * warm, 2 threads: 918 ms to 180 ms by `a.id`, 941 to 217 ms by a timestamp of `a`, 353 to 54 ms with the big table
+ * preserved. It still reads the big table's join column, which nothing indexes: cold at 153 M rows that read is about
+ * 20 s at 125 MB/s (an estimate from the column's 16.4 bytes a row), and only an index or the data clustered by the join
+ * key would remove it (docs/DESIGN.md "A top N over joined tables").
+ *
  * Measured over a 4 M-row join with wide JSON in the last table (a 2 GB
  * limit): 12.9 s and 8.6 GiB spilled before, 0.19 s and none after; LIMIT 10,000 failed for memory before and takes 2.9 s.
  *
@@ -740,7 +751,9 @@ interface Query { items: Relation[]; rowWise: boolean; listReads: string[]; list
   /** whether the query is a SELECT DISTINCT that is a grouping on its list (`distinctGrouping`) */
   distinct: boolean;
   /** whether the query is a DISTINCT ON (Postgres's `hasDistinctOn`), and whether an ON expression holds a volatile function */
-  distinctOn: boolean; volatileOn: boolean }
+  distinctOn: boolean; volatileOn: boolean;
+  /** whether its WHERE holds a volatile function: read twice (`preservedFirst`), it could keep other rows */
+  volatileWhere: boolean }
 
 function isTreeNode(v: TreeValue | undefined): v is TreeNode { return typeof v === "object" && v !== null && !Array.isArray(v); }
 const treeList = (v: TreeValue | undefined): TreeValue[] => Array.isArray(v) ? v : [];
@@ -777,7 +790,9 @@ function derivedFunctions(tree: TreeValue): number[] {
   let derived = false;
   walkTree(tree, (n) => {
     if (n._node === "QUERY" && n.limitCount !== null && n.limitCount !== undefined) {
-      derived ||= treeList(n.rtable).some((e) => isTreeNode(e) && (e.rtekind === RTE_SUBQUERY || e.rtekind === RTE_CTE)) || computedSorts(n).length > 0;
+      derived ||= treeList(n.rtable).some((e) => isTreeNode(e) && (e.rtekind === RTE_SUBQUERY || e.rtekind === RTE_CTE)) || computedSorts(n).length > 0
+        // a sorted join with a WHERE: `preservedFirst` reads the WHERE twice, so asks whether it is volatile
+        || (treeList(n.sortClause).length > 0 && isTreeNode(n.jointree) && isTreeNode(n.jointree.quals) && treeList(n.rtable).some((e) => isTreeNode(e) && e.rtekind === RTE_JOIN));
     }
     for (const id of [n._node === "FUNCEXPR" ? n.funcid : undefined, ["OPEXPR", "DISTINCTEXPR", "NULLIFEXPR", "SCALARARRAYOPEXPR"].includes(n._node as string) ? n.opfuncid : undefined]) {
       if (typeof id === "string" && Number(id) > 0) out.add(Number(id));
@@ -908,7 +923,8 @@ function relationsOf(analysis: TreeValue, keys: PrimaryKeys, volatile: ReadonlyS
     const computed = computedSorts(q).filter((c) => holdsVolatile(c.expr, volatile));
     return { items, rowWise: rowWiseQuery(q), listReads: listSubLinkReads(q) ?? [], listSubLinks: subLinksIn(treeList(q.targetList)), ...mergedColumns(q),
       volatileOutputs: computed.flatMap((c) => c.output === null ? [] : [c.output]), volatileKeys: computed.length > 0, sorts: treeList(q.sortClause).length, keyed: keyedTables(q, keys), distinct: distinctGrouping(q),
-      distinctOn: q.hasDistinctOn === "true", volatileOn: onTargets(q).some((t) => holdsVolatile(t.expr, volatile)) };
+      distinctOn: q.hasDistinctOn === "true", volatileOn: onTargets(q).some((t) => holdsVolatile(t.expr, volatile)),
+      volatileWhere: holdsVolatile(isTreeNode(q.jointree) ? q.jointree.quals : undefined, volatile) };
   };
   const visit = (v: TreeValue | undefined, enclosing: readonly TreeValue[][]): void => {
     if (Array.isArray(v)) { for (const x of v) visit(x, enclosing); return; }
@@ -1292,6 +1308,120 @@ function overCarried(n: unknown, carried: readonly Listed[], columns: Map<string
   return Object.fromEntries(Object.entries(n).map(([k, v]) => [k, k === "subselect" ? v : overCarried(v, carried, columns)]));
 }
 
+/** a LIMIT's or an OFFSET's count where it is a constant: a non-negative integer, `none` where none is written; else null */
+function constantCount(n: unknown, none: number | null): number | null {
+  if (n === undefined) return none;
+  if (kindOf(n) !== "A_Const") return null;
+  const b = bodyOf(n);
+  if (b.isnull === true) return null;
+  // (the parser leaves out an integer's value where it is 0)
+  if (b.ival !== undefined && !isObject(b.ival)) return null;
+  if (b.ival === undefined && Object.keys(b).some((k) => k !== "location")) return null;
+  const v = Number((b.ival as Body | undefined)?.ival ?? 0);
+  return Number.isSafeInteger(v) && v >= 0 ? v : null;
+}
+
+/** the FROM item every row of the join keeps (a LEFT JOIN's left, a RIGHT JOIN's right, down a chain of them), or null:
+ *  a FROM of one join tree, each join on the way down to the item an outer join that keeps that side */
+function preservedLeaf(from: unknown): AstNode | null {
+  if (!Array.isArray(from) || from.length !== 1 || kindOf(from[0]) !== "JoinExpr") return null;
+  let n: unknown = from[0];
+  while (kindOf(n) === "JoinExpr") {
+    const j = bodyOf(n);
+    n = j.jointype === "JOIN_LEFT" ? j.larg : j.jointype === "JOIN_RIGHT" ? j.rarg : null;
+  }
+  return kindOf(n) === "RangeVar" || kindOf(n) === "RangeSubselect" ? n as AstNode : null;
+}
+
+/** whether every column an expression reads is a column of the item named `alias` (`own`, its columns), read so that
+ *  the engine binds it there too: qualified by that name, or a bare name no other item holds (`others`, in any case,
+ *  since the engine binds a name in any case) nor a join's merged column. A star, a subquery or a bare name of no
+ *  column of the item is unsure: false */
+function readsOnly(n: unknown, alias: string, own: readonly string[], others: ReadonlySet<string>, merged: ReadonlySet<string>): boolean {
+  if (Array.isArray(n)) return n.every((x) => readsOnly(x, alias, own, others, merged));
+  if (!isObject(n)) return true;
+  if (kindOf(n) === "SubLink") return false;
+  if (kindOf(n) === "ColumnRef" && isObject(n.ColumnRef)) {
+    const names = fieldNames(n.ColumnRef);
+    if (names.some((x) => x === null)) return false;
+    const column = names.at(-1)!;
+    if (names.length >= 2) return names.at(-2) === alias;
+    // a lambda's parameter (the rewrite's own name) is no column of any item
+    if (ownName(column)) return true;
+    return own.includes(column) && !others.has(column.toLowerCase()) && !merged.has(column);
+  }
+  return Object.values(n).every((x) => readsOnly(x, alias, own, others, merged));
+}
+
+/** each column reference of a tree qualified by a schema (or a catalog) and the item named `alias`, read by that name
+ *  alone; a subquery's, and a derived item's, are their own scopes, left as they are */
+function shortened(n: unknown, alias: string): unknown {
+  if (Array.isArray(n)) return n.map((x) => shortened(x, alias));
+  if (!isObject(n)) return n;
+  if (kindOf(n) === "ColumnRef" && isObject(n.ColumnRef)) {
+    const fields = n.ColumnRef.fields as unknown[];
+    const names = fieldNames(n.ColumnRef);
+    return fields.length >= 3 && names.at(-2) === alias ? { ColumnRef: { ...n.ColumnRef, fields: structuredClone(fields.slice(-2)) } } : n;
+  }
+  return Object.fromEntries(Object.entries(n).map(([k, v]) => [k, k === "subselect" || k === "RangeSubselect" ? v : shortened(v, alias)]));
+}
+
+/**
+ * THE PRESERVED SIDE FIRST (issue 824, part 2: `small a LEFT JOIN big b ON a.id = b.small_id ORDER BY a.created LIMIT
+ * 100` joined every row of the big table and sorted all of them to keep 100). Where a FROM item P is preserved by every
+ * join above it (a chain of LEFT JOINs with P leftmost, or RIGHT JOINs with P rightmost) and every sort key and the WHERE
+ * read P's columns alone, P is limited to its first OFFSET + LIMIT rows in the statement's order (its WHERE kept, the
+ * same keys, directions, NULLS places and collation keys) BEFORE the join, and the join, the sort and the limit run as
+ * written over those rows. Which item and how many: `{ at, count }`, or null where it does not apply.
+ *
+ * WHY THE ANSWER IS AN ANSWER. Write N = OFFSET + LIMIT, k(r) for a joined row's keys, and A* for the N rows of P chosen
+ * (all of P's rows the WHERE keeps, where they are fewer). (1) Every row returned is a row of the statement's join: the
+ * joins above A* are the same joins over a subset of P's rows, and the WHERE, which reads P alone, is true of a joined
+ * row exactly where it is true of its row of P (it is kept outside as well). (2) A row of P yields at least one row of an
+ * outer join that preserves it, whatever the ON condition (one NULL-extended where nothing matches), and again at each
+ * join up: so A* yields at least |A*| rows. (3) Every key reads P alone, so a joined row's keys are its P row's: k(r) =
+ * k(p(r)). A* is the first N rows of P in key order, so every row of P outside A* has keys at or after every row of A*'s
+ * (equal keys at the boundary are a tie, chosen either way, as Postgres's own sort chooses one). Order the statement's
+ * join by its keys, ties broken by "a row of A*'s first": a valid order of the statement's sort, since it only refines
+ * the keys. Its first rows are exactly A*'s joined rows, at least N of them where |A*| = N (a row of A*'s is before any
+ * other at every key, or tied and broken so), so its rows OFFSET+1 … OFFSET+LIMIT are those of A*'s joined rows sorted
+ * by the keys, which is what the rewrite answers: rows of the join, as many as the statement's, in the keys' order.
+ * Where P has fewer than N rows, A* is all of it and the join is the statement's own. NULL keys, DESC, NULLS FIRST /
+ * LAST and a collation's keys are the same SortBy nodes in both sorts (the rewrite's own key expressions, cloned), so
+ * "in key order" is one order; several keys are one key compared left to right; OFFSET is counted in N.
+ *
+ * WHERE IT DOES NOT APPLY: an INNER join or a CROSS join on the way down (a row of P may yield none, so (2) fails and a
+ * limited P could miss rows the statement answers), a FULL join (its rows of the other side are no row of P, their keys
+ * NULL), a FROM of two items, a WHERE reading another item (a NULL-extended row may fail it, so (2) fails: `small a LEFT
+ * JOIN big b … WHERE b.cat = 7` stays as it was), a key reading another item or a join's merged column (`USING`: (3)
+ * fails), a volatile key or WHERE (read twice it is two values), a DISTINCT ON (a group's first row is no row of P), a
+ * subquery in the WHERE, a LATERAL item (it may read P by a schema's name), a LIMIT or an OFFSET that is no constant
+ * (a parameter: N is not known when the statement is planned), and an item with column aliases.
+ *
+ * P may be a table, a plain derived read, a carried derived read or a role's walled read (issue 134's kinds): the limit
+ * wraps the item as the join reads it, so a walled read keeps its filter, barrier and wall inside, and the keys and
+ * the WHERE run above them, where they ran before.
+ */
+function preservedFirst(s: Body, items: readonly AstNode[], listed: ReadonlyArray<Table | Derived | Walled>, query: Query, keys: readonly AstNode[]): { at: number; count: AstNode } | null {
+  const limit = noLimit(s.limitCount) ? null : constantCount(s.limitCount, null), offset = constantCount(s.limitOffset, 0);
+  if (limit === null || offset === null || !Number.isSafeInteger(limit + offset) || limit + offset > 2 ** 31 - 1) return null;
+  const leaf = preservedLeaf(s.fromClause);
+  const at = leaf === null ? -1 : items.indexOf(leaf);
+  if (at < 0) return null;
+  const item = items[at]!, b = bodyOf(item);
+  if (isObject(b.alias) && Array.isArray(b.alias.colnames) && b.alias.colnames.length > 0) return null;
+  if (items.some((n) => kindOf(n) === "RangeSubselect" && bodyOf(n).lateral === true)) return null;
+  const alias = aliasOfItem(item);
+  if (alias === null) return null;
+  const others = new Set(listed.flatMap((r, i) => i === at ? [] : r.columns.map((c) => c.toLowerCase())));
+  const merged = new Set(query.merged.map(([name]) => name));
+  const own = listed[at]!.columns;
+  if (!keys.every((k) => readsOnly(k, alias, own, others, merged))) return null;
+  if (s.whereClause !== undefined && (holdsSubLink(s.whereClause) > 0 || !readsOnly(s.whereClause, alias, own, others, merged))) return null;
+  // (the parser writes 0 as an integer with no value: a tree that reads back as itself)
+  return { at, count: { A_Const: { ival: limit + offset === 0 ? {} : { ival: limit + offset } } } };
+}
+
 /** one SELECT over joined FROM items written with its rows chosen by row number (see above), or null where it is not so shaped */
 function joinRows(select: AstNode, relations: Query[], wall: string | null): { select: AstNode; walls: number } | null {
   const written0 = bodyOf(select);
@@ -1371,27 +1501,45 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
   }), listed, tablesAlone, subqueried ? subLinks : null);
   if (written === null) return null;
   const isFetched = (i: number): boolean => written.read.has(aliases[i]!) && (listed[i]!.kind !== "derived" || sides[i] !== null);
-  const fetched = items.flatMap((n, i) => isFetched(i) ? [{ node: n, at: i, alias: aliases[i]!, id: listed[i]!.kind === "table" ? rowNumber(aliases[i]!) : ref(aliases[i]!, ROW_ID) }] : []);
+  // THE PRESERVED SIDE FIRST (issue 824, part 2): its rows limited before the join, where that is the same answer
+  const lead = on === null && !volatileKeys && sorts.length > 0 && !named.some((q) => q.volatileWhere) ? preservedFirst(s, items, listed, query, keys) : null;
+  // (a table limited first is a derived table: its row number is the column it exposes, inside; the fetch reads the table)
+  const innerId = (i: number): AstNode => listed[i]!.kind === "table" && lead?.at !== i ? rowNumber(aliases[i]!) : ref(aliases[i]!, ROW_ID);
+  const fetched = items.flatMap((n, i) => isFetched(i) ? [{ node: n, at: i, alias: aliases[i]!, id: listed[i]!.kind === "table" ? rowNumber(aliases[i]!) : ref(aliases[i]!, ROW_ID), inner: innerId(i) }] : []);
   if (fetched.length === 0) return null;
   const list = written.list.map((t) => ({ ResTarget: { ...bodyOf(t), val: overCarried(bodyOf(t).val, carried, columns) } }));
-  const from = mapFrom(s.fromClause as unknown[], (n, i) => {
+  const placed = (n: AstNode, i: number): AstNode => {
     const side = sides[i];
     if (side !== null && side !== undefined) return isFetched(i) ? exposed(side, bodyOf(n).alias as Body, true, wall) : { RangeSubselect: { ...bodyOf(n), subquery: { SelectStmt: side.body } } };
     if (listed[i]!.kind === "walled") return isFetched(i) ? walledExposed(n, wall!) : n;
     return kindOf(n) === "RangeVar" && listed[i]!.kind === "table" ? ownTable(bodyOf(n)) : n;
-  });
+  };
+  const from = mapFrom(s.fromClause as unknown[], (n, i) => {
+    if (lead?.at !== i) return placed(n, i);
+    // its WHERE (which reads it alone) and its sort, the statement's own, and its first OFFSET + LIMIT rows
+    return { RangeSubselect: { alias: { aliasname: aliases[i]! }, subquery: { SelectStmt: {
+      targetList: [{ ResTarget: { val: { ColumnRef: { fields: [{ A_Star: {} }] } } } },
+        ...(listed[i]!.kind === "table" && isFetched(i) ? [{ ResTarget: { name: ROW_ID, val: rowNumber(aliases[i]!) } }] : [])],
+      fromClause: [placed(n, i)],
+      ...(s.whereClause !== undefined ? { whereClause: structuredClone(s.whereClause) } : {}),
+      sortClause: sorts.map((sort, k) => ({ SortBy: { ...bodyOf(sort), node: structuredClone(keys[k]!) } })),
+      limitCount: lead.count, limitOption: "LIMIT_OPTION_COUNT", op: "SETOP_NONE",
+    } } } };
+  }, (b) => lead === null ? b : { ...b, ...(b.quals !== undefined ? { quals: shortened(b.quals, aliases[lead.at]!) } : {}) });
   // (with no sort of its own, its row numbers are sorted nowhere, inside or out: a sort by them would be a top N over
   // every row of the join where the statement stops early; issue 824, see above)
   // (the written sort is never the inner's: the outer sorts the rows the inner fetched)
   const { withClause: _with, sortClause: _sorts, ...body } = s;
   const left = isObject(s.withClause) ? (s.withClause.ctes as AstNode[]).filter((c) => !withs.used.has(String(bodyOf(c).ctename))) : [];
-  const inner: Body = { ...body, ...(distinct !== null ? { distinctClause: distinct } : {}), ...(left.length > 0 ? { withClause: { ...s.withClause as Body, ctes: left } } : {}), fromClause: from, targetList: [
-    ...fetched.map((t, i) => ({ ResTarget: { name: `__mason_r${i + 1}`, val: t.id } })),
+  const inner0: Body = { ...body, ...(distinct !== null ? { distinctClause: distinct } : {}), ...(left.length > 0 ? { withClause: { ...s.withClause as Body, ctes: left } } : {}), targetList: [
+    ...fetched.map((t, i) => ({ ResTarget: { name: `__mason_r${i + 1}`, val: t.inner } })),
     ...[...columns.values()].map((c) => ({ ResTarget: { name: c.name, val: c.val } })),
     ...keys.map((k, i) => ({ ResTarget: { name: `__mason_o${i + 1}`, val: k } })),
   ],
   // (a volatile key is sorted by the output that holds it: said twice, it would be two values)
   ...(sorts.length > 0 ? { sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: volatileKeys ? ref(`__mason_o${i + 1}`) : keys[i] } })) } : {}) };
+  // the preserved item is a derived table now, which a schema's name cannot qualify: its columns are read by its name alone
+  const inner: Body = { ...(lead === null ? inner0 : shortened(inner0, aliases[lead.at]!) as Body), fromClause: from };
   let joined: AstNode = { RangeSubselect: { subquery: { SelectStmt: inner }, alias: { aliasname: LATE } } };
   // the fetch reads a walled read through itself again, filter, barrier and wall: one more wall each
   let walls = 0;

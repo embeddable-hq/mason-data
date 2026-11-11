@@ -189,6 +189,8 @@ export const ROW_SHAPES: ReadonlyArray<{ name: string; sql: string; values?: str
   // them through the same filtered read (src/duck/late.ts), each join kind and FROM item, with a list that computes
   { name: "top N, filtered: inner join, a computed list, OFFSET", sql: "SELECT o.id, o.status, c.name, upper(c.name) AS u FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id ORDER BY o.id LIMIT 6 OFFSET 2" },
   { name: "top N, filtered: LEFT JOIN", sql: "SELECT c.id, c.name, o.id AS oid, o.amount * 2 AS twice FROM shop.customers c LEFT JOIN shop.orders o ON o.customer_id = c.id ORDER BY c.id, o.id NULLS FIRST LIMIT 8" },
+  // the preserved side first (issue 824, part 2): the walled read limited inside its own barrier and wall, then joined
+  { name: "top N, filtered: LEFT JOIN, the preserved side's keys and WHERE", sql: "SELECT o.id, o.amount, c.name FROM shop.orders o LEFT JOIN shop.customers c ON c.id = o.customer_id WHERE o.amount > 10 ORDER BY o.amount DESC NULLS LAST, o.id LIMIT 5 OFFSET 1" },
   { name: "top N, filtered: RIGHT JOIN", sql: "SELECT o.id, c.name, length(c.name) AS n FROM shop.customers c RIGHT JOIN shop.orders o ON o.customer_id = c.id ORDER BY o.id DESC LIMIT 6" },
   { name: "top N, filtered: FULL JOIN", sql: "SELECT c.id AS cid, o.id AS oid, coalesce(c.name, 'none') AS name FROM shop.customers c FULL JOIN shop.orders o ON o.customer_id = c.id ORDER BY o.id NULLS FIRST, c.id NULLS FIRST LIMIT 8" },
   { name: "top N, filtered: comma join, through:", sql: "SELECT o.id, i.id AS iid, i.quantity * i.unit_price AS total FROM shop.orders o, shop.order_items i WHERE i.order_id = o.id ORDER BY i.id LIMIT 6" },

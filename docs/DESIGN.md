@@ -2810,6 +2810,52 @@ scan of `big`, without the fetch of the 100 rows chosen:
 A WHERE on the big side that keeps few rows still reads the table until it has its rows, sorted or not. The cold
 numbers, on a machine whose page cache is smaller than the table, are issue 824's second part.
 
+**With an ORDER BY: the preserved side first (issue 824, part 2, 2026-11-11).** `… LEFT JOIN big … ORDER BY <key> LIMIT
+100` joined every row of `big` and sorted them all to keep 100. Where every sort key and the WHERE read the side the outer
+joins preserve, that side is limited to its first OFFSET + LIMIT rows by the same keys before the join, and the join,
+the sort and the limit run as written over those rows (`preservedFirst`, src/duck/late.ts, whose comment is the proof:
+each row of the preserved side yields at least one joined row and every key is its row's, so the page is the page of
+those rows' join). An INNER, FULL or comma join, a WHERE or a key reading another side, a merged `USING` column, a
+volatile key or WHERE and a LIMIT that is a parameter stay as they were.
+
+The same synthetic copy, now with a timestamp on each side (`small.created`, `big.seen`): `small` 25 k rows, `big` 30 M
+(1.58 GB, in memory: the disk held 0.5 GB free). Engine SQL as Mason sends it, warm, 2 threads, minimum of 3 runs:
+
+| `LIMIT 100` | today (sorted after the whole join) | preserved side first |
+|---|---|---|
+| `small a LEFT JOIN big b ORDER BY a.id` | 918 ms | 180 ms |
+| `… ORDER BY a.created DESC, a.id` | 941 ms | 217 ms |
+| `… ORDER BY a.id LIMIT 100 OFFSET 5000` | 1,069 ms | 491 ms |
+| `big b LEFT JOIN small a ORDER BY b.seen DESC, b.id` | 353 ms | 54 ms |
+| `… ORDER BY date_trunc('day', b.seen) DESC, b.id` (no top-N filter reaches the scan) | 467 ms | 138 ms |
+| `small a LEFT JOIN big b ORDER BY b.seen DESC, b.id` (a key of the joined side: unchanged) | 757 ms | |
+| `small a JOIN big b ORDER BY a.id` (INNER: unchanged) | 439 ms | |
+| `SELECT count(*) FROM small a LEFT JOIN big b` (the join column read, no sort) | 767 ms | |
+
+`small` limited first still reads `big`'s whole join column: every match of the 100 rows chosen must be found, and
+nothing indexes `big.small_id`. That column is 16.4 bytes a row (random uuids, stored uncompressed: 1,965 blocks of
+256 KiB at 30 M rows). Cold, on this machine's local disk (drop_caches, a 4 M-row copy, so its throughput is not a gp3
+volume's): 549 ms today against 229 ms first, the join counted 200 ms. ESTIMATE for the replica: at 153 M rows the join
+column is about 2.5 GB, about 20 s at 125 MB/s, whichever form, so cold the rewrite saves the CPU of the join and the
+sort but not the read. A key of the joined side (`ORDER BY b.seen DESC`) reads the join column and the key's (6.1 bytes a
+row here, about 0.9 GB at 153 M): about 27 s cold, ESTIMATED. Its NULLs come first under DESC (the rows of `small` that
+match nothing), so no side's rows can be limited first.
+
+What would remove the read, measured warm at 10 M rows (`big` 1,982 blocks), and not built (the owner's decision):
+- **The synced data clustered by the join key** (`big` rewritten in `small_id` order): 8.7 s to rewrite at 10 M, as many
+  blocks again while both copies exist. `ORDER BY a.id` (the 100 ids next to each other) then reads one row group: 7 ms
+  against 58 ms. 100 ids from anywhere (`ORDER BY a.created`) read 80 of 81 row groups through the LEFT JOIN (28 ms: the
+  engine pushes no filter into a LEFT JOIN's other side), but an INNER join of the same ids read only theirs (7.8 ms),
+  so the LEFT JOIN would need writing as a join of the side filtered by the chosen ids first. At 153 M rows a page's 100
+  ids hold about 6,100 rows each, contiguous, about 100 of 1,245 row groups. But the sync writes changes in the order
+  they arrive (the copy, the poll, the stream), so the order decays and the table must be rewritten again, a sort of
+  the whole table that spills to disk.
+- **An index on the join column** (DuckDB's ART): 2.8 s to build at 10 M, 837 blocks (21 bytes a row, about 3.2 GB at
+  153 M), an insert of 100 k rows 443 ms against 166 ms without it, an update of 10 k rows 182 against 158 ms. DuckDB used
+  it for one constant id only (2 ms, 395 rows): neither the join, nor a constant `IN` list of the 100 ids (220 ms, every
+  row read), nor a UNION ALL of 100 point lookups (61 ms, no faster than the scan). The rows of one id are scattered
+  through the table, so even its lookups read most of the column's blocks.
+
 **A join's FROM items (issue 134, step 2, 2026-10-31).** `joinRows` stopped at a table, so a view, a WITH query, a tool's
 wrapper and a derived side each carried every wide column through the join again. The issue's comment measured the shapes
 by hand; the real rewrite, through the listener, over 8 M facts, 3 M rows of about 3 kB and a 2 GB limit (minimum of three

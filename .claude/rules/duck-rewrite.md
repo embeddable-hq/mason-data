@@ -134,7 +134,14 @@ paths:
     N over every joined row, 19.8–46.6 s for a 100-row preview of a 25 k × 153 M-row LEFT JOIN, and its exact cheaper
     form (the preserved side limited first) still reads the big table's whole join column. OFFSET alone and LIMIT ALL
     stay as they were, and `afterLimit` still needs a sort. The plan fixture and `tests/duck-wire.test.ts` hold the
-    form, `oracle/unordered-limit.ts` the rows. ("A top N over joined tables");
+    form, `oracle/unordered-limit.ts` the rows. **A sort whose every key and WHERE read the side an outer join
+    preserves limits that side first** (`preservedFirst`, issue 824 part 2): its first OFFSET + LIMIT rows by the same
+    keys (each yields at least one joined row, each key is its row's), then the join, sort and limit as written. Never
+    through an INNER, FULL or comma join, a WHERE or key of another side or a merged column, a volatile key or WHERE, a
+    DISTINCT ON, a LATERAL item or a LIMIT that is a parameter; a schema-qualified column of the item is read by its
+    name inside (`shortened`). It still reads the other side's whole join column (about 20 s cold at 153 M rows): an
+    index or clustering is the owner's to decide. `tests/duck-wire.test.ts` "the preserved side of an outer join …",
+    the oracle's `preserved first:` and the plan fixture hold it ("A top N over joined tables");
   - **a grouped top N on a whole primary key reads its table's columns after the LIMIT** (`keyFirst`, src/duck/late.ts,
     issue 134, step 6): where the analysis proves a table's WHOLE primary key grouped (`keyGrouped`, pg_index's primary
     key only), the groups are formed as written with `any_value(t.rowid)`, the HAVING, ORDER BY and LIMIT applied, and
