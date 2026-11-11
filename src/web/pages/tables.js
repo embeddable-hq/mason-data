@@ -167,6 +167,103 @@ function pickForm(t, cols, ticked = null) {
     `<button type="submit" class="primary small">Add ${esc(name)}</button> ${button("Cancel", { cancelChoose: "", popClose: "" }, "small")}</form>`;
 }
 
+// ------------------------------------------------------------------ a table's Sync choice (issue 840)
+
+/** Where one table's Sync choice is read when it opens (src/cli/run-server.ts tableSyncChoice): its sync now, each poll's
+ *  cost on the database, and Live's checks — the database's read then, never with the state the page polls. */
+export const syncPath = (table) => `api/tables/${encodeURIComponent(table)}/sync`;
+/** The element a table's Sync choice opens from, and its popovers' anchor: unique in the document. */
+export const syncId = (table) => `sync-tables-${table}`;
+
+/** An interval in words: 300 → "5 minutes", 3600 → "hour". */
+const intervalWords = (seconds) => seconds % 86_400 === 0 ? (seconds === 86_400 ? "day" : `${seconds / 86_400} days`)
+  : seconds % 3600 === 0 ? (seconds === 3600 ? "hour" : `${seconds / 3600} hours`)
+  : seconds % 60 === 0 ? `${seconds / 60} minute${seconds === 60 ? "" : "s"}` : `${seconds} seconds`;
+const UNIT = { s: 1, m: 60, h: 3600, d: 86_400 };
+/** A sync as the sources file writes it (`off`, `poll 5m`, `replication`) in the page's words: Off, Every 5 minutes,
+ *  Live (replication) — "replication" kept beside Live, the word the file and `mason add --sync` use. */
+export function syncWords(value) {
+  if (value === "off") return "Off";
+  if (value === "replication") return "Live (replication)";
+  const m = /^poll (\d+)([smhd])$/.exec(value ?? "");
+  return m ? `Every ${intervalWords(Number(m[1]) * UNIT[m[2]])}` : String(value);
+}
+/** A table's sync now, as the run keeps it (`/api/state` `tables[].kept`, the sync's one derivation), as the file
+ *  writes it, or null when the run says none (not reached yet, or a generated table). */
+export function keptSync(t) {
+  const k = t.kept;
+  if (k?.by === "replication") return "replication";
+  if (k?.by === "poll") return k.sync.mode === "off" ? "off" : `poll ${k.sync.every}`;
+  return null;
+}
+
+/** `POST /api/pick`'s body for a sync chosen: only its sync, its columns and key kept (`mason add <table> --sync …`). */
+export const syncBody = (table, sync) => ({ table, picked: true, sync, keep: true });
+
+/** What Live keeps on the database, said wherever it can be chosen (issue 840). */
+export const LIVE_SLOT_WORDS = "Live keeps a replication slot on your database. While Mason is not reading it — stopped, or down — " +
+  "the slot holds every byte of WAL (the database's change log) written from then on, on your database's disk, until Mason reads it again " +
+  "or the slot is dropped (mason destroy, or no table left on sync: replication). max_slot_wal_keep_size caps what it may hold.";
+
+/** What a choice asks before it is saved, or null: a poll of a big table (its cost on the database), Live with a
+ *  warning (each said). `c`: `GET api/tables/<table>/sync`'s answer. */
+export function syncQuestion(c, value) {
+  const poll = c.polls.find((p) => p.sync === value);
+  if (poll && c.bigRows) {
+    return { lines: [poll.cost ?? `${entryName(c.table)} has more than 1,000,000 rows, and each poll scans it whole on your database.`],
+      ask: `Scan ${entryName(c.table)} whole on your database every ${intervalWords(poll.seconds)}?`, yes: `Poll it every ${intervalWords(poll.seconds)}` };
+  }
+  const warnings = value === "replication" ? c.live.checks.filter((x) => x.state === "warn") : [];
+  if (warnings.length) return { lines: warnings.map((x) => `${x.name}: ${x.detail}`), ask: `Keep ${entryName(c.table)} current by logical replication, with ${warnings.length === 1 ? "this warning" : "these warnings"}?`, yes: "Save Live (replication)" };
+  return null;
+}
+
+const CHECK_WORDS = { ok: ["ok", "ok"], warn: ["warn", "warning"], refused: ["bad", "fails"] };
+const checkLine = (x) => `<li class="check">${status(CHECK_WORDS[x.state][0], CHECK_WORDS[x.state][1])} <strong>${esc(x.name)}</strong> ${esc(x.detail)}` +
+  `${x.sql ? `<pre class="sql"><code>${esc(x.sql)}</code></pre>` : ""}</li>`;
+
+/**
+ * A TABLE'S SYNC CHOICE (a dialog beside its sync, `pop`): Off, a poll at each preset — each saying it scans the whole
+ * table at that interval, a big table's its cost —, or Live (replication), chosen only when `live.allowed` (every check
+ * passes), else shown disabled with each failing check in the server's words and the SQL that fixes it; what Live keeps
+ * on the database said plainly. `c`: the answer of `GET api/tables/<table>/sync` ({ table, failure } when refused, null
+ * while read); `ask`: the choice whose question is asked before it is saved (`syncQuestion`), or null; `open`: whether
+ * the passing checks' details is open; `picked`: the choice the person ticked (kept by the page, so a rewrite of
+ * the part writes it ticked), else its sync now.
+ */
+export function renderSyncChoice(t, c, ask = null, open = false, picked = null) {
+  const name = entryName(t.table);
+  const cancel = button("Cancel", { cancelSync: "", popClose: "" }, "small");
+  if (c?.table !== t.table) return `<p class="dim">Reading ${esc(name)}'s sync and checking your database for logical replication…</p>${cancel}`;
+  if ("failure" in c) return `${renderFailure(c.failure)}${cancel}`;
+  if (ask !== null) {
+    const q = syncQuestion(c, ask);
+    return `${q.lines.map((x) => `<p class="note">${esc(x)}</p>`).join("")}<p class="asks">${esc(q.ask)}</p>` +
+      `<p class="pop-actions">${button(q.yes, { saveSync: t.table, sync: ask }, "primary small")} ${button("Back", { backSync: "" }, "small")} ${cancel}</p>`;
+  }
+  const now = c.sync?.value ?? "off";
+  // the one ticked: what the person ticked (`picked`, kept by the page across a rewrite), else its sync now
+  const ticked = picked ?? now;
+  const radio = (value, label, what, { disabled = false, extra = "" } = {}) =>
+    `<label class="choice${disabled ? " disabled" : ""}"><input type="radio" name="sync" value="${esc(value)}"${value === ticked ? " checked" : ""}${disabled ? " disabled" : ""}> ` +
+    `<span class="choice-body"><span><span class="choice-label">${esc(label)}</span>${value === now ? ` <span class="dim">(its sync now)</span>` : ""}</span><span class="choice-what">${esc(what)}</span>${extra}</span></label>`;
+  const polls = c.polls.map((p) => radio(p.sync, syncWords(p.sync), `Scans the whole table on your database every ${intervalWords(p.seconds)}.`,
+    { extra: p.cost ? `<span class="choice-cost">${esc(p.cost)}</span>` : "" }));
+  // its sync now, written in the sources file at an interval the page does not offer: kept as a choice of its own
+  const other = now.startsWith("poll ") && !c.polls.some((p) => p.sync === now)
+    ? [radio(now, syncWords(now), "Scans the whole table on your database at that interval, as the sources file says.")] : [];
+  const refused = c.live.checks.filter((x) => x.state === "refused"), warned = c.live.checks.filter((x) => x.state === "warn"), passed = c.live.checks.filter((x) => x.state === "ok");
+  const live = radio("replication", "Live (replication)", "Changes stream from your database's change log: no scans.", { disabled: !c.live.allowed });
+  const checks = (refused.length ? `<p class="live-no">Live cannot be chosen: ${esc(refused.map((x) => x.name).join(", "))}.</p><ul class="checks">${refused.map(checkLine).join("")}</ul>` : "") +
+    (warned.length ? `<ul class="checks">${warned.map(checkLine).join("")}</ul>` : "") +
+    (passed.length ? details(`synccheck:${t.table}`, `The checks that pass (${passed.length})`, `<ul class="checks">${passed.map(checkLine).join("")}</ul>`, open) : "");
+  return `<form class="pick syncpick" data-sync-form="${esc(t.table)}" autocomplete="off">` +
+    `<fieldset><legend>How Mason keeps ${esc(name)} current after its first sync</legend><p class="choice-what">As ${code(`mason add ${name} --sync`)}: its entry's sync: in the sources file.</p>` +
+    radio("off", "Off", `Synced once, then only when you press Sync now (mason sync ${name}).`) + [...polls, ...other].join("") + live +
+    `<p class="note live-slot">${esc(LIVE_SLOT_WORDS)}</p>${checks}</fieldset>` +
+    `<button type="submit" class="primary small">Save</button> ${cancel}</form>`;
+}
+
 /** The cards over the list: the tables added of all, those synced, those failed and the copies' rows (`/api/state`
  *  `totals`, which `mason status --json` also carries); none before the state, or with no table to count. */
 export function renderTablesCards(s) {
@@ -199,7 +296,8 @@ export function renderTablesCards(s) {
  * search box's text and `ui.show` the state filter (a key of SHOWS).
  */
 export function renderTables(s, ui = {}) {
-  const { removing = null, choosing = null, columns = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], adding = [], shares = new Map(), before = new Map(), synced = null, open = () => false, limit = TABLE_ROWS } = ui;
+  const { removing = null, choosing = null, columns = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], adding = [], shares = new Map(), before = new Map(), synced = null, open = () => false, limit = TABLE_ROWS,
+    syncOpen = null, syncChoice = null, syncAsk = null, syncPicked = null } = ui;
   const now = ui.now ?? Date.now();
   if (!s.tables.length) return empty(`${s.source.database} has no table this user can read.`);
   // why the page changes nothing (MASON_UI_READ_ONLY=1: not even a Sync), or null — null when its tables are still its
@@ -250,7 +348,7 @@ export function renderTables(s, ui = {}) {
     // `tableLines`): full at 100% once copied, red when its copy failed, amber when it is not kept current, moving while
     // it copies, the indeterminate shimmer while it waits — the Overview's renderer (`copyBar`), its words the line's;
     // a table with none keeps its line, empty, so the row is as tall either way
-    const l = t.added && !adding_ ? tableLine(t) : null;
+    const l = t.added && !adding_ ? tableLine(t, now) : null;
     const bar = l ? `<span class="copyline t-${l.state}">${copyBar(t.table, l, shares.get(t.table) ?? l.fraction, before.get(t.table))}</span>` : `<span class="copyline none" aria-hidden="true"></span>`;
     const state = adding_ ? status("warn", "Adding…") : t.added ? (y ? status(undefined, SYNC_WORDS[y.state]) : "") : status("unknown", "Not added");
     const took = t.added && y?.syncSeconds != null ? `<span class="took" title="${esc(tookTitle(y))}">took ${esc(tookText(y))}</span>` : "";
@@ -258,8 +356,19 @@ export function renderTables(s, ui = {}) {
       ? `<td class="num"><span title="${esc(`${utcText(y.syncedAt)} UTC`)}">${esc(`${duration(y.ageSeconds)} ago`)}</span>${took}</td>` : `<td class="num">${took}</td>`;
     // what is said at length, its note under the row: the words the CLI prints after a bar that is not full and current,
     // an error (its first line; the whole in a details), why it cannot be added as it is, its stream state (replication mode)
+    // ITS SYNC, first on its note: what the run keeps it by now, and — where the page may edit the sources file — the
+    // button that opens its Sync choice (a dialog beside it); read-only, the words alone, the reason their title
+    const keptNow = keptSync(t);
+    const syncWord = keptNow === null ? "Sync…" : `Sync: ${syncWords(keptNow)}`;
+    const syncCtl = !t.added || adding_ ? ""
+      : readOnly !== null ? `<span class="syncnow dim" title="${esc(readOnly)}">${esc(syncWord)}</span>`
+      : `<button type="button" class="small link syncnow" id="${esc(syncId(t.table))}" data-choose-sync="${esc(t.table)}"${syncOpen === t.table ? ` aria-expanded="true"` : ""} title="${esc(`Choose how Mason keeps ${name} current`)}">${esc(syncWord)}</button>`;
+    if (syncOpen === t.table && t.added && readOnly === null) {
+      pops.push(pop(syncId(t.table), renderSyncChoice(t, syncChoice, syncAsk, open(`synccheck:${t.table}`), syncPicked), { kind: "dialog", label: `Sync ${name}` }));
+    }
     const said_ = adding_ ? `<span class="dim">adding it to the sources file…</span>`
       : t.added ? [
+        syncCtl,
         l && l.state !== "done" && !t.error ? `<span class="what-copy t-${l.state}">${esc(l.what)}</span>` : "",
         t.error ? `<span class="err">${esc(firstLine(t.error))}</span>${t.error.includes("\n") ? details(`error:${t.table}`, "the whole error", `<pre>${esc(t.error)}</pre>`, open(`error:${t.table}`)) : ""}` : "",
         stream && stream.get(t.table) ? `<span class="stream dim">Stream: ${esc(stream.get(t.table))}</span>` : "",
@@ -275,7 +384,8 @@ export function renderTables(s, ui = {}) {
     const refusedHere = outcome?.table === t.table && "failure" in outcome;
     if (formOpen) pops.push(pop(anchor, (refusedHere ? renderFailure(outcome.failure) : "") + pickForm(t, columns, ticked), { kind: "dialog", label: `Add ${name}` }));
     if (outcome?.table === t.table && !(formOpen && refusedHere)) {
-      pops.push(pop(anchor, "failure" in outcome ? `${renderFailure(outcome.failure)}${button("Dismiss", { dismissOutcome: "", popClose: "" }, "small")}`
+      // a sync saved (or refused) is said beside the sync it changed; an add or a remove beside the row's actions
+      pops.push(pop(outcome.at === "sync" && t.added && readOnly === null ? syncId(t.table) : anchor,"failure" in outcome ? `${renderFailure(outcome.failure)}${button("Dismiss", { dismissOutcome: "", popClose: "" }, "small")}`
         : "added" in outcome ? renderTableAdded(outcome.added, shownFileOf(s, outcome.added.file)) : renderTablesRemoved(outcome.removed, shownFileOf(s, outcome.removed.file))));
     }
     if (synced?.table === t.table) {
@@ -310,7 +420,11 @@ export const page = {
   id: "tables",
   title: "Tables",
   create(ctx) {
-    const m = { removing: null, choosing: null, columns: null, outcome: null, ticked: null, held: null, heldFilter: null, heldShow: null, filter: "", show: "all", syncing: [], adding: [], synced: null, limit: TABLE_ROWS };
+    const m = { removing: null, choosing: null, columns: null, outcome: null, ticked: null, held: null, heldFilter: null, heldShow: null, filter: "", show: "all", syncing: [], adding: [], synced: null, limit: TABLE_ROWS,
+      // the table whose Sync choice is open, what `GET api/tables/<table>/sync` answered for it (null while read), the
+      // choice whose question is asked before it is saved, and the read in flight: ONE at a time for the page, never on
+      // a timer — each is a connection to the database
+      syncOpen: null, syncChoice: null, syncAsk: null, syncRead: null, syncPicked: null, heldNow: null };
     const state = () => ctx.read("api/state")?.body ?? null;
     const monotone = createMonotone();
     // the details open (a copy's whole error), by key: a poll rewrites the part, and they stay open
@@ -322,10 +436,12 @@ export const page = {
     // refresh in between (its rows and its added marks may be minutes old) — and is written from the latest state again
     // once they Add, Cancel or confirm.
     const hold = () => {
-      const held = m.choosing !== null || m.removing !== null;
+      const held = m.choosing !== null || m.removing !== null || m.syncOpen !== null;
       m.heldFilter = held ? m.held === null ? m.filter : m.heldFilter : null;
       m.heldShow = held ? m.held === null ? m.show : m.heldShow : null;
       m.held = held ? m.held ?? state() : null;
+      // and the moment it is written as of: an age that moved would rewrite the part under the person (a choice ticked lost)
+      m.heldNow = held ? m.heldNow ?? ctx.now().getTime() : null;
       if (m.choosing === null) m.ticked = null;
     };
     const actions = {
@@ -346,7 +462,7 @@ export const page = {
       /** Open a table's form: its columns read now, once (the state the page polls carries none). */
       async choose(table) {
         // a question opened takes the last answer away: two popovers never stand on one another
-        m.choosing = table; m.removing = null; m.ticked = null; m.columns = null; m.outcome = null; m.synced = null; hold();
+        m.choosing = table; m.removing = null; m.syncOpen = null; m.ticked = null; m.columns = null; m.outcome = null; m.synced = null; hold();
         const r = await ctx.ask(columnsPath(table));
         // closed, or another table's opened, while it was read: that answer is not this form's
         if (m.choosing !== table) return false;
@@ -354,7 +470,39 @@ export const page = {
         return true;
       },
       cancelChoose() { m.choosing = null; m.columns = null; hold(); },
-      askRemoveTable(table) { m.removing = table; m.choosing = null; m.outcome = null; m.synced = null; hold(); },
+      /** Open a table's Sync choice: its sync, its polls' cost and Live's checks read now, once — after any read still in
+       *  flight, so the page never has two checks of the database open at once. */
+      async chooseSync(table) {
+        m.syncOpen = table; m.syncChoice = null; m.syncAsk = null; m.syncPicked = null; m.choosing = null; m.removing = null; m.outcome = null; m.synced = null; hold();
+        const before = m.syncRead;
+        const read = (async () => { await before; return ctx.ask(syncPath(table)); })();
+        m.syncRead = read;
+        const r = await read;
+        if (m.syncRead === read) m.syncRead = null;
+        // closed, or another table's opened, while it was read: that answer is not this choice's
+        if (m.syncOpen !== table) return false;
+        m.syncChoice = "failure" in r ? { table, failure: r.failure } : r.body;
+        return true;
+      },
+      cancelSync() { m.syncOpen = null; m.syncChoice = null; m.syncAsk = null; m.syncPicked = null; hold(); },
+      backSync() { m.syncAsk = null; },
+      /** A choice submitted: asked first when it must be (a big table's poll, Live with a warning), else saved. */
+      chooseSyncValue(table, value) {
+        if (m.syncOpen !== table || m.syncChoice?.table !== table || "failure" in m.syncChoice || typeof value !== "string") return false;
+        if (syncQuestion(m.syncChoice, value) !== null) { m.syncAsk = value; return true; }
+        return actions.saveSync(table, value);
+      },
+      /** Save a table's sync (`mason add <table> --sync …`, its columns kept): the answer, or the refusal as the run words
+       *  it — Live's checks read again there — beside its sync, then the state read again. */
+      async saveSync(table, value) {
+        const r = await ctx.ask("api/pick", json("POST", syncBody(table, value)));
+        m.syncOpen = null; m.syncChoice = null; m.syncAsk = null; m.syncPicked = null; hold();
+        m.outcome = "failure" in r ? { table, failure: r.failure, at: "sync" } : { table, added: r.body, at: "sync" };
+        if ("failure" in r) return false;
+        await ctx.refresh(["api/state"]);
+        return true;
+      },
+      askRemoveTable(table) { m.removing = table; m.choosing = null; m.syncOpen = null; m.outcome = null; m.synced = null; hold(); },
       cancelRemoveTable() { m.removing = null; hold(); },
       /** Remove a table (`mason remove`), once asked: the answer beside its actions, then the state read again. */
       async confirmRemoveTable(table) {
@@ -397,6 +545,7 @@ export const page = {
         const added = (table) => s.tables.some((t) => t.table === table && t.added);
         if (m.removing !== null && !added(m.removing)) m.removing = null;
         if (m.choosing !== null && added(m.choosing)) m.choosing = null;
+        if (m.syncOpen !== null && !added(m.syncOpen)) { m.syncOpen = null; m.syncChoice = null; m.syncAsk = null; }
         hold();
       },
       actions,
@@ -407,14 +556,17 @@ export const page = {
         const latest = state();
         return {
           "tables-cards": latest ? renderTablesCards(latest) : "",
-          tables: s ? renderTables(s, { removing: m.removing, choosing: m.choosing, columns: m.columns, outcome: m.outcome, ticked: m.ticked, now: ctx.now().getTime(),
+          tables: s ? renderTables(s, { removing: m.removing, choosing: m.choosing, columns: m.columns, outcome: m.outcome, ticked: m.ticked, now: m.heldNow ?? ctx.now().getTime(),
             filter: m.held ? m.heldFilter : m.filter, show: m.held ? m.heldShow : m.show, syncing: m.syncing, adding: m.adding, shares: monotone.of(latest ?? s), before: monotone.before, synced: m.synced, open: opened.has, limit: m.limit,
+            syncOpen: m.syncOpen, syncChoice: m.syncChoice, syncAsk: m.syncAsk, syncPicked: m.syncPicked,
             sizes: sizes === undefined ? undefined : sizes.failure ? { failure: sizes.failure } : sizes.body }) : "",
         };
       },
       submit(form, FormData) {
         // a table's form is written into the tables part: the ticked boxes sent as they are (FormData's getAll: the
         // values of the boxes ticked, in the page's order)
+        // a table's Sync choice: the one choice ticked
+        if (form.dataset?.syncForm !== undefined) return actions.chooseSyncValue(form.dataset.syncForm, new FormData(form).get("sync"));
         if (form.dataset?.pickForm === undefined) return null;
         const ticked = new FormData(form);
         return actions.addTable(form.dataset.pickForm, ticked.getAll("columns"), ticked.getAll("key"));
@@ -438,12 +590,18 @@ export const page = {
         if (d.dismissOutcome !== undefined) return actions.dismissOutcome() ?? true;
         if (d.syncTable !== undefined) return actions.syncTable(d.syncTable);
         if (d.dismissSynced !== undefined) return actions.dismissSynced() ?? true;
+        if (d.chooseSync !== undefined) return actions.chooseSync(d.chooseSync);
+        if (d.cancelSync !== undefined) return actions.cancelSync() ?? true;
+        if (d.backSync !== undefined) return actions.backSync() ?? true;
+        if (d.saveSync !== undefined) return actions.saveSync(d.saveSync, d.sync);
         return null;
       },
       toggle: (target) => opened.toggle(target),
       /** Escape with no question or form open: the answer beside a row goes (null: none is shown) */
       dismiss() { if (m.outcome === null && m.synced === null) return null; actions.dismissAnswer(); return true; },
       input(target) {
+        // a choice ticked in an open Sync choice: kept, so a rewrite of the part writes it as ticked (nothing to paint now)
+        if (target.name === "sync" && target.form?.dataset?.syncForm === m.syncOpen) { m.syncPicked = target.value; return null; }
         if (target.id === "tables-show") return actions.showTables(target.value) ?? true;
         if (target.id !== "tables-filter") return null;
         return actions.filterTables(target.value) ?? true;

@@ -290,6 +290,26 @@ label.tick { display: inline-flex; align-items: baseline; gap: var(--space-1); m
 /* a tick's box is its own size: never the phone's input { flex: 1 1 10em }, which squeezed its column's name to a letter a line */
 label.tick input { flex: none; }
 label.tick code { overflow-wrap: normal; }
+/* a table's Sync choice (src/web/pages/tables.js renderSyncChoice): its sync on its note, a quiet button of the note's
+   line height (every added row's note has it, so no row moves when it opens); the dialog a radio a line, each choice's
+   words under its label, a check a line with its state's word and the SQL that fixes it */
+button.link.syncnow { height: 20px; padding: 0 var(--space-1); border-color: var(--line); background: none; box-shadow: none; color: var(--fg); }
+button.link.syncnow:hover { background: var(--hover); border-color: var(--line-strong); }
+span.syncnow { white-space: nowrap; }
+.pop:has(form.syncpick) { max-width: min(40rem, calc(100vw - 32px)); max-height: min(calc(100vh - 32px), 46rem); }
+form.syncpick label.choice { display: flex; align-items: baseline; gap: var(--space-2); margin: 2px 0; color: var(--fg); cursor: pointer; }
+form.syncpick label.choice input { flex: none; min-width: 0; height: auto; accent-color: var(--accent); }
+form.syncpick label.choice.disabled { color: var(--muted); cursor: not-allowed; }
+form.syncpick .choice-body { display: flex; flex-direction: column; min-width: 0; }
+form.syncpick .choice-label { font-weight: 600; }
+form.syncpick .choice-what, form.syncpick .choice-cost { color: var(--muted); font-size: var(--text-xs); }
+form.syncpick .choice-cost { color: var(--warn); }
+form.syncpick .live-slot { margin: var(--space-2) 0; font-size: var(--text-xs); color: var(--muted); }
+form.syncpick .live-no { margin: var(--space-2) 0 var(--space-1); color: var(--fg); font-size: var(--text-sm); }
+ul.checks { list-style: none; margin: 0 0 var(--space-2); padding: 0; font-size: var(--text-xs); }
+ul.checks li.check { margin: var(--space-1) 0; overflow-wrap: anywhere; }
+ul.checks pre.sql { margin: var(--space-1) 0 0; padding: var(--space-1) var(--space-2); background: var(--code-bg); color: var(--code-fg); white-space: pre-wrap; }
+.pop .asks { margin: var(--space-2) 0; color: var(--fg); }
 
 /* ---------------------------------------------------------------- KPI cards */
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: var(--space-4); margin: 0 0 var(--space-6); }
