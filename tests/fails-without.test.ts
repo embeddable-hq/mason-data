@@ -43,6 +43,7 @@ function repo(t: { after: (fn: () => void) => void }): Repo {
   fs.mkdirSync(path.join(dir, "tests"));
   fs.copyFileSync(SCRIPT, path.join(dir, "scripts", "fails-without.ts"));
   fs.copyFileSync(path.join(ROOT, "scripts", "gate.ts"), path.join(dir, "scripts", "gate.ts")); // its per-test bound
+  fs.copyFileSync(path.join(ROOT, "scripts", "worktree-lock.ts"), path.join(dir, "scripts", "worktree-lock.ts"));
   fs.writeFileSync(path.join(dir, ".gitignore"), "ignored.txt\n");
   fs.writeFileSync(path.join(dir, "ignored.txt"), "linked, not committed\n");
   fs.writeFileSync(path.join(dir, MODULE), BUGGY);
@@ -110,7 +111,7 @@ test("git reads a repository of its own", () => {
   assert.equal(git("rev-parse", "HEAD").trim(), process.env.HEAD_THERE);
 });
 test("its tracked files are the tree's, the staged one too", () => {
-  assert.deepEqual(git("ls-files").trim().split("\\n"), [".gitignore", "scripts/fails-without.ts", "scripts/gate.ts", "src" + "/double.ts", "staged.txt"]);
+  assert.deepEqual(git("ls-files").trim().split("\\n"), [".gitignore", "scripts/fails-without.ts", "scripts/gate.ts", "scripts/worktree-lock.ts", "src" + "/double.ts", "staged.txt"]);
 });
 test("what is uncommitted reads as uncommitted", () => {
   assert.match(git("status", "--porcelain"), /^\\?\\? tests\\/$/m);
@@ -339,16 +340,18 @@ test("a run killed outright leaves a copy, and the next run removes it", async (
 
 test("the worktree lock of a run killed while it held it is taken over, and released", (t) => {
   const r = repo(t);
-  // a pid that is dead: a child that has exited
-  const dead = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }).stdout;
+  // a run killed while it held the lock: it takes it, and is killed inside
   const lock = path.join(r.dir, ".git", "fails-without-worktrees.lock");
-  fs.writeFileSync(lock, dead);
+  const killed = spawnSync(process.execPath, ["--input-type=module", "-e",
+    `import { underLock } from ${JSON.stringify(path.join(r.dir, "scripts", "worktree-lock.ts"))}; underLock(${JSON.stringify(lock)}, () => process.kill(process.pid, "SIGKILL"));`]);
+  assert.equal(killed.signal, "SIGKILL");
+  const dead = killed.pid;
   const x = run(r, FILE);
   assert.equal(x.code, 0, x.out);
   assert.match(x.out, new RegExp(`took over the worktree lock of a run that was killed \\(pid ${dead}\\)`));
   assert.match(x.out, /PROVED: 2 test\(s\)/);
-  assert.equal(fs.existsSync(lock), false, "the lock is released");
-  assert.deepEqual(fs.readdirSync(path.join(r.dir, ".git")).filter((f) => f.startsWith("fails-without-worktrees.lock")), []);
+  assert.deepEqual(fs.readdirSync(lock), [], "the lock is released: its folder holds no owner");
+  assert.deepEqual(fs.readdirSync(path.join(r.dir, ".git")).filter((f) => f.startsWith("fails-without-worktrees.lock")), ["fails-without-worktrees.lock"], "no run left a folder of its own beside it");
   assertClean(r);
 });
 

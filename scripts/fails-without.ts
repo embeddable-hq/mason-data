@@ -37,6 +37,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { setImmediate as yieldToSignals } from "node:timers/promises";
 import { TEST_BOUND_ARGS } from "./gate.ts";
+import { underLock } from "./worktree-lock.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -85,43 +86,14 @@ const git = (...a: string[]): string => execFileSync("git", a, { cwd: ROOT, enco
  * ONE RUN AT A TIME CHANGES OR READS THIS REPOSITORY'S WORKTREES (issue 792). `git worktree add` reads every entry
  * under .git/worktrees/ while another add is still writing its own, and fails on the half-written one
  * (`fatal: failed to read .git/worktrees/tree1/commondir: Success`); `remove` reads them the same way. So every
- * `git worktree` call here is made under a lock file in the repository's common git dir, shared by all its checkouts,
- * held only for the call and never across a test run. A lock whose pid is dead (a run killed while it held it) is taken
- * over; one held past LOCK_WAIT_MS is an error that names it.
+ * `git worktree` call here is made under one lock in the repository's common git dir, shared by all its checkouts,
+ * held only for the call and never across a test run (scripts/worktree-lock.ts: a killed holder's lock is taken over).
  */
-const LOCK_WAIT_MS = 120_000;
-const pause = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
-const alive = (pid: number): boolean => {
-  try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code !== "ESRCH"; }
-};
-let lockFile: string | null = null;
-function underWorktreeLock<T>(fn: () => T): T {
-  lockFile ??= path.join(path.resolve(ROOT, git("rev-parse", "--git-common-dir").trim()), "fails-without-worktrees.lock");
-  const lock = lockFile;
-  const until = Date.now() + LOCK_WAIT_MS;
-  for (;;) {
-    try { fs.writeFileSync(lock, String(process.pid), { flag: "wx" }); break; }
-    catch (e) { if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; }
-    let holder: number;
-    try { holder = Number(fs.readFileSync(lock, "utf8")); }
-    catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") continue; throw e; } // released between the two
-    // an empty file is a holder between its create and its write: alive, wait for it
-    if (holder > 0 && !alive(holder)) {
-      // taken over by a rename, so two runs that both saw the dead pid cannot both remove it (the second's fails
-      // ENOENT); what was renamed is read again, and a live holder's lock that came in between is put back
-      const taken = `${lock}.${process.pid}`;
-      try { fs.renameSync(lock, taken); } catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") continue; throw e; }
-      const was = Number(fs.readFileSync(taken, "utf8"));
-      if (was === holder) { fs.rmSync(taken); console.log(`[fails-without] took over the worktree lock of a run that was killed (pid ${holder})`); continue; }
-      fs.linkSync(taken, lock); // EEXIST throws: two holders would be worse than an error
-      fs.rmSync(taken);
-    }
-    if (Date.now() > until) throw new Error(`${lock} is held by pid ${holder} for over ${LOCK_WAIT_MS / 1000} s: run again once that run ends, or remove the file if no fails-without run is running`);
-    pause(20);
-  }
-  try { return fn(); } finally { fs.rmSync(lock, { force: true }); }
+let lockDir: string | null = null;
+function worktree(...a: string[]): string {
+  lockDir ??= path.join(path.resolve(ROOT, git("rev-parse", "--git-common-dir").trim()), "fails-without-worktrees.lock");
+  return underLock(lockDir, () => git("worktree", ...a), { onTakeOver: (pid) => console.log(`[fails-without] took over the worktree lock of a run that was killed (pid ${pid})`) });
 }
-const worktree = (...a: string[]): string => underWorktreeLock(() => git("worktree", ...a));
 
 const copyOf = (holder: string): string => path.join(holder, "tree");
 function removeCopy(holder: string): string | null {
