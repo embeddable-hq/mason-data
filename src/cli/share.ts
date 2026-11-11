@@ -26,6 +26,7 @@ import { appEnvValue } from "../lib/dotenv.ts";
 import { newSharePassword, shareSecret, type OpenedShare, type ShareChoice, type ShareTunnel } from "./share-run.ts";
 import { probeShare, startTunnel, sweepTunnelFiles, TOKEN_RE, TUNNELS, tunnelPlan, type OpenTunnel, type TunnelPlan, type Via } from "./tunnel.ts";
 import { parseDuration } from "../lib/table-sync.ts";
+import { connectionUrl } from "./pg-url.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 const say = (m: string): void => { process.stderr.write(`${m}\n`); };
@@ -70,8 +71,8 @@ export const SHARE: CommandSpec & { needs: "run" } = {
   line is visible to every user of the machine), a paid Pinggy token, keeps the address, so a tunnel that drops is opened
   again by itself, the password unchanged. --via bore needs bore (cargo install bore-cli).
 
-  The --json answer, once the address is known: { share: { host, port, database, user, password, sslmode,
-    fingerprint, role, reads, via, endsAt (ISO 8601, or null), verified (the address answered with this
+  The --json answer, once the address is known: { share: { url (what a tool pastes: the user and the password in it),
+    host, port, database, user, password, sslmode, fingerprint, role, reads, via, endsAt (ISO 8601, or null), verified (the address answered with this
     share's certificate; false: it could not be reached from this machine) }, next }; the command
     then holds the share: the end is on stderr, exit 0 for Ctrl-C or SIGTERM, 1 otherwise
 `,
@@ -206,13 +207,15 @@ async function holding(h: Holding): Promise<number> {
   steps.done(`Tunnel open: ${tunnel.host}:${tunnel.port}`);
   await tell({ host: tunnel.host, port: tunnel.port, endsAt: tunnel.endsAt, state: "up", pid: tunnel.pid });
   const next: NextStep[] = [["mason status", "the share, its sessions and the logins refused"], ["mason logs --requests", "what the tool asks"]];
+  // what a tool pastes: the share's address, user and password, by the one builder every printed URL comes from
+  const url = connectionUrl({ url: "", host: tunnel.host, port: tunnel.port, database: opened.database, sslmode: "require" }, opened.user, password);
   if (json) {
-    out(jsonText(SHARE, { share: { host: tunnel.host, port: tunnel.port, database: opened.database, user: opened.user, password, sslmode: "require", fingerprint: opened.fingerprint,
+    out(jsonText(SHARE, { share: { url, host: tunnel.host, port: tunnel.port, database: opened.database, user: opened.user, password, sslmode: "require", fingerprint: opened.fingerprint,
       role: opened.role, reads: opened.reads, via: plan.via, endsAt: tunnel.endsAt, verified: first.verified } }, next));
   } else {
     const st = styleOut();
     out(reportText({
-      headline: "Sharing the synced data with a tool outside this machine",
+      headline: `Try mason with your favorite postgres client: ${url}`,
       details: [["host", tunnel.host], ["port", String(tunnel.port)], ["database", opened.database], ["user", opened.user], ["password", password], ["sslmode", "require"],
         ["certificate", `SHA-256 ${opened.fingerprint}`], ["reads", opened.role === null ? `${opened.reads} (this project has no roles file)` : `the role ${opened.role}: ${opened.reads}`],
         ["via", plan.via], ["ends", endsText(tunnel.endsAt, Date.now())]],
