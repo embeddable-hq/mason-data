@@ -138,6 +138,8 @@ test("mason user add prints the URL a tool pastes: it connects as that user, and
   assert.match(h.stdout, new RegExp(`^ {2}url +postgres://grafana:mason_[0-9a-f]{16}_[0-9a-f]{32}@127\\.0\\.0\\.1:${api.port}/shop$`, "m"));
   assert.match(h.stdout, /^The user grafana added: its password is printed this once$/m);
   assert.match(h.stdout, /Rotating the API key .* removes every user at once/);
+  // a mason start run on loopback: the way to a cloud tool, the last tip, just above Next
+  assert.match(h.stdout, /\nTip: A tool outside this machine \(a cloud BI tool\) cannot reach this address: mason share opens one on the internet, with a login and password of its own, for as long as it runs\.\n\nNext:\n/);
   assert.doesNotMatch(h.stdout, /token|credential/i);
   // a name is one user
   const again = await runMason(root, ["user", "add", "metabase", "--json"], env);

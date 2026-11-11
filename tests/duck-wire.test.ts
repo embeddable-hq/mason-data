@@ -1351,6 +1351,15 @@ test("past what may spill is 53400 and a full disk 53100, each with the way out,
   assert.equal(pgErrorOf(new Error("Out of Memory Error: could not allocate block of size 256 KiB"), "SELECT 1").fields.code, "53200", "memory stays memory");
   // a commit that could not pin a block is the limit too (issue 96, measured on DuckDB 2.0.0); another commit failure is not
   assert.equal(pgErrorOf(new Error("TransactionContext Error: Failed to commit: failed to pin block of size 1.0 MiB (365.7 MiB/366.2 MiB used)"), "COMMIT").fields.code, "53200");
+  // every sentence the engine's buffer manager says the limit in, at a commit as in a statement (issue 829: a chunk's
+  // commit said "could not allocate block", read as XX000, and failed the first sync instead of reading on smaller)
+  for (const said of ["could not allocate block of size 1.9 KiB (734.2 MiB/732.4 MiB used)", "failed to allocate data of size 4.0 MiB (127.9 MiB/128.0 MiB used)",
+    "failed to pin block of size 256.0 KiB (122.0 MiB/122.0 MiB used)", "failed to reserve memory data of size 1.0 MiB (127.5 MiB/128.0 MiB used)"]) {
+    assert.equal(pgErrorOf(new Error(`TransactionContext Error: Failed to commit: ${said}\n\nPossible solutions:\n* Reducing the number of threads (SET threads=X)`), "COMMIT").fields.code, "53200", said);
+    assert.equal(pgErrorOf(new Error(`Out of Memory Error: ${said}`), "SELECT 1").fields.code, "53200", said);
+  }
+  // a commit's other failure that merely mentions a size is not the limit
+  assert.equal(pgErrorOf(new Error("TransactionContext Error: Failed to commit: could not allocate block of size 1.9 KiB"), "COMMIT").fields.code, "XX000");
   assert.equal(pgErrorOf(new Error("TransactionContext Error: Failed to commit: PRIMARY KEY or UNIQUE constraint violation"), "COMMIT").fields.code, "XX000");
   assert.equal(pgErrorOf(new Error("TransactionContext Error: Current transaction is aborted (please ROLLBACK)"), "COMMIT").fields.code, "XX000");
   // a statement's literal holding the engine's words is that statement's error

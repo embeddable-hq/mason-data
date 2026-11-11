@@ -15,6 +15,7 @@ import { failed, jsonText, listFlag, parseCommand, reportText, strict, withEnd, 
 import { reach } from "./state.ts";
 import { callRun, RunUnreachable } from "./control.ts";
 import { clientLink, connectionUrl, listenerTips, psqlLine, type PostgresLink } from "./pg-url.ts";
+import { isLoopback } from "../api/postgres/plain.ts";
 import { changeUsers, isActive, isDisabled, keyFingerprint, newUserId, readUsers, underKey, userPassword, userRanges, USER_NAME_RE, USER_NAME_RULE, USERS_FILE, type MasonUser } from "../duck/users.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { out as styleOut, type Style } from "./style.ts";
@@ -668,13 +669,26 @@ export const removedReport = (r: Removed, up: boolean, next: readonly NextStep[]
     tips: [`Adding ${gone.name} again makes a new password: the old one never connects again.`], next }, s);
 };
 
+/** The way to a tool outside this machine, under `mason user add`'s rows: `mason share` is a login of its own, never this user's. */
+export const SHARE_TIP = "A tool outside this machine (a cloud BI tool) cannot reach this address: mason share opens one on the internet, with a login and password of its own, for as long as it runs.";
+
+/**
+ * WHETHER `mason user add` POINTS TO `mason share`: only where the share can be opened and the address printed reaches
+ * this machine alone — a `mason start` run that is up (the URL printed), listening on loopback, with no public address.
+ * Never beside `mason serve`'s run (it refuses `mason share`, and its address is the server's), and never with
+ * `--replica` (a hosted replica's address is already remote: user-hosted.ts passes none).
+ */
+export const sharePoints = (served: boolean, link: PostgresLink | null, listener: PostgresListener | null): boolean =>
+  !served && link !== null && link.public !== true && listener !== null && isLoopback(listener.host);
+
 /**
  * `mason user add` for a person: the password, printed this once, in the url, psql and password rows (and nowhere else).
  * The url, psql, host, port and ssl mode rows are there when the answer has them (Mason runs, so where it listens is
  * known). `roles`: the roles as a command beside them sees them (the file's name in the role row; NO_ROLES where none
- * can be read here); `listener`: how this run listens (its tips), null where it is not known here.
+ * can be read here); `listener`: how this run listens (its tips), null where it is not known here; `share`: the tip
+ * naming `mason share` for a tool outside this machine (`sharePoints`), last, just above Next.
  */
-export function addedReport(r: Omit<AddedUser, "replaced"> & { replaced?: boolean }, o: { roles: RolesLive; listener: PostgresListener | null; link?: PostgresLink | null; next: readonly NextStep[]; on?: string }, s: Style = styleOut()): string {
+export function addedReport(r: Omit<AddedUser, "replaced"> & { replaced?: boolean }, o: { roles: RolesLive; listener: PostgresListener | null; link?: PostgresLink | null; next: readonly NextStep[]; on?: string; share?: boolean }, s: Style = styleOut()): string {
   const { roles } = o;
   return reportText({
     headline: `The user ${userOn(r.user, o.on)} added${r.replaced === true ? " (in place of one the API key's rotation had removed)" : ""}: its password is printed this once`,
@@ -695,6 +709,7 @@ export function addedReport(r: Omit<AddedUser, "replaced"> & { replaced?: boolea
       ...listenerTips(o.listener, o.link ?? null),
       "It never expires: mason user remove ends it, at once and for every session it holds.",
       "Rotating the API key (apiKey in .mason/config.json, MASON_API_KEY under mason serve) removes every user at once.",
+      ...(o.share === true ? [SHARE_TIP] : []),
     ],
     next: o.next,
   }, s);
@@ -835,6 +850,7 @@ export async function user(argv: string[]): Promise<number> {
   const { replaced: _, ...added } = r;
   const next = addedNext(r.user, link !== null);
   if (json) { out(jsonText(USER, added, next)); return 0; }
-  out(addedReport(r, { roles, listener: run?.postgresListener ?? null, link, next }));
+  const listener = run?.postgresListener ?? null;
+  out(addedReport(r, { roles, listener, link, next, share: sharePoints(project.config.served === true, link, listener) }));
   return 0;
 }

@@ -477,7 +477,7 @@ Run each probe that applies: the implementer before each push, and the fresh rev
   the keyed table on a LEFT or FULL join's nullable side, OFFSET past the end, LIMIT 0, a DISTINCT ON whose ON list the
   ORDER BY lacks: a scope moved, or a sort narrower than Postgres's (PR 146, 163, 164, 207).
 - No ORDER BY, a deep `OFFSET 2000000`, a small table LEFT JOINed to a 50 M-row one: a sort over the whole join where
-  the old plan stopped early (PR 118, 146).
+  the old plan stopped early (PR 118, 146; issue 824: no sort by row number at all).
 - A coercion Postgres adds that the raw tree lacks (`tm = '12:30-04'::timetz`, a UNION of time and timetz, `CASE …
   tm::timetz ELSE tm END`), and every spelling of one cast (`timetz(tm)`, `tm::timetz`, `ARRAY[tm]::timetz[]`): the
   analysed node unread; one input through two paths (PR 166; issue 167).
