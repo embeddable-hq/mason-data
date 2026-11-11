@@ -57,8 +57,8 @@ process.stdout.write(JSON.stringify(answer));
     const origin = path.join(this.tmp, "acme", "widgets.git");
     this.git(this.tmp, "init", "-q", "--bare", "-b", "main", origin);
     this.git(this.tmp, "init", "-q", "-b", "main", this.repo);
-    fs.writeFileSync(path.join(this.repo, "README.md"), "hello\n");
-    this.git(this.repo, "add", "README.md");
+    fs.writeFileSync(path.join(this.repo, "base.txt"), "hello\n");
+    this.git(this.repo, "add", "base.txt");
     this.git(this.repo, "commit", "-q", "-m", "first");
     this.git(this.repo, "remote", "add", "origin", origin);
     this.git(this.repo, "push", "-q", "-u", "origin", "main");
@@ -113,7 +113,7 @@ test("worktrees-sweep: a done and clean worktree is removed with its branch; eve
   const closed = f.worktree("closed"); f.pr(closed, "closed");
   f.worktree("inmain", { commit: false });
   const dirty = f.worktree("dirty"); f.pr(dirty, "merged");
-  fs.appendFileSync(path.join(dirty.dir, "README.md"), "an edit not committed\n");
+  fs.appendFileSync(path.join(dirty.dir, "base.txt"), "an edit not committed\n");
   const unpushed = f.worktree("unpushed"); f.pr(unpushed, "merged");
   fs.writeFileSync(path.join(unpushed.dir, "more.txt"), "more\n");
   f.git(unpushed.dir, "add", "more.txt"); f.git(unpushed.dir, "commit", "-q", "-m", "after the PR");
@@ -149,7 +149,7 @@ test("worktrees-sweep: a done and clean worktree is removed with its branch; eve
   assert.equal(fs.existsSync(outside.dir), true, "a worktree outside .claude/worktrees/ is never looked at");
   assert.equal(r.stdout.includes("outside"), false, r.stdout);
   assert.match(r.stdout, /: 3 removed, 6 kept\n$/);
-  assert.equal(fs.readFileSync(path.join(dirty.dir, "README.md"), "utf8"), "hello\nan edit not committed\n", "the dirty one untouched");
+  assert.equal(fs.readFileSync(path.join(dirty.dir, "base.txt"), "utf8"), "hello\nan edit not committed\n", "the dirty one untouched");
   assert.match(f.git(f.repo, "worktree", "list"), /dirty/);
 });
 

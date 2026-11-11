@@ -27,10 +27,11 @@
  * worktree goes on to the other checks, and is unlocked just before it is removed. Where the start time cannot be read
  * (not Linux), a live pid keeps it. Any other lock (a person's, or one with no reason) keeps it.
  *
- * LIVE PROCESSES. On Linux, every `/proc/<pid>/cwd`; elsewhere `lsof -d cwd`. A process this user cannot read and that
- * runs as another user is passed over (an agent of this session runs as this user), and so is pid 1 (the init of the
- * namespace: a container's supervisor, whose cwd a sandbox may hide even from root); any other that cannot be read, or
- * a listing that fails, is "cannot tell", and keeps every worktree.
+ * LIVE PROCESSES. On Linux, every `/proc/<pid>/cwd`; elsewhere `lsof -d cwd`. A process whose cwd the kernel will not
+ * show this user (EACCES: another user's, or one that made itself non-dumpable: a setuid program, ssh-agent, a sandbox's
+ * init, a CI runner's worker) is passed over: an agent, its shells, git, node and the tests are plain processes of this
+ * user, which can always be read, and failing closed on such a process kept every worktree on a GitHub runner and in a
+ * cloud container. Any other failure to read, or a listing that fails, is "cannot tell", and keeps every worktree.
  *
  * FAILS CLOSED: a check that cannot tell (git or gh failing, an answer that does not parse) keeps the worktree. Two
  * sweeps never run at once (a lock in the common git dir), and every `git worktree` call is made under the lock
@@ -122,7 +123,6 @@ function lockKeeps(reason: string): string | undefined {
 function processCwds(): { pid: number; cwd: string }[] | string {
   const out: { pid: number; cwd: string }[] = [];
   if (fs.existsSync("/proc/self/cwd")) {
-    const uid = process.getuid?.();
     for (const name of fs.readdirSync("/proc")) {
       if (!/^\d+$/.test(name) || Number(name) === process.pid) continue;
       try {
@@ -130,13 +130,7 @@ function processCwds(): { pid: number; cwd: string }[] | string {
       } catch (e) {
         const code = (e as NodeJS.ErrnoException).code;
         if (code === "ENOENT" || code === "ESRCH") continue; // it ended while the list was read
-        // pid 1 is the namespace's init (a container's supervisor), never an agent nor its shell; a sandbox may hide its cwd
-        if (name === "1") continue;
-        if (code === "EACCES" || code === "EPERM") {
-          let owner: number | undefined;
-          try { owner = fs.statSync(`/proc/${name}`).uid; } catch { owner = undefined; /* ended: passed over below */ }
-          if (owner === undefined || (uid !== undefined && owner !== uid)) continue; // gone, or another user's
-        }
+        if (code === "EACCES" || code === "EPERM") continue; // hidden from this user: no agent's process (the header)
         return `the working directory of process ${name} cannot be read (${code ?? String(e)})`;
       }
     }
