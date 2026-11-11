@@ -201,7 +201,7 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
       // sync and when it was last synced, what mason status and the stream's tables say, and EXPLAIN says over the wire
       ...(c?.kept ? { kept: c.kept } : {}),
       ...(c ? { duck: { rows: c.rows, bytes: c.bytes, seconds: c.seconds, copiedAt: c.copiedAt, error: c.error } } : {}),
-      // an added table's sync: synced, syncing, failed or waiting (src/cli/readiness.ts syncStateOf), when it was last
+      // an added table's sync: synced, syncing, catching-up, behind, failed or waiting (src/cli/readiness.ts syncStateOf), when it was last
       // brought current, how long that took and by what, and how old that is now
       ...(c !== undefined || entry !== undefined ? { sync: tableSync(c, now) } : {}),
       // an added table: why `mason sync <table>` (the page's Sync now) is refused now, in its own words, or null when it

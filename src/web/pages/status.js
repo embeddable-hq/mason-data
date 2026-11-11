@@ -61,7 +61,7 @@ export function copyingText(copied, rowsEstimate, p) {
 
 /**
  * AN ADDED TABLE'S LINE, as `mason status` and `mason wait` print it after its bar (src/cli/commands.ts `tableLines`):
- * its state (done, unsynced, failed, copying, waiting), how full its bar is, and what it says — a copied one with how it is kept
+ * its state (done, unsynced, failed, copying, catching-up, waiting), how full its bar is, and what it says — a copied one with how it is kept
  * current and how old its copy is (`keptAge`).
  */
 export function tableLine(t, now = Date.now()) {
@@ -73,6 +73,8 @@ export function tableLine(t, now = Date.now()) {
   if (!t.copy) return { state: "waiting", fraction: 0, what: "waiting for its first sync to start" };
   const age = keptWords(t, now);
   const what = `${n(t.copy.rowsCopied ?? 0)} rows · synced${t.copy.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}`;
+  // in its one catch-up poll: at work, the accent as mason status paints it cyan (paintBar), never amber (issue 834)
+  if (t.sync?.state === "catching-up") return { state: "catching-up", fraction: 1, what };
   // a copy the poll does not keep current (it waits for its catch-up) is a warning, as mason status paints it (paintBar)
   // and so is one behind what its sync promises (`tables[].sync.state`, src/cli/readiness.ts behindOf), of any kind
   if ((t.kept?.by === "poll" && t.kept.pending !== undefined) || (t.kept?.by === "replication" && (t.kept.state !== "streamed" || t.kept.notRunning !== null)) || t.sync?.state === "behind") {
@@ -101,9 +103,16 @@ function syncedAgo(iso, now = Date.now()) {
   return `${d} day${d === 1 ? "" : "s"} ago`;
 }
 
+/** What a table in its one catch-up poll says (src/cli/readiness.ts `CATCHING_UP`, held equal by tests/web-page.test.ts). */
+export const CATCHING_UP = "being caught up by one poll for what changed since it was synced";
+
 /** How a copied table is kept current and how old its copy is (src/cli/commands.ts `keptAge`). */
 export function keptAge(t, now = Date.now()) {
   const k = t.kept;
+  if (t.sync?.state === "catching-up" && k !== undefined && k.by !== "generated") {
+    const at = k.by === "recopy" ? k.syncedAt ?? k.copiedAt : k.syncedAt;
+    return `${CATCHING_UP} (${at === null ? "never synced" : `last synced ${syncedAgo(at, now)}`})`;
+  }
   if (k?.by === "replication") {
     if (k.state !== "streamed") return `NOT kept current (${k.syncedAt === null ? "never synced" : `last synced ${syncedAgo(k.syncedAt, now)}`}): ${k.why ?? "it is not streamed yet"}`;
     const at = `replicated, at ${k.position}, ${k.syncedAt === null ? "not synced yet" : syncedAgo(k.syncedAt, now)}`;
@@ -311,7 +320,7 @@ function renderProgress(s, isOpen = () => false, shares = new Map(), before = ne
       `<p class="dim">${code("mason tables")} lists them; ${code("mason add <table>")} syncs one.</p>`;
   }
   // as tableLines orders them: the finished first, in the order they finished, then the failed, the copying, the waiting
-  const rank = { done: 0, unsynced: 0, failed: 1, copying: 2, waiting: 3 };
+  const rank = { done: 0, unsynced: 0, failed: 1, copying: 2, "catching-up": 2, waiting: 3 };
   const lines = picked.map((t) => ({ t, l: tableLine(t) })).filter(({ l }) => l.state !== "done")
     .sort((a, b) => rank[a.l.state] - rank[b.l.state] || (a.t.copy?.updatedAt ?? "").localeCompare(b.t.copy?.updatedAt ?? "") || a.t.table.localeCompare(b.t.table));
   if (!lines.length) return "";

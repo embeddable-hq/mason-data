@@ -373,7 +373,8 @@ table.errors td { overflow-wrap: anywhere; }
 tr.warn th, tr.warn td { color: var(--warn); }
 
 /* A COPY'S BAR (copyBar, src/web/pages/status.js): a thin rounded track and a solid fill to the share, its % at the end.
-   The fill's colour follows the copy's state as the line's word does: the patina while it copies, green once served,
+   The fill's colour follows the copy's state as the line's word does: the patina while it copies or is caught up by
+   its one poll (.t-catching-up), green once served,
    rose when it failed, amber when not kept current; waiting, no fill, the track's quiet shimmer (not under
    prefers-reduced-motion). The share drawn never goes backwards (createMonotone). */
 td.bar { white-space: nowrap; width: 1%; }
@@ -500,7 +501,7 @@ table.catalog td.act, table.catalog th.act { position: sticky; right: 0; }
 table.catalog td.act { background: var(--surface); }
 table.catalog tbody tr:hover > td.act { background: var(--hover); }
 .what-copy.t-unsynced { color: var(--warn); }
-.what-copy.t-copying, .what-copy.t-waiting { color: var(--muted); }
+.what-copy.t-copying, .what-copy.t-catching-up, .what-copy.t-waiting { color: var(--muted); }
 /* a narrower window (the sidebar beside the page): every table's cells closer, so more fit their card */
 @media (max-width: 1100px) { th, td { padding-left: var(--space-2); padding-right: var(--space-2); } }
 /* a bare table too wide for the page (the Overview's statements: eleven numbers) scrolls inside its own box */

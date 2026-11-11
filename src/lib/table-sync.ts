@@ -336,3 +336,16 @@ export function syncedText(t: { changed: number; deleted: number; rows: number; 
   const n = (x: number): string => x.toLocaleString("en-US");
   return `${n(t.changed)} changed, ${n(t.deleted)} deleted, ${n(t.rows)} rows now · ${msText(t.ms)}`;
 }
+
+/** WHAT A TABLE IN ITS ONE CATCH-UP POLL SAYS (`tables[].sync.state` `catching-up`): its line in `mason wait` and
+ *  `mason status` (src/cli/commands.ts `keptAge`; the web page's, src/web/pages/status.js, held equal by a test), what
+ *  `mason wait` waits for (src/cli/readiness.ts) and EXPLAIN's first line (src/duck/explain.ts). Never "NOT kept
+ *  current": a `sync: off` table is never kept current by design, and the poll is at work, not at fault (issue 834). */
+export const CATCHING_UP = "being caught up by one poll for what changed since it was synced";
+
+/** WHETHER A SERVED TABLE IS IN ITS ONE CATCH-UP POLL (owed it, queued, polling or ending) — the one derivation, read by
+ *  `syncStateOf` (src/cli/readiness.ts) and EXPLAIN (src/duck/explain.ts): its sync not failed, not being read again
+ *  whole, and marked behind (`CopyState.behind`) or its rebuild in its catch-up (`CopyState.rebuilding`). */
+export function inCatchUp(c: { error: string | null; behind?: string; rebuilding?: "copy" | "catch-up" }): boolean {
+  return c.error === null && c.rebuilding !== "copy" && (c.behind !== undefined || c.rebuilding === "catch-up");
+}

@@ -409,10 +409,10 @@ test("a copied table's failed catch-up is its failure until it is caught up: sai
     assert.match(String((st().kept as { why: string }).why), /its last catch-up failed, tried again after \d\d:\d\d UTC$/);
     const read = await asRead(st);
     assert.deepEqual([read.sync.state, read.error, read.readiness.ready, read.word], ["failed", m, false, "Failed"]);
-    // queued after a copy that went well (no error): syncing, and ready
+    // queued after a copy that went well (no error): catching up, and not ready until it ends (issue 834)
     s.states.set("public.t", { ...s.states.get("public.t")!, error: null });
     const queued = await asRead(st);
-    assert.deepEqual([queued.sync.state, queued.readiness.ready], ["syncing", true]);
+    assert.deepEqual([queued.sync.state, queued.readiness.ready], ["catching-up", false]);
   });
 });
 
