@@ -1439,6 +1439,43 @@ function* matrix(): Generator<Matrixed> {
   yield q("top N over joins: two *, sorted by numbers", "SELECT a.*, b.* FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY 2, 1, 6 LIMIT 5");
   yield q("top N over joins: a number past the *'s first table", "SELECT *, a.id FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY 7, 1, 6 LIMIT 5");
   yield q("top N over joins: a *'s number output sorted by its name", "SELECT a.id, b.* FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY amount DESC, 1, b.id LIMIT 5");
+  // THE PRESERVED SIDE FIRST (issue 824, part 2; src/duck/late.ts preservedFirst): every key of the side a LEFT JOIN keeps,
+  // that side limited to its first OFFSET + LIMIT rows before the join. Each order total: a join of one row at most
+  // (a key), or a list of the preserved side's columns alone, whose rows a join repeats are alike
+  const PARENT = "FROM top_a a LEFT JOIN top_a p ON p.id = a.parent";
+  yield q("preserved first: every column, a descending key", `SELECT a.*, p.* ${PARENT} ORDER BY a.id DESC LIMIT 3 OFFSET 2`);
+  yield q("preserved first: a NULL key, DESC, NULLS first by default", `SELECT a.id, a.made, p.name ${PARENT} ORDER BY a.made DESC, a.id LIMIT 4`);
+  yield q("preserved first: a NULL key, DESC NULLS LAST, OFFSET", `SELECT a.id, a.made, p.name ${PARENT} ORDER BY a.made DESC NULLS LAST, a.id DESC LIMIT 3 OFFSET 2`);
+  yield q("preserved first: a NULL key, NULLS FIRST", `SELECT a.id, a.made, p.note ${PARENT} ORDER BY a.made NULLS FIRST, a.id LIMIT 4 OFFSET 1`);
+  yield q("preserved first: in a session's zone", `SELECT a.id, a.made, date_trunc('day', a.made), p.made ${PARENT} ORDER BY date_trunc('day', a.made) DESC NULLS LAST, a.id LIMIT 4`, "America/New_York");
+  yield q("preserved first: under the database's collation", `SELECT a.name, a.id, p.name ${PARENT} ORDER BY a.name NULLS FIRST, a.id LIMIT 4`);
+  yield q("preserved first: under C, descending", `SELECT a.name, a.id, p.name ${PARENT} ORDER BY a.name COLLATE "C" DESC NULLS LAST, a.id LIMIT 4`);
+  yield q("preserved first: under an ICU collation", `SELECT a.name, a.id, p.note ${PARENT} ORDER BY a.name COLLATE "unicode", a.id LIMIT 5 OFFSET 1`);
+  yield q("preserved first: a computed key, an ordinal and an output's name", `SELECT a.id AS k, lower(a.name) AS l, p.name ${PARENT} ORDER BY l NULLS FIRST, 1 DESC LIMIT 4`);
+  yield q("preserved first: a WHERE on the preserved side", `SELECT a.id, a.name, p.name ${PARENT} WHERE a.name IS NOT NULL AND a.id > 1 ORDER BY a.made DESC NULLS LAST, a.id LIMIT 3`);
+  yield q("preserved first: a WHERE on the other side stays as it was", `SELECT a.id, p.id, p.name ${PARENT} WHERE p.name IS NULL OR p.id > 1 ORDER BY a.id LIMIT 3`);
+  yield q("preserved first: a join that repeats rows, the preserved side's columns", "SELECT a.id, a.made, a.note FROM top_a a LEFT JOIN top_b b ON a.id = b.a_id ORDER BY a.made DESC, a.id LIMIT 9 OFFSET 3");
+  yield q("preserved first: a chain of LEFT joins that repeats rows", "SELECT a.id, a.name FROM top_a a LEFT JOIN top_b b ON a.id = b.a_id LEFT JOIN top_c c ON b.id = c.b_id ORDER BY a.name DESC NULLS LAST, a.id LIMIT 11 OFFSET 4");
+  yield q("preserved first: a RIGHT join's right side", "SELECT p.id, p.name, a.id, a.made FROM top_a p RIGHT JOIN top_a a ON p.id = a.parent ORDER BY a.made NULLS FIRST, a.id LIMIT 4");
+  yield q("preserved first: OFFSET past the end", `SELECT a.id, p.id ${PARENT} ORDER BY a.id LIMIT 3 OFFSET 100000`);
+  yield q("preserved first: LIMIT 0", `SELECT a.id, p.id ${PARENT} ORDER BY a.id LIMIT 0`);
+  yield q("preserved first: a LIMIT past the end", "SELECT a.id, a.note FROM top_a a LEFT JOIN top_b b ON a.id = b.a_id ORDER BY a.id DESC LIMIT 100000");
+  yield q("preserved first: the joined side's columns, a key the join reads", "SELECT b.id, b.seen, b.payload, a.note FROM top_b b LEFT JOIN top_a a ON a.id = b.a_id ORDER BY b.seen DESC NULLS LAST, b.id LIMIT 6 OFFSET 2");
+  yield q("preserved first: bare names", "SELECT seen, amount, note FROM top_b b LEFT JOIN top_a a ON a.id = b.a_id ORDER BY seen NULLS FIRST, b.id DESC LIMIT 6");
+  yield q("preserved first: a jsonb key", "SELECT b.id, b.payload, a.name FROM top_b b LEFT JOIN top_a a ON a.id = b.a_id ORDER BY b.payload DESC, b.id LIMIT 5");
+  yield q("preserved first: an exact quotient key", "SELECT b.id, b.amount / 3 AS q, a.note FROM top_b b LEFT JOIN top_a a ON a.id = b.a_id ORDER BY q DESC, b.id LIMIT 5 OFFSET 1");
+  yield q("preserved first: a derived table", "SELECT s.id, s.name, p.name FROM (SELECT id, name, parent FROM top_a WHERE id > 1) s LEFT JOIN top_a p ON p.id = s.parent ORDER BY s.name NULLS FIRST, s.id LIMIT 3");
+  yield q("preserved first: a WITH query", "WITH w AS (SELECT * FROM top_a) SELECT w.id, w.made, p.id FROM w LEFT JOIN top_a p ON p.id = w.parent ORDER BY w.made DESC, w.id LIMIT 4");
+  yield q("preserved first: a view", "SELECT v.id, v.payload, a.note FROM top_v v LEFT JOIN top_a a ON a.id = v.a_id ORDER BY v.id DESC LIMIT 5 OFFSET 1");
+  yield q("preserved first: a derived table carried", "SELECT s.a_id, s.n, a.note FROM (SELECT a_id, count(*) AS n FROM top_b GROUP BY a_id) s LEFT JOIN top_a a ON a.id = s.a_id ORDER BY s.n DESC, s.a_id NULLS FIRST LIMIT 3");
+  yield q("preserved first: a wrapper of the join", "SELECT * FROM (SELECT a.id, a.made, p.name FROM top_a a LEFT JOIN top_a p ON p.id = a.parent) t ORDER BY t.made NULLS FIRST, t.id LIMIT 4");
+  yield q("preserved first: a schema's name, as a tool writes it", "SELECT \"public\".\"top_a\".\"id\" AS \"id\", \"public\".\"top_a\".\"name\" AS \"name\", \"P\".\"name\" AS \"P__name\" FROM \"public\".\"top_a\" LEFT JOIN \"public\".\"top_a\" \"P\" ON \"public\".\"top_a\".\"parent\" = \"P\".\"id\" ORDER BY \"public\".\"top_a\".\"made\" DESC, \"public\".\"top_a\".\"id\" ASC LIMIT 4");
+  yield q("preserved first: in a derived table, counted", "SELECT count(*), max(x.id), min(x.made) FROM (SELECT a.id, a.made FROM top_a a LEFT JOIN top_b b ON b.a_id = a.id ORDER BY a.made DESC NULLS LAST, a.id LIMIT 5) x");
+  yield q("preserved first: in a WITH query, grouped around", "WITH x AS (SELECT a.id, a.name FROM top_a a LEFT JOIN top_b b ON b.a_id = a.id ORDER BY a.id DESC LIMIT 6 OFFSET 1) SELECT x.id, count(*) FROM x GROUP BY 1 ORDER BY 1");
+  yield q("preserved first: an arm of a UNION ALL", `(SELECT a.id, p.id AS p ${PARENT} ORDER BY a.id LIMIT 2) UNION ALL (SELECT a.id, p.id ${PARENT} ORDER BY a.made DESC NULLS LAST, a.id DESC LIMIT 2 OFFSET 1) ORDER BY 1, 2`);
+  yield q("preserved first: joined again", `SELECT x.id, x.p, c.label FROM (SELECT a.id, p.id AS p ${PARENT} ORDER BY a.made, a.id LIMIT 4) x LEFT JOIN top_c c ON c.id = x.id ORDER BY 1`);
+  yield q("preserved first: an INNER join stays as it was", "SELECT a.id, a.note FROM top_a a JOIN top_b b ON a.id = b.a_id ORDER BY a.made DESC, a.id LIMIT 6 OFFSET 2");
+  yield q("preserved first: a FULL join stays as it was", "SELECT a.id, a.note FROM top_a a FULL JOIN top_b b ON a.id = b.a_id ORDER BY a.id NULLS FIRST LIMIT 6 OFFSET 2");
   // AN OUTPUT OF A `*` SORTED BY ITS NUMBER OR ITS BARE NAME (issue 112): by that column's key, as the column named is.
   // Rows of equal keys stay apart by id, so that each answer is one order
   yield q("star sort: by number, text", "SELECT * FROM star_o ORDER BY 3 NULLS FIRST, 1");

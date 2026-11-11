@@ -3077,7 +3077,7 @@ test("USING and NATURAL choose their rows by row number, and a merged column is 
     assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
     assert.match(await sent(sql), form, sql);
   };
-  const ROWS = /rowid AS __mason_r1.*\) AS __mason_late LEFT JOIN /;
+  const ROWS = /(rowid|__mason_rid) AS __mason_r1.*\) AS __mason_late LEFT JOIN /;
   try {
     // inner and LEFT read the left side, RIGHT the right, FULL both: a fetch of the other side would read NULL
     const merged = [["JOIN", /SELECT l\.id AS id, /], ["LEFT JOIN", /SELECT l\.id AS id, /], ["RIGHT JOIN", /SELECT lc\.id AS id, /], ["FULL JOIN", /SELECT COALESCE\(l\.id, lc\.id\) AS id, /]] as const;
@@ -4567,7 +4567,7 @@ test("a top N over joined tables chooses its rows by row number and reads the co
       "SELECT l.*, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY name DESC, k LIMIT 3"];
     for (const sql of answered) {
       assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
-      assert.match(await sent(sql), /rowid AS __mason_r1.*\) AS __mason_late LEFT JOIN .* ON .*\.rowid = __mason_late\.__mason_r1/, sql);
+      assert.match(await sent(sql), /(rowid|__mason_rid) AS __mason_r1.*\) AS __mason_late LEFT JOIN .* ON .*\.rowid = __mason_late\.__mason_r1/, sql);
     }
     // only the tables the list reads are read again
     const one = await sent("SELECT l.j FROM late l JOIN late_c c ON c.id = l.c ORDER BY c.name, l.id LIMIT 2");
@@ -4617,7 +4617,7 @@ test("a join's FROM items: a plain derived read is fetched by its row number, a 
     }
   };
   const FETCHED = /__mason_rid AS __mason_r\d.*\) AS __mason_late LEFT JOIN .*__mason_rid = __mason_late\.__mason_r\d/;
-  const ROWS = /rowid AS __mason_r1.*\) AS __mason_late LEFT JOIN /;
+  const ROWS = /(rowid|__mason_rid) AS __mason_r1.*\) AS __mason_late LEFT JOIN /;
   const CARRIED = /AS __mason_c\d.*\) AS __mason_late LEFT JOIN /;
   try {
     // PLAIN DERIVED READS: each join kind, each spelling of one, the WHERE inside alone
@@ -4677,7 +4677,8 @@ test("a join's FROM items: a plain derived read is fetched by its row number, a 
       "SELECT l.id, d.name FROM late l JOIN (SELECT c.id, c.name FROM late_c c JOIN late_p p ON p.c = c.id AND p.line = 0) d ON d.id = l.c ORDER BY l.id LIMIT 3",
       "SELECT l.id, d.n FROM late l, LATERAL (SELECT count(*) AS n FROM late_c c WHERE c.id = l.c) d ORDER BY l.id LIMIT 3",
       "SELECT l.id, d.name FROM late l, LATERAL (SELECT name FROM late_c c WHERE c.id = l.c) d ORDER BY l.id LIMIT 3",
-    ], /__mason_rid/);
+    // (a preserved table limited first exposes its own row number inside; a carried item is fetched by none)
+    ], /__mason_rid = __mason_late/);
     // a volatile derived read stays one value: its column carried, never read again
     const random = await sent("SELECT l.id, d.r FROM late l JOIN (SELECT id, random() AS r FROM late_c) d ON d.id = l.c ORDER BY l.id LIMIT 3");
     assert.match(random, CARRIED);
@@ -4728,6 +4729,76 @@ test("a join's FROM items: a plain derived read is fetched by its row number, a 
     await c.query({ ...prepared, values: [2] });
     await c.query("SET TimeZone = 'Asia/Tokyo'");
     assert.deepEqual((await c.query({ ...prepared, values: [1], rowMode: "array" })).rows, [[1, "c1"]]);
+  } finally { await c.end(); }
+});
+
+// ISSUE 824, PART 2: a LIMIT with an ORDER BY over a LEFT JOIN whose keys and WHERE read the preserved side alone limits
+// that side to its first OFFSET + LIMIT rows before the join (src/duck/late.ts preservedFirst); everything else stays
+test("the preserved side of an outer join is limited first where its keys and WHERE are all the sort reads", async () => {
+  const c = await client();
+  const sent = async (sql: string): Promise<string> => {
+    logged.length = 0;
+    await c.query(sql);
+    const line = logged.findLast((l) => l.startsWith("statement: "));
+    assert.ok(line !== undefined, sql);
+    return line;
+  };
+  // the preserved item limited inside, by name, to N rows
+  const first = (alias: string, n: number): RegExp => new RegExp(`\\( SELECT \\*.* LIMIT ${n} \\) AS ${alias} (LEFT JOIN|RIGHT JOIN|ON) `);
+  const LIMITED = /\( SELECT \*.* LIMIT \d+ \) AS (?!__mason_)\w+ (LEFT JOIN|RIGHT JOIN|ON) /;
+  // (this file's truth writes a jsonb's text with a space after each colon)
+  const held = (r: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...r, rows: r.rows.map((x) => x.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
+  try {
+    // a join that repeats every row of c forty times, c's columns alone listed (rows of equal keys are alike), and a
+    // join of one row at most, every column: each order total, so Postgres's rows are the answer
+    for (const [sql, alias, n] of [
+      ["SELECT c.id, c.name FROM late_c c LEFT JOIN late l ON l.c = c.id ORDER BY c.name DESC, c.id LIMIT 7 OFFSET 30", "c", 37],
+      ["SELECT c.id FROM late_c c LEFT JOIN late l ON l.c = c.id AND l.id < 100 ORDER BY c.id DESC LIMIT 5 OFFSET 3", "c", 8],
+      ["SELECT c.id, c.name FROM late_c c LEFT JOIN late l ON l.c = c.id LEFT JOIN late_p p ON p.c = l.c WHERE c.id % 3 = 1 ORDER BY c.id LIMIT 9", "c", 9],
+      ["SELECT l.id, l.k, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY l.k, l.id LIMIT 4 OFFSET 2", "l", 6],
+      ["SELECT l.*, c.* FROM late l LEFT JOIN late_c c ON c.id = l.c + 40 ORDER BY l.c DESC NULLS LAST, l.id DESC LIMIT 6", "l", 6],
+      ["SELECT c.name, l.id FROM late_c c RIGHT JOIN late l ON c.id = l.c ORDER BY l.k DESC, l.id LIMIT 3", "l", 3],
+      ["SELECT d.id, d.name, l.k FROM (SELECT id, name FROM late_c WHERE id > 5) d LEFT JOIN late l ON l.id = d.id ORDER BY d.name, d.id LIMIT 4", "d", 4],
+      ["SELECT r.id, r.twice, l.k FROM late_read r LEFT JOIN late l ON l.id = r.id ORDER BY r.twice DESC, r.id LIMIT 3 OFFSET 1", "r", 4],
+      ["WITH w AS (SELECT id, name FROM late_c) SELECT w.id, w.name, l.k FROM w LEFT JOIN late l ON l.id = w.id ORDER BY w.name DESC, w.id LIMIT 3", "w", 3],
+      ["SELECT s.c, s.n, x.name FROM late_counts s LEFT JOIN late_c x ON x.id = s.c ORDER BY s.n, s.c DESC LIMIT 4", "s", 4],
+      ["SELECT * FROM (SELECT l.id, l.k, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c) t ORDER BY t.k, t.id LIMIT 3", "l", 3],
+      // a tool's spelling: a schema's name on the table and every column it reads, read by the table's name inside
+      ['SELECT "public"."late"."id" AS "id", "public"."late"."k" AS "k", "C"."name" AS "C__name" FROM "public"."late" LEFT JOIN "public"."late_c" "C" ON "public"."late"."c" = "C"."id" WHERE "public"."late"."id" > 3 ORDER BY "public"."late"."k" DESC, "public"."late"."id" ASC LIMIT 4', "late", 4],
+      // a computed key by its name and by its number, a bare name only the preserved side holds
+      ["SELECT l.id, l.k % 7 AS m, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY m DESC, 1 LIMIT 5", "l", 5],
+      ["SELECT l.id, j, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY k, l.id LIMIT 2", "l", 2],
+    ] as Array<[string, string, number]>) {
+      assert.match(await sent(sql), first(alias, n), sql);
+      assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
+    }
+    // LIMIT 0 and past the end of the preserved side
+    for (const sql of ["SELECT c.id FROM late_c c LEFT JOIN late l ON l.c = c.id ORDER BY c.id LIMIT 0",
+      "SELECT c.id FROM late_c c LEFT JOIN late l ON l.c = c.id ORDER BY c.id DESC LIMIT 3 OFFSET 2000",
+      "SELECT c.id FROM late_c c LEFT JOIN late l ON l.c = c.id AND l.id < 60 ORDER BY c.id LIMIT 100"]) {
+      assert.match(await sent(sql), LIMITED, sql);
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    }
+    // WHERE IT DOES NOT APPLY: an inner, a FULL or a comma join, a key or a WHERE reading the other side or a merged column,
+    // a volatile WHERE, a DISTINCT ON, a LIMIT that is a parameter
+    for (const sql of ["SELECT c.id FROM late_c c JOIN late l ON l.c = c.id ORDER BY c.id LIMIT 5",
+      "SELECT c.id FROM late_c c FULL JOIN late l ON l.c = c.id ORDER BY c.id LIMIT 5",
+      "SELECT c.id FROM late_c c LEFT JOIN late l ON l.c = c.id JOIN late_p p ON p.c = c.id ORDER BY c.id LIMIT 5",
+      "SELECT c.id, l.id FROM late_c c LEFT JOIN late l ON l.c = c.id ORDER BY l.k, c.id LIMIT 5",
+      "SELECT c.id, l.id FROM late_c c LEFT JOIN late l ON l.c = c.id ORDER BY c.id, l.id NULLS FIRST LIMIT 5",
+      "SELECT c.id FROM late_c c LEFT JOIN late l ON l.c = c.id WHERE l.k > 10 ORDER BY c.id LIMIT 5",
+      "SELECT c.id FROM late_c c LEFT JOIN late l ON l.c = c.id WHERE l.id IS NULL OR c.id > 3 ORDER BY c.id LIMIT 5",
+      "SELECT id, l.k FROM late_c c LEFT JOIN late l USING (id) ORDER BY id LIMIT 5",
+      "SELECT DISTINCT ON (c.id) c.id, l.id FROM late_c c LEFT JOIN late l ON l.c = c.id ORDER BY c.id, l.id LIMIT 5"]) {
+      assert.match(await sent(sql), /__mason_r1/, sql);
+      assert.doesNotMatch(await sent(sql), LIMITED, sql);
+    }
+    assert.doesNotMatch(await sent("SELECT c.id FROM late_c c LEFT JOIN late l ON l.c = c.id WHERE random() < 2 ORDER BY c.id LIMIT 5"), LIMITED);
+    logged.length = 0;
+    await c.query({ text: "SELECT c.id FROM late_c c LEFT JOIN late l ON l.c = c.id ORDER BY c.id LIMIT $1", values: [5] });
+    assert.doesNotMatch(logged.findLast((l) => l.startsWith("statement: ")) ?? "", LIMITED);
+    // no ORDER BY keeps its own path, unsorted (part 1)
+    assert.doesNotMatch(await sent("SELECT c.id FROM late_c c LEFT JOIN late l ON l.c = c.id LIMIT 5"), LIMITED);
   } finally { await c.end(); }
 });
 
