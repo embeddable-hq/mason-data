@@ -2717,7 +2717,7 @@ never, most pages differed when asked twice, and at `LIMIT 100` over the first 3
 pages. The numbered form (`row_number() OVER ()` over the chosen rows, kept outside) cost 0.04 to 0.08 s where the sort costs
 0.04 to 0.58 s and kept that overlap.
 
-**The sort has a price, accepted for stable pages.** A top N over row numbers is a full join where a streaming LIMIT stops
+**The sort has a price, accepted for stable pages** (until issue 824, below). A top N over row numbers is a full join where a streaming LIMIT stops
 early, so its cost grows with the join, and a narrow join that used to stop early pays it with nothing spilled to save. An
 unsorted row-number inner query costs about what the old plan did, at the price of overlapping pages. Over a 50 M-row table,
 min of 3 warm runs:
@@ -2733,7 +2733,7 @@ min of 3 warm runs:
 
 `LIMIT -1` is refused 42804 where Postgres says 2201W, with or without a join: not this path's.
 
-**The sort only where the join is proved bounded (issue 134, 2026-10-31).** That price was measured on joins that do not
+**The sort only where the join is proved bounded (issue 134, 2026-10-31; no sort at all since issue 824, below).** That price was measured on joins that do not
 multiply. Where a join multiplies, the top N over row numbers runs the entire join, and a statement that used to stop in
 milliseconds runs for minutes. So the row numbers are sorted only where `fanOutBounded` (src/duck/distinct-key.ts) proves
 the join's rows linear in its tables: every join equates a whole primary key of a table its side holds at most once, from
@@ -2767,6 +2767,45 @@ none, so such a copy goes unsorted too. The comma form is proved on the WHERE's 
 WHERE over a `CROSS JOIN` is not.
 
 
+**No sort at all (issue 824, decided by the owner on 2026-11-10).** A BI tool's preview of a join on a hosted replica
+(2 vCPU, 8 GiB, a gp3 volume at 125 MB/s), `SELECT a.*, b.* FROM small a LEFT JOIN big b ON a.id = b.small_id LIMIT 100
+OFFSET 0` over 25 k × 153 M rows with two wide jsonb columns in `big`, took 19.8 s, and 46.6 s on a later run. `a.id` is a
+primary key, so the join was proved bounded and its row numbers were sorted: a hash join of about 153 M rows into `Top N
+100`. On a cold disk most of that time is spent reading `big`'s join column, about 2.4 GB of uuids. The streaming form
+(`FROM (SELECT * FROM small LIMIT 100) a LEFT JOIN big b …`) took 26 ms and read 193 rows of `big`.
+
+The exact rewrite that keeps stable pages was measured before it was built. Every row of a LEFT JOIN's preserved side
+yields a row, so only that side's first OFFSET + LIMIT rows by row number can be in the page: limit it first, then
+join and sort. It answers the same rows, but it is not cheap. The sort still needs every `big` row that matches those
+100 rows, and nothing indexes `b.small_id`, so `big`'s whole join column is still read. At 153 M rows on a cold disk
+that is about 19 s again. The owner's decision: **never sort by row number for an unsorted LIMIT over joined tables.**
+The rows are chosen by row number with no sort, so the wide columns stay out of the join and the statement stops
+early. Pages of such a statement may overlap, as SQL and Postgres allow. The rows of each answer are still rows of
+the join, each as often as the join holds it. Stable pages could come back if issue 824's second part measures an
+index or clustering on the join column and the owner accepts its cost. With the sort gone, `fanOutBounded` decided
+nothing and was removed, and a preview of a join no longer reads the catalog's primary keys.
+
+A synthetic copy of the issue's shape: `small` has 25 k rows and a uuid key. `big` has 30 M rows (what this machine's
+disk held), with a uuid foreign key spread over `small` by hash, two JSON columns of about 100 bytes, and 1.4 GB in the
+file. `mid` has 300 k rows and an integer key. Each cell is the engine's SQL as Mason sends it, warm, 2 threads, the
+minimum of 3 runs, on a 4-core machine at load 5. "Rows of `big` read" is EXPLAIN ANALYZE's `rows_scanned` of the join's
+scan of `big`, without the fetch of the 100 rows chosen:
+
+| `LIMIT 100`, no ORDER BY | sorted by row number (before) | no sort (after) | rows of `big` read, before / after |
+|---|---|---|---|
+| `small LEFT JOIN big` (the issue's) | 588 ms | 7 ms | 30,000,000 / 4,096 |
+| the same, `OFFSET 2,000,000` | 6,125 ms | 55 ms | 30,000,000 / 2,004,096 |
+| `big JOIN small` (inner) | 15 ms | 7 ms | 245,760 / 4,096 |
+| the same, `OFFSET 2,000,000` | 1,540 ms | 59 ms | 30,000,000 / 2,004,096 |
+| `small LEFT JOIN big WHERE small.n >= 20000` | 303 ms | 5 ms | 30,000,000 / 4,096 |
+| `small LEFT JOIN big WHERE big.cat = 7` (1 row in 1,000) | 146 ms | 125 ms | 30,000,000 / 30,000,000 |
+| `small LEFT JOIN big LEFT JOIN mid` | 1,167 ms | 28 ms | 30,000,000 / 4,096 |
+| the exact form, `small` limited first, then joined and sorted (not built) | 116–149 ms | | 30,000,000 |
+| the issue's hand form, `(SELECT * FROM small LIMIT 100) a LEFT JOIN big b` | | 4 ms | 26,624 |
+
+A WHERE on the big side that keeps few rows still reads the table until it has its rows, sorted or not. The cold
+numbers, on a machine whose page cache is smaller than the table, are issue 824's second part.
+
 **A join's FROM items (issue 134, step 2, 2026-10-31).** `joinRows` stopped at a table, so a view, a WITH query, a tool's
 wrapper and a derived side each carried every wide column through the join again. The issue's comment measured the shapes
 by hand; the real rewrite, through the listener, over 8 M facts, 3 M rows of about 3 kB and a 2 GB limit (minimum of three
@@ -2788,7 +2827,7 @@ Decided: a wrapper folds by substitution, as Postgres pulls a subquery up, becau
 two columns of one name by position; the substitution is sound because nothing folded is volatile and nothing reads
 from outside it. A fetch keeps a nullable side's derived form, and DuckDB moved a computed list above the join in every
 plan measured, so a raising value on a row left out stayed unread (`limit-errors`, held by the oracle). A plain read
-counts for `fanOutBounded`, its bare outputs as its table's columns; what is carried has no row number and goes unsorted
+counted for `fanOutBounded` (until issue 824), its bare outputs as its table's columns; what is carried has no row number and goes unsorted
 even where the proof holds. A statement with a role's filtered read kept its form until step 4 reviewed the barrier.
 
 Decided (2026-11-01, issue 134 step 4): a role's filtered read takes the late fetch too, its rows chosen inside the

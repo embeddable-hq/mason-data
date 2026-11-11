@@ -29,20 +29,12 @@
  * two rows hold one value costs an answer. The oracle holds every shape (tests/integration/oracle/bi-shapes.ts, the
  * type matrix's `keyed`), the plan fixture the plans (tests/duck-plans.test.ts), and tests/duck-distinct-key.test.ts
  * the decision.
- *
- * THE SAME KEYS BOUND A JOIN'S ROWS (`fanOutBounded`, for src/duck/late.ts): a join that equates a whole primary key of
- * one side meets each row of the other side at most once, so its rows are at most those of its two sides, and a whole
- * FROM of such joins is linear in its tables. Here a composite key counts, every column of it equated. A PLAIN READ
- * counts as its table (`plainTable`: a derived table, a view's definition or a WITH query with only a projection and a
- * WHERE over one table): it holds each row of the table at most once, and an output that is a bare column is that column.
  */
 import type { TreeNode, TreeValue } from "./pgtree.ts";
 
 /** pg_proc's count(any) */
 const COUNT_ANY = 2147;
 const RTE_RELATION = 0;
-const RTE_SUBQUERY = 1;
-const RTE_CTE = 6;
 const RTE_GROUP = 9;
 /** JoinType: INNER, LEFT, FULL, RIGHT (nodes.h); the planner's SEMI / ANTI never reach a parse tree */
 const JOINS = new Set([0, 1, 2, 3]);
@@ -222,121 +214,6 @@ export function projectionOnly(q: TreeNode): boolean {
     if (q[f] !== null && q[f] !== undefined && !(Array.isArray(q[f]) && q[f].length === 0)) return false;
   }
   return true;
-}
-
-/** a table a query's FROM reads, and which of its columns each output (by attno) is, where it is a bare column */
-export interface PlainTable { relid: number; column: (attno: number) => number | null }
-
-/**
- * THE PLAIN READ: a query that is a projection and a WHERE over ONE table, or over one plain read (a view of a view), so
- * it holds each row of that table at most once; null for anything else. Whether it may also be read twice is the
- * reader's (src/duck/late.ts asks too that nothing in it is volatile): this is about its rows alone.
- */
-export function plainTable(q: TreeNode): PlainTable | null {
-  if (!projectionOnly(q) || !isNode(q.jointree)) return null;
-  const from = list(q.jointree.fromlist);
-  const rtable = list(q.rtable);
-  if (from.length !== 1) return null;
-  const inner = heldTable(q, rtable, from[0]);
-  if (inner === null) return null;
-  const outputs = list(q.targetList).filter((t): t is TreeNode => isNode(t) && t.resjunk !== "true");
-  return { relid: inner.relid, column: (attno) => {
-    const v = ownVar(outputs[attno - 1]?.expr);
-    return v === null ? null : inner.column(num(v.varattno)!);
-  } };
-}
-
-/** the table a FROM's RANGETBLREF reads once: a base table, a plain derived read, or a plain read of its query's WITH */
-function heldTable(query: TreeNode, rtable: readonly TreeValue[], ref: TreeValue | undefined): PlainTable | null {
-  const t = baseTable(rtable, ref);
-  if (t !== null) return { relid: t.relid, column: (attno) => attno };
-  if (!isNode(ref) || ref._node !== "RANGETBLREF") return null;
-  const rte = rtable[(num(ref.rtindex) ?? 0) - 1];
-  // a LATERAL read is one per row of what it follows: its rows are no bound by its table's
-  if (!isNode(rte) || rte.lateral === "true") return null;
-  if (num(rte.rtekind) === RTE_SUBQUERY && isNode(rte.subquery)) return plainTable(rte.subquery);
-  if (num(rte.rtekind) !== RTE_CTE || (num(rte.ctelevelsup) ?? -1) !== 0) return null;
-  const cte = list(query.cteList).find((c) => isNode(c) && c.ctename === rte.ctename);
-  return isNode(cte) && isNode(cte.ctequery) ? plainTable(cte.ctequery) : null;
-}
-
-/** a query's FROM so far: the rtindexes it holds, and the tables each of whose rows it holds at most once, by rtindex */
-interface Side { indexes: ReadonlySet<number>; once: ReadonlyMap<number, PlainTable> }
-
-/**
- * THE FAN-OUT PROOF: whether every join of `query` equates a whole primary key of a table whose rows its side holds at
- * most once, so the FROM's rows are bounded by the sum of its tables'. A key must be unique IN ITS SIDE, not merely in
- * its table: `a JOIN b ON a.id = b.a_id JOIN c ON a.id = c.a_id` equates a's key twice, and an `a` of a thousand b's and
- * a thousand c's is a million rows, because the first join repeats `a`. So a join passes on, as held at most once, only
- * the tables of a side whose every row it matches at most once.
- *
- * Each key column in an equality, by its btree family's operator and under its collation, with a bare column of the
- * other side (`equated`); conjuncts of the join's top-level AND only, so an OR proves nothing and any other conjunct
- * only filters. INNER, LEFT, RIGHT and FULL alike: a side's unmatched row is one row, and its NULL-extended key
- * equals nothing. A comma's items are inner joins, left to right, on the WHERE's conjuncts. Everything else (a cross
- * join, a key in part, a partial or UNIQUE index, no key, a key equated with an expression or a constant, a FROM item
- * neither a base table nor a plain read of one, a JOIN's condition written in the WHERE) proves nothing.
- *
- * What it decides is what a LIMIT with no ORDER BY costs and whether its pages are stable, never the rows' values, so
- * a key stale in the catalog (the source's as of the start) costs time, not an answer.
- */
-export function fanOutBounded(query: TreeNode, keys: PrimaryKeys): boolean {
-  const jt = query.jointree;
-  if (!isNode(jt)) return false;
-  const rtable = list(query.rtable);
-  const joined = (left: Side | null, right: Side | null, quals: readonly TreeNode[], indexes: ReadonlySet<number>): Side | null => {
-    if (left === null || right === null) return null;
-    const matchedOnce = (s: Side, by: Side): boolean => [...s.once].some(([rtindex, table]) => {
-      const key = keys.get(table.relid);
-      if (key === undefined) return false;
-      const keyColumn = (attno: number): UniqueColumn | undefined => { const c = table.column(attno); return c === null ? undefined : key.get(c); };
-      const met = new Set(quals.map((c) => { const at = equated(c, by.indexes, rtindex, keyColumn); return at === null ? null : table.column(at); }));
-      return [...key.keys()].every((attno) => met.has(attno));
-    });
-    const leftMatchesOne = matchedOnce(right, left), rightMatchesOne = matchedOnce(left, right);
-    if (!leftMatchesOne && !rightMatchesOne) return null;
-    return { indexes, once: new Map([...(leftMatchesOne ? left.once : []), ...(rightMatchesOne ? right.once : [])]) };
-  };
-  const side = (n: TreeValue | undefined): Side | null => {
-    if (isNode(n) && n._node === "JOINEXPR" && JOINS.has(num(n.jointype) ?? -1) && isNode(n.larg) && isNode(n.rarg)) return joined(side(n.larg), side(n.rarg), conjuncts(n.quals), indexesOf(n));
-    const t = heldTable(query, rtable, n);
-    const rtindex = isNode(n) ? num(n.rtindex) : null;
-    return t === null || rtindex === null ? null : { indexes: new Set([rtindex]), once: new Map([[rtindex, t]]) };
-  };
-  const where = conjuncts(jt.quals);
-  const items = list(jt.fromlist).map(side);
-  if (items.length === 0) return false;
-  return items.reduce((l, r) => joined(l, r, where, new Set([...l?.indexes ?? [], ...r?.indexes ?? []]))) !== null;
-}
-
-/** the base tables a query reads, at any depth (a wrapper's LIMIT stands over the join inside it) */
-function tablesUnder(q: TreeNode): number[] {
-  const out: number[] = [];
-  const visit = (v: TreeValue | undefined): void => {
-    if (Array.isArray(v)) { v.forEach(visit); return; }
-    if (!isNode(v)) return;
-    if (v._node === "RANGETBLENTRY" && num(v.rtekind) === RTE_RELATION) { const r = num(v.relid) ?? 0; if (r > 0) out.push(r); }
-    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
-  };
-  visit(q);
-  return out;
-}
-
-/** The base tables `fanOutBounded` may be asked about: those under a query with a LIMIT and no sort, at least two of them
- *  (none: the plan asks the catalog nothing). */
-export function fanOutTables(tree: TreeValue): number[] {
-  const relids = new Set<number>();
-  const visit = (v: TreeValue | undefined): void => {
-    if (Array.isArray(v)) { v.forEach(visit); return; }
-    if (!isNode(v)) return;
-    if (v._node === "QUERY" && isNode(v.limitCount) && list(v.sortClause).length === 0) {
-      const tables = tablesUnder(v);
-      if (tables.length >= 2) for (const r of tables) relids.add(r);
-    }
-    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
-  };
-  visit(tree);
-  return [...relids].sort((a, b) => a - b);
 }
 
 /** a grouped expression's collation where it is a bare column (a VAR's, or a binary-compatible relabel's own) */

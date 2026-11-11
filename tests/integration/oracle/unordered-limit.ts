@@ -5,18 +5,14 @@
  *  - the names, the OIDs and the row count are those of Postgres's answer to the same statement;
  *  - every row is a row of the whole join, as Postgres answers it unlimited, in Postgres's text;
  *  - no row comes back more often than the whole join holds it.
- * With `pages`, the statement is also run page by page: pages of one statement over rows that did not change read
- * every row of the join once. Postgres promises no such thing (its documentation warns that a LIMIT's rows follow the
- * plan), but its fixed plan does it in practice, and a tool paging a preview counts on it; Mason's rows are one list
- * by row number (src/duck/late.ts), which is what keeps a parallel join's pages from overlapping. Tables this small
- * hold the rows, not the parallelism: tests/duck-wire.test.ts holds the plan's order. ONLY A JOIN PROVED BOUNDED HAS
- * `pages` (fanOutBounded, src/duck/distinct-key.ts): the rest have no sort, and their pages may overlap, as is decided.
+ * Pages of one statement are not held to one list: Mason chooses the rows by row number with no sort, so a parallel
+ * join's pages may overlap, as SQL and Postgres allow (issue 824, the owner's decision of 2026-11-10; src/duck/late.ts).
  *
  * These are asked apart from `all()`: such a statement can verify nothing for src/duck/verified.ts, whose statements
  * are answered alike, and they may not weaken the verdict the others are held to.
  */
 
-export interface UnorderedLimit { name: string; list: string; from: string; tail: string; values?: string[]; pages?: number; whole?: string;
+export interface UnorderedLimit { name: string; list: string; from: string; tail: string; values?: string[]; whole?: string;
   /** a WITH clause before the SELECT */
   head?: string;
   /** the session's TimeZone it is asked in (UTC where none is said) */
@@ -27,16 +23,16 @@ const u = (name: string, list: string, from: string, tail: string, more: Partial
 
 const JOINED_TABLES: UnorderedLimit[] = [
   u("LEFT joins, every table's columns, the tool's preview", "a.*, b.*, c.*", JOINED, "LIMIT 12 OFFSET 0"),
-  u("LEFT joins, paged", "a.id, a.note, b.payload, c.doc", JOINED, "LIMIT 7 OFFSET 7", { pages: 7 }),
+  u("LEFT joins, paged", "a.id, a.note, b.payload, c.doc", JOINED, "LIMIT 7 OFFSET 7"),
   u("a LEFT join whose right side is empty of matches", "a.id, b.id AS b, b.payload", "FROM top_a a LEFT JOIN top_b b ON a.id = b.a_id + 1000", "LIMIT 5"),
-  u("a RIGHT join", "a.id, a.note, b.id AS b, b.payload", "FROM top_a a RIGHT JOIN top_b b ON a.id = b.a_id", "LIMIT 6 OFFSET 2", { pages: 6 }),
-  u("a FULL join", "a.id, a.note, b.id AS b, b.amount", "FROM top_a a FULL JOIN top_b b ON a.id = b.a_id", "LIMIT 9", { pages: 9 }),
+  u("a RIGHT join", "a.id, a.note, b.id AS b, b.payload", "FROM top_a a RIGHT JOIN top_b b ON a.id = b.a_id", "LIMIT 6 OFFSET 2"),
+  u("a FULL join", "a.id, a.note, b.id AS b, b.amount", "FROM top_a a FULL JOIN top_b b ON a.id = b.a_id", "LIMIT 9"),
   u("a FULL join with nothing matching", "a.id, b.id AS b", "FROM top_a a FULL JOIN top_b b ON a.id = b.a_id + 1000", "LIMIT 9 OFFSET 3"),
-  u("an inner join", "a.id, b.id AS b, b.payload ->> 'k' AS k", "FROM top_a a JOIN top_b b ON a.id = b.a_id", "LIMIT 6", { pages: 6 }),
+  u("an inner join", "a.id, b.id AS b, b.payload ->> 'k' AS k", "FROM top_a a JOIN top_b b ON a.id = b.a_id", "LIMIT 6"),
   u("a comma join", "b.id, c.id AS c, c.label", "FROM top_b b, top_c c WHERE c.b_id = b.id", "LIMIT 6"),
   u("a cross join's pairs", "x.id, y.id AS y, x.note, y.note AS n", "FROM top_a x, top_a y", "LIMIT 9 OFFSET 4"),
   u("a join that multiplies, one table read", "a.note", "FROM top_a a JOIN top_b b ON a.id = b.a_id", "LIMIT 11"),
-  u("rows alike the join repeats", "c.label", "FROM top_c c JOIN top_b b ON c.b_id = b.id", "LIMIT 11", { pages: 11 }),
+  u("rows alike the join repeats", "c.label", "FROM top_c c JOIN top_b b ON c.b_id = b.id", "LIMIT 11"),
   u("a table joined to itself", "x.id, x.name, p.id AS parent, g.name AS g", "FROM top_a x LEFT JOIN top_a p ON p.id = x.parent LEFT JOIN top_a g ON g.id = p.parent", "LIMIT 4"),
   u("a WHERE", "a.id, b.id AS b, b.amount", "FROM top_a a JOIN top_b b ON a.id = b.a_id WHERE b.amount > 10 AND a.name IS NOT NULL", "LIMIT 3"),
   u("LIMIT 0", "a.*, b.*", "FROM top_a a LEFT JOIN top_b b ON a.id = b.a_id", "LIMIT 0"),
@@ -52,8 +48,15 @@ const JOINED_TABLES: UnorderedLimit[] = [
   u("a view among the tables stays as it was", "a.id, v.id AS v, v.payload", "FROM top_a a JOIN top_v v ON a.id = v.a_id", "LIMIT 5"),
   u("a view alone with a table's *", "a.*, v.*", "FROM top_a a LEFT JOIN top_v v ON a.id = v.a_id", "LIMIT 5 OFFSET 2"),
   u("a table of a column named rowid stays as it was", "r.*, a.note", "FROM top_r r JOIN top_a a ON a.id = r.a_id", "LIMIT 2"),
-  // THE FAN-OUT GUARD (src/duck/distinct-key.ts fanOutBounded), held to count, rows and multiplicity on both sides.
-  // Not proved, no sort: many to many under each join kind, a table joined to itself, every column read
+  // ISSUE 824: a small table's key LEFT JOINed to a bigger one, as a tool previews it, read with no sort: a WHERE on
+  // either side, a chain, a deep OFFSET, a page past the end
+  u("a key LEFT joined, a WHERE on the preserved side", "a.id, a.note, b.id AS b, b.payload", "FROM top_a a LEFT JOIN top_b b ON a.id = b.a_id WHERE a.name IS NOT NULL", "LIMIT 6 OFFSET 2"),
+  u("a key LEFT joined, a WHERE on the nullable side", "a.id, b.id AS b, b.amount", "FROM top_a a LEFT JOIN top_b b ON a.id = b.a_id WHERE b.amount > 10 OR b.id IS NULL", "LIMIT 6"),
+  u("a key LEFT joined, a chain of three, every column", "a.*, b.*, c.*", JOINED, "LIMIT 5 OFFSET 9"),
+  u("a key LEFT joined, a deep OFFSET", "a.id, b.id AS b", "FROM top_a a LEFT JOIN top_b b ON a.id = b.a_id", "LIMIT 4 OFFSET 15"),
+  u("a key LEFT joined, a page past the end", "a.id, b.payload", "FROM top_a a LEFT JOIN top_b b ON a.id = b.a_id", "LIMIT 4 OFFSET 2000000"),
+  // held to count, rows and multiplicity on both sides, issue 134's cases: many to many under each join kind, a table
+  // joined to itself, every column read
   u("many to many", "x.id, y.id AS y, x.note, y.note AS n", "FROM top_b b JOIN top_b b2 ON b.a_id = b2.a_id JOIN top_a x ON x.id = b.id JOIN top_a y ON y.id = b2.id", "LIMIT 7"),
   u("many to many, a table joined to itself", "x.id, y.id AS y, x.payload", "FROM top_b x JOIN top_b y ON x.a_id = y.a_id", "LIMIT 13 OFFSET 3"),
   u("many to many, LEFT", "x.id, y.id AS y, y.payload", "FROM top_b x LEFT JOIN top_b y ON x.a_id = y.a_id", "LIMIT 13 OFFSET 3"),
@@ -72,15 +75,15 @@ const JOINED_TABLES: UnorderedLimit[] = [
   u("a table with no primary key, joined to itself by its key", "n.b, m.note", "FROM top_n n JOIN top_n m ON m.a = n.a AND m.b = n.b", "LIMIT 4"),
   u("an OR in the ON", "a.id, b.id AS b, b.payload", "FROM top_a a JOIN top_b b ON a.id = b.a_id OR a.id = b.id", "LIMIT 9"),
   u("an OR in a LEFT join's ON", "a.id, b.id AS b, b.payload", "FROM top_a a LEFT JOIN top_b b ON a.id = b.a_id OR b.id = 1", "LIMIT 9 OFFSET 2"),
-  // proved, sorted: a key on each side, a composite key whole, each outer join, pages one list
-  u("the key on the right", "b.id, a.note", "FROM top_b b JOIN top_a a ON a.id = b.a_id", "LIMIT 6", { pages: 6 }),
-  u("the key on the left of a RIGHT join", "b.id, a.note", "FROM top_a a RIGHT JOIN top_b b ON b.a_id = a.id", "LIMIT 6", { pages: 6 }),
-  u("the key of a FULL join, on the right", "b.id, a.note", "FROM top_b b FULL JOIN top_a a ON a.id = b.a_id", "LIMIT 6", { pages: 6 }),
-  u("a composite key, whole", "x.id, x.line, y.v", "FROM pairs x JOIN pairs y ON y.id = x.id AND y.line = x.line", "LIMIT 3", { pages: 3 }),
+  // a key on each side, a composite key whole, each outer join (sorted by row number before issue 824)
+  u("the key on the right", "b.id, a.note", "FROM top_b b JOIN top_a a ON a.id = b.a_id", "LIMIT 6"),
+  u("the key on the left of a RIGHT join", "b.id, a.note", "FROM top_a a RIGHT JOIN top_b b ON b.a_id = a.id", "LIMIT 6"),
+  u("the key of a FULL join, on the right", "b.id, a.note", "FROM top_b b FULL JOIN top_a a ON a.id = b.a_id", "LIMIT 6"),
+  u("a composite key, whole", "x.id, x.line, y.v", "FROM pairs x JOIN pairs y ON y.id = x.id AND y.line = x.line", "LIMIT 3"),
   u("a composite key, whole, LEFT with no match", "x.id, y.line, y.v", "FROM pairs x LEFT JOIN pairs y ON y.id = x.id + 1 AND y.line = x.line", "LIMIT 3"),
-  u("a star of keys", "b.id, a.note, c.label", "FROM top_c c JOIN top_b b ON b.id = c.b_id JOIN top_a a ON a.id = b.a_id", "LIMIT 6", { pages: 6 }),
-  u("a comma join on a key", "c.id, b.payload", "FROM top_c c, top_b b WHERE b.id = c.b_id", "LIMIT 6", { pages: 6 }),
-  u("a varchar key from a text column", "k.id, v.label", "FROM keyed k LEFT JOIN vkeys v ON v.id = k.ref", "LIMIT 3", { pages: 3 }),
+  u("a star of keys", "b.id, a.note, c.label", "FROM top_c c JOIN top_b b ON b.id = c.b_id JOIN top_a a ON a.id = b.a_id", "LIMIT 6"),
+  u("a comma join on a key", "c.id, b.payload", "FROM top_c c, top_b b WHERE b.id = c.b_id", "LIMIT 6"),
+  u("a varchar key from a text column", "k.id, v.label", "FROM keyed k LEFT JOIN vkeys v ON v.id = k.ref", "LIMIT 3"),
   u("a derived table of the join", "s.id, s.b", "FROM (SELECT a.id, b.id AS b FROM top_a a JOIN top_b b ON a.id = b.a_id LIMIT 3) s", "LIMIT 2", { whole: "FROM (SELECT a.id, b.id AS b FROM top_a a JOIN top_b b ON a.id = b.a_id) s" }),
 ];
 
@@ -97,17 +100,17 @@ const SIDE = `SELECT ${SIDE_LIST} FROM top_b b WHERE b.id < 20`;
 const SIDE_SELF = "SELECT p.id, p.parent AS a_id, p.parent + 1 AS key, p.note AS payload, 1 AS one, p.id * 2 AS twice, upper(p.name) AS up, date_trunc('day', p.made) AS day FROM top_a p WHERE p.id > 1";
 const SUMS = "SELECT b.a_id, b.a_id + 1 AS key, count(*) AS id, 'sum' AS payload, 1 AS one, sum(b.amount) AS twice, max(b.payload ->> 'k') AS up, max(b.seen)::timestamptz AS day FROM top_b b GROUP BY b.a_id";
 
-const JOIN_KINDS: ReadonlyArray<{ kind: string; from: (side: string) => string; bounded: boolean }> = [
-  { kind: "LEFT", from: (d) => `top_a a LEFT JOIN ${d} ON a.id = d.a_id`, bounded: true },
-  { kind: "RIGHT", from: (d) => `top_a a RIGHT JOIN ${d} ON a.id = d.a_id`, bounded: true },
-  { kind: "FULL", from: (d) => `top_a a FULL JOIN ${d} ON a.id = d.a_id`, bounded: true },
-  { kind: "inner", from: (d) => `top_a a JOIN ${d} ON a.id = d.a_id`, bounded: true },
-  { kind: "comma", from: (d) => `top_a a, ${d} WHERE a.id = d.a_id`, bounded: true },
-  { kind: "a side with no match", from: (d) => `top_a a LEFT JOIN ${d} ON a.id = d.a_id + 1000`, bounded: false },
-  { kind: "a computed join key", from: (d) => `top_a a LEFT JOIN ${d} ON a.id = d.key`, bounded: false },
-  { kind: "a join that multiplies", from: (d) => `top_a a JOIN ${d} ON a.id % 2 = d.a_id % 2`, bounded: false },
+const JOIN_KINDS: ReadonlyArray<{ kind: string; from: (side: string) => string }> = [
+  { kind: "LEFT", from: (d) => `top_a a LEFT JOIN ${d} ON a.id = d.a_id` },
+  { kind: "RIGHT", from: (d) => `top_a a RIGHT JOIN ${d} ON a.id = d.a_id` },
+  { kind: "FULL", from: (d) => `top_a a FULL JOIN ${d} ON a.id = d.a_id` },
+  { kind: "inner", from: (d) => `top_a a JOIN ${d} ON a.id = d.a_id` },
+  { kind: "comma", from: (d) => `top_a a, ${d} WHERE a.id = d.a_id` },
+  { kind: "a side with no match", from: (d) => `top_a a LEFT JOIN ${d} ON a.id = d.a_id + 1000` },
+  { kind: "a computed join key", from: (d) => `top_a a LEFT JOIN ${d} ON a.id = d.key` },
+  { kind: "a join that multiplies", from: (d) => `top_a a JOIN ${d} ON a.id % 2 = d.a_id % 2` },
 ];
-const SELF = { kind: "a table joined to itself", from: (d: string) => `top_a a LEFT JOIN ${d} ON a.id = d.a_id`, bounded: true };
+const SELF = { kind: "a table joined to itself", from: (d: string) => `top_a a LEFT JOIN ${d} ON a.id = d.a_id` };
 
 const OUT = "a.id, a.name, a.made, d.id AS d_id, d.a_id, d.key, d.one, d.twice, d.up, d.day";
 const wrapped = (from: string): string => `SELECT ${OUT} FROM ${from}`;
@@ -157,11 +160,11 @@ const applies = (s: Spelling, k: typeof SELF): boolean => k !== SELF || s.spelle
 
 const everySpelling = (): Array<{ s: Spelling; k: typeof SELF }> => [...JOIN_KINDS, SELF].flatMap((k) => SPELLINGS.filter((s) => applies(s, k)).map((s) => ({ s, k })));
 
-/** each spelling of each kind with no ORDER BY: pages one list where the join is proved, never where it is not */
+/** each spelling of each kind with no ORDER BY */
 export const FROM_ITEMS_UNORDERED: UnorderedLimit[] = [
   ...everySpelling().map(({ s, k }) => {
     const { head, list, from } = spelledAs(s, k);
-    return u(`${s.spelled}, ${k.kind}`, list, from, "LIMIT 7 OFFSET 1", { ...(head !== "" ? { head } : {}), ...(k.bounded && s.carried !== true ? { pages: 6 } : {}) });
+    return u(`${s.spelled}, ${k.kind}`, list, from, "LIMIT 7 OFFSET 1", head !== "" ? { head } : {});
   }),
   // a WITH query read twice is no plain read of one reference, and a column of a side the list does not read
   u("a WITH query read twice", "a.id, x.id AS x, y.up", "FROM top_a a LEFT JOIN w x ON x.a_id = a.id LEFT JOIN w y ON y.key = a.id", "LIMIT 9", { head: `WITH w AS (${SIDE}) ` }),
@@ -196,8 +199,8 @@ const MERGED_UNORDERED: UnorderedLimit[] = [
     u(`merged: ${m.name}`, m.list, m.from, "LIMIT 7 OFFSET 1"),
     u(`merged: ${m.name}, a *`, "*", m.from, "LIMIT 7"),
   ]),
-  // a USING that equates a key is proved bounded: its pages are one list
-  ...JOINS.map(({ kind, join }) => u(`merged: paged, a key's USING, ${kind}`, "id, x.only1, z.tail", `FROM top_m1 x ${join} top_m4 z USING (id)`, "LIMIT 3", { pages: 3 })),
+  // a USING that equates a key
+  ...JOINS.map(({ kind, join }) => u(`merged: paged, a key's USING, ${kind}`, "id, x.only1, z.tail", `FROM top_m1 x ${join} top_m4 z USING (id)`, "LIMIT 3")),
 ];
 
 const keysOver = (id: string): ReadonlyArray<{ key: string; order: string; zone?: string }> => [
@@ -428,11 +431,3 @@ export function withinWhole(want: Answered, whole: Rows, got: Answered): string 
   return taken(got.rows, tally(whole));
 }
 
-/** what is wrong with `pages` read in turn over a whole join: each row of it comes back exactly as often as it holds it */
-export function everyRowOnce(pages: Rows, whole: Rows): string | null {
-  const left = tally(whole);
-  const wrong = taken(pages, left);
-  if (wrong !== null) return wrong;
-  const missed = [...left].find(([, n]) => n > 0);
-  return missed === undefined ? null : `${missed[0]} is in no page`;
-}
