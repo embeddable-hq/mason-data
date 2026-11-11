@@ -1069,6 +1069,8 @@ test("stage 1b, the roles file decides a user added without --role: its default 
   assert.deepEqual(roleOf(await listed("metabase")), { role: undefined, roleFrom: "none", readsNothing: undefined });
   const noFile = await run(["user", "add", "psql"]);
   assert.doesNotMatch(noFile.stdout, /^ {2}role /m);
+  // Mason stopped: no address is printed, so no tip points from it to mason share
+  assert.doesNotMatch(noFile.stdout, /mason share/);
 
   // MASON UP: the listener's roles (default included) decide the add, and mason status says the default
   fs.writeFileSync(rolesFile, WITH_DEFAULT);
@@ -1470,6 +1472,23 @@ test("mason user add --role with Mason stopped: the role must be one the roles f
   const plain = (JSON.parse((await run(["user", "list", "--json"])).stdout) as { users: Array<{ name: string; role?: string }> }).users.find((u) => u.name === "plain");
   assert.deepEqual(plain && { role: plain.role, roleKnown: "roleKnown" in plain, roleFrom: (plain as { roleFrom?: string }).roleFrom, readsNothing: (plain as { readsNothing?: boolean }).readsNothing },
     { role: undefined, roleKnown: false, roleFrom: "none", readsNothing: true }, JSON.stringify(plain));
+});
+
+test("mason user add points to mason share only where it applies: a mason start run up, on loopback, with no public address", async () => {
+  const { sharePoints, addedReport, SHARE_TIP } = await import("../src/cli/user.ts");
+  const link = { url: "postgresql://127.0.0.1:5433/shop", host: "127.0.0.1", port: 5433, database: "shop", sslmode: "disable" as const };
+  const loopback = { host: "127.0.0.1", tls: null } as const;
+  assert.equal(sharePoints(false, link, loopback), true, "mason start on loopback");
+  assert.equal(sharePoints(false, link, { host: "::1", tls: null }), true, "IPv6 loopback");
+  assert.equal(sharePoints(true, link, loopback), false, "mason serve's run refuses mason share");
+  assert.equal(sharePoints(false, { ...link, public: true }, loopback), false, "a public address (MASON_PG_PUBLIC_URL) already reaches it");
+  assert.equal(sharePoints(false, link, { host: "0.0.0.0", tls: "self-signed" }), false, "off loopback: the address is this machine's network's");
+  assert.equal(sharePoints(false, null, null), false, "Mason stopped: no address printed");
+  const added = { user: "me", id: "x", password: "pw", database: "shop", addedAt: "2026-11-11T00:00:00Z", roleFrom: "none" as const };
+  const tips = (share: boolean) => addedReport(added, { roles: { file: null, roles: {}, default: null } as never, listener: null, next: [["mason user list", "the users"]], share }).split("\n").filter((l) => l.startsWith("Tip: "));
+  assert.equal(tips(true).at(-1), `Tip: ${SHARE_TIP}`, "the last tip, just above Next");
+  assert.equal(SHARE_TIP, "A tool outside this machine (a cloud BI tool) cannot reach this address: mason share opens one on the internet, with a login and password of its own, for as long as it runs.");
+  assert.ok(!tips(false).some((t) => /mason share/.test(t)));
 });
 
 test("mason user add --from and mason user from: a user's address ranges in their one form, replaced and removed, shown by list; an invalid range is a wrong line, exit 2, nothing written", async () => {

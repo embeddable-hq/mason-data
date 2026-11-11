@@ -268,6 +268,7 @@ test("every surface beside a run prints the URL from the one builder: mason stat
   assert.match(pub.addText as string, /^Tip: The listener's certificate is self-signed: where a client reaches it through a TCP pass-through, that is the certificate it meets; to check it by hand, its SHA-256 is AB:CD\.$/m, "the certificate's SHA-256 is kept");
   assert.match(own.addText as string, /^ {2}url +postgres:\/\/looker:[^@\s]+@localhost:5433\/shop\?sslmode=require$/m);
   assert.match(own.addText as string, /put this machine's address or name in place of localhost/, "unset: the tip, as before");
+  for (const t of [pub.addText, own.addText]) assert.doesNotMatch(t as string, /mason share/, "mason serve's run refuses mason share: no tip points to it");
   // mason user list: each user's URL without its password
   assert.deepEqual(pub.list, [["metabase", "postgres://metabase@db.example.com:6432/shop?sslmode=verify-full"], ["looker", "postgres://looker@db.example.com:6432/shop?sslmode=verify-full"]]);
   assert.deepEqual(own.list, [["metabase", "postgres://metabase@localhost:5433/shop?sslmode=require"], ["looker", "postgres://looker@localhost:5433/shop?sslmode=require"]]);
