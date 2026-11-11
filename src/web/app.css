@@ -650,6 +650,9 @@ button.expand:focus-visible { outline: 2px solid var(--accent); outline-offset: 
 #page-queries tr.detail:hover > td { background: var(--sunken); }
 #page-queries tr.detail pre.stmt { font-family: var(--font-mono); color: var(--fg); }
 #page-queries tr.detail pre.error { color: var(--bad); }
+/* a slow statement's plan: a block of lines as EXPLAIN prints them, its indentation kept, scrolling in its box */
+#page-queries tr.detail .plan-label { margin: var(--space-3) 0 0; font-size: var(--text-xs); color: var(--muted); }
+#page-queries tr.detail pre.plan { font-family: var(--font-mono); color: var(--fg); white-space: pre; overflow-x: auto; overflow-wrap: normal; }
 #page-queries table.sessions td:first-child { font-weight: 600; }
 
 /* Usage: four small charts in a grid, each under its title; a card with no drawn chart takes no room */

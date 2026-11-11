@@ -440,7 +440,7 @@ test("statementMsText: a statement's time is always whole milliseconds with thou
 
 test("mason logs --requests: a request a line, newest last — when, the outcome and SQLSTATE, the time, the rows, who, the statement and the error", () => {
   const { requestLine } = commands;
-  const base = { requestId: "r", session: 1, method: "QUERY", clientAddress: null, detail: null, hint: null, queryTruncated: false, user: "", role: "", attributes: null, endedAt: "2026-10-26T14:02:12.357Z", bytesSent: 100 };
+  const base = { requestId: "r", session: 1, method: "QUERY", clientAddress: null, detail: null, hint: null, queryTruncated: false, user: "", role: "", attributes: null, endedAt: "2026-10-26T14:02:12.357Z", bytesSent: 100, plan: null, planTruncated: false };
   assert.equal(requestLine({ ...base, startedAt: "2026-10-26T14:02:11.123Z", applicationName: "Metabase", tokenName: "", outcome: "ok", status: "completed", sqlstate: null, message: null,
     rows: 20, durationMs: 1234, query: "SELECT id\n FROM public.orders LIMIT 20" }, PLAIN),
     "2026-10-26 14:02:11  ok                1,234 ms      20 rows  Metabase  SELECT id FROM public.orders LIMIT 20");
@@ -1155,6 +1155,10 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
   const failedQueries = [{ requestId: "r1", startedAt: "2026-10-24T10:04:00.000Z", endedAt: "2026-10-24T10:04:00.003Z", session: 4, applicationName: "psql", tokenName: "", user: "",
     method: "QUERY", outcome: "refused", status: "failed", sqlstate: "42P01", message: 'relation "nope" does not exist', detail: null, hint: null, rows: null, bytesSent: 0, durationMs: 3,
     query: "SELECT * FROM nope", queryTruncated: false }];
+  // a slow statement with its plan (src/api/postgres/slow-plan.ts): what --id prints whole
+  const SLOW_ID = "0b9e5c1e-0000-4000-8000-0000000000aa";
+  const slowQuery = { ...failedQueries[0], requestId: SLOW_ID, outcome: "ok", status: "completed", sqlstate: null, message: null, rows: 1, durationMs: 2345, bytesSent: 90,
+    query: "SELECT count(*)\n  FROM orders o JOIN items i ON i.order_id = o.id", plan: "Mason: answered from the synced tables\n  public.orders (about 3 rows; polled every 30s)\nHash Join  (rows=3)\n  ->  Table Scan on public.orders  (rows=3)", planTruncated: true };
   const unsupportedAsks: Array<{ since: string; limit: number }> = [];
   const unsupportedSql = { gap: "json-agg-distinct", title: "json_agg / jsonb_agg (DISTINCT …)", runs: 12, users: ["metabase"], clients: ["Metabase"],
     last: "2026-10-24T10:04:00.000Z", example: "SELECT json_agg(DISTINCT status) FROM orders" };
@@ -1167,7 +1171,7 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
       return session === 4 && statement !== undefined && statement !== 9 ? { other: running, asked: statement } : session === 4 ? { cancelled: running } : session === 6 ? { cancelled: { ...running, session: 6, runningMs: 125_000 } } : session === 5 ? { idle: 5 } : { unknown: session }; } },
     logs: { capacity: 2000, recent: () => [] },
     duck: { copies: () => [], file: path.join(root, "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
-      requests: { days: 7, unsupported: async (q) => { unsupportedAsks.push(q); return [unsupportedSql]; }, page: async (q) => { asked.push(q); return { requests: q.failed === true ? failedQueries as never : [], before: "2026-10-24T10:00:00.000Z~7" }; }, slow: async () => [],
+      requests: { days: 7, unsupported: async (q) => { unsupportedAsks.push(q); return [unsupportedSql]; }, page: async (q) => { asked.push(q); return q.id !== undefined ? { requests: q.id === SLOW_ID ? [slowQuery] as never : [], before: null } : { requests: q.failed === true ? failedQueries as never : [], before: "2026-10-24T10:00:00.000Z~7" }; }, slow: async () => [],
         refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }), slowest: async () => [], durationsBy: async () => new Map(),  lastUsed: async (u) => u.map(() => null) },
       events: { days: 7, recent: async () => [] }, usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [], statementTotals: () => ({ completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 }), lastDurations: () => null }, restarts: () => [] },
   };
@@ -1194,6 +1198,19 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
     assert.equal(slow.code, 0, slow.stdout + slow.stderr);
     assert.deepEqual(asked.at(-1), { limit: 40, minMs: 1000, search: "from orders" });
     assert.equal((JSON.parse(slow.stdout) as { next: Array<{ command: string }> }).next[0]!.command, "mason logs --requests --slow --search 'from orders' --before 2026-10-24T10:00:00.000Z~7");
+    // --id: ONE request whole, its plan with it (issue 825), read through the same parser; none of that id is not_found
+    const one = await run(["logs", "--requests", "--id", SLOW_ID.toUpperCase()]);
+    assert.equal(one.code, 0, one.stdout + one.stderr);
+    assert.deepEqual(asked.at(-1), { limit: 40, id: SLOW_ID });
+    assert.match(one.stdout, /^2026-10-24 10:04:00  ok\s+2,345 ms\s+1 row  psql  SELECT count\(\*\) FROM orders o JOIN items i ON i\.order_id = o\.id\n\n  request\s+0b9e5c1e-0000-4000-8000-0000000000aa\n/);
+    assert.match(one.stdout, /\nStatement:\n  SELECT count\(\*\)\n    FROM orders o JOIN items i ON i\.order_id = o\.id\n\nPlan, recorded once it ended \(cut at 8 KiB\):\n  Mason: answered from the synced tables\n    public\.orders \(about 3 rows; polled every 30s\)\n  Hash Join  \(rows=3\)\n    ->  Table Scan on public\.orders  \(rows=3\)\n/);
+    const oneJson = JSON.parse((await run(["logs", "--requests", "--id", SLOW_ID, "--json"])).stdout) as { requests: Array<{ plan: string; planTruncated: boolean }> };
+    assert.deepEqual([oneJson.requests[0]!.plan, oneJson.requests[0]!.planTruncated], [slowQuery.plan, true]);
+    const missing = await run(["logs", "--requests", "--id", "0b9e5c1e-0000-4000-8000-0000000000bb"]);
+    assert.equal(missing.code, 1, missing.stdout + missing.stderr);
+    assert.match(missing.stderr, /mason logs: no request 0b9e5c1e-0000-4000-8000-0000000000bb in the request log/);
+    const missingJson = JSON.parse((await run(["logs", "--requests", "--id", "0b9e5c1e-0000-4000-8000-0000000000bb", "--json"])).stdout) as { error: { code: string } };
+    assert.equal(missingJson.error.code, "not_found");
     // none listed, nothing filtered: what the log does not list, so a select 1 typed to test the connection is not looked for in vain
     const none = await run(["logs", "--requests"]);
     assert.equal(none.code, 0, none.stdout + none.stderr);
@@ -1208,6 +1225,8 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
       [["logs", "--requests", "--failed", "--outcome", "ok"], /mason logs: --failed is every outcome but ok: name it or --outcome, never both/],
       [["logs", "--since", "2h"], /mason logs: --since is a filter of --requests/],
       [["logs", "--slow"], /mason logs: --slow is a filter of --requests/],
+      [["logs", "--id", SLOW_ID], /mason logs: --id is a filter of --requests/],
+      [["logs", "--requests", "--id", "r1"], /mason logs: --id "r1" is not a request's id/],
       [["logs", "--requests", "--search", ""], /mason logs: --search is a piece of a statement's text: it is empty/],
       [["logs", "--running", "--requests"], /mason logs: --running lists the statements running now; --requests is the request log's/],
       [["usage", "--since", "2026-10-28T09:00:00"], /mason usage: --since "2026-10-28T09:00:00" is not a time/],

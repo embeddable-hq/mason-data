@@ -58,8 +58,8 @@ import type { KeptPathStatus } from "../duck/kept.ts";
 import type { CopySize, UsageFacts, UsageSample, UsageSampler } from "../duck/usage.ts";
 import { FRESH_SAMPLES, type RunMetrics } from "./metrics.ts";
 
-/** A statement answered in this many milliseconds or more is slow (one constant: src/cli/request-filter.ts SLOW_MS, the
- *  request log's `slow` filter's too): what mason status lists (src/duck/requests.ts slow). */
+/** A statement answered in this many milliseconds or more is slow (one constant: src/api/request-log.ts SLOW_MS, the
+ *  request log's `slow` filter's and a slow statement's plan's too): what mason status lists (src/duck/requests.ts slow). */
 export { SLOW_MS };
 
 export interface RunContext {

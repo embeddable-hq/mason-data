@@ -2,6 +2,8 @@
 paths:
   - "src/duck/history.ts"
   - "src/duck/requests.ts"
+  - "src/api/postgres/slow-plan.ts"
+  - "tests/duck-requests-plan-wire.test.ts"
   - "src/duck/usage.ts"
   - "tests/duck-history.test.ts"
   - "tests/duck-requests-wire.test.ts"
@@ -35,6 +37,17 @@ paths:
   its message (src/duck/store.ts `pgErrorOf`), and carried across the executor's worker (`WireError`); a re-wrap of an
   error keeps it (tests/duck-wire.test.ts holds every path). `unsupported` groups by it (`/api/unsupported`, `mason
   status`). ("The request log")
+- **A statement that took `SLOW_MS` or more has its plan on its row, recorded after its answer and never in its way**
+  (src/api/postgres/slow-plan.ts `SlowPlans`, issue 825: a slow preview's cause took a hand-run EXPLAIN on the server,
+  and a hand-run EXPLAIN ANALYZE slowed a user's statement): a plain EXPLAIN (Mason's, src/duck/explain.ts) of the plan
+  it RAN (never planned again: the catalog plans every session on one thread), with the values and session it ran
+  under, its role held as it is then (a refusal is the plan's words), on a connection of its own; at most ONE in
+  flight, a second dropped (never queued) and said at most once a minute with their count; a statement bound with values keeps its operators
+  without their details (`detailsHidden`); none for a refusal by an entry, a cancel, or a statement that never reached
+  the engine. The row waits in the ledger for its plan (bounded, `PLAN_WAIT_MS`; written without it at the close),
+  cut and said: a line past `MAX_STORED_PLAN_LINE_BYTES` keeps its head (a long statement's SQL never pushes the
+  operators out), then the whole at `MAX_STORED_PLAN_BYTES`, at a line. Its cost beside fast statements is measured in docs/OBSERVABILITY.md "The
+  plan of a slow statement". Detector: tests/duck-requests-plan-wire.test.ts.
 - **Usage over time is a row of `_mason.usage` a minute, and each copy's own bytes a row of `_mason.copy_sizes` every 10
   minutes, kept as the request log is** (src/duck/usage.ts `UsageSampler`; the run had only the moment): on connections
   of their own, never the writer's turn, a failed take or write said once and never failing anything (a sample not

@@ -43,6 +43,18 @@ const expandButton = (key, open) =>
   `<button type="button" class="expand" data-expand="${esc(key)}" aria-expanded="${open ? "true" : "false"}" aria-label="${EXPAND_NAME}" title="${EXPAND_NAME}"><span aria-hidden="true">${open ? "−" : "+"}</span></button>`;
 
 /**
+ * A SLOW STATEMENT'S PLAN in its expanded row (`plan`, src/duck/requests.ts LedgerRequest): as text, the first
+ * STATEMENT_MAX characters and said so when cut, as the statement is, and said when the log kept it cut (8 KiB); "" for
+ * a row with none (an older run's rows have no `plan` at all).
+ */
+function planHtml(r) {
+  if (typeof r.plan !== "string") return "";
+  const plan = capped(r.plan, STATEMENT_MAX, `mason logs --requests --id ${r.requestId}`);
+  return `<p class="plan-label">Plan, recorded once it ended (it took ${esc(statementMsText(r.durationMs))})</p><pre class="plan">${esc(plan.text)}</pre>` +
+    (plan.cut ? `<p class="dim cut">${esc(plan.cut)}${r.planTruncated ? " (as the log kept it)" : ""}</p>` : r.planTruncated ? `<p class="dim cut">the request log kept the plan cut at 8 KiB</p>` : "");
+}
+
+/**
  * THE REQUEST LOG (`mason logs --requests --json`'s shape: { requests, keptDays, before }), newest first (the command
  * prints the oldest of the page first; a table reads the other way): a dot and the status word, the id's first 8
  * characters, when it started (how long ago; the UTC time is its title and in its details), the duration, user, client,
@@ -84,7 +96,7 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
     // its body is as wide as the row and no wider (`.detail-body`): a long statement scrolls in its box, never widens a column
     const more = open ? `<tr class="detail"><td colspan="${REQUEST_COLUMNS.length}"><div class="detail-body">${rowsHtml([["Query id", r.requestId], ["Started (UTC)", utcMsText(r.startedAt)], ["Ended (UTC)", utcMsText(r.endedAt)], ["Bytes sent", r.bytesSent === null ? "" : bytesText(r.bytesSent)]])}` +
       `<pre class="stmt">${esc(stmt.text)}</pre>${stmt.cut ? `<p class="dim cut">${esc(stmt.cut)}${r.queryTruncated ? " (as the log kept it)" : ""}</p>` : r.queryTruncated ? `<p class="dim cut">the request log kept the statement cut</p>` : ""}` +
-      `${r.message ? `<pre class="error">${esc(r.sqlstate ? `${r.sqlstate} ` : "")}${esc(err.text)}</pre>${err.cut ? `<p class="dim cut">${esc(err.cut)}</p>` : ""}` : ""}</div></td></tr>` : "";
+      `${r.message ? `<pre class="error">${esc(r.sqlstate ? `${r.sqlstate} ` : "")}${esc(err.text)}</pre>${err.cut ? `<p class="dim cut">${esc(err.cut)}</p>` : ""}` : ""}${planHtml(r)}</div></td></tr>` : "";
     return row + more;
   }).join("");
   const sortNote = sort.key === "started" && sort.dir === "desc" ? ""

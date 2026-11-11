@@ -167,7 +167,7 @@ const EVENT: SyncEvent = { at: "2026-10-27T09:03:10.123Z", kind: "poll_failed", 
 const EVENTS = { events: [EVENT, { at: "2026-10-27T09:04:00.000Z", kind: "restart", failed: true, table: null, message: "the run was started again after it stopped" }], keptDays: 7 };
 const REQUEST: LedgerRequest = { requestId: "0b9e5c1e-0000-4000-8000-000000000001", startedAt: "2026-10-27T09:02:00.500Z", session: 7, applicationName: "Metabase", clientAddress: null, tokenName: "", user: "metabase", role: "", attributes: null,
   method: "QUERY", outcome: "refused", status: "failed", sqlstate: "42P01", message: "relation \"nope\" does not exist\nLINE 1", detail: null, hint: null, rows: null, durationMs: 3,
-  endedAt: "2026-10-27T09:02:00.503Z", bytesSent: 120, query: "SELECT *\n  FROM nope", queryTruncated: false };
+  endedAt: "2026-10-27T09:02:00.503Z", bytesSent: 120, query: "SELECT *\n  FROM nope", queryTruncated: false, plan: null, planTruncated: false };
 const FAILED_REQUESTS = { requests: [REQUEST, { ...REQUEST, requestId: "0b9e5c1e-0000-4000-8000-000000000002", applicationName: "", user: "", outcome: "cancelled", sqlstate: "57014",
   message: "canceling statement due to user request", rows: 10, durationMs: 12_345, query: `SELECT ${"x, ".repeat(60)}1` }], keptDays: 7 };
 const USAGE = { since: "2026-10-27T09:04:30.000Z", until: "2026-10-27T09:05:30.000Z", stepSeconds: null, sampleSeconds: 60, keptDays: 7, samples: [],
@@ -2448,6 +2448,21 @@ test("the request log: a row each, newest first, in the commands' words — held
   const longOpen = renderRequests({ requests: [{ ...REQUESTS[0], requestId: "0b9e5c1e-0000-4000-8000-000000000001", query: "SELECT\n 1", message: "boom\nline 2", sqlstate: "XX000" }], keptDays: 7, before: null }, { isOpen: () => true });
   assert.match(textOf(longOpen), /Query id 0b9e5c1e-0000-4000-8000-000000000001 Started \(UTC\) 2026-10-28 09:00:00\.000 Ended \(UTC\) 2026-10-28 09:00:01\.234 Bytes sent 2\.0 KiB SELECT 1 XX000 boom line 2/);
   assert.match(longOpen, /<pre class="stmt">SELECT\n 1<\/pre><pre class="error">XX000 boom\nline 2<\/pre>/, "the whole statement and the whole error");
+  assert.ok(!longOpen.includes("Plan"), "a row with no plan says none");
+  // A SLOW STATEMENT'S PLAN (issue 825; `plan` of mason logs --requests --json): in its expanded row as text, its lines
+  // and their indentation kept, escaped, and said when the log kept it cut; never in a closed row
+  const plan = "Mason: answered from the synced table public.orders (about 3 rows)\n  Sent to the engine: SELECT a < b FROM orders\nTop N  (rows=3)\n  ->  Table Scan on public.orders  (rows=3)";
+  const slowRequest = { ...REQUESTS[0], requestId: "0b9e5c1e-0000-4000-8000-0000000000aa", durationMs: 2345, plan, planTruncated: false };
+  const planOpen = renderRequests({ requests: [slowRequest], keptDays: 7, before: null }, { isOpen: () => true });
+  assert.ok(planOpen.includes(`<p class="plan-label">Plan, recorded once it ended (it took 2,345 ms)</p><pre class="plan">Mason: answered from the synced table public.orders (about 3 rows)\n  Sent to the engine: SELECT a &lt; b FROM orders\nTop N  (rows=3)\n  -&gt;  Table Scan on public.orders  (rows=3)</pre>`), planOpen);
+  assert.ok(!renderRequests({ requests: [slowRequest], keptDays: 7, before: null }).includes("Top N"), "a closed row writes no plan");
+  assert.match(renderRequests({ requests: [{ ...slowRequest, planTruncated: true }], keptDays: 7, before: null }, { isOpen: () => true }),
+    /<\/pre><p class="dim cut">the request log kept the plan cut at 8 KiB<\/p>/);
+  const hugePlan = renderRequests({ requests: [{ ...slowRequest, plan: "x".repeat(20_000) }], keptDays: 7, before: null }, { isOpen: () => true });
+  assert.match(hugePlan, /<p class="dim cut">the first 16\.0 KiB of 19\.5 KiB: mason logs --requests --id 0b9e5c1e-0000-4000-8000-0000000000aa has it whole<\/p>/, "cut as the statement is, naming where it is whole");
+  // the CLI prints the same plan, whole, for that request (mason logs --requests --id)
+  const detail = commands.requestDetail(slowRequest as never, PLAIN);
+  for (const l of plan.split("\n")) assert.ok(detail.includes(`\n  ${l}`), `the CLI's --id says ${l}`);
   assert.ok(!html.includes("data-newest"), "the newest page has no Newest");
   for (const r of REQUESTS) {
     const line = commands.requestLine(r as never, PLAIN);

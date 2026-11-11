@@ -6,7 +6,7 @@
  * own clock and hands the run the times it resolved (`requestFilterParams`), which the run reads again here.
  */
 import type { Failure } from "./command.ts";
-import { OUTCOMES, type Outcome } from "../api/request-log.ts";
+import { OUTCOMES, SLOW_MS, type Outcome } from "../api/request-log.ts";
 import { parseRequestCursor, requestCursor, type RequestQuery } from "../duck/requests.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { parseDuration } from "../lib/table-sync.ts";
@@ -15,9 +15,13 @@ import { parseDuration } from "../lib/table-sync.ts";
 export const DEFAULT_REQUEST_LIMIT = 40;
 export const MAX_REQUEST_LIMIT = 10_000;
 
-/** A statement answered in this many milliseconds or more is slow: what mason status lists, and what the `slow` filter
- *  keeps (`--slow`, `slow=1`). One constant, here, where the filter is read; src/cli/run-server.ts re-exports it. */
-export const SLOW_MS = 1000;
+/** A statement answered in this many milliseconds or more is slow: the one constant is the request log's
+ *  (src/api/request-log.ts SLOW_MS), which also decides whose plan is recorded; re-exported here, where the filter is
+ *  read, and by src/cli/run-server.ts. */
+export { SLOW_MS };
+
+/** A request's id as the listener makes one (crypto.randomUUID): what `id` takes. */
+const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** The longest text `search` takes: a fragment of a statement, never a statement pasted whole. */
 export const MAX_SEARCH = 200;
@@ -41,6 +45,8 @@ export interface RequestFilterText {
   /** only the statements whose text has it, any case */
   search?: string | undefined;
   before?: string | undefined;
+  /** the one request of this id (its `requestId`): read whole, its plan with it */
+  id?: string | undefined;
 }
 
 /** a date, or a date and time with its zone (a time without one would be read in this machine's zone: refused) */
@@ -131,6 +137,11 @@ export function requestFilter(f: RequestFilterText, now: number = Date.now(), na
     if (f.search.length > MAX_SEARCH) return usage(`${name("search")} is a piece of a statement's text, at most ${MAX_SEARCH} characters: it has ${f.search.length}`);
     q.search = f.search;
   }
+  if (f.id !== undefined) {
+    // a request's id is the uuid the listener gave it (src/api/postgres/server.ts recordRequest)
+    if (!REQUEST_ID.test(f.id)) return usage(`${name("id")} ${JSON.stringify(f.id)} is not a request's id`, "the requestId a request is listed with (mason logs --requests --json), a uuid");
+    q.id = f.id.toLowerCase();
+  }
   if (f.before !== undefined) {
     const c = parseRequestCursor(f.before);
     if (c === null) return usage(`${name("before")} ${JSON.stringify(f.before)} is not a position in the request log`, `pass back the before a page answered with, as it came`);
@@ -151,6 +162,7 @@ export function requestFilterParams(q: RequestQuery): URLSearchParams {
   if (q.minMs !== undefined) p.set("slow", "1");
   if (q.search !== undefined) p.set("search", q.search);
   if (q.before !== undefined) p.set("before", requestCursor(q.before.at, q.before.seq));
+  if (q.id !== undefined) p.set("id", q.id);
   return p;
 }
 
@@ -158,5 +170,5 @@ export function requestFilterParams(q: RequestQuery): URLSearchParams {
 export function requestFilterText(p: URLSearchParams): RequestFilterText {
   const get = (k: string): string | undefined => p.get(k) ?? undefined;
   return { limit: get("limit"), outcome: get("outcome"), failed: p.get("failed") === "1", since: get("since"), until: get("until"),
-    user: get("user"), client: get("client"), slow: p.get("slow") === "1", search: get("search"), before: get("before") };
+    user: get("user"), client: get("client"), slow: p.get("slow") === "1", search: get("search"), before: get("before"), id: get("id") };
 }

@@ -911,7 +911,7 @@ export class SessionRunner implements DuckRunner {
     }
     // what it calls is the plan's (src/duck/plan.ts PlannedSql), the list that decides how it is cancelled
     const explained: Explained = { copies: await this.copies(scannedTables(plan), how.copies, how.rowFilters ?? []), sql: oneLine(sql.text), computed: computedOf(how.exact, how.fields),
-      functions: [...sql.functions], plan, ...(analyzed === undefined ? {} : { analyzed }) };
+      functions: [...sql.functions], plan, ...(analyzed === undefined ? {} : { analyzed }), ...(how.detailsHidden === true ? { detailsHidden: true as const } : {}) };
     return o.format === "json" ? [explainJson(explained, o)] : explainText(explained, o);
   }
 

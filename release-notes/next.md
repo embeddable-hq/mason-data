@@ -18,6 +18,17 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   their form. On Observability › Queries, the Statement cell
   now has its own `+` beside the statement. It opens and closes the same row as the Query id's `+`.
 
+- A statement that takes a second or more now has its plan recorded with its row of the request log, so why it was
+  slow can be read afterwards without rebuilding the plan by hand. Once the statement has ended and its answer was
+  sent, Mason runs a plain `EXPLAIN` of it in the background: planning only, nothing run a second time. The plan says
+  the tables it read and how fresh each was, the SQL sent to the synced data, and its operators with their estimated
+  rows. Read it in `mason logs --requests --json` (`plan`, `planTruncated`), in a row's details on Observability ›
+  Queries, or whole with the new `mason logs --requests --id <request id>`. A plan is at most 8 KiB and says when it
+  was cut. One plan is recorded at a time: a slow statement that ends while another's is being recorded gets none, and
+  the log says so. A statement bound with parameters has its operators recorded without their details, which could
+  show the values it was bound with. A cancelled statement has no plan. Neither does one refused before it reached
+  the synced data, or refused as SQL Mason does not support. It is kept as the request log is (`MASON_HISTORY_DAYS`).
+
 ## What was wrong and is now right
 
 - The Overview's "The synced data's file" card, `mason status`, `mason usage` and `mason_copy_bytes` now count the synced

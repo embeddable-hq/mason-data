@@ -17,7 +17,7 @@ same JSON; the web page and the managed service read those endpoints, never a se
 | `GET /api/activity?since=` | (the Usage page's) | one time range of the request log: `{ since, window, clients, clientsTotal, slowest, keptDays }` — its statements as the summary counts a day, who sent them (a row per user and client: statements, failed, sessions, last; the 50 with the most statements, `clientsTotal` the count of every client and session), the 10 slowest that completed |
 | `GET /api/slow`, `GET /api/refused` | `mason status` | the slow statements; the refused and failed ones, each distinct one once |
 | `GET /api/unsupported?since=&limit=` | `mason status` `unsupported` | the refused statements grouped by the registry entry (docs/SQL-SUPPORT.md) that refused them: `[{ gap, title, runs, users, clients, last, example }]`, the most refused first; a day and 10 entries by default |
-| `GET /api/requests?limit=&failed=&outcome=&since=&until=&user=&client=&slow=&search=&before=` | `mason logs --requests` | the request log, filtered and paged; `slow=1` (`--slow`) the ones that took `SLOW_MS` (1 s) or more, `search` (`--search`) a piece of the statement's text, any case |
+| `GET /api/requests?limit=&failed=&outcome=&since=&until=&user=&client=&slow=&search=&before=&id=` | `mason logs --requests` | the request log, filtered and paged; `slow=1` (`--slow`) the ones that took `SLOW_MS` (1 s) or more, `search` (`--search`) a piece of the statement's text, any case; `id` (`--id`, printed whole) one request; a slow one carries its `plan` ("The plan of a slow statement") |
 | `GET /api/events?limit=&since=&failed=` | `mason logs --events`; `mason status` `recentErrors.sync` | the sync's failures and events, and the run's restarts |
 | `GET /api/running`, `POST /api/cancel { session }` | `mason logs --running`, `mason cancel <session>` | the statements running now; stop one as a client's cancel does |
 | `GET /api/usage?since=&until=&step=` | `mason usage` | a sample a minute, re-bucketed by `step` (a point of more than a minute: its p50 / p95 are its statements', from the request log, never its worst minute's), and each copy's own size |
@@ -170,6 +170,7 @@ Key: ✅ built · ⏸ deferred
 | Cancel | ✅ | `POST /api/cancel`, `mason cancel <session>`, through the listener's one path |
 | User | ✅ | `user`; and the client's `applicationName` |
 | Query ID | ✅ | `requestId` |
+| The plan of a slow statement | ✅ | `plan`, `planTruncated` ("The plan of a slow statement" below): in the row's details, and whole in `mason logs --requests --id <requestId>` |
 | Rows scanned | ⏸ | **Decide later: may add cost to every query.** DuckDB reports it only with its profiler on per statement, whose cost is not measured. Measure (about half a day) before promising it. |
 | Filters: status, date, user | ✅ | `/api/requests`: outcome, `failed`, since / until, user, client, `slow`, `search`, and paging (`before`) |
 
@@ -256,6 +257,44 @@ Decisions it needs: pull or push (A or B); whether statement text is served at a
 token; whether actions (Cancel, Sync) are ever served there or read-only for good; one secret or a list of named ones
 (as `mason user` is for the Postgres API). Recommended: **A, read-only, one secret, statement text included, TLS
 required**, then **C** for teams that already run Prometheus. C is built (above); A and B stay open.
+
+## The plan of a slow statement (issue 825, 2026-11-10)
+
+A statement that took `SLOW_MS` (1 s) or more has Mason's plain EXPLAIN of it on its request-log row: `plan`,
+`planTruncated` (`mason logs --requests --json`, `/api/requests`, the Queries page's row details,
+`mason logs --requests --id <id>`). Finding why a 20–46 s preview was slow had taken a hand-run EXPLAIN on the server. A
+hand-run `EXPLAIN ANALYZE` slowed a user's statement to 46 s, while a plain EXPLAIN (111 ms) showed the cause: the
+rewrite's `ORDER BY a.rowid, b.rowid`, and a Top N over a Hash Join estimated at ~165 M rows.
+
+How it is kept out of the answer's way (src/api/postgres/slow-plan.ts):
+- **Recorded after the answer is sent.** The row waits for its plan in the ledger (src/duck/requests.ts,
+  `PLAN_WAIT_MS`), never the client.
+- **Planned from what it ran.** It is the plan the statement ran (`DuckPlan`), with its values and session. Nothing is
+  planned again, so the catalog Postgres (one thread for every session's analysis) does nothing for it.
+- **Its own connection.** On the engine's side, the EXPLAIN's prepare and plan are asynchronous calls. They run on a
+  libuv pool thread, never the executor worker's own thread, which only passes a few messages.
+- **One at a time.** At most one plan is in flight. A slow statement that ends meanwhile gets none, and the log says
+  so at most once a minute, with how many.
+- **Bounded.** A deadline of 30 s, a cap of 8 KiB, and the stop aborts the plan in flight.
+
+**Measured** (a scratch script, not a test, on a shared 4-core sandbox with the load average 0.9 rising to 4.7 from
+other work; Node 26.13, `UV_THREADPOOL_SIZE=32` as Mason sets it):
+- **The setup.** A listener over a real store. Five sessions send 50 fast statements a second in all (a count over a
+  10,000-row table, 91 texts). Two other sessions run a slow statement back to back (a nested-loop join of 20,000²
+  pairs, ~2 s each), so about one plan a second is recorded.
+- **The configurations.** Each ran 30 s, interleaved, twice: plans off; on at SLOW_MS; and at 0 ms, where every
+  statement is slow, so a plan is always in flight (the worst case: ~30 plans a second, the rest dropped).
+
+| Plans | fast statements | p50 ms | p95 ms | p99 ms | EXPLAIN p50 / p95 ms |
+|---|---|---|---|---|---|
+| off (round 1, 2) | 1,505 / 1,503 | 9.5 / 10.2 | 25.6 / 32.1 | 40.2 / 54.2 | — |
+| at SLOW_MS (33 and 32 plans) | 1,502 / 1,499 | 10.4 / 10.5 | 30.1 / 31.0 | 71.3 / 88.6 | 13.7 / 40.3, 13.0 / 25.0 |
+| every statement (1,096 and 847 plans) | 1,504 / 1,500 | 9.7 / 11.1 | 33.9 / 37.9 | 51.1 / 86.2 | 10.5 / 21.6, 10.9 / 22.9 |
+
+At SLOW_MS, the fast statements' p50 and p95 are within the spread between the two rounds without plans. With a plan
+always in flight, the p95 is 2–6 ms higher, about the size of that spread. An EXPLAIN takes ~10–14 ms at p50. No
+design around it (a lower priority, waiting for an idle executor) was needed; measure again if what the plan reads
+grows (a copy's facts are read in memory; `duckdb_tables()` once).
 
 ## To come back to
 
