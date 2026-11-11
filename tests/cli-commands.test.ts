@@ -345,9 +345,9 @@ test("mason status and wait --json say how each table is kept current (kept, src
   // what a table's sync promises, and whether it is behind it (issue 254): each key declared, and the new state
   assert.match(decl, /each with promisedSeconds \(.*\) and lateWhy \(/);
   const status = STATUS.usage.replace(/\s+/g, " ");
-  assert.match(status, /sync: \{ state \(synced, syncing, behind: [^)]*, failed, waiting\)/);
+  assert.match(status, /sync: \{ state \(synced, syncing, catching-up: [^,]*, behind: [^)]*, failed, waiting\)/);
   for (const key of ["asOf", "promisedSeconds", "behindBySeconds", "behindWhy"]) assert.match(status, new RegExp(`\\b${key} \\(`), key);
-  assert.match(WAIT.usage.replace(/\s+/g, " "), /synced, syncing, behind, failed, waiting — asOf, promisedSeconds, behindBySeconds, behindWhy/);
+  assert.match(WAIT.usage.replace(/\s+/g, " "), /synced, syncing, catching-up, behind, failed, waiting — asOf, promisedSeconds, behindBySeconds, behindWhy/);
   assert.match(WAIT.usage.replace(/\s+/g, " "), /pending, when it applies, says why it is not kept current now, its phase included/);
 });
 
@@ -1069,6 +1069,8 @@ test("stage 1b, the roles file decides a user added without --role: its default 
   assert.deepEqual(roleOf(await listed("metabase")), { role: undefined, roleFrom: "none", readsNothing: undefined });
   const noFile = await run(["user", "add", "psql"]);
   assert.doesNotMatch(noFile.stdout, /^ {2}role /m);
+  // Mason stopped: no address is printed, so no tip points from it to mason share
+  assert.doesNotMatch(noFile.stdout, /mason share/);
 
   // MASON UP: the listener's roles (default included) decide the add, and mason status says the default
   fs.writeFileSync(rolesFile, WITH_DEFAULT);
@@ -1290,6 +1292,95 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
   }
 });
 
+/**
+ * ISSUE 834: a first sync reads the table as of its start, then ONE poll catches it up (src/duck/sync.ts `catchUp`), a
+ * `sync: off` table's too. A 23 M-row table's catch-up was still running when `mason wait` said Ready, its line "NOT
+ * kept current" with a yellow bar. While a table is in it, `mason wait` and `mason status` say it is being caught up
+ * (never "NOT kept current"), and `mason wait` is not ready until it ends — through the command, over a run's server.
+ */
+test("mason wait is ready only once a first sync's catch-up poll is over, and says it is being caught up meanwhile — a sync: off table and a polled one (issue 834)", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-catch-up-")));
+  const app = path.join(root, "app");
+  const folder = path.join(app, "mason");
+  fs.mkdirSync(path.join(folder, "sources"), { recursive: true });
+  fs.writeFileSync(path.join(folder, "sources", "shop.yml"), "kind: postgres\nurl: postgres://me@localhost:5432/shop\ntables:\n  big: {}\n  small:\n    sync: poll 15m\n");
+  fs.mkdirSync(path.join(app, ".mason"), { mode: 0o700 });
+  const parsed = parseSource("postgres://me@localhost:5432/shop");
+  assert.ok("source" in parsed);
+  const col = (name: string, type: string) => ({ name, type, notNull: name === "id", comment: null });
+  const sourceTable = (table: string, rows: number) => ({ source: `public.${table}`, schema: "public", table, key: ["id"], rows, bytes: 8192, comment: null,
+    columns: [col("id", "bigint"), col("v", "text")], foreignKeys: [] });
+  const now = Date.now(), ago = (s: number): string => new Date(now - s * 1000).toISOString();
+  const pending = "it is caught up by one poll after its whole read first";
+  const every15 = { mode: "poll", every: "15m", seconds: 900 };
+  // both first syncs swapped in, each owed its one catch-up poll (`behind`), the big one's running now (`rebuilding`)
+  const inCatchUp = (): unknown[] => [
+    { source: "public.big", phase: "copied", rows: 23_364_415, bytes: 1, seconds: 1, copiedAt: ago(1), error: null, synced: { at: ago(1), seconds: 600, by: "copy" },
+      behind: "after its whole read", rebuilding: "catch-up", kept: { by: "poll", sync: { mode: "off" }, syncedAt: ago(1), nextAt: null, pending, promisedSeconds: null, lateWhy: null } },
+    { source: "public.small", phase: "copied", rows: 17_079, bytes: 1, seconds: 1, copiedAt: ago(11), error: null, synced: { at: ago(11), seconds: 1, by: "copy" },
+      behind: "after its whole read", kept: { by: "poll", sync: every15, syncedAt: ago(11), nextAt: null, pending, promisedSeconds: 960, lateWhy: pending } },
+  ];
+  let copies: unknown[] = inCatchUp();
+  const ctx = {
+    page: false, users: { file: path.join(app, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
+    source: parsed.source, facts: () => ({ version: 180000, versionText: "18", standby: false, tables: [sourceTable("big", 23_000_000), sourceTable("small", 17_000)], systemIdentifier: null }),
+    warnings: [], replication: () => null, port: 0, token: "t0ken-of-the-run", folder: () => folder, root: app, home: path.join(app, ".mason"), version: "test", startedAt: now,
+    sources: () => { const r = readSource(folder, app, {}); return { file: "message" in r ? null : r, problem: null }; }, sourcesChanged: () => {}, log: () => {},
+    readSource: () => readSource(folder, app, {}), runUrl: "postgres://me@localhost:5432/shop",
+    listener: { openSessions: () => ({ open: 0, byClient: [] }), running: () => [], cancel: (session: number) => ({ unknown: session }) },
+    logs: { capacity: 2000, recent: () => [] },
+    duck: { copies: () => copies, file: path.join(root, "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
+      requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }),
+        summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }),
+        slowest: async () => [], durationsBy: async () => new Map(), lastUsed: async (u: unknown[]) => u.map(() => null) },
+      events: { days: 7, recent: async () => [] }, usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [],
+        statementTotals: () => ({ completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 }), lastDurations: () => null }, restarts: () => [] },
+  } as unknown as RunContext;
+  const server = createRunServer(ctx);
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  ctx.port = (server.address() as { port: number }).port;
+  fs.writeFileSync(path.join(app, ".mason", "config.json"), JSON.stringify({ name: "shop", folder: "mason", remote: false, apiKey: "k".repeat(48), sourceServer: null,
+    running: { pid: process.pid, controlUrl: `http://127.0.0.1:${ctx.port}`, token: ctx.token, postgresUrl: "postgresql://127.0.0.1:1/shop", postgresListener: { host: "127.0.0.1", tls: null } },
+    lastRun: null }), { mode: 0o600 });
+  const run = (argv: string[]) => runMason(app, argv, matrixEnv());
+  const caughtUp = (name: string) => `public.${name}: ${commands.CATCHING_UP}`;
+  try {
+    // in their catch-up: not ready, out of time (124), each said as being caught up — the --json shape as it was
+    const json = await run(["wait", "--timeout", "1", "--json"]);
+    assert.equal(json.code, 124, json.stdout + json.stderr);
+    const w = JSON.parse(json.stdout) as { ready: boolean; failed: string[]; waiting: string[]; timedOut: boolean; tables: Array<{ table: string; sync: { state: string } }>; error: { code: string } };
+    assert.deepEqual([w.ready, w.failed, w.waiting, w.timedOut, w.error.code], [false, [], [caughtUp("big"), caughtUp("small")], true, "timeout"]);
+    assert.deepEqual(w.tables.map((t) => [t.table, t.sync.state]), [["public.big", "catching-up"], ["public.small", "catching-up"]]);
+    // named: that table's first sync alone, its catch-up included
+    const named = await run(["wait", "big", "--timeout", "1", "--json"]);
+    assert.equal(named.code, 124, named.stdout + named.stderr);
+    assert.deepEqual((JSON.parse(named.stdout) as { waiting: string[] }).waiting, [caughtUp("big")]);
+    const person = await run(["wait", "--timeout", "1"]);
+    assert.equal(person.code, 124, person.stdout + person.stderr);
+    assert.doesNotMatch(person.stdout + person.stderr, /NOT kept current|Ready/, "a catch-up is at work, not a fault, and the wait is not over");
+    assert.match(person.stderr, new RegExp(`public\\.big +█{20} 100% {2}23,364,415 rows · synced · ${commands.CATCHING_UP} \\(last synced \\d+ s ago\\)\\n`));
+    assert.match(person.stderr, new RegExp(`public\\.small +█{20} 100% {2}17,079 rows · synced · ${commands.CATCHING_UP} \\(last synced \\d+ s ago\\)\\n`));
+    const status = await run(["status", "--json"]);
+    assert.equal(status.code, 0, status.stdout + status.stderr);
+    assert.deepEqual((JSON.parse(status.stdout) as { readiness: { ready: boolean; waiting: string[] } }).readiness, { ready: false, failed: [], waiting: [caughtUp("big"), caughtUp("small")] });
+    // its catch-up over: Ready, the off table's line its sync's and green
+    copies = inCatchUp().map((c) => { const { behind: _b, rebuilding: _r, kept, ...rest } = c as { behind: string; rebuilding?: string; kept: Record<string, unknown> };
+      const { pending: _p, ...k } = kept; return { ...rest, kept: { ...k, lateWhy: null } }; });
+    const ready = await run(["wait", "--timeout", "5"]);
+    assert.equal(ready.code, 0, ready.stdout + ready.stderr);
+    assert.match(ready.stdout + ready.stderr, /Ready: every added table is synced and served\./);
+    assert.match(ready.stderr, /public\.big +█{20} 100% {2}23,364,415 rows · synced · sync: off, last synced \d+ s ago — mason sync big syncs it now/);
+    // a catch-up that failed is a failure, said as one (exit 1), as before (issue 100)
+    copies = inCatchUp().map((c) => ({ ...(c as object), rebuilding: undefined, error: "its catch-up poll failed (the synced data serves as it was; …): connection reset" }));
+    const failed = await run(["wait", "--timeout", "5", "--json"]);
+    assert.equal(failed.code, 1, failed.stdout + failed.stderr);
+    assert.equal((JSON.parse(failed.stdout) as { failed: string[] }).failed.length, 2);
+  } finally {
+    server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("mason status's Disk line: free where the synced data is, and what the copies running add — said as more than is free when it is; an unread free space is its error", async () => {
   const { diskRows } = await import("../src/cli/commands.ts") as unknown as { diskRows?: (d: unknown) => Array<[string, string]> };
   assert.equal(typeof diskRows, "function", "src/cli/commands.ts diskRows");
@@ -1378,6 +1469,23 @@ test("mason user add --role with Mason stopped: the role must be one the roles f
   const plain = (JSON.parse((await run(["user", "list", "--json"])).stdout) as { users: Array<{ name: string; role?: string }> }).users.find((u) => u.name === "plain");
   assert.deepEqual(plain && { role: plain.role, roleKnown: "roleKnown" in plain, roleFrom: (plain as { roleFrom?: string }).roleFrom, readsNothing: (plain as { readsNothing?: boolean }).readsNothing },
     { role: undefined, roleKnown: false, roleFrom: "none", readsNothing: true }, JSON.stringify(plain));
+});
+
+test("mason user add points to mason share only where it applies: a mason start run up, on loopback, with no public address", async () => {
+  const { sharePoints, addedReport, SHARE_TIP } = await import("../src/cli/user.ts");
+  const link = { url: "postgresql://127.0.0.1:5433/shop", host: "127.0.0.1", port: 5433, database: "shop", sslmode: "disable" as const };
+  const loopback = { host: "127.0.0.1", tls: null } as const;
+  assert.equal(sharePoints(false, link, loopback), true, "mason start on loopback");
+  assert.equal(sharePoints(false, link, { host: "::1", tls: null }), true, "IPv6 loopback");
+  assert.equal(sharePoints(true, link, loopback), false, "mason serve's run refuses mason share");
+  assert.equal(sharePoints(false, { ...link, public: true }, loopback), false, "a public address (MASON_PG_PUBLIC_URL) already reaches it");
+  assert.equal(sharePoints(false, link, { host: "0.0.0.0", tls: "self-signed" }), false, "off loopback: the address is this machine's network's");
+  assert.equal(sharePoints(false, null, null), false, "Mason stopped: no address printed");
+  const added = { user: "me", id: "x", password: "pw", database: "shop", addedAt: "2026-11-11T00:00:00Z", roleFrom: "none" as const };
+  const tips = (share: boolean) => addedReport(added, { roles: { file: null, roles: {}, default: null } as never, listener: null, next: [["mason user list", "the users"]], share }).split("\n").filter((l) => l.startsWith("Tip: "));
+  assert.equal(tips(true).at(-1), `Tip: ${SHARE_TIP}`, "the last tip, just above Next");
+  assert.equal(SHARE_TIP, "A tool outside this machine (a cloud BI tool) cannot reach this address: mason share opens one on the internet, with a login and password of its own, for as long as it runs.");
+  assert.ok(!tips(false).some((t) => /mason share/.test(t)));
 });
 
 test("mason user add --from and mason user from: a user's address ranges in their one form, replaced and removed, shown by list; an invalid range is a wrong line, exit 2, nothing written", async () => {

@@ -12,14 +12,28 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   checks read your database's settings and catalog only, never a row, when the choice opens and again when it is saved,
   so a database that changed in between is refused. Saving writes the table's `sync:` line in the sources file, as
   `mason add <table> --sync …` does. Where the project's files are read-only, the page shows the sync without a choice.
+
 - **`mason add <table> --sync …` works for a table added with `key:`** (one with no primary key): it changes its
   `sync:` and keeps its key, where it was refused as "cannot be added: no primary key".
+
+- **`mason wait` now waits for a table's catch-up poll** (after its first sync, a sync of it again whole, or a change of its `sync:` to `replication`). A first sync reads the table as of its start,
+  then catches it up by one poll for what changed during the read, a `sync: off` table too; on a large table that poll
+  is a scan of its own. `mason wait` said Ready while it ran, so a tool started on Ready read data as of the read's
+  start, and the table's line said "NOT kept current" with a yellow bar. Now the table's line says it is being caught up
+  by one poll, its bar at work, and `mason wait` is ready once that poll is over (a script waiting on it may wait that
+  much longer); `mason status`, the web page and EXPLAIN say the same. In `--json` a table in its catch-up has
+  `sync.state` `catching-up` (it was `syncing`), and `readiness` lists it under `waiting`.
 
 - **`mason share` opens with the URL to paste**: its first line is now `Try mason with your favorite postgres client:
   postgres://<user>:<password>@<host>:<port>/<database>?sslmode=require`, the share's own login and address, so a
   client that takes a connection string connects from that one line. The host, port, database, user and password rows
   below it stay, for a tool that asks for each field, and `mason share --json` carries the same URL as `share.url`.
   The password is still made for this run alone and kept nowhere.
+
+- `mason user add`, beside a `mason start` run on this machine's own address, now ends its tips with the way to a tool
+  outside this machine: `mason share` opens an address on the internet, with a login and password of its own (not the
+  new user's), for as long as it runs. It is not said beside `mason serve`, nor with `--replica`, nor while Mason is not
+  running. `--json` is unchanged.
 
 ## What was wrong and is now right
 

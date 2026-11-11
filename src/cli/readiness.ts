@@ -7,6 +7,10 @@
 import type { RunState } from "./commands.ts";
 import type { CopyProgressView, CopyState, KeptCurrent, Synced } from "../duck/sync.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
+import { CATCHING_UP, inCatchUp } from "../lib/table-sync.ts";
+
+/** What a table in its one catch-up poll says (src/lib/table-sync.ts, the one constant). */
+export { CATCHING_UP };
 
 const n = (x: number): string => x.toLocaleString("en-US");
 const firstLine = (s: string): string => s.split("\n")[0]!.trim();
@@ -80,17 +84,21 @@ export function copyProgress(source: string, copied: number, rowsEstimate: numbe
  *  - `waiting`: no copy yet, nor one under way (the sync has not reached it);
  *  - `failed`: its copy failed, or the poll, catch-up or stream keeping it current did (its `error` says why; a table
  *    copied before still serves that copy);
- *  - `syncing`: being copied, copied again, or caught up by its one poll before it is kept current;
+ *  - `syncing`: being copied, or copied again (a table copied before serves that copy meanwhile);
+ *  - `catching-up`: served, and caught up by its ONE poll from its watermark before it is kept current — after its
+ *    whole read (a `sync: off` table's too), a change of its sync to replication, or a slot new to it — queued, polling or ending
+ *    (issue 834: until it ends, its synced data is as of before what that poll reads, so `mason wait` is not ready);
  *  - `behind`: served and being kept current, but its synced data is older than its `sync:` promises (`behindOf`:
  *    measured from the ledger's time, at the moment asked — issue 106);
  *  - `synced`: its copy is served and kept current as its sync promises — or, `sync: off`, served as of its last sync
  *    (never behind: it promises nothing past it).
  */
-export type TableSyncState = "synced" | "syncing" | "failed" | "waiting" | "behind";
+export type TableSyncState = "synced" | "syncing" | "catching-up" | "failed" | "waiting" | "behind";
 export function syncStateOf(c: CopyState | undefined, now: number = Date.now()): TableSyncState {
   if (c === undefined || c.phase === "waiting") return "waiting";
   if (c.phase === "failed" || c.error !== null) return "failed";
-  if (c.phase === "copying" || c.rebuilding !== undefined || c.behind !== undefined) return "syncing";
+  if (c.phase === "copying" || c.rebuilding === "copy") return "syncing";
+  if (inCatchUp(c)) return "catching-up";
   return (behindOf(c.kept, now).behindBySeconds ?? 0) > 0 ? "behind" : "synced";
 }
 
@@ -148,7 +156,7 @@ export function readinessWord(r: Readiness): "Ready" | "Failed" | "Under way" {
 }
 
 /**
- * WHERE A RUN IS. Ready when every added table's copy has ended well: `mason add` followed by `mason wait` returns
+ * WHERE A RUN IS. Ready when every added table's copy has ended well, its one catch-up poll included (issue 834): `mason add` followed by `mason wait` returns
  * once the table is served. A copy that failed is a failure (the sync tries again by itself, and says so in the log),
  * so an agent is never left waiting for a copy that cannot finish.
  */
@@ -161,7 +169,9 @@ export function readiness(s: Pick<RunState, "tables">): Readiness {
     const state = t.sync?.state ?? (t.error ? "failed" : t.copy?.phase === "copying" ? "syncing" : !t.copy ? "waiting" : "synced");
     if (state === "failed") { failed.push(`${t.table}: ${firstLine(t.error ?? "its sync failed (mason status says why)")}`); continue; }
     if (t.copy?.phase === "copying") { waiting.push(copyProgress(t.table, t.copy.rowsCopied, t.rows, t.copy.progress)); continue; }
-    if (!t.copy) waiting.push(`${t.table}: waiting for its first sync to start`);
+    if (!t.copy) { waiting.push(`${t.table}: waiting for its first sync to start`); continue; }
+    // served, its one catch-up poll not over (issue 834): its synced data is as of before what that poll reads
+    if (state === "catching-up") waiting.push(`${t.table}: ${CATCHING_UP}`);
   }
   return { ready: failed.length === 0 && waiting.length === 0, failed, waiting };
 }

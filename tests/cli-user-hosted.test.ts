@@ -18,6 +18,7 @@ import { readSource } from "../src/cli/sources.ts";
 import { LiveRoles } from "../src/cli/roles.ts";
 import { connectionUrl, psqlLine } from "../src/cli/pg-url.ts";
 import { serviceText } from "../src/cli/hosted.ts";
+import { SHARE_TIP } from "../src/cli/user.ts";
 
 test("mason user --replica: each subcommand sends the run's own /api/users request to the replica's endpoint, with the token as Bearer and nothing of a project", async () => {
   const seen: Req[] = [];
@@ -256,8 +257,10 @@ test("the same answer prints the same output: mason user --replica, whose servic
         continue;
       }
       // a person's: every line above Next: the same (the headline names the replica), the steps the local ones
+      // but the tip naming mason share, which a local add on loopback carries and a replica's never does (its address is remote)
       const [lt, lnext = ""] = norm(l.stdout).split("\nNext:\n"), [rt, rnext = ""] = norm(r.stdout).split("\nNext:\n");
-      assert.equal(rt!.replace(/^(\d+ users? of )acme\/shop/, "$1shop").replace(/^(The user \S+) of the replica acme\/shop /, "$1 "), lt, line);
+      assert.equal(rt!.replace(/^(\d+ users? of )acme\/shop/, "$1shop").replace(/^(The user \S+) of the replica acme\/shop /, "$1 "), argv[0] === "add" ? lt!.replace(`Tip: ${SHARE_TIP}\n`, "") : lt, line);
+      if (argv[0] === "add") { assert.ok(lt!.includes(`Tip: ${SHARE_TIP}\n`), `${line}: the local add on loopback points to mason share`); assert.ok(!rt!.includes("mason share"), `${line}: the replica's never`); }
       assert.deepEqual(steps(rnext), steps(lnext).map(([c, ...w]) => [onReplica(c!), ...w]), `${line}: next`);
       assert.equal(r.stderr, "", `${line}: nothing on stderr`);
     }

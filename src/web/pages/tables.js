@@ -24,7 +24,7 @@ export const syncsHref = (table) => `#observability/syncs?table=${encodeURICompo
 export const columnsPath = (table) => `api/tables/${encodeURIComponent(table)}/columns`;
 
 /** A table's sync in one word (`/api/state` `tables[].sync.state`, src/cli/readiness.ts `syncStateOf`). */
-const SYNC_WORDS = { synced: "Synced", syncing: "Syncing", behind: "Behind", failed: "Failed", waiting: "Waiting" };
+const SYNC_WORDS = { synced: "Synced", syncing: "Syncing", "catching-up": "Catching up", behind: "Behind", failed: "Failed", waiting: "Waiting" };
 
 /** Whether a table's name has the search box's text (any case; nothing typed: every table). */
 const nameMatches = (table, filter) => !filter || table.toLowerCase().includes(filter.trim().toLowerCase());
