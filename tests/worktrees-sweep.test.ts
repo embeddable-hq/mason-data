@@ -40,7 +40,7 @@ class Fixture {
     fs.writeFileSync(fake, `
 import * as fs from "node:fs";
 const [api, route] = process.argv.slice(2);
-const m = /^repos\\/acme\\/widgets\\/pulls\\?head=([^&]+)&state=all$/.exec(route ?? "");
+const m = /^repos\\/acme\\/widgets\\/pulls\\?head=([^&]+)&state=all&per_page=100$/.exec(route ?? "");
 if (api !== "api" || m === null) { process.stderr.write("fake gh: unexpected " + process.argv.slice(2).join(" ")); process.exit(9); }
 const branch = decodeURIComponent(m[1]).replace(/^acme:/, "");
 const answer = JSON.parse(fs.readFileSync(${JSON.stringify(this.pullsFile)}, "utf8"))[branch] ?? [];
@@ -70,9 +70,12 @@ process.stdout.write(JSON.stringify(answer));
 
   private savePulls(): void { fs.writeFileSync(this.pullsFile, JSON.stringify(this.pulls)); }
 
-  /** A worktree on branch b-<name>, under .claude/worktrees/ unless `at` says where, with one commit of its own unless `commit` is false. */
+  /**
+   * A worktree on branch b-<name>, at .claude/worktrees/agent-<name> as Claude Code's isolation names it unless `at` says
+   * where, with one commit of its own unless `commit` is false.
+   */
   worktree(name: string, opts: { commit?: boolean; at?: string } = {}): { dir: string; branch: string; head: () => string } {
-    const dir = opts.at ?? path.join(this.repo, ".claude", "worktrees", name);
+    const dir = opts.at ?? path.join(this.repo, ".claude", "worktrees", `agent-${name}`);
     const branch = `b-${name}`;
     this.git(this.repo, "worktree", "add", "-q", "-b", branch, dir, "main");
     if (opts.commit !== false) {
@@ -96,6 +99,20 @@ process.stdout.write(JSON.stringify(answer));
 
   apiErrs(branch: string): void { this.pulls[branch] = "error"; this.savePulls(); }
 
+  /** Sets the modification time of everything under the worktree and its `.git/worktrees/<name>/` two hours back. */
+  age(dir: string): void {
+    const then = new Date(Date.now() - 2 * 60 * 60_000);
+    const gitDir = this.git(dir, "rev-parse", "--absolute-git-dir").trim();
+    for (const root of [dir, gitDir]) {
+      const walk = (p: string): void => {
+        const st = fs.lstatSync(p);
+        if (st.isDirectory()) for (const n of fs.readdirSync(p)) walk(path.join(p, n));
+        if (!st.isSymbolicLink()) fs.utimesSync(p, then, then); // a directory after its entries: setting theirs leaves its own
+      };
+      walk(root);
+    }
+  }
+
   branches(): string[] { return this.git(this.repo, "branch", "--format=%(refname:short)").trim().split("\n"); }
 }
 
@@ -104,14 +121,20 @@ function sweep(f: Fixture): { code: number | null; stdout: string; stderr: strin
   return { code: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
+/** The line of the worktree `agent-<name>`, or of the one named `name` when it starts with `=`. */
 const line = (out: string, verb: "removed" | "kept", name: string): string | undefined =>
-  out.split("\n").find((l) => l.startsWith(`${verb} ${name}: `));
+  out.split("\n").find((l) => l.startsWith(`${verb} ${name.startsWith("=") ? name.slice(1) : `agent-${name}`}: `));
 
 test("worktrees-sweep: a done and clean worktree is removed with its branch; every other is kept, said with its reason", (t) => {
   const f = new Fixture(t);
   const merged = f.worktree("merged"); f.pr(merged, "merged");
   const closed = f.worktree("closed"); f.pr(closed, "closed");
-  f.worktree("inmain", { commit: false });
+  f.worktree("inmain", { commit: false }); // an agent's fresh worktree at origin/main: in use, as far as anyone can tell
+  const idle = f.worktree("idle", { commit: false });
+  // one an agent made by hand beside its own to run main's tests, idle as long as you like: never an agent-* one
+  const byHand = path.join(f.repo, ".claude", "worktrees", "i371-main");
+  f.git(f.repo, "worktree", "add", "-q", "--detach", byHand, "main");
+  fs.mkdirSync(path.join(byHand, "node_modules"));
   const dirty = f.worktree("dirty"); f.pr(dirty, "merged");
   fs.appendFileSync(path.join(dirty.dir, "base.txt"), "an edit not committed\n");
   const unpushed = f.worktree("unpushed"); f.pr(unpushed, "merged");
@@ -125,13 +148,15 @@ test("worktrees-sweep: a done and clean worktree is removed with its branch; eve
   const apiErr = f.worktree("apierr"); f.git(apiErr.dir, "push", "-q", "origin", apiErr.branch); f.apiErrs(apiErr.branch);
   const nopr = f.worktree("nopr"); f.git(nopr.dir, "push", "-q", "origin", nopr.branch);
   const outside = f.worktree("outside", { at: path.join(f.tmp, "elsewhere") }); f.pr(outside, "merged");
+  f.age(idle.dir);
+  f.age(byHand);
 
   const r = sweep(f);
   assert.equal(r.code, 0, r.stderr + r.stdout);
   for (const [name, why] of [["merged", /its PR #1 is merged, branch b-merged deleted$/], ["closed", /its PR #2 is closed, branch b-closed deleted$/],
-    ["inmain", /its HEAD \w{7} is in origin\/main, branch b-inmain deleted$/]] as const) {
+    ["idle", /its HEAD \w{7} is in origin\/main, and nothing in it changed for 60 minutes, branch b-idle deleted$/]] as const) {
     assert.match(line(r.stdout, "removed", name) ?? "", why, r.stdout);
-    assert.equal(fs.existsSync(path.join(f.repo, ".claude", "worktrees", name)), false, name);
+    assert.equal(fs.existsSync(path.join(f.repo, ".claude", "worktrees", `agent-${name}`)), false, name);
     assert.equal(f.branches().includes(`b-${name}`), false, `b-${name} deleted`);
   }
   for (const [name, why] of [
@@ -141,14 +166,17 @@ test("worktrees-sweep: a done and clean worktree is removed with its branch; eve
     ["open", /its PR #\d+ is open/],
     ["apierr", /the PR lookup failed: gh: Server Error \(HTTP 502\)/],
     ["nopr", /no PR for its branch b-nopr/],
+    ["inmain", /its HEAD \w{7} is in origin\/main, but it is not idle: \S+ changed within 60 minutes/],
   ] as const) {
     assert.match(line(r.stdout, "kept", name) ?? "", why, r.stdout);
-    assert.equal(fs.existsSync(path.join(f.repo, ".claude", "worktrees", name)), true, name);
+    assert.equal(fs.existsSync(path.join(f.repo, ".claude", "worktrees", `agent-${name}`)), true, name);
     assert.equal(f.branches().includes(`b-${name}`), true, `b-${name} kept`);
   }
+  assert.match(line(r.stdout, "kept", "=i371-main") ?? "", /not an agent's worktree/, r.stdout);
+  assert.equal(fs.existsSync(path.join(byHand, "node_modules")), true, "a worktree made by hand is never touched");
   assert.equal(fs.existsSync(outside.dir), true, "a worktree outside .claude/worktrees/ is never looked at");
   assert.equal(r.stdout.includes("outside"), false, r.stdout);
-  assert.match(r.stdout, /: 3 removed, 6 kept\n$/);
+  assert.match(r.stdout, /: 3 removed, 8 kept\n$/);
   assert.equal(fs.readFileSync(path.join(dirty.dir, "base.txt"), "utf8"), "hello\nan edit not committed\n", "the dirty one untouched");
   assert.match(f.git(f.repo, "worktree", "list"), /dirty/);
 });
@@ -207,7 +235,7 @@ test("worktrees-sweep-after-merge: a merge that landed starts the sweep in the b
   assert.deepEqual([rest.code, rest.stdout], [0, ""], rest.stderr);
   const text = waitForSweep(log);
   assert.match(text, /a merge was seen \(gh api -X PUT repos\/acme\/widgets\/pulls\/1\/merge/);
-  assert.match(text, /removed merged: its PR #1 is merged, branch b-merged deleted/);
+  assert.match(text, /removed agent-merged: its PR #1 is merged, branch b-merged deleted/);
   assert.equal(fs.existsSync(merged.dir), false);
 
   fs.rmSync(log);

@@ -10,11 +10,15 @@
  * A worktree is removed only when ALL hold, and is otherwise KEPT and said with why:
  * - it is under `<the main checkout>/.claude/worktrees/` (its real path) and `git worktree list` lists it; nothing else
  *   is ever looked at, so no path is removed by a pattern;
+ * - it is one Claude Code's isolation made, `agent-<id>`: any other (a worktree an agent or a person added by hand, say
+ *   at origin/main to run main's tests) is never touched, and listed as kept;
  * - it is not locked, or its lock is a stale one of Claude Code's (below);
  * - no live process has its working directory inside it (an agent, a shell or a test still there);
  * - no tracked file has an uncommitted change (an untracked file makes `git worktree remove` refuse: kept too);
- * - its work is done: its HEAD is already in origin/main, or the PR of its branch (`gh api` REST, since a cloud
- *   session reaches no GraphQL) is merged or closed, and none of its branch's PRs is open;
+ * - its work is done: the PR of its branch (`gh api` REST, since a cloud session reaches no GraphQL) is merged or
+ *   closed, and none of its branch's PRs is open; or its HEAD is already in origin/main AND it is idle: nothing under
+ *   it, nor under its `.git/worktrees/<name>/`, modified for an hour (an agent's commands run in short-lived shells, so
+ *   between two of them no process is there, and a fresh worktree at origin/main may be in use);
  * - no commit of it is off GitHub: every commit is on a remote ref, or HEAD is the PR's head, which GitHub keeps as
  *   `refs/pull/<n>/head` after the branch is deleted (a squash merge with --delete-branch, then a `fetch --prune`,
  *   leaves the commits on no remote-tracking ref).
@@ -154,7 +158,29 @@ function processCwds(): { pid: number; cwd: string }[] | string {
 
 const short = (sha: string): string => sha.slice(0, 7);
 
-function verdict(wt: Worktree, ctx: { slug: string | undefined; cwds: { pid: number; cwd: string }[] | string; hasMain: boolean }): Verdict {
+/** How long nothing in a worktree at origin/main with no PR must have changed before it is done with. */
+const IDLE_MS = 60 * 60_000;
+
+/** The first path under `root` (itself included, symlinks not followed) modified after `since`, or undefined. */
+function modifiedSince(root: string, since: number): string | undefined {
+  const stack = [root];
+  while (stack.length > 0) {
+    const p = stack.pop()!;
+    let st: fs.Stats;
+    try { st = fs.lstatSync(p); } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return p; // removed while read: something is at work there
+      throw e;
+    }
+    if (st.mtimeMs > since) return p;
+    if (st.isDirectory()) for (const name of fs.readdirSync(p)) stack.push(path.join(p, name));
+  }
+  return undefined;
+}
+
+/** The worktrees Claude Code's isolation makes: `.claude/worktrees/agent-<id>`; any other is a person's or an agent's own. */
+const AGENT_WORKTREE = /^agent-[A-Za-z0-9]+$/;
+
+function verdict(wt: Worktree, ctx: { slug: string | undefined; cwds: { pid: number; cwd: string }[] | string; hasMain: boolean; idleSince: number }): Verdict {
   const real = fs.realpathSync(wt.path);
   if (wt.locked !== undefined) {
     const keeps = lockKeeps(wt.locked);
@@ -164,8 +190,9 @@ function verdict(wt: Worktree, ctx: { slug: string | undefined; cwds: { pid: num
   const live = ctx.cwds.filter((p) => p.cwd === real || p.cwd.startsWith(real + path.sep));
   if (live.length > 0) return { remove: false, reason: `a live process works in it (pid ${live.map((p) => p.pid).join(", ")})` };
 
+  // --no-optional-locks: a status never rewrites the index, so a sweep never makes a worktree look recently used
   let dirty: string;
-  try { dirty = run("git", ["status", "--porcelain", "--untracked-files=no"], real); } catch (e) {
+  try { dirty = run("git", ["--no-optional-locks", "status", "--porcelain", "--untracked-files=no"], real); } catch (e) {
     return { remove: false, reason: `git status failed: ${failure(e)}` };
   }
   const changed = dirty.split("\n").filter((l) => l !== "").length;
@@ -173,19 +200,36 @@ function verdict(wt: Worktree, ctx: { slug: string | undefined; cwds: { pid: num
 
   let done: string | undefined;
   let prHead: string | undefined;
+  /** Why a worktree at origin/main is not done with yet; its PR, merged or closed, may still say it is. */
+  let busy: string | undefined;
   if (ctx.hasMain) {
-    try { run("git", ["merge-base", "--is-ancestor", wt.head, "refs/remotes/origin/main"], real); done = `its HEAD ${short(wt.head)} is in origin/main`; } catch (e) {
+    let inMain = false;
+    try { run("git", ["merge-base", "--is-ancestor", wt.head, "refs/remotes/origin/main"], real); inMain = true; } catch (e) {
       // exit 1 is "not an ancestor"; anything else is git failing, which cannot tell
       if ((e as { status?: number }).status !== 1) return { remove: false, reason: `git merge-base failed: ${failure(e)}` };
     }
+    if (inMain) {
+      // With no PR to say the work is done, a worktree at origin/main may be one an agent has just made and works in
+      // between its short-lived shells: only an idle one is done with.
+      let gitDir: string;
+      try { gitDir = run("git", ["rev-parse", "--absolute-git-dir"], real).trim(); } catch (e) {
+        return { remove: false, reason: `git rev-parse failed: ${failure(e)}` };
+      }
+      let recent: string | undefined;
+      try { recent = modifiedSince(real, ctx.idleSince) ?? modifiedSince(gitDir, ctx.idleSince); } catch (e) {
+        return { remove: false, reason: `cannot tell whether it is idle: ${failure(e)}` };
+      }
+      if (recent === undefined) done = `its HEAD ${short(wt.head)} is in origin/main, and nothing in it changed for ${IDLE_MS / 60_000} minutes`;
+      else busy = `its HEAD ${short(wt.head)} is in origin/main, but it is not idle: ${path.relative(real, recent) || recent} changed within ${IDLE_MS / 60_000} minutes`;
+    }
   }
   if (done === undefined) {
-    if (wt.branch === undefined) return { remove: false, reason: "a detached HEAD not in origin/main: no branch to look its PR up by" };
-    if (ctx.slug === undefined) return { remove: false, reason: "the origin remote names no GitHub repository to look its PR up in" };
+    if (wt.branch === undefined) return { remove: false, reason: busy ?? "a detached HEAD not in origin/main: no branch to look its PR up by" };
+    if (ctx.slug === undefined) return { remove: false, reason: busy ?? "the origin remote names no GitHub repository to look its PR up in" };
     const owner = ctx.slug.split("/")[0]!;
     let pulls: Pull[];
     try {
-      const body: unknown = JSON.parse(run("gh", ["api", `repos/${ctx.slug}/pulls?head=${encodeURIComponent(`${owner}:${wt.branch}`)}&state=all`], real));
+      const body: unknown = JSON.parse(run("gh", ["api", `repos/${ctx.slug}/pulls?head=${encodeURIComponent(`${owner}:${wt.branch}`)}&state=all&per_page=100`], real));
       if (!Array.isArray(body) || body.some((p) => typeof p?.number !== "number" || typeof p?.state !== "string" || typeof p?.head?.sha !== "string")) {
         return { remove: false, reason: "the PR lookup answered something that is not a list of PRs" };
       }
@@ -193,7 +237,8 @@ function verdict(wt: Worktree, ctx: { slug: string | undefined; cwds: { pid: num
     } catch (e) {
       return { remove: false, reason: `the PR lookup failed: ${failure(e)}` };
     }
-    if (pulls.length === 0) return { remove: false, reason: `no PR for its branch ${wt.branch}, and its HEAD is not in origin/main` };
+    if (pulls.length >= 100) return { remove: false, reason: `100 PRs or more for its branch ${wt.branch}: more than the one page read` };
+    if (pulls.length === 0) return { remove: false, reason: busy ?? `no PR for its branch ${wt.branch}, and its HEAD is not in origin/main` };
     const open = pulls.find((p) => p.state === "open");
     if (open !== undefined) return { remove: false, reason: `its PR #${open.number} is open` };
     const latest = pulls.reduce((a, b) => (b.number > a.number ? b : a));
@@ -246,15 +291,16 @@ function sweep(common: string): number {
   let removed = 0;
   for (const wt of mine) {
     const name = path.relative(dir, fs.realpathSync(wt.path));
+    if (!AGENT_WORKTREE.test(name)) { process.stdout.write(`kept ${name}: not an agent's worktree (only .claude/worktrees/agent-* are swept)\n`); continue; }
     let v: Verdict;
     // the processes are read for each worktree, just before its verdict, so an agent started since the sweep began is seen
-    try { v = verdict(wt, { slug, cwds: processCwds(), hasMain }); } catch (e) { v = { remove: false, reason: `a check failed: ${failure(e)}` }; }
+    try { v = verdict(wt, { slug, cwds: processCwds(), hasMain, idleSince: Date.now() - IDLE_MS }); } catch (e) { v = { remove: false, reason: `a check failed: ${failure(e)}` }; }
     if (!v.remove) { process.stdout.write(`kept ${name}: ${v.reason}\n`); continue; }
     try {
       if (v.unlock) worktreeCall("unlock", wt.path);
       worktreeCall("remove", wt.path);
     } catch (e) {
-      process.stdout.write(`kept ${name}: ${v.why}, but git worktree would not remove it: ${failure(e)}\n`);
+      process.stdout.write(`kept ${name}: git worktree would not remove it (${failure(e)}), though ${v.why}\n`);
       continue;
     }
     removed++;
