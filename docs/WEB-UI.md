@@ -97,6 +97,30 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   answer, like a refusal, stays until it is dismissed (its Dismiss, Escape, or the next action's answer or question in
   its place) — and only an expander the reader opens (a request's details, a first sync's whole error) pushes the rows
   under it down.
+- **Tables**, an added table's **sync**, first on its note (`Sync: Off`, `Sync: Every 5 minutes`, `Sync: Live
+  (replication)`, as the run keeps it now: `/api/state` `tables[].kept`): a button that opens its **Sync choice**, a
+  dialog beside it that reads `GET /api/tables/<table>/sync` once, as it opens (never on a timer: it opens a connection
+  to the database), and saves with `POST /api/pick` `{ table, picked: true, sync, keep: true }`, as `mason add <table>
+  --sync …` does, writing the entry's `sync:` line alone:
+  - **Off**, the default: synced once, then only by Sync now. Nothing turns on load on the database unless chosen.
+  - **Every 5 minutes, 15 minutes, hour or day** (presets only), each saying it scans the whole table on the database at
+    that interval. For a table over 1,000,000 rows each says what a poll costs the database (`pollEstimate`, the estimate
+    `mason add` prints), and saving one asks first, with that cost.
+  - **Live (replication)**, the word beside `sync: replication` in the sources file: changes stream from the database's
+    change log, with no scans. It can be chosen only when every check passes, else it is shown disabled with each
+    failing check in Mason's words and the SQL that fixes it: the table's own (a primary key; not REPLICA IDENTITY
+    NOTHING) and the database's — the checks `mason start` holds a replicating sources file to (`wal_level`, a user that
+    may replicate, a free replication slot and WAL sender, on a read replica Postgres 16 or newer with
+    `hot_standby_feedback`, the WAL cap) and the table in the publication Mason reads. A warning (no
+    `max_slot_wal_keep_size`, `hot_standby_feedback` off) refuses nothing, and saving asks first, saying it. The
+    dialog says plainly what Live keeps on the database: a replication slot that, while Mason is not reading it, holds
+    every byte of WAL written since, until Mason reads it again or the slot is dropped. **Saving reads the database's
+    checks again** (`/api/pick`), so a database that changed since the dialog opened is refused, the refusal shown as
+    the run words it, and nothing written.
+
+  Where the page may not edit the sources file (`MASON_PROJECT_READONLY=1`, a server's folder it cannot write, or
+  `MASON_UI_READ_ONLY=1` without `MASON_UI_READ_ONLY_ALLOW=tables`) the sync is said alone, with no button, the reason
+  its title and above the list.
 - **Tables**, a table not added: its rows, its key and why it cannot be added as it is. **Add** syncs every column, as
   `mason add <table>` does; **Columns…** opens a form to tick the columns to sync; **Name its key…** does the same for a
   table with no primary key.
@@ -597,6 +621,19 @@ has `table` and `columns`, each column with `name`, `type`, `nullable`, `comment
 for a foreign key, else null). A table the catalog lacks is `404` `not_found`. A name that is not properly URL-encoded is
 `400` `usage`.
 
+**One table's Sync choice: `GET /api/tables/<table>/sync`** (the Tables page's, read when the choice opens; never part of
+the polled `/api/state`), with `<table>` URL-encoded. The answer has `table`; `sync`, its sync now as the sources file
+says it (`{ value, from }`, `from` `entry`, `file` or `default`), or null for a table not added; `rows`; `bigRows` (over
+1,000,000 rows: the page asks before saving a poll); `polls`, the polls offered (`{ sync, seconds, cost }`: `poll 5m`,
+`poll 15m`, `poll 1h`, `poll 1d`, `cost` the estimate for a big table, else null); and `live`: `allowed` (no check
+refused) and `checks`, each `{ name, state, detail, sql? }` with `state` `ok`, `warn` or `refused` — the table's own
+(`primary key`, `replica identity`), then the database's (`wal_level`, `standby`, `replication role`, `slot`, `wal
+senders`, `WAL cap`, `publication`), read now over one connection that reads settings, the catalog and the statistics
+views, never a row, each statement bounded (`statement_timeout` 10 s), and is closed. One read at a time for the whole run;
+at a save, a named publication is held to the columns of the entry the save will write. A database that cannot be reached, or whose
+checks cannot be read, is one refused check, `database`, never Live allowed; the answer never carries the database's
+address. A table the catalog lacks is `404` `not_found`.
+
 ### Add a table: `POST /api/pick`
 
 `{ "table": "public.orders", "picked": true, "columns"?: [...], "key"?: [...], "sync"?: "poll 5m", "keep"?: true }`:
@@ -604,7 +641,7 @@ for a foreign key, else null). A table the catalog lacks is `404` `not_found`. A
 - `columns`: the columns to sync (the key is always added), or `["*"]` for every one (the default);
 - `key`: for a table with no primary key, the NOT NULL columns of a unique index;
 - `sync`: `off`, `poll <interval>` or `replication`, in the sources file's grammar;
-- `keep: true` changes only the `sync:` of a table already added. A table added with a `key` names it again.
+- `keep: true` changes only the `sync:` of a table already added; its columns and its `key` stay as they are.
 
 `"picked": false` removes the table, as `POST /api/remove` does with a single name.
 
@@ -619,7 +656,7 @@ database, or null), and `state`, the lean state after the edit. The table's firs
 |---|---|---|
 | 400 | `usage` | the body lacks `table` or `picked` (`send { table, picked, columns?, key?, sync?, keep? }`); `sync`, `columns` or `key` malformed; a column the table lacks; a `key` for a table with a primary key; a `key` that does not tell its rows apart; `sync: replication` for a table that cannot be replicated |
 | 404 | `not_found` | `<table> is not a table of <database> that this user can read` |
-| 409 | `refused` | no primary key and no `key` (`<table> cannot be added: no primary key: …`); the project's files are read-only (`MASON_PROJECT_READONLY=1`, with `why`, `fix`, `next`); another entry of the file fails against the database (`… fix it first`); the file's `url:` now names another database; a switch to replication the database cannot serve (the file is put back) |
+| 409 | `refused` | no primary key and no `key` (`<table> cannot be added: no primary key: …`); the project's files are read-only (`MASON_PROJECT_READONLY=1`, with `why`, `fix`, `next`); another entry of the file fails against the database (`… fix it first`); the file's `url:` now names another database; a switch to replication the database cannot serve, its checks read again at the save (`<table> cannot be kept current by logical replication from <database>: <checks>`, each with its fix in `why`; nothing written) |
 
 ### Remove tables: `POST /api/remove`
 

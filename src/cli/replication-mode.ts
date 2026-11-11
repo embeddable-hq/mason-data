@@ -131,14 +131,31 @@ export function recordRefusal(cfg: Pick<ProjectConfig, "changes" | "publication"
  * saying (the WAL cap), from the production checks' own rules.
  */
 export function readinessVerdict(facts: ServerFacts, slot: string, slotFacts: Awaited<ReturnType<typeof readSlotFacts>>, repl: Pick<ProjectReplication, "publication" | "owned">): { refused: ProductionCheck[]; warnings: ProductionCheck[] } {
+  const checks = readinessChecks(facts, slot, slotFacts, repl);
+  return { refused: checks.filter((x) => checkState(x) === "refused"), warnings: checks.filter((x) => checkState(x) === "warn") };
+}
+
+/** Every check `readinessVerdict` judges, in order: `replicationChecks`, then on a standby with no publication named, the
+ *  publication Mason cannot make there. The web page's Sync choice lists them all (src/cli/sync-choice.ts). */
+export function readinessChecks(facts: ServerFacts, slot: string, slotFacts: Awaited<ReturnType<typeof readSlotFacts>>, repl: Pick<ProjectReplication, "publication" | "owned">): ProductionCheck[] {
   const checks = replicationChecks(facts, slot, slotFacts);
   // a standby takes no CREATE PUBLICATION (it is read-only): the publication must be the primary's, named
   if (facts.standby && repl.owned) {
     checks.push({ name: "publication", ok: false, detail: `this database is a read replica, where Mason cannot make its publication ${repl.publication} (CREATE ` +
       "PUBLICATION is refused on a standby). Create one on the primary for the tables whose sync: is replication, then name it: publication: <name> at the top of the sources file" });
   }
-  // a laptop's database has no cap on its slots by default: worth saying, never a reason to refuse a dev run
-  return { refused: checks.filter((x) => x.ok === false && x.name !== "WAL cap"), warnings: checks.filter((x) => (x.name === "WAL cap" && x.ok === false) || x.warn === true) };
+  return checks;
+}
+
+/**
+ * WHAT A CHECK MEANS TO A START OR AN EDIT THAT REPLICATES, one rule for every reader: `refused` (it failed, or could
+ * not tell: fail closed); `warn`, a cost to know that refuses nothing — no WAL cap (a laptop's database has no cap on its
+ * slots by default: worth saying, never a reason to refuse a dev run), or a check marked `warn`; else `ok`.
+ */
+export function checkState(c: ProductionCheck): "ok" | "warn" | "refused" {
+  if (c.name === "WAL cap" && c.ok === false) return "warn";
+  if (c.ok !== true) return "refused";
+  return c.warn === true ? "warn" : "ok";
 }
 
 export async function replicationReadiness(source: Source, repl: ProjectReplication): Promise<{ refused: ProductionCheck[]; warnings: ProductionCheck[] } | { failure: string }> {

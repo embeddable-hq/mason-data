@@ -59,6 +59,16 @@ const ASSUMED_SCAN_ROWS_PER_SECOND = 1_800_000;
  */
 export function pollCost(t: Pick<SourceTable, "source" | "rows">, sync: TableSync, m: PollMeasure | null): string | null {
   if (sync.mode !== "poll" || sync.seconds >= COSTLY_POLL_SECONDS || t.rows === null || t.rows < COSTLY_POLL_ROWS) return null;
+  return pollEstimate(t, sync, m);
+}
+
+/**
+ * THE ESTIMATE ITSELF, whatever the interval: `pollCost` says it only where `mason add` warns; the web page's Sync choice
+ * says it for every poll of a table over BIG_TABLE_ROWS, before it is saved (src/cli/sync-choice.ts). Null for a table
+ * whose rows are not known.
+ */
+export function pollEstimate(t: Pick<SourceTable, "source" | "rows">, sync: Extract<TableSync, { mode: "poll" }>, m: PollMeasure | null): string | null {
+  if (t.rows === null) return null;
   const rows = t.rows.toLocaleString("en-US");
   const [seconds, basis] = m?.lastPollMs != null ? [m.lastPollMs / 1000, "its last poll, measured"]
     : m?.copyRowsPerSecond ? [t.rows / m.copyRowsPerSecond, `its first sync's read rate, ${Math.round(m.copyRowsPerSecond).toLocaleString("en-US")} rows a second a reader (a poll sends only the rows that changed, so it is at most that)`]
@@ -183,8 +193,10 @@ export function plannedEntry(file: SourceFile, db: EditCatalog, t: SourceTable, 
   // a table not added that row-level security hides, said in a table's words (`unaddableReason`); an added one's entry
   // in the file's, by entryProblems below
   if (was === undefined && t.rowSecurityHidesFrom !== undefined) throw new Refusal(409, `${table} cannot be added: ${unaddableReason(t, key)}`);
-  if (key === null && !t.key.length) throw new Refusal(409, `${table} cannot be added: ${noKeyReason(t)}`);
   const keep = o.keep === true && was !== undefined;
+  // only its sync asked of a table added with its key: (`mason add <table> --sync …`, the web page's Sync choice): its
+  // entry's key stands, checked with the entry below — never "cannot be added" (issue 840)
+  if (key === null && !t.key.length && !(keep && was.key !== null)) throw new Refusal(409, `${table} cannot be added: ${noKeyReason(t)}`);
   const chosen = keep ? { columns: was.columns, exclude: was.exclude, addedKey: [], skipped: [] } : chooseColumns(t, columns, key);
   if ("problem" in chosen) throw new Refusal(400, chosen.problem);
   others();
@@ -193,9 +205,7 @@ export function plannedEntry(file: SourceFile, db: EditCatalog, t: SourceTable, 
   const bigOff = o.sync === undefined && was === undefined && fileSync.mode === "poll" && t.rows !== null && t.rows > BIG_TABLE_ROWS;
   // a table logical replication cannot keep, under a file whose default is replication: polled, said (never refused for
   // the default it did not choose; its own --sync replication is refused at its entry, below)
-  const keyed = keep ? was.key !== null : key !== null;
-  const unreplicable = keyed ? "it has no primary key, so logical replication cannot apply its changes by its key:"
-    : t.replicaIdentity === "n" ? "it has REPLICA IDENTITY NOTHING, and a publication carrying it would make your app's own UPDATEs and DELETEs on it fail" : null;
+  const unreplicable = unreplicableReason(t, keep ? was.key !== null : key !== null);
   const notReplicated = o.sync === undefined && (was?.sync ?? null) === null && fileSync.mode === "replication" ? unreplicable : null;
   // --sync replication asked of one: refused with the COMMAND to run (the person is at it), its own flags kept — the
   // file's words are for an entry written by hand (src/cli/sources.ts entryProblems)
@@ -210,6 +220,13 @@ export function plannedEntry(file: SourceFile, db: EditCatalog, t: SourceTable, 
   const own = entryProblems(t, entry, db.tables, db.database, effectiveSync(file, entry).sync);
   if (own.length) throw new Refusal(400, own.join("; "));
   return { entry, was, keep, addedKey: chosen.addedKey, skipped: chosen.skipped, bigOff, notReplicated };
+}
+
+/** Why logical replication cannot keep a table, in `mason add`'s words, or null: synced by a `key:` (`keyed`: it has no
+ *  primary key), or REPLICA IDENTITY NOTHING. The web page's Sync choice says the same (src/cli/sync-choice.ts). */
+export function unreplicableReason(t: Pick<SourceTable, "replicaIdentity">, keyed: boolean): string | null {
+  return keyed ? "it has no primary key, so logical replication cannot apply its changes by its key:"
+    : t.replicaIdentity === "n" ? "it has REPLICA IDENTITY NOTHING, and a publication carrying it would make your app's own UPDATEs and DELETEs on it fail" : null;
 }
 
 /** A table as `mason tables` lists it: the catalog's and the sources file's facts (sources.ts `catalogTable`), each

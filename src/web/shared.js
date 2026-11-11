@@ -427,7 +427,10 @@ export function placePops(doc, win) {
     const w = el.offsetWidth, h = el.offsetHeight;
     const left = Math.max(gutter, Math.min(r.right - w, vw - gutter - w));
     const below = r.bottom + gap;
-    const top = below + h <= vh - gutter || r.top - gap - h < gutter ? below : r.top - gap - h;
+    // too tall for the room on either side: kept inside the window, over its anchor, rather than past the window's edge
+    // where no scroll reaches it (a fixed box)
+    const side = below + h <= vh - gutter || r.top - gap - h < gutter ? below : r.top - gap - h;
+    const top = Math.max(gutter, Math.min(side, vh - gutter - h));
     el.style.left = `${Math.round(left)}px`;
     el.style.top = `${Math.round(top)}px`;
     placed.push(el);
