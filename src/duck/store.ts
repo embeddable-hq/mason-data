@@ -76,10 +76,34 @@ export const DUCKDB_VERSION = version();
  * once with `list_transform(list_value(e), l -> CASE … l … END)[1]` (`rangeFunction`; tests/duck-wire.test.ts). A `->`
  * that is not a lambda function's argument is still the json operator.
  *
+ * `max_vacuum_tasks: 0` (issue 371; docs/DESIGN.md "No checkpoint merges row groups"): a checkpoint never merges a
+ * table's row groups. A first sync commits a wide table as many small row groups, and DuckDB's first FULL checkpoint after
+ * it merged them all into 122,880-row groups at once, holding their values: past the memory limit (`failed to pin
+ * block`) or the spill's ceiling (`failed to offload data block`) the checkpoint failed, and a checkpoint that fails
+ * INVALIDATES the database — every table's sync, every session, and every restart that resumed the same sync. Measured:
+ * 700,000 rows of two ~1 KB jsonb at 128MB spilled 1.4–1.7 GB and rewrote the whole table (a 776 MiB file to 1,519);
+ * with 0 nothing spilled. One merge task is not enough: one merge of 100 KB values did not fit 128MB. What it costs
+ * (the owner's decision, 2026-11-11): a table written by key (the poll, the stream) keeps its deleted rows' space until
+ * a whole row group is deleted — 60 rounds of 5 % updates left 2.1× the file and 1.7× a scan's time. A row group whose
+ * every row is deleted is still dropped. `instanceSettingsProblem` reads it back at every open.
+ *
  * Beside them, the copy's extensions (src/duck/extensions.ts `extensionSettings`): with Mason's package for this
  * platform, `extension_directory` is that package and nothing is ever downloaded; without one, DuckDB's defaults.
  */
-const INSTANCE_SETTINGS = { late_materialization_max_rows: "10000", force_compression: "zstd", lambda_syntax: "ENABLE_SINGLE_ARROW" };
+const INSTANCE_SETTINGS = { late_materialization_max_rows: "10000", force_compression: "zstd", lambda_syntax: "ENABLE_SINGLE_ARROW", max_vacuum_tasks: "0" };
+
+/**
+ * WHAT THE INSTANCE MUST HOLD, READ BACK (`DuckStore.open`, every open): DuckDB 2.0 does not apply every setting given
+ * at the instance's creation (`max_temp_directory_size` is shown and not enforced, issue 850), and a checkpoint that
+ * merges row groups invalidates the database (`INSTANCE_SETTINGS`), so the open refuses unless the engine reads
+ * `max_vacuum_tasks` as 0 where its checkpoint reads it (the database's settings, which `current_setting` shows).
+ * Null when it holds; else why, in one line.
+ */
+export async function instanceSettingsProblem(c: Pick<DuckConnection, "runAndReadAll">): Promise<string | null> {
+  const vacuum = String((await c.runAndReadAll("SELECT current_setting('max_vacuum_tasks')")).getRowsJS()[0]?.[0]);
+  return vacuum === INSTANCE_SETTINGS.max_vacuum_tasks ? null
+    : `the engine runs with max_vacuum_tasks = ${vacuum}, not ${INSTANCE_SETTINGS.max_vacuum_tasks}: a checkpoint could merge a synced table's row groups past the memory and invalidate the synced data (Mason bug: report it)`;
+}
 
 /**
  * DUCKDB'S MEMORY, BOUNDED FOR THIS PROCESS: DuckDB's default is 80% of the machine's RAM, in a process
@@ -312,6 +336,18 @@ export class DuckStore {
       executor = await Executor.start({ file, settings: { ...INSTANCE_SETTINGS, ...extensionSettings(extensions), memory_limit: memoryLimit, temp_directory: `${file}.tmp`, max_temp_directory_size: spillSetting(spillLimit) }, log,
         ...(options.silentMs !== undefined ? { silentMs: options.silentMs } : {}), ...(options.workerFile !== undefined ? { workerFile: options.workerFile } : {}) });
     } catch (e) { if (opened.get(where) === mine) opened.delete(where); throw e; }
+    // the settings a checkpoint depends on, as the engine reads them (`instanceSettingsProblem`): refused, closed, never served
+    // read on the writer's connection, which nothing uses yet and the store keeps
+    let problem: string | null;
+    try { problem = await instanceSettingsProblem(executor.writer()); }
+    catch (e) { problem = `its settings could not be read: ${e instanceof Error ? e.message : String(e)}`; }
+    if (problem !== null) {
+      // closed as a store closes: a thread given up on keeps the file here (`abandoned`)
+      mine.closed = executor.close(options.closeGraceMs);
+      await mine.closed;
+      if (executor.abandoned !== null) mine.abandoned = executor.abandoned; else if (opened.get(where) === mine) opened.delete(where);
+      throw new Error(`Mason could not open the synced data ${file}: ${problem}`);
+    }
     const store = new DuckStore(file, executor, memoryLimitBytes(memoryLimit), extensions, { limit: spillLimit, set: spillSet, diskFree }, log, options.closeGraceMs);
     // closed: the file may be opened again — unless its thread was given up on (`abandoned`), which keeps it here
     store.closing = (p) => { mine.closed = p; void p.then(() => { if (executor.abandoned !== null) mine.abandoned = executor.abandoned; else if (opened.get(where) === mine) opened.delete(where); }); };

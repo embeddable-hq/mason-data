@@ -27,6 +27,16 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **A first sync of a table of wide values on a small machine could stop all of Mason.** After the sync read the
+  table, the synced data's own checkpoint could fail when it reorganised that table, with `failed to offload data
+  block …` or `failed to pin block …` in the log. That made the synced data unusable: every other table's sync failed
+  with `database has been invalidated`, and every restart failed again in the same place. Mason now never reorganises
+  a table's storage that way, so the sync finishes and the other tables sync. A run already stuck like this recovers
+  when it starts on this release; nothing is lost. The cost: a table kept current by the poll or the stream keeps the
+  space of the rows it updates or deletes, and reads a little slower, until a future release compacts it. In a
+  measurement, a table that had every row updated three times over took 2.1 times the disk and scanned in 1.7 times
+  the time.
+
 - **A table of large values could fail its first sync under a small `MASON_DUCKDB_MEMORY`**, now and then, with
   `Failed to commit: could not allocate block of size …` in `mason status` and the log, and wait for its retry (at
   least 5 minutes later). When a chunk of the first sync runs out of memory as it commits, it is now rolled back and

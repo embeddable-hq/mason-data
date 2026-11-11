@@ -1764,3 +1764,111 @@ test("a table of many moderate out-of-line values syncs under a 128 MB limit, ne
     assert.equal(String((await read.writer.runAndReadAll(`SELECT ${digest} FROM public.many`)).getRowsJS()[0]![0]), await psqlAsync(url, `SELECT ${digest} FROM many`), `public.many differs from the source\n${logged.join("\n")}`);
   } finally { await read.close(); }
 });
+
+// NO CHECKPOINT MERGES A SYNCED TABLE'S ROW GROUPS (issue 371: on a server with 8 GiB, five tables added at once, one of
+// ~154 M rows with two wide jsonb columns; a checkpoint during their first syncs failed with `failed to offload data
+// block … (5.3 GiB/5.3 GiB used)`, which invalidated the database, every other first sync failed after it, and each
+// restart resumed the same sync into the same failure; src/duck/store.ts INSTANCE_SETTINGS `max_vacuum_tasks`). A
+// first sync commits a wide table as many small row groups; DuckDB's first full checkpoint after it merged them all,
+// holding their values, and failed past the memory limit or the spill's ceiling. Synthetic shapes scaled to a low
+// memory limit; the checkpoint is the test's own, forced (Mason runs none), as DuckDB's own at a commit would run it.
+
+/** a store at `memoryLimit` whose spill's ceiling is in force at `ceiling`, as the run sets it once the disk moves
+ *  (src/duck/store.ts keepSpillCeiling) */
+async function storeWithCeiling(file: string, log: (l: string) => void, memoryLimit: string, ceiling: string): Promise<DuckStore> {
+  const store = await DuckStore.open(file, log, { memoryLimit, spillLimit: ceiling });
+  const c = await store.instance.connect();
+  try { await c.run(`SET GLOBAL max_temp_directory_size = '${ceiling}'`); } finally { c.closeSync(); }
+  return store;
+}
+
+test("five tables added together, one wide of two jsonb columns, sync under a low memory limit, and a checkpoint after leaves the synced data valid", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set", timeout: 900_000 }, async () => {
+  const db = `${tag}_five`;
+  const url = (() => { const u = new URL(adminUrl!); u.pathname = `/${db}`; return u.toString(); })();
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  after(() => psql(adminUrl!, `DROP DATABASE IF EXISTS ${db} WITH (FORCE)`));
+  // the wide one: two jsonb columns of ~1 KB of text each that compresses little; the others small to medium
+  psql(url, "CREATE TABLE wide (id bigint PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now(), kind text, a jsonb, b jsonb)");
+  psql(url, "INSERT INTO wide (id, kind, a, b) SELECT g, 'k' || (g % 7), jsonb_build_object('id', g, 'v', (SELECT string_agg(md5(random()::text || g || s), '') FROM generate_series(1, 32) s)), " +
+    "jsonb_build_object('id', g, 'w', (SELECT string_agg(md5(random()::text || g || s), ' ') FROM generate_series(1, 32) s)) FROM generate_series(1, 250000) g");
+  psql(url, "CREATE TABLE m1 (id bigint PRIMARY KEY, a int, b text, c timestamptz); INSERT INTO m1 SELECT g, g % 1000, md5(g::text), now() - g * interval '1 second' FROM generate_series(1, 400000) g");
+  psql(url, "CREATE TABLE m2 (id bigint PRIMARY KEY, n numeric(12,2), t text); INSERT INTO m2 SELECT g, g / 7.0, repeat(md5(g::text), 3) FROM generate_series(1, 150000) g");
+  psql(url, "CREATE TABLE s1 (id int PRIMARY KEY, name text); INSERT INTO s1 SELECT g, 'n' || g FROM generate_series(1, 10000) g");
+  psql(url, "CREATE TABLE s2 (id int PRIMARY KEY, j jsonb); INSERT INTO s2 SELECT g, jsonb_build_object('g', g) FROM generate_series(1, 50000) g");
+  for (const t of ["wide", "m1", "m2", "s1", "s2"]) psql(url, `VACUUM ANALYZE ${t}`);
+  for (const t of ["wide", "m1", "m2", "s1", "s2"]) await rowsOlderThanEverySnapshot(url, t);
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const col = (name: string, type: string) => ({ name, type, notNull: false, comment: null });
+  const added = (table: string, rows: number, columns: AddedTable["columns"]): AddedTable => ({ source: `public.${table}`, schema: "public", table, key: ["id"], bytes: 0, rows, foreignKeys: [], columns });
+  const tables: AddedTable[] = [
+    added("wide", 250_000, [col("id", "bigint"), col("created_at", "timestamp with time zone"), col("kind", "text"), col("a", "jsonb"), col("b", "jsonb")]),
+    added("m1", 400_000, [col("id", "bigint"), col("a", "integer"), col("b", "text"), col("c", "timestamp with time zone")]),
+    added("m2", 150_000, [col("id", "bigint"), col("n", "numeric(12,2)"), col("t", "text")]),
+    added("s1", 10_000, [col("id", "integer"), col("name", "text")]),
+    added("s2", 50_000, [col("id", "integer"), col("j", "jsonb")]),
+  ];
+  const logged: string[] = [];
+  const file = path.join(dir, "five.db");
+  const store = await storeWithCeiling(file, (l) => logged.push(l), "64MB", "96MB");
+  const crashed: string[] = [];
+  store.onCrash((r) => crashed.push(r));
+  const sync: Sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll", null, { copyParallel: 3 });
+  try {
+    await sync.open();
+    void sync.setTables(tables);
+    await sync.once();
+    const said = logged.join("\n");
+    assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]).sort(), tables.map((t) => [t.source, "copied", null]).sort(), said);
+    const groups = Number((await store.writer.runAndReadAll("SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('public.wide')")).getRowsJS()[0]![0]);
+    assert.ok(groups > 3, `the wide table's chunks are row groups of their own: ${groups}`);
+    await store.writer.run("CHECKPOINT");
+    for (const t of tables) {
+      assert.equal(String((await store.writer.runAndReadAll(`SELECT count(*) FROM public.${t.table}`)).getRowsJS()[0]![0]), await psqlAsync(url, `SELECT count(*) FROM ${t.table}`), `${t.source}\n${said}`);
+    }
+    assert.deepEqual(crashed, [], said);
+  } finally { await sync.stop(); await store.close(); }
+  // compared at the default memory, after a reopen: the comparison reads every value at once
+  const read = await DuckStore.open(file, (l) => logged.push(l));
+  try {
+    const digest = "count(*) || ' ' || md5(string_agg(id::text || ':' || md5(a::text) || md5(b::text), ',' ORDER BY id))";
+    assert.equal(String((await read.writer.runAndReadAll(`SELECT ${digest} FROM public.wide`)).getRowsJS()[0]![0]), await psqlAsync(url, `SELECT ${digest} FROM wide`), `public.wide differs from the source\n${logged.join("\n")}`);
+  } finally { await read.close(); }
+});
+
+test("a table of ~100 KB values synced one heap page a chunk under 128MB, and a checkpoint after, leaves the synced data valid", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set", timeout: 900_000 }, async () => {
+  const db = `${tag}_rg`;
+  const url = (() => { const u = new URL(adminUrl!); u.pathname = `/${db}`; return u.toString(); })();
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  after(() => psql(adminUrl!, `DROP DATABASE IF EXISTS ${db} WITH (FORCE)`));
+  // the issue's own shape: 4,000 rows of ~100 KB stored out of line, 30 heap pages, so its chunks are a page each
+  psql(url, "CREATE TABLE big100 (id bigint PRIMARY KEY, v text); ALTER TABLE big100 ALTER COLUMN v SET STORAGE EXTERNAL");
+  psql(url, "INSERT INTO big100 SELECT g, (SELECT string_agg(md5(random()::text || g || s), '') FROM generate_series(1, 3200) s) FROM generate_series(1, 4000) g");
+  psql(url, "VACUUM ANALYZE big100");
+  await rowsOlderThanEverySnapshot(url, "big100");
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const BIG100: AddedTable = { source: "public.big100", schema: "public", table: "big100", key: ["id"], bytes: 0, rows: 4000, foreignKeys: [],
+    columns: [{ name: "id", type: "bigint", notNull: true, comment: null }, { name: "v", type: "text", notNull: false, comment: null }] };
+  const logged: string[] = [];
+  const file = path.join(dir, "big100.db");
+  const store = await DuckStore.open(file, (l) => logged.push(l), { memoryLimit: "128MB" });
+  const crashed: string[] = [];
+  store.onCrash((r) => crashed.push(r));
+  const sync: Sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll", null, { copyParallel: 3 });
+  try {
+    await sync.open();
+    void sync.setTables([BIG100]);
+    await sync.once();
+    const said = logged.join("\n");
+    assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]), [["public.big100", "copied", null]], said);
+    await store.writer.run("CHECKPOINT");
+    assert.equal(String((await store.writer.runAndReadAll("SELECT count(*) FROM public.big100")).getRowsJS()[0]![0]), "4000", said);
+    assert.deepEqual(crashed, [], said);
+  } finally { await sync.stop(); await store.close(); }
+  const read = await DuckStore.open(file, (l) => logged.push(l));
+  try {
+    const digest = "count(*) || ' ' || md5(string_agg(id::text || ':' || md5(v), ',' ORDER BY id))";
+    assert.equal(String((await read.writer.runAndReadAll(`SELECT ${digest} FROM public.big100`)).getRowsJS()[0]![0]), await psqlAsync(url, `SELECT ${digest} FROM big100`), `public.big100 differs from the source\n${logged.join("\n")}`);
+  } finally { await read.close(); }
+});

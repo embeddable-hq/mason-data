@@ -56,7 +56,9 @@ paths:
   `MASON_DUCKDB_MEMORY`, `mason add … --columns`; never the engine's remedies), its chunks kept, backed off. No table is
   refused before it is read by a formula over the source's catalog: what the engine can write is the engine's to say,
   at the write (an up-front refusal by TOAST bytes refused 140,000 rows of ~2.6 KB that sync in 128 MB; PR 380). A
-  checkpoint merging small row groups of large values that do not fit invalidates the whole database (issue 371, open). `duck-poll.itest.ts` holds both shapes and the two out-of-memory paths (docs/DESIGN.md "Large values out of line").
+  checkpoint never merges the small row groups a copy of large values leaves (`max_vacuum_tasks` 0, read back at every
+  open, `instanceSettingsProblem`): such a merge that did not fit invalidated the whole database (issue 371; docs/DESIGN.md
+  "No checkpoint merges row groups"). `duck-poll.itest.ts` holds both shapes and the two out-of-memory paths (docs/DESIGN.md "Large values out of line").
 - **A copy's progress is rendered between commits** (`CopyLive`, `copyProgressNow`, `CopyState.progress`): the chunks
   done and about how many in all, the ones reading and how long the oldest has, the readers' measured rate and the time
   the pages left take at it, and the rows the chunks in flight have read by now at that rate, each held under 90 % of
@@ -133,7 +135,7 @@ Run each probe that applies: the implementer before each push, and the fresh rev
 - A table of large out-of-line values (a few rows a heap page, ~1 MB of text `STORAGE EXTERNAL`, or `jsonb` of ~512 KB)
   under a low `MASON_DUCKDB_MEMORY` at `MASON_COPY_PARALLEL` 3: it syncs in chunks of a page's values, or fails with
   the operator's way out and never the engine's advice (issue 96); and many moderate ones (~2 KB, 140,000 rows) under
-  128 MB, never refused before they are read (PR 380). A checkpoint that invalidates the database is issue 371's.
+  128 MB, never refused before they are read (PR 380). A checkpoint that invalidated the database was issue 371's.
 - `sizing-guard-from-derived-estimate`: a refusal decided up front by arithmetic on the source's catalog (out-of-line
   bytes a row group times a share, against the memory limit), measured on one shape and applied to all. Sync
   `CREATE TABLE t (id bigint PRIMARY KEY, v text)`, `v` `STORAGE EXTERNAL`, 140,000 rows of `repeat(md5(id::text), 64)`
