@@ -6,6 +6,14 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   and SSL mode, so each can be pasted into a BI tool's connection form one by one. The card no longer shows a psql
   line: paste the URL after `psql`. `mason user add --json` keeps its `psql` field.
 
+- **`mason wait` now waits for a table's catch-up poll** (after its first sync, a sync of it again whole, or a change of its `sync:` to `replication`). A first sync reads the table as of its start,
+  then catches it up by one poll for what changed during the read, a `sync: off` table too; on a large table that poll
+  is a scan of its own. `mason wait` said Ready while it ran, so a tool started on Ready read data as of the read's
+  start, and the table's line said "NOT kept current" with a yellow bar. Now the table's line says it is being caught up
+  by one poll, its bar at work, and `mason wait` is ready once that poll is over (a script waiting on it may wait that
+  much longer); `mason status`, the web page and EXPLAIN say the same. In `--json` a table in its catch-up has
+  `sync.state` `catching-up` (it was `syncing`), and `readiness` lists it under `waiting`.
+
 - **`mason share` opens with the URL to paste**: its first line is now `Try mason with your favorite postgres client:
   postgres://<user>:<password>@<host>:<port>/<database>?sslmode=require`, the share's own login and address, so a
   client that takes a connection string connects from that one line. The host, port, database, user and password rows

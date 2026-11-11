@@ -357,6 +357,14 @@ test("behind, left out, a failed catch-up, a stream down, off: each table's line
       lateWhy: "the last pass, which reads every table again whole, took 1 s, and Mason waits four times a pass between passes to keep the database's load to a fifth" } } as CopyState]],
     ["off", [{ ...copied("public.events", 30_000_000, ago(7200)), kept: { by: "poll", sync: { mode: "off" }, syncedAt: ago(3 * 86_400), nextAt: null, promisedSeconds: null, lateWhy: null } } as CopyState]],
     ["synced", [{ ...copied("public.customers", 1200, ago(7200)), kept: { by: "poll", sync: every15, syncedAt: ago(14 * 60), nextAt: null, promisedSeconds: 960, lateWhy: pass } } as CopyState]],
+    // in its first sync's one catch-up poll (issue 834): at work, its words the CLI's, never "NOT kept current"
+    ["catching up, off", [{ ...copied("public.events", 23_000_000, ago(5)), behind: "after its whole read", rebuilding: "catch-up",
+      kept: { by: "poll", sync: { mode: "off" }, syncedAt: ago(5), nextAt: null, pending: "it is caught up by one poll after its whole read first", promisedSeconds: null, lateWhy: null } } as CopyState]],
+    ["catching up, polled", [{ ...copied("public.customers", 1200, ago(5)), behind: "after its whole read",
+      kept: { by: "poll", sync: every15, syncedAt: ago(5), nextAt: null, pending: "it is caught up by one poll after its whole read first", promisedSeconds: 960, lateWhy: "it is caught up by one poll after its whole read first" } } as CopyState]],
+    ["catching up, replicated", [{ ...copied("public.orders", 2_000_000, ago(5)), behind: "after its whole read", rebuilding: "catch-up",
+      kept: { by: "replication", slot: "s", state: "catching-up", why: "caught up by one poll after its whole read", position: "0/1", lastCommit: null, notRunning: null,
+        syncedAt: ago(5), promisedSeconds: 120, lateWhy: "caught up by one poll after its whole read" } } as CopyState]],
   ];
   const tableLine = fn<[unknown, number], { state: string; fraction: number; what: string }>("tableLine");
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
@@ -369,10 +377,20 @@ test("behind, left out, a failed catch-up, a stream down, off: each table's line
     assert.ok(cli.endsWith(`  ${ours.what}`), `${name}:\n${cli}\n${ours.what}`);
     assert.doesNotMatch(ours.what, /first sync failed/, `${name}: a synced table's sync is never its first`);
     const row = renderTables(s).split("<tr").find((r) => r.includes(`<code class="name" title="${t.table}">`))!;
-    words[name] = `${/class="indicator (\w+)"/.exec(row)![1]} ${/<\/span>(Behind|Failed|Synced|Syncing|Waiting)</.exec(row)![1]} ${ours.state}`;
+    words[name] = `${/class="indicator (\w+)"/.exec(row)![1]} ${/<\/span>(Behind|Failed|Synced|Syncing|Catching up|Waiting)</.exec(row)![1]} ${ours.state}`;
+    if (name.startsWith("catching up")) {
+      assert.ok(ours.what.endsWith(` · ${commands.CATCHING_UP} (last synced 5 s ago)`), `${name}: ${ours.what}`);
+      assert.doesNotMatch(ours.what, /NOT kept current/, `${name}: at work, not a fault (issue 834)`);
+      assert.match(row, /<span class="copyline t-catching-up">/, `${name}: the bar in the accent (app.css: no amber of .t-unsynced)`);
+      assert.match(cli, /^\S+\s+█{20} 100% {2}/);
+      assert.match(commands.paintBar(cli, { red: (x: string) => `R${x}`, yellow: (x: string) => `Y${x}`, green: (x: string) => `G${x}`, cyan: (x: string) => `C${x}`, dim: (x: string) => x } as never, commands.tableRows(s, NOW).find((x) => x.line === cli)!.tone), /C█/, `${name}: cyan in mason status`);
+    }
   }
   assert.deepEqual(words, { "behind, the pass": "warn Behind unsynced", "behind, its own poll": "warn Behind unsynced", "left out": "bad Failed failed", "a failed catch-up": "bad Failed failed",
-    "a stream down past its bound": "warn Behind unsynced", "behind, recopied": "warn Behind unsynced", off: "ok Synced done", synced: "ok Synced done" });
+    "a stream down past its bound": "warn Behind unsynced", "behind, recopied": "warn Behind unsynced", off: "ok Synced done", synced: "ok Synced done",
+    "catching up, off": "warn Catching up catching-up", "catching up, polled": "warn Catching up catching-up", "catching up, replicated": "warn Catching up catching-up" });
+  // one wording: the page's own constant is the CLI's (src/web/pages/status.js, src/cli/readiness.ts)
+  assert.equal(page.CATCHING_UP, commands.CATCHING_UP);
   const recopied = stateOf(states.find(([n]) => n === "behind, recopied")![1], { now: NOW });
   const line = tableLine(recopied.tables.find((x) => x.table === "public.customers")!, NOW).what;
   assert.equal(line, "1,200 rows · synced · behind by 1 h 58 min: the last pass, which reads every table again whole, took 1 s, and Mason waits four times a pass between passes to keep the database's load to a fifth");

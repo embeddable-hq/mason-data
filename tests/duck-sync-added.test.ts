@@ -189,7 +189,8 @@ test("a project switched to replication is said streamed by EXPLAIN and status a
   }
   // one owed its catch-up poll (`_mason.catch_up`): catching up, as status says it
   assert.deepEqual([at(states, "caught").kept?.state, at(states, "caught").kept?.why], ["catching-up", "caught up by one poll after its whole read"]);
-  assert.equal(keptText(at(states, "caught")), "logical replication (slot mason_x), not streamed yet: caught up by one poll after its whole read");
+  // EXPLAIN says it as mason status does: at work, never "not streamed yet" (issue 834)
+  assert.match(keptText(at(states, "caught")), /^being caught up by one poll for what changed since it was synced \(last synced \d+ days ago \(2026-10-27 19:58:39 UTC\)\)$/);
 
   // the replication check a pass failed (recorded on each copy's state): its words
   const failed = await keptStates({ mode: "replication", replication: replicationX, tables: [table("a")], seed: async (run) => {
@@ -240,6 +241,8 @@ test("a polled copy says its interval and last poll, an `off` one its age and th
   for (const [name, why] of pending) {
     const st = at(states, name);
     assert.equal(st.kept?.pending, why, name);
+    // owed its one catch-up poll: EXPLAIN says it is being caught up, as mason status does (issue 834)
+    if (name === "caught") { assert.equal(keptText(st, now), "being caught up by one poll for what changed since it was synced (last synced 3 days ago (2026-10-27 19:58:39 UTC))"); continue; }
     assert.match(keptText(st, now), new RegExp(`^NOT kept current \\((last synced 3 days ago \\(2026-10-27 19:58:39 UTC\\)|never synced)\\): ${why.replace(/[.()]/g, "\\$&")}$`), name);
   }
 });
@@ -518,7 +521,9 @@ test("a table just copied says its copy's age at once, never 'never synced' unti
     const k = kept();
     assert.ok(typeof k.syncedAt === "string" && Date.now() - Date.parse(k.syncedAt) < 60_000, `synced as of its copy: ${JSON.stringify(k)}`);
     const line = tableLines(runState(runContext([{ ...table("a"), sync: every("30s", 30) }], "poll"), sync.state(), null) as RunState).find((l) => l.startsWith("public.a"))!;
-    assert.match(line, /NOT kept current \(last synced \d+ s ago\): /, line);
+    // swapped in and owed its one catch-up poll: being caught up, never NOT kept current (issue 834)
+    assert.match(line, /· being caught up by one poll for what changed since it was synced \(last synced \d+ s ago\)$/, line);
+    assert.equal(sync.state().find((x) => x.source === "public.a")!.behind, "after its whole read");
     assert.doesNotMatch(line, /never synced/);
   });
 });
