@@ -13,8 +13,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
-- A small synced table's size now appears on the web page's Tables view and in `mason usage` at the first measure
-  after its first sync (every 10 minutes) when no other first sync is writing and the disk has room for it; else it is
-  measured a minute later, and the log says why it was not. Before, a table small enough that its rows stayed in the synced data's write-ahead log showed "—" with
-  "not measured yet" for the life of the run. The Overview's "The synced data's file" card, `mason status`, `mason usage`
-  and `mason_copy_bytes` now count that log too: they read 12 KiB for a file whose log held 1.3 MB.
+- The Overview's "The synced data's file" card, `mason status`, `mason usage` and `mason_copy_bytes` now count the synced
+  data's write-ahead log: they read 12 KiB for a file whose log held 1.3 MB.
+- A small synced table's size is shown once its rows are written into the file, which happens when the write-ahead log
+  passes 16 MiB or Mason stops. Until then the Tables view and `mason usage` say so. Before, the page said the size was
+  coming at the next measurement, and for a small table it could never come.

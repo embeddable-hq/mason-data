@@ -1828,8 +1828,9 @@ growing with rows × columns, so it is sampled every 10 minutes, never per reque
 `count(*)` after a stream batch that wrote by key was a scan, 12 ms on 20 M rows, so a copy's rows are kept by the
 batch's own inserts less its deletes. A copy with no persistent block yet (its rows still in the write-ahead log) was
 measured "0.0 KiB" for 5,000 rows, so it is not measured until it has one — and since Mason never checkpointed, a small
-copy never had one, and its size was never shown (issue 815), so a measure that finds such a copy checkpoints first
-("Measurements", "A small table's size"); and the file's block size read without
+copy may not have one for the life of a run (issue 815); the sampler never checkpoints to give it one (the owner,
+2026-11-11: "Measurements", "A small table's size"), and the page and `mason usage` say why it has no size; and the
+file's block size read without
 `current_database()` was the in-memory catalog's 0, which made every copy 0 B. The synced data's file is the file and
 its write-ahead log (src/duck/file-bytes.ts, the one reader): the file alone read 12 KiB beside a log of 1.3 MB.
 
@@ -2861,15 +2862,15 @@ NATURAL of no column in common, which Postgres reads as every pair. It is writte
 (`naturalWritten`), not by the rows a LIMIT chooses alone: written there first, a count, a sort with no LIMIT and a list
 that reads no table still reached DuckDB as NATURAL and were refused (the review of PR 155).
 
-### A small table's size: a checkpoint before it is measured (issue 815, 2026-11-10)
+### A small table's size: not measured until DuckDB's own checkpoint (issue 815; the owner, 2026-11-11)
 
 **What was wrong.** A copy's size is its distinct blocks (`pragma_storage_info`), and a copy whose rows are all in the
 write-ahead log has none. Mason never checkpointed, and DuckDB checkpoints by itself only when the log passes
 `checkpoint_threshold` (16 MiB) or the store closes, so a 25,000-row table synced in under a second stayed unmeasured
 for the life of a run, its page saying the size was coming. DuckDB says nothing of the bytes a segment held in memory
 (`pragma_storage_info` gives a transient segment no block and no size, `estimated_size` is a row count, and the log is
-the whole instance's), so there is no estimate to give without a checkpoint; "not measured until the first checkpoint"
-would be honest and, for a small table, for ever.
+the whole instance's), so there is no estimate to give without a checkpoint. PR 826 first had the usage sampler
+checkpoint before measuring such a copy; what that cost, and why it was dropped, follow.
 
 **Measured** (DuckDB 2.0.0 through the store's own executor, Node 26, a 4-vCPU 15 GiB VM; synthetic: a checkpointed
 20 M-row, 5-column table, 242 MB; one change per run — a `CHECKPOINT` on a connection of its own, against the same run
@@ -2882,7 +2883,7 @@ in a loop, ~230 ms, and a poll's transaction in a loop, 500 rows deleted and ins
 | 400 transactions of 2,000 rows (9 MiB) | 135 – 192 ms | 246 / 291 → 255 / 310 ms | 8.0 / 15.9 / 42 → 8.1 / 18.4 / 62 ms |
 | 50,000 rows deleted and inserted over the 20 M (2.8 MiB) | 62 – 92 ms | 284 / 311 → 269 / 324 ms | 9.6 / 18.6 / 32 → 9.4 / 18.9 / 56 ms |
 
-The aggregate moved within its noise; a poll +2 ms at p95 and +11 – 24 ms at most. DuckDB's own checkpoint, by contrast,
+The aggregate moved within its noise; a poll +2 ms at p95 and +11 – 24 ms at most: cheap. DuckDB's own checkpoint, by contrast,
 runs INSIDE the commit that crosses the threshold: the same poll took 5 – 10 ms below it and 88 – 122 ms crossing it (5
 trials). A checkpoint taken earlier writes what that one would have written later. Bulk inserts of a full row group or
 more are written to the file as they commit (a 300,000-row table left 0 bytes of log), so what a checkpoint writes is
@@ -2910,21 +2911,19 @@ growth and the engine's memory peak over what it held before):
 | 400 values of 96 KB | 36.6 MiB | 256 KiB | 0 |
 | 50,000 rows deleted and inserted over the 2 M | 2.6 MiB | 2 MiB | 0 |
 
-So the rows take at most 0.8 times the log, and every table written takes a block (256 KiB) however few its rows. The
-sampler checkpoints only with room for twice the log and a block for every table of the file and 8 more, on the disk,
-and twice the log and an eighth of `store.memoryLimitBytes` free in the engine's memory; else it says the copies are not
-measured and why, and asks again at the next sample. With that guard the same 100 KiB volume skipped it, said so, served
-and wrote through the full disk, and measured the table once the space was freed. What it does not rule out: a checkpoint
-that fails for another reason (an I/O error; issue 371's merge of a first sync's out-of-line values, which DESIGN
-"Large values out of line" records failing under a memory limit, and whose memory the log does not show) invalidates the
-database as DuckDB's own checkpoint would, earlier than DuckDB would have taken it.
+So the rows take at most 0.8 times the log, and every table written takes a block (256 KiB) however few its rows. A
+fix round guarded the checkpoint with that room (twice the log and a block for every table and 8 more on the disk; twice
+the log and an eighth of `store.memoryLimitBytes` in the engine's memory), and the same 100 KiB volume then skipped it and
+kept serving. What a guard cannot rule out: a checkpoint that fails for another reason (an I/O error; issue 371's merge
+of a first sync's out-of-line values, which "Large values out of line" records failing under a memory limit, and whose
+memory the log does not show) invalidates the database, earlier than DuckDB's own would have been taken.
 
-**Decision.** A measure that finds a served copy with rows (segments in memory) and no block of its own checkpoints, on
-the samples' own connection (never the writer's turn, which a swap may hold), when there is room, then measures it; a
-copy with blocks, and an empty one, take none, so it happens after a small copy's first sync or swap, not every 10
-minutes. Refused or skipped, it is said once per streak and the copies left are measured again at the next sample, a
-minute later — during a long first sync, once it ends. **Where.** src/duck/usage.ts (`size`, `checkpoint`,
-`checkpointRoom`); tests/duck-usage.test.ts.
+**Decision (the owner, 2026-11-11).** The sampler never checkpoints. A checkpoint's failure is fatal to the instance —
+the review's near-full disk — and a size is not worth a new way to stop a run serving. A served copy with rows and no
+block of its own is not measured and never written as 0; the Tables view's tooltip and `mason usage` say why (its rows
+are written into the file at DuckDB's own checkpoint, when the log passes 16 MiB, or when Mason stops). What the change
+kept: the synced data's file counts its write-ahead log (src/duck/file-bytes.ts `syncedDataBytes`, the one reader).
+**Where.** src/duck/usage.ts (`size`), src/duck/file-bytes.ts; tests/duck-usage.test.ts, tests/cli-run-server.test.ts.
 
 ### First copy, and the poll's cost on the source
 

@@ -16,6 +16,8 @@ import { parseDuration } from "../lib/table-sync.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 const n = (x: number): string => x.toLocaleString("en-US");
+/** why a synced table may be missing from the sizes: its rows not written into the file yet (src/duck/usage.ts) */
+const SIZE_WAITS = "  a table is measured once its rows are written into the file: a small table's can wait in the write-ahead log until it passes 16 MiB or Mason stops";
 
 export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>] [--step <duration>] [--json]
 
@@ -24,7 +26,8 @@ export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>]
   cancelled — the errors column —, the completed ones' p95 duration, the rows sent), the synced data's size and rows, the
   tables whose sync is failing, how old the stalest table was, the stream's lag (a table under sync: replication), and
   the memory of the process and of the engine against its limit (MASON_DUCKDB_MEMORY). Then each synced table's own size, measured every
-  10 minutes. A span sums its statements and shows each level at its highest. Read through the running Mason.
+  10 minutes once its rows are written into the file (a small table's can wait in the write-ahead log until it passes
+  16 MiB or Mason stops, and has no size until then). A span sums its statements and shows each level at its highest. Read through the running Mason.
 
     mason usage                        the last hour, 5 minutes a line
     mason usage --since 7d --step 1h   the last week, an hour a line
@@ -118,6 +121,7 @@ export async function usage(argv: string[], now = Date.now()): Promise<number> {
       out(st.bold(`Each synced table's own size (measured every ${duration(SIZE_EVERY_MS / 1000)}):`));
       const wide = Math.max(...b.copySizes.map((c) => c.table.length));
       for (const c of b.copySizes) out(`  ${c.table.padEnd(wide)}  ${fileSize(c.bytes).padStart(10)}  ${st.dim(`at ${c.at.slice(11, 16)} UTC`)}`);
+      out(st.dim(SIZE_WAITS));
     }
     out(endText({ next }, st));
     return 0;
