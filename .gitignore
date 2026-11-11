@@ -20,3 +20,6 @@ tests/.tmp-*/
 /cli/platforms/
 # the CLI has no lock of its own: its optional platform packages are published in the same release run as it
 /cli/package-lock.json
+
+# the log of scripts/worktrees-sweep.ts when the merge hook starts it (scripts/hooks/worktrees-sweep-after-merge.ts)
+/.claude/worktrees-sweep.log

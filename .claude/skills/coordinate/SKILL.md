@@ -42,6 +42,7 @@ rest). CLAUDE.md "How work is done here" is the rule; this is how to run it.
 5. **Merge** once nothing blocking is open, CI is green at the head, and you have read the whole diff, pinned to that
    head: `gh pr merge <n> --squash --delete-branch --match-head-commit <sha>`, or the GitHub tool's merge with
    `expectedHeadSha` set to that head, never without it (no hook checks that route). Then confirm it merged.
+   A merge through Bash starts `scripts/worktrees-sweep.ts` in the background (its log `.claude/worktrees-sweep.log`), which removes the worktrees whose work is done and says why it kept each other; after a merge by the GitHub tool, run it by hand.
 
 ## Waiting
 

@@ -16,6 +16,8 @@ export interface HookInput {
   hook_event_name?: string;
   tool_name?: string;
   tool_input?: { command?: unknown; run_in_background?: unknown; file_path?: unknown; notebook_path?: unknown };
+  /** A PostToolUse input's result of the call; for Bash `{ stdout, stderr, interrupted, isImage }`. */
+  tool_response?: unknown;
   /** The session's working directory when the tool was called. */
   cwd?: unknown;
   transcript_path?: unknown;
