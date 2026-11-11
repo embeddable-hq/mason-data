@@ -2713,7 +2713,7 @@ and every wide column is held before the first row comes out. Each cell one run,
 | the same, `OFFSET 2,000,000` | 8.04 s, 4.05 GiB spilled | 3.89 s, none |
 | a small outer table, the wide one probed (no spill before) | 0.05 s | row numbers alone: 0.03 s against 0.07 s streamed |
 
-Why the row numbers are sorted, when any 100 rows of the join are a right answer: **pages**. Without a sort, DuckDB's
+Why the row numbers were sorted (superseded by issue 824, below: they are sorted nowhere now), when any 100 rows of the join are a right answer: **pages**. Without a sort, DuckDB's
 parallel hash join gives the same statement's rows in another order each run, so `LIMIT n OFFSET m` over them is no page of
 one list. Paging joins of 0.7–1 M rows to their end, with a plain statement, in pages of 100,000: 222,912 to 366,176 rows came back twice and as many
 never, most pages differed when asked twice, and at `LIMIT 100` over the first 3,000 rows one of four joins already repeated
@@ -2739,10 +2739,10 @@ min of 3 warm runs:
 
 **The sort only where the join is proved bounded (issue 134, 2026-10-31; no sort at all since issue 824, below).** That price was measured on joins that do not
 multiply. Where a join multiplies, the top N over row numbers runs the entire join, and a statement that used to stop in
-milliseconds runs for minutes. So the row numbers are sorted only where `fanOutBounded` (src/duck/distinct-key.ts) proves
+milliseconds runs for minutes. So the row numbers were sorted only where `fanOutBounded` (src/duck/distinct-key.ts, removed with issue 824) proved
 the join's rows linear in its tables: every join equates a whole primary key of a table its side holds at most once, from
-the analysis and the catalog's `pg_index`. Elsewhere they are not sorted at all, inside or out. An EXPLAIN's estimate
-would cost about 8 ms and can be wrong; the proof costs one catalog read, only for such a statement, and cannot.
+the analysis and the catalog's `pg_index`. Elsewhere they were not sorted at all, inside or out. An EXPLAIN's estimate
+would cost about 8 ms and can be wrong; the proof cost one catalog read, only for such a statement, and could not.
 
 The key must be unique in its SIDE, not only in its table: `a JOIN b ON a.id = b.a_id JOIN c ON a.id = c.a_id` equates a's
 key twice, yet an `a` of a thousand `b`s and a thousand `c`s is a million rows, because the first join repeats `a`. A join
@@ -2762,7 +2762,8 @@ limit, through the listener. After: minimum of 3 warm runs. Before: minimum of 3
 The unsorted form holds the issue's measurement: it costs what the plain join does, and it still leaves wide columns out of
 the join, where reading them through it was slower.
 
-**What is given up.** A join the proof does not bound can overlap its pages again, as before PR 118: `LIMIT n OFFSET m` over
+**What is given up** (superseded by issue 824, below: every unsorted LIMIT over joined tables can overlap its pages now,
+and no proof is made). A join the proof does not bound can overlap its pages again, as before PR 118: `LIMIT n OFFSET m` over
 a many-to-many join, a cross join, a key in part, a table with no primary key, or a key equated with an expression can
 show a row twice and miss another. A tool paging such a join to its end sees that. Each answer is still rows of the join,
 each as often as the join holds it, so the proof decides cost and pages, never an answer, and the safe side of a failed
