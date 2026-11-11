@@ -253,8 +253,11 @@ against a local Postgres 16, synthetic tables, `MASON_COPY_PARALLEL` 3:
   checkpoint (`max_vacuum_tasks = 1`) was not enough: one merge of 100 KB values does not fit 128MB. No setting bounds a
   row group's bytes, and fewer readers or smaller chunks do not help: the merge comes after the read, over what it left.
 
-**What it costs.** A table written by key (the poll's and the stream's write: its keys deleted, its rows inserted)
-keeps its deleted rows' space and reads past them, until a whole row group is deleted. Measured offline: a table of 2 M
+**What it costs: two things grow until a compaction of Mason's own (a later issue).** Neither grows in Mason's own
+history tables, whose 7-day trim empties whole row groups.
+
+*Dead rows from updates by key.* A table written by key (the poll's and the stream's write: its keys deleted, its rows
+inserted) keeps its deleted rows' space and reads past them, until a whole row group is deleted. Measured offline: a table of 2 M
 rows, each round one transaction that deletes and inserts 5 % of its keys and adds 0.5 % new rows, then a checkpoint:
 
 | rounds, which keys | vacuum on: stored rows, file, a scan | vacuum off: stored rows, file, a scan |
@@ -264,8 +267,26 @@ rows, each round one transaction that deletes and inserts 5 % of its keys and ad
 | 60, random | 5.72 M, 147.3 MiB, 163 ms | 16.9 M, 305.0 MiB, 282 ms |
 
 It grows with the churn: after 60 rounds (the table rewritten three times over), 2.1 times the file and 1.7 times a
-scan's time. A small append still fills the last row group, so a poll's or a batch's few rows make no row group of
-their own. **Where.** `src/duck/store.ts` (`INSTANCE_SETTINGS`, `instanceSettingsProblem`, `DuckStore.open`);
+scan's time.
+
+*A row group per checkpoint, per table written.* After a checkpoint, the next append to a table starts a new row group,
+and with no merge it stays: each holds at least one 256 KiB block, however few its rows. Checkpoints come when the
+log passes 16 MiB and at every stop, so this grows with the number of checkpoints, not with the churn, and an
+append-only table that is polled or streamed gets it too (the review of PR 854 found it; an earlier version of this
+section said the opposite). The review measured:
+- a 1 M-row table, then 2,000 rounds of "insert 20 rows, CHECKPOINT": 2,009 row groups and 535.8 MiB, where main had 13
+  row groups and 30.8 MiB; a `count(*)` took 2.8 ms, where main took 1.2 ms;
+- 8 polled tables of 100,000 rows over 25 `mason start` / `mason stop` cycles: the file grew 50 MiB, where main's grew
+  1 MiB, with 26 row groups a table, where main had 2.
+
+*What an operator can do meanwhile.* A table synced again whole is compacted: `mason remove <table>`, then `mason add
+<table>`, drops its synced data and syncs it again from the source (src/duck/sync.ts drops a table no longer added; it
+is not served between the two). Measured offline: a table of 209 row groups (287 blocks) with half its rows deleted, dropped
+and written again whole, was 5 row groups (42 blocks). The freed blocks are reused, but the file does not shrink.
+`mason sync` of a table is a poll, which does not compact it.
+
+*EXPLAIN's "about N rows" counts the dead rows.* It is `duckdb_tables().estimated_size` (src/duck/store.ts), which
+counts deleted rows still stored: measured 1,004,000 for a table of 504,000 live rows. **Where.** `src/duck/store.ts` (`INSTANCE_SETTINGS`, `instanceSettingsProblem`, `DuckStore.open`);
 `tests/duck-checkpoint.test.ts` (the copy's write pattern offline, and a store invalidated by the merge opened again),
 `tests/integration/duck-poll.itest.ts` (five tables added together under 64MB, and the 100 KB shape under 128MB, each with a
 checkpoint the test forces).

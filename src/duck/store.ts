@@ -83,9 +83,11 @@ export const DUCKDB_VERSION = version();
  * INVALIDATES the database — every table's sync, every session, and every restart that resumed the same sync. Measured:
  * 700,000 rows of two ~1 KB jsonb at 128MB spilled 1.4–1.7 GB and rewrote the whole table (a 776 MiB file to 1,519);
  * with 0 nothing spilled. One merge task is not enough: one merge of 100 KB values did not fit 128MB. What it costs
- * (the owner's decision, 2026-11-11): a table written by key (the poll, the stream) keeps its deleted rows' space until
- * a whole row group is deleted — 60 rounds of 5 % updates left 2.1× the file and 1.7× a scan's time. A row group whose
- * every row is deleted is still dropped. `instanceSettingsProblem` reads it back at every open.
+ * (the owner's decision, 2026-11-11), until a compaction of Mason's own: a table written by key (the poll, the stream)
+ * keeps its deleted rows' space until a whole row group is deleted — 60 rounds of 5 % updates left 2.1× the file and
+ * 1.7× a scan's time — and every table appended to between two checkpoints keeps a row group (a 256 KiB block at
+ * least) of its own — 2,000 checkpoints of 20 rows took a 1 M-row table from 31 to 536 MiB. A row group whose every
+ * row is deleted is still dropped. `instanceSettingsProblem` reads it back at every open.
  *
  * Beside them, the copy's extensions (src/duck/extensions.ts `extensionSettings`): with Mason's package for this
  * platform, `extension_directory` is that package and nothing is ever downloaded; without one, DuckDB's defaults.

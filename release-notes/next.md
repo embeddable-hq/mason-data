@@ -32,10 +32,21 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   block …` or `failed to pin block …` in the log. That made the synced data unusable: every other table's sync failed
   with `database has been invalidated`, and every restart failed again in the same place. Mason now never reorganises
   a table's storage that way, so the sync finishes and the other tables sync. A run already stuck like this recovers
-  when it starts on this release; nothing is lost. The cost: a table kept current by the poll or the stream keeps the
-  space of the rows it updates or deletes, and reads a little slower, until a future release compacts it. In a
-  measurement, a table that had every row updated three times over took 2.1 times the disk and scanned in 1.7 times
-  the time.
+  when it starts on this release; nothing is lost.
+
+  **What this costs until a future release compacts tables:** the synced data grows on disk, and tables kept current
+  by the poll or the stream get slower to read on a busy server.
+  - A table keeps the space of every row the poll or the stream updates or deletes. A table that had every row
+    updated three times over took 2.1 times the disk and scanned in 1.7 times the time.
+  - Every table written to between two of the synced data's checkpoints keeps a separate block of at least 256 KiB.
+    A checkpoint comes about every 16 MiB written and at every stop. In measurements, small appends with 2,000
+    checkpoints took a 1 M-row table from 31 MiB to 536 MiB, and its count from 1.2 ms to 2.8 ms. 25 restarts grew a
+    project of 8 polled tables by 50 MiB, where it grew by 1 MiB before.
+
+  Meanwhile, watch the disk under `.mason/`. To compact a table, sync it again whole: `mason remove <table>`, then
+  `mason add <table>` (the table is not served in between). The file does not shrink, but later writes reuse the
+  space. `mason sync` does not compact a table. EXPLAIN's "about N rows" also counts rows updated or deleted since
+  the table's last sync whole.
 
 - **A table of large values could fail its first sync under a small `MASON_DUCKDB_MEMORY`**, now and then, with
   `Failed to commit: could not allocate block of size …` in `mason status` and the log, and wait for its retry (at
