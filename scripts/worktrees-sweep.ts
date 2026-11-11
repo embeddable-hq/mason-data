@@ -15,10 +15,11 @@
  * - it is not locked, or its lock is a stale one of Claude Code's (below);
  * - no live process has its working directory inside it (an agent, a shell or a test still there);
  * - no tracked file has an uncommitted change (an untracked file makes `git worktree remove` refuse: kept too);
- * - its work is done: the PR of its branch (`gh api` REST, since a cloud session reaches no GraphQL) is merged or
- *   closed, and none of its branch's PRs is open; or its HEAD is already in origin/main AND it is idle: nothing under
- *   it, nor under its `.git/worktrees/<name>/`, modified for an hour (an agent's commands run in short-lived shells, so
- *   between two of them no process is there, and a fresh worktree at origin/main may be in use);
+ * - its work is done: its HEAD is already in origin/main, or the PR of its branch (`gh api` REST, since a cloud session
+ *   reaches no GraphQL) is merged or closed, and none of its branch's PRs is open;
+ * - it is idle: nothing under it, nor under its `.git/worktrees/<name>/`, modified for an hour. An agent's commands run
+ *   in short-lived shells, so between two of them no process is there: a fresh worktree at origin/main, or a branch
+ *   whose PR was just closed before the agent opens another, may be in use;
  * - no commit of it is off GitHub: every commit is on a remote ref, or HEAD is the PR's head, which GitHub keeps as
  *   `refs/pull/<n>/head` after the branch is deleted (a squash merge with --delete-branch, then a `fetch --prune`,
  *   leaves the commits on no remote-tracking ref).
@@ -158,7 +159,7 @@ function processCwds(): { pid: number; cwd: string }[] | string {
 
 const short = (sha: string): string => sha.slice(0, 7);
 
-/** How long nothing in a worktree at origin/main with no PR must have changed before it is done with. */
+/** How long nothing in a worktree must have changed before it is done with. */
 const IDLE_MS = 60 * 60_000;
 
 /** The first path under `root` (itself included, symlinks not followed) modified after `since`, or undefined. */
@@ -200,32 +201,15 @@ function verdict(wt: Worktree, ctx: { slug: string | undefined; cwds: { pid: num
 
   let done: string | undefined;
   let prHead: string | undefined;
-  /** Why a worktree at origin/main is not done with yet; its PR, merged or closed, may still say it is. */
-  let busy: string | undefined;
   if (ctx.hasMain) {
-    let inMain = false;
-    try { run("git", ["merge-base", "--is-ancestor", wt.head, "refs/remotes/origin/main"], real); inMain = true; } catch (e) {
+    try { run("git", ["merge-base", "--is-ancestor", wt.head, "refs/remotes/origin/main"], real); done = `its HEAD ${short(wt.head)} is in origin/main`; } catch (e) {
       // exit 1 is "not an ancestor"; anything else is git failing, which cannot tell
       if ((e as { status?: number }).status !== 1) return { remove: false, reason: `git merge-base failed: ${failure(e)}` };
     }
-    if (inMain) {
-      // With no PR to say the work is done, a worktree at origin/main may be one an agent has just made and works in
-      // between its short-lived shells: only an idle one is done with.
-      let gitDir: string;
-      try { gitDir = run("git", ["rev-parse", "--absolute-git-dir"], real).trim(); } catch (e) {
-        return { remove: false, reason: `git rev-parse failed: ${failure(e)}` };
-      }
-      let recent: string | undefined;
-      try { recent = modifiedSince(real, ctx.idleSince) ?? modifiedSince(gitDir, ctx.idleSince); } catch (e) {
-        return { remove: false, reason: `cannot tell whether it is idle: ${failure(e)}` };
-      }
-      if (recent === undefined) done = `its HEAD ${short(wt.head)} is in origin/main, and nothing in it changed for ${IDLE_MS / 60_000} minutes`;
-      else busy = `its HEAD ${short(wt.head)} is in origin/main, but it is not idle: ${path.relative(real, recent) || recent} changed within ${IDLE_MS / 60_000} minutes`;
-    }
   }
   if (done === undefined) {
-    if (wt.branch === undefined) return { remove: false, reason: busy ?? "a detached HEAD not in origin/main: no branch to look its PR up by" };
-    if (ctx.slug === undefined) return { remove: false, reason: busy ?? "the origin remote names no GitHub repository to look its PR up in" };
+    if (wt.branch === undefined) return { remove: false, reason: "a detached HEAD not in origin/main: no branch to look its PR up by" };
+    if (ctx.slug === undefined) return { remove: false, reason: "the origin remote names no GitHub repository to look its PR up in" };
     const owner = ctx.slug.split("/")[0]!;
     let pulls: Pull[];
     try {
@@ -238,13 +222,28 @@ function verdict(wt: Worktree, ctx: { slug: string | undefined; cwds: { pid: num
       return { remove: false, reason: `the PR lookup failed: ${failure(e)}` };
     }
     if (pulls.length >= 100) return { remove: false, reason: `100 PRs or more for its branch ${wt.branch}: more than the one page read` };
-    if (pulls.length === 0) return { remove: false, reason: busy ?? `no PR for its branch ${wt.branch}, and its HEAD is not in origin/main` };
+    if (pulls.length === 0) return { remove: false, reason: `no PR for its branch ${wt.branch}, and its HEAD is not in origin/main` };
     const open = pulls.find((p) => p.state === "open");
     if (open !== undefined) return { remove: false, reason: `its PR #${open.number} is open` };
     const latest = pulls.reduce((a, b) => (b.number > a.number ? b : a));
     done = `its PR #${latest.number} is ${latest.merged_at ? "merged" : "closed"}`;
     prHead = latest.head.sha;
   }
+
+  // Done or not, an agent may still be at work in it between its short-lived shells: a fresh worktree at origin/main,
+  // or a branch whose PR was just closed before it opens another. Only an idle one is done with.
+  let gitDir: string;
+  try { gitDir = run("git", ["rev-parse", "--absolute-git-dir"], real).trim(); } catch (e) {
+    return { remove: false, reason: `git rev-parse failed: ${failure(e)}` };
+  }
+  let recent: string | undefined;
+  try { recent = modifiedSince(real, ctx.idleSince) ?? modifiedSince(gitDir, ctx.idleSince); } catch (e) {
+    return { remove: false, reason: `cannot tell whether it is idle: ${failure(e)}` };
+  }
+  if (recent !== undefined) {
+    return { remove: false, reason: `${done}, but it is not idle: ${path.relative(real, recent) || recent} changed within ${IDLE_MS / 60_000} minutes` };
+  }
+  done = `${done}, and nothing in it changed for ${IDLE_MS / 60_000} minutes`;
 
   if (prHead !== wt.head) {
     let off: string;

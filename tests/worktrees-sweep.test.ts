@@ -148,12 +148,14 @@ test("worktrees-sweep: a done and clean worktree is removed with its branch; eve
   const apiErr = f.worktree("apierr"); f.git(apiErr.dir, "push", "-q", "origin", apiErr.branch); f.apiErrs(apiErr.branch);
   const nopr = f.worktree("nopr"); f.git(nopr.dir, "push", "-q", "origin", nopr.branch);
   const outside = f.worktree("outside", { at: path.join(f.tmp, "elsewhere") }); f.pr(outside, "merged");
-  f.age(idle.dir);
+  // every one idle but agent-inmain, so each is kept for its own reason, never only for being in use
+  for (const dir of [merged, closed, idle, dirty, unpushed, live, open, apiErr, nopr].map((w) => w.dir)) f.age(dir);
   f.age(byHand);
 
   const r = sweep(f);
   assert.equal(r.code, 0, r.stderr + r.stdout);
-  for (const [name, why] of [["merged", /its PR #1 is merged, branch b-merged deleted$/], ["closed", /its PR #2 is closed, branch b-closed deleted$/],
+  for (const [name, why] of [["merged", /its PR #1 is merged, and nothing in it changed for 60 minutes, branch b-merged deleted$/],
+    ["closed", /its PR #2 is closed, and nothing in it changed for 60 minutes, branch b-closed deleted$/],
     ["idle", /its HEAD \w{7} is in origin\/main, and nothing in it changed for 60 minutes, branch b-idle deleted$/]] as const) {
     assert.match(line(r.stdout, "removed", name) ?? "", why, r.stdout);
     assert.equal(fs.existsSync(path.join(f.repo, ".claude", "worktrees", `agent-${name}`)), false, name);
@@ -181,6 +183,31 @@ test("worktrees-sweep: a done and clean worktree is removed with its branch; eve
   assert.match(f.git(f.repo, "worktree", "list"), /dirty/);
 });
 
+test("worktrees-sweep: a worktree whose PR is merged or closed but that changed within the hour is kept, and removed once idle", (t) => {
+  const f = new Fixture(t);
+  const merged = f.worktree("recent"); f.pr(merged, "merged");
+  const closed = f.worktree("reopening"); f.pr(closed, "closed"); // an agent about to open another PR on its branch
+  f.age(merged.dir);
+  f.age(closed.dir);
+  // a scratch file made and removed leaves only the folder's time; a tracked file touched, its own
+  fs.writeFileSync(path.join(merged.dir, "notes.txt"), "still at work\n");
+  fs.rmSync(path.join(merged.dir, "notes.txt"));
+  fs.utimesSync(path.join(closed.dir, "reopening.txt"), new Date(), new Date());
+
+  const first = sweep(f);
+  assert.equal(first.code, 0, first.stderr + first.stdout);
+  assert.match(line(first.stdout, "kept", "recent") ?? "", new RegExp(`its PR #1 is merged, but it is not idle: ${merged.dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} changed within 60 minutes$`), first.stdout);
+  assert.match(line(first.stdout, "kept", "reopening") ?? "", /its PR #2 is closed, but it is not idle: reopening\.txt changed within 60 minutes/, first.stdout);
+  assert.equal(fs.existsSync(merged.dir) && fs.existsSync(closed.dir), true);
+
+  f.age(merged.dir);
+  f.age(closed.dir);
+  const second = sweep(f);
+  assert.match(line(second.stdout, "removed", "recent") ?? "", /its PR #1 is merged, and nothing in it changed for 60 minutes, branch b-recent deleted$/, second.stdout);
+  assert.match(line(second.stdout, "removed", "reopening") ?? "", /its PR #2 is closed, and nothing in it changed for 60 minutes, branch b-reopening deleted$/, second.stdout);
+  assert.equal(fs.existsSync(merged.dir) || fs.existsSync(closed.dir), false);
+});
+
 test("worktrees-sweep: a lock of a running Claude Code agent or a person's keeps the worktree; a stale agent lock does not", { skip: linux ? false : "reads /proc" }, (t) => {
   const f = new Fixture(t);
   const stat = fs.readFileSync("/proc/self/stat", "utf8");
@@ -191,6 +218,7 @@ test("worktrees-sweep: a lock of a running Claude Code agent or a person's keeps
   const gone = f.worktree("gone"); f.pr(gone, "merged"); lock(gone, `claude agent agent-g (pid ${dead} start 1)`);
   const reused = f.worktree("reused"); f.pr(reused, "merged"); lock(reused, `claude agent agent-u (pid ${process.pid} start 1${myStart})`);
   const person = f.worktree("person"); f.pr(person, "merged"); lock(person, "kept for a bisect");
+  for (const wt of [running, gone, reused, person]) f.age(wt.dir); // after the locks, which git writes in each one's git dir
 
   const r = sweep(f);
   assert.equal(r.code, 0, r.stderr + r.stdout);
@@ -228,14 +256,14 @@ function waitForSweep(log: string): string {
 test("worktrees-sweep-after-merge: a merge that landed starts the sweep in the background, its output to .claude/worktrees-sweep.log", (t) => {
   const f = new Fixture(t);
   const log = path.join(f.repo, ".claude", "worktrees-sweep.log");
-  const merged = f.worktree("merged"); f.pr(merged, "merged");
+  const merged = f.worktree("merged"); f.pr(merged, "merged"); f.age(merged.dir);
 
   const rest = hook(f, { tool_input: { command: "gh api -X PUT repos/acme/widgets/pulls/1/merge -f merge_method=squash -f sha=abc" },
     tool_response: ok('{"sha":"abc","merged":true,"message":"Pull Request successfully merged"}') });
   assert.deepEqual([rest.code, rest.stdout], [0, ""], rest.stderr);
   const text = waitForSweep(log);
   assert.match(text, /a merge was seen \(gh api -X PUT repos\/acme\/widgets\/pulls\/1\/merge/);
-  assert.match(text, /removed agent-merged: its PR #1 is merged, branch b-merged deleted/);
+  assert.match(text, /removed agent-merged: its PR #1 is merged, and nothing in it changed for 60 minutes, branch b-merged deleted/);
   assert.equal(fs.existsSync(merged.dir), false);
 
   fs.rmSync(log);
