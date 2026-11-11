@@ -108,8 +108,11 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   add` with no `--from`), with no second question; **Only from these addresses** sends the ranges typed in one box,
   comma-separated as `--from a,b` takes them (`192.0.2.0/24, 2001:db8::/32`), split at each comma and trimmed. The page
   never checks a range: the run reads each, and a refused one is shown as the run's refusal. `--set`
-  attributes stay the command's. Its password, URL and psql line are shown once, in a card with
-  Copy buttons, with a link to Queries, where its statements will show; Mason keeps no copy, so they are never shown again.
+  attributes stay the command's. Its password is shown once, in a card of the fields a tool's
+  connection form asks for — URL, User, Password, Database, Host, Port and SSL mode, each with **Copy**, laid out the
+  same way, so a person fills the form field by field (a field `mason user add --json` does not carry is not shown) —
+  with no psql line (the URL is the same thing, pasted after `psql`), and a link to Queries, where its statements will
+  show; Mason keeps no copy, so it is never shown again.
 - **Users**, Connect: once for the run, where a tool connects — host, port, database and SSL mode, each with **Copy**,
   and the URL and psql line with `<user>:<password>` in place — as `mason status` says it. No user's row carries a URL:
   the card shown once when a user is added is the only place its password is copied.
