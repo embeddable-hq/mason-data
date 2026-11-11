@@ -573,22 +573,43 @@ test("the users while the roles file cannot be read: mason user list's tip, word
   assert.doesNotMatch(textOf(renderUsers(list, null, NOW_R, null, null)), /cannot be read/);
 });
 
-test("a user just added: the password and the URL to paste, each with a copy button, and that it will not be shown again", () => {
-  const html = fn<[unknown], string>("renderAdded")({ user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password: "mason_0123456789abcdef_" + "a".repeat(32),
-    database: "shop", url: `postgres://metabase:mason_0123456789abcdef_${"a".repeat(32)}@127.0.0.1:5433/shop`,
-    psql: psqlLine(`postgres://metabase:mason_0123456789abcdef_${"a".repeat(32)}@127.0.0.1:5433/shop`), host: "127.0.0.1", port: 5433, sslmode: "disable" });
+test("a user just added: every field the JSON carries — URL, User, Password, Database, Host, Port, SSL mode — each with a Copy that copies it, no psql line, and that it will not be shown again", async () => {
+  const password = "mason_0123456789abcdef_" + "a".repeat(32);
+  const url = `postgres://metabase:${password}@127.0.0.1:5433/shop`;
+  const html = fn<[unknown], string>("renderAdded")({ user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password,
+    database: "shop", url, psql: psqlLine(url), host: "127.0.0.1", port: 5433, sslmode: "disable" });
   const text = textOf(html);
-  // the rows mason user add prints, its psql line included, their labels capitalised; each to paste with a Copy
-  assert.match(text, /^The user metabase added: its password is shown this once Shown once URL postgres:\/\/metabase:mason_0123456789abcdef_a{32}@127\.0\.0\.1:5433\/shop Copy psql psql postgres:\/\/metabase:mason_0123456789abcdef_a{32}@127\.0\.0\.1:5433\/shop Copy User metabase Password mason_0123456789abcdef_a{32} Copy Database shop Host 127\.0\.0\.1 Port 5433 /);
-  assert.match(html, /<code id="added-psql">psql postgres:\/\/metabase:mason_0123456789abcdef_a{32}@127\.0\.0\.1:5433\/shop<\/code> <button type="button" class="small" data-copy="added-psql" data-room="Press ⌘C">Copy<\/button>/);
+  // the seven fields a tool's form asks for, in one layout: each a label and its value with a Copy (issue 839)
+  assert.match(text, /^The user metabase added: its password is shown this once Shown once URL postgres:\/\/metabase:mason_0123456789abcdef_a{32}@127\.0\.0\.1:5433\/shop Copy User metabase Copy Password mason_0123456789abcdef_a{32} Copy Database shop Copy Host 127\.0\.0\.1 Copy Port 5433 Copy SSL mode disable Copy Paste it /);
+  const fields: Array<[string, string, string]> = [["URL", "added-url", url], ["User", "added-user", "metabase"], ["Password", "added-password", password],
+    ["Database", "added-database", "shop"], ["Host", "added-host", "127.0.0.1"], ["Port", "added-port", "5433"], ["SSL mode", "added-sslmode", "disable"]];
+  for (const [label, id, value] of fields) {
+    const re = value.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+    assert.match(html, new RegExp(`<dt>${label}</dt><dd><span class="copyrow"><code id="${id}">${re}</code> <button type="button" class="small" data-copy="${id}" data-room="Press ⌘C">Copy</button></span></dd>`), `${label}: its value and a Copy, laid out as every other field`);
+  }
+  assert.deepEqual([...html.matchAll(/data-copy="([^"]+)"/g)].map((m) => m[1]), fields.map(([, id]) => id), "a Copy on every field, none else");
+  // each Copy copies its own field's text, through the page's one copyClick
+  const copyClick = fn<[Record<string, string>, { textContent: string; dataset?: Record<string, string> }, unknown], Promise<void> | null>("copyClick");
+  const codes = new Map([...html.matchAll(/<code id="([^"]+)">([^<]*)<\/code>/g)].map((m) => [m[1]!, { textContent: textOf(m[2]!) }]));
+  for (const [label, id, value] of fields) {
+    const wrote: string[] = [];
+    await copyClick({ copy: id }, { textContent: "Copy", dataset: {} }, { doc: { getElementById: (x: string) => codes.get(x) ?? null },
+      win: { setTimeout: () => {}, navigator: { clipboard: { writeText: async (t: string) => { wrote.push(t); } } } } });
+    assert.deepEqual(wrote, [value], `${label}'s Copy copies ${value}`);
+  }
+  // no psql line: the URL is the same thing, pasted after psql (mason user add --json keeps its psql field)
+  assert.doesNotMatch(text, /psql/, "no psql line, and no word of it");
+  assert.doesNotMatch(html, /added-psql/);
   // and where its statements will show
-  assert.match(text, /Run the psql line, or connect your tool: each statement it sends shows on Observability › Queries \. I have copied it$/);
+  assert.match(text, /Connect your tool: each statement it sends shows on Observability › Queries \. I have copied it$/);
   assert.match(html, /<a href="#observability\/queries">Observability › Queries<\/a>/);
   assert.match(text, /Paste it into the tool now: Mason keeps no copy of the password, and this page will not show it again\./);
-  assert.match(html, /<code id="added-password">mason_0123456789abcdef_a{32}<\/code> <button type="button" class="small" data-copy="added-password" data-room="Press ⌘C">Copy<\/button>/);
   assert.match(html, /<span class="badge warn">Shown once<\/span>/, "a clear note that it is shown once");
   assert.match(html, /<button type="button" class="primary" data-dismiss-added="">I have copied it<\/button>/);
-  assert.ok(!/ssl mode/.test(text), "disable is said by leaving it out, as mason user add does");
+  // while Mason does not run, the JSON carries no URL, host, port nor sslmode: those fields are not shown, never "undefined"
+  const bare = fn<[unknown], string>("renderAdded")({ user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password, database: "shop" });
+  assert.deepEqual([...bare.matchAll(/data-copy="([^"]+)"/g)].map((m) => m[1]), ["added-user", "added-password", "added-database"]);
+  assert.doesNotMatch(textOf(bare), /undefined|null|Host|Port|SSL mode/);
 });
 
 test("a run that stopped, or a cookie of an earlier run: a plain Failure that says what to do", () => {
@@ -3153,7 +3174,7 @@ test("Users: the add form's password is a prominent card marked shown once; the 
   const added = fn<[unknown], string>("renderAdded")({ user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password: "mason_0123456789abcdef_" + "a".repeat(32),
     database: "shop", url: "postgres://metabase@127.0.0.1:5433/shop" });
   assert.match(added, /^<div class="added" role="status"><p class="headline">The user metabase added: its password is shown this once <span class="badge warn">Shown once<\/span><\/p>/);
-  assert.equal([...added.matchAll(/data-copy="/g)].length, 2, "the URL and the password each have a Copy");
+  assert.equal([...added.matchAll(/data-copy="/g)].length, 4, "the URL, the user, the password and the database each have a Copy");
   const run = fakeRun();
   let t = Date.UTC(2026, 9, 28, 9, 0, 0);
   run.answers.set("GET api/users?lastUsed=1", answer({ users: [{ name: "old", id: "aaaaaaaaaaaaaaaa", addedAt: "2026-10-01T10:00:00.000Z", removedAt: "2026-10-02T10:00:00.000Z", live: false, lastUsedAt: null, url: null },

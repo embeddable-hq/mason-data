@@ -16,6 +16,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **`mason add <table> --sync …` works for a table added with `key:`** (one with no primary key): it changes its
   `sync:` and keeps its key, where it was refused as "cannot be added: no primary key".
 
+- **The web page's card for a user just added has a Copy on every field**: URL, User, Password, Database, Host, Port
+  and SSL mode, so each can be pasted into a BI tool's connection form one by one. The card no longer shows a psql
+  line: paste the URL after `psql`. `mason user add --json` keeps its `psql` field.
+
 - **`mason wait` now waits for a table's catch-up poll** (after its first sync, a sync of it again whole, or a change of its `sync:` to `replication`). A first sync reads the table as of its start,
   then catches it up by one poll for what changed during the read, a `sync: off` table too; on a large table that poll
   is a scan of its own. `mason wait` said Ready while it ran, so a tool started on Ready read data as of the read's
