@@ -2330,28 +2330,23 @@ test("a refusal of the statement an EXPLAIN explains is placed where Postgres pl
   } finally { await c.end(); }
 });
 
-test("the catalog names the OID the wire sends for a type the source made as the source names it, and its own OIDs as it holds them", async () => {
+test("the catalog holds a type the source made at the OID the wire sends for it: format_type, pg_type and pg_attribute name it as the source does (issue 861)", async () => {
   const c = await client();
   try {
-    // the OIDs the wire sends for an enum, its array, a citext: the source's (here the truth's), which the catalog lacks
+    // the OIDs the wire sends for an enum, its array, a citext: the source's (here the truth's)
     const r = await c.query({ text: "SELECT m, ms FROM moods LIMIT 0", rowMode: "array" });
     const a = await c.query({ text: "SELECT status FROM accounts LIMIT 0", rowMode: "array" });
     const oids = [...r.fields.map((f) => f.dataTypeID), a.fields[0]!.dataTypeID];
-    const named = async (q: (sql: string) => Promise<unknown[][]>): Promise<unknown[][]> =>
-      q(`SELECT ${oids.map((o) => `format_type(${o}, -1)`).join(", ")}, format_type(23, -1), format_type(1043, 14)`);
-    const truthNames = (await truth.query<unknown[]>(`SELECT ${oids.map((o) => `format_type(${o}, -1)`).join(", ")}, format_type(23, -1), format_type(1043, 14)`, [], { rowMode: "array" })).rows;
+    const sql = `SELECT ${oids.map((o) => `format_type(${o}, -1)`).join(", ")}, format_type(23, -1), format_type(1043, 14)`;
+    const truthNames = (await truth.query<unknown[]>(sql, [], { rowMode: "array" })).rows;
     assert.deepEqual(truthNames, [["mood", "mood[]", "citext", "integer", "character varying(10)"]]);
-    // mason_wire_type names what the wire sent; format_type too, but for an OID the catalog holds itself (both count
-    // from 16384: here the array's OID is the catalog's row type of moods), which keeps the catalog's meaning
-    assert.deepEqual((await answer(c, `SELECT ${oids.map((o) => `mason_wire_type(${o}, -1)`).join(", ")}, mason_wire_type(23, -1), mason_wire_type(1043, 14)`)).rows, truthNames);
-    const catalogHas = (await answer(c, `SELECT ${oids.map((o) => `EXISTS (SELECT FROM pg_type WHERE oid = ${o})`).join(", ")}`)).rows[0]!;
-    const formatted = (await named(async (sql) => (await answer(c, sql)).rows))[0]!;
-    oids.forEach((o, i) => {
-      if (catalogHas[i] === "f") assert.equal(formatted[i], truthNames[0]![i], `format_type(${o}): the wire's name`);
-    });
-    // the catalog's own OIDs, as pg_attribute holds them: the catalog's names
-    assert.deepEqual((await answer(c, "SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'moods'::regclass AND attnum > 0 ORDER BY attnum")).rows,
-      [["id", "integer"], ["m", "mood"], ["ms", "mood[]"]]);
+    assert.deepEqual((await answer(c, sql)).rows, truthNames, "format_type of the wire's OIDs: the source's names");
+    // a client's lookup of a RowDescription's OID (JDBC's getColumnTypeName) reads the type itself
+    assert.deepEqual((await answer(c, `SELECT oid::int, typname::text FROM pg_type WHERE oid IN (${oids.join(", ")}) ORDER BY 2`)).rows,
+      [[String(oids[1]), "_mood"], [String(oids[2]), "citext"], [String(oids[0]), "mood"]]);
+    // the catalog's own columns hold the same OIDs
+    assert.deepEqual((await answer(c, "SELECT attname, atttypid::int, format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'moods'::regclass AND attnum > 0 ORDER BY attnum")).rows,
+      [["id", "23", "integer"], ["m", String(oids[0]), "mood"], ["ms", String(oids[1]), "mood[]"]]);
   } finally { await c.end(); }
 });
 

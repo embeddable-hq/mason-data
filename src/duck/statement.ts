@@ -34,10 +34,10 @@ export interface DuckPlan {
   sql: PlannedSql;
   /** the parameters' types, Postgres's */
   params: number[];
-  /** the result's columns, Postgres's RowDescription (size from pg_type). `oid` is the WIRE's: a type the source made
-   *  (an enum, a citext) is the SOURCE's OID (src/duck/plan.ts `userTypes`), which the catalog may hold as another type;
-   *  `catalogOid` is the catalog's own OID for it, the one a query of the catalog names it by (issue 858) */
-  fields: Array<{ name: string; oid: number; catalogOid: number; typmod: number; size: number }> | null;
+  /** the result's columns, Postgres's RowDescription (size from pg_type). `oid` is the analysis's, which the wire sends
+   *  and the catalog names: a type a database made (an enum, a citext) is held in the catalog at the SOURCE's OID
+   *  (src/api/postgres/type-oids.ts, issue 861), so the two are one number */
+  fields: Array<{ name: string; oid: number; typmod: number; size: number }> | null;
   /** the statement holds a FETCH … WITH TIES (a generated table refuses one) */
   withTies: boolean;
   /** the numeric columns computed as Postgres computes them, from cells DuckDB answers after Postgres's columns */

@@ -5,8 +5,9 @@
  * time on the port and holds a deadline for it; past the deadline it TERMINATES this thread and starts another, so a
  * statement that never ends costs one instance, not the process.
  *
- * Messages in: `{ id, op: "init", statements, optional? }` (start PGlite and run the DDL; the reply names the refused
- * statement, or the optional ones refused),
+ * Messages in: `{ id, op: "init", statements, placements?, optional? }` (start PGlite, run the DDL, hold each made type
+ * at the source's OID — type-oids.ts — and run the optional statements; the reply names the refused statement, or the
+ * optional ones refused and what could not be placed),
  * `{ id, op: "raw", bytes, at? }` (frontend protocol bytes in, backend bytes out; `at`: the instant the FIRST message
  * runs at, in microseconds since the epoch, `pinnedClock`), `{ id, op: "query", sql }` (rows as
  * objects, for the server's own lookups and the tests), `{ id, op: "close" }`. Every reply carries the id:
@@ -16,9 +17,10 @@ import { parentPort } from "node:worker_threads";
 import { PGlite } from "@electric-sql/pglite";
 import { citext } from "@electric-sql/pglite/contrib/citext";
 import { instantWallMs, nowMicros } from "../../lib/instant.ts";
+import { placeTypes, type TypePlacement } from "./type-oids.ts";
 
 type Request =
-  | { id: number; op: "init"; statements: string[]; optional?: string[] }
+  | { id: number; op: "init"; statements: string[]; placements?: TypePlacement[]; optional?: string[] }
   | { id: number; op: "raw"; bytes: Uint8Array; at?: number }
   | { id: number; op: "query"; sql: string }
   | { id: number; op: "close" };
@@ -91,6 +93,11 @@ port.on("message", (m: Request) => {
               throw new Error(`the catalog DDL was refused (${errorMessage(e)}) at:\n${statement}`, { cause: e });
             }
           }
+          // each type a database made at the SOURCE's OID (type-oids.ts), before a view or a default stores a tree naming one;
+          // a placement that fails is rolled back whole and said, the catalog keeping its own OIDs (one space still)
+          let unplaced: string[] = [];
+          try { unplaced = (await placeTypes(instance, m.placements ?? [])).skipped; }
+          catch (e) { unplaced = [`none was moved: ${errorMessage(e)}`]; }
           // a statement the catalog may do without (a source's column default or view, catalog.ts `catalogDefaults`,
           // `catalogViews`): each on its own (a multi-statement one is its own implicit transaction: all or none), in
           // passes while one more stands — a view over a view stands once the other does — and the refused ones named in
@@ -107,7 +114,7 @@ port.on("message", (m: Request) => {
             left = refused.map((r) => r.statement);
           }
           db = instance;
-          port.postMessage({ id: m.id, ok: true, ...(refused.length > 0 ? { refused } : {}) });
+          port.postMessage({ id: m.id, ok: true, ...(refused.length > 0 ? { refused } : {}), ...(unplaced.length > 0 ? { unplaced } : {}) });
           return;
         }
         case "raw": {

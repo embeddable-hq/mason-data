@@ -973,13 +973,12 @@ export function uncheckedRefusal(): GeneratedRefusal {
 /**
  * EACH OUTPUT COLUMN'S TYPE, AS THE CATALOG NAMES IT: its spelling (`format_type`, the typmod kept) and, for a type a
  * user or an extension made, its kind (`e` an enum, `citext`, `d` a domain, `c` a composite; `columnProblem` reads it). The one reader of a
- * generated column's type (issue 858): asked by the field's CATALOG OID (`catalogOid`), never its wire OID, which for a
- * made type is the SOURCE's and in the catalog may be another type (another table's row type, read as `daily`).
- * `pg_catalog.format_type`, written out, is Postgres's own, never the catalog's override of an unknown OID.
+ * generated column's type (issue 858), by the field's OID, which the catalog holds as that very type: a made type's is
+ * the SOURCE's there too (src/api/postgres/type-oids.ts, issue 861), never another table's row type (read as `daily`).
  */
 async function columnTypes(rows: Planner["rows"], fields: NonNullable<DuckPlan["fields"]>): Promise<{ typeNames: Map<number, string>; kinds: Map<number, string> }> {
   if (fields.length === 0) return { typeNames: new Map(), kinds: new Map() };
-  const values = fields.map((f, i) => `(${i}, ${Math.trunc(f.catalogOid)}::oid, ${Math.trunc(f.typmod)})`).join(", ");
+  const values = fields.map((f, i) => `(${i}, ${Math.trunc(f.oid)}::oid, ${Math.trunc(f.typmod)})`).join(", ");
   const typeNames = new Map<number, string>(), kinds = new Map<number, string>();
   for (const [i, name, kind] of await rows(`SELECT v.i::text, pg_catalog.format_type(v.oid, v.typmod), ` +
     `CASE WHEN t.typname = 'citext' AND t.typtype = 'b' THEN 'citext' ELSE t.typtype::text END ` +

@@ -39,6 +39,7 @@ import { NO_ROLE_CATALOG, type RoleGrants } from "../../duck/grants.ts";
 import { renderWhere, tableSql } from "../../duck/row-filter.ts";
 import { cstr, frame, splitFrames } from "./protocol.ts";
 import { HELD_ROW_INPUT, HELD_TYPE_INPUT, madeTypeName, PG_API_TYPE_SPELLING, typeNameParts, type PgJoin, type PgSchema, type PgTable } from "./schema.ts";
+import { typePlacements } from "./type-oids.ts";
 
 /** Ten minutes: long enough to outlive a tool's startup burst and a person's pause between two queries. */
 const DEFAULT_IDLE_MS = 10 * 60_000;
@@ -186,7 +187,7 @@ export function catalogDdl(schema: PgSchema): string[] {
       if (parts.length > 0) statements.push(`COMMENT ON COLUMN ${qualified(table)}.${ident(c.name)} IS ${literal(parts.join("; "))};`);
     }
   }
-  return [...statements, ...constraints, ...sourceTypeNames(schema)];
+  return [...statements, ...constraints];
 }
 
 /**
@@ -217,44 +218,6 @@ FROM json_to_recordset(${literal(JSON.stringify(rows))}) AS c(schema text, name 
 JOIN pg_catalog.pg_namespace n ON n.nspname = c.schema
 WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_collation x WHERE x.collnamespace = n.oid AND x.collname = c.name AND x.collencoding IN (-1, 6));`);
   return out;
-}
-
-/**
- * THE NAME OF A TYPE BY THE OID THE WIRE SENDS FOR IT. A column of a type the source made (an enum, a citext) is
- * sent with the SOURCE's OID (src/duck/plan.ts `userTypes`: what the source's own clients cached), which in this
- * catalog means another type or none (both count from 16384): `format_type(<that oid>, …)` answered `???`, or another
- * table's row type. Two readers ask by two OID spaces, and one OID can be in both:
- *   - `public.mason_wire_type(oid, integer)` names an OID the WIRE sent: a source OID as its type here, every other as
- *     Postgres does. `mason mcp` names a RowDescription's columns by it; this map is the one place a wire OID is named;
- *   - the catalog's `format_type(oid, integer)` — the `version()` override's way, search_path listing pg_catalog after
- *     public — keeps the catalog's meaning for an OID the catalog has (a reader of pg_attribute.atttypid asks by those)
- *     and names any other by the wire's map. `pg_catalog.format_type`, written out, is Postgres's own.
- */
-export function sourceTypeNames(schema: PgSchema): string[] {
-  const names = new Map<number, string>();
-  for (const t of schema.tables) {
-    if (t.rowTypeOid !== undefined) names.set(t.rowTypeOid, qualified(t));
-    for (const c of t.columns) {
-      if (c.typeOid === undefined || c.spelled === undefined) continue;
-      // an array column's own OID is its array type's; an element's array type is the element's spelling with []
-      const spelled = c.made !== undefined ? `${madeTypeName(c.spelled)}${c.spelled.endsWith("[]") ? "[]" : ""}` : c.spelled;
-      names.set(c.typeOid, spelled);
-      if (c.typeArrayOid !== undefined && !spelled.endsWith("[]")) names.set(c.typeArrayOid, `${spelled}[]`);
-    }
-  }
-  // with no type the source made, every OID the wire sends is Postgres's: the wire's name is format_type's
-  // (format_type is declared all the same: a catalog statement's every unqualified call of it is spliced to this one,
-  // server.ts userSpliced, since the session's search_path puts pg_catalog first)
-  if (names.size === 0) {
-    return [`CREATE OR REPLACE FUNCTION public.mason_wire_type(oid, integer) RETURNS text LANGUAGE sql STABLE AS $$ SELECT pg_catalog.format_type($1, $2) $$;`,
-      `CREATE OR REPLACE FUNCTION public.format_type(oid, integer) RETURNS text LANGUAGE sql STABLE AS $$ SELECT pg_catalog.format_type($1, $2) $$;`];
-  }
-  const values = [...names].map(([oid, spelled]) => `(${oid}::oid, ${literal(spelled)})`).join(", ");
-  return [`CREATE OR REPLACE FUNCTION public.mason_wire_type(oid, integer) RETURNS text LANGUAGE sql STABLE AS $$
-  SELECT coalesce((SELECT pg_catalog.format_type(pg_catalog.to_regtype(v.spelled), $2) FROM (VALUES ${values}) AS v(source, spelled) WHERE v.source = $1),
-    pg_catalog.format_type($1, $2)) $$;`,
-  `CREATE OR REPLACE FUNCTION public.format_type(oid, integer) RETURNS text LANGUAGE sql STABLE AS $$
-  SELECT CASE WHEN EXISTS (SELECT FROM pg_catalog.pg_type t WHERE t.oid = $1) THEN pg_catalog.format_type($1, $2) ELSE public.mason_wire_type($1, $2) END $$;`];
 }
 
 /**
@@ -517,8 +480,8 @@ export function currentSettingSql(): string[] {
  * now(), the clock keywords, a relative word however it reaches a date or time — reads the session's (GitHub issue
  * 253, review r3 of PR 333). The ROLLBACK undoes anything the request set, whether it succeeded or failed.
  * `state` and `settings` are the listener's (`sessionState`, `sessionSetting`), never read here. The search_path is the
- * session's as written, pg_catalog first unless it lists it, as on Postgres: the overrides of `version()`,
- * `current_setting` and `format_type` are reached by the splice of every call of them (server.ts userSpliced), never by
+ * session's as written, pg_catalog first unless it lists it, as on Postgres: the overrides of `version()` and
+ * `current_setting` are reached by the splice of every call of them (server.ts userSpliced), never by
  * the order of the path.
  */
 export function asSession(message: Uint8Array, state: SessionState, settings: ReadonlyMap<string, string>): Uint8Array {
@@ -576,7 +539,7 @@ export function leftOutLine(r: { statement: string; message: string }): string {
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-type Reply = { id: number; ok: true; bytes?: Uint8Array; rows?: Record<string, unknown>[]; refused?: Array<{ statement: string; message: string }> } | { id: number; ok: false; message: string };
+type Reply = { id: number; ok: true; bytes?: Uint8Array; rows?: Record<string, unknown>[]; refused?: Array<{ statement: string; message: string }>; unplaced?: string[] } | { id: number; ok: false; message: string };
 
 /** One worker thread holding one PGlite: requests one at a time (PgCatalog's chain), each with a deadline. */
 class CatalogWorker {
@@ -756,7 +719,15 @@ export class PgCatalog {
     const db = new CatalogWorker();
     try {
       const started = await this.#ask(db, { op: "init", statements: [CATALOG_BASE_SQL, ...catalogDdl(schema), ...catalogRoles(schema, roles), ...this.#setup],
-        optional: [...catalogDefaults(schema), ...catalogViews(schema, roles), ...this.#policies] }, "its start");
+        placements: typePlacements(schema), optional: [...catalogDefaults(schema), ...catalogViews(schema, roles), ...this.#policies] }, "its start");
+      // a type a database made that the catalog could not hold at the source's OID (type-oids.ts): the wire then sends
+      // the catalog's own OID for it, which pg_type names alike, but not the source's. One line, once per schema
+      for (const u of started.unplaced ?? []) {
+        const line = `catalog: a type the source made keeps the catalog's own OID, not the source's: ${u}`;
+        if (this.#said.has(line)) continue;
+        this.#said.add(line);
+        this.#log(line);
+      }
       // each left-out default or view: one line, once per schema (the instance starts again after every idle stop)
       for (const r of started.refused ?? []) {
         const line = leftOutLine(r);

@@ -538,7 +538,6 @@ class McpServer {
     }
     const { schema, name, kind } = found;
     const rel = `${pgLiteral(qualifiedName(found))}::regclass`;
-    // pg_catalog.format_type, written out: these are the catalog's own OIDs (mason_wire_type names the wire's)
     const columns = await pg.query(`SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), a.attnotnull, pg_catalog.col_description(a.attrelid, a.attnum)
       FROM pg_catalog.pg_attribute a WHERE a.attrelid = ${rel} AND a.attnum > 0 AND NOT a.attisdropped
         AND pg_catalog.has_column_privilege(a.attrelid, a.attnum, 'SELECT') ORDER BY a.attnum`);
@@ -577,15 +576,14 @@ class McpServer {
 
   /**
    * The answer's columns with their Postgres types: the RowDescription's OID and modifier named by the listener's
-   * catalog, whose `mason_wire_type` names the OID the wire sends for a type the source made (an enum, a citext) —
-   * src/api/postgres/catalog.ts `sourceTypeNames`, the one place a wire OID is named; format_type would give an OID the
-   * catalog holds too its catalog meaning. Asked again each call: the catalog is rebuilt when the copied tables change.
+   * catalog, which holds a type the source made (an enum, a citext) at the OID the wire sends for it
+   * (src/api/postgres/type-oids.ts). Asked again each call: the catalog is rebuilt when the copied tables change.
    */
   private async columns(pg: PgConnection, r: ExtendedResult): Promise<Array<{ name: string; type: string }>> {
     if (r.fields.length === 0) return [];
     const k = (f: { typeOid: number; typmod: number }): string => `${f.typeOid}:${f.typmod}`;
     const distinct = [...new Map(r.fields.map((f) => [k(f), f])).values()];
-    const names = await pg.query(`SELECT ${distinct.map((f) => `mason_wire_type(${f.typeOid}, ${f.typmod})`).join(", ")}`);
+    const names = await pg.query(`SELECT ${distinct.map((f) => `pg_catalog.format_type(${f.typeOid}, ${f.typmod})`).join(", ")}`);
     const named = new Map(distinct.map((f, i) => [k(f), names.rows[0]?.[i] ?? String(f.typeOid)]));
     return r.fields.map((f) => ({ name: f.name, type: named.get(k(f))! }));
   }
