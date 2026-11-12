@@ -239,19 +239,24 @@ test("mason start says the file's sync once — and LOUDLY when an upgrade stops
     "sync: replication (f): every table without a sync: of its own is kept current from the database's change log");
 });
 
-test("what the record names and this start no longer reads is dropped before the record names the new one: a renamed slot with Mason's own publication, Mason's own publication alone once another is named", async () => {
+test("what the record names and this start no longer reads is dropped before the record names the new one: a renamed slot with Mason's own publication, the slot (and Mason's own publication) once another publication is read", async () => {
   const R = await import("../src/cli/replication-mode.ts" as string) as Partial<typeof import("../src/cli/replication-mode.ts")>;
   assert.equal(typeof R.staleReplication, "function", "src/cli/replication-mode.ts exports staleReplication");
   const stale = R.staleReplication!;
   const own = { slot: "mason_dev_shop_app", publication: "mason_dev_shop_app", owned: true };
   const named = { slot: "mason_dev_shop_app", publication: "owners_pub", owned: false };
-  // a review finding: own → named on the same slot left mason_dev_shop_app on the database, after mason destroy too
-  assert.deepEqual(stale(own, named), { drop: own, what: "publication", why: "the replicated tables are read through publication owners_pub now, its owner's" });
+  const other = { slot: "mason_dev_shop_app", publication: "other_pub", owned: false };
+  const price = "A slot that read another publication can miss a transaction open across the switch, so the slot is made anew and each of those tables is caught up by one poll: one full read of it on the database";
+  // issue 893: a switch of publication on the same slot, in every direction, makes the slot anew (with Mason's own
+  // publication, when that was the one read: a review finding, it was left on the database after mason destroy too)
+  assert.deepEqual(stale(own, named), { drop: own, why: `the tables whose sync is replication are read through publication owners_pub now (its owner's), not mason_dev_shop_app. ${price}` });
+  assert.deepEqual(stale(named, own), { drop: named, why: `the tables whose sync is replication are read through publication mason_dev_shop_app now (Mason's own), not owners_pub. ${price}` });
+  assert.deepEqual(stale(named, other), { drop: named, why: `the tables whose sync is replication are read through publication other_pub now (its owner's), not owners_pub. ${price}` });
   // the slot renamed (the sources file renamed): both go
-  assert.deepEqual(stale({ ...own, slot: "mason_dev_shop_old" }, own), { drop: { ...own, slot: "mason_dev_shop_old" }, what: "both", why: "this source's slot is mason_dev_shop_app now" });
-  // named → own, the same named one, the same own one, nothing recorded: nothing of Mason's to drop
-  assert.equal(stale(named, own), null, "a named one is its owner's: never dropped");
+  assert.deepEqual(stale({ ...own, slot: "mason_dev_shop_old" }, own), { drop: { ...own, slot: "mason_dev_shop_old" }, why: "this source's slot is mason_dev_shop_app now" });
+  // the same publication read on (by name, whoever owns it), nothing recorded: nothing to drop
   assert.equal(stale(named, named), null);
   assert.equal(stale(own, own), null);
+  assert.equal(stale(own, { ...own, owned: false }), null, "Mason's own named as such is the publication the slot read: never dropped from under it");
   assert.equal(stale(null, own), null);
 });

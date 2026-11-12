@@ -5,7 +5,8 @@
  * DuckDB's `<schema>.<table>` must equal the source after every kind of change an app makes, as the stream brings it: an
  * insert, an update, a delete, a primary-key change, an UPDATE that leaves a large (TOASTed) value unchanged, a savepoint,
  * a transaction open while others commit, a TRUNCATE, a restart (the slot resumes; nothing is copied again), a table
- * added while streaming, and a project that polled before (caught up by one poll, never copied again). Every type of
+ * added while streaming, a project that polled before (caught up by one poll, never copied again), and a switch of
+ * publication with a transaction open across it (a slot made anew, caught up by one poll). Every type of
  * the copy arrives through the stream as the copy stores it: a table of them streamed is held equal, value for value,
  * to a fresh copy of it. A numeric wider than its synced DECIMAL column copies the table again, wider.
  *
@@ -439,6 +440,94 @@ test("a NAMED publication is read as it is, never altered: a table it lacks is r
   assert.deepEqual(await dropOwnReplication(parsed.source, repl), [`replication slot ${repl.slot}`]);
   assert.equal(psql(url, `SELECT count(*) FROM pg_replication_slots WHERE slot_name = '${repl.slot}'`), "0");
   assert.equal(definition(), defined, "the publication is left as it was");
+});
+
+// ISSUE 893: a start that reads another publication than the run before it (Mason's own → a named one, a named one →
+// Mason's own, one named → another) on the SAME slot resumed from the slot's acknowledged position with the new
+// publication. A transaction open while that publication was created, committed after, was decoded through a catalog
+// that had no such publication: Postgres 18's pgoutput skipped its changes with only a WARNING (rows lost silently), and
+// Postgres 16's failed the stream, which never advanced. Each switch below is made exactly so — the start's own step
+// (`staleReplication`, `dropOwnReplication`, src/cli/dev.ts) between the two runs — and the rows must arrive.
+test("a switch of publication on a running project, with a transaction open across it, loses no row and the stream goes on: the slot is made anew and the tables caught up by one poll", { skip }, async () => {
+  const db = `${tag}_ps`, url = urlOf(db);
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  psql(url, "CREATE TABLE items (id int PRIMARY KEY, v text); INSERT INTO items SELECT g, 'v' || g FROM generate_series(1, 20) g");
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const [ITEMS] = await tablesOf(parsed.source, ["public.items"]);
+  const { dropOwnReplication, staleReplication } = await import("../../src/cli/replication-mode.ts");
+  const slot = `${tag}_ps`;
+  const own = { slot, publication: `${tag}_ps_own`, owned: true };
+  const named1 = { slot, publication: `${tag}_ps_app`, owned: false };
+  const named2 = { slot, publication: `${tag}_ps_other`, owned: false };
+  const logged: string[] = [];
+  const file = path.join(dir, "ps.db");
+  const items = (): string => psql(url, "SELECT id, v FROM items ORDER BY 1");
+  let next = 100;
+  const run = async (repl: typeof own, step: string, during?: () => Promise<void>): Promise<void> => {
+    const store = await DuckStore.open(file, (l) => logged.push(l));
+    const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", repl);
+    const before = logged.length;
+    try {
+      await sync.open();
+      sync.setTables([ITEMS!]);
+      const pass = sync.once();
+      if (during) await during();
+      await pass;
+      await sync.caughtUp(20_000).catch((e: unknown) => { throw new Error(`${step}: ${(e as Error).message}\n${logged.slice(before).join("\n")}`); });
+      assert.equal(await rowsOf(store, "SELECT id, v FROM public.items ORDER BY 1"), items(), `items after ${step}\n${logged.slice(before).join("\n")}`);
+      // and the stream goes on past it
+      const said = step.replace(/'/g, "''");
+      psql(url, `INSERT INTO items VALUES (${next++}, 'after ${said}'); UPDATE items SET v = 'moved by ${said}' WHERE id = 1`);
+      await sync.caughtUp(20_000);
+      assert.equal(await rowsOf(store, "SELECT id, v FROM public.items ORDER BY 1"), items(), `items streamed after ${step}\n${logged.slice(before).join("\n")}`);
+      if (during) {
+        const lines = logged.slice(before);
+        assert.ok(!lines.some((l) => /^synced /.test(l)), `not copied again at ${step}:\n${lines.join("\n")}`);
+        // the slot is made anew under the new publication, and the table caught up by one poll before it streams
+        assert.ok(lines.some((l) => l.startsWith(`made replication slot ${repl.slot} at `)), `the slot is made anew at ${step}:\n${lines.join("\n")}`);
+        assert.ok(lines.some((l) => /^caught up public\.items by one poll after the slot was made: it joins the stream at /.test(l)), `caught up by one poll at ${step}:\n${lines.join("\n")}`);
+      }
+    } finally { await sync.stop(); await store.close(); }
+  };
+  /** the switch from `was` to `now`, as a start makes it: a write transaction is open while the new publication is made
+   *  (by its owner, or by Mason's run for its own) and commits once the run reading it is up */
+  const switchTo = async (was: typeof own, now: typeof own, create: string | null, step: string): Promise<void> => {
+    const open = spawn("psql", ["-X", "-q", "-v", "ON_ERROR_STOP=1", url], { stdio: ["pipe", "ignore", "pipe"] });
+    after(() => { if (open.exitCode === null) open.kill(); });
+    let err = "";
+    open.stderr.on("data", (d: Buffer) => { err += d.toString(); });
+    const exited = new Promise<void>((resolve, reject) => open.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`psql exited ${code}: ${err}`))));
+    const a = next++, b = next++;
+    const said = step.replace(/'/g, "''");
+    open.stdin.write(`BEGIN; INSERT INTO items VALUES (${a}, 'open across ${said}'); UPDATE items SET v = 'updated across ${said}' WHERE id = 2; DELETE FROM items WHERE id = ${10 + a % 7}; SELECT pg_sleep(0);\n`);
+    // its changes are written (and its xid taken) before the publication exists
+    for (const until = Date.now() + 10_000; psql(url, `SELECT count(*) FROM pg_stat_activity WHERE datname = '${db}' AND backend_xid IS NOT NULL AND state = 'idle in transaction'`) === "0";) {
+      if (Date.now() > until) throw new Error(`the open transaction never took its xid: ${psql(url, `SELECT string_agg(state || ' ' || coalesce(backend_xid::text, '-') || ' ' || query, '; ') FROM pg_stat_activity WHERE datname = '${db}'`)}; psql said ${err}`);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    if (create !== null) psql(url, create);
+    // THE START'S STEP (src/cli/dev.ts): what the record names and this start no longer reads goes, verified. Before
+    // issue 893 the start passed a `what` beside it (Mason's own publication alone, the slot kept): handed on when there
+    // is one, so this test runs the start of either
+    const stale = staleReplication(was, now);
+    const drop = dropOwnReplication as (...a: unknown[]) => Promise<string[]>;
+    if (stale !== null) await drop(parsed.source, stale.drop, null, (stale as { what?: unknown }).what);
+    await run(now, step, async () => {
+      // the run is up and reading (or waiting on the slot it makes for the transaction to end): the transaction commits
+      await new Promise((r) => setTimeout(r, 1_500));
+      open.stdin.end(`INSERT INTO items VALUES (${b}, 'last of ${said}'); COMMIT;\n`);
+      await exited;
+    });
+  };
+  await run(own, "the first sync");
+  await switchTo(own, named1, `CREATE PUBLICATION ${named1.publication} FOR TABLE items`, "Mason's own → a named one");
+  assert.equal(psql(url, `SELECT count(*) FROM pg_publication WHERE pubname = '${own.publication}'`), "0", "Mason's own publication is dropped with the switch");
+  await switchTo(named1, named2, `CREATE PUBLICATION ${named2.publication} FOR TABLE items`, "a named one → another");
+  await switchTo(named2, own, null, "a named one → Mason's own");
+  // the named ones are their owner's: never dropped
+  assert.equal(psql(url, `SELECT string_agg(pubname, ',' ORDER BY pubname) FROM pg_publication`), [named1.publication, own.publication, named2.publication].sort().join(","));
+  assert.equal(psql(url, `SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE '${tag}_ps%'`), "1", "one slot, the run's: the one before is gone");
 });
 
 test("a named publication that cannot carry the copy is refused in the developer's words with the way out: a narrower column list, no delete, a typo", { skip }, async () => {

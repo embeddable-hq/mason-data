@@ -127,8 +127,12 @@ paths:
   object Mason creates). Named by `publication:` at the top of the sources file (`${PG_PUBLICATION}` allowed, read by
   `readSource`), else `PG_PUBLICATION` (`namedPublication`) — never the one a
   start recorded, read silently: a replicating file that names none over a recorded one is refused before anything is
-  made (`recordRefusal`), and the literal `publication: null` asks for Mason's own on purpose (refused beside a set `PG_PUBLICATION`); Mason's own one left behind by a switch to a
-  named one is dropped, verified gone, before the record moves (`staleReplication`); verified by the ClickHouse reader's own `checkPublication` (src/duck/publication.ts), never a
+  made (`recordRefusal`), and the literal `publication: null` asks for Mason's own on purpose (refused beside a set `PG_PUBLICATION`); **a start that
+  reads another publication than the record (Mason's own → named, named → own, named → named) drops the SLOT, verified
+  gone, with Mason's own publication when that was the one read, before the record moves (`staleReplication`; issue
+  893: a slot resumed under a new publication decodes a transaction open across its creation without it — Postgres 18
+  skips its changes with a WARNING alone, 16 fails the stream for good)**: the run makes the slot anew and catches each
+  replicated table up by one poll, a full read of it, said at the start with that price; verified by the ClickHouse reader's own `checkPublication` (src/duck/publication.ts), never a
   second verifier. A gap in one table refuses that table alone, the others stream on; the way out is the found
   publication plus the gap as `ALTER PUBLICATION … ADD TABLE …`. On a standby a named one is required, refused before
   any slot is made. ("Logical replication")

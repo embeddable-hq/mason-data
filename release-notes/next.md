@@ -16,6 +16,18 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **Changing the publication a project replicates through no longer loses or freezes changes.** When the sources
+  file's `publication:` (or `PG_PUBLICATION`) changed between two starts — from Mason's own to one you named, from one
+  you named back to Mason's own, or from one named publication to another — Mason kept reading its replication slot
+  with the new publication. A write transaction that was open while the new publication was created, and committed
+  after, was then skipped: on Postgres 18 its rows never reached the synced tables, with only a warning in the
+  database's log; on Postgres 16 the stream stopped and never moved again, holding the database's WAL. Now such a
+  start drops the slot (and Mason's own publication, when that was the one read), verified gone, makes a new one, and
+  catches each table whose sync is `replication` up by one poll. That poll is one full read of each of those tables on
+  your database, once: `mason start` says so when it makes the switch. If you switched publication with an earlier
+  Mason while your application was writing, a replicated table may be missing those changes: `mason remove <table>`
+  then `mason add <table> --sync replication` syncs it whole again.
+
 - **A BI tool names a column of an enum, a citext or a composite as its type.** Mason sent such a column with the
   source database's number for its type, which Mason's own catalog could hold as another type, often a synced table's
   row type. So a tool that looks the number up (Metabase, DBeaver and Tableau through JDBC, .NET and asyncpg clients)
