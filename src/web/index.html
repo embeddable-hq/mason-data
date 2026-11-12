@@ -43,7 +43,7 @@
     <!-- each label in a field with its control, as the request filters are: on a phone a field is a row, never a label left at a line's end -->
     <div class="toolbar">
       <div class="field grow"><label for="tables-filter">Search the tables</label>
-        <input type="search" id="tables-filter" autocomplete="off" spellcheck="false" placeholder="orders"></div>
+        <input type="search" id="tables-filter" autocomplete="off" spellcheck="false" placeholder="e.g. orders"></div>
       <div class="field"><label for="tables-show">Show</label>
         <select id="tables-show"><option value="all">All</option><option value="added">Added</option><option value="failed">Failed</option><option value="not-added">Not added</option></select></div>
     </div>
@@ -57,13 +57,13 @@
       <div class="field"><label for="rq-status">Status</label>
         <select id="rq-status" name="status"><option value="">All</option><option value="completed">Completed</option><option value="refused">Refused</option><option value="failed">Failed</option><option value="refused-or-failed">Refused or failed</option><option value="cancelled">Cancelled</option></select></div>
       <div class="field"><label for="rq-since">Since</label>
-        <input id="rq-since" name="since" placeholder="2h" spellcheck="false"></div>
+        <input id="rq-since" name="since" placeholder="e.g. 2h" spellcheck="false"></div>
       <div class="field"><label for="rq-user">User</label>
         <input id="rq-user" name="user" spellcheck="false"></div>
       <div class="field"><label for="rq-client">Client</label>
         <input id="rq-client" name="client" spellcheck="false"></div>
       <div class="field grow"><label for="rq-search">Statement has</label>
-        <input id="rq-search" name="search" type="search" maxlength="200" spellcheck="false" placeholder="orders"></div>
+        <input id="rq-search" name="search" type="search" maxlength="200" spellcheck="false" placeholder="e.g. orders"></div>
       <label class="check" for="rq-slow"><input type="checkbox" id="rq-slow" name="slow"> Slow (1 s or more)</label>
       <div class="actions"><button type="submit" class="primary">Filter</button>
         <button type="button" data-clear-filters>Clear</button></div>
