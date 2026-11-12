@@ -1,6 +1,6 @@
 /**
  * THE SYNCED DATA'S BYTES ON DISK, read by this one function (`mason status`'s Synced data line and `engine.bytes`, the
- * web page's file card, the usage samples' `copyBytes`, `mason_copy_bytes`, and the first sync's disk projection): the
+ * web page's file card, the usage samples' `copyBytes`, `mason_synced_bytes`, and the first sync's disk projection): the
  * DuckDB file AND its write-ahead log. What a sync writes lands in the log until a checkpoint, and DuckDB checkpoints by
  * itself only once the log passes 16 MiB, so a run whose tables are small can hold all its rows there: the file read
  * 12 KiB beside a log of 1.3 MB (issue 815). A light module: the CLI reads it with Mason stopped, without the engine.

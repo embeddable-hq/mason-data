@@ -1,5 +1,19 @@
 The next release's notes, gathered here until its `v<version>.md` is written: a `v*.md` file is itself the release.
 
+## Before you upgrade
+
+- **`GET /metrics` names two metrics and the table phases in sync's words; change your dashboards and alerts.**
+  `mason_copy_bytes` is now `mason_synced_bytes` and `mason_copy_rows` is now `mason_synced_rows`; `mason_tables`'
+  `phase` label says `synced` where it said `copied` and `syncing` where it said `copying` (`waiting` and `failed` are
+  unchanged). A query or alert on an old name finds no series after the upgrade, so it reads as absent, not as zero:
+  rename it in the same step. `/healthz`'s `tables` counts keep their keys.
+- **The Helm chart's `memory.copy` is now `memory.engine`.** Rename it in your values file before `helm upgrade`:
+  a values file that still sets `memory.copy` fails to render, naming `memory.engine`, and nothing is installed (it is
+  never run with the default in its place).
+- **EXPLAIN (FORMAT JSON)'s `Kept Current By` says `syncing again in full` where it said `copying again`**, for a table
+  read again whole at its interval; `mason mcp`'s `kept_current_by` says the same. A tool that matched the old words
+  matches the new ones.
+
 ## What changes
 
 - **The web page no longer shows a psql line**: the Users page's Connect card keeps Host, Port, Database, SSL mode and

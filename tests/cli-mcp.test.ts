@@ -86,6 +86,9 @@ const copies = (): CopyState[] => [
   { source: "public.customers", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-29T09:00:00.000Z", error: null,
     kept: { by: "poll", sync: { mode: "off" }, syncedAt: THREE_DAYS_AGO, nextAt: null } },
   polled("sales.items"), polled("public.Clients"), polled("public.x; y"),
+  // read again whole at its interval: `kept_current_by` in the user's word (issue 903)
+  { source: "public.moods", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-29T09:00:00.000Z", error: null,
+    kept: { by: "recopy", copiedAt: "2026-10-29T09:00:00.000Z", syncedAt: null } },
 ];
 const POLLED = `polled every 5s, last 2 h ago (${utc(TWO_HOURS_AGO)})`;
 /** a polled copy's facts as the tools say them: its kept line, what keeps it current, its sync and when it was last synced */
@@ -306,7 +309,7 @@ test("tables and describe: the catalog's tables named as a statement writes them
         sync: "off", last_synced: THREE_DAYS_AGO },
       "public.events": { kind: "table", rows_about: 150_000, kept: "how it is kept current is unknown: the sync has no record of it", kept_current_by: null },
       "public.orders": { kind: "table", rows_about: 5, ...POLLED_FACTS },
-      "public.moods": { kind: "table", rows_about: 3, kept: "how it is kept current is unknown: the sync has no record of it", kept_current_by: null },
+      "public.moods": { kind: "table", rows_about: 3, kept: "kept current by reading it again whole, last synced 2026-10-29 09:00:00 UTC", kept_current_by: "syncing again in full" },
       // a name that needs quotes is named with them, and its copy is found by it
       'public."Clients"': { kind: "table", rows_about: 1, ...POLLED_FACTS },
       'public."x; y"': { kind: "table", rows_about: 1, ...POLLED_FACTS },

@@ -273,7 +273,7 @@ test("GET /metrics on the health port: 200 in Prometheus's text format while it 
     const ready = await get("/metrics");
     assert.deepEqual([ready.status, ready.type], [200, TYPE]);
     assert.match(ready.body, /^mason_ready 1$/m);
-    assert.match(ready.body, /^mason_tables\{phase="copying"\} 1$/m);
+    assert.match(ready.body, /^mason_tables\{phase="syncing"\} 1$/m);
     assert.match(ready.body, /^mason_statements_total\{outcome="completed"\} 5$/m);
     const up = Number(/^mason_uptime_seconds (\d+)$/m.exec(ready.body)?.[1]);
     const healthy = await get("/healthz");

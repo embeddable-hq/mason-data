@@ -85,8 +85,11 @@ function metric(name: string, kind: Kind, help: string, samples: readonly Sample
   }
   return lines;
 }
-/** The PHASES `mason_tables` says, in order: the sync's (src/duck/sync.ts `CopyState.phase`), as `/healthz` counts them. */
-export const TABLE_PHASES = ["copied", "copying", "waiting", "failed"] as const;
+/** The PHASES `mason_tables` says, in order: each the label value, then the count it reads — the sync's
+ *  (src/duck/sync.ts `CopyState.phase`), as `/healthz` counts them (`PhaseCounts`, whose keys keep the code's word) —
+ *  said in the user's words (CLAUDE.md "Vocabulary"). The phase of a table's FIRST sync: `synced` once it ended, whatever
+ *  its poll or stream did since (that is `tables[].sync.state`'s to say, where `synced` means kept current too). */
+export const TABLE_PHASES = [["synced", "copied"], ["syncing", "copying"], ["waiting", "waiting"], ["failed", "failed"]] as const;
 /** The OUTCOMES `mason_statements_total` says: the request log's (`outcomeOf`), `ok` said as `completed`. */
 export const STATEMENT_OUTCOMES = ["completed", "failed", "refused", "cancelled"] as const;
 
@@ -106,10 +109,10 @@ export function metricsText(f: MetricsFacts): string {
     const fresh = (value: number | null, readAt: string | null): number | null => readAt !== null && isFresh(r, readAt) ? value : null;
     lines.push(
       ...metric("mason_uptime_seconds", "gauge", "Seconds since mason serve started.", [{ value: r.uptimeSeconds }]),
-      ...metric("mason_tables", "gauge", "The synced tables the run holds, by phase (a removed table's data is held until dropped).",
-        TABLE_PHASES.map((phase) => ({ labels: { phase }, value: u.tables[phase] }))),
-      ...metric("mason_copy_bytes", "gauge", "The size of the synced data's file and its write-ahead log on disk, bytes.", [{ value: u.copyBytes }]),
-      ...metric("mason_copy_rows", "gauge", "The rows of the synced tables served.", [{ value: u.totals.rows }]),
+      ...metric("mason_tables", "gauge", "The synced tables the run holds, by the phase of their first sync: synced, syncing, waiting or failed (a removed table's data is held until dropped).",
+        TABLE_PHASES.map(([phase, counted]) => ({ labels: { phase }, value: u.tables[counted] }))),
+      ...metric("mason_synced_bytes", "gauge", "The size of the synced data's file and its write-ahead log on disk, bytes.", [{ value: u.copyBytes }]),
+      ...metric("mason_synced_rows", "gauge", "The rows of the synced tables served.", [{ value: u.totals.rows }]),
       // absent, not NaN, before any added table was synced: nothing has an age yet (see the module's comment)
       ...metric("mason_sync_oldest_age_seconds", "gauge", "Seconds since the stalest added table was last brought current; absent before any sync.",
         [{ value: u.oldestSyncSeconds }]),

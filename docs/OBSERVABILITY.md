@@ -232,8 +232,8 @@ service token, and TLS off loopback. Not designed yet: options A and B, for the 
 
 **C is built (2026-10-30)**: `GET /metrics` on the health port (`MASON_HEALTH_PORT`, beside `/healthz`), Prometheus's
 text format 0.0.4, no credential (src/cli/metrics.ts; deploy/mason-data/README.md "Metrics" has the scrape config). It
-serves numbers only — `mason_ready`, `mason_info{version}`, `mason_uptime_seconds`, `mason_tables{phase}`,
-`mason_copy_bytes`, `mason_copy_rows`, `mason_sync_oldest_age_seconds`, `mason_stream_lag_bytes` /
+serves numbers only — `mason_ready`, `mason_info{version}`, `mason_uptime_seconds`, `mason_tables{phase}` (the phase of
+each table's first sync: `synced`, `syncing`, `waiting` or `failed`), `mason_synced_bytes`, `mason_synced_rows`, `mason_sync_oldest_age_seconds`, `mason_stream_lag_bytes` /
 `_seconds`, `mason_slot_wal_held_bytes`, `mason_disk_free_bytes`, `mason_sessions_open`,
 `mason_statements_total{outcome}` (a counter since the process started) and `mason_statement_duration_seconds` (a
 summary: the last minute's sample's p50 / p95, the sum and count since the start) — each the number `/api/state` or a
