@@ -108,11 +108,10 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   own, src/duck/functions.ts) all reach. Detector: tests/duck-generated-round5.test.ts "round 5: a run's failure is
   Postgres's error" and tests/duck-generated-round6.test.ts "round 6: a numeric field overflow says Postgres's DETAIL
   on every path".
-- **A column's type is named and judged by the CATALOG's OID for it, by ONE reader** (`columnTypes`, over the field's
-  `catalogOid`, src/duck/plan.ts), never the field's wire `oid`, which for a made type is the SOURCE's (and an oid is a
-  string in Postgres's JSON: a number from the entrance, `readSourceFacts`): the two count from 16384 alike, so a
-  source's citext OID was a synced table's row type in the catalog, and the column was declared as that composite
-  (issue 858). `dropLast` is refused. A domain and a composite stay refused by name. Detector:
+- **A column's type is named and judged by the catalog, by ONE reader** (`columnTypes`, over the field's `oid`, the
+  catalog's own, which the wire sends too: issue 861), never the SOURCE's OID (an oid is a string in Postgres's JSON: a
+  number from the entrance, `readSourceFacts`): the two count from 16384 alike, so a source's citext OID was a synced
+  table's row type in the catalog, and the column was declared as that composite (issue 858). `dropLast` is refused. A domain and a composite stay refused by name. Detector:
   tests/duck-generated-numeric.test.ts and tests/duck-generated-numeric-reasons.test.ts, a test per shape, and "a made
   type whose source OID is a catalog row type's" (issue 858).
 - **One source of an enum's labels, the synced table's ENUM.** A generated table stores the ENUM it was built with; a

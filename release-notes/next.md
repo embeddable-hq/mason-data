@@ -8,6 +8,18 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **A BI tool names a column of an enum, a citext or a composite as its type.** Mason sent such a column with the
+  source database's number for its type, which Mason's own catalog could hold as another type, often a synced table's
+  row type. So a tool that looks the number up (Metabase, DBeaver and Tableau through JDBC, .NET and asyncpg clients)
+  showed the column as that table, and a prepared statement that named the type by its number was read as the other
+  type. Mason now sends its own number for every type, the one its catalog names, so the lookup names the column's type
+  and a prepared statement given that number reads it. The number is no longer the source database's. A physical read
+  replica shares its primary's numbers, and Mason sent the primary's until now: an application that learned these
+  numbers on its primary and decodes Mason's rows by them must now look such types up on Mason. Mason's numbers for
+  these types can also change when the synced tables change (its catalog is built again, for example when a table with
+  a new enum is added): a tool connected across that change may show stale type names until it reconnects, and a new
+  connection is always right. `pg_typeof` of such a column is also Postgres's: `other.level` for an enum of another schema and `mood[]`
+  for an array, where Mason said `level` and `_mood`.
 - **A database URL naming a database the server does not have no longer lists every database on that server.** The
   failure of `mason init`, `mason start`, `mason doctor`, `mason tables` and every other command that connects to it
   (and their `--json`) named them all: hundreds on a large

@@ -1934,9 +1934,8 @@ EXPLAIN a table, a few at once: a union of them all failed whole for one table i
 in the request log the agent never sent. A table is named as a statement writes it (`public."Clients"`, the formatter
 EXPLAIN's text uses), and `describe` reads a name as Postgres does (quoting, folding) in mcp itself, never by
 `to_regclass`, whose refusal of a name it cannot read would be a row of the request log too. A column's type is named
-by the catalog's `mason_wire_type`: the wire sends the SOURCE's OID for a type the source made (an enum, a citext),
-which the catalog holds under another OID — and both count from 16384, so `format_type` of the wire's OID can be
-another relation's row type in the catalog; the catalog's map of source OIDs is the one place a wire OID is named.
+by the catalog's `pg_catalog.format_type` of the RowDescription's OID: the OID the wire sends for a type the source
+made (an enum, a citext) is the catalog's own, which its pg_type names ("One OID for a type the source made").
 A request the client cancels (`notifications/cancelled`) is a CancelRequest for its statement, and is answered no
 further. With no URL it refuses and names `mason user add claude`; it never makes a user: a password is the person's
 to hand out. The protocol is written by hand (initialize, ping, tools/list, tools/call, resources/list, resources/read)
@@ -1960,8 +1959,51 @@ resource server, publishing its protected-resource metadata, the bearer token ma
 log still names who asked — or, before an authorization server exists, a user's password as a bearer token for the
 clients that take a static header. The tool code would not change; the transport and the login would.
 
-**Where.** `src/cli/mcp.ts`, `src/cdc/pg-wire.ts` (`extended`, `cancel`), `src/api/postgres/catalog.ts`
-(`sourceTypeNames`); `tests/cli-mcp.test.ts`, `tests/pg-wire.test.ts`.
+**Where.** `src/cli/mcp.ts`, `src/cdc/pg-wire.ts` (`extended`, `cancel`); `tests/cli-mcp.test.ts`, `tests/pg-wire.test.ts`.
+
+### One OID for a type the source made: the catalog's (2026-11-12, issue 861)
+
+**What.** The wire sent a column of a type the source made (an enum, a citext, a composite, a table's whole row) with
+the SOURCE's OID, while the catalog Postgres (PGlite) that answers every lookup holds that type at an OID of its own.
+Both count from 16384, so the catalog's pg_type could hold the source's number as another type. In a run seen,
+pg_type's 16511 was the catalog's row type of a table while the wire sent 16511 for a column of the enum `other.level`.
+A client that names a column by looking its RowDescription OID up in pg_type read the wrong type: pgjdbc's
+`getColumnTypeName` (so Metabase, DBeaver and Tableau's JDBC path), npgsql and asyncpg all do. A Parse naming that OID
+as a parameter's type was read as the other type too. Two readers had patched around the two numbers with maps of their
+own: `mason_wire_type` with an override of `format_type` in the catalog's `public`, and a field's `catalogOid` beside
+its wire OID for a generated table (issue 858).
+
+**Decision (the owner's, 2026-11-12): Mason sends the CATALOG's own OID for every type, a made one included.** Mason
+says a type's OID in the RowDescription, the ParameterDescription and any OID a statement answers (`::regtype`,
+`pg_typeof`, `pg_attribute.atttypid`). Each of these is the analysis's, so a client's pg_type lookup always names the
+right type and a Parse naming an OID Mason sent binds. The plan sends the analysis's OID as it is. `mason_wire_type`,
+the `format_type` override and `catalogOid` are gone, and `mason mcp` names a column with Postgres's own `format_type`.
+The source's OIDs still name the source's row types for the rewrite (`userTypes`, by name), and are never sent.
+
+Why not the other way, the catalog holding each made type at the source's OID: a first version did that, moving the
+catalog's rows (`pg_type`, `pg_attribute`, `pg_proc`, `pg_operator`, `pg_opclass` …) after its DDL. Its review found
+the two places it cannot reach. A `pg_node_tree` (`pg_proc.prosqlbody`) keeps the old OID: citext's 14 functions with
+a SQL body (`strpos`, `replace`, `split_part`, `translate`, `regexp_match` …) then answered `XX000 cache lookup failed
+for type`. And Postgres never clears its operator-class cache in a backend (`LookupOpclassInfo`): an index on a citext
+column fails every later plan over its table. Nothing in the catalog's system tables is rewritten.
+
+**What it costs a client.** A physical read replica shares its primary's OIDs, and Mason sent the primary's: an
+application that learned a made type's OID on its primary and decodes Mason's rows by it must now look the type up on
+Mason, as on any other Postgres database. And Mason's OIDs for made types can move when the synced tables change: the
+catalog is built again from the new schema (a table with a new enum added, say), and its types are numbered afresh.
+The review measured it: a client connected across such a change keeps the names it cached for the old numbers until it
+reconnects, while a new connection is always right. Built-in types never move.
+
+**The oracle** compares a made type's OID by what each server's own pg_type names it, schema-qualified
+(tests/integration/oracle/made-types.ts). A built-in type's OID, below 16384, stays held to exact equality.
+
+**`pg_typeof`** of a made type is the catalog's `regtype` under the session's search_path (src/duck/plan.ts
+`typeNames`), as Postgres names it: `other.level` where the schema is not on the path, `mood[]`, never pg_type's
+`level` or `_mood`.
+
+**Where.** `src/duck/plan.ts`, `src/duck/rewrite.ts` (`pg_typeof`), `src/api/postgres/catalog.ts`, `src/cli/mcp.ts`;
+`tests/duck-type-oids.test.ts` (the collision forced on a source by `lo_create`), the oracle's `made types by their
+OIDs` and `tests/integration/oracle/made-types.ts`.
 
 ### A session's settings are transactional (2026-10-30, issue 47)
 

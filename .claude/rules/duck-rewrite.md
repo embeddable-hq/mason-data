@@ -401,6 +401,14 @@ paths:
 - **A type a database made is declared in the catalog under its name, with nothing over it** (`PgColumn.made`, `catalogDdl`):
   a tool reads its name, and what Postgres's analysis cannot find over it is the gap, never Postgres's 42883
   (`madeTypeRefusal`). All such types are one allowlist key (`made`). A domain's column is its base type (`domain-column`).
+- **Every type OID Mason sends is the CATALOG's, a type a database made included: one OID space, never a map** (issue
+  861, the owner's decision; docs/DESIGN.md "One OID for a type the source made"): the RowDescription, the
+  ParameterDescription and any OID a statement answers are the analysis's, so a client's pg_type lookup of one
+  (JDBC's getColumnTypeName) names its type and a Parse naming it binds. Never the source's OID, which the catalog may
+  hold as another type (both count from 16384), and nothing in the catalog's system tables is rewritten to make the two
+  agree (a `pg_node_tree` and the opclass cache keep the old number). `pg_typeof` of one is the catalog's regtype under
+  the session's search_path (`typeNames`, src/duck/plan.ts). The oracle holds a made type's OID by what each server's
+  pg_type names it (tests/integration/oracle/made-types.ts). Detector: tests/duck-type-oids.test.ts (the collision forced).
 - **A value written in the session's zone is written where it is sent** (`ZONED_HELD`): a tstzrange's stored text is the zone it
   was read in; the wire and `x::text` ask Postgres's own output under the session's zone at the Execute.
 

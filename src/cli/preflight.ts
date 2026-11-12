@@ -245,8 +245,8 @@ export interface SourceColumnInfo {
   typeKind?: string;
   /** a column of a domain, read and declared as its base type (gap `domain-column`) */
   domain?: true;
-  /** the type's OID in the SOURCE (pg_type), for a type an extension made (citext): the wire sends the source's OID,
-   *  which differs between databases; absent for a built-in type, and in copies recorded before it was read */
+  /** the type's OID in the SOURCE (pg_type), for a type a database made (citext, an enum): never sent (the wire sends the
+   *  catalog's own OID, issue 861); absent for a built-in type, and in copies recorded before it was read */
   typeOid?: number;
   /** that type's array type's OID in the source (pg_type.typarray), for the same reason */
   typeArrayOid?: number;

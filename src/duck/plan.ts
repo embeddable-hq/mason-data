@@ -13,7 +13,7 @@ import { collationOids, functionsCalled, outputExpressions, textOrdering, type T
 import { gapRefusal, StatementError, type DuckPlan } from "./statement.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { analyze, catalogRows, readParameters } from "./analyze.ts";
-import type { SessionState } from "../api/postgres/catalog.ts";
+import { CATALOG_BASE_SQL, sessionSetSql, type SessionState } from "../api/postgres/catalog.ts";
 import { argumentTypes, describeKeys, nameUserKeys, heldUses, nullTested, resolvedKeys } from "./resolved.ts";
 import { expandViews, MAX_VIEW_DEPTH, viewRefused } from "./views.ts";
 import { selectListAfterLimit } from "./late.ts";
@@ -30,6 +30,8 @@ import { attributeRefused, expandRowFilters, wallStatistics, wallSwitch, type Wa
 import type { PgAnalysis } from "./analyze.ts";
 
 const JSON_OID = 114, JSONB_OID = 3802;
+/** pg_catalog.pg_typeof(any): its argument's type named by the catalog (src/duck/rewrite.ts) */
+const PG_TYPEOF = 1619;
 
 /** what the rewrite asks of the stored JSON paths (src/duck/kept-route.ts KeptLookup): the copied table and column of
  *  each json or jsonb column the statement reads from a table (Typed.relation), by the catalog's OIDs; null when it
@@ -465,8 +467,9 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
       return { ...inner, ...(reads !== undefined ? { reads } : {}), rowFilters };
     }
   }
-  // the catalog's own OIDs for the types an extension made (citext): the rewrite knows a few by name, and the wire sends
-  // the SOURCE's OID for them (`userTypes`, from the copy), never the catalog's
+  // the catalog's own OIDs for the types a database made (citext, an enum): the rewrite knows a few by name. The wire
+  // sends the analysis's OID as it is, the catalog's, never the source's (issue 861): a client that looks it up in pg_type
+  // or sends it back as a parameter's type reads the type itself
   let resolved = resolvedKeys(analysis.tree);
   const catalogTypes = new Map<number, string>();
   // every type that holds a citext anywhere in its structure (`CITEXT_HELD`): the rewrite refuses one where it would
@@ -475,8 +478,8 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   const enumLabels = new Map<number, string[]>(), enumArrays = new Map<number, number>();
   const enums: EnumTypes = { labels: enumLabels, arrays: enumArrays };
   const fields = analysis.fields === null ? null : analysis.fields.map((f) => ({ ...f }));
-  // a table's row type (a whole row, `SELECT t FROM t`): its columns, which the rewrite writes the row from, and the
-  // name the wire maps to the source's OID (`rowtype:<schema>.<table>`)
+  // a table's row type (a whole row, `SELECT t FROM t`): its columns, which the rewrite writes the row from, by its name
+  // (`rowtype:<schema>.<table>`), which says whether it is the source's whole row (`userTypes`); the wire sends its OID
   const rowTypes = new Map<number, RowColumn[]>();
   const used = new Set([...analysis.types.values()].flat().map((t) => t.type).filter((o) => o >= 16384));
   if ([...resolved].some((k) => /\bu\d+/.test(k)) || fields?.some((f) => f.oid >= 16384) || used.size > 0) {
@@ -496,9 +499,16 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
       rowTypes.set(Number(oid), columns.map(([n, type, typmod, collation]) => ({ name: n!, type: Number(type), typmod: Number(typmod), collation: Number(collation ?? 0) })));
     }
     resolved = await nameUserKeys((sql) => catalogRows(catalog, sql), resolved);
-    for (const f of fields ?? []) {
-      const source = f.oid >= 16384 ? userTypes.get(catalogTypes.get(f.oid) ?? "") : undefined;
-      if (source !== undefined) f.oid = source;
+  }
+  // pg_typeof of a type a database made, as Postgres names it: its regtype under the session's search_path
+  // (`other.level` where its schema is not on the path, `mood[]`), asked of the catalog only where the statement calls it
+  const typeNames = new Map<number, string>();
+  // (every made type the catalog holds, as the rewrite knows them, and every one the analysis typed: an expression of one,
+  // `ca[1]` of a citext[], is typed where no node of the analysis says so)
+  const made = new Set([...catalogTypes.keys(), ...used]);
+  if (made.size > 0 && functionsCalled(analysis.tree).oids.has(PG_TYPEOF)) {
+    for (const [oid, name] of await catalogRows(catalog, `${sessionSetSql(under)}; SELECT oid::text, oid::regtype::text FROM pg_catalog.pg_type WHERE oid IN (${[...made].join(", ")}); ${CATALOG_BASE_SQL}`)) {
+      typeNames.set(Number(oid), name!);
     }
   }
   let tree, withTies, exact, clock, jsonReads, unboundedLateral;
@@ -521,7 +531,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   try { collations = await resolver.prepare((sql) => catalogRows(catalog, sql), collationOids(analysis.tree)); }
   catch (e) { throw e instanceof Unrewritable ? unrewritableError(e, text) : e; }
   const analysed = performance.now();
-  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts });
+  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts });
   try {
     ({ tree, withTies, exact, clock, jsonReads, unboundedLateral } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them
@@ -576,7 +586,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
       detail: `read back: ${difference}; the rewritten SQL: ${sql}` }, text);
   }
   const planned = { text: sql, functions: masonCalls(tree), ...(unboundedLateral ? { unboundedLateral: true } : {}) } as unknown as PlannedSql;
-  return { sql: planned, params: analysis.params, fields: fields?.map((f, i) => ({ ...f, catalogOid: analysis.fields![i]!.oid, size: pgTyplen(f.oid) })) ?? null, withTies, ...(exact.length > 0 ? { exact } : {}), resolved: keys, argumentTypes: argumentTypes(analysis.tree), ...(outputs ? { outputs: outputExpressions(analysis.tree) ?? [] } : {}),
+  return { sql: planned, params: analysis.params, fields: fields?.map((f) => ({ ...f, size: pgTyplen(f.oid) })) ?? null, withTies, ...(exact.length > 0 ? { exact } : {}), resolved: keys, argumentTypes: argumentTypes(analysis.tree), ...(outputs ? { outputs: outputExpressions(analysis.tree) ?? [] } : {}),
     ...(Object.keys(clock).length > 0 ? { clock } : {}), ...(jsonReads.length > 0 ? { jsonReads: jsonReads.map(readKey) } : {}), ...(reads !== undefined ? { reads } : {}),
     timing: { analysisMs: analysed - started, rewriteMs: performance.now() - analysed } };
 }
