@@ -1,7 +1,7 @@
 /**
  * WHAT THE COPY HOLDS FOR A POSTGRES TYPE (issues 126 and 129): the one list that says so, read by the copy
  * (src/duck/sync.ts: what it reads and declares), the catalog (the column declared as the source spells it, always), the
- * wire (src/duck/types.ts: the source's OID) and the rewrite (src/duck/rewrite.ts: a literal, a sort).
+ * wire (src/duck/types.ts: the type's OID, the catalog's for a type a database made) and the rewrite (src/duck/rewrite.ts: a literal, a sort).
  *
  * THE CLASS: a type the copy holds as another type. The catalog said the wire's type, and the wire said what DuckDB
  * happened to read (`timetz` as text over DuckDB's TIMETZ, `point` as text over a STRUCT, `box` not copied at all), so a

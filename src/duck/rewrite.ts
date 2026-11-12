@@ -292,6 +292,9 @@ class Rewriter {
   private readonly userTypes: ReadonlyMap<number, string>;
   /** every type holding a citext anywhere in its structure, by the catalog's OID (src/duck/plan.ts `CITEXT_HELD`) */
   private readonly citextHeld: ReadonlySet<number>;
+  /** a type a database made as `pg_typeof` names it, the catalog's `regtype` under the session's search_path
+   *  (`other.level`, `mood[]`), read by src/duck/plan.ts where the statement calls pg_typeof */
+  private readonly typeNames: ReadonlyMap<number, string>;
   /** a copied table's row type: its columns, by the catalog's OID (src/duck/plan.ts) */
   private readonly rowTypes: ReadonlyMap<number, readonly RowColumn[]>;
   /** the session's TimeZone the statement was analysed under (a relative literal's day is its) */
@@ -304,9 +307,10 @@ class Rewriter {
    *  `json_reads`, which the keeper's policy reads (src/duck/kept.ts `review`) */
   readonly jsonReads = new Map<string, JsonRead>();
   constructor(analysis: PgAnalysis, base: number, collations: StatementCollations, userTypes: ReadonlyMap<number, string> = new Map(), rowTypes: ReadonlyMap<number, readonly RowColumn[]> = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY",
-    enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null, keyCounts: ReadonlySet<number> = new Set(), citextHeld: ReadonlySet<number> = new Set()) {
+    enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null, keyCounts: ReadonlySet<number> = new Set(), citextHeld: ReadonlySet<number> = new Set(),
+    typeNames: ReadonlyMap<number, string> = new Map()) {
     this.types = analysis.types; this.analysed = analysis.outputs; this.base = base; this.collations = collations; this.params = analysis.params; this.userTypes = userTypes; this.rowTypes = rowTypes; this.timeZone = timeZone; this.dateStyle = dateStyle;
-    this.enums = enums; this.kept = kept; this.citextHeld = citextHeld;
+    this.enums = enums; this.kept = kept; this.citextHeld = citextHeld; this.typeNames = typeNames;
     for (const at of keyCounts) this.keyCounts.add(at + base);
     this.twins = caseTwins(analysis.tree);
     this.analysisTree = analysis.tree;
@@ -5461,8 +5465,10 @@ class Rewriter {
       case "pg_typeof": {
         const type = argType(0);
         if (type === null) return null;
-        const made = this.userTypes.get(type);
-        return strConst(made !== undefined ? made.replace(/^rowtype:(public\.)?/, "") : pgEvalSync("SELECT $1::oid::regtype::text", [String(type)], this.timeZone, this.dateStyle)[0]?.[0] ?? String(type));
+        // a type a database made is the catalog's, named as Postgres names it under the session's search_path (issue 861:
+        // its pg_type name alone said `level` for `other.level` and `_mood` for `mood[]`)
+        const named = this.typeNames.get(type);
+        return strConst(named !== undefined ? named : pgEvalSync("SELECT $1::oid::regtype::text", [String(type)], this.timeZone, this.dateStyle)[0]?.[0] ?? String(type));
       }
       case "regexp_matches": case "regexp_match": case "regexp_split_to_table": case "regexp_split_to_array": case "regexp_count": case "regexp_instr": case "regexp_substr": case "regexp_like":
         throw new Unrewritable(`${name}() is not supported by Mason`, "test a match with ~ (or ~*), take a part with substring(text from pattern), or replace with regexp_replace", "regexp-functions");
@@ -7621,6 +7627,8 @@ export interface RewriteOptions {
   userTypes?: ReadonlyMap<number, string>;
   /** every type holding a citext anywhere in its structure (src/duck/plan.ts `CITEXT_HELD`) */
   citextHeld?: ReadonlySet<number>;
+  /** a type a database made as `pg_typeof` names it (src/duck/plan.ts) */
+  typeNames?: ReadonlyMap<number, string>;
   rowTypes?: ReadonlyMap<number, readonly RowColumn[]>;
   timeZone?: string;
   /** the session's DateStyle (src/api/postgres/catalog.ts SessionState) */
@@ -7631,10 +7639,10 @@ export interface RewriteOptions {
   keyCounts?: ReadonlySet<number>;
 }
 
-export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(), citextHeld = new Set(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
+export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(), citextHeld = new Set(), typeNames = new Map(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
   wireBound = false, keyCounts = new Set() }: RewriteOptions):
   { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean } {
-  const r = new Rewriter(analysis, base, collations, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts, citextHeld);
+  const r = new Rewriter(analysis, base, collations, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts, citextHeld, typeNames);
   if (joinsUsing(analysis.tree, new Set([JSONB, JSONB_ARRAY]))) {
     throw new Unrewritable("a JOIN … USING or a NATURAL JOIN on a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "JOIN … ON a.j = b.j", "jsonb-compare");
   }
