@@ -200,7 +200,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
         // while its chunks are read: the chunks done and reading, the measured rate, the time left (src/duck/sync.ts
         // copyProgressNow), so mason wait and status move between two commits
         ...(c.phase === "copying" && c.progress !== undefined ? { progress: c.progress } : {}),
-        ...(c.phase === "copied" && c.retired !== undefined ? { retired: c.retired } : {}) } : null,
+        ...(c.phase === "copied" && c.retired !== undefined ? { retired: c.retired } : {}),
+        // its space and its last compaction (src/duck/sync.ts Compaction), said on its line (compactionWords)
+        ...(c.phase === "copied" && c.compaction !== undefined ? { compaction: c.compaction } : {}) } : null,
       // its sync's error, whatever its phase: a copied table whose poll, catch-up, stream or publication check failed
       // carries it on its own row, as its sync's state says failed (issue 100)
       error: c?.error ?? null,

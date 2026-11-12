@@ -346,6 +346,6 @@ export const CATCHING_UP = "being caught up by one poll for what changed since i
 /** WHETHER A SERVED TABLE IS IN ITS ONE CATCH-UP POLL (owed it, queued, polling or ending) — the one derivation, read by
  *  `syncStateOf` (src/cli/readiness.ts) and EXPLAIN (src/duck/explain.ts): its sync not failed, not being read again
  *  whole, and marked behind (`CopyState.behind`) or its rebuild in its catch-up (`CopyState.rebuilding`). */
-export function inCatchUp(c: { error: string | null; behind?: string; rebuilding?: "copy" | "catch-up" }): boolean {
+export function inCatchUp(c: { error: string | null; behind?: string; rebuilding?: "copy" | "catch-up" | "compact" }): boolean {
   return c.error === null && c.rebuilding !== "copy" && (c.behind !== undefined || c.rebuilding === "catch-up");
 }
