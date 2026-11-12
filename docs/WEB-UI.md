@@ -24,7 +24,7 @@ the address's hash, so a view can be bookmarked and Back goes to the one before:
 | Hash | View |
 |---|---|
 | `#overview` (none, or one it does not know) | the Overview |
-| `#tables`, `#tables?show=failed` | Tables (filtered to the failed copies) |
+| `#tables`, `#tables?show=failed` | Tables (only the tables whose sync failed) |
 | `#users` | Users |
 | `#observability/queries` (`#observability`) | Observability › Queries; `?slow=1`, `?status=` (`completed`, `refused`, `failed`, `refused-or-failed`, `cancelled`), `?user=`, `?client=` set those filters |
 | `#observability/usage` | Observability › Usage |
@@ -74,8 +74,12 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   (and so through `mason ui --ssh`) it is absent, and every one of those endpoints refuses.
 - **Overview**, the tables not synced yet: a bar each with the line `mason wait` prints (a first sync not begun shimmers,
   with no % beside it), and nothing once every table is synced.
-- **Overview**, the facts: one table with the database and how its changes arrive, the warnings, Mason's version, uptime
-  and restarts, free disk, and sessions open. In replication mode, a Changes table shows the stream and the WAL its slot holds.
+- **Overview**, the facts ("Mason"): one table with the database (its name and host, the Postgres version, and whether
+  it is your main database or a read replica), the warnings, Mason's version and uptime, its restarts when there were
+  any, the free disk beside what the synced data uses, and the tools connected. Under it, quiet lines: that the database
+  is on another machine, and how text sorts when that differs from the database. `mason status` keeps its fuller rows
+  (the sources file, the sync settings); the page shows each table's sync on Tables. In replication mode, a Changes
+  table shows the stream and the WAL its slot holds.
 - **Overview**, the statements and errors: the last day and week in one table, then the latest sync errors and the
   refused or failed statements, each with **See all** (Logs, failures only; Queries, the refused or failed ones), and — when a
   statement used SQL Mason does not support in the last day — one line naming the most refused entry of
@@ -196,7 +200,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   shown (said under it: the pages follow the log's order by start). A statement is one or two lines in its row; a row
   opens in place to its whole id, times, bytes sent, statement and error — the first 16 KiB of each, said when cut.
   A statement that reads no synced table (`select 1`, `select now()`, SET, SHOW, a BI tool's catalog queries) is
-  answered without the copy and **not listed** — the protocol's chatter, hundreds a connection from a BI tool — and the
+  answered without the synced data and **not listed** — the protocol's chatter, hundreds a connection from a BI tool — and the
   page says so, as `mason logs --requests` does when it lists none; while nothing is listed, Connect offers a first
   statement that is (`select count(*) from <a synced table>;`).
 - **Observability › Usage** (`#observability/usage`): every part follows the range. Cards: under Now, the sessions

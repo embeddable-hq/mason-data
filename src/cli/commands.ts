@@ -418,8 +418,8 @@ export function streamLines(st: StreamStatus, now = Date.now()): string[] {
     const c = t.catchUp;
     rows.push([t.table, t.state === "streamed" ? `streamed${counts}`
       : t.state === "catching-up" && c !== undefined
-        ? `catching up by one poll ${c.from ? `from ${c.from.slice(0, 16).replace("T", " ")} UTC` : t.why?.replace(/^caught up by one poll /, "") ?? ""}: ` +
-          `${c.phase === "queued" ? (c.retryAt ? `its last catch-up failed, tried again after ${c.retryAt.slice(11, 16)} UTC (mason logs says why)` : "waiting its turn") : c.phase === "polling" ? "polling" : "applying what the stream held meanwhile"}` +
+        ? `getting the changes made ${c.from ? `since ${c.from.slice(0, 16).replace("T", " ")} UTC` : t.why?.replace(/^caught up by one poll /, "") ?? ""}: ` +
+          `${c.phase === "queued" ? (c.retryAt ? `its last catch-up failed, tried again after ${c.retryAt.slice(11, 16)} UTC (mason logs says why)` : "waiting its turn") : c.phase === "polling" ? "reading the changes" : "applying the changes"}` +
           `${c.startedAt ? `, for ${spanText(since(c.startedAt))}` : ""} · the stream holds ${n(c.held)} change${c.held === 1 ? "" : "s"} of it meanwhile${total(t) ? counts : ""}`
       : t.state === "left-out" ? `left out: ${t.why ?? ""}`
       : `not streamed yet: ${t.why ?? ""}${total(t) ? counts : ""}`]);
@@ -467,7 +467,7 @@ const STATUS_USAGE = `usage: mason status [--json]
 
   In replication mode a Stream section says where the stream is: its position against the database's (bytes behind),
   when the newest change applied was committed and how long after it was applied, and each added table — streamed,
-  with the changes applied this run; being caught up by one poll; not streamed yet; or left out — and why.
+  with the changes applied this run; getting the changes made since it was last synced; not streamed yet; or left out — and why.
 
   Stored JSON paths: a JSON value statements keep reading (payload ->> 'customer_id' read by several statements, or by
   one slow one) is stored as a column of the synced table and read from there, computed once when its row is written instead

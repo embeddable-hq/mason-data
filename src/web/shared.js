@@ -56,7 +56,7 @@ export function rangeOffered(key, keptDays) {
   if (!r.longer) return { offered: true, shown: true };
   if (typeof keptDays !== "number") return { offered: false, shown: false };
   if (keptDays >= r.days) return { offered: true, shown: true };
-  return { offered: false, shown: true, why: `Mason keeps ${keptDays} day${keptDays === 1 ? "" : "s"} of history: MASON_HISTORY_DAYS=${r.days} keeps ${r.days}` };
+  return { offered: false, shown: true, why: `Mason keeps ${keptDays} day${keptDays === 1 ? "" : "s"} of history. Set MASON_HISTORY_DAYS=${r.days} to keep ${r.days}.` };
 }
 export const DEFAULT_RANGE = "now";
 /** Whether a range follows what happens (Now) or is read once when chosen (every other). */
@@ -187,38 +187,6 @@ export function slotText(w, since) {
 /** Whether the slot's line is a warning: the WAL could not be read, Postgres invalidated it, it is past its cap or nothing caps it. */
 export const slotWarns = (w) => "error" in w || w.walStatus === "lost" || w.walStatus === "unreserved" || w.safeWalSizeBytes === null || w.safeWalSizeBytes <= 0;
 
-/** `Mason` in mason status (src/cli/commands.ts `masonRow`): the run's version and how long it has been up. The CLI adds the
- *  run's pid, which the state does not carry: the tests hold the rest equal. */
-export const masonRow = (e) => ["Mason", `${e.version} · one process${e.startedAt ? ` · up ${spanText(e.uptimeSeconds ?? 0)}, since ${e.startedAt.slice(0, 19).replace("T", " ")} UTC` : ""}`];
-
-/** `Sessions` in mason status (src/cli/commands.ts `sessionsRows`). */
-export function sessionsRows(s) {
-  if (s === undefined) return [];
-  if ("error" in s) return [["Sessions", `could not be read: ${s.error.split("\n")[0]}`]];
-  if (s.open === 0) return [["Sessions", "none open"]];
-  const running = s.byClient.reduce((a, c) => a + c.running, 0);
-  const who = s.byClient.slice(0, 3).map((c) => `${c.open} ${c.user === "" ? "by a token" : `as ${c.user}`}${c.client === "" ? "" : ` (${c.client})`}`);
-  const others = s.byClient.length - who.length;
-  return [["Sessions", `${s.open} open, ${running} running a statement · ${who.join(", ")}${others > 0 ? `, and ${others} other client${others === 1 ? "" : "s"}` : ""} (mason logs --running lists the statements)`]];
-}
-
-/** `Disk` in mason status (src/cli/commands.ts `diskRows`), but for the path: the page never shows an absolute path, so
- *  it says "where the copy is" for ` in <path>` (the tests hold the rest equal). */
-export function diskRows(d) {
-  if (d === undefined) return [];
-  const adds = d.projectedBytes === null ? "" : ` · the first syncs running are projected to add about ${fileSize(d.projectedBytes)} more`;
-  if (d.freeBytes === null) return [["Disk", `${d.error ?? "the free space could not be read"}${adds}`]];
-  return [["Disk", `${fileSize(d.freeBytes)} free where the synced data is${adds}${d.projectedBytes !== null && d.projectedBytes > d.freeBytes ? " — more than is free: the sync stops before the disk fills" : ""}`]];
-}
-
-/** `Restarts` in mason status (src/cli/commands.ts `restartsRows`; its `ago` is `agoText`): none, no row. */
-export function restartsRows(r, now = Date.now()) {
-  if (r === undefined) return [];
-  if ("error" in r) return [["Restarts", r.error]];
-  if (r.last === null) return [];
-  return [["Restarts", `${r.count}, the last ${agoText(r.last.at, now)}: ${r.last.why}, after ${r.last.upSeconds} s up (mason logs --start has its last lines)`]];
-}
-
 /** A time as `mason status` says how long ago (src/cli/commands.ts `ago`). */
 export function agoText(iso, now = Date.now()) {
   const s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
@@ -250,8 +218,8 @@ export function streamRows(st, now = Date.now()) {
     const c = t.catchUp;
     tables.push([t.table, t.state === "streamed" ? `streamed${counts}`
       : t.state === "catching-up" && c !== undefined
-        ? `catching up by one poll ${c.from ? `from ${utcMinute(c.from)} UTC` : t.why?.replace(/^caught up by one poll /, "") ?? ""}: ` +
-          `${c.phase === "queued" ? (c.retryAt ? `its last catch-up failed, tried again after ${c.retryAt.slice(11, 16)} UTC (mason logs says why)` : "waiting its turn") : c.phase === "polling" ? "polling" : "applying what the stream held meanwhile"}` +
+        ? `getting the changes made ${c.from ? `since ${utcMinute(c.from)} UTC` : t.why?.replace(/^caught up by one poll /, "") ?? ""}: ` +
+          `${c.phase === "queued" ? (c.retryAt ? `its last catch-up failed, tried again after ${c.retryAt.slice(11, 16)} UTC (Sync events says why)` : "waiting its turn") : c.phase === "polling" ? "reading the changes" : "applying the changes"}` +
           `${c.startedAt ? `, for ${spanText(since(c.startedAt))}` : ""} · the stream holds ${n(c.held)} change${c.held === 1 ? "" : "s"} of it meanwhile${total(t) ? counts : ""}`
       : t.state === "left-out" ? `left out: ${t.why ?? ""}`
       : `not streamed yet: ${t.why ?? ""}${total(t) ? counts : ""}`]);
@@ -280,6 +248,9 @@ export function renderFailure(f) {
  * means here — 403, a cookie this run does not take (the run started again, with a new token); no answer at all, the
  * run stopped. `status` null: fetch itself failed, `text` its error.
  */
+/** The message of a page whose cookie is an earlier run's (`failureOf`, read by `overTunnel`). */
+const STALE_PAGE = "This page is from an earlier run of Mason";
+
 export function failureOf(status, text) {
   if (status !== null) {
     let body = null;
@@ -287,15 +258,15 @@ export function failureOf(status, text) {
     try { body = JSON.parse(text); } catch { body = null; }
     if (body && typeof body.failure === "object" && body.failure !== null) return body.failure;
     if (status === 403 || status === 421) {
-      return { code: "refused", message: "this page's cookie is not the running Mason's", why: text.trim() || `HTTP ${status}`,
-        fix: "Mason was started again since this page was opened, and each run has its own token: mason ui, in the project's folder, opens this page again",
-        next: [{ command: "mason ui", what: "this page, for the Mason that is running" }] };
+      return { code: "refused", message: STALE_PAGE, why: text.trim() || `HTTP ${status}`,
+        fix: "Mason was restarted after you opened this page, and each run has its own token. Run mason ui in the project's folder to open the page again.",
+        next: [{ command: "mason ui", what: "opens this page for the Mason that is running" }] };
     }
-    return { code: "failed", message: (body && typeof body.error === "string" ? body.error : text.trim()) || `HTTP ${status}`, next: [{ command: "mason logs", what: "the run's log: what it was doing" }] };
+    return { code: "failed", message: (body && typeof body.error === "string" ? body.error : text.trim()) || `HTTP ${status}`, next: [{ command: "mason logs", what: "shows Mason's log: what it was doing" }] };
   }
-  return { code: "unreachable", message: "Mason does not answer at this address", why: `the run stopped, or runs on another port now (${text})`,
-    fix: "mason start in the project's folder, then mason ui opens this page again: each run has its own address and token",
-    next: [{ command: "mason status", what: "whether Mason runs, and why it stopped" }, { command: "mason start", what: "start it" }, { command: "mason ui", what: "this page, for the Mason that is running" }] };
+  return { code: "unreachable", message: "Mason is not answering at this address", why: `Mason stopped, or it now runs on another port (${text})`,
+    fix: "Run mason start in the project's folder, then mason ui to open this page again. Each run has its own address and token.",
+    next: [{ command: "mason status", what: "says whether Mason runs, and why it stopped" }, { command: "mason start", what: "starts it" }, { command: "mason ui", what: "opens this page for the Mason that is running" }] };
 }
 
 /**
@@ -304,10 +275,10 @@ export function failureOf(status, text) {
  * person's own machine. Every other failure is the run's, and stands.
  */
 export function overTunnel(f) {
-  if (f.code !== "unreachable" && f.message !== "this page's cookie is not the running Mason's") return f;
-  return { code: f.code, message: "the tunnel to this server has closed", why: f.why,
-    fix: "mason ui --ssh <user@server>, on your own machine, opens this page again: each tunnel has its own address",
-    next: [{ command: "mason ui --ssh <user@server>", what: "this page, through a new tunnel" }] };
+  if (f.code !== "unreachable" && f.message !== STALE_PAGE) return f;
+  return { code: f.code, message: "The tunnel to this server has closed", why: f.why,
+    fix: "Run mason ui --ssh <user@server> on your own machine to open this page again. Each tunnel has its own address.",
+    next: [{ command: "mason ui --ssh <user@server>", what: "opens this page through a new tunnel" }] };
 }
 
 /** A part of a page written from one read: its body rendered, its Failure said where it shows when `says` (not the
@@ -346,7 +317,7 @@ export function statusKind(word) {
   const w = String(word ?? "").toLowerCase();
   if (/^(ready|synced|done|copied|completed|ok|streamed|running|live|added)\b/.test(w)) return "ok";
   if (/^(failed|error|refused|lost|not running|stopped)\b/.test(w)) return "bad";
-  if (/^(under way|syncing|behind|copying|waiting|catching up|not streamed|not kept current|unsynced|cancelled|warning|left out|pending)\b/.test(w)) return "warn";
+  if (/^(under way|syncing|behind|copying|waiting|finishing sync|catching up|not streamed|not kept current|unsynced|cancelled|warning|left out|pending)\b/.test(w)) return "warn";
   return "unknown";
 }
 
@@ -524,13 +495,13 @@ export const USERS_HASH = "#users";
 export function renderConnect(pg, { first = false, table = null, served = false, share = "", readOnly = null } = {}) {
   if (!pg || typeof pg.shown !== "string") return "";
   // a first statement to type that the request log lists (one that reads a copied table: UNLISTED_STATEMENTS)
-  const tryIt = first && table ? `<dt>Then try</dt><dd>${copyable("connect-try", `select count(*) from ${entryName(table)};`)} <span class="dim">it shows on Queries</span></dd>` : "";
+  const tryIt = first && table ? `<dt>Then try</dt><dd>${copyable("connect-try", `select count(*) from ${entryName(table)};`)} <span class="dim">It will show on the Queries page.</span></dd>` : "";
   return `<div class="connect${first ? " first" : ""}"><p class="connect-title">${first ? "Connect your first tool" : "Connect"}</p>` +
-    (first ? `<p class="lead">Mason answers SQL over the Postgres protocol, as a read replica of your database would: point psql, a BI tool or your app's analytics code at this URL.</p>` : "") +
+    (first ? `<p class="lead">Mason answers SQL the way a read replica of your database would. Point psql, a BI tool or your app's analytics code at this URL.</p>` : "") +
     `<dl class="facts"><dt>URL</dt><dd>${copyable("connect-url", pg.shown)}</dd>${tryIt}</dl>` +
     serverHostNote(pg, served) +
-    (readOnly !== null ? `<p class="tip">A user's name and password go in place of ${code("<user>:<password>")}: ${code("mason user add <name>")} prints the whole URL once.</p>`
-      : `<p class="tip"><a class="btn${first ? " primary" : ""}" href="${USERS_HASH}">Create a user</a> <span>Its name and password go in place of ${code("<user>:<password>")}: the Users page shows the whole URL once, as ${code("mason user add <name>")} prints it.</span></p>`) + `${share}</div>`;
+    (readOnly !== null ? `<p class="tip">Put a user's name and password in place of ${code("<user>:<password>")}. Users are added from the command line here: ${code("mason user add <name>")} prints the full URL once.</p>`
+      : `<p class="tip"><a class="btn${first ? " primary" : ""}" href="${USERS_HASH}">Create a user</a> <span>Put its name and password in place of ${code("<user>:<password>")}. The Users page shows the full URL once, when you add the user.</span></p>`) + `${share}</div>`;
 }
 
 /** Why a page offers no control that changes anything (`/api/state` `pageReadOnly`), in its own words — `what` is what is
@@ -549,7 +520,7 @@ export const usersReadOnly = (s) => (s?.pageReadOnlyAllow ?? []).includes("users
  *  needs the server's address. "" off a server, and where the URL is the address a client reaches (`pg.public`: mason
  *  serve's MASON_PG_PUBLIC_URL, src/cli/pg-url.ts clientLink). */
 export const serverHostNote = (pg, served) => !served || pg.public === true ? ""
-  : `<p class="tip">This is the address on the server: from elsewhere a tool connects to the server's own address, in place of ${code(pg.host ?? "localhost")}.</p>`;
+  : `<p class="tip">This is the server's address for itself. A tool on another machine uses the server's own address in place of ${code(pg.host ?? "localhost")}.</p>`;
 
 /** Nothing to show, quietly: a title and a line under it (`hintHtml`: HTML, a command in code()). */
 export const empty = (title, hintHtml = "") => `<div class="empty"><p class="empty-title">${esc(title)}</p>${hintHtml ? `<p>${hintHtml}</p>` : ""}</div>`;

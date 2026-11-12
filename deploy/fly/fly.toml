@@ -6,15 +6,15 @@
 #   fly ips allocate-v4                                                   # IPv4 clients need a dedicated address (README)
 #   fly ssh console -u node -C "mason add public.orders"
 #
-# ONE Machine, always: the copy is one file with one writer. A Machine with a volume is updated in place (stopped,
+# ONE Machine, always: the synced data is one file with one writer. A Machine with a volume is updated in place (stopped,
 # then started on the same volume with the new image), which is the stop-before-start a deploy must be here; a second
-# Machine would get a second, empty volume and its own copy. Never `fly scale count 2`.
+# Machine would get a second, empty volume and sync everything again. Never `fly scale count 2`.
 # Every key is from https://docs.fly.io/reference/configuration (the section is named at each).
 
 app = "mason-data"          # fly launch --name sets yours
 primary_region = "ams"      # fly platform regions; the volume lives in it
 
-# Top-level: SIGTERM is mason serve's stop (a copy in flight interrupted and rolled back, the copy closed); a minute is
+# Top-level: SIGTERM is mason serve's stop (a first sync in flight is rolled back, the synced data closed); a minute is
 # plenty. kill_timeout's default is 5 s, its maximum 300.
 kill_timeout = 60
 
@@ -30,7 +30,7 @@ kill_timeout = 60
   # The project folder (sources/, mason.yml) on the volume: a Machine's root filesystem is replaced at every deploy, so
   # what `mason add` adds beside the server survives only here. Remove this line when the image carries mason/.
   MASON_PROJECT = "/mason/data/project"
-  # The copy's memory: half of [[vm]] memory; change the two together (deploy/mason-data/README.md "Memory").
+  # The engine's memory: half of [[vm]] memory; change the two together (deploy/mason-data/README.md "Memory").
   MASON_DUCKDB_MEMORY = "4GB"
 
 [deploy]
@@ -38,7 +38,7 @@ kill_timeout = 60
   # "cannot be used for Machines with attached volumes". With one Machine, rolling is: stop it, update it, start it.
   strategy = "rolling"
 
-# [[mounts]]: the copy and Mason's state. initial_size is read only when fly deploy creates the volume; a volume is
+# [[mounts]]: the synced data and Mason's state. initial_size is read only when fly deploy creates the volume; a volume is
 # extended, never shrunk (auto_extend_size_* keys exist, README.md).
 [[mounts]]
   source = "mason_data"
@@ -50,7 +50,7 @@ kill_timeout = 60
 [[services]]
   protocol = "tcp"
   internal_port = 5433
-  auto_stop_machines = "off"    # a stopped Machine is a copy that is not kept current
+  auto_stop_machines = "off"    # a stopped Machine's synced data is not kept current
   auto_start_machines = true
   min_machines_running = 1
 

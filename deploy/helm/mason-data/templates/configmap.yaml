@@ -7,7 +7,7 @@ metadata:
     {{- include "mason.labels" . | nindent 4 }}
 data:
   sources.yml: |
-    {{- required "project.sources is required: the sources file naming the tables to copy" .Values.project.sources | nindent 4 }}
+    {{- required "project.sources is required: the sources file naming the tables to sync" .Values.project.sources | nindent 4 }}
   {{- if .Values.project.masonYml }}
   mason.yml: |
     {{- .Values.project.masonYml | nindent 4 }}

@@ -1,6 +1,6 @@
-# ONE replica, a StatefulSet: the copy is one file with one writer, and a StatefulSet's RollingUpdate deletes the pod
+# ONE replica, a StatefulSet: the synced data is one file with one writer, and a StatefulSet's RollingUpdate deletes the pod
 # before it recreates it on the same PVC. deploy/kubernetes/statefulset.yaml says why, and why a Deployment would need
-# `strategy: Recreate`. Not a value: it is what the copy requires.
+# `strategy: Recreate`. Not a value: it is what the synced data requires.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -20,7 +20,7 @@ spec:
       labels:
         {{- include "mason.labels" . | nindent 8 }}
       annotations:
-        # a changed sources file restarts the pod: the table is copied or dropped at the next start
+        # a changed sources file restarts the pod: the table is synced or dropped at the next start
         checksum/project: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
       terminationGracePeriodSeconds: 60

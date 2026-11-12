@@ -25,7 +25,7 @@ export const syncsHref = (table) => `#observability/syncs?table=${encodeURICompo
 export const columnsPath = (table) => `api/tables/${encodeURIComponent(table)}/columns`;
 
 /** A table's sync in one word (`/api/state` `tables[].sync.state`, src/cli/readiness.ts `syncStateOf`). */
-const SYNC_WORDS = { synced: "Synced", syncing: "Syncing", "catching-up": "Catching up", behind: "Behind", failed: "Failed", waiting: "Waiting" };
+const SYNC_WORDS = { synced: "Synced", syncing: "Syncing", "catching-up": "Finishing sync", behind: "Behind", failed: "Failed", waiting: "Waiting" };
 
 /** Whether a table's name has the search box's text (any case; nothing typed: every table). */
 const nameMatches = (table, filter) => !filter || table.toLowerCase().includes(filter.trim().toLowerCase());
@@ -52,21 +52,22 @@ export function syncedReport(b, picked, tables) {
   };
 }
 
-/** What happens to each table synced after now, by its sync (src/cli/sync.ts `syncedTips`): an `off` table stays as of
- *  this sync until the next one, a polled one is polled again after its interval. */
+/** What happens to each table synced after now, by its sync (src/cli/sync.ts `syncedTips`, in the page's words: the
+ *  page's way to sync again is its Sync now, where the CLI names mason sync): an `off` table stays as of this sync
+ *  until the next one, a polled one is polled again after its interval. */
 function syncedTips(tables) {
   return tables.flatMap((t) => {
     const k = t.kept;
     if (k?.by !== "poll") return [];
-    return [k.sync.mode === "off" ? `${t.table}'s sync is off: it stays as of this sync until the next mason sync ${entryName(t.table)}`
-      : `${t.table} is polled every ${k.sync.every}: its next poll is an interval from this one`];
+    return [k.sync.mode === "off" ? `${t.table}'s sync is off, so it stays as it is now until you press Sync now again.`
+      : `${t.table} is polled every ${k.sync.every}. Its next poll is one interval from now.`];
   });
 }
 
 /** A sync's answer said as `mason sync` says it, with Dismiss. `s`: the state, for the tables not kept current. */
 function renderSynced(b, table, s) {
   const r = syncedReport(b, [table], s.tables.filter((t) => t.table === table));
-  return `<div class="done"><p class="headline">${esc(r.headline)}</p>${rowsHtml(r.details)}${r.tips.map((x) => `<p class="tip">Tip: ${esc(x)}</p>`).join("")}` +
+  return `<div class="done"><p class="headline">${esc(r.headline)}</p>${rowsHtml(r.details)}${r.tips.map((x) => `<p class="tip">${esc(x)}</p>`).join("")}` +
     `${button("Dismiss", { dismissSynced: "", popClose: "" }, "small")}</div>`;
 }
 
@@ -94,34 +95,37 @@ export function tableFacts(t) {
     state: t.added ? "added" : t.reason ? `cannot be added as it is: ${t.reason}` : null };
 }
 
-/** What `mason add` prints for a table added, from `/api/pick`'s answer (src/cli/commands.ts `addedLines`): its line,
- *  then its notes — the key added to the columns asked, the secret-looking columns left out. */
-export function addedLines(b, file) {
-  const copies = b.columns === null ? (b.exclude.length ? `every column but ${b.exclude.join(", ")}` : "every column") : b.columns.join(", ");
+/** What the page says for a table added, from `/api/pick`'s answer (`mason add --json`'s `added` entry): its line, then
+ *  its notes — its sync, a poll's cost, the key added to the columns asked, the secret-looking columns left out. The
+ *  facts are `mason add`'s (src/cli/commands.ts `addedLines`), in the page's words: no sources file, and the page's way
+ *  to change a table's sync (its Sync button) where `mason add` names `--sync`. */
+/** The columns an entry syncs, from `/api/pick`'s answer: every column, every column but some, or the columns named. */
+const columnsWords = (b) => b.columns === null ? (b.exclude.length ? `every column but ${b.exclude.join(", ")}` : "every column") : `the columns ${b.columns.join(", ")}`;
+export function addedLines(b) {
+  const copies = columnsWords(b);
   const s = b.skippedSecrets;
   const name = entryName(b.table);
-  const sync = b.bigOff ? `sync: off written on its entry: it has more than 1,000,000 rows, and each poll scans it whole on your database — ` +
-      `mason add ${name} --sync "poll 1h" polls it hourly; mason sync ${name} syncs it once, now; mason add ${name} --sync replication keeps it current from the change log`
-    : b.notReplicated ? `sync: poll 5m written on its entry, not the file's replication: ${b.notReplicated} — ` +
-      `mason add ${name} --sync "poll 1h" polls it hourly; mason add ${name} --sync off reads it only by mason sync ${name}`
-    : b.sync.value === "off" ? `sync: off (${b.sync.from === "entry" ? "its entry's" : b.sync.from === "file" ? "the file's" : "the default"}): after its first sync it is read again only by mason sync ${name} — ` +
-      `mason add ${name} --sync "poll 5m" polls it every 5 minutes`
-    : b.sync.value === "replication" ? `sync: replication (${b.sync.from === "entry" ? "its entry's" : "the file's"}): kept current from the database's change log after its first sync — ` +
-      `mason add ${name} --sync "poll 5m" polls it instead`
-    : `sync: ${b.sync.value} (${b.sync.from === "entry" ? "its entry's" : "the file's"}): polled every ${b.sync.value.slice("poll ".length)} after its first sync — mason add ${name} --sync off stops that`;
-  return { line: `Added ${b.table} to ${file}: ${copies}${b.key ? `, keyed by ${b.key.join(", ")}` : ""}${b.already ? " (already so)" : ""}`, notes: [
+  const change = "Its Sync button changes this.";
+  const sync = b.bigOff ? `Its sync is set to Off: it has more than 1,000,000 rows, and each poll would scan the whole table on your database. Press Sync now to sync it. ${change}`
+    : b.notReplicated ? `Its sync is set to every 5 minutes, not Live: ${b.notReplicated}. ${change}`
+    : b.sync.value === "off" ? `Its sync is Off: after its first sync, it syncs only when you press Sync now. ${change}`
+    : b.sync.value === "replication" ? `Its sync is Live: after its first sync, changes stream from your database's change log. ${change}`
+    : `Its sync is ${syncWords(b.sync.value).toLowerCase()}: after its first sync, Mason checks it for changes on that schedule. ${change}`;
+  return { line: `Added ${b.table}: ${copies}${b.key ? `, keyed by ${b.key.join(", ")}` : ""}${b.already ? " (it was already added)" : ""}.`, notes: [
     sync,
     ...(b.pollCost !== null ? [b.pollCost] : []),
-    ...(b.addedKey.length ? [`key added: ${b.addedKey.join(", ")} (a synced table always has its key)`] : []),
-    ...(s.length ? [`left out ${s.join(", ")}: ${s.length === 1 ? "it looks" : "they look"} like ${s.length === 1 ? "a secret" : "secrets"}, ` +
-      `which anyone with a user's password could read (--include ${s[0]} adds it)`] : []),
+    ...(b.addedKey.length ? [`Its key ${b.addedKey.join(", ")} was added to its columns: a synced table always keeps its key.`] : []),
+    // only the command can add a column left out of a table already added: named
+    ...(s.length ? [`Left out ${s.join(", ")}: ${s.length === 1 ? "it looks" : "they look"} like ${s.length === 1 ? "a secret" : "secrets"}, ` +
+      `which anyone with a user's password could read. To sync ${s.length === 1 ? "it" : "one"}, run mason add ${name} --include ${s[0]}.`] : []),
   ] };
 }
 
-/** What `mason remove` prints for the tables removed (src/cli/commands.ts `removedReport`). */
-export function removedReport(removed, file) {
-  return { headline: `Removed ${removed.join(", ")}`, details: [["from", file]],
-    tips: [`Mason stops syncing ${removed.length === 1 ? "it" : "them"} and drops ${removed.length === 1 ? "its synced data" : "their synced data"}`] };
+/** What the page says for the tables removed (`mason remove`'s facts, src/cli/commands.ts `removedReport`, without the
+ *  sources file it names). */
+export function removedReport(removed) {
+  return { headline: `Removed ${removed.join(", ")}.`, details: [],
+    tips: [`Mason stopped syncing ${removed.length === 1 ? "it" : "them"} and deleted ${removed.length === 1 ? "its synced data" : "their synced data"}.`] };
 }
 
 /**
@@ -131,23 +135,26 @@ export function removedReport(removed, file) {
  */
 export const pickBody = (table, columns = [], key = []) => ({ table, picked: true, ...(columns.length ? { columns } : {}), ...(key.length ? { key } : {}) });
 
-/** The sources file as the commands name it, from the project's root (`/api/state` `source.shownFile`), when it is the
- *  one the state names: the page never shows an absolute path. */
-const shownFileOf = (s, file) => s?.source?.file === file && typeof s.source.shownFile === "string" ? s.source.shownFile : file;
-
-/** A table just added (`/api/pick`'s answer, `mason add --json`'s `added` entry): the line and notes `mason add` prints,
- *  the sources file named as `file` (as `mason add` names it: from the project's root). */
-export function renderTableAdded(b, file = b.file) {
-  const l = addedLines(b, file);
-  return `<div class="done"><p class="headline">${esc(l.line)}</p>${l.notes.map((x) => `<p class="note">${esc(x)}</p>`).join("")}` +
+/** A table just added (`/api/pick`'s answer, `mason add --json`'s `added` entry): `addedLines`. `saved`: the answer to a
+ *  Sync choice saved (`"sync"`, or true) or a column form saved (`"columns"`), which says what was saved and the notes
+ *  after it, never "Added" (the table was added before); the same columns saved again say nothing changed. */
+export function renderTableAdded(b, saved = false) {
+  const l = addedLines(b);
+  const savedSync = saved === true || saved === "sync";
+  const name = entryName(b.table);
+  const head = savedSync ? `Saved ${name}'s sync.`
+    : saved === "columns" ? (b.already ? `Nothing changed: ${name} already syncs ${columnsWords(b)}.` : `Saved ${name}'s columns: ${columnsWords(b)}.`)
+    : l.line;
+  // after a column form, its sync is as it was: not said again
+  const notes = savedSync ? [l.notes[0].replace(" Its Sync button changes this.", ""), ...l.notes.slice(1)] : saved === "columns" ? l.notes.slice(1) : l.notes;
+  return `<div class="done"><p class="headline">${esc(head)}</p>${notes.map((x) => `<p class="note">${esc(x)}</p>`).join("")}` +
     `${button("Dismiss", { dismissOutcome: "", popClose: "" }, "small")}</div>`;
 }
 
-/** Tables just removed (`/api/remove`'s answer, `mason remove --json`'s shape): what `mason remove` prints, the file named
- *  as `file`. */
-export function renderTablesRemoved(b, file = b.file) {
-  const r = removedReport(b.removed, file);
-  return `<div class="done"><p class="headline">${esc(r.headline)}</p>${rowsHtml(r.details)}${r.tips.map((x) => `<p class="tip">Tip: ${esc(x)}</p>`).join("")}` +
+/** Tables just removed (`/api/remove`'s answer, `mason remove --json`'s shape): `removedReport`. */
+export function renderTablesRemoved(b) {
+  const r = removedReport(b.removed);
+  return `<div class="done"><p class="headline">${esc(r.headline)}</p>${r.tips.map((x) => `<p class="tip">${esc(x)}</p>`).join("")}` +
     `${button("Dismiss", { dismissOutcome: "", popClose: "" }, "small")}</div>`;
 }
 
@@ -163,8 +170,8 @@ function pickForm(t, cols, ticked = null) {
   if ("failure" in cols) return `${renderFailure(cols.failure)}${button("Cancel", { cancelChoose: "", popClose: "" }, "small")}`;
   const boxes = (field) => cols.columns.map((c) => tick(field, c, ticked?.[field]?.includes(c.name) ?? false)).join("");
   return `<form class="pick" data-pick-form="${esc(t.table)}" autocomplete="off">` +
-    (t.key.length ? "" : `<fieldset><legend>Its key: the columns that tell its rows apart, as ${code(`mason add ${name} --key`)}</legend>${boxes("key")}</fieldset>`) +
-    `<fieldset><legend>Its columns, as ${code(`mason add ${name} --columns`)} (none ticked: as ${code(`mason add ${name}`)}, every column)</legend>${boxes("columns")}</fieldset>` +
+    (t.key.length ? "" : `<fieldset><legend>Its key: the columns that tell its rows apart</legend>${boxes("key")}</fieldset>`) +
+    `<fieldset><legend>The columns to sync (tick none to sync every column)</legend>${boxes("columns")}</fieldset>` +
     `<button type="submit" class="primary small">Add ${esc(name)}</button> ${button("Cancel", { cancelChoose: "", popClose: "" }, "small")}</form>`;
 }
 
@@ -288,9 +295,9 @@ export function keptSync(t) {
 export const syncBody = (table, sync) => ({ table, picked: true, sync, keep: true });
 
 /** What Live keeps on the database, said wherever it can be chosen (issue 840). */
-export const LIVE_SLOT_WORDS = "Live keeps a replication slot on your database. While Mason is not reading it — stopped, or down — " +
-  "the slot holds every byte of WAL (the database's change log) written from then on, on your database's disk, until Mason reads it again " +
-  "or the slot is dropped (mason destroy, or no table left on sync: replication). max_slot_wal_keep_size caps what it may hold.";
+export const LIVE_SLOT_WORDS = "Live keeps a replication slot on your database. While Mason is not reading it (stopped or down), " +
+  "the slot keeps all the WAL (your database's change log) written since, on your database's disk. It keeps it until Mason reads it again " +
+  "or the slot is dropped. The slot is dropped when no table is set to Live, or by mason destroy. max_slot_wal_keep_size limits how much it can keep.";
 
 /** What a choice asks before it is saved, or null: a poll of a big table (its cost on the database), Live with a
  *  warning (each said). `c`: `GET api/tables/<table>/sync`'s answer. */
@@ -298,10 +305,10 @@ export function syncQuestion(c, value) {
   const poll = c.polls.find((p) => p.sync === value);
   if (poll && c.bigRows) {
     return { lines: [poll.cost ?? `${entryName(c.table)} has more than 1,000,000 rows, and each poll scans it whole on your database.`],
-      ask: `Scan ${entryName(c.table)} whole on your database every ${intervalWords(poll.seconds)}?`, yes: `Poll it every ${intervalWords(poll.seconds)}` };
+      ask: `Scan all of ${entryName(c.table)} on your database every ${intervalWords(poll.seconds)}?`, yes: `Poll it every ${intervalWords(poll.seconds)}` };
   }
   const warnings = value === "replication" ? c.live.checks.filter((x) => x.state === "warn") : [];
-  if (warnings.length) return { lines: warnings.map((x) => `${x.name}: ${x.detail}`), ask: `Keep ${entryName(c.table)} current by logical replication, with ${warnings.length === 1 ? "this warning" : "these warnings"}?`, yes: "Save Live (replication)" };
+  if (warnings.length) return { lines: warnings.map((x) => `${x.name}: ${x.detail}`), ask: `Keep ${entryName(c.table)} up to date by logical replication, with ${warnings.length === 1 ? "this warning" : "these warnings"}?`, yes: "Save Live (replication)" };
   return null;
 }
 
@@ -333,20 +340,20 @@ export function renderSyncChoice(t, c, ask = null, open = false, picked = null) 
   const ticked = picked ?? now;
   const radio = (value, label, what, { disabled = false, extra = "" } = {}) =>
     `<label class="choice${disabled ? " disabled" : ""}"><input type="radio" name="sync" value="${esc(value)}"${value === ticked ? " checked" : ""}${disabled ? " disabled" : ""}> ` +
-    `<span class="choice-body"><span><span class="choice-label">${esc(label)}</span>${value === now ? ` <span class="dim">(its sync now)</span>` : ""}</span><span class="choice-what">${esc(what)}</span>${extra}</span></label>`;
+    `<span class="choice-body"><span><span class="choice-label">${esc(label)}</span>${value === now ? ` <span class="dim">(current)</span>` : ""}</span><span class="choice-what">${esc(what)}</span>${extra}</span></label>`;
   const polls = c.polls.map((p) => radio(p.sync, syncWords(p.sync), `Scans the whole table on your database every ${intervalWords(p.seconds)}.`,
     { extra: p.cost ? `<span class="choice-cost">${esc(p.cost)}</span>` : "" }));
   // its sync now, written in the sources file at an interval the page does not offer: kept as a choice of its own
   const other = now.startsWith("poll ") && !c.polls.some((p) => p.sync === now)
-    ? [radio(now, syncWords(now), "Scans the whole table on your database at that interval, as the sources file says.")] : [];
+    ? [radio(now, syncWords(now), "Scans the whole table on your database at the interval set in the sources file.")] : [];
   const refused = c.live.checks.filter((x) => x.state === "refused"), warned = c.live.checks.filter((x) => x.state === "warn"), passed = c.live.checks.filter((x) => x.state === "ok");
-  const live = radio("replication", "Live (replication)", "Changes stream from your database's change log: no scans.", { disabled: !c.live.allowed });
+  const live = radio("replication", "Live (replication)", "Changes stream from your database's change log. No scans.", { disabled: !c.live.allowed });
   const checks = (refused.length ? `<p class="live-no">Live cannot be chosen: ${esc(refused.map((x) => x.name).join(", "))}.</p><ul class="checks">${refused.map(checkLine).join("")}</ul>` : "") +
     (warned.length ? `<ul class="checks">${warned.map(checkLine).join("")}</ul>` : "") +
     (passed.length ? details(`synccheck:${t.table}`, `The checks that pass (${passed.length})`, `<ul class="checks">${passed.map(checkLine).join("")}</ul>`, open) : "");
   return `<form class="pick syncpick" data-sync-form="${esc(t.table)}" autocomplete="off">` +
-    `<fieldset><legend>How Mason keeps ${esc(name)} current after its first sync</legend><p class="choice-what">As ${code(`mason add ${name} --sync`)}: its entry's sync: in the sources file.</p>` +
-    `<div class="radios">${radio("off", "Off", `Synced once, then only when you press Sync now (mason sync ${name}).`) + [...polls, ...other].join("") + live}</div>` +
+    `<fieldset><legend>How Mason keeps ${esc(name)} up to date after its first sync</legend>` +
+    `<div class="radios">${radio("off", "Off", "Synced once. After that, only when you press Sync now.") + [...polls, ...other].join("") + live}</div>` +
     `<p class="note live-slot">${esc(LIVE_SLOT_WORDS)}</p>${checks}</fieldset>` +
     `<button type="submit" class="primary small">Save</button> ${cancel}</form>`;
 }
@@ -460,7 +467,7 @@ export function renderTables(s, ui = {}) {
     if (syncOpen === t.table && t.added && readOnly === null) {
       pops.push(pop(syncId(t.table), renderSyncChoice(t, syncChoice, syncAsk, open(`synccheck:${t.table}`), syncPicked), { kind: "dialog", label: `Sync ${name}` }));
     }
-    const said_ = adding_ ? `<span class="dim">adding it to the sources file…</span>`
+    const said_ = adding_ ? `<span class="dim">adding it…</span>`
       : t.added ? [
         syncCtl,
         colsCtl,
@@ -479,7 +486,7 @@ export function renderTables(s, ui = {}) {
       .filter(([, x]) => x).map(([c, x]) => `<span class="fold f-${c}" data-fold="${esc(x)}"></span>`).join("");
     const note = under(folds + said_, "note");
     if (asking) {
-      pops.push(pop(anchor, `<p class="confirm">Remove ${esc(name)}? ${esc(removedReport([t.table], "").tips[0])}.</p>` +
+      pops.push(pop(anchor, `<p class="confirm">Remove ${esc(name)}? Mason will stop syncing it and delete its synced data.</p>` +
         `<p class="pop-actions">${button(`Remove ${name}`, { confirmRemoveTable: t.table }, "danger small")} ${button("Cancel", { cancelRemoveTable: "", popClose: "" }, "small")}</p>`, { kind: "dialog", label: `Remove ${name}?` }));
     }
     // a refused add with its form open: the refusal is said in the form's popover, over the boxes as they were ticked
@@ -495,14 +502,14 @@ export function renderTables(s, ui = {}) {
       // a sync saved (or refused) is said beside the sync it changed; an add or a remove beside the row's actions
       // a column form saved, beside its columns' summary
       pops.push(pop(outcome.at === "sync" && t.added && readOnly === null ? syncId(t.table) : outcome.at === "columns" && t.added && summary !== null && readOnly === null ? columnsId(t.table) : anchor,"failure" in outcome ? `${renderFailure(outcome.failure)}${button("Dismiss", { dismissOutcome: "", popClose: "" }, "small")}`
-        : "added" in outcome ? renderTableAdded(outcome.added, shownFileOf(s, outcome.added.file)) : renderTablesRemoved(outcome.removed, shownFileOf(s, outcome.removed.file))));
+        : "added" in outcome ? renderTableAdded(outcome.added, outcome.at ?? false) : renderTablesRemoved(outcome.removed)));
     }
     if (synced?.table === t.table) {
       pops.push(pop(anchor, "failure" in synced ? `${renderFailure(synced.failure)}${button("Dismiss", { dismissSynced: "", popClose: "" }, "small")}` : renderSynced(synced.synced, t.table, s)));
     }
     return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}${said_ ? " has-note" : ""}"><th scope="row" class="name"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
       `<td class="state">${state}${bar}</td>${cell(rows, "num rows")}${cell(f.key, "mono key", f.key)}${last}` +
-      `${t.added ? (sizeOf.has(t.table) ? cell(bytesText(sizeOf.get(t.table)), "num size") : cell("—", "num size", "not measured yet: a synced table's size is measured every 10 min once its rows are written into the file; a small table's can wait in the write-ahead log until the log passes 16 MiB or Mason stops")) : cell("", "num size")}` +
+      `${t.added ? (sizeOf.has(t.table) ? cell(bytesText(sizeOf.get(t.table)), "num size") : cell("—", "num size", "Not measured yet. A synced table's size is measured every 10 minutes, once its rows are written to disk. A small table's rows can wait in Mason's write-ahead log until it passes 16 MiB, or until Mason stops.")) : cell("", "num size")}` +
       `<td class="act" id="${esc(anchor)}">${act}</td></tr>` + note;
   };
   const added = s.tables.filter((t) => t.added).length;
@@ -514,15 +521,15 @@ export function renderTables(s, ui = {}) {
   // at most `limit` rows written (the one a form or a confirm is open on always): a database of 800 tables costs 100 rows
   const written = shown.filter((t, i) => i < limit || t.table === choosing || t.table === removing);
   const matching = filter.trim() ? `<p class="count dim">${n(shown.length)} with “${esc(filter.trim())}” in the name</p>` : "";
-  const sizesFailed = added && sizes && "failure" in sizes ? `<p class="count">The synced tables' own sizes: could not read them (${esc(firstLine(sizes.failure.message))}; ${code("mason usage")} has them)</p>` : "";
+  const sizesFailed = added && sizes && "failure" in sizes ? `<p class="count">The synced tables' sizes could not be read: ${esc(firstLine(sizes.failure.message))}.</p>` : "";
   const rowsHtml_ = written.map(line).join("");
   return stray + (viewOnly !== null ? readOnlyLine("Tables are not added, removed or synced", viewOnly)
     : readOnly === null ? "" : `<p class="count">Tables are not added or removed from this page: ${esc(readOnly)}.</p>`) +
-    (added ? "" : empty("No table added yet", readOnly === null ? `Add one from the list, as ${code("mason add <table>")} does.` : `The sources file names the tables to sync.`)) + matching +
+    (added ? "" : empty("No table added yet", readOnly === null ? "Add one from the list below." : "The tables to sync are set in the sources file.")) + matching +
     panel(`<table class="catalog"><thead><tr>${head.map(([h, c]) => `<th scope="col"${c ? ` class="${c}"` : ""}>${h}</th>`).join("")}</tr></thead>` +
       `<tbody>${rowsHtml_}</tbody></table>`) + pops.join("") + moreRows("tables", Math.min(limit, shown.length), shown.length, TABLE_ROWS) +
     (!shown.length ? `<p class="dim">No ${show === "added" ? "added " : show === "failed" ? "failed " : show === "not-added" ? "table that is not added, " : ""}table${filter.trim() ? `'s name has “${esc(filter.trim())}”` : ""}.</p>` : "") + sizesFailed +
-    (added ? `<p class="dim">A synced table's own size is measured every 10 minutes, once its rows are written into the file (${code("mason usage")}).</p>` : "");
+    (added ? `<p class="dim">A synced table's size is measured every 10 minutes, once its rows are written to disk.</p>` : "");
 }
 
 export const page = {
