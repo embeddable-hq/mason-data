@@ -13,6 +13,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **Every example in a box on the web page now starts with "e.g."**: the Tables and Queries search boxes say
   `e.g. orders`, Queries' since `e.g. 2h`, and a new user's name and where it connects from `e.g. metabase` and
   `e.g. 192.0.2.0/24, 2001:db8::/32`, so an example is never taken for a value already filled in.
+
 - **On the web page's Users, Connect comes first and the cursor starts in the new user's Name.** The page reads
   Connect, then the Add a user form, then the users; arriving on it (from the sidebar or a link) puts the cursor in
   Name, ready to type, except on a touch screen, on a read-only page, or when you have already clicked into something.
@@ -33,6 +34,23 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   own default, which every role has: it says so as information. A grant someone made, or a schema the role owns, is
   still a warning.
 
+- **The web page speaks plain English.** Its words are whole, short sentences, and it says "query" where it said
+  "statement". It tells you how to do things on the page (Sync now, a table's Sync button, Enable, Users) and names a
+  `mason` command or a file only where the page can't do it. For example, a table just added says what its sync is and
+  that its Sync button changes it, where it named the sources file and `mason add --sync`. `mason status` and the other
+  commands keep their own words.
+- **"Catching up" is now "Finishing sync".** A table whose first sync is done while Mason gets the changes made during
+  it says "Finishing sync" on the Tables page, and "Getting the changes made since it was last synced. You can query it
+  meanwhile." under it. `mason status` and `mason wait` say that sentence too, and a streamed table's line says
+  "getting the changes made since 09:00 UTC: reading the changes". `--json`'s `catching-up` is unchanged.
+- **The Overview's "Mason" card shows only what you can use.** It keeps Database (its name, host, Postgres version, and
+  whether it is your main database or a read replica), Mason (version and uptime), Disk (free space beside what the
+  synced data uses) and Connected tools; restarts show only when there were some. The sources file, the sync settings
+  and the page's socket are no longer on it: the Tables page shows each table's sync. A database on another machine is
+  now a quiet line, "Your database is on another machine. Mason will sync the tables you choose to this machine.", not a
+  warning, and a primary is no longer a warning on the page. How text sorts shows only when it differs from your
+  database, as one line.
+
 ## What was wrong and is now right
 
 - **A running Mason no longer connects to your database every 10 seconds while idle.** It read the database's tables
@@ -41,6 +59,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `mason status`, `mason add` or `remove`, `mason doctor` or the web page, reusing a read under a minute old. With every
   table `sync: off`, a run that nobody asks opens no connection after its first sync. A table or column added to the
   database shows within about a minute of being asked for.
+- **The web page's Users table no longer shows its Added header in a framed box.** The style of a new user's
+  password card also caught the column's header, giving it a border and a colored bar.
+- **On a phone, a new user's password card is scrolled into view.** After Add a user it was written at the bottom edge
+  of the screen.
+- **The Overview's "Connect from anywhere" heading no longer overlaps the tip above it**, and on Users › Connect the
+  full stop after `<password>` no longer wraps onto a line of its own.
 - **The Remove button is back on the web page's Tables.** Each added table showed "View events", "Sync now" and then
   only "…". The button was cut off because its column was too narrow. Now the column fits all three buttons at every
   window width.

@@ -326,7 +326,7 @@ within seconds.
   WAL the slot may keep. `mason stop` keeps the slot, so the next start resumes where it stopped. Mason drops the slot
   (and checks that it is gone) when no table uses `replication` any more, and on `mason destroy`.
 
-[docs/DESIGN.md](docs/DESIGN.md) "Keeping a copy current" explains every decision behind these, and why.
+[docs/DESIGN.md](docs/DESIGN.md#keeping-a-copy-current) explains every decision behind these, and why.
 
 ## Performance vs Postgres
 

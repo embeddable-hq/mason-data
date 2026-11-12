@@ -12,11 +12,11 @@
 Mason is a drop-in replacement for a Postgres read replica: the SQL a tool sends Postgres is answered as Postgres
 answers it — the same columns, types, values, text and order — or refused by name, never answered differently. Every
 piece a statement is made of is verified against a real Postgres by the oracle ("What is verified" below names
-each). The copy is read-only.
+each). The synced data is read-only.
 
 | Postgres | Mason |
 |---|---|
-| A `SELECT` over the copied tables (and the source's views over them): joins, subqueries, WITH queries, UNION / INTERSECT / EXCEPT, GROUP BY and grouping sets, HAVING, DISTINCT, ORDER BY under the database's collation, LIMIT / OFFSET / FETCH FIRST, window functions, CASE, COALESCE / NULLIF / GREATEST / LEAST, IN and ANY / ALL, parameters, EXPLAIN | answered exactly as Postgres answers it: 44 constructs and 92 forms of them verified |
+| A `SELECT` over the synced tables (and the source's views over them): joins, subqueries, WITH queries, UNION / INTERSECT / EXCEPT, GROUP BY and grouping sets, HAVING, DISTINCT, ORDER BY under the database's collation, LIMIT / OFFSET / FETCH FIRST, window functions, CASE, COALESCE / NULLIF / GREATEST / LEAST, IN and ANY / ALL, parameters, EXPLAIN | answered exactly as Postgres answers it: 44 constructs and 92 forms of them verified |
 | The types: "char", a type the source made, bigint, bit, bit varying, boolean, box, bytea, character, character varying, cid, cidr, circle, date, daterange, double precision, inet, int4multirange, int4range, int8range, integer, interval, json, jsonb, jsonpath, line, lseg, macaddr, macaddr8, money, name, numeric, numrange, oid, path, pg_lsn, point, polygon, real, regclass, regtype, smallint, text, tid, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsquery, tsrange, tstzmultirange, tstzrange, tsvector, uuid, xid, xid8, xml; arrays of bigint, bit, boolean, character, character varying, cidr, date, double precision, inet, int4range, integer, interval, json, jsonb, macaddr, money, numeric, oid, point, real, smallint, text, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsvector, uuid; the source's enums and citext; a table's row | answered (93 types verified) |
 | Functions, operators, aggregates, window functions and casts | answered exactly: 255 functions, 388 operators, 97 aggregates, 58 window functions and 126 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
@@ -25,7 +25,7 @@ each). The copy is read-only.
 ## Why not DuckDB by itself
 
 DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 7,219 statements,
-each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
+each sent as written to Mason and to a plain DuckDB connection over the same synced tables (tests/integration/duck-oracle.itest.ts):
 
 | Of 7,219 statements | Mason | DuckDB alone |
 |---|---|---|
@@ -49,7 +49,7 @@ Mason answers a statement on DuckDB only when it can give **exactly** the answer
 types, values, text and order (docs/DESIGN.md). Everything a statement is made of — each
 function, operator, aggregate, cast, type and construct Postgres resolved it to — must be on the **verified** list at
 the end: pieces a statement of tests/integration/duck-oracle.itest.ts used, which Mason answered exactly as a real
-Postgres did, after a copy and after two rounds of changes. A statement using anything else is refused
+Postgres did, after the first sync and after two rounds of changes. A statement using anything else is refused
 (SQLSTATE 0A000, `Mason gap unverified`), and the error names each piece.
 
 What is known **beyond** that list is below. A refusal names its gap in the error's detail (`Mason gap <id>`) and
