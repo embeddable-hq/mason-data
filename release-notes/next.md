@@ -2,9 +2,20 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **The web page no longer shows a psql line**: the Users page's Connect card keeps Host, Port, Database, SSL mode and
+  URL, and the Overview's Connect (and Queries' when the request log is empty) keeps the URL, each with Copy; Getting
+  started's last step no longer has a "Copy the psql line" button. Paste the URL after `psql`. `mason status` and
+  `--json`'s `psql` field are unchanged.
+
+- **The web page's card for a user just added shows URL, User and Password only**, each with Copy: the Database, Host,
+  Port and SSL mode it repeated are on the Users page's Connect card above it. `mason user add --json` is unchanged.
+
 - **Every example in a box on the web page now starts with "e.g."**: the Tables and Queries search boxes say
   `e.g. orders`, Queries' since `e.g. 2h`, and a new user's name and where it connects from `e.g. metabase` and
   `e.g. 192.0.2.0/24, 2001:db8::/32`, so an example is never taken for a value already filled in.
+- **On the web page's Users, Connect comes first and the cursor starts in the new user's Name.** The page reads
+  Connect, then the Add a user form, then the users; arriving on it (from the sidebar or a link) puts the cursor in
+  Name, ready to type, except on a touch screen, on a read-only page, or when you have already clicked into something.
 
 ## What was wrong and is now right
 
@@ -15,7 +26,26 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `MASON_UI_NAV_LINKS`. In a narrow window their icons sat left of the others, and the current one's highlight was cut
   short. In a wide window and on a phone, their rows were shorter than the others. Now they look the same as the page's
   own links at every width.
-
+- **The web page's Add a user form no longer jumps when "Connects from" is toggled.** Ticking "Only from these
+  addresses" showed the address box and pushed Add a user onto a line of its own; From anywhere pulled it back. Now the
+  box keeps its place whichever is ticked, saying "any address" under From anywhere, so nothing in the form moves; the
+  same in a user's From… box.
+- **The web page's radio choices line up.** Where a choice wrapped, "Only from these addresses" started under the
+  "Connects from" label rather than under "From anywhere". Now every choice of radio buttons (where a user connects
+  from, in the add form and in From…; a table's sync) is one a line with the buttons in one column, or, in the add
+  form where there is the room, one row.
+- **A BI tool names a column of an enum, a citext or a composite as its type.** Mason sent such a column with the
+  source database's number for its type, which Mason's own catalog could hold as another type, often a synced table's
+  row type. So a tool that looks the number up (Metabase, DBeaver and Tableau through JDBC, .NET and asyncpg clients)
+  showed the column as that table, and a prepared statement that named the type by its number was read as the other
+  type. Mason now sends its own number for every type, the one its catalog names, so the lookup names the column's type
+  and a prepared statement given that number reads it. The number is no longer the source database's. A physical read
+  replica shares its primary's numbers, and Mason sent the primary's until now: an application that learned these
+  numbers on its primary and decodes Mason's rows by them must now look such types up on Mason. Mason's numbers for
+  these types can also change when the synced tables change (its catalog is built again, for example when a table with
+  a new enum is added): a tool connected across that change may show stale type names until it reconnects, and a new
+  connection is always right. `pg_typeof` of such a column is also Postgres's: `other.level` for an enum of another schema and `mood[]`
+  for an array, where Mason said `level` and `_mood`.
 - **A database URL naming a database the server does not have no longer lists every database on that server.** The
   failure of `mason init`, `mason start`, `mason doctor`, `mason tables` and every other command that connects to it
   (and their `--json`) named them all: hundreds on a large

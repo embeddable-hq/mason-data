@@ -2759,10 +2759,10 @@ const USER_OPS: Readonly<Record<string, string>> = { SVFOP_SESSION_USER: "sessio
 const SESSION_OPS: ReadonlySet<string> = new Set(["SVFOP_SESSION_USER"]);
 /** a user the roles file holds to nothing: its catalog role is `NO_ROLE_CATALOG`, never a name it should answer */
 const HELD_TO_NOTHING_OPS: ReadonlySet<string> = new Set(Object.keys(USER_OPS));
-/** the functions Mason overrides in the catalog's `public` (src/api/postgres/catalog.ts currentSettingSql,
- *  sourceTypeNames; `version()` in `Server`'s setup), each with what a call of it may be written with: `pg_catalog.` too,
- *  or unqualified only (`pg_catalog.format_type`, written out, is Postgres's own) */
-const OVERRIDES: Readonly<Record<string, { qualified: boolean }>> = { version: { qualified: true }, current_setting: { qualified: true }, format_type: { qualified: false } };
+/** the functions Mason overrides in the catalog's `public` (src/api/postgres/catalog.ts currentSettingSql; `version()`
+ *  in `Server`'s setup), each with what a call of it may be written with: `pg_catalog.` too, or unqualified only. A type
+ *  a database made needs none: the wire sends the catalog's own OID for it (issue 861), so `format_type` is Postgres's */
+const OVERRIDES: Readonly<Record<string, { qualified: boolean }>> = { version: { qualified: true }, current_setting: { qualified: true } };
 /** one splice of `userSpliced`: the span the parser placed at a location, and what is written in its place */
 type Splice = { kind: "user"; keyword: string } | { kind: "override"; name: string };
 
@@ -2776,7 +2776,7 @@ type Splice = { kind: "user"; keyword: string } | { kind: "override"; name: stri
  *   src/api/postgres/catalog.ts asRole), spliced only for a user the roles file holds to nothing
  *   (`HELD_TO_NOTHING_OPS`), whose catalog role is `NO_ROLE_CATALOG`: Postgres answers its own name for all three to a
  *   login with no grant.
- * - EVERY CALL OF AN OVERRIDE (`OVERRIDES`: `version()`, `current_setting(…)`, `format_type(…)`), however written, is
+ * - EVERY CALL OF AN OVERRIDE (`OVERRIDES`: `version()`, `current_setting(…)`), however written, is
  *   the override's (`public.<name>`): the catalog runs a request under the session's search_path, which puts pg_catalog
  *   first as Postgres's does (GitHub issue 253), so the override is reached by name, never by the path's order — and
  *   Postgres's own `pg_catalog.current_setting` is called by its OID's C function whatever its catalog row says, so it
@@ -2993,7 +2993,8 @@ class Server {
   private duckPlansAt = 0;
   private duckPlansRoles: RolesLive | null = null;
 
-  /** the source's OIDs for the types an extension made, by name (a copied citext column's), from the schema */
+  /** the source's OIDs for the types a database made, by name (a copied citext column's), from the schema: never sent
+   *  (the wire sends the catalog's, issue 861); src/duck/plan.ts reads whether a whole row is the source's by them */
   userTypes(): ReadonlyMap<string, number> {
     const out = new Map<string, number>();
     for (const t of this.options.schema().tables) {

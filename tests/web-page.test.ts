@@ -595,21 +595,23 @@ test("the users while the roles file cannot be read: mason user list's tip, word
   assert.doesNotMatch(textOf(renderUsers(list, null, NOW_R, null, null)), /cannot be read/);
 });
 
-test("a user just added: every field the JSON carries — URL, User, Password, Database, Host, Port, SSL mode — each with a Copy that copies it, no psql line, and that it will not be shown again", async () => {
+test("a user just added: URL, User and Password alone — each with a Copy that copies it, no Database, Host, Port, SSL mode (Connect's) nor psql line, and that it will not be shown again", async () => {
   const password = "mason_0123456789abcdef_" + "a".repeat(32);
   const url = `postgres://metabase:${password}@127.0.0.1:5433/shop`;
   const html = fn<[unknown], string>("renderAdded")({ user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password,
     database: "shop", url, psql: psqlLine(url), host: "127.0.0.1", port: 5433, sslmode: "disable" });
   const text = textOf(html);
-  // the seven fields a tool's form asks for, in one layout: each a label and its value with a Copy (issue 839)
-  assert.match(text, /^The user metabase added: its password is shown this once Shown once URL postgres:\/\/metabase:mason_0123456789abcdef_a{32}@127\.0\.0\.1:5433\/shop Copy User metabase Copy Password mason_0123456789abcdef_a{32} Copy Database shop Copy Host 127\.0\.0\.1 Copy Port 5433 Copy SSL mode disable Copy Paste it /);
-  const fields: Array<[string, string, string]> = [["URL", "added-url", url], ["User", "added-user", "metabase"], ["Password", "added-password", password],
-    ["Database", "added-database", "shop"], ["Host", "added-host", "127.0.0.1"], ["Port", "added-port", "5433"], ["SSL mode", "added-sslmode", "disable"]];
+  // the user's own three fields, in one layout: each a label and its value with a Copy (issues 839, 876); the run's
+  // Database, Host, Port and SSL mode are on the Connect card above it, so not here
+  assert.match(text, /^The user metabase added: its password is shown this once Shown once URL postgres:\/\/metabase:mason_0123456789abcdef_a{32}@127\.0\.0\.1:5433\/shop Copy User metabase Copy Password mason_0123456789abcdef_a{32} Copy Paste it /);
+  const fields: Array<[string, string, string]> = [["URL", "added-url", url], ["User", "added-user", "metabase"], ["Password", "added-password", password]];
   for (const [label, id, value] of fields) {
     const re = value.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
     assert.match(html, new RegExp(`<dt>${label}</dt><dd><span class="copyrow"><code id="${id}">${re}</code> <button type="button" class="small" data-copy="${id}" data-room="Press ⌘C">Copy</button></span></dd>`), `${label}: its value and a Copy, laid out as every other field`);
   }
   assert.deepEqual([...html.matchAll(/data-copy="([^"]+)"/g)].map((m) => m[1]), fields.map(([, id]) => id), "a Copy on every field, none else");
+  assert.deepEqual([...html.matchAll(/<dt>([^<]*)<\/dt>/g)].map((m) => m[1]), ["URL", "User", "Password"], "exactly three rows");
+  assert.doesNotMatch(text, /Database|Host|Port|SSL mode/, "the run's facts are Connect's, not this card's");
   // each Copy copies its own field's text, through the page's one copyClick
   const copyClick = fn<[Record<string, string>, { textContent: string; dataset?: Record<string, string> }, unknown], Promise<void> | null>("copyClick");
   const codes = new Map([...html.matchAll(/<code id="([^"]+)">([^<]*)<\/code>/g)].map((m) => [m[1]!, { textContent: textOf(m[2]!) }]));
@@ -628,9 +630,9 @@ test("a user just added: every field the JSON carries — URL, User, Password, D
   assert.match(text, /Paste it into the tool now: Mason keeps no copy of the password, and this page will not show it again\./);
   assert.match(html, /<span class="badge warn">Shown once<\/span>/, "a clear note that it is shown once");
   assert.match(html, /<button type="button" class="primary" data-dismiss-added="">I have copied it<\/button>/);
-  // while Mason does not run, the JSON carries no URL, host, port nor sslmode: those fields are not shown, never "undefined"
+  // while Mason does not run, the JSON carries no URL: it is not shown, never "undefined"
   const bare = fn<[unknown], string>("renderAdded")({ user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password, database: "shop" });
-  assert.deepEqual([...bare.matchAll(/data-copy="([^"]+)"/g)].map((m) => m[1]), ["added-user", "added-password", "added-database"]);
+  assert.deepEqual([...bare.matchAll(/data-copy="([^"]+)"/g)].map((m) => m[1]), ["added-user", "added-password"]);
   assert.doesNotMatch(textOf(bare), /undefined|null|Host|Port|SSL mode/);
 });
 
@@ -748,7 +750,7 @@ test("a read-only page (pageReadOnly): no page writes a control that sends a cha
   for (const data of buttons) assert.ok(data.length > 0 && data.every((d) => VIEW_BUTTONS.test(d)), `a button that may send a change: ${data.join(" ")}`);
   assert.ok(!/<form\b(?![^>]*id="request-filters")/.test(shown), "no form but the request log's filters");
   // viewing is unchanged: the tables, the users, the statement running and where to connect are all there
-  for (const said of ["public.customers", "public.accounts", "metabase", "SELECT count(*) FROM orders", "connect-psql"]) assert.ok(shown.includes(said), said);
+  for (const said of ["public.customers", "public.accounts", "metabase", "SELECT count(*) FROM orders", "connect-url"]) assert.ok(shown.includes(said), said);
   assert.ok(textOf(shown).includes(`Tables are not added, removed or synced from this page: ${why}.`));
   assert.ok(textOf(shown).includes(`Users are not added, changed, disabled or removed from this page: ${why}.`));
 });
@@ -760,10 +762,10 @@ test("a read-only page: no add, create or write link anywhere — the Connect pa
   const open = await pageByPage(CATALOG_STATE);
   const shown = await pageByPage({ ...CATALOG_STATE, pageReadOnly: why });
   for (const lead of LEADS) assert.ok(!lead.test(shown.all), `read-only: ${lead}`);
-  // the Connect panel is on the Overview and on Queries' empty log, and keeps its URL, psql and Copy on both
+  // the Connect panel is on the Overview and on Queries' empty log, and keeps its URL and Copy on both
   for (const id of ["status", "queries"]) {
     assert.match(open.byPage.get(id)!, /<a class="btn[^"]*" href="#users">Create a user<\/a>/, `unset: Connect's Create a user on ${id}`);
-    assert.match(shown.byPage.get(id)!, /data-copy="connect-url"[\s\S]*data-copy="connect-psql"/, `read-only: Connect's URL and psql on ${id}`);
+    assert.match(shown.byPage.get(id)!, /data-copy="connect-url"/, `read-only: Connect's URL on ${id}`);
     assert.ok(textOf(shown.byPage.get(id)!).replace(/ :/g, ":").includes("A user's name and password go in place of <user>:<password>: mason user add <name> prints the whole URL once."), id);
   }
   // the Overview and Usage say why their controls are missing, as Tables and Users do; unset, none says it
@@ -1192,7 +1194,7 @@ test("MASON_PG_PUBLIC_URL: /api/state's postgres is the address a client reaches
     shown: "postgres://<user>:<password>@127.0.0.1:5433/shop?sslmode=require", psql: "psql 'postgres://<user>:<password>@127.0.0.1:5433/shop?sslmode=require'" }, "unset: the listener's own, as before");
   const note = /from elsewhere a tool connects to the server's own address/;
   const overview = textOf(renderConnect(pub, { served: true }));
-  assert.match(overview, /URL postgres:\/\/<user>:<password>@db\.example\.com:6432\/shop\?sslmode=verify-full Copy psql psql 'postgres:\/\/<user>:<password>@db\.example\.com:6432\/shop\?sslmode=verify-full' Copy/);
+  assert.match(overview, /URL postgres:\/\/<user>:<password>@db\.example\.com:6432\/shop\?sslmode=verify-full Copy/);
   assert.doesNotMatch(overview, note);
   const users = textOf(renderUsersConnect(pub, true));
   assert.match(users, /Host db\.example\.com Copy Port 6432 Copy Database shop Copy SSL mode verify-full Copy URL postgres:\/\/<user>:<password>@db\.example\.com:6432\/shop\?sslmode=verify-full Copy/);
@@ -1486,7 +1488,7 @@ test("the users: From… asks where the user connects from in a popover beside i
   assert.equal(pops.length, 1);
   assert.equal(pops[0]!.anchor, "act-users-looker");
   assert.match(pops[0]!.html, /^<div class="pop ask" data-anchor="act-users-looker" role="dialog" aria-label="Where looker connects from">/);
-  assert.equal(textOf(pops[0]!.html), "Where looker connects from, as mason user from looker sets it: the sessions it holds from another address end at their next statement. Connects from From anywhere Only from these addresses Address ranges, comma-separated Change looker Cancel");
+  assert.equal(textOf(pops[0]!.html), "Where looker connects from, as mason user from looker sets it: the sessions it holds from another address end at their next statement. Connects from From anywhere Only from these addresses any address Address ranges, comma-separated Change looker Cancel");
   assert.match(pops[0]!.html, /<input type="radio" name="connects" value="only" checked>/, "opened at its ranges");
   assert.match(pops[0]!.html, /<input id="user-from-from" name="from"[^>]* value="192\.0\.2\.0\/24, 2001:db8::\/32">/);
   assert.match(pops[0]!.html, /<input type="hidden" name="user" value="looker"><\/form>/);
@@ -1504,7 +1506,9 @@ test("the users: From… asks where the user connects from in a popover beside i
 test("the add form: Connects from, in mason user add's words — From anywhere (the default, no from sent) or Only from these addresses, a comma list as --from takes it, the run judging each", async () => {
   const renderAddUser = fn<[unknown], string>("renderAddUser");
   const form = renderAddUser(CATALOG_STATE);
-  assert.match(textOf(form), /Name Connects from From anywhere Only from these addresses Address ranges, comma-separated Add a user$/);
+  assert.match(textOf(form), /Name Connects from From anywhere Only from these addresses any address Address ranges, comma-separated Add a user$/);
+  // the field's place is kept under from anywhere, saying rangesText(null) to the eye alone (issue 875; geometry: tests/web-radio-groups.test.ts)
+  assert.match(form, /<span class="ranges"><span class="ranges-any" aria-hidden="true">any address<\/span><span class="ranges-field">/);
   assert.match(form, /<input type="radio" name="connects" value="any" checked> From anywhere/, "from anywhere is the default, as mason user add with no --from");
   assert.match(form, /<input type="radio" name="connects" value="only"> Only from these addresses/);
   assert.match(form, /<input id="add-user-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e\.g\. 192\.0\.2\.0\/24, 2001:db8::\/32" value="">/);
@@ -1821,7 +1825,7 @@ async function until(cond: () => boolean, what = "the condition", ms = 5000): Pr
 /** The page in a fake browser: elements whose innerHTML reads back as a browser serialises it (a bare data-x attribute
  *  as data-x="", an apostrophe in text as itself), the listeners `start` adds, the interval it sets, and a FormData
  *  that reads a form's ticked boxes from the fake form. */
-function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "") {
+function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "", winExtra: Record<string, unknown> = {}) {
   // an element's attributes, and what holds the focus: a target `{ in: "sidebar" }` is inside the element of that id
   interface FakeEl { id: string; writes: number; html: string; hidden?: boolean; innerHTML: string; attrs: Map<string, string>; addEventListener: () => void;
     setAttribute(k: string, v: string): void; removeAttribute(k: string): void; contains(t: { in?: string } | null): boolean; focus(): void; querySelector(sel: string): FakeEl }
@@ -1848,11 +1852,52 @@ function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "") {
   let tick: (() => void) | null = null;
   class FormData { readonly ticked: Record<string, string[]>; constructor(form: { ticked: Record<string, string[]> }) { this.ticked = form.ticked; } getAll(name: string) { return this.ticked[name] ?? []; } }
   fn<[unknown, unknown], void>("start")(doc, { fetch: (p: string, i?: { method?: string; body?: string }) => run.fetch(p, i), FormData, location, addEventListener: (type: string, f: () => void) => { onWin.set(type, f); },
-    setInterval: (f: () => void) => { tick = f; return 1; }, setTimeout: (f: () => void, ms: number) => setTimeout(f, ms) });
+    setInterval: (f: () => void) => { tick = f; return 1; }, setTimeout: (f: () => void, ms: number) => setTimeout(f, ms), ...winExtra });
   /** the reader follows a link of the nav: the hash changes, and the browser says so */
   const go = (to: string) => { location.hash = to; onWin.get("hashchange")!(); };
   return { el, on, doc, go, replaced, tick: () => tick!(), settle: () => new Promise((r) => setTimeout(r, 20)) };
 }
+
+test("the Users page reads Connect, then the add form and what it answered, then the users (issue 887)", () => {
+  const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
+  const section = /<section id="page-users"[^>]*>([\s\S]*?)<\/section>/.exec(html)?.[1] ?? assert.fail("the Users section");
+  const order = [...section.matchAll(/<div id="([a-z-]+)"><\/div>/g)].map((m) => m[1]);
+  assert.deepEqual(order, ["users-connect", "add-user-box", "action", "added", "users"],
+    "Connect first; the card an add answered (added) and its refusal (action) beside the form; the list last");
+  assert.ok(section.indexOf('id="users-h"') < section.indexOf('id="users-connect"'), "under the title");
+});
+
+test("arriving on the Users page puts the cursor in the add form's Name — at the start and by a link followed; never at a poll's write, nor from what the person focused since, nor on a touch screen or read-only (issue 887)", async () => {
+  const focusedAfter = async (o: { hash?: string; to?: string; coarse?: boolean; state?: unknown; focusMeanwhile?: boolean } = {}) => {
+    const run = fakeRun();
+    if (o.state !== undefined) run.answers.set("GET api/state", () => new Response(JSON.stringify(o.state), { status: 200 }));
+    // the state held until released: the form, and so the Name, is written only once it is read
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => { release = r; });
+    const answer = run.answers.get("GET api/state")!;
+    run.answers.set("GET api/state", (async () => { await held; return answer(); }) as unknown as () => Response);
+    const { doc, go, tick, settle } = fakeBrowser(run, o.hash ?? "#users",
+      o.coarse ? { matchMedia: (q: string) => ({ matches: q === "(pointer: coarse)", addEventListener: () => undefined }) } : {});
+    const d = doc as unknown as { focused: string; activeElement?: unknown };
+    if (o.to !== undefined) { release(); await settle(); assert.equal(d.focused, "", "not on the page it started on"); go(o.to); }
+    if (o.focusMeanwhile) d.activeElement = { tagName: "INPUT", in: "elsewhere", dataset: {} };
+    release();
+    await settle();
+    const first = d.focused;
+    // a poll's write after that: the focus left where it is
+    d.focused = "";
+    tick(); await settle();
+    return { first, later: d.focused };
+  };
+  assert.deepEqual(await focusedAfter(), { first: "user-name", later: "" }, "opened at #users: the Name, once the form is written; a poll's write takes nothing");
+  assert.deepEqual(await focusedAfter({ hash: "#overview", to: "#users" }), { first: "user-name", later: "" }, "a link followed to it: the same");
+  assert.deepEqual(await focusedAfter({ focusMeanwhile: true }), { first: "", later: "" }, "the person focused something before the form was written: theirs");
+  assert.deepEqual(await focusedAfter({ coarse: true }), { first: "", later: "" }, "a touch screen: no keyboard opened over the page");
+  assert.deepEqual(await focusedAfter({ state: { ...COPYING, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" } }), { first: "", later: "" },
+    "read-only: no form, nothing focused");
+  // another page arrived on: nothing of the Users page's
+  assert.deepEqual(await focusedAfter({ hash: "#tables" }), { first: "", later: "" });
+});
 
 test("in the browser: the phone's menu — its button opens the nav as a sheet, focus on its first link; Escape, a click outside, the focus leaving or a link followed close it", async () => {
   const run = fakeRun();
@@ -1872,7 +1917,8 @@ test("in the browser: the phone's menu — its button opens the nav as a sheet, 
   const menuButton = { in: "sidebar", closest: () => ({ dataset: { menu: "" } }) };
   // closed, Escape does nothing
   press("Escape");
-  assert.equal(open(), false); assert.equal(doc.focused, "");
+  // arriving on the Users page: the cursor in its Name (issue 887); the menu's own focus below
+  assert.equal(open(), false); assert.equal(doc.focused, "user-name");
   await click(menuButton);
   assert.deepEqual([open(), expanded(), doc.focused], [true, "true", "nav a"], "open: the sheet, the button says so, the focus on the nav's first link");
   await click({ in: "sidebar", closest: () => null });
@@ -3221,7 +3267,7 @@ test("Users: the add form's password is a prominent card marked shown once; the 
   const added = fn<[unknown], string>("renderAdded")({ user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password: "mason_0123456789abcdef_" + "a".repeat(32),
     database: "shop", url: "postgres://metabase@127.0.0.1:5433/shop" });
   assert.match(added, /^<div class="added" role="status"><p class="headline">The user metabase added: its password is shown this once <span class="badge warn">Shown once<\/span><\/p>/);
-  assert.equal([...added.matchAll(/data-copy="/g)].length, 4, "the URL, the user, the password and the database each have a Copy");
+  assert.equal([...added.matchAll(/data-copy="/g)].length, 3, "the URL, the user and the password each have a Copy (the database is Connect's)");
   const run = fakeRun();
   let t = Date.UTC(2026, 9, 28, 9, 0, 0);
   run.answers.set("GET api/users?lastUsed=1", answer({ users: [{ name: "old", id: "aaaaaaaaaaaaaaaa", addedAt: "2026-10-01T10:00:00.000Z", removedAt: "2026-10-02T10:00:00.000Z", live: false, lastUsedAt: null, url: null },
@@ -4222,12 +4268,12 @@ const SHOP_PG = ((): { shown: string; psql: string } | undefined => {
   catch (e) { if (e instanceof Error && /not a URL/.test(e.message)) return undefined; throw e; }
 })() ?? { shown: "postgres://<user>:<password>@127.0.0.1:5433/shop", psql: "psql 'postgres://<user>:<password>@127.0.0.1:5433/shop'" };
 
-test("the Overview, nothing asked yet: Connect your first tool under the cards — the URL and psql line mason status prints, each with Copy, and Create a user", () => {
+test("the Overview, nothing asked yet: Connect your first tool under the cards — the URL mason status prints, with Copy, no psql line, and Create a user", () => {
   const html = fn<[unknown, unknown?], string>("renderStatus")(RUNNING, { queries: NO_QUERIES, now: NOW });
   const text = textOf(html);
   assert.equal(SHOP_PG.shown, "postgres://<user>:<password>@127.0.0.1:5433/shop", "the line mason start and mason status print");
   assert.match(text, new RegExp(`Connect your first tool Mason answers SQL over the Postgres protocol, as a read replica of your database would: point psql, a BI tool or your app's analytics code at this URL\\. ` +
-    `URL ${SHOP_PG.shown.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} Copy psql ${SHOP_PG.psql.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} Copy ` +
+    `URL ${SHOP_PG.shown.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} Copy ` +
     "Then try select count\\(\\*\\) from customers; Copy it shows on Queries " +
     "Create a user Its name and password go in place of <user>:<password> : the Users page shows the whole URL once, as mason user add <name> prints it\\. " +
     // and beside the local connection, Connect from anywhere (mason share, from the page)
@@ -4237,14 +4283,16 @@ test("the Overview, nothing asked yet: Connect your first tool under the cards �
   // first under the cards, before the facts: the most important thing on a fresh install is how to reach it
   assert.ok(text.indexOf("Connect your first tool") > text.indexOf("p95, last day") && text.indexOf("Connect your first tool") < text.indexOf("Mason Source"));
   assert.match(html, /<code id="connect-url">postgres:\/\/&lt;user&gt;:&lt;password&gt;@127\.0\.0\.1:5433\/shop<\/code> <button type="button" class="small" data-copy="connect-url" data-room="Press ⌘C">Copy<\/button>/);
-  assert.match(html, /<code id="connect-psql">psql &#39;postgres:\/\/&lt;user&gt;:&lt;password&gt;@127\.0\.0\.1:5433\/shop&#39;<\/code> <button type="button" class="small" data-copy="connect-psql" data-room="Press ⌘C">Copy<\/button>/);
+  // no psql line (issue 874): the URL is the same thing, pasted after psql (mason status and --json keep theirs)
+  assert.doesNotMatch(html, /connect-psql|<dt>psql<\/dt>/);
+  assert.deepEqual([...html.matchAll(/data-copy="(connect-[^"]+)"/g)].map((m) => m[1]), ["connect-url", "connect-try"], "the URL's Copy and the first statement's, none else");
   assert.match(html, /<a class="btn primary" href="#users">Create a user<\/a>/, "a link to the page that makes one");
 });
 
 test("the Overview once statements ran: Connect after the facts, quieter; with no table added, none (adding one is the step)", () => {
   const busy = textOf(fn<[unknown, unknown?], string>("renderStatus")(RUNNING, { queries: QUERIES, now: NOW }));
   assert.ok(!busy.includes("Connect your first tool"));
-  assert.match(busy, /Sessions none open Connect URL postgres:\/\/<user>:<password>@127\.0\.0\.1:5433\/shop Copy psql /, "after the facts table");
+  assert.match(busy, /Sessions none open Connect URL postgres:\/\/<user>:<password>@127\.0\.0\.1:5433\/shop Copy Create a user /, "after the facts table, no psql line");
   // the request log not read yet, or unreadable: not "first" (it may have answered thousands)
   assert.ok(!textOf(fn<[unknown, unknown?], string>("renderStatus")(RUNNING, { now: NOW })).includes("Connect your first tool"));
   assert.ok(!textOf(fn<[unknown, unknown?], string>("renderStatus")(RUNNING, { queries: { failure: { code: "failed", message: "busy" } }, now: NOW })).includes("Connect your first tool"));
@@ -4267,20 +4315,20 @@ test("Queries, an empty request log: how to connect under its sentence — never
   const app = fn<[unknown], App>("createApp")(run.fetch);
   app.show("queries");
   await app.poll();
-  assert.match(textOf(app.view()["request-log"]!), /^No request in the last 15 minutes .* Connect your first tool .* URL postgres:\/\/<user>:<password>@127\.0\.0\.1:5433\/shop Copy .* Then try select count\(\*\) from customers; Copy /);
+  assert.match(textOf(app.view()["request-log"]!), /^No request in the last 15 minutes .* Connect your first tool .* URL postgres:\/\/<user>:<password>@127\.0\.0\.1:5433\/shop Copy Then try select count\(\*\) from customers; Copy /);
 });
 
 test("a Copy button, on any page: its code's text to the clipboard, Copied for 2 s then Copy; with no clipboard, the text selected and copied as a selection, else what to press", async () => {
   const copyClick = fn<[Record<string, string>, { textContent: string; dataset?: Record<string, string> }, unknown], Promise<void> | null>("copyClick");
   assert.equal((page as Record<string, unknown>).COPIED_MS, 2000);
-  const code = { textContent: SHOP_PG.psql };
+  const code = { textContent: SHOP_PG.shown };
   const timers: Array<[() => void, number]> = [];
   const setTimeout = (f: () => void, ms: number) => { timers.push([f, ms]); };
   const wrote: string[] = [];
   const b = { textContent: "Copy", dataset: {} as Record<string, string> };
-  const doc = { getElementById: (id: string) => id === "connect-psql" ? code : null };
-  await copyClick({ copy: "connect-psql" }, b, { doc, win: { setTimeout, navigator: { clipboard: { writeText: async (t: string) => { wrote.push(t); } } } } });
-  assert.deepEqual([wrote, b.textContent, "copied" in b.dataset], [[SHOP_PG.psql], "Copied", true]);
+  const doc = { getElementById: (id: string) => id === "connect-url" ? code : null };
+  await copyClick({ copy: "connect-url" }, b, { doc, win: { setTimeout, navigator: { clipboard: { writeText: async (t: string) => { wrote.push(t); } } } } });
+  assert.deepEqual([wrote, b.textContent, "copied" in b.dataset], [[SHOP_PG.shown], "Copied", true]);
   assert.deepEqual(timers.map(([, ms]) => ms), [2000], "it says Copied for 2 s");
   timers[0]![0]();
   assert.deepEqual([b.textContent, "copied" in b.dataset], ["Copy", false], "then Copy again");
@@ -4289,21 +4337,21 @@ test("a Copy button, on any page: its code's text to the clipboard, Copied for 2
   const execs: string[] = [];
   const r = { textContent: "Copy", dataset: {} as Record<string, string> };
   const refused = { setTimeout, getSelection: () => ({ selectAllChildren: (x: unknown) => selected.push(x) }), navigator: { platform: "MacIntel", clipboard: { writeText: async () => { throw new Error("denied"); } } } };
-  await copyClick({ copy: "connect-psql" }, r, { doc: { ...doc, execCommand: (c: string) => { execs.push(c); return true; } }, win: refused });
+  await copyClick({ copy: "connect-url" }, r, { doc: { ...doc, execCommand: (c: string) => { execs.push(c); return true; } }, win: refused });
   assert.deepEqual([selected, execs, r.textContent], [[code], ["copy"], "Copied"]);
   // and no clipboard at all (navigator.clipboard undefined on an insecure origin), the selection's copy refused too: what to press
   // in the button's own room (ROOMS.copy), so it never grows; the whole sentence is its title
   const q = { textContent: "Copy", title: "", dataset: {} as Record<string, string> };
-  await copyClick({ copy: "connect-psql" }, q, { doc: { ...doc, execCommand: () => false }, win: { ...refused, navigator: { platform: "Linux x86_64" } } });
+  await copyClick({ copy: "connect-url" }, q, { doc: { ...doc, execCommand: () => false }, win: { ...refused, navigator: { platform: "Linux x86_64" } } });
   assert.deepEqual([q.textContent, q.title], ["Ctrl+C", "Selected: press Ctrl+C to copy it"]);
-  await copyClick({ copy: "connect-psql" }, q, { doc: { ...doc, execCommand: () => { throw new Error("no"); } }, win: refused });
+  await copyClick({ copy: "connect-url" }, q, { doc: { ...doc, execCommand: () => { throw new Error("no"); } }, win: refused });
   assert.deepEqual([q.textContent, q.title], ["Press ⌘C", "Selected: press ⌘C to copy it"]);
   const ROOMS = (page as Record<string, unknown>).ROOMS as Record<string, string>;
   for (const label of ["Copy", "Copied", "Press ⌘C", "Ctrl+C"]) assert.ok([...label].length <= [...ROOMS.copy!].length, `${label} fits the Copy button's room`);
   assert.equal(copyClick({ sync: "x" }, b, { doc, win: {} }), null, "not a Copy: the page's own click goes on");
 });
 
-test("Users: ONE Connect panel for the run — host, port, database, sslmode, the URL and psql with placeholders, each with Copy — and no URL per user", async () => {
+test("Users: ONE Connect panel for the run — host, port, database, sslmode and the URL with placeholders, each with Copy, no psql line — and no URL per user", async () => {
   // (review, Tom) a row's URL without its password read as a credential to copy, and every row's host, port and
   // database were the run's: the row keeps what is the user's, the panel says the run's once, and the card shown
   // once when a user is added is the only place a password is ever copied
@@ -4313,14 +4361,20 @@ test("Users: ONE Connect panel for the run — host, port, database, sslmode, th
   const pg = { url: "postgresql://127.0.0.1:5433/shop", host: "127.0.0.1", port: 5433, database: "shop", shown: "postgresql://<user>:<password>@127.0.0.1:5433/shop", psql: "psql 'postgresql://<user>:<password>@127.0.0.1:5433/shop'" };
   const html = renderUsersConnect!(pg);
   assert.equal(textOf(html), "Connect Host 127.0.0.1 Copy Port 5433 Copy Database shop Copy SSL mode disable Copy URL postgresql://<user>:<password>@127.0.0.1:5433/shop Copy " +
-    "psql psql 'postgresql://<user>:<password>@127.0.0.1:5433/shop' Copy A user's name and password go in place of <user> and <password> . The password is shown once, when the user is added: lost, remove the user and add it again.");
-  for (const id of ["host", "port", "database", "sslmode", "url", "psql"]) assert.match(html, new RegExp(`<code id="users-connect-${id}">`), id);
+    "A user's name and password go in place of <user> and <password> . The password is shown once, when the user is added: lost, remove the user and add it again.");
+  for (const id of ["host", "port", "database", "sslmode", "url"]) {
+    assert.match(html, new RegExp(`<code id="users-connect-${id}">`), id);
+    assert.match(html, new RegExp(`data-copy="users-connect-${id}"`), `${id}'s Copy`);
+  }
+  // no psql line (issue 874): the URL is the same thing, pasted after psql (the Overview's Connect and --json keep theirs)
+  assert.doesNotMatch(textOf(html), /psql/, "no psql line, and no word of it");
+  assert.doesNotMatch(html, /users-connect-psql/);
   assert.match(renderUsersConnect!({ ...pg, sslmode: "require" }), /<code id="users-connect-sslmode">require<\/code>/, "off this machine: require");
   assert.equal(renderUsersConnect!(undefined), "", "a run that did not say: nothing");
   const rows = fn<[unknown, string | null, number], string>("renderUsers")({ users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: null,
     url: "postgresql://metabase@127.0.0.1:5433/shop" }], lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, NOW);
   assert.ok(!/postgresql:\/\/|data-copy|>URL</.test(rows), "no URL, and no Copy, in a user's row");
-  assert.match(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), /<div id="users-connect"><\/div>\s*<div id="users"><\/div>/, "the panel over the list");
+  assert.match(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), /<div id="users-connect"><\/div>\s*<div id="add-user-box"><\/div>/, "the panel over the form and the list (issue 887)");
 });
 
 test("the Overview's first-run checklist: running, a table copied, a user created, a first statement answered — each ○ with its one action; gone once all are done", async () => {
@@ -4329,19 +4383,21 @@ test("the Overview's first-run checklist: running, a table copied, a user create
   const noUser = { users: [{ ...user.users[0], removedAt: "2026-10-27T10:00:00.000Z" }] };
   // a fresh install: a table added and copied, no user, nothing asked
   const fresh = renderChecklist(RUNNING, NO_QUERIES, noUser);
-  assert.equal(textOf(fresh), "Getting started 2 of 4 done ✓ Mason is running (done) ✓ A table synced (done) ○ A user created (to do) Create a user ○ A first statement answered (to do) Copy the psql line then run a select on a synced table");
+  assert.equal(textOf(fresh), "Getting started 2 of 4 done ✓ Mason is running (done) ✓ A table synced (done) ○ A user created (to do) Create a user ○ A first statement answered (to do) connect with the URL below, then run a select on a synced table");
   // the steps drawn as courses of a wall beside its title: a brick a step, laid as it is done (drawing, hidden from a screen reader)
   assert.match(fresh, /<p class="checklist-title"><span class="courses" aria-hidden="true"><i class="on"><\/i><i class="on"><\/i><i><\/i><i><\/i><\/span>Getting started /);
   assert.match(fresh, /<li class="step-todo"><span class="mark" aria-hidden="true">○<\/span><span class="what">A user created<span class="sr"> \(to do\)<\/span><\/span><a class="btn small primary" href="#users">Create a user<\/a><\/li>/, "the next step is the primary action");
-  assert.match(fresh, /<button type="button" class="small" data-copy="connect-psql">Copy the psql line<\/button>/, "Connect's psql line, copied by its own Copy's handler");
-  // nothing added: Add a table leads to Tables; nothing to copy the psql line for yet
+  // no psql line to copy (issue 874): the URL is Connect's, under the checklist, with its own Copy
+  assert.doesNotMatch(fresh, /psql|data-copy/);
+  // nothing added: Add a table leads to Tables; nothing to connect to yet
   const none = renderChecklist(NONE, NO_QUERIES, noUser);
   assert.match(none, /○<\/span><span class="what">A table synced<span class="sr"> \(to do\)<\/span><\/span><a class="btn small primary" href="#tables">Add a table<\/a>/);
-  assert.ok(!none.includes("Copy the psql line"));
+  assert.ok(!none.includes("connect with the URL below"));
   // copying: no action, it is under way
   assert.match(textOf(renderChecklist({ ...COPYING, totals: { ...COPYING.totals!, copied: 0 } }, NO_QUERIES, noUser)), /○ A table synced \(to do\) syncing now ○ A user created/);
-  // a user, no statement yet: the psql line is the primary action
-  assert.match(renderChecklist(RUNNING, NO_QUERIES, user), /<button type="button" class="small primary" data-copy="connect-psql">Copy the psql line<\/button>/);
+  // a user, no statement yet: where to send it, and no psql line
+  assert.match(textOf(renderChecklist(RUNNING, NO_QUERIES, user)), /○ A first statement answered \(to do\) connect with the URL below, then run a select on a synced table$/);
+  assert.doesNotMatch(renderChecklist(RUNNING, NO_QUERIES, user), /psql/);
   // all four done: none; a read not answered, or that failed: none (never a ○ for what could not be told)
   assert.equal(renderChecklist(RUNNING, QUERIES, user), "");
   assert.equal(renderChecklist(RUNNING, undefined, user), "");
@@ -4358,7 +4414,8 @@ test("the Overview's first-run checklist: running, a table copied, a user create
   const text = textOf(app.view().status!);
   assert.match(text, /^Ready Getting started 2 of 4 done /);
   assert.ok(text.indexOf("Getting started") < text.indexOf("Tables synced"), "above the cards");
-  assert.match(text, /psql psql 'postgres:\/\/<user>:<password>@127\.0\.0\.1:5433\/shop' Copy/, "the psql line it copies is on the page, Connect's");
+  assert.ok(text.indexOf("connect with the URL below") < text.indexOf("URL postgres://<user>:<password>@127.0.0.1:5433/shop Copy"), "the URL it names is below it, Connect's, with its Copy");
+  assert.doesNotMatch(text, /psql '/, "no psql line on the Overview");
 });
 
 test("a page opened at its own address that reads no state (Users) still has the sidebar's project, badge and version: the shell reads the state once a minute beside it", async () => {

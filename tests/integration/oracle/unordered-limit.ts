@@ -11,6 +11,7 @@
  * These are asked apart from `all()`: such a statement can verify nothing for src/duck/verified.ts, whose statements
  * are answered alike, and they may not weaken the verdict the others are held to.
  */
+import { sameTypes } from "./made-types.ts";
 
 export interface UnorderedLimit { name: string; list: string; from: string; tail: string; values?: string[]; whole?: string;
   /** a WITH clause before the SELECT */
@@ -426,7 +427,7 @@ function tally(whole: Rows): Map<string, number> {
 /** what is wrong with Mason's answer `got` to a LIMIT with no ORDER BY, or null. `want` is Postgres's answer to the
  *  same statement, `whole` Postgres's to it unlimited */
 export function withinWhole(want: Answered, whole: Rows, got: Answered): string | null {
-  if (JSON.stringify([want.names, want.oids]) !== JSON.stringify([got.names, got.oids])) return `fields ${JSON.stringify([got.names, got.oids])} where Postgres sends ${JSON.stringify([want.names, want.oids])}`;
+  if (JSON.stringify(want.names) !== JSON.stringify(got.names) || !sameTypes(want.oids, got.oids)) return `fields ${JSON.stringify([got.names, got.oids])} where Postgres sends ${JSON.stringify([want.names, want.oids])}`;
   if (want.rows.length !== got.rows.length) return `${got.rows.length} row(s) where Postgres has ${want.rows.length}`;
   return taken(got.rows, tally(whole));
 }

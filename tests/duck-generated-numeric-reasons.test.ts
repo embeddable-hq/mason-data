@@ -15,16 +15,17 @@ import { LEDGER_COLUMNS, NUMS, KINDS, overLedger, typed } from "./duck-generated
 after(() => stopParser());
 
 // review round 3 of PR 202, F3: a made type's OID, as a REAL run spells it. The source's catalog read gives an oid as a
-// STRING (Postgres's JSON writes only the int, float and numeric types as numbers), and a field carries the SOURCE's OID
-// for a made type, which the catalog's pg_type does not have: the enum and the citext were refused by type in a real run
+// STRING (Postgres's JSON writes only the int, float and numeric types as numbers), and the catalog's pg_type does not
+// have the SOURCE's OID for a made type: the enum and the citext were refused by type in a real run
 const SOURCE_OIDS = LEDGER_COLUMNS.map((c) => c.name === "mood" ? { ...c, typeOid: "5974240", typeArrayOid: "5974239" } : c.name === "name" ? { ...c, typeOid: "5974250", typeArrayOid: "5974249" } : c);
 
 test("an enum and a citext over a source's own type OIDs, spelled as the source's JSON spells them, are stored, not refused by type", async () => {
   await overLedger({ kinds: KINDS }, async (w) => {
     assert.deepEqual(w.status("public.kinds").refusals, []);
     const r = await typed(w, "SELECT id, mood, name FROM kinds ORDER BY mood, id");
-    assert.deepEqual([r.fields[1]![1], r.fields[2]![1]], [5974240, 5974250], "the source's OIDs on the wire, as a synced column sends");
     assert.deepEqual(r.rows.map((x) => x[1]), ["sad", "sad", "ok", "happy"], "the declared order");
+    assert.deepEqual((await typed(w, `SELECT format_type(${r.fields[1]![1]}, NULL), format_type(${r.fields[2]![1]}, NULL)`)).rows, [["mood", "citext"]],
+      "the catalog's OIDs on the wire, as a synced column sends (issue 861)");
     assert.deepEqual((await typed(w, "SELECT id FROM kinds WHERE name = 'ALICE' ORDER BY id")).rows, [["1"], ["9223372036854775806"]]);
   }, SOURCE_OIDS);
 });
@@ -34,7 +35,7 @@ test("an enum and a citext over a source's own type OIDs, spelled as the source'
 // generated column was declared as that row type (`ledger`), and its statements were refused 0A000 "input of anonymous
 // composite types is not implemented". The catalog's row-type OIDs are read from a first world, then given to the
 // source's citext and enum in a second, whose catalog holds them as the same row types (checked, so a moved OID fails
-// as such, not as a pass)
+// as such, not as a pass). The wire sends the catalog's own OIDs for the two (issue 861), never those row types'
 test("a made type whose source OID is a catalog row type's is declared as the source's type, and its statements are answered (issue 858)", async () => {
   let rowTypes: Array<[string, number]> = [];
   const readRowTypes = async (w: Parameters<Parameters<typeof overLedger>[1]>[0]): Promise<Array<[string, number]>> =>
@@ -49,7 +50,8 @@ test("a made type whose source OID is a catalog row type's is declared as the so
     assert.deepEqual((await typed(w, "SELECT a.attname::text, pg_catalog.format_type(a.atttypid, a.atttypmod) FROM pg_catalog.pg_attribute a " +
       "WHERE a.attrelid = 'public.kinds'::regclass AND a.attnum > 0 ORDER BY a.attnum")).rows, [["id", "bigint"], ["mood", "mood"], ["name", "citext"]], "the generated table's columns are the source's types");
     const r = await typed(w, "SELECT id, mood, name FROM kinds ORDER BY mood, id");
-    assert.deepEqual([r.fields[1]![1], r.fields[2]![1]], [eventsRow, ledgerRow], "the source's OIDs on the wire, as a synced column sends");
+    assert.deepEqual((await typed(w, `SELECT typname::text FROM pg_catalog.pg_type WHERE oid IN (${r.fields[1]![1]}, ${r.fields[2]![1]}) ORDER BY 1`)).rows, [["citext"], ["mood"]],
+      "the catalog's OIDs on the wire, which its pg_type names as the columns' types (issue 861), never the row types the source's OIDs are here");
     assert.deepEqual(r.rows.map((x) => x[1]), ["sad", "sad", "ok", "happy"], "the enum's declared order");
     assert.deepEqual((await typed(w, "SELECT id, name FROM kinds WHERE name = 'ALICE' ORDER BY id")).rows, [["1", "Alice"], ["9223372036854775806", "alice"]], "a citext's case-blind equality");
   }, colliding);

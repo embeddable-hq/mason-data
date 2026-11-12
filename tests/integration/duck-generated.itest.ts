@@ -208,9 +208,14 @@ interface Harness {
 
 const yaml = (d: { sql: string; orderBy: string | null }): string => `kind: scheduled\ntarget_lag: 1s\nsql: |\n  ${d.sql}\n${d.orderBy === null ? "" : `order_by: ${d.orderBy}\n`}`;
 const text = { getTypeParser: () => (v: unknown) => v };
-const answer = async (c: pg.Client, sql: string): Promise<unknown> => {
+/** a statement's columns and rows; a type a database made (an OID from 16384 on) by what that server's own pg_type names
+ *  it, equal numbers included, since Mason sends its catalog's OID and the source its own (issue 861; the oracle's rule,
+ *  oracle/made-types.ts); a number its server does not hold equals nothing */
+const answer = async (c: pg.Client, sql: string, side: "mason" | "truth"): Promise<unknown> => {
   const r = await c.query({ text: sql, rowMode: "array", types: text as never });
-  return { fields: r.fields.map((f) => [f.name, f.dataTypeID]), rows: r.rows };
+  const typeOf = async (oid: number): Promise<number | string> => oid < 16384 ? oid : `type ${String((await c.query({ text: "SELECT n.nspname || '.' || t.typname FROM pg_catalog.pg_type t " +
+    `JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace WHERE t.oid = ${oid}`, rowMode: "array" })).rows[0]?.[0] ?? `no type ${oid} on ${side}`)}`;
+  return { fields: await Promise.all(r.fields.map(async (f) => [f.name, await typeOf(f.dataTypeID)])), rows: r.rows };
 };
 
 async function withHarness(db: string, mode: "poll" | "replication", use: (h: Harness, url: string, source: Source) => Promise<void>): Promise<void> {
@@ -291,11 +296,11 @@ async function withHarness(db: string, mode: "poll" | "replication", use: (h: Ha
     };
     await use({
       store, sync, logged, reached, status, until, settled, gate,
-      ask: (sql) => answer(client, sql), truthOf: (sql) => answer(truth, sql),
+      ask: (sql) => answer(client, sql, "mason"), truthOf: (sql) => answer(truth, sql, "truth"),
       define: (file, schemaTable, sql) => { psql(url, `CREATE VIEW ${schemaTable} AS ${sql}`); fs.writeFileSync(path.join(generated, `${file}.yml`), yaml({ sql, orderBy: null })); },
       hold: async (step) => {
         for (const d of DEFINITIONS) for (const sql of d.statements) {
-          assert.deepEqual(await answer(client, sql), await answer(truth, sql), `${step}: ${sql}\n${logged.slice(-6).join("\n")}`);
+          assert.deepEqual(await answer(client, sql, "mason"), await answer(truth, sql, "truth"), `${step}: ${sql}\n${logged.slice(-6).join("\n")}`);
         }
       },
     }, url, source);
