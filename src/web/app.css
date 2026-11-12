@@ -154,8 +154,10 @@ main, #poll { max-width: var(--width); margin: 0 auto; padding-left: var(--gutte
 .nav a[aria-current="page"] { color: var(--fg); background: var(--current); font-weight: 600; box-shadow: inset 3px 0 0 var(--accent); }
 .nav a:focus-visible { outline-offset: -2px; border-radius: 0; }
 .nav .group { margin-top: var(--space-4); }
-/* the host's own links (MASON_UI_NAV_LINKS): a group of their own under a mortar course, no heading of Mason's */
-.nav .host-links { padding-top: var(--space-3); border-top: 1px solid var(--line); }
+/* the host's own links (MASON_UI_NAV_LINKS): a group of their own under a mortar course, no heading of Mason's, laid out
+   as every other group. Its class is its own: the host view's row of links is `.host-links`, a flex row that wrapped
+   this list beside its gap and cut its rows short when the two shared that name (issue 885) */
+.nav .host-nav { padding-top: var(--space-3); border-top: 1px solid var(--line); }
 .nav .group-title { margin: 0 0 var(--space-1); padding: 0 var(--space-4); font-size: var(--text-xs); font-weight: 700; color: var(--fg); text-transform: uppercase; letter-spacing: 0.06em; }
 .nav .label { overflow: hidden; text-overflow: ellipsis; }
 /* an icon: Lucide's 24-unit drawing at 16 px, its stroke a little lighter than its 2, in the link's colour */
@@ -295,6 +297,14 @@ form#request-filters input { min-width: 8em; }
 form.pick { display: block; margin: var(--space-1) 0 var(--space-2); }
 form.pick fieldset { border: 1px solid var(--frame); border-radius: var(--radius); margin: 0 0 var(--space-2); padding: var(--space-2) var(--space-3); }
 form.pick legend { color: var(--fg); font-size: var(--text-sm); font-weight: 700; padding: 0 var(--space-1); }
+/* A RADIO GROUP (`.radios`: every one on the page — Connects from in the add form and From…, a table's sync choice):
+   one choice a line, every radio in one column at the group's left edge, its words beside it and wrapping under
+   themselves, never under the radio. A form with the room lays a short group in one row instead (Connects from in
+   the add form, below), never a row that wraps one choice under another's words. */
+.radios { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-1); min-width: 0; }
+.radios > label { display: flex; align-items: baseline; gap: var(--space-2); margin: 0; min-width: 0; color: var(--fg); cursor: pointer; }
+.radios > label > input[type="radio"] { flex: none; width: auto; min-width: 0; height: auto; margin: 0; accent-color: var(--accent); }
+.radios > label.disabled { color: var(--muted); cursor: not-allowed; }
 label.tick { display: inline-flex; align-items: baseline; gap: var(--space-1); margin: 2px 14px 2px 0; color: var(--fg); }
 /* a tick's box is its own size: never the phone's input { flex: 1 1 10em }, which squeezed its column's name to a letter a line */
 label.tick input { flex: none; }
@@ -306,9 +316,7 @@ button.link.syncnow { height: 20px; padding: 0 var(--space-1); border-color: var
 button.link.syncnow:hover { background: var(--hover); border-color: var(--line-strong); }
 span.syncnow { white-space: nowrap; }
 .pop:has(form.syncpick) { max-width: min(40rem, calc(100vw - 32px)); max-height: min(calc(100vh - 32px), 46rem); }
-form.syncpick label.choice { display: flex; align-items: baseline; gap: var(--space-2); margin: 2px 0; color: var(--fg); cursor: pointer; }
-form.syncpick label.choice input { flex: none; min-width: 0; height: auto; accent-color: var(--accent); }
-form.syncpick label.choice.disabled { color: var(--muted); cursor: not-allowed; }
+form.syncpick .radios { margin: var(--space-1) 0; }
 form.syncpick .choice-body { display: flex; flex-direction: column; min-width: 0; }
 form.syncpick .choice-label { font-weight: 600; }
 form.syncpick .choice-what, form.syncpick .choice-cost { color: var(--muted); font-size: var(--text-xs); }
@@ -486,13 +494,17 @@ details.memory, details#syncs-raw { margin: var(--space-4) 0; }
    over its bar, a line kept when it has none) and its note under it, across every column, written for every row (empty
    when it says nothing). A question, a form and an answer are popovers beside the row's actions (`.pop`), never a row.
    The row's actions never wrap and never leave the card: they stay pinned at its right where the table scrolls. */
-table.catalog { table-layout: fixed; width: 100%; min-width: 840px; }
+table.catalog { table-layout: fixed; width: 100%; min-width: 856px; }
 table.catalog th.state { width: 146px; }
 table.catalog th.rows { width: 116px; }
 table.catalog th.key { width: 104px; }
 table.catalog th.last { width: 104px; }
 table.catalog th.size { width: 100px; }
-table.catalog th.act { width: 268px; }
+/* the actions' column holds an added table's three — View events, Sync now (in the room of Syncing…) and Remove — whole
+   at the widest padding (12 px a side, above 1100 px): 250 px of buttons and gaps, and room to spare. The cells below
+   cut what overflows with "…", so a column narrower than its buttons hides the last one (issue 881):
+   tests/web-tables-actions.test.ts measures them in a browser */
+table.catalog th.act { width: 284px; }
 table.catalog th, table.catalog td { overflow: hidden; text-overflow: ellipsis; }
 table.catalog code.name { display: block; max-width: 100%; }
 table.catalog td.state { white-space: nowrap; }
@@ -545,7 +557,7 @@ table.catalog tbody tr:hover > td.act { background: var(--hover); }
 @media (max-width: 640px) {
   /* the table scrolls inside its card (.panel) at its least width (table.catalog's min-width), still a table — a block
      would lose its fixed columns — the name still the column that gives */
-  table.catalog { display: table; min-width: 940px; }
+  table.catalog { display: table; min-width: 956px; }
   /* the users' too, at their least width: their card scrolls, and a row's actions stay pinned at its right */
   table.users { display: table; }
 }
@@ -559,12 +571,26 @@ form.formcard input { width: 18em; }
 #add-user .role-field { display: inline-flex; align-items: center; gap: var(--space-2); max-width: 100%; min-width: 0; vertical-align: middle; }
 #add-user .role-field label { flex: none; }
 #add-user .role-field select { flex: 0 1 auto; min-width: 0; max-width: 100%; text-overflow: ellipsis; }
-/* Connects from (the add form's and From…'s): from anywhere, or only from the ranges typed — the box shown only then */
-fieldset.connects { border: 0; padding: 0; margin: var(--space-2) 0; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
-fieldset.connects legend { float: left; margin-right: var(--space-2); padding: 0; color: var(--fg); font-size: var(--text-sm); }
-fieldset.connects input[type="radio"] { width: auto; min-width: 0; height: auto; accent-color: var(--accent); }
-fieldset.connects .ranges input { width: 22em; max-width: 100%; }
-fieldset.connects:has(input[value="any"]:checked) .ranges { display: none; }
+/* Connects from (the add form's and From…'s): from anywhere, or only from the ranges typed. The field's place is kept
+   whichever is ticked, so a toggle moves nothing (issue 875): under from anywhere it says "any address", a quiet
+   dashed slot, and the field is visibility: hidden (no Tab, nothing announced); the two share one grid cell */
+fieldset.connects { border: 0; padding: 0; margin: var(--space-2) 0; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); }
+fieldset.connects legend { float: left; padding: 0; color: var(--fg); font-size: var(--text-sm); }
+fieldset.connects .radios > label { font-size: var(--text-sm); }
+/* the add form with the room (its card 800 px or wider): the label, the two choices and the box on one line */
+form.formcard { container-type: inline-size; }
+@container (min-width: 800px) {
+  fieldset.connects { flex-direction: row; align-items: center; gap: var(--space-3); }
+  fieldset.connects .radios { flex-direction: row; gap: var(--space-4); }
+}
+fieldset.connects .ranges { display: inline-grid; width: 22em; max-width: 100%; }
+fieldset.connects .ranges > * { grid-area: 1 / 1; min-width: 0; }
+fieldset.connects .ranges-field { position: relative; }
+fieldset.connects .ranges input { width: 100%; min-width: 0; }
+fieldset.connects .ranges-any { box-sizing: border-box; height: 32px; padding: 0 var(--space-3); display: flex; align-items: center; border: 1px dashed var(--line-strong);
+  background: var(--sunken); color: var(--muted); font-family: var(--font-mono); font-size: var(--text-sm); overflow: hidden; white-space: nowrap; }
+fieldset.connects:has(input[value="any"]:checked) .ranges-field { visibility: hidden; }
+fieldset.connects:has(input[value="only"]:checked) .ranges-any { visibility: hidden; }
 /* ---------------------------------------------------------------- Connect: the URL, its psql line, Create a user */
 /* a box whose title sits on its top edge, as a fieldset's legend does (Connect, Getting started, a chart's name) */
 .connect { background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-4) var(--space-5); margin: var(--space-6) 0 var(--space-6); }

@@ -259,7 +259,7 @@ export function renderSyncChoice(t, c, ask = null, open = false, picked = null) 
     (passed.length ? details(`synccheck:${t.table}`, `The checks that pass (${passed.length})`, `<ul class="checks">${passed.map(checkLine).join("")}</ul>`, open) : "");
   return `<form class="pick syncpick" data-sync-form="${esc(t.table)}" autocomplete="off">` +
     `<fieldset><legend>How Mason keeps ${esc(name)} current after its first sync</legend><p class="choice-what">As ${code(`mason add ${name} --sync`)}: its entry's sync: in the sources file.</p>` +
-    radio("off", "Off", `Synced once, then only when you press Sync now (mason sync ${name}).`) + [...polls, ...other].join("") + live +
+    `<div class="radios">${radio("off", "Off", `Synced once, then only when you press Sync now (mason sync ${name}).`) + [...polls, ...other].join("") + live}</div>` +
     `<p class="note live-slot">${esc(LIVE_SLOT_WORDS)}</p>${checks}</fieldset>` +
     `<button type="submit" class="primary small">Save</button> ${cancel}</form>`;
 }
