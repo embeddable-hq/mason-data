@@ -416,8 +416,10 @@ async function typeOf(side: "mason" | "truth", oid: number): Promise<number | st
   if (oid < 16384) return oid;
   let name = madeNames[side].get(oid);
   if (name === undefined) {
-    if (side === "truth") name = String((await truth.query<unknown[]>(`${TYPE_NAME}${oid}`, [], { rowMode: "array" })).rows[0]?.[0] ?? oid);
-    else { const c = await client(); try { name = String((await c.query({ text: `${TYPE_NAME}${oid}`, rowMode: "array" })).rows[0]?.[0] ?? oid); } finally { await c.end(); } }
+    // a number its own server does not hold is never another side's type: said with the side, so it equals nothing
+    const unknown = `no type ${oid} on ${side}`;
+    if (side === "truth") name = String((await truth.query<unknown[]>(`${TYPE_NAME}${oid}`, [], { rowMode: "array" })).rows[0]?.[0] ?? unknown);
+    else { const c = await client(); try { name = String((await c.query({ text: `${TYPE_NAME}${oid}`, rowMode: "array" })).rows[0]?.[0] ?? unknown); } finally { await c.end(); } }
     madeNames[side].set(oid, name);
   }
   return `type ${name}`;
@@ -657,7 +659,7 @@ test("the review's silent differences: citext without regard to case, an inet as
   const c = await client();
   try {
     const alike = async (sql: string): Promise<void> => assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
-    // citext: `=`, `<>`, IN, LIKE and ORDER BY lower-case both sides (3 of 4 rows are 'finalized'); the wire sends the source's OID
+    // citext: `=`, `<>`, IN, LIKE and ORDER BY lower-case both sides (3 of 4 rows are 'finalized'); the wire sends the catalog's OID
     await alike("SELECT count(*) FROM accounts WHERE status = 'finalized'");
     await alike("SELECT id FROM accounts WHERE status LIKE 'FINAL%' OR status IN ('DRAFT') ORDER BY id");
     await alike("SELECT id, status FROM accounts ORDER BY status, id");

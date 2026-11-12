@@ -13,9 +13,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   row type. So a tool that looks the number up (Metabase, DBeaver and Tableau through JDBC, .NET and asyncpg clients)
   showed the column as that table, and a prepared statement that named the type by its number was read as the other
   type. Mason now sends its own number for every type, the one its catalog names, so the lookup names the column's type
-  and a prepared statement given that number reads it. The number is no longer the source database's: a tool that
-  cached a type's number from the source should look it up again (two Postgres databases number their own types apart
-  anyway). `pg_typeof` of such a column is also Postgres's: `other.level` for an enum of another schema and `mood[]`
+  and a prepared statement given that number reads it. The number is no longer the source database's. A physical read
+  replica shares its primary's numbers, and Mason sent the primary's until now: an application that learned these
+  numbers on its primary and decodes Mason's rows by them must now look such types up on Mason. Mason's numbers for
+  these types can also change when the synced tables change (its catalog is built again, for example when a table with
+  a new enum is added): a tool connected across that change may show stale type names until it reconnects, and a new
+  connection is always right. `pg_typeof` of such a column is also Postgres's: `other.level` for an enum of another schema and `mood[]`
   for an array, where Mason said `level` and `_mood`.
 - **The limit on what statements may spill to disk is in force from the start.** Before, the limit (half of the free
   disk under `.mason/`, or `MASON_SPILL_LIMIT`) was not enforced until the free disk moved by 1 % or more, so a heavy

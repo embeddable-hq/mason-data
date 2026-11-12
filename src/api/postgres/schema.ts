@@ -28,8 +28,8 @@ export interface PgColumn {
   /** the column's type as the SOURCE spells it (`format_type`: `numeric(12,2)`, `character
    *  varying(255)`), which the catalog creates in place of `type`'s spelling — a tool sees the source's own types */
   spelled?: string | undefined;
-  /** the SOURCE's OID for a type an extension made (citext), which the wire sends in place of
-   *  the catalog Postgres's own OID for it (src/duck/plan.ts) */
+  /** the SOURCE's OID for a type a database made (citext, an enum): never sent, since the wire sends the catalog
+   *  Postgres's own OID for it (issue 861); it tells the rewrite a table's whole row is the source's (src/duck/plan.ts) */
   typeOid?: number | undefined;
   typeArrayOid?: number | undefined;
   /** the source's NOT NULL, DEFAULT, identity and owned sequence (src/cli/preflight.ts

@@ -478,8 +478,8 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   const enumLabels = new Map<number, string[]>(), enumArrays = new Map<number, number>();
   const enums: EnumTypes = { labels: enumLabels, arrays: enumArrays };
   const fields = analysis.fields === null ? null : analysis.fields.map((f) => ({ ...f }));
-  // a table's row type (a whole row, `SELECT t FROM t`): its columns, which the rewrite writes the row from, and the
-  // name the wire maps to the source's OID (`rowtype:<schema>.<table>`)
+  // a table's row type (a whole row, `SELECT t FROM t`): its columns, which the rewrite writes the row from, by its name
+  // (`rowtype:<schema>.<table>`), which says whether it is the source's whole row (`userTypes`); the wire sends its OID
   const rowTypes = new Map<number, RowColumn[]>();
   const used = new Set([...analysis.types.values()].flat().map((t) => t.type).filter((o) => o >= 16384));
   if ([...resolved].some((k) => /\bu\d+/.test(k)) || fields?.some((f) => f.oid >= 16384) || used.size > 0) {

@@ -2993,7 +2993,8 @@ class Server {
   private duckPlansAt = 0;
   private duckPlansRoles: RolesLive | null = null;
 
-  /** the source's OIDs for the types an extension made, by name (a copied citext column's), from the schema */
+  /** the source's OIDs for the types a database made, by name (a copied citext column's), from the schema: never sent
+   *  (the wire sends the catalog's, issue 861); src/duck/plan.ts reads whether a whole row is the source's by them */
   userTypes(): ReadonlyMap<string, number> {
     const out = new Map<string, number>();
     for (const t of this.options.schema().tables) {

@@ -1985,8 +1985,14 @@ catalog's rows (`pg_type`, `pg_attribute`, `pg_proc`, `pg_operator`, `pg_opclass
 the two places it cannot reach. A `pg_node_tree` (`pg_proc.prosqlbody`) keeps the old OID: citext's 14 functions with
 a SQL body (`strpos`, `replace`, `split_part`, `translate`, `regexp_match` …) then answered `XX000 cache lookup failed
 for type`. And Postgres never clears its operator-class cache in a backend (`LookupOpclassInfo`): an index on a citext
-column fails every later plan over its table. Nothing in the catalog's system tables is rewritten. A type made by a
-database has no fixed number between two Postgres databases, so no client can rely on the source's.
+column fails every later plan over its table. Nothing in the catalog's system tables is rewritten.
+
+**What it costs a client.** A physical read replica shares its primary's OIDs, and Mason sent the primary's: an
+application that learned a made type's OID on its primary and decodes Mason's rows by it must now look the type up on
+Mason, as on any other Postgres database. And Mason's OIDs for made types can move when the synced tables change: the
+catalog is built again from the new schema (a table with a new enum added, say), and its types are numbered afresh.
+The review measured it: a client connected across such a change keeps the names it cached for the old numbers until it
+reconnects, while a new connection is always right. Built-in types never move.
 
 **The oracle** compares a made type's OID by what each server's own pg_type names it, schema-qualified
 (tests/integration/oracle/made-types.ts). A built-in type's OID, below 16384, stays held to exact equality.
