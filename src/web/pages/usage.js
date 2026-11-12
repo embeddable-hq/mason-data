@@ -28,7 +28,7 @@ const th = (cols) => `<thead><tr>${cols.map((c) => `<th scope="col">${esc(c)}</t
 const num = (v) => `<td class="num">${esc(v)}</td>`;
 
 /** The caveat of a window the request log keeps fewer days of than it asks (src/cli/commands.ts `queryLines`); "" when it keeps all. */
-export const coveredText = (w) => w.covered < w.days ? `the request log keeps ${w.covered} day${w.covered === 1 ? "" : "s"}: MASON_HISTORY_DAYS` : "";
+export const coveredText = (w) => w.covered < w.days ? `Mason keeps only ${w.covered} day${w.covered === 1 ? "" : "s"} of history (MASON_HISTORY_DAYS sets it)` : "";
 
 /** One sample's cells in `mason usage`'s words (src/cli/usage.ts `sampleLine`): the strings the table writes, held equal by the tests. */
 export function sampleCells(s) {
@@ -53,7 +53,7 @@ const CHARTS = [
 /** A chart's title at a step: the statements are counted per step, the rest are levels. */
 const chartTitle = (key, title, step) => key === "usage-statements" ? `Statements ${perStep(step ?? 3600)}` : title;
 /** The sparklines of the cards, by card: [holder key, title, sample field]. The failed ones are the samples' refused and failed together. */
-const SPARKS = { statements: ["usage-spark-statements", "Statements", "statements"], failed: ["usage-spark-failed", "Failed statements", "failedCount"],
+const SPARKS = { statements: ["usage-spark-statements", "Queries", "statements"], failed: ["usage-spark-failed", "Failed queries", "failedCount"],
   p95: ["usage-spark-p95", "p95", "durationP95Ms"], rows: ["usage-spark-rows", "Rows sent", "rowsSent"], bytes: ["usage-spark-bytes", "Bytes sent", "bytesSent"] };
 
 const samplesOf = (usage) => usage && Array.isArray(usage.samples) ? usage.samples.map((s) => ({ ...s, failedCount: s.statementsRefused + s.statementsFailed })) : [];
@@ -115,14 +115,14 @@ export function queriesHref(filters = {}, range = DEFAULT_RANGE) {
 }
 /** A client's Queries link: its statements in the range. */
 const queriesLink = (user, client, range, label = "Queries") => `<a class="btn small" href="${esc(queriesHref({ user, client }, range))}" title="${esc(user || client
-  ? `the statements ${user ? `of ${user}` : ""}${user && client ? " " : ""}${client ? `from ${client}` : ""} in ${RANGES[rangeOf(range)].span}`
-  : `every statement in ${RANGES[rangeOf(range)].span}: a token's session that names no client cannot be told apart`)}">${esc(label)}</a>`;
+  ? `the queries ${user ? `of ${user}` : ""}${user && client ? " " : ""}${client ? `from ${client}` : ""} in ${RANGES[rangeOf(range)].span}`
+  : `every query in ${RANGES[rangeOf(range)].span}: a session with no user and no client can't be told apart from the others`)}">${esc(label)}</a>`;
 
 /** What a cancel answered, as `mason cancel` says it: its headline, or the refusal as the Failure — each with Dismiss. */
 function outcomeHtml(o) {
   const dismiss = `<p class="pop-actions"><button type="button" class="small" data-dismiss-cancelled data-pop-close>Dismiss</button></p>`;
   if (o.failure) return `${renderFailure(o.failure)}${dismiss}`;
-  return `<p class="done"><span class="headline" title="SQLSTATE 57014">Cancelled session ${o.cancelled.session}'s statement: it ends now, and its client gets a "canceling statement" error.</span></p>${dismiss}`;
+  return `<p class="done"><span class="headline" title="SQLSTATE 57014">Cancelled session ${o.cancelled.session}'s query. It stops now, and its client gets a "canceling statement" error.</span></p>${dismiss}`;
 }
 
 /**
@@ -154,10 +154,10 @@ export function renderSessions(sessions, top = SESSIONS_TOP, range = DEFAULT_RAN
 export function statementCards(day, line = () => "", label = "last 24 hours", hrefs = {}) {
   const failed = day.refused + day.failed;
   return [
-    card(`Statements, ${label}`, n(day.statements), `${n(day.completed)} completed`, line("statements"), "", hrefs.statements ?? ""),
+    card(`Queries, ${label}`, n(day.statements), `${n(day.completed)} completed`, line("statements"), "", hrefs.statements ?? ""),
     card(`Failed, ${label}`, n(failed), `${n(day.refused)} refused, ${n(day.failed)} failed${day.cancelled ? `, ${n(day.cancelled)} cancelled` : ""}`, line("failed"), failed ? "warn" : "", hrefs.failed ?? ""),
     card(`p95, ${label}`, day.durationMs === null ? "–" : statementMsText(day.durationMs.p95),
-      day.durationMs === null ? "no statement completed" : `average ${statementMsText(day.durationMs.avg)} · p50 ${statementMsText(day.durationMs.p50)}`, line("p95"), "", hrefs.p95 ?? ""),
+      day.durationMs === null ? "no query completed" : `average ${statementMsText(day.durationMs.avg)} · p50 ${statementMsText(day.durationMs.p50)}`, line("p95"), "", hrefs.p95 ?? ""),
   ];
 }
 
@@ -179,9 +179,9 @@ export function renderRunning(running, asking = null, outcome = null, now = Date
     const key = keyOf(r.session, r.statement);
     const anchor = actId("running", key);
     if (asking === key) {
-      pops.push(pop(anchor, `<p class="confirm" title="SQLSTATE 57014">Cancel session ${r.session}'s statement ${r.statement}? Its client gets a "canceling statement" error.</p>` +
-        `<p class="pop-actions"><button type="button" class="danger small" data-confirm-cancel="${esc(key)}">Cancel statement ${r.statement}</button> <button type="button" class="small" data-dismiss-cancel data-pop-close>Keep it running</button></p>`,
-        { kind: "dialog", label: `Cancel session ${r.session}'s statement ${r.statement}?` }));
+      pops.push(pop(anchor, `<p class="confirm" title="SQLSTATE 57014">Cancel query ${r.statement} of session ${r.session}? Its client gets a "canceling statement" error.</p>` +
+        `<p class="pop-actions"><button type="button" class="danger small" data-confirm-cancel="${esc(key)}">Cancel query ${r.statement}</button> <button type="button" class="small" data-dismiss-cancel data-pop-close>Keep it running</button></p>`,
+        { kind: "dialog", label: `Cancel query ${r.statement} of session ${r.session}?` }));
     }
     if (said !== null && said.key === key) { shown = true; pops.push(pop(anchor, outcomeHtml(said))); }
     return `<tr><td>${r.session}</td><td>${r.statement}</td><td><span class="clip" title="${esc(r.user)}">${esc(r.user)}</span></td><td><span class="clip" title="${esc(clientText(r.applicationName))}">${esc(clientText(r.applicationName))}</span></td>` +
@@ -189,9 +189,9 @@ export function renderRunning(running, asking = null, outcome = null, now = Date
       `<td>${statementCell(r.query)}</td>${readOnly !== null ? "" : `<td class="act" id="${esc(anchor)}">${asking === key ? `<button type="button" class="danger small" aria-expanded="true" disabled>Cancel</button>` : `<button type="button" class="danger small" data-ask-cancel="${esc(key)}">Cancel</button>`}</td>`}</tr>`;
   }).join("");
   const table = running.length
-    ? `<div class="scroll"><table class="running"><thead><tr><th scope="col">Session</th><th scope="col" title="the statement's number in its session, as mason cancel --statement takes it">No.</th><th scope="col">User</th><th scope="col">Client</th>` +
-      `<th scope="col" class="num">Running for</th><th scope="col">Rows</th><th scope="col">Statement</th>${readOnly !== null ? "" : `<th scope="col"></th>`}</tr></thead><tbody>${rows}</tbody></table></div>`
-    : empty("No statement is running now.");
+    ? `<div class="scroll"><table class="running"><thead><tr><th scope="col">Session</th><th scope="col" title="the query's number in its session">No.</th><th scope="col">User</th><th scope="col">Client</th>` +
+      `<th scope="col" class="num">Running for</th><th scope="col">Rows</th><th scope="col">Query</th>${readOnly !== null ? "" : `<th scope="col"></th>`}</tr></thead><tbody>${rows}</tbody></table></div>`
+    : empty("No query is running now.");
   // the statement ended since: said beside the part, which is there whatever it lists
   if (said !== null && !shown) pops.push(pop("usage-running", outcomeHtml(said)));
   return table + pops.join("");
@@ -206,8 +206,8 @@ export function renderRunning(running, asking = null, outcome = null, now = Date
  */
 export function renderUnsupported(b, span = RANGES[DEFAULT_RANGE].span) {
   const days = `${b.keptDays} day${b.keptDays === 1 ? "" : "s"}`;
-  if (!b.unsupported.length) return empty(`No statement refused for unsupported SQL in ${span} (the request log keeps ${days}: MASON_HISTORY_DAYS).`);
-  return `<p class="lead">The statements refused in ${esc(span)} by the SQL they used that Mason does not support, the most first.</p>` +
+  if (!b.unsupported.length) return empty(`No query was refused for unsupported SQL in ${span}. Mason keeps ${days} of history.`);
+  return `<p class="lead">The queries refused in ${esc(span)} because they used SQL that Mason does not support, most first.</p>` +
     panel(`<ul class="unsupported">${b.unsupported.map((g) => {
       const e = unsupportedEntry(g);
       return `<li><p class="headline" title="docs/SQL-SUPPORT.md entry ${esc(e.id)}">${esc(e.headline)}</p><p class="dim">${esc(e.last)} — <code class="clip" title="${esc(clip(g.example, TITLE_MAX))}">${esc(e.example)}</code></p><p class="dim">${esc(e.how)}</p></li>`;
@@ -222,17 +222,17 @@ export function renderUnsupported(b, span = RANGES[DEFAULT_RANGE].span) {
  */
 export function renderClients(clients, { top = SESSIONS_TOP, range = DEFAULT_RANGE, now = Date.now(), total = clients.length } = {}) {
   const span = RANGES[rangeOf(range)].span;
-  if (!clients.length) return empty(`No client sent a statement the request log lists in ${span}.`);
+  if (!clients.length) return empty(`No client sent a query in ${span}.`);
   const shown = clients.slice(0, top), rest = clients.slice(top);
   const sum = (k) => rest.reduce((a, c) => a + c[k], 0);
   const cell = (v) => `<td><span class="clip" title="${esc(v)}">${esc(v)}</span></td>`;
   const who = (c) => c.user || (c.tokenName ? `token ${c.tokenName}` : "(no user)");
-  return panel(`<table class="sessions"><thead><tr><th scope="col">User</th><th scope="col">Client</th><th scope="col" class="num">Statements</th><th scope="col" class="num">Failed</th>` +
+  return panel(`<table class="sessions"><thead><tr><th scope="col">User</th><th scope="col">Client</th><th scope="col" class="num">Queries</th><th scope="col" class="num">Failed</th>` +
     `<th scope="col" class="num">Sessions</th><th scope="col">Last</th><th scope="col" class="act"></th></tr></thead><tbody>` +
     shown.map((c) => `<tr>${cell(who(c))}${cell(clientText(c.client))}<td class="num">${esc(n(c.statements))}</td><td class="num">${c.failed ? esc(n(c.failed)) : ""}</td>` +
       `<td class="num">${esc(n(c.sessions))}</td><td><time data-tick datetime="${esc(c.last)}" title="${esc(utcText(c.last))} UTC">${esc(agoText(c.last, now))}</time></td><td class="act">${queriesLink(c.user, c.client, range)}</td></tr>`).join("") +
     (rest.length ? `<tr class="others"><td colspan="2">${esc(n(rest.length))} other client${rest.length === 1 ? "" : "s"}</td><td class="num">${esc(n(sum("statements")))}</td><td class="num">${esc(n(sum("failed")))}</td><td class="num">${esc(n(sum("sessions")))}</td><td></td><td></td></tr>` : "") +
-    `</tbody></table>`) + `<p class="dim">${esc(plural(total, "client"))}${total > clients.length ? ` (the ${esc(n(clients.length))} with the most statements are listed)` : ""} sent statements in ${esc(span)}. A session that sent only what the log does not list (select 1, SET, a catalog query) is not here.</p>`;
+    `</tbody></table>`) + `<p class="dim">${esc(plural(total, "client"))}${total > clients.length ? ` (the ${esc(n(clients.length))} with the most queries are listed)` : ""} sent queries in ${esc(span)}. A session that sent only queries Mason does not list (select 1, SET, a catalog query) is not here.</p>`;
 }
 
 /**
@@ -242,13 +242,13 @@ export function renderClients(clients, { top = SESSIONS_TOP, range = DEFAULT_RAN
  */
 export function renderSlowest(list, { range = DEFAULT_RANGE, now = Date.now() } = {}) {
   const span = RANGES[rangeOf(range)].span;
-  if (!list.length) return empty(`No statement completed in ${span}.`);
+  if (!list.length) return empty(`No query completed in ${span}.`);
   return `<div class="scroll"><table class="running"><thead><tr><th scope="col">Started</th><th scope="col" class="num">Took</th><th scope="col">User</th><th scope="col">Client</th>` +
-    `<th scope="col" class="num">Rows</th><th scope="col">Statement</th><th scope="col" class="act"></th></tr></thead><tbody>` +
+    `<th scope="col" class="num">Rows</th><th scope="col">Query</th><th scope="col" class="act"></th></tr></thead><tbody>` +
     list.map((r) => `<tr><td><time data-tick datetime="${esc(r.startedAt)}" title="${esc(utcText(r.startedAt))} UTC">${esc(agoText(r.startedAt, now))}</time></td><td class="num">${esc(statementMsText(r.durationMs))}</td>` +
       `<td><span class="clip" title="${esc(r.user || r.tokenName)}">${esc(r.user || (r.tokenName ? `token ${r.tokenName}` : ""))}</span></td><td><span class="clip" title="${esc(clientText(r.applicationName))}">${esc(clientText(r.applicationName))}</span></td>` +
       `<td class="num">${r.rows === null ? "" : esc(n(r.rows))}</td><td class="stmt-cell">${statementCell(r.query)}</td>` +
-      `<td class="act"><a class="btn small" href="${esc(queriesHref({ user: r.user, client: r.applicationName, slow: r.durationMs >= 1000 ? "1" : "" }, range))}" title="its client's statements on Observability › Queries">Queries</a></td></tr>`).join("") +
+      `<td class="act"><a class="btn small" href="${esc(queriesHref({ user: r.user, client: r.applicationName, slow: r.durationMs >= 1000 ? "1" : "" }, range))}" title="its client's queries on the Queries page">Queries</a></td></tr>`).join("") +
     `</tbody></table></div>`;
 }
 
@@ -269,14 +269,14 @@ export function renderUsageKpis({ activity, usage, sessions, running, range = DE
   if (isLive(range)) {
     if (sessions) list.push("error" in sessions ? card("Connected now", "unknown", firstLine(String(sessions.error)))
       : card("Connected now", plural(sessions.open, "session"), plural(sessions.byClient.length, "client")));
-    if (running) list.push(card("Running now", n(running.length), running.length ? `the longest for ${spanText(Math.max(...running.map((x) => x.runningMs)) / 1000)}` : "no statement is running"));
+    if (running) list.push(card("Running now", n(running.length), running.length ? `the longest for ${spanText(Math.max(...running.map((x) => x.runningMs)) / 1000)}` : "no query is running"));
   } else if (activity && !("failure" in activity)) {
     // the totals over every client, never the 50 the table lists (`clientsTotal`)
     const total = activity.clientsTotal;
     list.push(card(`Clients, ${label}`, n(total.clients), plural(total.sessions, "session")));
   }
   if (activity === undefined) return cards(list) + skeleton(2);
-  if ("failure" in activity) return cards([...list, card(`Statements, ${label}`, "unknown", `could not read them: ${firstLine(activity.failure.message)}`)]);
+  if ("failure" in activity) return cards([...list, card(`Queries, ${label}`, "unknown", `could not be read: ${firstLine(activity.failure.message)}`)]);
   const w = activity.window;
   const href = (filters) => queriesHref(filters, range);
   list.push(...statementCards(w, line, label, { statements: href({}), failed: href({ status: "refused-or-failed" }), p95: href({ slow: "1" }) }),
@@ -296,7 +296,7 @@ export function renderUsage(b, isOpen = () => false, sort = { key: "time", dir: 
   const span = b.stepSeconds === null ? "every sample" : `${duration(b.stepSeconds)} a line`;
   const head = `<p class="dim">From ${esc(at(b.since))} to ${esc(at(b.until))} UTC, ${esc(span)} (a sample every ${esc(duration(b.sampleSeconds))}, kept ${b.keptDays} day${b.keptDays === 1 ? "" : "s"}).</p>`;
   let samples;
-  if (!b.samples.length) samples = empty("No sample in this time: Mason takes the first a minute after it starts.");
+  if (!b.samples.length) samples = empty("No sample in this time. Mason takes the first one a minute after it starts.");
   else {
     const withLag = b.samples.some((s) => s.streamLagBytes !== null || s.streamLagSeconds !== null);
     const cols = ["Time (UTC)", "Statements", "Errors", "Rows sent", "Bytes sent", "p95", "Size", "Rows", "Failing", "Oldest", ...(withLag ? ["Lag"] : [])];
@@ -388,13 +388,13 @@ export const page = {
         const now = ctx.now().getTime();
         return {
           // a read-only page (MASON_UI_READ_ONLY=1): why no statement has a Cancel, as Tables and Users say it
-          "usage-kpis": readOnlyLine("Statements are not cancelled", readOnly) + renderUsageKpis({ activity: a === undefined ? undefined : a.body ?? { failure: a.failure }, usage: ctx.read(samples())?.body, sessions, running: running?.running, range }),
+          "usage-kpis": readOnlyLine("Queries are not cancelled", readOnly) + renderUsageKpis({ activity: a === undefined ? undefined : a.body ?? { failure: a.failure }, usage: ctx.read(samples())?.body, sessions, running: running?.running, range }),
           "usage-charts": renderCharts(ctx.read(samples())?.body, range),
           "usage-connected-h": live ? "Connected now" : `Connected in ${esc(span)}`,
           "usage-connected": live ? renderSessions(sessions, SESSIONS_TOP, range) : part(activity(), (b) => renderClients(b.clients, { range, now, total: b.clientsTotal.clients }), false),
           "usage-running-h": live ? "Running now" : `Slowest in ${esc(span)}`,
-          "usage-running-lead": live ? `As <code>mason logs --running</code> lists them.${readOnly !== null ? "" : ` Cancel stops one, as <code>mason cancel</code> does.`}`
-            : `The statements that took longest to complete, as the request log recorded them.`,
+          "usage-running-lead": live ? `The queries running right now.${readOnly !== null ? "" : " Cancel stops one."}`
+            : "The queries that took longest to complete.",
           "usage-running": live ? (running ? renderRunning(running.running, m.asking, m.outcome, now, readOnly) : "") : part(activity(), (b) => renderSlowest(b.slowest, { range, now }), false),
           unsupported: part(unsupportedPath(range), (b) => renderUnsupported(b, span), true),
           "usage-hourly": part(samples(), (b) => renderUsage(b, opened.has, m.sort), true),

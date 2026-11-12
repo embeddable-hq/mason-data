@@ -131,16 +131,16 @@ test("the choice: Off checked for a table on the default, each poll saying it sc
     assert.ok(text.includes(`Scans the whole table on your database every ${words}.`), words);
   }
   assert.match(html, /<input type="radio" name="sync" value="replication">/, "Live may be chosen");
-  assert.ok(text.includes("Live (replication) Changes stream from your database's change log: no scans."));
+  assert.ok(text.includes("Live (replication) Changes stream from your database's change log. No scans."));
   assert.ok(text.includes(tables.LIVE_SLOT_WORDS as string), "what the slot holds if Mason stops reading");
-  assert.match(tables.LIVE_SLOT_WORDS as string, /^Live keeps a replication slot on your database\. While Mason is not reading it — stopped, or down — the slot holds every byte of WAL/);
+  assert.match(tables.LIVE_SLOT_WORDS as string, /^Live keeps a replication slot on your database\. While Mason is not reading it \(stopped or down\), the slot keeps all the WAL/);
   assert.match(text, /The checks that pass \(5\)/, "the passing checks behind a closed details");
   assert.ok(!text.includes("Live cannot be chosen"));
   // its sync now is the one checked, and an interval the page does not offer is kept as a choice of its own
   assert.match(renderSyncChoice(tableOf("public.orders"), choiceOf("public.orders", { sync: "poll 5m" })), /value="poll 5m" checked>/);
   const odd = renderSyncChoice(tableOf("public.orders"), choiceOf("public.orders", { sync: "poll 30s" }));
   assert.match(odd, /value="poll 30s" checked>/);
-  assert.ok(textOf(odd).includes("Every 30 seconds (its sync now)"));
+  assert.ok(textOf(odd).includes("Every 30 seconds (current)"));
 });
 
 test("Live greyed out with each failing check named in the server's words and the SQL that fixes it: no key, wal_level, no REPLICATION, no free slot, a standby before 16", () => {
@@ -164,15 +164,15 @@ test("asked before saving: a big table's poll with its cost; Live with a warning
   const big = choiceOf("public.orders", { big: true, cost: COST, sync: "poll 5m" });
   assert.equal(syncQuestion(choiceOf("public.customers"), "poll 5m"), null, "a small table's poll is saved at once");
   assert.equal(syncQuestion(big, "off"), null);
-  assert.deepEqual(syncQuestion(big, "poll 1h"), { lines: [COST], ask: "Scan orders whole on your database every hour?", yes: "Poll it every hour" });
+  assert.deepEqual(syncQuestion(big, "poll 1h"), { lines: [COST], ask: "Scan all of orders on your database every hour?", yes: "Poll it every hour" });
   const asked = textOf(renderSyncChoice(tableOf("public.orders"), big, "poll 1h"));
-  assert.ok(asked.startsWith(`${COST} Scan orders whole on your database every hour? Poll it every hour Back Cancel`), asked);
+  assert.ok(asked.startsWith(`${COST} Scan all of orders on your database every hour? Poll it every hour Back Cancel`), asked);
   // the cost is said beside each poll in the choice too
   assert.ok(textOf(renderSyncChoice(tableOf("public.orders"), big)).includes(`Every 15 minutes Scans the whole table on your database every 15 minutes. ${COST}`));
   const warned = choiceOf("public.customers", { checks: [...PASSING.slice(0, 4), { name: "WAL cap", state: "warn", detail: "max_slot_wal_keep_size is unlimited: while Mason is stopped its slot holds every byte of WAL" }] });
   assert.equal(warned.live.allowed, true);
   assert.deepEqual(syncQuestion(warned, "replication"), { lines: ["WAL cap: max_slot_wal_keep_size is unlimited: while Mason is stopped its slot holds every byte of WAL"],
-    ask: "Keep customers current by logical replication, with this warning?", yes: "Save Live (replication)" });
+    ask: "Keep customers up to date by logical replication, with this warning?", yes: "Save Live (replication)" });
   assert.equal(syncQuestion(choiceOf("public.customers"), "replication"), null, "no warning: saved at once");
 });
 
@@ -250,7 +250,11 @@ test("the app: each choice saved by POST api/pick { table, picked, sync, keep: t
     assert.equal(await call<Promise<boolean>>("chooseSyncValue", "public.customers", value), true, value);
     assert.deepEqual(run.asked, [`POST api/pick ${JSON.stringify({ table: "public.customers", picked: true, sync: value, keep: true })}`, "GET api/state"], value);
     const said = textOf(popOf(app.view().tables!, "sync-tables-public.customers"));
-    assert.match(said, new RegExp(`^Added public\\.customers to mason/sources/shop\\.yml: every column sync: ${value === "off" ? "off \\(its entry's\\)" : value === "replication" ? "replication \\(its entry's\\)" : `${value} \\(its entry's\\)`}`), said);
+    // the sync saved, in the page's words: never "Added" (the table was added before), never the sources file
+    const words = value === "off" ? "Off: after its first sync, it syncs only when you press Sync now\\."
+      : value === "replication" ? "Live: after its first sync, changes stream from your database's change log\\."
+      : `${({ "poll 5m": "every 5 minutes", "poll 15m": "every 15 minutes", "poll 1h": "every hour", "poll 1d": "every day" } as Record<string, string>)[value]}: after its first sync, Mason checks it for changes on that schedule\\.`;
+    assert.match(said, new RegExp(`^Saved customers's sync\\. Its sync is ${words} Dismiss$`), said);
     assert.equal(tablesModel(app).syncOpen, null);
   }
 });
@@ -265,7 +269,7 @@ test("the app: a big table's poll asks first with its cost; Back returns to the 
   assert.equal(await call("chooseSyncValue", "public.orders", "poll 1h"), true);
   assert.deepEqual(run.asked, [], "nothing saved before the person says yes");
   const asking = popOf(app.view().tables!, "sync-tables-public.orders");
-  assert.ok(textOf(asking).startsWith(`${COST} Scan orders whole on your database every hour?`));
+  assert.ok(textOf(asking).startsWith(`${COST} Scan all of orders on your database every hour?`));
   assert.match(asking, /data-save-sync="public\.orders" data-sync="poll 1h">Poll it every hour</);
   call("backSync");
   assert.match(popOf(app.view().tables!, "sync-tables-public.orders"), /data-sync-form="public\.orders"/);

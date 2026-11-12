@@ -270,7 +270,7 @@ test("mason status and wait in replication mode say where the stream is: its pos
     "slot           holds 3.0 GiB of the database's WAL (extended) · 1.0 GiB more before Postgres invalidates it (max_slot_wal_keep_size) (read 2.0 s ago)",
     "last change    committed 5.0 s ago, applied 0.3 s after its commit",
     "public.orders  streamed · 1,204 changes (1,000 inserts, 200 updates, 4 deletes) this run",
-    "shop.lines     catching up by one poll from 2026-10-26 11:58 UTC: polling, for 3.0 s · the stream holds 12 changes of it meanwhile",
+    "shop.lines     getting the changes made since 2026-10-26 11:58 UTC: reading the changes, for 3.0 s · the stream holds 12 changes of it meanwhile",
     "public.events  left out: publication app_pub does not carry public.events: ALTER PUBLICATION app_pub ADD TABLE public.events",
     "public.big     not streamed yet: it is being read whole: it joins once synced and caught up by one poll",
   ]);

@@ -383,6 +383,8 @@ tr.under > td { border-top: 0; padding-top: 0; }
 /* the facts: a label column and a value column */
 table.facts-table th[scope="row"] { width: 1%; padding-right: var(--space-5); }
 table.facts-table td { overflow-wrap: anywhere; }
+/* the facts card's quiet lines under it: information, not a warning (the database on another machine, how text sorts) */
+.fact-note { color: var(--muted); font-family: var(--font-sans); font-size: var(--text-sm); margin: var(--space-2) 0 0; }
 /* the recent errors: a client's name, a user's or a statement unbroken by spaces wraps inside its cell, never past the page */
 table.errors td { overflow-wrap: anywhere; }
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-1) var(--space-4); margin: 0; font-size: var(--text-sm); }
@@ -442,9 +444,11 @@ details.memory, details#syncs-raw { margin: var(--space-4) 0; }
 .next-head { margin: var(--space-2) 0 2px; font-weight: 700; font-size: var(--text-sm); }
 .next { list-style: none; margin: 0; padding: 0; font-size: var(--text-sm); }
 .next li span { color: var(--muted); margin-left: var(--space-2); }
-.added, .done { border: 1px solid var(--frame); border-left: 4px solid var(--ok); border-radius: var(--radius); box-shadow: var(--drop); padding: var(--space-3) var(--space-4); margin: var(--space-3) 0 var(--space-4); background: var(--surface); }
-.added .headline, .done .headline { font-weight: 700; margin: 0 0 var(--space-2); overflow-wrap: anywhere; }
-.added .tip, .done .note, .done .tip { color: var(--muted); margin: 2px 0 6px; }
+/* an added user's card and an action's answer: `div.added`, since the Users table's ADDED header is `th.added`, which
+   the card's frame and accent bar once styled too */
+div.added, .done { border: 1px solid var(--frame); border-left: 4px solid var(--ok); border-radius: var(--radius); box-shadow: var(--drop); padding: var(--space-3) var(--space-4); margin: var(--space-3) 0 var(--space-4); background: var(--surface); }
+div.added .headline, .done .headline { font-weight: 700; margin: 0 0 var(--space-2); overflow-wrap: anywhere; }
+div.added .tip, .done .note, .done .tip { color: var(--muted); margin: 2px 0 6px; }
 
 /* ---------------------------------------------------------------- empty and loading */
 .empty { text-align: center; padding: var(--space-7) var(--space-4); color: var(--muted); background: var(--surface);
@@ -582,7 +586,7 @@ fieldset.connects .ranges-any { box-sizing: border-box; height: 32px; padding: 0
   background: var(--sunken); color: var(--muted); font-family: var(--font-mono); font-size: var(--text-sm); overflow: hidden; white-space: nowrap; }
 fieldset.connects:has(input[value="any"]:checked) .ranges-field { visibility: hidden; }
 fieldset.connects:has(input[value="only"]:checked) .ranges-any { visibility: hidden; }
-/* ---------------------------------------------------------------- Connect: the URL, its psql line, Create a user */
+/* ---------------------------------------------------------------- Connect: the URL, Create a user, Connect from anywhere */
 /* a box whose title sits on its top edge, as a fieldset's legend does (Connect, Getting started, a chart's name) */
 .connect { background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-4) var(--space-5); margin: var(--space-6) 0 var(--space-6); }
 .connect.first { border-width: 2px; }
@@ -595,6 +599,9 @@ fieldset.connects:has(input[value="only"]:checked) .ranges-any { visibility: hid
 .connect .facts dd .dim { font-family: var(--font-sans); font-size: var(--text-sm); }
 .connect .tip { margin: var(--space-3) 0 0; color: var(--muted); display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
 .empty + .connect { margin-top: var(--space-3); }
+/* Connect from anywhere's heading, inside Connect: in the flow under the tip above it, never on the box's top edge as
+   Connect's own title is (that pulled it up over the tip) */
+.connect .share .share-title { margin: var(--space-5) 0 var(--space-2); padding: 0; font-size: var(--text-md); }
 /* the first-run checklist (renderChecklist): a step a row, ✓ in green or ○ muted, a step to do with its one action */
 .checklist { background: var(--surface); border: 2px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-4) var(--space-5); margin: var(--space-6) 0 var(--space-6); }
 .checklist .checklist-title { margin-bottom: var(--space-3); font-size: var(--text-lg); display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-3); }
@@ -659,12 +666,12 @@ table.users td.act { background: var(--surface); }
 table.users tbody tr:hover > td.act { background: var(--hover); }
 table.users td { overflow: hidden; text-overflow: ellipsis; }
 #page-users td.mono { white-space: nowrap; }
-#page-users .added { border-left-color: var(--warn); border-radius: var(--radius-lg); padding: var(--space-4) var(--space-5); margin: 0 0 var(--space-4); }
-#page-users .added .headline { font-size: var(--text-lg); display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
-#page-users .added .facts { margin: 0 0 var(--space-3); gap: var(--space-2) var(--space-4); align-items: center; }
-#page-users .added .tip { margin: 0 0 var(--space-3); }
+#page-users div.added { border-left-color: var(--warn); border-radius: var(--radius-lg); padding: var(--space-4) var(--space-5); margin: 0 0 var(--space-4); }
+#page-users div.added .headline { font-size: var(--text-lg); display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+#page-users div.added .facts { margin: 0 0 var(--space-3); gap: var(--space-2) var(--space-4); align-items: center; }
+#page-users div.added .tip { margin: 0 0 var(--space-3); }
 /* a phone: a fact's label over its value, so a URL or a password has the card's whole width */
-@media (max-width: 640px) { .added .facts, .connect .facts { grid-template-columns: 1fr; gap: 0 var(--space-4); } .added .facts dd, .connect .facts dd { margin-bottom: var(--space-2); } }
+@media (max-width: 640px) { div.added .facts, .connect .facts { grid-template-columns: 1fr; gap: 0 var(--space-4); } div.added .facts dd, .connect .facts dd { margin-bottom: var(--space-2); } }
 
 /* ---------------------------------------------------------------- Queries, Usage and Logs (scoped to those pages) */
 /* a filter toolbar: each field a small label over its control, the actions at the end */
