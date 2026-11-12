@@ -592,16 +592,28 @@ test("the users while the roles file cannot be read: mason user list's tip, word
   assert.doesNotMatch(textOf(renderUsers(list, null, NOW_R, null, null)), /cannot be read/);
 });
 
-test("a user just added: every field the JSON carries — URL, User, Password, Database, Host, Port, SSL mode — each with a Copy that copies it, no psql line, and that it will not be shown again", async () => {
+test("a user just added: what is its own and the URL — URL, User, Password, Database, each with a Copy that copies it and held equal to mason user add's rows — no Host, Port or SSL mode (Connect says them), no psql line, and that it will not be shown again", async () => {
   const password = "mason_0123456789abcdef_" + "a".repeat(32);
   const url = `postgres://metabase:${password}@127.0.0.1:5433/shop`;
-  const html = fn<[unknown], string>("renderAdded")({ user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password,
-    database: "shop", url, psql: psqlLine(url), host: "127.0.0.1", port: 5433, sslmode: "disable" });
+  const added = { user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password,
+    database: "shop", url, psql: psqlLine(url), host: "127.0.0.1", port: 5433, sslmode: "require", roleFrom: "none" as const };
+  const html = fn<[unknown], string>("renderAdded")(added);
   const text = textOf(html);
-  // the seven fields a tool's form asks for, in one layout: each a label and its value with a Copy (issue 839)
-  assert.match(text, /^The user metabase added: its password is shown this once Shown once URL postgres:\/\/metabase:mason_0123456789abcdef_a{32}@127\.0\.0\.1:5433\/shop Copy User metabase Copy Password mason_0123456789abcdef_a{32} Copy Database shop Copy Host 127\.0\.0\.1 Copy Port 5433 Copy SSL mode disable Copy Paste it /);
+  // what is this user's alone, and the URL, in one layout: each a label and its value with a Copy (issue 839); the
+  // run's host, port and SSL mode are Connect's on the same page, pointed to by name (never "above"/"below": it may move)
+  assert.match(text, /^The user metabase added: its password is shown this once Shown once URL postgres:\/\/metabase:mason_0123456789abcdef_a{32}@127\.0\.0\.1:5433\/shop Copy User metabase Copy Password mason_0123456789abcdef_a{32} Copy Database shop Copy Host, port and SSL mode: see Connect on this page\. Paste it /);
   const fields: Array<[string, string, string]> = [["URL", "added-url", url], ["User", "added-user", "metabase"], ["Password", "added-password", password],
-    ["Database", "added-database", "shop"], ["Host", "added-host", "127.0.0.1"], ["Port", "added-port", "5433"], ["SSL mode", "added-sslmode", "disable"]];
+    ["Database", "added-database", "shop"]];
+  for (const label of ["Host", "Port", "SSL mode"]) assert.doesNotMatch(html, new RegExp(`<dt>${label}</dt>`), `no ${label} row: Connect says it`);
+  assert.doesNotMatch(html, /added-host|added-port|added-sslmode/);
+  assert.doesNotMatch(text, /\b(above|below)\b/, "Connect is named, never placed");
+  // each row the page shows is mason user add's row of the same name, value for value; the terminal, with no Connect
+  // beside it, still prints the host, the port and the SSL mode
+  const { addedReport } = await import("../src/cli/user.ts");
+  const cliRows = new Map(addedReport(added, { roles: { file: null, roles: {}, default: null } as never, listener: null, next: [] }, PLAIN).split("\n")
+    .map((l) => /^ {2}(\S+(?: mode)?) +(.*)$/.exec(l)).filter((m) => m !== null).map((m) => [m[1]!, m[2]!]));
+  for (const [label, , value] of fields) assert.equal(cliRows.get(label.toLowerCase()), value, `${label}: the page's row is mason user add's`);
+  assert.deepEqual([cliRows.get("host"), cliRows.get("port"), cliRows.get("ssl mode")], ["127.0.0.1", "5433", "require"], "mason user add keeps every row");
   for (const [label, id, value] of fields) {
     const re = value.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
     assert.match(html, new RegExp(`<dt>${label}</dt><dd><span class="copyrow"><code id="${id}">${re}</code> <button type="button" class="small" data-copy="${id}" data-room="Press ⌘C">Copy</button></span></dd>`), `${label}: its value and a Copy, laid out as every other field`);
@@ -628,7 +640,7 @@ test("a user just added: every field the JSON carries — URL, User, Password, D
   // while Mason does not run, the JSON carries no URL, host, port nor sslmode: those fields are not shown, never "undefined"
   const bare = fn<[unknown], string>("renderAdded")({ user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password, database: "shop" });
   assert.deepEqual([...bare.matchAll(/data-copy="([^"]+)"/g)].map((m) => m[1]), ["added-user", "added-password", "added-database"]);
-  assert.doesNotMatch(textOf(bare), /undefined|null|Host|Port|SSL mode/);
+  assert.doesNotMatch(textOf(bare), /undefined|null|Host|Port|SSL mode|Connect on this page/);
 });
 
 test("a run that stopped, or a cookie of an earlier run: a plain Failure that says what to do", () => {

@@ -23,6 +23,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **Every example in a box on the web page now starts with "e.g."**: the Tables and Queries search boxes say
   `e.g. orders`, Queries' since `e.g. 2h`, and a new user's name and where it connects from `e.g. metabase` and
   `e.g. 192.0.2.0/24, 2001:db8::/32`, so an example is never taken for a value already filled in.
+- **A user added on the web page's Users page shows only what is its own.** The card shown once now has the URL, User,
+  Password and Database, each with Copy, and a line pointing to Connect on the same page for the host, port and SSL
+  mode, which it no longer repeats. `mason user add` in a terminal prints every row, as before.
 
 ## What was wrong and is now right
 
