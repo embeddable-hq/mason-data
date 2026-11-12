@@ -14,6 +14,10 @@ paths:
   - "tests/integration/duck-poll.itest.ts"
   - "tests/integration/duck-stream.itest.ts"
   - "src/duck/kept.ts"
+  - "src/duck/compact.ts"
+  - "tests/duck-compact.test.ts"
+  - "tests/duck-compact-room.test.ts"
+  - "tests/integration/duck-compact.itest.ts"
 ---
 
 <!-- Loaded only when a matching file is read or edited (the paths above). CLAUDE.md lists every rules file. -->
@@ -147,6 +151,23 @@ paths:
   behind is compared ONCE, at the moment asked, from the ledger's time (`kept.syncedAt`), never a schedule, a phase or
   `CopyState.synced.at` (src/cli/readiness.ts `behindOf`: `tables[].sync.state` `behind`). DETECTOR:
   `tests/duck-sync-schedule.test.ts`, `tests/cli-run-server.test.ts`.
+- **A synced table is compacted by Mason, never by a checkpoint** (issue 851; src/duck/compact.ts, `Sync.compact`;
+  docs/DESIGN.md "Compaction"): the checkpoint merges no row groups (issue 371), so a table's dead rows and its row
+  groups past the fewest are read every 10 minutes on a connection of its own (`checkCompaction`, metadata only) and a
+  table whose waste is half its blocks and 4 MiB is queued LAST, one rebuild at a time, never beside a first sync. It
+  reads the synced data alone: the table frozen on the writer's turn (no poll, `mason sync` refused, stored JSON fills
+  paused, a streamed table's changes SPILLED to `_mason.compact_held` in each batch's transaction, never held in Node's
+  heap, and marked in `_mason.catch_up` for a stop or a crash), its rows into a side table in pieces held to
+  `store.memoryLimitBytes` (halved at 53200) and, before each, to the free disk (`diskShortFor`: none, and the table
+  waits, said), swapped as a copy is, the spill replayed after in pieces of 50,000. Its failure is an ordinary
+  statement's, that table's alone: never its `error`, never fatal, backed off. A new writer of a synced table checks
+  `rebuildingNow`, or it writes under a compaction and its write is lost at the swap. DETECTOR:
+  `tests/duck-compact.test.ts`, `tests/integration/duck-compact.itest.ts`.
+- **No INSERT … SELECT into an empty CREATE TABLE AS of the same transaction** (`writeByKey`; the review of PR 856):
+  DuckDB 2.0.0 reads back NOTHING of a table made by `CREATE TABLE AS … LIMIT 0` and filled by one INSERT … SELECT of a
+  row group's rows (122,880) or more in that transaction (`count(*)` says them all; lost even after the COMMIT), and a
+  write by key of more keys deleted none and inserted every row twice. Fill it by VALUES, or make it before the
+  transaction or by an explicit CREATE TABLE. DETECTOR: `tests/duck-compact.test.ts` "a held set of 300,000 changes".
 
 ## What the sync records
 

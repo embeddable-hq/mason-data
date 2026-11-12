@@ -396,6 +396,28 @@ test("behind, left out, a failed catch-up, a stream down, off: each table's line
   assert.equal(line, "1,200 rows · synced · behind by 1 h 58 min: the last pass, which reads every table again whole, took 1 s, and Mason waits four times a pass between passes to keep the database's load to a fifth");
 });
 
+test("a synced table's space on its line, the page's words the CLI's: its deleted rows' share, its last compaction, a compaction that failed (issue 851)", () => {
+  const kept = { by: "poll", sync: { mode: "off" }, syncedAt: "2026-10-27T09:00:09.000Z", nextAt: null, promisedSeconds: null, lateWhy: null };
+  const none = { deadShare: null, wasteShare: null, checkedAt: null, at: null, seconds: null, error: null, retryAt: null, waiting: null };
+  const cases: Array<[string, Record<string, unknown>, string | null]> = [
+    ["deleted rows", { ...none, deadShare: 0.237, wasteShare: 0.3, checkedAt: "2026-10-27T09:00:09.000Z" }, "23% of its stored rows deleted, not compacted yet"],
+    ["few deleted, compacted", { ...none, deadShare: 0.02, checkedAt: "2026-10-27T09:00:09.000Z", at: new Date(NOW - 2 * 3600_000).toISOString(), seconds: 1.5 }, "compacted 2 h ago"],
+    ["failed", { ...none, deadShare: 0.6, error: "its compaction failed, …", retryAt: "2026-10-27T10:35:00.000Z" }, "its compaction failed, tried again after 10:35 UTC (mason logs --events says why)"],
+    ["waits for disk", { ...none, deadShare: 0.52, waiting: "it needs 184.0 MiB free on disk to be compacted, and 70.0 MiB is free where the synced data is" },
+      "52% of its stored rows deleted, not compacted: it needs 184.0 MiB free on disk to be compacted, and 70.0 MiB is free where the synced data is"],
+    ["nothing read", none, null],
+  ];
+  for (const [name, compaction, said] of cases) {
+    const s = stateOf([{ ...copied("public.events", 30_000_000, "2026-10-27T09:00:09.000Z"), kept, compaction } as unknown as CopyState], { now: NOW });
+    const t = s.tables.find((x) => x.table === "public.events")!;
+    const cli = commands.tableLines(s, NOW).find((l) => l.startsWith("public.events"))!;
+    const ours = fn<[unknown, number], { what: string }>("tableLine")(t, NOW).what;
+    assert.ok(cli.endsWith(`  ${ours}`), `${name}:\n${cli}\n${ours}`);
+    if (said === null) assert.doesNotMatch(ours, /compact|deleted/, name);
+    else assert.ok(ours.endsWith(` · ${said}`), `${name}: ${ours}`);
+  }
+});
+
 test("a copy the poll does not keep current is the page's warning, as mason status paints it: its line's words equal, its state unsynced", () => {
   const BEHIND = stateOf([{ ...copied("public.orders", 2_000_000, "2026-10-27T09:00:09.000Z"),
     kept: { by: "poll", sync: { mode: "poll", every: "30s", seconds: 30 }, syncedAt: "2026-10-27T09:00:09.000Z", nextAt: null, pending: "caught up by one poll first (after its whole read)" } }]);
@@ -3636,7 +3658,7 @@ test("Sync events: 'Failures only' narrows the events read, in the page alone; t
   assert.match(textOf(app.view()["syncs-events"]!), /^When ↓ Kind Table Message 5 min ago ✗ restart .* ✗ copy_failed .* 10 min ago copied public\.orders/);
   // the kind and table filters: EVERY kind, and the sync and EVERY added table, whatever the range read (the state
   // read here names customers, orders and events; public.events has events, public.customers none)
-  assert.equal(textOf(app.view()["syncs-filters"]!), "Kind Every kind copy_failed poll_failed catch_up_failed stream_failed source_unreachable generated_failed restart copied recovered synced sync_changed Table Every table (the sync) public.customers public.events public.orders");
+  assert.equal(textOf(app.view()["syncs-filters"]!), "Kind Every kind copy_failed poll_failed catch_up_failed stream_failed source_unreachable generated_failed compact_failed restart copied recovered synced sync_changed Table Every table (the sync) public.customers public.events public.orders");
   assert.equal(app.pages.get("syncs")!.input({ id: "syncs-kind", value: "copy_failed" }), true);
   assert.match(app.view()["syncs-filters"]!, /<option value="copy_failed" selected>/);
   assert.match(textOf(app.view()["syncs-events"]!), /^1 of the 3 events read\. When ↓ Kind Table Message 9 min ago ✗ copy_failed/);
