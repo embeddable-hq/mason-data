@@ -1,6 +1,6 @@
 # Mason on Fly.io
 
-One Machine running `mason serve`, its copy on one Fly Volume, the Postgres API as a raw TCP service on 5433.
+One Machine running `mason serve`, its synced data on one Fly Volume, the Postgres API as a raw TCP service on 5433.
 `fly.toml` beside this file is the configuration; every key in it is cited to Fly's reference.
 
 ```bash
@@ -23,24 +23,24 @@ A tool connects to `<app>.fly.dev:5433` with `sslmode=require`, as the user `mas
   `fly ips allocate-v4` only IPv6 clients connect, and most hosted BI tools are IPv4-only. The IPv6 address is free and
   automatic.
 
-- **One Machine, one volume, never two.** The copy is one file with one writer. `fly deploy` "creates and starts only
+- **One Machine, one volume, never two.** The synced data is one file with one writer. `fly deploy` "creates and starts only
   one Machine if the process group has volumes mounted", and `--ha=false` says so twice; `fly scale count 1` is the
-  only count. A second Machine would get its own empty volume and its own copy, and the TCP service would send each
+  only count. A second Machine would get its own empty volume and sync everything again on its own, and the TCP service would send each
   connection to either. Fly's advice to run two Machines with volumes is for apps that replicate between them; Mason
   does not.
 - **A deploy is downtime, by design.** With one Machine and a volume, the `rolling` strategy (the default; `canary`
   and `bluegreen` "cannot be used for Machines with attached volumes") stops the Machine, updates it, and starts it on
   the same volume: the old container stops before the new one starts, which is what Mason requires. A restart is under
-  a second before `/healthz` answers again; the tables are not copied again.
-- **The volume is the copy and Mason's state** (`.mason/`, the users, the self-signed certificate). It is a slice of an
+  a second before `/healthz` answers again; the tables are not synced again from the start.
+- **The volume holds the synced data and Mason's state** (`.mason/`, the users, the self-signed certificate). It is a slice of an
   NVMe drive on the Machine's host: a block device, local, in one region. Fly snapshots it daily (kept 5 days by default);
-  losing it means the next start copies the tables again, nothing else.
+  losing it means the next start syncs the tables again from the start, nothing else.
   It can be extended, never shrunk: `fly volumes extend`, or the `auto_extend_size_*` keys of `[[mounts]]`.
 - **Raw TCP, Mason's TLS.** The `[[services.ports]]` entry has no `handlers`, so Fly's edge passes the bytes through and
   Mason's own TLS (`MASON_PG_SELF_SIGNED_TLS=1`, or `MASON_PG_TLS_CERT` / `MASON_PG_TLS_KEY` for one a CA signed) is
   the TLS the client sees. Do not add a `tls` handler: it would end TLS at the edge, and the Postgres protocol's own
   handshake would fail.
-- **`kill_timeout = 60`**: SIGTERM is `mason serve`'s stop (a copy in flight interrupted and rolled back); Fly's default
+- **`kill_timeout = 60`**: SIGTERM is `mason serve`'s stop (a first sync in flight is interrupted and rolled back); Fly's default
   is 5 s, the maximum 300.
 - **The health check is Fly's top-level `[checks]`**, on 4140, not a `[[services.http_checks]]`: a service check runs
   against the service's `internal_port`, and 5433 speaks Postgres, not HTTP. 4140 is not published; `fly checks list`
@@ -63,7 +63,7 @@ COPY mason/ /mason/project/
 ```
 
 with `[build]` naming the `dockerfile` instead of `image`. `mason serve` writes nothing in a project folder that has a
-sources file, so the folder may be read-only; a table added or removed in it is copied or dropped at the next deploy.
+sources file, so the folder may be read-only; a table added to it is synced, and one removed is dropped, at the next deploy.
 Set `MASON_PROJECT_READONLY=1` too: `mason add` and `mason remove` beside the server, and the web page's Add and Remove,
 are then refused with "edit the files and deploy them", where they would edit a folder the next deploy replaces.
 
@@ -72,7 +72,7 @@ are then refused with "edit the files and deploy them", where they would edit a 
 `[[vm]]` is `performance`, 2 CPUs, 8 GB, and `MASON_DUCKDB_MEMORY=4GB` is half of it; change the two together. A
 performance size takes memory in 2048 MB steps, up to 8 GB per CPU (`fly platform vm-sizes`). Which size: enough that the
 page cache holds the columns your dashboards read, memory before cores — [`deploy/mason-data/README.md`](../mason-data/README.md#memory)
-has the measurements. `fly ssh console -u node -C "mason doctor"` says what the copy may use.
+has the measurements. `fly ssh console -u node -C "mason doctor"` says how much memory Mason may use.
 
 ## Your database
 

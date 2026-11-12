@@ -1,4 +1,4 @@
-# MASON ON KUBERNETES: a StatefulSet of ONE replica. The copy is one file with one writer, so the old pod must be gone
+# MASON ON KUBERNETES: a StatefulSet of ONE replica. The synced data is one file with one writer, so the old pod must be gone
 # before the new one starts, on the same volume:
 # - a StatefulSet's RollingUpdate deletes a pod and recreates it ("delete and recreate each Pod ... one at a time",
 #   waiting until the new one is Running and Ready), and a pod's identity (its name, its PVC) exists at most once;
@@ -25,7 +25,7 @@ spec:
       labels:
         app: mason
     spec:
-      # SIGTERM is mason serve's stop (a copy in flight interrupted and rolled back, the copy closed); the kubelet sends
+      # SIGTERM is mason serve's stop (a first sync in flight rolled back, the synced data closed); the kubelet sends
       # SIGKILL when this expires. The default is 30 s.
       terminationGracePeriodSeconds: 60
       # the image runs as node (uid 1000); fsGroup makes the volume writable by it whatever the provisioner's owner
@@ -58,7 +58,7 @@ spec:
             # MASON_PG_TLS_CERT / MASON_PG_TLS_KEY naming one a CA signed, mounted from a kubernetes.io/tls Secret
             - name: MASON_PG_SELF_SIGNED_TLS
               value: "1"
-            # the copy's memory: half the container's memory limit (the default reads the cgroup limit and takes half;
+            # the memory Mason may use: half the container's memory limit (the default reads the cgroup limit and takes half;
             # said here so the two are changed together). The other half is the page cache, Node and the catalog.
             - name: MASON_DUCKDB_MEMORY
               value: "4GB"
@@ -106,14 +106,14 @@ spec:
                 path: sources/app.yml
               - key: mason.yml
                 path: mason.yml
-  # THE VOLUME: a disk (ReadWriteOnce from a block StorageClass), never a file share or NFS (EFS, Azure Files): the copy
-  # is one file written in place and read at random, and a network filesystem is not supported. No storageClassName
+  # THE VOLUME: a disk (ReadWriteOnce from a block StorageClass), never a file share or NFS (EFS, Azure Files): the synced
+  # data is one file written in place and read at random, and a network filesystem is not supported. No storageClassName
   # here means the cluster's DEFAULT class, which is a disk on GKE (balanced persistent disk) and AKS (`default` is
   # `managed-csi`, a managed disk); EKS Auto Mode creates none ("You must create a StorageClass", type gp3), and a
   # cluster whose default is a file class needs one named: `kubectl get storageclass`, then set it (README.md "The
   # volume"). A missing class leaves the PVC Pending and the pod never starts. Decided once: a volumeClaimTemplate
   # cannot be changed after creation. The PVC outlives the StatefulSet ("Deleting and/or scaling a StatefulSet down will
-  # not delete the volumes"): delete it by hand to start over, and the next start copies the tables again.
+  # not delete the volumes"): delete it by hand to start over, and the next start syncs the tables again from the start.
   volumeClaimTemplates:
     - metadata:
         name: data

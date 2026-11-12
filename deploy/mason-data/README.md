@@ -1,6 +1,6 @@
 # Mason on a server
 
-One container, `mason serve`: it copies the tables your project names from your Postgres, keeps them current, and
+One container, `mason serve`: it syncs the tables your project names from your Postgres, keeps them current, and
 answers the Postgres protocol for BI tools and your app. Wherever your Postgres is, Mason only reads it.
 
 The image is `ghcr.io/embeddable-hq/mason-data` (`main` is every merge, `<version>` a release; `MASON_TAG` in `.env`
@@ -30,8 +30,8 @@ docker compose exec mason mason user add metabase   # a user for the BI tool: th
 - **`./mason` is the project folder** (`sources/`, `mason.yml`). `mason add` adds the table to its sources file
   (`sources/<database>.yml`, written at the first start from `DATABASE_URL`); commit it.
   On a server built from your repo, mount the committed folder instead and nothing is added by hand.
-- **The volume `mason-data` is the copy and Mason's state.** `docker compose down` keeps it; `down -v` removes it, and
-  the next start copies again.
+- **The volume `mason-data` holds the synced data and Mason's state.** `docker compose down` keeps it; `down -v`
+  removes it, and the next start syncs everything again.
 - **One container per volume, never two.** DuckDB lets one process write its file. A platform must run one replica,
   with no autoscaling, and stop the old container before it starts the new one.
 - **The Postgres API needs TLS** off the container's loopback: `MASON_PG_SELF_SIGNED_TLS=1` makes a certificate on the
@@ -72,7 +72,7 @@ the edit, as `mason add` does:
 ## Metrics
 
 `GET /metrics` on the health port (4140, beside `/healthz`) is Mason's numbers in Prometheus's text format: tables by
-phase, the copy's size, how old the stalest copy is, the stream's lag and the WAL its slot holds, disk free, sessions
+phase, the synced data's size, how old the stalest synced table is, the stream's lag and the WAL its slot holds, disk free, sessions
 open, statements by outcome (a counter) and their p50 / p95 (`curl -s localhost:4140/metrics` lists each with its
 help). It is **numbers only and needs no secret**: no table, column, user, client or host name and no statement text
 appears in it, not even as a label. A scrape costs your database nothing: it reads what Mason already holds (the
@@ -107,20 +107,20 @@ Per-table or per-user detail (which table is stale, who sent what) would need a 
 
 ## Memory
 
-- **Give it 3 GiB or more.** Beside what the copy may use, Mason itself was measured using up to 2.3 GiB (Node, the
+- **Give it 3 GiB or more.** Beside what the engine may use, Mason itself was measured using up to 2.3 GiB (Node, the
   catalog, the Postgres that evaluates Postgres's own functions, and the engine's memory its limit does not count), and
   under less the kernel killed the whole run. With `MASON_DUCKDB_MEMORY` unset, a start under 3 GiB goes on and warns,
   in the log, `mason status` and `mason doctor`, that the system may stop it; set, it is your word at any size, and
   `mason doctor` says what it leaves beside it.
-- **The default**: the copy may use half the container's memory limit (cgroup v2 `memory.max`, or v1's), else half
+- **The default**: the engine may use half the container's memory limit (cgroup v2 `memory.max`, or v1's), else half
   the machine's RAM, or what leaves 2.5 GiB beside it when that is less, never under 128 MiB: 128 MiB of a container
   of 2.5 GiB or less, 512 MiB of 3 GiB, 1.5 GiB of 4 GiB, half from 5 GiB up. The rest is the page cache, Node and the catalog (about 820 MB while it runs).
-  `docker compose exec mason mason doctor` says what the copy may use.
+  `docker compose exec mason mason doctor` says what the engine may use.
 - **How much to give**: enough that the page cache holds the columns your dashboards read. A query over a column it
   does not hold runs at the disk's speed (on an EBS volume at ~125 MB/s, a JSON column of a 28 GB table: 93.5 s for
-  22 M rows). The copy is smaller than the tables: the benchmark's was about a fifth of them in Postgres (10.1 GiB →
-  1.8 GiB, 3.4 GiB → 0.61 GiB, with a jsonb column), measured on a 15 GiB machine with the copy's limit at 7832 MiB.
-  Yours depends on its columns: `mason status` says the copy's size, and each table's.
+  22 M rows). The synced data is smaller than the tables: the benchmark's was about a fifth of them in Postgres (10.1 GiB →
+  1.8 GiB, 3.4 GiB → 0.61 GiB, with a jsonb column), measured on a 15 GiB machine with the engine's limit at 7832 MiB.
+  Yours depends on its columns: `mason status` says the synced data's size, and each table's.
 - **How to set it**: the container's limit, and `MASON_DUCKDB_MEMORY` at about half of it, leaving at least 2.5 GiB
   beside it (or leave it unset: the default is that). Compose's key is `deploy.resources.limits.memory` (`compose.yml` sets none):
 
@@ -130,18 +130,18 @@ Per-table or per-user detail (which table is stale, who sent what) would need a 
       deploy:
         resources:
           limits:
-            memory: 8G          # the copy may use 4 GiB of it by default
+            memory: 8G          # the engine may use 4 GiB of it by default
   ```
 
 - **A first sync of large JSON documents can need more than the default.** A table of 20,000 rows with `jsonb` documents
   of up to 20 MB compressed failed with an out-of-memory under a 7.8 GiB limit, even with one reader; it synced with
   `MASON_DUCKDB_MEMORY=12GB` on a 16 GB machine, and the setting went back afterwards. The other tables go on, and the
   failed one is retried.
-- **When it is short**: a sort, a join or an aggregate past the limit spills to disk beside the copy; what cannot spill
+- **When it is short**: a sort, a join or an aggregate past the limit spills to disk beside the synced data; what cannot spill
   fails its own statement with 53200, naming `MASON_DUCKDB_MEMORY`, and the run goes on. A `MASON_DUCKDB_MEMORY` near
   or above the container's limit is the kernel killing the container instead.
-- **A copy beside the queries** costs them the page cache it evicts, not CPU (a 1 s chart took up to 8 s beside
-  buffered writes, +85 % beside a CPU-only load): memory is what keeps the queries steady while a table is copied.
+- **A first sync beside the queries** costs them the page cache it evicts, not CPU (a 1 s chart took up to 8 s beside
+  buffered writes, +85 % beside a CPU-only load): memory is what keeps the queries steady while a table syncs.
 
 ## CPU, disk and the instance
 
@@ -152,10 +152,10 @@ Per-table or per-user detail (which table is stale, who sent what) would need a 
   past the cores, more clients wait longer. Take the next size up when the slow statements `mason status` lists are
   slower than your dashboards can wait.
 - **One statement can use every core**: Mason leaves DuckDB's threads at its default, and DuckDB has no per-connection
-  priority, so a long statement slows the others beside it. A copy's readers are about a core each while it runs
+  priority, so a long statement slows the others beside it. A first sync's readers are about a core each while it runs
   (`MASON_COPY_PARALLEL`, default 3), and one backend each on your database.
-- **The disk** decides a query the page cache does not hold, and a copy's writes: EBS gp3 is the measured one. A
-  faster disk helps where the copy outgrows memory (not measured).
+- **The disk** decides a query the page cache does not hold, and a first sync's writes: EBS gp3 is the measured one.
+  A faster disk helps where the synced data outgrows memory (not measured).
 - **The image is arm64 and amd64**, the same image; arm64 (Graviton) is the one measured.
 
 ## Settings
@@ -167,9 +167,9 @@ Per-table or per-user detail (which table is stale, who sent what) would need a 
 
 | Setting | |
 |---|---|
-| `DATABASE_URL` | the database to copy from, as the sources file's `url: ${DATABASE_URL}` names it (the variable the file names is required) |
+| `DATABASE_URL` | the database to sync from, as the sources file's `url: ${DATABASE_URL}` names it (the variable the file names is required) |
 | `MASON_API_KEY` | what the users' passwords are made with (`mason user add`), at least 32 characters (required); changing it removes every user |
-| `MASON_DATA` | the folder whose `.mason/` holds the copy and the state: mount the volume there (the image's `/mason/data`) |
+| `MASON_DATA` | the folder whose `.mason/` holds the synced data and the state: mount the volume there (the image's `/mason/data`) |
 | `MASON_PG_TLS_CERT`, `MASON_PG_TLS_KEY` | its certificate, required off loopback; or `MASON_PG_SELF_SIGNED_TLS=1` for one made in `.mason/`, or `MASON_PG_PLAIN=1` behind a TLS proxy of your own |
 | `MASON_PG_PROXY_FROM` | behind a TCP load balancer or proxy that sends the PROXY protocol v2 (an AWS NLB, HAProxy): the proxy's own addresses, CIDRs comma-separated, so the request log names each real client; a connection from one must begin with the header, and one from any other address is refused (default unset: none is read; [docs/POSTGRES-API.md](../../docs/POSTGRES-API.md) "Behind a TCP proxy") |
 | `MASON_PG_HOST`, `MASON_PG_PORT` | the Postgres API's address |
@@ -191,10 +191,10 @@ Per-table or per-user detail (which table is stale, who sent what) would need a 
 | `MASON_UI_NAV_LINKS` | unset | the site's own pages belong in the sidebar: a JSON list of at most 5 `{"label","url"}`, a group of their own, in the same tab, each read as the link back's label and URL; or `{"label","view"}`, a view of the site's the page shows inside itself at `#host/<n>`, its JSON read from a path relative to the page's own address (`host/status.json`: no scheme, no `//`, no leading `/`, no `..`), in the page's look, every string as text (docs/WEB-UI.md "Host views"); anything else, a key written twice in an entry included, refuses the start |
 | `MASON_UI_OVERVIEW_CARD` | unset | the site's own facts as one card on the page's Overview, beside Mason's own: the same JSON as a view's, read from a path relative to the page's own address, refused as a view's path is (docs/WEB-UI.md "Host views") |
 | `MASON_PG_DATABASE` | `mason` | the sources file has no `database:` and a tool must keep the database name it has (a different `database:` in the file is refused) |
-| `MASON_DUCKDB_MEMORY` | half the container's memory limit, or what leaves 2.5 GiB beside it when that is less, never under 128 MiB; under 3 GiB, unset, a start warns that the system may stop it | the container's limit is not what the copy should have half of, or you choose its share under 3 GiB yourself ("Memory") |
+| `MASON_DUCKDB_MEMORY` | half the container's memory limit, or what leaves 2.5 GiB beside it when that is less, never under 128 MiB; under 3 GiB, unset, a start warns that the system may stop it | the container's limit is not what the engine should have half of, or you choose its share under 3 GiB yourself ("Memory") |
 | `MASON_SPILL_LIMIT` | half of what is free on the disk, followed as it fills | statements fail with 53400 on a disk with room to give them (never past 90% of what is free) |
-| `MASON_COPY_PARALLEL` | 3 (1 to 8) | each reader is a backend on your database: fewer when the database has little headroom, more when it has plenty and a copy is slow |
+| `MASON_COPY_PARALLEL` | 3 (1 to 8) | each reader is a backend on your database: fewer when the database has little headroom, more when it has plenty and a first sync is slow |
 | `UV_THREADPOOL_SIZE` | 32 (1 to 1024) | each running statement holds one. A run has about 40 threads plus five a CPU (49 at 2, 89 at 10). Under a thread limit (`pids.max`, `Max processes`) Mason lowers the default to fit and says so; a size of your own that does not fit refuses the start, since Node would exit with no message. On Windows it must be set in the shell before `mason` |
 | `MASON_STATEMENT_TIMEOUT` | `5min` (0 for none) | a dashboard's statement may rightly take longer, or a runaway one should stop sooner |
-| `MASON_HISTORY_DAYS` | 7 | you want Mason's history — the request log (`mason logs --requests`), the sync's events, the usage samples (`mason usage`), all kept in the copy — longer or shorter (it was `MASON_REQUEST_LOG_DAYS`, which now refuses the start) |
-| `MASON_STORE_JSON_PATHS` | `on` | you want the copy to hold only the columns you named: `off` stores no JSON path as a column, and drops what was stored at the next start |
+| `MASON_HISTORY_DAYS` | 7 | you want Mason's history — the request log (`mason logs --requests`), the sync's events, the usage samples (`mason usage`), all kept beside the synced data — longer or shorter (it was `MASON_REQUEST_LOG_DAYS`, which now refuses the start) |
+| `MASON_STORE_JSON_PATHS` | `on` | you want the synced data to hold only the columns you named: `off` stores no JSON path as a column, and drops what was stored at the next start |

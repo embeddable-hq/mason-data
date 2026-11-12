@@ -65,14 +65,14 @@ Postgres's p95 reached the 60 s target at 10 M rows, 32 clients, where its slowe
 | paid orders in a 30-day window | 0.45 | 0.96 | 1.05 | 2.59 | 2.3× slower |
 | one order by its primary key | 0.013 | 0.023 | 0.99 | 2.09 | 79× slower |
 
-Postgres is faster at "one tenant's orders per day, last 90 days", "paid orders in a 30-day window" and "one order by its primary key": it reads them through an index, and Mason's copy has none ([docs/DESIGN.md](DESIGN.md) "Heap order, no index").
+Postgres is faster at "one tenant's orders per day, last 90 days", "paid orders in a 30-day window" and "one order by its primary key": it reads them through an index, and Mason's synced tables have none ([docs/DESIGN.md](DESIGN.md) "Heap order, no index").
 
-## The copy
+## The first sync
 
-**Mason's copy** of each size, from that Postgres: *copied in* is the time until the copy was served, and the JSON path
-is stored that long after its first reads.
+**Mason's first sync** of each size, from that Postgres: *synced in* is the time until the synced tables were served,
+and the JSON path is stored that long after its first reads.
 
-| rows | in Postgres | copied in (s) | on Mason's disk | JSON path stored after (s) |
+| rows | in Postgres | synced in (s) | on Mason's disk | JSON path stored after (s) |
 |---:|---:|---:|---:|---:|
 | 1,000,000 orders, 50,000 customers | 0.34 GiB | 2.80 | 0.08 GiB | 17.9 |
 | 3,000,000 orders, 150,000 customers | 1.0 GiB | 8.20 | 0.20 GiB | 25.6 |

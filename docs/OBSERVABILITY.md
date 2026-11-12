@@ -1,6 +1,6 @@
 # Observability
 
-What a team running Mason sees about it: whether it is healthy, how fresh each copy is, what was asked of it, who
+What a team running Mason sees about it: whether it is healthy, how fresh each synced table is, what was asked of it, who
 asked, and what it costs. The data and the endpoints came first and are built (steps 1–6 below, ✅); the presentation
 (the web page's sections, the managed service) is built on them after. What is not built says so (⏸, "Access").
 
@@ -11,7 +11,7 @@ same JSON; the web page and the managed service read those endpoints, never a se
 
 | Endpoint | Command | What |
 |---|---|---|
-| `GET /api/state` | `mason status`, `mason wait` (with `?columns=1`) | each copy's rows, state and last sync (`tables[].sync`), the totals, the readiness; each table's columns only with `?columns=1` |
+| `GET /api/state` | `mason status`, `mason wait` (with `?columns=1`) | each synced table's rows, state and last sync (`tables[].sync`), the totals, the readiness; each table's columns only with `?columns=1` |
 | `GET /api/tables/<table>/columns` | `mason tables <table>` `columns` | one table's columns (`{ table, columns }`): the Tables page's form reads it as it opens |
 | `GET /api/queries` | `mason status` | the last day's and week's statements: outcomes, time (average, p50, p95), rows and bytes sent; read at most once every 30 s, so up to 30 s old |
 | `GET /api/activity?since=` | (the Usage page's) | one time range of the request log: `{ since, window, clients, clientsTotal, slowest, keptDays }` — its statements as the summary counts a day, who sent them (a row per user and client: statements, failed, sessions, last; the 50 with the most statements, `clientsTotal` the count of every client and session), the 10 slowest that completed |
@@ -20,13 +20,13 @@ same JSON; the web page and the managed service read those endpoints, never a se
 | `GET /api/requests?limit=&failed=&outcome=&since=&until=&user=&client=&slow=&search=&before=&id=` | `mason logs --requests` | the request log, filtered and paged; `slow=1` (`--slow`) the ones that took `SLOW_MS` (1 s) or more, `search` (`--search`) a piece of the statement's text, any case; `id` (`--id`, printed whole) one request; a slow one carries its `plan` ("The plan of a slow statement") |
 | `GET /api/events?limit=&since=&failed=` | `mason logs --events`; `mason status` `recentErrors.sync` | the sync's failures and events, and the run's restarts |
 | `GET /api/running`, `POST /api/cancel { session }` | `mason logs --running`, `mason cancel <session>` | the statements running now; stop one as a client's cancel does |
-| `GET /api/usage?since=&until=&step=` | `mason usage` | a sample a minute, re-bucketed by `step` (a point of more than a minute: its p50 / p95 are its statements', from the request log, never its worst minute's), and each copy's own size |
+| `GET /api/usage?since=&until=&step=` | `mason usage` | a sample a minute, re-bucketed by `step` (a point of more than a minute: its p50 / p95 are its statements', from the request log, never its worst minute's), and each synced table's own size on disk |
 | `GET /api/users[?lastUsed=1]` | `mason user list` | the users, removed ones kept; the last use only when asked (a scan of the request log) |
 | `POST /api/users/<name>/disable`, `POST /api/users/<name>/enable` | `mason user disable <name>`, `mason user enable <name>` | a user kept with its password, its logins refused (28000) until enabled; `{ disabled \| enabled, already, next }` |
 | `GET /api/logs?lines=&since=` | `mason logs --json` | the run's last log entries from memory (`mason serve` has no file) |
 | `POST /api/sync { tables }` | `mason sync` | sync now, per table |
 
-`/api/state` also says the run's health beyond the copies (each `mason status` says on a line of its own, and each
+`/api/state` also says the run's health beyond the synced tables (each `mason status` says on a line of its own, and each
 sampled once a minute where it moves):
 
 - `stream.slotWal` (replication): the WAL the slot holds on the database — `{ walHeldBytes, walStatus, safeWalSizeBytes, at }`
@@ -37,9 +37,9 @@ sampled once a minute where it moves):
   `engine.restarts` — `{ count, last: { at, why, upSeconds } | null }` or `{ error }` — its supervisor's record
   (`.mason/restarts.json`, the last 20), read by ONE function (src/cli/supervise.ts `restartsFact`) that `mason status`
   reads with Mason stopped too.
-- `disk` — `{ path, freeBytes, copyBytes, projectedBytes, error? }`: free where the copy's file is (the sync's own
-  `diskFree`, the measure a copy is held to), the file and its write-ahead log (`engine.bytes`), and while copies run what their pages left are
-  projected to add (`copyDiskProjection`, as each chunk's check last computed it; null while none can say). A `statfs`, no
+- `disk` — `{ path, freeBytes, copyBytes, projectedBytes, error? }`: free where the synced data's file is (the sync's own
+  `diskFree`, the measure a first sync is held to), the file and its write-ahead log (`engine.bytes`), and while first
+  syncs run what their pages left are projected to add (`copyDiskProjection`, as each chunk's check last computed it; null while none can say). A `statfs`, no
   query. Sampled as `diskFreeBytes` (re-bucketed, the lowest).
 - `sessions` — `{ open, byClient: [{ user, client, open, running }] }`: the Postgres API's sessions logged in now, by
   `mason user` ('' a token's) and application_name, and how many of each run a statement; the listener's own, in memory
@@ -76,17 +76,17 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   by the CLI and the page alike — the "Healthy / Syncing / Error" asked for, in the commands' words); cards that each link
   into the view that lists what they count (the failed tables, Queries — the slow ones from the p95 —, Usage); ONE table
   of facts — the database and how its changes arrive, the warnings, Mason's version, up for, restarts (`engine`), the
-  free disk and what a running copy is projected to add (`disk`), the sessions open (`sessions`); in replication mode a
+  free disk and what a running first sync is projected to add (`disk`), the sessions open (`sessions`); in replication mode a
   Changes table — the stream (`stream`: running or why not, position, lag, last batch, as `streamLines` says it) and the
   slot's hold on the WAL (`stream.slotWal`: held, status, room left; `lost`, `unreserved` or no cap are warnings); the
-  statements of the last day and week (p50 / p95); the copies not finished, a bar each, only while there are any; and a
+  statements of the last day and week (p50 / p95); the first syncs not finished, a bar each, only while there are any; and a
   table of the recent errors (sync and statements), each with See all. A fact the run could not read (`{ error }`) is
   said as unknown with its reason, never as 0; one it does not say is not shown; the last day's unsupported SQL, one line
   with See all when there is any. Reads `/api/state` (2 s), `/api/queries`, `/api/events?failed=1`,
   `/api/requests?failed=1`, `/api/unsupported` (30 s).
 - **Tables** (`#tables`, `#tables?show=failed`): ONE table of the database's tables. An added one shows its state
   (Synced / Syncing / Failed / Waiting), rows, last sync and its age, how long it took (`<0.1 s` under a tenth), the
-  copy's own size, in replication mode its stream state, its error, **View events** (Sync events narrowed to it), **Sync now**
+  synced table's own size on disk, in replication mode its stream state, its error, **View events** (Sync events narrowed to it), **Sync now**
   (`POST /api/sync`) and Remove; one not added
   its rows and key and why it cannot be added as it is, with Add / Columns… / Name its key…. A search box over the names
   and All / Added / Failed / Not added; the first 100 that pass written, then Show more / Show all. Reads `/api/state`
@@ -108,7 +108,7 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   `/api/state` `sessions`, 5 s; `/api/running`, 2 s, each with **Cancel**, `POST /api/cancel`) or who sent statements
   and the slowest (any other range: `/api/activity`), the unsupported SQL of the range (`/api/unsupported?since=`), the
   range's samples (`/api/usage?since=<range>&step=<60|3600|21600|86400>`, newest first, the process's memory in a closed
-  details), four charts of them, and each copy's own size. A client, a slow statement and a statement card lead to
+  details), four charts of them, and each synced table's own size on disk. A client, a slow statement and a statement card lead to
   Queries filtered. Under Now `/api/activity` every 5 s and the rest every 60 s; any other range, each once.
 - **Observability › Sync events** (`#observability/syncs`): the sync's events of the range (`/api/events?limit=500&since=`, 10 s
   under Now, else once), newest first, narrowed by Failures only, a kind (every kind) and a table (every added table,
@@ -127,7 +127,8 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
 
 - **One fact, one place**: every field is computed once on the server and is a field of a command's `--json` before
   any page shows it (`.claude/rules/web-ui.md`). The web page, the managed service and a coding agent read the same JSON.
-- **Mason's words**: a "user" (what `mason user` makes), never "credential" or "token"; "the copy"; never the engine's name.
+- **Mason's words**: a "user" (what `mason user` makes), never "credential" or "token"; "the synced table", "the synced data" and "the first sync", never "the copy"; never
+  the engine's name.
 - **Kept like the request log**: anything with history lives in the run's own file, written on a connection of its own
   (never the sync's writer turn), kept `MASON_HISTORY_DAYS` days.
 
@@ -139,9 +140,9 @@ Key: ✅ built · ⏸ deferred
 |---|---|---|
 | Healthy / Syncing / Error | ✅ | `readiness` (src/cli/readiness.ts) |
 | Tables synced, N of M | ✅ | `/api/state` `tables` |
-| Total rows | ✅ | `totals.rows`; a copy's rows are counted after every batch |
+| Total rows | ✅ | `totals.rows`; a synced table's rows are counted after every batch |
 | Last successful sync | ✅ | `totals.syncedAt` and `tables[].sync` (`syncedAt`, `syncedBy`); in replication mode the stream's last batch |
-| Storage used | ✅ | `engine.bytes`, the copy's file and its write-ahead log |
+| Storage used | ✅ | `engine.bytes`, the synced data's file and its write-ahead log |
 | Queries, last 24 h / 7 d | ✅ | `queries` (`/api/queries`), from the request log (`_mason.requests`); 7 days is its default retention |
 | Query duration | ✅ | `queries`: average, and p50 / p95 (an average alone hides the slow ones) |
 | Recent errors | ✅ | `recentErrors`: `sync` (the sync events record, step 2) and `queries` (the request log's failures) |
@@ -151,12 +152,12 @@ Key: ✅ built · ⏸ deferred
 | Field | | Where it comes from / what to build |
 |---|---|---|
 | Row count | ✅ | as Total rows above |
-| Last sync time, and how old the copy is | ✅ | per table: `sync.syncedAt`, `sync.ageSeconds` |
+| Last sync time, and how old the synced data is | ✅ | per table: `sync.syncedAt`, `sync.ageSeconds` |
 | Sync now, per table | ✅ | `POST /api/sync { tables }` (`mason sync`) |
-| Synced / Syncing / Failed / Pending | ✅ | the copy's phase: done / copying / failed / waiting |
-| Sync duration | ✅ | `sync.syncSeconds`: how long the sync that brought the copy current took |
+| Synced / Syncing / Failed / Pending | ✅ | the first sync's phase (`copy.phase`): done / copying / failed / waiting |
+| Sync duration | ✅ | `sync.syncSeconds`: how long the sync that brought the synced table current took |
 | Sync error | ✅ | the current one on the table; its history is the sync events (`mason logs --events`) |
-| Size of the copy | ✅ | `bytes` is the SOURCE table's size; the copy's own size per table is measured every 10 min from its blocks (`/api/usage` `copySizes`, `mason usage`), never per request |
+| Size of the synced table | ✅ | `bytes` is the SOURCE table's size; the synced table's own size is measured every 10 min from its blocks (`/api/usage` `copySizes`, `mason usage`), never per request |
 | Search / filter | ✅ | over the list the endpoint returns; no server change for hundreds of tables |
 
 ## 3. Queries
@@ -203,24 +204,24 @@ Key: ✅ built · ⏸ deferred
 
 ## Also worth showing (not asked for)
 
-1. **How old each copy is**, in seconds: "can I trust this number?"
+1. **How old each synced table is**, in seconds: "can I trust this number?"
 2. ✅ **Stream lag, and the WAL the replication slot holds on the source**: a slot nobody reads fills the source's disk.
 3. ✅ **Refused statements grouped by the unsupported SQL they used** (`src/duck/gaps.ts`), so users know what to rewrite
    (`GET /api/unsupported`; each refused statement's entry is the request log's `gap`).
 4. ✅ **Sessions open now, restarts** (`sessions`, `engine.restarts`); memory against the limit is a usage sample (`copyMemoryBytes`).
-5. ✅ **Free disk against the copy's projected size** (`disk`, from `copyDiskProjection`).
+5. ✅ **Free disk against the first sync's projected size** (`disk`, from `copyDiskProjection`).
 
 ## Steps (data and endpoints; presentation later)
 
 Each adds fields to a command's `--json` and the endpoint with the same JSON, with its tests.
 
-1. ✅ **Status and Tables (~2 days)**: row counts after each poll; per table the last sync, its duration and the copy's
-   age; totals; query counts and durations over 24 h and 7 d.
-2. ✅ **Sync events (~1.5 days)**: copy and poll failures and restarts as rows, kept as the request log is.
+1. ✅ **Status and Tables (~2 days)**: row counts after each poll; per table the last sync, its duration and the synced
+   table's age; totals; query counts and durations over 24 h and 7 d.
+2. ✅ **Sync events (~1.5 days)**: first-sync and poll failures and restarts as rows, kept as the request log is.
 3. ✅ **Queries (~2 days)**: filters and paging, ended, Cancelled; the running statements and cancel; bytes sent.
 4. ✅ **Users (~1 day)**: last used, removed entries kept, the URL without the password.
 5. ✅ **Logs (~1 day)**: the last N lines in memory, an endpoint, `mason logs --json`.
-6. ✅ **Samples (~2–3 days)**: every N seconds — storage, rows, queries, bytes sent, lag, memory — and each copy's size
+6. ✅ **Samples (~2–3 days)**: every N seconds — storage, rows, queries, bytes sent, lag, memory — and each synced table's size
    less often.
 
 ## Access (C built; A and B open)
@@ -294,14 +295,14 @@ other work; Node 26.13, `UV_THREADPOOL_SIZE=32` as Mason sets it):
 At SLOW_MS, the fast statements' p50 and p95 are within the spread between the two rounds without plans. With a plan
 always in flight, the p95 is 2–6 ms higher, about the size of that spread. An EXPLAIN takes ~10–14 ms at p50. No
 design around it (a lower priority, waiting for an idle executor) was needed; measure again if what the plan reads
-grows (a copy's facts are read in memory; `duckdb_tables()` once).
+grows (a synced table's facts are read in memory; `duckdb_tables()` once).
 
 ## To come back to
 
-- **NEXT: a table just added shows its copy's progress at once.** Today, Add on the Tables page writes the sources
-  file and the copy starts, but nothing on the row moves, so it looks as if nothing happened. The row should show a
-  progress bar and the % copied (`tables[].copy.progress.share`, the rows, the time left — what `mason wait` prints,
-  `copyingText`), above all on a table's first copy, from the click until the copy is served; then its sync state.
+- **NEXT: a table just added shows its first sync's progress at once.** Today, Add on the Tables page writes the
+  sources file and the first sync starts, but nothing on the row moves, so it looks as if nothing happened. The row
+  should show a progress bar and the % synced (`tables[].copy.progress.share`, the rows, the time left — what `mason
+  wait` prints, `copyingText`), from the click until the synced table is served; then its sync state.
 - **NEXT: a vertical left sidebar with icons** in place of the horizontal top nav (Overview, Tables, Users, and
   Observability with Queries / Usage / Logs under it), as Vercel's and Supabase's dashboards do; collapsing to icons
   on a narrow window and to a menu on a phone. Icons served by Mason like everything else: inline SVG, or a small icon
@@ -319,7 +320,7 @@ grows (a copy's facts are read in memory; `duckdb_tables()` once).
 
 Measured, not estimated: a synthetic request log of 30 M rows (a week of a BI tool at 50 statements a second, 2.2 GiB,
 written in time order as the ledger writes it) on a 10-core, 32 GiB laptop; the demo with 804 tables in its database
-and 204 of them copied; the listener against the `main` it branched from. Three runs each.
+and 204 of them synced; the listener against the `main` it branched from. Three runs each.
 
 **The request log's reads at 30 M rows** (what the pages poll; before → after this review):
 
@@ -334,14 +335,14 @@ and 204 of them copied; the listener against the `main` it branched from. Three 
 | `refused`, events, `max(seq)` at open | `mason status`, Logs, the open | 30–36; 1–2; 1–3 |
 | the retention trim | hourly, and at open | an hour's 179 k rows 4 ms, a day's 4.3 M 15 ms |
 | the open's `ADD COLUMN IF NOT EXISTS` | each start | 5 ms; 210 ms once on a log from `main` missing two columns |
-| `copySizes` (`pragma_storage_info`) | every 10 min | 30 M rows × 19 columns (9,348 segments) 71–84 ms, so ~0.5 s for 200 M × 20; 203 small copies 421 ms |
+| `copySizes` (`pragma_storage_info`) | every 10 min | 30 M rows × 19 columns (9,348 segments) 71–84 ms, so ~0.5 s for 200 M × 20; 203 small synced tables 421 ms |
 
 **The listener**: no per-statement cost measurable — 3,000 small statements, 780–970 µs each on `main` and on this
 branch alike, and a 150,000-row answer 96–126 ms on both (the bytes counted per send, the running list and the
 sessions are read only when asked).
 
 **Spin-up**: `mason init demo` 0.23 s, `mason start` 1.89 s (seeding the demo) and ready 0.26 s later; a restart with
-204 copies 2.25 s, ready +0.31 s; `mason serve` healthy after 0.60 s. The new tables' opens add 5–10 ms.
+204 synced tables 2.25 s, ready +0.31 s; `mason serve` healthy after 0.60 s. The new tables' opens add 5–10 ms.
 
 **The page**: the first load is 23 static requests, 520 KB (uPlot 145 KB and the fonts 141 KB of it; uPlot is
 imported only when a chart is drawn, which the Overview's sparklines do), every request same-origin (the CSP is
@@ -352,7 +353,7 @@ parsed in 1 ms, and polled every 2 s by the Overview and Tables.
 **Nothing is fetched at run time**: no URL in src/ is fetched but DuckDB's extension repository; JSON, ICU and Parquet
 are built into DuckDB; the `postgres` and `inet` extensions ship with the CLI and the image, one npm package per
 platform (src/duck/extensions.ts), and with them DuckDB's autoinstall is off. Without a package for the platform, the
-first copy on a machine downloads them once.
+first sync on a machine downloads them once.
 
 **Left, most worth it first**:
 
@@ -360,8 +361,8 @@ first copy on a machine downloads them once.
    columns 465 KB → **134 KB**, of 50 columns 3,414 KB → **134 KB** (built and serialised 4.6 → 1.2 ms); a form's
    columns are `GET /api/tables/<table>/columns`, read once as Columns… or Name its key… opens, and `?columns=1` keeps
    them for `mason status --json` (its shape unchanged).
-2. **Done, by PR 37**: from npm, an offline machine's first copy failed (the extension download), said only then. The
-   copy's `postgres` and `inet` extensions now ship with the CLI as one optional package per platform
+2. **Done, by PR 37**: from npm, an offline machine's first sync failed (the extension download), said only then. The
+   sync's `postgres` and `inet` extensions now ship with the CLI as one optional package per platform
    (`@mason-data/extensions-<platform>`, src/duck/extensions.ts) and in the image; `mason doctor` has an `extensions`
    line. This branch's own `mason init` install step was dropped for it when main was merged (2026-10-29).
 3. **Done**: Queries' `search` over 7 days was ~0.6 s every 5 s while shown (12 scans, ~7.2 s of a core a minute); a

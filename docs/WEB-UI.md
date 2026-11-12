@@ -24,7 +24,7 @@ the address's hash, so a view can be bookmarked and Back goes to the one before:
 | Hash | View |
 |---|---|
 | `#overview` (none, or one it does not know) | the Overview |
-| `#tables`, `#tables?show=failed` | Tables (filtered to the failed copies) |
+| `#tables`, `#tables?show=failed` | Tables (only the tables whose sync failed) |
 | `#users` | Users |
 | `#observability/queries` (`#observability`) | Observability › Queries; `?slow=1`, `?status=` (`completed`, `refused`, `failed`, `refused-or-failed`, `cancelled`), `?user=`, `?client=` set those filters |
 | `#observability/usage` | Observability › Usage |
@@ -164,7 +164,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   shown (said under it: the pages follow the log's order by start). A statement is one or two lines in its row; a row
   opens in place to its whole id, times, bytes sent, statement and error — the first 16 KiB of each, said when cut.
   A statement that reads no synced table (`select 1`, `select now()`, SET, SHOW, a BI tool's catalog queries) is
-  answered without the copy and **not listed** — the protocol's chatter, hundreds a connection from a BI tool — and the
+  answered without the synced data and **not listed** — the protocol's chatter, hundreds a connection from a BI tool — and the
   page says so, as `mason logs --requests` does when it lists none; while nothing is listed, Connect offers a first
   statement that is (`select count(*) from <a synced table>;`).
 - **Observability › Usage** (`#observability/usage`): every part follows the range. Cards: under Now, the sessions
