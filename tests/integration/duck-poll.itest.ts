@@ -1773,13 +1773,9 @@ test("a table of many moderate out-of-line values syncs under a 128 MB limit, ne
 // holding their values, and failed past the memory limit or the spill's ceiling. Synthetic shapes scaled to a low
 // memory limit; the checkpoint is the test's own, forced (Mason runs none), as DuckDB's own at a commit would run it.
 
-/** a store at `memoryLimit` whose spill's ceiling is in force at `ceiling`, as the run sets it once the disk moves
- *  (src/duck/store.ts keepSpillCeiling) */
+/** a store at `memoryLimit` whose spill's ceiling is `ceiling`, in force from the open (issue 850) */
 async function storeWithCeiling(file: string, log: (l: string) => void, memoryLimit: string, ceiling: string): Promise<DuckStore> {
-  const store = await DuckStore.open(file, log, { memoryLimit, spillLimit: ceiling });
-  const c = await store.instance.connect();
-  try { await c.run(`SET GLOBAL max_temp_directory_size = '${ceiling}'`); } finally { c.closeSync(); }
-  return store;
+  return DuckStore.open(file, log, { memoryLimit, spillLimit: ceiling });
 }
 
 test("five tables added together, one wide of two jsonb columns, sync under a low memory limit, and a checkpoint after leaves the synced data valid", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set", timeout: 900_000 }, async () => {

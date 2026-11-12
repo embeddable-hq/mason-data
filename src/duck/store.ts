@@ -96,16 +96,39 @@ export const DUCKDB_VERSION = version();
 const INSTANCE_SETTINGS = { late_materialization_max_rows: "10000", force_compression: "zstd", lambda_syntax: "ENABLE_SINGLE_ARROW", max_vacuum_tasks: "0" };
 
 /**
- * WHAT THE INSTANCE MUST HOLD, READ BACK (`DuckStore.open`, every open): DuckDB 2.0 does not apply every setting given
- * at the instance's creation (`max_temp_directory_size` is shown and not enforced, issue 850), and a checkpoint that
- * merges row groups invalidates the database (`INSTANCE_SETTINGS`), so the open refuses unless the engine reads
- * `max_vacuum_tasks` as 0 where its checkpoint reads it (the database's settings, which `current_setting` shows).
+ * WHAT THE INSTANCE MUST HOLD, READ BACK (`DuckStore.open`, every open): every setting the open gives the instance —
+ * `INSTANCE_SETTINGS`, the extensions', the memory limit, the spill's folder and its ceiling — read back as the engine
+ * reads it (`current_setting`), and the open refuses, closed, unless each is what was given. Two are why: a checkpoint
+ * that merges row groups invalidates the database (`max_vacuum_tasks`, `INSTANCE_SETTINGS`), and DuckDB 2.0 does NOT
+ * apply every setting given at the instance's creation — `max_temp_directory_size` given there is SHOWN and not
+ * enforced (issue 850: shown as 47.0 MiB, a statement spilled 300 MB with no 53400), so the open sets it with a
+ * `SET GLOBAL` (`spillCeilingSql`) before this reads it back. Every other setting given at creation was measured in
+ * force (DuckDB 2.0.0: the memory limit refused a 96 MiB pin at 95.3 MiB and spilled where the default did not, the
+ * spill landed in `temp_directory`, a string column was stored ZSTD, a top 5,000 joined back by row id, a `->` lambda
+ * bound). An amount is compared in bytes to within the rounding of DuckDB's own text (`95.3 MiB` for 100MB).
  * Null when it holds; else why, in one line.
  */
-export async function instanceSettingsProblem(c: Pick<DuckConnection, "runAndReadAll">): Promise<string | null> {
-  const vacuum = String((await c.runAndReadAll("SELECT current_setting('max_vacuum_tasks')")).getRowsJS()[0]?.[0]);
-  return vacuum === INSTANCE_SETTINGS.max_vacuum_tasks ? null
-    : `the engine runs with max_vacuum_tasks = ${vacuum}, not ${INSTANCE_SETTINGS.max_vacuum_tasks}: a checkpoint could merge a synced table's row groups past the memory and invalidate the synced data (Mason bug: report it)`;
+export async function instanceSettingsProblem(c: Pick<DuckConnection, "runAndReadAll">, settings: Record<string, string> = INSTANCE_SETTINGS): Promise<string | null> {
+  const names = Object.keys(settings);
+  const row = (await c.runAndReadAll(`SELECT ${names.map((n) => `current_setting('${n.replaceAll("'", "''")}')`).join(", ")}`)).getRowsJS()[0] ?? [];
+  for (const [i, name] of names.entries()) {
+    const want = settings[name]!, shown = String(row[i]);
+    if (sameSetting(shown, want)) continue;
+    if (name === "max_vacuum_tasks") return `the engine runs with max_vacuum_tasks = ${shown}, not ${want}: a checkpoint could merge a synced table's row groups past the memory and invalidate the synced data (Mason bug: report it)`;
+    if (name === "max_temp_directory_size") return `the engine runs with max_temp_directory_size = ${shown}, not ${want}: statements could spill past MASON_SPILL_LIMIT (or half of what is free) and fill the disk (Mason bug: report it)`;
+    return `the engine runs with ${name} = ${shown}, not ${want} (Mason bug: report it)`;
+  }
+  return null;
+}
+/** a setting as the engine shows it against the value given: an amount in bytes, to the last digit DuckDB prints (it
+ *  shows one decimal of a binary unit, cut, never rounded: `95.3 MiB` for 100MB's 95.37, `7.4 GiB` for 8GB's 7.45),
+ *  anything else as text */
+function sameSetting(shown: string, want: string): boolean {
+  if (!MEMORY_LIMIT_RE.test(want)) return shown === want;
+  const m = MEMORY_LIMIT_RE.exec(shown);
+  if (m === null) return false;
+  const decimals = m[1]!.split(".")[1]?.length ?? 0;
+  return Math.abs(memoryLimitBytes(shown) - memoryLimitBytes(want)) <= memoryLimitBytes(`1${m[2]}`) * 10 ** -decimals + 1;
 }
 
 /**
@@ -243,6 +266,9 @@ export function spillCeiling(freeBytes: number, spilledBytes: number, setBytes: 
 /** the bytes free where `dir` is: the one reading of it (the sync's disk check, the spill's ceiling) */
 export function freeBytesAt(dir: string): number { const st = fs.statfsSync(dir); return st.bavail * st.bsize; }
 const spillSetting = (bytes: number): string => `${Math.floor(bytes / 2 ** 20)}MiB`;
+/** the one statement that puts a spill's ceiling in force: DuckDB 2.0 enforces it only when SET, never when given at
+ *  the instance's creation (issue 850; `instanceSettingsProblem`) */
+const spillCeilingSql = (bytes: number): string => `SET GLOBAL max_temp_directory_size = '${spillSetting(bytes)}'`;
 export const MEMORY_LIMIT_RE = /^\s*(\d+(?:\.\d+)?)\s*(KB|MB|GB|TB|KiB|MiB|GiB|TiB)\s*$/i;
 
 /** DuckDB's memory limit in bytes, as DuckDB reads the text: KB / MB / GB / TB are powers of 1000, KiB / MiB / GiB / TiB of 1024 */
@@ -333,17 +359,21 @@ export class DuckStore {
     const mine = { closed: null as Promise<void> | null, abandoned: null as string | null };
     opened.set(where, mine);
     let executor: Executor;
+    // every connection's, the sync's and each session's; the spill's ceiling is SET after the open (`spillCeilingSql`)
+    const settings: Record<string, string> = { ...INSTANCE_SETTINGS, ...extensionSettings(extensions), memory_limit: memoryLimit, temp_directory: `${file}.tmp` };
     try {
       if (before !== undefined) await before.closed;
-      // every connection's, the sync's and each session's
-      executor = await Executor.start({ file, settings: { ...INSTANCE_SETTINGS, ...extensionSettings(extensions), memory_limit: memoryLimit, temp_directory: `${file}.tmp`, max_temp_directory_size: spillSetting(spillLimit) }, log,
+      executor = await Executor.start({ file, settings, log,
         ...(options.silentMs !== undefined ? { silentMs: options.silentMs } : {}), ...(options.workerFile !== undefined ? { workerFile: options.workerFile } : {}) });
     } catch (e) { if (opened.get(where) === mine) opened.delete(where); throw e; }
-    // the settings a checkpoint depends on, as the engine reads them (`instanceSettingsProblem`): refused, closed, never served
-    // read on the writer's connection, which nothing uses yet and the store keeps
+    // the spill's ceiling put in force (given at the creation it is shown and not enforced, issue 850), then every
+    // setting read back as the engine reads it (`instanceSettingsProblem`): refused, closed, never served. On the
+    // writer's connection, which nothing uses yet and the store keeps
     let problem: string | null;
-    try { problem = await instanceSettingsProblem(executor.writer()); }
-    catch (e) { problem = `its settings could not be read: ${e instanceof Error ? e.message : String(e)}`; }
+    try {
+      await executor.writer().run(spillCeilingSql(spillLimit));
+      problem = await instanceSettingsProblem(executor.writer(), { ...settings, max_temp_directory_size: spillSetting(spillLimit) });
+    } catch (e) { problem = `its settings could not be set and read back: ${e instanceof Error ? e.message : String(e)}`; }
     if (problem !== null) {
       // closed as a store closes: a thread given up on keeps the file here (`abandoned`)
       mine.closed = executor.close(options.closeGraceMs);
@@ -379,7 +409,7 @@ export class DuckStore {
     const spilled = Number((await c.runAndReadAll("SELECT coalesce(sum(size), 0) FROM duckdb_temporary_files()")).getRowsJS()[0]![0]);
     const next = spillCeiling(this.diskFree(path.dirname(path.resolve(this.file))), spilled, this.spillSet);
     if (Math.abs(next - this.spillLimitBytes) < this.spillLimitBytes * 0.01) return;
-    try { await c.run(`SET GLOBAL max_temp_directory_size = '${spillSetting(next)}'`); }
+    try { await c.run(spillCeilingSql(next)); }
     catch (e) {
       if (e instanceof Error && e.message.includes("failed to adjust")) return;
       throw e;

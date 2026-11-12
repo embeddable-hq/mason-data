@@ -27,7 +27,10 @@ paths:
   engine's limit (a worker, a WebAssembly instance, a cache) measures them again, never guesses.
 - **What statements spill has a ceiling under the free disk, and it follows the disk** (`spillCeiling`, `keepSpillCeiling`,
   `src/duck/store.ts`, issue 105): half of what is free plus what is spilled (the free bytes exclude the spill: half of the
-  free bytes on top of it converges on the whole disk), or `MASON_SPILL_LIMIT`, never past 90% of that; re-read every 15 s. DuckDB's own is 90% of what was free at its first spill, read once (measured on a
+  free bytes on top of it converges on the whole disk), or `MASON_SPILL_LIMIT`, never past 90% of that; re-read every 15 s.
+  It is in force from the open by a `SET GLOBAL`, never a setting given at the instance's creation, which DuckDB 2.0 shows
+  and does not enforce (issue 850: 47.0 MiB shown, 300 MB spilled); the open reads back every setting it gives and
+  refuses, naming it, one that is not what it gave (`instanceSettingsProblem`). DuckDB's own is 90% of what was free at its first spill, read once (measured on a
   small volume: a disk that fills after that ends in its IO error). Past it (53400, as past Postgres's temp_file_limit) or on a full disk (53100) the statement fails alone:
   no path and no engine in the answer, gap `spill-limit` on its request-log row. A sizing decision reads
   `store.spillLimitBytes`. ("A top N over joined tables")
