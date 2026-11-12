@@ -3,8 +3,9 @@
  * src/duck/compact.ts). The checkpoint merges no row groups (issue 371), so a table the poll or the stream writes by key
  * keeps its dead rows and a row group per checkpoint; the sync's check finds it due (here at a low threshold) and
  * rewrites it from the synced data alone. A polled table churned through many polls and checkpoints stays within the
- * bound and equal to the source; a streamed table's changes that arrive WHILE it is compacted are held and applied
- * after its swap, never lost; a compaction stopped half way keeps the table as it was, its held changes applied.
+ * bound and equal to the source; a streamed table's changes that arrive WHILE it is compacted are spilled beside it
+ * and applied after its swap, never lost; a compaction stopped half way keeps the table as it was, and the next start
+ * catches it up by one poll.
  *
  * What it needs: IT_POSTGRES_URL (the streamed tests: wal_level = logical), psql on PATH, DuckDB's postgres
  * extension. It writes only inside databases it creates, `it_dcompact_<random>*`, and drops them and its slots.
@@ -87,33 +88,38 @@ test("a polled table churned through many polls and checkpoints: compacted from 
     await sync.setTables([T]);
     await sync.once();
     await same(store, url, "the first sync");
-    let most = 0;
+    let most = 0, wrote = 0;
+    const live = (r: number): number => 20_000 + r * 50;
     for (let r = 1; r <= 12; r++) {
-      // a tenth of the rows updated, scattered, and a few new ones: the poll writes them by key
+      // a tenth of the rows updated, scattered, and a few new ones: ONE poll writes them by key (a poll reads again every
+      // row past the database's oldest open transaction, so on a busy server it writes more: counted, not assumed)
       psql(url, `UPDATE t SET n = ${r}, v = md5(id::text || '${r}') WHERE (id * 7 + ${r}) % 10 = 0; INSERT INTO t SELECT g, md5(g::text), ${r} FROM generate_series(${20_000 + r * 50 - 49}, ${20_000 + r * 50}) g`);
-      await sync.once();
+      const polled = await sync.pollNow(["public.t"]);
+      wrote = Math.max(wrote, polled.tables[0]!.changed + polled.tables[0]!.deleted);
       // the checkpoint DuckDB takes at 16 MiB of log, and at every stop
       await store.writer.run("CHECKPOINT");
-      most = Math.max(most, await one(store, "SELECT estimated_size FROM duckdb_tables() WHERE table_name = 't'"));
+      // what a scan reads: its stored rows, the deleted ones too — held to the threshold (0.3 of its space) and one
+      // round's writes past it, before the check that compacts it
+      const stored = await one(store, "SELECT estimated_size FROM duckdb_tables() WHERE table_name = 't'");
+      most = Math.max(most, stored);
+      assert.ok(stored <= live(r) / 0.7 + 2 * wrote, `round ${r}: ${stored} rows stored for ${live(r)} live and ${wrote} written a round\n${logged.filter((l) => /compact/.test(l)).join("\n")}`);
       await sync.checkCompaction();
-      await sync.once();
+      await (sync as unknown as { rebuilding: Promise<void> | null }).rebuilding;
       await same(store, url, `round ${r}`);
     }
-    const live = 20_000 + 12 * 50;
     const compacted = logged.filter((l) => l.startsWith("compacted public.t in "));
     assert.ok(compacted.length >= 2, `compacted again and again:\n${logged.slice(-20).join("\n")}`);
-    // a scan reads its stored rows, the deleted ones too: at the threshold (0.3) and a round past it, under 1.6 times
-    // its live rows; without the compaction, 12 rounds of a tenth leave 2.2 times
-    assert.ok(most <= 1.6 * live, `stored rows at most ${most} for ${live} live`);
+    // without the compaction, 12 rounds of a tenth leave 2.2 times its live rows, growing
+    assert.ok(most < 2.2 * live(12) || wrote > 5_000, `stored rows at most ${most} for ${live(12)} live`);
     const st = sync.state()[0]!;
     assert.ok(st.compaction?.at, JSON.stringify(st.compaction));
     assert.equal(st.error, null);
-    assert.equal(st.rows, live);
+    assert.equal(st.rows, live(12));
     assert.equal(await one(store, "SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE '%mason_compact'"), 0, "no side table left");
   } finally { await sync.stop(); await store.close(); }
 });
 
-test("a streamed table's changes while it is compacted are held and applied after its swap, never lost", { skip: skipStream }, async () => {
+test("a streamed table's changes while it is compacted are spilled and applied after its swap, never lost", { skip: skipStream }, async () => {
   const { db, url, source } = aSource("stream", 20_000);
   const T = { ...await tableOf(source, "public.t"), sync: { mode: "replication" } as const };
   const logged: string[] = [];
@@ -141,13 +147,15 @@ test("a streamed table's changes while it is compacted are held and applied afte
     // CHANGES WHILE IT IS COMPACTED: an update, a delete, an insert — the stream holds them for the table
     psql(url, "UPDATE t SET n = 2, v = 'during' WHERE id <= 100; DELETE FROM t WHERE id BETWEEN 101 AND 150; INSERT INTO t VALUES (99999, 'new', 3)");
     await sync.caughtUp();
-    assert.equal(await one(store, "SELECT count(*) FROM public.t WHERE v = 'during'"), 0, "held, not written under the compaction");
+    assert.equal(await one(store, "SELECT count(*) FROM public.t WHERE v = 'during'"), 0, "spilled, not written under the compaction");
+    assert.equal(await one(store, "SELECT count(*) FROM _mason.compact_held"), 151, "beside it: 100 updated, 50 deleted, 1 inserted");
     release();
     while (sync.state()[0]!.rebuilding === "compact") await new Promise((r) => setTimeout(r, 20));
     await sync.caughtUp();
-    await same(store, url, "the changes held during its compaction");
+    await same(store, url, "the changes spilled during its compaction");
     assert.ok(logged.some((l) => l.startsWith("compacted public.t in ")), logged.slice(-12).join("\n"));
-    assert.equal(await one(store, "SELECT count(*) FROM _mason.catch_up"), 0, "its mark removed once its held changes are applied");
+    assert.equal(await one(store, "SELECT count(*) FROM _mason.catch_up"), 0, "its mark removed once its spilled changes are applied");
+    assert.equal(await one(store, "SELECT count(*) FROM _mason.compact_held"), 0, "the spill applied and gone");
     // and the stream goes on writing it
     psql(url, "UPDATE t SET n = 4 WHERE id = 1");
     await sync.caughtUp();
@@ -155,7 +163,7 @@ test("a streamed table's changes while it is compacted are held and applied afte
   } finally { release(); await sync.stop(); await store.close(); }
 });
 
-test("a compaction stopped half way: the side table gone, the table as it was with its held changes, equal to the source after a restart", { skip: skipStream }, async () => {
+test("a compaction stopped half way: the side table gone, the table as it was, caught up by one poll at the next start and equal to the source", { skip: skipStream }, async () => {
   const { db, url, source } = aSource("stop", 20_000);
   const T = { ...await tableOf(source, "public.t"), sync: { mode: "replication" } as const };
   const logged: string[] = [];
@@ -180,12 +188,14 @@ test("a compaction stopped half way: the side table gone, the table as it was wi
     await reached;
     psql(url, "UPDATE t SET n = 5, v = 'held' WHERE id <= 10");
     await sync.caughtUp();
-    // stopped while the compaction is held: its piece never starts, and what was held is applied to the table as it was
+    // stopped while the compaction is held: its piece never starts; what was spilled is not applied at the stop (which
+    // must not wait for it), and the mark stands
     const stopping = sync.stop();
     release();
     await stopping;
     assert.ok(logged.some((l) => l.startsWith("compaction of public.t stopped: Mason is stopping")), logged.slice(-12).join("\n"));
-    assert.equal(await one(store, "SELECT count(*) FROM public.t WHERE v = 'held'"), 10, "the held changes applied to the table as it was");
+    assert.equal(await one(store, "SELECT count(*) FROM public.t WHERE v = 'held'"), 0, "the table as it was");
+    assert.equal(await rowsOf(store, "SELECT why FROM _mason.catch_up WHERE source = 'public.t'"), "after its compaction was cut short", "marked, so the next start catches it up");
     await store.close();
     store = await DuckStore.open(file, (l) => logged.push(l), { memoryLimit: "128MB" });
     sync = new Sync(store, source, db, (l) => logged.push(l), 1_000, "replication", names, { compact: LOW });
@@ -194,6 +204,7 @@ test("a compaction stopped half way: the side table gone, the table as it was wi
     await sync.once();
     await sync.caughtUp();
     await same(store, url, "a restart after a compaction stopped");
+    assert.ok(logged.some((l) => l.startsWith("caught up public.t by one poll after its compaction was cut short")), logged.slice(-12).join("\n"));
     assert.equal(await one(store, "SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE '%mason_compact'"), 0, "no side table left");
   } finally { release(); await sync.stop(); await store.close(); }
 });

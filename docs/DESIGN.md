@@ -312,22 +312,49 @@ an ordinary statement whose failure is that table's alone.
 - **How.** A due table is queued as a rebuild, behind every first sync and catch-up, one at a time, so it never runs
   beside a first sync. On the writer's turn the table is FROZEN: no poll starts on it, a `mason sync` of it is refused
   by name, its stored JSON paths' fills pause (`rebuildingNow` kind `compact`), and a streamed table's changes are
-  held (`held`, as a catch-up holds them) and marked in `_mason.catch_up` (`after its compaction was cut short`): the
-  stream acknowledges what it holds, so a crash before they are applied catches the table up by one poll at the next
-  start. Then, on the rebuilds' connection, its rows go into `<table>__mason_compact` (its columns from
+  SPILLED: each batch writes them, in the batch's own transaction, as rows of `_mason.compact_held` (a key's net change
+  as JSON, a column an UPDATE left unchanged told from a NULL) instead of into the table, and the table is marked in
+  `_mason.catch_up` (`after its compaction was cut short`). Then, on the rebuilds' connection, its rows go into `<table>__mason_compact` (its columns from
   `duckdb_columns()`, NOT NULL and defaults kept, the stored JSON paths' columns among them), a piece of rows by rowid
   at a time, each its own transaction, in rowid order (heap order kept), and the count is held equal to the table's.
   The swap is the copy's (one transaction on the writer's turn: a session reads the old table or the new one, never
   none and never half — `tests/duck-compact.test.ts` reads it 3 ways through 3 compactions); the compaction is
-  recorded with it (`_mason.compactions`), then the held changes are applied and the mark removed. A side table a crash
-  left is dropped at the next open.
+  recorded with it (`_mason.compactions`); then the spill is read back in commit order, 50,000 rows a piece, each piece
+  folded as a batch is and written as a catch-up writes what it held, its rows deleted from the spill in its own
+  transaction, each on a writer's turn of its own (the table's later batches keep spilling behind it), and the piece
+  that finds nothing left ends the spilling and removes the mark (`replaySpill`). A stop does not wait for the replay:
+  the mark stands, the spill is cleared at the next open, and that start catches the table up by one poll, as after a
+  crash. A side table a stop or a crash left is dropped at the next open.
+- **Never a reason to stop the synced data.** Before a compaction is queued, and before each of its pieces, the disk
+  where the synced data is must hold the rows it has left to write plus a quarter of the table's blocks and at least
+  64 MiB (`diskShortFor`, the copy's `diskFree`; a disk that cannot be read is no room). Without it the table WAITS,
+  said on its line and in the log (`Compaction.waiting`), never tried; a compaction that runs out of room between
+  pieces stops there (`CompactNoRoom`) and backs off. The review of PR 856 measured why: on a 200 MB volume holding a
+  120 MiB table, a rewrite with no such check filled the disk at a commit's checkpoint, and the synced data was
+  invalidated until the run started again. Measured with the check, on a 200 MB tmpfs (a table of 2 md5s a row, a third
+  of its stored rows deleted, low threshold): 103 MiB of file with 97 MiB free waited ("it needs 130.4 MiB free");
+  83 MiB with 117 MiB free was queued and stopped before its first piece (113.7 MiB free by then), backed off; 72 and
+  62 MiB with 128 and 138 MiB free compacted in 1.2 and 1.1 s; every store checkpointed after, none invalidated. A
+  table with a column named `rowid` waits for ever, said: the pieces read
+  the engine's row ids, which that column hides (every try had ended `wrote 180000 of 200000`).
 - **Memory.** A piece is `COMPACT_MEMORY_SHARE` (an eighth) of `store.memoryLimitBytes` over a row's bytes on disk
   times 8 (`pieceRows`: forced zstd stores text 2.5 to 4.5 times smaller; a jsonb read takes about 5.5 times its
   bytes), at most 8 row groups' rows; a piece out of memory (53200, a statement's or its commit's) is rolled back and
   the next is half of it, and one row that does not fit fails the compaction (`CompactTooLarge`), said with the limit.
 - **Failure.** Never the table's `error` and never fatal: logged, a `compact_failed` event, on its `mason status` line
   with when it is tried again (`copyRetryDelayMs`: at least 5 minutes, doubled per failure, at most 6 hours). What
-  was held is applied to the table as it was, and the side table dropped.
+  was spilled is applied to the table as it was, and the side table dropped.
+- **Memory outside the engine: none that grows with the stream.** The first version held a streamed table's changes in
+  Node's heap for the whole rewrite, as a catch-up holds them; the review of PR 856 measured ~590 bytes a key for a
+  220-byte row and ~1,470 for 1.1 KB, so a 50 M-row table's 6–7 minutes at 4,000 keys a second would pass the ~2 GiB
+  heap and kill the run, and the table be due again a minute after its restart. Spilled, measured here (`--expose-gc`,
+  1,000,000 changes of ~200 B rows in batches of 50,000 during one compaction): the heap moved by under 0.1 MiB after
+  any batch, against +520 MiB (545 B a key) for the same changes held; the spill wrote at ~13,000 changes a second on
+  this loaded laptop, and its replay of the million took ~2 minutes, 50,000 at a time. What the spill takes is disk,
+  in the synced data's file, and the check before each piece reads the free disk then, the spill's growth with it.
+- **The next pass is never moved later by a compaction.** Every rebuild's end re-times the passes (`followUp` →
+  `rearm`); `rearm` set the timer from now, four times the last pass on, so with frequent compactions no polled table
+  was polled for 20 minutes (the review of PR 856). It now only ever moves the next pass earlier (`timerAts`).
 
 **Why it cannot be the merge issue 371 met.** That merge ran INSIDE a checkpoint, and a checkpoint that fails
 invalidates the database. A compaction is statements, measured on DuckDB 2.0.0 (a laptop, synthetic tables, one store
@@ -364,15 +391,29 @@ comes every 16 MiB of log), so a real table is compacted far less often than her
 issue's measurement put the knee at (2.1× the file, 1.7× the scan after 60 rounds) and a cost a run pays rarely.
 
 **What it gives up, said.** While a table is compacted its polls wait (its synced data is as old as the compaction is
-long) and a streamed table's changes wait in Node's heap (`held`, as during a catch-up). At the rates above, a 22 M-row
-table with two wide JSON columns would take minutes, and a 195 M-row one tens of minutes: rare (half its space must
-be waste first) but at any hour; a window for it (an operator's setting, or quiet hours) is the owner's to decide.
-The file does not shrink: the freed blocks are reused by later writes. A crash during a streamed table's compaction
-catches it up by one poll, a scan of the source, at the next start. **Where.** `src/duck/compact.ts`,
-src/duck/sync.ts (`checkCompaction`, `compact`, `releaseHeld`); `tests/duck-compact.test.ts` (the rule, an append-only
-table through 200 checkpoints and a churned one held to the bound, out of memory, readers through the swap, the sync's
-own compaction), `tests/integration/duck-compact.itest.ts` (a polled table churned through 12 polls, a streamed table's
-changes held during its compaction, a compaction stopped half way).
+long) and a streamed table's changes wait in the spill, applied after its swap. At the rates above, a 22 M-row table
+with two wide JSON columns would take minutes, and a 195 M-row one tens of minutes: rare (half its space must be waste
+first) but at any hour; a window for it (an operator's setting, or quiet hours) is the owner's to decide. The file does
+not shrink: the freed blocks are reused by later writes. A stop or a crash during a streamed table's compaction catches
+it up by one poll, a scan of the source, at the next start.
+
+**A write by key never INSERT … SELECTs into a table made in its transaction** (src/duck/sync.ts `writeByKey`; the
+review of PR 856, a bug of main too). DuckDB 2.0.0 reads back nothing of a table made in a transaction that an INSERT …
+SELECT filled past a row group's rows (~120,000): `count(*)` says them all, a scan and a join none. `writeByKey` made its
+keys table so, in the batch's transaction, so a write of more than ~120,000 keys deleted none of them and inserted every
+row again: a catch-up replaying 1.34 M held changes after ~10 minutes down left 935,331 keys twice in a 2 M-row table,
+and the first version of this compaction's held replay 298,927 of 300,000. Measured here on that version, by fill: an
+INSERT … SELECT of 120,000 or 300,000 rows into a table made in the transaction reads back empty, TEMP or not; filled
+by VALUES of 500 at a time it reads back whole up to 1.5 M rows, as does a table made before the transaction or by
+CREATE TABLE AS in it. So the keys deleted are read from the keys table and the rows table at once, never gathered.
+
+**Where.** `src/duck/compact.ts`, src/duck/sync.ts (`checkCompaction`, `compactBlocker`, `diskShortFor`, `compact`,
+`spill`, `replaySpill`, `writeByKey`, `rearm`); `tests/duck-compact.test.ts` (the rule, an append-only table through 200
+checkpoints and a churned one held to the bound, out of memory, readers through the swap, the sync's own compaction,
+300,000 held changes replayed as a catch-up replays them, 300,003 changes spilled during a compaction, the waits for disk
+and for a rowid column, the next pass never later), `tests/duck-compact-room.test.ts` (no room before a piece),
+`tests/integration/duck-compact.itest.ts` (a polled table churned through 12 polls within the bound, a streamed table's
+changes spilled during its compaction, a compaction stopped half way and caught up at the next start).
 
 ### A copy beside the stream
 

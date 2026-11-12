@@ -23,6 +23,7 @@
  * The caller swaps the side table in on the writer's turn, the table frozen meanwhile (src/duck/sync.ts `compact`).
  */
 import type { DuckConnection } from "./executor.ts";
+import type { KeyChange } from "./stream.ts";
 import { endedTransaction, pgErrorOf } from "./store.ts";
 
 /** DuckDB's row group: a compacted table holds its rows in row groups of this many (the last one fewer) */
@@ -40,6 +41,9 @@ export const COMPACT_MEMORY_SHARE = 1 / 8;
 export const COMPACT_ROW_EXPANSION = 8;
 /** a piece is at most this many row groups' rows: a piece commits whole row groups (and one partial one at its end) */
 export const COMPACT_MAX_PIECE_ROWS = 8 * ROW_GROUP_ROWS;
+/** the least room on disk a compaction leaves beside what it writes (src/duck/sync.ts `diskShortFor`): the log, and the
+ *  checkpoint after the swap, which frees the old table's blocks only once it has written what the pieces left */
+export const COMPACT_DISK_MARGIN_BYTES = 64 * 2 ** 20;
 /** the side table a compaction fills, beside its table, dropped when the compaction ends either way and at every open */
 export const COMPACT_SIDE_SUFFIX = "__mason_compact";
 
@@ -100,6 +104,20 @@ export function pieceRows(memoryLimitBytes: number, s: Pick<TableShape, "stored"
 
 /** One row read alone ran out of memory: the table cannot be compacted under this limit (it serves as it is). */
 export class CompactTooLarge extends Error {}
+/** The disk has no room for the rows left to write: stopped before the piece that would have filled it. */
+export class CompactNoRoom extends Error {}
+
+/** what marks a column an UPDATE left unchanged (pgoutput sent no value) in a spilled change: JSON has no undefined */
+const UNCHANGED = { unchanged: true };
+/** A key's change as a spill's text (src/duck/sync.ts `spill`), and back (`unspilled`): every value's text, null, or
+ *  the column left unchanged — never confused, so a replayed partial row keeps the table's value where it carried none. */
+export const spilled = (c: KeyChange): string => JSON.stringify(c, (_k, v: unknown) => v === undefined ? UNCHANGED : v);
+export function unspilled(text: string): KeyChange {
+  const c = JSON.parse(text) as { kind: "delete" } | { kind: "row"; values: unknown[]; refetch?: true };
+  if (c.kind === "delete") return { kind: "delete" };
+  const values = c.values.map((v) => v !== null && typeof v === "object" ? undefined : v as string | null);
+  return c.refetch ? { kind: "row", values, refetch: true } : { kind: "row", values };
+}
 
 /**
  * THE TABLE'S ROWS INTO ITS SIDE TABLE, in pieces (the module's header), on `c`, whose statements `run` runs (the sync's
@@ -114,6 +132,9 @@ export interface RewriteHooks {
   said?: (line: string) => void;
   /** awaited before each piece is read: a test holds the compaction there, as `heldCopy` holds a first sync */
   beforePiece?: () => Promise<void> | void;
+  /** before each piece, given the share of the table's rows left to write: why there is no room for them on disk, or
+   *  null (`CompactNoRoom` stops the compaction there) */
+  room?: (left: number) => string | null;
 }
 
 export async function rewrite(c: DuckConnection, schema: string, table: string, firstPiece: number, hooks: RewriteHooks = {}): Promise<{ rows: number; pieces: number; pieceRows: number }> {
@@ -131,6 +152,8 @@ export async function rewrite(c: DuckConnection, schema: string, table: string, 
   for (let lo = 0; lo < end;) {
     let inTx = false;
     await hooks.beforePiece?.();
+    const noRoom = hooks.room?.(1 - lo / end) ?? null;
+    if (noRoom !== null) throw new CompactNoRoom(noRoom);
     try {
       await c.run("BEGIN TRANSACTION");
       inTx = true;

@@ -398,11 +398,13 @@ test("behind, left out, a failed catch-up, a stream down, off: each table's line
 
 test("a synced table's space on its line, the page's words the CLI's: its deleted rows' share, its last compaction, a compaction that failed (issue 851)", () => {
   const kept = { by: "poll", sync: { mode: "off" }, syncedAt: "2026-10-27T09:00:09.000Z", nextAt: null, promisedSeconds: null, lateWhy: null };
-  const none = { deadShare: null, wasteShare: null, checkedAt: null, at: null, seconds: null, error: null, retryAt: null };
+  const none = { deadShare: null, wasteShare: null, checkedAt: null, at: null, seconds: null, error: null, retryAt: null, waiting: null };
   const cases: Array<[string, Record<string, unknown>, string | null]> = [
     ["deleted rows", { ...none, deadShare: 0.237, wasteShare: 0.3, checkedAt: "2026-10-27T09:00:09.000Z" }, "23% of its stored rows deleted, not compacted yet"],
     ["few deleted, compacted", { ...none, deadShare: 0.02, checkedAt: "2026-10-27T09:00:09.000Z", at: new Date(NOW - 2 * 3600_000).toISOString(), seconds: 1.5 }, "compacted 2 h ago"],
     ["failed", { ...none, deadShare: 0.6, error: "its compaction failed, …", retryAt: "2026-10-27T10:35:00.000Z" }, "its compaction failed, tried again after 10:35 UTC (mason logs --events says why)"],
+    ["waits for disk", { ...none, deadShare: 0.52, waiting: "it needs 184.0 MiB free on disk to be compacted, and 70.0 MiB is free where the synced data is" },
+      "52% of its stored rows deleted, not compacted: it needs 184.0 MiB free on disk to be compacted, and 70.0 MiB is free where the synced data is"],
     ["nothing read", none, null],
   ];
   for (const [name, compaction, said] of cases) {

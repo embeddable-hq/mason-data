@@ -318,6 +318,7 @@ export const DEAD_SAID_SHARE = 0.1;
 export function compactionWords(c: Compaction | undefined, now: number = Date.now()): string | null {
   if (c === undefined) return null;
   if (c.error !== null) return `its compaction failed${c.retryAt === null ? "" : `, tried again after ${c.retryAt.slice(11, 16)} UTC`} (mason logs --events says why)`;
+  if (c.waiting) return `${c.deadShare === null ? "" : `${Math.floor(c.deadShare * 100)}% of its stored rows deleted, `}not compacted: ${c.waiting}`;
   if (c.deadShare !== null && c.deadShare >= DEAD_SAID_SHARE) return `${Math.floor(c.deadShare * 100)}% of its stored rows deleted, not compacted yet`;
   return c.at === null ? null : `compacted ${agoText(c.at, now)}`;
 }
@@ -489,7 +490,7 @@ const STATUS_USAGE = `usage: mason status [--json]
     (copy: { phase, rowsCopied, updatedAt, and of a synced table compaction: { deadShare (the share of its stored rows deleted), wasteShare (the share
     of its space its next compaction gives back), checkedAt (when they were read; null: not yet), at (its last
     compaction; null: none), seconds, error (a compaction that failed; the table is served and kept current all the
-    same), retryAt } }), totals: { added, copied, failed, rows (the synced tables' rows),
+    same), retryAt, waiting (why a table due is not compacted now: the disk, a column named rowid; null) } }), totals: { added, copied, failed, rows (the synced tables' rows),
     syncedAt (the latest sync of any) }, engine: { file, bytes, keptDays (MASON_HISTORY_DAYS), version (the run's), startedAt,
     uptimeSeconds, restarts (the times its supervisor started the run again: { count, last: { at, why, upSeconds }
     or null }, or { error }) }, disk: { path (where the synced data's file is), freeBytes, copyBytes (the file and its write-ahead log),

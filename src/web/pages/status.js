@@ -97,6 +97,7 @@ export function keptWords(t, now = Date.now()) {
 export function compactionWords(c, now = Date.now()) {
   if (c === undefined || c === null) return null;
   if (c.error !== null) return `its compaction failed${c.retryAt === null ? "" : `, tried again after ${c.retryAt.slice(11, 16)} UTC`} (mason logs --events says why)`;
+  if (c.waiting) return `${c.deadShare === null ? "" : `${Math.floor(c.deadShare * 100)}% of its stored rows deleted, `}not compacted: ${c.waiting}`;
   if (c.deadShare !== null && c.deadShare >= 0.1) return `${Math.floor(c.deadShare * 100)}% of its stored rows deleted, not compacted yet`;
   return c.at === null ? null : `compacted ${syncedAgo(c.at, now)}`;
 }

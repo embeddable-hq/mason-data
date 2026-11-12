@@ -16,6 +16,7 @@ paths:
   - "src/duck/kept.ts"
   - "src/duck/compact.ts"
   - "tests/duck-compact.test.ts"
+  - "tests/duck-compact-room.test.ts"
   - "tests/integration/duck-compact.itest.ts"
 ---
 
@@ -155,11 +156,17 @@ paths:
   groups past the fewest are read every 10 minutes on a connection of its own (`checkCompaction`, metadata only) and a
   table whose waste is half its blocks and 4 MiB is queued LAST, one rebuild at a time, never beside a first sync. It
   reads the synced data alone: the table frozen on the writer's turn (no poll, `mason sync` refused, stored JSON fills
-  paused, a streamed table's changes `held` and marked in `_mason.catch_up` for a crash), its rows into a side table in
-  pieces held to `store.memoryLimitBytes` (halved at 53200), swapped as a copy is, the held changes applied after. Its
-  failure is an ordinary statement's, that table's alone: never its `error`, never fatal, backed off. A new writer of a
-  synced table checks `rebuildingNow`, or it writes under a compaction and its write is lost at the swap. DETECTOR:
+  paused, a streamed table's changes SPILLED to `_mason.compact_held` in each batch's transaction, never held in Node's
+  heap, and marked in `_mason.catch_up` for a stop or a crash), its rows into a side table in pieces held to
+  `store.memoryLimitBytes` (halved at 53200) and, before each, to the free disk (`diskShortFor`: none, and the table
+  waits, said), swapped as a copy is, the spill replayed after in pieces of 50,000. Its failure is an ordinary
+  statement's, that table's alone: never its `error`, never fatal, backed off. A new writer of a synced table checks
+  `rebuildingNow`, or it writes under a compaction and its write is lost at the swap. DETECTOR:
   `tests/duck-compact.test.ts`, `tests/integration/duck-compact.itest.ts`.
+- **No INSERT … SELECT into a table made in the same transaction** (`writeByKey`; the review of PR 856): DuckDB 2.0.0
+  reads back NOTHING of such a table filled past ~120,000 rows (`count(*)` says them all), and a write by key of more
+  keys deleted none and inserted every row twice. Fill it by VALUES, make it before the transaction or by CREATE TABLE
+  AS. DETECTOR: `tests/duck-compact.test.ts` "a held set of 300,000 changes".
 
 ## What the sync records
 
