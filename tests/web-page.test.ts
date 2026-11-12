@@ -52,7 +52,7 @@ const asPage = (cli: string): string => cli
   .replace("(mason logs --events says why)", "(Sync events says why)").replace("(mason logs says why)", "(Sync events says why)");
 
 /** What a reader sees of some HTML: its text, tags gone and entities read, spaces collapsed. */
-const textOf = (html: string): string => html.replace(/<[^>]*>/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"")
+const textOf = (html: string): string => html.replace(/<wbr>/g, "").replace(/<[^>]*>/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"")
   .replace(/&#39;/g, "'").replace(/&amp;/g, "&").replace(/\s+/g, " ").trim();
 
 /** The popovers of some HTML (`pop` of src/web/shared.js: a confirm, a form, an answer, written after its table), each
@@ -2642,7 +2642,7 @@ test("Tables: each added table's state, rows, last sync and its age, how long it
   assert.match(html, /<span class="err">poll: connection reset<\/span><details data-open="error:public\.orders"><summary>the whole error<\/summary><pre>poll: connection reset\nthe sync tries it again in 5 s<\/pre><\/details>/);
   assert.match(html, /<td class="state"><span class="indicator bad"><span class="dot" aria-hidden="true"><\/span>Failed<\/span><span class="copyline t-failed"><span class="copybar" /, "a failed copy's bar is red (its line's class)");
   assert.match(html, /<button type="button" class="small" data-sync-table="public\.customers" data-room="Syncing…">Sync now<\/button>/);
-  assert.match(html, /<th scope="row" class="name"><code class="name" title="public\.customers">public\.customers<\/code><\/th>/, "a name in mono, cut by the stylesheet, its whole the title");
+  assert.match(html, /<th scope="row" class="name"><code class="name" title="public\.customers">public\.<wbr>customers<\/code><\/th>/, "a name in mono, whole, wrapping after its . and _ (issue 884), its whole the title too");
   // the cells are the commands': the age's and the span's functions, the size's
   const ages = SYNCED.tables.filter((t) => t.added).map((t) => `${commands.duration(t.sync!.ageSeconds!)} ago`);
   for (const a of ages) assert.ok(text.includes(a), a);
@@ -2738,7 +2738,7 @@ test("Tables: the search box and the state filter narrow the one list, their tex
   assert.match(textOf(renderTables(CATALOG_STATE, { filter: "zzz", choosing: "public.audit", columns: columnsOf("public.audit") })), /^1 with “zzz” in the name .* public\.audit Not added ~50 rows key id Add Columns… The columns to sync/, "the table whose form is open stays");
   assert.match(textOf(renderTables(SYNCED, { filter: "nope" })), /No table's name has “nope”\./);
   // All / Added / Not added
-  const names = (html: string) => [...html.matchAll(/<th scope="row" class="name"><code class="name" title="[^"]*">([^<]*)<\/code>/g)].map((m) => m[1]);
+  const names = (html: string) => [...html.matchAll(/<th scope="row" class="name"><code class="name" title="([^"]*)">/g)].map((m) => m[1]);
   assert.deepEqual(names(renderTables(CATALOG_STATE, { show: "added" })), ["public.customers", "public.orders", "public.events"]);
   assert.deepEqual(names(renderTables(CATALOG_STATE, { show: "not-added" })), ["public.audit", "public.accounts", "public.event_log", "public.staging"]);
   assert.deepEqual(names(renderTables(CATALOG_STATE, { show: "not-added", filter: "ORD" })), [], "the name and the state both narrow it");
@@ -4156,7 +4156,7 @@ test("Tables: #tables?show=failed is the Failed filter — the failed copies alo
   app.show("#tables?show=failed", { doc: { getElementById: (id: string) => id === "tables-show" ? select : null } });
   assert.equal(select.value, "failed");
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
-  const names = (html: string) => [...html.matchAll(/<th scope="row" class="name"><code class="name" title="[^"]*">([^<]*)<\/code>/g)].map((m) => m[1]);
+  const names = (html: string) => [...html.matchAll(/<th scope="row" class="name"><code class="name" title="([^"]*)">/g)].map((m) => m[1]);
   assert.deepEqual(names(renderTables(SYNCED, { show: "failed" })), ["public.orders"], "its poll failed");
   assert.match(textOf(renderTables(RUNNING, { show: "failed" })), /No failed table\./);
 });

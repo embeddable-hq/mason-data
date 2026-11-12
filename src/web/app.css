@@ -516,20 +516,22 @@ table.catalog th.act { width: 284px; }
    all counted once), at least 200 px for the name — a typical schema.table, cut with "…" and whole on hover — and the
    less important columns give way first: Key, then Size, then Last sync, then Rows. A column given way (no width, its
    cells unseen: still the table's seven columns, which a note's colspan spans) says its fact in the row's note instead
-   (`.fold`, src/web/pages/tables.js), so nothing is lost; below all of them the list scrolls in its card. A phone keeps every column, the list scrolling in its card (below). Detector:
-   tests/web-tables-layout.test.ts, every width from 1000 to 1400 px. */
+   (`.fold`, src/web/pages/tables.js), so nothing is lost. On a phone the same, the row's actions stacked (below).
+   Detector: tests/web-tables-layout.test.ts, 390 px and every width from 1000 to 1400 px. */
 .panel:has(> table.catalog) { container: catalog / inline-size; }
 table.catalog .fold { display: none; }
 table.catalog .fold::before { content: attr(data-fold); }
-@media (min-width: 641px) {
-  @container catalog (max-width: 1053px) { table.catalog :is(th, td).key { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-key { display: inline; } }
-  @container catalog (max-width: 949px) { table.catalog :is(th, td).size { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-size { display: inline; } }
-  @container catalog (max-width: 849px) { table.catalog :is(th, td).last { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-last { display: inline; } }
-  @container catalog (max-width: 745px) { table.catalog :is(th, td).rows { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-rows { display: inline; } }
-}
+@container catalog (max-width: 1053px) { table.catalog :is(th, td).key { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-key { display: inline; } }
+@container catalog (max-width: 949px) { table.catalog :is(th, td).size { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-size { display: inline; } }
+@container catalog (max-width: 849px) { table.catalog :is(th, td).last { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-last { display: inline; } }
+@container catalog (max-width: 745px) { table.catalog :is(th, td).rows { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-rows { display: inline; } }
 table.catalog th, table.catalog td { overflow: hidden; text-overflow: ellipsis; }
-table.catalog code.name { display: block; max-width: 100%; }
-table.catalog td.state { white-space: nowrap; }
+/* A TABLE'S NAME AND ITS STATE ARE NEVER CUT (issue 884, the owner: "otherwise we can't see them"): each wraps in its
+   cell, the row growing to fit — a name after its `.` and `_` where it can (`<wbr>`, src/web/pages/tables.js), anywhere
+   where it must — never cut with "…" */
+table.catalog th.name, table.catalog td.state { white-space: normal; text-overflow: clip; }
+table.catalog code.name { display: block; max-width: none; overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
+table.catalog td.state .indicator { white-space: normal; align-items: baseline; }
 table.catalog td.state .copyline { display: flex; flex-wrap: nowrap; align-items: center; height: 18px; margin-top: var(--space-1); }
 table.catalog td.state .pct { min-width: 0; }
 table.catalog td.state .copybar { width: 64px; }
@@ -587,9 +589,15 @@ table.catalog tbody tr:hover > td.act { background: var(--hover); }
 }
 /* a phone: the table scrolls inside its card, so a line under a row stays in the card's view, never as wide as the table */
 @media (max-width: 640px) {
-  /* the table scrolls inside its card (.panel) at its least width (table.catalog's min-width), still a table — a block
-     would lose its fixed columns — the name still the column that gives */
-  table.catalog { display: table; min-width: 956px; }
+  /* the list fits its card, still a table (a block would lose its fixed columns): the columns that give way have (the
+     container queries above), the state narrower, and a row's actions stacked in a column of their own, so its name
+     and state are read whole beside them (issue 884) */
+  table.catalog { display: table; min-width: 0; }
+  table.catalog th.state { width: 108px; }
+  table.catalog td.state .copybar { width: 44px; }
+  table.catalog th.act { width: 144px; }
+  table.catalog td.act { white-space: normal; }
+  table.catalog td.act > :is(button, a) { display: block; width: 100%; margin: 0 0 var(--space-1); }
   /* the users' too, at their least width: their card scrolls, and a row's actions stay pinned at its right */
   table.users { display: table; }
 }

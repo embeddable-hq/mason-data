@@ -27,6 +27,10 @@ export const columnsPath = (table) => `api/tables/${encodeURIComponent(table)}/c
 /** A table's sync in one word (`/api/state` `tables[].sync.state`, src/cli/readiness.ts `syncStateOf`). */
 const SYNC_WORDS = { synced: "Synced", syncing: "Syncing", "catching-up": "Finishing sync", behind: "Behind", failed: "Failed", waiting: "Waiting" };
 
+/** A table's name, escaped, with a place to break after each `.` and `_` (`<wbr>`): it wraps there in its cell rather
+ *  than being cut (issue 884). */
+export const nameBreaks = (table) => esc(table).replace(/([._])/g, "$1<wbr>");
+
 /** Whether a table's name has the search box's text (any case; nothing typed: every table). */
 const nameMatches = (table, filter) => !filter || table.toLowerCase().includes(filter.trim().toLowerCase());
 
@@ -507,7 +511,7 @@ export function renderTables(s, ui = {}) {
     if (synced?.table === t.table) {
       pops.push(pop(anchor, "failure" in synced ? `${renderFailure(synced.failure)}${button("Dismiss", { dismissSynced: "", popClose: "" }, "small")}` : renderSynced(synced.synced, t.table, s)));
     }
-    return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}${said_ ? " has-note" : ""}"><th scope="row" class="name"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
+    return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}${said_ ? " has-note" : ""}"><th scope="row" class="name"><code class="name" title="${esc(t.table)}">${nameBreaks(t.table)}</code></th>` +
       `<td class="state">${state}${bar}</td>${cell(rows, "num rows")}${cell(f.key, "mono key", f.key)}${last}` +
       `${t.added ? (sizeOf.has(t.table) ? cell(bytesText(sizeOf.get(t.table)), "num size") : cell("—", "num size", "Not measured yet. A synced table's size is measured every 10 minutes, once its rows are written to disk. A small table's rows can wait in Mason's write-ahead log until it passes 16 MiB, or until Mason stops.")) : cell("", "num size")}` +
       `<td class="act" id="${esc(anchor)}">${act}</td></tr>` + note;

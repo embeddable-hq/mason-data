@@ -41,7 +41,8 @@ const noBrowser = playwright === null ? "Playwright is not installed here (requi
 const col = (name: string, type = "text") => ({ name, type, notNull: false, comment: null });
 const table = (name: string, rows: number, key = ["id"]): SourceTable => ({ source: `public.${name}`, schema: "public", table: name, key, rows, bytes: 8192, comment: null,
   columns: [col("id", "bigint"), col("name"), col("status"), col("created_at", "timestamptz"), col("api_token")], foreignKeys: [] });
-const NAMES = ["customers", "order_items", "invoices", "shipments", "billing_events_archive", "audit_trail", "visits", "payments", "raw_log"];
+// a long name, not added: it wraps whole, never cut (issue 884)
+const NAMES = ["customers", "order_items", "invoices", "shipments", "billing_events_archive", "audit_trail", "visits", "payments", "raw_log", "customer_subscription_billing_events_archive_2026"];
 const TABLES = NAMES.map((n, i) => table(n, 1000 * (i + 1), n === "raw_log" ? [] : ["id"]));
 const parsed = parseSource("postgres://shop:secret@db.example.com:5432/shop");
 const source = "source" in parsed ? parsed.source : assert.fail(parsed.problem);
@@ -139,6 +140,49 @@ test(`the name column keeps a usable width at every width from 1000 to 1400 px; 
     assert.ok((l.widths.name ?? 0) >= 180, `${width} px: the name column is ${l.widths.name} px wide (${JSON.stringify(l.widths)})`);
     assert.ok(l.page <= 0, `${width} px: the page scrolls ${l.page} px sideways`);
     assert.deepEqual(l.unsaid, [], `${width} px: each hidden column's fact is in every row's note`);
+  }
+});
+
+/** Every table's name and state word that a person cannot read whole: cut inside its cell (its text past its box), not
+ *  the table's name, outside the list's card, past the window, or under something laid over it (a pinned column). */
+const unread = (p: Page) => p.evaluate<{ rows: number; out: string[] }>(`(() => {
+  const out = [];
+  const rows = [...document.querySelectorAll("#tables table.catalog tbody tr:not(.under)")];
+  for (const tr of rows) {
+    const code = tr.querySelector("code.name");
+    const name = code?.getAttribute("title") ?? "?";
+    const word = tr.querySelector("td.state .indicator");
+    for (const [what, el, cell] of [["name", code, tr.querySelector("th.name")], ["state", word, tr.querySelector("td.state")]]) {
+      if (!el) { if (what === "name") out.push(name + ": no name"); continue; }
+      el.scrollIntoView({ block: "center", inline: "nearest" });
+      const said = name + "'s " + what + ' "' + el.textContent.trim() + '"';
+      if (what === "name" && el.textContent !== name) out.push(said + " is not its name");
+      if (el.scrollWidth > el.clientWidth + 0.5 || el.scrollHeight > el.clientHeight + 0.5) out.push(said + " cut inside itself (" + el.scrollWidth + " > " + el.clientWidth + ")");
+      if (cell.scrollWidth > cell.clientWidth + 0.5) out.push(said + " cut by its cell (" + cell.scrollWidth + " > " + cell.clientWidth + ")");
+      const b = el.getBoundingClientRect(), card = (el.closest(".panel") ?? document.body).getBoundingClientRect();
+      if (b.left < card.left - 0.5 || b.right > card.right + 0.5) out.push(said + " outside the list's card");
+      if (b.right > window.innerWidth + 0.5) out.push(said + " past the window");
+      // read at each of its lines' ends and middle: what is there is it, never a column pinned over it
+      for (const r of el.getClientRects()) {
+        for (const x of [r.left + 1, (r.left + r.right) / 2, r.right - 1]) {
+          const hit = document.elementFromPoint(x, (r.top + r.bottom) / 2);
+          if (hit === null || !(el.contains(hit) || hit.contains(el))) { out.push(said + " under " + (hit?.tagName ?? "nothing") + " at " + Math.round(x)); break; }
+        }
+      }
+    }
+  }
+  return { rows: rows.length, out };
+})()`);
+
+test(`every table's name and state are read whole — wrapped, never cut — at 390 px and every 20 px from 1000 to 1400 px, the page never scrolling sideways`, { skip: noBrowser }, async () => {
+  for (const width of [390, ...LAPTOP]) {
+    const p = await open(width);
+    const u = await unread(p);
+    const page = await p.evaluate<number>("document.documentElement.scrollWidth - window.innerWidth");
+    await p.close();
+    assert.equal(u.rows, NAMES.length, `${width} px: a row for each table`);
+    assert.deepEqual(u.out, [], `${width} px: every name and state read whole`);
+    assert.ok(page <= 0, `${width} px: the page scrolls ${page} px sideways`);
   }
 });
 

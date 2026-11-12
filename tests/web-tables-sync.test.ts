@@ -25,7 +25,7 @@ const fn = <F>(m: Record<string, unknown>, name: string): F => { assert.equal(ty
 const renderTables = (s: unknown, ui: Record<string, unknown> = {}): string => fn<(s: unknown, ui: unknown) => string>(tables, "renderTables")(s, ui);
 const renderSyncChoice = (t: unknown, c: unknown, ask: string | null = null): string => fn<(t: unknown, c: unknown, a: string | null) => string>(tables, "renderSyncChoice")(t, c, ask);
 
-const textOf = (html: string): string => html.replace(/<[^>]*>/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"")
+const textOf = (html: string): string => html.replace(/<wbr>/g, "").replace(/<[^>]*>/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"")
   .replace(/&#39;/g, "'").replace(/&amp;/g, "&").replace(/\s+/g, " ").trim();
 /** The popover beside an element (`pop` of src/web/shared.js), or "". */
 const popOf = (html: string, anchor: string): string => {

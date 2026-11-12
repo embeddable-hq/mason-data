@@ -46,8 +46,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 ## What was wrong and is now right
 
 - **Table names are readable on the web page's Tables at laptop widths.** At 1024 px the name column was 2 px wide. Now
-  it always keeps room for a typical `schema.table` name. In a narrower window the Key, Size, Last sync and Rows
-  columns give way, in that order, and the row's note says what they said.
+  it always keeps room for a typical `schema.table` name, and a table's name and its state are never cut with "…": a
+  long one wraps onto more lines. In a narrower window the Key, Size, Last sync and Rows columns give way, in that
+  order, and the row's note says what they said. On a phone a row's buttons are stacked, so the names fit beside them.
 - **What Add or Sync now says on the web page's Tables no longer covers the next row's buttons.** It is placed where it
   covers no other button. Where there is no such place (on a phone, say), it is a bar at the bottom of the window, and
   the page leaves room under its last row so nothing stays hidden behind it.

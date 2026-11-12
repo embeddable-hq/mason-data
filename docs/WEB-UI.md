@@ -86,7 +86,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   `docs/SQL-SUPPORT.md`, with **See all** (Queries).
 - **Tables** (`#tables`): the database's tables, as `mason tables` lists them, with a search box by name and an All /
   Added / Failed / Not added filter. With hundreds of tables the first 100 that pass are written, then **Show 100 more**
-  and **Show all**; the search is over every table, at once. A long name is cut with an ellipsis, its whole the tooltip.
+  and **Show all**; the search is over every table, at once. A long name is never cut: it wraps in its cell.
 - **Tables**, an added table: its state (Synced, Syncing, Failed or Waiting) over its bar — every added table has
   one, as `mason status` draws one for each: full at 100% once synced, red when its first sync failed, amber when it is not kept
   current, moving while it syncs, a shimmer while it waits — its rows, its last sync over how long it took, and the
@@ -108,11 +108,13 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   scrolled clear of it. A tap on the answer is always the answer's, never a control's under it (`placePops`,
   src/web/shared.js).
 - **Tables**, **the name keeps its room at every width** (issue 884: it was 2 px at 1024 px): measured against the
-  list's card, the name gets at least 200 px, cut with an ellipsis and whole on hover, and the less important columns
-  give way first: Key below about 1340 px, then Size (1240), Last sync (1140) and Rows (1040) beside the full sidebar.
-  A column given way says its fact in the row's note instead ("key id", "size 1.2 MiB", "last sync 3 h ago, took
-  0.2 s", "1,200 rows"). The page never scrolls sideways; on a phone every column is kept, the list scrolling inside its
-  card.
+  list's card, the name gets at least 200 px, and the less important columns give way first: Key below about 1340 px,
+  then Size (1240), Last sync (1140) and Rows (1040) beside the full sidebar. A column given way says its fact in the
+  row's note instead ("key id", "size 1.2 MiB", "last sync 3 h ago, took 0.2 s", "1,200 rows"). **A table's name and
+  its state are never cut with "…"** (the owner: "otherwise we can't see them"): each wraps in its cell — a name after
+  its `.` and `_` where it can, anywhere where it must — and the row grows to fit. On a phone the same columns give way,
+  the state is narrower and a row's actions are stacked in a column of their own, so the list fits its card and every
+  name and state reads whole. The page never scrolls sideways.
 - **Tables**, an added table's **columns**, on its note beside its sync: which it syncs in a few words — "All columns",
   "5 of 12 columns" or "All but 1 column", the columns themselves its tooltip (`/api/state` `tables[].entry`,
   `addedColumns`, `columnCount`). It is a button that opens the table's **column form**, a dialog beside it that reads
