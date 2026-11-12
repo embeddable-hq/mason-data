@@ -6,6 +6,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   Failed now has a line saying what it means for the synced data: every added table is synced and served; how many of
   the added tables are synced while the rest sync; or how many tables' syncs failed, with a link to them on Tables.
   Getting started has three steps (Mason is running, a table synced, a user created) and goes once those are done.
+- **`mason status` and the web page's Overview say the same rows under new labels.** Source is now Sources file, Disk
+  is Free disk, Sessions is Connections open, and the Mason row is two: Version (`dev`, or the version) and Up (how long
+  and since when, with the pid in `mason status`; no more "one process"). On the Overview, Database and Changes are under
+  the line in the "mason status" box, and the rest is in a table captioned Server. `mason status --json` is unchanged.
 - **Two new cards on the Overview: Sync errors and Query errors, the last day.** Each counts the failures of the last
   24 hours and links to them (Sync events, failures only; Queries, the refused or failed statements); a count the page
   could not read says "unknown" and why. They replace the lists of recent errors at the foot of the page. The table of

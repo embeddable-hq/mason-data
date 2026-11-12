@@ -626,7 +626,7 @@ export async function status(argv: string[]): Promise<number> {
     const rows: Array<[string, string]> = [
       ["Project", `${run.name}, files in ${s.folder ?? "(none chosen)"}`],
       ...sourceRows(s),
-      masonRow(s.engine, run.pid),
+      ...masonRows(s.engine, run.pid),
       ["Synced data", `${s.engine.file}${s.engine.bytes === null ? "" : ` · ${fileSize(s.engine.bytes)}`}`],
       ...diskRows(s.disk),
       // the copies in all (src/cli/readiness.ts syncTotals): a run from before them has none
@@ -684,7 +684,7 @@ export async function status(argv: string[]): Promise<number> {
  */
 export function sourceRows(s: Pick<RunState, "source">): Array<[string, string]> {
   return [
-    ...(s.source.file ? [["Source", `${s.source.shownFile ?? s.source.file} (the tables it names are added)`] as [string, string]] : []),
+    ...(s.source.file ? [["Sources file", `${s.source.shownFile ?? s.source.file} (the tables it names are added)`] as [string, string]] : []),
     ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
       : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
     // in a web developer's words first (each table as its sync: says, streamed as they happen); the mechanism an operator needs in parentheses
@@ -860,21 +860,22 @@ export function fileSize(b: number): string {
   return b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(1)} GiB` : b >= 1024 ** 2 ? `${(b / 1024 ** 2).toFixed(1)} MiB` : `${(b / 1024).toFixed(1)} KiB`;
 }
 
-/** `Mason` in mason status: the run's own version (a CLI of another version says the run's), its pid, and how long it
- *  has been up (a run from before it: the CLI's version, no uptime) */
-export function masonRow(e: Pick<RunState["engine"], "version" | "startedAt" | "uptimeSeconds">, pid: number): [string, string] {
-  return ["Mason", `${e.version ?? version()}, pid ${pid} · one process${e.startedAt ? ` · up ${spanText(e.uptimeSeconds ?? 0)}, since ${e.startedAt.slice(0, 19).replace("T", " ")} UTC` : ""}`];
+/** `Version` and `Up` in mason status: the run's own version (a CLI of another version says the run's), then how long it
+ *  has been up and since when, with its pid (a run from before its uptime: the CLI's version, the pid alone) */
+export function masonRows(e: Pick<RunState["engine"], "version" | "startedAt" | "uptimeSeconds">, pid: number): Array<[string, string]> {
+  return [["Version", e.version ?? version()],
+    ["Up", `${e.startedAt ? `${spanText(e.uptimeSeconds ?? 0)}, since ${e.startedAt.slice(0, 19).replace("T", " ")} UTC · ` : ""}pid ${pid}`]];
 }
 
-/** `Sessions` in mason status: how many are logged in to the Postgres API, how many run a statement, and by whom (the
+/** `Connections open` in mason status: how many are logged in to the Postgres API, how many run a statement, and by whom (the
  *  three with the most, then how many others) */
 export function sessionsRows(s: SessionsOpen | undefined): Array<[string, string]> {
   if (s === undefined) return [];
-  if (s.open === 0) return [["Sessions", "none open"]];
+  if (s.open === 0) return [["Connections open", "none open"]];
   const running = s.byClient.reduce((n, c) => n + c.running, 0);
   const who = s.byClient.slice(0, 3).map((c) => `${c.open} ${c.user === "" ? "by a token" : `as ${c.user}`}${c.client === "" ? "" : ` (${c.client})`}`);
   const others = s.byClient.length - who.length;
-  return [["Sessions", `${s.open} open, ${running} running a statement · ${who.join(", ")}${others > 0 ? `, and ${others} other client${others === 1 ? "" : "s"}` : ""} (mason logs --running lists the statements)`]];
+  return [["Connections open", `${s.open} open, ${running} running a statement · ${who.join(", ")}${others > 0 ? `, and ${others} other client${others === 1 ? "" : "s"}` : ""} (mason logs --running lists the statements)`]];
 }
 
 /** `Share` in mason status: each share open now (mason share) and what its socket met; no row when none is. */
@@ -888,13 +889,13 @@ export function shareRows(s: ShareState | null | undefined, now = Date.now()): A
   return [...each, ["Share socket", `127.0.0.1:${s.port}, TLS required, SHA-256 ${s.fingerprint} · ${s.sessions} session${s.sessions === 1 ? "" : "s"}, ${s.refusedLogins} login${s.refusedLogins === 1 ? "" : "s"} refused, ${s.droppedConnections} dropped before a login`]];
 }
 
-/** `Disk` in mason status: the bytes free where the synced data is, and what the first syncs running are projected to add (none: no
+/** `Free disk` in mason status: the bytes free where the synced data is, and what the first syncs running are projected to add (none: no
  *  row, for a run from before it) */
 export function diskRows(d: RunState["disk"]): Array<[string, string]> {
   if (d === undefined) return [];
   const adds = d.projectedBytes === null ? "" : ` · the first syncs running are projected to add about ${fileSize(d.projectedBytes)} more`;
-  if (d.freeBytes === null) return [["Disk", `${d.error ?? "the free space could not be read"}${adds}`]];
-  return [["Disk", `${fileSize(d.freeBytes)} free in ${d.path}${adds}${d.projectedBytes !== null && d.projectedBytes > d.freeBytes ? " — more than is free: the sync stops before the disk fills" : ""}`]];
+  if (d.freeBytes === null) return [["Free disk", `${d.error ?? "the free space could not be read"}${adds}`]];
+  return [["Free disk", `${fileSize(d.freeBytes)} free in ${d.path}${adds}${d.projectedBytes !== null && d.projectedBytes > d.freeBytes ? " — more than is free: the sync stops before the disk fills" : ""}`]];
 }
 
 /** `Restarts` in mason status: how many times the run was started again, and the last one's reason (none: no row) —
@@ -941,10 +942,11 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
   const ended = lastStop === null ? "" : `; ${ago(lastStop.at)}: ${lastStop.how}`;
   out(reportText({ headline: `Status: ${hung === null ? st.yellow(state) : st.red(state)}`, details: [
     ["Project", `${project.config.name}, files in ${project.folder}`],
-    ["Source", "message" in src ? `${src.message}${src.fix ? ` — ${src.fix.split("\n")[0]}` : ""}` : src.file],
+    ["Sources file", "message" in src ? `${src.message}${src.fix ? ` — ${src.fix.split("\n")[0]}` : ""}` : src.file],
     ...(database === null ? [] : [["Database", `${database} (not checked: Mason ${hung === null ? "is not running" : "does not answer"})`] as [string, string]]),
-    ["Mason", hung === null ? `${version()} · not running${project.config.lastRun ? ` (last started ${ago(project.config.lastRun)}${ended})` : ""}`
-      : `${version()}, pid ${hung.run.pid} · running but does not answer its commands: ${hung.problem.why}`],
+    ["Version", version()],
+    ["Up", hung === null ? `not running${project.config.lastRun ? ` (last started ${ago(project.config.lastRun)}${ended})` : ""}`
+      : `pid ${hung.run.pid} · running but does not answer its commands: ${hung.problem.why}`],
     ["Synced data", bytes === null ? "none yet (mason start makes it)" : `${duckFile} · ${fileSize(bytes)}`],
     ...restartsRows(restarts),
     ["Postgres API", hung === null ? `not running${connectName === null ? "" : ` (a tool connects with the database ${connectName})`}` : `${shownUrl(clientLink(hung.run))}  (held by the hung run; it may not answer)`],

@@ -1381,25 +1381,25 @@ test("mason wait is ready only once a first sync's catch-up poll is over, and sa
   }
 });
 
-test("mason status's Disk line: free where the synced data is, and what the copies running add — said as more than is free when it is; an unread free space is its error", async () => {
+test("mason status's Free disk line: free where the synced data is, and what the copies running add — said as more than is free when it is; an unread free space is its error", async () => {
   const { diskRows } = await import("../src/cli/commands.ts") as unknown as { diskRows?: (d: unknown) => Array<[string, string]> };
   assert.equal(typeof diskRows, "function", "src/cli/commands.ts diskRows");
-  assert.deepEqual(diskRows!({ path: "/data", freeBytes: 75 * 2 ** 30, copyBytes: 49 * 2 ** 30, projectedBytes: null }), [["Disk", "75.0 GiB free in /data"]]);
+  assert.deepEqual(diskRows!({ path: "/data", freeBytes: 75 * 2 ** 30, copyBytes: 49 * 2 ** 30, projectedBytes: null }), [["Free disk", "75.0 GiB free in /data"]]);
   assert.deepEqual(diskRows!({ path: "/data", freeBytes: 75 * 2 ** 30, copyBytes: 49 * 2 ** 30, projectedBytes: 80 * 2 ** 30 }),
-    [["Disk", "75.0 GiB free in /data · the first syncs running are projected to add about 80.0 GiB more — more than is free: the sync stops before the disk fills"]]);
+    [["Free disk", "75.0 GiB free in /data · the first syncs running are projected to add about 80.0 GiB more — more than is free: the sync stops before the disk fills"]]);
   assert.deepEqual(diskRows!({ path: "/data", freeBytes: null, copyBytes: null, projectedBytes: null, error: "the free space where the synced data is could not be read: EACCES" }),
-    [["Disk", "the free space where the synced data is could not be read: EACCES"]]);
+    [["Free disk", "the free space where the synced data is could not be read: EACCES"]]);
   assert.deepEqual(diskRows!(undefined), [], "a run from before it: no line");
 });
 
-test("mason status's Sessions line: how many are open and running a statement, and by whom — the three with the most, then how many others", async () => {
+test("mason status's Connections open line: how many are open and running a statement, and by whom — the three with the most, then how many others", async () => {
   const { sessionsRows } = await import("../src/cli/commands.ts") as unknown as { sessionsRows?: (s: unknown) => Array<[string, string]> };
   assert.equal(typeof sessionsRows, "function", "src/cli/commands.ts sessionsRows");
-  assert.deepEqual(sessionsRows!({ open: 0, byClient: [] }), [["Sessions", "none open"]]);
+  assert.deepEqual(sessionsRows!({ open: 0, byClient: [] }), [["Connections open", "none open"]]);
   assert.deepEqual(sessionsRows!({ open: 7, byClient: [
     { user: "metabase", client: "Metabase", open: 3, running: 1 }, { user: "", client: "", open: 2, running: 0 },
     { user: "agent", client: "psql", open: 1, running: 1 }, { user: "grafana", client: "Grafana", open: 1, running: 0 }] }),
-    [["Sessions", "7 open, 2 running a statement · 3 as metabase (Metabase), 2 by a token, 1 as agent (psql), and 1 other client (mason logs --running lists the statements)"]]);
+    [["Connections open", "7 open, 2 running a statement · 3 as metabase (Metabase), 2 by a token, 1 as agent (psql), and 1 other client (mason logs --running lists the statements)"]]);
   assert.deepEqual(sessionsRows!(undefined), [], "a run from before it: no line");
 });
 

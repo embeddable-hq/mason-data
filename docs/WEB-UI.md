@@ -51,7 +51,8 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   beside a big dot, and one line saying what it means for the synced data, from `/api/state` alone (`readiness`,
   `totals`, the tables' `sync.state`): Ready, "Every added table is synced and served" (the sentence `mason status`
   ends on, `READY_TEXT`); Under way, "2 of 3 tables synced, the rest syncing" (or, every one synced, how many are
-  being caught up by their one poll); Failed, "1 table's sync failed: see Tables", Tables the failed ones. Then cards
+  being caught up by their one poll); Failed, "1 table's sync failed: see Tables", Tables the failed ones. Under the line,
+  `mason status`'s **Database** and **Changes** rows, a label and its value each. Then cards
   for the tables synced, the rows, the last sync, the synced data's file, the last day's statements with their p95,
   and the last day's **Sync errors** (the sync's failed events, `/api/events?failed=1&since=24h`, read up to 1,000:
   at that, "1,000+") and **Query errors** (the statements refused or failed, `/api/queries`' `day`). Each card has a
@@ -66,8 +67,9 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   or failed. How to connect is not on the Overview: it is on Queries' empty log, and the Users page.
 - **Overview**, the tables not synced yet: a bar each with the line `mason wait` prints (a first sync not begun shimmers,
   with no % beside it), and nothing once every table is synced.
-- **Overview**, the facts: one table with the database and how its changes arrive, the warnings, Mason's version, uptime
-  and restarts, free disk, and sessions open. In replication mode, a Changes table shows the stream and the WAL its slot holds.
+- **Overview**, the facts: one table, **Server**, with `mason status`'s rows under its labels: Sources file, the
+  warnings, Version, Up and Restarts, Free disk, and Connections open (Database and Changes too, while the box at the top
+  is not drawn). In replication mode, a Changes table shows the stream and the WAL its slot holds.
 - **Overview**, the unsupported SQL: when a statement used SQL Mason does not support in the last day, one line naming
   the most refused entry of `docs/SQL-SUPPORT.md`, with **See all** (Queries).
 - **Tables** (`#tables`): the database's tables, as `mason tables` lists them, with a search box by name and an All /

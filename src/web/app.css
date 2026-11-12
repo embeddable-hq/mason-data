@@ -244,6 +244,11 @@ section { margin: 0; }
 .health .health-title { font-size: var(--text-lg); }
 .health .health-word { display: flex; align-items: center; gap: var(--space-3); margin: 0; font-size: 28px; font-weight: 700; letter-spacing: 0; line-height: 1.2; }
 .health .health-line { margin: var(--space-2) 0 0; font-family: var(--font-sans); font-size: var(--text-md); color: var(--muted); }
+/* under the line, mason status's Database and Changes rows: a label and its value a row */
+.health .health-facts { margin: var(--space-3) 0 0; display: grid; gap: var(--space-1); font-size: var(--text-sm); }
+.health .health-facts > div { display: grid; grid-template-columns: 6.5em 1fr; gap: var(--space-3); }
+.health .health-facts dt { color: var(--muted); }
+.health .health-facts dd { margin: 0; overflow-wrap: anywhere; }
 /* its marker: a brick in the run's colour, set in a course of mortar of the same */
 .health .dot { width: 22px; height: 12px; border-radius: 0; background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); flex: none; }
 .health.ok .dot { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }

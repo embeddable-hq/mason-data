@@ -62,7 +62,7 @@ Read `.claude/rules/cli.md` and `docs/OBSERVABILITY.md`. Walked against `disk` (
    new member: grep `RunContext` in `tests/`. Four are casts that `tsc` will not catch: `tests/duck-sync-added.test.ts`,
    `tests/web-page.test.ts`, `tests/cli-ui.test.ts` and `tests/cli-state-matrix.test.ts`.
 4. **Type it:** `RunState` in `src/cli/commands.ts`.
-5. **Render it** in an exported renderer beside `diskRows` or `masonRow`, called from `status`. The web page uses the same
+5. **Render it** in an exported renderer beside `diskRows` or `masonRows`, called from `status`. The web page uses the same
    words (`src/web/pages/status.js`, `.claude/rules/web-ui.md`).
 6. **Declare it:** `STATUS_USAGE`'s `--json` text, and the `json` list of `STATUS` for a new top-level key (`jsonText` and
    `tests/cli-help.test.ts` hold both).

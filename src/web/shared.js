@@ -187,28 +187,30 @@ export function slotText(w, since) {
 /** Whether the slot's line is a warning: the WAL could not be read, Postgres invalidated it, it is past its cap or nothing caps it. */
 export const slotWarns = (w) => "error" in w || w.walStatus === "lost" || w.walStatus === "unreserved" || w.safeWalSizeBytes === null || w.safeWalSizeBytes <= 0;
 
-/** `Mason` in mason status (src/cli/commands.ts `masonRow`): the run's version and how long it has been up. The CLI adds the
- *  run's pid, which the state does not carry: the tests hold the rest equal. */
-export const masonRow = (e) => ["Mason", `${e.version} · one process${e.startedAt ? ` · up ${spanText(e.uptimeSeconds ?? 0)}, since ${e.startedAt.slice(0, 19).replace("T", " ")} UTC` : ""}`];
+/** `Version` and `Up` in mason status (src/cli/commands.ts `masonRows`): the run's version and how long it has been up. The
+ *  CLI adds the run's pid, which the state does not carry, so a run that does not say its uptime has no Up here: the tests
+ *  hold the rest equal. */
+export const masonRows = (e) => [["Version", e.version],
+  ...(e.startedAt ? [["Up", `${spanText(e.uptimeSeconds ?? 0)}, since ${e.startedAt.slice(0, 19).replace("T", " ")} UTC`]] : [])];
 
-/** `Sessions` in mason status (src/cli/commands.ts `sessionsRows`). */
+/** `Connections open` in mason status (src/cli/commands.ts `sessionsRows`). */
 export function sessionsRows(s) {
   if (s === undefined) return [];
-  if ("error" in s) return [["Sessions", `could not be read: ${s.error.split("\n")[0]}`]];
-  if (s.open === 0) return [["Sessions", "none open"]];
+  if ("error" in s) return [["Connections open", `could not be read: ${s.error.split("\n")[0]}`]];
+  if (s.open === 0) return [["Connections open", "none open"]];
   const running = s.byClient.reduce((a, c) => a + c.running, 0);
   const who = s.byClient.slice(0, 3).map((c) => `${c.open} ${c.user === "" ? "by a token" : `as ${c.user}`}${c.client === "" ? "" : ` (${c.client})`}`);
   const others = s.byClient.length - who.length;
-  return [["Sessions", `${s.open} open, ${running} running a statement · ${who.join(", ")}${others > 0 ? `, and ${others} other client${others === 1 ? "" : "s"}` : ""} (mason logs --running lists the statements)`]];
+  return [["Connections open", `${s.open} open, ${running} running a statement · ${who.join(", ")}${others > 0 ? `, and ${others} other client${others === 1 ? "" : "s"}` : ""} (mason logs --running lists the statements)`]];
 }
 
-/** `Disk` in mason status (src/cli/commands.ts `diskRows`), but for the path: the page never shows an absolute path, so
+/** `Free disk` in mason status (src/cli/commands.ts `diskRows`), but for the path: the page never shows an absolute path, so
  *  it says "where the copy is" for ` in <path>` (the tests hold the rest equal). */
 export function diskRows(d) {
   if (d === undefined) return [];
   const adds = d.projectedBytes === null ? "" : ` · the first syncs running are projected to add about ${fileSize(d.projectedBytes)} more`;
-  if (d.freeBytes === null) return [["Disk", `${d.error ?? "the free space could not be read"}${adds}`]];
-  return [["Disk", `${fileSize(d.freeBytes)} free where the synced data is${adds}${d.projectedBytes !== null && d.projectedBytes > d.freeBytes ? " — more than is free: the sync stops before the disk fills" : ""}`]];
+  if (d.freeBytes === null) return [["Free disk", `${d.error ?? "the free space could not be read"}${adds}`]];
+  return [["Free disk", `${fileSize(d.freeBytes)} free where the synced data is${adds}${d.projectedBytes !== null && d.projectedBytes > d.freeBytes ? " — more than is free: the sync stops before the disk fills" : ""}`]];
 }
 
 /** `Restarts` in mason status (src/cli/commands.ts `restartsRows`; its `ago` is `agoText`): none, no row. */

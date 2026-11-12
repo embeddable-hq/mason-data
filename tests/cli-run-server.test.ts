@@ -773,8 +773,9 @@ test("the run itself in /api/state: its version, since when it is up, and its su
   assert.match(restartsRows(engine({ ...ctx, duck: { ...ctx.duck, restarts: () => two } }).restarts)[0]![1], /^2, the last .* ago: it ran out of JavaScript heap \(V8: heap out of memory\), after 120 s up/);
   assert.deepEqual(restartsRows(none.restarts), [], "none: no line");
   assert.deepEqual(restartsRows(unreadable), [["Restarts", unreadable.error]]);
-  const { masonRow } = await import("../src/cli/commands.ts") as unknown as { masonRow: (e: unknown, pid: number) => [string, string] };
-  assert.deepEqual(masonRow(none, 4242), ["Mason", "9.9.9, pid 4242 · one process · up 1 h 30 min, since 2026-10-28 08:00:00 UTC"]);
+  const { masonRows } = await import("../src/cli/commands.ts") as unknown as { masonRows: (e: unknown, pid: number) => Array<[string, string]> };
+  assert.deepEqual(masonRows(none, 4242), [["Version", "9.9.9"], ["Up", "1 h 30 min, since 2026-10-28 08:00:00 UTC · pid 4242"]]);
+  assert.deepEqual(masonRows({ version: "9.9.9" }, 4242), [["Version", "9.9.9"], ["Up", "pid 4242"]], "a run that does not say its uptime: the pid alone");
 });
 
 test("the sync's events: /api/events passes its filters to the record, merges the run's restarts newest last, and refuses a bad limit or time by name", async () => {

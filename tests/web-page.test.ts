@@ -445,7 +445,7 @@ test("failed: its error on its line and in full, the warning, a table whose sync
 });
 
 test("no table added: the commands' sentence, and what adds one", () => {
-  assert.match(textOf(fn<[unknown, unknown?], string>("renderStatus")(NONE)), /^No table added yet \(4 in the database\)\. mason tables lists them; mason add <table> syncs one\. Mason Source .* Sessions none open$/);
+  assert.match(textOf(fn<[unknown, unknown?], string>("renderStatus")(NONE)), /^No table added yet \(4 in the database\)\. mason tables lists them; mason add <table> syncs one\. Server Sources file .* Database postgres:.* Changes each table as its sync: says .* Connections open none open$/, "no box: the Server table says the database and its changes");
 });
 
 test("the tables: each of the database's, added, not added or cannot be added with its reason and no Add; Remove asks first", async () => {
@@ -2234,17 +2234,19 @@ test("the Overview: the word and its line, the cards (tables synced N of M, rows
     const text = textOf(html);
     assert.match(html, HEALTH("bad", "Failed"), "the word first: mason status's");
     // the cards first: the copies in all, their rows, the last sync, the copy's file, the last day's statements and p95, its sync and query errors
-    assert.match(text, /^mason status Failed 1 table's sync failed: see Tables Tables synced 2 of 3 added, 1 failed Rows 30,001,200 Last sync 30 s ago 2026-10-27 09:05:00 UTC The synced data's file unknown its size could not be read Statements, last day 1,234 1,200 completed, 34 refused, failed or cancelled p95, last day 380 ms average 42 ms · p50 12 ms Sync errors, last day 2 failed sync events Query errors, last day 33 30 refused, 3 failed /);
+    assert.match(text, /^mason status Failed 1 table's sync failed: see Tables Database postgres:\S+ · Postgres 16\.4 Changes each table as its sync: says .*? Tables synced 2 of 3 added, 1 failed Rows 30,001,200 Last sync 30 s ago 2026-10-27 09:05:00 UTC The synced data's file unknown its size could not be read Statements, last day 1,234 1,200 completed, 34 refused, failed or cancelled p95, last day 380 ms average 42 ms · p50 12 ms Sync errors, last day 2 failed sync events Query errors, last day 33 30 refused, 3 failed /);
     assert.match(html, /<div class="cards n8">/, "eight cards on a bare run");
     assert.match(html, /<a class="card bad link" href="#tables\?show=failed"><p class="card-label">Tables synced<\/p><p class="card-value">2 of 3<\/p><p class="card-sub">added, 1 failed<\/p><\/a>/, "a card: its label, its value, its sub-line — and a link to the failed tables");
     // each error card leads to the view that lists what it counts, over the day it counts
     assert.match(html, /<a class="card bad link" href="#observability\/syncs\?failures=1&amp;range=24h"><p class="card-label">Sync errors, last day<\/p><p class="card-value">2<\/p>/);
     assert.match(html, /<a class="card warn link" href="#observability\/queries\?status=refused-or-failed&amp;range=24h"><p class="card-label">Query errors, last day<\/p><p class="card-value">33<\/p>/);
-    assert.match(text, / Mason Source .* Database postgres:.* Changes each table as its sync: says /);
-    assert.match(text, / Source mason\/sources\/shop\.yml \(the tables it names are added\) Database /, "the sources file from the project's root, as mason status names it");
+    // the database and how its changes arrive in the box, under its line; the rest in the Server table, under mason status's labels
+    assert.match(html, /<dl class="health-facts"><div><dt>Database<\/dt><dd>postgres:.*?<\/dd><\/div><div><dt>Changes<\/dt><dd>each table as its sync: says .*?<\/dd><\/div><\/dl><\/div>/);
+    assert.match(text, / Server Sources file mason\/sources\/shop\.yml \(the tables it names are added\) Version 0\.9\.0 Up 6 min, since 2026-10-27 09:00:00 UTC Free disk .* Connections open none open$/, "the sources file from the project's root, as mason status names it");
     assert.doesNotMatch(html, /\/app\//, "never an absolute path");
-    assert.match(html, /<caption>Mason<\/caption><tbody><tr><th scope="row">Source<\/th>/, "ONE table of the other facts, each a row headed by its name");
-    assert.doesNotMatch(html.slice(html.indexOf("<caption>Mason</caption>")), /<th scope="row">(Tables synced|Rows|Last sync|The synced data's file)<\/th>/, "a fact in ONE place: the cards' are not rows too");
+    assert.match(html, /<caption>Server<\/caption><tbody><tr><th scope="row">Sources file<\/th>/, "ONE table of the other facts, each a row headed by its name");
+    const server = html.slice(html.indexOf("<caption>Server</caption>"));
+    assert.doesNotMatch(server, /<th scope="row">(Tables synced|Rows|Last sync|The synced data's file|Database|Changes|Mason|Source|Disk|Sessions)<\/th>/, "a fact in ONE place: the cards' and the box's are not rows too");
     // no table of the statements and no list of the errors: the cards count them (the owner's, 2026-11-12)
     assert.ok(!/<table class="(queries|errors)"|Last week|None\./.test(html), "no statements table, no error lists");
     assert.match(text, /Database postgres:\/\/shop:\*\*\*\*@db\.example\.com:5432\/shop · Postgres 16\.4/);
@@ -2266,11 +2268,16 @@ test("the Overview's eight cards and nine (the host's beside them) leave no card
 
 test("the Overview: Ready, Under way and Failed under the title mason status, each with what it means in a line; nothing added says so once; a count that could not be read says so", async () => {
   const renderHealth = of<[unknown], string>(statusPage, "status.js", "renderHealth");
-  assert.equal(textOf(renderHealth(RUNNING)), "mason status Ready Every added table is synced and served");
-  assert.equal(textOf(renderHealth(COPYING)), "mason status Under way 1 of 3 tables synced, the rest syncing");
-  assert.equal(textOf(renderHealth(FAILED)), "mason status Failed 1 table's sync failed: see Tables");
-  assert.equal(textOf(renderHealth(SYNCED)), "mason status Failed 1 table's sync failed: see Tables");
-  assert.match(renderHealth(FAILED), /see <a href="#tables\?show=failed">Tables<\/a><\/p><\/div>$/, "Tables: the failed ones");
+  // under the line, mason status's Database and Changes rows, the CLI's words (sourceRows)
+  const boxRows = (s: RunState) => (commands as unknown as { sourceRows: (s: RunState) => Array<[string, string]> }).sourceRows(s)
+    .filter(([k]) => k === "Database" || k === "Changes").map(([k, v]) => `${k} ${v}`).join(" ");
+  assert.equal(textOf(renderHealth(RUNNING)), `mason status Ready Every added table is synced and served ${boxRows(RUNNING)}`);
+  assert.equal(textOf(renderHealth(COPYING)), `mason status Under way 1 of 3 tables synced, the rest syncing ${boxRows(COPYING)}`);
+  assert.equal(textOf(renderHealth(FAILED)), `mason status Failed 1 table's sync failed: see Tables ${boxRows(FAILED)}`);
+  assert.equal(textOf(renderHealth(SYNCED)), `mason status Failed 1 table's sync failed: see Tables ${boxRows(SYNCED)}`);
+  assert.match(boxRows(RUNNING), /^Database \S+ · Postgres 16\.4 Changes each table as its sync: says/);
+  assert.match(renderHealth(FAILED), /see <a href="#tables\?show=failed">Tables<\/a><\/p><dl class="health-facts"><div><dt>Database<\/dt><dd>/, "Tables: the failed ones");
+  assert.match(renderHealth(FAILED), /<\/dd><\/div><\/dl><\/div>$/, "the rows close the box");
   assert.match(renderHealth(RUNNING), /^<div class="health ok" role="status"><p class="health-title">mason status<\/p>/, "the title on the box's edge, as Getting started's");
   // from the state alone (readiness, totals, the tables' sync.state): two failed, every one synced but one catching up
   const readinessLine = of<[unknown], { text: string; link: string | null }>(statusPage, "status.js", "readinessLine");
@@ -2304,7 +2311,7 @@ test("the Overview: Ready, Under way and Failed under the title mason status, ea
   run.answers.set("GET api/state", answer(NONE));
   const app = fn<[unknown], App>("createApp")(run.fetch);
   await app.poll();
-  assert.match(textOf(app.view().status!), /^Getting started 2 of 3 done .* Add a table .* No table added yet \(4 in the database\)\. .* Mason Source /, "the checklist first: its one action is adding a table");
+  assert.match(textOf(app.view().status!), /^Getting started 2 of 3 done .* Add a table .* No table added yet \(4 in the database\)\. .* Server Sources file /, "the checklist first: its one action is adding a table");
 });
 
 // ------------------------------------------------------------------ the Tables page: each copy's sync, Sync, the search box
@@ -3107,14 +3114,18 @@ test("the Overview: the slot's WAL is the CLI's slotText; lost, past its cap, un
   assert.match(textOf(html({ error: "no restart position yet\nmore" })), /Slot the WAL it holds could not be read: no restart position yet/, "unknown, never 0");
 });
 
-test("the Overview: Mason's version and uptime, the restarts, the disk and the sessions are the CLI's rows (masonRow, restartsRows, diskRows, sessionsRows) — held equal, but for the pid and the path", () => {
-  const cli = commands as unknown as { masonRow: (e: unknown, pid: number) => [string, string]; restartsRows: (r: unknown) => Array<[string, string]>;
+test("the Overview: Mason's version and uptime, the restarts, the disk and the sessions are the CLI's rows (masonRows, restartsRows, diskRows, sessionsRows) — held equal, but for the pid and the path", () => {
+  const cli = commands as unknown as { masonRows: (e: unknown, pid: number) => Array<[string, string]>; restartsRows: (r: unknown) => Array<[string, string]>;
     diskRows: (d: unknown) => Array<[string, string]>; sessionsRows: (s: unknown) => Array<[string, string]> };
-  for (const f of ["masonRow", "restartsRows", "diskRows", "sessionsRows"] as const) assert.equal(typeof cli[f], "function", `src/cli/commands.ts exports ${f}`);
+  for (const f of ["masonRows", "restartsRows", "diskRows", "sessionsRows"] as const) assert.equal(typeof cli[f], "function", `src/cli/commands.ts exports ${f}`);
   const engine = { version: "0.4.2", startedAt: "2026-10-27T08:00:00.000Z", uptimeSeconds: 3930 };
-  // the state carries no pid: the page's row is the CLI's with ", pid N" gone
-  assert.deepEqual(fn<[unknown], string[]>("masonRow")(engine), [cli.masonRow(engine, 4242)[0], cli.masonRow(engine, 4242)[1].replace(", pid 4242", "")]);
-  assert.deepEqual(fn<[unknown], string[]>("masonRow")({ version: "0.4.2" }), ["Mason", cli.masonRow({ version: "0.4.2" }, 1)[1].replace(", pid 1", "")]);
+  // the state carries no pid: the page's rows are the CLI's with " · pid N" gone, and no Up where the pid was all it said
+  const pageRows = fn<[unknown], Array<[string, string]>>("masonRows");
+  const noPid = (rows: Array<[string, string]>, pid: number) => rows.map(([k, v]): [string, string] => [k, v.replace(new RegExp(`(^| · )pid ${pid}$`), "")]).filter(([, v]) => v !== "");
+  assert.deepEqual(pageRows(engine), noPid(cli.masonRows(engine, 4242), 4242));
+  assert.deepEqual(pageRows(engine), [["Version", "0.4.2"], ["Up", "66 min, since 2026-10-27 08:00:00 UTC"]]);
+  assert.deepEqual(pageRows({ version: "0.4.2" }), noPid(cli.masonRows({ version: "0.4.2" }, 1), 1));
+  assert.deepEqual(pageRows({ version: "dev" }), [["Version", "dev"]]);
   const hoursAgo = new Date(Date.now() - 3 * 3600_000).toISOString();
   const restarts = fn<[unknown, number?], Array<[string, string]>>("restartsRows");
   for (const r of [undefined, { count: 0, last: null }, { count: 2, last: { at: hoursAgo, why: "the run crashed", upSeconds: 42 } }, { error: "restarts.json is unreadable" }]) assert.deepEqual(restarts(r), cli.restartsRows(r), JSON.stringify(r));
@@ -3136,17 +3147,17 @@ test("the Overview: Mason's version and uptime, the restarts, the disk and the s
   const state = { ...RUNNING, engine: { ...RUNNING.engine, ...engine, restarts: { count: 2, last: { at: at3h, why: "the run crashed", upSeconds: 42 } } },
     disk: { path: D, freeBytes: 2 ** 30, copyBytes: 5, projectedBytes: 4 * 2 ** 30 }, sessions: { open: 5, byClient } };
   const html = renderFacts(state, NOW), text = textOf(html);
-  assert.match(text, /Mason 0\.4\.2 · one process · up 1\.1 h|Mason 0\.4\.2 · one process · up 66 min/);
+  assert.match(text, /^Server Sources file .* Version 0\.4\.2 Up 66 min, since 2026-10-27 08:00:00 UTC Restarts 2, /, "Version, then Up, then the restarts; no one process");
   assert.match(text, /Restarts 2, the last 3 h ago: the run crashed, after 42 s up/);
-  assert.match(text, /Disk 1\.0 GiB free where the synced data is · the first syncs running are projected to add about 4\.0 GiB more — more than is free/);
-  assert.match(text, /Sessions 5 open, 1 running a statement · 2 as metabase \(Metabase\), 1 by a token, 1 as ana \(psql\), and 1 other client/);
-  assert.match(html, /<tr class="warn"><th scope="row">Disk<\/th>/);
+  assert.match(text, /Free disk 1\.0 GiB free where the synced data is · the first syncs running are projected to add about 4\.0 GiB more — more than is free/);
+  assert.match(text, /Connections open 5 open, 1 running a statement · 2 as metabase \(Metabase\), 1 by a token, 1 as ana \(psql\), and 1 other client/);
+  assert.match(html, /<tr class="warn"><th scope="row">Free disk<\/th>/);
   assert.ok(!text.includes(D) && !/duckdb/i.test(text));
   const { disk: _d, sessions: _s, ...older } = RUNNING as unknown as Record<string, unknown> & { engine: Record<string, unknown> };
   const bare = { ...older, engine: { name: older.engine.name, file: older.engine.file, bytes: older.engine.bytes, pollSeconds: older.engine.pollSeconds } };
-  assert.doesNotMatch(textOf(renderFacts(bare, NOW)), /Mason \d|Restarts|Disk|Sessions/, "a run that says none of it: nothing");
-  assert.match(textOf(renderFacts(RUNNING, NOW)), /Mason \S+ · one process/, "the run's own state says them (runState)");
-  assert.match(textOf(renderFacts({ ...RUNNING, sessions: { error: "no listener\nmore" } } as never, NOW)), /Sessions could not be read: no listener/);
+  assert.doesNotMatch(textOf(renderFacts(bare, NOW)), /Version|Up \d|Restarts|Free disk|Connections open/, "a run that says none of it: nothing");
+  assert.match(textOf(renderFacts(RUNNING, NOW)), /Version \S+ Up \S+/, "the run's own state says them (runState)");
+  assert.match(textOf(renderFacts({ ...RUNNING, sessions: { error: "no listener\nmore" } } as never, NOW)), /Connections open could not be read: no listener/);
   // mason serve with MASON_UI_SOCKET (status --json pageSocket): said, never its path; none, nothing
   const onSocket = textOf(renderFacts({ ...RUNNING, pageSocket: "/run/mason/ui.sock" } as never, NOW));
   assert.match(onSocket, /Web page served on a Unix socket on the server too \(MASON_UI_SOCKET\)/);
@@ -4083,7 +4094,7 @@ test("the Overview: the last day's unsupported SQL is one line at its foot, with
   const app = fn<[unknown], App>("createApp")(run.fetch);
   await app.poll();
   assert.ok(run.asked.includes("GET api/unsupported?limit=100"), "the Overview reads the last day's, the endpoint's default");
-  assert.match(textOf(app.view().status!), /Sessions .* Unsupported SQL, the last day: a window frame in GROUPS mode: 12 statements as ana, metabase from Metabase \(and 1 other\) See all$/);
+  assert.match(textOf(app.view().status!), /Connections open .* Unsupported SQL, the last day: a window frame in GROUPS mode: 12 statements as ana, metabase from Metabase \(and 1 other\) See all$/);
 });
 
 // ------------------------------------------------------------------ a table just added shows its copy at once
@@ -4369,7 +4380,7 @@ test("the Overview's first-run checklist: running, a table synced, a user create
   await app.poll();
   assert.ok(run.asked.includes("GET api/users"));
   const text = textOf(app.view().status!);
-  assert.match(text, /^mason status Ready Every added table is synced and served Getting started 2 of 3 done /);
+  assert.match(text, /^mason status Ready Every added table is synced and served Database .*? Changes .*? Getting started 2 of 3 done /);
   assert.ok(text.indexOf("Getting started") < text.indexOf("Tables synced"), "above the cards");
   // a user created: gone, though nothing has asked Mason anything yet
   run.answers.set("GET api/users", answer(user));

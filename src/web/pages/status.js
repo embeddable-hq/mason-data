@@ -22,7 +22,7 @@
 const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage?range=24h", queries: "#observability/queries?range=24h",
   slow: "#observability/queries?slow=1&range=24h", failedQueries: "#observability/queries?status=refused-or-failed&range=24h", failedEvents: "#observability/syncs?failures=1&range=24h" };
 import { VIEW_HASHES } from "../routes.js";
-import { statementMsText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
+import { statementMsText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRows, sessionsRows, diskRows, restartsRows, utcText,
   unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, copyClick, readOnlyLine, tablesReadOnly, usersReadOnly } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
 import { readHost, hostEvery, hostKey, renderHostCard } from "../host-view.js";
@@ -193,7 +193,7 @@ export function createMonotone() {
  *  the page never shows an absolute path), its URL as the run masked it, how its changes arrive. */
 export function sourceRows(s) {
   return [
-    ...(s.source.file ? [["Source", `${s.source.shownFile ?? s.source.file} (the tables it names are added)`]] : []),
+    ...(s.source.file ? [["Sources file", `${s.source.shownFile ?? s.source.file} (the tables it names are added)`]] : []),
     ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
       : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
     // in a web developer's words first (each table as its sync: says, streamed as they happen); the mechanism an operator needs in parentheses
@@ -245,13 +245,22 @@ export function readinessLine(s) {
 /** The word at the top of the page under its title, "mason status", and what it means in a line (`readinessLine`): the
  *  run's readiness ("" with no table added: `renderStatus` says so, and what adds one). */
 export function renderHealth(s) {
-  if (!s.tables.some((t) => t.added) || !s.readiness) return "";
+  if (!healthShown(s)) return "";
   const word = readinessWord(s.readiness);
   const line = readinessLine(s);
+  const facts = sourceRows(s).filter(([k]) => HEALTH_ROWS.includes(k));
   return `<div class="health ${word === "Ready" ? "ok" : word === "Failed" ? "bad" : "warn"}" role="status"><p class="health-title">mason status</p>` +
     `<p class="health-word"><span class="dot" aria-hidden="true"></span><span class="word">${esc(word)}</span></p>` +
-    `<p class="health-line">${esc(line.text)}${line.link === null ? "" : `<a href="${esc(LINKS.failedTables)}">${esc(line.link)}</a>`}</p></div>`;
+    `<p class="health-line">${esc(line.text)}${line.link === null ? "" : `<a href="${esc(LINKS.failedTables)}">${esc(line.link)}</a>`}</p>` +
+    (facts.length ? `<dl class="health-facts">${facts.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl>` : "") + `</div>`;
 }
+
+/** The box at the top is drawn once a table is added and the run says its readiness (`renderHealth`). */
+const healthShown = (s) => s.tables.some((t) => t.added) && Boolean(s.readiness);
+
+/** `mason status`'s rows (`sourceRows`) said in the box at the top, under its line, and not in the Server table: the
+ *  database and how its changes arrive. With no box, the Server table says them. */
+const HEALTH_ROWS = ["Database", "Changes"];
 
 /** The sparklines the cards draw, by holder key: a usage sample's field each (src/web/charts.js specs). */
 const SPARKS = { rows: ["copyRows", "Rows synced"], "copy-bytes": ["copyBytes", "The synced data's file"], statements: ["statements", "Statements"], p95: ["durationP95Ms", "p95"] };
@@ -345,14 +354,15 @@ function renderStream(s, now = Date.now()) {
 }
 
 /**
- * THE FACTS, ONE table of what `mason status` says beside the cards: the database and how its changes arrive (`sourceRows`), the
- * warnings, Mason's version, how long it has been up and its restarts (`engine`), the free disk and what a running copy is projected to add (`disk`), the sessions open
- * (`sessions`). A fact the run did not say is absent; one it could not read is said as the CLI says it (its reason, never a 0). Mason's, the disk's, the restarts' and the sessions' rows are the CLI's (`masonRow`, `diskRows`, `restartsRows`, `sessionsRows`).
+ * THE FACTS, ONE table, "Server", of what `mason status` says beside the cards: its sources file (`sourceRows`; the database and
+ * how its changes arrive are the box's at the top, `renderHealth`, while it is drawn), the warnings, Mason's version, how long it has been up and its restarts (`engine`), the free disk and what a running copy is projected to add (`disk`), the sessions open
+ * (`sessions`). A fact the run did not say is absent; one it could not read is said as the CLI says it (its reason, never a 0). Mason's, the disk's, the restarts' and the sessions' rows are the CLI's (`masonRows`, `diskRows`, `restartsRows`, `sessionsRows`).
  */
 export function renderFacts(s, now = Date.now()) {
-  const rows = [...sourceRows(s).map(([k, v]) => factRow(k, v)), ...s.warnings.map((w) => factRow("Warning", w, true))];
+  const boxed = healthShown(s) ? HEALTH_ROWS : [];
+  const rows = [...sourceRows(s).filter(([k]) => !boxed.includes(k)).map(([k, v]) => factRow(k, v)), ...s.warnings.map((w) => factRow("Warning", w, true))];
   const e = s.engine;
-  if (typeof e.version === "string") rows.push(factRow(...masonRow(e)));
+  if (typeof e.version === "string") rows.push(...masonRows(e).map(([k, v]) => factRow(k, v)));
   rows.push(...restartsRows(e.restarts, now).map(([k, v]) => factRow(k, v, k === "Restarts")));
   // the copies in all, their rows, the last sync and the copy's file are the cards' (`renderKpis`): a fact in ONE place
   const d = s.disk;
@@ -360,7 +370,7 @@ export function renderFacts(s, now = Date.now()) {
   rows.push(...sessionsRows(s.sessions).map(([k, v]) => factRow(k, v)));
   // `pageSocket` (mason serve with MASON_UI_SOCKET): said without its path, as the page shows no absolute path
   if (typeof s.pageSocket === "string") rows.push(factRow("Web page", "served on a Unix socket on the server too (MASON_UI_SOCKET)"));
-  return `<table class="facts-table"><caption>Mason</caption><tbody>${rows.join("")}</tbody></table>`;
+  return `<table class="facts-table"><caption>Server</caption><tbody>${rows.join("")}</tbody></table>`;
 }
 
 /**

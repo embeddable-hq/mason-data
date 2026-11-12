@@ -45,7 +45,7 @@ sampled once a minute where it moves):
   `mason user` ('' a token's) and application_name, and how many of each run a statement; the listener's own, in memory
   (`openSessions`). Sampled as `sessionsOpen`.
 
-The lines `mason status` prints for them are exported renderers (src/cli/commands.ts `slotText`, `masonRow`,
+The lines `mason status` prints for them are exported renderers (src/cli/commands.ts `slotText`, `masonRows`,
 `restartsRows`, `diskRows`, `sessionsRows`), so the web page is held equal to them.
 
 `mason status --json` `recentErrors` holds the latest sync failures (`sync`) and the latest statements refused, failed or
