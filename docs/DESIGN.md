@@ -2162,8 +2162,11 @@ and people were scared off for no reason; the synced data's folder is made 0700,
 machine's" overstated it.
 
 **Decision (the owner).** A run reads the database's catalog again only when something asks — `/api/state` (the
-commands and the page), a table's columns or Sync choice, an add or a remove — reusing a read under a minute old,
-never on a timer (`sourceCatalog`, src/cli/source-catalog.ts). **Why.** The 10-second timer connected about 8,640 times
+commands and the page), a table's columns or Sync choice, an add or a remove — never on a timer (`sourceCatalog`,
+src/cli/source-catalog.ts). What shows it reuses a read under a minute old and waits at most 2 s for a new one; what
+acts on it reads it after it asked; the read waits on a lock at most 2 s (`lock_timeout`) and ends within 30 s (the
+review of PR 900: a read queued behind a migration's lock left `/api/state` answering nothing, and an add was refused
+a table made a moment before). **Why.** The 10-second timer connected about 8,640 times
 a day whatever each table's sync, so a serverless compute (Neon, Aurora Serverless) never suspended with every table
 `sync: off`. A failed read keeps the last one and is said in the log, and is not tried again within the minute.
 `tests/integration/cli-catalog-read.itest.ts` counts the run's connections over an idle window.

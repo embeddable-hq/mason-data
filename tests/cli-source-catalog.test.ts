@@ -72,3 +72,57 @@ test("a failed read leaves the last one in place, is said in the log, and is not
   assert.deepEqual(names(await c.fresh()), ["a", "b"], "a minute on, read again");
   assert.equal(reads, 2);
 });
+
+// THE REVIEW OF PR 900, B1: a read held by a lock (a migration's ALTER queued behind a long transaction) left /api/state,
+// so mason status, mason wait and the page, answering nothing for 30 s
+test("an asker that only shows the catalog waits for a read at most waitMs, then has the last one; the read goes on and is taken when it ends", async () => {
+  let now = CATALOG_FRESH_MS, release: (f: SourceFacts) => void = () => undefined;
+  const c = sourceCatalog(factsOf(["a"]), () => new Promise<SourceFacts>((r) => { release = r; }), { log: () => undefined, now: () => now });
+  now += CATALOG_FRESH_MS;
+  const began = Date.now();
+  assert.deepEqual(names(await c.fresh({ waitMs: 50 })), ["a"], "the last read, answered while the new one waits");
+  assert.ok(Date.now() - began < 1_000, "answered within its wait, not the read's");
+  release(factsOf(["a", "b"]));
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(names(c.facts()), ["a", "b"], "taken when it ended");
+});
+
+test("a read that does not end within readTimeoutMs fails: its connection is closed through the signal, the last read kept and said", async () => {
+  let signal: AbortSignal | null = null;
+  const logged: string[] = [];
+  const c = sourceCatalog(factsOf(["a"]), (s) => { signal = s; return new Promise<SourceFacts>(() => undefined); },
+    { log: (m) => logged.push(m), now: () => CATALOG_FRESH_MS * 2, readTimeoutMs: 30 });
+  assert.deepEqual(names(await c.fresh({ maxAgeMs: 0 })), ["a"]);
+  assert.equal(signal!.aborted, true, "the read is told to close its connection");
+  assert.deepEqual(logged, ["the database's tables could not be read again (no answer within 0.03 s): the tables read before are shown until a read succeeds"]);
+});
+
+// THE REVIEW OF PR 900, B2: an add was refused a table mason tables had just listed, its run's read up to a minute old
+test("an asker that acts on the catalog (maxAgeMs 0) has a read made after it asked: never the last one however young, never one already running", async () => {
+  let now = 1_000, reads = 0;
+  let database = ["a"];
+  const releases: Array<() => void> = [];
+  const c = sourceCatalog(factsOf(["a"]), () => { reads++; const seen = factsOf(database); return new Promise<SourceFacts>((r) => { releases.push(() => r(seen)); }); },
+    { log: () => undefined, now: () => now });
+  // a second after the start's read, a table is made: a shower is answered the start's read, an actor reads
+  now += 1_000;
+  database = ["a", "newt"];
+  assert.deepEqual(names(await c.fresh()), ["a"]);
+  assert.equal(reads, 0);
+  const acted = c.fresh({ maxAgeMs: 0 });
+  assert.equal(reads, 1);
+  releases[0]!();
+  assert.deepEqual(names(await acted), ["a", "newt"]);
+  // a read already running when it asks began before the table it may want: a new one follows it
+  now += 1_000;
+  const running = c.fresh({ maxAgeMs: 0 });
+  now += 1;
+  database = ["a", "newt", "later"];
+  const actor = c.fresh({ maxAgeMs: 0 });
+  releases[1]!();
+  assert.deepEqual(names(await running), ["a", "newt"]);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(reads, 3, "the running read, then one begun after the actor asked");
+  releases[2]!();
+  assert.deepEqual(names(await actor), ["a", "newt", "later"]);
+});

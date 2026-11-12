@@ -57,10 +57,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 - **A running Mason no longer connects to your database every 10 seconds while idle.** It read the database's tables
   again on a timer, whatever each table's sync, so a serverless database (Neon, Aurora Serverless) never suspended,
-  and every database logged about 8,600 connections a day. Mason now reads them only when you ask: `mason tables`,
-  `mason status`, `mason add` or `remove`, `mason doctor` or the web page, reusing a read under a minute old. With every
-  table `sync: off`, a run that nobody asks opens no connection after its first sync. A table or column added to the
-  database shows within about a minute of being asked for.
+  and every database logged about 8,600 connections a day. Mason now reads them only when you ask: `mason
+  status`, `wait` and `doctor` and the web page reuse a read under a minute old and never wait more than 2 seconds for a
+  new one; `mason tables`, `add` and `remove`, and the page's Columns and Sync choices, read them as they are now. With
+  every table `sync: off`, a run that nobody asks opens no connection after its first sync. A table made on the
+  database can be added at once, and shows in `mason status` within about a minute.
 - **The web page no longer shows old data as current while Mason can't be reached.** When the page lost Mason (the
   run stopped, or the tunnel closed), it kept what it had read, its big "Ready" and the cards, under the failure
   message, and they read as current. Now the page greys what it read before and says when it was read: "As of 14:02

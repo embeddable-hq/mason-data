@@ -174,9 +174,11 @@ async function runOr(spec: CommandSpec & { needs: "run" }, json: boolean): Promi
   return w !== null && "run" in w ? w.run : null;
 }
 
-/** The run's state with each table's columns (`?columns=1`: `mason status --json` carries them; the page polls it lean). */
-export async function readState(run: DevRun): Promise<RunState> {
-  const r = await callRun(run, "GET", "/api/state?columns=1");
+/** The run's state with each table's columns (`?columns=1`: `mason status --json` carries them; the page polls it lean).
+ *  `fresh`: the database's tables as they are now, read after this asked (`mason add`: a table made a moment ago is one
+ *  it can add; src/cli/source-catalog.ts), where the state otherwise shows a read up to a minute old. */
+export async function readState(run: DevRun, o: { fresh?: boolean } = {}): Promise<RunState> {
+  const r = await callRun(run, "GET", `/api/state?columns=1${o.fresh === true ? "&fresh=1" : ""}`);
   if (r.status !== 200) throw new RunUnreachable(String(r.body.error ?? `HTTP ${r.status}`));
   return r.body as unknown as RunState;
 }
@@ -1290,7 +1292,8 @@ export async function add(argv: string[]): Promise<number> {
     // Mason up: the run adds it (the copy starts now, and the run's own re-read never races the file's write)
     const run = where.run;
     return guarded("add", json, async () => {
-      const s = await readState(run);
+      // the tables as they are now: one made since the run last read them is one to add (the review of PR 900, B2)
+      const s = await readState(run, { fresh: true });
       return addTables({ tables: s.tables, file: s.source.file ?? null,
         pick: (table, columns, key) => viaRun<PickResult>(run, "/api/pick", { table, picked: true, columns, ...(key ? { key } : {}), ...(sync ? { sync: syncText(sync) } : {}), keep }),
         // --sync alone on tables already added: no copy starts (each is caught up by one poll), so wait has nothing to wait for

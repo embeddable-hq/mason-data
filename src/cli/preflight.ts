@@ -495,7 +495,7 @@ export function sourceWarnings(s: Source, _f: SourceFacts): string[] {
   if (!s.remote) return [];
   const sleeper = serverlessHost(s.host);
   return sleeper ? [`${sleeper} suspends an idle compute and bills while it runs: a table whose sync: is poll or replication keeps it running. ` +
-    "With every table sync: off, Mason connects only when asked: mason sync, a command that lists or adds tables, and the web page while it is open (once a minute at most)"] : [];
+    "With every table sync: off, Mason connects only when asked: mason sync, tables, add, remove, status, wait or doctor, and the web page while it is open (about once a minute)"] : [];
 }
 
 /** `pg_current_snapshot()` and xid8, which polling reads, arrived in Postgres 13. */

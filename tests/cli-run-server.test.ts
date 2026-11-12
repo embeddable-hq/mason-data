@@ -1230,10 +1230,13 @@ test("the database's catalog is read again only by what shows it or checks again
   const runServer = await import("../src/cli/run-server.ts") as unknown as { usageFacts: (c: RunContext, now?: number) => Promise<unknown> };
   const was = ctx.facts;
   let reads = 0;
+  // what each asked (src/cli/source-catalog.ts FreshAsk): what shows the catalog waits a bounded time for a read under a
+  // minute old; what acts on it asks for a read made after it asked (the review of PR 900, B1 and B2)
+  const asks: Array<{ maxAgeMs?: number; waitMs?: number } | undefined> = [];
   // a table made on the database since the run's last read: shown only once a read asked for has taken it
   let made: SourceTable[] = [];
   const fresh = [table({ table: "invoices" })];
-  (ctx as { freshFacts?: () => Promise<void> }).freshFacts = async () => { reads++; made = fresh; };
+  (ctx as { freshFacts?: (ask?: { maxAgeMs?: number; waitMs?: number }) => Promise<void> }).freshFacts = async (ask) => { reads++; asks.push(ask); made = fresh; };
   ctx.facts = () => ({ ...was(), tables: [...was().tables, ...made] });
   try {
     for (const p of ["/api/ping", "/api/slow", "/api/refused", "/api/queries", "/api/running", "/api/users"]) {
@@ -1253,6 +1256,11 @@ test("the database's catalog is read again only by what shows it or checks again
     assert.equal(reads, 4, "an add is checked against a fresh read");
     await call("POST", "/api/remove", { body: { tables: ["public.nope"] } });
     assert.equal(reads, 5, "so is a remove");
+    const SHOW = { waitMs: 2_000 }, ACT = { maxAgeMs: 0 };
+    assert.deepEqual(asks, [SHOW, ACT, ACT, ACT, ACT], "the state never waits on a read past 2 s; a column choice, a Sync choice, an add and a remove read the database as it is now");
+    // mason add reads the state as it is now before it checks its tables (?fresh=1): a table made a moment ago is there
+    assert.equal((await call("GET", "/api/state?columns=1&fresh=1")).status, 200);
+    assert.deepEqual(asks.at(-1), ACT);
   } finally {
     delete (ctx as { freshFacts?: () => Promise<void> }).freshFacts;
     ctx.facts = was;

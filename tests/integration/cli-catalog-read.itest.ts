@@ -5,10 +5,10 @@
  *
  * A run read the catalog on a 10-second timer, a connection every 10 s whatever each table's sync, which kept a
  * serverless compute awake with every table `sync: off`. Here: a run whose tables are all `sync: off`, once its first
- * sync is done and nobody asks, opens NO connection over a window longer than a minute; then the run's state (`mason
- * status`, what the page and `mason wait` read) shows a table made on the database since, with one connection, and a
- * second ask within the minute reuses that read. (`mason tables` reads the catalog itself, a connection each time, by
- * design: it needs the project, not the run.)
+ * sync is done and nobody asks, opens NO connection over a window longer than a minute; behind another session's lock
+ * the run's state (`mason status`, `mason wait`, the page) still answers at once; and a table made a moment ago is added
+ * at once. (How often a read is reused is tests/cli-source-catalog.test.ts's; `mason tables` reads the catalog itself, a
+ * connection each time, by design: it needs the project, not the run.)
  *
  * The proxy listens on this machine's first non-loopback address when it has one, so the database is "on another
  * machine" to Mason: `mason init` and the first `mason start` say so as information, never a warning; the next start,
@@ -103,7 +103,9 @@ const PRIMARY = "This is your main database, not a read replica. Mason only read
 
 test("an idle run whose tables are all sync: off opens no connection to the database; a table made since shows once asked, read once a minute at most", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set", timeout: 600_000 }, async () => {
   psql(adminUrl!, `CREATE DATABASE ${tag}`);
-  psql(dbUrl, "CREATE TABLE customers (id int PRIMARY KEY, name text); INSERT INTO customers SELECT g, 'c' || g FROM generate_series(1, 50) g");
+  psql(dbUrl, "CREATE TABLE customers (id int PRIMARY KEY, name text); INSERT INTO customers SELECT g, 'c' || g FROM generate_series(1, 50) g; " +
+    // a table this user reads and nothing adds: what another session's lock is taken on below
+    "CREATE TABLE big (id int PRIMARY KEY)");
   fs.mkdirSync(root);
   fs.mkdirSync(home);
   // the proxy on this machine's own network address, when it has one: to Mason, a database on another machine
@@ -145,21 +147,39 @@ test("an idle run whose tables are all sync: off opens no connection to the data
   await new Promise((r) => setTimeout(r, IDLE_MS));
   assert.equal(proxy.connections() - before, 0, `an idle run with every table sync: off connected ${proxy.connections() - before} time(s) in ${IDLE_MS / 1000} s`);
 
-  // ASKED: a table made on the database since is shown by the run, read with one connection; a second ask within the
-  // minute reuses it
+  // A LOCK THE READ WAITS ON (the review of PR 900, B1): another session holds ACCESS EXCLUSIVE on a table this user
+  // reads, as a migration does; the catalog's last read is over a minute old, so asking begins one, which waits on the
+  // lock — and the run still answers at once, with the read before (main answered in under 2 s; the head that waited
+  // for the read did not answer within 30 s)
+  const holder = spawn("psql", ["-X", "-q", dbUrl, "-c", "BEGIN; LOCK TABLE big IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(120); COMMIT"],
+    { env: { ...process.env, PGAPPNAME: `${tag}_lock` }, stdio: "ignore" });
+  try {
+    for (const end = Date.now() + 30_000; ;) {
+      if (psql(adminUrl!, `SELECT count(*) FROM pg_stat_activity WHERE application_name = '${tag}_lock' AND query LIKE '%pg_sleep%' AND state = 'active'`) === "1") break;
+      assert.ok(Date.now() < end, "the lock holder never began");
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    for (const cmd of [["status", "--json"], ["wait", "--json"]]) {
+      const began = Date.now();
+      const r = await mason(...cmd);
+      assert.equal(r.status, 0, `mason ${cmd[0]} behind a lock: ${r.stdout}${r.stderr}`);
+      assert.ok(Date.now() - began < 15_000, `mason ${cmd[0]} answered in ${Date.now() - began} ms behind a lock`);
+    }
+  } finally {
+    holder.kill();
+    psql(adminUrl!, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = '${tag}_lock'`);
+  }
+
+  // A TABLE MADE A MOMENT AGO (the review of PR 900, B2): added at once — an add reads the database as it is now, never
+  // the run's read of up to a minute before
   psql(dbUrl, "CREATE TABLE orders (id int PRIMARY KEY, customer_id int, total numeric(10,2))");
-  const asked = proxy.connections();
-  const shown = ok(await mason("status", "--json"), "mason status");
-  assert.ok((shown.json.tables as Array<{ table: string }>).some((t) => t.table === "public.orders"), JSON.stringify(shown.json.tables));
-  assert.equal(proxy.connections() - asked, 1, "one read of the catalog, when asked");
-  ok(await mason("status", "--json"), "mason status again");
-  ok(await mason("wait", "--json"), "mason wait");
-  assert.equal(proxy.connections() - asked, 1, "a read under a minute old is reused");
-  // mason tables reads it itself, Mason up or down: it lists it too
+  // mason tables reads it itself, Mason up or down: it lists it
   const listed = ok(await mason("tables", "--json"), "mason tables");
   assert.ok((listed.json.tables as Array<{ table: string }>).some((t) => t.table === "public.orders"), JSON.stringify(listed.json.tables));
-  // and it can be added at once, against the run's read
-  ok(await mason("add", "orders", "--json"), "mason add orders");
+  ok(await mason("add", "orders", "--json"), "mason add orders, made a moment ago");
+  // and the state shows it added, from that read
+  const shown = ok(await mason("status", "--json"), "mason status");
+  assert.ok((shown.json.tables as Array<{ table: string; added: boolean }>).some((t) => t.table === "public.orders" && t.added), JSON.stringify(shown.json.tables));
 
   // THE NEXT START, its first sync done: where the database is, still; that it is the main one, no longer
   ok(await mason("stop"), "mason stop");

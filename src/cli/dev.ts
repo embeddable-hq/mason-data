@@ -30,7 +30,7 @@ import type { Server } from "node:http";
 import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, PRIMARY_NOTE, readSourceFacts, type SourceFacts } from "./preflight.ts";
-import { sourceCatalog } from "./source-catalog.ts";
+import { CATALOG_LOCK_TIMEOUT_MS, CATALOG_STATEMENT_TIMEOUT_MS, sourceCatalog } from "./source-catalog.ts";
 import { uiReadOnlyAllowSetting, uiReadOnlySetting, type PageArea } from "./ui-read-only.ts";
 import { backLinkOf, uiBackLinkSetting } from "./ui-back-link.ts";
 import { navOf, uiNavSetting } from "./ui-nav.ts";
@@ -412,11 +412,20 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   if (cfg.changes !== undefined) { delete cfg.changes; writeConfig(home, cfg); }
   // the catalog the start read; read again only when something asks (src/cli/source-catalog.ts: no timer, issue 890)
   const facts: SourceFacts = checked.facts;
-  const catalog = sourceCatalog(facts, async () => {
+  const catalog = sourceCatalog(facts, async (signal) => {
     const c = await connectSource(source);
     if ("failure" in c) throw new Error(c.failure.message);
+    // a read that ran out of time: its connection closed, so whatever it waits on ends (src/cli/source-catalog.ts)
+    if (signal.aborted) { c.pg.close(); throw new Error("the read ran out of time"); }
+    signal.addEventListener("abort", () => c.pg.close(), { once: true });
     let read: SourceFacts;
-    try { read = await readSourceFacts(c.pg, undefined, { collations: false }); } finally { c.pg.close(); }
+    try {
+      // never queued behind a lock for long: the sizes it reads take a lock of every table, which a migration's
+      // ALTER (or one queued behind another session) holds; this session's settings alone, nothing on the database
+      await c.pg.query(`SET lock_timeout = ${CATALOG_LOCK_TIMEOUT_MS}`);
+      await c.pg.query(`SET statement_timeout = ${CATALOG_STATEMENT_TIMEOUT_MS}`);
+      read = await readSourceFacts(c.pg, undefined, { collations: false });
+    } finally { c.pg.close(); }
     // the collations were read at the start, and are the start's for the whole run
     return facts.collations !== undefined ? { ...read, collations: facts.collations } : read;
   }, { log: (m) => logLine(`[sync] ${m}`) });
@@ -680,7 +689,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const setupPort = o.exactPort === true ? o.port : await freePort(o.port, chosen);
   const token = newToken();
   const runCtx: RunContext = {
-    source, facts: () => catalog.facts(), freshFacts: async () => { await catalog.fresh(); }, warnings: [...warnings, ...(memoryWarned === null ? [] : [memoryProblemText(memoryWarned)])], textOrder,
+    source, facts: () => catalog.facts(), freshFacts: async (ask) => { await catalog.fresh(ask); }, warnings: [...warnings, ...(memoryWarned === null ? [] : [memoryProblemText(memoryWarned)])], textOrder,
     // the slot and publication while a table's sync is replication (the run streams), as the sync says it now
     replication: () => sync.streams() ? repl : null, port: setupPort, token, folder: () => folder, root: project.root, home,
     version: o.version, startedAt,

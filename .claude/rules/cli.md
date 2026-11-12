@@ -126,8 +126,10 @@ CLI lacks).
   `mason user`'s own functions (`addUser`, `listUsers`, `removeUser`, `disableUser`, `enableUser`), so the page and the CLI cannot disagree.
   **The run reads the database's catalog only when asked** (issue 890: a 10-second timer kept a serverless compute awake
   with every table `sync: off`): `/api/state`, a table's columns or Sync choice, `/api/pick` and `/api/remove` ask
-  `RunContext.freshFacts` (`sourceCatalog`, src/cli/source-catalog.ts: a read under `CATALOG_FRESH_MS` reused, one read
-  at a time, a failure keeping the last and said in the log); a usage sample and `/metrics` read `facts()` as it is. No
+  `RunContext.freshFacts` (`sourceCatalog`, src/cli/source-catalog.ts: what shows it, `SHOW_ASK`, a read under
+  `CATALOG_FRESH_MS` reused and never waited for past `STATE_WAIT_MS`; what acts on it, `ACT_ASK` and `mason add`'s
+  `/api/state?fresh=1`, a read made after it asked; the read's lock wait `CATALOG_LOCK_TIMEOUT_MS`, its whole
+  `CATALOG_READ_TIMEOUT_MS`; a failure keeping the last and said in the log); a usage sample and `/metrics` read `facts()` as it is. No
   timer reads it (tests/integration/cli-catalog-read.itest.ts counts an idle run's connections).
   **The request log's filters are read by ONE parser** (`requestFilter`, src/cli/request-filter.ts) at both entrances
   — `mason logs --requests`' options and `/api/requests`' query string — so a filter means one thing and a mistake is
