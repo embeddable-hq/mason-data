@@ -441,8 +441,8 @@ export function placePops(doc, win) {
 }
 
 /** A text with its Copy button (`copyClick` copies what the `<code id>` holds): a URL, a psql line, a password. */
-export const copyable = (id, text) =>
-  `<span class="copyrow"><code id="${esc(id)}">${esc(text)}</code> ${button("Copy", { copy: id }, "small", { room: ROOMS.copy })}</span>`;
+export const copyable = (id, text, afterHtml = "") =>
+  `<span class="copyrow"><code id="${esc(id)}">${esc(text)}</code> ${button("Copy", { copy: id }, "small", { room: ROOMS.copy })}${afterHtml ? ` ${afterHtml}` : ""}</span>`;
 
 /** How long a Copy button says Copied (or what to press) before it says Copy again. */
 export const COPIED_MS = 2000;

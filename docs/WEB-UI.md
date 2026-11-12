@@ -134,7 +134,8 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   attributes stay the command's. Its password is shown once, in a card titled **New user added** on its top edge (as
   the Overview's "mason status" box): **User**, its name as plain text, then URL, Password and Database, each with
   **Copy**, laid out the same way, so a person fills a tool's connection form field by field (a field `mason user add
-  --json` does not carry is not shown); "Shown once" on its own line under the password; and one line, "The password
+  --json` does not carry is not shown); "Shown once" in the password's row, right of its **Copy** and of the button's
+  height (`--control-sm`); and one line, "The password
   is only shown once", over **I have copied it**. Host, port and SSL mode are Connect's on the same page (`mason user
   add` in a terminal still prints all of them). No psql line: the URL is the same thing, pasted after `psql`. Mason
   keeps no copy, so it is never shown again.

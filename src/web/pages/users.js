@@ -198,7 +198,7 @@ export function renderShare(s, m = NO_SHARE, now = Date.now(), choices = undefin
       : [["Host", open.host ?? "opening…", "share-host"], ["Port", open.port === null || open.port === undefined ? "…" : String(open.port), "share-port"], ["Login", open.user, "share-user"]];
     return `<div class="share open" role="status">${head}<p class="headline">Shared ${badge("Public", "warn")} for <time data-tick datetime="${esc(open.openedAt)}">${esc(spanText((now - Date.parse(open.openedAt)) / 1000))}</time>` +
       `${open.role !== null && open.role !== undefined ? `, reading as the role ${esc(open.role)}` : ""}: ${esc(open.reads)}</p>` +
-      `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v)}${id === "share-password" ? ` ${badge("Shown once", "warn")}` : ""}</dd>`).join("")}</dl>` +
+      `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v, id === "share-password" ? badge("Shown once", "warn") : "")}</dd>`).join("")}</dl>` +
       (mine !== null ? `<p class="tip">Paste it into the tool now: the login is this share's own, not a user's, and its password is shown this once, is kept nowhere, and ends with the share.</p>`
         : `<p class="tip">The password was shown once, when it opened, and is kept nowhere: Stop sharing and Share again for a new one.</p>`) +
       `<p class="tip">Live until you stop it.${esc(endsLine(open.endsAt, now))}</p>` +
@@ -347,7 +347,7 @@ function toggle(u, disabled, asking) {
  * A USER JUST ADDED (`mason user add --json`'s shape): a prominent card, titled "New user added" on its top edge as the
  * Overview's "mason status" box is, with what is this user's alone and the URL: User, its name as plain text, then URL,
  * Password and Database, each with a Copy button laid out the same way, so a person fills a BI tool's form field by
- * field (issue 839). Under the password's value, "Shown once"; under the rows, one line: the password is only shown
+ * field (issue 839). Right of the password's Copy, in its row and of the button's height, "Shown once"; under the rows, one line: the password is only shown
  * once. Host, port and SSL mode are the run's, said by Connect on the same page (renderUsersConnect); `mason user add` in
  * a terminal prints them all. No psql line: the URL is the same thing, pasted after `psql`. A field the JSON does not
  * carry (the URL while Mason does not run) is not shown. Mason keeps no copy, so it is never shown again.
@@ -357,7 +357,7 @@ export function renderAdded(a) {
     .filter(([, v]) => v !== undefined && v !== null);
   return `<div class="added" role="status"><p class="added-title">New user added</p>` +
     `<dl class="facts"><dt>User</dt><dd>${esc(a.user)}</dd>` +
-    rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v)}${id === "added-password" ? `<div class="shown-once">${badge("Shown once", "warn")}</div>` : ""}</dd>`).join("") +
+    rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v, id === "added-password" ? badge("Shown once", "warn") : "")}</dd>`).join("") +
     `</dl><p class="tip">The password is only shown once</p>` +
     `${button("I have copied it", { dismissAdded: "" }, "primary")}</div>`;
 }

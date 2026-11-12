@@ -593,7 +593,7 @@ test("the users while the roles file cannot be read: mason user list's tip, word
   assert.doesNotMatch(textOf(renderUsers(list, null, NOW_R, null, null)), /cannot be read/);
 });
 
-test("a user just added: titled New user added on the box's edge; User as plain text, then URL, Password, Database, each with a Copy that copies it and held equal to mason user add's rows; Shown once under the password; one line that it is only shown once — no Host, Port or SSL mode, no psql line", async () => {
+test("a user just added: titled New user added on the box's edge; User as plain text, then URL, Password, Database, each with a Copy that copies it and held equal to mason user add's rows; Shown once right of the password's Copy; one line that it is only shown once — no Host, Port or SSL mode, no psql line", async () => {
   const password = "mason_0123456789abcdef_" + "a".repeat(32);
   const url = `postgres://metabase:${password}@127.0.0.1:5433/shop`;
   const added = { user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password,
@@ -604,8 +604,13 @@ test("a user just added: titled New user added on the box's edge; User as plain 
   // value, a Copy on all but the name (issue 839); Shown once under the password; one line, and the button
   assert.equal(text, "New user added User metabase URL postgres://metabase:mason_0123456789abcdef_a{32}@127.0.0.1:5433/shop Copy Password mason_0123456789abcdef_a{32} Copy Shown once Database shop Copy The password is only shown once I have copied it".replace("a{32}", "a".repeat(32)).replace("a{32}", "a".repeat(32)));
   assert.match(html, /^<div class="added" role="status"><p class="added-title">New user added<\/p><dl class="facts"><dt>User<\/dt><dd>metabase<\/dd><dt>URL<\/dt>/, "the title, then User as plain text with no Copy");
-  assert.match(html, /<code id="added-password">[^<]*<\/code> <button[^>]*>Copy<\/button><\/span><div class="shown-once"><span class="badge warn">Shown once<\/span><\/div><\/dd>/, "Shown once on its own line under the password's value");
-  assert.equal([...html.matchAll(/Shown once/g)].length, 1, "said once, under the password");
+  assert.match(html, /<code id="added-password">[^<]*<\/code> <button[^>]*>Copy<\/button> <span class="badge warn">Shown once<\/span><\/span><\/dd>/, "Shown once in the password's row, right of its Copy");
+  assert.doesNotMatch(html, /shown-once/, "no line of its own under the password");
+  assert.equal([...html.matchAll(/Shown once/g)].length, 1, "said once, beside the password's Copy");
+  // the badge is the Copy button's height, from one token: the row stays one line
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
+  assert.match(css, /button\.small \{ height: var\(--control-sm\);/);
+  assert.match(css, /\.copyrow \.badge \{ flex: none; height: var\(--control-sm\); \}/);
   assert.doesNotMatch(html, /headline/, "no headline");
   assert.doesNotMatch(text, /Connect on this page|Paste it|Connect your tool/, "the one line replaces the tips");
   const fields: Array<[string, string, string]> = [["URL", "added-url", url], ["Password", "added-password", password], ["Database", "added-database", "shop"]];
@@ -621,7 +626,7 @@ test("a user just added: titled New user added on the box's edge; User as plain 
   assert.deepEqual([cliRows.get("host"), cliRows.get("port"), cliRows.get("ssl mode")], ["127.0.0.1", "5433", "require"], "mason user add keeps every row");
   for (const [label, id, value] of fields) {
     const re = value.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
-    assert.match(html, new RegExp(`<dt>${label}</dt><dd><span class="copyrow"><code id="${id}">${re}</code> <button type="button" class="small" data-copy="${id}" data-room="Press ⌘C">Copy</button></span>(</dd>|<div class="shown-once">)`), `${label}: its value and a Copy, laid out as every other field`);
+    assert.match(html, new RegExp(`<dt>${label}</dt><dd><span class="copyrow"><code id="${id}">${re}</code> <button type="button" class="small" data-copy="${id}" data-room="Press ⌘C">Copy</button>( <span class="badge warn">Shown once</span>)?</span></dd>`), `${label}: its value and a Copy, laid out as every other field`);
   }
   assert.deepEqual([...html.matchAll(/data-copy="([^"]+)"/g)].map((m) => m[1]), fields.map(([, id]) => id), "a Copy on every field, none else");
   // each Copy copies its own field's text, through the page's one copyClick
@@ -2059,7 +2064,8 @@ test("the shell: a sidebar nav — Overview · Tables · Users, the Observabilit
   assert.match(slot, /min-width: calc\(25ch \+ 3 \* var\(--space-2\) \+ 2px\);/, "the room of 'as of HH:MM:SS UTC' (18ch), the gap and Refresh (7ch, its padding and border)");
   assert.match(slot, /min-height: 28px/, "the height of Refresh (button.small), so Live's row is as tall");
   assert.match(slot, /font-size: var\(--text-xs\)/, "ch is the status's own size");
-  assert.match(styles, /button\.small \{ height: 28px; padding: 0 var\(--space-2\); font-size: var\(--text-xs\); \}/, "the room is Refresh's: its height, padding and size");
+  assert.match(styles, /button\.small \{ height: var\(--control-sm\); padding: 0 var\(--space-2\); font-size: var\(--text-xs\); \}/, "the room is Refresh's: its height, padding and size");
+  assert.match(styles, /--control-sm: 28px;/, "that height, 28 px");
   assert.match(styles, /\.head-range \{[^}]*justify-content: flex-end;/, "the control flush right");
   for (const id of ["queries", "usage", "syncs"]) {
     assert.match(html, new RegExp(`<div class="page-head"><div class="head-row"><h2 id="${id}-h">[\\w ]+</h2><div id="range-${id}" class="head-range"></div></div>`), `${id}: its title and its range in one row`);
@@ -4041,7 +4047,8 @@ test("the buttons: every one has a visible label; a primary, a destructive one a
   }
   assert.match(htmls[1]!, /<p class="confirm">Remove orders\?.*<\/p><p class="pop-actions"><button type="button" class="danger small" data-confirm-remove-table="public\.orders">Remove orders<\/button>/);
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
-  assert.match(css, /button\.small \{ height: 28px;/);
+  assert.match(css, /button\.small \{ height: var\(--control-sm\);/);
+  assert.match(css, /--control-sm: 28px;/);
   assert.match(css, /\.pop-actions button\.danger \{ background: var\(--bad\); color: var\(--surface\)/, "the confirm of a destructive action is filled red");
   assert.match(css, /button\.primary \{ background: var\(--cta\)/, "the primary action is the one warm fill");
   assert.match(css, /button:focus-visible \{ outline: 2px solid var\(--accent\)/);
@@ -5017,7 +5024,7 @@ test("Share over the internet (for testing): the box in each state, as it WROTE 
   for (const [id, v] of [["share-url", SHARE_URL], ["share-user", "share_a1b2c3"], ["share-password", PASSWORD]]) {
     assert.ok(open.includes(`<code id="${id}">${v}</code> <button type="button" class="small" data-copy="${id}"`), `${id} with its Copy`);
   }
-  assert.match(open, /data-copy="share-password"[^>]*>Copy<\/button><\/span> <span class="badge warn">Shown once<\/span><\/dd>/, "Shown once beside the password's Copy");
+  assert.match(open, /data-copy="share-password"[^>]*>Copy<\/button> <span class="badge warn">Shown once<\/span><\/span><\/dd>/, "Shown once beside the password's Copy");
   const openText = textOf(open);
   assert.match(openText, /^Share over the internet \(for testing\) Shared Public for 5 min : every synced table URL postgres:\/\/share_a1b2c3:\S+ Copy Login share_a1b2c3 Copy Password \S+ Copy Shown once /);
   assert.match(openText, /the login is this share's own, not a user's, and its password is shown this once, is kept nowhere, and ends with the share\./);
