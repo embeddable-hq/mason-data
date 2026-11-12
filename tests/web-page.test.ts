@@ -769,20 +769,17 @@ test("a read-only page (pageReadOnly): no page writes a control that sends a cha
   assert.ok(textOf(shown).includes(`Users are not added, changed, disabled or removed from this page: ${why}.`));
 });
 
-test("a read-only page: no add, create or write link anywhere — the Connect panel's Create a user on Queries' empty log included; the Overview and Usage say why; unset, all as before", async () => {
+test("a read-only page: no add, create or write link anywhere — Queries' empty log's Create a user included; the Overview and Usage say why; unset, all as before", async () => {
   const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
   // what leads to adding or creating something: a button-styled link to the page that does it, or its words
   const LEADS = [/Create a user/, /Add a table/, /Add a user/, /Share over the internet/, /<a class="btn[^"]*" href="#users"/, /<a class="btn[^"]*" href="#tables[^"]*"/, /Cancel stops one/];
   const open = await pageByPage(CATALOG_STATE);
   const shown = await pageByPage({ ...CATALOG_STATE, pageReadOnly: why });
   for (const lead of LEADS) assert.ok(!lead.test(shown.all), `read-only: ${lead}`);
-  // the Connect panel is on Queries' empty log, and keeps its URL, psql and Copy there; the Overview has none (the owner's, 2026-11-12)
+  // Queries' empty log leads to the Users page in a line, unless the page makes no user; the Overview has no Connect (the owner's, 2026-11-12)
   for (const page of [open, shown]) assert.ok(!/class="connect[ "]|data-copy="connect-/.test(page.overview), "no Connect on the Overview");
-  for (const id of ["queries"]) {
-    assert.match(open.byPage.get(id)!, /<a class="btn[^"]*" href="#users">Create a user<\/a>/, `unset: Connect's Create a user on ${id}`);
-    assert.match(shown.byPage.get(id)!, /data-copy="connect-url"[\s\S]*data-copy="connect-psql"/, `read-only: Connect's URL and psql on ${id}`);
-    assert.ok(textOf(shown.byPage.get(id)!).replace(/ :/g, ":").includes("A user's name and password go in place of <user>:<password>: mason user add <name> prints the whole URL once."), id);
-  }
+  assert.match(open.byPage.get("queries")!, /<p class="empty first-tool"><a href="#users">Create a user<\/a> to connect your first tool\.<\/p>/, "unset: Queries' Create a user");
+  assert.ok(!/first-tool/.test(shown.byPage.get("queries")!), "read-only: no line");
   // the Overview and Usage say why their controls are missing, as Tables and Users do; unset, none says it
   const lines = new Map([["status", `Nothing is added or created from this page: ${why}.`], ["usage", `Statements are not cancelled from this page: ${why}.`],
     ["tables", `Tables are not added, removed or synced from this page: ${why}.`], ["users", `Users are not added, changed, disabled or removed from this page: ${why}.`]]);
@@ -793,11 +790,6 @@ test("a read-only page: no add, create or write link anywhere — the Connect pa
   }
   assert.match(open.byPage.get("usage")!, /Cancel stops one, as <code>mason cancel<\/code> does\./, "unset: Usage's lead names Cancel");
   assert.match(shown.byPage.get("usage")!, /As <code>mason logs --running<\/code> lists them\./, "read-only: the lead without Cancel");
-  // the renderer alone: Connect with the setting, and without it as before
-  const renderConnect = fn<[unknown, unknown], string>("renderConnect");
-  const pg = CATALOG_STATE.postgres;
-  assert.ok(!renderConnect(pg, { first: true, readOnly: why }).includes("Create a user"));
-  assert.equal(renderConnect(pg, { first: true, readOnly: null }), renderConnect(pg, { first: true }), "unset: Connect as before");
   assert.equal(fn<[string, unknown], string>("readOnlyLine")("Statements are not cancelled", null), "");
 });
 
@@ -1167,18 +1159,14 @@ test("in the browser: an item pointing into the page at a view not replaced (/#t
 });
 
 test("a server's Connect says the URL's host is the server's own view of itself; a laptop's page says nothing of it", async () => {
-  const renderConnect = fn<[unknown, unknown?], string>("renderConnect");
   const { renderUsersConnect } = await import(path.join(WEB, "pages", "users.js") as string) as { renderUsersConnect: (pg: unknown, served?: boolean) => string };
   const pg = { host: "localhost", port: 5433, database: "shop", shown: "postgresql://<user>:<password>@localhost:5433/shop", psql: "psql x" };
   const note = /from elsewhere a tool connects to the server's own address, in place of localhost/;
-  assert.match(textOf(renderConnect(pg, { served: true })), note);
   assert.match(textOf(renderUsersConnect(pg, true)), note);
-  assert.doesNotMatch(textOf(renderConnect(pg)), note);
   assert.doesNotMatch(textOf(renderUsersConnect(pg)), note);
 });
 
 test("MASON_PG_PUBLIC_URL: /api/state's postgres is the address a client reaches, every Connect panel prints it, and no note to replace the host", async () => {
-  const renderConnect = fn<[unknown, unknown?], string>("renderConnect");
   const { renderUsersConnect } = await import(path.join(WEB, "pages", "users.js") as string) as { renderUsersConnect: (pg: unknown, served?: boolean) => string };
   const ctxOf = (postgresPublicUrl?: string) => ({
     source, facts: () => ({ version: 160000, versionText: "16.4", standby: false, tables: TABLES, systemIdentifier: null }), warnings: [], replication: () => null,
@@ -1196,13 +1184,9 @@ test("MASON_PG_PUBLIC_URL: /api/state's postgres is the address a client reaches
   assert.deepEqual(own, { url: "postgresql://127.0.0.1:5433/shop?sslmode=require", host: "127.0.0.1", port: 5433, database: "shop", sslmode: "require",
     shown: "postgres://<user>:<password>@127.0.0.1:5433/shop?sslmode=require", psql: "psql 'postgres://<user>:<password>@127.0.0.1:5433/shop?sslmode=require'" }, "unset: the listener's own, as before");
   const note = /from elsewhere a tool connects to the server's own address/;
-  const overview = textOf(renderConnect(pub, { served: true }));
-  assert.match(overview, /URL postgres:\/\/<user>:<password>@db\.example\.com:6432\/shop\?sslmode=verify-full Copy psql psql 'postgres:\/\/<user>:<password>@db\.example\.com:6432\/shop\?sslmode=verify-full' Copy/);
-  assert.doesNotMatch(overview, note);
   const users = textOf(renderUsersConnect(pub, true));
   assert.match(users, /Host db\.example\.com Copy Port 6432 Copy Database shop Copy SSL mode verify-full Copy URL postgres:\/\/<user>:<password>@db\.example\.com:6432\/shop\?sslmode=verify-full Copy/);
   assert.doesNotMatch(users, note);
-  assert.match(textOf(renderConnect(own, { served: true })), note, "the listener's own address on a server: the note, as before");
   assert.match(textOf(renderUsersConnect(own, true)), note);
 });
 
@@ -4343,43 +4327,29 @@ const SHOP_PG = ((): { shown: string; psql: string } | undefined => {
   catch (e) { if (e instanceof Error && /not a URL/.test(e.message)) return undefined; throw e; }
 })() ?? { shown: "postgres://<user>:<password>@127.0.0.1:5433/shop", psql: "psql 'postgres://<user>:<password>@127.0.0.1:5433/shop'" };
 
-test("Connect your first tool (Queries' empty log): the URL and psql line mason status prints, each with Copy, a first statement, and Create a user — and no Connect on the Overview in any state", () => {
-  const renderConnect = fn<[unknown, unknown?], string>("renderConnect");
-  const html = renderConnect(SHOP_PG, { first: true, table: "public.customers" });
-  const text = textOf(html);
-  assert.equal(SHOP_PG.shown, "postgres://<user>:<password>@127.0.0.1:5433/shop", "the line mason start and mason status print");
-  assert.equal(text, `Connect your first tool Mason answers SQL over the Postgres protocol, as a read replica of your database would: point psql, a BI tool or your app's analytics code at this URL. ` +
-    `URL ${SHOP_PG.shown} Copy psql ${SHOP_PG.psql} Copy Then try select count(*) from customers; Copy it shows on Queries ` +
-    "Create a user Its name and password go in place of <user>:<password> : the Users page shows the whole URL once, as mason user add <name> prints it.");
-  assert.match(html, /<code id="connect-try">select count\(\*\) from customers;<\/code> <button type="button" class="small" data-copy="connect-try" data-room="Press ⌘C">Copy<\/button>/,
-    "a first statement that the request log lists: one that reads a copied table, never a select 1 it does not");
-  assert.match(html, /<code id="connect-url">postgres:\/\/&lt;user&gt;:&lt;password&gt;@127\.0\.0\.1:5433\/shop<\/code> <button type="button" class="small" data-copy="connect-url" data-room="Press ⌘C">Copy<\/button>/);
-  assert.match(html, /<code id="connect-psql">psql &#39;postgres:\/\/&lt;user&gt;:&lt;password&gt;@127\.0\.0\.1:5433\/shop&#39;<\/code> <button type="button" class="small" data-copy="connect-psql" data-room="Press ⌘C">Copy<\/button>/);
-  assert.match(html, /<a class="btn primary" href="#users">Create a user<\/a>/, "a link to the page that makes one");
-  // the Overview: no Connect, nothing asked yet or after, and no Connect from anywhere (the owner's, 2026-11-12: connecting is redesigned on Users)
-  for (const queries of [NO_QUERIES, QUERIES, undefined]) for (const s of [RUNNING, COPYING, NONE]) {
-    const overview = fn<[unknown, unknown?], string>("renderStatus")(s, { queries, now: NOW });
-    assert.ok(!/class="connect|Connect your first tool|Connect from anywhere|data-copy="connect-/.test(overview), "no Connect on the Overview");
-  }
-  // a run from before it said where it listens: nothing, never a made-up URL
-  assert.equal(renderConnect(undefined), "");
-});
-
-test("Queries, an empty request log: how to connect under its sentence — never once a filter or an older page is shown", async () => {
+test("Queries, an empty request log: its sentence, what the log does not list, and one quiet line, Create a user to connect your first tool — never once a filter or an older page is shown, nor where the page makes no user; no Connect on the Overview in any state", async () => {
   const renderRequests = fn<[unknown, Record<string, unknown>], string>("renderRequests");
-  const connect = fn<[unknown, unknown], string>("renderConnect")(SHOP_PG, { first: true });
   const empty = { requests: [], keptDays: 7, before: null };
-  assert.match(textOf(renderRequests(empty, { span: "the last 24 hours", connect })), /^No request in the last 24 hours \(the request log keeps 7 days: MASON_HISTORY_DAYS\)\. A statement that reads no synced table \(select 1, SET, SHOW, a BI tool's catalog queries\) is answered but not listed\. Connect your first tool .* Create a user /);
+  const html = renderRequests(empty, { span: "the last 24 hours", firstTool: true });
+  assert.match(textOf(html), /^No request in the last 24 hours \(the request log keeps 7 days: MASON_HISTORY_DAYS\)\. A statement that reads no synced table \(select 1, SET, SHOW, a BI tool's catalog queries\) is answered but not listed\. Create a user to connect your first tool\.$/);
+  assert.match(html, /<p class="empty first-tool"><a href="#users">Create a user<\/a> to connect your first tool\.<\/p>$/, "one quiet line, its link to the Users page");
+  assert.ok(!/class="connect|data-copy=|postgres:\/\//.test(html), "no Connect box, no URL");
   assert.equal((page as Record<string, unknown>).UNLISTED_STATEMENTS, commands.UNLISTED_STATEMENTS, "the page says what mason logs --requests says");
   assert.ok(fs.readFileSync(path.join(WEB, "index.html"), "utf8").includes(`${commands.UNLISTED_STATEMENTS}.`), "and the request log's lead says it over a log that has rows");
-  assert.ok(!textOf(renderRequests(empty, { span: "the last 24 hours", connect, filtered: true })).includes("Connect"), "a filter that passes none is not a fresh install");
-  // the app: the Queries page renders it from /api/state's postgres
+  for (const o of [{ filtered: true }, { paged: true }, { firstTool: false }]) assert.ok(!renderRequests(empty, { span: "the last 24 hours", firstTool: true, ...o }).includes("first-tool"), JSON.stringify(o));
+  assert.equal((page as Record<string, unknown>).renderConnect, undefined, "Connect your first tool is gone");
+  // the app: the line from /api/state, under the empty log's sentence
   const run = fakeRun();
   run.answers.set("GET api/state", () => new Response(JSON.stringify(RUNNING), { status: 200 }));
   const app = fn<[unknown], App>("createApp")(run.fetch);
   app.show("queries");
   await app.poll();
-  assert.match(textOf(app.view()["request-log"]!), /^No request in the last 15 minutes .* Connect your first tool .* URL postgres:\/\/<user>:<password>@127\.0\.0\.1:5433\/shop Copy .* Then try select count\(\*\) from customers; Copy /);
+  assert.match(textOf(app.view()["request-log"]!), /^No request in the last 15 minutes .* Create a user to connect your first tool\.$/);
+  // the Overview: no Connect, nothing asked yet or after (the owner's, 2026-11-12: connecting is on Users)
+  for (const queries of [NO_QUERIES, QUERIES, undefined]) for (const st of [RUNNING, COPYING, NONE]) {
+    const overview = fn<[unknown, unknown?], string>("renderStatus")(st, { queries, now: NOW });
+    assert.ok(!/class="connect|Connect your first tool|Connect from anywhere|data-copy="connect-/.test(overview), "no Connect on the Overview");
+  }
 });
 
 test("a Copy button, on any page: its code's text to the clipboard, Copied for 2 s then Copy; with no clipboard, the text selected and copied as a selection, else what to press", async () => {

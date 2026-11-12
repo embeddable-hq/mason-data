@@ -177,7 +177,9 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   the Added header (`tests/web-page.test.ts`, every header class of Users and Tables, and the pinned rule on `.act` alone).
 - **Observability › Queries** (`#observability/queries`): the request log, and only that — who is connected, what runs
   and the range's numbers are on Usage.
-- **Queries**, the request log empty and unfiltered: its sentence, then Connect your first tool: the URL and psql line, a first statement to try, and Create a user.
+- **Queries**, the request log empty and unfiltered: its sentence, what the log does not list, and one quiet line,
+  "**Create a user** to connect your first tool", the words a link to the Users page (`#users`), where the URL is; none
+  where the page makes no user (`pageReadOnly`), nor once a filter or an older page is shown. No Connect box.
 - **Queries**, the request log: newest first, with a status dot and word per row as `mason logs --requests` says it: Completed,
   Refused (a statement Mason answers as designed, as a Postgres would refuse it: unsupported SQL, a missing relation),
   Failed (Mason's or the machine's fault) or Cancelled. Filter by status (each, or Refused or failed), **Slow (1 s or more)**, a

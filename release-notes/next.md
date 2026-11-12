@@ -14,8 +14,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   24 hours and links to them (Sync events, failures only; Queries, the refused or failed statements); a count the page
   could not read says "unknown" and why. They replace the lists of recent errors at the foot of the page. The table of
   the last day's and week's statements is gone too (the Statements and p95 cards stay, and Queries lists every
-  statement), and so is the Connect panel, with Connect from anywhere (now Share over the internet, on the Users page): the Postgres URL is still on Queries while its
-  log is empty, on the Users page, and in `mason status`; `mason share` opens a share from the command line.
+  statement), and so is the Connect panel, with Connect from anywhere (now Share over the internet, on the Users page): the Postgres URL is on the Users page and in
+  `mason status`; `mason share` opens a share from the command line.
 - **The Tables page lists the added tables first**, then the tables not added, so on a database of hundreds of
   tables the ones Mason syncs are at the top under All. A table you add or remove keeps its row, its state changing in
   place, and moves to its group the next time the list is laid out: when you open the page again, or change the search
@@ -35,7 +35,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   under `mason serve` or on a read-only page.
 - **An empty list on the web page is one quiet line**, no longer a big box: "No users yet. Create a user for a service
   like a BI tool or your app: add one below.", "No table added yet: add one from the list below, as `mason add
-  <table>` does.", and the same on Queries, Usage and Sync events.
+  <table>` does.", and the same on Queries, Usage and Sync events. Queries with no statement yet no longer shows the
+  "Connect your first tool" box: one line, "Create a user to connect your first tool", leads to the Users page.
 - **Connects from is a dropdown** on the Users page (adding a user, and a user's From…): "anywhere" or "only these
   addresses", which shows the box for the addresses beside it. Nothing in the form moves when you change it, and what
   is sent is as before. The form (Name, Role, Connects from and Add a user) is one line where the page is wide enough,

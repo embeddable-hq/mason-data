@@ -479,28 +479,8 @@ export function copyClick(d, button, { doc, win }) {
  *  that reads no synced table is the catalog's to answer, and not recorded — so a `select 1` never shows on Queries. */
 export const UNLISTED_STATEMENTS = "A statement that reads no synced table (select 1, SET, SHOW, a BI tool's catalog queries) is answered but not listed";
 
-/** The hash of the page that makes a user (src/web/app.js PAGES): where Connect's Create a user leads. */
+/** The hash of the page that makes a user (src/web/app.js PAGES): where Queries' empty log's Create a user leads. */
 export const USERS_HASH = "#users";
-
-/**
- * HOW A TOOL CONNECTS (`/api/state` `postgres`, as `mason status --json` says it; src/cli/pg-url.ts postgresFacts): the
- * Postgres API's URL with `<user>:<password>` in the credentials' place — the line `mason start` and `mason status`
- * print — and its psql line, each with Copy, and Create a user (the Users page), whose name and password go in that
- * place. `first` (nothing has asked Mason anything yet) leads with what the URL is for. Nothing from a run that does
- * not say it. `readOnly`: `/api/state` `pageReadOnly` (MASON_UI_READ_ONLY=1) — no Create a user, whose page could only
- * refuse it; the URL, psql and their Copy stay.
- */
-export function renderConnect(pg, { first = false, table = null, served = false, readOnly = null } = {}) {
-  if (!pg || typeof pg.shown !== "string") return "";
-  // a first statement to type that the request log lists (one that reads a copied table: UNLISTED_STATEMENTS)
-  const tryIt = first && table ? `<dt>Then try</dt><dd>${copyable("connect-try", `select count(*) from ${entryName(table)};`)} <span class="dim">it shows on Queries</span></dd>` : "";
-  return `<div class="connect${first ? " first" : ""}"><p class="connect-title">${first ? "Connect your first tool" : "Connect"}</p>` +
-    (first ? `<p class="lead">Mason answers SQL over the Postgres protocol, as a read replica of your database would: point psql, a BI tool or your app's analytics code at this URL.</p>` : "") +
-    `<dl class="facts"><dt>URL</dt><dd>${copyable("connect-url", pg.shown)}</dd><dt>psql</dt><dd>${copyable("connect-psql", pg.psql)}</dd>${tryIt}</dl>` +
-    serverHostNote(pg, served) +
-    (readOnly !== null ? `<p class="tip">A user's name and password go in place of ${code("<user>:<password>")}: ${code("mason user add <name>")} prints the whole URL once.</p>`
-      : `<p class="tip"><a class="btn${first ? " primary" : ""}" href="${USERS_HASH}">Create a user</a> <span>Its name and password go in place of ${code("<user>:<password>")}: the Users page shows the whole URL once, as ${code("mason user add <name>")} prints it.</span></p>`) + `</div>`;
-}
 
 /** Why a page offers no control that changes anything (`/api/state` `pageReadOnly`), in its own words — `what` is what is
  *  not done from it ("Tables are not added, removed or synced") — as the Tables and Users pages say it; "" when it may. */

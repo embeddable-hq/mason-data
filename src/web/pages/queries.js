@@ -8,12 +8,12 @@
  * would need a cursor per order). Read every 5 s while the range is Now, once when another is chosen. A statement is one
  * or two lines in its cell, its title at most TITLE_MAX characters, and its expanded row the first STATEMENT_MAX of it.
  * The words are the commands': a request's duration in ms, its error, the empty log's sentence — and, while the log is
- * empty and unfiltered, how to connect (`renderConnect`), so the first statement is a paste away. Usage's rows lead here
+ * empty and unfiltered, one quiet line leading to the Users page, where a tool's user is made. Usage's rows lead here
  * filtered (`route`: `?user=`, `?client=`, `?slow=1`, `?status=`).
  */
 import { VIEW_HASHES } from "../routes.js";
 import { statementMsText, agoText, bytesText, esc, firstLine, n, empty, renderFailure, rowsHtml, utcText, utcMsText, details, createOpenSet, status,
-  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, clientText, renderConnect, copyClick, UNLISTED_STATEMENTS, statementCell, rangeEvery, usersReadOnly } from "../shared.js";
+  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, clientText, USERS_HASH, UNLISTED_STATEMENTS, statementCell, rangeEvery, usersReadOnly } from "../shared.js";
 
 const STATE = "api/state";
 const NEWEST_EVERY_MS = 5000;
@@ -66,16 +66,19 @@ function planHtml(r) {
  * started, duration or rows) orders the page shown, said under it when it is not the newest first. **Older** when the
  * page has an older one (`before`), **Newest** when the page shown is not the newest. `filtered`: the empty sentence
  * names the filters, as the command's does; `span` the range's words (the empty log's). `now` is the page's clock.
+ * `firstTool`: an empty, unfiltered log adds one quiet line, Create a user (a link to the Users page) to connect your
+ * first tool — false where the page makes no user (`usersReadOnly`).
  */
-export function renderRequests(page, { paged = false, filtered = false, isOpen = () => false, now = Date.now(), sort = NEWEST_FIRST, span = "", connect = "" } = {}) {
+export function renderRequests(page, { paged = false, filtered = false, isOpen = () => false, now = Date.now(), sort = NEWEST_FIRST, span = "", firstTool = false } = {}) {
   const older = page.before !== null && page.before !== undefined;
   const nav = paged || older ? `<div class="paging">${paged ? `<button type="button" data-newest>Newest</button>` : ""}${older ? `<button type="button" data-older>Older</button>` : ""}</div>` : "";
   if (!page.requests.length) {
     const days = `${page.keptDays} day${page.keptDays === 1 ? "" : "s"}`;
-    // nothing asked yet (no filter, the newest page): how to connect, so the first statement is a paste away
+    // nothing asked yet (no filter, the newest page): where a tool's user is made, in a line
     return empty(`No ${filtered ? "request that passes the filters" : "request"} ${span ? `in ${span} (the request log keeps ${days}: MASON_HISTORY_DAYS)` : `in the last ${days} (MASON_HISTORY_DAYS)`}.`) +
       // a first statement looked for and not there: what the log does not list (a select 1 typed to test the connection)
-      (filtered || paged ? "" : `<p class="dim unlisted">${esc(UNLISTED_STATEMENTS)}.</p>${connect}`) + nav;
+      (filtered || paged ? "" : `<p class="dim unlisted">${esc(UNLISTED_STATEMENTS)}.</p>` +
+        (firstTool ? `<p class="empty first-tool"><a href="${USERS_HASH}">Create a user</a> to connect your first tool.</p>` : "")) + nav;
   }
   const newest = [...page.requests].reverse();
   const list = sort.key === "started" && sort.dir === "desc" ? newest : sortedBy(newest, REQUEST_SORTS[sort.key] ?? REQUEST_SORTS.started, sort.dir);
@@ -168,7 +171,7 @@ export const page = {
     return {
       model: m,
       // the newest page of the log every 5 s while the range is Now (30 s while a search is set), once when another
-      // range is chosen; an older page only when first asked. The state (how to connect, when the log is empty) every 30 s
+      // range is chosen; an older page only when first asked. The state (whether the page makes users, for the empty log's line) every 30 s
       reads: () => [{ path: path(), everyMs: m.before !== null ? Infinity : rangeEvery(ctx.range(), m.filters.search ? SEARCH_EVERY_MS : NEWEST_EVERY_MS) }, { path: STATE, everyMs: 30_000 }],
       actions,
       view() {
@@ -176,7 +179,7 @@ export const page = {
         const s = ctx.read(STATE)?.body;
         return {
           "request-log": (log?.failure ? renderFailure(log.failure) : "") + (log?.body ? renderRequests(log.body, { paged: m.before !== null, filtered: filtered(), isOpen: opened.has, now: ctx.now().getTime(), sort: m.sort,
-            span: m.filters.since ? "" : (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span, connect: renderConnect(s?.postgres, { first: true, table: s?.tables?.find((t) => t.added && t.copy?.phase === "done")?.table ?? null, readOnly: usersReadOnly(s) }) }) : "") +
+            span: m.filters.since ? "" : (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span, firstTool: s != null && usersReadOnly(s) === null }) : "") +
             (log?.body && m.filters.search && m.before === null ? `<p class="dim refresh-note">${esc(SEARCH_NOTE)}</p>` : ""),
         };
       },
@@ -199,8 +202,6 @@ export const page = {
       },
       click(d, button, env) {
         const { doc } = env;
-        // Connect's Copy buttons, in the request log's empty state
-        if (d.copy !== undefined) return copyClick(d, button, env);
         if (d.sortTable === "requests") return actions.sortRequests(d.sortKey) ?? true;
         // the statement's toggle: the row's one open state, as its id's summary opens and closes it
         if (d.expand !== undefined) return opened.toggle({ dataset: { open: d.expand }, open: !opened.has(d.expand), clicked: true });

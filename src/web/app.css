@@ -106,7 +106,7 @@ a:hover { text-decoration-color: var(--accent); text-decoration-thickness: 2px; 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 0; }
 h1, h2, h3 { font-family: var(--font-mono); font-weight: 700; letter-spacing: -0.01em; }
 /* the slab: a title and a big number, cut like a mason's letters (one weight, 700) */
-h2, h3, .health-word, .health-title, #page-users .user-added .added-title, .card-value, .brand-name, .checklist-title, .connect.first .connect-title { font-family: var(--font-display); font-weight: 700; letter-spacing: 0; }
+h2, h3, .health-word, .health-title, #page-users .user-added .added-title, .card-value, .brand-name, .checklist-title { font-family: var(--font-display); font-weight: 700; letter-spacing: 0; }
 h3 { font-size: 20px; margin: var(--space-6) 0 var(--space-3); }
 code, pre, kbd, samp { font-family: var(--font-mono); font-size: 0.95em; }
 code { overflow-wrap: anywhere; }
@@ -579,10 +579,8 @@ form.formcard input { width: 18em; }
 /* ---------------------------------------------------------------- Connect: the URL, its psql line, Create a user */
 /* a box whose title sits on its top edge, as a fieldset's legend does (Connect, Getting started, a chart's name) */
 .connect { background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-4) var(--space-5); margin: var(--space-6) 0 var(--space-6); }
-.connect.first { border-width: 2px; }
 .connect .connect-title, .checklist .checklist-title, .health .health-title, #page-users .user-added .added-title { width: fit-content; max-width: 100%; margin: calc(-1 * var(--space-4) - 0.8em) 0 var(--space-2) calc(-1 * var(--space-2));
   padding: 0 var(--space-2); background: var(--surface); font-weight: 700; line-height: 1.6; }
-.connect.first .connect-title { font-size: var(--text-lg); }
 .connect .facts { margin: 0 0 var(--space-3); gap: var(--space-2) var(--space-4); align-items: center; }
 .connect .copyrow { flex-wrap: wrap; }
 .connect .copyrow code { overflow-wrap: anywhere; }
