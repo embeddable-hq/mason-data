@@ -43,7 +43,7 @@ export const rangesText = (from) => from === null || from === undefined ? "any a
 export const fromText = (from) => from === null || from === undefined ? "from anywhere" : `from ${rangesText(from)}`;
 
 /**
- * THE "CONNECTS FROM" CHOICE, as `mason user add --help` says it: from anywhere (no --from, the default: no `from` is
+ * THE "CONNECTS FROM" CHOICE, as `mason user add --help` says it: anywhere (no --from, the default: no `from` is
  * sent) or only from these addresses (--from <range>, a comma list as `--from a,b` takes it). `id`: the form's own, so
  * two forms on the page never share an input's id; `from`: the ranges it opens with (null: from anywhere). The page
  * never judges a range: the run reads each, and its refusal is said as the run words it (one grammar, the server's).
@@ -51,7 +51,7 @@ export const fromText = (from) => from === null || from === undefined ? "from an
 export function connectsChoice(id, from = null) {
   const only = Array.isArray(from);
   return `<fieldset class="connects"><legend>Connects from</legend>` +
-    `<label class="tick"><input type="radio" name="connects" value="any"${only ? "" : " checked"}> From anywhere</label>` +
+    `<label class="tick"><input type="radio" name="connects" value="any"${only ? "" : " checked"}> anywhere</label>` +
     `<label class="tick"><input type="radio" name="connects" value="only"${only ? " checked" : ""}> Only from these addresses</label>` +
     `<span class="ranges"><label class="sr" for="${esc(id)}-from">Address ranges, comma-separated</label>` +
     `<input id="${esc(id)}-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e.g. 192.0.2.0/24, 2001:db8::/32" value="${esc(only ? from.join(", ") : "")}"></span></fieldset>`;

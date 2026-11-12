@@ -1490,7 +1490,7 @@ test("the users: From… asks where the user connects from in a popover beside i
   assert.equal(pops.length, 1);
   assert.equal(pops[0]!.anchor, "act-users-looker");
   assert.match(pops[0]!.html, /^<div class="pop ask" data-anchor="act-users-looker" role="dialog" aria-label="Where looker connects from">/);
-  assert.equal(textOf(pops[0]!.html), "Where looker connects from, as mason user from looker sets it: the sessions it holds from another address end at their next statement. Connects from From anywhere Only from these addresses Address ranges, comma-separated Change looker Cancel");
+  assert.equal(textOf(pops[0]!.html), "Where looker connects from, as mason user from looker sets it: the sessions it holds from another address end at their next statement. Connects from anywhere Only from these addresses Address ranges, comma-separated Change looker Cancel");
   assert.match(pops[0]!.html, /<input type="radio" name="connects" value="only" checked>/, "opened at its ranges");
   assert.match(pops[0]!.html, /<input id="user-from-from" name="from"[^>]* value="192\.0\.2\.0\/24, 2001:db8::\/32">/);
   assert.match(pops[0]!.html, /<input type="hidden" name="user" value="looker"><\/form>/);
@@ -1499,17 +1499,17 @@ test("the users: From… asks where the user connects from in a popover beside i
   // its From… held where it was while it asks; no row and no cell added
   assert.match(asking, /<button type="button" class="from-line" title="[^"]*" aria-expanded="true" disabled>from 192\.0\.2\.0\/24, 2001:db8::\/32<\/button>/, "its line held while it asks");
   assert.equal(textOf(withoutPops(asking)), textOf(renderUsers(list, null)), "the rows say what they said");
-  // a user from anywhere opens at From anywhere, its box empty
+  // a user from anywhere opens at anywhere, its box empty
   const any = popOf(renderUsers(list, { name: "metabase", verb: "from" }), "act-users-metabase");
   assert.match(any, /<input type="radio" name="connects" value="any" checked>/);
   assert.match(any, /name="from"[^>]* value="">/);
 });
 
-test("the add form: Connects from, in mason user add's words — From anywhere (the default, no from sent) or Only from these addresses, a comma list as --from takes it, the run judging each", async () => {
+test("the add form: Connects from, in mason user add's words — anywhere (the default, no from sent) or Only from these addresses, a comma list as --from takes it, the run judging each", async () => {
   const renderAddUser = fn<[unknown], string>("renderAddUser");
   const form = renderAddUser(CATALOG_STATE);
-  assert.match(textOf(form), /Name Connects from From anywhere Only from these addresses Address ranges, comma-separated Add a user$/);
-  assert.match(form, /<input type="radio" name="connects" value="any" checked> From anywhere/, "from anywhere is the default, as mason user add with no --from");
+  assert.match(textOf(form), /Name Connects from anywhere Only from these addresses Address ranges, comma-separated Add a user$/);
+  assert.match(form, /<input type="radio" name="connects" value="any" checked> anywhere<\/label>/, "anywhere, the label, is the default, as mason user add with no --from");
   assert.match(form, /<input type="radio" name="connects" value="only"> Only from these addresses/);
   assert.match(form, /<input id="add-user-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e\.g\. 192\.0\.2\.0\/24, 2001:db8::\/32" value="">/);
   assert.ok(!/pattern=/.test(form), "never validated in the page");

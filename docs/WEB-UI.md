@@ -127,7 +127,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   **Role** as `mason user add --role` (the roles from `/api/state` `roles`, `mason status --json`'s): the file's
   `default:` is chosen first, marked (default), and sends no role, so the user follows the default as one added with no
   `--role` does; with no default the first choice is no role. The run judges the role, and its refusal is shown. Then
-  **Connects from**, in `mason user add --help`'s words: **From anywhere**, the default, sends no `from` (as `mason user
+  **Connects from**, in `mason user add --help`'s words: **anywhere**, the default, sends no `from` (as `mason user
   add` with no `--from`), with no second question; **Only from these addresses** sends the ranges typed in one box,
   comma-separated as `--from a,b` takes them (`192.0.2.0/24, 2001:db8::/32`), split at each comma and trimmed. The page
   never checks a range: the run reads each, and a refused one is shown as the run's refusal. `--set`
