@@ -312,8 +312,8 @@ every session needs. Write the rule and one sentence of why; the incident, the m
 
   For example, write "Choose where metabase can connect from. If you limit it, open sessions from other addresses end at
   their next query." Not "Where metabase connects from, as mason user from metabase sets it: the sessions it holds from
-  another address end at their next statement." This file and the code's comments are written tersely. That style is
-  for the people building Mason. Never copy it into what a user reads.
+  another address end at their next statement." This applies to this file and the code's comments too: dense,
+  compressed rules are how rules get missed.
 - **Say "sync", never "copy", for what Mason does to a table's data.** A user reads *the first sync*, *the synced
   table* and *the synced data*, never "copy", "copies", "copied" or "copying". This holds everywhere a user reads: the
   CLI, the web page, errors, logs, README.md, `cli/README.md`, the user-facing docs, release notes, and wording proposed
