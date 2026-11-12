@@ -82,8 +82,7 @@ export async function placeTypes(db: PlacementDb, placements: readonly TypePlace
     current.set(at, p.oid);
     wanted.set(p.oid, at);
   }
-  // a type the source holds at two OIDs, or two types at one, was dropped from both maps' meaning: keep the pairs whose
-  // two ends agree
+  // the pairs whose two ends agree (a type given two OIDs, or two types one, kept its first and was said)
   const pairs = [...current].filter(([at, to]) => wanted.get(to) === at);
   const moving = pairs.filter(([at, to]) => at !== to);
   if (moving.length === 0) return { moved: 0, skipped };
@@ -122,8 +121,9 @@ export async function placeTypes(db: PlacementDb, placements: readonly TypePlace
 /** every reference to each type, and the type's own row, from its OID to the map's: OIDs nothing holds, so one statement each */
 async function move(db: PlacementDb, map: ReadonlyMap<number, number>, keys: ReadonlyArray<{ table: string; column: string; array: boolean; type: string }>): Promise<void> {
   if (map.size === 0) return;
-  const olds = [...map.keys()].join(", ");
-  const scalar = (x: string): string => `CASE ${x} ${[...map].map(([a, b]) => `WHEN ${a} THEN ${b}`).join(" ")} ELSE ${x} END`;
+  // every OID written as an oid: one past 2^31 is no int4
+  const olds = [...map.keys()].map((o) => `${o}::oid`).join(", ");
+  const scalar = (x: string): string => `CASE ${x} ${[...map].map(([a, b]) => `WHEN ${a}::oid THEN ${b}::oid`).join(" ")} ELSE ${x} END`;
   const pairs = `(VALUES ${[...map].map(([a, b]) => `(${a}::oid, ${b}::oid)`).join(", ")}) AS m(a, b)`;
   await db.exec(`UPDATE pg_catalog.pg_type SET oid = ${scalar("oid")} WHERE oid IN (${olds})`);
   for (const k of keys) {
@@ -132,7 +132,7 @@ async function move(db: PlacementDb, map: ReadonlyMap<number, number>, keys: Rea
     // an array of OIDs (oid[]) or an oidvector, element by element in its order
     const elements = `(SELECT pg_catalog.array_agg(coalesce(m.b, e.o) ORDER BY e.i) FROM pg_catalog.unnest(${col}::oid[]) WITH ORDINALITY AS e(o, i) LEFT JOIN ${pairs} ON m.a = e.o)`;
     const value = k.type === "oidvector" ? `pg_catalog.array_to_string(${elements}, ' ')::pg_catalog.oidvector` : elements;
-    await db.exec(`UPDATE ${table} SET ${col} = ${value} WHERE ${col}::oid[] && ARRAY[${olds}]::oid[]`);
+    await db.exec(`UPDATE ${table} SET ${col} = ${value} WHERE ${col}::oid[] && ARRAY[${olds}]`);
   }
   // the references by class and object
   for (const [table, cls, obj] of [["pg_depend", "classid", "objid"], ["pg_depend", "refclassid", "refobjid"], ["pg_shdepend", "classid", "objid"],
