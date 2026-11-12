@@ -7,7 +7,7 @@
  * (`#tables?show=failed`, where the Overview's card leads). With hundreds of tables the page writes the first
  * TABLE_ROWS that pass and "Show N more" / "Show all" (the search is over all of them, at once); a long name is cut with
  * an ellipsis, its whole the title. Reads `/api/state` every poll (lean: no table's columns) and `/api/usage`'s
- * `copySizes` every minute; a table's columns once, when its Columns… or Name its key… form opens
+ * `copySizes` and `unsized` every minute; a table's columns once, when its Columns… or Name its key… form opens
  * (`GET /api/tables/<table>/columns`, `columnsPath`).
  */
 import { msText, bytesText, button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText, pop, actId, ROOMS, POLL_MS, readOnlyLine, tablesReadOnly } from "../shared.js";
@@ -277,6 +277,42 @@ export function renderTablesCards(s) {
   ]);
 }
 
+/** Why a synced table is being measured, in plain words, by the run's reason (src/duck/usage.ts `UnsizedWhy`). */
+export const MEASURING = {
+  "written-since": "Data was written to disk since sizes were last measured, and this table's rows may be in it. Sizes are measured every 10 minutes.",
+  "synced-since": "Synced since sizes were last measured. Sizes are measured every 10 minutes.",
+  "not-measured-yet": "Not measured since Mason started. Sizes are first measured a minute after it starts.",
+};
+
+/**
+ * WHAT AN ADDED TABLE'S SIZE CELL SAYS (issue 883), `{ text, title }`, from `/api/usage` (`sizes`: its `copySizes` and
+ * `unsized`, the run's one rule, src/duck/usage.ts `unsizedTables`) and the table's state: its size when measured; else
+ * the run's why — `< 3 MiB` (its rows all in the write-ahead log, the log's size rounded up the limit) or `Measuring…`
+ * (its rows written to disk, or the table synced, since the last measure, or none since Mason started: `MEASURING`, by
+ * the run's reason), each as `mason usage` writes it (`unsizedCell`, held equal by the tests); else, a table whose first
+ * sync is done since the sizes were read (they are read once a minute, the state every poll) `Measuring…` too, synced
+ * since; else, its first sync not done, nothing. Sizes not read yet, or not readable (said under the list): nothing.
+ */
+export function sizeCellOf(sizes) {
+  const read = sizes && !("failure" in sizes);
+  const sizeOf = new Map(read ? sizes.copySizes.map((c) => [c.table, c.bytes]) : []);
+  const whyOf = new Map(read ? (sizes.unsized ?? []).map((u) => [u.table, u]) : []);
+  const measuring = (why) => ({ text: "Measuring…", title: MEASURING[why] ?? MEASURING["synced-since"] });
+  return (t) => {
+    if (!read) return { text: "", title: "" };
+    if (sizeOf.has(t.table)) return { text: bytesText(sizeOf.get(t.table)), title: "" };
+    const u = whyOf.get(t.table);
+    if (u?.why === "in-log" && u.underBytes != null) {
+      const limit = `${n(Math.round(u.underBytes / 1024 ** 2))} MiB`;
+      return { text: `< ${limit}`, title: `Under ${limit}. Its rows aren't in the main file yet, so it can't be measured exactly.` };
+    }
+    // the run's reason; a table it has not said yet (its first sync done after the sizes were read) was synced since
+    if (u) return measuring(u.why);
+    if (t.copy?.phase === "done") return measuring("synced-since");
+    return { text: "", title: "No size until its first sync is done." };
+  };
+}
+
 /**
  * THE DATABASE'S TABLES from `/api/state` `tables` (`mason tables --json`'s list), ONE table in a card: a row each — its
  * name in mono, its state as a dot and the word (an added table's sync: Synced / Syncing / Failed / Waiting, else Not
@@ -313,7 +349,7 @@ export function renderTables(s, ui = {}) {
   // beside the row's actions (`pop`), written after the table: a click moves no other row and no column
   // (`table-layout: fixed`, the stylesheet's widths by the header's classes; a button whose label changes keeps its room).
   const head = [["Table", "name"], ["State", "state"], ["Rows", "num rows"], ["Key", "key"], ["Last sync", "num last"], ["Size", "num size"], ["", "act"]];
-  const sizeOf = new Map(sizes && !("failure" in sizes) ? sizes.copySizes.map((c) => [c.table, c.bytes]) : []);
+  const sizeCell = sizeCellOf(sizes);
   const under = (html, cls = "") => `<tr class="under${cls ? ` ${cls}` : ""}"><td colspan="${head.length}"><div class="under-body">${html}</div></td></tr>`;
   const cell = (v, cls = "", title = "") => `<td${cls ? ` class="${cls}"` : ""}${title ? ` title="${esc(title)}"` : ""}>${esc(v)}</td>`;
   // the popovers of the rows written, in their order: after the table, each anchored to its row's actions
@@ -343,6 +379,8 @@ export function renderTables(s, ui = {}) {
         : t.key.length ? "" : choosing === t.table ? button("Name its key…", {}, "small", { disabled: true, expanded: true }) : button("Name its key…", { choose: t.table }, "small");
     // a failed copy's rows so far are none: the copy it serves meanwhile is said by its error and mason status
     const rows = t.added && t.copy && t.copy.phase !== "failed" ? n(t.copy.rowsCopied) : f.size;
+    // its size, or why it has none (`sizeCellOf`): an added table's alone
+    const size = t.added ? sizeCell(t) : null;
     // EVERY ADDED TABLE HAS ITS BAR, as `mason status` and `mason wait` print one for each (src/cli/commands.ts
     // `tableLines`): full at 100% once copied, red when its copy failed, amber when it is not kept current, moving while
     // it copies, the indeterminate shimmer while it waits — the Overview's renderer (`copyBar`), its words the line's;
@@ -392,7 +430,7 @@ export function renderTables(s, ui = {}) {
     }
     return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}${said_ ? " has-note" : ""}"><th scope="row" class="name"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
       `<td class="state">${state}${bar}</td>${cell(rows, "num")}${cell(f.key, "mono", f.key)}${last}` +
-      `${t.added ? (sizeOf.has(t.table) ? cell(bytesText(sizeOf.get(t.table)), "num") : cell("—", "num", "Not measured yet. A synced table's size is measured every 10 minutes, once its rows are written to disk. A small table's rows can wait in Mason's write-ahead log until it passes 16 MiB, or until Mason stops.")) : cell("", "num")}` +
+      `${size ? cell(size.text, "num", size.title) : cell("", "num")}` +
       `<td class="act" id="${esc(anchor)}">${act}</td></tr>` + note;
   };
   const added = s.tables.filter((t) => t.added).length;

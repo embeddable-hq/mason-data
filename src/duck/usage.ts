@@ -36,13 +36,16 @@
  * for the life of a run (issue 815). The sampler NEVER checkpoints to measure one (the owner, 2026-11-11): a checkpoint
  * DuckDB cannot finish — a full disk, out of memory — invalidates the database until the run restarts, and a size is not
  * worth a new way to stop a run serving (docs/DESIGN.md "A small table's size"). The page and `mason usage` say why
- * such a table has no size.
+ * such a table has no size (`unsizedTables`, issue 883): measured since its first sync with no block and the file not
+ * written since, it is under the log's size; else it is being measured, and why (the file written, synced, or no measure
+ * since Mason started).
  *
  * The Postgres catalog never lists `_mason`, so a tool connected to the listener cannot read the samples.
  */
 import type { DuckDBValue } from "@duckdb/node-api";
 import { MASON_SCHEMA, type DuckStore } from "./store.ts";
 import { History, Streak, cutoff } from "./history.ts";
+import { fileStamp } from "./file-bytes.ts";
 import { outcomeOf, type ApiLogRow, type Outcome } from "../api/request-log.ts";
 
 export const USAGE_TABLE = `${MASON_SCHEMA}.usage`;
@@ -170,6 +173,46 @@ export interface UsageSample {
 /** One copy's own bytes, as last measured. */
 export interface CopySize { table: string; bytes: number; at: string }
 
+/**
+ * WHY A SYNCED TABLE HAS NO SIZE (issue 883), each a fact the run can tell:
+ * - `in-log`: measured since its first sync finished, it had no block of its own, and the file has not been written since
+ *   (`fileStamp` unchanged): all its rows are still in the write-ahead log, and it takes less room than the log —
+ *   `underBytes`, the log's size now rounded up to a whole MiB;
+ * - `written-since`: it had no block at the last measure, but the file has been written since (a checkpoint, DuckDB's own
+ *   past 16 MiB, or any table's bulk insert of whole row groups), so its rows may be in the file now and the log bounds
+ *   nothing — the run cannot tell whose rows moved without database work, so it says they may have;
+ * - `synced-since`: its first sync finished after the last measure;
+ * - `not-measured-yet`: no measure has been taken since Mason started (the first is a sample's interval after it).
+ * The last three are measured within SIZE_EVERY_MS. A table whose first sync is not done is none of them.
+ */
+export type UnsizedWhy = "in-log" | "written-since" | "synced-since" | "not-measured-yet";
+export interface UnsizedTable { table: string; why: UnsizedWhy; underBytes: number | null }
+
+/** A measure as the sampler took it: when (the facts it measured were read then), and the file's stamp at that moment. */
+export interface Measure { at: string; fileStamp: string | null }
+
+const MIB = 1024 ** 2;
+
+/**
+ * Each SERVED copy (phase copied) with no size in `sizes`, and why: ONE rule, the run's (`GET /api/usage` `unsized`),
+ * which `mason usage` and the Tables page both render. `measure` is the sampler's last (null: none since Mason started);
+ * `now` the log's bytes (null: none) and the file's stamp, read at the moment of asking (src/duck/file-bytes.ts: a stat
+ * each, no database work). The log's size bounds a table's rows only while no row has left it for the file since the
+ * measure: an unchanged stamp says so; a changed one, or an empty log, says it may have (review of PR 902: a checkpoint
+ * after the measure left a log of 3 KB beside a table of 1.8 MB).
+ */
+export function unsizedTables(copies: ReadonlyArray<{ source: string; phase: string; copiedAt: string | null }>, sizes: readonly CopySize[],
+  measure: Measure | null, now: { wal: number | null; fileStamp: string | null }): UnsizedTable[] {
+  const sized = new Set(sizes.map((c) => c.table));
+  return copies.filter((c) => c.phase === "copied" && !sized.has(c.source)).map((c): UnsizedTable => {
+    const why: UnsizedWhy = measure === null ? "not-measured-yet"
+      : c.copiedAt !== null && Date.parse(c.copiedAt) > Date.parse(measure.at) ? "synced-since"
+      : measure.fileStamp !== null && measure.fileStamp === now.fileStamp && now.wal !== null && now.wal > 0 ? "in-log"
+      : "written-since";
+    return { table: c.source, why, underBytes: why === "in-log" ? Math.ceil(now.wal! / MIB) * MIB : null };
+  }).sort((a, b) => (a.table < b.table ? -1 : a.table > b.table ? 1 : 0));
+}
+
 /** What a reader asks of the samples: from, until (ISO), and a bucket in seconds (absent: every sample). */
 export interface UsageQuery { since: string; until: string; stepSeconds?: number }
 
@@ -245,6 +288,10 @@ export class UsageSampler {
   private take: (() => Promise<UsageFacts>) | null = null;
   private lastSized = -Infinity;
   private sizedOnce = false;
+  /** the copies' sizes' last measure taken whole: when, and the file's stamp then; null before the first in this run */
+  private measured: Measure | null = null;
+  /** the synced data's file (`store.file`), whose stamp a measure keeps */
+  private file = "";
   /** a streak of failures, said once: what failed (a sample taken, written, sized), and how many */
   private readonly lost = new Map<string, Streak>();
   private closed = false;
@@ -267,6 +314,7 @@ export class UsageSampler {
   static async open(store: DuckStore, log: (line: string) => void, options: UsageOptions): Promise<UsageSampler> {
     const history = await History.open(store, [USAGE_DDL, ...USAGE_ADDED.map((c) => `ALTER TABLE ${USAGE_TABLE} ADD COLUMN IF NOT EXISTS ${c}`), SIZES_DDL]);
     const u = new UsageSampler(history, log, store.memoryLimitBytes, options);
+    u.file = store.file;
     await history.keepTrimmed(() => u.trim(), (e) => log(`usage: deleting the samples older than ${u.days} days failed: ${e.message}`));
     return u;
   }
@@ -328,7 +376,14 @@ export class UsageSampler {
     if (this.take === null) return;
     let facts: UsageFacts;
     let copyMemory: number | null;
+    // the copies a measure sizes are the facts' (`facts.copied`): a first sync that finished after this instant may not
+    // be among them, so this is when a measure says it measured (`sizedAt`), never the later `now`
+    const factsAt = this.now();
+    // and the file's stamp then, before the measure reads a block: a row that leaves the log for the file after this
+    // instant changes it (`unsizedTables`)
+    let stamp: string | null;
     try {
+      stamp = fileStamp(this.file);
       facts = await this.take();
       copyMemory = await this.copyMemory();
     } catch (e) {
@@ -361,7 +416,7 @@ export class UsageSampler {
     }
     if (now - this.lastSized >= (this.options.sizeEveryMs ?? SIZE_EVERY_MS)) {
       this.lastSized = now;
-      await this.size(facts.copied, now);
+      await this.size(facts.copied, now, { at: new Date(factsAt).toISOString(), fileStamp: stamp });
     }
   }
 
@@ -372,7 +427,7 @@ export class UsageSampler {
   }
 
   /** Each served copy's own bytes, written as one batch (see the module's comment for how, and what it costs). */
-  private async size(copied: readonly string[], now: number): Promise<void> {
+  private async size(copied: readonly string[], now: number, measure: Measure): Promise<void> {
     const t0 = performance.now();
     const rows: Array<[string, number]> = [];
     try {
@@ -413,6 +468,7 @@ export class UsageSampler {
       return;
     }
     this.ok("measuring each synced table's size");
+    this.measured = measure;
     // the first measure of a run is said with its time: what it costs on this machine's copies, read from the log
     if (!this.sizedOnce) { this.sizedOnce = true; this.log(`usage: measured ${rows.length} synced tables' own size in ${Math.round(performance.now() - t0)} ms (every ${Math.round((this.options.sizeEveryMs ?? SIZE_EVERY_MS) / 60_000)} min)`); }
   }
@@ -452,6 +508,10 @@ export class UsageSampler {
       .getRowsJS() as Array<[string, bigint | number, bigint | number]>;
     return rows.map(([table, bytes, at]) => ({ table, bytes: Number(bytes), at: new Date(Number(at)).toISOString() }));
   }
+
+  /** The last measure of the copies' sizes taken whole in this run — when (the moment the facts it measured were read)
+   *  and the file's stamp then — or null before the first, a sample's interval after the start. */
+  lastMeasure(): Measure | null { return this.measured; }
 
   /** Stops sampling, waits for a sample in flight, and closes the samples' connections (mason stop). */
   async close(): Promise<void> {

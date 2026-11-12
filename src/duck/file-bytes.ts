@@ -7,12 +7,32 @@
  */
 import * as fs from "node:fs";
 
+const size = (f: string): number | null => {
+  try { return fs.statSync(f).size; }
+  catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw e; }
+};
+
 /** The file's bytes and its write-ahead log's (none between checkpoints), or null when the file is not there. */
 export function syncedDataBytes(file: string): number | null {
-  const size = (f: string): number | null => {
-    try { return fs.statSync(f).size; }
-    catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw e; }
-  };
   const main = size(file);
-  return main === null ? null : main + (size(`${file}.wal`) ?? 0);
+  return main === null ? null : main + (walBytes(file) ?? 0);
+}
+
+/** The write-ahead log's bytes alone (`<file>.wal`), or null when there is none (nothing written since a checkpoint):
+ *  one file-size read, no database work — what a synced table whose rows are all in the log is under
+ *  (src/duck/usage.ts `unsizedTables`, issue 883). */
+export function walBytes(file: string): number | null {
+  return size(`${file}.wal`);
+}
+
+/**
+ * The FILE's stamp: its size and its modification time to the nanosecond, or null when it is not there — one stat, no
+ * database work. DuckDB writes the file only at a checkpoint (its own: the log past 16 MiB, or the store closed) or for a
+ * bulk insert's whole row groups, so a stamp unchanged since a measure says no row has moved from the log into the file
+ * since (src/duck/usage.ts `unsizedTables`, issue 883: a checkpoint between two measures made "< 1 MiB" of a table of
+ * 1.8 MB, its rows no longer in the log). A changed stamp says it may have: never the other way round.
+ */
+export function fileStamp(file: string): string | null {
+  try { const s = fs.statSync(file, { bigint: true }); return `${s.size}:${s.mtimeNs}`; }
+  catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw e; }
 }
