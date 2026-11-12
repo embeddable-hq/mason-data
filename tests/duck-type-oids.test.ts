@@ -166,10 +166,15 @@ test("a table's whole row is sent with the source's row type, which pg_type name
 });
 
 test("pg_typeof names a made type as the source does: an enum of another schema qualified, an array as its element's []", async () => {
-  const sql = "SELECT pg_typeof(m)::text, pg_typeof(ms)::text, pg_typeof(l)::text, pg_typeof(c)::text, pg_typeof(cs)::text, pg_typeof(id)::text FROM moods WHERE id = 1";
+  const sql = "SELECT pg_typeof(m)::text, pg_typeof(ms)::text, pg_typeof(l)::text, pg_typeof(c)::text, pg_typeof(cs)::text, pg_typeof(id)::text, pg_typeof(cs[1])::text, pg_typeof(coalesce(l, 'low'))::text FROM moods WHERE id = 1";
   const want = await source(sql);
-  assert.deepEqual(want.rows, [["mood", "mood[]", "other.level", "citext", "citext[]", "integer"]]);
+  assert.deepEqual(want.rows, [["mood", "mood[]", "other.level", "citext", "citext[]", "integer", "citext", "other.level"]]);
   assert.deepEqual(await mason(sql), want);
+  // an element of a made type's array, in a statement that reads no column of the element's type (the oracle's
+  // `pg_typeof of a citext[]`: the element was named by its OID)
+  const element = "SELECT pg_typeof(cs[1])::text, pg_typeof(ms[1])::text FROM moods WHERE id = 1";
+  assert.deepEqual(await mason(element), await source(element));
+  assert.deepEqual((await source(element)).rows, [["citext", "mood"]]);
   // under a search_path that holds the schema, its name alone
   const c = await connect(api);
   try {
@@ -177,7 +182,7 @@ test("pg_typeof names a made type as the source does: an enum of another schema 
     await truth.exec("SET search_path = other, public");
     const r = await c.query({ text: sql, rowMode: "array" });
     assert.deepEqual(r.rows, (await source(sql)).rows);
-    assert.deepEqual(r.rows, [["mood", "mood[]", "level", "citext", "citext[]", "integer"]]);
+    assert.deepEqual(r.rows, [["mood", "mood[]", "level", "citext", "citext[]", "integer", "citext", "level"]]);
   } finally { await c.end(); await truth.exec("RESET search_path"); }
 });
 

@@ -502,8 +502,11 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // pg_typeof of a type a database made, as Postgres names it: its regtype under the session's search_path
   // (`other.level` where its schema is not on the path, `mood[]`), asked of the catalog only where the statement calls it
   const typeNames = new Map<number, string>();
-  if (used.size > 0 && functionsCalled(analysis.tree).oids.has(PG_TYPEOF)) {
-    for (const [oid, name] of await catalogRows(catalog, `${sessionSetSql(under)}; SELECT oid::text, oid::regtype::text FROM pg_catalog.pg_type WHERE oid IN (${[...used].join(", ")}); ${CATALOG_BASE_SQL}`)) {
+  // (every made type the catalog holds, as the rewrite knows them, and every one the analysis typed: an expression of one,
+  // `ca[1]` of a citext[], is typed where no node of the analysis says so)
+  const made = new Set([...catalogTypes.keys(), ...used]);
+  if (made.size > 0 && functionsCalled(analysis.tree).oids.has(PG_TYPEOF)) {
+    for (const [oid, name] of await catalogRows(catalog, `${sessionSetSql(under)}; SELECT oid::text, oid::regtype::text FROM pg_catalog.pg_type WHERE oid IN (${[...made].join(", ")}); ${CATALOG_BASE_SQL}`)) {
       typeNames.set(Number(oid), name!);
     }
   }
