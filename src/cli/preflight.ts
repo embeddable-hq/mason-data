@@ -12,6 +12,7 @@ import * as os from "node:os";
 import { PgConnection, PgError } from "../cdc/pg-wire.ts";
 import { parseDatabaseUrl, queryProblem, type PgConnection as UrlParts } from "../lib/database-url.ts";
 import type { Failure, NextStep } from "./command.ts";
+import { closest } from "../lib/did-you-mean.ts";
 import type { SourceCollation } from "../duck/collation.ts";
 
 /** What `mason start` was given, completed the way libpq completes a URL: the user defaults to the OS user. */
@@ -134,7 +135,7 @@ export function explainConnectError(e: unknown, s: Source, o: ConnectContext = {
         ],
       };
     }
-    // the database is not repeated (issue 541: a refusal echoes no part of the value); the hint lists the ones there are
+    // the database is not repeated (issue 541: a refusal echoes no part of the value); the hint names the closest one there, or a count
     if (e.code === "3D000") return { message: `${where} has no database by the name the URL gives (the part after the port)`, hints: [] };
     return { message: `${where}: ${msg}`, hints: [] };
   }
@@ -164,7 +165,22 @@ export function explainConnectError(e: unknown, s: Source, o: ConnectContext = {
   return { message: `${where}: ${msg}`, hints: [] };
 }
 
-/** Connect as the service will. The failure is explained; for a missing database, the ones that exist are listed. */
+/**
+ * THE HINT OF A MISSING DATABASE (issue 871): the closest name the server has, when one is close (src/lib/did-you-mean.ts),
+ * else only how many others there are — never the list, which is unbounded and on a shared server names other tenants'
+ * databases. `wanted` is the URL's name, never repeated (issue 541). One wording for every reader of the check's
+ * failure: the CLI, `--json` and the web page each say these hints as they are.
+ */
+export function missingDatabaseHint(wanted: string, names: readonly string[], where: string): string {
+  const near = closest(wanted, names);
+  // a name is the server's, so untrusted: no control character of it reaches a terminal
+  if (near !== null) return `did you mean \`${near.replace(/[\x00-\x1f\x7f]/g, "?")}\`? It is the name after the port in the URL`;
+  const others = names.filter((n) => n !== wanted).length;
+  const count = others === 0 ? "no other database" : others === 1 ? "1 other database" : `${others} other databases`;
+  return `${where} has ${count}${others > 0 ? ", none close to that name" : ""}: put the right name after the port in the URL`;
+}
+
+/** Connect as the service will. The failure is explained; for a missing database, the closest name there or a count (missingDatabaseHint). */
 export async function connectSource(s: Source, o: ConnectContext = {}): Promise<{ pg: PgConnection } | { failure: ConnectFailure }> {
   const opts = { host: s.host, port: s.port, database: s.database, user: s.user, password: s.password, sslmode: s.sslmode, connectTimeoutMs: 10_000, applicationName: "mason-dev" };
   try {
@@ -176,11 +192,11 @@ export async function connectSource(s: Source, o: ConnectContext = {}): Promise<
         const pg = await PgConnection.connect({ ...opts, database: "postgres" });
         try {
           const names = (await pg.query("SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY datname")).rows.map((r) => r[0]!);
-          failure.hints.push(`The databases on ${s.host}:${s.port}: ${names.join(", ")}`);
+          failure.hints.push(missingDatabaseHint(s.database, names, `${s.host}:${s.port}`));
         } finally { pg.close(); }
       } catch (inner) {
-        // listing is a courtesy: the refusal above stands either way, and says why the list is missing
-        failure.hints.push(`(could not list the databases there: ${(inner as Error).message})`);
+        // the suggestion is a courtesy: the refusal above stands either way, and says why there is none
+        failure.hints.push(`(could not read the database names there to suggest one: ${(inner as Error).message})`);
       }
     }
     return { failure };
