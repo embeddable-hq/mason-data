@@ -308,6 +308,7 @@ every session needs. Write the rule and one sentence of why; the incident, the m
   - Keep sentences short, with one idea each. Don't chain clauses with colons, semicolons and commas.
   - Use common words. Say "query" rather than "statement" where a user reads it, and "set up" rather than "provision".
   - Cut any sentence that doesn't help the reader act or understand. A clear label needs no explanation under it.
+  - Speak to the interface the reader is using. On the web page, say how to do it on the page, and name a `mason` command or a file only when the page can't do it. In the CLI, name the commands.
 
   For example, write "Choose where hello can connect from. If you limit it, open sessions from other addresses end at
   their next query." Not "Where hello connects from, as mason user from hello sets it: the sessions it holds from
