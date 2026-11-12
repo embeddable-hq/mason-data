@@ -6,8 +6,12 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as os from "node:os";
 import { PgError } from "../src/cdc/pg-wire.ts";
-import { checkSource, explainConnectError, isLocalHost, maskedUrl, parseSource, PRIMARY_NOTE, REMOTE_NOTE, serverlessHost, sourceNotes, sourceWarnings, unpickableReason,
+import { checkSource, explainConnectError, isLocalHost, maskedUrl, parseSource, serverlessHost, sourceWarnings, unpickableReason,
   type SourceFacts, type SourceTable } from "../src/cli/preflight.ts";
+import * as preflightModule from "../src/cli/preflight.ts";
+// read from the module, not imported by name: the file loads at a commit without them (scripts/fails-without.ts)
+const { PRIMARY_NOTE, REMOTE_NOTE, sourceNotes } = preflightModule as unknown as { PRIMARY_NOTE: string; REMOTE_NOTE: string;
+  sourceNotes: (s: import("../src/cli/preflight.ts").Source, standby: boolean | null) => string[] };
 import { unassignedPort } from "./test-ports.ts";
 import { PGlite } from "@electric-sql/pglite";
 import { readCollations, TABLES_SQL } from "../src/cli/preflight.ts";
@@ -199,7 +203,7 @@ test("a database elsewhere is information, never a warning: where it is, and the
   // a serverless compute: what keeps it awake, as it is now — no timer of Mason's own (issue 890)
   assert.deepEqual(sourceWarnings(source("postgres://me@ep-x.us-east-2.aws.neon.tech/app"), facts(false)), [
     "Neon suspends an idle compute and bills while it runs: a table whose sync: is poll or replication keeps it running. " +
-    "With every table sync: off, Mason connects only to sync, and to read the database's tables when a command or the web page asks (at most once a minute)"]);
+    "With every table sync: off, Mason connects only when asked: mason sync, a command that lists or adds tables, and the web page while it is open (once a minute at most)"]);
   assert.equal(serverlessHost("db.abc.supabase.co"), null);
 });
 

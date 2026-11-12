@@ -6,7 +6,8 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import type { SourceFacts } from "../src/cli/preflight.ts";
-import { CATALOG_FRESH_MS, sourceCatalog } from "../src/cli/source-catalog.ts";
+// imported when the tests run: at a commit without the module the file still loads, and each test fails by name
+const { CATALOG_FRESH_MS, sourceCatalog } = await import("../src/cli/source-catalog.ts" as string).catch(() => ({})) as typeof import("../src/cli/source-catalog.ts");
 
 const factsOf = (tables: string[]): SourceFacts => ({ version: 160000, versionText: "16", standby: false, systemIdentifier: null,
   tables: tables.map((t) => ({ source: `public.${t}`, schema: "public", table: t, key: ["id"], rows: 1, bytes: 8192, comment: null, columns: [], foreignKeys: [] })) });
