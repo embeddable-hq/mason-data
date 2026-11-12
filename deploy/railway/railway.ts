@@ -11,7 +11,7 @@
 import { defineRailway, image, project, service, volume } from "railway/iac";
 
 export default defineRailway(() => {
-  // THE VOLUME: the copy and Mason's state, ONE, attached to one service ("A volume can be attached to one service";
+  // THE VOLUME: the synced data and Mason's state, ONE, attached to one service ("A volume can be attached to one service";
   // "Replicas cannot be used with volumes"). Its region MUST be the region the service runs in (the service's Settings
   // → Region in the dashboard, or the reference's `regions` placement), and a volume does not move: choose the region
   // nearest your database, once. Sizes by plan: 5 GB on Hobby, 50 GB on Pro by default, extendable, never shrunk.
@@ -32,7 +32,7 @@ export default defineRailway(() => {
       MASON_PG_SELF_SIGNED_TLS: "1",
       // the project folder (sources/, mason.yml) on the volume, so a table `mason add` adds survives a redeploy
       MASON_PROJECT: "/mason/data/project",
-      // the copy's memory, said explicitly: what the copy would read of Railway's limit is not documented. `mason doctor`
+      // the engine's memory, said explicitly: what the engine would read of Railway's limit is not documented. `mason doctor`
       // in the service's shell says what it took; keep it at about half of what the plan gives the service.
       MASON_DUCKDB_MEMORY: "4GB",
       // Railway's health check is sent to PORT ("If your app doesn't listen on PORT … you can set PORT manually"):
@@ -40,14 +40,14 @@ export default defineRailway(() => {
       PORT: "4140",
       // "Volumes are mounted as the root user"; the image runs as node, so it could not write the volume without this
       RAILWAY_RUN_UID: "0",
-      // the old deployment gets SIGTERM and, by default, 0 s before SIGKILL: a copy in flight needs the minute
+      // the old deployment gets SIGTERM and, by default, 0 s before SIGKILL: a first sync in flight needs the minute
       RAILWAY_DEPLOYMENT_DRAINING_SECONDS: "60",
     },
     volumeMounts: { "/mason/data": data },
     // 503 while it starts, 200 once it serves; the first start takes ~15 s, minutes on a loaded host
     healthcheck: "/healthz",
     healthcheckTimeout: 300,
-    // one, and never more: the copy is one file with one writer (and Railway refuses replicas with a volume)
+    // one, and never more: the synced data is one file with one writer (and Railway refuses replicas with a volume)
     replicas: 1,
   });
 
