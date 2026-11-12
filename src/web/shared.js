@@ -488,7 +488,7 @@ export const USERS_HASH = "#users";
  * not say it. `readOnly`: `/api/state` `pageReadOnly` (MASON_UI_READ_ONLY=1) — no Create a user, whose page could only
  * refuse it; the URL, psql and their Copy stay.
  */
-export function renderConnect(pg, { first = false, table = null, served = false, share = "", readOnly = null } = {}) {
+export function renderConnect(pg, { first = false, table = null, served = false, readOnly = null } = {}) {
   if (!pg || typeof pg.shown !== "string") return "";
   // a first statement to type that the request log lists (one that reads a copied table: UNLISTED_STATEMENTS)
   const tryIt = first && table ? `<dt>Then try</dt><dd>${copyable("connect-try", `select count(*) from ${entryName(table)};`)} <span class="dim">it shows on Queries</span></dd>` : "";
@@ -497,7 +497,7 @@ export function renderConnect(pg, { first = false, table = null, served = false,
     `<dl class="facts"><dt>URL</dt><dd>${copyable("connect-url", pg.shown)}</dd><dt>psql</dt><dd>${copyable("connect-psql", pg.psql)}</dd>${tryIt}</dl>` +
     serverHostNote(pg, served) +
     (readOnly !== null ? `<p class="tip">A user's name and password go in place of ${code("<user>:<password>")}: ${code("mason user add <name>")} prints the whole URL once.</p>`
-      : `<p class="tip"><a class="btn${first ? " primary" : ""}" href="${USERS_HASH}">Create a user</a> <span>Its name and password go in place of ${code("<user>:<password>")}: the Users page shows the whole URL once, as ${code("mason user add <name>")} prints it.</span></p>`) + `${share}</div>`;
+      : `<p class="tip"><a class="btn${first ? " primary" : ""}" href="${USERS_HASH}">Create a user</a> <span>Its name and password go in place of ${code("<user>:<password>")}: the Users page shows the whole URL once, as ${code("mason user add <name>")} prints it.</span></p>`) + `</div>`;
 }
 
 /** Why a page offers no control that changes anything (`/api/state` `pageReadOnly`), in its own words — `what` is what is

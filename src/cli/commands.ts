@@ -31,7 +31,7 @@ import { addEntry, listTables, Refusal, removeEntries, sourceToEdit, type EditCa
 import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFacts, type SourceTable } from "./preflight.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
 import { reach } from "./state.ts";
-import { CATCHING_UP, copyingText, copyProgress, duration, generatedReadiness, msText, statementMsText, readiness, readinessWord, type Readiness, type SyncFacts, type SyncTotals } from "./readiness.ts";
+import { CATCHING_UP, copyingText, copyProgress, duration, generatedReadiness, msText, statementMsText, readiness, readinessWord, READY_TEXT, type Readiness, type SyncFacts, type SyncTotals } from "./readiness.ts";
 import type { SyncEvent } from "../duck/events.ts";
 import type { Compaction, CopyProgressView, KeptCurrent, StreamStatus } from "../duck/sync.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
@@ -232,7 +232,7 @@ export function addSteps(tables: ReadonlyArray<Omit<CatalogTable, "columns">>, f
 
 // ------------------------------------------------------------------ readiness (mason wait, mason status): src/cli/readiness.ts
 
-export { CATCHING_UP, copyingText, copyProgress, duration, msText, statementMsText, readiness, readinessWord, type Readiness };
+export { CATCHING_UP, copyingText, copyProgress, duration, msText, statementMsText, readiness, readinessWord, READY_TEXT, type Readiness };
 
 /** A table line's bar in its state's colour (on a terminal): green copied, red failed, yellow served but not kept current, cyan at work
  *  — its first sync, or its one catch-up poll (issue 834) — (a table whose sync is off is copied as it asked: green). `tone`, the
@@ -671,7 +671,7 @@ export async function status(argv: string[]): Promise<number> {
     out("");
     // the word the web page's Status says too (readinessWord)
     const word = readinessWord(r);
-    if (r.ready) out(withEnd(st.green(`${word}: every added table is synced and served.`), { next }));
+    if (r.ready) out(withEnd(st.green(`${word}: ${READY_TEXT}.`), { next }));
     else if (r.failed.length) out(withEnd(`${st.red(`${word}:`)}\n${bullets(r.failed)}`, { next }));
     else out(withEnd(`${word}:\n${r.waiting.map((x) => `  - ${x}`).join("\n")}`, { next }));
     return 0;
@@ -1663,7 +1663,7 @@ export async function wait(argv: string[]): Promise<number> {
       if (r.ready) {
         const head = !picked.length ? "Nothing to wait for: no table added yet."
           : only !== null ? `Ready: ${picked.map((t) => t.table).join(", ")} ${picked.length === 1 ? "is" : "are"} synced and served.`
-          : "Ready: every added table is synced and served.";
+          : `Ready: ${READY_TEXT}.`;
         if (!json) out(withEnd(picked.length ? styleOut().green(head) : head, { next: readyNext }));
         return 0;
       }

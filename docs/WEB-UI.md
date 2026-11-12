@@ -47,39 +47,29 @@ a sheet over the page: the focus goes to its first link, and Escape, a click out
 followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/vendor/lucide-1.56.0/`, drawn inline at
 16 px in the text's colour.
 
-- **Overview** (`#overview`, read only): the run's word (Ready, Under way or Failed) beside a big dot, then cards for the
-  tables synced, the rows, the last sync, the synced data's file, and the last day's statements with their p95. Each card has a
+- **Overview** (`#overview`, read only): under the title **mason status**, the run's word (Ready, Under way or Failed)
+  beside a big dot, and one line saying what it means for the synced data, from `/api/state` alone (`readiness`,
+  `totals`, the tables' `sync.state`): Ready, "Every added table is synced and served" (the sentence `mason status`
+  ends on, `READY_TEXT`); Under way, "2 of 3 tables synced, the rest syncing" (or, every one synced, how many are
+  being caught up by their one poll); Failed, "1 table's sync failed: see Tables", Tables the failed ones. Then cards
+  for the tables synced, the rows, the last sync, the synced data's file, the last day's statements with their p95,
+  and the last day's **Sync errors** (the sync's failed events, `/api/events?failed=1&since=24h`, read up to 1,000:
+  at that, "1,000+") and **Query errors** (the statements refused or failed, `/api/queries`' `day`). Each card has a
   24-hour sparkline once there are two hours to draw, and **each is a link** into the view that lists what it counts:
-  the tables (the failed ones when a first sync failed), Usage for the synced data's file, Queries for the statements, the slow ones
-  for the p95.
+  the tables (the failed ones when a first sync failed), Usage for the synced data's file, Queries for the statements,
+  the slow ones for the p95, the refused or failed ones for the query errors, and Sync events' failures over the last
+  24 hours for the sync errors. A count the page could not read is "unknown" with its reason, never 0. Eight cards,
+  nine with the host's (`MASON_UI_OVERVIEW_CARD`): four by two and three by three from 641 px up, two a row on a phone.
 - **Overview**, Getting started (while setting up is not done): ✓ Mason is running · ✓/○ a table synced · ✓/○ a user
-  created · ✓/○ a first statement answered — each ○ with its one action (Add a table → Tables, Create a user → Users,
-  Copy the psql line → Connect's), from `/api/state`'s totals, `/api/users` (`mason user list --json`) and the request
-  log's week (`/api/queries`). Gone once the four are done; not drawn while a read it needs is unanswered or failed.
-- **Overview**, Connect: the Postgres API's URL with `<user>:<password>` in the credentials' place and its psql line —
-  the lines `mason status` prints — each with **Copy**, and **Create a user** (the Users page). While nothing has asked
-  Mason anything (no statement in the last day or week) it is **Connect your first tool**, right under the cards, saying
-  what the URL is for; afterwards a quieter panel after the facts. It is `/api/state` `postgres` (`mason status --json`'s
-  `postgres`: `shown`, `psql`).
-- **Overview**, Connect from anywhere (under `mason start` only): `mason share` from the page, for a tool in the cloud.
-  It asks once that this opens a temporary public address (`GET /api/share/choices`: a role picker where
-  `mason/roles.yml` offers more than one role, as `mason share --role`), then `POST /api/share` `{ from: "page",
-  confirmed: true, role? }` opens the same share the command opens (src/cli/page-share.ts): the run makes the password
-  and starts the tunnel's client, and the card shows host, port, user and the password, each with **Copy**, how long it
-  has been shared, when a free share ends (within about an hour), and **Stop sharing** (`DELETE /api/share/<user>`).
-  The password is in that one answer alone, kept in the page's memory: after a reload the card says it was shown once.
-  The page holds the share by a beat (`POST /api/share/<user>/beat`, every 15 s, hidden or not): two minutes without
-  one (the tab closed, crashed or asleep) and the share, its sessions and the tunnel's client end, said by `/api/state`
-  `shareEnded`. One share at a time between the page and `mason share`, refused naming the open one. Under `mason serve`
-  (and so through `mason ui --ssh`) it is absent, and every one of those endpoints refuses.
+  created — each ○ with its one action (Add a table → Tables, Create a user → Users), from `/api/state`'s totals and
+  `/api/users` (`mason user list --json`). Gone once the three are done; not drawn while the users' read is unanswered
+  or failed. How to connect is not on the Overview: it is on Queries' empty log, and the Users page.
 - **Overview**, the tables not synced yet: a bar each with the line `mason wait` prints (a first sync not begun shimmers,
   with no % beside it), and nothing once every table is synced.
 - **Overview**, the facts: one table with the database and how its changes arrive, the warnings, Mason's version, uptime
   and restarts, free disk, and sessions open. In replication mode, a Changes table shows the stream and the WAL its slot holds.
-- **Overview**, the statements and errors: the last day and week in one table, then the latest sync errors and the
-  refused or failed statements, each with **See all** (Logs, failures only; Queries, the refused or failed ones), and — when a
-  statement used SQL Mason does not support in the last day — one line naming the most refused entry of
-  `docs/SQL-SUPPORT.md`, with **See all** (Queries).
+- **Overview**, the unsupported SQL: when a statement used SQL Mason does not support in the last day, one line naming
+  the most refused entry of `docs/SQL-SUPPORT.md`, with **See all** (Queries).
 - **Tables** (`#tables`): the database's tables, as `mason tables` lists them, with a search box by name and an All /
   Added / Failed / Not added filter. The added tables come first (whatever their state), then those not added, each in
   the order `mason tables` lists them. A table added or removed while the page is shown keeps its row, its state
@@ -158,7 +148,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   the card's right.
 - **Observability › Queries** (`#observability/queries`): the request log, and only that — who is connected, what runs
   and the range's numbers are on Usage.
-- **Queries**, the request log empty and unfiltered: its sentence, then Connect your first tool (as the Overview's).
+- **Queries**, the request log empty and unfiltered: its sentence, then Connect your first tool: the URL and psql line, a first statement to try, and Create a user.
 - **Queries**, the request log: newest first, with a status dot and word per row as `mason logs --requests` says it: Completed,
   Refused (a statement Mason answers as designed, as a Postgres would refuse it: unsupported SQL, a missing relation),
   Failed (Mason's or the machine's fault) or Cancelled. Filter by status (each, or Refused or failed), **Slow (1 s or more)**, a
@@ -332,7 +322,7 @@ listens, and every browser connection crosses that one ssh connection as frames 
   (`src/cli/run-server.ts`).
 - **A page that only shows: `MASON_UI_READ_ONLY=1`.** For a page shown to someone who should only look (behind a
   reverse proxy, on the socket), `mason serve` with it set makes the page offer no control that changes anything — no
-  Add, Remove, Sync, Disable, Enable, Cancel, Add a user, Create a user or Connect from anywhere, each page saying
+  Add, Remove, Sync, Disable, Enable, Cancel, Add a user or Create a user, each page saying
   why — and its server refuses every request
   of the page that is not a GET or a HEAD, whatever its path, with "the web page is read-only here" in the failure shape
   (`src/cli/ui-read-only.ts`). Viewing is unchanged. It covers the page alone: a request with the run's token is the
@@ -349,7 +339,7 @@ listens, and every browser connection crosses that one ssh connection as frames 
   committed offers no Add or Remove and refuses them `409`, as without the allowance (Sync now stays).
 - **A read-only page that still manages its users: `MASON_UI_READ_ONLY_ALLOW=users`.** For a site that proxies the page
   and lets its users' changes through its own checks, `MASON_UI_READ_ONLY=1` beside it keeps the Users page's Add a
-  user (with its Connects from), its "from …" line, **Disable**, **Enable** and **Remove**, and the Overview's Create a user. The
+  user (with its Connects from), its "from …" line, **Disable**, **Enable** and **Remove**, and the Overview's Getting started Create a user. The
   server lets through exactly these routes, each `<name>` exactly one path segment (a user's name, encoded), never a
   prefix:
   - `POST /api/users` (Add a user);
@@ -383,7 +373,7 @@ listens, and every browser connection crosses that one ssh connection as frames 
   setting per item: `MASON_UI_NAV_OVERVIEW_URL`, `MASON_UI_NAV_TABLES_URL`, `MASON_UI_NAV_USERS_URL`,
   `MASON_UI_NAV_QUERIES_URL`, `MASON_UI_NAV_USAGE_URL`, `MASON_UI_NAV_SYNC_EVENTS_URL`. The item keeps its label and
   icon and links to that URL in the same tab, sending no referrer, on the full sidebar, the icon rail and the phone's
-  menu. Every link of Mason's own into that view goes there too — the Overview's Create a user and its Getting started
+  menu. Every link of Mason's own into that view goes there too — the Overview's Getting started
   step, a card, a client's Queries, a table's sync events, a page's lead — and so does opening the view's address
   (`#users`, `#users?…`, an old one such as `#queries`): the page replaces it with the URL, so Back does not land on it
   again. With the Overview replaced, the page opened with no address shows its first item not replaced. The URL is read

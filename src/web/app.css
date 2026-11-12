@@ -105,7 +105,7 @@ a:hover { text-decoration-color: var(--accent); text-decoration-thickness: 2px; 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 0; }
 h1, h2, h3 { font-family: var(--font-mono); font-weight: 700; letter-spacing: -0.01em; }
 /* the slab: a title and a big number, cut like a mason's letters (one weight, 700) */
-h2, h3, .health, .card-value, .brand-name, .checklist-title, .connect.first .connect-title, .empty .empty-title { font-family: var(--font-display); font-weight: 700; letter-spacing: 0; }
+h2, h3, .health-word, .health-title, .card-value, .brand-name, .checklist-title, .connect.first .connect-title, .empty .empty-title { font-family: var(--font-display); font-weight: 700; letter-spacing: 0; }
 h3 { font-size: 20px; margin: var(--space-6) 0 var(--space-3); }
 code, pre, kbd, samp { font-family: var(--font-mono); font-size: 0.95em; }
 code { overflow-wrap: anywhere; }
@@ -237,10 +237,13 @@ section { margin: 0; }
 @keyframes pulse { 50% { opacity: 0.35; } }
 @media (prefers-reduced-motion: reduce) { .indicator.warn .dot, .skeleton { animation: none; } }
 
-/* the run's word at the top of the Overview: a big dot and the CLI's word */
-.health { display: flex; align-items: center; gap: var(--space-3); margin: 0 0 var(--space-5); padding: var(--space-4) var(--space-5);
-  background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); font-size: var(--text-xl); font-weight: 800; letter-spacing: -0.02em; }
-.health { font-size: 28px; font-weight: 700; letter-spacing: 0; }
+/* the run's word at the top of the Overview, under its title on the box's top edge ("mason status", as Getting started's):
+   a big dot and the CLI's word, then what it means for the synced data in a line */
+.health { margin: var(--space-6) 0 var(--space-5); padding: var(--space-4) var(--space-5);
+  background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); }
+.health .health-title { font-size: var(--text-lg); }
+.health .health-word { display: flex; align-items: center; gap: var(--space-3); margin: 0; font-size: 28px; font-weight: 700; letter-spacing: 0; line-height: 1.2; }
+.health .health-line { margin: var(--space-2) 0 0; font-family: var(--font-sans); font-size: var(--text-md); color: var(--muted); }
 /* its marker: a brick in the run's colour, set in a course of mortar of the same */
 .health .dot { width: 22px; height: 12px; border-radius: 0; background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); flex: none; }
 .health.ok .dot { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
@@ -326,6 +329,9 @@ ul.checks pre.sql { margin: var(--space-1) 0 0; padding: var(--space-1) var(--sp
 /* seven (Mason's six and the host's card): four over three on a wide screen (a twelve-column grid), and below it as
    auto-fit lays them, the odd last one spanning on a phone */
 @media (min-width: 1100px) { .cards.n7 { grid-template-columns: repeat(12, 1fr); } .cards.n7 > * { grid-column: span 3; } .cards.n7 > :nth-child(n+5) { grid-column: span 4; } }
+/* eight (Mason's own: the copies, rows, last sync, file, statements, p95, sync errors, query errors) as four over four
+   from a tablet up; nine (with the host's card) as three by three. On a phone two a row, nine's last spanning it */
+@media (min-width: 641px) { .cards.n8 { grid-template-columns: repeat(4, 1fr); } .cards.n9 { grid-template-columns: repeat(3, 1fr); } }
 .card { background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-4); min-width: 0;
   display: flex; flex-direction: column; gap: var(--space-1); }
 .card-label { margin: 0; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
@@ -363,10 +369,9 @@ thead tr:first-child th:first-child { border-top-left-radius: var(--radius-lg); 
 thead tr:first-child th:last-child { border-top-right-radius: var(--radius-lg); }
 tbody tr:hover > * { background: var(--hover); }
 tbody th[scope="row"] { color: var(--fg); font-weight: 500; white-space: nowrap; }
-td.num, th.num, table.queries td, table.samples td.num, table.sizes td.num, table.catalog td.num { text-align: right; white-space: nowrap;
+td.num, th.num, table.samples td.num, table.sizes td.num, table.catalog td.num { text-align: right; white-space: nowrap;
   font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 tbody th code { white-space: nowrap; overflow-wrap: normal; }
-table.queries thead th:not(:first-child) { text-align: right; }
 td.act { text-align: right; white-space: nowrap; }
 .confirm { white-space: normal; }
 tr.under > td { border-top: 0; padding-top: 0; }
@@ -376,7 +381,6 @@ tr.under > td { border-top: 0; padding-top: 0; }
 table.facts-table th[scope="row"] { width: 1%; padding-right: var(--space-5); }
 table.facts-table td { overflow-wrap: anywhere; }
 /* the recent errors: a client's name, a user's or a statement unbroken by spaces wraps inside its cell, never past the page */
-table.errors td { overflow-wrap: anywhere; }
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-1) var(--space-4); margin: 0; font-size: var(--text-sm); }
 .facts dt { color: var(--muted); }
 .facts dd { margin: 0; overflow-wrap: anywhere; font-family: var(--font-mono); }
@@ -458,7 +462,9 @@ details.memory, details#syncs-raw { margin: var(--space-4) 0; }
   .cards { grid-template-columns: 1fr 1fr; gap: var(--space-2); }
   .card { padding: var(--space-3); }
   .card-value { font-size: var(--text-lg); }
-  .health { font-size: var(--text-lg); padding: var(--space-3) var(--space-4); }
+  .health { padding: var(--space-3) var(--space-4); }
+  .health .health-word { font-size: var(--text-lg); }
+  .health .health-title { margin-top: calc(-1 * var(--space-3) - 0.8em); }
   /* a table scrolls inside its card, never the page (its caption then heads the card) */
   table { display: block; overflow-x: auto; }
   caption { display: block; padding: var(--space-3) var(--space-3) var(--space-1); }
@@ -560,7 +566,7 @@ fieldset.connects:has(input[value="any"]:checked) .ranges { display: none; }
 /* a box whose title sits on its top edge, as a fieldset's legend does (Connect, Getting started, a chart's name) */
 .connect { background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-4) var(--space-5); margin: var(--space-6) 0 var(--space-6); }
 .connect.first { border-width: 2px; }
-.connect .connect-title, .checklist .checklist-title { width: fit-content; max-width: 100%; margin: calc(-1 * var(--space-4) - 0.8em) 0 var(--space-2) calc(-1 * var(--space-2));
+.connect .connect-title, .checklist .checklist-title, .health .health-title { width: fit-content; max-width: 100%; margin: calc(-1 * var(--space-4) - 0.8em) 0 var(--space-2) calc(-1 * var(--space-2));
   padding: 0 var(--space-2); background: var(--surface); font-weight: 700; line-height: 1.6; }
 .connect.first .connect-title { font-size: var(--text-lg); }
 .connect .facts { margin: 0 0 var(--space-3); gap: var(--space-2) var(--space-4); align-items: center; }

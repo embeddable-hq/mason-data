@@ -2,6 +2,16 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **The Overview is shorter, and says what its word means.** Under the title "mason status", Ready, Under way or
+  Failed now has a line saying what it means for the synced data: every added table is synced and served; how many of
+  the added tables are synced while the rest sync; or how many tables' syncs failed, with a link to them on Tables.
+  Getting started has three steps (Mason is running, a table synced, a user created) and goes once those are done.
+- **Two new cards on the Overview: Sync errors and Query errors, the last day.** Each counts the failures of the last
+  24 hours and links to them (Sync events, failures only; Queries, the refused or failed statements); a count the page
+  could not read says "unknown" and why. They replace the lists of recent errors at the foot of the page. The table of
+  the last day's and week's statements is gone too (the Statements and p95 cards stay, and Queries lists every
+  statement), and so is the Connect panel, with Connect from anywhere: the Postgres URL is still on Queries while its
+  log is empty, on the Users page, and in `mason status`; `mason share` opens a share from the command line.
 - **The Tables page lists the added tables first**, then the tables not added, so on a database of hundreds of
   tables the ones Mason syncs are at the top under All. A table you add or remove keeps its row, its state changing in
   place, and moves to its group the next time the list is laid out: when you open the page again, or change the search

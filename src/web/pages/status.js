@@ -1,33 +1,31 @@
 /**
- * THE OVERVIEW (#overview; `#status`, its old address, lands here; the module and its section keep the id `status`): what `mason status` prints — the run in one word (`readiness`), ONE table of facts (the
- * database and how its changes arrive, Mason's version, uptime and restarts, the copies in all, the copy's file, the
- * disk, the sessions open, the warnings), the changes the stream carries (replication mode: its position, lag, last
- * batch and the slot's hold on the database's WAL), the statements of the last day and week, the copies not finished (a
- * bar each, only while there are any), and the recent errors (the sync's and the statements', and the last day's
- * unsupported SQL in a line). The slow and the refused statements are the Queries page's. Reads `/api/state` every poll, the request log's every 30 s, the last 24 hours of
- * usage (the cards' sparklines) every 60 s. Never the engine's name.
+ * THE OVERVIEW (#overview; `#status`, its old address, lands here; the module and its section keep the id `status`): what `mason status` prints — the run in one word (`readiness`)
+ * and what it means for the synced data in a line, ONE table of facts (the database and how its changes arrive, Mason's
+ * version, uptime and restarts, the disk, the sessions open, the warnings), the changes the stream carries (replication
+ * mode: its position, lag, last batch and the slot's hold on the database's WAL), the copies not finished (a bar each,
+ * only while there are any), and the last day's unsupported SQL in a line. The statements, the slow, the refused and the
+ * failed ones are the Queries page's; the sync's failures Sync events'. Reads `/api/state` every poll, the request log's
+ * summary, the last day's sync failures, the unsupported SQL and the users every 30 s, the last 24 hours of usage (the
+ * cards' sparklines) every 60 s. Never the engine's name.
  *
- * Laid out as a dashboard (docs/WEB-UI.md "Presentation"): the word with a big dot, then KPI cards (the copies in all,
- * their rows, the last sync, the copy's file, the last day's statements and their p95 — each its own fact, said once,
- * with a sparkline of the last 24 hours where one helps), the copies not finished, the ONE table of the other facts,
- * the stream, the statements, the recent errors. Each card links into the view that lists what it counts (the tables,
- * filtered to the failed ones when a copy failed; Observability's Queries — the slow ones for the p95 — and Usage).
+ * Laid out as a dashboard (docs/WEB-UI.md "Presentation"): the word with a big dot under its title, then KPI cards (the
+ * copies in all, their rows, the last sync, the copy's file, the last day's statements and their p95, the last day's sync
+ * errors and query errors — each its own fact, said once, with a sparkline of the last 24 hours where one helps), the
+ * copies not finished, the ONE table of the other facts, the stream. Each card links into the view that lists what it
+ * counts (the tables, filtered to the failed ones when a copy failed; Observability's Queries — the slow ones for the
+ * p95, the refused or failed ones for the query errors —, Sync events' failures, and Usage).
  */
 
 /** Where each card leads: the views that list what it counts (src/web/app.js hashes). */
-// each with the range of what it counts — the statements of the last day, the sync's failures of the days kept — never
+// each with the range of what it counts — the statements of the last day, the sync's failures of the last day — never
 // the Observability views' default, Now: a card that says 12 failed must land on the 12
 const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage?range=24h", queries: "#observability/queries?range=24h",
-  slow: "#observability/queries?slow=1&range=24h", failedQueries: "#observability/queries?status=refused-or-failed&range=24h", failedEvents: "#observability/syncs?failures=1&range=7d" };
+  slow: "#observability/queries?slow=1&range=24h", failedQueries: "#observability/queries?status=refused-or-failed&range=24h", failedEvents: "#observability/syncs?failures=1&range=24h" };
 import { VIEW_HASHES } from "../routes.js";
 import { statementMsText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
-  utcMinute, oneLine, clientText, eventCells, unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, renderConnect, copyClick,
-  badge, button, copyable, pop, renderFailure, json, readOnlyLine, tablesReadOnly, usersReadOnly } from "../shared.js";
+  unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, copyClick, readOnlyLine, tablesReadOnly, usersReadOnly } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
 import { readHost, hostEvery, hostKey, renderHostCard } from "../host-view.js";
-
-/** How many recent errors of each kind are shown: mason status's (src/cli/commands.ts `RECENT_ERRORS`, held equal by the tests). */
-export const RECENT_ERRORS = 5;
 
 /** The last 24 hours an hour a point: the cards' sparklines (Usage's read at its default range). */
 const HOURLY = usagePath("24h");
@@ -220,11 +218,39 @@ export function totalsText(t, now = Date.now()) {
   return `${n(t.copied)} of ${n(t.added)} added synced, ${n(t.rows)} row${t.rows === 1 ? "" : "s"}${t.failed ? `, ${n(t.failed)} failed` : ""}${last}`;
 }
 
-/** The word at the top of the page: the run's readiness ("" with no table added: `renderStatus` says so, and what adds one). */
+/** What Ready means for the synced data, as `mason status` ends on it after the word (src/cli/readiness.ts `READY_TEXT`,
+ *  held equal by tests/web-page.test.ts). */
+export const READY_TEXT = "every added table is synced and served";
+
+/**
+ * WHAT THE WORD MEANS FOR THE SYNCED DATA, in one short line under it, from what `/api/state` says (`readiness`,
+ * `totals`, the tables' `sync.state`): Ready, `READY_TEXT`; Failed, how many tables' syncs failed, and Tables (the failed
+ * ones) to see them; Under way, how many of the added tables are synced and that the rest are syncing — or, every one
+ * synced, how many are being caught up by their one poll. `{ text, link }`: `link` the words linked after the text, or null.
+ */
+export function readinessLine(s) {
+  const r = s.readiness, t = s.totals;
+  const cap = (x) => x[0].toUpperCase() + x.slice(1);
+  if (r.ready) return { text: cap(READY_TEXT), link: null };
+  if (r.failed.length) {
+    const k = r.failed.length;
+    return { text: `${n(k)} ${k === 1 ? "table's sync" : "tables' syncs"} failed: see `, link: "Tables" };
+  }
+  const added = t?.added ?? s.tables.filter((x) => x.added).length, copied = t?.copied ?? 0;
+  if (copied < added) return { text: `${n(copied)} of ${n(added)} tables synced, the rest syncing`, link: null };
+  const catching = s.tables.filter((x) => x.added && x.sync?.state === "catching-up").length;
+  return { text: catching ? `Every added table is synced, ${n(catching)} being caught up by one poll` : "Every added table is synced, its last steps under way", link: null };
+}
+
+/** The word at the top of the page under its title, "mason status", and what it means in a line (`readinessLine`): the
+ *  run's readiness ("" with no table added: `renderStatus` says so, and what adds one). */
 export function renderHealth(s) {
   if (!s.tables.some((t) => t.added) || !s.readiness) return "";
   const word = readinessWord(s.readiness);
-  return `<div class="health ${word === "Ready" ? "ok" : word === "Failed" ? "bad" : "warn"}" role="status"><span class="dot" aria-hidden="true"></span><span class="word">${esc(word)}</span></div>`;
+  const line = readinessLine(s);
+  return `<div class="health ${word === "Ready" ? "ok" : word === "Failed" ? "bad" : "warn"}" role="status"><p class="health-title">mason status</p>` +
+    `<p class="health-word"><span class="dot" aria-hidden="true"></span><span class="word">${esc(word)}</span></p>` +
+    `<p class="health-line">${esc(line.text)}${line.link === null ? "" : `<a href="${esc(LINKS.failedTables)}">${esc(line.link)}</a>`}</p></div>`;
 }
 
 /** The sparklines the cards draw, by holder key: a usage sample's field each (src/web/charts.js specs). */
@@ -241,8 +267,10 @@ export const copyingCount = (s) => s.tables.filter((t) => t.added && tableLine(t
 
 /**
  * THE KPI CARDS: the copies in all (synced of added, the failed), their rows, the last sync (how long ago, and when),
- * the copy's file (its size, or why it is unknown), and the last day's statements and their p95 from the request log
- * (`q`: `/api/queries`' body, or `{ failure }`). Each card's sparkline is the last 24 hours (`usage`), only where there
+ * the copy's file (its size, or why it is unknown), the last day's statements and their p95 from the request log
+ * (`q`: `/api/queries`' body, or `{ failure }`), and the last day's errors: the sync's failed events (`o.syncErrors`:
+ * `/api/events?failed=1&since=24h`'s body, or `{ failure }`) and the statements refused or failed (`q`'s `day`). A count
+ * that could not be read is "unknown" with its reason, never 0; one not read yet is not shown. Each card's sparkline is the last 24 hours (`usage`), only where there
  * are two hours to draw; its numbers are the card's text either way. These facts are said here, and not in the facts table.
  * With the host's card (`/api/state` `pageCard`, mason serve's MASON_UI_OVERVIEW_CARD; `o.hostCard` its read), it is one
  * more card, last (src/web/host-view.js `renderHostCard`); without it, nothing changes.
@@ -271,6 +299,23 @@ export function renderKpis(s, o = {}) {
       list.push(card("Statements, last day", n(day.statements), `${n(day.completed)} completed${bad ? `, ${n(bad)} refused, failed or cancelled` : ""}`, line("statements"), day.failed ? "warn" : "", LINKS.queries),
         card("p95, last day", day.durationMs === null ? "–" : statementMsText(day.durationMs.p95),
           day.durationMs === null ? "no statement completed" : `average ${statementMsText(day.durationMs.avg)} · p50 ${statementMsText(day.durationMs.p50)}`, line("p95"), "", LINKS.slow));
+    }
+  }
+  const ev = o.syncErrors;
+  if (added && ev !== undefined) {
+    if ("failure" in ev) list.push(card("Sync errors, last day", "unknown", `could not read them: ${firstLine(ev.failure.message)}`, "", "", LINKS.failedEvents));
+    else {
+      const k = ev.events.filter((e) => e.failed).length;
+      // the read is capped (SYNC_ERRORS_LIMIT): at the cap there may be more, said as at least that many
+      const capped = ev.events.length >= SYNC_ERRORS_LIMIT;
+      list.push(card("Sync errors, last day", `${n(k)}${capped ? "+" : ""}`, capped ? `at least ${n(k)} failed sync events` : `failed sync event${k === 1 ? "" : "s"}`, "", k ? "bad" : "", LINKS.failedEvents));
+    }
+  }
+  if (added && q !== undefined) {
+    if ("failure" in q) list.push(card("Query errors, last day", "unknown", `could not read them: ${firstLine(q.failure.message)}`, "", "", LINKS.failedQueries));
+    else {
+      const day = q.queries.day, k = day.refused + day.failed;
+      list.push(card("Query errors, last day", n(k), `${n(day.refused)} refused, ${n(day.failed)} failed`, "", day.failed ? "warn" : "", LINKS.failedQueries));
     }
   }
   if (typeof s.pageCard === "string") list.push(renderHostCard(o.hostCard));
@@ -342,43 +387,6 @@ function renderProgress(s, isOpen = () => false, shares = new Map(), before = ne
 }
 
 /**
- * THE STATEMENTS of the last day and week (`/api/queries`, mason status's `Queries`, src/cli/commands.ts `queryLines`):
- * how many, each outcome, the completed ones' average / p50 / p95 in ms, the rows and bytes sent; when the request log
- * keeps fewer days than the week, that it is only what it keeps. `q` is the body, or `{ failure }`.
- */
-export function renderQueries(q) {
-  if (q === undefined) return "";
-  if ("failure" in q) return `<p class="count">Queries: could not read them (${esc(firstLine(q.failure.message))}; ${code("mason logs")} has the detail)</p>`;
-  const w = q.queries;
-  const ms = statementMsText;
-  const row = (label, x) => `<tr><th scope="row">${esc(label)}</th>${[n(x.statements), n(x.completed), n(x.refused), n(x.failed), n(x.cancelled),
-    x.durationMs === null ? "" : ms(x.durationMs.avg), x.durationMs === null ? "" : ms(x.durationMs.p50), x.durationMs === null ? "" : ms(x.durationMs.p95),
-    n(x.rows), bytesText(x.bytesSent)].map((v) => `<td class="num">${esc(v)}</td>`).join("")}</tr>`;
-  const short = [w.day, w.week].find((x) => x.covered < x.days);
-  // eleven columns of numbers: wider than a laptop's page beside the sidebar, so the table scrolls inside its own box, never the page
-  return `<div class="table-wrap"><table class="queries"><caption>Statements (the completed ones' time; ${code("mason logs --requests")} lists each)</caption><thead><tr><th scope="col"></th>` +
-    ["Statements", "Completed", "Refused", "Failed", "Cancelled", "Average", "p50", "p95", "Rows sent", "Sent"].map((h) => `<th scope="col">${h}</th>`).join("") +
-    `</tr></thead><tbody>${row("Last day", w.day)}${row("Last week", w.week)}</tbody></table></div>` +
-    (short ? `<p class="dim">The request log keeps ${short.covered} day${short.covered === 1 ? "" : "s"}: MASON_HISTORY_DAYS.</p>` : "") +
-    `<p class="dim">The slow and the refused statements, and every other, are on <a href="${esc(LINKS.queries)}">Observability › Queries</a> (${code("mason logs --requests")}).</p>`;
-}
-
-/** A failed statement's cells, as mason status's `Query errors` line says them (src/cli/commands.ts `requestLine`): when,
- *  the outcome and SQLSTATE, how long, the rows sent, who, the statement on one line and the error's first line. */
-export function requestCells(r) {
-  return [utcText(r.startedAt), r.outcome === "ok" ? "ok" : `${r.outcome} ${r.sqlstate ?? ""}`.trim(), statementMsText(r.durationMs),
-    r.rows === null ? "" : `${n(r.rows)} row${r.rows === 1 ? "" : "s"}`,
-    `${clientText(r.applicationName)}${r.tokenName ? ` (token ${r.tokenName})` : ""}${r.user ? ` (user ${r.user})` : ""}`,
-    oneLine(r.query, 120) || "(no statement)", r.message ? firstLine(r.message) : ""];
-}
-
-/** A row of cells; `outcomeAt` is the column that says `refused 42P01`: the word is shown, the SQLSTATE is its title (`--json` and the CLI's line keep it). */
-const cellsRow = (cells, outcomeAt = -1) => `<tr><th scope="row">${esc(cells[0])}</th>${cells.slice(1).map((c, i) => {
-  const m = i + 1 === outcomeAt ? /^(\S+) (\S+)$/.exec(c) : null;
-  return m ? `<td title="SQLSTATE ${esc(m[2])}">${esc(m[1])}</td>` : `<td>${esc(c)}</td>`;
-}).join("")}</tr>`;
-
-/**
  * THE UNSUPPORTED SQL OF THE LAST DAY in one line, as mason status heads it (`/api/unsupported`'s body, its default day):
  * the most refused entry's line (`unsupportedEntry`), how many others there are, and See all (Observability › Queries
  * lists each). Nothing when none was refused; one that could not be read says why, as mason status does.
@@ -393,36 +401,17 @@ export function renderUnsupportedLine(u) {
 }
 
 /**
- * THE RECENT ERRORS, as mason status lists them (`recentErrors`): the sync's latest failures (`/api/events?failed=1`)
- * and the latest statements refused, failed or cancelled (`/api/requests?failed=1`), newest last; a kind with none
- * says so, one that could not be read says why; then the last day's unsupported SQL in a line, when there is any
- * (`renderUnsupportedLine`). Each argument is the body, or `{ failure }`.
- */
-export function renderRecentErrors(events, requests, unsupported) {
-  const part = (title, r, list, head, cells, more, href, outcomeAt) => r === undefined ? ""
-    : "failure" in r ? `<h3>${title}</h3><p class="count">Could not read them (${esc(firstLine(r.failure.message))}; ${code("mason logs")} has the detail)</p>`
-    : !list(r).length ? `<h3>${title}</h3><p class="dim">None.</p>`
-    : `<table class="errors"><caption>${title} (the latest, newest last; ${code(more)} lists each) <a class="see" href="${esc(href)}">See all</a></caption><thead><tr>${head.map((h) => `<th scope="col">${h}</th>`).join("")}</tr></thead>` +
-      `<tbody>${list(r).map((x) => cellsRow(cells(x), outcomeAt)).join("")}</tbody></table>`;
-  return part("Sync errors", events, (r) => r.events, ["At (UTC)", "What", "Table", "Why"], (e) => Object.values(eventCells(e)), "mason logs --events", LINKS.failedEvents) +
-    part("Query errors", requests, (r) => r.requests, ["Started (UTC)", "Outcome", "Took", "Rows", "Who", "Statement", "Error"], requestCells, "mason logs --requests --failed", LINKS.failedQueries, 1) +
-    renderUnsupportedLine(unsupported);
-}
-
-/**
  * THE FIRST-RUN CHECKLIST, while setting up is not done: Mason is running (the state answered), a table copied (`totals`:
- * one served), a user created (`/api/users`: one not removed), a first statement answered (`/api/queries`: one completed
- * in the week the log keeps) — each ✓ or ○, a ○ with its one action: Add a table (Tables), Create a user (Users), the
- * psql line's Copy (Connect's, under it). "" once all four are done, and while a read it needs has not answered or
- * could not be read: a checklist never says ○ for what it could not tell. `users` is `/api/users`' body (or `{ failure }`).
+ * one served), a user created (`/api/users`: one not removed) — each ✓ or ○, a ○ with its one action: Add a table
+ * (Tables), Create a user (Users). "" once all three are done, and while the users' read has not answered or could not
+ * be read: a checklist never says ○ for what it could not tell. `users` is `/api/users`' body (or `{ failure }`).
  */
-export function renderChecklist(s, queries, users) {
-  if (queries === undefined || users === undefined || "failure" in queries || "failure" in users) return "";
+export function renderChecklist(s, users) {
+  if (users === undefined || "failure" in users) return "";
   const added = s.tables.some((t) => t.added);
   const copied = (s.totals?.copied ?? 0) > 0;
   const user = users.users.some((u) => u.removedAt == null);
-  const answered = queries.queries.week.completed > 0;
-  if (copied && user && answered) return "";
+  if (copied && user) return "";
   const copying = added && !copied && copyingCount(s) > 0;
   // a read-only page (MASON_UI_READ_ONLY=1) sends no one to add what it would refuse to add: a user unless its users
   // are still its own (MASON_UI_READ_ONLY_ALLOW=users), and a table unless its tables are (=tables)
@@ -432,8 +421,6 @@ export function renderChecklist(s, queries, users) {
     ["Mason is running", true, ""],
     ["A table synced", copied, copying ? `<span class="dim">syncing now</span>` : added || tablesLook ? "" : `<a class="btn small primary" href="${LINKS.tables}">Add a table</a>`],
     ["A user created", user, looks ? "" : `<a class="btn small${copied ? " primary" : ""}" href="#users">Create a user</a>`],
-    // the psql line is Connect's (rendered under the checklist once a table is added): its Copy copies it
-    ["A first statement answered", answered, copied ? `${`<button type="button" class="small${user ? " primary" : ""}" data-copy="connect-psql">Copy the psql line</button>`} <span class="dim">then run a select on a synced table</span>` : ""],
   ];
   const done = steps.filter(([, ok]) => ok).length;
   return `<div class="checklist" role="group" aria-label="Getting started"><p class="checklist-title"><span class="courses" aria-hidden="true">${steps.map(([, ok]) => `<i${ok ? ' class="on"' : ""}></i>`).join("")}</span>Getting started <span class="dim">${done} of ${steps.length} done</span></p><ol>` +
@@ -442,85 +429,34 @@ export function renderChecklist(s, queries, users) {
 }
 
 /** What a read-only page's Overview does not do (`readOnlyLine`'s words), by what it still may (MASON_UI_READ_ONLY_ALLOW):
- *  never a share; a table unless `tables`, a user unless `users`. */
-const readOnlyWhat = (tables, users) => tables && users ? "Nothing is shared" : tables ? "No user is created and nothing is shared"
-  : users ? "Nothing is shared or added" : "Nothing is shared, added or created";
+ *  a table unless `tables`, a user unless `users`; null when it still does both (no line). */
+const readOnlyWhat = (tables, users) => tables && users ? null : tables ? "No user is created" : users ? "No table is added" : "Nothing is added or created";
 
 /**
- * THE OVERVIEW from `/api/state` and the request log's reads (`o.queries`, `o.events`, `o.requests`, `o.unsupported`, `o.usage`:
- * each the body, or `{ failure }`; `o.now` the clock; `o.open(key)` whether a details is open): the word, the cards,
- * the copies not finished, the facts, the stream, the statements, the recent errors. Never the engine's name.
+ * THE OVERVIEW from `/api/state` and the slower reads (`o.queries`, `o.syncErrors`, `o.unsupported`, `o.users`, `o.usage`:
+ * each the body, or `{ failure }`; `o.now` the clock; `o.open(key)` whether a details is open): the word, the checklist,
+ * the cards, the copies not finished, the facts, the stream, the unsupported SQL's line. Never the engine's name.
  */
 export function renderStatus(s, o = {}) {
   const now = o.now ?? Date.now();
   const added = s.tables.some((t) => t.added);
-  // how to connect, once a table is added: first under the cards while nothing has asked Mason anything (the last
-  // day's and week's statements, read as none), else after the facts, for the next tool
-  const first = isFirstConnect(o.queries);
-  const connect = added ? renderConnect(s.postgres, { first, served: s.served === true, table: s.tables.find((t) => t.added && t.copy?.phase === "done")?.table ?? null,
-    share: renderShare(s, o.share ?? NO_SHARE, now), readOnly: usersReadOnly(s) }) : "";
-  // a read-only page (MASON_UI_READ_ONLY=1): why it offers no share, no user and no table to add, as Tables and Users say it
-  return readOnlyLine(readOnlyWhat(tablesReadOnly(s) === null, usersReadOnly(s) === null), s.pageReadOnly) + renderHealth(s) + renderChecklist(s, o.queries, o.users) + renderKpis(s, { ...o, now }) + (first ? connect : "") + renderProgress(s, o.open, o.shares, o.before) + renderFacts(s, now) + (first ? "" : connect) + renderStream(s, now) +
-    (added ? renderQueries(o.queries) : "") + (added ? renderRecentErrors(o.events, o.requests, o.unsupported) : "");
+  // a read-only page (MASON_UI_READ_ONLY=1): why it offers no user and no table to add, as Tables and Users say it
+  const what = readOnlyWhat(tablesReadOnly(s) === null, usersReadOnly(s) === null);
+  return (what === null ? "" : readOnlyLine(what, s.pageReadOnly)) + renderHealth(s) + renderChecklist(s, o.users) + renderKpis(s, { ...o, now }) +
+    renderProgress(s, o.open, o.shares, o.before) + renderFacts(s, now) + renderStream(s, now) + (added ? renderUnsupportedLine(o.unsupported) : "");
 }
-
-// ------------------------------------------------------------------ Connect from anywhere (mason share, from the page)
-
-/** The page's share before anything was asked: what `renderShare` and the page's model start from. */
-export const NO_SHARE = Object.freeze({ phase: "none", choices: null, reads: null, role: null, opened: null, ended: null, failure: null });
-
-/** The share the page holds, as `/api/state` `share` lists it (`from: "page"`), or null. */
-export const pageShareOf = (s) => s?.share?.shares?.find((x) => x.from === "page") ?? null;
-
-/** When a free share ends, as `mason share` says it: about an hour, and the time. */
-const endsLine = (endsAt, now) => endsAt === null || endsAt === undefined ? "It ends when you Stop sharing, or when this page closes."
-  : `A free share ends within about an hour: at ${new Date(endsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}, in about ${Math.max(0, Math.round((Date.parse(endsAt) - now) / 60_000))} minutes. Then Connect from anywhere again gives a new address and password.`;
-
-/**
- * CONNECT FROM ANYWHERE, the Connect card's part (src/cli/page-share.ts; `mason share`'s, from the page): a pure function
- * of the state (`s`) and the page's own model (`m`: `phase` none · asking · opening · open · ended · refused, the roles
- * offered, the answer that opened it — the password is in it alone — and the failure). Nothing under `mason serve`.
- */
-export function renderShare(s, m = NO_SHARE, now = Date.now()) {
-  // a server's run has no share to open, and a read-only page (MASON_UI_READ_ONLY=1) opens nothing
-  if (s?.served === true || (s?.pageReadOnly ?? null) !== null) return "";
-  const open = pageShareOf(s);
-  const head = `<p class="connect-title share-title">Connect from anywhere</p>`;
-  const ask = button("Connect from anywhere", { shareAsk: "" }, "", { disabled: m.phase === "asking" || m.phase === "opening" });
-  const askLine = `<p class="tip" id="share-anchor">${ask} <span>For a tool in the cloud, which cannot reach this machine: a temporary public address and a password, as ${code("mason share")} opens. TLS is required of every connection.</span></p>`;
-  if (open !== null && m.phase !== "ended") {
-    const mine = m.opened !== null && m.opened.user === open.user ? m.opened : null;
-    const rows = [["Host", open.host ?? "opening…", "share-host"], ["Port", open.port === null ? "…" : String(open.port), "share-port"], ["Database", mine?.database ?? s.postgres?.database ?? "", null],
-      ["User", open.user, "share-user"], ...(mine !== null ? [["Password", mine.password, "share-password"]] : []), ["SSL mode", "require", null]];
-    return `<div class="share open" role="status">${head}<p class="headline">Shared ${badge("Public", "warn")} for <time data-tick datetime="${esc(open.openedAt)}">${esc(spanText((now - Date.parse(open.openedAt)) / 1000))}</time>` +
-      `${open.role !== null ? `, reading as the role ${esc(open.role)}` : ""}: ${esc(open.reads)}</p>` +
-      `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${id ? copyable(id, v) : esc(v)}</dd>`).join("")}</dl>` +
-      (mine !== null ? `<p class="tip">Paste it into the tool now: the password is shown this once, is kept nowhere, and ends with the share.</p>`
-        : `<p class="tip">The password was shown once, when it opened, and is kept nowhere: Stop sharing and Connect from anywhere again for a new one.</p>`) +
-      `<p class="tip">${esc(endsLine(open.endsAt, now))} It also ends within two minutes of this page closing.</p>` +
-      `<p class="tip">${button("Stop sharing", { shareStop: open.user }, "danger")}</p></div>`;
-  }
-  if (m.phase === "opening") return `<div class="share">${head}<p class="dim" aria-busy="true">Opening a temporary public address… (up to 30 s)</p></div>`;
-  const before = m.phase === "ended" && m.ended !== null
-    ? `<p class="said">The share ended: ${esc(m.ended.why)}. Its address no longer answers, and its password no longer works.</p>`
-    : m.phase === "refused" && m.failure !== null ? renderFailure(m.failure) : "";
-  const question = m.phase !== "asking" ? "" : pop("share-anchor", m.choices === null ? `<p class="dim">Reading the roles…</p>` :
-    `<p>This opens a <strong>temporary public address</strong>: anyone with it and its password reads ${esc(m.reads ?? "what the role you choose reads")}. A free share ends within about an hour, and when this page closes.</p>` +
-    (m.choices.length > 0 ? `<label for="share-role">Read as the role</label> <select id="share-role">${m.choices.map((c) => `<option value="${esc(c.role)}"${c.role === m.role ? " selected" : ""}>${esc(`${c.role}: ${c.reads}${c.default ? " (the file's default)" : ""}`)}</option>`).join("")}</select>` : "") +
-    `<p>${button("Open the address", { shareOpen: "" }, "primary")} ${button("Cancel", { shareCancel: "", popClose: "" })}</p>`, { kind: "dialog", label: "Connect from anywhere" });
-  return `<div class="share">${head}${before}${askLine}${question}</div>`;
-}
-
-/** Nothing has asked Mason anything yet: the last day's statements were read (`/api/queries`' body), and are none. */
-export const isFirstConnect = (q) => q !== undefined && !("failure" in q) && q.queries.day.statements === 0 && q.queries.week.statements === 0;
 
 /** The most entries of the unsupported SQL `/api/unsupported` answers (src/cli/run-server.ts MAX_UNSUPPORTED_LIMIT, held
  *  equal by the tests): the Overview says the first and counts the others, so it reads them all. */
 export const UNSUPPORTED_LIMIT = 100;
 
-/** What the page reads every 30 s beside the state: the request log's summary, the recent errors, and the last day's
- *  unsupported SQL. */
-const SLOWER = ["api/queries", `api/events?failed=1&limit=${RECENT_ERRORS}`, `api/requests?failed=1&limit=${RECENT_ERRORS}`, `api/unsupported?limit=${UNSUPPORTED_LIMIT}`, "api/users"];
+/** The most of the last day's failed sync events the Overview reads to count them (`/api/events`' limit): at it, the card
+ *  says at least that many. */
+export const SYNC_ERRORS_LIMIT = 1000;
+
+/** What the page reads every 30 s beside the state: the request log's summary (the statements' and query errors' cards),
+ *  the last day's sync failures (the sync errors' card), the last day's unsupported SQL, and the users (the checklist). */
+const SLOWER = ["api/queries", `api/events?failed=1&since=24h&limit=${SYNC_ERRORS_LIMIT}`, `api/unsupported?limit=${UNSUPPORTED_LIMIT}`, "api/users"];
 
 /** A read as `renderStatus` takes it: the body, or `{ failure }` when it could not be read; undefined before any read. */
 const asRequest = (r) => r === undefined ? undefined : r.failure ? { failure: r.failure } : r.body;
@@ -533,7 +469,6 @@ export const page = {
     // the details open (a copy's whole error), by key: a poll rewrites the section, and they stay open
     const opened = createOpenSet();
     const monotone = createMonotone();
-    const share = createShare(ctx);
     // the host's card (MASON_UI_OVERVIEW_CARD), once the state names it: read when the Overview is shown, and again at
     // its own `refresh` while it is (src/web/host-view.js)
     const cardPath = () => { const p = ctx.read("api/state")?.body?.pageCard; return typeof p === "string" ? p : null; };
@@ -542,114 +477,18 @@ export const page = {
       return p === null ? [] : [{ path: hostKey(p), everyMs: hostEvery(ctx.read(hostKey(p))?.body), ask: (fetchFn) => readHost(fetchFn, p) }];
     };
     return {
-      model: { open: opened.open, share: share.m },
+      model: { open: opened.open },
       reads: () => [{ path: "api/state", everyMs: POLL_MS }, ...SLOWER.map((path) => ({ path, everyMs: 30_000 })), { path: HOURLY, everyMs: 60_000 }, ...hostCardReads()],
-      actions: share.actions,
-      afterRead: () => share.afterRead(ctx.read("api/state")?.body),
-      input: (target) => share.input(target),
       view() {
         const st = ctx.read("api/state");
         if (!st?.body) return { status: st?.failure ? "" : skeleton(4) };
-        const [queries, events, requests, unsupported, users] = SLOWER.map((p) => asRequest(ctx.read(p)));
-        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, events, requests, unsupported, users, usage: ctx.read(HOURLY)?.body, hostCard: cardPath() === null ? undefined : ctx.read(hostKey(cardPath())), open: opened.has, shares: monotone.of(st.body), before: monotone.before, share: share.m }) };
+        const [queries, syncErrors, unsupported, users] = SLOWER.map((p) => asRequest(ctx.read(p)));
+        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, syncErrors, unsupported, users, usage: ctx.read(HOURLY)?.body, hostCard: cardPath() === null ? undefined : ctx.read(hostKey(cardPath())), open: opened.has, shares: monotone.of(st.body), before: monotone.before }) };
       },
       toggle: (target) => opened.toggle(target),
-      // Connect's Copy buttons, and Connect from anywhere's
-      click: (d, button, env) => share.click(d) ?? copyClick(d, button, env),
+      // the host card's Copy buttons
+      click: (d, button, env) => copyClick(d, button, env),
       charts: () => sparkSpecs(ctx.read(HOURLY)?.body),
     };
   },
 };
-
-/** What a page beats with, when the answer that opened the share does not say (src/cli/page-share.ts BEAT_MS). */
-const BEAT_MS = 15_000;
-
-/**
- * THE PAGE'S SIDE OF CONNECT FROM ANYWHERE (src/cli/page-share.ts has why each choice): ask once, open, BEAT while the
- * share is open — on a timer of its own, which runs while the tab is hidden (the poll does not: the person is in their
- * tool's tab, pasting) —, Stop sharing. The password is in `m.opened` alone, the page's memory, and is dropped the moment
- * the share is seen ended. `ctx.timers` is a test's clock; a browser's own otherwise.
- */
-export function createShare(ctx) {
-  const m = { ...NO_SHARE };
-  const timers = ctx.timers ?? globalThis;
-  let beating = null;
-  const stopBeats = () => { if (beating !== null) { timers.clearInterval(beating.id); beating = null; } };
-  const ended = (user, why) => { stopBeats(); m.opened = null; m.phase = "ended"; m.ended = { user, why }; };
-  const beat = async () => {
-    if (beating === null) return;
-    const user = beating.user;
-    const r = await ctx.ask(`api/share/${encodeURIComponent(user)}/beat`, json("POST"));
-    if ("failure" in r && r.failure.code === "not_found" && beating?.user === user) { ended(user, r.failure.message.replace(/^.*?; it ended: /, "")); await ctx.refresh(["api/state"]); }
-  };
-  const startBeats = (user, everyMs = BEAT_MS) => {
-    if (beating?.user === user) return;
-    stopBeats();
-    beating = { user, id: timers.setInterval(() => { void beat(); }, everyMs) };
-  };
-  const actions = {
-    /** Connect from anywhere: what a share would read, then the question */
-    async shareAsk() {
-      Object.assign(m, NO_SHARE, { phase: "asking" });
-      const r = await ctx.ask("api/share/choices");
-      if (m.phase !== "asking") return;
-      if ("failure" in r) { m.phase = "refused"; m.failure = r.failure; return; }
-      m.choices = r.body.choices;
-      m.reads = r.body.reads ?? null;
-      m.role = r.body.choices.find((c) => c.default)?.role ?? r.body.choices[0]?.role ?? null;
-    },
-    shareCancel() { Object.assign(m, NO_SHARE); },
-    shareRole(role) { if (m.choices?.some((c) => c.role === role)) m.role = role; },
-    /** the person said yes: the run opens the share (confirmed), and its one answer carries the password */
-    async shareOpen() {
-      if (m.phase !== "asking" || m.choices === null) return;
-      const role = m.choices.length > 0 ? m.role : null;
-      Object.assign(m, { phase: "opening", failure: null });
-      const r = await ctx.ask("api/share", json("POST", { from: "page", confirmed: true, ...(role !== null ? { role } : {}) }));
-      if ("failure" in r) { m.phase = "refused"; m.failure = r.failure; return; }
-      Object.assign(m, { phase: "open", opened: { ...r.body, seen: false } });
-      startBeats(r.body.user, r.body.beatMs);
-      await ctx.refresh(["api/state"]);
-    },
-    async shareStop(user) {
-      const r = await ctx.ask(`api/share/${encodeURIComponent(user)}`, json("DELETE"));
-      if ("failure" in r && r.failure.code !== "not_found") { m.phase = "refused"; m.failure = r.failure; return; }
-      ended(user, "Stop sharing, on this page");
-      await ctx.refresh(["api/state"]);
-    },
-    shareBeat: beat,
-  };
-  return {
-    m,
-    actions,
-    /** after each read of the state: a share of the page's open is beaten (a reload's too); the one this page opened,
-     *  once listed and now gone, ended — said with the run's why, and its password dropped */
-    afterRead(s) {
-      if (s === undefined || s === null) return;
-      const open = pageShareOf(s);
-      if (open !== null) {
-        if (m.opened?.user === open.user) m.opened.seen = true;
-        if (m.phase === "ended" && m.ended?.user === open.user) return;
-        if (m.phase === "none" || m.phase === "ended") m.phase = "open";
-        startBeats(open.user);
-        return;
-      }
-      if (m.phase === "open" && (m.opened === null || m.opened.seen)) {
-        const user = m.opened?.user ?? beating?.user ?? null;
-        ended(user, s.shareEnded !== null && s.shareEnded !== undefined && s.shareEnded.user === user ? s.shareEnded.why : "it is no longer open");
-      }
-    },
-    input(target) {
-      if (target?.id !== "share-role") return null;
-      actions.shareRole(target.value);
-      return true;
-    },
-    click(d) {
-      if (d.shareAsk !== undefined) return actions.shareAsk() ?? true;
-      if (d.shareOpen !== undefined) return actions.shareOpen();
-      if (d.shareCancel !== undefined) return actions.shareCancel() ?? true;
-      if (d.shareStop !== undefined) return actions.shareStop(d.shareStop);
-      return null;
-    },
-  };
-}

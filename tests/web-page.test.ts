@@ -24,7 +24,6 @@ import * as syncCommand from "../src/cli/sync.ts";
 import { PLAIN } from "../src/cli/style.ts";
 import { EVENT_KINDS, type SyncEvent } from "../src/duck/events.ts";
 import { timeOf } from "../src/cli/request-filter.ts";
-import type { LedgerRequest } from "../src/duck/requests.ts";
 import type { RolesLive } from "../src/duck/grants.ts";
 
 const WEB = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "web");
@@ -165,20 +164,16 @@ const activityOf = (o: { window?: Record<string, unknown>; clients?: unknown[]; 
   clientsTotal: o.clientsTotal ?? { clients: (o.clients ?? CLIENTS).length, sessions: (o.clients ?? CLIENTS).reduce((a: number, c) => a + (c as { sessions: number }).sessions, 0) } });
 const EVENT: SyncEvent = { at: "2026-10-27T09:03:10.123Z", kind: "poll_failed", failed: true, table: "public.orders", message: "poll: connection reset\nthe sync tries it again in 5 s" };
 const EVENTS = { events: [EVENT, { at: "2026-10-27T09:04:00.000Z", kind: "restart", failed: true, table: null, message: "the run was started again after it stopped" }], keptDays: 7 };
-const REQUEST: LedgerRequest = { requestId: "0b9e5c1e-0000-4000-8000-000000000001", startedAt: "2026-10-27T09:02:00.500Z", session: 7, applicationName: "Metabase", clientAddress: null, tokenName: "", user: "metabase", role: "", attributes: null,
-  method: "QUERY", outcome: "refused", status: "failed", sqlstate: "42P01", message: "relation \"nope\" does not exist\nLINE 1", detail: null, hint: null, rows: null, durationMs: 3,
-  endedAt: "2026-10-27T09:02:00.503Z", bytesSent: 120, query: "SELECT *\n  FROM nope", queryTruncated: false, plan: null, planTruncated: false };
-const FAILED_REQUESTS = { requests: [REQUEST, { ...REQUEST, requestId: "0b9e5c1e-0000-4000-8000-000000000002", applicationName: "", user: "", outcome: "cancelled", sqlstate: "57014",
-  message: "canceling statement due to user request", rows: 10, durationMs: 12_345, query: `SELECT ${"x, ".repeat(60)}1` }], keptDays: 7 };
 const USAGE = { since: "2026-10-27T09:04:30.000Z", until: "2026-10-27T09:05:30.000Z", stepSeconds: null, sampleSeconds: 60, keptDays: 7, samples: [],
   copySizes: [{ table: "public.customers", bytes: 524_288, at: "2026-10-27T09:00:00.000Z" }, { table: "public.events", bytes: 3_221_225_472, at: "2026-10-27T09:00:00.000Z" }] };
 
-/** What the Overview reads, in order: the state every poll, the request log's every 30 s. */
-const STATUS_READS = ["GET api/state", "GET api/queries", "GET api/events?failed=1&limit=5", "GET api/requests?failed=1&limit=5", "GET api/unsupported?limit=100", "GET api/users"];
+/** What the Overview reads, in order: the state every poll, the request log's summary, the last day's sync failures, the
+ *  unsupported SQL and the users every 30 s. */
+const STATUS_READS = ["GET api/state", "GET api/queries", "GET api/events?failed=1&since=24h&limit=1000", "GET api/unsupported?limit=100", "GET api/users"];
 /** The Overview's first poll: those, and the last 24 hours of usage its cards' sparklines draw (read once a minute). */
 const STATUS_FIRST = [...STATUS_READS, "GET api/usage?since=24h&step=3600"];
 /** The run's word at the top of the Overview, as it is written: a big dot, then the word. */
-const HEALTH = (kind: string, word: string) => new RegExp(`^<div class="health ${kind}" role="status"><span class="dot" aria-hidden="true"></span><span class="word">${word}</span></div>`);
+const HEALTH = (kind: string, word: string) => new RegExp(`^<div class="health ${kind}" role="status"><p class="health-title">mason status</p><p class="health-word"><span class="dot" aria-hidden="true"></span><span class="word">${word}</span></p><p class="health-line">`);
 
 // ------------------------------------------------------------------ the DOM-free helpers, held to the commands'
 
@@ -308,7 +303,7 @@ test("a demo project's database row says it is the demo database Mason hosts, po
 // ------------------------------------------------------------------ what the page writes
 
 test("running: the database masked, each table copied with its rows, the counts, Ready — and never the engine's name", () => {
-  const html = fn<[unknown, unknown?], string>("renderStatus")(RUNNING, { now: NOW, queries: QUERIES, events: EVENTS, requests: FAILED_REQUESTS });
+  const html = fn<[unknown, unknown?], string>("renderStatus")(RUNNING, { now: NOW, queries: QUERIES, syncErrors: EVENTS });
   const text = textOf(html);
   assert.match(text, /Database postgres:\/\/shop:\*\*\*\*@db\.example\.com:5432\/shop · Postgres 16\.4/);
   assert.ok(!text.includes("secret"), "the password is the run's to mask, and it did");
@@ -317,7 +312,8 @@ test("running: the database masked, each table copied with its rows, the counts,
   assert.ok(!/Tables not synced yet|100%/.test(text), "every copy is done: no bar (the Tables page lists them)");
   assert.ok(!text.includes("public.audit"), "a table not added is not a line");
   assert.ok(!/Slow queries|Refused queries|Ready: every added table/.test(text), "the counts and the readiness line repeated the statements, the errors and the word");
-  assert.match(html, /<a href="#observability\/queries\?range=24h">Observability › Queries<\/a>/, "the statements are listed on Observability's Queries");
+  assert.match(html, /<a class="card[^"]*" href="#observability\/queries\?range=24h"><p class="card-label">Statements, last day<\/p>/, "the statements are listed on Observability's Queries");
+  assert.ok(!/<table class="(queries|errors)"/.test(html), "no table of the statements, nor lists of the errors: the cards count them, and link to them");
   assert.equal([...html.matchAll(/<table class="facts-table"/g)].length, 1, "ONE table of facts");
   assert.match(html, HEALTH("ok", "Ready"));
   assert.ok(!/duckdb/i.test(html), "the engine is named in the code and the docs, never on the page");
@@ -332,7 +328,7 @@ test("copying: the bar's share, the rows, the chunks, the rate and the time left
   // a copy not begun: its shimmer and its words, never a "0%" beside them (it reads as stuck before it starts)
   assert.match(text, /public\.orders 15% syncing .* public\.events waiting for its first sync to start/);
   assert.match(html, /<tr class="t-waiting"><th scope="row"><code class="name" title="public\.events">public\.events<\/code><\/th><td class="bar"><span class="copybar indeterminate" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="public\.events: its first sync" aria-valuetext="waiting for its first sync to start"><span class="track" aria-hidden="true"><span class="fill"[^>]*><\/span><\/span><\/span><\/td>/);
-  assert.match(text, /^Under way .* Tables not synced yet \(2 of 3 added\) Table Sync public\.orders 15% /);
+  assert.match(text, /^mason status Under way 1 of 3 tables synced, the rest syncing .* Tables not synced yet \(2 of 3 added\) Table Sync public\.orders 15% /);
   assert.ok(!/public\.customers/.test(text), "a copy that is done is not a bar");
 });
 
@@ -442,8 +438,9 @@ test("failed: its error on its line and in full, the warning, a table whose sync
   assert.match(text, /Warning mason\/sources\/shop\.yml: tables\.ordrs: no such table/);
   assert.match(text, /Changes each table as its sync: says · sync: off \(the default: the file writes none\) · sync: replication tables streamed as they happen \(logical replication: slot mason_dev_shop, publication app_pub, named: read as it is, never altered\); the others by a SELECT of their changed rows/);
   assert.ok(!/xmin|polling with SELECTs|goes back to polling/.test(text), "how the changes arrive is said in a web developer's words");
-  assert.match(text, /Queries: could not read them \(the request log cannot be read; mason logs has the detail\)/);
-  assert.match(text, /^Failed /);
+  assert.match(text, /Statements, last day unknown could not read them: the request log cannot be read Query errors, last day unknown could not read them: the request log cannot be read/);
+  assert.match(text, /^mason status Failed 1 table's sync failed: see Tables /);
+  assert.match(html, /<p class="health-line">1 table&#39;s sync failed: see <a href="#tables\?show=failed">Tables<\/a><\/p>/);
   assert.match(html, /<tr class="warn"><th scope="row">Warning<\/th>/, "a warning is marked");
 });
 
@@ -713,14 +710,14 @@ test("a project deployed read-only (MASON_PROJECT_READONLY=1): the state the run
 
 /** Every control a page wrote that sends a change (src/web/pages/*.js): a button or a form by its marker. */
 const WRITE_CONTROLS = ["data-sync-table", "data-remove-table", "data-confirm-remove-table", "data-add-table", "data-choose", "data-choose-sync", 'id="add-user"', "data-remove=", "data-confirm-remove=",
-  "data-disable=", "data-confirm-disable=", "data-enable=", "data-ask-cancel", "data-confirm-cancel", "data-share-ask", "data-share-open", "data-share-stop"];
+  "data-disable=", "data-confirm-disable=", "data-enable=", "data-ask-cancel", "data-confirm-cancel"];
 /** The buttons a read-only page may write: each only shows, copies or moves what is shown, and sends no change. */
 const VIEW_BUTTONS = /^data-(copy|dismiss-[a-z-]+|pop-close|sort-table|sort-key|show-more|show-all|refresh-range|older|newest|open)$/;
 
 /** Every page of the app over a fake run whose state is `state`, a statement running and a user: what each page wrote. */
 async function everyPage(state: unknown): Promise<string> { return (await pageByPage(state)).all; }
 /** The same, each page's parts apart: `byPage.get(id)` is what the page `id` wrote. */
-async function pageByPage(state: unknown): Promise<{ all: string; byPage: Map<string, string> }> {
+async function pageByPage(state: unknown): Promise<{ all: string; byPage: Map<string, string>; overview: string }> {
   const run = fakeRun();
   run.answers.set("GET api/state", () => new Response(JSON.stringify(state), { status: 200 }));
   run.answers.set("GET api/running", () => new Response(JSON.stringify({ running: [{ session: 4, statement: 9, user: "metabase", applicationName: "Metabase", method: "QUERY",
@@ -729,18 +726,20 @@ async function pageByPage(state: unknown): Promise<{ all: string; byPage: Map<st
     { name: "old", id: "fedcba9876543210", addedAt: "2026-10-27T09:10:11.000Z", disabledAt: "2026-10-27T10:00:00.000Z", live: true }] }), { status: 200 }));
   const app = fn<[unknown], App>("createApp")(run.fetch);
   const byPage = new Map<string, string>();
+  let overview = "";
   for (const id of ["status", "tables", "queries", "users", "usage", "syncs"]) {
     app.show(id);
     await app.poll();
     byPage.set(id, Object.values(app.view()).join("\n"));
+    if (id === "status") overview = app.view().status!;
   }
-  return { all: [...byPage.values()].join("\n"), byPage };
+  return { all: [...byPage.values()].join("\n"), byPage, overview };
 }
 
-test("a read-only page (pageReadOnly): no page writes a control that sends a change — no Add, Remove, Sync, Columns…, Disable, Enable, Cancel, Add a user or Connect from anywhere; unset, each is there", async () => {
+test("a read-only page (pageReadOnly): no page writes a control that sends a change — no Add, Remove, Sync, Columns…, Disable, Enable, Cancel or Add a user; unset, each is there", async () => {
   const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
   const open = await everyPage(CATALOG_STATE);
-  for (const control of WRITE_CONTROLS.filter((c) => !/confirm|share-open|share-stop/.test(c))) assert.ok(open.includes(control), `without the setting: ${control}`);
+  for (const control of WRITE_CONTROLS.filter((c) => !/confirm/.test(c))) assert.ok(open.includes(control), `without the setting: ${control}`);
   const shown = await everyPage({ ...CATALOG_STATE, pageReadOnly: why });
   for (const control of WRITE_CONTROLS) assert.ok(!shown.includes(control), `read-only: ${control}`);
   // BY RULE, NOT BY THE LIST ABOVE: every button a read-only page writes only shows, copies or moves what is shown
@@ -753,21 +752,22 @@ test("a read-only page (pageReadOnly): no page writes a control that sends a cha
   assert.ok(textOf(shown).includes(`Users are not added, changed, disabled or removed from this page: ${why}.`));
 });
 
-test("a read-only page: no add, create or write link anywhere — the Connect panel's Create a user on the Overview and on Queries' empty log included; the Overview and Usage say why; unset, all as before", async () => {
+test("a read-only page: no add, create or write link anywhere — the Connect panel's Create a user on Queries' empty log included; the Overview and Usage say why; unset, all as before", async () => {
   const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
   // what leads to adding or creating something: a button-styled link to the page that does it, or its words
   const LEADS = [/Create a user/, /Add a table/, /Add a user/, /Connect from anywhere/, /<a class="btn[^"]*" href="#users"/, /<a class="btn[^"]*" href="#tables[^"]*"/, /Cancel stops one/];
   const open = await pageByPage(CATALOG_STATE);
   const shown = await pageByPage({ ...CATALOG_STATE, pageReadOnly: why });
   for (const lead of LEADS) assert.ok(!lead.test(shown.all), `read-only: ${lead}`);
-  // the Connect panel is on the Overview and on Queries' empty log, and keeps its URL, psql and Copy on both
-  for (const id of ["status", "queries"]) {
+  // the Connect panel is on Queries' empty log, and keeps its URL, psql and Copy there; the Overview has none (the owner's, 2026-11-12)
+  for (const page of [open, shown]) assert.ok(!/class="connect[ "]|data-copy="connect-/.test(page.overview), "no Connect on the Overview");
+  for (const id of ["queries"]) {
     assert.match(open.byPage.get(id)!, /<a class="btn[^"]*" href="#users">Create a user<\/a>/, `unset: Connect's Create a user on ${id}`);
     assert.match(shown.byPage.get(id)!, /data-copy="connect-url"[\s\S]*data-copy="connect-psql"/, `read-only: Connect's URL and psql on ${id}`);
     assert.ok(textOf(shown.byPage.get(id)!).replace(/ :/g, ":").includes("A user's name and password go in place of <user>:<password>: mason user add <name> prints the whole URL once."), id);
   }
   // the Overview and Usage say why their controls are missing, as Tables and Users do; unset, none says it
-  const lines = new Map([["status", `Nothing is shared, added or created from this page: ${why}.`], ["usage", `Statements are not cancelled from this page: ${why}.`],
+  const lines = new Map([["status", `Nothing is added or created from this page: ${why}.`], ["usage", `Statements are not cancelled from this page: ${why}.`],
     ["tables", `Tables are not added, removed or synced from this page: ${why}.`], ["users", `Users are not added, changed, disabled or removed from this page: ${why}.`]]);
   for (const [id, line] of lines) {
     assert.ok(textOf(shown.byPage.get(id)!).includes(line), `${id}: ${line}`);
@@ -784,7 +784,7 @@ test("a read-only page: no add, create or write link anywhere — the Connect pa
   assert.equal(fn<[string, unknown], string>("readOnlyLine")("Statements are not cancelled", null), "");
 });
 
-test("a read-only page: each renderer alone writes no control that changes anything — Tables, Users, the statements running, the share and the checklist", async () => {
+test("a read-only page: each renderer alone writes no control that changes anything — Tables, Users, the statements running and the checklist", async () => {
   const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
   const ro = { ...CATALOG_STATE, pageReadOnly: why };
   const tables = fn<[unknown], string>("renderTables")(ro);
@@ -801,13 +801,12 @@ test("a read-only page: each renderer alone writes no control that changes anyth
   const renderRunning = fn<[unknown, unknown, unknown, number, unknown], string>("renderRunning");
   assert.ok(!renderRunning(running, null, null, Date.now(), why).includes("data-ask-cancel"));
   assert.ok(renderRunning(running, null, null, Date.now(), null).includes("data-ask-cancel"));
-  assert.equal(fn<[unknown], string>("renderShare")(ro), "");
-  assert.match(fn<[unknown], string>("renderShare")(CATALOG_STATE), /data-share-ask/);
-  const { renderChecklist: checklist } = await import(path.join(WEB, "pages", "status.js") as string) as { renderChecklist: (s: unknown, q: unknown, u: unknown) => string };
-  const noneYet = { queries: { week: { completed: 0 } } }, nobody = { users: [] };
+  assert.equal(page.renderShare, undefined, "Connect from anywhere is no longer on the Overview: its renderer is gone");
+  const { renderChecklist: checklist } = await import(path.join(WEB, "pages", "status.js") as string) as { renderChecklist: (s: unknown, u: unknown) => string };
+  const nobody = { users: [] };
   const fresh = { ...NONE, pageReadOnly: why };
-  assert.ok(!/href="#users"|Add a table/.test(checklist(fresh, noneYet, nobody)), "the checklist sends no one to add what the page refuses");
-  assert.match(checklist(NONE, noneYet, nobody), /Add a table/);
+  assert.ok(!/href="#users"|Add a table/.test(checklist(fresh, nobody)), "the checklist sends no one to add what the page refuses");
+  assert.match(checklist(NONE, nobody), /Add a table/);
 });
 
 test("a read-only page that still edits its tables (pageReadOnlyAllow: [tables]): Tables has Add, Columns…, Name its key…, Remove and Sync now; every other page writes no control that sends a change, and says why (issue 789)", async () => {
@@ -824,15 +823,15 @@ test("a read-only page that still edits its tables (pageReadOnlyAllow: [tables])
   for (const control of WRITE_CONTROLS.filter((c) => !TABLE_BUTTONS.test(c.replace(/=$/, "")))) assert.ok(!shown.all.includes(control), control);
   const buttons = [...shown.all.matchAll(/<button\b([^>]*)>/g)].map((m) => [...m[1]!.matchAll(/\b(data-[a-z-]+)/g)].map((d) => d[1]!).filter((d) => d !== "data-room"));
   for (const data of buttons) assert.ok(data.length > 0 && data.every((d) => VIEW_BUTTONS.test(d) || TABLE_BUTTONS.test(d)), `a button that may send a change: ${data.join(" ")}`);
-  assert.ok(!/Create a user|Add a user|Connect from anywhere|<a class="btn[^"]*" href="#users"/.test(shown.all), "a lead to a user or a share");
+  assert.ok(!/Create a user|Add a user|<a class="btn[^"]*" href="#users"/.test(shown.all), "a lead to a user");
   // each page says why it offers no change, the Overview now without the tables
-  for (const [id, line] of [["status", `No user is created and nothing is shared from this page: ${why}.`], ["users", `Users are not added, changed, disabled or removed from this page: ${why}.`],
+  for (const [id, line] of [["status", `No user is created from this page: ${why}.`], ["users", `Users are not added, changed, disabled or removed from this page: ${why}.`],
     ["usage", `Statements are not cancelled from this page: ${why}.`]] as const) assert.ok(textOf(shown.byPage.get(id)!).includes(line), `${id}: ${line}`);
-  assert.ok(!textOf(shown.byPage.get("status")!).includes("Nothing is shared, added or created"));
+  assert.ok(!textOf(shown.byPage.get("status")!).includes("Nothing is added or created"));
   // the checklist sends a person to add a table, never to create a user
-  const { renderChecklist: checklist } = await import(path.join(WEB, "pages", "status.js") as string) as { renderChecklist: (s: unknown, q: unknown, u: unknown) => string };
-  const noneYet = { queries: { week: { completed: 0 } } }, nobody = { users: [] };
-  const fresh = checklist({ ...NONE, pageReadOnly: why, pageReadOnlyAllow: ["tables"] }, noneYet, nobody);
+  const { renderChecklist: checklist } = await import(path.join(WEB, "pages", "status.js") as string) as { renderChecklist: (s: unknown, u: unknown) => string };
+  const nobody = { users: [] };
+  const fresh = checklist({ ...NONE, pageReadOnly: why, pageReadOnlyAllow: ["tables"] }, nobody);
   assert.match(fresh, /Add a table/);
   assert.ok(!/href="#users"/.test(fresh), "no Create a user");
   // an allowance the page does not know is no allowance; without the page read-only it changes nothing
@@ -1015,7 +1014,7 @@ test("renderNav with the host's sidebar: a replaced item keeps its label and ico
   assert.match(css, /\.nav \.host-links \{ padding-top: var\(--space-3\); border-top: 1px solid var\(--line\); \}/);
 });
 
-test("every link of Mason's own into a replaced view goes to the host's page: the Overview's Create a user and Getting started, its cards and parts, Users' and Usage's Queries, Tables' sync events, Queries' and Usage's leads", async () => {
+test("every link of Mason's own into a replaced view goes to the host's page: the Overview's Getting started, its cards and parts, Users' and Usage's Queries, Tables' sync events, Queries' and Usage's leads", async () => {
   const retarget = fn<[string, unknown], string>("retarget");
   const queriesHref = fn<[Record<string, string>, string], string>("queriesHref");
   const shared = await import(path.join(WEB, "shared.js") as string) as { USERS_HASH: string };
@@ -1051,7 +1050,7 @@ test("every link of Mason's own into a replaced view goes to the host's page: th
       assert.equal(left.length, hashHrefs(open.all).length - into, `${item}: every other link as it was`);
     }
   }
-  // the ones named in the issue, by name: the Overview's Create a user (Connect) and its Getting started step
+  // the one named in the issue, by name: the Overview's Getting started step (Connect is no longer on the Overview)
   for (const pageNav of [null, { items: { users: "/host/users" }, links: [] }]) {
     const run = fakeRun();
     run.answers.set("GET api/state", () => new Response(JSON.stringify({ ...COPYING, pageNav }), { status: 200 }));
@@ -1060,7 +1059,7 @@ test("every link of Mason's own into a replaced view goes to the host's page: th
     await app.poll();
     const overview = app.view().status!;
     const leads = overview.match(/<a class="btn[^"]*" href="[^"]*"(?: rel="noreferrer")?>Create a user<\/a>/g) ?? [];
-    assert.equal(leads.length, 2, "Connect's Create a user and Getting started's step");
+    assert.equal(leads.length, 1, "Getting started's step");
     for (const a of leads) assert.ok(a.includes(pageNav === null ? 'href="#users">' : 'href="/host/users" rel="noreferrer">'), a);
   }
   // index.html's own links into a view (the Queries' and Usage's leads), which no part writes: the same rule over the document
@@ -1199,8 +1198,7 @@ function fakeRun(): { fetch: (p: string, init?: { method?: string; body?: string
   answers.set("GET api/state", json(COPYING));
   answers.set("GET api/users", json({ users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", live: true }] }));
   answers.set("GET api/queries", json(QUERIES));
-  answers.set("GET api/events?failed=1&limit=5", json(EVENTS));
-  answers.set("GET api/requests?failed=1&limit=5", json(FAILED_REQUESTS));
+  answers.set("GET api/events?failed=1&since=24h&limit=1000", json(EVENTS));
   answers.set("GET api/usage?since=1m", json(USAGE));
   answers.set("GET api/running", json({ running: [] }));
   answers.set("GET api/usage?since=15m&step=60", json(USAGE));
@@ -1589,15 +1587,14 @@ test("a read-only page that still manages its users (pageReadOnlyAllow: [users])
   const buttons = [...shown.all.replace(/<form id="add-user"[\s\S]*?<\/form>/g, "").matchAll(/<button\b([^>]*)>/g)].map((m) => [...m[1]!.matchAll(/\b(data-[a-z-]+)/g)].map((d) => d[1]!).filter((d) => d !== "data-room"));
   for (const data of buttons) assert.ok(data.length > 0 && data.every((d) => VIEW_BUTTONS.test(d) || USER_BUTTONS.test(d)), `a button that may send a change: ${data.join(" ")}`);
   assert.ok(!/<form\b(?![^>]*id="(request-filters|add-user)")/.test(shown.all), "no form but the request log's filters and Add a user");
-  assert.ok(!/Add a table|Connect from anywhere|<a class="btn[^"]*" href="#tables[^"]*"/.test(shown.all), "no lead to a table or a share");
+  assert.ok(!/Add a table|<a class="btn[^"]*" href="#tables[^"]*"/.test(shown.all), "no lead to a table");
   // each page says why it offers no change: the Overview without the users, Tables and Usage as before
-  for (const [id, line] of [["status", `Nothing is shared or added from this page: ${why}.`], ["tables", `Tables are not added, removed or synced from this page: ${why}.`],
+  for (const [id, line] of [["status", `No table is added from this page: ${why}.`], ["tables", `Tables are not added, removed or synced from this page: ${why}.`],
     ["usage", `Statements are not cancelled from this page: ${why}.`]] as const) assert.ok(textOf(shown.byPage.get(id)!).includes(line), `${id}: ${line}`);
-  // Connect's Create a user and the checklist's, never Add a table
-  assert.match(shown.byPage.get("status")!, /<a class="btn[^"]*" href="#users">Create a user<\/a>/);
-  const { renderChecklist: checklist } = await import(path.join(WEB, "pages", "status.js") as string) as { renderChecklist: (s: unknown, q: unknown, u: unknown) => string };
-  const noneYet = { queries: { week: { completed: 0 } } }, nobody = { users: [] };
-  const fresh = checklist({ ...NONE, pageReadOnly: why, pageReadOnlyAllow: ["users"] }, noneYet, nobody);
+  // the checklist's Create a user, never Add a table
+  const { renderChecklist: checklist } = await import(path.join(WEB, "pages", "status.js") as string) as { renderChecklist: (s: unknown, u: unknown) => string };
+  const nobody = { users: [] };
+  const fresh = checklist({ ...NONE, pageReadOnly: why, pageReadOnlyAllow: ["users"] }, nobody);
   assert.match(fresh, /href="#users">Create a user/);
   assert.ok(!/Add a table/.test(fresh));
   // the renderers alone: an allowance the page does not know is no allowance; without the page read-only nothing changes
@@ -1608,12 +1605,12 @@ test("a read-only page that still manages its users (pageReadOnlyAllow: [users])
   assert.equal(renderAddUser({ ...CATALOG_STATE, pageReadOnlyAllow: ["users"] }), renderAddUser(CATALOG_STATE));
 });
 
-test("a read-only page that still changes its tables and its users (pageReadOnlyAllow: [tables, users]): both pages' controls; the Overview says only that nothing is shared; Cancel and the share still absent (issue 813)", async () => {
+test("a read-only page that still changes its tables and its users (pageReadOnlyAllow: [tables, users]): both pages' controls; the Overview says nothing is refused; Cancel still absent (issue 813)", async () => {
   const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
   const shown = await pageByPage({ ...CATALOG_STATE, pageReadOnly: why, pageReadOnlyAllow: ["tables", "users"] });
   for (const control of ["data-add-table", "data-sync-table", "data-remove-table", 'id="add-user"', "data-from=", "data-disable="]) assert.ok(shown.all.includes(control), control);
-  for (const control of ["data-ask-cancel", "data-share-ask"]) assert.ok(!shown.all.includes(control), control);
-  assert.ok(textOf(shown.byPage.get("status")!).includes(`Nothing is shared from this page: ${why}.`));
+  for (const control of ["data-ask-cancel"]) assert.ok(!shown.all.includes(control), control);
+  assert.ok(!textOf(shown.overview).includes("from this page"), "the Overview refuses nothing it offers");
   assert.ok(textOf(shown.byPage.get("usage")!).includes(`Statements are not cancelled from this page: ${why}.`));
   assert.ok(!/are not added/.test(textOf(shown.all)), "Tables and Users say nothing is refused");
 });
@@ -2101,7 +2098,7 @@ test("the shell: only the page shown is asked, each endpoint at its own rate —
   t += 30_000;
   await app.poll();
   assert.equal(app.view().poll, "");
-  assert.match(textOf(app.view().status!), /Queries: could not read them \(the request log cannot be read; mason logs has the detail\)/);
+  assert.match(textOf(app.view().status!), /Statements, last day unknown could not read them: the request log cannot be read .* Query errors, last day unknown could not read them: the request log cannot be read/);
 });
 
 test("in the browser: the hash chooses the section shown and the page asked; a link followed asks the new page at once; a range or an old hash too", async () => {
@@ -2203,12 +2200,16 @@ const of = <A extends unknown[], R>(mod: Record<string, unknown>, file: string, 
 };
 const plain = (line: string) => line.replace(/\s+/g, " ").trim();
 
-test("the Overview's words are mason status's: the readiness word, the copies' line, a size, a span, an event's and a statement's line", () => {
+test("the Overview's words are mason status's: the readiness word and what Ready means, the copies' line, a size, a span, an event's line", () => {
   const readinessWord = (commands as unknown as { readinessWord?: (r: unknown) => string }).readinessWord;
   assert.equal(typeof readinessWord, "function", "src/cli/commands.ts exports readinessWord");
   const word = of<[unknown], string>(statusPage, "status.js", "readinessWord");
   for (const s of [RUNNING, COPYING, FAILED]) assert.equal(word(s.readiness), readinessWord!(s.readiness), "the word mason status heads its last line with");
   assert.deepEqual([RUNNING, COPYING, FAILED].map((s) => word(s.readiness)), ["Ready", "Under way", "Failed"]);
+  // what Ready means for the synced data: the sentence mason status and mason wait end on after the word, one string
+  assert.equal(statusPage.READY_TEXT as unknown, commands.READY_TEXT, "src/cli/readiness.ts READY_TEXT");
+  const readinessLine = of<[unknown], { text: string; link: string | null }>(statusPage, "status.js", "readinessLine");
+  assert.equal(`Ready: ${readinessLine(RUNNING).text[0]!.toLowerCase()}${readinessLine(RUNNING).text.slice(1)}.`, `Ready: ${commands.READY_TEXT}.`);
   const totalsText = of<[unknown, number], string>(statusPage, "status.js", "totalsText");
   for (const s of [RUNNING, SYNCED, NONE]) assert.equal(totalsText(s.totals, NOW), commands.totalsText(s.totals!, NOW));
   const cli = commands as unknown as { bytesText?: (b: number) => string };
@@ -2219,16 +2220,12 @@ test("the Overview's words are mason status's: the readiness word, the copies' l
   }
   for (const x of [0, 0.42, 9.96, 10, 63, 754, 7500]) assert.equal(fn<[number], string>("spanText")(x), commands.spanText(x), `spanText(${x})`);
   // a line's cells, read in order, are its line (the line pads its columns: spaces aside)
-  const eventCells = fn<[unknown], Record<string, string>>("eventCells"), requestCells = of<[unknown], string[]>(statusPage, "status.js", "requestCells");
+  const eventCells = fn<[unknown], Record<string, string>>("eventCells");
   for (const e of EVENTS.events as SyncEvent[]) assert.equal(Object.values(eventCells(e)).join(" "), plain(commands.eventLine(e, PLAIN)));
-  assert.equal(statusPage.RECENT_ERRORS as unknown, commands.RECENT_ERRORS, "as many recent errors of each kind as mason status shows");
-  for (const r of FAILED_REQUESTS.requests as LedgerRequest[]) {
-    const cells = requestCells(r);
-    assert.equal(plain(cells.slice(0, -1).join(" ") + (cells.at(-1) ? ` — ${cells.at(-1)}` : "")), plain(commands.requestLine(r, PLAIN)));
-  }
+  for (const gone of ["requestCells", "renderRecentErrors", "renderQueries", "RECENT_ERRORS"]) assert.equal(statusPage[gone], undefined, `${gone} is gone: the cards count the errors and the statements`);
 });
 
-test("the Overview: the word, the facts (tables synced N of M, rows, the last sync and its age, the copy's file), the statements, the recent errors", () => {
+test("the Overview: the word and its line, the cards (tables synced N of M, rows, the last sync and its age, the copy's file, the statements, p95, the sync and query errors), the facts", () => {
   const run = fakeRun();
   run.answers.set("GET api/state", answer(SYNCED));
   const a = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => new Date(NOW));
@@ -2236,56 +2233,78 @@ test("the Overview: the word, the facts (tables synced N of M, rows, the last sy
     const html = a.view().status!;
     const text = textOf(html);
     assert.match(html, HEALTH("bad", "Failed"), "the word first: mason status's");
-    // the cards first: the copies in all, their rows, the last sync, the copy's file, the last day's statements and p95
-    assert.match(text, /^Failed Tables synced 2 of 3 added, 1 failed Rows 30,001,200 Last sync 30 s ago 2026-10-27 09:05:00 UTC The synced data's file unknown its size could not be read Statements, last day 1,234 1,200 completed, 34 refused, failed or cancelled p95, last day 380 ms average 42 ms · p50 12 ms /);
+    // the cards first: the copies in all, their rows, the last sync, the copy's file, the last day's statements and p95, its sync and query errors
+    assert.match(text, /^mason status Failed 1 table's sync failed: see Tables Tables synced 2 of 3 added, 1 failed Rows 30,001,200 Last sync 30 s ago 2026-10-27 09:05:00 UTC The synced data's file unknown its size could not be read Statements, last day 1,234 1,200 completed, 34 refused, failed or cancelled p95, last day 380 ms average 42 ms · p50 12 ms Sync errors, last day 2 failed sync events Query errors, last day 33 30 refused, 3 failed /);
+    assert.match(html, /<div class="cards n8">/, "eight cards on a bare run");
     assert.match(html, /<a class="card bad link" href="#tables\?show=failed"><p class="card-label">Tables synced<\/p><p class="card-value">2 of 3<\/p><p class="card-sub">added, 1 failed<\/p><\/a>/, "a card: its label, its value, its sub-line — and a link to the failed tables");
+    // each error card leads to the view that lists what it counts, over the day it counts
+    assert.match(html, /<a class="card bad link" href="#observability\/syncs\?failures=1&amp;range=24h"><p class="card-label">Sync errors, last day<\/p><p class="card-value">2<\/p>/);
+    assert.match(html, /<a class="card warn link" href="#observability\/queries\?status=refused-or-failed&amp;range=24h"><p class="card-label">Query errors, last day<\/p><p class="card-value">33<\/p>/);
     assert.match(text, / Mason Source .* Database postgres:.* Changes each table as its sync: says /);
     assert.match(text, / Source mason\/sources\/shop\.yml \(the tables it names are added\) Database /, "the sources file from the project's root, as mason status names it");
     assert.doesNotMatch(html, /\/app\//, "never an absolute path");
     assert.match(html, /<caption>Mason<\/caption><tbody><tr><th scope="row">Source<\/th>/, "ONE table of the other facts, each a row headed by its name");
     assert.doesNotMatch(html.slice(html.indexOf("<caption>Mason</caption>")), /<th scope="row">(Tables synced|Rows|Last sync|The synced data's file)<\/th>/, "a fact in ONE place: the cards' are not rows too");
-    // the statements: a row per window, each count as mason status says it
-    assert.match(text, /Statements \(the completed ones' time; mason logs --requests lists each\) Statements Completed Refused Failed Cancelled Average p50 p95 Rows sent Sent /);
-    assert.match(text, /Last day 1,234 1,200 30 3 1 42 ms 12 ms 380 ms 98,765 5\.1 MiB Last week 5,000 4,900 90 9 1 40 ms 11 ms 1,250 ms 400,000 900 B /);
-    assert.match(text, /The request log keeps 3 days: MASON_HISTORY_DAYS\./);
-    const cliQueries = plain(commands.queryLines(QUERIES.queries as never, PLAIN).join(" "));
-    for (const v of ["1,234 statements: 1,200 completed, 30 refused, 3 failed, 1 cancelled", "42 ms / 12 ms / 380 ms", "98,765 rows, 5.1 MiB sent", "400,000 rows, 900 B sent"]) assert.ok(cliQueries.includes(v), `mason status says ${v}`);
-    // the database is a row of the facts, the bars only for the copies not finished, no count the errors and statements repeat
+    // no table of the statements and no list of the errors: the cards count them (the owner's, 2026-11-12)
+    assert.ok(!/<table class="(queries|errors)"|Last week|None\./.test(html), "no statements table, no error lists");
     assert.match(text, /Database postgres:\/\/shop:\*\*\*\*@db\.example\.com:5432\/shop · Postgres 16\.4/);
     assert.match(text, /Tables not synced yet \(1 of 3 added\) Table Sync public\.orders 100% its first sync failed: poll: connection reset/);
     assert.ok(!/customers 100%|Slow queries|Refused queries|Ready:|Under way:|Failed:/.test(text));
-    // the recent errors: each a table, its cells mason status's line
-    assert.match(text, /Sync errors \(the latest, newest last; mason logs --events lists each\) See all At \(UTC\) What Table Why 2026-10-27 09:03:10 poll_failed public\.orders poll: connection reset 2026-10-27 09:04:00 restart \(the sync\) the run was started again after it stopped/);
-    assert.match(text, /Query errors \(the latest, newest last; mason logs --requests --failed lists each\) See all Started \(UTC\) Outcome Took Rows Who Statement Error 2026-10-27 09:02:00 refused 3 ms Metabase \(user metabase\) SELECT \* FROM nope relation "nope" does not exist /);
-    assert.ok(html.includes('title="SQLSTATE 42P01">refused</td>') && !/\b(42P01|57014)\b/.test(text), "the SQLSTATE is a title, never the page's words");
-    assert.match(text, /cancelled 12,345 ms 10 rows \(no application_name\) SELECT (x, )+x… canceling statement due to user request/);
     assert.ok(!/duckdb/i.test(html), "never the engine's name");
   });
 });
 
-test("the Overview: Ready and Under way in mason status's words; nothing added says so once; an error list that could not be read, or is empty, says so", async () => {
+test("the Overview's eight cards and nine (the host's beside them) leave no card alone on a row: four by two and three by three from a tablet up, two a row on a phone", () => {
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
+  assert.match(css, /@media \(min-width: 641px\) \{ \.cards\.n8 \{ grid-template-columns: repeat\(4, 1fr\); \} \.cards\.n9 \{ grid-template-columns: repeat\(3, 1fr\); \} \}/,
+    "from 641 px up (the 640–1099, 1100–1439 and 1440 widths alike): 8 = 4 + 4, 9 = 3 + 3 + 3");
+  assert.match(css, /\n {2}\.cards \{ grid-template-columns: 1fr 1fr; gap: var\(--space-2\); \}/, "a phone (its 640 px block): two a row, 8 = 2 × 4");
+  assert.match(css, /\.cards > :last-child:nth-child\(odd\) \{ grid-column: 1 \/ -1; \}/, "a phone: nine's last card spans its row");
+  // the box's title on its top edge, as Getting started's
+  assert.match(css, /\.connect \.connect-title, \.checklist \.checklist-title, \.health \.health-title \{ width: fit-content;/);
+});
+
+test("the Overview: Ready, Under way and Failed under the title mason status, each with what it means in a line; nothing added says so once; a count that could not be read says so", async () => {
   const renderHealth = of<[unknown], string>(statusPage, "status.js", "renderHealth");
-  assert.equal(textOf(renderHealth(RUNNING)), "Ready");
-  assert.equal(textOf(renderHealth(COPYING)), "Under way");
+  assert.equal(textOf(renderHealth(RUNNING)), "mason status Ready Every added table is synced and served");
+  assert.equal(textOf(renderHealth(COPYING)), "mason status Under way 1 of 3 tables synced, the rest syncing");
+  assert.equal(textOf(renderHealth(FAILED)), "mason status Failed 1 table's sync failed: see Tables");
+  assert.equal(textOf(renderHealth(SYNCED)), "mason status Failed 1 table's sync failed: see Tables");
+  assert.match(renderHealth(FAILED), /see <a href="#tables\?show=failed">Tables<\/a><\/p><\/div>$/, "Tables: the failed ones");
+  assert.match(renderHealth(RUNNING), /^<div class="health ok" role="status"><p class="health-title">mason status<\/p>/, "the title on the box's edge, as Getting started's");
+  // from the state alone (readiness, totals, the tables' sync.state): two failed, every one synced but one catching up
+  const readinessLine = of<[unknown], { text: string; link: string | null }>(statusPage, "status.js", "readinessLine");
+  assert.deepEqual(readinessLine({ ...FAILED, readiness: { ready: false, failed: ["a: x", "b: y"], waiting: [] } }), { text: "2 tables' syncs failed: see ", link: "Tables" });
+  const catching = { ...RUNNING, readiness: { ready: false, failed: [], waiting: ["public.orders: …"] },
+    tables: RUNNING.tables.map((t) => t.table === "public.orders" ? { ...t, sync: { ...t.sync, state: "catching-up" } } : t) };
+  assert.deepEqual(readinessLine(catching), { text: "Every added table is synced, 1 being caught up by one poll", link: null });
   assert.equal(renderHealth(NONE), "", "no table added: renderStatus says it, with what adds one");
-  const renderRecentErrors = of<[unknown, unknown], string>(statusPage, "status.js", "renderRecentErrors");
-  assert.equal(textOf(renderRecentErrors({ events: [] }, { failure: { code: "failed", message: "the request log cannot be read\nmore" } })),
-    "Sync errors None. Query errors Could not read them (the request log cannot be read; mason logs has the detail)");
-  assert.equal(renderRecentErrors(undefined, undefined), "", "not read yet: nothing");
+  // the two error cards: a count not read is unknown with its reason, never 0; a count at the read's cap says at least
+  const kpis = of<[unknown, unknown], string>(statusPage, "status.js", "renderKpis");
+  const failure = { failure: { code: "failed", message: "the history cannot be read\nmore" } };
+  assert.match(textOf(kpis(RUNNING, { now: NOW, queries: failure, syncErrors: failure })),
+    /Sync errors, last day unknown could not read them: the history cannot be read Query errors, last day unknown could not read them: the history cannot be read$/);
+  assert.match(textOf(kpis(RUNNING, { now: NOW, queries: QUERIES, syncErrors: { events: [], keptDays: 7 } })), /Sync errors, last day 0 failed sync events Query errors, last day 33 30 refused, 3 failed$/);
+  assert.match(kpis(RUNNING, { now: NOW, queries: QUERIES, syncErrors: { events: [], keptDays: 7 } }), /<a class="card link" href="#observability\/syncs\?failures=1&amp;range=24h"><p class="card-label">Sync errors, last day<\/p><p class="card-value">0<\/p>/, "none: not marked");
+  const many = { events: Array.from({ length: statusPage.SYNC_ERRORS_LIMIT as unknown as number }, () => EVENT), keptDays: 7 };
+  assert.match(textOf(kpis(RUNNING, { now: NOW, queries: QUERIES, syncErrors: many })), /Sync errors, last day 1,000\+ at least 1,000 failed sync events/);
+  // a restart is listed with the failures but is not one (its failed is the event's own)
+  assert.match(textOf(kpis(RUNNING, { now: NOW, queries: QUERIES, syncErrors: { events: [EVENT, { ...EVENT, kind: "restart", failed: false }], keptDays: 7 } })), /Sync errors, last day 1 failed sync event /);
+  assert.ok(!kpis(RUNNING, { now: NOW }).includes("errors, last day"), "not read yet: not shown");
+  assert.ok(!kpis(NONE, { now: NOW, queries: QUERIES, syncErrors: EVENTS }).includes("errors, last day"), "nothing added: no error to count");
   const renderKpis = of<[unknown, unknown], string>(statusPage, "status.js", "renderKpis");
   assert.equal(textOf(renderKpis({ ...NONE, totals: { added: 0, copied: 0, failed: 0, rows: 0, syncedAt: null }, engine: { ...NONE.engine, bytes: 2_097_152 } }, { now: NOW })),
     "The synced data's file 2.0 MiB", "nothing added: no sync to count, the copy's file alone");
   assert.equal(textOf(renderKpis({ ...SYNCED, engine: { ...SYNCED.engine, bytes: 2_097_152 } }, { now: NOW })), "Tables synced 2 of 3 added, 1 failed Rows 30,001,200 Last sync 30 s ago 2026-10-27 09:05:00 UTC The synced data's file 2.0 MiB");
   assert.equal(textOf(renderKpis({ ...SYNCED, totals: { ...SYNCED.totals!, syncedAt: null } }, { now: NOW, queries: { failure: { code: "failed", message: "no ledger\nmore" } } })),
-    "Tables synced 2 of 3 added, 1 failed Rows 30,001,200 Last sync none yet The synced data's file unknown its size could not be read Statements, last day unknown could not read them: no ledger",
+    "Tables synced 2 of 3 added, 1 failed Rows 30,001,200 Last sync none yet The synced data's file unknown its size could not be read Statements, last day unknown could not read them: no ledger Query errors, last day unknown could not read them: no ledger",
     "a fact not read is unknown, with its reason — never 0");
-  assert.match(textOf(of<[unknown], string>(statusPage, "status.js", "renderQueries")({ failure: { code: "failed", message: "no ledger" } })), /^Queries: could not read them \(no ledger; mason logs has the detail\)$/);
   // the app with nothing added: the commands' sentence first — no word, no card — then the facts
   const run = fakeRun();
   run.answers.set("GET api/state", answer(NONE));
   const app = fn<[unknown], App>("createApp")(run.fetch);
   await app.poll();
-  assert.match(textOf(app.view().status!), /^Getting started 3 of 4 done .* Add a table .* No table added yet \(4 in the database\)\. .* Mason Source /, "the checklist first: its one action is adding a table");
+  assert.match(textOf(app.view().status!), /^Getting started 2 of 3 done .* Add a table .* No table added yet \(4 in the database\)\. .* Mason Source /, "the checklist first: its one action is adding a table");
 });
 
 // ------------------------------------------------------------------ the Tables page: each copy's sync, Sync, the search box
@@ -3783,14 +3802,13 @@ test("Queries: Slow (1 s or more) and Statement has are the request log's slow a
   assert.match(textOf(app.view()["request-log"]!), /No request that passes the filters/);
   // the Overview's cards are links into the views that list what they count
   const html2 = renderStatusOf(FAILED);
-  for (const [label, href] of [["Tables synced", "#tables?show=failed"], ["Rows", "#tables"], ["The synced data&#39;s file", "#observability/usage?range=24h"], ["Statements, last day", "#observability/queries?range=24h"], ["p95, last day", "#observability/queries?slow=1&amp;range=24h"]]) {
+  for (const [label, href] of [["Tables synced", "#tables?show=failed"], ["Rows", "#tables"], ["The synced data&#39;s file", "#observability/usage?range=24h"], ["Statements, last day", "#observability/queries?range=24h"], ["p95, last day", "#observability/queries?slow=1&amp;range=24h"],
+    ["Sync errors, last day", "#observability/syncs?failures=1&amp;range=24h"], ["Query errors, last day", "#observability/queries?status=refused-or-failed&amp;range=24h"]]) {
     // each at the range of what it counts (the last day), never the views' default, Now
     assert.match(html2, new RegExp(`<a class="card[^"]*" href="${href!.replace(/[?]/g, "\\?")}"><p class="card-label">${label!.replace(/[()]/g, "\\$&")}</p>`), `${label} → ${href}`);
   }
-  assert.match(html2, /Sync errors .*<a class="see" href="#observability\/syncs\?failures=1&amp;range=7d">See all<\/a>/);
-  assert.match(html2, /Query errors .*<a class="see" href="#observability\/queries\?status=refused-or-failed&amp;range=24h">See all<\/a>/);
 });
-const renderStatusOf = (s: RunState) => fn<[unknown, Record<string, unknown>], string>("renderStatus")(s, { queries: QUERIES, events: EVENTS, requests: FAILED_REQUESTS, now: NOW });
+const renderStatusOf = (s: RunState) => fn<[unknown, Record<string, unknown>], string>("renderStatus")(s, { queries: QUERIES, syncErrors: EVENTS, now: NOW });
 
 test("Tables: #tables?show=failed is the Failed filter — the failed copies alone — and the select says so", async () => {
   const app = fn<[unknown], ObsApp>("createApp")(fakeRun().fetch);
@@ -4049,7 +4067,7 @@ test("Usage: the unsupported SQL of the range is mason status's lines (unsupport
   assert.match(textOf(app.view().unsupported!), /^✗ the request log cannot be read/, "a failure is said in its part, as the Failure");
 });
 
-test("the Overview: the last day's unsupported SQL is one line of the recent errors, with See all, and nothing when there is none", async () => {
+test("the Overview: the last day's unsupported SQL is one line at its foot, with See all, and nothing when there is none", async () => {
   const runServer = await import("../src/cli/run-server.ts") as { MAX_UNSUPPORTED_LIMIT?: number };
   assert.equal(statusPage.UNSUPPORTED_LIMIT as unknown, runServer.MAX_UNSUPPORTED_LIMIT, "it reads every entry the endpoint answers, to count them");
   const line = of<[unknown], string>(statusPage, "status.js", "renderUnsupportedLine");
@@ -4065,7 +4083,7 @@ test("the Overview: the last day's unsupported SQL is one line of the recent err
   const app = fn<[unknown], App>("createApp")(run.fetch);
   await app.poll();
   assert.ok(run.asked.includes("GET api/unsupported?limit=100"), "the Overview reads the last day's, the endpoint's default");
-  assert.match(textOf(app.view().status!), /Query errors .* Unsupported SQL, the last day: a window frame in GROUPS mode: 12 statements as ana, metabase from Metabase \(and 1 other\) See all$/);
+  assert.match(textOf(app.view().status!), /Sessions .* Unsupported SQL, the last day: a window frame in GROUPS mode: 12 statements as ana, metabase from Metabase \(and 1 other\) See all$/);
 });
 
 // ------------------------------------------------------------------ a table just added shows its copy at once
@@ -4229,35 +4247,26 @@ const SHOP_PG = ((): { shown: string; psql: string } | undefined => {
   catch (e) { if (e instanceof Error && /not a URL/.test(e.message)) return undefined; throw e; }
 })() ?? { shown: "postgres://<user>:<password>@127.0.0.1:5433/shop", psql: "psql 'postgres://<user>:<password>@127.0.0.1:5433/shop'" };
 
-test("the Overview, nothing asked yet: Connect your first tool under the cards — the URL and psql line mason status prints, each with Copy, and Create a user", () => {
-  const html = fn<[unknown, unknown?], string>("renderStatus")(RUNNING, { queries: NO_QUERIES, now: NOW });
+test("Connect your first tool (Queries' empty log): the URL and psql line mason status prints, each with Copy, a first statement, and Create a user — and no Connect on the Overview in any state", () => {
+  const renderConnect = fn<[unknown, unknown?], string>("renderConnect");
+  const html = renderConnect(SHOP_PG, { first: true, table: "public.customers" });
   const text = textOf(html);
   assert.equal(SHOP_PG.shown, "postgres://<user>:<password>@127.0.0.1:5433/shop", "the line mason start and mason status print");
-  assert.match(text, new RegExp(`Connect your first tool Mason answers SQL over the Postgres protocol, as a read replica of your database would: point psql, a BI tool or your app's analytics code at this URL\\. ` +
-    `URL ${SHOP_PG.shown.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} Copy psql ${SHOP_PG.psql.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} Copy ` +
-    "Then try select count\\(\\*\\) from customers; Copy it shows on Queries " +
-    "Create a user Its name and password go in place of <user>:<password> : the Users page shows the whole URL once, as mason user add <name> prints it\\. " +
-    // and beside the local connection, Connect from anywhere (mason share, from the page)
-    "Connect from anywhere Connect from anywhere For a tool in the cloud, which cannot reach this machine: a temporary public address and a password, as mason share opens\\. TLS is required of every connection\\. Mason Source "));
+  assert.equal(text, `Connect your first tool Mason answers SQL over the Postgres protocol, as a read replica of your database would: point psql, a BI tool or your app's analytics code at this URL. ` +
+    `URL ${SHOP_PG.shown} Copy psql ${SHOP_PG.psql} Copy Then try select count(*) from customers; Copy it shows on Queries ` +
+    "Create a user Its name and password go in place of <user>:<password> : the Users page shows the whole URL once, as mason user add <name> prints it.");
   assert.match(html, /<code id="connect-try">select count\(\*\) from customers;<\/code> <button type="button" class="small" data-copy="connect-try" data-room="Press ⌘C">Copy<\/button>/,
-    "a first statement that the request log lists: one that reads a copied table (the first copied), never a select 1 it does not");
-  // first under the cards, before the facts: the most important thing on a fresh install is how to reach it
-  assert.ok(text.indexOf("Connect your first tool") > text.indexOf("p95, last day") && text.indexOf("Connect your first tool") < text.indexOf("Mason Source"));
+    "a first statement that the request log lists: one that reads a copied table, never a select 1 it does not");
   assert.match(html, /<code id="connect-url">postgres:\/\/&lt;user&gt;:&lt;password&gt;@127\.0\.0\.1:5433\/shop<\/code> <button type="button" class="small" data-copy="connect-url" data-room="Press ⌘C">Copy<\/button>/);
   assert.match(html, /<code id="connect-psql">psql &#39;postgres:\/\/&lt;user&gt;:&lt;password&gt;@127\.0\.0\.1:5433\/shop&#39;<\/code> <button type="button" class="small" data-copy="connect-psql" data-room="Press ⌘C">Copy<\/button>/);
   assert.match(html, /<a class="btn primary" href="#users">Create a user<\/a>/, "a link to the page that makes one");
-});
-
-test("the Overview once statements ran: Connect after the facts, quieter; with no table added, none (adding one is the step)", () => {
-  const busy = textOf(fn<[unknown, unknown?], string>("renderStatus")(RUNNING, { queries: QUERIES, now: NOW }));
-  assert.ok(!busy.includes("Connect your first tool"));
-  assert.match(busy, /Sessions none open Connect URL postgres:\/\/<user>:<password>@127\.0\.0\.1:5433\/shop Copy psql /, "after the facts table");
-  // the request log not read yet, or unreadable: not "first" (it may have answered thousands)
-  assert.ok(!textOf(fn<[unknown, unknown?], string>("renderStatus")(RUNNING, { now: NOW })).includes("Connect your first tool"));
-  assert.ok(!textOf(fn<[unknown, unknown?], string>("renderStatus")(RUNNING, { queries: { failure: { code: "failed", message: "busy" } }, now: NOW })).includes("Connect your first tool"));
-  assert.ok(!/Connect/.test(textOf(fn<[unknown, unknown?], string>("renderStatus")(NONE, { queries: NO_QUERIES }))));
+  // the Overview: no Connect, nothing asked yet or after, and no Connect from anywhere (the owner's, 2026-11-12: connecting is redesigned on Users)
+  for (const queries of [NO_QUERIES, QUERIES, undefined]) for (const s of [RUNNING, COPYING, NONE]) {
+    const overview = fn<[unknown, unknown?], string>("renderStatus")(s, { queries, now: NOW });
+    assert.ok(!/class="connect|Connect your first tool|Connect from anywhere|data-copy="connect-/.test(overview), "no Connect on the Overview");
+  }
   // a run from before it said where it listens: nothing, never a made-up URL
-  assert.equal(fn<[unknown], string>("renderConnect")(undefined), "");
+  assert.equal(renderConnect(undefined), "");
 });
 
 test("Queries, an empty request log: how to connect under its sentence — never once a filter or an older page is shown", async () => {
@@ -4330,31 +4339,28 @@ test("Users: ONE Connect panel for the run — host, port, database, sslmode, th
   assert.match(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), /<div id="users-connect"><\/div>\s*<div id="users"><\/div>/, "the panel over the list");
 });
 
-test("the Overview's first-run checklist: running, a table copied, a user created, a first statement answered — each ○ with its one action; gone once all are done", async () => {
-  const renderChecklist = of<[unknown, unknown, unknown], string>(statusPage, "status.js", "renderChecklist");
+test("the Overview's first-run checklist: running, a table synced, a user created — each ○ with its one action; gone once all three are done", async () => {
+  const renderChecklist = of<[unknown, unknown], string>(statusPage, "status.js", "renderChecklist");
   const user = { users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true }] };
   const noUser = { users: [{ ...user.users[0], removedAt: "2026-10-27T10:00:00.000Z" }] };
-  // a fresh install: a table added and copied, no user, nothing asked
-  const fresh = renderChecklist(RUNNING, NO_QUERIES, noUser);
-  assert.equal(textOf(fresh), "Getting started 2 of 4 done ✓ Mason is running (done) ✓ A table synced (done) ○ A user created (to do) Create a user ○ A first statement answered (to do) Copy the psql line then run a select on a synced table");
+  // a fresh install: a table added and synced, no user
+  const fresh = renderChecklist(RUNNING, noUser);
+  assert.equal(textOf(fresh), "Getting started 2 of 3 done ✓ Mason is running (done) ✓ A table synced (done) ○ A user created (to do) Create a user");
   // the steps drawn as courses of a wall beside its title: a brick a step, laid as it is done (drawing, hidden from a screen reader)
-  assert.match(fresh, /<p class="checklist-title"><span class="courses" aria-hidden="true"><i class="on"><\/i><i class="on"><\/i><i><\/i><i><\/i><\/span>Getting started /);
+  assert.match(fresh, /<p class="checklist-title"><span class="courses" aria-hidden="true"><i class="on"><\/i><i class="on"><\/i><i><\/i><\/span>Getting started /);
   assert.match(fresh, /<li class="step-todo"><span class="mark" aria-hidden="true">○<\/span><span class="what">A user created<span class="sr"> \(to do\)<\/span><\/span><a class="btn small primary" href="#users">Create a user<\/a><\/li>/, "the next step is the primary action");
-  assert.match(fresh, /<button type="button" class="small" data-copy="connect-psql">Copy the psql line<\/button>/, "Connect's psql line, copied by its own Copy's handler");
-  // nothing added: Add a table leads to Tables; nothing to copy the psql line for yet
-  const none = renderChecklist(NONE, NO_QUERIES, noUser);
+  // no first statement step, and nothing to copy (the owner's, 2026-11-12)
+  assert.ok(!/A first statement answered|Copy the psql line|data-copy/.test(fresh));
+  // nothing added: Add a table leads to Tables
+  const none = renderChecklist(NONE, noUser);
   assert.match(none, /○<\/span><span class="what">A table synced<span class="sr"> \(to do\)<\/span><\/span><a class="btn small primary" href="#tables">Add a table<\/a>/);
-  assert.ok(!none.includes("Copy the psql line"));
   // copying: no action, it is under way
-  assert.match(textOf(renderChecklist({ ...COPYING, totals: { ...COPYING.totals!, copied: 0 } }, NO_QUERIES, noUser)), /○ A table synced \(to do\) syncing now ○ A user created/);
-  // a user, no statement yet: the psql line is the primary action
-  assert.match(renderChecklist(RUNNING, NO_QUERIES, user), /<button type="button" class="small primary" data-copy="connect-psql">Copy the psql line<\/button>/);
-  // all four done: none; a read not answered, or that failed: none (never a ○ for what could not be told)
-  assert.equal(renderChecklist(RUNNING, QUERIES, user), "");
-  assert.equal(renderChecklist(RUNNING, undefined, user), "");
-  assert.equal(renderChecklist(RUNNING, NO_QUERIES, { failure: { code: "failed", message: "x" } }), "");
-  assert.equal(renderChecklist(RUNNING, { failure: { code: "failed", message: "x" } }, noUser), "");
-  // the app: the Overview reads the users (every 30 s) and draws it above the cards; its Copy is a Copy
+  assert.match(textOf(renderChecklist({ ...COPYING, totals: { ...COPYING.totals!, copied: 0 } }, noUser)), /○ A table synced \(to do\) syncing now ○ A user created/);
+  // all three done: none, whatever was asked of Mason; the users not read, or their read failed: none (never a ○ for what could not be told)
+  assert.equal(renderChecklist(RUNNING, user), "");
+  assert.equal(renderChecklist(RUNNING, undefined), "");
+  assert.equal(renderChecklist(RUNNING, { failure: { code: "failed", message: "x" } }), "");
+  // the app: the Overview reads the users (every 30 s) and draws it above the cards
   const run = fakeRun();
   run.answers.set("GET api/state", answer(RUNNING));
   run.answers.set("GET api/queries", answer(NO_QUERIES));
@@ -4363,9 +4369,13 @@ test("the Overview's first-run checklist: running, a table copied, a user create
   await app.poll();
   assert.ok(run.asked.includes("GET api/users"));
   const text = textOf(app.view().status!);
-  assert.match(text, /^Ready Getting started 2 of 4 done /);
+  assert.match(text, /^mason status Ready Every added table is synced and served Getting started 2 of 3 done /);
   assert.ok(text.indexOf("Getting started") < text.indexOf("Tables synced"), "above the cards");
-  assert.match(text, /psql psql 'postgres:\/\/<user>:<password>@127\.0\.0\.1:5433\/shop' Copy/, "the psql line it copies is on the page, Connect's");
+  // a user created: gone, though nothing has asked Mason anything yet
+  run.answers.set("GET api/users", answer(user));
+  const again = fn<[unknown], App>("createApp")(run.fetch);
+  await again.poll();
+  assert.ok(!textOf(again.view().status!).includes("Getting started"), "the three done: no checklist");
 });
 
 test("a page opened at its own address that reads no state (Users) still has the sidebar's project, badge and version: the shell reads the state once a minute beside it", async () => {
@@ -4592,9 +4602,6 @@ test("layout guard: a click moves no row and no column — a question, a form an
   assert.match(rule(".scroll"), /overflow-x: auto/);
   assert.match(rule(".table-wrap"), /overflow-x: auto/, "a bare table too wide scrolls inside its box");
   assert.match(rule(".pop button"), /max-width: 100%/, "a confirm's button names a long table, cut, never past the popover");
-  assert.match(rule("table.errors td"), /overflow-wrap: anywhere/, "a user or client name without spaces wraps in its cell");
-  // the Overview's eleven numbers scroll in their box
-  assert.match(fn<[unknown, unknown?], string>("renderStatus")(RUNNING, { now: NOW, queries: QUERIES }), /<div class="table-wrap"><table class="queries">/);
   // AN EXPANDER the reader asked for (a request's details) pushes the rows under it down, but never widens a column: its
   // body adds no width of its own (a 64 KiB statement without a space measured 117 → 576 px for the Statement column)
   const long = { ...REQUESTS[0], query: `select ${"a".repeat(2000)} from orders` };
@@ -4939,117 +4946,6 @@ test("only the clock moved: the ages are set where they are, the part not writte
   assert.equal(shown[0]!.innerHTML, "7s ago", "the age moved where it is");
 });
 
-// ------------------------------------------------------------------ Connect from anywhere (the page's mason share)
-
-const SHARE_AT = "2026-11-01T10:00:00.000Z";
-const SHARE_NOW = Date.parse("2026-11-01T10:05:00.000Z");
-const PASSWORD = `mason_share_${"ab".repeat(24)}`;
-const listed = { user: "share_a1b2c3", from: "page", role: null, reads: "every synced table", openedAt: SHARE_AT, via: "pinggy", host: "relay.example", port: 41234, endsAt: "2026-11-01T11:00:00.000Z", state: "up" };
-const sharing = (shares: unknown[], o: Record<string, unknown> = {}) => ({ ...RUNNING, share: shares.length ? { port: 40001, fingerprint: "AA", sessions: 0, refusedLogins: 0, droppedConnections: 0, shares } : null, shareEnded: null, ...o });
-const shareModel = (o: Record<string, unknown> = {}) => ({ phase: "none", choices: null, reads: null, role: null, opened: null, ended: null, failure: null, ...o });
-const renderShare = (s: unknown, m: unknown) => fn<[unknown, unknown, number], string>("renderShare")(s, m, SHARE_NOW);
-
-test("Connect from anywhere: the card in each state, as it WROTE it — none, asking (one role, two), opening, open, open after a reload, ended, refused, served", () => {
-  const none = textOf(renderShare(sharing([]), shareModel()));
-  assert.match(none, /Connect from anywhere/);
-  assert.match(none, /a temporary public address and a password, as mason share opens\. TLS is required of every connection/);
-  assert.match(fn<[unknown, unknown?], string>("renderStatus")(sharing([]), { now: NOW, queries: QUERIES }), /data-share-ask/, "the Overview's Connect card offers it beside the local connection");
-
-  const asking = textOf(renderShare(sharing([]), shareModel({ phase: "asking", choices: [], reads: "every synced table" })));
-  assert.match(asking, /This opens a temporary public address : anyone with it and its password reads every synced table\. A free share ends within about an hour, and when this page closes\./);
-  assert.match(asking, /Open the address/);
-  assert.doesNotMatch(renderShare(sharing([]), shareModel({ phase: "asking", choices: [] })), /<select/, "one answer: no picker");
-  const two = renderShare(sharing([]), shareModel({ phase: "asking", choices: [{ role: "sales", reads: "1 synced table: orders", default: true }, { role: "ops", reads: "every synced table", default: false }], role: "sales" }));
-  assert.match(two, /<select id="share-role"><option value="sales" selected>sales: 1 synced table: orders \(the file&#39;s default\)<\/option><option value="ops">ops: every synced table<\/option><\/select>/);
-  assert.match(textOf(renderShare(sharing([]), shareModel({ phase: "asking" }))), /Reading the roles…/);
-
-  assert.match(textOf(renderShare(sharing([]), shareModel({ phase: "opening" }))), /Opening a temporary public address… \(up to 30 s\)/);
-
-  const opened = { user: "share_a1b2c3", password: PASSWORD, database: "shop", host: "relay.example", port: 41234 };
-  const open = renderShare(sharing([listed]), shareModel({ phase: "open", opened }));
-  for (const [id, v] of [["share-host", "relay.example"], ["share-port", "41234"], ["share-user", "share_a1b2c3"], ["share-password", PASSWORD]]) {
-    assert.match(open, new RegExp(`<code id="${id}">${v}</code> <button type="button" class="small" data-copy="${id}"`), `${id} with its Copy`);
-  }
-  const openText = textOf(open);
-  assert.match(openText, /Shared Public for 5 min : every synced table/);
-  assert.match(openText, /SSL mode require/);
-  assert.match(openText, /the password is shown this once, is kept nowhere, and ends with the share/);
-  assert.match(openText, /A free share ends within about an hour: at .+, in about 55 minutes\./);
-  assert.match(openText, /It also ends within two minutes of this page closing\./);
-  assert.match(open, /data-share-stop="share_a1b2c3"[^>]*>Stop sharing</);
-
-  const reloaded = renderShare(sharing([listed]), shareModel());
-  assert.ok(!reloaded.includes(PASSWORD) && !reloaded.includes("share-password"), "after a reload the password is nowhere on the page");
-  assert.match(textOf(reloaded), /The password was shown once, when it opened, and is kept nowhere/);
-  assert.match(reloaded, /Stop sharing/);
-
-  const ended = textOf(renderShare(sharing([]), shareModel({ phase: "ended", ended: { user: "share_a1b2c3", why: "its tunnel closed (ssh exited 255)" } })));
-  assert.match(ended, /The share ended: its tunnel closed \(ssh exited 255\)\. Its address no longer answers, and its password no longer works\./);
-  assert.match(ended, /Connect from anywhere/);
-
-  const failure = { code: "not_found", message: "ssh is not on this machine, and Connect from anywhere needs it", fix: "install the OpenSSH client, then Connect from anywhere again", next: [{ command: "mason doctor", what: "checks this machine" }] };
-  const refused = renderShare(sharing([]), shareModel({ phase: "refused", failure }));
-  assert.ok(refused.includes(fn<[unknown], string>("renderFailure")(failure)), "a refusal is the CLI's Failure, rendered by renderFailure");
-
-  for (const m of [shareModel(), shareModel({ phase: "open", opened })]) assert.equal(renderShare(sharing([listed], { served: true }), m), "", "under mason serve: absent");
-  assert.doesNotMatch(fn<[unknown, unknown?], string>("renderStatus")({ ...sharing([]), served: true }, { now: NOW, queries: QUERIES }), /share-ask|Connect from anywhere/, "nor on a served Overview");
-
-  // every word the card writes: no tunnel's provider, no engine
-  for (const html of [none, asking, two, openText, reloaded, ended, refused]) assert.doesNotMatch(textOf(html), /pinggy|bore\b|duck/i);
-});
-
-test("Connect from anywhere over a fake run: asked once, opened confirmed with the role chosen, beaten on a timer of its own, its end said and its password dropped", async () => {
-  const asked: Array<[string, string | undefined, unknown]> = [];
-  let state: unknown = sharing([]);
-  const answers: Record<string, unknown> = {
-    "GET api/share/choices": { body: { choices: [{ role: "sales", reads: "1 synced table: orders", default: false }, { role: "ops", reads: "every synced table", default: true }] } },
-    "POST api/share": { body: { user: "share_a1b2c3", host: "relay.example", port: 41234, database: "shop", password: PASSWORD, beatMs: 15_000 } },
-    "POST api/share/share_a1b2c3/beat": { body: { ok: true } },
-  };
-  const intervals: Array<{ fn: () => void; ms: number; cleared: boolean }> = [];
-  const ctx = {
-    ask: async (p: string, init?: { method?: string; body?: string }) => { asked.push([p, init?.method, init?.body === undefined ? undefined : JSON.parse(init.body)]); return answers[`${init?.method ?? "GET"} ${p}`]; },
-    read: () => ({ body: state, failure: null }), refresh: async () => undefined, now: () => new Date(SHARE_NOW),
-    timers: { setInterval: (f: () => void, ms: number) => { intervals.push({ fn: f, ms, cleared: false }); return intervals.length - 1; }, clearInterval: (i: number) => { intervals[i]!.cleared = true; } },
-  };
-  const share = fn<[unknown], { m: Record<string, unknown>; actions: Record<string, (...a: unknown[]) => Promise<void> | void>; afterRead: (s: unknown) => void; click: (d: Record<string, string>) => unknown; input: (t: unknown) => unknown }>("createShare")(ctx);
-  await share.click({ shareAsk: "" });
-  assert.equal(share.m.phase, "asking");
-  assert.equal(share.m.role, "ops", "the file's default chosen first");
-  share.input({ id: "share-role", value: "sales" });
-  await share.click({ shareOpen: "" });
-  assert.deepEqual(asked.find(([p, m]) => p === "api/share" && m === "POST")?.[2], { from: "page", confirmed: true, role: "sales" }, "confirmed, the role chosen");
-  assert.equal(share.m.phase, "open");
-  assert.equal(intervals.length, 1);
-  assert.equal(intervals[0]!.ms, 15_000);
-  // a state read before the open lists nothing: never taken for its end
-  share.afterRead(sharing([]));
-  assert.equal(share.m.phase, "open");
-  state = sharing([listed]);
-  share.afterRead(state);
-  intervals[0]!.fn();
-  await new Promise((r) => setTimeout(r, 0));
-  assert.ok(asked.some(([p, m]) => p === "api/share/share_a1b2c3/beat" && m === "POST"), "the beat");
-  // the run ended it (the tunnel closed): the next state says so, and the password leaves the page's memory
-  state = sharing([], { shareEnded: { user: "share_a1b2c3", from: "page", why: "its tunnel closed (ssh exited 255)", at: SHARE_AT } });
-  share.afterRead(state);
-  assert.equal(share.m.phase, "ended");
-  assert.deepEqual(share.m.ended, { user: "share_a1b2c3", why: "its tunnel closed (ssh exited 255)" });
-  assert.equal(share.m.opened, null);
-  assert.ok(!JSON.stringify(share.m).includes(PASSWORD));
-  assert.equal(intervals[0]!.cleared, true, "no more beats");
-  // a reload over an open share: it is beaten again, its password not shown
-  const again = fn<[unknown], { m: Record<string, unknown>; afterRead: (s: unknown) => void }>("createShare")(ctx);
-  again.afterRead(sharing([listed]));
-  assert.equal(again.m.phase, "open");
-  assert.equal(intervals.length, 2);
-  // Stop sharing: DELETE, the beats end
-  answers["DELETE api/share/share_a1b2c3"] = { body: { ok: true } };
-  await (again as unknown as { actions: Record<string, (u: string) => Promise<void>> }).actions.shareStop!("share_a1b2c3");
-  assert.equal(again.m.phase, "ended");
-  assert.equal(intervals[1]!.cleared, true);
-});
-
 // ------------------------------------------------------------------ the host's views and card (issue 814)
 
 /** A host's view as a site supplies it: every string a trap a renderer that writes HTML would fall into. */
@@ -5319,6 +5215,7 @@ test("the host's card on the Overview (pageCard): one card beside Mason's own, r
   await plain.poll();
   const before = Number(/<div class="cards n(\d)">/.exec(plain.view().status!)![1]);
   assert.equal(Number(grid![1]), before + 1, "one more card than Mason's own");
+  assert.deepEqual([before, Number(grid![1])], [8, 9], "eight of Mason's own on a run with tables added, nine with the host's (app.css lays both out)");
   assert.match(overview, /<div class="card host-card"><p class="card-label">Plan &lt;u&gt;<\/p>.*?<\/div><\/div>/s, "the host's card, last");
   assert.ok(!overview.includes("<img src=x"));
   run.asked.length = 0; t += 30_000; await app.poll(); await app.settled();
