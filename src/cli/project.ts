@@ -65,8 +65,6 @@ export interface ProjectConfig {
   name: string;
   /** the project's files (sources/, mason.yml), relative to the project's root */
   folder: string;
-  /** init was told the database is on another machine, on purpose */
-  remote: boolean;
   /** what the users' passwords are made with (src/duck/users.ts); rotating it removes every user */
   apiKey: string;
   /** the server the copy was taken from, recorded at the first start: a database moved to another server is read again */
@@ -252,8 +250,8 @@ export function writeConfig(dir: string, c: ProjectConfig): void {
 }
 
 /** A new project's config: the secrets made here, once. */
-export function newConfig(name: string, folder: string, remote: boolean, o: { demo?: boolean } = {}): ProjectConfig {
-  return { name, folder, remote, ...(o.demo ? { demo: true } : {}), apiKey: randomBytes(24).toString("hex"), sourceServer: null, running: null, lastRun: null };
+export function newConfig(name: string, folder: string, o: { demo?: boolean } = {}): ProjectConfig {
+  return { name, folder, ...(o.demo ? { demo: true } : {}), apiKey: randomBytes(24).toString("hex"), sourceServer: null, running: null, lastRun: null };
 }
 
 /**

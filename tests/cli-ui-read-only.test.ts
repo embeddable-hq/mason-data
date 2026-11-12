@@ -251,7 +251,7 @@ test("MASON_UI_READ_ONLY is mason serve's: 1 or 0, anything else refused on its 
 
   const dir = temp();
   fs.mkdirSync(path.join(dir, "mason", "sources"), { recursive: true });
-  const p = { root: dir, folder: path.join(dir, "mason"), config: newConfig("shop", "mason", false) } as unknown as Parameters<typeof startSettingRefusal>[0];
+  const p = { root: dir, folder: path.join(dir, "mason"), config: newConfig("shop", "mason") } as unknown as Parameters<typeof startSettingRefusal>[0];
   assert.deepEqual(startSettingRefusal(p, { MASON_UI_READ_ONLY: "1" }, { serve: false }),
     { message: "MASON_UI_READ_ONLY is mason serve's setting, and mason start ignores no setting silently", code: "refused", fix: "unset MASON_UI_READ_ONLY: mason start's page is yours alone, on this machine" });
   assert.equal(startSettingRefusal(p, { MASON_UI_READ_ONLY: "1" }, { serve: true }), null, "mason serve's run takes it");
@@ -380,7 +380,7 @@ test("MASON_UI_READ_ONLY_ALLOW is mason serve's: tables, users or both (in eithe
 
   const dir = temp();
   fs.mkdirSync(path.join(dir, "mason", "sources"), { recursive: true });
-  const p = { root: dir, folder: path.join(dir, "mason"), config: newConfig("shop", "mason", false) } as unknown as Parameters<typeof startSettingRefusal>[0];
+  const p = { root: dir, folder: path.join(dir, "mason"), config: newConfig("shop", "mason") } as unknown as Parameters<typeof startSettingRefusal>[0];
   for (const v of ["tables", "users", "tables,users"]) {
     assert.deepEqual(startSettingRefusal(p, { MASON_UI_READ_ONLY_ALLOW: v }, { serve: false }),
       { message: "MASON_UI_READ_ONLY_ALLOW is mason serve's setting, and mason start ignores no setting silently", code: "refused", fix: "unset MASON_UI_READ_ONLY_ALLOW: mason start's page is yours alone, on this machine" }, v);

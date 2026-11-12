@@ -14,7 +14,30 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `e.g. orders`, Queries' since `e.g. 2h`, and a new user's name and where it connects from `e.g. metabase` and
   `e.g. 192.0.2.0/24, 2001:db8::/32`, so an example is never taken for a value already filled in.
 
+- **`--remote` is gone.** `mason init` and `mason start` no longer stop for a database on another machine: they go on,
+  and say once "Your database is on another machine. Mason will sync the tables you choose to this machine." Drop
+  `--remote` from your scripts: `mason init --remote` now fails as an unknown option (exit 2). The `"remote"` key in an
+  older `.mason/config.json` is ignored, and `mason serve` no longer writes it.
+
+- **A database that is not a read replica is information, not a warning.** `mason init`, and `mason start` until the
+  first sync is done, say "This is your main database, not a read replica. Mason only reads from it and keeps its load
+  small. If you have a read replica, you can point Mason there instead." Neither line is a Warning row of `mason
+  status` or in `--json`'s `warnings` any more; `--json`'s `source.standby` and `source.remote` still say both.
+  `mason init --json` has a new `notes` list for these lines, and the tip about a password given on the command line,
+  which is no longer a warning on stderr.
+
+- **`mason doctor` no longer warns about CREATE in schema public on Postgres before 15** when that is only Postgres's
+  own default, which every role has: it says so as information. A grant someone made, or a schema the role owns, is
+  still a warning.
+
 ## What was wrong and is now right
+
+- **A running Mason no longer connects to your database every 10 seconds while idle.** It read the database's tables
+  again on a timer, whatever each table's sync, so a serverless database (Neon, Aurora Serverless) never suspended,
+  and every database logged about 8,600 connections a day. Mason now reads them only when you ask: `mason tables`,
+  `mason status`, `mason add` or `remove`, `mason doctor` or the web page, reusing a read under a minute old. With every
+  table `sync: off`, a run that nobody asks opens no connection after its first sync. A table or column added to the
+  database shows within about a minute of being asked for.
 
 - **A BI tool names a column of an enum, a citext or a composite as its type.** Mason sent such a column with the
   source database's number for its type, which Mason's own catalog could hold as another type, often a synced table's

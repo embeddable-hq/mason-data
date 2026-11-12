@@ -85,10 +85,6 @@ The demo also has a [generated table](#generated-tables), `daily_orders`: orders
 declared in `mason/generated_tables/daily_orders.yml` and kept current from the synced `orders`. `mason wait
 daily_orders` waits until it is built, and `mason status` shows it re-running as new orders arrive.
 
-Mason's CI and the `mason-data` image run Node 26. On Node 24 Mason runs, but a bug in Node 24's V8
-(nodejs/node#66366) can now and then abort it; `mason start` starts it again (not under `--attach`), and `mason status`
-shows the restart. Node 26, or a 22.x release from 22.13, avoids it ([Requirements](cli/README.md#requirements)).
-
 ### Try with your data
 
 **1. Add your tables and start Mason.**
@@ -108,7 +104,8 @@ mason remove customers               # removes a table from mason
 ```
 
 Your app's `DATABASE_URL` works as it is. Set `MASON_DATABASE_URL` when Mason should sync a different database: Mason
-reads it first. You can also run `mason init <url>`, and Mason writes the URL to `.env` for you. The sources file
+reads it first. You can also pipe the URL in, `mason init - < db-url.txt`, and Mason writes it to `.env` for you (its
+password stays out of your shell's history). The sources file
 names the variable Mason read, and the URL itself stays in `.env`.
 
 The sources file lists the tables Mason syncs. It also says how each table stays up to date: synced when you ask,
@@ -226,7 +223,7 @@ AI agents and your own code then connect to Mason as they would to any read repl
   and never asks your database to sort.
 - **It keeps its load small.** The first sync uses at most 3 connections (`MASON_COPY_PARALLEL`), and in case of a crash
   it resumes where it stopped. A table's polls use at most a fifth of your database's time. By default, Mason reads
-  nothing again after the first sync.
+  nothing again after the first sync, and connects only when you ask: to sync, or to list or add tables.
 - **It can read from a read replica.** Point Mason at a replica, and its queries run there, not on your primary.
 - **It leaves secrets out.** `mason add` skips columns that look like secrets (`password`, `token`, `api_key`, …)
   unless you name them.

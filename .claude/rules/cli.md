@@ -124,6 +124,11 @@ CLI lacks).
   Bearer` from the project's `.mason/config.json` (0600). It listens on 127.0.0.1 only and checks the `Host` header.
   It serves the web page too (`mason ui`, src/web/; `.claude/rules/web-ui.md`), under `mason serve` as well, listening only through `listenOnLoopback`, which takes no address (and, under `mason serve` with `MASON_UI_SOCKET`, a Unix socket made 0600 in a folder only Mason's user can write, whose requests reach the same handler behind the same guard: src/cli/ui-socket.ts), a `PageTunnel` opened with the run's token (`mason ui --ssh`, src/cli/ui-ssh.ts) being the guard's only way to add a Host; its users are
   `mason user`'s own functions (`addUser`, `listUsers`, `removeUser`, `disableUser`, `enableUser`), so the page and the CLI cannot disagree.
+  **The run reads the database's catalog only when asked** (issue 890: a 10-second timer kept a serverless compute awake
+  with every table `sync: off`): `/api/state`, a table's columns or Sync choice, `/api/pick` and `/api/remove` ask
+  `RunContext.freshFacts` (`sourceCatalog`, src/cli/source-catalog.ts: a read under `CATALOG_FRESH_MS` reused, one read
+  at a time, a failure keeping the last and said in the log); a usage sample and `/metrics` read `facts()` as it is. No
+  timer reads it (tests/integration/cli-catalog-read.itest.ts counts an idle run's connections).
   **The request log's filters are read by ONE parser** (`requestFilter`, src/cli/request-filter.ts) at both entrances
   — `mason logs --requests`' options and `/api/requests`' query string — so a filter means one thing and a mistake is
   worded once (its key spelled as the entrance spells it). `mason status`'s query summary is its own endpoint

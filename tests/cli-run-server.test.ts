@@ -1225,3 +1225,35 @@ test("the summary (/api/queries) is one read shared for 30 s by every page and c
   fail = false;
   assert.equal(await cached(), 4, "the failed read is not kept: the next ask reads again");
 });
+
+test("the database's catalog is read again only by what shows it or checks against it — the state, a table's columns and Sync choice, an add, a remove — never by a usage sample or another read (issue 890)", async () => {
+  const runServer = await import("../src/cli/run-server.ts") as unknown as { usageFacts: (c: RunContext, now?: number) => Promise<unknown> };
+  const was = ctx.facts;
+  let reads = 0;
+  // a table made on the database since the run's last read: shown only once a read asked for has taken it
+  let made: SourceTable[] = [];
+  const fresh = [table({ table: "invoices" })];
+  (ctx as { freshFacts?: () => Promise<void> }).freshFacts = async () => { reads++; made = fresh; };
+  ctx.facts = () => ({ ...was(), tables: [...was().tables, ...made] });
+  try {
+    for (const p of ["/api/ping", "/api/slow", "/api/refused", "/api/queries", "/api/running", "/api/users"]) {
+      assert.equal((await call("GET", p)).status, 200, p);
+    }
+    await runServer.usageFacts(ctx);
+    assert.equal(reads, 0, "a usage sample, the logs, the users and the queries never read the catalog");
+    const state = JSON.parse((await call("GET", "/api/state")).text) as { tables: Array<{ table: string }> };
+    assert.equal(reads, 1);
+    assert.ok(state.tables.some((t) => t.table === "public.invoices"), "the read is made before the answer: the new table is in it");
+    assert.equal((await call("GET", "/api/tables/public.invoices/columns")).status, 200);
+    assert.equal((await call("GET", "/api/tables/public.invoices/sync")).status, 200);
+    assert.equal(reads, 3, "a table's columns and its Sync choice each ask");
+    const r = await pickIt("public.nope");
+    assert.equal(r.status, 404, r.text);
+    assert.equal(reads, 4, "an add is checked against a fresh read");
+    await call("POST", "/api/remove", { body: { tables: ["public.nope"] } });
+    assert.equal(reads, 5, "so is a remove");
+  } finally {
+    delete (ctx as { freshFacts?: () => Promise<void> }).freshFacts;
+    ctx.facts = was;
+  }
+});

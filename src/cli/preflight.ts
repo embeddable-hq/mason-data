@@ -11,7 +11,6 @@
 import * as os from "node:os";
 import { PgConnection, PgError } from "../cdc/pg-wire.ts";
 import { parseDatabaseUrl, queryProblem, type PgConnection as UrlParts } from "../lib/database-url.ts";
-import type { Failure, NextStep } from "./command.ts";
 import { closest } from "../lib/did-you-mean.ts";
 import type { SourceCollation } from "../duck/collation.ts";
 
@@ -389,7 +388,8 @@ interface TableRow {
   foreign_keys: Array<{ column: string; target: string; target_column: string }>;
 }
 
-/** What a never-analysed table counted to, by oid: `mason start` reads the catalog every 10 s, and a table is counted
+/** What a never-analysed table counted to, by oid: a run reads the catalog again whenever it is asked (at most once a
+ *  minute: src/cli/source-catalog.ts), and a table is counted
  *  once per run, never per read (review of #404: a remote one over the network each time). */
 const COUNTED = new Map<number, number>();
 
@@ -404,7 +404,7 @@ export async function collationVersion(pg: Pick<PgConnection, "query">, versionN
 }
 
 /** The database's facts: its version, whether it is a standby, and every table this user can read. */
-/** `collations: false` (the run's 10-second refresh) leaves the database's collations unread: they were read at the start */
+/** `collations: false` (the run's read when asked, src/cli/source-catalog.ts) leaves the database's collations unread: they were read at the start */
 export async function readSourceFacts(pg: PgConnection, counted: Map<number, number> = COUNTED, o: { collations?: boolean } = {}): Promise<SourceFacts> {
   const r = (await pg.query("SELECT current_setting('server_version_num'), current_setting('server_version'), pg_is_in_recovery()::text")).rows[0]!;
   const rows = JSON.parse((await pg.query(TABLES_SQL)).rows[0]?.[0] ?? "null") as TableRow[] | null;
@@ -472,36 +472,30 @@ export function unpickableReason(t: SourceTable): string | null {
   return null;
 }
 
-/** The warnings `mason start` prints, and `mason status` shows, before anything is copied. */
-export function sourceWarnings(s: Source, f: SourceFacts): string[] {
-  const out: string[] = [];
-  if (!s.remote) return out;
-  out.push(remoteWarning(s));
-  if (!f.standby) out.push("this is a PRIMARY (pg_is_in_recovery() = false): the database your app writes to. A read replica takes the reads instead");
+/** A database on another machine, said as information by `mason init` and at every `mason start` (issue 888: it was a
+ *  stop that wanted a yes, for a fact that is no risk — the synced data's folder is made 0700). */
+export const REMOTE_NOTE = "Your database is on another machine. Mason will sync the tables you choose to this machine.";
+/** A database on another machine that is no read replica, said as information by `mason init`, and by `mason start`
+ *  only until the first sync is done (issue 888); `mason status` says which it is as a plain fact. */
+export const PRIMARY_NOTE = "This is your main database, not a read replica. Mason only reads from it and keeps its load small. " +
+  "If you have a read replica, you can point Mason there instead.";
+
+/** What `mason init` and `mason start` say of the database as INFORMATION, never as a warning (issue 888): where it is,
+ *  and whether it is the main database (`standby`: pg_is_in_recovery(), null when it was not read). A database on this
+ *  machine gets neither. */
+export function sourceNotes(s: Source, standby: boolean | null): string[] {
+  if (!s.remote) return [];
+  return standby === false ? [REMOTE_NOTE, PRIMARY_NOTE] : [REMOTE_NOTE];
+}
+
+/** The warnings `mason start` prints, and `mason status` shows: a serverless compute that a sync keeps awake. What
+ *  wakes it is said as it is (issue 890): a table polled or streamed, and a read of the database's tables, which Mason
+ *  makes only when asked — never on a timer. */
+export function sourceWarnings(s: Source, _f: SourceFacts): string[] {
+  if (!s.remote) return [];
   const sleeper = serverlessHost(s.host);
-  if (sleeper) out.push(`${sleeper} suspends an idle compute and bills while it runs: polling every few seconds, or an open replication connection, keeps it running`);
-  return out;
-}
-
-/** The warning a database on another machine gets at every start: what the copy is and how it is kept current (true of
- *  both modes — the mode is the start's, not known here: a poll scans each table, replication reads the change log). */
-export function remoteWarning(s: Source): string {
-  return `${s.host} is not this machine. mason start will sync the tables you pick to this machine (into its synced data's file, ` +
-    "with no access control beyond this machine's), and keep them current while it runs: a scan of each table at every poll, or its change log for a table whose sync: is replication";
-}
-
-/**
- * THE CONFIRMATION A DATABASE ON ANOTHER MACHINE NEEDS (the refusal read as a failed connection and then a fix: only a
- * careful reading showed it was a warning that wanted a yes, and what the risks were). It is not
- * a failed step — the check passed — but a stop before anything is written or started, said as one failure a reader
- * scans: what stopped (the message), what would happen and the risk (why), the one way to say yes (fix, next).
- */
-export function remoteConfirmation(host: string, o: { cmd: "mason init" | "mason start"; wayOut: string; next: readonly NextStep[] }): Failure {
-  return { code: "failed", exit: 1,
-    message: `stopped before ${o.cmd === "mason init" ? "writing anything" : "starting"}: ${host} is on another machine, and syncing from it needs your say-so`,
-    why: "mason start would sync the tables you pick to this machine: a file under .mason/, with no access control beyond this machine's\n" +
-      "and keep them current while it runs by reading that database: a scan of each table at every poll, or its change log for a table whose sync: is replication",
-    fix: o.wayOut, next: o.next };
+  return sleeper ? [`${sleeper} suspends an idle compute and bills while it runs: a table whose sync: is poll or replication keeps it running. ` +
+    "With every table sync: off, Mason connects only to sync, and to read the database's tables when a command or the web page asks (at most once a minute)"] : [];
 }
 
 /** `pg_current_snapshot()` and xid8, which polling reads, arrived in Postgres 13. */
@@ -509,21 +503,17 @@ export function versionProblem(f: SourceFacts): string | null {
   return f.version >= 130000 ? null : `mason start needs Postgres 13 or later (pg_current_snapshot, which it polls with); this is ${f.versionText}`;
 }
 
-/** A database that passed the check `mason init` and `mason start` both make. */
-export interface CheckedSource { source: Source; facts: SourceFacts; warnings: string[] }
-/** One that passed it but is on another machine, which the caller has not confirmed: said with `remoteConfirmation`,
- *  after the check's own facts — never as a failed connection. */
-export interface NeedsRemote { needsRemote: CheckedSource }
+/** A database that passed the check `mason init` and `mason start` both make: its facts, the warnings, and what is
+ *  said of it as information (`sourceNotes`). */
+export interface CheckedSource { source: Source; facts: SourceFacts; warnings: string[]; notes: string[] }
 
 /**
  * THE ONE CHECK OF A DATABASE (init checks the Postgres connection too, and fails when it cannot connect): connect as
- * the service will, read its version and tables, say the warnings, and refuse a database on another machine unless
- * `remote` says it is meant — `mason init` before it writes anything, `mason start` before it starts anything. Every
- * refusal is said through `say`, with the way out; the result is the exit code then. A database elsewhere that only
- * lacks the confirmation is answered as `NeedsRemote`: the caller says the confirmation, in its own command's words,
- * after the check's facts.
+ * the service will, read its version and tables, and say the warnings and the information. A database on another
+ * machine is read as any other (issue 888: no stop, no confirmation). Every refusal is said through `say`, with the way
+ * out; the result is the exit code then.
  */
-export async function checkSource(url: string, o: { remote: boolean; cmd: string; say: (m: string) => void; progress?: (m: string) => void; name?: string }): Promise<CheckedSource | NeedsRemote | { exit: number }> {
+export async function checkSource(url: string, o: { cmd: string; say: (m: string) => void; progress?: (m: string) => void; name?: string }): Promise<CheckedSource | { exit: number }> {
   const parsed = parseSource(url, o.name);
   if ("problem" in parsed) { o.say(`${o.cmd}: ${parsed.problem}`); return { exit: 2 }; }
   const source = parsed.source;
@@ -540,9 +530,10 @@ export async function checkSource(url: string, o: { remote: boolean; cmd: string
   const tooOld = versionProblem(facts);
   if (tooOld) { o.say(`${o.cmd}: ${tooOld}`); return { exit: 1 }; }
   const warnings = sourceWarnings(source, facts);
+  const notes = sourceNotes(source, facts.standby);
   o.say(`  Postgres ${facts.versionText}${facts.standby ? " (a read replica)" : ""}, ${facts.tables.length} table(s) this user can read. ` +
     "Mason only reads it: no setting, slot or publication is needed or made.");
+  for (const n of notes) o.say(`  ${n}`);
   for (const w of warnings) o.say(`  ! ${w}`);
-  if (source.remote && !o.remote) return { needsRemote: { source, facts, warnings } };
-  return { source, facts, warnings };
+  return { source, facts, warnings, notes };
 }

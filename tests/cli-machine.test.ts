@@ -21,7 +21,7 @@ function fakeProject(): { home: string; shop: Project } {
   const root = path.join(home, "code", "shop");
   fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
   fs.writeFileSync(path.join(root, "mason", "sources", "shop_dev.yml"), "kind: postgres\nurl: postgres://u:secret@localhost:5432/shop_dev\ntables:\n  orders: {}\n");
-  writeConfig(path.join(root, ".mason"), newConfig("shop", "mason", false));
+  writeConfig(path.join(root, ".mason"), newConfig("shop", "mason"));
   return { home, shop: readProject(root) as Project };
 }
 

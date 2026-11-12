@@ -67,7 +67,12 @@ export { SLOW_MS };
 
 export interface RunContext {
   source: Source;
+  /** the database's catalog as last read, whatever its age: what a reader that must never connect reads (a usage sample, `/metrics`) */
   facts: () => SourceFacts;
+  /** the catalog read again when the last read is about a minute old or more (src/cli/source-catalog.ts, issue 890):
+   *  asked by what SHOWS or CHECKS against the database's tables — `/api/state`, a table's columns and Sync choice, an
+   *  add and a remove — never on a timer. Absent: the catalog is what `facts` says (a test's) */
+  freshFacts?: () => Promise<void>;
   warnings: string[];
   /** what the read of a libc collation's order leaves to say (src/duck/libc-order.ts libcOrderNote), or null: mason status */
   textOrder?: string | null;
@@ -315,6 +320,8 @@ export const rolesState = (r: RolesLive): NonNullable<RunState["roles"]> & { all
 };
 
 async function state(ctx: RunContext, columns = false): Promise<unknown> {
+  // what the commands and the page show of the database is as of about a minute ago at most (issue 890)
+  await ctx.freshFacts?.();
   return runState(ctx, ctx.duck.copies(), await ctx.duck.stream(), Date.now(), { columns });
 }
 
@@ -787,12 +794,14 @@ export function createRunServer(ctx: RunContext): http.Server {
           let table: string;
           try { table = decodeURIComponent(url.pathname.split("/")[3]!); }
           catch { throw new Refusal(400, `${url.pathname} does not name a table: GET /api/tables/<schema.table, URL-encoded>/columns`); }
+          await ctx.freshFacts?.();
           sendJson(res, 200, tableColumns(ctx, table));
         } else if (method === "GET" && /^\/api\/tables\/[^/]+\/sync$/.test(url.pathname)) {
           // one table's Sync choice, read when the page opens it: each poll's cost, and Live's checks of the database
           let table: string;
           try { table = decodeURIComponent(url.pathname.split("/")[3]!); }
           catch { throw new Refusal(400, `${url.pathname} does not name a table: GET /api/tables/<schema.table, URL-encoded>/sync`); }
+          await ctx.freshFacts?.();
           sendJson(res, 200, await tableSyncChoice(ctx, table, live));
         } else if (method === "GET" && url.pathname === "/api/slow") {
           // the last day's slow statements, from the request log (src/duck/requests.ts)
@@ -853,6 +862,8 @@ export function createRunServer(ctx: RunContext): http.Server {
           if (sync !== undefined && "problem" in sync) throw new Refusal(400, `sync ${JSON.stringify(body.sync)}: ${sync.problem}`);
           if (body.columns !== undefined && !(Array.isArray(body.columns) && body.columns.every((c) => typeof c === "string"))) throw new Refusal(400, "columns is a list of column names, or [\"*\"]");
           if (body.key !== undefined && !(Array.isArray(body.key) && body.key.length > 0 && body.key.every((c) => typeof c === "string"))) throw new Refusal(400, "key is a list of column names");
+          // an edit is checked against the database's tables as they are now (a table made since the last read included)
+          await ctx.freshFacts?.();
           if (body.picked) {
             // the file as it was (its text, read once with the edit): an edit that sets a table to sync: replication the
             // database cannot serve is undone below
@@ -981,6 +992,7 @@ export function createRunServer(ctx: RunContext): http.Server {
         } else if (method === "POST" && url.pathname === "/api/remove") {
           const body = JSON.parse(await readBody(req, 64 * 1024)) as { tables?: unknown };
           if (!Array.isArray(body.tables) || !body.tables.length || !body.tables.every((m) => typeof m === "string")) throw new Refusal(400, "send { tables: [name, …] }");
+          await ctx.freshFacts?.();
           const r = removeTables(ctx, body.tables as string[]);
           // the sync stops copying a removed table, and drops its copy
           ctx.sourcesChanged();

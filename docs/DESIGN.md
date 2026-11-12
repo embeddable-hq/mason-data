@@ -1305,8 +1305,9 @@ far (the 1.5 GB spill); a laptop whose page cache holds the table never shows th
 **Why the primary key alone (the review of PR #25).** The first version trusted any single-column unique index the
 catalog declares, and three things made that a wrong answer waiting to happen:
 - the catalog's keys and indexes are the source's as of `mason start` and `mason add` / `remove` ONLY: `Sync.setTables`
-  carries them into the catalog's schema, and nothing else calls it — the run's 10-second catalog read
-  (`refreshFacts`, src/cli/dev.ts) refreshes the commands' facts, not the sync's tables. A migration that replaces
+  carries them into the catalog's schema, and nothing else calls it — the run's catalog read when a command or the page
+  asks (`sourceCatalog`, src/cli/source-catalog.ts; a 10-second timer until issue 890) refreshes the commands' facts, not
+  the sync's tables. A migration that replaces
   `UNIQUE (code)` with `UNIQUE (tenant_id, code)`, then two tenants inserting `'a'`, made `count(DISTINCT code)` count
   N+1 for N, and a join on `code` count a row twice. (Feeding the refreshed facts to `setTables` was left out: it would
   also hand the sync every column change of every table, which re-copies a table, and a change of its key mid-run —
@@ -2140,7 +2141,7 @@ only: a table whose `sync:` is `replication` in a demo project's sources file is
 **Why.** A first try should need nothing installed: no Docker, no Postgres, no database of one's own to point at.
 PGlite is a real Postgres (its catalog, its types, its `xmin`) already in the package, where a fixture of rows would be a
 second account of what a source is. It is reached over the wire, not through PGlite's own API, because the demo must run
-the read path production runs — `checkSource`, the chunked copy, the poll, the catalog read every 10 s — or it would show
+the read path production runs — `checkSource`, the chunked copy, the poll, the catalog read when asked — or it would show
 a Mason no one deploys. Polling only, because PGlite has no WAL sender: there is no change log to stream. The port lives in
 one place because two records of it (the URL and a config field) would disagree the day a person edits `.env`; an edited
 URL is refused by the run with the way out. `mason destroy` removes `.mason/demo/` with the copy and keeps `demo: true`,
@@ -2148,6 +2149,24 @@ so the next start seeds it again. **Where.** `src/cli/demo.ts`, `src/demo/source
 `tests/cli-demo.test.ts`, `tests/cli-project.test.ts`.
 
 ## Operating it
+
+### Facts said as facts, and the catalog read when asked (2026-11-12, issues 888 and 890)
+
+**Decision (the owner).** A database on another machine is no longer a stop that wants `--remote` (gone, with the
+config's `remote`): `mason init` and `mason start` carry on and say it as one line of information. That it is the main
+database, not a read replica, is information too, said by `mason init` and by `mason start` until a first sync is done
+(`sourceNotes`, `PRIMARY_NOTE`, src/cli/preflight.ts); `mason status` warns of neither. PUBLIC's
+default CREATE on schema public before Postgres 15 is a line of information in `mason doctor`, never a warning: the
+role its way out makes would hold it too. **Why.** Each made a normal fact read as a risk, or repeated it at every run,
+and people were scared off for no reason; the synced data's folder is made 0700, so "no access control beyond this
+machine's" overstated it.
+
+**Decision (the owner).** A run reads the database's catalog again only when something asks — `/api/state` (the
+commands and the page), a table's columns or Sync choice, an add or a remove — reusing a read under a minute old,
+never on a timer (`sourceCatalog`, src/cli/source-catalog.ts). **Why.** The 10-second timer connected about 8,640 times
+a day whatever each table's sync, so a serverless compute (Neon, Aurora Serverless) never suspended with every table
+`sync: off`. A failed read keeps the last one and is said in the log, and is not tried again within the minute.
+`tests/integration/cli-catalog-read.itest.ts` counts the run's connections over an idle window.
 
 ### A server's web page: `mason ui --ssh` (2026-10-31, issue 107)
 
