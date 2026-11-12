@@ -226,7 +226,7 @@ a commit out of memory is 53200); `tests/duck-copy-order.test.ts`, `tests/integr
 **Decision.** The instance runs with `max_vacuum_tasks = 0` (`INSTANCE_SETTINGS`, src/duck/store.ts), and every open
 reads it back where the checkpoint reads it and refuses to serve without it (`instanceSettingsProblem`). DuckDB's
 checkpoint never merges a table's row groups. It still drops a row group whose every row is deleted. The owner chose it
-on 2026-11-11 over keeping the merge, with its cost below. Mason's own compaction of a table is a later issue.
+on 2026-11-11 over keeping the merge, with its cost below, which Mason's own compaction now bounds ("Compaction", below; issue 851).
 
 **Why.** A real deployment met it on 2026-11-11, on v0.16.0: 2 vCPU, 8 GiB, a 50 GB volume, five tables added at once,
 one of ~154 M rows with two wide `jsonb` columns. A checkpoint during the first syncs failed with `failed to offload
@@ -253,7 +253,7 @@ against a local Postgres 16, synthetic tables, `MASON_COPY_PARALLEL` 3:
   checkpoint (`max_vacuum_tasks = 1`) was not enough: one merge of 100 KB values does not fit 128MB. No setting bounds a
   row group's bytes, and fewer readers or smaller chunks do not help: the merge comes after the read, over what it left.
 
-**What it costs: two things grow until a compaction of Mason's own (a later issue).** Neither grows in Mason's own
+**What it costs: two things grow, until Mason's own compaction rewrites the table ("Compaction", below).** Neither grows in Mason's own
 history tables, whose 7-day trim empties whole row groups.
 
 *Dead rows from updates by key.* A table written by key (the poll's and the stream's write: its keys deleted, its rows
@@ -279,7 +279,7 @@ section said the opposite). The review measured:
 - 8 polled tables of 100,000 rows over 25 `mason start` / `mason stop` cycles: the file grew 50 MiB, where main's grew
   1 MiB, with 26 row groups a table, where main had 2.
 
-*What an operator can do meanwhile.* A table synced again whole is compacted. With Mason running, run `mason remove
+*What an operator could do before the compaction (v0.17.0 alone; no longer needed).* A table synced again whole is compacted. With Mason running, run `mason remove
 <table>`, wait until `mason logs` shows `dropped <table>'s synced data: it is no longer added`, and only then run `mason
 add <table>`, which syncs it again from the source; the table is not served in between. The drop happens at the run's
 next pass (`pass`, src/duck/sync.ts), and only if the table is still removed then. An add made while Mason is stopped,
@@ -293,6 +293,86 @@ counts deleted rows still stored: measured 1,004,000 for a table of 504,000 live
 `tests/duck-checkpoint.test.ts` (the copy's write pattern offline, and a store invalidated by the merge opened again),
 `tests/integration/duck-poll.itest.ts` (five tables added together under 64MB, and the 100 KB shape under 128MB, each with a
 checkpoint the test forces).
+
+### Compaction (issue 851; 2026-11-12)
+
+**Decision.** Mason compacts a synced table itself (`src/duck/compact.ts`, src/duck/sync.ts `compact`,
+`checkCompaction`): what the checkpoint no longer gives back ("No checkpoint merges row groups", above) is given back by
+an ordinary statement whose failure is that table's alone.
+- **When.** The sync reads every synced table's space a minute after it opens (`COMPACT_FIRST_CHECK_MS`: a run started
+  and stopped often leaves a row group a table each time) and every 10 minutes after (`COMPACT_CHECK_MS`), on a DuckDB
+  connection of its own: `duckdb_tables().estimated_size` (the rows stored, deleted ones included), and from
+  `pragma_storage_info` the row groups and the distinct blocks (metadata only; 6 to 50 ms a table here, as the usage
+  sampler's size). The waste is the dead share of the table's blocks plus a block for each row group past the fewest
+  its live rows fill (`wasteOf`; the two add up — 300,000 rows churned 5 % a round grew 27 → 63 blocks in 12 rounds,
+  23.6 of them the dead rows' share and 12 the extra row groups). A table is DUE when that waste is half its blocks
+  (`COMPACT_WASTE_SHARE`) and at least 16 blocks, 4 MiB (`COMPACT_MIN_WASTE_BLOCKS`), so a table is held to about
+  twice what it holds compacted, and a small table never rewritten for a few blocks. A few row groups of large values
+  are no waste (4,000 rows of 100 KB in 20–30 row groups: 5 MiB of 210 MiB), so such a table is not rewritten for them.
+- **How.** A due table is queued as a rebuild, behind every first sync and catch-up, one at a time, so it never runs
+  beside a first sync. On the writer's turn the table is FROZEN: no poll starts on it, a `mason sync` of it is refused
+  by name, its stored JSON paths' fills pause (`rebuildingNow` kind `compact`), and a streamed table's changes are
+  held (`held`, as a catch-up holds them) and marked in `_mason.catch_up` (`after its compaction was cut short`): the
+  stream acknowledges what it holds, so a crash before they are applied catches the table up by one poll at the next
+  start. Then, on the rebuilds' connection, its rows go into `<table>__mason_compact` (its columns from
+  `duckdb_columns()`, NOT NULL and defaults kept, the stored JSON paths' columns among them), a piece of rows by rowid
+  at a time, each its own transaction, in rowid order (heap order kept), and the count is held equal to the table's.
+  The swap is the copy's (one transaction on the writer's turn: a session reads the old table or the new one, never
+  none and never half — `tests/duck-compact.test.ts` reads it 3 ways through 3 compactions); the compaction is
+  recorded with it (`_mason.compactions`), then the held changes are applied and the mark removed. A side table a crash
+  left is dropped at the next open.
+- **Memory.** A piece is `COMPACT_MEMORY_SHARE` (an eighth) of `store.memoryLimitBytes` over a row's bytes on disk
+  times 8 (`pieceRows`: forced zstd stores text 2.5 to 4.5 times smaller; a jsonb read takes about 5.5 times its
+  bytes), at most 8 row groups' rows; a piece out of memory (53200, a statement's or its commit's) is rolled back and
+  the next is half of it, and one row that does not fit fails the compaction (`CompactTooLarge`), said with the limit.
+- **Failure.** Never the table's `error` and never fatal: logged, a `compact_failed` event, on its `mason status` line
+  with when it is tried again (`copyRetryDelayMs`: at least 5 minutes, doubled per failure, at most 6 hours). What
+  was held is applied to the table as it was, and the side table dropped.
+
+**Why it cannot be the merge issue 371 met.** That merge ran INSIDE a checkpoint, and a checkpoint that fails
+invalidates the database. A compaction is statements, measured on DuckDB 2.0.0 (a laptop, synthetic tables, one store
+each; `duckdb_memory()` sampled every 50 ms; "crashed" is the store's `onCrash`, the invalidation):
+
+| what | at 64 MB | 128 MB | 256 MB | 384 MB |
+|---|---|---|---|---|
+| ONE `CREATE TABLE AS` (and the swap) of 4,080 rows of 100 KB (~400 MiB, 210 MiB on disk) | fails: `Out of Memory Error` at the statement | fails at its COMMIT: `failed to pin block … (121.7 MiB/122.0 MiB used)` | the same at 244 MiB | commits in 4.7 s, peak 366 MiB |
+| the same in pieces (`rewrite`, `pieceRows`) | 227 pieces of 18 rows, 16.6 s | 114 pieces of 36 rows, 12.0 s | | |
+
+Each failure left the transaction ended, the table whole and served, the next CHECKPOINT fine and the store never
+invalidated; 140,000 rows of ~2.6 KB (190 MiB) compacted as one statement at 64 and 128 MB. 400 rows of 1 MB at 128 MB:
+136 pieces of 3 rows, 24 s; asked as one piece of the whole table at 32 MB, 100 KB rows halved to 25-row pieces and
+ended whole. The commits a compaction makes may run DuckDB's own checkpoint (the log past 16 MiB), as a first sync's
+chunks do; with the merge off that checkpoint writes what the pieces committed, a piece's memory at most, never a
+merge of row groups.
+
+**The bound and the cost, measured** (`max_vacuum_tasks` 0, the rule above applied after every round, a laptop under
+load; "a round" is one transaction then a CHECKPOINT; the scan is `sum(n), max(s)` over the table, best of 3):
+
+| table, memory limit, rounds | compactions, each | at most, against just compacted: blocks used, a scan | without compaction, at the end | the compactions against the rounds' own writes |
+|---|---|---|---|---|
+| 2 M narrow rows (id, timestamp, int, md5), 256 MB, 60 rounds of 5 % rewritten by key + 0.5 % new | 2, 1.3 s each (128,000-row pieces, peak 204 MiB) | 2.7×, 2.5× | 5.4× the blocks, 4.6× the scan (81.7 ms against 19.7) | 21 % |
+| 300,000 rows with a 1 KB payload, 128 MB, 60 such rounds | 2, 7.6 and 8.7 s (3,400-row pieces, peak 122 MiB) | 2.3×, 2.0× | 4.4×, 4.6× | 57 % |
+| the same, 1 GB, 30 rounds | 1, 5.1 s (26,666-row pieces, peak 432 MiB) | 2.3×, 1.7× | | 43 % |
+| 5 M narrow rows, 1 GB, 25 rounds | 1, 2.2 s (560,915-row pieces) | 2.4×, 2.4× | | 24 % |
+| 1 M narrow rows, 256 MB, 300 rounds of "insert 20 rows" | 3, 0.5 s each, every ~90 rounds | 2.0×, 1.7× | (the review of PR 854: 2,009 row groups, 17× the blocks after 2,000) | 53 % of 2.8 s |
+| 300,000 rows of 1 KB, 128 MB, 300 rounds of "insert 20 rows" | none (75 MiB of extra row groups against 239 MiB) | 1.5×, the scan unchanged (6.2 ms) | | 0 |
+
+A compaction costs a rewrite of the live rows (here ~2.7 M narrow rows a second, ~130,000 rows of 1 KB a second) once
+per about a table's worth of churn at this threshold: a third (1.5×) would rewrite twice as often for a scan about a
+third shorter at its worst. The rounds above write far more between checkpoints than a real run does (a checkpoint
+comes every 16 MiB of log), so a real table is compacted far less often than here. The share of 0.5 is the bound the
+issue's measurement put the knee at (2.1× the file, 1.7× the scan after 60 rounds) and a cost a run pays rarely.
+
+**What it gives up, said.** While a table is compacted its polls wait (its synced data is as old as the compaction is
+long) and a streamed table's changes wait in Node's heap (`held`, as during a catch-up). At the rates above, a 22 M-row
+table with two wide JSON columns would take minutes, and a 195 M-row one tens of minutes: rare (half its space must
+be waste first) but at any hour; a window for it (an operator's setting, or quiet hours) is the owner's to decide.
+The file does not shrink: the freed blocks are reused by later writes. A crash during a streamed table's compaction
+catches it up by one poll, a scan of the source, at the next start. **Where.** `src/duck/compact.ts`,
+src/duck/sync.ts (`checkCompaction`, `compact`, `releaseHeld`); `tests/duck-compact.test.ts` (the rule, an append-only
+table through 200 checkpoints and a churned one held to the bound, out of memory, readers through the swap, the sync's
+own compaction), `tests/integration/duck-compact.itest.ts` (a polled table churned through 12 polls, a streamed table's
+changes held during its compaction, a compaction stopped half way).
 
 ### A copy beside the stream
 

@@ -33,7 +33,7 @@ import type { GeneratedStatus } from "../duck/generated.ts";
 import { reach } from "./state.ts";
 import { CATCHING_UP, copyingText, copyProgress, duration, generatedReadiness, msText, statementMsText, readiness, readinessWord, type Readiness, type SyncFacts, type SyncTotals } from "./readiness.ts";
 import type { SyncEvent } from "../duck/events.ts";
-import type { CopyProgressView, KeptCurrent, StreamStatus } from "../duck/sync.ts";
+import type { Compaction, CopyProgressView, KeptCurrent, StreamStatus } from "../duck/sync.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 import { pathText } from "../duck/kept-route.ts";
 import type { LedgerRequest, QuerySummary, QueryWindow, RequestQuery, UnsupportedSql } from "../duck/requests.ts";
@@ -63,7 +63,10 @@ export interface TableState extends Omit<CatalogTable, "columns"> {
     progress?: CopyProgressView;
     /** the copy is in a layout the run no longer keeps, and is copied again (it serves as it was meanwhile): why, in
      *  the reader's words (src/duck/sync.ts RETIRED_LAYOUT) */
-    retired?: string } | null;
+    retired?: string;
+    /** a synced table's space and its last compaction (src/duck/sync.ts `Compaction`): the share of its stored rows
+     *  deleted, its last compaction, a compaction's failure; said on its line (`compactionWords`) */
+    compaction?: Compaction } | null;
   /** why its copy failed (the sync tries again by itself, src/duck/sync.ts copyRetryDelayMs); null otherwise */
   error: string | null;
   /** an added table's sync: its state, its last sync and its age (src/cli/readiness.ts tableSync); a run from before it has none */
@@ -285,7 +288,8 @@ export function tableRows(s: RunState, now: number = Date.now()): Array<{ line: 
     if (r === 0 || r === 2 && t.copy?.phase === "done") {
       fraction = 1;
       const age = keptWords(t, now);
-      what = `${n(t.copy?.rowsCopied ?? 0)} rows · synced${t.copy?.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}`;
+      const space = compactionWords(t.copy?.compaction, now);
+      what = `${n(t.copy?.rowsCopied ?? 0)} rows · synced${t.copy?.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}${space ? ` · ${space}` : ""}`;
     }
     else if (r === 1) { fraction = 1; what = t.copy?.phase === "done" ? copiedFailedText(t, now) : `its first sync failed: ${firstLine(t.error!)}`; }
     else if (r === 2) {
@@ -299,6 +303,23 @@ export function tableRows(s: RunState, now: number = Date.now()): Array<{ line: 
   rows.sort((a, b) => a.r - b.r || a.at.localeCompare(b.at) || a.t.table.localeCompare(b.t.table));
   const w = Math.max(0, ...rows.map((x) => x.t.table.length));
   return rows.map((x) => ({ line: `${x.t.table.padEnd(w)}  ${x.line}`, tone: barTone(x.t) }));
+}
+
+/** a share of a synced table's stored rows that are deleted at or past which its line says it (under it, its last
+ *  compaction, if any) */
+export const DEAD_SAID_SHARE = 0.1;
+
+/**
+ * A SYNCED TABLE'S SPACE, on its line after its keeping (src/duck/sync.ts `Compaction`; the web page's `compactionWords`
+ * is held equal): a compaction that failed, with when it is tried again; else the share of its stored rows that are
+ * deleted ones its next compaction gives back, from `DEAD_SAID_SHARE` up; else when it was last compacted. Null:
+ * nothing read or done yet, or nothing worth a word.
+ */
+export function compactionWords(c: Compaction | undefined, now: number = Date.now()): string | null {
+  if (c === undefined) return null;
+  if (c.error !== null) return `its compaction failed${c.retryAt === null ? "" : `, tried again after ${c.retryAt.slice(11, 16)} UTC`} (mason logs --events says why)`;
+  if (c.deadShare !== null && c.deadShare >= DEAD_SAID_SHARE) return `${Math.floor(c.deadShare * 100)}% of its stored rows deleted, not compacted yet`;
+  return c.at === null ? null : `compacted ${agoText(c.at, now)}`;
 }
 
 /**
@@ -464,7 +485,11 @@ const STATUS_USAGE = `usage: mason status [--json]
     it was last brought current), syncSeconds (how long that took), syncedBy (copy, poll, catch-up, stream),
     ageSeconds (how long ago that was), asOf (the time the synced data holds the database as of: kept's syncedAt),
     promisedSeconds (the age its sync: promises not to pass; null: sync: off promises nothing), behindBySeconds
-    (how far past it, 0 when not; null when nothing is promised), behindWhy (why, while behind; else null) }, … }], totals: { added, copied, failed, rows (the synced tables' rows),
+    (how far past it, 0 when not; null when nothing is promised), behindWhy (why, while behind; else null) }, … }]
+    (copy: { phase, rowsCopied, updatedAt, and of a synced table compaction: { deadShare (the share of its stored rows deleted), wasteShare (the share
+    of its space its next compaction gives back), checkedAt (when they were read; null: not yet), at (its last
+    compaction; null: none), seconds, error (a compaction that failed; the table is served and kept current all the
+    same), retryAt } }), totals: { added, copied, failed, rows (the synced tables' rows),
     syncedAt (the latest sync of any) }, engine: { file, bytes, keptDays (MASON_HISTORY_DAYS), version (the run's), startedAt,
     uptimeSeconds, restarts (the times its supervisor started the run again: { count, last: { at, why, upSeconds }
     or null }, or { error }) }, disk: { path (where the synced data's file is), freeBytes, copyBytes (the file and its write-ahead log),
@@ -1788,7 +1813,7 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     operators with their estimated rows — or why none could be; else null), planTruncated (cut at 8 KiB) }], keptDays,
     before (the position of the page before,
     or null: none older) }; with --events { events: [{ at, kind (copy_failed, poll_failed,
-    catch_up_failed, stream_failed, source_unreachable, restart, copied, recovered, synced (a sync
+    catch_up_failed, stream_failed, source_unreachable, generated_failed, compact_failed, restart, copied, recovered, synced (a sync
     asked by hand), sync_changed (a table's sync: changed)), failed, table (null: the whole sync),
     message }], keptDays }; with --running { running: [{ session, user,
     applicationName, method, startedAt, runningMs, rows (sent so far), query, queryTruncated }] }; next

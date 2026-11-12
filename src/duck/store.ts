@@ -48,6 +48,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { DuckDBType } from "@duckdb/node-api";
 import { extensionSettings, findExtensions, type Extensions } from "./extensions.ts";
+import { messageOf } from "../lib/secret-mask.ts";
 
 export const MASON_SCHEMA = "_mason";
 
@@ -83,7 +84,7 @@ export const DUCKDB_VERSION = version();
  * INVALIDATES the database — every table's sync, every session, and every restart that resumed the same sync. Measured:
  * 700,000 rows of two ~1 KB jsonb at 128MB spilled 1.4–1.7 GB and rewrote the whole table (a 776 MiB file to 1,519);
  * with 0 nothing spilled. One merge task is not enough: one merge of 100 KB values did not fit 128MB. What it costs
- * (the owner's decision, 2026-11-11), until a compaction of Mason's own: a table written by key (the poll, the stream)
+ * (the owner's decision, 2026-11-11), bounded by Mason's own compaction (src/duck/compact.ts, issue 851): a table written by key (the poll, the stream)
  * keeps its deleted rows' space until a whole row group is deleted — 60 rounds of 5 % updates left 2.1× the file and
  * 1.7× a scan's time — and every table appended to between two checkpoints keeps a row group (a 256 KiB block at
  * least) of its own — 2,000 checkpoints of 20 rows took a 1 M-row table from 31 to 536 MiB. A row group whose every
@@ -506,6 +507,13 @@ export function failureOf(signal: AbortSignal, e: unknown, sql: string): Stateme
  *  chunk's commit of large values: "failed to pin block …" and "could not allocate block … (734.2 MiB/732.4 MiB used)") */
 const BUFFER_LIMIT_REACHED = /(?:could not allocate block|failed to (?:allocate data|pin block|reserve memory data)) of size [^()\n]* \([^()\n]*\/[^()\n]* used\)/;
 const COMMIT_LIMIT_REACHED = new RegExp(`^Failed to commit: ${BUFFER_LIMIT_REACHED.source}`);
+
+/** Whether a ROLLBACK's `e` says the engine had ended the transaction itself ("cannot rollback - no transaction is
+ *  active", after a COMMIT or a read out of memory): a decision, so it reads the raw words (`messageOf`). The first
+ *  sync's chunks and the compaction's pieces read it (src/duck/sync.ts, src/duck/compact.ts) */
+export function endedTransaction(e: unknown): boolean {
+  return /no transaction is active/.test(messageOf(e));
+}
 
 export function pgErrorOf(err: unknown, sql: string): StatementError {
   if (err instanceof StatementError) return err;

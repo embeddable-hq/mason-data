@@ -14,6 +14,9 @@ paths:
   - "tests/integration/duck-poll.itest.ts"
   - "tests/integration/duck-stream.itest.ts"
   - "src/duck/kept.ts"
+  - "src/duck/compact.ts"
+  - "tests/duck-compact.test.ts"
+  - "tests/integration/duck-compact.itest.ts"
 ---
 
 <!-- Loaded only when a matching file is read or edited (the paths above). CLAUDE.md lists every rules file. -->
@@ -147,6 +150,16 @@ paths:
   behind is compared ONCE, at the moment asked, from the ledger's time (`kept.syncedAt`), never a schedule, a phase or
   `CopyState.synced.at` (src/cli/readiness.ts `behindOf`: `tables[].sync.state` `behind`). DETECTOR:
   `tests/duck-sync-schedule.test.ts`, `tests/cli-run-server.test.ts`.
+- **A synced table is compacted by Mason, never by a checkpoint** (issue 851; src/duck/compact.ts, `Sync.compact`;
+  docs/DESIGN.md "Compaction"): the checkpoint merges no row groups (issue 371), so a table's dead rows and its row
+  groups past the fewest are read every 10 minutes on a connection of its own (`checkCompaction`, metadata only) and a
+  table whose waste is half its blocks and 4 MiB is queued LAST, one rebuild at a time, never beside a first sync. It
+  reads the synced data alone: the table frozen on the writer's turn (no poll, `mason sync` refused, stored JSON fills
+  paused, a streamed table's changes `held` and marked in `_mason.catch_up` for a crash), its rows into a side table in
+  pieces held to `store.memoryLimitBytes` (halved at 53200), swapped as a copy is, the held changes applied after. Its
+  failure is an ordinary statement's, that table's alone: never its `error`, never fatal, backed off. A new writer of a
+  synced table checks `rebuildingNow`, or it writes under a compaction and its write is lost at the swap. DETECTOR:
+  `tests/duck-compact.test.ts`, `tests/integration/duck-compact.itest.ts`.
 
 ## What the sync records
 

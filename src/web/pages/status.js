@@ -71,8 +71,8 @@ export function tableLine(t, now = Date.now()) {
     return { state: "copying", fraction: c.fraction ?? 0, what: /^\d/.test(c.text) ? `syncing ${c.text}` : c.text };
   }
   if (!t.copy) return { state: "waiting", fraction: 0, what: "waiting for its first sync to start" };
-  const age = keptWords(t, now);
-  const what = `${n(t.copy.rowsCopied ?? 0)} rows · synced${t.copy.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}`;
+  const age = keptWords(t, now), space = compactionWords(t.copy.compaction, now);
+  const what = `${n(t.copy.rowsCopied ?? 0)} rows · synced${t.copy.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}${space ? ` · ${space}` : ""}`;
   // in its one catch-up poll: at work, the accent as mason status paints it cyan (paintBar), never amber (issue 834)
   if (t.sync?.state === "catching-up") return { state: "catching-up", fraction: 1, what };
   // a copy the poll does not keep current (it waits for its catch-up) is a warning, as mason status paints it (paintBar)
@@ -90,6 +90,15 @@ export function keptWords(t, now = Date.now()) {
   const why = s.behindWhy ?? "its next sync is late";
   const by = `behind by ${duration(s.behindBySeconds)}${age !== null && age.includes(why) ? "" : `: ${why}`}`;
   return age === null ? by : `${age} — ${by}`;
+}
+
+/** A synced table's space on its line (src/cli/commands.ts `compactionWords`, `DEAD_SAID_SHARE`; held equal by
+ *  tests/web-page.test.ts): a failed compaction, the share of its stored rows deleted, or its last compaction. */
+export function compactionWords(c, now = Date.now()) {
+  if (c === undefined || c === null) return null;
+  if (c.error !== null) return `its compaction failed${c.retryAt === null ? "" : `, tried again after ${c.retryAt.slice(11, 16)} UTC`} (mason logs --events says why)`;
+  if (c.deadShare !== null && c.deadShare >= 0.1) return `${Math.floor(c.deadShare * 100)}% of its stored rows deleted, not compacted yet`;
+  return c.at === null ? null : `compacted ${syncedAgo(c.at, now)}`;
 }
 
 /** How long ago a table was synced, as `mason status` says it on its line (src/lib/table-sync.ts `agoText`, which

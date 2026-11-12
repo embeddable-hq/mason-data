@@ -54,7 +54,7 @@
  */
 import type { DuckStore } from "./store.ts";
 import { syncedDataBytes } from "./file-bytes.ts";
-import { DEFAULT_MEMORY_RULE, freeBytesAt, MASON_SCHEMA, NO_ROLE_SESSION, pgErrorOf, SessionSetup } from "./store.ts";
+import { DEFAULT_MEMORY_RULE, endedTransaction, freeBytesAt, MASON_SCHEMA, NO_ROLE_SESSION, pgErrorOf, SessionSetup } from "./store.ts";
 
 /** the session the generated tables' run passes the Mason functions: no slot of the cancel table (src/duck/cancel.ts
  *  `slotOf`), so never cancelled through it; a stop interrupts the run's connection instead */
@@ -78,6 +78,7 @@ import { didYouMean } from "../lib/did-you-mean.ts";
 import { numericWiderThan } from "../lib/pg-numeric.ts";
 import { gapLine, namedPublicationVerdict, readNamedPublication } from "./publication.ts";
 import type { SyncEventInput } from "./events.ts";
+import { COMPACT_MIN_WASTE_BLOCKS, COMPACT_WASTE_SHARE, CompactTooLarge, dropLeftovers, pieceRows, readShape, rewrite, sideOf, swapSql, wasteOf, type TableShape } from "./compact.ts";
 import { extensionFailure, loadPostgresSql } from "./extensions.ts";
 import { errorCode, errorText, maskPasswordKeyword, messageOf } from "../lib/secret-mask.ts";
 import { BIG_TABLE_ROWS, intervalOf, msText, syncedText, syncText, syncWords, type PolledSync, type TableSync } from "../lib/table-sync.ts";
@@ -217,7 +218,10 @@ export interface CopyState {
   /** copied, and caught up by one poll before the polls or the stream keep it current again (`behind`): why */
   behind?: string;
   /** a copy or a catch-up of it is running now (one rebuild at a time): a table copied before serves that copy meanwhile */
-  rebuilding?: "copy" | "catch-up";
+  rebuilding?: "copy" | "catch-up" | "compact";
+  /** what its space holds that is no longer its rows, and its last compaction (`Sync.compact`, src/duck/compact.ts):
+   *  present once its first check read it, or once it was compacted */
+  compaction?: Compaction;
   /** why a sync by hand of it (`mason sync <table>`, the page's Sync now) is refused NOW, in the refusal's own words, or
    *  null when it would run: `Sync.syncRefusal`, the one check `pollNow` refuses with. Present on every state a run's
    *  `state` answers */
@@ -879,11 +883,9 @@ const pq = (sql: string): string => `postgres_query(${literal(SRC)}, ${literal(s
 const NUMERIC_TYPE = /^numeric(?:\((\d+)(?:,\s*(\d+))?\))?$/;
 const WIDER = "mason: a numeric value wider than its synced column";
 
-/** Whether a ROLLBACK's `e` says the engine had ended the transaction itself ("cannot rollback - no transaction is
- *  active", after a COMMIT or a read out of memory): a decision, so it reads the raw words (`messageOf`) */
-export function endedTransaction(e: unknown): boolean {
-  return /no transaction is active/.test(messageOf(e));
-}
+/** Whether a ROLLBACK's `e` says the engine had ended the transaction itself: src/duck/store.ts's, which the
+ *  compaction reads too (src/duck/compact.ts) */
+export { endedTransaction };
 
 /** Whether `e` is a numeric of `source` wider than its synced column (`WIDER`): a decision, so it reads the error's raw
  *  words (`messageOf`), never the words Mason repeats (`errorText`) — the stream's, the catch-up's and the poll's alike */
@@ -932,11 +934,35 @@ interface Lane { readonly conn: DuckConnection; inFlight: boolean }
  *  current again */
 /** a rebuild of a copied table */
 type TableRebuild = "copy" | "catch-up";
-type RebuildKind = TableRebuild | "generated";
+/** a rebuild of a synced table: a copy, its catch-up, or its compaction (`compact`: the table's own rows rewritten) */
+type Rebuilt = TableRebuild | "compact";
+type RebuildKind = Rebuilt | "generated";
 interface Rebuild { kind: RebuildKind }
 /** the order the queue takes them in: a catch-up is one poll that makes a copied table current; a generated table's
- *  re-run reads what the copies hold, so it goes behind them */
-const REBUILD_ORDER: readonly RebuildKind[] = ["catch-up", "copy", "generated"];
+ *  re-run reads what the copies hold, so it goes behind them; a compaction gives back space and changes no row, so it
+ *  goes last, and never beside a first sync (one rebuild at a time) */
+const REBUILD_ORDER: readonly RebuildKind[] = ["catch-up", "copy", "generated", "compact"];
+
+/**
+ * A SYNCED TABLE'S SPACE (`CopyState.compaction`, mason status; src/duck/compact.ts): `deadShare`, the share of its
+ * stored rows that are deleted rows it still holds, and `wasteShare`, the share of its blocks the next compaction
+ * would give back, both as last read (`checkedAt`; null: not read yet); its last compaction (`at`, ISO, its `seconds`);
+ * and while a compaction failed, its error and when it is tried again (`retryAt`). A compaction's failure is never
+ * the table's `error`: the table is served and kept current all the same.
+ */
+export interface Compaction { deadShare: number | null; wasteShare: number | null; checkedAt: string | null; at: string | null; seconds: number | null; error: string | null; retryAt: string | null }
+
+/** how often the synced tables' space is read (`checkCompaction`), and the first read after the sync opens: a run
+ *  stopped and started often leaves a row group a table each time, so the first read comes early */
+export const COMPACT_CHECK_MS = 10 * 60_000;
+export const COMPACT_FIRST_CHECK_MS = 60_000;
+/** what the sync's catch-up ledger says of a streamed table whose compaction a crash cut short: its changes the stream
+ *  held meanwhile were acknowledged, so its next start catches it up by one poll (`_mason.catch_up`) */
+const COMPACT_CUT_SHORT = "after its compaction was cut short";
+/** when the space is read, and what makes a table due (src/duck/compact.ts `wasteOf`) */
+export interface CompactOptions { checkMs?: number; firstCheckMs?: number; wasteShare?: number; minWasteBlocks?: number;
+  /** a test's hold before each piece of a compaction (src/duck/compact.ts `RewriteHooks.beforePiece`) */
+  beforePiece?: (source: string) => Promise<void> | void }
 
 export class Sync {
   private readonly store: DuckStore;
@@ -1047,7 +1073,7 @@ export class Sync {
   private writerTurn: Promise<void> = Promise.resolve();
   /** the rebuilds waiting, by source; the one running and its loop (`drainRebuilds`) */
   private readonly queued = new Map<string, Rebuild>();
-  private rebuildingNow: { source: string; kind: TableRebuild } | null = null;
+  private rebuildingNow: { source: string; kind: Rebuilt } | null = null;
   private rebuilding: Promise<void> | null = null;
   /** the source attached for this many users (a pass, a rebuild): DETACHed when the last ends (`detach`) */
   private sourceUsers = 0;
@@ -1075,6 +1101,14 @@ export class Sync {
   private readonly diskFree: (dir: string) => number;
   /** the copy's readers past the rebuilds' own connection, open while it reads (`readChunks`): what `stop` interrupts too */
   private readonly copyLanes = new Set<Lane>();
+  /** each synced table's space and last compaction (`Compaction`), and the back-off of a compaction that failed */
+  private readonly compactions = new Map<string, Compaction>();
+  private readonly compactRetries = new Map<string, { failures: number; at: number }>();
+  /** the connection the space is read on (`checkCompaction`): never the writer's, nor the rebuilds' a copy holds */
+  private compactReader: DuckConnection | null = null;
+  private compactTimer: NodeJS.Timeout | null = null;
+  private checkingCompaction: Promise<void> | null = null;
+  private readonly compactOptions: Required<Omit<CompactOptions, "beforePiece">> & Pick<CompactOptions, "beforePiece">;
   private reportTimer: NodeJS.Timeout | null = null;
   /** the last batch applied with changes: when, and when its newest transaction committed on the database (ms) */
   private lastBatch: { appliedAt: number; committedAt: number } | null = null;
@@ -1112,7 +1146,10 @@ export class Sync {
     options: { streamReportMs?: number; copyChunkRows?: number; copyParallel?: number; copyChunkSeconds?: number; onChunk?: (e: ChunkEvent) => void | Promise<void>; diskFree?: (dir: string) => number;
       json?: Partial<KeptOptions>; generated?: GeneratedOptions; onReplication?: (made: boolean) => void;
       /** each failure and notable event of the sync, as it happens (src/duck/events.ts): the run records them */
-      onEvent?: (e: SyncEventInput) => void } = {}) {
+      onEvent?: (e: SyncEventInput) => void;
+      /** when the synced tables' space is read and when one is compacted (`CompactOptions`): the defaults, but in tests */
+      compact?: CompactOptions } = {}) {
+    this.compactOptions = { checkMs: COMPACT_CHECK_MS, firstCheckMs: COMPACT_FIRST_CHECK_MS, wasteShare: COMPACT_WASTE_SHARE, minWasteBlocks: COMPACT_MIN_WASTE_BLOCKS, ...options.compact };
     this.store = store; this.source = source; this.log = log; this.intervalMs = intervalMs; this.mode = mode;
     this.streamReportMs = options.streamReportMs ?? 60_000;
     this.copyChunkRows = options.copyChunkRows ?? COPY_CHUNK_ROWS;
@@ -1267,6 +1304,16 @@ export class Sync {
     await this.readSynced();
     await this.findRetired();
     this.removeStageLeftovers();
+    // EACH TABLE'S LAST COMPACTION (`compact`), written in its swap's transaction; and what a compaction a crash cut short
+    // left beside its table, dropped before anything reads it (a streamed one's held changes are caught up by one poll:
+    // its catch-up row, read above)
+    await this.store.writer.run(`CREATE TABLE IF NOT EXISTS ${MASON_SCHEMA}.compactions (source VARCHAR PRIMARY KEY, compacted_at TIMESTAMPTZ, seconds DOUBLE, ` +
+      `stored_before BIGINT, "rows" BIGINT, row_groups_before BIGINT, row_groups_after BIGINT, bytes_before BIGINT, bytes_after BIGINT)`);
+    for (const [source, ms, seconds] of (await this.store.writer.runAndReadAll(`SELECT source, epoch_ms(compacted_at), seconds FROM ${MASON_SCHEMA}.compactions`)).getRowsJS() as Array<[string, number | bigint, number]>) {
+      this.compactions.set(source, { deadShare: null, wasteShare: null, checkedAt: null, at: new Date(Number(ms)).toISOString(), seconds, error: null, retryAt: null });
+    }
+    for (const left of await dropLeftovers(this.store.writer)) this.log(`dropped ${left}: what a compaction cut short (by a stop or a crash) left; its table serves as it was, and is compacted again when it is due`);
+    this.compactReader = await this.store.instance.connect();
     // the stored JSON paths, before the catalog serves anything: each served copy's view, what the file holds
     await this.kept.open();
     // the run's connection is a session's, set up by the one set-up (src/duck/store.ts `SessionSetup`): a plan's SQL reads it
@@ -1278,6 +1325,160 @@ export class Sync {
     await this.generated.open();
     this.catalog = await this.store.instance.connect();
     await this.rebuildSchema();
+    this.timeCompactionCheck(this.compactOptions.firstCheckMs);
+  }
+
+  // ------------------------------------------------------------------------------------------------- the compaction
+
+  /** the next read of the synced tables' space, `ms` from now (`checkCompaction`); never while stopped */
+  private timeCompactionCheck(ms: number): void {
+    if (this.stopped || this.mode === "recopy") return;
+    if (this.compactTimer !== null) clearTimeout(this.compactTimer);
+    this.compactTimer = setTimeout(() => {
+      this.compactTimer = null;
+      this.checkingCompaction = this.checkCompaction().catch((e: unknown) => {
+        this.log(`the synced tables' space could not be read (read again in ${Math.round(this.compactOptions.checkMs / 60_000)} min): ${this.errorText(e)}`);
+      }).finally(() => { this.checkingCompaction = null; this.timeCompactionCheck(this.compactOptions.checkMs); });
+    }, ms);
+    this.compactTimer.unref();
+  }
+
+  /** the table's space as a reader is told it (`CopyState.compaction`): its last read and compaction, its failure */
+  private compactionOf(source: string): Compaction {
+    return this.compactions.get(source) ?? { deadShare: null, wasteShare: null, checkedAt: null, at: null, seconds: null, error: null, retryAt: null };
+  }
+
+  /** whether a table may be compacted now: synced and current (neither to be read again nor behind), not queued or
+   *  rebuilt, its last failed compaction's back-off over */
+  private compactable(t: AddedTable): boolean {
+    const st = this.states.get(t.source);
+    return this.mode !== "recopy" && st?.phase === "copied" && st.rows !== null && !this.needsCopy(t) && !this.behind.has(t.source) && !this.queued.has(t.source) &&
+      this.rebuildingNow?.source !== t.source && (this.compactRetries.get(t.source)?.at ?? 0) <= Date.now();
+  }
+
+  /**
+   * THE SYNCED TABLES' SPACE, READ (src/duck/compact.ts `readShape`, `wasteOf`): every `COMPACT_CHECK_MS` (and
+   * `COMPACT_FIRST_CHECK_MS` after the open), on a connection of its own — the engine's catalog, metadata only — each
+   * table's dead share and what a compaction would give back kept for mason status, and a table due queued for its
+   * compaction (`compact`), behind any first sync. One table's read that fails is said and the others read on.
+   */
+  async checkCompaction(): Promise<void> {
+    const c = this.compactReader;
+    if (c === null || this.stopped || this.mode === "recopy") return;
+    for (const t of this.tables.values()) {
+      if (this.stopped) return;
+      const st = this.states.get(t.source);
+      if (st?.phase !== "copied" || st.rows === null || this.needsCopy(t)) continue;
+      let shape: TableShape | null;
+      try { shape = await readShape(c, t.schema, t.table, st.rows); }
+      catch (e) { this.log(`${t.source}: its space could not be read (read again at the next check): ${this.errorText(e)}`); continue; }
+      if (shape === null) continue;
+      const w = wasteOf(shape, { share: this.compactOptions.wasteShare, minBlocks: this.compactOptions.minWasteBlocks });
+      this.compactions.set(t.source, { ...this.compactionOf(t.source), deadShare: w.deadShare, wasteShare: w.bytes > 0 ? w.wasteBytes / w.bytes : 0, checkedAt: new Date().toISOString() });
+      if (w.due && this.compactable(t)) this.enqueue(t.source, { kind: "compact" });
+    }
+  }
+
+  /**
+   * A SYNCED TABLE COMPACTED (issue 851; src/duck/compact.ts, docs/DESIGN.md "Compaction"), a rebuild of the queue —
+   * one at a time, never beside a first sync — that reads the synced data alone, never the source:
+   *  1. on the writer's turn, the table is FROZEN: marked as rebuilt, so no poll starts on it (`pollable`; a `mason sync`
+   *     is refused by name) and no stored JSON path is filled; a streamed table's changes are held (`held`, as a
+   *     catch-up holds them), and marked in `_mason.catch_up` (`COMPACT_CUT_SHORT`): the stream acknowledges what it
+   *     holds, so a crash before they are applied catches the table up by one poll at the next start;
+   *  2. on the rebuilds' connection, its rows into its side table in pieces held to the memory limit (`rewrite`): an
+   *     ordinary statement, whose failure — out of memory included — is that table's alone and never fatal;
+   *  3. on the writer's turn, the SWAP in one transaction (the copy's own guarantee: a session reads the old table or the
+   *     new one, never none and never half of one), the compaction recorded with it; then the held changes applied and
+   *     the mark removed.
+   * A failure drops the side table, applies what was held to the table as it was, and is tried again after a back-off
+   * (`copyRetryDelayMs`), said in the log, as an event and on its mason status line; never the table's error.
+   */
+  private async compact(t: AddedTable): Promise<void> {
+    const source = t.source, replicated = this.replicated(t);
+    const frozen = await this.onWriter(async () => {
+      // decided on the turn: the table may have been removed, changed or marked behind since it was queued
+      if (this.stopped || !this.tables.has(source) || !this.compactable(t)) return false;
+      this.rebuildingNow = { source, kind: "compact" };
+      if (replicated) {
+        await this.store.writer.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.catch_up VALUES (${literal(source)}, ${literal(COMPACT_CUT_SHORT)}, now())`);
+        this.held.set(source, noChanges());
+      }
+      this.refreshStreamed();
+      return true;
+    });
+    if (!frozen) return;
+    const started = Date.now();
+    const lane = this.rebuilder, c = lane.conn;
+    let swapped = false;
+    try {
+      const before = await readShape(c, t.schema, t.table, this.states.get(source)?.rows ?? null);
+      if (before === null) throw new Error(`its synced table is not there (Mason bug: report it, with mason logs)`);
+      const n = pieceRows(this.store.memoryLimitBytes, before);
+      const done = await rewrite(c, t.schema, t.table, n, { run: async (sql) => { await this.interruptible(lane, () => c.run(sql)); }, said: (line) => this.log(`${source}: ${line}`),
+        ...(this.compactOptions.beforePiece ? { beforePiece: () => this.compactOptions.beforePiece!(source) } : {}) });
+      const at = new Date().toISOString(), seconds = (Date.now() - started) / 1000;
+      await this.onWriter(async () => {
+        const w = this.store.writer;
+        await w.run("BEGIN TRANSACTION");
+        try {
+          for (const sql of swapSql(t.schema, t.table)) await w.run(sql);
+          await w.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.compactions (source, compacted_at, seconds, stored_before, "rows", row_groups_before, bytes_before) VALUES ($1, $2::TIMESTAMPTZ, $3, $4, $5, $6, $7)`,
+            [source, at, seconds, before.stored, done.rows, before.rowGroups, before.blocks * before.blockSize]);
+          await w.run("COMMIT");
+        } catch (e) { await w.run("ROLLBACK"); throw e; }
+        swapped = true;
+        try { await this.releaseHeld(t); }
+        catch (f) { this.log(`${source}: its compaction's mark could not be removed (it is caught up by one poll at the next start): ${this.errorText(f)}`); }
+      });
+      this.compactRetries.delete(source);
+      this.compactions.set(source, { ...this.compactionOf(source), deadShare: 0, wasteShare: null, checkedAt: null, at, seconds, error: null, retryAt: null });
+      const w = wasteOf(before);
+      this.log(`compacted ${source} in ${seconds.toFixed(2)} s: ${done.rows.toLocaleString("en-US")} row(s) rewritten from ${before.stored.toLocaleString("en-US")} stored ` +
+        `(${Math.round(w.deadShare * 100)}% deleted) in ${before.rowGroups} row group(s), about ${humanBytes(w.wasteBytes)} of ${humanBytes(w.bytes)} given back; its reads went on meanwhile`);
+    } catch (e) {
+      // the side table goes, and the table as it was serves on: what was held is applied to it
+      if (!swapped) {
+        try { await this.onWriter(async () => { await this.releaseHeld(t); }); }
+        catch (f) { this.log(`${source}: the changes held during its compaction could not be applied (it is caught up by one poll at the next start): ${this.errorText(f)}`); }
+        try { await c.run(`DROP TABLE IF EXISTS ${sideOf(t.schema, t.table)}`); }
+        catch (f) { this.log(`${source}: what its compaction left could not be dropped (dropped at the next start): ${this.errorText(f)}`); }
+      }
+      if (e instanceof Stopping) { this.log(`compaction of ${source} stopped: Mason is stopping (rolled back; its synced table serves as it was, and is compacted when it is due)`); return; }
+      const failures = (this.compactRetries.get(source)?.failures ?? 0) + 1;
+      const retryAt = Date.now() + copyRetryDelayMs(failures, Date.now() - started);
+      this.compactRetries.set(source, { failures, at: retryAt });
+      const why = e instanceof CompactTooLarge ? `${e.message} in ${humanBytes(this.store.memoryLimitBytes)} of memory (MASON_DUCKDB_MEMORY)` : this.errorText(e);
+      const m = `its compaction failed, and is tried again after ${clock(retryAt)} UTC (failure ${failures} in a row; its synced table serves as it was, and is kept current): ${why}`;
+      this.log(`${source}: ${m}`);
+      this.event({ kind: "compact_failed", table: source, message: m });
+      this.compactions.set(source, { ...this.compactionOf(source), error: m, retryAt: new Date(retryAt).toISOString() });
+    } finally {
+      await this.onWriter(async () => { if (this.rebuildingNow?.source === source) this.rebuildingNow = null; this.refreshStreamed(); });
+    }
+  }
+
+  /**
+   * ON THE WRITER'S TURN, a compaction's end (`compact`): what the stream held of the table meanwhile applied to it, as
+   * a catch-up applies what it held (`applyChanges` "held"), then its mark removed — only the compaction's own (a
+   * catch-up a switch of its sync or the stream marked meanwhile stands). Changes that cannot be applied leave the mark,
+   * and the table is caught up by one poll (`behind`), or read again whole when a numeric outgrew it.
+   */
+  private async releaseHeld(t: AddedTable): Promise<void> {
+    const held = this.held.get(t.source);
+    if (held === undefined || this.rebuildingNow?.source !== t.source || this.rebuildingNow.kind !== "compact") return;
+    this.held.delete(t.source);
+    try {
+      if (held.truncated || held.keys.size > 0) await this.applyChanges(new Map([[t.source, held]]), "held");
+    } catch (e) {
+      if (widerIn(e, t.source)) this.snapshots.delete(t.source);
+      else this.behind.set(t.source, { why: COMPACT_CUT_SHORT });
+      this.refreshStreamed();
+      this.log(`${t.source}: the changes the stream held during its compaction could not be applied: it is ${widerIn(e, t.source) ? "read again whole, wider" : "caught up by one poll"} (${this.errorText(e)})`);
+      return;
+    }
+    await this.store.writer.run(`DELETE FROM ${MASON_SCHEMA}.catch_up WHERE source = ${literal(t.source)} AND why = ${literal(COMPACT_CUT_SHORT)}`);
+    this.refreshStreamed();
   }
 
   /**
@@ -1484,9 +1685,15 @@ export class Sync {
     return dues.length ? passDelayMs(Math.min(...dues), Date.now(), this.lastPassMs) : null;
   }
 
+  /** a copy or a catch-up of the table is queued (a compaction queued is not one: the table is polled until it runs) */
+  private queuedRebuild(source: string): boolean {
+    const q = this.queued.get(source);
+    return q !== undefined && q.kind !== "compact";
+  }
+
   /** a table a pass would poll now if it were due: copied, not queued or rebuilt, and not owed its catch-up */
   private pollable(t: AddedTable): boolean {
-    return !this.needsCopy(t) && !this.behind.has(t.source) && !this.queued.has(t.source) && this.rebuildingNow?.source !== t.source;
+    return !this.needsCopy(t) && !this.behind.has(t.source) && !this.queuedRebuild(t.source) && this.rebuildingNow?.source !== t.source;
   }
 
   /** the source's views (src/cli/preflight.ts VIEWS_SQL), served over the copied tables: in the catalog from the next
@@ -1528,7 +1735,9 @@ export class Sync {
         return { ...s, ...(synced ? { synced } : {}), ...(behind !== undefined ? { behind } : {}), ...(rebuilding ? { rebuilding } : {}) };
       })
       // why a sync by hand of it would be refused now, from the one check pollNow refuses with (in memory: the page asks every 2 s)
-      .map((s) => { const t = this.tables.get(s.source); return t === undefined ? s : { ...s, syncRefusal: this.syncRefusal(t)?.message ?? null }; });
+      .map((s) => { const t = this.tables.get(s.source); return t === undefined ? s : { ...s, syncRefusal: this.syncRefusal(t)?.message ?? null }; })
+      // its space and its last compaction, once read or done (`Compaction`)
+      .map((s) => { const c = this.compactions.get(s.source); return c === undefined || s.phase !== "copied" ? s : { ...s, compaction: { ...c } }; });
   }
 
   /**
@@ -1673,7 +1882,7 @@ export class Sync {
 
   /** an added table needs a copy or a catch-up that is neither queued nor running: a later pass must queue it */
   private waiting(): boolean {
-    const busy = (s: string): boolean => this.queued.has(s) || this.rebuildingNow?.source === s;
+    const busy = (s: string): boolean => this.queuedRebuild(s) || this.rebuildingNow?.source === s;
     // a table a named publication does not carry waits for its owner, never for the interval (prepareReplication)
     // a table waiting out a failure's back-off is `wakeAt`'s, never a pass every interval (each one reads the source)
     const backingOff = (s: string): boolean => (this.retries.get(s)?.at ?? 0) > Date.now();
@@ -1815,6 +2024,7 @@ export class Sync {
     if (this.timer !== null) clearTimeout(this.timer);
     if (this.wake !== null) { clearTimeout(this.wake.timer); this.wake = null; }
     if (this.reportTimer !== null) { clearInterval(this.reportTimer); this.reportTimer = null; }
+    if (this.compactTimer !== null) { clearTimeout(this.compactTimer); this.compactTimer = null; }
     // the stream, the pass and the rebuild end together: a batch waiting for the writer's turn behind a poll must not
     // wait for that poll, so each connection's long statement is interrupted from the start
     const interrupt = (): void => { for (const lane of [this.writerLane, this.rebuilderLane, this.generatedLane, ...this.copyLanes]) if (lane?.inFlight) lane.conn.interrupt(); };
@@ -1822,7 +2032,7 @@ export class Sync {
     interrupt();
     try {
       // none of them rejects: each says its own failure
-      await Promise.all([this.stream?.stop(), this.running, this.rebuilding, this.kept.stop(), this.generated.stop()]);
+      await Promise.all([this.stream?.stop(), this.running, this.rebuilding, this.kept.stop(), this.generated.stop(), this.checkingCompaction]);
       await this.writerTurn;
     } finally { clearInterval(again); }
     this.stream = null;
@@ -1832,6 +2042,8 @@ export class Sync {
     this.catalog = null;
     this.rebuilderLane?.conn.closeSync();
     this.rebuilderLane = null;
+    this.compactReader?.closeSync();
+    this.compactReader = null;
     this.generatedLane?.conn.closeSync();
     this.generatedLane = null;
     this.generatedSession = null;
@@ -1867,6 +2079,8 @@ export class Sync {
   private rebuildingRefusal(t: AddedTable): PollRefused | null {
     const now = this.rebuildingNow?.source === t.source ? this.rebuildingNow.kind : null;
     if (now === null && !this.behind.has(t.source)) return null;
+    // a compaction rewrites the synced table and reads no source: its polls wait until it ends, then go on from its watermark
+    if (now === "compact") return new PollRefused("nothing_yet", `${t.source} is being compacted (its synced data serves as it was, and its polls wait until that ends): mason sync ${t.source} again once it ends`);
     const doing = now === "copy" ? "being read again whole" : `being caught up by one poll ${this.behind.get(t.source)?.why ?? ""}`.trimEnd();
     return new PollRefused("nothing_yet", `${t.source} is ${doing} (its synced data serves as it was): it is caught up by one poll when that ends, so there is nothing to poll — mason wait waits for it`);
   }
@@ -2262,7 +2476,7 @@ export class Sync {
     const at = this.retries.get(source)?.at ?? 0;
     if (at > Date.now()) return `${why} — after a failure, tried again after ${clock(at)} UTC`;
     const ahead = this.rebuildingNow;
-    if (this.queued.has(source) && ahead !== null && ahead.source !== source) return `${why} — queued behind ${ahead.source}'s ${ahead.kind === "copy" ? "whole read" : "catch-up"} (one rebuild at a time)`;
+    if (this.queued.has(source) && ahead !== null && ahead.source !== source) return `${why} — queued behind ${ahead.source}'s ${ahead.kind === "copy" ? "whole read" : ahead.kind === "compact" ? "compaction" : "catch-up"} (one rebuild at a time)`;
     return why;
   }
 
@@ -2290,9 +2504,10 @@ export class Sync {
     if (!this.needsCopy(t) && b !== undefined) return `it is caught up by one poll ${b.why} first`;
     // synced, caught up, and not yet polled (`pollable`): its rebuild's last writer's turn, or a rebuild still queued
     if (st?.phase === "copied") {
+      if (this.rebuildingNow?.source === source && this.rebuildingNow.kind === "compact") return "it is being compacted (its synced data serves as it was): its polls go on once that ends";
       if (this.rebuildingNow?.source === source) return "its sync is ending: it is kept current from then on";
       const queued = this.queued.get(source)?.kind;
-      if (queued !== undefined) return queued === "copy" ? `it is queued to be read whole: ${joins}` : "it is queued to be caught up by one poll";
+      if (queued !== undefined && queued !== "compact") return queued === "copy" ? `it is queued to be read whole: ${joins}` : "it is queued to be caught up by one poll";
     }
     return `it waits for its first sync: ${joins}`;
   }
@@ -2708,7 +2923,7 @@ export class Sync {
         await w.run(`DROP TABLE IF EXISTS ${ident(schema)}.${ident(table)}`);
         // and what a copy of it that a crash cut short left beside it (`copy`)
         await w.run(`DROP TABLE IF EXISTS ${ident(schema)}.${ident(`${table}${SIDE_SUFFIX}`)}`);
-        for (const ledger of ["copy_state", "poll_state", "catch_up", "copy_progress", "copy_chunks"]) await w.run(`DELETE FROM ${MASON_SCHEMA}.${ledger} WHERE source = ${literal(source)}`);
+        for (const ledger of ["copy_state", "poll_state", "catch_up", "copy_progress", "copy_chunks", "compactions"]) await w.run(`DELETE FROM ${MASON_SCHEMA}.${ledger} WHERE source = ${literal(source)}`);
         // its stored JSON paths and its view
         await this.kept.removed(source);
         this.behind.delete(source);
@@ -2726,6 +2941,8 @@ export class Sync {
       this.copiedColumns.delete(source);
       this.states.delete(source);
       this.synced.delete(source);
+      this.compactions.delete(source);
+      this.compactRetries.delete(source);
       this.log(`dropped ${source}'s synced data: it is no longer added (mason add ${source} syncs it again from the source, whole)`);
     }
     // REPLICATION, as the tables' syncs say: the publication and slot made ready for the replicated tables and the stream
@@ -2797,7 +3014,7 @@ export class Sync {
       if (this.unpublished.has(t.source)) continue;
       if (this.replicated(t) && !replicationReady) continue;
       if (this.mode !== "recopy" && !this.needsCopy(t)) continue;
-      if (this.queued.has(t.source) || this.rebuildingNow?.source === t.source) continue;
+      if (this.queuedRebuild(t.source) || this.rebuildingNow?.source === t.source) continue;
       if (this.states.get(t.source)?.phase === "copied" && this.copiedAs.get(t.source) !== columnsKey(t.columns)) this.log(`${t.source}: its columns are not the ones it was synced with: it is read again whole`);
       this.enqueue(t.source, { kind: "copy" });
     }
@@ -2836,8 +3053,10 @@ export class Sync {
     this.lastPassMs = Date.now() - started;
   }
 
-  /** a rebuild queued, unless that table's is queued or running already; the queue started if idle */
+  /** a rebuild queued, unless that table's is queued or running already; the queue started if idle. A copy or a
+   *  catch-up takes the place of a compaction queued for the table: it is what the table waits on */
   private enqueue(source: string, r: Rebuild): void {
+    if (r.kind !== "compact" && this.queued.get(source)?.kind === "compact") this.queued.delete(source);
     if (this.stopped || this.queued.has(source) || this.rebuildingNow?.source === source) return;
     this.queued.set(source, r);
     this.drainRebuilds();
@@ -2861,8 +3080,11 @@ export class Sync {
           continue;
         }
         const t = this.tables.get(next[0]);
+        // a compaction says its own failure, and changes nothing a copy or a catch-up waits on
+        // (its columns changed meanwhile, or its held changes could not be applied: its follow-up below)
+        if (kind === "compact") { if (t !== undefined) await this.compact(t); this.followUp(next[0]); }
         // a catch-up that found a numeric wider than the copy: copied again, next
-        if (t !== undefined && await this.rebuild(t, kind) === "copy again") this.enqueue(t.source, { kind: "copy" });
+        else if (t !== undefined && await this.rebuild(t, kind) === "copy again") this.enqueue(t.source, { kind: "copy" });
         // still needing a copy or a catch-up: a pass now, or when its back-off ends
         else this.followUp(next[0]);
         // removed while it was rebuilt: the pass that removal kicked left it for this one to drop
