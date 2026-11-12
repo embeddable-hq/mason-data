@@ -16,6 +16,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **The web page no longer shows old data as current while Mason can't be reached.** When the page lost Mason (the
+  run stopped, or the tunnel closed), it kept what it had read, its big "Ready" and the cards, under the failure
+  message, and they read as current. Now the page greys what it read before and says when it was read: "As of 14:02
+  UTC. Mason can't be reached." With nothing read yet, the Overview says "Unknown". The page is current again as soon
+  as Mason answers.
+
 - **A BI tool names a column of an enum, a citext or a composite as its type.** Mason sent such a column with the
   source database's number for its type, which Mason's own catalog could hold as another type, often a synced table's
   row type. So a tool that looks the number up (Metabase, DBeaver and Tableau through JDBC, .NET and asyncpg clients)

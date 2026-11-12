@@ -1263,6 +1263,92 @@ test("the app: a poll writes the shown page and when, reading only its endpoints
   for (const part of Object.values(v)) assert.ok(!/duckdb/i.test(part), "never the engine's name");
 });
 
+// ------------------------------------------------------------------ out of date while the poll fails (issue 886)
+
+interface StaleApp extends App { stale(): { at: Date; failure: { code: string } } | null }
+
+test("the Overview while the poll fails after a good read: the word it read greyed, as of when and why, the banner below it; current again at the first answer", async () => {
+  const run = fakeRun();
+  const kept = new Map(run.answers);
+  let clock = Date.UTC(2026, 9, 27, 14, 2, 30);
+  const app = fn<[unknown, () => Date], StaleApp>("createApp")(run.fetch, () => new Date(clock));
+  await app.poll();
+  let v = app.view();
+  assert.equal(app.stale(), null, "read: current");
+  assert.match(v.status!, /<div class="health warn" role="status">/, "the word in its colour");
+  assert.match(textOf(v.status!), /^Under way (?!As of)/, "no as-of while it answers");
+  assert.ok(!/stale-note/.test(v.poll!));
+  // the run stops; a minute later the poll asks again
+  run.answers.clear();
+  clock += 60_000;
+  await app.poll();
+  v = app.view();
+  assert.deepEqual(app.stale(), { at: new Date(Date.UTC(2026, 9, 27, 14, 2, 30)), failure: app.model.pollFailure }, "out of date: as of the last read that answered");
+  assert.match(v.status!, /<div class="health warn stale" role="status"><span class="dot" aria-hidden="true"><\/span><span class="word">Under way<\/span><p class="as-of">As of 14:02 UTC\. Mason can&#39;t be reached\.<\/p><\/div>/,
+    "the word it last read, greyed, said as of when and why");
+  assert.equal(textOf(v.status!).startsWith("Under way As of 14:02 UTC. Mason can't be reached."), true);
+  assert.match(textOf(v.status!), /public\.orders 15% syncing/, "the rest it read stays (greyed by its section: in the browser test)");
+  assert.ok(!/stale-note/.test(v.poll!), "the Overview says it in its word: the banner does not say it twice");
+  assert.match(textOf(v.poll!), /^✗ Mason does not answer at this address/, "the banner says what to do");
+  // another page shown while it fails: the banner says how old what it shows is
+  clock += 30_000;
+  app.show("tables");
+  await app.poll();
+  assert.equal(textOf(app.view().poll!).startsWith("As of 14:02 UTC. Mason can't be reached. What this page shows is from then. ✗ Mason does not answer"), true, app.view().poll);
+  app.show("status");
+  // a refusal (not a run gone): the same, said as the read that failed
+  run.answers.set("GET api/state", () => new Response(JSON.stringify({ failure: { code: "failed", message: "the state could not be read" } }), { status: 500 }));
+  await app.poll();
+  assert.equal(textOf(app.view().status!).startsWith("Under way As of 14:02 UTC. The latest read failed."), true, app.view().status);
+  // it answers again: current at once, the word in its colour, no as-of
+  for (const [k, a] of kept) run.answers.set(k, a);
+  await app.poll();
+  v = app.view();
+  assert.equal(app.stale(), null);
+  assert.match(v.status!, /<div class="health warn" role="status">/);
+  assert.ok(!/As of|can&#39;t be reached/.test(v.status!), "recovered: nothing says it is out of date");
+  assert.equal(v.poll, "");
+});
+
+test("the Overview while the poll fails with nothing read yet: Unknown, and why, greyed; the banner what to do; the state once it answers", async () => {
+  const run = fakeRun();
+  const kept = new Map(run.answers);
+  run.answers.clear();
+  const app = fn<[unknown], StaleApp>("createApp")(run.fetch);
+  await app.poll();
+  let v = app.view();
+  assert.equal(app.stale(), null, "nothing read: nothing to grey");
+  assert.equal(v.status, `<div class="health stale" role="status"><span class="dot" aria-hidden="true"></span><span class="word">Unknown</span><p class="as-of">Mason can&#39;t be reached.</p></div>`);
+  assert.equal(textOf(v.status!), "Unknown Mason can't be reached.");
+  assert.match(textOf(v.poll!), /^✗ Mason does not answer at this address/, "no as-of in the banner: there is no earlier read");
+  for (const [k, a] of kept) run.answers.set(k, a);
+  await app.poll();
+  v = app.view();
+  assert.match(textOf(v.status!), /^Under way (?!As of)/, "the state, once it answers");
+  assert.equal(v.poll, "");
+});
+
+test("in the browser: the shown section is greyed while the poll fails after a good read (its parts, not its controls), never another's, and current again at the first answer", async () => {
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
+  assert.match(css, /section\[data-stale\] > div\[id\] > :not\(\.health\) \{ opacity: 0\.55; \}/, "a stale section's parts greyed; the word says it itself");
+  assert.match(css, /\.health\.stale \.word \{ color: var\(--muted\); \}/);
+  const run = fakeRun();
+  const kept = new Map(run.answers);
+  const { el, tick, settle } = fakeBrowser(run, "#overview");
+  await settle();
+  const stale = (id: string) => el(`page-${id}`).attrs.has("data-stale");
+  assert.equal(stale("status"), false, "read: current");
+  run.answers.clear();
+  tick();
+  await settle();
+  assert.equal(stale("status"), true, "the poll failed: the Overview it shows is out of date");
+  assert.equal(stale("tables"), false, "never a section not shown");
+  for (const [k, a] of kept) run.answers.set(k, a);
+  tick();
+  await settle();
+  assert.equal(stale("status"), false, "it answered: current again");
+});
+
 test("the app: an added user's password is written once, gone once dismissed and never again; a refusal renders the Failure", async () => {
   const run = fakeRun();
   const app = fn<[unknown], App>("createApp")(run.fetch);
