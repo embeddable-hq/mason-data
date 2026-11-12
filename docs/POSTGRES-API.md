@@ -469,11 +469,9 @@ names the agent. Its tools say over this wire what a bare SQL tool would leave a
   writes it (`public."Clients"`);
 - `query` sends ONE statement through the extended protocol (a second is Postgres's 42601), its `max_rows` the
   Execute's row count (the server stops there and answers PortalSuspended: `truncated`), after `SET statement_timeout`
-  to its `timeout_ms` (57014 past it); the column types are the catalog's `mason_wire_type(oid, typmod)` of the
+  to its `timeout_ms` (57014 past it); the column types are the catalog's `format_type(oid, typmod)` of the
   RowDescription's OID and modifier. The wire sends the SOURCE's OID for a type the source made (an enum, a citext),
-  which the catalog holds under another OID, and both count from 16384: `mason_wire_type` names an OID as the wire
-  sent it; `format_type` keeps the catalog's meaning for an OID the catalog has (pg_attribute's `atttypid`) and names
-  any other as the wire's; `pg_catalog.format_type`, written out, is the catalog's own;
+  and the catalog holds the type at that very OID (src/api/postgres/type-oids.ts), so pg_type names it as the source does;
 - a request the client cancels (`notifications/cancelled`) is a CancelRequest for its statement;
 - a refusal reaches the model whole, as an MCP tool error: SQLSTATE, message, DETAIL (the gap's id) and HINT (its way
   out), the fields this listener's ErrorResponse carries;

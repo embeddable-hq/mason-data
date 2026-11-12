@@ -1397,6 +1397,16 @@ function* matrix(): Generator<Matrixed> {
   yield q("enum of another schema", "SELECT id, l FROM moods WHERE l = 'high' ORDER BY l, id");
   yield q("enum_range / enum_first", "SELECT enum_first(null::mood), enum_last(m), enum_range(m) FROM moods WHERE id = 1");
   yield q("an ORDER BY name two columns answer (42702)", "SELECT m, m::text FROM moods GROUP BY m ORDER BY m");
+  // ONE OID A TYPE THE SOURCE MADE (issue 861): the catalog holds an enum, a citext and their arrays at the source's OIDs,
+  // which the wire sends, so a lookup of a column's RowDescription OID in pg_type (JDBC's getColumnTypeName) names it;
+  // pg_typeof names it as Postgres does (an enum of another schema qualified, an array as its element's []); a literal
+  // cast in a statement the catalog answers is sent with the source's OID
+  yield q("made types' OIDs in pg_type", "SELECT t.oid::int8, format_type(t.oid, NULL), t.typnamespace::regnamespace::text FROM pg_type t " +
+    "WHERE t.oid IN ('mood'::regtype, 'mood[]'::regtype, 'other.level'::regtype, 'other.level[]'::regtype, 'citext'::regtype, 'citext[]'::regtype) ORDER BY 2");
+  yield q("made types' OIDs in pg_attribute", "SELECT attname, atttypid::int8, format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'public.moods'::regclass AND attnum > 0 ORDER BY attnum");
+  yield q("pg_typeof of made types", "SELECT id, pg_typeof(m)::text, pg_typeof(ms)::text, pg_typeof(l)::text, pg_typeof(m), pg_typeof(l) FROM moods ORDER BY id LIMIT 2");
+  yield q("pg_typeof of a citext[]", "SELECT pg_typeof(ca)::text, pg_typeof(ca[1])::text FROM typed_arrays ORDER BY id LIMIT 1");
+  yield q("a made type's literal, no table", "SELECT 'happy'::mood AS m, 'high'::other.level AS l, '{ok}'::mood[] AS ms, 'Q'::citext AS c");
   yield q("a source's defaults and NOT NULL in information_schema", "SELECT column_name, column_default, is_nullable, is_identity, identity_generation FROM information_schema.columns WHERE table_name = 'defaults' ORDER BY ordinal_position");
   yield q("a serial's and an identity's sequence", "SELECT pg_get_serial_sequence('defaults', 'id'), pg_get_serial_sequence('public.defaults', 'sm'), pg_get_serial_sequence('defaults', 'ia'), pg_get_serial_sequence('defaults', 'ib'), pg_get_serial_sequence('defaults', 's')");
   yield q("a source's defaults in pg_attribute and pg_attrdef", "SELECT a.attname, a.attnotnull, a.attidentity, a.atthasdef, pg_get_expr(d.adbin, d.adrelid) FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum WHERE a.attrelid = 'public.defaults'::regclass AND a.attnum > 0 AND a.attname <> 'g' ORDER BY a.attnum");

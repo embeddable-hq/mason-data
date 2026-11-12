@@ -401,6 +401,13 @@ paths:
 - **A type a database made is declared in the catalog under its name, with nothing over it** (`PgColumn.made`, `catalogDdl`):
   a tool reads its name, and what Postgres's analysis cannot find over it is the gap, never Postgres's 42883
   (`madeTypeRefusal`). All such types are one allowlist key (`made`). A domain's column is its base type (`domain-column`).
+- **A type a database made is at the SOURCE's OID in the catalog too: one OID space, never a map** (`placeTypes`,
+  src/api/postgres/type-oids.ts, issue 861; docs/DESIGN.md "One OID for a type the source made"): the catalog moves each
+  made type, its array and a whole-copied table's row type to the OIDs the wire sends, so a RowDescription's OID looked
+  up in pg_type (JDBC's getColumnTypeName), a Parse's parameter type and the analysis are one number, and the plan sends
+  the analysis's OID as it is. Why: both count from 16384, and the source's OID was the catalog's row type of another
+  table. `pg_typeof` of one is the catalog's regtype under the session's search_path (`typeNames`, src/duck/plan.ts).
+  Detector: tests/duck-type-oids.test.ts (the collision forced), the oracle's `made types' OIDs`.
 - **A value written in the session's zone is written where it is sent** (`ZONED_HELD`): a tstzrange's stored text is the zone it
   was read in; the wire and `x::text` ask Postgres's own output under the session's zone at the Execute.
 

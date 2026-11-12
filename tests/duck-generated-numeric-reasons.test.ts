@@ -33,8 +33,8 @@ test("an enum and a citext over a source's own type OIDs, spelled as the source'
 // catalog count their made types' OIDs from 16384 alike, so one number can name a citext there and a row type here: the
 // generated column was declared as that row type (`ledger`), and its statements were refused 0A000 "input of anonymous
 // composite types is not implemented". The catalog's row-type OIDs are read from a first world, then given to the
-// source's citext and enum in a second, whose catalog holds them as the same row types (checked, so a moved OID fails
-// as such, not as a pass)
+// source's citext and enum in a second, whose catalog makes its row types there first and then holds the source's types
+// at those OIDs (issue 861: checked, so a collision not forced fails as such, not as a pass)
 test("a made type whose source OID is a catalog row type's is declared as the source's type, and its statements are answered (issue 858)", async () => {
   let rowTypes: Array<[string, number]> = [];
   const readRowTypes = async (w: Parameters<Parameters<typeof overLedger>[1]>[0]): Promise<Array<[string, number]>> =>
@@ -44,7 +44,13 @@ test("a made type whose source OID is a catalog row type's is declared as the so
   const [eventsRow, ledgerRow] = rowTypes.map(([, oid]) => oid) as [number, number];
   const colliding = LEDGER_COLUMNS.map((c) => c.name === "mood" ? { ...c, typeOid: String(eventsRow), typeArrayOid: "5974239" } : c.name === "name" ? { ...c, typeOid: String(ledgerRow), typeArrayOid: "5974249" } : c);
   await overLedger({ kinds: KINDS }, async (w, restarted) => {
-    if (!restarted) assert.deepEqual(await readRowTypes(w), rowTypes, "the source's made-type OIDs are the catalog's row types' (the collision this test needs)");
+    // the collision this test needs: the catalog made its row types at the source's OIDs, and holds the source's types
+    // there instead (src/api/postgres/type-oids.ts, issue 861), its row types moved out of the way
+    if (!restarted) {
+      assert.deepEqual((await typed(w, `SELECT oid::int, typname::text FROM pg_catalog.pg_type WHERE oid IN (${eventsRow}, ${ledgerRow}) ORDER BY oid`)).rows,
+        [[eventsRow, "mood"], [ledgerRow, "citext"]].sort((a, b) => Number(a[0]) - Number(b[0])));
+      assert.ok((await readRowTypes(w)).every(([, oid]) => oid !== eventsRow && oid !== ledgerRow));
+    }
     assert.deepEqual(w.status("public.kinds").refusals, []);
     assert.deepEqual((await typed(w, "SELECT a.attname::text, pg_catalog.format_type(a.atttypid, a.atttypmod) FROM pg_catalog.pg_attribute a " +
       "WHERE a.attrelid = 'public.kinds'::regclass AND a.attnum > 0 ORDER BY a.attnum")).rows, [["id", "bigint"], ["mood", "mood"], ["name", "citext"]], "the generated table's columns are the source's types");
