@@ -38,7 +38,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   <table>` does.", and the same on Queries, Usage and Sync events.
 - **Connects from is a dropdown** on the Users page (adding a user, and a user's From…): "anywhere" or "only these
   addresses", which shows the box for the addresses beside it. Nothing in the form moves when you change it, and what
-  is sent is as before.
+  is sent is as before. The form (Name, Role, Connects from and Add a user) is one line where the page is wide enough,
+  and wraps by field below that.
 - **The Users page lists the users first**, under its title, then the form that adds one (with the card of a user just
   added beside it) and Connect.
 

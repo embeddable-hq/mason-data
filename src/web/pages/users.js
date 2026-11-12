@@ -314,12 +314,14 @@ export function createShare(ctx) {
  * role — then each other role, sent as `role`. The server judges the role (src/cli/user.ts roleToAdd). Written the
  * same while nothing changes, so a poll never rewrites it under a name being typed. Then Connects from, as `--from`
  * (`connectsChoice`): from anywhere, the default, sends no `from`; only from these addresses sends the ranges typed.
- * Shown under MASON_UI_READ_ONLY=1 too when its users are the page's own (MASON_UI_READ_ONLY_ALLOW=users).
+ * Shown under MASON_UI_READ_ONLY=1 too when its users are the page's own (MASON_UI_READ_ONLY_ALLOW=users). Each field
+ * (a label and its control) is one span, so the form lays out as one line where its card is wide enough and wraps by
+ * field, never between a label and its control, below that (app.css `#add-user`).
  */
 export function renderAddUser(state) {
   if (state === undefined || state === null || usersReadOnly(state) !== null) return "";
-  return `<form id="add-user" class="formcard" autocomplete="off"><label for="user-name">Name</label>` +
-    `<input id="user-name" name="name" required placeholder="e.g. metabase" spellcheck="false" autocapitalize="off">` +
+  return `<form id="add-user" class="formcard" autocomplete="off"><span class="name-field"><label for="user-name">Name</label> ` +
+    `<input id="user-name" name="name" required placeholder="e.g. metabase" spellcheck="false" autocapitalize="off"></span>` +
     roleChoice(state.roles) + connectsChoice("add-user") + `<button type="submit" class="primary">Add a user</button></form>`;
 }
 

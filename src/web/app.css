@@ -552,6 +552,19 @@ table.catalog tbody tr:hover > td.act { background: var(--hover); }
 tr.removed > * { color: var(--muted); }
 form.formcard { margin: 0 0 var(--space-5); padding: var(--space-3) var(--space-4); background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); }
 form.formcard input { width: 18em; }
+/* THE ADD A USER FORM ON ONE LINE where its card is wide enough: Name, Role, Connects from (its address box's place kept)
+   and Add a user, each field a label and its control that wrap together; below that, it wraps by field, the box under
+   its dropdown on a phone. The box's place is kept whatever is chosen, so nothing in the form moves when it changes. */
+#add-user-box { container-type: inline-size; }
+#add-user { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
+#add-user .name-field { display: inline-flex; align-items: center; gap: var(--space-2); min-width: 0; max-width: 100%; }
+#add-user .name-field label { flex: none; }
+#add-user .name-field input { width: 10em; min-width: 0; flex: 0 1 auto; }
+/* Connects from takes the rest of the line from a basis of its label, its dropdown and the least address box, the box
+   growing into the rest (under its dropdown on a phone) */
+#add-user .connects { margin: 0; flex: 1 1 400px; }
+#add-user .connects .ranges { flex: 1 1 9em; min-width: 0; }
+#add-user .connects .ranges input { width: 100%; min-width: 0; }
 /* the Users form's Role: its label and select wrap together on a phone, the select shrinking to the card (a long role's
    name cut in the closed box, whole in the open list), so the page never scrolls sideways */
 #add-user .role-field { display: inline-flex; align-items: center; gap: var(--space-2); max-width: 100%; min-width: 0; vertical-align: middle; }

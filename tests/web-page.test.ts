@@ -1527,6 +1527,27 @@ test("the add form: Connects from, a dropdown in mason user add's words — anyw
   assert.deepEqual(rangesOf({ connects: { value: "only" }, from: { value: "" } }), [], "none: sent as none, for the run to refuse");
 });
 
+test("the add form on one line where its card is wide enough: each field a label and its control in one span, the form a wrapping row, Connects from taking the rest, nothing moving on its choice", () => {
+  const renderAddUser = fn<[unknown], string>("renderAddUser");
+  const form = renderAddUser(stateOf([], { roles: rolesLive(["everything", "agent"], "everything") }));
+  // the form's children, in order: Name's span, Role's, Connects from's, Add a user — never a label apart from its control
+  const children = [...form.replace(/^<form[^>]*>|<\/form>$/g, "").matchAll(/<(span|button)\b[^>]*? class="([^"]*)"/g)];
+  assert.match(form, /^<form id="add-user" class="formcard" autocomplete="off"><span class="name-field"><label for="user-name">Name<\/label> <input id="user-name"[^>]*><\/span> <span class="role-field">/);
+  assert.ok(["name-field", "role-field", "connects", "primary"].every((c) => children.some((m) => m[2] === c)), "the four fields");
+  assert.match(textOf(renderAddUser(CATALOG_STATE)), /^Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user$/);
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rule = (sel: string) => css.match(new RegExp(`(?:^|\\})\\s*${sel.replace(/[.#[\]="]/g, "\\$&")}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
+  assert.match(rule("#add-user-box"), /container-type: inline-size;/, "the form's card is its own container");
+  assert.match(rule("#add-user"), /display: flex; flex-wrap: wrap;/, "one row, wrapping by field below its width");
+  assert.match(rule("#add-user .name-field"), /display: inline-flex;/);
+  assert.match(rule("#add-user .connects"), /margin: 0; flex: 1 1 \d+px;/, "Connects from takes the rest of the line");
+  assert.match(rule("#add-user .connects .ranges"), /min-width: 0;/, "the address box shrinks inside its field, never over Add a user");
+  assert.match(rule("#add-user .connects .ranges input"), /width: 100%; min-width: 0;/);
+  // the box's place is kept while anywhere is chosen: the choice changes no width, so nothing moves
+  assert.match(css, /\.connects:has\(option\[value="any"\]:checked\) \.ranges \{ visibility: hidden; \}/);
+  assert.doesNotMatch(css, /\.ranges\s*\{[^}]*display: none/);
+});
+
 test("the app: the add form sends from only when only these addresses is chosen; the run's refusal of a range is shown as the run words it", async () => {
   const run = fakeRun();
   run.answers.set("GET api/state", answer(CATALOG_STATE));
