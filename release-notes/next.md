@@ -12,6 +12,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   addresses" showed the address box and pushed Add a user onto a line of its own; From anywhere pulled it back. Now the
   box keeps its place whichever is ticked, saying "any address" under From anywhere, so nothing in the form moves; the
   same in a user's From… box.
+- **The web page's radio choices line up.** Where a choice wrapped, "Only from these addresses" started under the
+  "Connects from" label rather than under "From anywhere". Now every choice of radio buttons (where a user connects
+  from, in the add form and in From…; a table's sync) is one a line with the buttons in one column, or, in the add
+  form where there is the room, one row.
 - **The limit on what statements may spill to disk is in force from the start.** Before, the limit (half of the free
   disk under `.mason/`, or `MASON_SPILL_LIMIT`) was not enforced until the free disk moved by 1 % or more, so a heavy
   statement could spill past it and fill the disk. Now a statement past it fails alone with 53400 and Mason's hint.

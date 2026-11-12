@@ -132,7 +132,10 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   add` with no `--from`), with no second question; **Only from these addresses** sends the ranges typed in one box,
   comma-separated as `--from a,b` takes them (`192.0.2.0/24, 2001:db8::/32`), split at each comma and trimmed. The box
   keeps its place whichever is ticked, so a toggle moves nothing (issue 875): under From anywhere its place is a quiet
-  dashed slot saying "any address", the box itself hidden from Tab and from a screen reader. The page
+  dashed slot saying "any address", the box itself hidden from Tab and from a screen reader. Its two choices are a
+  radio group as every one on the page is (`.radios`, src/web/app.css: Connects from here and in From…, a table's
+  Sync choice): one choice a line, every radio at one left edge with its words beside it; the add form lays the two in
+  one row only where its card has the room for the label, both and the box (800 px). The page
   never checks a range: the run reads each, and a refused one is shown as the run's refusal. `--set`
   attributes stay the command's. Its password is shown once, in a card of the fields a tool's
   connection form asks for — URL, User, Password, Database, Host, Port and SSL mode, each with **Copy**, laid out the

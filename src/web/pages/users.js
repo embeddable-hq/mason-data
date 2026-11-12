@@ -47,12 +47,13 @@ export const fromText = (from) => from === null || from === undefined ? "from an
  * The address field's place is the form's whichever is ticked (issue 875: ticking it moved Add a user to a line of its
  * own): under from anywhere that place says "any address", muted and hidden from a screen reader (the ticked choice says
  * it), and the field is `visibility: hidden` there — out of the tab order and the accessibility tree, its box kept.
+ * Its two choices are a radio group (`.radios`, src/web/app.css): one a line, their radios in one column.
  */
 export function connectsChoice(id, from = null) {
   const only = Array.isArray(from);
   return `<fieldset class="connects"><legend>Connects from</legend>` +
-    `<label class="tick"><input type="radio" name="connects" value="any"${only ? "" : " checked"}> From anywhere</label>` +
-    `<label class="tick"><input type="radio" name="connects" value="only"${only ? " checked" : ""}> Only from these addresses</label>` +
+    `<div class="radios"><label><input type="radio" name="connects" value="any"${only ? "" : " checked"}> From anywhere</label>` +
+    `<label><input type="radio" name="connects" value="only"${only ? " checked" : ""}> Only from these addresses</label></div>` +
     `<span class="ranges"><span class="ranges-any" aria-hidden="true">${esc(rangesText(null))}</span>` +
     `<span class="ranges-field"><label class="sr" for="${esc(id)}-from">Address ranges, comma-separated</label>` +
     `<input id="${esc(id)}-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e.g. 192.0.2.0/24, 2001:db8::/32" value="${esc(only ? from.join(", ") : "")}"></span></span></fieldset>`;
