@@ -75,6 +75,25 @@ export const SHOWS = { all: "All", added: "Added", failed: "Failed", "not-added"
 /** How many of the tables that pass the filters the page writes at once; "Show N more" writes as many again. */
 const TABLE_ROWS = 100;
 
+/**
+ * THE LIST'S ORDER, as it is LAID OUT: the added tables first (whatever their sync's word), then those not added, each
+ * group in the order `/api/state` `tables` has them — so the first TABLE_ROWS written begin with every added table.
+ * The page lays it out when the list is shown, and again only when the search box's text or the state filter changes
+ * (`m.order`, below): a table added or removed in between keeps its row, its state changing in place, because a row that
+ * jumped to its group the moment its Add answered would pull the next row under the pointer (a click moves no other row).
+ */
+export const layoutOf = (tables) => [...tables.filter((t) => t.added), ...tables.filter((t) => !t.added)].map((t) => t.table);
+
+/** The tables in a laid-out order (`layoutOf`'s names): each where the layout put it; a table the layout has not met
+ *  (new in the catalog since) after them, laid out among themselves; one gone from the catalog gone. No order: laid out now. */
+export function inLayout(tables, order = null) {
+  const at = new Map((order ?? layoutOf(tables)).map((name, i) => [name, i]));
+  const placed = tables.filter((t) => at.has(t.table)).sort((a, b) => at.get(a.table) - at.get(b.table));
+  const met = new Set(placed.map((t) => t.table));
+  const fresh = new Map(tables.filter((t) => !met.has(t.table)).map((t) => [t.table, t]));
+  return [...placed, ...layoutOf([...fresh.values()]).map((name) => fresh.get(name))];
+}
+
 /** Whether an added table's copy or sync failed (the Failed filter, the Overview's failed card). */
 const failedTable = (t) => t.added && (t.sync?.state === "failed" || Boolean(t.error));
 
@@ -293,10 +312,11 @@ export function renderTablesCards(s) {
  * Escape, or the next action's answer or question in its place); `ui.syncing` the tables whose sync is asked. Sync now
  * is offered disabled while the table's `syncRefusal` (`/api/state`: why `mason sync` of it is refused now, the sync's
  * one check) is set, that reason its title, in the same room; `ui.filter` the
- * search box's text and `ui.show` the state filter (a key of SHOWS).
+ * search box's text and `ui.show` the state filter (a key of SHOWS); `ui.order` the list's order as it was last laid
+ * out (`layoutOf`'s names; none: laid out from `s`, the added tables first).
  */
 export function renderTables(s, ui = {}) {
-  const { removing = null, choosing = null, columns = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], adding = [], shares = new Map(), before = new Map(), synced = null, open = () => false, limit = TABLE_ROWS,
+  const { removing = null, choosing = null, columns = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], adding = [], shares = new Map(), before = new Map(), synced = null, open = () => false, limit = TABLE_ROWS, order = null,
     syncOpen = null, syncChoice = null, syncAsk = null, syncPicked = null } = ui;
   const now = ui.now ?? Date.now();
   if (!s.tables.length) return empty(`${s.source.database} has no table this user can read.`);
@@ -401,7 +421,7 @@ export function renderTables(s, ui = {}) {
   const stray = outcome !== null && "failure" in outcome && !s.tables.some((t) => t.table === outcome.table) ? renderFailure(outcome.failure) : "";
   // the search box's text and the state filter: the tables that pass both (the one a form or a confirm is open on stays, whatever they say)
   const passes = (t) => (show === "added" ? t.added : show === "failed" ? failedTable(t) : show === "not-added" ? !t.added : true) && nameMatches(t.table, filter);
-  const shown = s.tables.filter((t) => passes(t) || t.table === choosing || t.table === removing);
+  const shown = inLayout(s.tables, order).filter((t) => passes(t) || t.table === choosing || t.table === removing);
   // at most `limit` rows written (the one a form or a confirm is open on always): a database of 800 tables costs 100 rows
   const written = shown.filter((t, i) => i < limit || t.table === choosing || t.table === removing);
   const matching = filter.trim() ? `<p class="count dim">${n(shown.length)} with “${esc(filter.trim())}” in the name</p>` : "";
@@ -421,6 +441,8 @@ export const page = {
   title: "Tables",
   create(ctx) {
     const m = { removing: null, choosing: null, columns: null, outcome: null, ticked: null, held: null, heldFilter: null, heldShow: null, filter: "", show: "all", syncing: [], adding: [], synced: null, limit: TABLE_ROWS,
+      // the list's order as last laid out (`layoutOf`): null until the state is first read
+      order: null,
       // the table whose Sync choice is open, what `GET api/tables/<table>/sync` answered for it (null while read), the
       // choice whose question is asked before it is saved, and the read in flight: ONE at a time for the page, never on
       // a timer — each is a connection to the database
@@ -429,6 +451,11 @@ export const page = {
     const monotone = createMonotone();
     // the details open (a copy's whole error), by key: a poll rewrites the part, and they stay open
     const opened = createOpenSet();
+    // THE LIST IS LAID OUT (its order taken from the latest state: the added tables first) at ONE set of moments: the
+    // page shown (`route`, which `show` calls every time, drops it, and the next state read lays it out; a reload is a
+    // new page), the search box's text or the state filter changed. Never at a poll or an action's answer, so a table whose added mark
+    // changes — from this page or `mason add` / `mason remove` beside it — keeps its row until the next of them.
+    const layOut = () => { const s = state(); m.order = Array.isArray(s?.tables) ? layoutOf(s.tables) : null; };
     // WHILE A FORM IS OPEN OR A REMOVE ASKS, THE TABLES ARE RENDERED FROM THE STATE THEY WERE OPENED OVER (`held`): the
     // run reads the catalog again every few seconds, and a live database's row estimates move, so a part written from
     // each poll's state would be rewritten under the person — the form's ticks gone, the confirm's button replaced under
@@ -528,9 +555,9 @@ export const page = {
       /** Escape with no question open: the answer or refusal beside a row goes, as its Dismiss does */
       dismissAnswer() { m.outcome = null; m.synced = null; },
       /** The search box's text: kept here, so every poll writes the lists filtered by it. */
-      filterTables(text) { m.filter = text; m.limit = TABLE_ROWS; },
+      filterTables(text) { m.filter = text; m.limit = TABLE_ROWS; layOut(); },
       /** The state filter beside it (a key of SHOWS; anything else is All). */
-      showTables(which) { m.show = Object.hasOwn(SHOWS, which) ? which : "all"; m.limit = TABLE_ROWS; },
+      showTables(which) { m.show = Object.hasOwn(SHOWS, which) ? which : "all"; m.limit = TABLE_ROWS; layOut(); },
       /** Write TABLE_ROWS more of the tables that pass, or all of them. */
       showMoreTables() { m.limit += TABLE_ROWS; },
       showAllTables() { m.limit = Infinity; },
@@ -541,6 +568,7 @@ export const page = {
       afterRead() {
         const s = state();
         if (s === null) return;
+        if (m.order === null) layOut();
         // a table removed or added elsewhere (mason remove, mason add) takes its confirm or its form with it
         const added = (table) => s.tables.some((t) => t.table === table && t.added);
         if (m.removing !== null && !added(m.removing)) m.removing = null;
@@ -557,7 +585,7 @@ export const page = {
         return {
           "tables-cards": latest ? renderTablesCards(latest) : "",
           tables: s ? renderTables(s, { removing: m.removing, choosing: m.choosing, columns: m.columns, outcome: m.outcome, ticked: m.ticked, now: m.heldNow ?? ctx.now().getTime(),
-            filter: m.held ? m.heldFilter : m.filter, show: m.held ? m.heldShow : m.show, syncing: m.syncing, adding: m.adding, shares: monotone.of(latest ?? s), before: monotone.before, synced: m.synced, open: opened.has, limit: m.limit,
+            filter: m.held ? m.heldFilter : m.filter, show: m.held ? m.heldShow : m.show, syncing: m.syncing, adding: m.adding, shares: monotone.of(latest ?? s), before: monotone.before, synced: m.synced, open: opened.has, limit: m.limit, order: m.order,
             syncOpen: m.syncOpen, syncChoice: m.syncChoice, syncAsk: m.syncAsk, syncPicked: m.syncPicked,
             sizes: sizes === undefined ? undefined : sizes.failure ? { failure: sizes.failure } : sizes.body }) : "",
         };
@@ -573,6 +601,8 @@ export const page = {
       },
       /** `#tables?show=failed`: the state filter as the hash says (the select beside the search box shows it too). */
       route(params, { doc } = {}) {
+        // shown (again): the list laid out anew, from the state read for it (until then, from the last: the same rule)
+        m.order = null;
         if (params.show === undefined) return;
         actions.showTables(params.show);
         const select = doc?.getElementById?.("tables-show");
