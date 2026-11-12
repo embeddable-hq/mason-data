@@ -204,7 +204,7 @@ export const renderNav = (shown, range = DEFAULT_RANGE, nav = null, hostView = n
     const pages = t.pages.map((id) => PAGES.find((p) => p.id === id));
     return `<li class="group"><p class="group-title" id="nav-${esc(t.id)}">${esc(t.title)}</p><ul aria-labelledby="nav-${esc(t.id)}">` +
       pages.map((p) => `<li>${navLink(p, shown, hashOf(p.id, { range }), replaced.get(p.id))}</li>`).join("") + `</ul></li>`;
-  }).join("")}${links.length ? `<li class="group host-links"><ul aria-label="Links">${links.map((l) => l.view !== undefined
+  }).join("")}${links.length ? `<li class="group host-nav"><ul aria-label="Links">${links.map((l) => l.view !== undefined
     ? `<li><a href="${esc(hostHash(l.n))}"${shown === HOST_PAGE && String(hostView) === String(l.n) ? ` aria-current="page"` : ""}>${icon("panel-top")}<span class="label">${esc(l.label)}</span></a></li>`
     : `<li><a href="${esc(l.url)}" rel="noreferrer">${icon("link")}<span class="label">${esc(l.label)}</span></a></li>`).join("")}</ul></li>` : ""}</ul>`;
 };
