@@ -26,7 +26,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A database that is not a read replica is information, not a warning.** `mason init`, and `mason start` until the
   first sync is done, say "This is your main database, not a read replica. Mason only reads from it and keeps its load
   small. If you have a read replica, you can point Mason there instead." Neither line is a Warning row of `mason
-  status` or in `--json`'s `warnings` any more; `--json`'s `source.standby` and `source.remote` still say both.
+  status` or in `--json`'s `warnings` any more: `mason status`'s Database line ends with "your main database" or "a
+  read replica", as the web page's does, and `--json`'s `source.standby` and `source.remote` still say both. A table's
+  line says "not kept current" in lower case.
   `mason init --json` has a new `notes` list for these lines, and the tip about a password given on the command line,
   which is no longer a warning on stderr.
 

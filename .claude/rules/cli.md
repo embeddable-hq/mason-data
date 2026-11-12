@@ -144,7 +144,7 @@ CLI lacks).
   only `b`): a line each (`tableLines`), its bar, percent and state — the finished first, in the order
   they finished, the ones still syncing at the bottom — redrawn in place on a terminal, printed when it changes
   elsewhere; ready only when every added table is synced and served, its one catch-up poll after a whole read over too
-  (`catching-up`: said on its line as being caught up, at work in cyan, never "NOT kept current", issue 834) (`readiness`, src/cli/readiness.ts, which reads each
+  (`catching-up`: said on its line as being caught up, at work in cyan, never "not kept current", issue 834) (`readiness`, src/cli/readiness.ts, which reads each
   table's state in one word, `tables[].sync.state`, never its error or phase a second way: a synced table whose poll,
   catch-up, stream or publication check failed is failed there and here, issue 100; `behind` is said on its line and
   never fails it); a first sync that

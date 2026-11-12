@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { runState, type RunContext } from "../src/cli/run-server.ts";
 import * as pgUrl from "../src/cli/pg-url.ts";
 const { psqlLine } = pgUrl;
-import { parseSource, type SourceTable } from "../src/cli/preflight.ts";
+import { parseSource, sourceWarnings, type SourceFacts, type SourceTable } from "../src/cli/preflight.ts";
 import { catalogTable, parseSourceText } from "../src/cli/sources.ts";
 import type { CopyProgressView, CopyState } from "../src/duck/sync.ts";
 import type { RunState } from "../src/cli/commands.ts";
@@ -245,6 +245,9 @@ test("the Overview's facts card: Database, Mason, Disk and Connected tools in th
   const standby = (version: string, on: boolean) => factRows({ ...RUNNING, source: { ...RUNNING.source, version, standby: on } }, NOW)[0];
   assert.deepEqual(standby("16.15 (Ubuntu 16.15-1.pgdg20.04+1)", true), ["Database", "shop on db.example.com · Postgres 16.15 · a read replica", false]);
   assert.deepEqual(standby("16.4", false), ["Database", "shop on db.example.com · Postgres 16.4 · your main database", false]);
+  // mason status's Database row says the same kind of server, in the same words (issue 888)
+  const cliRow = (on: boolean) => commands.sourceRows({ ...RUNNING, source: { ...RUNNING.source, standby: on } } as unknown as RunState).find(([k]) => k === "Database")![1];
+  for (const on of [true, false]) assert.ok(cliRow(on).endsWith(` · ${standby("16.4", on)![1].split(" · ").at(-1)}`), `${on}: ${cliRow(on)}`);
   const mason = rows.find(([k]) => k === "Mason")!;
   assert.match(mason[1], /^\S+ · up .+, since (\d\d:\d\d|\d{4}-\d\d-\d\d \d\d:\d\d) UTC$/);
   assert.doesNotMatch(mason[1], /one process/);
@@ -271,17 +274,25 @@ test("the Overview's facts card: Database, Mason, Disk and Connected tools in th
 });
 
 test("the facts card's info lines: a database on another machine is information, never a warning; a primary is a fact of the Database row; text order only when it differs (issue 877)", () => {
-  const remote = "db.example.com is not this machine. mason start will sync the tables you pick to this machine (into its synced data's file, with no access control beyond this machine's), and keep them current while it runs: a scan of each table at every poll, or its change log for a table whose sync: is replication";
-  const primary = "this is a PRIMARY (pg_is_in_recovery() = false): the database your app writes to. A read replica takes the reads instead";
-  const serverless = "neon.tech suspends an idle compute and bills while it runs: polling every few seconds, or an open replication connection, keeps it running";
-  const s = { ...RUNNING, source: { ...RUNNING.source, remote: true, standby: false }, warnings: [remote, primary, serverless] };
-  const html = fn<[unknown, number], string>("renderFacts")(s, NOW);
-  const text = textOf(html);
-  assert.match(html, /<p class="info fact-note">Your database is on another machine\. Mason will sync the tables you choose to this machine\.<\/p>/);
-  assert.doesNotMatch(text, /is not this machine|PRIMARY|pg_is_in_recovery|access control/);
-  assert.equal([...html.matchAll(/<tr class="warn"><th scope="row">Warning<\/th>/g)].length, 1, "the other warnings stay warnings");
-  assert.match(text, /Warning neon\.tech suspends/);
-  assert.match(text, /Database shop on db\.example\.com · Postgres \S+ · your main database/);
+  // the run's warnings as mason start makes them (src/cli/preflight.ts sourceWarnings), never copied literals: a main
+  // database on another machine, a serverless one among them — the page shows each as it is, filtering none by its words
+  const facts: SourceFacts = { version: 160000, versionText: "16.4", standby: false, tables: [], systemIdentifier: null };
+  const sourceOf = (url: string) => { const p = parseSource(url); assert.ok("source" in p); return p.source; };
+  for (const url of ["postgres://me@db.example.com/shop", "postgres://me@ep-x.us-east-2.aws.neon.tech/shop"]) {
+    const source = sourceOf(url);
+    const warnings = sourceWarnings(source, facts);
+    for (const w of warnings) assert.doesNotMatch(w, /another machine|not this machine|main database|read replica|PRIMARY|pg_is_in_recovery/i, `${url}: where the database is and what kind it is are no warning (issue 888)`);
+    const s = { ...RUNNING, source: { ...RUNNING.source, remote: true, standby: false }, warnings };
+    const html = fn<[unknown, number], string>("renderFacts")(s, NOW);
+    const text = textOf(html);
+    assert.deepEqual(fn<[unknown, number], Array<[string, string, boolean]>>("factRows")(s, NOW).filter(([k]) => k === "Warning").map(([, v]) => v), warnings,
+      `${url}: every warning of the run is shown, none filtered by its words`);
+    assert.equal([...html.matchAll(/<tr class="warn"><th scope="row">Warning<\/th>/g)].length, warnings.length);
+    assert.match(html, /<p class="info fact-note">Your database is on another machine\. Mason will sync the tables you choose to this machine\.<\/p>/);
+    assert.match(text, /Database shop on db\.example\.com · Postgres \S+ · your main database/);
+  }
+  const s = { ...RUNNING, source: { ...RUNNING.source, remote: true, standby: false }, warnings: sourceWarnings(sourceOf("postgres://me@ep-x.us-east-2.aws.neon.tech/shop"), facts) };
+  assert.match(textOf(fn<[unknown, number], string>("renderFacts")(s, NOW)), /Warning Neon suspends/);
   // this machine's database: no info line
   assert.deepEqual(fn<[unknown], string[]>("factNotes")({ ...RUNNING, source: { ...RUNNING.source, remote: false } }), []);
   // how text sorts: nothing when it sorts as the database does; one quiet line, without the counts, when it differs
@@ -405,7 +416,7 @@ test("behind, left out, a failed catch-up, a stream down, off: each table's line
       lateWhy: "the last pass, which reads every table again whole, took 1 s, and Mason waits four times a pass between passes to keep the database's load to a fifth" } } as CopyState]],
     ["off", [{ ...copied("public.events", 30_000_000, ago(7200)), kept: { by: "poll", sync: { mode: "off" }, syncedAt: ago(3 * 86_400), nextAt: null, promisedSeconds: null, lateWhy: null } } as CopyState]],
     ["synced", [{ ...copied("public.customers", 1200, ago(7200)), kept: { by: "poll", sync: every15, syncedAt: ago(14 * 60), nextAt: null, promisedSeconds: 960, lateWhy: pass } } as CopyState]],
-    // in its first sync's one catch-up poll (issue 834): at work, its words the CLI's, never "NOT kept current"
+    // in its first sync's one catch-up poll (issue 834): at work, its words the CLI's, never "not kept current"
     ["catching up, off", [{ ...copied("public.events", 23_000_000, ago(5)), behind: "after its whole read", rebuilding: "catch-up",
       kept: { by: "poll", sync: { mode: "off" }, syncedAt: ago(5), nextAt: null, pending: "it is caught up by one poll after its whole read first", promisedSeconds: null, lateWhy: null } } as CopyState]],
     ["catching up, polled", [{ ...copied("public.customers", 1200, ago(5)), behind: "after its whole read",
@@ -428,7 +439,7 @@ test("behind, left out, a failed catch-up, a stream down, off: each table's line
     words[name] = `${/class="indicator (\w+)"/.exec(row)![1]} ${/<\/span>(Behind|Failed|Synced|Syncing|Finishing sync|Waiting)</.exec(row)![1]} ${ours.state}`;
     if (name.startsWith("catching up")) {
       assert.ok(ours.what.endsWith(` · ${commands.CATCHING_UP} (last synced 5 s ago)`), `${name}: ${ours.what}`);
-      assert.doesNotMatch(ours.what, /NOT kept current/, `${name}: at work, not a fault (issue 834)`);
+      assert.doesNotMatch(ours.what, /not kept current/, `${name}: at work, not a fault (issue 834)`);
       assert.match(row, /<span class="copyline t-catching-up">/, `${name}: the bar in the accent (app.css: no amber of .t-unsynced)`);
       assert.match(cli, /^\S+\s+█{20} 100% {2}/);
       assert.match(commands.paintBar(cli, { red: (x: string) => `R${x}`, yellow: (x: string) => `Y${x}`, green: (x: string) => `G${x}`, cyan: (x: string) => `C${x}`, dim: (x: string) => x } as never, commands.tableRows(s, NOW).find((x) => x.line === cli)!.tone), /C█/, `${name}: cyan in mason status`);
@@ -472,7 +483,7 @@ test("a copy the poll does not keep current is the page's warning, as mason stat
   const t = BEHIND.tables.find((x) => x.table === "public.orders")!;
   const line = fn<[unknown], { state: string; what: string }>("tableLine")(t);
   assert.equal(line.state, "unsynced", "the page's warning colour (app.css .t-unsynced), never done's");
-  assert.match(line.what, /^2,000,000 rows · synced · NOT kept current \(last synced .* ago\): caught up by one poll first \(after its whole read\)$/);
+  assert.match(line.what, /^2,000,000 rows · synced · not kept current \(last synced .* ago\): caught up by one poll first \(after its whole read\)$/);
   // the CLI paints the same words yellow (paintBar): the same text, the same warning
   const cli = commands.tableLines(BEHIND).find((l) => l.startsWith("public.orders"))!;
   assert.ok(cli.endsWith(line.what), `${cli}\n${line.what}`);

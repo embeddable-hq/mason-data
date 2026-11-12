@@ -241,14 +241,14 @@ export function paintBar(line: string, s: Style, tone?: BarTone): string {
   // the table's own tone (`barTone`, from its state) when the caller has it: a line cut to the terminal's width
   // (mason wait's `fit`) has lost the words the fallback below reads (issue 834's review)
   const colour = tone !== undefined ? s[tone]
-    : / its first sync failed: | NOT kept current, its sync failed /.test(line) ? s.red : / NOT kept current | (—|·) behind by /.test(line) ? s.yellow
+    : / its first sync failed: | not kept current, its sync failed /.test(line) ? s.red : / not kept current | (—|·) behind by /.test(line) ? s.yellow
     : / 100%  [\d,]+ rows · synced( · |$)/.test(line) ? s.green : s.cyan;
   return line.replace(/(█+)(░*)|(░+)/, (_m, full: string | undefined, empty: string | undefined, none: string | undefined) =>
     full !== undefined ? `${colour(full)}${s.dim(empty ?? "")}` : s.dim(none ?? ""));
 }
 
 /** A table's bar colour, from its state, never its line's words: red its sync failed, cyan at work (its first sync or
- *  its one catch-up poll: `catching-up`, issue 834), yellow served and NOT kept current (behind, a poll that waits, a
+ *  its one catch-up poll: `catching-up`, issue 834), yellow served and not kept current (behind, a poll that waits, a
  *  stream not running or not streaming it), else green — the web page's `tableLine` states (src/web/pages/status.js:
  *  failed, copying / catching-up, unsynced, done). */
 export type BarTone = "red" | "yellow" | "green" | "cyan";
@@ -327,26 +327,26 @@ export function compactionWords(c: Compaction | undefined, now: number = Date.no
  * HOW A COPIED TABLE IS KEPT CURRENT, AND HOW OLD ITS COPY IS, on its line (issue 33: a copy days old answers today's
  * count(*) wrongly, and nothing else tells): `sync: off, last synced 3 days ago — mason sync orders`, `polled every
  * 30s, last 4 s ago`, `replicated, at 0/1A2B3C4D, 2 s ago` (the stream's position, and the last moment it had
- * everything the database wrote); a table being caught up, copied again or not streamed says why it is NOT kept current.
+ * everything the database wrote); a table being caught up, copied again or not streamed says why it is not kept current.
  * The Stream section says the rest of the stream.
  */
 export function keptAge(t: Pick<TableState, "table" | "kept" | "sync">, now: number = Date.now()): string | null {
   const k = t.kept;
   // in its one catch-up poll (`tables[].sync.state`, the one word): at work, for every sync — `off` included, which is
-  // never kept current by design — so never "NOT kept current" (issue 834)
+  // never kept current by design — so never "not kept current" (issue 834)
   if (t.sync?.state === "catching-up" && k !== undefined && k.by !== "generated") {
     const at = k.by === "recopy" ? k.syncedAt ?? k.copiedAt : k.syncedAt;
     return `${CATCHING_UP} (${at === null ? "never synced" : `last synced ${agoText(at, now)}`})`;
   }
   if (k?.by === "replication") {
-    if (k.state !== "streamed") return `NOT kept current (${k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)}`}): ${k.why ?? "it is not streamed yet"}`;
+    if (k.state !== "streamed") return `not kept current (${k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)}`}): ${k.why ?? "it is not streamed yet"}`;
     const at = `replicated, at ${k.position}, ${k.syncedAt === null ? "not synced yet" : agoText(k.syncedAt, now)}`;
     // behind: `keptWords` says it, with the stream not running as its why
-    return k.notRunning === null || t.sync?.state === "behind" ? at : `${at} — NOT kept current now, the stream is not running: ${k.notRunning}`;
+    return k.notRunning === null || t.sync?.state === "behind" ? at : `${at} — not kept current now, the stream is not running: ${k.notRunning}`;
   }
   if (k?.by !== "poll") return null;
   const synced = k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)}`;
-  if (k.pending !== undefined) return `NOT kept current (${synced}): ${k.pending}`;
+  if (k.pending !== undefined) return `not kept current (${synced}): ${k.pending}`;
   // the line to write as well as the command: a project an older Mason polled is off after the upgrade
   if (k.sync.mode === "off") return `sync: off, ${synced} — mason sync ${tableArg(t.table)} syncs it now; sync: poll 5m on its entry polls it`;
   return `polled every ${k.sync.every}, ${k.syncedAt === null ? "not polled yet" : `last ${agoText(k.syncedAt, now)}`}`;
@@ -368,7 +368,7 @@ export function keptWords(t: Pick<TableState, "table" | "kept" | "sync">, now: n
 
 /**
  * A SERVED TABLE WHOSE SYNC FAILED (its first sync succeeded; its poll, catch-up, stream or publication check did not:
- * issues 100, 82): served as of its age, NOT kept current, why — how it is kept, when it says it is not kept current
+ * issues 100, 82): served as of its age, not kept current, why — how it is kept, when it says it is not kept current
  * now (`keptAge`: a catch-up waiting out its back-off, a table the publication does not carry, with the way out), else
  * its error's first line — never "its first sync failed".
  */
@@ -377,7 +377,7 @@ function copiedFailedText(t: TableState, now: number): string {
   const reason = k?.by === "replication" ? (k.state !== "streamed" ? k.why : k.notRunning === null ? null : `the stream is not running: ${k.notRunning}`)
     : k?.by === "poll" || k?.by === "recopy" ? k.pending ?? null : null;
   const asOf = t.sync?.asOf ?? (t.kept && t.kept.by !== "generated" && t.kept.by !== "recopy" ? t.kept.syncedAt : null) ?? t.sync?.syncedAt ?? null;
-  return `${n(t.copy?.rowsCopied ?? 0)} rows · synced · NOT kept current, its sync failed (${asOf === null ? "never synced" : `last synced ${agoText(asOf, now)}`}): ${reason ?? firstLine(t.error!)}`;
+  return `${n(t.copy?.rowsCopied ?? 0)} rows · synced · not kept current, its sync failed (${asOf === null ? "never synced" : `last synced ${agoText(asOf, now)}`}): ${reason ?? firstLine(t.error!)}`;
 }
 
 /** A span of seconds as the stream's lines say it: `0.3 s` under ten seconds, then as a wait reads (`duration`). */
@@ -686,7 +686,8 @@ export function sourceRows(s: Pick<RunState, "source">): Array<[string, string]>
   return [
     ...(s.source.file ? [["Source", `${s.source.shownFile ?? s.source.file} (the tables it names are added)`] as [string, string]] : []),
     ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
-      : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
+      // which kind of server it is, as a plain fact (issue 888), in the words of the page's facts card (src/web/pages/status.js factRows)
+      : `${s.source.url} · Postgres ${s.source.version} · ${s.source.standby ? "a read replica" : "your main database"}`],
     // in a web developer's words first (each table as its sync: says, streamed as they happen); the mechanism an operator needs in parentheses
     ["Changes", `each table as its sync: says${s.source.replication ? "" : " (a SELECT of its changed rows)"}${s.source.sync ? ` · sync: ${s.source.sync.default} ${s.source.sync.written ? "for every table without its own" : "(the default: the file writes none)"}` : ""} · ` +
       (s.source.replication ? `sync: replication tables streamed as they happen (logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication}, ` +

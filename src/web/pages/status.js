@@ -124,13 +124,13 @@ export function keptAge(t, now = Date.now()) {
     return `${CATCHING_UP} (${at === null ? "never synced" : `last synced ${syncedAgo(at, now)}`})`;
   }
   if (k?.by === "replication") {
-    if (k.state !== "streamed") return `NOT kept current (${k.syncedAt === null ? "never synced" : `last synced ${syncedAgo(k.syncedAt, now)}`}): ${k.why ?? "it is not streamed yet"}`;
+    if (k.state !== "streamed") return `not kept current (${k.syncedAt === null ? "never synced" : `last synced ${syncedAgo(k.syncedAt, now)}`}): ${k.why ?? "it is not streamed yet"}`;
     const at = `replicated, at ${k.position}, ${k.syncedAt === null ? "not synced yet" : syncedAgo(k.syncedAt, now)}`;
-    return k.notRunning === null || t.sync?.state === "behind" ? at : `${at} — NOT kept current now, the stream is not running: ${k.notRunning}`;
+    return k.notRunning === null || t.sync?.state === "behind" ? at : `${at} — not kept current now, the stream is not running: ${k.notRunning}`;
   }
   if (k?.by !== "poll") return null;
   const synced = k.syncedAt === null ? "never synced" : `last synced ${syncedAgo(k.syncedAt, now)}`;
-  if (k.pending !== undefined) return `NOT kept current (${synced}): ${k.pending}`;
+  if (k.pending !== undefined) return `not kept current (${synced}): ${k.pending}`;
   // the page says how to do it on the page (its Sync now, its Sync choice), where mason status names the commands
   if (k.sync.mode === "off") return `sync off, ${synced}: press Sync now to sync it`;
   return `polled every ${k.sync.every}, ${k.syncedAt === null ? "not polled yet" : `last ${syncedAgo(k.syncedAt, now)}`}`;
@@ -142,7 +142,7 @@ function copiedFailedText(t, now) {
   const reason = k?.by === "replication" ? (k.state !== "streamed" ? k.why : k.notRunning === null ? null : `the stream is not running: ${k.notRunning}`)
     : k?.by === "poll" || k?.by === "recopy" ? k.pending ?? null : null;
   const asOf = t.sync?.asOf ?? (k && k.by !== "generated" && k.by !== "recopy" ? k.syncedAt : null) ?? t.sync?.syncedAt ?? null;
-  return `${n(t.copy?.rowsCopied ?? 0)} rows · synced · NOT kept current, its sync failed (${asOf === null ? "never synced" : `last synced ${syncedAgo(asOf, now)}`}): ${reason ?? firstLine(t.error)}`;
+  return `${n(t.copy?.rowsCopied ?? 0)} rows · synced · not kept current, its sync failed (${asOf === null ? "never synced" : `last synced ${syncedAgo(asOf, now)}`}): ${reason ?? firstLine(t.error)}`;
 }
 
 /**
@@ -289,15 +289,11 @@ const pgVersion = (v) => String(v ?? "").split(" ")[0];
 /** A time as the facts say it: `16:03 UTC` on the day of `now`, else with its date. */
 const sinceText = (iso, now) => `${iso.slice(0, 10) === new Date(now).toISOString().slice(0, 10) ? iso.slice(11, 16) : utcMinute(iso)} UTC`;
 
-/** Whether a warning of the run says what the facts card says as a fact or as its info line: that the database is on
- *  another machine (src/cli/preflight.ts `remoteWarning`) or that it is a primary. The page says both in its own words. */
-const saidAsFact = (w, s) => (s.source.remote === true && (w.startsWith(`${s.source.host} is not this machine`) || w.startsWith("Your database is on another machine")))
-  || /\bPRIMARY\b|pg_is_in_recovery/.test(w);
-
 /**
  * THE FACTS CARD'S ROWS, `[label, value, warn]` each, in the page's own words (`mason status` keeps its fuller rows):
  * the database (its name, where it is, its Postgres version, and whether it is the main database or a read replica);
- * the run's warnings, but for what the card says as a fact; Mason's version and how long it has been up; its restarts,
+ * the run's warnings (where the database is and whether it is the main one are never among them: issue 888 — the card
+ * says both from `source.remote` and `source.standby`, never by reading a warning's words); Mason's version and how long it has been up; its restarts,
  * only when there were any; the free disk beside what the synced data takes; and the tools connected. A fact the run
  * did not say is absent; one it could not read says so, with its reason (never a 0).
  */
@@ -305,7 +301,7 @@ export function factRows(s, now = Date.now()) {
   const src = s.source, e = s.engine, d = s.disk, ss = s.sessions;
   const rows = [["Database", src.demo ? `the demo database Mason runs · Postgres ${pgVersion(src.version)}`
     : `${src.database} on ${src.host} · Postgres ${pgVersion(src.version)} · ${src.standby ? "a read replica" : "your main database"}`, false]];
-  rows.push(...s.warnings.filter((w) => !saidAsFact(w, s)).map((w) => ["Warning", w, true]));
+  rows.push(...s.warnings.map((w) => ["Warning", w, true]));
   if (typeof e.version === "string") rows.push(["Mason", `${e.version}${e.startedAt ? ` · up ${spanText(e.uptimeSeconds ?? 0)}, since ${sinceText(e.startedAt, now)}` : ""}`, false]);
   const r = e.restarts;
   if (r !== undefined && "error" in r) rows.push(["Restarts", `unknown: ${firstLine(r.error)}`, true]);
