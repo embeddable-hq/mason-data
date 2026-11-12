@@ -24,7 +24,6 @@
  *
  * What a run keeps between runs (the API key, the copy, the users, the logs) is in the project's `.mason/`.
  */
-import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Server } from "node:http";
 import { choosePgPort, freePort } from "./ports.ts";
@@ -69,6 +68,8 @@ import { exampleRole, LiveRoles, missingAttributesText, noRoleWayOut, readRoles,
 import { READY_LINE, readRestarts } from "./supervise.ts";
 import { dropOwnReplication, dropStatements, liveReadinessFailure, madeReplication, namedPublication, projectReplication, recordRefusal, replicationReadiness, staleReplication } from "./replication-mode.ts";
 import { textEntry } from "../lib/log.ts";
+import { withDiskWayOut, writeFailureText } from "../lib/disk-full.ts";
+import { guardTerminal, RunLog, terminalLine } from "./run-output.ts";
 import { LogBuffer } from "../lib/log-buffer.ts";
 import { logPath } from "../lib/log-read.ts";
 import { BIG_TABLE_ROWS, syncText, type TableSync } from "../lib/table-sync.ts";
@@ -109,7 +110,9 @@ export interface ServeHooks {
   socket?: string;
 }
 
-const say = (m: string): void => { process.stdout.write(`${m}\n`); };
+/** a line to the run's terminal, which a full disk never ends (src/cli/run-output.ts), a write under .mason/ that
+ *  failed for disk space given its way out (src/lib/disk-full.ts) */
+const say = (m: string): void => { terminalLine("stdout", `${withDiskWayOut(m)}\n`); };
 
 /**
  * THE RUN'S STEPS, as lines (an opening block of prose was too much to read, as `mason init`'s had been): a step begun,
@@ -224,6 +227,9 @@ function recordReplication(cfg: ProjectConfig, repl: ReturnType<typeof projectRe
 async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // when this run began: the uptime /api/state says (engine.startedAt, a supervisor's restart is a new run)
   const startedAt = Date.now();
+  // the terminal's failure to write (dev.log on a full disk) never ends the run: said on the other stream until the log
+  // is open, and in the log too from then on (below)
+  guardTerminal(() => undefined);
   const t = theProject(process.cwd());
   if ("problem" in t) { say(`mason start: ${t.problem}`); return 1; }
   const project = t.project;
@@ -294,18 +300,27 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const demoFile = demoChangesRefusal(cfg, src, shownPath(project.root, src.file));
   if (demoFile) return failed("start", demoFile, { json: false });
   const logFile = logPath(home, "run");
-  const log = fs.createWriteStream(logFile, { flags: "a" });
   // one entry a line: a multi-line message's further lines indented under it (src/lib/log.ts `textEntry`);
   // mason serve gets the same entry, for the container's stdout (src/cli/serve.ts)
   // the last entries are kept in memory too (src/lib/log-buffer.ts), for the command server's /api/logs: the one writer
-  // feeds the file, stdout and the buffer, so a mode with no file (mason serve) has the log as well
+  // feeds the file, stdout and the buffer, so a mode with no file (mason serve) has the log as well.
+  // A write under .mason/ that failed for disk space is given its way out here, whoever logged it (src/lib/disk-full.ts)
   const logs = new LogBuffer();
+  /** an entry to every reader but the file: what the file's own failure is said with */
+  const beside = (entry: string): void => { logs.push(entry); o.serve?.log(entry.trimEnd()); };
+  // THE LOG'S FILE, whose failure to write (a full disk, issue 847) never ends the run: said once on the run's stderr and
+  // to the log's other readers, and the file tried again until it takes lines (src/cli/run-output.ts RunLog)
+  const log = new RunLog(logFile, { said: (text) => {
+    terminalLine("stderr", `${text}\n`);
+    beside(textEntry(`${new Date().toISOString()} `, `[log] ${text}`));
+  } });
   const logLine = (l: string): void => {
-    const entry = textEntry(`${new Date().toISOString()} `, l);
+    const entry = textEntry(`${new Date().toISOString()} `, withDiskWayOut(l));
     log.write(entry);
-    logs.push(entry);
-    o.serve?.log(entry.trimEnd());
+    beside(entry);
   };
+  // the terminal's failure is in the log from here on
+  guardTerminal((text) => { logLine(`[log] ${text}`); });
   // THE DEMO DATABASE (src/cli/demo.ts), hosted here: opened before it is connected to, as any database is
   let demo: Parameters<typeof demoChanges>[0] | null = null;
   if (demoAt !== null) {
@@ -784,7 +799,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
         // the demo database's data flushed to its folder before the log it writes to ends (dev() closes it otherwise)
         // (a close still going after 2 s is said: the process ends without it, and the folder may not be whole)
         await closedWithin(closeDemo(hosted, null), 2_000, () => say(`  ${DEMO_STILL_CLOSING(2_000)}`));
-        log.end();
+        void log.end();
         resolve(1);
       })();
     };
@@ -821,8 +836,12 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
         cfg.running = null;
         // how it ended, for mason status once it is gone (a kill records nothing: mason stop writes that one)
         cfg.lastStop = { at: new Date().toISOString(), how: how ?? (signal === "SIGINT" ? "stopped from its terminal (SIGINT)" : `stopped by mason stop, or a shutdown (${signal})`) };
-        writeConfig(home, cfg);
-        log.end();
+        // a record that cannot be written (a full disk, issue 847) is said, and the config stays as it was, whole
+        // (writeConfig renames over it): the run still ends as a stop, exit 0, so its supervisor never starts it again
+        // over a config that still names it — a stop is never undone — and a command reads the pid it names as gone
+        try { writeConfig(home, cfg); }
+        catch (e) { say(`  ${writeFailureText("the stop's record in .mason/config.json", e)}; mason status reads the run as stopped all the same`); }
+        void log.end();
         resolve(0);
       })();
     };

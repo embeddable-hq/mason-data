@@ -18,6 +18,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
+import { replaceFile } from "../lib/disk-full.ts";
 import type { Failure, Problem } from "./command.ts";
 import { connectDatabase, databaseSettingRefusal } from "../lib/database-name.ts";
 import { changesRetired, pollMsRetired } from "../lib/table-sync.ts";
@@ -244,9 +245,10 @@ export function findProject(cwd: string): Project | BrokenProject | null {
 
 export function writeConfig(dir: string, c: ProjectConfig): void {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const file = path.join(dir, CONFIG);
-  fs.writeFileSync(file, `${JSON.stringify(c, null, 2)}\n`, { mode: 0o600 });
-  fs.chmodSync(file, 0o600);
+  // written beside and renamed over (src/lib/disk-full.ts): a write that fails (a full disk) leaves the config as it
+  // was, never empty — an empty one is a project no command can read (issue 847). A new file takes 0600 whatever the
+  // old one's mode was
+  replaceFile(path.join(dir, CONFIG), `${JSON.stringify(c, null, 2)}\n`, 0o600);
 }
 
 /** A new project's config: the secrets made here, once. */
