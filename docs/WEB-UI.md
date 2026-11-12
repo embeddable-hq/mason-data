@@ -138,7 +138,8 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   with no psql line (the URL is the same thing, pasted after `psql`), and a link to Queries, where its statements will
   show; Mason keeps no copy, so it is never shown again.
 - **Users**, Connect: once for the run, where a tool connects — host, port, database and SSL mode, each with **Copy**,
-  and the URL and psql line with `<user>:<password>` in place — as `mason status` says it. No user's row carries a URL:
+  and the URL with `<user>:<password>` in place, with **Copy** — as `mason status` says it, with no psql line (the URL
+  is the same thing, pasted after `psql`; the Overview's Connect keeps its own). No user's row carries a URL:
   the card shown once when a user is added is the only place its password is copied.
 - **Users**, the list: each user's role and, on a line under it, where it connects from ("from" its ranges as `mason
   user list` says them, or "from anywhere": `from` in `mason user list --json`; cut by the column, its whole the

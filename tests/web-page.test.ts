@@ -4291,7 +4291,7 @@ test("a Copy button, on any page: its code's text to the clipboard, Copied for 2
   assert.equal(copyClick({ sync: "x" }, b, { doc, win: {} }), null, "not a Copy: the page's own click goes on");
 });
 
-test("Users: ONE Connect panel for the run — host, port, database, sslmode, the URL and psql with placeholders, each with Copy — and no URL per user", async () => {
+test("Users: ONE Connect panel for the run — host, port, database, sslmode and the URL with placeholders, each with Copy, no psql line — and no URL per user", async () => {
   // (review, Tom) a row's URL without its password read as a credential to copy, and every row's host, port and
   // database were the run's: the row keeps what is the user's, the panel says the run's once, and the card shown
   // once when a user is added is the only place a password is ever copied
@@ -4301,8 +4301,14 @@ test("Users: ONE Connect panel for the run — host, port, database, sslmode, th
   const pg = { url: "postgresql://127.0.0.1:5433/shop", host: "127.0.0.1", port: 5433, database: "shop", shown: "postgresql://<user>:<password>@127.0.0.1:5433/shop", psql: "psql 'postgresql://<user>:<password>@127.0.0.1:5433/shop'" };
   const html = renderUsersConnect!(pg);
   assert.equal(textOf(html), "Connect Host 127.0.0.1 Copy Port 5433 Copy Database shop Copy SSL mode disable Copy URL postgresql://<user>:<password>@127.0.0.1:5433/shop Copy " +
-    "psql psql 'postgresql://<user>:<password>@127.0.0.1:5433/shop' Copy A user's name and password go in place of <user> and <password> . The password is shown once, when the user is added: lost, remove the user and add it again.");
-  for (const id of ["host", "port", "database", "sslmode", "url", "psql"]) assert.match(html, new RegExp(`<code id="users-connect-${id}">`), id);
+    "A user's name and password go in place of <user> and <password> . The password is shown once, when the user is added: lost, remove the user and add it again.");
+  for (const id of ["host", "port", "database", "sslmode", "url"]) {
+    assert.match(html, new RegExp(`<code id="users-connect-${id}">`), id);
+    assert.match(html, new RegExp(`data-copy="users-connect-${id}"`), `${id}'s Copy`);
+  }
+  // no psql line (issue 874): the URL is the same thing, pasted after psql (the Overview's Connect and --json keep theirs)
+  assert.doesNotMatch(textOf(html), /psql/, "no psql line, and no word of it");
+  assert.doesNotMatch(html, /users-connect-psql/);
   assert.match(renderUsersConnect!({ ...pg, sslmode: "require" }), /<code id="users-connect-sslmode">require<\/code>/, "off this machine: require");
   assert.equal(renderUsersConnect!(undefined), "", "a run that did not say: nothing");
   const rows = fn<[unknown, string | null, number], string>("renderUsers")({ users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: null,

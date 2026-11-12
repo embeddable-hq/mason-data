@@ -144,15 +144,16 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
 
 /**
  * HOW A TOOL CONNECTS, once for the run (`/api/state` `postgres`: src/cli/pg-url.ts postgresFacts, what `mason status`
- * prints): the host, port, database and sslmode — what a BI tool's form asks for, each with Copy — then the URL and the
- * psql line with `<user>:<password>` as placeholders. None of it is a user's: a row carries what is (its name, its
+ * prints): the host, port, database and sslmode — what a BI tool's form asks for, each with Copy — then the URL with
+ * `<user>:<password>` as placeholders. No psql line (issue 874): the URL is the same thing, pasted after `psql`; the
+ * Overview's Connect keeps its own. None of it is a user's: a row carries what is (its name, its
  * state), and a user's password is copied only from the card shown once when it is added (`renderAdded`). "" when the
  * run did not say.
  */
 export function renderUsersConnect(pg, served = false) {
   if (!pg || typeof pg.shown !== "string") return "";
   const rows = [["Host", pg.host, "users-connect-host"], ["Port", String(pg.port), "users-connect-port"], ["Database", pg.database, "users-connect-database"],
-    ["SSL mode", pg.sslmode ?? "disable", "users-connect-sslmode"], ["URL", pg.shown, "users-connect-url"], ["psql", pg.psql, "users-connect-psql"]];
+    ["SSL mode", pg.sslmode ?? "disable", "users-connect-sslmode"], ["URL", pg.shown, "users-connect-url"]];
   return `<div class="connect"><p class="connect-title">Connect</p>` +
     `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v)}</dd>`).join("")}</dl>` +
     serverHostNote(pg, served) +
