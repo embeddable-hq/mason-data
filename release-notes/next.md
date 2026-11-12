@@ -61,6 +61,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `mason status`, `mason add` or `remove`, `mason doctor` or the web page, reusing a read under a minute old. With every
   table `sync: off`, a run that nobody asks opens no connection after its first sync. A table or column added to the
   database shows within about a minute of being asked for.
+- **The web page no longer shows old data as current while Mason can't be reached.** When the page lost Mason (the
+  run stopped, or the tunnel closed), it kept what it had read, its big "Ready" and the cards, under the failure
+  message, and they read as current. Now the page greys what it read before and says when it was read: "As of 14:02
+  UTC. Mason can't be reached." With nothing read yet, the Overview says "Unknown". The page is current again as soon
+  as Mason answers.
 - **The web page's Users table no longer shows its Added header in a framed box.** The style of a new user's
   password card also caught the column's header, giving it a border and a colored bar.
 - **On a phone, a new user's password card is scrolled into view.** After Add a user it was written at the bottom edge

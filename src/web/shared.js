@@ -289,6 +289,15 @@ export function readPart(ctx, path, render, says) {
   return (r.failure && says ? renderFailure(r.failure) : "") + (r.body === undefined ? "" : render(r.body));
 }
 
+/**
+ * WHAT A PAGE SHOWS WHILE ITS POLL FAILS (issue 886): the last body it read stays, greyed, and says when it was read
+ * and why it is not newer — "As of 14:02 UTC. Mason can't be reached." — so it never reads as current; with nothing
+ * read yet, "Unknown" and the same reason. `failure` is the read's (`unreachable`: nothing answered, the run or the
+ * tunnel gone); `at` when the last read that answered was asked. The time as the page's lists print it (UTC, to the minute).
+ */
+export const staleWhy = (failure) => failure?.code === "unreachable" ? "Mason can't be reached." : "The latest read failed.";
+export const staleText = (at, failure) => `As of ${utcMinute(at.toISOString()).slice(11)} UTC. ${staleWhy(failure)}`;
+
 /** One request to the run over `fetchFn`: `{ body }`, its JSON, or `{ failure }` when it was refused or nothing answered. */
 export function createAsk(fetchFn) {
   return async (path, init) => {
