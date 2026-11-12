@@ -212,12 +212,11 @@ export function renderShare(s, m = NO_SHARE, now = Date.now(), choices = undefin
     : m.phase === "refused" && m.failure !== null ? renderFailure(m.failure) : "";
   const body = choices?.body ?? null;
   const list = Array.isArray(body?.choices) ? body.choices : null;
-  const reads = list !== null && list.length === 0 && typeof body.reads === "string" ? body.reads : "what the role chosen reads";
   const role = list === null || list.length === 0 ? "" : `<label for="share-role">Role</label> <select id="share-role">${list.map((c) => `<option value="${esc(c.role)}"${c.role === chosenRole(m, list) ? " selected" : ""}>${esc(`${c.role}: ${c.reads}${c.default ? " (the file's default)" : ""}`)}</option>`).join("")}</select> `;
   // the roles not read yet, or refused (a roles file that cannot be read, no role a share may read as): no Share, and why
   const why = list !== null ? "" : choices?.failure ? renderFailure(choices.failure) : `<p class="dim">Reading the roles…</p>`;
   return `<div class="share">${head}${before}` +
-    `<p class="tip">For a tool that cannot reach this machine, like a BI tool in the cloud: a <strong>temporary public address</strong> with a login of its own, as ${code("mason share")} opens. Anyone with the address and its password reads ${esc(reads)}. TLS is required of every connection.</p>` +
+    `<p class="tip">For a tool that cannot reach this machine, like a BI tool in the cloud: a <strong>temporary public address</strong> with a login of its own, as ${code("mason share")} opens. TLS is required of every connection.</p>` +
     why + `<p class="tip share-ask">${role}${button("Share", { shareOpen: "" }, "", { disabled: list === null })}</p></div>`;
 }
 

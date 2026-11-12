@@ -5008,12 +5008,12 @@ const renderShare = (s: unknown, m: unknown, choices: unknown = ONE_ANSWER) => f
 test("Share over the internet (for testing): the box in each state, as it WROTE it — none (one role, two, not read, refused), opening, open, open after a reload, ended, refused, served, read-only", () => {
   const none = renderShare(sharing([]), shareModel());
   const noneText = textOf(none);
-  assert.match(noneText, /^Share over the internet \(for testing\) For a tool that cannot reach this machine, like a BI tool in the cloud: a temporary public address with a login of its own, as mason share opens\. Anyone with the address and its password reads every synced table\. TLS is required of every connection\. Share$/);
+  assert.match(noneText, /^Share over the internet \(for testing\) For a tool that cannot reach this machine, like a BI tool in the cloud: a temporary public address with a login of its own, as mason share opens\. TLS is required of every connection\. Share$/);
   assert.match(none, /<button type="button" data-share-open="">Share<\/button>/, "Share, enabled");
   assert.doesNotMatch(none, /<select/, "one answer: no role to choose");
   const two = renderShare(sharing([]), shareModel(), TWO_ROLES);
   assert.match(two, /<label for="share-role">Role<\/label> <select id="share-role"><option value="sales" selected>sales: 1 synced table: orders \(the file&#39;s default\)<\/option><option value="ops">ops: every synced table<\/option><\/select> <button[^>]*data-share-open/, "the roles beside Share, the file's default first chosen");
-  assert.match(textOf(two), /reads what the role chosen reads\./);
+  assert.doesNotMatch(textOf(none) + textOf(two), /Anyone with the address|what the role chosen reads/, "no sentence of who reads what: the role's choice says what it reads");
   assert.match(renderShare(sharing([]), shareModel({ role: "ops" }), TWO_ROLES), /<option value="ops" selected>/, "the role chosen stays chosen across a rewrite");
   const unread = renderShare(sharing([]), shareModel(), null);
   assert.match(textOf(unread), /Reading the roles…/);

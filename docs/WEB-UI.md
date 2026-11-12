@@ -149,7 +149,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   `mason share` from the page, for a tool that cannot reach this machine. A box inside Connect: a **Role** choice where
   `mason/roles.yml` offers more than one role a share may read as (`GET /api/share/choices`, read beside the state
   while the box is offered, as `mason share --role`), and **Share**. The box says first that it opens a temporary
-  public address and what anyone with it reads, so the click is the person's yes: `POST /api/share` `{ from: "page",
+  public address (each Role option says what it reads), so the click is the person's yes: `POST /api/share` `{ from: "page",
   confirmed: true, role? }` opens the same share the command opens (src/cli/page-share.ts): the run makes the password
   and starts the tunnel's client. While on, the box shows how long it has been shared, the URL, the share's own
   **Login** (never a `mason user`) and its **Password**, each with **Copy**, "Shown once" beside the password's Copy;
