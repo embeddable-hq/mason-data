@@ -20,7 +20,7 @@
 const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage?range=24h", queries: "#observability/queries?range=24h",
   slow: "#observability/queries?slow=1&range=24h", failedQueries: "#observability/queries?status=refused-or-failed&range=24h", failedEvents: "#observability/syncs?failures=1&range=7d" };
 import { VIEW_HASHES } from "../routes.js";
-import { statementMsText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
+import { statementMsText, bytesText, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, streamRows, slotWarns, agoText, utcText,
   utcMinute, oneLine, clientText, eventCells, unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, renderConnect, copyClick,
   badge, button, copyable, pop, renderFailure, json, readOnlyLine, tablesReadOnly, usersReadOnly } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
@@ -96,7 +96,7 @@ export function keptWords(t, now = Date.now()) {
  *  tests/web-page.test.ts): a failed compaction, the share of its stored rows deleted, or its last compaction. */
 export function compactionWords(c, now = Date.now()) {
   if (c === undefined || c === null) return null;
-  if (c.error !== null) return `its compaction failed${c.retryAt === null ? "" : `, tried again after ${c.retryAt.slice(11, 16)} UTC`} (mason logs --events says why)`;
+  if (c.error !== null) return `its compaction failed${c.retryAt === null ? "" : `, tried again after ${c.retryAt.slice(11, 16)} UTC`} (Sync events says why)`;
   if (c.waiting) return `${c.deadShare === null ? "" : `${Math.floor(c.deadShare * 100)}% of its stored rows deleted, `}not compacted: ${c.waiting}`;
   if (c.deadShare !== null && c.deadShare >= 0.1) return `${Math.floor(c.deadShare * 100)}% of its stored rows deleted, not compacted yet`;
   return c.at === null ? null : `compacted ${syncedAgo(c.at, now)}`;
@@ -114,7 +114,7 @@ function syncedAgo(iso, now = Date.now()) {
 }
 
 /** What a table in its one catch-up poll says (src/cli/readiness.ts `CATCHING_UP`, held equal by tests/web-page.test.ts). */
-export const CATCHING_UP = "being caught up by one poll for what changed since it was synced";
+export const CATCHING_UP = "Getting the changes made since it was last synced. You can query it meanwhile.";
 
 /** How a copied table is kept current and how old its copy is (src/cli/commands.ts `keptAge`). */
 export function keptAge(t, now = Date.now()) {
@@ -131,7 +131,8 @@ export function keptAge(t, now = Date.now()) {
   if (k?.by !== "poll") return null;
   const synced = k.syncedAt === null ? "never synced" : `last synced ${syncedAgo(k.syncedAt, now)}`;
   if (k.pending !== undefined) return `NOT kept current (${synced}): ${k.pending}`;
-  if (k.sync.mode === "off") return `sync: off, ${synced} — mason sync ${entryName(t.table)} syncs it now; sync: poll 5m on its entry polls it`;
+  // the page says how to do it on the page (its Sync now, its Sync choice), where mason status names the commands
+  if (k.sync.mode === "off") return `sync off, ${synced}: press Sync now to sync it`;
   return `polled every ${k.sync.every}, ${k.syncedAt === null ? "not polled yet" : `last ${syncedAgo(k.syncedAt, now)}`}`;
 }
 
@@ -191,23 +192,6 @@ export function createMonotone() {
   };
 }
 
-/** `mason status`'s rows for the database (src/cli/commands.ts `sourceRows`): its sources file (from the project's root:
- *  the page never shows an absolute path), its URL as the run masked it, how its changes arrive. */
-export function sourceRows(s) {
-  return [
-    ...(s.source.file ? [["Source", `${s.source.shownFile ?? s.source.file} (the tables it names are added)`]] : []),
-    ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
-      : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
-    // in a web developer's words first (each table as its sync: says, streamed as they happen); the mechanism an operator needs in parentheses
-    ["Changes", `each table as its sync: says${s.source.replication ? "" : " (a SELECT of its changed rows)"}${s.source.sync ? ` · sync: ${s.source.sync.default} ${s.source.sync.written ? "for every table without its own" : "(the default: the file writes none)"}` : ""} · ` +
-      (s.source.replication ? `sync: replication tables streamed as they happen (logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication}, ` +
-          `${s.source.replication.owned ? "Mason's own, carrying them alone" : "named: read as it is, never altered"}); the others by a SELECT of their changed rows`
-        : s.source.demo ? "the demo database is checked this way only"
-        : "sync: replication on an entry streams that table as it happens instead")],
-    ...(s.source.textOrder ? [["Text order", s.source.textOrder]] : []),
-  ];
-}
-
 /** THE RUN IN ONE WORD, as `mason status` heads its last line (src/cli/readiness.ts `readinessWord`): Ready, Failed or
  *  Under way. */
 export function readinessWord(r) {
@@ -228,7 +212,7 @@ export function renderHealth(s) {
 }
 
 /** The sparklines the cards draw, by holder key: a usage sample's field each (src/web/charts.js specs). */
-const SPARKS = { rows: ["copyRows", "Rows synced"], "copy-bytes": ["copyBytes", "The synced data's file"], statements: ["statements", "Statements"], p95: ["durationP95Ms", "p95"] };
+const SPARKS = { rows: ["copyRows", "Rows synced"], "copy-bytes": ["copyBytes", "Synced data size"], statements: ["statements", "Queries"], p95: ["durationP95Ms", "p95"] };
 
 /** The sparklines' specs from the usage answer (`/api/usage`'s body; anything else draws none): what `charts()` returns. */
 export function sparkSpecs(usage) {
@@ -250,7 +234,7 @@ export const copyingCount = (s) => s.tables.filter((t) => t.added && tableLine(t
 export function renderKpis(s, o = {}) {
   const now = o.now ?? Date.now();
   const sparks = sparkSpecs(o.usage);
-  const line = (key) => sparks[key] ? spark(key, `${SPARKS[key][1]}, the last 24 hours an hour a point`) : "";
+  const line = (key) => sparks[key] ? spark(key, `${SPARKS[key][1]}, the last 24 hours, one point an hour`) : "";
   const list = [];
   const t = s.totals;
   // as renderStatus judges it: a table added (the totals count what the sources file names)
@@ -261,16 +245,16 @@ export function renderKpis(s, o = {}) {
     t.syncedAt === null ? card("Last sync", "none yet", "", "", "", LINKS.tables) : card("Last sync", `${duration((now - Date.parse(t.syncedAt)) / 1000)} ago`, `${utcText(t.syncedAt)} UTC`, "", "", LINKS.tables));
   const d = s.disk;
   const copyBytes = s.engine.bytes ?? (d && typeof d.copyBytes === "number" ? d.copyBytes : null);
-  if (added || copyBytes !== null) list.push(copyBytes === null ? card("The synced data's file", "unknown", "its size could not be read", "", "", LINKS.usage) : card("The synced data's file", fileSize(copyBytes), "", line("copy-bytes"), "", LINKS.usage));
+  if (added || copyBytes !== null) list.push(copyBytes === null ? card("Synced data", "unknown", "its size could not be read", "", "", LINKS.usage) : card("Synced data", fileSize(copyBytes), "", line("copy-bytes"), "", LINKS.usage));
   const q = o.queries;
   if (added && q !== undefined) {
-    if ("failure" in q) list.push(card("Statements, last day", "unknown", `could not read them: ${firstLine(q.failure.message)}`, "", "", LINKS.queries));
+    if ("failure" in q) list.push(card("Queries, last day", "unknown", `could not be read: ${firstLine(q.failure.message)}`, "", "", LINKS.queries));
     else {
       const day = q.queries.day;
       const bad = day.refused + day.failed + day.cancelled;
-      list.push(card("Statements, last day", n(day.statements), `${n(day.completed)} completed${bad ? `, ${n(bad)} refused, failed or cancelled` : ""}`, line("statements"), day.failed ? "warn" : "", LINKS.queries),
+      list.push(card("Queries, last day", n(day.statements), `${n(day.completed)} completed${bad ? `, ${n(bad)} refused, failed or cancelled` : ""}`, line("statements"), day.failed ? "warn" : "", LINKS.queries),
         card("p95, last day", day.durationMs === null ? "–" : statementMsText(day.durationMs.p95),
-          day.durationMs === null ? "no statement completed" : `average ${statementMsText(day.durationMs.avg)} · p50 ${statementMsText(day.durationMs.p50)}`, line("p95"), "", LINKS.slow));
+          day.durationMs === null ? "no query completed" : `average ${statementMsText(day.durationMs.avg)} · p50 ${statementMsText(day.durationMs.p50)}`, line("p95"), "", LINKS.slow));
     }
   }
   if (typeof s.pageCard === "string") list.push(renderHostCard(o.hostCard));
@@ -299,23 +283,67 @@ function renderStream(s, now = Date.now()) {
   return `<table class="facts-table"><caption>Changes (the stream${s.source.replication ? `, slot ${esc(s.source.replication.slot)}` : ""})</caption><tbody>${rows.join("")}</tbody></table>`;
 }
 
+/** Postgres's version as the page says it: the number alone (`16.15`), without the server's build in brackets. */
+const pgVersion = (v) => String(v ?? "").split(" ")[0];
+
+/** A time as the facts say it: `16:03 UTC` on the day of `now`, else with its date. */
+const sinceText = (iso, now) => `${iso.slice(0, 10) === new Date(now).toISOString().slice(0, 10) ? iso.slice(11, 16) : utcMinute(iso)} UTC`;
+
+/** Whether a warning of the run says what the facts card says as a fact or as its info line: that the database is on
+ *  another machine (src/cli/preflight.ts `remoteWarning`) or that it is a primary. The page says both in its own words. */
+const saidAsFact = (w, s) => (s.source.remote === true && (w.startsWith(`${s.source.host} is not this machine`) || w.startsWith("Your database is on another machine")))
+  || /\bPRIMARY\b|pg_is_in_recovery/.test(w);
+
 /**
- * THE FACTS, ONE table of what `mason status` says beside the cards: the database and how its changes arrive (`sourceRows`), the
- * warnings, Mason's version, how long it has been up and its restarts (`engine`), the free disk and what a running copy is projected to add (`disk`), the sessions open
- * (`sessions`). A fact the run did not say is absent; one it could not read is said as the CLI says it (its reason, never a 0). Mason's, the disk's, the restarts' and the sessions' rows are the CLI's (`masonRow`, `diskRows`, `restartsRows`, `sessionsRows`).
+ * THE FACTS CARD'S ROWS, `[label, value, warn]` each, in the page's own words (`mason status` keeps its fuller rows):
+ * the database (its name, where it is, its Postgres version, and whether it is the main database or a read replica);
+ * the run's warnings, but for what the card says as a fact; Mason's version and how long it has been up; its restarts,
+ * only when there were any; the free disk beside what the synced data takes; and the tools connected. A fact the run
+ * did not say is absent; one it could not read says so, with its reason (never a 0).
+ */
+export function factRows(s, now = Date.now()) {
+  const src = s.source, e = s.engine, d = s.disk, ss = s.sessions;
+  const rows = [["Database", src.demo ? `the demo database Mason runs · Postgres ${pgVersion(src.version)}`
+    : `${src.database} on ${src.host} · Postgres ${pgVersion(src.version)} · ${src.standby ? "a read replica" : "your main database"}`, false]];
+  rows.push(...s.warnings.filter((w) => !saidAsFact(w, s)).map((w) => ["Warning", w, true]));
+  if (typeof e.version === "string") rows.push(["Mason", `${e.version}${e.startedAt ? ` · up ${spanText(e.uptimeSeconds ?? 0)}, since ${sinceText(e.startedAt, now)}` : ""}`, false]);
+  const r = e.restarts;
+  if (r !== undefined && "error" in r) rows.push(["Restarts", `unknown: ${firstLine(r.error)}`, true]);
+  else if (r !== undefined && r.last !== null) rows.push(["Restarts", `${r.count}, the last ${agoText(r.last.at, now)}: ${r.last.why}, after ${r.last.upSeconds} s up`, true]);
+  if (d !== undefined) {
+    const uses = typeof d.copyBytes === "number" ? ` · the synced data uses ${fileSize(d.copyBytes)}` : "";
+    const adds = d.projectedBytes === null ? "" : ` · the first syncs running need about ${fileSize(d.projectedBytes)} more`;
+    const over = d.freeBytes !== null && d.projectedBytes !== null && d.projectedBytes > d.freeBytes;
+    rows.push(["Disk", d.freeBytes === null ? `${firstLine(d.error ?? "the free space could not be read")}${uses}${adds}`
+      : `${fileSize(d.freeBytes)} free${uses}${adds}${over ? ". That is more than is free: the sync stops before the disk fills" : ""}`, d.freeBytes === null || over]);
+  }
+  if (ss !== undefined) {
+    const tools = "error" in ss ? null : ss.byClient.length;
+    rows.push(["Connected tools", tools === null ? `unknown: ${firstLine(ss.error)}` : ss.open === 0 ? "none" : `${n(Math.max(1, tools))} connected`, false]);
+  }
+  return rows;
+}
+
+/** The facts card's quiet lines, in the page's words: that the database is on another machine (information, not a
+ *  warning), and how text sorts when it differs from the database (`source.textOrder`; nothing when it sorts the same). */
+export function factNotes(s) {
+  const notes = [];
+  if (s.source.remote === true && !s.source.demo) notes.push("Your database is on another machine. Mason will sync the tables you choose to this machine.");
+  const t = s.source.textOrder;
+  if (t) notes.push(/could not read/.test(t) ? "Mason can't sort text the way your database does, so it refuses to sort text in a query. Add COLLATE \"C\" to sort it (docs/SQL-SUPPORT.md explains why)."
+    : "Text sorts as in your database, except some rare symbols (docs/SQL-SUPPORT.md explains which).");
+  return notes;
+}
+
+/**
+ * THE FACTS CARD, "Mason": `factRows` in a table, a row the reader should act on marked, then `factNotes` as quiet
+ * lines. What the card used to say from `mason status` (the sources file, the sync settings, the page's socket) is
+ * not here: the Tables page shows and changes each table's sync, and the page names no file.
  */
 export function renderFacts(s, now = Date.now()) {
-  const rows = [...sourceRows(s).map(([k, v]) => factRow(k, v)), ...s.warnings.map((w) => factRow("Warning", w, true))];
-  const e = s.engine;
-  if (typeof e.version === "string") rows.push(factRow(...masonRow(e)));
-  rows.push(...restartsRows(e.restarts, now).map(([k, v]) => factRow(k, v, k === "Restarts")));
-  // the copies in all, their rows, the last sync and the copy's file are the cards' (`renderKpis`): a fact in ONE place
-  const d = s.disk;
-  rows.push(...diskRows(d).map(([k, v]) => factRow(k, v, d.freeBytes === null || (d.projectedBytes !== null && d.projectedBytes > d.freeBytes))));
-  rows.push(...sessionsRows(s.sessions).map(([k, v]) => factRow(k, v)));
-  // `pageSocket` (mason serve with MASON_UI_SOCKET): said without its path, as the page shows no absolute path
-  if (typeof s.pageSocket === "string") rows.push(factRow("Web page", "served on a Unix socket on the server too (MASON_UI_SOCKET)"));
-  return `<table class="facts-table"><caption>Mason</caption><tbody>${rows.join("")}</tbody></table>`;
+  const notes = factNotes(s);
+  return `<table class="facts-table"><caption>Mason</caption><tbody>${factRows(s, now).map(([k, v, warn]) => factRow(k, v, warn)).join("")}</tbody></table>` +
+    notes.map((x) => `<p class="info fact-note">${esc(x)}</p>`).join("");
 }
 
 /**
@@ -326,8 +354,9 @@ export function renderFacts(s, now = Date.now()) {
 function renderProgress(s, isOpen = () => false, shares = new Map(), before = new Map()) {
   const picked = s.tables.filter((t) => t.added);
   if (!picked.length) {
-    return `<p class="readiness">No table added yet (${n(s.tables.length)} in the database).</p>` +
-      `<p class="dim">${code("mason tables")} lists them; ${code("mason add <table>")} syncs one.</p>`;
+    return `<p class="readiness">No table added yet. Your database has ${n(s.tables.length)}.</p>` +
+      (tablesReadOnly(s) !== null || s.sourcesReadOnly ? `<p class="dim">The tables to sync are set in the sources file.</p>`
+        : `<p class="dim">Add one on the <a href="${LINKS.tables}">Tables</a> page.</p>`);
   }
   // as tableLines orders them: the finished first, in the order they finished, then the failed, the copying, the waiting
   const rank = { done: 0, unsynced: 0, failed: 1, copying: 2, "catching-up": 2, waiting: 3 };
@@ -348,7 +377,7 @@ function renderProgress(s, isOpen = () => false, shares = new Map(), before = ne
  */
 export function renderQueries(q) {
   if (q === undefined) return "";
-  if ("failure" in q) return `<p class="count">Queries: could not read them (${esc(firstLine(q.failure.message))}; ${code("mason logs")} has the detail)</p>`;
+  if ("failure" in q) return `<p class="count">The queries could not be read: ${esc(firstLine(q.failure.message))}.</p>`;
   const w = q.queries;
   const ms = statementMsText;
   const row = (label, x) => `<tr><th scope="row">${esc(label)}</th>${[n(x.statements), n(x.completed), n(x.refused), n(x.failed), n(x.cancelled),
@@ -356,11 +385,11 @@ export function renderQueries(q) {
     n(x.rows), bytesText(x.bytesSent)].map((v) => `<td class="num">${esc(v)}</td>`).join("")}</tr>`;
   const short = [w.day, w.week].find((x) => x.covered < x.days);
   // eleven columns of numbers: wider than a laptop's page beside the sidebar, so the table scrolls inside its own box, never the page
-  return `<div class="table-wrap"><table class="queries"><caption>Statements (the completed ones' time; ${code("mason logs --requests")} lists each)</caption><thead><tr><th scope="col"></th>` +
-    ["Statements", "Completed", "Refused", "Failed", "Cancelled", "Average", "p50", "p95", "Rows sent", "Sent"].map((h) => `<th scope="col">${h}</th>`).join("") +
+  return `<div class="table-wrap"><table class="queries"><caption>Queries (the times are for completed ones)</caption><thead><tr><th scope="col"></th>` +
+    ["Queries", "Completed", "Refused", "Failed", "Cancelled", "Average", "p50", "p95", "Rows sent", "Sent"].map((h) => `<th scope="col">${h}</th>`).join("") +
     `</tr></thead><tbody>${row("Last day", w.day)}${row("Last week", w.week)}</tbody></table></div>` +
-    (short ? `<p class="dim">The request log keeps ${short.covered} day${short.covered === 1 ? "" : "s"}: MASON_HISTORY_DAYS.</p>` : "") +
-    `<p class="dim">The slow and the refused statements, and every other, are on <a href="${esc(LINKS.queries)}">Observability › Queries</a> (${code("mason logs --requests")}).</p>`;
+    (short ? `<p class="dim">Mason keeps ${short.covered} day${short.covered === 1 ? "" : "s"} of history (MASON_HISTORY_DAYS sets it).</p>` : "") +
+    `<p class="dim">Each query, slow and refused ones too, is listed on <a href="${esc(LINKS.queries)}">Queries</a>.</p>`;
 }
 
 /** A failed statement's cells, as mason status's `Query errors` line says them (src/cli/commands.ts `requestLine`): when,
@@ -385,10 +414,10 @@ const cellsRow = (cells, outcomeAt = -1) => `<tr><th scope="row">${esc(cells[0])
  */
 export function renderUnsupportedLine(u) {
   if (u === undefined) return "";
-  if ("failure" in u) return `<p class="count">Unsupported SQL: could not read it (${esc(firstLine(u.failure.message))}; ${code("mason logs")} has the detail)</p>`;
+  if ("failure" in u) return `<p class="count">The unsupported SQL could not be read: ${esc(firstLine(u.failure.message))}.</p>`;
   const [top, ...rest] = u.unsupported;
   if (top === undefined) return "";
-  return `<p class="unsupported-line"><strong>Unsupported SQL, the last day:</strong> <span title="docs/SQL-SUPPORT.md entry ${esc(top.gap)}">${esc(unsupportedEntry(top).headline)}</span>` +
+  return `<p class="unsupported-line"><strong>Unsupported SQL, last day:</strong> <span title="docs/SQL-SUPPORT.md entry ${esc(top.gap)}">${esc(unsupportedEntry(top).headline)}</span>` +
     `${rest.length ? ` (and ${n(rest.length)} other${rest.length === 1 ? "" : "s"})` : ""} <a class="see" href="${esc(LINKS.queries)}">See all</a></p>`;
 }
 
@@ -399,13 +428,13 @@ export function renderUnsupportedLine(u) {
  * (`renderUnsupportedLine`). Each argument is the body, or `{ failure }`.
  */
 export function renderRecentErrors(events, requests, unsupported) {
-  const part = (title, r, list, head, cells, more, href, outcomeAt) => r === undefined ? ""
-    : "failure" in r ? `<h3>${title}</h3><p class="count">Could not read them (${esc(firstLine(r.failure.message))}; ${code("mason logs")} has the detail)</p>`
+  const part = (title, r, list, head, cells, href, outcomeAt) => r === undefined ? ""
+    : "failure" in r ? `<h3>${title}</h3><p class="count">They could not be read: ${esc(firstLine(r.failure.message))}.</p>`
     : !list(r).length ? `<h3>${title}</h3><p class="dim">None.</p>`
-    : `<table class="errors"><caption>${title} (the latest, newest last; ${code(more)} lists each) <a class="see" href="${esc(href)}">See all</a></caption><thead><tr>${head.map((h) => `<th scope="col">${h}</th>`).join("")}</tr></thead>` +
+    : `<table class="errors"><caption>${title}: the latest, newest last <a class="see" href="${esc(href)}">See all</a></caption><thead><tr>${head.map((h) => `<th scope="col">${h}</th>`).join("")}</tr></thead>` +
       `<tbody>${list(r).map((x) => cellsRow(cells(x), outcomeAt)).join("")}</tbody></table>`;
-  return part("Sync errors", events, (r) => r.events, ["At (UTC)", "What", "Table", "Why"], (e) => Object.values(eventCells(e)), "mason logs --events", LINKS.failedEvents) +
-    part("Query errors", requests, (r) => r.requests, ["Started (UTC)", "Outcome", "Took", "Rows", "Who", "Statement", "Error"], requestCells, "mason logs --requests --failed", LINKS.failedQueries, 1) +
+  return part("Sync errors", events, (r) => r.events, ["At (UTC)", "What", "Table", "Why"], (e) => Object.values(eventCells(e)), LINKS.failedEvents) +
+    part("Query errors", requests, (r) => r.requests, ["Started (UTC)", "Outcome", "Took", "Rows", "Who", "Query", "Error"], requestCells, LINKS.failedQueries, 1) +
     renderUnsupportedLine(unsupported);
 }
 
@@ -433,7 +462,7 @@ export function renderChecklist(s, queries, users) {
     ["A table synced", copied, copying ? `<span class="dim">syncing now</span>` : added || tablesLook ? "" : `<a class="btn small primary" href="${LINKS.tables}">Add a table</a>`],
     ["A user created", user, looks ? "" : `<a class="btn small${copied ? " primary" : ""}" href="#users">Create a user</a>`],
     // the URL is Connect's (rendered under the checklist once a table is added), with its own Copy
-    ["A first statement answered", answered, copied ? `<span class="dim">connect with the URL below, then run a select on a synced table</span>` : ""],
+    ["A first query answered", answered, copied ? `<span class="dim">connect with the URL below, then query a synced table</span>` : ""],
   ];
   const done = steps.filter(([, ok]) => ok).length;
   return `<div class="checklist" role="group" aria-label="Getting started"><p class="checklist-title"><span class="courses" aria-hidden="true">${steps.map(([, ok]) => `<i${ok ? ' class="on"' : ""}></i>`).join("")}</span>Getting started <span class="dim">${done} of ${steps.length} done</span></p><ol>` +
@@ -473,8 +502,8 @@ export const NO_SHARE = Object.freeze({ phase: "none", choices: null, reads: nul
 export const pageShareOf = (s) => s?.share?.shares?.find((x) => x.from === "page") ?? null;
 
 /** When a free share ends, as `mason share` says it: about an hour, and the time. */
-const endsLine = (endsAt, now) => endsAt === null || endsAt === undefined ? "It ends when you Stop sharing, or when this page closes."
-  : `A free share ends within about an hour: at ${new Date(endsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}, in about ${Math.max(0, Math.round((Date.parse(endsAt) - now) / 60_000))} minutes. Then Connect from anywhere again gives a new address and password.`;
+const endsLine = (endsAt, now) => endsAt === null || endsAt === undefined ? "It ends when you press Stop sharing, or when you close this page."
+  : `A free share ends within about an hour, at ${new Date(endsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} (in about ${Math.max(0, Math.round((Date.parse(endsAt) - now) / 60_000))} minutes). Then press Connect from anywhere again for a new address and password.`;
 
 /**
  * CONNECT FROM ANYWHERE, the Connect card's part (src/cli/page-share.ts; `mason share`'s, from the page): a pure function
@@ -487,26 +516,26 @@ export function renderShare(s, m = NO_SHARE, now = Date.now()) {
   const open = pageShareOf(s);
   const head = `<p class="connect-title share-title">Connect from anywhere</p>`;
   const ask = button("Connect from anywhere", { shareAsk: "" }, "", { disabled: m.phase === "asking" || m.phase === "opening" });
-  const askLine = `<p class="tip" id="share-anchor">${ask} <span>For a tool in the cloud, which cannot reach this machine: a temporary public address and a password, as ${code("mason share")} opens. TLS is required of every connection.</span></p>`;
+  const askLine = `<p class="tip" id="share-anchor">${ask} <span>For a tool in the cloud that can't reach this machine. You get a temporary public address and a password. Every connection must use TLS.</span></p>`;
   if (open !== null && m.phase !== "ended") {
     const mine = m.opened !== null && m.opened.user === open.user ? m.opened : null;
     const rows = [["Host", open.host ?? "opening…", "share-host"], ["Port", open.port === null ? "…" : String(open.port), "share-port"], ["Database", mine?.database ?? s.postgres?.database ?? "", null],
       ["User", open.user, "share-user"], ...(mine !== null ? [["Password", mine.password, "share-password"]] : []), ["SSL mode", "require", null]];
     return `<div class="share open" role="status">${head}<p class="headline">Shared ${badge("Public", "warn")} for <time data-tick datetime="${esc(open.openedAt)}">${esc(spanText((now - Date.parse(open.openedAt)) / 1000))}</time>` +
-      `${open.role !== null ? `, reading as the role ${esc(open.role)}` : ""}: ${esc(open.reads)}</p>` +
+      `${open.role !== null ? `, as the role ${esc(open.role)}` : ""}: ${esc(open.reads)}</p>` +
       `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${id ? copyable(id, v) : esc(v)}</dd>`).join("")}</dl>` +
-      (mine !== null ? `<p class="tip">Paste it into the tool now: the password is shown this once, is kept nowhere, and ends with the share.</p>`
-        : `<p class="tip">The password was shown once, when it opened, and is kept nowhere: Stop sharing and Connect from anywhere again for a new one.</p>`) +
-      `<p class="tip">${esc(endsLine(open.endsAt, now))} It also ends within two minutes of this page closing.</p>` +
+      (mine !== null ? `<p class="tip">Paste it into your tool now. The password is shown only this once and is not saved. It stops working when the share ends.</p>`
+        : `<p class="tip">The password was shown once, when the share opened, and is not saved. For a new one, press Stop sharing, then Connect from anywhere.</p>`) +
+      `<p class="tip">${esc(endsLine(open.endsAt, now))} It also ends within two minutes of closing this page.</p>` +
       `<p class="tip">${button("Stop sharing", { shareStop: open.user }, "danger")}</p></div>`;
   }
-  if (m.phase === "opening") return `<div class="share">${head}<p class="dim" aria-busy="true">Opening a temporary public address… (up to 30 s)</p></div>`;
+  if (m.phase === "opening") return `<div class="share">${head}<p class="dim" aria-busy="true">Opening a temporary public address… This can take up to 30 s.</p></div>`;
   const before = m.phase === "ended" && m.ended !== null
-    ? `<p class="said">The share ended: ${esc(m.ended.why)}. Its address no longer answers, and its password no longer works.</p>`
+    ? `<p class="said">The share ended: ${esc(m.ended.why)}. Its address and password no longer work.</p>`
     : m.phase === "refused" && m.failure !== null ? renderFailure(m.failure) : "";
   const question = m.phase !== "asking" ? "" : pop("share-anchor", m.choices === null ? `<p class="dim">Reading the roles…</p>` :
-    `<p>This opens a <strong>temporary public address</strong>: anyone with it and its password reads ${esc(m.reads ?? "what the role you choose reads")}. A free share ends within about an hour, and when this page closes.</p>` +
-    (m.choices.length > 0 ? `<label for="share-role">Read as the role</label> <select id="share-role">${m.choices.map((c) => `<option value="${esc(c.role)}"${c.role === m.role ? " selected" : ""}>${esc(`${c.role}: ${c.reads}${c.default ? " (the file's default)" : ""}`)}</option>`).join("")}</select>` : "") +
+    `<p>This opens a <strong>temporary public address</strong>. Anyone with the address and its password can read ${esc(m.reads ?? "what the role you choose can read")}. A free share ends within about an hour, or when you close this page.</p>` +
+    (m.choices.length > 0 ? `<label for="share-role">Role</label> <select id="share-role">${m.choices.map((c) => `<option value="${esc(c.role)}"${c.role === m.role ? " selected" : ""}>${esc(`${c.role}: ${c.reads}${c.default ? " (default)" : ""}`)}</option>`).join("")}</select>` : "") +
     `<p>${button("Open the address", { shareOpen: "" }, "primary")} ${button("Cancel", { shareCancel: "", popClose: "" })}</p>`, { kind: "dialog", label: "Connect from anywhere" });
   return `<div class="share">${head}${before}${askLine}${question}</div>`;
 }
@@ -614,7 +643,7 @@ export function createShare(ctx) {
     async shareStop(user) {
       const r = await ctx.ask(`api/share/${encodeURIComponent(user)}`, json("DELETE"));
       if ("failure" in r && r.failure.code !== "not_found") { m.phase = "refused"; m.failure = r.failure; return; }
-      ended(user, "Stop sharing, on this page");
+      ended(user, "you pressed Stop sharing");
       await ctx.refresh(["api/state"]);
     },
     shareBeat: beat,
