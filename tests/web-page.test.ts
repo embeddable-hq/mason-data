@@ -1709,7 +1709,8 @@ test("the app: Remove asks first, Cancel takes it back, the confirm sends POST a
   run.asked.length = 0;
   assert.equal(await app.confirmRemoveTable("public.accounts"), true);
   assert.deepEqual(run.asked, [`POST api/remove ${JSON.stringify({ tables: ["public.accounts"] })}`, "GET api/state"]);
-  assert.match(textOf(app.view().tables!), /public\.accounts Not added ~300 rows key id Add Columns… public\.event_log/);
+  // removed: it keeps its row (laid out among the added), its state Not added in place, until the list is laid out again (issue 872)
+  assert.match(textOf(app.view().tables!), /public\.events Synced .* public\.accounts Not added ~300 rows key id Add Columns… public\.audit Not added/);
   assert.match(textOf(popOf(app.view().tables!, "act-tables-public.accounts")), /^Removed public\.accounts from mason\/sources\/shop\.yml Tip: Mason stops syncing it and drops its synced data/);
   assert.equal(app.model.removing, null);
   // refused: the server's words
@@ -4411,6 +4412,80 @@ test("Tables: the state the page polls carries no table's columns; a form reads 
   assert.ok(!/data-pick-form|Reading/.test(app.view().tables!), "no form, nothing being read");
   await app.choose("public.accounts");
   assert.deepEqual([...app.view().tables!.matchAll(/name="columns" value="([^"]*)"/g)].map((m) => m[1]), ["id", "email", "password_hash"]);
+});
+
+// ------------------------------------------------------------------ the list's order: the added tables first, laid out at set moments (issue 872)
+
+/** The tables' names in the order the Tables list wrote them. */
+const rowNames = (html: string) => [...html.matchAll(/<th scope="row" class="name"><code class="name" title="[^"]*">([^<]*)<\/code>/g)].map((m) => m[1]);
+/** The catalog with two tables not added before the added ones, as a database lists them. */
+const MIXED = [CATALOG[3]!, CATALOG[4]!, CATALOG[0]!, CATALOG[1]!, CATALOG[2]!, CATALOG[5]!, CATALOG[6]!];
+const sourcesWith = (...more: string[]) => parseSourceText(`kind: postgres\nurl: x\ntables:\n  customers: {}\n  orders: {}\n  events: {}\n${more.map((t) => `  ${t}: {}\n`).join("")}`, "shop", FILE) as typeof sourceFile;
+
+test("Tables: under All the added tables come first, whatever their sync's word, then those not added, each group in the state's order; the filters unchanged (issue 872)", () => {
+  const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
+  const s = stateOf(THREE_COPIED(), { tables: MIXED });
+  assert.deepEqual(s.tables.map((t) => t.table).slice(0, 2), ["public.audit", "public.accounts"], "the state lists two not added first");
+  assert.deepEqual(rowNames(renderTables(s)), ["public.customers", "public.orders", "public.events", "public.audit", "public.accounts", "public.event_log", "public.staging"]);
+  assert.deepEqual(rowNames(renderTables(s, { show: "added" })), ["public.customers", "public.orders", "public.events"]);
+  assert.deepEqual(rowNames(renderTables(s, { show: "not-added" })), ["public.audit", "public.accounts", "public.event_log", "public.staging"]);
+  assert.deepEqual(rowNames(renderTables(s, { filter: "s" })), ["public.customers", "public.orders", "public.events", "public.accounts", "public.staging"], "the search narrows the laid-out list");
+  // a failed and a waiting one are added: first too
+  const failing = stateOf([copied("public.customers", 1200, "2026-10-27T09:00:01.000Z"), { source: "public.orders", phase: "failed", rows: null, bytes: null, seconds: null, copiedAt: null, error: "connection reset" }],
+    { tables: MIXED });
+  assert.deepEqual(rowNames(renderTables(failing)).slice(0, 3), ["public.customers", "public.orders", "public.events"]);
+  // 150 tables not added before them: the first 100 written begin with every added table
+  const many = stateOf(THREE_COPIED(), { tables: [...Array.from({ length: 150 }, (_, i) => table(`t${String(i).padStart(3, "0")}`, i)), ...TABLES] });
+  const written = rowNames(renderTables(many));
+  assert.equal(written.length, 100);
+  assert.deepEqual(written.slice(0, 4), ["public.customers", "public.orders", "public.events", "public.t000"]);
+  // an order laid out earlier is kept: each table where it was put, one new in the catalog after them, one gone gone
+  assert.deepEqual(rowNames(renderTables(s, { order: ["public.audit", "public.customers", "public.gone", "public.accounts"] })),
+    ["public.audit", "public.customers", "public.accounts", "public.orders", "public.events", "public.event_log", "public.staging"]);
+});
+
+test("Tables: a table added or removed keeps its row, its state changing in place, until the list is laid out again — the filter, the search or the page shown again (issue 872)", async () => {
+  const run = fakeRun();
+  const before = stateOf(THREE_COPIED(), { tables: MIXED });
+  run.answers.set("GET api/state", answer(before));
+  const app = fn<[unknown], ObsApp>("createApp")(run.fetch);
+  app.show("tables"); await app.poll();
+  const tp = app.pages.get("tables")!;
+  const laidOut = ["public.customers", "public.orders", "public.events", "public.audit", "public.accounts", "public.event_log", "public.staging"];
+  assert.deepEqual(rowNames(app.view().tables!), laidOut);
+  // Add audit from the page: its row stays where it was, Adding… then its sync's word
+  const withAudit = stateOf(THREE_COPIED(), { tables: MIXED, sources: sourcesWith("audit") });
+  run.answers.set("POST api/pick", () => { run.answers.set("GET api/state", answer(withAudit)); return answer({ ...PICKED.keyed, table: "public.audit", state: withAudit })(); });
+  assert.equal(await (app as unknown as App).addTable("public.audit"), true);
+  assert.deepEqual(rowNames(app.view().tables!), laidOut, "added: no row moved");
+  assert.match(textOf(app.view().tables!), /public\.audit Waiting /, "its state changed in place");
+  await app.poll(); await app.poll();
+  assert.deepEqual(rowNames(app.view().tables!), laidOut, "the polls after it move nothing either");
+  // the filter changed and back: laid out anew, audit first of the added (the state lists it first)
+  tp.input!({ id: "tables-show", value: "added" });
+  assert.deepEqual(rowNames(app.view().tables!), ["public.audit", "public.customers", "public.orders", "public.events"]);
+  tp.input!({ id: "tables-show", value: "all" });
+  const second = ["public.audit", "public.customers", "public.orders", "public.events", "public.accounts", "public.event_log", "public.staging"];
+  assert.deepEqual(rowNames(app.view().tables!), second);
+  // accounts added beside the page (mason add): it keeps its row at the polls; the search box's text lays it out
+  run.answers.set("GET api/state", answer(stateOf(THREE_COPIED(), { tables: MIXED, sources: sourcesWith("audit", "accounts") })));
+  await app.poll();
+  assert.deepEqual(rowNames(app.view().tables!), second, "added elsewhere: still in its row");
+  tp.input!({ id: "tables-filter", value: "" });
+  const third = ["public.audit", "public.accounts", "public.customers", "public.orders", "public.events", "public.event_log", "public.staging"];
+  assert.deepEqual(rowNames(app.view().tables!), third, "the search box's text changed: laid out");
+  // removed beside the page (mason remove): in its row until the page is shown again
+  run.answers.set("GET api/state", answer(before));
+  await app.poll();
+  assert.deepEqual(rowNames(app.view().tables!), third);
+  assert.match(textOf(app.view().tables!), /public\.accounts Not added /);
+  app.show("status"); app.show("tables");
+  assert.deepEqual(rowNames(app.view().tables!), laidOut, "shown again: laid out");
+  // added while another page was shown: the read the showing makes lays it out
+  app.show("status");
+  run.answers.set("GET api/state", answer(withAudit));
+  app.show("tables"); await app.poll();
+  assert.deepEqual(rowNames(app.view().tables!).slice(0, 2), ["public.audit", "public.customers"], "shown again: laid out from the state read for it");
 });
 
 // ------------------------------------------------------------------ the layout: rows that fit their card (the owner's Remove pushed off the edge)

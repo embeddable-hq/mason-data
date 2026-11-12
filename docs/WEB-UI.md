@@ -81,8 +81,12 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   statement used SQL Mason does not support in the last day — one line naming the most refused entry of
   `docs/SQL-SUPPORT.md`, with **See all** (Queries).
 - **Tables** (`#tables`): the database's tables, as `mason tables` lists them, with a search box by name and an All /
-  Added / Failed / Not added filter. With hundreds of tables the first 100 that pass are written, then **Show 100 more**
-  and **Show all**; the search is over every table, at once. A long name is cut with an ellipsis, its whole the tooltip.
+  Added / Failed / Not added filter. The added tables come first (whatever their state), then those not added, each in
+  the order `mason tables` lists them. A table added or removed while the page is shown keeps its row, its state
+  changing in place, and takes its place only when the list is laid out again: the page shown again, or the search
+  box's text or the filter changed (a click moves no other row). With hundreds of tables the first 100 that pass are
+  written, then **Show 100 more** and **Show all**; the search is over every table, at once. A long name is cut with an
+  ellipsis, its whole the tooltip.
 - **Tables**, an added table: its state (Synced, Syncing, Failed or Waiting) over its bar — every added table has
   one, as `mason status` draws one for each: full at 100% once synced, red when its first sync failed, amber when it is not kept
   current, moving while it syncs, a shimmer while it waits — its rows, its last sync over how long it took, and the

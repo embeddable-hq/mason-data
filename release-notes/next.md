@@ -2,6 +2,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **The Tables page lists the added tables first**, then the tables not added, so on a database of hundreds of
+  tables the ones Mason syncs are at the top under All. A table you add or remove keeps its row, its state changing in
+  place, and moves to its group the next time the list is laid out: when you open the page again, or change the search
+  or the All / Added / Failed / Not added filter.
 - **Every example in a box on the web page now starts with "e.g."**: the Tables and Queries search boxes say
   `e.g. orders`, Queries' since `e.g. 2h`, and a new user's name and where it connects from `e.g. metabase` and
   `e.g. 192.0.2.0/24, 2001:db8::/32`, so an example is never taken for a value already filled in.
