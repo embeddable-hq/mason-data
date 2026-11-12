@@ -1340,47 +1340,112 @@ test("the Overview while the poll fails with nothing read yet: Unknown, and why,
   assert.equal(v.poll, "");
 });
 
-test("a stale page's answer to what the person just did is never greyed: a Sync's popover on Tables, Add a user's Failure on Users (and what holds them)", async () => {
+/** An element of some HTML: its tag, its classes and its children (`tree`), for the stale rule's own matching. */
+interface El { tag: string; classes: string[]; children: El[]; html: string }
+const VOID = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"]);
+/** The top-level elements of a part's HTML, each with its subtree (a small parser: what the page writes is well formed). */
+function tree(html: string): El[] {
+  const root: El = { tag: "", classes: [], children: [], html: "" };
+  const stack: Array<{ el: El; start: number }> = [{ el: root, start: 0 }];
+  for (const m of html.matchAll(/<(\/?)([a-zA-Z][a-zA-Z0-9-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g)) {
+    const [, close, tag, attrs] = m;
+    if (close) {
+      const top = stack.pop()!;
+      assert.equal(top.el.tag, tag!.toLowerCase(), `</${tag}> closes <${top.el.tag}>`);
+      top.el.html = html.slice(top.start, m.index! + m[0].length);
+      continue;
+    }
+    const el: El = { tag: tag!.toLowerCase(), classes: (/\bclass="([^"]*)"/.exec(attrs!)?.[1] ?? "").split(/\s+/).filter(Boolean), children: [], html: m[0] };
+    stack.at(-1)!.el.children.push(el);
+    if (!VOID.has(el.tag) && !attrs!.trimEnd().endsWith("/")) stack.push({ el, start: m.index! });
+  }
+  assert.equal(stack.length, 1, "every element closed");
+  return root.children;
+}
+
+/** THE STALE RULE AS A BROWSER APPLIES IT (app.css `section[data-stale] > div[id] > :not(…)`), to a part's top-level
+ *  elements: each greyed unless it matches a simple selector of the rule's `:not` list, or holds one of its `:has`. */
+function staleGrey(): (partHtml: string) => Array<{ greyed: boolean; el: El }> {
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
-  // the one rule that greys a stale section: what it leaves out, itself and whatever holds it
-  const rule = /section\[data-stale\] > div\[id\] > :not\(([^{]*)\) \{ opacity: [0-9.]+; \}/.exec(css);
-  assert.ok(rule, "the stale rule");
-  assert.equal(css.match(/data-stale/g)?.length, 2, "one rule greys a stale section (and its comment names it)");
-  const kept = (cls: string) => new RegExp(`(^|[ ,(])\\.${cls}(?=[ ,)])`).test(rule[1]!) && new RegExp(`:has\\([^)]*\\.${cls}[ ,)]`).test(rule[1]!);
-  const outer = (html: string) => /^<div class="([a-z-]+)/.exec(html)?.[1] ?? "";
+  const rules = [...css.matchAll(/section\[data-stale\] > div\[id\] > :not\((.*)\) \{ opacity: [0-9.]+; \}/g)];
+  assert.equal(rules.length, 1, "one rule greys a stale section's parts");
+  const inner = rules[0]![1]!;
+  const has = /:has\(([^)]*)\)/.exec(inner)?.[1] ?? "";
+  const list = (s: string) => s.split(",").map((x) => x.trim()).filter((x) => x !== "" && !x.startsWith(":has("));
+  const simple = (sel: string) => {
+    const m = /^([a-z0-9]*)((?:\.[a-z0-9-]+)+)$/.exec(sel);
+    assert.ok(m, `a simple selector the test reads: ${sel}`);
+    const classes = m[2]!.split(".").filter(Boolean);
+    return (e: El) => (m[1] === "" || e.tag === m[1]) && classes.every((c) => e.classes.includes(c));
+  };
+  const own = list(inner.replace(/:has\([^)]*\)/, "")).map(simple);
+  const held = list(has).map(simple);
+  const holds = (e: El): boolean => e.children.some((c) => held.some((f) => f(c)) || holds(c));
+  return (partHtml) => tree(partHtml).map((el) => ({ el, greyed: !own.some((f) => f(el)) && !holds(el) }));
+}
+
+test("a stale page greys every part of what it read before — the users' table and Tables' list included — and never the answer to what the person just did (a Sync's popover, Add a user's Failure, an added user's password)", async () => {
+  const grey = staleGrey();
+  const allGreyed = (html: string, what: string) => {
+    const els = grey(html);
+    assert.ok(els.length > 0, `${what}: written`);
+    for (const { el, greyed } of els) assert.ok(greyed, `${what}: read before, so greyed: ${el.html.slice(0, 120)}`);
+  };
   const run = fakeRun();
   run.answers.set("GET api/state", () => new Response(JSON.stringify(SYNCED), { status: 200 }));
-  const app = fn<[unknown], StaleApp>("createApp")(run.fetch) as StaleApp & { syncTable(t: string): Promise<boolean> };
-  app.show("tables");
-  await app.poll();
+  const app = fn<[unknown], StaleApp>("createApp")(run.fetch) as StaleApp & { syncTable(t: string): Promise<boolean>; dismissAdded(): void };
+  // the Overview: its word says it itself; everything else it shows is greyed
   await app.poll();
   run.answers.clear();
   await app.poll();
-  assert.notEqual(app.stale(), null, "Tables is out of date");
-  assert.equal(await app.syncTable("public.events"), false);
-  const answer = popOf(app.view().tables!, "act-tables-public.events");
-  assert.match(textOf(answer), /Mason does not answer at this address/, "the click's answer, in its popover");
-  assert.equal(outer(answer), "pop");
-  assert.ok(kept("pop"), "a popover is from now: never greyed, nor what holds it");
-  // Users: read, then the run stops, then Add a user
-  app.show("users");
+  assert.notEqual(app.stale(), null, "the Overview is out of date");
+  for (const { el, greyed } of grey(app.view().status!)) assert.equal(greyed, !el.classes.includes("health"), `the Overview: ${el.html.slice(0, 120)}`);
+  // Tables: the cards and the list greyed; a Sync's answer, a popover, not — and the list beside it still greyed
   for (const [k, a] of new Map(fakeRun().answers)) run.answers.set(k, a);
+  run.answers.set("GET api/state", () => new Response(JSON.stringify(SYNCED), { status: 200 }));
+  app.show("tables");
+  await app.poll();
+  run.answers.clear();
+  app.show("tables");
+  await app.poll();
+  assert.notEqual(app.stale(), null, "Tables is out of date");
+  allGreyed(app.view()["tables-cards"]!, "Tables' cards");
+  allGreyed(app.view().tables!, "Tables' list");
+  assert.equal(await app.syncTable("public.events"), false);
+  const tables = grey(app.view().tables!);
+  const pop = tables.find(({ el }) => el.classes.includes("pop"));
+  assert.ok(pop, "the click's answer, a popover");
+  assert.match(textOf(pop.el.html), /Mason does not answer at this address/);
+  assert.equal(pop.greyed, false, "the answer to the click is from now");
+  for (const { el, greyed } of tables) if (el !== pop.el) assert.ok(greyed, `Tables' list beside the answer: greyed: ${el.html.slice(0, 120)}`);
+  // Users: the users' table greyed (its header has a column named Added); Add a user's Failure not; an added user's
+  // password not
+  for (const [k, a] of new Map(fakeRun().answers)) run.answers.set(k, a);
+  app.show("users");
   await app.poll();
   run.answers.clear();
   app.show("users");
   await app.poll();
   assert.notEqual(app.stale(), null, "Users is out of date");
+  assert.match(app.view().users!, /<th scope="col" class="added">Added<\/th>/, "the users' table, as it is written");
+  allGreyed(app.view().users!, "the users' table");
   assert.equal(await app.addUser("grafana"), false);
-  const action = app.view().action!;
-  assert.match(textOf(action), /Mason does not answer at this address/);
-  assert.equal(outer(action), "failure");
-  assert.ok(kept("failure"), "a Failure that answers an action is from now");
-  assert.ok(kept("added"), "an added user's password, shown once, is from now");
+  const action = grey(app.view().action!);
+  assert.match(textOf(app.view().action!), /Mason does not answer at this address/);
+  assert.deepEqual(action.map((x) => x.greyed), [false], "Add a user's Failure is from now");
+  const password = `mason_0123456789abcdef_${"b".repeat(32)}`;
+  run.answers.set("POST api/users", () => new Response(JSON.stringify({ user: "grafana", id: "0123456789abcdef", addedAt: "2026-10-27T09:11:00.000Z", password, database: "shop",
+    url: `postgres://grafana:${password}@127.0.0.1:5433/shop`, host: "127.0.0.1", port: 5433, sslmode: "disable", next: [] }), { status: 200 }));
+  assert.equal(await app.addUser("grafana"), true);
+  assert.notEqual(app.stale(), null, "still out of date: the users were not read again");
+  assert.ok(app.view().added!.includes(password));
+  assert.ok(grey(app.view().added!).every((x) => !x.greyed), "an added user's password, shown once, is from now");
+  allGreyed(app.view().users!, "the users' table beside it");
 });
 
 test("in the browser: the shown section is greyed while the poll fails after a good read (its parts, not its controls), never another's, and current again at the first answer", async () => {
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
-  assert.match(css, /section\[data-stale\] > div\[id\] > :not\(\.health, [^{]*\) \{ opacity: 0\.55; \}/, "a stale section's parts greyed; the word says it itself");
+  assert.match(css, /section\[data-stale\] > div\[id\] > :not\(div\.health, [^{]*\) \{ opacity: 0\.55; \}/, "a stale section's parts greyed; the word says it itself");
   assert.match(css, /\.health\.stale \.word \{ color: var\(--muted\); \}/);
   const run = fakeRun();
   const kept = new Map(run.answers);
