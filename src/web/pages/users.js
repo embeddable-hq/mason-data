@@ -145,8 +145,7 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
 /**
  * HOW A TOOL CONNECTS, once for the run (`/api/state` `postgres`: src/cli/pg-url.ts postgresFacts, what `mason status`
  * prints): the host, port, database and sslmode — what a BI tool's form asks for, each with Copy — then the URL with
- * `<user>:<password>` as placeholders. No psql line (issue 874): the URL is the same thing, pasted after `psql`; the
- * Overview's Connect keeps its own. None of it is a user's: a row carries what is (its name, its
+ * `<user>:<password>` as placeholders. No psql line (issue 874): the URL is the same thing, pasted after `psql`. None of it is a user's: a row carries what is (its name, its
  * state), and a user's password is copied only from the card shown once when it is added (`renderAdded`). "" when the
  * run did not say.
  */
@@ -200,15 +199,14 @@ function toggle(u, disabled, asking) {
 }
 
 /**
- * A USER JUST ADDED (`mason user add --json`'s shape): a prominent card with its password, shown this once — URL, User,
- * Password, Database, Host, Port and SSL mode, each with a Copy button laid out the same way, so a person fills a BI
- * tool's form field by field (issue 839). No psql line: the URL is the same thing, pasted after `psql`. A field the JSON
- * does not carry (host, port and sslmode while Mason does not run) is not shown. Mason keeps no copy, so it is never
- * shown again. Then where its statements will show: the Queries page.
+ * A USER JUST ADDED (`mason user add --json`'s shape): a prominent card with its password, shown this once — URL, User
+ * and Password, each with a Copy button laid out the same way (issue 839). Database, Host, Port and SSL mode are the
+ * run's, on the Connect card below it (`renderUsersConnect`), so not here (issue 876). No psql line: the URL is the same
+ * thing, pasted after `psql`. A field the JSON does not carry (the URL while Mason does not run) is not shown. Mason
+ * keeps no copy, so it is never shown again. Then where its statements will show: the Queries page.
  */
 export function renderAdded(a) {
-  const rows = [["URL", a.url, "added-url"], ["User", a.user, "added-user"], ["Password", a.password, "added-password"], ["Database", a.database, "added-database"],
-    ["Host", a.host, "added-host"], ["Port", a.port === undefined ? undefined : String(a.port), "added-port"], ["SSL mode", a.sslmode, "added-sslmode"]]
+  const rows = [["URL", a.url, "added-url"], ["User", a.user, "added-user"], ["Password", a.password, "added-password"]]
     .filter(([, v]) => v !== undefined && v !== null);
   return `<div class="added" role="status"><p class="headline">The user ${esc(a.user)} added: its password is shown this once ${badge("Shown once", "warn")}</p>` +
     `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v)}</dd>`).join("")}</dl>` +

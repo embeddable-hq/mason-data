@@ -412,8 +412,8 @@ export function renderRecentErrors(events, requests, unsupported) {
 /**
  * THE FIRST-RUN CHECKLIST, while setting up is not done: Mason is running (the state answered), a table copied (`totals`:
  * one served), a user created (`/api/users`: one not removed), a first statement answered (`/api/queries`: one completed
- * in the week the log keeps) — each ✓ or ○, a ○ with its one action: Add a table (Tables), Create a user (Users), the
- * psql line's Copy (Connect's, under it). "" once all four are done, and while a read it needs has not answered or
+ * in the week the log keeps) — each ✓ or ○, a ○ with its one action: Add a table (Tables), Create a user (Users), and
+ * for the first statement where to send it (Connect's URL, under it; no psql line, issue 874). "" once all four are done, and while a read it needs has not answered or
  * could not be read: a checklist never says ○ for what it could not tell. `users` is `/api/users`' body (or `{ failure }`).
  */
 export function renderChecklist(s, queries, users) {
@@ -432,8 +432,8 @@ export function renderChecklist(s, queries, users) {
     ["Mason is running", true, ""],
     ["A table synced", copied, copying ? `<span class="dim">syncing now</span>` : added || tablesLook ? "" : `<a class="btn small primary" href="${LINKS.tables}">Add a table</a>`],
     ["A user created", user, looks ? "" : `<a class="btn small${copied ? " primary" : ""}" href="#users">Create a user</a>`],
-    // the psql line is Connect's (rendered under the checklist once a table is added): its Copy copies it
-    ["A first statement answered", answered, copied ? `${`<button type="button" class="small${user ? " primary" : ""}" data-copy="connect-psql">Copy the psql line</button>`} <span class="dim">then run a select on a synced table</span>` : ""],
+    // the URL is Connect's (rendered under the checklist once a table is added), with its own Copy
+    ["A first statement answered", answered, copied ? `<span class="dim">connect with the URL below, then run a select on a synced table</span>` : ""],
   ];
   const done = steps.filter(([, ok]) => ok).length;
   return `<div class="checklist" role="group" aria-label="Getting started"><p class="checklist-title"><span class="courses" aria-hidden="true">${steps.map(([, ok]) => `<i${ok ? ' class="on"' : ""}></i>`).join("")}</span>Getting started <span class="dim">${done} of ${steps.length} done</span></p><ol>` +
