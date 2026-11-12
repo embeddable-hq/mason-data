@@ -1811,7 +1811,7 @@ async function until(cond: () => boolean, what = "the condition", ms = 5000): Pr
 /** The page in a fake browser: elements whose innerHTML reads back as a browser serialises it (a bare data-x attribute
  *  as data-x="", an apostrophe in text as itself), the listeners `start` adds, the interval it sets, and a FormData
  *  that reads a form's ticked boxes from the fake form. */
-function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "") {
+function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "", winExtra: Record<string, unknown> = {}) {
   // an element's attributes, and what holds the focus: a target `{ in: "sidebar" }` is inside the element of that id
   interface FakeEl { id: string; writes: number; html: string; hidden?: boolean; innerHTML: string; attrs: Map<string, string>; addEventListener: () => void;
     setAttribute(k: string, v: string): void; removeAttribute(k: string): void; contains(t: { in?: string } | null): boolean; focus(): void; querySelector(sel: string): FakeEl }
@@ -1838,11 +1838,52 @@ function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "") {
   let tick: (() => void) | null = null;
   class FormData { readonly ticked: Record<string, string[]>; constructor(form: { ticked: Record<string, string[]> }) { this.ticked = form.ticked; } getAll(name: string) { return this.ticked[name] ?? []; } }
   fn<[unknown, unknown], void>("start")(doc, { fetch: (p: string, i?: { method?: string; body?: string }) => run.fetch(p, i), FormData, location, addEventListener: (type: string, f: () => void) => { onWin.set(type, f); },
-    setInterval: (f: () => void) => { tick = f; return 1; }, setTimeout: (f: () => void, ms: number) => setTimeout(f, ms) });
+    setInterval: (f: () => void) => { tick = f; return 1; }, setTimeout: (f: () => void, ms: number) => setTimeout(f, ms), ...winExtra });
   /** the reader follows a link of the nav: the hash changes, and the browser says so */
   const go = (to: string) => { location.hash = to; onWin.get("hashchange")!(); };
   return { el, on, doc, go, replaced, tick: () => tick!(), settle: () => new Promise((r) => setTimeout(r, 20)) };
 }
+
+test("the Users page reads Connect, then the add form and what it answered, then the users (issue 887)", () => {
+  const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
+  const section = /<section id="page-users"[^>]*>([\s\S]*?)<\/section>/.exec(html)?.[1] ?? assert.fail("the Users section");
+  const order = [...section.matchAll(/<div id="([a-z-]+)"><\/div>/g)].map((m) => m[1]);
+  assert.deepEqual(order, ["users-connect", "add-user-box", "action", "added", "users"],
+    "Connect first; the card an add answered (added) and its refusal (action) beside the form; the list last");
+  assert.ok(section.indexOf('id="users-h"') < section.indexOf('id="users-connect"'), "under the title");
+});
+
+test("arriving on the Users page puts the cursor in the add form's Name — at the start and by a link followed; never at a poll's write, nor from what the person focused since, nor on a touch screen or read-only (issue 887)", async () => {
+  const focusedAfter = async (o: { hash?: string; to?: string; coarse?: boolean; state?: unknown; focusMeanwhile?: boolean } = {}) => {
+    const run = fakeRun();
+    if (o.state !== undefined) run.answers.set("GET api/state", () => new Response(JSON.stringify(o.state), { status: 200 }));
+    // the state held until released: the form, and so the Name, is written only once it is read
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => { release = r; });
+    const answer = run.answers.get("GET api/state")!;
+    run.answers.set("GET api/state", (async () => { await held; return answer(); }) as unknown as () => Response);
+    const { doc, go, tick, settle } = fakeBrowser(run, o.hash ?? "#users",
+      o.coarse ? { matchMedia: (q: string) => ({ matches: q === "(pointer: coarse)", addEventListener: () => undefined }) } : {});
+    const d = doc as unknown as { focused: string; activeElement?: unknown };
+    if (o.to !== undefined) { release(); await settle(); assert.equal(d.focused, "", "not on the page it started on"); go(o.to); }
+    if (o.focusMeanwhile) d.activeElement = { tagName: "INPUT", in: "elsewhere", dataset: {} };
+    release();
+    await settle();
+    const first = d.focused;
+    // a poll's write after that: the focus left where it is
+    d.focused = "";
+    tick(); await settle();
+    return { first, later: d.focused };
+  };
+  assert.deepEqual(await focusedAfter(), { first: "user-name", later: "" }, "opened at #users: the Name, once the form is written; a poll's write takes nothing");
+  assert.deepEqual(await focusedAfter({ hash: "#overview", to: "#users" }), { first: "user-name", later: "" }, "a link followed to it: the same");
+  assert.deepEqual(await focusedAfter({ focusMeanwhile: true }), { first: "", later: "" }, "the person focused something before the form was written: theirs");
+  assert.deepEqual(await focusedAfter({ coarse: true }), { first: "", later: "" }, "a touch screen: no keyboard opened over the page");
+  assert.deepEqual(await focusedAfter({ state: { ...COPYING, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" } }), { first: "", later: "" },
+    "read-only: no form, nothing focused");
+  // another page arrived on: nothing of the Users page's
+  assert.deepEqual(await focusedAfter({ hash: "#tables" }), { first: "", later: "" });
+});
 
 test("in the browser: the phone's menu — its button opens the nav as a sheet, focus on its first link; Escape, a click outside, the focus leaving or a link followed close it", async () => {
   const run = fakeRun();
@@ -1862,7 +1903,8 @@ test("in the browser: the phone's menu — its button opens the nav as a sheet, 
   const menuButton = { in: "sidebar", closest: () => ({ dataset: { menu: "" } }) };
   // closed, Escape does nothing
   press("Escape");
-  assert.equal(open(), false); assert.equal(doc.focused, "");
+  // arriving on the Users page: the cursor in its Name (issue 887); the menu's own focus below
+  assert.equal(open(), false); assert.equal(doc.focused, "user-name");
   await click(menuButton);
   assert.deepEqual([open(), expanded(), doc.focused], [true, "true", "nav a"], "open: the sheet, the button says so, the focus on the nav's first link");
   await click({ in: "sidebar", closest: () => null });
@@ -4310,7 +4352,7 @@ test("Users: ONE Connect panel for the run — host, port, database, sslmode, th
   const rows = fn<[unknown, string | null, number], string>("renderUsers")({ users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: null,
     url: "postgresql://metabase@127.0.0.1:5433/shop" }], lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, NOW);
   assert.ok(!/postgresql:\/\/|data-copy|>URL</.test(rows), "no URL, and no Copy, in a user's row");
-  assert.match(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), /<div id="users-connect"><\/div>\s*<div id="users"><\/div>/, "the panel over the list");
+  assert.match(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), /<div id="users-connect"><\/div>\s*<div id="add-user-box"><\/div>/, "the panel over the form and the list (issue 887)");
 });
 
 test("the Overview's first-run checklist: running, a table copied, a user created, a first statement answered — each ○ with its one action; gone once all are done", async () => {

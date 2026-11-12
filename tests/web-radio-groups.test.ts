@@ -34,7 +34,7 @@ type El = { id: string; tagName: string; focus(): void; blur(): void; getAttribu
 type HTMLInputElement = El;
 declare const document: { fonts: { ready: Promise<unknown> }; activeElement: El | null; documentElement: { scrollWidth: number };
   querySelector(sel: string): El | null; querySelectorAll(sel: string): Iterable<El> & { length: number } };
-declare const window: { innerWidth: number };
+declare const window: { innerWidth: number; scrollX: number; scrollY: number };
 type Page = {
   route(url: string, handler: (route: Route) => Promise<void>): Promise<void>;
   goto(url: string): Promise<unknown>;
@@ -116,7 +116,8 @@ async function served(browser: Browser, width: number, hash: string, ready: stri
   return page;
 }
 
-/** Every box in `root` (the form itself, each field, label, legend and button), by a path of its own. */
+/** Every box in `root` (the form itself, each field, label, legend and button), by a path of its own, where it is on
+ *  the page (the window's scroll added: ticking a choice below the fold scrolls it into view) */
 const boxes = (page: Page, root: string): Promise<Record<string, Box>> => page.evaluate((sel) => {
   const out: Record<string, Box> = {};
   const form = document.querySelector(sel);
@@ -124,8 +125,10 @@ const boxes = (page: Page, root: string): Promise<Record<string, Box>> => page.e
   const all = [form, ...form.querySelectorAll("*")];
   all.forEach((el, i) => {
     const r = el.getBoundingClientRect();
+    // what lays out no box (a closed select's options, an element display: none) has none wherever the page is scrolled
+    if (r.width === 0 && r.height === 0 && r.x === 0 && r.y === 0) return;
     out[`${i} ${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ""}${el.getAttribute("name") ? `[${el.getAttribute("name")}]` : ""}`] =
-      { x: Math.round(r.x * 100) / 100, y: Math.round(r.y * 100) / 100, width: Math.round(r.width * 100) / 100, height: Math.round(r.height * 100) / 100 };
+      { x: Math.round((r.x + window.scrollX) * 100) / 100, y: Math.round((r.y + window.scrollY) * 100) / 100, width: Math.round(r.width * 100) / 100, height: Math.round(r.height * 100) / 100 };
   });
   return out;
 }, root);

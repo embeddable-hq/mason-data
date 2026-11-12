@@ -72,11 +72,12 @@
   </section>
   <section id="page-users" aria-labelledby="users-h" hidden>
     <div class="page-head"><h2 id="users-h">Users</h2><p class="desc">A user is the name and password psql, a BI tool or your app connects to Mason with; it does not expire. The same users as <code>mason user</code>.</p></div>
-    <!-- the add form is the page's (src/web/pages/users.js renderAddUser): none on a read-only page -->
+    <!-- Connect, then the add form (src/web/pages/users.js renderAddUser: none on a read-only page), what it answered
+         beside it, then the users (issue 887) -->
+    <div id="users-connect"></div>
     <div id="add-user-box"></div>
     <div id="action"></div>
     <div id="added"></div>
-    <div id="users-connect"></div>
     <div id="users"></div>
   </section>
   <section id="page-usage" aria-labelledby="usage-h" hidden>

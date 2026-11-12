@@ -295,6 +295,12 @@ export const page = {
         if (ask !== null && u !== null && !u.users.some((x) => x.name === ask.name && x.removedAt == null && (ask.verb !== "disable" || x.disabledAt == null))) { m.confirming = null; m.held = null; }
       },
       actions,
+      /** a person arriving starts in the add form's Name (issue 887); none while the state is unread, none read-only */
+      arrive() {
+        const state = ctx.read(STATE)?.body;
+        if (state === undefined || state === null) return undefined;
+        return renderAddUser(state) === "" ? null : "user-name";
+      },
       view() {
         // while From… asks, the list as it opened (`held`): its form is never rewritten under what is being typed
         const h = m.held !== null && askOf(m.confirming)?.verb === "from" ? m.held : null;

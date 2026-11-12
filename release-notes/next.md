@@ -5,6 +5,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **Every example in a box on the web page now starts with "e.g."**: the Tables and Queries search boxes say
   `e.g. orders`, Queries' since `e.g. 2h`, and a new user's name and where it connects from `e.g. metabase` and
   `e.g. 192.0.2.0/24, 2001:db8::/32`, so an example is never taken for a value already filled in.
+- **On the web page's Users, Connect comes first and the cursor starts in the new user's Name.** The page reads
+  Connect, then the Add a user form, then the users; arriving on it (from the sidebar or a link) puts the cursor in
+  Name, ready to type, except on a touch screen, on a read-only page, or when you have already clicked into something.
 
 ## What was wrong and is now right
 
