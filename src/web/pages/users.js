@@ -25,9 +25,10 @@ export function lastUsedText(u, lastUsedNote, requestLogDays, now = Date.now()) 
   return `not used in the last ${requestLogDays ?? "?"} days`;
 }
 
-/** What a Disable does, as `mason user disable` says it (src/cli/user.ts `disableEffect`, held equal by the tests). */
-export const disableEffect = (name) =>
-  `It connects no more until mason user enable ${name}, with the same password, and the sessions it holds end at their next statement.`;
+/** What a Disable does (`mason user disable`'s facts, src/cli/user.ts `disableEffect`, in the page's words: the page's
+ *  way back is its Enable, where the CLI names mason user enable). */
+export const disableEffect = () =>
+  "It can't connect until you enable it again, with the same password. Its open sessions end at their next query.";
 
 /** A disabled user's state, as `mason user list` says it (src/cli/user.ts `disabledText`, held equal by the tests). */
 export const disabledText = (disabledAt) => `Disabled ${stamp(disabledAt)} UTC`;
@@ -97,8 +98,8 @@ export const attributesText = (a) => Object.entries(a).map(([k, v]) => `${k}=${t
 export function renderUsers(list, confirming = null, now = Date.now(), refused = null, roles = null, readOnly = null) {
   const users = [...list.users.filter((u) => u.removedAt == null), ...list.users.filter((u) => u.removedAt != null)];
   const why = readOnlyLine("Users are not added, changed, disabled or removed", readOnly);
-  if (!users.length) return why + empty("No users yet", readOnly !== null ? `A user is the name and password psql, a BI tool or your app connects with, as ${code("mason user add <name>")} adds one.`
-    : `A user is the name and password psql, a BI tool or your app connects with. Add one above, as ${code("mason user add <name>")} does: its URL, password included, is shown once.`);
+  if (!users.length) return why + empty("No users yet", readOnly !== null ? `A user is the name and password that psql, a BI tool or your app connects with. Users are added from the command line here: ${code("mason user add <name>")}.`
+    : "A user is the name and password that psql, a BI tool or your app connects with. Add one above. Its URL, with the password, is shown only once.");
   const note = (what, text) => text ? `<p class="dim">${esc(what)}: ${esc(text)}.</p>` : "";
   const broken = roles && roles.problem != null ? roles : null;
   const brokenNote = broken ? `<p class="warn">${esc(`${broken.file ?? "mason/roles.yml"} cannot be read as it is now, so every statement of a user held to it is refused: ${broken.problem}`)}</p>` : "";
@@ -113,13 +114,13 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
     const disabled = active && u.disabledAt != null;
     const asking = active && ask?.name === u.name ? ask.verb : null;
     const anchor = actId("users", u.name);
-    if (asking === "remove") pops.push(pop(anchor, `<p class="confirm">Remove ${esc(u.name)}? It connects no more, and the sessions it holds end at their next statement.</p>` +
+    if (asking === "remove") pops.push(pop(anchor, `<p class="confirm">Remove ${esc(u.name)}? It can no longer connect, and its open sessions end at their next query.</p>` +
       `<p class="pop-actions">${button(`Remove ${u.name}`, { confirmRemove: u.name }, "danger small")} ${button("Cancel", { cancelRemove: "", popClose: "" }, "small")}</p>`, { kind: "dialog", label: `Remove ${u.name}?` }));
-    else if (asking === "disable") pops.push(pop(anchor, `<p class="confirm">Disable ${esc(u.name)}? ${esc(disableEffect(u.name))}</p>` +
+    else if (asking === "disable") pops.push(pop(anchor, `<p class="confirm">Disable ${esc(u.name)}? ${esc(disableEffect())}</p>` +
       `<p class="pop-actions">${button(`Disable ${u.name}`, { confirmDisable: u.name }, "danger small")} ${button("Cancel", { cancelRemove: "", popClose: "" }, "small")}</p>`, { kind: "dialog", label: `Disable ${u.name}?` }));
     // the form's first input is its choice (a dialog's first box takes the focus): the user it changes is last, hidden
     else if (asking === "from") pops.push(pop(anchor, `<form id="user-from" class="from-form" autocomplete="off">` +
-      `<p class="ask-from">Where ${esc(u.name)} connects from, as ${code(`mason user from ${u.name}`)} sets it: the sessions it holds from another address end at their next statement.</p>` +
+      `<p class="ask-from">Choose where ${esc(u.name)} can connect from. If you limit it, open sessions from other addresses end at their next query.</p>` +
       connectsChoice("user-from", u.from ?? null) +
       `<p class="pop-actions"><button type="submit" class="primary small">Change ${esc(u.name)}</button> ${button("Cancel", { cancelRemove: "", popClose: "" }, "small")}</p>` +
       `<input type="hidden" name="user" value="${esc(u.name)}"></form>`, { kind: "dialog", label: `Where ${u.name} connects from` }));
@@ -127,11 +128,11 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
     return `<tr${active ? "" : ` class="removed"`}><th scope="row"><code class="name" title="${esc(u.name)}">${esc(u.name)}</code> <span class="dim">id ${esc(u.id)}</span></th>` +
       // the role it reads as (src/cli/roles.ts userRole): its own (mason user add --role) — one the roles file does not name,
       // said — or the file's default; none under a file with no default reads nothing, said; no roles file, every table
-      `<td>${broken ? `<span class="warn">refused: the roles file cannot be read</span>` : u.readsNothing === true ? `<span class="warn">no role, and the roles file names no default: its statements are refused</span>`
+      `<td>${broken ? `<span class="warn">refused: the roles file can't be read</span>` : u.readsNothing === true ? `<span class="warn">no role, and the roles file has no default: its queries are refused</span>`
         : u.role === undefined ? `<span class="dim">every table</span>`
         : `${code(u.role)}${u.roleFrom === "default" ? ` <span class="dim">(default)</span>` : ""}${u.attributes ? ` <span class="dim">${esc(attributesText(u.attributes))}</span>` : ""}` +
-          `${u.roleKnown === false ? ` <span class="warn">not in the roles file: its statements are refused</span>` : ""}` +
-          `${u.missingAttributes ? ` <span class="warn">${esc(`no value for ${u.missingAttributes.join(", ")}: its statements are refused`)}</span>` : ""}`}` +
+          `${u.roleKnown === false ? ` <span class="warn">not in the roles file: its queries are refused</span>` : ""}` +
+          `${u.missingAttributes ? ` <span class="warn">${esc(`no value for ${u.missingAttributes.join(", ")}: its queries are refused`)}</span>` : ""}`}` +
       // where it connects from, a line of its own under what it reads (mason user list's `from …`; none said there: any
       // address), as the user's id is under its name — so a row stays two lines, a Disable moves no row, and the table
       // keeps its width: no column of its own. Cut by the column, its whole the title; where the page may change it, the
@@ -139,10 +140,10 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
       `${!active ? "" : readOnly !== null ? `<span class="from-line" title="${esc(fromText(u.from))}">${esc(fromText(u.from))}</span>`
         : button(fromText(u.from), asking === "from" ? {} : { from: u.name }, "from-line", { disabled: asking === "from", expanded: asking === "from", title: `${fromText(u.from)}: change where ${u.name} connects from` })}</td>` +
       `<td>${!active ? status("unknown", `Removed ${stamp(u.removedAt)} UTC`) : disabled ? status("warn", disabledText(u.disabledAt)) : status("ok", "Active")}` +
-      `${active && !disabled && !u.live ? ` <span class="warn">does not connect: the API key was rotated since it was added</span>` : ""}</td>` +
+      `${active && !disabled && !u.live ? ` <span class="warn">can't connect: the API key changed after it was added</span>` : ""}</td>` +
       `<td class="mono">${esc(stamp(u.addedAt))} UTC</td><td class="num">${lastCell}</td>` +
       // Queries: its statements of the last 24 hours on Observability › Queries (a removed user's too: its past)
-      `<td class="act" id="${esc(anchor)}"><a class="btn small" href="${esc(userQueriesHref(u.name))}" title="the statements ${esc(u.name)} sent in the last 24 hours">Queries</a>${!active || readOnly !== null ? "" : ` ${toggle(u, disabled, asking === "disable")} ${asking === "remove" ? button("Remove", {}, "danger small", { disabled: true, expanded: true })
+      `<td class="act" id="${esc(anchor)}"><a class="btn small" href="${esc(userQueriesHref(u.name))}" title="the queries ${esc(u.name)} sent in the last 24 hours">Queries</a>${!active || readOnly !== null ? "" : ` ${toggle(u, disabled, asking === "disable")} ${asking === "remove" ? button("Remove", {}, "danger small", { disabled: true, expanded: true })
         : button("Remove", { remove: u.name }, "danger small")}`}</td></tr>`;
   }).join("")}</tbody></table>`) + pops.join("") + note("Last used", list.lastUsedNote);
 }
@@ -161,7 +162,7 @@ export function renderUsersConnect(pg, served = false) {
   return `<div class="connect"><p class="connect-title">Connect</p>` +
     `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v)}</dd>`).join("")}</dl>` +
     serverHostNote(pg, served) +
-    `<p class="tip">A user's name and password go in place of ${code("<user>")} and ${code("<password>")}. The password is shown once, when the user is added: lost, remove the user and add it again.</p></div>`;
+    `<p class="tip"><span>Put a user's name and password in place of ${code("<user>")} and ${code("<password>")}. The password is shown only once, when you add the user. If it's lost, remove the user and add it again.</span></p></div>`;
 }
 
 /**
@@ -187,7 +188,7 @@ export function renderAddUser(state) {
 function roleChoice(r) {
   if (!r || r.file == null || r.problem != null || !Array.isArray(r.roles) || r.roles.length === 0) return "";
   const dflt = r.default != null && r.roles.includes(r.default) ? r.default : null;
-  const first = dflt !== null ? `<option value="" selected>${esc(dflt)} (default)</option>` : `<option value="" selected>no role: its statements are refused</option>`;
+  const first = dflt !== null ? `<option value="" selected>${esc(dflt)} (default)</option>` : `<option value="" selected>no role (its queries are refused)</option>`;
   return ` <span class="role-field"><label for="user-role">Role</label> <select id="user-role" name="role">${first}` +
     `${r.roles.filter((n) => n !== dflt).map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("")}</select></span> `;
 }
@@ -213,10 +214,10 @@ function toggle(u, disabled, asking) {
 export function renderAdded(a) {
   const rows = [["URL", a.url, "added-url"], ["User", a.user, "added-user"], ["Password", a.password, "added-password"]]
     .filter(([, v]) => v !== undefined && v !== null);
-  return `<div class="added" role="status"><p class="headline">The user ${esc(a.user)} added: its password is shown this once ${badge("Shown once", "warn")}</p>` +
+  return `<div class="added" role="status"><p class="headline">${esc(a.user)} is added. Its password is shown only this once. ${badge("Shown once", "warn")}</p>` +
     `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v)}</dd>`).join("")}</dl>` +
-    `<p class="tip">Paste it into the tool now: Mason keeps no copy of the password, and this page will not show it again. Lost, remove the user and add it again.</p>` +
-    `<p class="tip">Connect your tool: each statement it sends shows on <a href="#observability/queries">Observability › Queries</a>.</p>` +
+    `<p class="tip">Paste it into your tool now. Mason keeps no copy of the password, and this page won't show it again. If it's lost, remove the user and add it again.</p>` +
+    `<p class="tip">Then connect your tool. Each query it sends shows on <a href="#observability/queries">Queries</a>.</p>` +
     `${button("I have copied it", { dismissAdded: "" }, "primary")}</div>`;
 }
 
@@ -225,7 +226,8 @@ export const page = {
   title: "Users",
   create(ctx) {
     // held: what From… opened over ({ list, now, state }), so a poll never rewrites its form under what is being typed
-    const m = { actionFailure: null, added: null, confirming: null, refused: null, held: null };
+    // reveal: the part to scroll into view after the next write (a new user's password card), once
+    const m = { actionFailure: null, added: null, confirming: null, refused: null, held: null, reveal: null };
     const users = () => ctx.read(USERS)?.body ?? null;
     const actions = {
       /** `role`: the Role choice's, sent as mason user add --role; "" or none: no role, as with no --role. `from`: the
@@ -235,6 +237,7 @@ export const page = {
         const r = await ctx.ask(USERS_POST, json("POST", { name, ...(role ? { role } : {}), ...(from !== null ? { from } : {}) }));
         if ("failure" in r) { m.actionFailure = r.failure; return false; }
         m.added = r.body;
+        m.reveal = "added";
         await ctx.refresh([USERS]);
         return true;
       },
@@ -294,6 +297,8 @@ export const page = {
         if (ask !== null && u !== null && !u.users.some((x) => x.name === ask.name && x.removedAt == null && (ask.verb !== "disable" || x.disabledAt == null))) { m.confirming = null; m.held = null; }
       },
       actions,
+      /** after an add, its password card scrolled into view once: on a phone it is written below the screen's edge */
+      reveal() { const id = m.reveal; m.reveal = null; return id; },
       /** a person arriving starts in the add form's Name (issue 887); none while the state is unread, none read-only */
       arrive() {
         const state = ctx.read(STATE)?.body;
