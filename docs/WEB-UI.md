@@ -175,22 +175,23 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   the card's right. A header cell's class (`added`, `status`, `act`, …) is styled only as a cell (`th.added`), never by a
   box's rule of the same name: the New user added card is `.user-added`, so its white and its left border never reach
   the Added header (`tests/web-page.test.ts`, every header class of Users and Tables, and the pinned rule on `.act` alone).
-- **Observability › Queries** (`#observability/queries`): the request log, and only that — who is connected, what runs
-  and the range's numbers are on Usage.
-- **Queries**, the request log empty and unfiltered: its sentence, what the log does not list, and one quiet line,
-  "**Create a user** to connect your first tool", the words a link to the Users page (`#users`), where the URL is; none
-  where the page makes no user (`pageReadOnly`), nor once a filter or an older page is shown. No Connect box.
+- **Observability › Queries** (`#observability/queries`): the request log, and only that, under one sentence: "Every
+  query sent to Mason, newest first." The time range is its only window: no Since box (a `since` in an old hash is
+  ignored, the page opening over the range).
+- **Queries**, the request log empty: one line, "No queries in the last 15 minutes." (the range's span; "No query passes
+  the filters in …" under a filter). Unfiltered, one quiet line under it, "**Create a user** to connect your first
+  tool", the words a link to the Users page (`#users`), where the URL is; none where the page makes no user
+  (`pageReadOnly`), nor once a filter or an older page is shown. No Connect box.
 - **Queries**, the request log: newest first, with a status dot and word per row as `mason logs --requests` says it: Completed,
   Refused (a statement Mason answers as designed, as a Postgres would refuse it: unsupported SQL, a missing relation),
-  Failed (Mason's or the machine's fault) or Cancelled. Filter by status (each, or Refused or failed), **Slow (1 s or more)**, a
-  piece of the statement's text (**Statement has**), since (`2h`, `7d`, or a date: used instead of the range), user and
-  client; **Older** pages back and **Newest** returns, 40 a page. **Started**, **Duration** and **Rows** sort the page
+  Failed (Mason's or the machine's fault) or Cancelled. Filter by status (each, or Refused or failed), user, client, a piece of the
+  statement's text (**Statement has**) and **Slow (1 s or more)**, with **Filter** and **Clear**: one row where they fit (a
+  1280 px window), wrapping by field below that; **Older** pages back and **Newest** returns, 40 a page. **Started**, **Duration** and **Rows** sort the page
   shown (said under it: the pages follow the log's order by start). A statement is one or two lines in its row; a row
   opens in place to its whole id, times, bytes sent, statement and error — the first 16 KiB of each, said when cut.
   A statement that reads no synced table (`select 1`, `select now()`, SET, SHOW, a BI tool's catalog queries) is
   answered without the copy and **not listed** — the protocol's chatter, hundreds a connection from a BI tool — and the
-  page says so, as `mason logs --requests` does when it lists none; while nothing is listed, Connect offers a first
-  statement that is (`select count(*) from <a synced table>;`).
+  page says so once, in a small quiet line under the list (empty or not), as `mason logs --requests` says it.
 - **Observability › Usage** (`#observability/usage`): every part follows the range. Cards: under Now, the sessions
   connected and the statements running; under any other range, the clients that sent statements in it; then the
   range's statements, failed, p95 and what was sent (bytes, and rows under it), each with a sparkline — the statement

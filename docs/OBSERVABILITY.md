@@ -99,8 +99,8 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
 - **Observability › Queries** (`#observability/queries`): the request log as a table, newest first — the first 8
   characters of the id, started, duration, status, user, client, rows, the statement (two lines at most), its error's
   first line — with a per-row details (the whole id, ended, bytes sent, the statement and error, the first 16 KiB of
-  each), filtered by status, slow (1 s or more), the statement's text, time (the range unless Since says), user and
-  client (Usage's rows lead here with them), paged by **Older**, its page sorted by Started, Duration or Rows. Rows
+  each), filtered by status, slow (1 s or more), the statement's text, user and
+  client (Usage's rows lead here with them), over the range alone, paged by **Older**, its page sorted by Started, Duration or Rows. Rows
   scanned is not a column: decide later, it may add cost to every statement. Reads `/api/requests` (under Now 5 s on
   the newest page, 30 s while a search is set — said under the log; once for any other range; never on an older page),
   `/api/state` (30 s, for Connect while the log is empty).

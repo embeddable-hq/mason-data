@@ -1076,7 +1076,7 @@ test("every link of Mason's own into a replaced view goes to the host's page: th
   const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
   const main = html.split("<main>")[1]!;
   const statics = hashHrefs(main);
-  assert.ok(statics.includes("#observability/usage") && statics.includes("#observability/queries"));
+  assert.ok(statics.includes("#observability/queries"), "Usage's lead links to Queries (Queries' own lead is one sentence, no link)");
   for (const h of statics) assert.notEqual(fn<[string, unknown], string | null>("elsewhere")(h, nav), null, `${h}: index.html's link follows a replaced view`);
 });
 
@@ -1850,7 +1850,7 @@ test("every placeholder on the page starts with 'e.g. ': an example is never rea
     const code = fs.readFileSync(path.join(WEB, f), "utf8").replace(/<!--[\s\S]*?-->|\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
     for (const m of code.matchAll(placeholder)) found.push(`${f}: ${m[2]!}`);
   }
-  assert.ok(found.length >= 5, `the page's placeholders are found (${found.length})`);
+  assert.ok(found.length >= 4, `the page's placeholders are found (${found.length})`);
   assert.deepEqual(found.filter((p) => !/^[^:]+: e\.g\. \S/.test(p)), [], "each placeholder says it is an example");
 });
 
@@ -2599,7 +2599,7 @@ test("the request log: a row each, newest first, in the commands' words — held
   const html = renderRequests({ requests: REQUESTS, keptDays: 7, before: "2026-10-28T09:00:00.000Z~5" }, { now: Date.parse("2026-10-28T09:05:00.000Z") });
   const text = textOf(html);
   assert.match(text, /^Status Query id Started ↓ Duration ↕ User Client Rows ↕ Statement /, "no Ended or Bytes column: they are in the row's details; Started, Duration and Rows sort, the start newest first");
-  assert.match(text, /Cancelled r-new 4 min ago 90,000 ms metabase \(no application_name\) SELECT pg_sleep\(100\) \+ canceling statement due to user request Completed r-old 5 min ago 1,234 ms ana psql 1 SELECT count\(\*\) FROM orders \+ Older$/);
+  assert.match(text, /Cancelled r-new 4 min ago 90,000 ms metabase \(no application_name\) SELECT pg_sleep\(100\) \+ canceling statement due to user request Completed r-old 5 min ago 1,234 ms ana psql 1 SELECT count\(\*\) FROM orders \+ A statement that reads no synced table \(select 1, SET, SHOW, a BI tool's catalog queries\) is answered but not listed\. Older$/);
   assert.equal([...html.matchAll(/<details data-open="request:r-(new|old)"><summary>r-(new|old)<\/summary><\/details>/g)].length, 2, "a details per row, closed, keyed by its request, its id the toggle");
   assert.ok(!/<details[^>]* open/.test(html) && !html.includes("Bytes sent"), "closed: the row's details are not written");
   // the status is a dot AND the word, from the ledger's outcome as mason logs --requests says it: completed ok, refused
@@ -2621,7 +2621,7 @@ test("the request log: a row each, newest first, in the commands' words — held
   assert.match(renderRequests({ requests: [REQUESTS[0]], keptDays: 7, before: null }, { now: Date.parse("2026-10-28T09:05:00.000Z") }), /<time [^>]*>5 min ago<\/time>/);
   // opened: the expanded row holds the whole id, when it started and ended, the bytes, the whole statement and error
   const opened = textOf(renderRequests({ requests: REQUESTS, keptDays: 7, before: null }, { isOpen: (k: string) => k === "request:r-old" }));
-  assert.match(opened, /Completed r-old .* SELECT count\(\*\) FROM orders − Query id r-old Started \(UTC\) 2026-10-28 09:00:00\.000 Ended \(UTC\) 2026-10-28 09:00:01\.234 Bytes sent 2\.0 KiB SELECT count\(\*\) FROM orders$/);
+  assert.match(opened, /Completed r-old .* SELECT count\(\*\) FROM orders − Query id r-old Started \(UTC\) 2026-10-28 09:00:00\.000 Ended \(UTC\) 2026-10-28 09:00:01\.234 Bytes sent 2\.0 KiB SELECT count\(\*\) FROM orders A statement that reads no synced table .* listed\.$/);
   assert.ok(!/Query id r-new/.test(opened), "only the one opened");
   // the id is its first 8 characters, the whole one its title and in the details
   const long = renderRequests({ requests: [{ ...REQUESTS[0], requestId: "0b9e5c1e-0000-4000-8000-000000000001", query: "SELECT\n 1", message: "boom\nline 2", sqlstate: "XX000" }], keptDays: 7, before: null });
@@ -2650,24 +2650,30 @@ test("the request log: a row each, newest first, in the commands' words — held
     const words = [commands.statementMsText(r.durationMs), r.query, ...(r.message ? [r.message.split("\n")[0]!] : [])];
     for (const w of words) { assert.ok(line.includes(w), `the CLI's line says ${w}`); assert.ok(text.includes(w), "and so does the page"); }
   }
-  assert.match(textOf(renderRequests({ requests: [failedRequest], keptDays: 7, before: null }, { paged: true })), /Refused .* relation "nope" does not exist Newest$/);
+  assert.match(textOf(renderRequests({ requests: [failedRequest], keptDays: 7, before: null }, { paged: true })), /Refused .* relation "nope" does not exist A statement that reads no synced table .* listed\. Newest$/);
   assert.match(renderRequests({ requests: [failedRequest], keptDays: 7, before: null }, { paged: true }), /<div class="paging"><button type="button" data-newest>Newest<\/button><\/div>/);
-  assert.match(renderRequests({ requests: [], keptDays: 7, before: null }), /^<p class="empty">No request in the last 7 days \(MASON_HISTORY_DAYS\)\.<\/p><p class="dim unlisted">A statement that reads no synced table /,
+  assert.match(renderRequests({ requests: [], keptDays: 7, before: null }), /^<p class="empty">No queries in the last 7 days\.<\/p><p class="dim unlisted">A statement that reads no synced table /,
     "nothing listed and nothing filtered: what the log does not list (a select 1 typed to test the connection), as mason logs --requests says it");
-  assert.equal(textOf(renderRequests({ requests: [], keptDays: 1, before: null }, { filtered: true })), "No request that passes the filters in the last 1 day (MASON_HISTORY_DAYS).");
+  assert.equal(textOf(renderRequests({ requests: [], keptDays: 1, before: null }, { filtered: true, span: "the last 15 minutes" })), `No query passes the filters in the last 15 minutes. ${commands.UNLISTED_STATEMENTS}.`);
+  // what the log does not list, ONCE, a small quiet line under the list, empty or not (index.html says it no more)
+  for (const html of [renderRequests({ requests: REQUESTS, keptDays: 7, before: "C~1" }), renderRequests({ requests: [], keptDays: 7, before: null }, { firstTool: true }), renderRequests({ requests: [], keptDays: 7, before: null }, { filtered: true })])
+    assert.equal(html.split('<p class="dim unlisted">').length, 2, "once, under the list"), assert.equal(textOf(html).split(`${commands.UNLISTED_STATEMENTS}.`).length, 2);
+  assert.ok(!fs.readFileSync(path.join(WEB, "index.html"), "utf8").includes(commands.UNLISTED_STATEMENTS), "never twice: not in the lead too");
 });
 
-test("the request log's filters: each view has its own path — status as the server's outcomes, since, user, client", async () => {
+test("the request log's filters: each view has its own path — status as the server's outcomes, user, client; the range the only window", async () => {
   const run = fakeRun();
   const app = fn<[unknown], QueriesApp>("createApp")(run.fetch);
   app.show("queries");
   const asked = async (f: Record<string, string>) => { run.asked.length = 0; await app.filterRequests(f); return [...run.asked]; };
   run.answers.set("GET api/requests?outcome=ok&since=15m", answer({ requests: [], keptDays: 7, before: null }));
   run.answers.set("GET api/requests?outcome=ok&since=24h", answer({ requests: [], keptDays: 7, before: null }));
-  run.answers.set("GET api/requests?outcome=refused%2Cfailed&since=2h&user=ana&client=psql", answer({ requests: [failedRequest], keptDays: 7, before: null }));
+  run.answers.set("GET api/requests?outcome=refused%2Cfailed&since=15m&user=ana&client=psql", answer({ requests: [failedRequest], keptDays: 7, before: null }));
   assert.deepEqual(await asked({ status: "completed" }), ["GET api/requests?outcome=ok&since=15m"], "since is the range's, Now's 15 minutes unless the hash says");
-  assert.match(textOf(app.view()["request-log"]!), /^No request that passes the filters in the last 15 minutes \(the request log keeps 7 days: MASON_HISTORY_DAYS\)\./);
-  assert.deepEqual(await asked({ status: "refused-or-failed", since: "2h", user: "ana", client: "psql" }), ["GET api/requests?outcome=refused%2Cfailed&since=2h&user=ana&client=psql"]);
+  assert.match(textOf(app.view()["request-log"]!), /^No query passes the filters in the last 15 minutes\./);
+  // no Since box: a since given anyway (an older caller) is no window of its own, the range is
+  assert.deepEqual(await asked({ status: "refused-or-failed", since: "2h", user: "ana", client: "psql" }), ["GET api/requests?outcome=refused%2Cfailed&since=15m&user=ana&client=psql"]);
+  assert.doesNotMatch(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), /rq-since|name="since"|Since, when given/, "no Since box, no help for it");
   assert.match(textOf(app.view()["request-log"]!), / relation "nope"/);
   // Refused and Failed are offered apart, each the ledger's outcome of that name
   assert.deepEqual(await asked({ status: "refused" }), ["GET api/requests?outcome=refused&since=15m"]);
@@ -2677,7 +2683,17 @@ test("the request log's filters: each view has its own path — status as the se
   // a range in the hash: its since, the filters kept
   app.show("observability/queries?range=24h");
   assert.deepEqual(await asked({ status: "completed" }), ["GET api/requests?outcome=ok&since=24h"]);
-  assert.match(textOf(app.view()["request-log"]!), /^No request that passes the filters in the last 24 hours /);
+  assert.match(textOf(app.view()["request-log"]!), /^No query passes the filters in the last 24 hours\./);
+  // an old bookmark carrying a since: the page opens, the range its window
+  run.answers.set("GET api/requests?since=15m", answer({ requests: [], keptDays: 7, before: null }));
+  await app.filterRequests({});
+  app.show("observability/queries?since=2h");
+  run.asked.length = 0; await app.poll();
+  assert.ok(run.asked.includes("GET api/requests?since=15m"), run.asked.join("\n"));
+  assert.match(textOf(app.view()["request-log"]!), /^No queries in the last 15 minutes\./);
+  // the filters on one row where they fit: User and Client narrower, Statement has taking the rest; a phone's rules as before
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
+  assert.match(css, /@media \(min-width: 641px\) \{\s*form#request-filters \.field input:not\(\[type="search"\]\) \{ width: 9em; \}\s*form#request-filters \.field\.grow \{ flex: 1 1 10em; \}/);
 });
 
 test("the app: Usage's Cancel asks first; the confirm posts { session, statement } and reads the statements again; a 409 renders as its Failure", async () => {
@@ -2771,12 +2787,12 @@ test("the app: a search is read every 30 s, not 5 (it reads every statement's te
 
 test("the app: a filter the server refuses renders its Failure, not a table: the page validates nothing", async () => {
   const run = fakeRun();
-  const failure = { code: "usage", message: "since \"yesterday\" is not a time", fix: "an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone (2026-10-28, 2026-10-28T09:00:00Z)" };
-  run.answers.set("GET api/requests?since=yesterday", answer({ error: failure.message, failure }, 400));
+  const failure = { code: "usage", message: "search is at most 200 characters", fix: "a shorter piece of the statement" };
+  run.answers.set(`GET api/requests?since=15m&search=${"x".repeat(201)}`, answer({ error: failure.message, failure }, 400));
   const app = fn<[unknown], QueriesApp>("createApp")(run.fetch);
   app.show("queries");
-  await app.filterRequests({ since: "yesterday" });
-  assert.equal(textOf(app.view()["request-log"]!), `✗ since "yesterday" is not a time fix an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone (2026-10-28, 2026-10-28T09:00:00Z)`);
+  await app.filterRequests({ search: "x".repeat(201) });
+  assert.equal(textOf(app.view()["request-log"]!), "✗ search is at most 200 characters fix a shorter piece of the statement");
   assert.ok(!fs.readFileSync(path.join(WEB, "index.html"), "utf8").includes("pattern="), "no input mirrors a server rule");
 });
 
@@ -3833,7 +3849,7 @@ test("the shared range: each Observability view reads its span — the request l
   app.show("#observability/usage?range=7d"); t += 120_000; await app.poll();
   assert.match(textOf(app.view()["usage-kpis"]!), /Statements, last 7 days 1,204 /, "the week's cards are the week's window");
   app.show("#observability/queries?range=7d"); t += 120_000; await app.poll();
-  assert.match(textOf(app.view()["request-log"]!), /No request in the last 7 days \(the request log keeps 7 days/);
+  assert.match(textOf(app.view()["request-log"]!), /^No queries in the last 7 days\./);
   app.show("#observability/usage?range=1h"); await app.poll();
   assert.match(textOf(app.view()["usage-kpis"]!), /Statements, last hour 1,204 /, "the hour's cards say the hour, by name");
 });
@@ -3845,7 +3861,7 @@ test("Queries: Slow (1 s or more) and Statement has are the request log's slow a
   assert.match(html, /<input id="rq-search" name="search" type="search" maxlength="200"/);
   const requestsPath = fnOf<[Record<string, unknown>, string | null, string?], string>(queriesModule, "requestsPath");
   assert.equal(requestsPath({ status: "refused-or-failed", slow: true, search: "from orders", user: "ana" }, null, "1h"), "api/requests?outcome=refused%2Cfailed&since=1h&user=ana&slow=1&search=from+orders");
-  assert.equal(requestsPath({ since: "2026-10-28" }, "C~1", "1h"), "api/requests?since=2026-10-28&before=C%7E1", "a since of its own is used instead of the range");
+  assert.equal(requestsPath({ since: "2026-10-28" }, "C~1", "1h"), "api/requests?since=1h&before=C%7E1", "the range is the only window: a since of its own is not");
   const run = fakeRun();
   run.answers.set("GET api/requests?since=15m&slow=1", answer({ requests: [REQUESTS[0]], keptDays: 7, before: null }));
   run.answers.set("GET api/requests?outcome=refused%2Cfailed&since=15m", answer({ requests: [failedRequest], keptDays: 7, before: null }));
@@ -3878,7 +3894,7 @@ test("Queries: Slow (1 s or more) and Statement has are the request log's slow a
   run.asked.length = 0;
   await (app.pages.get("queries") as unknown as { submit(f: unknown): Promise<void> }).submit(submitted);
   assert.deepEqual(run.asked, ["GET api/requests?since=7d&slow=1&search=sum%28"]);
-  assert.match(textOf(app.view()["request-log"]!), /No request that passes the filters/);
+  assert.match(textOf(app.view()["request-log"]!), /No query passes the filters/);
   // the Overview's cards are links into the views that list what they count
   const html2 = renderStatusOf(FAILED);
   for (const [label, href] of [["Tables synced", "#tables?show=failed"], ["Rows", "#tables"], ["The synced data&#39;s file", "#observability/usage?range=24h"], ["Statements, last day", "#observability/queries?range=24h"], ["p95, last day", "#observability/queries?slow=1&amp;range=24h"],
@@ -3917,7 +3933,7 @@ test("sorting: the request log by started, duration or rows (the page shown, sai
   assert.deepEqual(ids(renderRequests({ ...page3, requests: [REQUESTS[0], page3.requests[2], REQUESTS[1]] })), ["r-new", "r-mid", "r-old"], "newest first: the page as the server gave it, the other way round");
   assert.deepEqual(ids(renderRequests(page3, { sort: { key: "duration", dir: "desc" } })), ["r-new", "r-old", "r-mid"]);
   assert.deepEqual(ids(renderRequests(page3, { sort: { key: "rows", dir: "desc" } })), ["r-mid", "r-old", "r-new"], "the cancelled one has no rows: last");
-  assert.match(textOf(renderRequests(page3, { sort: { key: "duration", dir: "asc" } })), /Sorted by duration, lowest first, within the 3 rows of this page: Older and Newest page by start time\. Older$/);
+  assert.match(textOf(renderRequests(page3, { sort: { key: "duration", dir: "asc" } })), /Sorted by duration, lowest first, within the 3 rows of this page: Older and Newest page by start time\. A statement that reads no synced table .* Older$/);
   assert.doesNotMatch(renderRequests(page3), /sort-note/, "newest first is the log's own order: nothing to say");
   // the header clicked in the app: the page's state, written again
   const run = fakeRun();
@@ -4331,11 +4347,10 @@ test("Queries, an empty request log: its sentence, what the log does not list, a
   const renderRequests = fn<[unknown, Record<string, unknown>], string>("renderRequests");
   const empty = { requests: [], keptDays: 7, before: null };
   const html = renderRequests(empty, { span: "the last 24 hours", firstTool: true });
-  assert.match(textOf(html), /^No request in the last 24 hours \(the request log keeps 7 days: MASON_HISTORY_DAYS\)\. A statement that reads no synced table \(select 1, SET, SHOW, a BI tool's catalog queries\) is answered but not listed\. Create a user to connect your first tool\.$/);
-  assert.match(html, /<p class="empty first-tool"><a href="#users">Create a user<\/a> to connect your first tool\.<\/p>$/, "one quiet line, its link to the Users page");
+  assert.match(textOf(html), /^No queries in the last 24 hours\. Create a user to connect your first tool\. A statement that reads no synced table \(select 1, SET, SHOW, a BI tool's catalog queries\) is answered but not listed\.$/);
+  assert.match(html, /<p class="empty first-tool"><a href="#users">Create a user<\/a> to connect your first tool\.<\/p><p class="dim unlisted">/, "one quiet line, its link to the Users page");
   assert.ok(!/class="connect|data-copy=|postgres:\/\//.test(html), "no Connect box, no URL");
   assert.equal((page as Record<string, unknown>).UNLISTED_STATEMENTS, commands.UNLISTED_STATEMENTS, "the page says what mason logs --requests says");
-  assert.ok(fs.readFileSync(path.join(WEB, "index.html"), "utf8").includes(`${commands.UNLISTED_STATEMENTS}.`), "and the request log's lead says it over a log that has rows");
   for (const o of [{ filtered: true }, { paged: true }, { firstTool: false }]) assert.ok(!renderRequests(empty, { span: "the last 24 hours", firstTool: true, ...o }).includes("first-tool"), JSON.stringify(o));
   assert.equal((page as Record<string, unknown>).renderConnect, undefined, "Connect your first tool is gone");
   // the app: the line from /api/state, under the empty log's sentence
@@ -4344,7 +4359,7 @@ test("Queries, an empty request log: its sentence, what the log does not list, a
   const app = fn<[unknown], App>("createApp")(run.fetch);
   app.show("queries");
   await app.poll();
-  assert.match(textOf(app.view()["request-log"]!), /^No request in the last 15 minutes .* Create a user to connect your first tool\.$/);
+  assert.match(textOf(app.view()["request-log"]!), /^No queries in the last 15 minutes\. Create a user to connect your first tool\. /);
   // the Overview: no Connect, nothing asked yet or after (the owner's, 2026-11-12: connecting is on Users)
   for (const queries of [NO_QUERIES, QUERIES, undefined]) for (const st of [RUNNING, COPYING, NONE]) {
     const overview = fn<[unknown, unknown?], string>("renderStatus")(st, { queries, now: NOW });

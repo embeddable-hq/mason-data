@@ -21,7 +21,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   place, and moves to its group the next time the list is laid out: when you open the page again, or change the search
   or the All / Added / Failed / Not added filter.
 - **Every example in a box on the web page now starts with "e.g."**: the Tables and Queries search boxes say
-  `e.g. orders`, Queries' since `e.g. 2h`, and a new user's name and where it connects from `e.g. metabase` and
+  `e.g. orders`, and a new user's name and where it connects from `e.g. metabase` and
   `e.g. 192.0.2.0/24, 2001:db8::/32`, so an example is never taken for a value already filled in.
 - **A user added on the web page's Users page shows only what is its own.** The card shown once is titled "New user
   added" and has the User, then the URL, Password and Database, each with Copy, "Shown once" beside the password's Copy, and
@@ -37,6 +37,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   like a BI tool or your app: add one below.", "No table added yet: add one from the list below, as `mason add
   <table>` does.", and the same on Queries, Usage and Sync events. Queries with no statement yet no longer shows the
   "Connect your first tool" box: one line, "Create a user to connect your first tool", leads to the Users page.
+- **Queries is shorter.** Its lead is one sentence, "Every query sent to Mason, newest first."; the time range is its
+  only window (the Since box and its help are gone; a bookmark that carried one opens over the range); the line on
+  what is not listed (select 1, SET, SHOW, a BI tool's catalog queries) is said once, small, under the list; an empty
+  log says "No queries in the last 15 minutes." (the range's span); and the filters are one row where the page is wide
+  enough. `mason logs --requests` is unchanged.
 - **Connects from is a dropdown** on the Users page (adding a user, and a user's From…): "anywhere" or "only these
   addresses", which shows the box for the addresses beside it. Nothing in the form moves when you change it, and what
   is sent is as before. The form (Name, Role, Connects from and Add a user) is one line where the page is wide enough,

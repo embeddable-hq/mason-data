@@ -3,7 +3,8 @@
  * the request log (`mason logs --requests`, GET /api/requests) and nothing else — who is connected, what runs and the
  * range's numbers are Usage's (src/web/pages/usage.js). A table (a status dot and word, each row expanding in place and
  * staying open across polls), newest first, filtered by status, slow (SLOW_MS or more), a piece of the statement's text,
- * since, user and client — since is the shared time range unless the filter names its own — and paged back by Older;
+ * user and client, over the shared time range (the hash's `range`, the only window: a `since` in an old hash is
+ * ignored) — and paged back by Older;
  * Started, Duration and Rows sort the page shown (the pages follow the log's order by start: a sort of the whole log
  * would need a cursor per order). Read every 5 s while the range is Now, once when another is chosen. A statement is one
  * or two lines in its cell, its title at most TITLE_MAX characters, and its expanded row the first STATEMENT_MAX of it.
@@ -66,19 +67,20 @@ function planHtml(r) {
  * started, duration or rows) orders the page shown, said under it when it is not the newest first. **Older** when the
  * page has an older one (`before`), **Newest** when the page shown is not the newest. `filtered`: the empty sentence
  * names the filters, as the command's does; `span` the range's words (the empty log's). `now` is the page's clock.
+ * Under the list, always, one small quiet line: what the log does not list (UNLISTED_STATEMENTS, as `mason logs
+ * --requests` says it), so a `select 1` typed to test a connection is not looked for in vain.
  * `firstTool`: an empty, unfiltered log adds one quiet line, Create a user (a link to the Users page) to connect your
  * first tool — false where the page makes no user (`usersReadOnly`).
  */
 export function renderRequests(page, { paged = false, filtered = false, isOpen = () => false, now = Date.now(), sort = NEWEST_FIRST, span = "", firstTool = false } = {}) {
   const older = page.before !== null && page.before !== undefined;
+  const unlisted = `<p class="dim unlisted">${esc(UNLISTED_STATEMENTS)}.</p>`;
   const nav = paged || older ? `<div class="paging">${paged ? `<button type="button" data-newest>Newest</button>` : ""}${older ? `<button type="button" data-older>Older</button>` : ""}</div>` : "";
   if (!page.requests.length) {
     const days = `${page.keptDays} day${page.keptDays === 1 ? "" : "s"}`;
-    // nothing asked yet (no filter, the newest page): where a tool's user is made, in a line
-    return empty(`No ${filtered ? "request that passes the filters" : "request"} ${span ? `in ${span} (the request log keeps ${days}: MASON_HISTORY_DAYS)` : `in the last ${days} (MASON_HISTORY_DAYS)`}.`) +
-      // a first statement looked for and not there: what the log does not list (a select 1 typed to test the connection)
-      (filtered || paged ? "" : `<p class="dim unlisted">${esc(UNLISTED_STATEMENTS)}.</p>` +
-        (firstTool ? `<p class="empty first-tool"><a href="${USERS_HASH}">Create a user</a> to connect your first tool.</p>` : "")) + nav;
+    return empty(`${filtered ? "No query passes the filters" : "No queries"} in ${span || `the last ${days}`}.`) +
+      // nothing asked yet (no filter, the newest page): where a tool's user is made, in a line
+      (filtered || paged || !firstTool ? "" : `<p class="empty first-tool"><a href="${USERS_HASH}">Create a user</a> to connect your first tool.</p>`) + unlisted + nav;
   }
   const newest = [...page.requests].reverse();
   const list = sort.key === "started" && sort.dir === "desc" ? newest : sortedBy(newest, REQUEST_SORTS[sort.key] ?? REQUEST_SORTS.started, sort.dir);
@@ -105,7 +107,7 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
   const sortNote = sort.key === "started" && sort.dir === "desc" ? ""
     : `<p class="dim sort-note">Sorted by ${esc(sort.key === "started" ? "start" : sort.key)}, ${sort.dir === "asc" ? "lowest" : "highest"} first, within the ${n(page.requests.length)} rows of this page: Older and Newest page by start time.</p>`;
   return `<div class="scroll"><table class="requests"><thead><tr>${REQUEST_COLUMNS.map(([c, key, cls]) => key ? sortTh("requests", key, c, sort, cls) : `<th scope="col">${c}</th>`).join("")}</tr></thead>` +
-    `<tbody>${rows}</tbody></table></div>${sortNote}${nav}`;
+    `<tbody>${rows}</tbody></table></div>${sortNote}${unlisted}${nav}`;
 }
 
 /** The status filter's choices as the server's `outcome` list (src/api/request-log.ts): Completed is ok, Refused the
@@ -114,14 +116,14 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
 const STATUS_OUTCOMES = { completed: "ok", refused: "refused", failed: "failed", "refused-or-failed": "refused,failed", cancelled: "cancelled" };
 
 /** The filters as they are before any is set. */
-const NO_FILTERS = { status: "", since: "", user: "", client: "", slow: false, search: "" };
+const NO_FILTERS = { status: "", user: "", client: "", slow: false, search: "" };
 
-/** The path of one view of the request log: its filters as the server reads them (it judges since and search), since the
- *  range's (`range`, a key of RANGES) unless the filter names its own, and the cursor of an older page. */
+/** The path of one view of the request log: its filters as the server reads them (it judges search), since the range's
+ *  (`range`, a key of RANGES: the only window), and the cursor of an older page. */
 export function requestsPath(filters, before, range = DEFAULT_RANGE) {
   const p = new URLSearchParams();
   if (STATUS_OUTCOMES[filters.status]) p.set("outcome", STATUS_OUTCOMES[filters.status]);
-  p.set("since", filters.since || (RANGES[range] ?? RANGES[DEFAULT_RANGE]).since);
+  p.set("since", (RANGES[range] ?? RANGES[DEFAULT_RANGE]).since);
   for (const k of ["user", "client"]) if (filters[k]) p.set(k, filters[k]);
   if (filters.slow) p.set("slow", "1");
   if (filters.search) p.set("search", filters.search);
@@ -144,13 +146,14 @@ export const page = {
     const showFilters = (doc) => {
       const form = doc?.getElementById?.("request-filters");
       if (!form?.elements) return;
-      for (const k of ["status", "since", "user", "client", "search"]) if (form.elements[k]) form.elements[k].value = m.filters[k];
+      for (const k of ["status", "user", "client", "search"]) if (form.elements[k]) form.elements[k].value = m.filters[k];
       if (form.elements.slow) form.elements.slow.checked = m.filters.slow;
     };
     const actions = {
       /** Show the requests that pass these filters, from the newest. */
       async filterRequests(filters) {
-        m.filters = { ...NO_FILTERS, ...filters };
+        // the filters the form has, and only those (a since of an older caller is no window: the range is)
+        m.filters = { ...NO_FILTERS, ...Object.fromEntries(Object.entries(filters).filter(([k]) => Object.hasOwn(NO_FILTERS, k))) };
         m.before = null;
         await ctx.refresh([path()]);
       },
@@ -179,7 +182,7 @@ export const page = {
         const s = ctx.read(STATE)?.body;
         return {
           "request-log": (log?.failure ? renderFailure(log.failure) : "") + (log?.body ? renderRequests(log.body, { paged: m.before !== null, filtered: filtered(), isOpen: opened.has, now: ctx.now().getTime(), sort: m.sort,
-            span: m.filters.since ? "" : (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span, firstTool: s != null && usersReadOnly(s) === null }) : "") +
+            span: (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span, firstTool: s != null && usersReadOnly(s) === null }) : "") +
             (log?.body && m.filters.search && m.before === null ? `<p class="dim refresh-note">${esc(SEARCH_NOTE)}</p>` : ""),
         };
       },
@@ -187,7 +190,7 @@ export const page = {
       submit(form) {
         if (form.id !== "request-filters") return null;
         const value = (k) => form.elements[k]?.value?.trim() ?? "";
-        return actions.filterRequests({ status: value("status"), since: value("since"), user: value("user"), client: value("client"), slow: form.elements.slow?.checked === true, search: value("search") });
+        return actions.filterRequests({ status: value("status"), user: value("user"), client: value("client"), slow: form.elements.slow?.checked === true, search: value("search") });
       },
       /** `#observability/queries?slow=1`, `?status=refused-or-failed`,`?user=metabase&client=Metabase` (where the Overview's cards
        *  and Usage's rows lead): those filters, from the newest, and the form's controls showing them. Nothing to do for a
