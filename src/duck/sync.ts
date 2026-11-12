@@ -504,8 +504,9 @@ export function chunkCeiling(pages: number, rows: number | null, outOfLine: numb
  * NO TABLE IS REFUSED BY ARITHMETIC (fix round 1 of PR 380): whether the engine can write a table's values is the
  * engine's to say, at the write (53200 at a chunk's read or commit, `readChunks`), never a formula over the source's
  * catalog. A refusal decided up front from the TOAST bytes in a row group, measured on a few rows of ~100 KB, refused
- * 140,000 rows of ~2.6 KB through a 128 MB limit that the base synced in one chunk. What stays open: a checkpoint
- * merging a table's small row groups of LARGE values that do not fit invalidates the database (issue 371).
+ * 140,000 rows of ~2.6 KB through a 128 MB limit that the base synced in one chunk. The small row groups a copy of
+ * large values leaves are never merged by a checkpoint (issue 371: such a merge that did not fit invalidated the
+ * database; src/duck/store.ts INSTANCE_SETTINGS `max_vacuum_tasks`).
  */
 
 /** WHY A TABLE IS NOT SYNCED IN THIS MEMORY (`readChunks`): its rows, the limit as set, and the ways out — in the

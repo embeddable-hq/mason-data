@@ -213,13 +213,86 @@ about 5.5 times while it read (an eighth of the limit leaves that room, and the 
 polls and the queries their share). The third row is a limit chunks cannot lift: a checkpoint merges a table's small
 row groups (one a chunk of a few rows) into one of up to 122,880 rows, holding their values at once, and when that does
 not fit DuckDB invalidates the database (issue 371; 400 MiB merged under 366 MiB of limit, failed under 244 and 122 MiB).
-It stays open there: a first version of this change refused, before reading, a table whose out-of-line bytes in one
+No checkpoint merges row groups since ("No checkpoint merges row groups", below). Before that, a first version of this change refused, before reading, a table whose out-of-line bytes in one
 row group times 0.75 passed the limit, and its review found that wrong (fix round 1 of PR 380): 140,000 rows of ~2.6 KB
 stored EXTERNAL (~1,030 heap pages, 365 MiB out of line) sync through a 128 MB limit, at the base in one chunk (4.9 s)
 and here in 37, and their checkpoint and reopen are fine. A formula over the source's catalog measured on one shape is
 no authority for what the engine can write; the engine's own failure at the write is.
 **Where.** `src/duck/sync.ts` (`chunkCeiling`, `readChunks`, `outOfLineBytes`), `src/duck/store.ts` (`pgErrorOf`:
 a commit out of memory is 53200); `tests/duck-copy-order.test.ts`, `tests/integration/duck-poll.itest.ts`.
+
+### No checkpoint merges row groups (issue 371; the owner, 2026-11-11)
+
+**Decision.** The instance runs with `max_vacuum_tasks = 0` (`INSTANCE_SETTINGS`, src/duck/store.ts), and every open
+reads it back where the checkpoint reads it and refuses to serve without it (`instanceSettingsProblem`). DuckDB's
+checkpoint never merges a table's row groups. It still drops a row group whose every row is deleted. The owner chose it
+on 2026-11-11 over keeping the merge, with its cost below. Mason's own compaction of a table is a later issue.
+
+**Why.** A real deployment met it on 2026-11-11, on v0.16.0: 2 vCPU, 8 GiB, a 50 GB volume, five tables added at once,
+one of ~154 M rows with two wide `jsonb` columns. A checkpoint during the first syncs failed with `failed to offload
+data block of size 256.0 KiB (5.3 GiB/5.3 GiB used)`. DuckDB then invalidated the database. Every other first sync failed
+after it, and the run stood broken until a restart by hand. The mechanism was measured on DuckDB 2.0.0 (`d54cbbe3df`)
+against a local Postgres 16, synthetic tables, `MASON_COPY_PARALLEL` 3:
+- A first sync of a wide table commits it as many small row groups: one or a few a chunk, since a chunk is held to
+  the memory (issue 96). A table of 700,000 rows with two ~1 KB `jsonb` (1.6 GB on the source) is 52 row groups of a
+  median 13,650 rows, where 122,880 is DuckDB's size.
+- While the readers' transactions are open, a checkpoint is a concurrent one, and does no vacuum. The first FULL
+  checkpoint after the read (in practice the one at the swap's commit, once the log passes 16 MiB) merges them all at
+  once (`ScheduleVacuumTasks`: up to 3 row groups into fewer, up to 100 tasks a table). The merge holds the values. In
+  the runs where it fired, at 128MB it spilled 1.4–1.7 GB as `IN_MEMORY_TABLE` blocks and rewrote the whole table: a
+  776 MiB file grew to 1,519 MiB.
+- That merge fails INSIDE the checkpoint, which invalidates the database. It fails at the spill's ceiling (the
+  deployment's error: the 5.3/5.3 GiB is the temp directory's ceiling, not the memory): with a ceiling of 256 MB in
+  force, the 700,000-row table ended `failed to offload data block … (244.0 MiB/244.1 MiB used)`. It also fails in the
+  memory alone, with no ceiling at all: 4,000 rows of ~100 KB stored EXTERNAL (30 heap pages, one a chunk) at 128MB
+  ended `failed to pin block of size 256.0 KiB (121.8 MiB/122.0 MiB used)`.
+- A restart resumed the same sync ("its swap is next") and met the same failure within 4 s, three times in a row. Issue
+  830's crash path said it each time, and the supervisor gave up after 5. Opened with `max_vacuum_tasks = 0`, the same
+  file synced on, and its checkpoint succeeded.
+- With 0, both shapes synced, nothing spilled, and the 700,000-row table's file was 784 MiB. One merge task a
+  checkpoint (`max_vacuum_tasks = 1`) was not enough: one merge of 100 KB values does not fit 128MB. No setting bounds a
+  row group's bytes, and fewer readers or smaller chunks do not help: the merge comes after the read, over what it left.
+
+**What it costs: two things grow until a compaction of Mason's own (a later issue).** Neither grows in Mason's own
+history tables, whose 7-day trim empties whole row groups.
+
+*Dead rows from updates by key.* A table written by key (the poll's and the stream's write: its keys deleted, its rows
+inserted) keeps its deleted rows' space and reads past them, until a whole row group is deleted. Measured offline: a table of 2 M
+rows, each round one transaction that deletes and inserts 5 % of its keys and adds 0.5 % new rows, then a checkpoint:
+
+| rounds, which keys | vacuum on: stored rows, file, a scan | vacuum off: stored rows, file, a scan |
+|---|---|---|
+| 20, random | 4.98 M, 110.5 MiB, 122 ms | 8.30 M, 143.8 MiB, 154 ms |
+| 20, the newest tenth | 4.46 M, 80.5 MiB, 116 ms | 7.55 M, 127.8 MiB, 144 ms |
+| 60, random | 5.72 M, 147.3 MiB, 163 ms | 16.9 M, 305.0 MiB, 282 ms |
+
+It grows with the churn: after 60 rounds (the table rewritten three times over), 2.1 times the file and 1.7 times a
+scan's time.
+
+*A row group per checkpoint, per table written.* After a checkpoint, the next append to a table starts a new row group,
+and with no merge it stays: each holds at least one 256 KiB block, however few its rows. Checkpoints come when the
+log passes 16 MiB and at every stop, so this grows with the number of checkpoints, not with the churn, and an
+append-only table that is polled or streamed gets it too (the review of PR 854 found it; an earlier version of this
+section said the opposite). The review measured:
+- a 1 M-row table, then 2,000 rounds of "insert 20 rows, CHECKPOINT": 2,009 row groups and 535.8 MiB, where main had 13
+  row groups and 30.8 MiB; a `count(*)` took 2.8 ms, where main took 1.2 ms;
+- 8 polled tables of 100,000 rows over 25 `mason start` / `mason stop` cycles: the file grew 50 MiB, where main's grew
+  1 MiB, with 26 row groups a table, where main had 2.
+
+*What an operator can do meanwhile.* A table synced again whole is compacted. With Mason running, run `mason remove
+<table>`, wait until `mason logs` shows `dropped <table>'s synced data: it is no longer added`, and only then run `mason
+add <table>`, which syncs it again from the source; the table is not served in between. The drop happens at the run's
+next pass (`pass`, src/duck/sync.ts), and only if the table is still removed then. An add made while Mason is stopped,
+or before the drop, cancels the remove, and nothing is compacted (the re-check of PR 854: running and idle, 32 row
+groups became 3; stopped, or with a pass held up, nothing dropped, still 32; no data lost either way). Measured offline: a table of 209 row groups (287 blocks) with half its rows deleted, dropped
+and written again whole, was 5 row groups (42 blocks). The freed blocks are reused, but the file does not shrink.
+`mason sync` of a table is a poll, which does not compact it.
+
+*EXPLAIN's "about N rows" counts the dead rows.* It is `duckdb_tables().estimated_size` (src/duck/store.ts), which
+counts deleted rows still stored: measured 1,004,000 for a table of 504,000 live rows. **Where.** `src/duck/store.ts` (`INSTANCE_SETTINGS`, `instanceSettingsProblem`, `DuckStore.open`);
+`tests/duck-checkpoint.test.ts` (the copy's write pattern offline, and a store invalidated by the merge opened again),
+`tests/integration/duck-poll.itest.ts` (five tables added together under 64MB, and the 100 KB shape under 128MB, each with a
+checkpoint the test forces).
 
 ### A copy beside the stream
 
@@ -3000,9 +3073,9 @@ growth and the engine's memory peak over what it held before):
 So the rows take at most 0.8 times the log, and every table written takes a block (256 KiB) however few its rows. A
 fix round guarded the checkpoint with that room (twice the log and a block for every table and 8 more on the disk; twice
 the log and an eighth of `store.memoryLimitBytes` in the engine's memory), and the same 100 KiB volume then skipped it and
-kept serving. What a guard cannot rule out: a checkpoint that fails for another reason (an I/O error; issue 371's merge
-of a first sync's out-of-line values, which "Large values out of line" records failing under a memory limit, and whose
-memory the log does not show) invalidates the database, earlier than DuckDB's own would have been taken.
+kept serving. What a guard cannot rule out: a checkpoint that fails for another reason (an I/O error; until issue 371's
+fix, a merge of a first sync's out-of-line values, which "Large values out of line" records failing under a memory limit,
+and whose memory the log does not show) invalidates the database, earlier than DuckDB's own would have been taken.
 
 **Decision (the owner, 2026-11-11).** The sampler never checkpoints. A checkpoint's failure is fatal to the instance —
 the review's near-full disk — and a size is not worth a new way to stop a run serving. A served copy with rows and no
