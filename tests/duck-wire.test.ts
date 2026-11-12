@@ -6174,6 +6174,8 @@ test("a grouped collated output ordered by number, name or expression is its col
 test("round 14: a wire statement's plan computes no generated table's outputs, and a deep statement is planned within the bound", async () => {
   const catalogDb = new PGlite();
   try {
+    // ready before its first raw message: an empty schema's DDL is no statement at all, which would have awaited it
+    await catalogDb.waitReady;
     for (const s of catalogDdl({ database: "app", tables: [] })) await catalogDb.exec(s);
     const catalog = (b: Uint8Array): Promise<Uint8Array> => catalogDb.execProtocolRaw(b);
     const plan = async (sql: string) => planDuck({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Parameters<typeof planDuck>[0]["stmt"],
@@ -6204,6 +6206,8 @@ const EXPECTED_244: Record<string, string> = { 0: "as Postgres: 42804", 1: "as P
 test("issue 244: a numeric read three times a level through every level is planned within the bound, and answered as Postgres", async () => {
   const catalogDb = new PGlite();
   try {
+    // ready before its first raw message: an empty schema's DDL is no statement at all, which would have awaited it
+    await catalogDb.waitReady;
     for (const s of catalogDdl({ database: "app", tables: [] })) await catalogDb.exec(s);
     const catalog = (b: Uint8Array): Promise<Uint8Array> => catalogDb.execProtocolRaw(b);
     const plan = async (sql: string) => planDuck({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Parameters<typeof planDuck>[0]["stmt"],
