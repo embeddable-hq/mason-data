@@ -602,7 +602,7 @@ test("a user just added: URL, User and Password alone — each with a Copy that 
     database: "shop", url, psql: psqlLine(url), host: "127.0.0.1", port: 5433, sslmode: "disable" });
   const text = textOf(html);
   // the user's own three fields, in one layout: each a label and its value with a Copy (issues 839, 876); the run's
-  // Database, Host, Port and SSL mode are on the Connect card below it, so not here
+  // Database, Host, Port and SSL mode are on the Connect card above it, so not here
   assert.match(text, /^The user metabase added: its password is shown this once Shown once URL postgres:\/\/metabase:mason_0123456789abcdef_a{32}@127\.0\.0\.1:5433\/shop Copy User metabase Copy Password mason_0123456789abcdef_a{32} Copy Paste it /);
   const fields: Array<[string, string, string]> = [["URL", "added-url", url], ["User", "added-user", "metabase"], ["Password", "added-password", password]];
   for (const [label, id, value] of fields) {
@@ -1004,7 +1004,7 @@ test("renderNav with the host's sidebar: a replaced item keeps its label and ico
   // the others as before, the range kept
   assert.ok(html.includes('href="#tables"') && html.includes('href="#observability/queries?range=24h"'));
   // the host's links: last, a group without a heading of Mason's, the link icon, the label escaped
-  const group = html.split('<li class="group host-links">')[1]!;
+  const group = html.split('<li class="group host-nav">')[1]!;
   assert.ok(group !== undefined && html.endsWith("</ul></li></ul>"));
   assert.match(group, /^<ul aria-label="Links"><li><a href="\/billing" rel="noreferrer"><span class="icon" aria-hidden="true"><svg\s+class="lucide lucide-link"/);
   assert.ok(group.includes('<span class="label">&lt;script&gt;alert(1)&lt;/script&gt; &amp; co</span>'), "a label is text, never markup");
@@ -1014,7 +1014,19 @@ test("renderNav with the host's sidebar: a replaced item keeps its label and ico
   const linksOnly = renderNav("status", "now", { items: {}, links: [{ label: "Billing", url: "/billing" }] });
   assert.ok(linksOnly.startsWith(renderNav("status", "now").slice(0, -"</ul>".length)));
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
-  assert.match(css, /\.nav \.host-links \{ padding-top: var\(--space-3\); border-top: 1px solid var\(--line\); \}/);
+  assert.match(css, /\.nav \.host-nav \{ padding-top: var\(--space-3\); border-top: 1px solid var\(--line\); \}/);
+  // laid out as every other group of the nav, by no rule of anything else on the page (issue 885: it shared the host
+  // view's `.host-links`, a wrapping flex row, which cut its rows short and moved its icons in the rail): each class
+  // the sidebar's group of links carries is selected only under `.nav`, or is the nav's own `group`
+  const classes = [...html.matchAll(/<li class="([^"]+)"><ul aria-label="Links">/g)].flatMap((m) => m[1]!.split(" "));
+  assert.ok(classes.includes("group") && classes.length > 1, `a group of the nav, with a class of its own: ${classes.join(" ")}`);
+  // each rule's selector: the text before its "{" (inside an @media too, whose own "{" comes first)
+  const rules = css.replace(/\/\*[\s\S]*?\*\//g, "").split("}").map((r) => r.split("{")).filter((p) => p.length > 1).map((p) => p[p.length - 2]!.trim());
+  for (const c of classes.filter((c) => c !== "group")) {
+    const selectors = rules.flatMap((r) => r.split(",").map((s) => s.trim())).filter((s) => new RegExp(`\\.${c}(?![\\w-])`).test(s));
+    assert.ok(selectors.length > 0, `.${c} is styled`);
+    for (const s of selectors) assert.match(s, /^\.nav /, `the sidebar's .${c} is selected only under .nav, not by "${s}"`);
+  }
 });
 
 test("every link of Mason's own into a replaced view goes to the host's page: the Overview's Create a user and Getting started, its cards and parts, Users' and Usage's Queries, Tables' sync events, Queries' and Usage's leads", async () => {
@@ -1476,7 +1488,7 @@ test("the users: From… asks where the user connects from in a popover beside i
   assert.equal(pops.length, 1);
   assert.equal(pops[0]!.anchor, "act-users-looker");
   assert.match(pops[0]!.html, /^<div class="pop ask" data-anchor="act-users-looker" role="dialog" aria-label="Where looker connects from">/);
-  assert.equal(textOf(pops[0]!.html), "Where looker connects from, as mason user from looker sets it: the sessions it holds from another address end at their next statement. Connects from From anywhere Only from these addresses Address ranges, comma-separated Change looker Cancel");
+  assert.equal(textOf(pops[0]!.html), "Where looker connects from, as mason user from looker sets it: the sessions it holds from another address end at their next statement. Connects from From anywhere Only from these addresses any address Address ranges, comma-separated Change looker Cancel");
   assert.match(pops[0]!.html, /<input type="radio" name="connects" value="only" checked>/, "opened at its ranges");
   assert.match(pops[0]!.html, /<input id="user-from-from" name="from"[^>]* value="192\.0\.2\.0\/24, 2001:db8::\/32">/);
   assert.match(pops[0]!.html, /<input type="hidden" name="user" value="looker"><\/form>/);
@@ -1494,7 +1506,9 @@ test("the users: From… asks where the user connects from in a popover beside i
 test("the add form: Connects from, in mason user add's words — From anywhere (the default, no from sent) or Only from these addresses, a comma list as --from takes it, the run judging each", async () => {
   const renderAddUser = fn<[unknown], string>("renderAddUser");
   const form = renderAddUser(CATALOG_STATE);
-  assert.match(textOf(form), /Name Connects from From anywhere Only from these addresses Address ranges, comma-separated Add a user$/);
+  assert.match(textOf(form), /Name Connects from From anywhere Only from these addresses any address Address ranges, comma-separated Add a user$/);
+  // the field's place is kept under from anywhere, saying rangesText(null) to the eye alone (issue 875; geometry: tests/web-radio-groups.test.ts)
+  assert.match(form, /<span class="ranges"><span class="ranges-any" aria-hidden="true">any address<\/span><span class="ranges-field">/);
   assert.match(form, /<input type="radio" name="connects" value="any" checked> From anywhere/, "from anywhere is the default, as mason user add with no --from");
   assert.match(form, /<input type="radio" name="connects" value="only"> Only from these addresses/);
   assert.match(form, /<input id="add-user-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e\.g\. 192\.0\.2\.0\/24, 2001:db8::\/32" value="">/);
@@ -1811,7 +1825,7 @@ async function until(cond: () => boolean, what = "the condition", ms = 5000): Pr
 /** The page in a fake browser: elements whose innerHTML reads back as a browser serialises it (a bare data-x attribute
  *  as data-x="", an apostrophe in text as itself), the listeners `start` adds, the interval it sets, and a FormData
  *  that reads a form's ticked boxes from the fake form. */
-function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "") {
+function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "", winExtra: Record<string, unknown> = {}) {
   // an element's attributes, and what holds the focus: a target `{ in: "sidebar" }` is inside the element of that id
   interface FakeEl { id: string; writes: number; html: string; hidden?: boolean; innerHTML: string; attrs: Map<string, string>; addEventListener: () => void;
     setAttribute(k: string, v: string): void; removeAttribute(k: string): void; contains(t: { in?: string } | null): boolean; focus(): void; querySelector(sel: string): FakeEl }
@@ -1838,11 +1852,52 @@ function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "") {
   let tick: (() => void) | null = null;
   class FormData { readonly ticked: Record<string, string[]>; constructor(form: { ticked: Record<string, string[]> }) { this.ticked = form.ticked; } getAll(name: string) { return this.ticked[name] ?? []; } }
   fn<[unknown, unknown], void>("start")(doc, { fetch: (p: string, i?: { method?: string; body?: string }) => run.fetch(p, i), FormData, location, addEventListener: (type: string, f: () => void) => { onWin.set(type, f); },
-    setInterval: (f: () => void) => { tick = f; return 1; }, setTimeout: (f: () => void, ms: number) => setTimeout(f, ms) });
+    setInterval: (f: () => void) => { tick = f; return 1; }, setTimeout: (f: () => void, ms: number) => setTimeout(f, ms), ...winExtra });
   /** the reader follows a link of the nav: the hash changes, and the browser says so */
   const go = (to: string) => { location.hash = to; onWin.get("hashchange")!(); };
   return { el, on, doc, go, replaced, tick: () => tick!(), settle: () => new Promise((r) => setTimeout(r, 20)) };
 }
+
+test("the Users page reads Connect, then the add form and what it answered, then the users (issue 887)", () => {
+  const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
+  const section = /<section id="page-users"[^>]*>([\s\S]*?)<\/section>/.exec(html)?.[1] ?? assert.fail("the Users section");
+  const order = [...section.matchAll(/<div id="([a-z-]+)"><\/div>/g)].map((m) => m[1]);
+  assert.deepEqual(order, ["users-connect", "add-user-box", "action", "added", "users"],
+    "Connect first; the card an add answered (added) and its refusal (action) beside the form; the list last");
+  assert.ok(section.indexOf('id="users-h"') < section.indexOf('id="users-connect"'), "under the title");
+});
+
+test("arriving on the Users page puts the cursor in the add form's Name — at the start and by a link followed; never at a poll's write, nor from what the person focused since, nor on a touch screen or read-only (issue 887)", async () => {
+  const focusedAfter = async (o: { hash?: string; to?: string; coarse?: boolean; state?: unknown; focusMeanwhile?: boolean } = {}) => {
+    const run = fakeRun();
+    if (o.state !== undefined) run.answers.set("GET api/state", () => new Response(JSON.stringify(o.state), { status: 200 }));
+    // the state held until released: the form, and so the Name, is written only once it is read
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => { release = r; });
+    const answer = run.answers.get("GET api/state")!;
+    run.answers.set("GET api/state", (async () => { await held; return answer(); }) as unknown as () => Response);
+    const { doc, go, tick, settle } = fakeBrowser(run, o.hash ?? "#users",
+      o.coarse ? { matchMedia: (q: string) => ({ matches: q === "(pointer: coarse)", addEventListener: () => undefined }) } : {});
+    const d = doc as unknown as { focused: string; activeElement?: unknown };
+    if (o.to !== undefined) { release(); await settle(); assert.equal(d.focused, "", "not on the page it started on"); go(o.to); }
+    if (o.focusMeanwhile) d.activeElement = { tagName: "INPUT", in: "elsewhere", dataset: {} };
+    release();
+    await settle();
+    const first = d.focused;
+    // a poll's write after that: the focus left where it is
+    d.focused = "";
+    tick(); await settle();
+    return { first, later: d.focused };
+  };
+  assert.deepEqual(await focusedAfter(), { first: "user-name", later: "" }, "opened at #users: the Name, once the form is written; a poll's write takes nothing");
+  assert.deepEqual(await focusedAfter({ hash: "#overview", to: "#users" }), { first: "user-name", later: "" }, "a link followed to it: the same");
+  assert.deepEqual(await focusedAfter({ focusMeanwhile: true }), { first: "", later: "" }, "the person focused something before the form was written: theirs");
+  assert.deepEqual(await focusedAfter({ coarse: true }), { first: "", later: "" }, "a touch screen: no keyboard opened over the page");
+  assert.deepEqual(await focusedAfter({ state: { ...COPYING, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" } }), { first: "", later: "" },
+    "read-only: no form, nothing focused");
+  // another page arrived on: nothing of the Users page's
+  assert.deepEqual(await focusedAfter({ hash: "#tables" }), { first: "", later: "" });
+});
 
 test("in the browser: the phone's menu — its button opens the nav as a sheet, focus on its first link; Escape, a click outside, the focus leaving or a link followed close it", async () => {
   const run = fakeRun();
@@ -1862,7 +1917,8 @@ test("in the browser: the phone's menu — its button opens the nav as a sheet, 
   const menuButton = { in: "sidebar", closest: () => ({ dataset: { menu: "" } }) };
   // closed, Escape does nothing
   press("Escape");
-  assert.equal(open(), false); assert.equal(doc.focused, "");
+  // arriving on the Users page: the cursor in its Name (issue 887); the menu's own focus below
+  assert.equal(open(), false); assert.equal(doc.focused, "user-name");
   await click(menuButton);
   assert.deepEqual([open(), expanded(), doc.focused], [true, "true", "nav a"], "open: the sheet, the button says so, the focus on the nav's first link");
   await click({ in: "sidebar", closest: () => null });
@@ -4318,7 +4374,7 @@ test("Users: ONE Connect panel for the run — host, port, database, sslmode and
   const rows = fn<[unknown, string | null, number], string>("renderUsers")({ users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: null,
     url: "postgresql://metabase@127.0.0.1:5433/shop" }], lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, NOW);
   assert.ok(!/postgresql:\/\/|data-copy|>URL</.test(rows), "no URL, and no Copy, in a user's row");
-  assert.match(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), /<div id="users-connect"><\/div>\s*<div id="users"><\/div>/, "the panel over the list");
+  assert.match(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), /<div id="users-connect"><\/div>\s*<div id="add-user-box"><\/div>/, "the panel over the form and the list (issue 887)");
 });
 
 test("the Overview's first-run checklist: running, a table copied, a user created, a first statement answered — each ○ with its one action; gone once all are done", async () => {

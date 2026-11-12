@@ -125,17 +125,27 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
 - **Tables**, a table not added: its rows, its key and why it cannot be added as it is. **Add** syncs every column, as
   `mason add <table>` does; **Columns…** opens a form to tick the columns to sync; **Name its key…** does the same for a
   table with no primary key.
-- **Users** (`#users`): a form that adds a user by name and, where `mason/roles.yml` names roles and reads as it is, a
+- **Users** (`#users`) reads, under its title: Connect, then the add form with what it answered beside it (the card of
+  the user added, or its refusal), then the users (issue 887). A person arriving on the page — its address opened, a
+  link of the sidebar or another followed — starts with the cursor in the form's **Name**, once the form is written;
+  never at a poll's write after that, never taken from what the person focused since they arrived, never on a touch
+  screen (`(pointer: coarse)`, where it would open the keyboard over the page), and not on a read-only page, which has
+  no form (a page's `arrive()`, src/web/app.js). The add form adds a user by name and, where `mason/roles.yml` names roles and reads as it is, a
   **Role** as `mason user add --role` (the roles from `/api/state` `roles`, `mason status --json`'s): the file's
   `default:` is chosen first, marked (default), and sends no role, so the user follows the default as one added with no
   `--role` does; with no default the first choice is no role. The run judges the role, and its refusal is shown. Then
   **Connects from**, in `mason user add --help`'s words: **From anywhere**, the default, sends no `from` (as `mason user
   add` with no `--from`), with no second question; **Only from these addresses** sends the ranges typed in one box,
-  comma-separated as `--from a,b` takes them (`192.0.2.0/24, 2001:db8::/32`), split at each comma and trimmed. The page
+  comma-separated as `--from a,b` takes them (`192.0.2.0/24, 2001:db8::/32`), split at each comma and trimmed. The box
+  keeps its place whichever is ticked, so a toggle moves nothing (issue 875): under From anywhere its place is a quiet
+  dashed slot saying "any address", the box itself hidden from Tab and from a screen reader. Its two choices are a
+  radio group as every one on the page is (`.radios`, src/web/app.css: Connects from here and in From…, a table's
+  Sync choice): one choice a line, every radio at one left edge with its words beside it; the add form lays the two in
+  one row only where its card has the room for the label, both and the box (800 px). The page
   never checks a range: the run reads each, and a refused one is shown as the run's refusal. `--set`
   attributes stay the command's. Its password is shown once, in a card of the user's own fields — URL, User and
   Password, each with **Copy**, laid out the same way (a field `mason user add --json` does not carry is not shown;
-  Database, Host, Port and SSL mode are the run's, on the Connect card below it) —
+  Database, Host, Port and SSL mode are the run's, on the Connect card above it) —
   with no psql line (the URL is the same thing, pasted after `psql`), and a link to Queries, where its statements will
   show; Mason keeps no copy, so it is never shown again.
 - **Users**, Connect: once for the run, where a tool connects — host, port, database and SSL mode, each with **Copy**,

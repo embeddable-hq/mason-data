@@ -49,6 +49,9 @@
  *                      answered (true) even when its state already says so, the shell writing it again
  *       charts?()      { <holder key>: spec }: the charts drawn in its holders after each write (src/web/charts.js; a
  *                      progressive addition: every number a chart draws is also text)
+ *       arrive?()      the id of the element a person arriving on the page starts in (a sidebar link or a link
+ *                      followed, never a poll's write): undefined while what decides it is unread, null for none
+ *                      (the shell focuses it once, `arriving` in `start`)
  *       route?(params, { doc })  the hash showed it with these parameters (`#tables?show=failed`: { show: "failed" }):
  *                      it takes the ones it knows into its state (and a control outside its parts, through `doc`)
  *       model?         its state, for the tests
@@ -198,7 +201,7 @@ export const renderNav = (shown, range = DEFAULT_RANGE, nav = null, hostView = n
     const pages = t.pages.map((id) => PAGES.find((p) => p.id === id));
     return `<li class="group"><p class="group-title" id="nav-${esc(t.id)}">${esc(t.title)}</p><ul aria-labelledby="nav-${esc(t.id)}">` +
       pages.map((p) => `<li>${navLink(p, shown, hashOf(p.id, { range }), replaced.get(p.id))}</li>`).join("") + `</ul></li>`;
-  }).join("")}${links.length ? `<li class="group host-links"><ul aria-label="Links">${links.map((l) => l.view !== undefined
+  }).join("")}${links.length ? `<li class="group host-nav"><ul aria-label="Links">${links.map((l) => l.view !== undefined
     ? `<li><a href="${esc(hostHash(l.n))}"${shown === HOST_PAGE && String(hostView) === String(l.n) ? ` aria-current="page"` : ""}>${icon("panel-top")}<span class="label">${esc(l.label)}</span></a></li>`
     : `<li><a href="${esc(l.url)}" rel="noreferrer">${icon("link")}<span class="label">${esc(l.label)}</span></a></li>`).join("")}</ul></li>` : ""}</ul>`;
 };
@@ -499,6 +502,24 @@ export function start(doc, win) {
     leave();
     if (charts !== null) void charts.mount(app.pages.get(app.model.shown).charts?.() ?? {});
     place();
+    arrived();
+  };
+  // ARRIVING ON A PAGE (issue 887): the element its `arrive()` names takes the focus once, at the first write that has
+  // it — the page's first, or the one after a link followed (a hashchange) — so a person types straight away; never at a
+  // poll's write after that, never from what the person focused or typed in since they arrived (the focus moved off
+  // what held it then), and never on a touch screen (`(pointer: coarse)`), where it would open the keyboard over the page
+  let arriving = null;
+  const arrive = () => { arriving = { page: app.model.shown, from: doc.activeElement ?? null }; };
+  const arrived = () => {
+    if (arriving === null) return;
+    if (arriving.page !== app.model.shown) { arriving = null; return; }
+    const id = app.pages.get(app.model.shown).arrive?.();
+    if (id === undefined) return;
+    const from = arriving.from;
+    arriving = null;
+    if (id === null || win.matchMedia?.("(pointer: coarse)")?.matches === true) return;
+    const now = doc.activeElement ?? null;
+    if (now === null || now === doc.body || now === from) doc.getElementById(id)?.focus?.({ preventScroll: true });
   };
   // THE POPOVERS (a confirm, a form, an answer: `pop` of shared.js) placed beside their buttons after every write, and
   // again on a scroll or a resize; a question or a form that has just opened takes the focus (a form's first box, a
@@ -601,7 +622,7 @@ export function start(doc, win) {
     if (menuOpen) setMenu(false, true);
     // a replaced view's hash is not shown, nor read: the page leaves for the host's
     if (leave(true)) return;
-    app.show(win.location.hash, { doc }); paint(); void poll();
+    app.show(win.location.hash, { doc }); arrive(); paint(); void poll();
   });
   win.addEventListener?.("scroll", place, { capture: true, passive: true });
   win.addEventListener?.("resize", place);
@@ -611,6 +632,7 @@ export function start(doc, win) {
   }
   doc.addEventListener("visibilitychange", () => { void poll(); });
   win.setInterval(() => { void poll(); }, POLL_MS);
+  arrive();
   paint();
   void poll();
 }
