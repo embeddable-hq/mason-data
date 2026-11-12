@@ -2924,6 +2924,13 @@ statement costs nothing. Spill's ceiling, measured on a 1.4 GB volume: DuckDB's 
 it first spills (778.8 MiB of 865 free), stays that number, and failing against it is an `Out of Memory` error naming the
 setting; with 600 MiB taken from the disk afterwards the next sort ended in `IO Error: Could not write file …`. Lowering
 the setting under what is spilled at that moment is refused, and the statement goes on. A failed statement's files are gone at once.
+The ceiling given at the instance's creation is SHOWN and not enforced (issue 850, DuckDB 2.0.0: `current_setting` read
+50.0 MiB while a sort spilled 374 MiB; the same sort after a `SET GLOBAL` of the same value failed at 49.9 MiB), so the
+open sets it by `SET GLOBAL` and reads every setting it gives back (`instanceSettingsProblem`); each other one was
+measured in force (the memory limit, `temp_directory`, ZSTD, the late materialization, the lambda syntax).
+Once in force, Mason's own compaction in its pieces (an eighth of a 32MB limit) spilled ~1.5 MiB and completed under a
+16 MiB ceiling; under 1 MiB, or as one piece of a 40 MiB table under 16 MiB, it failed 53400 alone, the table served
+and the database valid, and the sync backs off as from any failed compaction.
 
 **The same preview with no ORDER BY** (a real deployment: `LIMIT 100 OFFSET 0`, no sort, tens of GiB spilled, a last table of
 about 100 M rows). It streams, and stops at the LIMIT, only where the wide table is probed; where the rows before it are
