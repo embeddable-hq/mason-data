@@ -57,17 +57,19 @@
  *                      written below the screen's edge)
  *       route?(params, { doc })  the hash showed it with these parameters (`#tables?show=failed`: { show: "failed" }):
  *                      it takes the ones it knows into its state (and a control outside its parts, through `doc`)
+ *       saysStale?     true when the page says itself that what it shows is out of date (the Overview's word): the
+ *                      banner then does not say it again (`app.stale()`)
  *       model?         its state, for the tests
  *     }
- *     ctx = { ask(path, init) → { body } | { failure }, read(path) → { body, failure } | undefined (body: the last
- *             one read; failure: this read's, else null), refresh(paths) → Promise (read them now), now() → Date,
+ *     ctx = { ask(path, init) → { body } | { failure }, read(path) → { body, failure, readAt } | undefined (body: the last
+ *             one read; failure: this read's, else null; readAt: when that body was read, ms), refresh(paths) → Promise (read them now), now() → Date,
  *             range() → a key of RANGES: the time range the Observability pages share (from the hash),
  *             shown() → the id of the page shown }
  *
  * A page is registered by its import and its place in PAGES below, its route in PAGE_ROUTES, and its section in
  * index.html.
  */
-import { esc, badge, icon, createAsk, overTunnel, renderFailure, updatedText, placePops, RANGES, DEFAULT_RANGE, rangeOf, rangeOffered, isLive, POLL_MS } from "./shared.js";
+import { esc, badge, icon, createAsk, overTunnel, renderFailure, updatedText, staleText, placePops, RANGES, DEFAULT_RANGE, rangeOf, rangeOffered, isLive, POLL_MS } from "./shared.js";
 import { createCharts } from "./charts.js";
 import { page as statusPage } from "./pages/status.js";
 import { page as tablesPage } from "./pages/tables.js";
@@ -255,6 +257,9 @@ export function setBack(link, label, back) {
   link.hidden = false;
 }
 
+/** The line over the banner's Failure while the page shows what it read before (`app.stale()`): as of when, and why. */
+const staleNote = (stale, said) => stale === null || said ? "" : `<p class="stale-note">${esc(staleText(stale.at, stale.failure))} What this page shows is from then.</p>`;
+
 /** The heading's line: the database the run copies, and its sources file's name when that is another. */
 function renderWhere(s) {
   return `${esc(s.source.database)}${s.source.name && s.source.name !== s.source.database ? ` · source ${esc(s.source.name)}` : ""}`;
@@ -278,7 +283,8 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
   const m = { shown: first.id, range: rangeOf(first.params.range), pollFailure: null, updatedAt: null, rangeReadAt: null };
   const put = (path, at, r) => {
     const was = store.get(path);
-    store.set(path, { at, body: "body" in r ? r.body : was?.body, failure: "failure" in r ? r.failure : null, stale: false });
+    // `readAt`: when the last read that answered was asked, what a body kept under a failing poll says it is as of
+    store.set(path, { at, body: "body" in r ? r.body : was?.body, failure: "failure" in r ? r.failure : null, stale: false, readAt: "body" in r ? at : was?.readAt });
     if ("body" in r) m.updatedAt = now();
   };
   const pages = new Map();
@@ -300,7 +306,7 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
     paths.forEach((p, i) => put(p, at, rs[i]));
     afterRead();
   };
-  const ctx = { ask, now, refresh, range: () => m.range, shown: () => m.shown, read: (path) => { const e = store.get(path); return e === undefined ? undefined : { body: e.body, failure: e.failure }; } };
+  const ctx = { ask, now, refresh, range: () => m.range, shown: () => m.shown, read: (path) => { const e = store.get(path); return e === undefined ? undefined : { body: e.body, failure: e.failure, readAt: e.readAt }; } };
   for (const p of PAGES) pages.set(p.id, p.create(ctx));
   // the page first shown takes its parameters too, as `show` hands them (a host's view, its place)
   pages.get(first.id).route?.(first.params, {});
@@ -346,6 +352,17 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
       const own = reads[0] === undefined ? undefined : store.get(reads[0].path);
       m.pollFailure = own?.failure ?? null;
       afterRead();
+    },
+    /**
+     * WHETHER THE PAGE SHOWN IS OUT OF DATE (issue 886): its own read (its first) failed at the last poll while a body
+     * read earlier is still shown — `{ at, failure }`, `at` when that body was read; else null (current, or nothing
+     * read yet: the page says Unknown, or nothing, under the banner). `start` greys the shown section's parts by it.
+     */
+    stale() {
+      if (m.pollFailure === null) return null;
+      const own = pages.get(m.shown).reads()[0];
+      const e = own === undefined ? undefined : store.get(own.path);
+      return e === undefined || e.body === undefined || e.readAt === undefined ? null : { at: new Date(e.readAt), failure: m.pollFailure };
     },
     /** Once every read of its own now in flight has settled (the tests' wait; the page paints on `onLate`). */
     settled: () => Promise.all([...aside.values()]),
@@ -399,7 +416,9 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
         version: typeof st?.engine?.version === "string" ? `Mason ${esc(st.engine.version)}` : "",
         // the phone's menu button: both icons, the stylesheet shows the one its aria-expanded says
         "menu-icon": icon("menu", "when-closed") + icon("x", "when-open"),
-        poll: m.pollFailure ? renderFailure(m.pollFailure) : "",
+        // over the Failure, when the page shows a body read before it: as of when (a page that says it itself, the
+        // Overview's word, `saysStale`, not twice)
+        poll: m.pollFailure ? staleNote(app.stale(), pages.get(m.shown).saysStale === true) + renderFailure(m.pollFailure) : "",
         ...Object.assign({}, ...[...pages.values()].map((p) => p.view())),
       };
     },
@@ -470,7 +489,14 @@ export function start(doc, win) {
   const paint = () => {
     if (pressedAt !== null && Date.now() - pressedAt < PRESS_HOLD_MS) return;
     pressedAt = null;
-    for (const p of PAGES) { const section = doc.getElementById(`page-${p.id}`); if (section) section.hidden = p.id !== app.model.shown; }
+    // the shown section greyed while what it shows is out of date (app.css `[data-stale]`), at once current again
+    const stale = app.stale() !== null;
+    for (const p of PAGES) {
+      const section = doc.getElementById(`page-${p.id}`);
+      if (!section) continue;
+      section.hidden = p.id !== app.model.shown;
+      if (p.id === app.model.shown && stale) section.setAttribute?.("data-stale", ""); else section.removeAttribute?.("data-stale");
+    }
     for (const [id, html] of Object.entries(app.view())) {
       const el = doc.getElementById(id);
       const was = written.get(id);

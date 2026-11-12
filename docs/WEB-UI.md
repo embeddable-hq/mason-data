@@ -228,7 +228,11 @@ as Vercel's and Supabase's are (Mason, the database's name, a **demo** badge whe
 each link an icon and its label, the one shown a pale stone row with the patina at its edge; at its foot how long ago Mason last
 answered — `Updated 3 s ago`, which keeps counting when it stops answering — and the version), the time range as a
 segmented control at the top of the Observability views, and on the Overview the run's word beside a big brick, a
-grid of KPI cards, then dense tables. Colour says a state and nothing else — a green, amber, red or gray marker always
+grid of KPI cards, then dense tables. While the page's poll fails (Mason stopped, the tunnel closed), what it read
+before stays on the page but never reads as current: the shown page's parts are greyed, the Overview's word is grey
+with "As of 14:02 UTC. Mason can't be reached." beside it (or "The latest read failed." for a refusal), every other page
+says the same line over the banner's Failure, and with nothing read yet the Overview says "Unknown" and why. The
+first poll that answers makes it current again (`app.stale()`, src/web/app.js; issue 886). Colour says a state and nothing else — a green, amber, red or gray marker always
 beside its word (the failed red a rose, never the accent) — besides the patina accent for focus, links, the current
 nav row, a laid brick of the motifs, the primary action and a chart's mark. A copy's bar fills in patina while it copies,
 green once served, rose when it failed and amber when not kept current (`--bar-ok/-warn/-bad` on `--bar-track`): tints validated together, in both themes, by the
