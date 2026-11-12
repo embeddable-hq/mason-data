@@ -971,6 +971,26 @@ export function uncheckedRefusal(): GeneratedRefusal {
 }
 
 /**
+ * EACH OUTPUT COLUMN'S TYPE, AS THE CATALOG NAMES IT: its spelling (`format_type`, the typmod kept) and, for a type a
+ * user or an extension made, its kind (`e` an enum, `citext`, `d` a domain, `c` a composite; `columnProblem` reads it). The one reader of a
+ * generated column's type (issue 858): asked by the field's CATALOG OID (`catalogOid`), never its wire OID, which for a
+ * made type is the SOURCE's and in the catalog may be another type (another table's row type, read as `daily`).
+ * `pg_catalog.format_type`, written out, is Postgres's own, never the catalog's override of an unknown OID.
+ */
+async function columnTypes(rows: Planner["rows"], fields: NonNullable<DuckPlan["fields"]>): Promise<{ typeNames: Map<number, string>; kinds: Map<number, string> }> {
+  if (fields.length === 0) return { typeNames: new Map(), kinds: new Map() };
+  const values = fields.map((f, i) => `(${i}, ${Math.trunc(f.catalogOid)}::oid, ${Math.trunc(f.typmod)})`).join(", ");
+  const typeNames = new Map<number, string>(), kinds = new Map<number, string>();
+  for (const [i, name, kind] of await rows(`SELECT v.i::text, pg_catalog.format_type(v.oid, v.typmod), ` +
+    `CASE WHEN t.typname = 'citext' AND t.typtype = 'b' THEN 'citext' ELSE t.typtype::text END ` +
+    `FROM (VALUES ${values}) AS v(i, oid, typmod) LEFT JOIN pg_catalog.pg_type t ON t.oid = v.oid`)) {
+    typeNames.set(Number(i), name!);
+    if (kind !== null && kind !== undefined) kinds.set(Number(i), kind);
+  }
+  return { typeNames, kinds };
+}
+
+/**
  * A DEFINITION HELD TO WHAT A TABLE CAN STORE, its reads named. `relations`: for a run of a chain, each parent built in
  * the same run (`schema.table`) and the side table read in its place (src/duck/plan.ts swapRelations). Throws what `Planner.plan` throws: a statement Postgres or the rewrite refuses is the
  * caller's to say at its key, and a table not there yet its to wait for.
@@ -1000,15 +1020,7 @@ export async function planDefinition(p: Planner, sql: string, orderBy: string | 
   const fields = plan.fields ?? [];
   const twice = fields.find((f, i) => f.name !== UNNAMED && fields.findIndex((x) => x.name === f.name) !== i);
   if (twice !== undefined) refused.push({ key: "sql", message: `it names column ${twice.name} twice`, why: "A table's columns have one name each.", options: ["rename one with AS"] });
-  const typeNames = new Map((await p.rows(fields.length === 0 ? "SELECT 0, ''" : `SELECT v.i::text, format_type(v.oid, v.typmod) FROM (VALUES ${fields.map((f, i) => `(${i}, ${Math.trunc(f.oid)}::oid, ${Math.trunc(f.typmod)})`).join(", ")}) AS v(i, oid, typmod)`))
-    .map(([i, name]) => [Number(i), name!]));
-  // a type a user or an extension made: an enum (`e`) and a citext are stored, a domain and a composite are not. Judged
-  // by the column's INDEX and the catalog's type of the name the wire gives its OID: a field carries the SOURCE's OID
-  // for a made type (src/duck/plan.ts), which the catalog's pg_type does not have
-  const made = fields.map((f, i) => [f, i] as const).filter(([f]) => !STORED_TYPES.has(f.oid) && f.oid !== NUMERIC_OID);
-  const kinds = new Map(made.length === 0 ? [] : (await p.rows(`SELECT v.i::text, CASE WHEN t.typname = 'citext' AND t.typtype = 'b' THEN 'citext' ELSE t.typtype::text END ` +
-    `FROM (VALUES ${made.map(([f, i]) => `(${i}, ${Math.trunc(f.oid)}::oid)`).join(", ")}) AS v(i, oid) JOIN pg_type t ON t.oid = coalesce(to_regtype(public.mason_wire_type(v.oid, -1)), v.oid)`))
-    .map(([i, kind]) => [Number(i), kind!] as const));
+  const { typeNames, kinds } = await columnTypes(p.rows, fields);
   fields.forEach((f, i) => { const bad = columnProblem(f, typeNames.get(i) ?? String(f.oid), kinds.get(i)); if (bad !== null) refused.push(bad); });
   // a numeric computed after the engine's answer: stored as DECIMAL arithmetic where the types fix its scale, over the
   // engine types DuckDB says the plan computes (`storedColumns`)

@@ -29,6 +29,32 @@ test("an enum and a citext over a source's own type OIDs, spelled as the source'
   }, SOURCE_OIDS);
 });
 
+// issue 858: a made type's SOURCE OID that is, in the catalog, another type (a table's row type). The source and the
+// catalog count their made types' OIDs from 16384 alike, so one number can name a citext there and a row type here: the
+// generated column was declared as that row type (`ledger`), and its statements were refused 0A000 "input of anonymous
+// composite types is not implemented". The catalog's row-type OIDs are read from a first world, then given to the
+// source's citext and enum in a second, whose catalog holds them as the same row types (checked, so a moved OID fails
+// as such, not as a pass)
+test("a made type whose source OID is a catalog row type's is declared as the source's type, and its statements are answered (issue 858)", async () => {
+  let rowTypes: Array<[string, number]> = [];
+  const readRowTypes = async (w: Parameters<Parameters<typeof overLedger>[1]>[0]): Promise<Array<[string, number]>> =>
+    (await typed(w, "SELECT typname::text, oid::int FROM pg_catalog.pg_type WHERE typtype = 'c' AND typname IN ('ledger', 'events') ORDER BY typname")).rows.map((r) => [r[0] as string, Number(r[1])]);
+  await overLedger({ kinds: KINDS }, async (w, restarted) => { if (!restarted) rowTypes = await readRowTypes(w); });
+  assert.deepEqual(rowTypes.map(([n]) => n), ["events", "ledger"], "the catalog holds both synced tables' row types");
+  const [eventsRow, ledgerRow] = rowTypes.map(([, oid]) => oid) as [number, number];
+  const colliding = LEDGER_COLUMNS.map((c) => c.name === "mood" ? { ...c, typeOid: String(eventsRow), typeArrayOid: "5974239" } : c.name === "name" ? { ...c, typeOid: String(ledgerRow), typeArrayOid: "5974249" } : c);
+  await overLedger({ kinds: KINDS }, async (w, restarted) => {
+    if (!restarted) assert.deepEqual(await readRowTypes(w), rowTypes, "the source's made-type OIDs are the catalog's row types' (the collision this test needs)");
+    assert.deepEqual(w.status("public.kinds").refusals, []);
+    assert.deepEqual((await typed(w, "SELECT a.attname::text, pg_catalog.format_type(a.atttypid, a.atttypmod) FROM pg_catalog.pg_attribute a " +
+      "WHERE a.attrelid = 'public.kinds'::regclass AND a.attnum > 0 ORDER BY a.attnum")).rows, [["id", "bigint"], ["mood", "mood"], ["name", "citext"]], "the generated table's columns are the source's types");
+    const r = await typed(w, "SELECT id, mood, name FROM kinds ORDER BY mood, id");
+    assert.deepEqual([r.fields[1]![1], r.fields[2]![1]], [eventsRow, ledgerRow], "the source's OIDs on the wire, as a synced column sends");
+    assert.deepEqual(r.rows.map((x) => x[1]), ["sad", "sad", "ok", "happy"], "the enum's declared order");
+    assert.deepEqual((await typed(w, "SELECT id, name FROM kinds WHERE name = 'ALICE' ORDER BY id")).rows, [["1", "Alice"], ["9223372036854775806", "alice"]], "a citext's case-blind equality");
+  }, colliding);
+});
+
 // review round 3 of PR 202, F1: a numeric the engine answers itself (no exact program, "as the engine answers it") is
 // held to the engine type DuckDB says it computes: a DECIMAL stored, an integer stored as HUGEINT, a double refused
 test("a numeric the engine answers itself is held to its engine type: a variance it computes as a double is refused, a sign is stored as HUGEINT", async () => {

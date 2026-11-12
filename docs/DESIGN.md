@@ -397,15 +397,17 @@ first) but at any hour; a window for it (an operator's setting, or quiet hours) 
 not shrink: the freed blocks are reused by later writes. A stop or a crash during a streamed table's compaction catches
 it up by one poll, a scan of the source, at the next start.
 
-**A write by key never INSERT … SELECTs into a table made in its transaction** (src/duck/sync.ts `writeByKey`; the
-review of PR 856, a bug of main too). DuckDB 2.0.0 reads back nothing of a table made in a transaction that an INSERT …
-SELECT filled past a row group's rows (~120,000): `count(*)` says them all, a scan and a join none. `writeByKey` made its
-keys table so, in the batch's transaction, so a write of more than ~120,000 keys deleted none of them and inserted every
-row again: a catch-up replaying 1.34 M held changes after ~10 minutes down left 935,331 keys twice in a 2 M-row table,
-and the first version of this compaction's held replay 298,927 of 300,000. Measured here on that version, by fill: an
-INSERT … SELECT of 120,000 or 300,000 rows into a table made in the transaction reads back empty, TEMP or not; filled
-by VALUES of 500 at a time it reads back whole up to 1.5 M rows, as does a table made before the transaction or by
-CREATE TABLE AS in it. So the keys deleted are read from the keys table and the rows table at once, never gathered.
+**A write by key never INSERT … SELECTs into an empty CREATE TABLE AS of its transaction** (src/duck/sync.ts
+`writeByKey`; the review of PR 856, a bug of main too). DuckDB 2.0.0 reads back nothing of a table made by an EMPTY
+`CREATE TABLE AS` (`… LIMIT 0`, `WHERE false`) and then filled by one INSERT … SELECT of a full row group's rows (122,880)
+or more in the same transaction: `count(*)` says them all, a scan and a join none, and the rows are lost even after the
+COMMIT. `writeByKey` made its keys table so, in the batch's transaction, so a write of more keys than that deleted none
+of them and inserted every row again: a catch-up replaying 1.34 M held changes after ~10 minutes down left 935,331 keys
+twice in a 2 M-row table, and the first version of this compaction's held replay 298,927 of 300,000. Measured here on
+that version, by fill: 120,000 and 300,000 rows by one INSERT … SELECT into an empty CREATE TABLE AS of the transaction
+read back empty, TEMP or not; the same table filled by VALUES of 500 at a time reads back whole up to 1.5 M rows, as does
+one made before the transaction or a CREATE TABLE AS that holds the rows itself; the review found an explicit `CREATE
+TABLE (cols)` whole too. So the keys deleted are read from the keys table and the rows table at once, never gathered.
 
 **Where.** `src/duck/compact.ts`, src/duck/sync.ts (`checkCompaction`, `compactBlocker`, `diskShortFor`, `compact`,
 `spill`, `replaySpill`, `writeByKey`, `rearm`); `tests/duck-compact.test.ts` (the rule, an append-only table through 200

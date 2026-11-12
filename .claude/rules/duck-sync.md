@@ -163,10 +163,11 @@ paths:
   statement's, that table's alone: never its `error`, never fatal, backed off. A new writer of a synced table checks
   `rebuildingNow`, or it writes under a compaction and its write is lost at the swap. DETECTOR:
   `tests/duck-compact.test.ts`, `tests/integration/duck-compact.itest.ts`.
-- **No INSERT … SELECT into a table made in the same transaction** (`writeByKey`; the review of PR 856): DuckDB 2.0.0
-  reads back NOTHING of such a table filled past ~120,000 rows (`count(*)` says them all), and a write by key of more
-  keys deleted none and inserted every row twice. Fill it by VALUES, make it before the transaction or by CREATE TABLE
-  AS. DETECTOR: `tests/duck-compact.test.ts` "a held set of 300,000 changes".
+- **No INSERT … SELECT into an empty CREATE TABLE AS of the same transaction** (`writeByKey`; the review of PR 856):
+  DuckDB 2.0.0 reads back NOTHING of a table made by `CREATE TABLE AS … LIMIT 0` and filled by one INSERT … SELECT of a
+  row group's rows (122,880) or more in that transaction (`count(*)` says them all; lost even after the COMMIT), and a
+  write by key of more keys deleted none and inserted every row twice. Fill it by VALUES, or make it before the
+  transaction or by an explicit CREATE TABLE. DETECTOR: `tests/duck-compact.test.ts` "a held set of 300,000 changes".
 
 ## What the sync records
 

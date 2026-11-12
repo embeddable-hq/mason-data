@@ -2878,13 +2878,15 @@ export class Sync {
    * src/cli/preflight.ts) is only appended to. Answers what it did to the table's count: the rows inserted less the rows
    * its deletes removed (DuckDB's own count of each).
    *
-   * NO INSERT … SELECT INTO A TABLE MADE IN THIS TRANSACTION (issue 851's review): DuckDB 2.0.0 reads back NOTHING of a
-   * table made in the transaction that an INSERT … SELECT filled past a row group's rows (~120,000) — `count(*)` says
-   * them all, a scan and a join none — so the keys' delete deleted nothing and every key was inserted twice (a catch-up
-   * replaying 1.34 M held changes left 935,331 keys twice). Measured on that version: a table filled by VALUES of 500 at
-   * a time reads back whole (to 1.5 M rows), as does one made before the transaction or by CREATE TABLE AS. So the temp
-   * tables here are filled by VALUES only, and the keys deleted are read from both of them at once, never gathered by
-   * an INSERT … SELECT. tests/duck-compact.test.ts holds a held set of 300,000 keys through the catch-up's replay.
+   * NO INSERT … SELECT INTO AN EMPTY `CREATE TABLE AS` OF THIS TRANSACTION (issue 851's review): DuckDB 2.0.0 reads back
+   * NOTHING of a table made by an empty CREATE TABLE AS (`… LIMIT 0`) that one INSERT … SELECT of a full row group's
+   * rows (122,880) or more then filled in the same transaction — `count(*)` says them all, a scan and a join none, even
+   * after the COMMIT — so the keys' delete deleted nothing and every key was inserted twice (a catch-up replaying 1.34 M
+   * held changes left 935,331 keys twice). Measured on that version: the same table filled by VALUES of 500 at a time
+   * reads back whole (to 1.5 M rows), as does one made before the transaction, one made by an explicit CREATE TABLE
+   * (cols) (the review's), or a CREATE TABLE AS that holds the rows itself. So the temp tables here are filled by VALUES
+   * only, and the keys deleted are read from both of them at once, never gathered by an INSERT … SELECT.
+   * tests/duck-compact.test.ts holds a held set of 300,000 keys through the catch-up's replay.
    */
   private async writeByKey(t: AddedTable, target: string, gone: ReadonlyArray<Array<string | null>>, whole: ReadonlyArray<Array<string | null>>, value: (c: string, v: string | null) => string): Promise<number> {
     if (gone.length === 0 && whole.length === 0) return 0;
