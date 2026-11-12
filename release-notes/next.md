@@ -2,6 +2,14 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **On the web page's Tables, an added table says which columns it syncs, and you can change them there.** Its note
+  says "All columns", "5 of 12 columns" or "All but 1 column". Click it to tick the columns to sync, as
+  `mason add <table> --columns …` does. Before you save, the form says what it costs: the table is synced again in full
+  from your database, and its synced data can still be queried until that finishes. Saving the same columns changes
+  nothing. An entry the form can't show as ticks (an `exclude:` written by hand) is described, and the form says that
+  saving replaces it. A read-only page shows the columns with no way to change them. `mason status --json` gains
+  `columnCount`, and for an added table `entry` and `everyColumnLeavesOut`.
+
 - **The web page no longer shows a psql line**: the Users page's Connect card keeps Host, Port, Database, SSL mode and
   URL, and the Overview's Connect (and Queries' when the request log is empty) keeps the URL, each with Copy; Getting
   started's last step no longer has a "Copy the psql line" button. Paste the URL after `psql`. `mason status` and
@@ -19,6 +27,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **Table names are readable on the web page's Tables at laptop widths.** At 1024 px the name column was 2 px wide. Now
+  it always keeps room for a typical `schema.table` name. In a narrower window the Key, Size, Last sync and Rows
+  columns give way, in that order, and the row's note says what they said.
+- **What Add or Sync now says on the web page's Tables no longer covers the next row's buttons.** It is placed where it
+  covers no other button, or else a click goes through it to the button under it.
 - **The Remove button is back on the web page's Tables.** Each added table showed "View events", "Sync now" and then
   only "…". The button was cut off because its column was too narrow. Now the column fits all three buttons at every
   window width.

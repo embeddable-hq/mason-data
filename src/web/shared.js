@@ -419,24 +419,56 @@ export function placePops(doc, win) {
   if (typeof doc?.querySelectorAll !== "function") return placed;
   const gutter = 16, gap = 4;
   const vw = win.innerWidth ?? 0, vh = win.innerHeight ?? 0;
+  const inside = (left, top, w, h) => ({ left: Math.max(gutter, Math.min(left, vw - gutter - w)), top: Math.max(gutter, Math.min(top, vh - gutter - h)) });
+  // the page's controls outside every popover, read once, only when an answer is to be placed (`said`, below)
+  let controls = null;
+  const controlsNow = () => controls ??= [...doc.querySelectorAll(CONTROLS)]
+    .filter((c) => typeof c.getBoundingClientRect === "function" && c.closest?.(".pop") == null)
+    .map((c) => c.getBoundingClientRect()).filter((b) => b.width > 0 && b.height > 0 && b.bottom > 0 && b.top < vh && b.right > 0 && b.left < vw);
   for (const el of doc.querySelectorAll(".pop[data-anchor]")) {
     const a = doc.getElementById(el.dataset.anchor);
     if (a === null || typeof a.getBoundingClientRect !== "function") { el.hidden = true; continue; }
     el.hidden = false;
     const r = a.getBoundingClientRect();
     const w = el.offsetWidth, h = el.offsetHeight;
-    const left = Math.max(gutter, Math.min(r.right - w, vw - gutter - w));
     const below = r.bottom + gap;
     // too tall for the room on either side: kept inside the window, over its anchor, rather than past the window's edge
     // where no scroll reaches it (a fixed box)
     const side = below + h <= vh - gutter || r.top - gap - h < gutter ? below : r.top - gap - h;
-    const top = Math.max(gutter, Math.min(side, vh - gutter - h));
-    el.style.left = `${Math.round(left)}px`;
-    el.style.top = `${Math.round(top)}px`;
+    let at = inside(r.right - w, side, w, h);
+    // AN ANSWER (`said`: what an Add or a Sync now answered, up until it is dismissed) NEVER COVERS ANOTHER CONTROL
+    // (issue 884: under a row's actions it covered the next row's Sync now and Remove): it goes where it covers none —
+    // under its anchor, over it, or beside it on its left, level with its top or its bottom — and where every place
+    // covers one, where it covers fewest, a click going through it to what is under it (`through`: its own buttons
+    // alone take a click, and they are placed over no control)
+    if (el.classList?.contains("said")) {
+      const all = controlsNow();
+      const own = [...(el.querySelectorAll?.(CONTROLS) ?? [])].map((c) => c.getBoundingClientRect());
+      const box = el.getBoundingClientRect();
+      const hits = (x, y, ww, hh) => all.filter((b) => b.left < x + ww - 0.5 && b.right > x + 0.5 && b.top < y + hh - 0.5 && b.bottom > y + 0.5).length;
+      const score = (p) => ({ p, covers: hits(p.left, p.top, w, h),
+        ownCovers: own.reduce((k, b) => k + hits(p.left + b.left - box.left, p.top + b.top - box.top, b.width, b.height), 0) });
+      const places = [at, inside(r.right - w, below, w, h), inside(r.right - w, r.top - gap - h, w, h), inside(r.left - gap - w, r.top, w, h), inside(r.left - gap - w, r.bottom - h, w, h)].map(score);
+      // none clear: each place moved up or down, 8 px at a time, its own buttons over no control first, then the fewest
+      // covered, then the nearest (a phone's rows are controls from edge to edge)
+      const moved = () => places.flatMap((x, i) => Array.from({ length: 40 }, (_, j) => {
+        const d = 8 * (1 + (j >> 1)) * (j % 2 ? -1 : 1);
+        return { ...score(inside(x.p.left, x.p.top + d, w, h)), far: Math.abs(d) + i };
+      }));
+      const best = places.find((x) => x.covers === 0) ?? [...places.map((x, i) => ({ ...x, far: i })), ...moved()]
+        .sort((x, y) => x.ownCovers - y.ownCovers || x.covers - y.covers || x.far - y.far)[0];
+      at = best.p;
+      el.classList.toggle("through", best.covers > 0);
+    }
+    el.style.left = `${Math.round(at.left)}px`;
+    el.style.top = `${Math.round(at.top)}px`;
     placed.push(el);
   }
   return placed;
 }
+
+/** What a person clicks or types in: what an answer's popover must not cover (`placePops`). */
+const CONTROLS = "button, a[href], input, select, textarea, summary";
 
 /** A text with its Copy button (`copyClick` copies what the `<code id>` holds): a URL, a psql line, a password. */
 export const copyable = (id, text) =>

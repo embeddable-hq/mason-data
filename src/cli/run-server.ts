@@ -46,7 +46,7 @@ import { userRole } from "./roles.ts";
 import type { RunState } from "./commands.ts";
 import { clientLink, postgresFacts } from "./pg-url.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
-import { catalogTable, copiedColumns, effectiveSync, entryName, parseSourceText, shownPath, type CatalogColumn, type ProjectSource, type SourceFile } from "./sources.ts";
+import { catalogTable, copiedColumns, effectiveSync, entryName, everyColumnLeavesOut, parseSourceText, shownPath, type CatalogColumn, type ProjectSource, type SourceFile } from "./sources.ts";
 import { projectWriteRefusal } from "./project.ts";
 import { addEntry, plannedEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type PollMeasure, type RemoveResult } from "./source-edit.ts";
 import { notAddedRefusal, PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamedAnswer, type StreamStatus } from "../duck/sync.ts";
@@ -193,6 +193,12 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     const { columns: cols, ...catalog } = catalogTable(t, entry);
     return {
       ...catalog, ...(columns ? { columns: cols } : {}),
+      // how many columns it has, in the lean state too: the page's "5 of 12 columns" on an added table's row
+      columnCount: cols.length,
+      // an added table's entry as the sources file says it — `columns:` (null: every column but `exclude:`), `exclude:`,
+      // `key:` (null: its primary key) — and the columns every column leaves out of it (`mason add <table>` with no
+      // --columns: the secret-looking ones), so the page's column form ticks what the file says, or says the form cannot
+      ...(entry !== undefined ? { entry: { columns: entry.columns, exclude: entry.exclude, key: entry.key }, everyColumnLeavesOut: everyColumnLeavesOut(t, entry.key) } : {}),
       // a table the sync has not reached is waiting for its copy (no copy yet), never "copying 0"
       // a copy in a retired layout (src/duck/sync.ts RETIRED_LAYOUT) serves until it is copied again: done, and said
       copy: c && c.phase !== "waiting" ? { phase: (c.phase === "copied" ? "done" : c.phase === "failed" ? "failed" : "copying") as "copying" | "done" | "failed",

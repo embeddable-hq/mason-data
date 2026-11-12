@@ -98,9 +98,9 @@ const FAILING = [
 test("every added table says its sync on its note, in the page's words, and opens its choice there; one not added has none", () => {
   const html = renderTables(STATE);
   const text = textOf(html);
-  assert.match(text, /public\.customers Synced .* Remove Sync: Off public\.orders /);
-  assert.match(text, /public\.orders Synced .* Remove Sync: Every 5 minutes public\.events /);
-  assert.match(text, /public\.events Synced .* Remove Sync: Live \(replication\)/);
+  assert.match(text, /public\.customers Synced .* Remove Sync: Off All columns public\.orders /);
+  assert.match(text, /public\.orders Synced .* Remove Sync: Every 5 minutes All columns public\.events /);
+  assert.match(text, /public\.events Synced .* Remove Sync: Live \(replication\) All columns/);
   for (const t of ["public.customers", "public.orders", "public.events"]) assert.match(html, new RegExp(`<button type="button" class="small link syncnow" id="sync-tables-${t.replace(".", "\\.")}" data-choose-sync="${t.replace(".", "\\.")}"`));
   assert.ok(!html.includes('data-choose-sync="public.audit"'), "no choice for a table not added");
 });
@@ -324,4 +324,206 @@ test("the app: a choice ticked survives a poll's rewrite of the part — written
   call("cancelSync");
   await call("chooseSync", "public.customers");
   assert.match(popOf(app.view().tables!, "sync-tables-public.customers"), /value="off" checked>/, "opened again: its sync now");
+});
+
+// ------------------------------------------------------------------ an added table's columns (issue 884)
+
+/** A database whose added tables each choose their columns differently, over the server's own state. */
+const COLS = {
+  // every column: `{}`, none looks like a secret
+  customers: ["id", "name", "status"],
+  // two named
+  orders: ["id", "name", "status", "created_at"],
+  // every column but the secret-looking one, as mason add writes it
+  accounts: ["id", "name", "api_token"],
+  // an exclude: written by hand, which the boxes cannot show
+  invoices: ["id", "name", "status"],
+  // `{}` over a secret-looking column: kept on purpose (mason add --include), which the boxes cannot show either
+  sessions: ["id", "user_id", "api_token"],
+  // no primary key: synced by its key:
+  raw_log: ["tenant_id", "seq", "body"],
+  // not added
+  audit: ["id", "what"],
+} as const;
+const COL_TABLES: SourceTable[] = Object.entries(COLS).map(([name, cols]) => ({ source: `public.${name}`, schema: "public", table: name, key: name === "raw_log" ? [] : ["id"],
+  rows: name === "orders" ? 40_000_000 : 1200, bytes: 8192, comment: null, columns: cols.map((c) => col(c, c === "id" ? "bigint" : "text")), foreignKeys: [] }));
+const COL_FILE = parseSourceText("kind: postgres\nurl: x\ntables:\n  customers: {}\n  orders:\n    columns: [id, status]\n  accounts:\n    exclude: [api_token]\n" +
+  "  invoices:\n    exclude: [name]\n  sessions: {}\n  raw_log:\n    key: [tenant_id, seq]\n    columns: [tenant_id, seq, body]\n", "shop", "/app/mason/sources/shop.yml");
+assert.ok(!("problems" in COL_FILE), JSON.stringify(COL_FILE));
+function colStateOf(o: { pageReadOnly?: boolean; sourcesReadOnly?: string } = {}): Record<string, unknown> {
+  const ctx = {
+    source, facts: () => ({ version: 160000, versionText: "16.4", standby: false, tables: COL_TABLES, systemIdentifier: null }), warnings: [],
+    replication: () => ({ slot: "mason_shop", publication: "mason_shop", owned: true }), page: true,
+    ...(o.pageReadOnly ? { pageReadOnly: true, pageReadOnlyAllow: [] } : {}),
+    users: { file: "/app/.mason/users.json", apiKey: "k".repeat(32), database: "shop", postgresUrl: "postgresql://127.0.0.1:5433/shop" },
+    folder: () => "/app/mason", root: "/app", home: "/app/.mason", version: "0.9.0", startedAt: Date.parse(at),
+    sources: () => ({ file: COL_FILE, problem: null }), listener: { openSessions: () => ({ open: 0, byClient: [] }) },
+    duck: { file: "/app/.mason/duck.db", requests: { days: 7 }, restarts: () => [], disk: () => ({ path: "/app/.mason", freeBytes: null, projectedBytes: null }) },
+  } as unknown as RunContext;
+  const kept: CopyState["kept"] = { by: "poll", sync: { mode: "off" }, syncedAt: at, nextAt: null };
+  const copies = Object.keys(COLS).filter((n) => n !== "audit").map((n) => copied(`public.${n}`, 1200, kept));
+  const s = JSON.parse(JSON.stringify(runState(ctx, copies, null, Date.parse(at)))) as Record<string, unknown>;
+  return o.sourcesReadOnly ? { ...s, sourcesReadOnly: o.sourcesReadOnly } : s;
+}
+const COL_STATE = colStateOf();
+type ColTable = { table: string; added: boolean; columnCount?: number; entry?: unknown; everyColumnLeavesOut?: string[]; addedColumns: string[] | null };
+const colTable = (name: string) => (COL_STATE.tables as ColTable[]).find((t) => t.table === `public.${name}`)!;
+/** `GET api/tables/<table>/columns`'s answer (src/cli/run-server.ts tableColumns). */
+const columnsOf = (name: keyof typeof COLS) => ({ table: `public.${name}`, columns: COLS[name].map((c) => ({ name: c, type: c === "id" ? "bigint" : "text", nullable: true, comment: null, references: null })) });
+const ticksOf = (html: string, field: string): string[] => [...html.matchAll(new RegExp(`name="${field}" value="([^"]+)" checked`, "g"))].map((m) => m[1]!);
+
+test("the state carries each added table's entry — its columns, exclude and key —, the columns every column leaves out, and every table's column count", () => {
+  assert.deepEqual(colTable("customers").entry, { columns: null, exclude: [], key: null });
+  assert.deepEqual(colTable("orders").entry, { columns: ["id", "status"], exclude: [], key: null });
+  assert.deepEqual(colTable("accounts").entry, { columns: null, exclude: ["api_token"], key: null });
+  assert.deepEqual(colTable("raw_log").entry, { columns: ["tenant_id", "seq", "body"], exclude: [], key: ["tenant_id", "seq"] });
+  assert.deepEqual(colTable("accounts").everyColumnLeavesOut, ["api_token"]);
+  assert.deepEqual(colTable("sessions").everyColumnLeavesOut, ["api_token"]);
+  assert.deepEqual(colTable("customers").everyColumnLeavesOut, []);
+  assert.equal(colTable("orders").columnCount, 4);
+  assert.equal(colTable("audit").columnCount, 2, "a table not added says how many columns it has too");
+  assert.ok(!("entry" in colTable("audit")) && !("everyColumnLeavesOut" in colTable("audit")), "and no entry");
+});
+
+test("an added table's row says which columns it syncs in a few words — All columns, 2 of 4 columns, All but 1 column — the columns its title, and opens its column form", () => {
+  const html = renderTables(COL_STATE);
+  const summary = (name: string) => new RegExp(`<button type="button" class="small link syncnow" id="columns-tables-public\\.${name}" data-choose="public\\.${name}" title="([^"]*)">([^<]*)</button>`).exec(html);
+  const said = Object.fromEntries(["customers", "orders", "accounts", "invoices", "sessions", "raw_log"].map((n) => [n, summary(n)?.slice(1)]));
+  assert.deepEqual(said, {
+    customers: ["Every column, and any column added to the table later. Choose which columns Mason syncs", "All columns"],
+    orders: ["Synced: id, status. Choose which columns Mason syncs", "2 of 4 columns"],
+    accounts: ["Every column but api_token. Choose which columns Mason syncs", "All but 1 column"],
+    invoices: ["Every column but name. Choose which columns Mason syncs", "All but 1 column"],
+    sessions: ["Every column, and any column added to the table later. Choose which columns Mason syncs", "All columns"],
+    raw_log: ["Synced: tenant_id, seq, body. Choose which columns Mason syncs", "3 of 3 columns"],
+  });
+  assert.match(textOf(html), /public\.orders Synced .* Remove Sync: Off 2 of 4 columns public\.accounts /, "on its note, beside its sync");
+  assert.ok(!html.includes('id="columns-tables-public.audit"'), "a table not added has Columns… in its actions instead");
+  assert.match(html, /data-add-table="public\.audit">Add<\/button> <button type="button" class="small" data-choose="public\.audit">Columns…<\/button>/);
+});
+
+test("read-only: the columns said, no form — where the project's files are read-only or the page may not edit tables", () => {
+  for (const s of [colStateOf({ sourcesReadOnly: "the project's files are read-only here (MASON_PROJECT_READONLY=1)" }), colStateOf({ pageReadOnly: true })]) {
+    const html = renderTables(s, { choosing: "public.orders", columns: columnsOf("orders") });
+    assert.match(html, /<span class="syncnow dim" title="Synced: id, status">2 of 4 columns<\/span>/);
+    assert.ok(!html.includes('id="columns-tables-'), "no button");
+    assert.ok(!html.includes("data-pick-form"), "no form, even one the model says is open");
+  }
+});
+
+test("the column form on an added table: its entry's columns ticked (none for every column), its key ticked, what saving costs said before Save", () => {
+  const form = (name: keyof typeof COLS) => popOf(renderTables(COL_STATE, { choosing: `public.${name}`, columns: columnsOf(name) }), `columns-tables-public.${name}`);
+  const orders = form("orders");
+  assert.match(orders, /role="dialog" aria-label="The columns orders syncs"/);
+  assert.deepEqual(ticksOf(orders, "columns"), ["id", "status"]);
+  assert.ok(!orders.includes('name="key"'), "a table with a primary key: no key to tick");
+  assert.equal(textOf(orders), "The columns orders syncs None ticked: every column, and any added to the table later. id bigint name text status text created_at text " +
+    "Saving different columns syncs orders again in full from your database (~40,000,000 rows): that takes a while, and on a big table it adds load to your database. " +
+    "Its synced data can still be queried until the new sync finishes. Saving the same columns changes nothing and starts no sync. Save Cancel");
+  assert.deepEqual(ticksOf(form("customers"), "columns"), [], "every column: none ticked");
+  const accounts = form("accounts");
+  assert.deepEqual(ticksOf(accounts, "columns"), [], "every column but the secret-looking one, as mason add writes it: none ticked");
+  assert.match(textOf(accounts), /None ticked: every column, and any added to the table later, but api_token, which looks like a secret\./);
+  const rawLog = form("raw_log");
+  assert.deepEqual(ticksOf(rawLog, "key"), ["tenant_id", "seq"], "its key: ticked");
+  assert.deepEqual(ticksOf(rawLog, "columns"), ["tenant_id", "seq", "body"]);
+  // while it is read: said, with Cancel
+  assert.equal(textOf(popOf(renderTables(COL_STATE, { choosing: "public.orders", columns: null }), "columns-tables-public.orders")), "Reading orders's columns… Cancel");
+  // while it is saved: Saving…, disabled
+  assert.match(popOf(renderTables(COL_STATE, { choosing: "public.orders", columns: columnsOf("orders"), savingColumns: "public.orders" }), "columns-tables-public.orders"),
+    /<button type="submit" class="primary small" disabled>Saving…<\/button>/);
+});
+
+test("an entry the form cannot show (an exclude: written by hand, a secret-looking column kept) is described, its boxes the columns synced now, and saving replaces it — said first", () => {
+  const form = (name: keyof typeof COLS) => popOf(renderTables(COL_STATE, { choosing: `public.${name}`, columns: columnsOf(name) }), `columns-tables-public.${name}`);
+  const invoices = form("invoices");
+  assert.match(textOf(invoices), /^Its entry in the sources file syncs every column but name, which these boxes cannot show: they show the columns synced now\. Saving replaces the entry with the columns ticked\. /);
+  assert.deepEqual(ticksOf(invoices, "columns"), ["id", "status"]);
+  assert.match(textOf(invoices), /Saving the same columns starts no sync\. Save Cancel$/);
+  const sessions = form("sessions");
+  assert.match(textOf(sessions), /^Its entry in the sources file syncs every column, api_token included, which these boxes cannot show/);
+  assert.deepEqual(ticksOf(sessions, "columns"), ["id", "user_id", "api_token"]);
+  const columnsChoice = fn<(t: unknown) => { exact: boolean }>(tables, "columnsChoice");
+  assert.deepEqual(["customers", "orders", "accounts", "invoices", "sessions", "raw_log"].map((n) => columnsChoice(colTable(n)).exact), [true, true, true, false, false, true]);
+});
+
+/** The Tables page's submit of a column form, as the shell calls it: the boxes ticked by FormData's getAll. */
+const submitForm = (app: App, table: string, ticks: { columns?: string[]; key?: string[] }) => {
+  class FD {
+    f: { ticks: Record<string, string[]> };
+    constructor(f: { ticks: Record<string, string[]> }) { this.f = f; }
+    getAll(k: string) { return this.f.ticks[k] ?? []; }
+    get(k: string) { return this.f.ticks[k]?.[0] ?? null; }
+  }
+  const page = (app as unknown as { pages: Map<string, { submit(f: unknown, F: unknown): Promise<boolean> | null }> }).pages.get("tables")!;
+  return page.submit({ dataset: { pickForm: table }, ticks }, FD);
+};
+const pickAnswer = (table: string, o: Record<string, unknown> = {}) => ({ table, file: "/app/mason/sources/shop.yml", entry: table.slice("public.".length), columns: null, exclude: [], key: null,
+  addedKey: [], skippedSecrets: [], already: false, sync: { value: "off", from: "default" }, bigOff: false, notReplicated: null, pollCost: null, ...o });
+
+test("the app: opening the column form on an added table reads its columns once; saving a change sends POST api/pick as mason add --columns, then the state; the answer beside its columns", async () => {
+  const { run, app, call } = await appOver(COL_STATE);
+  run.answers.set("GET api/tables/public.orders/columns", run.json(columnsOf("orders")));
+  assert.equal(await call<Promise<boolean>>("choose", "public.orders"), true);
+  assert.deepEqual(run.asked, ["GET api/tables/public.orders/columns"]);
+  assert.ok(tablesModel(app).held !== null, "the list held still while it is open");
+  assert.deepEqual(ticksOf(popOf(app.view().tables!, "columns-tables-public.orders"), "columns"), ["id", "status"]);
+  // a poll keeps it open: the table is still added
+  await app.poll();
+  assert.equal(tablesModel(app).choosing, "public.orders");
+  run.answers.set("POST api/pick", run.json(pickAnswer("public.orders", { columns: ["id", "name", "status"] })));
+  run.asked.length = 0;
+  assert.equal(await submitForm(app, "public.orders", { columns: ["id", "name", "status"] }), true);
+  assert.deepEqual(run.asked, [`POST api/pick ${JSON.stringify({ table: "public.orders", picked: true, columns: ["id", "name", "status"] })}`, "GET api/state"]);
+  const html = app.view().tables!;
+  assert.match(textOf(popOf(html, "columns-tables-public.orders")), /^Added public\.orders to mason\/sources\/shop\.yml: id, name, status sync: off /);
+  assert.ok(!html.includes("data-pick-form"), "the form closed");
+  assert.ok(!html.includes("Adding…"), "an added table is not said to be added again");
+});
+
+test("the app: saving the same choice sends the entry as it is — the run answers already so, writes nothing and starts no sync", async () => {
+  const cases: Array<[keyof typeof COLS, { columns?: string[]; key?: string[] }, Record<string, unknown>]> = [
+    // its columns ticked in another order, its key left unticked (always synced): the entry's own list
+    ["orders", { columns: ["status"] }, { table: "public.orders", picked: true, columns: ["id", "status"] }],
+    // every column: none ticked, none sent
+    ["customers", {}, { table: "public.customers", picked: true }],
+    ["accounts", {}, { table: "public.accounts", picked: true }],
+    // its key as the entry orders it
+    ["raw_log", { columns: ["body", "seq", "tenant_id"], key: ["seq", "tenant_id"] }, { table: "public.raw_log", picked: true, columns: ["tenant_id", "seq", "body"], key: ["tenant_id", "seq"] }],
+  ];
+  for (const [name, ticks, body] of cases) {
+    const { run, app, call } = await appOver(COL_STATE);
+    run.answers.set(`GET api/tables/public.${name}/columns`, run.json(columnsOf(name)));
+    run.answers.set("POST api/pick", run.json(pickAnswer(`public.${name}`, { already: true })));
+    await call("choose", `public.${name}`);
+    run.asked.length = 0;
+    await submitForm(app, `public.${name}`, ticks);
+    assert.equal(run.asked[0], `POST api/pick ${JSON.stringify(body)}`, name);
+    assert.match(textOf(popOf(app.view().tables!, `columns-tables-public.${name}`)), /\(already so\)/, name);
+  }
+  // the form the boxes cannot show: what they say is sent, which replaces the entry (said in the form first)
+  const { run, app, call } = await appOver(COL_STATE);
+  run.answers.set("GET api/tables/public.invoices/columns", run.json(columnsOf("invoices")));
+  run.answers.set("POST api/pick", run.json(pickAnswer("public.invoices", { columns: ["id", "status"] })));
+  await call("choose", "public.invoices");
+  run.asked.length = 0;
+  await submitForm(app, "public.invoices", { columns: ["id", "status"] });
+  assert.equal(run.asked[0], `POST api/pick ${JSON.stringify({ table: "public.invoices", picked: true, columns: ["id", "status"] })}`);
+});
+
+test("the app: a refused save is said over the form, its boxes as they were ticked; a table removed elsewhere takes its form with it", async () => {
+  const { run, app, call } = await appOver(COL_STATE);
+  run.answers.set("GET api/tables/public.orders/columns", run.json(columnsOf("orders")));
+  run.answers.set("POST api/pick", run.json({ error: "x", failure: { code: "refused", message: "public.orders has no column nope", next: [] } }, 400));
+  await call("choose", "public.orders");
+  assert.equal(await submitForm(app, "public.orders", { columns: ["name"] }), false);
+  const form = popOf(app.view().tables!, "columns-tables-public.orders");
+  assert.match(textOf(form), /^✗ public\.orders has no column nope The columns orders syncs /);
+  assert.deepEqual(ticksOf(form, "columns"), ["name"]);
+  // removed elsewhere (mason remove): the next poll closes the form
+  const removed = JSON.parse(JSON.stringify(COL_STATE)) as { tables: Array<Record<string, unknown>> };
+  for (const t of removed.tables) if (t.table === "public.orders") { t.added = false; delete t.entry; }
+  run.answers.set("GET api/state", run.json(removed));
+  await app.poll();
+  assert.equal(tablesModel(app).choosing, null);
 });

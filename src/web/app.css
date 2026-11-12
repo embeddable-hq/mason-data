@@ -485,7 +485,7 @@ details.memory, details#syncs-raw { margin: var(--space-4) 0; }
    over its bar, a line kept when it has none) and its note under it, across every column, written for every row (empty
    when it says nothing). A question, a form and an answer are popovers beside the row's actions (`.pop`), never a row.
    The row's actions never wrap and never leave the card: they stay pinned at its right where the table scrolls. */
-table.catalog { table-layout: fixed; width: 100%; min-width: 856px; }
+table.catalog { table-layout: fixed; width: 100%; min-width: 630px; }
 table.catalog th.state { width: 146px; }
 table.catalog th.rows { width: 116px; }
 table.catalog th.key { width: 104px; }
@@ -496,6 +496,22 @@ table.catalog th.size { width: 100px; }
    cut what overflows with "…", so a column narrower than its buttons hides the last one (issue 881):
    tests/web-tables-actions.test.ts measures them in a browser */
 table.catalog th.act { width: 284px; }
+/* THE NAME KEEPS ITS ROOM, AT EVERY WIDTH (issue 884: it was 2 px at 1024 px, the fixed columns filling the list's least
+   width): measured against the list's own card (a container query, so the sidebar, the rail and the window's width are
+   all counted once), at least 200 px for the name — a typical schema.table, cut with "…" and whole on hover — and the
+   less important columns give way first: Key, then Size, then Last sync, then Rows. A column given way (no width, its
+   cells unseen: still the table's seven columns, which a note's colspan spans) says its fact in the row's note instead
+   (`.fold`, src/web/pages/tables.js), so nothing is lost; below all of them the list scrolls in its card. A phone keeps every column, the list scrolling in its card (below). Detector:
+   tests/web-tables-layout.test.ts, every width from 1000 to 1400 px. */
+.panel:has(> table.catalog) { container: catalog / inline-size; }
+table.catalog .fold { display: none; }
+table.catalog .fold::before { content: attr(data-fold); }
+@media (min-width: 641px) {
+  @container catalog (max-width: 1053px) { table.catalog :is(th, td).key { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-key { display: inline; } }
+  @container catalog (max-width: 949px) { table.catalog :is(th, td).size { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-size { display: inline; } }
+  @container catalog (max-width: 849px) { table.catalog :is(th, td).last { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-last { display: inline; } }
+  @container catalog (max-width: 745px) { table.catalog :is(th, td).rows { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-rows { display: inline; } }
+}
 table.catalog th, table.catalog td { overflow: hidden; text-overflow: ellipsis; }
 table.catalog code.name { display: block; max-width: 100%; }
 table.catalog td.state { white-space: nowrap; }
@@ -516,6 +532,10 @@ table.catalog tr.note .under-body { font-size: var(--text-sm); line-height: 20px
 .pop.ask:has(.confirm) { border-top-color: var(--bad); }
 .pop.said { border-left: 4px solid var(--ok); }
 .pop.said:has(.failure) { border-left-color: var(--bad); }
+/* an answer that could be placed only over another control lets a click through to it: its own buttons alone take one
+   (placePops, src/web/shared.js) */
+.pop.said.through { pointer-events: none; }
+.pop.said.through :is(button, a[href], summary, input, select, textarea) { pointer-events: auto; }
 .pop > :first-child { margin-top: 0; }
 .pop > :last-child { margin-bottom: 0; }
 .pop .confirm { margin: 0 0 var(--space-2); color: var(--fg); }

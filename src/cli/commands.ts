@@ -57,6 +57,14 @@ export interface TableState extends Omit<CatalogTable, "columns"> {
   /** its columns: only in the state asked with `?columns=1` (readState; mason status --json carries them), never in
    *  the lean one the page polls (src/cli/run-server.ts runState) */
   columns?: ColumnState[];
+  /** how many columns it has (the lean state's too: the page's "5 of 12 columns"); absent from a run before it was said */
+  columnCount?: number;
+  /** an added table's entry as the sources file says it: `columns:` (null: every column but `exclude:`), `exclude:`, `key:`
+   *  (null: its primary key); absent for a table not added, and from a run before it was said */
+  entry?: { columns: string[] | null; exclude: string[]; key: string[] | null };
+  /** an added table's columns that every column leaves out (`mason add <table>` with no --columns: the secret-looking
+   *  ones, sources.ts everyColumnLeavesOut); absent with `entry` */
+  everyColumnLeavesOut?: string[];
   copy: { phase: "copying" | "done" | "failed"; rowsCopied: number; updatedAt: string;
     /** while its chunks are read: the chunks done and reading, the measured rate, the time left, as of the moment the
      *  state was asked (src/duck/sync.ts copyProgressNow) */
@@ -477,7 +485,10 @@ const STATUS_USAGE = `usage: mason status [--json]
     source's: its sources file's), file (the sources file), shownFile (it from the project's root), url, database, remote, version, standby, changes,
     replication, demo (the demo database this run hosts), textOrder (what reading the database's text order left to say), sync: { default (every table's sync unless its entry
     says its own: off, poll 30s), written (the file's top sync: says it; false: the default) } }, warnings, folder, project, tables: [{ table, rows,
-    bytes, key, added, addedColumns, copy, error (why its sync failed: its first sync, or the poll, catch-up, stream or
+    bytes, key, added, columnCount (how many columns the table has), entry (an added table's entry as the sources file
+    says it: { columns (null: every column but exclude), exclude, key (null: its primary key) }), everyColumnLeavesOut
+    (an added table's columns that mason add <table> with no --columns leaves out: they look like secrets),
+    addedColumns, copy, error (why its sync failed: its first sync, or the poll, catch-up, stream or
     publication check keeping a synced table current; null otherwise), kept, syncRefusal (why mason sync <table> is
     refused now, in its words: its first sync not finished or failed, being read again whole, being caught up; null
     when it would run), sync: { state (synced, syncing, catching-up: served and caught up by one poll

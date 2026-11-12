@@ -97,7 +97,29 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   (Columns…) and what an action answered are popovers beside the button, over the rows and never between them — an
   answer, like a refusal, stays until it is dismissed (its Dismiss, Escape, or the next action's answer or question in
   its place) — and only an expander the reader opens (a request's details, a first sync's whole error) pushes the rows
-  under it down.
+  under it down. **What Add or Sync now answered covers no other control** (issue 884): the answer is placed under its
+  row's actions, over them or on their left, wherever it covers no button, link or box of any row; where every place
+  covers one (a phone's rows, or a long answer beside a narrow list), a click goes through it to what is under it, and
+  its own Dismiss is placed over none (`placePops`, src/web/shared.js).
+- **Tables**, **the name keeps its room at every width** (issue 884: it was 2 px at 1024 px): measured against the
+  list's card, the name gets at least 200 px, cut with an ellipsis and whole on hover, and the less important columns
+  give way first: Key below about 1340 px, then Size (1240), Last sync (1140) and Rows (1040) beside the full sidebar.
+  A column given way says its fact in the row's note instead ("key id", "size 1.2 MiB", "last sync 3 h ago, took
+  0.2 s", "1,200 rows"). The page never scrolls sideways; on a phone every column is kept, the list scrolling inside its
+  card.
+- **Tables**, an added table's **columns**, on its note beside its sync: which it syncs in a few words — "All columns",
+  "5 of 12 columns" or "All but 1 column", the columns themselves its tooltip (`/api/state` `tables[].entry`,
+  `addedColumns`, `columnCount`). It is a button that opens the table's **column form**, a dialog beside it that reads
+  `GET /api/tables/<table>/columns` once, as it opens, ticked as the entry says: its `columns:`; none ticked for every
+  column (`{}`, or the `exclude:` of secret-looking columns `mason add` writes: `everyColumnLeavesOut`); and, for a
+  table with no primary key, its `key:`. Before Save it says what saving costs: the table is synced again in full from
+  the database, which takes a while and adds load on a big table, and its synced data can still be queried until the
+  new sync finishes; saving the same columns changes nothing and starts no sync. Save sends `POST /api/pick`
+  `{ table, picked: true, columns?, key? }`, as `mason add <table> --columns …` does, its sync kept; boxes that say what
+  the entry says send the entry's own lists, so the run answers `already` and writes nothing. **An entry the boxes cannot
+  show** — an `exclude:` written by hand, or every column with a secret-looking one kept on purpose — is described at
+  the top of the form, its boxes the columns synced now, and the form says that saving replaces the entry with the
+  columns ticked. Where the page may not edit the sources file, the columns are said alone, with no button.
 - **Tables**, an added table's **sync**, first on its note (`Sync: Off`, `Sync: Every 5 minutes`, `Sync: Live
   (replication)`, as the run keeps it now: `/api/state` `tables[].kept`): a button that opens its **Sync choice**, a
   dialog beside it that reads `GET /api/tables/<table>/sync` once, as it opens (never on a timer: it opens a connection
@@ -605,7 +627,10 @@ reads:
   `rows` (the catalog's estimate, or null), `bytes`, `key` (its primary key's columns, `[]` for none), `comment`,
   `added`, `reason` (why `mason add` without a key cannot add it: no primary key, with the `--key` to name; null for a
   table that can be added and for one added), `addedColumns` and `copyKey` (what its entry syncs, and the key it names;
-  null when not added), `copy` (its first sync, below, or null) and `error`. An added
+  null when not added), `columnCount` (how many columns the table has), an added table's `entry` (its entry as the
+  sources file says it: `{ columns, exclude, key }`, `columns` null for every column but `exclude`, `key` null for its
+  primary key) and `everyColumnLeavesOut` (the columns `mason add <table>` with no `--columns` leaves out: they look
+  like secrets), `copy` (its first sync, below, or null) and `error`. An added
   table also has `sync`: `state` (`waiting`, `syncing`, `synced`, `behind`, `failed`), `syncedAt`, `syncSeconds`,
   `syncedBy`, `ageSeconds`, `asOf`, `promisedSeconds`, `behindBySeconds`, `behindWhy`, and `syncRefusal`: why `mason
   sync <table>` (Sync now) is refused now, in the words it refuses with (its first sync not finished or failed, being
