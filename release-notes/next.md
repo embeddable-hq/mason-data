@@ -2,6 +2,14 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **The web page no longer shows a psql line**: the Users page's Connect card keeps Host, Port, Database, SSL mode and
+  URL, and the Overview's Connect (and Queries' when the request log is empty) keeps the URL, each with Copy; Getting
+  started's last step no longer has a "Copy the psql line" button. Paste the URL after `psql`. `mason status` and
+  `--json`'s `psql` field are unchanged.
+
+- **The web page's card for a user just added shows URL, User and Password only**, each with Copy: the Database, Host,
+  Port and SSL mode it repeated are on the Users page's Connect card below it. `mason user add --json` is unchanged.
+
 - **Every example in a box on the web page now starts with "e.g."**: the Tables and Queries search boxes say
   `e.g. orders`, Queries' since `e.g. 2h`, and a new user's name and where it connects from `e.g. metabase` and
   `e.g. 192.0.2.0/24, 2001:db8::/32`, so an example is never taken for a value already filled in.
