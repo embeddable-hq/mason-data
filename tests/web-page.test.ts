@@ -1340,9 +1340,47 @@ test("the Overview while the poll fails with nothing read yet: Unknown, and why,
   assert.equal(v.poll, "");
 });
 
+test("a stale page's answer to what the person just did is never greyed: a Sync's popover on Tables, Add a user's Failure on Users (and what holds them)", async () => {
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
+  // the one rule that greys a stale section: what it leaves out, itself and whatever holds it
+  const rule = /section\[data-stale\] > div\[id\] > :not\(([^{]*)\) \{ opacity: [0-9.]+; \}/.exec(css);
+  assert.ok(rule, "the stale rule");
+  assert.equal(css.match(/data-stale/g)?.length, 2, "one rule greys a stale section (and its comment names it)");
+  const kept = (cls: string) => new RegExp(`(^|[ ,(])\\.${cls}(?=[ ,)])`).test(rule[1]!) && new RegExp(`:has\\([^)]*\\.${cls}[ ,)]`).test(rule[1]!);
+  const outer = (html: string) => /^<div class="([a-z-]+)/.exec(html)?.[1] ?? "";
+  const run = fakeRun();
+  run.answers.set("GET api/state", () => new Response(JSON.stringify(SYNCED), { status: 200 }));
+  const app = fn<[unknown], StaleApp>("createApp")(run.fetch) as StaleApp & { syncTable(t: string): Promise<boolean> };
+  app.show("tables");
+  await app.poll();
+  await app.poll();
+  run.answers.clear();
+  await app.poll();
+  assert.notEqual(app.stale(), null, "Tables is out of date");
+  assert.equal(await app.syncTable("public.events"), false);
+  const answer = popOf(app.view().tables!, "act-tables-public.events");
+  assert.match(textOf(answer), /Mason does not answer at this address/, "the click's answer, in its popover");
+  assert.equal(outer(answer), "pop");
+  assert.ok(kept("pop"), "a popover is from now: never greyed, nor what holds it");
+  // Users: read, then the run stops, then Add a user
+  app.show("users");
+  for (const [k, a] of new Map(fakeRun().answers)) run.answers.set(k, a);
+  await app.poll();
+  run.answers.clear();
+  app.show("users");
+  await app.poll();
+  assert.notEqual(app.stale(), null, "Users is out of date");
+  assert.equal(await app.addUser("grafana"), false);
+  const action = app.view().action!;
+  assert.match(textOf(action), /Mason does not answer at this address/);
+  assert.equal(outer(action), "failure");
+  assert.ok(kept("failure"), "a Failure that answers an action is from now");
+  assert.ok(kept("added"), "an added user's password, shown once, is from now");
+});
+
 test("in the browser: the shown section is greyed while the poll fails after a good read (its parts, not its controls), never another's, and current again at the first answer", async () => {
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
-  assert.match(css, /section\[data-stale\] > div\[id\] > :not\(\.health\) \{ opacity: 0\.55; \}/, "a stale section's parts greyed; the word says it itself");
+  assert.match(css, /section\[data-stale\] > div\[id\] > :not\(\.health, [^{]*\) \{ opacity: 0\.55; \}/, "a stale section's parts greyed; the word says it itself");
   assert.match(css, /\.health\.stale \.word \{ color: var\(--muted\); \}/);
   const run = fakeRun();
   const kept = new Map(run.answers);

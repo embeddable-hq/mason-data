@@ -249,8 +249,9 @@ section { margin: 0; }
 .health.bad .dot { background: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft); }
 /* while the poll fails (issue 886): what the shown page read before greyed (`[data-stale]`, set by app.js on its
    section: the parts the page writes, never its head or a toolbar), the word grey with as of when and why beside it,
-   the banner's line the same; current again the moment a poll answers */
-section[data-stale] > div[id] > :not(.health) { opacity: 0.55; }
+   the banner's line the same; current again the moment a poll answers. An answer to what the person just did (a
+   popover, a Failure, an added user's password, a share's line) is from now: never greyed, nor what holds one */
+section[data-stale] > div[id] > :not(.health, .pop, .failure, .added, .said, :has(.pop, .failure, .added, .said)) { opacity: 0.55; }
 .health.stale { flex-wrap: wrap; }
 .health.stale .dot { background: var(--unknown); box-shadow: 0 0 0 3px var(--line); }
 .health.stale .word { color: var(--muted); }
