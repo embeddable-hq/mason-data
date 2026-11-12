@@ -3256,6 +3256,16 @@ are written into the file at DuckDB's own checkpoint, when the log passes 16 MiB
 kept: the synced data's file counts its write-ahead log (src/duck/file-bytes.ts `syncedDataBytes`, the one reader).
 **Where.** src/duck/usage.ts (`size`), src/duck/file-bytes.ts; tests/duck-usage.test.ts, tests/cli-run-server.test.ts.
 
+**What such a table shows (issue 883; the owner, 2026-11-12).** The Size cell said "—" for three reasons a reader could
+not tell apart. The run now says which, once (`unsizedTables`, src/duck/usage.ts; `GET /api/usage` `unsized`, beside
+`sizedAt`, when the sampler last measured, and `walBytes`, the log's size now — one file-size read, never a checkpoint):
+a served table measured since its first sync with no block is `in-log`, shown `< 3 MiB`, the log's size rounded up to a
+whole MiB (its rows take at most 0.8 times the log, its block 256 KiB, above); one synced after the last measure, or
+before the first measure of the run, `not-measured`, shown `Measuring…`; one whose first sync is not done, nothing. A
+log empty now was checkpointed since the measure, so such a table is `not-measured`: its rows are in the file. What the
+limit cannot see: a checkpoint since the measure and a new log smaller than the table's rows — the next measure, within
+10 minutes, finds its blocks.
+
 ### First copy, and the poll's cost on the source
 
 Four tables of a real database (the largest keyed tables under 5 GiB), each copied in one transaction through the

@@ -488,7 +488,7 @@ table.catalog th.state { width: 146px; }
 table.catalog th.rows { width: 116px; }
 table.catalog th.key { width: 104px; }
 table.catalog th.last { width: 104px; }
-table.catalog th.size { width: 100px; }
+table.catalog th.size { width: 116px; }   /* "Measuring…" whole (issue 883), as wide as Rows */
 table.catalog th.act { width: 268px; }
 table.catalog th, table.catalog td { overflow: hidden; text-overflow: ellipsis; }
 table.catalog code.name { display: block; max-width: 100%; }

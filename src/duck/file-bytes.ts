@@ -7,12 +7,20 @@
  */
 import * as fs from "node:fs";
 
+const size = (f: string): number | null => {
+  try { return fs.statSync(f).size; }
+  catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw e; }
+};
+
 /** The file's bytes and its write-ahead log's (none between checkpoints), or null when the file is not there. */
 export function syncedDataBytes(file: string): number | null {
-  const size = (f: string): number | null => {
-    try { return fs.statSync(f).size; }
-    catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw e; }
-  };
   const main = size(file);
-  return main === null ? null : main + (size(`${file}.wal`) ?? 0);
+  return main === null ? null : main + (walBytes(file) ?? 0);
+}
+
+/** The write-ahead log's bytes alone (`<file>.wal`), or null when there is none (nothing written since a checkpoint):
+ *  one file-size read, no database work — what a synced table whose rows are all in the log is under
+ *  (src/duck/usage.ts `unsizedTables`, issue 883). */
+export function walBytes(file: string): number | null {
+  return size(`${file}.wal`);
 }

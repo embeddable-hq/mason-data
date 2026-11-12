@@ -36,7 +36,8 @@
  * for the life of a run (issue 815). The sampler NEVER checkpoints to measure one (the owner, 2026-11-11): a checkpoint
  * DuckDB cannot finish — a full disk, out of memory — invalidates the database until the run restarts, and a size is not
  * worth a new way to stop a run serving (docs/DESIGN.md "A small table's size"). The page and `mason usage` say why
- * such a table has no size.
+ * such a table has no size (`unsizedTables`, issue 883): measured since its first sync with no block, it is under the
+ * log's size; synced since the last measure, it is being measured.
  *
  * The Postgres catalog never lists `_mason`, so a tool connected to the listener cannot read the samples.
  */
@@ -170,6 +171,33 @@ export interface UsageSample {
 /** One copy's own bytes, as last measured. */
 export interface CopySize { table: string; bytes: number; at: string }
 
+/**
+ * A SYNCED TABLE WITH NO SIZE, and why (issue 883): `in-log` — measured since its first sync finished, it had no block
+ * of its own, so all its rows are in the write-ahead log and it takes less room than the log: `underBytes`, the log's
+ * size now rounded up to a whole MiB; `not-measured` — its first sync finished after the last measure (or none was
+ * taken yet in this run), so it is measured within SIZE_EVERY_MS. A table whose first sync is not done is neither.
+ */
+export interface UnsizedTable { table: string; why: "in-log" | "not-measured"; underBytes: number | null }
+
+const MIB = 1024 ** 2;
+
+/**
+ * Each SERVED copy (phase copied) with no size in `sizes`, and why: ONE rule, the run's (`GET /api/usage` `unsized`),
+ * which `mason usage` and the Tables page both render. `sizedAt` is when the sampler last measured (null: not yet in
+ * this run); `wal` the log's bytes now (null: none). A log empty now was checkpointed since the measure, so the table's
+ * rows are in the file and it is `not-measured`: the log's size would bound nothing.
+ */
+export function unsizedTables(copies: ReadonlyArray<{ source: string; phase: string; copiedAt: string | null }>, sizes: readonly CopySize[],
+  sizedAt: string | null, wal: number | null): UnsizedTable[] {
+  const sized = new Set(sizes.map((c) => c.table));
+  return copies.filter((c) => c.phase === "copied" && !sized.has(c.source)).map((c): UnsizedTable => {
+    const measuredSince = sizedAt !== null && (c.copiedAt === null || Date.parse(c.copiedAt) <= Date.parse(sizedAt));
+    return measuredSince && wal !== null && wal > 0
+      ? { table: c.source, why: "in-log", underBytes: Math.ceil(wal / MIB) * MIB }
+      : { table: c.source, why: "not-measured", underBytes: null };
+  }).sort((a, b) => (a.table < b.table ? -1 : a.table > b.table ? 1 : 0));
+}
+
 /** What a reader asks of the samples: from, until (ISO), and a bucket in seconds (absent: every sample). */
 export interface UsageQuery { since: string; until: string; stepSeconds?: number }
 
@@ -245,6 +273,8 @@ export class UsageSampler {
   private take: (() => Promise<UsageFacts>) | null = null;
   private lastSized = -Infinity;
   private sizedOnce = false;
+  /** when the copies' sizes were last measured whole, ISO; null before the first in this run */
+  private measuredAt: string | null = null;
   /** a streak of failures, said once: what failed (a sample taken, written, sized), and how many */
   private readonly lost = new Map<string, Streak>();
   private closed = false;
@@ -328,6 +358,9 @@ export class UsageSampler {
     if (this.take === null) return;
     let facts: UsageFacts;
     let copyMemory: number | null;
+    // the copies a measure sizes are the facts' (`facts.copied`): a first sync that finished after this instant may not
+    // be among them, so this is when a measure says it measured (`sizedAt`), never the later `now`
+    const factsAt = this.now();
     try {
       facts = await this.take();
       copyMemory = await this.copyMemory();
@@ -361,7 +394,7 @@ export class UsageSampler {
     }
     if (now - this.lastSized >= (this.options.sizeEveryMs ?? SIZE_EVERY_MS)) {
       this.lastSized = now;
-      await this.size(facts.copied, now);
+      await this.size(facts.copied, now, factsAt);
     }
   }
 
@@ -372,7 +405,7 @@ export class UsageSampler {
   }
 
   /** Each served copy's own bytes, written as one batch (see the module's comment for how, and what it costs). */
-  private async size(copied: readonly string[], now: number): Promise<void> {
+  private async size(copied: readonly string[], now: number, factsAt: number): Promise<void> {
     const t0 = performance.now();
     const rows: Array<[string, number]> = [];
     try {
@@ -413,6 +446,7 @@ export class UsageSampler {
       return;
     }
     this.ok("measuring each synced table's size");
+    this.measuredAt = new Date(factsAt).toISOString();
     // the first measure of a run is said with its time: what it costs on this machine's copies, read from the log
     if (!this.sizedOnce) { this.sizedOnce = true; this.log(`usage: measured ${rows.length} synced tables' own size in ${Math.round(performance.now() - t0)} ms (every ${Math.round((this.options.sizeEveryMs ?? SIZE_EVERY_MS) / 60_000)} min)`); }
   }
@@ -452,6 +486,10 @@ export class UsageSampler {
       .getRowsJS() as Array<[string, bigint | number, bigint | number]>;
     return rows.map(([table, bytes, at]) => ({ table, bytes: Number(bytes), at: new Date(Number(at)).toISOString() }));
   }
+
+  /** When the copies' sizes were last measured whole in this run, ISO (the time the measure was taken); null before the
+   *  first, a sample's interval after the start. */
+  sizedAt(): string | null { return this.measuredAt; }
 
   /** Stops sampling, waits for a sample in flight, and closes the samples' connections (mason stop). */
   async close(): Promise<void> {

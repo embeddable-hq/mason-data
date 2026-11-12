@@ -143,9 +143,23 @@ test("a copy small enough to stay in the write-ahead log is not measured, never 
   const u = await UsageSampler.open(store, () => undefined, { days: 7, now: () => clock, sampleMs: NEVER, sizeEveryMs: 1 });
   try {
     u.start(async () => ({ ...facts, copied: ["app.fresh"] }));
+    assert.equal(u.sizedAt(), null, "not measured yet in this run");
     await u.sample();
     await u.sample();
     assert.deepEqual((await u.copySizes()).filter((c) => c.table === "app.fresh"), [], "not measured until its rows are in the file, never 0");
+    // WHY IT HAS NO SIZE (issue 883): measured since its first sync, its rows all in the log, so it is under the log's
+    // size rounded up to a MiB — what mason usage and the Tables page say; one synced after the measure is being measured
+    assert.equal(u.sizedAt(), new Date(clock).toISOString(), "when the sizes were measured");
+    const { unsizedTables } = await usage();
+    const { walBytes: logBytes } = await import("../src/duck/file-bytes.ts");
+    const log = logBytes(file)!;
+    assert.ok(log > 0, "the log's size, one file-size read");
+    const before = new Date(clock - 60_000).toISOString(), after = new Date(clock + 60_000).toISOString();
+    assert.deepEqual(unsizedTables([{ source: "app.fresh", phase: "copied", copiedAt: before }, { source: "app.later", phase: "copied", copiedAt: after },
+      { source: "app.first", phase: "copying", copiedAt: null }], await u.copySizes(), u.sizedAt(), log), [
+      { table: "app.fresh", why: "in-log", underBytes: Math.ceil(log / 2 ** 20) * 2 ** 20 },
+      { table: "app.later", why: "not-measured", underBytes: null },
+    ]);
     assert.equal(Number((await store.writer.runAndReadAll(`SELECT count(*) FROM _mason.copy_sizes WHERE table_name = 'app.fresh'`)).getRowsJS()[0]![0]), 0, "no row written for it, not even a 0");
     // no checkpoint was taken: its rows are still in the log, and the module issues none
     assert.equal(await persistent(), 0, "its rows still in the write-ahead log");

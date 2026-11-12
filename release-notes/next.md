@@ -17,6 +17,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   Connect, then the Add a user form, then the users; arriving on it (from the sidebar or a link) puts the cursor in
   Name, ready to type, except on a touch screen, on a read-only page, or when you have already clicked into something.
 
+- **A synced table with no size says why, instead of "—".** On the web page's Tables, a table whose rows are not in
+  the main file yet shows `< 3 MiB` (all its rows are in the write-ahead log, so it takes less than the log's size), one synced since sizes were last
+  measured shows `Measuring…`, and one whose first sync is not done shows nothing; each says why on hover. `mason usage`
+  lists those tables the same way under the sizes, and `--json` adds `sizedAt`, `walBytes` and `unsized`.
+
 ## What was wrong and is now right
 
 - **The web page's Add a user form no longer jumps when "Connects from" is toggled.** Ticking "Only from these

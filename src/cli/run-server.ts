@@ -39,7 +39,7 @@ import { errorJson, nextJson, type Failure, type NextStep } from "./command.ts";
 import { phaseCounts, readiness, syncTotals, tableSync, type SyncFacts, type SyncTotals } from "./readiness.ts";
 import { restartsFact, type Restart } from "./supervise.ts";
 import { withRestarts, type SyncEvents } from "../duck/events.ts";
-import { syncedDataBytes } from "../duck/file-bytes.ts";
+import { syncedDataBytes, walBytes } from "../duck/file-bytes.ts";
 import { NO_ROLES, type RolesLive } from "../duck/grants.ts";
 import { addedNext, addUser, attributesToAdd, disabledNext, disableUser, enabledNext, enableUser, fromNext, listUsers, rangesText, removeUser, REMOVED_NEXT, roleToAdd, setUserFrom, withLastUsed } from "./user.ts";
 import { userRole } from "./roles.ts";
@@ -58,7 +58,7 @@ import type { PgApiServer } from "../api/postgres/server.ts";
 import { tunnelReport, type RunShares } from "./share-run.ts";
 import type { PageShares } from "./page-share.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
-import type { CopySize, UsageFacts, UsageSample, UsageSampler } from "../duck/usage.ts";
+import { unsizedTables, type CopySize, type UnsizedTable, type UsageFacts, type UsageSample, type UsageSampler } from "../duck/usage.ts";
 import { FRESH_SAMPLES, type RunMetrics } from "./metrics.ts";
 
 /** A statement answered in this many milliseconds or more is slow (one constant: src/api/request-log.ts SLOW_MS, the
@@ -158,7 +158,7 @@ export interface RunContext {
     /** the sync's failures and notable events (src/duck/events.ts, `_mason.sync_events`): mason logs --events, mason status */
     events: Pick<SyncEvents, "recent" | "days">;
     /** usage over time (src/duck/usage.ts, `_mason.usage`): mason usage */
-    usage: Pick<UsageSampler, "samples" | "copySizes" | "days" | "sampleSeconds" | "statementTotals" | "lastDurations">;
+    usage: Pick<UsageSampler, "samples" | "copySizes" | "sizedAt" | "days" | "sampleSeconds" | "statementTotals" | "lastDurations">;
     /** the run's restarts, as its supervisor records them in `.mason/restarts.json` (src/cli/supervise.ts readRestarts:
      *  a file that cannot be read throws, said as the request's failure); merged with the events */
     restarts: () => Restart[];
@@ -441,11 +441,12 @@ const DAY_S = 86_400;
  * `GET /api/usage?since=&until=&step=`: the samples from `since` (default an hour ago) until `until` (default
  * now), oldest first; with `step` (seconds, at least a sample's interval) re-bucketed in one query, each count summed and
  * each level at its highest — but the p50 and p95 of a point of more than a minute are its statements', read from the
- * request log by when each started (`durationsBy`). And each copy's own bytes as last measured, how often a sample is taken, and the days
- * kept. `mason usage --json` is this.
+ * request log by when each started (`durationsBy`). And each copy's own bytes as last measured, when they were last
+ * measured (`sizedAt`), the write-ahead log's bytes now (`walBytes`), each served copy with no size and why
+ * (`unsized`), how often a sample is taken, and the days kept. `mason usage --json` is this.
  */
 export async function usage(ctx: RunContext, q: URLSearchParams, now = Date.now()): Promise<{ since: string; until: string; stepSeconds: number | null; sampleSeconds: number;
-  keptDays: number; samples: UsageSample[]; copySizes: CopySize[] }> {
+  keptDays: number; samples: UsageSample[]; copySizes: CopySize[]; sizedAt: string | null; walBytes: number | null; unsized: UnsizedTable[] }> {
   const time = (k: "since" | "until", fallback: number): string => {
     const text = q.get(k);
     if (text === null) return new Date(fallback).toISOString();
@@ -467,7 +468,12 @@ export async function usage(ctx: RunContext, q: URLSearchParams, now = Date.now(
     const d = durations.get(Date.parse(s.at));
     return { ...s, durationP50Ms: d?.p50 ?? null, durationP95Ms: d?.p95 ?? null };
   });
-  return { since, until, stepSeconds: step, sampleSeconds: u.sampleSeconds, keptDays: u.days, samples, copySizes: await u.copySizes() };
+  const copySizes = await u.copySizes();
+  // why a served table has no size (issue 883): the rule is the sampler's module's (`unsizedTables`), read once here for
+  // mason usage and the Tables page alike, over the log's size now (one file-size read: never a checkpoint to measure)
+  const sizedAt = u.sizedAt(), wal = walBytes(ctx.duck.file);
+  return { since, until, stepSeconds: step, sampleSeconds: u.sampleSeconds, keptDays: u.days, samples, copySizes,
+    sizedAt, walBytes: wal, unsized: unsizedTables(ctx.duck.copies(), copySizes, sizedAt, wal) };
 }
 
 /**

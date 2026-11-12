@@ -119,7 +119,7 @@ let disk: { path: string; freeBytes: number | null; projectedBytes: number | nul
 const usageAsks: Array<{ since: string; until: string; stepSeconds?: number }> = [];
 const copySize = { table: "public.orders", bytes: 4_194_304, at: "2026-10-28T09:10:00.000Z" };
 let usageSamples: Array<Record<string, unknown>> = [];
-const usage = { days: 7, sampleSeconds: 60, samples: async (o: { since: string; until: string; stepSeconds?: number }) => { usageAsks.push(o); return usageSamples as never[]; }, copySizes: async () => [copySize], statementTotals: () => ({ completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 }), lastDurations: () => null };
+const usage = { days: 7, sampleSeconds: 60, samples: async (o: { since: string; until: string; stepSeconds?: number }) => { usageAsks.push(o); return usageSamples as never[]; }, copySizes: async () => [copySize], sizedAt: () => null, statementTotals: () => ({ completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 }), lastDurations: () => null };
 const usersFile = path.join(root, "app", ".mason", "users.json");
 const API_KEY = "k".repeat(48);
 const ctx: RunContext = {
@@ -653,7 +653,10 @@ test("usage over time: /api/usage passes since, until and step to the samples, a
   usageAsks.length = 0;
   const one = await get("/api/usage?since=2026-10-28T09:00:00Z&until=2026-10-28T10:00:00Z&step=300");
   assert.equal(one.status, 200);
-  assert.deepEqual(one.body, { since: "2026-10-28T09:00:00.000Z", until: "2026-10-28T10:00:00.000Z", stepSeconds: 300, sampleSeconds: 60, keptDays: 7, samples: [], copySizes: [copySize] });
+  const { unsized, ...rest } = one.body;
+  assert.deepEqual(rest, { since: "2026-10-28T09:00:00.000Z", until: "2026-10-28T10:00:00.000Z", stepSeconds: 300, sampleSeconds: 60, keptDays: 7, samples: [], copySizes: [copySize],
+    sizedAt: null, walBytes: fs.existsSync(`${duckFile}.wal`) ? fs.statSync(`${duckFile}.wal`).size : null });
+  assert.ok(Array.isArray(unsized), "each synced table with no size, and why (issue 883)");
   assert.deepEqual(usageAsks, [{ since: "2026-10-28T09:00:00.000Z", until: "2026-10-28T10:00:00.000Z", stepSeconds: 300 }]);
   const t0 = Date.now();
   const plain = await get("/api/usage");
@@ -684,6 +687,44 @@ test("usage over time: /api/usage passes since, until and step to the samples, a
     assert.deepEqual((minutes.body.samples as Array<Record<string, unknown>>).map((x) => x.durationP95Ms), [5000, 30], "a minute a point is the samples' own");
     assert.equal(durationAsks.length, 1, "and reads no request log");
   } finally { usageSamples = []; }
+});
+
+test("/api/usage says why a synced table has no size: under the write-ahead log's size when measured since its first sync, measuring when synced since, nothing for a first sync not done (issue 883)", async () => {
+  const runServer = await import("../src/cli/run-server.ts");
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "mason-unsized-"));
+  try {
+    const file = path.join(d, "duck.db");
+    fs.writeFileSync(file, "x".repeat(12_288));
+    // a log of 2.3 MiB: a table whose rows are all in it is under 3 MiB
+    fs.writeFileSync(`${file}.wal`, "w".repeat(Math.round(2.3 * 2 ** 20)));
+    const base = { rows: 3, bytes: 8192, seconds: 1, error: null };
+    const states = [
+      { source: "public.orders", phase: "copied", ...base, copiedAt: "2026-10-28T08:00:00.000Z" },   // measured: its size
+      { source: "public.small", phase: "copied", ...base, copiedAt: "2026-10-28T09:00:00.000Z" },    // measured since, no block
+      { source: "public.fresh", phase: "copied", ...base, copiedAt: "2026-10-28T09:12:00.000Z" },    // synced after the measure
+      { source: "public.big", phase: "copying", ...base, copiedAt: null },                           // first sync not done
+      { source: "public.broken", phase: "failed", ...base, copiedAt: null },                         // first sync failed
+    ] as unknown as CopyState[];
+    let sizedAt: string | null = "2026-10-28T09:10:00.000Z";
+    const c: RunContext = { ...ctx, duck: { ...ctx.duck, file, copies: () => states, usage: { ...usage, sizedAt: () => sizedAt } } };
+    const q = new URLSearchParams({ since: "2026-10-28T09:00:00Z", until: "2026-10-28T10:00:00Z" });
+    const b = await runServer.usage(c, q);
+    assert.equal(b.sizedAt, "2026-10-28T09:10:00.000Z");
+    assert.equal(b.walBytes, Math.round(2.3 * 2 ** 20), "the log's size: one file-size read");
+    assert.deepEqual(b.unsized, [
+      { table: "public.fresh", why: "not-measured", underBytes: null },
+      { table: "public.small", why: "in-log", underBytes: 3 * 2 ** 20 },
+    ], "a measured table is not listed, nor one whose first sync is not done");
+    // no measure yet in this run: every unsized table is being measured
+    sizedAt = null;
+    assert.deepEqual((await runServer.usage(c, q)).unsized.map((u) => [u.table, u.why]), [["public.fresh", "not-measured"], ["public.small", "not-measured"]]);
+    // the log checkpointed since the measure (none now): its rows are in the file, so it is measured next, never "under 0"
+    sizedAt = "2026-10-28T09:10:00.000Z";
+    fs.rmSync(`${file}.wal`);
+    const after = await runServer.usage(c, q);
+    assert.equal(after.walBytes, null);
+    assert.deepEqual(after.unsized.map((u) => [u.table, u.why]), [["public.fresh", "not-measured"], ["public.small", "not-measured"]]);
+  } finally { fs.rmSync(d, { recursive: true, force: true }); }
 });
 
 test("the synced data's file is its bytes AND its write-ahead log's: a small table's rows sit in the log, so the file alone read 12 KiB beside 1.3 MB (issue 815)", async () => {

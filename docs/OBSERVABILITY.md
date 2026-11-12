@@ -90,7 +90,7 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   (`POST /api/sync`) and Remove; one not added
   its rows and key and why it cannot be added as it is, with Add / Columns… / Name its key…. A search box over the names
   and All / Added / Failed / Not added; the first 100 that pass written, then Show more / Show all. Reads `/api/state`
-  (2 s, lean: no table's columns), `/api/usage` `copySizes` (60 s), and a table's columns once as its form opens
+  (2 s, lean: no table's columns), `/api/usage` `copySizes` and `unsized` (60 s: a synced table with no size says why, `< 3 MiB` or `Measuring…`), and a table's columns once as its form opens
   (`/api/tables/<table>/columns`).
 - **Users** (`#users`): today's add form, Disable (asks first) / Enable and Remove, and each user's status (Active /
   Disabled / Removed), when it was added, its last use and its Queries; ONE Connect panel for the run (host, port,
@@ -156,7 +156,7 @@ Key: ✅ built · ⏸ deferred
 | Synced / Syncing / Failed / Pending | ✅ | the copy's phase: done / copying / failed / waiting |
 | Sync duration | ✅ | `sync.syncSeconds`: how long the sync that brought the copy current took |
 | Sync error | ✅ | the current one on the table; its history is the sync events (`mason logs --events`) |
-| Size of the copy | ✅ | `bytes` is the SOURCE table's size; the copy's own size per table is measured every 10 min from its blocks (`/api/usage` `copySizes`, `mason usage`), never per request |
+| Size of the copy | ✅ | `bytes` is the SOURCE table's size; the copy's own size per table is measured every 10 min from its blocks (`/api/usage` `copySizes`, `mason usage`), never per request; a synced table with none says why (`unsized`: its rows all in the write-ahead log, under its size `walBytes`; or synced since the last measure, `sizedAt`) |
 | Search / filter | ✅ | over the list the endpoint returns; no server change for hundreds of tables |
 
 ## 3. Queries
