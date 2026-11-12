@@ -302,6 +302,17 @@ every session needs. Write the rule and one sentence of why; the incident, the m
   exit code. Both get what to run next, from ONE list. The reader is told apart by the stream (`isTTY`) and by `--json`
   only — never by sniffing an environment variable that names an agent. A failure is one shape for both: what is wrong,
   why, the way out, what to run next (`Failure`, `src/cli/command.ts`).
+- **Write plain English for everything a person reads.** This covers the web page, the CLI's output, errors, log
+  lines, release notes, docs, issues and PRs. Aim for an easy reading age:
+  - Write whole sentences. Keep the small words ("the", "a", "is", "can", "will").
+  - Keep sentences short, with one idea each. Don't chain clauses with colons, semicolons and commas.
+  - Use common words. Say "query" rather than "statement" where a user reads it, and "set up" rather than "provision".
+  - Cut any sentence that doesn't help the reader act or understand. A clear label needs no explanation under it.
+
+  For example, write "Choose where hello can connect from. If you limit it, open sessions from other addresses end at
+  their next query." Not "Where hello connects from, as mason user from hello sets it: the sessions it holds from
+  another address end at their next statement." This file and the code's comments are written tersely. That style is
+  for the people building Mason. Never copy it into what a user reads.
 - **A refusal on the wire is Postgres's** (SQLSTATE, message, DETAIL, HINT), and every refusal names its registry entry
   (`src/duck/gaps.ts`): a DuckDB-side refusal without one does not compile; a `PgError` 0A000 in src/api/ without one fails
   `tests/conventions.test.ts` (six older ones are ratcheted there).
