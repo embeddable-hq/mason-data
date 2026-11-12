@@ -36,8 +36,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **An empty list on the web page is one quiet line**, no longer a big box: "No users yet. Create a user for a service
   like a BI tool or your app: add one below.", "No table added yet: add one from the list below, as `mason add
   <table>` does.", and the same on Queries, Usage and Sync events.
-- **Connects from reads "anywhere"** on the Users page (adding a user, and a user's From…), no longer "From
-  anywhere" after its own label.
+- **Connects from is a dropdown** on the Users page (adding a user, and a user's From…): "anywhere" or "only these
+  addresses", which shows the box for the addresses beside it. Nothing in the form moves when you change it, and what
+  is sent is as before.
 - **The Users page lists the users first**, under its title, then the form that adds one (with the card of a user just
   added beside it) and Connect.
 

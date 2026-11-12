@@ -1312,13 +1312,14 @@ test("the users' add form: a Role choice where the roles file names roles, its d
   const form = renderAddUser(state);
   assert.match(form, /<span class="role-field"><label for="user-role">Role<\/label> <select id="user-role" name="role"><option value="" selected>everything \(default\)<\/option><option value="agent">agent<\/option><option value="&lt;b&gt;x&quot;y&lt;\/b&gt;">&lt;b&gt;x&quot;y&lt;\/b&gt;<\/option><\/select><\/span>/);
   assert.ok(!form.includes("<b>"), "a role's name is text, never markup");
-  assert.equal((form.match(/ selected/g) ?? []).length, 1, "one choice preselected: the default");
+  const roleSelect = /<select id="user-role"[\s\S]*?<\/select>/.exec(form)?.[0] ?? "";
+  assert.equal((roleSelect.match(/ selected/g) ?? []).length, 1, "one role preselected: the default");
   assert.ok(form.indexOf('id="user-name"') < form.indexOf('id="user-role"') && form.indexOf('id="user-role"') < form.indexOf('type="submit"'), "Name, Role, Add a user");
   // a file with no default: what mason user add gives with no --role first, no role
   assert.match(renderAddUser(stateOf([], { roles: rolesLive(["agent"], null) })), /<select id="user-role" name="role"><option value="" selected>no role: its statements are refused<\/option><option value="agent">agent<\/option><\/select>/);
   // none: no roles file (the run's state has no roles, or a file of none), a file that names none, one that cannot be read, a read-only page
   const plain = renderAddUser(CATALOG_STATE);
-  assert.ok(!plain.includes("<select"), "no roles in the state: the form as before");
+  assert.ok(!plain.includes("user-role"), "no roles in the state: no Role choice (Connects from is its own dropdown)");
   assert.equal(renderAddUser(stateOf([], { roles: rolesLive([], null, null, null) })), plain, "no roles file: as before");
   assert.equal(renderAddUser(stateOf([], { roles: rolesLive([], null) })), plain, "a file naming no role: as before");
   assert.equal(renderAddUser(stateOf([], { roles: rolesLive(["agent"], "agent", "mason/roles.yml: it is not YAML") })), plain, "while it cannot be read: no choice");
@@ -1490,8 +1491,8 @@ test("the users: From… asks where the user connects from in a popover beside i
   assert.equal(pops.length, 1);
   assert.equal(pops[0]!.anchor, "act-users-looker");
   assert.match(pops[0]!.html, /^<div class="pop ask" data-anchor="act-users-looker" role="dialog" aria-label="Where looker connects from">/);
-  assert.equal(textOf(pops[0]!.html), "Where looker connects from, as mason user from looker sets it: the sessions it holds from another address end at their next statement. Connects from anywhere Only from these addresses Address ranges, comma-separated Change looker Cancel");
-  assert.match(pops[0]!.html, /<input type="radio" name="connects" value="only" checked>/, "opened at its ranges");
+  assert.equal(textOf(pops[0]!.html), "Where looker connects from, as mason user from looker sets it: the sessions it holds from another address end at their next statement. Connects from anywhere only these addresses Address ranges, comma-separated Change looker Cancel");
+  assert.match(pops[0]!.html, /<select id="user-from-connects" name="connects"><option value="any">anywhere<\/option><option value="only" selected>only these addresses<\/option><\/select>/, "opened at its ranges");
   assert.match(pops[0]!.html, /<input id="user-from-from" name="from"[^>]* value="192\.0\.2\.0\/24, 2001:db8::\/32">/);
   assert.match(pops[0]!.html, /<input type="hidden" name="user" value="looker"><\/form>/);
   assert.match(pops[0]!.html, /data-pop-close/, "Escape presses its Cancel");
@@ -1501,16 +1502,21 @@ test("the users: From… asks where the user connects from in a popover beside i
   assert.equal(textOf(withoutPops(asking)), textOf(renderUsers(list, null)), "the rows say what they said");
   // a user from anywhere opens at anywhere, its box empty
   const any = popOf(renderUsers(list, { name: "metabase", verb: "from" }), "act-users-metabase");
-  assert.match(any, /<input type="radio" name="connects" value="any" checked>/);
+  assert.match(any, /<option value="any" selected>anywhere<\/option><option value="only">only these addresses<\/option>/);
   assert.match(any, /name="from"[^>]* value="">/);
 });
 
-test("the add form: Connects from, in mason user add's words — anywhere (the default, no from sent) or Only from these addresses, a comma list as --from takes it, the run judging each", async () => {
+test("the add form: Connects from, a dropdown in mason user add's words — anywhere (the default, no from sent) or only these addresses, the box beside it, a comma list as --from takes it, the run judging each", async () => {
   const renderAddUser = fn<[unknown], string>("renderAddUser");
   const form = renderAddUser(CATALOG_STATE);
-  assert.match(textOf(form), /Name Connects from anywhere Only from these addresses Address ranges, comma-separated Add a user$/);
-  assert.match(form, /<input type="radio" name="connects" value="any" checked> anywhere<\/label>/, "anywhere, the label, is the default, as mason user add with no --from");
-  assert.match(form, /<input type="radio" name="connects" value="only"> Only from these addresses/);
+  assert.match(textOf(form), /Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user$/);
+  assert.match(form, /<span class="connects"><label for="add-user-connects">Connects from<\/label> <select id="add-user-connects" name="connects"><option value="any" selected>anywhere<\/option><option value="only">only these addresses<\/option><\/select> <span class="ranges">/,
+    "a dropdown, its label; anywhere the default, as mason user add with no --from; the box beside it");
+  assert.doesNotMatch(form, /type="radio"|<fieldset/, "no radios");
+  // the box keeps its place while anywhere is chosen (visibility, never display): nothing in the form moves when the choice changes
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
+  assert.match(css, /\.connects:has\(option\[value="any"\]:checked\) \.ranges \{ visibility: hidden; \}/);
+  assert.doesNotMatch(css, /fieldset\.connects|\.connects[^{]*input\[type="radio"\]/, "the radios' rules are gone");
   assert.match(form, /<input id="add-user-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e\.g\. 192\.0\.2\.0\/24, 2001:db8::\/32" value="">/);
   assert.ok(!/pattern=/.test(form), "never validated in the page");
   const { rangesOf } = await import(path.join(WEB, "pages", "users.js") as string) as { rangesOf: (e: unknown) => string[] | null };
@@ -1521,13 +1527,13 @@ test("the add form: Connects from, in mason user add's words — anywhere (the d
   assert.deepEqual(rangesOf({ connects: { value: "only" }, from: { value: "" } }), [], "none: sent as none, for the run to refuse");
 });
 
-test("the app: the add form sends from only when Only from these addresses is chosen; the run's refusal of a range is shown as the run words it", async () => {
+test("the app: the add form sends from only when only these addresses is chosen; the run's refusal of a range is shown as the run words it", async () => {
   const run = fakeRun();
   run.answers.set("GET api/state", answer(CATALOG_STATE));
   const app = fn<[unknown], App & { pages: Map<string, { submit(f: unknown): Promise<void> | null }> }>("createApp")(run.fetch);
   app.show("users");
   await app.poll();
-  assert.match(app.view()["add-user-box"]!, /name="connects" value="only"/);
+  assert.match(app.view()["add-user-box"]!, /name="connects"><option value="any" selected>anywhere<\/option><option value="only">/);
   const password = `mason_0123456789abcdef_${"b".repeat(32)}`;
   run.answers.set("POST api/users", () => new Response(JSON.stringify({ user: "grafana", id: "0123456789abcdef", addedAt: "2026-10-27T09:11:00.000Z", password, database: "shop",
     url: `postgres://grafana:${password}@127.0.0.1:5433/shop`, next: [] }), { status: 200 }));
