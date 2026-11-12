@@ -223,3 +223,39 @@ test("the Postgres API's port avoids the demo database's: a MASON_PG_PORT or a r
     assert.match(e2.why, new RegExp(`^${held.replace(/[()]/g, "\\$&")}, so the Postgres API cannot listen there`));
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+// ISSUE 847: the disk under .mason/ filled, and the run's log stream (no 'error' handler) threw ENOSPC and ended the run.
+// Its log here is Linux's /dev/full, every write of which fails ENOSPC: a full disk, for the log alone
+const devFull = fs.existsSync("/dev/full") ? false : "no /dev/full on this platform (Linux has it): a write that fails for disk space is not made here";
+test("a run whose log cannot be written (a full disk: .mason/mason.log on /dev/full) says so once with the way out, gets ready, and stops as asked", { skip: devFull, timeout: 150_000 }, async () => {
+  const dir = tmp("full-log");
+  let child: ReturnType<typeof spawn> | null = null;
+  try {
+    const init = await runMason(dir, ["init", "demo", "--json"], matrixEnv());
+    assert.equal(init.code, 0, init.stdout + init.stderr);
+    // the demo's database and the Postgres API on ports out of the kernel's reach (tests/test-ports.ts)
+    const envFile = path.join(dir, ".env");
+    fs.writeFileSync(envFile, fs.readFileSync(envFile, "utf8").replace(/127\.0\.0\.1:\d+\/demo/, `127.0.0.1:${await unassignedPort()}/demo`));
+    fs.symlinkSync("/dev/full", path.join(dir, ".mason", "mason.log"));
+    child = spawn(process.execPath, [MAIN, "start", "--attach"], { cwd: dir, env: matrixEnv({ MASON_PG_PORT: String(await unassignedPort()) }), stdio: ["ignore", "pipe", "pipe"] });
+    let out = "", err = "";
+    child.stdout!.on("data", (c: Buffer) => { out += String(c); });
+    child.stderr!.on("data", (c: Buffer) => { err += String(c); });
+    const exited = new Promise<number | null>((r) => child!.once("exit", (c) => r(c)));
+    const ready = await Promise.race([
+      (async () => { while (!out.includes("mason start: ready")) await new Promise((r) => setTimeout(r, 100)); return "ready" as const; })(),
+      exited.then((c) => `exited ${c}`),
+      new Promise<string>((r) => setTimeout(() => r("not ready within 120 s"), 120_000).unref()),
+    ]);
+    assert.equal(ready, "ready", `${out}\n--- stderr\n${err}`);
+    child.kill("SIGTERM");
+    assert.equal(await exited, 0, `stopped as asked: ${err}`);
+    const said = err.split("\n").filter((l) => l.includes("mason.log could not be written"));
+    assert.equal(said.length, 1, `said once: ${err}`);
+    assert.match(said[0]!, /^the run's log .*\/\.mason\/mason\.log could not be written \(ENOSPC: no space left on device, write\): the disk that holds \.mason\/ is full: free disk there \(Mason writes again once there is room, and nothing synced is lost\); the run goes on/);
+    assert.doesNotMatch(err, /Unhandled 'error' event/);
+  } finally {
+    if (child !== null && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

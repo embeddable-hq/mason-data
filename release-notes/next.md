@@ -8,10 +8,17 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
-- **The limit on what statements may spill to disk is in force from the start.** Before, `MASON_SPILL_LIMIT` (and the
-  default, half of the free disk) was shown by the engine but not enforced until the free disk moved by 1 % or more, so
-  with `MASON_SPILL_LIMIT` set, or on a disk whose free space held still, a heavy statement could spill past it and fill
-  the disk under `.mason/`. Now a statement past it fails alone with 53400 from the first statement on. If you set
-  `MASON_SPILL_LIMIT` low, a statement that used to finish by spilling past it now fails with 53400: raise it, or ask
-  for less at once. Mason also checks every engine setting it gives at the start, and refuses to start, naming the
-  setting, if one is not what it gave.
+- **The limit on what statements may spill to disk is in force from the start.** Before, the limit (half of the free
+  disk under `.mason/`, or `MASON_SPILL_LIMIT`) was not enforced until the free disk moved by 1 % or more, so a heavy
+  statement could spill past it and fill the disk. Now a statement past it fails alone with 53400 and Mason's hint.
+  This applies at the default too: a statement, or many at once, that used to finish by spilling past half of the free
+  disk now fails with 53400. Set `MASON_SPILL_LIMIT` (for example `40GB`) to raise the limit, or ask for less at once.
+  Mason also checks every engine setting it gives at the start, and refuses to start, naming the setting, if one is not
+  what it gave.
+- **A full disk under `.mason/` no longer kills Mason and leaves it down.** When the disk filled, the run died on its
+  own log, and the process that restarts it died too, leaving `.mason/restarts.json` empty, so `mason status` said
+  `Unexpected end of JSON input` and nothing started Mason again. Now the run goes on, saying once that its log could
+  not be written, and writes its log again once there is room. If it stops while the disk is full, it is started
+  again once there is room (8 MiB free), its restart recorded whole then; `mason status` reads a record it cannot
+  parse as unreadable and says the rest; and a write under `.mason/` that fails for disk space says so, with the way
+  out: free disk where `.mason/` is. Nothing synced is lost.

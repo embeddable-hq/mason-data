@@ -19,6 +19,7 @@ import { CommandFailed, failed, wantsJson } from "./command.ts";
 import { RunUnreachable } from "./control.ts";
 import { exitWhenWritten } from "../lib/exit-when-written.ts";
 import { gatedExit, installOutputGate } from "./output-gate.ts";
+import { DISK_WAY_OUT, isDiskFull } from "../lib/disk-full.ts";
 import * as fs from "node:fs";
 
 /** `-C <folder>` before the command, as git's and make's (each one from the last): the folders, and the line after them. */
@@ -96,7 +97,10 @@ main(process.argv.slice(2)).then((code) => exitWhenWritten(gatedExit(code)), (e:
   // MASON_DEBUG=1 prints where it happened, for the bug report it deserves. The same shape as every failure, JSON under --json.
   const message = e instanceof Error ? e.message : String(e);
   const [command, ...args] = leadingFolders(process.argv.slice(2)).rest;
-  const code = failed(command ?? "", { message, code: "failed", fix: process.env.MASON_DEBUG ? undefined : "this is a bug in mason: MASON_DEBUG=1 prints where it happened, for the report" },
+  // a write that failed for disk space (the config, a log under .mason/: issue 847) is the disk's, never a bug: its way
+  // out is said (src/lib/disk-full.ts)
+  const fix = isDiskFull(e) ? DISK_WAY_OUT : process.env.MASON_DEBUG ? undefined : "this is a bug in mason: MASON_DEBUG=1 prints where it happened, for the report";
+  const code = failed(command ?? "", { message, code: "failed", fix },
     { json: wantsJson(args, COMMANDS.find((c) => c.name === command)) });
   if (process.env.MASON_DEBUG) process.stderr.write(`${(e as Error).stack ?? ""}\n`);
   exitWhenWritten(gatedExit(code));
