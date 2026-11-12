@@ -279,9 +279,12 @@ section said the opposite). The review measured:
 - 8 polled tables of 100,000 rows over 25 `mason start` / `mason stop` cycles: the file grew 50 MiB, where main's grew
   1 MiB, with 26 row groups a table, where main had 2.
 
-*What an operator can do meanwhile.* A table synced again whole is compacted: `mason remove <table>`, then `mason add
-<table>`, drops its synced data and syncs it again from the source (src/duck/sync.ts drops a table no longer added; it
-is not served between the two). Measured offline: a table of 209 row groups (287 blocks) with half its rows deleted, dropped
+*What an operator can do meanwhile.* A table synced again whole is compacted. With Mason running, run `mason remove
+<table>`, wait until `mason logs` shows `dropped <table>'s synced data: it is no longer added`, and only then run `mason
+add <table>`, which syncs it again from the source; the table is not served in between. The drop happens at the run's
+next pass (`pass`, src/duck/sync.ts), and only if the table is still removed then. An add made while Mason is stopped,
+or before the drop, cancels the remove, and nothing is compacted (the re-check of PR 854: running and idle, 32 row
+groups became 3; stopped, or with a pass held up, nothing dropped, still 32; no data lost either way). Measured offline: a table of 209 row groups (287 blocks) with half its rows deleted, dropped
 and written again whole, was 5 row groups (42 blocks). The freed blocks are reused, but the file does not shrink.
 `mason sync` of a table is a poll, which does not compact it.
 

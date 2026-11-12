@@ -43,9 +43,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
     checkpoints took a 1 M-row table from 31 MiB to 536 MiB, and its count from 1.2 ms to 2.8 ms. 25 restarts grew a
     project of 8 polled tables by 50 MiB, where it grew by 1 MiB before.
 
-  Meanwhile, watch the disk under `.mason/`. To compact a table, sync it again whole: `mason remove <table>`, then
-  `mason add <table>` (the table is not served in between). The file does not shrink, but later writes reuse the
-  space. `mason sync` does not compact a table. EXPLAIN's "about N rows" also counts rows updated or deleted since
+  Meanwhile, watch the disk under `.mason/`. To compact a table, sync it again whole. With Mason running, run `mason
+  remove <table>`. Wait until `mason logs` shows `dropped <table>'s synced data`, then run `mason add <table>`. The
+  table is not served in between. If you add it back while Mason is stopped, or before that line appears, the add
+  cancels the remove and nothing is compacted. The file does not shrink, but later writes reuse the space. `mason sync` does not compact a table. EXPLAIN's "about N rows" also counts rows updated or deleted since
   the table's last sync whole.
 
 - **A table of large values could fail its first sync under a small `MASON_DUCKDB_MEMORY`**, now and then, with
