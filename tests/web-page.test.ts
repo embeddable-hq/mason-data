@@ -1004,7 +1004,7 @@ test("renderNav with the host's sidebar: a replaced item keeps its label and ico
   // the others as before, the range kept
   assert.ok(html.includes('href="#tables"') && html.includes('href="#observability/queries?range=24h"'));
   // the host's links: last, a group without a heading of Mason's, the link icon, the label escaped
-  const group = html.split('<li class="group host-links">')[1]!;
+  const group = html.split('<li class="group host-nav">')[1]!;
   assert.ok(group !== undefined && html.endsWith("</ul></li></ul>"));
   assert.match(group, /^<ul aria-label="Links"><li><a href="\/billing" rel="noreferrer"><span class="icon" aria-hidden="true"><svg\s+class="lucide lucide-link"/);
   assert.ok(group.includes('<span class="label">&lt;script&gt;alert(1)&lt;/script&gt; &amp; co</span>'), "a label is text, never markup");
@@ -1014,7 +1014,19 @@ test("renderNav with the host's sidebar: a replaced item keeps its label and ico
   const linksOnly = renderNav("status", "now", { items: {}, links: [{ label: "Billing", url: "/billing" }] });
   assert.ok(linksOnly.startsWith(renderNav("status", "now").slice(0, -"</ul>".length)));
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
-  assert.match(css, /\.nav \.host-links \{ padding-top: var\(--space-3\); border-top: 1px solid var\(--line\); \}/);
+  assert.match(css, /\.nav \.host-nav \{ padding-top: var\(--space-3\); border-top: 1px solid var\(--line\); \}/);
+  // laid out as every other group of the nav, by no rule of anything else on the page (issue 885: it shared the host
+  // view's `.host-links`, a wrapping flex row, which cut its rows short and moved its icons in the rail): each class
+  // the sidebar's group of links carries is selected only under `.nav`, or is the nav's own `group`
+  const classes = [...html.matchAll(/<li class="([^"]+)"><ul aria-label="Links">/g)].flatMap((m) => m[1]!.split(" "));
+  assert.ok(classes.includes("group") && classes.length > 1, `a group of the nav, with a class of its own: ${classes.join(" ")}`);
+  // each rule's selector: the text before its "{" (inside an @media too, whose own "{" comes first)
+  const rules = css.replace(/\/\*[\s\S]*?\*\//g, "").split("}").map((r) => r.split("{")).filter((p) => p.length > 1).map((p) => p[p.length - 2]!.trim());
+  for (const c of classes.filter((c) => c !== "group")) {
+    const selectors = rules.flatMap((r) => r.split(",").map((s) => s.trim())).filter((s) => new RegExp(`\\.${c}(?![\\w-])`).test(s));
+    assert.ok(selectors.length > 0, `.${c} is styled`);
+    for (const s of selectors) assert.match(s, /^\.nav /, `the sidebar's .${c} is selected only under .nav, not by "${s}"`);
+  }
 });
 
 test("every link of Mason's own into a replaced view goes to the host's page: the Overview's Create a user and Getting started, its cards and parts, Users' and Usage's Queries, Tables' sync events, Queries' and Usage's leads", async () => {
