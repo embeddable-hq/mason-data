@@ -30,7 +30,7 @@ kill_timeout = 60
   # The project folder (sources/, mason.yml) on the volume: a Machine's root filesystem is replaced at every deploy, so
   # what `mason add` adds beside the server survives only here. Remove this line when the image carries mason/.
   MASON_PROJECT = "/mason/data/project"
-  # The memory Mason may use: half of [[vm]] memory; change the two together (deploy/mason-data/README.md "Memory").
+  # The engine's memory: half of [[vm]] memory; change the two together (deploy/mason-data/README.md "Memory").
   MASON_DUCKDB_MEMORY = "4GB"
 
 [deploy]

@@ -72,7 +72,7 @@ are then refused with "edit the files and deploy them", where they would edit a 
 `[[vm]]` is `performance`, 2 CPUs, 8 GB, and `MASON_DUCKDB_MEMORY=4GB` is half of it; change the two together. A
 performance size takes memory in 2048 MB steps, up to 8 GB per CPU (`fly platform vm-sizes`). Which size: enough that the
 page cache holds the columns your dashboards read, memory before cores — [`deploy/mason-data/README.md`](../mason-data/README.md#memory)
-has the measurements. `fly ssh console -u node -C "mason doctor"` says how much memory Mason may use.
+has the measurements. `fly ssh console -u node -C "mason doctor"` says what the engine may use.
 
 ## Your database
 

@@ -58,7 +58,7 @@ spec:
             # MASON_PG_TLS_CERT / MASON_PG_TLS_KEY naming one a CA signed, mounted from a kubernetes.io/tls Secret
             - name: MASON_PG_SELF_SIGNED_TLS
               value: "1"
-            # the memory Mason may use: half the container's memory limit (the default reads the cgroup limit and takes half;
+            # the engine's memory: half the container's memory limit (the default reads the cgroup limit and takes half;
             # said here so the two are changed together). The other half is the page cache, Node and the catalog.
             - name: MASON_DUCKDB_MEMORY
               value: "4GB"

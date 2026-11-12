@@ -69,7 +69,7 @@ the cgroup limit and takes half from 5 GiB up, said explicitly here). The reques
 memory it was promised. CPU has a request and no limit: one statement may use every core, and a CPU limit would
 throttle it. Which size: enough that the page cache holds the columns your dashboards read, memory before cores;
 [`deploy/mason-data/README.md`](../mason-data/README.md#memory) has the measurements, `kubectl exec statefulset/mason -- mason doctor`
-how much memory Mason may use.
+what the engine may use.
 
 ## The Helm chart
 

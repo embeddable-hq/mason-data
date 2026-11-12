@@ -154,7 +154,7 @@ Key: ✅ built · ⏸ deferred
 | Row count | ✅ | as Total rows above |
 | Last sync time, and how old the synced data is | ✅ | per table: `sync.syncedAt`, `sync.ageSeconds` |
 | Sync now, per table | ✅ | `POST /api/sync { tables }` (`mason sync`) |
-| Synced / Syncing / Failed / Pending | ✅ | the first sync's phase (`copy.phase`): done / copying / failed / waiting |
+| Synced / Syncing / Failed / Pending | ✅ | the first sync's phase: `copy.phase` is `done`, `copying` or `failed`, and `copy` is null while the table waits |
 | Sync duration | ✅ | `sync.syncSeconds`: how long the sync that brought the synced table current took |
 | Sync error | ✅ | the current one on the table; its history is the sync events (`mason logs --events`) |
 | Size of the synced table | ✅ | `bytes` is the SOURCE table's size; the synced table's own size is measured every 10 min from its blocks (`/api/usage` `copySizes`, `mason usage`), never per request |
