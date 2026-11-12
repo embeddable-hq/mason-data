@@ -34,9 +34,8 @@ export interface DuckPlan {
   sql: PlannedSql;
   /** the parameters' types, Postgres's */
   params: number[];
-  /** the result's columns, Postgres's RowDescription (size from pg_type). `oid` is the analysis's, which the wire sends
-   *  and the catalog names: a type a database made (an enum, a citext) is held in the catalog at the SOURCE's OID
-   *  (src/api/postgres/type-oids.ts, issue 861), so the two are one number */
+  /** the result's columns, Postgres's RowDescription (size from pg_type). `oid` is the analysis's, the catalog's, which
+   *  the wire sends for every type, a type a database made (an enum, a citext) included (issue 861) */
   fields: Array<{ name: string; oid: number; typmod: number; size: number }> | null;
   /** the statement holds a FETCH … WITH TIES (a generated table refuses one) */
   withTies: boolean;

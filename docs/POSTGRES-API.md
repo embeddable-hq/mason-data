@@ -470,8 +470,8 @@ names the agent. Its tools say over this wire what a bare SQL tool would leave a
 - `query` sends ONE statement through the extended protocol (a second is Postgres's 42601), its `max_rows` the
   Execute's row count (the server stops there and answers PortalSuspended: `truncated`), after `SET statement_timeout`
   to its `timeout_ms` (57014 past it); the column types are the catalog's `format_type(oid, typmod)` of the
-  RowDescription's OID and modifier. The wire sends the SOURCE's OID for a type the source made (an enum, a citext),
-  and the catalog holds the type at that very OID (src/api/postgres/type-oids.ts), so pg_type names it as the source does;
+  RowDescription's OID and modifier. The wire sends the catalog's own OID for every type, a type the source made (an
+  enum, a citext) included, so pg_type names it as the source names its own;
 - a request the client cancels (`notifications/cancelled`) is a CancelRequest for its statement;
 - a refusal reaches the model whole, as an MCP tool error: SQLSTATE, message, DETAIL (the gap's id) and HINT (its way
   out), the fields this listener's ErrorResponse carries;

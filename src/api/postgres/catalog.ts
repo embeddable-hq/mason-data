@@ -39,7 +39,6 @@ import { NO_ROLE_CATALOG, type RoleGrants } from "../../duck/grants.ts";
 import { renderWhere, tableSql } from "../../duck/row-filter.ts";
 import { cstr, frame, splitFrames } from "./protocol.ts";
 import { HELD_ROW_INPUT, HELD_TYPE_INPUT, madeTypeName, PG_API_TYPE_SPELLING, typeNameParts, type PgJoin, type PgSchema, type PgTable } from "./schema.ts";
-import { typePlacements } from "./type-oids.ts";
 
 /** Ten minutes: long enough to outlive a tool's startup burst and a person's pause between two queries. */
 const DEFAULT_IDLE_MS = 10 * 60_000;
@@ -539,7 +538,7 @@ export function leftOutLine(r: { statement: string; message: string }): string {
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-type Reply = { id: number; ok: true; bytes?: Uint8Array; rows?: Record<string, unknown>[]; refused?: Array<{ statement: string; message: string }>; unplaced?: string[] } | { id: number; ok: false; message: string };
+type Reply = { id: number; ok: true; bytes?: Uint8Array; rows?: Record<string, unknown>[]; refused?: Array<{ statement: string; message: string }>} | { id: number; ok: false; message: string };
 
 /** One worker thread holding one PGlite: requests one at a time (PgCatalog's chain), each with a deadline. */
 class CatalogWorker {
@@ -719,15 +718,7 @@ export class PgCatalog {
     const db = new CatalogWorker();
     try {
       const started = await this.#ask(db, { op: "init", statements: [CATALOG_BASE_SQL, ...catalogDdl(schema), ...catalogRoles(schema, roles), ...this.#setup],
-        placements: typePlacements(schema), optional: [...catalogDefaults(schema), ...catalogViews(schema, roles), ...this.#policies] }, "its start");
-      // a type a database made that the catalog could not hold at the source's OID (type-oids.ts): the wire then sends
-      // the catalog's own OID for it, which pg_type names alike, but not the source's. One line, once per schema
-      for (const u of started.unplaced ?? []) {
-        const line = `catalog: a type the source made keeps the catalog's own OID, not the source's: ${u}`;
-        if (this.#said.has(line)) continue;
-        this.#said.add(line);
-        this.#log(line);
-      }
+        optional: [...catalogDefaults(schema), ...catalogViews(schema, roles), ...this.#policies] }, "its start");
       // each left-out default or view: one line, once per schema (the instance starts again after every idle stop)
       for (const r of started.refused ?? []) {
         const line = leftOutLine(r);

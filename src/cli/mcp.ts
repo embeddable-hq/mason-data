@@ -576,8 +576,8 @@ class McpServer {
 
   /**
    * The answer's columns with their Postgres types: the RowDescription's OID and modifier named by the listener's
-   * catalog, which holds a type the source made (an enum, a citext) at the OID the wire sends for it
-   * (src/api/postgres/type-oids.ts). Asked again each call: the catalog is rebuilt when the copied tables change.
+   * catalog, whose own OID the wire sends for every type, a type the source made (an enum, a citext) included
+   * (issue 861). Asked again each call: the catalog is rebuilt when the copied tables change.
    */
   private async columns(pg: PgConnection, r: ExtendedResult): Promise<Array<{ name: string; type: string }>> {
     if (r.fields.length === 0) return [];

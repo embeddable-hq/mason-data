@@ -2761,7 +2761,7 @@ const SESSION_OPS: ReadonlySet<string> = new Set(["SVFOP_SESSION_USER"]);
 const HELD_TO_NOTHING_OPS: ReadonlySet<string> = new Set(Object.keys(USER_OPS));
 /** the functions Mason overrides in the catalog's `public` (src/api/postgres/catalog.ts currentSettingSql; `version()`
  *  in `Server`'s setup), each with what a call of it may be written with: `pg_catalog.` too, or unqualified only. A type
- *  a database made needs none: the catalog holds it at the source's OID (type-oids.ts), so `format_type` is Postgres's */
+ *  a database made needs none: the wire sends the catalog's own OID for it (issue 861), so `format_type` is Postgres's */
 const OVERRIDES: Readonly<Record<string, { qualified: boolean }>> = { version: { qualified: true }, current_setting: { qualified: true } };
 /** one splice of `userSpliced`: the span the parser placed at a location, and what is written in its place */
 type Splice = { kind: "user"; keyword: string } | { kind: "override"; name: string };

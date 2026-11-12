@@ -861,7 +861,7 @@ test("session state: the splice of a catalog statement reaches every call of an 
   assert.equal(await splice("SELECT version(), pg_catalog.version(), \"pg_catalog\" . \"version\" ( )"), "SELECT public.version(), public.version(), public.version ( )");
   assert.equal(await splice("SELECT current_setting('a'), pg_catalog.current_setting('b', true), CURRENT_SETTING('c')"),
     "SELECT public.current_setting('a'), public.current_setting('b', true), public.current_setting('c')");
-  // format_type is Postgres's own: a type a database made is at the source's OID in the catalog (type-oids.ts, issue 861)
+  // format_type is Postgres's own: the wire sends the catalog's OID for a type a database made too (issue 861)
   assert.equal(await splice("SELECT format_type(23, NULL), pg_catalog.format_type(23, NULL)"), "SELECT format_type(23, NULL), pg_catalog.format_type(23, NULL)");
   // the clock is the catalog transaction's own, begun at the session's instant (catalog.ts asSession): never spliced
   const clock = "SELECT now(), CURRENT_DATE, current_timestamp(3), LOCALTIME, transaction_timestamp(), clock_timestamp(), 'now'::timestamptz, x.now FROM (SELECT 1 AS now) x";

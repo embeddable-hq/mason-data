@@ -80,6 +80,7 @@ import { describeKeys } from "../../src/duck/resolved.ts";
 import { GAP_MARK, GAPS, type GapId } from "../../src/duck/gaps.ts";
 import { Clock, deadGaps, FIRST_LEG_RUNS_STAGES, fixtureOf, legRefused, movedTallies, parseLeg, partition, PHASES, readWeights, statementId, timesLine, verifiedDiff, verifiedText, weightKey, WRITE_COMMAND, type LegReport, type Measured, type Times } from "../../scripts/oracle-legs.ts";
 import type { RolesLive } from "../../src/duck/grants.ts";
+import { madeTypes, readMadeTypes, sameType } from "./oracle/made-types.ts";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const adminUrl = process.env.IT_POSTGRES_URL;
@@ -166,7 +167,8 @@ const ordered = (sql: string): boolean => { let s = sql, prev = ""; while (s !==
 /**
  * THE VERDICT ON ONE STATEMENT, as the kinds of difference a tool can see, worst first: a wrong VALUE (normalised as
  * the oracle does: `1.50` and `1.5` are one value), a different TEXT of the same value, a different TYPE (OID), a
- * different NAME, a refusal where Postgres answered (or the reverse, or another SQLSTATE). null when identical.
+ * different NAME, a refusal where Postgres answered (or the reverse, or another SQLSTATE). null when identical. A type a
+ * database made is held equal by what each side's pg_type names its OID, a built-in one by the OID (oracle/made-types.ts).
  */
 export function verdict(want: Answer, got: Answer, inOrder: boolean): { kind: "value" | "rows" | "text" | "type" | "name" | "refused" | "answered" | "sqlstate"; detail: string } | null {
   if ("code" in want && "code" in got) return want.code === got.code ? null : { kind: "sqlstate", detail: `${got.code} ${got.message} where Postgres refuses ${want.code} ${want.message}` };
@@ -191,7 +193,7 @@ export function verdict(want: Answer, got: Answer, inOrder: boolean): { kind: "v
     }
   }
   if (text !== null) return { kind: "text", detail: text };
-  const types = want.oids.map((o, i) => o === got.oids[i] ? null : `${JSON.stringify(want.names[i])} OID ${got.oids[i]} where Postgres sends ${o}`).filter((x) => x !== null);
+  const types = want.oids.map((o, i) => sameType(o, got.oids[i]!) ? null : `${JSON.stringify(want.names[i])} OID ${got.oids[i]} where Postgres sends ${o}`).filter((x) => x !== null);
   if (types.length) return { kind: "type", detail: types.join(", ") };
   if (want.names.join("\u0000") !== got.names.join("\u0000")) return { kind: "name", detail: `${JSON.stringify(got.names)} where Postgres names ${JSON.stringify(want.names)}` };
   return null;
@@ -519,6 +521,9 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   let zone = "UTC";
   const run = async (phase: string): Promise<void> => {
     const first = phase === PHASES[0];
+    // each side's made types as its pg_type names them now (oracle/made-types.ts)
+    await readMadeTypes(source, madeTypes.source);
+    await readMadeTypes(mason, madeTypes.mason);
     for (const q of all()) {
       clock.lap(weightKey(q.sql), q.name);
       (askedIn[phase] ??= []).push(statementId(q));

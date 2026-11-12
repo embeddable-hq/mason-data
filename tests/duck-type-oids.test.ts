@@ -1,11 +1,12 @@
 /**
- * A TYPE THE SOURCE MADE, AT THE SOURCE'S OID IN THE CATALOG TOO (issue 861; src/api/postgres/type-oids.ts). The wire
- * sends an enum's, a citext's and a table's whole row's column with the SOURCE's OID, and a client names the column by
- * looking that OID up in pg_type (JDBC's getColumnTypeName, npgsql, asyncpg) or sends it as a Parse's parameter type.
- * The catalog Postgres and the source count their made types from 16384 alike, so here the collision is FORCED: the
- * source's OID counter is advanced (`lo_create`) until its enums take the OIDs the catalog gives two tables' row types.
- * Every lookup must name the source's type, every Parse with a source OID must bind, and pg_typeof must say what the
- * source says. The source is a PGlite of its own (`truth`), whose answers are the expected ones.
+ * A TYPE THE SOURCE MADE IS SENT WITH THE CATALOG'S OWN OID (issue 861). The wire sends an enum's, a citext's and a
+ * table's whole row's column with an OID, and a client names the column by looking that OID up in pg_type (JDBC's
+ * getColumnTypeName, npgsql, asyncpg) or sends it back as a Parse's parameter type. The OID is the catalog's, which its
+ * pg_type names: the source's OID for the type, which the wire once sent, is in the catalog another type or none, since
+ * both count from 16384. Here that collision is FORCED: the source's OID counter is advanced (`lo_create`) until its
+ * enums take the OIDs the catalog gives two tables' row types. Every lookup must name the source's type, every Parse
+ * with an OID Mason sent must bind, pg_typeof must say what the source says, and a restart must keep the OIDs. The
+ * source is a PGlite of its own (`truth`), whose answers are the expected ones.
  */
 import { test, after, before } from "node:test";
 import assert from "node:assert/strict";
@@ -101,9 +102,8 @@ let oids: Record<string, number> = {};
 before(async () => {
   store = await DuckStore.open(path.join(dir, "duck.db"), () => undefined);
   for (const s of DUCK_DDL) await store.writer.run(s);
-  // the catalog's row types of people and moods, as it makes them over this schema: the made types' OIDs far away, the
-  // tables' row types its own (the DDL is the same whatever the OIDs: a type is moved only once every table is made)
-  const far = { people: undefined, moods: undefined, mood: 900001, _mood: 900000, level: 900003, _level: 900002, citext: 900005, _citext: 900004 };
+  // the catalog's row types of people and moods, as it makes them over this schema (the same whatever the source's OIDs)
+  const far = { people: 900020, moods: 900021, mood: 900001, _mood: 900000, level: 900003, _level: 900002, citext: 900005, _citext: 900004 };
   api = await listen(schemaOf(far));
   const rowTypes = Object.fromEntries((await mason("SELECT typname::text, oid::int FROM pg_catalog.pg_type WHERE typrelid IN ('people'::regclass, 'moods'::regclass)")).rows.map((r) => [r[0], Number(r[1])]));
   await api.close();
@@ -137,31 +137,37 @@ after(async () => {
 });
 
 const COLUMNS = "SELECT id, m, ms, l, c, cs FROM moods ORDER BY id";
+/** a type by its OID as a server names it: schema-qualified, as pgjdbc's TypeInfoCache reads it */
+const NAMED = (oid: number): string => "SELECT n.nspname::text, t.typname::text, t.typtype::text, format_type(t.oid, NULL), t.oid::regtype::text " +
+  `FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid WHERE t.oid = ${oid}`;
+/** Mason's OIDs for the columns of COLUMNS, as its RowDescription sends them */
+const sentOids = async (): Promise<number[]> => (await mason(COLUMNS)).oids;
 
-test("the wire sends the source's OIDs, and the catalog's pg_type names each as the source does: JDBC's getColumnTypeName lookup", async () => {
-  const sent = (await mason(COLUMNS)).oids;
-  assert.deepEqual(sent, (await source(COLUMNS)).oids, "the RowDescription's OIDs are the source's");
-  assert.deepEqual(sent.slice(1), [oids.mood, oids._mood, oids.level, oids.citext, oids._citext]);
-  for (const oid of sent) {
-    // as pgjdbc's TypeInfoCache asks, and the issue's form
-    for (const sql of [`SELECT typname::text, typnamespace::regnamespace::text FROM pg_type WHERE oid = ${oid}`,
-      `SELECT n.nspname::text, t.typname::text, t.typtype::text FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid WHERE t.oid = ${oid}`,
-      `SELECT format_type(${oid}, NULL), ${oid}::regtype::text`]) {
-      assert.deepEqual((await mason(sql)).rows, (await source(sql)).rows, sql);
-    }
+test("the wire sends the catalog's own OID for a made type, which pg_type names as the source names its own: JDBC's getColumnTypeName lookup", async () => {
+  const sent = await sentOids(), theirs = (await source(COLUMNS)).oids;
+  assert.deepEqual(theirs.slice(1), [oids.mood, oids._mood, oids.level, oids.citext, oids._citext], "the source's OIDs, the collided ones");
+  // the source's own OID for the enum is, in Mason's catalog, a table's row type: never sent
+  assert.deepEqual((await mason(`SELECT typname::text, typtype::text FROM pg_type WHERE oid = ${oids.mood}`)).rows, [["people", "c"]], "the collision this test needs");
+  assert.notEqual(sent[1], oids.mood);
+  assert.equal(sent[0], theirs[0], "a built-in type is sent with Postgres's OID");
+  for (const [i, oid] of sent.entries()) {
+    // what a client reads when it looks the column's OID up, on each side: the same type
+    assert.deepEqual((await mason(NAMED(oid))).rows, (await source(NAMED(theirs[i]!))).rows, `column ${i}: OID ${oid} here, ${theirs[i]} on the source`);
+    assert.deepEqual((await mason(`SELECT typname::text, typnamespace::regnamespace::text FROM pg_type WHERE oid = ${oid}`)).rows,
+      (await source(`SELECT typname::text, typnamespace::regnamespace::text FROM pg_type WHERE oid = ${theirs[i]}`)).rows);
   }
-  // the catalog's own columns hold those OIDs, and the tables' row types are the source's too
+  // one OID for a type wherever Mason says it: the RowDescription, pg_attribute, a ::regtype
   const attributes = "SELECT attname::text, atttypid::int FROM pg_attribute WHERE attrelid = 'moods'::regclass AND attnum > 0 ORDER BY attnum";
-  assert.deepEqual((await mason(attributes)).rows, (await source(attributes)).rows);
-  const rows = "SELECT relname::text, reltype::int FROM pg_class WHERE relname IN ('people', 'moods') ORDER BY 1";
-  assert.deepEqual((await mason(rows)).rows, (await source(rows)).rows);
-  assert.ok(!logged.some((l) => l.includes("keeps the catalog's own OID")), logged.join("\n"));
+  assert.deepEqual((await mason(attributes)).rows.map((r) => Number(r[1])), sent);
+  const regtypes = "SELECT 23, 'mood'::regtype::oid::int, 'mood[]'::regtype::oid::int, 'other.level'::regtype::oid::int, 'citext'::regtype::oid::int, 'citext[]'::regtype::oid::int";
+  assert.deepEqual((await mason(regtypes)).rows[0]!.map(Number), sent);
 });
 
-test("a table's whole row is sent with the source's row type, which pg_type names as the table", async () => {
+test("a table's whole row is sent with the catalog's row type, which pg_type names as the table", async () => {
   const sql = "SELECT p FROM people p ORDER BY p.id";
   const got = await mason(sql), want = await source(sql);
-  assert.deepEqual(got, want);
+  assert.deepEqual(got.rows, want.rows);
+  assert.deepEqual((await mason(NAMED(got.oids[0]!))).rows, (await source(NAMED(want.oids[0]!))).rows);
   assert.deepEqual((await mason(`SELECT typname::text, typrelid::regclass::text FROM pg_type WHERE oid = ${got.oids[0]}`)).rows, [["people", "people"]]);
 });
 
@@ -178,20 +184,35 @@ test("pg_typeof names a made type as the source does: an enum of another schema 
   // under a search_path that holds the schema, its name alone
   const c = await connect(api);
   try {
+    // a prepared statement parsed before the SET and executed after it is planned again, as Postgres's plancache
+    const prepared = { name: "typed", text: sql, rowMode: "array" as const };
+    assert.deepEqual((await c.query(prepared)).rows, want.rows);
     await c.query("SET search_path = other, public");
     await truth.exec("SET search_path = other, public");
     const r = await c.query({ text: sql, rowMode: "array" });
     assert.deepEqual(r.rows, (await source(sql)).rows);
     assert.deepEqual(r.rows, [["mood", "mood[]", "level", "citext", "citext[]", "integer", "citext", "level"]]);
+    assert.deepEqual((await c.query(prepared)).rows, r.rows);
   } finally { await c.end(); await truth.exec("RESET search_path"); }
 });
 
-test("a literal cast to a made type is sent with the source's OID, over a synced table and in a statement the catalog answers", async () => {
-  for (const sql of ["SELECT 'happy'::mood AS x, 'high'::other.level AS y, 'Q'::citext AS z", "SELECT 'happy'::mood AS x, id FROM moods ORDER BY id", "SELECT 'high'::other.level AS x, c FROM moods WHERE id = 1",
-    "SELECT ARRAY['ok'::mood] AS x FROM moods WHERE id = 1"]) {
+test("a literal cast to a made type is sent with the catalog's OID, over a synced table and in a statement the catalog answers", async () => {
+  const [, mood, moods, level, citextOid] = await sentOids();
+  for (const [sql, made] of [["SELECT 'happy'::mood AS x, 'high'::other.level AS y, 'Q'::citext AS z, '{ok}'::mood[] AS w", [mood, level, citextOid, moods]],
+    ["SELECT 'happy'::mood AS x, id FROM moods ORDER BY id", [mood, 23]], ["SELECT 'high'::other.level AS x, c FROM moods WHERE id = 1", [level, citextOid]],
+    ["SELECT ARRAY['ok'::mood] AS x FROM moods WHERE id = 1", [moods]]] as Array<[string, number[]]>) {
     const got = await mason(sql), want = await source(sql);
-    assert.deepEqual(got, want, sql);
+    assert.deepEqual(got.rows, want.rows, sql);
+    assert.deepEqual(got.oids, made, `${sql}: the catalog's OIDs, as a column of each type sends`);
   }
+});
+
+test("citext's functions with a SQL body answer as Postgres's: the catalog's own citext is whole", async () => {
+  const sql = "SELECT strpos('aXb'::citext, 'x'), replace('aXbx'::citext, 'x', 'y'), regexp_match('aXb'::citext, 'x')::text, split_part('aXb'::citext, 'x', 2), " +
+    "translate('aXb'::citext, 'x', 'y'), regexp_replace('aXb'::citext, 'x', 'y'), regexp_matches('aXbx'::citext, 'x', 'g')::text";
+  const want = await source(sql);
+  assert.deepEqual(want.rows[0]![0], "2");
+  assert.deepEqual((await mason(sql)).rows, want.rows);
 });
 
 /** one session over a raw socket: a Parse with declared parameter types, which `pg` cannot send */
@@ -218,24 +239,40 @@ async function rawSession(): Promise<{ exchange(...frames: Buffer[]): Promise<Ba
 const rowsOf = (ms: BackendMessage[]): unknown[][] => ms.flatMap((m) => m.type === "DataRow" ? [m.values.map((v) => v === null ? null : v.toString("utf8"))] : []);
 const errorOf = (ms: BackendMessage[]): string | undefined => { const e = ms.find((m) => m.type === "ErrorResponse"); return e?.type === "ErrorResponse" ? `${e.fields.C} ${e.fields.M}` : undefined; };
 
-test("a Parse whose parameter types are the source's OIDs binds them as those types", async () => {
+/** a Parse naming the OIDs Mason sent (`mine`), bound and run, its ParameterDescription those OIDs; the same statement
+ *  on the source with ITS OIDs answers alike */
+async function parsesBind(mine: number[]): Promise<void> {
+  const [, mood, , level, citextOid] = mine;
   const s = await rawSession();
   try {
-    for (const [sql, types, values, want] of [
-      ["SELECT id FROM moods WHERE m = $1 ORDER BY id", [oids.mood!], ["happy"], [["1"]]],
-      ["SELECT id FROM moods WHERE m < $1 ORDER BY id", [oids.mood!], ["happy"], [["2"]]],
-      ["SELECT id FROM moods WHERE l = $1 ORDER BY id", [oids.level!], ["low"], [["2"]]],
-      ["SELECT id FROM moods WHERE c = $1 ORDER BY id", [oids.citext!], ["alice"], [["1"], ["3"]]],
+    for (const [sql, types, theirs, values, want] of [
+      ["SELECT id FROM moods WHERE m = $1 ORDER BY id", [mood!], [oids.mood!], ["happy"], [["1"]]],
+      ["SELECT id FROM moods WHERE m < $1 ORDER BY id", [mood!], [oids.mood!], ["happy"], [["2"]]],
+      ["SELECT id FROM moods WHERE l = $1 ORDER BY id", [level!], [oids.level!], ["low"], [["2"]]],
+      ["SELECT id FROM moods WHERE c = $1 ORDER BY id", [citextOid!], [oids.citext!], ["alice"], [["1"], ["3"]]],
       // a statement the catalog answers
-      ["SELECT pg_typeof($1)::text, $1::text", [oids.level!], ["high"], [["other.level", "high"]]],
-    ] as Array<[string, number[], string[], unknown[][]]>) {
+      ["SELECT pg_typeof($1)::text, $1::text", [level!], [oids.level!], ["high"], [["other.level", "high"]]],
+    ] as Array<[string, number[], number[], string[], unknown[][]]>) {
       const ms = await s.exchange(wire.parse("", sql, types), wire.describe("S", ""), wire.bind("", "", values, [0]), wire.execute("", 0), wire.sync());
       assert.equal(errorOf(ms), undefined, sql);
       const described = ms.find((m) => m.type === "ParameterDescription");
-      assert.deepEqual(described?.type === "ParameterDescription" ? described.oids : null, types, `${sql}: the ParameterDescription is the source's OIDs`);
+      assert.deepEqual(described?.type === "ParameterDescription" ? described.oids : null, types, `${sql}: the ParameterDescription is the OIDs the Parse named`);
       assert.deepEqual(rowsOf(ms), want, sql);
-      const t = await truth.query<unknown[]>(sql, values, { rowMode: "array", paramTypes: types, parsers: { 23: (v: string) => v } });
+      const t = await truth.query<unknown[]>(sql, values, { rowMode: "array", paramTypes: theirs, parsers: { 23: (v: string) => v } });
       assert.deepEqual(t.rows, want, `${sql}: the source's answer`);
     }
   } finally { s.end(); }
+}
+
+test("a Parse whose parameter types are the OIDs Mason sent binds them as those types", async () => {
+  await parsesBind(await sentOids());
+});
+
+test("after a restart the catalog sends the same OIDs, and they name and bind the same types", async () => {
+  const before = await sentOids();
+  await api.close();
+  api = await listen(schemaOf(oids));
+  assert.deepEqual(await sentOids(), before);
+  for (const oid of before) assert.equal((await mason(NAMED(oid))).rows.length, 1);
+  await parsesBind(before);
 });

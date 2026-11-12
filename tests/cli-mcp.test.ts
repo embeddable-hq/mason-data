@@ -49,7 +49,7 @@ let url = "";
 let analystUrl = "";
 const env = matrixEnv({ HOME: dir, PATH: path.dirname(process.execPath) });
 
-/** the OIDs the SOURCE gave its enum and its array type, which the catalog moves its own to (src/api/postgres/type-oids.ts) */
+/** the OIDs the SOURCE gave its enum and its array type: none of them the catalog's, which the wire sends (issue 861) */
 const MOOD_OID = 90_001, MOOD_ARRAY_OID = 90_002;
 
 const schema: PgSchema = {

@@ -8,12 +8,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
-- **A BI tool names a column of an enum, a citext or a composite as the source's type.** Mason's catalog could hold the
-  number the wire sends for such a column as another type, often a synced table's row type, so a tool that looks the
-  number up (Metabase, DBeaver and Tableau through JDBC, .NET and asyncpg clients) showed the column as that table, and
-  a prepared statement that named the type by its number was read as the other type. The catalog now holds every such
-  type at the source's own number. `pg_typeof` of one is also Postgres's: `other.level` for an enum of another schema
-  and `mood[]` for an array, where Mason said `level` and `_mood`.
+- **A BI tool names a column of an enum, a citext or a composite as its type.** Mason sent such a column with the
+  source database's number for its type, which Mason's own catalog could hold as another type, often a synced table's
+  row type. So a tool that looks the number up (Metabase, DBeaver and Tableau through JDBC, .NET and asyncpg clients)
+  showed the column as that table, and a prepared statement that named the type by its number was read as the other
+  type. Mason now sends its own number for every type, the one its catalog names, so the lookup names the column's type
+  and a prepared statement given that number reads it. The number is no longer the source database's: a tool that
+  cached a type's number from the source should look it up again (two Postgres databases number their own types apart
+  anyway). `pg_typeof` of such a column is also Postgres's: `other.level` for an enum of another schema and `mood[]`
+  for an array, where Mason said `level` and `_mood`.
 - **The limit on what statements may spill to disk is in force from the start.** Before, the limit (half of the free
   disk under `.mason/`, or `MASON_SPILL_LIMIT`) was not enforced until the free disk moved by 1 % or more, so a heavy
   statement could spill past it and fill the disk. Now a statement past it fails alone with 53400 and Mason's hint.

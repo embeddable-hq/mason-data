@@ -974,7 +974,8 @@ export function uncheckedRefusal(): GeneratedRefusal {
  * EACH OUTPUT COLUMN'S TYPE, AS THE CATALOG NAMES IT: its spelling (`format_type`, the typmod kept) and, for a type a
  * user or an extension made, its kind (`e` an enum, `citext`, `d` a domain, `c` a composite; `columnProblem` reads it). The one reader of a
  * generated column's type (issue 858), by the field's OID, which the catalog holds as that very type: a made type's is
- * the SOURCE's there too (src/api/postgres/type-oids.ts, issue 861), never another table's row type (read as `daily`).
+ * the catalog's own, as the wire sends it (issue 861), never the source's, which the catalog may hold as another table's
+ * row type (read as `daily`).
  */
 async function columnTypes(rows: Planner["rows"], fields: NonNullable<DuckPlan["fields"]>): Promise<{ typeNames: Map<number, string>; kinds: Map<number, string> }> {
   if (fields.length === 0) return { typeNames: new Map(), kinds: new Map() };

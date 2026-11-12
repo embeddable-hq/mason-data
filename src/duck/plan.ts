@@ -467,8 +467,9 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
       return { ...inner, ...(reads !== undefined ? { reads } : {}), rowFilters };
     }
   }
-  // the catalog's own OIDs for the types a database made (citext, an enum): the rewrite knows a few by name. They are the
-  // SOURCE's OIDs too (src/api/postgres/type-oids.ts places each there), so the wire sends the analysis's OID as it is
+  // the catalog's own OIDs for the types a database made (citext, an enum): the rewrite knows a few by name. The wire
+  // sends the analysis's OID as it is, the catalog's, never the source's (issue 861): a client that looks it up in pg_type
+  // or sends it back as a parameter's type reads the type itself
   let resolved = resolvedKeys(analysis.tree);
   const catalogTypes = new Map<number, string>();
   // every type that holds a citext anywhere in its structure (`CITEXT_HELD`): the rewrite refuses one where it would
