@@ -44,14 +44,19 @@ export const fromText = (from) => from === null || from === undefined ? "from an
  * sent) or only from these addresses (--from <range>, a comma list as `--from a,b` takes it). `id`: the form's own, so
  * two forms on the page never share an input's id; `from`: the ranges it opens with (null: from anywhere). The page
  * never judges a range: the run reads each, and its refusal is said as the run words it (one grammar, the server's).
+ * The address field's place is the form's whichever is ticked (issue 875: ticking it moved Add a user to a line of its
+ * own): under from anywhere that place says "any address", muted and hidden from a screen reader (the ticked choice says
+ * it), and the field is `visibility: hidden` there — out of the tab order and the accessibility tree, its box kept.
+ * Its two choices are a radio group (`.radios`, src/web/app.css): one a line, their radios in one column.
  */
 export function connectsChoice(id, from = null) {
   const only = Array.isArray(from);
   return `<fieldset class="connects"><legend>Connects from</legend>` +
-    `<label class="tick"><input type="radio" name="connects" value="any"${only ? "" : " checked"}> From anywhere</label>` +
-    `<label class="tick"><input type="radio" name="connects" value="only"${only ? " checked" : ""}> Only from these addresses</label>` +
-    `<span class="ranges"><label class="sr" for="${esc(id)}-from">Address ranges, comma-separated</label>` +
-    `<input id="${esc(id)}-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e.g. 192.0.2.0/24, 2001:db8::/32" value="${esc(only ? from.join(", ") : "")}"></span></fieldset>`;
+    `<div class="radios"><label><input type="radio" name="connects" value="any"${only ? "" : " checked"}> From anywhere</label>` +
+    `<label><input type="radio" name="connects" value="only"${only ? " checked" : ""}> Only from these addresses</label></div>` +
+    `<span class="ranges"><span class="ranges-any" aria-hidden="true">${esc(rangesText(null))}</span>` +
+    `<span class="ranges-field"><label class="sr" for="${esc(id)}-from">Address ranges, comma-separated</label>` +
+    `<input id="${esc(id)}-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e.g. 192.0.2.0/24, 2001:db8::/32" value="${esc(only ? from.join(", ") : "")}"></span></span></fieldset>`;
 }
 
 /**
@@ -201,7 +206,7 @@ function toggle(u, disabled, asking) {
 /**
  * A USER JUST ADDED (`mason user add --json`'s shape): a prominent card with its password, shown this once — URL, User
  * and Password, each with a Copy button laid out the same way (issue 839). Database, Host, Port and SSL mode are the
- * run's, on the Connect card below it (`renderUsersConnect`), so not here (issue 876). No psql line: the URL is the same
+ * run's, on the Connect card above it (`renderUsersConnect`), so not here (issue 876). No psql line: the URL is the same
  * thing, pasted after `psql`. A field the JSON does not carry (the URL while Mason does not run) is not shown. Mason
  * keeps no copy, so it is never shown again. Then where its statements will show: the Queries page.
  */
@@ -289,6 +294,12 @@ export const page = {
         if (ask !== null && u !== null && !u.users.some((x) => x.name === ask.name && x.removedAt == null && (ask.verb !== "disable" || x.disabledAt == null))) { m.confirming = null; m.held = null; }
       },
       actions,
+      /** a person arriving starts in the add form's Name (issue 887); none while the state is unread, none read-only */
+      arrive() {
+        const state = ctx.read(STATE)?.body;
+        if (state === undefined || state === null) return undefined;
+        return renderAddUser(state) === "" ? null : "user-name";
+      },
       view() {
         // while From… asks, the list as it opened (`held`): its form is never rewritten under what is being typed
         const h = m.held !== null && askOf(m.confirming)?.verb === "from" ? m.held : null;
