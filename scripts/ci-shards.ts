@@ -336,6 +336,8 @@ export const DOCS_TESTS: ReadonlyArray<{ file: string; pattern?: string }> = [
   { file: "tests/oracle-legs.test.ts", pattern: "^--write" },
   // docs/WEB-UI.md "An operator's table edits" names every key of the contract; the file's other tests read no doc
   { file: "tests/cli-operator-tables.test.ts", pattern: "^the doc names every key of the contract" },
+  // the Helm chart under deploy/, rendered: a change to the chart alone is a docs-only run
+  { file: "tests/deploy-helm.test.ts" },
 ];
 
 /** The `node` invocations of the docs job: the per-test bound before the files (CI never runs `npm test`), the files
