@@ -1495,7 +1495,7 @@ test("the add form: Connects from, in mason user add's words — From anywhere (
   assert.match(textOf(form), /Name Connects from From anywhere Only from these addresses Address ranges, comma-separated Add a user$/);
   assert.match(form, /<input type="radio" name="connects" value="any" checked> From anywhere/, "from anywhere is the default, as mason user add with no --from");
   assert.match(form, /<input type="radio" name="connects" value="only"> Only from these addresses/);
-  assert.match(form, /<input id="add-user-from" name="from" spellcheck="false" autocapitalize="off" placeholder="192\.0\.2\.0\/24, 2001:db8::\/32" value="">/);
+  assert.match(form, /<input id="add-user-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e\.g\. 192\.0\.2\.0\/24, 2001:db8::\/32" value="">/);
   assert.ok(!/pattern=/.test(form), "never validated in the page");
   const { rangesOf } = await import(path.join(WEB, "pages", "users.js") as string) as { rangesOf: (e: unknown) => string[] | null };
   assert.equal(rangesOf({ connects: { value: "any" }, from: { value: "192.0.2.0/24" } }), null, "from anywhere: what is typed is not sent");
@@ -1781,6 +1781,19 @@ test("the page names nothing root-absolute: every asset, API path and import is 
     assert.ok(new RegExp(rootAbsolute.source).test(bad), bad);
   }
   for (const ok of [`fetch("api/state")`, `<link href="app.css">`, `"<svg/>"`, `<path d="M3 3z"/>`, `x.split("//")`]) assert.ok(!new RegExp(rootAbsolute.source).test(ok), ok);
+});
+
+test("every placeholder on the page starts with 'e.g. ': an example is never read as a value already filled in (issue 863)", () => {
+  // an attribute written in the HTML or by a module, or a property a script sets
+  const placeholder = /\bplaceholder\s*[=:]\s*(["'`])([\s\S]*?)\1/g;
+  const found: string[] = [];
+  for (const f of webFiles()) {
+    if (f.startsWith(`vendor${path.sep}`) || !/\.(?:html|js)$/.test(f)) continue;
+    const code = fs.readFileSync(path.join(WEB, f), "utf8").replace(/<!--[\s\S]*?-->|\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
+    for (const m of code.matchAll(placeholder)) found.push(`${f}: ${m[2]!}`);
+  }
+  assert.ok(found.length >= 5, `the page's placeholders are found (${found.length})`);
+  assert.deepEqual(found.filter((p) => !/^[^:]+: e\.g\. \S/.test(p)), [], "each placeholder says it is an example");
 });
 
 /** Wait until `cond` holds, checked every 5 ms, failing by name after `ms`: a wait on the condition, never on a delay a

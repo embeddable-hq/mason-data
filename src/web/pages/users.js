@@ -51,7 +51,7 @@ export function connectsChoice(id, from = null) {
     `<label class="tick"><input type="radio" name="connects" value="any"${only ? "" : " checked"}> From anywhere</label>` +
     `<label class="tick"><input type="radio" name="connects" value="only"${only ? " checked" : ""}> Only from these addresses</label>` +
     `<span class="ranges"><label class="sr" for="${esc(id)}-from">Address ranges, comma-separated</label>` +
-    `<input id="${esc(id)}-from" name="from" spellcheck="false" autocapitalize="off" placeholder="192.0.2.0/24, 2001:db8::/32" value="${esc(only ? from.join(", ") : "")}"></span></fieldset>`;
+    `<input id="${esc(id)}-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e.g. 192.0.2.0/24, 2001:db8::/32" value="${esc(only ? from.join(", ") : "")}"></span></fieldset>`;
 }
 
 /**
@@ -173,7 +173,7 @@ export function renderUsersConnect(pg, served = false) {
 export function renderAddUser(state) {
   if (state === undefined || state === null || usersReadOnly(state) !== null) return "";
   return `<form id="add-user" class="formcard" autocomplete="off"><label for="user-name">Name</label>` +
-    `<input id="user-name" name="name" required placeholder="metabase" spellcheck="false" autocapitalize="off">` +
+    `<input id="user-name" name="name" required placeholder="e.g. metabase" spellcheck="false" autocapitalize="off">` +
     roleChoice(state.roles) + connectsChoice("add-user") + `<button type="submit" class="primary">Add a user</button></form>`;
 }
 
