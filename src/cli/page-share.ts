@@ -1,5 +1,5 @@
 /**
- * THE WEB PAGE'S `mason share` (Connect from anywhere, the Overview's Connect card; docs/WEB-UI.md): the same share the
+ * THE WEB PAGE'S `mason share` (Share over the internet, in the Users page's Connect; docs/WEB-UI.md): the same share the
  * command opens — a login of `RunShares` (src/cli/share-run.ts) on the share's TLS-only socket, a tunnel client of
  * src/cli/tunnel.ts pointed at it, its address probed for the share's own certificate — opened by the RUN, because a page
  * cannot start a process. Nothing here is a second socket, password or tunnel: only who holds the share differs.
@@ -20,6 +20,7 @@
  */
 import type { Failure } from "./command.ts";
 import { newSharePassword, shareSecret, type RunShares, type ShareChoice } from "./share-run.ts";
+import { connectionUrl } from "./pg-url.ts";
 import { probeShare, startTunnel, tunnelPlan, type OpenTunnel, type TunnelPlan } from "./tunnel.ts";
 
 /** How often the page beats, and how long a share waits for a beat before it ends (the header says why each). */
@@ -28,9 +29,10 @@ export const BOUND_MS = 120_000;
 /** How long the tunnel has to give its address: `mason share`'s default. */
 const TIMEOUT_MS = 30_000;
 
-/** What the page is answered once, and only once: the password is in this answer alone. */
+/** What the page is answered once, and only once: the password is in this answer alone, and in `url` (what a tool
+ *  pastes, built as `mason share` builds its own: `connectionUrl`). */
 export interface PageOpened {
-  user: string; host: string; port: number; database: string; password: string; sslmode: "require"; fingerprint: string;
+  url: string; user: string; host: string; port: number; database: string; password: string; sslmode: "require"; fingerprint: string;
   role: string | null; reads: string; openedAt: string; endsAt: string | null; verified: boolean; beatMs: number; boundMs: number;
 }
 
@@ -49,8 +51,8 @@ export interface PageShareDeps {
 /** A tunnel's failure in the page's words: what to do there, never a flag of the command's. */
 function pageFailure(f: Failure, plan: TunnelPlan): Failure {
   if (f.code === "not_found") {
-    return { message: `${plan.bin} is not on this machine, and Connect from anywhere needs it`, code: "not_found", why: "the temporary address is a tunnel opened over ssh",
-      fix: `install ${plan.install}, then Connect from anywhere again`, next: [["mason doctor", "checks this machine"]] };
+    return { message: `${plan.bin} is not on this machine, and Share over the internet needs it`, code: "not_found", why: "the temporary address is a tunnel opened over ssh",
+      fix: `install ${plan.install}, then Share over the internet again`, next: [["mason doctor", "checks this machine"]] };
   }
   return { message: f.message, code: f.code, ...(f.why !== undefined ? { why: f.why } : {}),
     fix: f.message.startsWith("the tunnel gave no address") ? "the tunnel's service answered in a way this Mason cannot read: nothing was left open; mason share, in a terminal, offers another tunnel"
@@ -96,13 +98,14 @@ export class PageShares {
     shares.update(user, { host: t.host, port: t.port, endsAt: t.endsAt, state: "up", pid: t.pid, via: plan.via });
     void t.ended.then((why) => shares.close(user, `its tunnel closed (${why})`)).catch((e: unknown) => this.deps.log(`share: closing ${user} after its tunnel: ${(e as Error).message}`));
     this.deps.log(`share: ${user} opened from the web page, at ${t.host}:${t.port}`);
-    return { user, host: t.host, port: t.port, database: opened.database, password, sslmode: "require", fingerprint: opened.fingerprint, role: opened.role, reads: opened.reads,
+    const url = connectionUrl({ url: "", host: t.host, port: t.port, database: opened.database, sslmode: "require" }, user, password);
+    return { url, user, host: t.host, port: t.port, database: opened.database, password, sslmode: "require", fingerprint: opened.fingerprint, role: opened.role, reads: opened.reads,
       openedAt: new Date().toISOString(), endsAt: t.endsAt, verified: probe === "same", beatMs: BEAT_MS, boundMs: this.bound };
   }
 
   private endedWhileOpening(user: string): Failure {
     const why = this.deps.shares.ended?.user === user ? this.deps.shares.ended.why : "it was stopped";
-    return { message: `the share ended while its tunnel opened: ${why}`, code: "failed", fix: "nothing was left open: Connect from anywhere again" };
+    return { message: `the share ended while its tunnel opened: ${why}`, code: "failed", fix: "nothing was left open: Share over the internet again" };
   }
 
   /** The timer a beat resets: past the bound with no beat, the share ends. */

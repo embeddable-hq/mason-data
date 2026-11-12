@@ -14,7 +14,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   24 hours and links to them (Sync events, failures only; Queries, the refused or failed statements); a count the page
   could not read says "unknown" and why. They replace the lists of recent errors at the foot of the page. The table of
   the last day's and week's statements is gone too (the Statements and p95 cards stay, and Queries lists every
-  statement), and so is the Connect panel, with Connect from anywhere: the Postgres URL is still on Queries while its
+  statement), and so is the Connect panel, with Connect from anywhere (now Share over the internet, on the Users page): the Postgres URL is still on Queries while its
   log is empty, on the Users page, and in `mason status`; `mason share` opens a share from the command line.
 - **The Tables page lists the added tables first**, then the tables not added, so on a database of hundreds of
   tables the ones Mason syncs are at the top under All. A table you add or remove keeps its row, its state changing in
@@ -27,6 +27,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   added" and has the User, then the URL, Password and Database, each with Copy, "Shown once" under the password, and
   one line: the password is only shown once. The host, port and SSL mode are Connect's on the same page, and the card
   no longer repeats them. `mason user add` in a terminal prints every row, as before.
+- **Share over the internet is back, on the Users page.** Inside Connect, the box "Share over the internet (for
+  testing)" opens what `mason share` opens, for a tool that cannot reach your machine: choose the role it reads as
+  (where `mason/roles.yml` offers more than one), click Share, and it shows the public URL and the share's own login
+  and password, each with Copy, the password shown once. It is live until you stop it (Stop sharing), until a free
+  share's hour is up, or within two minutes of the page closing, and the box says how it ended. It is not offered
+  under `mason serve` or on a read-only page.
 - **The Users page lists the users first**, under its title, then the form that adds one (with the card of a user just
   added beside it) and Connect.
 

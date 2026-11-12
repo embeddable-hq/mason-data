@@ -87,7 +87,7 @@ export interface ShareState {
   shares: Array<{ user: string; from: ShareFrom; role: string | null; reads: string; openedAt: string; via: string | null; host: string | null; port: number | null; endsAt: string | null; state: string }>;
 }
 
-/** Who opened a share and holds it: `mason share`, or the web page's Connect from anywhere (src/cli/page-share.ts). */
+/** Who opened a share and holds it: `mason share`, or the web page's Share over the internet (src/cli/page-share.ts). */
 export type ShareFrom = "command" | "page";
 
 /** The last share that ended, and why: `/api/state` `shareEnded`, so a page that held it says why it is gone. */

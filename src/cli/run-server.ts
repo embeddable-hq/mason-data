@@ -110,7 +110,7 @@ export interface RunContext {
   roles?: () => RolesLive;
   /** what `mason share` opens (src/cli/share-run.ts): mason start's run alone; a server has an address of its own */
   shares?: RunShares;
-  /** the web page's Connect from anywhere (src/cli/page-share.ts): the same shares, held by the page's beats; absent with `shares` */
+  /** the web page's Share over the internet (src/cli/page-share.ts): the same shares, held by the page's beats; absent with `shares` */
   pageShares?: PageShares;
   /** the project's folder (sources/, mason.yml) */
   folder: () => string | null;
@@ -694,14 +694,14 @@ async function openShare(ctx: RunContext, req: http.IncomingMessage, res: http.S
 const SERVED_SHARE: Failure = { message: "this run is on a server, and has an address of its own: mason share is for a run on a laptop", code: "refused", next: [["mason help production", "reaching a server's Postgres API"]] };
 
 /**
- * `POST /api/share` { from: "page", confirmed: true, role? }: the web page's Connect from anywhere (src/cli/page-share.ts),
+ * `POST /api/share` { from: "page", confirmed: true, role? }: the web page's Share over the internet (src/cli/page-share.ts),
  * answered ONCE with the share and its password, which nothing here keeps; the page's beats hold it from then on.
  * `confirmed` is the person's yes to a public address, which the page asks for: a body without it opens nothing.
  */
 async function openPageShare(ctx: RunContext, body: { role?: unknown; confirmed?: unknown }, res: http.ServerResponse): Promise<void> {
   if (ctx.pageShares === undefined) { sendFailure(res, 409, SERVED_SHARE); return; }
   if (body.confirmed !== true) {
-    sendFailure(res, 400, { message: "nothing was shared: a temporary public address is opened only once the person said yes to it", code: "usage", fix: "send { from: \"page\", confirmed: true, role? }: the page's Connect from anywhere asks first" });
+    sendFailure(res, 400, { message: "nothing was shared: a temporary public address is opened only once the person said yes to it", code: "usage", fix: "send { from: \"page\", confirmed: true, role? }: the page's Share over the internet sends it once the person clicks Share" });
     return;
   }
   if (body.role !== undefined && typeof body.role !== "string") throw new Refusal(400, "role is a role's name, or left out");
@@ -898,7 +898,7 @@ export function createRunServer(ctx: RunContext): http.Server {
           const ended = ctx.shares.ended;
           const why = ended?.user === user ? `: ${ended.why}` : "";
           const ok = method === "DELETE" ? await ctx.pageShares.stop(user) : ctx.pageShares.beat(user);
-          if (!ok) { sendFailure(res, 404, { message: `the share ${user} is not open${why === "" ? "" : `; it ended${why}`}`, code: "not_found", fix: "Connect from anywhere opens a new one, with a new address and password" }); return; }
+          if (!ok) { sendFailure(res, 404, { message: `the share ${user} is not open${why === "" ? "" : `; it ended${why}`}`, code: "not_found", fix: "Share over the internet, on the Users page, opens a new one, with a new address and password" }); return; }
           sendJson(res, 200, { ok: true });
         } else if (method === "POST" && /^\/api\/share\/[^/]+$/.test(url.pathname)) {
           // what the command knows of its tunnel, as it knows it: mason status says it, and the run stops the client

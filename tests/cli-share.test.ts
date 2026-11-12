@@ -809,7 +809,7 @@ describe("mason share, against a real run and a stub tunnel", { timeout: 300_000
     return { status: r.status, body: await r.json() as Record<string, unknown> & { failure?: { message: string; fix?: string } } };
   };
 
-  test("the web page's Connect from anywhere on a real run: the stub's tunnel at the share's socket, TLS required, the password nowhere after; one share at a time with mason share; Stop sharing ends it all", async () => {
+  test("the web page's Share over the internet on a real run: the stub's tunnel at the share's socket, TLS required, the password nowhere after; one share at a time with mason share; Stop sharing ends it all", async () => {
     const opened = await fromPage("POST", "/api/share", { from: "page", confirmed: true });
     assert.equal(opened.status, 200, JSON.stringify(opened.body));
     const r = opened.body as unknown as { user: string; host: string; port: number; password: string; database: string };
@@ -944,7 +944,7 @@ test("the tunnel ends while the page's share is open: the share ends, said why; 
   const noSsh = pageShares({ fail: { message: "ssh is not on this machine's PATH, and --via pinggy needs it", code: "not_found", fix: "install it, or use --via bore" } });
   const refused = await noSsh.page.open({});
   assert.ok("failure" in refused);
-  assert.match(refused.failure.message, /^ssh is not on this machine, and Connect from anywhere needs it$/);
+  assert.match(refused.failure.message, /^ssh is not on this machine, and Share over the internet needs it$/);
   assert.match(refused.failure.fix ?? "", /install the OpenSSH client/);
   const offline = pageShares({ fail: { message: "the tunnel ended before it gave an address", code: "failed", why: "ssh exited 255: ssh: Could not resolve hostname", fix: "is this machine online? Port 443 outbound is all it needs" } });
   const off = await offline.page.open({});

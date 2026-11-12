@@ -141,6 +141,21 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
 - **Users**, Connect: once for the run, where a tool connects — host, port, database and SSL mode, each with **Copy**,
   and the URL and psql line with `<user>:<password>` in place — as `mason status` says it. No user's row carries a URL:
   the card shown once when a user is added is the only place its password is copied.
+- **Users**, Connect, Share over the internet (for testing) (under `mason start` only: never under `mason serve`, whose run
+  refuses it, and never on a read-only page, `pageReadOnly`, whatever `MASON_UI_READ_ONLY_ALLOW` still allows):
+  `mason share` from the page, for a tool that cannot reach this machine. A box inside Connect: a **Role** choice where
+  `mason/roles.yml` offers more than one role a share may read as (`GET /api/share/choices`, read beside the state
+  while the box is offered, as `mason share --role`), and **Share**. The box says first that it opens a temporary
+  public address and what anyone with it reads, so the click is the person's yes: `POST /api/share` `{ from: "page",
+  confirmed: true, role? }` opens the same share the command opens (src/cli/page-share.ts): the run makes the password
+  and starts the tunnel's client. While on, the box shows how long it has been shared, the URL, the share's own
+  **Login** (never a `mason user`) and its **Password**, each with **Copy**, "Shown once" beside the password's Copy;
+  "Live until you stop it", when a free share ends sooner (within about an hour), and **Stop sharing** (`DELETE
+  /api/share/<user>`). The password is in that one answer alone, kept in the page's memory: after a reload the box
+  shows the host, port and login, and says the password was shown once. The page holds the share by a beat (`POST
+  /api/share/<user>/beat`, every 15 s, hidden or not): two minutes without one (the tab closed, crashed or asleep) and
+  the share, its sessions and the tunnel's client end. How it ended (Stop sharing, the tunnel dropped) is said in the
+  box from `/api/state` `shareEnded`, with Share again under it; a refusal is the run's Failure.
 - **Users**, the list: each user's role and, on a line under it, where it connects from ("from" its ranges as `mason
   user list` says them, or "from anywhere": `from` in `mason user list --json`; cut by the column, its whole the
   tooltip), its status (Active, Disabled and when, or Removed), when added, when last
@@ -328,7 +343,7 @@ listens, and every browser connection crosses that one ssh connection as frames 
   (`src/cli/run-server.ts`).
 - **A page that only shows: `MASON_UI_READ_ONLY=1`.** For a page shown to someone who should only look (behind a
   reverse proxy, on the socket), `mason serve` with it set makes the page offer no control that changes anything — no
-  Add, Remove, Sync, Disable, Enable, Cancel, Add a user or Create a user, each page saying
+  Add, Remove, Sync, Disable, Enable, Cancel, Add a user, Create a user or Share, each page saying
   why — and its server refuses every request
   of the page that is not a GET or a HEAD, whatever its path, with "the web page is read-only here" in the failure shape
   (`src/cli/ui-read-only.ts`). Viewing is unchanged. It covers the page alone: a request with the run's token is the

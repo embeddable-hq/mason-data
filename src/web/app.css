@@ -580,6 +580,15 @@ fieldset.connects:has(input[value="any"]:checked) .ranges { display: none; }
 .connect .facts dd .dim { font-family: var(--font-sans); font-size: var(--text-sm); }
 .connect .tip { margin: var(--space-3) 0 0; color: var(--muted); display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
 .empty + .connect { margin-top: var(--space-3); }
+/* SHARE OVER THE INTERNET (renderShare, src/web/pages/users.js): a box of its own inside Connect, under a mortar course,
+   its title a bold line; its role choice and Share on one row */
+.connect .share { margin: var(--space-4) 0 0; padding: var(--space-3) var(--space-4); border: 1px solid var(--frame); border-radius: var(--radius); background: var(--sunken); }
+.connect .share .share-title { margin: 0 0 var(--space-2); font-weight: 700; color: var(--fg); }
+.connect .share .headline { margin: 0 0 var(--space-2); display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
+.connect .share .tip { margin: var(--space-2) 0 0; display: block; }
+.connect .share .share-ask { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.connect .share .share-ask select { width: auto; max-width: 100%; }
+.connect .share .facts { margin: 0 0 var(--space-2); }
 /* the first-run checklist (renderChecklist): a step a row, ✓ in green or ○ muted, a step to do with its one action */
 .checklist { background: var(--surface); border: 2px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-4) var(--space-5); margin: var(--space-6) 0 var(--space-6); }
 .checklist .checklist-title { margin-bottom: var(--space-3); font-size: var(--text-lg); display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-3); }

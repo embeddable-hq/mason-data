@@ -721,7 +721,7 @@ test("a project deployed read-only (MASON_PROJECT_READONLY=1): the state the run
 
 /** Every control a page wrote that sends a change (src/web/pages/*.js): a button or a form by its marker. */
 const WRITE_CONTROLS = ["data-sync-table", "data-remove-table", "data-confirm-remove-table", "data-add-table", "data-choose", "data-choose-sync", 'id="add-user"', "data-remove=", "data-confirm-remove=",
-  "data-disable=", "data-confirm-disable=", "data-enable=", "data-ask-cancel", "data-confirm-cancel"];
+  "data-disable=", "data-confirm-disable=", "data-enable=", "data-ask-cancel", "data-confirm-cancel", "data-share-open", "data-share-stop"];
 /** The buttons a read-only page may write: each only shows, copies or moves what is shown, and sends no change. */
 const VIEW_BUTTONS = /^data-(copy|dismiss-[a-z-]+|pop-close|sort-table|sort-key|show-more|show-all|refresh-range|older|newest|open)$/;
 
@@ -750,7 +750,7 @@ async function pageByPage(state: unknown): Promise<{ all: string; byPage: Map<st
 test("a read-only page (pageReadOnly): no page writes a control that sends a change — no Add, Remove, Sync, Columns…, Disable, Enable, Cancel or Add a user; unset, each is there", async () => {
   const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
   const open = await everyPage(CATALOG_STATE);
-  for (const control of WRITE_CONTROLS.filter((c) => !/confirm/.test(c))) assert.ok(open.includes(control), `without the setting: ${control}`);
+  for (const control of WRITE_CONTROLS.filter((c) => !/confirm|share-stop/.test(c))) assert.ok(open.includes(control), `without the setting: ${control}`);
   const shown = await everyPage({ ...CATALOG_STATE, pageReadOnly: why });
   for (const control of WRITE_CONTROLS) assert.ok(!shown.includes(control), `read-only: ${control}`);
   // BY RULE, NOT BY THE LIST ABOVE: every button a read-only page writes only shows, copies or moves what is shown
@@ -766,7 +766,7 @@ test("a read-only page (pageReadOnly): no page writes a control that sends a cha
 test("a read-only page: no add, create or write link anywhere — the Connect panel's Create a user on Queries' empty log included; the Overview and Usage say why; unset, all as before", async () => {
   const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
   // what leads to adding or creating something: a button-styled link to the page that does it, or its words
-  const LEADS = [/Create a user/, /Add a table/, /Add a user/, /Connect from anywhere/, /<a class="btn[^"]*" href="#users"/, /<a class="btn[^"]*" href="#tables[^"]*"/, /Cancel stops one/];
+  const LEADS = [/Create a user/, /Add a table/, /Add a user/, /Share over the internet/, /<a class="btn[^"]*" href="#users"/, /<a class="btn[^"]*" href="#tables[^"]*"/, /Cancel stops one/];
   const open = await pageByPage(CATALOG_STATE);
   const shown = await pageByPage({ ...CATALOG_STATE, pageReadOnly: why });
   for (const lead of LEADS) assert.ok(!lead.test(shown.all), `read-only: ${lead}`);
@@ -812,7 +812,8 @@ test("a read-only page: each renderer alone writes no control that changes anyth
   const renderRunning = fn<[unknown, unknown, unknown, number, unknown], string>("renderRunning");
   assert.ok(!renderRunning(running, null, null, Date.now(), why).includes("data-ask-cancel"));
   assert.ok(renderRunning(running, null, null, Date.now(), null).includes("data-ask-cancel"));
-  assert.equal(page.renderShare, undefined, "Connect from anywhere is no longer on the Overview: its renderer is gone");
+  assert.equal(fn<[unknown], string>("renderShare")(ro), "", "Share over the internet: absent on a read-only page");
+  assert.match(fn<[unknown], string>("renderShare")(CATALOG_STATE), /data-share-open/, "unset: Share is there");
   const { renderChecklist: checklist } = await import(path.join(WEB, "pages", "status.js") as string) as { renderChecklist: (s: unknown, u: unknown) => string };
   const nobody = { users: [] };
   const fresh = { ...NONE, pageReadOnly: why };
@@ -1256,7 +1257,7 @@ test("the app: a poll writes the shown page and when, reading only its endpoints
   run.asked.length = 0;
   await app.poll();
   // a page shown is read again whatever its rates (show marks every read stale): the shell's state with it
-  assert.deepEqual(run.asked, ["GET api/users?lastUsed=1", "GET api/state"]);
+  assert.deepEqual(run.asked, ["GET api/users?lastUsed=1", "GET api/state", "GET api/share/choices"]);
   assert.match(textOf(app.view().users!), /^User Role Status Added Last used metabase id 0123456789abcdef every table from anywhere Active 2026-10-27 09:10 UTC not used in the last \? days Queries Disable Remove$/);
   app.show("status");
   // the run stops
@@ -1616,11 +1617,13 @@ test("a read-only page that still manages its users (pageReadOnlyAllow: [users])
   assert.equal(renderAddUser({ ...CATALOG_STATE, pageReadOnlyAllow: ["users"] }), renderAddUser(CATALOG_STATE));
 });
 
-test("a read-only page that still changes its tables and its users (pageReadOnlyAllow: [tables, users]): both pages' controls; the Overview says nothing is refused; Cancel still absent (issue 813)", async () => {
+test("a read-only page that still changes its tables and its users (pageReadOnlyAllow: [tables, users]): both pages' controls; the Overview says nothing is refused; Cancel and Share over the internet still absent (issue 813)", async () => {
   const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
   const shown = await pageByPage({ ...CATALOG_STATE, pageReadOnly: why, pageReadOnlyAllow: ["tables", "users"] });
   for (const control of ["data-add-table", "data-sync-table", "data-remove-table", 'id="add-user"', "data-from=", "data-disable="]) assert.ok(shown.all.includes(control), control);
-  for (const control of ["data-ask-cancel"]) assert.ok(!shown.all.includes(control), control);
+  // the run refuses /api/share on any read-only page, whatever it still allows: no Share box
+  for (const control of ["data-ask-cancel", "data-share-open"]) assert.ok(!shown.all.includes(control), control);
+  assert.ok(!/Share over the internet/.test(shown.all), "no share box");
   assert.ok(!textOf(shown.overview).includes("from this page"), "the Overview refuses nothing it offers");
   assert.ok(textOf(shown.byPage.get("usage")!).includes(`Statements are not cancelled from this page: ${why}.`));
   assert.ok(!/are not added/.test(textOf(shown.all)), "Tables and Users say nothing is refused");
@@ -2084,7 +2087,7 @@ test("the shell: only the page shown is asked, each endpoint at its own rate —
   t += 2000;
   assert.deepEqual(await asked(), ["GET api/state"], "the synced tables' sizes once a minute: they are measured every 10 min");
   app.show("users");
-  assert.deepEqual(await asked(), ["GET api/users?lastUsed=1", "GET api/state"], "a page shown is read at once, the shell's state with it");
+  assert.deepEqual(await asked(), ["GET api/users?lastUsed=1", "GET api/state", "GET api/share/choices"], "a page shown is read at once, the shell's state with it");
   // Queries at Now, the default: the newest requests of the last 15 minutes, every 5 s (the state, how to connect, every 30 s)
   app.show("queries");
   assert.deepEqual(await asked(), ["GET api/requests?since=15m", "GET api/state"], "Queries: the request log alone, of the range");
@@ -2125,7 +2128,7 @@ test("in the browser: the hash chooses the section shown and the page asked; a l
   run.asked.length = 0;
   go("#users"); await settle();
   assert.deepEqual(shown(), ["users"]);
-  assert.deepEqual(run.asked, ["GET api/users?lastUsed=1", "GET api/state"], "the users at once, not at the next tick (and the state the sidebar names the project from)");
+  assert.deepEqual(run.asked, ["GET api/users?lastUsed=1", "GET api/state", "GET api/share/choices"], "the users at once, not at the next tick (and the state the sidebar names the project from)");
   assert.deepEqual(current(), ["#users"]);
   run.asked.length = 0;
   tick(); await settle();
@@ -2761,11 +2764,11 @@ test("the users: read with their last use, every 30 s, the state beside them; Co
   const app = fn<[unknown, () => Date], App & { pages: Map<string, { click(d: unknown, b: unknown, w: unknown): Promise<void> | null }> }>("createApp")(run.fetch, () => new Date(t));
   app.show("users");
   const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
-  assert.deepEqual(await asked(), [U, "GET api/state"], "on opening: its own, and the state for the sidebar (once a minute)");
+  assert.deepEqual(await asked(), [U, "GET api/state", "GET api/share/choices"], "on opening: its own, the state for the sidebar (once a minute), and the roles a share may read as");
   t += 2000;
   assert.deepEqual(await asked(), [], "not at the 2 s poll");
   t += 28_000;
-  assert.deepEqual(await asked(), [U, "GET api/state"], "then every 30 s, the state with them (the Connect panel's)");
+  assert.deepEqual(await asked(), [U, "GET api/state", "GET api/share/choices"], "then every 30 s, the state with them (the Connect panel's) and the share's roles");
   assert.match(textOf(app.view().users!), /metabase id 0123456789abcdef every table from anywhere Active 2026-10-27 09:10 UTC never Queries Disable Remove old id aaaaaaaaaaaaaaaa every table Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC Queries$/);
   // Copy (the Connect panel's): the page's own handler writes the text as shown, and keeps it nowhere
   const written: string[] = [];
@@ -4412,11 +4415,11 @@ test("a page opened at its own address that reads no state (Users) still has the
   let t = Date.UTC(2026, 9, 28, 9, 0, 0);
   const app = fn<[unknown, () => Date, string], App>("createApp")(run.fetch, () => new Date(t), "#users");
   await app.poll();
-  assert.deepEqual(run.asked, ["GET api/users?lastUsed=1", "GET api/state"], "the page's own read first: its failure is the banner");
+  assert.deepEqual(run.asked, ["GET api/users?lastUsed=1", "GET api/state", "GET api/share/choices"], "the page's own read first: its failure is the banner");
   assert.notEqual(app.view().where, "", "the sidebar names the database");
   assert.match(app.view().version!, /^Mason /);
   run.asked.length = 0; t += 30_000; await app.poll();
-  assert.deepEqual(run.asked, ["GET api/users?lastUsed=1", "GET api/state"], "Users reads the state itself now (its Connect panel), at its own rate");
+  assert.deepEqual(run.asked, ["GET api/users?lastUsed=1", "GET api/state", "GET api/share/choices"], "Users reads the state itself now (its Connect panel), and the roles a share may read as, at its own rate");
 });
 
 test("Tables: an added copy not measured yet says so (—, with why in its title), never 0 B", () => {
@@ -4972,6 +4975,164 @@ test("only the clock moved: the ages are set where they are, the part not writte
   tick(); await settle();
   assert.equal(log.writes, writes, "not written again");
   assert.equal(shown[0]!.innerHTML, "7s ago", "the age moved where it is");
+});
+
+// ------------------------------------------------------------------ Share over the internet (the page's mason share, in the Users page's Connect)
+
+const SHARE_AT = "2026-11-01T10:00:00.000Z";
+const SHARE_NOW = Date.parse("2026-11-01T10:05:00.000Z");
+const PASSWORD = `mason_share_${"ab".repeat(24)}`;
+const SHARE_URL = `postgres://share_a1b2c3:${PASSWORD}@relay.example:41234/shop?sslmode=require`;
+const listed = { user: "share_a1b2c3", from: "page", role: null, reads: "every synced table", openedAt: SHARE_AT, via: "pinggy", host: "relay.example", port: 41234, endsAt: "2026-11-01T11:00:00.000Z", state: "up" };
+const sharing = (shares: unknown[], o: Record<string, unknown> = {}) => ({ ...RUNNING, share: shares.length ? { port: 40001, fingerprint: "AA", sessions: 0, refusedLogins: 0, droppedConnections: 0, shares } : null, shareEnded: null, ...o });
+const shareModel = (o: Record<string, unknown> = {}) => ({ phase: "none", role: null, opened: null, ended: null, failure: null, ...o });
+const ONE_ANSWER = { body: { choices: [], role: null, reads: "every synced table" }, failure: null };
+const TWO_ROLES = { body: { choices: [{ role: "sales", reads: "1 synced table: orders", default: true }, { role: "ops", reads: "every synced table", default: false }] }, failure: null };
+const renderShare = (s: unknown, m: unknown, choices: unknown = ONE_ANSWER) => fn<[unknown, unknown, number, unknown], string>("renderShare")(s, m, SHARE_NOW, choices);
+
+test("Share over the internet (for testing): the box in each state, as it WROTE it — none (one role, two, not read, refused), opening, open, open after a reload, ended, refused, served, read-only", () => {
+  const none = renderShare(sharing([]), shareModel());
+  const noneText = textOf(none);
+  assert.match(noneText, /^Share over the internet \(for testing\) For a tool that cannot reach this machine, like a BI tool in the cloud: a temporary public address with a login of its own, as mason share opens\. Anyone with the address and its password reads every synced table\. TLS is required of every connection\. Share$/);
+  assert.match(none, /<button type="button" data-share-open="">Share<\/button>/, "Share, enabled");
+  assert.doesNotMatch(none, /<select/, "one answer: no role to choose");
+  const two = renderShare(sharing([]), shareModel(), TWO_ROLES);
+  assert.match(two, /<label for="share-role">Role<\/label> <select id="share-role"><option value="sales" selected>sales: 1 synced table: orders \(the file&#39;s default\)<\/option><option value="ops">ops: every synced table<\/option><\/select> <button[^>]*data-share-open/, "the roles beside Share, the file's default first chosen");
+  assert.match(textOf(two), /reads what the role chosen reads\./);
+  assert.match(renderShare(sharing([]), shareModel({ role: "ops" }), TWO_ROLES), /<option value="ops" selected>/, "the role chosen stays chosen across a rewrite");
+  const unread = renderShare(sharing([]), shareModel(), null);
+  assert.match(textOf(unread), /Reading the roles…/);
+  assert.match(unread, /data-share-open="" disabled>Share/, "no Share before the roles are read");
+  const rolesFailure = { code: "refused", message: "no role of mason/roles.yml can be shared: the rows of each depend on an attribute, and a share's login has no attributes" };
+  const noRole = renderShare(sharing([]), shareModel(), { body: undefined, failure: rolesFailure });
+  assert.ok(noRole.includes(fn<[unknown], string>("renderFailure")(rolesFailure)), "the roles refused: the run's Failure");
+  assert.match(noRole, /data-share-open="" disabled>Share/);
+
+  assert.match(textOf(renderShare(sharing([]), shareModel({ phase: "opening" }))), /^Share over the internet \(for testing\) Opening a temporary public address… \(up to 30 s\)$/);
+
+  const opened = { url: SHARE_URL, user: "share_a1b2c3", password: PASSWORD, database: "shop", host: "relay.example", port: 41234 };
+  const open = renderShare(sharing([listed]), shareModel({ phase: "open", opened }));
+  for (const [id, v] of [["share-url", SHARE_URL], ["share-user", "share_a1b2c3"], ["share-password", PASSWORD]]) {
+    assert.ok(open.includes(`<code id="${id}">${v}</code> <button type="button" class="small" data-copy="${id}"`), `${id} with its Copy`);
+  }
+  assert.match(open, /data-copy="share-password"[^>]*>Copy<\/button><\/span> <span class="badge warn">Shown once<\/span><\/dd>/, "Shown once beside the password's Copy");
+  const openText = textOf(open);
+  assert.match(openText, /^Share over the internet \(for testing\) Shared Public for 5 min : every synced table URL postgres:\/\/share_a1b2c3:\S+ Copy Login share_a1b2c3 Copy Password \S+ Copy Shown once /);
+  assert.match(openText, /the login is this share's own, not a user's, and its password is shown this once, is kept nowhere, and ends with the share\./);
+  assert.match(openText, /Live until you stop it\. A free share ends sooner, within about an hour: at .+, in about 55 minutes; Share again then gives a new address and password\. It also ends within two minutes of this page closing\./);
+  assert.match(open, /data-share-stop="share_a1b2c3"[^>]*>Stop sharing</);
+  assert.match(textOf(renderShare(sharing([{ ...listed, endsAt: null }]), shareModel({ phase: "open", opened }))), /Live until you stop it\. It also ends within two minutes of this page closing\./, "a share with no end: until stopped");
+  assert.match(textOf(renderShare(sharing([{ ...listed, role: "sales", reads: "1 synced table: orders" }]), shareModel({ phase: "open", opened }))), /Shared Public for 5 min , reading as the role sales: 1 synced table: orders/);
+
+  const reloaded = renderShare(sharing([listed]), shareModel());
+  assert.ok(!reloaded.includes(PASSWORD) && !reloaded.includes("share-password") && !reloaded.includes("share-url"), "after a reload the password is nowhere on the page");
+  assert.match(textOf(reloaded), /Host relay\.example Copy Port 41234 Copy Login share_a1b2c3 Copy The password was shown once, when it opened, and is kept nowhere: Stop sharing and Share again for a new one\./);
+  assert.match(reloaded, /Stop sharing/);
+
+  const ended = textOf(renderShare(sharing([]), shareModel({ phase: "ended", ended: { user: "share_a1b2c3", why: "its tunnel closed (ssh exited 255)" } })));
+  assert.match(ended, /^Share over the internet \(for testing\) The share ended: its tunnel closed \(ssh exited 255\)\. Its address no longer answers, and its password no longer works\. For a tool /);
+  assert.match(ended, /Share$/, "and Share again");
+  assert.match(textOf(renderShare(sharing([]), shareModel({ phase: "ended", ended: { user: "share_a1b2c3", why: "Stop sharing, on this page" } }))), /The share ended: Stop sharing, on this page\./);
+
+  const failure = { code: "not_found", message: "ssh is not on this machine, and Share over the internet needs it", fix: "install the OpenSSH client, then Share over the internet again", next: [{ command: "mason doctor", what: "checks this machine" }] };
+  const refused = renderShare(sharing([]), shareModel({ phase: "refused", failure }));
+  assert.ok(refused.includes(fn<[unknown], string>("renderFailure")(failure)), "a refusal is the CLI's Failure, rendered by renderFailure");
+
+  for (const m of [shareModel(), shareModel({ phase: "open", opened })]) {
+    assert.equal(renderShare(sharing([listed], { served: true }), m), "", "under mason serve: absent");
+    assert.equal(renderShare(sharing([listed], { pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" }), m), "", "read-only: absent");
+    assert.equal(renderShare(sharing([listed], { pageReadOnly: "x", pageReadOnlyAllow: ["users"] }), m), "", "read-only, its users still the page's: absent too (the run refuses it)");
+  }
+  // in Connect, after its tip; nowhere on the Overview
+  const { renderUsersConnect } = { renderUsersConnect: fn<[unknown, boolean, string], string>("renderUsersConnect") };
+  assert.match(renderUsersConnect(RUNNING.postgres, false, none), /The password is shown once, when the user is added: lost, remove the user and add it again\.<\/p><div class="share">[\s\S]*<\/div><\/div>$/);
+  // every word the box writes: no tunnel's provider, no engine
+  for (const html of [none, two, open, reloaded, ended, refused]) assert.doesNotMatch(textOf(html), /pinggy|bore\b|duck/i);
+});
+
+test("Share over the internet over a fake run: Share opens it confirmed with the role chosen, beaten on a timer of its own, its end said and its password dropped; Stop sharing", async () => {
+  const asked: Array<[string, string | undefined, unknown]> = [];
+  let state: unknown = sharing([]);
+  const answers: Record<string, unknown> = {
+    "POST api/share": { body: { url: SHARE_URL, user: "share_a1b2c3", host: "relay.example", port: 41234, database: "shop", password: PASSWORD, beatMs: 15_000 } },
+    "POST api/share/share_a1b2c3/beat": { body: { ok: true } },
+  };
+  const intervals: Array<{ fn: () => void; ms: number; cleared: boolean }> = [];
+  const refreshed: string[][] = [];
+  const ctx = {
+    ask: async (p: string, init?: { method?: string; body?: string }) => { asked.push([p, init?.method, init?.body === undefined ? undefined : JSON.parse(init.body)]); return answers[`${init?.method ?? "GET"} ${p}`]; },
+    read: (p: string) => p === "api/share/choices" ? TWO_ROLES : { body: state, failure: null }, refresh: async (ps: string[]) => { refreshed.push(ps); }, now: () => new Date(SHARE_NOW),
+    timers: { setInterval: (f: () => void, ms: number) => { intervals.push({ fn: f, ms, cleared: false }); return intervals.length - 1; }, clearInterval: (i: number) => { intervals[i]!.cleared = true; } },
+  };
+  type Share = { m: Record<string, unknown>; actions: Record<string, (...a: unknown[]) => Promise<void> | void>; afterRead: (s: unknown) => void; click: (d: Record<string, string>) => unknown; input: (t: unknown) => unknown };
+  const share = fn<[unknown], Share>("createShare")(ctx);
+  assert.equal(share.input({ id: "user-role", value: "x" }), null, "another input is not its");
+  share.input({ id: "share-role", value: "ops" });
+  share.input({ id: "share-role", value: "nobody" });
+  assert.equal(share.m.role, "ops", "only a role offered is chosen");
+  await share.click({ shareOpen: "" });
+  assert.deepEqual(asked.find(([p, m]) => p === "api/share" && m === "POST")?.[2], { from: "page", confirmed: true, role: "ops" }, "confirmed by the click, the role chosen");
+  assert.equal(share.m.phase, "open");
+  assert.equal((share.m.opened as { password: string }).password, PASSWORD);
+  assert.equal(intervals.length, 1);
+  assert.equal(intervals[0]!.ms, 15_000);
+  // a state read before the open lists nothing: never taken for its end
+  share.afterRead(sharing([]));
+  assert.equal(share.m.phase, "open");
+  state = sharing([listed]);
+  share.afterRead(state);
+  intervals[0]!.fn();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(asked.some(([p, m]) => p === "api/share/share_a1b2c3/beat" && m === "POST"), "the beat");
+  // the run ended it (the tunnel closed): the next state says so, and the password leaves the page's memory
+  state = sharing([], { shareEnded: { user: "share_a1b2c3", from: "page", why: "its tunnel closed (ssh exited 255)", at: SHARE_AT } });
+  share.afterRead(state);
+  assert.equal(share.m.phase, "ended");
+  assert.deepEqual(share.m.ended, { user: "share_a1b2c3", why: "its tunnel closed (ssh exited 255)" });
+  assert.equal(share.m.opened, null);
+  assert.ok(!JSON.stringify(share.m).includes(PASSWORD));
+  assert.equal(intervals[0]!.cleared, true, "no more beats");
+  // a reload over an open share: it is beaten again, its password not shown
+  const again = fn<[unknown], Share>("createShare")(ctx);
+  again.afterRead(sharing([listed]));
+  assert.equal(again.m.phase, "open");
+  assert.equal(intervals.length, 2);
+  // Stop sharing: DELETE, the beats end
+  answers["DELETE api/share/share_a1b2c3"] = { body: { ok: true } };
+  await again.click({ shareStop: "share_a1b2c3" });
+  assert.ok(asked.some(([p, m]) => p === "api/share/share_a1b2c3" && m === "DELETE"));
+  assert.equal(again.m.phase, "ended");
+  assert.deepEqual(again.m.ended, { user: "share_a1b2c3", why: "Stop sharing, on this page" });
+  assert.equal(intervals[1]!.cleared, true);
+  // a refusal to open: the run's Failure, and the roles read again
+  const third = fn<[unknown], Share>("createShare")(ctx);
+  answers["POST api/share"] = { failure: { code: "failed", message: "the tunnel did not give an address within 30 s" } };
+  await third.click({ shareOpen: "" });
+  assert.equal(third.m.phase, "refused");
+  assert.deepEqual(refreshed.at(-1), ["api/share/choices"]);
+});
+
+test("the Users page over a fake run: Connect carries the share's box, the roles read beside the state, Share sends the role chosen; a served run neither reads them nor shows it", async () => {
+  const run = fakeRun();
+  run.answers.set("GET api/state", answer(RUNNING));
+  run.answers.set("GET api/share/choices", answer(TWO_ROLES.body));
+  run.answers.set("POST api/share", answer({ url: SHARE_URL, user: "share_a1b2c3", host: "relay.example", port: 41234, database: "shop", password: PASSWORD, beatMs: 15_000 }));
+  const app = fn<[unknown], App & { pages: Map<string, { input(t: unknown): unknown; click(d: unknown, b: unknown, w: unknown): Promise<void> | null }> }>("createApp")(run.fetch);
+  app.show("users");
+  await app.poll();
+  const connect = app.view()["users-connect"]!;
+  assert.match(textOf(connect), /Share over the internet \(for testing\) .* Role sales: 1 synced table: orders \(the file's default\) ops: every synced table Share$/);
+  app.pages.get("users")!.input({ id: "share-role", value: "ops" });
+  run.asked.length = 0;
+  await app.pages.get("users")!.click({ shareOpen: "" }, {}, {});
+  assert.equal(run.asked[0], `POST api/share ${JSON.stringify({ from: "page", confirmed: true, role: "ops" })}`);
+  const served = fakeRun();
+  served.answers.set("GET api/state", answer({ ...RUNNING, served: true }));
+  const sapp = fn<[unknown], App>("createApp")(served.fetch);
+  sapp.show("users");
+  await sapp.poll();
+  assert.ok(!served.asked.includes("GET api/share/choices"), "a served run's roles are not asked: it refuses a share");
+  assert.doesNotMatch(sapp.view()["users-connect"] ?? "", /Share over the internet|data-share/);
 });
 
 // ------------------------------------------------------------------ the host's views and card (issue 814)
