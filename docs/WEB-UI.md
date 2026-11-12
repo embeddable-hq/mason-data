@@ -121,7 +121,9 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
 - **Tables**, a table not added: its rows, its key and why it cannot be added as it is. **Add** syncs every column, as
   `mason add <table>` does; **Columns…** opens a form to tick the columns to sync; **Name its key…** does the same for a
   table with no primary key.
-- **Users** (`#users`): a form that adds a user by name and, where `mason/roles.yml` names roles and reads as it is, a
+- **Users** (`#users`), in this order: the list of users, right under the title (and its read-only line), then the add
+  form with the card of a user just added beside it, then Connect, so a card that appears moves nothing above it. The
+  form adds a user by name and, where `mason/roles.yml` names roles and reads as it is, a
   **Role** as `mason user add --role` (the roles from `/api/state` `roles`, `mason status --json`'s): the file's
   `default:` is chosen first, marked (default), and sends no role, so the user follows the default as one added with no
   `--role` does; with no default the first choice is no role. The run judges the role, and its refusal is shown. Then
@@ -129,12 +131,13 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   add` with no `--from`), with no second question; **Only from these addresses** sends the ranges typed in one box,
   comma-separated as `--from a,b` takes them (`192.0.2.0/24, 2001:db8::/32`), split at each comma and trimmed. The page
   never checks a range: the run reads each, and a refused one is shown as the run's refusal. `--set`
-  attributes stay the command's. Its password is shown once, in a card of what is the user's own and the URL — URL,
-  User, Password and Database, each with **Copy**, laid out the same way, so a person fills a tool's connection form
-  field by field (a field `mason user add --json` does not carry is not shown) — and one line, "Host, port and SSL
-  mode: see Connect on this page", since Connect already says the run's (named, never "above" or "below": where it sits
-  may move; `mason user add` in a terminal still prints all of them). No psql line (the URL is the same thing, pasted
-  after `psql`), and a link to Queries, where its statements will show; Mason keeps no copy, so it is never shown again.
+  attributes stay the command's. Its password is shown once, in a card titled **New user added** on its top edge (as
+  the Overview's "mason status" box): **User**, its name as plain text, then URL, Password and Database, each with
+  **Copy**, laid out the same way, so a person fills a tool's connection form field by field (a field `mason user add
+  --json` does not carry is not shown); "Shown once" on its own line under the password; and one line, "The password
+  is only shown once", over **I have copied it**. Host, port and SSL mode are Connect's on the same page (`mason user
+  add` in a terminal still prints all of them). No psql line: the URL is the same thing, pasted after `psql`. Mason
+  keeps no copy, so it is never shown again.
 - **Users**, Connect: once for the run, where a tool connects — host, port, database and SSL mode, each with **Copy**,
   and the URL and psql line with `<user>:<password>` in place — as `mason status` says it. No user's row carries a URL:
   the card shown once when a user is added is the only place its password is copied.

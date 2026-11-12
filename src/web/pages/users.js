@@ -199,23 +199,21 @@ function toggle(u, disabled, asking) {
 }
 
 /**
- * A USER JUST ADDED (`mason user add --json`'s shape): a prominent card with its password, shown this once — what is
- * this user's alone, and the URL: URL, User, Password and Database, each with a Copy button laid out the same way, so a
- * person fills a BI tool's form field by field (issue 839). Host, port and SSL mode are the run's, said once by Connect
- * on the same page (renderUsersConnect), so the card points there in a line instead of repeating them — named, never
- * "above" or "below", since where Connect sits may move; `mason user add` in a terminal, with no Connect beside it,
- * prints them all. No psql line: the URL is the same thing, pasted after `psql`. A field the JSON does not carry (the
- * URL and host while Mason does not run) is not shown, nor the line about Connect. Mason keeps no copy, so it is never
- * shown again. Then where its statements will show: the Queries page.
+ * A USER JUST ADDED (`mason user add --json`'s shape): a prominent card, titled "New user added" on its top edge as the
+ * Overview's "mason status" box is, with what is this user's alone and the URL: User, its name as plain text, then URL,
+ * Password and Database, each with a Copy button laid out the same way, so a person fills a BI tool's form field by
+ * field (issue 839). Under the password's value, "Shown once"; under the rows, one line: the password is only shown
+ * once. Host, port and SSL mode are the run's, said by Connect on the same page (renderUsersConnect); `mason user add` in
+ * a terminal prints them all. No psql line: the URL is the same thing, pasted after `psql`. A field the JSON does not
+ * carry (the URL while Mason does not run) is not shown. Mason keeps no copy, so it is never shown again.
  */
 export function renderAdded(a) {
-  const rows = [["URL", a.url, "added-url"], ["User", a.user, "added-user"], ["Password", a.password, "added-password"], ["Database", a.database, "added-database"]]
+  const rows = [["URL", a.url, "added-url"], ["Password", a.password, "added-password"], ["Database", a.database, "added-database"]]
     .filter(([, v]) => v !== undefined && v !== null);
-  return `<div class="added" role="status"><p class="headline">The user ${esc(a.user)} added: its password is shown this once ${badge("Shown once", "warn")}</p>` +
-    `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v)}</dd>`).join("")}</dl>` +
-    (a.host !== undefined && a.host !== null ? `<p class="tip">Host, port and SSL mode: see Connect on this page.</p>` : "") +
-    `<p class="tip">Paste it into the tool now: Mason keeps no copy of the password, and this page will not show it again. Lost, remove the user and add it again.</p>` +
-    `<p class="tip">Connect your tool: each statement it sends shows on <a href="#observability/queries">Observability › Queries</a>.</p>` +
+  return `<div class="added" role="status"><p class="added-title">New user added</p>` +
+    `<dl class="facts"><dt>User</dt><dd>${esc(a.user)}</dd>` +
+    rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v)}${id === "added-password" ? `<div class="shown-once">${badge("Shown once", "warn")}</div>` : ""}</dd>`).join("") +
+    `</dl><p class="tip">The password is only shown once</p>` +
     `${button("I have copied it", { dismissAdded: "" }, "primary")}</div>`;
 }
 
