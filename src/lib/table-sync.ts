@@ -341,7 +341,7 @@ export function syncedText(t: { changed: number; deleted: number; rows: number; 
  *  `mason status` (src/cli/commands.ts `keptAge`; the web page's, src/web/pages/status.js, held equal by a test), what
  *  `mason wait` waits for (src/cli/readiness.ts) and EXPLAIN's first line (src/duck/explain.ts). Never "NOT kept
  *  current": a `sync: off` table is never kept current by design, and the poll is at work, not at fault (issue 834). */
-export const CATCHING_UP = "being caught up by one poll for what changed since it was synced";
+export const CATCHING_UP = "Getting the changes made since it was last synced. You can query it meanwhile.";
 
 /** WHETHER A SERVED TABLE IS IN ITS ONE CATCH-UP POLL (owed it, queued, polling or ending) — the one derivation, read by
  *  `syncStateOf` (src/cli/readiness.ts) and EXPLAIN (src/duck/explain.ts): its sync not failed, not being read again

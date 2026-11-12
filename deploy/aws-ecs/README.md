@@ -2,7 +2,7 @@
 
 **The simplest, and what Mason was measured on: one EC2 instance running [`deploy/mason-data/compose.yml`](../mason-data/README.md).**
 An m7g.xlarge (4 vCPU Graviton3, 15 GiB) with an EBS gp3 volume, Docker installed, the compose file and its `.env`
-copied in, `docker compose up -d`; the copy is the compose volume on the instance's EBS disk, a block device. For one
+copied in, `docker compose up -d`; the synced data is on the compose volume on the instance's EBS disk, a block device. For one
 container on one machine, a scheduler adds nothing. Give the instance an Elastic IP, or a Network Load Balancer with a
 TCP listener on 5433, for the tools.
 
@@ -10,10 +10,10 @@ The rest of this folder is the same container as an ECS task on such an instance
 
 ## Why ECS on EC2, not Fargate
 
-The copy needs a persistent block device. Fargate has none: its storage is ephemeral (20 to 200 GiB of bind-mount
-space that ends with the task), EFS is NFS (a network filesystem, which the copy does not support), and the EBS volumes
+The synced data needs a persistent block device. Fargate has none: its storage is ephemeral (20 to 200 GiB of bind-mount
+space that ends with the task), EFS is NFS (a network filesystem, which Mason does not support), and the EBS volumes
 ECS attaches to tasks "must be a new volume … You can't attach an existing Amazon EBS volume to a task", and for a
-service they "aren't preserved and are always deleted upon task termination". A redeploy would copy every table again.
+service they "aren't preserved and are always deleted upon task termination". A redeploy would sync every table again from the start.
 On EC2 the instance mounts an EBS volume and the task bind-mounts it (`host.sourcePath`): the data is "tied to the
 lifecycle of the host Amazon EC2 instance", which is what Mason wants.
 
@@ -39,7 +39,7 @@ What to make, in order; each step is AWS's own page, cited, because the console 
    NLB's health check, if one), nothing else in; out to the database and to AWS's endpoints.
 4. **The cluster**, a **launch template** and an **Auto Scaling group of one**: `aws ecs create-cluster --cluster-name mason`;
    the template is the ECS-optimized Amazon Linux 2023 AMI (arm64 for an m7g), the instance profile from step 2, the
-   security group, a second gp3 EBS volume mapped at `/dev/sdf` for the copy, and [`user-data.sh`](user-data.sh) as its
+   security group, a second gp3 EBS volume mapped at `/dev/sdf` for the synced data, and [`user-data.sh`](user-data.sh) as its
    user data ([launching a container instance](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/launch_container_instance.html);
    the group as the cluster's [capacity provider](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/asg-capacity-providers.html),
    or plain instances that join through user data, both work). Min, max and desired are 1, in one Availability Zone.
@@ -75,8 +75,8 @@ A tool connects to the instance's address (its Elastic IP, or the NLB) on 5433 w
   task that never becomes healthy.
 - **The volume is the instance's.** `/mnt/mason` is the second EBS volume of the launch template, mounted by
   `user-data.sh` (formatted when blank, left alone when not), and the task bind-mounts it at `/mason/data`. A replaced
-  instance gets a new, empty volume from the template, so the next start copies every table again: Mason loses no data
-  by it, only the time of a copy. Keeping one volume across replacements means attaching a tagged volume by instance id
+  instance gets a new, empty volume from the template, so the next start syncs every table again from the start: Mason loses no data
+  by it, only the time a first sync takes. Keeping one volume across replacements means attaching a tagged volume by instance id
   in the user data (`ec2:DescribeVolumes`, `ec2:AttachVolume` on the instance role, the volume in the group's one zone, a
   wait for the device); this folder does not do it. One instance in the cluster, so the task has one place to run; a
   cluster of several instances would need a placement constraint on the one with the volume (not shown). A Docker volume
@@ -90,8 +90,8 @@ A tool connects to the instance's address (its Elastic IP, or the NLB) on 5433 w
 - **`cd /mason/data`**: every `mason` command means the project of the folder it runs in (the nearest `.mason/`), and
   ECS Exec documents no working directory. The data folder is the image's `WORKDIR`, which `docker compose exec` and
   `kubectl exec` start in; a shell that does not needs the `cd`.
-- **`stopTimeout: 60`** in the task definition is what applies: SIGTERM is `mason serve`'s stop (a copy in flight
-  interrupted and rolled back), and the default is 30 s, after which the container is killed. The instance's
+- **`stopTimeout: 60`** in the task definition is what applies: SIGTERM is `mason serve`'s stop (a first sync in
+  flight is interrupted and rolled back), and the default is 30 s, after which the container is killed. The instance's
   `ECS_CONTAINER_STOP_TIMEOUT=60s` applies only to a container whose task definition sets none; it is set so a task
   definition that forgets gets the same answer. (Fargate caps `stopTimeout` at 120 s; EC2 reads the agent's setting.)
 - **The health check** runs `fetch` inside the container, as the image's own `HEALTHCHECK` does (the image has no curl):

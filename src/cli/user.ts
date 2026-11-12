@@ -364,8 +364,8 @@ export const disabledNext = (name: string): NextStep[] => [[`mason user enable $
 export const enabledNext = (name: string): NextStep[] => [["mason user list", "the users"], [`mason user disable ${name}`, "it connects no more, until enabled"]];
 
 /**
- * WHAT A DISABLE DOES, in the words `mason user disable` prints and the web page's Disable asks with (src/web/pages/users.js
- * `disableEffect`, held equal by tests/web-page.test.ts).
+ * WHAT A DISABLE DOES, in the words `mason user disable` prints (the web page's Disable says the same facts in its own
+ * words, naming its Enable: src/web/pages/users.js `disableEffect`).
  */
 export const disableEffect = (name: string): string =>
   `It connects no more until mason user enable ${name}, with the same password, and the sessions it holds end at their next statement.`;

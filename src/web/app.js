@@ -52,6 +52,9 @@
  *       arrive?()      the id of the element a person arriving on the page starts in (a sidebar link or a link
  *                      followed, never a poll's write): undefined while what decides it is unread, null for none
  *                      (the shell focuses it once, `arriving` in `start`)
+ *       reveal?()      the id of an element an action just wrote that the person must see (a new user's password
+ *                      card), once, else null: after the write, the shell scrolls it into view (on a phone it was
+ *                      written below the screen's edge)
  *       route?(params, { doc })  the hash showed it with these parameters (`#tables?show=failed`: { show: "failed" }):
  *                      it takes the ones it knows into its state (and a control outside its parts, through `doc`)
  *       saysStale?     true when the page says itself that what it shows is out of date (the Overview's word): the
@@ -90,7 +93,7 @@ export const PRESS_HOLD_MS = 2000;
 
 // every renderer the tests import from here, wherever it lives now
 export * from "./shared.js";
-export { CATCHING_UP, copyingText, tableLine, keptAge, keptWords, sourceRows, renderStatus, renderShare, createShare } from "./pages/status.js";
+export { CATCHING_UP, copyingText, tableLine, keptAge, keptWords, factRows, factNotes, renderFacts, renderStatus, renderShare, createShare } from "./pages/status.js";
 export { tableFacts, addedLines, removedReport, pickBody, columnsPath, renderTableAdded, renderTablesRemoved, renderTables } from "./pages/tables.js";
 export { renderUsers, renderAdded, renderAddUser, attributesText } from "./pages/users.js";
 export { renderRequests } from "./pages/queries.js";
@@ -224,9 +227,9 @@ export function renderSubnav(shown, range = DEFAULT_RANGE, keptDays = undefined,
     const o = rangeOffered(k, keptDays);
     if (!o.shown && k !== r) return "";
     if (!o.offered && k !== r) return `<span class="off" aria-disabled="true" title="${esc(o.why)}">${esc(v.label)}<span class="sr"> (${esc(o.why)})</span></span>`;
-    return `<a href="${esc(hashOf(shown, { range: k }))}"${k === r ? ` aria-current="true"` : ""}${v.live ? ` title="follows what happens: read every few seconds"` : ""}>${esc(v.label)}</a>`;
-  }).join("")}</div>` + (isLive(r) ? `<span class="live" title="read every few seconds"><span class="live-dot" aria-hidden="true"></span>Live</span>`
-    : `<span class="as-of">${asOf ? `<span class="dim" title="read once when chosen; Now follows what happens">as of ${esc(asOf.toISOString().slice(11, 19))} UTC</span> ` : ""}<button type="button" class="small" data-refresh-range>Refresh</button></span>`);
+    return `<a href="${esc(hashOf(shown, { range: k }))}"${k === r ? ` aria-current="true"` : ""}${v.live ? ` title="Updates every few seconds"` : ""}>${esc(v.label)}</a>`;
+  }).join("")}</div>` + (isLive(r) ? `<span class="live" title="Updates every few seconds"><span class="live-dot" aria-hidden="true"></span>Live</span>`
+    : `<span class="as-of">${asOf ? `<span class="dim" title="Read once, when you chose this range. Choose Now to follow it live.">as of ${esc(asOf.toISOString().slice(11, 19))} UTC</span> ` : ""}<button type="button" class="small" data-refresh-range>Refresh</button></span>`);
 }
 
 /**
@@ -529,6 +532,10 @@ export function start(doc, win) {
     if (charts !== null) void charts.mount(app.pages.get(app.model.shown).charts?.() ?? {});
     place();
     arrived();
+    // what an action just wrote that the person must see (the page's `reveal`): scrolled into view once, as little as
+    // it takes (a phone wrote a new user's password card at the screen's bottom edge)
+    const reveal = app.pages.get(app.model.shown).reveal?.() ?? null;
+    if (reveal !== null) doc.getElementById(reveal)?.scrollIntoView?.({ block: "nearest" });
   };
   // ARRIVING ON A PAGE (issue 887): the element its `arrive()` names takes the focus once, at the first write that has
   // it — the page's first, or the one after a link followed (a hashchange) — so a person types straight away; never at a

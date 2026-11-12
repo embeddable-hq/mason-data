@@ -15,8 +15,8 @@ docs/DESIGN.md "Mason against a Postgres read replica" says why the sweep is sha
 - **The statements** (`QUERIES` in the script), Postgres's SQL sent as written to both: orders and revenue by status
   over every row; one tenant's orders per day over 90 days; the top 20 customers by amount, joined to `customers`; orders
   by `payload ->> 'source'`; paid orders in a 30-day window; one order by its primary key.
-- **Mason** is the real copy and listener in the script's process, wired as `mason start` wires them (the request log
-  on, the stored JSON paths on), copying from the same Postgres; the copy's time is part of the result. Before a size is
+- **Mason** is the real sync and listener in the script's process, wired as `mason start` wires them (the request log
+  on, the stored JSON paths on), syncing from the same Postgres; the first sync's time is part of the result. Before a size is
   measured every statement's answer from Mason is compared with Postgres's.
 - **Each cell** (size × clients × engine): N clients in a separate Node process run the statements in turn for
   `--seconds` after `--warmup` and one pass of the mix by every client; p50 / p95 are of every statement's wall time, the rate is statements completed per
@@ -56,11 +56,11 @@ laptop runs (`--sizes 1M --clients 1,8 --seconds 10 --runs 1`).
 ```bash
 npm install
 node scripts/bench-replica.ts --label "m7g.xlarge, EBS" --target-postgres-seconds 60 \
-  --work <a directory on the disk a deployment's copy lives on> --out /tmp/bench-replica.json
+  --work <a directory on the disk a deployment's synced data lives on> --out /tmp/bench-replica.json
 ```
 
 - **The other engine stopped**: while Postgres is measured Mason is closed (its DuckDB memory released, its file kept,
-  opened again as `mason start` reopens a copy), and while Mason is measured the bench's Postgres container is stopped
+  opened again as `mason start` reopens the synced data), and while Mason is measured the bench's Postgres container is stopped
   (`docker stop`). An idle engine is not equivalent: its buffers stay resident and take the other's page cache. A
   `--postgres` server stays up (the fixture says so).
 - **A quiet machine**: stop Mason's own run (`mason stop`, or the `mason-data` container) and anything else that reads
@@ -76,11 +76,11 @@ node scripts/bench-replica.ts --label "m7g.xlarge, EBS" --target-postgres-second
   its settings are read and recorded (a sweep refuses one whose `max_connections` is not past `--max-clients`), and its `bench_replica_<rows>` databases are kept for the next run (`COMMENT ON
   TABLE orders` says what one holds; a stale one is made again).
 - **Disk**: a size whose estimate (~700 bytes a row, both engines) would leave less than `--reserve-gb` (60) free where
-  Mason's copy is written (`--work`, the OS temp dir by default) is skipped, said in the output and the fixture. Where
-  `/tmp` is a tmpfs or a small volume, point `--work` at the disk a deployment's copy would live on, so Mason reads the
+  Mason's synced data is written (`--work`, the OS temp dir by default) is skipped, said in the output and the fixture.
+  Where `/tmp` is a tmpfs or a small volume, point `--work` at the disk a deployment's synced data would live on, so Mason reads the
   disk Postgres reads.
 - **Time**: about `2 × runs × (warm-up + window + the slowest statements' drain)` per cell, printed before each cell
-  starts, plus the data's generation (~5 s per million rows on a laptop) and Mason's copy. A sweep to a minute is
+  starts, plus the data's generation (~5 s per million rows on a laptop) and Mason's first sync. A sweep to a minute is
   hours: its last cells measure for 3 minutes, twice per engine.
 
 The output prints a line per run as it ends, and the fixture is written after each size and at the end, so an
@@ -124,7 +124,7 @@ rendered files. It is laid out for scanning:
   both engines; the sweep's verdict (where Postgres reached the target, or what stopped it, and its slowest statement
   there) under it. A measured cell on neither line gets a table of its own.
 - **Statement by statement** at the largest cell, **Mason is** from the p50s, and the statements Postgres answers faster
-  named under it; **the copy**, a row per size; and the environment, the method, the answers' check, any failed
+  named under it; **the first sync**, a row per size; and the environment, the method, the answers' check, any failed
   statements and skipped sizes folded in a `<details>` "How it was measured".
 
 Every time is in seconds, the header saying `(s)`, at a precision by size (`258`, `37.9`, `4.53`, `0.14`, `0.013`);

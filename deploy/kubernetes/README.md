@@ -1,6 +1,6 @@
 # Mason on Kubernetes
 
-A StatefulSet of one pod running `mason serve`, its copy on one PersistentVolumeClaim, the Postgres API behind a TCP
+A StatefulSet of one pod running `mason serve`, its synced data on one PersistentVolumeClaim, the Postgres API behind a TCP
 LoadBalancer. The manifests beside this file are the configuration; [`deploy/helm/mason-data/`](../helm/mason-data/README.md)
 is the same as a chart.
 
@@ -23,14 +23,14 @@ kubectl exec statefulset/mason -- mason user add metabase   # the BI tool's user
 kubectl get service mason-pg                        # EXTERNAL-IP: the address a tool connects to, port 5433, sslmode=require
 ```
 
-- **One replica, a StatefulSet, never an autoscaler.** The copy is one file with one writer, so the old pod must be gone
+- **One replica, a StatefulSet, never an autoscaler.** The synced data is one file with one writer, so the old pod must be gone
   before the new one starts on the same volume. A StatefulSet's RollingUpdate does exactly that ("delete and recreate
   each Pod … one at a time", waiting for the new one to be Running and Ready), and a pod's identity, its name and its
   PVC, exists at most once. A Deployment can serve too, with `strategy: Recreate` and nothing else: its default
   RollingUpdate starts the new pod beside the old one, and even a Deployment with Recreate replaces a pod deleted by hand
   "even if the old Pod is still in a Terminating state". That is why Recreate is mandatory for a Deployment, and why the
   StatefulSet is preferred.
-- **The volume.** A disk, `ReadWriteOnce` from a block StorageClass; the copy is one file written in place and read at
+- **The volume.** A disk, `ReadWriteOnce` from a block StorageClass; the synced data is one file written in place and read at
   random, and a network filesystem (EFS, Azure Files, any NFS class) is not supported. The manifests name no
   `storageClassName`, so the cluster's default class is used: on GKE the default is a balanced persistent disk, on AKS
   `default` is `managed-csi`, a managed disk, both right. EKS Auto Mode creates no StorageClass ("You must create a
@@ -40,11 +40,11 @@ kubectl get service mason-pg                        # EXTERNAL-IP: the address a
   and `kubectl rollout status` waits for ever. The class and the size are decided once: a StatefulSet's
   `volumeClaimTemplates` cannot be changed after creation. The PVC stays when the StatefulSet is deleted ("Deleting
   and/or scaling a StatefulSet down will not delete the volumes"): `kubectl delete pvc data-mason-0` to start over; the
-  next start copies the tables again.
+  next start syncs the tables again from the start.
 - **The project folder is a ConfigMap**, mounted read-only at `/mason/project`: the sources file naming the tables, and
   `mason.yml`. `mason serve` writes nothing there, so `mason add` beside the server is refused (with
   `MASON_PROJECT_READONLY=1` set, by name and before anything is read: edit the files and deploy them); change the ConfigMap and
-  `kubectl rollout restart statefulset/mason`: the table is copied (or dropped) at the next start. The chart restarts the
+  `kubectl rollout restart statefulset/mason`: the table is synced (or dropped) at the next start. The chart restarts the
   pod itself when the sources file changes. To let `mason add` work beside the server instead, set
   `MASON_PROJECT=/mason/data/project` and drop the mount: the folder then lives on the volume, uncommitted.
 - **Two Services.** `mason-pg`, a LoadBalancer on 5433: a cloud's default is a TCP (layer 4) load balancer, which is
@@ -55,8 +55,8 @@ kubectl get service mason-pg                        # EXTERNAL-IP: the address a
 - **Probes**: a startup probe of 30 × 10 s allows the first start 5 minutes (it takes ~15 s on an idle node, minutes on
   a loaded one; liveness and readiness run only after it has succeeded once); readiness every 10 s, liveness every
   15 s with 3 failures. `/healthz` is 503 while it starts, 200 once it serves.
-- **`terminationGracePeriodSeconds: 60`**: SIGTERM is `mason serve`'s stop (a copy in flight interrupted and rolled
-  back); the kubelet sends SIGKILL when it expires. The default is 30 s.
+- **`terminationGracePeriodSeconds: 60`**: SIGTERM is `mason serve`'s stop (a first sync in flight is interrupted and
+  rolled back); the kubelet sends SIGKILL when it expires. The default is 30 s.
 - **The pod runs as uid 1000** (the image's `node`), with `fsGroup: 1000` so the volume is writable whoever the
   provisioner made its owner.
 - **Commands beside the server**: `kubectl exec statefulset/mason -- mason <command>`; they run as `node`, in the data
@@ -69,7 +69,7 @@ the cgroup limit and takes half from 5 GiB up, said explicitly here). The reques
 memory it was promised. CPU has a request and no limit: one statement may use every core, and a CPU limit would
 throttle it. Which size: enough that the page cache holds the columns your dashboards read, memory before cores;
 [`deploy/mason-data/README.md`](../mason-data/README.md#memory) has the measurements, `kubectl exec statefulset/mason -- mason doctor`
-what the copy may use.
+what the engine may use.
 
 ## The Helm chart
 

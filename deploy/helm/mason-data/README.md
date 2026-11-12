@@ -2,7 +2,7 @@
 
 The plain manifests of [`deploy/kubernetes/`](../../kubernetes/README.md) as a chart; `values.yaml` holds the decisions
 (image, database, project folder, storage class and size, memory, the Postgres API's Service, TLS, further settings) and
-nothing else: one replica, the probes and the 60 s grace are fixed, because the copy requires them.
+nothing else: one replica, the probes and the 60 s grace are fixed, because the synced data requires them.
 
 From your own repository, where `mason/` is the project folder `mason init` and `mason add` wrote on a laptop
 (`MASON_REPO` a checkout of this repository):

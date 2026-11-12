@@ -158,9 +158,9 @@ ${table(["rows", "clients", ...mixHead], ["---:", "---:", ...mixAlign], others.m
     perQuery.map(({ q, p, m }) => [q.title, secondsText(p.p50Ms), secondsText(p.p95Ms), secondsText(m.p50Ms), secondsText(m.p95Ms), masonIs(p.p50Ms, m.p50Ms)]));
   const postgresWins = perQuery.filter(({ p, m }) => m.p50Ms > p.p50Ms).map(({ q }) => `"${q.title}"`);
   const winsNote = postgresWins.length === 0 ? "Mason answers every statement faster here, at p50." :
-    `Postgres is faster at ${listText(postgresWins)}: it reads ${postgresWins.length === 1 ? "it" : "them"} through an index, and Mason's copy has none ([docs/DESIGN.md](DESIGN.md) "Heap order, no index").`;
+    `Postgres is faster at ${listText(postgresWins)}: it reads ${postgresWins.length === 1 ? "it" : "them"} through an index, and Mason's synced tables have none ([docs/DESIGN.md](DESIGN.md) "Heap order, no index").`;
 
-  const copyTable = table(["rows", "in Postgres", "copied in (s)", "on Mason's disk", "JSON path stored after (s)"], ["---:", "---:", "---:", "---:", "---:"],
+  const copyTable = table(["rows", "in Postgres", "synced in (s)", "on Mason's disk", "JSON path stored after (s)"], ["---:", "---:", "---:", "---:", "---:"],
     f.sizes.map((z) => [`${rowsText(z.rows)} orders, ${rowsText(z.customers)} customers`, gib(z.postgresBytes), numText(z.copySeconds), gib(z.masonFileBytes),
       z.jsonPathReadySeconds === null ? "not stored" : numText(z.jsonPathReadySeconds)]));
 
@@ -243,10 +243,10 @@ ${perQueryTable}
 
 ${winsNote}
 
-## The copy
+## The first sync
 
-**Mason's copy** of each size, from that Postgres: *copied in* is the time until the copy was served, and the JSON path
-is stored that long after its first reads.
+**Mason's first sync** of each size, from that Postgres: *synced in* is the time until the synced tables were served,
+and the JSON path is stored that long after its first reads.
 
 ${copyTable}
 
@@ -403,7 +403,7 @@ test("Mason is: the ratio of the two, one decimal under 10 and none above, faste
   assert.match(text, /\| one order by its primary key, 30 M rows, 8 clients \(p50\) \| 0\.013 \| 0\.99 \| 79× slower \|/);
   assert.match(text, /Mason is for scans and aggregates\. A lookup through an index is faster on Postgres/);
   assert.match(text, /\| one order by its primary key \| 0\.013 \| 2\.06 \| 0\.99 \| 0\.14 \| 79× slower \|/, "the statement's ratio is of its p50s");
-  assert.match(text, /Postgres is faster at "one order by its primary key": it reads it through an index, and Mason's copy has none/);
+  assert.match(text, /Postgres is faster at "one order by its primary key": it reads it through an index, and Mason's synced tables have none/);
   assert.match(text, /\| 1,000,000 \| 2\.06 \| 0\.14 \| 15× faster \| /);
 });
 

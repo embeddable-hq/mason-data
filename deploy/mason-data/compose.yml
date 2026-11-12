@@ -1,4 +1,4 @@
-# MASON ON ONE MACHINE: one container, `mason serve` (src/cli/serve.ts), beside wherever your Postgres is. It copies
+# MASON ON ONE MACHINE: one container, `mason serve` (src/cli/serve.ts), beside wherever your Postgres is. It syncs
 # the tables your project's sources file names, keeps them current, and answers the Postgres protocol for BI tools and your
 # app. deploy/mason-data/README.md is the walkthrough.
 #
@@ -8,8 +8,8 @@
 #   docker compose exec mason mason add public.orders
 #   docker compose exec mason mason user add metabase   # a user for the BI tool: its password and the URL
 #
-# ./mason is the project folder (sources/, mason.yml): commit it. The copy and Mason's state are the volume
-# `mason-data`; `docker compose down` keeps it, `down -v` removes it (the next start copies again).
+# ./mason is the project folder (sources/, mason.yml): commit it. The synced data and Mason's state are the volume
+# `mason-data`; `docker compose down` keeps it, `down -v` removes it (the next start syncs everything again).
 #
 # ONE replica, always: DuckDB lets one process write its file. The image is ghcr.io/embeddable-hq/mason-data
 # (`main` is every merge, `<version>` a release; MASON_TAG pins one, MASON_IMAGE names another, `mason-data:dev` a
@@ -29,7 +29,7 @@ services:
     volumes:
       - ./mason:/mason/project
       - mason-data:/mason/data
-    # the stop: a copy in flight is interrupted and rolled back, DuckDB closed; a minute is plenty
+    # the stop: a first sync in flight is interrupted and rolled back, DuckDB closed; a minute is plenty
     stop_grace_period: 60s
 
 volumes:
