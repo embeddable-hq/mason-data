@@ -37,6 +37,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { ADDRESS_NOT_ALLOWED, ApiError, USER_DISABLED } from "../api/error.ts";
 import { cidrOf, cidrText, inRanges, rangeOf, type Range } from "../lib/cidr.ts";
+import { replaceFile } from "../lib/disk-full.ts";
 import type { PgApiOptions, PgToken } from "../api/postgres/server.ts";
 import { tokenProblem } from "./token.ts";
 import { ATTRIBUTE_NAME_RE, type AttributeValues } from "./row-filter.ts";
@@ -220,11 +221,8 @@ export function changeUsers<R extends { refused: string }>(file: string, change:
     if ("problem" in now) throw new Error(now.problem);
     const next = change(now.users);
     if (!Array.isArray(next)) return next;
-    const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
-    try {
-      fs.writeFileSync(tmp, `${JSON.stringify({ users: next }, null, 2)}\n`, { mode: 0o600 });
-      fs.renameSync(tmp, file);
-    } catch (e) { fs.rmSync(tmp, { force: true }); throw e; }
+    // whole or not at all (src/lib/disk-full.ts): a full disk leaves the users as they were
+    replaceFile(file, `${JSON.stringify({ users: next }, null, 2)}\n`, 0o600);
     return next;
   } finally { fs.rmSync(lock, { force: true }); }
 }
