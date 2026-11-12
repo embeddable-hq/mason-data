@@ -314,6 +314,13 @@ every session needs. Write the rule and one sentence of why; the incident, the m
   their next query." Not "Where hello connects from, as mason user from hello sets it: the sessions it holds from
   another address end at their next statement." This file and the code's comments are written tersely. That style is
   for the people building Mason. Never copy it into what a user reads.
+- **Say "sync", never "copy", for what Mason does to a table's data.** A user reads *the first sync*, *the synced
+  table* and *the synced data*, never "copy", "copies", "copied" or "copying". This holds everywhere a user reads: the
+  CLI, the web page, errors, logs, README.md, `cli/README.md`, the user-facing docs, release notes, and wording proposed
+  in issues and PRs. A user who reads "copy" thinks of a one-off snapshot, not data kept in sync. Exempt are code
+  identifiers, `--json` keys and values, `MASON_COPY_PARALLEL`, SQL's and the wire's `COPY`, the clipboard's Copy
+  button, and the docs for people building Mason (`docs/DESIGN.md`, `docs/RECIPES.md`, `docs/FLOWS.md`, `.claude/`).
+  `tests/conventions.test.ts` holds every literal in `src/` to it.
 - **A refusal on the wire is Postgres's** (SQLSTATE, message, DETAIL, HINT), and every refusal names its registry entry
   (`src/duck/gaps.ts`): a DuckDB-side refusal without one does not compile; a `PgError` 0A000 in src/api/ without one fails
   `tests/conventions.test.ts` (six older ones are ratcheted there).
@@ -329,11 +336,9 @@ every session needs. Write the rule and one sentence of why; the incident, the m
   entrance); "done" asserted by code that never exercised the artifact (the contract answers a probe); progress and
   reasons that lived only in the log (the ledger is the record, the commands render it).
 - **Vocabulary**: the *sources file* names what is synced, one *entry* per table; what Mason does to a table's data is
-  *sync*: a user reads *the first sync* (the chunked copy, in the code), *the synced table* and *the synced data*, never
-  "copy" (`tests/conventions.test.ts` holds every literal of src/ to it: the commands, the log, the wire; identifiers, `--json` keys and
-  `MASON_COPY_PARALLEL` keep the code's word); changes
-  arrive by *the poll* (SELECTs on xmin) or *the stream* (logical replication); a *user* is what `mason user` makes (never "token" or "credentials" in what it
-  prints); the *request log* is `_mason.requests`. Name the engine only in code and docs.
+  *sync* ("Say sync" above; the first sync is the chunked copy in the code); changes arrive by *the poll* (SELECTs on
+  xmin) or *the stream* (logical replication); a *user* is what `mason user` makes (never "token" or "credentials" in
+  what it prints); the *request log* is `_mason.requests`. Name the engine only in code and docs.
 - **The sources file is named for a software engineer**: someone who writes SQL against Postgres must recognise every
   key (`kind`, `url`, `tables`, `columns`, `exclude`, `key`) without a BI glossary (no CLI answer says otherwise,
   `tests/conventions.test.ts`). Choose a word in this order: what SQL and the database call it; what an application
