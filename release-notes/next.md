@@ -8,6 +8,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **A database URL naming a database the server does not have no longer lists every database on that server.** The
+  failure of `mason init`, `mason start`, `mason doctor`, `mason tables` and every other command that connects to it
+  (and their `--json`) named them all: hundreds on a large
+  server, and on a shared one other teams' databases. Now it names the closest one when the name is a typo of it
+  ("did you mean `shop`?"), and otherwise only how many others there are; the way out is the same: put the right name
+  after the port in the URL.
 - **The limit on what statements may spill to disk is in force from the start.** Before, the limit (half of the free
   disk under `.mason/`, or `MASON_SPILL_LIMIT`) was not enforced until the free disk moved by 1 % or more, so a heavy
   statement could spill past it and fill the disk. Now a statement past it fails alone with 53400 and Mason's hint.

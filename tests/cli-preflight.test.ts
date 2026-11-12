@@ -214,3 +214,88 @@ test("collation: a column's own collation and the source's collations are read w
     assert.deepEqual([own("C")?.provider, own("C")?.collate, own("C")?.ctype, own("und-x-icu")?.provider, own("und-x-icu")?.locale], ["c", "C", "C", "i", "und"]);
   } finally { await db.close(); }
 });
+
+// ------------------------------------------------------------------ a database the server does not have (issue 871)
+
+/** A Postgres that has only `names` (`postgres` among them, the one it serves): any other database is 3D000, and its
+ *  one statement, the names' read, is answered with them. Synthetic names alone. */
+async function serverOf(names: string[]): Promise<{ port: number; close: () => void }> {
+  const net = await import("node:net");
+  const msg = (type: string, body: Buffer): Buffer => { const len = Buffer.alloc(4); len.writeInt32BE(body.length + 4); return Buffer.concat([Buffer.from(type), len, body]); };
+  const cstr = (s: string) => Buffer.from(`${s}\0`);
+  const server = net.createServer((sock) => {
+    let started = false;
+    sock.on("data", (d: Buffer) => {
+      if (!started && d.length === 8 && d.readInt32BE(4) === 80877103) { sock.write("N"); return; }   // SSLRequest: no TLS here
+      if (!started) {
+        started = true;
+        const fields = d.subarray(8).toString("utf8").split("\0");
+        const database = fields[fields.indexOf("database") + 1];
+        if (database !== "postgres") {
+          sock.end(msg("E", Buffer.concat([cstr("SFATAL"), cstr("C3D000"), cstr(`Mdatabase "${database}" does not exist`), Buffer.from([0])])));
+          return;
+        }
+        sock.write(Buffer.concat([msg("R", Buffer.alloc(4)), msg("Z", Buffer.from("I"))]));
+        return;
+      }
+      if (d[0] !== 0x51) return;   // 'Q': the names' read; a Terminate is answered by nothing
+      const col = Buffer.alloc(18); col.writeInt32BE(0, 0); col.writeInt16BE(0, 4); col.writeInt32BE(19, 6); col.writeInt16BE(64, 10); col.writeInt32BE(-1, 12); col.writeInt16BE(0, 16);
+      const one = Buffer.alloc(2); one.writeInt16BE(1);
+      const rows = names.map((name) => { const v = Buffer.from(name); const h = Buffer.alloc(6); h.writeInt16BE(1, 0); h.writeInt32BE(v.length, 2); return msg("D", Buffer.concat([h, v])); });
+      sock.write(Buffer.concat([msg("T", Buffer.concat([one, cstr("datname"), col])), ...rows, msg("C", cstr(`SELECT ${names.length}`)), msg("Z", Buffer.from("I"))]));
+    });
+    sock.on("error", () => { /* the client's close resets the socket: nothing of the test's to say */ });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  return { port: (server.address() as { port: number }).port, close: () => server.close() };
+}
+
+test("a database the server does not have: the closest name there, as did you mean, and never the list (mason init, mason start)", async () => {
+  const names = ["accounts", "billing", "postgres", "shop", "warehouse"];
+  const srv = await serverOf(names);
+  try {
+    const said: string[] = [];
+    const r = await checkSource(`postgres://me@127.0.0.1:${srv.port}/shpo`, { remote: false, cmd: "mason init", say: (m) => said.push(m), progress: () => {} });
+    assert.deepEqual(r, { exit: 1 });
+    assert.deepEqual(said, [
+      `mason init: could not connect: 127.0.0.1:${srv.port} has no database by the name the URL gives (the part after the port)`,
+      "  - did you mean `shop`? It is the name after the port in the URL",
+    ]);
+  } finally { srv.close(); }
+});
+
+test("a database the server does not have and none close to it: a count only, in mason doctor's check and its --json", async () => {
+  const others = ["accounts", "billing", "warehouse"];
+  const srv = await serverOf(["postgres", ...others]);
+  try {
+    const { connectSource } = await import("../src/cli/preflight.ts");
+    const c = await connectSource(source(`postgres://me@127.0.0.1:${srv.port}/inventory`));
+    assert.ok("failure" in c);
+    assert.deepEqual(c.failure.hints, [`127.0.0.1:${srv.port} has 4 other databases, none close to that name: put the right name after the port in the URL`]);
+    // the database line mason doctor says, which its --json carries as it is
+    const { databaseChecks } = await import("../src/cli/doctor.ts");
+    const json = JSON.stringify(await databaseChecks(`postgres://me@127.0.0.1:${srv.port}/inventory`));
+    assert.match(json, /has 4 other databases, none close to that name/);
+    for (const n of others) assert.ok(!json.includes(n), `${n} is not in the check's --json: ${json}`);
+  } finally { srv.close(); }
+});
+
+test("a server with many databases: the failure is as short as with one, and names none of them", async () => {
+  const { connectSource } = await import("../src/cli/preflight.ts");
+  const srv = await serverOf(["postgres", ...Array.from({ length: 2000 }, (_, i) => `tenant_${String(i).padStart(4, "0")}_data`)]);
+  try {
+    const c = await connectSource(source(`postgres://me@127.0.0.1:${srv.port}/inventory`));
+    assert.ok("failure" in c);
+    const text = [c.failure.message, ...c.failure.hints].join("\n");
+    assert.ok(text.length < 300, `bounded: ${text.length} characters`);
+    assert.doesNotMatch(text, /tenant_/);
+    assert.match(text, /has 2001 other databases, none close to that name/);
+  } finally { srv.close(); }
+  // one other: said in the singular
+  const one = await serverOf(["postgres"]);
+  try {
+    const c = await connectSource(source(`postgres://me@127.0.0.1:${one.port}/inventory`));
+    assert.ok("failure" in c);
+    assert.deepEqual(c.failure.hints, [`127.0.0.1:${one.port} has 1 other database, none close to that name: put the right name after the port in the URL`]);
+  } finally { one.close(); }
+});
