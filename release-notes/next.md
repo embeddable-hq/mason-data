@@ -19,6 +19,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **The Remove button is back on the web page's Tables.** Each added table showed "View events", "Sync now" and then
+  only "…". The button was cut off because its column was too narrow. Now the column fits all three buttons at every
+  window width.
+- **A site's own links in the web page's sidebar now line up with the page's own.** These are the links set by
+  `MASON_UI_NAV_LINKS`. In a narrow window their icons sat left of the others, and the current one's highlight was cut
+  short. In a wide window and on a phone, their rows were shorter than the others. Now they look the same as the page's
+  own links at every width.
 - **The web page's Add a user form no longer jumps when "Connects from" is toggled.** Ticking "Only from these
   addresses" showed the address box and pushed Add a user onto a line of its own; From anywhere pulled it back. Now the
   box keeps its place whichever is ticked, saying "any address" under From anywhere, so nothing in the form moves; the
