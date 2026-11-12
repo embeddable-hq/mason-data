@@ -95,8 +95,8 @@ export const attributesText = (a) => Object.entries(a).map(([k, v]) => `${k}=${t
 export function renderUsers(list, confirming = null, now = Date.now(), refused = null, roles = null, readOnly = null) {
   const users = [...list.users.filter((u) => u.removedAt == null), ...list.users.filter((u) => u.removedAt != null)];
   const why = readOnlyLine("Users are not added, changed, disabled or removed", readOnly);
-  if (!users.length) return why + empty("No users yet", readOnly !== null ? `A user is the name and password psql, a BI tool or your app connects with, as ${code("mason user add <name>")} adds one.`
-    : `A user is the name and password psql, a BI tool or your app connects with. Add one above, as ${code("mason user add <name>")} does: its URL, password included, is shown once.`);
+  if (!users.length) return why + (readOnly !== null ? empty("No users yet:", `${code("mason user add <name>")} adds one.`)
+    : empty("No users yet. Create a user for a service like a BI tool or your app: add one below."));
   const note = (what, text) => text ? `<p class="dim">${esc(what)}: ${esc(text)}.</p>` : "";
   const broken = roles && roles.problem != null ? roles : null;
   const brokenNote = broken ? `<p class="warn">${esc(`${broken.file ?? "mason/roles.yml"} cannot be read as it is now, so every statement of a user held to it is refused: ${broken.problem}`)}</p>` : "";

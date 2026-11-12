@@ -520,8 +520,9 @@ export const usersReadOnly = (s) => (s?.pageReadOnlyAllow ?? []).includes("users
 export const serverHostNote = (pg, served) => !served || pg.public === true ? ""
   : `<p class="tip">This is the address on the server: from elsewhere a tool connects to the server's own address, in place of ${code(pg.host ?? "localhost")}.</p>`;
 
-/** Nothing to show, quietly: a title and a line under it (`hintHtml`: HTML, a command in code()). */
-export const empty = (title, hintHtml = "") => `<div class="empty"><p class="empty-title">${esc(title)}</p>${hintHtml ? `<p>${hintHtml}</p>` : ""}</div>`;
+/** Nothing to show, quietly: ONE line of muted text, one short sentence (`text`, escaped), and what may follow it in the
+ *  same line (`moreHtml`: HTML, a command in code()) — no box, no icon, the same on every page. */
+export const empty = (text, moreHtml = "") => `<p class="empty">${esc(text)}${moreHtml ? ` ${moreHtml}` : ""}</p>`;
 
 /** Being asked: the words a reader (and a test) reads, over grey bars the size of what will come. */
 export const skeleton = (lines = 3, what = "Asking Mason…") => `<div class="loading" aria-busy="true"><p class="dim">${esc(what)}</p>` +

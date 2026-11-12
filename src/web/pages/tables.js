@@ -429,7 +429,7 @@ export function renderTables(s, ui = {}) {
   const rowsHtml_ = written.map(line).join("");
   return stray + (viewOnly !== null ? readOnlyLine("Tables are not added, removed or synced", viewOnly)
     : readOnly === null ? "" : `<p class="count">Tables are not added or removed from this page: ${esc(readOnly)}.</p>`) +
-    (added ? "" : empty("No table added yet", readOnly === null ? `Add one from the list, as ${code("mason add <table>")} does.` : `The sources file names the tables to sync.`)) + matching +
+    (added ? "" : readOnly === null ? empty("No table added yet: add one from the list below, as", `${code("mason add <table>")} does.`) : empty("No table added yet: the sources file names the tables to sync.")) + matching +
     panel(`<table class="catalog"><thead><tr>${head.map(([h, c]) => `<th scope="col"${c ? ` class="${c}"` : ""}>${h}</th>`).join("")}</tr></thead>` +
       `<tbody>${rowsHtml_}</tbody></table>`) + pops.join("") + moreRows("tables", Math.min(limit, shown.length), shown.length, TABLE_ROWS) +
     (!shown.length ? `<p class="dim">No ${show === "added" ? "added " : show === "failed" ? "failed " : show === "not-added" ? "table that is not added, " : ""}table${filter.trim() ? `'s name has “${esc(filter.trim())}”` : ""}.</p>` : "") + sizesFailed +

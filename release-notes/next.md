@@ -33,6 +33,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   and password, each with Copy, the password shown once. It is live until you stop it (Stop sharing), until a free
   share's hour is up, or within two minutes of the page closing, and the box says how it ended. It is not offered
   under `mason serve` or on a read-only page.
+- **An empty list on the web page is one quiet line**, no longer a big box: "No users yet. Create a user for a service
+  like a BI tool or your app: add one below.", "No table added yet: add one from the list below, as `mason add
+  <table>` does.", and the same on Queries, Usage and Sync events.
 - **The Users page lists the users first**, under its title, then the form that adds one (with the card of a user just
   added beside it) and Connect.
 

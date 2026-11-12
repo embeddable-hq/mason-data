@@ -222,7 +222,8 @@ and the data still reads as a tool's printout. Boxes are square, framed in a hai
 is a carved lintel in small capitals on pale stone. The motif stays in the chrome, never on a number: a copy's bar is a
 plain line — a thin rounded track and a solid fill to its share, its % at the end as the CLI prints it, a quiet shimmer
 while it waits (still under `prefers-reduced-motion`); a state's marker is a small stone block, a page's title stands on a course of bricks, the
-Getting-started steps are courses of a wall, an empty state is a footing with nothing on it yet, and the mark is an
+Getting-started steps are courses of a wall, an empty state is one quiet line of muted text (`empty`: no box, no
+icon, one short sentence, the same on every page), and the mark is an
 arch of bricks with its keystone, drawn inline. All of it is borders and boxes: no gradient, no image. A left sidebar
 as Vercel's and Supabase's are (Mason, the database's name, a **demo** badge when it is the demo database; the nav,
 each link an icon and its label, the one shown a pale stone row with the patina at its edge; at its foot how long ago Mason last

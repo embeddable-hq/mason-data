@@ -147,8 +147,8 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   the line's words, its track `aria-hidden`), its % as text at the bar's end as the CLI prints it, the fill the line's
   state (patina copying, green served, amber not kept current, rose failed), waiting a quiet shimmer of the track (never
   under `prefers-reduced-motion`): a patterned bar reads as noise. A state's marker is a small stone block; a page's title
-  stands on a course of bricks; the Getting-started steps are courses of a wall; an empty state is a footing with
-  nothing built on it. All of it is boxes and borders: **no gradient and no image** (`url(` only in an `@font-face`).
+  stands on a course of bricks; the Getting-started steps are courses of a wall; an empty state is one quiet line of
+  muted text, one short sentence (`empty`), never a box. All of it is boxes and borders: **no gradient and no image** (`url(` only in an `@font-face`).
   **The mark is Mason's own**: an arch of bricks with its keystone, an inline SVG in index.html in `currentColor`.
 - **The sidebar is the nav at every width, never a second one**: 232 px with labels; below 1000 px an icon rail, each
   label its icon's tooltip and still the link's name; below 640 px a top bar whose menu button (`aria-expanded`,

@@ -506,7 +506,7 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   const gone = renderTables(CATALOG_STATE, { outcome: { table: "public.gone", failure: { code: "not_found", message: "public.gone is not a table of shop that this user can read" } } });
   assert.match(textOf(gone), /^✗ public\.gone is not a table of shop that this user can read Table State /);
   assert.equal(textOf(renderTables({ ...NONE, tables: [] })), "shop has no table this user can read.");
-  assert.match(renderTables({ ...NONE, tables: [] }), /^<div class="empty">/, "nothing to list is the empty state");
+  assert.match(renderTables({ ...NONE, tables: [] }), /^<p class="empty">[^<]* has no table this user can read\.<\/p>$/, "nothing to list is the empty state: one quiet line");
 });
 
 test("a Failure renders as the CLI's four parts: ✗ what is wrong, why, fix, then Next with each command and what it does", () => {
@@ -565,8 +565,9 @@ test("the users: a row each, active first then removed without Remove; Remove as
   assert.match(asking, /data-confirm-remove="metabase"/);
   assert.ok(!/data-confirm-remove="grafana"/.test(asking), "only the one asked");
   // none yet: what a user is for, in a web developer's words, and how one is made
-  assert.equal(textOf(renderUsers({ users: [] }, null)), "No users yet A user is the name and password psql, a BI tool or your app connects with. Add one above, as mason user add <name> does: its URL, password included, is shown once.");
-  assert.match(renderUsers({ users: [] }, null), /^<div class="empty">/);
+  assert.equal(textOf(renderUsers({ users: [] }, null)), "No users yet. Create a user for a service like a BI tool or your app: add one below.");
+  assert.equal(renderUsers({ users: [] }, null), `<p class="empty">No users yet. Create a user for a service like a BI tool or your app: add one below.</p>`, "one quiet line, no box");
+  assert.equal(fn<[unknown, unknown, number, unknown, unknown, unknown], string>("renderUsers")({ users: [] }, null, Date.now(), null, null, "read-only here"), `<p class="count">Users are not added, changed, disabled or removed from this page: read-only here.</p><p class="empty">No users yet: <code>mason user add &lt;name&gt;</code> adds one.</p>`, "read-only: the command, nothing to add below");
   // last use unknown, or the URL unknown: the note why, as mason user list says it
   const unknown = textOf(renderUsers({ ...list, lastUsedNote: "unknown: the request log could not be read (busy)", urlNote: "Mason is not running" }, null, NOW_U));
   assert.match(unknown, /Active 2026-10-27 09:10 UTC 60 min ago/);
@@ -1383,7 +1384,7 @@ test("the app: Remove asks first, Cancel takes it back, the confirm sends DELETE
   run.asked.length = 0;
   assert.equal(await app.confirmRemove("metabase"), true);
   assert.deepEqual(run.asked, ["DELETE api/users/metabase", "GET api/users?lastUsed=1"]);
-  assert.equal(textOf(app.view().users!), "No users yet A user is the name and password psql, a BI tool or your app connects with. Add one above, as mason user add <name> does: its URL, password included, is shown once.");
+  assert.equal(textOf(app.view().users!), "No users yet. Create a user for a service like a BI tool or your app: add one below.");
   assert.equal(app.model.confirming, null);
 });
 
@@ -2605,7 +2606,7 @@ test("the request log: a row each, newest first, in the commands' words — held
   }
   assert.match(textOf(renderRequests({ requests: [failedRequest], keptDays: 7, before: null }, { paged: true })), /Refused .* relation "nope" does not exist Newest$/);
   assert.match(renderRequests({ requests: [failedRequest], keptDays: 7, before: null }, { paged: true }), /<div class="paging"><button type="button" data-newest>Newest<\/button><\/div>/);
-  assert.match(renderRequests({ requests: [], keptDays: 7, before: null }), /^<div class="empty"><p class="empty-title">No request in the last 7 days \(MASON_HISTORY_DAYS\)\.<\/p><\/div><p class="dim unlisted">A statement that reads no synced table /,
+  assert.match(renderRequests({ requests: [], keptDays: 7, before: null }), /^<p class="empty">No request in the last 7 days \(MASON_HISTORY_DAYS\)\.<\/p><p class="dim unlisted">A statement that reads no synced table /,
     "nothing listed and nothing filtered: what the log does not list (a select 1 typed to test the connection), as mason logs --requests says it");
   assert.equal(textOf(renderRequests({ requests: [], keptDays: 1, before: null }, { filtered: true })), "No request that passes the filters in the last 1 day (MASON_HISTORY_DAYS).");
 });
@@ -3252,7 +3253,8 @@ test("Tables: the cards are the tables added of all, those synced, those failed 
 test("Tables: nothing added is the empty state above the list that still offers Add; a stream's column is in the same table", () => {
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
   const html = renderTables(NONE);
-  assert.match(html, /^<div class="empty"><p class="empty-title">No table added yet<\/p><p>Add one from the list, as <code>mason add &lt;table&gt;<\/code> does\.<\/p><\/div>/);
+  assert.match(html, /^<p class="empty">No table added yet: add one from the list below, as <code>mason add &lt;table&gt;<\/code> does\.<\/p><div class="panel">/, "one quiet line over the list");
+  assert.match(renderTables({ ...NONE, pageReadOnly: "read-only here" }), /<p class="empty">No table added yet: the sources file names the tables to sync\.<\/p>/);
   assert.match(html, /data-add-table="public\.customers"/, "the list is still there to add from");
   assert.doesNotMatch(renderTables(SYNCED, { sizes: USAGE }), /class="empty"/);
 });
