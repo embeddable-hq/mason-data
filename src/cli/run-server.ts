@@ -39,7 +39,7 @@ import { errorJson, nextJson, type Failure, type NextStep } from "./command.ts";
 import { phaseCounts, readiness, syncTotals, tableSync, type SyncFacts, type SyncTotals } from "./readiness.ts";
 import { restartsFact, type Restart } from "./supervise.ts";
 import { withRestarts, type SyncEvents } from "../duck/events.ts";
-import { syncedDataBytes, walBytes } from "../duck/file-bytes.ts";
+import { fileStamp, syncedDataBytes, walBytes } from "../duck/file-bytes.ts";
 import { NO_ROLES, type RolesLive } from "../duck/grants.ts";
 import { addedNext, addUser, attributesToAdd, disabledNext, disableUser, enabledNext, enableUser, fromNext, listUsers, rangesText, removeUser, REMOVED_NEXT, roleToAdd, setUserFrom, withLastUsed } from "./user.ts";
 import { userRole } from "./roles.ts";
@@ -158,7 +158,7 @@ export interface RunContext {
     /** the sync's failures and notable events (src/duck/events.ts, `_mason.sync_events`): mason logs --events, mason status */
     events: Pick<SyncEvents, "recent" | "days">;
     /** usage over time (src/duck/usage.ts, `_mason.usage`): mason usage */
-    usage: Pick<UsageSampler, "samples" | "copySizes" | "sizedAt" | "days" | "sampleSeconds" | "statementTotals" | "lastDurations">;
+    usage: Pick<UsageSampler, "samples" | "copySizes" | "lastMeasure" | "days" | "sampleSeconds" | "statementTotals" | "lastDurations">;
     /** the run's restarts, as its supervisor records them in `.mason/restarts.json` (src/cli/supervise.ts readRestarts:
      *  a file that cannot be read throws, said as the request's failure); merged with the events */
     restarts: () => Restart[];
@@ -468,12 +468,15 @@ export async function usage(ctx: RunContext, q: URLSearchParams, now = Date.now(
     const d = durations.get(Date.parse(s.at));
     return { ...s, durationP50Ms: d?.p50 ?? null, durationP95Ms: d?.p95 ?? null };
   });
-  const copySizes = await u.copySizes();
   // why a served table has no size (issue 883): the rule is the sampler's module's (`unsizedTables`), read once here for
-  // mason usage and the Tables page alike, over the log's size now (one file-size read: never a checkpoint to measure)
-  const sizedAt = u.sizedAt(), wal = walBytes(ctx.duck.file);
+  // mason usage and the Tables page alike. IN THIS ORDER, so no moment between two reads makes a false "in-log": the
+  // measure before the sizes (a measure that lands after it adds sizes, never takes one away), and the log before the
+  // file's stamp (a checkpoint after the log is read changes the stamp). A stat each, never a checkpoint to measure
+  const measure = u.lastMeasure();
+  const copySizes = await u.copySizes();
+  const wal = walBytes(ctx.duck.file), stamp = fileStamp(ctx.duck.file);
   return { since, until, stepSeconds: step, sampleSeconds: u.sampleSeconds, keptDays: u.days, samples, copySizes,
-    sizedAt, walBytes: wal, unsized: unsizedTables(ctx.duck.copies(), copySizes, sizedAt, wal) };
+    sizedAt: measure?.at ?? null, walBytes: wal, unsized: unsizedTables(ctx.duck.copies(), copySizes, measure, { wal, fileStamp: stamp }) };
 }
 
 /**

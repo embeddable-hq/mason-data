@@ -20,17 +20,23 @@ const n = (x: number): string => x.toLocaleString("en-US");
 /**
  * WHAT A SYNCED TABLE WITH NO SIZE SHOWS where a size would be (issue 883; the run's `unsized`, src/duck/usage.ts
  * `unsizedTables`): `< 3 MiB` when its rows are all in the write-ahead log (the log's size, rounded up), `Measuring…`
- * when it was synced since the last measure. The Tables page's Size cell is held equal to it (tests/web-page.test.ts).
+ * for each other reason. The Tables page's Size cell is held equal to it (tests/web-page.test.ts).
  */
 export function unsizedCell(u: Pick<UnsizedTable, "why" | "underBytes">): string {
   return u.why === "in-log" && u.underBytes !== null ? `< ${n(Math.round(u.underBytes / 1024 ** 2))} MiB` : "Measuring…";
 }
 
-/** Why, beside it on mason usage's line: the CLI may name the log, which only a person at the files can look at. */
+/** Why, beside it on mason usage's line, one sentence a reason (`UnsizedWhy`: each a fact the run tells, never a guess):
+ *  the CLI may name the log, which only a person at the files can look at. */
 export function unsizedWhy(u: Pick<UnsizedTable, "why" | "underBytes">, sizedAt: string | null): string {
-  return u.why === "in-log" && u.underBytes !== null
-    ? "its rows are all in the write-ahead log, not yet in the file: under the log's size, measured exactly once they are written into the file (the log past 16 MiB, or mason stop)"
-    : `synced since the last measure${sizedAt === null ? "" : ` (at ${sizedAt.slice(11, 16)} UTC)`}: measured within ${duration(SIZE_EVERY_MS / 1000)}`;
+  const at = sizedAt === null ? "" : ` (at ${sizedAt.slice(11, 16)} UTC)`;
+  const within = `measured within ${duration(SIZE_EVERY_MS / 1000)}`;
+  switch (u.why) {
+    case "in-log": return "its rows are all in the write-ahead log, not yet in the file: under the log's size, measured exactly once they are written into the file (the log past 16 MiB, or mason stop)";
+    case "written-since": return `its rows were in the write-ahead log at the last measure${at}, and rows have been written into the file since, maybe its own: ${within}`;
+    case "synced-since": return `synced since the last measure${at}: ${within}`;
+    case "not-measured-yet": return `not measured since Mason started: the first measure is a minute after the start`;
+  }
 }
 
 export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>] [--step <duration>] [--json]
@@ -41,8 +47,8 @@ export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>]
   tables whose sync is failing, how old the stalest table was, the stream's lag (a table under sync: replication), and
   the memory of the process and of the engine against its limit (MASON_DUCKDB_MEMORY). Then each synced table's own size, measured every
   10 minutes once its rows are written into the file: a small table's can wait in the write-ahead log until it passes
-  16 MiB or Mason stops, and shows "< 3 MiB" (under the log's size) until then; one synced since the last measure shows
-  "Measuring…". A span sums its statements and shows each level at its highest. Read through the running Mason.
+  16 MiB or Mason stops, and shows "< 3 MiB" (under the log's size) until then; one not measured since its rows were
+  written into the file, since it was synced or since Mason started shows "Measuring…" and why. A span sums its statements and shows each level at its highest. Read through the running Mason.
 
     mason usage                        the last hour, 5 minutes a line
     mason usage --since 7d --step 1h   the last week, an hour a line
@@ -63,9 +69,11 @@ export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>]
     sessionsOpen (the Postgres API's sessions logged in) }],
     copySizes: [{ table, bytes, at }], sizedAt (when the sizes were last measured; null: not yet since
     Mason started), walBytes (the write-ahead log's size now; null: none), unsized: [{ table (a synced
-    table with no size), why (in-log: measured since its first sync, its rows all in the write-ahead log;
-    not-measured: synced since the last measure), underBytes (in-log: the log's size rounded up to a MiB,
-    which it is under; else null) }], next }
+    table with no size), why (in-log: measured since its first sync with its rows all in the write-ahead
+    log, and nothing written into the file since; written-since: so at the last measure, but rows have
+    been written into the file since; synced-since: its first sync finished after the last measure;
+    not-measured-yet: no measure since Mason started), underBytes (in-log: the log's size rounded up to a
+    MiB, which it is under; else null) }], next }
 `;
 
 export const USAGE: CommandSpec & { needs: "run" } = {

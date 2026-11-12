@@ -277,20 +277,27 @@ export function renderTablesCards(s) {
   ]);
 }
 
+/** Why a synced table is being measured, in plain words, by the run's reason (src/duck/usage.ts `UnsizedWhy`). */
+export const MEASURING = {
+  "written-since": "Data was written to disk since sizes were last measured, and this table's rows may be in it. Sizes are measured every 10 minutes.",
+  "synced-since": "Synced since sizes were last measured. Sizes are measured every 10 minutes.",
+  "not-measured-yet": "Not measured since Mason started. Sizes are first measured a minute after it starts.",
+};
+
 /**
  * WHAT AN ADDED TABLE'S SIZE CELL SAYS (issue 883), `{ text, title }`, from `/api/usage` (`sizes`: its `copySizes` and
  * `unsized`, the run's one rule, src/duck/usage.ts `unsizedTables`) and the table's state: its size when measured; else
  * the run's why — `< 3 MiB` (its rows all in the write-ahead log, the log's size rounded up the limit) or `Measuring…`
- * (synced since the last measure), each as `mason usage` writes it (`unsizedCell`, held equal by the tests); else, a
- * table whose first sync is done since the sizes were read (they are read once a minute, the state every poll)
- * `Measuring…` too; else, its first sync not done, nothing. Sizes not read yet, or not readable (said under the list):
- * nothing.
+ * (its rows written to disk, or the table synced, since the last measure, or none since Mason started: `MEASURING`, by
+ * the run's reason), each as `mason usage` writes it (`unsizedCell`, held equal by the tests); else, a table whose first
+ * sync is done since the sizes were read (they are read once a minute, the state every poll) `Measuring…` too, synced
+ * since; else, its first sync not done, nothing. Sizes not read yet, or not readable (said under the list): nothing.
  */
 export function sizeCellOf(sizes) {
   const read = sizes && !("failure" in sizes);
   const sizeOf = new Map(read ? sizes.copySizes.map((c) => [c.table, c.bytes]) : []);
   const whyOf = new Map(read ? (sizes.unsized ?? []).map((u) => [u.table, u]) : []);
-  const measuring = { text: "Measuring…", title: "Synced since sizes were last measured. Sizes are measured every 10 minutes." };
+  const measuring = (why) => ({ text: "Measuring…", title: MEASURING[why] ?? MEASURING["synced-since"] });
   return (t) => {
     if (!read) return { text: "", title: "" };
     if (sizeOf.has(t.table)) return { text: bytesText(sizeOf.get(t.table)), title: "" };
@@ -299,7 +306,9 @@ export function sizeCellOf(sizes) {
       const limit = `${n(Math.round(u.underBytes / 1024 ** 2))} MiB`;
       return { text: `< ${limit}`, title: `Under ${limit}. Its rows aren't in the main file yet, so it can't be measured exactly.` };
     }
-    if (u || t.copy?.phase === "done") return measuring;
+    // the run's reason; a table it has not said yet (its first sync done after the sizes were read) was synced since
+    if (u) return measuring(u.why);
+    if (t.copy?.phase === "done") return measuring("synced-since");
     return { text: "", title: "No size until its first sync is done." };
   };
 }

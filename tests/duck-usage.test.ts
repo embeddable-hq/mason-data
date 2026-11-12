@@ -143,29 +143,48 @@ test("a copy small enough to stay in the write-ahead log is not measured, never 
   const u = await UsageSampler.open(store, () => undefined, { days: 7, now: () => clock, sampleMs: NEVER, sizeEveryMs: 1 });
   try {
     u.start(async () => ({ ...facts, copied: ["app.fresh"] }));
-    assert.equal(u.sizedAt(), null, "not measured yet in this run");
+    assert.equal(u.lastMeasure(), null, "not measured yet in this run");
     await u.sample();
     await u.sample();
     assert.deepEqual((await u.copySizes()).filter((c) => c.table === "app.fresh"), [], "not measured until its rows are in the file, never 0");
-    // WHY IT HAS NO SIZE (issue 883): measured since its first sync, its rows all in the log, so it is under the log's
-    // size rounded up to a MiB — what mason usage and the Tables page say; one synced after the measure is being measured
-    assert.equal(u.sizedAt(), new Date(clock).toISOString(), "when the sizes were measured");
+    // WHY IT HAS NO SIZE (issue 883): measured since its first sync, its rows all in the log and the file not written
+    // since, so it is under the log's size rounded up to a MiB — what mason usage and the Tables page say; one synced
+    // after the measure is being measured
+    const measure = u.lastMeasure();
+    assert.equal(measure?.at, new Date(clock).toISOString(), "when the sizes were measured");
     const { unsizedTables } = await usage();
-    const { walBytes: logBytes } = await import("../src/duck/file-bytes.ts");
+    const { walBytes: logBytes, fileStamp } = await import("../src/duck/file-bytes.ts");
+    assert.equal(measure?.fileStamp, fileStamp(file), "the file not written since the measure: the sampler's own rows are in the log");
     const log = logBytes(file)!;
     assert.ok(log > 0, "the log's size, one file-size read");
     const before = new Date(clock - 60_000).toISOString(), after = new Date(clock + 60_000).toISOString();
-    assert.deepEqual(unsizedTables([{ source: "app.fresh", phase: "copied", copiedAt: before }, { source: "app.later", phase: "copied", copiedAt: after },
-      { source: "app.first", phase: "copying", copiedAt: null }], await u.copySizes(), u.sizedAt(), log), [
+    const copies = [{ source: "app.fresh", phase: "copied", copiedAt: before }, { source: "app.later", phase: "copied", copiedAt: after }, { source: "app.first", phase: "copying", copiedAt: null }];
+    assert.deepEqual(unsizedTables(copies, await u.copySizes(), measure, { wal: log, fileStamp: fileStamp(file) }), [
       { table: "app.fresh", why: "in-log", underBytes: Math.ceil(log / 2 ** 20) * 2 ** 20 },
-      { table: "app.later", why: "not-measured", underBytes: null },
+      { table: "app.later", why: "synced-since", underBytes: null },
     ]);
+    // no measure since Mason started (a restart): never "synced since", which it was not
+    assert.deepEqual(unsizedTables(copies, await u.copySizes(), null, { wal: log, fileStamp: fileStamp(file) }).map((x) => x.why), ["not-measured-yet", "not-measured-yet"]);
     assert.equal(Number((await store.writer.runAndReadAll(`SELECT count(*) FROM _mason.copy_sizes WHERE table_name = 'app.fresh'`)).getRowsJS()[0]![0]), 0, "no row written for it, not even a 0");
     // no checkpoint was taken: its rows are still in the log, and the module issues none
     assert.equal(await persistent(), 0, "its rows still in the write-ahead log");
     assert.ok(walBytes() >= wal, `the log kept: ${walBytes()} of ${wal} bytes`);
     const code = fs.readFileSync(new URL("../src/duck/usage.ts", import.meta.url), "utf8").split("\n").filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l)).join("\n");
     assert.doesNotMatch(code, /CHECKPOINT/i, "the sampler issues no checkpoint");
+    // A CHECKPOINT AFTER THE MEASURE (DuckDB's own, past 16 MiB, in a run; the test's here) moves its rows into the file
+    // and starts a small log: the log bounds nothing now, so it is being measured, never "< 1 MiB" (review of PR 902: a
+    // 1.8 MB table said "< 1 MiB" beside a log of 3 KB)
+    await store.writer.run("CHECKPOINT");
+    await store.writer.run(`CREATE TABLE app.after AS SELECT 1 AS id`);
+    assert.ok(await persistent() > 0, "its rows are in the file now");
+    const small = logBytes(file);
+    assert.ok(small !== null && small > 0 && small < log, `a new, smaller log: ${small} of ${log} bytes`);
+    assert.notEqual(fileStamp(file), measure?.fileStamp, "the checkpoint wrote the file");
+    assert.deepEqual(unsizedTables(copies, await u.copySizes(), measure, { wal: small, fileStamp: fileStamp(file) }), [
+      { table: "app.fresh", why: "written-since", underBytes: null },
+      { table: "app.later", why: "synced-since", underBytes: null },
+    ]);
+    await store.writer.run(`DROP TABLE app.after`);
   } finally {
     await u.close();
     await store.writer.run(`DROP TABLE app.fresh`);

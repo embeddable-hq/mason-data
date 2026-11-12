@@ -24,3 +24,15 @@ export function syncedDataBytes(file: string): number | null {
 export function walBytes(file: string): number | null {
   return size(`${file}.wal`);
 }
+
+/**
+ * The FILE's stamp: its size and its modification time to the nanosecond, or null when it is not there — one stat, no
+ * database work. DuckDB writes the file only at a checkpoint (its own: the log past 16 MiB, or the store closed) or for a
+ * bulk insert's whole row groups, so a stamp unchanged since a measure says no row has moved from the log into the file
+ * since (src/duck/usage.ts `unsizedTables`, issue 883: a checkpoint between two measures made "< 1 MiB" of a table of
+ * 1.8 MB, its rows no longer in the log). A changed stamp says it may have: never the other way round.
+ */
+export function fileStamp(file: string): string | null {
+  try { const s = fs.statSync(file, { bigint: true }); return `${s.size}:${s.mtimeNs}`; }
+  catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw e; }
+}

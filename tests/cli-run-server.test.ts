@@ -119,7 +119,7 @@ let disk: { path: string; freeBytes: number | null; projectedBytes: number | nul
 const usageAsks: Array<{ since: string; until: string; stepSeconds?: number }> = [];
 const copySize = { table: "public.orders", bytes: 4_194_304, at: "2026-10-28T09:10:00.000Z" };
 let usageSamples: Array<Record<string, unknown>> = [];
-const usage = { days: 7, sampleSeconds: 60, samples: async (o: { since: string; until: string; stepSeconds?: number }) => { usageAsks.push(o); return usageSamples as never[]; }, copySizes: async () => [copySize], sizedAt: () => null, statementTotals: () => ({ completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 }), lastDurations: () => null };
+const usage = { days: 7, sampleSeconds: 60, samples: async (o: { since: string; until: string; stepSeconds?: number }) => { usageAsks.push(o); return usageSamples as never[]; }, copySizes: async () => [copySize], lastMeasure: () => null, statementTotals: () => ({ completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 }), lastDurations: () => null };
 const usersFile = path.join(root, "app", ".mason", "users.json");
 const API_KEY = "k".repeat(48);
 const ctx: RunContext = {
@@ -689,7 +689,7 @@ test("usage over time: /api/usage passes since, until and step to the samples, a
   } finally { usageSamples = []; }
 });
 
-test("/api/usage says why a synced table has no size: under the write-ahead log's size when measured since its first sync, measuring when synced since, nothing for a first sync not done (issue 883)", async () => {
+test("/api/usage says why a synced table has no size: under the write-ahead log's size when measured since its first sync, measuring when synced since, written since or not yet measured, nothing for a first sync not done (issue 883)", async () => {
   const runServer = await import("../src/cli/run-server.ts");
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "mason-unsized-"));
   try {
@@ -705,25 +705,40 @@ test("/api/usage says why a synced table has no size: under the write-ahead log'
       { source: "public.big", phase: "copying", ...base, copiedAt: null },                           // first sync not done
       { source: "public.broken", phase: "failed", ...base, copiedAt: null },                         // first sync failed
     ] as unknown as CopyState[];
-    let sizedAt: string | null = "2026-10-28T09:10:00.000Z";
-    const c: RunContext = { ...ctx, duck: { ...ctx.duck, file, copies: () => states, usage: { ...usage, sizedAt: () => sizedAt } } };
+    const { fileStamp } = await import("../src/duck/file-bytes.ts");
+    // the sampler's last measure: when, and the file's stamp then
+    let measure: { at: string; fileStamp: string | null } | null = { at: "2026-10-28T09:10:00.000Z", fileStamp: fileStamp(file) };
+    const c: RunContext = { ...ctx, duck: { ...ctx.duck, file, copies: () => states, usage: { ...usage, lastMeasure: () => measure } } };
     const q = new URLSearchParams({ since: "2026-10-28T09:00:00Z", until: "2026-10-28T10:00:00Z" });
     const b = await runServer.usage(c, q);
     assert.equal(b.sizedAt, "2026-10-28T09:10:00.000Z");
     assert.equal(b.walBytes, Math.round(2.3 * 2 ** 20), "the log's size: one file-size read");
     assert.deepEqual(b.unsized, [
-      { table: "public.fresh", why: "not-measured", underBytes: null },
+      { table: "public.fresh", why: "synced-since", underBytes: null },
       { table: "public.small", why: "in-log", underBytes: 3 * 2 ** 20 },
     ], "a measured table is not listed, nor one whose first sync is not done");
-    // no measure yet in this run: every unsized table is being measured
-    sizedAt = null;
-    assert.deepEqual((await runServer.usage(c, q)).unsized.map((u) => [u.table, u.why]), [["public.fresh", "not-measured"], ["public.small", "not-measured"]]);
-    // the log checkpointed since the measure (none now): its rows are in the file, so it is measured next, never "under 0"
-    sizedAt = "2026-10-28T09:10:00.000Z";
+    // NO MEASURE YET since Mason started (a restart): never "synced since", which neither was (review of PR 902)
+    measure = null;
+    assert.deepEqual((await runServer.usage(c, q)).unsized.map((u) => [u.table, u.why]), [["public.fresh", "not-measured-yet"], ["public.small", "not-measured-yet"]]);
+    // THE FILE WRITTEN SINCE THE MEASURE (a checkpoint: its rows moved into the file, a new log begun): the log's size
+    // bounds nothing, though a log is there — never "< 1 MiB" of a table of 1.8 MB (review of PR 902)
+    measure = { at: "2026-10-28T09:10:00.000Z", fileStamp: fileStamp(file) };
+    fs.writeFileSync(file, "x".repeat(12_288 + 1_835_008));
+    fs.writeFileSync(`${file}.wal`, "w".repeat(3_130));
+    const checkpointed = await runServer.usage(c, q);
+    assert.equal(checkpointed.walBytes, 3_130);
+    assert.deepEqual(checkpointed.unsized, [{ table: "public.fresh", why: "synced-since", underBytes: null }, { table: "public.small", why: "written-since", underBytes: null }]);
+    // the same size, a later write (its time alone moved): written too
+    measure = { at: "2026-10-28T09:10:00.000Z", fileStamp: fileStamp(file) };
+    const later = new Date(Date.now() + 5_000);
+    fs.utimesSync(file, later, later);
+    assert.deepEqual((await runServer.usage(c, q)).unsized.map((u) => [u.table, u.why]), [["public.fresh", "synced-since"], ["public.small", "written-since"]]);
+    // no log at all (checkpointed, nothing written since): its rows are in the file, never "under 0"
+    measure = { at: "2026-10-28T09:10:00.000Z", fileStamp: fileStamp(file) };
     fs.rmSync(`${file}.wal`);
     const after = await runServer.usage(c, q);
     assert.equal(after.walBytes, null);
-    assert.deepEqual(after.unsized.map((u) => [u.table, u.why]), [["public.fresh", "not-measured"], ["public.small", "not-measured"]]);
+    assert.deepEqual(after.unsized.map((u) => [u.table, u.why]), [["public.fresh", "synced-since"], ["public.small", "written-since"]]);
   } finally { fs.rmSync(d, { recursive: true, force: true }); }
 });
 

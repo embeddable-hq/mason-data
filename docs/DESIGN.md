@@ -3260,11 +3260,17 @@ kept: the synced data's file counts its write-ahead log (src/duck/file-bytes.ts 
 not tell apart. The run now says which, once (`unsizedTables`, src/duck/usage.ts; `GET /api/usage` `unsized`, beside
 `sizedAt`, when the sampler last measured, and `walBytes`, the log's size now — one file-size read, never a checkpoint):
 a served table measured since its first sync with no block is `in-log`, shown `< 3 MiB`, the log's size rounded up to a
-whole MiB (its rows take at most 0.8 times the log, its block 256 KiB, above); one synced after the last measure, or
-before the first measure of the run, `not-measured`, shown `Measuring…`; one whose first sync is not done, nothing. A
-log empty now was checkpointed since the measure, so such a table is `not-measured`: its rows are in the file. What the
-limit cannot see: a checkpoint since the measure and a new log smaller than the table's rows — the next measure, within
-10 minutes, finds its blocks.
+whole MiB (its rows take at most 0.8 times the log, its block 256 KiB, above) — but only while the FILE has not been
+written since the measure. PR 902's review met the gap: a 60,000-row table measured `in-log` beside a 7.7 MB log, two
+more tables pushed the log past 16 MiB, DuckDB checkpointed, and the next read said "< 1 MiB" of the new 3 KB log while
+the table took 1.8 MB in the file (the sampler writes the log every minute, so a log is rarely empty). So a measure keeps
+the file's stamp (its size and modification time to the nanosecond, `fileStamp`, src/duck/file-bytes.ts: a stat, no
+database work), taken as the facts it measures are read; DuckDB writes the file only at a checkpoint or for a bulk
+insert's whole row groups, so a stamp unchanged says no row left the log since, and a changed one, or an empty log, says
+some may have: `written-since`, shown `Measuring…` (whose rows moved cannot be told without database work, so it says
+they may be this table's). Each other `Measuring…` says its own reason: `synced-since` (its first sync finished after
+the measure) or `not-measured-yet` (no measure since Mason started: after a restart, never "synced since", which it was
+not). One whose first sync is not done shows nothing.
 
 ### First copy, and the poll's cost on the source
 

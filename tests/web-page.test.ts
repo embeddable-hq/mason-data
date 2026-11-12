@@ -4532,7 +4532,7 @@ test("Tables: a synced table with no size says why — under the log's size, Mea
     { source: "public.audit", phase: "copying", rows: null, bytes: null, seconds: null, copiedAt: null, error: null, rowsSoFar: 10, rowsEstimate: 50 }],
   { now: NOW, sources: parseSourceText("kind: postgres\nurl: x\ntables:\n  customers: {}\n  orders: {}\n  events: {}\n  audit: {}\n", "shop", "/app/mason/sources/shop.yml") as typeof sourceFile });
   const sizes = { ...USAGE, copySizes: [USAGE.copySizes[0]], sizedAt: "2026-10-27T09:00:00.000Z", walBytes: Math.round(2.3 * 2 ** 20),
-    unsized: [{ table: "public.events", why: "not-measured", underBytes: null }, { table: "public.orders", why: "in-log", underBytes: 3 * 2 ** 20 }] };
+    unsized: [{ table: "public.events", why: "synced-since", underBytes: null }, { table: "public.orders", why: "in-log", underBytes: 3 * 2 ** 20 }] };
   const html = renderTables(state, { sizes, now: NOW });
   const sizeCell = (t: string): string => {
     const row = new RegExp(`<tr class="c-added[^"]*"><th scope="row" class="name"><code class="name" title="${t.replace(".", "\\.")}">.*?</tr>`).exec(html)?.[0] ?? assert.fail(`no row for ${t}`);
@@ -4549,6 +4549,16 @@ test("Tables: a synced table with no size says why — under the log's size, Mea
   // a first sync done since the sizes were read (a minute ago; the state is read every poll): Measuring…, never blank
   const unread = renderTables(state, { sizes: { ...sizes, unsized: [{ table: "public.orders", why: "in-log", underBytes: 3 * 2 ** 20 }] }, now: NOW });
   assert.match(unread, /<td class="num" title="Synced since sizes were last measured\. Sizes are measured every 10 minutes\.">Measuring…<\/td>/);
+  // EACH REASON THE RUN GIVES, its own words, never another's (review of PR 902): rows written to disk since the measure
+  // (a checkpoint), and no measure since Mason started (a restart) — never "Synced since", which neither was
+  const because = (why: string): string => {
+    const h = renderTables(state, { sizes: { ...sizes, unsized: [{ table: "public.orders", why, underBytes: null }, { table: "public.events", why, underBytes: null }] }, now: NOW });
+    return /<td class="num" title="([^"]*)">Measuring…<\/td>/.exec(h)?.[1] ?? assert.fail(`no Measuring… for ${why}`);
+  };
+  assert.equal(because("written-since"), "Data was written to disk since sizes were last measured, and this table&#39;s rows may be in it. Sizes are measured every 10 minutes.");
+  assert.equal(because("not-measured-yet"), "Not measured since Mason started. Sizes are first measured a minute after it starts.");
+  assert.equal(because("synced-since"), "Synced since sizes were last measured. Sizes are measured every 10 minutes.");
+  for (const why of ["written-since", "not-measured-yet", "synced-since"]) assert.equal(usageCliModule.unsizedCell({ why, underBytes: null } as never), "Measuring…", why);
   // the page never says the engine's file names
   assert.doesNotMatch(html, /write-ahead|WAL|duck\.db/i);
   // sizes not read yet: nothing said in the cell (the list says nothing of a size it has not read)
