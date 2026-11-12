@@ -2015,21 +2015,39 @@ test("the shell: a sidebar nav — Overview · Tables · Users, the Observabilit
   // name is the sidebar's heading, never a line of its own above the title)
   const renderSubnav = fn<[string, string?, number?, Date?], string>("renderSubnav");
   assert.equal(renderSubnav("tables"), "", "a page of its own has none");
-  // Now first, the default (its link has no range), said Live beside the control
+  // Now first, the default (its link has no range), said Live beside the control — before it, in the status's slot
   const live = renderSubnav("usage");
-  assert.equal(textOf(live), "Now Last hour 24 hours 7 days Live");
-  assert.equal(live, `<div class="range" role="group" aria-label="Time range"><a href="#observability/usage" aria-current="true" title="follows what happens: read every few seconds">Now</a><a href="#observability/usage?range=1h">Last hour</a>` +
-    `<a href="#observability/usage?range=24h">24 hours</a><a href="#observability/usage?range=7d">7 days</a></div><span class="live" title="read every few seconds"><span class="live-dot" aria-hidden="true"></span>Live</span>`);
+  assert.equal(textOf(live), "Live Now Last hour 24 hours 7 days");
+  assert.equal(live, `<span class="range-status"><span class="live" title="read every few seconds"><span class="live-dot" aria-hidden="true"></span>Live</span></span>` +
+    `<div class="range" role="group" aria-label="Time range"><a href="#observability/usage" aria-current="true" title="follows what happens: read every few seconds">Now</a><a href="#observability/usage?range=1h">Last hour</a>` +
+    `<a href="#observability/usage?range=24h">24 hours</a><a href="#observability/usage?range=7d">7 days</a></div>`);
   assert.ok(!/data-refresh-range|as of/.test(live), "Now follows what happens: nothing to refresh");
   // any other range is read once: when it was read beside it (once it was), and Refresh, which reads it again
   const sub = renderSubnav("usage", "1h");
-  assert.equal(textOf(sub), "Now Last hour 24 hours 7 days Refresh", "not read yet: no time");
-  assert.equal(sub, `<div class="range" role="group" aria-label="Time range"><a href="#observability/usage" title="follows what happens: read every few seconds">Now</a><a href="#observability/usage?range=1h" aria-current="true">Last hour</a>` +
-    `<a href="#observability/usage?range=24h">24 hours</a><a href="#observability/usage?range=7d">7 days</a></div><span class="as-of"><button type="button" class="small" data-refresh-range>Refresh</button></span>`);
+  assert.equal(textOf(sub), "Refresh Now Last hour 24 hours 7 days", "not read yet: no time");
+  assert.equal(sub, `<span class="range-status"><span class="as-of"><button type="button" class="small" data-refresh-range>Refresh</button></span></span>` +
+    `<div class="range" role="group" aria-label="Time range"><a href="#observability/usage" title="follows what happens: read every few seconds">Now</a><a href="#observability/usage?range=1h" aria-current="true">Last hour</a>` +
+    `<a href="#observability/usage?range=24h">24 hours</a><a href="#observability/usage?range=7d">7 days</a></div>`);
   const read = renderSubnav("usage", "24h", 7, new Date("2026-10-27T09:05:30.400Z"));
-  assert.match(textOf(read), /^Now Last hour 24 hours 7 days 30 days .* as of 09:05:30 UTC Refresh$/);
-  assert.match(read, /<span class="as-of"><span class="dim" title="read once when chosen; Now follows what happens">as of 09:05:30 UTC<\/span> <button type="button" class="small" data-refresh-range>Refresh<\/button><\/span>$/);
+  assert.match(textOf(read), /^as of 09:05:30 UTC Refresh Now Last hour 24 hours 7 days 30 days /);
+  assert.match(read, /^<span class="range-status"><span class="as-of"><span class="dim" title="read once when chosen; Now follows what happens">as of 09:05:30 UTC<\/span> <button type="button" class="small" data-refresh-range>Refresh<\/button><\/span><\/span><div class="range" /);
   assert.ok(!/class="live"/.test(read), "a past range is never said Live");
+  // the control never moves when the range changes (issue 873): whatever the range, the status is written BEFORE the
+  // control, in one slot, and the control is the last thing written, so it stays flush right; the slot keeps the room of
+  // its longest (as of HH:MM:SS UTC and Refresh) and the button's height, so the row wraps the same on a phone
+  for (const [range, asOf] of [["now", undefined], ["1h", undefined], ["24h", new Date("2026-10-27T23:59:59Z")], ["90d", new Date(0)]] as const) {
+    const h = renderSubnav("queries", range, 90, asOf);
+    assert.match(h, /^<span class="range-status">.*<\/span><div class="range" role="group" aria-label="Time range">.*<\/div>$/s, `${range}: the status first, the control last`);
+    assert.equal((h.match(/class="range-status"/g) ?? []).length, 1, `${range}: one status slot`);
+  }
+  const styles = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
+  const slot = styles.match(/\.head-range \.range-status \{([^}]*)\}/)?.[1] ?? assert.fail("app.css lays out the status slot");
+  // a length, never a percentage: a percentage of the row is cyclic while the row is sized, and counts as none there
+  assert.match(slot, /min-width: calc\(25ch \+ 3 \* var\(--space-2\) \+ 2px\);/, "the room of 'as of HH:MM:SS UTC' (18ch), the gap and Refresh (7ch, its padding and border)");
+  assert.match(slot, /min-height: 28px/, "the height of Refresh (button.small), so Live's row is as tall");
+  assert.match(slot, /font-size: var\(--text-xs\)/, "ch is the status's own size");
+  assert.match(styles, /button\.small \{ height: 28px; padding: 0 var\(--space-2\); font-size: var\(--text-xs\); \}/, "the room is Refresh's: its height, padding and size");
+  assert.match(styles, /\.head-range \{[^}]*justify-content: flex-end;/, "the control flush right");
   for (const id of ["queries", "usage", "syncs"]) {
     assert.match(html, new RegExp(`<div class="page-head"><div class="head-row"><h2 id="${id}-h">[\\w ]+</h2><div id="range-${id}" class="head-range"></div></div>`), `${id}: its title and its range in one row`);
   }
@@ -2110,7 +2128,7 @@ test("in the browser: the hash chooses the section shown and the page asked; a l
   assert.deepEqual(shown(), ["usage"]);
   assert.deepEqual(current(), ["#observability/usage"], "an old hash: the view it was is the current page of the nav");
   assert.match(el("range-usage").html, /<a href="#observability\/usage" aria-current="true"[^>]*>Now<\/a>/);
-  assert.match(el("range-usage").html, /Live<\/span>$/);
+  assert.match(el("range-usage").html, /^<span class="range-status"><span class="live"[^>]*>.*Live<\/span><\/span><div class="range"/);
   assert.deepEqual((run.asked as string[]).filter((a) => a.includes("api/usage")), ["GET api/usage?since=15m&step=60"], "Now: the last 15 minutes, a minute a point");
   // the range followed: the same view, its samples of the week, six hours a point
   run.answers.set("GET api/usage?since=7d&step=21600", run.answers.get("GET api/usage?since=24h&step=3600")!);
@@ -2119,7 +2137,7 @@ test("in the browser: the hash chooses the section shown and the page asked; a l
   assert.deepEqual((run.asked as string[]).filter((a) => a.includes("api/usage")), ["GET api/usage?since=7d&step=21600"]);
   assert.match(el("range-usage").html, /<a href="#observability\/usage\?range=7d" aria-current="true">7 days<\/a>/);
   assert.deepEqual(current(), ["#observability/usage?range=7d"], "the nav's links keep the range");
-  assert.match(el("range-usage").html, /as of \d\d:\d\d:\d\d UTC<\/span> <button type="button" class="small" data-refresh-range>Refresh<\/button><\/span>$/, "a past range: when it was read, and Refresh");
+  assert.match(el("range-usage").html, /^<span class="range-status"><span class="as-of"><span class="dim"[^>]*>as of \d\d:\d\d:\d\d UTC<\/span> <button type="button" class="small" data-refresh-range>Refresh<\/button><\/span><\/span><div class="range"/, "a past range: when it was read, and Refresh, before the control");
   run.asked.length = 0;
   tick(); await settle();
   assert.ok(!(run.asked as string[]).some((x) => x.includes("api/usage") || x.includes("api/activity")), "a past range is not read again by the clock");
@@ -4612,7 +4630,7 @@ test("the time range past a week: 30 and 90 days, a day a point, offered when th
   assert.deepEqual(Object.keys(RANGES), ["now", "1h", "24h", "7d", "30d", "90d"]);
   assert.deepEqual([RANGES["30d"]!.stepSeconds, RANGES["90d"]!.stepSeconds], [86_400, 86_400], "a day a point: 30 and 90 of them");
   assert.equal(fn<[string], string>("usagePath")("90d"), "api/usage?since=90d&step=86400");
-  assert.equal(textOf(renderSubnav("usage", "24h")), "Now Last hour 24 hours 7 days Refresh", "a run that has not said what it keeps: no range it could not tell");
+  assert.equal(textOf(renderSubnav("usage", "24h")), "Refresh Now Last hour 24 hours 7 days", "a run that has not said what it keeps: no range it could not tell");
   const kept7 = renderSubnav("usage", "24h", 7);
   assert.match(kept7, /<span class="off" aria-disabled="true" title="Mason keeps 7 days of history: MASON_HISTORY_DAYS=30 keeps 30">30 days<span class="sr"> \(Mason keeps 7 days of history: MASON_HISTORY_DAYS=30 keeps 30\)<\/span><\/span>/);
   assert.ok(!/href="[^"]*range=30d"/.test(kept7) && !/href="[^"]*range=90d"/.test(kept7), "never a link to more than is kept");

@@ -209,19 +209,23 @@ export const renderNav = (shown, range = DEFAULT_RANGE, nav = null, hostView = n
  * at that range, so the hash is the state and Back goes to the range before — Now first, the one that follows what
  * happens (said "Live" beside it); any other is read once when chosen, so beside it are when it was read (`asOf`, a
  * Date) and Refresh, which reads it again. "" for a page of its own.
+ * The status is written BEFORE the control, in a slot that keeps the room of its longest (`.range-status`: "as of
+ * HH:MM:SS UTC" and Refresh, wide and tall), so the control stays flush right and never moves when the range changes —
+ * nor wraps differently on a phone (issue 873: the segment just clicked moved away under the pointer).
  */
 export function renderSubnav(shown, range = DEFAULT_RANGE, keptDays = undefined, asOf = null) {
   const p = PAGES.find((x) => x.id === shown);
   if (!p?.parent) return "";
   const r = rangeOf(range);
   // a range past what the run keeps is shown disabled, saying why and what keeps it (the one chosen by its hash stays a link)
-  return `<div class="range" role="group" aria-label="Time range">${Object.entries(RANGES).map(([k, v]) => {
+  const status = isLive(r) ? `<span class="live" title="read every few seconds"><span class="live-dot" aria-hidden="true"></span>Live</span>`
+    : `<span class="as-of">${asOf ? `<span class="dim" title="read once when chosen; Now follows what happens">as of ${esc(asOf.toISOString().slice(11, 19))} UTC</span> ` : ""}<button type="button" class="small" data-refresh-range>Refresh</button></span>`;
+  return `<span class="range-status">${status}</span><div class="range" role="group" aria-label="Time range">${Object.entries(RANGES).map(([k, v]) => {
     const o = rangeOffered(k, keptDays);
     if (!o.shown && k !== r) return "";
     if (!o.offered && k !== r) return `<span class="off" aria-disabled="true" title="${esc(o.why)}">${esc(v.label)}<span class="sr"> (${esc(o.why)})</span></span>`;
     return `<a href="${esc(hashOf(shown, { range: k }))}"${k === r ? ` aria-current="true"` : ""}${v.live ? ` title="follows what happens: read every few seconds"` : ""}>${esc(v.label)}</a>`;
-  }).join("")}</div>` + (isLive(r) ? `<span class="live" title="read every few seconds"><span class="live-dot" aria-hidden="true"></span>Live</span>`
-    : `<span class="as-of">${asOf ? `<span class="dim" title="read once when chosen; Now follows what happens">as of ${esc(asOf.toISOString().slice(11, 19))} UTC</span> ` : ""}<button type="button" class="small" data-refresh-range>Refresh</button></span>`);
+  }).join("")}</div>`;
 }
 
 /**

@@ -8,6 +8,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **The time range on Queries, Usage and Sync events no longer moves when a range is chosen.** Before, choosing any
+  range but Now pushed the whole control left (its "as of … UTC" and Refresh are wider than Live), so the range just
+  clicked slid away under the pointer. Now Live, or when the range was read and Refresh, sits left of the control in
+  room kept for the longest, and the control stays where it is at every width, on a phone too.
 - **The limit on what statements may spill to disk is in force from the start.** Before, the limit (half of the free
   disk under `.mason/`, or `MASON_SPILL_LIMIT`) was not enforced until the free disk moved by 1 % or more, so a heavy
   statement could spill past it and fill the disk. Now a statement past it fails alone with 53400 and Mason's hint.
