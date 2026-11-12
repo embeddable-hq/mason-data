@@ -20,7 +20,7 @@
 const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage?range=24h", queries: "#observability/queries?range=24h",
   slow: "#observability/queries?slow=1&range=24h", failedQueries: "#observability/queries?status=refused-or-failed&range=24h", failedEvents: "#observability/syncs?failures=1&range=7d" };
 import { VIEW_HASHES } from "../routes.js";
-import { statementMsText, bytesText, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, streamRows, slotWarns, agoText, utcText,
+import { statementMsText, bytesText, esc, staleText, staleWhy, fileSize, firstLine, n, percent, leftText, spanText, duration, streamRows, slotWarns, agoText, utcText,
   utcMinute, oneLine, clientText, eventCells, unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, renderConnect, copyClick,
   badge, button, copyable, pop, renderFailure, json, readOnlyLine, tablesReadOnly, usersReadOnly } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
@@ -204,12 +204,22 @@ export function totalsText(t, now = Date.now()) {
   return `${n(t.copied)} of ${n(t.added)} added synced, ${n(t.rows)} row${t.rows === 1 ? "" : "s"}${t.failed ? `, ${n(t.failed)} failed` : ""}${last}`;
 }
 
-/** The word at the top of the page: the run's readiness ("" with no table added: `renderStatus` says so, and what adds one). */
-export function renderHealth(s) {
-  if (!s.tables.some((t) => t.added) || !s.readiness) return "";
+/**
+ * The word at the top of the page: the run's readiness ("" with no table added: `renderStatus` says so, and what adds
+ * one). While the poll fails (`stale`: `{ at, failure }`, `app.stale()`), the word it last read greyed, and beside it as
+ * of when and why ("As of 14:02 UTC. Mason can't be reached."): never a Ready that reads as current (issue 886).
+ */
+export function renderHealth(s, stale = null) {
+  const note = stale === null ? "" : `<p class="as-of">${esc(staleText(stale.at, stale.failure))}</p>`;
+  if (!s.tables.some((t) => t.added) || !s.readiness) return note === "" ? "" : `<div class="health stale" role="status">${note}</div>`;
   const word = readinessWord(s.readiness);
-  return `<div class="health ${word === "Ready" ? "ok" : word === "Failed" ? "bad" : "warn"}" role="status"><span class="dot" aria-hidden="true"></span><span class="word">${esc(word)}</span></div>`;
+  return `<div class="health ${word === "Ready" ? "ok" : word === "Failed" ? "bad" : "warn"}${stale === null ? "" : " stale"}" role="status"><span class="dot" aria-hidden="true"></span>` +
+    `<span class="word">${esc(word)}</span>${note}</div>`;
 }
+
+/** The word with nothing read yet and the poll failing: Unknown, and why, greyed (the banner says what to do). */
+export const renderUnknown = (failure) =>
+  `<div class="health stale" role="status"><span class="dot" aria-hidden="true"></span><span class="word">Unknown</span><p class="as-of">${esc(staleWhy(failure))}</p></div>`;
 
 /** The sparklines the cards draw, by holder key: a usage sample's field each (src/web/charts.js specs). */
 const SPARKS = { rows: ["copyRows", "Rows synced"], "copy-bytes": ["copyBytes", "Synced data size"], statements: ["statements", "Queries"], p95: ["durationP95Ms", "p95"] };
@@ -477,7 +487,8 @@ const readOnlyWhat = (tables, users) => tables && users ? "Nothing is shared" : 
 
 /**
  * THE OVERVIEW from `/api/state` and the request log's reads (`o.queries`, `o.events`, `o.requests`, `o.unsupported`, `o.usage`:
- * each the body, or `{ failure }`; `o.now` the clock; `o.open(key)` whether a details is open): the word, the cards,
+ * each the body, or `{ failure }`; `o.now` the clock; `o.open(key)` whether a details is open; `o.stale` `{ at, failure }`
+ * while the poll fails, the word then greyed and as of when): the word, the cards,
  * the copies not finished, the facts, the stream, the statements, the recent errors. Never the engine's name.
  */
 export function renderStatus(s, o = {}) {
@@ -489,7 +500,7 @@ export function renderStatus(s, o = {}) {
   const connect = added ? renderConnect(s.postgres, { first, served: s.served === true, table: s.tables.find((t) => t.added && t.copy?.phase === "done")?.table ?? null,
     share: renderShare(s, o.share ?? NO_SHARE, now), readOnly: usersReadOnly(s) }) : "";
   // a read-only page (MASON_UI_READ_ONLY=1): why it offers no share, no user and no table to add, as Tables and Users say it
-  return readOnlyLine(readOnlyWhat(tablesReadOnly(s) === null, usersReadOnly(s) === null), s.pageReadOnly) + renderHealth(s) + renderChecklist(s, o.queries, o.users) + renderKpis(s, { ...o, now }) + (first ? connect : "") + renderProgress(s, o.open, o.shares, o.before) + renderFacts(s, now) + (first ? "" : connect) + renderStream(s, now) +
+  return readOnlyLine(readOnlyWhat(tablesReadOnly(s) === null, usersReadOnly(s) === null), s.pageReadOnly) + renderHealth(s, o.stale ?? null) + renderChecklist(s, o.queries, o.users) + renderKpis(s, { ...o, now }) + (first ? connect : "") + renderProgress(s, o.open, o.shares, o.before) + renderFacts(s, now) + (first ? "" : connect) + renderStream(s, now) +
     (added ? renderQueries(o.queries) : "") + (added ? renderRecentErrors(o.events, o.requests, o.unsupported) : "");
 }
 
@@ -572,15 +583,17 @@ export const page = {
     };
     return {
       model: { open: opened.open, share: share.m },
+      // its word says as of when while the poll fails: the banner does not say it again
+      saysStale: true,
       reads: () => [{ path: "api/state", everyMs: POLL_MS }, ...SLOWER.map((path) => ({ path, everyMs: 30_000 })), { path: HOURLY, everyMs: 60_000 }, ...hostCardReads()],
       actions: share.actions,
       afterRead: () => share.afterRead(ctx.read("api/state")?.body),
       input: (target) => share.input(target),
       view() {
         const st = ctx.read("api/state");
-        if (!st?.body) return { status: st?.failure ? "" : skeleton(4) };
+        if (!st?.body) return { status: st?.failure ? renderUnknown(st.failure) : skeleton(4) };
         const [queries, events, requests, unsupported, users] = SLOWER.map((p) => asRequest(ctx.read(p)));
-        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, events, requests, unsupported, users, usage: ctx.read(HOURLY)?.body, hostCard: cardPath() === null ? undefined : ctx.read(hostKey(cardPath())), open: opened.has, shares: monotone.of(st.body), before: monotone.before, share: share.m }) };
+        return { status: renderStatus(st.body, { now: ctx.now().getTime(), stale: st.failure && st.readAt !== undefined ? { at: new Date(st.readAt), failure: st.failure } : null, queries, events, requests, unsupported, users, usage: ctx.read(HOURLY)?.body, hostCard: cardPath() === null ? undefined : ctx.read(hostKey(cardPath())), open: opened.has, shares: monotone.of(st.body), before: monotone.before, share: share.m }) };
       },
       toggle: (target) => opened.toggle(target),
       // Connect's Copy buttons, and Connect from anywhere's
