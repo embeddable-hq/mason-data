@@ -3640,7 +3640,7 @@ test("a popover is placed beside its anchor: under it, its right edge on the anc
   assert.deepEqual(placePops({}, {}), [], "a document that cannot place one: none");
 });
 
-test("an answer's popover covers no other control (issue 884): under its anchor, over it, or on its left; where every place covers one, a click goes through it", () => {
+test("an answer's popover covers no other control (issue 884): under its anchor, over it, or on its left; where every place covers one, a bar at the window's bottom, never a way through", () => {
   const placePops = fn<[unknown, unknown], unknown[]>("placePops");
   const box = (left: number, top: number, w: number, h: number) => ({ left, top, right: left + w, bottom: top + h, width: w, height: h });
   const control = (left: number, top: number, w = 80, h = 28) => ({ getBoundingClientRect: () => box(left, top, w, h), closest: () => null });
@@ -3661,14 +3661,21 @@ test("an answer's popover covers no other control (issue 884): under its anchor,
   const alone = said();
   placePops(docOf([alone], [control(10, 600)]), { innerWidth: 1280, innerHeight: 900 });
   assert.deepEqual(alone.style, { left: "880px", top: "140px" });
-  // controls in every place (a phone's rows): a click goes through it, its own Dismiss over none
+  // controls in every place (a phone's rows): a bar at the window's bottom (`docked`), its height given to the page's
+  // end; never a way through to what is under it (a tap on its words once added the table under it)
   const grid = Array.from({ length: 25 }, (_, row) => Array.from({ length: 13 }, (_, c) => control(c * 100, row * 36 + 2, 90, 4))).flat();
   const crowded = said();
-  placePops(docOf([crowded], grid), { innerWidth: 1280, innerHeight: 900 });
-  assert.equal(crowded.classList.contains("through"), true, "a click goes through it");
-  const top = Number.parseInt(crowded.style.top!, 10), left = Number.parseInt(crowded.style.left!, 10);
-  const dismiss = box(left + 16, top + 80, 70, 28);
-  assert.ok(!grid.some((c) => { const b = c.getBoundingClientRect(); return b.left < dismiss.right && b.right > dismiss.left && b.top < dismiss.bottom && b.bottom > dismiss.top; }), "its Dismiss over no control");
+  const root = { style: { props: {} as Record<string, string>, setProperty(k: string, v: string) { this.props[k] = v; } } };
+  placePops({ ...docOf([crowded], grid), documentElement: root }, { innerWidth: 1280, innerHeight: 900 });
+  assert.equal(crowded.classList.contains("docked"), true, "docked at the window's bottom");
+  assert.equal(crowded.classList.contains("through"), false, "never a way through");
+  assert.deepEqual(crowded.style, { left: "", top: "" }, "placed by the stylesheet, not over a row");
+  assert.deepEqual(root.style.props, { "--docked-h": "120px" }, "its height given to the page's end");
+  // a place clear again: no longer docked, and the page's end its own again
+  placePops({ ...docOf([crowded], rowControls), documentElement: root }, { innerWidth: 1280, innerHeight: 900 });
+  assert.equal(crowded.classList.contains("docked"), false);
+  assert.deepEqual(crowded.style, { left: "596px", top: "100px" });
+  assert.deepEqual(root.style.props, { "--docked-h": "0px" });
 });
 
 // ------------------------------------------------------------------ the restyled Queries, Usage and Sync events pages (docs/WEB-UI.md "Presentation")

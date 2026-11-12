@@ -70,8 +70,11 @@ const synced = (table: string) => ({ tables: [{ table, changed: 3, deleted: 1, r
 
 // ------------------------------------------------------------------ the page, served as the run serves it
 
+/** What the page asked of the run, as `<method> <path>`. */
+const asked: string[] = [];
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://x");
+  if (url.pathname.startsWith("/api/")) asked.push(`${req.method} ${url.pathname}`);
   const json = (body: unknown) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
   if (url.pathname === "/api/state") return json(STATE);
   if (url.pathname === "/api/usage") return json({ samples: [], copySizes: [] });
@@ -139,28 +142,76 @@ test(`the name column keeps a usable width at every width from 1000 to 1400 px; 
   }
 });
 
-/** Every control of the page outside the popover that a click at its middle does not reach: the said popover's own
- *  buttons are reached too. */
-const covered = (p: Page) => p.evaluate<{ pops: number; out: string[]; through: boolean }>(`(() => {
+/** Every control of the page outside the popover that the answer's box covers, any of it — once more after it is scrolled to the window's middle, as a person scrolls a row clear of an answer docked at
+ *  the window's bottom (whose height the page's end leaves room for). */
+const covered = (p: Page) => p.evaluate<{ pops: number; out: string[] }>(`(async () => {
+  const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  const under = (el) => {
+    const b = el.getBoundingClientRect();
+    if (b.width < 1 || b.height < 1) return false;
+    const x = (b.left + b.right) / 2, y = (b.top + b.bottom) / 2;
+    if (x < 0 || x > window.innerWidth || y < 0 || y > window.innerHeight) return false;
+    // covered as a person sees it: any of it under the answer's box (a click let through it is no excuse: hidden is
+    // hidden, and a tap on the answer's words reached the control under it)
+    return [...document.querySelectorAll(".pop.said")].some((pop) => {
+      if (pop.hidden) return false;
+      const a = pop.getBoundingClientRect();
+      return b.left < a.right - 0.5 && b.right > a.left + 0.5 && b.top < a.bottom - 0.5 && b.bottom > a.top + 0.5;
+    });
+  };
   const out = [];
   const pops = [...document.querySelectorAll(".pop.said")].filter((e) => !e.hidden);
-  for (const el of document.querySelectorAll("#page-tables button, #page-tables a[href], #page-tables input, #page-tables select, #page-tables summary")) {
-    const b = el.getBoundingClientRect();
-    if (b.width < 1 || b.height < 1 || b.bottom <= 0 || b.top >= window.innerHeight || b.right <= 0 || b.left >= window.innerWidth) continue;
-    const x = (b.left + b.right) / 2, y = (b.top + b.bottom) / 2;
-    if (x < 0 || x > window.innerWidth || y < 0 || y > window.innerHeight) continue;
-    const hit = document.elementFromPoint(x, y);
-    // reached, or under something that is no popover (a phone's top bar over a row scrolled under it)
-    if (hit !== null && (el.contains(hit) || hit.closest(".pop") === null)) continue;
-    const row = el.closest("tr")?.querySelector("code.name")?.textContent ?? (el.closest(".pop") ? "the popover" : "");
-    out.push(row + ' "' + (el.textContent ?? "").trim() + '" under the popover');
+  const controls = [...document.querySelectorAll("#page-tables button, #page-tables a[href], #page-tables input, #page-tables select, #page-tables summary")]
+    .filter((el) => el.closest(".pop") === null && under(el));
+  for (const el of controls) {
+    el.scrollIntoView({ block: "center" });
+    await frame();
+    if (!under(el)) continue;
+    const row = el.closest("tr")?.querySelector("code.name")?.textContent ?? el.closest("tr")?.previousElementSibling?.querySelector("code.name")?.textContent ?? "";
+    out.push(row + ' "' + (el.textContent ?? "").trim() + '" under the answer');
   }
-  return { pops: pops.length, out, through: pops.some((e) => e.classList.contains("through")) };
+  return { pops: pops.length, out };
 })()`);
 
+/** Where a tap on the answer reaches something that is not the answer: every 8 px of it, its own buttons aside. */
+const through = (p: Page) => p.evaluate<string[]>(`(() => {
+  const pop = [...document.querySelectorAll(".pop.said")].find((e) => !e.hidden);
+  if (!pop) return ["no answer"];
+  const b = pop.getBoundingClientRect();
+  const out = [];
+  for (let y = Math.ceil(b.top) + 2; y < b.bottom - 1; y += 8) {
+    for (let x = Math.ceil(b.left) + 2; x < b.right - 1; x += 8) {
+      if (x >= window.innerWidth || y >= window.innerHeight) continue;
+      const hit = document.elementFromPoint(x, y);
+      if (hit === null || !pop.contains(hit)) out.push(x + "," + y + ": " + (hit?.tagName ?? "nothing") + " " + (hit?.textContent ?? "").trim().slice(0, 30));
+    }
+  }
+  return out;
+})()`);
+
+/** 1000 to 1400 px every 40 px, 1024 (the width the owner met) and a phone (390 px). */
+const ANSWER_WIDTHS = [...LAPTOP.filter((w) => w % 40 === 0 || w === 1024), 390];
+
 for (const [what, click] of [["Add", 'button[data-add-table="public.audit_trail"]'], ["Sync now", 'button[data-sync-table="public.invoices"]']] as const) {
+  test(`after ${what}, a tap anywhere on what it answered never reaches a control under it: 1000 to 1400 px and a phone`, { skip: noBrowser }, async () => {
+    for (const width of ANSWER_WIDTHS) {
+      const p = await open(width);
+      await p.evaluate(`document.querySelector('${click.replace(/'/g, "\\'")}').scrollIntoView({ block: "center" })`);
+      await p.click(click);
+      await p.waitForSelector(".pop.said:not([hidden])");
+      const out = await through(p);
+      // and a real tap on its words: nothing asked of the run (a tap once added the table under it)
+      const before = asked.length;
+      await p.click(".pop.said:not([hidden]) .headline");
+      await new Promise((r) => setTimeout(r, 100));
+      const after = asked.slice(before);
+      await p.close();
+      assert.deepEqual(out, [], `${width} px: every point of the answer is the answer`);
+      assert.deepEqual(after.filter((a) => a !== "GET /api/state" && !a.startsWith("GET /api/usage")), [], `${width} px: a tap on its words asks nothing`);
+    }
+  });
   test(`after ${what}, what it answered covers no other control: 1000 to 1400 px and a phone`, { skip: noBrowser }, async () => {
-    for (const width of [...LAPTOP.filter((w) => w % 40 === 0 || w === 1024), 375]) {
+    for (const width of ANSWER_WIDTHS) {
       const p = await open(width);
       await p.evaluate(`document.querySelector('${click.replace(/'/g, "\\'")}').scrollIntoView({ block: "center" })`);
       await p.click(click);

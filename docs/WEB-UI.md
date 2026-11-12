@@ -103,8 +103,10 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   its place) — and only an expander the reader opens (a request's details, a first sync's whole error) pushes the rows
   under it down. **What Add or Sync now answered covers no other control** (issue 884): the answer is placed under its
   row's actions, over them or on their left, wherever it covers no button, link or box of any row; where every place
-  covers one (a phone's rows, or a long answer beside a narrow list), a click goes through it to what is under it, and
-  its own Dismiss is placed over none (`placePops`, src/web/shared.js).
+  covers one (a phone's rows, or a long answer beside a narrow list), it is a bar fixed at the window's bottom, beside
+  the sidebar, with its Dismiss, still read out (`role="status"`), the page's end given its height so every row can be
+  scrolled clear of it. A tap on the answer is always the answer's, never a control's under it (`placePops`,
+  src/web/shared.js).
 - **Tables**, **the name keeps its room at every width** (issue 884: it was 2 px at 1024 px): measured against the
   list's card, the name gets at least 200 px, cut with an ellipsis and whole on hover, and the less important columns
   give way first: Key below about 1340 px, then Size (1240), Last sync (1140) and Rows (1040) beside the full sidebar.

@@ -536,10 +536,16 @@ table.catalog tr.note .under-body { font-size: var(--text-sm); line-height: 20px
 .pop.ask:has(.confirm) { border-top-color: var(--bad); }
 .pop.said { border-left: 4px solid var(--ok); }
 .pop.said:has(.failure) { border-left-color: var(--bad); }
-/* an answer that could be placed only over another control lets a click through to it: its own buttons alone take one
-   (placePops, src/web/shared.js) */
-.pop.said.through { pointer-events: none; }
-.pop.said.through :is(button, a[href], summary, input, select, textarea) { pointer-events: auto; }
+/* an answer with no place near its row that covers no control is a bar at the window's bottom, across it, its height
+   given to the page's end so every row scrolls clear of it (placePops, src/web/shared.js: `docked`, `--docked-h`) */
+.pop.said.docked { top: auto; left: 0; right: 0; bottom: 0; width: auto; max-width: none; max-height: 50vh; overflow-y: auto;
+  border-radius: 0; border-left: 0; border-right: 0; border-bottom: 0; border-top: 4px solid var(--ok); }
+.pop.said.docked:has(.failure) { border-top-color: var(--bad); }
+body { padding-bottom: var(--docked-h, 0px); }
+/* beside the page, never over the sidebar's nav: past the sidebar, the rail, or the whole width on a phone */
+.pop.said.docked { left: var(--sidebar-w); }
+@media (max-width: 999px) { .pop.said.docked { left: var(--rail-w); } }
+@media (max-width: 640px) { .pop.said.docked { left: 0; } }
 .pop > :first-child { margin-top: 0; }
 .pop > :last-child { margin-bottom: 0; }
 .pop .confirm { margin: 0 0 var(--space-2); color: var(--fg); }

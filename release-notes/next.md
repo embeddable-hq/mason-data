@@ -49,7 +49,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   it always keeps room for a typical `schema.table` name. In a narrower window the Key, Size, Last sync and Rows
   columns give way, in that order, and the row's note says what they said.
 - **What Add or Sync now says on the web page's Tables no longer covers the next row's buttons.** It is placed where it
-  covers no other button, or else a click goes through it to the button under it.
+  covers no other button. Where there is no such place (on a phone, say), it is a bar at the bottom of the window, and
+  the page leaves room under its last row so nothing stays hidden behind it.
 - **The web page's Users table no longer shows its Added header in a framed box.** The style of a new user's
   password card also caught the column's header, giving it a border and a colored bar.
 - **On a phone, a new user's password card is scrolled into view.** After Add a user it was written at the bottom edge

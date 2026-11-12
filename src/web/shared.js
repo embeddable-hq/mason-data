@@ -396,6 +396,8 @@ export function placePops(doc, win) {
   const controlsNow = () => controls ??= [...doc.querySelectorAll(CONTROLS)]
     .filter((c) => typeof c.getBoundingClientRect === "function" && c.closest?.(".pop") == null)
     .map((c) => c.getBoundingClientRect()).filter((b) => b.width > 0 && b.height > 0 && b.bottom > 0 && b.top < vh && b.right > 0 && b.left < vw);
+  // the height of an answer docked at the window's bottom, given to the page's end (0: none is)
+  let dockedHeight = 0;
   for (const el of doc.querySelectorAll(".pop[data-anchor]")) {
     const a = doc.getElementById(el.dataset.anchor);
     if (a === null || typeof a.getBoundingClientRect !== "function") { el.hidden = true; continue; }
@@ -408,33 +410,27 @@ export function placePops(doc, win) {
     const side = below + h <= vh - gutter || r.top - gap - h < gutter ? below : r.top - gap - h;
     let at = inside(r.right - w, side, w, h);
     // AN ANSWER (`said`: what an Add or a Sync now answered, up until it is dismissed) NEVER COVERS ANOTHER CONTROL
-    // (issue 884: under a row's actions it covered the next row's Sync now and Remove): it goes where it covers none —
-    // under its anchor, over it, or beside it on its left, level with its top or its bottom — and where every place
-    // covers one, where it covers fewest, a click going through it to what is under it (`through`: its own buttons
-    // alone take a click, and they are placed over no control)
+    // (issue 884: under a row's actions it covered the next row's Sync now and Remove), and is never a way through to
+    // one (a tap on its words once added the table under it): it goes where it covers none — under its anchor, over it,
+    // or beside it on its left, level with its top or its bottom — and where every place covers one (a phone's rows, a
+    // long answer beside a narrow list), it is a bar fixed at the window's bottom (`docked`), the page given its height
+    // at its end (`--docked-h`), so every row can be scrolled clear of it
+    let docked = false;
     if (el.classList?.contains("said")) {
       const all = controlsNow();
-      const own = [...(el.querySelectorAll?.(CONTROLS) ?? [])].map((c) => c.getBoundingClientRect());
-      const box = el.getBoundingClientRect();
-      const hits = (x, y, ww, hh) => all.filter((b) => b.left < x + ww - 0.5 && b.right > x + 0.5 && b.top < y + hh - 0.5 && b.bottom > y + 0.5).length;
-      const score = (p) => ({ p, covers: hits(p.left, p.top, w, h),
-        ownCovers: own.reduce((k, b) => k + hits(p.left + b.left - box.left, p.top + b.top - box.top, b.width, b.height), 0) });
-      const places = [at, inside(r.right - w, below, w, h), inside(r.right - w, r.top - gap - h, w, h), inside(r.left - gap - w, r.top, w, h), inside(r.left - gap - w, r.bottom - h, w, h)].map(score);
-      // none clear: each place moved up or down, 8 px at a time, its own buttons over no control first, then the fewest
-      // covered, then the nearest (a phone's rows are controls from edge to edge)
-      const moved = () => places.flatMap((x, i) => Array.from({ length: 40 }, (_, j) => {
-        const d = 8 * (1 + (j >> 1)) * (j % 2 ? -1 : 1);
-        return { ...score(inside(x.p.left, x.p.top + d, w, h)), far: Math.abs(d) + i };
-      }));
-      const best = places.find((x) => x.covers === 0) ?? [...places.map((x, i) => ({ ...x, far: i })), ...moved()]
-        .sort((x, y) => x.ownCovers - y.ownCovers || x.covers - y.covers || x.far - y.far)[0];
-      at = best.p;
-      el.classList.toggle("through", best.covers > 0);
+      const covers = (p) => all.some((b) => b.left < p.left + w - 0.5 && b.right > p.left + 0.5 && b.top < p.top + h - 0.5 && b.bottom > p.top + 0.5);
+      const clear = [at, inside(r.right - w, below, w, h), inside(r.right - w, r.top - gap - h, w, h), inside(r.left - gap - w, r.top, w, h), inside(r.left - gap - w, r.bottom - h, w, h)]
+        .find((p) => !covers(p));
+      docked = clear === undefined;
+      el.classList.toggle("docked", docked);
+      if (!docked) at = clear;
+      else dockedHeight = Math.max(dockedHeight, el.offsetHeight);
     }
-    el.style.left = `${Math.round(at.left)}px`;
-    el.style.top = `${Math.round(at.top)}px`;
+    el.style.left = docked ? "" : `${Math.round(at.left)}px`;
+    el.style.top = docked ? "" : `${Math.round(at.top)}px`;
     placed.push(el);
   }
+  doc.documentElement?.style?.setProperty?.("--docked-h", `${Math.ceil(dockedHeight)}px`);
   return placed;
 }
 
