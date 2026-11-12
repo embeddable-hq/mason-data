@@ -106,7 +106,7 @@ a:hover { text-decoration-color: var(--accent); text-decoration-thickness: 2px; 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 0; }
 h1, h2, h3 { font-family: var(--font-mono); font-weight: 700; letter-spacing: -0.01em; }
 /* the slab: a title and a big number, cut like a mason's letters (one weight, 700) */
-h2, h3, .health-word, .health-title, #page-users .added .added-title, .card-value, .brand-name, .checklist-title, .connect.first .connect-title { font-family: var(--font-display); font-weight: 700; letter-spacing: 0; }
+h2, h3, .health-word, .health-title, #page-users .user-added .added-title, .card-value, .brand-name, .checklist-title, .connect.first .connect-title { font-family: var(--font-display); font-weight: 700; letter-spacing: 0; }
 h3 { font-size: 20px; margin: var(--space-6) 0 var(--space-3); }
 code, pre, kbd, samp { font-family: var(--font-mono); font-size: 0.95em; }
 code { overflow-wrap: anywhere; }
@@ -444,9 +444,9 @@ details.memory, details#syncs-raw { margin: var(--space-4) 0; }
 .next-head { margin: var(--space-2) 0 2px; font-weight: 700; font-size: var(--text-sm); }
 .next { list-style: none; margin: 0; padding: 0; font-size: var(--text-sm); }
 .next li span { color: var(--muted); margin-left: var(--space-2); }
-.added, .done { border: 1px solid var(--frame); border-left: 4px solid var(--ok); border-radius: var(--radius); box-shadow: var(--drop); padding: var(--space-3) var(--space-4); margin: var(--space-3) 0 var(--space-4); background: var(--surface); }
-.added .headline, .done .headline { font-weight: 700; margin: 0 0 var(--space-2); overflow-wrap: anywhere; }
-.added .tip, .done .note, .done .tip { color: var(--muted); margin: 2px 0 6px; }
+.user-added, .done { border: 1px solid var(--frame); border-left: 4px solid var(--ok); border-radius: var(--radius); box-shadow: var(--drop); padding: var(--space-3) var(--space-4); margin: var(--space-3) 0 var(--space-4); background: var(--surface); }
+.user-added .headline, .done .headline { font-weight: 700; margin: 0 0 var(--space-2); overflow-wrap: anywhere; }
+.user-added .tip, .done .note, .done .tip { color: var(--muted); margin: 2px 0 6px; }
 
 /* ---------------------------------------------------------------- empty and loading */
 /* an empty state: one quiet line of text, never a box (empty, src/web/shared.js) */
@@ -580,7 +580,7 @@ form.formcard input { width: 18em; }
 /* a box whose title sits on its top edge, as a fieldset's legend does (Connect, Getting started, a chart's name) */
 .connect { background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-4) var(--space-5); margin: var(--space-6) 0 var(--space-6); }
 .connect.first { border-width: 2px; }
-.connect .connect-title, .checklist .checklist-title, .health .health-title, #page-users .added .added-title { width: fit-content; max-width: 100%; margin: calc(-1 * var(--space-4) - 0.8em) 0 var(--space-2) calc(-1 * var(--space-2));
+.connect .connect-title, .checklist .checklist-title, .health .health-title, #page-users .user-added .added-title { width: fit-content; max-width: 100%; margin: calc(-1 * var(--space-4) - 0.8em) 0 var(--space-2) calc(-1 * var(--space-2));
   padding: 0 var(--space-2); background: var(--surface); font-weight: 700; line-height: 1.6; }
 .connect.first .connect-title { font-size: var(--text-lg); }
 .connect .facts { margin: 0 0 var(--space-3); gap: var(--space-2) var(--space-4); align-items: center; }
@@ -664,13 +664,13 @@ table.users td.act { background: var(--surface); }
 table.users tbody tr:hover > td.act { background: var(--hover); }
 table.users td { overflow: hidden; text-overflow: ellipsis; }
 #page-users td.mono { white-space: nowrap; }
-#page-users .added { border-left-color: var(--warn); border-radius: var(--radius-lg); padding: var(--space-4) var(--space-5); margin: var(--space-6) 0 var(--space-4); }
+#page-users .user-added { border-left-color: var(--warn); border-radius: var(--radius-lg); padding: var(--space-4) var(--space-5); margin: var(--space-6) 0 var(--space-4); }
 /* its title on the box's top edge, as the Overview's "mason status" (the rule shared with .health-title above) */
-#page-users .added .added-title { font-size: var(--text-lg); }
-#page-users .added .facts { margin: 0 0 var(--space-3); gap: var(--space-2) var(--space-4); align-items: center; }
-#page-users .added .tip { margin: 0 0 var(--space-3); }
+#page-users .user-added .added-title { font-size: var(--text-lg); }
+#page-users .user-added .facts { margin: 0 0 var(--space-3); gap: var(--space-2) var(--space-4); align-items: center; }
+#page-users .user-added .tip { margin: 0 0 var(--space-3); }
 /* a phone: a fact's label over its value, so a URL or a password has the card's whole width */
-@media (max-width: 640px) { .added .facts, .connect .facts { grid-template-columns: 1fr; gap: 0 var(--space-4); } .added .facts dd, .connect .facts dd { margin-bottom: var(--space-2); } }
+@media (max-width: 640px) { .user-added .facts, .connect .facts { grid-template-columns: 1fr; gap: 0 var(--space-4); } .user-added .facts dd, .connect .facts dd { margin-bottom: var(--space-2); } }
 
 /* ---------------------------------------------------------------- Queries, Usage and Logs (scoped to those pages) */
 /* a filter toolbar: each field a small label over its control, the actions at the end */

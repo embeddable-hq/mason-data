@@ -172,7 +172,9 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   the ranges, or `null` for from anywhere, `--any`); the list holds still while it asks, and a refusal is said in the
   popover. **Remove** asks first; a removed user stays listed, muted. The table keeps its width (no column of its own),
   fits its card in a 1280 px window, and where it scrolls (a narrower window, a phone) a row's actions stay pinned at
-  the card's right.
+  the card's right. A header cell's class (`added`, `status`, `act`, …) is styled only as a cell (`th.added`), never by a
+  box's rule of the same name: the New user added card is `.user-added`, so its white and its left border never reach
+  the Added header (`tests/web-page.test.ts`, every header class of Users and Tables, and the pinned rule on `.act` alone).
 - **Observability › Queries** (`#observability/queries`): the request log, and only that — who is connected, what runs
   and the range's numbers are on Usage.
 - **Queries**, the request log empty and unfiltered: its sentence, then Connect your first tool: the URL and psql line, a first statement to try, and Create a user.

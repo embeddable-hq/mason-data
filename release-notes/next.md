@@ -45,6 +45,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **The Users list's Added header looks like the others.** It was drawn white with a brown left border, the look of the
+  New user added card, which shares its name; every header cell of a list now has the header's tint.
+
 - **The time range on Queries, Usage and Sync events no longer moves when a range is chosen.** Before, choosing any
   range but Now pushed the whole control left (its "as of … UTC" and Refresh are wider than Live), so the range just
   clicked slid away under the pointer. Now Live, or when the range was read and Refresh, sits left of the control in

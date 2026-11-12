@@ -603,7 +603,7 @@ test("a user just added: titled New user added on the box's edge; User as plain 
   // the title on the box's top edge, then what is this user's alone, and the URL, in one layout: each a label and its
   // value, a Copy on all but the name (issue 839); Shown once under the password; one line, and the button
   assert.equal(text, "New user added User metabase URL postgres://metabase:mason_0123456789abcdef_a{32}@127.0.0.1:5433/shop Copy Password mason_0123456789abcdef_a{32} Copy Shown once Database shop Copy The password is only shown once I have copied it".replace("a{32}", "a".repeat(32)).replace("a{32}", "a".repeat(32)));
-  assert.match(html, /^<div class="added" role="status"><p class="added-title">New user added<\/p><dl class="facts"><dt>User<\/dt><dd>metabase<\/dd><dt>URL<\/dt>/, "the title, then User as plain text with no Copy");
+  assert.match(html, /^<div class="user-added" role="status"><p class="added-title">New user added<\/p><dl class="facts"><dt>User<\/dt><dd>metabase<\/dd><dt>URL<\/dt>/, "the title, then User as plain text with no Copy");
   assert.match(html, /<code id="added-password">[^<]*<\/code> <button[^>]*>Copy<\/button> <span class="badge warn">Shown once<\/span><\/span><\/dd>/, "Shown once in the password's row, right of its Copy");
   assert.doesNotMatch(html, /shown-once/, "no line of its own under the password");
   assert.equal([...html.matchAll(/Shown once/g)].length, 1, "said once, beside the password's Copy");
@@ -1459,6 +1459,35 @@ test("the app: Disable asks first and its confirm sends POST api/users/<name>/di
 
 // ------------------------------------------------------------------ where a user connects from (mason user add --from, mason user from; issue 813)
 
+test("a header cell is styled as a cell alone: in every table that pins its actions (Users, Tables) the actions column, last, is the only pinned header, and no rule of a box (a card, the New user added) reaches a header cell by its class", () => {
+  const renderUsers = fn<[unknown, unknown, number?], string>("renderUsers");
+  const renderTables = fn<[unknown], string>("renderTables");
+  const at = { addedAt: "2026-10-27T09:10:11.000Z", live: true, lastUsedAt: null, url: null };
+  const users = renderUsers({ users: [{ name: "metabase", id: "0000000000000001", ...at, removedAt: null, from: null }, { name: "old", id: "0000000000000002", ...at, removedAt: "2026-10-28T09:00:00.000Z", from: null }],
+    lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, Date.parse("2026-10-29T09:00:00.000Z"));
+  const heads = (html: string) => [...(/<thead>([\s\S]*?)<\/thead>/.exec(html)?.[1] ?? "").matchAll(/<th\b([^>]*)>/g)].map((m) => (/class="([^"]*)"/.exec(m[1]!)?.[1] ?? "").split(" ").filter(Boolean));
+  const classes = new Set<string>();
+  for (const [name, html] of [["Users", users], ["Tables", renderTables(CATALOG_STATE)]] as const) {
+    const cells = heads(html);
+    assert.ok(cells.length > 3, `${name}: its header cells`);
+    assert.deepEqual(cells.map((c, i) => c.includes("act") ? i : -1).filter((i) => i >= 0), [cells.length - 1], `${name}: the actions column alone is act, and last`);
+    for (const c of cells.flat()) classes.add(c);
+  }
+  assert.deepEqual(heads(users), [[], ["role"], ["status"], ["added"], ["num", "last"], ["act"]], "the users' header cells, as the page writes them");
+  // every selector naming a header cell's class names it on a cell (th.x, td.x), so a rule meant for something else
+  // (`.added`, the New user added card: a white box with a brown left border) never paints a header (num: the mono numbers, any element)
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const selectors = [...css.matchAll(/([^{}]+)\{[^{}]*\}/g)].flatMap((m) => m[1]!.split(",").map((x) => x.trim())).filter((x) => x && !x.startsWith("@"));
+  for (const c of [...classes].filter((x) => x !== "num")) {
+    const loose = selectors.filter((sel) => new RegExp(`(^|[^\\w-])\\.${c}(?![\\w-])`).test(sel) && !new RegExp(`(^|[\\s>+~(])(th|td)(\\.[\\w-]+)*\\.${c}(?![\\w-])`).test(sel));
+    assert.deepEqual(loose, [], `.${c} is a header cell's class: styled only as a cell`);
+  }
+  // the pinned rule (position: sticky; right: 0) names the actions' cells alone
+  const pinned = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter((m) => /position: sticky; right: 0/.test(m[2]!)).flatMap((m) => m[1]!.split(",").map((x) => x.trim()));
+  assert.ok(pinned.length > 0);
+  for (const sel of pinned) assert.match(sel, /\b(td|th)\.act$/, `pinned: ${sel}`);
+});
+
 test("the users: each user's addresses on a line under its role, as mason user says them — from its ranges, or from anywhere; the line is its From…; a removed user's none; read-only, the words alone", async () => {
   const renderUsers = fn<[unknown, unknown, number?, unknown?, unknown?, unknown?], string>("renderUsers");
   const { rangesText } = await import("../src/cli/user.ts");
@@ -2311,8 +2340,8 @@ test("the Overview's eight cards and nine (the host's beside them) leave no card
   assert.match(css, /\n {2}\.cards \{ grid-template-columns: 1fr 1fr; gap: var\(--space-2\); \}/, "a phone (its 640 px block): two a row, 8 = 2 × 4");
   assert.match(css, /\.cards > :last-child:nth-child\(odd\) \{ grid-column: 1 \/ -1; \}/, "a phone: nine's last card spans its row");
   // the box's title on its top edge, as Getting started's
-  assert.match(css, /\.connect \.connect-title, \.checklist \.checklist-title, \.health \.health-title, #page-users \.added \.added-title \{ width: fit-content;/, "the Users page's New user added on its box's edge as mason status is");
-  assert.match(css, /\.health-title, #page-users \.added \.added-title,/, "in the same type as mason status");
+  assert.match(css, /\.connect \.connect-title, \.checklist \.checklist-title, \.health \.health-title, #page-users \.user-added \.added-title \{ width: fit-content;/, "the Users page's New user added on its box's edge as mason status is");
+  assert.match(css, /\.health-title, #page-users \.user-added \.added-title,/, "in the same type as mason status");
 });
 
 test("the Overview: Ready, Under way and Failed under the title mason status, each with what it means in a line; nothing added says so once; a count that could not be read says so", async () => {
@@ -3311,7 +3340,7 @@ test("Tables: a copy's whole error stays open across the polls that rewrite the 
 test("Users: the add form's password is a prominent card marked shown once; the active users come first, a removed one muted last, and the age ticks with the page's clock", async () => {
   const added = fn<[unknown], string>("renderAdded")({ user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password: "mason_0123456789abcdef_" + "a".repeat(32),
     database: "shop", url: "postgres://metabase@127.0.0.1:5433/shop" });
-  assert.match(added, /^<div class="added" role="status"><p class="added-title">New user added<\/p>/);
+  assert.match(added, /^<div class="user-added" role="status"><p class="added-title">New user added<\/p>/);
   assert.match(added, /<span class="badge warn">Shown once<\/span>/);
   assert.equal([...added.matchAll(/data-copy="/g)].length, 3, "the URL, the password and the database each have a Copy; the name is plain");
   const run = fakeRun();

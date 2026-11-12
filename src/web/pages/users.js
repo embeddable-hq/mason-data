@@ -358,7 +358,7 @@ function toggle(u, disabled, asking) {
 export function renderAdded(a) {
   const rows = [["URL", a.url, "added-url"], ["Password", a.password, "added-password"], ["Database", a.database, "added-database"]]
     .filter(([, v]) => v !== undefined && v !== null);
-  return `<div class="added" role="status"><p class="added-title">New user added</p>` +
+  return `<div class="user-added" role="status"><p class="added-title">New user added</p>` +
     `<dl class="facts"><dt>User</dt><dd>${esc(a.user)}</dd>` +
     rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v, id === "added-password" ? badge("Shown once", "warn") : "")}</dd>`).join("") +
     `</dl><p class="tip">The password is only shown once</p>` +
