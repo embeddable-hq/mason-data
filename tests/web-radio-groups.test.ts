@@ -27,6 +27,14 @@ const WEB = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src",
 const ORIGIN = "http://mason.test";
 
 type Box = { x: number; y: number; width: number; height: number };
+// what the functions handed to page.evaluate meet in the browser (the checkout's tsconfig has no DOM library)
+type DOMRect = Box;
+type El = { id: string; tagName: string; focus(): void; blur(): void; getAttribute(n: string): string | null; getBoundingClientRect(): DOMRect;
+  checkVisibility(o: { visibilityProperty: boolean }): boolean; closest(sel: string): El | null; querySelectorAll(sel: string): Iterable<El> };
+type HTMLInputElement = El;
+declare const document: { fonts: { ready: Promise<unknown> }; activeElement: El | null; documentElement: { scrollWidth: number };
+  querySelector(sel: string): El | null; querySelectorAll(sel: string): Iterable<El> & { length: number } };
+declare const window: { innerWidth: number };
 type Page = {
   route(url: string, handler: (route: Route) => Promise<void>): Promise<void>;
   goto(url: string): Promise<unknown>;
