@@ -1474,7 +1474,7 @@ test("the users: From… asks where the user connects from in a popover beside i
   assert.equal(pops.length, 1);
   assert.equal(pops[0]!.anchor, "act-users-looker");
   assert.match(pops[0]!.html, /^<div class="pop ask" data-anchor="act-users-looker" role="dialog" aria-label="Where looker connects from">/);
-  assert.equal(textOf(pops[0]!.html), "Where looker connects from, as mason user from looker sets it: the sessions it holds from another address end at their next statement. Connects from From anywhere Only from these addresses Address ranges, comma-separated Change looker Cancel");
+  assert.equal(textOf(pops[0]!.html), "Where looker connects from, as mason user from looker sets it: the sessions it holds from another address end at their next statement. Connects from From anywhere Only from these addresses any address Address ranges, comma-separated Change looker Cancel");
   assert.match(pops[0]!.html, /<input type="radio" name="connects" value="only" checked>/, "opened at its ranges");
   assert.match(pops[0]!.html, /<input id="user-from-from" name="from"[^>]* value="192\.0\.2\.0\/24, 2001:db8::\/32">/);
   assert.match(pops[0]!.html, /<input type="hidden" name="user" value="looker"><\/form>/);
@@ -1492,7 +1492,9 @@ test("the users: From… asks where the user connects from in a popover beside i
 test("the add form: Connects from, in mason user add's words — From anywhere (the default, no from sent) or Only from these addresses, a comma list as --from takes it, the run judging each", async () => {
   const renderAddUser = fn<[unknown], string>("renderAddUser");
   const form = renderAddUser(CATALOG_STATE);
-  assert.match(textOf(form), /Name Connects from From anywhere Only from these addresses Address ranges, comma-separated Add a user$/);
+  assert.match(textOf(form), /Name Connects from From anywhere Only from these addresses any address Address ranges, comma-separated Add a user$/);
+  // the field's place is kept under from anywhere, saying rangesText(null) to the eye alone (issue 875; geometry: tests/web-users-form-layout.test.ts)
+  assert.match(form, /<span class="ranges"><span class="ranges-any" aria-hidden="true">any address<\/span><span class="ranges-field">/);
   assert.match(form, /<input type="radio" name="connects" value="any" checked> From anywhere/, "from anywhere is the default, as mason user add with no --from");
   assert.match(form, /<input type="radio" name="connects" value="only"> Only from these addresses/);
   assert.match(form, /<input id="add-user-from" name="from" spellcheck="false" autocapitalize="off" placeholder="e\.g\. 192\.0\.2\.0\/24, 2001:db8::\/32" value="">/);
