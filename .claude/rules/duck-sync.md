@@ -132,7 +132,10 @@ paths:
   gone, with Mason's own publication when that was the one read, before the record moves (`staleReplication`; issue
   893: a slot resumed under a new publication decodes a transaction open across its creation without it — Postgres 18
   skips its changes with a WARNING alone, 16 fails the stream for good)**: the run makes the slot anew and catches each
-  replicated table up by one poll, a full read of it, said at the start with that price; verified by the ClickHouse reader's own `checkPublication` (src/duck/publication.ts), never a
+  replicated table up by one poll, a full read of it, said at the start with that price. **A slot about to be made has
+  its tables marked behind, with its record at 0/0, in one transaction committed BEFORE `CREATE_REPLICATION_SLOT`**
+  (`prepareReplication`; the review of PR 897: marked after it, a `kill -9` between the two left the next start
+  streaming the new slot under the old one's record, never caught up — the switch keeps the slot's name); verified by the ClickHouse reader's own `checkPublication` (src/duck/publication.ts), never a
   second verifier. A gap in one table refuses that table alone, the others stream on; the way out is the found
   publication plus the gap as `ALTER PUBLICATION … ADD TABLE …`. On a standby a named one is required, refused before
   any slot is made. ("Logical replication")

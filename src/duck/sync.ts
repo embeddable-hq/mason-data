@@ -2218,7 +2218,7 @@ export class Sync {
    * REPLICATION, BEFORE A PASS COPIES: the publication carries every replicated table, and the slot exists — so a table
    * copied now has its changes in the stream from before it joins (src/duck/stream.ts "why replaying is safe"). A slot
    * made now, or one this copy has no record of, carries nothing from before it: the tables already copied are caught
-   * up by one poll each before the stream applies their changes (`behind`, recorded with the slot in one transaction).
+   * up by one poll each before the stream applies their changes (`behind`, recorded before the slot is made).
    * A slot Postgres invalidated (`wal_status = lost`, past `max_slot_wal_keep_size`) lost changes: it is dropped and
    * made again, and the copies are caught up the same way.
    */
@@ -2240,7 +2240,6 @@ export class Sync {
       if (r.owned) await this.ensurePublication(pg, tables, identities);
       else await this.verifyPublication(pg, tables, identities);
       const slot = await readSlot(pg, r.slot);
-      let made = false;
       if (slot.exists && slot.walStatus === "lost") {
         this.log(`replication slot ${r.slot} was invalidated by the database (wal_status lost: it held more WAL than max_slot_wal_keep_size), so changes are missing from it: made again, and the synced tables caught up by one poll`);
         if (slot.active) throw new Error(`replication slot ${r.slot} is lost and still in use by pid ${slot.activePid}`);
@@ -2248,14 +2247,13 @@ export class Sync {
       } else if (slot.exists && slot.plugin !== "pgoutput") {
         throw new Error(`replication slot ${r.slot} exists with the plugin ${slot.plugin}, not pgoutput: it is not Mason's (drop it, or name another project)`);
       }
-      if (!slot.exists || slot.walStatus === "lost") {
-        const repl = await PgConnection.connect({ ...this.pgOptions(), replication: true });
-        try { this.log(`made replication slot ${r.slot} at ${await createSlot(repl, r.slot)} (it holds the database's WAL until Mason reads it: mason destroy drops it, and so does a sources file in which no table's sync is replication)`); }
-        finally { repl.close(); }
-        made = true;
-        this.onReplication?.(true);
-      }
-      if (made || !this.slotKnown) {
+      const making = !slot.exists || slot.walStatus === "lost";
+      // A SLOT ABOUT TO BE MADE, or one this copy has no record of: the replicated tables already copied are marked
+      // behind, with the slot's record at 0/0, in ONE transaction committed BEFORE the slot is made (issue 893's
+      // review: marked after it, a run that died between the two — or whose marks failed — met at its next start a slot
+      // of the name its record knew, under an old record, and streamed it as the old one, its tables never caught up).
+      // A run that dies before the slot exists marks again at its next start; one that dies after it finds the marks
+      if (making || !this.slotKnown) {
         // the replicated tables already copied: the slot carries nothing from before it (a polled one is the poll's)
         const copied = tables.filter((t) => this.states.get(t.source)?.phase === "copied" && this.snapshots.has(t.source));
         await this.onWriter(async () => {
@@ -2274,6 +2272,12 @@ export class Sync {
           for (const t of copied) this.behind.set(t.source, { why: "after the slot was made" });
           this.refreshStreamed();
         });
+      }
+      if (making) {
+        const repl = await PgConnection.connect({ ...this.pgOptions(), replication: true });
+        try { this.log(`made replication slot ${r.slot} at ${await createSlot(repl, r.slot)} (it holds the database's WAL until Mason reads it: mason destroy drops it, and so does a sources file in which no table's sync is replication)`); }
+        finally { repl.close(); }
+        this.onReplication?.(true);
       }
     } finally { pg.close(); }
     await this.onWriter(() => this.settlePrepared(tables));

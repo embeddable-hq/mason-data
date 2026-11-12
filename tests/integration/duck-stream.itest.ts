@@ -464,7 +464,10 @@ test("a switch of publication on a running project, with a transaction open acro
   const file = path.join(dir, "ps.db");
   const items = (): string => psql(url, "SELECT id, v FROM items ORDER BY 1");
   let next = 100;
-  const run = async (repl: typeof own, step: string, during?: () => Promise<void>): Promise<void> => {
+  /** a run reading `repl`; `during` runs while its first pass does; `expect` what it must have said: the slot made anew and
+   *  the table caught up (a switch), or the catch-up alone (a start after a run that died once its slot was made) */
+  const run = async (repl: typeof own, step: string, o: { during?: () => Promise<void>; expect?: "made" | "caught up" } = {}): Promise<void> => {
+    const { during, expect } = o;
     const store = await DuckStore.open(file, (l) => logged.push(l));
     const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", repl);
     const before = logged.length;
@@ -481,18 +484,18 @@ test("a switch of publication on a running project, with a transaction open acro
       psql(url, `INSERT INTO items VALUES (${next++}, 'after ${said}'); UPDATE items SET v = 'moved by ${said}' WHERE id = 1`);
       await sync.caughtUp(20_000);
       assert.equal(await rowsOf(store, "SELECT id, v FROM public.items ORDER BY 1"), items(), `items streamed after ${step}\n${logged.slice(before).join("\n")}`);
-      if (during) {
+      if (expect !== undefined) {
         const lines = logged.slice(before);
         assert.ok(!lines.some((l) => /^synced /.test(l)), `not copied again at ${step}:\n${lines.join("\n")}`);
         // the slot is made anew under the new publication, and the table caught up by one poll before it streams
-        assert.ok(lines.some((l) => l.startsWith(`made replication slot ${repl.slot} at `)), `the slot is made anew at ${step}:\n${lines.join("\n")}`);
+        if (expect === "made") assert.ok(lines.some((l) => l.startsWith(`made replication slot ${repl.slot} at `)), `the slot is made anew at ${step}:\n${lines.join("\n")}`);
         assert.ok(lines.some((l) => /^caught up public\.items by one poll after the slot was made: it joins the stream at /.test(l)), `caught up by one poll at ${step}:\n${lines.join("\n")}`);
       }
     } finally { await sync.stop(); await store.close(); }
   };
   /** the switch from `was` to `now`, as a start makes it: a write transaction is open while the new publication is made
    *  (by its owner, or by Mason's run for its own) and commits once the run reading it is up */
-  const switchTo = async (was: typeof own, now: typeof own, create: string | null, step: string): Promise<void> => {
+  const switchTo = async (was: typeof own, now: typeof own, create: string | null, step: string, died = false): Promise<void> => {
     const open = spawn("psql", ["-X", "-q", "-v", "ON_ERROR_STOP=1", url], { stdio: ["pipe", "ignore", "pipe"] });
     after(() => { if (open.exitCode === null) open.kill(); });
     let err = "";
@@ -513,18 +516,43 @@ test("a switch of publication on a running project, with a transaction open acro
     const stale = staleReplication(was, now);
     const drop = dropOwnReplication as (...a: unknown[]) => Promise<string[]>;
     if (stale !== null) await drop(parsed.source, stale.drop, null, (stale as { what?: unknown }).what);
-    await run(now, step, async () => {
-      // the run is up and reading (or waiting on the slot it makes for the transaction to end): the transaction commits
+    // the run is up and reading (or waiting on the slot it makes for the transaction to end): the transaction commits
+    const commit = async (): Promise<void> => {
       await new Promise((r) => setTimeout(r, 1_500));
       open.stdin.end(`INSERT INTO items VALUES (${b}, 'last of ${said}'); COMMIT;\n`);
       await exited;
-    });
+    };
+    if (!died) { await run(now, step, { during: commit, expect: "made" }); return; }
+    // THE RUN DIES THE MOMENT ITS SLOT IS MADE (the review of PR 897: a kill -9 there, its catch-up marks not yet
+    // written, left the next start streaming the new slot as the old one, the transaction's changes lost for good): the
+    // run's own hook told of the slot made is where it stops: the sync is stopped there, at once, and nothing after it runs
+    const store = await DuckStore.open(file, (l) => logged.push(l));
+    let stopping: Promise<void> | null = null;
+    const sync: Sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", now, {
+      onReplication: (made) => { if (made) { stopping = sync.stop(); throw new Error("the run died once its slot was made"); } } });
+    const before = logged.length;
+    try {
+      await sync.open();
+      sync.setTables([ITEMS!]);
+      const pass = sync.once().catch((e: unknown) => e);
+      await commit();
+      await pass;
+      await stopping;
+      assert.ok(!logged.slice(before).some((l) => /^caught up /.test(l)), `the run that died caught nothing up:\n${logged.slice(before).join("\n")}`);
+      assert.ok(logged.slice(before).some((l) => l.startsWith(`made replication slot ${now.slot} at `)), `the slot was made before the run died:\n${logged.slice(before).join("\n")}`);
+    } finally { await sync.stop(); await store.close(); }
+    // started again: the slot is there, of the name the record knows — and the table is still caught up by one poll
+    await run(now, `${step}, started again after the run died`, { expect: "caught up" });
   };
   await run(own, "the first sync");
   await switchTo(own, named1, `CREATE PUBLICATION ${named1.publication} FOR TABLE items`, "Mason's own → a named one");
   assert.equal(psql(url, `SELECT count(*) FROM pg_publication WHERE pubname = '${own.publication}'`), "0", "Mason's own publication is dropped with the switch");
   await switchTo(named1, named2, `CREATE PUBLICATION ${named2.publication} FOR TABLE items`, "a named one → another");
   await switchTo(named2, own, null, "a named one → Mason's own");
+  // the same switch, with the run dying the moment its new slot is made: the next start still catches the table up
+  await switchTo(own, named1, null, "Mason's own → a named one, the run dying once its slot is made", true);
+  await switchTo(named1, named2, null, "a named one → another, the run dying once its slot is made", true);
+  await switchTo(named2, own, null, "a named one → Mason's own, the run dying once its slot is made", true);
   // the named ones are their owner's: never dropped
   assert.equal(psql(url, `SELECT string_agg(pubname, ',' ORDER BY pubname) FROM pg_publication`), [named1.publication, own.publication, named2.publication].sort().join(","));
   assert.equal(psql(url, `SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE '${tag}_ps%'`), "1", "one slot, the run's: the one before is gone");
