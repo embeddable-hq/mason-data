@@ -1,11 +1,11 @@
 /**
  * THE USERS PAGE'S "CONNECTS FROM" IN A BROWSER (issue 875; src/web/pages/users.js `connectsChoice`, src/web/app.css):
- * ticking "Only from these addresses" or "From anywhere" moves nothing in its form — the add form's Name, Role,
- * the choice and Add a user, and From…'s popover — at 1280 px and 375 px. The one test of the page that measures
- * geometry, because what it holds is geometry: the page as served (src/web, its app.js run whole) in Chromium, over the
- * server's own state (`runState`), every box of the form measured before and after each toggle. The address field
- * hidden under From anywhere is held out of the tab order and the accessibility tree too. It needs Playwright and
- * its Chromium; on a machine without them it skips, saying so.
+ * ticking "Only from these addresses" or "From anywhere" moves nothing in its form — the add form's Name, Role, the
+ * choice and Add a user, and From…'s popover — at 1280, 1024, 900 and 375 px (the widths web-ui.md walks). The one
+ * test of the page that measures geometry, because what it holds is geometry: the page as served (src/web, its app.js
+ * run whole) in Chromium, over the server's own state (`runState`), every box of the form measured before and after
+ * each toggle. The address field hidden under From anywhere is held out of the tab order and the accessibility tree
+ * too. It needs Playwright and its Chromium; on a machine without them it skips, saying so.
  */
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
@@ -118,7 +118,7 @@ const reachable = (page: Page, input: string): Promise<{ focusable: boolean; hid
   return { focusable, hidden };
 }, input);
 
-for (const width of [1280, 375]) {
+for (const width of [1280, 1024, 900, 375]) {
   test(`the add form moves nothing as Connects from is toggled, at ${width} px (issue 875)`, { skip }, async () => {
     const browser = await (chromium as { launch(): Promise<Browser> }).launch();
     try {
