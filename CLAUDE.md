@@ -310,8 +310,8 @@ every session needs. Write the rule and one sentence of why; the incident, the m
   - Cut any sentence that doesn't help the reader act or understand. A clear label needs no explanation under it.
   - Speak to the interface the reader is using. On the web page, say how to do it on the page, and name a `mason` command or a file only when the page can't do it. In the CLI, name the commands.
 
-  For example, write "Choose where hello can connect from. If you limit it, open sessions from other addresses end at
-  their next query." Not "Where hello connects from, as mason user from hello sets it: the sessions it holds from
+  For example, write "Choose where metabase can connect from. If you limit it, open sessions from other addresses end at
+  their next query." Not "Where metabase connects from, as mason user from metabase sets it: the sessions it holds from
   another address end at their next statement." This file and the code's comments are written tersely. That style is
   for the people building Mason. Never copy it into what a user reads.
 - **Say "sync", never "copy", for what Mason does to a table's data.** A user reads *the first sync*, *the synced
