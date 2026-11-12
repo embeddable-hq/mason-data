@@ -208,9 +208,13 @@ interface Harness {
 
 const yaml = (d: { sql: string; orderBy: string | null }): string => `kind: scheduled\ntarget_lag: 1s\nsql: |\n  ${d.sql}\n${d.orderBy === null ? "" : `order_by: ${d.orderBy}\n`}`;
 const text = { getTypeParser: () => (v: unknown) => v };
+/** a statement's columns and rows; a type a database made (an OID from 16384 on) by what that server's own pg_type names
+ *  it, since Mason sends its catalog's OID and the source its own (issue 861; the oracle's rule, oracle/made-types.ts) */
 const answer = async (c: pg.Client, sql: string): Promise<unknown> => {
   const r = await c.query({ text: sql, rowMode: "array", types: text as never });
-  return { fields: r.fields.map((f) => [f.name, f.dataTypeID]), rows: r.rows };
+  const typeOf = async (oid: number): Promise<number | string> => oid < 16384 ? oid : `type ${String((await c.query({ text: "SELECT n.nspname || '.' || t.typname FROM pg_catalog.pg_type t " +
+    `JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace WHERE t.oid = ${oid}`, rowMode: "array" })).rows[0]?.[0] ?? oid)}`;
+  return { fields: await Promise.all(r.fields.map(async (f) => [f.name, await typeOf(f.dataTypeID)])), rows: r.rows };
 };
 
 async function withHarness(db: string, mode: "poll" | "replication", use: (h: Harness, url: string, source: Source) => Promise<void>): Promise<void> {
