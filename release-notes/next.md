@@ -8,6 +8,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **The Remove button is back on the web page's Tables.** Each added table showed "View events", "Sync now" and then
+  only "…". The button was cut off because its column was too narrow. Now the column fits all three buttons at every
+  window width.
+
 - **A database URL naming a database the server does not have no longer lists every database on that server.** The
   failure of `mason init`, `mason start`, `mason doctor`, `mason tables` and every other command that connects to it
   (and their `--json`) named them all: hundreds on a large
