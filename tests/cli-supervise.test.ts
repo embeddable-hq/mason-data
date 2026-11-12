@@ -61,6 +61,8 @@ fs.writeFileSync(starts, String(n));
 fs.appendFileSync(path.join(home, "ports"), (process.env.MASON_PG_PORT ?? "-") + "\\n");
 if (mode === "fail") { process.stderr.write("mason start: the database refused the password\\n"); process.exit(3); }
 // the synced data cannot be opened again: the disk is still full (src/duck/store.ts openDuck)
+// a start into a disk still full: it cannot write its config, nor a word of why
+if (mode === "silent-crash-then-full" && n === 2) process.exit(1);
 if (mode === "invalidated-then-fail" && n > 1) { process.stdout.write("mason start: Mason could not open the synced data: No space left on device\\n"); process.exit(1); }
 const file = path.join(home, "config.json");
 const write = (c) => { fs.writeFileSync(file + ".tmp", JSON.stringify(c)); fs.renameSync(file + ".tmp", file); };
@@ -75,6 +77,10 @@ const invalidated = () => { process.stdout.write("FATAL ERROR: Mason: " + ${JSON
 if ((mode === "crash-once" && n === 1) || mode === "crash-always") setTimeout(heap, 30);
 else if (mode === "invalidated-always" || (mode === "invalidated-then-fail" && n === 1)) setTimeout(invalidated, 30);
 else if (mode === "killed-once" && n === 1) setTimeout(() => process.kill(process.pid, "SIGKILL"), 30);
+// a run on a full disk: its FATAL line could not be written, so it dies without a word (issue 847); started again, it
+// stays up a moment and ends on its own (exit 0: nothing to restart)
+else if (mode === "silent-crash-once") setTimeout(() => process.exit(n === 1 ? 1 : 0), n === 1 ? 30 : 300);
+else if (mode === "silent-crash-then-full") setTimeout(() => process.exit(n === 1 ? 1 : 0), n === 1 ? 30 : 300);
 else if (mode === "hang") { process.removeAllListeners("SIGTERM"); process.on("SIGTERM", () => {}); setInterval(() => {}, 1000); }   // a blocked main thread: SIGTERM never acted on
 else setInterval(() => {}, 1000);
 `;
@@ -341,4 +347,104 @@ test("mason status says the restarts: how many, and the last one's reason", asyn
   const body = JSON.parse(json.stdout) as { engine: { restarts: unknown } };
   assert.deepEqual(body.engine.restarts, { count: 2, last: { at, why: "it ran out of JavaScript heap (V8: heap out of memory)", upSeconds: 120 } },
     "the one fact the run's /api/state says too (src/cli/supervise.ts restartsFact)");
+});
+
+// ISSUE 847: the disk that holds .mason/ filled. The supervisor's note (dev.log) and its record (restarts.json) threw
+// ENOSPC, the supervisor died leaving the record empty, and nothing restarted the run. Here the disk is full (an ENOSPC
+// on every note and every record, 0 bytes free) from the crash until the supervisor's wait, then there is room
+test("a full disk under .mason/ ends no supervisor: the silent crash said as the disk's, the record left whole, both written once there is room", { timeout: 60_000 }, async () => {
+  const { supervise, restartsFact } = await import(SUPERVISE) as typeof import("../src/cli/supervise.ts");
+  const { replaceFile } = await import("../src/lib/disk-full.ts");
+  const p = project();
+  const record = path.join(p.home, "restarts.json");
+  const earlier = { at: new Date(Date.now() - 3_600_000).toISOString(), reason: "it was killed (SIGKILL: often the system out of memory)", upSeconds: 7 };
+  fs.writeFileSync(record, JSON.stringify({ restarts: [earlier] }));
+  let full = false;
+  const enospc = (): Error => Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" });
+  const seenWhileFull: string[] = [];
+  const code = await supervise({ home: p.home, logFile: p.log,
+    // the run's crash fills the disk; room is made while the supervisor waits to start it again
+    start: (_env, fd) => {
+      const c = spawn(process.execPath, [p.fake, p.home, "silent-crash-once"], { stdio: ["ignore", fd, fd] });
+      c.once("exit", () => { if (startsOf(p.home) === 1) full = true; });
+      return c;
+    },
+    sleep: async () => { seenWhileFull.push(fs.readFileSync(record, "utf8")); full = false; },
+    io: {
+      note: (fd, text) => { if (full) throw enospc(); fs.writeSync(fd, text); },
+      replace: (file, text) => { if (full) throw enospc(); replaceFile(file, text); },
+      freeBytes: () => full ? 0 : 50 * 1024 ** 3,
+    } });
+  assert.equal(code, 0, "the run started again ended on its own: the supervisor stayed up for it");
+  assert.equal(startsOf(p.home), 2, "the run was started again");
+  assert.deepEqual(JSON.parse(seenWhileFull[0]!), { restarts: [earlier] }, "the record a failed write met is left whole, never emptied");
+  const wayOut = "the disk that holds .mason/ is full: free disk there (Mason writes again once there is room, and nothing synced is lost)";
+  const reason = `it exited with code 1, with 0 bytes free where .mason/ is: ${wayOut}`;
+  const after = JSON.parse(fs.readFileSync(record, "utf8")) as { restarts: Array<{ reason: string }> };
+  assert.deepEqual(after.restarts.map((r) => r.reason), [earlier.reason, reason], "the restart it missed is written once there is room");
+  const fact = restartsFact(p.home);
+  assert.ok("count" in fact && fact.count === 2 && fact.last?.why === reason, `mason status reads the record: ${JSON.stringify(fact)}`);
+  const notes = fs.readFileSync(p.log, "utf8").split("\n").filter((l) => l.startsWith("mason supervisor: "));
+  assert.deepEqual(notes, [
+    `mason supervisor: ${p.log} could not be written (ENOSPC: no space left on device, write): ${wayOut}; the notes after this one were held until it could be`,
+    `mason supervisor: the run stopped (${reason}) after 0 s: starting it again in 1 s (mason status shows each restart); ${record} could not be written ` +
+      `(ENOSPC: no space left on device, write): ${wayOut}, so mason status does not show this restart until it is (tried again as the run starts again, and as the supervisor ends)`,
+    "mason supervisor: restarts.json is written now, with the restart(s) it missed",
+  ], "why the notes were late, then each note held, in order");
+});
+
+test("a run started again into a disk still full is waited out, never given up on: started once there is room, a stop ending the wait", { timeout: 60_000 }, async () => {
+  const { supervise, ROOM_BYTES } = await import(SUPERVISE) as typeof import("../src/cli/supervise.ts");
+  const p = project();
+  let full = false;
+  let sleeps = 0;
+  const enospc = (): Error => Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" });
+  const code = await supervise({ home: p.home, logFile: p.log,
+    start: (_env, fd) => {
+      const c = spawn(process.execPath, [p.fake, p.home, "silent-crash-then-full"], { stdio: ["ignore", fd, fd] });
+      c.once("exit", () => { if (startsOf(p.home) === 1) full = true; });
+      return c;
+    },
+    // the wait before the restart, then the waits for room: the second of those finds it
+    sleep: async () => { if (++sleeps === 3) full = false; },
+    io: {
+      note: (fd, text) => { if (full) throw enospc(); fs.writeSync(fd, text); },
+      replace: (file, text) => { if (full) throw enospc(); fs.writeFileSync(file, text); },
+      freeBytes: () => full ? 4096 : ROOM_BYTES,
+    } });
+  assert.equal(code, 0, "the run started once there was room ended on its own");
+  assert.equal(startsOf(p.home), 3, "the crash, the start into the full disk, the start once there was room");
+  assert.equal((JSON.parse(fs.readFileSync(path.join(p.home, "restarts.json"), "utf8")) as { restarts: unknown[] }).restarts.length, 1,
+    "the crash's restart, recorded once there was room");
+  const notes = fs.readFileSync(p.log, "utf8").split("\n").filter((l) => l.startsWith("mason supervisor: "));
+  assert.match(notes.join("\n"), /the run started again did not get ready \(it exited with code 1, with 4096 bytes free where \.mason\/ is: the disk that holds \.mason\/ is full: free disk there .*\): it is started again once 8 MiB are free there, looked at every 10 s \(mason stop stops the wait\)\nmason supervisor: 8 MiB are free where .* is: starting the run again/);
+  // a stop while it waits: the wait ends, nothing is started
+  const q = project();
+  const stopping = supervise({ home: q.home, logFile: q.log,
+    start: (_env, fd) => spawn(process.execPath, [q.fake, q.home, "silent-crash-then-full"], { stdio: ["ignore", fd, fd] }),
+    sleep: () => new Promise((r) => setTimeout(r, 50)),
+    io: { freeBytes: () => 0 } });
+  await until("the wait for room", () => fs.existsSync(q.log) && fs.readFileSync(q.log, "utf8").includes("mason stop stops the wait"));
+  const cfg = JSON.parse(fs.readFileSync(path.join(q.home, "config.json"), "utf8")) as { running: unknown };
+  cfg.running = null;
+  fs.writeFileSync(path.join(q.home, "config.json"), JSON.stringify(cfg));
+  assert.equal(await stopping, 1, "a config that no longer says it runs ends the wait");
+  assert.equal(startsOf(q.home), 2);
+});
+
+test("mason status reads a restarts record it cannot parse (an older Mason left it empty on a full disk) as unreadable, and goes on", async () => {
+  const p = project();
+  const root = path.dirname(p.home);
+  fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
+  fs.writeFileSync(path.join(p.home, "config.json"), JSON.stringify({ name: "sup", source: "postgres://mason:secret@127.0.0.1:1/shop", folder: "mason", remote: false,
+    apiKey: "k".repeat(48), sourceServer: null, running: null, lastRun: null }), { mode: 0o600 });
+  fs.writeFileSync(path.join(p.home, "duck.db"), "");
+  fs.writeFileSync(path.join(p.home, "restarts.json"), "");
+  const human = await runMason(root, ["status"], matrixEnv());
+  assert.equal(human.code, 0, human.stderr);
+  assert.match(human.stdout, /^ {2}Restarts\s+.*restarts\.json is unreadable \(Unexpected end of JSON input\): its supervisor writes it again at the next restart$/m);
+  assert.match(human.stdout, /^Next:/m, "the rest of the status is said");
+  const json = await runMason(root, ["status", "--json"], matrixEnv());
+  assert.equal(json.code, 0, json.stderr);
+  assert.match((JSON.parse(json.stdout) as { engine: { restarts: { error: string } } }).engine.restarts.error, /is unreadable/);
 });

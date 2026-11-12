@@ -34,6 +34,12 @@ CLI lacks).
   up says so and exits 0. The run's terminal is `dev.log` in the project's `.mason/` (`mason logs --start`); `mason logs`
   is the run's log, `mason.log`. The run is kept up by a supervisor (src/cli/supervise.ts) that starts it again after a
   crash and records each restart (`mason status` `engine.restarts`).
+  **A full disk under `.mason/` ends neither** (issue 847: the log stream's unhandled ENOSPC killed the run, and the
+  supervisor's record write killed it, leaving `restarts.json` empty): the run's log and terminal say a failed write
+  once and go on (src/cli/run-output.ts), a file Mason rewrites is replaced whole or left as it was (`replaceFile`,
+  src/lib/disk-full.ts: the config, the record, the users), the supervisor holds a note and a record it could not write
+  until it can and starts a run that could not get ready on a full disk again once there is room (`ROOM_BYTES`), and a
+  write under `.mason/` that failed for disk space is said with ONE way out (`withDiskWayOut`).
   **A log file has ONE reader, which masks as it reads** (src/lib/log-read.ts `LogReader`; issue 621: an older Mason's lines held the source's password in a `password=` value): `mason logs` in
   every form, `mason start`'s watch of `dev.log` and the supervisor's scan read through it, and the files are named only
   there (`logPath`); it releases a line only whole, whatever its chunks, holds nothing of a line between them

@@ -519,7 +519,13 @@ export async function events(ctx: RunContext, q: URLSearchParams): Promise<{ eve
   const since = sinceText === null ? undefined : timeParam("since", sinceText, Date.now());
   const o = { limit, failed: q.get("failed") === "1", ...(since === undefined ? {} : { since }) };
   const found = await ctx.duck.events.recent(o);
-  return { events: withRestarts(found, ctx.duck.restarts(), { ...o, days: ctx.duck.events.days }), keptDays: ctx.duck.events.days };
+  // a record of restarts that cannot be read (issue 847: one an older Mason left empty on a full disk) costs the sync's
+  // events nothing: none of it is merged, and why it is unreadable is said where the restarts are (`restartsFact`,
+  // /api/state engine.restarts, mason status's Restarts line)
+  let restarts: Restart[] = [];
+  try { restarts = ctx.duck.restarts(); }
+  catch (e) { if (!(e instanceof SyntaxError) && (e as NodeJS.ErrnoException).code === undefined) throw e; }
+  return { events: withRestarts(found, restarts, { ...o, days: ctx.duck.events.days }), keptDays: ctx.duck.events.days };
 }
 
 /** The sources file as it is on disk now (src/cli/source-edit.ts sourceToEdit) — and the database it names NOW must be

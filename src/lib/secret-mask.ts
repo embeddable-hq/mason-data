@@ -17,6 +17,7 @@
  * and no branch reads these words at all: a decision reads `messageOf`, the raw words, which are never shown.
  * tests/secret-mask.test.ts holds both rules over src/duck/sync.ts and src/duck/stream.ts.
  */
+import { withDiskWayOut } from "./disk-full.ts";
 
 /** What a masked value reads as. */
 export const MASKED = "****";
@@ -125,9 +126,10 @@ export function errorCode(e: unknown): string | null {
 }
 
 /** A CAUGHT ERROR'S WORDS, AS MASON REPEATS THEM (a log line, an event, a table's `error`, an answer): its message (or,
- *  `stack`, its stack), every `password=` value masked. Never matched by a branch: that reads `messageOf`. */
+ *  `stack`, its stack), every `password=` value masked, and a write under `.mason/` that failed for disk space given the
+ *  disk's way out (src/lib/disk-full.ts, issue 847). Never matched by a branch: that reads `messageOf`. */
 export function errorText(e: unknown, o: { stack?: boolean } = {}): string {
-  return maskPasswordKeyword(e instanceof Error ? (o.stack === true ? e.stack ?? e.message : e.message) : String(e));
+  return withDiskWayOut(maskPasswordKeyword(e instanceof Error ? (o.stack === true ? e.stack ?? e.message : e.message) : String(e)));
 }
 
 /** A CAUGHT ERROR'S RAW WORDS, FOR A DECISION ALONE (which failure it is: a wider numeric, a transaction already ended):

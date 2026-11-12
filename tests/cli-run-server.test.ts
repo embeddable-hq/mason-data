@@ -112,6 +112,7 @@ const eventAsks: Array<{ limit: number; since?: string; failed?: boolean }> = []
 const syncEvent = { at: new Date(Date.now() - 120_000).toISOString(), kind: "poll_failed" as const, failed: true, table: "public.customers", message: "the poll failed, and is tried again at the next one" };
 const events = { days: 7, recent: async (o: { limit: number; since?: string; failed?: boolean }) => { eventAsks.push(o); return [syncEvent]; } };
 let restarts: Array<{ at: string; reason: string; upSeconds: number }> = [];
+let restartsUnreadable = false;
 // the disk under the copy, as the sync measures it (src/duck/sync.ts diskStatus)
 let disk: { path: string; freeBytes: number | null; projectedBytes: number | null; error?: string } = { path: "/data", freeBytes: 75 * 2 ** 30, projectedBytes: null };
 // usage over time (src/duck/usage.ts), as UsageSampler answers it
@@ -130,7 +131,7 @@ const ctx: RunContext = {
   readSource: () => chosen === null ? { message: "no folder chosen", code: "bad_source" } : readSource(chosen, path.join(root, "app"), {}),
   runUrl: "postgres://me@localhost:5432/app", listener,
   logs: runLog,
-  duck: { copies: () => copies, file: duckFile, poll: pollNow, stream: async () => null, disk: () => disk, requests, events, usage, restarts: () => restarts },
+  duck: { copies: () => copies, file: duckFile, poll: pollNow, stream: async () => null, disk: () => disk, requests, events, usage, restarts: () => { if (restartsUnreadable) throw new SyntaxError("Unexpected end of JSON input"); return restarts; } },
 };
 const server = createRunServer(ctx);
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
@@ -766,7 +767,7 @@ test("the run itself in /api/state: its version, since when it is up, and its su
   assert.deepEqual(engine({ ...ctx, duck: { ...ctx.duck, restarts: () => two } }).restarts,
     { count: 2, last: { at: "2026-10-28T09:00:00.000Z", why: "it ran out of JavaScript heap (V8: heap out of memory)", upSeconds: 120 } });
   const unreadable = engine({ ...ctx, duck: { ...ctx.duck, restarts: () => { throw new Error("Unexpected end of JSON input"); } } }).restarts as { error: string };
-  assert.equal(unreadable.error, `${path.join(root, "app", ".mason", "restarts.json")} could not be read: Unexpected end of JSON input`, "said, never taken as none");
+  assert.equal(unreadable.error, `${path.join(root, "app", ".mason", "restarts.json")} is unreadable (Unexpected end of JSON input): its supervisor writes it again at the next restart`, "said, never taken as none");
   // mason status's line is the same fact, rendered (src/cli/commands.ts restartsRows)
   const { restartsRows } = await import("../src/cli/commands.ts") as unknown as { restartsRows: (r: unknown) => Array<[string, string]> };
   assert.match(restartsRows(engine({ ...ctx, duck: { ...ctx.duck, restarts: () => two } }).restarts)[0]![1], /^2, the last .* ago: it ran out of JavaScript heap \(V8: heap out of memory\), after 120 s up/);
@@ -807,6 +808,23 @@ test("the sync's events: /api/events passes its filters to the record, merges th
     for (const zero of ["0s", "0m", "0d"]) assert.equal((await get(`/api/events?until=${zero}`)).status, 200, `${zero}: an age of zero is now`);
     assert.ok(Math.abs(Date.parse((eventAsks[0] as { since: string }).since) - (Date.now() - 7_200_000)) < 60_000, "an age is that long ago");
   } finally { restarts = []; }
+});
+
+// ISSUE 847: a supervisor on a full disk left restarts.json empty, and every /api/events (mason status's recent errors,
+// mason logs --events) failed on it
+test("an unreadable restarts record costs /api/events nothing: the sync's events answered, and /api/state says the record is unreadable", async () => {
+  const get = async (p: string): Promise<{ status: number; body: Record<string, unknown> }> => {
+    const r = await fetch(`http://127.0.0.1:${ctx.port}${p}`, { headers: { Authorization: "Bearer t0ken-of-this-run" } });
+    return { status: r.status, body: await r.json() as Record<string, unknown> };
+  };
+  restartsUnreadable = true;
+  try {
+    const all = await get("/api/events");
+    assert.equal(all.status, 200, JSON.stringify(all.body));
+    assert.deepEqual(all.body, { keptDays: 7, events: [syncEvent] });
+    const state = await get("/api/state");
+    assert.match((state.body.engine as { restarts: { error: string } }).restarts.error, /restarts\.json is unreadable \(Unexpected end of JSON input\)/);
+  } finally { restartsUnreadable = false; }
 });
 
 test("the state says how each copy is kept current, as the sync's state has it (src/duck/sync.ts KeptCurrent); a table the sync holds none of says nothing", async () => {
