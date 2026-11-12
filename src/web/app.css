@@ -154,8 +154,10 @@ main, #poll { max-width: var(--width); margin: 0 auto; padding-left: var(--gutte
 .nav a[aria-current="page"] { color: var(--fg); background: var(--current); font-weight: 600; box-shadow: inset 3px 0 0 var(--accent); }
 .nav a:focus-visible { outline-offset: -2px; border-radius: 0; }
 .nav .group { margin-top: var(--space-4); }
-/* the host's own links (MASON_UI_NAV_LINKS): a group of their own under a mortar course, no heading of Mason's */
-.nav .host-links { padding-top: var(--space-3); border-top: 1px solid var(--line); }
+/* the host's own links (MASON_UI_NAV_LINKS): a group of their own under a mortar course, no heading of Mason's, laid out
+   as every other group. Its class is its own: the host view's row of links is `.host-links`, a flex row that wrapped
+   this list beside its gap and cut its rows short when the two shared that name (issue 885) */
+.nav .host-nav { padding-top: var(--space-3); border-top: 1px solid var(--line); }
 .nav .group-title { margin: 0 0 var(--space-1); padding: 0 var(--space-4); font-size: var(--text-xs); font-weight: 700; color: var(--fg); text-transform: uppercase; letter-spacing: 0.06em; }
 .nav .label { overflow: hidden; text-overflow: ellipsis; }
 /* an icon: Lucide's 24-unit drawing at 16 px, its stroke a little lighter than its 2, in the link's colour */

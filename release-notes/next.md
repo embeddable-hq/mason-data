@@ -11,6 +11,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **The Remove button is back on the web page's Tables.** Each added table showed "View events", "Sync now" and then
   only "…". The button was cut off because its column was too narrow. Now the column fits all three buttons at every
   window width.
+- **A site's own links in the web page's sidebar now line up with the page's own.** These are the links set by
+  `MASON_UI_NAV_LINKS`. In a narrow window their icons sat left of the others, and the current one's highlight was cut
+  short. In a wide window and on a phone, their rows were shorter than the others. Now they look the same as the page's
+  own links at every width.
 
 - **A database URL naming a database the server does not have no longer lists every database on that server.** The
   failure of `mason init`, `mason start`, `mason doctor`, `mason tables` and every other command that connects to it
