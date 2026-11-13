@@ -278,10 +278,21 @@ paths:
     page carried `__mason_v` as a column (42703, PR for issue 130). **A constant path has one route however it is spelled**
     (`Rewriter.jsonPath`, `constRead`; issue 130): `'{a,b}'`, `ARRAY['a', 'b']`, either cast to `text[]`, `'a'::text`, the
     json_extract_path family, read from the analysis (`Typed.text`, `Typed.textArray`, the Const's own bytes), never
-    the statement's text, so array_in's reading of a literal is Postgres's own. A path the Parse cannot see (a parameter,
-    a row's element) is computed; a text[] parameter is bound as the JSON Postgres read it to (`readParameters`,
-    `from_json`); a cast that changes the text (`varchar(n)[]`, `char(n)[]`, `name[]`) is refused, `json-path-type`.
-    The oracle's `jsonPathCases` holds every spelling on both types;
+    the statement's text, so array_in's reading of a literal is Postgres's own. **A path bound as a parameter is read as
+    its value** (issues 465, 466: Metabase binds every JSON field's path, `col #>> array[?]::text[]`; a grouped field
+    was ×18 of Postgres, a sync's nested fingerprint ×45–63): the Parse's plan computes it and names the parameters
+    (`PlannedSql.pathParams`, `foldParam`: a text or varchar key or element, a text[] path, an int2 or int4 index, bare or
+    cast to its own type with no length), and each Execute runs the statement planned again with their values as
+    Postgres read them (`Session.pathsBound`, EXPLAIN too), kept by those values and each folded read guarded by them
+    (`folded`: `CASE WHEN $n::varchar = '<value>' THEN <the read> ELSE <the read as at the Parse> END`, so a value it was
+    not planned for is read by the function, never another path's; never DuckDB's `error()` there, which DuckDB holds
+    volatile and refuses as a window's key; the guard also keeps the parameter in the SQL, which DuckDB numbers by the
+    ones it meets). A folded read is never read from a stored column nor counted as a read by the policy (`keptRead`)
+    until a stored path read under a late select list or a keyed GROUP BY names its column (issue 919). A NULL value,
+    another type and a row's element stay computed; a text[] parameter is bound as the JSON Postgres read it to (`readParameters`, `from_json`); a cast
+    that changes the text (`varchar(n)[]`, `char(n)[]`, `name[]`) is refused, `json-path-type`. The oracle's
+    `jsonPathCases` holds every spelling on both types, its setting scripts every bound one, `tests/duck-wire.test.ts`
+    "a json path bound as a parameter …" the hops;
   - **the JSON paths statements keep reading are stored as columns** (`.claude/rules/duck-stored-json.md`), which answers a number's digits and
     the rest from a plain column. ("The executor worker", "A `->>` is DuckDB's own read")
 - **A jsonb is sorted, grouped and compared by ONE key, `jsonbKey` (src/duck/jsonb-order.ts), never by its text**:

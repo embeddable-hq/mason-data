@@ -365,6 +365,10 @@ const KEY_COUNTS: Shape[] = [
   { name: "native json: an @> filter of a string", sql: "SELECT count(*) FROM orders WHERE meta @> '{\"status\": \"paid\"}'" },
   { name: "native json: a -> read's nullness", sql: "SELECT count(*) FROM orders WHERE (meta -> 'status') IS NOT NULL" },
   { name: "native json: a -> read of a string or a JSON null", sql: "SELECT meta -> 'status' FROM orders LIMIT 100" },
+  // a JSON field's path a BI tool binds (issues 465, 466: Metabase's `col #>> array[?]::text[]`), planned again with its
+  // value at the Execute (src/api/postgres/server.ts pathsBound): the read its literal is, guarded by the value
+  { name: "native json: a field Metabase binds, grouped", sql: "SELECT (\"public\".\"orders\".\"meta\" #>> array[$1]::text[])::text AS \"status\", count(*) AS \"count\" FROM \"public\".\"orders\" GROUP BY 1 ORDER BY 1", values: ["status"] },
+  { name: "native json: a ->> of a bound key", sql: "SELECT meta ->> $1 FROM orders LIMIT 100", values: ["status"] },
 ];
 
 const SHAPES: Shape[] = [...REWRITTEN, ...KEY_COUNTS, ...HELD_BI.map((name) => {
@@ -754,7 +758,7 @@ const said = (ss: readonly Scan[]): string => ss.map((s) => `${s.rowGroups} of $
 for (const shape of KEY_COUNTS) {
   const rewritten = !shape.name.endsWith("(not rewritten)");
   test(`a count of distinct ${rewritten ? "keys aggregates once, sent as count(x)" : "non-keys keeps its DISTINCT and its two aggregates"}: ${shape.name}`, async () => {
-    const { plan, sent } = await explained(shape.sql);
+    const { plan, sent } = await explained(shape.sql, undefined, undefined, shape.values);
     const aggregates = skeletonOf(plan, [], sent).plan.filter((l) => /^\s*(HASH_GROUP_BY|PERFECT_HASH_GROUP_BY|UNGROUPED_AGGREGATE)\b/.test(l)).length;
     if (rewritten) {
       assert.doesNotMatch(sent, /DISTINCT/i, `${shape.name}: sent with its DISTINCT`);
@@ -804,11 +808,11 @@ for (const name of ["LEFT lateral preview: jsonb_each, LIMIT 100 OFFSET 0", "LEF
 /** how many rows a statement handed each Mason function, run through the listener and counted on the thread the
  *  functions run on (src/duck/executor.ts functionRows): the rows, not the calls, so neither DuckDB's chunking nor
  *  its partitioning nor the threads move it */
-async function rowsOf(sql: string, on?: Where): Promise<Map<string, number>> {
+async function rowsOf(sql: string, on?: Where, values?: string[]): Promise<Map<string, number>> {
   const { c, store } = await target(on);
   await c.query("SET TimeZone = 'UTC'");
   const before = await store.functionRows();
-  await c.query(sql);
+  await c.query(sql, values);
   const after = await store.functionRows();
   return new Map([...after].map(([k, n]) => [k, n - (before.get(k) ?? 0)]));
 }
@@ -817,8 +821,9 @@ async function rowsOf(sql: string, on?: Where): Promise<Map<string, number>> {
 // own SQL: over the million orders, no row reaches any Mason function (each vector would be a hop to the executor's loop
 // that every other session's statement waits behind)
 test("a native json filter or read hands no row to any Mason function", async (t) => {
-  for (const name of ["native json: an @> filter of a string", "native json: a -> read's nullness", "native json: a -> read of a string or a JSON null"]) {
-    const rows = [...(await rowsOf(sqlOf(name))).values()].reduce((a, b) => a + b, 0);
+  for (const name of ["native json: an @> filter of a string", "native json: a -> read's nullness", "native json: a -> read of a string or a JSON null",
+    "native json: a field Metabase binds, grouped", "native json: a ->> of a bound key"]) {
+    const rows = [...(await rowsOf(sqlOf(name), undefined, SHAPES.find((s) => s.name === name)!.values)).values()].reduce((a, b) => a + b, 0);
     t.diagnostic(`${name}: ${rows} rows handed to Mason functions`);
     assert.equal(rows, 0, `${name}: ${rows} rows handed to Mason functions`);
   }
