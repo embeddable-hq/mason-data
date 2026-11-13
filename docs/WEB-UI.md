@@ -154,7 +154,8 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   `mason add <table>` does; **Columns…** opens a form to tick the columns to sync; **Name its key…** does the same for a
   table with no primary key.
 - **Users** (`#users`), in this order: the list of users, right under the title (and its read-only line), then the add
-  form with the card of a user just added beside it, then Connect, so a card that appears moves nothing above it. A person arriving on the page — its address opened, a
+  box (the add form; and, where it may be opened, a Temporary public login) with the card of what it made beside it,
+  then Connect, so a card that appears moves nothing above it. A person arriving on the page — its address opened, a
   link of the sidebar or another followed — starts with the cursor in the form's **Name**, once the form is written;
   never at a poll's write after that, never at a hash of the page already shown (a tab of the list, a range), never taken from what the person focused since they arrived, never on a touch
   screen (`(pointer: coarse)`, where it would open the keyboard over the page), and not on a read-only page, which has
@@ -187,21 +188,31 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   and the URL with `<user>:<password>` in place, with **Copy** — as `mason status` says it, with no psql line (the URL
   is the same thing, pasted after `psql`). No user's row carries a URL:
   the card shown once when a user is added is the only place its password is copied.
-- **Users**, Connect, Share over the internet (for testing) (under `mason start` only: never under `mason serve`, whose run
-  refuses it, and never on a read-only page, `pageReadOnly`, whatever `MASON_UI_READ_ONLY_ALLOW` still allows):
-  `mason share` from the page, for a tool that cannot reach this machine. A box inside Connect: a **Role** choice where
-  `mason/roles.yml` offers more than one role a share may read as (`GET /api/share/choices`, read beside the state
-  while the box is offered, as `mason share --role`), and **Share**. The box says first that it opens a temporary
-  public address (each Role option says what it reads), so the click is the person's yes: `POST /api/share` `{ from: "page",
-  confirmed: true, role? }` opens the same share the command opens (src/cli/page-share.ts): the run makes the password
-  and starts the tunnel's client. While on, the box shows how long it has been shared, the URL, the share's own
-  **Login** (never a `mason user`) and its **Password**, each with **Copy**, "Shown once" beside the password's Copy;
-  "Live until you stop it", when a free share ends sooner (within about an hour), and **Stop sharing** (`DELETE
-  /api/share/<user>`). The password is in that one answer alone, kept in the page's memory: after a reload the box
-  shows the host, port and login, and says the password was shown once. The page holds the share by a beat (`POST
+- **Users**, the add box's **Temporary public login** (under `mason start` only: never under `mason serve`, whose run
+  refuses it, and never on a read-only page, `pageReadOnly`, whatever `MASON_UI_READ_ONLY_ALLOW` still allows; there
+  the box is the plain add form, with no segments): `mason share` from the page, for a tool in the cloud that cannot
+  reach this machine. It is the same flow as adding a user with another job, so it is the box's second kind: two
+  segments on top of the box, **New user** (the form above) and **Temporary public login**, a segmented control as the
+  time range's, the choice the page's own (not the hash: a form's, not a view's). The two panes sit in one grid cell,
+  the one not chosen unseen in its place, so the box keeps the height of the taller and a choice moves nothing on the
+  page; each pane is a part of its own (`add-user-box`, `add-share-box`), so a choice rewrites neither, and a name being
+  typed stays. The pane: "For a tool in the cloud that can't reach this machine. Opens a public address with a login
+  of its own, until you stop it.", a **Role** choice where `mason/roles.yml` offers more than one role a share may
+  read as (`GET /api/share/choices`, read beside the state while it is offered, as `mason share --role`; each option
+  says what it reads), and **Open a public login**, held disabled while one opens or is open (one at a time). The click
+  is the person's yes: `POST /api/share` `{ from: "page", confirmed: true, role? }` opens the same share the command
+  opens (src/cli/page-share.ts): the run makes the password and starts the tunnel's client. What it opened is a card
+  in the place and style of New user added, titled **Temporary public login**: URL, **Login** (its own, never a
+  `mason user`, and never listed or counted among the users) and **Password**, the URL and the Password each with
+  **Copy**, "Shown once" beside the password's Copy; how long it has been public and what it reads; "Live until you
+  stop it", when a free one ends sooner (within about an hour) and that it ends when the page closes; and **Stop**
+  (`DELETE /api/share/<user>`). The password is in that one answer alone, kept in the page's memory: after a reload
+  the card shows the host, port and login, and says the password was shown once. The page holds it by a beat (`POST
   /api/share/<user>/beat`, every 15 s, hidden or not): two minutes without one (the tab closed, crashed or asleep) and
-  the share, its sessions and the tunnel's client end. How it ended (Stop sharing, the tunnel dropped) is said in the
-  box from `/api/state` `shareEnded`, with Share again under it; a refusal is the run's Failure.
+  it, its sessions and the tunnel's client end. How it ended (Stop, the tunnel dropped, from `/api/state`
+  `shareEnded`) is said in the card's place, and a refusal there is the run's Failure; the pane is the form again.
+  Connect says, where it is offered, that a tool in the cloud that can't reach this machine uses Temporary public
+  login in the box above.
 - **Users**, the list: two tabs over the table, a segmented control as the time range's, each with its count —
   **Active** (the default, `#users`: the users not removed, a disabled one among them with its Disabled status) and
   **Removed** (`#users?show=removed`: the removed ones, muted, with Queries alone). The tab is the hash's

@@ -178,21 +178,23 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
  * prints): the host, port, database and sslmode — what a BI tool's form asks for, each with Copy — then the URL with
  * `<user>:<password>` as placeholders. No psql line (issue 874): the URL is the same thing, pasted after `psql`. None of it is a user's: a row carries what is (its name, its
  * state), and a user's password is copied only from the card shown once when it is added (`renderAdded`). "" when the
- * run did not say.
+ * run did not say. `shareTip`: where the page may open a temporary public login (`shareable`), a tip pointing to it in
+ * the add box, for a tool that can't reach this machine.
  */
-export function renderUsersConnect(pg, served = false, share = "") {
+export function renderUsersConnect(pg, served = false, shareTip = false) {
   if (!pg || typeof pg.shown !== "string") return "";
   const rows = [["Host", pg.host, "users-connect-host"], ["Port", String(pg.port), "users-connect-port"], ["Database", pg.database, "users-connect-database"],
     ["SSL mode", pg.sslmode ?? "disable", "users-connect-sslmode"], ["URL", pg.shown, "users-connect-url"]];
   return `<div class="connect"><p class="connect-title">Connect</p>` +
     `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v)}</dd>`).join("")}</dl>` +
     serverHostNote(pg, served) +
-    `<p class="tip"><span>Put a user's name and password in place of ${code("<user>")} and ${code("<password>")}. The password is shown only once, when you add the user. If it's lost, remove the user and add it again.</span></p>${share}</div>`;
+    `<p class="tip"><span>Put a user's name and password in place of ${code("<user>")} and ${code("<password>")}. The password is shown only once, when you add the user. If it's lost, remove the user and add it again.</span></p>` +
+    (shareTip ? `<p class="tip">A tool in the cloud that can't reach this machine: choose Temporary public login in the box above.</p>` : "") + `</div>`;
 }
 
-// ------------------------------------------------------------------ Share over the internet (mason share, from the page)
+// ------------------------------------------------------------------ Temporary public login (mason share, from the page)
 
-/** The page's share before anything was asked: what `renderShare` and the page's model start from. */
+/** The page's share before anything was asked: what the share's renderers and the page's model start from. */
 export const NO_SHARE = Object.freeze({ phase: "none", role: null, opened: null, ended: null, failure: null });
 
 /** The share the page holds, as `/api/state` `share` lists it (`from: "page"`), or null. */
@@ -202,48 +204,82 @@ export const pageShareOf = (s) => s?.share?.shares?.find((x) => x.from === "page
  *  (`served`: its run refuses `/api/share`) and never on a read-only page (`pageReadOnly`, whatever it still allows). */
 export const shareable = (s) => s !== undefined && s !== null && s.served !== true && (s.pageReadOnly ?? null) === null;
 
-/** How a share ends, beside "Live until you stop it": a free share's hour, and the page closing (its beats stop). */
+/** How a temporary public login ends, beside "Live until you stop it": a free one's hour, and the page closing (its
+ *  beats stop). */
 const endsLine = (endsAt, now) => (endsAt === null || endsAt === undefined ? ""
-  : ` A free share ends sooner, within about an hour, at ${new Date(endsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} (in about ${Math.max(0, Math.round((Date.parse(endsAt) - now) / 60_000))} minutes). Then press Share again for a new address and password.`) +
+  : ` A free one ends sooner, within about an hour, at ${new Date(endsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} (in about ${Math.max(0, Math.round((Date.parse(endsAt) - now) / 60_000))} minutes). Then open a new one for a new address and password.`) +
   " It also ends within two minutes of closing this page.";
 
+/** The two things the add box creates, its segments' words. */
+const KINDS = [["user", "New user"], ["share", "Temporary public login"]];
+
 /**
- * SHARE OVER THE INTERNET (FOR TESTING), a box in Connect (src/cli/page-share.ts; `mason share`'s, from the page): a pure
- * function of the state (`s`), the page's own model (`m`: `phase` none · opening · open · ended · refused, the role
- * chosen, the one answer that opened it — the password is in it alone — and the failure), and the roles a share may
- * read as (`choices`: the read of `/api/share/choices`, undefined before it). A role choice where the roles file offers
- * more than one, then Share: the click is the person's yes to a public address, said above it. While on: the URL, its
- * own login and its password, each with Copy (the password shown once, never a mason user's), Live until you stop it,
- * and Stop sharing. Nothing under `mason serve` or on a read-only page (`shareable`).
+ * WHAT THE ADD BOX CREATES: two segments on the box, a segmented control as the time range's — "New user" (the add
+ * form) and "Temporary public login" (`mason share`, from the page) — each a button, the one chosen pressed. Written only
+ * where the page may open a share (`shareable`); elsewhere the box is the plain add form. The choice is the page's own
+ * (`m.addKind`), never the hash: it is a form's, not a view's. The stylesheet shows the pane chosen and keeps the
+ * other's place, unseen (both in one grid cell), so the box keeps the height of the taller and nothing below moves.
  */
-export function renderShare(s, m = NO_SHARE, now = Date.now(), choices = undefined) {
+export function renderAddKinds(kind = "user") {
+  return `<div class="range add-kinds" role="group" aria-label="What to create">${KINDS.map(([k, label]) =>
+    `<button type="button" data-add-kind="${k}" aria-pressed="${k === kind ? "true" : "false"}">${esc(label)}</button>`).join("")}</div>`;
+}
+
+/**
+ * THE TEMPORARY PUBLIC LOGIN'S PANE in the add box (src/cli/page-share.ts; `mason share`'s, from the page): what it is
+ * for, in two sentences, then a Role choice where the roles a share may read as (`choices`: the read of
+ * `/api/share/choices`, undefined before it) are more than one, and "Open a public login" — the click is the person's
+ * yes to a public address, said above it. Written the same in every phase but while one opens or is open, when the
+ * button is held, disabled (one at a time); what it opened, how it ended or why it was refused is the card's
+ * (`renderShareCard`), where a user just added is shown. The roles unread: the button disabled, "Reading the roles…" beside
+ * it; refused (a roles file that cannot be read, no role a share may read as): the run's Failure. "" where the page may
+ * not open one (`shareable`).
+ */
+export function renderSharePane(s, m = NO_SHARE, choices = undefined) {
   if (!shareable(s)) return "";
-  const head = `<p class="share-title">Share over the internet (for testing)</p>`;
+  const body = choices?.body ?? null;
+  const list = Array.isArray(body?.choices) ? body.choices : null;
+  const role = list === null || list.length < 2 ? "" : `<span class="role-field"><label for="share-role">Role</label> <select id="share-role">${list.map((c) => `<option value="${esc(c.role)}"${c.role === chosenRole(m, list) ? " selected" : ""}>${esc(`${c.role}: ${c.reads}${c.default ? " (default)" : ""}`)}</option>`).join("")}</select></span> `;
+  const failure = list === null && choices?.failure ? renderFailure(choices.failure) : "";
+  const busy = m.phase === "opening" || (pageShareOf(s) !== null && m.phase !== "ended");
+  const title = list === null ? "" : busy ? "One is open: stop it to open another" : "";
+  return `<div class="share-pane"><p class="tip">For a tool in the cloud that can't reach this machine. Opens a public address with a login of its own, until you stop it.</p>` +
+    failure + `<p class="share-ask">${role}${button("Open a public login", { shareOpen: "" }, "primary", { disabled: list === null || busy, title })}` +
+    `${list === null && !failure ? ` <span class="dim">Reading the roles…</span>` : ""}</p></div>`;
+}
+
+/**
+ * THE TEMPORARY PUBLIC LOGIN, once asked: a card in the place and style of "New user added" (`renderAddUser`'s card,
+ * `.user-added`), titled "Temporary public login" on its top edge. While it opens: that it is opening. Open, with the
+ * answer that opened it (`m.opened`, the page's memory alone): URL, Login and Password, the URL and the Password each with
+ * Copy, "Shown once" beside the password's Copy — the login its own, never a user's; reloaded (no answer): its host,
+ * port and login, and that the password was shown once. Then what it reads and for how long, "Live until you stop it"
+ * with when a free one ends and that it ends when this page closes, and Stop (`DELETE /api/share/<user>`). Ended:
+ * how, from the run's `shareEnded` or the page's Stop; refused: the run's Failure. "" before anything was asked, and
+ * where the page may not open one (`shareable`).
+ */
+export function renderShareCard(s, m = NO_SHARE, now = Date.now()) {
+  if (!shareable(s)) return "";
+  const head = `<p class="added-title">Temporary public login</p>`;
   const open = pageShareOf(s);
   if (open !== null && m.phase !== "ended") {
     const mine = m.opened !== null && m.opened.user === open.user ? m.opened : null;
-    const rows = mine !== null ? [["URL", mine.url, "share-url"], ["Login", open.user, "share-user"], ["Password", mine.password, "share-password"]]
-      : [["Host", open.host ?? "opening…", "share-host"], ["Port", open.port === null || open.port === undefined ? "…" : String(open.port), "share-port"], ["Login", open.user, "share-user"]];
-    return `<div class="share open" role="status">${head}<p class="headline">Shared ${badge("Public", "warn")} for <time data-tick datetime="${esc(open.openedAt)}">${esc(spanText((now - Date.parse(open.openedAt)) / 1000))}</time>` +
-      `${open.role !== null && open.role !== undefined ? `, reading as the role ${esc(open.role)}` : ""}: ${esc(open.reads)}</p>` +
-      `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v, id === "share-password" ? badge("Shown once", "warn") : "")}</dd>`).join("")}</dl>` +
-      (mine !== null ? `<p class="tip">Paste it into your tool now. The login is this share's own, not a user's. The password is shown only this once and is not saved. It stops working when the share ends.</p>`
-        : `<p class="tip">The password was shown once, when the share opened, and is not saved. For a new one, press Stop sharing, then Share.</p>`) +
+    const rows = mine !== null ? [["URL", mine.url, "share-url"], ["Login", open.user, null], ["Password", mine.password, "share-password"]]
+      : [["Host", open.host ?? "opening…", "share-host"], ["Port", open.port === null || open.port === undefined ? "…" : String(open.port), "share-port"], ["Login", open.user, null]];
+    const value = (v, id) => id === null ? esc(v) : copyable(id, v, id === "share-password" ? badge("Shown once", "warn") : "");
+    return `<div class="user-added share-added" role="status">${head}` +
+      `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${value(v, id)}</dd>`).join("")}</dl>` +
+      `<p class="added-seen">${badge("Public", "warn")} for <time data-tick datetime="${esc(open.openedAt)}">${esc(spanText((now - Date.parse(open.openedAt)) / 1000))}</time>` +
+      `${open.role !== null && open.role !== undefined ? `, as the role ${esc(open.role)}` : ""}: ${esc(open.reads)}</p>` +
+      (mine !== null ? `<p class="tip">The password is only shown once and is not saved. This login is its own, and stops working when it ends.</p>`
+        : `<p class="tip">The password was shown once, when it opened, and is not saved. For a new one, press Stop, then Open a public login.</p>`) +
       `<p class="tip">Live until you stop it.${esc(endsLine(open.endsAt, now))}</p>` +
-      `<p class="tip">${button("Stop sharing", { shareStop: open.user }, "danger")}</p></div>`;
+      `${button("Stop", { shareStop: open.user }, "danger")}</div>`;
   }
-  if (m.phase === "opening") return `<div class="share">${head}<p class="dim" aria-busy="true">Opening a temporary public address… This can take up to 30 s.</p></div>`;
-  const before = m.phase === "ended" && m.ended !== null
-    ? `<p class="said">The share ended: ${esc(m.ended.why)}. Its address and password no longer work.</p>`
-    : m.phase === "refused" && m.failure !== null ? renderFailure(m.failure) : "";
-  const body = choices?.body ?? null;
-  const list = Array.isArray(body?.choices) ? body.choices : null;
-  const role = list === null || list.length === 0 ? "" : `<label for="share-role">Role</label> <select id="share-role">${list.map((c) => `<option value="${esc(c.role)}"${c.role === chosenRole(m, list) ? " selected" : ""}>${esc(`${c.role}: ${c.reads}${c.default ? " (default)" : ""}`)}</option>`).join("")}</select> `;
-  // the roles not read yet, or refused (a roles file that cannot be read, no role a share may read as): no Share, and why
-  const why = list !== null ? "" : choices?.failure ? renderFailure(choices.failure) : `<p class="dim">Reading the roles…</p>`;
-  return `<div class="share">${head}${before}` +
-    `<p class="tip">For a tool that can't reach this machine, like a BI tool in the cloud. You get a <strong>temporary public address</strong> with a login of its own, as ${code("mason share")} opens. Every connection must use TLS.</p>` +
-    why + `<p class="tip share-ask">${role}${button("Share", { shareOpen: "" }, "", { disabled: list === null })}</p></div>`;
+  if (m.phase === "opening") return `<div class="user-added share-added" role="status">${head}<p class="added-seen" aria-busy="true">Opening a temporary public address… This can take up to 30 s.</p></div>`;
+  if (m.phase === "ended" && m.ended !== null) return `<p class="said">The temporary public login ended: ${esc(m.ended.why)}. Its address and password no longer work.</p>`;
+  if (m.phase === "refused" && m.failure !== null) return renderFailure(m.failure);
+  return "";
 }
 
 /** The role a share opens with: the one chosen, while the roles offer it, else the file's default, else the first. */
@@ -253,9 +289,9 @@ const chosenRole = (m, list) => list.some((c) => c.role === m.role) ? m.role : l
 const BEAT_MS = 15_000;
 
 /**
- * THE PAGE'S SIDE OF SHARE OVER THE INTERNET (src/cli/page-share.ts has why each choice): open (the click on Share is the
- * yes), BEAT while the share is open — on a timer of its own, which runs while the tab is hidden (the poll does not: the
- * person is in their tool's tab, pasting) —, Stop sharing. The password is in `m.opened` alone, the page's memory, and is
+ * THE PAGE'S SIDE OF A TEMPORARY PUBLIC LOGIN (src/cli/page-share.ts has why each choice): open (the click on Open a
+ * public login is the yes), BEAT while it is open — on a timer of its own, which runs while the tab is hidden (the poll
+ * does not: the person is in their tool's tab, pasting) —, Stop. The password is in `m.opened` alone, the page's memory, and is
  * dropped the moment the share is seen ended. `ctx.timers` is a test's clock; a browser's own otherwise.
  */
 export function createShare(ctx) {
@@ -278,7 +314,7 @@ export function createShare(ctx) {
   const roles = () => { const c = ctx.read(SHARE_CHOICES)?.body?.choices; return Array.isArray(c) ? c : null; };
   const actions = {
     shareRole(role) { if (roles()?.some((c) => c.role === role)) m.role = role; },
-    /** Share: the person said yes to a public address; the run opens the share (confirmed), and its one answer carries the password */
+    /** Open a public login: the person said yes to a public address; the run opens the share (confirmed), and its one answer carries the password */
     async shareOpen() {
       const list = roles();
       if (list === null || m.phase === "opening") return;
@@ -293,7 +329,7 @@ export function createShare(ctx) {
     async shareStop(user) {
       const r = await ctx.ask(`api/share/${encodeURIComponent(user)}`, json("DELETE"));
       if ("failure" in r && r.failure.code !== "not_found") { m.phase = "refused"; m.failure = r.failure; return; }
-      ended(user, "Stop sharing, on this page");
+      ended(user, "you stopped it on this page");
       await ctx.refresh([STATE]);
     },
     shareBeat: beat,
@@ -342,11 +378,12 @@ export function createShare(ctx) {
  * (`connectsChoice`): from anywhere, the default, sends no `from`; only from these addresses sends the ranges typed.
  * Shown under MASON_UI_READ_ONLY=1 too when its users are the page's own (MASON_UI_READ_ONLY_ALLOW=users). Each field
  * (a label and its control) is one span, so the form lays out as one line where its card is wide enough and wraps by
- * field, never between a label and its control, below that (app.css `#add-user`).
+ * field, never between a label and its control, below that (app.css `#add-user`). `inBox`: the form is the "New user"
+ * pane of the add box (`renderAddKinds`), whose box is the card, so it is none of its own.
  */
-export function renderAddUser(state) {
+export function renderAddUser(state, inBox = false) {
   if (state === undefined || state === null || usersReadOnly(state) !== null) return "";
-  return `<form id="add-user" class="formcard" autocomplete="off"><span class="name-field"><label for="user-name">Name</label> ` +
+  return `<form id="add-user"${inBox ? "" : ` class="formcard"`} autocomplete="off"><span class="name-field"><label for="user-name">Name</label> ` +
     `<input id="user-name" name="name" required placeholder="e.g. metabase" spellcheck="false" autocapitalize="off"></span>` +
     roleChoice(state.roles) + connectsChoice("add-user") + `<button type="submit" class="primary">Add a user</button></form>`;
 }
@@ -418,9 +455,10 @@ export const page = {
     // added: the user just added (its password in it, this page's memory alone); addedSeen: whether it has connected
     // reveal: the part to scroll into view after the next write (a new user's password card), once
     // show: the list's tab, the hash's (`route`: #users?show=removed)
-    const m = { actionFailure: null, added: null, addedSeen: false, confirming: null, refused: null, held: null, reveal: null, show: "active" };
+    const m = { actionFailure: null, added: null, addedSeen: false, confirming: null, refused: null, held: null, reveal: null, show: "active", addKind: "user" };
+    // addKind: what the add box creates, "user" (New user) or "share" (Temporary public login): the box's own choice
     const users = () => ctx.read(USERS)?.body ?? null;
-    // Share over the internet, in Connect: its own model, beats and actions
+    // the temporary public login, the add box's second kind: its own model, beats and actions
     const share = createShare(ctx);
     m.share = share.m;
     const actions = {
@@ -513,20 +551,26 @@ export const page = {
       arrive() {
         const state = ctx.read(STATE)?.body;
         if (state === undefined || state === null) return undefined;
-        return renderAddUser(state) === "" ? null : "user-name";
+        return renderAddUser(state) === "" || (m.addKind === "share" && shareable(state)) ? null : "user-name";
       },
       view() {
         // while From… asks, the list as it opened (`held`): its form is never rewritten under what is being typed
         const h = m.held !== null && askOf(m.confirming)?.verb === "from" ? m.held : null;
         const u = h !== null ? h.list : users();
         const state = h !== null ? h.state : ctx.read(STATE)?.body ?? null;
+        const s = ctx.read(STATE)?.body;
+        const offer = shareable(s) && renderAddUser(s) !== "";
         return {
           // the roles file's state is the run's (/api/state roles): a file that cannot be read refuses every user held to it
           users: u ? renderUsers(u, m.confirming, h !== null ? h.now : ctx.now().getTime(), m.refused, state?.roles ?? null, usersReadOnly(state), m.show) : "",
-          "add-user-box": renderAddUser(ctx.read(STATE)?.body),
-          "users-connect": renderUsersConnect(ctx.read(STATE)?.body?.postgres, ctx.read(STATE)?.body?.served === true,
-            renderShare(ctx.read(STATE)?.body, share.m, ctx.now().getTime(), ctx.read(SHARE_CHOICES))),
-          added: m.added ? renderAdded(m.added, { connected: m.addedSeen }) : "",
+          // the add box: what it creates where the page may open a temporary public login (else the plain form), each
+          // kind's pane a part of its own, so a choice of kind rewrites neither (a name being typed stays)
+          "add-kinds": offer ? renderAddKinds(m.addKind) : "",
+          "add-user-box": renderAddUser(s, offer),
+          "add-share-box": offer ? renderSharePane(s, share.m, ctx.read(SHARE_CHOICES)) : "",
+          "users-connect": renderUsersConnect(s?.postgres, s?.served === true, offer),
+          // what the box made, in one place: a user just added, a temporary public login
+          added: (m.added ? renderAdded(m.added, { connected: m.addedSeen }) : "") + renderShareCard(s, share.m, ctx.now().getTime()),
           action: m.actionFailure ? renderFailure(m.actionFailure) : "",
         };
       },
@@ -538,6 +582,9 @@ export const page = {
       },
       input: (target) => share.input(target),
       click(d, button, { doc, win }) {
+        if (d.addKind !== undefined) { if (d.addKind === "user" || d.addKind === "share") m.addKind = d.addKind; return true; }
+        // opened: its card scrolled into view once, as a new user's is (on a phone it is written below the screen's edge)
+        if (d.shareOpen !== undefined) return share.actions.shareOpen().then(() => { if (share.m.phase === "open") m.reveal = "added"; });
         const shared = share.click(d);
         if (shared !== null) return shared;
         if (d.remove !== undefined) return actions.askRemove(d.remove) ?? true;

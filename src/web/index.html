@@ -70,8 +70,10 @@
   <section id="page-users" aria-labelledby="users-h" hidden>
     <div class="page-head"><h2 id="users-h">Users</h2><p class="desc">Create and manage Users that you can connect to tools and services</p></div>
     <div id="users"></div>
-    <!-- the add form is the page's (src/web/pages/users.js renderAddUser): none on a read-only page -->
-    <div id="add-user-box"></div>
+    <!-- the add box is the page's (src/web/pages/users.js): what it creates (renderAddKinds, only where a temporary public
+         login may be opened), the add form (renderAddUser: none on a read-only page) and the temporary public login's pane
+         (renderSharePane), the two panes in one place so the box keeps the height of the taller -->
+    <div id="add-box" class="add-box"><div id="add-kinds"></div><div class="add-panes"><div id="add-user-box"></div><div id="add-share-box"></div></div></div>
     <div id="action"></div>
     <div id="added"></div>
     <div id="users-connect"></div>

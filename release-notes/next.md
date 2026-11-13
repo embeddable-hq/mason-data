@@ -16,7 +16,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   24 hours and links to them (Sync events, failures only; Queries, the refused or failed statements); a count the page
   could not read says "unknown" and why. They replace the lists of recent errors at the foot of the page. The table of
   the last day's and week's statements is gone too (the Statements and p95 cards stay, and Queries lists every
-  statement), and so is the Connect panel, with Connect from anywhere (now Share over the internet, on the Users page): the Postgres URL is on the Users page and in
+  statement), and so is the Connect panel, with Connect from anywhere (now Temporary public login, on the Users page): the Postgres URL is on the Users page and in
   `mason status`; `mason share` opens a share from the command line.
 - **The Tables page lists the added tables first**, then the tables not added, so on a database of hundreds of
   tables the ones Mason syncs are at the top under All. A table you add or remove keeps its row, its state changing in
@@ -26,12 +26,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   added" and has the URL, the User and the Password, the URL and the Password each with Copy, "Shown once" beside the
   password's Copy, and one line: the password is only shown once. The URL already carries the database; the database,
   host, port and SSL mode are Connect's on the same page, and the card does not repeat them. `mason user add` in a terminal prints every row, as before.
-- **Connect from anywhere moves to the Users page, as Share over the internet.** Inside Connect, the box "Share over the internet (for
-  testing)" opens what `mason share` opens, for a tool that cannot reach your machine: choose the role it reads as
-  (where `mason/roles.yml` offers more than one), click Share, and it shows the public URL and the share's own login
-  and password, each with Copy, the password shown once. It is live until you stop it (Stop sharing), until a free
-  share's hour is up, or within two minutes of the page closing, and the box says how it ended. It is not offered
-  under `mason serve` or on a read-only page.
+- **Connect from anywhere moves to the Users page, as a Temporary public login.** The box that adds a user has two
+  segments, New user and Temporary public login: the second opens what `mason share` opens, for a tool in the cloud
+  that cannot reach your machine. Choose the role it reads as (where `mason/roles.yml` offers more than one), click
+  Open a public login, and a card where New user added appears shows the public URL, its own login and the password,
+  the URL and the password with Copy, the password shown once. It is live until you press Stop, until a free one's
+  hour is up, or within two minutes of the page closing, and the page says how it ended. It is not a user: it is never
+  in the users list. It is not offered under `mason serve` or on a read-only page.
 - **An empty list on the web page is one quiet line**, no longer a big box: "No users yet. Create a user for a service
   like a BI tool or your app: add one below.", "No table added yet. Add one from the list below.", and the same on Queries, Usage and Sync events. Queries with no statement yet no longer shows the
   "Connect your first tool" box: one line, "Create a user to connect your first tool", leads to the Users page.
