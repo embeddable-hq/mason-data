@@ -81,7 +81,9 @@ test("a statement calling a Mason function on every row starves no one but its t
 // waits for at least 40 % of it; with the turn the loop turns every few calls, and the small statement's eight turns are
 // about 3 %. A count alone would not do: small statements are answered before the calls reach their full rate.
 for (const [shape, sql, rows] of [
-  ["a numeric bin", "SELECT floor(n / 0.05) * 0.05 AS bin, count(*) FROM wide GROUP BY 1", 1000],
+  // (of a cast to numeric, as a JSON number is binned: a bin of a column of a bounded type is the engine's own arithmetic,
+  // src/duck/rewrite.ts nativeBin, and calls nothing)
+  ["a numeric bin", "SELECT floor(n::numeric / 0.05) * 0.05 AS bin, count(*) FROM wide GROUP BY 1", 1000],
   ["a week of the year, as a BI tool writes it", "SELECT ceil((extract(doy FROM ts)::integer + 6) / 7.0) AS week, count(*) FROM wide GROUP BY 1", 54],
   ["to_char", "SELECT to_char(ts, 'YYYY-MM') AS month, count(*) FROM wide GROUP BY 1", 24],
   // (an array in the template: the function's by construction, where a template of scalars is DuckDB's own SQL)
