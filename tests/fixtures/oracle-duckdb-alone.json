@@ -1,19 +1,19 @@
 {
-  "statements": 7219,
+  "statements": 7258,
   "mason": {
-    "exact": 6703,
+    "exact": 6742,
     "decided": 48,
     "refused": 468,
     "differs": 0
   },
   "duckdb": {
-    "exact": 1836,
-    "name": 1306,
-    "refused": 1624,
-    "value": 999,
-    "rows": 602,
-    "text": 232,
-    "other": 620
+    "exact": 1848,
+    "name": 1294,
+    "refused": 1630,
+    "value": 1005,
+    "rows": 601,
+    "text": 233,
+    "other": 647
   },
   "gaps": {
     "copyPhase": {
@@ -95,7 +95,7 @@
       }
     },
     "everyAsk": {
-      "asked": 99455,
+      "asked": 100179,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
@@ -119,7 +119,7 @@
         "json-of-type": { "planted": 3, "natural": 3 },
         "json-path-type": { "planted": 0, "natural": 48 },
         "json-rows-in-select": { "planted": 3, "natural": 0 },
-        "jsonb-compare": { "planted": 3, "natural": 219 },
+        "jsonb-compare": { "planted": 3, "natural": 225 },
         "jsonb-set": { "planted": 0, "natural": 3 },
         "latest-order": { "planted": 6, "natural": 0 },
         "latest-quotient": { "planted": 3, "natural": 0 },
@@ -129,7 +129,7 @@
         "numeric-exact-sum": { "planted": 3, "natural": 8 },
         "numeric-math": { "planted": 3, "natural": 0 },
         "numeric-ordered-set": { "planted": 3, "natural": 0 },
-        "numeric-quotient-equality": { "planted": 9, "natural": 44 },
+        "numeric-quotient-equality": { "planted": 9, "natural": 46 },
         "numeric-special": { "planted": 0, "natural": 6 },
         "quote-ident": { "planted": 0, "natural": 9 },
         "regexp-flags": { "planted": 3, "natural": 0 },
@@ -178,7 +178,7 @@
   "measured": {
     "what": "the copy phase of tests/integration/duck-oracle.itest.ts, each statement as written to a plain DuckDB connection over the same copy",
     "machine": "linux x64",
-    "postgres": "PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on x86_64-pc-linux-gnu",
+    "postgres": "PostgreSQL 18.7 (Debian 18.7-1.pgdg13+2) on x86_64-pc-linux-gnu",
     "collation": "en_US.utf8 (c)",
     "shapes": true
   }
