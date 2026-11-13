@@ -561,11 +561,11 @@ form.formcard input { width: 18em; }
 #add-user { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
 #add-user .name-field { display: inline-flex; align-items: center; gap: var(--space-2); min-width: 0; max-width: 100%; }
 #add-user .name-field label { flex: none; }
-#add-user .name-field input { width: 10em; min-width: 0; flex: 0 1 auto; }
+#add-user .name-field input { width: 8.5em; min-width: 0; flex: 0 1 auto; }
 /* Connects from takes the rest of the line from a basis of its label, its dropdown and the least address box, the box
    growing into the rest (under its dropdown on a phone) */
 #add-user .connects { margin: 0; flex: 1 1 400px; }
-#add-user .connects .ranges { flex: 1 1 9em; min-width: 0; }
+#add-user .connects .ranges { flex: 1 1 6.5em; min-width: 0; }
 #add-user .connects .ranges input { width: 100%; min-width: 0; }
 /* the Users form's Role: its label and select wrap together on a phone, the select shrinking to the card (a long role's
    name cut in the closed box, whole in the open list), so the page never scrolls sideways */

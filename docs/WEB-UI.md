@@ -142,9 +142,10 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   `mason user add` with no `--from`), with no second question; **only these addresses** shows the address box beside
   it and sends the ranges typed there, comma-separated as `--from a,b` takes them (`192.0.2.0/24, 2001:db8::/32`),
   split at each comma and trimmed. The box keeps its place, unseen, while anywhere is chosen, so nothing in the form
-  moves when the choice changes (From… offers the same dropdown). Name, Role, Connects from and **Add a user** are one
-  line where the form's card is wide enough (a container of its own, `#add-user-box`: a 1280 px window with or without
-  a Role, 900 px without one, where the sidebar is a rail), the address box growing into the rest of the line; below
+  moves when the choice changes (From… offers the same dropdown). For, Name, Role, Connects from and **Add a user** are one
+  line where the form's card is wide enough (a container of its own, `#add-user-box`: a 1280 px window without a Role;
+  with one, For, Name and Role are a line over Connects from and Add a user, as at 1024 and 900 px, where the sidebar
+  is a rail), the address box growing into the rest of the line; below
   that the form wraps by field, a label never apart from its control, the address box under its dropdown on a phone. The page
   never checks a range: the run reads each, and a refused one is shown as the run's refusal. `--set`
   attributes stay the command's. Its password is shown once, in a card titled **New user added** on its top edge (as
