@@ -3352,7 +3352,7 @@ test("Tables and Users: the sections are a page head, the cards' part and a tool
   // each label in a field with its control (on a phone a field is a row of its own: "Show" never wraps away from its select)
   assert.match(tables, /<div class="field grow"><label for="tables-filter">Search the tables<\/label>\s*<input type="search" id="tables-filter"[^>]*><\/div>/);
   assert.match(tables, /<div class="field"><label for="tables-show">Show<\/label>\s*<select id="tables-show">[\s\S]*?<\/select><\/div>/);
-  assert.match(users, /<div class="page-head"><h2 id="users-h">Users<\/h2>/);
+  assert.match(users, /<div class="page-head"><h2 id="users-h">Users<\/h2><p class="desc">Create and manage Users that you can connect to tools and services<\/p><\/div>/, "the Users page's intro, in the owner's words");
   // the form is the page's own once the state is read (renderAddUser: none on a read-only page), in its place
   assert.match(fn<[unknown], string>("renderAddUser")(CATALOG_STATE), /^<form id="add-user" class="formcard"[^>]*>[\s\S]*<button type="submit" class="primary">Add a user<\/button><\/form>$/);
   // the users first, right under the title (their read-only line is renderUsers' own); then the form, the password just

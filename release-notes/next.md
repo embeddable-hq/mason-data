@@ -53,7 +53,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **The New user added card says when the user has connected.** Under its rows, "Waiting for its first query…"
   until a tool or app logs in with the user (or runs a query), then "Connected".
 - **The Users page lists the users first**, under its title, then the form that adds one (with the card of a user just
-  added beside it) and Connect.
+  added beside it) and Connect. Its intro now reads "Create and manage Users that you can connect to tools and
+  services".
 
 ## What was wrong and is now right
 
