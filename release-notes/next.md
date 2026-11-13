@@ -5,7 +5,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **The Overview is shorter, and says what its word means.** Under the title "mason status", Ready, Under way or
   Failed now has a line saying what it means for the synced data: every added table is synced and served; how many of
   the added tables are synced while the rest sync; or how many tables' syncs failed, with a link to them on Tables.
-  Getting started has three steps (Mason is running, a table synced, a user created) and goes once those are done.
+  Getting started has three steps (Mason is running, Sync a table, Create a user), each in the same words done or not, and goes once those are done.
 - **`mason status` and the web page's Overview say the same rows under new labels.** Source is now Sources file, Disk
   is Free disk, Sessions is Connections open, and the Mason row is two: Version (`dev`, or the version) and Up (how long
   and since when, with the pid in `mason status`; no more "one process"). On the Overview, Database and Changes are under

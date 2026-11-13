@@ -4420,23 +4420,23 @@ test("Users: ONE Connect panel for the run — host, port, database, sslmode, th
   assert.match(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), /<div id="users"><\/div>[\s\S]*<div id="users-connect"><\/div>\s*<\/section>/, "the list first, the panel last");
 });
 
-test("the Overview's first-run checklist: running, a table synced, a user created — each ○ with its one action; gone once all three are done", async () => {
+test("the Overview's first-run checklist: Mason is running, Sync a table, Create a user — the same words done or not, each ○ with its one action; gone once all three are done", async () => {
   const renderChecklist = of<[unknown, unknown], string>(statusPage, "status.js", "renderChecklist");
   const user = { users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true }] };
   const noUser = { users: [{ ...user.users[0], removedAt: "2026-10-27T10:00:00.000Z" }] };
   // a fresh install: a table added and synced, no user
   const fresh = renderChecklist(RUNNING, noUser);
-  assert.equal(textOf(fresh), "Getting started 2 of 3 done ✓ Mason is running (done) ✓ A table synced (done) ○ A user created (to do) Create a user");
+  assert.equal(textOf(fresh), "Getting started 2 of 3 done ✓ Mason is running (done) ✓ Sync a table (done) ○ Create a user (to do) Create a user");
   // the steps drawn as courses of a wall beside its title: a brick a step, laid as it is done (drawing, hidden from a screen reader)
   assert.match(fresh, /<p class="checklist-title"><span class="courses" aria-hidden="true"><i class="on"><\/i><i class="on"><\/i><i><\/i><\/span>Getting started /);
-  assert.match(fresh, /<li class="step-todo"><span class="mark" aria-hidden="true">○<\/span><span class="what">A user created<span class="sr"> \(to do\)<\/span><\/span><a class="btn small primary" href="#users">Create a user<\/a><\/li>/, "the next step is the primary action");
+  assert.match(fresh, /<li class="step-todo"><span class="mark" aria-hidden="true">○<\/span><span class="what">Create a user<span class="sr"> \(to do\)<\/span><\/span><a class="btn small primary" href="#users">Create a user<\/a><\/li>/, "the next step is the primary action");
   // no first statement step, and nothing to copy (the owner's, 2026-11-12)
   assert.ok(!/A first statement answered|Copy the psql line|data-copy/.test(fresh));
   // nothing added: Add a table leads to Tables
   const none = renderChecklist(NONE, noUser);
-  assert.match(none, /○<\/span><span class="what">A table synced<span class="sr"> \(to do\)<\/span><\/span><a class="btn small primary" href="#tables">Add a table<\/a>/);
+  assert.match(none, /○<\/span><span class="what">Sync a table<span class="sr"> \(to do\)<\/span><\/span><a class="btn small primary" href="#tables">Add a table<\/a>/);
   // copying: no action, it is under way
-  assert.match(textOf(renderChecklist({ ...COPYING, totals: { ...COPYING.totals!, copied: 0 } }, noUser)), /○ A table synced \(to do\) syncing now ○ A user created/);
+  assert.match(textOf(renderChecklist({ ...COPYING, totals: { ...COPYING.totals!, copied: 0 } }, noUser)), /○ Sync a table \(to do\) syncing now ○ Create a user/);
   // all three done: none, whatever was asked of Mason; the users not read, or their read failed: none (never a ○ for what could not be told)
   assert.equal(renderChecklist(RUNNING, user), "");
   assert.equal(renderChecklist(RUNNING, undefined), "");

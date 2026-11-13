@@ -61,8 +61,8 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   the slow ones for the p95, the refused or failed ones for the query errors, and Sync events' failures over the last
   24 hours for the sync errors. A count the page could not read is "unknown" with its reason, never 0. Eight cards,
   nine with the host's (`MASON_UI_OVERVIEW_CARD`): four by two and three by three from 641 px up, two a row on a phone.
-- **Overview**, Getting started (while setting up is not done): ✓ Mason is running · ✓/○ a table synced · ✓/○ a user
-  created — each ○ with its one action (Add a table → Tables, Create a user → Users), from `/api/state`'s totals and
+- **Overview**, Getting started (while setting up is not done): ✓ Mason is running · ✓/○ Sync a table · ✓/○ Create
+  a user — each step in the same words done or not (the ✓ or ○ says which), each ○ with its one action (Add a table → Tables, Create a user → Users), from `/api/state`'s totals and
   `/api/users` (`mason user list --json`). Gone once the three are done; not drawn while the users' read is unanswered
   or failed. How to connect is not on the Overview: it is on Queries' empty log, and the Users page.
 - **Overview**, the tables not synced yet: a bar each with the line `mason wait` prints (a first sync not begun shimmers,

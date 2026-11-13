@@ -411,8 +411,8 @@ export function renderUnsupportedLine(u) {
 }
 
 /**
- * THE FIRST-RUN CHECKLIST, while setting up is not done: Mason is running (the state answered), a table copied (`totals`:
- * one served), a user created (`/api/users`: one not removed) — each ✓ or ○, a ○ with its one action: Add a table
+ * THE FIRST-RUN CHECKLIST, while setting up is not done: Mason is running (the state answered), Sync a table (`totals`:
+ * one served), Create a user (`/api/users`: one not removed), each step in its words done or not (the ✓ or ○ says which) — each ✓ or ○, a ○ with its one action: Add a table
  * (Tables), Create a user (Users). "" once all three are done, and while the users' read has not answered or could not
  * be read: a checklist never says ○ for what it could not tell. `users` is `/api/users`' body (or `{ failure }`).
  */
@@ -429,8 +429,8 @@ export function renderChecklist(s, users) {
   const tablesLook = tablesReadOnly(s) !== null;
   const steps = [
     ["Mason is running", true, ""],
-    ["A table synced", copied, copying ? `<span class="dim">syncing now</span>` : added || tablesLook ? "" : `<a class="btn small primary" href="${LINKS.tables}">Add a table</a>`],
-    ["A user created", user, looks ? "" : `<a class="btn small${copied ? " primary" : ""}" href="#users">Create a user</a>`],
+    ["Sync a table", copied, copying ? `<span class="dim">syncing now</span>` : added || tablesLook ? "" : `<a class="btn small primary" href="${LINKS.tables}">Add a table</a>`],
+    ["Create a user", user, looks ? "" : `<a class="btn small${copied ? " primary" : ""}" href="#users">Create a user</a>`],
   ];
   const done = steps.filter(([, ok]) => ok).length;
   return `<div class="checklist" role="group" aria-label="Getting started"><p class="checklist-title"><span class="courses" aria-hidden="true">${steps.map(([, ok]) => `<i${ok ? ' class="on"' : ""}></i>`).join("")}</span>Getting started <span class="dim">${done} of ${steps.length} done</span></p><ol>` +
