@@ -1,7 +1,6 @@
 /**
- * A RUNNING MASON READS THE DATABASE'S CATALOG ONLY WHEN ASKED (issue 890), and says a database on another machine and
- * the main database as information (issue 888), against a real Postgres reached through a proxy here that counts the
- * connections made to it.
+ * A RUNNING MASON READS THE DATABASE'S CATALOG ONLY WHEN ASKED (issue 890), against a real Postgres reached through a
+ * proxy here that counts the connections made to it.
  *
  * A run read the catalog on a 10-second timer, a connection every 10 s whatever each table's sync, which kept a
  * serverless compute awake with every table `sync: off`. Here: a run whose tables are all `sync: off`, once its first
@@ -11,8 +10,8 @@
  * connection each time, by design: it needs the project, not the run.)
  *
  * The proxy listens on this machine's first non-loopback address when it has one, so the database is "on another
- * machine" to Mason: `mason init` and the first `mason start` say so as information, never a warning; the next start,
- * its first sync done, no longer says it is the main database; `mason status` warns of neither.
+ * machine" to Mason, as a serverless one is. (What mason init and mason start say of it is
+ * tests/integration/cli-database-notes.itest.ts's.)
  *
  * What it needs: IT_POSTGRES_URL (any wal_level), psql on PATH, and DuckDB's postgres extension. It writes only inside a
  * database it creates, `it_catalog_<random>`, and drops it at the end.
@@ -47,8 +46,9 @@ function freePort(): Promise<number> {
   });
 }
 /** A TCP proxy to the Postgres at `to`, listening on `host`: every connection made through it is counted. */
-/** `muteNext()`: the next connection made through it goes silent once logged in (its ReadyForQuery passed): nothing
- *  either way after it, the TCP connection kept — a connection gone silent, as a stalled network or proxy leaves it.
+/** `muteNext()`: the next connection made through it goes silent once logged in (its ReadyForQuery passed): what the
+ *  client sends still reaches the database, and nothing the database answers comes back, the TCP connection kept — a
+ *  connection gone silent one way, as a stalled network or proxy leaves it.
  *  `darkAfterNext()`: the same, and every connection after it is taken and given nothing at all, until `light()` — a
  *  database that stopped answering altogether, so it cannot be asked about the read either. */
 function countingProxy(host: string, to: { host: string; port: number }): Promise<{ port: number; connections: () => number; close: () => void; muteNext: () => void; darkAfterNext: () => void; light: () => void }> {
@@ -69,7 +69,7 @@ function countingProxy(host: string, to: { host: string; port: number }): Promis
     if (mute) {
       mute = false;
       let silent = false;
-      client.on("data", (d: Buffer) => { if (!silent) upstream.write(d); });
+      client.on("data", (d: Buffer) => { upstream.write(d); });
       upstream.on("data", (d: Buffer) => {
         if (silent) return;
         client.write(d);
@@ -121,8 +121,6 @@ after(() => {
   fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
 });
 
-const REMOTE = "Your database is on another machine. Mason will sync the tables you choose to this machine.";
-const PRIMARY = "This is your main database, not a read replica. Mason only reads from it and keeps its load small. If you have a read replica, you can point Mason there instead.";
 
 test("an idle run whose tables are all sync: off opens no connection to the database; a table made since shows once asked, read once a minute at most", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set", timeout: 600_000 }, async () => {
   psql(adminUrl!, `CREATE DATABASE ${tag}`);
@@ -143,26 +141,10 @@ test("an idle run whose tables are all sync: off opens no connection to the data
   viaProxy.searchParams.set("sslmode", "disable");
   env = { PATH: process.env.PATH ?? "", HOME: home, MASON_PG_PORT: String(await freePort()), DATABASE_URL: viaProxy.toString() };
 
-  // INIT: on the first try, whatever machine the database is on; where it is said as information, never a warning
-  const init = ok(await mason("init", "--json"), "mason init");
-  if (lan !== null) {
-    assert.deepEqual([init.json.warnings, init.json.notes], [[], [REMOTE, PRIMARY]], JSON.stringify(init.json));
-  }
-  assert.ok(fs.existsSync(path.join(root, ".mason", "config.json")), "written on the first try");
+  ok(await mason("init", "--json"), "mason init");
   ok(await mason("add", "customers", "--json"), "mason add customers");
-
-  const started = ok(await mason("start"), "mason start");
-  const startLog = started.stdout + started.stderr;
-  if (lan !== null) {
-    assert.ok(startLog.includes(`  ${REMOTE}\n`), startLog);
-    assert.ok(startLog.includes(`  ${PRIMARY}\n`), `before the first sync, the main database is said:\n${startLog}`);
-    assert.doesNotMatch(startLog, /! .*(another machine|read replica|PRIMARY)/, "neither is a warning");
-  }
+  ok(await mason("start"), "mason start");
   ok(await mason("wait", "--timeout", "120", "--json"), "mason wait");
-  if (lan !== null) {
-    const status = ok(await mason("status", "--json"), "mason status");
-    assert.deepEqual((status.json.warnings as string[]).filter((w) => /another machine|read replica|main database/.test(w)), [], "no Warning row of either");
-  }
 
   // IDLE: nobody asks, every table sync: off — no connection at all over a window that held six of the timer's reads
   await new Promise((r) => setTimeout(r, 3_000));   // what the first sync had open is closed by now
@@ -239,13 +221,4 @@ test("an idle run whose tables are all sync: off opens no connection to the data
     assert.ok(Date.now() - dark < 150_000, `said in ${Date.now() - dark} ms, never after the last guard`);
   } finally { proxy.light(); }
   ok(await mason("add", "darkened", "--json"), "mason add, the database answering again");
-
-  // THE NEXT START, its first sync done: where the database is, still; that it is the main one, no longer
-  ok(await mason("stop"), "mason stop");
-  const again = ok(await mason("start"), "mason start again");
-  if (lan !== null) {
-    const said = again.stdout + again.stderr;
-    assert.ok(said.includes(`  ${REMOTE}\n`), said);
-    assert.ok(!said.includes(PRIMARY), `said only until the first sync is done:\n${said}`);
-  }
 });

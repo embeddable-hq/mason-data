@@ -30,7 +30,7 @@ import type { Server } from "node:http";
 import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, PRIMARY_NOTE, readSourceFacts, type SourceFacts } from "./preflight.ts";
-import { actRead, CATALOG_LOCK_TIMEOUT_MS, sourceCatalog, stallWatch, STATE_WAIT_MS } from "./source-catalog.ts";
+import { actRead, sourceCatalog, STATE_WAIT_MS, watchedRead } from "./source-catalog.ts";
 import { uiReadOnlyAllowSetting, uiReadOnlySetting, type PageArea } from "./ui-read-only.ts";
 import { backLinkOf, uiBackLinkSetting } from "./ui-back-link.ts";
 import { navOf, uiNavSetting } from "./ui-nav.ts";
@@ -414,52 +414,18 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   if (cfg.changes !== undefined) { delete cfg.changes; writeConfig(home, cfg); }
   // the catalog the start read; read again only when something asks (src/cli/source-catalog.ts: no timer, issue 890)
   const facts: SourceFacts = checked.facts;
+  const catalogLog = (m: string): void => logLine(`[sync] ${m}`);
   const catalog = sourceCatalog(facts, async (signal) => {
-    const c = await connectSource(source);
-    if ("failure" in c) throw new Error(c.failure.message);
-    // a read that ran out of time: its connection closed, so whatever it waits on ends (src/cli/source-catalog.ts)
-    if (signal.aborted) { c.pg.close(); throw new Error("the read ran out of time"); }
-    signal.addEventListener("abort", () => c.pg.close(), { once: true });
-    // A CONNECTION GONE SILENT is told from a slow read by its progress, never by a cap a large catalog's read could need
-    // (src/cli/source-catalog.ts stallWatch): bytes arriving on it, else the database's word about its session
-    let silent: string | null = null;
-    const pid = c.pg.backendPid;
-    const stopWatch = stallWatch({
-      lastHeard: () => c.pg.lastHeardAt,
-      check: async (signal) => {
-        // a session the database never named (no BackendKeyData) cannot be asked after: couldn't tell
-        if (pid === null) throw new Error("the database did not name the read's session");
-        const p = await connectSource(source);
-        if ("failure" in p) throw new Error(p.failure.message);
-        if (signal.aborted) { p.pg.close(); throw new Error("no answer in time"); }
-        signal.addEventListener("abort", () => p.pg.close(), { once: true });
-        try {
-          const row = (await p.pg.query(`SELECT state, wait_event, extract(epoch FROM now() - state_change)::float8::text FROM pg_stat_activity WHERE pid = ${pid}`)).rows[0];
-          if (row === undefined) return "its session is gone from the database: the connection went silent";
-          // a state this user may not see is no answer
-          if (row[0] === null || row[0] === undefined) throw new Error("the database does not show the read's session to this user");
-          // the database waits to send results this run never received: the connection, not the database, is stuck
-          if (row[0] === "active" && row[1] === "ClientWrite") return "the database has results for it that do not arrive: the connection went silent";
-          if (row[0] === "active") return null;
-          return `the database has had nothing to do for it for ${Math.round(Number(row[2]))} s (its session is ${row[0]}): the connection went silent`;
-        } finally { p.pg.close(); }
-      },
-      onSilent: (why) => { silent = why; c.pg.close(); },
+    // a read watched for a connection gone silent, its session told by what it runs, and cancelled on the database
+    // when given up on (src/cli/source-catalog.ts watchedRead)
+    const read = await watchedRead({
+      connect: async () => { const c = await connectSource(source); if ("failure" in c) throw new Error(c.failure.message); return c.pg; },
+      read: (pg) => readSourceFacts(pg, undefined, { collations: false }),
+      signal, log: catalogLog,
     });
-    let read: SourceFacts;
-    try {
-      // never queued behind a lock for long: the sizes it reads take a lock of every table, which a migration's
-      // ALTER (or one queued behind another session) holds; this session's settings alone, nothing on the database
-      await c.pg.query(`SET lock_timeout = ${CATALOG_LOCK_TIMEOUT_MS}`);
-      read = await readSourceFacts(c.pg, undefined, { collations: false });
-    } catch (e) {
-      // the connection the watch closed: said as what it found, not as "connection closed"
-      if (silent !== null) throw new Error(silent);
-      throw e;
-    } finally { stopWatch(); c.pg.close(); }
     // the collations were read at the start, and are the start's for the whole run
     return facts.collations !== undefined ? { ...read, collations: facts.collations } : read;
-  }, { log: (m) => logLine(`[sync] ${m}`) });
+  }, { log: catalogLog });
   const move = sourceMove(cfg.sourceServer ?? null, { database: source.database, systemIdentifier: facts.systemIdentifier });
   if ("refuse" in move) { say(`mason start: ${move.refuse}`); return 1; }
   // THE TABLES THE SOURCES FILE NAMES, against the database's catalog: every mistake said at once, before anything opens

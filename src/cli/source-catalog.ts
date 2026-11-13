@@ -6,7 +6,7 @@
  * awake and billing with every table `sync: off`. Three readers:
  *
  * - one that must never connect (a usage sample, `/metrics`) takes the last read as it is (`facts`);
- * - one that SHOWS it (`/api/state`: the commands and the page) asks `fresh`: the last read when one began under
+ * - one that SHOWS it (`/api/state`: the commands and the page) asks `fresh`: the last read when one ended under
  *   `CATALOG_FRESH_MS` ago, else the read running, else one read now — waited for at most `waitMs`, the last read
  *   answering after that (the review of PR 900: a read queued behind a lock left the run answering nothing);
  * - one that ACTS on it (an add, a remove, a table's columns or Sync choice) asks for a read of its own (`ask`) and
@@ -22,22 +22,23 @@
  *
  * A read is never held to a cap shorter than it can need: its session gives up on a LOCK after
  * `CATALOG_LOCK_TIMEOUT_MS` (a table's size takes a lock of it, which a migration holds or queues for); a read whose
- * session the database says is not working on it is a connection gone silent, ended (src/cli/dev.ts's watch); and
+ * session the database says is not working on it is a connection gone silent, ended (`watchedRead`); and
  * `CATALOG_READ_TIMEOUT_MS` is the last guard. A failed read leaves the last in place and is said in the run's log; what
  * only shows the catalog does not try again within `CATALOG_FRESH_MS`, so a database that is away is not asked every 2 s
  * by an open page.
  *
  * There is no timer here, and none may be added: nothing reads the database's catalog unless something asked.
  */
+import { randomBytes } from "node:crypto";
 import type { SourceFacts } from "./preflight.ts";
 import type { Failure } from "./command.ts";
 
 /** How old a read of the catalog may be and still be shown: about a minute (the owner's choice, issue 890). */
 export const CATALOG_FRESH_MS = 60_000;
 /** The last guard on a read: far past what a large catalog needs (10,000 tables read in 44–76 s, the re-checks of PR
- *  900); a connection gone silent is ended much sooner, by the database's word (src/cli/dev.ts). */
+ *  900); a connection gone silent is ended much sooner, by the database's word (`watchedRead`). */
 export const CATALOG_READ_TIMEOUT_MS = 15 * 60_000;
-/** The read's session waits on a lock at most this long (src/cli/dev.ts). */
+/** The read's session waits on a lock at most this long (`watchedRead`). */
 export const CATALOG_LOCK_TIMEOUT_MS = 2_000;
 /** How long `/api/state` waits for a read before it answers with the last one. */
 export const STATE_WAIT_MS = 2_000;
@@ -80,8 +81,11 @@ export function sourceCatalog(first: SourceFacts, read: (signal: AbortSignal) =>
   let facts = first;
   // the number of the read `facts` is (0: the start's), and the reads given out
   let factsSeq = 0, issued = 0;
-  // when the last read began: what only shows the catalog does not begin another within freshMs
-  let begunAt = clock();
+  // when the last read ENDED (the start's, then each one's, failed too): what only shows the catalog does not begin
+  // another within freshMs of it. Counted from its end, never its start (the review of PR 900 at 0d5a63fc, B2: a read
+  // over a minute long was stale the moment it ended, so the add that waited on it began a second, and an open page
+  // read the catalog back to back)
+  let endedAt = clock();
   let running: Read | null = null;
   let queued: Read | null = null;
   // the reads given out, kept a while by number: an actor waits on its own again by it
@@ -95,7 +99,6 @@ export function sourceCatalog(first: SourceFacts, read: (signal: AbortSignal) =>
   /** Runs `r` now: one read on the database, bounded by the last guard. */
   const run = (r: Read): Promise<Outcome> => {
     r.startedAt = clock();
-    begunAt = r.startedAt;
     running = r;
     const stop = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -114,6 +117,7 @@ export function sourceCatalog(first: SourceFacts, read: (signal: AbortSignal) =>
       return { failed };
     }).then((x) => {
       clearTimeout(timer);
+      endedAt = clock();
       r.outcome = x;
       running = null;
       return x;
@@ -137,10 +141,10 @@ export function sourceCatalog(first: SourceFacts, read: (signal: AbortSignal) =>
     facts: () => facts,
     fresh: (ask = {}) => {
       // a read running is shared, whatever its age (a large catalog's is long: never a second one beside it); a read
-      // begun under freshMs ago, ended or failed, answers as it is
+      // that ended under freshMs ago, failed or not, answers as it is
       const busy = queued ?? running;
       if (busy !== null) return waited(busy.done.then(() => facts), ask.waitMs, () => facts);
-      if (clock() - begunAt < freshMs) return Promise.resolve(facts);
+      if (clock() - endedAt < freshMs) return Promise.resolve(facts);
       const r = fresh();
       r.done = run(r);
       return waited(r.done.then(() => facts), ask.waitMs, () => facts);
@@ -228,6 +232,119 @@ export function stallWatch(o: {
   }, o.lookMs ?? STALL_LOOK_MS);
   timer.unref?.();
   return () => { stopped = true; clearInterval(timer); };
+}
+
+/** A connection a catalog read is made on (src/cdc/pg-wire.ts PgConnection): what the watch needs of it. */
+export interface CatalogConnection {
+  query(sql: string): Promise<{ rows: Array<Array<string | null>> }>;
+  /** Postgres's CancelRequest, sent the way the connection came (through a pooler, with the key the pooler gave) */
+  cancel(): Promise<void>;
+  close(): void;
+  /** when the server last sent this connection anything */
+  readonly lastHeardAt: number;
+}
+
+/** How long a CancelRequest may take to be sent before the read's connection is closed all the same. */
+export const CANCEL_SEND_MS = 5_000;
+
+/**
+ * ONE READ OF THE CATALOG, WATCHED (`stallWatch`), on a connection of its own (`connect`), closed when it ends.
+ *
+ * WHICH SESSION IS THE READ'S is told by what it runs, never by a process id (the review of PR 900 at 0d5a63fc, B1): a
+ * pooler or proxy (PgBouncer, Supavisor, Neon's proxy) hands the client an id of its own in BackendKeyData, so asking
+ * `pg_stat_activity` about that id found no row, judged the session gone, and ended every read of a large catalog
+ * after 15 s. Each statement of the read begins with a comment of its own (`mark`: a random id, and the statement's
+ * number), and the check asks the database about the session whose query begins with the CURRENT statement's comment
+ * (`statementVerdict`): working on it is slow; done with it (its results never arrived) or blocked sending them
+ * (`ClientWrite`) is silent; no such query on the database (the statement queued in a pooler, or its session gone) is
+ * "couldn't tell", which ends the read only after `STALL_GIVE_UP_MS` with nothing heard.
+ *
+ * A READ GIVEN UP ON IS CANCELLED ON THE DATABASE before its connection is closed: closing the socket alone left its
+ * query running on the source for its whole length (Postgres notices a client gone only when it writes to it), and a
+ * read asked again began a second beside it. The CancelRequest goes the way the connection came, so a pooler maps its
+ * own key to the backend's, as it does for any client's cancel.
+ */
+export async function watchedRead<C extends CatalogConnection>(o: {
+  connect: () => Promise<C>;
+  read: (pg: Pick<C, "query">) => Promise<SourceFacts>;
+  signal: AbortSignal;
+  log: (m: string) => void;
+  mark?: string;
+  watch?: { now?: () => number; lookMs?: number; quietMs?: number; giveUpMs?: number; checkMs?: number };
+  cancelMs?: number;
+}): Promise<SourceFacts> {
+  const mark = o.mark ?? `mason catalog read ${randomBytes(8).toString("hex")}`;
+  const c = await o.connect();
+  // the statement running now, by its number: what the check asks the database about
+  let statement = 0;
+  const marked = (n: number): string => `/* ${mark} ${n} */`;
+  let silent: string | null = null, ended = false;
+  /** Gives the read up: its statement cancelled on the database (the sending bounded), then its connection closed. */
+  const giveUp = (why: string): void => {
+    if (ended) return;
+    ended = true;
+    silent = why;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<void>((resolve) => { timer = setTimeout(resolve, o.cancelMs ?? CANCEL_SEND_MS); timer.unref?.(); });
+    void Promise.race([c.cancel(), late])
+      // tolerated: the read ends all the same, its connection closed below; the database may then run the statement to
+      // its end, which is said in the log
+      .catch((e: unknown) => o.log(`a read of the database's tables that was given up on could not be cancelled there (${(e as Error).message}): its statement may run to its end`))
+      .finally(() => { clearTimeout(timer); c.close(); });
+  };
+  if (o.signal.aborted) { c.close(); throw new Error("the read ran out of time"); }
+  o.signal.addEventListener("abort", () => giveUp("the read ran out of time"), { once: true });
+  const stopWatch = stallWatch({
+    ...o.watch,
+    lastHeard: () => c.lastHeardAt,
+    check: async (signal) => {
+      const asked = statement;
+      if (asked === 0) throw new Error("the read has sent nothing yet");
+      const p = await o.connect();
+      if (signal.aborted) { p.close(); throw new Error("no answer in time"); }
+      signal.addEventListener("abort", () => p.close(), { once: true });
+      try {
+        // the check's own query begins with SELECT, never with the comment: it never finds itself
+        const rows = (await p.query("SELECT state, wait_event, extract(epoch FROM now() - state_change)::float8::text FROM pg_stat_activity " +
+          `WHERE query LIKE '${marked(asked)}%'`)).rows;
+        // the statement asked about ended meanwhile and another began: it progresses
+        if (asked !== statement) return null;
+        return statementVerdict(rows);
+      } finally { p.close(); }
+    },
+    onSilent: giveUp,
+  });
+  const tagged = { query: ((sql: string) => c.query(`${marked(++statement)} ${sql}`)) as C["query"] };
+  try {
+    // never queued behind a lock for long: the sizes it reads take a lock of every table, which a migration's ALTER (or
+    // one queued behind another session) holds; this session's settings alone, nothing on the database
+    await tagged.query(`SET lock_timeout = ${CATALOG_LOCK_TIMEOUT_MS}`);
+    return await o.read(tagged);
+  } catch (e) {
+    // the read the watch gave up on: said as what it found, never as the cancel or the closed connection
+    if (silent !== null) throw new Error(silent);
+    throw e;
+  } finally {
+    stopWatch();
+    // a read that ended by itself is closed now; one given up on, once its cancel is sent
+    if (!ended) { ended = true; c.close(); }
+  }
+}
+
+/**
+ * What the database says of a read's current statement: `pg_stat_activity`'s rows whose query begins with its comment
+ * (state, wait_event, seconds since the state changed). Null while it works on it; the reason when it does not (its
+ * results wait to be sent, or it is done with it and they never arrived); thrown when it cannot tell (no such query
+ * there: queued in a pooler, or its session gone; or a row this user may not see).
+ */
+export function statementVerdict(rows: ReadonlyArray<ReadonlyArray<string | null | undefined>>): string | null {
+  const row = rows.find((r) => r[0] === "active") ?? rows[0];
+  if (row === undefined) throw new Error("the database runs no statement of the read just now");
+  if (row[0] === null || row[0] === undefined) throw new Error("the database does not show the read's session to this user");
+  // the database waits to send results this run never received: the connection, not the database, is stuck
+  if (row[0] === "active" && row[1] === "ClientWrite") return "the database has results for it that do not arrive: the connection went silent";
+  if (row[0] === "active") return null;
+  return `the database has had nothing to do for it for ${Math.round(Number(row[2]))} s (its session is ${row[0]}): the connection went silent`;
 }
 
 /** What an actor's request came to: the number of its read (to carry to its next request), and null when that read is

@@ -349,7 +349,9 @@ async function readNow(ctx: RunContext, req: http.IncomingMessage, res: http.Ser
 
 async function state(ctx: RunContext, columns = false, show = true): Promise<unknown> {
   // what the commands and the page show of the database is as of about a minute ago at most (issue 890), never waited
-  // for past a moment (the review of PR 900, B1: a read held by a lock left the run answering nothing)
+  // for past a moment (the review of PR 900, B1: a read held by a lock left the run answering nothing). `show` false:
+  // the request read the database itself just now (an add, a remove: `readNow`), and its answer's state is that read,
+  // never a second one (the review at 0d5a63fc, B2)
   if (show) await ctx.freshFacts?.();
   return runState(ctx, ctx.duck.copies(), await ctx.duck.stream(), Date.now(), { columns });
 }
@@ -922,12 +924,12 @@ export function createRunServer(ctx: RunContext): http.Server {
             if (refused !== null) { fs.writeFileSync(at.file, at.text); sendFailure(res, statusOf(refused), refused); return; }
             if (!r.already) ctx.log(`added ${r.table} to ${r.file}`);
             ctx.sourcesChanged();
-            sendJson(res, 200, { ...r, state: await state(ctx) });
+            sendJson(res, 200, { ...r, state: await state(ctx, false, false) });
           } else {
             const r = removeTables(ctx, [body.table]);
             for (const t of r.removed) ctx.log(`removed ${t} from ${r.file}`);
             ctx.sourcesChanged();
-            sendJson(res, 200, { ...r, state: await state(ctx) });
+            sendJson(res, 200, { ...r, state: await state(ctx, false, false) });
           }
         } else if (method === "POST" && url.pathname === "/api/ui/tunnel") {
           await openTunnel(ctx, tunnels, req, res);
@@ -1038,7 +1040,7 @@ export function createRunServer(ctx: RunContext): http.Server {
           // the sync stops copying a removed table, and drops its copy
           ctx.sourcesChanged();
           for (const t of r.removed) ctx.log(`removed ${t} from ${r.file}`);
-          sendJson(res, 200, { ...r, state: await state(ctx) });
+          sendJson(res, 200, { ...r, state: await state(ctx, false, false) });
         } else {
           sendFailure(res, 404, { message: `no ${req.method} ${url.pathname}: this is mason start's server for the mason command (mason --help)`, code: "not_found" });
         }

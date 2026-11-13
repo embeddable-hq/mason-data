@@ -2229,7 +2229,16 @@ database is asked about the read's session, within 10 s, on a connection of its 
 gone or waiting to send results that never arrive (`ClientWrite`) is silent; and when the database cannot be asked
 either (a source that stopped answering altogether: a check made by the database's word alone was "couldn't tell" for
 the whole 15 minutes, the third re-check), a minute with neither bytes nor the database's word is silent. A silent read
-ends, said as such; the actor runs it again and the next read begins. **Why.** The 10-second timer connected about 8,640 times
+ends, said as such; the actor runs it again and the next read begins. The review at 0d5a63fc: behind a pooler (PgBouncer,
+Supavisor, Neon's proxy), BackendKeyData carries the pooler's id, not the backend's, so the check asked
+`pg_stat_activity` about a process that does not exist, judged the session gone, and ended every read of a large
+catalog after 15 s, its query left running on the source; and "fresh" counted from when a read began, so a read over a
+minute was stale as it ended and one `mason add` read the catalog twice. So the read's session is found by what it runs:
+each statement begins with a comment of the read's own (a random id and the statement's number), which `pg_stat_activity`
+shows whatever the pooler; a read given up on is cancelled on the database, by a CancelRequest sent the way its
+connection came (a pooler maps its own key, as for any client), before its connection closes; a read is fresh for a
+minute after it ENDS; and an add's or a remove's answer carries the read it acted on, never a second.
+`tests/integration/cli-catalog-pooler.itest.ts` reads through a proxy that rewrites the id. **Why.** The 10-second timer connected about 8,640 times
 a day whatever each table's sync, so a serverless compute (Neon, Aurora Serverless) never suspended with every table
 `sync: off`. A failed read keeps the last one and is said in the log, and is not tried again within the minute.
 `tests/integration/cli-catalog-read.itest.ts` counts the run's connections over an idle window.

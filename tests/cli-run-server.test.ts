@@ -1359,3 +1359,33 @@ test("an add, a remove, a column or Sync choice whose read of the database fails
     delete (ctx as unknown as Ctx).factsNow;
   }
 });
+
+// THE REVIEW OF PR 900 AT 0d5a63fc, B2: an add's pick and a remove answer with the run's state, and that state asked for
+// a read of its own (`freshFacts`) — over a catalog whose read took over a minute, the read the pick had just waited on
+// was already stale, so one `mason add` read the catalog twice, and each pick waited up to 2 s more
+test("an add and a remove answer with the state of the read they acted on: never a second read of the database's tables", async () => {
+  type Ctx = { freshFacts?: () => Promise<void>; factsNow?: (carried: number | null) => Promise<unknown> };
+  const asked: string[] = [];
+  (ctx as unknown as Ctx).freshFacts = async () => { asked.push("show"); };
+  (ctx as unknown as Ctx).factsNow = async (carried) => { asked.push("act"); return { read: carried ?? 7, failure: null, running: false }; };
+  const was = fs.readFileSync(sourceFile, "utf8");
+  const wasChosen = chosen;
+  chosen = folder;
+  try {
+    const added = await pickIt("public.customers");
+    assert.equal(added.status, 200, added.text);
+    assert.ok((JSON.parse(added.text) as { state?: unknown }).state !== undefined, "the answer carries the state");
+    const unpicked = await pickIt("public.customers", false);
+    assert.equal(unpicked.status, 200, unpicked.text);
+    assert.equal((await pickIt("public.customers")).status, 200);
+    const removed = await call("POST", "/api/remove", { body: { tables: ["customers"] } });
+    assert.equal(removed.status, 200, removed.text);
+    assert.ok((JSON.parse(removed.text) as { state?: unknown }).state !== undefined, "the answer carries the state");
+    assert.deepEqual(asked, ["act", "act", "act", "act"], "each edit read the database once, as it acted; its answer asked for no other read");
+  } finally {
+    delete (ctx as unknown as Ctx).freshFacts;
+    delete (ctx as unknown as Ctx).factsNow;
+    fs.writeFileSync(sourceFile, was);
+    chosen = wasChosen;
+  }
+});

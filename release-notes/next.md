@@ -17,8 +17,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   own default, which every role has. It says so as information. A grant someone made, or a schema the role owns, is
   still a warning.
 - **Calmer words.** The note for a serverless database (Neon, Aurora Serverless) now names everything that keeps it
-  awake. `mason share` says it is for trying
-  Mason out. A table's line says "not kept current" in lower case.
+  awake. `mason share` says it is for trying Mason out. A table's line says "not kept current" in lower case.
 
 - **A JSON field read through a path your tool sends as a parameter is now as fast as one written in the query.**
   Metabase sends the path of every JSON field it unfolds as a parameter (`payload #>> array[$1]::text[]`). Mason used

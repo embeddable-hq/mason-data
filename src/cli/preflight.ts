@@ -405,7 +405,7 @@ export async function collationVersion(pg: Pick<PgConnection, "query">, versionN
 
 /** The database's facts: its version, whether it is a standby, and every table this user can read. */
 /** `collations: false` (the run's read when asked, src/cli/source-catalog.ts) leaves the database's collations unread: they were read at the start */
-export async function readSourceFacts(pg: PgConnection, counted: Map<number, number> = COUNTED, o: { collations?: boolean } = {}): Promise<SourceFacts> {
+export async function readSourceFacts(pg: Pick<PgConnection, "query">, counted: Map<number, number> = COUNTED, o: { collations?: boolean } = {}): Promise<SourceFacts> {
   const r = (await pg.query("SELECT current_setting('server_version_num'), current_setting('server_version'), pg_is_in_recovery()::text")).rows[0]!;
   const rows = JSON.parse((await pg.query(TABLES_SQL)).rows[0]?.[0] ?? "null") as TableRow[] | null;
   const tables: SourceTable[] = [];
@@ -444,7 +444,7 @@ export async function readSourceFacts(pg: PgConnection, counted: Map<number, num
 }
 
 /** The server's system identifier, or null when this user may not read it (only that refusal: any other error is real). */
-export async function systemIdentifier(pg: PgConnection): Promise<string | null> {
+export async function systemIdentifier(pg: Pick<PgConnection, "query">): Promise<string | null> {
   try { return (await pg.query("SELECT system_identifier::text FROM pg_control_system()")).rows[0]?.[0] ?? null; }
   catch (e) {
     // 42501 insufficient_privilege: a server that revoked pg_control_system from PUBLIC. The identity is then unknown,

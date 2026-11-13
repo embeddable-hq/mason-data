@@ -7,7 +7,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import type { SourceFacts } from "../src/cli/preflight.ts";
 // imported when the tests run: at a commit without the module the file still loads, and each test fails by name
-const { actRead, CATALOG_FRESH_MS, CATALOG_READ_HEADER, CATALOG_READ_TIMEOUT_MS, catalogFailure, sourceCatalog, stallWatch } = await import("../src/cli/source-catalog.ts" as string).catch(() => ({})) as typeof import("../src/cli/source-catalog.ts");
+const { actRead, CATALOG_FRESH_MS, CATALOG_READ_HEADER, CATALOG_READ_TIMEOUT_MS, catalogFailure, sourceCatalog, stallWatch, statementVerdict, watchedRead } = await import("../src/cli/source-catalog.ts" as string).catch(() => ({})) as typeof import("../src/cli/source-catalog.ts");
 
 const factsOf = (tables: string[]): SourceFacts => ({ version: 160000, versionText: "16", standby: false, systemIdentifier: null,
   tables: tables.map((t) => ({ source: `public.${t}`, schema: "public", table: t, key: ["id"], rows: 1, bytes: 8192, comment: null, columns: [], foreignKeys: [] })) });
@@ -310,4 +310,113 @@ test("the page asks again carrying the read's number while it runs, with the run
   });
   assert.deepEqual(await ask("api/tables/t/columns"), { body: { table: "t", columns: [] } });
   assert.deepEqual(seen, [undefined, "4", "4"]);
+});
+
+// THE REVIEW OF PR 900 AT 0d5a63fc, B2: "fresh" counted from when the last read BEGAN, so a read over a minute long was
+// stale the moment it ended: the add that had waited on it began a second, and an open page read back to back
+test("a read longer than a minute is fresh for a minute after it ENDS: what shows the catalog reuses it, never a read again at once", async () => {
+  let now = CATALOG_FRESH_MS, reads = 0;
+  let release: (f: SourceFacts) => void = () => undefined;
+  const c = sourceCatalog(factsOf(["a"]), () => { reads++; return new Promise<SourceFacts>((r) => { release = r; }); }, { log: () => undefined, now: () => now });
+  now += CATALOG_FRESH_MS;
+  // an actor's read, 155 s long (the review's throttled catalog)
+  const read = c.ask();
+  now += 155_000;
+  release(factsOf(["a", "b"]));
+  const got = await c.wait(read);
+  assert.ok(got !== null && "facts" in got);
+  assert.equal(reads, 1);
+  // the add's next step and an open page's polls, at once and a while after: the read that just ended
+  assert.deepEqual(names(await c.fresh({ waitMs: 2_000 })), ["a", "b"]);
+  now += CATALOG_FRESH_MS - 1;
+  assert.deepEqual(names(await c.fresh({ waitMs: 2_000 })), ["a", "b"]);
+  assert.equal(reads, 1, "one read, however long it took");
+  // a minute after it ended: read again
+  now += 1;
+  const again = c.fresh();
+  assert.equal(reads, 2);
+  release(factsOf(["a", "b", "c"]));
+  assert.deepEqual(names(await again), ["a", "b", "c"]);
+});
+
+/** A fake connection of a catalog read: each statement recorded; one matching `slow` answers after `slowMs`, or fails
+ *  with Postgres's cancel when a CancelRequest is sent first. */
+function fakeConnection(o: { slow: RegExp; slowMs: number; events: string[]; statements: string[] }) {
+  let cancelPending: ((e: Error) => void) | null = null;
+  return {
+    lastHeardAt: Date.now(),
+    query: (sql: string) => {
+      o.statements.push(sql);
+      if (!o.slow.test(sql)) return Promise.resolve({ rows: [["x"]] });
+      return new Promise<{ rows: Array<Array<string | null>> }>((resolve, reject) => {
+        const t = setTimeout(() => resolve({ rows: [["x"]] }), o.slowMs);
+        cancelPending = (e) => { clearTimeout(t); reject(e); };
+      });
+    },
+    cancel: async () => { o.events.push("cancel"); cancelPending?.(new Error("canceling statement due to user request")); },
+    close: () => { o.events.push("close"); },
+  };
+}
+const quick = { lookMs: 10, quietMs: 30, giveUpMs: 150, checkMs: 100 };
+
+// THE REVIEW OF PR 900 AT 0d5a63fc, B1: the watch asked pg_stat_activity about BackendKeyData's process id, which a
+// pooler rewrites to its own: no row, "its session is gone", and every read of a large catalog ended after 15 s
+test("a read's session is found by its statement's comment, never by a process id: a statement the database works on is never cut, however long", async () => {
+  const events: string[] = [], statements: string[] = [], checks: string[] = [];
+  let connects = 0;
+  const main = fakeConnection({ slow: /json_agg/, slowMs: 400, events, statements });
+  const facts = await watchedRead({
+    connect: async () => {
+      if (connects++ === 0) return main;
+      return { lastHeardAt: Date.now(), cancel: async () => undefined, close: () => undefined,
+        query: async (sql: string) => { checks.push(sql); return { rows: [["active", null, "1"]] }; } };
+    },
+    read: async (pg) => { await pg.query("SELECT version()"); await pg.query("SELECT json_agg(t) FROM t"); return factsOf(["a"]); },
+    signal: new AbortController().signal, log: () => undefined, mark: "mason catalog read test1", watch: quick,
+  });
+  assert.deepEqual(names(facts), ["a"], "read to its end: 400 ms, past the 150 ms a silent one is given");
+  assert.deepEqual(statements.map((q) => /^\/\* mason catalog read test1 (\d+) \*\/ /.exec(q)?.[1]), ["1", "2", "3"], "each statement begins with the read's comment and its number");
+  assert.ok(checks.length > 0, "the database was asked");
+  for (const q of checks) {
+    assert.match(q, /WHERE query LIKE '\/\* mason catalog read test1 3 \*\/%'/, "about the statement running now, by its comment");
+    assert.doesNotMatch(q, /\bpid\b/, "never by a process id");
+  }
+  assert.deepEqual(events, ["close"], "never cancelled; closed once");
+});
+
+test("a read given up on is cancelled on the database, through its own connection's way, before that connection is closed", async () => {
+  const events: string[] = [], statements: string[] = [];
+  let connects = 0;
+  const main = fakeConnection({ slow: /json_agg/, slowMs: 60_000, events, statements });
+  const began = Date.now();
+  await assert.rejects(watchedRead({
+    connect: async () => {
+      if (connects++ === 0) return main;
+      // the database: done with the read's statement, whose results never arrived
+      return { lastHeardAt: Date.now(), cancel: async () => undefined, close: () => undefined,
+        query: async () => ({ rows: [["idle", "ClientRead", "20"]] }) };
+    },
+    read: async (pg) => { await pg.query("SELECT json_agg(t) FROM t"); return factsOf(["a"]); },
+    signal: new AbortController().signal, log: () => undefined, watch: quick,
+  }), /the database has had nothing to do for it for 20 s \(its session is idle\): the connection went silent/);
+  assert.ok(Date.now() - began < 5_000);
+  assert.deepEqual(events, ["cancel", "close"], "the cancel first, then the connection closed");
+  // a read past its last guard: the same
+  const events2: string[] = [];
+  const stop = new AbortController();
+  const p = watchedRead({ connect: async () => fakeConnection({ slow: /json_agg/, slowMs: 60_000, events: events2, statements: [] }),
+    read: async (pg) => { await pg.query("SELECT json_agg(t) FROM t"); return factsOf(["a"]); }, signal: stop.signal, log: () => undefined });
+  await settle();
+  stop.abort();
+  await assert.rejects(p, /the read ran out of time/);
+  assert.deepEqual(events2, ["cancel", "close"]);
+});
+
+test("what the database says of the read's statement: working, or why it went silent, or couldn't tell", () => {
+  assert.equal(statementVerdict([["active", null, "3"]]), null);
+  assert.equal(statementVerdict([["idle", "ClientRead", "40"], ["active", "Lock", "2"]]), null, "the statement working on one session is working");
+  assert.match(statementVerdict([["active", "ClientWrite", "30"]])!, /results for it that do not arrive/);
+  assert.match(statementVerdict([["idle in transaction", null, "17.4"]])!, /nothing to do for it for 17 s \(its session is idle in transaction\)/);
+  assert.throws(() => statementVerdict([]), /runs no statement of the read just now/, "queued in a pooler, or gone: couldn't tell");
+  assert.throws(() => statementVerdict([[null, null, null]]), /does not show the read's session/);
 });
