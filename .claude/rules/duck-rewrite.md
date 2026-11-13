@@ -284,9 +284,12 @@ paths:
     (`PlannedSql.pathParams`, `foldParam`: a text or varchar key or element, a text[] path, an int2 or int4 index, bare or
     cast to its own type with no length), and each Execute runs the statement planned again with their values as
     Postgres read them (`Session.pathsBound`, EXPLAIN too), kept by those values and each folded read guarded by them
-    (`folded`: a value it was not planned for raises XX000, never another path's answer; the guard also keeps the
-    parameter in the SQL, which DuckDB numbers by the ones it meets). A NULL value, another type and a row's element
-    stay computed; a text[] parameter is bound as the JSON Postgres read it to (`readParameters`, `from_json`); a cast
+    (`folded`: `CASE WHEN $n::varchar = '<value>' THEN <the read> ELSE <the read as at the Parse> END`, so a value it was
+    not planned for is read by the function, never another path's; never DuckDB's `error()` there, which DuckDB holds
+    volatile and refuses as a window's key; the guard also keeps the parameter in the SQL, which DuckDB numbers by the
+    ones it meets). A folded read is never read from a stored column nor counted as a read by the policy (`keptRead`)
+    until a stored path read under a late select list or a keyed GROUP BY names its column (issue 919). A NULL value,
+    another type and a row's element stay computed; a text[] parameter is bound as the JSON Postgres read it to (`readParameters`, `from_json`); a cast
     that changes the text (`varchar(n)[]`, `char(n)[]`, `name[]`) is refused, `json-path-type`. The oracle's
     `jsonPathCases` holds every spelling on both types, its setting scripts every bound one, `tests/duck-wire.test.ts`
     "a json path bound as a parameter …" the hops;

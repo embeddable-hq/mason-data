@@ -1966,8 +1966,8 @@ class Session {
    * the function's, a call to the main thread a row (×18 of Postgres for a grouped field, ×45–63 for a sync's nested
    * fingerprint). Where the plan says it reads such parameters (PlannedSql.pathParams), the Bind's values are read as
    * Postgres reads them (the one reading every Execute's values have, `duckParameters`) and the statement is planned
-   * again with them (planDuck's `boundPaths`): each read is then the one its literal would be — DuckDB's own read, a
-   * stored column, one path in the request log. The plan is kept by its values beside the others (`Server.duckPlan`),
+   * again with them (planDuck's `boundPaths`): each read is then DuckDB's own read, as its literal's is (never a stored
+   * column yet: issue 919, src/duck/rewrite.ts keptRead). The plan is kept by its values beside the others (`Server.duckPlan`),
    * never on the statement, so a statement bound to another path is planned for that path; a NULL value plans nothing
    * (the read stays the function's). As at `boundOnWire`: under the Parse's settings, the statement's own time (a
    * cancel aborts it), a plan whose parameters or result are not the Parse's not run, and one Postgres or the rewrite

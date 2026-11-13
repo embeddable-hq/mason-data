@@ -1479,8 +1479,13 @@ stored, then the path stored:
 unfolds (`col #>> array[?]::text[]`), which the Parse cannot see, so each such read was the function's. The plan says
 which parameters it reads as a path (`PlannedSql.pathParams`), and an Execute plans the statement again with their
 values as Postgres read them (`Session.pathsBound`). The plan is kept by those values and each folded read is
-guarded by them (a value it was not planned for raises XX000): the guard also keeps every parameter in the SQL, since
-DuckDB numbers its parameters by the ones the text names (`SELECT $2` has one, and binding two fails). 1 M rows of
+guarded by them: `CASE WHEN $1::varchar = 'k' THEN <the native read> ELSE <the read as at the Parse> END`, so a value
+it was not planned for is read by the function. The guard first raised (DuckDB's `error()`), which DuckDB holds
+volatile, so a window keyed by the read was refused (PR 917's review). The guard also keeps every parameter in the
+SQL, since DuckDB numbers its parameters by the ones the text names (`SELECT $2` has one, and binding two fails). A
+folded read is not read from a stored column and does not count toward storing one: a stored path read under a late
+select list or a keyed GROUP BY names its column where it is not (issue 919), and Metabase's shapes would have met it
+once the policy stored their paths. 1 M rows of
 two jsonb columns of 270-290 B, a 4-vCPU machine at a load of about 24 (other agents' work), each against Postgres
 run alternately, three runs (2026-11-13):
 

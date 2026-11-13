@@ -388,6 +388,9 @@ class Rewriter {
    * null: not such a read, or not stored — the caller writes the call.
    */
   private keptRead(l: AstNode, steps: AstNode, either: boolean, canonical: boolean, asText: boolean): AstNode | null {
+    // a path bound as a parameter is read natively, never from its stored column, and is no read the policy counts:
+    // a stored path read under a late select list or a keyed GROUP BY names its column where it is not (issue 919)
+    if (this.folds !== null && this.folds.size > 0) return null;
     if (this.kept === null || kindOf(l) !== "ColumnRef") return null;
     const path = constString(steps);
     const fields = (bodyOf(l).fields ?? []) as AstNode[];
@@ -810,7 +813,7 @@ class Rewriter {
       case "CollateClause": return this.collateClause(b);
       case "MinMaxExpr": return this.minMax(b);
       case "SQLValueFunction": return this.sqlValueFunction(b);
-      case "NullTest": return this.folded(() => this.jsonNullTest(b));
+      case "NullTest": return this.folded(() => this.jsonNullTest(b), () => ({ NullTest: { ...b } }));
       // CASE x WHEN v …: each WHEN is x = v, jsonb's equality for a jsonb (its keys compared)
       case "CaseExpr": {
         this.caseOfNumericParam(b);
@@ -6161,7 +6164,7 @@ class Rewriter {
    * A PARAMETER IN A JSON PATH, READ AS THE CONSTANT IT WAS BOUND TO (issues 465, 466; `boundPaths`): `n` a parameter,
    * bare or cast to its own type with no length (`$1::text`), of a type whose bound text IS the path's text — `text` or
    * `varchar` for a key or an element, `text[]` or `varchar[]` for a whole path (its JSON), int2 or int4 for an index —
-   * so the read is the one its literal would be: DuckDB's own read, a stored column, one path in the request log.
+   * so the read is DuckDB's own read, as its literal's is (never its stored column yet: `keptRead`, issue 919).
    * Anything else (another type, whose cast to text writes its own text; a cast with a length; a NULL value) is null,
    * and the read stays the function's, as at the Parse. The parameter is recorded as a path's (`pathParams`) whatever
    * its value, so the listener knows to plan the statement again at an Execute; it folds only inside a read's rule
@@ -6243,22 +6246,27 @@ class Rewriter {
 
   /**
    * A JSON READ WHOSE PATH FOLDED A BOUND PARAMETER (`foldParam`), GUARDED BY THE VALUE IT FOLDED: `CASE WHEN $n::varchar
-   * IS NULL OR $n::varchar <> '<the value>' THEN error(…) ELSE <the read> END`. A plan made for one value is kept by
-   * that value (the listener's plans are keyed by it), so the guard never fires; should it ever be run with another,
-   * it raises rather than answer another path's value — and it keeps every parameter in the SQL, which DuckDB numbers
-   * by the ones it meets. DuckDB compares two constants once a vector, and a read from a stored column alone still
-   * names no document. `make` null: no read written here, nothing folded.
+   * = '<the value>' AND … THEN <the read> ELSE <the read as at the Parse> END`. A plan made for one value is kept by that
+   * value (the listener's plans are keyed by it), so the ELSE is never taken; run with another value, it reads that one
+   * through the function, Postgres's answer either way. Never `error()` there: DuckDB holds an expression calling it
+   * volatile, and refuses it as a window's key (PR 917's review). It keeps every parameter in the SQL, which DuckDB
+   * numbers by the ones it meets; DuckDB compares two constants once a vector, and runs the ELSE on no row.
+   * `make` null: no read written here, nothing folded. `asAtParse`: the read as the Parse writes it (`make` again with
+   * nothing folded, by default).
    */
-  private folded(make: () => AstNode | null): AstNode | null {
+  private folded(make: () => AstNode | null, asAtParse: () => AstNode | null = make): AstNode | null {
     const outer = this.folds;
     this.folds = new Map();
-    try {
-      const read = make();
-      if (read === null || this.folds.size === 0) return read;
-      const bound = (p: number): AstNode => cast({ ParamRef: { number: p } }, ["varchar"]);
-      const other = or([...this.folds].flatMap(([p, v]) => [isNull(bound(p)), op("<>", bound(p), strConst(v))]));
-      return caseWhen([[other, fn("error", [strConst("mason[XX000]: a statement planned for one bound json path was run with another (a Mason bug: report it)")])]], read);
-    } finally { this.folds = outer; }
+    let read: AstNode | null, folds: Map<number, string>;
+    try { read = make(); folds = this.folds; } finally { this.folds = outer; }
+    if (read === null || folds.size === 0) return read;
+    this.folds = null;
+    let parsed: AstNode | null;
+    try { parsed = asAtParse(); } finally { this.folds = outer; }
+    if (parsed === null) throw new Error("a json read folded at the Execute has no form at the Parse: report it (src/duck/rewrite.ts folded)");
+    const bound = (p: number): AstNode => cast({ ParamRef: { number: p } }, ["varchar"]);
+    const same = [...folds].map(([p, v]) => op("=", bound(p), strConst(v)));
+    return caseWhen([[same.length === 1 ? same[0]! : and(same), read]], parsed);
   }
 
   /** `#>`'s path, or VARIADIC's array (`list` as DuckDB reads it), as the JSON array of its elements; a NULL path or a
