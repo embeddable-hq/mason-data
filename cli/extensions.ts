@@ -64,7 +64,7 @@ export function packageJson(m: Manifest, p: ExtensionPlatform, cliVersion: strin
   return {
     name: packageName(p),
     version: cliVersion,
-    description: `The copy's postgres and inet extensions for @mason-data/cli on ${p} (engine ${m.engine}), so Mason downloads nothing after npm install`,
+    description: `The sync's postgres and inet extensions for @mason-data/cli on ${p} (engine ${m.engine}), so Mason downloads nothing after npm install`,
     homepage: "https://github.com/embeddable-hq/mason-data#readme",
     // built by this script; the package's own folder is cli/platforms/<platform>/, which is not committed
     repository: { type: "git", url: "git+https://github.com/embeddable-hq/mason-data.git", directory: `cli/platforms/${p}` },
@@ -79,7 +79,7 @@ export function packageJson(m: Manifest, p: ExtensionPlatform, cliVersion: strin
 }
 
 const readme = (m: Manifest, p: ExtensionPlatform): string =>
-  `# ${packageName(p)}\n\nThe copy's extensions for [@mason-data/cli](https://www.npmjs.com/package/@mason-data/cli) on ${p}: the ` +
+  `# ${packageName(p)}\n\nThe sync's extensions for [@mason-data/cli](https://www.npmjs.com/package/@mason-data/cli) on ${p}: the ` +
   `\`postgres\` and \`inet\` extensions of the engine Mason runs, ${m.engine} (${EXTENSION_PLATFORMS[p]}), unchanged, as their authors ` +
   "publish them. You do not install this package yourself: npm installs it with `@mason-data/cli` on this platform, and Mason loads the " +
   "extensions from it, so nothing is downloaded after `npm install`. `mason doctor` says whether it found them.\n\nLICENSE says whose they are, and their licences.\n";

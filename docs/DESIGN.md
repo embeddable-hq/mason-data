@@ -556,6 +556,7 @@ are `.claude/rules/duck-sync.md` "Keeping a copy current". Why each is so:
 | on a standby: a named publication, and Postgres 16+ | a standby decodes only from 16 |
 | `REPLICA IDENTITY NOTHING` and a `key:` table are refused | publishing a table of `REPLICA IDENTITY NOTHING` fails the app's own UPDATEs and DELETEs; a `key:` table's changes carry no key to apply them by |
 | a table joins once caught up by ONE poll; a new slot catches the copies up by one poll from their watermarks | a key's changes replayed in commit order end at its state, so nothing is copied again |
+| a start that reads ANOTHER publication than the run before (Mason's own → named, named → own, named → named) drops the slot, verified gone, and the run makes it anew, catching each replicated table up by one poll (`staleReplication`, issue 893, 2026-11-12) | a slot resumed with a new publication decodes a transaction open across its creation through a catalog without it: Postgres 18.3's pgoutput skipped its insert, update and delete with only a WARNING ("The publication does not exist at this point in the WAL"), Postgres 16.15's failed the stream at every restart; a new slot's creation waits for every open transaction, so what it misses the poll reads. Waiting instead for the old slot to pass every older transaction was not chosen: proving none is open needs `pg_stat_activity` of every role, which Mason's read-only role may not see. The price is one full read of each replicated table on the database, said at the start. The catch-up marks are committed BEFORE the slot is made (the review of PR 897: written after it, a run killed between the two met, at its next start, a slot of the name its old record knew, and streamed it with no catch-up: the open transaction's changes lost for good, 3 of 3 `kill -9`s on Postgres 18); and no catch-up ends a mark while the slot is made, the in-memory marks set anew only once it exists (the second review: set before it, a catch-up queued behind a copy polled while `CREATE_REPLICATION_SLOT` waited on an open transaction and ended the mark, and that transaction's changes reached neither the poll nor the slot, 2 of 2 runs on Postgres 18) |
 | a batch (500 ms or 10 k changes) commits with its position before it is acknowledged; idle, the server's position is acknowledged | a run that dies skips what it applied; an idle slot holds no WAL |
 | a large transaction is applied in committed pieces of `PIECE_CHANGES` (10,000) | 607,000 changes in one transaction ran a sync out of a 96 MB heap folded whole; in pieces it ran in 48 MB |
 | a change is written as the COPY's columns (`Sync.asCopied`, `projectTuple`) | a column removed from a 22 M-row table's entry and restored during its re-copy: held changes named a column the copy lacked (`Binder Error`) and the table stopped |
@@ -1934,9 +1935,8 @@ EXPLAIN a table, a few at once: a union of them all failed whole for one table i
 in the request log the agent never sent. A table is named as a statement writes it (`public."Clients"`, the formatter
 EXPLAIN's text uses), and `describe` reads a name as Postgres does (quoting, folding) in mcp itself, never by
 `to_regclass`, whose refusal of a name it cannot read would be a row of the request log too. A column's type is named
-by the catalog's `mason_wire_type`: the wire sends the SOURCE's OID for a type the source made (an enum, a citext),
-which the catalog holds under another OID — and both count from 16384, so `format_type` of the wire's OID can be
-another relation's row type in the catalog; the catalog's map of source OIDs is the one place a wire OID is named.
+by the catalog's `pg_catalog.format_type` of the RowDescription's OID: the OID the wire sends for a type the source
+made (an enum, a citext) is the catalog's own, which its pg_type names ("One OID for a type the source made").
 A request the client cancels (`notifications/cancelled`) is a CancelRequest for its statement, and is answered no
 further. With no URL it refuses and names `mason user add claude`; it never makes a user: a password is the person's
 to hand out. The protocol is written by hand (initialize, ping, tools/list, tools/call, resources/list, resources/read)
@@ -1960,8 +1960,51 @@ resource server, publishing its protected-resource metadata, the bearer token ma
 log still names who asked — or, before an authorization server exists, a user's password as a bearer token for the
 clients that take a static header. The tool code would not change; the transport and the login would.
 
-**Where.** `src/cli/mcp.ts`, `src/cdc/pg-wire.ts` (`extended`, `cancel`), `src/api/postgres/catalog.ts`
-(`sourceTypeNames`); `tests/cli-mcp.test.ts`, `tests/pg-wire.test.ts`.
+**Where.** `src/cli/mcp.ts`, `src/cdc/pg-wire.ts` (`extended`, `cancel`); `tests/cli-mcp.test.ts`, `tests/pg-wire.test.ts`.
+
+### One OID for a type the source made: the catalog's (2026-11-12, issue 861)
+
+**What.** The wire sent a column of a type the source made (an enum, a citext, a composite, a table's whole row) with
+the SOURCE's OID, while the catalog Postgres (PGlite) that answers every lookup holds that type at an OID of its own.
+Both count from 16384, so the catalog's pg_type could hold the source's number as another type. In a run seen,
+pg_type's 16511 was the catalog's row type of a table while the wire sent 16511 for a column of the enum `other.level`.
+A client that names a column by looking its RowDescription OID up in pg_type read the wrong type: pgjdbc's
+`getColumnTypeName` (so Metabase, DBeaver and Tableau's JDBC path), npgsql and asyncpg all do. A Parse naming that OID
+as a parameter's type was read as the other type too. Two readers had patched around the two numbers with maps of their
+own: `mason_wire_type` with an override of `format_type` in the catalog's `public`, and a field's `catalogOid` beside
+its wire OID for a generated table (issue 858).
+
+**Decision (the owner's, 2026-11-12): Mason sends the CATALOG's own OID for every type, a made one included.** Mason
+says a type's OID in the RowDescription, the ParameterDescription and any OID a statement answers (`::regtype`,
+`pg_typeof`, `pg_attribute.atttypid`). Each of these is the analysis's, so a client's pg_type lookup always names the
+right type and a Parse naming an OID Mason sent binds. The plan sends the analysis's OID as it is. `mason_wire_type`,
+the `format_type` override and `catalogOid` are gone, and `mason mcp` names a column with Postgres's own `format_type`.
+The source's OIDs still name the source's row types for the rewrite (`userTypes`, by name), and are never sent.
+
+Why not the other way, the catalog holding each made type at the source's OID: a first version did that, moving the
+catalog's rows (`pg_type`, `pg_attribute`, `pg_proc`, `pg_operator`, `pg_opclass` …) after its DDL. Its review found
+the two places it cannot reach. A `pg_node_tree` (`pg_proc.prosqlbody`) keeps the old OID: citext's 14 functions with
+a SQL body (`strpos`, `replace`, `split_part`, `translate`, `regexp_match` …) then answered `XX000 cache lookup failed
+for type`. And Postgres never clears its operator-class cache in a backend (`LookupOpclassInfo`): an index on a citext
+column fails every later plan over its table. Nothing in the catalog's system tables is rewritten.
+
+**What it costs a client.** A physical read replica shares its primary's OIDs, and Mason sent the primary's: an
+application that learned a made type's OID on its primary and decodes Mason's rows by it must now look the type up on
+Mason, as on any other Postgres database. And Mason's OIDs for made types can move when the synced tables change: the
+catalog is built again from the new schema (a table with a new enum added, say), and its types are numbered afresh.
+The review measured it: a client connected across such a change keeps the names it cached for the old numbers until it
+reconnects, while a new connection is always right. Built-in types never move.
+
+**The oracle** compares a made type's OID by what each server's own pg_type names it, schema-qualified
+(tests/integration/oracle/made-types.ts). A built-in type's OID, below 16384, stays held to exact equality.
+
+**`pg_typeof`** of a made type is the catalog's `regtype` under the session's search_path (src/duck/plan.ts
+`typeNames`), as Postgres names it: `other.level` where the schema is not on the path, `mood[]`, never pg_type's
+`level` or `_mood`.
+
+**Where.** `src/duck/plan.ts`, `src/duck/rewrite.ts` (`pg_typeof`), `src/api/postgres/catalog.ts`, `src/cli/mcp.ts`;
+`tests/duck-type-oids.test.ts` (the collision forced on a source by `lo_create`), the oracle's `made types by their
+OIDs` and `tests/integration/oracle/made-types.ts`.
 
 ### A session's settings are transactional (2026-10-30, issue 47)
 
@@ -3213,6 +3256,22 @@ block of its own is not measured and never written as 0; the Tables view's toolt
 are written into the file at DuckDB's own checkpoint, when the log passes 16 MiB, or when Mason stops). What the change
 kept: the synced data's file counts its write-ahead log (src/duck/file-bytes.ts `syncedDataBytes`, the one reader).
 **Where.** src/duck/usage.ts (`size`), src/duck/file-bytes.ts; tests/duck-usage.test.ts, tests/cli-run-server.test.ts.
+
+**What such a table shows (issue 883; the owner, 2026-11-12).** The Size cell said "—" for three reasons a reader could
+not tell apart. The run now says which, once (`unsizedTables`, src/duck/usage.ts; `GET /api/usage` `unsized`, beside
+`sizedAt`, when the sampler last measured, and `walBytes`, the log's size now — one file-size read, never a checkpoint):
+a served table measured since its first sync with no block is `in-log`, shown `< 3 MiB`, the log's size rounded up to a
+whole MiB (its rows take at most 0.8 times the log, its block 256 KiB, above) — but only while the FILE has not been
+written since the measure. PR 902's review met the gap: a 60,000-row table measured `in-log` beside a 7.7 MB log, two
+more tables pushed the log past 16 MiB, DuckDB checkpointed, and the next read said "< 1 MiB" of the new 3 KB log while
+the table took 1.8 MB in the file (the sampler writes the log every minute, so a log is rarely empty). So a measure keeps
+the file's stamp (its size and modification time to the nanosecond, `fileStamp`, src/duck/file-bytes.ts: a stat, no
+database work), taken as the facts it measures are read; DuckDB writes the file only at a checkpoint or for a bulk
+insert's whole row groups, so a stamp unchanged says no row left the log since, and a changed one, or an empty log, says
+some may have: `written-since`, shown `Measuring…` (whose rows moved cannot be told without database work, so it says
+they may be this table's). Each other `Measuring…` says its own reason: `synced-since` (its first sync finished after
+the measure) or `not-measured-yet` (no measure since Mason started: after a restart, never "synced since", which it was
+not). One whose first sync is not done shows nothing.
 
 ### First copy, and the poll's cost on the source
 

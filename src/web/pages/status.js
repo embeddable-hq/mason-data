@@ -22,7 +22,7 @@
 const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage?range=24h", queries: "#observability/queries?range=24h",
   slow: "#observability/queries?slow=1&range=24h", failedQueries: "#observability/queries?status=refused-or-failed&range=24h", failedEvents: "#observability/syncs?failures=1&range=24h" };
 import { VIEW_HASHES } from "../routes.js";
-import { statementMsText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRows, sessionsRows, diskRows, restartsRows, utcText,
+import { statementMsText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRows, sessionsRows, diskRows, restartsRows, utcText, staleText, staleWhy,
   unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, copyClick, readOnlyLine, tablesReadOnly, usersReadOnly } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
 import { readHost, hostEvery, hostKey, renderHostCard } from "../host-view.js";
@@ -94,7 +94,7 @@ export function keptWords(t, now = Date.now()) {
  *  tests/web-page.test.ts): a failed compaction, the share of its stored rows deleted, or its last compaction. */
 export function compactionWords(c, now = Date.now()) {
   if (c === undefined || c === null) return null;
-  if (c.error !== null) return `its compaction failed${c.retryAt === null ? "" : `, tried again after ${c.retryAt.slice(11, 16)} UTC`} (mason logs --events says why)`;
+  if (c.error !== null) return `its compaction failed${c.retryAt === null ? "" : `, tried again after ${c.retryAt.slice(11, 16)} UTC`} (Sync events says why)`;
   if (c.waiting) return `${c.deadShare === null ? "" : `${Math.floor(c.deadShare * 100)}% of its stored rows deleted, `}not compacted: ${c.waiting}`;
   if (c.deadShare !== null && c.deadShare >= 0.1) return `${Math.floor(c.deadShare * 100)}% of its stored rows deleted, not compacted yet`;
   return c.at === null ? null : `compacted ${syncedAgo(c.at, now)}`;
@@ -112,7 +112,7 @@ function syncedAgo(iso, now = Date.now()) {
 }
 
 /** What a table in its one catch-up poll says (src/cli/readiness.ts `CATCHING_UP`, held equal by tests/web-page.test.ts). */
-export const CATCHING_UP = "being caught up by one poll for what changed since it was synced";
+export const CATCHING_UP = "Getting the changes made since it was last synced. You can query it meanwhile.";
 
 /** How a copied table is kept current and how old its copy is (src/cli/commands.ts `keptAge`). */
 export function keptAge(t, now = Date.now()) {
@@ -129,7 +129,8 @@ export function keptAge(t, now = Date.now()) {
   if (k?.by !== "poll") return null;
   const synced = k.syncedAt === null ? "never synced" : `last synced ${syncedAgo(k.syncedAt, now)}`;
   if (k.pending !== undefined) return `NOT kept current (${synced}): ${k.pending}`;
-  if (k.sync.mode === "off") return `sync: off, ${synced} — mason sync ${entryName(t.table)} syncs it now; sync: poll 5m on its entry polls it`;
+  // the page says how to do it on the page (its Sync now, its Sync choice), where mason status names the commands
+  if (k.sync.mode === "off") return `sync off, ${synced}: press Sync now to sync it`;
   return `polled every ${k.sync.every}, ${k.syncedAt === null ? "not polled yet" : `last ${syncedAgo(k.syncedAt, now)}`}`;
 }
 
@@ -243,17 +244,24 @@ export function readinessLine(s) {
 }
 
 /** The word at the top of the page under its title, "mason status", and what it means in a line (`readinessLine`): the
- *  run's readiness ("" with no table added: `renderStatus` says so, and what adds one). */
-export function renderHealth(s) {
-  if (!healthShown(s)) return "";
+ *  run's readiness ("" with no table added: `renderStatus` says so, and what adds one). While the poll fails (`stale`:
+ *  `{ at, failure }`, `app.stale()`), the box it last read greyed, and under the word as of when and why ("As of 14:02
+ *  UTC. Mason can't be reached."): never a Ready that reads as current (issue 886). */
+export function renderHealth(s, stale = null) {
+  const note = stale === null ? "" : `<p class="as-of">${esc(staleText(stale.at, stale.failure))}</p>`;
+  if (!healthShown(s)) return note === "" ? "" : `<div class="health stale" role="status">${note}</div>`;
   const word = readinessWord(s.readiness);
   const line = readinessLine(s);
   const facts = sourceRows(s).filter(([k]) => HEALTH_ROWS.includes(k));
-  return `<div class="health ${word === "Ready" ? "ok" : word === "Failed" ? "bad" : "warn"}" role="status"><p class="health-title">mason status</p>` +
-    `<p class="health-word"><span class="dot" aria-hidden="true"></span><span class="word">${esc(word)}</span></p>` +
+  return `<div class="health ${word === "Ready" ? "ok" : word === "Failed" ? "bad" : "warn"}${stale === null ? "" : " stale"}" role="status"><p class="health-title">mason status</p>` +
+    `<p class="health-word"><span class="dot" aria-hidden="true"></span><span class="word">${esc(word)}</span></p>${note}` +
     `<p class="health-line">${esc(line.text)}${line.link === null ? "" : `<a href="${esc(LINKS.failedTables)}">${esc(line.link)}</a>`}</p>` +
     (facts.length ? `<dl class="health-facts">${facts.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl>` : "") + `</div>`;
 }
+
+/** The box with nothing read yet and the poll failing: Unknown, and why, greyed (the banner says what to do). */
+export const renderUnknown = (failure) =>
+  `<div class="health stale" role="status"><p class="health-title">mason status</p><p class="health-word"><span class="dot" aria-hidden="true"></span><span class="word">Unknown</span></p><p class="as-of">${esc(staleWhy(failure))}</p></div>`;
 
 /** The box at the top is drawn once a table is added and the run says its readiness (`renderHealth`). */
 const healthShown = (s) => s.tables.some((t) => t.added) && Boolean(s.readiness);
@@ -263,7 +271,7 @@ const healthShown = (s) => s.tables.some((t) => t.added) && Boolean(s.readiness)
 const HEALTH_ROWS = ["Database", "Changes"];
 
 /** The sparklines the cards draw, by holder key: a usage sample's field each (src/web/charts.js specs). */
-const SPARKS = { rows: ["copyRows", "Rows synced"], "copy-bytes": ["copyBytes", "The synced data's file"], statements: ["statements", "Statements"], p95: ["durationP95Ms", "p95"] };
+const SPARKS = { rows: ["copyRows", "Rows synced"], "copy-bytes": ["copyBytes", "Synced data size"], statements: ["statements", "Queries"], p95: ["durationP95Ms", "p95"] };
 
 /** The sparklines' specs from the usage answer (`/api/usage`'s body; anything else draws none): what `charts()` returns. */
 export function sparkSpecs(usage) {
@@ -287,7 +295,7 @@ export const copyingCount = (s) => s.tables.filter((t) => t.added && tableLine(t
 export function renderKpis(s, o = {}) {
   const now = o.now ?? Date.now();
   const sparks = sparkSpecs(o.usage);
-  const line = (key) => sparks[key] ? spark(key, `${SPARKS[key][1]}, the last 24 hours an hour a point`) : "";
+  const line = (key) => sparks[key] ? spark(key, `${SPARKS[key][1]}, the last 24 hours, one point an hour`) : "";
   const list = [];
   const t = s.totals;
   // as renderStatus judges it: a table added (the totals count what the sources file names)
@@ -298,16 +306,16 @@ export function renderKpis(s, o = {}) {
     t.syncedAt === null ? card("Last sync", "none yet", "", "", "", LINKS.tables) : card("Last sync", `${duration((now - Date.parse(t.syncedAt)) / 1000)} ago`, `${utcText(t.syncedAt)} UTC`, "", "", LINKS.tables));
   const d = s.disk;
   const copyBytes = s.engine.bytes ?? (d && typeof d.copyBytes === "number" ? d.copyBytes : null);
-  if (added || copyBytes !== null) list.push(copyBytes === null ? card("The synced data's file", "unknown", "its size could not be read", "", "", LINKS.usage) : card("The synced data's file", fileSize(copyBytes), "", line("copy-bytes"), "", LINKS.usage));
+  if (added || copyBytes !== null) list.push(copyBytes === null ? card("Synced data", "unknown", "its size could not be read", "", "", LINKS.usage) : card("Synced data", fileSize(copyBytes), "", line("copy-bytes"), "", LINKS.usage));
   const q = o.queries;
   if (added && q !== undefined) {
-    if ("failure" in q) list.push(card("Statements, last day", "unknown", `could not read them: ${firstLine(q.failure.message)}`, "", "", LINKS.queries));
+    if ("failure" in q) list.push(card("Queries, last day", "unknown", `could not be read: ${firstLine(q.failure.message)}`, "", "", LINKS.queries));
     else {
       const day = q.queries.day;
       const bad = day.refused + day.failed + day.cancelled;
-      list.push(card("Statements, last day", n(day.statements), `${n(day.completed)} completed${bad ? `, ${n(bad)} refused, failed or cancelled` : ""}`, line("statements"), day.failed ? "warn" : "", LINKS.queries),
+      list.push(card("Queries, last day", n(day.statements), `${n(day.completed)} completed${bad ? `, ${n(bad)} refused, failed or cancelled` : ""}`, line("statements"), day.failed ? "warn" : "", LINKS.queries),
         card("p95, last day", day.durationMs === null ? "–" : statementMsText(day.durationMs.p95),
-          day.durationMs === null ? "no statement completed" : `average ${statementMsText(day.durationMs.avg)} · p50 ${statementMsText(day.durationMs.p50)}`, line("p95"), "", LINKS.slow));
+          day.durationMs === null ? "no query completed" : `average ${statementMsText(day.durationMs.avg)} · p50 ${statementMsText(day.durationMs.p50)}`, line("p95"), "", LINKS.slow));
     }
   }
   const ev = o.syncErrors;
@@ -381,8 +389,9 @@ export function renderFacts(s, now = Date.now()) {
 function renderProgress(s, isOpen = () => false, shares = new Map(), before = new Map()) {
   const picked = s.tables.filter((t) => t.added);
   if (!picked.length) {
-    return `<p class="readiness">No table added yet (${n(s.tables.length)} in the database).</p>` +
-      `<p class="dim">${code("mason tables")} lists them; ${code("mason add <table>")} syncs one.</p>`;
+    return `<p class="readiness">No table added yet. Your database has ${n(s.tables.length)}.</p>` +
+      (tablesReadOnly(s) !== null || s.sourcesReadOnly ? `<p class="dim">The tables to sync are set in the sources file.</p>`
+        : `<p class="dim">Add one on the <a href="${LINKS.tables}">Tables</a> page.</p>`);
   }
   // as tableLines orders them: the finished first, in the order they finished, then the failed, the copying, the waiting
   const rank = { done: 0, unsynced: 0, failed: 1, copying: 2, "catching-up": 2, waiting: 3 };
@@ -403,10 +412,10 @@ function renderProgress(s, isOpen = () => false, shares = new Map(), before = ne
  */
 export function renderUnsupportedLine(u) {
   if (u === undefined) return "";
-  if ("failure" in u) return `<p class="count">Unsupported SQL: could not read it (${esc(firstLine(u.failure.message))}; ${code("mason logs")} has the detail)</p>`;
+  if ("failure" in u) return `<p class="count">The unsupported SQL could not be read: ${esc(firstLine(u.failure.message))}.</p>`;
   const [top, ...rest] = u.unsupported;
   if (top === undefined) return "";
-  return `<p class="unsupported-line"><strong>Unsupported SQL, the last day:</strong> <span title="docs/SQL-SUPPORT.md entry ${esc(top.gap)}">${esc(unsupportedEntry(top).headline)}</span>` +
+  return `<p class="unsupported-line"><strong>Unsupported SQL, last day:</strong> <span title="docs/SQL-SUPPORT.md entry ${esc(top.gap)}">${esc(unsupportedEntry(top).headline)}</span>` +
     `${rest.length ? ` (and ${n(rest.length)} other${rest.length === 1 ? "" : "s"})` : ""} <a class="see" href="${esc(LINKS.queries)}">See all</a></p>`;
 }
 
@@ -452,7 +461,8 @@ const readOnlyWhat = (tables, users) => tables && users ? null : tables ? "No us
 
 /**
  * THE OVERVIEW from `/api/state` and the slower reads (`o.queries`, `o.syncErrors`, `o.unsupported`, `o.usage`:
- * each the body, or `{ failure }`; `o.now` the clock; `o.open(key)` whether a details is open): the word, the checklist,
+ * each the body, or `{ failure }`; `o.now` the clock; `o.open(key)` whether a details is open; `o.stale` `{ at, failure }`
+ * while the poll fails, the box then greyed and as of when): the word, the checklist,
  * the cards, the copies not finished, the facts, the stream, the unsupported SQL's line. Never the engine's name.
  */
 export function renderStatus(s, o = {}) {
@@ -460,7 +470,7 @@ export function renderStatus(s, o = {}) {
   const added = s.tables.some((t) => t.added);
   // a read-only page (MASON_UI_READ_ONLY=1): why it offers no user and no table to add, as Tables and Users say it
   const what = readOnlyWhat(tablesReadOnly(s) === null, usersReadOnly(s) === null);
-  return (what === null ? "" : readOnlyLine(what, s.pageReadOnly)) + renderHealth(s) + renderChecklist(s, o.queries, o.connected === true) + renderKpis(s, { ...o, now }) +
+  return (what === null ? "" : readOnlyLine(what, s.pageReadOnly)) + renderHealth(s, o.stale ?? null) + renderChecklist(s, o.queries, o.connected === true) + renderKpis(s, { ...o, now }) +
     renderProgress(s, o.open, o.shares, o.before) + renderFacts(s, now) + renderStream(s, now) + (added ? renderUnsupportedLine(o.unsupported) : "");
 }
 
@@ -500,12 +510,14 @@ export const page = {
     };
     return {
       model: { open: opened.open },
+      // its word says as of when while the poll fails: the banner does not say it again
+      saysStale: true,
       reads: () => [{ path: "api/state", everyMs: POLL_MS }, ...SLOWER.map((path) => ({ path, everyMs: 30_000 })), { path: HOURLY, everyMs: 60_000 }, ...hostCardReads()],
       view() {
         const st = ctx.read("api/state");
-        if (!st?.body) return { status: st?.failure ? "" : skeleton(4) };
+        if (!st?.body) return { status: st?.failure ? renderUnknown(st.failure) : skeleton(4) };
         const [queries, syncErrors, unsupported] = SLOWER.map((p) => asRequest(ctx.read(p)));
-        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, syncErrors, unsupported, connected, usage: ctx.read(HOURLY)?.body, hostCard: cardPath() === null ? undefined : ctx.read(hostKey(cardPath())), open: opened.has, shares: monotone.of(st.body), before: monotone.before }) };
+        return { status: renderStatus(st.body, { now: ctx.now().getTime(), stale: st.failure && st.readAt !== undefined ? { at: new Date(st.readAt), failure: st.failure } : null, queries, syncErrors, unsupported, connected, usage: ctx.read(HOURLY)?.body, hostCard: cardPath() === null ? undefined : ctx.read(hostKey(cardPath())), open: opened.has, shares: monotone.of(st.body), before: monotone.before }) };
       },
       afterRead() { if (toolConnected(ctx.read("api/state")?.body)) connected = true; },
       toggle: (target) => opened.toggle(target),

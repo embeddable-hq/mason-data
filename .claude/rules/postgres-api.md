@@ -87,7 +87,7 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   given it by `sessionSetSql` (catalog.ts: `asSession` around every request, which sets the catalog's base back after,
   `analyze` / `readParameters`, the lookups of views.ts and row-filter.ts); DuckDB by store.ts `SessionSetup.settle`,
   pg-eval told the zone and DateStyle from it. The catalog runs a request under the session's search_path as Postgres
-  does (pg_catalog first unless listed), so the overrides (`version()`, `current_setting`, `format_type`) are reached
+  does (pg_catalog first unless listed), so the overrides (`version()`, `current_setting`) are reached
   by the splice of every call of them from the parse tree (`userSpliced`), never by the path's order. The clock is
   never spliced: each catalog request is a transaction of its own (`asSession`: BEGIN … ROLLBACK) whose first message
   runs with PGlite's wall clock held at the session's instant (`PgCatalog.run`'s `at`, catalog-worker.ts

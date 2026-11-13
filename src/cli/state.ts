@@ -13,7 +13,10 @@
  * A command declares what it needs (`CommandSpec.needs`: a project, or a run) and answers a state below it with that
  * state's CODE. Most ask `reach`, the one gate, and say the state's own words; a few word their own answer for a state
  * they handle — mason status and mason stop where Mason is not running (exit 0: that is their answer), mason logs,
- * mason start and mason doctor — and keep the state's code where they fail. tests/cli-state-matrix.test.ts (the states
+ * mason start and mason doctor — and keep the state's code where they fail. One command needs less than a project:
+ * mason deploy needs the project's files alone (`needs: "files"`, src/cli/project.ts `theProjectFolder`), which a
+ * project meets, and, with no .mason/ at or above, so does a folder whose own mason/ holds a project; it asks no gate here, and answers
+ * no_project and bad_config with their codes. tests/cli-state-matrix.test.ts (the states
  * without a run) and a run against a real Postgres (the states with one; no integration test yet) run every command in every state,
  * and hold each to the code of the state it met.
  */

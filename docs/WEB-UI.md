@@ -24,7 +24,7 @@ the address's hash, so a view can be bookmarked and Back goes to the one before:
 | Hash | View |
 |---|---|
 | `#overview` (none, or one it does not know) | the Overview |
-| `#tables`, `#tables?show=failed` | Tables (filtered to the failed copies) |
+| `#tables`, `#tables?show=failed` | Tables (only the tables whose sync failed) |
 | `#users` | Users |
 | `#observability/queries` (`#observability`) | Observability › Queries; `?slow=1`, `?status=` (`completed`, `refused`, `failed`, `refused-or-failed`, `cancelled`), `?user=`, `?client=` set those filters |
 | `#observability/usage` | Observability › Usage |
@@ -81,8 +81,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   the order `mason tables` lists them. A table added or removed while the page is shown keeps its row, its state
   changing in place, and takes its place only when the list is laid out again: the page shown again, or the search
   box's text or the filter changed (a click moves no other row). With hundreds of tables the first 100 that pass are
-  written, then **Show 100 more** and **Show all**; the search is over every table, at once. A long name is cut with an
-  ellipsis, its whole the tooltip.
+  written, then **Show 100 more** and **Show all**; the search is over every table, at once. A long name is never cut: it wraps in its cell.
 - **Tables**, an added table: its state (Synced, Syncing, Failed or Waiting) over its bar — every added table has
   one, as `mason status` draws one for each: full at 100% once synced, red when its first sync failed, amber when it is not kept
   current, moving while it syncs, a shimmer while it waits — its rows, its last sync over how long it took, and the
@@ -97,7 +96,36 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   (Columns…) and what an action answered are popovers beside the button, over the rows and never between them — an
   answer, like a refusal, stays until it is dismissed (its Dismiss, Escape, or the next action's answer or question in
   its place) — and only an expander the reader opens (a request's details, a first sync's whole error) pushes the rows
-  under it down.
+  under it down. **What Add or Sync now answered covers no other control** (issue 884): the answer is placed under its
+  row's actions, over them or on their left, wherever it covers no button, link or box of any row; where every place
+  covers one (a phone's rows, or a long answer beside a narrow list), it is a bar fixed at the window's bottom, beside
+  the sidebar, with its Dismiss, still read out (`role="status"`), the page's end given its height so every row can be
+  scrolled clear of it. A tap on the answer is always the answer's, never a control's under or near it, with a finger
+  too: the answer is itself a target a browser keeps a tap on, and docked, an unseen band of 16 px above it is its own.
+  Docked, its Dismiss stays in view at its bottom however long the answer, the rest scrolling above it; what the
+  person scrolled in it stays put when the page is written again; and a long table name in its facts wraps rather
+  than squeezing the value beside it (`placePops`, src/web/shared.js).
+- **Tables**, **the name keeps its room at every width** (issue 884: it was 2 px at 1024 px): measured against the
+  list's card, the name gets at least 200 px, and the less important columns give way first: Key below about 1350 px,
+  then Size (1250), Last sync (1140) and Rows (1040) beside the full sidebar. A column given way says its fact in the
+  row's note instead ("key id", "size 1.2 MiB", "last sync 3 h ago, took 0.2 s", "1,200 rows"). **A table's name and
+  its state are never cut with "…"** (the owner: "otherwise we can't see them"): each wraps in its cell — a name after
+  its `.` and `_` where it can, anywhere where it must — and the row grows to fit. On a phone the same columns give way,
+  the state is narrower and a row's actions are stacked in a column of their own, so the list fits its card and every
+  name and state reads whole. The page never scrolls sideways.
+- **Tables**, an added table's **columns**, on its note beside its sync: which it syncs in a few words — "All columns",
+  "5 of 12 columns" or "All but 1 column", the columns themselves its tooltip (`/api/state` `tables[].entry`,
+  `addedColumns`, `columnCount`). It is a button that opens the table's **column form**, a dialog beside it that reads
+  `GET /api/tables/<table>/columns` once, as it opens, ticked as the entry says: its `columns:`; none ticked for every
+  column (`{}`, or the `exclude:` of secret-looking columns `mason add` writes: `everyColumnLeavesOut`); and, for a
+  table with no primary key, its `key:`. Before Save it says what saving costs: the table is synced again in full from
+  the database, which takes a while and adds load on a big table, and its synced data can still be queried until the
+  new sync finishes; saving the same columns changes nothing and starts no sync. Save sends `POST /api/pick`
+  `{ table, picked: true, columns?, key? }`, as `mason add <table> --columns …` does, its sync kept; boxes that say what
+  the entry says send the entry's own lists, so the run answers `already` and writes nothing. **An entry the boxes cannot
+  show** — an `exclude:` written by hand, or every column with a secret-looking one kept on purpose — is described at
+  the top of the form, its boxes the columns synced now, and the form says that saving replaces the entry with the
+  columns ticked. Where the page may not edit the sources file, the columns are said alone, with no button.
 - **Tables**, an added table's **sync**, first on its note (`Sync: Off`, `Sync: Every 5 minutes`, `Sync: Live
   (replication)`, as the run keeps it now: `/api/state` `tables[].kept`): a button that opens its **Sync choice**, a
   dialog beside it that reads `GET /api/tables/<table>/sync` once, as it opens (never on a timer: it opens a connection
@@ -126,7 +154,11 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   `mason add <table>` does; **Columns…** opens a form to tick the columns to sync; **Name its key…** does the same for a
   table with no primary key.
 - **Users** (`#users`), in this order: the list of users, right under the title (and its read-only line), then the add
-  form with the card of a user just added beside it, then Connect, so a card that appears moves nothing above it. The
+  form with the card of a user just added beside it, then Connect, so a card that appears moves nothing above it. A person arriving on the page — its address opened, a
+  link of the sidebar or another followed — starts with the cursor in the form's **Name**, once the form is written;
+  never at a poll's write after that, never taken from what the person focused since they arrived, never on a touch
+  screen (`(pointer: coarse)`, where it would open the keyboard over the page), and not on a read-only page, which has
+  no form (a page's `arrive()`, src/web/app.js); after an add, the New user added card is scrolled into view once. The
   form adds a user by name and, where `mason/roles.yml` names roles and reads as it is, a
   **Role** as `mason user add --role` (the roles from `/api/state` `roles`, `mason status --json`'s): the file's
   `default:` is chosen first, marked (default), and sends no role, so the user follows the default as one added with no
@@ -152,7 +184,8 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   (`/api/users?lastUsed=1` `lastUsedAt`) — then "Connected", held once seen. While it waits, the state is read every
   5 s instead of 30 s.
 - **Users**, Connect: once for the run, where a tool connects — host, port, database and SSL mode, each with **Copy**,
-  and the URL and psql line with `<user>:<password>` in place — as `mason status` says it. No user's row carries a URL:
+  and the URL with `<user>:<password>` in place, with **Copy** — as `mason status` says it, with no psql line (the URL
+  is the same thing, pasted after `psql`). No user's row carries a URL:
   the card shown once when a user is added is the only place its password is copied.
 - **Users**, Connect, Share over the internet (for testing) (under `mason start` only: never under `mason serve`, whose run
   refuses it, and never on a read-only page, `pageReadOnly`, whatever `MASON_UI_READ_ONLY_ALLOW` still allows):
@@ -203,7 +236,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   shown (said under it: the pages follow the log's order by start). A statement is one or two lines in its row; a row
   opens in place to its whole id, times, bytes sent, statement and error — the first 16 KiB of each, said when cut.
   A statement that reads no synced table (`select 1`, `select now()`, SET, SHOW, a BI tool's catalog queries) is
-  answered without the copy and **not listed** — the protocol's chatter, hundreds a connection from a BI tool — and the
+  answered without the synced data and **not listed** — the protocol's chatter, hundreds a connection from a BI tool — and the
   page says so once, in a small quiet line under the list (empty or not), as `mason logs --requests` says it.
 - **Observability › Usage** (`#observability/usage`): every part follows the range. Cards: under Now, the sessions
   connected and the statements running; under any other range, the clients that sent statements in it; then the
@@ -253,7 +286,11 @@ as Vercel's and Supabase's are (Mason, the database's name, a **demo** badge whe
 each link an icon and its label, the one shown a pale stone row with the patina at its edge; at its foot how long ago Mason last
 answered — `Updated 3 s ago`, which keeps counting when it stops answering — and the version), the time range as a
 segmented control at the top of the Observability views, and on the Overview the run's word beside a big brick, a
-grid of KPI cards, then dense tables. Colour says a state and nothing else — a green, amber, red or gray marker always
+grid of KPI cards, then dense tables. While the page's poll fails (Mason stopped, the tunnel closed), what it read
+before stays on the page but never reads as current: the shown page's parts are greyed, the Overview's word is grey
+with "As of 14:02 UTC. Mason can't be reached." beside it (or "The latest read failed." for a refusal), every other page
+says the same line over the banner's Failure, and with nothing read yet the Overview says "Unknown" and why. The
+first poll that answers makes it current again (`app.stale()`, src/web/app.js; issue 886). Colour says a state and nothing else — a green, amber, red or gray marker always
 beside its word (the failed red a rose, never the accent) — besides the patina accent for focus, links, the current
 nav row, a laid brick of the motifs, the primary action and a chart's mark. A copy's bar fills in patina while it copies,
 green once served, rose when it failed and amber when not kept current (`--bar-ok/-warn/-bad` on `--bar-track`): tints validated together, in both themes, by the
@@ -634,7 +671,10 @@ reads:
   `rows` (the catalog's estimate, or null), `bytes`, `key` (its primary key's columns, `[]` for none), `comment`,
   `added`, `reason` (why `mason add` without a key cannot add it: no primary key, with the `--key` to name; null for a
   table that can be added and for one added), `addedColumns` and `copyKey` (what its entry syncs, and the key it names;
-  null when not added), `copy` (its first sync, below, or null) and `error`. An added
+  null when not added), `columnCount` (how many columns the table has), an added table's `entry` (its entry as the
+  sources file says it: `{ columns, exclude, key }`, `columns` null for every column but `exclude`, `key` null for its
+  primary key) and `everyColumnLeavesOut` (the columns `mason add <table>` with no `--columns` leaves out: they look
+  like secrets), `copy` (its first sync, below, or null) and `error`. An added
   table also has `sync`: `state` (`waiting`, `syncing`, `synced`, `behind`, `failed`), `syncedAt`, `syncSeconds`,
   `syncedBy`, `ageSeconds`, `asOf`, `promisedSeconds`, `behindBySeconds`, `behindWhy`, and `syncRefusal`: why `mason
   sync <table>` (Sync now) is refused now, in the words it refuses with (its first sync not finished or failed, being

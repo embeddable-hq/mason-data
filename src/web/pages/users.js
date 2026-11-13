@@ -31,9 +31,10 @@ export function lastUsedText(u, lastUsedNote, requestLogDays, now = Date.now()) 
   return `not used in the last ${requestLogDays ?? "?"} days`;
 }
 
-/** What a Disable does, as `mason user disable` says it (src/cli/user.ts `disableEffect`, held equal by the tests). */
-export const disableEffect = (name) =>
-  `It connects no more until mason user enable ${name}, with the same password, and the sessions it holds end at their next statement.`;
+/** What a Disable does (`mason user disable`'s facts, src/cli/user.ts `disableEffect`, in the page's words: the page's
+ *  way back is its Enable, where the CLI names mason user enable). */
+export const disableEffect = () =>
+  "It can't connect until you enable it again, with the same password. Its open sessions end at their next query.";
 
 /** A disabled user's state, as `mason user list` says it (src/cli/user.ts `disabledText`, held equal by the tests). */
 export const disabledText = (disabledAt) => `Disabled ${stamp(disabledAt)} UTC`;
@@ -116,13 +117,13 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
     const disabled = active && u.disabledAt != null;
     const asking = active && ask?.name === u.name ? ask.verb : null;
     const anchor = actId("users", u.name);
-    if (asking === "remove") pops.push(pop(anchor, `<p class="confirm">Remove ${esc(u.name)}? It connects no more, and the sessions it holds end at their next statement.</p>` +
+    if (asking === "remove") pops.push(pop(anchor, `<p class="confirm">Remove ${esc(u.name)}? It can no longer connect, and its open sessions end at their next query.</p>` +
       `<p class="pop-actions">${button(`Remove ${u.name}`, { confirmRemove: u.name }, "danger small")} ${button("Cancel", { cancelRemove: "", popClose: "" }, "small")}</p>`, { kind: "dialog", label: `Remove ${u.name}?` }));
-    else if (asking === "disable") pops.push(pop(anchor, `<p class="confirm">Disable ${esc(u.name)}? ${esc(disableEffect(u.name))}</p>` +
+    else if (asking === "disable") pops.push(pop(anchor, `<p class="confirm">Disable ${esc(u.name)}? ${esc(disableEffect())}</p>` +
       `<p class="pop-actions">${button(`Disable ${u.name}`, { confirmDisable: u.name }, "danger small")} ${button("Cancel", { cancelRemove: "", popClose: "" }, "small")}</p>`, { kind: "dialog", label: `Disable ${u.name}?` }));
     // the form's first input is its choice (a dialog's first box takes the focus): the user it changes is last, hidden
     else if (asking === "from") pops.push(pop(anchor, `<form id="user-from" class="from-form" autocomplete="off">` +
-      `<p class="ask-from">Where ${esc(u.name)} connects from, as ${code(`mason user from ${u.name}`)} sets it: the sessions it holds from another address end at their next statement.</p>` +
+      `<p class="ask-from">Choose where ${esc(u.name)} can connect from. If you limit it, open sessions from other addresses end at their next query.</p>` +
       connectsChoice("user-from", u.from ?? null) +
       `<p class="pop-actions"><button type="submit" class="primary small">Change ${esc(u.name)}</button> ${button("Cancel", { cancelRemove: "", popClose: "" }, "small")}</p>` +
       `<input type="hidden" name="user" value="${esc(u.name)}"></form>`, { kind: "dialog", label: `Where ${u.name} connects from` }));
@@ -130,11 +131,11 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
     return `<tr${active ? "" : ` class="removed"`}><th scope="row"><code class="name" title="${esc(u.name)}">${esc(u.name)}</code> <span class="dim">id ${esc(u.id)}</span></th>` +
       // the role it reads as (src/cli/roles.ts userRole): its own (mason user add --role) — one the roles file does not name,
       // said — or the file's default; none under a file with no default reads nothing, said; no roles file, every table
-      `<td>${broken ? `<span class="warn">refused: the roles file cannot be read</span>` : u.readsNothing === true ? `<span class="warn">no role, and the roles file names no default: its statements are refused</span>`
+      `<td>${broken ? `<span class="warn">refused: the roles file can't be read</span>` : u.readsNothing === true ? `<span class="warn">no role, and the roles file has no default: its queries are refused</span>`
         : u.role === undefined ? `<span class="dim">every table</span>`
         : `${code(u.role)}${u.roleFrom === "default" ? ` <span class="dim">(default)</span>` : ""}${u.attributes ? ` <span class="dim">${esc(attributesText(u.attributes))}</span>` : ""}` +
-          `${u.roleKnown === false ? ` <span class="warn">not in the roles file: its statements are refused</span>` : ""}` +
-          `${u.missingAttributes ? ` <span class="warn">${esc(`no value for ${u.missingAttributes.join(", ")}: its statements are refused`)}</span>` : ""}`}` +
+          `${u.roleKnown === false ? ` <span class="warn">not in the roles file: its queries are refused</span>` : ""}` +
+          `${u.missingAttributes ? ` <span class="warn">${esc(`no value for ${u.missingAttributes.join(", ")}: its queries are refused`)}</span>` : ""}`}` +
       // where it connects from, a line of its own under what it reads (mason user list's `from …`; none said there: any
       // address), as the user's id is under its name — so a row stays two lines, a Disable moves no row, and the table
       // keeps its width: no column of its own. Cut by the column, its whole the title; where the page may change it, the
@@ -142,29 +143,29 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
       `${!active ? "" : readOnly !== null ? `<span class="from-line" title="${esc(fromText(u.from))}">${esc(fromText(u.from))}</span>`
         : button(fromText(u.from), asking === "from" ? {} : { from: u.name }, "from-line", { disabled: asking === "from", expanded: asking === "from", title: `${fromText(u.from)}: change where ${u.name} connects from` })}</td>` +
       `<td>${!active ? status("unknown", `Removed ${stamp(u.removedAt)} UTC`) : disabled ? status("warn", disabledText(u.disabledAt)) : status("ok", "Active")}` +
-      `${active && !disabled && !u.live ? ` <span class="warn">does not connect: the API key was rotated since it was added</span>` : ""}</td>` +
+      `${active && !disabled && !u.live ? ` <span class="warn">can't connect: the API key changed after it was added</span>` : ""}</td>` +
       `<td class="mono">${esc(stamp(u.addedAt))} UTC</td><td class="num">${lastCell}</td>` +
       // Queries: its statements of the last 24 hours on Observability › Queries (a removed user's too: its past)
-      `<td class="act" id="${esc(anchor)}"><a class="btn small" href="${esc(userQueriesHref(u.name))}" title="the statements ${esc(u.name)} sent in the last 24 hours">Queries</a>${!active || readOnly !== null ? "" : ` ${toggle(u, disabled, asking === "disable")} ${asking === "remove" ? button("Remove", {}, "danger small", { disabled: true, expanded: true })
+      `<td class="act" id="${esc(anchor)}"><a class="btn small" href="${esc(userQueriesHref(u.name))}" title="the queries ${esc(u.name)} sent in the last 24 hours">Queries</a>${!active || readOnly !== null ? "" : ` ${toggle(u, disabled, asking === "disable")} ${asking === "remove" ? button("Remove", {}, "danger small", { disabled: true, expanded: true })
         : button("Remove", { remove: u.name }, "danger small")}`}</td></tr>`;
   }).join("")}</tbody></table>`) + pops.join("") + note("Last used", list.lastUsedNote);
 }
 
 /**
  * HOW A TOOL CONNECTS, once for the run (`/api/state` `postgres`: src/cli/pg-url.ts postgresFacts, what `mason status`
- * prints): the host, port, database and sslmode — what a BI tool's form asks for, each with Copy — then the URL and the
- * psql line with `<user>:<password>` as placeholders. None of it is a user's: a row carries what is (its name, its
+ * prints): the host, port, database and sslmode — what a BI tool's form asks for, each with Copy — then the URL with
+ * `<user>:<password>` as placeholders. No psql line (issue 874): the URL is the same thing, pasted after `psql`. None of it is a user's: a row carries what is (its name, its
  * state), and a user's password is copied only from the card shown once when it is added (`renderAdded`). "" when the
  * run did not say.
  */
 export function renderUsersConnect(pg, served = false, share = "") {
   if (!pg || typeof pg.shown !== "string") return "";
   const rows = [["Host", pg.host, "users-connect-host"], ["Port", String(pg.port), "users-connect-port"], ["Database", pg.database, "users-connect-database"],
-    ["SSL mode", pg.sslmode ?? "disable", "users-connect-sslmode"], ["URL", pg.shown, "users-connect-url"], ["psql", pg.psql, "users-connect-psql"]];
+    ["SSL mode", pg.sslmode ?? "disable", "users-connect-sslmode"], ["URL", pg.shown, "users-connect-url"]];
   return `<div class="connect"><p class="connect-title">Connect</p>` +
     `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v)}</dd>`).join("")}</dl>` +
     serverHostNote(pg, served) +
-    `<p class="tip">A user's name and password go in place of ${code("<user>")} and ${code("<password>")}. The password is shown once, when the user is added: lost, remove the user and add it again.</p>${share}</div>`;
+    `<p class="tip"><span>Put a user's name and password in place of ${code("<user>")} and ${code("<password>")}. The password is shown only once, when you add the user. If it's lost, remove the user and add it again.</span></p>${share}</div>`;
 }
 
 // ------------------------------------------------------------------ Share over the internet (mason share, from the page)
@@ -181,8 +182,8 @@ export const shareable = (s) => s !== undefined && s !== null && s.served !== tr
 
 /** How a share ends, beside "Live until you stop it": a free share's hour, and the page closing (its beats stop). */
 const endsLine = (endsAt, now) => (endsAt === null || endsAt === undefined ? ""
-  : ` A free share ends sooner, within about an hour: at ${new Date(endsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}, in about ${Math.max(0, Math.round((Date.parse(endsAt) - now) / 60_000))} minutes; Share again then gives a new address and password.`) +
-  " It also ends within two minutes of this page closing.";
+  : ` A free share ends sooner, within about an hour, at ${new Date(endsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} (in about ${Math.max(0, Math.round((Date.parse(endsAt) - now) / 60_000))} minutes). Then press Share again for a new address and password.`) +
+  " It also ends within two minutes of closing this page.";
 
 /**
  * SHARE OVER THE INTERNET (FOR TESTING), a box in Connect (src/cli/page-share.ts; `mason share`'s, from the page): a pure
@@ -204,22 +205,22 @@ export function renderShare(s, m = NO_SHARE, now = Date.now(), choices = undefin
     return `<div class="share open" role="status">${head}<p class="headline">Shared ${badge("Public", "warn")} for <time data-tick datetime="${esc(open.openedAt)}">${esc(spanText((now - Date.parse(open.openedAt)) / 1000))}</time>` +
       `${open.role !== null && open.role !== undefined ? `, reading as the role ${esc(open.role)}` : ""}: ${esc(open.reads)}</p>` +
       `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v, id === "share-password" ? badge("Shown once", "warn") : "")}</dd>`).join("")}</dl>` +
-      (mine !== null ? `<p class="tip">Paste it into the tool now: the login is this share's own, not a user's, and its password is shown this once, is kept nowhere, and ends with the share.</p>`
-        : `<p class="tip">The password was shown once, when it opened, and is kept nowhere: Stop sharing and Share again for a new one.</p>`) +
+      (mine !== null ? `<p class="tip">Paste it into your tool now. The login is this share's own, not a user's. The password is shown only this once and is not saved. It stops working when the share ends.</p>`
+        : `<p class="tip">The password was shown once, when the share opened, and is not saved. For a new one, press Stop sharing, then Share.</p>`) +
       `<p class="tip">Live until you stop it.${esc(endsLine(open.endsAt, now))}</p>` +
       `<p class="tip">${button("Stop sharing", { shareStop: open.user }, "danger")}</p></div>`;
   }
-  if (m.phase === "opening") return `<div class="share">${head}<p class="dim" aria-busy="true">Opening a temporary public address… (up to 30 s)</p></div>`;
+  if (m.phase === "opening") return `<div class="share">${head}<p class="dim" aria-busy="true">Opening a temporary public address… This can take up to 30 s.</p></div>`;
   const before = m.phase === "ended" && m.ended !== null
-    ? `<p class="said">The share ended: ${esc(m.ended.why)}. Its address no longer answers, and its password no longer works.</p>`
+    ? `<p class="said">The share ended: ${esc(m.ended.why)}. Its address and password no longer work.</p>`
     : m.phase === "refused" && m.failure !== null ? renderFailure(m.failure) : "";
   const body = choices?.body ?? null;
   const list = Array.isArray(body?.choices) ? body.choices : null;
-  const role = list === null || list.length === 0 ? "" : `<label for="share-role">Role</label> <select id="share-role">${list.map((c) => `<option value="${esc(c.role)}"${c.role === chosenRole(m, list) ? " selected" : ""}>${esc(`${c.role}: ${c.reads}${c.default ? " (the file's default)" : ""}`)}</option>`).join("")}</select> `;
+  const role = list === null || list.length === 0 ? "" : `<label for="share-role">Role</label> <select id="share-role">${list.map((c) => `<option value="${esc(c.role)}"${c.role === chosenRole(m, list) ? " selected" : ""}>${esc(`${c.role}: ${c.reads}${c.default ? " (default)" : ""}`)}</option>`).join("")}</select> `;
   // the roles not read yet, or refused (a roles file that cannot be read, no role a share may read as): no Share, and why
   const why = list !== null ? "" : choices?.failure ? renderFailure(choices.failure) : `<p class="dim">Reading the roles…</p>`;
   return `<div class="share">${head}${before}` +
-    `<p class="tip">For a tool that cannot reach this machine, like a BI tool in the cloud: a <strong>temporary public address</strong> with a login of its own, as ${code("mason share")} opens. TLS is required of every connection.</p>` +
+    `<p class="tip">For a tool that can't reach this machine, like a BI tool in the cloud. You get a <strong>temporary public address</strong> with a login of its own, as ${code("mason share")} opens. Every connection must use TLS.</p>` +
     why + `<p class="tip share-ask">${role}${button("Share", { shareOpen: "" }, "", { disabled: list === null })}</p></div>`;
 }
 
@@ -333,7 +334,7 @@ export function renderAddUser(state) {
 function roleChoice(r) {
   if (!r || r.file == null || r.problem != null || !Array.isArray(r.roles) || r.roles.length === 0) return "";
   const dflt = r.default != null && r.roles.includes(r.default) ? r.default : null;
-  const first = dflt !== null ? `<option value="" selected>${esc(dflt)} (default)</option>` : `<option value="" selected>no role: its statements are refused</option>`;
+  const first = dflt !== null ? `<option value="" selected>${esc(dflt)} (default)</option>` : `<option value="" selected>no role (its queries are refused)</option>`;
   return ` <span class="role-field"><label for="user-role">Role</label> <select id="user-role" name="role">${first}` +
     `${r.roles.filter((n) => n !== dflt).map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("")}</select></span> `;
 }
@@ -392,7 +393,8 @@ export const page = {
   create(ctx) {
     // held: what From… opened over ({ list, now, state }), so a poll never rewrites its form under what is being typed
     // added: the user just added (its password in it, this page's memory alone); addedSeen: whether it has connected
-    const m = { actionFailure: null, added: null, addedSeen: false, confirming: null, refused: null, held: null };
+    // reveal: the part to scroll into view after the next write (a new user's password card), once
+    const m = { actionFailure: null, added: null, addedSeen: false, confirming: null, refused: null, held: null, reveal: null };
     const users = () => ctx.read(USERS)?.body ?? null;
     // Share over the internet, in Connect: its own model, beats and actions
     const share = createShare(ctx);
@@ -406,6 +408,7 @@ export const page = {
         if ("failure" in r) { m.actionFailure = r.failure; return false; }
         m.added = r.body;
         m.addedSeen = false;
+        m.reveal = "added";
         await ctx.refresh([USERS]);
         return true;
       },
@@ -471,6 +474,14 @@ export const page = {
         if (ask !== null && u !== null && !u.users.some((x) => x.name === ask.name && x.removedAt == null && (ask.verb !== "disable" || x.disabledAt == null))) { m.confirming = null; m.held = null; }
       },
       actions,
+      /** after an add, its password card scrolled into view once: on a phone it is written below the screen's edge */
+      reveal() { const id = m.reveal; m.reveal = null; return id; },
+      /** a person arriving starts in the add form's Name (issue 887); none while the state is unread, none read-only */
+      arrive() {
+        const state = ctx.read(STATE)?.body;
+        if (state === undefined || state === null) return undefined;
+        return renderAddUser(state) === "" ? null : "user-name";
+      },
       view() {
         // while From… asks, the list as it opened (`held`): its form is never rewritten under what is being typed
         const h = m.held !== null && askOf(m.confirming)?.verb === "from" ? m.held : null;

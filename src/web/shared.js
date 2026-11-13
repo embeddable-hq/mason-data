@@ -56,7 +56,7 @@ export function rangeOffered(key, keptDays) {
   if (!r.longer) return { offered: true, shown: true };
   if (typeof keptDays !== "number") return { offered: false, shown: false };
   if (keptDays >= r.days) return { offered: true, shown: true };
-  return { offered: false, shown: true, why: `Mason keeps ${keptDays} day${keptDays === 1 ? "" : "s"} of history: MASON_HISTORY_DAYS=${r.days} keeps ${r.days}` };
+  return { offered: false, shown: true, why: `Mason keeps ${keptDays} day${keptDays === 1 ? "" : "s"} of history. Set MASON_HISTORY_DAYS=${r.days} to keep ${r.days}.` };
 }
 export const DEFAULT_RANGE = "now";
 /** Whether a range follows what happens (Now) or is read once when chosen (every other). */
@@ -252,8 +252,8 @@ export function streamRows(st, now = Date.now()) {
     const c = t.catchUp;
     tables.push([t.table, t.state === "streamed" ? `streamed${counts}`
       : t.state === "catching-up" && c !== undefined
-        ? `catching up by one poll ${c.from ? `from ${utcMinute(c.from)} UTC` : t.why?.replace(/^caught up by one poll /, "") ?? ""}: ` +
-          `${c.phase === "queued" ? (c.retryAt ? `its last catch-up failed, tried again after ${c.retryAt.slice(11, 16)} UTC (mason logs says why)` : "waiting its turn") : c.phase === "polling" ? "polling" : "applying what the stream held meanwhile"}` +
+        ? `getting the changes made ${c.from ? `since ${utcMinute(c.from)} UTC` : t.why?.replace(/^caught up by one poll /, "") ?? ""}: ` +
+          `${c.phase === "queued" ? (c.retryAt ? `its last catch-up failed, tried again after ${c.retryAt.slice(11, 16)} UTC (Sync events says why)` : "waiting its turn") : c.phase === "polling" ? "reading the changes" : "applying the changes"}` +
           `${c.startedAt ? `, for ${spanText(since(c.startedAt))}` : ""} · the stream holds ${n(c.held)} change${c.held === 1 ? "" : "s"} of it meanwhile${total(t) ? counts : ""}`
       : t.state === "left-out" ? `left out: ${t.why ?? ""}`
       : `not streamed yet: ${t.why ?? ""}${total(t) ? counts : ""}`]);
@@ -282,6 +282,9 @@ export function renderFailure(f) {
  * means here — 403, a cookie this run does not take (the run started again, with a new token); no answer at all, the
  * run stopped. `status` null: fetch itself failed, `text` its error.
  */
+/** The message of a page whose cookie is an earlier run's (`failureOf`, read by `overTunnel`). */
+const STALE_PAGE = "This page is from an earlier run of Mason";
+
 export function failureOf(status, text) {
   if (status !== null) {
     let body = null;
@@ -289,15 +292,15 @@ export function failureOf(status, text) {
     try { body = JSON.parse(text); } catch { body = null; }
     if (body && typeof body.failure === "object" && body.failure !== null) return body.failure;
     if (status === 403 || status === 421) {
-      return { code: "refused", message: "this page's cookie is not the running Mason's", why: text.trim() || `HTTP ${status}`,
-        fix: "Mason was started again since this page was opened, and each run has its own token: mason ui, in the project's folder, opens this page again",
-        next: [{ command: "mason ui", what: "this page, for the Mason that is running" }] };
+      return { code: "refused", message: STALE_PAGE, why: text.trim() || `HTTP ${status}`,
+        fix: "Mason was restarted after you opened this page, and each run has its own token. Run mason ui in the project's folder to open the page again.",
+        next: [{ command: "mason ui", what: "opens this page for the Mason that is running" }] };
     }
-    return { code: "failed", message: (body && typeof body.error === "string" ? body.error : text.trim()) || `HTTP ${status}`, next: [{ command: "mason logs", what: "the run's log: what it was doing" }] };
+    return { code: "failed", message: (body && typeof body.error === "string" ? body.error : text.trim()) || `HTTP ${status}`, next: [{ command: "mason logs", what: "shows Mason's log: what it was doing" }] };
   }
-  return { code: "unreachable", message: "Mason does not answer at this address", why: `the run stopped, or runs on another port now (${text})`,
-    fix: "mason start in the project's folder, then mason ui opens this page again: each run has its own address and token",
-    next: [{ command: "mason status", what: "whether Mason runs, and why it stopped" }, { command: "mason start", what: "start it" }, { command: "mason ui", what: "this page, for the Mason that is running" }] };
+  return { code: "unreachable", message: "Mason is not answering at this address", why: `Mason stopped, or it now runs on another port (${text})`,
+    fix: "Run mason start in the project's folder, then mason ui to open this page again. Each run has its own address and token.",
+    next: [{ command: "mason status", what: "says whether Mason runs, and why it stopped" }, { command: "mason start", what: "starts it" }, { command: "mason ui", what: "opens this page for the Mason that is running" }] };
 }
 
 /**
@@ -306,10 +309,10 @@ export function failureOf(status, text) {
  * person's own machine. Every other failure is the run's, and stands.
  */
 export function overTunnel(f) {
-  if (f.code !== "unreachable" && f.message !== "this page's cookie is not the running Mason's") return f;
-  return { code: f.code, message: "the tunnel to this server has closed", why: f.why,
-    fix: "mason ui --ssh <user@server>, on your own machine, opens this page again: each tunnel has its own address",
-    next: [{ command: "mason ui --ssh <user@server>", what: "this page, through a new tunnel" }] };
+  if (f.code !== "unreachable" && f.message !== STALE_PAGE) return f;
+  return { code: f.code, message: "The tunnel to this server has closed", why: f.why,
+    fix: "Run mason ui --ssh <user@server> on your own machine to open this page again. Each tunnel has its own address.",
+    next: [{ command: "mason ui --ssh <user@server>", what: "opens this page through a new tunnel" }] };
 }
 
 /** A part of a page written from one read: its body rendered, its Failure said where it shows when `says` (not the
@@ -319,6 +322,15 @@ export function readPart(ctx, path, render, says) {
   if (r === undefined) return `<p class="dim">Asking Mason…</p>`;
   return (r.failure && says ? renderFailure(r.failure) : "") + (r.body === undefined ? "" : render(r.body));
 }
+
+/**
+ * WHAT A PAGE SHOWS WHILE ITS POLL FAILS (issue 886): the last body it read stays, greyed, and says when it was read
+ * and why it is not newer — "As of 14:02 UTC. Mason can't be reached." — so it never reads as current; with nothing
+ * read yet, "Unknown" and the same reason. `failure` is the read's (`unreachable`: nothing answered, the run or the
+ * tunnel gone); `at` when the last read that answered was asked. The time as the page's lists print it (UTC, to the minute).
+ */
+export const staleWhy = (failure) => failure?.code === "unreachable" ? "Mason can't be reached." : "The latest read failed.";
+export const staleText = (at, failure) => `As of ${utcMinute(at.toISOString()).slice(11)} UTC. ${staleWhy(failure)}`;
 
 /** One request to the run over `fetchFn`: `{ body }`, its JSON, or `{ failure }` when it was refused or nothing answered. */
 export function createAsk(fetchFn) {
@@ -348,7 +360,7 @@ export function statusKind(word) {
   const w = String(word ?? "").toLowerCase();
   if (/^(ready|synced|done|copied|completed|ok|streamed|running|live|added)\b/.test(w)) return "ok";
   if (/^(failed|error|refused|lost|not running|stopped)\b/.test(w)) return "bad";
-  if (/^(under way|syncing|behind|copying|waiting|catching up|not streamed|not kept current|unsynced|cancelled|warning|left out|pending)\b/.test(w)) return "warn";
+  if (/^(under way|syncing|behind|copying|waiting|finishing sync|catching up|not streamed|not kept current|unsynced|cancelled|warning|left out|pending)\b/.test(w)) return "warn";
   return "unknown";
 }
 
@@ -421,24 +433,69 @@ export function placePops(doc, win) {
   if (typeof doc?.querySelectorAll !== "function") return placed;
   const gutter = 16, gap = 4;
   const vw = win.innerWidth ?? 0, vh = win.innerHeight ?? 0;
+  const inside = (left, top, w, h) => ({ left: Math.max(gutter, Math.min(left, vw - gutter - w)), top: Math.max(gutter, Math.min(top, vh - gutter - h)) });
+  // the page's controls outside every popover, read once, only when an answer is to be placed (`said`, below)
+  let controls = null;
+  const controlsNow = () => controls ??= [...doc.querySelectorAll(CONTROLS)]
+    .filter((c) => typeof c.getBoundingClientRect === "function" && c.closest?.(".pop") == null)
+    .map((c) => c.getBoundingClientRect()).filter((b) => b.width > 0 && b.height > 0 && b.bottom > 0 && b.top < vh && b.right > 0 && b.left < vw);
+  // the height of an answer docked at the window's bottom, given to the page's end (0: none is)
+  let dockedHeight = 0;
   for (const el of doc.querySelectorAll(".pop[data-anchor]")) {
     const a = doc.getElementById(el.dataset.anchor);
     if (a === null || typeof a.getBoundingClientRect !== "function") { el.hidden = true; continue; }
     el.hidden = false;
     const r = a.getBoundingClientRect();
     const w = el.offsetWidth, h = el.offsetHeight;
-    const left = Math.max(gutter, Math.min(r.right - w, vw - gutter - w));
     const below = r.bottom + gap;
     // too tall for the room on either side: kept inside the window, over its anchor, rather than past the window's edge
     // where no scroll reaches it (a fixed box)
     const side = below + h <= vh - gutter || r.top - gap - h < gutter ? below : r.top - gap - h;
-    const top = Math.max(gutter, Math.min(side, vh - gutter - h));
-    el.style.left = `${Math.round(left)}px`;
-    el.style.top = `${Math.round(top)}px`;
+    let at = inside(r.right - w, side, w, h);
+    // AN ANSWER (`said`: what an Add or a Sync now answered, up until it is dismissed) NEVER COVERS ANOTHER CONTROL
+    // (issue 884: under a row's actions it covered the next row's Sync now and Remove), and is never a way through to
+    // one (a tap on its words once added the table under it): it goes where it covers none — under its anchor, over it,
+    // or beside it on its left, level with its top or its bottom — and where every place covers one (a phone's rows, a
+    // long answer beside a narrow list), it is a bar fixed at the window's bottom (`docked`), the page given its height
+    // at its end (`--docked-h`), so every row can be scrolled clear of it
+    let docked = false;
+    if (el.classList?.contains("said")) {
+      const all = controlsNow();
+      const covers = (p) => all.some((b) => b.left < p.left + w - 0.5 && b.right > p.left + 0.5 && b.top < p.top + h - 0.5 && b.bottom > p.top + 0.5);
+      const clear = [at, inside(r.right - w, below, w, h), inside(r.right - w, r.top - gap - h, w, h), inside(r.left - gap - w, r.top, w, h), inside(r.left - gap - w, r.bottom - h, w, h)]
+        .find((p) => !covers(p));
+      docked = clear === undefined;
+      el.classList.toggle("docked", docked);
+      if (!docked) at = clear;
+      else dockedHeight = Math.max(dockedHeight, el.offsetHeight);
+      // A TAP ON IT IS ITS OWN (the owner's re-check: a finger 2 px inside the docked bar's top pressed the Add above it):
+      // a browser moves a tap to the nearest control under the finger, and only a box that answers a click is one — so it
+      // answers one (`keepsTap`), and docked, a band above it, unseen, is its own too (app.css)
+      el.onclick = keepsTap;
+      // what the person scrolled in it stays where they put it, whatever writes the page again (a poll, a pointerup)
+      const key = `${el.dataset.anchor}|${(el.textContent ?? "").slice(0, 200)}`;
+      el.onscroll = () => { popScroll.set(key, el.scrollTop); };
+      const kept = popScroll.get(key);
+      if (kept !== undefined && el.scrollTop !== kept) el.scrollTop = kept;
+    }
+    el.style.left = docked ? "" : `${Math.round(at.left)}px`;
+    el.style.top = docked ? "" : `${Math.round(at.top)}px`;
     placed.push(el);
   }
+  doc.documentElement?.style?.setProperty?.("--docked-h", `${Math.ceil(dockedHeight)}px`);
   return placed;
 }
+
+/** What a person clicks or types in: what an answer's popover must not cover (`placePops`). */
+const CONTROLS = "button, a[href], input, select, textarea, summary";
+
+/** An answer's click on itself, not on one of its own buttons or links: kept by it, so the page's own handler (a menu
+ *  closed by a click elsewhere) never takes a tap on the answer for a tap outside it. What makes the answer a target
+ *  a browser's touch adjustment keeps a tap on, rather than moving it to a control nearby. */
+const keepsTap = (e) => { if (e.target?.closest?.(CONTROLS) == null) e.stopPropagation?.(); };
+
+/** How far each answer was scrolled, by its anchor and its words (`placePops`): a write replaces the element. */
+const popScroll = new Map();
 
 /** A text with its Copy button (`copyClick` copies what the `<code id>` holds): a URL, a psql line, a password. */
 export const copyable = (id, text, afterHtml = "") =>
@@ -498,7 +555,7 @@ export const usersReadOnly = (s) => (s?.pageReadOnlyAllow ?? []).includes("users
  *  needs the server's address. "" off a server, and where the URL is the address a client reaches (`pg.public`: mason
  *  serve's MASON_PG_PUBLIC_URL, src/cli/pg-url.ts clientLink). */
 export const serverHostNote = (pg, served) => !served || pg.public === true ? ""
-  : `<p class="tip">This is the address on the server: from elsewhere a tool connects to the server's own address, in place of ${code(pg.host ?? "localhost")}.</p>`;
+  : `<p class="tip">This is the server's address for itself. A tool on another machine uses the server's own address in place of ${code(pg.host ?? "localhost")}.</p>`;
 
 /** Nothing to show, quietly: ONE line of muted text, one short sentence (`text`, escaped), and what may follow it in the
  *  same line (`moreHtml`: HTML, a command in code()) — no box, no icon, the same on every page. */

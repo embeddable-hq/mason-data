@@ -376,7 +376,7 @@ before(async () => {
   for (const s of PG_DDL) await truth.exec(s);
   // latest(x ORDER BY …), Mason's aggregate, declared on the truth from the catalog's own definition
   for (const s of LATEST_SQL) await truth.exec(s);
-  // the "source's" OID for citext is the truth's: what the copy records (SourceColumnInfo.typeOid) and the wire sends
+  // the "source's" OID for citext is the truth's: what the copy records (SourceColumnInfo.typeOid); the wire sends the catalog's (issue 861)
   const citextOid = Number((await truth.query<{ oid: number }>("SELECT oid FROM pg_type WHERE typname = 'citext'")).rows[0]!.oid);
   schema.tables[2]!.columns[1]!.typeOid = citextOid;
   // and the enum's, as for any type the source made
@@ -407,15 +407,33 @@ const client = async (password = mintToken(API_KEY, 600).token): Promise<pg.Clie
   return c;
 };
 
-/** the result's column names and type OIDs, and its rows as text (`pg`'s parsers off: the wire's own text) */
-const raw = { getTypeParser: () => (v: string) => v };
-async function answer(c: pg.Client, text: string, values?: unknown[]): Promise<{ fields: Array<[string, number]>; rows: unknown[][] }> {
-  const r = await c.query({ text, values, rowMode: "array", types: raw } as pg.QueryConfig);
-  return { fields: r.fields.map((f) => [f.name, f.dataTypeID]), rows: r.rows as unknown[][] };
+/** a type a database made (an OID from 16384 on) as its own server names it: the catalog and the truth each number their
+ *  own, and Mason sends the catalog's (issue 861), so the two are held alike by the type's name, never the number; a
+ *  built-in type stays its OID. Each side's names, read once an OID (a session's state never reaches the lookup) */
+const madeNames = { mason: new Map<number, string>(), truth: new Map<number, string>() };
+const TYPE_NAME = "SELECT n.nspname || '.' || t.typname FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace WHERE t.oid = ";
+async function typeOf(side: "mason" | "truth", oid: number): Promise<number | string> {
+  if (oid < 16384) return oid;
+  let name = madeNames[side].get(oid);
+  if (name === undefined) {
+    // a number its own server does not hold is never another side's type: said with the side, so it equals nothing
+    const unknown = `no type ${oid} on ${side}`;
+    if (side === "truth") name = String((await truth.query<unknown[]>(`${TYPE_NAME}${oid}`, [], { rowMode: "array" })).rows[0]?.[0] ?? unknown);
+    else { const c = await client(); try { name = String((await c.query({ text: `${TYPE_NAME}${oid}`, rowMode: "array" })).rows[0]?.[0] ?? unknown); } finally { await c.end(); } }
+    madeNames[side].set(oid, name);
+  }
+  return `type ${name}`;
 }
-async function postgres(text: string, values?: unknown[]): Promise<{ fields: Array<[string, number]>; rows: unknown[][] }> {
+/** the result's column names and type OIDs (a made type's by its name: `typeOf`), and its rows as text (`pg`'s parsers
+ *  off: the wire's own text) */
+const raw = { getTypeParser: () => (v: string) => v };
+async function answer(c: pg.Client, text: string, values?: unknown[]): Promise<{ fields: Array<[string, number | string]>; rows: unknown[][] }> {
+  const r = await c.query({ text, values, rowMode: "array", types: raw } as pg.QueryConfig);
+  return { fields: await Promise.all(r.fields.map(async (f): Promise<[string, number | string]> => [f.name, await typeOf("mason", f.dataTypeID)])), rows: r.rows as unknown[][] };
+}
+async function postgres(text: string, values?: unknown[]): Promise<{ fields: Array<[string, number | string]>; rows: unknown[][] }> {
   const r = await truth.query<unknown[]>(text, values, { rowMode: "array", parsers: Object.fromEntries([16, 20, 21, 23, 25, 114, 700, 701, 1009, 1014, 1015, 1022, 1082, 1114, 1184, 1186, 1700, 3802].map((o) => [o, (v: string) => v])) });
-  return { fields: r.fields.map((f) => [f.name, f.dataTypeID]), rows: r.rows };
+  return { fields: await Promise.all(r.fields.map(async (f): Promise<[string, number | string]> => [f.name, await typeOf("truth", f.dataTypeID)])), rows: r.rows };
 }
 
 test("a statement over a copied table is answered by DuckDB with Postgres's column names, types and text", async () => {
@@ -641,7 +659,7 @@ test("the review's silent differences: citext without regard to case, an inet as
   const c = await client();
   try {
     const alike = async (sql: string): Promise<void> => assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
-    // citext: `=`, `<>`, IN, LIKE and ORDER BY lower-case both sides (3 of 4 rows are 'finalized'); the wire sends the source's OID
+    // citext: `=`, `<>`, IN, LIKE and ORDER BY lower-case both sides (3 of 4 rows are 'finalized'); the wire sends the catalog's OID
     await alike("SELECT count(*) FROM accounts WHERE status = 'finalized'");
     await alike("SELECT id FROM accounts WHERE status LIKE 'FINAL%' OR status IN ('DRAFT') ORDER BY id");
     await alike("SELECT id, status FROM accounts ORDER BY status, id");
@@ -1802,7 +1820,7 @@ test("a LEFT JOIN LATERAL of json rows ON TRUE is Postgres's rows; under a LIMIT
       assert.doesNotMatch(sent(from), /LEFT JOIN/, sql);
     }
     // a whole result without an ORDER BY is the same rows, in an order neither promises (the oracle's set comparison)
-    const asSet = (r: { fields: Array<[string, number]>; rows: unknown[][] }): { fields: Array<[string, number]>; rows: unknown[][] } =>
+    const asSet = (r: { fields: Array<[string, number | string]>; rows: unknown[][] }): { fields: Array<[string, number | string]>; rows: unknown[][] } =>
       ({ fields: r.fields, rows: r.rows.map((x) => JSON.stringify(x)).sort().map((x) => JSON.parse(x) as unknown[]) });
     for (const sql of joined) {
       const from = logged.length;
@@ -2206,7 +2224,7 @@ test("jsonb_array_elements' column is value under a FROM name, and the FROM name
   const c = await client();
   const arrays = "CASE WHEN jsonb_typeof(t.b) = 'array' THEN t.b END";
   // the rows as a set: a json text's order is the collation's, which is not what is tested here
-  const sorted = (r: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ fields: r.fields, rows: r.rows.map((x) => JSON.stringify(x)).sort() });
+  const sorted = (r: { fields: Array<[string, number | string]>; rows: unknown[][] }): unknown => ({ fields: r.fields, rows: r.rows.map((x) => JSON.stringify(x)).sort() });
   try {
     for (const fn of ["jsonb_array_elements", "jsonb_array_elements_text"]) {
       for (const join of ["JOIN", "LEFT JOIN"]) {
@@ -2330,28 +2348,21 @@ test("a refusal of the statement an EXPLAIN explains is placed where Postgres pl
   } finally { await c.end(); }
 });
 
-test("the catalog names the OID the wire sends for a type the source made as the source names it, and its own OIDs as it holds them", async () => {
+test("the wire sends the catalog's own OID for a type the source made: format_type, pg_type and pg_attribute name it as the source does (issue 861)", async () => {
   const c = await client();
   try {
-    // the OIDs the wire sends for an enum, its array, a citext: the source's (here the truth's), which the catalog lacks
+    // the OIDs the wire sends for an enum, its array, a citext: the catalog's own
     const r = await c.query({ text: "SELECT m, ms FROM moods LIMIT 0", rowMode: "array" });
     const a = await c.query({ text: "SELECT status FROM accounts LIMIT 0", rowMode: "array" });
     const oids = [...r.fields.map((f) => f.dataTypeID), a.fields[0]!.dataTypeID];
-    const named = async (q: (sql: string) => Promise<unknown[][]>): Promise<unknown[][]> =>
-      q(`SELECT ${oids.map((o) => `format_type(${o}, -1)`).join(", ")}, format_type(23, -1), format_type(1043, 14)`);
-    const truthNames = (await truth.query<unknown[]>(`SELECT ${oids.map((o) => `format_type(${o}, -1)`).join(", ")}, format_type(23, -1), format_type(1043, 14)`, [], { rowMode: "array" })).rows;
-    assert.deepEqual(truthNames, [["mood", "mood[]", "citext", "integer", "character varying(10)"]]);
-    // mason_wire_type names what the wire sent; format_type too, but for an OID the catalog holds itself (both count
-    // from 16384: here the array's OID is the catalog's row type of moods), which keeps the catalog's meaning
-    assert.deepEqual((await answer(c, `SELECT ${oids.map((o) => `mason_wire_type(${o}, -1)`).join(", ")}, mason_wire_type(23, -1), mason_wire_type(1043, 14)`)).rows, truthNames);
-    const catalogHas = (await answer(c, `SELECT ${oids.map((o) => `EXISTS (SELECT FROM pg_type WHERE oid = ${o})`).join(", ")}`)).rows[0]!;
-    const formatted = (await named(async (sql) => (await answer(c, sql)).rows))[0]!;
-    oids.forEach((o, i) => {
-      if (catalogHas[i] === "f") assert.equal(formatted[i], truthNames[0]![i], `format_type(${o}): the wire's name`);
-    });
-    // the catalog's own OIDs, as pg_attribute holds them: the catalog's names
-    assert.deepEqual((await answer(c, "SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'moods'::regclass AND attnum > 0 ORDER BY attnum")).rows,
-      [["id", "integer"], ["m", "mood"], ["ms", "mood[]"]]);
+    const sql = `SELECT ${oids.map((o) => `format_type(${o}, -1)`).join(", ")}, format_type(23, -1), format_type(1043, 14)`;
+    assert.deepEqual((await answer(c, sql)).rows, [["mood", "mood[]", "citext", "integer", "character varying(10)"]], "format_type of the wire's OIDs: the source's names");
+    // a client's lookup of a RowDescription's OID (JDBC's getColumnTypeName) reads the type itself
+    assert.deepEqual((await answer(c, `SELECT oid::int, typname::text FROM pg_type WHERE oid IN (${oids.join(", ")}) ORDER BY 2`)).rows,
+      [[String(oids[1]), "_mood"], [String(oids[2]), "citext"], [String(oids[0]), "mood"]]);
+    // the catalog's own columns hold the same OIDs
+    assert.deepEqual((await answer(c, "SELECT attname, atttypid::int, format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'moods'::regclass AND attnum > 0 ORDER BY attnum")).rows,
+      [["id", "23", "integer"], ["m", String(oids[0]), "mood"], ["ms", String(oids[1]), "mood[]"]]);
   } finally { await c.end(); }
 });
 
@@ -2450,6 +2461,10 @@ test("EXPLAIN says how a copy is kept current as the sync says it to mason statu
     copies = [copied({ by: "poll", sync: { mode: "off" }, syncedAt: daysAgo, nextAt: null })];
     assert.equal(await header(), `${head}off: last synced 3 days ago (${utc(daysAgo)}); mason sync public.orders syncs it now)`);
     await jsonSays(null, { Sync: "off", "Last Synced": daysAgo, "Next Poll": null });
+    // read again whole at its interval: what keeps it current said in the user's word, sync, never "copy" (issue 903)
+    copies = [copied({ by: "recopy", copiedAt: daysAgo, syncedAt: null })];
+    assert.equal(await header(), `${head}kept current by reading it again whole, last synced ${utc(daysAgo)})`);
+    await jsonSays("syncing again in full", {});
     // served as copied and skipped by the passes until copied again: NOT kept current, and why
     copies = [copied({ by: "poll", sync: every30, syncedAt: daysAgo, nextAt: null, pending: "its columns changed: it is read again whole, then caught up by one poll" })];
     assert.equal(await header(), `${head}NOT kept current (last synced 3 days ago (${utc(daysAgo)})): its columns changed: it is read again whole, then caught up by one poll)`);
@@ -3074,7 +3089,7 @@ test("an output of a * is read by its number and its bare name as the column it 
 // one value; a volatile value is never computed twice
 test("USING and NATURAL choose their rows by row number, and a merged column is read as the join kind reads it", async () => {
   const c = await client();
-  const held = (a: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
+  const held = (a: { fields: Array<[string, number | string]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
   const sent = async (sql: string): Promise<string> => {
     logged.length = 0;
     await c.query(sql);
@@ -3342,7 +3357,7 @@ test("a key bound to an output is that output: by alias, number or an equal expr
 test("FETCH … WITH TIES answers as Postgres does: every key by its output's column, a set operation, its limits, inside another query", async () => {
   const c = await client();
   try {
-    const bag = (r: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ fields: r.fields, rows: r.rows.map((x) => JSON.stringify(x)).sort() });
+    const bag = (r: { fields: Array<[string, number | string]>; rows: unknown[][] }): unknown => ({ fields: r.fields, rows: r.rows.map((x) => JSON.stringify(x)).sort() });
     const differ: string[] = [];
     const alike = async (sql: string, values?: unknown[]): Promise<void> => {
       const [got, want] = [await answer(c, sql, values).catch((e: pg.DatabaseError) => `${e.code}: ${e.message}`), await postgres(sql, values).catch((e: { code: string; message: string }) => `${e.code}: ${e.message}`)];
@@ -3488,7 +3503,7 @@ test("a set operation's ORDER BY sorts its column as Postgres resolved it, and a
 async function unlike(c: pg.Client, statements: ReadonlyArray<readonly [string, "ordered" | "bag"]>): Promise<string[]> {
   const differ: string[] = [];
   for (const [sql, how] of statements) {
-    const as = (r: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ fields: r.fields, rows: how === "bag" ? r.rows.map((x) => JSON.stringify(x)).sort() : r.rows });
+    const as = (r: { fields: Array<[string, number | string]>; rows: unknown[][] }): unknown => ({ fields: r.fields, rows: how === "bag" ? r.rows.map((x) => JSON.stringify(x)).sort() : r.rows });
     const got = await answer(c, sql).then(as, (e: pg.DatabaseError) => `${e.code}: ${e.message}`);
     const want = await postgres(sql).then(as, (e: { code: string; message: string }) => `${e.code}: ${e.message}`);
     // asked whether the answers agree or not, so the reason is named on every run, beside the rows when they differ
@@ -3726,7 +3741,7 @@ test("a computed key and a merged column in a prepared statement run after a SET
 
 test("a GROUP BY a table's whole primary key with a LIMIT groups on the key and reads that table's columns after the limit (issue 134, step 6)", async () => {
   const c = await client();
-  const held = (a: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
+  const held = (a: { fields: Array<[string, number | string]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
   const sent = async (sql: string): Promise<string> => {
     logged.length = 0;
     await c.query(sql);
@@ -3788,7 +3803,7 @@ test("a GROUP BY a table's whole primary key with a LIMIT groups on the key and 
 
 test("a SELECT DISTINCT whose list holds a table's whole primary key, with a LIMIT, groups on the key and reads that table's columns after the limit (issue 134, step 6)", async () => {
   const c = await client();
-  const held = (a: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
+  const held = (a: { fields: Array<[string, number | string]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
   const sent = async (sql: string): Promise<string> => {
     logged.length = 0;
     await c.query(sql);
@@ -3854,7 +3869,7 @@ test("a SELECT DISTINCT whose list holds a table's whole primary key, with a LIM
 
 test("a DISTINCT ON with a LIMIT chooses its rows by row number and reads the columns of the kept rows alone (issue 134, step 6, task E)", async () => {
   const c = await client();
-  const held = (a: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
+  const held = (a: { fields: Array<[string, number | string]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
   const sent = async (cl: pg.Client, sql: string): Promise<string> => {
     logged.length = 0;
     await cl.query(sql);
@@ -3958,7 +3973,7 @@ test("a DISTINCT ON with a LIMIT chooses its rows by row number and reads the co
   } finally { await c.end(); await onLibc.end(); await libc.close(); }
 });
 
-const heldJson = (a: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
+const heldJson = (a: { fields: Array<[string, number | string]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
 
 test("a DISTINCT ON sorts by the ON expressions its ORDER BY lacks, appended as Postgres does (PR 207's review)", async () => {
   const c = await client();
@@ -4156,7 +4171,7 @@ test("a numeric quotient under a DISTINCT ON or a DISTINCT shows Postgres's exac
 
 /** an answer's rows in one order: quotients equal to a double's 17 digits are in no defined order on Mason (the listed
  *  difference numeric-quotient-compare), so a test of their equality reads the rows as a set */
-const rowSet = (a: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => JSON.stringify(r)).sort() });
+const rowSet = (a: { fields: Array<[string, number | string]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => JSON.stringify(r)).sort() });
 
 test("a numeric quotient passed through a DISTINCT shows Postgres's exact text (PR 207's class round, P3 P4 C10)", async () => {
   const c = await client();
@@ -4553,7 +4568,7 @@ test("every way out a numeric refusal names answers as Postgres does; a numeric 
 test("a top N over joined tables chooses its rows by row number and reads the columns for those alone", async () => {
   const c = await client();
   // this file's copy holds a jsonb as DuckDB wrote it, where a real copy holds Postgres's text: one spelling for the comparison
-  const held = (a: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
+  const held = (a: { fields: Array<[string, number | string]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
   const sent = async (sql: string): Promise<string> => {
     logged.length = 0;
     await c.query(sql);
@@ -4608,7 +4623,7 @@ test("a top N over joined tables chooses its rows by row number and reads the co
 // query, a tool's wrapper and a derived side read their rows by row number too, and what has no row number passes through
 test("a join's FROM items: a plain derived read is fetched by its row number, a wrapper folded into its join, anything else carried", async () => {
   const c = await client();
-  const held = (a: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
+  const held = (a: { fields: Array<[string, number | string]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
   const sent = async (sql: string): Promise<string> => {
     logged.length = 0;
     await c.query(sql);
@@ -4756,7 +4771,7 @@ test("the preserved side of an outer join is limited first where its keys and WH
   const first = (alias: string, n: number): RegExp => new RegExp(`\\( SELECT \\*.* LIMIT ${n} \\) AS ${alias} (LEFT JOIN|RIGHT JOIN|ON) `);
   const LIMITED = /\( SELECT \*.* LIMIT \d+ \) AS (?!__mason_)\w+ (LEFT JOIN|RIGHT JOIN|ON) /;
   // (this file's truth writes a jsonb's text with a space after each colon)
-  const held = (r: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...r, rows: r.rows.map((x) => x.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
+  const held = (r: { fields: Array<[string, number | string]>; rows: unknown[][] }): unknown => ({ ...r, rows: r.rows.map((x) => x.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
   try {
     // a join that repeats every row of c forty times, c's columns alone listed (rows of equal keys are alike), and a
     // join of one row at most, every column: each order total, so Postgres's rows are the answer
@@ -4816,7 +4831,7 @@ test("the preserved side of an outer join is limited first where its keys and WH
 test("a subquery in the select list is computed for the chosen rows alone, and one anywhere else keeps the statement as it was", async () => {
   const c = await client();
   // (this file's truth parses an int4[]: written back as its text)
-  const held = (a: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : Array.isArray(v) ? `{${v.join(",")}}` : v)) });
+  const held = (a: { fields: Array<[string, number | string]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : Array.isArray(v) ? `{${v.join(",")}}` : v)) });
   const sent = async (sql: string): Promise<string> => {
     logged.length = 0;
     await c.query(sql);
@@ -6179,6 +6194,8 @@ test("a grouped collated output ordered by number, name or expression is its col
 test("round 14: a wire statement's plan computes no generated table's outputs, and a deep statement is planned within the bound", async () => {
   const catalogDb = new PGlite();
   try {
+    // ready before its first raw message: an empty schema's DDL is no statement at all, which would have awaited it
+    await catalogDb.waitReady;
     for (const s of catalogDdl({ database: "app", tables: [] })) await catalogDb.exec(s);
     const catalog = (b: Uint8Array): Promise<Uint8Array> => catalogDb.execProtocolRaw(b);
     const plan = async (sql: string) => planDuck({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Parameters<typeof planDuck>[0]["stmt"],
@@ -6209,6 +6226,8 @@ const EXPECTED_244: Record<string, string> = { 0: "as Postgres: 42804", 1: "as P
 test("issue 244: a numeric read three times a level through every level is planned within the bound, and answered as Postgres", async () => {
   const catalogDb = new PGlite();
   try {
+    // ready before its first raw message: an empty schema's DDL is no statement at all, which would have awaited it
+    await catalogDb.waitReady;
     for (const s of catalogDdl({ database: "app", tables: [] })) await catalogDb.exec(s);
     const catalog = (b: Uint8Array): Promise<Uint8Array> => catalogDb.execProtocolRaw(b);
     const plan = async (sql: string) => planDuck({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Parameters<typeof planDuck>[0]["stmt"],

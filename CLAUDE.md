@@ -302,6 +302,25 @@ every session needs. Write the rule and one sentence of why; the incident, the m
   exit code. Both get what to run next, from ONE list. The reader is told apart by the stream (`isTTY`) and by `--json`
   only — never by sniffing an environment variable that names an agent. A failure is one shape for both: what is wrong,
   why, the way out, what to run next (`Failure`, `src/cli/command.ts`).
+- **Write plain English for everything a person reads.** This covers the web page, the CLI's output, errors, log
+  lines, release notes, docs, issues and PRs. Aim for an easy reading age:
+  - Write whole sentences. Keep the small words ("the", "a", "is", "can", "will").
+  - Keep sentences short, with one idea each. Don't chain clauses with colons, semicolons and commas.
+  - Use common words. Say "query" rather than "statement" where a user reads it, and "set up" rather than "provision".
+  - Cut any sentence that doesn't help the reader act or understand. A clear label needs no explanation under it.
+  - Speak to the interface the reader is using. On the web page, say how to do it on the page, and name a `mason` command or a file only when the page can't do it. In the CLI, name the commands.
+
+  For example, write "Choose where metabase can connect from. If you limit it, open sessions from other addresses end at
+  their next query." Not "Where metabase connects from, as mason user from metabase sets it: the sessions it holds from
+  another address end at their next statement." This applies to this file and the code's comments too: dense,
+  compressed rules are how rules get missed.
+- **Say "sync", never "copy", for what Mason does to a table's data.** A user reads *the first sync*, *the synced
+  table* and *the synced data*, never "copy", "copies", "copied" or "copying". This holds everywhere a user reads: the
+  CLI, the web page, errors, logs, README.md, `cli/README.md`, the user-facing docs, release notes, and wording proposed
+  in issues and PRs. A user who reads "copy" thinks of a one-off snapshot, not data kept in sync. Exempt are code
+  identifiers, `--json` keys and values, `MASON_COPY_PARALLEL`, SQL's and the wire's `COPY`, the clipboard's Copy
+  button, and the docs for people building Mason (`docs/DESIGN.md`, `docs/RECIPES.md`, `docs/FLOWS.md`, `.claude/`).
+  `tests/conventions.test.ts` holds every literal in `src/` to it.
 - **A refusal on the wire is Postgres's** (SQLSTATE, message, DETAIL, HINT), and every refusal names its registry entry
   (`src/duck/gaps.ts`): a DuckDB-side refusal without one does not compile; a `PgError` 0A000 in src/api/ without one fails
   `tests/conventions.test.ts` (six older ones are ratcheted there).
@@ -317,11 +336,9 @@ every session needs. Write the rule and one sentence of why; the incident, the m
   entrance); "done" asserted by code that never exercised the artifact (the contract answers a probe); progress and
   reasons that lived only in the log (the ledger is the record, the commands render it).
 - **Vocabulary**: the *sources file* names what is synced, one *entry* per table; what Mason does to a table's data is
-  *sync*: a user reads *the first sync* (the chunked copy, in the code), *the synced table* and *the synced data*, never
-  "copy" (`tests/conventions.test.ts` holds every literal of src/ to it: the commands, the log, the wire; identifiers, `--json` keys and
-  `MASON_COPY_PARALLEL` keep the code's word); changes
-  arrive by *the poll* (SELECTs on xmin) or *the stream* (logical replication); a *user* is what `mason user` makes (never "token" or "credentials" in what it
-  prints); the *request log* is `_mason.requests`. Name the engine only in code and docs.
+  *sync* ("Say sync" above; the first sync is the chunked copy in the code); changes arrive by *the poll* (SELECTs on
+  xmin) or *the stream* (logical replication); a *user* is what `mason user` makes (never "token" or "credentials" in
+  what it prints); the *request log* is `_mason.requests`. Name the engine only in code and docs.
 - **The sources file is named for a software engineer**: someone who writes SQL against Postgres must recognise every
   key (`kind`, `url`, `tables`, `columns`, `exclude`, `key`) without a BI glossary (no CLI answer says otherwise,
   `tests/conventions.test.ts`). Choose a word in this order: what SQL and the database call it; what an application

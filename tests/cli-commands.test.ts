@@ -270,7 +270,7 @@ test("mason status and wait in replication mode say where the stream is: its pos
     "slot           holds 3.0 GiB of the database's WAL (extended) · 1.0 GiB more before Postgres invalidates it (max_slot_wal_keep_size) (read 2.0 s ago)",
     "last change    committed 5.0 s ago, applied 0.3 s after its commit",
     "public.orders  streamed · 1,204 changes (1,000 inserts, 200 updates, 4 deletes) this run",
-    "shop.lines     catching up by one poll from 2026-10-26 11:58 UTC: polling, for 3.0 s · the stream holds 12 changes of it meanwhile",
+    "shop.lines     getting the changes made since 2026-10-26 11:58 UTC: reading the changes, for 3.0 s · the stream holds 12 changes of it meanwhile",
     "public.events  left out: publication app_pub does not carry public.events: ALTER PUBLICATION app_pub ADD TABLE public.events",
     "public.big     not streamed yet: it is being read whole: it joins once synced and caught up by one poll",
   ]);
@@ -859,16 +859,19 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
   const usageAsks: Array<{ since: string; until: string; stepSeconds?: number }> = [];
   // the tables each POST /api/sync asked the sync to poll (mason sync)
   const polled: string[][] = [];
+  // the copies the run serves and when sizes were last measured, as mason usage's section sets them (issue 883)
+  let usageCopies: Array<{ source: string; phase: string; copiedAt: string | null }> = [];
+  let measure: { at: string; fileStamp: string | null } | null = null;
   const ctx: RunContext = {
     page: false, users: { file: path.join(app, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
     source: parsed.source, facts: () => facts, warnings: [], replication: () => null, port: 0, token: "t0ken-of-the-run",
     folder: () => s.folder, root: app, home: path.join(app, ".mason"), version: "test", startedAt: Date.now(), sources: () => { const r = read(); return { file: "message" in r ? null : r, problem: null }; }, sourcesChanged: () => {}, log: () => {},
     readSource: () => { runEdits++; return read(); }, runUrl: s.url, listener: { running: () => [], cancel: (session) => ({ unknown: session }), openSessions: () => ({ open: 0, byClient: [] }) },
     logs: { capacity: 2000, recent: () => [] },
-    duck: { copies: () => [], file: path.join(s.root, "duck.db"), poll: async (tables) => { polled.push(tables); return { at: "2026-11-07T10:00:00.000Z", tables: [] }; }, stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
+    duck: { copies: () => usageCopies as never[], file: path.join(s.root, "duck.db"), poll: async (tables) => { polled.push(tables); return { at: "2026-11-07T10:00:00.000Z", tables: [] }; }, stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }), slowest: async () => [], durationsBy: async () => new Map([[Date.parse(sample.at), { p50: sample.durationP50Ms, p95: sample.durationP95Ms }]]), 
         lastUsed: async (u) => u.map(() => null) }, events: { days: 7, recent: async () => [] },
-      usage: { days: 7, sampleSeconds: 60, samples: async (o) => { usageAsks.push(o); return [sample]; }, copySizes: async () => [{ table: "public.orders", bytes: 3 * 2 ** 20, at: "2026-10-28T09:10:00.000Z" }], statementTotals: () => ({ completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 }), lastDurations: () => null },
+      usage: { days: 7, sampleSeconds: 60, samples: async (o) => { usageAsks.push(o); return [sample]; }, copySizes: async () => [{ table: "public.orders", bytes: 3 * 2 ** 20, at: "2026-10-28T09:10:00.000Z" }], lastMeasure: () => measure, statementTotals: () => ({ completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 }), lastDurations: () => null },
       restarts: () => [] },
   };
   const server = createRunServer(ctx);
@@ -909,6 +912,19 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
     await same(["remove", "customer"], /shop\.yml names no table customer — did you mean `customers`\?/);
     // MASON USAGE asks the run's /api/usage and prints its answer: as it is under --json, a line a span for a person
     writeRunning(s.root, { port: ctx.port, token: ctx.token });
+    // a synced table with no size says why where its size would be (issue 883): one measured since its first sync with no
+    // block of its own (its rows all in a write-ahead log of 2.3 MiB: under 3 MiB), one synced after the last measure,
+    // and one whose first sync is not done (not listed)
+    usageCopies = [{ source: "public.orders", phase: "copied", copiedAt: "2026-10-28T08:00:00.000Z" }, { source: "public.small", phase: "copied", copiedAt: "2026-10-28T09:00:00.000Z" },
+      { source: "public.fresh", phase: "copied", copiedAt: "2026-10-28T09:12:00.000Z" }, { source: "public.big", phase: "copying", copiedAt: null }];
+    const wal = `${ctx.duck.file}.wal`;
+    const madeFile = !fs.existsSync(ctx.duck.file);
+    if (madeFile) fs.writeFileSync(ctx.duck.file, "x".repeat(12_288));
+    fs.writeFileSync(wal, "w".repeat(Math.round(2.3 * 2 ** 20)));
+    // the sampler's last measure: at 09:10, the file as it is now (not written since), stamped as
+    // src/duck/file-bytes.ts fileStamp stamps it (its size and its time to the nanosecond)
+    const stampOf = (f: string): string => { const st = fs.statSync(f, { bigint: true }); return `${st.size}:${st.mtimeNs}`; };
+    measure = { at: "2026-10-28T09:10:00.000Z", fileStamp: stampOf(ctx.duck.file) };
     try {
       const t0 = Date.now();
       const person = await runMason(app, ["usage", "--since", "2h", "--step", "10m"], matrixEnv());
@@ -917,14 +933,31 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
       assert.ok(Date.parse(usageAsks[0]!.until) >= t0 - 1000, "until now");
       assert.match(person.stdout, /^Usage from \d{4}-\d\d-\d\d \d\d:\d\d to .* UTC, 10 min a line \(a sample every 60 s, kept 7 days\):\n/);
       assert.ok(person.stdout.includes(`\n${sampleLine(sample, false)}\n`), person.stdout);
-      assert.match(person.stdout, /Each synced table's own size \(measured every 10 min\):\n {2}public\.orders {2}\s+3\.0 MiB {2}at 09:10 UTC\n {2}a table is measured once its rows are written into the file: a small table's can wait in the write-ahead log until it passes 16 MiB or Mason stops\n/);
+      assert.match(person.stdout, new RegExp("Each synced table's own size \\(measured every 10 min\\):\\n" +
+        " {2}public\\.orders {2}\\s+3\\.0 MiB {2}at 09:10 UTC\\n" +
+        " {2}public\\.fresh {3}Measuring… {2}synced since the last measure \\(at 09:10 UTC\\): measured within 10 min\\n" +
+        " {2}public\\.small {6}< 3 MiB {2}its rows are all in the write-ahead log, not yet in the file: under the log's size, measured exactly once they are written into the file \\(the log past 16 MiB, or mason stop\\)\\n"));
+      assert.doesNotMatch(person.stdout, /public\.big/, "a first sync not done has no size line");
       assert.match(person.stdout, /\nNext:/);
       const json = await runMason(app, ["usage", "--step", "0", "--json"], matrixEnv());
       assert.equal(json.code, 0, json.stderr);
       const answer = JSON.parse(json.stdout) as Record<string, unknown>;
       assert.equal(usageAsks[1]!.stepSeconds, undefined, "--step 0: every sample");
       assert.deepEqual({ ...answer, since: null, until: null, next: null }, { since: null, until: null, stepSeconds: null, sampleSeconds: 60, keptDays: 7, samples: [sample],
-        copySizes: [{ table: "public.orders", bytes: 3 * 2 ** 20, at: "2026-10-28T09:10:00.000Z" }], next: null });
+        copySizes: [{ table: "public.orders", bytes: 3 * 2 ** 20, at: "2026-10-28T09:10:00.000Z" }], sizedAt: "2026-10-28T09:10:00.000Z", walBytes: Math.round(2.3 * 2 ** 20),
+        unsized: [{ table: "public.fresh", why: "synced-since", underBytes: null }, { table: "public.small", why: "in-log", underBytes: 3 * 2 ** 20 }], next: null });
+      // THE FILE WRITTEN SINCE THE MEASURE (a checkpoint moved rows into it, a small log begun): measuring, never the new
+      // log's "< 1 MiB" (review of PR 902)
+      fs.appendFileSync(ctx.duck.file, "x".repeat(1_835_008));
+      fs.writeFileSync(wal, "w".repeat(3_130));
+      const written = await runMason(app, ["usage"], matrixEnv());
+      assert.match(written.stdout, / {2}public\.small {3}Measuring… {2}its rows were in the write-ahead log at the last measure \(at 09:10 UTC\), and rows have been written into the file since, maybe its own: measured within 10 min\n/);
+      assert.doesNotMatch(written.stdout, /< 1 MiB/);
+      // A RESTART, read before its first measure: not measured since Mason started, never "synced since the last measure"
+      measure = null;
+      const restarted = await runMason(app, ["usage"], matrixEnv());
+      for (const t of ["fresh", "small"]) assert.match(restarted.stdout, new RegExp(` {2}public\\.${t} +Measuring… {2}not measured since Mason started: the first measure is a minute after the start\\n`));
+      assert.doesNotMatch(restarted.stdout, /synced since the last measure/);
       // the run's refusal, in its words and the usage code; and one the command refuses itself, before asking
       const short = await runMason(app, ["usage", "--step", "30s", "--json"], matrixEnv());
       assert.deepEqual([short.code, (JSON.parse(short.stdout) as { error: { code: string; message: string } }).error.message],
@@ -939,7 +972,7 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
       assert.match(huge.stderr, /mason usage: --since "99999999999d" is further back than a time reaches/);
       assert.doesNotMatch(huge.stderr, /RangeError|Invalid time value/);
       assert.equal(usageAsks.length, asked, "refused before the run is asked");
-    } finally { writeRunning(s.root, null); }
+    } finally { writeRunning(s.root, null); usageCopies = []; measure = null; fs.rmSync(wal, { force: true }); if (madeFile) fs.rmSync(ctx.duck.file, { force: true }); }
     // MASON SYNC --ALL: every table the sources file names, in one POST /api/sync; never beside names; none added is nothing yet
     fs.writeFileSync(s.file, `kind: postgres\nurl: ${s.url}\ntables:\n  customers: {}\n  orders: {}\n`);
     writeRunning(s.root, { port: ctx.port, token: ctx.token });
@@ -1090,7 +1123,7 @@ test("stage 1b, the roles file decides a user added without --role: its default 
       requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }),
         summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }),
         slowest: async () => [], durationsBy: async () => new Map(), lastUsed: async (u) => u.map(() => null) },
-      events: { days: 7, recent: async () => [] }, usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [], statementTotals: () => ({ completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 }), lastDurations: () => null }, restarts: () => [] },
+      events: { days: 7, recent: async () => [] }, usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [], lastMeasure: () => null, statementTotals: () => ({ completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 }), lastDurations: () => null }, restarts: () => [] },
   };
   const server = createRunServer(ctx);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
@@ -1175,7 +1208,7 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
     duck: { copies: () => [], file: path.join(root, "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       requests: { days: 7, unsupported: async (q) => { unsupportedAsks.push(q); return [unsupportedSql]; }, page: async (q) => { asked.push(q); return q.id !== undefined ? { requests: q.id === SLOW_ID ? [slowQuery] as never : [], before: null } : { requests: q.failed === true ? failedQueries as never : [], before: "2026-10-24T10:00:00.000Z~7" }; }, slow: async () => [],
         refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }), slowest: async () => [], durationsBy: async () => new Map(),  lastUsed: async (u) => u.map(() => null) },
-      events: { days: 7, recent: async () => [] }, usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [], statementTotals: () => ({ completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 }), lastDurations: () => null }, restarts: () => [] },
+      events: { days: 7, recent: async () => [] }, usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [], lastMeasure: () => null, statementTotals: () => ({ completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 }), lastDurations: () => null }, restarts: () => [] },
   };
   const server = createRunServer(ctx);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
@@ -1333,7 +1366,7 @@ test("mason wait is ready only once a first sync's catch-up poll is over, and sa
       requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }),
         summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }),
         slowest: async () => [], durationsBy: async () => new Map(), lastUsed: async (u: unknown[]) => u.map(() => null) },
-      events: { days: 7, recent: async () => [] }, usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [],
+      events: { days: 7, recent: async () => [] }, usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [], lastMeasure: () => null,
         statementTotals: () => ({ completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 }), lastDurations: () => null }, restarts: () => [] },
   } as unknown as RunContext;
   const server = createRunServer(ctx);

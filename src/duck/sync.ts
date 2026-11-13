@@ -1035,6 +1035,9 @@ export class Sync {
   private appliedLsn = 0n;
   /** the slot has a row in `_mason.stream_state`: what this copy applied of it is known */
   private slotKnown = false;
+  /** a slot is being made (`prepareReplication`, from its marks' commit until it exists and its tables are marked anew):
+   *  no catch-up ends a mark meanwhile (`catchUp`) */
+  private makingSlot = false;
   /** THE TABLES COPIED BUT NOT YET CAUGHT UP (`_mason.catch_up`, so a run that stops first catches them up at its next
    *  start), and why: left out of the polls and the stream until one poll from their watermark (`catchUp`). Each mark is
    *  an object of its own, so a catch-up clears only the mark it caught up (a slot made again meanwhile marks anew) */
@@ -2218,7 +2221,7 @@ export class Sync {
    * REPLICATION, BEFORE A PASS COPIES: the publication carries every replicated table, and the slot exists — so a table
    * copied now has its changes in the stream from before it joins (src/duck/stream.ts "why replaying is safe"). A slot
    * made now, or one this copy has no record of, carries nothing from before it: the tables already copied are caught
-   * up by one poll each before the stream applies their changes (`behind`, recorded with the slot in one transaction).
+   * up by one poll each before the stream applies their changes (`behind`, recorded before the slot is made).
    * A slot Postgres invalidated (`wal_status = lost`, past `max_slot_wal_keep_size`) lost changes: it is dropped and
    * made again, and the copies are caught up the same way.
    */
@@ -2240,7 +2243,6 @@ export class Sync {
       if (r.owned) await this.ensurePublication(pg, tables, identities);
       else await this.verifyPublication(pg, tables, identities);
       const slot = await readSlot(pg, r.slot);
-      let made = false;
       if (slot.exists && slot.walStatus === "lost") {
         this.log(`replication slot ${r.slot} was invalidated by the database (wal_status lost: it held more WAL than max_slot_wal_keep_size), so changes are missing from it: made again, and the synced tables caught up by one poll`);
         if (slot.active) throw new Error(`replication slot ${r.slot} is lost and still in use by pid ${slot.activePid}`);
@@ -2248,27 +2250,56 @@ export class Sync {
       } else if (slot.exists && slot.plugin !== "pgoutput") {
         throw new Error(`replication slot ${r.slot} exists with the plugin ${slot.plugin}, not pgoutput: it is not Mason's (drop it, or name another project)`);
       }
-      if (!slot.exists || slot.walStatus === "lost") {
-        const repl = await PgConnection.connect({ ...this.pgOptions(), replication: true });
-        try { this.log(`made replication slot ${r.slot} at ${await createSlot(repl, r.slot)} (it holds the database's WAL until Mason reads it: mason destroy drops it, and so does a sources file in which no table's sync is replication)`); }
-        finally { repl.close(); }
-        made = true;
-        this.onReplication?.(true);
+      const making = !slot.exists || slot.walStatus === "lost";
+      // the replicated tables already copied: the slot carries nothing from before it (a polled one is the poll's)
+      const copiedNow = (): AddedTable[] => tables.filter((t) => this.states.get(t.source)?.phase === "copied" && this.snapshots.has(t.source));
+      const record = async (copied: readonly AddedTable[]): Promise<void> => {
+        const w = this.store.writer;
+        await w.run("BEGIN TRANSACTION");
+        try {
+          await w.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.stream_state VALUES ($1, '0/0', now())`, [r.slot]);
+          for (const t of copied) await w.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.catch_up VALUES (${literal(t.source)}, 'after the slot was made', now())`);
+          await w.run("COMMIT");
+        } catch (e) {
+          await w.run("ROLLBACK");
+          throw e;
+        }
+      };
+      if (making) {
+        // A SLOT ABOUT TO BE MADE: its tables' catch-ups are DURABLE before it exists — the slot's record at 0/0 and a
+        // catch_up row each, committed first (issue 893's review, B1: written only after it, a run killed between the
+        // two met at its next start a slot of the name its old record knew and streamed it with no catch-up). And no
+        // catch-up ends one of them while it is being made (`makingSlot`, `catchUp`): a catch-up's poll before the slot
+        // exists may precede a transaction the slot's creation waits for, which then reaches neither (the second
+        // review: a copy's catch-up queued meanwhile took a mark set before the slot and cleared it). The marks a
+        // catch-up must clear are set only once the slot exists, below
+        await this.onWriter(async () => { await record(copiedNow()); this.makingSlot = true; });
+        try {
+          const repl = await PgConnection.connect({ ...this.pgOptions(), replication: true });
+          try { this.log(`made replication slot ${r.slot} at ${await createSlot(repl, r.slot)} (it holds the database's WAL until Mason reads it: mason destroy drops it, and so does a sources file in which no table's sync is replication)`); }
+          finally { repl.close(); }
+          this.onReplication?.(true);
+        } catch (e) {
+          await this.onWriter(async () => { this.makingSlot = false; });
+          throw e;
+        }
       }
-      if (made || !this.slotKnown) {
-        // the replicated tables already copied: the slot carries nothing from before it (a polled one is the poll's)
-        const copied = tables.filter((t) => this.states.get(t.source)?.phase === "copied" && this.snapshots.has(t.source));
+      if (making || !this.slotKnown) {
+        // THE SLOT EXISTS (made now, or one this copy has no record of): every replicated table copied by now is marked
+        // behind with a mark of its own, so a catch-up that took an earlier one counts for nothing, and is caught up by
+        // one poll from here — durable again, as a catch-up ended while the slot was made kept its row
         await this.onWriter(async () => {
-          const w = this.store.writer;
-          await w.run("BEGIN TRANSACTION");
-          try {
-            await w.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.stream_state VALUES ($1, '0/0', now())`, [r.slot]);
-            for (const t of copied) await w.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.catch_up VALUES (${literal(t.source)}, 'after the slot was made', now())`);
-            await w.run("COMMIT");
-          } catch (e) {
-            await w.run("ROLLBACK");
-            throw e;
+          const copied = copiedNow();
+          try { await record(copied); }
+          catch (e) {
+            // a slot made now: its tables' rows were committed before it and no catch-up ended one since, so a restart
+            // still catches them up — said, and this run marks them all the same, never leaving the slot's flag set
+            // (a flag left set ended no catch-up for the rest of the run: the table polled whole again and again).
+            // One this copy has no record of: thrown, and marked at the next pass
+            if (!making) throw e;
+            this.log(`replication slot ${r.slot}: its tables' catch-ups could not be recorded again after it was made (the ones recorded before it stand, so a restart catches them up): ${this.errorText(e)}`);
           }
+          this.makingSlot = false;
           this.appliedLsn = 0n;
           this.slotKnown = true;
           for (const t of copied) this.behind.set(t.source, { why: "after the slot was made" });
@@ -3320,8 +3351,9 @@ export class Sync {
       this.retries.delete(t.source);
       const st = this.states.get(t.source);
       if (st !== undefined && st.error !== null) await this.record({ ...st, error: null });
-      // a slot made again meanwhile marked it anew: caught up once more
-      if (this.behind.get(t.source) === mark) {
+      // a slot made again meanwhile marked it anew: caught up once more. While one is being made, a catch-up ends no
+      // mark: its poll may precede a transaction the slot's creation waits for (`prepareReplication` marks it anew)
+      if (this.behind.get(t.source) === mark && !this.makingSlot) {
         await this.store.writer.run(`DELETE FROM ${MASON_SCHEMA}.catch_up WHERE source = ${literal(t.source)}`);
         this.behind.delete(t.source);
       }

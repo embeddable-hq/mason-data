@@ -26,7 +26,7 @@ const NEWEST_EVERY_MS = 5000;
 /** The newest page while a search is set: a search reads every statement's text of the range (7 days of a busy log,
  *  ~0.6 s a read), so it is read every 30 s, not 5 — said under the log (SEARCH_NOTE). */
 const SEARCH_EVERY_MS = 30_000;
-export const SEARCH_NOTE = `Refreshed every ${SEARCH_EVERY_MS / 1000} s while searching: a search reads the text of every statement in the range.`;
+export const SEARCH_NOTE = `While you search, this list refreshes every ${SEARCH_EVERY_MS / 1000} s, because a search reads the text of every query in the range.`;
 /** The most of a statement (or an error) an expanded row writes, in characters. */
 const STATEMENT_MAX = 16 * 1024;
 
@@ -36,7 +36,7 @@ const STATEMENT_MAX = 16 * 1024;
 const OUTCOME = { ok: ["ok", "Completed"], refused: ["warn", "Refused"], failed: ["bad", "Failed"], cancelled: ["warn", "Cancelled"] };
 
 /** The columns of the request log's table: its details row spans them all; the sortable ones by their sort key. */
-const REQUEST_COLUMNS = [["Status"], ["Query id"], ["Started", "started"], ["Duration", "duration", "num"], ["User"], ["Client"], ["Rows", "rows", "num"], ["Statement"]];
+const REQUEST_COLUMNS = [["Status"], ["Query id"], ["Started", "started"], ["Duration", "duration", "num"], ["User"], ["Client"], ["Rows", "rows", "num"], ["Query"]];
 /** What each sortable column sorts by. */
 const REQUEST_SORTS = { started: (r) => Date.parse(r.startedAt), duration: (r) => r.durationMs, rows: (r) => r.rows };
 /** The request log's order unless a header is clicked: newest first. */
@@ -44,7 +44,7 @@ const NEWEST_FIRST = { key: "started", dir: "desc" };
 
 /** The statement cell's toggle (issue 816): the same expanded row as the id's, by the same key and open state, so the
  *  way to the whole statement is where the reader looks for it: its label the +/− the id's summary draws, its name what it opens. */
-const EXPAND_NAME = "Show the whole statement";
+const EXPAND_NAME = "Show the whole query";
 const expandButton = (key, open) =>
   `<button type="button" class="expand" data-expand="${esc(key)}" aria-expanded="${open ? "true" : "false"}" aria-label="${EXPAND_NAME}" title="${EXPAND_NAME}"><span aria-hidden="true">${open ? "−" : "+"}</span></button>`;
 
@@ -56,8 +56,8 @@ const expandButton = (key, open) =>
 function planHtml(r) {
   if (typeof r.plan !== "string") return "";
   const plan = capped(r.plan, STATEMENT_MAX, `mason logs --requests --id ${r.requestId}`);
-  return `<p class="plan-label">Plan, recorded once it ended (it took ${esc(statementMsText(r.durationMs))})</p><pre class="plan">${esc(plan.text)}</pre>` +
-    (plan.cut ? `<p class="dim cut">${esc(plan.cut)}${r.planTruncated ? " (as the log kept it)" : ""}</p>` : r.planTruncated ? `<p class="dim cut">the request log kept the plan cut at 8 KiB</p>` : "");
+  return `<p class="plan-label">Its plan, recorded when it ended (it took ${esc(statementMsText(r.durationMs))})</p><pre class="plan">${esc(plan.text)}</pre>` +
+    (plan.cut ? `<p class="dim cut">${esc(plan.cut)}${r.planTruncated ? " (as the log kept it)" : ""}</p>` : r.planTruncated ? `<p class="dim cut">Mason kept only the first 8 KiB of the plan.</p>` : "");
 }
 
 /**
@@ -83,7 +83,7 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
   const nav = paged || older ? `<div class="paging">${paged ? `<button type="button" data-newest>Newest</button>` : ""}${older ? `<button type="button" data-older>Older</button>` : ""}</div>` : "";
   if (!page.requests.length) {
     const days = `${page.keptDays} day${page.keptDays === 1 ? "" : "s"}`;
-    return empty(`${filtered ? "No query passes the filters" : "No queries"} in ${span || `the last ${days}`}.`) +
+    return empty(`${filtered ? "No query matches the filters" : "No queries"} in ${span || `the last ${days}`}.`) +
       // nothing asked yet (no filter, the newest page): where a tool's user is made, in a line
       (filtered || paged || !firstTool ? "" : `<p class="empty first-tool"><a href="${USERS_HASH}">Create a user</a> to connect your first tool.</p>`) + unlisted + nav;
   }
@@ -105,12 +105,12 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
     const err = capped(r.message ?? "", STATEMENT_MAX, "mason logs --requests --json");
     // its body is as wide as the row and no wider (`.detail-body`): a long statement scrolls in its box, never widens a column
     const more = open ? `<tr class="detail"><td colspan="${REQUEST_COLUMNS.length}"><div class="detail-body">${rowsHtml([["Query id", r.requestId], ["Started (UTC)", utcMsText(r.startedAt)], ["Ended (UTC)", utcMsText(r.endedAt)], ["Bytes sent", r.bytesSent === null ? "" : bytesText(r.bytesSent)]])}` +
-      `<pre class="stmt">${esc(stmt.text)}</pre>${stmt.cut ? `<p class="dim cut">${esc(stmt.cut)}${r.queryTruncated ? " (as the log kept it)" : ""}</p>` : r.queryTruncated ? `<p class="dim cut">the request log kept the statement cut</p>` : ""}` +
+      `<pre class="stmt">${esc(stmt.text)}</pre>${stmt.cut ? `<p class="dim cut">${esc(stmt.cut)}${r.queryTruncated ? " (as the log kept it)" : ""}</p>` : r.queryTruncated ? `<p class="dim cut">Mason kept only the start of this query.</p>` : ""}` +
       `${r.message ? `<pre class="error">${esc(r.sqlstate ? `${r.sqlstate} ` : "")}${esc(err.text)}</pre>${err.cut ? `<p class="dim cut">${esc(err.cut)}</p>` : ""}` : ""}${planHtml(r)}</div></td></tr>` : "";
     return row + more;
   }).join("");
   const sortNote = sort.key === "started" && sort.dir === "desc" ? ""
-    : `<p class="dim sort-note">Sorted by ${esc(sort.key === "started" ? "start" : sort.key)}, ${sort.dir === "asc" ? "lowest" : "highest"} first, within the ${n(page.requests.length)} rows of this page: Older and Newest page by start time.</p>`;
+    : `<p class="dim sort-note">Sorted by ${esc(sort.key === "started" ? "start" : sort.key)}, ${sort.dir === "asc" ? "lowest" : "highest"} first, within the ${n(page.requests.length)} rows of this page. Older and Newest go by start time.</p>`;
   return `<div class="scroll"><table class="requests"><thead><tr>${REQUEST_COLUMNS.map(([c, key, cls]) => key ? sortTh("requests", key, c, sort, cls) : `<th scope="col">${c}</th>`).join("")}</tr></thead>` +
     `<tbody>${rows}</tbody></table></div>${sortNote}${unlisted}${nav}`;
 }

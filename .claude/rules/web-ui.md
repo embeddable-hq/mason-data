@@ -36,14 +36,22 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   `<section id="page-<id>">` in index.html; what every page uses lives in `src/web/shared.js`. So pages are built in
   parallel without touching each other, and the tests hold the three equal (a module that is no route would not load).
 
-- **One page per concern, rendered from the command server's JSON exactly as the CLI prints it** (one grammar at
-  every entrance): a page's words are the commands' words — "the synced data", "added", "a user", the phase lines `mason
-  wait` prints — never a vocabulary of its own, and never the engine's name. Where the page re-says a CLI line (a first sync's
-  progress, the database's rows, a table's line, what an add or a remove did) it is held EQUAL to the CLI's function by
-  a test (`tests/web-page.test.ts`: `copyingText`, `tableLines`, `duration`, `sourceRows`, `tableFacts`, `addedLines`,
-  `removedReport`, `readinessWord`, `totalsText`, `fileSize`, `bytesText`, `spanText`, `eventLine`, `requestLine`,
-  `queryLines`, `syncedReport`, `streamLines`, `unsupportedLines`, `ago`), so the two cannot drift. A line the page splits into a table's cells is held equal
-  cell by cell: its cells, read in order, are the CLI's line (spaces aside).
+- **One page per concern, rendered from the command server's JSON, in plain English for the person on the page**
+  (issue 877): whole sentences with their small words, short ones, common words ("query" where the code says
+  "statement"; "sync", never "copy"; never the engine's name), and no sentence that does not help the reader act or
+  understand. **The page speaks to its own interface**: it says how to do a thing ON THE PAGE (Sync now, a table's Sync
+  button, Enable, the Users page) and names a `mason` command or a file only where the page cannot do it (starting
+  Mason, opening the page again, a setting such as MASON_HISTORY_DAYS, a column left out of a table already added). The
+  FACTS are the commands' (the same JSON, the same states and numbers). Where the page says a line the CLI prints that
+  names no command (a first sync's progress, a table's line, the stream's rows, the totals), it is held EQUAL to the
+  CLI's function by a test (`tests/web-page.test.ts`: `copyingText`, `tableLines`, `duration`, `tableFacts`,
+  `readinessWord`, `totalsText`, `fileSize`, `bytesText`, `spanText`, `eventLine`, `requestLine`, `queryLines`,
+  `syncedReport`'s headline and rows, `streamLines`, `unsupportedLines`, `ago`, `CATCHING_UP`), so the two cannot
+  drift. Where the CLI's line names a command or a file, the page says it in its own words, held by a test of those
+  words: what an add or a remove did (`addedLines`, `removedReport`), what follows a sync (`syncedReport`'s tips), a
+  table whose sync is off (`keptAge`), a Disable (`disableEffect`), and the Overview's facts card (`factRows`,
+  `factNotes`: the database, Mason, the disk and the tools connected; `mason status` keeps its fuller rows). A line the
+  page splits into a table's cells is held equal cell by cell: its cells, read in order, are the CLI's line (spaces aside).
 - **Nothing on the page that `mason status --json` (or the command whose `--json` it renders) cannot also say.** A page
   that needs a fact gets it by adding it to the JSON first, computed ONCE on the server (`readiness` is the run's, in
   `/api/state`, src/cli/readiness.ts): the CLI and the page stay equal, and an agent reads what a person sees.
@@ -68,7 +76,7 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   (`pop`, below). While a form is
   open or a Remove asks, the list is FROZEN at the state it opened over (`held`, src/web/pages/tables.js: no refresh, however
   long), so a poll never rewrites it under the person; it is written from the latest state again at Add, Cancel or confirm.
-  Sync is `POST /api/sync` `{ tables: [name] }` (`mason sync`), said beside its Sync as `mason sync` says it
+  Sync is `POST /api/sync` `{ tables: [name] }` (`mason sync`), said beside its Sync as `mason sync` says it, but for its tips, which name the page's Sync now
   (`syncedReport`, src/cli/sync.ts), and written disabled, in its room, its title the reason, while `/api/state`
   `tables[].syncRefusal` says why `mason sync` of it is refused now — the sync's one check, which `pollNow` refuses with
   (`Sync.syncRefusal`, src/duck/sync.ts), never a check of the page's own; the search box filters by name, and All / Added / Not added by state, in the page alone (the endpoint returns every table).
@@ -189,10 +197,12 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   next action's answer or question in its place (two lines a person may act on went mid-read: issue 811). A
   button whose label changes keeps the room of its longest (`ROOMS`: Sync → Syncing… → Synced ✓, Copy → Copied); one
   held while it asks stays where it was, disabled. The Tables list's columns are FIXED widths (`table-layout: fixed`,
-  a width per header class, the name the column that gives), every row two lines (a table not added keeps its bar's
-  line) and its note under it written for every row, empty or not. Only an expander the reader opens (a request's
+  a width per header class, the name the column that gives, never under 200 px: the less important give way first,
+  their facts in the note), every row at least two lines (a table not added keeps its bar's line) and its note under it
+  written for every row, empty or not. **A table's name and state are never cut** (issue 884, the owner: "otherwise
+  we can't see them"): each wraps in its cell, the row growing to fit (detector: tests/web-tables-layout.test.ts). Only an expander the reader opens (a request's
   details, a copy's whole error) pushes rows down — and never widens a column (`.detail-body`). A row's actions never
-  wrap (`td.act`), a bare table too wide scrolls in its own box (`.table-wrap`), and where the table scrolls a row's
+  wrap (`td.act`) but on a phone, where the Tables list stacks them in a column of their own, a bare table too wide scrolls in its own box (`.table-wrap`), and where the table scrolls a row's
   actions stay pinned at its card's right. The detector is `tests/web-page.test.ts` "layout guard" (no row, cell or
   question inserted by any click); walk every page at 1280, 1024, 900 and 375 px measuring rows and columns before and
   after each click (getBoundingClientRect) after a change to a row.
@@ -203,7 +213,7 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   need a cursor per order) — and in the page for a list read whole (the events, the samples).
 - **What the page writes is bounded, whatever the data**: a list of hundreds writes a page of rows and `moreRows`
   (Tables 100, the events 100), a by-client list its top 10 and one row for the rest, a long name or value is cut by the
-  stylesheet with its whole the `title`, a title is at most `TITLE_MAX` characters (`clip`), a statement is one or two
+  stylesheet with its whole the `title` (but a Tables name, which wraps whole), a title is at most `TITLE_MAX` characters (`clip`), a statement is one or two
   lines in its cell and the first `STATEMENT_MAX` in its expanded row (`capped`, which says it was cut and where the
   whole is). The tests render these with large fixtures (800 tables of 60-character names, 200 clients, a 64 KiB
   statement, 10,000 requests paged, 500 events, a week of samples with a spike) and hold the caps.

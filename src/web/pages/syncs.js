@@ -37,7 +37,7 @@ const eventsShown = (events, { failuresOnly = false, kind = "", table = "" } = {
  */
 export function renderEvents(b, { failuresOnly = false, kind = "", table = "", now = Date.now(), sort = { key: "time", dir: "desc" }, limit = EVENTS_SHOWN, span = "" } = {}) {
   const days = `${b.keptDays} day${b.keptDays === 1 ? "" : "s"}`;
-  const within = span ? `in ${span} (the events are kept ${days}: MASON_HISTORY_DAYS)` : `in the last ${days} (MASON_HISTORY_DAYS)`;
+  const within = span ? `in ${span}. Mason keeps ${days} of history` : `in the last ${days}`;
   const passing = eventsShown(b.events, { failuresOnly, kind, table });
   const narrowed = failuresOnly || kind || table;
   // a table chosen that had none (every added table is a choice, events or not): said by its name
@@ -82,7 +82,7 @@ export function renderLogs(b) {
   if (!b.lines.length) return empty("The run has logged nothing yet.");
   return `<div class="terminal" role="log">` +
     [...b.lines].reverse().map((l) => `<div class="log-line"><time>${esc(l.at === null || l.at === undefined ? "" : utcText(l.at))}</time><pre>${esc(l.text)}</pre></div>`).join("") + `</div>` +
-    `<p class="dim">The last ${b.lines.length} of at most ${b.kept} entries the run keeps, newest first; <code>mason logs</code> reads the log file.</p>`;
+    `<p class="dim">The last ${b.lines.length} of the up to ${b.kept} entries Mason keeps here, newest first. <code>mason logs</code> reads the whole log file.</p>`;
 }
 
 /** The raw log's details: its summary closed or open, and, open, the entries (or that they are being asked). */

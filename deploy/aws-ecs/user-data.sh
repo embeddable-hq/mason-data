@@ -1,11 +1,11 @@
 #!/bin/bash
 # THE CONTAINER INSTANCE for deploy/aws-ecs/task-definition.json: an ECS-optimized Amazon Linux 2023 AMI (arm64 for an
 # m7g), in an Auto Scaling group of exactly one, whose launch template maps a second EBS volume (gp3) at /dev/sdf for
-# the copy. It joins the cluster, gives a stopping container 60 s, mounts that volume at /mnt/mason and hands it to
+# the synced data. It joins the cluster, gives a stopping container 60 s, mounts that volume at /mnt/mason and hands it to
 # uid 1000, the image's `node` user.
 #
 # The volume is the instance's: a REPLACED instance gets a new, empty one from the launch template and the next start
-# copies every table again (README.md "The volume is the instance's"). Keeping one volume across replacements means
+# syncs every table again from the start (README.md "The volume is the instance's"). Keeping one volume across replacements means
 # attaching a tagged volume by instance id here (ec2:DescribeVolumes and ec2:AttachVolume on the instance role, the
 # volume in the group's one Availability Zone, a wait for the device): not done by this script.
 set -euo pipefail

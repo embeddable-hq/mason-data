@@ -49,19 +49,27 @@
  *                      answered (true) even when its state already says so, the shell writing it again
  *       charts?()      { <holder key>: spec }: the charts drawn in its holders after each write (src/web/charts.js; a
  *                      progressive addition: every number a chart draws is also text)
+ *       arrive?()      the id of the element a person arriving on the page starts in (a sidebar link or a link
+ *                      followed, never a poll's write): undefined while what decides it is unread, null for none
+ *                      (the shell focuses it once, `arriving` in `start`)
+ *       reveal?()      the id of an element an action just wrote that the person must see (a new user's password
+ *                      card), once, else null: after the write, the shell scrolls it into view (on a phone it was
+ *                      written below the screen's edge)
  *       route?(params, { doc })  the hash showed it with these parameters (`#tables?show=failed`: { show: "failed" }):
  *                      it takes the ones it knows into its state (and a control outside its parts, through `doc`)
+ *       saysStale?     true when the page says itself that what it shows is out of date (the Overview's word): the
+ *                      banner then does not say it again (`app.stale()`)
  *       model?         its state, for the tests
  *     }
- *     ctx = { ask(path, init) → { body } | { failure }, read(path) → { body, failure } | undefined (body: the last
- *             one read; failure: this read's, else null), refresh(paths) → Promise (read them now), now() → Date,
+ *     ctx = { ask(path, init) → { body } | { failure }, read(path) → { body, failure, readAt } | undefined (body: the last
+ *             one read; failure: this read's, else null; readAt: when that body was read, ms), refresh(paths) → Promise (read them now), now() → Date,
  *             range() → a key of RANGES: the time range the Observability pages share (from the hash),
  *             shown() → the id of the page shown }
  *
  * A page is registered by its import and its place in PAGES below, its route in PAGE_ROUTES, and its section in
  * index.html.
  */
-import { esc, badge, icon, createAsk, overTunnel, renderFailure, updatedText, placePops, RANGES, DEFAULT_RANGE, rangeOf, rangeOffered, isLive, POLL_MS } from "./shared.js";
+import { esc, badge, icon, createAsk, overTunnel, renderFailure, updatedText, staleText, placePops, RANGES, DEFAULT_RANGE, rangeOf, rangeOffered, isLive, POLL_MS } from "./shared.js";
 import { createCharts } from "./charts.js";
 import { page as statusPage } from "./pages/status.js";
 import { page as tablesPage } from "./pages/tables.js";
@@ -198,7 +206,7 @@ export const renderNav = (shown, range = DEFAULT_RANGE, nav = null, hostView = n
     const pages = t.pages.map((id) => PAGES.find((p) => p.id === id));
     return `<li class="group"><p class="group-title" id="nav-${esc(t.id)}">${esc(t.title)}</p><ul aria-labelledby="nav-${esc(t.id)}">` +
       pages.map((p) => `<li>${navLink(p, shown, hashOf(p.id, { range }), replaced.get(p.id))}</li>`).join("") + `</ul></li>`;
-  }).join("")}${links.length ? `<li class="group host-links"><ul aria-label="Links">${links.map((l) => l.view !== undefined
+  }).join("")}${links.length ? `<li class="group host-nav"><ul aria-label="Links">${links.map((l) => l.view !== undefined
     ? `<li><a href="${esc(hostHash(l.n))}"${shown === HOST_PAGE && String(hostView) === String(l.n) ? ` aria-current="page"` : ""}>${icon("panel-top")}<span class="label">${esc(l.label)}</span></a></li>`
     : `<li><a href="${esc(l.url)}" rel="noreferrer">${icon("link")}<span class="label">${esc(l.label)}</span></a></li>`).join("")}</ul></li>` : ""}</ul>`;
 };
@@ -218,13 +226,13 @@ export function renderSubnav(shown, range = DEFAULT_RANGE, keptDays = undefined,
   if (!p?.parent) return "";
   const r = rangeOf(range);
   // a range past what the run keeps is shown disabled, saying why and what keeps it (the one chosen by its hash stays a link)
-  const status = isLive(r) ? `<span class="live" title="read every few seconds"><span class="live-dot" aria-hidden="true"></span>Live</span>`
-    : `<span class="as-of">${asOf ? `<span class="dim" title="read once when chosen; Now follows what happens">as of ${esc(asOf.toISOString().slice(11, 19))} UTC</span> ` : ""}<button type="button" class="small" data-refresh-range>Refresh</button></span>`;
+  const status = isLive(r) ? `<span class="live" title="Updates every few seconds"><span class="live-dot" aria-hidden="true"></span>Live</span>`
+    : `<span class="as-of">${asOf ? `<span class="dim" title="Read once, when you chose this range. Choose Now to follow it live.">as of ${esc(asOf.toISOString().slice(11, 19))} UTC</span> ` : ""}<button type="button" class="small" data-refresh-range>Refresh</button></span>`;
   return `<span class="range-status">${status}</span><div class="range" role="group" aria-label="Time range">${Object.entries(RANGES).map(([k, v]) => {
     const o = rangeOffered(k, keptDays);
     if (!o.shown && k !== r) return "";
     if (!o.offered && k !== r) return `<span class="off" aria-disabled="true" title="${esc(o.why)}">${esc(v.label)}<span class="sr"> (${esc(o.why)})</span></span>`;
-    return `<a href="${esc(hashOf(shown, { range: k }))}"${k === r ? ` aria-current="true"` : ""}${v.live ? ` title="follows what happens: read every few seconds"` : ""}>${esc(v.label)}</a>`;
+    return `<a href="${esc(hashOf(shown, { range: k }))}"${k === r ? ` aria-current="true"` : ""}${v.live ? ` title="Updates every few seconds"` : ""}>${esc(v.label)}</a>`;
   }).join("")}</div>`;
 }
 
@@ -253,6 +261,9 @@ export function setBack(link, label, back) {
   link.hidden = false;
 }
 
+/** The line over the banner's Failure while the page shows what it read before (`app.stale()`): as of when, and why. */
+const staleNote = (stale, said) => stale === null || said ? "" : `<p class="stale-note">${esc(staleText(stale.at, stale.failure))} What this page shows is from then.</p>`;
+
 /** The heading's line: the database the run copies, and its sources file's name when that is another. */
 function renderWhere(s) {
   return `${esc(s.source.database)}${s.source.name && s.source.name !== s.source.database ? ` · source ${esc(s.source.name)}` : ""}`;
@@ -276,7 +287,8 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
   const m = { shown: first.id, range: rangeOf(first.params.range), pollFailure: null, updatedAt: null, rangeReadAt: null };
   const put = (path, at, r) => {
     const was = store.get(path);
-    store.set(path, { at, body: "body" in r ? r.body : was?.body, failure: "failure" in r ? r.failure : null, stale: false });
+    // `readAt`: when the last read that answered was asked, what a body kept under a failing poll says it is as of
+    store.set(path, { at, body: "body" in r ? r.body : was?.body, failure: "failure" in r ? r.failure : null, stale: false, readAt: "body" in r ? at : was?.readAt });
     if ("body" in r) m.updatedAt = now();
   };
   const pages = new Map();
@@ -298,7 +310,7 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
     paths.forEach((p, i) => put(p, at, rs[i]));
     afterRead();
   };
-  const ctx = { ask, now, refresh, range: () => m.range, shown: () => m.shown, read: (path) => { const e = store.get(path); return e === undefined ? undefined : { body: e.body, failure: e.failure }; } };
+  const ctx = { ask, now, refresh, range: () => m.range, shown: () => m.shown, read: (path) => { const e = store.get(path); return e === undefined ? undefined : { body: e.body, failure: e.failure, readAt: e.readAt }; } };
   for (const p of PAGES) pages.set(p.id, p.create(ctx));
   // the page first shown takes its parameters too, as `show` hands them (a host's view, its place)
   pages.get(first.id).route?.(first.params, {});
@@ -344,6 +356,17 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
       const own = reads[0] === undefined ? undefined : store.get(reads[0].path);
       m.pollFailure = own?.failure ?? null;
       afterRead();
+    },
+    /**
+     * WHETHER THE PAGE SHOWN IS OUT OF DATE (issue 886): its own read (its first) failed at the last poll while a body
+     * read earlier is still shown — `{ at, failure }`, `at` when that body was read; else null (current, or nothing
+     * read yet: the page says Unknown, or nothing, under the banner). `start` greys the shown section's parts by it.
+     */
+    stale() {
+      if (m.pollFailure === null) return null;
+      const own = pages.get(m.shown).reads()[0];
+      const e = own === undefined ? undefined : store.get(own.path);
+      return e === undefined || e.body === undefined || e.readAt === undefined ? null : { at: new Date(e.readAt), failure: m.pollFailure };
     },
     /** Once every read of its own now in flight has settled (the tests' wait; the page paints on `onLate`). */
     settled: () => Promise.all([...aside.values()]),
@@ -397,7 +420,9 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
         version: typeof st?.engine?.version === "string" ? `Mason ${esc(st.engine.version)}` : "",
         // the phone's menu button: both icons, the stylesheet shows the one its aria-expanded says
         "menu-icon": icon("menu", "when-closed") + icon("x", "when-open"),
-        poll: m.pollFailure ? renderFailure(m.pollFailure) : "",
+        // over the Failure, when the page shows a body read before it: as of when (a page that says it itself, the
+        // Overview's word, `saysStale`, not twice)
+        poll: m.pollFailure ? staleNote(app.stale(), pages.get(m.shown).saysStale === true) + renderFailure(m.pollFailure) : "",
         ...Object.assign({}, ...[...pages.values()].map((p) => p.view())),
       };
     },
@@ -468,7 +493,14 @@ export function start(doc, win) {
   const paint = () => {
     if (pressedAt !== null && Date.now() - pressedAt < PRESS_HOLD_MS) return;
     pressedAt = null;
-    for (const p of PAGES) { const section = doc.getElementById(`page-${p.id}`); if (section) section.hidden = p.id !== app.model.shown; }
+    // the shown section greyed while what it shows is out of date (app.css `[data-stale]`), at once current again
+    const stale = app.stale() !== null;
+    for (const p of PAGES) {
+      const section = doc.getElementById(`page-${p.id}`);
+      if (!section) continue;
+      section.hidden = p.id !== app.model.shown;
+      if (p.id === app.model.shown && stale) section.setAttribute?.("data-stale", ""); else section.removeAttribute?.("data-stale");
+    }
     for (const [id, html] of Object.entries(app.view())) {
       const el = doc.getElementById(id);
       const was = written.get(id);
@@ -503,6 +535,28 @@ export function start(doc, win) {
     leave();
     if (charts !== null) void charts.mount(app.pages.get(app.model.shown).charts?.() ?? {});
     place();
+    arrived();
+    // what an action just wrote that the person must see (the page's `reveal`): scrolled into view once, as little as
+    // it takes (a phone wrote a new user's password card at the screen's bottom edge)
+    const reveal = app.pages.get(app.model.shown).reveal?.() ?? null;
+    if (reveal !== null) doc.getElementById(reveal)?.scrollIntoView?.({ block: "nearest" });
+  };
+  // ARRIVING ON A PAGE (issue 887): the element its `arrive()` names takes the focus once, at the first write that has
+  // it — the page's first, or the one after a link followed (a hashchange) — so a person types straight away; never at a
+  // poll's write after that, never from what the person focused or typed in since they arrived (the focus moved off
+  // what held it then), and never on a touch screen (`(pointer: coarse)`), where it would open the keyboard over the page
+  let arriving = null;
+  const arrive = () => { arriving = { page: app.model.shown, from: doc.activeElement ?? null }; };
+  const arrived = () => {
+    if (arriving === null) return;
+    if (arriving.page !== app.model.shown) { arriving = null; return; }
+    const id = app.pages.get(app.model.shown).arrive?.();
+    if (id === undefined) return;
+    const from = arriving.from;
+    arriving = null;
+    if (id === null || win.matchMedia?.("(pointer: coarse)")?.matches === true) return;
+    const now = doc.activeElement ?? null;
+    if (now === null || now === doc.body || now === from) doc.getElementById(id)?.focus?.({ preventScroll: true });
   };
   // THE POPOVERS (a confirm, a form, an answer: `pop` of shared.js) placed beside their buttons after every write, and
   // again on a scroll or a resize; a question or a form that has just opened takes the focus (a form's first box, a
@@ -605,7 +659,7 @@ export function start(doc, win) {
     if (menuOpen) setMenu(false, true);
     // a replaced view's hash is not shown, nor read: the page leaves for the host's
     if (leave(true)) return;
-    app.show(win.location.hash, { doc }); paint(); void poll();
+    app.show(win.location.hash, { doc }); arrive(); paint(); void poll();
   });
   win.addEventListener?.("scroll", place, { capture: true, passive: true });
   win.addEventListener?.("resize", place);
@@ -615,6 +669,7 @@ export function start(doc, win) {
   }
   doc.addEventListener("visibilitychange", () => { void poll(); });
   win.setInterval(() => { void poll(); }, POLL_MS);
+  arrive();
   paint();
   void poll();
 }

@@ -11,7 +11,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **`mason status` and the web page's Overview say the same rows under new labels.** Source is now Sources file, Disk
   is Free disk, Sessions is Connections open, and the Mason row is two: Version (`dev`, or the version) and Up (how long
   and since when, with the pid in `mason status`; no more "one process"). On the Overview, Database and Changes are under
-  the line in the "mason status" box, and the rest is in a table captioned Server. `mason status --json` is unchanged.
+  the line in the "mason status" box, and the rest is in a table captioned Server, in place of the "Mason" card. `mason status --json` is unchanged.
 - **Two new cards on the Overview: Sync errors and Query errors, the last day.** Each counts the failures of the last
   24 hours and links to them (Sync events, failures only; Queries, the refused or failed statements); a count the page
   could not read says "unknown" and why. They replace the lists of recent errors at the foot of the page. The table of
@@ -22,22 +22,18 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   tables the ones Mason syncs are at the top under All. A table you add or remove keeps its row, its state changing in
   place, and moves to its group the next time the list is laid out: when you open the page again, or change the search
   or the All / Added / Failed / Not added filter.
-- **Every example in a box on the web page now starts with "e.g."**: the Tables and Queries search boxes say
-  `e.g. orders`, and a new user's name and where it connects from `e.g. metabase` and
-  `e.g. 192.0.2.0/24, 2001:db8::/32`, so an example is never taken for a value already filled in.
 - **A user added on the web page's Users page shows only what is its own.** The card shown once is titled "New user
   added" and has the User, then the URL, Password and Database, each with Copy, "Shown once" beside the password's Copy, and
   one line: the password is only shown once. The host, port and SSL mode are Connect's on the same page, and the card
-  no longer repeats them. `mason user add` in a terminal prints every row, as before.
-- **Share over the internet is back, on the Users page.** Inside Connect, the box "Share over the internet (for
+  does not repeat them. `mason user add` in a terminal prints every row, as before.
+- **Connect from anywhere moves to the Users page, as Share over the internet.** Inside Connect, the box "Share over the internet (for
   testing)" opens what `mason share` opens, for a tool that cannot reach your machine: choose the role it reads as
   (where `mason/roles.yml` offers more than one), click Share, and it shows the public URL and the share's own login
   and password, each with Copy, the password shown once. It is live until you stop it (Stop sharing), until a free
   share's hour is up, or within two minutes of the page closing, and the box says how it ended. It is not offered
   under `mason serve` or on a read-only page.
 - **An empty list on the web page is one quiet line**, no longer a big box: "No users yet. Create a user for a service
-  like a BI tool or your app: add one below.", "No table added yet: add one from the list below, as `mason add
-  <table>` does.", and the same on Queries, Usage and Sync events. Queries with no statement yet no longer shows the
+  like a BI tool or your app: add one below.", "No table added yet. Add one from the list below.", and the same on Queries, Usage and Sync events. Queries with no statement yet no longer shows the
   "Connect your first tool" box: one line, "Create a user to connect your first tool", leads to the Users page.
 - **Queries is shorter.** Its lead is one sentence, "Every query sent to Mason, newest first."; the time range is its
   only window (the Since box and its help are gone; a bookmark that carried one opens over the range); the line on
@@ -46,36 +42,19 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   enough. The User filter is a dropdown of your users, All users first, then the active ones, then the removed ones
   marked "(removed)", whose queries are still in the log; a link to a user not in the list (a share's login, say) still
   filters and shows that name. `mason logs --requests` is unchanged.
-- **Connects from is a dropdown** on the Users page (adding a user, and a user's From…): "anywhere" or "only these
+- **Connects from is a dropdown again** on the Users page (adding a user, and a user's From…): "anywhere" or "only these
   addresses", which shows the box for the addresses beside it. Nothing in the form moves when you change it, and what
   is sent is as before. The form (Name, Role, Connects from and Add a user) is one line where the page is wide enough,
   and wraps by field below that.
 - **The New user added card says when the user has connected.** Under its rows, "Waiting for its first query…"
   until a tool or app logs in with the user (or runs a query), then "Connected".
-- **The Users page lists the users first**, under its title, then the form that adds one (with the card of a user just
+- **The Users page lists the users first** (Connect is last now), under its title, then the form that adds one (with the card of a user just
   added beside it) and Connect. Its intro now reads "Create and manage Users that you can connect to tools and
   services".
 
 ## What was wrong and is now right
 
-- **The Users list's Added header looks like the others.** It was drawn white with a brown left border, the look of the
-  New user added card, which shares its name; every header cell of a list now has the header's tint.
-
 - **The time range on Queries, Usage and Sync events no longer moves when a range is chosen.** Before, choosing any
   range but Now pushed the whole control left (its "as of … UTC" and Refresh are wider than Live), so the range just
   clicked slid away under the pointer. Now Live, or when the range was read and Refresh, sits left of the control in
   room kept for the longest, and the control stays where it is at every width, on a phone too.
-- **The limit on what statements may spill to disk is in force from the start.** Before, the limit (half of the free
-  disk under `.mason/`, or `MASON_SPILL_LIMIT`) was not enforced until the free disk moved by 1 % or more, so a heavy
-  statement could spill past it and fill the disk. Now a statement past it fails alone with 53400 and Mason's hint.
-  This applies at the default too: a statement, or many at once, that used to finish by spilling past half of the free
-  disk now fails with 53400. Set `MASON_SPILL_LIMIT` (for example `40GB`) to raise the limit, or ask for less at once.
-  Mason also checks every engine setting it gives at the start, and refuses to start, naming the setting, if one is not
-  what it gave.
-- **A full disk under `.mason/` no longer kills Mason and leaves it down.** When the disk filled, the run died on its
-  own log, and the process that restarts it died too, leaving `.mason/restarts.json` empty, so `mason status` said
-  `Unexpected end of JSON input` and nothing started Mason again. Now the run goes on, saying once that its log could
-  not be written, and writes its log again once there is room. If it stops while the disk is full, it is started
-  again once there is room (8 MiB free), its restart recorded whole then; `mason status` reads a record it cannot
-  parse as unreadable and says the rest; and a write under `.mason/` that fails for disk space says so, with the way
-  out: free disk where `.mason/` is. Nothing synced is lost.

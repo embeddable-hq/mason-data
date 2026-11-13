@@ -405,7 +405,7 @@ export function pgTypedColumn(name: string, oid: number, t: DuckDBType, typmod =
   if (oid === 26 && DUCK_EXACT.has(t.typeId)) return custom(name, 26, 4, (v) => exactText(v), (v) => { const b = Buffer.alloc(4); b.writeUInt32BE(Number(exactText(v))); return b; });
   // an inet: stored as Postgres's text with its mask (`10.3.6.45/32`), sent as inet_out writes it (a full mask dropped)
   if (oid === 869 && own.oid === 25) return custom(name, 869, -1, (v) => inetOut(str(v)), (v) => inetBytes(str(v)));
-  // a type an extension made that DuckDB holds as text (citext), or an array of one: its bytes, under the source's OID
+  // a type a database made that DuckDB holds as text (citext), or an array of one: its bytes, under its OID (the catalog's)
   if (oid >= 16384 && (own.oid === 25 || own.oid === 1009)) return retyped(own);
   // an anonymous row (record) is its text, written by record_out's rules (src/duck/functions.ts recordText)
   if (oid === 2249 && own.oid === 25) return retyped(own);

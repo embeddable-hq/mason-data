@@ -34,11 +34,11 @@
 <div id="poll"></div>
 <main>
   <section id="page-status" aria-labelledby="status-h">
-    <div class="page-head"><h2 id="status-h">Overview</h2><p class="desc">Mason syncs the tables you add from your Postgres, keeps them current, and answers analytics SQL at a Postgres URL of its own. Here: whether the synced data is ready, how to connect, and what it answered — what <code>mason status</code> says.</p></div>
+    <div class="page-head"><h2 id="status-h">Overview</h2><p class="desc">Mason syncs the tables you add from your Postgres and keeps them up to date. Tools query them at Mason's own Postgres URL. This page shows whether your synced data is ready, how to connect, and what Mason answered.</p></div>
     <div id="status"><div class="loading" aria-busy="true"><p class="dim">Asking Mason…</p><span class="skeleton block"></span></div></div>
   </section>
   <section id="page-tables" aria-labelledby="tables-h" hidden>
-    <div class="page-head"><h2 id="tables-h">Tables</h2><p class="desc">The database's tables, as <code>mason tables</code> lists them. Add one and Mason syncs it: it is added to the sources file, as <code>mason add</code> does; Remove takes it out and drops its synced data, as <code>mason remove</code> does.</p></div>
+    <div class="page-head"><h2 id="tables-h">Tables</h2><p class="desc">The tables in your database. Add a table and Mason syncs it. Remove it and Mason stops syncing it and deletes its synced data.</p></div>
     <div id="tables-cards"></div>
     <!-- each label in a field with its control, as the request filters are: on a phone a field is a row, never a label left at a line's end -->
     <div class="toolbar">
@@ -59,7 +59,7 @@
       <div class="field" id="rq-user-field"></div>
       <div class="field"><label for="rq-client">Client</label>
         <input id="rq-client" name="client" spellcheck="false"></div>
-      <div class="field grow"><label for="rq-search">Statement has</label>
+      <div class="field grow"><label for="rq-search">Query text has</label>
         <input id="rq-search" name="search" type="search" maxlength="200" spellcheck="false" placeholder="e.g. orders"></div>
       <label class="check" for="rq-slow"><input type="checkbox" id="rq-slow" name="slow"> Slow (1 s or more)</label>
       <div class="actions"><button type="submit" class="primary">Filter</button>
@@ -77,7 +77,7 @@
     <div id="users-connect"></div>
   </section>
   <section id="page-usage" aria-labelledby="usage-h" hidden>
-    <div class="page-head"><div class="head-row"><h2 id="usage-h">Usage</h2><div id="range-usage" class="head-range"></div></div><p class="desc">What the Postgres API answered over the time range — who connected, what ran, the SQL it refused as unsupported — and each synced table's size, as <code>mason status</code>, <code>mason logs</code> and <code>mason usage</code> say them. A client or a card leads to its statements on <a href="#observability/queries">Queries</a>.</p></div>
+    <div class="page-head"><div class="head-row"><h2 id="usage-h">Usage</h2><div id="range-usage" class="head-range"></div></div><p class="desc">What Mason answered in the time range: who connected, what ran, and the SQL it refused as unsupported. Also each synced table's size. Click a client or a card to see its queries on <a href="#observability/queries">Queries</a>.</p></div>
     <div id="usage-kpis"></div>
     <div id="usage-charts"></div>
     <h3 id="usage-connected-h">Connected now</h3>
@@ -93,7 +93,7 @@
     <div id="usage-sizes"></div>
   </section>
   <section id="page-syncs" aria-labelledby="syncs-h" hidden>
-    <div class="page-head"><div class="head-row"><h2 id="syncs-h">Sync events</h2><div id="range-syncs" class="head-range"></div></div><p class="desc">The sync's events — each first sync, each failure and recovery, each sync asked by hand — as <code>mason logs --events</code> lists them, and the run's own log behind a details. A scheduled poll that succeeds is not listed: the last one's result is each table's last sync (mason status, the Tables page's Last sync).</p></div>
+    <div class="page-head"><div class="head-row"><h2 id="syncs-h">Sync events</h2><div id="range-syncs" class="head-range"></div></div><p class="desc">What the sync did: each first sync, each failure and recovery, and each sync you asked for. A scheduled poll that succeeds is not listed. The Tables page shows each table's last sync. Mason's raw log is at the bottom, for debugging.</p></div>
     <div class="toolbar"><div id="syncs-filters" class="fields"></div><label class="check" for="syncs-failures-only"><input type="checkbox" id="syncs-failures-only"> Failures only</label></div>
     <div id="syncs-events"></div>
     <div id="syncs-run"></div>

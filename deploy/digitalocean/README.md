@@ -1,6 +1,6 @@
 # Mason on DigitalOcean
 
-One Droplet running [the compose file](../mason-data/README.md), with the copy and every secret on an encrypted Volume,
+One Droplet running [the compose file](../mason-data/README.md), with the synced data and every secret on an encrypted Volume,
 and a Cloud Firewall so that only the addresses you name can reach the Postgres port. Mason has no source-address rule of
 its own, so the firewall is what keeps the port private.
 
@@ -28,7 +28,7 @@ the rest with the `doctl` login from step 2.
 **Which machine.** Memory first, then disk, then cores ([how to size it](../mason-data/README.md#memory)). For scale, a
 real deployment on `m-2vcpu-16gb` with a 100 GiB Volume synced 52 tables, 310 M rows and about 200 GiB in Postgres in about
 an hour, into 64 GiB. A sync ran on both cores throughout, so more cores would shorten it, and a page cache smaller
-than the copy makes the first read of a big table slow. We have not measured `m-4vcpu-32gb`.
+than the synced data makes the first read of a big table slow. We have not measured `m-4vcpu-32gb`.
 
 ## 1. Make the account, and see what it allows
 
@@ -126,7 +126,7 @@ Everything goes in `/mnt/mason/deploy`, so `.env` is on the Volume too. **`mason
 container runs as `node`.
 
 ```bash
-TAG=0.17.1    # the release you run
+TAG=0.18.0    # the release you run
 curl -fsSL https://raw.githubusercontent.com/embeddable-hq/mason-data/v$TAG/deploy/mason-data/compose.yml \
   | ssh root@$IP 'umask 077; cd /mnt/mason/deploy; cat > compose.yml; mkdir -p mason; chown 1000:1000 mason; chmod 755 mason
     { printf "MASON_API_KEY=%s\n" "$(openssl rand -hex 24)"; printf "MASON_PG_SELF_SIGNED_TLS=1\nMASON_TAG='$TAG'\n"; } > .env'
@@ -154,7 +154,7 @@ docker compose exec mason mason tables  # what the database has, with each table
 docker compose exec mason mason add public.orders public.customers
 ```
 
-`mason add` starts the copy at once, and takes a list. Add the small tables first, so something is ready early. It leaves
+`mason add` starts the first sync at once, and takes a list. Add the small tables first, so something is ready early. It leaves
 out columns that look like secrets, and says so: name one with `--include` to have it. A table with no primary key needs
 `--key <columns>`, which only you can choose.
 
@@ -221,7 +221,7 @@ Add it back when you need to log in. Revoke the `doctl` token, and keep a note o
 | `failed to create volume: invalid size specified` | Usually the tier again, not the format: a new account stopped at about 100 GiB | Create it at 100 GiB, and resize when the tier rises |
 | The container restarts, with `EACCES: permission denied, mkdir '/mason/project/sources'` | `mason/` belongs to root | `chown -R 1000:1000 /mnt/mason/deploy/mason`, then `docker compose up -d` |
 | `Out of Memory Error: failed to allocate data …` on one table in a first sync | Large JSON documents hold more than the engine's limit, which is half the machine's memory from 5 GiB up. Fewer readers may not help | Add `MASON_DUCKDB_MEMORY=12GB` to `.env` on a 16 GB machine, `docker compose up -d`, and remove it when the table is in. The other tables carry on meanwhile |
-| After a reboot, tables are gone or a new copy starts | Docker started before the Volume mounted, and is writing to the local disk | Stop Docker, empty `/mnt/mason` on the local disk once the Volume is unmounted, add the `RequiresMountsFor` line from [step 4](#4-write-the-first-boot-script), and reboot |
+| After a reboot, tables are gone or a new first sync starts | Docker started before the Volume mounted, and is writing to the local disk | Stop Docker, empty `/mnt/mason` on the local disk once the Volume is unmounted, add the `RequiresMountsFor` line from [step 4](#4-write-the-first-boot-script), and reboot |
 | SSH times out, and the Droplet shows `active` | Your own address changed, so the firewall blocks you | `curl -s https://checkip.amazonaws.com`, then add a rule for it and remove the old one |
 | A tool gets `3D000 database … does not exist` | The database name is `mason`, not your source's | Connect with `mason`, or write `database: <name>` at the top of the sources file |
 | A tool gets `28000` asking for TLS, or a certificate error | It connected without TLS, or verifies the certificate | Use `sslmode=require`. node-postgres needs `uselibpqcompat=true&sslmode=require` |

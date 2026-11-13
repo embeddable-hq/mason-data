@@ -2,13 +2,13 @@
 
 Mason answers the Postgres wire protocol, so any tool that speaks to Postgres — `psql`, a JDBC or ODBC driver,
 Metabase, Grafana, DBeaver, Superset — connects to Mason as it would to a read replica and sees **the tables `mason
-add` copied**, in their own schemas, with the source's column types, keys and comments. A statement over them is
+add` synced**, in their own schemas, with the source's column types, keys and comments. A statement over them is
 analysed by Postgres (an embedded one, holding the tables' definitions and no rows) and computed by DuckDB over the
-copy, and its answer is written as Postgres's columns: the same names, types, values, text and order a real Postgres
+synced data, and its answer is written as Postgres's columns: the same names, types, values, text and order a real Postgres
 gives ([docs/DESIGN.md](DESIGN.md) "How a statement is answered: Postgres decides, DuckDB
 computes").
 
-**It is a read-only copy, not a Postgres.** A statement is answered only when everything it is made of — each
+**It serves read-only synced data. It is not a Postgres.** A statement is answered only when everything it is made of — each
 function, operator, aggregate, cast, type and construct Postgres resolved it to — is on the verified list of
 [docs/SQL-SUPPORT.md](SQL-SUPPORT.md): pieces a statement of the oracle used and Mason answered exactly as Postgres
 did. Anything else is refused by name, with the statement position, a SQLSTATE and the way out — never answered
@@ -137,10 +137,10 @@ writes it, with today's access said in it — one role reading everything, the d
 default: everything              # the role of a user added without --role
 roles:
   everything:
-    tables: all                  # every copied table and column, those added to the sources file later included
+    tables: all                  # every synced table and column, those added to the sources file later included
   agent:                         # the role's name
     tables:
-      orders: {}                 # every column of a copied table
+      orders: {}                 # every column of a synced table
       customers:
         columns: [id, country]   # these columns only
       billing.invoices:
@@ -149,11 +149,11 @@ roles:
 
 **The file decides what a user with no role reads, never the code**:
 
-- **no `mason/roles.yml`**: every user reads every copied table (`mason start` says so, and that `mason init` writes one);
+- **no `mason/roles.yml`**: every user reads every synced table (`mason start` says so, and that `mason init` writes one);
 - **`default: <role>`**: a user added without `--role` reads as that role — its refusals, its catalog (`current_user`
   is the role's name) and its request-log rows are the role's. Edit the line and the next statement of every such
   session is held to the new default, with no restart;
-- **a file with no `default:`**: a user with no role reads NOTHING. Every statement that reads a copied table is
+- **a file with no `default:`**: a user with no role reads NOTHING. Every statement that reads a synced table is
   refused `42501 permission denied for table …`, the DETAIL `the user "<name>" has no role and mason/roles.yml names
   no default`, the HINT the two ways out (`write default: <a role> at the top of mason/roles.yml, or mason user remove
   <name> and mason user add <name> --role <a role>`); a statement that reads none (`SELECT 1`) is answered, and the
@@ -165,9 +165,9 @@ roles:
 **Before upgrading from a release with roles but no `default:`**: a roles file from before this release names no
 default: write `default: <role>` at its top before upgrading, or its roleless users read nothing.
 
-A token (minted from the API key, no user) reads every copied table in every state. `tables: all` is Postgres's own word
-(`GRANT SELECT ON ALL TABLES IN SCHEMA`), resolved against the tables copied at every read: a table the sources file adds
-is the role's once its copy is served. A table key `all` under `tables:` is refused (`public.all` names a table called
+A token (minted from the API key, no user) reads every synced table in every state. `tables: all` is Postgres's own word
+(`GRANT SELECT ON ALL TABLES IN SCHEMA`), resolved against the synced tables at every read: a table the sources file adds
+is the role's once its first sync is served. A table key `all` under `tables:` is refused (`public.all` names a table called
 `all`).
 
 - **A role names synced tables only**: a table the sources file does not sync, a column the synced table lacks, a role with
@@ -183,7 +183,7 @@ is the role's once its copy is served. A table key `all` under `tables:` is refu
   naming the role and the column (`the role agent may not read column notes of orders`), the HINT what the role may
   read. `SELECT *` or `t.*` on a partly granted table is refused naming the first hidden column, never narrowed to the
   granted ones; `count(*)` over a table of which the role reads any column is answered, as on Postgres; a system
-  column (`xmin`) needs the whole table, as on Postgres; a statement that reads no copied table is untouched.
+  column (`xmin`) needs the whole table, as on Postgres; a statement that reads no synced table is untouched.
 - **The role is read with the user before every statement** (the users file, `recheckMs: 0`): a role given, taken or
   changed under a held session applies to its next statement — an EXECUTE of a statement prepared before included —
   and a role the file no longer names refuses its users by name (42501, the way out: add it back, or remove and add
@@ -191,13 +191,13 @@ is the role's once its copy is served. A table key `all` under `tables:` is refu
   role the file lacks. A user with no role is held to the file's `default:` (above), read at every statement too; a
   file that cannot be read refuses it as well (57P03): its default cannot be known.
 - **The catalog answers for the role**: one Postgres role per Mason role, with the same `GRANT SELECT` and
-  `GRANT SELECT (columns)`, lives in the catalog Postgres, rebuilt when the file or the copied tables change, and a
+  `GRANT SELECT (columns)`, lives in the catalog Postgres, rebuilt when the file or the synced tables change, and a
   session with a role runs each catalog statement under `SET ROLE … RESET ROLE` in one request. So
   `information_schema.tables` and `.columns` list the role what it may read, `has_table_privilege` /
   `has_column_privilege` / `has_any_column_privilege` answer as Postgres's would for its grants (`current_user` is the
   role's name, as under Postgres's own `SET ROLE`), and `mason mcp`'s
   `tables` and `describe` (which ask them) list an agent only what its user may read. **`pg_catalog` itself is not
-  filtered in this stage**: `pg_class` and `pg_attribute` still list every copied column to every role (as they do on
+  filtered in this stage**: `pg_class` and `pg_attribute` still list every synced column to every role (as they do on
   Postgres, which filters neither), while a read of a hidden one is refused. **Every role may see every view** of the
   source: reading one is held to the tables it reads, so a view over a hidden column is refused when read — stricter
   than Postgres, where a view's owner's grants apply. A role's rows are filtered too (below).
@@ -252,8 +252,8 @@ mason user add emea --role regions --set regions=eu --set regions=uk --set plan=
   reads it and the exact `--set` to add.
 - **The file is checked when it is read**, each mistake at its key on one report: a `:name` the role does not declare
   (with the line that declares it), a `$1` (a `where:` reads attributes, never a statement's parameter), `where:` beside `through:`, a `through:` to a table the role lacks or to one with no
-  filter of its own, a cycle of `through:`s, and the `where:` itself analysed by the catalog Postgres against the copy's
-  columns — a column the copy lacks, a type that does not compare, a list used as a scalar or the reverse is Postgres's
+  filter of its own, a cycle of `through:`s, and the `where:` itself analysed by the catalog Postgres against the synced
+  table's columns — a column the synced table lacks, a type that does not compare, a list used as a scalar or the reverse is Postgres's
   own error with the key and the character (`roles.regions.tables.customers.where: operator does not exist: uuid =
   uuid[] … :regions is a list, read here as one uuid — write = ANY(:regions)`). A subquery in a `where:` is refused
   (use `through:`). A `through:` follows the foreign key from the table to its parent as the source's catalog reports
@@ -464,16 +464,14 @@ names the agent. Its tools say over this wire what a bare SQL tool would leave a
 - `tables` and `describe` read the catalog (`pg_class`, `pg_attribute`, `pg_index`, `pg_constraint`, filtered by
   `has_table_privilege` / `has_any_column_privilege` and `has_column_privilege`, so a user with a role is shown what
   it may read, "Roles" above) and, for each
-  copy's rows and how it is kept current, `EXPLAIN (FORMAT JSON)`'s `Mason.Tables` — one EXPLAIN a table, a few at
+  synced table's rows and how it is kept current, `EXPLAIN (FORMAT JSON)`'s `Mason.Tables` — one EXPLAIN a table, a few at
   once, so a remote `mason serve` answers as a local run does; a table is named as EXPLAIN names it, as a statement
   writes it (`public."Clients"`);
 - `query` sends ONE statement through the extended protocol (a second is Postgres's 42601), its `max_rows` the
   Execute's row count (the server stops there and answers PortalSuspended: `truncated`), after `SET statement_timeout`
-  to its `timeout_ms` (57014 past it); the column types are the catalog's `mason_wire_type(oid, typmod)` of the
-  RowDescription's OID and modifier. The wire sends the SOURCE's OID for a type the source made (an enum, a citext),
-  which the catalog holds under another OID, and both count from 16384: `mason_wire_type` names an OID as the wire
-  sent it; `format_type` keeps the catalog's meaning for an OID the catalog has (pg_attribute's `atttypid`) and names
-  any other as the wire's; `pg_catalog.format_type`, written out, is the catalog's own;
+  to its `timeout_ms` (57014 past it); the column types are the catalog's `format_type(oid, typmod)` of the
+  RowDescription's OID and modifier. The wire sends the catalog's own OID for every type, a type the source made (an
+  enum, a citext) included, so pg_type names it as the source names its own;
 - a request the client cancels (`notifications/cancelled`) is a CancelRequest for its statement;
 - a refusal reaches the model whole, as an MCP tool error: SQLSTATE, message, DETAIL (the gap's id) and HINT (its way
   out), the fields this listener's ErrorResponse carries;
@@ -481,15 +479,15 @@ names the agent. Its tools say over this wire what a bare SQL tool would leave a
 
 ## What a tool sees
 
-- **Each copied table**, in the schema it has in the source (`public.orders` stays `public.orders`), with the columns
-  that are copied, in the source's order, each with its source type, its comment, and an enum's labels. A table appears
-  once its first copy commits; until then a statement naming it is refused `42P01` with a hint saying where its copy
-  is (being copied and how far, waiting its turn, or why its copy failed), and only a table nobody added is told
-  `mason add <table>` copies it.
-- **Its keys**: the primary key and unique indexes over plain columns, and a foreign key between two copied tables
+- **Each synced table**, in the schema it has in the source (`public.orders` stays `public.orders`), with the columns
+  that are synced, in the source's order, each with its source type, its comment, and an enum's labels. A table appears
+  once its first sync commits. Until then a statement naming it is refused `42P01`, with a hint saying where its first
+  sync is: running and how far along, waiting its turn, or why it failed. Only a table nobody added is told that
+  `mason add <table>` syncs it.
+- **Its keys**: the primary key and unique indexes over plain columns, and a foreign key between two synced tables
   (`pg_constraint`, so a tool's "relationships" view and ER diagram draw them).
-- **The source's views** over copied tables, answered by their definitions as Postgres's rewriter answers them; a view
-  over a table not copied is left out, said once in the log.
+- **The source's views** over synced tables, answered by their definitions as Postgres's rewriter answers them; a view
+  over a table that is not synced is left out, said once in the log.
 - **Each generated table** (`mason help generated`), under the name its file gives it, as a plain table of its output's
   columns with no keys. It appears once its first build ends; until then a statement naming it is refused by name
   (`generated-not-built`), saying what the table is doing. EXPLAIN says how it is kept current on its first line.
@@ -501,7 +499,7 @@ names the agent. Its tools say over this wire what a bare SQL tool would leave a
   deadline, and the instance is replaced. A catalog statement's own `now()` (`SELECT now()`, reading no table) is that
   Postgres's clock as the statement runs.
 - **`EXPLAIN`** is the statement it explains, in Postgres's shape (one `QUERY PLAN` column, or `FORMAT JSON`), with
-  DuckDB's plan inside: which copy answered, what was sent to DuckDB and what Mason computed after it
+  DuckDB's plan inside: which synced table answered, what was sent to DuckDB and what Mason computed after it
   (docs/DESIGN.md "EXPLAIN").
 
 ## What is refused, by name
@@ -514,7 +512,7 @@ or column 42703, a type mismatch 42883) is refused with Postgres's own error: Du
 |---|---|
 | a function, operator, aggregate, cast, type or construct not on the verified list | 0A000, `Mason gap unverified` in the detail, naming each piece (`degrees(double precision)`) |
 | a construct Mason knows it cannot answer as Postgres does | 0A000, `Mason gap <id>` in the detail and what to write instead in the hint ([docs/SQL-SUPPORT.md](SQL-SUPPORT.md) "Refused") |
-| `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `COPY`, `TRUNCATE`, DDL, `GRANT`, `VACUUM`, `SET … READ WRITE` | 25006: a read-only copy |
+| `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `COPY`, `TRUNCATE`, DDL, `GRANT`, `VACUUM`, `SET … READ WRITE` | 25006: the synced data is read-only |
 | `PREPARE` / `EXECUTE` (the SQL forms) | 0A000: use the protocol's prepared statements (every driver does) |
 | `SAVEPOINT`, `PREPARE TRANSACTION` | 0A000: BEGIN, COMMIT and ROLLBACK are accepted, and a ROLLBACK undoes the block's `SET`s |
 | `LISTEN`, and any other statement that is not a SELECT, an EXPLAIN, a catalog query, SET, SHOW or a transaction no-op | 0A000, naming what is answered |
@@ -545,8 +543,8 @@ does not know is 42704.
 **One reader answers a session's settings, however a tool asks.** `SHOW <name>`, SHOW ALL's row, the ParameterStatus
 the session is told and `current_setting(name[, missing_ok])` are the same string: after `SET search_path = sales,
 public`, `current_setting('search_path')` answers `sales, public` in a statement the embedded Postgres answers and in
-one over a copied table alike, in a WHERE, a CTE or a prepared statement executed after the SET (each catalog request
-carries the session's settings in and takes them out again, and a statement over a copy reads them, never the copy
+one over a synced table alike, in a WHERE, a CTE or a prepared statement executed after the SET (each catalog request
+carries the session's settings in and takes them out again, and a statement over a synced table reads them, never the
 engine's own). A name the session does not hold is the embedded Postgres's own value (`block_size`), and a name nobody
 holds is Postgres's 42704, or NULL with `missing_ok`. `RESET <name>`, `RESET ALL` and `DISCARD ALL` restore the value
 the session started with — its startup packet's `application_name` and `options` (`-c name=value`) included — and the
@@ -627,22 +625,22 @@ whatever the session runs at that moment is stopped, as a `CancelRequest` stops 
 | `MASON_PG_PLAIN` | unset | `1`: a plain listener off loopback is on a private network; without it (or TLS) such a listener refuses to start |
 | `MASON_PG_CATALOG_TIMEOUT_MS` | 10000 | how long a catalog statement may take before the embedded Postgres is discarded and the statement refused |
 | `MASON_STATEMENT_TIMEOUT` | 5min | the longest one statement may run (Postgres's units; 0 for none); a session's `statement_timeout` may only shorten it |
-| `MASON_HISTORY_DAYS` | 7 | how many days of the request log (and the sync's events, the usage samples and the copies' sizes) are kept |
-| `MASON_STORE_JSON_PATHS` | on | `off`: never store the JSON paths statements keep reading as columns of the copy (`payload ->> 'customer_id'` read by 3 statements, or by one taking 1 s, is stored, and read from there; `mason status` lists them), and drop those stored, at that start |
+| `MASON_HISTORY_DAYS` | 7 | how many days of the request log (and the sync's events, the usage samples and the synced tables' sizes) are kept |
+| `MASON_STORE_JSON_PATHS` | on | `off`: never store the JSON paths statements keep reading as columns of the synced table (`payload ->> 'customer_id'` read by 3 statements, or by one taking 1 s, is stored, and read from there; `mason status` lists them), and drop those stored, at that start |
 | `MASON_PG_TRACE` | unset | `1`: log every statement text a session receives |
 
 ## How it is tested, and what is not
 
 - **The oracle** (`tests/integration/duck-oracle.itest.ts`, `oracle/`): adversarial synthetic data seeded on a real
-  Postgres and copied by Mason's own sync, then thousands of statements — BI tools' shapes, every type, function,
+  Postgres and synced by Mason, then thousands of statements — BI tools' shapes, every type, function,
   operator, aggregate, cast and construct — sent through the listener and held to what Postgres answers, after the
-  copy and after two rounds of changes. It fails while `src/duck/verified.ts` is not exactly what it verified, which
+  first sync and after two rounds of changes. It fails while `src/duck/verified.ts` is not exactly what it verified, which
   `node scripts/oracle-legs.ts --write <run-id>` writes from a CI run's oracle legs.
 - **The gaps** (`tests/duck-gaps.test.ts`): docs/SQL-SUPPORT.md is what `src/duck/gaps.ts` and `verified.ts` render,
   and every refusal names an entry that exists.
 - **The wire** (`tests/postgres-api/protocol.test.ts`, `encode.test.ts`, `server.test.ts`, `tests/duck-wire.test.ts`):
-  the frames, the bytes of every type against Postgres's own, and sessions driven by node-postgres over a real DuckDB
-  copy.
+  the frames, the bytes of every type against Postgres's own, and sessions driven by node-postgres over real synced
+  data in DuckDB.
 - **Roles** (`tests/duck-roles-wire.test.ts`, `tests/postgres-api/catalog.test.ts`, the oracle's role cases): every
   shape a hidden column can be read in, refused over a real listener; the catalog's roles and `SET ROLE`; and a
   Postgres role with the same grants asked the same statements, the refusals equal by SQLSTATE and message.

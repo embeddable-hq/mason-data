@@ -157,8 +157,11 @@ export interface CommandSpec {
    *  the usage to naming each): a command with a `json` option declares them, so what a program reads is what the help says */
   json?: readonly string[];
   /** what it needs to do its work (src/cli/state.ts): a project, a run, or the service; nothing when absent. Its gate
-   *  (`reach`) reads it, and tests/cli-state-matrix.test.ts holds it to the code it answers in each state below it */
-  needs?: "project" | "run";
+   *  (`reach`) reads it, and tests/cli-state-matrix.test.ts holds it to the code it answers in each state below it.
+   *  "files": the project's files alone (its `mason/`), found with or without `.mason/` (src/cli/project.ts
+   *  `theProjectFolder`: mason deploy's, which reads nothing of `.mason/`); a project meets it, and so does a folder
+   *  whose own `mason/` holds a project, with no `.mason/` at or above it */
+  needs?: "files" | "project" | "run";
   /** "protocol": its stdout is a protocol's (`mason mcp`'s MCP frames), so it takes no --json and every failure — a
    *  wrong line, a refusal, a crash — is said on stderr, `--json` on the line or not: one JSON object on stdout would
    *  be a frame the client cannot read */
@@ -247,7 +250,7 @@ const timesOut = (name: string): boolean => new RegExp(`\\bmason ${name}\\b`).te
  *                          value }: short and default null when it has none, value the synopsis' placeholder for a
  *                          string option (`<column>,…`), else null
  *   json                   the top-level keys of its --json answer, next included; null when it takes no --json
- *   needs                  "project", "run" or null (what it needs to do its work)
+ *   needs                  "files", "project", "run" or null (what it needs to do its work)
  *   stdout                 "protocol" when its stdout is a protocol's (mason mcp), else null
  *   exitCodes              [{ code, meaning }]: 0, 1 and 2 for every command, 124 for one that can run out of time
  */
@@ -258,7 +261,7 @@ export interface SpecJson {
   forms: Array<{ synopsis: string; positionals: string[] }>;
   options: Array<{ name: string; short: string | null; type: "string" | "boolean"; multiple: boolean; default: string | boolean | string[] | boolean[] | null; value: string | null }>;
   json: string[] | null;
-  needs: "project" | "run" | null;
+  needs: "files" | "project" | "run" | null;
   stdout: "protocol" | null;
   exitCodes: Array<{ code: number; meaning: string }>;
 }

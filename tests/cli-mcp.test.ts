@@ -49,7 +49,7 @@ let url = "";
 let analystUrl = "";
 const env = matrixEnv({ HOME: dir, PATH: path.dirname(process.execPath) });
 
-/** the OIDs the SOURCE gave its enum and its array type: none of them the catalog's (src/api/postgres/catalog.ts sourceTypeNames) */
+/** the OIDs the SOURCE gave its enum and its array type: none of them the catalog's, which the wire sends (issue 861) */
 const MOOD_OID = 90_001, MOOD_ARRAY_OID = 90_002;
 
 const schema: PgSchema = {
@@ -66,7 +66,7 @@ const schema: PgSchema = {
     { name: "items", schema: "sales", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int8", notNull: true }] },
     { name: "Clients", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int8", notNull: true }] },
     { name: "x; y", primaryKey: [], joins: [], columns: [{ name: "id", type: "int8" }] },
-    // an enum the source made, sent on the wire under the source's OID
+    // an enum the source made, sent on the wire under the catalog's OID, never the source's (issue 861)
     { name: "moods", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int8", notNull: true },
       { name: "m", type: "text", spelled: "mood", enumLabels: ["sad", "ok", "happy"], typeOid: MOOD_OID, typeArrayOid: MOOD_ARRAY_OID }] },
     // in the catalog, and no copy of it: a table removed between the catalog's read and its EXPLAIN
@@ -86,6 +86,9 @@ const copies = (): CopyState[] => [
   { source: "public.customers", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-29T09:00:00.000Z", error: null,
     kept: { by: "poll", sync: { mode: "off" }, syncedAt: THREE_DAYS_AGO, nextAt: null } },
   polled("sales.items"), polled("public.Clients"), polled("public.x; y"),
+  // read again whole at its interval: `kept_current_by` in the user's word (issue 903)
+  { source: "public.moods", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-29T09:00:00.000Z", error: null,
+    kept: { by: "recopy", copiedAt: "2026-10-29T09:00:00.000Z", syncedAt: null } },
 ];
 const POLLED = `polled every 5s, last 2 h ago (${utc(TWO_HOURS_AGO)})`;
 /** a polled copy's facts as the tools say them: its kept line, what keeps it current, its sync and when it was last synced */
@@ -306,7 +309,7 @@ test("tables and describe: the catalog's tables named as a statement writes them
         sync: "off", last_synced: THREE_DAYS_AGO },
       "public.events": { kind: "table", rows_about: 150_000, kept: "how it is kept current is unknown: the sync has no record of it", kept_current_by: null },
       "public.orders": { kind: "table", rows_about: 5, ...POLLED_FACTS },
-      "public.moods": { kind: "table", rows_about: 3, kept: "how it is kept current is unknown: the sync has no record of it", kept_current_by: null },
+      "public.moods": { kind: "table", rows_about: 3, kept: "kept current by reading it again whole, last synced 2026-10-29 09:00:00 UTC", kept_current_by: "syncing again in full" },
       // a name that needs quotes is named with them, and its copy is found by it
       'public."Clients"': { kind: "table", rows_about: 1, ...POLLED_FACTS },
       'public."x; y"': { kind: "table", rows_about: 1, ...POLLED_FACTS },
@@ -389,7 +392,7 @@ test("query: rows and Postgres's types for a GROUP BY, an enum by its name, trun
       rows: [["paid", "3", "210.75"], ["pending", "2", "43.00"]], row_count: 2, truncated: false, command: "SELECT 2" });
     assert.equal(g.text, '{\n  "columns": [\n    {"name":"status","type":"text"},\n    {"name":"n","type":"bigint"},\n    {"name":"total","type":"numeric"}\n  ],\n' +
       '  "rows": [\n    ["paid","3","210.75"],\n    ["pending","2","43.00"]\n  ],\n  "row_count": 2,\n  "truncated": false,\n  "command": "SELECT 2"\n}', "a row a line");
-    // a type the source made: the wire sends the source's OID, which the catalog lacks; its name is the type's
+    // a type the source made: the wire sends the catalog's OID for it, which the catalog names as the type
     const moods = await c.call("query", { sql: "SELECT m, count(*) AS n FROM moods GROUP BY m ORDER BY m" });
     assert.equal(moods.isError, undefined, moods.text);
     assert.deepEqual([moods.structured.columns, moods.structured.rows], [[{ name: "m", type: "mood" }, { name: "n", type: "bigint" }], [["sad", "1"], ["happy", "2"]]]);
