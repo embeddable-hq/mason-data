@@ -147,7 +147,7 @@ await import(${JSON.stringify(fileURLToPath(new URL("../src/duck/executor-worker
 // exactly as it was there. The run is told once, with the cause and the way out (src/cli/dev.ts exits for its supervisor,
 // or mason serve's platform, to open the file again), a session's later statement is told 57P02 and to reconnect, and
 // every synced row is there when the file is opened again.
-test("the synced data invalidated by a fatal error ends the run as a crash, its cause said, and every row is there on reopen", { timeout: 60_000, skip: "quarantined: #899" }, async () => {
+test("the synced data invalidated by a fatal error ends the run as a crash, its cause said, and every row is there on reopen", { timeout: 60_000 }, async () => {
   const file = path.join(dir, "invalidated.db");
   const ownLog: string[] = [];
   const own = await DuckStore.open(file, (l) => { ownLog.push(l); });
@@ -167,11 +167,21 @@ test("the synced data invalidated by a fatal error ends the run as a crash, its 
   try {
     assert.equal(String((await c.query("SELECT count(*) AS n FROM small")).rows[0].n), "10", "served before");
     await own.writer.run("SET debug_checkpoint_abort = 'before_header'");
-    await assert.rejects(own.writer.run("CHECKPOINT"), /^Error: FATAL Error: Failed to create checkpoint/);
+    // Two races decide the words (issue 899), and every outcome is correct. The check after a failed request may end
+    // the run before the CHECKPOINT's own answer, which is then told the run's reason. And DuckDB records the abort
+    // twice: first in its own words, then wrapped as "Failed to create checkpoint because of error: …" once the
+    // checkpoint unwinds, so a check that meets the instance in between is told the inner words.
+    const ABORT = /^(Failed to create checkpoint because of error: )?Checkpoint aborted before header write because of PRAGMA checkpoint_abort flag$/;
+    const REASON = /^the synced data met a fatal error and must be opened again \(([^()]*)\)\. /;
+    await assert.rejects(own.writer.run("CHECKPOINT"), (e: Error) => {
+      const cause = /^FATAL Error: (.*)$/.exec(e.message)?.[1] ?? REASON.exec(e.message)?.[1];
+      assert.match(cause ?? e.message, ABORT, "the checkpoint is told its own FATAL error, or the run's reason, which names it");
+      return true;
+    });
     for (const t = Date.now(); said.length === 0; await sleep(20)) if (Date.now() - t > 10_000) throw new Error(`the run was not told within 10 s\n${ownLog.join("\n")}`);
     await sleep(200);
     assert.equal(said.length, 1, "the run is told, once");
-    assert.match(said[0]!, /^the synced data met a fatal error and must be opened again \(Failed to create checkpoint because of error: Checkpoint aborted before header write/);
+    assert.match(REASON.exec(said[0]!)?.[1] ?? said[0]!, ABORT, "the cause is the checkpoint's abort, in either of DuckDB's words");
     assert.match(said[0]!, /Nothing synced is lost: it is opened again when Mason starts again; if the restart meets the same error, mason logs says it/);
     assert.doesNotMatch(said[0]!, /\n/, "one line: its supervisor reads the run's FATAL line by line");
     assert.doesNotMatch(said[0]!, /duckdb/i, "the engine is not named to a user");
@@ -198,6 +208,8 @@ test("only DuckDB's FATAL error invalidates; its original cause is read, and a f
     "Failed to create checkpoint because of error: Could not write file \"/d/.mason/duck.db\": No space left on device");
   assert.equal(invalidationOf(new Error("FATAL Error: Failed: database has been invalidated because of a previous fatal error. The database must be restarted prior to being used again.\nOriginal error: \"Failed to create checkpoint because of error: Could not write file \"/d/.mason/duck.db\": No space left on device\"")),
     "Failed to create checkpoint because of error: Could not write file \"/d/.mason/duck.db\": No space left on device");
+  assert.equal(invalidationOf(new Error("FATAL Error: Failed: database has been invalidated because of a previous fatal error. The database must be restarted prior to being used again.\nOriginal error: \"Could not write file \"/d/.mason/duck.db\": No space left on device\"")),
+    "Could not write file \"/d/.mason/duck.db\": No space left on device", "met before the checkpoint wraps it (issue 899): the inner words, the file and the disk still said");
   assert.match(invalidatedReason("Could not write file \"x\": No space left on device"), /; free disk where the synced data is \(\.mason\/\), or the restart meets the same error$/);
   assert.equal(invalidatedReason("a\n  b"), invalidatedReason("a b"), "one line");
 });
