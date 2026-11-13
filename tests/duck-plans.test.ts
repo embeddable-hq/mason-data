@@ -269,6 +269,8 @@ const HELD_BI = [
   "issue 665: Metabase's numeric auto-bin",
   "issue 665: the auto-bin of a bare column named as its output",
   "issue 665: the grouped quotient read as text and as a cast",
+  "issues 464, 465: Metabase's binned card, from a min below zero",
+  "issues 464, 465: Metabase's binned implicit join",
   "a top N with its ties: FETCH FIRST n ROWS WITH TIES",
   "a relative window: make_interval with named arguments",
 ];
@@ -837,7 +839,7 @@ test("a native json filter or read hands no row to any Mason function", async (t
 // The bound: the rows, plus a few calls a group (the week of year has 53 groups over the orders' 694 days, the bins 80;
 // each thread's partial groups may evaluate a projection again), never a second call a row. The turn
 // (`__mason_turn`, a vector's hop) is no row's call: left out
-const GROUPED_QUOTIENTS = ["issue 665: Metabase's week of year, the expression repeated", "issue 665: Metabase's numeric auto-bin", "issue 665: the auto-bin of a bare column named as its output"];
+const GROUPED_QUOTIENTS = ["issue 665: Metabase's week of year, the expression repeated"];
 test("issue 665: a grouped numeric quotient hands the Mason functions one row a row, the rest per group", async (t) => {
   for (const name of GROUPED_QUOTIENTS) {
     const rows = [...(await rowsOf(sqlOf(`BI shape: ${name}`)))].filter(([k, n]) => k !== "__mason_turn" && n > 0);
@@ -845,6 +847,20 @@ test("issue 665: a grouped numeric quotient hands the Mason functions one row a 
     t.diagnostic(`${name}: ${rows.map(([k, n]) => `${k} ${n}`).join(", ")}; ${total} rows of ${ORDERS}`);
     assert.ok(total >= ORDERS, `${name}: the Mason functions were handed ${total} rows of the ${ORDERS} orders: no key a row — a native plan? Read it, and tighten this invariant`);
     assert.ok(total <= ORDERS + 10_000, `${name}: the Mason functions were handed ${total} rows for the ${ORDERS} orders (${rows.map(([k, n]) => `${k} ${n}`).join(", ")}): more than one call a row`);
+  }
+});
+
+// A NUMERIC BIN (issues 464, 465): floor((x - min) / width) of a numeric(12,2) column, a constant width, is an integer
+// the engine computes in its own arithmetic (src/duck/rewrite.ts `nativeBin`), and so is everything above it: its
+// `* width + min`, the GROUP BY and the ORDER BY. Keyed a row by `__mason_numeric_program_key` (issue 665's one call a
+// row), the binned card took 46–76 s over 12 M rows against Postgres's 2.6–6.7 s: no row reaches a Mason function now
+const BINS = ["issue 665: Metabase's numeric auto-bin", "issue 665: the auto-bin of a bare column named as its output",
+  "issues 464, 465: Metabase's binned card, from a min below zero", "issues 464, 465: Metabase's binned implicit join"];
+test("issues 464, 465: a numeric bin of a numeric(12,2) column hands no row to any Mason function", async (t) => {
+  for (const name of BINS) {
+    const rows = [...(await rowsOf(sqlOf(`BI shape: ${name}`)))].filter(([, n]) => n > 0);
+    t.diagnostic(`${name}: ${rows.map(([k, n]) => `${k} ${n}`).join(", ") || "none"}`);
+    assert.deepEqual(rows, [], `${name}: the Mason functions were handed rows (${rows.map(([k, n]) => `${k} ${n}`).join(", ")}): the bin is not the engine's own arithmetic`);
   }
 });
 

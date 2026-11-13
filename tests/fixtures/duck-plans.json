@@ -2420,19 +2420,12 @@
       "sql": "SELECT (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) AS amount, count(*) AS count FROM orders o GROUP BY (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) ORDER BY (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) ASC",
       "plan": [
         "ORDER_BY",
-        "  PROJECTION calls __mason_numeric_order, __mason_numeric_program, __mason_turn",
+        "  HASH_GROUP_BY",
         "    PROJECTION",
-        "      HASH_GROUP_BY",
-        "        PROJECTION calls __mason_numeric_program_key, __mason_turn",
-        "          PROJECTION",
-        "            TABLE_SCAN public.orders"
+        "      PROJECTION",
+        "        TABLE_SCAN public.orders"
       ],
-      "calls": [
-        "__mason_numeric_div",
-        "__mason_numeric_order",
-        "__mason_numeric_program",
-        "__mason_numeric_program_key"
-      ],
+      "calls": [],
       "sends": [],
       "delim_join": false,
       "full_sort": true
@@ -2442,20 +2435,12 @@
       "sql": "SELECT floor(amount / 12.5) * 12.5 AS amount, count(*) FROM orders GROUP BY floor(amount / 12.5) * 12.5 ORDER BY floor(amount / 12.5) * 12.5 DESC",
       "plan": [
         "ORDER_BY",
-        "  PROJECTION calls __mason_numeric_order, __mason_numeric_program",
-        "    PROJECTION calls __mason_turn",
+        "  HASH_GROUP_BY",
+        "    PROJECTION",
         "      PROJECTION",
-        "        HASH_GROUP_BY",
-        "          PROJECTION calls __mason_numeric_program_key, __mason_turn",
-        "            PROJECTION",
-        "              TABLE_SCAN public.orders"
+        "        TABLE_SCAN public.orders"
       ],
-      "calls": [
-        "__mason_numeric_div",
-        "__mason_numeric_order",
-        "__mason_numeric_program",
-        "__mason_numeric_program_key"
-      ],
+      "calls": [],
       "sends": [],
       "delim_join": false,
       "full_sort": true
@@ -2480,6 +2465,38 @@
         "__mason_numeric_program",
         "__mason_numeric_program_key"
       ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
+      "name": "BI shape: issues 464, 465: Metabase's binned card, from a min below zero",
+      "sql": "SELECT ((FLOOR(((\"public\".\"orders\".\"amount\" - -50.0) / 125.0)) * 125.0) + -50.0) AS \"amount\", COUNT(*) AS \"count\" FROM \"public\".\"orders\" GROUP BY ((FLOOR(((\"public\".\"orders\".\"amount\" - -50.0) / 125.0)) * 125.0) + -50.0) ORDER BY ((FLOOR(((\"public\".\"orders\".\"amount\" - -50.0) / 125.0)) * 125.0) + -50.0) ASC",
+      "plan": [
+        "ORDER_BY",
+        "  HASH_GROUP_BY",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        TABLE_SCAN public.orders"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
+      "name": "BI shape: issues 464, 465: Metabase's binned implicit join",
+      "sql": "SELECT ((FLOOR(((\"Order\".\"amount\" - 0.0) / 25.0)) * 25.0) + 0.0) AS \"Order__amount\", COUNT(*) AS \"count\" FROM \"public\".\"order_items\" LEFT JOIN \"public\".\"orders\" AS \"Order\" ON \"public\".\"order_items\".\"order_id\" = \"Order\".\"id\" GROUP BY ((FLOOR(((\"Order\".\"amount\" - 0.0) / 25.0)) * 25.0) + 0.0) ORDER BY ((FLOOR(((\"Order\".\"amount\" - 0.0) / 25.0)) * 25.0) + 0.0) ASC",
+      "plan": [
+        "ORDER_BY",
+        "  HASH_GROUP_BY",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        HASH_JOIN",
+        "          TABLE_SCAN public.orders",
+        "          TABLE_SCAN public.order_items"
+      ],
+      "calls": [],
       "sends": [],
       "delim_join": false,
       "full_sort": true

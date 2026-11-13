@@ -95,6 +95,16 @@ paths:
     (`nullsKeyFolded`): an expression key stops DuckDB's top N pruning the scan (6.4 s and 91 s for a 100-row page).
     Equivalent means READ alike too: a bare key that is an integer or an output column's name is the output's
     (findTargetlistEntrySQL92), the same tree inside an expression the input's (`bareKeyIsInput`);
+  - **a numeric bin, `floor(e / c)` or `ceil(e / c)` of a constant c, is the engine's integer arithmetic where the types
+    prove it Postgres's integer** (`nativeBin`, issues 464, 465: keyed a row by `__mason_numeric_program_key`, Metabase's
+    binned card was ×16–25 of Postgres over 12 M rows): e·10^(c's scale) floored in a DECIMAL, divided in HUGEINT, a
+    DECIMAL(38, 0) that `duckExact` calls exact, so the `* width + min`, GROUP BY and ORDER BY above it are the engine's.
+    Postgres floors the quotient ROUNDED to `select_div_scale`'s rscale, so it is answered only where no quotient that is
+    not whole can round to one (|c|·10^S < 2·10^rscale, rscale at least 16 − 4·the quotient's largest base-10000
+    weight), and only where e is + and − of columns of a bounded type (numeric(p ≤ 38, s), the integers) and constants,
+    whose magnitude and display scale are read from the types, and e·10^(c's scale) and the bin fit 38 places. A bigint
+    by 12.5 is not (1000000000000000012 / 12.5 floors to …01), nor a numeric of no typmod: the program, as before.
+    `tests/duck-wire.test.ts` "issues 464, 465", the plan fixture's BINS, the oracle's `bin:` statements over `bins`;
   - **a count(DISTINCT x) of a key is count(x)** (`src/duck/distinct-key.ts`): x alone its table's PRIMARY KEY in
     the CATALOG's pg_index (the key the copy is written by; never a sources file's `key:`, and NEVER another UNIQUE
     index — the copy may hold its value twice for a moment, and the catalog's indexes are the source's as of the start

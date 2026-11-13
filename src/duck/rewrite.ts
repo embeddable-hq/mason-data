@@ -3174,6 +3174,8 @@ class Rewriter {
             return numeric({ op: name, arg: x.p, scale });
           }
           case "abs": case "floor": case "ceil": case "ceiling": {
+            // a bin the engine computes exactly (`nativeBin`): its integer, one cell
+            if (this.nativeBin(n) !== null) return asCell();
             const x = args.length === 1 ? sub(args[0]) : null;
             return x === null ? asCell() : numeric({ op: name === "ceiling" ? "ceil" : name, arg: x.p });
           }
@@ -3486,9 +3488,120 @@ class Rewriter {
    * exact it is that value's own type or its exact key, `numericParamComparison`), a column a FROM item computes as a double
    * (`carry`), a function this does not know — whose value then has its program, or is the engine's everywhere.
    */
+  /**
+   * A NUMERIC BIN THE ENGINE COMPUTES EXACTLY (issues 464, 465): `floor(e / c)` or `ceil(e / c)` of a constant c, the
+   * form every BI tool's auto-bin sends (Metabase's `floor((x - min) / width) * width + min`). Its value is an integer,
+   * which DuckDB computes in HUGEINT arithmetic with no Mason function: before, the quotient's program was keyed a row,
+   * 46–76 s against Postgres's 2.6–6.7 s over 12 M rows. Decided here ONCE, read by `duckExact` (so the bin's `* width
+   * + min`, its GROUP BY and its ORDER BY are the engine's DECIMALs), `exactOf` (a cell) and `funcCall` (the writer).
+   *
+   * It must be Postgres's integer, which is NOT always the exact quotient's floor: numeric_div rounds the quotient to
+   * `select_div_scale`'s rscale first, so a quotient within half a unit of that scale below an integer floors to the
+   * integer (`floor(1000000000000000012 / 12.5)` is 80000000000000001). So it is answered here only where no quotient
+   * can be that close: e and c read as integers at scale S (the more decimals of the two), a quotient that is not whole
+   * is at least 1 / (|c|·10^S) from every integer, so the floor is exact when |c|·10^S < 2·10^rscale, rscale at least
+   * 16 − 4·(the quotient's largest base-10000 weight), and at least each operand's display scale. Everything is read
+   * from types and constants: e is + and − of columns of a bounded type (numeric(p, s), smallint, integer, bigint) and
+   * constants, so its magnitude and its display scale are known; e·10^(c's scale) must fit DuckDB's 38 digits, and so
+   * must the bin. Anything else (no typmod, a wider column, a computed e) is left to the program, as before.
+   */
+  private nativeBin(n: AstNode): NativeBin | null {
+    if (kindOf(n) !== "FuncCall") return null;
+    const b = bodyOf(n);
+    const name = lastName(b.funcname);
+    if (name !== "floor" && name !== "ceil" && name !== "ceiling") return null;
+    if (b.over !== undefined || b.agg_star === true || b.agg_distinct === true || b.agg_within_group === true || b.agg_filter !== undefined || b.agg_order !== undefined) return null;
+    const args = (b.args ?? []) as AstNode[];
+    if (args.length !== 1 || this.typeOf(n) !== NUMERIC) return null;
+    const q = args[0]!;
+    if (kindOf(q) !== "A_Expr" || bodyOf(q).kind !== "AEXPR_OP" || lastName(bodyOf(q).name) !== "/" || this.typeOf(q) !== NUMERIC) return null;
+    const e = bodyOf(q).lexpr, c = bodyOf(q).rexpr;
+    if (!isNode(e) || !isNode(c) || kindOf(c) !== "A_Const") return null;
+    const cb = bodyOf(c);
+    const cText = cb.ival !== undefined ? String(cb.ival.ival ?? 0) : cb.fval !== undefined ? positional(String(cb.fval.fval)) : null;
+    const cm = cText === null ? null : /^(-?)(\d+)(?:\.(\d+))?$/.exec(cText);
+    if (cm === null || cm === undefined) return null;
+    const sc = (cm[3] ?? "").length;
+    const cAbs = BigInt(`${cm[2]}${cm[3] ?? ""}`);
+    if (cAbs === 0n) return null;
+    const magnitude = this.binMagnitude(e);
+    const se = this.displayScale(e);
+    if (magnitude === null || se === null || !this.duckExact(e)) return null;
+    // |e| < 10^d: e·10^sc and the bin within DuckDB's 38 digits, e written at its own scale
+    const d = Math.max(magnitude, 1);
+    if (d + sc + se > 38) return null;
+    // the quotient's largest weight in base 10000 (select_div_scale's qweight, at most weight1 − weight2) and the least
+    // rscale Postgres can choose for it
+    const cDigits = cAbs.toString().length;
+    const weight1 = Math.floor((d - 1) / 4), weight2 = Math.floor((cDigits - 1 - sc) / 4);
+    const rscale = Math.max(16 - 4 * (weight1 - weight2), se, sc);
+    const s = Math.max(se, sc);
+    // (held to two units of rscale's last place, not half of one: a margin past a division off by its last digit)
+    if (2n * cAbs * 10n ** BigInt(s - sc) >= 10n ** BigInt(Math.max(rscale, 0))) return null;
+    // the bin: |floor(e / c)| ≤ 10^d / |c| + 1, within 38 places
+    if (((10n ** BigInt(d + sc)) / cAbs + 1n).toString().length > 38) return null;
+    // (DuckDB multiplies two DECIMALs of at most 18 places in 64 bits, and fails past them: where e·10^sc may pass 17
+    // places, e is cast to DECIMAL(38, its scale) first. The bin is a DECIMAL(38, 0), so its `* width` above is made in
+    // 128 bits too, whatever the width is written with)
+    return { e, up: name !== "floor", shift: (cm[1] === "-" ? -1n : 1n) * 10n ** BigInt(sc), divisor: cAbs, scale: se, wide: d + sc + se > 17 };
+  }
+  /** the digits d of a bound |e| < 10^d for a native bin's dividend (`nativeBin`): + and − of columns of a bounded type
+   *  and constants, or null where none is known (a numeric of no typmod, a computed value, a parameter) */
+  private binMagnitude(read: AstNode): number | null {
+    // (a column a grouped query reads through the rewrite's any_value or first is that column's value)
+    const e = perGroupRead(read);
+    const k = kindOf(e), b = bodyOf(e), t = this.typed(e);
+    switch (k) {
+      case "ColumnRef": {
+        if (t === null) return null;
+        if (t.type === INT2) return 5;
+        if (t.type === INT4) return 10;
+        if (t.type === INT8) return 19;
+        if (t.type !== NUMERIC || t.typmod < 4) return null;
+        const precision = ((t.typmod - 4) >> 16) & 0xffff, scale = (t.typmod - 4) & 0xffff;
+        // (a negative scale, numeric(5, -2), reads here as a scale past its precision: not bounded here)
+        return precision >= 1 && precision <= 38 && scale <= precision ? Math.max(precision - scale, 0) : null;
+      }
+      case "A_Const": {
+        const text = b.ival !== undefined ? String(b.ival.ival ?? 0) : b.fval !== undefined ? positional(String(b.fval.fval)) : null;
+        const m = text === null ? null : /^-?(\d+)(?:\.\d+)?$/.exec(text);
+        return m === null || m === undefined ? null : m[1]!.replace(/^0+/, "").length + 1;
+      }
+      case "A_Expr": {
+        if (b.kind !== "AEXPR_OP") return null;
+        const name = lastName(b.name);
+        if (name !== "+" && name !== "-") return null;
+        const r = isNode(b.rexpr) ? this.binMagnitude(b.rexpr) : null;
+        if (b.lexpr === undefined) return name === "-" ? r : null;
+        const l = isNode(b.lexpr) ? this.binMagnitude(b.lexpr) : null;
+        return l === null || r === null ? null : Math.max(l, r) + 1;
+      }
+      default: return null;
+    }
+  }
+  /** a native bin as DuckDB computes it (`nativeBin`): y = e·(±10^sc), an integer once floored (or ceiled: of an integer
+   *  divisor, floor(y / c) = floor(floor(y) / c)), divided in HUGEINT by the divisor, rounding down (or up) where DuckDB's
+   *  `//` truncates, as a DECIMAL(38, 0) — the type every reader above it (`* width + min`) reads exactly */
+  private nativeBinWritten(bin: NativeBin, first: AstNode): AstNode {
+    const big = (v: bigint): AstNode => v >= -2_147_483_647n && v <= 2_147_483_647n ? intConst(Number(v)) : numConst(String(v));
+    const whole = (e: AstNode): AstNode => {
+      const x = bin.wide ? cast(e, ["decimal", "38", String(bin.scale)]) : e;
+      const y = bin.shift === 1n ? x : op("*", x, cast(big(bin.shift), ["decimal", String(String(bin.shift).replace("-", "").length), "0"]));
+      return cast(fn(bin.up ? "ceil" : "floor", [y]), ["hugeint"]);
+    };
+    const c = bin.divisor;
+    if (c === 1n) return cast(whole(first), ["decimal", "38", "0"]);
+    // floor: (f − ((f % c) + c) % c) // c; ceil: (f + ((−f % c) + c) % c) // c — the remainder DuckDB's `%` truncates
+    // toward zero, made the one that leaves an exact multiple of c
+    const f = whole(first), g = whole(this.clone(bin.e));
+    const rest = op("%", op("+", op("%", bin.up ? op("-", null, g) : g, big(c)), big(c)), big(c));
+    return cast(op("//", op(bin.up ? "+" : "-", f, rest), big(c)), ["decimal", "38", "0"]);
+  }
+
   private duckExact(n: AstNode): boolean {
     const t = this.typed(n), b = bodyOf(n), k = kindOf(n);
     if (t !== null && INTEGERS.has(t.type)) return true;
+    if (this.nativeBin(n) !== null) return true;
     if (isCellRef(n, this.cellPrefix)) return true;
     const exact = (x: unknown): boolean => isNode(x) && this.duckExact(x);
     const args = (b.args ?? []) as AstNode[];
@@ -3963,8 +4076,11 @@ class Rewriter {
       }
       case "FuncCall": {
         const args = (b.args ?? []) as AstNode[];
+        // a bin the engine computes (`nativeBin`): an integer, as Postgres's floor and ceil are
+        if (this.nativeBin(n) !== null) return 0;
         // (latest, Mason's, answers one row's value: its scale is its argument's)
-        if (!["sum", "min", "max", "latest"].includes(lastName(b.funcname)) || args.length !== 1 || b.agg_star === true || b.agg_within_group === true) return null;
+        // (any_value and first, the rewrite's read of a column per group, are one row's value too)
+        if (!["sum", "min", "max", "latest", "any_value", "first"].includes(lastName(b.funcname)) || args.length !== 1 || b.agg_star === true || b.agg_within_group === true) return null;
         return this.displayScale(args[0]!);
       }
       case "TypeCast": {
@@ -5214,6 +5330,9 @@ class Rewriter {
     const t = this.typed({ FuncCall: b });
     const args = (b.args ?? []) as AstNode[];
     const argType = (i: number): number | null => t?.args[i]?.type ?? (args[i] !== undefined ? this.typeOf(args[i]!) : null);
+    // a numeric bin: its integer in the engine's own arithmetic (`nativeBin`, issues 464, 465)
+    const bin = this.nativeBin({ FuncCall: b });
+    if (bin !== null) return this.nativeBinWritten(bin, bin.e);
     // an array_agg whose elements no reader sees (its length, its bounds): the engine's list has as many, whatever their
     // type, so no element of it is refused (`elementsUnread`)
     if (ELEMENT_BLIND.has(name) && args[0] !== undefined && kindOf(args[0]) === "FuncCall" && lastName(bodyOf(args[0]).funcname) === "array_agg") this.elementsUnread.add(bodyOf(args[0]));
@@ -7436,6 +7555,16 @@ function nonZero(copy: Copy, r: AstNode): AstNode {
   // NULL in the branch no row takes: the CASE keeps the divisor's type
   return caseWhen([[fn("__mason_zero_divisor", [op("=", r, intConst(0))]), nullConst()]], copy(r));
 }
+
+/** a column the rewrite reads per group (`any_value(c)`, `first(c)`, one argument): the column itself */
+/** a bin the engine computes (`Rewriter.nativeBin`): floor (or ceil) of e·shift / divisor, e at its display scale */
+type NativeBin = { readonly e: AstNode; readonly up: boolean; readonly shift: bigint; readonly divisor: bigint; readonly scale: number; readonly wide: boolean };
+
+const perGroupRead = (e: AstNode): AstNode => {
+  if (kindOf(e) !== "FuncCall") return e;
+  const b = bodyOf(e), args = (b.args ?? []) as AstNode[];
+  return ["any_value", "first"].includes(lastName(b.funcname)) && args.length === 1 && b.over === undefined ? perGroupRead(args[0]!) : e;
+};
 
 /** a decimal text without an exponent: `1.5e-3` → `0.0015` */
 function positional(text: string): string {
