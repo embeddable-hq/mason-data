@@ -360,6 +360,11 @@ export function keptAge(t: Pick<TableState, "table" | "kept" | "sync">, now: num
     return `${CATCHING_UP} (${at === null ? "never synced" : `last synced ${agoText(at, now)}`})`;
   }
   if (k?.by === "replication") {
+<<<<<<< HEAD
+=======
+    // being compacted: served as of the moment its changes began to be kept aside, and said so (issue 904)
+    if (k.state === "compacting") return `replicated, ${k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)}`} — ${k.why ?? "it is being compacted"}`;
+>>>>>>> fix/888-quiet-warnings
     if (k.state !== "streamed") return `not kept current (${k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)}`}): ${k.why ?? "it is not streamed yet"}`;
     const at = `replicated, at ${k.position}, ${k.syncedAt === null ? "not synced yet" : agoText(k.syncedAt, now)}`;
     // behind: `keptWords` says it, with the stream not running as its why

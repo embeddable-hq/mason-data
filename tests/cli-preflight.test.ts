@@ -202,7 +202,7 @@ test("a database elsewhere is information, never a warning: where it is, and the
   assert.deepEqual(sourceWarnings(source("postgres://me@db.example.com/app"), facts(false)), [], "neither is a warning");
   // a serverless compute: what keeps it awake, as it is now — no timer of Mason's own (issue 890)
   assert.deepEqual(sourceWarnings(source("postgres://me@ep-x.us-east-2.aws.neon.tech/app"), facts(false)), [
-    "Neon suspends an idle compute and bills while it runs: a table whose sync: is poll or replication keeps it running. " +
+    "Neon suspends an idle compute and bills while it runs. A table whose sync: is poll or replication keeps it running. " +
     "With every table sync: off, Mason connects only when asked: mason sync, tables, add, remove, status, wait or doctor, and the web page while it is open (about once a minute)"]);
   assert.equal(serverlessHost("db.abc.supabase.co"), null);
 });

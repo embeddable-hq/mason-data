@@ -124,6 +124,7 @@ export function keptAge(t, now = Date.now()) {
     return `${CATCHING_UP} (${at === null ? "never synced" : `last synced ${syncedAgo(at, now)}`})`;
   }
   if (k?.by === "replication") {
+    if (k.state === "compacting") return `replicated, ${k.syncedAt === null ? "never synced" : `last synced ${syncedAgo(k.syncedAt, now)}`} — ${k.why ?? "it is being compacted"}`;
     if (k.state !== "streamed") return `not kept current (${k.syncedAt === null ? "never synced" : `last synced ${syncedAgo(k.syncedAt, now)}`}): ${k.why ?? "it is not streamed yet"}`;
     const at = `replicated, at ${k.position}, ${k.syncedAt === null ? "not synced yet" : syncedAgo(k.syncedAt, now)}`;
     return k.notRunning === null || t.sync?.state === "behind" ? at : `${at} — not kept current now, the stream is not running: ${k.notRunning}`;
