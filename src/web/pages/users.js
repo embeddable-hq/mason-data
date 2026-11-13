@@ -178,7 +178,7 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
  * prints): the host, port, database and sslmode — what a BI tool's form asks for, each with Copy — then the URL with
  * `<user>:<password>` as placeholders. No psql line (issue 874): the URL is the same thing, pasted after `psql`. None of it is a user's: a row carries what is (its name, its
  * state), and a user's password is copied only from the card shown once when it is added (`renderAdded`). "" when the
- * run did not say. `shareTip`: where the page may open a temporary public login (`shareable`), a tip pointing to it in
+ * run did not say. `shareTip`: where the page may open a temporary cloud login (`shareable`), a tip pointing to it in
  * the add box, for a tool that can't reach this machine.
  */
 export function renderUsersConnect(pg, served = false, shareTip = false) {
@@ -189,10 +189,10 @@ export function renderUsersConnect(pg, served = false, shareTip = false) {
     `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v)}</dd>`).join("")}</dl>` +
     serverHostNote(pg, served) +
     `<p class="tip"><span>Put a user's name and password in place of ${code("<user>")} and ${code("<password>")}. The password is shown only once, when you add the user. If it's lost, remove the user and add it again.</span></p>` +
-    (shareTip ? `<p class="tip">A tool in the cloud that can't reach this machine: choose Temporary public login in the box above.</p>` : "") + `</div>`;
+    (shareTip ? `<p class="tip">A tool in the cloud that can't reach this machine: choose Temporary cloud login in the box above.</p>` : "") + `</div>`;
 }
 
-// ------------------------------------------------------------------ Temporary public login (mason share, from the page)
+// ------------------------------------------------------------------ Temporary cloud login (mason share, from the page)
 
 /** The page's share before anything was asked: what the share's renderers and the page's model start from. */
 export const NO_SHARE = Object.freeze({ phase: "none", role: null, opened: null, ended: null, failure: null });
@@ -204,18 +204,18 @@ export const pageShareOf = (s) => s?.share?.shares?.find((x) => x.from === "page
  *  (`served`: its run refuses `/api/share`) and never on a read-only page (`pageReadOnly`, whatever it still allows). */
 export const shareable = (s) => s !== undefined && s !== null && s.served !== true && (s.pageReadOnly ?? null) === null;
 
-/** How a temporary public login ends, beside "Live until you stop it": a free one's hour, and the page closing (its
+/** How a temporary cloud login ends, beside "Live until you stop it": a free one's hour, and the page closing (its
  *  beats stop). */
 const endsLine = (endsAt, now) => (endsAt === null || endsAt === undefined ? ""
   : ` A free one ends sooner, within about an hour, at ${new Date(endsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} (in about ${Math.max(0, Math.round((Date.parse(endsAt) - now) / 60_000))} minutes). Then open a new one for a new address and password.`) +
   " It also ends within two minutes of closing this page.";
 
 /** The two things the add box creates, its segments' words. */
-const KINDS = [["user", "New user"], ["share", "Temporary public login"]];
+const KINDS = [["user", "New user"], ["share", "Temporary cloud login"]];
 
 /**
  * WHAT THE ADD BOX CREATES: two segments on the box, a segmented control as the time range's — "New user" (the add
- * form) and "Temporary public login" (`mason share`, from the page) — each a button, the one chosen pressed. Written only
+ * form) and "Temporary cloud login" (`mason share`, from the page) — each a button, the one chosen pressed. Written only
  * where the page may open a share (`shareable`); elsewhere the box is the plain add form. The choice is the page's own
  * (`m.addKind`), never the hash: it is a form's, not a view's. The stylesheet shows the pane chosen and keeps the
  * other's place, unseen (both in one grid cell), so the box keeps the height of the taller and nothing below moves.
@@ -226,9 +226,9 @@ export function renderAddKinds(kind = "user") {
 }
 
 /**
- * THE TEMPORARY PUBLIC LOGIN'S PANE in the add box (src/cli/page-share.ts; `mason share`'s, from the page): what it is
+ * THE TEMPORARY CLOUD LOGIN'S PANE in the add box (src/cli/page-share.ts; `mason share`'s, from the page): what it is
  * for, in two sentences, then a Role choice where the roles a share may read as (`choices`: the read of
- * `/api/share/choices`, undefined before it) are more than one, and "Open a public login" — the click is the person's
+ * `/api/share/choices`, undefined before it) are more than one, and "Open a cloud login" — the click is the person's
  * yes to a public address, said above it. Written the same in every phase but while one opens or is open, when the
  * button is held, disabled (one at a time); what it opened, how it ended or why it was refused is the card's
  * (`renderShareCard`), where a user just added is shown. The roles unread: the button disabled, "Reading the roles…" beside
@@ -244,13 +244,13 @@ export function renderSharePane(s, m = NO_SHARE, choices = undefined) {
   const busy = m.phase === "opening" || (pageShareOf(s) !== null && m.phase !== "ended");
   const title = list === null ? "" : busy ? "One is open: stop it to open another" : "";
   return `<div class="share-pane"><p class="tip">For a tool in the cloud that can't reach this machine. Opens a public address with a login of its own, until you stop it.</p>` +
-    failure + `<p class="share-ask">${role}${button("Open a public login", { shareOpen: "" }, "primary", { disabled: list === null || busy, title })}` +
+    failure + `<p class="share-ask">${role}${button("Open a cloud login", { shareOpen: "" }, "primary", { disabled: list === null || busy, title })}` +
     `${list === null && !failure ? ` <span class="dim">Reading the roles…</span>` : ""}</p></div>`;
 }
 
 /**
- * THE TEMPORARY PUBLIC LOGIN, once asked: a card in the place and style of "New user added" (`renderAddUser`'s card,
- * `.user-added`), titled "Temporary public login" on its top edge. While it opens: that it is opening. Open, with the
+ * THE TEMPORARY CLOUD LOGIN, once asked: a card in the place and style of "New user added" (`renderAddUser`'s card,
+ * `.user-added`), titled "Temporary cloud login" on its top edge. While it opens: that it is opening. Open, with the
  * answer that opened it (`m.opened`, the page's memory alone): URL, Login and Password, the URL and the Password each with
  * Copy, "Shown once" beside the password's Copy — the login its own, never a user's; reloaded (no answer): its host,
  * port and login, and that the password was shown once. Then what it reads and for how long, "Live until you stop it"
@@ -260,7 +260,7 @@ export function renderSharePane(s, m = NO_SHARE, choices = undefined) {
  */
 export function renderShareCard(s, m = NO_SHARE, now = Date.now()) {
   if (!shareable(s)) return "";
-  const head = `<p class="added-title">Temporary public login</p>`;
+  const head = `<p class="added-title">Temporary cloud login</p>`;
   const open = pageShareOf(s);
   if (open !== null && m.phase !== "ended") {
     const mine = m.opened !== null && m.opened.user === open.user ? m.opened : null;
@@ -272,12 +272,12 @@ export function renderShareCard(s, m = NO_SHARE, now = Date.now()) {
       `<p class="added-seen">${badge("Public", "warn")} for <time data-tick datetime="${esc(open.openedAt)}">${esc(spanText((now - Date.parse(open.openedAt)) / 1000))}</time>` +
       `${open.role !== null && open.role !== undefined ? `, as the role ${esc(open.role)}` : ""}: ${esc(open.reads)}</p>` +
       (mine !== null ? `<p class="tip">The password is only shown once and is not saved. This login is its own, and stops working when it ends.</p>`
-        : `<p class="tip">The password was shown once, when it opened, and is not saved. For a new one, press Stop, then Open a public login.</p>`) +
+        : `<p class="tip">The password was shown once, when it opened, and is not saved. For a new one, press Stop, then Open a cloud login.</p>`) +
       `<p class="tip">Live until you stop it.${esc(endsLine(open.endsAt, now))}</p>` +
       `${button("Stop", { shareStop: open.user }, "danger")}</div>`;
   }
   if (m.phase === "opening") return `<div class="user-added share-added" role="status">${head}<p class="added-seen" aria-busy="true">Opening a temporary public address… This can take up to 30 s.</p></div>`;
-  if (m.phase === "ended" && m.ended !== null) return `<p class="said">The temporary public login ended: ${esc(m.ended.why)}. Its address and password no longer work.</p>`;
+  if (m.phase === "ended" && m.ended !== null) return `<p class="said">The temporary cloud login ended: ${esc(m.ended.why)}. Its address and password no longer work.</p>`;
   if (m.phase === "refused" && m.failure !== null) return renderFailure(m.failure);
   return "";
 }
@@ -289,8 +289,8 @@ const chosenRole = (m, list) => list.some((c) => c.role === m.role) ? m.role : l
 const BEAT_MS = 15_000;
 
 /**
- * THE PAGE'S SIDE OF A TEMPORARY PUBLIC LOGIN (src/cli/page-share.ts has why each choice): open (the click on Open a
- * public login is the yes), BEAT while it is open — on a timer of its own, which runs while the tab is hidden (the poll
+ * THE PAGE'S SIDE OF A TEMPORARY CLOUD LOGIN (src/cli/page-share.ts has why each choice): open (the click on Open a
+ * cloud login is the yes), BEAT while it is open — on a timer of its own, which runs while the tab is hidden (the poll
  * does not: the person is in their tool's tab, pasting) —, Stop. The password is in `m.opened` alone, the page's memory, and is
  * dropped the moment the share is seen ended. `ctx.timers` is a test's clock; a browser's own otherwise.
  */
@@ -314,7 +314,7 @@ export function createShare(ctx) {
   const roles = () => { const c = ctx.read(SHARE_CHOICES)?.body?.choices; return Array.isArray(c) ? c : null; };
   const actions = {
     shareRole(role) { if (roles()?.some((c) => c.role === role)) m.role = role; },
-    /** Open a public login: the person said yes to a public address; the run opens the share (confirmed), and its one answer carries the password */
+    /** Open a cloud login: the person said yes to a public address; the run opens the share (confirmed), and its one answer carries the password */
     async shareOpen() {
       const list = roles();
       if (list === null || m.phase === "opening") return;
@@ -456,9 +456,9 @@ export const page = {
     // reveal: the part to scroll into view after the next write (a new user's password card), once
     // show: the list's tab, the hash's (`route`: #users?show=removed)
     const m = { actionFailure: null, added: null, addedSeen: false, confirming: null, refused: null, held: null, reveal: null, show: "active", addKind: "user" };
-    // addKind: what the add box creates, "user" (New user) or "share" (Temporary public login): the box's own choice
+    // addKind: what the add box creates, "user" (New user) or "share" (Temporary cloud login): the box's own choice
     const users = () => ctx.read(USERS)?.body ?? null;
-    // the temporary public login, the add box's second kind: its own model, beats and actions
+    // the temporary cloud login, the add box's second kind: its own model, beats and actions
     const share = createShare(ctx);
     m.share = share.m;
     const actions = {
@@ -563,13 +563,13 @@ export const page = {
         return {
           // the roles file's state is the run's (/api/state roles): a file that cannot be read refuses every user held to it
           users: u ? renderUsers(u, m.confirming, h !== null ? h.now : ctx.now().getTime(), m.refused, state?.roles ?? null, usersReadOnly(state), m.show) : "",
-          // the add box: what it creates where the page may open a temporary public login (else the plain form), each
+          // the add box: what it creates where the page may open a temporary cloud login (else the plain form), each
           // kind's pane a part of its own, so a choice of kind rewrites neither (a name being typed stays)
           "add-kinds": offer ? renderAddKinds(m.addKind) : "",
           "add-user-box": renderAddUser(s, offer),
           "add-share-box": offer ? renderSharePane(s, share.m, ctx.read(SHARE_CHOICES)) : "",
           "users-connect": renderUsersConnect(s?.postgres, s?.served === true, offer),
-          // what the box made, in one place: a user just added, a temporary public login
+          // what the box made, in one place: a user just added, a temporary cloud login
           added: (m.added ? renderAdded(m.added, { connected: m.addedSeen }) : "") + renderShareCard(s, share.m, ctx.now().getTime()),
           action: m.actionFailure ? renderFailure(m.actionFailure) : "",
         };

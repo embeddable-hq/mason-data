@@ -650,8 +650,8 @@ form.formcard input { width: 18em; }
 .connects .ranges input { width: 22em; max-width: 100%; }
 /* "anywhere" chosen: the address box keeps its place, unseen, so nothing in the form moves when the choice changes */
 .connects:has(option[value="any"]:checked) .ranges { visibility: hidden; }
-/* THE ADD BOX (src/web/pages/users.js): where a temporary public login may be opened, a card of its own with what it
-   creates on top (New user · Temporary public login, the time range's segmented control) and the two panes in ONE grid
+/* THE ADD BOX (src/web/pages/users.js): where a temporary cloud login may be opened, a card of its own with what it
+   creates on top (New user · Temporary cloud login, the time range's segmented control) and the two panes in ONE grid
    cell, the one not chosen unseen in its place: the box keeps the height of the taller, so a choice moves nothing below.
    Elsewhere it holds the plain add form, itself the card (form.formcard). */
 .add-box:has(#add-kinds > *) { margin: 0 0 var(--space-5); padding: var(--space-3) var(--space-4); background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); }

@@ -153,7 +153,7 @@ test("the browser is the platform's: open on macOS, start on Windows, xdg-open e
   assert.deepEqual(openCommand!("freebsd", u), ["xdg-open", [u]]);
 });
 
-// ------------------------------------------------------------------ Temporary public login: the page's share endpoint
+// ------------------------------------------------------------------ Temporary cloud login: the page's share endpoint
 
 const { RunShares } = await import("../src/cli/share-run.ts");
 const { PageShares } = await import("../src/cli/page-share.ts" as string).catch(() => ({})) as typeof import("../src/cli/page-share.ts");

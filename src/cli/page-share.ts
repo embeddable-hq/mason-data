@@ -1,5 +1,5 @@
 /**
- * THE WEB PAGE'S `mason share` (the Temporary public login of the Users page's add box; docs/WEB-UI.md): the same share the
+ * THE WEB PAGE'S `mason share` (the Temporary cloud login of the Users page's add box; docs/WEB-UI.md): the same share the
  * command opens — a login of `RunShares` (src/cli/share-run.ts) on the share's TLS-only socket, a tunnel client of
  * src/cli/tunnel.ts pointed at it, its address probed for the share's own certificate — opened by the RUN, because a page
  * cannot start a process. Nothing here is a second socket, password or tunnel: only who holds the share differs.
@@ -51,8 +51,8 @@ export interface PageShareDeps {
 /** A tunnel's failure in the page's words: what to do there, never a flag of the command's. */
 function pageFailure(f: Failure, plan: TunnelPlan): Failure {
   if (f.code === "not_found") {
-    return { message: `${plan.bin} is not on this machine, and a temporary public login needs it`, code: "not_found", why: "the temporary address is a tunnel opened over ssh",
-      fix: `install ${plan.install}, then Open a public login again`, next: [["mason doctor", "checks this machine"]] };
+    return { message: `${plan.bin} is not on this machine, and a temporary cloud login needs it`, code: "not_found", why: "the temporary address is a tunnel opened over ssh",
+      fix: `install ${plan.install}, then Open a cloud login again`, next: [["mason doctor", "checks this machine"]] };
   }
   return { message: f.message, code: f.code, ...(f.why !== undefined ? { why: f.why } : {}),
     fix: f.message.startsWith("the tunnel gave no address") ? "the tunnel's service answered in a way this Mason cannot read: nothing was left open; mason share, in a terminal, offers another tunnel"
@@ -105,7 +105,7 @@ export class PageShares {
 
   private endedWhileOpening(user: string): Failure {
     const why = this.deps.shares.ended?.user === user ? this.deps.shares.ended.why : "it was stopped";
-    return { message: `the share ended while its tunnel opened: ${why}`, code: "failed", fix: "nothing was left open: Open a public login again" };
+    return { message: `the share ended while its tunnel opened: ${why}`, code: "failed", fix: "nothing was left open: Open a cloud login again" };
   }
 
   /** The timer a beat resets: past the bound with no beat, the share ends. */

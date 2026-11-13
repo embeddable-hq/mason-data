@@ -786,7 +786,7 @@ test("a read-only page (pageReadOnly): no page writes a control that sends a cha
 test("a read-only page: no add, create or write link anywhere — Queries' empty log's Create a user included; the Overview and Usage say why; unset, all as before", async () => {
   const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
   // what leads to adding or creating something: a button-styled link to the page that does it, or its words
-  const LEADS = [/Create a user/, /Add a table/, /Add a user/, /Temporary public login/, /<a class="btn[^"]*" href="#users"/, /<a class="btn[^"]*" href="#tables[^"]*"/, /Cancel stops one/];
+  const LEADS = [/Create a user/, /Add a table/, /Add a user/, /Temporary cloud login/, /<a class="btn[^"]*" href="#users"/, /<a class="btn[^"]*" href="#tables[^"]*"/, /Cancel stops one/];
   const open = await pageByPage(CATALOG_STATE);
   const shown = await pageByPage({ ...CATALOG_STATE, pageReadOnly: why });
   for (const lead of LEADS) assert.ok(!lead.test(shown.all), `read-only: ${lead}`);
@@ -824,8 +824,8 @@ test("a read-only page: each renderer alone writes no control that changes anyth
   const renderRunning = fn<[unknown, unknown, unknown, number, unknown], string>("renderRunning");
   assert.ok(!renderRunning(running, null, null, Date.now(), why).includes("data-ask-cancel"));
   assert.ok(renderRunning(running, null, null, Date.now(), null).includes("data-ask-cancel"));
-  assert.equal(fn<[unknown], string>("renderSharePane")(ro), "", "Temporary public login: absent on a read-only page");
-  assert.match(fn<[unknown], string>("renderSharePane")(CATALOG_STATE), /data-share-open/, "unset: Open a public login is there");
+  assert.equal(fn<[unknown], string>("renderSharePane")(ro), "", "Temporary cloud login: absent on a read-only page");
+  assert.match(fn<[unknown], string>("renderSharePane")(CATALOG_STATE), /data-share-open/, "unset: Open a cloud login is there");
   const { renderChecklist: checklist } = await import(path.join(WEB, "pages", "status.js") as string) as { renderChecklist: (s: unknown, u: unknown) => string };
   const nobody = { queries: { week: { completed: 0 } } };
   const fresh = { ...NONE, pageReadOnly: why };
@@ -1944,13 +1944,13 @@ test("a read-only page that still manages its users (pageReadOnlyAllow: [users])
   assert.equal(renderAddUser({ ...CATALOG_STATE, pageReadOnlyAllow: ["users"] }), renderAddUser(CATALOG_STATE));
 });
 
-test("a read-only page that still changes its tables and its users (pageReadOnlyAllow: [tables, users]): both pages' controls; the Overview says nothing is refused; Cancel and Temporary public login still absent (issue 813)", async () => {
+test("a read-only page that still changes its tables and its users (pageReadOnlyAllow: [tables, users]): both pages' controls; the Overview says nothing is refused; Cancel and Temporary cloud login still absent (issue 813)", async () => {
   const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
   const shown = await pageByPage({ ...CATALOG_STATE, pageReadOnly: why, pageReadOnlyAllow: ["tables", "users"] });
   for (const control of ["data-add-table", "data-sync-table", "data-remove-table", 'id="add-user"', "data-from=", "data-disable="]) assert.ok(shown.all.includes(control), control);
   // the run refuses /api/share on any read-only page, whatever it still allows: no Share box
   for (const control of ["data-ask-cancel", "data-share-open"]) assert.ok(!shown.all.includes(control), control);
-  assert.ok(!/Temporary public login|data-add-kind/.test(shown.all), "no temporary public login, no segments");
+  assert.ok(!/Temporary cloud login|data-add-kind/.test(shown.all), "no temporary cloud login, no segments");
   assert.ok(!textOf(shown.overview).includes("from this page"), "the Overview refuses nothing it offers");
   assert.ok(textOf(shown.byPage.get("usage")!).includes(`Queries are not cancelled from this page: ${why}.`));
   assert.ok(!/are not added/.test(textOf(shown.all)), "Tables and Users say nothing is refused");
@@ -3681,7 +3681,7 @@ test("Tables and Users: the sections are a page head, the cards' part and a tool
   // the users first, right under the title (their read-only line is renderUsers' own); then the form, the password just
   // shown beside it, Connect: a card that appears moves nothing above it
   const order = ["users-h", "users", "add-box", "add-kinds", "add-user-box", "add-share-box", "action", "added", "users-connect"].map((id) => users.indexOf(`id="${id}"`));
-  assert.ok(order.every((i, n) => i >= 0 && (n === 0 || i > order[n - 1]!)), "the title, the users, the box (its segments, the form, the temporary public login), its failure, the card, Connect");
+  assert.ok(order.every((i, n) => i >= 0 && (n === 0 || i > order[n - 1]!)), "the title, the users, the box (its segments, the form, the temporary cloud login), its failure, the card, Connect");
   assert.match(users, /<\/div>\s*<div id="users"><\/div>\s*<!--[^>]*-->\s*<div id="add-box" class="add-box"><div id="add-kinds"><\/div><div class="add-panes"><div id="add-user-box"><\/div><div id="add-share-box"><\/div><\/div><\/div>/, "the users list right under the page's head, then the box");
 });
 
@@ -5625,7 +5625,7 @@ test("only the clock moved: the ages are set where they are, the part not writte
   assert.equal(shown[0]!.innerHTML, "7s ago", "the age moved where it is");
 });
 
-// ------------------------------------------------------------------ Temporary public login (the page's mason share, the add box's second kind)
+// ------------------------------------------------------------------ Temporary cloud login (the page's mason share, the add box's second kind)
 
 const SHARE_AT = "2026-11-01T10:00:00.000Z";
 const SHARE_NOW = Date.parse("2026-11-01T10:05:00.000Z");
@@ -5641,22 +5641,22 @@ const sharePane = (s: unknown, m: unknown, choices: unknown = ONE_ANSWER) => fn<
 const shareCard = (s: unknown, m: unknown) => fn<[unknown, unknown, number], string>("renderShareCard")(s, m, SHARE_NOW);
 const PANE_WORDS = "For a tool in the cloud that can't reach this machine. Opens a public address with a login of its own, until you stop it.";
 
-test("Temporary public login: the add box's segments, its pane in each state and its card in each — none, opening, open, open after a reload, ended, refused, served, read-only — as they WROTE them", () => {
-  // the segments: New user and Temporary public login, the one chosen pressed
+test("Temporary cloud login: the add box's segments, its pane in each state and its card in each — none, opening, open, open after a reload, ended, refused, served, read-only — as they WROTE them", () => {
+  // the segments: New user and Temporary cloud login, the one chosen pressed
   const kinds = fn<[string], string>("renderAddKinds");
-  assert.equal(kinds("user"), `<div class="range add-kinds" role="group" aria-label="What to create"><button type="button" data-add-kind="user" aria-pressed="true">New user</button><button type="button" data-add-kind="share" aria-pressed="false">Temporary public login</button></div>`);
+  assert.equal(kinds("user"), `<div class="range add-kinds" role="group" aria-label="What to create"><button type="button" data-add-kind="user" aria-pressed="true">New user</button><button type="button" data-add-kind="share" aria-pressed="false">Temporary cloud login</button></div>`);
   assert.match(kinds("share"), /data-add-kind="user" aria-pressed="false">New user<\/button><button type="button" data-add-kind="share" aria-pressed="true">/);
-  // the pane: two sentences, then Open a public login; a Role only where more than one is offered
+  // the pane: two sentences, then Open a cloud login; a Role only where more than one is offered
   const none = sharePane(sharing([]), shareModel());
-  assert.equal(textOf(none), `${PANE_WORDS} Open a public login`);
-  assert.match(none, /<button type="button" class="primary" data-share-open="">Open a public login<\/button>/, "enabled");
+  assert.equal(textOf(none), `${PANE_WORDS} Open a cloud login`);
+  assert.match(none, /<button type="button" class="primary" data-share-open="">Open a cloud login<\/button>/, "enabled");
   assert.doesNotMatch(none + sharePane(sharing([]), shareModel(), ONE_ROLE), /<select/, "none or one role: no role to choose");
   const two = sharePane(sharing([]), shareModel(), TWO_ROLES);
   assert.match(two, /<label for="share-role">Role<\/label> <select id="share-role"><option value="sales" selected>sales: 1 synced table: orders \(default\)<\/option><option value="ops">ops: every synced table<\/option><\/select><\/span> <button[^>]*data-share-open/, "the roles beside the button, the file's default first chosen");
   assert.match(sharePane(sharing([]), shareModel({ role: "ops" }), TWO_ROLES), /<option value="ops" selected>/, "the role chosen stays chosen across a rewrite");
   const unread = sharePane(sharing([]), shareModel(), null);
-  assert.equal(textOf(unread), `${PANE_WORDS} Open a public login Reading the roles…`);
-  assert.match(unread, /data-share-open="" disabled>Open a public login/, "no button before the roles are read");
+  assert.equal(textOf(unread), `${PANE_WORDS} Open a cloud login Reading the roles…`);
+  assert.match(unread, /data-share-open="" disabled>Open a cloud login/, "no button before the roles are read");
   const rolesFailure = { code: "refused", message: "no role of mason/roles.yml can be shared: the rows of each depend on an attribute, and a share's login has no attributes" };
   const noRole = sharePane(sharing([]), shareModel(), { body: undefined, failure: rolesFailure });
   assert.ok(noRole.includes(fn<[unknown], string>("renderFailure")(rolesFailure)), "the roles refused: the run's Failure");
@@ -5664,23 +5664,23 @@ test("Temporary public login: the add box's segments, its pane in each state and
   // one at a time: while one opens or is open the button is held, the pane's words the same
   for (const [s, m] of [[sharing([]), shareModel({ phase: "opening" })], [sharing([listed]), shareModel({ phase: "open" })]] as const) {
     const busy = sharePane(s, m);
-    assert.equal(textOf(busy), `${PANE_WORDS} Open a public login`);
-    assert.match(busy, /title="One is open: stop it to open another" disabled>Open a public login/);
+    assert.equal(textOf(busy), `${PANE_WORDS} Open a cloud login`);
+    assert.match(busy, /title="One is open: stop it to open another" disabled>Open a cloud login/);
   }
   // nothing before anything was asked
   assert.equal(shareCard(sharing([]), shareModel()), "");
-  assert.equal(textOf(shareCard(sharing([]), shareModel({ phase: "opening" }))), "Temporary public login Opening a temporary public address… This can take up to 30 s.");
+  assert.equal(textOf(shareCard(sharing([]), shareModel({ phase: "opening" }))), "Temporary cloud login Opening a temporary public address… This can take up to 30 s.");
 
   // open: the card in New user added's style, URL, Login and Password
   const opened = { url: SHARE_URL, user: "share_a1b2c3", password: PASSWORD, database: "shop", host: "relay.example", port: 41234 };
   const open = shareCard(sharing([listed]), shareModel({ phase: "open", opened }));
-  assert.match(open, /^<div class="user-added share-added" role="status"><p class="added-title">Temporary public login<\/p><dl class="facts">/);
+  assert.match(open, /^<div class="user-added share-added" role="status"><p class="added-title">Temporary cloud login<\/p><dl class="facts">/);
   for (const [id, v] of [["share-url", SHARE_URL], ["share-password", PASSWORD]]) {
     assert.ok(open.includes(`<code id="${id}">${v}</code> <button type="button" class="small" data-copy="${id}"`), `${id} with its Copy`);
   }
   assert.match(open, /<dt>Login<\/dt><dd>share_a1b2c3<\/dd>/, "the login its name, as a new user's User is");
   assert.match(open, /data-copy="share-password"[^>]*>Copy<\/button> <span class="badge warn">Shown once<\/span><\/span><\/dd>/, "Shown once beside the password's Copy");
-  assert.equal(textOf(open).replace(/ at .+? \(in /, " at HH:MM (in "), `Temporary public login URL ${SHARE_URL} Copy Login share_a1b2c3 Password ${PASSWORD} Copy Shown once Public for 5 min : every synced table ` +
+  assert.equal(textOf(open).replace(/ at .+? \(in /, " at HH:MM (in "), `Temporary cloud login URL ${SHARE_URL} Copy Login share_a1b2c3 Password ${PASSWORD} Copy Shown once Public for 5 min : every synced table ` +
     "The password is only shown once and is not saved. This login is its own, and stops working when it ends. " +
     "Live until you stop it. A free one ends sooner, within about an hour, at HH:MM (in about 55 minutes). Then open a new one for a new address and password. It also ends within two minutes of closing this page. Stop");
   assert.match(open, /<button type="button" class="danger" data-share-stop="share_a1b2c3">Stop<\/button><\/div>$/);
@@ -5690,13 +5690,13 @@ test("Temporary public login: the add box's segments, its pane in each state and
   // a reload over an open one: no password anywhere; its host, port and login, and Stop
   const reloaded = shareCard(sharing([listed]), shareModel());
   assert.ok(!reloaded.includes(PASSWORD) && !reloaded.includes("share-password") && !reloaded.includes("share-url"), "after a reload the password is nowhere on the page");
-  assert.match(textOf(reloaded), /^Temporary public login Host relay\.example Copy Port 41234 Copy Login share_a1b2c3 Public for 5 min : every synced table The password was shown once, when it opened, and is not saved\. For a new one, press Stop, then Open a public login\. Live until you stop it\. .* Stop$/);
+  assert.match(textOf(reloaded), /^Temporary cloud login Host relay\.example Copy Port 41234 Copy Login share_a1b2c3 Public for 5 min : every synced table The password was shown once, when it opened, and is not saved\. For a new one, press Stop, then Open a cloud login\. Live until you stop it\. .* Stop$/);
 
   // ended and refused: said in the card's place
   assert.equal(textOf(shareCard(sharing([]), shareModel({ phase: "ended", ended: { user: "share_a1b2c3", why: "its tunnel closed (ssh exited 255)" } }))),
-    "The temporary public login ended: its tunnel closed (ssh exited 255). Its address and password no longer work.");
+    "The temporary cloud login ended: its tunnel closed (ssh exited 255). Its address and password no longer work.");
   assert.equal(textOf(shareCard(sharing([]), shareModel({ phase: "ended", ended: { user: "share_a1b2c3", why: "you stopped it on this page" } }))),
-    "The temporary public login ended: you stopped it on this page. Its address and password no longer work.");
+    "The temporary cloud login ended: you stopped it on this page. Its address and password no longer work.");
   const failure = { code: "not_found", message: "ssh is not on this machine", fix: "install the OpenSSH client", next: [{ command: "mason doctor", what: "checks this machine" }] };
   const refused = shareCard(sharing([]), shareModel({ phase: "refused", failure }));
   assert.equal(refused, fn<[unknown], string>("renderFailure")(failure), "a refusal is the CLI's Failure, rendered by renderFailure");
@@ -5710,7 +5710,7 @@ test("Temporary public login: the add box's segments, its pane in each state and
   for (const html of [none, two, open, reloaded, refused]) assert.doesNotMatch(textOf(html), /pinggy|bore\b|duck|\buser\b|Share over the internet/i);
 });
 
-test("Temporary public login over a fake run: Open a public login opens it confirmed with the role chosen, beaten on a timer of its own, its end said and its password dropped; Stop", async () => {
+test("Temporary cloud login over a fake run: Open a cloud login opens it confirmed with the role chosen, beaten on a timer of its own, its end said and its password dropped; Stop", async () => {
   const asked: Array<[string, string | undefined, unknown]> = [];
   let state: unknown = sharing([]);
   const answers: Record<string, unknown> = {
@@ -5772,7 +5772,7 @@ test("Temporary public login over a fake run: Open a public login opens it confi
   assert.deepEqual(refreshed.at(-1), ["api/share/choices"]);
 });
 
-test("the Users page over a fake run: the add box offers New user and Temporary public login, a choice rewriting neither pane; its card where New user added is; never in the users list; Connect points to it; a served run has the plain form", async () => {
+test("the Users page over a fake run: the add box offers New user and Temporary cloud login, a choice rewriting neither pane; its card where New user added is; never in the users list; Connect points to it; a served run has the plain form", async () => {
   const run = fakeRun();
   let state: unknown = RUNNING;
   run.answers.set("GET api/state", () => new Response(JSON.stringify(state), { status: 200 }));
@@ -5784,8 +5784,8 @@ test("the Users page over a fake run: the add box offers New user and Temporary 
   const before = app.view();
   assert.match(before["add-kinds"]!, /data-add-kind="user" aria-pressed="true">New user/);
   assert.match(before["add-user-box"]!, /^<form id="add-user" autocomplete="off">/, "in the box, the form is no card of its own");
-  assert.match(textOf(before["add-share-box"]!), /^For a tool in the cloud .* Role sales: 1 synced table: orders \(default\) ops: every synced table Open a public login$/);
-  assert.match(textOf(before["users-connect"]!), /A tool in the cloud that can't reach this machine: choose Temporary public login in the box above\.$/);
+  assert.match(textOf(before["add-share-box"]!), /^For a tool in the cloud .* Role sales: 1 synced table: orders \(default\) ops: every synced table Open a cloud login$/);
+  assert.match(textOf(before["users-connect"]!), /A tool in the cloud that can't reach this machine: choose Temporary cloud login in the box above\.$/);
   assert.doesNotMatch(before["users-connect"]!, /data-share/, "no box in Connect");
   const page = app.pages.get("users")!;
   assert.equal(page.arrive(), "user-name");
@@ -5805,10 +5805,10 @@ test("the Users page over a fake run: the add box offers New user and Temporary 
   state = sharing([{ ...listed, role: "ops" }]);
   app.markStale(); await app.poll();
   const open = app.view();
-  assert.match(open.added!, /<p class="added-title">Temporary public login<\/p>/);
+  assert.match(open.added!, /<p class="added-title">Temporary cloud login<\/p>/);
   assert.ok(open.added!.includes(PASSWORD));
   assert.ok(!open.users!.includes("share_a1b2c3"), "not a user");
-  assert.match(open["add-share-box"]!, /disabled>Open a public login/, "one at a time");
+  assert.match(open["add-share-box"]!, /disabled>Open a cloud login/, "one at a time");
   const served = fakeRun();
   served.answers.set("GET api/state", answer({ ...RUNNING, served: true }));
   const sapp = fn<[unknown], App>("createApp")(served.fetch);
@@ -5819,7 +5819,7 @@ test("the Users page over a fake run: the add box offers New user and Temporary 
   assert.equal(sv["add-kinds"], "", "no segments");
   assert.equal(sv["add-share-box"], "");
   assert.match(sv["add-user-box"]!, /^<form id="add-user" class="formcard"/, "the plain add form, its own card");
-  assert.doesNotMatch(Object.values(sv).join(""), /Temporary public login|data-share/);
+  assert.doesNotMatch(Object.values(sv).join(""), /Temporary cloud login|data-share/);
 });
 
 // ------------------------------------------------------------------ the host's views and card (issue 814)

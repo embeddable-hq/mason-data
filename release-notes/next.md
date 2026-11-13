@@ -16,7 +16,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   24 hours and links to them (Sync events, failures only; Queries, the refused or failed statements); a count the page
   could not read says "unknown" and why. They replace the lists of recent errors at the foot of the page. The table of
   the last day's and week's statements is gone too (the Statements and p95 cards stay, and Queries lists every
-  statement), and so is the Connect panel, with Connect from anywhere (now Temporary public login, on the Users page): the Postgres URL is on the Users page and in
+  statement), and so is the Connect panel, with Connect from anywhere (now Temporary cloud login, on the Users page): the Postgres URL is on the Users page and in
   `mason status`; `mason share` opens a share from the command line.
 - **The Tables page lists the added tables first**, then the tables not added, so on a database of hundreds of
   tables the ones Mason syncs are at the top under All. A table you add or remove keeps its row, its state changing in
@@ -26,10 +26,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   added" and has the URL, the User and the Password, the URL and the Password each with Copy, "Shown once" beside the
   password's Copy, and one line: the password is only shown once. The URL already carries the database; the database,
   host, port and SSL mode are Connect's on the same page, and the card does not repeat them. `mason user add` in a terminal prints every row, as before.
-- **Connect from anywhere moves to the Users page, as a Temporary public login.** The box that adds a user has two
-  segments, New user and Temporary public login: the second opens what `mason share` opens, for a tool in the cloud
+- **Connect from anywhere moves to the Users page, as a Temporary cloud login.** The box that adds a user has two
+  segments, New user and Temporary cloud login: the second opens what `mason share` opens, for a tool in the cloud
   that cannot reach your machine. Choose the role it reads as (where `mason/roles.yml` offers more than one), click
-  Open a public login, and a card where New user added appears shows the public URL, its own login and the password,
+  Open a cloud login, and a card where New user added appears shows the public URL, its own login and the password,
   the URL and the password with Copy, the password shown once. It is live until you press Stop, until a free one's
   hour is up, or within two minutes of the page closing, and the page says how it ended. It is not a user: it is never
   in the users list. It is not offered under `mason serve` or on a read-only page.

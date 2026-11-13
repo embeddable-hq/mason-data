@@ -154,7 +154,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   `mason add <table>` does; **Columns…** opens a form to tick the columns to sync; **Name its key…** does the same for a
   table with no primary key.
 - **Users** (`#users`), in this order: the list of users, right under the title (and its read-only line), then the add
-  box (the add form; and, where it may be opened, a Temporary public login) with the card of what it made beside it,
+  box (the add form; and, where it may be opened, a Temporary cloud login) with the card of what it made beside it,
   then Connect, so a card that appears moves nothing above it. A person arriving on the page — its address opened, a
   link of the sidebar or another followed — starts with the cursor in the form's **Name**, once the form is written;
   never at a poll's write after that, never at a hash of the page already shown (a tab of the list, a range), never taken from what the person focused since they arrived, never on a touch
@@ -188,21 +188,21 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   and the URL with `<user>:<password>` in place, with **Copy** — as `mason status` says it, with no psql line (the URL
   is the same thing, pasted after `psql`). No user's row carries a URL:
   the card shown once when a user is added is the only place its password is copied.
-- **Users**, the add box's **Temporary public login** (under `mason start` only: never under `mason serve`, whose run
+- **Users**, the add box's **Temporary cloud login** (under `mason start` only: never under `mason serve`, whose run
   refuses it, and never on a read-only page, `pageReadOnly`, whatever `MASON_UI_READ_ONLY_ALLOW` still allows; there
   the box is the plain add form, with no segments): `mason share` from the page, for a tool in the cloud that cannot
   reach this machine. It is the same flow as adding a user with another job, so it is the box's second kind: two
-  segments on top of the box, **New user** (the form above) and **Temporary public login**, a segmented control as the
+  segments on top of the box, **New user** (the form above) and **Temporary cloud login**, a segmented control as the
   time range's, the choice the page's own (not the hash: a form's, not a view's). The two panes sit in one grid cell,
   the one not chosen unseen in its place, so the box keeps the height of the taller and a choice moves nothing on the
   page; each pane is a part of its own (`add-user-box`, `add-share-box`), so a choice rewrites neither, and a name being
   typed stays. The pane: "For a tool in the cloud that can't reach this machine. Opens a public address with a login
   of its own, until you stop it.", a **Role** choice where `mason/roles.yml` offers more than one role a share may
   read as (`GET /api/share/choices`, read beside the state while it is offered, as `mason share --role`; each option
-  says what it reads), and **Open a public login**, held disabled while one opens or is open (one at a time). The click
+  says what it reads), and **Open a cloud login**, held disabled while one opens or is open (one at a time). The click
   is the person's yes: `POST /api/share` `{ from: "page", confirmed: true, role? }` opens the same share the command
   opens (src/cli/page-share.ts): the run makes the password and starts the tunnel's client. What it opened is a card
-  in the place and style of New user added, titled **Temporary public login**: URL, **Login** (its own, never a
+  in the place and style of New user added, titled **Temporary cloud login**: URL, **Login** (its own, never a
   `mason user`, and never listed or counted among the users) and **Password**, the URL and the Password each with
   **Copy**, "Shown once" beside the password's Copy; how long it has been public and what it reads; "Live until you
   stop it", when a free one ends sooner (within about an hour) and that it ends when the page closes; and **Stop**
