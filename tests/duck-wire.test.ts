@@ -4178,44 +4178,75 @@ test("a numeric quotient under a DISTINCT ON or a DISTINCT shows Postgres's exac
   } finally { await c.end(); }
 });
 
-// issues 464, 465: a numeric bin, floor or ceil of a column's (+ and - of columns and constants) quotient by a constant,
-// is the engine's own integer arithmetic where the types prove it Postgres's integer (src/duck/rewrite.ts `nativeBin`):
-// no row reaches a Mason function, and every answer is Postgres's, at a bin's edges, below zero, at each type's limits.
-// Where Postgres rounds the quotient to a whole number before its floor (a bigint by 12.5: 80000000000000000.96 rounds
-// at one place), or e·10^scale could pass 38 places, the bin stays the quotient's program, as before
+// issues 464, 465: a GROUP BY of a numeric bin, floor or ceil of a column's (+ and - of columns and constants) quotient
+// by a constant, groups by the engine's own integer where the types prove it Postgres's integer (src/duck/rewrite.ts
+// `nativeBin`, `nativeKey`), never the program's key a row, and every answer is Postgres's, at a bin's edges, below
+// zero, at each type's limits. Where Postgres rounds the quotient to a whole number before its floor (a bigint by 12.5:
+// 80000000000000000.96 rounds at one place), or e·10^scale could pass 38 places, the key stays the program's, as before
 test("issues 464, 465: a numeric bin is the engine's integer where the types prove it Postgres's, and Postgres's answer everywhere", async () => {
   const c = await client();
   try {
-    const calls = async (): Promise<number> => [...(await store.functionCalls()).entries()].filter(([k]) => k !== "__mason_turn").reduce((a, [, n]) => a + n, 0);
+    const keyed = async (): Promise<number> => (await store.functionRows()).get("__mason_numeric_program_key") ?? 0;
     const bin = (x: string, min: string, w: string): string => `((FLOOR(((${x} - ${min}) / ${w})) * ${w}) + ${min})`;
-    const native: string[] = [];
+    // grouped by the bin: the engine's own integer, no key a row
+    const grouped: string[] = [];
     for (const [x, min, w] of [["bins.a", "0.0", "12.5"], ["bins.a", "-10000.0", "125.0"], ["bins.a", "1.25", "0.3"], ["bins.a", "0.0", "-12.5"], ["bins.a", "0", "7"],
       ["bins.h", "-5.0", "0.25"], ["bins.h", "0.0", "0.0007"], ["bins.i", "0.0", "12.5"], ["bins.s", "-100.0", "0.3"], ["bins.b", "0.0", "0.125"]] as const) {
       const e = bin(x, min, w);
-      native.push(`SELECT ${e} AS v, COUNT(*) AS n FROM public.bins GROUP BY ${e} ORDER BY ${e} ASC`);
+      grouped.push(`SELECT ${e} AS v, COUNT(*) AS n FROM public.bins GROUP BY ${e} ORDER BY ${e} ASC`);
     }
-    native.push(
-      "SELECT id, floor(a / 12.5) AS f, ceil(a / 12.5) AS c, ceiling((a - 0.01) / 0.3) AS c2, (floor(a / 12.5) * 12.5)::text AS t, floor(-a / 3) AS n FROM bins ORDER BY id",
-      "SELECT id, floor(h / 0.00000007) AS f, ceil(h / 0.00000007) AS c, floor(i / 12.5) AS fi, ceil(s / -2.5) AS cs FROM bins ORDER BY id",
+    grouped.push(
       "SELECT floor(a / 12.5) * 12.5 AS v, count(*) FROM bins GROUP BY 1 ORDER BY 1 DESC NULLS FIRST",
+      "SELECT -ceil(a / 12.5) AS v, count(*) FROM bins GROUP BY 1 ORDER BY 1",
       "SELECT floor(a / 12.5) * 12.5 AS v, count(*) FROM bins GROUP BY v HAVING floor(a / 12.5) * 12.5 > -20 ORDER BY v",
       "SELECT s.v, s.n FROM (SELECT floor((a - -5.0) / 2.5) * 2.5 + -5.0 AS v, count(*) AS n FROM bins GROUP BY 1) s ORDER BY s.v NULLS FIRST",
-      "SELECT floor(a / 12.5) AS v FROM bins UNION SELECT floor(i / 3.0) FROM bins ORDER BY 1 NULLS FIRST",
-      "SELECT o.id, floor((b.a - 0.0) / 25.0) * 25.0 + 0.0 AS v FROM orders o LEFT JOIN bins b ON b.id = o.id % 15 ORDER BY o.id");
-    for (const sql of native) {
-      const before = await calls();
+      "SELECT floor((b.a - 0.0) / 25.0) * 25.0 + 0.0 AS v, count(*) FROM orders o LEFT JOIN bins b ON b.id = o.id % 15 GROUP BY 1 ORDER BY 1 NULLS FIRST");
+    for (const sql of grouped) {
+      const before = await keyed();
       assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
-      assert.equal(await calls() - before, 0, `${sql}: a row reached a Mason function`);
+      assert.equal(await keyed() - before, 0, `${sql}: grouped by the program's key a row, not the engine's bin`);
     }
-    // the program's, as before: a bigint by a width whose quotient Postgres may round to a whole number first, a
-    // numeric(30,8) whose e·10^scale may pass 38 places, a quotient of the bin
-    for (const sql of ["SELECT id, floor(b / 12.5) AS f, ceil(b / 12.5) AS c FROM bins ORDER BY id", "SELECT floor(b / 12.5) * 12.5 AS v, count(*) FROM bins GROUP BY 1 ORDER BY 1",
-      "SELECT id, floor(h / 0.000000007) AS f FROM bins ORDER BY id", "SELECT floor(a / 12.5) / 3 AS q, count(*) FROM bins GROUP BY 1 ORDER BY 1"]) {
+    // the program's key, as before: a bigint by a width whose quotient Postgres may round to a whole number first, a
+    // numeric(30,8) whose e·10^scale may pass 38 places, a quotient of the bin (not one-to-one), a divisor past 18 places
+    for (const sql of ["SELECT floor(b / 12.5) * 12.5 AS v, count(*) FROM bins GROUP BY 1 ORDER BY 1", "SELECT floor(h / 0.000000007) AS v, count(*) FROM bins GROUP BY 1 ORDER BY 1",
+      "SELECT floor(a / 12.5) / 3 AS q, count(*) FROM bins GROUP BY 1 ORDER BY 1", "SELECT floor(a / 12.5) * 0.0 AS z, count(*) FROM bins GROUP BY 1 ORDER BY 1",
+      "SELECT floor(a / 1000000000000000000.5) AS v, count(*) FROM bins GROUP BY 1 ORDER BY 1"]) {
+      const before = await keyed();
       assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      assert.ok(await keyed() - before > 0, `${sql}: grouped by the engine's bin where the types do not prove it`);
     }
-    assert.deepEqual((await answer(c, "SELECT floor(b / 12.5)::text FROM bins WHERE id = 4")).rows, [["80000000000000001"]], "Postgres's floor of 80000000000000000.96, the quotient rounded first");
+    assert.deepEqual((await answer(c, "SELECT floor(b / 12.5)::text AS v, count(*) FROM bins WHERE id = 4 GROUP BY 1")).rows, [["80000000000000001", "1"]], "Postgres's floor of 80000000000000000.96, the quotient rounded first");
   } finally { await c.end(); }
 });
+
+// THE REVIEW OF PR 922: the bin is the GROUP BY's key ONLY. Anywhere else it is read as before, its program and the
+// engine's double. Read as the engine's DECIMAL(38, 0) it rounded the decimals of what it was compared with, united with
+// or chosen beside (0.01 IN a bin of 0; 0.75 sorted past 1); a product of it passed 38 places (22003); and a divisor
+// of 39 places passed a HUGEINT in the remainder's arithmetic, or was read as a double
+const binReview = (name: string, sqls: string[]): void => {
+  test(`issues 464, 465, the review of PR 922: ${name}`, async () => {
+    const c = await client();
+    try {
+      for (const sql of sqls) assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    } finally { await c.end(); }
+  });
+};
+binReview("a bin read beside another numeric's decimals is Postgres's, never rounded to the bin's type", [
+  "SELECT id FROM bins WHERE a IN (SELECT floor(a / 12.5) FROM bins) ORDER BY id",
+  "SELECT id FROM bins WHERE floor(a / 12.5) * 12.5 IN (SELECT a FROM bins) ORDER BY id",
+  "SELECT floor(a / 12.5) AS v FROM bins UNION ALL SELECT 0.75 ORDER BY 1 NULLS FIRST",
+  "SELECT floor(a / 12.5) * 12.5 AS v, 1 AS arm FROM bins UNION ALL SELECT a, 2 FROM bins ORDER BY 1 NULLS FIRST, 2",
+  "SELECT a AS v, 1 AS arm FROM bins UNION ALL SELECT floor(a / 12.5), 2 FROM bins ORDER BY 1 NULLS FIRST, 2",
+  "SELECT id, CASE WHEN id % 2 = 0 THEN floor(a / 12.5) ELSE a END AS v FROM bins ORDER BY 2, 1",
+  "SELECT id, floor(a / 12.5) AS f, ceil(a / 12.5) AS c, ceiling((a - 0.01) / 0.3) AS c2, (floor(a / 12.5) * 12.5)::text AS t, floor(-a / 3) AS n FROM bins ORDER BY id"]);
+binReview("a product of a bin past 38 places is Postgres's, never the engine's overflow", [
+  "SELECT id, floor(h / 0.0001) * floor(h / 0.0001) AS sq FROM bins ORDER BY id",
+  "SELECT id, floor(h / 0.0001) * h AS p, floor(h / 0.0001) * 1000000000000.5 AS q FROM bins ORDER BY id",
+  "SELECT floor(h / 0.0001) * 1000000000000 AS p, count(*) FROM bins GROUP BY 1 ORDER BY 1"]);
+binReview("a bin by a divisor of 39 places is Postgres's", [
+  "SELECT id, floor(a / 170141183460469231731687303715884105720) AS f, ceil(a / 170141183460469231731687303715884105720) AS c FROM bins ORDER BY id",
+  "SELECT id, floor(a / 200000000000000000000000000000000000000) AS f, ceil(a / 200000000000000000000000000000000000000) AS c FROM bins ORDER BY id",
+  "SELECT floor(a / 170141183460469231731687303715884105720) AS v, count(*) FROM bins GROUP BY 1 ORDER BY 1"]);
 
 /** an answer's rows in one order: quotients equal to a double's 17 digits are in no defined order on Mason (the listed
  *  difference numeric-quotient-compare), so a test of their equality reads the rows as a set */

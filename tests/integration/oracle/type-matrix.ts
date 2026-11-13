@@ -1984,6 +1984,16 @@ function* binCases(): Generator<Matrixed> {
   yield q("bin: a quotient of the bin, grouped", "SELECT floor(a / 12.5) / 3 AS q, count(*) FROM public.bins GROUP BY 1 ORDER BY 1");
   yield q("bin: two bins grouped together", "SELECT floor(a / 12.5) AS x, ceil(b / 0.125) AS y, count(*) FROM public.bins GROUP BY 1, 2 ORDER BY 1, 2");
   yield q("bin: DISTINCT, and compared with a constant", "SELECT DISTINCT floor(h / 0.5) AS f, floor(h / 0.5) = 25 AS e FROM public.bins ORDER BY 1");
+  // (the review of PR 922: the bin read as a value beside another numeric's decimals — IN, UNION ALL, CASE — in a
+  // product past 38 places, and by a divisor of 39 places; each grouped one is the engine's bin, the rest its program)
+  yield q("bin: IN a subquery of bins, and a bin IN a subquery of values", "SELECT id, a IN (SELECT floor(a / 12.5) FROM public.bins) AS x, floor(a / 12.5) * 12.5 IN (SELECT a FROM public.bins) AS y FROM public.bins ORDER BY id");
+  yield q("bin: UNION ALL beside decimals", "SELECT floor(a / 12.5) * 12.5 AS v, 1 AS arm FROM public.bins UNION ALL SELECT a, 2 FROM public.bins UNION ALL SELECT 0.75, 3 ORDER BY 1 NULLS FIRST, 2");
+  yield q("bin: UNION beside decimals", "SELECT floor(a / 12.5) AS v FROM public.bins UNION SELECT 0.75 UNION SELECT a FROM public.bins ORDER BY 1 NULLS FIRST");
+  yield q("bin: a CASE of a bin or a value, sorted", "SELECT id, CASE WHEN id % 2 = 0 THEN floor(a / 12.5) ELSE a END AS v FROM public.bins ORDER BY 2, 1");
+  yield q("bin: products past 38 places", "SELECT id, floor(h / 0.0001) * floor(h / 0.0001) AS sq, floor(h / 0.0001) * h AS p, floor(h / 0.0001) * 1000000000000.5 AS q FROM public.bins ORDER BY id");
+  yield q("bin: products past 38 places, grouped", "SELECT floor(h / 0.0001) * 1000000000000 AS p, count(*) FROM public.bins GROUP BY 1 ORDER BY 1");
+  yield q("bin: by a divisor of 39 places", "SELECT id, floor(a / 170141183460469231731687303715884105720) AS f, ceil(a / 200000000000000000000000000000000000000) AS c FROM public.bins ORDER BY id");
+  yield q("bin: by a divisor of 39 places, grouped", "SELECT floor(a / 170141183460469231731687303715884105720) AS f, count(*) FROM public.bins GROUP BY 1 ORDER BY 1");
 }
 
 export const TYPE_MATRIX: Matrixed[] = [...matrix(), ...mappedTypes(), ...binCases(),...FROM_ITEMS_SORTED.map((f) => q(f.name, f.sql, f.zone)),

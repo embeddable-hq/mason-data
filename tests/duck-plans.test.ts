@@ -850,17 +850,21 @@ test("issue 665: a grouped numeric quotient hands the Mason functions one row a 
   }
 });
 
-// A NUMERIC BIN (issues 464, 465): floor((x - min) / width) of a numeric(12,2) column, a constant width, is an integer
-// the engine computes in its own arithmetic (src/duck/rewrite.ts `nativeBin`), and so is everything above it: its
-// `* width + min`, the GROUP BY and the ORDER BY. Keyed a row by `__mason_numeric_program_key` (issue 665's one call a
-// row), the binned card took 46–76 s over 12 M rows against Postgres's 2.6–6.7 s: no row reaches a Mason function now
+// A NUMERIC BIN GROUPED (issues 464, 465): floor((x - min) / width) of a numeric(12,2) column, a constant width, is
+// grouped by the engine's own integer (src/duck/rewrite.ts `nativeBin`, `nativeKey`), never the program's key a row;
+// what reads the value (the list's text, the ORDER BY's exact order key) is computed per group, as for any keyed
+// group. Keyed a row by `__mason_numeric_program_key` (issue 665's one call a row), the binned card took 46–76 s over
+// 12 M rows against Postgres's 2.6–6.7 s. The bound: a few calls a group (80 bins of the orders' amounts at most;
+// each thread's partial groups may evaluate a projection again), never one a row
 const BINS = ["issue 665: Metabase's numeric auto-bin", "issue 665: the auto-bin of a bare column named as its output",
   "issues 464, 465: Metabase's binned card, from a min below zero", "issues 464, 465: Metabase's binned implicit join"];
-test("issues 464, 465: a numeric bin of a numeric(12,2) column hands no row to any Mason function", async (t) => {
+test("issues 464, 465: a numeric bin of a numeric(12,2) column is grouped by the engine's integer: the Mason functions see each group, never each row", async (t) => {
   for (const name of BINS) {
-    const rows = [...(await rowsOf(sqlOf(`BI shape: ${name}`)))].filter(([, n]) => n > 0);
+    const rows = [...(await rowsOf(sqlOf(`BI shape: ${name}`)))].filter(([k, n]) => k !== "__mason_turn" && n > 0);
+    const total = rows.reduce((a, [, n]) => a + n, 0);
     t.diagnostic(`${name}: ${rows.map(([k, n]) => `${k} ${n}`).join(", ") || "none"}`);
-    assert.deepEqual(rows, [], `${name}: the Mason functions were handed rows (${rows.map(([k, n]) => `${k} ${n}`).join(", ")}): the bin is not the engine's own arithmetic`);
+    assert.ok(!rows.some(([k]) => k === "__mason_numeric_program_key"), `${name}: grouped by the program's key a row (${rows.map(([k, n]) => `${k} ${n}`).join(", ")})`);
+    assert.ok(total <= 10_000, `${name}: the Mason functions were handed ${total} rows of the ${ORDERS} orders (${rows.map(([k, n]) => `${k} ${n}`).join(", ")}): per row, not per group`);
   }
 });
 
