@@ -2197,17 +2197,20 @@ so the next start seeds it again. **Where.** `src/cli/demo.ts`, `src/demo/source
 
 ## Operating it
 
-<<<<<<< HEAD
-### Facts said as facts, and the catalog read when asked (2026-11-12, issues 888 and 890)
+### Facts said as facts (2026-11-12, issue 888)
 
 **Decision (the owner).** A database on another machine is no longer a stop that wants `--remote` (gone, with the
-config's `remote`): `mason init` and `mason start` carry on and say it as one line of information. That it is the main
-database, not a read replica, is information too, said by `mason init` and by `mason start` until a first sync is done
-(`sourceNotes`, `PRIMARY_NOTE`, src/cli/preflight.ts); `mason status` warns of neither, and its Database line says which it is, as the page's facts card does from `source.standby`, never from a warning's words. PUBLIC's
-default CREATE on schema public before Postgres 15 is a line of information in `mason doctor`, never a warning: the
-role its way out makes would hold it too. **Why.** Each made a normal fact read as a risk, or repeated it at every run,
-and people were scared off for no reason; the synced data's folder is made 0700, so "no access control beyond this
-machine's" overstated it.
+config's `remote`): `mason init` and `mason start` carry on and say it as one line of information (`REMOTE_NOTE`). That
+it is the main database, not a read replica, is information too, said by `mason init` and by `mason start` until a first
+sync is done (`sourceNotes`, `PRIMARY_NOTE`, src/cli/preflight.ts; `Sync.copiedSources`, the ledger as read at open).
+`mason status` warns of neither, and its Database line says which it is, as the page's facts card does from
+`source.standby`, never from a warning's words (#898's `saidAsFact` filter is gone). PUBLIC's default CREATE on schema
+public before Postgres 15 is a line of information in `mason doctor`, never a warning: the role its way out makes would
+hold it too. A password in `mason init`'s URL is a `Tip:`. **Why.** Each made a normal fact read as a risk, or repeated
+it at every run, and people were scared off for no reason. The synced data's folder is made 0700, so "no access control
+beyond this machine's" overstated it.
+
+### The catalog read when asked (2026-11-12, issue 890)
 
 **Decision (the owner).** A run reads the database's catalog again only when something asks — `/api/state` (the
 commands and the page), a table's columns or Sync choice, an add or a remove — never on a timer (`sourceCatalog`,
@@ -2230,20 +2233,6 @@ ends, said as such; the actor runs it again and the next read begins. **Why.** T
 a day whatever each table's sync, so a serverless compute (Neon, Aurora Serverless) never suspended with every table
 `sync: off`. A failed read keeps the last one and is said in the log, and is not tried again within the minute.
 `tests/integration/cli-catalog-read.itest.ts` counts the run's connections over an idle window.
-=======
-### Facts said as facts (2026-11-12, issue 888)
-
-**Decision (the owner).** A database on another machine is no longer a stop that wants `--remote` (gone, with the
-config's `remote`): `mason init` and `mason start` carry on and say it as one line of information (`REMOTE_NOTE`). That
-it is the main database, not a read replica, is information too, said by `mason init` and by `mason start` until a first
-sync is done (`sourceNotes`, `PRIMARY_NOTE`, src/cli/preflight.ts; `Sync.copiedSources`, the ledger as read at open).
-`mason status` warns of neither, and its Database line says which it is, as the page's facts card does from
-`source.standby`, never from a warning's words (#898's `saidAsFact` filter is gone). PUBLIC's default CREATE on schema
-public before Postgres 15 is a line of information in `mason doctor`, never a warning: the role its way out makes would
-hold it too. A password in `mason init`'s URL is a `Tip:`. **Why.** Each made a normal fact read as a risk, or repeated
-it at every run, and people were scared off for no reason. The synced data's folder is made 0700, so "no access control
-beyond this machine's" overstated it.
->>>>>>> fix/888-quiet-warnings
 
 ### A server's web page: `mason ui --ssh` (2026-10-31, issue 107)
 
