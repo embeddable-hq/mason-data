@@ -516,11 +516,15 @@ sends a byte, so a name is always safe in a path). Both requests carry `Authoriz
 
 A deploy needs only the project's `mason/` folder, never `mason init`: it reads nothing of `.mason/` (no key, no
 synced data). In an initialised project (a `.mason/` at or above the folder it runs in) the config's `folder` names the
-files, as for every command. With no `.mason/` at or above, the project is the nearest folder at or above that holds
-`mason/` with a `mason.yml` or a `.yml` or `.yaml` file in `mason/sources/` (a clone, or a folder the files were copied into), and its
-`mason/` is sent: never the folder itself or anything beside `mason/`. A `mason/` that is a link out of its folder is
-refused, as is one that cannot be read; a folder with neither a `.mason/` nor such a `mason/` is refused with code
-`no_project`, the way out `mason init` or the folder that holds `mason/`. `--dry-run` finds the files the same way.
+files, as for every command; a `.mason/` at or above whose config cannot be read or checked (one this user may not
+read) is refused, never passed over. With no `.mason/` at or above, the project is the `mason/` of the current folder
+(or of the folder `mason -C <folder> deploy` names), when it holds a `mason.yml` or a `.yml` or `.yaml` file in
+`mason/sources/` (a clone, or a folder the files were copied into), and only that `mason/` is sent: never the folder
+itself, anything beside `mason/`, or a `mason/` of a folder above or below. A `mason/` that is a link out of its folder
+is refused, as is one that cannot be read; a folder with no `.mason/` at or above and no `mason/` of its own, or one
+whose `mason/` holds no project, is refused with code `no_project`, saying what is missing, the ways out: run it in the
+folder that holds `mason/`, `mason -C <folder> deploy`, or `mason init`. The folder whose files are sent is said: a
+row of the report, the dry run's first line, and `folder` in `--json`. `--dry-run` finds the files the same way.
 
 ### What the CLI checks before it sends anything
 

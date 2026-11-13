@@ -150,9 +150,7 @@ export const DEPLOY: CommandSpec & { needs: "files" } = {
   service, then waits until Mason on the replica runs them, or refuses them. The project is checked here first, as
   mason start checks it, without connecting to any database (the replica's own environment names its URL); a
   project that would be refused is refused here, and nothing is sent. A url: written with its password is refused:
-  write url: \${DATABASE_URL} and set it on the replica. It needs no mason init: with no .mason/ in this folder
-  or above, the project is the nearest folder here or above that holds mason/ (with a mason.yml or a YAML
-  file in sources/), and only its mason/ is sent.
+  write url: \${DATABASE_URL} and set it on the replica.
 
     mason deploy --replica acme/shop
     mason deploy --replica acme/shop --dry-run     what would be sent and what it changes, sending nothing
@@ -171,6 +169,10 @@ export const DEPLOY: CommandSpec & { needs: "files" } = {
   The replica is --replica <org>/<name>, else MASON_REPLICA (each part lower case letters, digits and -). The login
   is MASON_TOKEN, else this machine's (mason login); the service is MASON_CLOUD_URL, else the default. Progress
   goes to stderr; the answer is printed when it ends.
+
+  It needs no mason init: with no .mason/ in this folder or above, the project is this folder's own mason/
+  (with a mason.yml or a YAML file in sources/), or the mason/ of the folder mason -C <folder> deploy names,
+  and never a mason/ elsewhere. Only that mason/ is sent, and its folder is said with what is sent.
 
   While the replica is being created (or the service asks for a wait: too many deploys at once), it waits as the
   service asks and sends the deploy again, within --timeout, saying the replica's state and how long it has waited.
@@ -201,8 +203,9 @@ export const DEPLOY: CommandSpec & { needs: "files" } = {
   or 124.
 
   The --json answer, once it ends: { dryRun, replica (null when none is named on a dry run),
-    service, files: [{ path, size, sha256 }], totalBytes, warnings (the generated tables
-    refused, as mason start says them, each one line), plan (what the deploy changes on the
+    service, folder (the folder whose files are sent), files: [{ path, size, sha256 }],
+    totalBytes, warnings (the generated tables refused, as mason start says them, each one
+    line), plan (what the deploy changes on the
     replica: { tables: { added, removed: [{ table, rows, bytes }], changed: [{ table,
     columns, key, sync: { from, to } | null }] }, generatedTables: { added, removed,
     changed }, roles: { added, removed, changed, default: { from, to } | null }, pin:
@@ -216,7 +219,7 @@ export const DEPLOY: CommandSpec & { needs: "files" } = {
     { code, message, why, fix }), next }
 `,
   options: { replica: { type: "string" }, "dry-run": { type: "boolean", default: false }, yes: { type: "boolean", default: false }, timeout: { type: "string" }, json: { type: "boolean", default: false } },
-  json: ["dryRun", "replica", "service", "files", "totalBytes", "warnings", "plan", "planUnknown", "confirmed", "deploy", "error", "next"],
+  json: ["dryRun", "replica", "service", "folder", "files", "totalBytes", "warnings", "plan", "planUnknown", "confirmed", "deploy", "error", "next"],
 };
 
 /** A file as it is sent: its path (relative to the project folder, `/` between its parts), size in bytes, sha256 of its
@@ -579,7 +582,7 @@ export async function deploy(argv: string[]): Promise<number> {
   const totalBytes = files.reduce((n, x) => n + x.size, 0);
   const listed = files.map(({ path: p, size, sha256 }) => ({ path: p, size, sha256 }));
   // --json carries each warning as one line (a string with no line break); a person reads its lines on stderr
-  const base = { replica: replica === null ? null : replicaText(replica), service: service.base, files: listed, totalBytes,
+  const base = { replica: replica === null ? null : replicaText(replica), service: service.base, folder: `${project.folder}${path.sep}`, files: listed, totalBytes,
     warnings: checked.warnings.map((w) => w.split("\n").map((l) => l.trim()).filter(Boolean).join(" ")) };
   if (!json) for (const w of checked.warnings) say(textEntry("  ! ", w).trimEnd());
 
@@ -604,7 +607,7 @@ export async function deploy(argv: string[]): Promise<number> {
     // the files, then what they change (its heading and rows), then what to run next
     const st = outStyle();
     const report = reportText({
-      headline: `Would send ${files.length} file${files.length === 1 ? "" : "s"}, ${bytes(totalBytes)}, ${replica === null ? `to ${service.base} (no replica named)` : `to ${replicaText(replica)} on ${service.base}`}; nothing was sent`,
+      headline: `Would send ${files.length} file${files.length === 1 ? "" : "s"} of ${project.folder}${path.sep}, ${bytes(totalBytes)}, ${replica === null ? `to ${service.base} (no replica named)` : `to ${replicaText(replica)} on ${service.base}`}; nothing was sent`,
       details: files.map((x): [string, string] => [x.path.padEnd(w), `${bytes(x.size).padStart(sw)}   sha256 ${x.sha256}`]),
     }, st);
     out(withEnd(`${report}\n${strict(planLines(replica === null ? null : replicaText(replica), planned).join("\n"), st)}`, { next }, st));
@@ -745,7 +748,7 @@ export async function deploy(argv: string[]): Promise<number> {
       else if (line !== null && line !== said) say(`  ${line}`);
       if (error !== null) return fail(error, { json: false });
       out(reportText({ headline: `Deployed to ${replicaText(r)}: the replica runs it`,
-        details: [["deploy", id], ["service", service.base], ["files", `${files.length} (${bytes(totalBytes)})`], ["took", `${Math.max(1, Math.round((Date.now() - started) / 1000))} s`]],
+        details: [["deploy", id], ["service", service.base], ["folder", `${project.folder}${path.sep}`], ["files", `${files.length} (${bytes(totalBytes)})`], ["took", `${Math.max(1, Math.round((Date.now() - started) / 1000))} s`]],
         next: NEXT_AGAIN(r) }, outStyle()));
       return 0;
     };

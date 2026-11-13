@@ -160,7 +160,7 @@ export interface CommandSpec {
    *  (`reach`) reads it, and tests/cli-state-matrix.test.ts holds it to the code it answers in each state below it.
    *  "files": the project's files alone (its `mason/`), found with or without `.mason/` (src/cli/project.ts
    *  `theProjectFolder`: mason deploy's, which reads nothing of `.mason/`); a project meets it, and so does a folder
-   *  holding `mason/` with no `.mason/` at or above it */
+   *  whose own `mason/` holds a project, with no `.mason/` at or above it */
   needs?: "files" | "project" | "run";
   /** "protocol": its stdout is a protocol's (`mason mcp`'s MCP frames), so it takes no --json and every failure — a
    *  wrong line, a refusal, a crash — is said on stderr, `--json` on the line or not: one JSON object on stdout would

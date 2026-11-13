@@ -15,7 +15,7 @@
  * they handle — mason status and mason stop where Mason is not running (exit 0: that is their answer), mason logs,
  * mason start and mason doctor — and keep the state's code where they fail. One command needs less than a project:
  * mason deploy needs the project's files alone (`needs: "files"`, src/cli/project.ts `theProjectFolder`), which a
- * project meets, and, with no .mason/ at or above, so does a folder holding mason/; it asks no gate here, and answers
+ * project meets, and, with no .mason/ at or above, so does a folder whose own mason/ holds a project; it asks no gate here, and answers
  * no_project and bad_config with their codes. tests/cli-state-matrix.test.ts (the states
  * without a run) and a run against a real Postgres (the states with one; no integration test yet) run every command in every state,
  * and hold each to the code of the state it met.

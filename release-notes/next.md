@@ -17,9 +17,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 ## What changes
 
 - **`mason deploy` runs in any folder that holds a project's `mason/`, with no `mason init`.** With no `.mason/` in
-  the folder or above it, the nearest folder that holds `mason/` (a `mason.yml`, or a YAML file in `mason/sources/`)
-  is the project, and only its `mason/` is sent; `--dry-run` finds it the same way. A clone in CI, or a folder the
-  files were copied into, deploys as it is. An initialised project deploys as before.
+  the folder or above it, the current folder's `mason/` (a `mason.yml`, or a YAML file in `mason/sources/`) is the
+  project, or the one of the folder `mason -C <folder> deploy` names; never a `mason/` elsewhere. Only that `mason/` is
+  sent, and the folder is said with what is sent (`folder` in `--json`); `--dry-run` finds it the same way. A clone in
+  CI, or a folder the files were copied into, deploys as it is. An initialised project deploys as before.
 
 - **On the web page's Tables, an added table says which columns it syncs, and you can change them there.** Its note
   says "All columns", "5 of 12 columns" or "All but 1 column". Click it to tick the columns to sync, as

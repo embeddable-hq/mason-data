@@ -269,38 +269,40 @@ export function theProject(cwd: string): { project: Project } | Problem {
     next: [["mason init", "make this folder a project (MASON_DATABASE_URL or DATABASE_URL from .env, or its URL on stdin: mason init -)"]] };
 }
 
-/** The folder `mason init` writes a project's files in (its `--folder` default): the one a deploy takes where no
- *  `.mason/` is found (`theProjectFolder`). */
+/** The folder `mason init` writes a project's files in (its `--folder` default): the one a deploy takes, in the folder
+ *  it runs in, where no `.mason/` is found (`theProjectFolder`). */
 export const PROJECT_FOLDER = "mason";
 
 /**
  * WHERE A PROJECT'S FILES ARE, for a command that reads them alone (mason deploy: `needs: "files"`): the folder they
  * are in and the root it is in. `config` is the `.mason/config.json` that named the folder, with its "folder" as written;
- * null when no `.mason/` was found and the root's own `mason/` was taken.
+ * null when no `.mason/` was found and the current folder's own `mason/` was taken.
  */
 export interface ProjectFolder { root: string; folder: string; config: { file: string; folder: string } | null }
 
-/** Whether `folder` holds a project's files: a `mason.yml`, or a `sources/` with a .yml or .yaml file in it; `why`
- *  when that cannot be told (a folder this user may not read): never taken for a no, which would look further up. */
-function holdsProjectFiles(folder: string): boolean | { why: string } {
+/** What `folder` is: absent, not a folder, a folder holding a project's files (a `mason.yml`, or a `sources/` with a
+ *  .yml or .yaml file in it), or one that lacks them; `why` when that cannot be told (a folder this user may not read),
+ *  never taken for any of the others. */
+function projectFilesIn(folder: string): "absent" | "file" | "holds" | "lacks" | { why: string } {
   const absent = (e: unknown): boolean => ["ENOENT", "ENOTDIR"].includes((e as NodeJS.ErrnoException).code ?? "");
-  try { if (!fs.statSync(folder).isDirectory()) return false; }
-  catch (e) { if (absent(e)) return false; return { why: unresolvedWhy(e) }; }
-  try { if (fs.statSync(path.join(folder, PROJECT_FILE)).isFile()) return true; }
+  try { if (!fs.statSync(folder).isDirectory()) return "file"; }
+  catch (e) { if (absent(e)) return "absent"; return { why: unresolvedWhy(e) }; }
+  try { if (fs.statSync(path.join(folder, PROJECT_FILE)).isFile()) return "holds"; }
   catch (e) { if (!absent(e)) return { why: unresolvedWhy(e) }; }
   let names: string[];
   try { names = fs.readdirSync(path.join(folder, SOURCES_DIR)); }
-  catch (e) { if (absent(e)) return false; return { why: unresolvedWhy(e) }; }
-  return names.some((n) => !n.startsWith(".") && /\.ya?ml$/.test(n));
+  catch (e) { if (absent(e)) return "lacks"; return { why: unresolvedWhy(e) }; }
+  return names.some((n) => !n.startsWith(".") && /\.ya?ml$/.test(n)) ? "holds" : "lacks";
 }
 
 /**
  * THE PROJECT'S FILES A COMMAND THAT NEEDS NOTHING ELSE MEANS (mason deploy, which reads nothing of `.mason/`): the
  * nearest project's (`theProject`), whose config names its folder, as every command finds it; a project whose config
- * cannot be read is refused as every command refuses it. Only where no `.mason/` is at or above `cwd`: the nearest
- * folder at or above it that holds `mason/` with a `mason.yml` or a `sources/` file (a project fetched, or cloned,
- * that was never `mason init`ed), its `mason/` the files. Never the folder itself, nor anything beside `mason/`: the
- * caller still holds the folder to being strictly inside its root (src/cli/deploy.ts `ownFolderRefusal`).
+ * cannot be read is refused as every command refuses it, and so is a `.mason/` at or above whose config cannot be
+ * checked. Only where no `.mason/` is at or above `cwd`: the `mason/` of `cwd` itself (the folder it runs in, or the
+ * one `mason -C` names), when it holds a `mason.yml` or a `sources/` file — never a `mason/` of a folder above or
+ * below, which may be anyone's. Never `cwd` itself, nor anything beside `mason/`: the caller still holds the folder to
+ * being strictly inside its root (src/cli/deploy.ts `ownFolderRefusal`).
  */
 export function theProjectFolder(cwd: string): { project: ProjectFolder } | Problem {
   const t = theProject(cwd);
@@ -311,7 +313,7 @@ export function theProjectFolder(cwd: string): { project: ProjectFolder } | Prob
   if (t.code !== "no_project") return t;
   // "no .mason/" must be a no: `theProject` reads a config it cannot check (a .mason/ this user may not read, a link
   // loop) as none, and a project there would name its own folder. So at every level a config that is neither there nor
-  // absent refuses, before any mason/ is looked for (fail closed: never another folder's files in its place)
+  // absent refuses, before any mason/ is looked at (fail closed: never another folder's files in its place)
   for (let d = path.resolve(cwd); ; d = path.dirname(d)) {
     const config = path.join(d, STATE_DIR, CONFIG);
     let why: string | null = null;
@@ -323,21 +325,21 @@ export function theProjectFolder(cwd: string): { project: ProjectFolder } | Prob
     }
     if (path.dirname(d) === d) break;
   }
-  for (let d = path.resolve(cwd); ; d = path.dirname(d)) {
-    const folder = path.join(d, PROJECT_FOLDER);
-    const holds = holdsProjectFiles(folder);
-    if (holds === true) return { project: { root: d, folder, config: null } };
-    // a folder that cannot be read is no "no": the files may be there, so the search stops, refusing (fail closed)
-    if (holds !== false) {
-      return { problem: `${folder} cannot be read, so whether it holds this project's files cannot be told`, code: "refused", why: holds.why,
-        fix: `make ${folder} readable by this user, or run mason deploy in the folder that holds the project's ${PROJECT_FOLDER}/` };
-    }
-    if (path.dirname(d) === d) break;
+  const root = path.resolve(cwd), folder = path.join(root, PROJECT_FOLDER);
+  const ways = `run mason deploy in the folder that holds the project's ${PROJECT_FOLDER}/, or name that folder: mason -C <folder> deploy; or make this folder a project: mason init`;
+  const why = `with no .mason/ here or above, a deploy sends the ${PROJECT_FOLDER}/ of the folder it runs in (its ${PROJECT_FILE}, ${SOURCES_DIR}/, roles.yml and generated tables), and no other`;
+  const init: Problem["next"] = [["mason init", "make this folder a project (MASON_DATABASE_URL or DATABASE_URL from .env, or its URL on stdin: mason init -)"]];
+  const found = projectFilesIn(folder);
+  if (found === "holds") return { project: { root, folder, config: null } };
+  // a folder that cannot be read is no "no": the files may be there (fail closed)
+  if (typeof found === "object") {
+    return { problem: `${folder} cannot be read, so whether it holds this project's files cannot be told`, code: "refused", why: found.why,
+      fix: `make ${folder} readable by this user, or ${ways}` };
   }
-  return { problem: `no Mason project here or above: no .mason/, and no ${PROJECT_FOLDER}/ folder holding a ${PROJECT_FILE} or a YAML file in ${SOURCES_DIR}/`, code: "no_project",
-    why: `a deploy sends the project's ${PROJECT_FOLDER}/ folder (its ${PROJECT_FILE}, ${SOURCES_DIR}/, roles.yml and generated tables), found in this folder or one above it`,
-    fix: `cd into the folder that holds the project's ${PROJECT_FOLDER}/ (or a folder under it), or make this folder a project: mason init`,
-    next: [["mason init", "make this folder a project (MASON_DATABASE_URL or DATABASE_URL from .env, or its URL on stdin: mason init -)"]] };
+  if (found === "absent") return { problem: `no Mason project in ${root}: no .mason/ here or above, and no ${PROJECT_FOLDER}/ here`, code: "no_project", why, fix: ways, next: init };
+  if (found === "file") return { problem: `${folder} is a file, not the project's ${PROJECT_FOLDER}/ folder`, code: "no_project", why, fix: ways, next: init };
+  return { problem: `${folder}/ holds no project: no ${PROJECT_FILE} and no YAML file in ${PROJECT_FOLDER}/${SOURCES_DIR}/`, code: "no_project", why,
+    fix: `write the project's files in it (mason init writes ${PROJECT_FOLDER}/${SOURCES_DIR}/<name>.yml and ${PROJECT_FILE}), or ${ways}`, next: init };
 }
 
 /** Whether `root`'s .gitignore already ignores `.mason/`. */
