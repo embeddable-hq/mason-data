@@ -236,7 +236,7 @@ paths:
 ## What review probes
 
 Run each probe that applies: the implementer before each push, and the fresh reviewer at each review (CLAUDE.md
-"How work is done here", steps 3 and 4). A new probe is proposed to the owner; each bullet names the PR or issue it was met in.
+"How work is done here"). A new probe is proposed to the owner; each bullet names the PR or issue it was met in.
 
 - A store written by the previous release (a `copy_state` row without the new field, a `point` copied as a STRUCT, an
   enum column): synced again exactly where the layout differs, and quiet on the second start (PR 153).

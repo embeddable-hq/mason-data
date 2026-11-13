@@ -700,6 +700,22 @@ review", and `git show 9e20f15:.claude/workflows/pr-loop-slim.js`.
 a test seen failing without its fix; the coordinator alone merging, pinned to the head read; and acting only on words
 from the repository's people, since anyone can open an issue here.
 
+### How CLAUDE.md is laid out (2026-11-13, issue 891)
+
+**Decision.** CLAUDE.md leads every rule with the rule, in one short sentence. Rules are grouped by when a session needs
+them: the words a user reads, security, the source database, how work is done, local gates, commands, conventions for
+code, and gotchas. Each role's mechanics are in its own skill (`.claude/skills/coordinate/`, `implement/`, `review/`),
+which only that role loads. CLAUDE.md keeps a short summary of each role and every hard limit: what blocks a merge, who
+merges, and what never happens. The story behind a rule moves here.
+
+**Why.** On 2026-11-12 CLAUDE.md was 400 lines and about 5,300 words, and sessions missed rules in it. A session wrote
+"Mason copies the tables" in an issue, though the file said "never copy". The causes:
+- Rules were buried mid-sentence. "Sync, never copy" was a clause inside a bullet that defined six other terms.
+- One topic was spread across sections. The rules for the words a user reads were in four places.
+- Rules carried their reasons and history inline, in parentheses, issue numbers and dates.
+- Every session read every role's mechanics: the coordinator's process, the implementer's gates and the reviewer's
+  checks.
+
 ### Issue labels and a bug's Severity (Tom, 2026-11-01)
 
 **Decision.** Every open issue carries the label `bug` or `enhancement`. Every bug is on the Mason work board with its
@@ -2382,6 +2398,11 @@ throwaway postgres:18 with a synthetic 5,000-row table synced by the stream, fou
 no `Check failed` in either log. `Check failed: end > addr`, seen once on Node 24 on an arm64 Mac at load ~114, was not
 met again and is not explained: it is not claimed to be this bug, nor fixed.
 
+**Match CI's tools before testing (2026-11-07).** A local run on another Node is a guess at CI. On Node 22,
+`tests/cli-ui-ssh.test.ts` cancels most of its tests, so PRs 725 and 728 could only be read there. So a session first
+installs what CI runs and the machine lacks (Node 26 from nodejs.org, its `SHASUMS256.txt` checked, first on `PATH`;
+`psql`; a Postgres for the integration tests).
+
 ### The turn (2026-10-31, issue 127)
 
 **Measured** on a synthetic 17 M-row table, 10 cores: while `to_char` ran, a probe on the executor's thread saw 999 function
@@ -2522,7 +2543,7 @@ notification; one test had deadlocked, so the job never exited and nothing came.
 shown as completed. Across that day's agents, about 31 of 115 agent-hours were idle until a notification or message
 arrived and about 11 went on sleep loops, against about 4 running the oracle.
 
-**The bound on a test (2026-11-02).** Measured on Node 26.13.0 over a test that never settles and holds an interval:
+**The bound on a test (2026-11-02, issue 139).** Measured on Node 26.13.0 over a test that never settles and holds an interval:
 `--test-timeout` alone names it (`test timed out after 2000ms`) but its file's process never exits, so the run does
 not end (alarm-killed at 20 s; on Node 24 still alive at 73 s); with `--test-force-exit` beside it the run exits 1 in
 about 3 s, the test listed under `✖ failing tests:`. The 2h07 hang above held a handle (0.43 s of CPU, never exiting,
@@ -2534,6 +2555,11 @@ main's five latest green runs the slowest test took 150.0 s (the state matrix), 
 varied 1.9x between runs (58.8 to 111.5 s), so the default is twice the slowest, 300 s (`TEST_TIMEOUT_MS`,
 `scripts/gate.ts`), and CI's unit shards carry it. The trade: `--test-force-exit` turns a handle leaked after a file's
 last test from a hang into a pass, and that hang never named anything (only CI's 30-minute job timeout ended it).
+
+**A gate an agent waits on (issue 504).** Two implementers ended their turn on a gate they had started in the
+background, and nothing woke them: an agent run by the Agent tool, or resumed by SendMessage, is not woken by its own
+background job once its turn has ended. So an agent that must wait on a heavy gate runs it through `scripts/done-file.ts`
+and waits with bounded `scripts/wait-file.ts` calls in the same turn.
 
 **A turn ended with nothing to wake it (2026-11-01).** Two issue leads, each running one Opus agent at a time, were
 read from their transcripts over seven hours: an agent worked 34% and 21% of the wall clock. Of the rest, about 3.5 h
