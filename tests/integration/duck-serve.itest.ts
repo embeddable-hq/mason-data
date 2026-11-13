@@ -112,9 +112,9 @@ test("mason serve: healthy once it answers, a table added beside it copied, stop
     assert.deepEqual([scrape.status, scrape.headers.get("content-type")], [200, "text/plain; version=0.0.4; charset=utf-8"]);
     const metrics = await scrape.text();
     assert.match(metrics, /^mason_ready 1$/m);
-    assert.match(metrics, /^mason_tables\{phase="copied"\} 1$/m);
-    assert.match(metrics, /^mason_copy_rows 500$/m);
-    assert.match(metrics, /^mason_copy_bytes \d+$/m);
+    assert.match(metrics, /^mason_tables\{phase="synced"\} 1$/m);
+    assert.match(metrics, /^mason_synced_rows 500$/m);
+    assert.match(metrics, /^mason_synced_bytes \d+$/m);
     assert.match(metrics, /^mason_disk_free_bytes \d+$/m);
     assert.ok(Number(/^mason_statements_total\{outcome="completed"\} (\d+)$/m.exec(metrics)?.[1]) >= 1, `the count(*) is counted:\n${metrics}`);
     assert.doesNotMatch(metrics, /^mason_stream_lag/m, "polled: no stream, so no lag (absent, never 0)");

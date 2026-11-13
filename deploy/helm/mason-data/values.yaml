@@ -27,7 +27,7 @@ storage:                    # DECIDED ONCE, at install: a StatefulSet's volumeCl
 
 memory:
   limit: 8Gi                # the container's memory limit
-  copy: 4GB                 # MASON_DUCKDB_MEMORY: what the engine may use, half the limit; the rest is the page cache
+  engine: 4GB               # MASON_DUCKDB_MEMORY: what the engine may use, half the limit; the rest is the page cache
 cpu: "2"                    # the CPU request (no limit: one statement may use every core)
 
 pgService:                  # the Postgres API, 5433, for tools outside the cluster
