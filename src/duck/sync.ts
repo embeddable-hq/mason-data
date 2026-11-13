@@ -1017,7 +1017,13 @@ export class Sync {
   private readonly copiedColumns = new Map<string, SourceColumnInfo[]>();
   /** the pass a failed rebuild's back-off waits for (`wakeAt`): replication mode runs a pass only when kicked */
   private wake: { timer: NodeJS.Timeout; at: number } | null = null;
+  /** THE NEXT PASS's timer, and nothing else: a kick clears it. Each other schedule has a field of its own (`wake`,
+   *  `streamTimer`, `compactTimer`), so a kick, or a pass timed again, never discards one (issue 908: the stream's restart
+   *  lived here, a kick inside its wait cleared it, and the stream stayed stopped for the rest of the run) */
   private timer: NodeJS.Timeout | null = null;
+  /** the stream's restart after a failure (`startStream`): a pass at `streamAt`, which starts it. Never cleared by a kick:
+   *  a pass kicked sooner is too soon to start the stream, and this one is still to come */
+  private streamTimer: NodeJS.Timeout | null = null;
   /** when each timer of the passes fires (`rearm` never moves the next pass later); a timer not here is replaced */
   private readonly timerAts = new WeakMap<NodeJS.Timeout, number>();
   private running: Promise<void> | null = null;
@@ -1067,7 +1073,7 @@ export class Sync {
   /** each copied table's column types as DuckDB holds them (DESCRIBE), read once per copy */
   private readonly duckTypes = new Map<string, Map<string, string>>();
   /** the stream's failures in a row: each restart waits twice the one before (`streamRetryDelayMs`), until `streamAt`
-   *  (a pass kicked sooner leaves it stopped) */
+   *  (a pass kicked sooner leaves it stopped, and the pass `streamTimer` kicks then starts it) */
   private streamFailures = 0;
   private streamAt = 0;
   /** when each copy was last brought current, and how (`Synced`): seeded at `open` from the ledger, moved by every
@@ -2010,7 +2016,19 @@ export class Sync {
       // or catch-up nothing has queued (a copy that failed waits its turn, `copyRetryDelayMs`)
       const d = this.nextPassDelay();
       if (d !== null) { this.timer = setTimeout(() => this.kick(), d); this.timerAts.set(this.timer, Date.now() + d); }
+      this.wakeForBackOffs();
     });
+  }
+
+  /**
+   * THE PASS FOR THE NEXT BACK-OFF STILL TO END, timed again after every pass: `wake` holds ONE time, the earliest asked
+   * for, so a later table's back-off asked meanwhile was dropped (`wakeAt`) — and once the earlier one's pass had run, in
+   * replication mode nothing ran a pass for the later table (issue 908's class: two schedules in one field, one lost).
+   */
+  private wakeForBackOffs(): void {
+    const now = Date.now();
+    const ats = [...this.tables.keys()].map((s) => this.retries.get(s)?.at ?? 0).filter((at) => at > now);
+    if (ats.length) this.wakeAt(Math.min(...ats));
   }
 
   /** an added table needs a copy or a catch-up that is neither queued nor running: a later pass must queue it */
@@ -2161,6 +2179,7 @@ export class Sync {
   async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer !== null) clearTimeout(this.timer);
+    if (this.streamTimer !== null) { clearTimeout(this.streamTimer); this.streamTimer = null; }
     if (this.wake !== null) { clearTimeout(this.wake.timer); this.wake = null; }
     if (this.reportTimer !== null) { clearInterval(this.reportTimer); this.reportTimer = null; }
     if (this.compactTimer !== null) { clearTimeout(this.compactTimer); this.compactTimer = null; }
@@ -2515,6 +2534,7 @@ export class Sync {
     });
     this.stream = s;
     this.streamFailure = null;
+    if (this.streamTimer !== null) { clearTimeout(this.streamTimer); this.streamTimer = null; }
     this.lineAt = Date.now();
     // the stream's periodic line: at most every streamReportMs, and only when it applied something (`reportStream`)
     if (this.reportTimer === null) { this.reportTimer = setInterval(() => this.reportStream(), this.streamReportMs); this.reportTimer.unref(); }
@@ -2552,8 +2572,11 @@ export class Sync {
       this.wholeFailure.stream = m;
       // on the tables the stream kept current when it failed (one being caught up says its own)
       await this.onWriter(async () => { for (const source of this.streamed.keys()) if (!this.held.has(source)) await this.record({ ...this.states.get(source)!, error: m }); });
-      this.timer = setTimeout(() => this.kick(), wait);
-      this.timerAts.set(this.timer, Date.now() + wait);
+      // a timer of its own, never the pass's (issue 908): a kick meanwhile runs a pass too soon to start the stream
+      // and clears the pass's timer, and this pass is the one that starts it
+      if (this.stopped) return;
+      if (this.streamTimer !== null) clearTimeout(this.streamTimer);
+      this.streamTimer = setTimeout(() => { this.streamTimer = null; this.kick(); }, wait);
     });
   }
 
