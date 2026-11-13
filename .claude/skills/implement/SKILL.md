@@ -53,9 +53,10 @@ package and the image, runs the oracle in three legs, and runs `tests/integratio
 every PR and on main. Locally:
 
 - **While working, run the tests nearest the change**, with both flags before the files (CLAUDE.md "Local gates").
-- **Run one full `npm run check` before the PR's first push.** It queues for a slot, so start it in the background
-  through `scripts/done-file.ts`, and wait with bounded `node scripts/wait-file.ts <file> <seconds>` calls. Your own
-  background job does not wake you once your turn has ended.
+- **Run one full `npm run check` before the PR's first push.** It queues for a slot, so start it in the background.
+  If you must wait on it before your turn ends, run it through `scripts/done-file.ts`, and wait with bounded
+  `node scripts/wait-file.ts <file> <seconds>` calls. Your own background job does not wake you once your turn has
+  ended.
 - **A fix round runs `npm run typecheck` and the change's test files.** CI carries the rest.
 - **Before each push, run the `## What review probes`** of every rules file your paths fall under (`.claude/rules/`).
 - **No session runs the full oracle locally.** When what Mason answers moved, the allowlist (`src/duck/verified.ts`) and

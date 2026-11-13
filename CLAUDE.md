@@ -25,8 +25,8 @@ and text. What Mason cannot answer exactly as Postgres would, it refuses by name
 
 - `src/` is the product: `cli/` (the `mason` command), `duck/` (the engine), `api/postgres/` (the listener), `cdc/`
   (reading a Postgres), `lib/` and `web/` (the web page). `scripts/` may import `src/`, never the reverse.
-- **A project is a folder.** `mason/sources/<name>.yml` (committed) names one source and its tables. Its URL stays in
-  `.env`, and the file names the variable. `.mason/` is the machine's, gitignored.
+- **A project is a folder.** `mason/sources/<name>.yml` (committed) names the source and its tables. A project has one
+  source. Its URL stays in `.env`, and the file names the variable. `.mason/` is the machine's, gitignored.
 - A test makes a project of its own in a temp folder. An integration test makes a database of its own on
   `IT_POSTGRES_URL`, and drops it.
 
@@ -138,6 +138,9 @@ got right; a red CI. Everything else is a note in the review, never a fix round 
 - The coordinator writes no change itself, however small: not a wording, a conflict, a stale test or a workflow. An
   implementer does (`scripts/hooks/coordinator-writes.ts`).
 
+**The board's cards move by themselves** (`.github/workflows/board.yml`, from each PR's `Closes #<issue>`). A session
+does not move one by hand.
+
 **Process changes are the owner's.** Add no rule, hook, gate, script or doc to the process. Propose it to the owner in
 a sentence, with what it would have caught.
 
@@ -199,7 +202,7 @@ node cli/extensions.ts                # its platform packages (the copy's extens
 docker build -f docker/mason-data.Dockerfile -t mason-data:dev .   # the image; deploy/mason-data/compose.yml runs it
 scripts/fails-without.ts <commit> <test-file>   # a test must fail with src/ as it was at <commit>
 scripts/gate-slot.ts <command>        # runs a command in one of the machine's slots
-scripts/board.ts status <n> "<status>"   # moves a card by hand (gh's project scope)
+scripts/board.ts status <n> "<status>"   # moves a card by hand (gh's project scope); .github/workflows/board.yml moves them on every issue and PR
 ```
 
 ## Conventions for code and tests

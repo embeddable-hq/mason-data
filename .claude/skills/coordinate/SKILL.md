@@ -32,10 +32,11 @@ rest). CLAUDE.md "How work is done here" is the rule, with what blocks and who m
    It reports the PR number and its head commit.
 3. **Start a fresh reviewer** (Agent, `model: "opus"`, `effort: "medium"`, or `"high"` when the diff touches
    `src/duck/`, `src/api/`, `src/cdc/`, or what decides who reaches the run or its data: `src/cli/security.ts`,
-   `src/cli/run-server.ts`, `src/cli/ui-*.ts`, `src/duck/users.ts`): there a wrong answer is Mason's worst failure, or
-   the diff decides who reaches the run or its data. Give it the PR number, the issue and
+   `src/cli/run-server.ts`, `src/cli/ui-*.ts`, `src/duck/users.ts`). In those folders a wrong answer is Mason's worst
+   failure, and those files decide who reaches the run or its data. Give it the PR number, the issue and
    `.claude/skills/review/SKILL.md` to follow (it holds the blocking list), never the implementer's report. It runs
-   what changed, at the head and at main, and reports each blocking finding as the input, what was expected and what
+   what changed, at the head and at main (for an engine or listener diff, the touched query shapes and their variants
+   through `scripts/duck-repro.ts`), and reports each blocking finding as the input, what was expected and what
    happened, plus a short list of notes.
 4. **A blocking finding goes back** to the same implementer by SendMessage, as the failure, not the fix, and you
    convert the PR to draft (`gh pr ready <n> --undo`; from a cloud session, which reaches no GraphQL,
