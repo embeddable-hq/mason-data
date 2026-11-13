@@ -48,6 +48,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   now a quiet line, "Your database is on another machine. Mason will sync the tables you choose to this machine.", not a
   warning, and a primary is no longer a warning on the page. How text sorts shows only when it differs from your
   database, as one line.
+- **A synced table with no size says why, instead of "—".** On the web page's Tables, a table whose rows are not in
+  the main file yet shows `< 3 MiB` (all its rows are in the write-ahead log, so it takes less than the log's size); one
+  not measured since it was synced, since data was written to disk, or since Mason started shows `Measuring…`; and one
+  whose first sync is not done shows nothing. Each says why on hover. `mason usage`
+  lists those tables the same way under the sizes, and `--json` adds `sizedAt`, `walBytes` and `unsized`.
 
 ## What was wrong and is now right
 

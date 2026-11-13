@@ -500,12 +500,12 @@ div.added .tip, .done .note, .done .tip { color: var(--muted); margin: 2px 0 6px
    over its bar, a line kept when it has none) and its note under it, across every column, written for every row (empty
    when it says nothing). A question, a form and an answer are popovers beside the row's actions (`.pop`), never a row.
    The row's actions never wrap and never leave the card: they stay pinned at its right where the table scrolls. */
-table.catalog { table-layout: fixed; width: 100%; min-width: 856px; }
+table.catalog { table-layout: fixed; width: 100%; min-width: 872px; }
 table.catalog th.state { width: 146px; }
 table.catalog th.rows { width: 116px; }
 table.catalog th.key { width: 104px; }
 table.catalog th.last { width: 104px; }
-table.catalog th.size { width: 100px; }
+table.catalog th.size { width: 116px; }   /* "Measuring…" whole (issue 883), as wide as Rows */
 /* the actions' column holds an added table's three — View events, Sync now (in the room of Syncing…) and Remove — whole
    at the widest padding (12 px a side, above 1100 px): 250 px of buttons and gaps, and room to spare. The cells below
    cut what overflows with "…", so a column narrower than its buttons hides the last one (issue 881):
