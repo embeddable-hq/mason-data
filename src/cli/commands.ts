@@ -264,7 +264,8 @@ export function barTone(t: TableState): BarTone {
   if (t.error) return "red";
   if (!t.copy || t.copy.phase === "copying" || t.sync?.state === "catching-up") return "cyan";
   const k = t.kept;
-  return (k?.by === "poll" && k.pending !== undefined) || (k?.by === "replication" && (k.state !== "streamed" || k.notRunning !== null)) || t.sync?.state === "behind"
+  // being compacted (issue 904) is served and kept current within its promise, said on its line; past it, behind
+  return (k?.by === "poll" && k.pending !== undefined) || (k?.by === "replication" && ((k.state !== "streamed" && k.state !== "compacting") || k.notRunning !== null)) || t.sync?.state === "behind"
     ? "yellow" : "green";
 }
 
@@ -347,6 +348,8 @@ export function keptAge(t: Pick<TableState, "table" | "kept" | "sync">, now: num
     return `${CATCHING_UP} (${at === null ? "never synced" : `last synced ${agoText(at, now)}`})`;
   }
   if (k?.by === "replication") {
+    // being compacted: served as of the moment its changes began to be kept aside, and said so (issue 904)
+    if (k.state === "compacting") return `replicated, ${k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)}`} — ${k.why ?? "it is being compacted"}`;
     if (k.state !== "streamed") return `NOT kept current (${k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)}`}): ${k.why ?? "it is not streamed yet"}`;
     const at = `replicated, at ${k.position}, ${k.syncedAt === null ? "not synced yet" : agoText(k.syncedAt, now)}`;
     // behind: `keptWords` says it, with the stream not running as its why
@@ -421,6 +424,7 @@ export function streamLines(st: StreamStatus, now = Date.now()): string[] {
         ? `getting the changes made ${c.from ? `since ${c.from.slice(0, 16).replace("T", " ")} UTC` : t.why?.replace(/^caught up by one poll /, "") ?? ""}: ` +
           `${c.phase === "queued" ? (c.retryAt ? `its last catch-up failed, tried again after ${c.retryAt.slice(11, 16)} UTC (mason logs says why)` : "waiting its turn") : c.phase === "polling" ? "reading the changes" : "applying the changes"}` +
           `${c.startedAt ? `, for ${spanText(since(c.startedAt))}` : ""} · the stream holds ${n(c.held)} change${c.held === 1 ? "" : "s"} of it meanwhile${total(t) ? counts : ""}`
+      : t.state === "compacting" ? `being compacted: ${n(t.compacting?.held ?? 0)} change${t.compacting?.held === 1 ? "" : "s"} kept aside, applied when it ends${counts}`
       : t.state === "left-out" ? `left out: ${t.why ?? ""}`
       : `not streamed yet: ${t.why ?? ""}${total(t) ? counts : ""}`]);
   }
@@ -537,7 +541,7 @@ const STATUS_USAGE = `usage: mason status [--json]
     now), pending (only when it applies: why it is not kept current now, its phase included: it waits for
     its first sync, it is being read whole, its first sync failed, it is read again whole, caught up first) }
     or { by: recopy, copiedAt, syncedAt, pending (only when it applies, as the poll's) }
-    or { by: replication, slot, state (streamed, catching-up, waiting, left-out), why, position, lastCommit,
+    or { by: replication, slot, state (streamed, catching-up, compacting, waiting, left-out), why, position, lastCommit,
     notRunning (why the stream is not running, null when it is) }; each with promisedSeconds (the age of
     its synced data past which it is behind: poll, its interval plus the larger of 60 s and twice its last poll;
     replication, 120 s; off, null) and lateWhy (what would make it late now: the pass's or its own poll's
@@ -548,8 +552,8 @@ const STATUS_USAGE = `usage: mason status [--json]
     database), walStatus (reserved, extended, unreserved, lost), safeWalSizeBytes (the WAL left before Postgres
     invalidates it; null: max_slot_wal_keep_size unset, nothing caps it), at } or { error }, publication, running, failure, position,
     applied, database: { lsn, at } or { error }, lag: { bytes, seconds }, lastBatch: { appliedAt, committedAt },
-    tables: [{ table, state (streamed, catching-up, waiting, left-out), why, catchUp: { phase (queued, polling,
-    applying), from, startedAt, held, retryAt }, applied: { inserts, updates, deletes, truncates } }] }.
+    tables: [{ table, state (streamed, catching-up, compacting, waiting, left-out), why, catchUp: { phase (queued, polling,
+    applying), from, startedAt, held, retryAt }, compacting: { held (the changes kept aside until it ends) }, applied: { inserts, updates, deletes, truncates } }] }.
     jsonPaths: [{ table, column, steps, either, canonical, asText (false: a path's -> and ->> share it), name,
     state (waiting, backfilling, ready, dropped), rowsTotal, rowsDone, marked, statements, slowestMs, totalMs,
     fill: { rows, bytesPerRow, seconds, basis (measured: from the last fill of its column; disk or text: modelled from

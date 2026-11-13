@@ -71,3 +71,31 @@ test("the promise's floor, a restart with nothing measured, off, recopy and a st
   assert.match(polled({ passFailed: true }).lateWhy!, /^the sync's last pass failed/);
   assert.equal(polled({}).lateWhy, "its next poll is due 12:05 UTC");
 });
+
+// ISSUE 908's CLASS, TWO SCHEDULES IN ONE FIELD: `wake` holds one time, the earliest back-off asked for, so a later
+// table's back-off asked meanwhile was dropped; once the earlier one's pass had run, a replication project (no table
+// polled, so no pass timed) never ran one for the later table, and it stayed neither copied nor streamed. Every back-off
+// still to end gets its pass. The passes are counted, not run: the schedule is what is held here
+test("two tables backing off, the later one's end asked second: each gets its pass, the later one's too", async () => {
+  const Sync = (syncModule as unknown as { Sync: new (...a: unknown[]) => Record<string, unknown> }).Sync;
+  const sync = new Sync({ writer: {} }, { host: "localhost" }, "x", () => undefined, 5_000, "replication", { slot: "s", publication: "p", owned: true });
+  const passes: number[] = [];
+  sync.pass = async () => { passes.push(Date.now()); };
+  // a replication project with nothing polled: no pass is timed after one ends (`nextPassDelay`)
+  sync.nextPassDelay = () => null;
+  const start = Date.now(), first = start + 100, second = start + 300;
+  sync.tables = new Map([["public.a", { source: "public.a" }], ["public.b", { source: "public.b" }]]);
+  const retries = sync.retries as Map<string, { failures: number; at: number }>;
+  retries.set("public.a", { failures: 1, at: first });
+  retries.set("public.b", { failures: 1, at: second });
+  try {
+    // as two rebuilds failing would ask (`backOff`): the earlier end, then the later
+    (sync.wakeAt as (at: number) => void)(first);
+    (sync.wakeAt as (at: number) => void)(second);
+    for (const end = Date.now() + 3_000; passes.length < 2 && Date.now() < end;) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(passes.length, 2, `a pass when each back-off ends (passes at ${passes.map((p) => p - start).join(", ")} ms)`);
+    assert.ok(passes[1]! >= second, `the second pass is at or after the later back-off's end (${passes[1]! - start} ms)`);
+  } finally {
+    await (sync.stop as () => Promise<void>).call(sync);
+  }
+});

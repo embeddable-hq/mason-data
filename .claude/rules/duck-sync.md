@@ -56,7 +56,11 @@ paths:
 - **A table is never left neither streamed nor copied**: after every rebuild, a table that still needs a copy or a
   catch-up gets a pass at once (`followUp`; a change of its columns during its copy re-copies it at once), or when its back-off
   ends (`wakeAt`) — replication mode runs a pass only when kicked, and on the test server a failed catch-up left that table dead
-  for good. A failed catch-up backs off as a failed copy does (`backOff`, `copyRetryDelayMs`), its whole error and next
+  for good. **Each schedule has a timer of its own, never one field for two** (issue 908): `timer` is the next pass's and a
+  kick clears it; the stream's restart is `streamTimer` (a kick inside its wait ran a pass too soon to start the stream,
+  cleared the restart, and the stream stayed stopped for the run); `wake` holds the earliest back-off and is set again
+  for the next after every pass (`wakeForBackOffs`). DETECTOR: `duck-stream.itest.ts` "a pass kicked while the stream
+  waits", `tests/duck-sync-schedule.test.ts`. A failed catch-up backs off as a failed copy does (`backOff`, `copyRetryDelayMs`), its whole error and next
   attempt said in the log and `mason status` (`catchUp.retryAt`). ("Logical replication")
 - **A multi-line reason is ONE log entry**, its further lines indented (`textEntry`, src/lib/log.ts: the
   run's log, mason.log, is written through it, src/cli/dev.ts) — the test server's Binder Error was read as its first line.
@@ -171,8 +175,14 @@ paths:
   `store.memoryLimitBytes` (halved at 53200) and, before each, to the free disk (`diskShortFor`: none, and the table
   waits, said), swapped as a copy is, the spill replayed after in pieces of 50,000. Its failure is an ordinary
   statement's, that table's alone: never its `error`, never fatal, backed off. A new writer of a synced table checks
-  `rebuildingNow`, or it writes under a compaction and its write is lost at the swap. DETECTOR:
-  `tests/duck-compact.test.ts`, `tests/integration/duck-compact.itest.ts`.
+  `rebuildingNow`, or it writes under a compaction and its write is lost at the swap. **A table whose changes are
+  spilled is never marked current past what it serves** (issue 904: the batch's position moved its `synced`, so `mason
+  status`, `wait` and `caughtUp` said current while the newest changes waited in the spill; the bulk itest read
+  DuckDB 7,000–17,000 changes short): its part in the stream is `compacting`, its `kept.syncedAt` the moment its spill
+  began (`heldFrom`), its `synced` left as it was by every batch until the replay's last piece, which sets it to the
+  stream's last position; `caughtUp` waits for the spill; a stop or a replay that fails before it ends leaves it
+  `behind`, as its mark says. DETECTOR: `tests/duck-compact.test.ts`, `tests/integration/duck-compact.itest.ts`, the
+  bulk test of `tests/integration/duck-stream.itest.ts` (compaction checked every 3 s).
 - **No INSERT … SELECT into an empty CREATE TABLE AS of the same transaction** (`writeByKey`; the review of PR 856):
   DuckDB 2.0.0 reads back NOTHING of a table made by `CREATE TABLE AS … LIMIT 0` and filled by one INSERT … SELECT of a
   row group's rows (122,880) or more in that transaction (`count(*)` says them all; lost even after the COMMIT), and a
