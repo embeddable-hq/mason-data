@@ -522,6 +522,68 @@ or column 42703, a type mismatch 42883) is refused with Postgres's own error: Du
 What Mason answers differently from Postgres, without refusing it, is listed in [docs/SQL-SUPPORT.md](SQL-SUPPORT.md)
 "Answered differently", each entry with what differs.
 
+## Fast queries
+
+Use Mason for analytical queries: the queries that get slower as your data grows. On a replica, these queries compete
+with each other and with everything else. Typical examples are dashboards, reports, BI tools, AI agents and
+customer-facing analytics. Keep your application's own queries on Postgres: fetching a row by its primary key, inserts
+and updates. Postgres is faster at point lookups, and Mason is read-only.
+
+### Why it's fast
+
+Postgres is built to find a few rows quickly. Mason is built to read millions of rows quickly. On a large table, four
+things about how DuckDB works make the difference:
+
+- **It reads only the columns a query uses.** Postgres stores a table row by row, so a query that sums one column
+  still reads every row in full. Mason stores each column separately, and compressed. A `SUM(amount)` reads the
+  `amount` column and nothing else. In the benchmark, the synced data was about a fifth of the tables' size in Postgres
+  (10.1 GiB → 1.8 GiB), so much more of it stays in memory.
+- **It processes values in batches, not one row at a time.** Postgres's executor handles one row at a time, and each
+  row passes through every step of the plan. DuckDB handles 2,048 values at a time, in tight loops that a modern CPU
+  runs very efficiently. Over millions of rows, a `SUM` or a `GROUP BY` costs far less CPU this way.
+- **It uses every core for one query.** By default, Postgres gives one query at most 2 extra workers
+  (`max_parallel_workers_per_gather`). DuckDB splits a query's scan, aggregation and joins across all the machine's
+  cores.
+- **It skips blocks that can't match.** For every block of about 122,880 rows, DuckDB keeps each column's smallest and
+  largest value. A filter like `created_at > now() - interval '7 days'` skips every block whose dates are all older.
+  This works best on columns that grow as rows are inserted, such as `created_at` or an increasing `id`, because Mason
+  keeps rows in the order they were inserted.
+
+Mason makes DuckDB faster:
+
+- **It stores what your queries keep computing.** When queries keep reading the same JSON field, such as
+  `payload ->> 'status'`, Mason stores that field as a column of its own, in the background. After that, reading it
+  is about 200 times faster than parsing the JSON every time. It does the same for sorting and grouping by a `jsonb`
+  column. `mason status` lists what it stores.
+- **It rewrites slow query shapes into fast ones, with the same answer.** BI tools send some shapes that DuckDB runs
+  slowly as written: nulls placed last with `ORDER BY col IS NULL, col`, a `date_trunc` of a `timestamptz`, a
+  `count(DISTINCT id)` of a primary key, or a `LEFT JOIN` to `jsonb_each`. Mason sends DuckDB an equivalent form that
+  it runs natively, and the oracle checks that the answer is still exactly Postgres's.
+
+### Making Mason faster
+
+Most of Mason's speed comes from memory. These are the things that help most, in order:
+
+- **Give it enough memory.** A query is fast when the columns it reads are in memory. When they are not, it runs at
+  the disk's speed: reading a JSON column of a 22 M-row table from a cloud disk took 93.5 s. Give Mason enough memory
+  to hold the columns your dashboards read. `mason status` shows how big your synced data is, and
+  [deploy/mason-data/README.md](../deploy/mason-data/README.md#memory) shows how to set the memory.
+- **Use a fast disk if your data doesn't fit in memory.** Whatever is not in memory is read from disk. The benchmark
+  ran on a standard AWS gp3 volume, which reads about 125 MB/s. A local NVMe disk, or a gp3 volume with more
+  throughput provisioned, reads many times faster.
+- **Filter by time.** Mason keeps rows in the order they were inserted, so a filter on `created_at` or an increasing
+  `id` skips the blocks outside it. On 5 M rows inserted in time order, one day's filter read 1 of 41 blocks. Give
+  your dashboards a date range where you can.
+- **Read JSON text with `->>`.** Write `payload ->> 'status'` rather than `(payload -> 'status')::text`. Mason reads
+  `->>` directly, and the cast takes a much slower path (0.21 s against 8.8 s for a `count(DISTINCT …)` over 5 M rows).
+- **Add cores for more users.** One query already uses every core. More cores help when many dashboards query at
+  once: the benchmark's 4-core machine answered 12 queries a second with 8 clients and with 32, and the extra clients
+  waited in a queue.
+- **Store an answer that many queries repeat.** When dashboards keep aggregating the same large table the same way,
+  declare that query as a generated table (`mason help generated`) and point the dashboards at it.
+
+[docs/MEASUREMENTS.md](MEASUREMENTS.md) has every measurement and how it was taken.
+
 ## Sessions, settings and transactions
 
 `SET` and `SHOW` for what a driver sets on connect: `TimeZone` (an IANA zone or UTC), `application_name`,
