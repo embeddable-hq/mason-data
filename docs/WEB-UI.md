@@ -25,7 +25,7 @@ the address's hash, so a view can be bookmarked and Back goes to the one before:
 |---|---|
 | `#overview` (none, or one it does not know) | the Overview |
 | `#tables`, `#tables?show=failed` | Tables (only the tables whose sync failed) |
-| `#users` | Users |
+| `#users`, `#users?show=removed` | Users (its Active tab; the Removed tab) |
 | `#observability/queries` (`#observability`) | Observability › Queries; `?slow=1`, `?status=` (`completed`, `refused`, `failed`, `refused-or-failed`, `cancelled`), `?user=`, `?client=` set those filters |
 | `#observability/usage` | Observability › Usage |
 | `#observability/syncs` | Observability › Sync events; `?failures=1` ticks Failures only, `?table=` chooses the table |
@@ -156,7 +156,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
 - **Users** (`#users`), in this order: the list of users, right under the title (and its read-only line), then the add
   form with the card of a user just added beside it, then Connect, so a card that appears moves nothing above it. A person arriving on the page — its address opened, a
   link of the sidebar or another followed — starts with the cursor in the form's **Name**, once the form is written;
-  never at a poll's write after that, never taken from what the person focused since they arrived, never on a touch
+  never at a poll's write after that, never at a hash of the page already shown (a tab of the list, a range), never taken from what the person focused since they arrived, never on a touch
   screen (`(pointer: coarse)`, where it would open the keyboard over the page), and not on a read-only page, which has
   no form (a page's `arrive()`, src/web/app.js); after an add, the New user added card is scrolled into view once. The
   form adds a user by name and, where `mason/roles.yml` names roles and reads as it is, a
@@ -202,7 +202,13 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   /api/share/<user>/beat`, every 15 s, hidden or not): two minutes without one (the tab closed, crashed or asleep) and
   the share, its sessions and the tunnel's client end. How it ended (Stop sharing, the tunnel dropped) is said in the
   box from `/api/state` `shareEnded`, with Share again under it; a refusal is the run's Failure.
-- **Users**, the list: each user's role and, on a line under it, where it connects from ("from" its ranges as `mason
+- **Users**, the list: two tabs over the table, a segmented control as the time range's, each with its count —
+  **Active** (the default, `#users`: the users not removed, a disabled one among them with its Disabled status) and
+  **Removed** (`#users?show=removed`: the removed ones, muted, with Queries alone). The tab is the hash's
+  (`parseHash`, `hashOf`), so Back returns to the tab before and nothing is stored; a tab left drops a question, a
+  From… or a refusal open beside one of its rows. An empty tab is one quiet line: "No active users. Add one below."
+  (on a read-only page "No active users."), "No removed users."; no user at all, the "No users yet" line alone, no
+  tabs. Each user's role and, on a line under it, where it connects from ("from" its ranges as `mason
   user list` says them, or "from anywhere": `from` in `mason user list --json`; cut by the column, its whole the
   tooltip), its status (Active, Disabled and when, or Removed), when added, when last
   used, and **Queries**, its statements. A user that no longer connects is flagged with why. **Disable** asks first (in a popover, in `mason
@@ -210,7 +216,8 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   enable` at once. The "from …" line is a button: it asks where the user connects from in a popover beside the row's
   actions, the add form's choice opened at its ranges now, and sends `POST /api/users/<name>/from` (`mason user from`:
   the ranges, or `null` for from anywhere, `--any`); the list holds still while it asks, and a refusal is said in the
-  popover. **Remove** asks first; a removed user stays listed, muted. The table keeps its width (no column of its own),
+  popover. **Remove** asks first; a user removed leaves the Active tab at the next write (its own row goes, the
+  others keep their order) and is listed under Removed; a refusal beside a user whose row left goes with it. The table keeps its width (no column of its own),
   fits its card in a 1280 px window, and where it scrolls (a narrower window, a phone) a row's actions stay pinned at
   the card's right. A header cell's class (`added`, `status`, `act`, …) is styled only as a cell (`th.added`), never by a
   box's rule of the same name: the New user added card is `.user-added`, so its white and its left border never reach

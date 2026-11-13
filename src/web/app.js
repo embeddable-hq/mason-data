@@ -95,7 +95,7 @@ export const PRESS_HOLD_MS = 2000;
 export * from "./shared.js";
 export { CATCHING_UP, copyingText, tableLine, keptAge, keptWords, sourceRows, renderStatus } from "./pages/status.js";
 export { tableFacts, addedLines, removedReport, pickBody, columnsPath, renderTableAdded, renderTablesRemoved, renderTables } from "./pages/tables.js";
-export { renderUsers, renderAdded, renderAddUser, attributesText, renderUsersConnect, renderShare, createShare, addedSeen } from "./pages/users.js";
+export { renderUsers, usersShowHref, renderAdded, renderAddUser, attributesText, renderUsersConnect, renderShare, createShare, addedSeen } from "./pages/users.js";
 export { renderRequests } from "./pages/queries.js";
 export { renderRunning, renderSessions, renderClients, renderSlowest, queriesHref } from "./pages/usage.js";
 export { hostLinkUrl, hostView, readHost, renderHostView, renderHostCard, renderHostPart, HOST_BYTES_MAX, HOST_READ_MS, REFRESH_MIN_S, REFRESH_MAX_S, HOST_LIMITS } from "./host-view.js";
@@ -659,7 +659,11 @@ export function start(doc, win) {
     if (menuOpen) setMenu(false, true);
     // a replaced view's hash is not shown, nor read: the page leaves for the host's
     if (leave(true)) return;
-    app.show(win.location.hash, { doc }); arrive(); paint(); void poll();
+    // arriving is coming to ANOTHER page: a hash of the page shown (a Users tab, a range) moves no focus
+    const was = app.model.shown;
+    app.show(win.location.hash, { doc });
+    if (app.model.shown !== was) arrive();
+    paint(); void poll();
   });
   win.addEventListener?.("scroll", place, { capture: true, passive: true });
   win.addEventListener?.("resize", place);

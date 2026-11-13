@@ -4,6 +4,7 @@
  * storage, a URL or a log line.
  */
 import { actId, badge, button, code, copyable, copyClick, duration, empty, esc, json, panel, pop, renderFailure, ROOMS, serverHostNote, spanText, status, utcMinute, readOnlyLine, usersReadOnly } from "../shared.js";
+import { VIEW_HASHES } from "../routes.js";
 
 /** The users as the page reads them: with each one's last use (`mason user list` asks the same), then every 30 s. */
 const USERS = "api/users?lastUsed=1";
@@ -79,12 +80,28 @@ const askOf = (confirming) => confirming === null || confirming === undefined ? 
 /** a user's attributes as `mason user list` says them (src/cli/user.ts attributesText, held equal by tests/web-page.test.ts) */
 export const attributesText = (a) => Object.entries(a).map(([k, v]) => `${k}=${typeof v === "string" ? v : `[${v.join(", ")}]`}`).join(", ");
 
+/** The users' tab a hash names (`show`): "removed", else "active", the default. */
+const showOf = (v) => v === "removed" ? "removed" : "active";
+
+/** A users' tab's address: `#users` (Active) or `#users?show=removed`, as src/web/app.js `hashOf("users", { show })`
+ *  writes it and `parseHash` reads it (held equal by tests/web-page.test.ts). */
+export const usersShowHref = (show) => `#${VIEW_HASHES.users}${showOf(show) === "removed" ? "?show=removed" : ""}`;
+
+/** THE USERS' TABS, Active and Removed, each with its count: a segmented control as the time range's (`.range`), each a
+ *  link to its address, so the hash is the choice and Back returns to the tab before; nothing is stored. */
+function usersTabs(show, active, removed) {
+  return `<div class="range users-show" role="group" aria-label="Show users">${[["active", "Active", active], ["removed", "Removed", removed]]
+    .map(([k, label, n]) => `<a href="${esc(usersShowHref(k))}"${k === show ? ` aria-current="true"` : ""}>${esc(label)} <span class="n">${n}</span></a>`).join("")}</div>`;
+}
+
 /**
  * THE USERS from `/api/users?lastUsed=1` (`mason user list --json`'s shape), in a table in a card: a row each — its name
  * in mono with its id muted, its status as a dot and the word (Active, Disabled and when, or Removed and when), when it
  * was added, when it was last used (an age, `lastUsedText`'s UTC time in a title; or the note why it is not known), then
- * Queries, Disable — Enable for a disabled one, in Disable's room — and Remove. The users
- * not removed first; a removed user is listed after them, muted, without actions. A Remove or a Disable asks first
+ * Queries, Disable — Enable for a disabled one, in Disable's room — and Remove. Over the table, two tabs (`usersTabs`):
+ * Active, the users not removed (a disabled one among them), and Removed, the removed ones, muted, without actions —
+ * each with its count; `show` ("active", the default, or "removed") is the hash's (`#users?show=removed`), so Back
+ * goes to the tab before. An empty tab is one quiet line; no user at all, the "No users yet" line and no tabs. A Remove or a Disable asks first
  * (`confirming`: the name, Remove's; or { name, verb: "disable" }), in a popover beside the row's actions; an Enable
  * asks nothing. A refused action (`refused`: { name, failure }) is said there too, until dismissed. `now` is the
  * page's clock, in ms. `roles`: `/api/state`'s (`mason status --json`'s): while the roles file cannot be read every
@@ -98,18 +115,23 @@ export const attributesText = (a) => Object.entries(a).map(([k, v]) => `${k}=${t
  * row's actions as Disable does, where it connects from (`confirming` { name, verb: "from" }) — the choice the add form
  * offers, opened at its ranges now — and sends POST /api/users/<name>/from.
  */
-export function renderUsers(list, confirming = null, now = Date.now(), refused = null, roles = null, readOnly = null) {
-  const users = [...list.users.filter((u) => u.removedAt == null), ...list.users.filter((u) => u.removedAt != null)];
+export function renderUsers(list, confirming = null, now = Date.now(), refused = null, roles = null, readOnly = null, show = "active") {
+  const live = list.users.filter((u) => u.removedAt == null);
+  const gone = list.users.filter((u) => u.removedAt != null);
   const why = readOnlyLine("Users are not added, changed, disabled or removed", readOnly);
-  if (!users.length) return why + (readOnly !== null ? empty("No users yet:", `${code("mason user add <name>")} adds one.`)
+  if (!live.length && !gone.length) return why + (readOnly !== null ? empty("No users yet:", `${code("mason user add <name>")} adds one.`)
     : empty("No users yet. Create a user for a service like a BI tool or your app: add one below."));
+  const tab = showOf(show);
+  const users = tab === "removed" ? gone : live;
   const note = (what, text) => text ? `<p class="dim">${esc(what)}: ${esc(text)}.</p>` : "";
   const broken = roles && roles.problem != null ? roles : null;
   const brokenNote = broken ? `<p class="warn">${esc(`${broken.file ?? "mason/roles.yml"} cannot be read as it is now, so every statement of a user held to it is refused: ${broken.problem}`)}</p>` : "";
+  const tabs = usersTabs(tab, live.length, gone.length);
+  if (!users.length) return why + brokenNote + tabs + empty(tab === "removed" ? "No removed users." : readOnly !== null ? "No active users." : "No active users. Add one below.");
   // a Remove's or a Disable's question is a popover beside the user's actions (`pop`), never a row: no row below it moves
   const pops = [];
   const ask = askOf(confirming);
-  return why + brokenNote + panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col" class="role">Role</th><th scope="col" class="status">Status</th><th scope="col" class="added">Added</th><th scope="col" class="num last">Last used</th><th scope="col" class="act"></th></tr></thead><tbody>${users.map((u) => {
+  return why + brokenNote + tabs + panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col" class="role">Role</th><th scope="col" class="status">Status</th><th scope="col" class="added">Added</th><th scope="col" class="num last">Last used</th><th scope="col" class="act"></th></tr></thead><tbody>${users.map((u) => {
     const active = u.removedAt == null;
     const last = lastUsedText(u, list.lastUsedNote, list.requestLogDays, now);
     const lastCell = !active ? "" : u.lastUsedAt != null
@@ -395,7 +417,8 @@ export const page = {
     // held: what From… opened over ({ list, now, state }), so a poll never rewrites its form under what is being typed
     // added: the user just added (its password in it, this page's memory alone); addedSeen: whether it has connected
     // reveal: the part to scroll into view after the next write (a new user's password card), once
-    const m = { actionFailure: null, added: null, addedSeen: false, confirming: null, refused: null, held: null, reveal: null };
+    // show: the list's tab, the hash's (`route`: #users?show=removed)
+    const m = { actionFailure: null, added: null, addedSeen: false, confirming: null, refused: null, held: null, reveal: null, show: "active" };
     const users = () => ctx.read(USERS)?.body ?? null;
     // Share over the internet, in Connect: its own model, beats and actions
     const share = createShare(ctx);
@@ -473,10 +496,19 @@ export const page = {
         // the user asked about went (removed), or is disabled already (by mason user disable): the question goes
         const ask = askOf(m.confirming);
         if (ask !== null && u !== null && !u.users.some((x) => x.name === ask.name && x.removedAt == null && (ask.verb !== "disable" || x.disabledAt == null))) { m.confirming = null; m.held = null; }
+        // a refusal beside a user whose row left the Active tab (removed beside the page): it goes with its row
+        if (m.refused !== null && u !== null && !u.users.some((x) => x.name === m.refused.name && x.removedAt == null)) m.refused = null;
       },
       actions,
       /** after an add, its password card scrolled into view once: on a phone it is written below the screen's edge */
       reveal() { const id = m.reveal; m.reveal = null; return id; },
+      /** `#users?show=removed`: the list's tab, as the hash says (none: Active). Another tab drops a question, a From…
+       *  and a refusal beside a row of the tab left: their rows are not shown. */
+      route(params) {
+        const show = showOf(params.show);
+        if (show !== m.show) { m.confirming = null; m.held = null; m.refused = null; }
+        m.show = show;
+      },
       /** a person arriving starts in the add form's Name (issue 887); none while the state is unread, none read-only */
       arrive() {
         const state = ctx.read(STATE)?.body;
@@ -490,7 +522,7 @@ export const page = {
         const state = h !== null ? h.state : ctx.read(STATE)?.body ?? null;
         return {
           // the roles file's state is the run's (/api/state roles): a file that cannot be read refuses every user held to it
-          users: u ? renderUsers(u, m.confirming, h !== null ? h.now : ctx.now().getTime(), m.refused, state?.roles ?? null, usersReadOnly(state)) : "",
+          users: u ? renderUsers(u, m.confirming, h !== null ? h.now : ctx.now().getTime(), m.refused, state?.roles ?? null, usersReadOnly(state), m.show) : "",
           "add-user-box": renderAddUser(ctx.read(STATE)?.body),
           "users-connect": renderUsersConnect(ctx.read(STATE)?.body?.postgres, ctx.read(STATE)?.body?.served === true,
             renderShare(ctx.read(STATE)?.body, share.m, ctx.now().getTime(), ctx.read(SHARE_CHOICES))),

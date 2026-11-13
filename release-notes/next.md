@@ -46,6 +46,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   addresses", which shows the box for the addresses beside it. Nothing in the form moves when you change it, and what
   is sent is as before. The form (Name, Role, Connects from and Add a user) is one line where the page is wide enough,
   and wraps by field below that.
+- **The Users page lists the active users and the removed ones in two tabs**, Active and Removed, each with its
+  count, over the table. Active is shown first and has every user not removed (a disabled one with its Disabled
+  status); Removed has the removed ones. The tab is in the address (`#users?show=removed`), so Back returns to it.
+  A user you remove leaves Active and is listed under Removed.
 - **The New user added card says when the user has connected.** Under its rows, "Waiting for its first query…"
   until a tool or app logs in with the user (or runs a query), then "Connected".
 - **The Users page lists the users first** (Connect is last now), under its title, then the form that adds one (with the card of a user just

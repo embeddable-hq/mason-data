@@ -621,6 +621,9 @@ table.catalog tbody tr:hover > td.act { background: var(--hover); }
 @media (max-width: 640px) { tr.under .under-body { position: sticky; left: var(--space-3); max-width: calc(100vw - 2 * var(--gutter) - 2 * var(--space-3)); } }
 @media (max-width: 640px) { table.catalog tr.under > td { overflow: visible; } }
 tr.removed > * { color: var(--muted); }
+/* the Users list's tabs, Active and Removed (usersTabs): the time range's segmented control, over the table; a count muted */
+#page-users .users-show { margin: 0 0 var(--space-3); }
+#page-users .users-show .n { margin-left: var(--space-1); color: var(--muted); font-weight: 500; }
 form.formcard { margin: 0 0 var(--space-5); padding: var(--space-3) var(--space-4); background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); }
 form.formcard input { width: 18em; }
 /* THE ADD A USER FORM ON ONE LINE where its card is wide enough: Name, Role, Connects from (its address box's place kept)

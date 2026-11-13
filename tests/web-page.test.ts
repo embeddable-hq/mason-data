@@ -517,7 +517,7 @@ test("the users: a user's role (mason user add --role) in its own column; one th
     // stage 1b (src/cli/roles.ts userRole): one reading as the roles file's default, one the file holds to nothing (no default:)
     { name: "dflt", id: "0000000000000003", ...at, role: "everything", roleFrom: "default" },
     { name: "bare", id: "0000000000000004", ...at, roleFrom: "none", readsNothing: true }], lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, Date.parse("2026-10-29T09:00:00.000Z"));
-  assert.match(textOf(html), /^User Role Status Added Last used agent id 0000000000000001 agent from anywhere Active .* old id 0000000000000002 gone not in the roles file: its queries are refused from anywhere Active /);
+  assert.match(textOf(html), /^Active 4 Removed 0 User Role Status Added Last used agent id 0000000000000001 agent from anywhere Active .* old id 0000000000000002 gone not in the roles file: its queries are refused from anywhere Active /);
   assert.match(textOf(html), /dflt id 0000000000000003 everything \(default\) from anywhere Active .* bare id 0000000000000004 no role, and the roles file has no default: its queries are refused from anywhere Active /);
 });
 
@@ -535,22 +535,40 @@ test("the users: a user's attributes beside its role in mason user list's words;
   assert.match(textOf(html), /acme id 0000000000000001 tenant tenant=42, regions=\[eu, uk\] from anywhere Active .* stale id 0000000000000002 tenant tenant=7 no value for regions: its queries are refused from anywhere Active /);
 });
 
-test("the users: a row each, active first then removed without Remove; Remove asks first; none is said", () => {
-  const renderUsers = fn<[unknown, string | null, number?], string>("renderUsers");
+test("the users: a row each under two tabs, Active (with its Remove) and Removed (muted, no actions); Remove asks first; none is said", () => {
+  const renderUsers = fn<[unknown, unknown, number?, unknown?, unknown?, unknown?, string?], string>("renderUsers");
   const list = { users: [{ name: "old", id: "aaaaaaaaaaaaaaaa", addedAt: "2026-10-01T10:00:00.000Z", removedAt: "2026-10-02T10:00:00.000Z", live: false, lastUsedAt: null, url: null },
     { name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: "2026-10-28T08:15:59.000Z", url: "postgres://metabase@127.0.0.1:5433/shop" },
     { name: "grafana", id: "fedcba9876543210", addedAt: "2026-10-20T08:00:00.000Z", removedAt: null, live: false, lastUsedAt: null, url: "postgres://grafana@127.0.0.1:5433/shop" }],
   lastUsedNote: null, urlNote: null, requestLogDays: 7 };
   const NOW_U = Date.parse("2026-10-28T09:15:59.000Z");
   const html = renderUsers(list, null, NOW_U);
-  assert.match(textOf(html), /User Role Status Added Last used metabase id 0123456789abcdef every table from anywhere Active 2026-10-27 09:10 UTC 60 min ago Queries Disable Remove grafana id fedcba9876543210 every table from anywhere Active can't connect: the API key changed after it was added 2026-10-20 08:00 UTC not used in the last 7 days Queries Disable Remove old id aaaaaaaaaaaaaaaa every table Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC/);
+  assert.match(textOf(html), /^Active 2 Removed 1 User Role Status Added Last used metabase id 0123456789abcdef every table from anywhere Active 2026-10-27 09:10 UTC 60 min ago Queries Disable Remove grafana id fedcba9876543210 every table from anywhere Active can't connect: the API key changed after it was added 2026-10-20 08:00 UTC not used in the last 7 days Queries Disable Remove$/);
+  // the tabs: a segmented control, each a link to its address (the hash is the choice), the one shown current
+  assert.match(html, /^<div class="range users-show" role="group" aria-label="Show users"><a href="#users" aria-current="true">Active <span class="n">2<\/span><\/a><a href="#users\?show=removed">Removed <span class="n">1<\/span><\/a><\/div>/);
+  const removedTab = renderUsers(list, null, NOW_U, null, null, null, "removed");
+  assert.match(textOf(removedTab), /^Active 2 Removed 1 User Role Status Added Last used old id aaaaaaaaaaaaaaaa every table Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC Queries$/, "Removed: the removed alone, its Queries its only action");
+  assert.match(removedTab, /<a href="#users\?show=removed" aria-current="true">Removed/);
+  assert.ok(!/data-remove=|data-disable=/.test(removedTab), "a removed user has no Remove nor Disable");
+  // a disabled user is Active's, with its Disabled status
+  const disabled = renderUsers({ ...list, users: list.users.map((u) => u.name === "grafana" ? { ...u, disabledAt: "2026-10-28T08:00:00.000Z" } : u) }, null, NOW_U);
+  assert.match(textOf(disabled), /^Active 2 Removed 1 .* grafana id fedcba9876543210 every table from anywhere Disabled 2026-10-28 08:00 UTC .* Enable Remove$/);
+  // empty tabs: one quiet line each, under the tabs
+  const onlyRemoved = { ...list, users: list.users.filter((u) => u.removedAt !== null) };
+  assert.equal(textOf(renderUsers(onlyRemoved, null, NOW_U)), "Active 0 Removed 1 No active users. Add one below.");
+  assert.match(renderUsers(onlyRemoved, null, NOW_U), /<\/div><p class="empty">No active users\. Add one below\.<\/p>$/);
+  assert.equal(textOf(renderUsers(onlyRemoved, null, NOW_U, null, null, "read-only here")), "Users are not added, changed, disabled or removed from this page: read-only here. Active 0 Removed 1 No active users.", "read-only: nothing to add below");
+  const onlyActive = { ...list, users: list.users.filter((u) => u.removedAt === null) };
+  assert.equal(textOf(renderUsers(onlyActive, null, NOW_U, null, null, null, "removed")), "Active 2 Removed 0 No removed users.");
+  assert.equal(renderUsers(list, null, NOW_U, null, null, null, "nonsense"), html, "a tab the page does not know is Active");
   // the last use is an age with its UTC time in a title (mason user list's words); status is a dot and a word
   assert.match(html, /<td class="num"><span title="2026-10-28 08:15 UTC">60 min ago<\/span><\/td>/);
   assert.deepEqual([...html.matchAll(/<span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`),
-    ["ok Active", "ok Active", "unknown Removed 2026-10-02 10:00 UTC"]);
+    ["ok Active", "ok Active"]);
+  assert.match(removedTab, /<span class="indicator unknown"><span class="dot" aria-hidden="true"><\/span>Removed 2026-10-02 10:00 UTC<\/span>/);
   assert.match(html, /<button type="button" class="danger small" data-remove="metabase">Remove<\/button>/);
-  assert.equal([...html.matchAll(/<tr( class="removed")?><th scope="row">/g)].map((m) => m[1] ? "removed" : "active").join(" "), "active active removed", "a removed user is listed last, muted");
-  assert.ok(!/data-remove="old"/.test(html), "a removed user has no Remove");
+  assert.equal([...html.matchAll(/<tr( class="removed")?><th scope="row">/g)].map((m) => m[1] ? "removed" : "active").join(" "), "active active", "Active: the users not removed");
+  assert.equal([...removedTab.matchAll(/<tr( class="removed")?><th scope="row">/g)].map((m) => m[1] ? "removed" : "active").join(" "), "removed", "Removed: muted");
   assert.ok(!/password/i.test(html.replace(/the API key/g, "")), "no password is shown: the URL is the one without it");
   const asking = renderUsers(list, "metabase", NOW_U);
   assert.match(textOf(asking), /Remove metabase\? It can no longer connect, and its open sessions end at their next query\. Remove metabase Cancel/);
@@ -578,7 +596,7 @@ test("the users while the roles file cannot be read: mason user list's tip, word
   const NOW_R = Date.parse("2026-10-29T09:00:00.000Z");
   const problem = "mason/roles.yml: it is not YAML: Flow sequence in block collection must be sufficiently indented and end with a ] at line 1, column 18";
   const html = renderUsers(list, null, NOW_R, null, { file: "mason/roles.yml", roles: [], problem, default: null, all: [] });
-  assert.ok(textOf(html).startsWith(`${rolesProblemText("mason/roles.yml", problem)} User Role Status Added Last used `), textOf(html));
+  assert.ok(textOf(html).startsWith(`${rolesProblemText("mason/roles.yml", problem)} Active 2 Removed 0 User Role Status Added Last used `), textOf(html));
   assert.match(textOf(html), /metabase id 0123456789abcdef refused: the roles file can't be read from anywhere Active 2026-10-27 .* agent id 0000000000000001 refused: the roles file can't be read from anywhere Active 2026-10-29/);
   // a readable file: nothing said; the page's own roles are the state's (/api/state roles), read beside the users
   assert.doesNotMatch(textOf(renderUsers(list, null, NOW_R, null, { file: "mason/roles.yml", roles: ["agent"], problem: null, default: null, all: [] })), /cannot be read/);
@@ -1257,7 +1275,7 @@ test("the app: a poll writes the shown page and when, reading only its endpoints
   await app.poll();
   // a page shown is read again whatever its rates (show marks every read stale): the shell's state with it
   assert.deepEqual(run.asked, ["GET api/users?lastUsed=1", "GET api/state", "GET api/share/choices"]);
-  assert.match(textOf(app.view().users!), /^User Role Status Added Last used metabase id 0123456789abcdef every table from anywhere Active 2026-10-27 09:10 UTC not used in the last \? days Queries Disable Remove$/);
+  assert.match(textOf(app.view().users!), /^Active 1 Removed 0 User Role Status Added Last used metabase id 0123456789abcdef every table from anywhere Active 2026-10-27 09:10 UTC not used in the last \? days Queries Disable Remove$/);
   app.show("status");
   // the run stops
   run.answers.clear();
@@ -1735,7 +1753,7 @@ test("a header cell is styled as a cell alone: in every table that pins its acti
 });
 
 test("the users: each user's addresses on a line under its role, as mason user says them — from its ranges, or from anywhere; the line is its From…; a removed user's none; read-only, the words alone", async () => {
-  const renderUsers = fn<[unknown, unknown, number?, unknown?, unknown?, unknown?], string>("renderUsers");
+  const renderUsers = fn<[unknown, unknown, number?, unknown?, unknown?, unknown?, string?], string>("renderUsers");
   const { rangesText } = await import("../src/cli/user.ts");
   const page = await import(path.join(WEB, "pages", "users.js") as string) as { rangesText: (f: unknown) => string; fromText: (f: unknown) => string };
   for (const f of [null, undefined, ["192.0.2.0/24"], ["192.0.2.0/24", "2001:db8::/32", "198.51.100.7/32"]]) assert.equal(page.rangesText(f), rangesText(f as string[] | null), JSON.stringify(f));
@@ -1743,12 +1761,13 @@ test("the users: each user's addresses on a line under its role, as mason user s
   const list = { users: [{ name: "looker", id: "0000000000000001", ...at, removedAt: null, from: ["192.0.2.0/24", "2001:db8::/32"] }, { name: "metabase", id: "0000000000000002", ...at, removedAt: null, from: null },
     { name: "old", id: "0000000000000003", ...at, removedAt: "2026-10-28T09:00:00.000Z", from: ["192.0.2.0/24"] }], lastUsedNote: null, urlNote: null, requestLogDays: 7 };
   const html = renderUsers(list, null, Date.parse("2026-10-29T09:00:00.000Z"));
-  assert.match(textOf(html), /^User Role Status Added Last used looker id 0000000000000001 every table from 192\.0\.2\.0\/24, 2001:db8::\/32 Active 2026-10-27 09:10 UTC .* Queries Disable Remove metabase id 0000000000000002 every table from anywhere Active 2026-10-27 /);
+  assert.match(textOf(html), /^Active 2 Removed 1 User Role Status Added Last used looker id 0000000000000001 every table from 192\.0\.2\.0\/24, 2001:db8::\/32 Active 2026-10-27 09:10 UTC .* Queries Disable Remove metabase id 0000000000000002 every table from anywhere Active 2026-10-27 /);
   // the line is its From…, its whole the title (the column cuts it); no column of its own, no button in the actions
   assert.match(html, /<span class="dim">every table<\/span><button type="button" class="from-line" data-from="looker" title="from 192\.0\.2\.0\/24, 2001:db8::\/32: change where looker connects from">from 192\.0\.2\.0\/24, 2001:db8::\/32<\/button><\/td>/);
   assert.equal([...html.matchAll(/<th scope="col"/g)].length, 6, "the columns as before");
   assert.ok(![...html.matchAll(/<td class="act"[^>]*>(.*?)<\/td>/gs)].some((m) => m[1]!.includes("data-from")), "the actions as before");
-  assert.ok(!/data-from="old"/.test(html) && !/<tr class="removed">.*?from-line/s.test(html), "a removed user connects from nowhere: nothing said");
+  const gone = renderUsers(list, null, Date.parse("2026-10-29T09:00:00.000Z"), null, null, null, "removed");
+  assert.ok(!/data-from="old"/.test(gone) && !/<tr class="removed">.*?from-line/s.test(gone), "a removed user connects from nowhere: nothing said");
   // asking: its line held, disabled, as Disable is
   assert.match(renderUsers(list, { name: "looker", verb: "from" }), /<button type="button" class="from-line" title="[^"]*" aria-expanded="true" disabled>from 192\.0\.2\.0\/24, 2001:db8::\/32<\/button>/);
   // read-only: the words alone, never a control
@@ -2192,6 +2211,16 @@ test("arriving on the Users page puts the cursor in the add form's Name — at t
     "read-only: no form, nothing focused");
   // another page arrived on: nothing of the Users page's
   assert.deepEqual(await focusedAfter({ hash: "#tables" }), { first: "", later: "" });
+  // a tab of the page shown (Active, Removed: #users?show=removed) is no arriving: the focus stays where it was
+  const run = fakeRun();
+  const { doc, go, settle } = fakeBrowser(run, "#users");
+  await settle();
+  const d = doc as unknown as { focused: string };
+  assert.equal(d.focused, "user-name");
+  d.focused = "";
+  go("#users?show=removed"); await settle();
+  go("#users"); await settle();
+  assert.equal(d.focused, "", "a tab followed moves no focus");
 });
 
 test("after Add a user, its password card is scrolled into view once — on a phone it was written at the screen's bottom edge; a poll's write scrolls nothing (issue 877)", async () => {
@@ -3189,7 +3218,7 @@ test("the users: read with their last use, every 30 s, the state beside them; Co
   assert.deepEqual(await asked(), [], "not at the 2 s poll");
   t += 28_000;
   assert.deepEqual(await asked(), [U, "GET api/state", "GET api/share/choices"], "then every 30 s, the state with them (the Connect panel's) and the share's roles");
-  assert.match(textOf(app.view().users!), /metabase id 0123456789abcdef every table from anywhere Active 2026-10-27 09:10 UTC never Queries Disable Remove old id aaaaaaaaaaaaaaaa every table Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC Queries$/);
+  assert.match(textOf(app.view().users!), /^Active 1 Removed 1 .*metabase id 0123456789abcdef every table from anywhere Active 2026-10-27 09:10 UTC never Queries Disable Remove$/);
   // Copy (the Connect panel's): the page's own handler writes the text as shown, and keeps it nowhere
   const written: string[] = [];
   const doc = { getElementById: (id: string) => id === "users-connect-host" ? { textContent: "127.0.0.1" } : null };
@@ -3693,7 +3722,7 @@ test("Tables: a copy's whole error stays open across the polls that rewrite the 
   assert.equal(app.pages.get("tables")!.toggle!({ id: "syncs-raw", open: true }), null, "a details with no key is not this page's");
 });
 
-test("Users: the add form's password is a prominent card marked shown once; the active users come first, a removed one muted last, and the age ticks with the page's clock", async () => {
+test("Users: the add form's password is a prominent card marked shown once; Active lists the users not removed, #users?show=removed the removed, and the age ticks with the page's clock", async () => {
   const added = fn<[unknown], string>("renderAdded")({ user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password: "mason_0123456789abcdef_" + "a".repeat(32),
     database: "shop", url: "postgres://metabase@127.0.0.1:5433/shop" });
   assert.match(added, /^<div class="user-added" role="status"><p class="added-title">New user added<\/p>/);
@@ -3710,7 +3739,47 @@ test("Users: the add form's password is a prominent card marked shown once; the 
   assert.match(app.view().users!, /<span title="2026-10-28 08:59 UTC">30 s ago<\/span>/);
   t += 60_000;
   assert.match(app.view().users!, /<span title="2026-10-28 08:59 UTC">2 min ago<\/span>/, "an age moves with the clock between reads");
-  assert.ok(app.view().users!.indexOf("metabase") < app.view().users!.indexOf(">old<"), "removed users are listed last");
+  assert.ok(app.view().users!.includes("metabase") && !app.view().users!.includes(">old<"), "Active: the removed user is not listed");
+  // the tab is the hash's: hashOf and the page's own link agree, parseHash reads it, and the page shows it
+  const hashOf = fn<[string, Record<string, string>?], string>("hashOf");
+  const usersShowHref = fn<[string], string>("usersShowHref");
+  assert.deepEqual([usersShowHref("active"), usersShowHref("removed")], [hashOf("users"), hashOf("users", { show: "removed" })]);
+  assert.deepEqual(fn<[string], unknown>("parseHash")("#users?show=removed"), { id: "users", params: { show: "removed" } });
+  app.show("#users?show=removed");
+  assert.ok(app.view().users!.includes(">old<") && !app.view().users!.includes("data-remove=\"metabase\""), "Removed: the removed user alone");
+  app.show("#users");
+  assert.ok(!app.view().users!.includes(">old<"), "Back to #users: Active again");
+});
+
+test("Users: Remove in the Active tab takes the user's row to Removed at the next write, no other row moving; a question or a refusal goes with a tab left, or a row that left", async () => {
+  const run = fakeRun();
+  const u = (name: string, id: string, removedAt: string | null = null) => ({ name, id, addedAt: "2026-10-27T09:10:11.000Z", removedAt, live: true, lastUsedAt: null, url: null });
+  let users = [u("a_first", "0000000000000001"), u("metabase", "0000000000000002"), u("z_last", "0000000000000003")];
+  run.answers.set("GET api/users?lastUsed=1", () => new Response(JSON.stringify({ users, lastUsedNote: null, urlNote: null, requestLogDays: 7 }), { status: 200 }));
+  run.answers.set("DELETE api/users/metabase", () => { users = users.map((x) => x.name === "metabase" ? { ...x, removedAt: "2026-10-28T09:00:00.000Z" } : x); return new Response(JSON.stringify({ removed: { name: "metabase" }, next: [] }), { status: 200 }); });
+  const app = fn<[unknown], App & { markStale(): void; pages: Map<string, { click(d: unknown, b: unknown, w: unknown): unknown; model: Record<string, unknown> }> }>("createApp")(run.fetch);
+  app.show("users");
+  await app.poll();
+  const rows = (html: string) => [...html.matchAll(/<code class="name" title="([^"]+)"/g)].map((x) => x[1]);
+  assert.deepEqual(rows(app.view().users!), ["a_first", "metabase", "z_last"]);
+  const page = app.pages.get("users")!;
+  await page.click({ remove: "metabase" }, {}, {});
+  await page.click({ confirmRemove: "metabase" }, {}, {});
+  assert.deepEqual(rows(app.view().users!), ["a_first", "z_last"], "its own row went; the others in their order");
+  assert.match(textOf(app.view().users!), /^Active 2 Removed 1 /);
+  assert.equal(popOf(app.view().users!, "act-users-metabase"), "", "no popover left without its row");
+  // a refusal beside a user, then the tab left: it goes (its row is not shown), and is not there on coming back
+  page.model.refused = { name: "a_first", failure: { code: "refused", message: "nope", next: [] } };
+  assert.notEqual(popOf(app.view().users!, "act-users-a_first"), "");
+  app.show("#users?show=removed");
+  assert.equal(page.model.refused, null);
+  app.show("#users");
+  assert.equal(popOf(app.view().users!, "act-users-a_first"), "");
+  // a refusal beside a user removed beside the page (mason user remove): it goes with its row at the next read
+  page.model.refused = { name: "z_last", failure: { code: "refused", message: "nope", next: [] } };
+  users = users.map((x) => x.name === "z_last" ? { ...x, removedAt: "2026-10-28T09:01:00.000Z" } : x);
+  app.markStale(); await app.poll();
+  assert.equal(page.model.refused, null);
 });
 
 // ------------------------------------------------------------------ the presentation: components, vendored files, details kept open, charts as an addition
