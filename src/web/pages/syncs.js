@@ -31,7 +31,7 @@ const th = (cols) => cols.map((c) => `<th scope="col">${esc(c)}</th>`).join("");
 export const KIND_WORDS = { copy_failed: "Full sync failed", poll_failed: "Scheduled sync failed", catch_up_failed: "Catch-up failed",
   stream_failed: "Live sync failed", source_unreachable: "Database unreachable", generated_failed: "Generated table failed",
   compact_failed: "Compaction failed", restart: "Mason restarted", copied: "Full sync", recovered: "Working again", synced: "Manual sync",
-  sync_changed: "Sync setting changed", polled: "Scheduled sync", streamed: "Live sync" };
+  sync_changed: "Sync setting changed", polled: "Scheduled sync", streamed: "Live sync", ui_error: "Web page error" };
 /** A kind's words; a kind this page does not know, its code. */
 export const kindWords = (kind) => Object.hasOwn(KIND_WORDS, kind) ? KIND_WORDS[kind] : kind;
 
@@ -77,7 +77,7 @@ export function renderEvents(b, { failuresOnly = false, kind = "", table = "", n
 
 /** EVERY KIND OF SYNC EVENT, in its order (src/duck/events.ts `EVENT_KINDS`, held equal by the tests): the Kind filter
  *  offers each, whether the range has one or not. */
-export const EVENT_KINDS = ["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "restart", "copied", "recovered", "synced", "sync_changed", "polled", "streamed"];
+export const EVENT_KINDS = ["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "restart", "copied", "recovered", "synced", "sync_changed", "polled", "streamed", "ui_error"];
 
 /** The kind and table filters' controls: EVERY kind (EVENT_KINDS), and EVERY added table (`/api/state` `tables`, `s`) —
  *  Mason's own events first ("Mason events", MASON_TABLE) — whether the range has an event of it or not, so the choices never depend on what

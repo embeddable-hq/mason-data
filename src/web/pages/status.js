@@ -123,13 +123,13 @@ export function keptAge(t, now = Date.now()) {
   }
   if (k?.by === "replication") {
     if (k.state === "compacting") return `replicated, ${k.syncedAt === null ? "never synced" : `last synced ${syncedAgo(k.syncedAt, now)}`} — ${k.why ?? "it is being compacted"}`;
-    if (k.state !== "streamed") return `NOT kept current (${k.syncedAt === null ? "never synced" : `last synced ${syncedAgo(k.syncedAt, now)}`}): ${k.why ?? "it is not streamed yet"}`;
+    if (k.state !== "streamed") return `not kept current (${k.syncedAt === null ? "never synced" : `last synced ${syncedAgo(k.syncedAt, now)}`}): ${k.why ?? "it is not streamed yet"}`;
     const at = `replicated, at ${k.position}, ${k.syncedAt === null ? "not synced yet" : syncedAgo(k.syncedAt, now)}`;
-    return k.notRunning === null || t.sync?.state === "behind" ? at : `${at} — NOT kept current now, the stream is not running: ${k.notRunning}`;
+    return k.notRunning === null || t.sync?.state === "behind" ? at : `${at} — not kept current now, the stream is not running: ${k.notRunning}`;
   }
   if (k?.by !== "poll") return null;
   const synced = k.syncedAt === null ? "never synced" : `last synced ${syncedAgo(k.syncedAt, now)}`;
-  if (k.pending !== undefined) return `NOT kept current (${synced}): ${k.pending}`;
+  if (k.pending !== undefined) return `not kept current (${synced}): ${k.pending}`;
   // the page says how to do it on the page (its Sync now, its Sync choice), where mason status names the commands
   if (k.sync.mode === "off") return `sync off, ${synced}: press Sync now to sync it`;
   return `polled every ${k.sync.every}, ${k.syncedAt === null ? "not polled yet" : `last ${syncedAgo(k.syncedAt, now)}`}`;
@@ -141,7 +141,7 @@ function copiedFailedText(t, now) {
   const reason = k?.by === "replication" ? (k.state !== "streamed" ? k.why : k.notRunning === null ? null : `the stream is not running: ${k.notRunning}`)
     : k?.by === "poll" || k?.by === "recopy" ? k.pending ?? null : null;
   const asOf = t.sync?.asOf ?? (k && k.by !== "generated" && k.by !== "recopy" ? k.syncedAt : null) ?? t.sync?.syncedAt ?? null;
-  return `${n(t.copy?.rowsCopied ?? 0)} rows · synced · NOT kept current, its sync failed (${asOf === null ? "never synced" : `last synced ${syncedAgo(asOf, now)}`}): ${reason ?? firstLine(t.error)}`;
+  return `${n(t.copy?.rowsCopied ?? 0)} rows · synced · not kept current, its sync failed (${asOf === null ? "never synced" : `last synced ${syncedAgo(asOf, now)}`}): ${reason ?? firstLine(t.error)}`;
 }
 
 /**
@@ -197,7 +197,8 @@ export function sourceRows(s) {
   return [
     ...(s.source.file ? [["Sources file", `${s.source.shownFile ?? s.source.file} (the tables it names are added)`]] : []),
     ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
-      : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
+      // which kind of server it is, as a plain fact (issue 888), as mason status says it (src/cli/commands.ts sourceRows)
+      : `${s.source.url} · Postgres ${s.source.version} · ${s.source.standby ? "a read replica" : "your main database"}`],
     // in a web developer's words first (each table as its sync: says, streamed as they happen); the mechanism an operator needs in parentheses
     ["Changes", `each table as its sync: says${s.source.replication ? "" : " (a SELECT of its changed rows)"}${s.source.sync ? ` · sync: ${s.source.sync.default} ${s.source.sync.written ? "for every table without its own" : "(the default: the file writes none)"}` : ""} · ` +
       (s.source.replication ? `sync: replication tables streamed as they happen (logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication}, ` +
@@ -379,8 +380,13 @@ export function renderFacts(s, now = Date.now()) {
   rows.push(...sessionsRows(s.sessions).map(([k, v]) => factRow(k, v)));
   // `pageSocket` (mason serve with MASON_UI_SOCKET): said without its path, as the page shows no absolute path
   if (typeof s.pageSocket === "string") rows.push(factRow("Web page", "served on a Unix socket on the server too (MASON_UI_SOCKET)"));
-  return `<table class="facts-table"><caption>Server</caption><tbody>${rows.join("")}</tbody></table>`;
+  // a database on another machine, said as information, never as a warning (issue 888: the run no longer warns of it)
+  const remote = s.source.remote === true && !s.source.demo ? `<p class="info fact-note">${esc(REMOTE_NOTE)}</p>` : "";
+  return `<table class="facts-table"><caption>Server</caption><tbody>${rows.join("")}</tbody></table>${remote}`;
 }
+
+/** A database on another machine, in the words `mason init` and `mason start` say it (src/cli/preflight.ts REMOTE_NOTE). */
+export const REMOTE_NOTE = "Your database is on another machine. Mason will sync the tables you choose to this machine.";
 
 /**
  * THE COPIES NOT FINISHED, a bar each as `mason status` and `mason wait` print them (`tableLine`): copying, waiting,

@@ -232,7 +232,7 @@ test("mason status and wait: each copied table says how it is kept current and h
   assert.match(paintBar(lines[0]!, st), /<g>█{20}<\/g>/);
   const behind = tableLines(state({ tables: [t({ table: "public.orders", added: true, copy: { phase: "done", rowsCopied: 1, updatedAt: at(1) },
     kept: { by: "poll", sync: every30, syncedAt: "2026-10-29T11:00:00.000Z", nextAt: null, pending: "its columns changed: it is read again whole, then caught up by one poll" } })] }), now);
-  assert.deepEqual(behind, ["public.orders  ████████████████████ 100%  1 rows · synced · NOT kept current (last synced 60 min ago): its columns changed: it is read again whole, then caught up by one poll"]);
+  assert.deepEqual(behind, ["public.orders  ████████████████████ 100%  1 rows · synced · not kept current (last synced 60 min ago): its columns changed: it is read again whole, then caught up by one poll"]);
   assert.match(paintBar(behind[0]!, st), /<y>█{20}<\/y>/);
   // ready all the same: it is synced and served
   assert.equal(readiness(state({ tables: [t({ table: "public.orders", added: true, copy: { phase: "done", rowsCopied: 1, updatedAt: at(1) }, kept: { by: "poll", sync: off, syncedAt: null, nextAt: null } })] })).ready, true);
@@ -1332,7 +1332,7 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
  * ISSUE 834: a first sync reads the table as of its start, then ONE poll catches it up (src/duck/sync.ts `catchUp`), a
  * `sync: off` table's too. A 23 M-row table's catch-up was still running when `mason wait` said Ready, its line "NOT
  * kept current" with a yellow bar. While a table is in it, `mason wait` and `mason status` say it is being caught up
- * (never "NOT kept current"), and `mason wait` is not ready until it ends — through the command, over a run's server.
+ * (never "not kept current"), and `mason wait` is not ready until it ends — through the command, over a run's server.
  */
 test("mason wait is ready only once a first sync's catch-up poll is over, and says it is being caught up meanwhile — a sync: off table and a polled one (issue 834)", async () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-catch-up-")));
@@ -1393,7 +1393,7 @@ test("mason wait is ready only once a first sync's catch-up poll is over, and sa
     assert.deepEqual((JSON.parse(named.stdout) as { waiting: string[] }).waiting, [caughtUp("big")]);
     const person = await run(["wait", "--timeout", "1"]);
     assert.equal(person.code, 124, person.stdout + person.stderr);
-    assert.doesNotMatch(person.stdout + person.stderr, /NOT kept current|Ready/, "a catch-up is at work, not a fault, and the wait is not over");
+    assert.doesNotMatch(person.stdout + person.stderr, /not kept current|Ready/, "a catch-up is at work, not a fault, and the wait is not over");
     assert.match(person.stderr, new RegExp(`public\\.big +█{20} 100% {2}23,364,415 rows · synced · ${commands.CATCHING_UP} \\(last synced \\d+ s ago\\)\\n`));
     assert.match(person.stderr, new RegExp(`public\\.small +█{20} 100% {2}17,079 rows · synced · ${commands.CATCHING_UP} \\(last synced \\d+ s ago\\)\\n`));
     const status = await run(["status", "--json"]);

@@ -243,7 +243,8 @@ serves numbers only — `mason_ready`, `mason_info{version}`, `mason_uptime_seco
 each table's first sync: `synced`, `syncing`, `waiting` or `failed`), `mason_synced_bytes`, `mason_synced_rows`, `mason_sync_oldest_age_seconds`, `mason_stream_lag_bytes` /
 `_seconds`, `mason_slot_wal_held_bytes`, `mason_disk_free_bytes`, `mason_sessions_open`,
 `mason_statements_total{outcome}` (a counter since the process started) and `mason_statement_duration_seconds` (a
-summary: the last minute's sample's p50 / p95, the sum and count since the start) — each the number `/api/state` or a
+summary: the last minute's sample's p50 / p95, the sum and count since the start) and `mason_ui_errors_total` (the web
+page's own errors reported since the start, issue 923) — each the number `/api/state` or a
 usage sample already holds (src/cli/run-server.ts `metricsFacts`), a number not known absent rather than 0. A scrape
 never reaches the source: the stream's position and the slot are as the sampler last read them, absent when that is
 more than two samples old. It

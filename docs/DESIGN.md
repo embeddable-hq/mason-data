@@ -2198,6 +2198,19 @@ so the next start seeds it again. **Where.** `src/cli/demo.ts`, `src/demo/source
 
 ## Operating it
 
+### Facts said as facts (2026-11-12, issue 888)
+
+**Decision (the owner).** A database on another machine is no longer a stop that wants `--remote` (gone, with the
+config's `remote`): `mason init` and `mason start` carry on and say it as one line of information (`REMOTE_NOTE`). That
+it is the main database, not a read replica, is information too, said by `mason init` and by `mason start` until a first
+sync is done (`sourceNotes`, `PRIMARY_NOTE`, src/cli/preflight.ts; `Sync.copiedSources`, the ledger as read at open).
+`mason status` warns of neither, and its Database line says which it is, as the page's facts card does from
+`source.standby`, never from a warning's words (#898's `saidAsFact` filter is gone). PUBLIC's default CREATE on schema
+public before Postgres 15 is a line of information in `mason doctor`, never a warning: the role its way out makes would
+hold it too. A password in `mason init`'s URL is a `Tip:`. **Why.** Each made a normal fact read as a risk, or repeated
+it at every run, and people were scared off for no reason. The synced data's folder is made 0700, so "no access control
+beyond this machine's" overstated it.
+
 ### A server's web page: `mason ui --ssh` (2026-10-31, issue 107)
 
 **Decision.** The tunnel is ssh's stdio to a bridge beside the run (`mason ui --bridge`, `src/cli/ui-ssh.ts`), not `ssh -L`.

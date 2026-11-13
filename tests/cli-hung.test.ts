@@ -52,7 +52,7 @@ Object.defineProperty(process, "platform", { get: () => /src[\\\\/]cli[\\\\/]run
 function hungProject(pid: number, recorded: { started?: string }): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-hung-"));
   fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
-  const cfg = newConfig("shop", "mason", false);
+  const cfg = newConfig("shop", "mason");
   cfg.lastRun = new Date(Date.now() - 120_000).toISOString();
   cfg.running = { pid, ...recorded, controlUrl: "http://127.0.0.1:1", token: "t", postgresUrl: "postgresql://127.0.0.1:54988/shop", postgresListener: { host: "127.0.0.1", tls: null } };
   writeConfig(path.join(root, ".mason"), cfg);

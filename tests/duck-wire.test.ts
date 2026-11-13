@@ -137,6 +137,10 @@ const DDL = [
   // values use) (src/duck/sync.ts "A NUMERIC THE EXTENSION WOULD READ AS A DOUBLE"), a w of 30 integer digits
   "CREATE TABLE public.pnum (id INTEGER PRIMARY KEY, u DECIMAL(38,4), w DECIMAL(38,2))",
   "INSERT INTO public.pnum VALUES (1, 1.2345, 19.99), (2, 7, 123456789012345678901234567890.25), (3, -0.5, 5), (4, NULL, NULL)",
+  // a numeric bin's edges (issues 464, 465): a cent either side of 12.5, negatives, each type's limits, NULL, and the
+  // bigints whose quotient by 12.5 Postgres rounds to a whole number before its floor
+  "CREATE TABLE public.bins (id INTEGER PRIMARY KEY, a DECIMAL(12,2), h DECIMAL(30,8), i INTEGER, s SMALLINT, b BIGINT)",
+  "INSERT INTO public.bins VALUES (1, 0, 0, 0, 0, 0), (2, 12.5, 12.5, 25, 25, 25), (3, 12.49, 12.49999999, 24, 24, 24), (4, 12.51, 12.50000001, 26, 26, 1000000000000000012), (5, -12.5, -12.5, -25, -25, -1000000000000000012), (6, -12.49, -12.49999999, -24, -24, -24), (7, -12.51, -12.50000001, -26, -26, -26), (8, 0.01, 0.00000001, 1, 1, 1), (9, -0.01, -0.00000001, -1, -1, -1), (10, 9999999999.99, 9999999999999999999999.99999999, 2147483647, 32767, 9223372036854775807), (11, -9999999999.99, -9999999999999999999999.99999999, -2147483648, -32768, -9223372036854775808), (12, 124.99, 125, 124, 124, 999999999999999999), (13, NULL, NULL, NULL, NULL, NULL)",
   // issue 244's deep chains executed (#484): `deepShapes`' table, ten rows of NULLs, duplicates, ties, a padded char(4)
   "CREATE TABLE public.deep_t (id INTEGER PRIMARY KEY, a INTEGER, b VARCHAR, c DECIMAL(10,2), d VARCHAR)",
   "INSERT INTO public.deep_t VALUES (1, 5, 'x', 10.00, 'ab  '), (2, -3, 'y', 0.00, 'abcd'), (3, NULL, 'x', -7.25, 'a   '), (4, 7, NULL, 10.00, NULL), (5, 0, 'z', 99999999.99, 'zz  '), " +
@@ -225,6 +229,8 @@ const PG_DDL = [
   "INSERT INTO public.bigdec VALUES (1, 1.00000000000000000001, 1), (2, 1.00000000000000000002, 1), (3, 2.5, 2), (4, 5, 2), (5, 2.5, 1)",
   "CREATE TABLE public.pnum (id integer PRIMARY KEY, u numeric, w numeric(65,30))",
   "INSERT INTO public.pnum VALUES (1, 1.2345, 19.99), (2, 7, 123456789012345678901234567890.25), (3, -0.5, 5), (4, NULL, NULL)",
+  "CREATE TABLE public.bins (id integer PRIMARY KEY, a numeric(12,2), h numeric(30,8), i integer, s smallint, b bigint)",
+  "INSERT INTO public.bins VALUES (1, 0, 0, 0, 0, 0), (2, 12.5, 12.5, 25, 25, 25), (3, 12.49, 12.49999999, 24, 24, 24), (4, 12.51, 12.50000001, 26, 26, 1000000000000000012), (5, -12.5, -12.5, -25, -25, -1000000000000000012), (6, -12.49, -12.49999999, -24, -24, -24), (7, -12.51, -12.50000001, -26, -26, -26), (8, 0.01, 0.00000001, 1, 1, 1), (9, -0.01, -0.00000001, -1, -1, -1), (10, 9999999999.99, 9999999999999999999999.99999999, 2147483647, 32767, 9223372036854775807), (11, -9999999999.99, -9999999999999999999999.99999999, -2147483648, -32768, -9223372036854775808), (12, 124.99, 125, 124, 124, 999999999999999999), (13, NULL, NULL, NULL, NULL, NULL)",
   "CREATE TABLE public.deep_t (id integer PRIMARY KEY, a integer, b text, c numeric(10,2), d char(4))",
   "INSERT INTO public.deep_t VALUES (1, 5, 'x', 10.00, 'ab'), (2, -3, 'y', 0.00, 'abcd'), (3, NULL, 'x', -7.25, 'a'), (4, 7, NULL, 10.00, NULL), (5, 0, 'z', 99999999.99, 'zz'), " +
     "(6, 2, 'y', NULL, 'b'), (7, 9, 'x', 1.01, 'ab'), (8, -1, 'w', 3.33, 'c'), (9, 4, NULL, 2.50, 'd'), (10, 1, 'v', -0.01, 'e')",
@@ -305,6 +311,9 @@ const schema: PgSchema = {
       columns: [{ name: "id", type: "int4" }, { name: "x", type: "numeric", spelled: "numeric(30,20)" }, { name: "y", type: "numeric", spelled: "numeric(30,20)" }] },
     { name: "pnum", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "u", type: "numeric", spelled: "numeric" }, { name: "w", type: "numeric", spelled: "numeric(65,30)" }] },
+    { name: "bins", primaryKey: ["id"], joins: [],
+      columns: [{ name: "id", type: "int4" }, { name: "a", type: "numeric", spelled: "numeric(12,2)" }, { name: "h", type: "numeric", spelled: "numeric(30,8)" },
+        { name: "i", type: "int4" }, { name: "s", type: "int2" }, { name: "b", type: "int8" }] },
     { name: "deep_t", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "a", type: "int4" }, { name: "b", type: "text" }, { name: "c", type: "numeric", spelled: "numeric(10,2)" }, { name: "d", type: "text", spelled: "character(4)" }] },
     { name: "ratios", primaryKey: ["id"], joins: [],
@@ -534,7 +543,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "pnum"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "timetz_runs"], ["public", "timetz_runs3"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "accounts"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "bins"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "pnum"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "timetz_runs"], ["public", "timetz_runs3"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "accounts"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'sales' AND table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -4168,6 +4177,76 @@ test("a numeric quotient under a DISTINCT ON or a DISTINCT shows Postgres's exac
     }
   } finally { await c.end(); }
 });
+
+// issues 464, 465: a GROUP BY of a numeric bin, floor or ceil of a column's (+ and - of columns and constants) quotient
+// by a constant, groups by the engine's own integer where the types prove it Postgres's integer (src/duck/rewrite.ts
+// `nativeBin`, `nativeKey`), never the program's key a row, and every answer is Postgres's, at a bin's edges, below
+// zero, at each type's limits. Where Postgres rounds the quotient to a whole number before its floor (a bigint by 12.5:
+// 80000000000000000.96 rounds at one place), or e·10^scale could pass 38 places, the key stays the program's, as before
+test("issues 464, 465: a numeric bin is the engine's integer where the types prove it Postgres's, and Postgres's answer everywhere", async () => {
+  const c = await client();
+  try {
+    const keyed = async (): Promise<number> => (await store.functionRows()).get("__mason_numeric_program_key") ?? 0;
+    const bin = (x: string, min: string, w: string): string => `((FLOOR(((${x} - ${min}) / ${w})) * ${w}) + ${min})`;
+    // grouped by the bin: the engine's own integer, no key a row
+    const grouped: string[] = [];
+    for (const [x, min, w] of [["bins.a", "0.0", "12.5"], ["bins.a", "-10000.0", "125.0"], ["bins.a", "1.25", "0.3"], ["bins.a", "0.0", "-12.5"], ["bins.a", "0", "7"],
+      ["bins.h", "-5.0", "0.25"], ["bins.h", "0.0", "0.0007"], ["bins.i", "0.0", "12.5"], ["bins.s", "-100.0", "0.3"], ["bins.b", "0.0", "0.125"]] as const) {
+      const e = bin(x, min, w);
+      grouped.push(`SELECT ${e} AS v, COUNT(*) AS n FROM public.bins GROUP BY ${e} ORDER BY ${e} ASC`);
+    }
+    grouped.push(
+      "SELECT floor(a / 12.5) * 12.5 AS v, count(*) FROM bins GROUP BY 1 ORDER BY 1 DESC NULLS FIRST",
+      "SELECT -ceil(a / 12.5) AS v, count(*) FROM bins GROUP BY 1 ORDER BY 1",
+      "SELECT floor(a / 12.5) * 12.5 AS v, count(*) FROM bins GROUP BY v HAVING floor(a / 12.5) * 12.5 > -20 ORDER BY v",
+      "SELECT s.v, s.n FROM (SELECT floor((a - -5.0) / 2.5) * 2.5 + -5.0 AS v, count(*) AS n FROM bins GROUP BY 1) s ORDER BY s.v NULLS FIRST",
+      "SELECT floor((b.a - 0.0) / 25.0) * 25.0 + 0.0 AS v, count(*) FROM orders o LEFT JOIN bins b ON b.id = o.id % 15 GROUP BY 1 ORDER BY 1 NULLS FIRST");
+    for (const sql of grouped) {
+      const before = await keyed();
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      assert.equal(await keyed() - before, 0, `${sql}: grouped by the program's key a row, not the engine's bin`);
+    }
+    // the program's key, as before: a bigint by a width whose quotient Postgres may round to a whole number first, a
+    // numeric(30,8) whose e·10^scale may pass 38 places, a quotient of the bin (not one-to-one), a divisor past 18 places
+    for (const sql of ["SELECT floor(b / 12.5) * 12.5 AS v, count(*) FROM bins GROUP BY 1 ORDER BY 1", "SELECT floor(h / 0.000000007) AS v, count(*) FROM bins GROUP BY 1 ORDER BY 1",
+      "SELECT floor(a / 12.5) / 3 AS q, count(*) FROM bins GROUP BY 1 ORDER BY 1", "SELECT floor(a / 12.5) * 0.0 AS z, count(*) FROM bins GROUP BY 1 ORDER BY 1",
+      "SELECT floor(a / 1000000000000000000.5) AS v, count(*) FROM bins GROUP BY 1 ORDER BY 1"]) {
+      const before = await keyed();
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      assert.ok(await keyed() - before > 0, `${sql}: grouped by the engine's bin where the types do not prove it`);
+    }
+    assert.deepEqual((await answer(c, "SELECT floor(b / 12.5)::text AS v, count(*) FROM bins WHERE id = 4 GROUP BY 1")).rows, [["80000000000000001", "1"]], "Postgres's floor of 80000000000000000.96, the quotient rounded first");
+  } finally { await c.end(); }
+});
+
+// THE REVIEW OF PR 922: the bin is the GROUP BY's key ONLY. Anywhere else it is read as before, its program and the
+// engine's double. Read as the engine's DECIMAL(38, 0) it rounded the decimals of what it was compared with, united with
+// or chosen beside (0.01 IN a bin of 0; 0.75 sorted past 1); a product of it passed 38 places (22003); and a divisor
+// of 39 places passed a HUGEINT in the remainder's arithmetic, or was read as a double
+const binReview = (name: string, sqls: string[]): void => {
+  test(`issues 464, 465, the review of PR 922: ${name}`, async () => {
+    const c = await client();
+    try {
+      for (const sql of sqls) assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    } finally { await c.end(); }
+  });
+};
+binReview("a bin read beside another numeric's decimals is Postgres's, never rounded to the bin's type", [
+  "SELECT id FROM bins WHERE a IN (SELECT floor(a / 12.5) FROM bins) ORDER BY id",
+  "SELECT id FROM bins WHERE floor(a / 12.5) * 12.5 IN (SELECT a FROM bins) ORDER BY id",
+  "SELECT floor(a / 12.5) AS v FROM bins UNION ALL SELECT 0.75 ORDER BY 1 NULLS FIRST",
+  "SELECT floor(a / 12.5) * 12.5 AS v, 1 AS arm FROM bins UNION ALL SELECT a, 2 FROM bins ORDER BY 1 NULLS FIRST, 2",
+  "SELECT a AS v, 1 AS arm FROM bins UNION ALL SELECT floor(a / 12.5), 2 FROM bins ORDER BY 1 NULLS FIRST, 2",
+  "SELECT id, CASE WHEN id % 2 = 0 THEN floor(a / 12.5) ELSE a END AS v FROM bins ORDER BY 2, 1",
+  "SELECT id, floor(a / 12.5) AS f, ceil(a / 12.5) AS c, ceiling((a - 0.01) / 0.3) AS c2, (floor(a / 12.5) * 12.5)::text AS t, floor(-a / 3) AS n FROM bins ORDER BY id"]);
+binReview("a product of a bin past 38 places is Postgres's, never the engine's overflow", [
+  "SELECT id, floor(h / 0.0001) * floor(h / 0.0001) AS sq FROM bins ORDER BY id",
+  "SELECT id, floor(h / 0.0001) * h AS p, floor(h / 0.0001) * 1000000000000.5 AS q FROM bins ORDER BY id",
+  "SELECT floor(h / 0.0001) * 1000000000000 AS p, count(*) FROM bins GROUP BY 1 ORDER BY 1"]);
+binReview("a bin by a divisor of 39 places is Postgres's", [
+  "SELECT id, floor(a / 170141183460469231731687303715884105720) AS f, ceil(a / 170141183460469231731687303715884105720) AS c FROM bins ORDER BY id",
+  "SELECT id, floor(a / 200000000000000000000000000000000000000) AS f, ceil(a / 200000000000000000000000000000000000000) AS c FROM bins ORDER BY id",
+  "SELECT floor(a / 170141183460469231731687303715884105720) AS v, count(*) FROM bins GROUP BY 1 ORDER BY 1"]);
 
 /** an answer's rows in one order: quotients equal to a double's 17 digits are in no defined order on Mason (the listed
  *  difference numeric-quotient-compare), so a test of their equality reads the rows as a set */

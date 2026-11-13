@@ -540,7 +540,7 @@ test("behind: a polled table older than its sync promises is behind, by how much
   const pendingWhy = "its columns changed: it is read again whole, then caught up by one poll";
   const queued = await row254({ kept: { ...polledKept(7200, { pending: pendingWhy }), pending: pendingWhy } });
   assert.equal(queued.sync.state, "behind");
-  assert.match(queued.line, /NOT kept current \(last synced 2 h ago\): its columns changed: it is read again whole, then caught up by one poll — behind by 1 h 44 min$/);
+  assert.match(queued.line, /not kept current \(last synced 2 h ago\): its columns changed: it is read again whole, then caught up by one poll — behind by 1 h 44 min$/);
 });
 
 test("a streamed table is behind only past what the stream promises: an idle healthy stream never; a stream down past it, with why (issue 254)", async () => {
@@ -556,15 +556,15 @@ test("a streamed table is behind only past what the stream promises: an idle hea
   // a short restart: within the bound, said as not running, never behind
   const short = await row254({ kept: streamed(30, "it has not started yet: it starts at the next pass") });
   assert.equal(short.sync.state, "synced");
-  assert.match(short.line, /NOT kept current now, the stream is not running/);
+  assert.match(short.line, /not kept current now, the stream is not running/);
   // a stream failure recorded on the copy: failed, on its row, and readiness fails
   const failed = await row254({ error: "replication: the connection was reset", kept: streamed(30, null) });
   assert.deepEqual([failed.sync.state, failed.t.error, failed.readiness.ready, failed.word], ["failed", "replication: the connection was reset", false, "Failed"]);
-  assert.match(failed.line, /1,000 rows · synced · NOT kept current, its sync failed \(last synced 30 s ago\): replication: the connection was reset$/);
+  assert.match(failed.line, /1,000 rows · synced · not kept current, its sync failed \(last synced 30 s ago\): replication: the connection was reset$/);
 });
 
 test("left out of a named publication, or its catch-up failed: a synced table whose keeping fails is failed on its own row, and mason wait fails (issues 100, 82)", async () => {
-  // #100: the publication does not carry it — its copy serves, NOT kept current; the row carries its error
+  // #100: the publication does not carry it — its copy serves, not kept current; the row carries its error
   const gap = "replication: publication app_pub does not carry public.t: ALTER PUBLICATION app_pub ADD TABLE public.t";
   const why = "publication app_pub does not carry public.t: ALTER PUBLICATION app_pub ADD TABLE public.t — or give its entry sync: poll <interval> in the sources file, which needs no publication";
   const left = await row254({ error: gap, kept: { by: "replication", slot: "s", state: "left-out", why, position: "0/1", lastCommit: null, notRunning: null, syncedAt: ago(7200),
@@ -573,7 +573,7 @@ test("left out of a named publication, or its catch-up failed: a synced table wh
   assert.deepEqual(left.readiness, { ready: false, failed: [`public.customers: ${gap}`], waiting: [] });
   assert.equal(left.word, "Failed");
   assert.equal(left.totals.failed, 1, "the count of failed is matched by a row");
-  assert.equal(left.line.replace(/\s+/g, " "), `public.customers ████████████████████ 100% 1,000 rows · synced · NOT kept current, its sync failed (last synced 2 h ago): ${why}`);
+  assert.equal(left.line.replace(/\s+/g, " "), `public.customers ████████████████████ 100% 1,000 rows · synced · not kept current, its sync failed (last synced 2 h ago): ${why}`);
   assert.doesNotMatch(left.line, /first sync failed/);
   assert.equal(left.colour, "R", "a synced table whose sync failed is red");
   // #82's shape: its catch-up failed and waits out its back-off (the copy's error, its behind mark)
@@ -582,7 +582,7 @@ test("left out of a named publication, or its catch-up failed: a synced table wh
     behind: "after its whole read", kept: polledKept(7200, { pending }, every15) && { ...polledKept(7200, { pending }), pending } });
   assert.deepEqual([caught.sync.state, caught.readiness.ready, caught.word], ["failed", false, "Failed"]);
   assert.match(caught.readiness.failed[0]!, /^public\.customers: its catch-up poll failed/);
-  assert.match(caught.line, /NOT kept current, its sync failed \(last synced 2 h ago\): it is caught up by one poll after its whole read first — after a failure, tried again after 12:05 UTC$/);
+  assert.match(caught.line, /not kept current, its sync failed \(last synced 2 h ago\): it is caught up by one poll after its whole read first — after a failure, tried again after 12:05 UTC$/);
   // a catch-up queued after a copy that went well: catching up, not ready yet (issue 834), never failed or behind
   const queued = await row254({ behind: "after its whole read", kept: { ...polledKept(7200, { pending: "it is caught up by one poll after its whole read first" }), pending: "it is caught up by one poll after its whole read first" } });
   assert.deepEqual([queued.sync.state, queued.readiness.ready], ["catching-up", false]);
@@ -594,7 +594,7 @@ test("left out of a named publication, or its catch-up failed: a synced table wh
   assert.deepEqual([(await row254({ kept: polledKept(60) })).readiness.ready], [true]);
 });
 
-test("in its one catch-up poll, for every sync — off, polled, replicated — and as it ends: catching-up, at work in cyan, never NOT kept current, and not ready (issue 834)", async () => {
+test("in its one catch-up poll, for every sync — off, polled, replicated — and as it ends: catching-up, at work in cyan, never not kept current, and not ready (issue 834)", async () => {
   const { CATCHING_UP } = await import("../src/cli/readiness.ts") as unknown as { CATCHING_UP: string };
   const commands = await import("../src/cli/commands.ts");
   const pending = "it is caught up by one poll after its whole read first";
@@ -805,6 +805,11 @@ test("GET /metrics' facts never reach the source: the stream is asked with refre
   const now = Date.now();
   const facts = await runServer.metricsFacts!(c, now);
   assert.deepEqual(asked, [{ refresh: false }], "a scrape: the cached position, never a connection to the database");
+  // the web page's own errors (src/cli/ui-errors.ts): the run's count, and none at all where the run takes no reports
+  assert.equal(facts.uiErrors, null, "a run that takes no reports of the page's errors: no count, never a 0");
+  const counted = { total: 3 } as unknown as NonNullable<RunContext["uiErrors"]>;
+  assert.equal((await runServer.metricsFacts!({ ...c, uiErrors: counted }, now)).uiErrors, 3, "the reports counted since the process started");
+  asked.length = 1;
   assert.deepEqual([facts.at, facts.freshSeconds, facts.statements, facts.durations], [now, 120, usage.statementTotals(), usage.lastDurations()],
     "the facts' moment, two samples' age allowed, the sampler's counter and last p50 / p95");
   await runServer.usageFacts(c, now);

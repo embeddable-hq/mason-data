@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { runState, type RunContext } from "../src/cli/run-server.ts";
 import * as pgUrl from "../src/cli/pg-url.ts";
 const { psqlLine } = pgUrl;
-import { parseSource, type SourceTable } from "../src/cli/preflight.ts";
+import { parseSource, REMOTE_NOTE, sourceWarnings, type SourceFacts, type SourceTable } from "../src/cli/preflight.ts";
 import { catalogTable, parseSourceText } from "../src/cli/sources.ts";
 import type { CopyProgressView, CopyState } from "../src/duck/sync.ts";
 import type { RunState } from "../src/cli/commands.ts";
@@ -236,6 +236,36 @@ test("each added table's line is mason status's: the table, its percent and what
   }
 });
 
+test("the Overview's Server table: a database on another machine is information, never a warning; the kind of server is a fact of the Database row, as mason status says it (issue 888)", async () => {
+  const status = await import(path.join(WEB, "pages", "status.js") as string) as Record<string, unknown>;
+  const statusFn = <A extends unknown[], R>(name: string) => { assert.equal(typeof status[name], "function", `status.js exports ${name}`); return status[name] as (...a: A) => R; };
+  // the run's warnings as mason start makes them (src/cli/preflight.ts sourceWarnings), never copied literals: a main
+  // database on another machine, a serverless one among them — the page shows each as it is, filtering none by its words
+  const facts: SourceFacts = { version: 160000, versionText: "16.4", standby: false, tables: [], systemIdentifier: null };
+  const sourceOf = (url: string) => { const p = parseSource(url); assert.ok("source" in p); return p.source; };
+  const renderFacts = statusFn<[unknown, number], string>("renderFacts");
+  for (const url of ["postgres://me@db.example.com/shop", "postgres://me@ep-x.us-east-2.aws.neon.tech/shop"]) {
+    const warnings = sourceWarnings(sourceOf(url), facts);
+    for (const w of warnings) assert.doesNotMatch(w, /another machine|not this machine|main database|read replica|PRIMARY|pg_is_in_recovery/i, `${url}: where the database is and what kind it is are no warning (issue 888)`);
+    const html = renderFacts({ ...RUNNING, source: { ...RUNNING.source, remote: true, standby: false }, warnings }, NOW);
+    assert.equal([...html.matchAll(/<tr class="warn"><th scope="row">Warning<\/th>/g)].length, warnings.length, `${url}: every warning of the run is shown, none filtered by its words`);
+    assert.match(html, /<\/table><p class="info fact-note">Your database is on another machine\. Mason will sync the tables you choose to this machine\.<\/p>$/, "information under the table");
+  }
+  assert.match(textOf(renderFacts({ ...RUNNING, source: { ...RUNNING.source, remote: true }, warnings: sourceWarnings(sourceOf("postgres://me@ep-x.us-east-2.aws.neon.tech/shop"), facts) }, NOW)), /Warning Neon suspends/);
+  // this machine's database, and the demo's: no such line
+  for (const source of [{ ...RUNNING.source, remote: false }, { ...RUNNING.source, remote: true, demo: true }]) assert.doesNotMatch(renderFacts({ ...RUNNING, source }, NOW), /another machine/);
+  // the page's words are mason start's (src/cli/preflight.ts REMOTE_NOTE)
+  assert.equal(status.REMOTE_NOTE, REMOTE_NOTE, "src/cli/preflight.ts REMOTE_NOTE");
+  // the Database row: what kind of server, in mason status's words — the page's sourceRows and the CLI's say the same row
+  const pageRows = statusFn<[unknown], Array<[string, string]>>("sourceRows");
+  for (const standby of [true, false]) {
+    const s = { ...RUNNING, source: { ...RUNNING.source, standby } };
+    const page = pageRows(s).find(([k]) => k === "Database")![1];
+    assert.ok(page.endsWith(standby ? " · a read replica" : " · your main database"), page);
+    assert.equal(page, commands.sourceRows(s as unknown as RunState).find(([k]) => k === "Database")![1], "the same words as mason status");
+  }
+});
+
 test("a table's line is mason tables': its size, its key, and added or why it cannot be added as it is", () => {
   const cli = (commands as unknown as { tableFacts?: (t: unknown) => unknown }).tableFacts;
   assert.equal(typeof cli, "function", "src/cli/commands.ts exports tableFacts");
@@ -350,7 +380,7 @@ test("behind, left out, a failed catch-up, a stream down, off: each table's line
       lateWhy: "the last pass, which reads every table again whole, took 1 s, and Mason waits four times a pass between passes to keep the database's load to a fifth" } } as CopyState]],
     ["off", [{ ...copied("public.events", 30_000_000, ago(7200)), kept: { by: "poll", sync: { mode: "off" }, syncedAt: ago(3 * 86_400), nextAt: null, promisedSeconds: null, lateWhy: null } } as CopyState]],
     ["synced", [{ ...copied("public.customers", 1200, ago(7200)), kept: { by: "poll", sync: every15, syncedAt: ago(14 * 60), nextAt: null, promisedSeconds: 960, lateWhy: pass } } as CopyState]],
-    // in its first sync's one catch-up poll (issue 834): at work, its words the CLI's, never "NOT kept current"
+    // in its first sync's one catch-up poll (issue 834): at work, its words the CLI's, never "not kept current"
     ["catching up, off", [{ ...copied("public.events", 23_000_000, ago(5)), behind: "after its whole read", rebuilding: "catch-up",
       kept: { by: "poll", sync: { mode: "off" }, syncedAt: ago(5), nextAt: null, pending: "it is caught up by one poll after its whole read first", promisedSeconds: null, lateWhy: null } } as CopyState]],
     ["catching up, polled", [{ ...copied("public.customers", 1200, ago(5)), behind: "after its whole read",
@@ -380,7 +410,7 @@ test("behind, left out, a failed catch-up, a stream down, off: each table's line
     words[name] = `${/class="indicator (\w+)"/.exec(row)![1]} ${/<\/span>(Behind|Failed|Synced|Syncing|Finishing sync|Waiting)</.exec(row)![1]} ${ours.state}`;
     if (name.startsWith("catching up")) {
       assert.ok(ours.what.endsWith(` · ${commands.CATCHING_UP} (last synced 5 s ago)`), `${name}: ${ours.what}`);
-      assert.doesNotMatch(ours.what, /NOT kept current/, `${name}: at work, not a fault (issue 834)`);
+      assert.doesNotMatch(ours.what, /not kept current/, `${name}: at work, not a fault (issue 834)`);
       assert.match(row, /<span class="copyline t-catching-up">/, `${name}: the bar in the accent (app.css: no amber of .t-unsynced)`);
       assert.match(cli, /^\S+\s+█{20} 100% {2}/);
       assert.match(commands.paintBar(cli, { red: (x: string) => `R${x}`, yellow: (x: string) => `Y${x}`, green: (x: string) => `G${x}`, cyan: (x: string) => `C${x}`, dim: (x: string) => x } as never, commands.tableRows(s, NOW).find((x) => x.line === cli)!.tone), /C█/, `${name}: cyan in mason status`);
@@ -429,7 +459,7 @@ test("a copy the poll does not keep current is the page's warning, as mason stat
   const t = BEHIND.tables.find((x) => x.table === "public.orders")!;
   const line = fn<[unknown], { state: string; what: string }>("tableLine")(t);
   assert.equal(line.state, "unsynced", "the page's warning colour (app.css .t-unsynced), never done's");
-  assert.match(line.what, /^2,000,000 rows · synced · NOT kept current \(last synced .* ago\): caught up by one poll first \(after its whole read\)$/);
+  assert.match(line.what, /^2,000,000 rows · synced · not kept current \(last synced .* ago\): caught up by one poll first \(after its whole read\)$/);
   // the CLI paints the same words yellow (paintBar): the same text, the same warning
   const cli = commands.tableLines(BEHIND).find((l) => l.startsWith("public.orders"))!;
   assert.ok(cli.endsWith(line.what), `${cli}\n${line.what}`);
@@ -454,7 +484,7 @@ test("failed: its error on its line and in full, the warning, a table whose sync
 });
 
 test("no table added: the commands' sentence, and what adds one", () => {
-  assert.match(textOf(fn<[unknown, unknown?], string>("renderStatus")(NONE)), /^No table added yet\. Your database has 4\. Add one on the Tables page\. Server Sources file .* Database postgres:.* Changes each table as its sync: says .* Connections open none open$/, "no box: the Server table says the database and its changes");
+  assert.match(textOf(fn<[unknown, unknown?], string>("renderStatus")(NONE)), /^No table added yet\. Your database has 4\. Add one on the Tables page\. Server Sources file .* Database postgres:.* Changes each table as its sync: says .* Connections open none open Your database is on another machine\. Mason will sync the tables you choose to this machine\.$/, "no box: the Server table says the database and its changes, then where it is, as information");
 });
 
 test("the tables: each of the database's, added, not added or cannot be added with its reason and no Add; Remove asks first", async () => {
@@ -2779,7 +2809,7 @@ test("the Overview: the word and its line, the cards (tables synced N of M, rows
     const text = textOf(html);
     assert.match(html, HEALTH("bad", "Failed"), "the word first: mason status's");
     // the cards first: the copies in all, their rows, the last sync, the copy's file, the last day's statements and p95, its sync and query errors
-    assert.match(text, /^mason status Failed 1 table's sync failed: see Tables Database postgres:\S+ · Postgres 16\.4 Changes each table as its sync: says .*? Tables synced 2 of 3 added, 1 failed Rows 30,001,200 Last sync 30 s ago 2026-10-27 09:05:00 UTC Synced data unknown its size could not be read Queries, last day 1,234 1,200 completed, 34 refused, failed or cancelled p95, last day 380 ms average 42 ms · p50 12 ms Sync errors, last day 2 failed sync events Query errors, last day 33 30 refused, 3 failed /);
+    assert.match(text, /^mason status Failed 1 table's sync failed: see Tables Database postgres:\S+ · Postgres 16\.4 · your main database Changes each table as its sync: says .*? Tables synced 2 of 3 added, 1 failed Rows 30,001,200 Last sync 30 s ago 2026-10-27 09:05:00 UTC Synced data unknown its size could not be read Queries, last day 1,234 1,200 completed, 34 refused, failed or cancelled p95, last day 380 ms average 42 ms · p50 12 ms Sync errors, last day 2 failed sync events Query errors, last day 33 30 refused, 3 failed /);
     assert.match(html, /<div class="cards n8">/, "eight cards on a bare run");
     assert.match(html, /<a class="card bad link" href="#tables\?show=failed"><p class="card-label">Tables synced<\/p><p class="card-value">2 of 3<\/p><p class="card-sub">added, 1 failed<\/p><\/a>/, "a card: its label, its value, its sub-line — and a link to the failed tables");
     // each error card leads to the view that lists what it counts, over the day it counts
@@ -2787,7 +2817,7 @@ test("the Overview: the word and its line, the cards (tables synced N of M, rows
     assert.match(html, /<a class="card warn link" href="#observability\/queries\?status=refused-or-failed&amp;range=24h"><p class="card-label">Query errors, last day<\/p><p class="card-value">33<\/p>/);
     // the database and how its changes arrive in the box, under its line; the rest in the Server table, under mason status's labels
     assert.match(html, /<dl class="health-facts"><div><dt>Database<\/dt><dd>postgres:.*?<\/dd><\/div><div><dt>Changes<\/dt><dd>each table as its sync: says .*?<\/dd><\/div><\/dl><\/div>/);
-    assert.match(text, / Server Sources file mason\/sources\/shop\.yml \(the tables it names are added\) Version 0\.9\.0 Up 6 min, since 2026-10-27 09:00:00 UTC Free disk .* Connections open none open$/, "the sources file from the project's root, as mason status names it");
+    assert.match(text, / Server Sources file mason\/sources\/shop\.yml \(the tables it names are added\) Version 0\.9\.0 Up 6 min, since 2026-10-27 09:00:00 UTC Free disk .* Connections open none open Your database is on another machine\. Mason will sync the tables you choose to this machine\.$/, "the sources file from the project's root, as mason status names it; then where the database is, as information");
     assert.doesNotMatch(html, /\/app\//, "never an absolute path");
     assert.match(html, /<caption>Server<\/caption><tbody><tr><th scope="row">Sources file<\/th>/, "ONE table of the other facts, each a row headed by its name");
     const server = html.slice(html.indexOf("<caption>Server</caption>"));
@@ -2821,7 +2851,7 @@ test("the Overview: Ready, Under way and Failed under the title mason status, ea
   assert.equal(textOf(renderHealth(COPYING)), `mason status Under way 1 of 3 tables synced, the rest syncing ${boxRows(COPYING)}`);
   assert.equal(textOf(renderHealth(FAILED)), `mason status Failed 1 table's sync failed: see Tables ${boxRows(FAILED)}`);
   assert.equal(textOf(renderHealth(SYNCED)), `mason status Failed 1 table's sync failed: see Tables ${boxRows(SYNCED)}`);
-  assert.match(boxRows(RUNNING), /^Database \S+ · Postgres 16\.4 Changes each table as its sync: says/);
+  assert.match(boxRows(RUNNING), /^Database \S+ · Postgres 16\.4 · your main database Changes each table as its sync: says/);
   assert.match(renderHealth(FAILED), /see <a href="#tables\?show=failed">Tables<\/a><\/p><dl class="health-facts"><div><dt>Database<\/dt><dd>/, "Tables: the failed ones");
   assert.match(renderHealth(FAILED), /<\/dd><\/div><\/dl><\/div>$/, "the rows close the box");
   assert.match(renderHealth(RUNNING), /^<div class="health ok" role="status"><p class="health-title">mason status<\/p>/, "the title on the box's edge, as Getting started's");

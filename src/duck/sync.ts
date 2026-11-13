@@ -1843,6 +1843,12 @@ export class Sync {
     for (const s of this.snapshots.keys()) this.snapshots.set(s, "0:0:");
   }
 
+  /** The tables the store holds a finished first sync of, as its ledger says from `open` on — before `setTables` names
+   *  any, where `state()` lists none: what mason start says only until a first sync is done reads it (issue 888). */
+  copiedSources(): string[] {
+    return [...this.states.values()].filter((s) => s.phase === "copied").map((s) => s.source);
+  }
+
   state(): CopyState[] {
     const now = Date.now();
     // in the project's order, whatever order the copies ran and were recorded in (`copyOrder`)
