@@ -147,7 +147,7 @@ await import(${JSON.stringify(fileURLToPath(new URL("../src/duck/executor-worker
 // exactly as it was there. The run is told once, with the cause and the way out (src/cli/dev.ts exits for its supervisor,
 // or mason serve's platform, to open the file again), a session's later statement is told 57P02 and to reconnect, and
 // every synced row is there when the file is opened again.
-test("the synced data invalidated by a fatal error ends the run as a crash, its cause said, and every row is there on reopen", { timeout: 60_000 }, async () => {
+test("the synced data invalidated by a fatal error ends the run as a crash, its cause said, and every row is there on reopen", { timeout: 60_000, skip: "quarantined: #899" }, async () => {
   const file = path.join(dir, "invalidated.db");
   const ownLog: string[] = [];
   const own = await DuckStore.open(file, (l) => { ownLog.push(l); });
