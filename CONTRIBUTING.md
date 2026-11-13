@@ -68,7 +68,7 @@ alias mason-local="node $PWD/src/cli/main.ts"   # from the checkout's root; then
 | `cli/` | the npm package `@mason-data/cli` (built from `src/` by `cli/build.ts`) |
 | `docker/`, `deploy/` | the `mason-data` image and how to run it |
 | `tests/` | `node --test`, offline; `tests/integration/` against a real Postgres |
-| `docs/` | the README's Documentation table says what each one is |
+| `docs/` | the README's "Where to read more" table says what each one is |
 
 ## Pull requests
 

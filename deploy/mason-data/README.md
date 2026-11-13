@@ -157,7 +157,8 @@ Per-table or per-user detail (which table is stale, who sent what) would need a 
   priority, so a long statement slows the others beside it. A first sync's readers are about a core each while it runs
   (`MASON_COPY_PARALLEL`, default 3), and one backend each on your database.
 - **The disk** decides a query the page cache does not hold, and a first sync's writes: EBS gp3 is the measured one.
-  A faster disk helps where the synced data outgrows memory (not measured).
+  A faster disk helps where the synced data outgrows memory (not measured): a gp3 volume reads about 125 MB/s, and a
+  local NVMe disk, or a gp3 volume with more throughput provisioned, reads many times faster.
 - **The image is arm64 and amd64**, the same image; arm64 (Graviton) is the one measured.
 
 ## Settings

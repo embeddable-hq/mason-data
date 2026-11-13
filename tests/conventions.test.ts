@@ -1041,7 +1041,7 @@ export function contentsProblems(file: string, text: string): string[] {
 test("the README's Contents lists every ## and ### heading at its level and in order, and each of its links is a heading's anchor", () => {
   const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
   assert.deepEqual(contentsProblems("README.md", readme), [], "the README's Contents is its index: list each heading where the README has it");
-  assert.ok(markdownHeadings(readme).filter((h) => h.level === 2 || h.level === 3).length >= 27, "the README's ## and ### headings were read");
+  assert.ok(markdownHeadings(readme).filter((h) => h.level === 2 || h.level === 3).length >= 15, "the README's ## and ### headings were read");
 });
 
 test("the Contents guard would catch the real thing", () => {

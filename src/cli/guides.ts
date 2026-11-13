@@ -222,7 +222,7 @@ const REPO = "https://github.com/embeddable-hq/mason-data/blob/main";
 
 /**
  * `mason help production` (the journey from running it locally to deploying it, on the mason-data image): the
- * README's "Going to production", offline and short — what travels, what the server needs, how it runs, how it is upgraded.
+ * README's "Run it on a server", offline and longer — what travels, what the server needs, how it runs, how it is upgraded.
  */
 export function productionGuide(): string {
   return `GOING TO PRODUCTION — the project folder (mason/sources/, mason/mason.yml) is all that travels: its sources file
