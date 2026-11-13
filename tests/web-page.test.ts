@@ -585,17 +585,17 @@ test("the users while the roles file cannot be read: mason user list's tip, word
   assert.doesNotMatch(textOf(renderUsers(list, null, NOW_R, null, null)), /cannot be read/);
 });
 
-test("a user just added: titled New user added on the box's edge; User as plain text, then URL, Password, Database, each with a Copy that copies it and held equal to mason user add's rows; Shown once right of the password's Copy; one line that it is only shown once — no Host, Port or SSL mode, no psql line", async () => {
+test("a user just added: titled New user added on the box's edge; URL, User and Password alone, in that order, held equal to mason user add's rows — the URL and the Password each with a Copy that copies it, the User as plain text; Shown once right of the password's Copy; one line that it is only shown once — no Database, Host, Port or SSL mode (Connect's), no psql line", async () => {
   const password = "mason_0123456789abcdef_" + "a".repeat(32);
   const url = `postgres://metabase:${password}@127.0.0.1:5433/shop`;
   const added = { user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password,
     database: "shop", url, psql: psqlLine(url), host: "127.0.0.1", port: 5433, sslmode: "require", roleFrom: "none" as const };
   const html = fn<[unknown], string>("renderAdded")(added);
   const text = textOf(html);
-  // the title on the box's top edge, then what is this user's alone, and the URL, in one layout: each a label and its
-  // value, a Copy on all but the name (issue 839); Shown once under the password; one line, and the button
-  assert.equal(text, "New user added User metabase URL postgres://metabase:mason_0123456789abcdef_a{32}@127.0.0.1:5433/shop Copy Password mason_0123456789abcdef_a{32} Copy Shown once Database shop Copy Waiting for its first query… The password is only shown once I have copied it".replace("a{32}", "a".repeat(32)).replace("a{32}", "a".repeat(32)));
-  assert.match(html, /^<div class="user-added" role="status"><p class="added-title">New user added<\/p><dl class="facts"><dt>User<\/dt><dd>metabase<\/dd><dt>URL<\/dt>/, "the title, then User as plain text with no Copy");
+  // the title on the box's top edge, then the user's own three fields, in one layout: each a label and its value, a
+  // Copy on all but the name (issues 839, 876); Shown once beside the password's Copy; one line, and the button
+  assert.equal(text, "New user added URL postgres://metabase:mason_0123456789abcdef_a{32}@127.0.0.1:5433/shop Copy User metabase Password mason_0123456789abcdef_a{32} Copy Shown once Waiting for its first query… The password is only shown once I have copied it".replace("a{32}", "a".repeat(32)).replace("a{32}", "a".repeat(32)));
+  assert.match(html, /^<div class="user-added" role="status"><p class="added-title">New user added<\/p><dl class="facts"><dt>URL<\/dt><dd><span class="copyrow">[^]*?<\/dd><dt>User<\/dt><dd>metabase<\/dd><dt>Password<\/dt>/, "the title, then URL, then User as plain text with no Copy, then Password");
   assert.match(html, /<code id="added-password">[^<]*<\/code> <button[^>]*>Copy<\/button> <span class="badge warn">Shown once<\/span><\/span><\/dd>/, "Shown once in the password's row, right of its Copy");
   assert.doesNotMatch(html, /shown-once/, "no line of its own under the password");
   assert.equal([...html.matchAll(/Shown once/g)].length, 1, "said once, beside the password's Copy");
@@ -605,24 +605,25 @@ test("a user just added: titled New user added on the box's edge; User as plain 
   assert.match(css, /\.copyrow \.badge \{ flex: none; height: var\(--control-sm\); \}/);
   assert.doesNotMatch(html, /headline/, "no headline");
   assert.doesNotMatch(text, /Connect on this page|Paste it|Connect your tool/, "the one line replaces the tips");
-  const fields: Array<[string, string, string]> = [["URL", "added-url", url], ["Password", "added-password", password], ["Database", "added-database", "shop"]];
-  for (const label of ["Host", "Port", "SSL mode"]) assert.doesNotMatch(html, new RegExp(`<dt>${label}</dt>`), `no ${label} row: Connect says it`);
-  assert.doesNotMatch(html, /added-host|added-port|added-sslmode/);
+  const fields: Array<[string, string, string]> = [["URL", "added-url", url], ["Password", "added-password", password]];
+  // the URL already carries the database (…/shop): the run's Database, Host, Port and SSL mode are on Connect (issue 876)
+  for (const label of ["Database", "Host", "Port", "SSL mode"]) assert.doesNotMatch(html, new RegExp(`<dt>${label}</dt>`), `no ${label} row: Connect says it`);
+  assert.doesNotMatch(html, /added-database|added-host|added-port|added-sslmode/);
   assert.doesNotMatch(text, /\b(above|below)\b/, "Connect is named, never placed");
   // each row the page shows is mason user add's row of the same name, value for value; the terminal, with no Connect
-  // beside it, still prints the host, the port and the SSL mode
+  // beside it, still prints the database, the host, the port and the SSL mode
   const { addedReport } = await import("../src/cli/user.ts");
   const cliRows = new Map(addedReport(added, { roles: { file: null, roles: {}, default: null } as never, listener: null, next: [] }, PLAIN).split("\n")
     .map((l) => /^ {2}(\S+(?: mode)?) +(.*)$/.exec(l)).filter((m) => m !== null).map((m) => [m[1]!, m[2]!]));
   for (const [label, , value] of [...fields, ["User", "", "metabase"] as [string, string, string]]) assert.equal(cliRows.get(label.toLowerCase()), value, `${label}: the page's row is mason user add's`);
-  assert.deepEqual([cliRows.get("host"), cliRows.get("port"), cliRows.get("ssl mode")], ["127.0.0.1", "5433", "require"], "mason user add keeps every row");
+  assert.deepEqual([cliRows.get("database"), cliRows.get("host"), cliRows.get("port"), cliRows.get("ssl mode")], ["shop", "127.0.0.1", "5433", "require"], "mason user add keeps every row");
   for (const [label, id, value] of fields) {
     const re = value.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
     assert.match(html, new RegExp(`<dt>${label}</dt><dd><span class="copyrow"><code id="${id}">${re}</code> <button type="button" class="small" data-copy="${id}" data-room="Press ⌘C">Copy</button>( <span class="badge warn">Shown once</span>)?</span></dd>`), `${label}: its value and a Copy, laid out as every other field`);
   }
   assert.deepEqual([...html.matchAll(/data-copy="([^"]+)"/g)].map((m) => m[1]), fields.map(([, id]) => id), "a Copy on every field, none else");
-  assert.deepEqual([...html.matchAll(/<dt>([^<]*)<\/dt>/g)].map((m) => m[1]), ["User", "URL", "Password", "Database"], "exactly four rows");
-  assert.doesNotMatch(text, /Host|Port|SSL mode/, "the run's host, port and SSL mode are Connect's, not this card's");
+  assert.deepEqual([...html.matchAll(/<dt>([^<]*)<\/dt>/g)].map((m) => m[1]), ["URL", "User", "Password"], "exactly three rows, in mason user add's order");
+  assert.doesNotMatch(text, /Database|Host|Port|SSL mode/, "the run's facts are Connect's, not this card's");
   // each Copy copies its own field's text, through the page's one copyClick
   const copyClick = fn<[Record<string, string>, { textContent: string; dataset?: Record<string, string> }, unknown], Promise<void> | null>("copyClick");
   const codes = new Map([...html.matchAll(/<code id="([^"]+)">([^<]*)<\/code>/g)].map((m) => [m[1]!, { textContent: textOf(m[2]!) }]));
@@ -638,8 +639,9 @@ test("a user just added: titled New user added on the box's edge; User as plain 
   assert.match(html, /<button type="button" class="primary" data-dismiss-added="">I have copied it<\/button>/);
   // while Mason does not run, the JSON carries no URL: it is not shown, never "undefined"
   const bare = fn<[unknown], string>("renderAdded")({ user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password, database: "shop" });
-  assert.deepEqual([...bare.matchAll(/data-copy="([^"]+)"/g)].map((m) => m[1]), ["added-password", "added-database"]);
-  assert.doesNotMatch(textOf(bare), /undefined|null|Host|Port|SSL mode|URL/);
+  assert.deepEqual([...bare.matchAll(/data-copy="([^"]+)"/g)].map((m) => m[1]), ["added-password"]);
+  assert.deepEqual([...bare.matchAll(/<dt>([^<]*)<\/dt>/g)].map((m) => m[1]), ["User", "Password"]);
+  assert.doesNotMatch(textOf(bare), /undefined|null|Database|Host|Port|SSL mode|URL/);
 });
 
 test("a run that stopped, or a cookie of an earlier run: a plain Failure that says what to do", () => {
@@ -1489,7 +1491,7 @@ const ADDED = (user: string) => {
 };
 test("the New user added card: under its rows a status line, Waiting for its first query… until the user is seen, then Connected; no tool's guide, psql line or cloud line", () => {
   const renderAdded = fn<[unknown, unknown?], string>("renderAdded");
-  const between = (html: string) => textOf(html).replace(/^.*?Database shop Copy /, "").replace(/ ?The password is only shown once I have copied it$/, "");
+  const between = (html: string) => textOf(html).replace(/^.*? Copy Shown once /, "").replace(/ ?The password is only shown once I have copied it$/, "");
   const waiting = renderAdded(ADDED("metabase"));
   assert.equal(between(waiting), "Waiting for its first query…");
   assert.equal(between(renderAdded(ADDED("metabase"), { connected: true })), "Connected");
@@ -2205,7 +2207,7 @@ test("after Add a user, its password card is scrolled into view once — on a ph
   const form = { id: "add-user", elements: { name: { value: "grafana" }, connects: { value: "any" } } };
   await on.get("submit")!({ target: form, preventDefault: () => undefined });
   await settle();
-  assert.match(el("added").html, /New user added<\/p><dl class="facts"><dt>User<\/dt><dd>grafana<\/dd>/, "the card is written");
+  assert.match(el("added").html, /New user added<\/p><dl class="facts">[^]*<dt>User<\/dt><dd>grafana<\/dd>/, "the card is written");
   assert.deepEqual(scrolled, [{ block: "nearest" }], "and scrolled into view, as little as it takes");
   tick(); await settle();
   assert.equal(scrolled.length, 1, "once: a poll's write after it scrolls nothing");
@@ -3696,7 +3698,7 @@ test("Users: the add form's password is a prominent card marked shown once; the 
     database: "shop", url: "postgres://metabase@127.0.0.1:5433/shop" });
   assert.match(added, /^<div class="user-added" role="status"><p class="added-title">New user added<\/p>/);
   assert.match(added, /<span class="badge warn">Shown once<\/span>/);
-  assert.equal([...added.matchAll(/data-copy="/g)].length, 3, "the URL, the password and the database each have a Copy; the name is plain");
+  assert.equal([...added.matchAll(/data-copy="/g)].length, 2, "the URL and the password each have a Copy; the name is plain, the database is Connect's");
   const run = fakeRun();
   let t = Date.UTC(2026, 9, 28, 9, 0, 0);
   run.answers.set("GET api/users?lastUsed=1", answer({ users: [{ name: "old", id: "aaaaaaaaaaaaaaaa", addedAt: "2026-10-01T10:00:00.000Z", removedAt: "2026-10-02T10:00:00.000Z", live: false, lastUsedAt: null, url: null },

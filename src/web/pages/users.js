@@ -352,21 +352,22 @@ function toggle(u, disabled, asking) {
 
 /**
  * A USER JUST ADDED (`mason user add --json`'s shape): a prominent card, titled "New user added" on its top edge as the
- * Overview's "mason status" box is, with what is this user's alone and the URL: User, its name as plain text, then URL,
- * Password and Database, each with a Copy button laid out the same way, so a person fills a BI tool's form field by
- * field (issue 839). Right of the password's Copy, in its row and of the button's height, "Shown once"; under the rows, one line: the password is only shown
- * once. Host, port and SSL mode are the run's, said by Connect on the same page (renderUsersConnect); `mason user add` in
- * a terminal prints them all. No psql line: the URL is the same thing, pasted after `psql`. A field the JSON does not
- * carry (the URL while Mason does not run) is not shown. Mason keeps no copy, so it is never shown again. Under the
- * rows, whether it has connected (`o.connected`, `addedSeen`): Waiting for its first query…, then Connected.
+ * Overview's "mason status" box is, with URL, User and Password, in that order (issue 876): the URL and the Password each
+ * with a Copy button laid out the same way, the User its name as plain text (issue 839). Right of the password's Copy, in
+ * its row and of the button's height, "Shown once"; under the rows, one line: the password is only shown once. No
+ * Database row: the URL already carries the database, and the Database, Host, Port and SSL mode are the run's, said by
+ * Connect on the same page (renderUsersConnect); `mason user add` in a terminal prints them all. No psql line: the URL
+ * is the same thing, pasted after `psql`. A field the JSON does not carry (the URL while Mason does not run) is not
+ * shown. Mason keeps no copy, so it is never shown again. Under the rows, whether it has connected (`o.connected`,
+ * `addedSeen`): Waiting for its first query…, then Connected.
  */
 export function renderAdded(a, o = {}) {
-  const rows = [["URL", a.url, "added-url"], ["Password", a.password, "added-password"], ["Database", a.database, "added-database"]]
+  const rows = [["URL", a.url, "added-url"], ["User", a.user, null], ["Password", a.password, "added-password"]]
     .filter(([, v]) => v !== undefined && v !== null);
+  const value = (v, id) => id === null ? esc(v) : copyable(id, v, id === "added-password" ? badge("Shown once", "warn") : "");
   return `<div class="user-added" role="status"><p class="added-title">New user added</p>` +
-    `<dl class="facts"><dt>User</dt><dd>${esc(a.user)}</dd>` +
-    rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v, id === "added-password" ? badge("Shown once", "warn") : "")}</dd>`).join("") +
-    `</dl>${connectedLine(o.connected === true)}<p class="tip">The password is only shown once</p>` +
+    `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${value(v, id)}</dd>`).join("")}</dl>` +
+    `${connectedLine(o.connected === true)}<p class="tip">The password is only shown once</p>` +
     `${button("I have copied it", { dismissAdded: "" }, "primary")}</div>`;
 }
 

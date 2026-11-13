@@ -173,12 +173,12 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   that the form wraps by field, a label never apart from its control, the address box under its dropdown on a phone. The page
   never checks a range: the run reads each, and a refused one is shown as the run's refusal. `--set`
   attributes stay the command's. Its password is shown once, in a card titled **New user added** on its top edge (as
-  the Overview's "mason status" box): **User**, its name as plain text, then URL, Password and Database, each with
-  **Copy**, laid out the same way, so a person fills a tool's connection form field by field (a field `mason user add
-  --json` does not carry is not shown); "Shown once" in the password's row, right of its **Copy** and of the button's
-  height (`--control-sm`); and one line, "The password
-  is only shown once", over **I have copied it**. Host, port and SSL mode are Connect's on the same page (`mason user
-  add` in a terminal still prints all of them). No psql line: the URL is the same thing, pasted after `psql`. Mason
+  the Overview's "mason status" box): URL, **User** and Password, in `mason user add`'s order, the URL and the Password
+  each with **Copy** and laid out the same way, the User its name as plain text (a field `mason user add --json` does
+  not carry is not shown); "Shown once" in the password's row, right of its **Copy** and of the button's height
+  (`--control-sm`); and one line, "The password is only shown once", over **I have copied it**. No Database row: the
+  URL already carries the database, and the database, host, port and SSL mode are Connect's on the same page (`mason
+  user add` in a terminal still prints all of them). No psql line: the URL is the same thing, pasted after `psql`. Mason
   keeps no copy, so it is never shown again. Under the rows, a status line: "Waiting for its first query…" until Mason
   has seen the user — a session of it open (`/api/state` `sessions`), or a statement of it since it was added
   (`/api/users?lastUsed=1` `lastUsedAt`) — then "Connected", held once seen. While it waits, the state is read every

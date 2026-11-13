@@ -23,9 +23,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   place, and moves to its group the next time the list is laid out: when you open the page again, or change the search
   or the All / Added / Failed / Not added filter.
 - **A user added on the web page's Users page shows only what is its own.** The card shown once is titled "New user
-  added" and has the User, then the URL, Password and Database, each with Copy, "Shown once" beside the password's Copy, and
-  one line: the password is only shown once. The host, port and SSL mode are Connect's on the same page, and the card
-  does not repeat them. `mason user add` in a terminal prints every row, as before.
+  added" and has the URL, the User and the Password, the URL and the Password each with Copy, "Shown once" beside the
+  password's Copy, and one line: the password is only shown once. The URL already carries the database; the database,
+  host, port and SSL mode are Connect's on the same page, and the card does not repeat them. `mason user add` in a terminal prints every row, as before.
 - **Connect from anywhere moves to the Users page, as Share over the internet.** Inside Connect, the box "Share over the internet (for
   testing)" opens what `mason share` opens, for a tool that cannot reach your machine: choose the role it reads as
   (where `mason/roles.yml` offers more than one), click Share, and it shows the public URL and the share's own login
