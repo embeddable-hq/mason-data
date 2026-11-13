@@ -30,7 +30,8 @@ type Reporter = {
 const app = await import("../src/web/app.js" as string) as Partial<Reporter>;
 const reporter = (): Reporter => (typeof app.reportErrors === "function" ? app as Reporter : assert.fail("src/web/app.js: the page reports none of its errors at this commit"));
 type UiErrorsModule = typeof import("../src/cli/ui-errors.ts");
-const uiMod = await import("../src/cli/ui-errors.ts" as string).catch(() => null) as UiErrorsModule | null;
+// a commit without the module: none, and the test says so by name (a failure to load for another reason is thrown)
+const uiMod = await import("../src/cli/ui-errors.ts" as string).catch((e: NodeJS.ErrnoException) => { if (e.code === "ERR_MODULE_NOT_FOUND") return null; throw e; }) as UiErrorsModule | null;
 
 const BASE = "http://127.0.0.1:4000/ui/";
 const SECRET = "secret_customer_alice";
@@ -134,7 +135,9 @@ test("a page that throws in its own code: exactly ONE ui_error event, from a rep
   assert.deepEqual(bodies, [], "the page as it loads throws nothing");
 
   // an uncaught error thrown in the page's own script (src/web/shared.js renderFailure reads a property of null)
-  await page.evaluate(`import("./shared.js").then((m) => { setTimeout(() => m.renderFailure(null), 0); return null; })`);
+  // the page's own module, by its address under the page (written so, it names no file of this folder)
+  const SHARED = "./shared.js";
+  await page.evaluate(`import("${SHARED}").then((m) => { setTimeout(() => m.renderFailure(null), 0); return null; })`);
   for (let i = 0; i < 50 && bodies.length === 0; i++) await page.waitForTimeout(50);
   await page.waitForTimeout(300);
   await events.flush();

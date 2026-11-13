@@ -12,7 +12,8 @@ import { createRunServer, type RunContext } from "../src/cli/run-server.ts";
 
 // imported when the tests run: at a commit without the module this file still loads, and each test fails by name
 type UiErrorsModule = typeof import("../src/cli/ui-errors.ts");
-const mod = await import("../src/cli/ui-errors.ts" as string).catch(() => null) as UiErrorsModule | null;
+// a commit without the module: none, and each test says so by name (a failure to load for another reason is thrown)
+const mod = await import("../src/cli/ui-errors.ts" as string).catch((e: NodeJS.ErrnoException) => { if (e.code === "ERR_MODULE_NOT_FOUND") return null; throw e; }) as UiErrorsModule | null;
 const need = (): UiErrorsModule => mod ?? assert.fail("src/cli/ui-errors.ts: no record of the web page's errors at this commit");
 
 const TOKEN = "t0ken-of-this-run";
