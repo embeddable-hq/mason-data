@@ -2238,7 +2238,14 @@ each statement begins with a comment of the read's own (a random id and the stat
 shows whatever the pooler; a read given up on is cancelled on the database, by a CancelRequest sent the way its
 connection came (a pooler maps its own key, as for any client), before its connection closes; a read is fresh for a
 minute after it ENDS; and an add's or a remove's answer carries the read it acted on, never a second.
-`tests/integration/cli-catalog-pooler.itest.ts` reads through a proxy that rewrites the id. **Why.** The 10-second timer connected about 8,640 times
+`tests/integration/cli-catalog-pooler.itest.ts` reads through a proxy that rewrites the id. The re-check at 6d60906b:
+the read's session `SET lock_timeout` stayed on the server connection, and a pooler in transaction mode (PgBouncer's
+`pool_mode = transaction`, Supabase's default pooler URL) resets nothing between clients, so an application's next
+connections were given a 2 s lock limit for up to an hour, and its query failed on another session's lock. So the read
+is one `BEGIN READ ONLY` transaction with `SET LOCAL lock_timeout`, which ends with it whatever the pooler: COMMIT when
+it succeeds, ROLLBACK after a failure while the connection answers, else its close (Postgres rolls back a transaction
+whose client is gone, and a pooler closes a server connection left in one). A run never changes a setting of a session
+it does not own to its end. `tests/integration/cli-catalog-txpool.itest.ts`. **Why.** The 10-second timer connected about 8,640 times
 a day whatever each table's sync, so a serverless compute (Neon, Aurora Serverless) never suspended with every table
 `sync: off`. A failed read keeps the last one and is said in the log, and is not tried again within the minute.
 `tests/integration/cli-catalog-read.itest.ts` counts the run's connections over an idle window.

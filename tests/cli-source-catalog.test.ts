@@ -375,10 +375,12 @@ test("a read's session is found by its statement's comment, never by a process i
     signal: new AbortController().signal, log: () => undefined, mark: "mason catalog read test1", watch: quick,
   });
   assert.deepEqual(names(facts), ["a"], "read to its end: 400 ms, past the 150 ms a silent one is given");
-  assert.deepEqual(statements.map((q) => /^\/\* mason catalog read test1 (\d+) \*\/ /.exec(q)?.[1]), ["1", "2", "3"], "each statement begins with the read's comment and its number");
+  assert.deepEqual(statements.map((q) => /^\/\* mason catalog read test1 (\d+) \*\/ (.*)$/.exec(q)?.slice(1)),
+    [["1", "BEGIN READ ONLY"], ["2", "SET LOCAL lock_timeout = 2000"], ["3", "SELECT version()"], ["4", "SELECT json_agg(t) FROM t"], ["5", "COMMIT"]],
+    "one read-only transaction, its lock limit LOCAL to it; each statement begins with the read's comment and its number");
   assert.ok(checks.length > 0, "the database was asked");
   for (const q of checks) {
-    assert.match(q, /WHERE query LIKE '\/\* mason catalog read test1 3 \*\/%'/, "about the statement running now, by its comment");
+    assert.match(q, /WHERE query LIKE '\/\* mason catalog read test1 4 \*\/%'/, "about the statement running now, by its comment");
     assert.doesNotMatch(q, /\bpid\b/, "never by a process id");
   }
   assert.deepEqual(events, ["close"], "never cancelled; closed once");
@@ -410,6 +412,35 @@ test("a read given up on is cancelled on the database, through its own connectio
   stop.abort();
   await assert.rejects(p, /the read ran out of time/);
   assert.deepEqual(events2, ["cancel", "close"]);
+});
+
+// THE RE-CHECK OF PR 900 AT 6d60906b: a session SET lock_timeout stayed on the server connection behind a pooler in
+// transaction mode, and the application's next queries were given it. The read is one transaction, ended on every way out
+test("the read is one read-only transaction, ended on every way out: COMMIT, else ROLLBACK before the close, else the close", async () => {
+  const run = async (o: { fail?: RegExp; gone?: boolean }) => {
+    const order: string[] = [];
+    const conn = {
+      lastHeardAt: Date.now(), cancel: async () => { order.push("cancel"); },
+      close: () => { order.push("close"); },
+      query: async (sql: string) => {
+        const bare = sql.replace(/^\/\* [^*]* \*\/ /, "");
+        order.push(bare);
+        if (o.gone && bare === "ROLLBACK") throw new Error("connection closed by the server");
+        if (o.fail?.test(bare)) throw new Error(o.gone ? "connection closed by the server" : "canceling statement due to lock timeout");
+        return { rows: [["x"]] };
+      },
+    };
+    let error: string | null = null;
+    try { await watchedRead({ connect: async () => conn, read: async (pg) => { await pg.query("SELECT json_agg(t) FROM t"); return factsOf(["a"]); },
+      signal: new AbortController().signal, log: () => undefined }); } catch (e) { error = (e as Error).message; }
+    return { order, error };
+  };
+  assert.deepEqual(await run({}), { order: ["BEGIN READ ONLY", "SET LOCAL lock_timeout = 2000", "SELECT json_agg(t) FROM t", "COMMIT", "close"], error: null });
+  assert.deepEqual(await run({ fail: /json_agg/ }), { order: ["BEGIN READ ONLY", "SET LOCAL lock_timeout = 2000", "SELECT json_agg(t) FROM t", "ROLLBACK", "close"],
+    error: "canceling statement due to lock timeout" }, "a lock timeout: rolled back, then closed");
+  assert.deepEqual(await run({ fail: /json_agg/, gone: true }), { order: ["BEGIN READ ONLY", "SET LOCAL lock_timeout = 2000", "SELECT json_agg(t) FROM t", "ROLLBACK", "close"],
+    error: "connection closed by the server" }, "a connection that died: its close ends the transaction");
+  for (const q of (await run({})).order) assert.doesNotMatch(q, /^SET (?!LOCAL)/, "no session setting");
 });
 
 test("what the database says of the read's statement: working, or why it went silent, or couldn't tell", () => {

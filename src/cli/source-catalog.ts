@@ -263,6 +263,15 @@ export const CANCEL_SEND_MS = 5_000;
  * query running on the source for its whole length (Postgres notices a client gone only when it writes to it), and a
  * read asked again began a second beside it. The CancelRequest goes the way the connection came, so a pooler maps its
  * own key to the backend's, as it does for any client's cancel.
+ *
+ * THE READ IS ONE READ-ONLY TRANSACTION, its lock limit `SET LOCAL` (the re-check of PR 900 at 6d60906b): a session
+ * `SET lock_timeout` stayed on the server connection, and a pooler in transaction mode (PgBouncer, Supabase's default
+ * URL) resets nothing, so the next clients given that connection had a 2 s lock limit for up to an hour, and an
+ * application's query failed on it. A setting made `LOCAL` ends with the transaction, whatever the pooler. Every way out
+ * ends it: COMMIT when the read succeeds; ROLLBACK after a lock timeout, a cancel or any other failure, when the
+ * connection still answers; and a connection closed mid-transaction, which Postgres rolls back and a pooler closes
+ * server-side (it never hands on a connection in a transaction). Nothing the read runs refuses a transaction: it is
+ * SELECTs alone.
  */
 export async function watchedRead<C extends CatalogConnection>(o: {
   connect: () => Promise<C>;
@@ -278,21 +287,28 @@ export async function watchedRead<C extends CatalogConnection>(o: {
   // the statement running now, by its number: what the check asks the database about
   let statement = 0;
   const marked = (n: number): string => `/* ${mark} ${n} */`;
-  let silent: string | null = null, ended = false;
-  /** Gives the read up: its statement cancelled on the database (the sending bounded), then its connection closed. */
+  const cancelMs = o.cancelMs ?? CANCEL_SEND_MS;
+  let silent: string | null = null, closed = false, settled = false;
+  const close = (): void => { if (!closed) { closed = true; c.close(); } };
+  /** Gives the read up: its statement cancelled on the database (the sending bounded), so the read fails and its
+   *  transaction is rolled back below; the connection is closed all the same if the read has not ended `cancelMs` after
+   *  the cancel (a connection that answers nothing: the database rolls back a transaction whose client is gone). */
   const giveUp = (why: string): void => {
-    if (ended) return;
-    ended = true;
+    if (silent !== null || settled) return;
     silent = why;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const late = new Promise<void>((resolve) => { timer = setTimeout(resolve, o.cancelMs ?? CANCEL_SEND_MS); timer.unref?.(); });
+    const late = new Promise<void>((resolve) => { timer = setTimeout(resolve, cancelMs); timer.unref?.(); });
     void Promise.race([c.cancel(), late])
       // tolerated: the read ends all the same, its connection closed below; the database may then run the statement to
       // its end, which is said in the log
       .catch((e: unknown) => o.log(`a read of the database's tables that was given up on could not be cancelled there (${(e as Error).message}): its statement may run to its end`))
-      .finally(() => { clearTimeout(timer); c.close(); });
+      .finally(() => {
+        clearTimeout(timer);
+        const after = setTimeout(close, cancelMs);
+        after.unref?.();
+      });
   };
-  if (o.signal.aborted) { c.close(); throw new Error("the read ran out of time"); }
+  if (o.signal.aborted) { close(); throw new Error("the read ran out of time"); }
   o.signal.addEventListener("abort", () => giveUp("the read ran out of time"), { once: true });
   const stopWatch = stallWatch({
     ...o.watch,
@@ -315,19 +331,34 @@ export async function watchedRead<C extends CatalogConnection>(o: {
     onSilent: giveUp,
   });
   const tagged = { query: ((sql: string) => c.query(`${marked(++statement)} ${sql}`)) as C["query"] };
+  let begun = false;
   try {
+    await tagged.query("BEGIN READ ONLY");
+    begun = true;
     // never queued behind a lock for long: the sizes it reads take a lock of every table, which a migration's ALTER (or
-    // one queued behind another session) holds; this session's settings alone, nothing on the database
-    await tagged.query(`SET lock_timeout = ${CATALOG_LOCK_TIMEOUT_MS}`);
-    return await o.read(tagged);
+    // one queued behind another session) holds. LOCAL: this transaction's alone, never the server connection's
+    await tagged.query(`SET LOCAL lock_timeout = ${CATALOG_LOCK_TIMEOUT_MS}`);
+    const facts = await o.read(tagged);
+    await tagged.query("COMMIT");
+    begun = false;
+    return facts;
   } catch (e) {
     // the read the watch gave up on: said as what it found, never as the cancel or the closed connection
     if (silent !== null) throw new Error(silent);
     throw e;
   } finally {
+    settled = true;
     stopWatch();
-    // a read that ended by itself is closed now; one given up on, once its cancel is sent
-    if (!ended) { ended = true; c.close(); }
+    // the transaction ended on every way out: rolled back while the connection answers (bounded), else by its close
+    if (begun && !closed) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const late = new Promise<void>((resolve) => { timer = setTimeout(resolve, cancelMs); timer.unref?.(); });
+      // tolerated: the connection is closed next, and the database rolls back a transaction whose client is gone
+      await Promise.race([c.query("ROLLBACK").then(() => undefined), late])
+        .catch((e: unknown) => o.log(`a read of the database's tables could not be rolled back (${(e as Error).message}): its connection is closed, which ends it`))
+        .finally(() => clearTimeout(timer));
+    }
+    close();
   }
 }
 

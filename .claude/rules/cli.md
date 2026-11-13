@@ -136,7 +136,10 @@ CLI lacks).
   database now, never the run said as down. The command (`callRunReading`, src/cli/control.ts) and the page (`createAsk`,
   src/web/shared.js) ask again carrying the number, and an add's every step carries the number its first was given: ONE
   read serves the whole add. ONE READ AT A TIME on the database: an actor asking while one runs is given the next,
-  shared by all who ask meanwhile. The read waits on a lock `CATALOG_LOCK_TIMEOUT_MS`, and on nothing else short: a
+  shared by all who ask meanwhile. The read is ONE read-only transaction and its settings are `SET LOCAL`, never a
+  session `SET` (a pooler in transaction mode hands the server connection on with nothing reset: the re-check at
+  6d60906b, an application's queries got the read's 2 s lock limit), ended on every way out (COMMIT, ROLLBACK, else the
+  close). It waits on a lock `CATALOG_LOCK_TIMEOUT_MS`, and on nothing else short: a
   large catalog takes what it takes. A read is told SLOW from SILENT by its progress (`stallWatch`, `watchedRead`):
   bytes arriving on its connection; quiet `STALL_QUIET_MS`, the database is asked about the statement running now, found
   by the comment each statement of the read begins with, NEVER by a process id (a pooler rewrites BackendKeyData's:
