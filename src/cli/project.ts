@@ -309,6 +309,20 @@ export function theProjectFolder(cwd: string): { project: ProjectFolder } | Prob
     return { project: { root: p.root, folder: p.folder, config: { file: path.join(p.dir, CONFIG), folder: p.config.folder } } };
   }
   if (t.code !== "no_project") return t;
+  // "no .mason/" must be a no: `theProject` reads a config it cannot check (a .mason/ this user may not read, a link
+  // loop) as none, and a project there would name its own folder. So at every level a config that is neither there nor
+  // absent refuses, before any mason/ is looked for (fail closed: never another folder's files in its place)
+  for (let d = path.resolve(cwd); ; d = path.dirname(d)) {
+    const config = path.join(d, STATE_DIR, CONFIG);
+    let why: string | null = null;
+    try { fs.statSync(config); why = "it is there, yet could not be read as a project's config"; }
+    catch (e) { if (!["ENOENT", "ENOTDIR"].includes((e as NodeJS.ErrnoException).code ?? "")) why = unresolvedWhy(e); }
+    if (why !== null) {
+      return { problem: `${path.join(d, STATE_DIR)} cannot be read, so whether ${d} is a Mason project cannot be told`, code: "refused", why,
+        fix: `make ${path.join(d, STATE_DIR)} readable by this user (run mason deploy as the user that ran mason init there), or run it in a folder outside ${d}` };
+    }
+    if (path.dirname(d) === d) break;
+  }
   for (let d = path.resolve(cwd); ; d = path.dirname(d)) {
     const folder = path.join(d, PROJECT_FOLDER);
     const holds = holdsProjectFiles(folder);

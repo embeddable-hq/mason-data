@@ -1100,6 +1100,45 @@ test("mason deploy, with no .mason/: a mason/ that is a link out of the folder i
   }
 });
 
+test("mason deploy: a .mason/ whose config cannot be checked (a link loop; a .mason/ this user may not read) is refused saying so — never taken for no .mason/, so no other mason/ is sent in place of the folder its config names", async () => {
+  // an initialised project whose config names "files", beside a mason/ of other files: a deploy must never send mason/
+  const layout = (): { root: string } => {
+    const { root } = project();
+    fs.renameSync(path.join(root, "mason"), path.join(root, "files"));
+    fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: "shop", folder: "files", remote: false, apiKey: "k".repeat(48) }), { mode: 0o600 });
+    fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
+    fs.writeFileSync(path.join(root, "mason", "sources", "other.yml"), SOURCE);
+    return { root };
+  };
+  const cases: Array<[string, (root: string) => void, RegExp]> = [
+    // a .mason/ that is a link to itself: its config cannot be resolved, whoever runs this
+    ["a link loop", (root) => { fs.rmSync(path.join(root, ".mason"), { recursive: true }); fs.symlinkSync(".mason", path.join(root, ".mason")); }, /\(ELOOP\)$/],
+  ];
+  // a .mason/ this user may not read, as mason init makes it for another user (as root every folder is read)
+  if (process.getuid?.() !== 0) cases.push(["a .mason/ this user may not read", (root) => { fs.chmodSync(path.join(root, ".mason"), 0); }, /may not be read by this user \(EACCES\)$/]);
+  for (const [what, make, why] of cases) {
+    const { root } = layout();
+    make(root);
+    try {
+      for (const cwd of [root, path.join(root, "mason", "sources")]) {
+        for (const argv of [["--replica", "acme/shop", "--dry-run", "--json"], ["--replica", "acme/shop", "--json"]]) {
+          const { a, requests } = await deployWith({}, cwd, argv);
+          assert.equal(a.code, 1, `${what} ${argv.join(" ")}: ${a.stdout}${a.stderr}`);
+          const e = (JSON.parse(a.stdout) as { error: { code: string; message: string; why: string; fix: string } }).error;
+          assert.deepEqual([e.code, e.message], ["refused", `${path.join(root, ".mason")} cannot be read, so whether ${root} is a Mason project cannot be told`], what);
+          assert.match(e.why, why, what);
+          assert.match(e.fix, /^make .*\.mason readable by this user/, what);
+          assert.doesNotMatch(a.stdout + a.stderr, /other\.yml/, `${what}: nothing of mason/ listed`);
+          assert.deepEqual(requests, [], `${what}: nothing sent`);
+        }
+      }
+      const p = await deployWith({}, root, ["--replica", "acme/shop", "--dry-run"]);
+      assert.equal(p.a.code, 1);
+      assert.match(p.a.stderr, /^✗ mason deploy: .*\.mason cannot be read, so whether .* is a Mason project cannot be told\n/);
+    } finally { if (fs.existsSync(path.join(root, ".mason")) && !fs.lstatSync(path.join(root, ".mason")).isSymbolicLink()) fs.chmodSync(path.join(root, ".mason"), 0o700); }
+  }
+});
+
 test("mason deploy, in an initialised project: unchanged — its config's folder decides, wherever a mason/ is; a .mason/ above a folder's own mason/ is the project", async () => {
   // config.json names "files": that folder is sent, never the mason/ beside it
   const { root } = project();
