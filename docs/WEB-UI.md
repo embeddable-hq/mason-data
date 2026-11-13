@@ -159,7 +159,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   link of the sidebar or another followed — starts with the cursor in the form's **Name**, once the form is written;
   never at a poll's write after that, never at a hash of the page already shown (a tab of the list, a range), never taken from what the person focused since they arrived, never on a touch
   screen (`(pointer: coarse)`, where it would open the keyboard over the page), and not on a read-only page, which has
-  no form (a page's `arrive()`, src/web/app.js); after an add, the New user added card is scrolled into view once. The
+  no form (a page's `arrive()`, src/web/app.js). The
   form adds a user by name and, where `mason/roles.yml` names roles and reads as it is, a
   **Role** as `mason user add --role` (the roles from `/api/state` `roles`, `mason status --json`'s): the file's
   `default:` is chosen first, marked (default), and sends no role, so the user follows the default as one added with no
@@ -173,8 +173,13 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   a Role, 900 px without one, where the sidebar is a rail), the address box growing into the rest of the line; below
   that the form wraps by field, a label never apart from its control, the address box under its dropdown on a phone. The page
   never checks a range: the run reads each, and a refused one is shown as the run's refusal. `--set`
-  attributes stay the command's. Its password is shown once, in a card titled **New user added** on its top edge (as
-  the Overview's "mason status" box): URL, **User** and Password, in `mason user add`'s order, the URL and the Password
+  attributes stay the command's. Its password is shown once, in a modal dialog over the page titled **New user added**
+  (index.html's one `<dialog id="once">`, opened with `showModal`: the page behind it dimmed and inert, the focus on the
+  URL's **Copy**; on a phone a sheet the screen's width that scrolls inside itself). It closes **only** by its button,
+  **I have copied it** — never by Escape nor a click outside it, since the password is kept nowhere once it closes — and
+  the focus then returns to the form's **Name**, the new user in the list above. No poll closes or rewrites it: its
+  parts are written when it opens and when its status line changes, never while a pointer is pressed, and it stays
+  open whichever page a hash followed shows. A refusal of Add a user is said under the form, as before. It shows URL, **User** and Password, in `mason user add`'s order, the URL and the Password
   each with **Copy** and laid out the same way, the User its name as plain text (a field `mason user add --json` does
   not carry is not shown); "Shown once" in the password's row, right of its **Copy** and of the button's height
   (`--control-sm`); and one line, "The password is only shown once", over **I have copied it**. No Database row: the

@@ -108,6 +108,15 @@
   </section>
 </main>
 </div>
+<!-- THE ONE-TIME DIALOG (src/web/app.js `once`): a password shown once — a user just added, a temporary cloud login just
+     opened — as a modal over the page, its parts written by the page that holds it (src/web/pages/users.js). It closes
+     only by its button: never by Escape nor a click outside it, since the password is kept nowhere once it closes -->
+<dialog id="once" class="once" aria-labelledby="once-title" closedby="none">
+  <div id="once-head"></div>
+  <div id="once-status" aria-live="polite"></div>
+  <div id="once-foot"></div>
+  <p class="once-actions"><button type="button" class="primary" data-dismiss-once>I have copied it</button></p>
+</dialog>
 <noscript><p>This page needs JavaScript. <code>mason status</code>, <code>mason tables</code>, <code>mason user list</code>, <code>mason logs</code> and <code>mason usage</code> say the same in a terminal.</p></noscript>
 </body>
 </html>

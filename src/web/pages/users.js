@@ -1,6 +1,6 @@
 /**
  * THE USERS PAGE (#users): what `mason user list|add|from|disable|enable|remove` does — GET /api/users, POST /api/users,
- * POST /api/users/<name>/from, /disable and /enable, DELETE /api/users/<name>. An added user's password lives in this page's memory until the person dismisses it, never in
+ * POST /api/users/<name>/from, /disable and /enable, DELETE /api/users/<name>. An added user's password lives in this page's memory while its one-time dialog is open, never in
  * storage, a URL or a log line.
  */
 import { actId, badge, button, code, copyable, copyClick, duration, empty, esc, json, panel, pop, renderFailure, ROOMS, serverHostNote, spanText, status, utcMinute, readOnlyLine, usersReadOnly } from "../shared.js";
@@ -409,25 +409,33 @@ function toggle(u, disabled, asking) {
     : button("Disable", { disable: u.name }, "small", { room: ROOMS.disable });
 }
 
+/** The one-time dialog's parts (index.html `#once`, opened by the shell while a page's `once()` names it) with nothing in
+ *  them: its head (the title, `#once-title`, and the facts), its status line and its foot (the line over its button). */
+export const NO_ONCE = Object.freeze({ "once-head": "", "once-status": "", "once-foot": "" });
+
+/** The one-time dialog's facts: a label and its value each, a value with an id its Copy, "Shown once" beside the password's. */
+const onceFacts = (rows, passwordId) => `<dl class="facts">${rows.filter(([, v]) => v !== undefined && v !== null).map(([k, v, id]) =>
+  `<dt>${esc(k)}</dt><dd>${id === null ? esc(v) : copyable(id, v, id === passwordId ? badge("Shown once", "warn") : "")}</dd>`).join("")}</dl>`;
+
 /**
- * A USER JUST ADDED (`mason user add --json`'s shape): a prominent card, titled "New user added" on its top edge as the
- * Overview's "mason status" box is, with URL, User and Password, in that order (issue 876): the URL and the Password each
- * with a Copy button laid out the same way, the User its name as plain text (issue 839). Right of the password's Copy, in
- * its row and of the button's height, "Shown once"; under the rows, one line: the password is only shown once. No
- * Database row: the URL already carries the database, and the Database, Host, Port and SSL mode are the run's, said by
- * Connect on the same page (renderUsersConnect); `mason user add` in a terminal prints them all. No psql line: the URL
- * is the same thing, pasted after `psql`. A field the JSON does not carry (the URL while Mason does not run) is not
- * shown. Mason keeps no copy, so it is never shown again. Under the rows, whether it has connected (`o.connected`,
- * `addedSeen`): Waiting for its first query…, then Connected.
+ * A USER JUST ADDED (`mason user add --json`'s shape), as the parts of the one-time dialog (index.html `#once`, a modal
+ * the shell opens while the page's `once()` names it, and closes only by its "I have copied it"): titled "New user
+ * added", with URL, User and Password, in that order (issue 876): the URL and the Password each with a Copy button laid
+ * out the same way, the User its name as plain text (issue 839). Right of the password's Copy, in its row and of the
+ * button's height, "Shown once"; under the rows, whether it has connected (`o.connected`, `addedSeen`): Waiting for its
+ * first query…, then Connected — a part of its own, so its change rewrites nothing the person is copying from; then one
+ * line: the password is only shown once. No Database row: the URL already carries the database, and the Database, Host,
+ * Port and SSL mode are the run's, said by Connect on the same page (renderUsersConnect); `mason user add` in a terminal
+ * prints them all. No psql line: the URL is the same thing, pasted after `psql`. A field the JSON does not carry (the
+ * URL while Mason does not run) is not shown. Mason keeps no copy, so it is never shown again.
  */
 export function renderAdded(a, o = {}) {
-  const rows = [["URL", a.url, "added-url"], ["User", a.user, null], ["Password", a.password, "added-password"]]
-    .filter(([, v]) => v !== undefined && v !== null);
-  const value = (v, id) => id === null ? esc(v) : copyable(id, v, id === "added-password" ? badge("Shown once", "warn") : "");
-  return `<div class="user-added" role="status"><p class="added-title">New user added</p>` +
-    `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${value(v, id)}</dd>`).join("")}</dl>` +
-    `${connectedLine(o.connected === true)}<p class="tip">The password is only shown once</p>` +
-    `${button("I have copied it", { dismissAdded: "" }, "primary")}</div>`;
+  return {
+    "once-head": `<p class="once-title" id="once-title">New user added</p>` +
+      onceFacts([["URL", a.url, "added-url"], ["User", a.user, null], ["Password", a.password, "added-password"]], "added-password"),
+    "once-status": connectedLine(o.connected === true),
+    "once-foot": `<p class="tip">The password is only shown once</p>`,
+  };
 }
 
 /** Whether the user just added has connected yet: waiting, then connected. */
@@ -453,9 +461,8 @@ export const page = {
   create(ctx) {
     // held: what From… opened over ({ list, now, state }), so a poll never rewrites its form under what is being typed
     // added: the user just added (its password in it, this page's memory alone); addedSeen: whether it has connected
-    // reveal: the part to scroll into view after the next write (a new user's password card), once
     // show: the list's tab, the hash's (`route`: #users?show=removed)
-    const m = { actionFailure: null, added: null, addedSeen: false, confirming: null, refused: null, held: null, reveal: null, show: "active", addKind: "user" };
+    const m = { actionFailure: null, added: null, addedSeen: false, confirming: null, refused: null, held: null, show: "active", addKind: "user" };
     // addKind: what the add box creates, "user" (New user) or "share" (Temporary cloud login): the box's own choice
     const users = () => ctx.read(USERS)?.body ?? null;
     // the temporary cloud login, the add box's second kind: its own model, beats and actions
@@ -470,7 +477,6 @@ export const page = {
         if ("failure" in r) { m.actionFailure = r.failure; return false; }
         m.added = r.body;
         m.addedSeen = false;
-        m.reveal = "added";
         await ctx.refresh([USERS]);
         return true;
       },
@@ -538,8 +544,11 @@ export const page = {
         if (m.refused !== null && u !== null && !u.users.some((x) => x.name === m.refused.name && x.removedAt == null)) m.refused = null;
       },
       actions,
-      /** after an add, its password card scrolled into view once: on a phone it is written below the screen's edge */
-      reveal() { const id = m.reveal; m.reveal = null; return id; },
+      /** THE ONE-TIME MOMENT the shell's dialog shows (index.html `#once`): a user just added — `key` its identity (a new one
+       *  takes the focus again), `back` where the focus goes once it closes (the add form's Name) — else null */
+      once() { return m.added !== null ? { key: `user ${m.added.user} ${m.added.addedAt}`, back: "user-name" } : null; },
+      /** its "I have copied it": the password dropped from the page's memory */
+      dismissOnce() { if (m.added !== null) actions.dismissAdded(); },
       /** `#users?show=removed`: the list's tab, as the hash says (none: Active). Another tab drops a question, a From…
        *  and a refusal beside a row of the tab left: their rows are not shown. */
       route(params) {
@@ -569,8 +578,10 @@ export const page = {
           "add-user-box": renderAddUser(s, offer),
           "add-share-box": offer ? renderSharePane(s, share.m, ctx.read(SHARE_CHOICES)) : "",
           "users-connect": renderUsersConnect(s?.postgres, s?.served === true, offer),
-          // what the box made, in one place: a user just added, a temporary cloud login
-          added: (m.added ? renderAdded(m.added, { connected: m.addedSeen }) : "") + renderShareCard(s, share.m, ctx.now().getTime()),
+          // a user just added: the one-time dialog's parts (the shell opens it while `once()` names it)
+          ...(m.added ? renderAdded(m.added, { connected: m.addedSeen }) : NO_ONCE),
+          // what the box made, under it: a temporary cloud login
+          added: renderShareCard(s, share.m, ctx.now().getTime()),
           action: m.actionFailure ? renderFailure(m.actionFailure) : "",
         };
       },
@@ -583,8 +594,6 @@ export const page = {
       input: (target) => share.input(target),
       click(d, button, { doc, win }) {
         if (d.addKind !== undefined) { if (d.addKind === "user" || d.addKind === "share") m.addKind = d.addKind; return true; }
-        // opened: its card scrolled into view once, as a new user's is (on a phone it is written below the screen's edge)
-        if (d.shareOpen !== undefined) return share.actions.shareOpen().then(() => { if (share.m.phase === "open") m.reveal = "added"; });
         const shared = share.click(d);
         if (shared !== null) return shared;
         if (d.remove !== undefined) return actions.askRemove(d.remove) ?? true;
@@ -594,7 +603,6 @@ export const page = {
         if (d.confirmDisable !== undefined) return actions.confirmDisable(d.confirmDisable);
         if (d.from !== undefined) return actions.askFrom(d.from) ?? true;
         if (d.enable !== undefined) return actions.enableUser(d.enable);
-        if (d.dismissAdded !== undefined) return actions.dismissAdded() ?? true;
         if (d.dismissRefused !== undefined) return actions.dismissRefused() ?? true;
         return copyClick(d, button, { doc, win });
       },

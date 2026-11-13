@@ -52,9 +52,14 @@
  *       arrive?()      the id of the element a person arriving on the page starts in (a sidebar link or a link
  *                      followed, never a poll's write): undefined while what decides it is unread, null for none
  *                      (the shell focuses it once, `arriving` in `start`)
- *       reveal?()      the id of an element an action just wrote that the person must see (a new user's password
- *                      card), once, else null: after the write, the shell scrolls it into view (on a phone it was
- *                      written below the screen's edge)
+ *       once?()        THE ONE-TIME MOMENT (a password shown once): `{ key, back }` while the page's parts
+ *                      `once-head`, `once-status` and `once-foot` (index.html's one `<dialog id="once">`) hold it,
+ *                      else null. The shell opens the dialog as a modal (`showModal`: the page behind inert) with the
+ *                      focus on its first Copy, again whenever `key` changes; it closes ONLY once the page's `once()`
+ *                      is null again — Escape and a click on the backdrop do nothing — and the focus goes to `back`
+ *                      (an element's id). Its parts are written as every part is: only when their HTML changes and
+ *                      never while a pointer is pressed, so a poll never rewrites what the person copies from
+ *       dismissOnce?() its "I have copied it" (`data-dismiss-once`, index.html's): the page drops what it showed
  *       route?(params, { doc })  the hash showed it with these parameters (`#tables?show=failed`: { show: "failed" }):
  *                      it takes the ones it knows into its state (and a control outside its parts, through `doc`)
  *       saysStale?     true when the page says itself that what it shows is out of date (the Overview's word): the
@@ -69,7 +74,7 @@
  * A page is registered by its import and its place in PAGES below, its route in PAGE_ROUTES, and its section in
  * index.html.
  */
-import { esc, badge, icon, createAsk, overTunnel, renderFailure, updatedText, staleText, placePops, RANGES, DEFAULT_RANGE, rangeOf, rangeOffered, isLive, POLL_MS } from "./shared.js";
+import { esc, badge, icon, copyClick, createAsk, overTunnel, renderFailure, updatedText, staleText, placePops, RANGES, DEFAULT_RANGE, rangeOf, rangeOffered, isLive, POLL_MS } from "./shared.js";
 import { createCharts } from "./charts.js";
 import { page as statusPage } from "./pages/status.js";
 import { page as tablesPage } from "./pages/tables.js";
@@ -536,11 +541,33 @@ export function start(doc, win) {
     if (charts !== null) void charts.mount(app.pages.get(app.model.shown).charts?.() ?? {});
     place();
     arrived();
-    // what an action just wrote that the person must see (the page's `reveal`): scrolled into view once, as little as
-    // it takes (a phone wrote a new user's password card at the screen's bottom edge)
-    const reveal = app.pages.get(app.model.shown).reveal?.() ?? null;
-    if (reveal !== null) doc.getElementById(reveal)?.scrollIntoView?.({ block: "nearest" });
+    once();
   };
+  // THE ONE-TIME DIALOG (index.html `#once`, a page's `once()`): open as a modal while a page names one — whichever page
+  // is shown, so a hash followed under it never leaves the page inert behind a dialog nobody sees — its first Copy
+  // focused when it opens and when what it shows changes; closed only once the page names none (its "I have copied
+  // it"), the focus then where the page says. Escape (`cancel`) is refused; a backdrop click is no button; and a dialog
+  // closed by anything else (a browser's own close request) is opened again at the paint its `close` asks for.
+  const onceEl = doc.getElementById("once");
+  let onceShown = null;
+  const once = () => {
+    if (onceEl === null || typeof onceEl.showModal !== "function") return;
+    const o = [...app.pages.values()].map((p) => p.once?.() ?? null).find((x) => x !== null) ?? null;
+    if (o !== null) {
+      const opening = !onceEl.open;
+      if (opening) onceEl.showModal();
+      if (opening || onceShown?.key !== o.key) onceEl.querySelector?.("[data-copy]")?.focus?.();
+      onceShown = o;
+      return;
+    }
+    if (onceShown === null) return;
+    const back = onceShown.back;
+    onceShown = null;
+    if (onceEl.open) onceEl.close();
+    if (back) doc.getElementById(back)?.focus?.();
+  };
+  onceEl?.addEventListener?.("cancel", (e) => { e.preventDefault?.(); });
+  onceEl?.addEventListener?.("close", () => { paint(); });
   // ARRIVING ON A PAGE (issue 887): the element its `arrive()` names takes the focus once, at the first write that has
   // it — the page's first, or the one after a link followed (a hashchange) — so a person types straight away; never at a
   // poll's write after that, never from what the person focused or typed in since they arrived (the focus moved off
@@ -605,6 +632,8 @@ export function start(doc, win) {
   const inMenu = (t) => Boolean(t) && (sidebar?.contains?.(t) ?? false);
   doc.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
+    // the one-time dialog closes only by its button: Escape is no close request there
+    if (onceEl?.open) { e.preventDefault?.(); return; }
     if (menuOpen) { e.preventDefault?.(); setMenu(false, true); return; }
     const close = doc.querySelector?.(".pop.ask:not([hidden]) [data-pop-close]");
     if (close) { e.preventDefault?.(); close.click(); return; }
@@ -640,6 +669,9 @@ export function start(doc, win) {
     if (!b) return;
     // Refresh beside a range that is not Now: everything shown read again
     if (b.dataset.refreshRange !== undefined) { app.markStale(); await poll(); return; }
+    // the one-time dialog's own buttons, whichever page is shown: I have copied it, and each Copy in it
+    if (b.dataset.dismissOnce !== undefined) { for (const p of app.pages.values()) if ((p.once?.() ?? null) !== null) p.dismissOnce?.(); paint(); return; }
+    if (b.dataset.copy !== undefined && onceEl?.contains?.(b)) { await act(copyClick(b.dataset, b, { doc, win })); return; }
     const r = shownPage().click?.(b.dataset, b, { doc, win }) ?? null;
     if (r === null) return;
     await act(r);

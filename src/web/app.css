@@ -755,6 +755,24 @@ table.users td { overflow: hidden; text-overflow: ellipsis; }
 /* a phone: a fact's label over its value, so a URL or a password has the card's whole width */
 @media (max-width: 640px) { .user-added .facts, .connect .facts { grid-template-columns: 1fr; gap: 0 var(--space-4); } .user-added .facts dd, .connect .facts dd { margin-bottom: var(--space-2); } }
 
+/* THE ONE-TIME DIALOG (index.html #once): a password shown once, a modal over the page dimmed by the scrim, framed as
+   the card it replaced (its warn edge); a long URL wraps in its row, and the dialog scrolls inside itself, never the page */
+dialog.once { width: min(640px, calc(100vw - 2 * var(--space-4))); max-width: none; max-height: calc(100dvh - 2 * var(--space-4)); overflow: auto;
+  box-sizing: border-box; padding: var(--space-5); color: var(--fg); background: var(--surface); border: 1px solid var(--frame);
+  border-left: 4px solid var(--warn); border-radius: var(--radius-lg); box-shadow: var(--drop-hover); }
+dialog.once::backdrop { background: var(--scrim); }
+.once .once-title { margin: 0 0 var(--space-3); font-family: var(--font-display); font-weight: 700; font-size: var(--text-lg); }
+.once .facts { margin: 0 0 var(--space-3); gap: var(--space-2) var(--space-4); align-items: center; grid-template-columns: max-content minmax(0, 1fr); }
+.once .copyrow { flex-wrap: wrap; } .once .copyrow code { overflow-wrap: anywhere; min-width: 0; }
+.once .added-seen { margin: 0 0 var(--space-3); overflow-wrap: anywhere; }
+.once .tip { color: var(--muted); margin: 0 0 var(--space-3); }
+.once .once-actions { margin: 0; }
+/* a phone: a sheet the screen's whole width at its foot, a fact's label over its value */
+@media (max-width: 640px) {
+  dialog.once { width: 100%; max-height: 100dvh; margin: auto 0 0; padding: var(--space-4); border-left-width: 1px; border-top: 4px solid var(--warn); }
+  .once .facts { grid-template-columns: 1fr; gap: 0 var(--space-4); } .once .facts dd { margin-bottom: var(--space-2); }
+}
+
 /* ---------------------------------------------------------------- Queries, Usage and Logs (scoped to those pages) */
 /* a filter toolbar: each field a small label over its control, the actions at the end */
 .toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-3); margin: 0 0 var(--space-5); padding: var(--space-3) var(--space-4);

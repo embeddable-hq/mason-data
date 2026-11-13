@@ -54,6 +54,10 @@ const asPage = (cli: string): string => cli
 const textOf = (html: string): string => html.replace(/<wbr>/g, "").replace(/<[^>]*>/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"")
   .replace(/&#39;/g, "'").replace(/&amp;/g, "&").replace(/\s+/g, " ").trim();
 
+/** What the one-time dialog (index.html `#once`) shows from a page's parts (or a view's): its head, status line and foot,
+ *  in order; its button is the dialog's own. */
+const onceHtml = (parts: Record<string, string | undefined>): string => `${parts["once-head"] ?? ""}${parts["once-status"] ?? ""}${parts["once-foot"] ?? ""}`;
+
 /** The popovers of some HTML (`pop` of src/web/shared.js: a confirm, a form, an answer, written after its table), each
  *  { anchor, html }, in their order; `popOf(html, anchor)` the one beside that element (a row's actions), or "". */
 const popsOf = (html: string): Array<{ anchor: string; html: string }> => {
@@ -603,17 +607,19 @@ test("the users while the roles file cannot be read: mason user list's tip, word
   assert.doesNotMatch(textOf(renderUsers(list, null, NOW_R, null, null)), /cannot be read/);
 });
 
-test("a user just added: titled New user added on the box's edge; URL, User and Password alone, in that order, held equal to mason user add's rows — the URL and the Password each with a Copy that copies it, the User as plain text; Shown once right of the password's Copy; one line that it is only shown once — no Database, Host, Port or SSL mode (Connect's), no psql line", async () => {
+test("a user just added: the one-time dialog's parts, titled New user added; URL, User and Password alone, in that order, held equal to mason user add's rows — the URL and the Password each with a Copy that copies it, the User as plain text; Shown once right of the password's Copy; one line that it is only shown once — no Database, Host, Port or SSL mode (Connect's), no psql line", async () => {
   const password = "mason_0123456789abcdef_" + "a".repeat(32);
   const url = `postgres://metabase:${password}@127.0.0.1:5433/shop`;
   const added = { user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password,
     database: "shop", url, psql: psqlLine(url), host: "127.0.0.1", port: 5433, sslmode: "require", roleFrom: "none" as const };
-  const html = fn<[unknown], string>("renderAdded")(added);
+  const parts = fn<[unknown], Record<string, string>>("renderAdded")(added);
+  assert.deepEqual(Object.keys(parts), ["once-head", "once-status", "once-foot"], "the dialog's three parts");
+  const html = onceHtml(parts);
   const text = textOf(html);
-  // the title on the box's top edge, then the user's own three fields, in one layout: each a label and its value, a
-  // Copy on all but the name (issues 839, 876); Shown once beside the password's Copy; one line, and the button
-  assert.equal(text, "New user added URL postgres://metabase:mason_0123456789abcdef_a{32}@127.0.0.1:5433/shop Copy User metabase Password mason_0123456789abcdef_a{32} Copy Shown once Waiting for its first query… The password is only shown once I have copied it".replace("a{32}", "a".repeat(32)).replace("a{32}", "a".repeat(32)));
-  assert.match(html, /^<div class="user-added" role="status"><p class="added-title">New user added<\/p><dl class="facts"><dt>URL<\/dt><dd><span class="copyrow">[^]*?<\/dd><dt>User<\/dt><dd>metabase<\/dd><dt>Password<\/dt>/, "the title, then URL, then User as plain text with no Copy, then Password");
+  // the title, then the user's own three fields, in one layout: each a label and its value, a Copy on all but the name
+  // (issues 839, 876); Shown once beside the password's Copy; the status line, then one line (the button is the dialog's)
+  assert.equal(text, "New user added URL postgres://metabase:mason_0123456789abcdef_a{32}@127.0.0.1:5433/shop Copy User metabase Password mason_0123456789abcdef_a{32} Copy Shown once Waiting for its first query… The password is only shown once".replace("a{32}", "a".repeat(32)).replace("a{32}", "a".repeat(32)));
+  assert.match(html, /^<p class="once-title" id="once-title">New user added<\/p><dl class="facts"><dt>URL<\/dt><dd><span class="copyrow">[^]*?<\/dd><dt>User<\/dt><dd>metabase<\/dd><dt>Password<\/dt>/, "the title, then URL, then User as plain text with no Copy, then Password");
   assert.match(html, /<code id="added-password">[^<]*<\/code> <button[^>]*>Copy<\/button> <span class="badge warn">Shown once<\/span><\/span><\/dd>/, "Shown once in the password's row, right of its Copy");
   assert.doesNotMatch(html, /shown-once/, "no line of its own under the password");
   assert.equal([...html.matchAll(/Shown once/g)].length, 1, "said once, beside the password's Copy");
@@ -654,9 +660,10 @@ test("a user just added: titled New user added on the box's edge; URL, User and 
   // no psql line: the URL is the same thing, pasted after psql (mason user add --json keeps its psql field)
   assert.doesNotMatch(text, /psql/, "no psql line, and no word of it");
   assert.doesNotMatch(html, /added-psql/);
-  assert.match(html, /<button type="button" class="primary" data-dismiss-added="">I have copied it<\/button>/);
+  // its one way out is the dialog's own, in index.html: I have copied it
+  assert.match(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), /<button type="button" class="primary" data-dismiss-once>I have copied it<\/button><\/p>\s*<\/dialog>/);
   // while Mason does not run, the JSON carries no URL: it is not shown, never "undefined"
-  const bare = fn<[unknown], string>("renderAdded")({ user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password, database: "shop" });
+  const bare = onceHtml(fn<[unknown], Record<string, string>>("renderAdded")({ user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password, database: "shop" }));
   assert.deepEqual([...bare.matchAll(/data-copy="([^"]+)"/g)].map((m) => m[1]), ["added-password"]);
   assert.deepEqual([...bare.matchAll(/<dt>([^<]*)<\/dt>/g)].map((m) => m[1]), ["User", "Password"]);
   assert.doesNotMatch(textOf(bare), /undefined|null|Database|Host|Port|SSL mode|URL/);
@@ -1451,8 +1458,10 @@ test("a stale page greys every part of what it read before — the users' table 
     url: `postgres://grafana:${password}@127.0.0.1:5433/shop`, host: "127.0.0.1", port: 5433, sslmode: "disable", next: [] }), { status: 200 }));
   assert.equal(await app.addUser("grafana"), true);
   assert.notEqual(app.stale(), null, "still out of date: the users were not read again");
-  assert.ok(app.view().added!.includes(password));
-  assert.ok(grey(app.view().added!).every((x) => !x.greyed), "an added user's password, shown once, is from now");
+  assert.ok(onceHtml(app.view()).includes(password));
+  // the one-time dialog is no part of a section (index.html: after </main>), so a stale section's rule never greys it
+  const index = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
+  assert.ok(index.indexOf('<dialog id="once"') > index.lastIndexOf("</main>"), "an added user's password, shown once, is from now: never greyed");
   allGreyed(app.view().users!, "the users' table beside it");
 });
 
@@ -1485,9 +1494,9 @@ test("the app: an added user's password is written once, gone once dismissed and
     url: `postgres://grafana:${password}@127.0.0.1:5433/shop`, host: "127.0.0.1", port: 5433, sslmode: "disable", next: [] }), { status: 200 }));
   assert.equal(await app.addUser("grafana"), true);
   assert.ok(run.asked.includes(`POST api/users ${JSON.stringify({ name: "grafana" })}`));
-  assert.ok(app.view().added!.includes(password));
+  assert.ok(onceHtml(app.view()).includes(password));
   await app.poll();
-  assert.ok(app.view().added!.includes(password), "a poll does not take it away before it is copied");
+  assert.ok(onceHtml(app.view()).includes(password), "a poll does not take it away before it is copied");
   app.dismissAdded();
   await app.poll();
   assert.ok(Object.values(app.view()).every((part) => !part.includes(password)), "once dismissed, nowhere on the page");
@@ -1497,7 +1506,7 @@ test("the app: an added user's password is written once, gone once dismissed and
     failure: { code: "refused", message: "there is already a user \"grafana\"", why: "a name names one user", fix: "mason user remove grafana, then mason user add grafana", next: [{ command: "mason user list", what: "the users" }] } }), { status: 409 }));
   assert.equal(await app.addUser("grafana"), false);
   assert.equal(textOf(app.view().action!), "✗ there is already a user \"grafana\" why a name names one user fix mason user remove grafana, then mason user add grafana Next: mason user list the users");
-  assert.equal(app.view().added, "");
+  assert.equal(onceHtml(app.view()), "");
 });
 
 // ------------------------------------------------------------------ a user just added: waiting for its first query, then connected
@@ -1507,9 +1516,9 @@ const ADDED = (user: string) => {
   const url = `postgres://${user}:${password}@127.0.0.1:5433/shop`;
   return { user, id: "0123456789abcdef", addedAt: "2026-10-27T09:11:00.000Z", password, database: "shop", url, psql: psqlLine(url), host: "127.0.0.1", port: 5433, sslmode: "disable", roleFrom: "none" as const };
 };
-test("the New user added card: under its rows a status line, Waiting for its first query… until the user is seen, then Connected; no tool's guide, psql line or cloud line", () => {
-  const renderAdded = fn<[unknown, unknown?], string>("renderAdded");
-  const between = (html: string) => textOf(html).replace(/^.*? Copy Shown once /, "").replace(/ ?The password is only shown once I have copied it$/, "");
+test("the New user added dialog: under its rows a status line, Waiting for its first query… until the user is seen, then Connected; no tool's guide, psql line or cloud line", () => {
+  const renderAdded = (a: unknown, o?: unknown) => onceHtml(fn<[unknown, unknown?], Record<string, string>>("renderAdded")(a, o));
+  const between = (html: string) => textOf(html).replace(/^.*? Copy Shown once /, "").replace(/ ?The password is only shown once$/, "");
   const waiting = renderAdded(ADDED("metabase"));
   assert.equal(between(waiting), "Waiting for its first query…");
   assert.equal(between(renderAdded(ADDED("metabase"), { connected: true })), "Connected");
@@ -1539,7 +1548,7 @@ test("connected: a session of the user added open now, or a statement of it sinc
   await app.poll();
   run.answers.set("POST api/users", answer(a));
   await app.pages.get("users")!.submit({ id: "add-user", elements: { name: { value: "metabase2" }, role: { value: "" }, connects: { value: "any" }, from: { value: "" } } });
-  assert.match(textOf(app.view().added!), /Waiting for its first query…/);
+  assert.match(textOf(onceHtml(app.view())), /Waiting for its first query…/);
   const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
   t += 2000;
   assert.deepEqual(await asked(), [], "not at every 2 s poll");
@@ -1548,17 +1557,17 @@ test("connected: a session of the user added open now, or a statement of it sinc
   run.answers.set("GET api/state", answer(sessions([{ user: "metabase2", client: "Metabase v0.50", open: 1, running: 0 }])));
   t += 5000;
   await asked();
-  assert.match(app.view().added!, /<span class="indicator ok"><span class="dot" aria-hidden="true"><\/span>Connected<\/span>/);
+  assert.match(onceHtml(app.view()), /<span class="indicator ok"><span class="dot" aria-hidden="true"><\/span>Connected<\/span>/);
   // its session closed: still connected (held), and the state at the users' rate again
   run.answers.set("GET api/state", answer(CATALOG_STATE));
   t += 5000;
   assert.deepEqual(await asked(), [], "seen: no faster read");
   t += 30_000;
   await asked();
-  assert.match(textOf(app.view().added!), /Connected/);
+  assert.match(textOf(onceHtml(app.view())), /Connected/);
   // dismissed: the card and its reads go
   app.dismissAdded();
-  assert.equal(app.view().added, "");
+  assert.equal(onceHtml(app.view()), "");
 });
 
 /** A roles file as the listener holds it (src/duck/grants.ts RolesLive): its roles by name (the tables each reads do not
@@ -1623,7 +1632,7 @@ test("the app: the add form's role is sent as role (none for the default, as mas
   assert.equal(await app.addUser("grafana", "gone"), false);
   assert.ok(run.asked.includes(`POST api/users ${JSON.stringify({ name: "grafana", role: "gone" })}`));
   assert.equal(textOf(app.view().action!), "✗ there is no role gone in mason/roles.yml why a role is a key of mason/roles.yml fix mason user add grafana --role everything");
-  assert.equal(app.view().added, "");
+  assert.equal(onceHtml(app.view()), "");
 });
 
 test("the app: Remove asks first, Cancel takes it back, the confirm sends DELETE api/users/<name> and reads the users again", async () => {
@@ -1866,7 +1875,7 @@ test("the app: the add form sends from only when only these addresses is chosen;
   const input = { value: "looker" };
   await users.submit({ id: "add-user", elements: { name: input, role: { value: "" }, connects: { value: "only" }, from: { value: "192.0.2.0/33" } } });
   assert.equal(textOf(app.view().action!), `✗ ${failure.message} fix ${failure.fix}`);
-  assert.equal(app.view().added, "");
+  assert.equal(onceHtml(app.view()), "");
   assert.equal(input.value, "looker", "refused: the name stays to fix");
 });
 
@@ -2150,10 +2159,18 @@ async function until(cond: () => boolean, what = "the condition", ms = 5000): Pr
  *  that reads a form's ticked boxes from the fake form. */
 function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "", winExtra: Record<string, unknown> = {}) {
   // an element's attributes, and what holds the focus: a target `{ in: "sidebar" }` is inside the element of that id
-  interface FakeEl { id: string; writes: number; html: string; hidden?: boolean; innerHTML: string; attrs: Map<string, string>; addEventListener: () => void;
+  // a dialog's too (the one-time dialog, index.html #once): `open`, `showModal` (counted in `shown`; a second while open
+  // throws, as a browser's does), `close` (its close event after, as a browser fires it), and the events it was given
+  interface FakeEl { id: string; writes: number; html: string; hidden?: boolean; innerHTML: string; attrs: Map<string, string>;
+    open: boolean; shown: number; listeners: Map<string, Array<(e: unknown) => void>>; addEventListener(type: string, f: (e: unknown) => void): void; fire(type: string, e?: unknown): void;
+    showModal(): void; close(): void;
     setAttribute(k: string, v: string): void; removeAttribute(k: string): void; contains(t: { in?: string } | null): boolean; focus(): void; querySelector(sel: string): FakeEl }
   const els = new Map<string, FakeEl>();
-  const el = (id: string): FakeEl => els.get(id) ?? (els.set(id, { id, writes: 0, html: "", attrs: new Map(), addEventListener: () => undefined,
+  const el = (id: string): FakeEl => els.get(id) ?? (els.set(id, { id, writes: 0, html: "", attrs: new Map(), open: false, shown: 0, listeners: new Map(),
+    addEventListener(type: string, f: (e: unknown) => void) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), f]); },
+    fire(type: string, e: unknown = {}) { for (const f of this.listeners.get(type) ?? []) f(e); },
+    showModal() { if (this.open) throw new Error("InvalidStateError: the dialog is already open"); this.open = true; this.shown++; },
+    close() { if (!this.open) return; this.open = false; setTimeout(() => this.fire("close"), 0); },
     get innerHTML() { return this.html.replace(/ (data-[a-z-]+)(?=[ >])/g, ' $1=""').replace(/&#39;/g, "'"); },
     set innerHTML(v: string) { this.html = v; this.writes++; },
     setAttribute(k: string, v: string) { this.attrs.set(k, v); }, removeAttribute(k: string) { this.attrs.delete(k); },
@@ -2223,23 +2240,74 @@ test("arriving on the Users page puts the cursor in the add form's Name — at t
   assert.equal(d.focused, "", "a tab followed moves no focus");
 });
 
-test("after Add a user, its password card is scrolled into view once — on a phone it was written at the screen's bottom edge; a poll's write scrolls nothing (issue 877)", async () => {
+test("after Add a user, New user added is a modal dialog: its Copy focused; a poll never closes nor rewrites it, its status line alone moves; Escape, a backdrop click and a hash followed leave it open; I have copied it closes it, the password gone and the focus on Name; never on a read-only page", async () => {
+  const password = `mason_0123456789abcdef_${"a".repeat(32)}`;
   const run = fakeRun();
-  run.answers.set("POST api/users", () => new Response(JSON.stringify({ user: "grafana", id: "0123456789abcdef", addedAt: "2026-10-27T09:11:00.000Z",
-    password: `mason_0123456789abcdef_${"a".repeat(32)}`, database: "shop" }), { status: 200 }));
-  const { el, on, tick, settle } = fakeBrowser(run, "#users");
+  run.answers.set("GET api/state", answer(CATALOG_STATE));
+  run.answers.set("POST api/users", () => new Response(JSON.stringify({ user: "grafana", id: "0123456789abcdef", addedAt: "2026-10-27T09:11:00.000Z", password, database: "shop",
+    url: `postgres://grafana:${password}@127.0.0.1:5433/shop` }), { status: 200 }));
+  const { el, on, doc, go, tick, settle } = fakeBrowser(run, "#users");
   await settle();
-  const scrolled: unknown[] = [];
-  Object.assign(el("added"), { scrollIntoView: (o: unknown) => { scrolled.push(o); } });
+  const d = doc as unknown as { focused: string };
+  const once = el("once");
   tick(); await settle();
-  assert.deepEqual(scrolled, [], "nothing added: nothing scrolled");
-  const form = { id: "add-user", elements: { name: { value: "grafana" }, connects: { value: "any" } } };
-  await on.get("submit")!({ target: form, preventDefault: () => undefined });
+  assert.deepEqual([once.open, once.shown], [false, 0], "nothing added: no dialog");
+  assert.equal(onceHtml({ "once-head": el("once-head").html, "once-status": el("once-status").html, "once-foot": el("once-foot").html }), "");
+  // Add a user: the dialog opens over the page, filled, its first Copy (the URL's) focused; nothing under the form
+  await on.get("submit")!({ target: { id: "add-user", elements: { name: { value: "grafana" }, connects: { value: "any" } } }, preventDefault: () => undefined });
   await settle();
-  assert.match(el("added").html, /New user added<\/p><dl class="facts">[^]*<dt>User<\/dt><dd>grafana<\/dd>/, "the card is written");
-  assert.deepEqual(scrolled, [{ block: "nearest" }], "and scrolled into view, as little as it takes");
+  assert.deepEqual([once.open, once.shown], [true, 1], "opened as a modal, once");
+  assert.match(el("once-head").html, /^<p class="once-title" id="once-title">New user added<\/p><dl class="facts"><dt>URL<\/dt>[^]*<dt>User<\/dt><dd>grafana<\/dd>[^]*Shown once/);
+  assert.ok(el("once-head").html.includes(password));
+  assert.match(textOf(el("once-status").html), /^Waiting for its first query…$/);
+  assert.equal(textOf(el("once-foot").html), "The password is only shown once");
+  assert.equal(d.focused, "once [data-copy]", "the focus on its first Copy");
+  assert.ok(!el("added").html.includes(password) && !el("action").html.includes(password), "no card under the form");
+  // polls: nothing closes it, and what it shows is not written again
+  const writes = () => [el("once-head").writes, el("once-status").writes, el("once-foot").writes];
+  const was = writes();
+  for (let i = 0; i < 4; i++) { tick(); await settle(); }
+  go("#users"); await settle();
+  assert.deepEqual([once.open, once.shown, writes()], [true, 1, was], "a poll neither closes nor rewrites it");
+  // Escape: the dialog's cancel refused, the key's default too; a browser that closes it anyway sees it opened again
+  let cancelled = false;
+  once.fire("cancel", { preventDefault: () => { cancelled = true; } });
+  assert.ok(cancelled, "its cancel event (Escape) is refused");
+  let escaped = false;
+  await on.get("keydown")!({ key: "Escape", preventDefault: () => { escaped = true; } });
+  assert.ok(escaped && once.open, "Escape is no close request while it is open");
+  once.close(); await settle();
+  assert.deepEqual([once.open, once.shown], [true, 2], "closed by anything but its button: opened again");
+  assert.ok(el("once-head").html.includes(password), "with what it showed");
+  // a click on the backdrop (the dialog itself, no button) does nothing
+  await on.get("click")!({ target: { in: "once", closest: () => null } });
+  await settle();
+  assert.equal(once.open, true, "a backdrop click leaves it open");
+  // another page followed under it (Back): still open, whichever page is shown
+  go("#tables"); await settle();
+  assert.equal(once.open, true, "a hash followed leaves it open");
+  go("#users"); await settle();
+  // the user connects: its status line alone is written again
+  run.answers.set("GET api/state", answer({ ...CATALOG_STATE, sessions: { open: 1, byClient: [{ user: "grafana", client: "Grafana", open: 1, running: 0 }] } }));
+  const head = el("once-head").writes;
+  go("#users"); await settle();
+  assert.match(textOf(el("once-status").html), /^Connected$/);
+  assert.equal(el("once-head").writes, head, "the facts the person copies from not rewritten");
+  // I have copied it: closed, nothing of it left on the page, the focus back on the add form's Name
+  await on.get("click")!({ target: { closest: (sel: string) => sel === "button" ? { dataset: { dismissOnce: "" } } : null } });
+  await settle();
+  assert.equal(once.open, false, "closed by its button");
+  assert.equal(d.focused, "user-name", "the focus back on Name");
+  assert.deepEqual([el("once-head").html, el("once-status").html, el("once-foot").html], ["", "", ""]);
+  assert.ok([...["users", "added", "action", "once-head", "once-status", "once-foot"]].every((id) => !el(id).html.includes(password)), "the password nowhere on the page");
   tick(); await settle();
-  assert.equal(scrolled.length, 1, "once: a poll's write after it scrolls nothing");
+  assert.equal(once.shown, 2, "and never again");
+  // a read-only page adds no user: never a dialog
+  const ro = fakeRun();
+  ro.answers.set("GET api/state", answer({ ...CATALOG_STATE, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" }));
+  const b = fakeBrowser(ro, "#users");
+  await b.settle(); b.tick(); await b.settle();
+  assert.deepEqual([b.el("once").open, b.el("once").shown, b.el("add-user-box").html], [false, 0, ""]);
 });
 
 test("the stylesheet: the Users table's Added header is no card, the add box keeps the height of its taller pane, and Users › Connect's tip is one line of text (issue 877)", async () => {
@@ -3724,10 +3792,10 @@ test("Tables: a copy's whole error stays open across the polls that rewrite the 
   assert.equal(app.pages.get("tables")!.toggle!({ id: "syncs-raw", open: true }), null, "a details with no key is not this page's");
 });
 
-test("Users: the add form's password is a prominent card marked shown once; Active lists the users not removed, #users?show=removed the removed, and the age ticks with the page's clock", async () => {
-  const added = fn<[unknown], string>("renderAdded")({ user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password: "mason_0123456789abcdef_" + "a".repeat(32),
-    database: "shop", url: "postgres://metabase@127.0.0.1:5433/shop" });
-  assert.match(added, /^<div class="user-added" role="status"><p class="added-title">New user added<\/p>/);
+test("Users: the add form's password is the one-time dialog, marked shown once; Active lists the users not removed, #users?show=removed the removed, and the age ticks with the page's clock", async () => {
+  const added = onceHtml(fn<[unknown], Record<string, string>>("renderAdded")({ user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password: "mason_0123456789abcdef_" + "a".repeat(32),
+    database: "shop", url: "postgres://metabase@127.0.0.1:5433/shop" }));
+  assert.match(added, /^<p class="once-title" id="once-title">New user added<\/p>/);
   assert.match(added, /<span class="badge warn">Shown once<\/span>/);
   assert.equal([...added.matchAll(/data-copy="/g)].length, 2, "the URL and the password each have a Copy; the name is plain, the database is Connect's");
   const run = fakeRun();
@@ -5778,7 +5846,7 @@ test("the Users page over a fake run: the add box offers New user and Temporary 
   run.answers.set("GET api/state", () => new Response(JSON.stringify(state), { status: 200 }));
   run.answers.set("GET api/share/choices", answer(TWO_ROLES.body));
   run.answers.set("POST api/share", answer({ url: SHARE_URL, user: "share_a1b2c3", host: "relay.example", port: 41234, database: "shop", password: PASSWORD, beatMs: 15_000 }));
-  const app = fn<[unknown], App & { markStale(): void; pages: Map<string, { input(t: unknown): unknown; click(d: unknown, b: unknown, w: unknown): unknown; reveal(): string | null; arrive(): unknown }> }>("createApp")(run.fetch);
+  const app = fn<[unknown], App & { markStale(): void; pages: Map<string, { input(t: unknown): unknown; click(d: unknown, b: unknown, w: unknown): unknown; arrive(): unknown }> }>("createApp")(run.fetch);
   app.show("users");
   await app.poll();
   const before = app.view();
@@ -5800,7 +5868,6 @@ test("the Users page over a fake run: the add box offers New user and Temporary 
   run.asked.length = 0;
   await page.click({ shareOpen: "" }, {}, {});
   assert.equal(run.asked[0], `POST api/share ${JSON.stringify({ from: "page", confirmed: true, role: "ops" })}`);
-  assert.equal(page.reveal(), "added", "its card scrolled into view once");
   // the run lists it now: its card in the added place, never a row of the users nor in their counts
   state = sharing([{ ...listed, role: "ops" }]);
   app.markStale(); await app.poll();

@@ -22,8 +22,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   tables the ones Mason syncs are at the top under All. A table you add or remove keeps its row, its state changing in
   place, and moves to its group the next time the list is laid out: when you open the page again, or change the search
   or the All / Added / Failed / Not added filter.
-- **A user added on the web page's Users page shows only what is its own.** The card shown once is titled "New user
-  added" and has the URL, the User and the Password, the URL and the Password each with Copy, "Shown once" beside the
+- **A user added on the web page's Users page shows only what is its own, in a dialog over the page.** What is shown
+  once opens as a dialog titled "New user added", so it is not missed under the form, and it closes only when you click
+  "I have copied it": Escape and a click outside it leave it open, because the password is not shown again. It has the URL, the User and the Password, the URL and the Password each with Copy, "Shown once" beside the
   password's Copy, and one line: the password is only shown once. The URL already carries the database; the database,
   host, port and SSL mode are Connect's on the same page, and the card does not repeat them. `mason user add` in a terminal prints every row, as before.
 - **Connect from anywhere moves to the Users page, as a Temporary cloud login.** The box that adds a user has two
