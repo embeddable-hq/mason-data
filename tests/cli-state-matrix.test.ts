@@ -13,6 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 import { COMMANDS } from "../src/cli/registry.ts";
+import { DEPLOY } from "../src/cli/deploy.ts";
 import { PROJECT_STATES, meets, type ProjectState } from "../src/cli/state.ts";
 import { MATRIX_ARGS, MATRIX_EXTRA_ARGS, MATRIX_HOSTED, MATRIX_MORE, TRANSITIONS, answerProblems, containerMemoryEnv, matrixEnv, runMason, takesJson, type Answer } from "./cli-matrix.ts";
 import { createRunServer, type RunContext } from "../src/cli/run-server.ts";
@@ -602,7 +603,7 @@ test("every command, in every state without a run, as a person and with --json: 
     const p = answerProblems(cmd, a, json, codes);
     // a folder holding mason/ alone is a project to mason deploy: its dry run reads the files, and meets the sources
     // file's url: written with its password (refused: the replica keeps the files), never "no project"
-    if (state === "files_only" && cmd === "deploy" && !(json ? a.stdout : a.stderr).includes("mason/sources/shop.yml: url: is written with its password")) {
+    if (state === "files_only" && cmd === DEPLOY.name && !(json ? a.stdout : a.stderr).includes("mason/sources/shop.yml: url: is written with its password")) {
       p.push(`mason ${a.argv.join(" ")}: not the sources file's refusal, where mason/ is the project's files:\n${a.stdout}${a.stderr}`);
     }
     if (json && codes.length && a.code === 0) p.push(`mason ${a.argv.join(" ")}: exit 0, where ${IS[state]} does not meet what it needs (${needs})`);
