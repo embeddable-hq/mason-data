@@ -2759,11 +2759,17 @@ export class Sync {
         if (held !== undefined) { foldInto(held, changes); continue; }
         applied.set(name, changes);
       }
-      await this.applyChanges(applied, { lsn, committedAt }, { inTransaction: async () => { for (const [name, changes] of spill) await this.spill(name, changes); } });
-      for (const [name, changes] of spill) {
-        const h = this.heldFrom.get(name);
-        if (h !== undefined) h.held += changes.counts.inserts + changes.counts.updates + changes.counts.deletes + changes.counts.truncates;
-      }
+      // the changes kept aside are counted at the commit that writes them, in the same turn: a reader of
+      // `_mason.compact_held` never sees rows the stream's status does not count yet (the review of PR 910)
+      await this.applyChanges(applied, { lsn, committedAt }, {
+        inTransaction: async () => { for (const [name, changes] of spill) await this.spill(name, changes); },
+        committed: () => {
+          for (const [name, changes] of spill) {
+            const h = this.heldFrom.get(name);
+            if (h !== undefined) h.held += changes.counts.inserts + changes.counts.updates + changes.counts.deletes + changes.counts.truncates;
+          }
+        },
+      });
     });
   }
 
@@ -2783,7 +2789,7 @@ export class Sync {
    * writer, whatever the stream is doing (it may be failing).
    */
   private async applyChanges(batch: ReadonlyMap<string, TableChanges>, from: { lsn: bigint | null; committedAt: Date | null } | "held",
-    o: { inTransaction?: () => Promise<void> } = {}): Promise<void> {
+    o: { inTransaction?: () => Promise<void>; committed?: () => void } = {}): Promise<void> {
     const lsn = from === "held" ? null : from.lsn;
     const committedAt = from === "held" ? null : from.committedAt;
     const w = this.store.writer;
@@ -2844,6 +2850,8 @@ export class Sync {
       await o.inTransaction?.();
       if (position !== null) await w.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.stream_state VALUES ($1, $2, $3::TIMESTAMPTZ)`, [this.replication!.slot, formatLsn(position.lsn), position.at]);
       await w.run("COMMIT");
+      // what the commit holds, said at once: no reader of the ledger may see it before this run does (`compacting.held`)
+      o.committed?.();
     } catch (e) {
       await w.run("ROLLBACK");
       throw e;
