@@ -16,8 +16,9 @@ given its report. You never merge.
 - **Run tests on CI's Node, 26.** Match CI's tools first, and read a test that differs between Node 24 and 26 on Node
   26 (`.claude/skills/implement/SKILL.md` "Before you start").
 - **For an engine or listener diff, run the query shapes the change touches, and their variants**, through `scripts/duck-repro.ts`,
-  against a real Postgres, at the head and at main. The variants: each shape in a subquery, a CTE, a join and a UNION
-  arm; with GROUP BY and ORDER BY; over NULLs and every type the column can hold; as a tool might send it.
+  against a real Postgres, at the head and at main. The variants: each shape in a subquery, a CTE, a join, a UNION
+  arm, an IN (a subquery's list) and a CASE; with GROUP BY and ORDER BY; over NULLs and every type the column can hold;
+  as a tool might send it.
   `.claude/rules/duck-rewrite.md` names the shapes a rewrite must answer.
 - **A query main answered that the head no longer answers the same is a regression.**
 - **Run the `## What review probes`** of every rules file the diff's paths fall under (`.claude/rules/`).

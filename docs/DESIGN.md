@@ -724,6 +724,20 @@ merges, and what never happens. The story behind a rule moves here.
 - Every session read every role's mechanics: the coordinator's process, the implementer's gates and the reviewer's
   checks.
 
+### The implementer sweeps, and runs no full check before a push (2026-11-13, issue 933)
+
+**Decision (the owner, 2026-11-13).** For a diff to `src/duck/` or `src/api/`, the implementer runs the query shapes
+its change touches, and their variants, through `scripts/duck-repro.ts` against a real Postgres, at the head and at
+main. It fixes any query that the head answers differently from main before it marks the PR ready. The reviewer still
+runs its own sweep. And the implementer no longer runs the full `npm run check` before its first push. It runs
+`npm run typecheck` and the test files nearest the change, and CI runs the rest.
+
+**Why.** In the day before this decision, about half the PRs needed a fix round, and each round took about 1.5 hours
+of wall clock. In PR 922 the first blocking finding was a wrong answer. A reviewer found it in minutes, by putting the
+change's shape in a UNION, an IN and a CASE beside a decimal column. The implementer could have found it the same way.
+The full check took over an hour on PR 932, on a shared 4-core machine under load, and some tests timed out only
+because of the load. CI runs the same check in about 16 minutes.
+
 ### Issue labels and a bug's Severity (Tom, 2026-11-01)
 
 **Decision.** Every open issue carries the label `bug` or `enhancement`. Every bug is on the Mason work board with its

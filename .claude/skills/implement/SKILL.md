@@ -53,11 +53,8 @@ package and the image, runs the oracle in three legs, and runs `tests/integratio
 every PR and on main. Locally:
 
 - **While working, run the tests nearest the change**, with both flags before the files (CLAUDE.md "Local gates").
-- **Run one full `npm run check` before the PR's first push.** It queues for a slot, so start it in the background.
-  If you must wait on it before your turn ends, run it through `scripts/done-file.ts`, and wait with bounded
-  `node scripts/wait-file.ts <file> <seconds>` calls. Your own background job does not wake you once your turn has
-  ended.
-- **A fix round runs `npm run typecheck` and the change's test files.** CI carries the rest.
+- **Before each push, run `npm run typecheck` and the test files nearest the change.** This holds for the first push
+  and for a fix round. CI runs the rest. Do not run the full `npm run check` before a push.
 - **Before each push, run the `## What review probes`** of every rules file your paths fall under (`.claude/rules/`).
 - **No session runs the full oracle locally.** When what Mason answers moved, the allowlist (`src/duck/verified.ts`) and
   `tests/fixtures/oracle-duckdb-alone.json` come from that push's CI run: `node scripts/oracle-legs.ts --write
@@ -77,6 +74,11 @@ every PR and on main. Locally:
   tested, and what was left out.
 - **Wait on CI** with `node scripts/ci-wait.ts <pr> <seconds>` (CLAUDE.md "Waiting"). Never pipe it: its exit code is
   the verdict.
+- **Before you mark the PR ready, sweep the query shapes your change touches.** For a diff to `src/duck/` or
+  `src/api/`, run those shapes and their variants through `scripts/duck-repro.ts`, against a real Postgres, at the head
+  and at main. The variants are the ones the review skill lists (`.claude/skills/review/SKILL.md` "What you do"), and
+  `.claude/rules/duck-rewrite.md` names the shapes a rewrite must answer. If main answered a query and the head answers
+  it differently, fix that before you mark the PR ready. The reviewer still runs its own sweep.
 - **Mark the PR ready when done.** From a cloud session, which reaches no GraphQL, use
   `gh api -X POST repos/embeddable-hq/mason-data/pulls/<n>/ccr/ready_for_review`.
 - **Report the PR number and its head commit** to the coordinator.
