@@ -36,6 +36,7 @@ import { backLinkOf, uiBackLinkSetting } from "./ui-back-link.ts";
 import { navOf, uiNavSetting } from "./ui-nav.ts";
 import { overviewCardOf, uiOverviewCardSetting } from "./ui-host-view.ts";
 import { createRunServer, listenOnLoopback, metricsFacts, usageFacts, type RunContext } from "./run-server.ts";
+import { UiErrors } from "./ui-errors.ts";
 import type { RunMetrics } from "./metrics.ts";
 import { readGenerated } from "./generated-files.ts";
 import { addedTables, effectiveSync, entryName, replicatedEntries, rereadSources, shownPath, syncWritten, type RunSources, type SourceFile } from "./sources.ts";
@@ -750,6 +751,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     },
     log: (m) => say(`  ${m}`),
     logs,
+    // the web page's own errors (POST /api/ui/error): ui_error events, at most UI_ERRORS_PER_MINUTE a minute, and a count for /metrics
+    uiErrors: new UiErrors((e) => events.record(e), (m) => say(`  ${m}`)),
     // the statements running now, and a cancel of one: the listener's own (a CancelRequest's path)
     listener: api,
     duck: { copies: () => sync.state(), file: duckFile, poll: (sources) => sync.pollNow(sources), stream: (o) => sync.streamStatus(o), measured: (table) => sync.measured(table), disk: () => sync.diskStatus(), requests, events, usage,

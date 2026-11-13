@@ -2,6 +2,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **When the web page itself hits an error, Mason now records it.** If a bug in the page's own code stops it
+  from working, you will see a `ui_error` event in `mason logs --events`, on the Sync events page and among the recent
+  errors of `mason status`. `/metrics` counts these errors in `mason_ui_errors_total`. The event says which page and
+  which of its files hit the error, and where in the file. It never includes the error's own message, because that
+  could quote your synced data. The browser's console still shows the whole error. Mason records at most 10 of these
+  errors a minute, and counts the rest.
 - **`--remote` is gone.** `mason init` and `mason start` no longer stop for a database on another machine. They carry
   on, and say once: "Your database is on another machine. Mason will sync the tables you choose to this machine." Drop
   `--remote` from your scripts: `mason init --remote` now fails as an unknown option (exit 2). An older
@@ -18,12 +24,17 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   still a warning.
 - **Calmer words.** The note for a serverless database (Neon, Aurora Serverless) now names everything that keeps it
   awake. `mason share` says it is for trying Mason out. A table's line says "not kept current" in lower case.
-
 - **A JSON field read through a path your tool sends as a parameter is now as fast as one written in the query.**
   Metabase sends the path of every JSON field it unfolds as a parameter (`payload #>> array[$1]::text[]`). Mason used
   to read such a path row by row in its slowest way, so a card grouped by a JSON field took 10 to 18 times as long as
   on Postgres. Mason now reads the path's value when the query runs and answers it like a path written in the query:
   that card now takes about twice Postgres's time.
+- **A chart that groups a number into bins is now faster than on Postgres.** Metabase bins a number column as
+  `floor((x - min) / width) * width + min`, for its X-rays' "by value" cards and for a binned field of a joined table.
+  Mason used to work out each row's bin in its slowest way, so over 12 million rows such a card took 16 to 25 times as
+  long as on Postgres, and on a big table it ran past the statement timeout. Mason now works out the bin in the synced
+  data's own exact arithmetic, for columns of `numeric(p, s)` and the integer types. The answers are the same as before,
+  to the last digit.
 
 ## What was wrong and is now right
 

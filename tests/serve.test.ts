@@ -269,12 +269,13 @@ test("GET /metrics on the health port: 200 in Prometheus's text format while it 
     const health = await get("/healthz");
     assert.deepEqual([health.status, health.type, (JSON.parse(health.body) as { status: string }).status], [503, "application/json", "starting"]);
     state = { phase: "ready", tables: () => [copy("public.secret_orders", "copied"), copy("public.users", "copying")],
-      metrics: async () => { if (broken) throw new Error("the copy of public.secret_orders on db.internal could not be read"); return { usage, statements, durations: null, at: Date.now(), freshSeconds: 120 }; } };
+      metrics: async () => { if (broken) throw new Error("the copy of public.secret_orders on db.internal could not be read"); return { usage, statements, durations: null, uiErrors: 2, at: Date.now(), freshSeconds: 120 }; } };
     const ready = await get("/metrics");
     assert.deepEqual([ready.status, ready.type], [200, TYPE]);
     assert.match(ready.body, /^mason_ready 1$/m);
     assert.match(ready.body, /^mason_tables\{phase="syncing"\} 1$/m);
     assert.match(ready.body, /^mason_statements_total\{outcome="completed"\} 5$/m);
+    assert.match(ready.body, /^mason_ui_errors_total 2$/m, "the web page's own errors reported");
     const up = Number(/^mason_uptime_seconds (\d+)$/m.exec(ready.body)?.[1]);
     const healthy = await get("/healthz");
     const h = JSON.parse(healthy.body) as { status: string; uptimeSeconds: number; tables: unknown };

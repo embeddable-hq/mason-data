@@ -339,6 +339,19 @@ export const TYPED = `${MAPPED_TABLE} CREATE EXTENSION IF NOT EXISTS citext; CRE
   // integer digits (oracle/setting-scripts.ts "numeric parameter")
   "CREATE TABLE public.pnums (id int PRIMARY KEY, x numeric(30,20), u numeric, w numeric(65,30)); " +
   "INSERT INTO public.pnums VALUES (1, 1.00000000000000000001, 1.2345, 19.99), (2, 1.00000000000000000002, 7, 123456789012345678901234567890.25), (3, 2.5, -0.5, 5), (4, 5, NULL, NULL), (5, 2.5, 1.25, 19.99), (6, NULL, 0, 0);" +
+  // A NUMERIC BIN (issues 464, 465: `floor((x - min) / width) * width + min`, which the engine computes where it can):
+  // values on a bin's edges and a cent either side, negative values and zero, each column's precision limits, NULL, an
+  // unconstrained numeric, a numeric(30,8) whose bins of a tiny width pass 18 places, a numeric(38,10) whose bins pass 38,
+  // and bigints whose quotient Postgres rounds to a whole number before its floor (1000000000000000012 / 12.5 is
+  // 80000000000000000.96, rounded at one place to …01.0, so floor is …01): the exact floor would differ
+  "CREATE TABLE public.bins (id int PRIMARY KEY, a numeric(12,2), h numeric(30,8), m numeric(38,10), u numeric, i int, s smallint, b bigint, f float8); " +
+  "INSERT INTO public.bins VALUES (1, 0, 0, 0, 0, 0, 0, 0, 0), (2, 12.5, 12.5, 12.5, 12.5, 25, 25, 25, 12.5), (3, 12.49, 12.49999999, 12.4999999999, 12.4999999999999, 24, 24, 24, 12.49), " +
+  "(4, 12.51, 12.50000001, 12.5000000001, 12.5000000000001, 26, 26, 26, 12.51), (5, -12.5, -12.5, -12.5, -12.5, -25, -25, -25, -12.5), (6, -12.49, -12.49999999, -12.4999999999, -0.0000000001, -24, -24, -24, -12.49), " +
+  "(7, -12.51, -12.50000001, -12.5000000001, -12.5000000000001, -26, -26, -26, -12.51), (8, 0.01, 0.00000001, 0.0000000001, 0.00000000000000000001, 1, 1, 1, 0.01), (9, -0.01, -0.00000001, -0.0000000001, -1, -1, -1, -1, -0.01), " +
+  "(10, 9999999999.99, 9999999999999999999999.99999999, 999999999999999999999999999.9999999999, 123456789012345678.5, 2147483647, 32767, 9223372036854775807, 1e300), " +
+  "(11, -9999999999.99, -9999999999999999999999.99999999, -999999999999999999999999999.9999999999, -123456789012345678.5, -2147483648, -32768, -9223372036854775808, -1e300), " +
+  "(12, 124.99, 125, 125.0000000001, 125, 124, 124, 1000000000000000012, 124.99), (13, 125.00, 124.99999999, 124.9999999999, 124.999, 125, 125, -1000000000000000012, 125), " +
+  "(14, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL), (15, 7.77, 3.33333333, 0.3, 0.1, 7, 3, 3, 0.3), (16, 0.30, 0.29999999, 0.6, 0.9, 9, 9, 999999999999999999, 0.6);" +
   // no primary key: the copy is keyed by a UNIQUE over NOT NULL columns, as a sources file's `key:` keys it, and the
   // catalog declares no key (oracle's `added`; src/cli/sources.ts addedTables)
   "CREATE TABLE public.top_n (a int NOT NULL, b int NOT NULL, note text, UNIQUE (a, b)); INSERT INTO public.top_n SELECT g % 3 + 1, g % 2, 'n' || g FROM generate_series(1, 6) g;" +
@@ -1946,6 +1959,43 @@ function* matrix(): Generator<Matrixed> {
   yield q("window frames", "SELECT id, sum(i4) OVER (ORDER BY id RANGE BETWEEN 2 PRECEDING AND CURRENT ROW), count(*) OVER (ORDER BY ts RANGE BETWEEN interval '1 day' PRECEDING AND interval '1 day' FOLLOWING), sum(i4) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND 2 FOLLOWING), max(i4) OVER (ORDER BY id GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW), sum(i4) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW), sum(i4) OVER (ORDER BY id RANGE UNBOUNDED PRECEDING) FROM typed WHERE id < 100 ORDER BY id");
 }
 
-export const TYPE_MATRIX: Matrixed[] = [...matrix(), ...mappedTypes(), ...FROM_ITEMS_SORTED.map((f) => q(f.name, f.sql, f.zone)),
+/** A NUMERIC BIN over `bins` (issues 464, 465): Metabase's auto-bin grouped, and floor / ceil a row, of every column kind
+ *  (a numeric(p, s), an unconstrained numeric, numeric(38,10) at the engine's limit, the integers, a float), by widths
+ *  that are and are not a power of ten, negative, tiny and big, from a min of zero and below every value */
+function* binCases(): Generator<Matrixed> {
+  const cols = ["a", "h", "m", "u", "i", "s", "b", "f"];
+  const bin = (c: string, min: string, w: string): string => `((FLOOR(((bins.${c} - ${min}) / ${w})) * ${w}) + ${min})`;
+  for (const c of cols) {
+    for (const w of ["12.5", "0.3", "7", "-12.5", "0.00000001"]) {
+      for (const min of ["0.0", "-10000.0"]) {
+        const e = bin(c, min, w);
+        yield q(`bin: ${c} from ${min} by ${w}, grouped`, `SELECT ${e} AS "${c}", COUNT(*) AS "count" FROM public.bins GROUP BY ${e} ORDER BY ${e} ASC`);
+      }
+    }
+    for (const w of ["12.5", "0.3", "3", "0.00000001", "1000000.0"]) {
+      yield q(`bin: ${c} by ${w}, a row`, `SELECT id, floor(${c} / ${w}) AS f, ceil(${c} / ${w}) AS c, ceiling((${c} - 0.01) / ${w}) AS c2, (floor(${c} / ${w}) * ${w})::text AS t FROM public.bins ORDER BY id`);
+    }
+  }
+  // the bin by its ordinal, its output name, DESC with a LIMIT, beside other aggregates, in HAVING, read by an outer
+  // query, a quotient of it (a program over the bin's integer), and the bins of two columns in one GROUP BY
+  yield q("bin: by ordinal, sum and avg beside it", "SELECT floor(a / 2.5) * 2.5 AS b, count(*), sum(a), avg(i) FROM public.bins GROUP BY 1 ORDER BY 1 NULLS FIRST");
+  yield q("bin: by output name, DESC, LIMIT", "SELECT floor((a - -100.0) / 25.0) * 25.0 + -100.0 AS b, count(*) FROM public.bins GROUP BY b ORDER BY b DESC NULLS LAST LIMIT 4");
+  yield q("bin: HAVING and an ORDER BY of the count", "SELECT floor(i / 10.0) * 10.0 AS b, count(*) AS n FROM public.bins GROUP BY 1 HAVING floor(i / 10.0) * 10.0 > -30 ORDER BY 2 DESC, 1");
+  yield q("bin: a quotient of the bin, grouped", "SELECT floor(a / 12.5) / 3 AS q, count(*) FROM public.bins GROUP BY 1 ORDER BY 1");
+  yield q("bin: two bins grouped together", "SELECT floor(a / 12.5) AS x, ceil(b / 0.125) AS y, count(*) FROM public.bins GROUP BY 1, 2 ORDER BY 1, 2");
+  yield q("bin: DISTINCT, and compared with a constant", "SELECT DISTINCT floor(h / 0.5) AS f, floor(h / 0.5) = 25 AS e FROM public.bins ORDER BY 1");
+  // (the review of PR 922: the bin read as a value beside another numeric's decimals — IN, UNION ALL, CASE — in a
+  // product past 38 places, and by a divisor of 39 places; each grouped one is the engine's bin, the rest its program)
+  yield q("bin: IN a subquery of bins, and a bin IN a subquery of values", "SELECT id, a IN (SELECT floor(a / 12.5) FROM public.bins) AS x, floor(a / 12.5) * 12.5 IN (SELECT a FROM public.bins) AS y FROM public.bins ORDER BY id");
+  yield q("bin: UNION ALL beside decimals", "SELECT floor(a / 12.5) * 12.5 AS v, 1 AS arm FROM public.bins UNION ALL SELECT a, 2 FROM public.bins UNION ALL SELECT 0.75, 3 ORDER BY 1 NULLS FIRST, 2");
+  yield q("bin: UNION beside decimals", "SELECT floor(a / 12.5) AS v FROM public.bins UNION SELECT 0.75 UNION SELECT a FROM public.bins ORDER BY 1 NULLS FIRST");
+  yield q("bin: a CASE of a bin or a value, sorted", "SELECT id, CASE WHEN id % 2 = 0 THEN floor(a / 12.5) ELSE a END AS v FROM public.bins ORDER BY 2, 1");
+  yield q("bin: products past 38 places", "SELECT id, floor(h / 0.0001) * floor(h / 0.0001) AS sq, floor(h / 0.0001) * h AS p, floor(h / 0.0001) * 1000000000000.5 AS q FROM public.bins ORDER BY id");
+  yield q("bin: products past 38 places, grouped", "SELECT floor(h / 0.0001) * 1000000000000 AS p, count(*) FROM public.bins GROUP BY 1 ORDER BY 1");
+  yield q("bin: by a divisor of 39 places", "SELECT id, floor(a / 170141183460469231731687303715884105720) AS f, ceil(a / 200000000000000000000000000000000000000) AS c FROM public.bins ORDER BY id");
+  yield q("bin: by a divisor of 39 places, grouped", "SELECT floor(a / 170141183460469231731687303715884105720) AS f, count(*) FROM public.bins GROUP BY 1 ORDER BY 1");
+}
+
+export const TYPE_MATRIX: Matrixed[] = [...matrix(), ...mappedTypes(), ...binCases(),...FROM_ITEMS_SORTED.map((f) => q(f.name, f.sql, f.zone)),
   // issue 665: a quotient grouped by its exact key alone, its day of the year read in the session's zone
   q("issue 665: the week of year grouped in a session zone of daylight saving", "SELECT ceil(cast(extract(doy from o.created_at) as integer) / 7.0) AS w, count(*) FROM orders o GROUP BY 1 ORDER BY 1", "America/New_York")];

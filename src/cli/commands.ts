@@ -1864,7 +1864,8 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     before (the position of the page before,
     or null: none older) }; with --events { events: [{ at, kind (copy_failed, poll_failed,
     catch_up_failed, stream_failed, source_unreachable, generated_failed, compact_failed, restart, copied, recovered, synced (a sync
-    asked by hand), sync_changed (a table's sync: changed)), failed, table (null: the whole sync),
+    asked by hand), sync_changed (a table's sync: changed), ui_error (the web page met an error of its own)), failed, table (null: the
+    whole sync, the run or the web page),
     message }], keptDays }; with --running { running: [{ session, user,
     applicationName, method, startedAt, runningMs, rows (sent so far), query, queryTruncated }] }; next
 `;

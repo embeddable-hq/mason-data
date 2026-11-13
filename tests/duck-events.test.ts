@@ -20,6 +20,26 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-events-"));
 const store = await DuckStore.open(path.join(dir, "duck.db"), () => undefined);
 after(async () => { await store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
 
+test("the web page's own error (ui_error, src/cli/ui-errors.ts) is a failure of no table: read with --failed, and the same one again within the hour is one event", async () => {
+  const { SyncEvents, isFailure } = await events();
+  assert.ok(isFailure("ui_error"));
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), "mason-events-ui-"));
+  const own = await DuckStore.open(path.join(dir2, "duck.db"), () => undefined);
+  try {
+    let clock = Date.parse("2026-11-13T09:00:00.000Z");
+    const log = await SyncEvents.open(own, () => undefined, { days: 7, now: () => clock });
+    const message = "the web page hit a TypeError on its overview view in app.js at line 1, column 2";
+    log.record({ kind: "ui_error", table: null, message });
+    clock += 1000;
+    log.record({ kind: "ui_error", table: null, message });
+    clock += 1000;
+    log.record({ kind: "copied", table: "public.orders", message: "copied" });
+    await log.flush();
+    assert.deepEqual(await log.recent({ limit: 10, failed: true }), [{ at: "2026-11-13T09:00:00.000Z", kind: "ui_error", failed: true, table: null, message }]);
+    await log.close();
+  } finally { await own.close(); fs.rmSync(dir2, { recursive: true, force: true }); }
+});
+
 test("every event is read back as the sync recorded it, newest last; --failed is the failures alone; the newest n; from a time on", async () => {
   const { SyncEvents, EVENTS_TABLE } = await events();
   let clock = Date.parse("2026-10-28T09:00:00.000Z");
