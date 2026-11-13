@@ -325,6 +325,14 @@ an ordinary statement whose failure is that table's alone.
   that finds nothing left ends the spilling and removes the mark (`replaySpill`). A stop does not wait for the replay:
   the mark stands, the spill is cleared at the next open, and that start catches the table up by one poll, as after a
   crash. A side table a stop or a crash left is dropped at the next open.
+- **Never said current past what it serves** (issue 904, 2026-11-13). The first version marked every streamed table
+  synced as of each batch's position, the one being compacted included, so `mason status`, `mason wait` and
+  `Sync.caughtUp` said current while the newest changes waited in the spill. `duck-stream.itest.ts`'s bulk test read
+  DuckDB straight after `caughtUp`, 1 run in 8, while the first check (60 s after the open) compacted its 600,000-row
+  table mid-transaction: 7,000 changes short, sometimes 9,900 more; with the checks every 3 s, every run. Now the
+  table's part in the stream is `compacting`, as of the moment its spill began; its `synced` moves to the stream's last
+  position only at the replay's last piece, `caughtUp` waits for the spill, and a stop or a failed replay leaves it
+  behind, as its mark says. A compaction past `REPLICATION_BEHIND_SECONDS` shows the table behind until it ends.
 - **Never a reason to stop the synced data.** Before a compaction is queued, and before each of its pieces, the disk
   where the synced data is must hold the rows it has left to write plus a quarter of the table's blocks and at least
   64 MiB (`diskShortFor`, the copy's `diskFree`; a disk that cannot be read is no room). Without it the table WAITS,
