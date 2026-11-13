@@ -11,7 +11,7 @@
  * `copySizes` and `unsized` every minute; a table's columns once, when its Columns… or Name its key… form opens
  * (`GET /api/tables/<table>/columns`, `columnsPath`).
  */
-import { msText, bytesText, button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText, pop, actId, ROOMS, POLL_MS, readOnlyLine, tablesReadOnly } from "../shared.js";
+import { msText, bytesText, button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, spanText, duration, status, streamRows, utcText, pop, actId, ROOMS, POLL_MS, readOnlyLine, tablesReadOnly } from "../shared.js";
 import { copyBar, copyingCount, createMonotone, tableLine } from "./status.js";
 
 /** `/api/usage` asked for the copies' own sizes alone: the last minute's samples (none needed), and `copySizes`. */
@@ -71,7 +71,9 @@ function syncedTips(tables) {
 /** A sync's answer said as `mason sync` says it, with Dismiss. `s`: the state, for the tables not kept current. */
 function renderSynced(b, table, s) {
   const r = syncedReport(b, [table], s.tables.filter((t) => t.table === table));
-  return `<div class="done"><p class="headline">${esc(r.headline)}</p>${rowsHtml(r.details)}${r.tips.map((x) => `<p class="tip">${esc(x)}</p>`).join("")}` +
+  // a table's name in it wraps after its . and _ (`nameBreaks`), never squeezing what is beside it (issue 884)
+  return `<div class="done"><p class="headline">${nameBreaks(r.headline)}</p>` +
+    `<dl class="facts">${r.details.map(([k, v]) => `<dt>${nameBreaks(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>${r.tips.map((x) => `<p class="tip">${nameBreaks(x)}</p>`).join("")}` +
     `${button("Dismiss", { dismissSynced: "", popClose: "" }, "small")}</div>`;
 }
 
@@ -151,14 +153,14 @@ export function renderTableAdded(b, saved = false) {
     : l.line;
   // after a column form, its sync is as it was: not said again
   const notes = savedSync ? [l.notes[0].replace(" Its Sync button changes this.", ""), ...l.notes.slice(1)] : saved === "columns" ? l.notes.slice(1) : l.notes;
-  return `<div class="done"><p class="headline">${esc(head)}</p>${notes.map((x) => `<p class="note">${esc(x)}</p>`).join("")}` +
+  return `<div class="done"><p class="headline">${nameBreaks(head)}</p>${notes.map((x) => `<p class="note">${nameBreaks(x)}</p>`).join("")}` +
     `${button("Dismiss", { dismissOutcome: "", popClose: "" }, "small")}</div>`;
 }
 
 /** Tables just removed (`/api/remove`'s answer, `mason remove --json`'s shape): `removedReport`. */
 export function renderTablesRemoved(b) {
   const r = removedReport(b.removed);
-  return `<div class="done"><p class="headline">${esc(r.headline)}</p>${r.tips.map((x) => `<p class="tip">${esc(x)}</p>`).join("")}` +
+  return `<div class="done"><p class="headline">${nameBreaks(r.headline)}</p>${r.tips.map((x) => `<p class="tip">${nameBreaks(x)}</p>`).join("")}` +
     `${button("Dismiss", { dismissOutcome: "", popClose: "" }, "small")}</div>`;
 }
 

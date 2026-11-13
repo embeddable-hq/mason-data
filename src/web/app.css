@@ -561,7 +561,9 @@ table.catalog tr.note .under-body { font-size: var(--text-sm); line-height: 20px
 .pop.said.docked [data-pop-close] { position: sticky; bottom: 0; }
 /* a long table name in an answer's facts wraps in its column, never squeezing the value beside it to a letter a line */
 .pop .facts { grid-template-columns: fit-content(45%) minmax(0, 1fr); }
-.pop .facts dt { overflow-wrap: anywhere; }
+.pop .facts dt { overflow-wrap: break-word; }
+/* a name in an answer breaks after its . and _ (`<wbr>`, src/web/pages/tables.js `nameBreaks`) before anywhere else */
+.pop .done :is(.headline, .note, .tip) { overflow-wrap: break-word; }
 body { padding-bottom: var(--docked-h, 0px); }
 /* beside the page, never over the sidebar's nav: past the sidebar, the rail, or the whole width on a phone */
 .pop.said.docked { left: var(--sidebar-w); }

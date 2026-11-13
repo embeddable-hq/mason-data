@@ -5006,10 +5006,10 @@ test("Escape with no question open dismisses the answer beside a button, in the 
   run.answers.set("POST api/sync", answer({ at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", changed: 1, deleted: 0, rows: 1201, ms: 40 }] }));
   await click({ syncTable: "public.customers" });
   await settle();
-  assert.match(el("tables").html, /Synced public\.customers:/, "the answer, said");
+  assert.match(textOf(el("tables").html), /Synced public\.customers:/, "the answer, said");
   press("Escape");
   await settle();
-  assert.ok(!/Synced public\.customers:/.test(el("tables").html), "Escape took it");
+  assert.ok(!/Synced public\.customers:/.test(textOf(el("tables").html)), "Escape took it");
 });
 
 test("every added table has its bar on the Tables page, as mason status draws one for each: full when copied, red when failed, amber when not kept current, the shimmer while waiting", () => {
