@@ -2168,7 +2168,12 @@ acts on it reads it after it asked, waits for that read at most 20 s, and says w
 runs, never answering from the read before; the read waits on a lock at most 2 s (`lock_timeout`), and on nothing else
 short, since a catalog of 10,000 tables takes 76 s to read (the review and re-check of PR 900: a read queued behind a
 migration's lock left `/api/state` answering nothing, an add was refused a table made a moment before or answered from
-the read before, and a 20 s statement limit left a 6,500-table catalog never read again). **Why.** The 10-second timer connected about 8,640 times
+the read before, and a 20 s statement limit left a 6,500-table catalog never read again). The second re-check: an
+add's two steps each began a read, so a 44 s catalog was never added to; an actor was handed a read begun before it
+asked; eleven reads ran on the source at once; and a silent connection held every add for 15 minutes. So a read is
+given only to actors that asked before it began, one runs at a time (the next shared by all who ask meanwhile), an
+act carries its read's number across its requests (one read for a whole `mason add`), and a long read's session is
+asked after on the database every 15 s: idle there for over 10 s, the connection went silent and the read ends. **Why.** The 10-second timer connected about 8,640 times
 a day whatever each table's sync, so a serverless compute (Neon, Aurora Serverless) never suspended with every table
 `sync: off`. A failed read keeps the last one and is said in the log, and is not tried again within the minute.
 `tests/integration/cli-catalog-read.itest.ts` counts the run's connections over an idle window.

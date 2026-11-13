@@ -32,6 +32,7 @@ import type { BackLink } from "./ui-back-link.ts";
 import type { PageNav } from "./ui-nav.ts";
 import { PAGE_READ_ONLY_WHY, pageAllows, pageReadOnlyRefusal, pageWrite, type PageArea } from "./ui-read-only.ts";
 import { maskedUrl, type Source, type SourceFacts, type SourceTable } from "./preflight.ts";
+import { CATALOG_READ_HEADER, type ActRead } from "./source-catalog.ts";
 import { liveColumns, syncChoice, type LiveCheck, type SyncChoice } from "./sync-choice.ts";
 import { liveReadinessFailure } from "./replication-mode.ts";
 import { unreplicable } from "./source-check.ts";
@@ -73,9 +74,11 @@ export interface RunContext {
    *  old, waited for at most `STATE_WAIT_MS`, else the last one — never on a timer. Absent: `facts` as it is (a test's) */
   freshFacts?: () => Promise<void>;
   /** what ACTS on it asks (an add, a remove, a table's columns or Sync choice, `/api/state?fresh=1` for mason add;
-   *  `now`): a read begun after it asked, or the failure that says why there is none — a read that failed, or one still
-   *  running — never an older read in its place (the re-check of PR 900). Absent: `facts` as it is (a test's) */
-  factsNow?: () => Promise<Failure | null>;
+   *  src/cli/source-catalog.ts `actRead`): a read begun after it asked — or, `carried`, the read an earlier request of
+   *  the same act was given (the `x-mason-catalog-read` header), so one read serves a whole add — or the failure that says
+   *  why there is none: a read that failed, or one still running (`running`: the same number may be waited on again).
+   *  Never an older read in its place (the re-checks of PR 900). Absent: `facts` as it is (a test's) */
+  factsNow?: (carried: number | null) => Promise<ActRead>;
   warnings: string[];
   /** what the read of a libc collation's order leaves to say (src/duck/libc-order.ts libcOrderNote), or null: mason status */
   textOrder?: string | null;
@@ -322,12 +325,20 @@ export const rolesState = (r: RolesLive): NonNullable<RunState["roles"]> & { all
     ...(Object.keys(attributes).length > 0 ? { attributes } : {}), ...(Object.keys(wheres).length > 0 ? { wheres } : {}) };
 };
 
-/** A read of the database's tables as they are now, for what acts on them: true once there is one, else its failure
- *  answered (503: the run is up, the database's tables could not be read just now) and false. */
-async function readNow(ctx: RunContext, res: http.ServerResponse): Promise<boolean> {
-  const f = await ctx.factsNow?.() ?? null;
-  if (f !== null) sendFailure(res, 503, f);
-  return f === null;
+/**
+ * A read of the database's tables as they are now, for what acts on them: true once there is one, else its failure
+ * answered (503: the run is up, the database's tables could not be read just now) and false. The read's number is said
+ * in the answer's `x-mason-catalog-read` header, and, while it still runs, as `catalogRead` beside the failure: the
+ * command (and the page) asks again carrying it, and waits on the same read, never a new one.
+ */
+async function readNow(ctx: RunContext, req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
+  if (ctx.factsNow === undefined) return true;
+  const said = req.headers[CATALOG_READ_HEADER];
+  const carried = typeof said === "string" && /^[1-9][0-9]{0,15}$/.test(said) ? Number(said) : null;
+  const r = await ctx.factsNow(carried);
+  res.setHeader(CATALOG_READ_HEADER, String(r.read));
+  if (r.failure !== null) sendFailure(res, 503, r.failure, r.running ? { catalogRead: r.read } : {});
+  return r.failure === null;
 }
 
 async function state(ctx: RunContext, columns = false, show = true): Promise<unknown> {
@@ -802,21 +813,21 @@ export function createRunServer(ctx: RunContext): http.Server {
           // lean, as the page polls it; ?columns=1 with each table's columns (mason status --json)
           // ?fresh=1 (mason add, before it checks its tables): the database as it is now, waited for
           const fresh = url.searchParams.get("fresh") === "1";
-          if (fresh && !await readNow(ctx, res)) return;
+          if (fresh && !await readNow(ctx, req, res)) return;
           sendJson(res, 200, await state(ctx, url.searchParams.get("columns") === "1", !fresh));
         } else if (method === "GET" && /^\/api\/tables\/[^/]+\/columns$/.test(url.pathname)) {
           // one table's columns, read when the page's Columns… form opens (never with the state, polled every 2 s)
           let table: string;
           try { table = decodeURIComponent(url.pathname.split("/")[3]!); }
           catch { throw new Refusal(400, `${url.pathname} does not name a table: GET /api/tables/<schema.table, URL-encoded>/columns`); }
-          if (!await readNow(ctx, res)) return;
+          if (!await readNow(ctx, req, res)) return;
           sendJson(res, 200, tableColumns(ctx, table));
         } else if (method === "GET" && /^\/api\/tables\/[^/]+\/sync$/.test(url.pathname)) {
           // one table's Sync choice, read when the page opens it: each poll's cost, and Live's checks of the database
           let table: string;
           try { table = decodeURIComponent(url.pathname.split("/")[3]!); }
           catch { throw new Refusal(400, `${url.pathname} does not name a table: GET /api/tables/<schema.table, URL-encoded>/sync`); }
-          if (!await readNow(ctx, res)) return;
+          if (!await readNow(ctx, req, res)) return;
           sendJson(res, 200, await tableSyncChoice(ctx, table, live));
         } else if (method === "GET" && url.pathname === "/api/slow") {
           // the last day's slow statements, from the request log (src/duck/requests.ts)
@@ -878,7 +889,7 @@ export function createRunServer(ctx: RunContext): http.Server {
           if (body.columns !== undefined && !(Array.isArray(body.columns) && body.columns.every((c) => typeof c === "string"))) throw new Refusal(400, "columns is a list of column names, or [\"*\"]");
           if (body.key !== undefined && !(Array.isArray(body.key) && body.key.length > 0 && body.key.every((c) => typeof c === "string"))) throw new Refusal(400, "key is a list of column names");
           // an edit is checked against the database's tables as they are now (a table made since the last read included)
-          if (!await readNow(ctx, res)) return;
+          if (!await readNow(ctx, req, res)) return;
           if (body.picked) {
             // the file as it was (its text, read once with the edit): an edit that sets a table to sync: replication the
             // database cannot serve is undone below
@@ -1007,7 +1018,7 @@ export function createRunServer(ctx: RunContext): http.Server {
         } else if (method === "POST" && url.pathname === "/api/remove") {
           const body = JSON.parse(await readBody(req, 64 * 1024)) as { tables?: unknown };
           if (!Array.isArray(body.tables) || !body.tables.length || !body.tables.every((m) => typeof m === "string")) throw new Refusal(400, "send { tables: [name, …] }");
-          if (!await readNow(ctx, res)) return;
+          if (!await readNow(ctx, req, res)) return;
           const r = removeTables(ctx, body.tables as string[]);
           // the sync stops copying a removed table, and drops its copy
           ctx.sourcesChanged();

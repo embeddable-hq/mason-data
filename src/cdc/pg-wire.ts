@@ -134,6 +134,10 @@ export class PgConnection {
   /** the server's key for this session (BackendKeyData), for a CancelRequest */
   private key: { pid: number; secret: number } | null = null;
 
+  /** this session's backend on the server (BackendKeyData's process id), or null before it is known: what
+   *  `pg_stat_activity` names it by (src/cli/dev.ts asks whether a long catalog read is still worked on) */
+  get backendPid(): number | null { return this.key?.pid ?? null; }
+
   /**
    * ASK THE SERVER TO CANCEL THIS SESSION'S RUNNING STATEMENT (Postgres's CancelRequest, on a connection of its own,
    * TLS as this one's sslmode): the statement ends with 57014 on this connection, which stays usable. Resolves once

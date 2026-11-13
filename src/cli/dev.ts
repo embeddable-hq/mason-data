@@ -30,7 +30,7 @@ import type { Server } from "node:http";
 import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, PRIMARY_NOTE, readSourceFacts, type SourceFacts } from "./preflight.ts";
-import { ACT_WAIT_MS, CATALOG_LOCK_TIMEOUT_MS, catalogFailure, sourceCatalog, STATE_WAIT_MS } from "./source-catalog.ts";
+import { actRead, CATALOG_LOCK_TIMEOUT_MS, SILENT_AFTER_S, silentWatch, sourceCatalog, STATE_WAIT_MS } from "./source-catalog.ts";
 import { uiReadOnlyAllowSetting, uiReadOnlySetting, type PageArea } from "./ui-read-only.ts";
 import { backLinkOf, uiBackLinkSetting } from "./ui-back-link.ts";
 import { navOf, uiNavSetting } from "./ui-nav.ts";
@@ -418,13 +418,33 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     // a read that ran out of time: its connection closed, so whatever it waits on ends (src/cli/source-catalog.ts)
     if (signal.aborted) { c.pg.close(); throw new Error("the read ran out of time"); }
     signal.addEventListener("abort", () => c.pg.close(), { once: true });
+    // A CONNECTION GONE SILENT is ended by the database's word, never by a cap a large catalog's read could need: while
+    // the read runs, the database is asked (on a connection of its own) whether this read's session is working on it
+    let silent: string | null = null;
+    const pid = c.pg.backendPid;
+    const stopWatch = pid === null ? () => undefined : silentWatch({
+      check: async () => {
+        const p = await connectSource(source);
+        if ("failure" in p) throw new Error(p.failure.message);
+        try {
+          const row = (await p.pg.query(`SELECT state, extract(epoch FROM now() - state_change)::float8::text FROM pg_stat_activity WHERE pid = ${pid}`)).rows[0];
+          if (row === undefined) return "its session is gone from the database";
+          return row[0] !== "active" && Number(row[1]) > SILENT_AFTER_S ? `the database has had nothing to do for it for ${Math.round(Number(row[1]))} s (its session is ${row[0] ?? "unknown"}): the connection went silent` : null;
+        } finally { p.pg.close(); }
+      },
+      onSilent: (why) => { silent = why; c.pg.close(); },
+    });
     let read: SourceFacts;
     try {
       // never queued behind a lock for long: the sizes it reads take a lock of every table, which a migration's
       // ALTER (or one queued behind another session) holds; this session's settings alone, nothing on the database
       await c.pg.query(`SET lock_timeout = ${CATALOG_LOCK_TIMEOUT_MS}`);
       read = await readSourceFacts(c.pg, undefined, { collations: false });
-    } finally { c.pg.close(); }
+    } catch (e) {
+      // the connection the watch closed: said as what it found, not as "connection closed"
+      if (silent !== null) throw new Error(silent);
+      throw e;
+    } finally { stopWatch(); c.pg.close(); }
     // the collations were read at the start, and are the start's for the whole run
     return facts.collations !== undefined ? { ...read, collations: facts.collations } : read;
   }, { log: (m) => logLine(`[sync] ${m}`) });
@@ -688,7 +708,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const setupPort = o.exactPort === true ? o.port : await freePort(o.port, chosen);
   const token = newToken();
   const runCtx: RunContext = {
-    source, facts: () => catalog.facts(), freshFacts: async () => { await catalog.fresh({ waitMs: STATE_WAIT_MS }); }, factsNow: async () => catalogFailure(await catalog.now({ waitMs: ACT_WAIT_MS }), source.database), warnings: [...warnings, ...(memoryWarned === null ? [] : [memoryProblemText(memoryWarned)])], textOrder,
+    source, facts: () => catalog.facts(), freshFacts: async () => { await catalog.fresh({ waitMs: STATE_WAIT_MS }); }, factsNow: (carried) => actRead(catalog, carried, source.database), warnings: [...warnings, ...(memoryWarned === null ? [] : [memoryProblemText(memoryWarned)])], textOrder,
     // the slot and publication while a table's sync is replication (the run streams), as the sync says it now
     replication: () => sync.streams() ? repl : null, port: setupPort, token, folder: () => folder, root: project.root, home,
     version: o.version, startedAt,

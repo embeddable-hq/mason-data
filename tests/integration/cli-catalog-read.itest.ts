@@ -47,14 +47,26 @@ function freePort(): Promise<number> {
   });
 }
 /** A TCP proxy to the Postgres at `to`, listening on `host`: every connection made through it is counted. */
-function countingProxy(host: string, to: { host: string; port: number }): Promise<{ port: number; connections: () => number; close: () => void }> {
-  let n = 0;
+/** `muteNext()`: the next connection made through it goes silent once logged in (its ReadyForQuery passed): nothing
+ *  either way after it, the TCP connection kept — a connection gone silent, as a stalled network or proxy leaves it. */
+function countingProxy(host: string, to: { host: string; port: number }): Promise<{ port: number; connections: () => number; close: () => void; muteNext: () => void }> {
+  let n = 0, mute = false;
   const sockets = new Set<net.Socket>();
   const server = net.createServer((client) => {
     n++;
     const upstream = net.connect(to.port, to.host);
     sockets.add(client).add(upstream);
-    client.pipe(upstream).pipe(client);
+    if (mute) {
+      mute = false;
+      let silent = false;
+      client.on("data", (d: Buffer) => { if (!silent) upstream.write(d); });
+      upstream.on("data", (d: Buffer) => {
+        if (silent) return;
+        client.write(d);
+        // ReadyForQuery ('Z', length 5): logged in; from here on nothing passes
+        if (d.includes(Buffer.from([0x5a, 0, 0, 0, 5]))) silent = true;
+      });
+    } else client.pipe(upstream).pipe(client);
     const end = (): void => { client.destroy(); upstream.destroy(); sockets.delete(client); sockets.delete(upstream); };
     client.on("error", end).on("close", end);
     upstream.on("error", end).on("close", end);
@@ -62,7 +74,7 @@ function countingProxy(host: string, to: { host: string; port: number }): Promis
   return new Promise((resolve, reject) => {
     server.on("error", reject);
     server.listen(0, host, () => resolve({ port: (server.address() as net.AddressInfo).port, connections: () => n,
-      close: () => { for (const s of sockets) s.destroy(); server.close(); } }));
+      close: () => { for (const s of sockets) s.destroy(); server.close(); }, muteNext: () => { mute = true; } }));
   });
 }
 
@@ -188,6 +200,18 @@ test("an idle run whose tables are all sync: off opens no connection to the data
   // and the state shows it added, from that read
   const shown = ok(await mason("status", "--json"), "mason status");
   assert.ok((shown.json.tables as Array<{ table: string; added: boolean }>).some((t) => t.table === "public.orders" && t.added), JSON.stringify(shown.json.tables));
+
+  // A CONNECTION GONE SILENT (the re-check of PR 900: one held every add for the quarter of an hour of the last guard):
+  // the read's own connection goes silent once logged in; the database, asked on a connection of its own, says its
+  // session does nothing for it, and the read ends — the add says so, and the next add reads anew and adds
+  psql(dbUrl, "CREATE TABLE silenced (id int PRIMARY KEY)");
+  proxy.muteNext();
+  const began = Date.now();
+  const hushed = await mason("add", "silenced", "--json");
+  assert.equal(hushed.status, 1, hushed.stdout + hushed.stderr);
+  assert.match((hushed.json as { error: { message: string } }).error.message, /could not be read just now: the database has had nothing to do for it for \d+ s .*the connection went silent/, hushed.stdout);
+  assert.ok(Date.now() - began < 120_000, `said in ${Date.now() - began} ms, never after the last guard`);
+  ok(await mason("add", "silenced", "--json"), "mason add, the next read answered");
 
   // THE NEXT START, its first sync done: where the database is, still; that it is the main one, no longer
   ok(await mason("stop"), "mason stop");
