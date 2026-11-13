@@ -95,6 +95,20 @@ paths:
     (`nullsKeyFolded`): an expression key stops DuckDB's top N pruning the scan (6.4 s and 91 s for a 100-row page).
     Equivalent means READ alike too: a bare key that is an integer or an output column's name is the output's
     (findTargetlistEntrySQL92), the same tree inside an expression the input's (`bareKeyIsInput`);
+  - **a GROUP BY of a numeric bin, `floor(e / c)` or `ceil(e / c)` of a constant c, or a one-to-one function of one
+    (`bin * width + min`), groups by the engine's integer where the types prove it Postgres's integer** (`nativeBin`,
+    `nativeKey`, issues 464, 465: keyed a row by `__mason_numeric_program_key`, Metabase's binned card was ×16–25 of
+    Postgres over 12 M rows): e·10^(c's scale) floored in a DECIMAL, divided in HUGEINT, and every reader of the value
+    computed per group from its program. Postgres floors the quotient ROUNDED to `select_div_scale`'s rscale, so the
+    bin is the engine's only where no quotient that is not whole can round to one (2·|c|·10^S < 10^rscale, rscale at
+    least 16 − 4·the quotient's largest base-10000 weight), only where e is + and − of columns of a bounded type
+    (numeric(p ≤ 38, s), the integers) and constants, whose magnitude and display scale are read from the types, c is
+    at most 18 places, and e·10^(c's scale) and the bin fit 38 places. A bigint by 12.5 is not (1000000000000000012 /
+    12.5 floors to …01), nor a numeric of no typmod: the program's key, as before. **The bin is the KEY only**, never a
+    value `duckExact` calls exact (the review of PR 922): read as the engine's DECIMAL(38, 0) beside another DECIMAL in a
+    UNION, an IN, a CASE or a comparison it was cast to a type that rounds the other's decimals, and a product of it
+    passed 38 places where Postgres answers. `tests/duck-wire.test.ts` "issues 464, 465", the plan fixture's BINS, the
+    oracle's `bin:` statements over `bins`;
   - **a count(DISTINCT x) of a key is count(x)** (`src/duck/distinct-key.ts`): x alone its table's PRIMARY KEY in
     the CATALOG's pg_index (the key the copy is written by; never a sources file's `key:`, and NEVER another UNIQUE
     index — the copy may hold its value twice for a moment, and the catalog's indexes are the source's as of the start

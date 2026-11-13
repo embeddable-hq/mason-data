@@ -25,6 +25,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   to read such a path row by row in its slowest way, so a card grouped by a JSON field took 10 to 18 times as long as
   on Postgres. Mason now reads the path's value when the query runs and answers it like a path written in the query:
   that card now takes about twice Postgres's time.
+- **A chart that groups a number into bins is now faster than on Postgres.** Metabase bins a number column as
+  `floor((x - min) / width) * width + min`, for its X-rays' "by value" cards and for a binned field of a joined table.
+  Mason used to work out each row's bin in its slowest way, so over 12 million rows such a card took 16 to 25 times as
+  long as on Postgres, and on a big table it ran past the statement timeout. Mason now works out the bin in the synced
+  data's own exact arithmetic, for columns of `numeric(p, s)` and the integer types. The answers are the same as before,
+  to the last digit.
 
 ## What was wrong and is now right
 
