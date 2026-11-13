@@ -56,7 +56,11 @@ paths:
 - **A table is never left neither streamed nor copied**: after every rebuild, a table that still needs a copy or a
   catch-up gets a pass at once (`followUp`; a change of its columns during its copy re-copies it at once), or when its back-off
   ends (`wakeAt`) — replication mode runs a pass only when kicked, and on the test server a failed catch-up left that table dead
-  for good. A failed catch-up backs off as a failed copy does (`backOff`, `copyRetryDelayMs`), its whole error and next
+  for good. **Each schedule has a timer of its own, never one field for two** (issue 908): `timer` is the next pass's and a
+  kick clears it; the stream's restart is `streamTimer` (a kick inside its wait ran a pass too soon to start the stream,
+  cleared the restart, and the stream stayed stopped for the run); `wake` holds the earliest back-off and is set again
+  for the next after every pass (`wakeForBackOffs`). DETECTOR: `duck-stream.itest.ts` "a pass kicked while the stream
+  waits", `tests/duck-sync-schedule.test.ts`. A failed catch-up backs off as a failed copy does (`backOff`, `copyRetryDelayMs`), its whole error and next
   attempt said in the log and `mason status` (`catchUp.retryAt`). ("Logical replication")
 - **A multi-line reason is ONE log entry**, its further lines indented (`textEntry`, src/lib/log.ts: the
   run's log, mason.log, is written through it, src/cli/dev.ts) — the test server's Binder Error was read as its first line.
