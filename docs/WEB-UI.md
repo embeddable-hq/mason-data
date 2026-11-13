@@ -175,7 +175,9 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   never checks a range: the run reads each, and a refused one is shown as the run's refusal. `--set`
   attributes stay the command's. Its password is shown once, in a modal dialog over the page titled **New user added**
   (index.html's one `<dialog id="once">`, opened with `showModal`: the page behind it dimmed and inert, the focus on the
-  URL's **Copy**; on a phone a sheet the screen's width that scrolls inside itself). It closes **only** by its button,
+  URL's **Copy**; as wide as its rows up to the window less its gutters, so each **Copy** sits on its value's line and
+  only a value too long for the window breaks inside its box, the Copy still beside it; on a phone a sheet the screen's
+  width that scrolls inside itself). It closes **only** by its button,
   **I have copied it** — never by Escape nor a click outside it, since the password is kept nowhere once it closes — and
   the focus then returns to the form's **Name**, the new user in the list above. No poll closes or rewrites it: its
   parts are written when it opens and when its status line changes, never while a pointer is pressed, and it stays

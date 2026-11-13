@@ -627,6 +627,14 @@ test("a user just added: the one-time dialog's parts, titled New user added; URL
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
   assert.match(css, /button\.small \{ height: var\(--control-sm\);/);
   assert.match(css, /\.copyrow \.badge \{ flex: none; height: var\(--control-sm\); \}/);
+  // the dialog as wide as its rows up to the window less its gutters, so each Copy sits on its value's line; its sentences
+  // never widen it; a copy row never wraps its Copy under the value: the value breaks inside its box; a phone's sheet
+  // the screen's whole width
+  assert.match(css, /dialog\.once \{ width: max-content; min-width: min\(640px, calc\(100vw - 2 \* var\(--space-4\)\)\); max-width: calc\(100vw - 2 \* var\(--space-4\)\);/);
+  assert.match(css, /\.once \.copyrow \{ display: flex; flex-wrap: nowrap; align-items: center; \}/);
+  assert.match(css, /\.once \.copyrow code \{ flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; \}/);
+  assert.match(css, /\.once \.once-title, \.once \.added-seen, \.once \.tip \{ contain: inline-size; \}/);
+  assert.match(css, /@media \(max-width: 640px\) \{\s*dialog\.once \{ width: 100%; min-width: 0; max-width: none;/);
   assert.doesNotMatch(html, /headline/, "no headline");
   assert.doesNotMatch(text, /Connect on this page|Paste it|Connect your tool/, "the one line replaces the tips");
   const fields: Array<[string, string, string]> = [["URL", "added-url", url], ["Password", "added-password", password]];
