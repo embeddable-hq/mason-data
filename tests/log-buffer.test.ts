@@ -58,7 +58,7 @@ test("the file's parser gives the buffer's entries: one shape for mason logs and
 test("mason logs --json prints the file's entries as { at, text }, a multi-line one whole, -n counting entries", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-logs-"));
   try {
-    writeConfig(path.join(dir, ".mason"), newConfig("shop", "mason", false));
+    writeConfig(path.join(dir, ".mason"), newConfig("shop", "mason"));
     fs.writeFileSync(path.join(dir, ".mason", "mason.log"), textEntry(`${at(1)} `, "[a] one") + textEntry(`${at(2)} `, "[b] two\nmore"));
     const r = spawnSync(process.execPath, [path.resolve("src/cli/main.ts"), "logs", "--json", "-n", "1"], { cwd: dir, encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr);
@@ -70,7 +70,7 @@ test("mason logs --json prints the file's entries as { at, text }, a multi-line 
 test("mason logs --start prints dev.log as written, its blank lines too", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-logs-"));
   try {
-    writeConfig(path.join(dir, ".mason"), newConfig("shop", "mason", false));
+    writeConfig(path.join(dir, ".mason"), newConfig("shop", "mason"));
     fs.writeFileSync(path.join(dir, ".mason", "dev.log"), "Starting\n\n  step one\n\nReady\n");
     const r = spawnSync(process.execPath, [path.resolve("src/cli/main.ts"), "logs", "--start"], { cwd: dir, encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr);

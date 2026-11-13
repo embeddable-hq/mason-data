@@ -71,7 +71,7 @@ test("the config: new on an empty volume, resumed over what the runs recorded; a
     const fresh = serveConfig(s, readProject(dir));
     assert.ok("config" in fresh);
     assert.equal(fresh.config.served, true);
-    assert.equal(fresh.config.remote, true, "a server's database is on another machine, on purpose");
+    assert.equal("remote" in fresh.config, false, "where the database is needs no say-so (issue 888): no remote key");
     assert.deepEqual([fresh.config.name, fresh.config.apiKey, fresh.config.folder], ["mason", KEY, "/mason/project"]);
     assert.equal("source" in fresh.config, false, "the database's URL is the sources file's, never the config's");
     assert.match(fresh.said[0]!, /new synced data in .*\.mason$/);
@@ -92,7 +92,7 @@ test("the config: new on an empty volume, resumed over what the runs recorded; a
     assert.match(renamed.fix!, /set MASON_NAME=mason again, or give the new name a new MASON_DATA/);
 
     // a project mason init made: the developer's, never overwritten from the environment
-    writeConfig(path.join(dir, ".mason"), newConfig("mason", "mason", false));
+    writeConfig(path.join(dir, ".mason"), newConfig("mason", "mason"));
     const theirs = serveConfig(s, readProject(dir));
     assert.ok("message" in theirs);
     assert.equal(theirs.code, "refused");
@@ -115,7 +115,7 @@ test("mason serve refuses what its volume's 0.7.0 config records and the sources
     const replication = { slot: "mason_dev_shop_app", publication: "app_pub", owned: false };
     fs.mkdirSync(path.join(data, ".mason"), { recursive: true });
     // no sources file yet: serve would write one saying sync: off, which is no one's choice
-    writeConfig(path.join(data, ".mason"), { ...newConfig("shop", project, true), apiKey: KEY, served: true, changes: "replication", publication: "app_pub", replication });
+    writeConfig(path.join(data, ".mason"), { ...newConfig("shop", project), apiKey: KEY, served: true, changes: "replication", publication: "app_pub", replication });
     const was = fs.readFileSync(path.join(data, ".mason", "config.json"), "utf8");
     const serveNow = async (): Promise<{ code: number | null; json: string }> => {
       const child = spawn(process.execPath, [MAIN, "serve", "--json"], { cwd: dir, env: { PATH: process.env.PATH, HOME: dir, ...env }, stdio: ["ignore", "pipe", "pipe"] });
@@ -158,7 +158,7 @@ test("mason serve refuses what its volume's 0.7.0 config records and the sources
     fs.writeFileSync(file, "kind: nope\n");
     assert.equal(serveRecordRefusal(s, readProject(data), env), null);
     fs.writeFileSync(file, "kind: postgres\nurl: ${DATABASE_URL}\ntables:\n  orders: {}\n");
-    writeConfig(path.join(data, ".mason"), { ...newConfig("shop", project, false), changes: "replication" });
+    writeConfig(path.join(data, ".mason"), { ...newConfig("shop", project), changes: "replication" });
     assert.equal(serveRecordRefusal(s, readProject(data), env), null);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

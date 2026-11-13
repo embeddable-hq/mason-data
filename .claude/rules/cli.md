@@ -139,7 +139,7 @@ CLI lacks).
   only `b`): a line each (`tableLines`), its bar, percent and state — the finished first, in the order
   they finished, the ones still syncing at the bottom — redrawn in place on a terminal, printed when it changes
   elsewhere; ready only when every added table is synced and served, its one catch-up poll after a whole read over too
-  (`catching-up`: said on its line as being caught up, at work in cyan, never "NOT kept current", issue 834) (`readiness`, src/cli/readiness.ts, which reads each
+  (`catching-up`: said on its line as being caught up, at work in cyan, never "not kept current", issue 834) (`readiness`, src/cli/readiness.ts, which reads each
   table's state in one word, `tables[].sync.state`, never its error or phase a second way: a synced table whose poll,
   catch-up, stream or publication check failed is failed there and here, issue 100; `behind` is said on its line and
   never fails it); a first sync that
@@ -428,8 +428,9 @@ CLI lacks).
 
 ## Errors
 
-**Every error says what to do about it** (CLAUDE.md "Conventions"). A message a developer or an agent meets names the
-file and the key, says what is wrong in their words, and gives the way out, on ONE report:
+**Every error says what to do about it** (CLAUDE.md "An error a developer meets says what to do about it").
+A message a developer or an agent meets names the file and the key, says what is wrong in their words, and gives the
+way out, on ONE report:
 
 - the closest valid name for a misspelling (`didYouMean`, src/lib/did-you-mean.ts: a case, a letter or two, a prefix
   — never a guess at a different word, which is worse than none);
@@ -452,7 +453,7 @@ A new refusal a developer can meet gets a test asserted on its whole text (`test
 ## What review probes
 
 Run each probe that applies: the implementer before each push, and the fresh reviewer at each review (CLAUDE.md
-"How work is done here", steps 3 and 4). A new probe is proposed to the owner; each bullet names the PR or issue it was met in.
+"How work is done here"). A new probe is proposed to the owner; each bullet names the PR or issue it was met in.
 
 - An operator setting given junk (`abc`, `0`, `-1`, `1.5`, `2000`): refused naming the variable and its range, never run
   on a library's reading of it (PR 148).

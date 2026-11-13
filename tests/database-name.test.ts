@@ -184,7 +184,7 @@ test("mason mcp's 3D000: the way out is the URL's last part and the hint's name,
 test("mason status while up compares what the file says: a server named by its setting, asked from a shell without it, is no move", () => {
   const root = project(`${HEAD}tables: {}\n`);
   const at = (served: boolean): P.Project => ({ root, dir: path.join(root, ".mason"), folder: path.join(root, "mason"),
-    config: { name: "my-shop", folder: "mason", remote: false, apiKey: "k", ...(served ? { served } : {}) } });
+    config: { name: "my-shop", folder: "mason", apiKey: "k", ...(served ? { served } : {}) } });
   const file = path.join(root, "mason", "sources", "app.yml");
   try {
     assert.equal(P.databaseMoved(at(true), "reporting"), null, "named by MASON_PG_DATABASE, which this shell need not have");

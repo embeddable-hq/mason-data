@@ -223,7 +223,7 @@ async function holding(h: Holding): Promise<number> {
         "Paste it into the tool now: the password is printed this once, is kept nowhere, and ends with this command.",
         ...(opened.role === null ? ["With no roles file, anyone with this address and password reads every synced table: mason/roles.yml narrows it."] : []),
         ...(first.verified ? [] : [`${tunnel.host}:${tunnel.port} could not be reached from this machine, so it is not verified: a firewall here may be why, and a tool elsewhere may reach it.`]),
-        "A self-signed certificate: a service that forwards bytes cannot read them, a malicious one could sit in the middle. For anything lasting: mason help production.",
+        "This is for trying Mason out. The connection is encrypted, but the certificate isn't checked. For a lasting setup, run Mason on a server.",
       ],
       next,
     }, st));

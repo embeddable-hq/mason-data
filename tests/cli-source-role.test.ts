@@ -16,7 +16,7 @@ const rel = (name: string, o: Partial<RelationFact> = {}): RelationFact => {
   return { name, sql: `${schema}.${/^[a-z_][a-z0-9_]*$/.test(table) ? table : `"${table}"`}`, kind: "table", entry: name, schemaSql: schema, owner: "admin", owned: false, rowSecurity: false, privileges: [], ...o };
 };
 const facts = (o: Partial<RoleFacts> = {}): RoleFacts => ({
-  user: "app", userSql: "app", databaseSql: "shop",
+  user: "app", userSql: "app", databaseSql: "shop", version: 160000,
   roles: [{ name: "app", self: true, superuser: false, bypassrls: false }],
   relations: [rel("public.orders"), rel("billing.Invoices")],
   schemas: [{ name: "billing", sql: "billing", owner: "admin", owned: false, create: [], publicCreate: false },
@@ -90,6 +90,25 @@ test("BYPASSRLS, an owner, a write privilege and CREATE: a warning each, with it
   assert.match(fix, /^-- PUBLIC holds TRIGGER on public\.events_2026, so the new role does too/m);
   assert.doesNotMatch(fix, /REVOKE|ALTER FUNCTION/, "no statement that changes another role's privileges");
   assert.equal(new Set(checks.map((c) => c.fix)).size, 1, "one way out, shared");
+});
+
+test("CREATE in schema public that is PUBLIC's default before Postgres 15, and nothing else, is information, never a warning (issue 888)", async () => {
+  const { roleChecks, PUBLIC_DEFAULT_CREATE } = await roleModule();
+  const pub = (o: Partial<RoleFacts["schemas"][number]> = {}) => ({ name: "public", sql: "public", owner: "admin", owned: false, create: ["app"], publicCreate: true, ...o });
+  const billing = { name: "billing", sql: "billing", owner: "admin", owned: false, create: [], publicCreate: false };
+  const at = (version: number, p = pub()) => roleChecks(facts({ version, schemas: [billing, p] }), ask());
+  const only = at(140000);
+  assert.equal(PUBLIC_DEFAULT_CREATE, "On Postgres before 15, every role can create tables in schema public by default. Mason never does.");
+  assert.deepEqual(only.map((c) => [c.ok, c.warn ?? null, c.code ?? null]), [[true, null, null], [true, null, null]], "no warning, no code, no way out");
+  assert.match(only[0]!.detail, /^app only reads: .*nor CREATE in their schemas \(but PUBLIC's default, below\), and it reaches no SECURITY DEFINER code/);
+  assert.equal(only[1]!.detail, PUBLIC_DEFAULT_CREATE);
+  assert.ok(only.every((c) => c.fix === undefined));
+  // what stays a warning: a schema it owns, PUBLIC's CREATE on 15 and later (someone granted it), another schema
+  for (const [what, checks] of [["owned", at(140000, pub({ owned: true, owner: "app" }))],
+    ["Postgres 15", at(150000)], ["another schema", roleChecks(facts({ version: 140000, schemas: [{ ...billing, create: ["app"], publicCreate: true }, pub({ publicCreate: false, create: [] })] }), ask())]] as const) {
+    assert.deepEqual(checks.map((c) => c.code), ["role_creates_in_schema"], what);
+    assert.ok(!checks.some((c) => c.detail === PUBLIC_DEFAULT_CREATE), what);
+  }
 });
 
 test("a write through another relation is named by its route: a partition, an INHERITS child, a view, a rule; the way out grants on the synced tables alone", async () => {

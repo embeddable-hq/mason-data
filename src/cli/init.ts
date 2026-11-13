@@ -25,7 +25,7 @@ import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 import { STDIO, endText, failed, jsonText, parseCommand, type CommandSpec, type Io, type NextStep } from "./command.ts";
 import { checklist, out as styleOut, PLAIN, StepFailed } from "./style.ts";
-import { checkSource, maskedUrl, parseSource, remoteConfirmation, remoteWarning } from "./preflight.ts";
+import { checkSource, maskedUrl, parseSource, sourceNotes } from "./preflight.ts";
 import { cliPinProblem, ensurePin } from "./pin.ts";
 import { version } from "./version.ts";
 import { parseVersion, PIN_FILE } from "../lib/project-version.ts";
@@ -40,7 +40,7 @@ import { newRolesText, rolesFile } from "./roles.ts";
 import { newSourceText, OLD_TABLES_DIR, parseSourceText, shownPath, sourceFileNames, sourceNameFor, sourceOf, sourcesDir } from "./sources.ts";
 
 
-export const INIT_USAGE = `usage: mason init [- | <postgres url> | demo] [--name <name>] [--database <name>] [--folder <dir>] [--remote] [--skip-check] [--json]
+export const INIT_USAGE = `usage: mason init [- | <postgres url> | demo] [--name <name>] [--database <name>] [--folder <dir>] [--skip-check] [--json]
 
   Makes this folder a Mason project — run it in your app's folder. It checks it can read the database (and writes
   nothing when it cannot), then creates:
@@ -54,13 +54,11 @@ export const INIT_USAGE = `usage: mason init [- | <postgres url> | demo] [--name
     mason init - < db-url.txt                           the URL on stdin, written to .env, never on the command line
     mason init demo                                     a demo database Mason hosts itself: nothing to install
     mason init --folder db/mason --name shop-admin      the project's files elsewhere; another name
-    mason init --remote                                 the database in .env is on another machine
 
   --name <name>     the project's name, which its replication slot is named for (default: this folder's)
   --database <name> the database name a tool connects with, written as database: in the source file (default: none
                     written, so tools connect with ${DEFAULT_DATABASE}): your database's own, and a tool keeps the name it has
   --folder <dir>    where sources/ goes, relative to this folder (default mason; . for this folder itself)
-  --remote          go ahead with a database on another machine (read the warnings mason init prints); not with demo
   --skip-check      write the project without connecting (the database is not up yet); mason start checks it; not with demo
   --json            as data: its shape is at the end
 
@@ -73,7 +71,9 @@ export const INIT_USAGE = `usage: mason init [- | <postgres url> | demo] [--name
   with no source file (an older Mason's), it writes that file alone, and the roles file when there is none.
   mason init - reads the URL from stdin (one line, from a pipe), so its password stays off the command line, where ps
   shows it to this machine's users and your shell keeps it in its history: a URL with a password given as the argument
-  is still taken, with a warning on stderr.
+  is still taken, with a tip.
+  A database on another machine is read as any other: mason init says so, and that Mason syncs the tables you choose to
+  this machine; so it does for your main database (not a read replica), which Mason only reads, keeping its load small.
   mason init demo, in a new folder, makes a project on a demo database Mason hosts itself (a shop: customers, products,
   orders, order_items): mason start makes it in .mason/demo/ and changes it every few seconds. Three of its tables are
   added; the fourth is yours to add after mason start (mason add ${DEMO_TABLE_TO_ADD}), to watch its first sync begin.
@@ -85,15 +85,16 @@ export const INIT_USAGE = `usage: mason init [- | <postgres url> | demo] [--name
     source: { name (the source's: its file's), file, url (as the file writes it), database (the name
     a tool connects with, or null when the file has a mistake), env (the .env line written, its value masked, or null) }, roles: { file, written (false: one was here, and kept) },
     generated: [{ table, file, written (false: one was here, and kept) }] (the demo's generated table; [] for
-    any other project), database: { url (password masked), from, version, tables }, warnings, next }
+    any other project), database: { url (password masked), from, version, tables }, warnings, notes (information, not
+    warnings: the database is on another machine, it is your main database, a tip), next }
 `;
 
 export const INIT: CommandSpec = {
   name: "init",
   summary: "make this folder a Mason project on your Postgres: mason init (its URL from .env), mason init - (from stdin) or demo",
   usage: INIT_USAGE,
-  options: { name: { type: "string" }, database: { type: "string" }, folder: { type: "string" }, remote: { type: "boolean" }, "skip-check": { type: "boolean" }, json: { type: "boolean" } },
-  json: ["name", "root", "folder", "config", "demo", "source", "roles", "generated", "database", "warnings", "next"],
+  options: { name: { type: "string" }, database: { type: "string" }, folder: { type: "string" }, "skip-check": { type: "boolean" }, json: { type: "boolean" } },
+  json: ["name", "root", "folder", "config", "demo", "source", "roles", "generated", "database", "warnings", "notes", "next"],
 };
 
 /** Why `name` cannot be this project's, or null: not a name its replication slot takes. */
@@ -216,11 +217,8 @@ export function readPipedUrl(input: UrlInput, max = STDIN_MAX_BYTES, timeoutMs =
   });
 }
 
-/** The warning for a URL whose password was given as the argument, naming the safer forms — `variable` the one the
- *  sources file would name (DATABASE_URL, or MASON_DATABASE_URL for a database other than the app's) — never the password. */
-export const argvPasswordWarning = (variable: string): string =>
-  "the URL given on the command line holds its password, which ps shows to this machine's users and your shell keeps in its history: " +
-  `put it in .env as ${variable}=… and run mason init, or pipe it in with mason init - < db-url.txt`;
+/** The tip for a URL whose password was given as the argument (issue 888: a tip, not a warning) — never the password. */
+export const ARGV_PASSWORD_TIP = "Your shell's history now holds this password. Next time, put the URL in .env and run mason init.";
 
 export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io; version?: string; env?: NodeJS.ProcessEnv; stdin?: UrlInput } = {}): Promise<number> {
   const io = deps.io ?? STDIO;
@@ -233,9 +231,7 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   // THE DEMO (src/cli/demo.ts): a database Mason hosts, made by mason start; there is nothing to check, nor elsewhere
   const demo = f.positionals[0] === DEMO_ARG;
   if (demo) {
-    for (const flag of ["remote", "skip-check"] as const) {
-      if (f.values[flag] === true) return failed("init", { message: `--${flag} means nothing for the demo database: it is on this machine, made and hosted by mason start`, code: "usage", fix: "mason init demo, without it", usage: INIT_USAGE }, { json, io });
-    }
+    if (f.values["skip-check"] === true) return failed("init", { message: "--skip-check means nothing for the demo database: it is on this machine, made and hosted by mason start", code: "usage", fix: "mason init demo, without it", usage: INIT_USAGE }, { json, io });
   }
   let root = path.resolve(cwd);
   const existing = findProject(root);
@@ -344,17 +340,13 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   const urlName = found !== null ? found.from : demo ? "the demo database's URL" : piped ? "the URL read from stdin" : "the URL given";
   const parsed = parseSource(url, urlName);
   if ("problem" in parsed) return usage(parsed.problem);
-  // A PASSWORD ON THE COMMAND LINE: taken (refusing it would break scripts), and said on stderr with the safer forms;
+  // A PASSWORD ON THE COMMAND LINE: taken (refusing it would break scripts), and said as a tip with the safer form;
   // the password itself is never repeated
   const argvPassword = !demo && !piped && found === null && parsed.source.password !== "";
-  const remote = f.values.remote === true || sourceless?.config.remote === true;
   // a kept file's variable gets this URL in .env when the folder's files give it none; one they give another value is said
   const keptValue = keptVar === null ? null : appEnvValue(root, keptVar, {});
   const where = kept === null ? urlVariable(root, url, found)
     : { variable: keptVar ?? "", line: keptVar !== null && keptValue === null ? `${keptVar}=${url}` : null };
-  // the variable .env would hold it in: the one the sources file names (MASON_DATABASE_URL for another database than the app's)
-  const argvWarning = argvPassword ? argvPasswordWarning("problem" in where || where.variable === "" ? "DATABASE_URL" : where.variable) : null;
-  if (argvWarning !== null) io.err(`! ${argvWarning}`);
   if ("problem" in where) return failed("init", { message: where.problem, code: "refused" }, { json, io });
 
   // WHAT IT DOES, AS A CHECKLIST (each item it is doing, with a spinner left of it that turns into a checkmark when
@@ -366,8 +358,8 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   const db = maskedUrl(parsed.source.url);
   line(st.bold(`Making ${name} a Mason project in ${root}`));
   const notes: string[] = [];
-  // a person read the warning on stderr already; an agent reads warnings in the answer too
-  if (argvWarning !== null && json) notes.push(argvWarning);
+  // information about the database, never a warning (issue 888): on another machine, the main database — and a tip
+  const info: string[] = [];
   if (keptValue !== null && keptValue.value !== url) notes.push(`${kept} reads ${keptVar} from ${keptValue.from}, which is ${maskedUrl(keptValue.value)}: mason start syncs from that one, not ${db}`);
   let database: { url: string; from: string | null; version: string | null; tables: number | null } = { url: db, from: from ? from.slice(2, -1) : null, version: null, tables: null };
   const rel = (p: string): string => path.relative(root, p) || ".";
@@ -380,41 +372,31 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   // the folder an older Mason listed the tables in: read by nothing (no backwards compatibility before v1.0), said
   const oldTables = path.join(folder, OLD_TABLES_DIR);
   if (fs.existsSync(oldTables)) notes.push(`${rel(oldTables)}/ is an older Mason's, which this one does not read: mason add each table again, then remove it`);
-  // A DATABASE ON ANOTHER MACHINE, NOT CONFIRMED: not a failed step (the check passed, or was skipped) but a stop before
-  // anything is written, said as one failure (remoteConfirmation) — the same words whether the check ran or not
-  const confirmRemote = (): number => failed("init", remoteConfirmation(parsed.source.host, { cmd: "mason init",
-    wayOut: "run the same mason init again with --remote: that says yes, sync from that machine",
-    next: [["mason init --remote <url>", "the same command, confirmed"]] }), { json, io });
   try {
     if (demo) {
       // nothing exists yet: mason start makes the database (src/demo/source.ts) at its first start
       await steps.step("Choosing the demo database's port", () => null,
         () => `The demo database will be ${db}: mason start makes it in ${STATE_DIR}/${DEMO_DIR}/ and seeds it (nothing to connect to yet)`);
     } else if (f.values["skip-check"] === true) {
-      if (parsed.source.remote && !remote) return confirmRemote();
+      // not read, so whether it is a read replica is not known: where it is, alone
+      info.push(...sourceNotes(parsed.source, null));
       await steps.step(`Not checking ${db}${from}`, () => null, () => `Not checking ${db}${from} (--skip-check): mason start checks it`);
     } else {
       // the check's own words are its failure's (an error, then the ways out); on success its facts are the step's line
       const said: string[] = [];
-      let needsRemote = false;
       const checked = await steps.step(`Connecting to ${db}${from}`, async () => {
-        const c = await checkSource(url, { remote, cmd: "mason init", say: (m) => said.push(m), name: urlName });
+        const c = await checkSource(url, { cmd: "mason init", say: (m) => said.push(m), name: urlName });
         if ("exit" in c) throw new StepFailed(said.filter((m) => !/: connecting to /.test(m)).join("\n"), c.exit);
-        if ("needsRemote" in c) { needsRemote = true; return c.needsRemote; }
         return c;
       }, (c) => `Connected to ${db}${from}: Postgres ${c.facts.versionText}${c.facts.standby ? " (a read replica)" : ""}, ${c.facts.tables.length} table(s) this user can read`);
-      if (needsRemote) {
-        // the other warnings (a primary, a serverless host) stand; the remote one is the confirmation's own words
-        for (const w of checked.warnings.filter((w) => w !== remoteWarning(checked.source))) line(`  ! ${w}`);
-        return confirmRemote();
-      }
+      info.push(...checked.notes);
       notes.push(...checked.warnings);
       database = { ...database, version: checked.facts.versionText, tables: checked.facts.tables.length };
     }
     if (sourceless) await steps.step(`Keeping ${STATE_DIR}/config.json`, () => undefined, () => `Kept ${STATE_DIR}/config.json: the project ${name}, its key and its synced data`);
     else {
       await steps.step(`Writing ${STATE_DIR}/config.json`, () => {
-        writeConfig(path.join(root, STATE_DIR), newConfig(name, path.relative(root, folder) || ".", remote, { demo }));
+        writeConfig(path.join(root, STATE_DIR), newConfig(name, path.relative(root, folder) || ".", { demo }));
       }, () => `Wrote ${STATE_DIR}/config.json: Mason's key (this machine's)`);
     }
     if (kept !== null) {
@@ -499,11 +481,12 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
         env: where.line === null ? null : maskedLine(where.line) },
       roles: { file: rolesPath, written: !rolesKept },
       generated: generatedPath === null ? [] : [{ table: sourceOf(DEMO_GENERATED.table), file: generatedPath, written: !generatedKept }],
-      database, warnings: notes }, next));
+      database, warnings: notes, notes: [...info, ...(argvPassword ? [ARGV_PASSWORD_TIP] : [])] }, next));
     return 0;
   }
+  for (const n of info) say(`  ${n}`);
   for (const n of notes) say(`  ! ${n}`);
-  say(endText({ tips: [demo ? `The demo database runs inside mason start, read by polling: a new order every few seconds; ${DEMO_TABLE_TO_ADD} is left for you to add; ${DEMO_GENERATED.table} is a generated table over the synced orders; mason destroy removes the demo database with the synced data`
+  say(endText({ tips: [...(argvPassword ? [ARGV_PASSWORD_TIP] : []), demo ? `The demo database runs inside mason start, read by polling: a new order every few seconds; ${DEMO_TABLE_TO_ADD} is left for you to add; ${DEMO_GENERATED.table} is a generated table over the synced orders; mason destroy removes the demo database with the synced data`
     : "Mason only reads your database: no setting, slot or publication is needed or made"], next }, st));
   return 0;
 }

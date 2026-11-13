@@ -58,7 +58,7 @@ test("a command means the nearest project at or above its folder, as git finds a
   try {
     const shop = path.join(home, "code", "shop");
     fs.mkdirSync(path.join(shop, "src", "components"), { recursive: true });
-    writeConfig(path.join(shop, ".mason"), newConfig("shop", "mason", false));
+    writeConfig(path.join(shop, ".mason"), newConfig("shop", "mason"));
     assert.equal(findProject(path.join(shop, "src", "components"))!.root, shop);
     assert.equal((findProject(shop) as Project).folder, path.join(shop, "mason"));
     assert.equal(findProject(home), null);
@@ -146,35 +146,39 @@ test("mason init - reads the URL from a pipe, never the command line; a password
     assert.match(r.out, /✓ Not checking postgres:\/\/me:\*\*\*\*@localhost:5432\/shop \(--skip-check\)/);
     assert.equal(r.err, "", "nothing warned for a URL on stdin");
     assert.doesNotMatch(r.out, /s3cret/);
-    // given as the argument with a password: taken (scripts keep working), warned on stderr, the password never repeated
+    // given as the argument with a password: taken (scripts keep working), said as a tip (issue 888), the password never repeated
+    const TIP = "Your shell's history now holds this password. Next time, put the URL in .env and run mason init.";
     const two = path.join(root, "two");
     fs.mkdirSync(two);
     const a = await quiet((io) => init(["postgres://me:s3cret@localhost:5432/shop", "--skip-check"], two, { io }));
     assert.equal(a.value, 0, a.err);
-    assert.equal(a.err, "! the URL given on the command line holds its password, which ps shows to this machine's users and your shell keeps in its history: " +
-      "put it in .env as DATABASE_URL=… and run mason init, or pipe it in with mason init - < db-url.txt\n");
+    assert.equal(a.err, "", "a tip, not a warning on stderr");
+    assert.ok(a.out.includes(`\nTip: ${TIP}\n`), a.out);
+    assert.doesNotMatch(a.out, /^ {2}! /m, "nothing warned");
     assert.doesNotMatch(a.out + a.err, /s3cret/);
-    // under --json the warning is on stderr and in the answer's warnings too
+    // under --json the tip is in the answer's notes, never its warnings
     const three = path.join(root, "three");
     fs.mkdirSync(three);
     const j = await quiet((io) => init(["postgres://me:s3cret@localhost:5432/shop", "--skip-check", "--json"], three, { io }));
     assert.equal(j.value, 0, j.err);
-    assert.ok((JSON.parse(j.out) as { warnings: string[] }).warnings.some((w) => w.startsWith("the URL given on the command line holds its password")), j.out);
-    assert.match(j.err, /^! the URL given on the command line holds its password/);
+    const ja = JSON.parse(j.out) as { warnings: string[]; notes: string[] };
+    assert.deepEqual([ja.warnings, ja.notes], [[], [TIP]], j.out);
+    assert.equal(j.err, "");
     assert.doesNotMatch(j.out + j.err, /s3cret/);
     // no password in the URL: nothing to warn of
     const four = path.join(root, "four");
     fs.mkdirSync(four);
     const n = await quiet((io) => init(["postgres://me@localhost:5432/shop", "--skip-check"], four, { io }));
     assert.deepEqual([n.value, n.err], [0, ""]);
-    // another database than the app's DATABASE_URL: init writes it as MASON_DATABASE_URL, and the warning names that one
+    // another database than the app's DATABASE_URL: init writes it as MASON_DATABASE_URL, the same tip
     const six = path.join(root, "six");
     fs.mkdirSync(six);
     fs.writeFileSync(path.join(six, ".env"), "DATABASE_URL=postgres://app@localhost:5432/app\n");
     const other = await quiet((io) => init(["postgres://me:s3cret@localhost:5432/shop", "--skip-check"], six, { io }));
     assert.equal(other.value, 0, other.err);
     assert.match(fs.readFileSync(path.join(six, ".env"), "utf8"), /\nMASON_DATABASE_URL=postgres:\/\/me:s3cret@localhost:5432\/shop\n$/);
-    assert.match(other.err, /^! the URL given on the command line holds its password, [^\n]*: put it in \.env as MASON_DATABASE_URL=… and run mason init, or pipe it in with mason init - < db-url\.txt\n$/);
+    assert.equal(other.err, "");
+    assert.ok(other.out.includes(`\nTip: ${TIP}\n`), other.out);
     assert.doesNotMatch(other.out + other.err, /s3cret/);
     // what the pipe cannot be: said by kind, never by what it held, exit 2, nothing written
     const five = path.join(root, "five");
@@ -220,7 +224,7 @@ test("mason init writes the project — config, the sources file, the URL in .en
     assert.equal(fs.statSync(path.join(app, ".env")).mode & 0o777, 0o600);
     assert.match(fs.readFileSync(path.join(app, ".gitignore"), "utf8"), /^node_modules\n# Mason: .*\n\.mason\/\n# the database URL mason\/sources\/ names \(mason init\)\n\.env\n$/);
     // what it did, as a checklist, then what to run next
-    assert.match(r.out, /^Making app a Mason project in .*\n✓ Not checking postgres:\/\/me:\*\*\*\*@localhost:5432\/shop \(--skip-check\): mason start checks it\n✓ Wrote \.mason\/config\.json: Mason's key \(this machine's\)\n✓ Wrote mason\/sources\/shop\.yml: the database \(url: \$\{DATABASE_URL\}\), sync: off \(each table read once, then again only by mason sync <table>\) and the tables to sync, none yet \(mason add\) — commit it\n✓ Wrote mason\/roles\.yml: every user reads every synced table \(default: everything, tables: all\) — narrow it with a second role — commit it\n✓ Wrote DATABASE_URL=postgres:\/\/me:\*\*\*\*@localhost:5432\/shop to \.env: the URL the source file names, kept out of git\n✓ Added \.mason\/ and \.env to \.gitignore\n\nTip: Mason only reads your database: no setting, slot or publication is needed or made\n\nNext:\n  mason start {35}Mason in the background, for this folder\n  mason tables /);
+    assert.match(r.out, /^Making app a Mason project in .*\n✓ Not checking postgres:\/\/me:\*\*\*\*@localhost:5432\/shop \(--skip-check\): mason start checks it\n✓ Wrote \.mason\/config\.json: Mason's key \(this machine's\)\n✓ Wrote mason\/sources\/shop\.yml: the database \(url: \$\{DATABASE_URL\}\), sync: off \(each table read once, then again only by mason sync <table>\) and the tables to sync, none yet \(mason add\) — commit it\n✓ Wrote mason\/roles\.yml: every user reads every synced table \(default: everything, tables: all\) — narrow it with a second role — commit it\n✓ Wrote DATABASE_URL=postgres:\/\/me:\*\*\*\*@localhost:5432\/shop to \.env: the URL the source file names, kept out of git\n✓ Added \.mason\/ and \.env to \.gitignore\n\nTip: Your shell's history now holds this password\. Next time, put the URL in \.env and run mason init\.\nTip: Mason only reads your database: no setting, slot or publication is needed or made\n\nNext:\n  mason start {35}Mason in the background, for this folder\n  mason tables /);
     assert.doesNotMatch(r.out, /secret/, "the password is never printed");
     // again here, or anywhere inside: refused, naming the project and how to point it elsewhere
     fs.mkdirSync(path.join(app, "src"));
@@ -276,14 +280,27 @@ test("mason init writes the project — config, the sources file, the URL in .en
     assert.match(noneAnswer.error.fix, /as DATABASE_URL=postgres:\/\/… \(your app's, usually\) or as MASON_DATABASE_URL=postgres:\/\/… \(read first/);
     assert.deepEqual(noneAnswer.next.map((n) => n.command), ["mason init - < db-url.txt", "mason init", "mason init demo", "mason init --help"]);
     assert.equal(noneAnswer.next[1]!.what, "again, once .env has MASON_DATABASE_URL or DATABASE_URL");
-    // a database elsewhere needs --remote, even unchecked
-    const remote = await quiet((io) => init(["postgres://u@db.example.com/x", "--skip-check"], three, { io }));
-    assert.equal(remote.value, 1);
-    assert.match(remote.err, /^✗ mason init: stopped before writing anything: db\.example\.com is on another machine, and syncing from it needs your say-so\n/m);
-    assert.match(remote.err, /\n {2}why {3}mason start would sync the tables you pick to this machine: a file under \.mason\/, with no access control beyond this machine's\n {8}and keep them current while it runs by reading that database/);
-    assert.match(remote.err, /\n {2}fix {3}run the same mason init again with --remote: that says yes, sync from that machine\n/);
-    assert.match(remote.err, /\nNext:\n {2}mason init --remote <url>/);
-    assert.equal(readProject(three), null, "nothing written");
+    // a database elsewhere is written on the first try, said as information (issue 888); --remote is no option any more
+    const elsewhere = path.join(root, "elsewhere");
+    fs.mkdirSync(elsewhere);
+    const remote = await quiet((io) => init(["postgres://u@db.example.com/x", "--skip-check"], elsewhere, { io }));
+    assert.equal(remote.value, 0, remote.err);
+    assert.equal(remote.err, "");
+    assert.ok(remote.out.includes("\n  Your database is on another machine. Mason will sync the tables you choose to this machine.\n"), remote.out);
+    assert.doesNotMatch(remote.out, /^ {2}! |not a read replica/m, "no warning; whether it is a replica is not known unchecked");
+    const made = readProject(elsewhere);
+    assert.ok(made !== null && "config" in made, "written");
+    assert.equal("remote" in made.config, false, "no remote key");
+    const elsewhereJson = path.join(root, "elsewhere-json");
+    fs.mkdirSync(elsewhereJson);
+    const rj = await quiet((io) => init(["postgres://u@db.example.com/x", "--skip-check", "--json"], elsewhereJson, { io }));
+    assert.equal(rj.value, 0, rj.err);
+    const rja = JSON.parse(rj.out) as { warnings: string[]; notes: string[]; config: string };
+    assert.deepEqual([rja.warnings, rja.notes], [[], ["Your database is on another machine. Mason will sync the tables you choose to this machine."]]);
+    assert.ok(fs.existsSync(rja.config), "--json says it was written, and it was");
+    const flag = await quiet((io) => init(["postgres://u@db.example.com/x", "--remote"], path.join(root, "flag-gone"), { io }));
+    assert.equal(flag.value, 2, "--remote is an unknown option now: a wrong command line");
+    assert.equal(readProject(path.join(root, "flag-gone")), null);
     // the URL read from .env: that file is ignored with .mason/ (and named in the checklist)
     const four = path.join(root, "four");
     fs.mkdirSync(four);
@@ -359,7 +376,7 @@ test("mason init checks the database and writes nothing when it cannot connect",
     assert.equal(r.value, 1);
     // the step fails as such, and the check's own words — what is wrong, then the ways out — follow it
     assert.match(r.out, /\n✗ Connecting to postgres:\/\/u:\*\*\*\*@127\.0\.0\.1:1\/shop\n$/);
-    assert.match(r.err, /^! the URL given on the command line holds its password[^\n]*\n✗ mason init: could not connect: .*\n {2}why {3}the database's URL is postgres:\/\/u:\*{4}@127\.0\.0\.1:1\/shop\n {2}fix {3}Is Postgres running\?.*\n {8}Supabase/);
+    assert.match(r.err, /^✗ mason init: could not connect: .*\n {2}why {3}the database's URL is postgres:\/\/u:\*{4}@127\.0\.0\.1:1\/shop\n {2}fix {3}Is Postgres running\?.*\n {8}Supabase/);
     assert.equal(readProject(root), null);
     assert.ok(!fs.existsSync(path.join(root, "mason")));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
@@ -375,7 +392,7 @@ test("a run is up only when it answers with its token and its pid: a pid alive a
   const port = (srv.address() as { port: number }).port;
   const root = tmp();
   try {
-    const cfg = newConfig("shop", "mason", false);
+    const cfg = newConfig("shop", "mason");
     cfg.running = { pid: process.pid, controlUrl: `http://127.0.0.1:${port}`, token: "right", postgresUrl: "postgresql://127.0.0.1:5433/shop", postgresListener: { host: "127.0.0.1", tls: null } };
     writeConfig(path.join(root, ".mason"), cfg);
     const p = readProject(root) as Project;
@@ -443,7 +460,7 @@ test("a config that cannot be read is a broken project: said with the file and t
   const dir = path.join(root, ".mason");
   fs.mkdirSync(dir);
   const file = path.join(dir, "config.json");
-  const good = newConfig("shop", "mason", false);
+  const good = newConfig("shop", "mason");
   const cases: Array<[string, string, RegExp]> = [
     ["half-written", '{"name": "shop", "sour', /^it is not valid JSON \(Unterminated string in JSON/],
     ["not an object", "[1, 2]", /^it is not a JSON object$/],
@@ -569,7 +586,7 @@ function oldProject(root: string): ReturnType<typeof newConfig> {
   const models = path.join(root, "mason", "models");
   fs.mkdirSync(models, { recursive: true });
   fs.writeFileSync(path.join(models, "orders.yml"), "name: orders\nprimary_key:\n  id: { type: bigint }\n");
-  const config = { ...newConfig("shop", "mason", false), source: "postgres://me:pw@localhost:5432/shop_dev" };
+  const config = { ...newConfig("shop", "mason"), source: "postgres://me:pw@localhost:5432/shop_dev" };
   fs.writeFileSync(path.join(root, ".gitignore"), ".mason/\n");
   writeConfig(path.join(root, ".mason"), config as ReturnType<typeof newConfig>);
   return config;
@@ -742,7 +759,7 @@ test("mason init demo: the same project on a demo database Mason hosts — its U
     const j = await quiet((io) => init(["demo", "--json"], asData, { io }));
     assert.equal(j.value, 0, j.err);
     const answer = JSON.parse(j.out) as Record<string, unknown> & { source: { url: string; env: string }; database: { url: string; from: unknown; version: unknown; tables: unknown }; next: Array<{ command: string }> };
-    assert.deepEqual(Object.keys(answer), ["name", "root", "folder", "config", "demo", "source", "roles", "generated", "database", "warnings", "next"]);
+    assert.deepEqual(Object.keys(answer), ["name", "root", "folder", "config", "demo", "source", "roles", "generated", "database", "warnings", "notes", "next"]);
     assert.deepEqual(answer.generated, [{ table: "public.daily_orders", file: path.join(asData, "mason", "generated_tables", "daily_orders.yml"), written: true }]);
     assert.deepEqual(answer.roles, { file: path.join(asData, "mason", "roles.yml"), written: true }, "the roles file, with the files init writes");
     assert.equal(answer.demo, true);
@@ -775,10 +792,10 @@ test("mason init demo: the same project on a demo database Mason hosts — its U
     assert.equal(keptJ.value, 0, keptJ.err);
     assert.deepEqual(JSON.parse(keptJ.out).generated, [{ table: "public.daily_orders", file: path.join(keepsJson, "mason", "generated_tables", "daily_orders.yml"), written: false }]);
     assert.equal(fs.readFileSync(path.join(keepsJson, "mason", "generated_tables", "daily_orders.yml"), "utf8"), mine);
-    // --remote and --skip-check mean nothing for it: a wrong command line
+    // --skip-check means nothing for it: a wrong command line
     const flags = path.join(root, "flags");
     fs.mkdirSync(flags);
-    for (const flag of ["--remote", "--skip-check"]) {
+    for (const flag of ["--skip-check"]) {
       const w = await quiet((io) => init(["demo", flag], flags, { io }));
       assert.equal(w.value, 2, flag);
       assert.match(w.err, new RegExp(`^✗ mason init: ${flag} means nothing for the demo database: it is on this machine, made and hosted by mason start\\n {2}fix {3}mason init demo, without it\\n`));
