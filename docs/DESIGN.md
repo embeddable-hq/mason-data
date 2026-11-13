@@ -3257,6 +3257,22 @@ are written into the file at DuckDB's own checkpoint, when the log passes 16 MiB
 kept: the synced data's file counts its write-ahead log (src/duck/file-bytes.ts `syncedDataBytes`, the one reader).
 **Where.** src/duck/usage.ts (`size`), src/duck/file-bytes.ts; tests/duck-usage.test.ts, tests/cli-run-server.test.ts.
 
+**What such a table shows (issue 883; the owner, 2026-11-12).** The Size cell said "—" for three reasons a reader could
+not tell apart. The run now says which, once (`unsizedTables`, src/duck/usage.ts; `GET /api/usage` `unsized`, beside
+`sizedAt`, when the sampler last measured, and `walBytes`, the log's size now — one file-size read, never a checkpoint):
+a served table measured since its first sync with no block is `in-log`, shown `< 3 MiB`, the log's size rounded up to a
+whole MiB (its rows take at most 0.8 times the log, its block 256 KiB, above) — but only while the FILE has not been
+written since the measure. PR 902's review met the gap: a 60,000-row table measured `in-log` beside a 7.7 MB log, two
+more tables pushed the log past 16 MiB, DuckDB checkpointed, and the next read said "< 1 MiB" of the new 3 KB log while
+the table took 1.8 MB in the file (the sampler writes the log every minute, so a log is rarely empty). So a measure keeps
+the file's stamp (its size and modification time to the nanosecond, `fileStamp`, src/duck/file-bytes.ts: a stat, no
+database work), taken as the facts it measures are read; DuckDB writes the file only at a checkpoint or for a bulk
+insert's whole row groups, so a stamp unchanged says no row left the log since, and a changed one, or an empty log, says
+some may have: `written-since`, shown `Measuring…` (whose rows moved cannot be told without database work, so it says
+they may be this table's). Each other `Measuring…` says its own reason: `synced-since` (its first sync finished after
+the measure) or `not-measured-yet` (no measure since Mason started: after a restart, never "synced since", which it was
+not). One whose first sync is not done shows nothing.
+
 ### First copy, and the poll's cost on the source
 
 Four tables of a real database (the largest keyed tables under 5 GiB), each copied in one transaction through the

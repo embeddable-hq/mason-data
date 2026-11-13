@@ -1,6 +1,11 @@
 # ONE replica, a StatefulSet: the synced data is one file with one writer, and a StatefulSet's RollingUpdate deletes the pod
 # before it recreates it on the same PVC. deploy/kubernetes/statefulset.yaml says why, and why a Deployment would need
 # `strategy: Recreate`. Not a value: it is what the synced data requires.
+{{- /* memory.copy was renamed memory.engine: a values file still setting the old name is refused, never rendered with
+       the default in its place (a renamed setting set under its old name refuses the start) */}}
+{{- if hasKey (.Values.memory | default dict) "copy" }}
+{{- fail "memory.copy was renamed memory.engine: in your values file, write `engine:` in place of `copy:` under `memory:` (the engine's share of the memory limit, MASON_DUCKDB_MEMORY)" }}
+{{- end }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -49,7 +54,7 @@ spec:
                   name: {{ include "mason.secretName" . }}
                   key: MASON_API_KEY
             - name: MASON_DUCKDB_MEMORY
-              value: {{ .Values.memory.copy | quote }}
+              value: {{ .Values.memory.engine | quote }}
             {{- if .Values.tls.certSecret }}
             - name: MASON_PG_TLS_CERT
               value: /mason/tls/tls.crt

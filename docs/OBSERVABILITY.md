@@ -90,7 +90,7 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   (`POST /api/sync`) and Remove; one not added
   its rows and key and why it cannot be added as it is, with Add / Columns… / Name its key…. A search box over the names
   and All / Added / Failed / Not added; the first 100 that pass written, then Show more / Show all. Reads `/api/state`
-  (2 s, lean: no table's columns), `/api/usage` `copySizes` (60 s), and a table's columns once as its form opens
+  (2 s, lean: no table's columns), `/api/usage` `copySizes` and `unsized` (60 s: a synced table with no size says why, `< 3 MiB` or `Measuring…`), and a table's columns once as its form opens
   (`/api/tables/<table>/columns`).
 - **Users** (`#users`): today's add form, Disable (asks first) / Enable and Remove, and each user's status (Active /
   Disabled / Removed), when it was added, its last use and its Queries; ONE Connect panel for the run (host, port,
@@ -157,7 +157,7 @@ Key: ✅ built · ⏸ deferred
 | Synced / Syncing / Failed / Pending | ✅ | the first sync's phase: `copy.phase` is `done`, `copying` or `failed`, and `copy` is null while the table waits |
 | Sync duration | ✅ | `sync.syncSeconds`: how long the sync that brought the synced table current took |
 | Sync error | ✅ | the current one on the table; its history is the sync events (`mason logs --events`) |
-| Size of the synced table | ✅ | `bytes` is the SOURCE table's size; the synced table's own size is measured every 10 min from its blocks (`/api/usage` `copySizes`, `mason usage`), never per request |
+| Size of the synced table | ✅ | `bytes` is the SOURCE table's size; the synced table's own size is measured every 10 min from its blocks (`/api/usage` `copySizes`, `mason usage`), never per request; a synced table with none says why (`unsized`: its rows all in the write-ahead log, under its size `walBytes` while the file is unwritten since the measure; else why it is being measured: the file written, synced, or no measure since the start, `sizedAt`) |
 | Search / filter | ✅ | over the list the endpoint returns; no server change for hundreds of tables |
 
 ## 3. Queries
@@ -232,8 +232,8 @@ service token, and TLS off loopback. Not designed yet: options A and B, for the 
 
 **C is built (2026-10-30)**: `GET /metrics` on the health port (`MASON_HEALTH_PORT`, beside `/healthz`), Prometheus's
 text format 0.0.4, no credential (src/cli/metrics.ts; deploy/mason-data/README.md "Metrics" has the scrape config). It
-serves numbers only — `mason_ready`, `mason_info{version}`, `mason_uptime_seconds`, `mason_tables{phase}`,
-`mason_copy_bytes`, `mason_copy_rows`, `mason_sync_oldest_age_seconds`, `mason_stream_lag_bytes` /
+serves numbers only — `mason_ready`, `mason_info{version}`, `mason_uptime_seconds`, `mason_tables{phase}` (the phase of
+each table's first sync: `synced`, `syncing`, `waiting` or `failed`), `mason_synced_bytes`, `mason_synced_rows`, `mason_sync_oldest_age_seconds`, `mason_stream_lag_bytes` /
 `_seconds`, `mason_slot_wal_held_bytes`, `mason_disk_free_bytes`, `mason_sessions_open`,
 `mason_statements_total{outcome}` (a counter since the process started) and `mason_statement_duration_seconds` (a
 summary: the last minute's sample's p50 / p95, the sum and count since the start) — each the number `/api/state` or a

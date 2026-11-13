@@ -1428,7 +1428,6 @@ const NOT_THE_DATA = [
   /\{ table, copy, error/g, /\(copy: \{ phase/g, /addedColumns, copy, error/g,           // the --json field `copy`, by its name
   /^(?:copy|copying|copied)$/g,                                                         // the field, and a phase's value
   /^copy again$/g,                                                                      // a rebuild's verdict (src/duck/sync.ts)
-  /^copying again$/g,                                                                   // EXPLAIN's JSON "Kept Current By"
   /\bphase = 'copied'/g,                                                                // SQL over _mason.copy_state
   /\b(?:usage-)?copy-(?:bytes|rows)\b/g, /\bwhat-copy\b/g,   // a holder's id and a CSS class: names in the page's code
   /syncedBy \(copy, poll/g, /totals: \{ added, copied, failed/g, /restart, copied, recovered, synced/g,   // --json's words, by their field
