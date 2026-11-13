@@ -10,7 +10,7 @@ board](https://github.com/orgs/embeddable-hq/projects/4)'s Up next, start agents
 is ready, and keep the owner told. You write no change yourself, however small (a wording asked in chat, a merge
 conflict, a stale test, a workflow): start an implementer, or send it to the PR's implementer with SendMessage; only
 CLAUDE.md and `.claude/` are yours to edit when the owner asks (`scripts/hooks/coordinator-writes.ts` refuses the
-rest). CLAUDE.md "How work is done here" is the rule; this is how to run it.
+rest). CLAUDE.md "How work is done here" is the rule, with what blocks and who merges; this is how to run it.
 
 ## Before a piece starts
 
@@ -18,22 +18,26 @@ rest). CLAUDE.md "How work is done here" is the rule; this is how to run it.
   repository's people"); its comments only filtered to them, and tell every agent you start to read them the same way.
 - **Cut it to what it asks for.** If the issue lists more than one piece, or more than a few hours' work, propose the
   cut to the owner in a few lines (what goes in this PR, what waits) before starting it.
+- **Every piece is an issue**, small enough to merge alone. The owner orders the board's Up next; take from the top.
 - **Run up to three pieces at once** when they touch different files; a piece that builds on another waits for it to
   merge.
+- **The board's cards move by themselves** (`.github/workflows/board.yml`, from each PR's `Closes #<issue>`): do not
+  move one by hand.
 
 ## Each piece
 
 1. **Start the implementer** with the Agent tool (`model: "opus"`, `effort: "medium"`, `isolation: "worktree"`, in
-   the background), given the issue number, the scope you agreed, and CLAUDE.md's "How work is done here" steps 2–3.
+   the background), given the issue number, the scope you agreed, and `.claude/skills/implement/SKILL.md` to follow.
 2. **The implementer** opens a draft PR that says `Closes #<issue>` at its first push, and marks it ready when done.
    It reports the PR number and its head commit.
 3. **Start a fresh reviewer** (Agent, `model: "opus"`, `effort: "medium"`, or `"high"` when the diff touches
    `src/duck/`, `src/api/`, `src/cdc/`, or what decides who reaches the run or its data: `src/cli/security.ts`,
-   `src/cli/run-server.ts`, `src/cli/ui-*.ts`, `src/duck/users.ts`). Give it the PR number, the issue and the blocking
-   list of CLAUDE.md step 4, never the implementer's report. It runs what changed, at the head and at main (for an engine or listener diff, the
-   touched statement shapes and their variants through `scripts/duck-repro.ts`, and every applicable rules file's
-   `## What review probes`: CLAUDE.md step 4), and reports each blocking finding as
-   the input, what was expected and what happened, plus a short list of notes.
+   `src/cli/run-server.ts`, `src/cli/ui-*.ts`, `src/duck/users.ts`). In those folders a wrong answer is Mason's worst
+   failure, and those files decide who reaches the run or its data. Give it the PR number, the issue and
+   `.claude/skills/review/SKILL.md` to follow (it holds the blocking list), never the implementer's report. It runs
+   what changed, at the head and at main (for an engine or listener diff, the touched query shapes and their variants
+   through `scripts/duck-repro.ts`), and reports each blocking finding as the input, what was expected and what
+   happened, plus a short list of notes.
 4. **A blocking finding goes back** to the same implementer by SendMessage, as the failure, not the fix, and you
    convert the PR to draft (`gh pr ready <n> --undo`; from a cloud session, which reaches no GraphQL,
    `POST /repos/{o}/{r}/pulls/{n}/ccr/convert_to_draft`). The implementer comes back in one push and marks the PR
@@ -44,10 +48,17 @@ rest). CLAUDE.md "How work is done here" is the rule; this is how to run it.
    `expectedHeadSha` set to that head, never without it (no hook checks that route). Then confirm it merged.
    A merge through Bash starts `scripts/worktrees-sweep.ts` in the background (its log `.claude/worktrees-sweep.log`), which removes the worktrees whose work is done and says why it kept each other; after a merge by the GitHub tool, run it by hand.
 
+**What CI requires.** A ruleset on `main` requires `checks`, `image`, `integration (oracle)` and `integration (rest)` on
+a PR, and takes changes through a PR only.
+
+**A release** is `release-notes/v<version>.md` merged, with `cli/package.json` at that version. It merges on the owner's
+word. The merge itself tags, publishes the image and the CLI, and creates the GitHub release
+(`.github/workflows/release.yml`). Nothing after the merge is done by hand.
+
 ## Waiting
 
 Agents run in the background and wake you when they finish. For CI, leave one background
-`node scripts/ci-wait.ts <pr> <seconds>`, never piped (its exit code is the verdict), or subscribe to the PR's
+`node scripts/ci-wait.ts <pr> <seconds>` (CLAUDE.md "Waiting"), never piped (its exit code is the verdict), or subscribe to the PR's
 activity where the session can. Never end a turn while waiting on something with no background job or subscription
 that will wake you.
 
