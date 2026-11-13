@@ -206,13 +206,17 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   read as (`GET /api/share/choices`, read beside the state while it is offered, as `mason share --role`; each option
   says what it reads), and **Open a cloud login**, held disabled while one opens or is open (one at a time). The click
   is the person's yes: `POST /api/share` `{ from: "page", confirmed: true, role? }` opens the same share the command
-  opens (src/cli/page-share.ts): the run makes the password and starts the tunnel's client. What it opened is a card
-  in the place and style of New user added, titled **Temporary cloud login**: URL, **Login** (its own, never a
+  opens (src/cli/page-share.ts): the run makes the password and starts the tunnel's client. What it opened is shown
+  once in the same modal dialog as New user added, titled **Temporary cloud login**: URL, **Login** (its own, never a
   `mason user`, and never listed or counted among the users) and **Password**, the URL and the Password each with
-  **Copy**, "Shown once" beside the password's Copy; how long it has been public and what it reads; "Live until you
-  stop it", when a free one ends sooner (within about an hour) and that it ends when the page closes; and **Stop**
-  (`DELETE /api/share/<user>`). The password is in that one answer alone, kept in the page's memory: after a reload
-  the card shows the host, port and login, and says the password was shown once. The page holds it by a beat (`POST
+  **Copy**, "Shown once" beside the password's Copy; how long it has been public and what it reads; that the password
+  is only shown once and is not saved; and **I have copied it**, its only way out, as a new user's. The password is in
+  that one answer alone, kept in the page's memory until the dialog closes (or the share is seen ended, when the
+  dialog goes with it). Under the add box a card, titled **Temporary cloud login** on its top edge, shows it live: the
+  host, port and login, that the password was shown once, how long it has been public and what it reads, "Live until
+  you stop it", when a free one ends sooner (within about an hour) and that it ends when the page closes, and **Stop**
+  (`DELETE /api/share/<user>`), which takes the focus when the dialog closes. After a reload the card is the same.
+  While it opens, the card says so. The page holds it by a beat (`POST
   /api/share/<user>/beat`, every 15 s, hidden or not): two minutes without one (the tab closed, crashed or asleep) and
   it, its sessions and the tunnel's client end. How it ended (Stop, the tunnel dropped, from `/api/state`
   `shareEnded`) is said in the card's place, and a refusal there is the run's Failure; the pane is the form again.

@@ -248,33 +248,51 @@ export function renderSharePane(s, m = NO_SHARE, choices = undefined) {
     `${list === null && !failure ? ` <span class="dim">Reading the roles…</span>` : ""}</p></div>`;
 }
 
+/** How long a share has been public, as the role it reads as, and what it reads (`open`: as `/api/state` lists it, or
+ *  the answer that opened it). */
+const publicLine = (open, now) => `<p class="added-seen">${badge("Public", "warn")} for <time data-tick datetime="${esc(open.openedAt)}">${esc(spanText((now - Date.parse(open.openedAt)) / 1000))}</time>` +
+  `${open.role !== null && open.role !== undefined ? `, as the role ${esc(open.role)}` : ""}: ${esc(open.reads)}</p>`;
+
 /**
- * THE TEMPORARY CLOUD LOGIN, once asked: a card in the place and style of "New user added" (`renderAddUser`'s card,
- * `.user-added`), titled "Temporary cloud login" on its top edge. While it opens: that it is opening. Open, with the
- * answer that opened it (`m.opened`, the page's memory alone): URL, Login and Password, the URL and the Password each with
- * Copy, "Shown once" beside the password's Copy — the login its own, never a user's; reloaded (no answer): its host,
- * port and login, and that the password was shown once. Then what it reads and for how long, "Live until you stop it"
- * with when a free one ends and that it ends when this page closes, and Stop (`DELETE /api/share/<user>`). Ended:
- * how, from the run's `shareEnded` or the page's Stop; refused: the run's Failure. "" before anything was asked, and
- * where the page may not open one (`shareable`).
+ * A TEMPORARY CLOUD LOGIN JUST OPENED, as the parts of the one-time dialog (`renderAdded`'s, index.html `#once`), while
+ * the answer that opened it is in the page's memory (`m.opened`, until its "I have copied it"): titled "Temporary cloud
+ * login", URL, Login and Password, the URL and the Password each with Copy, "Shown once" beside the password's Copy —
+ * the login its own, never a user's; what it reads and for how long; and that the password is only shown once and is
+ * not saved. NO_ONCE otherwise, and where the page may not open one (`shareable`).
+ */
+export function renderShareOnce(s, m = NO_SHARE, now = Date.now()) {
+  if (!shareable(s) || m.opened === null || m.phase !== "open") return NO_ONCE;
+  const listed = pageShareOf(s);
+  const open = listed !== null && listed.user === m.opened.user ? listed : m.opened;
+  return {
+    "once-head": `<p class="once-title" id="once-title">Temporary cloud login</p>` +
+      onceFacts([["URL", m.opened.url, "share-url"], ["Login", m.opened.user, null], ["Password", m.opened.password, "share-password"]], "share-password"),
+    "once-status": publicLine(open, now),
+    "once-foot": `<p class="tip">The password is only shown once and is not saved. This login is its own, and stops working when it ends.</p>`,
+  };
+}
+
+/**
+ * THE TEMPORARY CLOUD LOGIN, once asked: a card in the place and style "New user added" had (`.user-added`), under the
+ * add box, titled "Temporary cloud login" on its top edge. While it opens: that it is opening. Open: its host, port and
+ * login, and that the password was shown once (it is the one-time dialog's, `renderShareOnce`, and never this card's);
+ * then what it reads and for how long, "Live until you stop it" with when a free one ends and that it ends when this
+ * page closes, and Stop (`DELETE /api/share/<user>`, `#share-stop`: where the focus goes once the dialog closes).
+ * Ended: how, from the run's `shareEnded` or the page's Stop; refused: the run's Failure. "" before anything was
+ * asked, and where the page may not open one (`shareable`).
  */
 export function renderShareCard(s, m = NO_SHARE, now = Date.now()) {
   if (!shareable(s)) return "";
   const head = `<p class="added-title">Temporary cloud login</p>`;
   const open = pageShareOf(s);
   if (open !== null && m.phase !== "ended") {
-    const mine = m.opened !== null && m.opened.user === open.user ? m.opened : null;
-    const rows = mine !== null ? [["URL", mine.url, "share-url"], ["Login", open.user, null], ["Password", mine.password, "share-password"]]
-      : [["Host", open.host ?? "opening…", "share-host"], ["Port", open.port === null || open.port === undefined ? "…" : String(open.port), "share-port"], ["Login", open.user, null]];
-    const value = (v, id) => id === null ? esc(v) : copyable(id, v, id === "share-password" ? badge("Shown once", "warn") : "");
+    const rows = [["Host", open.host ?? "opening…", "share-host"], ["Port", open.port === null || open.port === undefined ? "…" : String(open.port), "share-port"], ["Login", open.user, null]];
     return `<div class="user-added share-added" role="status">${head}` +
-      `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${value(v, id)}</dd>`).join("")}</dl>` +
-      `<p class="added-seen">${badge("Public", "warn")} for <time data-tick datetime="${esc(open.openedAt)}">${esc(spanText((now - Date.parse(open.openedAt)) / 1000))}</time>` +
-      `${open.role !== null && open.role !== undefined ? `, as the role ${esc(open.role)}` : ""}: ${esc(open.reads)}</p>` +
-      (mine !== null ? `<p class="tip">The password is only shown once and is not saved. This login is its own, and stops working when it ends.</p>`
-        : `<p class="tip">The password was shown once, when it opened, and is not saved. For a new one, press Stop, then Open a cloud login.</p>`) +
+      `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${id === null ? esc(v) : copyable(id, v)}</dd>`).join("")}</dl>` +
+      publicLine(open, now) +
+      `<p class="tip">The password was shown once, when it opened, and is not saved. For a new one, press Stop, then Open a cloud login.</p>` +
       `<p class="tip">Live until you stop it.${esc(endsLine(open.endsAt, now))}</p>` +
-      `${button("Stop", { shareStop: open.user }, "danger")}</div>`;
+      `${button("Stop", { shareStop: open.user }, "danger", { id: "share-stop" })}</div>`;
   }
   if (m.phase === "opening") return `<div class="user-added share-added" role="status">${head}<p class="added-seen" aria-busy="true">Opening a temporary public address… This can take up to 30 s.</p></div>`;
   if (m.phase === "ended" && m.ended !== null) return `<p class="said">The temporary cloud login ended: ${esc(m.ended.why)}. Its address and password no longer work.</p>`;
@@ -291,7 +309,8 @@ const BEAT_MS = 15_000;
 /**
  * THE PAGE'S SIDE OF A TEMPORARY CLOUD LOGIN (src/cli/page-share.ts has why each choice): open (the click on Open a
  * cloud login is the yes), BEAT while it is open — on a timer of its own, which runs while the tab is hidden (the poll
- * does not: the person is in their tool's tab, pasting) —, Stop. The password is in `m.opened` alone, the page's memory, and is
+ * does not: the person is in their tool's tab, pasting) —, Stop. The password is in `m.opened` alone, the page's memory, until its
+ * one-time dialog is closed (`dismissOnce`), and is
  * dropped the moment the share is seen ended. `ctx.timers` is a test's clock; a browser's own otherwise.
  */
 export function createShare(ctx) {
@@ -337,6 +356,10 @@ export function createShare(ctx) {
   return {
     m,
     actions,
+    /** the one-time dialog while the answer that opened it is held (the shell's `once`): the focus to Stop once closed */
+    once: () => m.opened !== null && m.phase === "open" ? { key: `share ${m.opened.user}`, back: "share-stop" } : null,
+    /** its "I have copied it": the answer, and the password in it, dropped from the page's memory */
+    dismissOnce() { m.opened = null; },
     /** after each read of the state: a share of the page's open is beaten (a reload's too); the one this page opened,
      *  once listed and now gone, ended — said with the run's why, and its password dropped */
     afterRead(s) {
@@ -546,9 +569,9 @@ export const page = {
       actions,
       /** THE ONE-TIME MOMENT the shell's dialog shows (index.html `#once`): a user just added — `key` its identity (a new one
        *  takes the focus again), `back` where the focus goes once it closes (the add form's Name) — else null */
-      once() { return m.added !== null ? { key: `user ${m.added.user} ${m.added.addedAt}`, back: "user-name" } : null; },
+      once() { return m.added !== null ? { key: `user ${m.added.user} ${m.added.addedAt}`, back: "user-name" } : share.once(); },
       /** its "I have copied it": the password dropped from the page's memory */
-      dismissOnce() { if (m.added !== null) actions.dismissAdded(); },
+      dismissOnce() { if (m.added !== null) actions.dismissAdded(); else share.dismissOnce(); },
       /** `#users?show=removed`: the list's tab, as the hash says (none: Active). Another tab drops a question, a From…
        *  and a refusal beside a row of the tab left: their rows are not shown. */
       route(params) {
@@ -578,8 +601,8 @@ export const page = {
           "add-user-box": renderAddUser(s, offer),
           "add-share-box": offer ? renderSharePane(s, share.m, ctx.read(SHARE_CHOICES)) : "",
           "users-connect": renderUsersConnect(s?.postgres, s?.served === true, offer),
-          // a user just added: the one-time dialog's parts (the shell opens it while `once()` names it)
-          ...(m.added ? renderAdded(m.added, { connected: m.addedSeen }) : NO_ONCE),
+          // a user just added, or a cloud login just opened: the one-time dialog's parts (the shell opens it while `once()` names it)
+          ...(m.added ? renderAdded(m.added, { connected: m.addedSeen }) : renderShareOnce(s, share.m, ctx.now().getTime())),
           // what the box made, under it: a temporary cloud login
           added: renderShareCard(s, share.m, ctx.now().getTime()),
           action: m.actionFailure ? renderFailure(m.actionFailure) : "",

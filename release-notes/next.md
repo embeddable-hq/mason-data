@@ -30,8 +30,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **Connect from anywhere moves to the Users page, as a Temporary cloud login.** The box that adds a user has two
   segments, New user and Temporary cloud login: the second opens what `mason share` opens, for a tool in the cloud
   that cannot reach your machine. Choose the role it reads as (where `mason/roles.yml` offers more than one), click
-  Open a cloud login, and a card where New user added appears shows the public URL, its own login and the password,
-  the URL and the password with Copy, the password shown once. It is live until you press Stop, until a free one's
+  Open a cloud login, and a dialog shows the public URL, its own login and the password, the URL and the password with
+  Copy, the password shown once: it closes only when you click "I have copied it", and a card under the box then shows
+  it live, with Stop. It is live until you press Stop, until a free one's
   hour is up, or within two minutes of the page closing, and the page says how it ended. It is not a user: it is never
   in the users list. It is not offered under `mason serve` or on a read-only page.
 - **An empty list on the web page is one quiet line**, no longer a big box: "No users yet. Create a user for a service

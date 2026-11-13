@@ -5707,9 +5707,10 @@ const ONE_ROLE = { body: { choices: [{ role: "sales", reads: "1 synced table: or
 const TWO_ROLES = { body: { choices: [{ role: "sales", reads: "1 synced table: orders", default: true }, { role: "ops", reads: "every synced table", default: false }] }, failure: null };
 const sharePane = (s: unknown, m: unknown, choices: unknown = ONE_ANSWER) => fn<[unknown, unknown, unknown], string>("renderSharePane")(s, m, choices);
 const shareCard = (s: unknown, m: unknown) => fn<[unknown, unknown, number], string>("renderShareCard")(s, m, SHARE_NOW);
+const shareOnce = (s: unknown, m: unknown) => fn<[unknown, unknown, number], Record<string, string>>("renderShareOnce")(s, m, SHARE_NOW);
 const PANE_WORDS = "For a tool in the cloud that can't reach this machine. Opens a public address with a login of its own, until you stop it.";
 
-test("Temporary cloud login: the add box's segments, its pane in each state and its card in each — none, opening, open, open after a reload, ended, refused, served, read-only — as they WROTE them", () => {
+test("Temporary cloud login: the add box's segments, its pane in each state, its one-time dialog once opened and its card in each — none, opening, open, open after a reload, ended, refused, served, read-only — as they WROTE them", () => {
   // the segments: New user and Temporary cloud login, the one chosen pressed
   const kinds = fn<[string], string>("renderAddKinds");
   assert.equal(kinds("user"), `<div class="range add-kinds" role="group" aria-label="What to create"><button type="button" data-add-kind="user" aria-pressed="true">New user</button><button type="button" data-add-kind="share" aria-pressed="false">Temporary cloud login</button></div>`);
@@ -5739,26 +5740,38 @@ test("Temporary cloud login: the add box's segments, its pane in each state and 
   assert.equal(shareCard(sharing([]), shareModel()), "");
   assert.equal(textOf(shareCard(sharing([]), shareModel({ phase: "opening" }))), "Temporary cloud login Opening a temporary public address… This can take up to 30 s.");
 
-  // open: the card in New user added's style, URL, Login and Password
-  const opened = { url: SHARE_URL, user: "share_a1b2c3", password: PASSWORD, database: "shop", host: "relay.example", port: 41234 };
-  const open = shareCard(sharing([listed]), shareModel({ phase: "open", opened }));
-  assert.match(open, /^<div class="user-added share-added" role="status"><p class="added-title">Temporary cloud login<\/p><dl class="facts">/);
+  // just opened: the one-time dialog's parts, titled Temporary cloud login — URL, Login and Password, what it reads, one line
+  const opened = { url: SHARE_URL, user: "share_a1b2c3", password: PASSWORD, database: "shop", host: "relay.example", port: 41234, role: null, reads: "every synced table", openedAt: SHARE_AT };
+  const parts = shareOnce(sharing([listed]), shareModel({ phase: "open", opened }));
+  assert.deepEqual(Object.keys(parts), ["once-head", "once-status", "once-foot"]);
+  const once = onceHtml(parts);
+  assert.match(once, /^<p class="once-title" id="once-title">Temporary cloud login<\/p><dl class="facts">/);
   for (const [id, v] of [["share-url", SHARE_URL], ["share-password", PASSWORD]]) {
-    assert.ok(open.includes(`<code id="${id}">${v}</code> <button type="button" class="small" data-copy="${id}"`), `${id} with its Copy`);
+    assert.ok(once.includes(`<code id="${id}">${v}</code> <button type="button" class="small" data-copy="${id}"`), `${id} with its Copy`);
   }
-  assert.match(open, /<dt>Login<\/dt><dd>share_a1b2c3<\/dd>/, "the login its name, as a new user's User is");
-  assert.match(open, /data-copy="share-password"[^>]*>Copy<\/button> <span class="badge warn">Shown once<\/span><\/span><\/dd>/, "Shown once beside the password's Copy");
-  assert.equal(textOf(open).replace(/ at .+? \(in /, " at HH:MM (in "), `Temporary cloud login URL ${SHARE_URL} Copy Login share_a1b2c3 Password ${PASSWORD} Copy Shown once Public for 5 min : every synced table ` +
-    "The password is only shown once and is not saved. This login is its own, and stops working when it ends. " +
-    "Live until you stop it. A free one ends sooner, within about an hour, at HH:MM (in about 55 minutes). Then open a new one for a new address and password. It also ends within two minutes of closing this page. Stop");
-  assert.match(open, /<button type="button" class="danger" data-share-stop="share_a1b2c3">Stop<\/button><\/div>$/);
-  assert.match(textOf(shareCard(sharing([{ ...listed, endsAt: null }]), shareModel({ phase: "open", opened }))), /Live until you stop it\. It also ends within two minutes of closing this page\./, "one with no end: until stopped");
-  assert.match(textOf(shareCard(sharing([{ ...listed, role: "sales", reads: "1 synced table: orders" }]), shareModel({ phase: "open", opened }))), /Public for 5 min , as the role sales: 1 synced table: orders/);
+  assert.match(once, /<dt>Login<\/dt><dd>share_a1b2c3<\/dd>/, "the login its name, as a new user's User is");
+  assert.match(once, /data-copy="share-password"[^>]*>Copy<\/button> <span class="badge warn">Shown once<\/span><\/span><\/dd>/, "Shown once beside the password's Copy");
+  assert.equal(textOf(once), `Temporary cloud login URL ${SHARE_URL} Copy Login share_a1b2c3 Password ${PASSWORD} Copy Shown once Public for 5 min : every synced table ` +
+    "The password is only shown once and is not saved. This login is its own, and stops working when it ends.");
+  assert.match(textOf(onceHtml(shareOnce(sharing([{ ...listed, role: "sales", reads: "1 synced table: orders" }]), shareModel({ phase: "open", opened })))), /Public for 5 min , as the role sales: 1 synced table: orders/);
+  assert.match(textOf(onceHtml(shareOnce(sharing([]), shareModel({ phase: "open", opened })))), /Public for 5 min : every synced table/, "before the state lists it: from the answer that opened it");
+  // none: before anything was asked, while it opens, after a reload (no answer), once ended or refused
+  for (const m of [shareModel(), shareModel({ phase: "opening" }), shareModel({ phase: "open" }), shareModel({ phase: "ended", ended: { user: "share_a1b2c3", why: "x" } }), shareModel({ phase: "refused", failure: { code: "x", message: "y" } })]) {
+    assert.equal(onceHtml(shareOnce(sharing([listed]), m)), "", `no dialog in phase ${m.phase}`);
+  }
 
-  // a reload over an open one: no password anywhere; its host, port and login, and Stop
-  const reloaded = shareCard(sharing([listed]), shareModel());
-  assert.ok(!reloaded.includes(PASSWORD) && !reloaded.includes("share-password") && !reloaded.includes("share-url"), "after a reload the password is nowhere on the page");
-  assert.match(textOf(reloaded), /^Temporary cloud login Host relay\.example Copy Port 41234 Copy Login share_a1b2c3 Public for 5 min : every synced table The password was shown once, when it opened, and is not saved\. For a new one, press Stop, then Open a cloud login\. Live until you stop it\. .* Stop$/);
+  // open: the card, its password never in it (the dialog's alone) — its host, port and login, what it reads, Stop
+  for (const m of [shareModel({ phase: "open", opened }), shareModel()]) {
+    const card = shareCard(sharing([listed]), m);
+    assert.match(card, /^<div class="user-added share-added" role="status"><p class="added-title">Temporary cloud login<\/p><dl class="facts">/);
+    assert.ok(!card.includes(PASSWORD) && !card.includes("share-password") && !card.includes("share-url"), "the password is nowhere in the card, the dialog open or not, after a reload too");
+    assert.equal(textOf(card).replace(/ at .+? \(in /, " at HH:MM (in "), "Temporary cloud login Host relay.example Copy Port 41234 Copy Login share_a1b2c3 Public for 5 min : every synced table " +
+      "The password was shown once, when it opened, and is not saved. For a new one, press Stop, then Open a cloud login. " +
+      "Live until you stop it. A free one ends sooner, within about an hour, at HH:MM (in about 55 minutes). Then open a new one for a new address and password. It also ends within two minutes of closing this page. Stop");
+    assert.match(card, /<button type="button" id="share-stop" class="danger" data-share-stop="share_a1b2c3">Stop<\/button><\/div>$/, "Stop, where the focus goes once the dialog closes");
+  }
+  assert.match(textOf(shareCard(sharing([{ ...listed, endsAt: null }]), shareModel({ phase: "open", opened }))), /Live until you stop it\. It also ends within two minutes of closing this page\./, "one with no end: until stopped");
+  assert.match(textOf(shareCard(sharing([{ ...listed, role: "sales", reads: "1 synced table: orders" }]), shareModel({ phase: "open" }))), /Public for 5 min , as the role sales: 1 synced table: orders/);
 
   // ended and refused: said in the card's place
   assert.equal(textOf(shareCard(sharing([]), shareModel({ phase: "ended", ended: { user: "share_a1b2c3", why: "its tunnel closed (ssh exited 255)" } }))),
@@ -5771,11 +5784,11 @@ test("Temporary cloud login: the add box's segments, its pane in each state and 
 
   for (const m of [shareModel(), shareModel({ phase: "open", opened })]) {
     for (const s of [sharing([listed], { served: true }), sharing([listed], { pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" }), sharing([listed], { pageReadOnly: "x", pageReadOnlyAllow: ["users"] })]) {
-      assert.equal(sharePane(s, m) + shareCard(s, m), "", "under mason serve, or read-only (its users the page's or not): absent");
+      assert.equal(sharePane(s, m) + shareCard(s, m) + onceHtml(shareOnce(s, m)), "", "under mason serve, or read-only (its users the page's or not): absent");
     }
   }
   // never called a user, never a tunnel's provider, never the engine
-  for (const html of [none, two, open, reloaded, refused]) assert.doesNotMatch(textOf(html), /pinggy|bore\b|duck|\buser\b|Share over the internet/i);
+  for (const html of [none, two, once, shareCard(sharing([listed]), shareModel()), refused]) assert.doesNotMatch(textOf(html), /pinggy|bore\b|duck|\buser\b|Share over the internet/i);
 });
 
 test("Temporary cloud login over a fake run: Open a cloud login opens it confirmed with the role chosen, beaten on a timer of its own, its end said and its password dropped; Stop", async () => {
@@ -5792,7 +5805,8 @@ test("Temporary cloud login over a fake run: Open a cloud login opens it confirm
     read: (p: string) => p === "api/share/choices" ? TWO_ROLES : { body: state, failure: null }, refresh: async (ps: string[]) => { refreshed.push(ps); }, now: () => new Date(SHARE_NOW),
     timers: { setInterval: (f: () => void, ms: number) => { intervals.push({ fn: f, ms, cleared: false }); return intervals.length - 1; }, clearInterval: (i: number) => { intervals[i]!.cleared = true; } },
   };
-  type Share = { m: Record<string, unknown>; actions: Record<string, (...a: unknown[]) => Promise<void> | void>; afterRead: (s: unknown) => void; click: (d: Record<string, string>) => unknown; input: (t: unknown) => unknown };
+  type Share = { m: Record<string, unknown>; actions: Record<string, (...a: unknown[]) => Promise<void> | void>; afterRead: (s: unknown) => void; click: (d: Record<string, string>) => unknown; input: (t: unknown) => unknown;
+    once: () => { key: string; back: string } | null; dismissOnce: () => void };
   const share = fn<[unknown], Share>("createShare")(ctx);
   assert.equal(share.input({ id: "user-role", value: "x" }), null, "another input is not its");
   share.input({ id: "share-role", value: "ops" });
@@ -5838,6 +5852,60 @@ test("Temporary cloud login over a fake run: Open a cloud login opens it confirm
   await third.click({ shareOpen: "" });
   assert.equal(third.m.phase, "refused");
   assert.deepEqual(refreshed.at(-1), ["api/share/choices"]);
+  assert.equal(third.once(), null, "refused: no dialog");
+  // the one-time dialog: named while the answer that opened it is held; I have copied it drops it, the share still open
+  answers["POST api/share"] = { body: { url: SHARE_URL, user: "share_a1b2c3", host: "relay.example", port: 41234, database: "shop", password: PASSWORD, beatMs: 15_000, reads: "every synced table", openedAt: SHARE_AT } };
+  const fourth = fn<[unknown], Share>("createShare")(ctx);
+  assert.equal(fourth.once(), null, "nothing asked: no dialog");
+  await fourth.click({ shareOpen: "" });
+  assert.deepEqual(fourth.once(), { key: "share share_a1b2c3", back: "share-stop" }, "opened: the dialog, the focus to Stop once it closes");
+  fourth.afterRead(sharing([listed]));
+  fourth.dismissOnce();
+  assert.equal(fourth.once(), null, "closed");
+  assert.ok(!JSON.stringify(fourth.m).includes(PASSWORD), "the password gone from the page's memory");
+  fourth.afterRead(sharing([listed]));
+  assert.equal(fourth.m.phase, "open", "the share still open, its card live");
+  assert.equal(intervals.at(-1)!.cleared, false, "and still beaten");
+  // ended while the dialog is open: the password is dead, so the dialog goes with it, the end said in the card's place
+  const fifth = fn<[unknown], Share>("createShare")(ctx);
+  await fifth.click({ shareOpen: "" });
+  fifth.afterRead(sharing([listed]));
+  fifth.afterRead(sharing([], { shareEnded: { user: "share_a1b2c3", from: "page", why: "its tunnel closed (ssh exited 255)", at: SHARE_AT } }));
+  assert.deepEqual([fifth.once(), fifth.m.phase], [null, "ended"]);
+});
+
+test("in the browser: Open a cloud login opens the one-time dialog (its Copy focused, Escape refused, polls leaving it as it is); I have copied it closes it, the live card left with Stop focused and no password on the page", async () => {
+  const run = fakeRun();
+  let state: unknown = sharing([]);
+  run.answers.set("GET api/state", () => new Response(JSON.stringify(state), { status: 200 }));
+  run.answers.set("GET api/share/choices", answer(ONE_ANSWER.body));
+  run.answers.set("POST api/share", () => { state = sharing([listed]); return new Response(JSON.stringify({ url: SHARE_URL, user: "share_a1b2c3", host: "relay.example", port: 41234, database: "shop",
+    password: PASSWORD, role: null, reads: "every synced table", openedAt: SHARE_AT, endsAt: null, beatMs: 15_000 }), { status: 200 }); });
+  run.answers.set("POST api/share/share_a1b2c3/beat", answer({ ok: true }));
+  const { el, on, doc, tick, settle } = fakeBrowser(run, "#users");
+  await settle();
+  const d = doc as unknown as { focused: string };
+  const click = async (dataset: Record<string, string>) => { await on.get("click")!({ target: { closest: (sel: string) => sel === "button" ? { dataset } : null } }); await settle(); };
+  await click({ addKind: "share" });
+  await click({ shareOpen: "" });
+  const once = el("once");
+  assert.deepEqual([once.open, once.shown], [true, 1], "opened as a modal");
+  assert.match(el("once-head").html, /^<p class="once-title" id="once-title">Temporary cloud login<\/p>/);
+  assert.ok(el("once-head").html.includes(PASSWORD));
+  assert.match(textOf(el("once-status").html), /^Public for .* : every synced table$/);
+  assert.match(textOf(el("once-foot").html), /^The password is only shown once and is not saved\./);
+  assert.equal(d.focused, "once [data-copy]");
+  assert.ok(!el("added").html.includes(PASSWORD), "the card under the box never holds it");
+  let cancelled = false;
+  once.fire("cancel", { preventDefault: () => { cancelled = true; } });
+  const head = el("once-head").writes;
+  for (let i = 0; i < 3; i++) { tick(); await settle(); }
+  assert.deepEqual([cancelled, once.open, el("once-head").writes], [true, true, head], "Escape refused; polls close and rewrite nothing");
+  await click({ dismissOnce: "" });
+  assert.equal(once.open, false, "closed by its button");
+  assert.equal(d.focused, "share-stop", "the focus on the live card's Stop");
+  assert.match(textOf(el("added").html), /^Temporary cloud login Host relay\.example Copy Port 41234 Copy Login share_a1b2c3 .* The password was shown once, when it opened, and is not saved\..* Stop$/);
+  assert.ok(["added", "once-head", "once-status", "once-foot", "add-share-box"].every((id) => !el(id).html.includes(PASSWORD)), "the password nowhere on the page");
 });
 
 test("the Users page over a fake run: the add box offers New user and Temporary cloud login, a choice rewriting neither pane; its card where New user added is; never in the users list; Connect points to it; a served run has the plain form", async () => {
@@ -5868,12 +5936,15 @@ test("the Users page over a fake run: the add box offers New user and Temporary 
   run.asked.length = 0;
   await page.click({ shareOpen: "" }, {}, {});
   assert.equal(run.asked[0], `POST api/share ${JSON.stringify({ from: "page", confirmed: true, role: "ops" })}`);
-  // the run lists it now: its card in the added place, never a row of the users nor in their counts
+  // the run lists it now: its password in the one-time dialog alone, its card in the added place, never a row of the
+  // users nor in their counts
   state = sharing([{ ...listed, role: "ops" }]);
   app.markStale(); await app.poll();
   const open = app.view();
+  assert.match(open["once-head"]!, /<p class="once-title" id="once-title">Temporary cloud login<\/p>/);
+  assert.ok(open["once-head"]!.includes(PASSWORD));
   assert.match(open.added!, /<p class="added-title">Temporary cloud login<\/p>/);
-  assert.ok(open.added!.includes(PASSWORD));
+  assert.ok(!open.added!.includes(PASSWORD), "never in the card");
   assert.ok(!open.users!.includes("share_a1b2c3"), "not a user");
   assert.match(open["add-share-box"]!, /disabled>Open a cloud login/, "one at a time");
   const served = fakeRun();

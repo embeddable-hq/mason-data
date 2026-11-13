@@ -100,7 +100,7 @@ export const PRESS_HOLD_MS = 2000;
 export * from "./shared.js";
 export { CATCHING_UP, copyingText, tableLine, keptAge, keptWords, sourceRows, renderStatus } from "./pages/status.js";
 export { tableFacts, addedLines, removedReport, pickBody, columnsPath, renderTableAdded, renderTablesRemoved, renderTables } from "./pages/tables.js";
-export { renderUsers, usersShowHref, renderAdded, renderAddUser, attributesText, renderUsersConnect, renderAddKinds, renderSharePane, renderShareCard, createShare, addedSeen } from "./pages/users.js";
+export { renderUsers, usersShowHref, renderAdded, renderAddUser, attributesText, renderUsersConnect, renderAddKinds, renderSharePane, renderShareCard, renderShareOnce, createShare, addedSeen } from "./pages/users.js";
 export { renderRequests } from "./pages/queries.js";
 export { renderRunning, renderSessions, renderClients, renderSlowest, queriesHref } from "./pages/usage.js";
 export { hostLinkUrl, hostView, readHost, renderHostView, renderHostCard, renderHostPart, HOST_BYTES_MAX, HOST_READ_MS, REFRESH_MIN_S, REFRESH_MAX_S, HOST_LIMITS } from "./host-view.js";
