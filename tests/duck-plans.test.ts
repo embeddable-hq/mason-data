@@ -836,7 +836,7 @@ test("a native json filter or read hands no row to any Mason function", async (t
 // key, the printed cells — computed once per GROUP over the group's columns (src/duck/rewrite.ts keyedGroups,
 // `readPerGroup`). Grouped beside its key as well (4861a5b), the week of year handed the functions three rows a row (the
 // double, the program, the key) and a fourth for the ORDER BY's program inside any_value: 3x the time of 09204fa's one.
-// The bound: the rows, plus a few calls a group (the week of year has 53 groups over the orders' 694 days, the bins 80;
+// The bound: the rows, plus a few calls a group (the week of year has 53 groups over the orders' 694 days;
 // each thread's partial groups may evaluate a projection again), never a second call a row. The turn
 // (`__mason_turn`, a vector's hop) is no row's call: left out
 const GROUPED_QUOTIENTS = ["issue 665: Metabase's week of year, the expression repeated"];
