@@ -197,15 +197,23 @@ export function listSlotsStatement(): string {
 
 /**
  * WHAT THE RECORD NAMES THAT THIS START NO LONGER READS, to drop before the record names the new one (each holds what
- * Mason made on a database nothing would drop otherwise): a slot under another name (the sources file renamed) goes
- * with Mason's own publication; Mason's own publication alone when the project now reads another (one named), on the
- * same slot — a review finding, the own one was left on the database after the switch and after mason destroy.
+ * Mason made on a database nothing would drop otherwise): a slot under another name (the sources file renamed), with
+ * Mason's own publication; and THE SLOT ITSELF when the project now reads another publication through it — Mason's own
+ * to a named one, a named one to Mason's own, one named to another — with Mason's own publication when that was the one
+ * read (issue 893). A slot resumes from its acknowledged position, and pgoutput reads a publication through the catalog
+ * as of each change it decodes: a transaction open while the new publication was made, committed after, met no such
+ * publication — Postgres 18 skipped its changes with a WARNING alone (rows lost silently), Postgres 16 failed the
+ * stream for good. Dropped, the slot is made anew by the run (src/duck/sync.ts `prepareReplication`; its creation
+ * waits for every transaction open by then), and each replicated table is caught up by one poll, a full read of it on
+ * the database: the switch's price, said in `why`. The same name read on (Mason's own named as such) keeps both: it is
+ * the publication the slot read.
  */
-export function staleReplication(was: ProjectReplication | null, now: ProjectReplication): { drop: ProjectReplication; what: "both" | "publication"; why: string } | null {
+export function staleReplication(was: ProjectReplication | null, now: ProjectReplication): { drop: ProjectReplication; why: string } | null {
   if (was === null) return null;
-  if (was.slot !== now.slot) return { drop: was, what: "both", why: `this source's slot is ${now.slot} now` };
-  if (was.owned && (was.publication !== now.publication || !now.owned)) {
-    return { drop: was, what: "publication", why: `the replicated tables are read through publication ${now.publication} now${now.owned ? "" : ", its owner's"}` };
+  if (was.slot !== now.slot) return { drop: was, why: `this source's slot is ${now.slot} now` };
+  if (was.publication !== now.publication) {
+    return { drop: was, why: `the tables whose sync is replication are read through publication ${now.publication} now (${now.owned ? "Mason's own" : "its owner's"}), not ${was.publication}. ` +
+      "A slot that read another publication can miss a transaction open across the switch, so the slot is made anew and each of those tables is caught up by one poll: one full read of it on the database" };
   }
   return null;
 }
@@ -213,10 +221,10 @@ export function staleReplication(was: ProjectReplication | null, now: ProjectRep
 /**
  * Drop what replication mode made on the developer's database — the slot, and the publication when it is Mason's own,
  * never one the operator named — and verify it is gone: what was dropped, in words. A slot a reader still holds is never
- * dropped (the run must be stopped first): that is a failure. `what: "publication"` drops Mason's own publication alone
- * (the slot is still read).
+ * dropped (the run must be stopped first): that is a failure, once the walsender of a run that just stopped has had
+ * 10 s to let it go (a restart, a deploy).
  */
-export async function dropOwnReplication(source: Source, o: ProjectReplication, from: { systemIdentifier: string | null } | null = null, what: "both" | "publication" = "both"): Promise<string[]> {
+export async function dropOwnReplication(source: Source, o: ProjectReplication, from: { systemIdentifier: string | null } | null = null): Promise<string[]> {
   const c = await connectSource(source);
   if ("failure" in c) throw new Error(`could not connect to drop them: ${c.failure.message}`);
   const pg = c.pg;
@@ -230,7 +238,9 @@ export async function dropOwnReplication(source: Source, o: ProjectReplication, 
       }
     }
     const dropped: string[] = [];
-    const slot = what === "both" ? await readSlotFacts(pg, o.slot) : null;
+    let slot = await readSlotFacts(pg, o.slot);
+    // the walsender of a run that just stopped lets the slot go a moment later: waited for, at most 10 s
+    for (let i = 0; slot?.active === true && i < 100; i++) { await new Promise((res) => setTimeout(res, 100)); slot = await readSlotFacts(pg, o.slot); }
     if (slot) {
       if (slot.active) throw new Error(`replication slot ${o.slot} is in use by a reader: stop it first`);
       await pg.query(`SELECT pg_drop_replication_slot(${lit(o.slot)})`);
@@ -242,7 +252,7 @@ export async function dropOwnReplication(source: Source, o: ProjectReplication, 
       dropped.push(`publication ${o.publication}`);
     }
     // verified, never assumed: a slot left behind holds the database's WAL for ever
-    if (what === "both" && await readSlotFacts(pg, o.slot)) throw new Error(`replication slot ${o.slot} is still there after pg_drop_replication_slot`);
+    if (await readSlotFacts(pg, o.slot)) throw new Error(`replication slot ${o.slot} is still there after pg_drop_replication_slot`);
     if (o.owned && await hasPub()) throw new Error(`publication ${o.publication} is still there after DROP PUBLICATION`);
     return dropped;
   } finally { pg.close(); }

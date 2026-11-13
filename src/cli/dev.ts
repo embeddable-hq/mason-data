@@ -381,13 +381,15 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       : `Logical replication for ${replicatedEntries(src).length} table(s): publication ${repl.publication} is read as it is, never altered; Mason makes slot ${repl.slot} on ${source.database} (mason destroy drops the slot alone, and so does a sources file in which no table's sync is replication)`);
     for (const w of ready.warnings) say(`  ! ${w.name}: ${w.detail}`);
     // WHAT THE RECORD NAMES AND THIS RUN NO LONGER READS — a slot under another name (the sources file renamed since),
-    // or Mason's own publication once another is named — goes, verified, before the record names the new one
+    // or the slot (with Mason's own publication) once another publication is read through it, issue 893 — goes,
+    // verified, before the record names the new one; said here and in the run's log, with the switch's price
     const stale = staleReplication(cfg.replication ?? null, repl);
     if (stale !== null) {
-      try { for (const d of await dropOwnReplication(source, stale.drop, null, stale.what)) say(`  dropped ${d} from ${source.database}: ${stale.why}`); }
-      catch (e) {
-        const by = stale.what === "both" ? dropStatements(stale.drop) : `DROP PUBLICATION IF EXISTS ${stale.drop.publication};`;
-        say(`mason start: ${(e as Error).message}. Mason made ${stale.what === "both" ? "them" : "it"} and nothing reads ${stale.what === "both" ? "them" : "it"} now: drop ${stale.what === "both" ? "them" : "it"} by hand — ${by}`);
+      try {
+        const dropped = await dropOwnReplication(source, stale.drop, null);
+        if (dropped.length) { const line = `dropped ${dropped.join(" and ")} from ${source.database}: ${stale.why}`; say(`  ${line}`); logLine(`[sync] ${line}`); }
+      } catch (e) {
+        say(`mason start: ${(e as Error).message}. Mason made them and nothing reads them now: drop them by hand — ${dropStatements(stale.drop)}`);
         return 1;
       }
     }

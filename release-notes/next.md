@@ -16,6 +16,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **`mason deploy` runs in any folder that holds a project's `mason/`, with no `mason init`.** With no `.mason/` in
+  the folder or above it, the current folder's `mason/` (a `mason.yml`, or a YAML file in `mason/sources/`) is the
+  project, or the one of the folder `mason -C <folder> deploy` names; never a `mason/` elsewhere. Only that `mason/` is
+  sent, and the folder is said with what is sent (`folder` in `--json`); `--dry-run` finds it the same way. A clone in
+  CI, or a folder the files were copied into, deploys as it is. An initialised project deploys as before.
+
 - **On the web page's Tables, an added table says which columns it syncs, and you can change them there.** Its note
   says "All columns", "5 of 12 columns" or "All but 1 column". Click it to tick the columns to sync, as
   `mason add <table> --columns …` does. Before you save, the form says what it costs: the table is synced again in full
@@ -92,6 +98,17 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   take a minute to read: `mason add` waits for the read and says that it is still going. With
   every table `sync: off`, a run that nobody asks opens no connection after its first sync. A table made on the
   database can be added at once, and shows in `mason status` within about a minute.
+- **Changing the publication a project replicates through no longer loses or freezes changes.** When the sources
+  file's `publication:` (or `PG_PUBLICATION`) changed between two starts — from Mason's own to one you named, from one
+  you named back to Mason's own, or from one named publication to another — Mason kept reading its replication slot
+  with the new publication. A write transaction that was open while the new publication was created, and committed
+  after, was then skipped: on Postgres 18 its rows never reached the synced tables, with only a warning in the
+  database's log; on Postgres 16 the stream stopped and never moved again, holding the database's WAL. Now such a
+  start drops the slot (and Mason's own publication, when that was the one read), verified gone, makes a new one, and
+  catches each table whose sync is `replication` up by one poll. That poll is one full read of each of those tables on
+  your database, once: `mason start` says so when it makes the switch. If you switched publication with an earlier
+  Mason while your application was writing, a replicated table may be missing those changes: `mason remove <table>`
+  then `mason add <table> --sync replication` syncs it whole again.
 - **Table names are readable on the web page's Tables at laptop widths.** At 1024 px the name column was 2 px wide. Now
   it always keeps room for a typical `schema.table` name, and a table's name and its state are never cut with "…": a
   long one wraps onto more lines. In a narrower window the Key, Size, Last sync and Rows columns give way, in that
