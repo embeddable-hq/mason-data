@@ -216,8 +216,9 @@ describe("mason init demo, then the run as a person drives it", { timeout: 300_0
       [["public.customers", true, "done"], ["public.order_items", false, null], ["public.orders", true, "done"], ["public.products", true, "done"]]);
     const text = await mason(["status"]);
     assert.equal(text.code, 0, said(text));
-    assert.match(text.stdout, new RegExp(`the demo database Mason hosts \\(postgres://demo@127\\.0\\.0\\.1:${demoPort}/demo · Postgres 18[.\\d]*\\)`));
-    assert.match(text.stdout, /^ {2}Changes +each table as its sync: says \(a SELECT of its changed rows\) · sync: poll 1s for every table without its own · the demo database is checked this way only$/m);
+    assert.match(text.stdout, new RegExp(`^ {2}Source +the demo database Mason hosts \\(postgres://demo@127\\.0\\.0\\.1:${demoPort}/demo · Postgres 18[.\\d]*\\)$`, "m"));
+    // how changes arrive is no row (issue 935): each table's line says its sync, and --json keeps source.changes above
+    assert.doesNotMatch(text.stdout, /^ {2}(Changes|Database) /m);
     assert.match(text.stdout, /^Tables \(3 of 4 added\):$/m);
     for (const t of ["customers", "products", "orders"]) assert.match(text.stdout, new RegExp(`^ {2}public\\.${t} +█+ 100% +[\\d,]+ rows · synced · polled every 1s, (last \\d+ s ago|not polled yet)$`, "m"));
   });

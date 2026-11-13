@@ -1,17 +1,17 @@
 /**
  * THE OVERVIEW (#overview; `#status`, its old address, lands here; the module and its section keep the id `status`): what `mason status` prints — the run in one word (`readiness`)
- * and what it means for the synced data in a line, ONE table of facts (the database and how its changes arrive, Mason's
- * version, uptime and restarts, the disk, the sessions open, the warnings), the changes the stream carries (replication
+ * and what it means for the synced data in a line with the Source under it, the facts card "Mason" (the Source, the
+ * warnings, Mason's version, uptime and restarts, the disk, the tools connected), the changes the stream carries (replication
  * mode: its position, lag, last batch and the slot's hold on the database's WAL), the copies not finished (a bar each,
  * only while there are any), and the last day's unsupported SQL in a line. The statements, the slow, the refused and the
  * failed ones are the Queries page's; the sync's failures Sync events'. Reads `/api/state` every poll, the request log's
- * summary, the last day's sync failures and the unsupported SQL every 30 s, the last 24 hours of usage (the
+ * summary, the last day's failed events and the unsupported SQL every 30 s, the last 24 hours of usage (the
  * cards' sparklines) every 60 s. Never the engine's name.
  *
  * Laid out as a dashboard (docs/WEB-UI.md "Presentation"): the word with a big dot under its title, then KPI cards (the
- * copies in all, their rows, the last sync, the copy's file, the last day's statements and their p95, the last day's sync
+ * copies in all, their rows, the last sync, the copy's file, the last day's statements and their p95, the last day's
  * errors and query errors — each its own fact, said once, with a sparkline of the last 24 hours where one helps), the
- * copies not finished, the ONE table of the other facts, the stream. Each card links into the view that lists what it
+ * copies not finished, the facts card, the stream. Each card links into the view that lists what it
  * counts (the tables, filtered to the failed ones when a copy failed; Observability's Queries — the slow ones for the
  * p95, the refused or failed ones for the query errors —, Sync events' failures, and Usage).
  */
@@ -22,7 +22,7 @@
 const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage?range=24h", queries: "#observability/queries?range=24h",
   slow: "#observability/queries?slow=1&range=24h", failedQueries: "#observability/queries?status=refused-or-failed&range=24h", failedEvents: "#observability/syncs?failures=1&range=24h" };
 import { VIEW_HASHES } from "../routes.js";
-import { statementMsText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRows, sessionsRows, diskRows, restartsRows, utcText, staleText, staleWhy,
+import { statementMsText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, agoText, utcMinute, utcText, staleText, staleWhy,
   unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, copyClick, readOnlyLine, tablesReadOnly, usersReadOnly } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
 import { readHost, hostEvery, hostKey, renderHostCard } from "../host-view.js";
@@ -191,20 +191,16 @@ export function createMonotone() {
   };
 }
 
-/** `mason status`'s rows for the database (src/cli/commands.ts `sourceRows`): its sources file (from the project's root:
- *  the page never shows an absolute path), its URL as the run masked it, how its changes arrive. */
+/** `mason status`'s rows for the Postgres the run syncs from (src/cli/commands.ts `sourceRows`, held equal by the tests):
+ *  its sources file (from the project's root: the page never shows an absolute path), the Source (its URL as the run
+ *  masked it, and what kind of server it is), and how text sorts where it differs. No row says how changes arrive
+ *  (issue 935): the Tables page says each table's sync. */
 export function sourceRows(s) {
   return [
     ...(s.source.file ? [["Sources file", `${s.source.shownFile ?? s.source.file} (the tables it names are added)`]] : []),
-    ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
+    ["Source", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
       // which kind of server it is, as a plain fact (issue 888), as mason status says it (src/cli/commands.ts sourceRows)
       : `${s.source.url} · Postgres ${s.source.version} · ${s.source.standby ? "a read replica" : "your main database"}`],
-    // in a web developer's words first (each table as its sync: says, streamed as they happen); the mechanism an operator needs in parentheses
-    ["Changes", `each table as its sync: says${s.source.replication ? "" : " (a SELECT of its changed rows)"}${s.source.sync ? ` · sync: ${s.source.sync.default} ${s.source.sync.written ? "for every table without its own" : "(the default: the file writes none)"}` : ""} · ` +
-      (s.source.replication ? `sync: replication tables streamed as they happen (logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication}, ` +
-          `${s.source.replication.owned ? "Mason's own, carrying them alone" : "named: read as it is, never altered"}); the others by a SELECT of their changed rows`
-        : s.source.demo ? "the demo database is checked this way only"
-        : "sync: replication on an entry streams that table as it happens instead")],
     ...(s.source.textOrder ? [["Text order", s.source.textOrder]] : []),
   ];
 }
@@ -268,9 +264,8 @@ export const renderUnknown = (failure) =>
 /** The box at the top is drawn once a table is added and the run says its readiness (`renderHealth`). */
 const healthShown = (s) => s.tables.some((t) => t.added) && Boolean(s.readiness);
 
-/** `mason status`'s rows (`sourceRows`) said in the box at the top, under its line, and not in the Server table: the
- *  database and how its changes arrive. With no box, the Server table says them. */
-const HEALTH_ROWS = ["Database", "Changes"];
+/** `mason status`'s rows (`sourceRows`) said in the box at the top, under its line: the Postgres the run syncs from. */
+const HEALTH_ROWS = ["Source"];
 
 /** The sparklines the cards draw, by holder key: a usage sample's field each (src/web/charts.js specs). */
 const SPARKS = { rows: ["copyRows", "Rows synced"], "copy-bytes": ["copyBytes", "Synced data size"], statements: ["statements", "Queries"], p95: ["durationP95Ms", "p95"] };
@@ -322,24 +317,31 @@ export function renderKpis(s, o = {}) {
   }
   const ev = o.syncErrors;
   if (added && ev !== undefined) {
-    if ("failure" in ev) list.push(card("Sync errors, last day", "unknown", `could not read them: ${firstLine(ev.failure.message)}`, "", "", LINKS.failedEvents));
+    if ("failure" in ev) list.push(card("Errors, last day", "unknown", `could not read them: ${firstLine(ev.failure.message)}`, "", "", LINKS.failedEvents));
     else {
+      // every failed event (src/duck/events.ts isFailure): a sync that failed, the database out of reach, a restart, the
+      // web page's own error — so its line names them all, never "sync" alone
       const k = ev.events.filter((e) => e.failed).length;
       // the read is capped (SYNC_ERRORS_LIMIT): at the cap there may be more, said as at least that many
       const capped = ev.events.length >= SYNC_ERRORS_LIMIT;
-      list.push(card("Sync errors, last day", `${n(k)}${capped ? "+" : ""}`, capped ? `at least ${n(k)} failed sync events` : `failed sync event${k === 1 ? "" : "s"}`, "", k ? "bad" : "", LINKS.failedEvents));
+      list.push(card("Errors, last day", `${n(k)}${capped ? "+" : ""}`, `${capped ? `at least ${n(k)}: ` : ""}${ERRORS_COUNTED}`, "", k ? "bad" : "", LINKS.failedEvents));
     }
   }
   if (added && q !== undefined) {
     if ("failure" in q) list.push(card("Query errors, last day", "unknown", `could not read them: ${firstLine(q.failure.message)}`, "", "", LINKS.failedQueries));
     else {
-      const day = q.queries.day, k = day.refused + day.failed;
-      list.push(card("Query errors, last day", n(k), `${n(day.refused)} refused, ${n(day.failed)} failed`, "", day.failed ? "warn" : "", LINKS.failedQueries));
+      // the big number is the queries that failed (Mason's or the machine's fault); the refused ones (the query's own
+      // fault, such as SQL Mason does not support) are its small line
+      const day = q.queries.day;
+      list.push(card("Query errors, last day", n(day.failed), `${n(day.refused)} refused`, "", day.failed ? "warn" : "", LINKS.failedQueries));
     }
   }
   if (typeof s.pageCard === "string") list.push(renderHostCard(o.hostCard));
   return cards(list);
 }
+
+/** What the Errors card counts, its small line: every failed event of the last day (`/api/events?failed=1`). */
+export const ERRORS_COUNTED = "failed syncs, restarts and web page errors";
 
 /** A fact's row; `warn` marks one the reader should act on. */
 const factRow = (k, v, warn = false) => `<tr${warn ? ` class="warn"` : ""}><th scope="row">${esc(k)}</th><td>${esc(v)}</td></tr>`;
@@ -363,30 +365,69 @@ function renderStream(s, now = Date.now()) {
   return `<table class="facts-table"><caption>Changes (the stream${s.source.replication ? `, slot ${esc(s.source.replication.slot)}` : ""})</caption><tbody>${rows.join("")}</tbody></table>`;
 }
 
+/** Postgres's version as the page says it: the number alone (`16.15`), without the server's build in brackets. */
+const pgVersion = (v) => String(v ?? "").split(" ")[0];
+
+/** A time as the facts say it: `16:03 UTC` on the day of `now`, else with its date. */
+const sinceText = (iso, now) => `${iso.slice(0, 10) === new Date(now).toISOString().slice(0, 10) ? iso.slice(11, 16) : utcMinute(iso)} UTC`;
+
 /**
- * THE FACTS, ONE table, "Server", of what `mason status` says beside the cards: its sources file (`sourceRows`; the database and
- * how its changes arrive are the box's at the top, `renderHealth`, while it is drawn), the warnings, Mason's version, how long it has been up and its restarts (`engine`), the free disk and what a running copy is projected to add (`disk`), the sessions open
- * (`sessions`). A fact the run did not say is absent; one it could not read is said as the CLI says it (its reason, never a 0). Mason's, the disk's, the restarts' and the sessions' rows are the CLI's (`masonRows`, `diskRows`, `restartsRows`, `sessionsRows`).
+ * THE FACTS CARD'S ROWS, `[label, value, warn]` each, in the page's own words (`mason status` keeps its fuller rows):
+ * the Postgres Mason reads from, as "Source" (its name, where it is, its Postgres version, and whether it is the main
+ * database or a read replica: issue 935 names it Source, as the box at the top and `mason status` do); the run's
+ * warnings (where the database is and whether it is the main one are never among them: issue 888 — the card says both
+ * from `source.remote` and `source.standby`, never by reading a warning's words); Mason's version and how long it has
+ * been up; its restarts, only when there were any; the free disk beside what the synced data takes; and the tools
+ * connected. A fact the run did not say is absent; one it could not read says so, with its reason (never a 0).
  */
-export function renderFacts(s, now = Date.now()) {
-  const boxed = healthShown(s) ? HEALTH_ROWS : [];
-  const rows = [...sourceRows(s).filter(([k]) => !boxed.includes(k)).map(([k, v]) => factRow(k, v)), ...s.warnings.map((w) => factRow("Warning", w, true))];
-  const e = s.engine;
-  if (typeof e.version === "string") rows.push(...masonRows(e).map(([k, v]) => factRow(k, v)));
-  rows.push(...restartsRows(e.restarts, now).map(([k, v]) => factRow(k, v, k === "Restarts")));
-  // the copies in all, their rows, the last sync and the copy's file are the cards' (`renderKpis`): a fact in ONE place
-  const d = s.disk;
-  rows.push(...diskRows(d).map(([k, v]) => factRow(k, v, d.freeBytes === null || (d.projectedBytes !== null && d.projectedBytes > d.freeBytes))));
-  rows.push(...sessionsRows(s.sessions).map(([k, v]) => factRow(k, v)));
-  // `pageSocket` (mason serve with MASON_UI_SOCKET): said without its path, as the page shows no absolute path
-  if (typeof s.pageSocket === "string") rows.push(factRow("Web page", "served on a Unix socket on the server too (MASON_UI_SOCKET)"));
-  // a database on another machine, said as information, never as a warning (issue 888: the run no longer warns of it)
-  const remote = s.source.remote === true && !s.source.demo ? `<p class="info fact-note">${esc(REMOTE_NOTE)}</p>` : "";
-  return `<table class="facts-table"><caption>Server</caption><tbody>${rows.join("")}</tbody></table>${remote}`;
+export function factRows(s, now = Date.now()) {
+  const src = s.source, e = s.engine, d = s.disk, ss = s.sessions;
+  const rows = [["Source", src.demo ? `the demo database Mason runs · Postgres ${pgVersion(src.version)}`
+    : `${src.database} on ${src.host} · Postgres ${pgVersion(src.version)} · ${src.standby ? "a read replica" : "your main database"}`, false]];
+  rows.push(...s.warnings.map((w) => ["Warning", w, true]));
+  if (typeof e.version === "string") rows.push(["Mason", `${e.version}${e.startedAt ? ` · up ${spanText(e.uptimeSeconds ?? 0)}, since ${sinceText(e.startedAt, now)}` : ""}`, false]);
+  const r = e.restarts;
+  if (r !== undefined && "error" in r) rows.push(["Restarts", `unknown: ${firstLine(r.error)}`, true]);
+  else if (r !== undefined && r.last !== null) rows.push(["Restarts", `${r.count}, the last ${agoText(r.last.at, now)}: ${r.last.why}, after ${r.last.upSeconds} s up`, true]);
+  if (d !== undefined) {
+    const uses = typeof d.copyBytes === "number" ? ` · the synced data uses ${fileSize(d.copyBytes)}` : "";
+    const adds = d.projectedBytes === null ? "" : ` · the first syncs running need about ${fileSize(d.projectedBytes)} more`;
+    const over = d.freeBytes !== null && d.projectedBytes !== null && d.projectedBytes > d.freeBytes;
+    rows.push(["Disk", d.freeBytes === null ? `${firstLine(d.error ?? "the free space could not be read")}${uses}${adds}`
+      : `${fileSize(d.freeBytes)} free${uses}${adds}${over ? ". That is more than is free: the sync stops before the disk fills" : ""}`, d.freeBytes === null || over]);
+  }
+  if (ss !== undefined) {
+    const tools = "error" in ss ? null : ss.byClient.length;
+    rows.push(["Connected tools", tools === null ? `unknown: ${firstLine(ss.error)}` : ss.open === 0 ? "none" : `${n(Math.max(1, tools))} connected`, false]);
+  }
+  return rows;
 }
 
 /** A database on another machine, in the words `mason init` and `mason start` say it (src/cli/preflight.ts REMOTE_NOTE). */
 export const REMOTE_NOTE = "Your database is on another machine. Mason will sync the tables you choose to this machine.";
+
+/** The facts card's quiet lines, in the page's words: that the database is on another machine (information, not a
+ *  warning: `REMOTE_NOTE`), and how text sorts when it differs from the database (`source.textOrder`; nothing when it
+ *  sorts the same). */
+export function factNotes(s) {
+  const notes = [];
+  if (s.source.remote === true && !s.source.demo) notes.push(REMOTE_NOTE);
+  const t = s.source.textOrder;
+  if (t) notes.push(/could not read/.test(t) ? "Mason can't sort text the way your database does, so it refuses to sort text in a query. Add COLLATE \"C\" to sort it (docs/SQL-SUPPORT.md explains why)."
+    : "Text sorts as in your database, except some rare symbols (docs/SQL-SUPPORT.md explains which).");
+  return notes;
+}
+
+/**
+ * THE FACTS CARD, "Mason" (the owner, 2026-11-13: main's card, kept): `factRows` in a table, a row the reader should act
+ * on marked, then `factNotes` as quiet lines. What `mason status` says beside it (the sources file, the sync settings,
+ * the page's socket) is not here: the Tables page shows and changes each table's sync, and the page names no file.
+ */
+export function renderFacts(s, now = Date.now()) {
+  const notes = factNotes(s);
+  return `<table class="facts-table"><caption>Mason</caption><tbody>${factRows(s, now).map(([k, v, warn]) => factRow(k, v, warn)).join("")}</tbody></table>` +
+    notes.map((x) => `<p class="info fact-note">${esc(x)}</p>`).join("");
+}
 
 /**
  * THE COPIES NOT FINISHED, a bar each as `mason status` and `mason wait` print them (`tableLine`): copying, waiting,
@@ -426,26 +467,22 @@ export function renderUnsupportedLine(u) {
     `${rest.length ? ` (and ${n(rest.length)} other${rest.length === 1 ? "" : "s"})` : ""} <a class="see" href="${esc(LINKS.queries)}">See all</a></p>`;
 }
 
-/** Whether a tool has used Mason, from the state alone: a session of a user (`mason user`'s; '' is a token's) open now
- *  (`sessions.byClient`, the listener's) — a login with its password, which a tool's catalog queries alone make. */
-export const toolConnected = (s) => Array.isArray(s?.sessions?.byClient) && s.sessions.byClient.some((c) => c.user !== "" && c.open > 0);
-
 /**
- * THE FIRST-RUN CHECKLIST, while setting up is not done: Mason is running (the state answered), Sync a table (`totals`:
- * one served), Connect a tool — done once a tool has used Mason: a user's session open now (`toolConnected`), one seen
- * open while the page was shown (`seen`, the page's), or a statement completed in the request log's week (`queries`:
- * `/api/queries`' body, or `{ failure }`) — each step in its words done or not (the ✓ or ○ says which), a ○ with its one
- * action: Add a table (Tables), Create a user first (Users, where a user is added for it). A user existing is not a tool
- * connected. "" once all three are done, and while it cannot tell whether a tool connected (no session, and the request
- * log's summary not read or refused): a checklist never says ○ for what it could not tell.
+ * THE FIRST-RUN CHECKLIST, while setting up is not done: Mason is running (the state answered), Sync a table (an added
+ * table synced: `tables[].copy.phase` done), Create a user (a user exists, not removed: `/api/state` `users.active`) —
+ * each step in its words done or not (the ✓ or ○ says which), a ○ with its one action: Add a table (Tables), Add a user
+ * (Users). THE OWNER'S RULE (2026-11-13): done while a table is synced AND a user exists, read from the state alone;
+ * never whether a tool has queried Mason, so a deployment nobody queried for a week stays done. Every table or every
+ * user removed: not done again. "" once both are done, and while it cannot tell whether a user exists (`users` an
+ * error, or a run that does not say): a checklist never says ○ for what it could not tell.
  */
-export function renderChecklist(s, queries, seen = false) {
+export function renderChecklist(s) {
   const added = s.tables.some((t) => t.added);
-  const copied = (s.totals?.copied ?? 0) > 0;
-  const answered = queries !== undefined && queries !== null && !("failure" in queries) ? (queries.queries?.week?.completed ?? 0) > 0 : null;
-  const connected = seen || toolConnected(s) || answered === true;
-  if (!connected && answered === null) return "";
-  if (copied && connected) return "";
+  const copied = s.tables.some((t) => t.added && t.copy?.phase === "done");
+  const u = s.users;
+  if (u === undefined || u === null || typeof u.active !== "number") return "";
+  const user = u.active > 0;
+  if (copied && user) return "";
   const copying = added && !copied && copyingCount(s) > 0;
   // a read-only page (MASON_UI_READ_ONLY=1) sends no one to add what it would refuse to add: a user unless its users
   // are still its own (MASON_UI_READ_ONLY_ALLOW=users), and a table unless its tables are (=tables)
@@ -454,7 +491,7 @@ export function renderChecklist(s, queries, seen = false) {
   const steps = [
     ["Mason is running", true, ""],
     ["Sync a table", copied, copying ? `<span class="dim">syncing now</span>` : added || tablesLook ? "" : `<a class="btn small primary" href="${LINKS.tables}">Add a table</a>`],
-    ["Connect a tool", connected, looks ? "" : `<a class="btn small${copied ? " primary" : ""}" href="#users">Create a user first</a>`],
+    ["Create a user", user, looks ? "" : `<a class="btn small${copied ? " primary" : ""}" href="#users">Add a user</a>`],
   ];
   const done = steps.filter(([, ok]) => ok).length;
   return `<div class="checklist" role="group" aria-label="Getting started"><p class="checklist-title"><span class="courses" aria-hidden="true">${steps.map(([, ok]) => `<i${ok ? ' class="on"' : ""}></i>`).join("")}</span>Getting started <span class="dim">${done} of ${steps.length} done</span></p><ol>` +
@@ -471,9 +508,9 @@ const readOnlyWhat = (tables, users) => tables && users ? null : tables ? "No us
  * each the body, or `{ failure }`; `o.now` the clock; `o.open(key)` whether a details is open; `o.stale` `{ at, failure }`
  * while the poll fails, the box then greyed and as of when): the word, the checklist,
  * the cards, the copies not finished, the facts, the stream, the unsupported SQL's line. Never the engine's name.
- * WHILE GETTING STARTED IS NOT DONE, IT IS THE OVERVIEW (the owner, 2026-11-13): the checklist alone, the rest once its
- * three steps are done — but for the word's box while it says Failed, or while the state could not be read now, so a
- * sync that failed during setup, or a Mason that cannot be reached, is never hidden behind "Sync a table ○".
+ * WHILE GETTING STARTED IS NOT DONE, the word's box and the checklist alone (the owner, 2026-11-13); the cards and the
+ * rest once its three steps are done. The word's box is always shown (the owner, 2026-11-13, later that day), so the
+ * state of the synced data is never hidden behind "Sync a table ○".
  */
 export function renderStatus(s, o = {}) {
   const now = o.now ?? Date.now();
@@ -481,11 +518,8 @@ export function renderStatus(s, o = {}) {
   // a read-only page (MASON_UI_READ_ONLY=1): why it offers no user and no table to add, as Tables and Users say it
   const what = readOnlyWhat(tablesReadOnly(s) === null, usersReadOnly(s) === null);
   const lead = what === null ? "" : readOnlyLine(what, s.pageReadOnly);
-  const checklist = renderChecklist(s, o.queries, o.connected === true);
-  if (checklist !== "") {
-    const failed = (o.stale ?? null) !== null || readinessWord(s.readiness) === "Failed";
-    return lead + (failed ? renderHealth(s, o.stale ?? null) : "") + checklist;
-  }
+  const checklist = renderChecklist(s);
+  if (checklist !== "") return lead + renderHealth(s, o.stale ?? null) + checklist;
   return lead + renderHealth(s, o.stale ?? null) + renderKpis(s, { ...o, now }) +
     renderProgress(s, o.open, o.shares, o.before) + renderFacts(s, now) + renderStream(s, now) + (added ? renderUnsupportedLine(o.unsupported) : "");
 }
@@ -499,7 +533,7 @@ export const UNSUPPORTED_LIMIT = 100;
 export const SYNC_ERRORS_LIMIT = 1000;
 
 /** What the page reads every 30 s beside the state: the request log's summary (the statements' and query errors' cards,
- *  and whether a tool has used Mason: the checklist), the last day's sync failures (the sync errors' card) and the last
+ *  and whether a tool has used Mason: the checklist), the last day's failed events (the Errors card) and the last
  *  day's unsupported SQL. */
 const SLOWER = ["api/queries", `api/events?failed=1&since=24h&limit=${SYNC_ERRORS_LIMIT}`, `api/unsupported?limit=${UNSUPPORTED_LIMIT}`];
 
@@ -514,9 +548,6 @@ export const page = {
     // the details open (a copy's whole error), by key: a poll rewrites the section, and they stay open
     const opened = createOpenSet();
     const monotone = createMonotone();
-    // a tool seen connected while the page is shown (a session of a user's): the checklist's step stays done after the
-    // tool closes it, before a statement of it reaches the request log's summary
-    let connected = false;
     // the host's card (MASON_UI_OVERVIEW_CARD), once the state names it: read when the Overview is shown, and again at
     // its own `refresh` while it is (src/web/host-view.js)
     const cardPath = () => { const p = ctx.read("api/state")?.body?.pageCard; return typeof p === "string" ? p : null; };
@@ -533,9 +564,8 @@ export const page = {
         const st = ctx.read("api/state");
         if (!st?.body) return { status: st?.failure ? renderUnknown(st.failure) : skeleton(4) };
         const [queries, syncErrors, unsupported] = SLOWER.map((p) => asRequest(ctx.read(p)));
-        return { status: renderStatus(st.body, { now: ctx.now().getTime(), stale: st.failure && st.readAt !== undefined ? { at: new Date(st.readAt), failure: st.failure } : null, queries, syncErrors, unsupported, connected, usage: ctx.read(HOURLY)?.body, hostCard: cardPath() === null ? undefined : ctx.read(hostKey(cardPath())), open: opened.has, shares: monotone.of(st.body), before: monotone.before }) };
+        return { status: renderStatus(st.body, { now: ctx.now().getTime(), stale: st.failure && st.readAt !== undefined ? { at: new Date(st.readAt), failure: st.failure } : null, queries, syncErrors, unsupported, usage: ctx.read(HOURLY)?.body, hostCard: cardPath() === null ? undefined : ctx.read(hostKey(cardPath())), open: opened.has, shares: monotone.of(st.body), before: monotone.before }) };
       },
-      afterRead() { if (toolConnected(ctx.read("api/state")?.body)) connected = true; },
       toggle: (target) => opened.toggle(target),
       // the host card's Copy buttons
       click: (d, button, env) => copyClick(d, button, env),

@@ -172,6 +172,9 @@ export interface RunState {
   share?: ShareState | null;
   /** the last share that ended and why (src/cli/share-run.ts), or null */
   shareEnded?: ShareEnded | null;
+  /** how many users exist now, removed ones not counted, or why the list cannot be read (src/cli/run-server.ts
+   *  usersFact): the web page's Getting started reads it; a run from before it has none */
+  users?: { active: number } | { error: string };
 }
 
 // ------------------------------------------------------------------ shared
@@ -452,8 +455,8 @@ export function slotText(w: StreamStatus["slotWal"], since: (iso: string) => num
 
 const STATUS_USAGE = `usage: mason status [--json]
 
-  Status: running, not running, or hung — then this project's facts, one a line: its folder, its database and how
-  its changes are read, the run and the synced data's file and the synced tables in all (synced, rows, the last sync), the Postgres API
+  Status: running, not running, or hung — then this project's facts, one a line: its folder, its sources file, its
+  Source (the Postgres it syncs from, and whether that is your main database or a read replica), the run and the synced data's file and the synced tables in all (synced, rows, the last sync), the Postgres API
   and how it listens.
 
     mason status
@@ -511,7 +514,8 @@ const STATUS_USAGE = `usage: mason status [--json]
     or null }, or { error }) }, disk: { path (where the synced data's file is), freeBytes, copyBytes (the file and its write-ahead log),
     projectedBytes (what the first syncs running are projected to add; null: none, or too early to say), error },
     sessions: { open (the Postgres API's sessions logged in), byClient: [{ user ('' a token's), client (its
-    application_name), open, running }] }, share: (null, or what mason share has open) { port, fingerprint, sessions,
+    application_name), open, running }] }, users: { active (the users mason user made, removed ones not counted) } or
+    { error }, share: (null, or what mason share has open) { port, fingerprint, sessions,
     refusedLogins, droppedConnections, shares: [{ user, from (command: mason share; page: the web page), role, reads, openedAt, via, host, port, endsAt, state }] }, shareEnded: (null, or the last share that ended) { user, from, why, at }, queries: { keptDays, day, week } (the last day's and the last 7
     days' statements, each { days, covered (the days of it the request log keeps), statements, completed, refused,
     failed, cancelled, rows, bytesSent, durationMs: { avg, p50, p95 } (the completed ones') or null }; { error }
@@ -577,7 +581,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   options: { json: { type: "boolean" } },
   json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "generatedTables", "queries", "slowQueries", "refusedQueries",
     "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "pageReadOnly", "pageReadOnlyAllow", "pageBack", "pageNav", "pageCard", "pageSocket",
-    "roles", "share", "shareEnded", "lastRun", "lastStop", "hung", "next"],
+    "users", "roles", "share", "shareEnded", "lastRun", "lastStop", "hung", "next"],
 };
 
 export async function status(argv: string[]): Promise<number> {
@@ -694,21 +698,17 @@ export async function status(argv: string[]): Promise<number> {
 }
 
 /**
- * mason status's rows for the database the run copies: its sources file, its URL (masked by the run), and how its changes
- * arrive. The web page (src/web/app.js `sourceRows`) says the same rows, held equal by tests/web-page.test.ts.
+ * mason status's rows for the Postgres the run syncs from: its sources file, the Source (its URL, masked by the run, and
+ * what kind of server it is), and how text sorts where it differs. No row says how changes arrive (issue 935: the
+ * sources file and the Tables page say each table's sync; `--json` keeps `source.sync` and `source.replication`). The
+ * web page (src/web/pages/status.js `sourceRows`) says the same rows, held equal by tests/web-page.test.ts.
  */
 export function sourceRows(s: Pick<RunState, "source">): Array<[string, string]> {
   return [
     ...(s.source.file ? [["Sources file", `${s.source.shownFile ?? s.source.file} (the tables it names are added)`] as [string, string]] : []),
-    ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
+    ["Source", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
       // which kind of server it is, as a plain fact (issue 888), in the words of the page's facts card (src/web/pages/status.js factRows)
       : `${s.source.url} · Postgres ${s.source.version} · ${s.source.standby ? "a read replica" : "your main database"}`],
-    // in a web developer's words first (each table as its sync: says, streamed as they happen); the mechanism an operator needs in parentheses
-    ["Changes", `each table as its sync: says${s.source.replication ? "" : " (a SELECT of its changed rows)"}${s.source.sync ? ` · sync: ${s.source.sync.default} ${s.source.sync.written ? "for every table without its own" : "(the default: the file writes none)"}` : ""} · ` +
-      (s.source.replication ? `sync: replication tables streamed as they happen (logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication}, ` +
-          `${s.source.replication.owned ? "Mason's own, carrying them alone" : "named: read as it is, never altered"}); the others by a SELECT of their changed rows`
-        : s.source.demo ? "the demo database is checked this way only"
-        : "sync: replication on an entry streams that table as it happens instead")],
     ...(s.source.textOrder ? [["Text order", s.source.textOrder] as [string, string]] : []),
   ];
 }
@@ -964,7 +964,7 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
   out(reportText({ headline: `Status: ${hung === null ? st.yellow(state) : st.red(state)}`, details: [
     ["Project", `${project.config.name}, files in ${project.folder}`],
     ["Sources file", "message" in src ? `${src.message}${src.fix ? ` — ${src.fix.split("\n")[0]}` : ""}` : src.file],
-    ...(database === null ? [] : [["Database", `${database} (not checked: Mason ${hung === null ? "is not running" : "does not answer"})`] as [string, string]]),
+    ...(database === null ? [] : [["Source", `${database} (not checked: Mason ${hung === null ? "is not running" : "does not answer"})`] as [string, string]]),
     ["Version", version()],
     ["Up", hung === null ? `not running${project.config.lastRun ? ` (last started ${ago(project.config.lastRun)}${ended})` : ""}`
       : `pid ${hung.run.pid} · running but does not answer its commands: ${hung.problem.why}`],

@@ -4,8 +4,8 @@
  * docs/OBSERVABILITY.md "Pages"): the sync's events (`mason logs --events`) over the time range the Observability views
  * share, as a timeline table NEWEST FIRST (When sorts it the other way) — the scheduled syncs that succeeded read only
  * while "Scheduled syncs" is ticked (or one of their kinds chosen: `?scheduled=1`, filtered by the run, so they never
- * take the place of a failure among the newest EVENTS_LIMIT), narrowed in the page alone by "Failures only",
- * a kind and a table (every kind, and every added table from `/api/state`, events or not), at most EVENTS_SHOWN rows written with
+ * take the place of a failure among the newest EVENTS_LIMIT), "Failures only" asked of the run too (`?failed=1`: every
+ * failure of the range, whatever else was read), and narrowed in the page alone by a kind and a table (every kind, and every added table from `/api/state`, events or not), at most EVENTS_SHOWN rows written with
  * "Show more" — and, behind a closed details "The run's raw log (for debugging)", the run's last log entries, newest
  * first (`mason logs`: they carry internal tags and absolute paths, so they are not the page's content). Reads
  * `/api/events` every 10 s (a longer range at its own rate, `rangeEvery`), and `/api/logs` every 5 s ONLY WHILE the
@@ -17,8 +17,10 @@ import { esc, agoText, utcText, badge, empty, panel, n, sortTh, nextSort, moreRo
 /** How many of the range's events are read (the newest), and how many of those the page writes at once. */
 const EVENTS_LIMIT = 500;
 const EVENTS_SHOWN = 100;
-/** The events of a range: the newest EVENTS_LIMIT since its start; with `scheduled`, the scheduled syncs too. */
-const eventsPath = (range = DEFAULT_RANGE, scheduled = false) => `api/events?limit=${EVENTS_LIMIT}&since=${RANGES[rangeOf(range)].since}${scheduled ? "&scheduled=1" : ""}`;
+/** The events of a range: the newest EVENTS_LIMIT since its start; with `failed`, the failures alone, filtered by the run
+ *  (so no other event takes a failure's place among the newest read); else with `scheduled`, the scheduled syncs too. */
+const eventsPath = (range = DEFAULT_RANGE, { scheduled = false, failed = false } = {}) =>
+  `api/events?limit=${EVENTS_LIMIT}&since=${RANGES[rangeOf(range)].since}${failed ? "&failed=1" : scheduled ? "&scheduled=1" : ""}`;
 /** The kinds that are scheduled syncs (src/duck/events.ts `SCHEDULED`): read only when asked for. */
 const SCHEDULED_KINDS = ["polled", "streamed"];
 const LOGS = "api/logs?lines=200";
@@ -59,7 +61,7 @@ export function renderEvents(b, { failuresOnly = false, kind = "", table = "", n
   if (!passing.length && table && !kind) {
     return empty(table === MASON_TABLE ? `No Mason ${failuresOnly ? "failure" : "event"}s ${within}.` : `No ${failuresOnly ? "failure" : "event"}s for ${table} ${within}.`);
   }
-  if (!b.events.length) return empty(`No sync event ${within}.`);
+  if (!b.events.length) return empty(`No sync ${failuresOnly ? "failure" : "event"} ${within}.`);
   if (!passing.length) {
     return empty(failuresOnly && !kind && !table ? `None of the ${b.events.length} sync event${b.events.length === 1 ? "" : "s"} shown failed.` : `None of the ${n(b.events.length)} sync event${b.events.length === 1 ? "" : "s"} read passes the filters.`);
   }
@@ -117,7 +119,9 @@ export const page = {
     const m = { rawOpen: false, failuresOnly: false, scheduled: false, kind: "", table: "", sort: { key: "time", dir: "desc" }, limit: EVENTS_SHOWN };
     // the scheduled syncs are read when the box is ticked, or one of their kinds is chosen (else that kind lists none)
     const scheduledRead = () => m.scheduled || SCHEDULED_KINDS.includes(m.kind);
-    const events = () => eventsPath(ctx.range(), scheduledRead());
+    // FAILURES ONLY IS ASKED OF THE RUN (`failed=1`), never filtered from the newest EVENTS_LIMIT read: the scheduled syncs,
+    // one a table a poll, fill 500 rows in minutes, and a failure among them must still be listed
+    const events = () => eventsPath(ctx.range(), { scheduled: scheduledRead(), failed: m.failuresOnly });
     const part = (path, render, says) => readPart(ctx, path, render, says);
     const actions = {
       /** The details opened or closed: the log is read from then on, or no longer. */
@@ -142,10 +146,10 @@ export const page = {
           span: RANGES[ctx.range()]?.span ?? "" }), false),
         "syncs-run": renderRawLog(m.rawOpen, m.rawOpen ? part(LOGS, renderLogs, true) : ""),
       }),
-      /** The "Failures only" box, the kind or the table chosen: the events read are filtered in the page alone. "Scheduled
-       *  syncs" (and a kind that changes it) is what the run is asked for: read again now, and written when answered. */
+      /** The kind or the table chosen: the events read are filtered in the page alone. "Failures only" and "Scheduled
+       *  syncs" (and a kind that changes it) are what the run is asked for: read again now, and written when answered. */
       input(target) {
-        if (target?.id === "syncs-failures-only") { m.failuresOnly = target.checked === true; m.limit = EVENTS_SHOWN; return true; }
+        if (target?.id === "syncs-failures-only") { m.failuresOnly = target.checked === true; m.limit = EVENTS_SHOWN; return actions.readEvents(); }
         if (target?.id === "syncs-scheduled") { m.scheduled = target.checked === true; m.limit = EVENTS_SHOWN; return actions.readEvents(); }
         if (target?.id === "syncs-kind") {
           const before = scheduledRead();

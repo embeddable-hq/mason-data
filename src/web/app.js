@@ -98,7 +98,7 @@ export const PRESS_HOLD_MS = 2000;
 
 // every renderer the tests import from here, wherever it lives now
 export * from "./shared.js";
-export { CATCHING_UP, copyingText, tableLine, keptAge, keptWords, sourceRows, renderStatus } from "./pages/status.js";
+export { CATCHING_UP, copyingText, tableLine, keptAge, keptWords, sourceRows, factRows, factNotes, renderFacts, renderStatus } from "./pages/status.js";
 export { tableFacts, addedLines, removedReport, pickBody, columnsPath, renderTableAdded, renderTablesRemoved, renderTables } from "./pages/tables.js";
 export { renderUsers, usersShowHref, renderAdded, renderAddUser, attributesText, renderUsersConnect, renderAddKinds, renderSharePane, renderShareCard, renderShareOnce, createShare, addedSeen } from "./pages/users.js";
 export { renderRequests } from "./pages/queries.js";

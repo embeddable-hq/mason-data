@@ -189,6 +189,11 @@ test("asked before saving: a big table's poll with its cost; Live with a warning
   const slow = renderSyncChoice(tableOf("public.orders"), choiceOf("public.orders", { big: true, cost: costOf(100, "first-sync"), sync: "poll 5m" }));
   assert.match(textOf(slow), /about 2 minutes a scan \(estimated from how fast its first sync read it\)/);
   assert.match(slow, /<span class="choice-cost high">It runs every 7 minutes at most, since a scan waits four times its own length\. One connection to your database is busy about 25% of the time\.<\/span>/);
+  // a short scan is said plainly: "under a second", never "about 0 seconds"; one second is singular
+  const quick = textOf(renderSyncChoice(tableOf("public.orders"), choiceOf("public.orders", { big: true, cost: costOf(0.3, "measured"), sync: "poll 5m" })));
+  assert.match(quick, /scans the whole table on your database, under a second a scan \(measured at its last scheduled sync\)\./);
+  assert.doesNotMatch(quick, /about 0 seconds/);
+  assert.match(textOf(renderSyncChoice(tableOf("public.orders"), choiceOf("public.orders", { big: true, cost: costOf(1.2), sync: "poll 5m" }))), /about 1 second a scan /);
   const warned = choiceOf("public.customers", { checks: [...PASSING.slice(0, 4), { name: "WAL cap", state: "warn", detail: "max_slot_wal_keep_size is unlimited: while Mason is stopped its slot holds every byte of WAL" }] });
   assert.equal(warned.live.allowed, true);
   assert.deepEqual(syncQuestion(warned, "replication"), { lines: ["WAL cap: max_slot_wal_keep_size is unlimited: while Mason is stopped its slot holds every byte of WAL"],

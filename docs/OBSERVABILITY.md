@@ -44,9 +44,13 @@ sampled once a minute where it moves):
 - `sessions` — `{ open, byClient: [{ user, client, open, running }] }`: the Postgres API's sessions logged in now, by
   `mason user` ('' a token's) and application_name, and how many of each run a statement; the listener's own, in memory
   (`openSessions`). Sampled as `sessionsOpen`.
+- `users` — `{ active }`, or `{ error }` when the list of users cannot be read: how many `mason user` users exist now,
+  not counting removed ones (`usersFact`, a read of `.mason/users.json`). The web page's Getting started is done while
+  one exists and a table is synced.
 
 The lines `mason status` prints for them are exported renderers (src/cli/commands.ts `slotText`, `masonRows`,
-`restartsRows`, `diskRows`, `sessionsRows`), so the web page is held equal to them.
+`restartsRows`, `diskRows`, `sessionsRows`). The web page's facts card says the same facts in its own words
+(src/web/pages/status.js `factRows`).
 
 `mason status --json` `recentErrors` holds the latest sync failures (`sync`) and the latest statements refused, failed or
 cancelled (`queries`, the request log's own shape). `since` and `until` are read everywhere by one grammar: an age (30m,
@@ -74,13 +78,14 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   Usage's `/api/activity`, Sync events' `since`. Each view's filters compose with it.
 - **Overview** (`#overview`): a box titled "mason status" with one word, `mason status`'s (Ready / Under way / Failed:
   `readinessWord` of `readiness`, said by the CLI and the page alike — the "Healthy / Syncing / Error" asked for, in the
-  commands' words), a line saying what it means for the synced data, and the Database and Changes rows; Getting started
-  (three steps) while it is not done, alone then (the word's box over it only while it says Failed or the state cannot be
-  read), the rest once it is done; cards that each link into the view that lists what they count (the failed tables,
-  Queries — the slow ones from the p95, the refused or failed ones from Query errors —, Usage, Sync events' failures from
-  Sync errors); ONE table of facts, Server — `mason status`'s other rows under its labels: the sources file, the
-  warnings, Mason's version, up for, restarts (`engine`), the free disk and what a running first sync is projected to
-  add (`disk`), the connections open (`sessions`); in replication mode a Changes table — the stream (`stream`: running
+  commands' words), a line saying what it means for the synced data, and the Source row (`mason status`'s, `sourceRows`);
+  Getting started (three steps) while it is not done, under the box and alone with it then, the rest once it is done;
+  cards that each link into the view that lists what they count (the failed tables, Queries — the slow ones from the
+  p95, the failed ones from Query errors, the refused under them —, Usage, Sync events' failures from Errors, which
+  counts every failed event: failed syncs, restarts and the web page's own errors); ONE table of facts, Mason, in the
+  page's words (`factRows`, `factNotes`): the Source (the database, its host, its Postgres version, main or read
+  replica), the warnings, Mason's version and up for, restarts (`engine`), the free disk and what the synced data uses
+  (`disk`), the tools connected (`sessions`), then quiet lines for a database on another machine and how text sorts; in replication mode a Changes table — the stream (`stream`: running
   or why not, position, lag, last batch, as `streamLines` says it) and the slot's hold on the WAL (`stream.slotWal`:
   held, status, room left; `lost`, `unreserved` or no cap are warnings); and the first syncs not finished, a bar each,
   only while there are any. A fact the run could not read (`{ error }`) is said as unknown with its reason, never as 0;
@@ -118,7 +123,8 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   Queries filtered. `/api/activity` every 5 s and the rest every 60 s; 24 hours each at least 30 s apart, a week or
   more each a minute apart.
 - **Observability › Sync events** (`#observability/syncs`): the sync's events of the range (`/api/events?limit=500&since=`, 10 s;
-  24 hours 30 s, a week or more 60 s), newest first, narrowed by Failures only, a kind (every kind) and a table (every added table,
+  24 hours 30 s, a week or more 60 s; with `&failed=1` while Failures only is ticked, so every failure of the range is
+  listed, and `&scheduled=1` while Scheduled syncs is), newest first, narrowed by a kind (every kind) and a table (every added table,
   from `/api/state`, whether the range has an event of it or not; Tables' View events chooses it). The run's raw log
   (`/api/logs`, 5 s) is debugging output with internal tags and paths: it is behind a closed details, newest first, and
   read only while that is open.

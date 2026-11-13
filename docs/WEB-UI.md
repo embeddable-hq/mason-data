@@ -52,37 +52,41 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   `totals`, the tables' `sync.state`): Ready, "Every added table is synced and served" (the sentence `mason status`
   ends on, `READY_TEXT`); Under way, "2 of 3 tables synced, the rest syncing" (or, every one synced, how many are
   being caught up by their one poll); Failed, "1 table's sync failed: see Tables", Tables the failed ones. Under the line,
-  `mason status`'s **Database** and **Changes** rows, a label and its value each. Then cards
+  `mason status`'s **Source** row: the Postgres Mason syncs from, and whether it is your main database or a read
+  replica. Then cards
   for the tables synced, the rows, the last sync, the synced data's file, the last day's statements with their p95,
-  and the last day's **Sync errors** (the sync's failed events, `/api/events?failed=1&since=24h`, read up to 1,000:
-  at that, "1,000+") and **Query errors** (the statements refused or failed, `/api/queries`' `day`). Each card has a
+  and the last day's **Errors** (every failed event: failed syncs, restarts and the web page's own errors,
+  `/api/events?failed=1&since=24h`, read up to 1,000: at that, "1,000+") and **Query errors** (the big number the
+  queries that failed, the refused ones on the line under it, `/api/queries`' `day`). Each card has a
   24-hour sparkline once there are two hours to draw, and **each is a link** into the view that lists what it counts:
   the tables (the failed ones when a first sync failed), Usage for the synced data's file, Queries for the statements,
   the slow ones for the p95, the refused or failed ones for the query errors, and Sync events' failures over the last
-  24 hours for the sync errors. A count the page could not read is "unknown" with its reason, never 0. Eight cards,
+  24 hours for the errors. A count the page could not read is "unknown" with its reason, never 0. Eight cards,
   nine with the host's (`MASON_UI_OVERVIEW_CARD`): four by two and three by three from 641 px up, two a row on a phone.
-- **Overview**, Getting started (while setting up is not done): ✓ Mason is running · ✓/○ Sync a table · ✓/○ Connect
-  a tool — each step in the same words done or not (the ✓ or ○ says which), each ○ with its one action (Add a table →
-  Tables, **Create a user first** → Users, where a user is added for it; the step's text stays Connect a tool). Connect a tool is done once a tool has used
-  Mason, never because a user exists: a session of a `mason user` open now (`/api/state` `sessions.byClient`, which a
-  tool's login with only its catalog queries already makes), one seen open while the page was shown (held by the page),
-  or a statement completed in the request log's week (`/api/queries`). **While it is shown, it is the whole Overview**:
-  the word's box, the cards and the rest appear once the three are done and it goes. The word's box is shown over it
-  only while it says Failed, or while the state cannot be read now, so a failure during setup is never hidden. Not drawn while it
-  cannot tell (no session, and the request log's summary unanswered or failed). On a read-only page that adds no user
-  the step shows without its button. How to connect is not on the Overview: it is on Queries' empty log, and the Users page.
+- **Overview**, Getting started (while setting up is not done): ✓ Mason is running · ✓/○ Sync a table · ✓/○ Create
+  a user — each step in the same words done or not (the ✓ or ○ says which), each ○ with its one action (**Add a table**
+  → Tables, **Add a user** → Users). It is done while at least one added table is synced and at least one user exists
+  (not removed), read from `/api/state` alone (`tables[].copy`, `users.active`); whether a tool has queried Mason does
+  not count, so a deployment nobody queried for a week stays done. With every table or every user removed, it is shown
+  again. **While it is shown, the word's box and it are the whole Overview**: the cards and the rest appear once both
+  are done and it goes. The word's box is always shown once a table is added, so the state of the synced data is never hidden while you set
+  up. Not drawn while it cannot tell (`users` unreadable, `{ error }`, or a run that does not say it). On a read-only
+  page that adds no user the step shows without its button. How to connect is not on the Overview: it is on Queries'
+  empty log, and the Users page.
 - **Overview**, the tables not synced yet: a bar each with the line `mason wait` prints (a first sync not begun shimmers,
   with no % beside it), and nothing once every table is synced.
-- **Overview**, the facts: one table, **Server**, with `mason status`'s rows under its labels: Sources file, the
-  warnings, Version, Up and Restarts, Free disk, and Connections open (Database and Changes too, while the box at the top
-  is not drawn). In replication mode, a Changes table shows the stream and the WAL its slot holds.
+- **Overview**, the facts: one table, **Mason**, in the page's own words: **Source** (the database's name and host, its
+  Postgres version, and whether it is your main database or a read replica), the warnings, Mason (its version and how
+  long it has been up), the restarts when there were any, the disk (free, and what the synced data uses), and the tools
+  connected. Under it, as quiet lines: that the database is on another machine, and how text sorts where it differs from
+  the database. In replication mode, a Changes table shows the stream and the WAL its slot holds.
 - **Overview**, the unsupported SQL: when a statement used SQL Mason does not support in the last day, one line naming
   the most refused entry of `docs/SQL-SUPPORT.md`, with **See all** (Queries).
-- **Tables** (`#tables`): the database's tables, as `mason tables` lists them, with a search box by name and an All /
-  Added / Failed / Not added filter. The added tables come first (whatever their state), then those not added, each in
-  the order `mason tables` lists them. A table added or removed while the page is shown keeps its row, its state
-  changing in place, and takes its place only when the list is laid out again: the page shown again, or the search
-  box's text or the filter changed (a click moves no other row). With hundreds of tables the first 100 that pass are
+- **Tables** (`#tables`): the database's tables, as `mason tables` lists them, in two lists, **Added** over **Not
+  added**, each with its count and in the order `mason tables` lists them, with a search box over both and **Failed
+  only** (the failed tables alone; `#tables?show=failed` ticks it). A table added or removed while the page is shown
+  keeps its row in its list, its state changing in place, and moves to the other list only when the lists are laid out
+  again: the page shown again, or the search box's text or Failed only changed (a click moves no other row). With hundreds of tables the first 100 that pass are
   written, then **Show 100 more** and **Show all**; the search is over every table, at once. A long name is never cut: it wraps in its cell.
 - **Tables**, an added table: its state (Synced, Syncing, Failed or Waiting) over its bar — every added table has
   one, as `mason status` draws one for each: full at 100% once synced, red when its first sync failed, amber when it is not kept
@@ -300,7 +304,8 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   the code `mason logs --events` prints is its title), table and reason. The scheduled syncs that succeed (each poll on
   its schedule, and each minute the stream applied changes, a row a table) are listed only while **Scheduled syncs** is
   ticked, or one of their kinds is chosen: Mason is asked for them then (`?scheduled=1`), so they never push a failure
-  out of the newest 500 read. **Failures only**, a **Kind** (every kind of event) and a **Table** (every added table, whether the range has an event of it or not: one with none says so by its name) narrow the list; 100 are
+  out of the newest 500 read. **Failures only** asks Mason for the range's failures alone (`?failed=1`), so every failure
+  of the range is listed, whatever else is ticked. A **Kind** (every kind of event) and a **Table** (every added table, whether the range has an event of it or not: one with none says so by its name) narrow the list; 100 are
   written at once, then **Show more**.
 - **Sync events**, the run's raw log: behind a closed details, for debugging (it has internal tags and paths), newest first. Mason
   is asked for it only while the details is open.
@@ -448,7 +453,7 @@ listens, and every browser connection crosses that one ssh connection as frames 
   (`src/cli/run-server.ts`).
 - **A page that only shows: `MASON_UI_READ_ONLY=1`.** For a page shown to someone who should only look (behind a
   reverse proxy, on the socket), `mason serve` with it set makes the page offer no control that changes anything — no
-  Add, Remove, Sync, Disable, Enable, Cancel, Add a user, Create a user first or Share, each page saying
+  Add, Remove, Sync, Disable, Enable, Cancel, Add a user or Share, each page saying
   why — and its server refuses every request
   of the page that is not a GET or a HEAD, whatever its path, with "the web page is read-only here" in the failure shape
   (`src/cli/ui-read-only.ts`). Viewing is unchanged. It covers the page alone: a request with the run's token is the
@@ -465,7 +470,7 @@ listens, and every browser connection crosses that one ssh connection as frames 
   committed offers no Add or Remove and refuses them `409`, as without the allowance (Sync now stays).
 - **A read-only page that still manages its users: `MASON_UI_READ_ONLY_ALLOW=users`.** For a site that proxies the page
   and lets its users' changes through its own checks, `MASON_UI_READ_ONLY=1` beside it keeps the Users page's Add a
-  user (with its Connects from), its "from …" line, **Disable**, **Enable** and **Remove**, and the Overview's Getting started Create a user first. The
+  user (with its Connects from), its "from …" line, **Disable**, **Enable** and **Remove**, and the Overview's Getting started Add a user. The
   server lets through exactly these routes, each `<name>` exactly one path segment (a user's name, encoded), never a
   prefix:
   - `POST /api/users` (Add a user);

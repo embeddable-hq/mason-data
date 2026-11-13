@@ -359,7 +359,9 @@ export const LIVE_SLOT_WORDS = "Live keeps a replication slot on your database. 
   "or the slot is dropped. The slot is dropped when no table is set to Live, or by mason destroy. max_slot_wal_keep_size limits how much it can keep.";
 
 /** A scan's length in words: 38 → "38 seconds", 150 → "3 minutes", 5400 → "1.5 hours". */
-const lengthWords = (x) => x < 90 ? `${Math.round(x)} seconds` : x < 5400 ? `${Math.round(x / 60)} minutes` : `${(x / 3600).toFixed(1)} hours`;
+const lengthWords = (x) => x < 90 ? `${Math.round(x)} second${Math.round(x) === 1 ? "" : "s"}` : x < 5400 ? `${Math.round(x / 60)} minutes` : `${(x / 3600).toFixed(1)} hours`;
+/** A scan's length as the lead says it: "under a second" for a short one (never "about 0 seconds"), else "about …". */
+const scanWords = (x) => x < 1 ? "under a second" : `about ${lengthWords(x)}`;
 const BASIS_WORDS = { measured: "measured at its last scheduled sync", "first-sync": "estimated from how fast its first sync read it", assumed: "a rough guess, since nothing is measured yet" };
 
 /**
@@ -371,7 +373,7 @@ export function pollCostLead(c) {
   const l = c.polls.find((p) => p.cost)?.cost;
   if (!l) return null;
   return `${entryName(c.table)} has about ${n(l.rows)} rows. Each scheduled sync scans the whole table on your database, ` +
-    `about ${lengthWords(l.scanSeconds)} a scan (${BASIS_WORDS[l.basis] ?? "estimated"}).`;
+    `${scanWords(l.scanSeconds)} a scan (${BASIS_WORDS[l.basis] ?? "estimated"}).`;
 }
 export function pollCostLine(p) {
   const l = p.cost;

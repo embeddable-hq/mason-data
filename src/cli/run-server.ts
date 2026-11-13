@@ -61,6 +61,7 @@ import type { PageShares } from "./page-share.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 import { unsizedTables, type CopySize, type UnsizedTable, type UsageFacts, type UsageSample, type UsageSampler } from "../duck/usage.ts";
 import { FRESH_SAMPLES, type RunMetrics } from "./metrics.ts";
+import { isActive, readUsers } from "../duck/users.ts";
 
 /** The page's views (src/web/routes.js, the one list: the page imports it too), as a report of its error names them:
  *  each view's hash, and the host's view. Plain JavaScript beside the code, hence its shape declared here. */
@@ -180,6 +181,12 @@ export interface RunContext {
 /** the request log's shapes (src/duck/requests.ts), as mason status reads them */
 export type { RefusedQuery, SlowQuery } from "../duck/requests.ts";
 
+/** `/api/state` `users`: how many users exist now (not removed: `isActive`), or why the list cannot be read. */
+export function usersFact(file: string): { active: number } | { error: string } {
+  const r = readUsers(file);
+  return "problem" in r ? { error: r.problem } : { active: r.users.filter(isActive).length };
+}
+
 /**
  * The run's state, in the shape mason status / wait read (`RunState`, src/cli/commands.ts): each table of the database,
  * added or not, and each added one's copy as the sync has it, so `mason wait` is ready exactly when every added table is
@@ -285,6 +292,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     // (engine.bytes), and what the first syncs running are projected to add (copyDiskProjection) — mason status says it
     // the sessions logged in now, by user and client (the listener's own, in memory): mason status says how many
     sessions: ctx.listener.openSessions(),
+    // how many users exist (mason user's, not removed): the web page's Getting started is done once one does (the owner,
+    // 2026-11-13); a list that cannot be read says why, never 0
+    users: usersFact(ctx.users.file),
     disk: { path: disk.path, freeBytes: disk.freeBytes, copyBytes: bytes, projectedBytes: disk.projectedBytes, ...(disk.error !== undefined ? { error: disk.error } : {}) },
     jsonPaths: ctx.duck.jsonPaths?.() ?? [],
     generatedTables: ctx.duck.generated?.() ?? [],

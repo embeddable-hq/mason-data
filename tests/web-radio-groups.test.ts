@@ -206,3 +206,15 @@ for (const width of [1280, 375]) {
     assert.equal(await radiosLie(page, "form.syncpick"), "column");
   }));
 }
+
+// THE TIME RANGE ON A PHONE (the review of PR 918): "Last 15 mins" is wider than "Now" was, which pushed the disabled
+// 30 and 90 days, and their screen-reader words (absolute, `.sr`), past the screen's edge: the page scrolled sideways
+// (413 px of 375). The control scrolls inside itself, the containing block of what it holds (app.css `.range`).
+for (const hash of ["observability/queries", "observability/usage", "observability/syncs"]) {
+  test(`${hash} at 375 px with the default MASON_HISTORY_DAYS: no sideways scroll, the range control inside the screen`, { skip }, () => inChromium(async (browser) => {
+    const control = `#range-${hash.split("/")[1]} .range`;
+    const page = await served(browser, 375, hash, control);
+    assert.equal(await page.evaluate((sel) => document.querySelectorAll(`${sel} .off`).length, control), 2, "30 and 90 days shown disabled (7 days kept)");
+    assert.deepEqual(await page.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth], null), [375, 375], "a phone never scrolls the page sideways");
+  }));
+}
