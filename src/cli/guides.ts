@@ -134,7 +134,7 @@ async function agentGuide(): Promise<string> {
     options                [{ name, short, type, multiple, default, value }]: every option, --help too; type
                            "string" or "boolean"; short, default and value (a string option's placeholder) null if none
     json                   the top-level keys of its --json answer, next last; null when it takes no --json
-    needs                  "project", "run" or null
+    needs                  "files" (the project's mason/ alone), "project", "run" or null
     stdout                 "protocol" for mason mcp, else null
     exitCodes              [{ code, meaning }]: the exit codes below it can exit with
 
