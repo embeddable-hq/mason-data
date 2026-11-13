@@ -18,7 +18,7 @@
 
 /** Where each card leads: the views that list what it counts (src/web/app.js hashes). */
 // each with the range of what it counts — the statements of the last day, the sync's failures of the last day — never
-// the Observability views' default, Now: a card that says 12 failed must land on the 12
+// the Observability views' default, the last 15 minutes: a card that says 12 failed must land on the 12
 const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage?range=24h", queries: "#observability/queries?range=24h",
   slow: "#observability/queries?slow=1&range=24h", failedQueries: "#observability/queries?status=refused-or-failed&range=24h", failedEvents: "#observability/syncs?failures=1&range=24h" };
 import { VIEW_HASHES } from "../routes.js";
@@ -465,13 +465,22 @@ const readOnlyWhat = (tables, users) => tables && users ? null : tables ? "No us
  * each the body, or `{ failure }`; `o.now` the clock; `o.open(key)` whether a details is open; `o.stale` `{ at, failure }`
  * while the poll fails, the box then greyed and as of when): the word, the checklist,
  * the cards, the copies not finished, the facts, the stream, the unsupported SQL's line. Never the engine's name.
+ * WHILE GETTING STARTED IS NOT DONE, IT IS THE OVERVIEW (the owner, 2026-11-13): the checklist alone, the rest once its
+ * three steps are done — but for the word's box while it says Failed, or while the state could not be read now, so a
+ * sync that failed during setup, or a Mason that cannot be reached, is never hidden behind "Sync a table ○".
  */
 export function renderStatus(s, o = {}) {
   const now = o.now ?? Date.now();
   const added = s.tables.some((t) => t.added);
   // a read-only page (MASON_UI_READ_ONLY=1): why it offers no user and no table to add, as Tables and Users say it
   const what = readOnlyWhat(tablesReadOnly(s) === null, usersReadOnly(s) === null);
-  return (what === null ? "" : readOnlyLine(what, s.pageReadOnly)) + renderHealth(s, o.stale ?? null) + renderChecklist(s, o.queries, o.connected === true) + renderKpis(s, { ...o, now }) +
+  const lead = what === null ? "" : readOnlyLine(what, s.pageReadOnly);
+  const checklist = renderChecklist(s, o.queries, o.connected === true);
+  if (checklist !== "") {
+    const failed = (o.stale ?? null) !== null || readinessWord(s.readiness) === "Failed";
+    return lead + (failed ? renderHealth(s, o.stale ?? null) : "") + checklist;
+  }
+  return lead + renderHealth(s, o.stale ?? null) + renderKpis(s, { ...o, now }) +
     renderProgress(s, o.open, o.shares, o.before) + renderFacts(s, now) + renderStream(s, now) + (added ? renderUnsupportedLine(o.unsupported) : "");
 }
 

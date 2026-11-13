@@ -34,7 +34,7 @@
 <div id="poll"></div>
 <main>
   <section id="page-status" aria-labelledby="status-h">
-    <div class="page-head"><h2 id="status-h">Overview</h2><p class="desc">Mason syncs the tables you add from your Postgres and keeps them up to date. Tools query them at Mason's own Postgres URL. This page shows whether your synced data is ready, what Mason answered, and any errors of the last day.</p></div>
+    <div class="page-head"><h2 id="status-h">Overview</h2><p class="desc">Mason syncs the tables you add from your Postgres and keeps them up to date. Tools query them at Mason's own Postgres URL.</p></div>
     <div id="status"><div class="loading" aria-busy="true"><p class="dim">Asking Mason…</p><span class="skeleton block"></span></div></div>
   </section>
   <section id="page-tables" aria-labelledby="tables-h" hidden>
@@ -44,8 +44,7 @@
     <div class="toolbar">
       <div class="field grow"><label for="tables-filter">Search the tables</label>
         <input type="search" id="tables-filter" autocomplete="off" spellcheck="false" placeholder="e.g. orders"></div>
-      <div class="field"><label for="tables-show">Show</label>
-        <select id="tables-show"><option value="all">All</option><option value="added">Added</option><option value="failed">Failed</option><option value="not-added">Not added</option></select></div>
+      <label class="check" for="tables-failed"><input type="checkbox" id="tables-failed"> Failed only</label>
     </div>
     <div id="tables"></div>
   </section>
@@ -95,8 +94,8 @@
     <div id="usage-sizes"></div>
   </section>
   <section id="page-syncs" aria-labelledby="syncs-h" hidden>
-    <div class="page-head"><div class="head-row"><h2 id="syncs-h">Sync events</h2><div id="range-syncs" class="head-range"></div></div><p class="desc">What the sync did: each first sync, each failure and recovery, and each sync you asked for. A scheduled poll that succeeds is not listed. The Tables page shows each table's last sync. Mason's raw log is at the bottom, for debugging.</p></div>
-    <div class="toolbar"><div id="syncs-filters" class="fields"></div><label class="check" for="syncs-failures-only"><input type="checkbox" id="syncs-failures-only"> Failures only</label></div>
+    <div class="page-head"><div class="head-row"><h2 id="syncs-h">Sync events</h2><div id="range-syncs" class="head-range"></div></div><p class="desc">What the sync did: each full sync, each failure and recovery, and each sync you started. The scheduled syncs that succeed are listed only when you tick Scheduled syncs. Mason's raw log is at the bottom, for debugging.</p></div>
+    <div class="toolbar"><div id="syncs-filters" class="fields"></div><label class="check" for="syncs-failures-only"><input type="checkbox" id="syncs-failures-only"> Failures only</label><label class="check" for="syncs-scheduled"><input type="checkbox" id="syncs-scheduled"> Scheduled syncs</label></div>
     <div id="syncs-events"></div>
     <div id="syncs-run"></div>
   </section>

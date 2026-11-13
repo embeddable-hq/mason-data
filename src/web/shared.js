@@ -29,20 +29,26 @@ export const icon = (name, cls = "") => Object.hasOwn(ICONS, name)
 export const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
 /**
- * THE TIME RANGES the Observability pages share (`?range=` of their hash; Now unless it says): each its label, the
+ * THE TIME RANGES the Observability pages share (`?range=` of their hash; the last 15 minutes unless it says): each its label, the
  * age every endpoint's `since` takes (src/cli/request-filter.ts `timeOf`), and the usage samples' step — a minute a
  * point for the hour, an hour for the day, six for the week (60, 24 and 28 points: a chart readable at each).
+ * EVERY RANGE IS LIVE: each is "up to now", so each follows what happens, read again by itself (the owner, 2026-11-13:
+ * a range read once and held still, with Refresh, read as stale). `everyMs` is how often its reads are asked at most
+ * often: a longer range's reads scan more of the logs, and what they show moves less in a few seconds.
  */
 export const RANGES = {
-  // NOW is the one that follows what happens (`live`): its reads every few seconds, the last 15 minutes a minute a
-  // point; every other range is read once when chosen and stays as it was then (Refresh reads it again)
-  now: { label: "Now", span: "the last 15 minutes", since: "15m", stepSeconds: 60, days: 0, live: true },
-  "1h": { label: "Last hour", span: "the last hour", since: "1h", stepSeconds: 60, days: 0 },
-  "24h": { label: "24 hours", span: "the last 24 hours", since: "24h", stepSeconds: 3600, days: 1 },
-  "7d": { label: "7 days", span: "the last 7 days", since: "7d", stepSeconds: 21_600, days: 7 },
+  now: { label: "Last 15 mins", span: "the last 15 minutes", since: "15m", stepSeconds: 60, days: 0, everyMs: 0 },
+  "1h": { label: "Last hour", span: "the last hour", since: "1h", stepSeconds: 60, days: 0, everyMs: 0 },
+  "24h": { label: "24 hours", span: "the last 24 hours", since: "24h", stepSeconds: 3600, days: 1, everyMs: 30_000 },
+  "7d": { label: "7 days", span: "the last 7 days", since: "7d", stepSeconds: 21_600, days: 7, everyMs: 60_000 },
   // past the week, offered only where the run keeps that much (`rangeOffered`): a day a point, 30 and 90 of them
-  "30d": { label: "30 days", span: "the last 30 days", since: "30d", stepSeconds: 86_400, days: 30, longer: true },
-  "90d": { label: "90 days", span: "the last 90 days", since: "90d", stepSeconds: 86_400, days: 90, longer: true },
+  "30d": { label: "30 days", span: "the last 30 days", since: "30d", stepSeconds: 86_400, days: 30, longer: true, everyMs: 60_000 },
+  "90d": { label: "90 days", span: "the last 90 days", since: "90d", stepSeconds: 86_400, days: 90, longer: true, everyMs: 60_000 },
+};
+/** How often a range is read again, in words: the Live mark's title. */
+export const liveTitle = (range) => {
+  const ms = RANGES[rangeOf(range)].everyMs;
+  return ms === 0 ? "Updates every few seconds" : ms === 60_000 ? "Updates every minute" : `Updates every ${ms / 1000} seconds`;
 };
 
 /**
@@ -59,10 +65,11 @@ export function rangeOffered(key, keptDays) {
   return { offered: false, shown: true, why: `Mason keeps ${keptDays} day${keptDays === 1 ? "" : "s"} of history. Set MASON_HISTORY_DAYS=${r.days} to keep ${r.days}.` };
 }
 export const DEFAULT_RANGE = "now";
-/** Whether a range follows what happens (Now) or is read once when chosen (every other). */
-export const isLive = (range) => RANGES[rangeOf(range)].live === true;
-/** How often a read of a range is asked: `everyMs` while it is live, once (when chosen, or on Refresh) when it is not. */
-export const rangeEvery = (range, everyMs) => isLive(range) ? everyMs : Infinity;
+/** Whether a range is the last 15 minutes, the default: the one that also says what is happening this moment (Usage's
+ *  Connected now and Running now). */
+export const isNow = (range) => rangeOf(range) === DEFAULT_RANGE;
+/** How often a read of a range is asked: `everyMs`, or the range's own `everyMs` where that is longer. */
+export const rangeEvery = (range, everyMs) => Math.max(everyMs, RANGES[rangeOf(range)].everyMs);
 /** A range's key as the hash gave it: one of RANGES, else the default. */
 export const rangeOf = (text) => Object.hasOwn(RANGES, String(text ?? "")) ? String(text) : DEFAULT_RANGE;
 /** The usage samples of a range, its step a point (src/cli/run-server.ts `usage`): Usage's read, and the Overview's
@@ -138,7 +145,11 @@ export const clientText = (applicationName) => applicationName || "(no applicati
 
 /** A sync event's cells as `mason logs --events` and mason status's `Sync errors` say them (src/cli/commands.ts
  *  `eventLine`): when, kind, table, the reason's first line. */
-export const eventCells = (e) => ({ time: utcText(e.at), kind: e.kind, table: e.table ?? "(the sync)", message: firstLine(e.message) });
+export const eventCells = (e) => ({ time: utcText(e.at), kind: e.kind, table: e.table ?? MASON_TABLE, message: firstLine(e.message) });
+/** What an event of no one table says where a table's name goes (the database out of reach, the stream as a whole, a
+ *  restart), as `mason logs --events` says it (src/cli/commands.ts `MASON_TABLE`, held equal by the tests); the Sync
+ *  events' Table filter offers them as "Mason events". */
+export const MASON_TABLE = "Mason";
 
 /**
  * AN ENTRY OF THE UNSUPPORTED SQL (`/api/unsupported`'s `unsupported[]`: { gap, title, runs, users, clients, last,
@@ -415,10 +426,16 @@ export const ROOMS = { sync: "Syncing…", add: "Adding…", copy: "Press ⌘C",
  * after each write, and again on a scroll or a resize. `kind`: `dialog` (a question or a form: Escape presses its
  * `data-pop-close` button) or `status` (an answer or a refusal: read out, and up until it is dismissed — its Dismiss,
  * Escape (the page's `dismiss`), or the next action's answer or question in its place). `label` names a dialog for a
- * screen reader.
+ * screen reader. A popover that can be closed (it has a `data-pop-close` button) has an X at its top right too
+ * (`POP_X`), which presses that button: the same close, whatever the popover.
  */
 export const pop = (anchor, html, { kind = "status", label = "" } = {}) =>
-  `<div class="pop ${kind === "dialog" ? "ask" : "said"}" data-anchor="${esc(anchor)}" role="${kind === "dialog" ? "dialog" : "status"}"${label ? ` aria-label="${esc(label)}"` : ""}>${html}</div>`;
+  `<div class="pop ${kind === "dialog" ? "ask" : "said"}" data-anchor="${esc(anchor)}" role="${kind === "dialog" ? "dialog" : "status"}"${label ? ` aria-label="${esc(label)}"` : ""}>` +
+  `${html.includes("data-pop-close") ? POP_X : ""}${html}</div>`;
+
+/** A popover's X (`pop`): its own Dismiss or Cancel pressed by the shell's click (`data-pop-x`, src/web/app.js), so it
+ *  never has an action of its own to drift from that button's. Named Close for a screen reader; the icon says nothing. */
+export const POP_X = `<button type="button" class="pop-x" data-pop-x aria-label="Close" title="Close">${icon("x")}</button>`;
 
 /** An element's id for a row's actions cell (a popover's anchor): unique in the document, whatever the name holds. */
 export const actId = (page, key) => `act-${page}-${key}`;

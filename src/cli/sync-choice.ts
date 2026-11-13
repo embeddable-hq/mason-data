@@ -4,7 +4,8 @@
  * saved by `POST /api/pick` `{ table, picked: true, sync, keep: true }` (`mason add <table> --sync …`), the one writer of
  * the sources file; this module only says what each choice would mean:
  *
- * - each poll's cost on the database, for a table over BIG_TABLE_ROWS (`pollEstimate`, the estimate `mason add` prints);
+ * - each poll's cost on the database, for a table over BIG_TABLE_ROWS, in numbers (`pollLoad`, the estimate `mason add`
+ *   prints in its words), which the page says in its own;
  * - the checks logical replication needs, in Mason's words: the table's own (a primary key, not REPLICA IDENTITY
  *   NOTHING: `unreplicableReason`, `mason add`'s refusal) and the database's — `readinessChecks`, the checks `mason
  *   start` holds a replicating sources file to (wal_level, the role, a free slot and WAL sender, a standby on 16+ with
@@ -20,7 +21,7 @@ import type { SourceTable } from "./preflight.ts";
 import { readServerFacts, readSlotFacts, type ProductionCheck } from "./replication-checks.ts";
 import { checkState, readinessChecks, type ProjectReplication } from "./replication-mode.ts";
 import { ownReaderFreed, publicationProblems } from "./source-check.ts";
-import { pollEstimate, unreplicableReason, type PollMeasure } from "./source-edit.ts";
+import { pollLoad, unreplicableReason, type PollLoad, type PollMeasure } from "./source-edit.ts";
 import { copiedColumns, effectiveSync, entryName, type SourceFile } from "./sources.ts";
 import { namedPublicationVerdict, readNamedPublication } from "../duck/publication.ts";
 import { BIG_TABLE_ROWS, parseSync, syncText } from "../lib/table-sync.ts";
@@ -43,9 +44,9 @@ export interface SyncChoice {
   sync: { value: string; from: "entry" | "file" | "default" } | null;
   /** the catalog's row estimate, or null */
   rows: number | null;
-  /** each poll offered: its sync as the file writes it, its interval, and what it costs the database — said for a table
-   *  over BIG_TABLE_ROWS (`bigRows`), null otherwise */
-  polls: Array<{ sync: string; seconds: number; cost: string | null }>;
+  /** each poll offered: its sync as the file writes it, its interval, and what it costs the database (`PollLoad`) — for
+   *  a table over BIG_TABLE_ROWS (`bigRows`), null otherwise */
+  polls: Array<{ sync: string; seconds: number; cost: PollLoad | null }>;
   /** the table is over BIG_TABLE_ROWS: a poll scans it whole, and the page asks before saving one */
   bigRows: boolean;
   /** Live: whether it may be chosen (no check refused), and every check */
@@ -107,7 +108,7 @@ export function syncChoice(t: SourceTable, file: SourceFile | null, measured: Po
   const polls = POLL_PRESETS.map((every) => {
     const s = parseSync(`poll ${every}`);
     if ("problem" in s || s.mode !== "poll") throw new Error(`POLL_PRESETS holds ${every}, which is no poll: ${"problem" in s ? s.problem : s.mode}`);
-    return { sync: syncText(s), seconds: s.seconds, cost: bigRows ? pollEstimate(t, s, measured) : null };
+    return { sync: syncText(s), seconds: s.seconds, cost: bigRows ? pollLoad(t, s, measured) : null };
   });
   const checks = [...tableLiveChecks(t), ...database];
   return { table: t.source, sync: now === null ? null : { value: syncText(now.sync), from: now.from }, rows: t.rows, polls, bigRows,

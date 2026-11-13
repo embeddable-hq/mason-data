@@ -523,8 +523,9 @@ export async function unsupported(ctx: RunContext, q: URLSearchParams, now = Dat
 }
 
 /**
- * `GET /api/events?limit=&since=&failed=1`: the newest `limit` (1 to 10000, default 40) of the sync's events merged with
- * the run's restarts, newest last, from `since` on (`since` and `until` are read everywhere by one grammar, src/cli/request-filter.ts `timeOf`: an age, or an ISO 8601 time with its zone), the failures only with `failed=1`; and the days
+ * `GET /api/events?limit=&since=&failed=1&scheduled=1`: the newest `limit` (1 to 10000, default 40) of the sync's events merged with
+ * the run's restarts, newest last, from `since` on (`since` and `until` are read everywhere by one grammar, src/cli/request-filter.ts `timeOf`: an age, or an ISO 8601 time with its zone), the failures only with `failed=1`,
+ * the scheduled syncs too with `scheduled=1` (src/duck/events.ts `SCHEDULED`: left out otherwise); and the days
  * they are kept. `mason logs --events --json` is this; `mason status --json` `recentErrors` its latest failures.
  */
 export async function events(ctx: RunContext, q: URLSearchParams): Promise<{ events: ReturnType<typeof withRestarts>; keptDays: number }> {
@@ -532,7 +533,7 @@ export async function events(ctx: RunContext, q: URLSearchParams): Promise<{ eve
   if (typeof limit !== "number") throw new Refusal(400, limit.message, limit);
   const sinceText = q.get("since");
   const since = sinceText === null ? undefined : timeParam("since", sinceText, Date.now());
-  const o = { limit, failed: q.get("failed") === "1", ...(since === undefined ? {} : { since }) };
+  const o = { limit, failed: q.get("failed") === "1", scheduled: q.get("scheduled") === "1", ...(since === undefined ? {} : { since }) };
   const found = await ctx.duck.events.recent(o);
   // a record of restarts that cannot be read (issue 847: one an older Mason left empty on a full disk) costs the sync's
   // events nothing: none of it is merged, and why it is unreadable is said where the restarts are (`restartsFact`,

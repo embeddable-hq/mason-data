@@ -320,6 +320,10 @@ label.tick { display: inline-flex; align-items: baseline; gap: var(--space-1); m
 /* a tick's box is its own size: never the phone's input { flex: 1 1 10em }, which squeezed its column's name to a letter a line */
 label.tick input { flex: none; }
 label.tick code { overflow-wrap: normal; }
+/* a column form's boxes (tables.js columnsField): under Only these, indented to its words; hidden while All is chosen,
+   by the radio itself, so choosing writes nothing */
+form.pick .only-cols { margin: var(--space-1) 0 0 calc(13px + var(--space-2)); }
+form.pick:has(input[name="which"][value="all"]:checked) .only-cols { display: none; }
 /* a table's Sync choice (src/web/pages/tables.js renderSyncChoice): its sync on its note, a quiet button of the note's
    line height (every added row's note has it, so no row moves when it opens); the dialog a radio a line, each choice's
    words under its label, a check a line with its state's word and the SQL that fixes it */
@@ -331,7 +335,10 @@ form.syncpick .radios { margin: var(--space-1) 0; }
 form.syncpick .choice-body { display: flex; flex-direction: column; min-width: 0; }
 form.syncpick .choice-label { font-weight: 600; }
 form.syncpick .choice-what, form.syncpick .choice-cost { color: var(--muted); font-size: var(--text-xs); }
-form.syncpick .choice-cost { color: var(--warn); }
+/* a big table's cost: each interval's share of the database quiet, a share of 10 % or more in the warning colour;
+   what every interval shares is one note over the choices (tables.js pollCostLead) */
+form.syncpick .choice-cost.high { color: var(--warn); }
+form.syncpick .poll-lead { margin: 0 0 var(--space-2); font-size: var(--text-xs); color: var(--muted); }
 form.syncpick .live-slot { margin: var(--space-2) 0; font-size: var(--text-xs); color: var(--muted); }
 form.syncpick .live-no { margin: var(--space-2) 0 var(--space-1); color: var(--fg); font-size: var(--text-sm); }
 ul.checks { list-style: none; margin: 0 0 var(--space-2); padding: 0; font-size: var(--text-xs); }
@@ -501,6 +508,10 @@ details.memory, details#syncs-raw { margin: var(--space-4) 0; }
 #page-tables td.mono { white-space: nowrap; color: var(--muted); }
 .err { color: var(--bad); overflow-wrap: anywhere; }
 #page-tables .done button { margin-top: var(--space-1); }
+/* the two lists, Added over Not added: each a heading and its count over its card */
+#page-tables h3.list-h { margin: var(--space-6) 0 var(--space-3); }
+#page-tables h3.list-h:first-of-type { margin-top: 0; }
+#page-tables h3.list-h .dim { font-family: var(--font-mono); font-size: var(--text-sm); font-weight: 400; }
 /* THE TABLES LIST FITS ITS CARD AND NOTHING A CLICK DOES MOVES IT (src/web/pages/tables.js renderTables): seven short
    cells a row at FIXED widths (`table-layout: fixed`: a column is as wide as its header says, whatever a row's cells
    hold now), the name the column that gives (cut with an ellipsis, its whole the title); every row two lines (its state
@@ -578,6 +589,12 @@ body { padding-bottom: var(--docked-h, 0px); }
 @media (max-width: 640px) { .pop.said.docked { left: 0; } }
 .pop > :first-child { margin-top: 0; }
 .pop > :last-child { margin-bottom: 0; }
+/* a popover's X (`pop`, src/web/shared.js): at its top right, its words wrapping beside it; it presses its own
+   Dismiss or Cancel. Quiet until pointed at, as the menu's button is */
+.pop .pop-x { float: right; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0;
+  margin: -2px calc(-1 * var(--space-2)) var(--space-1) var(--space-2); border: 0; background: none; box-shadow: none; color: var(--muted); }
+.pop .pop-x:hover { background: var(--hover); color: var(--fg); }
+.pop > .pop-x + * { margin-top: 0; }
 .pop .confirm { margin: 0 0 var(--space-2); color: var(--fg); }
 .pop .pop-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0; }
 .pop .done { border: 0; box-shadow: none; padding: 0; margin: 0; background: none; }
@@ -630,6 +647,8 @@ form.formcard input { width: 18em; }
    and Add a user, each field a label and its control that wrap together; below that, it wraps by field, the box under
    its dropdown on a phone. The box's place is kept whatever is chosen, so nothing in the form moves when it changes. */
 #add-user-box { container-type: inline-size; }
+/* the line on roles under the add form (users.js ROLES_LINE) */
+#add-user .roles-line { flex: 0 0 100%; margin: 0; font-size: var(--text-xs); }
 #add-user { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
 #add-user .name-field { display: inline-flex; align-items: center; gap: var(--space-2); min-width: 0; max-width: 100%; }
 #add-user .name-field label { flex: none; }
@@ -653,13 +672,15 @@ form.formcard input { width: 18em; }
 /* THE ADD BOX (src/web/pages/users.js): where a temporary cloud login may be opened, a card of its own with what it
    creates on top (New user · Temporary cloud login, the time range's segmented control) and the two panes in ONE grid
    cell, the one not chosen unseen in its place: the box keeps the height of the taller, so a choice moves nothing below.
-   Elsewhere it holds the plain add form, itself the card (form.formcard). */
+   Elsewhere it holds the plain add form, itself the card (form.formcard). The share pane is unseen UNLESS it is chosen:
+   where no choice is drawn (mason serve, a read-only page), it is an empty pane laid over the form in the same cell,
+   and a visible one, however empty, takes the clicks meant for the form's Name and Add a user. */
 .add-box:has(#add-kinds > *) { margin: 0 0 var(--space-5); padding: var(--space-3) var(--space-4); background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); }
 #add-kinds:not(:empty) { margin: 0 0 var(--space-3); }
 .add-panes { display: grid; }
 .add-panes > * { grid-area: 1 / 1; min-width: 0; }
 .add-box:has([data-add-kind="share"][aria-pressed="true"]) #add-user-box,
-.add-box:has([data-add-kind="user"][aria-pressed="true"]) #add-share-box { visibility: hidden; }
+.add-box:not(:has([data-add-kind="share"][aria-pressed="true"])) #add-share-box { visibility: hidden; }
 .range button { display: inline-flex; align-items: center; height: auto; min-height: 30px; padding: 0 var(--space-3); border: 0; border-radius: 0; background: transparent; box-shadow: none;
   color: var(--fg); font-size: var(--text-xs); font-weight: 500; white-space: nowrap; }
 .range button:hover { background: var(--hover); }
@@ -848,17 +869,14 @@ details.hours > summary { margin-bottom: var(--space-2); }
 .head-row h2 { margin: 0; }
 .head-range:empty { display: none; }
 .head-range { min-width: 0; max-width: 100%; display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; justify-content: flex-end; }
-/* before the range: Now's "Live" (a dot that breathes), or when a past range was read and its Refresh — in a slot that
-   keeps the room of its longest ("as of HH:MM:SS UTC" 18ch, the gap, Refresh's 7ch in its padding and border; the
-   page's font is mono, so ch is exact) and the button's height, so the control right of it never moves and the row
-   wraps the same whichever the range (issue 873) */
-.head-range .range-status { display: inline-flex; align-items: center; justify-content: flex-end; font-size: var(--text-xs);
-  min-width: calc(25ch + 3 * var(--space-2) + 2px); min-height: 28px; }
+/* before the range: "Live" (a dot that breathes), the same at every range, so the control right of it never moves
+   and the row wraps the same whichever the range (issue 873) */
+.head-range .range-status { display: inline-flex; align-items: center; justify-content: flex-end; font-size: var(--text-xs); min-height: 28px; }
 .head-range .live { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: var(--text-xs); font-weight: 500; color: var(--ok); }
 .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 0 var(--ok); animation: live 2s ease-out infinite; }
 @keyframes live { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 50%, transparent); } 100% { box-shadow: 0 0 0 6px transparent; } }
 @media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
-.head-range .as-of { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--text-xs); white-space: nowrap; }
+
 /* the time range: square segments in one hairline frame, the one chosen a pale stone with a patina underline */
 .range { display: inline-flex; padding: 0; margin: 0; background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius); box-shadow: var(--bevel); }
 .range a { display: inline-flex; align-items: center; min-height: 30px; padding: 0 var(--space-3); border-radius: 0; color: var(--fg);

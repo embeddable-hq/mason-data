@@ -50,6 +50,29 @@ test("every event is read back as the sync recorded it, newest last; --failed is
   await store.writer.run(`DELETE FROM ${EVENTS_TABLE}`);
 });
 
+test("the scheduled syncs (polled, streamed) are kept, but read only when asked for: never taking a place of the newest n, nor among the failures", async () => {
+  const { SyncEvents, EVENTS_TABLE, SCHEDULED } = await events();
+  assert.deepEqual([...SCHEDULED], ["polled", "streamed"]);
+  let clock = Date.parse("2026-10-28T09:00:00.000Z");
+  const log = await SyncEvents.open(store, () => undefined, { days: 7, now: () => clock });
+  log.record({ kind: "poll_failed", table: "public.orders", message: "the poll failed" });
+  clock += 1000;
+  log.record({ kind: "recovered", table: "public.orders", message: "current again" });
+  // a busy minute of scheduled syncs after them: newer than the failure, more than the limit asked
+  for (let i = 0; i < 5; i++) { clock += 1000; log.record({ kind: "polled", table: "public.orders", message: `synced on schedule: ${i} changed` }); }
+  clock += 1000;
+  log.record({ kind: "streamed", table: "public.events", message: "streamed 3 changes (3 inserts) in the last 60 s" });
+  await log.flush();
+  assert.deepEqual((await log.recent({ limit: 2 })).map((e) => e.kind), ["poll_failed", "recovered"], "left out: the newest 2 are the others'");
+  assert.deepEqual((await log.recent({ limit: 2, scheduled: true })).map((e) => e.kind), ["polled", "streamed"], "asked for: the newest 2 of all");
+  assert.equal((await log.recent({ limit: 20, scheduled: true })).length, 8, "every one kept");
+  assert.deepEqual((await log.recent({ limit: 20, failed: true, scheduled: true })).map((e) => e.kind), ["poll_failed"], "never a failure");
+  const polled = (await log.recent({ limit: 20, scheduled: true })).find((e) => e.kind === "polled")!;
+  assert.equal(polled.failed, false);
+  await log.close();
+  await store.writer.run(`DELETE FROM ${EVENTS_TABLE}`);
+});
+
 test("a failure said again word for word is one event, until its table is current again or an hour has passed", async () => {
   const { SyncEvents, EVENTS_TABLE, REPEAT_MS } = await events();
   let clock = Date.parse("2026-10-28T10:00:00.000Z");

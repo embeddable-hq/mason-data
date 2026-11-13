@@ -2103,9 +2103,11 @@ rule for clicks — "clicking buttons in a table should not shift it around" —
 is a popover, every changing label keeps the room of its longest, and the Tables and Users lists have fixed columns
 (a disabled user's "Disabled <when>" once widened Users' Status column).
 
-**The ranges.** The views share one time range. Now (the last 15 minutes, read every few seconds) is the default,
-and every other range is read once and holds still, with when it was read and Refresh: a person comparing a past
-hour wants it to stay put. The Overview's links carry the range of what their card counts (24 hours; the sync's
+**The ranges.** The views share one time range. Now (the last 15 minutes, read every few seconds) was the default,
+and every other range was read once and held still, with when it was read and Refresh: a person comparing a past
+hour would want it to stay put. On 2026-11-13 the owner asked why every range could not be live: each ends now, and
+one held still read as stale. Every range is live since, and Now is "Last 15 mins". A longer range's reads scan more
+of the logs and move less in a few seconds, so 24 hours is read every 30 s and a week or more every minute. The Overview's links carry the range of what their card counts (24 hours; the sync's
 failures 7 days): with Now the default, a card of 12 failed statements once landed on an empty 15 minutes.
 
 **Measured.** A copy's size from `pragma_storage_info`: 61–72 ms cold on 30 M rows × 14 columns, metadata only but

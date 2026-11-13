@@ -783,9 +783,14 @@ export const RECENT_ERRORS = 5;
  */
 export interface RecentErrors { sync: SyncEvent[]; error: string | null; queries: LedgerRequest[]; queriesError: string | null }
 
+/** What an event of no one table says where a table's name goes (`table: null`: the database out of reach, the stream
+ *  as a whole, a restart): Mason's own. A table's name always has its schema and a dot, so the two never meet. The web
+ *  page says the same (src/web/shared.js `MASON_TABLE`, held equal by the tests). */
+export const MASON_TABLE = "Mason";
+
 /** One event of the sync on one line (src/duck/events.ts): when, what (a failure in red), its table, its reason's first line. */
 export function eventLine(e: SyncEvent, st: Style): string {
-  return `${e.at.slice(0, 19).replace("T", " ")}  ${(e.failed ? st.red : st.green)(e.kind.padEnd(18))}  ${e.table ?? "(the sync)"}  ${firstLine(e.message)}`;
+  return `${e.at.slice(0, 19).replace("T", " ")}  ${(e.failed ? st.red : st.green)(e.kind.padEnd(18))}  ${e.table ?? MASON_TABLE}  ${firstLine(e.message)}`;
 }
 
 /** mason status's sync errors: the latest few, a line each, newest last; none, no section. */
@@ -1767,11 +1772,11 @@ async function waitGenerated(run: DevRun, named: string, timeout: number, json: 
 
 // ------------------------------------------------------------------ mason logs
 
-/** What the sync's events leave out, said where they are listed (mason logs --help, the page's Sync events, held equal
- *  by tests/web-page.test.ts): a scheduled poll that succeeds is no event, so a person who synced reads where it is. */
-export const EVENTS_LEAVE_OUT = "A scheduled poll that succeeds is not listed: the last one's result is each table's last sync (mason status, the Tables page's Last sync).";
+/** What the sync's events leave out unless asked, said where they are listed (mason logs --help, the page's Sync
+ *  events, held equal by tests/web-page.test.ts): the scheduled syncs that succeed (src/duck/events.ts `SCHEDULED`). */
+export const EVENTS_LEAVE_OUT = "The scheduled syncs that succeed (each poll on its schedule, and each minute the stream applied changes, a line a table) are listed only with --scheduled.";
 
-const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<filters>] [--id <request id>]] [--events [--failed]] [--running] [--json]
+const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<filters>] [--id <request id>]] [--events [--failed | --scheduled]] [--running] [--json]
 
   The last lines of Mason's log: every sync, poll and statement it ran, warnings and errors with their reasons —
   running or not.
@@ -1784,6 +1789,7 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     mason logs --requests --slow --search orders   the statements over orders that took a second or more
     mason logs --requests --id <request id>   one request whole: its statement, its error, and a slow one's plan
     mason logs --events --failed  the sync's latest failures
+    mason logs --events --scheduled   every sync, the scheduled ones that succeeded too
     mason logs --running          the statements running now, and their sessions
 
   -n, --lines <n>  how many lines, or with --requests or --events how many of them (default 40; 1 to 10000 for each)
@@ -1793,6 +1799,7 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
   --events         the sync's events and the run's restarts (Mason must be running)
   --failed         with --requests: only the ones not answered (refused, failed or cancelled); with --events: only
                    the failures
+  --scheduled      with --events: the scheduled syncs that succeeded too (polled, streamed)
   --outcome <o,…>  with --requests: only these outcomes — ok, refused (the statement's own fault), failed (Mason's or
                    the machine's), cancelled (a cancel or a statement timeout, SQLSTATE 57014); a comma list or
                    the flag repeated, the same
@@ -1815,8 +1822,8 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
   reads them (--before). With --events, the sync's events: each first sync that failed or finished, each poll, catch-up or
   stream that failed, the database out of reach, a table current again, each sync asked by hand (mason sync, the
   page's Sync now) and what it did, and each restart of the run — a line each, newest last (a failure repeated word for
-  word is said once an hour). A scheduled poll that succeeds is not listed: the last one's result is each table's last
-  sync (mason status, the Tables page's Last sync). Both are kept MASON_HISTORY_DAYS days
+  word is said once an hour). The scheduled syncs that succeed (each poll on its schedule, and each minute the stream
+  applied changes, a line a table) are listed only with --scheduled. Both are kept MASON_HISTORY_DAYS days
   (default 7) in the run's synced data, and read through the running Mason. With --running, the statements running now
   instead, one per session, each with its number (mason cancel <session> --statement <n> stops one).
 
@@ -1832,7 +1839,8 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     before (the position of the page before,
     or null: none older) }; with --events { events: [{ at, kind (copy_failed, poll_failed,
     catch_up_failed, stream_failed, source_unreachable, generated_failed, compact_failed, restart, copied, recovered, synced (a sync
-    asked by hand), sync_changed (a table's sync: changed)), failed, table (null: the whole sync),
+    asked by hand), sync_changed (a table's sync: changed), polled (a poll on its schedule, with --scheduled), streamed (a
+    minute of the stream's changes to a table, with --scheduled)), failed, table (null: the whole sync),
     message }], keptDays }; with --running { running: [{ session, user,
     applicationName, method, startedAt, runningMs, rows (sent so far), query, queryTruncated }] }; next
 `;
@@ -1843,7 +1851,7 @@ export const LOGS: CommandSpec & { needs: "project" } = {
   summary: "Mason's log (-f follows it); --requests: the Postgres API's statements; --events: the sync's; --running: running now",
   usage: LOGS_USAGE,
   options: { lines: { type: "string", short: "n" }, follow: { type: "boolean", short: "f" }, start: { type: "boolean" },
-    requests: { type: "boolean" }, events: { type: "boolean" }, failed: { type: "boolean" }, outcome: { type: "string", multiple: true }, since: { type: "string" },
+    requests: { type: "boolean" }, events: { type: "boolean" }, failed: { type: "boolean" }, scheduled: { type: "boolean" }, outcome: { type: "string", multiple: true }, since: { type: "string" },
     until: { type: "string" }, user: { type: "string" }, client: { type: "string" }, slow: { type: "boolean" }, search: { type: "string" }, before: { type: "string" }, id: { type: "string" }, running: { type: "boolean" }, json: { type: "boolean" } },
   json: ["lines", "requests", "events", "keptDays", "before", "running", "next"],
 };
@@ -1955,21 +1963,23 @@ async function requestLogs(q: RequestQuery, json: boolean): Promise<number> {
 }
 
 /** mason logs --events: the sync's events and the run's restarts through its command server (src/duck/events.ts) */
-async function eventLogs(limit: number, failedOnly: boolean, json: boolean): Promise<number> {
+async function eventLogs(limit: number, failedOnly: boolean, scheduled: boolean, json: boolean): Promise<number> {
   const r0 = await theRun(process.cwd());
   if ("problem" in r0) return failed("logs", r0, { json });
   return guarded("logs", json, async () => {
-    const reply = await callRun(r0.run, "GET", `/api/events?limit=${limit}${failedOnly ? "&failed=1" : ""}`);
+    const reply = await callRun(r0.run, "GET", `/api/events?limit=${limit}${failedOnly ? "&failed=1" : ""}${scheduled ? "&scheduled=1" : ""}`);
     if (reply.status !== 200) {
       return failed("logs", runFailure(reply, [["mason status", "each synced table and its error now"], ["mason logs", "Mason's log, where each event is a line too"]]), { json });
     }
     const events = reply.body.events as SyncEvent[];
     const keptDays = Number(reply.body.keptDays);
     const next: NextStep[] = failedOnly ? [["mason logs --events", "every event, the first syncs finished and the tables current again too"], ["mason status", "each synced table and its error now"]]
-      : [["mason logs --events --failed", "only the failures"], ["mason status", "each synced table and its error now"]];
+      : [["mason logs --events --failed", "only the failures"], ...(scheduled ? [] : [["mason logs --events --scheduled", "the scheduled syncs that succeeded too"] as NextStep]),
+        ["mason status", "each synced table and its error now"]];
     if (json) { out(jsonText(LOGS, { events, keptDays }, next)); return 0; }
     const st = styleOut();
-    if (!events.length) out(`No ${failedOnly ? "sync failure" : "sync event"} in the last ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_HISTORY_DAYS).`);
+    if (!events.length) out(`No ${failedOnly ? "sync failure" : "sync event"} in the last ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_HISTORY_DAYS)` +
+      `${failedOnly || scheduled ? "" : ", but for the scheduled syncs that succeeded: --scheduled lists them"}.`);
     for (const e of events) out(eventLine(e, st));
     out(endText({ next }, st));
     return 0;
@@ -2012,6 +2022,8 @@ export async function logs(argv: string[]): Promise<number> {
   const json = f.values.json === true;
   if (f.values.requests && f.values.events) return failed("logs", { message: "--requests and --events are two lists: ask for one", code: "usage", fix: "mason logs --requests, or mason logs --events" }, { json });
   if (f.values.failed && !f.values.requests && !f.values.events) return failed("logs", { message: "--failed is a filter of --requests or --events", code: "usage", fix: "mason logs --requests --failed, or mason logs --events --failed" }, { json });
+  if (f.values.scheduled && !f.values.events) return failed("logs", { message: "--scheduled is a filter of --events", code: "usage", fix: "mason logs --events --scheduled" }, { json });
+  if (f.values.scheduled && f.values.failed) return failed("logs", { message: "--failed lists the failures alone, and --scheduled adds the scheduled syncs that succeeded: ask for one", code: "usage", fix: "mason logs --events --failed, or mason logs --events --scheduled" }, { json });
   // the request log's own filters (--failed is --events' too)
   const filter = FILTER_FLAGS.find((k) => k !== "failed" && f.values[k] !== undefined);
   if (filter !== undefined && !f.values.requests) {
@@ -2043,7 +2055,7 @@ export async function logs(argv: string[]): Promise<number> {
   if (f.values.events) {
     const limit = eventLimit(typeof f.values.lines === "string" ? f.values.lines : undefined, "-n");
     if (typeof limit !== "number") return failed("logs", { ...limit, usage: LOGS_USAGE }, { json });
-    return eventLogs(limit, f.values.failed === true, json);
+    return eventLogs(limit, f.values.failed === true, f.values.scheduled === true, json);
   }
   // a stopped run's log is still worth reading: the project's, running or not
   const t = theProject(process.cwd());

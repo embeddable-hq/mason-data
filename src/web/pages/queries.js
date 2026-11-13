@@ -6,7 +6,7 @@
  * user and client, over the shared time range (the hash's `range`, the only window: a `since` in an old hash is
  * ignored) — and paged back by Older;
  * Started, Duration and Rows sort the page shown (the pages follow the log's order by start: a sort of the whole log
- * would need a cursor per order). Read every 5 s while the range is Now, once when another is chosen. A statement is one
+ * would need a cursor per order). Read every 5 s, a longer range at its own rate (`rangeEvery`). A statement is one
  * or two lines in its cell, its title at most TITLE_MAX characters, and its expanded row the first STATEMENT_MAX of it.
  * The words are the commands': a request's duration in ms, its error, the empty log's sentence — and, while the log is
  * empty and unfiltered, one quiet line leading to the Users page, where a tool's user is made. Usage's rows lead here
@@ -74,7 +74,7 @@ function planHtml(r) {
  * names the filters, as the command's does; `span` the range's words (the empty log's). `now` is the page's clock.
  * Under the list, always, one small quiet line: what the log does not list (UNLISTED_STATEMENTS, as `mason logs
  * --requests` says it), so a `select 1` typed to test a connection is not looked for in vain.
- * `firstTool`: an empty, unfiltered log adds one quiet line, Create a user (a link to the Users page) to connect your
+ * `firstTool`: an empty, unfiltered log adds one quiet line, Create a user (a button to the Users page) to connect your
  * first tool — false where the page makes no user (`usersReadOnly`).
  */
 export function renderRequests(page, { paged = false, filtered = false, isOpen = () => false, now = Date.now(), sort = NEWEST_FIRST, span = "", firstTool = false } = {}) {
@@ -85,7 +85,7 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
     const days = `${page.keptDays} day${page.keptDays === 1 ? "" : "s"}`;
     return empty(`${filtered ? "No query matches the filters" : "No queries"} in ${span || `the last ${days}`}.`) +
       // nothing asked yet (no filter, the newest page): where a tool's user is made, in a line
-      (filtered || paged || !firstTool ? "" : `<p class="empty first-tool"><a href="${USERS_HASH}">Create a user</a> to connect your first tool.</p>`) + unlisted + nav;
+      (filtered || paged || !firstTool ? "" : `<p class="empty first-tool"><a class="btn small primary" href="${USERS_HASH}">Create a user</a> to connect your first tool.</p>`) + unlisted + nav;
   }
   const newest = [...page.requests].reverse();
   const list = sort.key === "started" && sort.dir === "desc" ? newest : sortedBy(newest, REQUEST_SORTS[sort.key] ?? REQUEST_SORTS.started, sort.dir);
@@ -203,8 +203,8 @@ export const page = {
     };
     return {
       model: m,
-      // the newest page of the log every 5 s while the range is Now (30 s while a search is set), once when another
-      // range is chosen; an older page only when first asked. The state (whether the page makes users, for the empty log's line) every 30 s,
+      // the newest page of the log every 5 s (30 s while a search is set), a longer range at its own rate; an older
+      // page only when first asked. The state (whether the page makes users, for the empty log's line) every 30 s,
       // and the users (the User filter's choices) at the Users page's rate
       reads: () => [{ path: path(), everyMs: m.before !== null ? Infinity : rangeEvery(ctx.range(), m.filters.search ? SEARCH_EVERY_MS : NEWEST_EVERY_MS) }, { path: STATE, everyMs: 30_000 },
         { path: USERS, everyMs: USERS_EVERY_MS }],

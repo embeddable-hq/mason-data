@@ -402,14 +402,26 @@ export function createShare(ctx) {
  * Shown under MASON_UI_READ_ONLY=1 too when its users are the page's own (MASON_UI_READ_ONLY_ALLOW=users). Each field
  * (a label and its control) is one span, so the form lays out as one line where its card is wide enough and wraps by
  * field, never between a label and its control, below that (app.css `#add-user`). `inBox`: the form is the "New user"
- * pane of the add box (`renderAddKinds`), whose box is the card, so it is none of its own.
+ * pane of the add box (`renderAddKinds`), whose box is the card, so it is none of its own. Under it, one line on roles
+ * (`ROLES_LINE`), with or without a roles file.
  */
 export function renderAddUser(state, inBox = false) {
   if (state === undefined || state === null || usersReadOnly(state) !== null) return "";
   return `<form id="add-user"${inBox ? "" : ` class="formcard"`} autocomplete="off"><span class="name-field"><label for="user-name">Name</label> ` +
     `<input id="user-name" name="name" required placeholder="e.g. metabase" spellcheck="false" autocapitalize="off"></span>` +
-    roleChoice(state.roles) + connectsChoice("add-user") + `<button type="submit" class="primary">Add a user</button></form>`;
+    roleChoice(state.roles) + connectsChoice("add-user") + `<button type="submit" class="primary">Add a user</button>${ROLES_LINE}</form>`;
 }
+
+/** Where the README says how to write roles (its "Access control" section, on the public repository): the one site
+ *  the page links to. A link loads nothing into the page, so the CSP holds. It sends no referrer, since the page's
+ *  address may carry a host's token (`/page/<token>/`). It opens in the same tab, as the host's links do (app.js): a host
+ *  may serve the page in a CSP sandbox with no `allow-popups`, where a `target="_blank"` link silently opens nothing. */
+export const ROLES_DOCS_URL = "https://github.com/embeddable-hq/mason-data#access-control";
+
+/** The add form's line on roles, its last row (app.css): the page cannot write a role, so it names the file, and links
+ *  to the README's section that shows how. */
+export const ROLES_LINE = `<p class="dim roles-line">Roles limit a user to some tables and columns. ` +
+  `You write them in ${code("mason/roles.yml")}, and <a href="${ROLES_DOCS_URL}" rel="noreferrer">the README</a> shows how.</p>`;
 
 /** The add form's Role choice from `/api/state` `roles`: "" with no roles file, one naming none, or one that cannot be
  *  read now (the roles it names are not known then) */
@@ -421,7 +433,7 @@ function roleChoice(r) {
     `${r.roles.filter((n) => n !== dflt).map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("")}</select></span> `;
 }
 
-/** A user's statements: Observability › Queries filtered to it, over the last 24 hours (Now's 15 minutes would mostly be empty). */
+/** A user's statements: Observability › Queries filtered to it, over the last 24 hours (the default 15 minutes would mostly be empty). */
 export const userQueriesHref = (name) => `#observability/queries?${new URLSearchParams({ user: name, range: "24h" })}`;
 
 /** A user's Disable, or Enable once disabled: one room (ROOMS.disable), so the row's actions keep their width; held

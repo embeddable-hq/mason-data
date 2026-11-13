@@ -358,7 +358,7 @@ test("a chunk out of memory switches the copy to one reader as it is seen: while
   }
 });
 
-test("a sync asked by hand (mason sync, the page's Sync now) is a synced event in mason sync's words; a scheduled poll that succeeds records none", async () => {
+test("a sync asked by hand (mason sync, the page's Sync now) is a synced event in mason sync's words; a scheduled poll that succeeds is a polled event in them", async () => {
   const s = await shared();
   const dir = tmp("synced");
   dirs.push(dir);
@@ -380,7 +380,12 @@ test("a sync asked by hand (mason sync, the page's Sync now) is a synced event i
     events.length = 0;
     await s.change();
     await sync.once();
-    assert.deepEqual(events.filter((e) => e.kind === "synced"), [], `a scheduled poll records nothing: ${JSON.stringify(events)}`);
+    assert.deepEqual(events.filter((e) => e.kind === "synced"), [], `a scheduled poll is never a sync by hand: ${JSON.stringify(events)}`);
+    // ONE polled event a poll, in the words mason sync prints, after "synced on schedule"
+    const polled = events.filter((e) => e.kind === "polled");
+    assert.equal(polled.length, 1, `the scheduled poll's event: ${JSON.stringify(events)}\n${logged.slice(-6).join("\n")}`);
+    assert.equal(polled[0]!.table, "public.orders");
+    assert.match(polled[0]!.message, /^synced on schedule: [\d,]+ changed, [\d,]+ deleted, [\d,]+ rows now · [\d.]+ (ms|s)$/);
     await s.change();
     const asked = await sync.pollNow(["public.orders"]);
     const synced = events.filter((e) => e.kind === "synced");

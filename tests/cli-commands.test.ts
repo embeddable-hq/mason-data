@@ -464,7 +464,7 @@ test("the sync's events: a line each in mason logs --events and mason status's S
   const failedCopy = { at: "2026-10-28T09:00:00.000Z", kind: "copy_failed", failed: true, table: "public.orders", message: "the source closed the connection\nmore detail" };
   const restart = { at: "2026-10-28T09:05:00.000Z", kind: "restart", failed: true, table: null, message: "the run stopped (it crashed (SIGSEGV)) after 42 s up, and its supervisor started it again" };
   assert.equal(eventLine(failedCopy, PLAIN), "2026-10-28 09:00:00  copy_failed         public.orders  the source closed the connection");
-  assert.equal(eventLine(restart, PLAIN), "2026-10-28 09:05:00  restart             (the sync)  the run stopped (it crashed (SIGSEGV)) after 42 s up, and its supervisor started it again");
+  assert.equal(eventLine(restart, PLAIN), "2026-10-28 09:05:00  restart             Mason  the run stopped (it crashed (SIGSEGV)) after 42 s up, and its supervisor started it again");
   assert.deepEqual(syncErrorLines({ sync: [failedCopy, restart], error: null }, PLAIN), [
     "\nSync errors (the latest, newest last; mason logs --events lists every event):",
     `  ${eventLine(failedCopy, PLAIN)}`, `  ${eventLine(restart, PLAIN)}`]);
@@ -1267,6 +1267,9 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
       [["usage", "--since", "2026-10-28T09:00:00"], /mason usage: --since "2026-10-28T09:00:00" is not a time/],
       [["logs", "--events", "-n", "20000"], /mason logs: -n is a whole number of events, 1 to 10000/],
       [["logs", "--events", "-n", "0"], /mason logs: -n is a whole number of events, 1 to 10000/],
+      [["logs", "--scheduled"], /mason logs: --scheduled is a filter of --events/],
+      [["logs", "--requests", "--scheduled"], /mason logs: --scheduled is a filter of --events/],
+      [["logs", "--events", "--failed", "--scheduled"], /mason logs: --failed lists the failures alone, and --scheduled adds the scheduled syncs that succeeded: ask for one/],
       [["logs", "--running", "-n", "5"], /mason logs: --running lists every statement running now: -n \(--lines\) does not apply to it/],
     ] as Array<[string[], RegExp]>) {
       const a = await run(argv);

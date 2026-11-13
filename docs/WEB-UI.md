@@ -31,12 +31,12 @@ the address's hash, so a view can be bookmarked and Back goes to the one before:
 | `#observability/syncs` | Observability › Sync events; `?failures=1` ticks Failures only, `?table=` chooses the table |
 
 The hashes of before still land on their view: `#status` is the Overview, `#queries` and `#usage` their views, `#logs`
-and `#observability/logs` Sync events. In each Observability view's header row, right of its title, is **the time range the three share**: a segmented control — **Now** · Last hour · 24 hours · 7 days · 30 days · 90 days, Now unless the hash says (`?range=1h`, `?range=7d`, `?range=90d`); 30 and 90 days only where Mason keeps that much history (`MASON_HISTORY_DAYS`, 7 by default), else shown disabled with that setting as the reason
-— kept in the hash, so a link carries it (the sidebar's links to the three keep it too). **Now is live**: the last 15
-minutes, read every few seconds, said **Live** left of the control. **Every other range is read once**, when it is
-chosen, and stays as it was then: left of the control, when it was read and **Refresh**, in room kept for the longest
-of the two, so the control never moves when the range changes, at any width. Queries reads the request log since then,
-Usage the range's statements, clients and samples (a minute a point for Now and the hour, an hour for the day, six hours
+and `#observability/logs` Sync events. In each Observability view's header row, right of its title, is **the time range the three share**: a segmented control — **Last 15 mins** · Last hour · 24 hours · 7 days · 30 days · 90 days, the last 15 minutes unless the hash says (`?range=1h`, `?range=7d`, `?range=90d`); 30 and 90 days only where Mason keeps that much history (`MASON_HISTORY_DAYS`, 7 by default), else shown disabled with that setting as the reason
+— kept in the hash, so a link carries it (the sidebar's links to the three keep it too). **Every range is live**, said **Live**
+left of the control (the same word at every range, so the control never moves when the range changes). Each is read
+again by itself: the last 15 minutes and the hour every few seconds, 24 hours every 30 seconds, and a week or more
+every minute, since those reads scan more of the logs. Live's title says how often. Queries reads the request log since then,
+Usage the range's statements, clients and samples (a minute a point for the last 15 minutes and the hour, an hour for the day, six hours
 for the week, a day for 30 and 90 days), Sync events the sync's events since then; each
 view's own filters compose with it. Only the view shown asks Mason anything, each read at the rate its data changes,
 and nothing while the tab is hidden. How long ago Mason last answered is at the sidebar's foot.
@@ -66,7 +66,9 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   Tables, **Create a user first** → Users, where a user is added for it; the step's text stays Connect a tool). Connect a tool is done once a tool has used
   Mason, never because a user exists: a session of a `mason user` open now (`/api/state` `sessions.byClient`, which a
   tool's login with only its catalog queries already makes), one seen open while the page was shown (held by the page),
-  or a statement completed in the request log's week (`/api/queries`). Gone once the three are done; not drawn while it
+  or a statement completed in the request log's week (`/api/queries`). **While it is shown, it is the whole Overview**:
+  the word's box, the cards and the rest appear once the three are done and it goes. The word's box is shown over it
+  only while it says Failed, or while the state cannot be read now, so a failure during setup is never hidden. Not drawn while it
   cannot tell (no session, and the request log's summary unanswered or failed). On a read-only page that adds no user
   the step shows without its button. How to connect is not on the Overview: it is on Queries' empty log, and the Users page.
 - **Overview**, the tables not synced yet: a bar each with the line `mason wait` prints (a first sync not begun shimmers,
@@ -116,9 +118,13 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
 - **Tables**, an added table's **columns**, on its note beside its sync: which it syncs in a few words — "All columns",
   "5 of 12 columns" or "All but 1 column", the columns themselves its tooltip (`/api/state` `tables[].entry`,
   `addedColumns`, `columnCount`). It is a button that opens the table's **column form**, a dialog beside it that reads
-  `GET /api/tables/<table>/columns` once, as it opens, ticked as the entry says: its `columns:`; none ticked for every
-  column (`{}`, or the `exclude:` of secret-looking columns `mason add` writes: `everyColumnLeavesOut`); and, for a
-  table with no primary key, its `key:`. Before Save it says what saving costs: the table is synced again in full from
+  `GET /api/tables/<table>/columns` once, as it opens. It has two choices: **All columns, and any added to the table
+  later**, chosen for every column (`{}`, or the `exclude:` of secret-looking columns `mason add` writes:
+  `everyColumnLeavesOut`, which All names); and **Only these columns**, chosen for a `columns:` list, with its boxes
+  under it ticked as the list says. The boxes are hidden while All is chosen (by the radio, in app.css), and are every
+  column but what All leaves out, so choosing Only these starts from what is synced. Only these with no box ticked is
+  refused on the page, since an empty list would be sent as every column. For a table with no primary key, it also
+  ticks its `key:`. Before Save it says what saving costs: the table is synced again in full from
   the database, which takes a while and adds load on a big table, and its synced data can still be queried until the
   new sync finishes; saving the same columns changes nothing and starts no sync. Save sends `POST /api/pick`
   `{ table, picked: true, columns?, key? }`, as `mason add <table> --columns …` does, its sync kept; boxes that say what
@@ -133,8 +139,12 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   --sync …` does, writing the entry's `sync:` line alone:
   - **Off**, the default: synced once, then only by Sync now. Nothing turns on load on the database unless chosen.
   - **Every 5 minutes, 15 minutes, hour or day** (presets only), each saying it scans the whole table on the database at
-    that interval. For a table over 1,000,000 rows each says what a poll costs the database (`pollEstimate`, the estimate
-    `mason add` prints), and saving one asks first, with that cost.
+    that interval. For a table over 1,000,000 rows, what every interval shares is said once over the choices: the
+    table's rows, and how long a scan takes and how that was found (measured, from its first sync, or a guess). Each
+    interval then says its own share: how much of the time it keeps one connection busy (in the warning colour at 10 %
+    or more), and how often it really runs where a long scan stretches it. The numbers are `pollLoad`'s, the estimate
+    `mason add` prints in its own words; the page never shows the CLI's sentence or its flags. Saving one asks first,
+    with that cost.
   - **Live (replication)**, the word beside `sync: replication` in the sources file: changes stream from the database's
     change log, with no scans. It can be chosen only when every check passes, else it is shown disabled with each
     failing check in Mason's words and the SQL that fixes it: the table's own (a primary key; not REPLICA IDENTITY
@@ -151,7 +161,8 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   `MASON_UI_READ_ONLY=1` without `MASON_UI_READ_ONLY_ALLOW=tables`) the sync is said alone, with no button, the reason
   its title and above the list.
 - **Tables**, a table not added: its rows, its key and why it cannot be added as it is. **Add** syncs every column, as
-  `mason add <table>` does; **Columns…** opens a form to tick the columns to sync; **Name its key…** does the same for a
+  `mason add <table>` does; **Columns…** opens a form with the same two choices (All columns at first, every box ticked
+  under Only these columns); **Name its key…** does the same for a
   table with no primary key.
 - **Users** (`#users`), in this order: the list of users, right under the title (and its read-only line), then the add
   box (the add form; and, where it may be opened, a Temporary cloud login) with the card of what it made beside it,
@@ -267,14 +278,14 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   A statement that reads no synced table (`select 1`, `select now()`, SET, SHOW, a BI tool's catalog queries) is
   answered without the synced data and **not listed** — the protocol's chatter, hundreds a connection from a BI tool — and the
   page says so once, in a small quiet line under the list (empty or not), as `mason logs --requests` says it.
-- **Observability › Usage** (`#observability/usage`): every part follows the range. Cards: under Now, the sessions
+- **Observability › Usage** (`#observability/usage`): every part follows the range. Cards: over the last 15 minutes, the sessions
   connected and the statements running; under any other range, the clients that sent statements in it; then the
   range's statements, failed, p95 and what was sent (bytes, and rows under it), each with a sparkline — the statement
   cards lead to Queries filtered to what they count (all, failed, slow).
-- **Usage**, connected: under Now, who is connected now — a row per user and client, the 10 with the most sessions and
+- **Usage**, connected: over the last 15 minutes, who is connected now — a row per user and client, the 10 with the most sessions and
   one row for the others; under any other range, who sent statements in it, the most first, with their failed ones,
   sessions and last statement. Each row's **Queries** opens the request log filtered to that user and client.
-- **Usage**, running: under Now, each statement running with how long it has run (moving with each poll; when it started is its title) and **Cancel**, which asks first and stops that one statement, as
+- **Usage**, running: over the last 15 minutes, each statement running with how long it has run (moving with each poll; when it started is its title) and **Cancel**, which asks first and stops that one statement, as
   `mason cancel` does; under any other range, the slowest statements that completed in it, each with **Queries**.
 - **Usage**, unsupported SQL: the statements of the range Mason refused for SQL it does not support, grouped by their
   entry of `docs/SQL-SUPPORT.md` (named, as the page cannot link into the repository), the most refused first — how
@@ -285,8 +296,11 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   samples, newest first (**Time** sorts them), sit behind a closed details, and the process's memory behind another.
 - **Observability › Sync events** (`#observability/syncs`): the sync's events of the range — each first sync, each
   failure and recovery, each sync asked by hand (`synced`: `mason sync`, a table's **Sync now**) — newest first (**When**
-  turns it round), with when, kind, table and reason. A scheduled poll that succeeds is not listed (one every few
-  seconds would bury the failures): the last one's result is each table's **Last sync** on Tables. **Failures only**, a **Kind** (every kind of event) and a **Table** (every added table, whether the range has an event of it or not: one with none says so by its name) narrow the list; 100 are
+  turns it round), with when, kind (in words: Manual sync, Full sync, Scheduled sync, Live sync, Scheduled sync failed…;
+  the code `mason logs --events` prints is its title), table and reason. The scheduled syncs that succeed (each poll on
+  its schedule, and each minute the stream applied changes, a row a table) are listed only while **Scheduled syncs** is
+  ticked, or one of their kinds is chosen: Mason is asked for them then (`?scheduled=1`), so they never push a failure
+  out of the newest 500 read. **Failures only**, a **Kind** (every kind of event) and a **Table** (every added table, whether the range has an event of it or not: one with none says so by its name) narrow the list; 100 are
   written at once, then **Show more**.
 - **Sync events**, the run's raw log: behind a closed details, for debugging (it has internal tags and paths), newest first. Mason
   is asked for it only while the details is open.
@@ -735,7 +749,8 @@ for a foreign key, else null). A table the catalog lacks is `404` `not_found`. A
 the polled `/api/state`), with `<table>` URL-encoded. The answer has `table`; `sync`, its sync now as the sources file
 says it (`{ value, from }`, `from` `entry`, `file` or `default`), or null for a table not added; `rows`; `bigRows` (over
 1,000,000 rows: the page asks before saving a poll); `polls`, the polls offered (`{ sync, seconds, cost }`: `poll 5m`,
-`poll 15m`, `poll 1h`, `poll 1d`, `cost` the estimate for a big table, else null); and `live`: `allowed` (no check
+`poll 15m`, `poll 1h`, `poll 1d`, `cost` the estimate for a big table, else null: `{ rows, scanSeconds, everySeconds,
+busyPercent, basis: measured | first-sync | assumed, rowsPerSecond }`); and `live`: `allowed` (no check
 refused) and `checks`, each `{ name, state, detail, sql? }` with `state` `ok`, `warn` or `refused` — the table's own
 (`primary key`, `replica identity`), then the database's (`wal_level`, `standby`, `replication role`, `slot`, `wal
 senders`, `WAL cap`, `publication`), read now over one connection that reads settings, the catalog and the statistics

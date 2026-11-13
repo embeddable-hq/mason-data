@@ -462,14 +462,17 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   const renderTables = fn<[unknown, Ui?], string>("renderTables");
   const html = renderTables(CATALOG_STATE);
   const text = textOf(html);
-  // ONE table: an added table shows its sync columns, one not added its rows and key; seven short columns, whatever is
-  // long (a reason, an error, a copy's words, a Remove's question) a line of its own under the row
-  assert.match(text, /^Table State Rows Key Last sync Size public\.customers /);
-  assert.equal([...html.matchAll(/<table /g)].length, 1, "the added tables are not listed twice");
+  // TWO tables, Added over Not added: an added table shows its sync columns, one not added its rows and key; seven short
+  // columns, whatever is long (a reason, an error, a copy's words, a Remove's question) a line of its own under the row
+  assert.match(text, /^Added \(3\) Table State Rows Key Last sync Size public\.customers /);
+  assert.equal([...html.matchAll(/<table /g)].length, 2, "two tables: Added, then Not added");
+  const listed = [...html.matchAll(/<th scope="row" class="name"><code class="name" title="([^"]*)">/g)].map((m) => m[1]);
+  assert.equal(new Set(listed).size, 7, "each table listed once");
   assert.match(text, /public\.customers Synced 100% 1,200 key id View events Sync now Remove Sync… All columns public\.orders /, "every added table has its bar: 100% once copied");
   assert.equal([...html.matchAll(/<span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`).join(", "),
     "ok Synced, ok Synced, ok Synced, unknown Not added, unknown Not added, unknown Not added, unknown Not added", "a state is a dot AND the CLI's word");
-  assert.match(html, /^<div class="panel"><table class="catalog">/, "one table, in a card");
+  assert.match(html, /^<h3 class="list-h">Added <span class="dim">\(3\)<\/span><\/h3><div class="panel"><table class="catalog">/, "Added: its heading and count over its card");
+  assert.match(html, /<\/table><\/div><h3 class="list-h">Not added <span class="dim">\(4\)<\/span><\/h3><div class="panel"><table class="catalog">/, "Not added under it, a card of its own");
   assert.match(text, /public\.audit Not added ~50 rows key id Add Columns… public\.accounts /);
   assert.match(text, /public\.event_log Not added ~900 rows no key Name its key… cannot be added as it is: no primary key: name the columns that tell its rows apart, mason add event_log --key tenant_id,id \(its unique index event_log_tenant_id_id_key\) public\.staging /);
   assert.match(html, /<\/tr><tr class="under note"><td colspan="7"><div class="under-body">(?:<span class="fold[^"]*" data-fold="[^"]*"><\/span>)*<span class="dim">cannot be added as it is: no primary key/, "the reason on a line of its own under its row, across every column");
@@ -492,7 +495,7 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   assert.equal(textOf(popOf(asking, "act-tables-public.customers")), "Remove customers? Mason will stop syncing it and delete its synced data. Remove customers Cancel");
   // its Remove where it was, held down; the question a dialog anchored to the row's actions, written after the table
   assert.match(asking, /<td class="act" id="act-tables-public\.customers"><a class="btn small" href="#observability\/syncs\?table=public\.customers&amp;range=7d">View events<\/a> <button type="button" class="small" data-sync-table="public\.customers" data-room="Syncing…">Sync now<\/button> <button type="button" class="danger small" aria-expanded="true" disabled>Remove<\/button><\/td><\/tr>/);
-  assert.match(asking, /<\/table><\/div><div class="pop ask" data-anchor="act-tables-public\.customers" role="dialog" aria-label="Remove customers\?"><p class="confirm">Remove customers\?/);
+  assert.match(asking, /<\/table><\/div><div class="pop ask" data-anchor="act-tables-public\.customers" role="dialog" aria-label="Remove customers\?"><button type="button" class="pop-x"[\s\S]*?<\/button><p class="confirm">Remove customers\?/);
   assert.match(asking, /<button type="button" class="danger small" data-confirm-remove-table="public\.customers">Remove customers<\/button>/);
   assert.match(asking, /data-confirm-remove-table="public\.customers"/);
   assert.ok(!/data-confirm-remove-table="public\.orders"/.test(asking), "only the one asked");
@@ -501,9 +504,12 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   const keyForm = renderTables(CATALOG_STATE, { choosing: "public.event_log", columns: columnsOf("public.event_log") });
   assert.match(keyForm, /<form class="pick" data-pick-form="public\.event_log"/);
   assert.match(keyForm, /<button type="submit" class="primary small">Add event_log<\/button>/);
-  assert.match(textOf(keyForm), /Its key: the columns that tell its rows apart tenant_id bigint id bigint payload jsonb The columns to sync \(tick none to sync every column\) tenant_id bigint id bigint payload jsonb Add event_log Cancel/);
+  assert.match(textOf(keyForm), /Its key: the columns that tell its rows apart tenant_id bigint id bigint payload jsonb The columns to sync All columns, and any added to the table later Only these columns tenant_id bigint id bigint payload jsonb Add event_log Cancel/);
   assert.deepEqual([...keyForm.matchAll(/name="(key|columns)" value="([^"]*)"/g)].map((m) => `${m[1]}=${m[2]}`),
     ["key=tenant_id", "key=id", "key=payload", "columns=tenant_id", "columns=id", "columns=payload"]);
+  // All at first; under Only these every box ticked, so choosing it starts from every column; the key's boxes none
+  assert.deepEqual([...keyForm.matchAll(/name="(which|key|columns)" value="([^"]*)" checked/g)].map((m) => `${m[1]}=${m[2]}`),
+    ["which=all", "columns=tenant_id", "columns=id", "columns=payload"]);
   const columnsForm = renderTables(CATALOG_STATE, { choosing: "public.accounts", columns: columnsOf("public.accounts") });
   assert.ok(!/name="key"/.test(columnsForm) && !/Its key/.test(columnsForm), "a table with a primary key is copied by it: no key to name");
   assert.deepEqual([...columnsForm.matchAll(/name="columns" value="([^"]*)"/g)].map((m) => m[1]), ["id", "email", "password_hash"]);
@@ -513,7 +519,7 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   assert.match(textOf(popOf(said, "act-tables-public.accounts")), /^Added public\.accounts: every column but password_hash\. .* Dismiss$/);
   assert.equal(textOf(withoutPops(said)), textOf(html), "and nothing inserted into the table");
   const gone = renderTables(CATALOG_STATE, { outcome: { table: "public.gone", failure: { code: "not_found", message: "public.gone is not a table of shop that this user can read" } } });
-  assert.match(textOf(gone), /^✗ public\.gone is not a table of shop that this user can read Table State /);
+  assert.match(textOf(gone), /^✗ public\.gone is not a table of shop that this user can read Added \(\d+\) Table State /);
   assert.equal(textOf(renderTables({ ...NONE, tables: [] })), "shop has no table this user can read.");
   assert.match(renderTables({ ...NONE, tables: [] }), /^<p class="empty">[^<]* has no table this user can read\.<\/p>$/, "nothing to list is the empty state: one quiet line");
 });
@@ -820,7 +826,7 @@ test("a read-only page: no add, create or write link anywhere — Queries' empty
   for (const lead of LEADS) assert.ok(!lead.test(shown.all), `read-only: ${lead}`);
   // Queries' empty log leads to the Users page in a line, unless the page makes no user; the Overview has no Connect (the owner's, 2026-11-12)
   for (const page of [open, shown]) assert.ok(!/class="connect[ "]|data-copy="connect-/.test(page.overview), "no Connect on the Overview");
-  assert.match(open.byPage.get("queries")!, /<p class="empty first-tool"><a href="#users">Create a user<\/a> to connect your first tool\.<\/p>/, "unset: Queries' Create a user");
+  assert.match(open.byPage.get("queries")!, /<p class="empty first-tool"><a class="btn small primary" href="#users">Create a user<\/a> to connect your first tool\.<\/p>/, "unset: Queries' Create a user");
   assert.ok(!/first-tool/.test(shown.byPage.get("queries")!), "read-only: no line");
   // the Overview and Usage say why their controls are missing, as Tables and Users do; unset, none says it
   const lines = new Map([["status", `Nothing is added or created from this page: ${why}.`], ["usage", `Queries are not cancelled from this page: ${why}.`],
@@ -1615,6 +1621,11 @@ test("the users' add form: a Role choice where the roles file names roles, its d
   assert.equal(renderAddUser(stateOf([], { roles: rolesLive([], null) })), plain, "a file naming no role: as before");
   assert.equal(renderAddUser(stateOf([], { roles: rolesLive(["agent"], "agent", "mason/roles.yml: it is not YAML") })), plain, "while it cannot be read: no choice");
   assert.equal(renderAddUser({ ...state, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" }), "", "read-only: no form, no choice");
+  // one line on roles under the form, with roles or without: the file and the command that explains it
+  // the link opens in the same tab: a host's CSP sandbox with no allow-popups silently drops a target="_blank" one
+  for (const html of [form, plain]) assert.match(html, /<\/button><p class="dim roles-line">Roles limit a user to some tables and columns\. You write them in <code>mason\/roles\.yml<\/code>, and <a href="https:\/\/github\.com\/embeddable-hq\/mason-data#access-control" rel="noreferrer">the README<\/a> shows how\.<\/p><\/form>$/);
+  // the README's section the link names is there: its heading's anchor
+  assert.ok(/^### Access control$/m.test(fs.readFileSync(path.join(WEB, "..", "..", "README.md"), "utf8")), "README.md has the Access control section the link names");
   // no --set: attributes stay the command's
   assert.ok(!/name="set"|attribute/i.test(form));
   // a long role (63 characters, the longest a name may be) or no default's words never widen the page on a phone: the
@@ -1833,7 +1844,7 @@ test("the users: From… asks where the user connects from in a popover beside i
 test("the add form: Connects from, a dropdown in mason user add's words — anywhere (the default, no from sent) or only these addresses, the box beside it, a comma list as --from takes it, the run judging each", async () => {
   const renderAddUser = fn<[unknown], string>("renderAddUser");
   const form = renderAddUser(CATALOG_STATE);
-  assert.match(textOf(form), /Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user$/);
+  assert.match(textOf(form), /Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user Roles limit/);
   assert.match(form, /<span class="connects"><label for="add-user-connects">Connects from<\/label> <select id="add-user-connects" name="connects"><option value="any" selected>anywhere<\/option><option value="only">only these addresses<\/option><\/select> <span class="ranges">/,
     "a dropdown, its label; anywhere the default, as mason user add with no --from; the box beside it");
   assert.doesNotMatch(form, /type="radio"|<fieldset/, "no radios");
@@ -1858,8 +1869,9 @@ test("the add form on one line where its card is wide enough: each field a label
   const children = [...form.replace(/^<form[^>]*>|<\/form>$/g, "").matchAll(/<(span|button)\b[^>]*? class="([^"]*)"/g)];
   assert.match(form, /^<form id="add-user" class="formcard" autocomplete="off"><span class="name-field"><label for="user-name">Name<\/label> <input id="user-name"[^>]*><\/span> <span class="role-field">/);
   assert.ok(["name-field", "role-field", "connects", "primary"].every((c) => children.some((m) => m[2] === c)), "the four fields");
-  assert.match(textOf(renderAddUser(CATALOG_STATE)), /^Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user$/);
+  assert.match(textOf(renderAddUser(CATALOG_STATE)), /^Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user Roles limit a user to some tables and columns\. You write them in mason\/roles\.yml , and the README shows how\.$/);
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.match(css, /#add-user \.roles-line \{ flex: 0 0 100%;/, "the line on roles is the form's own last row, under the fields");
   const rule = (sel: string) => css.match(new RegExp(`(?:^|\\})\\s*${sel.replace(/[.#[\]="]/g, "\\$&")}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
   assert.match(rule("#add-user-box"), /container-type: inline-size;/, "the form's card is its own container");
   assert.match(rule("#add-user"), /display: flex; flex-wrap: wrap;/, "one row, wrapping by field below its width");
@@ -2047,7 +2059,7 @@ test("the app: a refusal to add renders the server's Failure in its table's form
   assert.deepEqual(run.asked, [`POST api/pick ${JSON.stringify({ table: "public.event_log", picked: true })}`], "nothing read again: nothing changed");
   const tables = app.view().tables!;
   assert.ok(tables.includes(`<div class="failure" role="alert"><p class="message"><span class="mark" aria-hidden="true">✗</span> ${message}</p></div>`), "the server's words, as renderFailure says them");
-  assert.match(popOf(tables, "act-tables-public.event_log"), /^<div class="pop ask"[^>]*><div class="failure" role="alert">.*data-pick-form="public\.event_log"/s, "the form stays, to name its key, under the refusal");
+  assert.match(popOf(tables, "act-tables-public.event_log"), /^<div class="pop ask"[^>]*><button type="button" class="pop-x".*?<\/button><div class="failure" role="alert">.*data-pick-form="public\.event_log"/s, "the form stays, to name its key, under the refusal");
   // refused with boxes ticked: the form written again under its refusal keeps them ticked
   await app.addTable("public.event_log", ["payload"], ["id"]);
   assert.deepEqual([...app.view().tables!.matchAll(/name="(key|columns)" value="([^"]*)" checked/g)].map((m) => `${m[1]}=${m[2]}`), ["key=id", "columns=payload"]);
@@ -2077,8 +2089,8 @@ test("the app: Remove asks first, Cancel takes it back, the confirm sends POST a
   run.asked.length = 0;
   assert.equal(await app.confirmRemoveTable("public.accounts"), true);
   assert.deepEqual(run.asked, [`POST api/remove ${JSON.stringify({ tables: ["public.accounts"] })}`, "GET api/state"]);
-  // removed: it keeps its row (laid out among the added), its state Not added in place, until the list is laid out again (issue 872)
-  assert.match(textOf(app.view().tables!), /public\.events Synced .* public\.accounts Not added ~300 rows key id Add Columns… public\.audit Not added/);
+  // removed: it keeps its row (laid out in Added), its state Not added in place, until the list is laid out again (issue 872)
+  assert.match(textOf(app.view().tables!), /public\.events Synced .* public\.accounts Not added ~300 rows key id Add Columns… Not added \(3\) .*public\.audit Not added/);
   assert.match(textOf(popOf(app.view().tables!, "act-tables-public.accounts")), /^Removed public\.accounts\. Mason stopped syncing it and deleted its synced data\./);
   assert.equal(app.model.removing, null);
   // refused: the server's words
@@ -2105,7 +2117,9 @@ test("the page's files fetch nothing from elsewhere and never touch the token: t
   for (const f of files) {
     // what is vendored is a third party's, copied whole (src/web/vendor/README.md): its comments name its sites, and it is never edited
     if (f.startsWith(`vendor${path.sep}`)) continue;
-    const text = fs.readFileSync(path.join(WEB, f), "utf8");
+    // the one site the page names is a link to its README's roles section (users.js ROLES_DOCS_URL): a link the reader
+    // follows loads nothing into the page, so the CSP holds; nothing else is ever named
+    const text = fs.readFileSync(path.join(WEB, f), "utf8").replace(/ROLES_DOCS_URL = "https:\/\/github\.com\/embeddable-hq\/mason-data#access-control";/, "");
     assert.ok(!/https?:\/\//.test(text), `${f} names no other site: a CDN or a font would break the CSP`);
     assert.ok(!/@import/.test(text), `${f} loads no stylesheet but the page's own`);
     // url( only for a font of the page's own, in an @font-face: a relative path to a woff2 under vendor/ that is a route
@@ -2211,7 +2225,12 @@ function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "", winExtra: Recor
     if (at !== null && replaced.length <= 20) { location.hash = u.slice(at[0].length - 1); setTimeout(() => onWin.get("hashchange")!(), 0); }
   } };
   let tick: (() => void) | null = null;
-  class FormData { readonly ticked: Record<string, string[]>; constructor(form: { ticked: Record<string, string[]> }) { this.ticked = form.ticked; } getAll(name: string) { return this.ticked[name] ?? []; } }
+  class FormData {
+    readonly ticked: Record<string, string[]>;
+    constructor(form: { ticked: Record<string, string[]> }) { this.ticked = form.ticked; }
+    getAll(name: string) { return this.ticked[name] ?? []; }
+    get(name: string) { return this.ticked[name]?.[0] ?? null; }
+  }
   fn<[unknown, unknown], void>("start")(doc, { fetch: (p: string, i?: { method?: string; body?: string }) => run.fetch(p, i), FormData, location, addEventListener: (type: string, f: () => void) => { onWin.set(type, f); },
     setInterval: (f: () => void) => { tick = f; return 1; }, setTimeout: (f: () => void, ms: number) => setTimeout(f, ms), ...winExtra });
   /** the reader follows a link of the nav: the hash changes, and the browser says so */
@@ -2342,7 +2361,12 @@ test("the stylesheet: the Users table's Added header is no card, the add box kee
   // the add box's two panes in one grid cell, the one not chosen unseen in its place (visibility, never display)
   assert.match(css, /\.add-panes \{ display: grid; \}/);
   assert.match(css, /\.add-panes > \* \{ grid-area: 1 \/ 1; min-width: 0; \}/);
-  assert.match(css, /\.add-box:has\(\[data-add-kind="share"\]\[aria-pressed="true"\]\) #add-user-box,\s*\.add-box:has\(\[data-add-kind="user"\]\[aria-pressed="true"\]\) #add-share-box \{ visibility: hidden; \}/);
+  // the share pane is unseen unless it is chosen — never only when New user is: where no choice is drawn (mason serve,
+  // a read-only page) it is an empty pane over the form in the same cell, and a visible one took the clicks meant for
+  // the form's Name and Add a user (the owner, 2026-11-13: "it seems the add-share-box is the div getting in the way")
+  assert.match(css, /\.add-box:has\(\[data-add-kind="share"\]\[aria-pressed="true"\]\) #add-user-box,\s*\.add-box:not\(:has\(\[data-add-kind="share"\]\[aria-pressed="true"\]\)\) #add-share-box \{ visibility: hidden; \}/);
+  const rulesOf = (sel: RegExp) => [...css.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{([^}]*)\}/g)].filter((m) => sel.test(m[1]!));
+  assert.ok(!rulesOf(/:has\(\[data-add-kind="user"\]\[aria-pressed="true"\]\)[^,{]*#add-share-box/).length, "never hidden only when New user is pressed: with no choice drawn it would stay over the form");
   // the tip is a flex row: its sentence one item, so the full stop after <password> never wraps onto a line of its own
   const usersConnect = (await import(path.join(WEB, "pages", "users.js") as string) as { renderUsersConnect: (pg: unknown) => string }).renderUsersConnect;
   const tip = /<p class="tip">(.*?)<\/p><\/div>$/.exec(usersConnect({ shown: "postgres://<user>:<password>@127.0.0.1:5433/shop", host: "127.0.0.1", port: 5433, database: "shop" }))?.[1] ?? "";
@@ -2480,7 +2504,7 @@ test("in the browser: the tables are written when they change, never at every po
   // the form submitted: the ticked boxes, as FormData reads them, sent as the columns
   run.answers.set("POST api/pick", answer({ ...PICKED.columns, state: COPYING }));
   let prevented = false;
-  await on.get("submit")!({ target: { dataset: { pickForm: "public.audit" }, ticked: { columns: ["name"] } }, preventDefault: () => { prevented = true; } });
+  await on.get("submit")!({ target: { dataset: { pickForm: "public.audit" }, ticked: { which: ["only"], columns: ["name"] } }, preventDefault: () => { prevented = true; } });
   assert.ok(prevented, "the page posts it, not the browser");
   assert.ok(run.asked.includes(`POST api/pick ${JSON.stringify({ table: "public.audit", picked: true, columns: ["name"] })}`), run.asked.join("\n"));
   assert.match(textOf(tables.html), /Added public\.audit: the columns id, name\. Its sync is every 30 seconds: .* Its key id was added to its columns/, "what was added, in the page's words");
@@ -2543,39 +2567,30 @@ test("the shell: a sidebar nav — Overview · Tables · Users, the Observabilit
   // name is the sidebar's heading, never a line of its own above the title)
   const renderSubnav = fn<[string, string?, number?, Date?], string>("renderSubnav");
   assert.equal(renderSubnav("tables"), "", "a page of its own has none");
-  // Now first, the default (its link has no range), said Live beside the control — before it, in the status's slot
+  // the last 15 minutes first, the default (its link has no range); every range is live, said Live before the control,
+  // its title how often that range is read again (a longer range less often: each read scans more of the log)
   const live = renderSubnav("usage");
-  assert.equal(textOf(live), "Live Now Last hour 24 hours 7 days");
+  assert.equal(textOf(live), "Live Last 15 mins Last hour 24 hours 7 days");
   assert.equal(live, `<span class="range-status"><span class="live" title="Updates every few seconds"><span class="live-dot" aria-hidden="true"></span>Live</span></span>` +
-    `<div class="range" role="group" aria-label="Time range"><a href="#observability/usage" aria-current="true" title="Updates every few seconds">Now</a><a href="#observability/usage?range=1h">Last hour</a>` +
-    `<a href="#observability/usage?range=24h">24 hours</a><a href="#observability/usage?range=7d">7 days</a></div>`);
-  assert.ok(!/data-refresh-range|as of/.test(live), "Now follows what happens: nothing to refresh");
-  // any other range is read once: when it was read beside it (once it was), and Refresh, which reads it again
-  const sub = renderSubnav("usage", "1h");
-  assert.equal(textOf(sub), "Refresh Now Last hour 24 hours 7 days", "not read yet: no time");
-  assert.equal(sub, `<span class="range-status"><span class="as-of"><button type="button" class="small" data-refresh-range>Refresh</button></span></span>` +
-    `<div class="range" role="group" aria-label="Time range"><a href="#observability/usage" title="Updates every few seconds">Now</a><a href="#observability/usage?range=1h" aria-current="true">Last hour</a>` +
-    `<a href="#observability/usage?range=24h">24 hours</a><a href="#observability/usage?range=7d">7 days</a></div>`);
-  const read = renderSubnav("usage", "24h", 7, new Date("2026-10-27T09:05:30.400Z"));
-  assert.match(textOf(read), /^as of 09:05:30 UTC Refresh Now Last hour 24 hours 7 days 30 days /);
-  assert.match(read, /^<span class="range-status"><span class="as-of"><span class="dim" title="Read once, when you chose this range. Choose Now to follow it live.">as of 09:05:30 UTC<\/span> <button type="button" class="small" data-refresh-range>Refresh<\/button><\/span><\/span><div class="range" /);
-  assert.ok(!/class="live"/.test(read), "a past range is never said Live");
-  // the control never moves when the range changes (issue 873): whatever the range, the status is written BEFORE the
-  // control, in one slot, and the control is the last thing written, so it stays flush right; the slot keeps the room of
-  // its longest (as of HH:MM:SS UTC and Refresh) and the button's height, so the row wraps the same on a phone
-  for (const [range, asOf] of [["now", undefined], ["1h", undefined], ["24h", new Date("2026-10-27T23:59:59Z")], ["90d", new Date(0)]] as const) {
-    const h = renderSubnav("queries", range, 90, asOf);
+    `<div class="range" role="group" aria-label="Time range"><a href="#observability/usage" aria-current="true" title="Updates every few seconds">Last 15 mins</a>` +
+    `<a href="#observability/usage?range=1h" title="Updates every few seconds">Last hour</a>` +
+    `<a href="#observability/usage?range=24h" title="Updates every 30 seconds">24 hours</a><a href="#observability/usage?range=7d" title="Updates every minute">7 days</a></div>`);
+  for (const [range, title] of [["1h", "Updates every few seconds"], ["24h", "Updates every 30 seconds"], ["7d", "Updates every minute"], ["90d", "Updates every minute"]] as const) {
+    const h = renderSubnav("queries", range, 90);
+    assert.match(h, new RegExp(`^<span class="range-status"><span class="live" title="${title}">`), `${range}: live too`);
+    assert.ok(!/data-refresh-range|as of/.test(h), `${range}: nothing to refresh`);
+  }
+  // the control never moves when the range changes (issue 873): the status, the same Live at every range, is written
+  // BEFORE the control, in one slot, and the control is the last thing written, so it stays flush right
+  for (const range of ["now", "1h", "24h", "90d"]) {
+    const h = renderSubnav("queries", range, 90);
     assert.match(h, /^<span class="range-status">.*<\/span><div class="range" role="group" aria-label="Time range">.*<\/div>$/s, `${range}: the status first, the control last`);
     assert.equal((h.match(/class="range-status"/g) ?? []).length, 1, `${range}: one status slot`);
+    assert.equal(textOf(h.slice(0, h.indexOf('<div class="range"'))), "Live", `${range}: the same words`);
   }
   const styles = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
   const slot = styles.match(/\.head-range \.range-status \{([^}]*)\}/)?.[1] ?? assert.fail("app.css lays out the status slot");
-  // a length, never a percentage: a percentage of the row is cyclic while the row is sized, and counts as none there
-  assert.match(slot, /min-width: calc\(25ch \+ 3 \* var\(--space-2\) \+ 2px\);/, "the room of 'as of HH:MM:SS UTC' (18ch), the gap and Refresh (7ch, its padding and border)");
-  assert.match(slot, /min-height: 28px/, "the height of Refresh (button.small), so Live's row is as tall");
-  assert.match(slot, /font-size: var\(--text-xs\)/, "ch is the status's own size");
-  assert.match(styles, /button\.small \{ height: var\(--control-sm\); padding: 0 var\(--space-2\); font-size: var\(--text-xs\); \}/, "the room is Refresh's: its height, padding and size");
-  assert.match(styles, /--control-sm: 28px;/, "that height, 28 px");
+  assert.match(slot, /min-height: 28px/, "as tall as the row's controls");
   assert.match(styles, /\.head-range \{[^}]*justify-content: flex-end;/, "the control flush right");
   for (const id of ["queries", "usage", "syncs"]) {
     assert.match(html, new RegExp(`<div class="page-head"><div class="head-row"><h2 id="${id}-h">[\\w ]+</h2><div id="range-${id}" class="head-range"></div></div>`), `${id}: its title and its range in one row`);
@@ -2612,16 +2627,16 @@ test("the shell: only the page shown is asked, each endpoint at its own rate —
   t += 2000;
   assert.deepEqual(await asked(), [], "2 s on: nothing is due");
   t += 4000;
-  assert.deepEqual(await asked(), ["GET api/requests?since=15m"], "Now is live: the request log again every 5 s");
-  // a past range is read ONCE, when chosen: never again by time, however long it is shown
+  assert.deepEqual(await asked(), ["GET api/requests?since=15m"], "the last 15 minutes are live: the request log again every 5 s");
+  // every range is live: the last hour read when it is chosen, then again by time
   app.show("observability/queries?range=1h");
   assert.deepEqual(await asked(), ["GET api/requests?since=1h", "GET api/state", "GET api/users"], "the last hour, read when it is chosen");
-  for (let i = 0; i < 3; i++) { t += 60_000; assert.deepEqual(await asked(), ["GET api/state", "GET api/users"], "a minute on: the range is not read again; the state and the users at their own rate"); }
-  // read again only when the view is shown again (a range chosen, a link followed) or Refresh marks it stale
+  t += 6000; assert.deepEqual(await asked(), ["GET api/requests?since=1h"], "the last hour is live too: again every 5 s");
+  // a range shown again is read again at once, everything shown
   (app as unknown as { markStale(): void }).markStale();
-  assert.deepEqual(await asked(), ["GET api/requests?since=1h", "GET api/state", "GET api/users"], "Refresh: everything shown read again");
+  assert.deepEqual(await asked(), ["GET api/requests?since=1h", "GET api/state", "GET api/users"], "shown again: everything shown read again");
   t += 10_000;
-  assert.deepEqual(await asked(), [], "and once again only");
+  assert.deepEqual(await asked(), ["GET api/requests?since=1h"], "then at its rate");
   app.show("observability/queries?range=1h");
   assert.deepEqual(await asked(), ["GET api/requests?since=1h", "GET api/state", "GET api/users"], "shown again: read again");
   // the page's own read failing is the banner; a slower one failing is said where it is shown, never as the banner
@@ -2636,7 +2651,7 @@ test("the shell: only the page shown is asked, each endpoint at its own rate —
 test("in the browser: the hash chooses the section shown and the page asked; a link followed asks the new page at once; a range or an old hash too", async () => {
   const run = fakeRun();
   run.answers.set("GET api/usage?since=24h&step=3600", answer(USAGE));
-  const { el, on, go, settle, tick } = fakeBrowser(run, "#nope");
+  const { el, go, settle, tick } = fakeBrowser(run, "#nope");
   await settle();
   const shown = () => ["status", "tables", "queries", "users", "usage", "syncs"].filter((id) => (el(`page-${id}`) as unknown as { hidden: boolean }).hidden === false);
   assert.deepEqual(shown(), ["status"], "an unknown hash shows the Overview");
@@ -2657,7 +2672,7 @@ test("in the browser: the hash chooses the section shown and the page asked; a l
   go("#usage"); await settle();
   assert.deepEqual(shown(), ["usage"]);
   assert.deepEqual(current(), ["#observability/usage"], "an old hash: the view it was is the current page of the nav");
-  assert.match(el("range-usage").html, /<a href="#observability\/usage" aria-current="true"[^>]*>Now<\/a>/);
+  assert.match(el("range-usage").html, /<a href="#observability\/usage" aria-current="true"[^>]*>Last 15 mins<\/a>/);
   assert.match(el("range-usage").html, /^<span class="range-status"><span class="live"[^>]*>.*Live<\/span><\/span><div class="range"/);
   assert.deepEqual((run.asked as string[]).filter((a) => a.includes("api/usage")), ["GET api/usage?since=15m&step=60"], "Now: the last 15 minutes, a minute a point");
   // the range followed: the same view, its samples of the week, six hours a point
@@ -2665,14 +2680,12 @@ test("in the browser: the hash chooses the section shown and the page asked; a l
   run.asked.length = 0;
   go("#observability/usage?range=7d"); await settle();
   assert.deepEqual((run.asked as string[]).filter((a) => a.includes("api/usage")), ["GET api/usage?since=7d&step=21600"]);
-  assert.match(el("range-usage").html, /<a href="#observability\/usage\?range=7d" aria-current="true">7 days<\/a>/);
+  assert.match(el("range-usage").html, /<a href="#observability\/usage\?range=7d" aria-current="true" title="Updates every minute">7 days<\/a>/);
   assert.deepEqual(current(), ["#observability/usage?range=7d"], "the nav's links keep the range");
-  assert.match(el("range-usage").html, /^<span class="range-status"><span class="as-of"><span class="dim"[^>]*>as of \d\d:\d\d:\d\d UTC<\/span> <button type="button" class="small" data-refresh-range>Refresh<\/button><\/span><\/span><div class="range"/, "a past range: when it was read, and Refresh, before the control");
+  assert.match(el("range-usage").html, /^<span class="range-status"><span class="live" title="Updates every minute">/, "the week is live too, read once a minute");
   run.asked.length = 0;
   tick(); await settle();
-  assert.ok(!(run.asked as string[]).some((x) => x.includes("api/usage") || x.includes("api/activity")), "a past range is not read again by the clock");
-  await on.get("click")!({ target: { closest: () => ({ dataset: { refreshRange: "" } }) } });
-  assert.deepEqual((run.asked as string[]).filter((x) => x.includes("api/usage") || x.includes("api/activity")), ["GET api/activity?since=7d", "GET api/usage?since=7d&step=21600"], "Refresh: read again at once");
+  assert.ok(!(run.asked as string[]).some((x) => x.includes("api/usage") || x.includes("api/activity")), "the week is live, but read again only once a minute");
   // the sub-tab beside it keeps the range: Sync events reads the week's events (an old #observability/logs lands there)
   run.answers.set("GET api/events?limit=500&since=7d", answer(EVENTS));
   run.asked.length = 0;
@@ -2844,7 +2857,9 @@ test("the Overview: Ready, Under way and Failed under the title mason status, ea
   run.answers.set("GET api/state", answer(NONE));
   const app = fn<[unknown], App>("createApp")(run.fetch);
   await app.poll();
-  assert.match(textOf(app.view().status!), /^Getting started 2 of 3 done .* Add a table .* No table added yet\. Your database has 4\. .* Server Sources file /, "the checklist first: its one action is adding a table");
+  const first = textOf(app.view().status!);
+  assert.match(first, /^Getting started 2 of 3 done .* Add a table /, "the checklist: its one action is adding a table");
+  assert.ok(!/mason status|Server|No table added yet/.test(first), `while getting started, the checklist alone: ${first}`);
 });
 
 // ------------------------------------------------------------------ the Tables page: each copy's sync, Sync, the search box
@@ -2853,13 +2868,13 @@ test("Tables: each added table's state, rows, last sync and its age, how long it
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
   const html = renderTables(SYNCED, { sizes: USAGE });
   const text = textOf(html);
-  assert.match(text, /^Table State Rows Key Last sync Size /);
+  assert.match(text, /^Added \(3\) Table State Rows Key Last sync Size /);
   assert.match(text, /public\.customers Synced 100% 1,200 key id 30 s ago took 0\.4 s 512\.0 KiB View events Sync now Remove /);
   assert.match(text, /public\.orders Failed 100% ~2,000,000 rows key id 65 min ago took 63 s View events Sync now Remove Sync… All columns poll: connection reset the whole error poll: connection reset the sync tries it again in 5 s /);
   // a copy served but not kept current: its amber bar, and the words mason status prints after it, under the row
-  assert.match(text, /public\.events Synced 100% 30,000,000 key id 2 min ago took 13 min 3\.0 GiB View events Sync now Remove Sync: Off All columns public\.audit /, "a table whose sync is off is synced, its age its Last sync");
-  assert.match(text, /public\.audit Not added ~50 rows key id Add Columns… /, "a table not added has no sync, and is in the same table");
-  assert.equal([...html.matchAll(/<table /g)].length, 1);
+  assert.match(text, /public\.events Synced 100% 30,000,000 key id 2 min ago took 13 min 3\.0 GiB View events Sync now Remove Sync: Off All columns Not added \(1\) Table State Rows Key Last sync Size public\.audit /, "a table whose sync is off is synced, its age its Last sync");
+  assert.match(text, /public\.audit Not added ~50 rows key id Add Columns… /, "a table not added has no sync, and is in the Not added list");
+  assert.equal([...html.matchAll(/<table /g)].length, 2);
   // the last sync is an age, its UTC time in a title; rows, age, span and size are mono and right-aligned
   assert.match(html, /<td class="num last"><span title="2026-10-27 09:05:00 UTC">30 s ago<\/span><span class="took" title="changes checked">took 0\.4 s<\/span><\/td><td class="num size">512\.0 KiB<\/td>/);
   assert.match(html, /<td class="num rows">1,200<\/td>/);
@@ -2945,7 +2960,7 @@ test("Tables: what a sync did is said as mason sync says it, beside its Sync; a 
   assert.equal(await app.syncTable("public.events"), true);
   assert.deepEqual(run.asked, [`POST api/sync ${JSON.stringify({ tables: ["public.events"] })}`, "GET api/state"], "mason sync events; then the state again");
   // the button says it in its own room, and what the sync did is said beside it, as mason sync prints it
-  assert.match(textOf(app.view().tables!), /public\.events Synced .* Synced ✓ Remove Sync: Off All columns public\.audit /);
+  assert.match(textOf(app.view().tables!), /public\.events Synced .* Synced ✓ Remove Sync: Off All columns Not added \(1\) Table State Rows Key Last sync Size public\.audit /);
   assert.match(app.view().tables!, /<button type="button" class="small" data-sync-table="public\.events" data-room="Syncing…">Synced ✓<\/button>/);
   assert.equal(textOf(popOf(app.view().tables!, "act-tables-public.events")), "Synced public.events: 1,234 row(s) written, 5 deleted. public.events 1,234 changed, 5 deleted, 30,001,229 rows now · 8.5 s public.events's sync is off, so it stays as it is now until you press Sync now again. Dismiss");
   app.dismissSynced();
@@ -2956,20 +2971,32 @@ test("Tables: what a sync did is said as mason sync says it, beside its Sync; a 
   assert.ok(app.view().tables!.includes(`<div class="failure" role="alert"><p class="message"><span class="mark" aria-hidden="true">✗</span> ${message}</p></div>`), "the server's words, as renderFailure says them");
 });
 
-test("Tables: the search box and the state filter narrow the one list, their text kept across polls; a form open keeps its table and its list still", async () => {
+test("Tables: while the page's Sync now of a table runs, its State says Syncing (amber), as Adding… does for an add; the others keep their own word", () => {
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
-  assert.match(textOf(renderTables(CATALOG_STATE, { filter: "ORD" })), /^1 with “ORD” in the name Table State Rows Key Last sync Size public\.orders Synced 100% 2,000,000 key id View events Sync now Remove /);
+  const states = (html: string) => [...html.matchAll(/<td class="state"><span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`);
+  // the run says synced for a table whose poll by hand runs: only the page's own request knows
+  assert.deepEqual(states(renderTables(CATALOG_STATE)).slice(0, 3), ["ok Synced", "ok Synced", "ok Synced"]);
+  assert.deepEqual(states(renderTables(CATALOG_STATE, { syncing: ["public.orders"] })).slice(0, 3), ["ok Synced", "warn Syncing", "ok Synced"]);
+  // a table not added is never said to sync, whatever the list holds
+  assert.ok(!states(renderTables(CATALOG_STATE, { syncing: ["public.audit"] })).includes("warn Syncing"));
+});
+
+test("Tables: the search box narrows both lists and Failed only lists the failed tables alone, kept across polls; a form open keeps its table and its list still", async () => {
+  const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
+  assert.match(textOf(renderTables(CATALOG_STATE, { filter: "ORD" })), /^1 with “ORD” in the name Added \(1\) Table State Rows Key Last sync Size public\.orders Synced 100% 2,000,000 key id View events Sync now Remove .* Not added \(0\) No table that is not added has “ORD” in its name\./);
   assert.equal(renderTables(CATALOG_STATE, { filter: "" }), renderTables(CATALOG_STATE), "nothing typed: every table, as before");
   assert.match(textOf(renderTables(CATALOG_STATE, { filter: "zzz", choosing: "public.audit", columns: columnsOf("public.audit") })), /^1 with “zzz” in the name .* public\.audit Not added ~50 rows key id Add Columns… The columns to sync/, "the table whose form is open stays");
-  assert.match(textOf(renderTables(SYNCED, { filter: "nope" })), /No table's name has “nope”\./);
-  // All / Added / Not added
+  assert.match(textOf(renderTables(SYNCED, { filter: "nope" })), /Added \(0\) No added table's name has “nope”\. Not added \(0\) No table that is not added has “nope” in its name\./);
+  // the search is over both lists; Failed only lists the failed tables alone, and no list of the tables not added
   const names = (html: string) => [...html.matchAll(/<th scope="row" class="name"><code class="name" title="([^"]*)">/g)].map((m) => m[1]);
-  assert.deepEqual(names(renderTables(CATALOG_STATE, { show: "added" })), ["public.customers", "public.orders", "public.events"]);
-  assert.deepEqual(names(renderTables(CATALOG_STATE, { show: "not-added" })), ["public.audit", "public.accounts", "public.event_log", "public.staging"]);
-  assert.deepEqual(names(renderTables(CATALOG_STATE, { show: "not-added", filter: "ORD" })), [], "the name and the state both narrow it");
-  assert.deepEqual(names(renderTables(CATALOG_STATE, { show: "not-added", filter: "acc" })), ["public.accounts"]);
-  assert.equal(names(renderTables(CATALOG_STATE, { show: "all" })).length, 7);
-  assert.deepEqual(names(renderTables(CATALOG_STATE, { show: "added", choosing: "public.audit" })).includes("public.audit"), true, "a form open stays, whatever the filter says");
+  assert.deepEqual(names(renderTables(CATALOG_STATE, { filter: "acc" })), ["public.accounts"]);
+  assert.deepEqual(names(renderTables(CATALOG_STATE, { filter: "ev" })), ["public.events", "public.event_log"], "a match in each list");
+  assert.equal(names(renderTables(CATALOG_STATE)).length, 7);
+  assert.deepEqual(names(renderTables(SYNCED, { failed: true })), ["public.orders"]);
+  assert.doesNotMatch(textOf(renderTables(SYNCED, { failed: true })), /Not added \(/, "Failed only: no Not added list");
+  assert.deepEqual(names(renderTables(SYNCED, { failed: true, filter: "cust" })), [], "the name and Failed only both narrow it");
+  assert.match(textOf(renderTables(SYNCED, { failed: true, filter: "cust" })), /Added \(0\) No failed table's name has “cust”\./);
+  assert.deepEqual(names(renderTables(CATALOG_STATE, { failed: true, choosing: "public.audit" })).includes("public.audit"), true, "a form open stays, whatever the filter says");
   const run = fakeRun();
   run.answers.set("GET api/state", answer(SYNCED));
   const { el, on, tick, settle } = fakeBrowser(run, "#tables");
@@ -2981,10 +3008,10 @@ test("Tables: the search box and the state filter narrow the one list, their tex
   tick(); await settle();
   assert.ok(!/public\.orders/.test(el("tables").html) && /public\.customers/.test(el("tables").html), "the text is kept across polls");
   await on.get("input")!({ target: { id: "tables-filter", value: "" } });
-  await on.get("input")!({ target: { id: "tables-show", value: "not-added" } });
-  assert.deepEqual(names(el("tables").html), ["public.audit"], "SYNCED has one table not added");
-  await on.get("input")!({ target: { id: "tables-show", value: "bogus" } });
-  assert.equal(names(el("tables").html).length, 4, "anything but a filter of the list is All");
+  await on.get("input")!({ target: { id: "tables-failed", checked: true } });
+  assert.deepEqual(names(el("tables").html), ["public.orders"], "SYNCED has one table failed");
+  await on.get("input")!({ target: { id: "tables-failed", checked: false } });
+  assert.equal(names(el("tables").html).length, 4, "Failed only cleared: every table");
   // Sync clicked: its button says Syncing… at once (written before the answer comes), the answer under it once it does
   let release!: () => void;
   const answered = new Promise<void>((r) => { release = r; });
@@ -2994,13 +3021,13 @@ test("Tables: the search box and the state filter narrow the one list, their tex
   const click = on.get("click")!({ target: { closest: () => ({ dataset: { syncTable: "public.customers" } }) } });
   await settle();
   assert.match(el("tables").html, /<button type="button" class="small" data-room="Syncing…" disabled>Syncing…<\/button>/, "said while it runs");
+  assert.match(textOf(el("tables").html), /public\.customers Syncing 100% /, "and its State says Syncing meanwhile");
   release();
   await click;
   assert.match(textOf(el("tables").html), /Synced public\.customers: 1 row\(s\) written, 0 deleted\./);
   // frozen: a form open holds the filter it opened over
-  await on.get("input")!({ target: { id: "tables-show", value: "all" } });
   await on.get("click")!({ target: { closest: () => ({ dataset: { choose: "public.audit" } }) } });
-  await on.get("input")!({ target: { id: "tables-show", value: "added" } });
+  await on.get("input")!({ target: { id: "tables-failed", checked: true } });
   assert.ok(names(el("tables").html).includes("public.audit"), "the list stays as it was opened until the form is done");
 });
 
@@ -3402,7 +3429,7 @@ test("Usage: each hour's cells are mason usage's (sampleLine), no sample yet is 
   assert.match(textOf(fnOf<[unknown], string>(usagePage, "renderCopySizes")([])), /No table measured yet/);
 });
 
-test("Usage: under Now what runs every poll, the range's statements and who is connected every 5 s, the samples and unsupported SQL every 60 s; a past range read once; only while shown; a refusal is the CLI's Failure", async () => {
+test("Usage: over the last 15 minutes what runs every poll, the range's statements and who is connected every 5 s, the samples and unsupported SQL every 60 s; a longer range less often; only while shown; a refusal is the CLI's Failure", async () => {
   const run = fakeRun(); withUsageAnswers(run);
   let t = Date.UTC(2026, 9, 28, 9, 0, 0);
   const app = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => new Date(t));
@@ -3424,14 +3451,18 @@ test("Usage: under Now what runs every poll, the range's statements and who is c
   // a past range: each read once, when chosen; what runs now is Now's alone
   app.show("observability/usage?range=24h");
   assert.deepEqual(await asked(), ["GET api/activity?since=24h", "GET api/usage?since=24h&step=3600", "GET api/unsupported?since=24h", "GET api/state"],
-    "the range's statements, samples and unsupported SQL, read once (the state the sidebar's)");
+    "the range's statements, samples and unsupported SQL (the state the sidebar's)");
   const p = app.view();
   assert.equal(p["usage-connected-h"], "Connected in the last 24 hours");
   assert.equal(p["usage-running-h"], "Slowest in the last 24 hours");
   assert.match(textOf(p["usage-connected"]!), /^User Client Queries Failed Sessions Last metabase Metabase v0\.50 1,100 9 3 /, "who sent statements in it");
   assert.equal(textOf(p["usage-running"]!), "No query completed in the last 24 hours.", "the slowest of it");
   assert.match(textOf(p["usage-kpis"]!), /^Clients, last 24 hours 2 4 sessions Queries, last 24 hours 1,204 /);
-  for (let i = 0; i < 3; i++) { t += 60_000; assert.deepEqual(await asked(), ["GET api/state"], "a minute on: the range is not read again"); }
+  t += 6000; assert.deepEqual(await asked(), [], "24 hours: not read again within 30 s");
+  for (let i = 0; i < 3; i++) {
+    t += 60_000;
+    assert.deepEqual(await asked(), ["GET api/activity?since=24h", "GET api/usage?since=24h&step=3600", "GET api/unsupported?since=24h", "GET api/state"], "a minute on: the range is live, read again");
+  }
   // the hours refused (a step the run does not take): the server's Failure, said once under the hours; the first read's is the banner
   const refusal = { error: "step is a whole number of seconds", failure: { code: "usage", message: "step is a whole number of seconds", why: "too short", fix: "mason usage --step 1h", next: [{ command: "mason usage --help", what: "the spans it takes" }] } };
   run.answers.set("GET api/usage?since=24h&step=3600", answer(refusal, 400));
@@ -3455,18 +3486,18 @@ test("Sync events: the sync's events are mason logs --events' lines in a table, 
   const html = renderEvents(UL_EVENTS);
   const at = Date.parse("2026-10-28T09:10:00.000Z");
   const timeline = renderEvents(UL_EVENTS, { now: at });
-  assert.equal(textOf(timeline), "When ↓ Kind Table Message 5 min ago ✗ restart (the sync) the run stopped <b>after</b> 42 s 9 min ago ✗ copy_failed public.events the source closed the connection the sync tries it again in 5 min 10 min ago copied public.orders copied 2,000,000 rows");
-  assert.equal(textOf(renderEvents(UL_EVENTS, { now: at, sort: { key: "time", dir: "asc" } })), "When ↑ Kind Table Message 10 min ago copied public.orders copied 2,000,000 rows 9 min ago ✗ copy_failed public.events the source closed the connection the sync tries it again in 5 min 5 min ago ✗ restart (the sync) the run stopped <b>after</b> 42 s",
+  assert.equal(textOf(timeline), "When ↓ Kind Table Message 5 min ago ✗ Mason restarted Mason the run stopped <b>after</b> 42 s 9 min ago ✗ Full sync failed public.events the source closed the connection the sync tries it again in 5 min 10 min ago Full sync public.orders copied 2,000,000 rows");
+  assert.equal(textOf(renderEvents(UL_EVENTS, { now: at, sort: { key: "time", dir: "asc" } })), "When ↑ Kind Table Message 10 min ago Full sync public.orders copied 2,000,000 rows 9 min ago ✗ Full sync failed public.events the source closed the connection the sync tries it again in 5 min 5 min ago ✗ Mason restarted Mason the run stopped <b>after</b> 42 s",
     "oldest first, as the command lists them, when asked");
   assert.match(timeline, /<th scope="col" aria-sort="descending"><button type="button" class="sort on" data-sort-table="events" data-sort-key="time">When/);
   assert.match(timeline, /<time data-tick datetime="2026-10-28T09:00:00.000Z" title="2026-10-28 09:00:00 UTC">10 min ago<\/time>/, "how long ago, the UTC time as the command prints it its title");
-  assert.match(timeline, /<span class="badge ok">copied<\/span>/); assert.equal([...timeline.matchAll(/<span class="badge bad">✗ /g)].length, 2, "a failure is a red badge with its ✗");
+  assert.match(timeline, /<span title="copied"><span class="badge ok">Full sync<\/span><\/span>/); assert.equal([...timeline.matchAll(/<span class="badge bad">✗ /g)].length, 2, "a failure is a red badge with its ✗");
   assert.equal([...html.matchAll(/class="t-failed"/g)].length, 2, "the failures are marked");
   // Failures only: what was read, narrowed in the page alone
-  assert.equal(textOf(renderEvents(UL_EVENTS, { failuresOnly: true, now: at })), "2 of the 3 events read. When ↓ Kind Table Message 5 min ago ✗ restart (the sync) the run stopped <b>after</b> 42 s 9 min ago ✗ copy_failed public.events the source closed the connection the sync tries it again in 5 min");
+  assert.equal(textOf(renderEvents(UL_EVENTS, { failuresOnly: true, now: at })), "2 of the 3 events read. When ↓ Kind Table Message 5 min ago ✗ Mason restarted Mason the run stopped <b>after</b> 42 s 9 min ago ✗ Full sync failed public.events the source closed the connection the sync tries it again in 5 min");
   // a kind and a table narrow it too, and compose
-  assert.match(textOf(renderEvents(UL_EVENTS, { kind: "copied", now: at })), /^1 of the 3 events read\. When ↓ Kind Table Message 10 min ago copied public\.orders/);
-  assert.match(textOf(renderEvents(UL_EVENTS, { table: "(the sync)", now: at })), /^1 of the 3 events read\. .* restart \(the sync\)/);
+  assert.match(textOf(renderEvents(UL_EVENTS, { kind: "copied", now: at })), /^1 of the 3 events read\. When ↓ Kind Table Message 10 min ago Full sync public\.orders/);
+  assert.match(textOf(renderEvents(UL_EVENTS, { table: "Mason", now: at })), /^1 of the 3 events read\. .* Mason restarted Mason the run stopped/);
   assert.equal(textOf(renderEvents(UL_EVENTS, { kind: "copied", failuresOnly: true })), "None of the 3 sync events read passes the filters.");
   assert.equal(textOf(renderEvents({ keptDays: 7, events: [UL_EVENTS.events[0]] }, { failuresOnly: true })), "None of the 1 sync event shown failed.");
   assert.doesNotMatch(html, /<b>/, "a message is escaped");
@@ -3486,14 +3517,14 @@ test("Sync events: the run's entries are rows, NEWEST FIRST, a multi-line entry 
   assert.match(textOf(renderLogs({ lines: [], kept: 2000 })), /The run has logged nothing yet\./);
 });
 
-test("Sync events: the events every 10 s while the range is Now, once for another; the run's raw log sits behind a closed details and is read, every 5 s, only while it is open; a refusal is its Failure under it", async () => {
+test("Sync events: the events every 10 s, a week or more once a minute; the run's raw log sits behind a closed details and is read, every 5 s, only while it is open; a refusal is its Failure under it", async () => {
   const run = fakeRun(); withUsageAnswers(run);
   let t = Date.UTC(2026, 9, 28, 9, 0, 0);
   const app = fn<[unknown, () => Date], App & { showRawLog(open: boolean): Promise<void> }>("createApp")(run.fetch, () => new Date(t));
   app.show("syncs");
   const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
   assert.deepEqual(await asked(), ["GET api/events?limit=500&since=15m", "GET api/state"], "closed: the log is not read (the state is the sidebar's)");
-  assert.match(textOf(app.view()["syncs-events"]!), /✗ copy_failed/);
+  assert.match(textOf(app.view()["syncs-events"]!), /✗ Full sync failed/);
   const closed = app.view()["syncs-run"]!;
   assert.equal(closed, `<details id="syncs-raw"><summary>The run's raw log (for debugging)</summary></details>`);
   assert.doesNotMatch(closed, /mason started/, "the entries are not written while it is closed");
@@ -3516,10 +3547,15 @@ test("Sync events: the events every 10 s while the range is Now, once for anothe
   // closed again: no read
   await app.showRawLog(false);
   t += 10_000; assert.deepEqual(await asked(), ["GET api/events?limit=500&since=15m"]);
-  // a past range: its events read once, when chosen
+  // the last hour: its events at the same rate, live too
   app.show("observability/syncs?range=1h");
   assert.deepEqual(await asked(), ["GET api/events?limit=500&since=1h", "GET api/state"]);
-  t += 60_000; assert.deepEqual(await asked(), ["GET api/state"], "its events never again by time (the state, the Table filter's choices, every 30 s)");
+  t += 10_000; assert.deepEqual(await asked(), ["GET api/events?limit=500&since=1h"], "its events again 10 s on");
+  // 7 days: a minute apart (each read scans the week)
+  app.show("observability/syncs?range=7d");
+  assert.deepEqual(await asked(), ["GET api/events?limit=500&since=7d", "GET api/state"]);
+  t += 30_000; assert.deepEqual(await asked(), ["GET api/state"], "the week's events not again within the minute (the state at its own 30 s)");
+  t += 30_000; assert.deepEqual(await asked(), ["GET api/events?limit=500&since=7d", "GET api/state"], "a minute on, again");
   app.show("syncs");
   run.answers.set("GET api/events?limit=500&since=15m", answer({ error: "no", failure: { code: "failed", message: "the events cannot be read", next: [] } }, 500));
   t += 10_000; await app.poll();
@@ -3572,7 +3608,7 @@ test("Usage and Sync events: the index.html has the parts the pages write, the p
   }
   for (const gone of ["usage-queries", "connected-now", "running-now", "queries-kpis", "page-logs", "logs-events"]) assert.ok(!html.includes(`id="${gone}"`), `${gone} is gone`);
   assert.doesNotMatch(html, /id="copies"|The run's log<\/h3>/, "the tables are one list, and the raw log is the details' summary");
-  assert.match(html, /<select id="tables-show">.*<option value="all">All<\/option><option value="added">Added<\/option><option value="failed">Failed<\/option><option value="not-added">Not added<\/option>/);
+  assert.match(html, /<label class="check" for="tables-failed"><input type="checkbox" id="tables-failed"> Failed only<\/label>/);
   assert.doesNotMatch(html, /<div id="usage"><\/div>|<div id="logs"><\/div>/);
 });
 
@@ -3746,7 +3782,7 @@ test("Tables: in replication mode each added table's stream state is a column, i
   const html = renderTables(st, { now: NOW });
   const text = textOf(html);
   // the stream state is a line under each added table's row, never a column: what it says is long
-  assert.match(text, /^Table State Rows Key Last sync Size public\.customers /);
+  assert.match(text, /^Added \(\d+\) Table State Rows Key Last sync Size public\.customers /);
   const { tables } = fn<[unknown, number], { tables: Array<[string, string]> }>("streamRows")(STREAM, NOW);
   for (const [t, words] of tables.filter(([t]) => ["public.customers", "public.orders", "public.events"].includes(t))) assert.ok(text.includes(words), `${t}: ${words}`);
   assert.match(text, /public\.customers Synced .* streamed · 1,204 changes \(1,000 inserts, 200 updates, 4 deletes\) this run /);
@@ -3764,12 +3800,13 @@ test("Tables and Users: the sections are a page head, the cards' part and a tool
   const tables = section("tables"), users = section("users");
   assert.match(tables, /<div class="page-head"><h2 id="tables-h">Tables<\/h2><p class="desc">/);
   assert.ok(tables.indexOf('id="tables-cards"') < tables.indexOf('class="toolbar"') && tables.indexOf('class="toolbar"') < tables.indexOf('id="tables"'), "cards, then the toolbar, then the list");
-  // each label in a field with its control (on a phone a field is a row of its own: "Show" never wraps away from its select)
+  // each label in a field with its control (on a phone a field is a row of its own); Failed only a box in its own label
   assert.match(tables, /<div class="field grow"><label for="tables-filter">Search the tables<\/label>\s*<input type="search" id="tables-filter"[^>]*><\/div>/);
-  assert.match(tables, /<div class="field"><label for="tables-show">Show<\/label>\s*<select id="tables-show">[\s\S]*?<\/select><\/div>/);
+  assert.match(tables, /<label class="check" for="tables-failed"><input type="checkbox" id="tables-failed"> Failed only<\/label>/);
+  assert.doesNotMatch(tables, /tables-show/, "no Show select");
   assert.match(users, /<div class="page-head"><h2 id="users-h">Users<\/h2><p class="desc">Create and manage Users that you can connect to tools and services<\/p><\/div>/, "the Users page's intro, in the owner's words");
   // the form is the page's own once the state is read (renderAddUser: none on a read-only page), in its place
-  assert.match(fn<[unknown], string>("renderAddUser")(CATALOG_STATE), /^<form id="add-user" class="formcard"[^>]*>[\s\S]*<button type="submit" class="primary">Add a user<\/button><\/form>$/);
+  assert.match(fn<[unknown], string>("renderAddUser")(CATALOG_STATE), /^<form id="add-user" class="formcard"[^>]*>[\s\S]*<button type="submit" class="primary">Add a user<\/button><p class="dim roles-line">[\s\S]*<\/p><\/form>$/);
   // the users first, right under the title (their read-only line is renderUsers' own); then the form, the password just
   // shown beside it, Connect: a card that appears moves nothing above it
   const order = ["users-h", "users", "add-box", "add-kinds", "add-user-box", "add-share-box", "action", "added", "users-connect"].map((id) => users.indexOf(`id="${id}"`));
@@ -3791,10 +3828,10 @@ test("Tables: the cards are the tables added of all, those synced, those failed 
   return app.poll().then(() => assert.match(app.view()["tables-cards"]!, /^<div class="cards n4">/));
 });
 
-test("Tables: nothing added is the empty state above the list that still offers Add; a stream's column is in the same table", () => {
+test("Tables: nothing added is the empty state under Added, over the Not added list that still offers Add; a stream's column is in the same table", () => {
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
   const html = renderTables(NONE);
-  assert.match(html, /^<p class="empty">No table added yet\. Add one from the list below\.<\/p><div class="panel">/, "one quiet line over the list");
+  assert.match(html, /^<h3 class="list-h">Added <span class="dim">\(0\)<\/span><\/h3><p class="empty">No table added yet\. Add one from the list below\.<\/p><h3 class="list-h">Not added <span class="dim">\(\d+\)<\/span><\/h3><div class="panel">/, "one quiet line under Added, over the list");
   assert.match(renderTables({ ...NONE, pageReadOnly: "read-only here" }), /<p class="empty">No table added yet\. The tables to sync are set in the sources file\.<\/p>/);
   assert.match(html, /data-add-table="public\.customers"/, "the list is still there to add from");
   assert.doesNotMatch(renderTables(SYNCED, { sizes: USAGE }), /class="empty"/);
@@ -3919,7 +3956,7 @@ test("the shell: the sidebar's project and a demo badge, its nav, its foot (upda
   assert.ok(!/class="topbar"|class="tabs"/.test(html), "no top nav beside it");
   assert.match(html, /<nav id="nav" class="nav" aria-label="Pages"><ul><li><a href=/, "the nav is a list of links: Tab reaches each, Enter follows it");
   assert.match(html, /<\/aside>\s*<div class="scrim" aria-hidden="true"><\/div>\s*<div class="content">\s*<div id="poll"><\/div>\s*<main>/, "the page beside the sidebar");
-  assert.match(html, /<section id="page-status" aria-labelledby="status-h">\s*<div class="page-head"><h2 id="status-h">Overview<\/h2><p class="desc">Mason syncs the tables you add from your Postgres and keeps them up to date\. Tools query them at Mason's own Postgres URL\. This page shows whether your synced data is ready, what Mason answered, and any errors of the last day\.<\/p>/, "the Overview says what Mason is first, then that it is mason status's");
+  assert.match(html, /<section id="page-status" aria-labelledby="status-h">\s*<div class="page-head"><h2 id="status-h">Overview<\/h2><p class="desc">Mason syncs the tables you add from your Postgres and keeps them up to date\. Tools query them at Mason's own Postgres URL\.<\/p>/, "the Overview says what Mason is first, then that it is mason status's");
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
   assert.match(css, /--sidebar-w: 232px/, "the sidebar's width, a token");
   assert.match(css, /@media \(min-width: 641px\) and \(max-width: 999px\) \{\s*\.sidebar \{ width: var\(--rail-w\); \}/, "below 1000 px an icon rail");
@@ -4129,6 +4166,32 @@ test("a chart stays in its card: sized to its holder's width when drawn and when
   assert.match(css, /\.chart-card \.chart \{ min-width: 0; max-width: 100%; \}/);
 });
 
+test("a popover that can be closed has an X at its top right, named Close, which presses its own Dismiss or Cancel; one that cannot has none", async () => {
+  const pop = fn<[string, string, Record<string, unknown>?], string>("pop");
+  const X = page.POP_X as unknown as string;
+  assert.match(X, /^<button type="button" class="pop-x" data-pop-x aria-label="Close" title="Close"><span class="icon" aria-hidden="true"><svg/, "a button named Close, its icon silent");
+  assert.equal(textOf(X).trim(), "", "the X adds no words to what the popover says");
+  // first in the popover (floated to its top right), only where a close is
+  assert.ok(pop("a", `<p>Done.</p><button type="button" data-dismiss-x data-pop-close>Dismiss</button>`).startsWith(`<div class="pop said" data-anchor="a" role="status">${X}<p>Done.</p>`));
+  assert.ok(!pop("a", "<p>Reading…</p>").includes("data-pop-x"), "nothing to close: no X");
+  // on the pages: an answer, a refusal and a question each have one
+  const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
+  const synced = { at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", changed: 1, deleted: 0, rows: 1201, ms: 40 }] };
+  for (const [what, ui] of [["a sync's answer", { synced: { table: "public.customers", synced } }], ["a refusal", { synced: { table: "public.customers", failure: { code: "refused", message: "no" } } }],
+    ["Remove's question", { removing: "public.customers" }]] as const) {
+    assert.ok(popOf(renderTables(CATALOG_STATE, ui), "act-tables-public.customers").includes(X), `${what}: its X`);
+  }
+  // the shell: a click on the X clicks its popover's own close, and nothing else
+  const run = fakeRun();
+  const { on } = fakeBrowser(run, "#tables");
+  let closed = 0;
+  const close = { click: () => { closed++; } };
+  const popEl = { querySelector: (sel: string) => sel === "[data-pop-close]" ? close : null };
+  const x = { dataset: { popX: "" }, closest: (sel: string) => sel === ".pop" ? popEl : null };
+  await on.get("click")!({ target: { closest: (sel: string) => sel === "button" ? x : null } });
+  assert.equal(closed, 1, "its Dismiss or Cancel pressed");
+});
+
 test("a popover is placed beside its anchor: under it, its right edge on the anchor's, above when no room below, inside the window; hidden when its anchor is gone", () => {
   const placePops = fn<[unknown, unknown], unknown[]>("placePops");
   const pop = (anchor: string) => ({ dataset: { anchor }, offsetWidth: 300, offsetHeight: 120, hidden: false, style: {} as Record<string, string> });
@@ -4320,25 +4383,58 @@ test("Usage: the page hands its charts to the shell from the hours it read, and 
   assert.equal(new Set(keys).size, keys.length, "a chart key is one holder's in the whole document");
 });
 
-test("Sync events: the page and mason logs --events say what the list leaves out, in one sentence; a manual sync's kind is good news", () => {
-  // a scheduled poll that succeeds is no event: the page that lists them says so, as mason logs --help does (one sentence)
+test("Sync events: the page and mason logs --events say what the list leaves out unless asked, in one sentence; a manual sync's kind is good news, in words", () => {
+  // the scheduled syncs that succeed are listed only when asked for: the page says so, as mason logs --help does (one sentence)
   const leaveOut = (commands as Record<string, unknown>).EVENTS_LEAVE_OUT as string | undefined;
   assert.equal(typeof leaveOut, "string", "src/cli/commands.ts exports EVENTS_LEAVE_OUT");
   const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
   const desc = /<h2 id="syncs-h">Sync events<\/h2>.*?<p class="desc">(.*?)<\/p>/s.exec(html)?.[1] ?? "";
-  // the page says the same fact in its own words (issue 877): the CLI's sentence names mason status
-  assert.match(leaveOut!, /^A scheduled poll that succeeds is not listed/);
-  assert.ok(desc.includes("A scheduled poll that succeeds is not listed."), `the page's description says it: ${desc}`);
-  assert.match(desc, /each sync you asked for/);
+  // the page says the same fact in its own words (issue 877): the CLI's sentence names its flag, the page its box
+  assert.match(leaveOut!, /^The scheduled syncs that succeed .* are listed only with --scheduled\.$/);
+  assert.ok(desc.includes("The scheduled syncs that succeed are listed only when you tick Scheduled syncs."), `the page's description says it: ${desc}`);
+  assert.match(html, /<label class="check" for="syncs-scheduled"><input type="checkbox" id="syncs-scheduled"> Scheduled syncs<\/label>/);
+  assert.match(desc, /each sync you started/);
   const help = commands.LOGS.usage.replace(/\s+/g, " ");
-  assert.ok(help.includes(leaveOut!), "mason logs --help says the same sentence");
+  assert.ok(help.includes(leaveOut!.replace(/\s+/g, " ")), "mason logs --help says the same sentence");
   assert.match(help, /each sync asked by hand \(mason sync, the page's Sync now\) and what it did/);
   assert.match(html, /<a href="#observability\/syncs"><span class="label">Sync events<\/span><\/a>/, "the nav names the page Sync events; its route is unchanged");
   // a synced event is good news, as copied and recovered are
   const renderEvents = of<[unknown], string>(syncsPage, "syncs.js", "renderEvents");
   const row = renderEvents({ events: [{ at: "2026-10-27T09:04:00.000Z", kind: "synced", failed: false, table: "public.orders", message: "synced by hand: 3 changed, 0 deleted, 1,200 rows now · 41 ms" }], keptDays: 7 });
-  assert.match(row, /<span class="badge ok">synced<\/span>/);
-  assert.match(textOf(row), /synced public\.orders synced by hand: 3 changed, 0 deleted, 1,200 rows now · 41 ms/);
+  assert.match(row, /<span title="synced"><span class="badge ok">Manual sync<\/span><\/span>/, "in words, its code the title");
+  assert.match(textOf(row), /Manual sync public\.orders synced by hand: 3 changed, 0 deleted, 1,200 rows now · 41 ms/);
+});
+
+test("Sync events: Scheduled syncs (or a scheduled kind chosen) asks the run for them, read at once and written when answered; cleared, the run is asked without", async () => {
+  const run = fakeRun(); withUsageAnswers(run);
+  const scheduled = { keptDays: 7, events: [...UL_EVENTS.events,
+    { at: "2026-10-28T09:09:00.000Z", kind: "polled", failed: false, table: "public.orders", message: "synced on schedule: 2 changed, 0 deleted, 1,202 rows now · 40 ms" },
+    { at: "2026-10-28T09:09:30.000Z", kind: "streamed", failed: false, table: "public.events", message: "streamed 4 changes (4 inserts) in the last 60 s" }] };
+  run.answers.set("GET api/events?limit=500&since=15m&scheduled=1", answer(scheduled));
+  const t = Date.parse("2026-10-28T09:10:00.000Z");
+  const app = fn<[unknown, () => Date], App & { pages: Map<string, { input(t: unknown): unknown }> }>("createApp")(run.fetch, () => new Date(t));
+  app.show("syncs");
+  await app.poll();
+  assert.doesNotMatch(textOf(app.view()["syncs-events"]!), /Scheduled sync|Live sync/, "not asked for: none");
+  run.asked.length = 0;
+  await app.pages.get("syncs")!.input({ id: "syncs-scheduled", checked: true });
+  assert.deepEqual(run.asked, ["GET api/events?limit=500&since=15m&scheduled=1"], "the run is asked for them, at once");
+  const text = textOf(app.view()["syncs-events"]!);
+  assert.match(text, /^When ↓ Kind Table Message 30s ago Live sync public\.events streamed 4 changes \(4 inserts\) in the last 60 s 60s ago Scheduled sync public\.orders synced on schedule: 2 changed/);
+  assert.match(app.view()["syncs-events"]!, /<span title="polled"><span class="badge ok">Scheduled sync<\/span><\/span>/, "good news, in words");
+  run.asked.length = 0;
+  await app.pages.get("syncs")!.input({ id: "syncs-scheduled", checked: false });
+  assert.deepEqual(run.asked, ["GET api/events?limit=500&since=15m"]);
+  assert.doesNotMatch(textOf(app.view()["syncs-events"]!), /Scheduled sync public/);
+  // a scheduled kind chosen with the box clear: they are read for it, else it would list none
+  run.asked.length = 0;
+  await app.pages.get("syncs")!.input({ id: "syncs-kind", value: "polled" });
+  assert.deepEqual(run.asked, ["GET api/events?limit=500&since=15m&scheduled=1"]);
+  assert.match(textOf(app.view()["syncs-events"]!), /^1 of the 5 events read\. When ↓ Kind Table Message 60s ago Scheduled sync public\.orders/);
+  // another kind: no read, the page's filter alone
+  run.asked.length = 0;
+  assert.equal(await app.pages.get("syncs")!.input({ id: "syncs-kind", value: "copied" }), undefined);
+  assert.deepEqual(run.asked, ["GET api/events?limit=500&since=15m"], "back to the events without them");
 });
 
 test("Sync events: 'Failures only' narrows the events read, in the page alone; the events' kinds are badges and their times how long ago", async () => {
@@ -4347,22 +4443,23 @@ test("Sync events: 'Failures only' narrows the events read, in the page alone; t
   const app = fn<[unknown, () => Date], App & { pages: Map<string, { input(t: unknown): unknown }> }>("createApp")(run.fetch, () => new Date(t));
   app.show("syncs");
   await app.poll();
-  assert.match(textOf(app.view()["syncs-events"]!), /^When ↓ Kind Table Message 5 min ago ✗ restart .* ✗ copy_failed .* 10 min ago copied public\.orders/);
+  assert.match(textOf(app.view()["syncs-events"]!), /^When ↓ Kind Table Message 5 min ago ✗ Mason restarted .* ✗ Full sync failed .* 10 min ago Full sync public\.orders/);
   // the kind and table filters: EVERY kind, and the sync and EVERY added table, whatever the range read (the state
   // read here names customers, orders and events; public.events has events, public.customers none)
-  assert.equal(textOf(app.view()["syncs-filters"]!), "Kind Every kind copy_failed poll_failed catch_up_failed stream_failed source_unreachable generated_failed compact_failed restart copied recovered synced sync_changed Table Every table (the sync) public.customers public.events public.orders");
+  const words = (syncsPage as Record<string, unknown>).KIND_WORDS as Record<string, string>;
+  assert.equal(textOf(app.view()["syncs-filters"]!), `Kind Every kind ${EVENT_KINDS.map((k) => words[k]).join(" ")} Table Every table Mason events public.customers public.events public.orders`);
   assert.equal(app.pages.get("syncs")!.input({ id: "syncs-kind", value: "copy_failed" }), true);
   assert.match(app.view()["syncs-filters"]!, /<option value="copy_failed" selected>/);
-  assert.match(textOf(app.view()["syncs-events"]!), /^1 of the 3 events read\. When ↓ Kind Table Message 9 min ago ✗ copy_failed/);
+  assert.match(textOf(app.view()["syncs-events"]!), /^1 of the 3 events read\. When ↓ Kind Table Message 9 min ago ✗ Full sync failed/);
   app.pages.get("syncs")!.input({ id: "syncs-kind", value: "" });
   run.asked.length = 0;
   assert.equal(app.pages.get("syncs")!.input({ id: "syncs-failures-only", checked: true }), true);
-  assert.doesNotMatch(textOf(app.view()["syncs-events"]!), /copied public\.orders/);
-  assert.match(textOf(app.view()["syncs-events"]!), /✗ copy_failed/);
+  assert.doesNotMatch(textOf(app.view()["syncs-events"]!), /Full sync public\.orders/);
+  assert.match(textOf(app.view()["syncs-events"]!), /✗ Full sync failed/);
   assert.deepEqual(run.asked, [], "the page alone: nothing is asked");
   assert.equal(app.pages.get("syncs")!.input({ id: "somewhere-else", checked: true }), null, "another input is not this page's");
   app.pages.get("syncs")!.input({ id: "syncs-failures-only", checked: false });
-  assert.match(textOf(app.view()["syncs-events"]!), /copied public\.orders/);
+  assert.match(textOf(app.view()["syncs-events"]!), /Full sync public\.orders/);
   t += 60_000; await app.poll();
   assert.match(textOf(app.view()["syncs-events"]!), /11 min ago/, "the ages move with the clock");
 });
@@ -4534,15 +4631,18 @@ test("Queries' User filter is a dropdown of the users: All users, the active, th
 });
 const renderStatusOf = (s: RunState) => fn<[unknown, Record<string, unknown>], string>("renderStatus")(s, { queries: QUERIES, syncErrors: EVENTS, now: NOW });
 
-test("Tables: #tables?show=failed is the Failed filter — the failed copies alone — and the select says so", async () => {
+test("Tables: #tables?show=failed is Failed only — the failed copies alone — and its box is ticked; an older bookmark's show clears it", async () => {
   const app = fn<[unknown], ObsApp>("createApp")(fakeRun().fetch);
-  const select = { value: "all" };
-  app.show("#tables?show=failed", { doc: { getElementById: (id: string) => id === "tables-show" ? select : null } });
-  assert.equal(select.value, "failed");
+  const box = { checked: false };
+  const doc = { getElementById: (id: string) => id === "tables-failed" ? box : null };
+  app.show("#tables?show=failed", { doc });
+  assert.equal(box.checked, true);
+  app.show("#tables?show=added", { doc });
+  assert.equal(box.checked, false, "the Show select's other values are every table now");
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
   const names = (html: string) => [...html.matchAll(/<th scope="row" class="name"><code class="name" title="([^"]*)">/g)].map((m) => m[1]);
-  assert.deepEqual(names(renderTables(SYNCED, { show: "failed" })), ["public.orders"], "its poll failed");
-  assert.match(textOf(renderTables(RUNNING, { show: "failed" })), /No failed table\./);
+  assert.deepEqual(names(renderTables(SYNCED, { failed: true })), ["public.orders"], "its poll failed");
+  assert.match(textOf(renderTables(RUNNING, { failed: true })), /No failed table\./);
 });
 
 test("sorting: the request log by started, duration or rows (the page shown, said so), the events and the samples by time; each header a button with aria-sort", async () => {
@@ -4727,9 +4827,13 @@ test("the buttons: every one has a visible label; a primary, a destructive one a
   const htmls = [fn<[unknown, Record<string, unknown>?], string>("renderTables")(CATALOG_STATE), fn<[unknown, Record<string, unknown>?], string>("renderTables")(CATALOG_STATE, { removing: "public.orders" }),
     fn<[unknown[], string | null], string>("renderRunning")(RUNNING_NOW, "12:45"), fn<[unknown, unknown?], string>("renderRequests")({ requests: REQUESTS, keptDays: 7, before: "C~1" }, { paged: true }),
     fs.readFileSync(path.join(WEB, "index.html"), "utf8")];
+  // its words, or an icon button's aria-label (a popover's X, Close): a screen reader names every button
   for (const html of htmls) {
-    for (const b of html.matchAll(/<button[^>]*>([\s\S]*?)<\/button>/g)) assert.ok(textOf(b[1]!).replace(/[↑↓↕]/g, "").trim().length > 0, `a button with no label: ${b[0]}`);
+    for (const b of html.matchAll(/<button([^>]*)>([\s\S]*?)<\/button>/g)) {
+      assert.ok(textOf(b[2]!).replace(/[↑↓↕]/g, "").trim().length > 0 || /\baria-label="[^"]+"/.test(b[1]!), `a button with no label: ${b[0]}`);
+    }
   }
+  assert.ok(htmls[1]!.includes('aria-label="Close"'), "the confirm's X is named Close");
   assert.match(htmls[1]!, /<p class="confirm">Remove orders\?.*<\/p><p class="pop-actions"><button type="button" class="danger small" data-confirm-remove-table="public\.orders">Remove orders<\/button>/);
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
   assert.match(css, /button\.small \{ height: var\(--control-sm\);/);
@@ -4750,7 +4854,7 @@ const UNSUPPORTED = { since: "2026-10-27T09:05:00.000Z", keptDays: 7, unsupporte
   { gap: "gone-entry", title: null, runs: 1, users: [], clients: [], last: "2026-10-28T07:00:00.000Z", example: "SELECT 1" },
 ] };
 
-test("Usage: the unsupported SQL of the range is mason status's lines (unsupportedLines), each entry named by docs/SQL-SUPPORT.md, read once a minute under Now, once for another range", async () => {
+test("Usage: the unsupported SQL of the range is mason status's lines (unsupportedLines), each entry named by docs/SQL-SUPPORT.md, read once a minute at every range", async () => {
   const entry = fn<[unknown], { headline: string; last: string; how: string; example: string }>("unsupportedEntry");
   for (const g of UNSUPPORTED.unsupported) {
     const [, head, last, how] = commands.unsupportedLines([g], PLAIN);
@@ -4779,8 +4883,10 @@ test("Usage: the unsupported SQL of the range is mason status's lines (unsupport
   await app.poll();
   assert.ok(run.asked.includes("GET api/unsupported?since=7d"), "the range's since");
   assert.match(textOf(app.view().unsupported!), /^The queries refused in the last 7 days .* a window frame in GROUPS mode: 12 statements/);
-  run.asked.length = 0; t += 60_000; await app.poll();
-  assert.ok(!run.asked.some((a) => a.startsWith("GET api/unsupported")), "a past range: read once");
+  run.asked.length = 0; t += 2000; await app.poll();
+  assert.ok(!run.asked.some((a) => a.startsWith("GET api/unsupported")), "the week: not every poll");
+  t += 60_000; await app.poll();
+  assert.ok(run.asked.includes("GET api/unsupported?since=7d"), "the week is live: a minute on, again");
   app.show("#observability/usage"); await app.poll();
   assert.match(textOf(app.view().unsupported!), /^The queries refused in the last 15 minutes /);
   run.asked.length = 0; t += 2000; await app.poll();
@@ -4977,7 +5083,7 @@ test("Queries, an empty request log: its sentence, what the log does not list, a
   const empty = { requests: [], keptDays: 7, before: null };
   const html = renderRequests(empty, { span: "the last 24 hours", firstTool: true });
   assert.match(textOf(html), /^No queries in the last 24 hours\. Create a user to connect your first tool\. A statement that reads no synced table \(select 1, SET, SHOW, a BI tool's catalog queries\) is answered but not listed\.$/);
-  assert.match(html, /<p class="empty first-tool"><a href="#users">Create a user<\/a> to connect your first tool\.<\/p><p class="dim unlisted">/, "one quiet line, its link to the Users page");
+  assert.match(html, /<p class="empty first-tool"><a class="btn small primary" href="#users">Create a user<\/a> to connect your first tool\.<\/p><p class="dim unlisted">/, "one quiet line, its button to the Users page");
   assert.ok(!/class="connect|data-copy=|postgres:\/\//.test(html), "no Connect box, no URL");
   assert.equal((page as Record<string, unknown>).UNLISTED_STATEMENTS, commands.UNLISTED_STATEMENTS, "the page says what mason logs --requests says");
   for (const o of [{ filtered: true }, { paged: true }, { firstTool: false }]) assert.ok(!renderRequests(empty, { span: "the last 24 hours", firstTool: true, ...o }).includes("first-tool"), JSON.stringify(o));
@@ -5092,12 +5198,23 @@ test("the Overview's first-run checklist: Mason is running, Sync a table, Connec
   await app.poll();
   assert.ok(!run.asked.includes("GET api/users"), "the users are not read for it");
   const text = textOf(app.view().status!);
-  assert.match(text, /^mason status Ready Every added table is synced and served Database .*? Changes .*? Getting started 2 of 3 done .* ○ Connect a tool \(to do\) Create a user first /);
-  assert.ok(text.indexOf("Getting started") < text.indexOf("Tables synced"), "above the cards");
-  // a tool logs in: done, and the checklist goes; its session closed before a statement reached the summary: still done
+  // while getting started is not done, it is the Overview: the checklist alone (the owner, 2026-11-13)
+  assert.match(text, /^Getting started 2 of 3 done ✓ Mason is running \(done\) ✓ Sync a table \(done\) ○ Connect a tool \(to do\) Create a user first$/);
+  // a tool logs in: done, and the checklist goes, the rest of the Overview in its place; its session closed before a
+  // statement reached the summary: still done
   run.answers.set("GET api/state", answer(withSessions(RUNNING, [{ user: "metabase", client: "Metabase", open: 1, running: 0 }])));
   t += 2000; await app.poll();
-  assert.ok(!textOf(app.view().status!).includes("Getting started"), "the three done: no checklist");
+  const done = textOf(app.view().status!);
+  assert.ok(!done.includes("Getting started"), "the three done: no checklist");
+  assert.match(done, /^mason status Ready Every added table is synced and served .* Tables synced /, "the word, the cards and the rest once it is done");
+  // a failure is never hidden behind the checklist: the word's box stays over it while it says Failed, or while the
+  // state could not be read now
+  const renderStatus = fn<[unknown, Record<string, unknown>?], string>("renderStatus");
+  const failedSetup = textOf(renderStatus(SYNCED, { queries: NO_QUERIES, now: Date.UTC(2026, 9, 27, 9, 5, 30) }));
+  assert.match(failedSetup, /^mason status Failed .* Getting started /, "Failed: its box, then the checklist");
+  assert.ok(!failedSetup.includes("Tables synced"), "and nothing else");
+  const unknown = textOf(renderStatus(RUNNING, { queries: NO_QUERIES, stale: { at: new Date(Date.UTC(2026, 9, 28, 9, 0, 0)), failure: { code: "unreachable", message: "Mason did not answer" } } }));
+  assert.match(unknown, /^mason status Ready As of 09:00 UTC\. Mason can't be reached\. .* Getting started /, "a state that could not be read now: said, then the checklist");
   run.answers.set("GET api/state", answer(RUNNING));
   t += 2000; await app.poll();
   assert.ok(!textOf(app.view().status!).includes("Getting started"), "seen once: it stays done");
@@ -5203,13 +5320,14 @@ const rowNames = (html: string) => [...html.matchAll(/<th scope="row" class="nam
 const MIXED = [CATALOG[3]!, CATALOG[4]!, CATALOG[0]!, CATALOG[1]!, CATALOG[2]!, CATALOG[5]!, CATALOG[6]!];
 const sourcesWith = (...more: string[]) => parseSourceText(`kind: postgres\nurl: x\ntables:\n  customers: {}\n  orders: {}\n  events: {}\n${more.map((t) => `  ${t}: {}\n`).join("")}`, "shop", FILE) as typeof sourceFile;
 
-test("Tables: under All the added tables come first, whatever their sync's word, then those not added, each group in the state's order; the filters unchanged (issue 872)", () => {
+test("Tables: Added lists the added tables, whatever their sync's word, over Not added, each in the state's order; the search over both (issue 872)", () => {
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
   const s = stateOf(THREE_COPIED(), { tables: MIXED });
   assert.deepEqual(s.tables.map((t) => t.table).slice(0, 2), ["public.audit", "public.accounts"], "the state lists two not added first");
   assert.deepEqual(rowNames(renderTables(s)), ["public.customers", "public.orders", "public.events", "public.audit", "public.accounts", "public.event_log", "public.staging"]);
-  assert.deepEqual(rowNames(renderTables(s, { show: "added" })), ["public.customers", "public.orders", "public.events"]);
-  assert.deepEqual(rowNames(renderTables(s, { show: "not-added" })), ["public.audit", "public.accounts", "public.event_log", "public.staging"]);
+  const [addedPart, otherPart] = renderTables(s).split('<h3 class="list-h">Not added');
+  assert.deepEqual(rowNames(addedPart!), ["public.customers", "public.orders", "public.events"], "Added");
+  assert.deepEqual(rowNames(otherPart!), ["public.audit", "public.accounts", "public.event_log", "public.staging"], "Not added, under it");
   assert.deepEqual(rowNames(renderTables(s, { filter: "s" })), ["public.customers", "public.orders", "public.events", "public.accounts", "public.staging"], "the search narrows the laid-out list");
   // a failed and a waiting one are added: first too
   const failing = stateOf([copied("public.customers", 1200, "2026-10-27T09:00:01.000Z"), { source: "public.orders", phase: "failed", rows: null, bytes: null, seconds: null, copiedAt: null, error: "connection reset" }],
@@ -5220,12 +5338,14 @@ test("Tables: under All the added tables come first, whatever their sync's word,
   const written = rowNames(renderTables(many));
   assert.equal(written.length, 100);
   assert.deepEqual(written.slice(0, 4), ["public.customers", "public.orders", "public.events", "public.t000"]);
-  // an order laid out earlier is kept: each table where it was put, one new in the catalog after them, one gone gone
-  assert.deepEqual(rowNames(renderTables(s, { order: ["public.audit", "public.customers", "public.gone", "public.accounts"] })),
-    ["public.audit", "public.customers", "public.accounts", "public.orders", "public.events", "public.event_log", "public.staging"]);
+  // a layout made earlier is kept: each table in the list and the place it was put, one new in the catalog after them in
+  // the list its added mark says, one gone gone
+  const kept = renderTables(s, { order: { added: ["public.audit", "public.customers", "public.gone"], other: ["public.accounts"] } });
+  assert.deepEqual(rowNames(kept), ["public.audit", "public.customers", "public.orders", "public.events", "public.accounts", "public.event_log", "public.staging"]);
+  assert.deepEqual(rowNames(kept.split('<h3 class="list-h">Not added')[0]!), ["public.audit", "public.customers", "public.orders", "public.events"], "audit stays in Added, where it was laid out");
 });
 
-test("Tables: a table added or removed keeps its row, its state changing in place, until the list is laid out again — the filter, the search or the page shown again (issue 872)", async () => {
+test("Tables: a table added or removed keeps its row in its list, its state changing in place, until the lists are laid out again — Failed only, the search or the page shown again (issue 872)", async () => {
   const run = fakeRun();
   const before = stateOf(THREE_COPIED(), { tables: MIXED });
   run.answers.set("GET api/state", answer(before));
@@ -5240,12 +5360,13 @@ test("Tables: a table added or removed keeps its row, its state changing in plac
   assert.equal(await (app as unknown as App).addTable("public.audit"), true);
   assert.deepEqual(rowNames(app.view().tables!), laidOut, "added: no row moved");
   assert.match(textOf(app.view().tables!), /public\.audit Waiting /, "its state changed in place");
+  assert.match(app.view().tables!.split('<h3 class="list-h">Not added')[1]!, /title="public\.audit"/, "still in Not added");
   await app.poll(); await app.poll();
   assert.deepEqual(rowNames(app.view().tables!), laidOut, "the polls after it move nothing either");
-  // the filter changed and back: laid out anew, audit first of the added (the state lists it first)
-  tp.input!({ id: "tables-show", value: "added" });
-  assert.deepEqual(rowNames(app.view().tables!), ["public.audit", "public.customers", "public.orders", "public.events"]);
-  tp.input!({ id: "tables-show", value: "all" });
+  // Failed only ticked and cleared: laid out anew, audit first of the added (the state lists it first)
+  tp.input!({ id: "tables-failed", checked: true });
+  assert.deepEqual(rowNames(app.view().tables!), [], "none failed");
+  tp.input!({ id: "tables-failed", checked: false });
   const second = ["public.audit", "public.customers", "public.orders", "public.events", "public.accounts", "public.event_log", "public.staging"];
   assert.deepEqual(rowNames(app.view().tables!), second);
   // accounts added beside the page (mason add): it keeps its row at the polls; the search box's text lays it out
@@ -5324,7 +5445,8 @@ test("layout guard: a click moves no row and no column — a question, a form an
   }
   // THE TABLES LIST: every row its note line under it, empty or not, so a note that comes or goes moves no row
   const html = renderTables(CATALOG_STATE);
-  const trs = rowsOf(html).slice(1);
+  // each list's header row left out: a table's rows alone
+  const trs = rowsOf(html).filter((tr) => tr !== "<tr>");
   trs.forEach((tr, i) => assert.equal(tr.startsWith('<tr class="under note"'), i % 2 === 1, `row ${i}: a table's row, then its note line: ${tr}`));
   for (const row of html.split("<tr").filter((r) => r.includes('<th scope="row" class="name">'))) assert.equal([...row.matchAll(/<td/g)].length, 6, `six cells beside the name: ${row.slice(0, 120)}`);
   assert.ok(!/class="what"/.test(html), "no Note column");
@@ -5366,7 +5488,8 @@ test("layout guard: a click moves no row and no column — a question, a form an
   assert.ok(css.includes("  table.users { display: table; }") && phone.indexOf("table.users { display: table; }") < phone.indexOf("\n}"), "on a phone the card scrolls, so the actions pin");
   assert.match(rule('table.users th[scope="row"]'), /overflow: hidden/);
   const heads = [...html.matchAll(/<th scope="col" class="([^"]+)">/g)].map((m) => m[1]!.split(" ").pop()!);
-  assert.deepEqual(heads, ["name", "state", "rows", "key", "last", "size", "act"]);
+  const COLUMNS = ["name", "state", "rows", "key", "last", "size", "act"];
+  assert.deepEqual(heads, [...COLUMNS, ...COLUMNS], "Added and Not added: the same columns, so they line up one over the other");
   for (const c of heads.filter((x) => x !== "name")) assert.match(rule(`table.catalog th.${c}`), /width: \d+px/, `the ${c} column has its width`);
   assert.match(rule("td.act"), /white-space: nowrap/, "a row's actions never wrap");
   assert.match(rule(".panel"), /overflow-x: auto/, "a table in a card scrolls inside it");
@@ -5483,16 +5606,16 @@ test("the time range past a week: 30 and 90 days, a day a point, offered when th
   assert.deepEqual(Object.keys(RANGES), ["now", "1h", "24h", "7d", "30d", "90d"]);
   assert.deepEqual([RANGES["30d"]!.stepSeconds, RANGES["90d"]!.stepSeconds], [86_400, 86_400], "a day a point: 30 and 90 of them");
   assert.equal(fn<[string], string>("usagePath")("90d"), "api/usage?since=90d&step=86400");
-  assert.equal(textOf(renderSubnav("usage", "24h")), "Refresh Now Last hour 24 hours 7 days", "a run that has not said what it keeps: no range it could not tell");
+  assert.equal(textOf(renderSubnav("usage", "24h")), "Live Last 15 mins Last hour 24 hours 7 days", "a run that has not said what it keeps: no range it could not tell");
   const kept7 = renderSubnav("usage", "24h", 7);
   assert.match(kept7, /<span class="off" aria-disabled="true" title="Mason keeps 7 days of history\. Set MASON_HISTORY_DAYS=30 to keep 30\.">30 days<span class="sr"> \(Mason keeps 7 days of history\. Set MASON_HISTORY_DAYS=30 to keep 30\.\)<\/span><\/span>/);
   assert.ok(!/href="[^"]*range=30d"/.test(kept7) && !/href="[^"]*range=90d"/.test(kept7), "never a link to more than is kept");
   const kept30 = renderSubnav("usage", "24h", 30);
-  assert.match(kept30, /<a href="#observability\/usage\?range=30d">30 days<\/a>/);
+  assert.match(kept30, /<a href="#observability\/usage\?range=30d" title="Updates every minute">30 days<\/a>/);
   assert.match(kept30, /title="Mason keeps 30 days of history\. Set MASON_HISTORY_DAYS=90 to keep 90\.">90 days/);
-  assert.match(renderSubnav("syncs", "90d", 90), /<a href="#observability\/syncs\?range=90d" aria-current="true">90 days<\/a>/);
+  assert.match(renderSubnav("syncs", "90d", 90), /<a href="#observability\/syncs\?range=90d" aria-current="true" title="Updates every minute">90 days<\/a>/);
   // a bookmark of 90 days on a run that keeps 7 still lands on it (the log says what it keeps)
-  assert.match(renderSubnav("queries", "90d", 7), /aria-current="true">90 days<\/a>/);
+  assert.match(renderSubnav("queries", "90d", 7), /aria-current="true" title="Updates every minute">90 days<\/a>/);
   // every view reads the range's since: the cards of 30 and 90 days are their own window (GET /api/activity), never the week's
   assert.equal(of<[string], string>(usagePage, "usage.js", "activityPath")("90d"), "api/activity?since=90d");
   assert.match(of<[unknown, unknown, string], string>(queriesPage, "queries.js", "requestsPath")({ status: "", since: "", user: "", client: "", slow: false, search: "" }, null, "30d"), /since=30d/);
@@ -5508,11 +5631,24 @@ test("Sync events' filters list every kind and every added table, whatever the r
   assert.deepEqual((syncsPage as Record<string, unknown>).EVENT_KINDS, [...EVENT_KINDS], "the page's kinds are src/duck/events.ts's");
   const only = { events: [{ at: "2026-10-28T09:00:00.000Z", kind: "copied", failed: false, table: "public.orders", message: "copied" }], keptDays: 7 };
   const text = textOf(renderEventFilters(only, { kind: "", table: "" }, RUNNING));
-  assert.equal(text, `Kind Every kind ${EVENT_KINDS.join(" ")} Table Every table (the sync) public.customers public.events public.orders`);
+  // each kind in the page's words, its code the option's value: a word for every kind the sync records
+  const words = (syncsPage as Record<string, unknown>).KIND_WORDS as Record<string, string>;
+  for (const k of EVENT_KINDS) assert.ok(typeof words[k] === "string" && words[k] !== k, `${k} has its words on the page`);
+  assert.equal(text, `Kind Every kind ${EVENT_KINDS.map((k) => words[k]).join(" ")} Table Every table Mason events public.customers public.events public.orders`);
+  assert.match(renderEventFilters(only, { kind: "synced", table: "" }, RUNNING), /<option value="synced" selected>Manual sync<\/option>/);
+  assert.match(renderEventFilters(only, {}, RUNNING), /<option value="copied">Full sync<\/option>.*<option value="polled">Scheduled sync<\/option><option value="streamed">Live sync<\/option>/s);
   // a removed table's events keep it a choice; nothing read yet still lists the added tables
   assert.match(textOf(renderEventFilters({ events: [{ ...only.events[0], table: "public.gone" }], keptDays: 7 }, {}, RUNNING)), /public\.orders public\.gone$/);
-  assert.match(textOf(renderEventFilters(undefined, {}, RUNNING)), /Every table \(the sync\) public\.customers public\.events public\.orders$/);
+  assert.match(textOf(renderEventFilters(undefined, {}, RUNNING)), /Every table Mason events public\.customers public\.events public\.orders$/);
   assert.equal(textOf(renderEvents(only, { table: "public.customers", span: "the last 24 hours" })), "No events for public.customers in the last 24 hours. Mason keeps 7 days of history.");
+  // an event of no one table is Mason's: "Mason" where a table's name goes, as mason logs --events says it, and the
+  // filter's choice "Mason events"
+  assert.equal(page.MASON_TABLE as unknown as string, (commands as Record<string, unknown>).MASON_TABLE, "the page and the CLI say the same");
+  assert.match(renderEventFilters(only, { table: "Mason" }, RUNNING), /<option value="Mason" selected>Mason events<\/option>/);
+  assert.equal(textOf(renderEvents(only, { table: "Mason", span: "the last 24 hours" })), "No Mason events in the last 24 hours. Mason keeps 7 days of history.");
+  assert.equal(textOf(renderEvents(only, { table: "Mason", failuresOnly: true, span: "the last 24 hours" })), "No Mason failures in the last 24 hours. Mason keeps 7 days of history.");
+  const mason = renderEvents({ events: [{ at: "2026-10-28T09:00:00.000Z", kind: "source_unreachable", failed: true, table: null, message: "could not attach the database" }], keptDays: 7 }, {});
+  assert.match(mason, /<td><span class="dim">Mason<\/span><\/td>/, "dimmed: not a table's name");
   assert.equal(textOf(renderEvents({ events: [], keptDays: 7 }, { table: "public.customers", span: "the last 24 hours" })), "No events for public.customers in the last 24 hours. Mason keeps 7 days of history.");
   assert.equal(textOf(renderEvents({ events: [], keptDays: 7 }, { span: "the last 24 hours" })), "No sync event in the last 24 hours. Mason keeps 7 days of history.");
 });
@@ -5530,7 +5666,7 @@ test("Sync events: #observability/syncs?table= (a table's View events) narrows t
   const m = app.pages.get("syncs")!.model;
   assert.deepEqual([m.table, m.failuresOnly], ["public.events", false]);
   assert.match(app.view()["syncs-filters"]!, /<option value="public\.events" selected>public\.events<\/option>/, "the Table filter shows it");
-  assert.match(textOf(app.view()["syncs-events"]!), /^1 of the 3 events read\. When ↓ Kind Table Message 9 min ago ✗ copy_failed public\.events /, "its events alone");
+  assert.match(textOf(app.view()["syncs-events"]!), /^1 of the 3 events read\. When ↓ Kind Table Message 9 min ago ✗ Full sync failed public\.events /, "its events alone");
   // the Overview's sync errors: the failures of every table over the week, the box ticked
   app.show("#observability/syncs?failures=1&range=7d", { doc });
   assert.deepEqual([m.table, m.failuresOnly, box.checked], ["", true, true]);
@@ -5541,35 +5677,6 @@ test("Sync events: #observability/syncs?table= (a table's View events) narrows t
   // the old addresses land here too, with their parameters
   app.show("#logs?table=public.orders", { doc });
   assert.equal(m.table, "public.orders");
-});
-
-test("a past range's 'as of' is its own read's, never another page's; a Refresh asked while a poll is in flight runs when it ends", async () => {
-  // the as-of: cleared by a page or range shown, set once that page's own once-only reads are answered
-  const run = fakeRun(); withUsageAnswers(run);
-  const at = new Date("2026-10-28T09:10:00.000Z");
-  const app = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => at);
-  app.show("observability/usage?range=1h");
-  await app.poll();
-  assert.match(app.view()["range-usage"]!, /as of 09:10:00 UTC/);
-  app.show("observability/queries?range=1h");
-  assert.ok(!/as of/.test(app.view()["range-queries"]!), "Queries not read yet: no as-of (Usage's was 09:10:00)");
-  await app.poll();
-  assert.match(app.view()["range-queries"]!, /as of 09:10:00 UTC/);
-  // Refresh while a poll is in flight: held, then run — never dropped (the poll in flight read the state alone)
-  const run2 = fakeRun(); withUsageAnswers(run2);
-  let release: () => void = () => undefined;
-  let hold: Promise<void> | null = null;
-  const plain = run2.fetch;
-  run2.fetch = async (p, init) => { if (hold !== null && p === "api/state") await hold; return plain(p, init); };
-  const { on, settle, tick } = fakeBrowser(run2, "#observability/usage?range=1h");
-  await settle();
-  hold = new Promise<void>((r) => { release = r; });
-  tick();                                   // a poll in flight: the shell's state, held
-  run2.asked.length = 0;
-  const clicked = on.get("click")!({ target: { closest: () => ({ dataset: { refreshRange: "" } }) } });
-  release(); hold = null;
-  await clicked; await settle();
-  assert.ok((run2.asked as string[]).includes("GET api/activity?since=1h"), `the Refresh ran once the poll ended: ${run2.asked.join(", ")}`);
 });
 
 test("a request's + opens on its click: the toggle event a repaint strands (the live log's ages move every second) is never needed", async () => {

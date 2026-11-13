@@ -21,15 +21,16 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   `ALIASES` (src/web/routes.js, the one list of the page's addresses, which the run's check of `MASON_UI_NAV_*` reads too) of the view they were: a bookmark lands where it did (`tests/web-page.test.ts` holds each).
 - **A page with a `parent` is in its group** (`observability`, `GROUPS`): its link is under the group's heading in the
   sidebar (always shown, the current page the view itself, `aria-current`), and its views share
-  `ctx.range()` — `RANGES` in src/web/shared.js (Now · Last hour · 24 hours · 7 days · 30 days · 90 days, Now by default), each its `since`
+  `ctx.range()` — `RANGES` in src/web/shared.js (Last 15 mins · Last hour · 24 hours · 7 days · 30 days · 90 days, the last 15 minutes by default), each its `since`
   for every endpoint and its usage step; a range past the week is offered only when the run keeps it (`rangeOffered`, from
   `/api/state` `engine.keptDays`), else shown disabled with MASON_HISTORY_DAYS as its reason — kept in the hash (`?range=`), never in storage, and in the group's links;
   the range control is in the view's header row, right of its title (`renderSubnav`, its section's `range-<id>`), never in the sidebar. A view builds its paths from
-  it, so a change of range is a new read of the view shown alone. **Now is the only live range**: a read bound to the
-  range takes its rate from `rangeEvery(range, everyMs)` — that rate under Now, `Infinity` under any other — so a past
-  range is read once when chosen (`show` marks every read stale) and again only on its Refresh; the control says Live,
-  or when it was read. Why: a person comparing a past hour wants it to hold still; one watching wants it to move.
-  Detector: tests/web-page.test.ts (the reads due under Now and under a past range).
+  it, so a change of range is a new read of the view shown alone. **Every range is live**: a read bound to the range
+  takes its rate from `rangeEvery(range, everyMs)`, its own rate or the range's `everyMs` where that is slower (24 hours
+  every 30 s, a week or more every minute), and `show` marks every read stale, so a range chosen is read at once. The
+  control says Live at every range, its title the range's rate. Why: every range ends now, and one read once and held
+  still read as stale (the owner, 2026-11-13); a longer range's reads scan more of the logs. Detector:
+  tests/web-page.test.ts (the reads due under the last 15 minutes, the hour, the day and the week).
 
 - **A page is a module of its own, registered in three places** (the contract is at the top of src/web/app.js): its
   `page = { id, title, hash?, parent?, create(ctx) }` in `PAGES`, its route `/pages/<id>.js` in `PAGE_ROUTES`, its
@@ -81,7 +82,7 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   Sync is `POST /api/sync` `{ tables: [name] }` (`mason sync`), said beside its Sync as `mason sync` says it, but for its tips, which name the page's Sync now
   (`syncedReport`, src/cli/sync.ts), and written disabled, in its room, its title the reason, while `/api/state`
   `tables[].syncRefusal` says why `mason sync` of it is refused now — the sync's one check, which `pollNow` refuses with
-  (`Sync.syncRefusal`, src/duck/sync.ts), never a check of the page's own; the search box filters by name, and All / Added / Not added by state, in the page alone (the endpoint returns every table).
+  (`Sync.syncRefusal`, src/duck/sync.ts), never a check of the page's own; the tables are two lists, Added over Not added, each table in the list it was in when the lists were last laid out (`layoutOf`: the page shown, the search or Failed only changed), so a table just added keeps its row; the search box filters both by name, and Failed only lists the failed tables alone, in the page alone (the endpoint returns every table).
 - **No framework, no build step, no CDN, nothing fetched from elsewhere**: plain HTML, CSS and ES modules importing each
   other by relative paths, served as they are (cli/build.ts copies `src/**` that is not TypeScript, subfolders too,
   cli/beside.ts), because Mason runs on boxes without internet and the page must work there whole. **A small dependency
@@ -196,8 +197,10 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
 - **A click moves no other row and no column** — a table that moves under the pointer loses the next click:
   a question (a Remove's, a Cancel's), a form (Columns…, Name its key…) and what an action answered are a POPOVER beside
   the button (`pop` and `placePops` of src/web/shared.js: written after the table, `position: fixed`, anchored to the
-  row's actions cell by its id, `actId`), never a row inserted and never in the actions' cell; an answer, like a
-  refusal, stays until it is dismissed — its Dismiss, Escape (the page's `dismiss`, when no question is open), or the
+  row's actions cell by its id, `actId`), never a row inserted and never in the actions' cell. A popover that can be
+  closed has an X at its top right (`POP_X`), which presses its own Dismiss or Cancel (`data-pop-close`), never an
+  action of its own. An answer, like a
+  refusal, stays until it is dismissed — its Dismiss or X, Escape (the page's `dismiss`, when no question is open), or the
   next action's answer or question in its place (two lines a person may act on went mid-read: issue 811). A
   button whose label changes keeps the room of its longest (`ROOMS`: Sync → Syncing… → Synced ✓, Copy → Copied); one
   held while it asks stays where it was, disabled. The Tables list's columns are FIXED widths (`table-layout: fixed`,

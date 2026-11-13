@@ -849,9 +849,11 @@ test("the sync's events: /api/events passes its filters to the record, merges th
     assert.deepEqual(all.body, { keptDays: 7, events: [syncEvent,
       { at: recent, kind: "restart", failed: true, table: null, message: "the run stopped (it was killed (SIGKILL: often the system out of memory)) after 3600 s up, and its supervisor started it again" }] },
       "newest last; a restart older than the retention is not one of them");
-    assert.deepEqual(eventAsks, [{ limit: 5, failed: true, since }]);
+    assert.deepEqual(eventAsks, [{ limit: 5, failed: true, scheduled: false, since }]);
     assert.deepEqual((await get("/api/events")).body.events, [syncEvent, (all.body.events as unknown[])[1]]);
-    assert.deepEqual(eventAsks[1], { limit: 40, failed: false }, "40 by default, every kind");
+    assert.deepEqual(eventAsks[1], { limit: 40, failed: false, scheduled: false }, "40 by default, every kind but the scheduled syncs");
+    await get("/api/events?scheduled=1");
+    assert.deepEqual(eventAsks[2], { limit: 40, failed: false, scheduled: true }, "scheduled=1: the scheduled syncs too");
     const one = await get("/api/events?limit=1");
     assert.equal((one.body.events as Array<{ kind: string }>).map((e) => e.kind).join(), "restart", "the newest `limit` of the two together");
     const bad = await get("/api/events?limit=0");

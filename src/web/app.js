@@ -74,7 +74,7 @@
  * A page is registered by its import and its place in PAGES below, its route in PAGE_ROUTES, and its section in
  * index.html.
  */
-import { esc, badge, icon, copyClick, createAsk, overTunnel, renderFailure, updatedText, staleText, placePops, RANGES, DEFAULT_RANGE, rangeOf, rangeOffered, isLive, POLL_MS } from "./shared.js";
+import { esc, badge, icon, copyClick, createAsk, overTunnel, renderFailure, updatedText, staleText, placePops, RANGES, DEFAULT_RANGE, rangeOf, rangeOffered, liveTitle, POLL_MS } from "./shared.js";
 import { createCharts } from "./charts.js";
 import { page as statusPage } from "./pages/status.js";
 import { page as tablesPage } from "./pages/tables.js";
@@ -166,7 +166,7 @@ export function retarget(html, nav) {
 }
 
 /** A page's address with its parameters (`hashOf("queries", { range: "7d" })` → `#observability/queries?range=7d`); the
- *  default range is left out, so the plain address is Now. */
+ *  default range is left out, so the plain address is the last 15 minutes. */
 export function hashOf(id, params = {}) {
   // a host's view: its place in the host's links is its address
   if (id === HOST_PAGE && params.view !== undefined) return hostHash(params.view);
@@ -219,25 +219,22 @@ export const renderNav = (shown, range = DEFAULT_RANGE, nav = null, hostView = n
 /**
  * THE TIME RANGE OF A GROUP'S PAGE (the Observability views'), written beside the view's title in ONE header row (its
  * section's `range-<id>`; the group's name is the sidebar's heading): a segmented control — each a link to the same view
- * at that range, so the hash is the state and Back goes to the range before — Now first, the one that follows what
- * happens (said "Live" beside it); any other is read once when chosen, so beside it are when it was read (`asOf`, a
- * Date) and Refresh, which reads it again. "" for a page of its own.
- * The status is written BEFORE the control, in a slot that keeps the room of its longest (`.range-status`: "as of
- * HH:MM:SS UTC" and Refresh, wide and tall), so the control stays flush right and never moves when the range changes —
- * nor wraps differently on a phone (issue 873: the segment just clicked moved away under the pointer).
+ * at that range, so the hash is the state and Back goes to the range before — the last 15 minutes first. Every range
+ * follows what happens, so "Live" is said before the control, its title how often the range is read (`liveTitle`).
+ * The same word at every range, so the control never moves when the range changes (issue 873: the segment just
+ * clicked moved away under the pointer). "" for a page of its own.
  */
-export function renderSubnav(shown, range = DEFAULT_RANGE, keptDays = undefined, asOf = null) {
+export function renderSubnav(shown, range = DEFAULT_RANGE, keptDays = undefined) {
   const p = PAGES.find((x) => x.id === shown);
   if (!p?.parent) return "";
   const r = rangeOf(range);
   // a range past what the run keeps is shown disabled, saying why and what keeps it (the one chosen by its hash stays a link)
-  const status = isLive(r) ? `<span class="live" title="Updates every few seconds"><span class="live-dot" aria-hidden="true"></span>Live</span>`
-    : `<span class="as-of">${asOf ? `<span class="dim" title="Read once, when you chose this range. Choose Now to follow it live.">as of ${esc(asOf.toISOString().slice(11, 19))} UTC</span> ` : ""}<button type="button" class="small" data-refresh-range>Refresh</button></span>`;
+  const status = `<span class="live" title="${esc(liveTitle(r))}"><span class="live-dot" aria-hidden="true"></span>Live</span>`;
   return `<span class="range-status">${status}</span><div class="range" role="group" aria-label="Time range">${Object.entries(RANGES).map(([k, v]) => {
     const o = rangeOffered(k, keptDays);
     if (!o.shown && k !== r) return "";
     if (!o.offered && k !== r) return `<span class="off" aria-disabled="true" title="${esc(o.why)}">${esc(v.label)}<span class="sr"> (${esc(o.why)})</span></span>`;
-    return `<a href="${esc(hashOf(shown, { range: k }))}"${k === r ? ` aria-current="true"` : ""}${v.live ? ` title="Updates every few seconds"` : ""}>${esc(v.label)}</a>`;
+    return `<a href="${esc(hashOf(shown, { range: k }))}"${k === r ? ` aria-current="true"` : ""} title="${esc(liveTitle(k))}">${esc(v.label)}</a>`;
   }).join("")}</div>`;
 }
 
@@ -289,7 +286,7 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
     return "failure" in r && store.get("api/state")?.body?.served === true ? { failure: overTunnel(r.failure) } : r;
   };
   const first = parseHash(shown);
-  const m = { shown: first.id, range: rangeOf(first.params.range), pollFailure: null, updatedAt: null, rangeReadAt: null };
+  const m = { shown: first.id, range: rangeOf(first.params.range), pollFailure: null, updatedAt: null };
   const put = (path, at, r) => {
     const was = store.get(path);
     // `readAt`: when the last read that answered was asked, what a body kept under a failing poll says it is as of
@@ -327,14 +324,12 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
     show(hash, env = {}) {
       const r = parseHash(hash);
       m.shown = r.id;
-      // what is shown is read again now, whatever its rate: a range that is not Now is read once, when it is chosen —
-      // and until it is, it says no "as of" (the last one was another page's, or another range's)
+      // what is shown is read again now, whatever its rate (a longer range's are a minute apart)
       app.markStale();
-      m.rangeReadAt = null;
       if (PAGES.find((p) => p.id === r.id)?.parent) m.range = rangeOf(r.params.range);
       pages.get(r.id).route?.(r.params, env);
     },
-    /** Every read due at the next poll (a range chosen again, Refresh): what it has stays shown until it is answered. */
+    /** Every read due at the next poll (a page or a range shown): what it has stays shown until it is answered. */
     markStale() { for (const e of store.values()) e.stale = true; },
     /** Read the shown page's reads that are due: those at the poll's rate every time, the slower ones once their time is up. */
     async poll() {
@@ -356,8 +351,7 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
       // what the page reads once these answered and it had not named (a view the state has just named): read now, not a poll later
       const named = page.reads().filter((r) => !store.has(r.path) && !aside.has(r.path));
       if (named.length > 0) await runReads(named);
-      // a range that is not Now says when it was read: its reads are the once-only ones
-      if (due.some((r) => r.everyMs === Infinity)) m.rangeReadAt = now();
+
       const own = reads[0] === undefined ? undefined : store.get(reads[0].path);
       m.pollFailure = own?.failure ?? null;
       afterRead();
@@ -416,7 +410,7 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
       return {
         nav: renderNav(m.shown, m.range, nav, pages.get(HOST_PAGE).model.view),
         // the range control in the shown view's header row (each group page's own slot; the others empty)
-        ...Object.fromEntries(PAGES.filter((p) => p.parent).map((p) => [`range-${p.id}`, p.id === m.shown ? renderSubnav(m.shown, m.range, st?.engine?.keptDays, m.rangeReadAt) : ""])),
+        ...Object.fromEntries(PAGES.filter((p) => p.parent).map((p) => [`range-${p.id}`, p.id === m.shown ? renderSubnav(m.shown, m.range, st?.engine?.keptDays) : ""])),
         where: st ? renderWhere(st) : "",
         // the demo database is said beside its name, so a person never takes it for their own
         badge: st?.source?.demo ? badge("demo", "accent") : "",
@@ -667,8 +661,9 @@ export function start(doc, win) {
       return;
     }
     if (!b) return;
-    // Refresh beside a range that is not Now: everything shown read again
-    if (b.dataset.refreshRange !== undefined) { app.markStale(); await poll(); return; }
+    // a popover's X (`pop`, src/web/shared.js): its own Dismiss or Cancel pressed, as Escape presses a question's
+    if (b.dataset.popX !== undefined) { b.closest?.(".pop")?.querySelector?.("[data-pop-close]")?.click?.(); return; }
+
     // the one-time dialog's own buttons, whichever page is shown: I have copied it, and each Copy in it
     if (b.dataset.dismissOnce !== undefined) { for (const p of app.pages.values()) if ((p.once?.() ?? null) !== null) p.dismissOnce?.(); paint(); return; }
     if (b.dataset.copy !== undefined && onceEl?.contains?.(b)) { await act(copyClick(b.dataset, b, { doc, win })); return; }
@@ -676,8 +671,11 @@ export function start(doc, win) {
     if (r === null) return;
     await act(r);
   });
-  doc.addEventListener("input", (e) => {
-    if ((shownPage().input?.(e.target) ?? null) !== null) paint();
+  // what a page answered a change of a control with: written at once, and again when an answer it waits on comes (a
+  // filter that changes what the run is asked for: Sync events' Scheduled syncs)
+  doc.addEventListener("input", async (e) => {
+    const r = shownPage().input?.(e.target) ?? null;
+    if (r !== null) await act(r);
   });
   // a details opening does not bubble, so it is heard on the way down; the page reads what its opening needs at once
   doc.addEventListener("toggle", async (e) => {

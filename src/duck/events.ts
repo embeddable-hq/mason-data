@@ -44,14 +44,22 @@ export const EVENTS_DDL = `CREATE TABLE IF NOT EXISTS ${EVENTS_TABLE} (happened_
  * `copied` (a copy finished and was swapped in), `recovered` (a table whose poll, catch-up, stream or re-run failed is
  * current again; of no table, the stream applying changes or the database attached again after it failed) and
  * `synced` (a sync asked by hand — mason sync, the page's Sync now — and what it did), and `sync_changed` (a table's
- * `sync:` in the sources file changed while it is copied: from what, to what, and how its copy is caught up). A scheduled poll that succeeds
- * is no event: one every few seconds would bury the failures; its last result is the table's last sync.
+ * `sync:` in the sources file changed while it is copied: from what, to what, and how its copy is caught up).
+ *
+ * THE SCHEDULED SYNCS (`SCHEDULED`): `polled` (a poll on the table's schedule that succeeded, and what it did) and
+ * `streamed` (a table's changes the stream applied in the last minute, ONE row a table a minute, and only in a minute
+ * it applied some: a busy database's batches, many a second, never a row each). They are kept as the others are, but a
+ * reader gets them only when it asks (`EventsQuery.scheduled`): one every few seconds would bury the failures, and push
+ * them past the newest `limit` a reader asks for. A poll is at most one a second a table (`poll 1s`, the floor), so a
+ * table writes at most 86,400 rows a day, MASON_HISTORY_DAYS kept; a streamed table 1,440.
  */
-export const EVENT_KINDS = ["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "restart", "copied", "recovered", "synced", "sync_changed"] as const;
+export const EVENT_KINDS = ["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "restart", "copied", "recovered", "synced", "sync_changed", "polled", "streamed"] as const;
 export type SyncEventKind = (typeof EVENT_KINDS)[number];
 const FAILURES: ReadonlySet<SyncEventKind> = new Set(["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "restart"]);
 /** whether an event of this kind is a failure: the one place that says it (the reader's filter, `failed`) */
 export const isFailure = (kind: SyncEventKind): boolean => FAILURES.has(kind);
+/** the scheduled syncs' kinds: listed only when a reader asks for them (`EventsQuery.scheduled`) */
+export const SCHEDULED: ReadonlySet<SyncEventKind> = new Set(["polled", "streamed"]);
 
 /** One event as the commands read it (`mason logs --events --json`, `/api/events`, `mason status --json` recentErrors). */
 export interface SyncEvent {
@@ -160,11 +168,13 @@ export class SyncEvents {
     return n;
   }
 
-  /** The newest `limit` events, newest LAST; `since`: at or after it; `failed`: the failures only. Committed ones only. */
+  /** The newest `limit` events, newest LAST; `since`: at or after it; `failed`: the failures only; `scheduled`: the
+   *  scheduled syncs too (else left out, in the query, so they never take a place of the `limit`). Committed ones only. */
   async recent(o: EventsQuery): Promise<SyncEvent[]> {
     const where: string[] = [];
     const values: DuckDBValue[] = [o.limit];
     if (o.failed) where.push(`kind IN (${[...FAILURES].map((k) => `'${k}'`).join(", ")})`);
+    else if (o.scheduled !== true) where.push(`kind NOT IN (${[...SCHEDULED].map((k) => `'${k}'`).join(", ")})`);
     if (o.since !== undefined) { values.push(o.since); where.push(`happened_at >= $${values.length}::TIMESTAMPTZ`); }
     const rows = (await this.history.reader.runAndReadAll(`SELECT * FROM (SELECT epoch_ms(happened_at) AS ms, seq, kind, table_name, message FROM ${EVENTS_TABLE}` +
       `${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY happened_at DESC, seq DESC LIMIT $1) ORDER BY ms, seq`, values)).getRowsJS() as Array<[bigint | number, bigint, string, string | null, string]>;
@@ -180,8 +190,8 @@ export class SyncEvents {
   }
 }
 
-/** What a reader asks of the events: how many (the newest), from when (ISO), the failures only. */
-export interface EventsQuery { limit: number; since?: string; failed?: boolean }
+/** What a reader asks of the events: how many (the newest), from when (ISO), the failures only, the scheduled syncs too. */
+export interface EventsQuery { limit: number; since?: string; failed?: boolean; scheduled?: boolean }
 
 /** an event as read back, any `password=` value in its message masked (src/lib/secret-mask.ts `maskPasswordKeyword`,
  *  the exact form an earlier Mason leaked, issue 599: the sync scrubs those rows at open, and this holds should one stay) */
