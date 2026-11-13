@@ -133,7 +133,7 @@ const HEADS: readonly string[] = [
   ...STEP_WORDS.flatMap((w) => [`  ${w}`, ...["✔", "✓", "✘", "✗", ...FRAMES].map((m) => `${m} ${w}`)]),
   "  the service could not say more just now ", "  ! ", "using MASON_REPLICA=acme/shop ",
   ...["  ", ...["✔", "✓", "✘", "✗", ...FRAMES].map((m) => `${m} `)].map((m) => `${m}Waiting to send the deploy: `),
-  ...["deploy", "service", "files", "took", "why", "fix"].map((l) => `  ${l} `),
+  ...["deploy", "service", "folder", "files", "took", "why", "fix"].map((l) => `  ${l} `),
   // what the deploy changes, shown before it is sent (a row each), and the question a removal asks
   "What the deploy changes on ", ...["adds", "removes", "changes"].map((v) => `  ${v} `), "Removing ", "> ",
   // a service's refusal of a removal not confirmed, naming what it removes, and the question it asks
@@ -289,7 +289,7 @@ test("mason deploy: the files sent are projectFiles of the project folder, whole
   assert.doesNotMatch(post.body, /hunter2|a note|readme|x: 1|a: 1/, "nothing beside the project's files");
   // the outcome, once
   assert.equal(requests.filter((r) => r.method === "GET").length, 1);
-  assert.match(a.stdout, /^Deployed to acme\/shop: the replica runs it\n {2}deploy {4}dep_01abc\n {2}service {3}http:\/\/127\.0\.0\.1:\d+\n {2}files {5}4 \(\d+ bytes\)\n {2}took {6}\d+ s\n\nNext:\n {2}mason deploy --replica acme\/shop +deploy again, after the next edit\n$/);
+  assert.match(a.stdout, /^Deployed to acme\/shop: the replica runs it\n {2}deploy {4}dep_01abc\n {2}service {3}http:\/\/127\.0\.0\.1:\d+\n {2}folder {4}\S+\/mason\/\n {2}files {5}4 \(\d+ bytes\)\n {2}took {6}\d+ s\n\nNext:\n {2}mason deploy --replica acme\/shop +deploy again, after the next edit\n$/);
 });
 
 test("mason deploy: no database is read and no .env needed — the URL is the replica's environment's", async () => {
@@ -299,7 +299,7 @@ test("mason deploy: no database is read and no .env needed — the URL is the re
   assert.equal(a.code, 0, a.stdout + a.stderr);
   assert.equal(requests.filter((r) => r.method === "POST").length, 1);
   const v = JSON.parse(a.stdout) as Record<string, unknown>;
-  assert.deepEqual(Object.keys(v), ["dryRun", "replica", "service", "files", "totalBytes", "warnings", "plan", "planUnknown", "confirmed", "deploy", "next"]);
+  assert.deepEqual(Object.keys(v), ["dryRun", "replica", "service", "folder", "files", "totalBytes", "warnings", "plan", "planUnknown", "confirmed", "deploy", "next"]);
   assert.equal(v.dryRun, false);
   assert.equal(v.confirmed, null, "nothing removed, nothing confirmed");
   assert.equal(v.plan, null, "a service that does not say what the replica runs: no plan");
@@ -322,7 +322,7 @@ test("mason deploy --dry-run: each path, its size and its sha256, and no request
     });
     const w = Math.max(...rows.map((r) => r.path.length)), sw = Math.max(...rows.map((r) => `${r.size} bytes`.length));
     const total = rows.reduce((n, r) => n + r.size, 0);
-    assert.equal(a.stdout, `Would send 3 files, ${total} bytes, to acme/shop on ${fake.url}; nothing was sent\n` +
+    assert.equal(a.stdout, `Would send 3 files of ${folder}/, ${total} bytes, to acme/shop on ${fake.url}; nothing was sent\n` +
       rows.map((r) => `  ${r.path.padEnd(w)}   ${`${r.size} bytes`.padStart(sw)}   sha256 ${r.sha256}\n`).join("") +
       `What the deploy changes on acme/shop cannot be shown: this machine is not signed in to ${fake.url}\n` +
       "\nNext:\n  mason deploy --replica acme/shop              send it\n");
@@ -952,11 +952,249 @@ test("mason deploy --timeout: past it, exit 124 naming the deploy's id and that 
   }
 });
 
-test("mason deploy: needs a project — none here is the state's answer, nothing sent", async () => {
-  const { a, requests } = await deployWith({}, temp("mason-empty-"), ["--replica", "acme/shop", "--json"]);
-  assert.equal(a.code, 1);
-  assert.equal((JSON.parse(a.stdout) as { error: { code: string } }).error.code, "no_project");
-  assert.deepEqual(requests, []);
+/** What a deploy says where no .mason/ is at or above and `root`'s own mason/ is missing ("absent") or holds no project
+ *  ("lacks"): its whole --json error. */
+const noProject = (root: string, kind: "absent" | "lacks"): Record<string, string> => {
+  const ways = "run mason deploy in the folder that holds the project's mason/, or name that folder: mason -C <folder> deploy; or make this folder a project: mason init";
+  return { code: "no_project",
+    message: kind === "absent" ? `no Mason project in ${root}: no .mason/ here or above, and no mason/ here` : `${path.join(root, "mason")}/ holds no project: no mason.yml and no YAML file in mason/sources/`,
+    why: "with no .mason/ here or above, a deploy sends the mason/ of the folder it runs in (its mason.yml, sources/, roles.yml and generated tables), and no other",
+    fix: kind === "absent" ? ways : `write the project's files in it (mason init writes mason/sources/<name>.yml and mason.yml), or ${ways}` };
+};
+
+test("mason deploy: needs a project's files — a folder with no .mason/ at or above and no mason/ of its own is refused, saying what is missing and the ways out; a mason/ holding no project is refused saying what it lacks; nothing sent", async () => {
+  // nothing above the temp folders holds a project
+  for (let d = os.tmpdir(); ; d = path.dirname(d)) {
+    assert.ok(!fs.existsSync(path.join(d, ".mason", "config.json")), `${d} holds a project`);
+    if (path.dirname(d) === d) break;
+  }
+  const empty = temp("mason-empty-");
+  fs.writeFileSync(path.join(empty, "docker-compose.yml"), "password: from-the-app\n");
+  // a mason/ that holds no project file (a note, an empty sources/), and one that is a file: refused, saying what it lacks
+  const lacking = temp("mason-lacking-");
+  fs.mkdirSync(path.join(lacking, "mason", "sources"), { recursive: true });
+  fs.writeFileSync(path.join(lacking, "mason", "notes.txt"), "a note\n");
+  fs.writeFileSync(path.join(lacking, "mason", "sources", ".hidden.yml"), "x: from-a-hidden-file\n");
+  for (const [root, kind] of [[empty, "absent"], [lacking, "lacks"]] as const) {
+    for (const argv of [["--replica", "acme/shop", "--json"], ["--replica", "acme/shop", "--dry-run", "--json"]]) {
+      const { a, requests } = await deployWith({}, root, argv);
+      assert.equal(a.code, 1, a.stdout + a.stderr);
+      const v = JSON.parse(a.stdout) as { error: Record<string, string>; next: Array<{ command: string }> };
+      assert.deepEqual(v.error, noProject(root, kind), `${kind} ${argv.join(" ")}`);
+      assert.deepEqual(v.next.map((n) => n.command), ["mason init"]);
+      assert.deepEqual(requests, [], "nothing sent");
+    }
+    const { a } = await deployWith({}, root, ["--replica", "acme/shop"]);
+    assert.equal(a.code, 1);
+    assert.ok(a.stderr.startsWith(`✗ mason deploy: ${noProject(root, kind).message}\n`), a.stderr);
+    assert.doesNotMatch(a.stdout + a.stderr, /from-the-app|a note|from-a-hidden-file/);
+  }
+  const file = temp("mason-file-");
+  fs.writeFileSync(path.join(file, "mason"), "x: 1\n");
+  const f = await deployWith({}, file, ["--replica", "acme/shop", "--json"]);
+  assert.equal((JSON.parse(f.a.stdout) as { error: { code: string; message: string } }).error.message, `${path.join(file, "mason")} is a file, not the project's mason/ folder`);
+});
+
+/** A folder holding a project's files alone, as one fetched or cloned that was never `mason init`ed: `mason/` (its
+ *  sources file, mason.yml, roles.yml, and `files` more under it), no `.mason/`; the application's own files beside it. */
+function filesOnly(files: Record<string, string | null> = {}): { root: string; folder: string } {
+  const root = temp("mason-files-only-");
+  const folder = path.join(root, "mason");
+  const all: Record<string, string | null> = { "sources/shop.yml": SOURCE, "mason.yml": "version: 0.7.0\n", "roles.yml": ROLES, ...files };
+  for (const [rel, text] of Object.entries(all)) {
+    if (text === null) continue;
+    fs.mkdirSync(path.dirname(path.join(folder, rel)), { recursive: true });
+    fs.writeFileSync(path.join(folder, rel), text);
+  }
+  // beside mason/: the application's YAML, its .env, a dotfile, a folder of its own — none is ever sent
+  fs.writeFileSync(path.join(root, "docker-compose.yml"), "password: from-the-app\n");
+  fs.writeFileSync(path.join(root, "ci.yaml"), "token: from-the-ci\n");
+  fs.writeFileSync(path.join(root, ".env"), "DATABASE_URL=postgres://u:hunter2@db.example/prod\n");
+  fs.writeFileSync(path.join(root, ".editor.yml"), "a: from-a-dotfile\n");
+  fs.mkdirSync(path.join(root, "app", "src"), { recursive: true });
+  fs.writeFileSync(path.join(root, "app", "k8s.yml"), "secret: from-a-sibling\n");
+  fs.writeFileSync(path.join(folder, ".hidden.yml"), "x: from-a-hidden-file\n");
+  return { root, folder };
+}
+const BESIDE = /from-the-app|from-the-ci|hunter2|from-a-dotfile|from-a-sibling|from-a-hidden-file|docker-compose|ci\.yaml|k8s\.yml/;
+const escaped = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+test("mason deploy, with no .mason/: the folder's own mason/ is the project — only its project files are sent, never the YAML beside it, .env or a dotfile; the folder sent is said, as a person and in --json; the dry run lists the same files; nothing of .mason/ is made", async () => {
+  const { root, folder } = filesOnly({ "generated_tables/daily.yml": DAILY });
+  const expected = ["generated_tables/daily.yml", "mason.yml", "roles.yml", "sources/shop.yml"];
+  // a deploy, as a person and with --json
+  for (const json of [false, true]) {
+    const { a, requests } = await deployWith({}, root, ["--replica", "acme/shop", ...(json ? ["--json"] : [])]);
+    assert.equal(a.code, 0, a.stdout + a.stderr);
+    const posts = requests.filter((r) => r.method === "POST");
+    assert.equal(posts.length, 1);
+    const body = JSON.parse(posts[0]!.body) as { files: Array<{ path: string; sha256: string; content: string }> };
+    assert.deepEqual(body.files.map((f) => f.path), expected);
+    for (const f of body.files) assert.equal(f.sha256, sha(fs.readFileSync(path.join(folder, f.path))));
+    assert.doesNotMatch(posts[0]!.body, BESIDE, "nothing beside mason/'s project files");
+    assert.doesNotMatch(a.stdout + a.stderr, BESIDE);
+    if (json) {
+      const v = JSON.parse(a.stdout) as { deploy: { status: string }; folder: string };
+      assert.deepEqual([v.deploy.status, v.folder], ["running", `${folder}/`]);
+    } else assert.match(a.stdout, new RegExp(`^Deployed to acme/shop: the replica runs it\\n {2}deploy {4}dep_01abc\\n {2}service {3}\\S+\\n {2}folder {4}${escaped(folder)}/\\n {2}files {5}4 `));
+  }
+  // a dry run: the same files and the folder, and no request
+  const fake = await fakeService({});
+  try {
+    const env = envFor(temp("mason-home-"), fake.url);
+    const d = await mason(root, ["deploy", "--dry-run", "--json"], env);
+    assert.equal(d.code, 0, d.stdout + d.stderr);
+    const v = JSON.parse(d.stdout) as { dryRun: boolean; folder: string; files: Array<{ path: string; size: number; sha256: string }> };
+    assert.deepEqual([v.dryRun, v.folder], [true, `${folder}/`]);
+    assert.deepEqual(v.files.map((f) => f.path), expected);
+    const p = await mason(root, ["deploy", "--replica", "acme/shop", "--dry-run"], env);
+    assert.equal(p.code, 0, p.stderr);
+    assert.match(p.stdout, new RegExp(`^Would send 4 files of ${escaped(folder)}/, [\\d,]+ bytes, to acme/shop on http://127\\.0\\.0\\.1:\\d+; nothing was sent\\n {2}generated_tables/daily\\.yml `));
+    assert.doesNotMatch(d.stdout + p.stdout + p.stderr, BESIDE);
+    assert.deepEqual(fake.requests, [], "a dry run makes no request");
+  } finally { await fake.close(); }
+  assert.equal(fs.existsSync(path.join(root, ".mason")), false, "a deploy makes no .mason/");
+  // a mason/ with only a sources/ file (no mason.yml) is one; a mason.yml alone is one too, then checked as a start checks it
+  const sourcesOnly = filesOnly({ "mason.yml": null, "roles.yml": null });
+  const s = await deployWith({}, sourcesOnly.root, ["--replica", "acme/shop", "--dry-run", "--json"]);
+  assert.equal(s.a.code, 0, s.a.stdout + s.a.stderr);
+  assert.deepEqual((JSON.parse(s.a.stdout) as { files: Array<{ path: string }> }).files.map((f) => f.path), ["sources/shop.yml"]);
+  const pinOnly = filesOnly({ "sources/shop.yml": null, "roles.yml": null });
+  const m = await deployWith({}, pinOnly.root, ["--replica", "acme/shop", "--dry-run", "--json"]);
+  assert.equal(m.a.code, 1);
+  assert.notEqual((JSON.parse(m.a.stdout) as { error: { code: string } }).error.code, "no_project", m.a.stdout);
+});
+
+test("mason deploy, with no .mason/: only the folder it runs in (or -C's) — a mason/ in a folder above, or below, is never taken; run below one it is refused, never naming it; mason -C <folder> deploy sends that folder's", async () => {
+  const { root, folder } = filesOnly();
+  // below the project's root, its mason/ own folders included: refused, the folder above never named nor sent
+  for (const sub of ["app/src", "app", "mason", "mason/sources"]) {
+    const cwd = path.join(root, sub);
+    for (const argv of [["--replica", "acme/shop", "--json"], ["--replica", "acme/shop", "--dry-run", "--json"]]) {
+      const { a, requests } = await deployWith({}, cwd, argv);
+      assert.equal(a.code, 1, `${sub}: ${a.stdout}${a.stderr}`);
+      // mason/sources/ holds no mason/ of its own; mason/ holds sources/ but not a mason/ — each is "no mason/ here"
+      assert.deepEqual((JSON.parse(a.stdout) as { error: Record<string, string> }).error, noProject(cwd, "absent"), sub);
+      assert.deepEqual(requests, [], `${sub}: nothing sent`);
+      // (a folder inside mason/ names it only as the folder it runs in, which the error above holds whole)
+      if (!sub.startsWith("mason")) assert.ok(!a.stdout.includes(folder), `${sub}: the mason/ above is never named`);
+    }
+  }
+  // a folder below holding a mason/ of its own is never taken from the root either
+  const { root: top } = filesOnly();
+  fs.rmSync(path.join(top, "mason"), { recursive: true });
+  fs.mkdirSync(path.join(top, "app", "mason", "sources"), { recursive: true });
+  fs.writeFileSync(path.join(top, "app", "mason", "sources", "inner.yml"), SOURCE);
+  const below = await deployWith({}, top, ["--replica", "acme/shop", "--json"]);
+  assert.deepEqual((JSON.parse(below.a.stdout) as { error: Record<string, string> }).error, noProject(top, "absent"));
+  assert.deepEqual(below.requests, []);
+  // mason -C <folder>: that folder's mason/, from anywhere
+  const fake = await fakeService({});
+  try {
+    const env = envFor(temp("mason-home-"), fake.url, { MASON_TOKEN: newToken("ci") });
+    SECRETS.push(env.MASON_TOKEN!);
+    const c = await mason(path.join(root, "app", "src"), ["-C", root, "deploy", "--replica", "acme/shop", "--json"], env);
+    assert.equal(c.code, 0, c.stdout + c.stderr);
+    assert.equal((JSON.parse(c.stdout) as { folder: string }).folder, `${folder}/`);
+    const post = fake.requests.find((r) => r.method === "POST")!;
+    assert.deepEqual((JSON.parse(post.body) as { files: Array<{ path: string }> }).files.map((f) => f.path), ["mason.yml", "roles.yml", "sources/shop.yml"]);
+    assert.doesNotMatch(post.body, BESIDE);
+  } finally { await fake.close(); }
+});
+
+test("mason deploy, with no .mason/: a mason/ that is a link out of the folder is outside it — refused, nothing read or sent; one that cannot be read is refused saying so", async () => {
+  const { root, folder } = filesOnly();
+  const away = temp("mason-away-");
+  fs.cpSync(folder, away, { recursive: true });
+  fs.writeFileSync(path.join(away, "elsewhere.yml"), "secret: from-elsewhere\n");
+  fs.rmSync(folder, { recursive: true });
+  fs.symlinkSync(away, folder);
+  for (const argv of [["--replica", "acme/shop", "--json"], ["--replica", "acme/shop", "--dry-run", "--json"]]) {
+    const { a, requests } = await deployWith({}, root, argv);
+    assert.equal(a.code, 1, a.stdout + a.stderr);
+    const e = (JSON.parse(a.stdout) as { error: { code: string; message: string; fix: string } }).error;
+    assert.deepEqual([e.code, e.message, e.fix], ["refused", `this project's files are outside its folder (mason/ leads out of ${root})`,
+      `make mason/ a folder of its own inside ${root}, holding the project's files, rather than a link`]);
+    assert.deepEqual(requests, []);
+    assert.doesNotMatch(a.stdout + a.stderr, /from-elsewhere|elsewhere\.yml/);
+  }
+  // a mason/ this user may not read (as root, every folder is read): refused, never taken for "none here"
+  if (process.getuid?.() !== 0) {
+    const locked = filesOnly();
+    fs.chmodSync(locked.folder, 0);
+    try {
+      const { a, requests } = await deployWith({}, locked.root, ["--replica", "acme/shop", "--json"]);
+      assert.equal(a.code, 1, a.stdout + a.stderr);
+      const e = (JSON.parse(a.stdout) as { error: { code: string; message: string; why: string } }).error;
+      assert.deepEqual([e.code, e.message, e.why], ["refused", `${locked.folder} cannot be read, so whether it holds this project's files cannot be told`,
+        "a folder on the way may not be read by this user (EACCES)"]);
+      assert.deepEqual(requests, []);
+    } finally { fs.chmodSync(locked.folder, 0o700); }
+  }
+});
+
+test("mason deploy: a .mason/ whose config cannot be checked (a link loop; a .mason/ this user may not read) is refused saying so — never taken for no .mason/, so no other mason/ is sent in place of the folder its config names", async () => {
+  // an initialised project whose config names "files", beside a mason/ of other files: a deploy must never send mason/
+  const layout = (): { root: string } => {
+    const { root } = project();
+    fs.renameSync(path.join(root, "mason"), path.join(root, "files"));
+    fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: "shop", folder: "files", remote: false, apiKey: "k".repeat(48) }), { mode: 0o600 });
+    fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
+    fs.writeFileSync(path.join(root, "mason", "sources", "other.yml"), SOURCE);
+    return { root };
+  };
+  const cases: Array<[string, (root: string) => void, RegExp]> = [
+    // a .mason/ that is a link to itself: its config cannot be resolved, whoever runs this
+    ["a link loop", (root) => { fs.rmSync(path.join(root, ".mason"), { recursive: true }); fs.symlinkSync(".mason", path.join(root, ".mason")); }, /\(ELOOP\)$/],
+  ];
+  // a .mason/ this user may not read, as mason init makes it for another user (as root every folder is read)
+  if (process.getuid?.() !== 0) cases.push(["a .mason/ this user may not read", (root) => { fs.chmodSync(path.join(root, ".mason"), 0); }, /may not be read by this user \(EACCES\)$/]);
+  for (const [what, make, why] of cases) {
+    const { root } = layout();
+    make(root);
+    try {
+      for (const cwd of [root, path.join(root, "mason", "sources")]) {
+        for (const argv of [["--replica", "acme/shop", "--dry-run", "--json"], ["--replica", "acme/shop", "--json"]]) {
+          const { a, requests } = await deployWith({}, cwd, argv);
+          assert.equal(a.code, 1, `${what} ${argv.join(" ")}: ${a.stdout}${a.stderr}`);
+          const e = (JSON.parse(a.stdout) as { error: { code: string; message: string; why: string; fix: string } }).error;
+          assert.deepEqual([e.code, e.message], ["refused", `${path.join(root, ".mason")} cannot be read, so whether ${root} is a Mason project cannot be told`], what);
+          assert.match(e.why, why, what);
+          assert.match(e.fix, /^make .*\.mason readable by this user/, what);
+          assert.doesNotMatch(a.stdout + a.stderr, /other\.yml/, `${what}: nothing of mason/ listed`);
+          assert.deepEqual(requests, [], `${what}: nothing sent`);
+        }
+      }
+      const p = await deployWith({}, root, ["--replica", "acme/shop", "--dry-run"]);
+      assert.equal(p.a.code, 1);
+      assert.match(p.a.stderr, /^✗ mason deploy: .*\.mason cannot be read, so whether .* is a Mason project cannot be told\n/);
+    } finally { if (fs.existsSync(path.join(root, ".mason")) && !fs.lstatSync(path.join(root, ".mason")).isSymbolicLink()) fs.chmodSync(path.join(root, ".mason"), 0o700); }
+  }
+});
+
+test("mason deploy, in an initialised project: unchanged — its config's folder decides, wherever a mason/ is; a .mason/ above a folder's own mason/ is the project", async () => {
+  // config.json names "files": that folder is sent, never the mason/ beside it
+  const { root } = project();
+  fs.renameSync(path.join(root, "mason"), path.join(root, "files"));
+  fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: "shop", folder: "files", remote: false, apiKey: "k".repeat(48) }), { mode: 0o600 });
+  fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
+  fs.writeFileSync(path.join(root, "mason", "sources", "other.yml"), SOURCE);
+  const { a, requests } = await deployWith({}, root, ["--replica", "acme/shop", "--json"]);
+  assert.equal(a.code, 0, a.stdout + a.stderr);
+  assert.deepEqual((JSON.parse(requests.find((r) => r.method === "POST")!.body) as { files: Array<{ path: string }> }).files.map((f) => f.path), ["mason.yml", "roles.yml", "sources/shop.yml"]);
+  // a folder under the project holding a mason/ of its own: the .mason/ above is the nearest project, as for every command
+  const sub = path.join(root, "app");
+  fs.mkdirSync(path.join(sub, "mason", "sources"), { recursive: true });
+  fs.writeFileSync(path.join(sub, "mason", "sources", "sub.yml"), SOURCE);
+  const s = await deployWith({}, sub, ["--replica", "acme/shop", "--json"]);
+  assert.equal(s.a.code, 0, s.a.stdout + s.a.stderr);
+  assert.deepEqual((JSON.parse(s.requests.find((r) => r.method === "POST")!.body) as { files: Array<{ path: string }> }).files.map((f) => f.path), ["mason.yml", "roles.yml", "sources/shop.yml"]);
+  // a config that cannot be read is refused as every command refuses it, never passed over for a mason/
+  fs.writeFileSync(path.join(root, ".mason", "config.json"), '{"name": "shop", "fol');
+  const b = await deployWith({}, root, ["--replica", "acme/shop", "--json"]);
+  assert.equal(b.a.code, 1);
+  assert.equal((JSON.parse(b.a.stdout) as { error: { code: string } }).error.code, "bad_config");
+  assert.deepEqual(b.requests, []);
 });
 
 test("mason deploy: a service that echoes the token it was sent in another form — its body, split, re-cased, URL-encoded, a slice, pieces, a piece in each field — shows no more than a quarter of it in all, on stdout, stderr or in --json", { timeout: 300_000 }, async () => {
@@ -1609,7 +1847,7 @@ test("mason deploy --dry-run: a generated table's file whose YAML expands more a
   const { a } = await deployWith({}, root, ["--replica", "acme/shop", "--dry-run"]);
   assert.equal(a.code, 0, a.stderr);
   assert.match(a.stderr, /mason\/generated_tables\/daily\.yml: it cannot be read as values: /);
-  assert.match(a.stdout, /^Would send 4 files, /);
+  assert.match(a.stdout, /^Would send 4 files of \S+\/mason\/, /);
 });
 
 test("no run of mason deploy printed a token, nor anything shaped as one", () => {

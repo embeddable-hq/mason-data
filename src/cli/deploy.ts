@@ -80,7 +80,7 @@ import { canAsk, pinRefusal, replicaAnswer, typedBack, wordless } from "./replic
 import { heldProject, heldRemoves, MAX_DEPLOY_ANSWER, planOf, planRows, removedText, RESYNC, type Plan, type TableSize } from "./deploy-plan.ts";
 import { holdOutput } from "./output-gate.ts";
 import { maskedUrl } from "./preflight.ts";
-import { folderPlace, theProject, type Project } from "./project.ts";
+import { folderPlace, PROJECT_FOLDER, theProjectFolder, type ProjectFolder } from "./project.ts";
 import { commandPinProblem } from "./pin.ts";
 import { readPin } from "../lib/project-version.ts";
 import { projectFiles } from "../lib/project-files.ts";
@@ -139,8 +139,8 @@ const clipped = (label: string): string | null => {
 /** A failure said for a person in serviceStyle, or under --json as data. */
 const fail = (f: Failure | Parameters<typeof failed>[1], o: { json: boolean }): number => failed("deploy", f, { json: o.json, style: errStyle() });
 
-export const DEPLOY: CommandSpec & { needs: "project" } = {
-  needs: "project",
+export const DEPLOY: CommandSpec & { needs: "files" } = {
+  needs: "files",
   name: "deploy",
   summary: "send this project to a replica on a hosted Mason service, and wait until the replica runs it",
   usage: `usage: mason deploy [--replica <org>/<name>] [--dry-run] [--yes] [--timeout <duration>] [--json]
@@ -169,6 +169,10 @@ export const DEPLOY: CommandSpec & { needs: "project" } = {
   The replica is --replica <org>/<name>, else MASON_REPLICA (each part lower case letters, digits and -). The login
   is MASON_TOKEN, else this machine's (mason login); the service is MASON_CLOUD_URL, else the default. Progress
   goes to stderr; the answer is printed when it ends.
+
+  It needs no mason init: with no .mason/ in this folder or above, the project is this folder's own mason/
+  (with a mason.yml or a YAML file in sources/), or the mason/ of the folder mason -C <folder> deploy names,
+  and never a mason/ elsewhere. Only that mason/ is sent, and its folder is said with what is sent.
 
   While the replica is being created (or the service asks for a wait: too many deploys at once), it waits as the
   service asks and sends the deploy again, within --timeout, saying the replica's state and how long it has waited.
@@ -199,8 +203,9 @@ export const DEPLOY: CommandSpec & { needs: "project" } = {
   or 124.
 
   The --json answer, once it ends: { dryRun, replica (null when none is named on a dry run),
-    service, files: [{ path, size, sha256 }], totalBytes, warnings (the generated tables
-    refused, as mason start says them, each one line), plan (what the deploy changes on the
+    service, folder (the folder whose files are sent), files: [{ path, size, sha256 }],
+    totalBytes, warnings (the generated tables refused, as mason start says them, each one
+    line), plan (what the deploy changes on the
     replica: { tables: { added, removed: [{ table, rows, bytes }], changed: [{ table,
     columns, key, sync: { from, to } | null }] }, generatedTables: { added, removed,
     changed }, roles: { added, removed, changed, default: { from, to } | null }, pin:
@@ -214,7 +219,7 @@ export const DEPLOY: CommandSpec & { needs: "project" } = {
     { code, message, why, fix }), next }
 `,
   options: { replica: { type: "string" }, "dry-run": { type: "boolean", default: false }, yes: { type: "boolean", default: false }, timeout: { type: "string" }, json: { type: "boolean", default: false } },
-  json: ["dryRun", "replica", "service", "files", "totalBytes", "warnings", "plan", "planUnknown", "confirmed", "deploy", "error", "next"],
+  json: ["dryRun", "replica", "service", "folder", "files", "totalBytes", "warnings", "plan", "planUnknown", "confirmed", "deploy", "error", "next"],
 };
 
 /** A file as it is sent: its path (relative to the project folder, `/` between its parts), size in bytes, sha256 of its
@@ -234,7 +239,7 @@ function writesPassword(url: string): boolean {
  * file against the tables the sources file names, the generated tables (said, never refusing). A Failure for what a
  * start would refuse; else the warnings, and every file the check read (each must be among the files sent).
  */
-export function checkProject(p: Project, cliVersion: string = version()): (Checked & { read: string[] }) | Failure {
+export function checkProject(p: ProjectFolder, cliVersion: string = version()): (Checked & { read: string[] }) | Failure {
   const read: string[] = [];
   // the pin: a mason.yml that cannot be read is refused whatever this command's version (a checkout's `dev` checks no
   // version, and the replica's image reads the same file)
@@ -281,20 +286,30 @@ const refuse = (message: string, why: string, fix: string): Failure => ({ messag
  * THE PROJECT'S OWN FOLDER, or why a deploy sends nothing from it: its files must be a folder strictly inside the
  * project's root (`folderPlace`, src/cli/project.ts, the one authority, which `mason init` asks too). Its root itself
  * (`"folder": "."`, mason init --folder .) is the application's folder, and anything outside the root (`..`, `../app`,
- * an absolute path, a link that leaves it) is anyone's: a deploy would send every .yml and .yaml there. Fail closed:
- * asked before any of those files is read.
+ * an absolute path, a link that leaves it) is anyone's: a deploy would send every .yml and .yaml there. Found with no
+ * `.mason/` (`theProjectFolder`), the folder is the root's own `mason/`, held to the same rule: a `mason/` that is a link
+ * out of the root is outside it. Fail closed: asked before any of those files is read.
  */
-export function ownFolderRefusal(p: Project): Failure | null {
+export function ownFolderRefusal(p: ProjectFolder): Failure | null {
   const place = folderPlace(p.root, p.folder);
   if (place.place === "inside") return null;
-  const config = shownPath(p.root, path.join(p.dir, "config.json"));
+  if (p.config === null) {
+    // no config names it: the root's mason/, which can only be outside (a link that leaves the root) or unresolvable
+    const shown = `${shownPath(p.root, p.folder)}/`;
+    const fix = `make ${shown} a folder of its own inside ${p.root}, holding the project's files, rather than a link`;
+    return place.place === "unknown"
+      ? refuse(`this project's files cannot be found: ${shown} cannot be resolved`, place.why, fix)
+      : refuse(`this project's files are outside its folder (${shown} leads out of ${p.root})`,
+        `a deploy sends every .yml and .yaml under the project's files, and outside ${p.root} that is anyone's`, fix);
+  }
+  const config = shownPath(p.root, p.config.file);
   // the config's value as it is written, bounded (a path may be long)
   const named = JSON.stringify(p.config.folder.length > 200 ? `${p.config.folder.slice(0, 200)}…` : p.config.folder);
-  const fix = `move mason.yml, roles.yml, sources/ and generated_tables/ into a folder of their own inside ${p.root} (mason/), and set "folder": "mason" in ${config}`;
+  const fix = `move mason.yml, roles.yml, sources/ and generated_tables/ into a folder of their own inside ${p.root} (${PROJECT_FOLDER}/), and set "folder": "${PROJECT_FOLDER}" in ${config}`;
   // a place that cannot be told is refused, saying it could not tell (fail closed), never thrown
   if (place.place === "unknown") {
     return refuse(`this project's files cannot be found: ${config} names "folder": ${named}, which cannot be resolved`, place.why,
-      `set "folder" in ${config} to the project's folder, a folder of its own inside ${p.root} (mason, as mason init writes it)`);
+      `set "folder" in ${config} to the project's folder, a folder of its own inside ${p.root} (${PROJECT_FOLDER}, as mason init writes it)`);
   }
   return place.place === "root"
     ? refuse("this project's files are its folder's own (mason init --folder .), beside the application's",
@@ -307,7 +322,7 @@ export function ownFolderRefusal(p: Project): Failure | null {
  * THE FILES A DEPLOY SENDS: `projectFiles` of the project folder, each read and held to the contract's bounds, and
  * every file the check read among them. A Failure naming the file and the bound otherwise.
  */
-export function deployFiles(p: Project, read: readonly string[]): DeployFile[] | Failure {
+export function deployFiles(p: ProjectFolder, read: readonly string[]): DeployFile[] | Failure {
   const folder = p.folder, shownFolder = `${shownPath(p.root, folder)}/`;
   // never a file of a folder that is not the project's own, whoever calls this (deploy() asks first, before the check)
   const own = ownFolderRefusal(p);
@@ -498,7 +513,7 @@ export interface Planned { plan: Plan | null; unknown: string | null }
  * deploy goes on. But an answer that carries a secret, in any value (a file's text included) or the service's words, is
  * refused whole, as every answer is. A Failure: the pin's refusal, or such an answer.
  */
-export async function replicaNow(service: Parameters<typeof call>[0], r: Replica, token: string, project: Project, files: readonly DeployFile[]): Promise<Planned | Failure> {
+export async function replicaNow(service: Parameters<typeof call>[0], r: Replica, token: string, project: ProjectFolder, files: readonly DeployFile[]): Promise<Planned | Failure> {
   const secrets = [token], name = replicaText(r);
   const cannot = (why: string): Planned => ({ plan: null, unknown: why });
   const asked = await call(service, "GET", `/v1/replicas/${r.org}/${r.name}?project=1`, { token, maxBytes: MAX_PROJECT_ANSWER });
@@ -553,7 +568,8 @@ export async function deploy(argv: string[]): Promise<number> {
   if (isFailure(service)) return fail(service, { json });
 
   // THE PROJECT, checked as a start checks it, offline; then its files
-  const t = theProject(process.cwd());
+  // its files alone (needs: "files"): the nearest project's folder, or, with no .mason/ at or above, the nearest mason/
+  const t = theProjectFolder(process.cwd());
   if ("problem" in t) return fail(t, { json });
   const project = t.project;
   // the project's own folder first: nothing of a folder that is not one is read, let alone sent
@@ -566,7 +582,7 @@ export async function deploy(argv: string[]): Promise<number> {
   const totalBytes = files.reduce((n, x) => n + x.size, 0);
   const listed = files.map(({ path: p, size, sha256 }) => ({ path: p, size, sha256 }));
   // --json carries each warning as one line (a string with no line break); a person reads its lines on stderr
-  const base = { replica: replica === null ? null : replicaText(replica), service: service.base, files: listed, totalBytes,
+  const base = { replica: replica === null ? null : replicaText(replica), service: service.base, folder: `${project.folder}${path.sep}`, files: listed, totalBytes,
     warnings: checked.warnings.map((w) => w.split("\n").map((l) => l.trim()).filter(Boolean).join(" ")) };
   if (!json) for (const w of checked.warnings) say(textEntry("  ! ", w).trimEnd());
 
@@ -591,7 +607,7 @@ export async function deploy(argv: string[]): Promise<number> {
     // the files, then what they change (its heading and rows), then what to run next
     const st = outStyle();
     const report = reportText({
-      headline: `Would send ${files.length} file${files.length === 1 ? "" : "s"}, ${bytes(totalBytes)}, ${replica === null ? `to ${service.base} (no replica named)` : `to ${replicaText(replica)} on ${service.base}`}; nothing was sent`,
+      headline: `Would send ${files.length} file${files.length === 1 ? "" : "s"} of ${project.folder}${path.sep}, ${bytes(totalBytes)}, ${replica === null ? `to ${service.base} (no replica named)` : `to ${replicaText(replica)} on ${service.base}`}; nothing was sent`,
       details: files.map((x): [string, string] => [x.path.padEnd(w), `${bytes(x.size).padStart(sw)}   sha256 ${x.sha256}`]),
     }, st);
     out(withEnd(`${report}\n${strict(planLines(replica === null ? null : replicaText(replica), planned).join("\n"), st)}`, { next }, st));
@@ -732,7 +748,7 @@ export async function deploy(argv: string[]): Promise<number> {
       else if (line !== null && line !== said) say(`  ${line}`);
       if (error !== null) return fail(error, { json: false });
       out(reportText({ headline: `Deployed to ${replicaText(r)}: the replica runs it`,
-        details: [["deploy", id], ["service", service.base], ["files", `${files.length} (${bytes(totalBytes)})`], ["took", `${Math.max(1, Math.round((Date.now() - started) / 1000))} s`]],
+        details: [["deploy", id], ["service", service.base], ["folder", `${project.folder}${path.sep}`], ["files", `${files.length} (${bytes(totalBytes)})`], ["took", `${Math.max(1, Math.round((Date.now() - started) / 1000))} s`]],
         next: NEXT_AGAIN(r) }, outStyle()));
       return 0;
     };
