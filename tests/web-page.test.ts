@@ -3919,7 +3919,7 @@ test("the shell: the sidebar's project and a demo badge, its nav, its foot (upda
   assert.ok(!/class="topbar"|class="tabs"/.test(html), "no top nav beside it");
   assert.match(html, /<nav id="nav" class="nav" aria-label="Pages"><ul><li><a href=/, "the nav is a list of links: Tab reaches each, Enter follows it");
   assert.match(html, /<\/aside>\s*<div class="scrim" aria-hidden="true"><\/div>\s*<div class="content">\s*<div id="poll"><\/div>\s*<main>/, "the page beside the sidebar");
-  assert.match(html, /<section id="page-status" aria-labelledby="status-h">\s*<div class="page-head"><h2 id="status-h">Overview<\/h2><p class="desc">Mason syncs the tables you add from your Postgres and keeps them up to date\. Tools query them at Mason's own Postgres URL\. This page shows whether your synced data is ready, how to connect, and what Mason answered\.<\/p>/, "the Overview says what Mason is first, then that it is mason status's");
+  assert.match(html, /<section id="page-status" aria-labelledby="status-h">\s*<div class="page-head"><h2 id="status-h">Overview<\/h2><p class="desc">Mason syncs the tables you add from your Postgres and keeps them up to date\. Tools query them at Mason's own Postgres URL\. This page shows whether your synced data is ready, what Mason answered, and any errors of the last day\.<\/p>/, "the Overview says what Mason is first, then that it is mason status's");
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
   assert.match(css, /--sidebar-w: 232px/, "the sidebar's width, a token");
   assert.match(css, /@media \(min-width: 641px\) and \(max-width: 999px\) \{\s*\.sidebar \{ width: var\(--rail-w\); \}/, "below 1000 px an icon rail");

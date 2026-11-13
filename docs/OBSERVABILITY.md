@@ -72,18 +72,19 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   disabled, saying so), shared by its three views and kept in the hash: Queries' request log `since`, Usage's samples
   (`since`, and a step of 60 s, 1 h, 6 h or a day — 90 days, 129,600 samples, re-bucket in ~15 ms),
   Usage's `/api/activity`, Sync events' `since`. Each view's filters compose with it.
-- **Overview** (`#overview`): one word, `mason status`'s (Ready / Under way / Failed: `readinessWord` of `readiness`, said
-  by the CLI and the page alike — the "Healthy / Syncing / Error" asked for, in the commands' words); cards that each link
-  into the view that lists what they count (the failed tables, Queries — the slow ones from the p95 —, Usage); ONE table
-  of facts — the database and how its changes arrive, the warnings, Mason's version, up for, restarts (`engine`), the
-  free disk and what a running first sync is projected to add (`disk`), the sessions open (`sessions`); in replication mode a
-  Changes table — the stream (`stream`: running or why not, position, lag, last batch, as `streamLines` says it) and the
-  slot's hold on the WAL (`stream.slotWal`: held, status, room left; `lost`, `unreserved` or no cap are warnings); the
-  statements of the last day and week (p50 / p95); the first syncs not finished, a bar each, only while there are any; and a
-  table of the recent errors (sync and statements), each with See all. A fact the run could not read (`{ error }`) is
-  said as unknown with its reason, never as 0; one it does not say is not shown; the last day's unsupported SQL, one line
-  with See all when there is any. Reads `/api/state` (2 s), `/api/queries`, `/api/events?failed=1`,
-  `/api/requests?failed=1`, `/api/unsupported` (30 s).
+- **Overview** (`#overview`): a box titled "mason status" with one word, `mason status`'s (Ready / Under way / Failed:
+  `readinessWord` of `readiness`, said by the CLI and the page alike — the "Healthy / Syncing / Error" asked for, in the
+  commands' words), a line saying what it means for the synced data, and the Database and Changes rows; Getting started
+  (three steps) while it is not done; cards that each link into the view that lists what they count (the failed tables,
+  Queries — the slow ones from the p95, the refused or failed ones from Query errors —, Usage, Sync events' failures from
+  Sync errors); ONE table of facts, Server — `mason status`'s other rows under its labels: the sources file, the
+  warnings, Mason's version, up for, restarts (`engine`), the free disk and what a running first sync is projected to
+  add (`disk`), the connections open (`sessions`); in replication mode a Changes table — the stream (`stream`: running
+  or why not, position, lag, last batch, as `streamLines` says it) and the slot's hold on the WAL (`stream.slotWal`:
+  held, status, room left; `lost`, `unreserved` or no cap are warnings); and the first syncs not finished, a bar each,
+  only while there are any. A fact the run could not read (`{ error }`) is said as unknown with its reason, never as 0;
+  one it does not say is not shown; the last day's unsupported SQL, one line with See all when there is any. Reads
+  `/api/state` (2 s), `/api/queries`, `/api/events?failed=1&since=24h`, `/api/unsupported` (30 s), `/api/usage` (60 s).
 - **Tables** (`#tables`, `#tables?show=failed`): ONE table of the database's tables. An added one shows its state
   (Synced / Syncing / Failed / Waiting), rows, last sync and its age, how long it took (`<0.1 s` under a tenth), the
   synced table's own size on disk, in replication mode its stream state, its error, **View events** (Sync events narrowed to it), **Sync now**
@@ -92,10 +93,12 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   and All / Added / Failed / Not added; the first 100 that pass written, then Show more / Show all. Reads `/api/state`
   (2 s, lean: no table's columns), `/api/usage` `copySizes` and `unsized` (60 s: a synced table with no size says why, `< 3 MiB` or `Measuring…`), and a table's columns once as its form opens
   (`/api/tables/<table>/columns`).
-- **Users** (`#users`): today's add form, Disable (asks first) / Enable and Remove, and each user's status (Active /
-  Disabled / Removed), when it was added, its last use and its Queries; ONE Connect panel for the run (host, port,
-  database, SSL mode, the URL and psql with `<user>:<password>`, each with **Copy**), never a URL per user. Reads
-  `/api/users?lastUsed=1` and `/api/state` (on opening, then 30 s).
+- **Users** (`#users`): the users first, under Active / Removed tabs — each user's status (Active / Disabled /
+  Removed), when it was added, its last use and its Queries, Disable (asks first) / Enable and Remove; then the box that
+  adds one, with two segments, New user and Temporary cloud login (what `mason share` opens), what it adds shown once in
+  a dialog that closes only at "I have copied it"; then ONE Connect panel for the run (host, port, database, SSL mode
+  and the URL with `<user>:<password>`, each with **Copy**), never a URL per user. Reads `/api/users?lastUsed=1` and
+  `/api/state` (on opening, then 30 s), and `/api/share/choices` where a cloud login is offered.
 - **Observability › Queries** (`#observability/queries`): the request log as a table, newest first — the first 8
   characters of the id, started, duration, status, user, client, rows, the statement (two lines at most), its error's
   first line — with a per-row details (the whole id, ended, bytes sent, the statement and error, the first 16 KiB of
@@ -103,7 +106,7 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   client (Usage's rows lead here with them), over the range alone, paged by **Older**, its page sorted by Started, Duration or Rows. Rows
   scanned is not a column: decide later, it may add cost to every statement. Reads `/api/requests` (under Now 5 s on
   the newest page, 30 s while a search is set — said under the log; once for any other range; never on an older page),
-  `/api/state` (30 s, for Connect while the log is empty).
+  `/api/state` (30 s, for whether its empty line leads to the Users page).
 - **Observability › Usage** (`#observability/usage`): the range's cards, who is connected and what runs (Now:
   `/api/state` `sessions`, 5 s; `/api/running`, 2 s, each with **Cancel**, `POST /api/cancel`) or who sent statements
   and the slowest (any other range: `/api/activity`), the unsupported SQL of the range (`/api/unsupported?since=`), the
