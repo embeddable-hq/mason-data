@@ -333,7 +333,7 @@ export function createShare(ctx) {
   const roles = () => { const c = ctx.read(SHARE_CHOICES)?.body?.choices; return Array.isArray(c) ? c : null; };
   const actions = {
     shareRole(role) { if (roles()?.some((c) => c.role === role)) m.role = role; },
-    /** Open a cloud login: the person said yes to a public address; the run opens the share (confirmed), and its one answer carries the password */
+    /** Open a cloud login: the click is the person's yes to a public address (the pane's sentence is what they read first; no question follows); the run opens the share (confirmed), and its one answer carries the password */
     async shareOpen() {
       const list = roles();
       if (list === null || m.phase === "opening") return;

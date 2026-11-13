@@ -207,7 +207,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   of its own, until you stop it.", a **Role** choice where `mason/roles.yml` offers more than one role a share may
   read as (`GET /api/share/choices`, read beside the state while it is offered, as `mason share --role`; each option
   says what it reads), and **Open a cloud login**, held disabled while one opens or is open (one at a time). The click
-  is the person's yes: `POST /api/share` `{ from: "page", confirmed: true, role? }` opens the same share the command
+  is the person's yes, the pane's sentence what they have read before it, and no question follows: `POST /api/share` `{ from: "page", confirmed: true, role? }` opens the same share the command
   opens (src/cli/page-share.ts): the run makes the password and starts the tunnel's client. What it opened is shown
   once in the same modal dialog as New user added, titled **Temporary cloud login**: URL, **Login** (its own, never a
   `mason user`, and never listed or counted among the users) and **Password**, the URL and the Password each with

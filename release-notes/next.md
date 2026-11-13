@@ -30,7 +30,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **Connect from anywhere moves to the Users page, as a Temporary cloud login.** The box that adds a user has two
   segments, New user and Temporary cloud login: the second opens what `mason share` opens, for a tool in the cloud
   that cannot reach your machine. Choose the role it reads as (where `mason/roles.yml` offers more than one), click
-  Open a cloud login, and a dialog shows the public URL, its own login and the password, the URL and the password with
+  Open a cloud login, and it opens on that one click: Connect from anywhere asked first, and this does not; the pane's
+  sentence says before the click that it opens a public address with a login of its own. A dialog shows the public URL, its own login and the password, the URL and the password with
   Copy, the password shown once: it closes only when you click "I have copied it", and a card under the box then shows
   it live, with Stop. It is live until you press Stop, until a free one's
   hour is up, or within two minutes of the page closing, and the page says how it ended. It is not a user: it is never

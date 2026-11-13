@@ -253,8 +253,8 @@ export class RunShares {
       next: [["mason status", "the share open now"]] };
   }
 
-  /** What a share with no role named reads (`shareRole`'s answer, the one authority): the web page asks it before it asks
-   *  the person, to offer the roles as `mason share` would. */
+  /** What a share with no role named reads (`shareRole`'s answer, the one authority): the web page asks it to offer the
+   *  roles beside Open a cloud login, as `mason share` would. */
   async choices(): Promise<{ role: string | null; reads: string } | { failure: Failure; choices?: ShareChoice[] }> {
     return shareRole(undefined, await this.deps.listener.checkRoles());
   }

@@ -711,7 +711,9 @@ const SERVED_SHARE: Failure = { message: "this run is on a server, and has an ad
 /**
  * `POST /api/share` { from: "page", confirmed: true, role? }: the web page's Temporary cloud login (src/cli/page-share.ts),
  * answered ONCE with the share and its password, which nothing here keeps; the page's beats hold it from then on.
- * `confirmed` is the person's yes to a public address, which the page asks for: a body without it opens nothing.
+ * `confirmed` is the person's yes to a public address: on the page, the click on Open a cloud login is that yes, the
+ * pane's sentence ("…Opens a public address with a login of its own, until you stop it.") what the person has read
+ * before it, and no question follows. It is still required of the request: a body without it opens nothing.
  */
 async function openPageShare(ctx: RunContext, body: { role?: unknown; confirmed?: unknown }, res: http.ServerResponse): Promise<void> {
   if (ctx.pageShares === undefined) { sendFailure(res, 409, SERVED_SHARE); return; }

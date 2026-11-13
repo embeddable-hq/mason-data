@@ -69,7 +69,7 @@ export class PageShares {
 
   private get bound(): number { return this.deps.boundMs ?? BOUND_MS; }
 
-  /** The roles the page offers before it asks (`RunShares.choices`). */
+  /** The roles the page offers beside Open a cloud login (`RunShares.choices`). */
   choices(): Promise<{ role: string | null; reads: string } | { failure: Failure; choices?: ShareChoice[] }> { return this.deps.shares.choices(); }
 
   /** Opens the page's share: the login, the tunnel, the probe; refused, the failure, and nothing left open. */
