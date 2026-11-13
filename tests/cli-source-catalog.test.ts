@@ -7,7 +7,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import type { SourceFacts } from "../src/cli/preflight.ts";
 // imported when the tests run: at a commit without the module the file still loads, and each test fails by name
-const { CATALOG_FRESH_MS, sourceCatalog } = await import("../src/cli/source-catalog.ts" as string).catch(() => ({})) as typeof import("../src/cli/source-catalog.ts");
+const { CATALOG_FRESH_MS, CATALOG_READ_TIMEOUT_MS, catalogFailure, sourceCatalog } = await import("../src/cli/source-catalog.ts" as string).catch(() => ({})) as typeof import("../src/cli/source-catalog.ts");
 
 const factsOf = (tables: string[]): SourceFacts => ({ version: 160000, versionText: "16", standby: false, systemIdentifier: null,
   tables: tables.map((t) => ({ source: `public.${t}`, schema: "public", table: t, key: ["id"], rows: 1, bytes: 8192, comment: null, columns: [], foreignKeys: [] })) });
@@ -91,14 +91,19 @@ test("a read that does not end within readTimeoutMs fails: its connection is clo
   let signal: AbortSignal | null = null;
   const logged: string[] = [];
   const c = sourceCatalog(factsOf(["a"]), (s) => { signal = s; return new Promise<SourceFacts>(() => undefined); },
-    { log: (m) => logged.push(m), now: () => CATALOG_FRESH_MS * 2, readTimeoutMs: 30 });
-  assert.deepEqual(names(await c.fresh({ maxAgeMs: 0 })), ["a"]);
+    { log: (m) => logged.push(m), now: (() => { let t = 0; return () => ++t; })(), readTimeoutMs: 30 });
+  assert.deepEqual(await c.now(), { failed: "no answer within 0 s" });
   assert.equal(signal!.aborted, true, "the read is told to close its connection");
-  assert.deepEqual(logged, ["the database's tables could not be read again (no answer within 0.03 s): the tables read before are shown until a read succeeds"]);
+  assert.equal(logged.length, 1);
+  assert.deepEqual(names(c.facts()), ["a"], "the last read kept for what shows it");
+});
+
+test("a read is held to no cap a large catalog can need: the guard is a quarter of an hour, against a connection gone silent", () => {
+  assert.ok(CATALOG_READ_TIMEOUT_MS >= 10 * 60_000, String(CATALOG_READ_TIMEOUT_MS));
 });
 
 // THE REVIEW OF PR 900, B2: an add was refused a table mason tables had just listed, its run's read up to a minute old
-test("an asker that acts on the catalog (maxAgeMs 0) has a read made after it asked: never the last one however young, never one already running", async () => {
+test("an actor has a read begun after it asked: never the last one however young, never one running from before", async () => {
   let now = 1_000, reads = 0;
   let database = ["a"];
   const releases: Array<() => void> = [];
@@ -109,20 +114,72 @@ test("an asker that acts on the catalog (maxAgeMs 0) has a read made after it as
   database = ["a", "newt"];
   assert.deepEqual(names(await c.fresh()), ["a"]);
   assert.equal(reads, 0);
-  const acted = c.fresh({ maxAgeMs: 0 });
+  const acted = c.now();
   assert.equal(reads, 1);
   releases[0]!();
-  assert.deepEqual(names(await acted), ["a", "newt"]);
-  // a read already running when it asks began before the table it may want: a new one follows it
+  const got = await acted;
+  assert.ok("facts" in got);
+  assert.deepEqual(names(got.facts), ["a", "newt"]);
+  // a read running when it asks began before the table it may want: one of its own begins beside it, at once (a read
+  // gone silent never holds the next actor)
   now += 1_000;
-  const running = c.fresh({ maxAgeMs: 0 });
+  const shown = c.fresh();
+  assert.equal(reads, 1, "a shower within the minute reads nothing");
+  now += CATALOG_FRESH_MS;
+  void c.fresh();
+  assert.equal(reads, 2, "a shower past the minute begins one");
   now += 1;
   database = ["a", "newt", "later"];
-  const actor = c.fresh({ maxAgeMs: 0 });
-  releases[1]!();
-  assert.deepEqual(names(await running), ["a", "newt"]);
-  await new Promise((r) => setImmediate(r));
-  assert.equal(reads, 3, "the running read, then one begun after the actor asked");
+  const actor = c.now();
+  assert.equal(reads, 3, "the actor's own, beside the one running");
   releases[2]!();
-  assert.deepEqual(names(await actor), ["a", "newt", "later"]);
+  const own = await actor;
+  assert.ok("facts" in own);
+  assert.deepEqual(names(own.facts), ["a", "newt", "later"]);
+  // the older read ending later never replaces the newer one
+  releases[1]!();
+  await shown;
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(names(c.facts()), ["a", "newt", "later"]);
+});
+
+// THE RE-CHECK OF PR 900: a read longer than an actor's wait (10,000 tables, 76 s) was begun again at every ask, so an
+// add never succeeded; and a read that failed was answered as the last read, an add saying "no table" of one it has
+test("a read longer than an actor's wait is said as running, goes on, and the actor asking again takes it", async () => {
+  let now = CATALOG_FRESH_MS, reads = 0;
+  const releases: Array<() => void> = [];
+  const c = sourceCatalog(factsOf(["a"]), () => { reads++; return new Promise<SourceFacts>((r) => { releases.push(() => r(factsOf(["a", "big"]))); }); },
+    { log: () => undefined, now: () => now });
+  now += 10;
+  const first = await c.now({ waitMs: 20 });
+  assert.ok("running" in first, JSON.stringify(first));
+  now += 25_000;
+  assert.ok("running" in await c.now({ waitMs: 20 }), "asked again while it runs: the same read, still running");
+  assert.equal(reads, 1, "never begun again at every ask");
+  releases[0]!();
+  now += 51_000;
+  const third = await c.now({ waitMs: 20 });
+  assert.ok("facts" in third, JSON.stringify(third));
+  assert.deepEqual(names(third.facts), ["a", "big"]);
+  assert.equal(reads, 1, "the read the first ask began, taken once it ended");
+  // the next actor, with no one waiting, has a read of its own
+  now += 1_000;
+  void c.now({ waitMs: 20 });
+  assert.equal(reads, 2);
+});
+
+test("an actor whose read fails has the failure and its reason, never the last read in its place", async () => {
+  let now = CATALOG_FRESH_MS;
+  const c = sourceCatalog(factsOf(["a"]), async () => { throw new Error("canceling statement due to lock timeout"); }, { log: () => undefined, now: () => now });
+  now += 1;
+  const r = await c.now();
+  assert.deepEqual(r, { failed: "canceling statement due to lock timeout" });
+  const f = catalogFailure(r, "shop");
+  assert.deepEqual(f, { code: "failed", message: "the tables of shop could not be read just now: canceling statement due to lock timeout",
+    why: "another session holds a lock on one of its tables (a migration, often), and Mason waits on a lock at most 2 s",
+    fix: "run it again once that session's transaction ends", next: [["mason doctor", "checks the machine and the project's database"]] });
+  assert.equal(catalogFailure({ running: 21 }, "shop")!.message, "the tables of shop are still being read (for 21 s)");
+  assert.equal(catalogFailure({ facts: factsOf(["a"]) }, "shop"), null);
+  // what only shows the catalog has the last read, and does not try again within the minute
+  assert.deepEqual(names(await c.fresh()), ["a"]);
 });

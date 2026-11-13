@@ -30,7 +30,7 @@ import type { Server } from "node:http";
 import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, PRIMARY_NOTE, readSourceFacts, type SourceFacts } from "./preflight.ts";
-import { CATALOG_LOCK_TIMEOUT_MS, CATALOG_STATEMENT_TIMEOUT_MS, sourceCatalog } from "./source-catalog.ts";
+import { ACT_WAIT_MS, CATALOG_LOCK_TIMEOUT_MS, catalogFailure, sourceCatalog, STATE_WAIT_MS } from "./source-catalog.ts";
 import { uiReadOnlyAllowSetting, uiReadOnlySetting, type PageArea } from "./ui-read-only.ts";
 import { backLinkOf, uiBackLinkSetting } from "./ui-back-link.ts";
 import { navOf, uiNavSetting } from "./ui-nav.ts";
@@ -423,7 +423,6 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       // never queued behind a lock for long: the sizes it reads take a lock of every table, which a migration's
       // ALTER (or one queued behind another session) holds; this session's settings alone, nothing on the database
       await c.pg.query(`SET lock_timeout = ${CATALOG_LOCK_TIMEOUT_MS}`);
-      await c.pg.query(`SET statement_timeout = ${CATALOG_STATEMENT_TIMEOUT_MS}`);
       read = await readSourceFacts(c.pg, undefined, { collations: false });
     } finally { c.pg.close(); }
     // the collations were read at the start, and are the start's for the whole run
@@ -689,7 +688,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const setupPort = o.exactPort === true ? o.port : await freePort(o.port, chosen);
   const token = newToken();
   const runCtx: RunContext = {
-    source, facts: () => catalog.facts(), freshFacts: async (ask) => { await catalog.fresh(ask); }, warnings: [...warnings, ...(memoryWarned === null ? [] : [memoryProblemText(memoryWarned)])], textOrder,
+    source, facts: () => catalog.facts(), freshFacts: async () => { await catalog.fresh({ waitMs: STATE_WAIT_MS }); }, factsNow: async () => catalogFailure(await catalog.now({ waitMs: ACT_WAIT_MS }), source.database), warnings: [...warnings, ...(memoryWarned === null ? [] : [memoryProblemText(memoryWarned)])], textOrder,
     // the slot and publication while a table's sync is replication (the run streams), as the sync says it now
     replication: () => sync.streams() ? repl : null, port: setupPort, token, folder: () => folder, root: project.root, home,
     version: o.version, startedAt,

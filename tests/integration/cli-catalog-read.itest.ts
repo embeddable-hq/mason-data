@@ -165,6 +165,14 @@ test("an idle run whose tables are all sync: off opens no connection to the data
       assert.equal(r.status, 0, `mason ${cmd[0]} behind a lock: ${r.stdout}${r.stderr}`);
       assert.ok(Date.now() - began < 15_000, `mason ${cmd[0]} answered in ${Date.now() - began} ms behind a lock`);
     }
+    // an add's read waits on the lock a moment, then says so: never an answer from the read before, never "Mason does not
+    // answer" (the re-check of PR 900)
+    const blocked = await mason("add", "customers", "--columns", "id", "--json");
+    assert.equal(blocked.status, 1, blocked.stdout + blocked.stderr);
+    const e = (blocked.json as { error: { code: string; message: string; why?: string } }).error;
+    assert.equal(e.code, "failed", JSON.stringify(e));
+    assert.match(e.message, new RegExp(`^the tables of ${tag} could not be read just now: .*lock timeout`), JSON.stringify(e));
+    assert.match(e.why ?? "", /another session holds a lock/);
   } finally {
     holder.kill();
     psql(adminUrl!, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = '${tag}_lock'`);

@@ -14,7 +14,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { asFailure, endText, errorJson, failed, failureCode, jsonText, listFlag, nextBlock, noArguments, parseCommand, reportText, withEnd, type CommandSpec, type Failure, type NextStep, type Problem } from "./command.ts";
+import { asFailure, CommandFailed, endText, errorJson, failed, failureCode, jsonText, listFlag, nextBlock, noArguments, parseCommand, reportText, withEnd, type CommandSpec, type Failure, type NextStep, type Problem } from "./command.ts";
 import { err as styleErr, out as styleOut, stepRenderer, wrap, type Style } from "./style.ts";
 import { alive, endRun, END_GRACE_MS, notAnswering, runState, theRun, type DevRun } from "./runs.ts";
 import { version } from "./version.ts";
@@ -179,6 +179,12 @@ async function runOr(spec: CommandSpec & { needs: "run" }, json: boolean): Promi
  *  it can add; src/cli/source-catalog.ts), where the state otherwise shows a read up to a minute old. */
 export async function readState(run: DevRun, o: { fresh?: boolean } = {}): Promise<RunState> {
   const r = await callRun(run, "GET", `/api/state?columns=1${o.fresh === true ? "&fresh=1" : ""}`);
+  // the run is up and answered: a failure it says (the database's tables could not be read just now) is its own,
+  // never said as the run not answering
+  if (r.status !== 200 && r.body.failure !== undefined) {
+    const next = (r.body.failure as { next?: Array<{ command: string; what?: string }> }).next ?? [];
+    throw new CommandFailed(runFailure(r, next.map((n): NextStep => n.what === undefined ? [n.command] : [n.command, n.what])));
+  }
   if (r.status !== 200) throw new RunUnreachable(String(r.body.error ?? `HTTP ${r.status}`));
   return r.body as unknown as RunState;
 }

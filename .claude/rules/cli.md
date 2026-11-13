@@ -125,11 +125,14 @@ CLI lacks).
   It serves the web page too (`mason ui`, src/web/; `.claude/rules/web-ui.md`), under `mason serve` as well, listening only through `listenOnLoopback`, which takes no address (and, under `mason serve` with `MASON_UI_SOCKET`, a Unix socket made 0600 in a folder only Mason's user can write, whose requests reach the same handler behind the same guard: src/cli/ui-socket.ts), a `PageTunnel` opened with the run's token (`mason ui --ssh`, src/cli/ui-ssh.ts) being the guard's only way to add a Host; its users are
   `mason user`'s own functions (`addUser`, `listUsers`, `removeUser`, `disableUser`, `enableUser`), so the page and the CLI cannot disagree.
   **The run reads the database's catalog only when asked** (issue 890: a 10-second timer kept a serverless compute awake
-  with every table `sync: off`): `/api/state`, a table's columns or Sync choice, `/api/pick` and `/api/remove` ask
-  `RunContext.freshFacts` (`sourceCatalog`, src/cli/source-catalog.ts: what shows it, `SHOW_ASK`, a read under
-  `CATALOG_FRESH_MS` reused and never waited for past `STATE_WAIT_MS`; what acts on it, `ACT_ASK` and `mason add`'s
-  `/api/state?fresh=1`, a read made after it asked; the read's lock wait `CATALOG_LOCK_TIMEOUT_MS`, its whole
-  `CATALOG_READ_TIMEOUT_MS`; a failure keeping the last and said in the log); a usage sample and `/metrics` read `facts()` as it is. No
+  with every table `sync: off`; `sourceCatalog`, src/cli/source-catalog.ts): what SHOWS it (`/api/state`) asks
+  `RunContext.freshFacts`, a read under `CATALOG_FRESH_MS` reused and never waited for past `STATE_WAIT_MS`; what ACTS on
+  it (a table's columns or Sync choice, `/api/pick`, `/api/remove`, `mason add`'s `/api/state?fresh=1`) asks
+  `factsNow`, a read begun after it asked, waited for `ACT_WAIT_MS` (under the commands' 30 s), its failure or its still
+  running said as a 503 Failure (`catalogFailure`) — never an older read answered as the database now, never the run said
+  as down. The read waits on a lock `CATALOG_LOCK_TIMEOUT_MS`, and on nothing else short: a large catalog takes what it
+  takes (`CATALOG_READ_TIMEOUT_MS` guards a silent connection), and the actor asking again takes it once it ends. A
+  usage sample and `/metrics` read `facts()` as it is. No
   timer reads it (tests/integration/cli-catalog-read.itest.ts counts an idle run's connections).
   **The request log's filters are read by ONE parser** (`requestFilter`, src/cli/request-filter.ts) at both entrances
   — `mason logs --requests`' options and `/api/requests`' query string — so a filter means one thing and a mistake is

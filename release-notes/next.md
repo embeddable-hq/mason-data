@@ -59,7 +59,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   again on a timer, whatever each table's sync, so a serverless database (Neon, Aurora Serverless) never suspended,
   and every database logged about 8,600 connections a day. Mason now reads them only when you ask: `mason
   status`, `wait` and `doctor` and the web page reuse a read under a minute old and never wait more than 2 seconds for a
-  new one; `mason tables`, `add` and `remove`, and the page's Columns and Sync choices, read them as they are now. With
+  new one; `mason tables`, `add` and `remove`, and the page's Columns and Sync choices, read them as they are now, and
+  say so when they cannot (a lock held by a migration, a read that is still running), changing nothing. With
   every table `sync: off`, a run that nobody asks opens no connection after its first sync. A table made on the
   database can be added at once, and shows in `mason status` within about a minute.
 - **The web page no longer shows old data as current while Mason can't be reached.** When the page lost Mason (the
