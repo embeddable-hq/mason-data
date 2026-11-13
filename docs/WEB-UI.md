@@ -63,7 +63,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   nine with the host's (`MASON_UI_OVERVIEW_CARD`): four by two and three by three from 641 px up, two a row on a phone.
 - **Overview**, Getting started (while setting up is not done): ✓ Mason is running · ✓/○ Sync a table · ✓/○ Connect
   a tool — each step in the same words done or not (the ✓ or ○ says which), each ○ with its one action (Add a table →
-  Tables, Connect a tool → Users, where a user is added for the tool). Connect a tool is done once a tool has used
+  Tables, Connect a tool → Users, where a user is added for it). Connect a tool is done once a tool has used
   Mason, never because a user exists: a session of a `mason user` open now (`/api/state` `sessions.byClient`, which a
   tool's login with only its catalog queries already makes), one seen open while the page was shown (held by the page),
   or a statement completed in the request log's week (`/api/queries`). Gone once the three are done; not drawn while it
@@ -127,13 +127,6 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   table with no primary key.
 - **Users** (`#users`), in this order: the list of users, right under the title (and its read-only line), then the add
   form with the card of a user just added beside it, then Connect, so a card that appears moves nothing above it. The
-  form opens with **For**, what the user is for: "a tool or app (optional)", then the tools a person connects, grouped
-  (SQL clients, BI tools, Embedded analytics), from `GET /api/tools` (src/cli/connect-tools.ts, one list: each tool a
-  name, a kind and its own guide to connecting to PostgreSQL, no form or field of its own; read once when Users is
-  shown, never with the state). Choosing one puts a name for its user in the Name box (the tool's id, `metabase`,
-  `looker_studio`, `power_bi`, with 2, 3… after it while a user not removed has it) only while the box holds no name of
-  the person's own; the Name stays editable and nothing in the form moves. What is chosen is the page's memory alone,
-  never sent or stored: the user is a plain `mason user add` user. The
   form adds a user by name and, where `mason/roles.yml` names roles and reads as it is, a
   **Role** as `mason user add --role` (the roles from `/api/state` `roles`, `mason status --json`'s): the file's
   `default:` is chosen first, marked (default), and sends no role, so the user follows the default as one added with no
@@ -142,10 +135,9 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   `mason user add` with no `--from`), with no second question; **only these addresses** shows the address box beside
   it and sends the ranges typed there, comma-separated as `--from a,b` takes them (`192.0.2.0/24, 2001:db8::/32`),
   split at each comma and trimmed. The box keeps its place, unseen, while anywhere is chosen, so nothing in the form
-  moves when the choice changes (From… offers the same dropdown). For, Name, Role, Connects from and **Add a user** are one
-  line where the form's card is wide enough (a container of its own, `#add-user-box`: a 1280 px window without a Role;
-  with one, For, Name and Role are a line over Connects from and Add a user, as at 1024 and 900 px, where the sidebar
-  is a rail), the address box growing into the rest of the line; below
+  moves when the choice changes (From… offers the same dropdown). Name, Role, Connects from and **Add a user** are one
+  line where the form's card is wide enough (a container of its own, `#add-user-box`: a 1280 px window with or without
+  a Role, 900 px without one, where the sidebar is a rail), the address box growing into the rest of the line; below
   that the form wraps by field, a label never apart from its control, the address box under its dropdown on a phone. The page
   never checks a range: the run reads each, and a refused one is shown as the run's refusal. `--set`
   attributes stay the command's. Its password is shown once, in a card titled **New user added** on its top edge (as
@@ -154,17 +146,11 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   --json` does not carry is not shown); "Shown once" in the password's row, right of its **Copy** and of the button's
   height (`--control-sm`); and one line, "The password
   is only shown once", over **I have copied it**. Host, port and SSL mode are Connect's on the same page (`mason user
-  add` in a terminal still prints all of them). No psql line unless psql was chosen: the URL is the same thing, pasted
-  after `psql`. Mason keeps no copy, so it is never shown again. With a tool chosen in For, under the rows: a link,
-  "How to connect <Tool> to PostgreSQL", to the tool's guide (the URL arrives as data from `/api/tools` and is written
-  only when the host links' rule (`hostLinkUrl`) reads it as an https URL; a new tab, no referrer); for psql, the ready
-  `psql '<url>'` line with **Copy** (the password in it, shown this once); and on `mason start`'s page (not under
-  `mason serve`, nor on a read-only page) for a BI or embedded tool, one line: the tool in the cloud cannot reach this
-  machine, and Share over the internet, in Connect on the same page, gives it an address with a login of its own.
-  Then, with a tool chosen or not, a status line: "Waiting for <Tool>'s first query…" (or "Waiting for its first
-  query…") until Mason has seen the user — a session of it open (`/api/state` `sessions`), or a statement of it since
-  it was added (`/api/users?lastUsed=1` `lastUsedAt`) — then "<Tool> connected" (or "Connected"), held once seen. While
-  it waits, the state is read every 5 s instead of 30 s.
+  add` in a terminal still prints all of them). No psql line: the URL is the same thing, pasted after `psql`. Mason
+  keeps no copy, so it is never shown again. Under the rows, a status line: "Waiting for its first query…" until Mason
+  has seen the user — a session of it open (`/api/state` `sessions`), or a statement of it since it was added
+  (`/api/users?lastUsed=1` `lastUsedAt`) — then "Connected", held once seen. While it waits, the state is read every
+  5 s instead of 30 s.
 - **Users**, Connect: once for the run, where a tool connects — host, port, database and SSL mode, each with **Copy**,
   and the URL and psql line with `<user>:<password>` in place — as `mason status` says it. No user's row carries a URL:
   the card shown once when a user is added is the only place its password is copied.

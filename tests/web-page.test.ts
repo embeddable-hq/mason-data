@@ -152,10 +152,6 @@ const SYNCED = stateOf([{ ...copied("public.customers", 1200, "2026-10-27T09:00:
   { ...copied("public.orders", 2_000_000, "2026-10-27T09:00:09.000Z"), phase: "failed", error: "poll: connection reset\nthe sync tries it again in 5 s", synced: { at: "2026-10-27T08:00:09.000Z", seconds: 63, by: "copy" } },
   { ...copied("public.events", 30_000_000, "2026-10-27T09:04:00.000Z"), kept: { by: "poll", sync: { mode: "off" }, syncedAt: "2026-10-27T09:04:00.000Z", nextAt: null }, synced: { at: "2026-10-27T09:04:00.000Z", seconds: 754, by: "copy" } }],
   { now: NOW });
-// the tools a person connects, as GET /api/tools answers them (src/cli/connect-tools.ts): imported when the tests run, so
-// the file loads at a commit without the module and a test that needs it fails by name
-const toolsModule = await import("../src/cli/connect-tools.ts" as string).catch(() => ({})) as { toolsAnswer?: () => { tools: Array<{ id: string; name: string; kind: string; guide: string }>; kinds: Array<{ kind: string; label: string }> } };
-const TOOLS = toolsModule.toolsAnswer?.() ?? { tools: [], kinds: [] };
 const QUERIES = { queries: { keptDays: 3,
   day: { days: 1, covered: 1, statements: 1234, completed: 1200, refused: 30, failed: 3, cancelled: 1, rows: 98_765, bytesSent: 5_400_000, durationMs: { avg: 42, p50: 12, p95: 380 } },
   week: { days: 7, covered: 3, statements: 5000, completed: 4900, refused: 90, failed: 9, cancelled: 1, rows: 400_000, bytesSent: 900, durationMs: { avg: 40, p50: 11, p95: 1_250 } } } };
@@ -1215,7 +1211,6 @@ function fakeRun(): { fetch: (p: string, init?: { method?: string; body?: string
   }
   for (const p of ["limit=100", "since=15m", "since=1h", "since=24h", "since=7d"]) answers.set(`GET api/unsupported?${p}`, json({ since: "2026-10-26T09:05:00.000Z", unsupported: [], keptDays: 7 }));
   answers.set("GET api/users?lastUsed=1", json({ users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", live: true }] }));
-  answers.set("GET api/tools", json(TOOLS));
   for (const t of ["public.audit", "public.accounts", "public.event_log"]) answers.set(`GET api/tables/${encodeURIComponent(t)}/columns`, json(columnsOf(t)));
   return {
     asked, answers,
@@ -1253,7 +1248,7 @@ test("the app: a poll writes the shown page and when, reading only its endpoints
   run.asked.length = 0;
   await app.poll();
   // a page shown is read again whatever its rates (show marks every read stale): the shell's state with it
-  assert.deepEqual(run.asked, ["GET api/users?lastUsed=1", "GET api/state", "GET api/tools", "GET api/share/choices"]);
+  assert.deepEqual(run.asked, ["GET api/users?lastUsed=1", "GET api/state", "GET api/share/choices"]);
   assert.match(textOf(app.view().users!), /^User Role Status Added Last used metabase id 0123456789abcdef every table from anywhere Active 2026-10-27 09:10 UTC not used in the last \? days Queries Disable Remove$/);
   app.show("status");
   // the run stops
@@ -1290,120 +1285,23 @@ test("the app: an added user's password is written once, gone once dismissed and
   assert.equal(app.view().added, "");
 });
 
-// ------------------------------------------------------------------ Connect a tool: the For choice, the card, connected
-
-test("the add form's For choice: a tool or app (optional) first, then the tools of GET /api/tools grouped by kind; none before they are read; the rest of the form as before", () => {
-  const renderAddUser = fn<[unknown, unknown?], string>("renderAddUser");
-  const form = renderAddUser(CATALOG_STATE, TOOLS);
-  assert.ok(TOOLS.tools.length >= 18, "the module's tools");
-  const choice = /<span class="tool-field"><label for="user-tool">For<\/label> <select id="user-tool" name="tool">([\s\S]*?)<\/select><\/span>/.exec(form);
-  assert.ok(choice, "a For dropdown, its label beside it");
-  assert.match(choice![1]!, /^<option value="" selected>a tool or app \(optional\)<\/option><optgroup label="SQL clients">/, "nothing chosen first");
-  const groups = [...choice![1]!.matchAll(/<optgroup label="([^"]+)">([\s\S]*?)<\/optgroup>/g)].map((m) => [m[1], [...m[2]!.matchAll(/<option value="([^"]+)">([^<]+)<\/option>/g)].map((o) => [o[1], o[2]])]);
-  assert.deepEqual(groups.map(([label]) => label), ["SQL clients", "BI tools", "Embedded analytics"]);
-  for (const [label, options] of groups) {
-    const kind = TOOLS.kinds.find((k) => k.label === label)!.kind;
-    assert.deepEqual(options, TOOLS.tools.filter((t) => t.kind === kind).map((t) => [t.id, t.name]), `${label}: its tools, by id and name`);
-  }
-  assert.ok(form.indexOf('id="user-tool"') < form.indexOf('id="user-name"'), "For first: its choice fills the Name");
-  assert.match(textOf(form), /^For a tool or app \(optional\) psql DataGrip .* Sisense Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user$/);
-  // no tool's form, no field of its own, no URL: a tool is a name, a kind and a guide
-  assert.doesNotMatch(form, /guide|https?:/);
-  // the tools not read (or refused): the form as before
-  assert.equal(renderAddUser(CATALOG_STATE, undefined), renderAddUser(CATALOG_STATE));
-  assert.equal(renderAddUser(CATALOG_STATE, { failure: { code: "failed", message: "x" } }), renderAddUser(CATALOG_STATE));
-  assert.doesNotMatch(renderAddUser(CATALOG_STATE), /user-tool/);
-  assert.equal(renderAddUser({ ...CATALOG_STATE, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" }, TOOLS), "", "read-only: no form");
-});
-
-test("For prefills the Name with the tool's user name — 2, 3… after it while a user has it — only while the person has typed no name of their own; the tool is never sent", async () => {
-  const suggestName = fn<[string, unknown[]], string>("suggestName");
-  const user = (name: string, removedAt: string | null = null) => ({ name, id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt, live: true });
-  assert.equal(suggestName("metabase", []), "metabase");
-  assert.equal(suggestName("looker_studio", [user("metabase")]), "looker_studio");
-  assert.equal(suggestName("metabase", [user("metabase")]), "metabase2");
-  assert.equal(suggestName("metabase", [user("metabase"), user("metabase2")]), "metabase3");
-  assert.equal(suggestName("metabase", [user("metabase", "2026-10-28T00:00:00.000Z")]), "metabase", "a removed user's name is free, as mason user add takes it");
-  const { USER_NAME_RE } = await import("../src/duck/users.ts");
-  for (const t of TOOLS.tools) assert.match(suggestName(t.id, [user(t.id)]), USER_NAME_RE, `${t.id}: a name mason user add takes`);
-  // the app: the users read (metabase is one), then For chosen over the Name box
-  const run = fakeRun();
-  run.answers.set("GET api/state", answer(CATALOG_STATE));
-  const app = fn<[unknown], App & { pages: Map<string, { input(t: unknown): unknown; submit(f: unknown): Promise<void> | null }> }>("createApp")(run.fetch);
-  app.show("users");
-  await app.poll();
-  assert.match(app.view()["add-user-box"]!, /id="user-tool"/, "the tools read when Users is shown");
-  const users = app.pages.get("users")!;
-  const name = { value: "" };
-  const choose = (value: string) => users.input({ id: "user-tool", value, form: { elements: { name } } });
-  choose("metabase");
-  assert.equal(name.value, "metabase2", "metabase is taken: metabase2");
-  choose("power_bi");
-  assert.equal(name.value, "power_bi", "the name it suggested follows the choice");
-  choose("");
-  assert.equal(name.value, "", "back to none: its suggestion goes");
-  name.value = "finance";
-  choose("looker_studio");
-  assert.equal(name.value, "finance", "a name of the person's own is kept");
-  const before = app.view()["add-user-box"];
-  choose("grafana");
-  assert.equal(app.view()["add-user-box"], before, "the form is not rewritten by a choice: nothing in it moves, nothing typed is lost");
-  // submitted with a tool: the user is a plain mason user add user — the tool is not sent
-  run.answers.set("POST api/users", answer({ user: "finance", id: "0123456789abcdef", addedAt: "2026-10-27T09:11:00.000Z", password: `mason_0123456789abcdef_${"c".repeat(32)}`, database: "shop", next: [] }));
-  const tool = { value: "grafana" };
-  await users.submit({ id: "add-user", elements: { name, tool, role: { value: "" }, connects: { value: "any" }, from: { value: "" } } });
-  assert.ok(run.asked.includes(`POST api/users ${JSON.stringify({ name: "finance" })}`), run.asked.join("\n"));
-  assert.ok(!run.asked.some((a) => a.includes("grafana")), "the tool chosen is nowhere in a request");
-  assert.deepEqual([name.value, tool.value], ["", ""], "added: the form empty again, For back to none");
-  assert.match(textOf(app.view().added!), /How to connect Grafana to PostgreSQL/, "the card is the tool's");
-});
+// ------------------------------------------------------------------ a user just added: waiting for its first query, then connected
 
 const ADDED = (user: string) => {
   const password = `mason_0123456789abcdef_${"d".repeat(32)}`;
   const url = `postgres://${user}:${password}@127.0.0.1:5433/shop`;
   return { user, id: "0123456789abcdef", addedAt: "2026-10-27T09:11:00.000Z", password, database: "shop", url, psql: psqlLine(url), host: "127.0.0.1", port: 5433, sslmode: "disable", roleFrom: "none" as const };
 };
-const toolNamed = (id: string) => TOOLS.tools.find((t) => t.id === id)!;
-
-test("the New user added card for a tool: its guide linked safely in a new tab; psql's ready line with Copy; a cloud tool on mason start's page pointed to Share over the internet; waiting, then connected", () => {
+test("the New user added card: under its rows a status line, Waiting for its first query… until the user is seen, then Connected; no tool's guide, psql line or cloud line", () => {
   const renderAdded = fn<[unknown, unknown?], string>("renderAdded");
-  const card = (user: string, tool: string | null, local: boolean, connected = false) => renderAdded(ADDED(user), { tool: tool === null ? null : toolNamed(tool), local, connected });
   const between = (html: string) => textOf(html).replace(/^.*?Database shop Copy /, "").replace(/ ?The password is only shown once I have copied it$/, "");
-  // psql, on mason start's page: the guide, the ready line (the password in it, shown this once) with Copy, no cloud line
-  const psql = card("psql", "psql", true);
-  const a = ADDED("psql");
-  assert.equal(between(psql), `How to connect psql to PostgreSQL ${a.psql} Copy Waiting for psql's first query…`);
-  assert.match(psql, /<p class="added-guide"><a href="([^"]+)" target="_blank" rel="noreferrer">How to connect psql to PostgreSQL<\/a><\/p>/);
-  assert.equal(/<a href="([^"]+)"/.exec(psql)![1], toolNamed("psql").guide, "the module's guide, as the parser serialises it");
-  assert.match(psql, new RegExp(`<p class="added-psql"><span class="copyrow"><code id="added-psql">${a.psql.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&").replace(/'/g, "&#39;")}</code> <button[^>]*data-copy="added-psql"`), "psql's line with its Copy");
-  assert.equal(between(card("psql", "psql", false)), between(psql), "psql under mason serve: the same");
-  // Metabase on mason start's page: the guide and the line on a tool in the cloud; none of psql's line
-  const metabase = card("metabase", "metabase", true);
-  assert.equal(between(metabase), "How to connect Metabase to PostgreSQL Metabase in the cloud cannot reach this machine: Share over the internet, in Connect on this page, gives it an address it can reach, with a login of its own. Waiting for Metabase's first query…");
-  assert.doesNotMatch(metabase, /added-psql/);
-  // Metabase under mason serve (or a read-only page, where no share opens): no line on the cloud
-  assert.equal(between(card("metabase", "metabase", false)), "How to connect Metabase to PostgreSQL Waiting for Metabase's first query…");
-  // embedded: as a BI tool; a SQL client: never the cloud's line
-  assert.match(textOf(card("luzmo", "luzmo", true)), /Luzmo in the cloud cannot reach this machine/);
-  assert.doesNotMatch(textOf(card("dbeaver", "dbeaver", true)), /cloud/);
+  const waiting = renderAdded(ADDED("metabase"));
+  assert.equal(between(waiting), "Waiting for its first query…");
+  assert.equal(between(renderAdded(ADDED("metabase"), { connected: true })), "Connected");
   // waiting, then connected: a status's dot and its word (amber while waiting, the ok green once seen)
-  assert.match(metabase, /<p class="added-seen"><span class="indicator warn"><span class="dot" aria-hidden="true"><\/span>Waiting for Metabase&#39;s first query…<\/span><\/p>/);
-  assert.match(card("metabase", "metabase", true, true), /<p class="added-seen"><span class="indicator ok"><span class="dot" aria-hidden="true"><\/span>Metabase connected<\/span><\/p>/);
-  // no tool chosen: the card as before, and the line worded for the user
-  assert.equal(between(renderAdded(ADDED("finance"))), "Waiting for its first query…");
-  assert.equal(between(renderAdded(ADDED("finance"), { tool: null, local: true, connected: true })), "Connected");
-  // the link is set as the host's links are (hostLinkUrl): a guide that is no https URL is no link at all
-  for (const guide of ["javascript:alert(1)", "http://example.com/x", "//example.com", "/local", "https://user:pw@example.com/", "not a url"]) {
-    const html = renderAdded(ADDED("x"), { tool: { ...toolNamed("metabase"), guide }, local: false });
-    assert.doesNotMatch(html, /<a /, guide);
-    assert.match(textOf(html), /Waiting for Metabase's first query…/);
-  }
-  // every link the card writes leaves no referrer and opens beside the page
-  for (const t of TOOLS.tools) {
-    const html = card(t.id, t.id, true);
-    const links = [...html.matchAll(/<a [^>]*>/g)].map((m) => m[0]);
-    assert.deepEqual(links, [`<a href="${new URL(t.guide).href.replace(/&/g, "&amp;")}" target="_blank" rel="noreferrer">`], t.id);
-  }
+  assert.match(waiting, /<p class="added-seen"><span class="indicator warn"><span class="dot" aria-hidden="true"><\/span>Waiting for its first query…<\/span><\/p>/);
+  assert.match(renderAdded(ADDED("metabase"), { connected: true }), /<p class="added-seen"><span class="indicator ok"><span class="dot" aria-hidden="true"><\/span>Connected<\/span><\/p>/);
+  assert.doesNotMatch(waiting, /<a |added-psql|added-guide|cloud/, "no link, no psql line, no line on a tool in the cloud");
 });
 
 test("connected: a session of the user added open now, or a statement of it since it was added — held once seen; the state read every 5 s only while the card waits", async () => {
@@ -1425,8 +1323,8 @@ test("connected: a session of the user added open now, or a statement of it sinc
   app.show("users");
   await app.poll();
   run.answers.set("POST api/users", answer(a));
-  await app.pages.get("users")!.submit({ id: "add-user", elements: { name: { value: "metabase2" }, tool: { value: "metabase" }, role: { value: "" }, connects: { value: "any" }, from: { value: "" } } });
-  assert.match(textOf(app.view().added!), /Waiting for Metabase's first query…/);
+  await app.pages.get("users")!.submit({ id: "add-user", elements: { name: { value: "metabase2" }, role: { value: "" }, connects: { value: "any" }, from: { value: "" } } });
+  assert.match(textOf(app.view().added!), /Waiting for its first query…/);
   const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
   t += 2000;
   assert.deepEqual(await asked(), [], "not at every 2 s poll");
@@ -1435,14 +1333,14 @@ test("connected: a session of the user added open now, or a statement of it sinc
   run.answers.set("GET api/state", answer(sessions([{ user: "metabase2", client: "Metabase v0.50", open: 1, running: 0 }])));
   t += 5000;
   await asked();
-  assert.match(app.view().added!, /<span class="indicator ok"><span class="dot" aria-hidden="true"><\/span>Metabase connected<\/span>/);
+  assert.match(app.view().added!, /<span class="indicator ok"><span class="dot" aria-hidden="true"><\/span>Connected<\/span>/);
   // its session closed: still connected (held), and the state at the users' rate again
   run.answers.set("GET api/state", answer(CATALOG_STATE));
   t += 5000;
   assert.deepEqual(await asked(), [], "seen: no faster read");
   t += 30_000;
   await asked();
-  assert.match(textOf(app.view().added!), /Metabase connected/);
+  assert.match(textOf(app.view().added!), /Connected/);
   // dismissed: the card and its reads go
   app.dismissAdded();
   assert.equal(app.view().added, "");
@@ -2298,7 +2196,7 @@ test("the shell: only the page shown is asked, each endpoint at its own rate —
   t += 2000;
   assert.deepEqual(await asked(), ["GET api/state"], "the synced tables' sizes once a minute: they are measured every 10 min");
   app.show("users");
-  assert.deepEqual(await asked(), ["GET api/users?lastUsed=1", "GET api/state", "GET api/tools", "GET api/share/choices"], "a page shown is read at once, the shell's state with it");
+  assert.deepEqual(await asked(), ["GET api/users?lastUsed=1", "GET api/state", "GET api/share/choices"], "a page shown is read at once, the shell's state with it");
   // Queries at Now, the default: the newest requests of the last 15 minutes, every 5 s (the state, how to connect, and
   // the users, the User filter's choices — never ?lastUsed=1, a scan of the log it does not show — every 30 s)
   app.show("queries");
@@ -2340,7 +2238,7 @@ test("in the browser: the hash chooses the section shown and the page asked; a l
   run.asked.length = 0;
   go("#users"); await settle();
   assert.deepEqual(shown(), ["users"]);
-  assert.deepEqual(run.asked, ["GET api/users?lastUsed=1", "GET api/state", "GET api/tools", "GET api/share/choices"], "the users at once, not at the next tick (and the state the sidebar names the project from)");
+  assert.deepEqual(run.asked, ["GET api/users?lastUsed=1", "GET api/state", "GET api/share/choices"], "the users at once, not at the next tick (and the state the sidebar names the project from)");
   assert.deepEqual(current(), ["#users"]);
   run.asked.length = 0;
   tick(); await settle();
@@ -2993,7 +2891,7 @@ test("the users: read with their last use, every 30 s, the state beside them; Co
   const app = fn<[unknown, () => Date], App & { pages: Map<string, { click(d: unknown, b: unknown, w: unknown): Promise<void> | null }> }>("createApp")(run.fetch, () => new Date(t));
   app.show("users");
   const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
-  assert.deepEqual(await asked(), [U, "GET api/state", "GET api/tools", "GET api/share/choices"], "on opening: its own, the state for the sidebar (once a minute), and the roles a share may read as");
+  assert.deepEqual(await asked(), [U, "GET api/state", "GET api/share/choices"], "on opening: its own, the state for the sidebar (once a minute), and the roles a share may read as");
   t += 2000;
   assert.deepEqual(await asked(), [], "not at the 2 s poll");
   t += 28_000;
@@ -4715,7 +4613,7 @@ test("a page opened at its own address that reads no state (Users) still has the
   let t = Date.UTC(2026, 9, 28, 9, 0, 0);
   const app = fn<[unknown, () => Date, string], App>("createApp")(run.fetch, () => new Date(t), "#users");
   await app.poll();
-  assert.deepEqual(run.asked, ["GET api/users?lastUsed=1", "GET api/state", "GET api/tools", "GET api/share/choices"], "the page's own read first: its failure is the banner");
+  assert.deepEqual(run.asked, ["GET api/users?lastUsed=1", "GET api/state", "GET api/share/choices"], "the page's own read first: its failure is the banner");
   assert.notEqual(app.view().where, "", "the sidebar names the database");
   assert.match(app.view().version!, /^Mason /);
   run.asked.length = 0; t += 30_000; await app.poll();

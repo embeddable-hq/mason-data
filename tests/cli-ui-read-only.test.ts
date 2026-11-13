@@ -110,7 +110,7 @@ const WRITES = ["POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
 test("the paths read from the run's server are every route it has: the page's files and each /api route, its patterns filled in", () => {
   const routes = routesOfTheServer();
   for (const p of ["/", "/api/state", "/api/pick", "/api/remove", "/api/sync", "/api/cancel", "/api/share", "/api/share/choices", "/api/share/x", "/api/share/x/beat",
-    "/api/ui/tunnel", "/api/tools", "/api/users", "/api/users/x", "/api/users/x/disable", "/api/users/x/enable", "/api/users/x/from", "/api/tables/x/columns"]) assert.ok(routes.includes(p), p);
+    "/api/ui/tunnel", "/api/users", "/api/users/x", "/api/users/x/disable", "/api/users/x/enable", "/api/users/x/from", "/api/tables/x/columns"]) assert.ok(routes.includes(p), p);
   assert.ok(routes.length >= 40, `${routes.length} paths`);
 });
 

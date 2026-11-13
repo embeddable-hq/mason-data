@@ -4,7 +4,6 @@
  * storage, a URL or a log line.
  */
 import { actId, badge, button, code, copyable, copyClick, duration, empty, esc, json, panel, pop, renderFailure, ROOMS, serverHostNote, spanText, status, utcMinute, readOnlyLine, usersReadOnly } from "../shared.js";
-import { hostLinkUrl } from "../host-view.js";
 
 /** The users as the page reads them: with each one's last use (`mason user list` asks the same), then every 30 s. */
 const USERS = "api/users?lastUsed=1";
@@ -16,9 +15,6 @@ const STATE = "api/state";
 /** The roles a share may read as (`mason share --role`'s choices, src/cli/share-run.ts shareRole): read beside the state
  *  while the page may open a share (`shareable`), at the users' rate. */
 const SHARE_CHOICES = "api/share/choices";
-/** The tools a person connects (src/cli/connect-tools.ts, `GET /api/tools`): the add form's For choice and each one's
- *  guide. It never changes during a run, so it is read once each time the page is shown. */
-const TOOLS = "api/tools";
 /** How often the state is read while a user just added waits for its first connection (its sessions, `/api/state`
  *  `sessions`): a few seconds, so Connected follows the tool soon; at the users' rate again once it is seen or dismissed. */
 const WAITING_EVERY_MS = 5_000;
@@ -325,39 +321,11 @@ export function createShare(ctx) {
  * (a label and its control) is one span, so the form lays out as one line where its card is wide enough and wraps by
  * field, never between a label and its control, below that (app.css `#add-user`).
  */
-export function renderAddUser(state, tools = undefined) {
+export function renderAddUser(state) {
   if (state === undefined || state === null || usersReadOnly(state) !== null) return "";
-  return `<form id="add-user" class="formcard" autocomplete="off">${toolChoice(tools)}<span class="name-field"><label for="user-name">Name</label> ` +
+  return `<form id="add-user" class="formcard" autocomplete="off"><span class="name-field"><label for="user-name">Name</label> ` +
     `<input id="user-name" name="name" required placeholder="e.g. metabase" spellcheck="false" autocapitalize="off"></span>` +
     roleChoice(state.roles) + connectsChoice("add-user") + `<button type="submit" class="primary">Add a user</button></form>`;
-}
-
-/** The tools as `/api/tools` answers them (`{ tools, kinds }`), or [] before it is read or when it could not be. */
-export const toolsOf = (body) => Array.isArray(body?.tools) ? body.tools.filter((t) => t !== null && typeof t === "object" && typeof t.id === "string" && typeof t.name === "string") : [];
-
-/**
- * THE ADD FORM'S FOR CHOICE (`tools`: `/api/tools`' body): what the user is for — "a tool or app (optional)", the
- * default, then the tools grouped by kind (an `<optgroup>` each: SQL clients, BI tools, Embedded analytics). Choosing
- * one suggests a name for its user (`suggestName`) while the Name box holds none of the person's own; what is chosen is
- * the page's memory alone — never sent, never stored: the user added is a plain `mason user add` user — and says, on
- * the card of the user added, the tool's guide and when it has connected. "" while the tools are not read.
- */
-function toolChoice(body) {
-  const tools = toolsOf(body);
-  if (tools.length === 0) return "";
-  const kinds = Array.isArray(body?.kinds) ? body.kinds : [];
-  const groups = kinds.map((k) => [k.label, tools.filter((t) => t.kind === k.kind)]).filter(([, ts]) => ts.length > 0);
-  return `<span class="tool-field"><label for="user-tool">For</label> <select id="user-tool" name="tool"><option value="" selected>a tool or app (optional)</option>` +
-    groups.map(([label, ts]) => `<optgroup label="${esc(label)}">${ts.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("")}</optgroup>`).join("") +
-    `</select></span> `;
-}
-
-/** The name the For choice suggests for a tool's user: its id (a valid user name, src/cli/connect-tools.ts), or with
- *  2, 3… after it while a user not removed has it (a removed user's name is free, as `mason user add` takes it). */
-export function suggestName(id, users = []) {
-  const taken = new Set(users.filter((u) => u.removedAt == null).map((u) => u.name));
-  if (!taken.has(id)) return id;
-  for (let i = 2; ; i++) if (!taken.has(`${id}${i}`)) return `${id}${i}`;
 }
 
 /** The add form's Role choice from `/api/state` `roles`: "" with no roles file, one naming none, or one that cannot be
@@ -388,7 +356,8 @@ function toggle(u, disabled, asking) {
  * field (issue 839). Right of the password's Copy, in its row and of the button's height, "Shown once"; under the rows, one line: the password is only shown
  * once. Host, port and SSL mode are the run's, said by Connect on the same page (renderUsersConnect); `mason user add` in
  * a terminal prints them all. No psql line: the URL is the same thing, pasted after `psql`. A field the JSON does not
- * carry (the URL while Mason does not run) is not shown. Mason keeps no copy, so it is never shown again.
+ * carry (the URL while Mason does not run) is not shown. Mason keeps no copy, so it is never shown again. Under the
+ * rows, whether it has connected (`o.connected`, `addedSeen`): Waiting for its first query…, then Connected.
  */
 export function renderAdded(a, o = {}) {
   const rows = [["URL", a.url, "added-url"], ["Password", a.password, "added-password"], ["Database", a.database, "added-database"]]
@@ -396,35 +365,12 @@ export function renderAdded(a, o = {}) {
   return `<div class="user-added" role="status"><p class="added-title">New user added</p>` +
     `<dl class="facts"><dt>User</dt><dd>${esc(a.user)}</dd>` +
     rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v, id === "added-password" ? badge("Shown once", "warn") : "")}</dd>`).join("") +
-    `</dl>${addedFor(a, o.tool ?? null, o.local === true)}${connectedLine(o.tool ?? null, o.connected === true)}<p class="tip">The password is only shown once</p>` +
+    `</dl>${connectedLine(o.connected === true)}<p class="tip">The password is only shown once</p>` +
     `${button("I have copied it", { dismissAdded: "" }, "primary")}</div>`;
 }
 
-/** The kinds of tool that usually run in the cloud, which cannot reach a `mason start` on this machine. */
-const CLOUD_KINDS = new Set(["bi", "embedded"]);
-
-/**
- * WHAT THE CARD SAYS FOR THE TOOL CHOSEN (`tool`: one of `/api/tools`', or null): its guide, a link set as the host's
- * links are (`hostLinkUrl`: an https: URL as the parser serialises it, else no link), in a new tab and sending no
- * referrer; for psql, the ready line (`mason user add --json`'s `psql`, the URL with the password in it, shown this
- * once) with Copy; and on `mason start`'s page (`local`) for a BI or embedded tool, that one in the cloud cannot reach
- * this machine, and where on the page a share opens.
- */
-function addedFor(a, tool, local) {
-  if (tool === null) return "";
-  const url = hostLinkUrl(tool.guide);
-  const guide = url !== null && /^https:/.test(url)
-    ? `<p class="added-guide"><a href="${esc(url)}" target="_blank" rel="noreferrer">How to connect ${esc(tool.name)} to PostgreSQL</a></p>` : "";
-  const psql = tool.id === "psql" && typeof a.psql === "string" ? `<p class="added-psql">${copyable("added-psql", a.psql)}</p>` : "";
-  const cloud = local && CLOUD_KINDS.has(tool.kind)
-    ? `<p class="tip">${esc(tool.name)} in the cloud cannot reach this machine: Share over the internet, in Connect on this page, gives it an address it can reach, with a login of its own.</p>` : "";
-  return guide + psql + cloud;
-}
-
-/** Whether the user added has connected yet, in the tool's name when one was chosen: waiting, then connected. */
-const connectedLine = (tool, connected) => `<p class="added-seen">${connected
-  ? status("ok", tool === null ? "Connected" : `${tool.name} connected`)
-  : status("warn", tool === null ? "Waiting for its first query…" : `Waiting for ${tool.name}'s first query…`)}</p>`;
+/** Whether the user just added has connected yet: waiting, then connected. */
+const connectedLine = (connected) => `<p class="added-seen">${connected ? status("ok", "Connected") : status("warn", "Waiting for its first query…")}</p>`;
 
 /**
  * WHETHER A USER JUST ADDED HAS CONNECTED (`added`: `mason user add --json`'s answer; `state`: `/api/state`'s body;
@@ -445,10 +391,8 @@ export const page = {
   title: "Users",
   create(ctx) {
     // held: what From… opened over ({ list, now, state }), so a poll never rewrites its form under what is being typed
-    // added: the user just added (its password in it, this page's memory alone); addedTool: the tool its For chose (or
-    // null), addedSeen: whether it has connected; prefilled: the name the For choice last put in the Name box
-    const m = { actionFailure: null, added: null, addedTool: null, addedSeen: false, prefilled: null, confirming: null, refused: null, held: null };
-    const tools = () => toolsOf(ctx.read(TOOLS)?.body);
+    // added: the user just added (its password in it, this page's memory alone); addedSeen: whether it has connected
+    const m = { actionFailure: null, added: null, addedSeen: false, confirming: null, refused: null, held: null };
     const users = () => ctx.read(USERS)?.body ?? null;
     // Share over the internet, in Connect: its own model, beats and actions
     const share = createShare(ctx);
@@ -456,15 +400,12 @@ export const page = {
     const actions = {
       /** `role`: the Role choice's, sent as mason user add --role; "" or none: no role, as with no --role. `from`: the
        *  ranges, as mason user add --from; null or none: none sent, from anywhere */
-      async addUser(name, role = "", from = null, tool = "") {
+      async addUser(name, role = "", from = null) {
         m.actionFailure = null;
-        // the tool chosen is never sent: the user is a plain mason user add user
         const r = await ctx.ask(USERS_POST, json("POST", { name, ...(role ? { role } : {}), ...(from !== null ? { from } : {}) }));
         if ("failure" in r) { m.actionFailure = r.failure; return false; }
         m.added = r.body;
-        m.addedTool = tools().find((t) => t.id === tool) ?? null;
         m.addedSeen = false;
-        m.prefilled = null;
         await ctx.refresh([USERS]);
         return true;
       },
@@ -510,17 +451,7 @@ export const page = {
         await ctx.refresh([USERS]);
         return true;
       },
-      dismissAdded() { m.added = null; m.addedTool = null; m.addedSeen = false; },
-      /** For chosen (`tool`: its id, "" for none): the Name box takes the name it suggests while it holds none of the
-       *  person's own — empty, or the one it suggested before — and keeps what the person typed */
-      chooseTool(tool, nameBox) {
-        if (nameBox === null || nameBox === undefined) return;
-        const own = nameBox.value !== "" && nameBox.value !== m.prefilled;
-        if (own) return;
-        const next = tool === "" ? "" : suggestName(tool, users()?.users ?? []);
-        nameBox.value = next;
-        m.prefilled = next === "" ? null : next;
-      },
+      dismissAdded() { m.added = null; m.addedSeen = false; },
       dismissRefused() { m.refused = null; },
       ...share.actions,
     };
@@ -528,9 +459,8 @@ export const page = {
       model: m,
       // the users first (their read's failure is the page's banner), and the state for the Connect panel; the roles a
       // share may read as while the state says the page may open one
-      // the state more often while a user just added waits for its first connection (its sessions); the tools once
+      // the state more often while a user just added waits for its first connection (its sessions)
       reads: () => [{ path: USERS, everyMs: USERS_EVERY_MS }, { path: STATE, everyMs: m.added !== null && !m.addedSeen ? WAITING_EVERY_MS : USERS_EVERY_MS },
-        ...(usersReadOnly(ctx.read(STATE)?.body) === null ? [{ path: TOOLS, everyMs: Infinity }] : []),
         ...(shareable(ctx.read(STATE)?.body) ? [{ path: SHARE_CHOICES, everyMs: USERS_EVERY_MS }] : [])],
       afterRead() {
         share.afterRead(ctx.read(STATE)?.body);
@@ -549,10 +479,10 @@ export const page = {
         return {
           // the roles file's state is the run's (/api/state roles): a file that cannot be read refuses every user held to it
           users: u ? renderUsers(u, m.confirming, h !== null ? h.now : ctx.now().getTime(), m.refused, state?.roles ?? null, usersReadOnly(state)) : "",
-          "add-user-box": renderAddUser(ctx.read(STATE)?.body, ctx.read(TOOLS)?.body),
+          "add-user-box": renderAddUser(ctx.read(STATE)?.body),
           "users-connect": renderUsersConnect(ctx.read(STATE)?.body?.postgres, ctx.read(STATE)?.body?.served === true,
             renderShare(ctx.read(STATE)?.body, share.m, ctx.now().getTime(), ctx.read(SHARE_CHOICES))),
-          added: m.added ? renderAdded(m.added, { tool: m.addedTool, local: shareable(ctx.read(STATE)?.body), connected: m.addedSeen }) : "",
+          added: m.added ? renderAdded(m.added, { connected: m.addedSeen }) : "",
           action: m.actionFailure ? renderFailure(m.actionFailure) : "",
         };
       },
@@ -560,13 +490,9 @@ export const page = {
         if (form.id === "user-from") return actions.changeFrom(form.elements.user.value, rangesOf(form.elements));
         if (form.id !== "add-user") return null;
         const input = form.elements.name;
-        const tool = form.elements.tool;
-        return actions.addUser(input.value.trim(), form.elements.role?.value ?? "", rangesOf(form.elements), tool?.value ?? "").then((ok) => { if (ok) { input.value = ""; if (tool) tool.value = ""; } });
+        return actions.addUser(input.value.trim(), form.elements.role?.value ?? "", rangesOf(form.elements)).then((ok) => { if (ok) input.value = ""; });
       },
-      input(target) {
-        if (target?.id === "user-tool") { actions.chooseTool(target.value, target.form?.elements?.name ?? null); return true; }
-        return share.input(target);
-      },
+      input: (target) => share.input(target),
       click(d, button, { doc, win }) {
         const shared = share.click(d);
         if (shared !== null) return shared;

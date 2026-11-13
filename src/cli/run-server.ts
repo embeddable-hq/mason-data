@@ -43,7 +43,6 @@ import { syncedDataBytes } from "../duck/file-bytes.ts";
 import { NO_ROLES, type RolesLive } from "../duck/grants.ts";
 import { addedNext, addUser, attributesToAdd, disabledNext, disableUser, enabledNext, enableUser, fromNext, listUsers, rangesText, removeUser, REMOVED_NEXT, roleToAdd, setUserFrom, withLastUsed } from "./user.ts";
 import { userRole } from "./roles.ts";
-import { toolsAnswer } from "./connect-tools.ts";
 import type { RunState } from "./commands.ts";
 import { clientLink, postgresFacts } from "./pg-url.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
@@ -908,10 +907,6 @@ export function createRunServer(ctx: RunContext): http.Server {
           const user = decodeURIComponent(url.pathname.slice("/api/share/".length));
           if (ctx.shares?.update(user, body) !== true) { sendFailure(res, 404, { message: `no share ${user} is open`, code: "not_found" }); return; }
           sendJson(res, 200, { ok: true });
-        } else if (method === "GET" && url.pathname === "/api/tools") {
-          // the tools a person connects (src/cli/connect-tools.ts): the Users page's "For" choice and each one's guide,
-          // read once when the page is shown — never with /api/state, which the page asks every 2 s
-          sendJson(res, 200, toolsAnswer());
         } else if (method === "GET" && url.pathname === "/api/users") {
           // mason user list --json's shape: the users, and whether each connects (and with ?lastUsed=1 when each was last used)
           const r = listUsers(ctx.users.file, ctx.users.apiKey, clientLink(ctx.users), ctx.roles?.() ?? NO_ROLES);

@@ -1173,31 +1173,6 @@ test("/api/state says where a tool connects: the Postgres API's URL with <user>:
     shown: "postgres://<user>:<password>@127.0.0.1:5433/app", psql: "psql 'postgres://<user>:<password>@127.0.0.1:5433/app'" });
 });
 
-test("GET /api/tools: the tools a person connects, from one module, under the guard — each an id that is a valid user name, unique, a name, a kind the page groups, and an https guide; never in /api/state", async () => {
-  // imported when the test runs: at a commit without the module the file still loads, and this test fails by name
-  const { CONNECT_TOOLS, TOOL_KINDS } = await import("../src/cli/connect-tools.ts" as string) as typeof import("../src/cli/connect-tools.ts");
-  const a = await call("GET", "/api/tools");
-  assert.equal(a.status, 200);
-  const body = JSON.parse(a.text) as { tools: Array<{ id: string; name: string; kind: string; guide: string }>; kinds: Array<{ kind: string; label: string }> };
-  assert.deepEqual(body, JSON.parse(JSON.stringify({ tools: CONNECT_TOOLS, kinds: TOOL_KINDS })), "the module's list, as it is");
-  assert.deepEqual(body.kinds.map((k) => k.label), ["SQL clients", "BI tools", "Embedded analytics"]);
-  assert.ok(body.tools.length >= 18);
-  const ids = body.tools.map((t) => t.id);
-  assert.equal(new Set(ids).size, ids.length, "each id once");
-  const { USER_NAME_RE } = await import("../src/duck/users.ts");
-  for (const t of body.tools) {
-    assert.match(t.id, USER_NAME_RE, `${t.id}: a valid user name, the one the form suggests`);
-    assert.deepEqual(Object.keys(t).sort(), ["guide", "id", "kind", "name"], `${t.id}: a name, a kind and a guide, nothing else`);
-    assert.ok(body.kinds.some((k) => k.kind === t.kind), `${t.id}: a kind the page groups`);
-    assert.equal(new URL(t.guide).protocol, "https:", `${t.id}: its guide is https`);
-    assert.ok(t.name.length > 0);
-  }
-  for (const id of ["psql", "metabase", "looker_studio", "power_bi", "embeddable"]) assert.ok(ids.includes(id), id);
-  // under the guard, as every route of the API; and not polled with the state
-  assert.equal((await call("GET", "/api/tools", { cookie: null })).status, 403);
-  assert.ok(!(await call("GET", "/api/state")).text.includes("\"guide\""), "never inside /api/state");
-});
-
 test("/api/state is lean, as the page polls it every 2 s: no table's columns; ?columns=1 carries them (mason status --json), and one table's are GET /api/tables/<table>/columns", async () => {
   const lean = JSON.parse((await call("GET", "/api/state")).text) as { tables: Array<{ table: string; columns?: unknown }> };
   assert.equal(lean.tables.length, tables.length);
