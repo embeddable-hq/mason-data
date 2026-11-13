@@ -135,7 +135,10 @@ paths:
   replicated table up by one poll, a full read of it, said at the start with that price. **A slot about to be made has
   its tables marked behind, with its record at 0/0, in one transaction committed BEFORE `CREATE_REPLICATION_SLOT`**
   (`prepareReplication`; the review of PR 897: marked after it, a `kill -9` between the two left the next start
-  streaming the new slot under the old one's record, never caught up — the switch keeps the slot's name); verified by the ClickHouse reader's own `checkPublication` (src/duck/publication.ts), never a
+  streaming the new slot under the old one's record, never caught up — the switch keeps the slot's name), **and no
+  catch-up ends a mark while it is made (`makingSlot`); the marks a catch-up compares are set anew only once it exists**
+  (the second review: a catch-up queued behind a copy polled while the slot's creation waited on an open transaction,
+  took a mark set before the slot, and ended it — the transaction reached neither the poll nor the stream); verified by the ClickHouse reader's own `checkPublication` (src/duck/publication.ts), never a
   second verifier. A gap in one table refuses that table alone, the others stream on; the way out is the found
   publication plus the gap as `ALTER PUBLICATION … ADD TABLE …`. On a standby a named one is required, refused before
   any slot is made. ("Logical replication")

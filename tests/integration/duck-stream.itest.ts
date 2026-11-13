@@ -558,6 +558,83 @@ test("a switch of publication on a running project, with a transaction open acro
   assert.equal(psql(url, `SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE '${tag}_ps%'`), "1", "one slot, the run's: the one before is gone");
 });
 
+// THE SECOND REVIEW OF PR 897: a slot made again while a table's copy and catch-up run beside it, with a transaction
+// open across the slot's creation. Marked behind before the slot existed, the table's catch-up — queued behind its copy,
+// polling while CREATE_REPLICATION_SLOT waited on the transaction — took that mark and ended it: the transaction then
+// committed before the slot's start, and its insert, update and delete reached neither the poll nor the stream. No
+// catch-up whose poll may precede the slot counts as the slot's: the table is caught up again once the slot exists.
+test("a slot made again while a table's catch-up runs beside it, a transaction open across the slot's creation: caught up again once the slot exists, nothing lost", { skip }, async () => {
+  const db = `${tag}_sr`, url = urlOf(db);
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  psql(url, "CREATE TABLE items (id int PRIMARY KEY, v text); INSERT INTO items SELECT g, 'v' || g FROM generate_series(1, 20) g; " +
+    "CREATE TABLE big (id int PRIMARY KEY, v text, w text); INSERT INTO big SELECT g, 'b' || g, md5(g::text) FROM generate_series(1, 50) g");
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const [ITEMS, BIG] = await tablesOf(parsed.source, ["public.items", "public.big"]);
+  const repl = { slot: `${tag}_sr`, publication: `${tag}_sr`, owned: true };
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "sr.db"), (l) => logged.push(l));
+  const copy = heldCopy("public.big", false);
+  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", repl, { onChunk: copy.onChunk });
+  const open = spawn("psql", ["-X", "-q", "-v", "ON_ERROR_STOP=1", url], { stdio: ["pipe", "ignore", "pipe"] });
+  after(() => { if (open.exitCode === null) open.kill(); });
+  let err = "";
+  open.stderr.on("data", (d: Buffer) => { err += d.toString(); });
+  const exited = new Promise<void>((resolve, reject) => open.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`psql exited ${code}: ${err}`))));
+  const until = async (what: string, f: () => boolean, from: number): Promise<void> => {
+    for (const end = Date.now() + 60_000; !f(); await new Promise((r) => setTimeout(r, 50))) if (Date.now() > end) throw new Error(`${what} did not happen in 60 s:\n${logged.slice(from).join("\n")}`);
+  };
+  try {
+    await sync.open();
+    sync.setTables([ITEMS!, BIG!]);
+    await sync.once();
+    await sync.caughtUp();
+    // big read again whole (a column left out), its copy held until the slot's creation waits
+    const from = logged.length;
+    copy.hold();
+    void sync.setTables([ITEMS!, { ...BIG!, columns: BIG!.columns.filter((c) => c.name !== "w") }]);
+    sync.kick();
+    await until("big's copy held", () => copy.held(), from);
+    // T: open across the slot's creation
+    open.stdin.write("BEGIN; INSERT INTO big VALUES (-1, 'T insert', 'x'); UPDATE big SET v = 'T updated' WHERE id = 5; DELETE FROM big WHERE id = 6; " +
+      "INSERT INTO items VALUES (-1, 'T'); UPDATE items SET v = 'T updated' WHERE id = 2;\n");
+    for (const end = Date.now() + 10_000; psql(url, `SELECT count(*) FROM pg_stat_activity WHERE datname = '${db}' AND backend_xid IS NOT NULL AND state = 'idle in transaction'`) === "0";) {
+      if (Date.now() > end) throw new Error(`the open transaction never took its xid; psql said ${err}`);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    // the slot dropped under the run (an invalidation, an operator's drop), then a pass makes it again
+    for (let i = 0; psql(adminUrl!, `SELECT count(*) FROM pg_replication_slots WHERE slot_name = '${repl.slot}'`) !== "0"; i++) {
+      psql(adminUrl!, `SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = '${repl.slot}' AND active`);
+      psql(adminUrl!, `SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = '${repl.slot}' AND NOT active`);
+      if (i > 200) throw new Error("the slot could not be dropped");
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    sync.kick();
+    await until("CREATE_REPLICATION_SLOT waiting on the open transaction", () =>
+      psql(adminUrl!, `SELECT count(*) FROM pg_stat_activity WHERE datname = '${db}' AND backend_type = 'walsender' AND query LIKE 'CREATE_REPLICATION_SLOT%'`) !== "0", from);
+    // big's copy and its catch-up poll run while the slot waits: before the transaction commits
+    copy.release();
+    await until("big's catch-up while the slot waits", () => logged.slice(from).some((l) => l.startsWith("caught up public.big by one poll after its whole read")), from);
+    assert.ok(!logged.slice(from).some((l) => l.startsWith("made replication slot")), `the slot is not made yet:\n${logged.slice(from).join("\n")}`);
+    open.stdin.end("COMMIT;\n");
+    await exited;
+    await until("the slot made", () => logged.slice(from).some((l) => l.startsWith(`made replication slot ${repl.slot} at `)), from);
+    await sync.caughtUp(30_000);
+    const said = `\n${logged.slice(from).join("\n")}`;
+    assert.equal(await rowsOf(store, "SELECT id, v FROM public.big ORDER BY 1"), psql(url, "SELECT id, v FROM big ORDER BY 1"), `big after the slot was made again${said}`);
+    assert.equal(await rowsOf(store, "SELECT id, v FROM public.items ORDER BY 1"), psql(url, "SELECT id, v FROM items ORDER BY 1"), `items after the slot was made again${said}`);
+    // and the stream goes on past it
+    psql(url, "INSERT INTO big VALUES (-2, 'after', 'y'); UPDATE items SET v = 'after' WHERE id = 3");
+    await sync.caughtUp(30_000);
+    assert.equal(await rowsOf(store, "SELECT id, v FROM public.big ORDER BY 1"), psql(url, "SELECT id, v FROM big ORDER BY 1"), `big streamed after${said}`);
+    assert.equal(await rowsOf(store, "SELECT id, v FROM public.items ORDER BY 1"), psql(url, "SELECT id, v FROM items ORDER BY 1"), `items streamed after${said}`);
+  } finally {
+    copy.release();
+    await sync.stop();
+    await store.close();
+  }
+});
+
 test("a named publication that cannot carry the copy is refused in the developer's words with the way out: a narrower column list, no delete, a typo", { skip }, async () => {
   const db = `${tag}_q`, url = urlOf(db);
   psql(adminUrl!, `CREATE DATABASE ${db}`);
