@@ -121,7 +121,8 @@ and its own publication when none is named. A named publication is read and veri
   fresh reviewer for each, and merges (`.claude/skills/coordinate/SKILL.md`).
 - **An implementer** builds one issue and opens its PR (`.claude/skills/implement/SKILL.md`). Every change carries its
   test, seen failing without the change. Before each push, it runs the `## What review probes` of every rules file its
-  paths fall under.
+  paths fall under. For an engine or listener diff, it sweeps the query shapes it touches, and their variants, against
+  a real Postgres at the head and at main before it marks the PR ready.
 - **A fresh reviewer** runs what changed, at the head and at main, with the same probes
   (`.claude/skills/review/SKILL.md`). It is never the implementer, and is not given its report.
 
@@ -175,13 +176,15 @@ a sentence, with what it would have caught.
 ## Local gates
 
 **CI is the full gate**, on every push. The implement skill says which gates an implementer runs locally, and when.
+- **An implementer does not run the full `npm run check` before a push.** It runs `npm run typecheck` and the test
+  files nearest the change. CI runs the rest.
 - **While working, run the tests nearest the change**: `node --test --test-timeout=<ms> --test-force-exit <file>`,
   with `--test-name-pattern` for one test and `IT_ORACLE_ONLY=<regex>` for the oracle. Both flags go before the files,
   or Node ignores them. Without the second, a hung test keeps its process alive for ever. `npm test` has its own bound and takes no argument.
   `scripts/hooks/test-timeout.ts` enforces this.
 - **No session runs the full oracle locally.** The allowlist comes from CI's legs (the implement skill has how).
 - **A heavy gate takes a slot.** `npm run check`, `npm run gate` and `npm run test:integration` queue for one of
-  `MASON_GATE_SLOTS` (`scripts/gate-slot.ts`), so start one in the background. To wait on it before your turn ends, run
+  `MASON_GATE_SLOTS` (`scripts/gate-slot.ts`), so when you run one, start it in the background. To wait on it before your turn ends, run
   it through `scripts/done-file.ts` and wait with bounded `scripts/wait-file.ts` calls. A background job does not wake an
   agent whose turn has ended.
 - **Never re-run a gate on an unchanged tree** to see whether a failure goes away. Read it: it is the change's to fix,
