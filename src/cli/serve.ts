@@ -339,7 +339,7 @@ function urlSettingProblems(project: string, data: string, env: Readonly<Record<
 export function serveConfig(s: ServeSettings, existing: Project | BrokenProject | null): { config: ProjectConfig; said: string[] } | Failure {
   const dir = path.join(s.data, STATE_DIR);
   if (existing === null) {
-    const config = { ...newConfig(s.name, s.project, true), apiKey: s.apiKey, served: true };
+    const config = { ...newConfig(s.name, s.project), apiKey: s.apiKey, served: true };
     return { config, said: [`new synced data in ${dir}`] };
   }
   if ("broken" in existing) {
@@ -359,9 +359,10 @@ export function serveConfig(s: ServeSettings, existing: Project | BrokenProject 
   }
   const said: string[] = [`the synced data in ${dir}, resumed`];
   if (was.apiKey !== s.apiKey) said.push("MASON_API_KEY changed: every mason user is removed (mason user add each again)");
-  // the source is the sources file's; a database restored elsewhere, or another one, is the run's to see (sourceMove)
-  const { source: _old, ...kept } = was as ProjectConfig & { source?: unknown };
-  return { config: { ...kept, apiKey: s.apiKey, folder: s.project, remote: true, served: true }, said };
+  // the source is the sources file's; a database restored elsewhere, or another one, is the run's to see (sourceMove);
+  // an older Mason's `remote` is read by nothing (issue 888), and not written again
+  const { source: _old, remote: _remote, ...kept } = was as ProjectConfig & { source?: unknown; remote?: unknown };
+  return { config: { ...kept, apiKey: s.apiKey, folder: s.project, served: true }, said };
 }
 
 /**

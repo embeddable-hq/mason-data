@@ -109,7 +109,7 @@ test("the demo database is read as a Postgres: Mason's client connects under ssl
   }
 
   const said: string[] = [];
-  const checked = await checkSource(s.url, { remote: false, cmd: "test", say: (m) => said.push(m) });
+  const checked = await checkSource(s.url, { cmd: "test", say: (m) => said.push(m) });
   assert.ok("source" in checked && "facts" in checked, `the check passes:\n${said.join("\n")}`);
   assert.equal(checked.facts.tables.length, 4);
 

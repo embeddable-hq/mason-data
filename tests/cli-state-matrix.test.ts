@@ -93,7 +93,8 @@ function folderIn(state: string): string {
   // a project's files alone, never mason init'ed (fetched, or cloned): no .mason/ at all
   if (state === "files_only") { fs.rmSync(dir, { recursive: true }); return root; }
   if (state === "broken") { fs.writeFileSync(path.join(dir, "config.json"), '{"name": "matrix", "sour'); return root; }
-  const config: Record<string, unknown> = { name: `matrix-${state.replace(/_/g, "-")}`, folder: "mason", remote: false,
+  // `remote`: an older Mason's key (its --remote, gone: issue 888), which every command in every state reads past
+  const config: Record<string, unknown> = { name: `matrix-${state.replace(/_/g, "-")}`, folder: "mason", remote: true,
     apiKey: "k".repeat(48), sourceServer: null, running: null, lastRun: null };
   if (state === "stale" || state === "squatted") {
     // after a reboot the config still names the run; its pid is dead, or now another process's (this test's own), which
@@ -235,7 +236,7 @@ async function upProject(changes: "poll" | "replication", copies: CopyState[], s
   fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, SOURCE.replace("  orders: {}\n", "  orders: {}\n  events: {}\n  fresh: {}\n"));
-  fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: `matrix-up-${changes}`, folder: "mason", remote: false, apiKey: "k".repeat(48), sourceServer: null,
+  fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: `matrix-up-${changes}`, folder: "mason", remote: true, apiKey: "k".repeat(48), sourceServer: null,
     running: { pid: process.pid, controlUrl: `http://127.0.0.1:${port}`, token, postgresUrl: "postgresql://127.0.0.1:1/shop", postgresListener: { host: "127.0.0.1", tls: null } },
     lastRun: null, ...(changes === "replication" ? { changes } : {}) }), { mode: 0o600 });
   return { root, close: () => { server.close(); } };
@@ -363,6 +364,21 @@ test("a project 0.7.0 streamed, its file silent on sync: mason start is refused 
   fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("tables:", "sync: off\ntables:"));
   const through = await runMason(root, ["start", "--json"], matrixEnv());
   assert.doesNotMatch(through.stdout + through.stderr, /this project streams/);
+});
+
+test("mason init --remote, in every state: an option that is gone (issue 888), a wrong command line before anything is read or written", async () => {
+  for (const state of STATES) {
+    const root = folderIn(state);
+    const was = fs.existsSync(path.join(root, ".mason", "config.json")) ? fs.readFileSync(path.join(root, ".mason", "config.json"), "utf8") : null;
+    for (const json of [false, true]) {
+      const a = await runMason(root, ["init", "postgres://mason@db.example.com/shop", "--remote", ...(json ? ["--json"] : [])], matrixEnv());
+      assert.equal(a.code, 2, `${state}: ${a.stdout}${a.stderr}`);
+      if (json) assert.equal((JSON.parse(a.stdout) as { error: { code: string; message: string } }).error.message, "there is no option --remote", state);
+      else assert.match(a.stderr, /mason init: there is no option --remote\n/, state);
+      assert.doesNotMatch(a.stdout + a.stderr, /at .*\.ts:\d+/, `${state}: no stack`);
+    }
+    assert.equal(fs.existsSync(path.join(root, ".mason", "config.json")) ? fs.readFileSync(path.join(root, ".mason", "config.json"), "utf8") : null, was, `${state}: nothing written`);
+  }
 });
 
 test("MASON_CHANGES refuses mason start as it does mason serve, naming the line, in every state of a project; a state below a project answers its own", async () => {

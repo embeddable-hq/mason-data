@@ -124,7 +124,7 @@ test("the reader's chunks never let a value through: a file read 1, 2, … bytes
 test("mason logs, --start, their --json, and -n show an older Mason's lines masked, in mason.log and dev.log, identifiers whole; --since and --until are the request log's, refused", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-logs-mask-"));
   try {
-    writeConfig(path.join(dir, ".mason"), newConfig("shop", "mason", false));
+    writeConfig(path.join(dir, ".mason"), newConfig("shop", "mason"));
     fs.writeFileSync(path.join(dir, ".mason", "mason.log"), OLD_LINES.map(([old]) => `${old}\n`).join(""));
     const devOld = ["--- mason start 2026-10-30T10:00:00.000Z ---", "Starting Mason for shop", "  ✗ Connecting to postgres://reader:****@db.internal:5432/app",
       `mason start: could not connect: Unable to connect to Postgres at "${conn("'orders2024'")}"`, "  password = orders2024", `FATAL: password authentication failed for user "orders2024"`];
@@ -162,7 +162,7 @@ test("mason logs, --start, their --json, and -n show an older Mason's lines mask
 test("mason logs -f masks the lines it follows, a password= value cut between two of the run's writes included", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-logs-follow-"));
   try {
-    writeConfig(path.join(dir, ".mason"), newConfig("shop", "mason", false));
+    writeConfig(path.join(dir, ".mason"), newConfig("shop", "mason"));
     const file = path.join(dir, ".mason", "mason.log");
     fs.writeFileSync(file, `${OLD_LINES[2]![0]}\n`);
     const follow = spawn(process.execPath, [MAIN, "logs", "-f"], { cwd: dir, env: { ...process.env, NO_COLOR: "1" } });
@@ -191,7 +191,7 @@ test("mason logs -f shows a last line no newline ended (a run killed mid-write),
   // the review of PR 641 (B1): -f waited for the newline, and a stopped run's last words never came
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-logs-unended-"));
   try {
-    writeConfig(path.join(dir, ".mason"), newConfig("shop", "mason", false));
+    writeConfig(path.join(dir, ".mason"), newConfig("shop", "mason"));
     const file = path.join(dir, ".mason", "mason.log");
     fs.writeFileSync(file, `${at(0)} [x] one\n${at(1)} [x] the run died mid-li`);
     const follow = spawn(process.execPath, [MAIN, "logs", "-f"], { cwd: dir, env: { ...process.env, NO_COLOR: "1" } });

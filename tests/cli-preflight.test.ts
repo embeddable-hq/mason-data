@@ -8,6 +8,10 @@ import * as os from "node:os";
 import { PgError } from "../src/cdc/pg-wire.ts";
 import { checkSource, explainConnectError, isLocalHost, maskedUrl, parseSource, serverlessHost, sourceWarnings, unpickableReason,
   type SourceFacts, type SourceTable } from "../src/cli/preflight.ts";
+import * as preflightModule from "../src/cli/preflight.ts";
+// read from the module, not imported by name: the file loads at a commit without them (scripts/fails-without.ts)
+const { PRIMARY_NOTE, REMOTE_NOTE, sourceNotes } = preflightModule as unknown as { PRIMARY_NOTE: string; REMOTE_NOTE: string;
+  sourceNotes: (s: import("../src/cli/preflight.ts").Source, standby: boolean | null) => string[] };
 import { unassignedPort } from "./test-ports.ts";
 import { PGlite } from "@electric-sql/pglite";
 import { readCollations, TABLES_SQL } from "../src/cli/preflight.ts";
@@ -154,7 +158,7 @@ test("a refused connection to localhost says nothing is listening, from the real
   // A port nothing listens on until the connect: out of the kernel's ephemeral range (tests/test-ports.ts)
   const port = await unassignedPort();
   const said: string[] = [], progress: string[] = [];
-  const r = await checkSource(`postgres://me@localhost:${port}/app`, { remote: false, cmd: "mason start", say: (m) => said.push(m), progress: (m) => progress.push(m) });
+  const r = await checkSource(`postgres://me@localhost:${port}/app`, { cmd: "mason start", say: (m) => said.push(m), progress: (m) => progress.push(m) });
   assert.deepEqual(r, { exit: 1 });
   assert.deepEqual(progress, [`mason start: connecting to postgres://me@localhost:${port}/app …`]);
   assert.equal(said[0], `mason start: could not connect: nothing is listening on localhost:${port}`);
@@ -183,14 +187,23 @@ test("a table without a primary key cannot be picked; one of any size can, where
   for (const rows of [5, 22_000_000, 1_000_000_000, null]) assert.equal(unpickableReason(table({ rows })), null, `rows: ${rows}`);
 });
 
-test("a database elsewhere is warned about: the copy, a primary, a serverless compute kept awake", () => {
+test("a database elsewhere is information, never a warning: where it is, and the main database; a serverless compute is the one warning (issue 888)", () => {
   const facts = (standby: boolean): SourceFacts => ({ version: 160000, versionText: "16", standby, tables: [], systemIdentifier: null });
+  assert.equal(REMOTE_NOTE, "Your database is on another machine. Mason will sync the tables you choose to this machine.");
+  assert.equal(PRIMARY_NOTE, "This is your main database, not a read replica. Mason only reads from it and keeps its load small. " +
+    "If you have a read replica, you can point Mason there instead.");
+  // on this machine: nothing to say
+  assert.deepEqual(sourceNotes(source("postgres://me@localhost/app"), false), []);
   assert.deepEqual(sourceWarnings(source("postgres://me@localhost/app"), facts(false)), []);
-  const neon = sourceWarnings(source("postgres://me@ep-x.us-east-2.aws.neon.tech/app"), facts(false));
-  assert.ok(neon.some((w) => /sync the tables you pick/.test(w)));
-  assert.ok(neon.some((w) => /PRIMARY/.test(w)));
-  assert.ok(neon.some((w) => /Neon suspends an idle compute/.test(w)));
-  assert.ok(!sourceWarnings(source("postgres://me@replica.example.com/app"), facts(true)).some((w) => /PRIMARY/.test(w)));
+  // elsewhere: where it is, and whether it is the main database (not read: where it is alone)
+  assert.deepEqual(sourceNotes(source("postgres://me@db.example.com/app"), false), [REMOTE_NOTE, PRIMARY_NOTE]);
+  assert.deepEqual(sourceNotes(source("postgres://me@replica.example.com/app"), true), [REMOTE_NOTE]);
+  assert.deepEqual(sourceNotes(source("postgres://me@db.example.com/app"), null), [REMOTE_NOTE]);
+  assert.deepEqual(sourceWarnings(source("postgres://me@db.example.com/app"), facts(false)), [], "neither is a warning");
+  // a serverless compute: everything that keeps it awake, not the polling alone — the run's 10-second read too (issue 888)
+  assert.deepEqual(sourceWarnings(source("postgres://me@ep-x.us-east-2.aws.neon.tech/app"), facts(false)), [
+    "Neon suspends an idle compute and bills while it runs. A table whose sync: is poll or replication keeps it running. " +
+    "So does Mason itself while it runs: it reads the database's tables every 10 seconds, whatever each table's sync: is"]);
   assert.equal(serverlessHost("db.abc.supabase.co"), null);
 });
 
@@ -255,7 +268,7 @@ test("a database the server does not have: the closest name there, as did you me
   const srv = await serverOf(names);
   try {
     const said: string[] = [];
-    const r = await checkSource(`postgres://me@127.0.0.1:${srv.port}/shpo`, { remote: false, cmd: "mason init", say: (m) => said.push(m), progress: () => {} });
+    const r = await checkSource(`postgres://me@127.0.0.1:${srv.port}/shpo`, { cmd: "mason init", say: (m) => said.push(m), progress: () => {} });
     assert.deepEqual(r, { exit: 1 });
     assert.deepEqual(said, [
       `mason init: could not connect: 127.0.0.1:${srv.port} has no database by the name the URL gives (the part after the port)`,

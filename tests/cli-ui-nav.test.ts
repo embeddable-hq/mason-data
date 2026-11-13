@@ -28,7 +28,7 @@ const project = (): Parameters<typeof startSettingRefusal>[0] => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mnav-"));
   made.push(dir);
   fs.mkdirSync(path.join(dir, "mason", "sources"), { recursive: true });
-  return { root: dir, folder: path.join(dir, "mason"), config: newConfig("shop", "mason", false) } as unknown as Parameters<typeof startSettingRefusal>[0];
+  return { root: dir, folder: path.join(dir, "mason"), config: newConfig("shop", "mason") } as unknown as Parameters<typeof startSettingRefusal>[0];
 };
 
 /** What every entrance of mason serve says of the settings: the setting's own reading, the one report, the run's check. */
