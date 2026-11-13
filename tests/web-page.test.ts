@@ -171,9 +171,9 @@ const EVENTS = { events: [EVENT, { at: "2026-10-27T09:04:00.000Z", kind: "restar
 const USAGE = { since: "2026-10-27T09:04:30.000Z", until: "2026-10-27T09:05:30.000Z", stepSeconds: null, sampleSeconds: 60, keptDays: 7, samples: [],
   copySizes: [{ table: "public.customers", bytes: 524_288, at: "2026-10-27T09:00:00.000Z" }, { table: "public.events", bytes: 3_221_225_472, at: "2026-10-27T09:00:00.000Z" }] };
 
-/** What the Overview reads, in order: the state every poll, the request log's summary, the last day's sync failures, the
- *  unsupported SQL and the users every 30 s. */
-const STATUS_READS = ["GET api/state", "GET api/queries", "GET api/events?failed=1&since=24h&limit=1000", "GET api/unsupported?limit=100", "GET api/users"];
+/** What the Overview reads, in order: the state every poll, the request log's summary, the last day's sync failures and
+ *  the unsupported SQL every 30 s. */
+const STATUS_READS = ["GET api/state", "GET api/queries", "GET api/events?failed=1&since=24h&limit=1000", "GET api/unsupported?limit=100"];
 /** The Overview's first poll: those, and the last 24 hours of usage its cards' sparklines draw (read once a minute). */
 const STATUS_FIRST = [...STATUS_READS, "GET api/usage?since=24h&step=3600"];
 /** The run's word at the top of the Overview, as it is written: a big dot, then the word. */
@@ -817,7 +817,7 @@ test("a read-only page: each renderer alone writes no control that changes anyth
   assert.equal(fn<[unknown], string>("renderShare")(ro), "", "Share over the internet: absent on a read-only page");
   assert.match(fn<[unknown], string>("renderShare")(CATALOG_STATE), /data-share-open/, "unset: Share is there");
   const { renderChecklist: checklist } = await import(path.join(WEB, "pages", "status.js") as string) as { renderChecklist: (s: unknown, u: unknown) => string };
-  const nobody = { users: [] };
+  const nobody = { queries: { week: { completed: 0 } } };
   const fresh = { ...NONE, pageReadOnly: why };
   assert.ok(!/href="#users"|Add a table/.test(checklist(fresh, nobody)), "the checklist sends no one to add what the page refuses");
   assert.match(checklist(NONE, nobody), /Add a table/);
@@ -844,10 +844,11 @@ test("a read-only page that still edits its tables (pageReadOnlyAllow: [tables])
   assert.ok(!textOf(shown.byPage.get("status")!).includes("Nothing is added or created"));
   // the checklist sends a person to add a table, never to create a user
   const { renderChecklist: checklist } = await import(path.join(WEB, "pages", "status.js") as string) as { renderChecklist: (s: unknown, u: unknown) => string };
-  const nobody = { users: [] };
+  const nobody = { queries: { week: { completed: 0 } } };
   const fresh = checklist({ ...NONE, pageReadOnly: why, pageReadOnlyAllow: ["tables"] }, nobody);
   assert.match(fresh, /Add a table/);
-  assert.ok(!/href="#users"/.test(fresh), "no Create a user");
+  assert.ok(!/href="#users"/.test(fresh), "no Connect a tool");
+  assert.match(textOf(fresh), /○ Connect a tool \(to do\)$/, "the step still shows, without its button");
   // an allowance the page does not know is no allowance; without the page read-only it changes nothing
   const renderTables = fn<[unknown], string>("renderTables");
   assert.ok(!renderTables({ ...CATALOG_STATE, pageReadOnly: why, pageReadOnlyAllow: ["users"] }).includes("data-add-table"));
@@ -1068,11 +1069,11 @@ test("every link of Mason's own into a replaced view goes to the host's page: th
   for (const pageNav of [null, { items: { users: "/host/users" }, links: [] }]) {
     const run = fakeRun();
     run.answers.set("GET api/state", () => new Response(JSON.stringify({ ...COPYING, pageNav }), { status: 200 }));
-    run.answers.set("GET api/users", () => new Response(JSON.stringify({ users: [] }), { status: 200 }));
+    run.answers.set("GET api/queries", () => new Response(JSON.stringify({ queries: { ...QUERIES.queries, week: { ...QUERIES.queries.week, completed: 0 } } }), { status: 200 }));
     const app = fn<[unknown], App>("createApp")(run.fetch);
     await app.poll();
     const overview = app.view().status!;
-    const leads = overview.match(/<a class="btn[^"]*" href="[^"]*"(?: rel="noreferrer")?>Create a user<\/a>/g) ?? [];
+    const leads = overview.match(/<a class="btn[^"]*" href="[^"]*"(?: rel="noreferrer")?>Connect a tool<\/a>/g) ?? [];
     assert.equal(leads.length, 1, "Getting started's step");
     for (const a of leads) assert.ok(a.includes(pageNav === null ? 'href="#users">' : 'href="/host/users" rel="noreferrer">'), a);
   }
@@ -1814,9 +1815,9 @@ test("a read-only page that still manages its users (pageReadOnlyAllow: [users])
     ["usage", `Statements are not cancelled from this page: ${why}.`]] as const) assert.ok(textOf(shown.byPage.get(id)!).includes(line), `${id}: ${line}`);
   // the checklist's Create a user, never Add a table
   const { renderChecklist: checklist } = await import(path.join(WEB, "pages", "status.js") as string) as { renderChecklist: (s: unknown, u: unknown) => string };
-  const nobody = { users: [] };
+  const nobody = { queries: { week: { completed: 0 } } };
   const fresh = checklist({ ...NONE, pageReadOnly: why, pageReadOnlyAllow: ["users"] }, nobody);
-  assert.match(fresh, /href="#users">Create a user/);
+  assert.match(fresh, /href="#users">Connect a tool/);
   assert.ok(!/Add a table/.test(fresh));
   // the renderers alone: an allowance the page does not know is no allowance; without the page read-only nothing changes
   const renderAddUser = fn<[unknown], string>("renderAddUser");
@@ -4655,43 +4656,57 @@ test("Users: ONE Connect panel for the run — host, port, database, sslmode, th
   assert.match(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), /<div id="users"><\/div>[\s\S]*<div id="users-connect"><\/div>\s*<\/section>/, "the list first, the panel last");
 });
 
-test("the Overview's first-run checklist: Mason is running, Sync a table, Create a user — the same words done or not, each ○ with its one action; gone once all three are done", async () => {
-  const renderChecklist = of<[unknown, unknown], string>(statusPage, "status.js", "renderChecklist");
-  const user = { users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true }] };
-  const noUser = { users: [{ ...user.users[0], removedAt: "2026-10-27T10:00:00.000Z" }] };
-  // a fresh install: a table added and synced, no user
-  const fresh = renderChecklist(RUNNING, noUser);
-  assert.equal(textOf(fresh), "Getting started 2 of 3 done ✓ Mason is running (done) ✓ Sync a table (done) ○ Create a user (to do) Create a user");
+test("the Overview's first-run checklist: Mason is running, Sync a table, Connect a tool — the same words done or not, each ○ with its one action; Connect a tool done once a tool has used Mason, never for a user existing; gone once all three are done", async () => {
+  const renderChecklist = of<[unknown, unknown, boolean?], string>(statusPage, "status.js", "renderChecklist");
+  const none = NO_QUERIES;
+  const answered = { queries: { ...NO_QUERIES.queries, week: { ...NO_QUERIES.queries.week, completed: 1 } } };
+  const withSessions = (s: RunState, byClient: unknown[]) => ({ ...s, sessions: { open: byClient.length, byClient } });
+  // a fresh install: a table added and synced, no tool has used Mason
+  const fresh = renderChecklist(RUNNING, none);
+  assert.equal(textOf(fresh), "Getting started 2 of 3 done ✓ Mason is running (done) ✓ Sync a table (done) ○ Connect a tool (to do) Connect a tool");
   // the steps drawn as courses of a wall beside its title: a brick a step, laid as it is done (drawing, hidden from a screen reader)
   assert.match(fresh, /<p class="checklist-title"><span class="courses" aria-hidden="true"><i class="on"><\/i><i class="on"><\/i><i><\/i><\/span>Getting started /);
-  assert.match(fresh, /<li class="step-todo"><span class="mark" aria-hidden="true">○<\/span><span class="what">Create a user<span class="sr"> \(to do\)<\/span><\/span><a class="btn small primary" href="#users">Create a user<\/a><\/li>/, "the next step is the primary action");
-  // no first statement step, and nothing to copy (the owner's, 2026-11-12)
-  assert.ok(!/A first statement answered|Copy the psql line|data-copy/.test(fresh));
+  assert.match(fresh, /<li class="step-todo"><span class="mark" aria-hidden="true">○<\/span><span class="what">Connect a tool<span class="sr"> \(to do\)<\/span><\/span><a class="btn small primary" href="#users">Connect a tool<\/a><\/li>/, "the next step is the primary action, to the Users page");
+  assert.ok(!/Create a user|A first statement answered|Copy the psql line|data-copy/.test(fresh));
   // nothing added: Add a table leads to Tables
-  const none = renderChecklist(NONE, noUser);
-  assert.match(none, /○<\/span><span class="what">Sync a table<span class="sr"> \(to do\)<\/span><\/span><a class="btn small primary" href="#tables">Add a table<\/a>/);
+  assert.match(renderChecklist(NONE, none), /○<\/span><span class="what">Sync a table<span class="sr"> \(to do\)<\/span><\/span><a class="btn small primary" href="#tables">Add a table<\/a>/);
   // copying: no action, it is under way
-  assert.match(textOf(renderChecklist({ ...COPYING, totals: { ...COPYING.totals!, copied: 0 } }, noUser)), /○ Sync a table \(to do\) syncing now ○ Create a user/);
-  // all three done: none, whatever was asked of Mason; the users not read, or their read failed: none (never a ○ for what could not be told)
-  assert.equal(renderChecklist(RUNNING, user), "");
+  assert.match(textOf(renderChecklist({ ...COPYING, totals: { ...COPYING.totals!, copied: 0 } }, none)), /○ Sync a table \(to do\) syncing now ○ Connect a tool/);
+  // done: a statement completed in the request log's week; a user's session open now (a tool's catalog queries alone);
+  // one seen open while the page was shown — each with a table synced, no checklist
+  assert.equal(renderChecklist(RUNNING, answered), "");
+  assert.equal(renderChecklist(withSessions(RUNNING, [{ user: "metabase", client: "Metabase", open: 1, running: 0 }]), none), "");
+  assert.equal(renderChecklist(RUNNING, none, true), "");
+  // a token's session ('') is not a tool's; a session open does not tell the step over a failed read either
+  assert.match(textOf(renderChecklist(withSessions(RUNNING, [{ user: "", client: "psql", open: 1, running: 0 }]), none)), /○ Connect a tool/);
+  assert.equal(textOf(renderChecklist(withSessions(NONE, [{ user: "metabase", client: "", open: 1, running: 0 }]), undefined)).includes("✓ Connect a tool (done)"), true, "a session tells it without the summary");
+  // the summary not read, or its read failed, and no session: none (never a ○ for what could not be told)
   assert.equal(renderChecklist(RUNNING, undefined), "");
   assert.equal(renderChecklist(RUNNING, { failure: { code: "failed", message: "x" } }), "");
-  // the app: the Overview reads the users (every 30 s) and draws it above the cards
+  // the app: the Overview no longer reads the users; a user existing does not tick the step
   const run = fakeRun();
   run.answers.set("GET api/state", answer(RUNNING));
   run.answers.set("GET api/queries", answer(NO_QUERIES));
-  run.answers.set("GET api/users", answer({ users: [] }));
-  const app = fn<[unknown], App>("createApp")(run.fetch);
+  run.answers.set("GET api/users", answer({ users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true }] }));
+  let t = Date.UTC(2026, 9, 28, 9, 0, 0);
+  const app = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => new Date(t));
   await app.poll();
-  assert.ok(run.asked.includes("GET api/users"));
+  assert.ok(!run.asked.includes("GET api/users"), "the users are not read for it");
   const text = textOf(app.view().status!);
-  assert.match(text, /^mason status Ready Every added table is synced and served Database .*? Changes .*? Getting started 2 of 3 done /);
+  assert.match(text, /^mason status Ready Every added table is synced and served Database .*? Changes .*? Getting started 2 of 3 done .* ○ Connect a tool \(to do\) Connect a tool /);
   assert.ok(text.indexOf("Getting started") < text.indexOf("Tables synced"), "above the cards");
-  // a user created: gone, though nothing has asked Mason anything yet
-  run.answers.set("GET api/users", answer(user));
+  // a tool logs in: done, and the checklist goes; its session closed before a statement reached the summary: still done
+  run.answers.set("GET api/state", answer(withSessions(RUNNING, [{ user: "metabase", client: "Metabase", open: 1, running: 0 }])));
+  t += 2000; await app.poll();
+  assert.ok(!textOf(app.view().status!).includes("Getting started"), "the three done: no checklist");
+  run.answers.set("GET api/state", answer(RUNNING));
+  t += 2000; await app.poll();
+  assert.ok(!textOf(app.view().status!).includes("Getting started"), "seen once: it stays done");
+  // a statement in the request log's week: done from the first read
+  run.answers.set("GET api/queries", answer(answered));
   const again = fn<[unknown], App>("createApp")(run.fetch);
   await again.poll();
-  assert.ok(!textOf(again.view().status!).includes("Getting started"), "the three done: no checklist");
+  assert.ok(!textOf(again.view().status!).includes("Getting started"));
 });
 
 test("a page opened at its own address that reads no state (Users) still has the sidebar's project, badge and version: the shell reads the state once a minute beside it", async () => {

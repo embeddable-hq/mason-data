@@ -61,10 +61,14 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   the slow ones for the p95, the refused or failed ones for the query errors, and Sync events' failures over the last
   24 hours for the sync errors. A count the page could not read is "unknown" with its reason, never 0. Eight cards,
   nine with the host's (`MASON_UI_OVERVIEW_CARD`): four by two and three by three from 641 px up, two a row on a phone.
-- **Overview**, Getting started (while setting up is not done): ✓ Mason is running · ✓/○ Sync a table · ✓/○ Create
-  a user — each step in the same words done or not (the ✓ or ○ says which), each ○ with its one action (Add a table → Tables, Create a user → Users), from `/api/state`'s totals and
-  `/api/users` (`mason user list --json`). Gone once the three are done; not drawn while the users' read is unanswered
-  or failed. How to connect is not on the Overview: it is on Queries' empty log, and the Users page.
+- **Overview**, Getting started (while setting up is not done): ✓ Mason is running · ✓/○ Sync a table · ✓/○ Connect
+  a tool — each step in the same words done or not (the ✓ or ○ says which), each ○ with its one action (Add a table →
+  Tables, Connect a tool → Users, where a user is added for the tool). Connect a tool is done once a tool has used
+  Mason, never because a user exists: a session of a `mason user` open now (`/api/state` `sessions.byClient`, which a
+  tool's login with only its catalog queries already makes), one seen open while the page was shown (held by the page),
+  or a statement completed in the request log's week (`/api/queries`). Gone once the three are done; not drawn while it
+  cannot tell (no session, and the request log's summary unanswered or failed). On a read-only page that adds no user
+  the step shows without its button. How to connect is not on the Overview: it is on Queries' empty log, and the Users page.
 - **Overview**, the tables not synced yet: a bar each with the line `mason wait` prints (a first sync not begun shimmers,
   with no % beside it), and nothing once every table is synced.
 - **Overview**, the facts: one table, **Server**, with `mason status`'s rows under its labels: Sources file, the
@@ -123,6 +127,13 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   table with no primary key.
 - **Users** (`#users`), in this order: the list of users, right under the title (and its read-only line), then the add
   form with the card of a user just added beside it, then Connect, so a card that appears moves nothing above it. The
+  form opens with **For**, what the user is for: "a tool or app (optional)", then the tools a person connects, grouped
+  (SQL clients, BI tools, Embedded analytics), from `GET /api/tools` (src/cli/connect-tools.ts, one list: each tool a
+  name, a kind and its own guide to connecting to PostgreSQL, no form or field of its own; read once when Users is
+  shown, never with the state). Choosing one puts a name for its user in the Name box (the tool's id, `metabase`,
+  `looker_studio`, `power_bi`, with 2, 3… after it while a user not removed has it) only while the box holds no name of
+  the person's own; the Name stays editable and nothing in the form moves. What is chosen is the page's memory alone,
+  never sent or stored: the user is a plain `mason user add` user. The
   form adds a user by name and, where `mason/roles.yml` names roles and reads as it is, a
   **Role** as `mason user add --role` (the roles from `/api/state` `roles`, `mason status --json`'s): the file's
   `default:` is chosen first, marked (default), and sends no role, so the user follows the default as one added with no
@@ -142,8 +153,17 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   --json` does not carry is not shown); "Shown once" in the password's row, right of its **Copy** and of the button's
   height (`--control-sm`); and one line, "The password
   is only shown once", over **I have copied it**. Host, port and SSL mode are Connect's on the same page (`mason user
-  add` in a terminal still prints all of them). No psql line: the URL is the same thing, pasted after `psql`. Mason
-  keeps no copy, so it is never shown again.
+  add` in a terminal still prints all of them). No psql line unless psql was chosen: the URL is the same thing, pasted
+  after `psql`. Mason keeps no copy, so it is never shown again. With a tool chosen in For, under the rows: a link,
+  "How to connect <Tool> to PostgreSQL", to the tool's guide (the URL arrives as data from `/api/tools` and is written
+  only when the host links' rule (`hostLinkUrl`) reads it as an https URL; a new tab, no referrer); for psql, the ready
+  `psql '<url>'` line with **Copy** (the password in it, shown this once); and on `mason start`'s page (not under
+  `mason serve`, nor on a read-only page) for a BI or embedded tool, one line: the tool in the cloud cannot reach this
+  machine, and Share over the internet, in Connect on the same page, gives it an address with a login of its own.
+  Then, with a tool chosen or not, a status line: "Waiting for <Tool>'s first query…" (or "Waiting for its first
+  query…") until Mason has seen the user — a session of it open (`/api/state` `sessions`), or a statement of it since
+  it was added (`/api/users?lastUsed=1` `lastUsedAt`) — then "<Tool> connected" (or "Connected"), held once seen. While
+  it waits, the state is read every 5 s instead of 30 s.
 - **Users**, Connect: once for the run, where a tool connects — host, port, database and SSL mode, each with **Copy**,
   and the URL and psql line with `<user>:<password>` in place — as `mason status` says it. No user's row carries a URL:
   the card shown once when a user is added is the only place its password is copied.
@@ -361,7 +381,7 @@ listens, and every browser connection crosses that one ssh connection as frames 
   (`src/cli/run-server.ts`).
 - **A page that only shows: `MASON_UI_READ_ONLY=1`.** For a page shown to someone who should only look (behind a
   reverse proxy, on the socket), `mason serve` with it set makes the page offer no control that changes anything — no
-  Add, Remove, Sync, Disable, Enable, Cancel, Add a user, Create a user or Share, each page saying
+  Add, Remove, Sync, Disable, Enable, Cancel, Add a user, Connect a tool or Share, each page saying
   why — and its server refuses every request
   of the page that is not a GET or a HEAD, whatever its path, with "the web page is read-only here" in the failure shape
   (`src/cli/ui-read-only.ts`). Viewing is unchanged. It covers the page alone: a request with the run's token is the
@@ -378,7 +398,7 @@ listens, and every browser connection crosses that one ssh connection as frames 
   committed offers no Add or Remove and refuses them `409`, as without the allowance (Sync now stays).
 - **A read-only page that still manages its users: `MASON_UI_READ_ONLY_ALLOW=users`.** For a site that proxies the page
   and lets its users' changes through its own checks, `MASON_UI_READ_ONLY=1` beside it keeps the Users page's Add a
-  user (with its Connects from), its "from …" line, **Disable**, **Enable** and **Remove**, and the Overview's Getting started Create a user. The
+  user (with its Connects from), its "from …" line, **Disable**, **Enable** and **Remove**, and the Overview's Getting started Connect a tool. The
   server lets through exactly these routes, each `<name>` exactly one path segment (a user's name, encoded), never a
   prefix:
   - `POST /api/users` (Add a user);

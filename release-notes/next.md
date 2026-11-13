@@ -5,7 +5,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **The Overview is shorter, and says what its word means.** Under the title "mason status", Ready, Under way or
   Failed now has a line saying what it means for the synced data: every added table is synced and served; how many of
   the added tables are synced while the rest sync; or how many tables' syncs failed, with a link to them on Tables.
-  Getting started has three steps (Mason is running, Sync a table, Create a user), each in the same words done or not, and goes once those are done.
+  Getting started has three steps (Mason is running, Sync a table, Connect a tool), each in the same words done or not,
+  and goes once those are done. Connect a tool is done once a tool has used Mason (it has logged in, or run a query),
+  no longer as soon as a user exists; its button goes to the Users page.
 - **`mason status` and the web page's Overview say the same rows under new labels.** Source is now Sources file, Disk
   is Free disk, Sessions is Connections open, and the Mason row is two: Version (`dev`, or the version) and Up (how long
   and since when, with the pid in `mason status`; no more "one process"). On the Overview, Database and Changes are under
@@ -48,6 +50,14 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   addresses", which shows the box for the addresses beside it. Nothing in the form moves when you change it, and what
   is sent is as before. The form (Name, Role, Connects from and Add a user) is one line where the page is wide enough,
   and wraps by field below that.
+- **Adding a user for a tool on the Users page.** The form starts with **For**: choose the tool or app the user is for
+  (psql, DataGrip, DBeaver, pgAdmin, TablePlus; Superset, Grafana, Hex, Looker, Looker Studio, Metabase, Power BI,
+  Sigma, Tableau, Trevor.io; Embeddable, Luzmo, Sisense), and the Name box is filled with a name for it (`metabase`, or
+  `metabase2` when there is one) unless you typed your own. The choice is not saved: the user is the same as one
+  `mason user add` makes. The New user added card then links the tool's own guide to connecting to PostgreSQL, gives
+  psql's ready command line to copy, says for a BI or embedded tool in the cloud that it cannot reach your machine
+  and that Share over the internet, on the same page, gives it an address, and says "Waiting for Metabase's first
+  query…" until the tool connects, then "Metabase connected".
 - **The Users page lists the users first**, under its title, then the form that adds one (with the card of a user just
   added beside it) and Connect.
 

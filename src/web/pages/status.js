@@ -5,7 +5,7 @@
  * mode: its position, lag, last batch and the slot's hold on the database's WAL), the copies not finished (a bar each,
  * only while there are any), and the last day's unsupported SQL in a line. The statements, the slow, the refused and the
  * failed ones are the Queries page's; the sync's failures Sync events'. Reads `/api/state` every poll, the request log's
- * summary, the last day's sync failures, the unsupported SQL and the users every 30 s, the last 24 hours of usage (the
+ * summary, the last day's sync failures and the unsupported SQL every 30 s, the last 24 hours of usage (the
  * cards' sparklines) every 60 s. Never the engine's name.
  *
  * Laid out as a dashboard (docs/WEB-UI.md "Presentation"): the word with a big dot under its title, then KPI cards (the
@@ -410,18 +410,26 @@ export function renderUnsupportedLine(u) {
     `${rest.length ? ` (and ${n(rest.length)} other${rest.length === 1 ? "" : "s"})` : ""} <a class="see" href="${esc(LINKS.queries)}">See all</a></p>`;
 }
 
+/** Whether a tool has used Mason, from the state alone: a session of a user (`mason user`'s; '' is a token's) open now
+ *  (`sessions.byClient`, the listener's) — a login with its password, which a tool's catalog queries alone make. */
+export const toolConnected = (s) => Array.isArray(s?.sessions?.byClient) && s.sessions.byClient.some((c) => c.user !== "" && c.open > 0);
+
 /**
  * THE FIRST-RUN CHECKLIST, while setting up is not done: Mason is running (the state answered), Sync a table (`totals`:
- * one served), Create a user (`/api/users`: one not removed), each step in its words done or not (the ✓ or ○ says which) — each ✓ or ○, a ○ with its one action: Add a table
- * (Tables), Create a user (Users). "" once all three are done, and while the users' read has not answered or could not
- * be read: a checklist never says ○ for what it could not tell. `users` is `/api/users`' body (or `{ failure }`).
+ * one served), Connect a tool — done once a tool has used Mason: a user's session open now (`toolConnected`), one seen
+ * open while the page was shown (`seen`, the page's), or a statement completed in the request log's week (`queries`:
+ * `/api/queries`' body, or `{ failure }`) — each step in its words done or not (the ✓ or ○ says which), a ○ with its one
+ * action: Add a table (Tables), Connect a tool (Users, where a user is added for it). A user existing is not a tool
+ * connected. "" once all three are done, and while it cannot tell whether a tool connected (no session, and the request
+ * log's summary not read or refused): a checklist never says ○ for what it could not tell.
  */
-export function renderChecklist(s, users) {
-  if (users === undefined || "failure" in users) return "";
+export function renderChecklist(s, queries, seen = false) {
   const added = s.tables.some((t) => t.added);
   const copied = (s.totals?.copied ?? 0) > 0;
-  const user = users.users.some((u) => u.removedAt == null);
-  if (copied && user) return "";
+  const answered = queries !== undefined && queries !== null && !("failure" in queries) ? (queries.queries?.week?.completed ?? 0) > 0 : null;
+  const connected = seen || toolConnected(s) || answered === true;
+  if (!connected && answered === null) return "";
+  if (copied && connected) return "";
   const copying = added && !copied && copyingCount(s) > 0;
   // a read-only page (MASON_UI_READ_ONLY=1) sends no one to add what it would refuse to add: a user unless its users
   // are still its own (MASON_UI_READ_ONLY_ALLOW=users), and a table unless its tables are (=tables)
@@ -430,7 +438,7 @@ export function renderChecklist(s, users) {
   const steps = [
     ["Mason is running", true, ""],
     ["Sync a table", copied, copying ? `<span class="dim">syncing now</span>` : added || tablesLook ? "" : `<a class="btn small primary" href="${LINKS.tables}">Add a table</a>`],
-    ["Create a user", user, looks ? "" : `<a class="btn small${copied ? " primary" : ""}" href="#users">Create a user</a>`],
+    ["Connect a tool", connected, looks ? "" : `<a class="btn small${copied ? " primary" : ""}" href="#users">Connect a tool</a>`],
   ];
   const done = steps.filter(([, ok]) => ok).length;
   return `<div class="checklist" role="group" aria-label="Getting started"><p class="checklist-title"><span class="courses" aria-hidden="true">${steps.map(([, ok]) => `<i${ok ? ' class="on"' : ""}></i>`).join("")}</span>Getting started <span class="dim">${done} of ${steps.length} done</span></p><ol>` +
@@ -443,7 +451,7 @@ export function renderChecklist(s, users) {
 const readOnlyWhat = (tables, users) => tables && users ? null : tables ? "No user is created" : users ? "No table is added" : "Nothing is added or created";
 
 /**
- * THE OVERVIEW from `/api/state` and the slower reads (`o.queries`, `o.syncErrors`, `o.unsupported`, `o.users`, `o.usage`:
+ * THE OVERVIEW from `/api/state` and the slower reads (`o.queries`, `o.syncErrors`, `o.unsupported`, `o.usage`:
  * each the body, or `{ failure }`; `o.now` the clock; `o.open(key)` whether a details is open): the word, the checklist,
  * the cards, the copies not finished, the facts, the stream, the unsupported SQL's line. Never the engine's name.
  */
@@ -452,7 +460,7 @@ export function renderStatus(s, o = {}) {
   const added = s.tables.some((t) => t.added);
   // a read-only page (MASON_UI_READ_ONLY=1): why it offers no user and no table to add, as Tables and Users say it
   const what = readOnlyWhat(tablesReadOnly(s) === null, usersReadOnly(s) === null);
-  return (what === null ? "" : readOnlyLine(what, s.pageReadOnly)) + renderHealth(s) + renderChecklist(s, o.users) + renderKpis(s, { ...o, now }) +
+  return (what === null ? "" : readOnlyLine(what, s.pageReadOnly)) + renderHealth(s) + renderChecklist(s, o.queries, o.connected === true) + renderKpis(s, { ...o, now }) +
     renderProgress(s, o.open, o.shares, o.before) + renderFacts(s, now) + renderStream(s, now) + (added ? renderUnsupportedLine(o.unsupported) : "");
 }
 
@@ -464,9 +472,10 @@ export const UNSUPPORTED_LIMIT = 100;
  *  says at least that many. */
 export const SYNC_ERRORS_LIMIT = 1000;
 
-/** What the page reads every 30 s beside the state: the request log's summary (the statements' and query errors' cards),
- *  the last day's sync failures (the sync errors' card), the last day's unsupported SQL, and the users (the checklist). */
-const SLOWER = ["api/queries", `api/events?failed=1&since=24h&limit=${SYNC_ERRORS_LIMIT}`, `api/unsupported?limit=${UNSUPPORTED_LIMIT}`, "api/users"];
+/** What the page reads every 30 s beside the state: the request log's summary (the statements' and query errors' cards,
+ *  and whether a tool has used Mason: the checklist), the last day's sync failures (the sync errors' card) and the last
+ *  day's unsupported SQL. */
+const SLOWER = ["api/queries", `api/events?failed=1&since=24h&limit=${SYNC_ERRORS_LIMIT}`, `api/unsupported?limit=${UNSUPPORTED_LIMIT}`];
 
 /** A read as `renderStatus` takes it: the body, or `{ failure }` when it could not be read; undefined before any read. */
 const asRequest = (r) => r === undefined ? undefined : r.failure ? { failure: r.failure } : r.body;
@@ -479,6 +488,9 @@ export const page = {
     // the details open (a copy's whole error), by key: a poll rewrites the section, and they stay open
     const opened = createOpenSet();
     const monotone = createMonotone();
+    // a tool seen connected while the page is shown (a session of a user's): the checklist's step stays done after the
+    // tool closes it, before a statement of it reaches the request log's summary
+    let connected = false;
     // the host's card (MASON_UI_OVERVIEW_CARD), once the state names it: read when the Overview is shown, and again at
     // its own `refresh` while it is (src/web/host-view.js)
     const cardPath = () => { const p = ctx.read("api/state")?.body?.pageCard; return typeof p === "string" ? p : null; };
@@ -492,9 +504,10 @@ export const page = {
       view() {
         const st = ctx.read("api/state");
         if (!st?.body) return { status: st?.failure ? "" : skeleton(4) };
-        const [queries, syncErrors, unsupported, users] = SLOWER.map((p) => asRequest(ctx.read(p)));
-        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, syncErrors, unsupported, users, usage: ctx.read(HOURLY)?.body, hostCard: cardPath() === null ? undefined : ctx.read(hostKey(cardPath())), open: opened.has, shares: monotone.of(st.body), before: monotone.before }) };
+        const [queries, syncErrors, unsupported] = SLOWER.map((p) => asRequest(ctx.read(p)));
+        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, syncErrors, unsupported, connected, usage: ctx.read(HOURLY)?.body, hostCard: cardPath() === null ? undefined : ctx.read(hostKey(cardPath())), open: opened.has, shares: monotone.of(st.body), before: monotone.before }) };
       },
+      afterRead() { if (toolConnected(ctx.read("api/state")?.body)) connected = true; },
       toggle: (target) => opened.toggle(target),
       // the host card's Copy buttons
       click: (d, button, env) => copyClick(d, button, env),
