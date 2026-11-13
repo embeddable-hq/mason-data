@@ -514,6 +514,14 @@ A deploy sends a project's files to one replica and waits until Mason on the rep
 replica is named `{org}/{name}`: each part matches `^[a-z0-9][a-z0-9-]{0,62}$` (the CLI refuses any other before it
 sends a byte, so a name is always safe in a path). Both requests carry `Authorization: Bearer <token>`.
 
+A deploy needs only the project's `mason/` folder, never `mason init`: it reads nothing of `.mason/` (no key, no
+synced data). In an initialised project (a `.mason/` at or above the folder it runs in) the config's `folder` names the
+files, as for every command. With no `.mason/` at or above, the project is the nearest folder at or above that holds
+`mason/` with a `mason.yml` or a `.yml` or `.yaml` file in `mason/sources/` (a clone, or a folder the files were copied into), and its
+`mason/` is sent: never the folder itself or anything beside `mason/`. A `mason/` that is a link out of its folder is
+refused, as is one that cannot be read; a folder with neither a `.mason/` nor such a `mason/` is refused with code
+`no_project`, the way out `mason init` or the folder that holds `mason/`. `--dry-run` finds the files the same way.
+
 ### What the CLI checks before it sends anything
 
 The project is checked on this machine by Mason's own readers, as `mason start` checks it before it connects: the

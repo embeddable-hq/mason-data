@@ -22,7 +22,8 @@ import { replaceFile } from "../lib/disk-full.ts";
 import type { Failure, Problem } from "./command.ts";
 import { connectDatabase, databaseSettingRefusal } from "../lib/database-name.ts";
 import { changesRetired, pollMsRetired } from "../lib/table-sync.ts";
-import { readSource, sourcesTop, writtenDatabase, type ProjectSource } from "./sources.ts";
+import { readSource, sourcesTop, SOURCES_DIR, writtenDatabase, type ProjectSource } from "./sources.ts";
+import { PROJECT_FILE } from "../lib/project-file.ts";
 import { UI_SOCKET_SETTING } from "./ui-socket.ts";
 import { UI_RUN_FILE_SETTING } from "./ui-run-file.ts";
 import { backLinkSettingsSet, uiBackLinkSetting } from "./ui-back-link.ts";
@@ -265,6 +266,63 @@ export function theProject(cwd: string): { project: Project } | Problem {
   if (p && "broken" in p) return brokenProblem(p);
   if (p) return { project: p };
   return { problem: "no Mason project here or above", code: "no_project", fix: "cd into a project's folder, or make this folder one (mason init demo: a demo database, nothing to install)",
+    next: [["mason init", "make this folder a project (MASON_DATABASE_URL or DATABASE_URL from .env, or its URL on stdin: mason init -)"]] };
+}
+
+/** The folder `mason init` writes a project's files in (its `--folder` default): the one a deploy takes where no
+ *  `.mason/` is found (`theProjectFolder`). */
+export const PROJECT_FOLDER = "mason";
+
+/**
+ * WHERE A PROJECT'S FILES ARE, for a command that reads them alone (mason deploy: `needs: "files"`): the folder they
+ * are in and the root it is in. `config` is the `.mason/config.json` that named the folder, with its "folder" as written;
+ * null when no `.mason/` was found and the root's own `mason/` was taken.
+ */
+export interface ProjectFolder { root: string; folder: string; config: { file: string; folder: string } | null }
+
+/** Whether `folder` holds a project's files: a `mason.yml`, or a `sources/` with a .yml or .yaml file in it; `why`
+ *  when that cannot be told (a folder this user may not read): never taken for a no, which would look further up. */
+function holdsProjectFiles(folder: string): boolean | { why: string } {
+  const absent = (e: unknown): boolean => ["ENOENT", "ENOTDIR"].includes((e as NodeJS.ErrnoException).code ?? "");
+  try { if (!fs.statSync(folder).isDirectory()) return false; }
+  catch (e) { if (absent(e)) return false; return { why: unresolvedWhy(e) }; }
+  try { if (fs.statSync(path.join(folder, PROJECT_FILE)).isFile()) return true; }
+  catch (e) { if (!absent(e)) return { why: unresolvedWhy(e) }; }
+  let names: string[];
+  try { names = fs.readdirSync(path.join(folder, SOURCES_DIR)); }
+  catch (e) { if (absent(e)) return false; return { why: unresolvedWhy(e) }; }
+  return names.some((n) => !n.startsWith(".") && /\.ya?ml$/.test(n));
+}
+
+/**
+ * THE PROJECT'S FILES A COMMAND THAT NEEDS NOTHING ELSE MEANS (mason deploy, which reads nothing of `.mason/`): the
+ * nearest project's (`theProject`), whose config names its folder, as every command finds it; a project whose config
+ * cannot be read is refused as every command refuses it. Only where no `.mason/` is at or above `cwd`: the nearest
+ * folder at or above it that holds `mason/` with a `mason.yml` or a `sources/` file (a project fetched, or cloned,
+ * that was never `mason init`ed), its `mason/` the files. Never the folder itself, nor anything beside `mason/`: the
+ * caller still holds the folder to being strictly inside its root (src/cli/deploy.ts `ownFolderRefusal`).
+ */
+export function theProjectFolder(cwd: string): { project: ProjectFolder } | Problem {
+  const t = theProject(cwd);
+  if (!("problem" in t)) {
+    const p = t.project;
+    return { project: { root: p.root, folder: p.folder, config: { file: path.join(p.dir, CONFIG), folder: p.config.folder } } };
+  }
+  if (t.code !== "no_project") return t;
+  for (let d = path.resolve(cwd); ; d = path.dirname(d)) {
+    const folder = path.join(d, PROJECT_FOLDER);
+    const holds = holdsProjectFiles(folder);
+    if (holds === true) return { project: { root: d, folder, config: null } };
+    // a folder that cannot be read is no "no": the files may be there, so the search stops, refusing (fail closed)
+    if (holds !== false) {
+      return { problem: `${folder} cannot be read, so whether it holds this project's files cannot be told`, code: "refused", why: holds.why,
+        fix: `make ${folder} readable by this user, or run mason deploy in the folder that holds the project's ${PROJECT_FOLDER}/` };
+    }
+    if (path.dirname(d) === d) break;
+  }
+  return { problem: `no Mason project here or above: no .mason/, and no ${PROJECT_FOLDER}/ folder holding a ${PROJECT_FILE} or a YAML file in ${SOURCES_DIR}/`, code: "no_project",
+    why: `a deploy sends the project's ${PROJECT_FOLDER}/ folder (its ${PROJECT_FILE}, ${SOURCES_DIR}/, roles.yml and generated tables), found in this folder or one above it`,
+    fix: `cd into the folder that holds the project's ${PROJECT_FOLDER}/ (or a folder under it), or make this folder a project: mason init`,
     next: [["mason init", "make this folder a project (MASON_DATABASE_URL or DATABASE_URL from .env, or its URL on stdin: mason init -)"]] };
 }
 

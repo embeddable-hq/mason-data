@@ -89,6 +89,8 @@ function folderIn(state: string): string {
   // a saved query (mason/queries/), which only the ClickHouse stack this was cut from read: every state is a project
   // carrying one, so a file Mason does not read is held to changing no command's answer
   fs.writeFileSync(path.join(root, "mason", "queries", "orders.yml"), SAVED);
+  // a project's files alone, never mason init'ed (fetched, or cloned): no .mason/ at all
+  if (state === "files_only") { fs.rmSync(dir, { recursive: true }); return root; }
   if (state === "broken") { fs.writeFileSync(path.join(dir, "config.json"), '{"name": "matrix", "sour'); return root; }
   const config: Record<string, unknown> = { name: `matrix-${state.replace(/_/g, "-")}`, folder: "mason", remote: false,
     apiKey: "k".repeat(48), sourceServer: null, running: null, lastRun: null };
@@ -105,9 +107,9 @@ function folderIn(state: string): string {
   return root;
 }
 
-const STATES = ["no_project", "stopped", "stale", "squatted", "broken", "demo", "streamed_0_7", "deployed"] as const;
+const STATES = ["no_project", "files_only", "stopped", "stale", "squatted", "broken", "demo", "streamed_0_7", "deployed"] as const;
 /** Which of src/cli/state.ts's states each folder is: a run recorded that does not answer is stopped. */
-const IS: Record<(typeof STATES)[number], ProjectState> = { no_project: "no_project", stopped: "stopped", stale: "stopped", squatted: "stopped", broken: "bad_config", demo: "stopped", streamed_0_7: "stopped", deployed: "stopped" };
+const IS: Record<(typeof STATES)[number], ProjectState> = { no_project: "no_project", files_only: "no_project", stopped: "stopped", stale: "stopped", squatted: "stopped", broken: "bad_config", demo: "stopped", streamed_0_7: "stopped", deployed: "stopped" };
 
 test("the states are src/cli/state.ts's, in order: each meets more than the one before", () => {
   assert.deepEqual(Object.keys(PROJECT_STATES), ["no_project", "bad_config", "stopped", "up"]);
@@ -118,7 +120,14 @@ test("the states are src/cli/state.ts's, in order: each meets more than the one 
   }
 });
 
-/** Run `jobs` with at most `n` at once. */
+/**
+ * Whether a folder in `state` meets what a command needs: src/cli/state.ts's `meets`, and for a command that needs the
+ * project's files alone (`needs: "files"`, mason deploy) a project, or a folder holding mason/ with no .mason/.
+ */
+function meetsNeed(state: (typeof STATES)[number], need: "files" | "project" | "run"): boolean {
+  return need === "files" ? state === "files_only" || meets(IS[state], "project") : meets(IS[state], need);
+}
+
 /** Every key of a JSON answer, at any depth, that names a model (`model`, `models`, `modelFile`…); [] for text. */
 function keysNamingAModel(stdout: string): string[] {
   let v: unknown;
@@ -589,8 +598,13 @@ test("every command, in every state without a run, as a person and with --json: 
   const problems = answers.flatMap(({ state, cmd, json, a }) => {
     // a command in a state that does not meet what it needs answers with THAT state's code (src/cli/state.ts reach)
     const needs = COMMANDS.find((c) => c.name === cmd)!.needs;
-    const codes = needs && !meets(IS[state], needs) ? PROJECT_STATES[IS[state]].codes : [];
+    const codes = needs && !meetsNeed(state, needs) ? PROJECT_STATES[IS[state]].codes : [];
     const p = answerProblems(cmd, a, json, codes);
+    // a folder holding mason/ alone is a project to mason deploy: its dry run reads the files, and meets the sources
+    // file's url: written with its password (refused: the replica keeps the files), never "no project"
+    if (state === "files_only" && cmd === "deploy" && !(json ? a.stdout : a.stderr).includes("mason/sources/shop.yml: url: is written with its password")) {
+      p.push(`mason ${a.argv.join(" ")}: not the sources file's refusal, where mason/ is the project's files:\n${a.stdout}${a.stderr}`);
+    }
     if (json && codes.length && a.code === 0) p.push(`mason ${a.argv.join(" ")}: exit 0, where ${IS[state]} does not meet what it needs (${needs})`);
     // what a project copies is its sources file's tables: no answer names a model, at any depth
     if (json) for (const k of keysNamingAModel(a.stdout)) p.push(`mason ${a.argv.join(" ")}: --json answers with a key ${k}, where it says table or source`);
@@ -652,9 +666,9 @@ test("mason replica and mason token, in every state without a run, as a person a
     const said = json ? a.stdout : a.stderr;
     const create = cmd === "replica" && line[0] === "create";
     // what create meets first: the state's own refusal, else the sources file's literal url (every state's but the demo's), else the login
-    const want = !create ? "this machine is not signed in to http://127.0.0.1:1" : state === "no_project" ? "no Mason project here or above"
+    const want = !create ? "this machine is not signed in to http://127.0.0.1:1" : state === "no_project" || state === "files_only" ? "no Mason project here or above"
       : state === "broken" ? ".mason/config.json" : state === "demo" ? "this machine is not signed in to http://127.0.0.1:1" : "mason/sources/shop.yml: url: is written in the file";
-    const p = answerProblems(cmd, a, json, create && state === "no_project" ? ["no_project"] : create && state === "broken" ? ["bad_config"] : ["refused"]);
+    const p = answerProblems(cmd, a, json, create && (state === "no_project" || state === "files_only") ? ["no_project"] : create && state === "broken" ? ["bad_config"] : ["refused"]);
     if (a.code !== 1) p.push(`mason ${a.argv.join(" ")}: exit ${a.code}, where 1 is owed`);
     if (!said.includes(want)) p.push(`mason ${a.argv.join(" ")}: not ${JSON.stringify(want)}:\n${a.stdout}${a.stderr}`);
     if (/postgres:\/\/mason:secret@/.test(a.stdout + a.stderr)) p.push(`mason ${a.argv.join(" ")}: printed the sources file's URL`);
