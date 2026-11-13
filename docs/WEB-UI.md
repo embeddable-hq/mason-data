@@ -105,8 +105,11 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   row's actions, over them or on their left, wherever it covers no button, link or box of any row; where every place
   covers one (a phone's rows, or a long answer beside a narrow list), it is a bar fixed at the window's bottom, beside
   the sidebar, with its Dismiss, still read out (`role="status"`), the page's end given its height so every row can be
-  scrolled clear of it. A tap on the answer is always the answer's, never a control's under it (`placePops`,
-  src/web/shared.js).
+  scrolled clear of it. A tap on the answer is always the answer's, never a control's under or near it, with a finger
+  too: the answer is itself a target a browser keeps a tap on, and docked, an unseen band of 16 px above it is its own.
+  Docked, its Dismiss stays in view at its bottom however long the answer, the rest scrolling above it; what the
+  person scrolled in it stays put when the page is written again; and a long table name in its facts wraps rather
+  than squeezing the value beside it (`placePops`, src/web/shared.js).
 - **Tables**, **the name keeps its room at every width** (issue 884: it was 2 px at 1024 px): measured against the
   list's card, the name gets at least 200 px, and the less important columns give way first: Key below about 1350 px,
   then Size (1250), Last sync (1140) and Rows (1040) beside the full sidebar. A column given way says its fact in the

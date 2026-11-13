@@ -551,9 +551,17 @@ table.catalog tr.note .under-body { font-size: var(--text-sm); line-height: 20px
 .pop.said:has(.failure) { border-left-color: var(--bad); }
 /* an answer with no place near its row that covers no control is a bar at the window's bottom, across it, its height
    given to the page's end so every row scrolls clear of it (placePops, src/web/shared.js: `docked`, `--docked-h`) */
+/* Docked, a band of 16 px above it is its own, unseen (a transparent border, the surface clipped to the padding box): a
+   finger tapping its top edge never reaches the row above (the re-check: a tap 2 px inside pressed an Add above it).
+   Its line is an inset shadow inside the band. Its Dismiss stays in view however long the answer: pinned at its bottom
+   (sticky) while the rest scrolls in it, so a long table name never pushes it out of reach. */
 .pop.said.docked { top: auto; left: 0; right: 0; bottom: 0; width: auto; max-width: none; max-height: 50vh; overflow-y: auto;
-  border-radius: 0; border-left: 0; border-right: 0; border-bottom: 0; border-top: 4px solid var(--ok); }
-.pop.said.docked:has(.failure) { border-top-color: var(--bad); }
+  border-radius: 0; border: 0; border-top: 16px solid transparent; background-clip: padding-box; box-shadow: inset 0 4px 0 var(--ok); }
+.pop.said.docked:has(.failure) { box-shadow: inset 0 4px 0 var(--bad); }
+.pop.said.docked [data-pop-close] { position: sticky; bottom: 0; }
+/* a long table name in an answer's facts wraps in its column, never squeezing the value beside it to a letter a line */
+.pop .facts { grid-template-columns: fit-content(45%) minmax(0, 1fr); }
+.pop .facts dt { overflow-wrap: anywhere; }
 body { padding-bottom: var(--docked-h, 0px); }
 /* beside the page, never over the sidebar's nav: past the sidebar, the rail, or the whole width on a phone */
 .pop.said.docked { left: var(--sidebar-w); }

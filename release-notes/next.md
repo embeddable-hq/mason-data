@@ -70,7 +70,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   order, and the row's note says what they said. On a phone a row's buttons are stacked, so the names fit beside them.
 - **What Add or Sync now says on the web page's Tables no longer covers the next row's buttons.** It is placed where it
   covers no other button. Where there is no such place (on a phone, say), it is a bar at the bottom of the window, and
-  the page leaves room under its last row so nothing stays hidden behind it.
+  the page leaves room under its last row so nothing stays hidden behind it. A tap on the message, even near its edge
+  on a touch screen, never presses a button under or next to it, and its Dismiss is always in view.
 - **The web page no longer shows old data as current while Mason can't be reached.** When the page lost Mason (the
   run stopped, or the tunnel closed), it kept what it had read, its big "Ready" and the cards, under the failure
   message, and they read as current. Now the page greys what it read before and says when it was read: "As of 14:02

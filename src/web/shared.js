@@ -434,6 +434,15 @@ export function placePops(doc, win) {
       el.classList.toggle("docked", docked);
       if (!docked) at = clear;
       else dockedHeight = Math.max(dockedHeight, el.offsetHeight);
+      // A TAP ON IT IS ITS OWN (the owner's re-check: a finger 2 px inside the docked bar's top pressed the Add above it):
+      // a browser moves a tap to the nearest control under the finger, and only a box that answers a click is one — so it
+      // answers one (`keepsTap`), and docked, a band above it, unseen, is its own too (app.css)
+      el.onclick = keepsTap;
+      // what the person scrolled in it stays where they put it, whatever writes the page again (a poll, a pointerup)
+      const key = `${el.dataset.anchor}|${(el.textContent ?? "").slice(0, 200)}`;
+      el.onscroll = () => { popScroll.set(key, el.scrollTop); };
+      const kept = popScroll.get(key);
+      if (kept !== undefined && el.scrollTop !== kept) el.scrollTop = kept;
     }
     el.style.left = docked ? "" : `${Math.round(at.left)}px`;
     el.style.top = docked ? "" : `${Math.round(at.top)}px`;
@@ -445,6 +454,14 @@ export function placePops(doc, win) {
 
 /** What a person clicks or types in: what an answer's popover must not cover (`placePops`). */
 const CONTROLS = "button, a[href], input, select, textarea, summary";
+
+/** An answer's click on itself, not on one of its own buttons or links: kept by it, so the page's own handler (a menu
+ *  closed by a click elsewhere) never takes a tap on the answer for a tap outside it. What makes the answer a target
+ *  a browser's touch adjustment keeps a tap on, rather than moving it to a control nearby. */
+const keepsTap = (e) => { if (e.target?.closest?.(CONTROLS) == null) e.stopPropagation?.(); };
+
+/** How far each answer was scrolled, by its anchor and its words (`placePops`): a write replaces the element. */
+const popScroll = new Map();
 
 /** A text with its Copy button (`copyClick` copies what the `<code id>` holds): a URL, a psql line, a password. */
 export const copyable = (id, text) =>

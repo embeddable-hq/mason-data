@@ -27,10 +27,11 @@ import type { CopyState } from "../src/duck/sync.ts";
 const WEB = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "web");
 
 type Page = {
-  goto(url: string): Promise<unknown>; waitForSelector(s: string): Promise<unknown>; click(s: string): Promise<void>;
-  evaluate<T = unknown>(expression: string): Promise<T>; close(): Promise<void>;
+  goto(url: string): Promise<unknown>; waitForSelector(s: string): Promise<unknown>; click(s: string): Promise<void>; tap(s: string): Promise<void>;
+  evaluate<T = unknown>(expression: string): Promise<T>; close(): Promise<void>; touchscreen: { tap(x: number, y: number): Promise<void> };
+  waitForTimeout(ms: number): Promise<void>;
 };
-type Browser = { newPage(o: { viewport: { width: number; height: number } }): Promise<Page>; close(): Promise<void> };
+type Browser = { newPage(o: { viewport: { width: number; height: number }; hasTouch?: boolean; isMobile?: boolean }): Promise<Page>; close(): Promise<void> };
 const playwright = ((): { chromium: { launch(): Promise<Browser> } } | null => {
   try { return createRequire(import.meta.url)("playwright"); } catch { return null; }
 })();
@@ -41,18 +42,20 @@ const noBrowser = playwright === null ? "Playwright is not installed here (requi
 const col = (name: string, type = "text") => ({ name, type, notNull: false, comment: null });
 const table = (name: string, rows: number, key = ["id"]): SourceTable => ({ source: `public.${name}`, schema: "public", table: name, key, rows, bytes: 8192, comment: null,
   columns: [col("id", "bigint"), col("name"), col("status"), col("created_at", "timestamptz"), col("api_token")], foreignKeys: [] });
-// a long name, not added: it wraps whole, never cut (issue 884)
-const NAMES = ["customers", "order_items", "invoices", "shipments", "billing_events_archive", "audit_trail", "visits", "payments", "raw_log", "customer_subscription_billing_events_archive_2026"];
+// a long name, not added: it wraps whole, never cut (issue 884); and an added one of 60 characters with its schema
+// (`public.` and 53), whose answer must keep its Dismiss in reach on a phone
+const LONG = "customer_subscription_billing_events_archive_2026_full";
+const NAMES = ["customers", "order_items", "invoices", "shipments", "billing_events_archive", "audit_trail", "visits", "payments", "raw_log", "customer_subscription_billing_events_archive_2026", LONG];
 const TABLES = NAMES.map((n, i) => table(n, 1000 * (i + 1), n === "raw_log" ? [] : ["id"]));
 const parsed = parseSource("postgres://shop:secret@db.example.com:5432/shop");
 const source = "source" in parsed ? parsed.source : assert.fail(parsed.problem);
 const FILE = parseSourceText("kind: postgres\nurl: x\ntables:\n  customers: {}\n  order_items:\n    columns: [id, status]\n  invoices:\n    exclude: [api_token]\n" +
-  "  shipments: {}\n  billing_events_archive: {}\n  payments: {}\n", "shop", "/app/mason/sources/shop.yml");
+  `  shipments: {}\n  billing_events_archive: {}\n  payments: {}\n  ${LONG}: {}\n`, "shop", "/app/mason/sources/shop.yml");
 assert.ok(!("problems" in FILE));
 const at = "2026-11-11T09:00:00.000Z";
 const kept: CopyState["kept"] = { by: "poll", sync: { mode: "off" }, syncedAt: at, nextAt: null };
 const copied = (name: string): CopyState => ({ source: `public.${name}`, phase: "copied", rows: 1200, bytes: 1, seconds: 1, copiedAt: at, error: null, kept });
-const COPIES: CopyState[] = ["customers", "order_items", "invoices", "shipments", "billing_events_archive", "payments"].map(copied);
+const COPIES: CopyState[] = ["customers", "order_items", "invoices", "shipments", "billing_events_archive", "payments", LONG].map(copied);
 const STATE = (() => {
   const ctx = {
     source, facts: () => ({ version: 160000, versionText: "16.4", standby: false, tables: TABLES, systemIdentifier: null }), warnings: [],
@@ -100,9 +103,10 @@ after(async () => {
   if (ready !== null) await new Promise((r) => server.close(r));
 });
 
-async function open(width: number): Promise<Page> {
+async function open(width: number, o: { touch?: boolean; height?: number } = {}): Promise<Page> {
   browser ??= await playwright!.chromium.launch();
-  const p = await browser.newPage({ viewport: { width, height: 900 } });
+  // with touch, as a phone or a touch screen taps: the browser moves a tap to the nearest control under the finger
+  const p = await browser.newPage({ viewport: { width, height: o.height ?? 900 }, ...(o.touch ? { hasTouch: true, isMobile: width < 641 } : {}) });
   await p.goto(`http://127.0.0.1:${await ready}/#tables`);
   await p.waitForSelector("#tables table.catalog tbody tr");
   await p.evaluate("document.fonts.ready.then(() => null)");
@@ -267,3 +271,110 @@ for (const [what, click] of [["Add", 'button[data-add-table="public.audit_trail"
     }
   });
 }
+
+// ------------------------------------------------------------------ a finger on the answer (the owner's re-check of PR 901)
+
+/** The page's requests that change something (an Add, a Sync, a Remove), from `asked` past `from`. */
+const changes = (from: number) => asked.slice(from).filter((a) => !a.startsWith("GET "));
+/** The answer shown: its box, whether it is docked at the window's bottom, and its own buttons' boxes. */
+const answerBox = (p: Page) => p.evaluate<{ left: number; top: number; right: number; bottom: number; docked: boolean; own: number[][] }>(`(() => {
+  const e = [...document.querySelectorAll(".pop.said")].find((x) => !x.hidden);
+  const r = e.getBoundingClientRect();
+  return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, docked: e.classList.contains("docked"),
+    own: [...e.querySelectorAll("button, a[href]")].map((b) => { const q = b.getBoundingClientRect(); return [q.left, q.top, q.right, q.bottom]; }) };
+})()`);
+
+for (const [what, attr] of [["Add", "data-add-table"], ["Sync now", "data-sync-table"]] as const) {
+  test(`after ${what}, a finger's tap 1 to 8 px inside the answer's edges reaches nothing under it (touch): 390, 1024, 1080 and 1280 px`, { skip: noBrowser }, async () => {
+    for (const [width, height] of [[390, 844], [1024, 768], [1080, 800], [1280, 800]] as const) {
+      const p = await open(width, { touch: true, height });
+      // the second row that has it, as the re-check pressed
+      const name = await p.evaluate<string>(`[...document.querySelectorAll("button[${attr}]")][1].getAttribute("${attr}")`);
+      await p.evaluate(`document.querySelector('button[${attr}="${name}"]').scrollIntoView({ block: "center" })`);
+      await p.tap(`button[${attr}="${name}"]`);
+      await p.waitForSelector(".pop.said:not([hidden]) .headline");
+      await p.waitForTimeout(300);
+      const a = await answerBox(p);
+      const points: Array<[number, number]> = [];
+      for (const d of [1, 2, 4, 8]) {
+        for (let x = a.left + d; x < a.right - d; x += 40) { points.push([x, a.top + d]); points.push([x, a.bottom - d]); }
+        for (let y = a.top + d; y < a.bottom - d; y += 40) { points.push([a.left + d, y]); points.push([a.right - d, y]); }
+      }
+      // its own buttons answer a tap (Dismiss): a finger near one is left to it
+      const nearOwn = ([x, y]: [number, number]) => a.own.some(([l, t, r, b]) => x > l! - 24 && x < r! + 24 && y > t! - 24 && y < b! + 24);
+      const out: string[] = [];
+      for (const [x, y] of points.filter(([x, y]) => x > 0 && y > 0 && x < width && y < height && !nearOwn([x, y]))) {
+        const from = asked.length;
+        await p.touchscreen.tap(x, y);
+        await p.waitForTimeout(40);
+        const gone = !(await p.evaluate<boolean>(`[...document.querySelectorAll(".pop.said")].some((e) => !e.hidden)`));
+        const got = changes(from);
+        const opened = await p.evaluate<boolean>(`!!document.querySelector(".pop.ask:not([hidden])")`);
+        if (got.length || gone || opened) { out.push(`${Math.round(x)},${Math.round(y)}: ${got.join(", ") || (gone ? "the answer went" : "a form opened")}`); break; }
+      }
+      await p.close();
+      assert.deepEqual(out, [], `${width} px, ${a.docked ? "docked" : "beside its row"}: a tap on the answer is the answer's`);
+    }
+  });
+}
+
+test("on a phone, a tap just inside the docked answer's top edge never reaches an Add 2 px above it (touch)", { skip: noBrowser }, async () => {
+  const p = await open(390, { touch: true, height: 844 });
+  await p.tap('button[data-sync-table="public.order_items"]');
+  await p.waitForSelector(".pop.said.docked:not([hidden]) .headline");
+  await p.waitForTimeout(300);
+  const out: string[] = [];
+  for (const depth of [1, 1.5, 3, 5, 8]) {
+    // a not-added table's Add, its bottom 2 px above the answer's top
+    const at = await p.evaluate<{ x: number; top: number }>(`(() => {
+      const bar = [...document.querySelectorAll(".pop.said.docked")].find((e) => !e.hidden).getBoundingClientRect();
+      const add = document.querySelector("button[data-add-table]");
+      window.scrollBy(0, add.getBoundingClientRect().bottom - (bar.top - 2));
+      const b = add.getBoundingClientRect();
+      return { x: (b.left + b.right) / 2, top: [...document.querySelectorAll(".pop.said.docked")].find((e) => !e.hidden).getBoundingClientRect().top };
+    })()`);
+    await p.waitForTimeout(200);
+    const from = asked.length;
+    await p.touchscreen.tap(at.x, at.top + depth);
+    await p.waitForTimeout(300);
+    if (changes(from).length) out.push(`${depth} px in: ${changes(from).join(", ")}`);
+  }
+  await p.close();
+  assert.deepEqual(out, [], "the Add above the answer is never pressed by a tap on the answer");
+});
+
+test(`on a phone, the answer for a table of a 60-character name keeps its Dismiss in view, unmoved by the page's redraws, and a tap on it dismisses (touch)`, { skip: noBrowser }, async () => {
+  const p = await open(390, { touch: true, height: 844 });
+  const out: string[] = [];
+  for (let i = 0; i < 3; i++) {
+    await p.evaluate(`document.querySelector('button[data-sync-table="public.${LONG}"]').scrollIntoView({ block: "center" })`);
+    await p.tap(`button[data-sync-table="public.${LONG}"]`);
+    await p.waitForSelector(".pop.said:not([hidden]) .headline");
+    // a while, the page redrawn by its polls meanwhile (every 2 s)
+    await p.waitForTimeout(500 + i * 1100);
+    const seen = await p.evaluate<{ ok: boolean; why: string }>(`(() => {
+      const pop = [...document.querySelectorAll(".pop.said")].find((e) => !e.hidden);
+      const d = [...pop.querySelectorAll("button")].find((b) => b.textContent.trim() === "Dismiss");
+      if (!d) return { ok: false, why: "no Dismiss" };
+      const b = d.getBoundingClientRect(), a = pop.getBoundingClientRect();
+      if (b.top < Math.max(0, a.top) - 0.5 || b.bottom > Math.min(window.innerHeight, a.bottom) + 0.5) return { ok: false, why: "Dismiss at " + Math.round(b.top) + "-" + Math.round(b.bottom) + ", the answer seen " + Math.round(a.top) + "-" + Math.round(Math.min(window.innerHeight, a.bottom)) };
+      const hit = document.elementFromPoint((b.left + b.right) / 2, (b.top + b.bottom) / 2);
+      return hit !== null && d.contains(hit) ? { ok: true, why: "" } : { ok: false, why: "Dismiss under " + (hit?.tagName ?? "nothing") };
+    })()`);
+    if (!seen.ok) { out.push(`try ${i + 1}: ${seen.why}`); continue; }
+    // what a person scrolled in the answer stays where they put it across a redraw
+    const kept = await p.evaluate<{ before: number; after: number } | null>(`new Promise((done) => {
+      const pop = [...document.querySelectorAll(".pop.said")].find((e) => !e.hidden);
+      if (pop.scrollHeight <= pop.clientHeight + 1) return done(null);
+      pop.scrollTop = pop.scrollHeight;
+      const before = pop.scrollTop;
+      setTimeout(() => done({ before, after: [...document.querySelectorAll(".pop.said")].find((e) => !e.hidden).scrollTop }), 2600);
+    })`);
+    if (kept !== null && Math.abs(kept.after - kept.before) > 1) out.push(`try ${i + 1}: the answer's scroll went from ${kept.before} to ${kept.after} at a redraw`);
+    await p.tap('.pop.said:not([hidden]) button[data-pop-close]');
+    await p.waitForTimeout(300);
+    if (await p.evaluate<boolean>(`[...document.querySelectorAll(".pop.said")].some((e) => !e.hidden)`)) out.push(`try ${i + 1}: a tap on Dismiss left the answer`);
+  }
+  await p.close();
+  assert.deepEqual(out, [], "Dismiss in view and dismissing, every time");
+});
