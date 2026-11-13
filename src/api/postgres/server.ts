@@ -101,7 +101,12 @@ type AnyTranslation = Translation | DuckTranslation | ExplainTranslation;
 interface ExplainTranslation { kind: "explain"; query: NonNullable<RawStmt["stmt"]>; options: unknown[] }
 /** an EXPLAIN read: its options, and the plan of the statement it explains (null: a catalog statement, the catalog
  *  Postgres's to explain) */
-interface Explaining { options: ExplainOptions; plan: DuckPlan | null }
+interface Explaining {
+  options: ExplainOptions;
+  plan: DuckPlan | null;
+  /** the statement explained, planned afresh with the values an Execute bound to its json paths (Session.pathsBound) */
+  again?: (paths: ReadonlyMap<number, string>) => Promise<DuckPlan>;
+}
 
 /** what an EXPLAIN of a catalog statement says first: whose plan it is */
 const CATALOG_EXPLAINED = "Mason: answered by the catalog Postgres (Mason's own, PGlite), not the synced data: a statement of pg_catalog or information_schema, or of no table, is the catalog's, and this is its plan";
@@ -218,9 +223,12 @@ export interface DuckOptions {
    *  a LIMIT over its outermost SELECT would be, with no LIMIT in its SQL */
   /** `grants`: the session's role, held after Postgres's analysis (src/duck/grants.ts): a 42501 StatementError where
    *  it reads what the role may not; null for a session with no role beside roles; undefined where no roles exist.
-   *  `outputs`: the generated planner's alone (src/duck/plan.ts `PlanOptions.outputs`), never a wire statement's */
+   *  `outputs`: the generated planner's alone (src/duck/plan.ts `PlanOptions.outputs`), never a wire statement's.
+   *  `boundPaths`: an Execute's values of the parameters the plan reads as a json path (PlannedSql.pathParams), by
+   *  number: each such read made as its constant (src/duck/plan.ts `PlanOptions.boundPaths`) */
   plan(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, stmt: NonNullable<RawStmt["stmt"]>, base: number, paramOids: readonly number[], under: SessionState,
-    userTypes: ReadonlyMap<string, number>, wireBound?: boolean, grants?: RoleGrants | null, relations?: ReadonlyMap<string, string>, outputs?: boolean): Promise<DuckPlan>;
+    userTypes: ReadonlyMap<string, number>, wireBound?: boolean, grants?: RoleGrants | null, relations?: ReadonlyMap<string, string>, outputs?: boolean,
+    boundPaths?: ReadonlyMap<number, string>): Promise<DuckPlan>;
   /** a Bind's values as DuckDB must read them: each through Postgres's input function for the plan's parameter type
    *  (a StatementError with Postgres's own error for a value it refuses) */
   parameters(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, oids: readonly number[], values: readonly (string | null)[], under: SessionState): Promise<(string | null)[]>;
@@ -657,7 +665,7 @@ interface Statement {
    *  a bound streams (PlannedSql.unboundedLateral, `boundOnWire`) */
   duckOnWire?: DuckPlan;
   /** an EXPLAIN of a DuckDB statement: its options and that statement's plan, made at Parse */
-  explain?: { options: ExplainOptions; plan: DuckPlan };
+  explain?: { options: ExplainOptions; plan: DuckPlan; again?: (paths: ReadonlyMap<number, string>) => Promise<DuckPlan> };
   /** an EXPLAIN of a catalog statement (the sidecar's): its options, for the line its rows begin with */
   explainCatalog?: ExplainOptions;
   /** the transaction's start as of the Parse, in microseconds: what a relative literal (`'now'`) of it means, as
@@ -1715,7 +1723,8 @@ class Session {
   /** A DuckDB statement's plan (Postgres's analysis and the DuckDB SQL), kept per text, search_path, TimeZone,
    *  declared parameter types and the session's role until the schema or the roles change. Every statement DuckDB
    *  runs has one: never its text as written. */
-  private async duckPlan(raw: RawStmt, whole: string, paramOids: readonly number[], under: SessionState = this.sessionState(), wireBound = false): Promise<DuckPlan> {
+  private async duckPlan(raw: RawStmt, whole: string, paramOids: readonly number[], under: SessionState = this.sessionState(), wireBound = false,
+    boundPaths?: ReadonlyMap<number, string>): Promise<DuckPlan> {
     const stmt = raw.stmt!;
     const bytes = Buffer.from(whole, "utf8");
     const base = raw.stmt_location ?? 0;
@@ -1726,8 +1735,11 @@ class Session {
     // rows, the filters bound to the user's values (a plan holds them as literals)
     const rowsKey = rowsKeyOf(grants);
     const key = `${grants?.noRole !== undefined ? "\u0000no role" : this.roleName() ?? ""}${rowsKey === "" ? "" : `\u0000${rowsKey}`}`;
-    return this.server.duckPlan(text, paramOids, under, wireBound, key, async () => {
-      const plan = await this.server.options.duck.plan((b) => this.server.catalog.run(b), text, stmt, base, paramOids, under, this.server.userTypes(), wireBound, grants);
+    // (a plan made with bound json paths is one for those values alone: kept by them too)
+    const paths = boundPaths === undefined || boundPaths.size === 0 ? "" : `\u0000paths ${JSON.stringify([...boundPaths])}`;
+    return this.server.duckPlan(text, paramOids, under, wireBound, key + paths, async () => {
+      const plan = await this.server.options.duck.plan((b) => this.server.catalog.run(b), text, stmt, base, paramOids, under, this.server.userTypes(), wireBound, grants,
+        undefined, undefined, boundPaths);
       return rowsKey === "" ? plan : { ...plan, rowsKey };
     });
   }
@@ -1949,6 +1961,50 @@ class Session {
   }
 
   /**
+   * A JSON PATH BOUND AS A PARAMETER IS A CONSTANT THE PLAN AT PARSE COULD NOT SEE (issues 465, 466): a BI tool binds
+   * the path of every JSON field it reads (Metabase's `col #>> array[?]::text[]`), so at the Parse each such read is
+   * the function's, a call to the main thread a row (×18 of Postgres for a grouped field, ×45–63 for a sync's nested
+   * fingerprint). Where the plan says it reads such parameters (PlannedSql.pathParams), the Bind's values are read as
+   * Postgres reads them (the one reading every Execute's values have, `duckParameters`) and the statement is planned
+   * again with them (planDuck's `boundPaths`): each read is then the one its literal would be — DuckDB's own read, a
+   * stored column, one path in the request log. The plan is kept by its values beside the others (`Server.duckPlan`),
+   * never on the statement, so a statement bound to another path is planned for that path; a NULL value plans nothing
+   * (the read stays the function's). As at `boundOnWire`: under the Parse's settings, the statement's own time (a
+   * cancel aborts it), a plan whose parameters or result are not the Parse's not run, and one Postgres or the rewrite
+   * refuses logged and the Parse's plan run. Returns the plan and the values read, which the run binds. An EXPLAIN of
+   * such a statement explains the plan made with its values, the one that runs (`Explaining.again`).
+   */
+  private async pathsBound(plan: DuckPlan, params: readonly (string | null)[], controller: AbortController, again: ((paths: ReadonlyMap<number, string>) => Promise<DuckPlan>) | null):
+    Promise<{ plan: DuckPlan; own?: (string | null)[] }> {
+    const at = plan.sql.pathParams ?? [];
+    if (at.length === 0 || again === null || params.length === 0) return { plan };
+    this.running = controller;
+    let made: DuckPlan;
+    let own: (string | null)[];
+    try {
+      own = await this.server.options.duck.parameters((b) => this.server.catalog.run(b), plan.params, params, this.sessionState());
+      const values = new Map(at.flatMap((n) => { const v = own[n - 1]; return typeof v === "string" ? [[n, v] as [number, string]] : []; }));
+      if (values.size === 0) return { plan, own };
+      try { made = await again(values); }
+      catch (e) {
+        if (!(e instanceof StatementError) || e.fields.code === "57014") throw e;
+        this.server.log(`session ${this.id}: a statement planned again for its bound json paths was refused (${e.fields.code}: ${e.fields.message}): its Parse's plan runs`);
+        return { plan, own };
+      }
+    } finally { this.settled(); }
+    if (this.phase === "closed") {
+      this.server.log(`session ${this.id}: closed while its statement was planned again for its bound json paths: it runs nothing`);
+      throw new PgError({ code: "08006", message: "the session closed while its statement was planned" });
+    }
+    const shape = (p: DuckPlan): string => JSON.stringify([p.params, p.fields?.map((f) => [f.name, f.oid, f.typmod]) ?? null, p.clock ?? null]);
+    if (shape(made) !== shape(plan)) {
+      this.server.log(`session ${this.id}: a statement planned again for its bound json paths answers other columns than its Parse said (the schema moved): its Parse's plan runs`);
+      return { plan, own };
+    }
+    return { plan: made, own };
+  }
+
+  /**
    * AN EXPLAIN (src/api/postgres/explain.ts, src/duck/explain.ts): its options read as Postgres reads them, then the
    * statement it explains classified as that statement alone would be — refused with that statement's own error — and,
    * for DuckDB's, planned afresh (an ANALYZE's Planning Time is this one's), never from the plans kept per text.
@@ -1966,26 +2022,33 @@ class Session {
     // a statement of no table is explained as what answers it: the synced data's plan where it orders text (`routed`)
     if ((await this.routed(classified, found.text, paramOids, bindable)).kind === "catalog") return { options, plan: null };
     let plan: DuckPlan;
-    try {
+    const under = this.sessionState();
+    const made = async (paths?: ReadonlyMap<number, string>): Promise<DuckPlan> => {
       const grants = this.grants();
-      plan = await this.server.options.duck.plan((b) => this.server.catalog.run(b), found.text, t.query, base + Buffer.byteLength(text.slice(0, found.offset)), paramOids,
-        this.sessionState(), this.server.userTypes(), false, grants);
+      const p = await this.server.options.duck.plan((b) => this.server.catalog.run(b), found.text, t.query, base + Buffer.byteLength(text.slice(0, found.offset)), paramOids,
+        under, this.server.userTypes(), false, grants, undefined, undefined, paths);
       // the row filters it was made under, as every plan of a session carries them (Session.duckPlan)
       const rowsKey = rowsKeyOf(grants);
-      if (rowsKey !== "") plan = { ...plan, rowsKey };
+      return rowsKey === "" ? p : { ...p, rowsKey };
+    };
+    try {
+      plan = await made();
     } catch (e) {
       // a refusal of the statement explained is placed as Postgres places it: in the whole text, past `EXPLAIN …`
       if (!(e instanceof StatementError) || e.fields.position === undefined) throw e;
       const before = bytes.subarray(0, base).toString("utf8").length + found.offset;
       throw new StatementError({ ...e.fields, position: e.fields.position + before }, whole);
     }
-    return { options, plan };
+    return { options, plan, ...(plan.sql.pathParams === undefined ? {} : { again: (paths: ReadonlyMap<number, string>) => made(paths) }) };
   }
 
   /** an EXPLAIN of a DuckDB statement, run: its QUERY PLAN rows (ANALYZE runs the statement and sends none of its rows) */
-  private async duckExplain(e: { options: ExplainOptions; plan: DuckPlan }, params: readonly (string | null)[], resultFormats: number[], clock: { parse: number; exec: number },
-    controller: AbortController): Promise<{ field: FieldDescription; rows: Buffer[] }> {
-    this.heldToRole(e.plan);
+  private async duckExplain(explained: { options: ExplainOptions; plan: DuckPlan; again?: (paths: ReadonlyMap<number, string>) => Promise<DuckPlan> }, params: readonly (string | null)[],
+    resultFormats: number[], clock: { parse: number; exec: number }, controller: AbortController): Promise<{ field: FieldDescription; rows: Buffer[] }> {
+    this.heldToRole(explained.plan);
+    // the plan that runs: made again with the values bound to its json paths (pathsBound), as an Execute's is
+    const bound = (explained.plan.rowFilters ?? []).length > 0 ? { plan: explained.plan } : await this.pathsBound(explained.plan, params, controller, explained.again ?? null);
+    const e = { options: explained.options, plan: bound.plan };
     // ANALYZE RUNS THE STATEMENT AND REPORTS WHAT THE ENGINE DID, which is a count of what it read and what it proved
     // of the whole table: nothing of it can be said to a filtered user, so there is nothing left to run it for
     const filtered = e.plan.rowFilters ?? [];
@@ -1997,7 +2060,7 @@ class Session {
     const runner = await this.duck();
     this.running = controller;
     try {
-      const values = filtered.length > 0 ? [] : await this.duckValues(e.plan, params, clock);
+      const values = filtered.length > 0 ? [] : await this.duckValues(e.plan, params, clock, bound.own);
       const lines = await runner.explain(e.plan.sql, values, await this.duckSession(), controller.signal,
         { options: e.options, fields: e.plan.fields, exact: e.plan.exact ?? [], planning: e.plan.timing ?? { analysisMs: 0, rewriteMs: 0 },
           // how each copy is kept current, as the sync says it to mason status, read now (src/duck/sync.ts KeptCurrent)
@@ -2008,9 +2071,10 @@ class Session {
 
   /** a plan's parameter values as DuckDB reads them: the bound ones through Postgres's input functions, then the
    *  transaction's start where the plan reads it (its positions follow the statement's own parameters) */
-  private async duckValues(plan: DuckPlan, params: readonly (string | null)[], clock: { parse: number; exec: number }): Promise<(string | null)[]> {
+  private async duckValues(plan: DuckPlan, params: readonly (string | null)[], clock: { parse: number; exec: number }, read?: readonly (string | null)[]): Promise<(string | null)[]> {
+    // (`read`: the bound values already read so, for the same parameter types: Session.pathsBound)
     const own = params.length === 0 ? params
-      : await this.server.options.duck.parameters((b) => this.server.catalog.run(b), plan.params, params, this.sessionState());
+      : read ?? await this.server.options.duck.parameters((b) => this.server.catalog.run(b), plan.params, params, this.sessionState());
     const values = [...own];
     for (const [which, at] of Object.entries(plan.clock ?? {}) as Array<["parse" | "exec", number]>) values[at - 1] = instantText(clock[which]);
     return values;
@@ -2046,14 +2110,14 @@ class Session {
   /** A DuckDB statement run: its columns (Postgres's, where it has a plan), and its rows to read, encoded in the
    *  formats asked */
   private async duckAnswer(plan: DuckPlan, params: readonly (string | null)[], resultFormats: number[], clock: { parse: number; exec: number },
-    controller: AbortController): Promise<{ fields: FieldDescription[]; cursor: DuckCursor }> {
+    controller: AbortController, read?: readonly (string | null)[]): Promise<{ fields: FieldDescription[]; cursor: DuckCursor }> {
     this.readsOf(plan);
     this.heldToRole(plan);
     await this.readAside();
     const runner = await this.duck();
     this.running = controller;
     try {
-      const values = await this.duckValues(plan, params, clock);
+      const values = await this.duckValues(plan, params, clock, read);
       const session = await this.duckSession();
       const a = await runner.run(plan.sql, values, session, controller.signal, plan.fields, plan.exact ?? []);
       // it reached the engine: its plan can be recorded should it prove slow, answered or failed (recordRequest)
@@ -2433,7 +2497,7 @@ class Session {
       if (statement.shape.kind === "explain") {
         const e = await this.explaining(raw, m.sql, statement.shape, m.paramTypes, true);
         if (e.plan === null) statement.explainCatalog = e.options;
-        else { statement.explain = { options: e.options, plan: e.plan }; statement.parsedNow = this.txNow ??= this.server.now(); }
+        else { statement.explain = { options: e.options, plan: e.plan, ...(e.again === undefined ? {} : { again: e.again }) }; statement.parsedNow = this.txNow ??= this.server.now(); }
       }
       // Postgres's analysis says the result's columns and the parameters' types, and DuckDB's SQL is made from it
       if (statement.shape.kind === "duckdb") {
@@ -2649,9 +2713,13 @@ class Session {
         if (shape(again) === shape(statement.duck)) { statement.duck = again; delete statement.duckOnWire; }
       }
       // a row count on the wire bounds the rows: the plan made for it where it differs (boundOnWire)
-      const plan = m.maxRows > 0 ? await this.boundOnWire(statement, statement.duck, controller) : statement.duck;
+      const wired = m.maxRows > 0 ? await this.boundOnWire(statement, statement.duck, controller) : statement.duck;
+      // a json path bound as a parameter: the plan made with its value (pathsBound)
+      const raw = statement.raw;
+      const { plan, own } = await this.pathsBound(wired, portal.params, controller,
+        raw === null ? null : (paths) => this.duckPlan(raw, statement.sql, statement.paramOids, statement.plannedUnder ?? this.sessionState(), wired !== statement.duck, paths));
       const exec = this.txNow ??= this.server.now();
-      const answer = await this.duckAnswer(plan, portal.params, portal.resultFormats, { parse: statement.parsedNow ?? exec, exec }, controller);
+      const answer = await this.duckAnswer(plan, portal.params, portal.resultFormats, { parse: statement.parsedNow ?? exec, exec }, controller, own);
       portal.cursor = answer.cursor;
       portal.fields = answer.fields;
     }

@@ -45,6 +45,20 @@ const PATH_PARAMETERS: Array<[string, string]> = [
 ];
 const PATH_VALUES = ["{k}", "{o,b}", "{a,0}", "{a,-1}", "{0}", "{}", "{k,NULL}", null];
 
+/** a json read's key, element or index bound as a parameter (issues 465, 466): each Execute planned with its value, so
+ *  the read is its literal's, and the one statement bound again to another value reads that one; a NULL, an index, a
+ *  key that needs quoting, a json document holding a key twice and Metabase's spelling of a nested field */
+const BOUND_PATHS: Array<[string, string, Array<Array<string | null>>]> = [
+  ["a key", "SELECT id, jb ->> $1 AS a, j ->> $1 AS b, jb -> $1 AS c, j -> $1 AS d FROM public.jpath ORDER BY id",
+    [["k"], ["o"], ["n"], ["a.b"], ['q"r'], ["0"], ["e"], [""], ["missing"], [null]]],
+  ["Metabase's nested field", "SELECT id, (jb #>> array[$1, $2]::text[])::text AS a, (j #>> array[$1, $2]::text[])::text AS b, jb #>> array[$1]::text[] AS c FROM public.jpath ORDER BY id",
+    [["o", "b"], ["a", "0"], ["a", "-1"], ["o.b", null], [null, "b"], ["", ""], ["a", "2"]]],
+  ["grouped as a BI tool groups a field", "SELECT (jb #>> array[$1]::text[])::text AS v, count(*) FROM public.jpath GROUP BY 1 ORDER BY 1 NULLS FIRST", [["k"], ["o"], ["missing"]]],
+  ["an index", "SELECT id, jb -> $1::int AS a, j ->> $1::int AS b FROM public.jpath ORDER BY id", [["0"], ["1"], ["-1"], ["9"], [null]]],
+  ["a path and a value at once", "SELECT id, $1::text AS p, jb ->> $1 AS a FROM public.jpath WHERE jb ->> $1 IS NOT NULL OR j ->> $1 = $2 ORDER BY id", [["k", "alpha"], ["o", "x"], [null, "x"]]],
+  ["json_extract_path's arguments", "SELECT id, jsonb_extract_path_text(jb, $1, $2) AS a, json_extract_path(j, $1, $2) AS b FROM public.jpath ORDER BY id", [["o", "b"], ["a", "0"], ["k", null]]],
+];
+
 /** a text[] parameter DuckDB's list cannot hold as Postgres read it, refused by name, then one it can, run on */
 const TEXT_ARRAY_PARAMETERS: Array<[string, string]> = [
   ["in ANY", "SELECT id FROM public.jpath WHERE id::text = ANY($1::text[]) ORDER BY id"],
@@ -216,6 +230,7 @@ export const SETTING_SCRIPTS: SettingScript[] = [
   // a prepared statement reads what is in force when it RUNS: a reverted setting never stays in its plan
   // a json read's path as a parameter is not constant at the Parse (issue 130): each run reads its own, after a SET too
   ...PATH_PARAMETERS.map(([name, sql]) => s(`a json path as a parameter, ${name}`, { prepare: "p", sql }, ...PATH_VALUES.flatMap((v, i): Step[] => [{ run: "p", values: [v] }, `SET TimeZone = '${i % 2 === 0 ? "Asia/Tokyo" : "UTC"}'`, { run: "p", values: [v] }]))),
+  ...BOUND_PATHS.map(([name, sql, values]) => s(`a json path bound as a parameter, ${name}`, { prepare: "p", sql }, ...values.flatMap((v, i): Step[] => [{ run: "p", values: v }, ...(i === 1 ? ["SET TimeZone = 'Asia/Tokyo'"] : [])]))),
   ...TEXT_ARRAY_PARAMETERS.map(([name, sql]) => s(`a text[] parameter of two dimensions or other bounds, ${name}`, { prepare: "p", sql }, ...TEXT_ARRAY_STEPS)),
   ...NUMERIC_PARAMETERS.map(([name, sql, values]) => s(`numeric parameter: ${name}`, { prepare: "p", sql }, ...values.map((v): Step => ({ run: "p", values: v })))),
   s("a json path element as a parameter", { prepare: "p", sql: "SELECT id, jb #>> ARRAY[$1], j #>> ARRAY[$1, 'b'], jsonb_extract_path_text(jb, $1, 'b') FROM public.jpath ORDER BY id" }, { run: "p", values: ["o"] }, "SET TimeZone = 'Asia/Tokyo'", { run: "p", values: ["k"] }, { run: "p", values: [null] }, { run: "p", values: ["0"] }),

@@ -62,6 +62,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   whose first sync is not done shows nothing. Each says why on hover. `mason usage`
   lists those tables the same way under the sizes, and `--json` adds `sizedAt`, `walBytes` and `unsized`.
 
+- **A JSON field read through a path your tool sends as a parameter is now as fast as one written in the query.**
+  Metabase sends the path of every JSON field it unfolds as a parameter (`payload #>> array[$1]::text[]`). Mason used
+  to read such a path row by row in its slowest way, so a card grouped by a JSON field took 10 to 18 times as long as
+  on Postgres. Mason now reads the path's value when the query runs and answers it like a path written in the query:
+  that card now takes about twice Postgres's time. A path sent this way can also be kept as a column of the synced
+  table, as a written one already could, and `mason status` lists it.
+
 ## What was wrong and is now right
 
 - **Changing the publication a project replicates through no longer loses or freezes changes.** When the sources

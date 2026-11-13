@@ -1467,6 +1467,23 @@ stored, then the path stored:
 | `jsonb_extract_path_text(meta, VARIADIC array[…])` | 54-60 s | 1.4-1.6 s | |
 | `count(meta #> array['k'])` | | | 0.05-0.07 s |
 
+**A path bound as a parameter is the same route** (issues 465, 466). Metabase binds the path of every JSON field it
+unfolds (`col #>> array[?]::text[]`), which the Parse cannot see, so each such read was the function's. The plan says
+which parameters it reads as a path (`PlannedSql.pathParams`), and an Execute plans the statement again with their
+values as Postgres read them (`Session.pathsBound`). The plan is kept by those values and each folded read is
+guarded by them (a value it was not planned for raises XX000): the guard also keeps every parameter in the SQL, since
+DuckDB numbers its parameters by the ones the text names (`SELECT $2` has one, and binding two fails). 1 M rows of
+two jsonb columns of 270-290 B, a 4-vCPU machine at a load of about 24 (other agents' work), each against Postgres
+run alternately, three runs (2026-11-13):
+
+| statement | main | bound, read as its value | the path written |
+|---|---|---|---|
+| a grouped field, `#>> array[$1]::text[]` | 10.8-18.2 s, ×10.8 | 1.4-2.1 s, ×2.2 | 1.7-3.7 s, ×2.1-2.2 |
+| a grouped nested field, `array[$1, $2]` | 11.5-13.5 s, ×16 | 1.2-1.8 s, ×2.7 | |
+| a nested fingerprint, 49 fields, 68 parameters, LIMIT 10000 | 7.1-9.3 s, ×28 | 4.2-5.2 s, ×20 | 4.3-6.4 s, ×15-20 |
+
+The fingerprint stays ×15-20 written or bound: its numbers and booleans are the function's and their casts' (#464).
+
 `#>`, like `->`, stays the function until the path is stored: it answers a value's JSON text, which DuckDB's writer
 would respell. `(meta #> array['k'])::text` and `(meta -> 'k')::text` took 48-82 s and up to 168 s by the function
 (both the same route, the spread the machine's), and 7-14 s stored, where the rest is the cast's own function.
