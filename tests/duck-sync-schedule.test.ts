@@ -92,9 +92,44 @@ test("two tables backing off, the later one's end asked second: each gets its pa
     // as two rebuilds failing would ask (`backOff`): the earlier end, then the later
     (sync.wakeAt as (at: number) => void)(first);
     (sync.wakeAt as (at: number) => void)(second);
-    for (const end = Date.now() + 3_000; passes.length < 2 && Date.now() < end;) await new Promise((r) => setTimeout(r, 20));
-    assert.equal(passes.length, 2, `a pass when each back-off ends (passes at ${passes.map((p) => p - start).join(", ")} ms)`);
-    assert.ok(passes[1]! >= second, `the second pass is at or after the later back-off's end (${passes[1]! - start} ms)`);
+    // until a pass at or after the later end, and 100 ms more for any pass that should not come
+    let settled: number | null = null;
+    for (const end = Date.now() + 3_000; Date.now() < end && (settled === null || Date.now() < settled + 100);) {
+      await new Promise((r) => setTimeout(r, 20));
+      if (settled === null && passes.some((p) => p >= second)) settled = Date.now();
+    }
+    const at = passes.map((p) => p - start).join(", ");
+    // a loop held up past both ends (a loaded machine) runs ONE pass for both, which serves both: never more than two
+    assert.ok(passes.some((p) => p >= second), `a pass at or after the later back-off's end (passes at ${at} ms)`);
+    assert.ok(passes.every((p) => p >= first), `no pass before the earlier back-off's end (passes at ${at} ms)`);
+    assert.ok(passes.length <= 2, `no more passes than back-offs (passes at ${at} ms)`);
+  } finally {
+    await (sync.stop as () => Promise<void>).call(sync);
+  }
+});
+
+// ISSUE 925: a timer counts on the event loop's clock, which can run up to a millisecond ahead of `Date.now()` (where
+// the two clocks' phases sit is fixed per machine, so on some CI runners and never on others). The back-off's wake then
+// kicked a pass a millisecond before the back-off ended by `Date.now()`; that pass skipped the table as still backing
+// off, and the next wake ran a second pass for it. Here `Date.now()` is held behind the timers' clock by 20 ms, so the
+// wake always fires early by it: ONE pass, at or after the end
+test("a back-off's wake that fires before its end by the clock waits out the rest: one pass, never one early and another", async (t) => {
+  const Sync = (syncModule as unknown as { Sync: new (...a: unknown[]) => Record<string, unknown> }).Sync;
+  const sync = new Sync({ writer: {} }, { host: "localhost" }, "x", () => undefined, 5_000, "replication", { slot: "s", publication: "p", owned: true });
+  const passes: number[] = [];
+  sync.pass = async () => { passes.push(Date.now()); };
+  sync.nextPassDelay = () => null;
+  const realNow = Date.now.bind(Date);
+  let behind = 0;
+  t.mock.method(Date, "now", () => realNow() - behind);
+  const start = Date.now(), end = start + 100;
+  sync.tables = new Map([["public.a", { source: "public.a" }]]);
+  (sync.retries as Map<string, { failures: number; at: number }>).set("public.a", { failures: 1, at: end });
+  try {
+    (sync.wakeAt as (at: number) => void)(end);
+    behind = 20;
+    for (const until = realNow() + 3_000; realNow() < until && (passes.length === 0 || realNow() < start + 400);) await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(passes.map((p) => p >= end), [true], `one pass, once the back-off has ended (passes at ${passes.map((p) => p - start).join(", ")} ms)`);
   } finally {
     await (sync.stop as () => Promise<void>).call(sync);
   }
