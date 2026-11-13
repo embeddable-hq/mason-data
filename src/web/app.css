@@ -569,6 +569,10 @@ form.formcard input { width: 18em; }
 #add-user .connects .ranges input { width: 100%; min-width: 0; }
 /* the Users form's Role: its label and select wrap together on a phone, the select shrinking to the card (a long role's
    name cut in the closed box, whole in the open list), so the page never scrolls sideways */
+/* For: which tool the user is for (the page's memory alone), a select that shrinks to the card as Role's does */
+#add-user .tool-field { display: inline-flex; align-items: center; gap: var(--space-2); max-width: 100%; min-width: 0; vertical-align: middle; }
+#add-user .tool-field label { flex: none; }
+#add-user .tool-field select { flex: 0 1 auto; min-width: 0; max-width: 100%; text-overflow: ellipsis; }
 #add-user .role-field { display: inline-flex; align-items: center; gap: var(--space-2); max-width: 100%; min-width: 0; vertical-align: middle; }
 #add-user .role-field label { flex: none; }
 #add-user .role-field select { flex: 0 1 auto; min-width: 0; max-width: 100%; text-overflow: ellipsis; }
@@ -668,6 +672,8 @@ table.users td { overflow: hidden; text-overflow: ellipsis; }
 #page-users .user-added .added-title { font-size: var(--text-lg); }
 #page-users .user-added .facts { margin: 0 0 var(--space-3); gap: var(--space-2) var(--space-4); align-items: center; }
 #page-users .user-added .tip { margin: 0 0 var(--space-3); }
+/* for the tool chosen: its guide, psql's ready line, and whether it has connected, each a line of its own */
+#page-users .user-added .added-guide, #page-users .user-added .added-psql, #page-users .user-added .added-seen { margin: 0 0 var(--space-3); overflow-wrap: anywhere; }
 /* a phone: a fact's label over its value, so a URL or a password has the card's whole width */
 @media (max-width: 640px) { .user-added .facts, .connect .facts { grid-template-columns: 1fr; gap: 0 var(--space-4); } .user-added .facts dd, .connect .facts dd { margin-bottom: var(--space-2); } }
 
