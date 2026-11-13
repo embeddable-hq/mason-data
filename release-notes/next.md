@@ -59,6 +59,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **The Users page lists the users first** (Connect is last now), under its title, then the form that adds one (with the card of a user just
   added beside it) and Connect. Its intro now reads "Create and manage Users that you can connect to tools and
   services".
+- **A JSON field read through a path your tool sends as a parameter is now as fast as one written in the query.**
+  Metabase sends the path of every JSON field it unfolds as a parameter (`payload #>> array[$1]::text[]`). Mason used
+  to read such a path row by row in its slowest way, so a card grouped by a JSON field took 10 to 18 times as long as
+  on Postgres. Mason now reads the path's value when the query runs and answers it like a path written in the query:
+  that card now takes about twice Postgres's time.
 
 ## What was wrong and is now right
 

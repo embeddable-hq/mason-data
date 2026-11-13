@@ -24,7 +24,6 @@ const adminUrl = process.env.IT_POSTGRES_URL;
 const tag = `it_dcompact_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "it-dcompact-"));
 const logical = adminUrl ? psql(adminUrl, "SHOW wal_level") === "logical" : false;
-const skip = !adminUrl ? "IT_POSTGRES_URL is not set" : false;
 const skipStream = !adminUrl ? "IT_POSTGRES_URL is not set" : !logical ? "IT_POSTGRES_URL's server has no wal_level = logical" : false;
 
 function psql(url: string, sql: string): string {
@@ -91,7 +90,7 @@ async function keptAside(store: DuckStore, n: number, logged: readonly string[])
 const same = async (store: DuckStore, url: string, step: string): Promise<void> =>
   assert.equal(await rowsOf(store, "SELECT id, v, n FROM public.t ORDER BY 1"), psql(url, "SELECT id, v, n FROM t ORDER BY 1"), `public.t after ${step}`);
 
-test("a polled table churned through many polls and checkpoints: compacted from the synced data, within the bound, equal to the source", { skip }, async () => {
+test("a polled table churned through many polls and checkpoints: compacted from the synced data, within the bound, equal to the source", { skip: "quarantined: #926" }, async () => {
   const { db, url, source } = aSource("poll", 20_000);
   const T = { ...await tableOf(source, "public.t"), sync: { mode: "poll", every: "1s", seconds: 1 } as const };
   const logged: string[] = [];

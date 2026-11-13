@@ -111,6 +111,13 @@ export interface PlannedSql {
    * (none, a LIMIT already bounds it, or an aggregate, a GROUP BY, a DISTINCT, a window or an ORDER BY reads every row)
    */
   readonly unboundedLateral?: true;
+  /**
+   * the parameters it reads as a json read's path (or an element or key of one) of a type whose bound value is the
+   * path's text (src/duck/rewrite.ts `foldParam`; issues 465, 466): each such read is the function's here, and an
+   * Execute that binds them runs the plan made again with their values (planDuck's `boundPaths`), so the read is the one
+   * its literal would be. Absent: none
+   */
+  readonly pathParams?: readonly number[];
   readonly [PLANNED]: true;
 }
 
@@ -282,6 +289,9 @@ export interface PlanOptions {
   depth?: number;
   kept?: KeptRoutes | null;
   wireBound?: boolean;
+  /** the values an Execute bound to the parameters the plan reads as a json path (PlannedSql.pathParams), as Postgres
+   *  read them (src/duck/analyze.ts readParameters), by number: each such read is made as its constant */
+  boundPaths?: ReadonlyMap<number, string>;
   grants?: RoleGrants | null | undefined;
   walls?: Walls | null;
   /** a generated table's run (src/duck/generated.ts): `schema.table` → the table read in its place, in the same schema */
@@ -399,7 +409,7 @@ async function heldRefusal(catalog: Parameters<typeof catalogRows>[0], tree: Tre
  *  `walls`: `text` is the statement with its filtered reads in place (expandRowFilters), each of which the wall ends */
 export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   const { catalog, text, stmt, base, paramOids, searchPath, timeZone, dateStyle = "ISO, MDY", collations: resolver, verified, userTypes = new Map<string, number>(), copies = () => [],
-    depth = 0, kept = null, wireBound = false, grants, walls = null, relations, outputs = false } = options;
+    depth = 0, kept = null, wireBound = false, boundPaths = new Map<number, string>(), grants, walls = null, relations, outputs = false } = options;
   const started = performance.now();
   const under: SessionState = { searchPath, timeZone, dateStyle };
   const analysis = await analyze(catalog, text, paramOids, under);
@@ -511,7 +521,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
       typeNames.set(Number(oid), name!);
     }
   }
-  let tree, withTies, exact, clock, jsonReads, unboundedLateral;
+  let tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams: number[];
   // a table's row the source has otherwise (copied in part: no source OID for it) is not the source's row
   const sourceRows = new Map([...rowTypes].filter(([oid]) => userTypes.has(catalogTypes.get(oid) ?? "")));
   // IS [NOT] NULL of a composite reads its fields (a row of NULLs IS NULL), which the copy's text does not
@@ -531,17 +541,17 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   try { collations = await resolver.prepare((sql) => catalogRows(catalog, sql), collationOids(analysis.tree)); }
   catch (e) { throw e instanceof Unrewritable ? unrewritableError(e, text) : e; }
   const analysed = performance.now();
-  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts });
+  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths });
   try {
-    ({ tree, withTies, exact, clock, jsonReads, unboundedLateral } = rewritten());
+    ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them
     if (kept?.keepNow != null && lookup !== null && jsonReads.some((r) => kept.ready(r) === null)) {
       await kept.keepNow(jsonReads);
-      ({ tree, withTies, exact, clock, jsonReads, unboundedLateral } = rewritten());
+      ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams } = rewritten());
     }
     // a statement that lists a copy's columns without naming them reads none from a stored column (hideKept): made
     // again with every read its call, the reads still recorded
-    if (lookup !== null && exposes(tree)) ({ tree, withTies, exact, clock, jsonReads, unboundedLateral } = rewritten({ at: (relid, attno) => lookup.at(relid, attno), ready: () => null }));
+    if (lookup !== null && exposes(tree)) ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams } = rewritten({ at: (relid, attno) => lookup.at(relid, attno), ready: () => null }));
   }
   catch (e) {
     if (e instanceof Unrewritable) throw unrewritableError(e, text);
@@ -585,7 +595,8 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
     throw new StatementError({ code: "0A000", message: "Mason cannot run this statement exactly: its rewritten form does not read back as itself (a Mason gap: report it, with the statement)",
       detail: `read back: ${difference}; the rewritten SQL: ${sql}` }, text);
   }
-  const planned = { text: sql, functions: masonCalls(tree), ...(unboundedLateral ? { unboundedLateral: true } : {}) } as unknown as PlannedSql;
+  const planned = { text: sql, functions: masonCalls(tree), ...(unboundedLateral ? { unboundedLateral: true } : {}),
+    ...(pathParams.length > 0 ? { pathParams } : {}) } as unknown as PlannedSql;
   return { sql: planned, params: analysis.params, fields: fields?.map((f) => ({ ...f, size: pgTyplen(f.oid) })) ?? null, withTies, ...(exact.length > 0 ? { exact } : {}), resolved: keys, argumentTypes: argumentTypes(analysis.tree), ...(outputs ? { outputs: outputExpressions(analysis.tree) ?? [] } : {}),
     ...(Object.keys(clock).length > 0 ? { clock } : {}), ...(jsonReads.length > 0 ? { jsonReads: jsonReads.map(readKey) } : {}), ...(reads !== undefined ? { reads } : {}),
     timing: { analysisMs: analysed - started, rewriteMs: performance.now() - analysed } };

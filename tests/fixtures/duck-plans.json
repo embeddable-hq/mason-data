@@ -1561,6 +1561,43 @@
       "full_sort": false
     },
     {
+      "name": "native json: a field Metabase binds, grouped",
+      "sql": "SELECT (\"public\".\"orders\".\"meta\" #>> array[$1]::text[])::text AS \"status\", count(*) AS \"count\" FROM \"public\".\"orders\" GROUP BY 1 ORDER BY 1",
+      "values": [
+        "status"
+      ],
+      "plan": [
+        "ORDER_BY",
+        "  HASH_GROUP_BY",
+        "    PROJECTION",
+        "      TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_json_get"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
+      "name": "native json: a ->> of a bound key",
+      "sql": "SELECT meta ->> $1 FROM orders LIMIT 100",
+      "values": [
+        "status"
+      ],
+      "plan": [
+        "PROJECTION",
+        "  LIMIT",
+        "    TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_json_get"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
       "name": "BI shape: cast: ::varchar(n) (truncates)",
       "sql": "SELECT o.id, o.notes::varchar(12) AS head, c.name::varchar(3) AS initials FROM orders o LEFT JOIN customers c ON c.id = o.customer_id ORDER BY o.id LIMIT 20",
       "plan": [

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * PreToolUse hook (Bash): a test run carries its time limit (CLAUDE.md "Local gates", "While working, the tests
+ * PreToolUse hook (Bash): a test run carries its time limit (CLAUDE.md "Local gates", "While working, run the tests
  * nearest the change"). A hung test never exits, and a background job reports only when it exits, so `node --test` is
  * blocked unless BOTH `--test-timeout=<ms>` (a positive integer: 0 is no bound) and `--test-force-exit` come before its
  * first file: after the files Node ignores them, and without `--test-force-exit` a test that timed out but holds a
