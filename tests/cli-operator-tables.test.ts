@@ -127,7 +127,9 @@ function refusal(a: Answer, status: number, code: string): { code: string; messa
 }
 
 /** THE CONTRACT'S KEYS, as the doc lists them: a key added or renamed here is a contract change, said in the doc. */
-const LEAN_TABLE = ["added", "addedColumns", "bytes", "comment", "copy", "copyKey", "error", "key", "reason", "rows", "table"];
+const LEAN_TABLE = ["added", "addedColumns", "bytes", "columnCount", "comment", "copy", "copyKey", "error", "key", "reason", "rows", "table"];
+/** An added table's entry as the sources file says it, and the columns every column leaves out (issue 884). */
+const ADDED_ENTRY = ["entry", "everyColumnLeavesOut"];
 const PICK_ANSWER = ["addedKey", "already", "bigOff", "columns", "entry", "exclude", "file", "key", "notReplicated", "pollCost", "skippedSecrets", "state", "sync", "table"];
 const REMOVE_ANSWER = ["file", "removed", "state"];
 const COLUMN = ["comment", "name", "nullable", "references", "type"];
@@ -138,7 +140,7 @@ test("the table list: GET /api/state is lean — per table its name, key, rows, 
   assert.deepEqual(state.tables.map((t) => t.table), ["public.customers", "public.orders", "public.logs", "public.events"]);
   for (const t of state.tables) assert.deepEqual(keys(t), LEAN_TABLE, `${String(t.table)}: no columns, no sync before it is added`);
   const by = new Map(state.tables.map((t) => [t.table, t]));
-  assert.deepEqual(by.get("public.customers"), { table: "public.customers", rows: 3, bytes: 8192, key: ["id"], comment: null, reason: null, added: false, addedColumns: null, copyKey: null, copy: null, error: null });
+  assert.deepEqual(by.get("public.customers"), { table: "public.customers", rows: 3, bytes: 8192, key: ["id"], comment: null, reason: null, added: false, addedColumns: null, copyKey: null, columnCount: 2, copy: null, error: null });
   assert.equal(by.get("public.logs")!.reason, "no primary key: name the columns that tell its rows apart, mason add logs --key <column>,…");
   assert.equal(by.get("public.events")!.reason, "no primary key: name the columns that tell its rows apart, mason add events --key tenant_id,id (its unique index events_tenant_id_id_key)");
   assert.equal(state.sourcesReadOnly, null);
@@ -161,7 +163,7 @@ test("an added table in the list: added, its columns and its sync's state; once 
   const op = await operator();
   assert.equal((await ask(op, "POST", "/api/pick", { body: { table: "public.customers", picked: true } })).status, 200);
   let t = (json(await ask(op, "GET", "/api/state")) as { tables: Array<Record<string, unknown>> }).tables.find((x) => x.table === "public.customers")!;
-  assert.deepEqual(keys(t), [...LEAN_TABLE, "sync", "syncRefusal"].sort());
+  assert.deepEqual(keys(t), [...LEAN_TABLE, ...ADDED_ENTRY, "sync", "syncRefusal"].sort());
   assert.equal(t.syncRefusal, "public.customers is not added (mason add adds it)", "the sync does not hold it yet: mason sync's own refusal (issue 812)");
   assert.equal(t.added, true);
   assert.deepEqual(t.addedColumns, ["id", "name"]);
@@ -169,7 +171,7 @@ test("an added table in the list: added, its columns and its sync's state; once 
   const kept = { by: "poll" as const, sync: { mode: "poll" as const, every: "5m", seconds: 300 }, syncedAt: "2026-11-08T10:00:00.000Z", nextAt: "2026-11-08T10:05:00.000Z" };
   op.setCopies([{ source: "public.customers", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-11-08T10:00:00.000Z", error: null, kept }]);
   t = (json(await ask(op, "GET", "/api/state")) as { tables: Array<Record<string, unknown>> }).tables.find((x) => x.table === "public.customers")!;
-  assert.deepEqual(keys(t), [...LEAN_TABLE, "duck", "kept", "sync", "syncRefusal"].sort());
+  assert.deepEqual(keys(t), [...LEAN_TABLE, ...ADDED_ENTRY, "duck", "kept", "sync", "syncRefusal"].sort());
   assert.equal(t.syncRefusal, null, "the sync's state says none: mason sync runs it");
   assert.deepEqual(t.kept, kept);
   assert.deepEqual(keys(t.copy), ["phase", "rowsCopied", "updatedAt"]);
@@ -434,7 +436,7 @@ test("the doc names every key of the contract: the lean table, a column, the pic
   const doc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "docs", "WEB-UI.md"), "utf8");
   const section = doc.split("\n## An operator's table edits\n")[1]?.split("\n## ")[0];
   assert.ok(section !== undefined, "docs/WEB-UI.md has the section");
-  for (const k of [...LEAN_TABLE, ...PICK_ANSWER, ...REMOVE_ANSWER, ...COLUMN, "kept", "sync", "syncRefusal", "sourcesReadOnly", "pageReadOnly", "phase", "rowsCopied", "updatedAt", "progress", "retired", "copying", "done", "failed"]) assert.ok(section.includes(`\`${k}\``), k);
+  for (const k of [...LEAN_TABLE, ...ADDED_ENTRY, ...PICK_ANSWER, ...REMOVE_ANSWER, ...COLUMN, "kept", "sync", "syncRefusal", "sourcesReadOnly", "pageReadOnly", "phase", "rowsCopied", "updatedAt", "progress", "retired", "copying", "done", "failed"]) assert.ok(section.includes(`\`${k}\``), k);
   for (const route of ["GET /api/state", "GET /api/tables/<table>/columns", "POST /api/pick", "POST /api/remove", "MASON_UI_SOCKET", "MASON_UI_RUN_FILE", "MASON_UI_READ_ONLY"]) {
     assert.ok(section.includes(route), route);
   }

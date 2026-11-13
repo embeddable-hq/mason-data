@@ -17,9 +17,17 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 ## What changes
 
 - **`mason deploy` runs in any folder that holds a project's `mason/`, with no `mason init`.** With no `.mason/` in
-  the folder or above it, the nearest folder that holds `mason/` (a `mason.yml`, or a YAML file in `mason/sources/`) is the
-  project, and only its `mason/` is sent; `--dry-run` finds it the same way. A clone in CI, or a folder
-  the files were copied into, deploys as it is. An initialised project deploys as before.
+  the folder or above it, the nearest folder that holds `mason/` (a `mason.yml`, or a YAML file in `mason/sources/`)
+  is the project, and only its `mason/` is sent; `--dry-run` finds it the same way. A clone in CI, or a folder the
+  files were copied into, deploys as it is. An initialised project deploys as before.
+
+- **On the web page's Tables, an added table says which columns it syncs, and you can change them there.** Its note
+  says "All columns", "5 of 12 columns" or "All but 1 column". Click it to tick the columns to sync, as
+  `mason add <table> --columns …` does. Before you save, the form says what it costs: the table is synced again in full
+  from your database, and its synced data can still be queried until that finishes. Saving the same columns changes
+  nothing. An entry the form can't show as ticks (an `exclude:` written by hand) is described, and the form says that
+  saving replaces it. A read-only page shows the columns with no way to change them. `mason status --json` gains
+  `columnCount`, and for an added table `entry` and `everyColumnLeavesOut`.
 
 - **The web page no longer shows a psql line**: the Users page's Connect card keeps Host, Port, Database, SSL mode and
   URL, and the Overview's Connect (and Queries' when the request log is empty) keeps the URL, each with Copy; Getting
@@ -61,6 +69,14 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **Table names are readable on the web page's Tables at laptop widths.** At 1024 px the name column was 2 px wide. Now
+  it always keeps room for a typical `schema.table` name, and a table's name and its state are never cut with "…": a
+  long one wraps onto more lines. In a narrower window the Key, Size, Last sync and Rows columns give way, in that
+  order, and the row's note says what they said. On a phone a row's buttons are stacked, so the names fit beside them.
+- **What Add or Sync now says on the web page's Tables no longer covers the next row's buttons.** It is placed where it
+  covers no other button. Where there is no such place (on a phone, say), it is a bar at the bottom of the window, and
+  the page leaves room under its last row so nothing stays hidden behind it. A tap on the message, even near its edge
+  on a touch screen, never presses a button under or next to it, and its Dismiss is always in view.
 - **The web page no longer shows old data as current while Mason can't be reached.** When the page lost Mason (the
   run stopped, or the tunnel closed), it kept what it had read, its big "Ready" and the cards, under the failure
   message, and they read as current. Now the page greys what it read before and says when it was read: "As of 14:02
