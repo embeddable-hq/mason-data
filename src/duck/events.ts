@@ -40,16 +40,17 @@ export const EVENTS_DDL = `CREATE TABLE IF NOT EXISTS ${EVENTS_TABLE} (happened_
  * current), `stream_failed` (the stream stopped, or refused a table: `table` says which), `source_unreachable` (the
  * database could not be attached), `generated_failed` (a generated table's re-run failed, and it serves what it held),
  * `compact_failed` (a synced table's compaction failed: it serves and is kept current as it was, and is compacted again
- * after a back-off, src/duck/sync.ts `compact`), `restart` (the supervisor started the run again after it died) — each a failure;
+ * after a back-off, src/duck/sync.ts `compact`), `restart` (the supervisor started the run again after it died), `ui_error` (the web page met an error of its own: where,
+ * never its words, src/cli/ui-errors.ts) — each a failure;
  * `copied` (a copy finished and was swapped in), `recovered` (a table whose poll, catch-up, stream or re-run failed is
  * current again; of no table, the stream applying changes or the database attached again after it failed) and
  * `synced` (a sync asked by hand — mason sync, the page's Sync now — and what it did), and `sync_changed` (a table's
  * `sync:` in the sources file changed while it is copied: from what, to what, and how its copy is caught up). A scheduled poll that succeeds
  * is no event: one every few seconds would bury the failures; its last result is the table's last sync.
  */
-export const EVENT_KINDS = ["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "restart", "copied", "recovered", "synced", "sync_changed"] as const;
+export const EVENT_KINDS = ["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "restart", "copied", "recovered", "synced", "sync_changed", "ui_error"] as const;
 export type SyncEventKind = (typeof EVENT_KINDS)[number];
-const FAILURES: ReadonlySet<SyncEventKind> = new Set(["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "restart"]);
+const FAILURES: ReadonlySet<SyncEventKind> = new Set(["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "restart", "ui_error"]);
 /** whether an event of this kind is a failure: the one place that says it (the reader's filter, `failed`) */
 export const isFailure = (kind: SyncEventKind): boolean => FAILURES.has(kind);
 
@@ -60,7 +61,7 @@ export interface SyncEvent {
   kind: SyncEventKind;
   /** a failure (`isFailure`), else good news */
   failed: boolean;
-  /** the table it is of (`schema.table`), or null for the whole sync (the stream, the database, the run) */
+  /** the table it is of (`schema.table`), or null for the whole sync (the stream, the database, the run) or the web page */
   table: string | null;
   /** what happened, in the log's own words (its first line is the reason; further lines are its detail) */
   message: string;

@@ -56,10 +56,16 @@ import type { ClientActivity, LedgerRequest, QueryWindow, RequestLedger, Unsuppo
 import { eventLimit, requestFilter, requestFilterText, SLOW_MS, timeOf } from "./request-filter.ts";
 import type { PgApiServer } from "../api/postgres/server.ts";
 import { tunnelReport, type RunShares } from "./share-run.ts";
+import { UI_ERROR_BODY_MAX, uiErrorReport, type UiErrors } from "./ui-errors.ts";
 import type { PageShares } from "./page-share.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 import { unsizedTables, type CopySize, type UnsizedTable, type UsageFacts, type UsageSample, type UsageSampler } from "../duck/usage.ts";
 import { FRESH_SAMPLES, type RunMetrics } from "./metrics.ts";
+
+/** The page's views (src/web/routes.js, the one list: the page imports it too), as a report of its error names them:
+ *  each view's hash, and the host's view. Plain JavaScript beside the code, hence its shape declared here. */
+const pageRoutes = await import("../web/routes.js" as string) as { VIEW_HASHES: Readonly<Record<string, string>>; HOST_PAGE: string };
+const PAGE_VIEWS: ReadonlySet<string> = new Set([...Object.values(pageRoutes.VIEW_HASHES), pageRoutes.HOST_PAGE]);
 
 /** A statement answered in this many milliseconds or more is slow (one constant: src/api/request-log.ts SLOW_MS, the
  *  request log's `slow` filter's and a slow statement's plan's too): what mason status lists (src/duck/requests.ts slow). */
@@ -112,6 +118,9 @@ export interface RunContext {
   shares?: RunShares;
   /** the web page's Connect from anywhere (src/cli/page-share.ts): the same shares, held by the page's beats; absent with `shares` */
   pageShares?: PageShares;
+  /** the web page's own errors (src/cli/ui-errors.ts): `POST /api/ui/error` records them, `/metrics` counts them;
+   *  absent, the route answers 404 and `/metrics` says no count */
+  uiErrors?: UiErrors;
   /** the project's folder (sources/, mason.yml) */
   folder: () => string | null;
   /** the project's root (where .mason/ is): what messages name files from */
@@ -428,7 +437,7 @@ export async function usageFacts(ctx: RunContext, now = Date.now(), { refresh = 
  */
 export async function metricsFacts(ctx: RunContext, now = Date.now()): Promise<Omit<RunMetrics, "uptimeSeconds">> {
   return { usage: await usageFacts(ctx, now, { refresh: false }), statements: ctx.duck.usage.statementTotals(), durations: ctx.duck.usage.lastDurations(),
-    at: now, freshSeconds: FRESH_SAMPLES * ctx.duck.usage.sampleSeconds };
+    uiErrors: ctx.uiErrors?.total ?? null, at: now, freshSeconds: FRESH_SAMPLES * ctx.duck.usage.sampleSeconds };
 }
 
 /** A `since` / `until` of a query string, read by the one time grammar (src/cli/request-filter.ts timeOf), as an ISO time. */
@@ -638,6 +647,9 @@ export const PAGE_ROUTES: Readonly<Record<string, readonly [file: string, type: 
   "/vendor/lucide-1.56.0/x.mjs": ["vendor/lucide-1.56.0/x.mjs", "text/javascript; charset=utf-8"],
   "/vendor/lucide-1.56.0/LICENSE.txt": ["vendor/lucide-1.56.0/LICENSE.txt", "text/plain; charset=utf-8"],
 };
+
+/** The page's own scripts, by route (`/app.js`): the only `file` a report of the page's error may name. */
+const PAGE_SCRIPTS: ReadonlySet<string> = new Set(Object.keys(PAGE_ROUTES).filter((r) => /\.m?js$/.test(r)));
 
 /**
  * The web page's files, READ ONCE when the server starts (src/web/ beside src/cli/, in a checkout and in the package
@@ -892,6 +904,18 @@ export function createRunServer(ctx: RunContext): http.Server {
             ctx.sourcesChanged();
             sendJson(res, 200, { ...r, state: await state(ctx) });
           }
+        } else if (method === "POST" && url.pathname === "/api/ui/error") {
+          // the web page's own error: where it happened, never its words (src/cli/ui-errors.ts); every field checked
+          if (ctx.uiErrors === undefined) { sendFailure(res, 404, { message: "this run records no errors of the web page", code: "not_found" }); return; }
+          const body = JSON.parse(await readBody(req, UI_ERROR_BODY_MAX, (m) => new Refusal(413, `a report of the web page's error is at most ${UI_ERROR_BODY_MAX} bytes: ${m}`))) as unknown;
+          const r = uiErrorReport(body, PAGE_VIEWS, PAGE_SCRIPTS);
+          if ("code" in r) { sendFailure(res, 400, r); return; }
+          if (!ctx.uiErrors.take(r)) {
+            sendFailure(res, 429, { message: "the web page reported too many errors this minute: this one is counted, not recorded", code: "refused",
+              fix: "the events have the first of them: mason logs --events --failed" });
+            return;
+          }
+          sendJson(res, 200, { recorded: true });
         } else if (method === "POST" && url.pathname === "/api/ui/tunnel") {
           await openTunnel(ctx, tunnels, req, res);
         } else if (method === "POST" && url.pathname === "/api/share") {

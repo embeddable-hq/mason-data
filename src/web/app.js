@@ -436,12 +436,80 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
   return app;
 }
 
+// ------------------------------------------------------------------ the page's own errors
+
+/** The page's own address, the folder its scripts are served from (app.js is at its root): a script under it is the
+ *  page's own, named by its path under it (`pages/status.js`), never by a URL. */
+const PAGE_BASE = new URL(".", import.meta.url).href;
+/** How many of its errors one load of the page reports at most: a page throwing in a loop sends no more. */
+export const ERROR_REPORTS_MAX = 20;
+const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/;
+const escaped = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * WHAT THE PAGE REPORTS OF AN ERROR OF ITS OWN (src/cli/ui-errors.ts, issue 923): the view shown, the page's script it
+ * happened in, the line, the column and the error's class — NEVER its message or its stack, which can quote the page's
+ * text, and that text can be synced data. Where the browser gives no place (an unhandled rejection), the place is read
+ * from the stack's first frame in one of the page's scripts, here: the stack itself never leaves the page.
+ */
+export function errorReport(view, error, filename, line, column, base = PAGE_BASE) {
+  const own = (f) => typeof f === "string" && f.startsWith(base) && /^[A-Za-z0-9_./-]+\.m?js$/.test(f.slice(base.length)) ? f.slice(base.length) : null;
+  const whole = (n) => Number.isInteger(n) && n >= 0 ? n : null;
+  let file = own(filename);
+  let at = file === null ? { line: null, column: null } : { line: whole(line), column: whole(column) };
+  if (file === null) {
+    let stack = null;
+    try { stack = typeof error?.stack === "string" ? error.stack : null; } catch (e) { void e; /* a getter that throws: no place, said as unknown */ }
+    const m = stack === null ? null : new RegExp(`${escaped(base)}([A-Za-z0-9_./-]+\\.m?js):(\\d+):(\\d+)`).exec(stack);
+    if (m !== null) { file = m[1]; at = { line: whole(Number(m[2])), column: whole(Number(m[3])) }; }
+  }
+  let name = null;
+  try { name = error !== null && typeof error === "object" && typeof error.name === "string" && IDENTIFIER.test(error.name) ? error.name : null; }
+  catch (e) { void e; /* a getter that throws: no class, said as unknown */ }
+  return { view, file, line: at.line, column: at.column, name };
+}
+
+/**
+ * THE PAGE'S ERRORS SENT TO THE RUN, installed once per window: an uncaught error and an unhandled rejection each POST
+ * `errorReport` to `api/ui/error`. The reporter never throws and never reports itself: what it meets is dropped (the
+ * browser's console still has the error), a report already being made drops the next, and a load sends at most
+ * ERROR_REPORTS_MAX. `viewOf()` is the view shown; `post(body)` sends it.
+ */
+const reporting = new WeakSet();
+export function reportErrors(win, viewOf, post, base = PAGE_BASE) {
+  if (reporting.has(win)) return;
+  reporting.add(win);
+  let sent = 0;
+  let busy = false;
+  let warned = false;
+  const report =(error, filename, line, column) => {
+    if (busy || sent >= ERROR_REPORTS_MAX) return;
+    busy = true;
+    sent++;
+    try {
+      let view = "overview";
+      try { view = viewOf(); } catch (e) { void e; /* the view could not be told: the default page's */ }
+      // a report that cannot be sent is said once in the console and dropped: reporting that failure would be another
+      // report, and the console already has the error itself
+      Promise.resolve(post(errorReport(view, error, filename, line, column, base))).then(undefined, (e) => {
+        if (!warned) { warned = true; console.warn("the page could not tell the run of its error", e); }
+      });
+    } catch (e) { void e; /* the same: a reporter that throws would report itself for ever */ }
+    finally { busy = false; }
+  };
+  win.addEventListener?.("error", (e) => report(e?.error, e?.filename, e?.lineno, e?.colno));
+  win.addEventListener?.("unhandledrejection", (e) => report(e?.reason, null, null, null));
+}
+
 // ------------------------------------------------------------------ the browser
 
 /** Wire the app to the page: each part written from `view()`, the shown section from the hash, the buttons, forms and
  *  inputs to the shown page, and the poll while the tab is seen. */
 export function start(doc, win) {
   const app = createApp((path, init) => win.fetch(path, init), () => new Date(), "status");
+  // first, so an error of anything after it is reported (where, never its words: `errorReport`)
+  reportErrors(win, () => VIEW_HASHES[app.model.shown] ?? app.model.shown,
+    (body) => win.fetch("api/ui/error", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
   app.show(win.location.hash, { doc });
   // what each part was last written, compared as written: the browser's innerHTML serialises attributes its own way
   // (data-x becomes data-x=""), and a part rewritten at every poll replaces the button under a click

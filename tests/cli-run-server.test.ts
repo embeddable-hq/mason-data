@@ -805,6 +805,11 @@ test("GET /metrics' facts never reach the source: the stream is asked with refre
   const now = Date.now();
   const facts = await runServer.metricsFacts!(c, now);
   assert.deepEqual(asked, [{ refresh: false }], "a scrape: the cached position, never a connection to the database");
+  // the web page's own errors (src/cli/ui-errors.ts): the run's count, and none at all where the run takes no reports
+  assert.equal(facts.uiErrors, null, "a run that takes no reports of the page's errors: no count, never a 0");
+  const counted = { total: 3 } as unknown as NonNullable<RunContext["uiErrors"]>;
+  assert.equal((await runServer.metricsFacts!({ ...c, uiErrors: counted }, now)).uiErrors, 3, "the reports counted since the process started");
+  asked.length = 1;
   assert.deepEqual([facts.at, facts.freshSeconds, facts.statements, facts.durations], [now, 120, usage.statementTotals(), usage.lastDurations()],
     "the facts' moment, two samples' age allowed, the sampler's counter and last p50 / p95");
   await runServer.usageFacts(c, now);
