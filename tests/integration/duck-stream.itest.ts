@@ -635,6 +635,63 @@ test("a slot made again while a table's catch-up runs beside it, a transaction o
   }
 });
 
+// THE THIRD REVIEW OF PR 897: the marks written again once a slot made anew exists failed (one throw injected into that
+// write), and the flag that keeps a catch-up from ending a mark while a slot is made stayed set for the rest of the run:
+// the table's catch-up polled the whole table again and again and never joined the stream. The flag clears whatever
+// happens, the failure is said, and the table is caught up once and streamed.
+test("a slot made again whose tables' marks cannot be written again once it exists: said, and the tables are still caught up once and streamed", { skip }, async () => {
+  const db = `${tag}_rm`, url = urlOf(db);
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  psql(url, "CREATE TABLE items (id int PRIMARY KEY, v text); INSERT INTO items SELECT g, 'v' || g FROM generate_series(1, 20) g");
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const [ITEMS] = await tablesOf(parsed.source, ["public.items"]);
+  const repl = { slot: `${tag}_rm`, publication: `${tag}_rm`, owned: true };
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "rm.db"), (l) => logged.push(l));
+  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", repl);
+  const writer = store.writer as unknown as { run: (sql: string, params?: unknown) => Promise<unknown> };
+  const run = writer.run.bind(writer);
+  try {
+    await sync.open();
+    sync.setTables([ITEMS!]);
+    await sync.once();
+    await sync.caughtUp();
+    // the slot dropped under the run; changes made while there is none, which only the catch-up can read
+    const from = logged.length;
+    for (let i = 0; psql(adminUrl!, `SELECT count(*) FROM pg_replication_slots WHERE slot_name = '${repl.slot}'`) !== "0"; i++) {
+      psql(adminUrl!, `SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = '${repl.slot}' AND active`);
+      psql(adminUrl!, `SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = '${repl.slot}' AND NOT active`);
+      if (i > 200) throw new Error("the slot could not be dropped");
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    psql(url, "INSERT INTO items VALUES (-1, 'no slot'); UPDATE items SET v = 'no slot' WHERE id = 2; DELETE FROM items WHERE id = 3");
+    // the slot's record is written twice when it is made again: before the slot, then once it exists — the second fails
+    let records = 0;
+    writer.run = (sql: string, params?: unknown) => {
+      if (sql.startsWith(`INSERT OR REPLACE INTO _mason.stream_state VALUES ($1, '0/0'`) && ++records === 2) return Promise.reject(new Error("the re-mark failed (injected by the test)"));
+      return run(sql, params);
+    };
+    sync.kick();
+    for (const end = Date.now() + 60_000; records < 2; await new Promise((r) => setTimeout(r, 50))) if (Date.now() > end) throw new Error(`the slot was not made again:\n${logged.slice(from).join("\n")}`);
+    writer.run = run;
+    await sync.caughtUp(30_000).catch((e: unknown) => { throw new Error(`${(e as Error).message}\n${logged.slice(from).join("\n")}`); });
+    const said = `\n${logged.slice(from).join("\n")}`;
+    assert.equal((sync as unknown as { makingSlot: boolean }).makingSlot, false, `the flag is cleared${said}`);
+    assert.equal(await rowsOf(store, "SELECT id, v FROM public.items ORDER BY 1"), psql(url, "SELECT id, v FROM items ORDER BY 1"), `items after the slot was made again${said}`);
+    assert.ok(logged.slice(from).some((l) => l.startsWith(`replication slot ${repl.slot}: its tables' catch-ups could not be recorded again after it was made`)), `the failure is said${said}`);
+    // caught up ONCE, then streamed
+    psql(url, "INSERT INTO items VALUES (-2, 'streamed'); UPDATE items SET v = 'streamed' WHERE id = 4");
+    await sync.caughtUp(30_000);
+    assert.equal(await rowsOf(store, "SELECT id, v FROM public.items ORDER BY 1"), psql(url, "SELECT id, v FROM items ORDER BY 1"), `items streamed after${said}`);
+    assert.equal(logged.slice(from).filter((l) => /^poll: /.test(l)).length, 1, `one catch-up poll, never polled again and again${said}`);
+  } finally {
+    writer.run = run;
+    await sync.stop();
+    await store.close();
+  }
+});
+
 test("a named publication that cannot carry the copy is refused in the developer's words with the way out: a narrower column list, no delete, a typo", { skip }, async () => {
   const db = `${tag}_q`, url = urlOf(db);
   psql(adminUrl!, `CREATE DATABASE ${db}`);

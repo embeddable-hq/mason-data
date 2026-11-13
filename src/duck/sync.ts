@@ -2290,7 +2290,15 @@ export class Sync {
         // one poll from here — durable again, as a catch-up ended while the slot was made kept its row
         await this.onWriter(async () => {
           const copied = copiedNow();
-          await record(copied);
+          try { await record(copied); }
+          catch (e) {
+            // a slot made now: its tables' rows were committed before it and no catch-up ended one since, so a restart
+            // still catches them up — said, and this run marks them all the same, never leaving the slot's flag set
+            // (a flag left set ended no catch-up for the rest of the run: the table polled whole again and again).
+            // One this copy has no record of: thrown, and marked at the next pass
+            if (!making) throw e;
+            this.log(`replication slot ${r.slot}: its tables' catch-ups could not be recorded again after it was made (the ones recorded before it stand, so a restart catches them up): ${this.errorText(e)}`);
+          }
           this.makingSlot = false;
           this.appliedLsn = 0n;
           this.slotKnown = true;
