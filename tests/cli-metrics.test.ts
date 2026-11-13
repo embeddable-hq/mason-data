@@ -97,7 +97,7 @@ test("serving: mason_ready 1 and every number, named with its unit, a counter by
   const text = metricsText(READY);
   const p = holdsTheFormat(text);
   assert.deepEqual(Object.fromEntries(p.type), {
-    mason_ready: "gauge", mason_info: "gauge", mason_uptime_seconds: "gauge", mason_tables: "gauge", mason_copy_bytes: "gauge", mason_copy_rows: "gauge",
+    mason_ready: "gauge", mason_info: "gauge", mason_uptime_seconds: "gauge", mason_tables: "gauge", mason_synced_bytes: "gauge", mason_synced_rows: "gauge",
     mason_sync_oldest_age_seconds: "gauge", mason_stream_lag_bytes: "gauge", mason_stream_lag_seconds: "gauge", mason_slot_wal_held_bytes: "gauge",
     mason_disk_free_bytes: "gauge", mason_sessions_open: "gauge", mason_statements_total: "counter", mason_statement_duration_seconds: "summary",
   });
@@ -105,9 +105,9 @@ test("serving: mason_ready 1 and every number, named with its unit, a counter by
     "mason_ready 1",
     'mason_info{version="0.9.1"} 1',
     "mason_uptime_seconds 3600",
-    'mason_tables{phase="copied"} 3', 'mason_tables{phase="copying"} 1', 'mason_tables{phase="waiting"} 0', 'mason_tables{phase="failed"} 1',
-    `mason_copy_bytes ${5 * 2 ** 30}`,
-    "mason_copy_rows 12345678",
+    'mason_tables{phase="synced"} 3', 'mason_tables{phase="syncing"} 1', 'mason_tables{phase="waiting"} 0', 'mason_tables{phase="failed"} 1',
+    `mason_synced_bytes ${5 * 2 ** 30}`,
+    "mason_synced_rows 12345678",
     "mason_sync_oldest_age_seconds 42.5",
     "mason_stream_lag_bytes 2048",
     "mason_stream_lag_seconds 1.5",
@@ -128,7 +128,7 @@ test("a number not known is ABSENT, never 0 or NaN: no stream when polling, no a
     ...run, usage: { ...usage, streamLag: null, slotWalHeldBytes: null, oldestSyncSeconds: null, copyBytes: null, diskFreeBytes: null }, durations: null,
   } }));
   const names = new Set(polled.samples.map((s) => family(polled, s.name)));
-  for (const gone of ["mason_stream_lag_bytes", "mason_stream_lag_seconds", "mason_slot_wal_held_bytes", "mason_sync_oldest_age_seconds", "mason_copy_bytes", "mason_disk_free_bytes"]) {
+  for (const gone of ["mason_stream_lag_bytes", "mason_stream_lag_seconds", "mason_slot_wal_held_bytes", "mason_sync_oldest_age_seconds", "mason_synced_bytes", "mason_disk_free_bytes"]) {
     assert.ok(!names.has(gone) && !polled.help.has(gone) && !polled.type.has(gone), `${gone} is absent, its HELP and TYPE too`);
   }
   // before the first sample: the summary's sum and count stand (the counter), its quantiles are absent
@@ -143,7 +143,7 @@ test("a number not known is ABSENT, never 0 or NaN: no stream when polling, no a
   // a value that is not finite is never written (a guard: the facts never carry one)
   const odd = holdsTheFormat(metricsText({ version: "0.9.1", run: { ...run, usage: { ...usage, oldestSyncSeconds: Number.NaN, copyBytes: Number.POSITIVE_INFINITY } } }));
   assert.equal(value(odd, "mason_sync_oldest_age_seconds"), undefined);
-  assert.equal(value(odd, "mason_copy_bytes"), undefined);
+  assert.equal(value(odd, "mason_synced_bytes"), undefined);
 });
 
 test("a number the sampler read more than two samples ago is ABSENT: the stream's position under the lag, the slot, the last p50 / p95 — never a stale number as current", async () => {

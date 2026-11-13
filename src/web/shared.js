@@ -419,24 +419,69 @@ export function placePops(doc, win) {
   if (typeof doc?.querySelectorAll !== "function") return placed;
   const gutter = 16, gap = 4;
   const vw = win.innerWidth ?? 0, vh = win.innerHeight ?? 0;
+  const inside = (left, top, w, h) => ({ left: Math.max(gutter, Math.min(left, vw - gutter - w)), top: Math.max(gutter, Math.min(top, vh - gutter - h)) });
+  // the page's controls outside every popover, read once, only when an answer is to be placed (`said`, below)
+  let controls = null;
+  const controlsNow = () => controls ??= [...doc.querySelectorAll(CONTROLS)]
+    .filter((c) => typeof c.getBoundingClientRect === "function" && c.closest?.(".pop") == null)
+    .map((c) => c.getBoundingClientRect()).filter((b) => b.width > 0 && b.height > 0 && b.bottom > 0 && b.top < vh && b.right > 0 && b.left < vw);
+  // the height of an answer docked at the window's bottom, given to the page's end (0: none is)
+  let dockedHeight = 0;
   for (const el of doc.querySelectorAll(".pop[data-anchor]")) {
     const a = doc.getElementById(el.dataset.anchor);
     if (a === null || typeof a.getBoundingClientRect !== "function") { el.hidden = true; continue; }
     el.hidden = false;
     const r = a.getBoundingClientRect();
     const w = el.offsetWidth, h = el.offsetHeight;
-    const left = Math.max(gutter, Math.min(r.right - w, vw - gutter - w));
     const below = r.bottom + gap;
     // too tall for the room on either side: kept inside the window, over its anchor, rather than past the window's edge
     // where no scroll reaches it (a fixed box)
     const side = below + h <= vh - gutter || r.top - gap - h < gutter ? below : r.top - gap - h;
-    const top = Math.max(gutter, Math.min(side, vh - gutter - h));
-    el.style.left = `${Math.round(left)}px`;
-    el.style.top = `${Math.round(top)}px`;
+    let at = inside(r.right - w, side, w, h);
+    // AN ANSWER (`said`: what an Add or a Sync now answered, up until it is dismissed) NEVER COVERS ANOTHER CONTROL
+    // (issue 884: under a row's actions it covered the next row's Sync now and Remove), and is never a way through to
+    // one (a tap on its words once added the table under it): it goes where it covers none — under its anchor, over it,
+    // or beside it on its left, level with its top or its bottom — and where every place covers one (a phone's rows, a
+    // long answer beside a narrow list), it is a bar fixed at the window's bottom (`docked`), the page given its height
+    // at its end (`--docked-h`), so every row can be scrolled clear of it
+    let docked = false;
+    if (el.classList?.contains("said")) {
+      const all = controlsNow();
+      const covers = (p) => all.some((b) => b.left < p.left + w - 0.5 && b.right > p.left + 0.5 && b.top < p.top + h - 0.5 && b.bottom > p.top + 0.5);
+      const clear = [at, inside(r.right - w, below, w, h), inside(r.right - w, r.top - gap - h, w, h), inside(r.left - gap - w, r.top, w, h), inside(r.left - gap - w, r.bottom - h, w, h)]
+        .find((p) => !covers(p));
+      docked = clear === undefined;
+      el.classList.toggle("docked", docked);
+      if (!docked) at = clear;
+      else dockedHeight = Math.max(dockedHeight, el.offsetHeight);
+      // A TAP ON IT IS ITS OWN (the owner's re-check: a finger 2 px inside the docked bar's top pressed the Add above it):
+      // a browser moves a tap to the nearest control under the finger, and only a box that answers a click is one — so it
+      // answers one (`keepsTap`), and docked, a band above it, unseen, is its own too (app.css)
+      el.onclick = keepsTap;
+      // what the person scrolled in it stays where they put it, whatever writes the page again (a poll, a pointerup)
+      const key = `${el.dataset.anchor}|${(el.textContent ?? "").slice(0, 200)}`;
+      el.onscroll = () => { popScroll.set(key, el.scrollTop); };
+      const kept = popScroll.get(key);
+      if (kept !== undefined && el.scrollTop !== kept) el.scrollTop = kept;
+    }
+    el.style.left = docked ? "" : `${Math.round(at.left)}px`;
+    el.style.top = docked ? "" : `${Math.round(at.top)}px`;
     placed.push(el);
   }
+  doc.documentElement?.style?.setProperty?.("--docked-h", `${Math.ceil(dockedHeight)}px`);
   return placed;
 }
+
+/** What a person clicks or types in: what an answer's popover must not cover (`placePops`). */
+const CONTROLS = "button, a[href], input, select, textarea, summary";
+
+/** An answer's click on itself, not on one of its own buttons or links: kept by it, so the page's own handler (a menu
+ *  closed by a click elsewhere) never takes a tap on the answer for a tap outside it. What makes the answer a target
+ *  a browser's touch adjustment keeps a tap on, rather than moving it to a control nearby. */
+const keepsTap = (e) => { if (e.target?.closest?.(CONTROLS) == null) e.stopPropagation?.(); };
+
+/** How far each answer was scrolled, by its anchor and its words (`placePops`): a write replaces the element. */
+const popScroll = new Map();
 
 /** A text with its Copy button (`copyClick` copies what the `<code id>` holds): a URL, a psql line, a password. */
 export const copyable = (id, text) =>

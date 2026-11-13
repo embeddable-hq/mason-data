@@ -11,13 +11,33 @@ import { reach } from "./state.ts";
 import { fileSize, guarded, runFailure } from "./commands.ts";
 import { timeOf } from "./request-filter.ts";
 import { duration, statementMsText } from "./readiness.ts";
-import { SIZE_EVERY_MS, type CopySize, type UsageSample } from "../duck/usage.ts";
+import { SIZE_EVERY_MS, type CopySize, type UnsizedTable, type UsageSample } from "../duck/usage.ts";
 import { parseDuration } from "../lib/table-sync.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 const n = (x: number): string => x.toLocaleString("en-US");
-/** why a synced table may be missing from the sizes: its rows not written into the file yet (src/duck/usage.ts) */
-const SIZE_WAITS = "  a table is measured once its rows are written into the file: a small table's can wait in the write-ahead log until it passes 16 MiB or Mason stops";
+
+/**
+ * WHAT A SYNCED TABLE WITH NO SIZE SHOWS where a size would be (issue 883; the run's `unsized`, src/duck/usage.ts
+ * `unsizedTables`): `< 3 MiB` when its rows are all in the write-ahead log (the log's size, rounded up), `Measuring…`
+ * for each other reason. The Tables page's Size cell is held equal to it (tests/web-page.test.ts).
+ */
+export function unsizedCell(u: Pick<UnsizedTable, "why" | "underBytes">): string {
+  return u.why === "in-log" && u.underBytes !== null ? `< ${n(Math.round(u.underBytes / 1024 ** 2))} MiB` : "Measuring…";
+}
+
+/** Why, beside it on mason usage's line, one sentence a reason (`UnsizedWhy`: each a fact the run tells, never a guess):
+ *  the CLI may name the log, which only a person at the files can look at. */
+export function unsizedWhy(u: Pick<UnsizedTable, "why" | "underBytes">, sizedAt: string | null): string {
+  const at = sizedAt === null ? "" : ` (at ${sizedAt.slice(11, 16)} UTC)`;
+  const within = `measured within ${duration(SIZE_EVERY_MS / 1000)}`;
+  switch (u.why) {
+    case "in-log": return "its rows are all in the write-ahead log, not yet in the file: under the log's size, measured exactly once they are written into the file (the log past 16 MiB, or mason stop)";
+    case "written-since": return `its rows were in the write-ahead log at the last measure${at}, and rows have been written into the file since, maybe its own: ${within}`;
+    case "synced-since": return `synced since the last measure${at}: ${within}`;
+    case "not-measured-yet": return `not measured since Mason started: the first measure is a minute after the start`;
+  }
+}
 
 export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>] [--step <duration>] [--json]
 
@@ -26,8 +46,9 @@ export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>]
   cancelled — the errors column —, the completed ones' p95 duration, the rows sent), the synced data's size and rows, the
   tables whose sync is failing, how old the stalest table was, the stream's lag (a table under sync: replication), and
   the memory of the process and of the engine against its limit (MASON_DUCKDB_MEMORY). Then each synced table's own size, measured every
-  10 minutes once its rows are written into the file (a small table's can wait in the write-ahead log until it passes
-  16 MiB or Mason stops, and has no size until then). A span sums its statements and shows each level at its highest. Read through the running Mason.
+  10 minutes once its rows are written into the file: a small table's can wait in the write-ahead log until it passes
+  16 MiB or Mason stops, and shows "< 3 MiB" (under the log's size) until then; one not measured since its rows were
+  written into the file, since it was synced or since Mason started shows "Measuring…" and why. A span sums its statements and shows each level at its highest. Read through the running Mason.
 
     mason usage                        the last hour, 5 minutes a line
     mason usage --since 7d --step 1h   the last week, an hour a line
@@ -46,7 +67,13 @@ export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>]
     heapUsedBytes, copyMemoryBytes, copyMemoryLimitBytes, slotWalHeldBytes (replication: the WAL the
     slot holds on the database), diskFreeBytes (free where the synced data is; with a step, the lowest),
     sessionsOpen (the Postgres API's sessions logged in) }],
-    copySizes: [{ table, bytes, at }], next }
+    copySizes: [{ table, bytes, at }], sizedAt (when the sizes were last measured; null: not yet since
+    Mason started), walBytes (the write-ahead log's size now; null: none), unsized: [{ table (a synced
+    table with no size), why (in-log: measured since its first sync with its rows all in the write-ahead
+    log, and nothing written into the file since; written-since: so at the last measure, but rows have
+    been written into the file since; synced-since: its first sync finished after the last measure;
+    not-measured-yet: no measure since Mason started), underBytes (in-log: the log's size rounded up to a
+    MiB, which it is under; else null) }], next }
 `;
 
 export const USAGE: CommandSpec & { needs: "run" } = {
@@ -55,7 +82,7 @@ export const USAGE: CommandSpec & { needs: "run" } = {
   summary: "what Mason did over time: statements, the synced data's size and age, memory (a sample a minute; --since 7d --step 1h)",
   usage: USAGE_USAGE,
   options: { since: { type: "string" }, until: { type: "string" }, step: { type: "string" }, json: { type: "boolean" } },
-  json: ["since", "until", "stepSeconds", "sampleSeconds", "keptDays", "samples", "copySizes", "next"],
+  json: ["since", "until", "stepSeconds", "sampleSeconds", "keptDays", "samples", "copySizes", "sizedAt", "walBytes", "unsized", "next"],
 };
 
 /** A span as the options write it (the command line's one duration grammar, src/lib/table-sync.ts `parseDuration`:
@@ -104,7 +131,8 @@ export async function usage(argv: string[], now = Date.now()): Promise<number> {
     const r = await callRun(run, "GET", `/api/usage?${q}`);
     // the run's refusal (a step past the days kept, a since after until) in its own words and code
     if (r.status !== 200) return failed("usage", runFailure(r, [["mason usage --help", "the spans and times it takes"], ["mason logs", "the run's log"]]), { json });
-    const b = r.body as unknown as { since: string; until: string; stepSeconds: number | null; sampleSeconds: number; keptDays: number; samples: UsageSample[]; copySizes: CopySize[] };
+    const b = r.body as unknown as { since: string; until: string; stepSeconds: number | null; sampleSeconds: number; keptDays: number; samples: UsageSample[]; copySizes: CopySize[];
+      sizedAt?: string | null; walBytes?: number | null; unsized?: UnsizedTable[] };
     const next: NextStep[] = [["mason usage --since 7d --step 1h", "the week, an hour a line"], ["mason status", "where everything is now"]];
     if (json) { out(jsonText(USAGE, b, next)); return 0; }
     const st = styleOut();
@@ -116,12 +144,15 @@ export async function usage(argv: string[], now = Date.now()): Promise<number> {
       out(st.dim(sampleHeading(withLag)));
       for (const s of b.samples) out(sampleLine(s, withLag));
     }
-    if (b.copySizes.length) {
+    // a run of an earlier Mason says no table without a size: none listed
+    const unsized = b.unsized ?? [];
+    if (b.copySizes.length || unsized.length) {
       out("");
       out(st.bold(`Each synced table's own size (measured every ${duration(SIZE_EVERY_MS / 1000)}):`));
-      const wide = Math.max(...b.copySizes.map((c) => c.table.length));
+      const wide = Math.max(...b.copySizes.map((c) => c.table.length), ...unsized.map((u) => u.table.length));
       for (const c of b.copySizes) out(`  ${c.table.padEnd(wide)}  ${fileSize(c.bytes).padStart(10)}  ${st.dim(`at ${c.at.slice(11, 16)} UTC`)}`);
-      out(st.dim(SIZE_WAITS));
+      // a synced table with no size says why, on its line, where its size would be (issue 883)
+      for (const u of unsized) out(`  ${u.table.padEnd(wide)}  ${unsizedCell(u).padStart(10)}  ${st.dim(unsizedWhy(u, b.sizedAt ?? null))}`);
     }
     out(endText({ next }, st));
     return 0;

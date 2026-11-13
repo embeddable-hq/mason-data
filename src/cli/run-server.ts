@@ -40,14 +40,14 @@ import { errorJson, nextJson, type Failure, type NextStep } from "./command.ts";
 import { phaseCounts, readiness, syncTotals, tableSync, type SyncFacts, type SyncTotals } from "./readiness.ts";
 import { restartsFact, type Restart } from "./supervise.ts";
 import { withRestarts, type SyncEvents } from "../duck/events.ts";
-import { syncedDataBytes } from "../duck/file-bytes.ts";
+import { fileStamp, syncedDataBytes, walBytes } from "../duck/file-bytes.ts";
 import { NO_ROLES, type RolesLive } from "../duck/grants.ts";
 import { addedNext, addUser, attributesToAdd, disabledNext, disableUser, enabledNext, enableUser, fromNext, listUsers, rangesText, removeUser, REMOVED_NEXT, roleToAdd, setUserFrom, withLastUsed } from "./user.ts";
 import { userRole } from "./roles.ts";
 import type { RunState } from "./commands.ts";
 import { clientLink, postgresFacts } from "./pg-url.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
-import { catalogTable, copiedColumns, effectiveSync, entryName, parseSourceText, shownPath, type CatalogColumn, type ProjectSource, type SourceFile } from "./sources.ts";
+import { catalogTable, copiedColumns, effectiveSync, entryName, everyColumnLeavesOut, parseSourceText, shownPath, type CatalogColumn, type ProjectSource, type SourceFile } from "./sources.ts";
 import { projectWriteRefusal } from "./project.ts";
 import { addEntry, plannedEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type PollMeasure, type RemoveResult } from "./source-edit.ts";
 import { notAddedRefusal, PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamedAnswer, type StreamStatus } from "../duck/sync.ts";
@@ -59,7 +59,7 @@ import type { PgApiServer } from "../api/postgres/server.ts";
 import { tunnelReport, type RunShares } from "./share-run.ts";
 import type { PageShares } from "./page-share.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
-import type { CopySize, UsageFacts, UsageSample, UsageSampler } from "../duck/usage.ts";
+import { unsizedTables, type CopySize, type UnsizedTable, type UsageFacts, type UsageSample, type UsageSampler } from "../duck/usage.ts";
 import { FRESH_SAMPLES, type RunMetrics } from "./metrics.ts";
 
 /** A statement answered in this many milliseconds or more is slow (one constant: src/api/request-log.ts SLOW_MS, the
@@ -169,7 +169,7 @@ export interface RunContext {
     /** the sync's failures and notable events (src/duck/events.ts, `_mason.sync_events`): mason logs --events, mason status */
     events: Pick<SyncEvents, "recent" | "days">;
     /** usage over time (src/duck/usage.ts, `_mason.usage`): mason usage */
-    usage: Pick<UsageSampler, "samples" | "copySizes" | "days" | "sampleSeconds" | "statementTotals" | "lastDurations">;
+    usage: Pick<UsageSampler, "samples" | "copySizes" | "lastMeasure" | "days" | "sampleSeconds" | "statementTotals" | "lastDurations">;
     /** the run's restarts, as its supervisor records them in `.mason/restarts.json` (src/cli/supervise.ts readRestarts:
      *  a file that cannot be read throws, said as the request's failure); merged with the events */
     restarts: () => Restart[];
@@ -204,6 +204,12 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     const { columns: cols, ...catalog } = catalogTable(t, entry);
     return {
       ...catalog, ...(columns ? { columns: cols } : {}),
+      // how many columns it has, in the lean state too: the page's "5 of 12 columns" on an added table's row
+      columnCount: cols.length,
+      // an added table's entry as the sources file says it — `columns:` (null: every column but `exclude:`), `exclude:`,
+      // `key:` (null: its primary key) — and the columns every column leaves out of it (`mason add <table>` with no
+      // --columns: the secret-looking ones), so the page's column form ticks what the file says, or says the form cannot
+      ...(entry !== undefined ? { entry: { columns: entry.columns, exclude: entry.exclude, key: entry.key }, everyColumnLeavesOut: everyColumnLeavesOut(t, entry.key) } : {}),
       // a table the sync has not reached is waiting for its copy (no copy yet), never "copying 0"
       // a copy in a retired layout (src/duck/sync.ts RETIRED_LAYOUT) serves until it is copied again: done, and said
       copy: c && c.phase !== "waiting" ? { phase: (c.phase === "copied" ? "done" : c.phase === "failed" ? "failed" : "copying") as "copying" | "done" | "failed",
@@ -471,11 +477,12 @@ const DAY_S = 86_400;
  * `GET /api/usage?since=&until=&step=`: the samples from `since` (default an hour ago) until `until` (default
  * now), oldest first; with `step` (seconds, at least a sample's interval) re-bucketed in one query, each count summed and
  * each level at its highest — but the p50 and p95 of a point of more than a minute are its statements', read from the
- * request log by when each started (`durationsBy`). And each copy's own bytes as last measured, how often a sample is taken, and the days
- * kept. `mason usage --json` is this.
+ * request log by when each started (`durationsBy`). And each copy's own bytes as last measured, when they were last
+ * measured (`sizedAt`), the write-ahead log's bytes now (`walBytes`), each served copy with no size and why
+ * (`unsized`), how often a sample is taken, and the days kept. `mason usage --json` is this.
  */
 export async function usage(ctx: RunContext, q: URLSearchParams, now = Date.now()): Promise<{ since: string; until: string; stepSeconds: number | null; sampleSeconds: number;
-  keptDays: number; samples: UsageSample[]; copySizes: CopySize[] }> {
+  keptDays: number; samples: UsageSample[]; copySizes: CopySize[]; sizedAt: string | null; walBytes: number | null; unsized: UnsizedTable[] }> {
   const time = (k: "since" | "until", fallback: number): string => {
     const text = q.get(k);
     if (text === null) return new Date(fallback).toISOString();
@@ -497,7 +504,15 @@ export async function usage(ctx: RunContext, q: URLSearchParams, now = Date.now(
     const d = durations.get(Date.parse(s.at));
     return { ...s, durationP50Ms: d?.p50 ?? null, durationP95Ms: d?.p95 ?? null };
   });
-  return { since, until, stepSeconds: step, sampleSeconds: u.sampleSeconds, keptDays: u.days, samples, copySizes: await u.copySizes() };
+  // why a served table has no size (issue 883): the rule is the sampler's module's (`unsizedTables`), read once here for
+  // mason usage and the Tables page alike. IN THIS ORDER, so no moment between two reads makes a false "in-log": the
+  // measure before the sizes (a measure that lands after it adds sizes, never takes one away), and the log before the
+  // file's stamp (a checkpoint after the log is read changes the stamp). A stat each, never a checkpoint to measure
+  const measure = u.lastMeasure();
+  const copySizes = await u.copySizes();
+  const wal = walBytes(ctx.duck.file), stamp = fileStamp(ctx.duck.file);
+  return { since, until, stepSeconds: step, sampleSeconds: u.sampleSeconds, keptDays: u.days, samples, copySizes,
+    sizedAt: measure?.at ?? null, walBytes: wal, unsized: unsizedTables(ctx.duck.copies(), copySizes, measure, { wal, fileStamp: stamp }) };
 }
 
 /**

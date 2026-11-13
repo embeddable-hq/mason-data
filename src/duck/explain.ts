@@ -189,11 +189,11 @@ export function keptText(f: CopyFacts | null, now: number = Date.now(), rows = t
 /** what keeps a copy current NOW, as FORMAT JSON's `Kept Current By` says it: null for a copy nothing does (not copied
  *  yet, skipped by the passes, its sync off, not streamed, the stream down), so a reader keying on it is
  *  never told of a mode that is not at work on it */
-export function keptCurrentBy(f: CopyFacts | null): "polling" | "copying again" | "logical replication" | null {
+export function keptCurrentBy(f: CopyFacts | null): "polling" | "syncing again in full" | "logical replication" | null {
   const k: KeptCurrent | undefined = f?.phase === "copied" ? f.kept : undefined;
   if (k === undefined) return null;
   if (k.by === "poll") return k.pending === undefined && k.sync.mode === "poll" ? "polling" : null;
-  if (k.by === "recopy") return "copying again";
+  if (k.by === "recopy") return "syncing again in full";
   if (k.by === "generated") return null;
   return k.state === "streamed" && k.notRunning === null ? "logical replication" : null;
 }
