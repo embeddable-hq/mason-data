@@ -32,6 +32,7 @@ const run: RunMetrics = {
   uptimeSeconds: 3_600, usage,
   statements: { completed: 1_000, refused: 7, failed: 2, cancelled: 1, completedMs: 12_500 },
   durations: { at: READ, p50Ms: 12, p95Ms: 340 },
+  uiErrors: 4,
   at: NOW, freshSeconds: 120,
 };
 const READY: MetricsFacts = { version: "0.9.1", run };
@@ -100,6 +101,7 @@ test("serving: mason_ready 1 and every number, named with its unit, a counter by
     mason_ready: "gauge", mason_info: "gauge", mason_uptime_seconds: "gauge", mason_tables: "gauge", mason_synced_bytes: "gauge", mason_synced_rows: "gauge",
     mason_sync_oldest_age_seconds: "gauge", mason_stream_lag_bytes: "gauge", mason_stream_lag_seconds: "gauge", mason_slot_wal_held_bytes: "gauge",
     mason_disk_free_bytes: "gauge", mason_sessions_open: "gauge", mason_statements_total: "counter", mason_statement_duration_seconds: "summary",
+    mason_ui_errors_total: "counter",
   });
   assert.deepEqual(p.samples.map((s) => `${s.name}${s.labels} ${s.value}`), [
     "mason_ready 1",
@@ -119,6 +121,8 @@ test("serving: mason_ready 1 and every number, named with its unit, a counter by
     // the last sample's p50 / p95, ms said in seconds; the sum and count of the completed since the process started
     'mason_statement_duration_seconds{quantile="0.5"} 0.012', 'mason_statement_duration_seconds{quantile="0.95"} 0.34',
     "mason_statement_duration_seconds_sum 12.5", "mason_statement_duration_seconds_count 1000",
+    // the web page's own errors reported since the process started (src/cli/ui-errors.ts)
+    "mason_ui_errors_total 4",
   ]);
 });
 
@@ -126,9 +130,12 @@ test("a number not known is ABSENT, never 0 or NaN: no stream when polling, no a
   const { metricsText } = await metrics();
   const polled = holdsTheFormat(metricsText({ version: "0.9.1", run: {
     ...run, usage: { ...usage, streamLag: null, slotWalHeldBytes: null, oldestSyncSeconds: null, copyBytes: null, diskFreeBytes: null }, durations: null,
+    uiErrors: null,
   } }));
   const names = new Set(polled.samples.map((s) => family(polled, s.name)));
-  for (const gone of ["mason_stream_lag_bytes", "mason_stream_lag_seconds", "mason_slot_wal_held_bytes", "mason_sync_oldest_age_seconds", "mason_synced_bytes", "mason_disk_free_bytes"]) {
+  for (const gone of ["mason_stream_lag_bytes", "mason_stream_lag_seconds", "mason_slot_wal_held_bytes", "mason_sync_oldest_age_seconds", "mason_synced_bytes", "mason_disk_free_bytes",
+    // a run that takes no report of the web page's errors: no count, never a 0 that claims it counted
+    "mason_ui_errors_total"]) {
     assert.ok(!names.has(gone) && !polled.help.has(gone) && !polled.type.has(gone), `${gone} is absent, its HELP and TYPE too`);
   }
   // before the first sample: the summary's sum and count stand (the counter), its quantiles are absent
@@ -193,7 +200,7 @@ test("mason_statements_total is a COUNTER: counted as the listener records each 
   const u = await UsageSampler.open(store, () => undefined, { days: 7, now: () => clock, sampleMs: 3_600_000, sizeEveryMs: 3_600_000 });
   u.start(async () => usage);
   const row = (durationMs: number, o: Partial<ApiLogRow> = {}): ApiLogRow => ({ requestId: "r", at: new Date(), method: "QUERY", status: 200, durationMs, ...o });
-  const scrape = (): Parsed => parse(metricsText({ version: "0.9.1", run: { uptimeSeconds: 1, usage, statements: u.statementTotals(), durations: u.lastDurations(), at: clock, freshSeconds: 120 } }));
+  const scrape = (): Parsed => parse(metricsText({ version: "0.9.1", run: { uptimeSeconds: 1, usage, statements: u.statementTotals(), durations: u.lastDurations(), uiErrors: 0, at: clock, freshSeconds: 120 } }));
   const counts = (p: Parsed): Record<string, number> => Object.fromEntries(p.samples.filter((s) => s.name === "mason_statements_total" || s.name.startsWith("mason_statement_duration_seconds_"))
     .map((s) => [s.name + s.labels, Number(s.value)]));
   for (const ms of [10, 20, 30]) u.count(row(ms));
@@ -249,7 +256,7 @@ const READS = [
   "run.usage.copyBytes", "run.usage.totals.rows", "run.usage.oldestSyncSeconds", "run.usage.streamLag.bytes", "run.usage.streamLag.seconds",
   "run.usage.streamLagReadAt", "run.usage.slotWalHeldBytes", "run.usage.slotWalReadAt", "run.usage.diskFreeBytes", "run.usage.sessionsOpen",
   "run.statements.completed", "run.statements.failed", "run.statements.refused", "run.statements.cancelled", "run.statements.completedMs",
-  "run.durations.at", "run.durations.p50Ms", "run.durations.p95Ms",
+  "run.durations.at", "run.durations.p50Ms", "run.durations.p95Ms", "run.uiErrors",
 ].sort();
 
 test("NEVER A NAME: the renderer READS only the closed list of numbers (a name field added to the facts and read fails here), and names fed to it print nowhere", async () => {

@@ -23,6 +23,7 @@
  * alert on it never fires.
  */
 import type { LastDurations, StatementTotals, UsageFacts } from "../duck/usage.ts";
+import { UI_ERRORS_PER_MINUTE } from "./ui-errors.ts";
 
 /** The content type of the text exposition format, version 0.0.4. */
 export const METRICS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8";
@@ -45,6 +46,9 @@ export interface RunMetrics {
   statements: StatementTotals;
   /** the last usage sample's p50 / p95 of its completed statements; null before the first sample */
   durations: LastDurations | null;
+  /** the web page's own errors reported since the process started (src/cli/ui-errors.ts `UiErrors.total`), recorded as
+   *  events or not; null where the run takes none */
+  uiErrors: number | null;
   /** when the facts were read, ms since the epoch, and how old a cached number may be, seconds (FRESH_SAMPLES samples) */
   at: number;
   freshSeconds: number;
@@ -131,6 +135,9 @@ export function metricsText(f: MetricsFacts): string {
       ...metric("mason_statements_total", "counter", "Statements the listener answered since the process started, whether or not the request log kept each, by outcome (refused: the statement's fault; failed: Mason's or the machine's).",
         STATEMENT_OUTCOMES.map((outcome) => ({ labels: { outcome }, value: outcome === "completed" ? st.completed : st[outcome] }))),
       ...durationSummary(r),
+      // absent where the run takes no report of the page's errors: a 0 would claim it counted
+      ...metric("mason_ui_errors_total", "counter", `Errors the web page met in its own code and reported since the process started, whether or not the events kept each (at most ${UI_ERRORS_PER_MINUTE} a minute are recorded as ui_error events).`,
+        [{ value: r.uiErrors }]),
     );
   }
   return `${lines.join("\n")}\n`;

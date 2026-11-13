@@ -74,7 +74,8 @@ the edit, as `mason add` does:
 `GET /metrics` on the health port (4140, beside `/healthz`) is Mason's numbers in Prometheus's text format: tables by
 the phase of their first sync (`mason_tables{phase="synced"|"syncing"|"waiting"|"failed"}`), the synced data's size
 (`mason_synced_bytes`) and rows (`mason_synced_rows`), how old the stalest synced table is, the stream's lag and the WAL its slot holds, disk free, sessions
-open, statements by outcome (a counter) and their p50 / p95 (`curl -s localhost:4140/metrics` lists each with its
+open, statements by outcome (a counter) and their p50 / p95, the errors the web page met in its own code
+(`mason_ui_errors_total`) (`curl -s localhost:4140/metrics` lists each with its
 help). It is **numbers only and needs no secret**: no table, column, user, client or host name and no statement text
 appears in it, not even as a label. A scrape costs your database nothing: it reads what Mason already holds (the
 stream's position as last sampled, once a minute), never a connection or a query on the source, however often it is

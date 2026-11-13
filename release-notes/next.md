@@ -2,6 +2,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **When the web page itself hits an error, Mason now records it.** If a bug in the page's own code stops it
+  from working, you will see a `ui_error` event in `mason logs --events`, on the Sync events page and among the recent
+  errors of `mason status`. `/metrics` counts these errors in `mason_ui_errors_total`. The event says which page and
+  which of its files hit the error, and where in the file. It never includes the error's own message, because that
+  could quote your synced data. The browser's console still shows the whole error. Mason records at most 10 of these
+  errors a minute, and counts the rest.
 - **`--remote` is gone.** `mason init` and `mason start` no longer stop for a database on another machine. They carry
   on, and say once: "Your database is on another machine. Mason will sync the tables you choose to this machine." Drop
   `--remote` from your scripts: `mason init --remote` now fails as an unknown option (exit 2). An older
