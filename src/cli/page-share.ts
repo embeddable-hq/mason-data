@@ -1,5 +1,5 @@
 /**
- * THE WEB PAGE'S `mason share` (Share over the internet, in the Users page's Connect; docs/WEB-UI.md): the same share the
+ * THE WEB PAGE'S `mason share` (the Temporary public login of the Users page's add box; docs/WEB-UI.md): the same share the
  * command opens — a login of `RunShares` (src/cli/share-run.ts) on the share's TLS-only socket, a tunnel client of
  * src/cli/tunnel.ts pointed at it, its address probed for the share's own certificate — opened by the RUN, because a page
  * cannot start a process. Nothing here is a second socket, password or tunnel: only who holds the share differs.
@@ -9,7 +9,7 @@
  * discarded and a laptop asleep all stop beating; a connection held open would survive a frozen tab (the browser keeps
  * reading its socket) and spends one of the browser's six connections to the run. The page beats while hidden (the
  * person is in their BI tool's tab, pasting), and a hidden tab's timers run at most once a minute (Chrome's intensive
- * throttling), so the bound is two minutes: one late beat never ends a share, two missed ones do. Stop sharing ends it
+ * throttling), so the bound is two minutes: one late beat never ends a share, two missed ones do. Stop ends it
  * at once, and the page sends it as it closes too (`keepalive`), which a crash does not: the bound is the guarantee.
  *
  * THE PASSWORD IS MADE HERE, by the command's own `newSharePassword`, its hash given to `RunShares` as the command gives
@@ -51,8 +51,8 @@ export interface PageShareDeps {
 /** A tunnel's failure in the page's words: what to do there, never a flag of the command's. */
 function pageFailure(f: Failure, plan: TunnelPlan): Failure {
   if (f.code === "not_found") {
-    return { message: `${plan.bin} is not on this machine, and Share over the internet needs it`, code: "not_found", why: "the temporary address is a tunnel opened over ssh",
-      fix: `install ${plan.install}, then Share over the internet again`, next: [["mason doctor", "checks this machine"]] };
+    return { message: `${plan.bin} is not on this machine, and a temporary public login needs it`, code: "not_found", why: "the temporary address is a tunnel opened over ssh",
+      fix: `install ${plan.install}, then Open a public login again`, next: [["mason doctor", "checks this machine"]] };
   }
   return { message: f.message, code: f.code, ...(f.why !== undefined ? { why: f.why } : {}),
     fix: f.message.startsWith("the tunnel gave no address") ? "the tunnel's service answered in a way this Mason cannot read: nothing was left open; mason share, in a terminal, offers another tunnel"
@@ -81,7 +81,7 @@ export class PageShares {
     const user = opened.user;
     const mine = { user, tunnel: null as OpenTunnel | null, timer: this.lapse(user) };
     this.current = mine;
-    // however it ends (Stop sharing, no beat, its tunnel, the run stopping), the tunnel's client goes with it
+    // however it ends (Stop, no beat, its tunnel, the run stopping), the tunnel's client goes with it
     shares.onEnd(user, () => { clearTimeout(mine.timer); void mine.tunnel?.stop(); if (this.current === mine) this.current = null; });
     const plan = tunnelPlan("pinggy", { port: opened.port, home: this.deps.home, token: null });
     const t = await (this.deps.start ?? startTunnel)(plan, { timeoutMs: this.deps.timeoutMs ?? TIMEOUT_MS, onPid: (pid) => { shares.update(user, { pid, via: plan.via, state: "opening" }); } });
@@ -105,7 +105,7 @@ export class PageShares {
 
   private endedWhileOpening(user: string): Failure {
     const why = this.deps.shares.ended?.user === user ? this.deps.shares.ended.why : "it was stopped";
-    return { message: `the share ended while its tunnel opened: ${why}`, code: "failed", fix: "nothing was left open: Share over the internet again" };
+    return { message: `the share ended while its tunnel opened: ${why}`, code: "failed", fix: "nothing was left open: Open a public login again" };
   }
 
   /** The timer a beat resets: past the bound with no beat, the share ends. */
@@ -127,10 +127,10 @@ export class PageShares {
     return true;
   }
 
-  /** Stop sharing: the page's share ended now. false: no such share of the page's is open. */
+  /** Stop: the page's share ended now. false: no such share of the page's is open. */
   async stop(user: string): Promise<boolean> {
     if (this.deps.shares.fromOf(user) !== "page") return false;
-    await this.deps.shares.close(user, "Stop sharing, on the web page");
+    await this.deps.shares.close(user, "Stop, on the web page's Users page");
     return true;
   }
 }

@@ -87,7 +87,7 @@ export interface ShareState {
   shares: Array<{ user: string; from: ShareFrom; role: string | null; reads: string; openedAt: string; via: string | null; host: string | null; port: number | null; endsAt: string | null; state: string }>;
 }
 
-/** Who opened a share and holds it: `mason share`, or the web page's Share over the internet (src/cli/page-share.ts). */
+/** Who opened a share and holds it: `mason share`, or the web page's Temporary public login (src/cli/page-share.ts). */
 export type ShareFrom = "command" | "page";
 
 /** The last share that ended, and why: `/api/state` `shareEnded`, so a page that held it says why it is gone. */
@@ -98,7 +98,7 @@ interface Held { user: string; from: ShareFrom; secret: string; role: string | n
 /** How each holder ends its share, as a refusal names it. */
 const HOW_TO_END: Record<ShareFrom, [string, string]> = {
   command: ["mason share", "Ctrl-C in the terminal running mason share ends it"],
-  page: ["the web page", "Stop sharing on the web page's Overview ends it (mason ui opens the page)"],
+  page: ["the web page", "Stop, under Temporary public login on the web page's Users page, ends it (mason ui opens the page)"],
 };
 
 export interface ShareDeps {
@@ -249,7 +249,7 @@ export class RunShares {
     if (open === undefined) return null;
     const [who, how] = HOW_TO_END[open.from];
     return { message: `a share is open already: ${open.user}, opened by ${who}${open.tunnel.host !== undefined ? ` at ${open.tunnel.host}:${open.tunnel.port}` : ""}`, code: "refused",
-      why: "one share at a time between the web page and mason share: each is a public address someone must be watching", fix: `${how}, then share again`,
+      why: "one share at a time between the web page and mason share: each is a public address someone must be watching", fix: `${how}, then ${from === "page" ? "Open a public login" : "run mason share"} again`,
       next: [["mason status", "the share open now"]] };
   }
 

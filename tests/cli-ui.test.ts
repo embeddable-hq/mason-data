@@ -153,7 +153,7 @@ test("the browser is the platform's: open on macOS, start on Windows, xdg-open e
   assert.deepEqual(openCommand!("freebsd", u), ["xdg-open", [u]]);
 });
 
-// ------------------------------------------------------------------ Share over the internet: the page's share endpoint
+// ------------------------------------------------------------------ Temporary public login: the page's share endpoint
 
 const { RunShares } = await import("../src/cli/share-run.ts");
 const { PageShares } = await import("../src/cli/page-share.ts" as string).catch(() => ({})) as typeof import("../src/cli/page-share.ts");
@@ -204,7 +204,7 @@ test("the page's share endpoint behind the guard: another Origin, none, no cooki
   } finally { s.close(); }
 });
 
-test("the page's share opened: its password in the one answer and no log line; a beat holds it; Stop sharing ends it and its tunnel; a beat after says it ended and why", async () => {
+test("the page's share opened: its password in the one answer and no log line; a beat holds it; Stop ends it and its tunnel; a beat after says it ended and why", async () => {
   const s = await shareServer(false);
   try {
     const choices = await s.ask("GET", "/api/share/choices");
@@ -227,7 +227,7 @@ test("the page's share opened: its password in the one answer and no log line; a
     assert.equal(s.shares.state(), null);
     const late = await s.ask("POST", `/api/share/${r.user}/beat`);
     assert.equal(late.status, 404);
-    assert.equal(JSON.parse(late.text).failure.message, `the share ${r.user} is not open; it ended: Stop sharing, on the web page`);
+    assert.equal(JSON.parse(late.text).failure.message, `the share ${r.user} is not open; it ended: Stop, on the web page's Users page`);
     // a share of mason share's is its command's to end
     const cmd = await s.shares.open({ secret: "a".repeat(64) });
     assert.ok("user" in cmd);

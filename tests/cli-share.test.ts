@@ -809,7 +809,7 @@ describe("mason share, against a real run and a stub tunnel", { timeout: 300_000
     return { status: r.status, body: await r.json() as Record<string, unknown> & { failure?: { message: string; fix?: string } } };
   };
 
-  test("the web page's Share over the internet on a real run: the stub's tunnel at the share's socket, TLS required, the password nowhere after; one share at a time with mason share; Stop sharing ends it all", async () => {
+  test("the web page's Temporary public login on a real run: the stub's tunnel at the share's socket, TLS required, the password nowhere after; one share at a time with mason share; Stop ends it all", async () => {
     const opened = await fromPage("POST", "/api/share", { from: "page", confirmed: true });
     assert.equal(opened.status, 200, JSON.stringify(opened.body));
     const r = opened.body as unknown as { user: string; host: string; port: number; password: string; database: string };
@@ -842,7 +842,7 @@ describe("mason share, against a real run and a stub tunnel", { timeout: 300_000
     await reported(s);
     const refused = await fromPage("POST", "/api/share", { from: "page", confirmed: true });
     assert.equal(refused.status, 409);
-    assert.match(refused.body.failure?.fix ?? "", /Ctrl-C in the terminal running mason share ends it/);
+    assert.match(refused.body.failure?.fix ?? "", /^Ctrl-C in the terminal running mason share ends it, then Open a public login again$/);
   });
 
   test("the run stopping with the page's share open ends it and its tunnel's client; the next start sweeps a tunnel file a killed run left", async () => {
@@ -914,9 +914,9 @@ test("the page's share is the command's share: one login of RunShares on the TLS
   for (const where of [JSON.stringify(st), f.lines.join("\n")]) assert.ok(!where.includes(r.password) && !where.includes(shareSecret(r.password)), "neither the password nor its hash in the state or the log");
   assert.ok(page.beat(r.user));
   assert.equal(await page.stop(r.user), true);
-  assert.equal(t.stops(), 1, "Stop sharing stops the tunnel's client");
+  assert.equal(t.stops(), 1, "Stop stops the tunnel's client");
   assert.equal(f.shares.state(), null);
-  assert.deepEqual([f.shares.ended?.user, f.shares.ended?.from, f.shares.ended?.why], [r.user, "page", "Stop sharing, on the web page"]);
+  assert.deepEqual([f.shares.ended?.user, f.shares.ended?.from, f.shares.ended?.why], [r.user, "page", "Stop, on the web page's Users page"]);
   assert.equal(page.beat(r.user), false, "a beat for a share ended is refused");
   assert.throws(() => f.door().authenticate(r.password, r.user), /not this share's password/);
 });
@@ -944,7 +944,7 @@ test("the tunnel ends while the page's share is open: the share ends, said why; 
   const noSsh = pageShares({ fail: { message: "ssh is not on this machine's PATH, and --via pinggy needs it", code: "not_found", fix: "install it, or use --via bore" } });
   const refused = await noSsh.page.open({});
   assert.ok("failure" in refused);
-  assert.match(refused.failure.message, /^ssh is not on this machine, and Share over the internet needs it$/);
+  assert.match(refused.failure.message, /^ssh is not on this machine, and a temporary public login needs it$/);
   assert.match(refused.failure.fix ?? "", /install the OpenSSH client/);
   const offline = pageShares({ fail: { message: "the tunnel ended before it gave an address", code: "failed", why: "ssh exited 255: ssh: Could not resolve hostname", fix: "is this machine online? Port 443 outbound is all it needs" } });
   const off = await offline.page.open({});
@@ -969,7 +969,7 @@ test("one share at a time between the page and mason share, in either order: ref
   const refused = await page.open({});
   assert.ok("failure" in refused);
   assert.match(refused.failure.message, new RegExp(`a share is open already: ${cmd.user}, opened by mason share at cmd.example:7`));
-  assert.match(refused.failure.fix ?? "", /Ctrl-C in the terminal running mason share ends it/);
+  assert.match(refused.failure.fix ?? "", /^Ctrl-C in the terminal running mason share ends it, then Open a public login again$/);
   const second = await f.shares.open({ secret: shareSecret("b") });
   assert.ok("user" in second, "a second mason share meets the same socket, as before");
   await f.shares.closeAll("the test");
@@ -978,7 +978,7 @@ test("one share at a time between the page and mason share, in either order: ref
   const cmdRefused = await f.shares.open({ secret: shareSecret("c") });
   assert.ok("failure" in cmdRefused);
   assert.match(cmdRefused.failure.message, new RegExp(`opened by the web page at relay.example:41234`));
-  assert.match(cmdRefused.failure.fix ?? "", /Stop sharing on the web page's Overview ends it/);
+  assert.match(cmdRefused.failure.fix ?? "", /^Stop, under Temporary public login on the web page's Users page, ends it \(mason ui opens the page\), then run mason share again$/);
   const again = await page.open({});
   assert.ok("failure" in again && /a share is open already/.test(again.failure.message));
   assert.equal(f.shares.state()?.shares.length, 1);
