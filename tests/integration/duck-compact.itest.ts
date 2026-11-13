@@ -75,12 +75,18 @@ function aSource(name: string, rows: number): { db: string; url: string; source:
 // the threshold low and the check by hand: the rule is the test's, the rewrite and the swap the sync's
 const LOW: CompactOptions = { firstCheckMs: 3_600_000, checkMs: 3_600_000, wasteShare: 0.3, minWasteBlocks: 1 };
 /** waits until the stream has kept `n` changes aside for the table being compacted: `caughtUp` waits for them to be
- *  applied, which the held compaction never lets happen (issue 904) */
+ *  applied, which the held compaction never lets happen (issue 904). Read on a connection of the test's own, so only
+ *  COMMITTED rows count: on the writer's connection the read lands inside the stream's open batch and sees its rows
+ *  before the batch commits (the review of PR 910: held 0 read in that window) */
 async function keptAside(store: DuckStore, n: number, logged: readonly string[]): Promise<void> {
-  for (const until = Date.now() + 30_000; await one(store, "SELECT count(*) FROM _mason.compact_held") < n;) {
-    if (Date.now() > until) throw new Error(`the stream did not keep ${n} change(s) aside in 30 s\n${logged.slice(-12).join("\n")}`);
-    await new Promise((r) => setTimeout(r, 20));
-  }
+  const reader = await store.instance.connect();
+  try {
+    const count = async (): Promise<number> => Number((await reader.runAndReadAll("SELECT count(*) FROM _mason.compact_held")).getRowsJS()[0]![0]);
+    for (const until = Date.now() + 30_000; await count() < n;) {
+      if (Date.now() > until) throw new Error(`the stream did not keep ${n} change(s) aside in 30 s\n${logged.slice(-12).join("\n")}`);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  } finally { reader.closeSync(); }
 }
 const same = async (store: DuckStore, url: string, step: string): Promise<void> =>
   assert.equal(await rowsOf(store, "SELECT id, v, n FROM public.t ORDER BY 1"), psql(url, "SELECT id, v, n FROM t ORDER BY 1"), `public.t after ${step}`);
