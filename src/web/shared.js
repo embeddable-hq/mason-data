@@ -302,14 +302,34 @@ export const staleText = (at, failure) => `As of ${utcMinute(at.toISOString()).s
 /** One request to the run over `fetchFn`: `{ body }`, its JSON, or `{ failure }` when it was refused or nothing answered. */
 export function createAsk(fetchFn) {
   return async (path, init) => {
-    let res;
-    try { res = await fetchFn(path, { credentials: "same-origin", ...init }); }
-    catch (e) { return { failure: failureOf(null, e?.message ?? String(e)) }; }
-    const text = await res.text();
+    let res, text;
+    // AN ACT ON THE DATABASE'S TABLES WHOSE READ STILL RUNS (a Columns or Sync choice, an add, a remove over a large
+    // catalog: the run's 503 says `catalogRead`): asked again carrying that read's number, so it waits on the same read
+    // and never begins another (src/cli/source-catalog.ts); a quarter of an hour at most, as the run's own guard
+    for (let read = null, tries = 0; ; tries++) {
+      const asked = read === null ? init : { ...init, headers: { ...init?.headers, [CATALOG_READ_HEADER]: String(read) } };
+      try { res = await fetchFn(path, { credentials: "same-origin", ...asked }); }
+      catch (e) { return { failure: failureOf(null, e?.message ?? String(e)) }; }
+      text = await res.text();
+      const running = res.status === 503 && tries < 45 ? runningRead(text) : null;
+      if (running === null) break;
+      read = running;
+    }
     if (!res.ok) return { failure: failureOf(res.status, text) };
     try { return { body: JSON.parse(text) }; }
     catch (e) { return { failure: { code: "failed", message: `the run's answer to ${path} is not JSON: ${e.message}` } }; }
   };
+}
+
+/** The header an act's request carries its read's number in (src/cli/source-catalog.ts CATALOG_READ_HEADER). */
+export const CATALOG_READ_HEADER = "x-mason-catalog-read";
+
+/** The number of a read of the database's tables that still runs, as a run's 503 says it (`catalogRead`), else null —
+ *  an answer that is not JSON is no such answer. */
+function runningRead(text) {
+  let body;
+  try { body = JSON.parse(text); } catch { return null; }
+  return Number.isInteger(body?.catalogRead) && body.catalogRead > 0 ? body.catalogRead : null;
 }
 
 /** A request's init carrying JSON: `json("POST", { tables })`. */

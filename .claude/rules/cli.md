@@ -124,6 +124,30 @@ CLI lacks).
   Bearer` from the project's `.mason/config.json` (0600). It listens on 127.0.0.1 only and checks the `Host` header.
   It serves the web page too (`mason ui`, src/web/; `.claude/rules/web-ui.md`), under `mason serve` as well, listening only through `listenOnLoopback`, which takes no address (and, under `mason serve` with `MASON_UI_SOCKET`, a Unix socket made 0600 in a folder only Mason's user can write, whose requests reach the same handler behind the same guard: src/cli/ui-socket.ts), a `PageTunnel` opened with the run's token (`mason ui --ssh`, src/cli/ui-ssh.ts) being the guard's only way to add a Host; its users are
   `mason user`'s own functions (`addUser`, `listUsers`, `removeUser`, `disableUser`, `enableUser`), so the page and the CLI cannot disagree.
+  **The run reads the database's catalog only when asked** (issue 890: a 10-second timer kept a serverless compute awake
+  with every table `sync: off`; `sourceCatalog`, src/cli/source-catalog.ts): what SHOWS it (`/api/state`) asks
+  `RunContext.freshFacts`, a read that ENDED under `CATALOG_FRESH_MS` ago reused (from its end, never its start: a
+  read over a minute long was stale as it ended, and an add read twice) and never waited for past `STATE_WAIT_MS`; an
+  add's or a remove's answer carries the state of the read it acted on, never a second one; what ACTS on
+  it (a table's columns or Sync choice, `/api/pick`, `/api/remove`, `mason add`'s `/api/state?fresh=1`) asks
+  `factsNow` (`actRead`): a read BEGUN AFTER IT ASKED, never one begun before however young, waited for `ACT_WAIT_MS`
+  (under the commands' 30 s); its failure, or its still running with its number (`catalogRead`, the
+  `x-mason-catalog-read` header), said as a 503 Failure (`catalogFailure`) — never an older read answered as the
+  database now, never the run said as down. The command (`callRunReading`, src/cli/control.ts) and the page (`createAsk`,
+  src/web/shared.js) ask again carrying the number, and an add's every step carries the number its first was given: ONE
+  read serves the whole add. ONE READ AT A TIME on the database: an actor asking while one runs is given the next,
+  shared by all who ask meanwhile. The read is ONE read-only transaction and its settings are `SET LOCAL`, never a
+  session `SET` (a pooler in transaction mode hands the server connection on with nothing reset: the re-check at
+  6d60906b, an application's queries got the read's 2 s lock limit), ended on every way out (COMMIT, ROLLBACK, else the
+  close). It waits on a lock `CATALOG_LOCK_TIMEOUT_MS`, and on nothing else short: a
+  large catalog takes what it takes. A read is told SLOW from SILENT by its progress (`stallWatch`, `watchedRead`):
+  bytes arriving on its connection; quiet `STALL_QUIET_MS`, the database is asked about the statement running now, found
+  by the comment each statement of the read begins with, NEVER by a process id (a pooler rewrites BackendKeyData's:
+  the review of PR 900 at 0d5a63fc, every large read ended at 15 s) — working on it: slow; done with it, or waiting to
+  send to us: silent, ended; not on the database (queued in a pooler, or gone) or the database not answering: silent
+  once nothing was heard for `STALL_GIVE_UP_MS`. A read given up on is CANCELLED on the database (a CancelRequest the
+  way its connection came, which a pooler maps) before its connection is closed. `CATALOG_READ_TIMEOUT_MS` is the last
+  guard. A usage sample and `/metrics` read `facts()` as it is. No timer reads it (tests/integration/cli-catalog-read.itest.ts counts an idle run's connections).
   **The request log's filters are read by ONE parser** (`requestFilter`, src/cli/request-filter.ts) at both entrances
   — `mason logs --requests`' options and `/api/requests`' query string — so a filter means one thing and a mistake is
   worded once (its key spelled as the entrance spells it). `mason status`'s query summary is its own endpoint

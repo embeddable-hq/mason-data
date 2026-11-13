@@ -140,9 +140,9 @@ after(() => { server.close(); fs.rmSync(root, { recursive: true, force: true });
 
 // the run's cookie is named for its port (src/cli/security.ts cookieName), known once the server listens
 const cookieNow = () => `mason_dev_${ctx.port}=t0ken-of-this-run`;
-function call(method: string, p: string, o: { host?: string; origin?: string | null; cookie?: string | null; body?: unknown; bearer?: string } = {}): Promise<{ status: number; headers: http.IncomingHttpHeaders; text: string }> {
+function call(method: string, p: string, o: { host?: string; origin?: string | null; cookie?: string | null; body?: unknown; bearer?: string; headers?: Record<string, string> } = {}): Promise<{ status: number; headers: http.IncomingHttpHeaders; text: string }> {
   return new Promise((resolve, reject) => {
-    const headers: Record<string, string> = { Host: o.host ?? `127.0.0.1:${ctx.port}` };
+    const headers: Record<string, string> = { ...o.headers, Host: o.host ?? `127.0.0.1:${ctx.port}` };
     const cookie = o.cookie === undefined ? cookieNow() : o.cookie;
     if (cookie) headers.Cookie = cookie;
     if (o.bearer !== undefined) headers.Authorization = `Bearer ${o.bearer}`;
@@ -1285,4 +1285,112 @@ test("the summary (/api/queries) is one read shared for 30 s by every page and c
   await assert.rejects(cached(), /could not be read/);
   fail = false;
   assert.equal(await cached(), 4, "the failed read is not kept: the next ask reads again");
+});
+
+test("the database's catalog is read again only by what shows it or acts on it — the state, a table's columns and Sync choice, an add, a remove — never by a usage sample or another read (issue 890)", async () => {
+  const runServer = await import("../src/cli/run-server.ts") as unknown as { usageFacts: (c: RunContext, now?: number) => Promise<unknown> };
+  type Ctx = { freshFacts?: () => Promise<void>; factsNow?: (carried: number | null) => Promise<unknown> };
+  const was = ctx.facts;
+  // what showed it (a read under a minute old, waited for a moment) and what acted on it (a read begun after it asked)
+  const asked: string[] = [];
+  // a table made on the database since the run's last read: shown only once a read asked for has taken it
+  let made: SourceTable[] = [];
+  const fresh = [table({ table: "invoices" })];
+  (ctx as unknown as Ctx).freshFacts = async () => { asked.push("show"); made = fresh; };
+  const carriedSeen: Array<number | null> = [];
+  (ctx as unknown as Ctx).factsNow = async (carried) => { asked.push("act"); carriedSeen.push(carried); made = fresh; return { read: carried ?? 3, failure: null, running: false }; };
+  ctx.facts = () => ({ ...was(), tables: [...was().tables, ...made] });
+  try {
+    for (const p of ["/api/ping", "/api/slow", "/api/refused", "/api/queries", "/api/running", "/api/users"]) {
+      assert.equal((await call("GET", p)).status, 200, p);
+    }
+    await runServer.usageFacts(ctx);
+    assert.deepEqual(asked, [], "a usage sample, the logs, the users and the queries never read the catalog");
+    const state = JSON.parse((await call("GET", "/api/state")).text) as { tables: Array<{ table: string }> };
+    assert.deepEqual(asked, ["show"]);
+    assert.ok(state.tables.some((t) => t.table === "public.invoices"), "the read is made before the answer: the new table is in it");
+    assert.equal((await call("GET", "/api/tables/public.invoices/columns")).status, 200);
+    assert.equal((await call("GET", "/api/tables/public.invoices/sync")).status, 200);
+    // (whatever it answers: no folder chosen yet in this test alone, or the table it lacks)
+    const r = await pickIt("public.nope");
+    assert.ok(r.status >= 400, r.text);
+    await call("POST", "/api/remove", { body: { tables: ["public.nope"] } });
+    assert.deepEqual(asked, ["show", "act", "act", "act", "act"], "a column choice, a Sync choice, an add and a remove read the database as it is now");
+    // mason add reads the state as it is now before it checks its tables (?fresh=1): a table made a moment ago is there;
+    // the answer says the read's number, which the add's next steps carry (one read for the whole add)
+    const st = await call("GET", "/api/state?columns=1&fresh=1");
+    assert.equal(st.status, 200);
+    assert.equal(st.headers["x-mason-catalog-read"], "3");
+    assert.deepEqual(asked.at(-1), "act");
+    await call("POST", "/api/pick", { body: { table: "public.nope", picked: true }, headers: { "x-mason-catalog-read": "3" } });
+    await call("GET", "/api/tables/public.invoices/columns", { headers: { "x-mason-catalog-read": "junk" } });
+    assert.deepEqual(carriedSeen.slice(-2), [3, null], "the number carried, and none for one that is not a number");
+  } finally {
+    delete (ctx as unknown as Ctx).freshFacts;
+    delete (ctx as unknown as Ctx).factsNow;
+    ctx.facts = was;
+  }
+});
+
+// THE RE-CHECK OF PR 900: an add whose read failed answered from the read before ("no table" of one the database has,
+// "no column … did you mean" of one it has); now each says the read failed and why, and changes nothing
+test("an add, a remove, a column or Sync choice whose read of the database fails says so, with why, and changes nothing; the run is up", async () => {
+  type Ctx = { factsNow?: (carried: number | null) => Promise<unknown> };
+  const failure = { code: "failed", message: "the tables of app could not be read just now: canceling statement due to lock timeout",
+    why: "another session holds a lock on one of its tables (a migration, often), and Mason waits on a lock at most 2 s",
+    fix: "run it again once that session's transaction ends", next: [["mason doctor", "checks the machine and the project's database"]] };
+  let running = false;
+  (ctx as unknown as Ctx).factsNow = async () => ({ read: 9, failure, running });
+  const before = chosen === null ? null : filesUnder(chosen).map((f) => [f, fs.readFileSync(path.join(chosen!, f), "utf8")]);
+  try {
+    for (const [method, p, body] of [["POST", "/api/pick", { table: "public.customers", picked: true }], ["POST", "/api/remove", { tables: ["public.customers"] }],
+      ["GET", "/api/tables/public.customers/columns", undefined], ["GET", "/api/tables/public.customers/sync", undefined], ["GET", "/api/state?columns=1&fresh=1", undefined]] as const) {
+      const r = await call(method, p, body === undefined ? {} : { body });
+      assert.equal(r.status, 503, `${p}: ${r.text}`);
+      const answer = JSON.parse(r.text) as { error: string; failure: { code: string; message: string; why: string; fix: string } };
+      assert.deepEqual([answer.error, answer.failure.code, answer.failure.message, answer.failure.why, answer.failure.fix],
+        [failure.message, "failed", failure.message, failure.why, failure.fix], p);
+    }
+    if (before !== null) assert.deepEqual(filesUnder(chosen!).map((f) => [f, fs.readFileSync(path.join(chosen!, f), "utf8")]), before, "nothing written");
+    // a read that still runs: its number beside the failure, so the command or the page waits on that same read again
+    running = true;
+    const still = await call("GET", "/api/tables/public.customers/columns");
+    assert.equal(still.status, 503);
+    assert.equal((JSON.parse(still.text) as { catalogRead?: number }).catalogRead, 9);
+    assert.equal(still.headers["x-mason-catalog-read"], "9");
+    // what only shows the database's tables still answers, from the read before
+    assert.equal((await call("GET", "/api/state")).status, 200);
+  } finally {
+    delete (ctx as unknown as Ctx).factsNow;
+  }
+});
+
+// THE REVIEW OF PR 900 AT 0d5a63fc, B2: an add's pick and a remove answer with the run's state, and that state asked for
+// a read of its own (`freshFacts`) — over a catalog whose read took over a minute, the read the pick had just waited on
+// was already stale, so one `mason add` read the catalog twice, and each pick waited up to 2 s more
+test("an add and a remove answer with the state of the read they acted on: never a second read of the database's tables", async () => {
+  type Ctx = { freshFacts?: () => Promise<void>; factsNow?: (carried: number | null) => Promise<unknown> };
+  const asked: string[] = [];
+  (ctx as unknown as Ctx).freshFacts = async () => { asked.push("show"); };
+  (ctx as unknown as Ctx).factsNow = async (carried) => { asked.push("act"); return { read: carried ?? 7, failure: null, running: false }; };
+  const was = fs.readFileSync(sourceFile, "utf8");
+  const wasChosen = chosen;
+  chosen = folder;
+  try {
+    const added = await pickIt("public.customers");
+    assert.equal(added.status, 200, added.text);
+    assert.ok((JSON.parse(added.text) as { state?: unknown }).state !== undefined, "the answer carries the state");
+    const unpicked = await pickIt("public.customers", false);
+    assert.equal(unpicked.status, 200, unpicked.text);
+    assert.equal((await pickIt("public.customers")).status, 200);
+    const removed = await call("POST", "/api/remove", { body: { tables: ["customers"] } });
+    assert.equal(removed.status, 200, removed.text);
+    assert.ok((JSON.parse(removed.text) as { state?: unknown }).state !== undefined, "the answer carries the state");
+    assert.deepEqual(asked, ["act", "act", "act", "act"], "each edit read the database once, as it acted; its answer asked for no other read");
+  } finally {
+    delete (ctx as unknown as Ctx).freshFacts;
+    delete (ctx as unknown as Ctx).factsNow;
+    fs.writeFileSync(sourceFile, was);
+    chosen = wasChosen;
+  }
 });

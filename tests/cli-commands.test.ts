@@ -1831,3 +1831,67 @@ test("a list flag takes a comma list or the flag repeated, meaning the same: --c
     assert.match((JSON.parse(ranges.stdout) as { error: { message: string } }).error.message, /10\.0\.0\.0\/33/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+// THE RE-CHECK OF PR 900 (finding 5): a lock met at the pick step (POST /api/pick) dropped its why and its way out — the
+// command showed less than the Failure the run built, where the step before it (`/api/state?fresh=1`) says it whole
+test("mason add and mason remove with Mason up: the database's tables not readable at the edit is the run's Failure whole — what, why, the way out, next", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-edit-unread-")));
+  const folder = path.join(root, "app", "mason");
+  const file = path.join(folder, "sources", "shop.yml");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.mkdirSync(path.join(root, "app", ".mason"), { mode: 0o700 });
+  const url = "postgres://me@127.0.0.1:1/shop";
+  fs.writeFileSync(file, `kind: postgres\nurl: ${url}\ntables:\n  orders: {}\n`);
+  const parsed = parseSource(url);
+  assert.ok("source" in parsed);
+  const col = (name: string, type = "bigint") => ({ name, type, notNull: name === "id", comment: null });
+  const tables = ["orders", "customers", "products"].map((t) => ({ source: `public.${t}`, schema: "public", table: t, key: ["id"], rows: 3, bytes: 8192, comment: null,
+    columns: [col("id"), col("note", "text")], foreignKeys: [] }));
+  const read = () => readSource(folder, path.join(root, "app"), {});
+  // the run's read of the database's tables: the add's first step is given read 5, its first pick carries it and is
+  // answered; then a lock taken by another session fails every later ask
+  const lock = { code: "failed", message: "the tables of shop could not be read just now: canceling statement due to lock timeout",
+    why: "another session holds a lock on one of its tables (a migration, often), and Mason waits on a lock at most 2 s",
+    fix: "run it again once that session's transaction ends", next: [["mason doctor", "checks the machine and the project's database"]] } as Failure;
+  let asks = 0, failFrom = 3;
+  const ctx = {
+    page: false, users: { file: path.join(root, "app", ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
+    source: parsed.source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables, systemIdentifier: null }), warnings: [], replication: () => null, port: 0, token: "t0ken-of-the-run",
+    factsNow: async (carried: number | null) => ++asks >= failFrom ? { read: carried ?? 6, failure: lock, running: false } : { read: carried ?? 5, failure: null, running: false },
+    folder: () => folder, root: path.join(root, "app"), home: path.join(root, "app", ".mason"), version: "test", startedAt: Date.now(),
+    sources: () => { const r = read(); return { file: "message" in r ? null : r, problem: null }; }, sourcesChanged: () => {}, log: () => {}, readSource: read, runUrl: url,
+    listener: { running: () => [], openSessions: () => ({ open: 0, byClient: [] }) },
+    duck: { copies: () => [], file: path.join(root, "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
+      restarts: () => [], requests: { days: 7 } },
+  } as unknown as RunContext;
+  const server = createRunServer(ctx);
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  ctx.port = (server.address() as { port: number }).port;
+  writeRunning(root, { port: ctx.port, token: ctx.token });
+  const app = path.join(root, "app");
+  try {
+    const a = await runMason(app, ["add", "customers", "products", "--json"], matrixEnv());
+    assert.equal(a.code, 1, a.stdout + a.stderr);
+    const v = JSON.parse(a.stdout) as { added: Array<{ table: string; error?: string }>; error: Record<string, string>; next: Array<{ command: string }> };
+    assert.deepEqual(v.error, { code: lock.code, message: lock.message, why: lock.why, fix: lock.fix }, "the Failure whole, under --json");
+    assert.deepEqual(v.added.map((x) => [x.table, x.error ?? null]), [["public.customers", null], ["public.products", lock.message]], "the table added before it, and the one the failure stopped");
+    assert.deepEqual(v.next.map((n) => n.command), ["mason wait", "mason user add <name>", "mason doctor"], "what to run for the table added, then the failure's own next");
+    assert.match(fs.readFileSync(file, "utf8"), /customers: \{\}/);
+    assert.doesNotMatch(fs.readFileSync(file, "utf8"), /products/, "nothing written for the one the failure stopped");
+    // as a person: the same failure, its why and its way out as rows, then Next
+    asks = 0; failFrom = 2;
+    const person = await runMason(app, ["add", "products"], matrixEnv());
+    assert.equal(person.code, 1, person.stdout + person.stderr);
+    assert.ok(person.stderr.includes(`mason add: ${lock.message}\n`), person.stderr);
+    assert.match(person.stderr, /\n {2}why +another session holds a lock on one of its tables \(a migration, often\), and Mason waits on a lock at most 2 s\n {2}fix +run it again once that session's transaction ends\n/);
+    assert.match(person.stderr, /Next:\n {2}mason doctor +checks the machine and the project's database/);
+    // mason remove: the same Failure, whole, the file unchanged
+    const was = fs.readFileSync(file, "utf8");
+    asks = 0; failFrom = 1;
+    const r = await runMason(app, ["remove", "orders", "--json"], matrixEnv());
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    const rv = JSON.parse(r.stdout) as { error: Record<string, string>; next: Array<{ command: string }> };
+    assert.deepEqual([rv.error, rv.next.map((n) => n.command)], [{ code: lock.code, message: lock.message, why: lock.why, fix: lock.fix }, ["mason doctor"]]);
+    assert.equal(fs.readFileSync(file, "utf8"), was);
+  } finally { server.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});

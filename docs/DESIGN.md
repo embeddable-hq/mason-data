@@ -1344,8 +1344,9 @@ far (the 1.5 GB spill); a laptop whose page cache holds the table never shows th
 **Why the primary key alone (the review of PR #25).** The first version trusted any single-column unique index the
 catalog declares, and three things made that a wrong answer waiting to happen:
 - the catalog's keys and indexes are the source's as of `mason start` and `mason add` / `remove` ONLY: `Sync.setTables`
-  carries them into the catalog's schema, and nothing else calls it — the run's 10-second catalog read
-  (`refreshFacts`, src/cli/dev.ts) refreshes the commands' facts, not the sync's tables. A migration that replaces
+  carries them into the catalog's schema, and nothing else calls it — the run's catalog read when a command or the page
+  asks (`sourceCatalog`, src/cli/source-catalog.ts; a 10-second timer until issue 890) refreshes the commands' facts, not
+  the sync's tables. A migration that replaces
   `UNIQUE (code)` with `UNIQUE (tenant_id, code)`, then two tenants inserting `'a'`, made `count(DISTINCT code)` count
   N+1 for N, and a join on `code` count a row twice. (Feeding the refreshed facts to `setTables` was left out: it would
   also hand the sync every column change of every table, which re-copies a table, and a change of its key mid-run —
@@ -2201,7 +2202,7 @@ only: a table whose `sync:` is `replication` in a demo project's sources file is
 **Why.** A first try should need nothing installed: no Docker, no Postgres, no database of one's own to point at.
 PGlite is a real Postgres (its catalog, its types, its `xmin`) already in the package, where a fixture of rows would be a
 second account of what a source is. It is reached over the wire, not through PGlite's own API, because the demo must run
-the read path production runs — `checkSource`, the chunked copy, the poll, the catalog read every 10 s — or it would show
+the read path production runs — `checkSource`, the chunked copy, the poll, the catalog read when asked — or it would show
 a Mason no one deploys. Polling only, because PGlite has no WAL sender: there is no change log to stream. The port lives in
 one place because two records of it (the URL and a config field) would disagree the day a person edits `.env`; an edited
 URL is refused by the run with the way out. `mason destroy` removes `.mason/demo/` with the copy and keeps `demo: true`,
@@ -2222,6 +2223,46 @@ public before Postgres 15 is a line of information in `mason doctor`, never a wa
 hold it too. A password in `mason init`'s URL is a `Tip:`. **Why.** Each made a normal fact read as a risk, or repeated
 it at every run, and people were scared off for no reason. The synced data's folder is made 0700, so "no access control
 beyond this machine's" overstated it.
+
+### The catalog read when asked (2026-11-12, issue 890)
+
+**Decision (the owner).** A run reads the database's catalog again only when something asks — `/api/state` (the
+commands and the page), a table's columns or Sync choice, an add or a remove — never on a timer (`sourceCatalog`,
+src/cli/source-catalog.ts). What shows it reuses a read under a minute old and waits at most 2 s for a new one; what
+acts on it reads it after it asked, waits for that read at most 20 s, and says when the read failed (and why) or still
+runs, never answering from the read before; the read waits on a lock at most 2 s (`lock_timeout`), and on nothing else
+short, since a catalog of 10,000 tables takes 76 s to read (the review and re-check of PR 900: a read queued behind a
+migration's lock left `/api/state` answering nothing, an add was refused a table made a moment before or answered from
+the read before, and a 20 s statement limit left a 6,500-table catalog never read again). The second re-check: an
+add's two steps each began a read, so a 44 s catalog was never added to; an actor was handed a read begun before it
+asked; eleven reads ran on the source at once; and a silent connection held every add for 15 minutes. So a read is
+given only to actors that asked before it began, one runs at a time (the next shared by all who ask meanwhile), an
+act carries its read's number across its requests (one read for a whole `mason add`), and a read is told slow from
+silent by its progress (`stallWatch`): while bytes arrive on its connection nothing is asked; after 15 s of none the
+database is asked about the read's session, within 10 s, on a connection of its own — working on it is slow, idle or
+gone or waiting to send results that never arrive (`ClientWrite`) is silent; and when the database cannot be asked
+either (a source that stopped answering altogether: a check made by the database's word alone was "couldn't tell" for
+the whole 15 minutes, the third re-check), a minute with neither bytes nor the database's word is silent. A silent read
+ends, said as such; the actor runs it again and the next read begins. The review at 0d5a63fc: behind a pooler (PgBouncer,
+Supavisor, Neon's proxy), BackendKeyData carries the pooler's id, not the backend's, so the check asked
+`pg_stat_activity` about a process that does not exist, judged the session gone, and ended every read of a large
+catalog after 15 s, its query left running on the source; and "fresh" counted from when a read began, so a read over a
+minute was stale as it ended and one `mason add` read the catalog twice. So the read's session is found by what it runs:
+each statement begins with a comment of the read's own (a random id and the statement's number), which `pg_stat_activity`
+shows whatever the pooler; a read given up on is cancelled on the database, by a CancelRequest sent the way its
+connection came (a pooler maps its own key, as for any client), before its connection closes; a read is fresh for a
+minute after it ENDS; and an add's or a remove's answer carries the read it acted on, never a second.
+`tests/integration/cli-catalog-pooler.itest.ts` reads through a proxy that rewrites the id. The re-check at 6d60906b:
+the read's session `SET lock_timeout` stayed on the server connection, and a pooler in transaction mode (PgBouncer's
+`pool_mode = transaction`, Supabase's default pooler URL) resets nothing between clients, so an application's next
+connections were given a 2 s lock limit for up to an hour, and its query failed on another session's lock. So the read
+is one `BEGIN READ ONLY` transaction with `SET LOCAL lock_timeout`, which ends with it whatever the pooler: COMMIT when
+it succeeds, ROLLBACK after a failure while the connection answers, else its close (Postgres rolls back a transaction
+whose client is gone, and a pooler closes a server connection left in one). A run never changes a setting of a session
+it does not own to its end. `tests/integration/cli-catalog-txpool.itest.ts`. **Why.** The 10-second timer connected about 8,640 times
+a day whatever each table's sync, so a serverless compute (Neon, Aurora Serverless) never suspended with every table
+`sync: off`. A failed read keeps the last one and is said in the log, and is not tried again within the minute.
+`tests/integration/cli-catalog-read.itest.ts` counts the run's connections over an idle window.
 
 ### A server's web page: `mason ui --ssh` (2026-10-31, issue 107)
 

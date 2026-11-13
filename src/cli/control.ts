@@ -6,6 +6,7 @@
 import * as http from "node:http";
 import type { DevRun } from "./runs.ts";
 import type { Failure } from "./command.ts";
+import { CATALOG_READ_HEADER, CATALOG_READ_TIMEOUT_MS } from "./source-catalog.ts";
 
 /** The run does not answer: a failure with the reason as `why` and mason logs as the way out (`failure` is what a command
  *  hands src/cli/command.ts failed). */
@@ -19,12 +20,13 @@ export class RunUnreachable extends Error {
 
 /** One request to the run. A reply with an error status is returned (its `error` is the sentence to show). `timeoutMs`
  *  is for a request that does work on the database (mason sync scans a table whole): the others answer in moments. */
-export async function callRun(run: DevRun, method: "GET" | "POST", route: string, body?: unknown, timeoutMs = 30_000): Promise<{ status: number; body: Record<string, unknown> }> {
+export async function callRun(run: DevRun, method: "GET" | "POST", route: string, body?: unknown, timeoutMs = 30_000,
+  headers: Record<string, string> = {}): Promise<{ status: number; body: Record<string, unknown>; read: number | null }> {
   let res: Response;
   try {
     res = await fetch(run.control.url + route, {
       method,
-      headers: { Authorization: `Bearer ${run.control.token}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+      headers: { ...headers, Authorization: `Bearer ${run.control.token}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -36,7 +38,30 @@ export async function callRun(run: DevRun, method: "GET" | "POST", route: string
   let parsed: Record<string, unknown>;
   // the setup server answers JSON; anything else is an error to show as it came
   try { parsed = JSON.parse(text) as Record<string, unknown>; } catch { parsed = { error: text.trim() || `HTTP ${res.status}` }; }
-  return { status: res.status, body: parsed };
+  // the number of the read of the database's tables the run acted on, when it says one (src/cli/source-catalog.ts)
+  const read = res.headers.get(CATALOG_READ_HEADER);
+  return { status: res.status, body: parsed, read: read !== null && /^[1-9][0-9]{0,15}$/.test(read) ? Number(read) : null };
+}
+
+/**
+ * A REQUEST THAT ACTS ON THE DATABASE'S TABLES (an add, a remove; src/cli/source-catalog.ts): it carries the number of
+ * the read an earlier request of the same command was given (`read`), so one read serves the whole command, and while
+ * that read still runs (a 503 saying `catalogRead`: a large catalog takes longer than one request may wait) it asks
+ * again carrying it — waiting on the same read, never a new one — until the read ends or fails, or `CATALOG_READ_TIMEOUT_MS`
+ * passes (the re-check of PR 900: an add of a 10,000-table catalog, 44 s a read, failed ten times as "still being read").
+ */
+export async function callRunReading(run: DevRun, method: "GET" | "POST", route: string, body: unknown, read: number | null = null,
+  o: { progress?: (said: string) => void } = {}): Promise<{ status: number; body: Record<string, unknown>; read: number | null }> {
+  let carried = read;
+  const until = Date.now() + CATALOG_READ_TIMEOUT_MS;
+  for (;;) {
+    const r = await callRun(run, method, route, body, 30_000, carried !== null ? { [CATALOG_READ_HEADER]: String(carried) } : {});
+    const again = r.status === 503 && typeof r.body.catalogRead === "number" && Number.isInteger(r.body.catalogRead);
+    if (!again || Date.now() > until) return { ...r, read: r.read ?? carried };
+    // a person sees the wait go on (the run's own words: how long the read has run), never a silence or a failure
+    o.progress?.(String(r.body.error));
+    carried = r.body.catalogRead as number;
+  }
 }
 
 /** A request whose answer stays open (`POST /api/share`): its first line, while the connection is the thing held. */

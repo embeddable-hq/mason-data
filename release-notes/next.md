@@ -23,9 +23,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   own default, which every role has. It says so as information. A grant someone made, or a schema the role owns, is
   still a warning.
 - **Calmer words.** The note for a serverless database (Neon, Aurora Serverless) now names everything that keeps it
-  awake, Mason's own read of the database's tables every 10 seconds included. `mason share` says it is for trying
-  Mason out. A table's line says "not kept current" in lower case.
-
+  awake. `mason share` says it is for trying Mason out. A table's line says "not kept current" in lower case.
 - **A JSON field read through a path your tool sends as a parameter is now as fast as one written in the query.**
   Metabase sends the path of every JSON field it unfolds as a parameter (`payload #>> array[$1]::text[]`). Mason used
   to read such a path row by row in its slowest way, so a card grouped by a JSON field took 10 to 18 times as long as
@@ -40,6 +38,17 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **A running Mason no longer connects to your database every 10 seconds while idle.** It read the database's tables
+  again on a timer, whatever each table's sync, so a serverless database (Neon, Aurora Serverless) never suspended,
+  and every database logged about 8,600 connections a day. Mason now reads them only when you ask. `mason status`,
+  `wait` and `doctor` and the web page reuse a read under a minute old, and never wait more than 2 seconds for a new
+  one. `mason tables`, `add` and `remove`, and the page's Columns and Sync choices, read them as they are now. They
+  say so when they cannot (a lock held by a migration, a connection gone silent), and change nothing. One read serves a
+  whole `mason add`, however many tables, and Mason makes one read at a time. A database with many tables can take a
+  minute to read: `mason add` waits for the read and says that it is still going. This works behind a connection
+  pooler too (PgBouncer, Supavisor, Neon's proxy). With every table `sync: off`, a run that nobody asks opens no
+  connection after its first sync. A table made on the database can be added at once, and shows in `mason status`
+  within about a minute.
 - **A table kept current by `sync: replication` is no longer called current while Mason compacts it.** During a
   compaction, the newest changes to the table wait until it ends, and queries read the rows as they were. Before, `mason
   status`, `mason wait` and the web page said the table was synced as of the newest change. Now its line says it is
