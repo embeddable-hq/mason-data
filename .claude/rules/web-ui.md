@@ -21,15 +21,17 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   `ALIASES` (src/web/routes.js, the one list of the page's addresses, which the run's check of `MASON_UI_NAV_*` reads too) of the view they were: a bookmark lands where it did (`tests/web-page.test.ts` holds each).
 - **A page with a `parent` is in its group** (`observability`, `GROUPS`): its link is under the group's heading in the
   sidebar (always shown, the current page the view itself, `aria-current`), and its views share
-  `ctx.range()` — `RANGES` in src/web/shared.js (Now · Last hour · 24 hours · 7 days · 30 days · 90 days, Now by default), each its `since`
+  `ctx.range()` — `RANGES` in src/web/shared.js (Last 15 mins · Last hour · 24 hours · 7 days · 30 days · 90 days, the last 15 minutes by default), each its `since`
   for every endpoint and its usage step; a range past the week is offered only when the run keeps it (`rangeOffered`, from
   `/api/state` `engine.keptDays`), else shown disabled with MASON_HISTORY_DAYS as its reason — kept in the hash (`?range=`), never in storage, and in the group's links;
-  the range control is in the view's header row, right of its title (`renderSubnav`, its section's `range-<id>`), never in the sidebar. A view builds its paths from
-  it, so a change of range is a new read of the view shown alone. **Now is the only live range**: a read bound to the
-  range takes its rate from `rangeEvery(range, everyMs)` — that rate under Now, `Infinity` under any other — so a past
-  range is read once when chosen (`show` marks every read stale) and again only on its Refresh; the control says Live,
-  or when it was read. Why: a person comparing a past hour wants it to hold still; one watching wants it to move.
-  Detector: tests/web-page.test.ts (the reads due under Now and under a past range).
+  the range control is in the view's header row, right of its title (`renderSubnav`, its section's `range-<id>`), never in the sidebar,
+  and on a phone it scrolls inside itself (`.range`, the containing block of its `.sr` words too, so they never widen the page). A view builds its paths from
+  it, so a change of range is a new read of the view shown alone. **Every range is live**: a read bound to the range
+  takes its rate from `rangeEvery(range, everyMs)`, its own rate or the range's `everyMs` where that is slower (24 hours
+  every 30 s, a week or more every minute), and `show` marks every read stale, so a range chosen is read at once. The
+  control says Live at every range, its title the range's rate. Why: every range ends now, and one read once and held
+  still read as stale (the owner, 2026-11-13); a longer range's reads scan more of the logs. Detector:
+  tests/web-page.test.ts (the reads due under the last 15 minutes, the hour, the day and the week).
 
 - **A page is a module of its own, registered in three places** (the contract is at the top of src/web/app.js): its
   `page = { id, title, hash?, parent?, create(ctx) }` in `PAGES`, its route `/pages/<id>.js` in `PAGE_ROUTES`, its
@@ -47,10 +49,12 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   CLI's function by a test (`tests/web-page.test.ts`: `copyingText`, `tableLines`, `duration`, `tableFacts`,
   `readinessWord`, `totalsText`, `fileSize`, `bytesText`, `spanText`, `eventLine`, `requestLine`, `queryLines`,
   `syncedReport`'s headline and rows, `streamLines`, `unsupportedLines`, `ago`, `CATCHING_UP`), so the two cannot
-  drift. Where the CLI's line names a command or a file, the page says it in its own words, held by a test of those
+  drift. The "mason status" box's Source row is `mason status`'s own, held equal the same way (`sourceRows`).
+  Where the CLI's line names a command or a file, the page says it in its own words, held by a test of those
   words: what an add or a remove did (`addedLines`, `removedReport`), what follows a sync (`syncedReport`'s tips), a
   table whose sync is off (`keptAge`), a Disable (`disableEffect`), and the Overview's facts card (`factRows`,
-  `factNotes`: the database, Mason, the disk and the tools connected; `mason status` keeps its fuller rows). A line the
+  `factNotes`: the Source, Mason, the disk and the tools connected; `mason status` keeps its fuller rows; the owner,
+  2026-11-13, kept main's card over a table of the CLI's rows). A line the
   page splits into a table's cells is held equal cell by cell: its cells, read in order, are the CLI's line (spaces aside).
 - **Nothing on the page that `mason status --json` (or the command whose `--json` it renders) cannot also say.** A page
   that needs a fact gets it by adding it to the JSON first, computed ONCE on the server (`readiness` is the run's, in
@@ -62,7 +66,8 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
 - **A page shows what a person reads, and puts the rest behind a closed `<details>`**: a debugging aid (the run's raw
   log, with internal tags and absolute paths; the process's memory; a request's whole id, bytes and statement) is a
   details, and what only a details shows is read only while it is open (the raw log: `toggle`, the page's own state).
-  A fact is in ONE place: the Overview has one table of facts, the Tables page one list of tables. **A fact the run could
+  A fact is in ONE place: the Overview has one table of facts (beside the Source under the box's word, which the owner
+  asked for in both), the Tables page one list of tables. **A fact the run could
   not read is `unknown` with its reason, never 0, and one it does not say is not shown** (`{ error }` fields of
   `/api/state`: `stream.slotWal`, `engine.restarts`, `disk`, `sessions`).
 - **Tables are added and removed through the commands' own endpoints** (the Tables page): the list is
@@ -79,7 +84,7 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   Sync is `POST /api/sync` `{ tables: [name] }` (`mason sync`), said beside its Sync as `mason sync` says it, but for its tips, which name the page's Sync now
   (`syncedReport`, src/cli/sync.ts), and written disabled, in its room, its title the reason, while `/api/state`
   `tables[].syncRefusal` says why `mason sync` of it is refused now — the sync's one check, which `pollNow` refuses with
-  (`Sync.syncRefusal`, src/duck/sync.ts), never a check of the page's own; the search box filters by name, and All / Added / Not added by state, in the page alone (the endpoint returns every table).
+  (`Sync.syncRefusal`, src/duck/sync.ts), never a check of the page's own; the tables are two lists, Added over Not added, each table in the list it was in when the lists were last laid out (`layoutOf`: the page shown, the search or Failed only changed), so a table just added keeps its row; the search box filters both by name, and Failed only lists the failed tables alone, in the page alone (the endpoint returns every table).
 - **No framework, no build step, no CDN, nothing fetched from elsewhere**: plain HTML, CSS and ES modules importing each
   other by relative paths, served as they are (cli/build.ts copies `src/**` that is not TypeScript, subfolders too,
   cli/beside.ts), because Mason runs on boxes without internet and the page must work there whole. **A small dependency
@@ -123,10 +128,12 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   and a failed poll keeps the last state
   and says, as a Failure, what to do (the run stopped: `mason start`, then `mason ui`; a cookie of an earlier run:
   `mason ui`).
-- **A password is shown once and kept nowhere**: an added user's password lives in the page's memory until the person
-  dismisses it, never in storage, a URL or a log line (the server logs `user <name> added`, never the password).
+- **A password is shown once and kept nowhere**: an added user's password, and a temporary cloud login's, lives in the
+  page's memory only while its one-time dialog is open (index.html's `<dialog id="once">`), dropped at its "I have copied
+  it", the one thing that closes it; never in storage, a URL or a log line (the server logs `user <name> added`, never the password).
 - **Tests assert on what a page WROTE, never geometry**: the renderers are pure functions of the JSON returning HTML
-  (`renderStatus`, `renderTables`, `renderUsers`, `renderAdded`, `renderFailure`, `renderNav`), the app runs over a fake
+  (`renderStatus`, `renderTables`, `renderUsers`, `renderFailure`, `renderNav`; `renderAdded` and `renderShareOnce`
+  the one-time dialog's parts, HTML each), the app runs over a fake
   `fetch` (`createApp`; `show(id)` chooses the page as the hash does), `start` over a fake document and window,
   and the fixtures are the server's own (`runState` over synthetic copies: running, copying, failed, not kept current;
   a stopped run's answers). The helpers run under `node --test`; the page's text is read through `textOf`.
@@ -155,8 +162,8 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   the line's words, its track `aria-hidden`), its % as text at the bar's end as the CLI prints it, the fill the line's
   state (patina copying, green served, amber not kept current, rose failed), waiting a quiet shimmer of the track (never
   under `prefers-reduced-motion`): a patterned bar reads as noise. A state's marker is a small stone block; a page's title
-  stands on a course of bricks; the Getting-started steps are courses of a wall; an empty state is a footing with
-  nothing built on it. All of it is boxes and borders: **no gradient and no image** (`url(` only in an `@font-face`).
+  stands on a course of bricks; the Getting-started steps are courses of a wall; an empty state is one quiet line of
+  muted text, one short sentence (`empty`), never a box. All of it is boxes and borders: **no gradient and no image** (`url(` only in an `@font-face`).
   **The mark is Mason's own**: an arch of bricks with its keystone, an inline SVG in index.html in `currentColor`.
 - **The sidebar is the nav at every width, never a second one**: 232 px with labels; below 1000 px an icon rail, each
   label its icon's tooltip and still the link's name; below 640 px a top bar whose menu button (`aria-expanded`,
@@ -185,15 +192,19 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   stable id (a request's id, a table's name), written into the HTML by `details(key, …)` — never the element's own,
   which a rewrite replaces. (The raw log's details is the Sync events page's own state, as before.)
 - **A fact is in ONE place on the Overview**: the cards carry the copies in all, their rows, the last sync and the copy's file,
-  and the facts table no longer does; the last day's statements and p95 cards are the request log's summary at a
-  glance, its table the day and the week in full.
+  and the facts table does not; the last day's statements, p95, errors and query errors cards are the request
+  log's and the run's events' summary at a glance, each linking to the page that lists them in full (Queries, Sync
+  events). A card's line says what it counts, all of it: Errors counts every failed event (a sync, a restart, the web
+  page's own error), never "sync" alone.
 - **Numbers are mono and right-aligned in a column; a table scrolls inside its card on a phone, never the page**: the
   reader compares down a column, and a page that scrolls sideways hides the nav.
 - **A click moves no other row and no column** — a table that moves under the pointer loses the next click:
   a question (a Remove's, a Cancel's), a form (Columns…, Name its key…) and what an action answered are a POPOVER beside
   the button (`pop` and `placePops` of src/web/shared.js: written after the table, `position: fixed`, anchored to the
-  row's actions cell by its id, `actId`), never a row inserted and never in the actions' cell; an answer, like a
-  refusal, stays until it is dismissed — its Dismiss, Escape (the page's `dismiss`, when no question is open), or the
+  row's actions cell by its id, `actId`), never a row inserted and never in the actions' cell. A popover that can be
+  closed has an X at its top right (`POP_X`), which presses its own Dismiss or Cancel (`data-pop-close`), never an
+  action of its own. An answer, like a
+  refusal, stays until it is dismissed — its Dismiss or X, Escape (the page's `dismiss`, when no question is open), or the
   next action's answer or question in its place (two lines a person may act on went mid-read: issue 811). A
   button whose label changes keeps the room of its longest (`ROOMS`: Sync → Syncing… → Synced ✓, Copy → Copied); one
   held while it asks stays where it was, disabled. The Tables list's columns are FIXED widths (`table-layout: fixed`,
@@ -202,7 +213,8 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   written for every row, empty or not. **A table's name and state are never cut** (issue 884, the owner: "otherwise
   we can't see them"): each wraps in its cell, the row growing to fit (detector: tests/web-tables-layout.test.ts). Only an expander the reader opens (a request's
   details, a copy's whole error) pushes rows down — and never widens a column (`.detail-body`). A row's actions never
-  wrap (`td.act`) but on a phone, where the Tables list stacks them in a column of their own, a bare table too wide scrolls in its own box (`.table-wrap`), and where the table scrolls a row's
+  wrap (`td.act`) but on a phone, where the Tables and Users lists stack them in a column of their own (a pinned column
+  of buttons in a row covered the Users' Role and its From…, which could not be pressed), a table too wide scrolls in its own box (every table on a phone; `.table-wrap` where a page wraps one), and where the table scrolls a row's
   actions stay pinned at its card's right. The detector is `tests/web-page.test.ts` "layout guard" (no row, cell or
   question inserted by any click); walk every page at 1280, 1024, 900 and 375 px measuring rows and columns before and
   after each click (getBoundingClientRect) after a change to a row.
@@ -233,7 +245,7 @@ adds pages, not endpoints.
 | Feature | Endpoint (src/cli/run-server.ts) | Renders the shape of |
 |---|---|---|
 | The statements that ran | `GET /api/requests?since=&outcome=&user=&client=&slow=1&search=&before=` | `mason logs --requests --json` |
-| The sync's failures and events | `GET /api/events?limit=&since=&failed=1` | `mason logs --events --json`; the latest failures, `mason status --json` `recentErrors` |
+| The sync's failures and events | `GET /api/events?limit=&since=&failed=1&scheduled=1` | `mason logs --events --json`; the Overview's Errors card counts the last day's (`?failed=1&since=24h`); Sync events' Failures only asks `failed=1`, so no other event takes a failure's place among the newest read |
 | Usage over time, each copy's own size | `GET /api/usage?since=&until=&step=` | `mason usage --json` (`samples`, re-bucketed by `step`; `copySizes`) |
 | The run's log | `GET /api/logs?lines=&since=` | `mason logs --json` (`lines`: `{ at, text }`) |
 | Each table's sync, the copies in all | `GET /api/state` `tables[].sync`, `totals` | `mason status --json` |

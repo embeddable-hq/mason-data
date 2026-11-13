@@ -155,6 +155,11 @@ export function readinessWord(r: Readiness): "Ready" | "Failed" | "Under way" {
   return r.ready ? "Ready" : r.failed.length ? "Failed" : "Under way";
 }
 
+/** What Ready means for the synced data, as `mason status` and `mason wait` end on it after the word ("Ready: …."), and
+ *  the web page's Overview says it under the word (src/web/pages/status.js `READY_TEXT`, held equal by
+ *  tests/web-page.test.ts). */
+export const READY_TEXT = "every added table is synced and served";
+
 /**
  * WHERE A RUN IS. Ready when every added table's copy has ended well, its one catch-up poll included (issue 834): `mason add` followed by `mason wait` returns
  * once the table is served. A copy that failed is a failure (the sync tries again by itself, and says so in the log),

@@ -87,7 +87,7 @@ export interface ShareState {
   shares: Array<{ user: string; from: ShareFrom; role: string | null; reads: string; openedAt: string; via: string | null; host: string | null; port: number | null; endsAt: string | null; state: string }>;
 }
 
-/** Who opened a share and holds it: `mason share`, or the web page's Connect from anywhere (src/cli/page-share.ts). */
+/** Who opened a share and holds it: `mason share`, or the web page's Temporary cloud login (src/cli/page-share.ts). */
 export type ShareFrom = "command" | "page";
 
 /** The last share that ended, and why: `/api/state` `shareEnded`, so a page that held it says why it is gone. */
@@ -98,7 +98,7 @@ interface Held { user: string; from: ShareFrom; secret: string; role: string | n
 /** How each holder ends its share, as a refusal names it. */
 const HOW_TO_END: Record<ShareFrom, [string, string]> = {
   command: ["mason share", "Ctrl-C in the terminal running mason share ends it"],
-  page: ["the web page", "Stop sharing on the web page's Overview ends it (mason ui opens the page)"],
+  page: ["the web page", "Stop, under Temporary cloud login on the web page's Users page, ends it (mason ui opens the page)"],
 };
 
 export interface ShareDeps {
@@ -249,12 +249,12 @@ export class RunShares {
     if (open === undefined) return null;
     const [who, how] = HOW_TO_END[open.from];
     return { message: `a share is open already: ${open.user}, opened by ${who}${open.tunnel.host !== undefined ? ` at ${open.tunnel.host}:${open.tunnel.port}` : ""}`, code: "refused",
-      why: "one share at a time between the web page and mason share: each is a public address someone must be watching", fix: `${how}, then share again`,
+      why: "one share at a time between the web page and mason share: each is a public address someone must be watching", fix: `${how}, then ${from === "page" ? "Open a cloud login" : "run mason share"} again`,
       next: [["mason status", "the share open now"]] };
   }
 
-  /** What a share with no role named reads (`shareRole`'s answer, the one authority): the web page asks it before it asks
-   *  the person, to offer the roles as `mason share` would. */
+  /** What a share with no role named reads (`shareRole`'s answer, the one authority): the web page asks it to offer the
+   *  roles beside Open a cloud login, as `mason share` would. */
   async choices(): Promise<{ role: string | null; reads: string } | { failure: Failure; choices?: ShareChoice[] }> {
     return shareRole(undefined, await this.deps.listener.checkRoles());
   }

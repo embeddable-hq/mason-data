@@ -1,10 +1,10 @@
 /**
  * THE USAGE VIEW (#observability/usage, a view of the Observability group; `#usage`, its old address, lands here;
  * docs/OBSERVABILITY.md "Pages"): what the Postgres API answered over the time range the Observability views share —
- * every part following it. Now: who is connected now (`/api/state` `sessions`) and the statements running now
- * (`mason logs --running`, GET /api/running) with a Cancel that asks first (`mason cancel`, POST /api/cancel), read
- * every few seconds. Any other range: who sent statements in it and the slowest that completed (GET /api/activity),
- * read once when chosen. Either way: KPI cards for the range (`/api/activity` `window`: the statements, the failed ones,
+ * every part following it, read again by itself (a longer range less often: `rangeEvery`). The last 15 minutes: who is
+ * connected now (`/api/state` `sessions`) and the statements running now (`mason logs --running`, GET /api/running)
+ * with a Cancel that asks first (`mason cancel`, POST /api/cancel). Any other range: who sent statements in it and the
+ * slowest that completed (GET /api/activity). Either way: KPI cards for the range (`/api/activity` `window`: the statements, the failed ones,
  * p95, rows and bytes sent, each with a sparkline), four small charts (statements, p95, the copy's size and its rows,
  * `mason usage`'s samples: the hour a minute a point, the day an hour, the week six hours), the unsupported SQL of the
  * range (mason status's, GET /api/unsupported), the samples a line, newest first (behind a details once there are
@@ -14,7 +14,7 @@
  */
 import { VIEW_HASHES } from "../routes.js";
 import { esc, n, statementMsText, bytesText, fileSize, duration, details, createOpenSet, cards, card, empty, panel, skeleton, sortTh, sortedBy, nextSort, readPart, usagePath, utcMinute,
-  RANGES, DEFAULT_RANGE, rangeOf, isLive, rangeEvery, firstLine, spanText, agoText, utcText, clientText, clip, TITLE_MAX, unsupportedEntry, renderFailure, json, pop, actId,
+  RANGES, DEFAULT_RANGE, rangeOf, isNow, rangeEvery, firstLine, spanText, agoText, utcText, clientText, clip, TITLE_MAX, unsupportedEntry, renderFailure, json, pop, actId,
   statementCell, POLL_MS, readOnlyLine } from "../shared.js";
 import { spark, seriesChart, seriesOf, drawable } from "../charts.js";
 
@@ -92,7 +92,7 @@ const RUNNING = "api/running";
 const STATE = "api/state";
 /** Who is connected: the clients with the most sessions (or statements) shown, this many; the rest in one row. */
 const SESSIONS_TOP = 10;
-/** What a past range's statements were (GET /api/activity): read once when chosen, every 5 s while the range is Now. */
+/** What a range's statements were (GET /api/activity): every 5 s, or the range's own rate where it is slower. */
 export const activityPath = (range = DEFAULT_RANGE) => `api/activity?since=${RANGES[rangeOf(range)].since}`;
 const ACTIVITY_EVERY_MS = 5000;
 /** The unsupported SQL of a range (`/api/unsupported`: its 10 entries the most refused first): it says what to rewrite. */
@@ -102,7 +102,7 @@ const plural = (count, word) => `${n(count)} ${word}${count === 1 ? "" : "s"}`;
 /** The key a running statement is asked about by: its session and its statement's number. */
 const keyOf = (session, statement) => `${session}:${statement}`;
 /** A range's words on a card: `last 15 min`, `last hour`, `last 24 hours`. */
-const shortSpan = (range) => { const r = RANGES[rangeOf(range)]; return r.live ? "last 15 min" : r.span.replace(/^the /, ""); };
+const shortSpan = (range) => isNow(range) ? "last 15 min" : RANGES[rangeOf(range)].span.replace(/^the /, "");
 
 /**
  * WHERE A ROW LEADS: Observability › Queries filtered to what it counts (`user`, `client`, `slow`, `status`), at the
@@ -253,7 +253,7 @@ export function renderSlowest(list, { range = DEFAULT_RANGE, now = Date.now() } 
 }
 
 /**
- * THE KPI CARDS of the range: while it is Now, who is connected (`sessions`, `/api/state`'s) and what runs (`running`);
+ * THE KPI CARDS of the range: while it is the last 15 minutes, who is connected (`sessions`, `/api/state`'s) and what runs (`running`);
  * for any other, the clients that sent statements in it (`clients`, `/api/activity`'s). Then the range's statements, the
  * failed ones, the p95 (`statementCards`, of `/api/activity` `window`), the bytes and rows sent (one card) — each with a
  * sparkline where `usage` (`/api/usage`'s body) has two samples to draw, and each statement card leading to the
@@ -266,7 +266,7 @@ export function renderUsageKpis({ activity, usage, sessions, running, range = DE
   const line = (k) => specs[SPARKS[k][0]] ? spark(SPARKS[k][0], `${SPARKS[k][1]}, ${r.span} ${perStep(r.stepSeconds)} a point`) : "";
   const label = shortSpan(range);
   const list = [];
-  if (isLive(range)) {
+  if (isNow(range)) {
     if (sessions) list.push("error" in sessions ? card("Connected now", "unknown", firstLine(String(sessions.error)))
       : card("Connected now", plural(sessions.open, "session"), plural(sessions.byClient.length, "client")));
     if (running) list.push(card("Running now", n(running.length), running.length ? `the longest for ${spanText(Math.max(...running.map((x) => x.runningMs)) / 1000)}` : "no query is running"));
@@ -352,11 +352,11 @@ export const page = {
     };
     return {
       model: m,
-      // Now: the running statements every poll, who is connected and the range's numbers every 5 s, the samples and
-      // the unsupported SQL every minute. Any other range: each read once, when it is chosen (or on Refresh)
+      // the last 15 minutes: the running statements every poll, who is connected and the range's numbers every 5 s,
+      // the samples and the unsupported SQL every minute. A longer range: each at its rate or the range's, the slower
       reads: () => [{ path: activity(), everyMs: rangeEvery(ctx.range(), ACTIVITY_EVERY_MS) }, { path: samples(), everyMs: rangeEvery(ctx.range(), EVERY_MS) },
         { path: unsupportedPath(ctx.range()), everyMs: rangeEvery(ctx.range(), UNSUPPORTED_EVERY_MS) },
-        ...(isLive(ctx.range()) ? [{ path: RUNNING, everyMs: POLL_MS }, { path: STATE, everyMs: ACTIVITY_EVERY_MS }] : [])],
+        ...(isNow(ctx.range()) ? [{ path: RUNNING, everyMs: POLL_MS }, { path: STATE, everyMs: ACTIVITY_EVERY_MS }] : [])],
       afterRead() {
         // a statement that ended since it was asked about has nothing left to cancel
         const r = ctx.read(RUNNING)?.body?.running;
@@ -378,7 +378,7 @@ export const page = {
       charts: () => usageSpecs(ctx.read(samples())?.body),
       view() {
         const range = ctx.range();
-        const live = isLive(range);
+        const live = isNow(range);
         const span = RANGES[rangeOf(range)].span;
         const a = ctx.read(activity());
         const running = live ? ctx.read(RUNNING)?.body : undefined;

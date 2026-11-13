@@ -72,7 +72,7 @@ test(`${how}: mason status says hung, and mason stop ends the run and records th
     const st = await runMason(root, ["status"], env);
     assert.equal(st.code, 1, st.stderr);
     assert.match(st.stdout, /^Status: hung\n/);
-    assert.match(st.stdout, new RegExp(`Mason +\\S+, pid ${run.pid} · running but does not answer its commands: a statement may be holding its main thread`));
+    assert.match(st.stdout, new RegExp(`Version +\\S+\\n {2}Up +pid ${run.pid} · running but does not answer its commands: a statement may be holding its main thread`));
     assert.match(st.stdout, /Postgres API +postgres:\/\/<user>:<password>@127\.0\.0\.1:54988\/shop {2}\(held by the hung run; it may not answer\)/);
     assert.doesNotMatch(st.stdout, /not running/);
     assert.match(st.stdout, /\n {2}mason stop {2}.*SIGKILL after 15 s/);
@@ -95,7 +95,7 @@ test(`${how}: mason status says hung, and mason stop ends the run and records th
     const again = await runMason(root, ["status"], env);
     assert.equal(again.code, 0, again.stderr);
     assert.match(again.stdout, /^Status: not running\n/);
-    assert.match(again.stdout, /Mason +\S+ · not running \(last started 2 min ago; \d+s ago: stopped by mason stop \(SIGTERM\): it did not answer its commands and left on SIGTERM\)/);
+    assert.match(again.stdout, /Version +\S+\n {2}Up +not running \(last started 2 min ago; \d+s ago: stopped by mason stop \(SIGTERM\): it did not answer its commands and left on SIGTERM\)/);
   } finally {
     if (run.pid !== undefined && alive(run.pid)) run.kill("SIGKILL");
     fs.rmSync(root, { recursive: true, force: true });

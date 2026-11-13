@@ -62,22 +62,51 @@ export function pollCost(t: Pick<SourceTable, "source" | "rows">, sync: TableSyn
   return pollEstimate(t, sync, m);
 }
 
+/** What a poll of a table costs its database, in numbers (`pollLoad`): the CLI says it in its words (`pollEstimate`),
+ *  the web page's Sync choice in the page's (src/web/pages/tables.js). */
+export interface PollLoad {
+  /** the catalog's row estimate */
+  rows: number;
+  /** about how long one poll's scan takes */
+  scanSeconds: number;
+  /** how often it polls at most: the interval, stretched so a poll waits four times its own time */
+  everySeconds: number;
+  /** how much of the time one backend of the database is busy with it, rounded */
+  busyPercent: number;
+  /** where `scanSeconds` comes from: its last poll, its first sync's read rate (an upper bound: a poll sends only the
+   *  rows that changed), or an assumed scan rate (nothing measured yet) */
+  basis: "measured" | "first-sync" | "assumed";
+  /** the read rate of the basis, rows a second a reader; null for a measured poll */
+  rowsPerSecond: number | null;
+}
+
 /**
  * THE ESTIMATE ITSELF, whatever the interval: `pollCost` says it only where `mason add` warns; the web page's Sync choice
  * says it for every poll of a table over BIG_TABLE_ROWS, before it is saved (src/cli/sync-choice.ts). Null for a table
  * whose rows are not known.
  */
-export function pollEstimate(t: Pick<SourceTable, "source" | "rows">, sync: Extract<TableSync, { mode: "poll" }>, m: PollMeasure | null): string | null {
+export function pollLoad(t: Pick<SourceTable, "rows">, sync: Extract<TableSync, { mode: "poll" }>, m: PollMeasure | null): PollLoad | null {
   if (t.rows === null) return null;
-  const rows = t.rows.toLocaleString("en-US");
-  const [seconds, basis] = m?.lastPollMs != null ? [m.lastPollMs / 1000, "its last poll, measured"]
-    : m?.copyRowsPerSecond ? [t.rows / m.copyRowsPerSecond, `its first sync's read rate, ${Math.round(m.copyRowsPerSecond).toLocaleString("en-US")} rows a second a reader (a poll sends only the rows that changed, so it is at most that)`]
-    : [t.rows / ASSUMED_SCAN_ROWS_PER_SECOND, `the catalog's ${rows} rows at an assumed ${ASSUMED_SCAN_ROWS_PER_SECOND.toLocaleString("en-US")} rows a second of scan (nothing of it measured yet)`];
-  const every = Math.max(sync.seconds, 4 * seconds);
+  const [scanSeconds, basis, rowsPerSecond]: [number, PollLoad["basis"], number | null] = m?.lastPollMs != null ? [m.lastPollMs / 1000, "measured", null]
+    : m?.copyRowsPerSecond ? [t.rows / m.copyRowsPerSecond, "first-sync", m.copyRowsPerSecond]
+    : [t.rows / ASSUMED_SCAN_ROWS_PER_SECOND, "assumed", ASSUMED_SCAN_ROWS_PER_SECOND];
+  const everySeconds = Math.max(sync.seconds, 4 * scanSeconds);
+  return { rows: t.rows, scanSeconds, everySeconds, busyPercent: Math.round((scanSeconds / everySeconds) * 100), basis, rowsPerSecond };
+}
+
+/** `pollLoad` in the CLI's words (`mason add`'s warning). */
+export function pollEstimate(t: Pick<SourceTable, "source" | "rows">, sync: Extract<TableSync, { mode: "poll" }>, m: PollMeasure | null): string | null {
+  const l = pollLoad(t, sync, m);
+  if (l === null) return null;
+  const rows = l.rows.toLocaleString("en-US");
+  const rate = Math.round(l.rowsPerSecond ?? 0).toLocaleString("en-US");
+  const basis = l.basis === "measured" ? "its last poll, measured"
+    : l.basis === "first-sync" ? `its first sync's read rate, ${rate} rows a second a reader (a poll sends only the rows that changed, so it is at most that)`
+    : `the catalog's ${rows} rows at an assumed ${rate} rows a second of scan (nothing of it measured yet)`;
   const s = (x: number): string => x < 90 ? `${Math.round(x)} s` : x < 5400 ? `${Math.round(x / 60)} min` : `${(x / 3600).toFixed(1)} h`;
-  return `${entryName(t.source)} has about ${rows} rows, and each poll scans it whole on your database: about ${s(seconds)} a poll, from ${basis}. ` +
-    `sync: ${syncText(sync)} is stretched to a poll every ${s(every)} at most (a poll waits four times its own time), one backend of your database ` +
-    `busy ${Math.round((seconds / every) * 100)} % of the time — a longer interval (--sync "poll 1h"), or --sync replication (the change log), costs it less`;
+  return `${entryName(t.source)} has about ${rows} rows, and each poll scans it whole on your database: about ${s(l.scanSeconds)} a poll, from ${basis}. ` +
+    `sync: ${syncText(sync)} is stretched to a poll every ${s(l.everySeconds)} at most (a poll waits four times its own time), one backend of your database ` +
+    `busy ${l.busyPercent} % of the time — a longer interval (--sync "poll 1h"), or --sync replication (the change log), costs it less`;
 }
 
 /**

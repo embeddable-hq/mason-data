@@ -194,7 +194,7 @@ test("GET /api/tables/<table>/sync: behind the run's guard — no cookie, a wron
 test("GET /api/tables/<table>/sync: its sync now (off, the default), the polls offered with a big table's cost, and Live's checks — allowed only when every one passes", async () => {
   const orders = await syncOf("public.orders");
   assert.deepEqual(orders.sync, { value: "off", from: "default" }, "a newly added table is off: nothing turns on load by itself");
-  assert.deepEqual(orders.polls.map((p: { sync: string; seconds: number; cost: string | null }) => [p.sync, p.seconds, p.cost]),
+  assert.deepEqual(orders.polls.map((p: { sync: string; seconds: number; cost: unknown }) => [p.sync, p.seconds, p.cost]),
     [["poll 5m", 300, null], ["poll 15m", 900, null], ["poll 1h", 3600, null], ["poll 1d", 86_400, null]], "presets only; a small table's poll costs nothing worth asking");
   assert.equal(orders.bigRows, false);
   assert.deepEqual(orders.live.checks.map((c: LiveCheck) => [c.name, c.state]), [["primary key", "ok"], ["replica identity", "ok"], ["wal_level", "ok"]]);
@@ -203,7 +203,15 @@ test("GET /api/tables/<table>/sync: its sync now (off, the default), the polls o
 
   const events = await syncOf("public.events");
   assert.equal(events.bigRows, true);
-  for (const p of events.polls) assert.match(p.cost, /^events has about 40,000,000 rows, and each poll scans it whole on your database: about \d+ s a poll/, "a big table's cost, before it is saved");
+  // a big table's cost, before it is saved: numbers, which the page says in its own words (never the CLI's flags)
+  for (const p of events.polls) {
+    assert.equal(p.cost.rows, 40_000_000, p.sync);
+    assert.ok(p.cost.scanSeconds > 0 && p.cost.everySeconds >= p.seconds, p.sync);
+    assert.equal(p.cost.everySeconds, Math.max(p.seconds, 4 * p.cost.scanSeconds), `${p.sync}: a poll waits four times its own time`);
+    assert.equal(p.cost.busyPercent, Math.round((p.cost.scanSeconds / p.cost.everySeconds) * 100), p.sync);
+    assert.ok(["measured", "first-sync", "assumed"].includes(p.cost.basis), p.sync);
+  }
+  assert.doesNotMatch(JSON.stringify(events.polls), /--sync/, "no flag of the CLI in what the page says");
 
   const logs = await syncOf("public.logs");
   assert.equal(logs.live.allowed, false, "no primary key");

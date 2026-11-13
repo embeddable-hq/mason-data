@@ -198,6 +198,10 @@ test("mason status --json, Mason stopped: source is the database — its name, i
   assert.equal("kept" in (v.tables as Array<Record<string, unknown>>)[0]!, false, "Mason stopped: no kept");
   assert.deepEqual(v.project, { name: "matrix-stopped", folder: path.join(fs.realpathSync(root), "mason") });
   assert.equal("sources" in v, false);
+  // for a person, the Postgres it syncs from is the Source row (issue 935), never Database; the sources file its own row
+  const person = await runMason(root, ["status"], matrixEnv());
+  assert.match(person.stdout, /\n {2}Sources file +\S+shop\.yml\n {2}Source +postgres:\/\/mason:\*\*\*\*@127\.0\.0\.1:1\/shop \(not checked: Mason is not running\)\n/, person.stdout);
+  assert.doesNotMatch(person.stdout, /\n {2}(Database|Changes) /, person.stdout);
   fs.writeFileSync(path.join(root, "mason", "sources", "shop.yml"), "kind: postgres\nurl: x\ntables:\n  a.b.c: {}\n");
   const bad = JSON.parse((await runMason(root, ["status", "--json"], matrixEnv())).stdout) as { source: { name: unknown; file: unknown; url: unknown; error: { code: string; message: string } } };
   assert.deepEqual([bad.source.name, bad.source.file, bad.source.url, bad.source.error.code], [null, null, null, "bad_source"]);
@@ -269,6 +273,10 @@ test("mason status and mason wait --json, Mason up: each added table says how it
       assert.equal(status.code, 0, status.stdout + status.stderr);
       const s = JSON.parse(status.stdout) as { running: boolean; source: { changes: string }; tables: Array<{ table: string; added: boolean; kept?: unknown }> };
       assert.deepEqual([s.running, s.source.changes], [true, m.changes]);
+      // for a person (issue 935): the Source row, and no Database or Changes row — --json keeps source.changes above
+      const person = await runMason(p.root, ["status"], matrixEnv());
+      assert.match(person.stdout, /\n {2}Source +postgres:\/\/\S+ · Postgres \S+ · (your main database|a read replica)\n/, `${m.changes}: ${person.stdout}`);
+      assert.doesNotMatch(person.stdout, /\n {2}(Database|Changes) /, `${m.changes}: ${person.stdout}`);
       const keptOf = (tables: ReadonlyArray<{ table: string; kept?: unknown }>) => Object.fromEntries(tables.filter((t) => "kept" in t).map((t) => [t.table, t.kept]));
       assert.deepEqual(keptOf(s.tables), m.kept, `${m.changes}: mason status --json, each table the sync holds with its kept as the run's state has it`);
       const fresh = s.tables.find((t) => t.table === "public.fresh")!;

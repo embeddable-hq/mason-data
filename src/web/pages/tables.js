@@ -1,13 +1,14 @@
 /**
- * THE TABLES PAGE (#tables): the database's tables in ONE table, as `mason tables` lists them. An added table shows its
+ * THE TABLES PAGE (#tables): the database's tables, as `mason tables` lists them, in TWO lists one above the other: the
+ * tables added (Added), then the tables not added (Not added). An added table shows its
  * copy's sync — state, rows, last sync and its age, how long it took, the copy's own size, and in replication mode its
  * stream state — and its error, with Sync (POST /api/sync, `mason sync`) and Remove (POST /api/remove, `mason remove`),
  * and on its note which columns it syncs, a button that opens its column form (POST /api/pick, `mason add --columns`);
  * one not added shows its rows and key and why it cannot be added as it is, with Add, Columns… and Name its key…
- * (POST /api/pick, `mason add`). A search box filters by name, and All / Added / Failed / Not added by state
+ * (POST /api/pick, `mason add`). A search box filters both lists by name, and Failed only lists the failed tables alone
  * (`#tables?show=failed`, where the Overview's card leads). With hundreds of tables the page writes the first
- * TABLE_ROWS that pass and "Show N more" / "Show all" (the search is over all of them, at once); a long name is cut with
- * an ellipsis, its whole the title. Reads `/api/state` every poll (lean: no table's columns) and `/api/usage`'s
+ * TABLE_ROWS that pass, the added first, and "Show N more" / "Show all" (the search is over all of them, at once); a
+ * long name wraps whole. Reads `/api/state` every poll (lean: no table's columns) and `/api/usage`'s
  * `copySizes` and `unsized` every minute; a table's columns once, when its Columns… or Name its key… form opens
  * (`GET /api/tables/<table>/columns`, `columnsPath`).
  */
@@ -20,7 +21,7 @@ const SIZES_PATH = "api/usage?since=1m";
 /** Where one table's columns are read, when its form opens (src/cli/run-server.ts tableColumns): never with the state,
  *  which is polled every 2 s and would carry every table's (3.4 MB at 800 tables of 50 columns). */
 /** A table's sync events: Observability › Sync events narrowed to it (src/web/pages/syncs.js `route`), over the week (its
- *  copy and failures are rarely in the last 15 minutes, Now's). */
+ *  copy and failures are rarely in the last 15 minutes, the default range's). */
 export const syncsHref = (table) => `#observability/syncs?table=${encodeURIComponent(table)}&range=7d`;
 export const columnsPath = (table) => `api/tables/${encodeURIComponent(table)}/columns`;
 
@@ -77,13 +78,33 @@ function renderSynced(b, table, s) {
     `${button("Dismiss", { dismissSynced: "", popClose: "" }, "small")}</div>`;
 }
 
-/** The filter beside the search box: which of the database's tables are listed. */
-export const SHOWS = { all: "All", added: "Added", failed: "Failed", "not-added": "Not added" };
 
 /** How many of the tables that pass the filters the page writes at once; "Show N more" writes as many again. */
 const TABLE_ROWS = 100;
 
-/** Whether an added table's copy or sync failed (the Failed filter, the Overview's failed card). */
+/**
+ * THE TWO LISTS, as they are LAID OUT: the names of the added tables (whatever their sync's word), Added, and of those
+ * not added, Not added, each in the order `/api/state` `tables` has them — Added is written first, so the first
+ * TABLE_ROWS written begin with every added table. The page lays them out when the page is shown, and again only when
+ * the search box's text or Failed only changes (`m.order`, below): a table added or removed in between keeps its row in
+ * its list, its state changing in place, because a row that jumped to the other list the moment its Add answered would
+ * pull the next row under the pointer (a click moves no other row).
+ */
+export const layoutOf = (tables) => ({ added: tables.filter((t) => t.added).map((t) => t.table), other: tables.filter((t) => !t.added).map((t) => t.table) });
+
+/** The tables in a layout (`layoutOf`'s `{ added, other }`): `{ added, other }`, each table in the list and at the place
+ *  the layout put it; a table the layout has not met (new in the catalog since) after them, in the list its added mark
+ *  says; one gone from the catalog gone. No layout: laid out now. */
+export function inLayout(tables, order = null) {
+  const o = order ?? layoutOf(tables);
+  const byName = new Map(tables.map((t) => [t.table, t]));
+  const met = new Set([...o.added, ...o.other]);
+  const fresh = layoutOf(tables.filter((t) => !met.has(t.table)));
+  const of = (names) => names.filter((x) => byName.has(x)).map((x) => byName.get(x));
+  return { added: of([...o.added, ...fresh.added]), other: of([...o.other, ...fresh.other]) };
+}
+
+/** Whether an added table's copy or sync failed (Failed only, the Overview's failed card). */
 const failedTable = (t) => t.added && (t.sync?.state === "failed" || Boolean(t.error));
 
 /** What brought a copy current, in a web developer's words (`/api/state` `tables[].sync.syncedBy` keeps the mechanism's
@@ -166,6 +187,33 @@ export function renderTablesRemoved(b) {
 
 const tick = (name, c, on) => `<label class="tick"><input type="checkbox" name="${name}" value="${esc(c.name)}"${on ? " checked" : ""}> ${code(c.name)} <span class="dim">${esc(c.type)}</span></label>`;
 
+/**
+ * THE COLUMNS' CHOICE OF BOTH COLUMN FORMS (an add's and an added table's): All columns — no list sent, every column and
+ * any added later, as `mason add <table>` with no `--columns` — or Only these columns, its boxes under it (app.css hides
+ * them while All is chosen, so nothing is written while the person ticks) and sent as `--columns`. Boxes left empty
+ * read as "nothing chosen", never as "every column": so every column is a choice of its own. `which`: "all" | "only";
+ * `on`: the names of the boxes ticked; `leaves`: what every column leaves out (`everyColumnLeavesOut`), said at All.
+ */
+function columnsField(legend, cols, which, on, leaves = []) {
+  const all = `All columns, and any added to the table later${leaves.length
+    ? `, but ${leaves.join(", ")}, which ${leaves.length === 1 ? "looks like a secret" : "look like secrets"}` : ""}`;
+  const radio = (value, words) => `<label><input type="radio" name="which" value="${value}"${which === value ? " checked" : ""}> <span>${esc(words)}</span></label>`;
+  return `<fieldset><legend>${esc(legend)}</legend><div class="radios">${radio("all", all)}${radio("only", "Only these columns")}</div>` +
+    `<div class="only-cols">${cols.map((c) => tick("columns", c, on.includes(c.name))).join("")}</div></fieldset>`;
+}
+
+/** What a column form sends, from its fields (`FormData`): All sends no columns; Only these sends the boxes ticked.
+ *  `sent` is what the person chose, written back when the save is refused. null: Only these with no box ticked, which
+ *  the page refuses (an empty list would be sent as every column). */
+export function columnsSent(f) {
+  const which = f.get("which") === "only" ? "only" : "all";
+  const boxes = f.getAll("columns"), key = f.getAll("key");
+  if (which === "only" && boxes.length === 0) return null;
+  return { columns: which === "only" ? boxes : [], key, sent: { which, columns: boxes, key } };
+}
+/** The page's own refusal of Only these with no box ticked (`columnsSent`), said over the form as a run's would be. */
+export const NO_COLUMNS = Object.freeze({ message: "Tick the columns to sync, or choose All columns." });
+
 /** The form that adds a table with the columns ticked (`--columns`) and, for one with no primary key, its key (`--key`).
  *  The ticks live in the document while the person ticks (the tables part is held still meanwhile: the page's `held`);
  *  `ticked`, what a refused submit sent, writes them back when the refusal is said over the form, in its popover. `cols` is what
@@ -175,9 +223,12 @@ function pickForm(t, cols, ticked = null) {
   if (cols?.table !== t.table) return `<p class="dim">Reading ${esc(name)}'s columns…</p>${button("Cancel", { cancelChoose: "", popClose: "" }, "small")}`;
   if ("failure" in cols) return `${renderFailure(cols.failure)}${button("Cancel", { cancelChoose: "", popClose: "" }, "small")}`;
   const boxes = (field) => cols.columns.map((c) => tick(field, c, ticked?.[field]?.includes(c.name) ?? false)).join("");
+  // All at first, its boxes all ticked under Only these, so choosing it starts from every column
+  const which = ticked?.which ?? "all";
+  const on = ticked?.columns ?? cols.columns.map((c) => c.name);
   return `<form class="pick" data-pick-form="${esc(t.table)}" autocomplete="off">` +
     (t.key.length ? "" : `<fieldset><legend>Its key: the columns that tell its rows apart</legend>${boxes("key")}</fieldset>`) +
-    `<fieldset><legend>The columns to sync (tick none to sync every column)</legend>${boxes("columns")}</fieldset>` +
+    columnsField("The columns to sync", cols.columns, which, on) +
     `<button type="submit" class="primary small">Add ${esc(name)}</button> ${button("Cancel", { cancelChoose: "", popClose: "" }, "small")}</form>`;
 }
 
@@ -254,15 +305,17 @@ export function columnsForm(t, cols, ticked = null, saving = false) {
   if (cols?.table !== t.table) return `<p class="dim">Reading ${esc(name)}'s columns…</p>${cancel}`;
   if ("failure" in cols) return `${renderFailure(cols.failure)}${cancel}`;
   const c = columnsChoice(t);
-  const on = ticked ?? { columns: c.columns, key: c.key };
-  const boxes = (field) => cols.columns.map((x) => tick(field, x, on[field].includes(x.name))).join("");
   const leaves = t.everyColumnLeavesOut ?? [];
-  const none = `None ticked: every column, and any added to the table later${leaves.length
-    ? `, but ${leaves.join(", ")}, which ${leaves.length === 1 ? "looks like a secret" : "look like secrets"}` : ""}.`;
+  // every column (as its entry says it): All, its boxes every column but what All leaves out, so Only these starts
+  // from what is synced now; a list, or an entry the boxes cannot show: Only these, the boxes as columnsChoice says
+  const everyColumn = c.exact && c.columns.length === 0;
+  const which = ticked?.which ?? (everyColumn ? "all" : "only");
+  const on = ticked ?? { columns: everyColumn ? cols.columns.map((x) => x.name).filter((x) => !leaves.includes(x)) : c.columns, key: c.key };
+  const boxes = (field) => cols.columns.map((x) => tick(field, x, on[field].includes(x.name))).join("");
   return `<form class="pick" data-pick-form="${esc(t.table)}" autocomplete="off">` +
     (c.exact ? "" : `<p class="note replaces">Its entry in the sources file syncs ${esc(c.said)}, which these boxes cannot show: they show the columns synced now. Saving replaces the entry with the columns ticked.</p>`) +
     (t.key.length ? "" : `<fieldset><legend>Its key: the columns that tell its rows apart</legend>${boxes("key")}</fieldset>`) +
-    `<fieldset><legend>The columns ${esc(name)} syncs</legend><p class="choice-what">${esc(none)}</p>${boxes("columns")}</fieldset>` +
+    columnsField(`The columns ${name} syncs`, cols.columns, which, on.columns, leaves) +
     `<p class="note cost">${esc(columnsCost(t, c.exact))}</p>` +
     `<button type="submit" class="primary small"${saving ? " disabled" : ""}>${saving ? "Saving…" : "Save"}</button> ${cancel}</form>`;
 }
@@ -305,12 +358,37 @@ export const LIVE_SLOT_WORDS = "Live keeps a replication slot on your database. 
   "the slot keeps all the WAL (your database's change log) written since, on your database's disk. It keeps it until Mason reads it again " +
   "or the slot is dropped. The slot is dropped when no table is set to Live, or by mason destroy. max_slot_wal_keep_size limits how much it can keep.";
 
+/** A scan's length in words: 38 → "38 seconds", 150 → "3 minutes", 5400 → "1.5 hours". */
+const lengthWords = (x) => x < 90 ? `${Math.round(x)} second${Math.round(x) === 1 ? "" : "s"}` : x < 5400 ? `${Math.round(x / 60)} minutes` : `${(x / 3600).toFixed(1)} hours`;
+/** A scan's length as the lead says it: "under a second" for a short one (never "about 0 seconds"), else "about …". */
+const scanWords = (x) => x < 1 ? "under a second" : `about ${lengthWords(x)}`;
+const BASIS_WORDS = { measured: "measured at its last scheduled sync", "first-sync": "estimated from how fast its first sync read it", assumed: "a rough guess, since nothing is measured yet" };
+
+/**
+ * WHAT A SCHEDULED SYNC OF A BIG TABLE COSTS, IN THE PAGE'S WORDS, from the Sync choice's numbers (`polls[].cost`,
+ * src/cli/source-edit.ts `PollLoad`): `pollCostLead`, what every interval shares, said once over the choices; and
+ * `pollCostLine`, one interval's own share of the database, under it. Never the CLI's sentence and its flags.
+ */
+export function pollCostLead(c) {
+  const l = c.polls.find((p) => p.cost)?.cost;
+  if (!l) return null;
+  return `${entryName(c.table)} has about ${n(l.rows)} rows. Each scheduled sync scans the whole table on your database, ` +
+    `${scanWords(l.scanSeconds)} a scan (${BASIS_WORDS[l.basis] ?? "estimated"}).`;
+}
+export function pollCostLine(p) {
+  const l = p.cost;
+  if (!l) return null;
+  const stretched = l.everySeconds > p.seconds * 1.01 ? `It runs every ${lengthWords(l.everySeconds)} at most, since a scan waits four times its own length. ` : "";
+  return `${stretched}One connection to your database is busy ${l.busyPercent < 1 ? "less than 1" : `about ${l.busyPercent}`}% of the time.`;
+}
+
 /** What a choice asks before it is saved, or null: a poll of a big table (its cost on the database), Live with a
  *  warning (each said). `c`: `GET api/tables/<table>/sync`'s answer. */
 export function syncQuestion(c, value) {
   const poll = c.polls.find((p) => p.sync === value);
   if (poll && c.bigRows) {
-    return { lines: [poll.cost ?? `${entryName(c.table)} has more than 1,000,000 rows, and each poll scans it whole on your database.`],
+    const lead = pollCostLead(c), line = pollCostLine(poll);
+    return { lines: lead && line ? [lead, line] : [`${entryName(c.table)} has more than 1,000,000 rows, and each scheduled sync scans it whole on your database.`],
       ask: `Scan all of ${entryName(c.table)} on your database every ${intervalWords(poll.seconds)}?`, yes: `Poll it every ${intervalWords(poll.seconds)}` };
   }
   const warnings = value === "replication" ? c.live.checks.filter((x) => x.state === "warn") : [];
@@ -347,8 +425,13 @@ export function renderSyncChoice(t, c, ask = null, open = false, picked = null) 
   const radio = (value, label, what, { disabled = false, extra = "" } = {}) =>
     `<label class="choice${disabled ? " disabled" : ""}"><input type="radio" name="sync" value="${esc(value)}"${value === ticked ? " checked" : ""}${disabled ? " disabled" : ""}> ` +
     `<span class="choice-body"><span><span class="choice-label">${esc(label)}</span>${value === now ? ` <span class="dim">(current)</span>` : ""}</span><span class="choice-what">${esc(what)}</span>${extra}</span></label>`;
-  const polls = c.polls.map((p) => radio(p.sync, syncWords(p.sync), `Scans the whole table on your database every ${intervalWords(p.seconds)}.`,
-    { extra: p.cost ? `<span class="choice-cost">${esc(p.cost)}</span>` : "" }));
+  // a big table's cost: what every interval shares once, over the choices; each interval's own share under it
+  const lead = pollCostLead(c);
+  const polls = c.polls.map((p) => {
+    const line = pollCostLine(p);
+    return radio(p.sync, syncWords(p.sync), `Scans the whole table on your database every ${intervalWords(p.seconds)}.`,
+      { extra: line ? `<span class="choice-cost${p.cost.busyPercent >= 10 ? " high" : ""}">${esc(line)}</span>` : "" });
+  });
   // its sync now, written in the sources file at an interval the page does not offer: kept as a choice of its own
   const other = now.startsWith("poll ") && !c.polls.some((p) => p.sync === now)
     ? [radio(now, syncWords(now), "Scans the whole table on your database at the interval set in the sources file.")] : [];
@@ -359,6 +442,7 @@ export function renderSyncChoice(t, c, ask = null, open = false, picked = null) 
     (passed.length ? details(`synccheck:${t.table}`, `The checks that pass (${passed.length})`, `<ul class="checks">${passed.map(checkLine).join("")}</ul>`, open) : "");
   return `<form class="pick syncpick" data-sync-form="${esc(t.table)}" autocomplete="off">` +
     `<fieldset><legend>How Mason keeps ${esc(name)} up to date after its first sync</legend>` +
+    (lead ? `<p class="note poll-lead">${esc(lead)}</p>` : "") +
     `<div class="radios">${radio("off", "Off", "Synced once. After that, only when you press Sync now.") + [...polls, ...other].join("") + live}</div>` +
     `<p class="note live-slot">${esc(LIVE_SLOT_WORDS)}</p>${checks}</fieldset>` +
     `<button type="submit" class="primary small">Save</button> ${cancel}</form>`;
@@ -415,7 +499,8 @@ export function sizeCellOf(sizes) {
 }
 
 /**
- * THE DATABASE'S TABLES from `/api/state` `tables` (`mason tables --json`'s list), ONE table in a card: a row each — its
+ * THE DATABASE'S TABLES from `/api/state` `tables` (`mason tables --json`'s list), in TWO tables, each in a card under its
+ * heading and count: Added, then Not added (`inLayout`). A row each — its
  * name in mono, its state as a dot and the word (an added table's sync: Synced / Syncing / Failed / Waiting, else Not
  * added), its rows, its key, an added table's last sync as its age (the UTC time in a title), how long it took and the
  * copy's own size (`ui.sizes`: `/api/usage`'s body or `{ failure }`), its stream state in replication mode, and a note —
@@ -430,10 +515,11 @@ export function sizeCellOf(sizes) {
  * Escape, or the next action's answer or question in its place); `ui.syncing` the tables whose sync is asked. Sync now
  * is offered disabled while the table's `syncRefusal` (`/api/state`: why `mason sync` of it is refused now, the sync's
  * one check) is set, that reason its title, in the same room; `ui.filter` the
- * search box's text and `ui.show` the state filter (a key of SHOWS).
+ * search box's text, over both lists, and `ui.failed` Failed only (the failed tables alone; Not added is not written);
+ * `ui.order` the lists as they were last laid out (`layoutOf`'s; none: laid out from `s`).
  */
 export function renderTables(s, ui = {}) {
-  const { removing = null, choosing = null, columns = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], adding = [], shares = new Map(), before = new Map(), synced = null, open = () => false, limit = TABLE_ROWS,
+  const { removing = null, choosing = null, columns = null, outcome = null, ticked = null, filter = "", failed = false, sizes, syncing = [], adding = [], shares = new Map(), before = new Map(), synced = null, open = () => false, limit = TABLE_ROWS, order = null,
     syncOpen = null, syncChoice = null, syncAsk = null, syncPicked = null, savingColumns = null } = ui;
   const now = ui.now ?? Date.now();
   if (!s.tables.length) return empty(`${s.source.database} has no table this user can read.`);
@@ -489,7 +575,12 @@ export function renderTables(s, ui = {}) {
     // a table with none keeps its line, empty, so the row is as tall either way
     const l = t.added && !adding_ ? tableLine(t, now) : null;
     const bar = l ? `<span class="copyline t-${l.state}">${copyBar(t.table, l, shares.get(t.table) ?? l.fraction, before.get(t.table))}</span>` : `<span class="copyline none" aria-hidden="true"></span>`;
-    const state = adding_ ? status("warn", "Adding…") : t.added ? (y ? status(undefined, SYNC_WORDS[y.state]) : "") : status("unknown", "Not added");
+    // while this page's Sync now of it runs, its State says so, as Adding… does for an add: the run's own state says
+    // "syncing" only for a first sync or a read again whole, never for a sync by hand (a poll), and the click's answer
+    // comes when the sync is done, so the page's own request is the one sure sign
+    const syncingNow = t.added && !adding_ && syncing.includes(t.table);
+    const state = adding_ ? status("warn", "Adding…") : syncingNow ? status("warn", SYNC_WORDS.syncing)
+      : t.added ? (y ? status(undefined, SYNC_WORDS[y.state]) : "") : status("unknown", "Not added");
     const took = t.added && y?.syncSeconds != null ? `<span class="took" title="${esc(tookTitle(y))}">took ${esc(tookText(y))}</span>` : "";
     const last = t.added && y?.syncedAt && y?.ageSeconds != null
       ? `<td class="num last"><span title="${esc(`${utcText(y.syncedAt)} UTC`)}">${esc(`${duration(y.ageSeconds)} ago`)}</span>${took}</td>` : `<td class="num last">${took}</td>`;
@@ -559,20 +650,38 @@ export function renderTables(s, ui = {}) {
   const added = s.tables.filter((t) => t.added).length;
   // a refusal for a table the list does not have (dropped since the run read the catalog): said above the list
   const stray = outcome !== null && "failure" in outcome && !s.tables.some((t) => t.table === outcome.table) ? renderFailure(outcome.failure) : "";
-  // the search box's text and the state filter: the tables that pass both (the one a form or a confirm is open on stays, whatever they say)
-  const passes = (t) => (show === "added" ? t.added : show === "failed" ? failedTable(t) : show === "not-added" ? !t.added : true) && nameMatches(t.table, filter);
-  const shown = s.tables.filter((t) => passes(t) || t.table === choosing || t.table === removing);
-  // at most `limit` rows written (the one a form or a confirm is open on always): a database of 800 tables costs 100 rows
-  const written = shown.filter((t, i) => i < limit || t.table === choosing || t.table === removing);
-  const matching = filter.trim() ? `<p class="count dim">${n(shown.length)} with “${esc(filter.trim())}” in the name</p>` : "";
+  const term = filter.trim();
+  // the search box's text, over both lists, and Failed only: the tables that pass (the one a form or a confirm is open
+  // on stays, whatever they say)
+  const held_ = (t) => t.table === choosing || t.table === removing;
+  const passes = (t) => (!failed || failedTable(t)) && nameMatches(t.table, filter);
+  const laid = inLayout(s.tables, order);
+  const addedShown = laid.added.filter((t) => passes(t) || held_(t));
+  // Failed only: no table not added is listed (none of them can fail)
+  const otherShown = laid.other.filter((t) => (!failed && passes(t)) || held_(t));
+  const shown = addedShown.length + otherShown.length;
+  // at most `limit` rows written across both lists, Added's first (the one a form or a confirm is open on always): a
+  // database of 800 tables costs 100 rows
+  const addedWritten = addedShown.filter((t, i) => i < limit || held_(t));
+  const otherWritten = otherShown.filter((t, i) => addedShown.length + i < limit || held_(t));
+  const matching = term ? `<p class="count dim">${n(shown)} with “${esc(term)}” in the name</p>` : "";
   const sizesFailed = added && sizes && "failure" in sizes ? `<p class="count">The synced tables' sizes could not be read: ${esc(firstLine(sizes.failure.message))}.</p>` : "";
-  const rowsHtml_ = written.map(line).join("");
+  const thead = `<thead><tr>${head.map(([h, c]) => `<th scope="col"${c ? ` class="${c}"` : ""}>${h}</th>`).join("")}</tr></thead>`;
+  // `line` writes each row's popovers into `pops` as it goes: Added's rows first, in the order they are written
+  const list = (rows) => panel(`<table class="catalog">${thead}<tbody>${rows.map(line).join("")}</tbody></table>`);
+  const heading = (title, count) => `<h3 class="list-h">${esc(title)} <span class="dim">(${n(count)})</span></h3>`;
+  const addedNone = added === 0 ? empty(readOnly === null ? "No table added yet. Add one from the list below." : "No table added yet. The tables to sync are set in the sources file.")
+    : failed ? `<p class="dim">No failed table${term ? `'s name has “${esc(term)}”` : ""}.</p>`
+    : `<p class="dim">No added table's name has “${esc(term)}”.</p>`;
+  const addedHtml = heading("Added", addedShown.length) + (addedWritten.length ? list(addedWritten) : addedNone);
+  // Not added: not under Failed only, and not while every row it would write is past the limit (Show more writes them)
+  const otherNone = laid.other.length === 0 ? `<p class="dim">Every table in the database is added.</p>`
+    : `<p class="dim">No table that is not added has “${esc(term)}” in its name.</p>`;
+  const otherHtml = failed && !otherShown.length || otherShown.length && !otherWritten.length ? ""
+    : heading("Not added", otherShown.length) + (otherWritten.length ? list(otherWritten) : otherNone);
   return stray + (viewOnly !== null ? readOnlyLine("Tables are not added, removed or synced", viewOnly)
     : readOnly === null ? "" : `<p class="count">Tables are not added or removed from this page: ${esc(readOnly)}.</p>`) +
-    (added ? "" : empty("No table added yet", readOnly === null ? "Add one from the list below." : "The tables to sync are set in the sources file.")) + matching +
-    panel(`<table class="catalog"><thead><tr>${head.map(([h, c]) => `<th scope="col"${c ? ` class="${c}"` : ""}>${h}</th>`).join("")}</tr></thead>` +
-      `<tbody>${rowsHtml_}</tbody></table>`) + pops.join("") + moreRows("tables", Math.min(limit, shown.length), shown.length, TABLE_ROWS) +
-    (!shown.length ? `<p class="dim">No ${show === "added" ? "added " : show === "failed" ? "failed " : show === "not-added" ? "table that is not added, " : ""}table${filter.trim() ? `'s name has “${esc(filter.trim())}”` : ""}.</p>` : "") + sizesFailed +
+    matching + addedHtml + otherHtml + pops.join("") + moreRows("tables", Math.min(limit, shown), shown, TABLE_ROWS) + sizesFailed +
     (added ? `<p class="dim">A synced table's size is measured every 10 minutes, once its rows are written to disk.</p>` : "");
 }
 
@@ -580,7 +689,9 @@ export const page = {
   id: "tables",
   title: "Tables",
   create(ctx) {
-    const m = { removing: null, choosing: null, columns: null, outcome: null, ticked: null, held: null, heldFilter: null, heldShow: null, filter: "", show: "all", syncing: [], adding: [], synced: null, limit: TABLE_ROWS,
+    const m = { removing: null, choosing: null, columns: null, outcome: null, ticked: null, held: null, heldFilter: null, heldFailed: null, filter: "", failed: false, syncing: [], adding: [], synced: null, limit: TABLE_ROWS,
+      // the two lists as last laid out (`layoutOf`): null until the state is first read
+      order: null,
       // the table whose Sync choice is open, what `GET api/tables/<table>/sync` answered for it (null while read), the
       // choice whose question is asked before it is saved, and the read in flight: ONE at a time for the page, never on
       // a timer — each is a connection to the database
@@ -592,6 +703,11 @@ export const page = {
     const monotone = createMonotone();
     // the details open (a copy's whole error), by key: a poll rewrites the part, and they stay open
     const opened = createOpenSet();
+    // THE LISTS ARE LAID OUT (from the latest state: Added and Not added) at ONE set of moments: the page shown
+    // (`route`, which `show` calls every time, drops it, and the next state read lays it out; a reload is a new page),
+    // the search box's text or Failed only changed. Never at a poll or an action's answer, so a table whose added mark
+    // changes — from this page or `mason add` / `mason remove` beside it — keeps its row until the next of them.
+    const layOut = () => { const s = state(); m.order = Array.isArray(s?.tables) ? layoutOf(s.tables) : null; };
     // WHILE A FORM IS OPEN OR A REMOVE ASKS, THE TABLES ARE RENDERED FROM THE STATE THEY WERE OPENED OVER (`held`): the
     // run reads the catalog again every few seconds, and a live database's row estimates move, so a part written from
     // each poll's state would be rewritten under the person — the form's ticks gone, the confirm's button replaced under
@@ -601,7 +717,7 @@ export const page = {
     const hold = () => {
       const held = m.choosing !== null || m.removing !== null || m.syncOpen !== null;
       m.heldFilter = held ? m.held === null ? m.filter : m.heldFilter : null;
-      m.heldShow = held ? m.held === null ? m.show : m.heldShow : null;
+      m.heldFailed = held ? m.held === null ? m.failed : m.heldFailed : null;
       m.held = held ? m.held ?? state() : null;
       // and the moment it is written as of: an age that moved would rewrite the part under the person (a choice ticked lost)
       m.heldNow = held ? m.heldNow ?? ctx.now().getTime() : null;
@@ -609,7 +725,7 @@ export const page = {
     };
     const actions = {
       /** Add a table (`mason add`): the answer beside its actions, then the state read again — the Overview shows its copy starting. */
-      async addTable(table, columns = [], key = []) {
+      async addTable(table, columns = [], key = [], sent = { which: columns.length ? "only" : "all", columns, key }) {
         if (m.adding.includes(table)) return false;
         // from the click: the row says Adding… (the page paints before the answer), then the state read again shows the copy
         m.adding = [...m.adding, table];
@@ -617,7 +733,7 @@ export const page = {
         const r = await ctx.ask("api/pick", json("POST", pickBody(table, columns, key)));
         m.adding = m.adding.filter((x) => x !== table);
         // refused: said over the form, in its popover, written again with the boxes the person had ticked
-        if ("failure" in r) { m.outcome = { table, failure: r.failure }; if (m.choosing === table) m.ticked = { columns, key }; return false; }
+        if ("failure" in r) { m.outcome = { table, failure: r.failure }; if (m.choosing === table) m.ticked = sent; return false; }
         m.outcome = { table, added: r.body }; m.choosing = null; m.columns = null; hold();
         await ctx.refresh(["api/state"]);
         return true;
@@ -636,13 +752,13 @@ export const page = {
       cancelChoose() { m.choosing = null; m.columns = null; hold(); },
       /** Save an added table's column form (`mason add <table> --columns …`, its sync kept): the answer beside its
        *  columns' summary, then the state read again; refused, said over the form, its boxes as they were ticked. */
-      async saveColumns(table, columns = [], key = []) {
+      async saveColumns(table, columns = [], key = [], sent = { which: columns.length ? "only" : "all", columns, key }) {
         const t = (m.held ?? state())?.tables.find((x) => x.table === table);
         if (!t?.added || m.savingColumns !== null) return false;
         m.savingColumns = table;
         const r = await ctx.ask("api/pick", json("POST", columnsBody(t, columns, key)));
         m.savingColumns = null;
-        if ("failure" in r) { m.outcome = { table, failure: r.failure, at: "columns" }; if (m.choosing === table) m.ticked = { columns, key }; return false; }
+        if ("failure" in r) { m.outcome = { table, failure: r.failure, at: "columns" }; if (m.choosing === table) m.ticked = sent; return false; }
         m.outcome = { table, added: r.body, at: "columns" }; m.choosing = null; m.columns = null; hold();
         await ctx.refresh(["api/state"]);
         return true;
@@ -705,9 +821,9 @@ export const page = {
       /** Escape with no question open: the answer or refusal beside a row goes, as its Dismiss does */
       dismissAnswer() { m.outcome = null; m.synced = null; },
       /** The search box's text: kept here, so every poll writes the lists filtered by it. */
-      filterTables(text) { m.filter = text; m.limit = TABLE_ROWS; },
-      /** The state filter beside it (a key of SHOWS; anything else is All). */
-      showTables(which) { m.show = Object.hasOwn(SHOWS, which) ? which : "all"; m.limit = TABLE_ROWS; },
+      filterTables(text) { m.filter = text; m.limit = TABLE_ROWS; layOut(); },
+      /** Failed only, beside it: the failed tables alone (true), or every table (anything else). */
+      failedOnly(on) { m.failed = on === true; m.limit = TABLE_ROWS; layOut(); },
       /** Write TABLE_ROWS more of the tables that pass, or all of them. */
       showMoreTables() { m.limit += TABLE_ROWS; },
       showAllTables() { m.limit = Infinity; },
@@ -718,6 +834,7 @@ export const page = {
       afterRead() {
         const s = state();
         if (s === null) return;
+        if (m.order === null) layOut();
         // a table removed or added elsewhere (mason remove, mason add) takes its confirm or its form with it
         const added = (table) => s.tables.some((t) => t.table === table && t.added);
         if (m.removing !== null && !added(m.removing)) m.removing = null;
@@ -730,12 +847,12 @@ export const page = {
       view() {
         const s = m.held ?? state();
         const sizes = ctx.read(SIZES_PATH);
-        // held still while a form is open or a Remove asks, the search box's text and the state filter included: nothing moves under the person
+        // held still while a form is open or a Remove asks, the search box's text and Failed only included: nothing moves under the person
         const latest = state();
         return {
           "tables-cards": latest ? renderTablesCards(latest) : "",
           tables: s ? renderTables(s, { removing: m.removing, choosing: m.choosing, columns: m.columns, outcome: m.outcome, ticked: m.ticked, now: m.heldNow ?? ctx.now().getTime(),
-            filter: m.held ? m.heldFilter : m.filter, show: m.held ? m.heldShow : m.show, syncing: m.syncing, adding: m.adding, shares: monotone.of(latest ?? s), before: monotone.before, synced: m.synced, open: opened.has, limit: m.limit,
+            filter: m.held ? m.heldFilter : m.filter, failed: m.held ? m.heldFailed : m.failed, syncing: m.syncing, adding: m.adding, shares: monotone.of(latest ?? s), before: monotone.before, synced: m.synced, open: opened.has, limit: m.limit, order: m.order,
             syncOpen: m.syncOpen, syncChoice: m.syncChoice, syncAsk: m.syncAsk, syncPicked: m.syncPicked, savingColumns: m.savingColumns,
             sizes: sizes === undefined ? undefined : sizes.failure ? { failure: sizes.failure } : sizes.body }) : "",
         };
@@ -746,17 +863,28 @@ export const page = {
         // a table's Sync choice: the one choice ticked
         if (form.dataset?.syncForm !== undefined) return actions.chooseSyncValue(form.dataset.syncForm, new FormData(form).get("sync"));
         if (form.dataset?.pickForm === undefined) return null;
-        const ticked = new FormData(form);
+        const table = form.dataset.pickForm, saving = m.choosingAdded && table === m.choosing;
+        const f = new FormData(form);
+        const s = columnsSent(f);
+        // Only these with no box ticked: refused here, over the form as it was
+        if (s === null) {
+          m.outcome = { table, failure: NO_COLUMNS, ...(saving ? { at: "columns" } : {}) };
+          m.ticked = { which: "only", columns: [], key: f.getAll("key") };
+          return true;
+        }
         // an added table's column form: its columns saved; else Columns…: the table added with them
-        if (m.choosingAdded && form.dataset.pickForm === m.choosing) return actions.saveColumns(form.dataset.pickForm, ticked.getAll("columns"), ticked.getAll("key"));
-        return actions.addTable(form.dataset.pickForm, ticked.getAll("columns"), ticked.getAll("key"));
+        if (saving) return actions.saveColumns(table, s.columns, s.key, s.sent);
+        return actions.addTable(table, s.columns, s.key, s.sent);
       },
-      /** `#tables?show=failed`: the state filter as the hash says (the select beside the search box shows it too). */
+      /** `#tables?show=failed` (where the Overview's failed card leads): Failed only, its box ticked; any other `show`
+       *  (an older bookmark's `added` or `not-added`): every table, its box clear. */
       route(params, { doc } = {}) {
+        // shown (again): the lists laid out anew, from the state read for it (until then, from the last: the same rule)
+        m.order = null;
         if (params.show === undefined) return;
-        actions.showTables(params.show);
-        const select = doc?.getElementById?.("tables-show");
-        if (select) select.value = m.show;
+        actions.failedOnly(params.show === "failed");
+        const box = doc?.getElementById?.("tables-failed");
+        if (box) box.checked = m.failed;
       },
       click(d) {
         if (d.showMore === "tables") return actions.showMoreTables() ?? true;
@@ -782,7 +910,7 @@ export const page = {
       input(target) {
         // a choice ticked in an open Sync choice: kept, so a rewrite of the part writes it as ticked (nothing to paint now)
         if (target.name === "sync" && target.form?.dataset?.syncForm === m.syncOpen) { m.syncPicked = target.value; return null; }
-        if (target.id === "tables-show") return actions.showTables(target.value) ?? true;
+        if (target.id === "tables-failed") return actions.failedOnly(target.checked === true) ?? true;
         if (target.id !== "tables-filter") return null;
         return actions.filterTables(target.value) ?? true;
       },

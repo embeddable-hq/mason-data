@@ -31,7 +31,7 @@ import { addEntry, listTables, Refusal, removeEntries, sourceToEdit, type EditCa
 import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFacts, type SourceTable } from "./preflight.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
 import { reach } from "./state.ts";
-import { CATCHING_UP, copyingText, copyProgress, duration, generatedReadiness, msText, statementMsText, readiness, readinessWord, type Readiness, type SyncFacts, type SyncTotals } from "./readiness.ts";
+import { CATCHING_UP, copyingText, copyProgress, duration, generatedReadiness, msText, statementMsText, readiness, readinessWord, READY_TEXT, type Readiness, type SyncFacts, type SyncTotals } from "./readiness.ts";
 import type { SyncEvent } from "../duck/events.ts";
 import type { Compaction, CopyProgressView, KeptCurrent, StreamStatus } from "../duck/sync.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
@@ -172,6 +172,9 @@ export interface RunState {
   share?: ShareState | null;
   /** the last share that ended and why (src/cli/share-run.ts), or null */
   shareEnded?: ShareEnded | null;
+  /** how many users exist now, removed ones not counted, or why the list cannot be read (src/cli/run-server.ts
+   *  usersFact): the web page's Getting started reads it; a run from before it has none */
+  users?: { active: number } | { error: string };
 }
 
 // ------------------------------------------------------------------ shared
@@ -252,7 +255,7 @@ export function addSteps(tables: ReadonlyArray<Omit<CatalogTable, "columns">>, f
 
 // ------------------------------------------------------------------ readiness (mason wait, mason status): src/cli/readiness.ts
 
-export { CATCHING_UP, copyingText, copyProgress, duration, msText, statementMsText, readiness, readinessWord, type Readiness };
+export { CATCHING_UP, copyingText, copyProgress, duration, msText, statementMsText, readiness, readinessWord, READY_TEXT, type Readiness };
 
 /** A table line's bar in its state's colour (on a terminal): green copied, red failed, yellow served but not kept current, cyan at work
  *  — its first sync, or its one catch-up poll (issue 834) — (a table whose sync is off is copied as it asked: green). `tone`, the
@@ -464,8 +467,8 @@ export function slotText(w: StreamStatus["slotWal"], since: (iso: string) => num
 
 const STATUS_USAGE = `usage: mason status [--json]
 
-  Status: running, not running, or hung — then this project's facts, one a line: its folder, its database and how
-  its changes are read, the run and the synced data's file and the synced tables in all (synced, rows, the last sync), the Postgres API
+  Status: running, not running, or hung — then this project's facts, one a line: its folder, its sources file, its
+  Source (the Postgres it syncs from, and whether that is your main database or a read replica), the run and the synced data's file and the synced tables in all (synced, rows, the last sync), the Postgres API
   and how it listens.
 
     mason status
@@ -523,7 +526,8 @@ const STATUS_USAGE = `usage: mason status [--json]
     or null }, or { error }) }, disk: { path (where the synced data's file is), freeBytes, copyBytes (the file and its write-ahead log),
     projectedBytes (what the first syncs running are projected to add; null: none, or too early to say), error },
     sessions: { open (the Postgres API's sessions logged in), byClient: [{ user ('' a token's), client (its
-    application_name), open, running }] }, share: (null, or what mason share has open) { port, fingerprint, sessions,
+    application_name), open, running }] }, users: { active (the users mason user made, removed ones not counted) } or
+    { error }, share: (null, or what mason share has open) { port, fingerprint, sessions,
     refusedLogins, droppedConnections, shares: [{ user, from (command: mason share; page: the web page), role, reads, openedAt, via, host, port, endsAt, state }] }, shareEnded: (null, or the last share that ended) { user, from, why, at }, queries: { keptDays, day, week } (the last day's and the last 7
     days' statements, each { days, covered (the days of it the request log keeps), statements, completed, refused,
     failed, cancelled, rows, bytesSent, durationMs: { avg, p50, p95 } (the completed ones') or null }; { error }
@@ -589,7 +593,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   options: { json: { type: "boolean" } },
   json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "generatedTables", "queries", "slowQueries", "refusedQueries",
     "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "pageReadOnly", "pageReadOnlyAllow", "pageBack", "pageNav", "pageCard", "pageSocket",
-    "roles", "share", "shareEnded", "lastRun", "lastStop", "hung", "next"],
+    "users", "roles", "share", "shareEnded", "lastRun", "lastStop", "hung", "next"],
 };
 
 export async function status(argv: string[]): Promise<number> {
@@ -653,7 +657,7 @@ export async function status(argv: string[]): Promise<number> {
     const rows: Array<[string, string]> = [
       ["Project", `${run.name}, files in ${s.folder ?? "(none chosen)"}`],
       ...sourceRows(s),
-      masonRow(s.engine, run.pid),
+      ...masonRows(s.engine, run.pid),
       ["Synced data", `${s.engine.file}${s.engine.bytes === null ? "" : ` · ${fileSize(s.engine.bytes)}`}`],
       ...diskRows(s.disk),
       // the copies in all (src/cli/readiness.ts syncTotals): a run from before them has none
@@ -698,7 +702,7 @@ export async function status(argv: string[]): Promise<number> {
     out("");
     // the word the web page's Status says too (readinessWord)
     const word = readinessWord(r);
-    if (r.ready) out(withEnd(st.green(`${word}: every added table is synced and served.`), { next }));
+    if (r.ready) out(withEnd(st.green(`${word}: ${READY_TEXT}.`), { next }));
     else if (r.failed.length) out(withEnd(`${st.red(`${word}:`)}\n${bullets(r.failed)}`, { next }));
     else out(withEnd(`${word}:\n${r.waiting.map((x) => `  - ${x}`).join("\n")}`, { next }));
     return 0;
@@ -706,21 +710,17 @@ export async function status(argv: string[]): Promise<number> {
 }
 
 /**
- * mason status's rows for the database the run copies: its sources file, its URL (masked by the run), and how its changes
- * arrive. The web page (src/web/app.js `sourceRows`) says the same rows, held equal by tests/web-page.test.ts.
+ * mason status's rows for the Postgres the run syncs from: its sources file, the Source (its URL, masked by the run, and
+ * what kind of server it is), and how text sorts where it differs. No row says how changes arrive (issue 935: the
+ * sources file and the Tables page say each table's sync; `--json` keeps `source.sync` and `source.replication`). The
+ * web page (src/web/pages/status.js `sourceRows`) says the same rows, held equal by tests/web-page.test.ts.
  */
 export function sourceRows(s: Pick<RunState, "source">): Array<[string, string]> {
   return [
-    ...(s.source.file ? [["Source", `${s.source.shownFile ?? s.source.file} (the tables it names are added)`] as [string, string]] : []),
-    ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
+    ...(s.source.file ? [["Sources file", `${s.source.shownFile ?? s.source.file} (the tables it names are added)`] as [string, string]] : []),
+    ["Source", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
       // which kind of server it is, as a plain fact (issue 888), in the words of the page's facts card (src/web/pages/status.js factRows)
       : `${s.source.url} · Postgres ${s.source.version} · ${s.source.standby ? "a read replica" : "your main database"}`],
-    // in a web developer's words first (each table as its sync: says, streamed as they happen); the mechanism an operator needs in parentheses
-    ["Changes", `each table as its sync: says${s.source.replication ? "" : " (a SELECT of its changed rows)"}${s.source.sync ? ` · sync: ${s.source.sync.default} ${s.source.sync.written ? "for every table without its own" : "(the default: the file writes none)"}` : ""} · ` +
-      (s.source.replication ? `sync: replication tables streamed as they happen (logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication}, ` +
-          `${s.source.replication.owned ? "Mason's own, carrying them alone" : "named: read as it is, never altered"}); the others by a SELECT of their changed rows`
-        : s.source.demo ? "the demo database is checked this way only"
-        : "sync: replication on an entry streams that table as it happens instead")],
     ...(s.source.textOrder ? [["Text order", s.source.textOrder] as [string, string]] : []),
   ];
 }
@@ -796,9 +796,14 @@ export const RECENT_ERRORS = 5;
  */
 export interface RecentErrors { sync: SyncEvent[]; error: string | null; queries: LedgerRequest[]; queriesError: string | null }
 
+/** What an event of no one table says where a table's name goes (`table: null`: the database out of reach, the stream
+ *  as a whole, a restart): Mason's own. A table's name always has its schema and a dot, so the two never meet. The web
+ *  page says the same (src/web/shared.js `MASON_TABLE`, held equal by the tests). */
+export const MASON_TABLE = "Mason";
+
 /** One event of the sync on one line (src/duck/events.ts): when, what (a failure in red), its table, its reason's first line. */
 export function eventLine(e: SyncEvent, st: Style): string {
-  return `${e.at.slice(0, 19).replace("T", " ")}  ${(e.failed ? st.red : st.green)(e.kind.padEnd(18))}  ${e.table ?? "(the sync)"}  ${firstLine(e.message)}`;
+  return `${e.at.slice(0, 19).replace("T", " ")}  ${(e.failed ? st.red : st.green)(e.kind.padEnd(18))}  ${e.table ?? MASON_TABLE}  ${firstLine(e.message)}`;
 }
 
 /** mason status's sync errors: the latest few, a line each, newest last; none, no section. */
@@ -888,21 +893,22 @@ export function fileSize(b: number): string {
   return b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(1)} GiB` : b >= 1024 ** 2 ? `${(b / 1024 ** 2).toFixed(1)} MiB` : `${(b / 1024).toFixed(1)} KiB`;
 }
 
-/** `Mason` in mason status: the run's own version (a CLI of another version says the run's), its pid, and how long it
- *  has been up (a run from before it: the CLI's version, no uptime) */
-export function masonRow(e: Pick<RunState["engine"], "version" | "startedAt" | "uptimeSeconds">, pid: number): [string, string] {
-  return ["Mason", `${e.version ?? version()}, pid ${pid} · one process${e.startedAt ? ` · up ${spanText(e.uptimeSeconds ?? 0)}, since ${e.startedAt.slice(0, 19).replace("T", " ")} UTC` : ""}`];
+/** `Version` and `Up` in mason status: the run's own version (a CLI of another version says the run's), then how long it
+ *  has been up and since when, with its pid (a run from before its uptime: the CLI's version, the pid alone) */
+export function masonRows(e: Pick<RunState["engine"], "version" | "startedAt" | "uptimeSeconds">, pid: number): Array<[string, string]> {
+  return [["Version", e.version ?? version()],
+    ["Up", `${e.startedAt ? `${spanText(e.uptimeSeconds ?? 0)}, since ${e.startedAt.slice(0, 19).replace("T", " ")} UTC · ` : ""}pid ${pid}`]];
 }
 
-/** `Sessions` in mason status: how many are logged in to the Postgres API, how many run a statement, and by whom (the
+/** `Connections open` in mason status: how many are logged in to the Postgres API, how many run a statement, and by whom (the
  *  three with the most, then how many others) */
 export function sessionsRows(s: SessionsOpen | undefined): Array<[string, string]> {
   if (s === undefined) return [];
-  if (s.open === 0) return [["Sessions", "none open"]];
+  if (s.open === 0) return [["Connections open", "none open"]];
   const running = s.byClient.reduce((n, c) => n + c.running, 0);
   const who = s.byClient.slice(0, 3).map((c) => `${c.open} ${c.user === "" ? "by a token" : `as ${c.user}`}${c.client === "" ? "" : ` (${c.client})`}`);
   const others = s.byClient.length - who.length;
-  return [["Sessions", `${s.open} open, ${running} running a statement · ${who.join(", ")}${others > 0 ? `, and ${others} other client${others === 1 ? "" : "s"}` : ""} (mason logs --running lists the statements)`]];
+  return [["Connections open", `${s.open} open, ${running} running a statement · ${who.join(", ")}${others > 0 ? `, and ${others} other client${others === 1 ? "" : "s"}` : ""} (mason logs --running lists the statements)`]];
 }
 
 /** `Share` in mason status: each share open now (mason share) and what its socket met; no row when none is. */
@@ -916,13 +922,13 @@ export function shareRows(s: ShareState | null | undefined, now = Date.now()): A
   return [...each, ["Share socket", `127.0.0.1:${s.port}, TLS required, SHA-256 ${s.fingerprint} · ${s.sessions} session${s.sessions === 1 ? "" : "s"}, ${s.refusedLogins} login${s.refusedLogins === 1 ? "" : "s"} refused, ${s.droppedConnections} dropped before a login`]];
 }
 
-/** `Disk` in mason status: the bytes free where the synced data is, and what the first syncs running are projected to add (none: no
+/** `Free disk` in mason status: the bytes free where the synced data is, and what the first syncs running are projected to add (none: no
  *  row, for a run from before it) */
 export function diskRows(d: RunState["disk"]): Array<[string, string]> {
   if (d === undefined) return [];
   const adds = d.projectedBytes === null ? "" : ` · the first syncs running are projected to add about ${fileSize(d.projectedBytes)} more`;
-  if (d.freeBytes === null) return [["Disk", `${d.error ?? "the free space could not be read"}${adds}`]];
-  return [["Disk", `${fileSize(d.freeBytes)} free in ${d.path}${adds}${d.projectedBytes !== null && d.projectedBytes > d.freeBytes ? " — more than is free: the sync stops before the disk fills" : ""}`]];
+  if (d.freeBytes === null) return [["Free disk", `${d.error ?? "the free space could not be read"}${adds}`]];
+  return [["Free disk", `${fileSize(d.freeBytes)} free in ${d.path}${adds}${d.projectedBytes !== null && d.projectedBytes > d.freeBytes ? " — more than is free: the sync stops before the disk fills" : ""}`]];
 }
 
 /** `Restarts` in mason status: how many times the run was started again, and the last one's reason (none: no row) —
@@ -969,10 +975,11 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
   const ended = lastStop === null ? "" : `; ${ago(lastStop.at)}: ${lastStop.how}`;
   out(reportText({ headline: `Status: ${hung === null ? st.yellow(state) : st.red(state)}`, details: [
     ["Project", `${project.config.name}, files in ${project.folder}`],
-    ["Source", "message" in src ? `${src.message}${src.fix ? ` — ${src.fix.split("\n")[0]}` : ""}` : src.file],
-    ...(database === null ? [] : [["Database", `${database} (not checked: Mason ${hung === null ? "is not running" : "does not answer"})`] as [string, string]]),
-    ["Mason", hung === null ? `${version()} · not running${project.config.lastRun ? ` (last started ${ago(project.config.lastRun)}${ended})` : ""}`
-      : `${version()}, pid ${hung.run.pid} · running but does not answer its commands: ${hung.problem.why}`],
+    ["Sources file", "message" in src ? `${src.message}${src.fix ? ` — ${src.fix.split("\n")[0]}` : ""}` : src.file],
+    ...(database === null ? [] : [["Source", `${database} (not checked: Mason ${hung === null ? "is not running" : "does not answer"})`] as [string, string]]),
+    ["Version", version()],
+    ["Up", hung === null ? `not running${project.config.lastRun ? ` (last started ${ago(project.config.lastRun)}${ended})` : ""}`
+      : `pid ${hung.run.pid} · running but does not answer its commands: ${hung.problem.why}`],
     ["Synced data", bytes === null ? "none yet (mason start makes it)" : `${duckFile} · ${fileSize(bytes)}`],
     ...restartsRows(restarts),
     ["Postgres API", hung === null ? `not running${connectName === null ? "" : ` (a tool connects with the database ${connectName})`}` : `${shownUrl(clientLink(hung.run))}  (held by the hung run; it may not answer)`],
@@ -1712,7 +1719,7 @@ export async function wait(argv: string[]): Promise<number> {
       if (r.ready) {
         const head = !picked.length ? "Nothing to wait for: no table added yet."
           : only !== null ? `Ready: ${picked.map((t) => t.table).join(", ")} ${picked.length === 1 ? "is" : "are"} synced and served.`
-          : "Ready: every added table is synced and served.";
+          : `Ready: ${READY_TEXT}.`;
         if (!json) out(withEnd(picked.length ? styleOut().green(head) : head, { next: readyNext }));
         return 0;
       }
@@ -1799,11 +1806,11 @@ async function waitGenerated(run: DevRun, named: string, timeout: number, json: 
 
 // ------------------------------------------------------------------ mason logs
 
-/** What the sync's events leave out, said where they are listed (mason logs --help, the page's Sync events, held equal
- *  by tests/web-page.test.ts): a scheduled poll that succeeds is no event, so a person who synced reads where it is. */
-export const EVENTS_LEAVE_OUT = "A scheduled poll that succeeds is not listed: the last one's result is each table's last sync (mason status, the Tables page's Last sync).";
+/** What the sync's events leave out unless asked, said where they are listed (mason logs --help, the page's Sync
+ *  events, held equal by tests/web-page.test.ts): the scheduled syncs that succeed (src/duck/events.ts `SCHEDULED`). */
+export const EVENTS_LEAVE_OUT = "The scheduled syncs that succeed (each poll on its schedule, and each minute the stream applied changes, a line a table) are listed only with --scheduled.";
 
-const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<filters>] [--id <request id>]] [--events [--failed]] [--running] [--json]
+const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<filters>] [--id <request id>]] [--events [--failed | --scheduled]] [--running] [--json]
 
   The last lines of Mason's log: every sync, poll and statement it ran, warnings and errors with their reasons —
   running or not.
@@ -1816,6 +1823,7 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     mason logs --requests --slow --search orders   the statements over orders that took a second or more
     mason logs --requests --id <request id>   one request whole: its statement, its error, and a slow one's plan
     mason logs --events --failed  the sync's latest failures
+    mason logs --events --scheduled   every sync, the scheduled ones that succeeded too
     mason logs --running          the statements running now, and their sessions
 
   -n, --lines <n>  how many lines, or with --requests or --events how many of them (default 40; 1 to 10000 for each)
@@ -1825,6 +1833,7 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
   --events         the sync's events and the run's restarts (Mason must be running)
   --failed         with --requests: only the ones not answered (refused, failed or cancelled); with --events: only
                    the failures
+  --scheduled      with --events: the scheduled syncs that succeeded too (polled, streamed)
   --outcome <o,…>  with --requests: only these outcomes — ok, refused (the statement's own fault), failed (Mason's or
                    the machine's), cancelled (a cancel or a statement timeout, SQLSTATE 57014); a comma list or
                    the flag repeated, the same
@@ -1847,8 +1856,8 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
   reads them (--before). With --events, the sync's events: each first sync that failed or finished, each poll, catch-up or
   stream that failed, the database out of reach, a table current again, each sync asked by hand (mason sync, the
   page's Sync now) and what it did, and each restart of the run — a line each, newest last (a failure repeated word for
-  word is said once an hour). A scheduled poll that succeeds is not listed: the last one's result is each table's last
-  sync (mason status, the Tables page's Last sync). Both are kept MASON_HISTORY_DAYS days
+  word is said once an hour). The scheduled syncs that succeed (each poll on its schedule, and each minute the stream
+  applied changes, a line a table) are listed only with --scheduled. Both are kept MASON_HISTORY_DAYS days
   (default 7) in the run's synced data, and read through the running Mason. With --running, the statements running now
   instead, one per session, each with its number (mason cancel <session> --statement <n> stops one).
 
@@ -1864,8 +1873,9 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     before (the position of the page before,
     or null: none older) }; with --events { events: [{ at, kind (copy_failed, poll_failed,
     catch_up_failed, stream_failed, source_unreachable, generated_failed, compact_failed, restart, copied, recovered, synced (a sync
-    asked by hand), sync_changed (a table's sync: changed), ui_error (the web page met an error of its own)), failed, table (null: the
-    whole sync, the run or the web page),
+    asked by hand), sync_changed (a table's sync: changed), polled (a poll on its schedule, with --scheduled), streamed (a
+    minute of the stream's changes to a table, with --scheduled), ui_error (the web page met an error of its own)), failed,
+    table (null: the whole sync, the run or the web page),
     message }], keptDays }; with --running { running: [{ session, user,
     applicationName, method, startedAt, runningMs, rows (sent so far), query, queryTruncated }] }; next
 `;
@@ -1876,7 +1886,7 @@ export const LOGS: CommandSpec & { needs: "project" } = {
   summary: "Mason's log (-f follows it); --requests: the Postgres API's statements; --events: the sync's; --running: running now",
   usage: LOGS_USAGE,
   options: { lines: { type: "string", short: "n" }, follow: { type: "boolean", short: "f" }, start: { type: "boolean" },
-    requests: { type: "boolean" }, events: { type: "boolean" }, failed: { type: "boolean" }, outcome: { type: "string", multiple: true }, since: { type: "string" },
+    requests: { type: "boolean" }, events: { type: "boolean" }, failed: { type: "boolean" }, scheduled: { type: "boolean" }, outcome: { type: "string", multiple: true }, since: { type: "string" },
     until: { type: "string" }, user: { type: "string" }, client: { type: "string" }, slow: { type: "boolean" }, search: { type: "string" }, before: { type: "string" }, id: { type: "string" }, running: { type: "boolean" }, json: { type: "boolean" } },
   json: ["lines", "requests", "events", "keptDays", "before", "running", "next"],
 };
@@ -1988,21 +1998,23 @@ async function requestLogs(q: RequestQuery, json: boolean): Promise<number> {
 }
 
 /** mason logs --events: the sync's events and the run's restarts through its command server (src/duck/events.ts) */
-async function eventLogs(limit: number, failedOnly: boolean, json: boolean): Promise<number> {
+async function eventLogs(limit: number, failedOnly: boolean, scheduled: boolean, json: boolean): Promise<number> {
   const r0 = await theRun(process.cwd());
   if ("problem" in r0) return failed("logs", r0, { json });
   return guarded("logs", json, async () => {
-    const reply = await callRun(r0.run, "GET", `/api/events?limit=${limit}${failedOnly ? "&failed=1" : ""}`);
+    const reply = await callRun(r0.run, "GET", `/api/events?limit=${limit}${failedOnly ? "&failed=1" : ""}${scheduled ? "&scheduled=1" : ""}`);
     if (reply.status !== 200) {
       return failed("logs", runFailure(reply, [["mason status", "each synced table and its error now"], ["mason logs", "Mason's log, where each event is a line too"]]), { json });
     }
     const events = reply.body.events as SyncEvent[];
     const keptDays = Number(reply.body.keptDays);
     const next: NextStep[] = failedOnly ? [["mason logs --events", "every event, the first syncs finished and the tables current again too"], ["mason status", "each synced table and its error now"]]
-      : [["mason logs --events --failed", "only the failures"], ["mason status", "each synced table and its error now"]];
+      : [["mason logs --events --failed", "only the failures"], ...(scheduled ? [] : [["mason logs --events --scheduled", "the scheduled syncs that succeeded too"] as NextStep]),
+        ["mason status", "each synced table and its error now"]];
     if (json) { out(jsonText(LOGS, { events, keptDays }, next)); return 0; }
     const st = styleOut();
-    if (!events.length) out(`No ${failedOnly ? "sync failure" : "sync event"} in the last ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_HISTORY_DAYS).`);
+    if (!events.length) out(`No ${failedOnly ? "sync failure" : "sync event"} in the last ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_HISTORY_DAYS)` +
+      `${failedOnly || scheduled ? "" : ", but for the scheduled syncs that succeeded: --scheduled lists them"}.`);
     for (const e of events) out(eventLine(e, st));
     out(endText({ next }, st));
     return 0;
@@ -2051,6 +2063,8 @@ export async function logs(argv: string[]): Promise<number> {
   const json = f.values.json === true;
   if (f.values.requests && f.values.events) return failed("logs", { message: "--requests and --events are two lists: ask for one", code: "usage", fix: "mason logs --requests, or mason logs --events" }, { json });
   if (f.values.failed && !f.values.requests && !f.values.events) return failed("logs", { message: "--failed is a filter of --requests or --events", code: "usage", fix: "mason logs --requests --failed, or mason logs --events --failed" }, { json });
+  if (f.values.scheduled && !f.values.events) return failed("logs", { message: "--scheduled is a filter of --events", code: "usage", fix: "mason logs --events --scheduled" }, { json });
+  if (f.values.scheduled && f.values.failed) return failed("logs", { message: "--failed lists the failures alone, and --scheduled adds the scheduled syncs that succeeded: ask for one", code: "usage", fix: "mason logs --events --failed, or mason logs --events --scheduled" }, { json });
   // the request log's own filters (--failed is --events' too)
   const filter = FILTER_FLAGS.find((k) => k !== "failed" && f.values[k] !== undefined);
   if (filter !== undefined && !f.values.requests) {
@@ -2082,7 +2096,7 @@ export async function logs(argv: string[]): Promise<number> {
   if (f.values.events) {
     const limit = eventLimit(typeof f.values.lines === "string" ? f.values.lines : undefined, "-n");
     if (typeof limit !== "number") return failed("logs", { ...limit, usage: LOGS_USAGE }, { json });
-    return eventLogs(limit, f.values.failed === true, json);
+    return eventLogs(limit, f.values.failed === true, f.values.scheduled === true, json);
   }
   // a stopped run's log is still worth reading: the project's, running or not
   const t = theProject(process.cwd());

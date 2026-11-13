@@ -820,8 +820,10 @@ test("the stream says where it is: a table joins and leaves on a line with its p
   if ("problem" in parsed) throw new Error(parsed.problem);
   const [A, B] = await tablesOf(parsed.source, ["public.a", "public.b"]);
   const logged: string[] = [];
+  const events: Array<{ kind: string; table: string | null; message: string }> = [];
   const store = await DuckStore.open(path.join(dir, "v.db"), (l) => logged.push(l));
-  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", { slot: `${tag}_v`, publication: `${tag}_v`, owned: true }, { streamReportMs: 300 });
+  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", { slot: `${tag}_v`, publication: `${tag}_v`, owned: true },
+    { streamReportMs: 300, onEvent: (e) => { events.push(e); } });
   const status = async (): Promise<StreamStatus> => { const s = await sync.streamStatus(); assert.ok(s !== null, "replication mode has a stream status"); return s; };
   const table = (s: StreamStatus, source: string): StreamStatus["tables"][number] => s.tables.find((t) => t.table === source)!;
   const LSN = "[0-9A-F]+\\/[0-9A-F]+";
@@ -853,9 +855,13 @@ test("the stream says where it is: a table joins and leaves on a line with its p
     // THE PERIODIC LINE says what moved since the last one, and nothing while idle
     await until(() => logged.some((l) => new RegExp(`^replication: applied through ${LSN} · in the last [\\d.]+ s: public\\.a 6 changes \\(3 inserts, 2 updates, 1 delete\\) · [\\d,]+ bytes behind the database; the newest change applied was committed`).test(l)),
       "the periodic line", logged, 5_000);
-    const idleFrom = logged.length;
+    // and ONE scheduled-sync event a table for it (src/duck/events.ts `streamed`), never one a batch
+    assert.deepEqual(events.filter((e) => e.kind === "streamed").map((e) => `${e.table} ${e.message.replace(/in the last [\d.]+ s$/, "in the last # s")}`),
+      ["public.a streamed 6 changes (3 inserts, 2 updates, 1 delete) in the last # s"], JSON.stringify(events));
+    const idleFrom = logged.length, idleEvents = events.length;
     await new Promise((r) => setTimeout(r, 1_200));
     assert.deepEqual(logged.slice(idleFrom).filter((l) => /^replication: applied through /.test(l)), [], "silent while idle");
+    assert.deepEqual(events.slice(idleEvents).filter((e) => e.kind === "streamed"), [], "no streamed event while idle");
 
     // AN IDLE HEALTHY STREAM IS NEVER BEHIND (issue 254): the keepalive it asks for every 10 s says it has everything,
     // so its synced data's age (kept.syncedAt) stays far under what a streamed table promises — sampled over 25 s

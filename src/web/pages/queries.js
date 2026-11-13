@@ -3,19 +3,25 @@
  * the request log (`mason logs --requests`, GET /api/requests) and nothing else — who is connected, what runs and the
  * range's numbers are Usage's (src/web/pages/usage.js). A table (a status dot and word, each row expanding in place and
  * staying open across polls), newest first, filtered by status, slow (SLOW_MS or more), a piece of the statement's text,
- * since, user and client — since is the shared time range unless the filter names its own — and paged back by Older;
+ * user and client, over the shared time range (the hash's `range`, the only window: a `since` in an old hash is
+ * ignored) — and paged back by Older;
  * Started, Duration and Rows sort the page shown (the pages follow the log's order by start: a sort of the whole log
- * would need a cursor per order). Read every 5 s while the range is Now, once when another is chosen. A statement is one
+ * would need a cursor per order). Read every 5 s, a longer range at its own rate (`rangeEvery`). A statement is one
  * or two lines in its cell, its title at most TITLE_MAX characters, and its expanded row the first STATEMENT_MAX of it.
  * The words are the commands': a request's duration in ms, its error, the empty log's sentence — and, while the log is
- * empty and unfiltered, how to connect (`renderConnect`), so the first statement is a paste away. Usage's rows lead here
- * filtered (`route`: `?user=`, `?client=`, `?slow=1`, `?status=`).
+ * empty and unfiltered, one quiet line leading to the Users page, where a tool's user is made. Usage's rows lead here
+ * filtered (`route`: `?user=`, `?client=`, `?slow=1`, `?status=`). The User filter is a dropdown of the users
+ * (`renderUserFilter`, from GET /api/users while Queries is shown), a text box when they could not be read.
  */
 import { VIEW_HASHES } from "../routes.js";
 import { statementMsText, agoText, bytesText, esc, firstLine, n, empty, renderFailure, rowsHtml, utcText, utcMsText, details, createOpenSet, status,
-  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, clientText, renderConnect, copyClick, UNLISTED_STATEMENTS, statementCell, rangeEvery, usersReadOnly } from "../shared.js";
+  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, clientText, USERS_HASH, UNLISTED_STATEMENTS, statementCell, rangeEvery, usersReadOnly } from "../shared.js";
 
 const STATE = "api/state";
+/** The users, for the User filter's choices: `mason user list --json`'s shape, without the last use (a scan of the log
+ *  the dropdown does not show), read at the Users page's rate while Queries is shown. */
+const USERS = "api/users";
+const USERS_EVERY_MS = 30_000;
 const NEWEST_EVERY_MS = 5000;
 /** The newest page while a search is set: a search reads every statement's text of the range (7 days of a busy log,
  *  ~0.6 s a read), so it is read every 30 s, not 5 — said under the log (SEARCH_NOTE). */
@@ -66,16 +72,20 @@ function planHtml(r) {
  * started, duration or rows) orders the page shown, said under it when it is not the newest first. **Older** when the
  * page has an older one (`before`), **Newest** when the page shown is not the newest. `filtered`: the empty sentence
  * names the filters, as the command's does; `span` the range's words (the empty log's). `now` is the page's clock.
+ * Under the list, always, one small quiet line: what the log does not list (UNLISTED_STATEMENTS, as `mason logs
+ * --requests` says it), so a `select 1` typed to test a connection is not looked for in vain.
+ * `firstTool`: an empty, unfiltered log adds one quiet line, Create a user (a button to the Users page) to connect your
+ * first tool — false where the page makes no user (`usersReadOnly`).
  */
-export function renderRequests(page, { paged = false, filtered = false, isOpen = () => false, now = Date.now(), sort = NEWEST_FIRST, span = "", connect = "" } = {}) {
+export function renderRequests(page, { paged = false, filtered = false, isOpen = () => false, now = Date.now(), sort = NEWEST_FIRST, span = "", firstTool = false } = {}) {
   const older = page.before !== null && page.before !== undefined;
+  const unlisted = `<p class="dim unlisted">${esc(UNLISTED_STATEMENTS)}.</p>`;
   const nav = paged || older ? `<div class="paging">${paged ? `<button type="button" data-newest>Newest</button>` : ""}${older ? `<button type="button" data-older>Older</button>` : ""}</div>` : "";
   if (!page.requests.length) {
     const days = `${page.keptDays} day${page.keptDays === 1 ? "" : "s"}`;
-    // nothing asked yet (no filter, the newest page): how to connect, so the first statement is a paste away
-    return empty(`No ${filtered ? "query matches the filters" : "query"} ${span ? `in ${span}` : `in the last ${days}`}. Mason keeps ${days} of history.`) +
-      // a first statement looked for and not there: what the log does not list (a select 1 typed to test the connection)
-      (filtered || paged ? "" : `<p class="dim unlisted">${esc(UNLISTED_STATEMENTS)}.</p>${connect}`) + nav;
+    return empty(`${filtered ? "No query matches the filters" : "No queries"} in ${span || `the last ${days}`}.`) +
+      // nothing asked yet (no filter, the newest page): where a tool's user is made, in a line
+      (filtered || paged || !firstTool ? "" : `<p class="empty first-tool"><a class="btn small primary" href="${USERS_HASH}">Create a user</a> to connect your first tool.</p>`) + unlisted + nav;
   }
   const newest = [...page.requests].reverse();
   const list = sort.key === "started" && sort.dir === "desc" ? newest : sortedBy(newest, REQUEST_SORTS[sort.key] ?? REQUEST_SORTS.started, sort.dir);
@@ -102,7 +112,32 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
   const sortNote = sort.key === "started" && sort.dir === "desc" ? ""
     : `<p class="dim sort-note">Sorted by ${esc(sort.key === "started" ? "start" : sort.key)}, ${sort.dir === "asc" ? "lowest" : "highest"} first, within the ${n(page.requests.length)} rows of this page. Older and Newest go by start time.</p>`;
   return `<div class="scroll"><table class="requests"><thead><tr>${REQUEST_COLUMNS.map(([c, key, cls]) => key ? sortTh("requests", key, c, sort, cls) : `<th scope="col">${c}</th>`).join("")}</tr></thead>` +
-    `<tbody>${rows}</tbody></table></div>${sortNote}${nav}`;
+    `<tbody>${rows}</tbody></table></div>${sortNote}${unlisted}${nav}`;
+}
+
+/**
+ * THE USER FILTER (the form's `user`, the part `rq-user-field`: its label and its control): a dropdown, "All users" (no
+ * filter) then the users of `/api/users` (`users`: its body, `{ failure }`, or undefined before it answered) — the
+ * active first, then the removed, marked "(removed)", since their statements are still in the log; a name once. An
+ * option's value is the user's name, sent as `user=` as a typed name was: the server's one filter. `selected` (the
+ * filter set) not among them (a hash's `user=` naming a share's login, or a user whose record is gone) is one more
+ * option, selected, so a link still filters and says so. The users not read (a failure): the text box, as before.
+ */
+export function renderUserFilter(users, selected = "") {
+  const label = `<label for="rq-user">User</label>`;
+  if (users !== undefined && (users === null || "failure" in users || !Array.isArray(users.users)))
+    return `${label}<input id="rq-user" name="user" spellcheck="false" value="${esc(selected)}">`;
+  const list = users?.users ?? [];
+  const seen = new Set();
+  const options = [];
+  for (const u of [...list.filter((x) => x.removedAt == null), ...list.filter((x) => x.removedAt != null)]) {
+    if (typeof u.name !== "string" || seen.has(u.name)) continue;
+    seen.add(u.name);
+    options.push([u.name, u.removedAt == null ? u.name : `${u.name} (removed)`]);
+  }
+  if (selected !== "" && !seen.has(selected)) options.push([selected, selected]);
+  const option = (value, text) => `<option value="${esc(value)}"${value === selected ? " selected" : ""}>${esc(text)}</option>`;
+  return `${label}<select id="rq-user" name="user">${option("", "All users")}${options.map(([v, t]) => option(v, t)).join("")}</select>`;
 }
 
 /** The status filter's choices as the server's `outcome` list (src/api/request-log.ts): Completed is ok, Refused the
@@ -111,14 +146,14 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
 const STATUS_OUTCOMES = { completed: "ok", refused: "refused", failed: "failed", "refused-or-failed": "refused,failed", cancelled: "cancelled" };
 
 /** The filters as they are before any is set. */
-const NO_FILTERS = { status: "", since: "", user: "", client: "", slow: false, search: "" };
+const NO_FILTERS = { status: "", user: "", client: "", slow: false, search: "" };
 
-/** The path of one view of the request log: its filters as the server reads them (it judges since and search), since the
- *  range's (`range`, a key of RANGES) unless the filter names its own, and the cursor of an older page. */
+/** The path of one view of the request log: its filters as the server reads them (it judges search), since the range's
+ *  (`range`, a key of RANGES: the only window), and the cursor of an older page. */
 export function requestsPath(filters, before, range = DEFAULT_RANGE) {
   const p = new URLSearchParams();
   if (STATUS_OUTCOMES[filters.status]) p.set("outcome", STATUS_OUTCOMES[filters.status]);
-  p.set("since", filters.since || (RANGES[range] ?? RANGES[DEFAULT_RANGE]).since);
+  p.set("since", (RANGES[range] ?? RANGES[DEFAULT_RANGE]).since);
   for (const k of ["user", "client"]) if (filters[k]) p.set(k, filters[k]);
   if (filters.slow) p.set("slow", "1");
   if (filters.search) p.set("search", filters.search);
@@ -141,13 +176,14 @@ export const page = {
     const showFilters = (doc) => {
       const form = doc?.getElementById?.("request-filters");
       if (!form?.elements) return;
-      for (const k of ["status", "since", "user", "client", "search"]) if (form.elements[k]) form.elements[k].value = m.filters[k];
+      for (const k of ["status", "user", "client", "search"]) if (form.elements[k]) form.elements[k].value = m.filters[k];
       if (form.elements.slow) form.elements.slow.checked = m.filters.slow;
     };
     const actions = {
       /** Show the requests that pass these filters, from the newest. */
       async filterRequests(filters) {
-        m.filters = { ...NO_FILTERS, ...filters };
+        // the filters the form has, and only those (a since of an older caller is no window: the range is)
+        m.filters = { ...NO_FILTERS, ...Object.fromEntries(Object.entries(filters).filter(([k]) => Object.hasOwn(NO_FILTERS, k))) };
         m.before = null;
         await ctx.refresh([path()]);
       },
@@ -167,16 +203,20 @@ export const page = {
     };
     return {
       model: m,
-      // the newest page of the log every 5 s while the range is Now (30 s while a search is set), once when another
-      // range is chosen; an older page only when first asked. The state (how to connect, when the log is empty) every 30 s
-      reads: () => [{ path: path(), everyMs: m.before !== null ? Infinity : rangeEvery(ctx.range(), m.filters.search ? SEARCH_EVERY_MS : NEWEST_EVERY_MS) }, { path: STATE, everyMs: 30_000 }],
+      // the newest page of the log every 5 s (30 s while a search is set), a longer range at its own rate; an older
+      // page only when first asked. The state (whether the page makes users, for the empty log's line) every 30 s,
+      // and the users (the User filter's choices) at the Users page's rate
+      reads: () => [{ path: path(), everyMs: m.before !== null ? Infinity : rangeEvery(ctx.range(), m.filters.search ? SEARCH_EVERY_MS : NEWEST_EVERY_MS) }, { path: STATE, everyMs: 30_000 },
+        { path: USERS, everyMs: USERS_EVERY_MS }],
       actions,
       view() {
         const log = ctx.read(path());
         const s = ctx.read(STATE)?.body;
+        const users = ctx.read(USERS);
         return {
+          "rq-user-field": renderUserFilter(users === undefined ? undefined : users.failure ? { failure: users.failure } : users.body, m.filters.user),
           "request-log": (log?.failure ? renderFailure(log.failure) : "") + (log?.body ? renderRequests(log.body, { paged: m.before !== null, filtered: filtered(), isOpen: opened.has, now: ctx.now().getTime(), sort: m.sort,
-            span: m.filters.since ? "" : (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span, connect: renderConnect(s?.postgres, { first: true, table: s?.tables?.find((t) => t.added && t.copy?.phase === "done")?.table ?? null, readOnly: usersReadOnly(s) }) }) : "") +
+            span: (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span, firstTool: s != null && usersReadOnly(s) === null }) : "") +
             (log?.body && m.filters.search && m.before === null ? `<p class="dim refresh-note">${esc(SEARCH_NOTE)}</p>` : ""),
         };
       },
@@ -184,7 +224,7 @@ export const page = {
       submit(form) {
         if (form.id !== "request-filters") return null;
         const value = (k) => form.elements[k]?.value?.trim() ?? "";
-        return actions.filterRequests({ status: value("status"), since: value("since"), user: value("user"), client: value("client"), slow: form.elements.slow?.checked === true, search: value("search") });
+        return actions.filterRequests({ status: value("status"), user: value("user"), client: value("client"), slow: form.elements.slow?.checked === true, search: value("search") });
       },
       /** `#observability/queries?slow=1`, `?status=refused-or-failed`,`?user=metabase&client=Metabase` (where the Overview's cards
        *  and Usage's rows lead): those filters, from the newest, and the form's controls showing them. Nothing to do for a
@@ -199,8 +239,6 @@ export const page = {
       },
       click(d, button, env) {
         const { doc } = env;
-        // Connect's Copy buttons, in the request log's empty state
-        if (d.copy !== undefined) return copyClick(d, button, env);
         if (d.sortTable === "requests") return actions.sortRequests(d.sortKey) ?? true;
         // the statement's toggle: the row's one open state, as its id's summary opens and closes it
         if (d.expand !== undefined) return opened.toggle({ dataset: { open: d.expand }, open: !opened.has(d.expand), clicked: true });

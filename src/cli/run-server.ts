@@ -62,6 +62,7 @@ import type { PageShares } from "./page-share.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 import { unsizedTables, type CopySize, type UnsizedTable, type UsageFacts, type UsageSample, type UsageSampler } from "../duck/usage.ts";
 import { FRESH_SAMPLES, type RunMetrics } from "./metrics.ts";
+import { isActive, readUsers } from "../duck/users.ts";
 
 /** The page's views (src/web/routes.js, the one list: the page imports it too), as a report of its error names them:
  *  each view's hash, and the host's view. Plain JavaScript beside the code, hence its shape declared here. */
@@ -127,7 +128,7 @@ export interface RunContext {
   roles?: () => RolesLive;
   /** what `mason share` opens (src/cli/share-run.ts): mason start's run alone; a server has an address of its own */
   shares?: RunShares;
-  /** the web page's Connect from anywhere (src/cli/page-share.ts): the same shares, held by the page's beats; absent with `shares` */
+  /** the web page's Temporary cloud login (src/cli/page-share.ts): the same shares, held by the page's beats; absent with `shares` */
   pageShares?: PageShares;
   /** the web page's own errors (src/cli/ui-errors.ts): `POST /api/ui/error` records them, `/metrics` counts them;
    *  absent, the route answers 404 and `/metrics` says no count */
@@ -190,6 +191,12 @@ export interface RunContext {
 
 /** the request log's shapes (src/duck/requests.ts), as mason status reads them */
 export type { RefusedQuery, SlowQuery } from "../duck/requests.ts";
+
+/** `/api/state` `users`: how many users exist now (not removed: `isActive`), or why the list cannot be read. */
+export function usersFact(file: string): { active: number } | { error: string } {
+  const r = readUsers(file);
+  return "problem" in r ? { error: r.problem } : { active: r.users.filter(isActive).length };
+}
 
 /**
  * The run's state, in the shape mason status / wait read (`RunState`, src/cli/commands.ts): each table of the database,
@@ -296,6 +303,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     // (engine.bytes), and what the first syncs running are projected to add (copyDiskProjection) — mason status says it
     // the sessions logged in now, by user and client (the listener's own, in memory): mason status says how many
     sessions: ctx.listener.openSessions(),
+    // how many users exist (mason user's, not removed): the web page's Getting started is done once one does (the owner,
+    // 2026-11-13); a list that cannot be read says why, never 0
+    users: usersFact(ctx.users.file),
     disk: { path: disk.path, freeBytes: disk.freeBytes, copyBytes: bytes, projectedBytes: disk.projectedBytes, ...(disk.error !== undefined ? { error: disk.error } : {}) },
     jsonPaths: ctx.duck.jsonPaths?.() ?? [],
     generatedTables: ctx.duck.generated?.() ?? [],
@@ -564,8 +574,9 @@ export async function unsupported(ctx: RunContext, q: URLSearchParams, now = Dat
 }
 
 /**
- * `GET /api/events?limit=&since=&failed=1`: the newest `limit` (1 to 10000, default 40) of the sync's events merged with
- * the run's restarts, newest last, from `since` on (`since` and `until` are read everywhere by one grammar, src/cli/request-filter.ts `timeOf`: an age, or an ISO 8601 time with its zone), the failures only with `failed=1`; and the days
+ * `GET /api/events?limit=&since=&failed=1&scheduled=1`: the newest `limit` (1 to 10000, default 40) of the sync's events merged with
+ * the run's restarts, newest last, from `since` on (`since` and `until` are read everywhere by one grammar, src/cli/request-filter.ts `timeOf`: an age, or an ISO 8601 time with its zone), the failures only with `failed=1`,
+ * the scheduled syncs too with `scheduled=1` (src/duck/events.ts `SCHEDULED`: left out otherwise); and the days
  * they are kept. `mason logs --events --json` is this; `mason status --json` `recentErrors` its latest failures.
  */
 export async function events(ctx: RunContext, q: URLSearchParams): Promise<{ events: ReturnType<typeof withRestarts>; keptDays: number }> {
@@ -573,7 +584,7 @@ export async function events(ctx: RunContext, q: URLSearchParams): Promise<{ eve
   if (typeof limit !== "number") throw new Refusal(400, limit.message, limit);
   const sinceText = q.get("since");
   const since = sinceText === null ? undefined : timeParam("since", sinceText, Date.now());
-  const o = { limit, failed: q.get("failed") === "1", ...(since === undefined ? {} : { since }) };
+  const o = { limit, failed: q.get("failed") === "1", scheduled: q.get("scheduled") === "1", ...(since === undefined ? {} : { since }) };
   const found = await ctx.duck.events.recent(o);
   // a record of restarts that cannot be read (issue 847: one an older Mason left empty on a full disk) costs the sync's
   // events nothing: none of it is merged, and why it is unreadable is said where the restarts are (`restartsFact`,
@@ -753,14 +764,16 @@ async function openShare(ctx: RunContext, req: http.IncomingMessage, res: http.S
 const SERVED_SHARE: Failure = { message: "this run is on a server, and has an address of its own: mason share is for a run on a laptop", code: "refused", next: [["mason help production", "reaching a server's Postgres API"]] };
 
 /**
- * `POST /api/share` { from: "page", confirmed: true, role? }: the web page's Connect from anywhere (src/cli/page-share.ts),
+ * `POST /api/share` { from: "page", confirmed: true, role? }: the web page's Temporary cloud login (src/cli/page-share.ts),
  * answered ONCE with the share and its password, which nothing here keeps; the page's beats hold it from then on.
- * `confirmed` is the person's yes to a public address, which the page asks for: a body without it opens nothing.
+ * `confirmed` is the person's yes to a public address: on the page, the click on Open a cloud login is that yes, the
+ * pane's sentence ("…Opens a public address with a login of its own, until you stop it.") what the person has read
+ * before it, and no question follows. It is still required of the request: a body without it opens nothing.
  */
 async function openPageShare(ctx: RunContext, body: { role?: unknown; confirmed?: unknown }, res: http.ServerResponse): Promise<void> {
   if (ctx.pageShares === undefined) { sendFailure(res, 409, SERVED_SHARE); return; }
   if (body.confirmed !== true) {
-    sendFailure(res, 400, { message: "nothing was shared: a temporary public address is opened only once the person said yes to it", code: "usage", fix: "send { from: \"page\", confirmed: true, role? }: the page's Connect from anywhere asks first" });
+    sendFailure(res, 400, { message: "nothing was shared: a temporary public address is opened only once the person said yes to it", code: "usage", fix: "send { from: \"page\", confirmed: true, role? }: the Users page's Temporary cloud login sends it once the person clicks Open a cloud login" });
     return;
   }
   if (body.role !== undefined && typeof body.role !== "string") throw new Refusal(400, "role is a role's name, or left out");
@@ -966,7 +979,7 @@ export function createRunServer(ctx: RunContext): http.Server {
           if ("failure" in r && r.choices === undefined) { sendFailure(res, statusOf(r.failure), r.failure); return; }
           sendJson(res, 200, "failure" in r ? { choices: r.choices } : { choices: [], role: r.role, reads: r.reads });
         } else if ((method === "POST" && /^\/api\/share\/[^/]+\/beat$/.test(url.pathname)) || (method === "DELETE" && /^\/api\/share\/[^/]+$/.test(url.pathname))) {
-          // the page's share: a beat holds it, a DELETE is Stop sharing; a share of mason share's is its command's to end
+          // the page's share: a beat holds it, a DELETE is Stop; a share of mason share's is its command's to end
           if (ctx.pageShares === undefined || ctx.shares === undefined) { sendFailure(res, 409, SERVED_SHARE); return; }
           let user: string;
           try { user = decodeURIComponent(url.pathname.split("/")[3]!); }
@@ -976,7 +989,7 @@ export function createRunServer(ctx: RunContext): http.Server {
           const ended = ctx.shares.ended;
           const why = ended?.user === user ? `: ${ended.why}` : "";
           const ok = method === "DELETE" ? await ctx.pageShares.stop(user) : ctx.pageShares.beat(user);
-          if (!ok) { sendFailure(res, 404, { message: `the share ${user} is not open${why === "" ? "" : `; it ended${why}`}`, code: "not_found", fix: "Connect from anywhere opens a new one, with a new address and password" }); return; }
+          if (!ok) { sendFailure(res, 404, { message: `the share ${user} is not open${why === "" ? "" : `; it ended${why}`}`, code: "not_found", fix: "Open a cloud login, in the Users page's Temporary cloud login, opens a new one, with a new address and password" }); return; }
           sendJson(res, 200, { ok: true });
         } else if (method === "POST" && /^\/api\/share\/[^/]+$/.test(url.pathname)) {
           // what the command knows of its tunnel, as it knows it: mason status says it, and the run stops the client

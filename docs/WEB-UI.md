@@ -25,17 +25,18 @@ the address's hash, so a view can be bookmarked and Back goes to the one before:
 |---|---|
 | `#overview` (none, or one it does not know) | the Overview |
 | `#tables`, `#tables?show=failed` | Tables (only the tables whose sync failed) |
-| `#users` | Users |
+| `#users`, `#users?show=removed` | Users (its Active tab; the Removed tab) |
 | `#observability/queries` (`#observability`) | Observability › Queries; `?slow=1`, `?status=` (`completed`, `refused`, `failed`, `refused-or-failed`, `cancelled`), `?user=`, `?client=` set those filters |
 | `#observability/usage` | Observability › Usage |
 | `#observability/syncs` | Observability › Sync events; `?failures=1` ticks Failures only, `?table=` chooses the table |
 
 The hashes of before still land on their view: `#status` is the Overview, `#queries` and `#usage` their views, `#logs`
-and `#observability/logs` Sync events. In each Observability view's header row, right of its title, is **the time range the three share**: a segmented control — **Now** · Last hour · 24 hours · 7 days · 30 days · 90 days, Now unless the hash says (`?range=1h`, `?range=7d`, `?range=90d`); 30 and 90 days only where Mason keeps that much history (`MASON_HISTORY_DAYS`, 7 by default), else shown disabled with that setting as the reason
-— kept in the hash, so a link carries it (the sidebar's links to the three keep it too). **Now is live**: the last 15
-minutes, read every few seconds, said **Live** beside the control. **Every other range is read once**, when it is
-chosen, and stays as it was then: beside it, when it was read and **Refresh**. Queries reads the request log since then,
-Usage the range's statements, clients and samples (a minute a point for Now and the hour, an hour for the day, six hours
+and `#observability/logs` Sync events. In each Observability view's header row, right of its title, is **the time range the three share**: a segmented control — **Last 15 mins** · Last hour · 24 hours · 7 days · 30 days · 90 days, the last 15 minutes unless the hash says (`?range=1h`, `?range=7d`, `?range=90d`); 30 and 90 days only where Mason keeps that much history (`MASON_HISTORY_DAYS`, 7 by default), else shown disabled with that setting as the reason
+— kept in the hash, so a link carries it (the sidebar's links to the three keep it too). **Every range is live**, said **Live**
+left of the control (the same word at every range, so the control never moves when the range changes). Each is read
+again by itself: the last 15 minutes and the hour every few seconds, 24 hours every 30 seconds, and a week or more
+every minute, since those reads scan more of the logs. Live's title says how often. Queries reads the request log since then,
+Usage the range's statements, clients and samples (a minute a point for the last 15 minutes and the hour, an hour for the day, six hours
 for the week, a day for 30 and 90 days), Sync events the sync's events since then; each
 view's own filters compose with it. Only the view shown asks Mason anything, each read at the rate its data changes,
 and nothing while the tab is hidden. How long ago Mason last answered is at the sidebar's foot.
@@ -46,47 +47,47 @@ a sheet over the page: the focus goes to its first link, and Escape, a click out
 followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/vendor/lucide-1.56.0/`, drawn inline at
 16 px in the text's colour.
 
-- **Overview** (`#overview`, read only): the run's word (Ready, Under way or Failed) beside a big dot, then cards for the
-  tables synced, the rows, the last sync, the synced data's file, and the last day's statements with their p95. Each card has a
+- **Overview** (`#overview`, read only): under the title **mason status**, the run's word (Ready, Under way or Failed)
+  beside a big dot, and one line saying what it means for the synced data, from `/api/state` alone (`readiness`,
+  `totals`, the tables' `sync.state`): Ready, "Every added table is synced and served" (the sentence `mason status`
+  ends on, `READY_TEXT`); Under way, "2 of 3 tables synced, the rest syncing" (or, every one synced, how many are
+  being caught up by their one poll); Failed, "1 table's sync failed: see Tables", Tables the failed ones. Under the line,
+  `mason status`'s **Source** row: the Postgres Mason syncs from, and whether it is your main database or a read
+  replica. Then cards
+  for the tables synced, the rows, the last sync, the synced data's file, the last day's statements with their p95,
+  and the last day's **Errors** (every failed event: failed syncs, restarts and the web page's own errors,
+  `/api/events?failed=1&since=24h`, read up to 1,000: at that, "1,000+") and **Query errors** (the big number the
+  queries that failed, the refused ones on the line under it, `/api/queries`' `day`). Each card has a
   24-hour sparkline once there are two hours to draw, and **each is a link** into the view that lists what it counts:
-  the tables (the failed ones when a first sync failed), Usage for the synced data's file, Queries for the statements, the slow ones
-  for the p95.
-- **Overview**, Getting started (while setting up is not done): ✓ Mason is running · ✓/○ a table synced · ✓/○ a user
-  created · ✓/○ a first statement answered — each ○ with its one action (Add a table → Tables, Create a user → Users,
-  connect with Connect's URL below), from `/api/state`'s totals, `/api/users` (`mason user list --json`) and the request
-  log's week (`/api/queries`). Gone once the four are done; not drawn while a read it needs is unanswered or failed.
-- **Overview**, Connect: the Postgres API's URL with `<user>:<password>` in the credentials' place — the line `mason
-  status` prints — with **Copy** and no psql line (the URL is the same thing, pasted after `psql`), and **Create a
-  user** (the Users page). While nothing has asked
-  Mason anything (no statement in the last day or week) it is **Connect your first tool**, right under the cards, saying
-  what the URL is for; afterwards a quieter panel after the facts. It is `/api/state` `postgres` (`mason status --json`'s
-  `postgres`: `shown`; its `psql` is not shown).
-- **Overview**, Connect from anywhere (under `mason start` only): `mason share` from the page, for a tool in the cloud.
-  It asks once that this opens a temporary public address (`GET /api/share/choices`: a role picker where
-  `mason/roles.yml` offers more than one role, as `mason share --role`), then `POST /api/share` `{ from: "page",
-  confirmed: true, role? }` opens the same share the command opens (src/cli/page-share.ts): the run makes the password
-  and starts the tunnel's client, and the card shows host, port, user and the password, each with **Copy**, how long it
-  has been shared, when a free share ends (within about an hour), and **Stop sharing** (`DELETE /api/share/<user>`).
-  The password is in that one answer alone, kept in the page's memory: after a reload the card says it was shown once.
-  The page holds the share by a beat (`POST /api/share/<user>/beat`, every 15 s, hidden or not): two minutes without
-  one (the tab closed, crashed or asleep) and the share, its sessions and the tunnel's client end, said by `/api/state`
-  `shareEnded`. One share at a time between the page and `mason share`, refused naming the open one. Under `mason serve`
-  (and so through `mason ui --ssh`) it is absent, and every one of those endpoints refuses.
+  the tables (the failed ones when a first sync failed), Usage for the synced data's file, Queries for the statements,
+  the slow ones for the p95, the refused or failed ones for the query errors, and Sync events' failures over the last
+  24 hours for the errors. A count the page could not read is "unknown" with its reason, never 0. Eight cards,
+  nine with the host's (`MASON_UI_OVERVIEW_CARD`): four by two and three by three from 641 px up, two a row on a phone.
+- **Overview**, Getting started (while setting up is not done): ✓ Mason is running · ✓/○ Sync a table · ✓/○ Create
+  a user — each step in the same words done or not (the ✓ or ○ says which), each ○ with its one action (**Add a table**
+  → Tables, **Add a user** → Users). It is done while at least one added table is synced and at least one user exists
+  (not removed), read from `/api/state` alone (`tables[].copy`, `users.active`); whether a tool has queried Mason does
+  not count, so a deployment nobody queried for a week stays done. With every table or every user removed, it is shown
+  again. **While it is shown, the word's box and it are the whole Overview**: the cards and the rest appear once both
+  are done and it goes. The word's box is always shown once a table is added, so the state of the synced data is never hidden while you set
+  up. Not drawn while it cannot tell (`users` unreadable, `{ error }`, or a run that does not say it). On a read-only
+  page that adds no user the step shows without its button. How to connect is not on the Overview: it is on Queries'
+  empty log, and the Users page.
 - **Overview**, the tables not synced yet: a bar each with the line `mason wait` prints (a first sync not begun shimmers,
   with no % beside it), and nothing once every table is synced.
-- **Overview**, the facts ("Mason"): one table with the database (its name and host, the Postgres version, and whether
-  it is your main database or a read replica), the warnings, Mason's version and uptime, its restarts when there were
-  any, the free disk beside what the synced data uses, and the tools connected. Under it, quiet lines: that the database
-  is on another machine, and how text sorts when that differs from the database. `mason status` keeps its fuller rows
-  (the sources file, the sync settings); the page shows each table's sync on Tables. In replication mode, a Changes
-  table shows the stream and the WAL its slot holds.
-- **Overview**, the statements and errors: the last day and week in one table, then the latest sync errors and the
-  refused or failed statements, each with **See all** (Logs, failures only; Queries, the refused or failed ones), and — when a
-  statement used SQL Mason does not support in the last day — one line naming the most refused entry of
-  `docs/SQL-SUPPORT.md`, with **See all** (Queries).
-- **Tables** (`#tables`): the database's tables, as `mason tables` lists them, with a search box by name and an All /
-  Added / Failed / Not added filter. With hundreds of tables the first 100 that pass are written, then **Show 100 more**
-  and **Show all**; the search is over every table, at once. A long name is never cut: it wraps in its cell.
+- **Overview**, the facts: one table, **Mason**, in the page's own words: **Source** (the database's name and host, its
+  Postgres version, and whether it is your main database or a read replica), the warnings, Mason (its version and how
+  long it has been up), the restarts when there were any, the disk (free, and what the synced data uses), and the tools
+  connected. Under it, as quiet lines: that the database is on another machine, and how text sorts where it differs from
+  the database. In replication mode, a Changes table shows the stream and the WAL its slot holds.
+- **Overview**, the unsupported SQL: when a statement used SQL Mason does not support in the last day, one line naming
+  the most refused entry of `docs/SQL-SUPPORT.md`, with **See all** (Queries).
+- **Tables** (`#tables`): the database's tables, as `mason tables` lists them, in two lists, **Added** over **Not
+  added**, each with its count and in the order `mason tables` lists them, with a search box over both and **Failed
+  only** (the failed tables alone; `#tables?show=failed` ticks it). A table added or removed while the page is shown
+  keeps its row in its list, its state changing in place, and moves to the other list only when the lists are laid out
+  again: the page shown again, or the search box's text or Failed only changed (a click moves no other row). With hundreds of tables the first 100 that pass are
+  written, then **Show 100 more** and **Show all**; the search is over every table, at once. A long name is never cut: it wraps in its cell.
 - **Tables**, an added table: its state (Synced, Syncing, Failed or Waiting) over its bar — every added table has
   one, as `mason status` draws one for each: full at 100% once synced, red when its first sync failed, amber when it is not kept
   current, moving while it syncs, a shimmer while it waits — its rows, its last sync over how long it took, and the
@@ -121,9 +122,13 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
 - **Tables**, an added table's **columns**, on its note beside its sync: which it syncs in a few words — "All columns",
   "5 of 12 columns" or "All but 1 column", the columns themselves its tooltip (`/api/state` `tables[].entry`,
   `addedColumns`, `columnCount`). It is a button that opens the table's **column form**, a dialog beside it that reads
-  `GET /api/tables/<table>/columns` once, as it opens, ticked as the entry says: its `columns:`; none ticked for every
-  column (`{}`, or the `exclude:` of secret-looking columns `mason add` writes: `everyColumnLeavesOut`); and, for a
-  table with no primary key, its `key:`. Before Save it says what saving costs: the table is synced again in full from
+  `GET /api/tables/<table>/columns` once, as it opens. It has two choices: **All columns, and any added to the table
+  later**, chosen for every column (`{}`, or the `exclude:` of secret-looking columns `mason add` writes:
+  `everyColumnLeavesOut`, which All names); and **Only these columns**, chosen for a `columns:` list, with its boxes
+  under it ticked as the list says. The boxes are hidden while All is chosen (by the radio, in app.css), and are every
+  column but what All leaves out, so choosing Only these starts from what is synced. Only these with no box ticked is
+  refused on the page, since an empty list would be sent as every column. For a table with no primary key, it also
+  ticks its `key:`. Before Save it says what saving costs: the table is synced again in full from
   the database, which takes a while and adds load on a big table, and its synced data can still be queried until the
   new sync finishes; saving the same columns changes nothing and starts no sync. Save sends `POST /api/pick`
   `{ table, picked: true, columns?, key? }`, as `mason add <table> --columns …` does, its sync kept; boxes that say what
@@ -138,8 +143,12 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   --sync …` does, writing the entry's `sync:` line alone:
   - **Off**, the default: synced once, then only by Sync now. Nothing turns on load on the database unless chosen.
   - **Every 5 minutes, 15 minutes, hour or day** (presets only), each saying it scans the whole table on the database at
-    that interval. For a table over 1,000,000 rows each says what a poll costs the database (`pollEstimate`, the estimate
-    `mason add` prints), and saving one asks first, with that cost.
+    that interval. For a table over 1,000,000 rows, what every interval shares is said once over the choices: the
+    table's rows, and how long a scan takes and how that was found (measured, from its first sync, or a guess). Each
+    interval then says its own share: how much of the time it keeps one connection busy (in the warning colour at 10 %
+    or more), and how often it really runs where a long scan stretches it. The numbers are `pollLoad`'s, the estimate
+    `mason add` prints in its own words; the page never shows the CLI's sentence or its flags. Saving one asks first,
+    with that cost.
   - **Live (replication)**, the word beside `sync: replication` in the sources file: changes stream from the database's
     change log, with no scans. It can be chosen only when every check passes, else it is shown disabled with each
     failing check in Mason's words and the SQL that fixes it: the table's own (a primary key; not REPLICA IDENTITY
@@ -156,36 +165,87 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   `MASON_UI_READ_ONLY=1` without `MASON_UI_READ_ONLY_ALLOW=tables`) the sync is said alone, with no button, the reason
   its title and above the list.
 - **Tables**, a table not added: its rows, its key and why it cannot be added as it is. **Add** syncs every column, as
-  `mason add <table>` does; **Columns…** opens a form to tick the columns to sync; **Name its key…** does the same for a
+  `mason add <table>` does; **Columns…** opens a form with the same two choices (All columns at first, every box ticked
+  under Only these columns); **Name its key…** does the same for a
   table with no primary key.
-- **Users** (`#users`) reads, under its title: Connect, then the add form with what it answered beside it (the card of
-  the user added, or its refusal), then the users (issue 887). A person arriving on the page — its address opened, a
+- **Users** (`#users`), in this order: the list of users, right under the title (and its read-only line), then the add
+  box (the add form; and, where it may be opened, a Temporary cloud login) with the card of what it made beside it,
+  then Connect, so a card that appears moves nothing above it. A person arriving on the page — its address opened, a
   link of the sidebar or another followed — starts with the cursor in the form's **Name**, once the form is written;
-  never at a poll's write after that, never taken from what the person focused since they arrived, never on a touch
+  never at a poll's write after that, never at a hash of the page already shown (a tab of the list, a range), never taken from what the person focused since they arrived, never on a touch
   screen (`(pointer: coarse)`, where it would open the keyboard over the page), and not on a read-only page, which has
-  no form (a page's `arrive()`, src/web/app.js). The add form adds a user by name and, where `mason/roles.yml` names roles and reads as it is, a
+  no form (a page's `arrive()`, src/web/app.js). The
+  form adds a user by name and, where `mason/roles.yml` names roles and reads as it is, a
   **Role** as `mason user add --role` (the roles from `/api/state` `roles`, `mason status --json`'s): the file's
   `default:` is chosen first, marked (default), and sends no role, so the user follows the default as one added with no
   `--role` does; with no default the first choice is no role. The run judges the role, and its refusal is shown. Then
-  **Connects from**, in `mason user add --help`'s words: **From anywhere**, the default, sends no `from` (as `mason user
-  add` with no `--from`), with no second question; **Only from these addresses** sends the ranges typed in one box,
-  comma-separated as `--from a,b` takes them (`192.0.2.0/24, 2001:db8::/32`), split at each comma and trimmed. The box
-  keeps its place whichever is ticked, so a toggle moves nothing (issue 875): under From anywhere its place is a quiet
-  dashed slot saying "any address", the box itself hidden from Tab and from a screen reader. Its two choices are a
-  radio group as every one on the page is (`.radios`, src/web/app.css: Connects from here and in From…, a table's
-  Sync choice): one choice a line, every radio at one left edge with its words beside it; the add form lays the two in
-  one row only where its card has the room for the label, both and the box (800 px). The page
+  **Connects from**, a dropdown in `mason user add --help`'s words: **anywhere**, the default, sends no `from` (as
+  `mason user add` with no `--from`), with no second question; **only these addresses** shows the address box beside
+  it and sends the ranges typed there, comma-separated as `--from a,b` takes them (`192.0.2.0/24, 2001:db8::/32`),
+  split at each comma and trimmed. The box keeps its place, unseen, while anywhere is chosen, so nothing in the form
+  moves when the choice changes (From… offers the same dropdown). Name, Role, Connects from and **Add a user** are one
+  line where the form's card is wide enough (a container of its own, `#add-user-box`: a 1280 px window with or without
+  a Role, 900 px without one, where the sidebar is a rail), the address box growing into the rest of the line; below
+  that the form wraps by field, a label never apart from its control, the address box under its dropdown on a phone. The page
   never checks a range: the run reads each, and a refused one is shown as the run's refusal. `--set`
-  attributes stay the command's. Its password is shown once, in a card of the user's own fields — URL, User and
-  Password, each with **Copy**, laid out the same way (a field `mason user add --json` does not carry is not shown;
-  Database, Host, Port and SSL mode are the run's, on the Connect card above it) —
-  with no psql line (the URL is the same thing, pasted after `psql`), and a link to Queries, where its statements will
-  show; Mason keeps no copy, so it is never shown again.
+  attributes stay the command's. Its password is shown once, in a modal dialog over the page titled **New user added**
+  (index.html's one `<dialog id="once">`, opened with `showModal`: the page behind it dimmed and inert, the focus on the
+  URL's **Copy**; as wide as its rows up to the window less its gutters, so each **Copy** sits on its value's line and
+  only a value too long for the window breaks inside its box, the Copy still beside it; on a phone a sheet the screen's
+  width that scrolls inside itself). It closes **only** by its button,
+  **I have copied it** — never by Escape nor a click outside it, since the password is kept nowhere once it closes — and
+  the focus then returns to the form's **Name**, the new user in the list above. No poll closes or rewrites it: its
+  parts are written when it opens and when its status line changes, never while a pointer is pressed, and it stays
+  open whichever page a hash followed shows. A refusal of Add a user is said under the form, as before. It shows URL, **User** and Password, in `mason user add`'s order, the URL and the Password
+  each with **Copy** and laid out the same way, the User its name as plain text (a field `mason user add --json` does
+  not carry is not shown); "Shown once" in the password's row, right of its **Copy** and of the button's height
+  (`--control-sm`); and one line, "The password is only shown once", over **I have copied it**. No Database row: the
+  URL already carries the database, and the database, host, port and SSL mode are Connect's on the same page (`mason
+  user add` in a terminal still prints all of them). No psql line: the URL is the same thing, pasted after `psql`. Mason
+  keeps no copy, so it is never shown again. Under the rows, a status line: "Waiting for its first query…" until Mason
+  has seen the user — a session of it open (`/api/state` `sessions`), or a statement of it since it was added
+  (`/api/users?lastUsed=1` `lastUsedAt`) — then "Connected", held once seen. While it waits, the state is read every
+  5 s instead of 30 s.
 - **Users**, Connect: once for the run, where a tool connects — host, port, database and SSL mode, each with **Copy**,
   and the URL with `<user>:<password>` in place, with **Copy** — as `mason status` says it, with no psql line (the URL
   is the same thing, pasted after `psql`). No user's row carries a URL:
   the card shown once when a user is added is the only place its password is copied.
-- **Users**, the list: each user's role and, on a line under it, where it connects from ("from" its ranges as `mason
+- **Users**, the add box's **Temporary cloud login** (under `mason start` only: never under `mason serve`, whose run
+  refuses it, and never on a read-only page, `pageReadOnly`, whatever `MASON_UI_READ_ONLY_ALLOW` still allows; there
+  the box is the plain add form, with no segments): `mason share` from the page, for a tool in the cloud that cannot
+  reach this machine. It is the same flow as adding a user with another job, so it is the box's second kind: two
+  segments on top of the box, **New user** (the form above) and **Temporary cloud login**, a segmented control as the
+  time range's, the choice the page's own (not the hash: a form's, not a view's). The two panes sit in one grid cell,
+  the one not chosen unseen in its place, so the box keeps the height of the taller and a choice moves nothing on the
+  page; each pane is a part of its own (`add-user-box`, `add-share-box`), so a choice rewrites neither, and a name being
+  typed stays. The pane: "For a tool in the cloud that can't reach this machine. Opens a public address with a login
+  of its own, until you stop it.", a **Role** choice where `mason/roles.yml` offers more than one role a share may
+  read as (`GET /api/share/choices`, read beside the state while it is offered, as `mason share --role`; each option
+  says what it reads), and **Open a cloud login**, held disabled while one opens or is open (one at a time). The click
+  is the person's yes, the pane's sentence what they have read before it, and no question follows: `POST /api/share` `{ from: "page", confirmed: true, role? }` opens the same share the command
+  opens (src/cli/page-share.ts): the run makes the password and starts the tunnel's client. What it opened is shown
+  once in the same modal dialog as New user added, titled **Temporary cloud login**: URL, **Login** (its own, never a
+  `mason user`, and never listed or counted among the users) and **Password**, the URL and the Password each with
+  **Copy**, "Shown once" beside the password's Copy; how long it has been public and what it reads; that the password
+  is only shown once and is not saved; and **I have copied it**, its only way out, as a new user's. The password is in
+  that one answer alone, kept in the page's memory until the dialog closes (or the share is seen ended, when the
+  dialog goes with it). Under the add box a card, titled **Temporary cloud login** on its top edge, shows it live: the
+  host, port and login, that the password was shown once, how long it has been public and what it reads, "Live until
+  you stop it", when a free one ends sooner (within about an hour) and that it ends when the page closes, and **Stop**
+  (`DELETE /api/share/<user>`), which takes the focus when the dialog closes. After a reload the card is the same.
+  While it opens, the card says so. The page holds it by a beat (`POST
+  /api/share/<user>/beat`, every 15 s, hidden or not): two minutes without one (the tab closed, crashed or asleep) and
+  it, its sessions and the tunnel's client end. How it ended (Stop, the tunnel dropped, from `/api/state`
+  `shareEnded`) is said in the card's place, and a refusal there is the run's Failure; the pane is the form again.
+  Connect says, where it is offered, that a tool in the cloud that can't reach this machine uses Temporary public
+  login in the box above.
+- **Users**, the list: two tabs over the table, a segmented control as the time range's, each with its count —
+  **Active** (the default, `#users`: the users not removed, a disabled one among them with its Disabled status) and
+  **Removed** (`#users?show=removed`: the removed ones, muted, with Queries alone). The tab is the hash's
+  (`parseHash`, `hashOf`), so Back returns to the tab before and nothing is stored; a tab left drops a question, a
+  From… or a refusal open beside one of its rows. An empty tab is one quiet line: "No active users. Add one below."
+  (on a read-only page "No active users."), "No removed users."; no user at all, the "No users yet" line alone, no
+  tabs. Each user's role and, on a line under it, where it connects from ("from" its ranges as `mason
   user list` says them, or "from anywhere": `from` in `mason user list --json`; cut by the column, its whole the
   tooltip), its status (Active, Disabled and when, or Removed), when added, when last
   used, and **Queries**, its statements. A user that no longer connects is flagged with why. **Disable** asks first (in a popover, in `mason
@@ -193,31 +253,43 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   enable` at once. The "from …" line is a button: it asks where the user connects from in a popover beside the row's
   actions, the add form's choice opened at its ranges now, and sends `POST /api/users/<name>/from` (`mason user from`:
   the ranges, or `null` for from anywhere, `--any`); the list holds still while it asks, and a refusal is said in the
-  popover. **Remove** asks first; a removed user stays listed, muted. The table keeps its width (no column of its own),
+  popover. **Remove** asks first; a user removed leaves the Active tab at the next write (its own row goes, the
+  others keep their order) and is listed under Removed; a refusal beside a user whose row left goes with it. The table keeps its width (no column of its own),
   fits its card in a 1280 px window, and where it scrolls (a narrower window, a phone) a row's actions stay pinned at
-  the card's right.
-- **Observability › Queries** (`#observability/queries`): the request log, and only that — who is connected, what runs
-  and the range's numbers are on Usage.
-- **Queries**, the request log empty and unfiltered: its sentence, then Connect your first tool (as the Overview's).
+  the card's right. A header cell's class (`added`, `status`, `act`, …) is styled only as a cell (`th.added`), never by a
+  box's rule of the same name: the New user added card is `.user-added`, so its white and its left border never reach
+  the Added header (`tests/web-page.test.ts`, every header class of Users and Tables, and the pinned rule on `.act` alone).
+- **Observability › Queries** (`#observability/queries`): the request log, and only that, under one sentence: "Every
+  query sent to Mason, newest first." The time range is its only window: no Since box (a `since` in an old hash is
+  ignored, the page opening over the range).
+- **Queries**, the request log empty: one line, "No queries in the last 15 minutes." (the range's span; "No query passes
+  the filters in …" under a filter). Unfiltered, one quiet line under it, "**Create a user** to connect your first
+  tool", the words a link to the Users page (`#users`), where the URL is; none where the page makes no user
+  (`pageReadOnly`), nor once a filter or an older page is shown. No Connect box.
 - **Queries**, the request log: newest first, with a status dot and word per row as `mason logs --requests` says it: Completed,
   Refused (a statement Mason answers as designed, as a Postgres would refuse it: unsupported SQL, a missing relation),
-  Failed (Mason's or the machine's fault) or Cancelled. Filter by status (each, or Refused or failed), **Slow (1 s or more)**, a
-  piece of the statement's text (**Statement has**), since (`2h`, `7d`, or a date: used instead of the range), user and
-  client; **Older** pages back and **Newest** returns, 40 a page. **Started**, **Duration** and **Rows** sort the page
+  Failed (Mason's or the machine's fault) or Cancelled. Filter by status (each, or Refused or failed), user, client, a piece of the
+  statement's text (**Statement has**) and **Slow (1 s or more)**, with **Filter** and **Clear**. **User** is a dropdown:
+  All users (no filter), then the users of `GET /api/users` (`mason user list --json`; read while Queries is shown,
+  every 30 s as the Users page reads it, never with `?lastUsed=1`, and on a read-only page too) — the active first,
+  then the removed, marked "(removed)", since their statements are still in the log. A choice is sent as `user=<name>`,
+  the server's one filter, as a typed name was; a `?user=` the list does not have (a share's own login, a user whose
+  record is gone) still filters, the dropdown showing it as one more option, selected; the users not read, the text box
+  as before. The filters are one row where they fit (a
+  1280 px window), wrapping by field below that; **Older** pages back and **Newest** returns, 40 a page. **Started**, **Duration** and **Rows** sort the page
   shown (said under it: the pages follow the log's order by start). A statement is one or two lines in its row; a row
   opens in place to its whole id, times, bytes sent, statement and error — the first 16 KiB of each, said when cut.
   A statement that reads no synced table (`select 1`, `select now()`, SET, SHOW, a BI tool's catalog queries) is
   answered without the synced data and **not listed** — the protocol's chatter, hundreds a connection from a BI tool — and the
-  page says so, as `mason logs --requests` does when it lists none; while nothing is listed, Connect offers a first
-  statement that is (`select count(*) from <a synced table>;`).
-- **Observability › Usage** (`#observability/usage`): every part follows the range. Cards: under Now, the sessions
+  page says so once, in a small quiet line under the list (empty or not), as `mason logs --requests` says it.
+- **Observability › Usage** (`#observability/usage`): every part follows the range. Cards: over the last 15 minutes, the sessions
   connected and the statements running; under any other range, the clients that sent statements in it; then the
   range's statements, failed, p95 and what was sent (bytes, and rows under it), each with a sparkline — the statement
   cards lead to Queries filtered to what they count (all, failed, slow).
-- **Usage**, connected: under Now, who is connected now — a row per user and client, the 10 with the most sessions and
+- **Usage**, connected: over the last 15 minutes, who is connected now — a row per user and client, the 10 with the most sessions and
   one row for the others; under any other range, who sent statements in it, the most first, with their failed ones,
   sessions and last statement. Each row's **Queries** opens the request log filtered to that user and client.
-- **Usage**, running: under Now, each statement running with how long it has run (moving with each poll; when it started is its title) and **Cancel**, which asks first and stops that one statement, as
+- **Usage**, running: over the last 15 minutes, each statement running with how long it has run (moving with each poll; when it started is its title) and **Cancel**, which asks first and stops that one statement, as
   `mason cancel` does; under any other range, the slowest statements that completed in it, each with **Queries**.
 - **Usage**, unsupported SQL: the statements of the range Mason refused for SQL it does not support, grouped by their
   entry of `docs/SQL-SUPPORT.md` (named, as the page cannot link into the repository), the most refused first — how
@@ -228,8 +300,12 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   samples, newest first (**Time** sorts them), sit behind a closed details, and the process's memory behind another.
 - **Observability › Sync events** (`#observability/syncs`): the sync's events of the range — each first sync, each
   failure and recovery, each sync asked by hand (`synced`: `mason sync`, a table's **Sync now**) — newest first (**When**
-  turns it round), with when, kind, table and reason. A scheduled poll that succeeds is not listed (one every few
-  seconds would bury the failures): the last one's result is each table's **Last sync** on Tables. **Failures only**, a **Kind** (every kind of event) and a **Table** (every added table, whether the range has an event of it or not: one with none says so by its name) narrow the list; 100 are
+  turns it round), with when, kind (in words: Manual sync, Full sync, Scheduled sync, Live sync, Scheduled sync failed…;
+  the code `mason logs --events` prints is its title), table and reason. The scheduled syncs that succeed (each poll on
+  its schedule, and each minute the stream applied changes, a row a table) are listed only while **Scheduled syncs** is
+  ticked, or one of their kinds is chosen: Mason is asked for them then (`?scheduled=1`), so they never push a failure
+  out of the newest 500 read. **Failures only** asks Mason for the range's failures alone (`?failed=1`), so every failure
+  of the range is listed, whatever else is ticked. A **Kind** (every kind of event) and a **Table** (every added table, whether the range has an event of it or not: one with none says so by its name) narrow the list; 100 are
   written at once, then **Show more**.
 - **Sync events**, the run's raw log: behind a closed details, for debugging (it has internal tags and paths), newest first. Mason
   is asked for it only while the details is open.
@@ -251,7 +327,8 @@ and the data still reads as a tool's printout. Boxes are square, framed in a hai
 is a carved lintel in small capitals on pale stone. The motif stays in the chrome, never on a number: a copy's bar is a
 plain line — a thin rounded track and a solid fill to its share, its % at the end as the CLI prints it, a quiet shimmer
 while it waits (still under `prefers-reduced-motion`); a state's marker is a small stone block, a page's title stands on a course of bricks, the
-Getting-started steps are courses of a wall, an empty state is a footing with nothing on it yet, and the mark is an
+Getting-started steps are courses of a wall, an empty state is one quiet line of muted text (`empty`: no box, no
+icon, one short sentence, the same on every page), and the mark is an
 arch of bricks with its keystone, drawn inline. All of it is borders and boxes: no gradient, no image. A left sidebar
 as Vercel's and Supabase's are (Mason, the database's name, a **demo** badge when it is the demo database; the nav,
 each link an icon and its label, the one shown a pale stone row with the patina at its edge; at its foot how long ago Mason last
@@ -376,7 +453,7 @@ listens, and every browser connection crosses that one ssh connection as frames 
   (`src/cli/run-server.ts`).
 - **A page that only shows: `MASON_UI_READ_ONLY=1`.** For a page shown to someone who should only look (behind a
   reverse proxy, on the socket), `mason serve` with it set makes the page offer no control that changes anything — no
-  Add, Remove, Sync, Disable, Enable, Cancel, Add a user, Create a user or Connect from anywhere, each page saying
+  Add, Remove, Sync, Disable, Enable, Cancel, Add a user or Share, each page saying
   why — and its server refuses every request
   of the page that is not a GET or a HEAD, whatever its path, with "the web page is read-only here" in the failure shape
   (`src/cli/ui-read-only.ts`). Viewing is unchanged. It covers the page alone: a request with the run's token is the
@@ -393,7 +470,7 @@ listens, and every browser connection crosses that one ssh connection as frames 
   committed offers no Add or Remove and refuses them `409`, as without the allowance (Sync now stays).
 - **A read-only page that still manages its users: `MASON_UI_READ_ONLY_ALLOW=users`.** For a site that proxies the page
   and lets its users' changes through its own checks, `MASON_UI_READ_ONLY=1` beside it keeps the Users page's Add a
-  user (with its Connects from), its "from …" line, **Disable**, **Enable** and **Remove**, and the Overview's Create a user. The
+  user (with its Connects from), its "from …" line, **Disable**, **Enable** and **Remove**, and the Overview's Getting started Add a user. The
   server lets through exactly these routes, each `<name>` exactly one path segment (a user's name, encoded), never a
   prefix:
   - `POST /api/users` (Add a user);
@@ -427,7 +504,7 @@ listens, and every browser connection crosses that one ssh connection as frames 
   setting per item: `MASON_UI_NAV_OVERVIEW_URL`, `MASON_UI_NAV_TABLES_URL`, `MASON_UI_NAV_USERS_URL`,
   `MASON_UI_NAV_QUERIES_URL`, `MASON_UI_NAV_USAGE_URL`, `MASON_UI_NAV_SYNC_EVENTS_URL`. The item keeps its label and
   icon and links to that URL in the same tab, sending no referrer, on the full sidebar, the icon rail and the phone's
-  menu. Every link of Mason's own into that view goes there too — the Overview's Create a user and its Getting started
+  menu. Every link of Mason's own into that view goes there too — the Overview's Getting started
   step, a card, a client's Queries, a table's sync events, a page's lead — and so does opening the view's address
   (`#users`, `#users?…`, an old one such as `#queries`): the page replaces it with the URL, so Back does not land on it
   again. With the Overview replaced, the page opened with no address shows its first item not replaced. The URL is read
@@ -677,7 +754,8 @@ for a foreign key, else null). A table the catalog lacks is `404` `not_found`. A
 the polled `/api/state`), with `<table>` URL-encoded. The answer has `table`; `sync`, its sync now as the sources file
 says it (`{ value, from }`, `from` `entry`, `file` or `default`), or null for a table not added; `rows`; `bigRows` (over
 1,000,000 rows: the page asks before saving a poll); `polls`, the polls offered (`{ sync, seconds, cost }`: `poll 5m`,
-`poll 15m`, `poll 1h`, `poll 1d`, `cost` the estimate for a big table, else null); and `live`: `allowed` (no check
+`poll 15m`, `poll 1h`, `poll 1d`, `cost` the estimate for a big table, else null: `{ rows, scanSeconds, everySeconds,
+busyPercent, basis: measured | first-sync | assumed, rowsPerSecond }`); and `live`: `allowed` (no check
 refused) and `checks`, each `{ name, state, detail, sql? }` with `state` `ok`, `warn` or `refused` — the table's own
 (`primary key`, `replica identity`), then the database's (`wal_level`, `standby`, `replication role`, `slot`, `wal
 senders`, `WAL cap`, `publication`), read now over one connection that reads settings, the catalog and the statistics

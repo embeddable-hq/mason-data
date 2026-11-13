@@ -153,7 +153,7 @@ test("the browser is the platform's: open on macOS, start on Windows, xdg-open e
   assert.deepEqual(openCommand!("freebsd", u), ["xdg-open", [u]]);
 });
 
-// ------------------------------------------------------------------ Connect from anywhere: the page's share endpoint
+// ------------------------------------------------------------------ Temporary cloud login: the page's share endpoint
 
 const { RunShares } = await import("../src/cli/share-run.ts");
 const { PageShares } = await import("../src/cli/page-share.ts" as string).catch(() => ({})) as typeof import("../src/cli/page-share.ts");
@@ -204,15 +204,17 @@ test("the page's share endpoint behind the guard: another Origin, none, no cooki
   } finally { s.close(); }
 });
 
-test("the page's share opened: its password in the one answer and no log line; a beat holds it; Stop sharing ends it and its tunnel; a beat after says it ended and why", async () => {
+test("the page's share opened: its password in the one answer and no log line; a beat holds it; Stop ends it and its tunnel; a beat after says it ended and why", async () => {
   const s = await shareServer(false);
   try {
     const choices = await s.ask("GET", "/api/share/choices");
     assert.deepEqual(JSON.parse(choices.text), { choices: [], role: null, reads: "every synced table" });
     const opened = await s.ask("POST", "/api/share", { body: OPEN });
     assert.equal(opened.status, 200, opened.text);
-    const r = JSON.parse(opened.text) as { user: string; password: string; host: string; port: number; sslmode: string; beatMs: number; boundMs: number };
+    const r = JSON.parse(opened.text) as { url: string; user: string; password: string; host: string; port: number; database: string; sslmode: string; beatMs: number; boundMs: number };
     assert.match(r.password, /^mason_share_[0-9a-f]{48}$/);
+    // the URL a tool pastes, built as mason share builds its own (connectionUrl): the share's login and password in it
+    assert.equal(r.url, `postgres://${r.user}:${r.password}@relay.example:41234/${encodeURIComponent(r.database)}?sslmode=require`);
     assert.deepEqual([r.host, r.port, r.sslmode, r.beatMs, r.boundMs], ["relay.example", 41234, "require", 15_000, 120_000]);
     assert.ok(!s.logged.join("\n").includes(r.password), "no log line carries it");
     assert.ok(!JSON.stringify(s.shares.state()).includes(r.password));
@@ -225,7 +227,7 @@ test("the page's share opened: its password in the one answer and no log line; a
     assert.equal(s.shares.state(), null);
     const late = await s.ask("POST", `/api/share/${r.user}/beat`);
     assert.equal(late.status, 404);
-    assert.equal(JSON.parse(late.text).failure.message, `the share ${r.user} is not open; it ended: Stop sharing, on the web page`);
+    assert.equal(JSON.parse(late.text).failure.message, `the share ${r.user} is not open; it ended: Stop, on the web page's Users page`);
     // a share of mason share's is its command's to end
     const cmd = await s.shares.open({ secret: "a".repeat(64) });
     assert.ok("user" in cmd);

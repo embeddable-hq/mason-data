@@ -123,12 +123,13 @@ test("a database on another machine: init writes the project the first time, and
   assert.doesNotMatch(startLog, /! .*(another machine|not this machine|read replica|PRIMARY)/, "neither is a warning");
   ok(await mason("wait", "--timeout", "120", "--json"), "mason wait");
 
-  // STATUS: no Warning row of either; the Database line says which kind of server it is, as a plain fact
+  // STATUS: no Warning row of either; the Source line says which kind of server it is, as a plain fact (issue 935: Source, not Database)
   const status = ok(await mason("status", "--json"), "mason status --json");
   assert.deepEqual((status.json.warnings as string[]).filter((w) => /another machine|not this machine|read replica|main database|PRIMARY/.test(w)), [],
     JSON.stringify(status.json.warnings));
   const person = ok(await mason("status"), "mason status");
-  assert.match(person.stdout, /\n {2}Database +\S+ · Postgres .* · your main database\n/, person.stdout);
+  assert.match(person.stdout, /\n {2}Source +\S+ · Postgres .* · your main database\n/, person.stdout);
+  assert.doesNotMatch(person.stdout, /\n {2}(Database|Changes) /, "no Database or Changes row: Source names the database (issue 935)");
 
   // THE NEXT START, its first sync done: where the database is, still; that it is the main one, no longer
   ok(await mason("stop"), "mason stop");

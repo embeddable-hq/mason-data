@@ -2178,7 +2178,7 @@ export class Sync {
     this.running = poll.then(() => undefined, () => undefined).finally(() => { this.running = null; this.rearm(); });
     const found = await poll;
     // A SYNC BY HAND IS AN EVENT (src/duck/events.ts `synced`), in the words mason sync and the page's Sync now say:
-    // a scheduled poll that succeeds records nothing (one every few seconds would bury the failures), so without it a
+    // a scheduled poll's `polled` event is listed only when a reader asks for the scheduled syncs, so without this one a
     // person who synced and then read the events found only an older copy, and read it as a sync lost. A replicated
     // table asked for is answered with the stream's position and records none: nothing was read for it
     for (const x of found) this.event({ kind: "synced", table: x.table, message: `synced by hand: ${syncedText(x)}` });
@@ -2799,6 +2799,9 @@ export class Sync {
     if (this.sinceLine.size === 0 || s === null) return;
     const moved = [...this.sinceLine].map(([source, c]) => `${source} ${countsText(c)}`).join(", ");
     const span = Date.now() - this.lineAt;
+    // ONE scheduled-sync event a table for what the stream applied since the last line (src/duck/events.ts `streamed`):
+    // never one a batch, which a busy database sends many a second
+    for (const [source, c] of this.sinceLine) this.event({ kind: "streamed", table: source, message: `streamed ${countsText(c)} in the last ${secondsText(span)}` });
     this.sinceLine.clear();
     this.lineAt = Date.now();
     const position = s.position();
@@ -3280,7 +3283,8 @@ export class Sync {
       // its catch-up polls it
       try {
         const found = await this.onWriter(async () => this.rebuildingNow?.source !== t.source && !this.behind.has(t.source) ? this.poll(this.writerLane, [t]) : []);
-        for (const f of found) this.polledNow(t, f.ms);
+        // a scheduled sync is an event too, listed only when a reader asks for the scheduled syncs (src/duck/events.ts)
+        for (const f of found) { this.polledNow(t, f.ms); this.event({ kind: "polled", table: f.table, message: `synced on schedule: ${syncedText(f)}` }); }
       } catch (e) {
         if (e instanceof Stopping) { this.log("poll stopped: Mason is stopping (rolled back; the synced tables serve as they were)"); return; }
         // tried again after its interval (an `off` table whose sync changed: after the sync's), never at every pass

@@ -1,12 +1,12 @@
 /**
- * THE PAGE'S RADIO GROUPS IN A BROWSER (issue 875; `.radios` in src/web/app.css): Users' "Connects from"
- * (src/web/pages/users.js `connectsChoice`, in the add form and in From…'s popover) and a table's Sync choice
- * (src/web/pages/tables.js `renderSyncChoice`).
- * - Ticking "Only from these addresses" or "From anywhere" moves nothing in its form — the add form's Name, Role, the
- *   choice and Add a user, and From…'s popover — at 1280, 1024, 900 and 375 px (the widths web-ui.md walks), and the
- *   address field hidden under From anywhere is out of the tab order and the accessibility tree.
- * - In every group the radios line up: one column, every radio at one left edge (stacked), or one row at one height
- *   (the add form where its card has the room) — never a row that wraps one choice under the group's label.
+ * THE PAGE'S CHOICES IN A BROWSER (issue 875): Users' "Connects from" (src/web/pages/users.js `connectsChoice`, a
+ * dropdown, in the add form and in From…'s popover) and a table's Sync choice (src/web/pages/tables.js
+ * `renderSyncChoice`, a radio group: `.radios` in src/web/app.css).
+ * - Choosing "only these addresses" or "anywhere" moves nothing in its form — the add form's Name, Role, the choice and
+ *   Add a user, and From…'s popover — at 1280, 1024, 900 and 375 px (the widths web-ui.md walks), and the address
+ *   field hidden under anywhere is out of the tab order and the accessibility tree.
+ * - In a radio group the radios line up: one column, every radio at one left edge (stacked), or one row at one height
+ *   — never a row that wraps one choice under the group's label.
  * The one test of the page that measures geometry, because what it holds is geometry: the page as served (src/web, its
  * app.js run whole) in Chromium, over the server's own state (`runState`). It needs Playwright and its Chromium; on a
  * machine without them it skips, saying so.
@@ -40,6 +40,7 @@ type Page = {
   goto(url: string): Promise<unknown>;
   waitForSelector(selector: string, o?: { state?: string; timeout?: number }): Promise<unknown>;
   check(selector: string): Promise<void>;
+  selectOption(selector: string, value: string): Promise<unknown>;
   click(selector: string): Promise<void>;
   evaluate<T, A>(fn: (arg: A) => T, arg: A): Promise<T>;
   close(): Promise<void>;
@@ -166,36 +167,33 @@ async function inChromium(body: (browser: Browser) => Promise<void>): Promise<vo
 }
 
 for (const width of [1280, 1024, 900, 375]) {
-  test(`the add form moves nothing as Connects from is toggled, its radios lined up, at ${width} px (issue 875)`, { skip }, () => inChromium(async (browser) => {
+  test(`the add form moves nothing as Connects from is changed, at ${width} px (issue 875)`, { skip }, () => inChromium(async (browser) => {
     const page = await served(browser, width, "users", "#add-user button[type=submit]");
     const any = await boxes(page, "#add-user");
     assert.ok(Object.keys(any).length > 10, "the form is measured");
-    // in a row where the card has the room for the label, both choices and the box; else one a line
-    assert.equal(await radiosLie(page, "#add-user"), width >= 1280 ? "row" : "column");
-    assert.deepEqual(await reachable(page, "#add-user-from"), { focusable: false, hidden: true }, "from anywhere: the address field is neither focused nor announced");
-    await page.check("#add-user input[value=only]");
+    assert.deepEqual(await reachable(page, "#add-user-from"), { focusable: false, hidden: true }, "anywhere: the address field is neither focused nor announced");
+    await page.selectOption("#add-user-connects", "only");
     const only = await boxes(page, "#add-user");
-    assert.deepEqual(moved(any, only), [], "Only from these addresses moved nothing");
-    assert.deepEqual(await reachable(page, "#add-user-from"), { focusable: true, hidden: false }, "only from these addresses: the address field is there to type in");
-    await page.check("#add-user input[value=any]");
-    assert.deepEqual(moved(any, await boxes(page, "#add-user")), [], "From anywhere again moved nothing");
+    assert.deepEqual(moved(any, only), [], "only these addresses moved nothing");
+    assert.deepEqual(await reachable(page, "#add-user-from"), { focusable: true, hidden: false }, "only these addresses: the address field is there to type in");
+    await page.selectOption("#add-user-connects", "any");
+    assert.deepEqual(moved(any, await boxes(page, "#add-user")), [], "anywhere again moved nothing");
     assert.deepEqual(await reachable(page, "#add-user-from"), { focusable: false, hidden: true });
     // the page is no wider than the screen in either state (a phone never scrolls sideways)
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth, null), true, "no sideways scroll");
   }));
 
-  test(`From…'s form moves nothing as Connects from is toggled, its radios one a line, at ${width} px (issue 875)`, { skip }, () => inChromium(async (browser) => {
+  test(`From…'s form moves nothing as Connects from is changed, at ${width} px (issue 875)`, { skip }, () => inChromium(async (browser) => {
     const page = await served(browser, width, "users", "#add-user button[type=submit]");
     await page.click("button.from-line");
     await page.waitForSelector("#user-from", { timeout: 5_000 });
     const any = await boxes(page, "#user-from");
-    assert.equal(await radiosLie(page, "#user-from"), "column", "in a popover: one a line, every radio at one left edge");
-    assert.deepEqual(await reachable(page, "#user-from-from"), { focusable: false, hidden: true }, "from anywhere: the address field is neither focused nor announced");
-    await page.check("#user-from input[value=only]");
-    assert.deepEqual(moved(any, await boxes(page, "#user-from")), [], "Only from these addresses moved nothing");
+    assert.deepEqual(await reachable(page, "#user-from-from"), { focusable: false, hidden: true }, "anywhere: the address field is neither focused nor announced");
+    await page.selectOption("#user-from-connects", "only");
+    assert.deepEqual(moved(any, await boxes(page, "#user-from")), [], "only these addresses moved nothing");
     assert.deepEqual(await reachable(page, "#user-from-from"), { focusable: true, hidden: false });
-    await page.check("#user-from input[value=any]");
-    assert.deepEqual(moved(any, await boxes(page, "#user-from")), [], "From anywhere again moved nothing");
+    await page.selectOption("#user-from-connects", "any");
+    assert.deepEqual(moved(any, await boxes(page, "#user-from")), [], "anywhere again moved nothing");
   }));
 }
 
@@ -206,5 +204,17 @@ for (const width of [1280, 375]) {
     await page.waitForSelector("form.syncpick input[type=radio]", { timeout: 5_000 });
     assert.equal(await page.evaluate(() => document.querySelectorAll("form.syncpick input[type=radio]").length, null), 6, "Off, four polls and Live");
     assert.equal(await radiosLie(page, "form.syncpick"), "column");
+  }));
+}
+
+// THE TIME RANGE ON A PHONE (the review of PR 918): "Last 15 mins" is wider than "Now" was, which pushed the disabled
+// 30 and 90 days, and their screen-reader words (absolute, `.sr`), past the screen's edge: the page scrolled sideways
+// (413 px of 375). The control scrolls inside itself, the containing block of what it holds (app.css `.range`).
+for (const hash of ["observability/queries", "observability/usage", "observability/syncs"]) {
+  test(`${hash} at 375 px with the default MASON_HISTORY_DAYS: no sideways scroll, the range control inside the screen`, { skip }, () => inChromium(async (browser) => {
+    const control = `#range-${hash.split("/")[1]} .range`;
+    const page = await served(browser, 375, hash, control);
+    assert.equal(await page.evaluate((sel) => document.querySelectorAll(`${sel} .off`).length, control), 2, "30 and 90 days shown disabled (7 days kept)");
+    assert.deepEqual(await page.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth], null), [375, 375], "a phone never scrolls the page sideways");
   }));
 }

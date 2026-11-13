@@ -52,9 +52,14 @@
  *       arrive?()      the id of the element a person arriving on the page starts in (a sidebar link or a link
  *                      followed, never a poll's write): undefined while what decides it is unread, null for none
  *                      (the shell focuses it once, `arriving` in `start`)
- *       reveal?()      the id of an element an action just wrote that the person must see (a new user's password
- *                      card), once, else null: after the write, the shell scrolls it into view (on a phone it was
- *                      written below the screen's edge)
+ *       once?()        THE ONE-TIME MOMENT (a password shown once): `{ key, back }` while the page's parts
+ *                      `once-head`, `once-status` and `once-foot` (index.html's one `<dialog id="once">`) hold it,
+ *                      else null. The shell opens the dialog as a modal (`showModal`: the page behind inert) with the
+ *                      focus on its first Copy, again whenever `key` changes; it closes ONLY once the page's `once()`
+ *                      is null again — Escape and a click on the backdrop do nothing — and the focus goes to `back`
+ *                      (an element's id). Its parts are written as every part is: only when their HTML changes and
+ *                      never while a pointer is pressed, so a poll never rewrites what the person copies from
+ *       dismissOnce?() its "I have copied it" (`data-dismiss-once`, index.html's): the page drops what it showed
  *       route?(params, { doc })  the hash showed it with these parameters (`#tables?show=failed`: { show: "failed" }):
  *                      it takes the ones it knows into its state (and a control outside its parts, through `doc`)
  *       saysStale?     true when the page says itself that what it shows is out of date (the Overview's word): the
@@ -69,7 +74,7 @@
  * A page is registered by its import and its place in PAGES below, its route in PAGE_ROUTES, and its section in
  * index.html.
  */
-import { esc, badge, icon, createAsk, overTunnel, renderFailure, updatedText, staleText, placePops, RANGES, DEFAULT_RANGE, rangeOf, rangeOffered, isLive, POLL_MS } from "./shared.js";
+import { esc, badge, icon, copyClick, createAsk, overTunnel, renderFailure, updatedText, staleText, placePops, RANGES, DEFAULT_RANGE, rangeOf, rangeOffered, liveTitle, POLL_MS } from "./shared.js";
 import { createCharts } from "./charts.js";
 import { page as statusPage } from "./pages/status.js";
 import { page as tablesPage } from "./pages/tables.js";
@@ -93,9 +98,9 @@ export const PRESS_HOLD_MS = 2000;
 
 // every renderer the tests import from here, wherever it lives now
 export * from "./shared.js";
-export { CATCHING_UP, copyingText, tableLine, keptAge, keptWords, factRows, factNotes, renderFacts, renderStatus, renderShare, createShare } from "./pages/status.js";
+export { CATCHING_UP, copyingText, tableLine, keptAge, keptWords, sourceRows, factRows, factNotes, renderFacts, renderStatus } from "./pages/status.js";
 export { tableFacts, addedLines, removedReport, pickBody, columnsPath, renderTableAdded, renderTablesRemoved, renderTables } from "./pages/tables.js";
-export { renderUsers, renderAdded, renderAddUser, attributesText } from "./pages/users.js";
+export { renderUsers, usersShowHref, renderAdded, renderAddUser, attributesText, renderUsersConnect, renderAddKinds, renderSharePane, renderShareCard, renderShareOnce, createShare, addedSeen } from "./pages/users.js";
 export { renderRequests } from "./pages/queries.js";
 export { renderRunning, renderSessions, renderClients, renderSlowest, queriesHref } from "./pages/usage.js";
 export { hostLinkUrl, hostView, readHost, renderHostView, renderHostCard, renderHostPart, HOST_BYTES_MAX, HOST_READ_MS, REFRESH_MIN_S, REFRESH_MAX_S, HOST_LIMITS } from "./host-view.js";
@@ -161,7 +166,7 @@ export function retarget(html, nav) {
 }
 
 /** A page's address with its parameters (`hashOf("queries", { range: "7d" })` → `#observability/queries?range=7d`); the
- *  default range is left out, so the plain address is Now. */
+ *  default range is left out, so the plain address is the last 15 minutes. */
 export function hashOf(id, params = {}) {
   // a host's view: its place in the host's links is its address
   if (id === HOST_PAGE && params.view !== undefined) return hostHash(params.view);
@@ -214,22 +219,23 @@ export const renderNav = (shown, range = DEFAULT_RANGE, nav = null, hostView = n
 /**
  * THE TIME RANGE OF A GROUP'S PAGE (the Observability views'), written beside the view's title in ONE header row (its
  * section's `range-<id>`; the group's name is the sidebar's heading): a segmented control — each a link to the same view
- * at that range, so the hash is the state and Back goes to the range before — Now first, the one that follows what
- * happens (said "Live" beside it); any other is read once when chosen, so beside it are when it was read (`asOf`, a
- * Date) and Refresh, which reads it again. "" for a page of its own.
+ * at that range, so the hash is the state and Back goes to the range before — the last 15 minutes first. Every range
+ * follows what happens, so "Live" is said before the control, its title how often the range is read (`liveTitle`).
+ * The same word at every range, so the control never moves when the range changes (issue 873: the segment just
+ * clicked moved away under the pointer). "" for a page of its own.
  */
-export function renderSubnav(shown, range = DEFAULT_RANGE, keptDays = undefined, asOf = null) {
+export function renderSubnav(shown, range = DEFAULT_RANGE, keptDays = undefined) {
   const p = PAGES.find((x) => x.id === shown);
   if (!p?.parent) return "";
   const r = rangeOf(range);
   // a range past what the run keeps is shown disabled, saying why and what keeps it (the one chosen by its hash stays a link)
-  return `<div class="range" role="group" aria-label="Time range">${Object.entries(RANGES).map(([k, v]) => {
+  const status = `<span class="live" title="${esc(liveTitle(r))}"><span class="live-dot" aria-hidden="true"></span>Live</span>`;
+  return `<span class="range-status">${status}</span><div class="range" role="group" aria-label="Time range">${Object.entries(RANGES).map(([k, v]) => {
     const o = rangeOffered(k, keptDays);
     if (!o.shown && k !== r) return "";
     if (!o.offered && k !== r) return `<span class="off" aria-disabled="true" title="${esc(o.why)}">${esc(v.label)}<span class="sr"> (${esc(o.why)})</span></span>`;
-    return `<a href="${esc(hashOf(shown, { range: k }))}"${k === r ? ` aria-current="true"` : ""}${v.live ? ` title="Updates every few seconds"` : ""}>${esc(v.label)}</a>`;
-  }).join("")}</div>` + (isLive(r) ? `<span class="live" title="Updates every few seconds"><span class="live-dot" aria-hidden="true"></span>Live</span>`
-    : `<span class="as-of">${asOf ? `<span class="dim" title="Read once, when you chose this range. Choose Now to follow it live.">as of ${esc(asOf.toISOString().slice(11, 19))} UTC</span> ` : ""}<button type="button" class="small" data-refresh-range>Refresh</button></span>`);
+    return `<a href="${esc(hashOf(shown, { range: k }))}"${k === r ? ` aria-current="true"` : ""} title="${esc(liveTitle(k))}">${esc(v.label)}</a>`;
+  }).join("")}</div>`;
 }
 
 /**
@@ -280,7 +286,7 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
     return "failure" in r && store.get("api/state")?.body?.served === true ? { failure: overTunnel(r.failure) } : r;
   };
   const first = parseHash(shown);
-  const m = { shown: first.id, range: rangeOf(first.params.range), pollFailure: null, updatedAt: null, rangeReadAt: null };
+  const m = { shown: first.id, range: rangeOf(first.params.range), pollFailure: null, updatedAt: null };
   const put = (path, at, r) => {
     const was = store.get(path);
     // `readAt`: when the last read that answered was asked, what a body kept under a failing poll says it is as of
@@ -318,14 +324,12 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
     show(hash, env = {}) {
       const r = parseHash(hash);
       m.shown = r.id;
-      // what is shown is read again now, whatever its rate: a range that is not Now is read once, when it is chosen —
-      // and until it is, it says no "as of" (the last one was another page's, or another range's)
+      // what is shown is read again now, whatever its rate (a longer range's are a minute apart)
       app.markStale();
-      m.rangeReadAt = null;
       if (PAGES.find((p) => p.id === r.id)?.parent) m.range = rangeOf(r.params.range);
       pages.get(r.id).route?.(r.params, env);
     },
-    /** Every read due at the next poll (a range chosen again, Refresh): what it has stays shown until it is answered. */
+    /** Every read due at the next poll (a page or a range shown): what it has stays shown until it is answered. */
     markStale() { for (const e of store.values()) e.stale = true; },
     /** Read the shown page's reads that are due: those at the poll's rate every time, the slower ones once their time is up. */
     async poll() {
@@ -347,8 +351,7 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
       // what the page reads once these answered and it had not named (a view the state has just named): read now, not a poll later
       const named = page.reads().filter((r) => !store.has(r.path) && !aside.has(r.path));
       if (named.length > 0) await runReads(named);
-      // a range that is not Now says when it was read: its reads are the once-only ones
-      if (due.some((r) => r.everyMs === Infinity)) m.rangeReadAt = now();
+
       const own = reads[0] === undefined ? undefined : store.get(reads[0].path);
       m.pollFailure = own?.failure ?? null;
       afterRead();
@@ -407,7 +410,7 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
       return {
         nav: renderNav(m.shown, m.range, nav, pages.get(HOST_PAGE).model.view),
         // the range control in the shown view's header row (each group page's own slot; the others empty)
-        ...Object.fromEntries(PAGES.filter((p) => p.parent).map((p) => [`range-${p.id}`, p.id === m.shown ? renderSubnav(m.shown, m.range, st?.engine?.keptDays, m.rangeReadAt) : ""])),
+        ...Object.fromEntries(PAGES.filter((p) => p.parent).map((p) => [`range-${p.id}`, p.id === m.shown ? renderSubnav(m.shown, m.range, st?.engine?.keptDays) : ""])),
         where: st ? renderWhere(st) : "",
         // the demo database is said beside its name, so a person never takes it for their own
         badge: st?.source?.demo ? badge("demo", "accent") : "",
@@ -600,11 +603,33 @@ export function start(doc, win) {
     if (charts !== null) void charts.mount(app.pages.get(app.model.shown).charts?.() ?? {});
     place();
     arrived();
-    // what an action just wrote that the person must see (the page's `reveal`): scrolled into view once, as little as
-    // it takes (a phone wrote a new user's password card at the screen's bottom edge)
-    const reveal = app.pages.get(app.model.shown).reveal?.() ?? null;
-    if (reveal !== null) doc.getElementById(reveal)?.scrollIntoView?.({ block: "nearest" });
+    once();
   };
+  // THE ONE-TIME DIALOG (index.html `#once`, a page's `once()`): open as a modal while a page names one — whichever page
+  // is shown, so a hash followed under it never leaves the page inert behind a dialog nobody sees — its first Copy
+  // focused when it opens and when what it shows changes; closed only once the page names none (its "I have copied
+  // it"), the focus then where the page says. Escape (`cancel`) is refused; a backdrop click is no button; and a dialog
+  // closed by anything else (a browser's own close request) is opened again at the paint its `close` asks for.
+  const onceEl = doc.getElementById("once");
+  let onceShown = null;
+  const once = () => {
+    if (onceEl === null || typeof onceEl.showModal !== "function") return;
+    const o = [...app.pages.values()].map((p) => p.once?.() ?? null).find((x) => x !== null) ?? null;
+    if (o !== null) {
+      const opening = !onceEl.open;
+      if (opening) onceEl.showModal();
+      if (opening || onceShown?.key !== o.key) onceEl.querySelector?.("[data-copy]")?.focus?.();
+      onceShown = o;
+      return;
+    }
+    if (onceShown === null) return;
+    const back = onceShown.back;
+    onceShown = null;
+    if (onceEl.open) onceEl.close();
+    if (back) doc.getElementById(back)?.focus?.();
+  };
+  onceEl?.addEventListener?.("cancel", (e) => { e.preventDefault?.(); });
+  onceEl?.addEventListener?.("close", () => { paint(); });
   // ARRIVING ON A PAGE (issue 887): the element its `arrive()` names takes the focus once, at the first write that has
   // it — the page's first, or the one after a link followed (a hashchange) — so a person types straight away; never at a
   // poll's write after that, never from what the person focused or typed in since they arrived (the focus moved off
@@ -669,6 +694,8 @@ export function start(doc, win) {
   const inMenu = (t) => Boolean(t) && (sidebar?.contains?.(t) ?? false);
   doc.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
+    // the one-time dialog closes only by its button: Escape is no close request there
+    if (onceEl?.open) { e.preventDefault?.(); return; }
     if (menuOpen) { e.preventDefault?.(); setMenu(false, true); return; }
     const close = doc.querySelector?.(".pop.ask:not([hidden]) [data-pop-close]");
     if (close) { e.preventDefault?.(); close.click(); return; }
@@ -702,14 +729,21 @@ export function start(doc, win) {
       return;
     }
     if (!b) return;
-    // Refresh beside a range that is not Now: everything shown read again
-    if (b.dataset.refreshRange !== undefined) { app.markStale(); await poll(); return; }
+    // a popover's X (`pop`, src/web/shared.js): its own Dismiss or Cancel pressed, as Escape presses a question's
+    if (b.dataset.popX !== undefined) { b.closest?.(".pop")?.querySelector?.("[data-pop-close]")?.click?.(); return; }
+
+    // the one-time dialog's own buttons, whichever page is shown: I have copied it, and each Copy in it
+    if (b.dataset.dismissOnce !== undefined) { for (const p of app.pages.values()) if ((p.once?.() ?? null) !== null) p.dismissOnce?.(); paint(); return; }
+    if (b.dataset.copy !== undefined && onceEl?.contains?.(b)) { await act(copyClick(b.dataset, b, { doc, win })); return; }
     const r = shownPage().click?.(b.dataset, b, { doc, win }) ?? null;
     if (r === null) return;
     await act(r);
   });
-  doc.addEventListener("input", (e) => {
-    if ((shownPage().input?.(e.target) ?? null) !== null) paint();
+  // what a page answered a change of a control with: written at once, and again when an answer it waits on comes (a
+  // filter that changes what the run is asked for: Sync events' Scheduled syncs)
+  doc.addEventListener("input", async (e) => {
+    const r = shownPage().input?.(e.target) ?? null;
+    if (r !== null) await act(r);
   });
   // a details opening does not bubble, so it is heard on the way down; the page reads what its opening needs at once
   doc.addEventListener("toggle", async (e) => {
@@ -723,7 +757,11 @@ export function start(doc, win) {
     if (menuOpen) setMenu(false, true);
     // a replaced view's hash is not shown, nor read: the page leaves for the host's
     if (leave(true)) return;
-    app.show(win.location.hash, { doc }); arrive(); paint(); void poll();
+    // arriving is coming to ANOTHER page: a hash of the page shown (a Users tab, a range) moves no focus
+    const was = app.model.shown;
+    app.show(win.location.hash, { doc });
+    if (app.model.shown !== was) arrive();
+    paint(); void poll();
   });
   win.addEventListener?.("scroll", place, { capture: true, passive: true });
   win.addEventListener?.("resize", place);

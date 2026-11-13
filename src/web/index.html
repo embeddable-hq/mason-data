@@ -34,7 +34,7 @@
 <div id="poll"></div>
 <main>
   <section id="page-status" aria-labelledby="status-h">
-    <div class="page-head"><h2 id="status-h">Overview</h2><p class="desc">Mason syncs the tables you add from your Postgres and keeps them up to date. Tools query them at Mason's own Postgres URL. This page shows whether your synced data is ready, how to connect, and what Mason answered.</p></div>
+    <div class="page-head"><h2 id="status-h">Overview</h2><p class="desc">Mason syncs the tables you add from your Postgres and keeps them up to date. Tools query them at Mason's own Postgres URL.</p></div>
     <div id="status"><div class="loading" aria-busy="true"><p class="dim">Asking Mason…</p><span class="skeleton block"></span></div></div>
   </section>
   <section id="page-tables" aria-labelledby="tables-h" hidden>
@@ -44,22 +44,18 @@
     <div class="toolbar">
       <div class="field grow"><label for="tables-filter">Search the tables</label>
         <input type="search" id="tables-filter" autocomplete="off" spellcheck="false" placeholder="e.g. orders"></div>
-      <div class="field"><label for="tables-show">Show</label>
-        <select id="tables-show"><option value="all">All</option><option value="added">Added</option><option value="failed">Failed</option><option value="not-added">Not added</option></select></div>
+      <label class="check" for="tables-failed"><input type="checkbox" id="tables-failed"> Failed only</label>
     </div>
     <div id="tables"></div>
   </section>
   <section id="page-queries" aria-labelledby="queries-h" hidden>
     <!-- an Observability view's head is ONE row: its title left, the time range the three share right (src/web/app.js renderSubnav) -->
-    <div class="page-head"><div class="head-row"><h2 id="queries-h">Queries</h2><div id="range-queries" class="head-range"></div></div><p class="desc">Every query Mason answered, refused or cancelled in the time range, newest first. Who is connected, what is running now and the totals are on <a href="#observability/usage">Usage</a>.</p></div>
-    <p class="lead">If you fill in Since, it replaces the time range. Give an age (30m, 2h, 7d), or an ISO 8601 date or time with its time zone. A statement that reads no synced table (select 1, SET, SHOW, a BI tool's catalog queries) is answered but not listed.</p>
+    <div class="page-head"><div class="head-row"><h2 id="queries-h">Queries</h2><div id="range-queries" class="head-range"></div></div><p class="desc">Every query sent to Mason, newest first.</p></div>
     <form id="request-filters" class="toolbar" autocomplete="off">
       <div class="field"><label for="rq-status">Status</label>
         <select id="rq-status" name="status"><option value="">All</option><option value="completed">Completed</option><option value="refused">Refused</option><option value="failed">Failed</option><option value="refused-or-failed">Refused or failed</option><option value="cancelled">Cancelled</option></select></div>
-      <div class="field"><label for="rq-since">Since</label>
-        <input id="rq-since" name="since" placeholder="e.g. 2h" spellcheck="false"></div>
-      <div class="field"><label for="rq-user">User</label>
-        <input id="rq-user" name="user" spellcheck="false"></div>
+      <!-- the User filter is the page's (src/web/pages/queries.js renderUserFilter): a dropdown of the users, a text box when they could not be read -->
+      <div class="field" id="rq-user-field"></div>
       <div class="field"><label for="rq-client">Client</label>
         <input id="rq-client" name="client" spellcheck="false"></div>
       <div class="field grow"><label for="rq-search">Query text has</label>
@@ -71,14 +67,15 @@
     <div id="request-log"></div>
   </section>
   <section id="page-users" aria-labelledby="users-h" hidden>
-    <div class="page-head"><h2 id="users-h">Users</h2><p class="desc">A user is the name and password that psql, a BI tool or your app uses to connect to Mason. It does not expire.</p></div>
-    <!-- Connect, then the add form (src/web/pages/users.js renderAddUser: none on a read-only page), what it answered
-         beside it, then the users (issue 887) -->
-    <div id="users-connect"></div>
-    <div id="add-user-box"></div>
+    <div class="page-head"><h2 id="users-h">Users</h2><p class="desc">Create and manage users that you can connect to tools and services.</p></div>
+    <div id="users"></div>
+    <!-- the add box is the page's (src/web/pages/users.js): what it creates (renderAddKinds, only where a temporary public
+         login may be opened), the add form (renderAddUser: none on a read-only page) and the temporary cloud login's pane
+         (renderSharePane), the two panes in one place so the box keeps the height of the taller -->
+    <div id="add-box" class="add-box"><div id="add-kinds"></div><div class="add-panes"><div id="add-user-box"></div><div id="add-share-box"></div></div></div>
     <div id="action"></div>
     <div id="added"></div>
-    <div id="users"></div>
+    <div id="users-connect"></div>
   </section>
   <section id="page-usage" aria-labelledby="usage-h" hidden>
     <div class="page-head"><div class="head-row"><h2 id="usage-h">Usage</h2><div id="range-usage" class="head-range"></div></div><p class="desc">What Mason answered in the time range: who connected, what ran, and the SQL it refused as unsupported. Also each synced table's size. Click a client or a card to see its queries on <a href="#observability/queries">Queries</a>.</p></div>
@@ -97,8 +94,8 @@
     <div id="usage-sizes"></div>
   </section>
   <section id="page-syncs" aria-labelledby="syncs-h" hidden>
-    <div class="page-head"><div class="head-row"><h2 id="syncs-h">Sync events</h2><div id="range-syncs" class="head-range"></div></div><p class="desc">What the sync did: each first sync, each failure and recovery, and each sync you asked for. A scheduled poll that succeeds is not listed. The Tables page shows each table's last sync. Mason's raw log is at the bottom, for debugging.</p></div>
-    <div class="toolbar"><div id="syncs-filters" class="fields"></div><label class="check" for="syncs-failures-only"><input type="checkbox" id="syncs-failures-only"> Failures only</label></div>
+    <div class="page-head"><div class="head-row"><h2 id="syncs-h">Sync events</h2><div id="range-syncs" class="head-range"></div></div><p class="desc">What the sync did: each full sync, each failure and recovery, and each sync you started. The scheduled syncs that succeed are listed only when you tick Scheduled syncs. Mason's raw log is at the bottom, for debugging.</p></div>
+    <div class="toolbar"><div id="syncs-filters" class="fields"></div><label class="check" for="syncs-failures-only"><input type="checkbox" id="syncs-failures-only"> Failures only</label><label class="check" for="syncs-scheduled"><input type="checkbox" id="syncs-scheduled"> Scheduled syncs</label></div>
     <div id="syncs-events"></div>
     <div id="syncs-run"></div>
   </section>
@@ -110,6 +107,15 @@
   </section>
 </main>
 </div>
+<!-- THE ONE-TIME DIALOG (src/web/app.js `once`): a password shown once — a user just added, a temporary cloud login just
+     opened — as a modal over the page, its parts written by the page that holds it (src/web/pages/users.js). It closes
+     only by its button: never by Escape nor a click outside it, since the password is kept nowhere once it closes -->
+<dialog id="once" class="once" aria-labelledby="once-title" closedby="none">
+  <div id="once-head"></div>
+  <div id="once-status" aria-live="polite"></div>
+  <div id="once-foot"></div>
+  <p class="once-actions"><button type="button" class="primary" data-dismiss-once>I have copied it</button></p>
+</dialog>
 <noscript><p>This page needs JavaScript. <code>mason status</code>, <code>mason tables</code>, <code>mason user list</code>, <code>mason logs</code> and <code>mason usage</code> say the same in a terminal.</p></noscript>
 </body>
 </html>

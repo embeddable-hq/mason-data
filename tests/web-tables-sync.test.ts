@@ -10,6 +10,7 @@
  */
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runState, type RunContext } from "../src/cli/run-server.ts";
@@ -74,16 +75,24 @@ const STATE = stateOf();
 const tableOf = (name: string) => (STATE.tables as Array<{ table: string }>).find((t) => t.table === name)!;
 
 /** `GET api/tables/<table>/sync`'s answer (src/cli/sync-choice.ts SyncChoice). */
-const POLLS = (cost: string | null) => [["poll 5m", 300], ["poll 15m", 900], ["poll 1h", 3600], ["poll 1d", 86_400]].map(([sync, seconds]) => ({ sync, seconds, cost }));
+type Cost = (seconds: number) => Record<string, unknown>;
+const POLLS = (cost: Cost | null) => ([["poll 5m", 300], ["poll 15m", 900], ["poll 1h", 3600], ["poll 1d", 86_400]] as const).map(([sync, seconds]) => ({ sync, seconds, cost: cost ? cost(seconds) : null }));
 const PASSING = [{ name: "primary key", state: "ok", detail: "id" }, { name: "replica identity", state: "ok", detail: "DEFAULT (its primary key)" },
   { name: "wal_level", state: "ok", detail: "logical" }, { name: "replication role", state: "ok", detail: "mason_reader may replicate (REPLICATION)" },
   { name: "WAL cap", state: "ok", detail: "max_slot_wal_keep_size = 4GB" }];
-const choiceOf = (name: string, o: { sync?: string; checks?: unknown[]; cost?: string | null; big?: boolean } = {}) => {
+const choiceOf = (name: string, o: { sync?: string; checks?: unknown[]; cost?: Cost | null; big?: boolean } = {}) => {
   const checks = (o.checks ?? PASSING) as Array<{ state: string }>;
   return { table: name, sync: { value: o.sync ?? "off", from: o.sync ? "entry" : "default" }, rows: 1200, polls: POLLS(o.cost ?? null), bigRows: o.big ?? false,
     live: { allowed: checks.every((c) => c.state !== "refused"), checks } };
 };
-const COST = "orders has about 40,000,000 rows, and each poll scans it whole on your database: about 22 s a poll, from the catalog's 40,000,000 rows at an assumed 1,800,000 rows a second of scan (nothing of it measured yet).";
+/** A big table's cost at each interval, as src/cli/source-edit.ts pollLoad answers it: a scan of `scan` seconds, a poll
+ *  waiting four times that. */
+const costOf = (scan: number, basis = "assumed"): Cost => (seconds) => {
+  const every = Math.max(seconds, 4 * scan);
+  return { rows: 40_000_000, scanSeconds: scan, everySeconds: every, busyPercent: Math.round((scan / every) * 100), basis, rowsPerSecond: 1_800_000 };
+};
+const COST = costOf(22);
+const LEAD = "orders has about 40,000,000 rows. Each scheduled sync scans the whole table on your database, about 22 seconds a scan (a rough guess, since nothing is measured yet).";
 /** Each check that refuses Live the issue names, in the server's words (src/cli/replication-checks.ts, sync-choice.ts). */
 const FAILING = [
   { name: "primary key", state: "refused", detail: "it has no primary key, so logical replication cannot apply its changes by its key — poll it instead, or keep its sync off" },
@@ -164,11 +173,27 @@ test("asked before saving: a big table's poll with its cost; Live with a warning
   const big = choiceOf("public.orders", { big: true, cost: COST, sync: "poll 5m" });
   assert.equal(syncQuestion(choiceOf("public.customers"), "poll 5m"), null, "a small table's poll is saved at once");
   assert.equal(syncQuestion(big, "off"), null);
-  assert.deepEqual(syncQuestion(big, "poll 1h"), { lines: [COST], ask: "Scan all of orders on your database every hour?", yes: "Poll it every hour" });
+  const HOUR = "One connection to your database is busy about 1% of the time.";
+  assert.deepEqual(syncQuestion(big, "poll 1h"), { lines: [LEAD, HOUR], ask: "Scan all of orders on your database every hour?", yes: "Poll it every hour" });
   const asked = textOf(renderSyncChoice(tableOf("public.orders"), big, "poll 1h"));
-  assert.ok(asked.startsWith(`${COST} Scan all of orders on your database every hour? Poll it every hour Back Cancel`), asked);
-  // the cost is said beside each poll in the choice too
-  assert.ok(textOf(renderSyncChoice(tableOf("public.orders"), big)).includes(`Every 15 minutes Scans the whole table on your database every 15 minutes. ${COST}`));
+  assert.ok(asked.startsWith(`${LEAD} ${HOUR} Scan all of orders on your database every hour? Poll it every hour Back Cancel`), asked);
+  // in the choice: what every interval shares said ONCE, over the choices; each interval's own share under it
+  const choice = renderSyncChoice(tableOf("public.orders"), big);
+  assert.equal(choice.split("has about 40,000,000 rows").length - 1, 1, "the table's rows and a scan's length said once");
+  assert.match(textOf(choice), new RegExp(`^How Mason keeps orders up to date after its first sync ${LEAD.replace(/[.()]/g, "\\$&")} Off `));
+  assert.ok(textOf(choice).includes("Every 15 minutes Scans the whole table on your database every 15 minutes. One connection to your database is busy about 2% of the time."));
+  assert.ok(textOf(choice).includes("Every day Scans the whole table on your database every day. One connection to your database is busy less than 1% of the time."));
+  assert.doesNotMatch(choice, /--sync|stretched|backend/, "the page's words, never the CLI's");
+  assert.match(choice, /<span class="choice-cost">One connection[^<]*about 7%/, "under 10 %: quiet");
+  // a scan long enough to stretch the interval says so, and a share of 10 % or more is in the warning colour
+  const slow = renderSyncChoice(tableOf("public.orders"), choiceOf("public.orders", { big: true, cost: costOf(100, "first-sync"), sync: "poll 5m" }));
+  assert.match(textOf(slow), /about 2 minutes a scan \(estimated from how fast its first sync read it\)/);
+  assert.match(slow, /<span class="choice-cost high">It runs every 7 minutes at most, since a scan waits four times its own length\. One connection to your database is busy about 25% of the time\.<\/span>/);
+  // a short scan is said plainly: "under a second", never "about 0 seconds"; one second is singular
+  const quick = textOf(renderSyncChoice(tableOf("public.orders"), choiceOf("public.orders", { big: true, cost: costOf(0.3, "measured"), sync: "poll 5m" })));
+  assert.match(quick, /scans the whole table on your database, under a second a scan \(measured at its last scheduled sync\)\./);
+  assert.doesNotMatch(quick, /about 0 seconds/);
+  assert.match(textOf(renderSyncChoice(tableOf("public.orders"), choiceOf("public.orders", { big: true, cost: costOf(1.2), sync: "poll 5m" }))), /about 1 second a scan /);
   const warned = choiceOf("public.customers", { checks: [...PASSING.slice(0, 4), { name: "WAL cap", state: "warn", detail: "max_slot_wal_keep_size is unlimited: while Mason is stopped its slot holds every byte of WAL" }] });
   assert.equal(warned.live.allowed, true);
   assert.deepEqual(syncQuestion(warned, "replication"), { lines: ["WAL cap: max_slot_wal_keep_size is unlimited: while Mason is stopped its slot holds every byte of WAL"],
@@ -269,7 +294,7 @@ test("the app: a big table's poll asks first with its cost; Back returns to the 
   assert.equal(await call("chooseSyncValue", "public.orders", "poll 1h"), true);
   assert.deepEqual(run.asked, [], "nothing saved before the person says yes");
   const asking = popOf(app.view().tables!, "sync-tables-public.orders");
-  assert.ok(textOf(asking).startsWith(`${COST} Scan all of orders on your database every hour?`));
+  assert.ok(textOf(asking).startsWith(`${LEAD} One connection to your database is busy about 1% of the time. Scan all of orders on your database every hour?`));
   assert.match(asking, /data-save-sync="public\.orders" data-sync="poll 1h">Poll it every hour</);
   call("backSync");
   assert.match(popOf(app.view().tables!, "sync-tables-public.orders"), /data-sync-form="public\.orders"/);
@@ -375,6 +400,8 @@ const colTable = (name: string) => (COL_STATE.tables as ColTable[]).find((t) => 
 /** `GET api/tables/<table>/columns`'s answer (src/cli/run-server.ts tableColumns). */
 const columnsOf = (name: keyof typeof COLS) => ({ table: `public.${name}`, columns: COLS[name].map((c) => ({ name: c, type: c === "id" ? "bigint" : "text", nullable: true, comment: null, references: null })) });
 const ticksOf = (html: string, field: string): string[] => [...html.matchAll(new RegExp(`name="${field}" value="([^"]+)" checked`, "g"))].map((m) => m[1]!);
+/** A column form's columns choice: the radio chosen, All or Only these. */
+const whichOf = (html: string): string[] => ticksOf(html, "which");
 
 test("the state carries each added table's entry — its columns, exclude and key —, the columns every column leaves out, and every table's column count", () => {
   assert.deepEqual(colTable("customers").entry, { columns: null, exclude: [], key: null });
@@ -415,19 +442,29 @@ test("read-only: the columns said, no form — where the project's files are rea
   }
 });
 
-test("the column form on an added table: its entry's columns ticked (none for every column), its key ticked, what saving costs said before Save", () => {
+test("the column form on an added table: All columns for every column, else Only these with its entry's columns ticked; its key ticked, what saving costs said before Save", () => {
   const form = (name: keyof typeof COLS) => popOf(renderTables(COL_STATE, { choosing: `public.${name}`, columns: columnsOf(name) }), `columns-tables-public.${name}`);
   const orders = form("orders");
   assert.match(orders, /role="dialog" aria-label="The columns orders syncs"/);
+  assert.deepEqual(whichOf(orders), ["only"], "a list of columns: Only these");
   assert.deepEqual(ticksOf(orders, "columns"), ["id", "status"]);
   assert.ok(!orders.includes('name="key"'), "a table with a primary key: no key to tick");
-  assert.equal(textOf(orders), "The columns orders syncs None ticked: every column, and any added to the table later. id bigint name text status text created_at text " +
+  assert.match(orders, /<div class="radios"><label><input type="radio" name="which" value="all"> <span>All columns, and any added to the table later<\/span><\/label><label><input type="radio" name="which" value="only" checked> <span>Only these columns<\/span><\/label><\/div><div class="only-cols">/,
+    "two choices, the boxes under Only these");
+  assert.equal(textOf(orders), "The columns orders syncs All columns, and any added to the table later Only these columns id bigint name text status text created_at text " +
     "Saving different columns syncs orders again in full from your database (~40,000,000 rows): that takes a while, and on a big table it adds load to your database. " +
     "Its synced data can still be queried until the new sync finishes. Saving the same columns changes nothing and starts no sync. Save Cancel");
-  assert.deepEqual(ticksOf(form("customers"), "columns"), [], "every column: none ticked");
+  // every column: All chosen, never an empty set of boxes; under Only these every box ticked, so choosing it starts from what is synced
+  const customers = form("customers");
+  assert.deepEqual(whichOf(customers), ["all"], "every column: All");
+  assert.deepEqual(ticksOf(customers, "columns"), ["id", "name", "status"], "its boxes all ticked, hidden while All is chosen");
   const accounts = form("accounts");
-  assert.deepEqual(ticksOf(accounts, "columns"), [], "every column but the secret-looking one, as mason add writes it: none ticked");
-  assert.match(textOf(accounts), /None ticked: every column, and any added to the table later, but api_token, which looks like a secret\./);
+  assert.deepEqual(whichOf(accounts), ["all"], "every column but the secret-looking one, as mason add writes it: All");
+  assert.deepEqual(ticksOf(accounts, "columns"), ["id", "name"], "its boxes: every column but the one All leaves out");
+  assert.match(textOf(accounts), /All columns, and any added to the table later, but api_token, which looks like a secret Only these columns/);
+  // the boxes hidden by the radio itself while All is chosen: nothing is written when it changes
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.match(css, /form\.pick:has\(input\[name="which"\]\[value="all"\]:checked\) \.only-cols \{ display: none; \}/);
   const rawLog = form("raw_log");
   assert.deepEqual(ticksOf(rawLog, "key"), ["tenant_id", "seq"], "its key: ticked");
   assert.deepEqual(ticksOf(rawLog, "columns"), ["tenant_id", "seq", "body"]);
@@ -443,6 +480,7 @@ test("an entry the form cannot show (an exclude: written by hand, a secret-looki
   const invoices = form("invoices");
   assert.match(textOf(invoices), /^Its entry in the sources file syncs every column but name, which these boxes cannot show: they show the columns synced now\. Saving replaces the entry with the columns ticked\. /);
   assert.deepEqual(ticksOf(invoices, "columns"), ["id", "status"]);
+  assert.deepEqual(whichOf(invoices), ["only"], "the columns synced now: Only these");
   assert.match(textOf(invoices), /Saving the same columns starts no sync\. Save Cancel$/);
   const sessions = form("sessions");
   assert.match(textOf(sessions), /^Its entry in the sources file syncs every column, api_token included, which these boxes cannot show/);
@@ -451,8 +489,9 @@ test("an entry the form cannot show (an exclude: written by hand, a secret-looki
   assert.deepEqual(["customers", "orders", "accounts", "invoices", "sessions", "raw_log"].map((n) => columnsChoice(colTable(n)).exact), [true, true, true, false, false, true]);
 });
 
-/** The Tables page's submit of a column form, as the shell calls it: the boxes ticked by FormData's getAll. */
-const submitForm = (app: App, table: string, ticks: { columns?: string[]; key?: string[] }) => {
+/** The Tables page's submit of a column form, as the shell calls it: the boxes ticked by FormData's getAll, the columns
+ *  choice (`which`) by its get. */
+const submitForm = (app: App, table: string, ticks: { which?: string[]; columns?: string[]; key?: string[] }) => {
   class FD {
     f: { ticks: Record<string, string[]> };
     constructor(f: { ticks: Record<string, string[]> }) { this.f = f; }
@@ -477,7 +516,7 @@ test("the app: opening the column form on an added table reads its columns once;
   assert.equal(tablesModel(app).choosing, "public.orders");
   run.answers.set("POST api/pick", run.json(pickAnswer("public.orders", { columns: ["id", "name", "status"] })));
   run.asked.length = 0;
-  assert.equal(await submitForm(app, "public.orders", { columns: ["id", "name", "status"] }), true);
+  assert.equal(await submitForm(app, "public.orders", { which: ["only"], columns: ["id", "name", "status"] }), true);
   assert.deepEqual(run.asked, [`POST api/pick ${JSON.stringify({ table: "public.orders", picked: true, columns: ["id", "name", "status"] })}`, "GET api/state"]);
   const html = app.view().tables!;
   assert.equal(textOf(popOf(html, "columns-tables-public.orders")), "Saved orders's columns: the columns id, name, status. Dismiss", "what was saved; its sync, unchanged, not said again");
@@ -486,14 +525,14 @@ test("the app: opening the column form on an added table reads its columns once;
 });
 
 test("the app: saving the same choice sends the entry as it is — the run answers already, writes nothing and starts no sync", async () => {
-  const cases: Array<[keyof typeof COLS, { columns?: string[]; key?: string[] }, Record<string, unknown>]> = [
+  const cases: Array<[keyof typeof COLS, { which?: string[]; columns?: string[]; key?: string[] }, Record<string, unknown>]> = [
     // its columns ticked in another order, its key left unticked (always synced): the entry's own list
-    ["orders", { columns: ["status"] }, { table: "public.orders", picked: true, columns: ["id", "status"] }],
-    // every column: none ticked, none sent
-    ["customers", {}, { table: "public.customers", picked: true }],
-    ["accounts", {}, { table: "public.accounts", picked: true }],
+    ["orders", { which: ["only"], columns: ["status"] }, { table: "public.orders", picked: true, columns: ["id", "status"] }],
+    // every column: All, its boxes (hidden, all ticked) not sent
+    ["customers", { which: ["all"], columns: ["id", "name", "status"] }, { table: "public.customers", picked: true }],
+    ["accounts", { which: ["all"], columns: ["id", "name"] }, { table: "public.accounts", picked: true }],
     // its key as the entry orders it
-    ["raw_log", { columns: ["body", "seq", "tenant_id"], key: ["seq", "tenant_id"] }, { table: "public.raw_log", picked: true, columns: ["tenant_id", "seq", "body"], key: ["tenant_id", "seq"] }],
+    ["raw_log", { which: ["only"], columns: ["body", "seq", "tenant_id"], key: ["seq", "tenant_id"] }, { table: "public.raw_log", picked: true, columns: ["tenant_id", "seq", "body"], key: ["tenant_id", "seq"] }],
   ];
   for (const [name, ticks, body] of cases) {
     const { run, app, call } = await appOver(COL_STATE);
@@ -511,8 +550,24 @@ test("the app: saving the same choice sends the entry as it is — the run answe
   run.answers.set("POST api/pick", run.json(pickAnswer("public.invoices", { columns: ["id", "status"] })));
   await call("choose", "public.invoices");
   run.asked.length = 0;
-  await submitForm(app, "public.invoices", { columns: ["id", "status"] });
+  await submitForm(app, "public.invoices", { which: ["only"], columns: ["id", "status"] });
   assert.equal(run.asked[0], `POST api/pick ${JSON.stringify({ table: "public.invoices", picked: true, columns: ["id", "status"] })}`);
+});
+
+test("the app: Only these with no box ticked is refused on the page, never sent as every column; All sends no columns whatever its hidden boxes say", async () => {
+  const { run, app, call } = await appOver(COL_STATE);
+  run.answers.set("GET api/tables/public.orders/columns", run.json(columnsOf("orders")));
+  run.answers.set("POST api/pick", run.json(pickAnswer("public.orders")));
+  await call("choose", "public.orders");
+  run.asked.length = 0;
+  assert.equal(await submitForm(app, "public.orders", { which: ["only"], columns: [] }), true);
+  assert.deepEqual(run.asked, [], "nothing sent");
+  const form = popOf(app.view().tables!, "columns-tables-public.orders");
+  assert.match(textOf(form), /^✗ Tick the columns to sync, or choose All columns\. The columns orders syncs /, "said over the form");
+  assert.deepEqual(whichOf(form), ["only"], "the choice as it was");
+  assert.deepEqual(ticksOf(form, "columns"), [], "its boxes as they were");
+  await submitForm(app, "public.orders", { which: ["all"], columns: ["id"] });
+  assert.equal(run.asked[0], `POST api/pick ${JSON.stringify({ table: "public.orders", picked: true })}`, "All: every column, as mason add <table>");
 });
 
 test("the app: a refused save is said over the form, its boxes as they were ticked; a table removed elsewhere takes its form with it", async () => {
@@ -520,10 +575,11 @@ test("the app: a refused save is said over the form, its boxes as they were tick
   run.answers.set("GET api/tables/public.orders/columns", run.json(columnsOf("orders")));
   run.answers.set("POST api/pick", run.json({ error: "x", failure: { code: "refused", message: "public.orders has no column nope", next: [] } }, 400));
   await call("choose", "public.orders");
-  assert.equal(await submitForm(app, "public.orders", { columns: ["name"] }), false);
+  assert.equal(await submitForm(app, "public.orders", { which: ["only"], columns: ["name"] }), false);
   const form = popOf(app.view().tables!, "columns-tables-public.orders");
   assert.match(textOf(form), /^✗ public\.orders has no column nope The columns orders syncs /);
   assert.deepEqual(ticksOf(form, "columns"), ["name"]);
+  assert.deepEqual(whichOf(form), ["only"], "the choice as it was");
   // removed elsewhere (mason remove): the next poll closes the form
   const removed = JSON.parse(JSON.stringify(COL_STATE)) as { tables: Array<Record<string, unknown>> };
   for (const t of removed.tables) if (t.table === "public.orders") { t.added = false; delete t.entry; }
