@@ -197,7 +197,8 @@ export function keptCurrentBy(f: CopyFacts | null): "polling" | "syncing again i
   if (k.by === "poll") return k.pending === undefined && k.sync.mode === "poll" ? "polling" : null;
   if (k.by === "recopy") return "syncing again in full";
   if (k.by === "generated") return null;
-  return k.state === "streamed" && k.notRunning === null ? "logical replication" : null;
+  // being compacted: still kept current by the stream, its changes applied when the compaction ends (issue 904)
+  return (k.state === "streamed" || k.state === "compacting") && k.notRunning === null ? "logical replication" : null;
 }
 
 /** how a copy is kept current, as FORMAT JSON's keys say it (`keptText`'s facts) */
