@@ -69,6 +69,17 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   status`, `mason wait` and the web page said the table was synced as of the newest change. Now its line says it is
   being compacted and when it was last synced, and that time moves on only once the waiting changes are in. If the
   compaction takes longer than two minutes, the table shows as behind until it ends. No data was ever lost.
+- **Changing the publication a project replicates through no longer loses or freezes changes.** When the sources
+  file's `publication:` (or `PG_PUBLICATION`) changed between two starts — from Mason's own to one you named, from one
+  you named back to Mason's own, or from one named publication to another — Mason kept reading its replication slot
+  with the new publication. A write transaction that was open while the new publication was created, and committed
+  after, was then skipped: on Postgres 18 its rows never reached the synced tables, with only a warning in the
+  database's log; on Postgres 16 the stream stopped and never moved again, holding the database's WAL. Now such a
+  start drops the slot (and Mason's own publication, when that was the one read), verified gone, makes a new one, and
+  catches each table whose sync is `replication` up by one poll. That poll is one full read of each of those tables on
+  your database, once: `mason start` says so when it makes the switch. If you switched publication with an earlier
+  Mason while your application was writing, a replicated table may be missing those changes: `mason remove <table>`
+  then `mason add <table> --sync replication` syncs it whole again.
 - **Table names are readable on the web page's Tables at laptop widths.** At 1024 px the name column was 2 px wide. Now
   it always keeps room for a typical `schema.table` name, and a table's name and its state are never cut with "…": a
   long one wraps onto more lines. In a narrower window the Key, Size, Last sync and Rows columns give way, in that
