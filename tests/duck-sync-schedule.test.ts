@@ -99,3 +99,30 @@ test("two tables backing off, the later one's end asked second: each gets its pa
     await (sync.stop as () => Promise<void>).call(sync);
   }
 });
+
+// ISSUE 925: a timer counts on the event loop's clock, which can run up to a millisecond ahead of `Date.now()` (where
+// the two clocks' phases sit is fixed per machine, so on some CI runners and never on others). The back-off's wake then
+// kicked a pass a millisecond before the back-off ended by `Date.now()`; that pass skipped the table as still backing
+// off, and the next wake ran a second pass for it. Here `Date.now()` is held behind the timers' clock by 20 ms, so the
+// wake always fires early by it: ONE pass, at or after the end
+test("a back-off's wake that fires before its end by the clock waits out the rest: one pass, never one early and another", async (t) => {
+  const Sync = (syncModule as unknown as { Sync: new (...a: unknown[]) => Record<string, unknown> }).Sync;
+  const sync = new Sync({ writer: {} }, { host: "localhost" }, "x", () => undefined, 5_000, "replication", { slot: "s", publication: "p", owned: true });
+  const passes: number[] = [];
+  sync.pass = async () => { passes.push(Date.now()); };
+  sync.nextPassDelay = () => null;
+  const realNow = Date.now.bind(Date);
+  let behind = 0;
+  t.mock.method(Date, "now", () => realNow() - behind);
+  const start = Date.now(), end = start + 100;
+  sync.tables = new Map([["public.a", { source: "public.a" }]]);
+  (sync.retries as Map<string, { failures: number; at: number }>).set("public.a", { failures: 1, at: end });
+  try {
+    (sync.wakeAt as (at: number) => void)(end);
+    behind = 20;
+    for (const until = realNow() + 3_000; realNow() < until && (passes.length === 0 || realNow() < start + 400);) await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(passes.map((p) => p >= end), [true], `one pass, once the back-off has ended (passes at ${passes.map((p) => p - start).join(", ")} ms)`);
+  } finally {
+    await (sync.stop as () => Promise<void>).call(sync);
+  }
+});

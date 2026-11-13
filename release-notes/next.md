@@ -52,3 +52,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **Under `sync: replication`, a table whose sync failed is always tried again.** When two tables' syncs failed at
   different times, the one due to be tried later could wait until Mason started again. Now each is tried again at its
   own time.
+- **A table whose sync failed is tried again with one pass, not two.** On some machines, the wait before Mason tried the
+  table again could end a millisecond early. Mason then found the table not yet due, skipped it, and ran a second pass
+  straight after to try it. Each extra pass checked the database for nothing. Now Mason waits out that last
+  millisecond and runs one pass.

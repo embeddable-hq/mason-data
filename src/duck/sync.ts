@@ -2060,12 +2060,24 @@ export class Sync {
     return `${clock(at)} UTC (failure ${failures} in a row), or at once when Mason starts again or its columns or key change`;
   }
 
-  /** a pass at `at` (the earliest asked for wins): in replication mode nothing else runs one when a back-off ends */
+  /**
+   * A pass at `at` (the earliest asked for wins): in replication mode nothing else runs one when a back-off ends.
+   * NEVER BEFORE `at` BY `Date.now()` (issue 925): a timer counts on the event loop's clock, which can run up to a
+   * millisecond ahead of `Date.now()`. A pass kicked then found the back-off not yet over and skipped the table, and
+   * the next wake ran a second pass for it. So a wake that fires early waits out the rest.
+   */
   private wakeAt(at: number): void {
     if (this.stopped || (this.wake !== null && this.wake.at <= at)) return;
     if (this.wake !== null) clearTimeout(this.wake.timer);
-    const timer = setTimeout(() => { this.wake = null; this.kick(); }, Math.max(0, at - Date.now()));
-    this.wake = { timer, at };
+    const arm = (): void => {
+      const timer = setTimeout(() => {
+        if (Date.now() < at) { arm(); return; }
+        this.wake = null;
+        this.kick();
+      }, Math.max(0, at - Date.now()));
+      this.wake = { timer, at };
+    };
+    arm();
   }
 
   /**
