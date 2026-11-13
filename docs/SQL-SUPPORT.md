@@ -24,10 +24,10 @@ each). The synced data is read-only.
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 7,258 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 7,387 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same synced tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 7,258 statements | Mason | DuckDB alone |
+| Of 7,387 statements | Mason | DuckDB alone |
 |---|---|---|
 | answered exactly as Postgres: the rows, their text, the column names | 93% | 25% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
@@ -36,7 +36,7 @@ each sent as written to Mason and to a plain DuckDB connection over the same syn
 | refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 22% |
 | a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 14% |
 | wrong rows, or the rows in another order | — | 8% |
-| the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 3% |
+| the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 4% |
 | another error than Postgres's, or answered where Postgres refuses | — | 9% |
 
 A tool that reads Postgres reads the first row's answers; the rest it would have to work around, statement by
