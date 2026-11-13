@@ -1223,8 +1223,9 @@ test("SHOW, SHOW ALL, the reported parameters and current_setting read a paramet
   // (checkRoles: the roles' row filters analysed once per roles file, as the catalog's own, never a session's request;
   // planner: a generated table's SQL, planned as no session, and refused where it reads a session's setting;
   // canonicalElsewhere: a SET's value read by the catalog's own check, as validateElsewhere's; routed: a statement of no
-  // table analysed to see whether it orders text, as duckPlan's analysis is, under the session's state it is passed)
-  assert.deepEqual(direct, ["catalogAs", "catalogSettings", "checkRoles", "duckPlan", "duckValues", "end", "explaining", "planner", "routed", "showAll", "showStatement", "validateElsewhere", "canonicalElsewhere"].sort(),
+  // table analysed to see whether it orders text, as duckPlan's analysis is, under the session's state it is passed;
+  // pathsBound: a Bind's values read by their input functions under the session's state, as duckValues's are)
+  assert.deepEqual(direct, ["catalogAs", "catalogSettings", "checkRoles", "duckPlan", "duckValues", "end", "explaining", "pathsBound", "planner", "routed", "showAll", "showStatement", "validateElsewhere", "canonicalElsewhere"].sort(),
     "a catalog request beside catalogAs: carry the session's settings (catalogAs), or say here why it reads none of them");
   const calls = scannedFiles(["src"]).flatMap((f) => [...f.src.matchAll(/(?<!function )\bfixedParameter\(/g)].map((m) => `${f.name}:${f.src.slice(0, m.index).split("\n").length}`));
   assert.equal(calls.length, 1, `fixedParameter is called by sessionSetting alone: ${calls.join(", ")}`);
@@ -1384,12 +1385,13 @@ test("the image user guard catches the real thing", () => {
   one("# FROM node:26-slim\nUSER node\n", /^D: no FROM/, "a comment is no instruction");
 });
 
-/** the calls of a statement's plan (`duck.plan(…)`) that do not pass the session's `grants`, by their first line */
+/** the calls of a statement's plan (`duck.plan(…)`) that do not pass the session's `grants`, by their first line (an
+ *  argument after it, a generated table's or an Execute's bound json paths, is no role's) */
 const planCallsWithoutGrants = (source: string): string[] => {
   const file = ts.createSourceFile("x.ts", source, ts.ScriptTarget.Latest, true);
   const out: string[] = [];
   const visit = (n: ts.Node): void => {
-    if (ts.isCallExpression(n) && /\bduck\.plan$/.test(n.expression.getText(file)) && n.arguments.at(-1)?.getText(file) !== "grants") out.push(n.getText(file).split("\n")[0]!);
+    if (ts.isCallExpression(n) && /\bduck\.plan$/.test(n.expression.getText(file)) && !n.arguments.some((a) => a.getText(file) === "grants")) out.push(n.getText(file).split("\n")[0]!);
     ts.forEachChild(n, visit);
   };
   visit(file);

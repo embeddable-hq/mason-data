@@ -445,8 +445,9 @@ CLI lacks).
 
 ## Errors
 
-**Every error says what to do about it** (CLAUDE.md "Conventions"). A message a developer or an agent meets names the
-file and the key, says what is wrong in their words, and gives the way out, on ONE report:
+**Every error says what to do about it** (CLAUDE.md "An error a developer meets says what to do about it").
+A message a developer or an agent meets names the file and the key, says what is wrong in their words, and gives the
+way out, on ONE report:
 
 - the closest valid name for a misspelling (`didYouMean`, src/lib/did-you-mean.ts: a case, a letter or two, a prefix
   — never a guess at a different word, which is worse than none);
@@ -469,7 +470,7 @@ A new refusal a developer can meet gets a test asserted on its whole text (`test
 ## What review probes
 
 Run each probe that applies: the implementer before each push, and the fresh reviewer at each review (CLAUDE.md
-"How work is done here", steps 3 and 4). A new probe is proposed to the owner; each bullet names the PR or issue it was met in.
+"How work is done here"). A new probe is proposed to the owner; each bullet names the PR or issue it was met in.
 
 - An operator setting given junk (`abc`, `0`, `-1`, `1.5`, `2000`): refused naming the variable and its range, never run
   on a library's reading of it (PR 148).

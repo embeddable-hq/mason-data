@@ -280,6 +280,19 @@ class Rewriter {
   /** a LEFT lateral of a list left DuckDB's join that a row count on the wire would stream (leftLateral): the
    *  listener plans the statement again for an Execute that sets one (PlannedSql.unboundedLateral) */
   unboundedLateral = false;
+  /**
+   * A JSON PATH BOUND AS A PARAMETER, READ AS A CONSTANT (issues 465, 466): the values an Execute bound to the
+   * parameters this statement reads as a json read's path or one of its elements, as Postgres's input function read
+   * them (src/duck/analyze.ts readParameters: a text as itself, a text[] as its JSON, an integer's digits), by the
+   * parameter's number. Empty at a Parse, which cannot see them: there each such read is the function's, and the plan
+   * says which parameters would fold (`pathParams`), so the listener plans it again at the Execute with the values.
+   */
+  boundPaths: ReadonlyMap<number, string> = new Map();
+  /** the parameters met as a json read's path, or an element or key of one, of a type read as a constant (`foldParam`) */
+  readonly pathParams = new Set<number>();
+  /** the parameters the read being written folded, and the text each was bound to (`folded`); null outside a json
+   *  read's rule, where nothing folds */
+  private folds: Map<number, string> | null = null;
   /** the ANY / ALL comparisons already guarded against a NULL array (the guard holds the comparison, walked again) */
   private readonly nullArrayTested = new WeakSet<Body>();
   /** the catalog's enums: each one's labels in their declared order, and its array type's element */
@@ -375,6 +388,9 @@ class Rewriter {
    * null: not such a read, or not stored — the caller writes the call.
    */
   private keptRead(l: AstNode, steps: AstNode, either: boolean, canonical: boolean, asText: boolean): AstNode | null {
+    // a path bound as a parameter is read natively, never from its stored column, and is no read the policy counts:
+    // a stored path read under a late select list or a keyed GROUP BY names its column where it is not (issue 919)
+    if (this.folds !== null && this.folds.size > 0) return null;
     if (this.kept === null || kindOf(l) !== "ColumnRef") return null;
     const path = constString(steps);
     const fields = (bodyOf(l).fields ?? []) as AstNode[];
@@ -797,7 +813,7 @@ class Rewriter {
       case "CollateClause": return this.collateClause(b);
       case "MinMaxExpr": return this.minMax(b);
       case "SQLValueFunction": return this.sqlValueFunction(b);
-      case "NullTest": return this.jsonNullTest(b);
+      case "NullTest": return this.folded(() => this.jsonNullTest(b), () => ({ NullTest: { ...b } }));
       // CASE x WHEN v …: each WHEN is x = v, jsonb's equality for a jsonb (its keys compared)
       case "CaseExpr": {
         this.caseOfNumericParam(b);
@@ -5054,10 +5070,13 @@ class Rewriter {
       }
       case "#>": case "#>>": case "->": case "->>": {
         if (a0 === null || !JSONS.has(a0)) return null;
-        const { base, steps, either, canonical } = this.jsonReadOf(name, l!, r!, a0, a1);
-        // a stored column of the path where every row holds it (keptRead), else DuckDB's own read where it is
-        // Postgres's, else the function (jsonGet)
-        return this.jsonRead(base, steps, either, canonical, name.endsWith(">>"));
+        // (a path bound as a parameter read as its value, guarded by it: folded)
+        return this.folded(() => {
+          const { base, steps, either, canonical } = this.jsonReadOf(name, l!, r!, a0, a1);
+          // a stored column of the path where every row holds it (keptRead), else DuckDB's own read where it is
+          // Postgres's, else the function (jsonGet)
+          return this.jsonRead(base, steps, either, canonical, name.endsWith(">>"));
+        });
       }
       case "@>": case "<@":
         if (a0 !== null && JSONS.has(a0)) {
@@ -5436,10 +5455,12 @@ class Rewriter {
       }
       case "jsonb_extract_path_text": case "json_extract_path_text": case "jsonb_extract_path": case "json_extract_path": {
         const own = argType(0);
-        // VARIADIC <array>: the array's elements are the path, as `#>`'s; else each argument is an element
-        const steps = b.func_variadic === true ? this.jsonPath(args[1]!, (n) => arrayCast(n, "varchar")) : this.pathOfArguments(args.slice(1));
-        const canonical = own === JSONB || name.startsWith("jsonb");
-        return this.jsonRead(args[0]!, steps, true, canonical, name.endsWith("_text"));
+        return this.folded(() => {
+          // VARIADIC <array>: the array's elements are the path, as `#>`'s; else each argument is an element
+          const steps = b.func_variadic === true ? this.jsonPath(args[1]!, (n) => arrayCast(n, "varchar")) : this.pathOfArguments(args.slice(1));
+          const canonical = own === JSONB || name.startsWith("jsonb");
+          return this.jsonRead(args[0]!, steps, true, canonical, name.endsWith("_text"));
+        });
       }
       case "jsonb_object_keys": case "json_object_keys":
         if (this.inFrom.has(b)) return null;
@@ -6139,6 +6160,115 @@ class Rewriter {
     return kindOf(inner) === "A_Const" || kindOf(inner) === "A_ArrayExpr" ? this.typed(n) : null;
   }
 
+  /**
+   * A PARAMETER IN A JSON PATH, READ AS THE CONSTANT IT WAS BOUND TO (issues 465, 466; `boundPaths`): `n` a parameter,
+   * bare or cast to its own type with no length (`$1::text`), of a type whose bound text IS the path's text — `text` or
+   * `varchar` for a key or an element, `text[]` or `varchar[]` for a whole path (its JSON), int2 or int4 for an index —
+   * so the read is DuckDB's own read, as its literal's is (never its stored column yet: `keptRead`, issue 919).
+   * Anything else (another type, whose cast to text writes its own text; a cast with a length; a NULL value) is null,
+   * and the read stays the function's, as at the Parse. The parameter is recorded as a path's (`pathParams`) whatever
+   * its value, so the listener knows to plan the statement again at an Execute; it folds only inside a read's rule
+   * (`folded`), which guards the read by the value it folded.
+   */
+  private foldParam(n: AstNode, kind: "text" | "array" | "index"): string | null {
+    const number = this.pathParam(n, kind);
+    const value = number === null ? undefined : this.boundValue(number, kind);
+    if (number === null || value === undefined || this.folds === null) return null;
+    this.folds.set(number, value);
+    return value;
+  }
+
+  /** the number of the parameter `n` is, where it is one `foldParam` may read as a constant (recorded in `pathParams`) */
+  private pathParam(n: AstNode, kind: "text" | "array" | "index"): number | null {
+    let p = n;
+    if (kindOf(p) === "TypeCast") {
+      const c = bodyOf(p), t = this.typed(p);
+      const allowed = kind === "text" ? [TEXT, VARCHAR] : kind === "array" ? [TEXT_ARRAY, VARCHAR_ARRAY] : [INT4];
+      if (((c.typeName?.typmods ?? []) as AstNode[]).length > 0 || t === null || !allowed.includes(t.type) || t.typmod !== -1 || !isNode(c.arg)) return null;
+      p = c.arg as AstNode;
+    }
+    if (kindOf(p) !== "ParamRef") return null;
+    const number = Number(bodyOf(p).number);
+    const oid = this.params[number - 1];
+    const types = kind === "text" ? [TEXT, VARCHAR] : kind === "array" ? [TEXT_ARRAY, VARCHAR_ARRAY] : [INT2, INT4];
+    if (oid === undefined || !types.includes(oid)) return null;
+    this.pathParams.add(number);
+    return number;
+  }
+
+  /** a parameter's bound value as a json read takes it as a constant: an index an int4's digits, a path a JSON array of
+   *  texts and NULLs (to_json of what array_in read), a key any text; undefined for none (a NULL, no Execute's value) */
+  private boundValue(number: number, kind: "text" | "array" | "index"): string | undefined {
+    const value = this.boundPaths.get(number);
+    if (value === undefined) return undefined;
+    if (kind === "index") return /^-?\d{1,10}$/.test(value) && pathIndex(value) !== null ? value : undefined;
+    if (kind === "array") {
+      let read: unknown;
+      try { read = JSON.parse(value); } catch (e) { if (e instanceof SyntaxError) return undefined; throw e; }
+      if (!Array.isArray(read) || read.some((x) => x !== null && typeof x !== "string")) return undefined;
+    }
+    return value;
+  }
+
+  /** `#>`'s path bound as parameters (`foldParam`): the whole path one (`$1`, `$1::text[]`), or an ARRAY[…] of constants
+   *  and parameters (`array[$1, $2]::text[]`, a BI tool's spelling of a nested field) — its elements as Postgres read
+   *  them, a NULL one included; undefined for any other path, or one with an element that does not fold */
+  private foldPath(r: AstNode): Array<string | null> | undefined {
+    const whole = this.foldParam(r, "array");
+    if (whole !== null) return JSON.parse(whole) as Array<string | null>;
+    let a = r;
+    if (kindOf(a) === "TypeCast") {
+      const t = this.typed(a);
+      if (((bodyOf(a).typeName?.typmods ?? []) as AstNode[]).length > 0 || t === null || (t.type !== TEXT_ARRAY && t.type !== VARCHAR_ARRAY) || t.typmod !== -1 || !isNode(bodyOf(a).arg)) return undefined;
+      a = bodyOf(a).arg as AstNode;
+    }
+    if (kindOf(a) !== "A_ArrayExpr") return undefined;
+    return this.foldElements((bodyOf(a).elements ?? []) as AstNode[]);
+  }
+
+  /** a path's elements (an ARRAY[…]'s, json_extract_path's arguments) as Postgres read them, where each is a text
+   *  constant or a parameter that folds (`foldParam`); undefined where any is neither */
+  private foldElements(elements: AstNode[]): Array<string | null> | undefined {
+    // each element a text constant (its value as Postgres read it, a NULL included) or a parameter that may fold, every
+    // parameter recorded as a path's before any folds, so a path with one element that cannot fold folds none
+    const read = elements.map((e) => {
+      const c = this.constRead(e);
+      if (c !== null) return c.text === undefined ? { no: true as const } : { text: c.text };
+      const number = this.pathParam(e, "text");
+      return number === null ? { no: true as const } : { number };
+    });
+    if (read.some((x) => "no" in x)) return undefined;
+    const values = read.map((x) => "number" in x ? this.boundValue(x.number, "text") : (x as { text: string | null }).text);
+    if (this.folds === null || values.some((v) => v === undefined)) return undefined;
+    for (const [i, x] of read.entries()) if ("number" in x) this.folds.set(x.number, values[i]!);
+    return values as Array<string | null>;
+  }
+
+  /**
+   * A JSON READ WHOSE PATH FOLDED A BOUND PARAMETER (`foldParam`), GUARDED BY THE VALUE IT FOLDED: `CASE WHEN $n::varchar
+   * = '<the value>' AND … THEN <the read> ELSE <the read as at the Parse> END`. A plan made for one value is kept by that
+   * value (the listener's plans are keyed by it), so the ELSE is never taken; run with another value, it reads that one
+   * through the function, Postgres's answer either way. Never `error()` there: DuckDB holds an expression calling it
+   * volatile, and refuses it as a window's key (PR 917's review). It keeps every parameter in the SQL, which DuckDB
+   * numbers by the ones it meets; DuckDB compares two constants once a vector, and runs the ELSE on no row.
+   * `make` null: no read written here, nothing folded. `asAtParse`: the read as the Parse writes it (`make` again with
+   * nothing folded, by default).
+   */
+  private folded(make: () => AstNode | null, asAtParse: () => AstNode | null = make): AstNode | null {
+    const outer = this.folds;
+    this.folds = new Map();
+    let read: AstNode | null, folds: Map<number, string>;
+    try { read = make(); folds = this.folds; } finally { this.folds = outer; }
+    if (read === null || folds.size === 0) return read;
+    this.folds = null;
+    let parsed: AstNode | null;
+    try { parsed = asAtParse(); } finally { this.folds = outer; }
+    if (parsed === null) throw new Error("a json read folded at the Execute has no form at the Parse: report it (src/duck/rewrite.ts folded)");
+    const bound = (p: number): AstNode => cast({ ParamRef: { number: p } }, ["varchar"]);
+    const same = [...folds].map(([p, v]) => op("=", bound(p), strConst(v)));
+    return caseWhen([[same.length === 1 ? same[0]! : and(same), read]], parsed);
+  }
+
   /** `#>`'s path, or VARIADIC's array (`list` as DuckDB reads it), as the JSON array of its elements; a NULL path or a
    *  NULL element is NULL (get_path_all, the functions being strict) */
   private jsonPath(r: AstNode, list: (n: AstNode) => AstNode = (n) => n): AstNode {
@@ -6146,6 +6276,8 @@ class Rewriter {
     // a literal the analysis does not read as an array here: a twin of the same text typed otherwise (`typed`'s shape)
     const literal = read === undefined ? constString(r) : null;
     if (literal !== null) read = arrayLiteral(literal);
+    // a path bound as parameters, read as the constant it was bound to
+    if (read === undefined) read = this.foldPath(r);
     if (read === undefined) {
       this.pathTypeKnown(r);
       return cast(fn("to_json", [list(r)]), ["varchar"]);
@@ -6165,15 +6297,20 @@ class Rewriter {
 
   /** json_extract_path's elements, an argument each, as the JSON array of steps */
   private pathOfArguments(keys: AstNode[]): AstNode {
-    const read = keys.map((k) => this.constRead(k)?.text);
-    if (read.some((k) => k === undefined)) return jsonSteps(keys.map((k) => this.widen(k, TEXT)), false);
+    // each a constant, or a parameter bound to one (foldElements)
+    const read = keys.some((k) => this.constRead(k)?.text === undefined) ? this.foldElements(keys) : keys.map((k) => this.constRead(k)?.text);
+    if (read === undefined || read.some((k) => k === undefined)) return jsonSteps(keys.map((k) => this.widen(k, TEXT)), false);
     return read.includes(null) ? nullConst() : strConst(JSON.stringify(read));
   }
 
   /** `->`'s key: an integer one an index, a constant text its one step, a char(n)'s text without its padding (`widen`) */
   private jsonKey(r: AstNode, type: number | null): AstNode {
     const index = type !== null && INTEGERS.has(type);
-    const text = index ? null : this.constRead(r)?.text;
+    // a parameter bound to the key, read as the constant it was bound to (foldParam): an index as its integer
+    const folded = index ? this.foldParam(r, "index") : null;
+    if (folded !== null) return strConst(JSON.stringify([Number(folded)]));
+    const own = index ? null : this.constRead(r);
+    const text = own !== null ? own.text : index ? null : this.foldParam(r, "text");
     return typeof text === "string" ? strConst(JSON.stringify([text])) : jsonSteps([index ? r : this.widen(r, TEXT)], index);
   }
 
@@ -7637,12 +7774,15 @@ export interface RewriteOptions {
   kept?: KeptLookup | null;
   wireBound?: boolean;
   keyCounts?: ReadonlySet<number>;
+  /** the values an Execute bound to the parameters read as a json path, by number (`Rewriter.boundPaths`) */
+  boundPaths?: ReadonlyMap<number, string>;
 }
 
 export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(), citextHeld = new Set(), typeNames = new Map(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
-  wireBound = false, keyCounts = new Set() }: RewriteOptions):
-  { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean } {
+  wireBound = false, keyCounts = new Set(), boundPaths = new Map() }: RewriteOptions):
+  { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean; pathParams: number[] } {
   const r = new Rewriter(analysis, base, collations, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts, citextHeld, typeNames);
+  r.boundPaths = boundPaths;
   if (joinsUsing(analysis.tree, new Set([JSONB, JSONB_ARRAY]))) {
     throw new Unrewritable("a JOIN … USING or a NATURAL JOIN on a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "JOIN … ON a.j = b.j", "jsonb-compare");
   }
@@ -7665,7 +7805,7 @@ export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(
   r.markWholeReads(own);
   r.walking = true;
   const tree = guardFilters(flattenBool(r.walk(own))) as AstNode;
-  return { tree, withTies: r.wroteTies, exact, clock: r.clock, jsonReads: [...r.jsonReads.values()], unboundedLateral: r.unboundedLateral };
+  return { tree, withTies: r.wroteTies, exact, clock: r.clock, jsonReads: [...r.jsonReads.values()], unboundedLateral: r.unboundedLateral, pathParams: [...r.pathParams].sort((a, b) => a - b) };
 }
 
 /** the functions whose every call is a new value (Postgres's volatile ones Mason answers) */

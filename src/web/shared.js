@@ -221,6 +221,7 @@ export function streamRows(st, now = Date.now()) {
         ? `getting the changes made ${c.from ? `since ${utcMinute(c.from)} UTC` : t.why?.replace(/^caught up by one poll /, "") ?? ""}: ` +
           `${c.phase === "queued" ? (c.retryAt ? `its last catch-up failed, tried again after ${c.retryAt.slice(11, 16)} UTC (Sync events says why)` : "waiting its turn") : c.phase === "polling" ? "reading the changes" : "applying the changes"}` +
           `${c.startedAt ? `, for ${spanText(since(c.startedAt))}` : ""} · the stream holds ${n(c.held)} change${c.held === 1 ? "" : "s"} of it meanwhile${total(t) ? counts : ""}`
+      : t.state === "compacting" ? `being compacted: ${n(t.compacting?.held ?? 0)} change${t.compacting?.held === 1 ? "" : "s"} kept aside, applied when it ends${counts}`
       : t.state === "left-out" ? `left out: ${t.why ?? ""}`
       : `not streamed yet: ${t.why ?? ""}${total(t) ? counts : ""}`]);
   }

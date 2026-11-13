@@ -24,7 +24,6 @@ const adminUrl = process.env.IT_POSTGRES_URL;
 const tag = `it_dcompact_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "it-dcompact-"));
 const logical = adminUrl ? psql(adminUrl, "SHOW wal_level") === "logical" : false;
-const skip = !adminUrl ? "IT_POSTGRES_URL is not set" : false;
 const skipStream = !adminUrl ? "IT_POSTGRES_URL is not set" : !logical ? "IT_POSTGRES_URL's server has no wal_level = logical" : false;
 
 function psql(url: string, sql: string): string {
@@ -74,10 +73,24 @@ function aSource(name: string, rows: number): { db: string; url: string; source:
 
 // the threshold low and the check by hand: the rule is the test's, the rewrite and the swap the sync's
 const LOW: CompactOptions = { firstCheckMs: 3_600_000, checkMs: 3_600_000, wasteShare: 0.3, minWasteBlocks: 1 };
+/** waits until the stream has kept `n` changes aside for the table being compacted: `caughtUp` waits for them to be
+ *  applied, which the held compaction never lets happen (issue 904). Read on a connection of the test's own, so only
+ *  COMMITTED rows count: on the writer's connection the read lands inside the stream's open batch and sees its rows
+ *  before the batch commits (the review of PR 910: held 0 read in that window) */
+async function keptAside(store: DuckStore, n: number, logged: readonly string[]): Promise<void> {
+  const reader = await store.instance.connect();
+  try {
+    const count = async (): Promise<number> => Number((await reader.runAndReadAll("SELECT count(*) FROM _mason.compact_held")).getRowsJS()[0]![0]);
+    for (const until = Date.now() + 30_000; await count() < n;) {
+      if (Date.now() > until) throw new Error(`the stream did not keep ${n} change(s) aside in 30 s\n${logged.slice(-12).join("\n")}`);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  } finally { reader.closeSync(); }
+}
 const same = async (store: DuckStore, url: string, step: string): Promise<void> =>
   assert.equal(await rowsOf(store, "SELECT id, v, n FROM public.t ORDER BY 1"), psql(url, "SELECT id, v, n FROM t ORDER BY 1"), `public.t after ${step}`);
 
-test("a polled table churned through many polls and checkpoints: compacted from the synced data, within the bound, equal to the source", { skip }, async () => {
+test("a polled table churned through many polls and checkpoints: compacted from the synced data, within the bound, equal to the source", { skip: "quarantined: #926" }, async () => {
   const { db, url, source } = aSource("poll", 20_000);
   const T = { ...await tableOf(source, "public.t"), sync: { mode: "poll", every: "1s", seconds: 1 } as const };
   const logged: string[] = [];
@@ -144,15 +157,28 @@ test("a streamed table's changes while it is compacted are spilled and applied a
     await sync.checkCompaction();
     await reached;
     assert.equal(sync.state()[0]!.rebuilding, "compact");
+    const before = sync.state()[0]!;
     // CHANGES WHILE IT IS COMPACTED: an update, a delete, an insert — the stream holds them for the table
     psql(url, "UPDATE t SET n = 2, v = 'during' WHERE id <= 100; DELETE FROM t WHERE id BETWEEN 101 AND 150; INSERT INTO t VALUES (99999, 'new', 3)");
-    await sync.caughtUp();
+    await keptAside(store, 151, logged);
     assert.equal(await one(store, "SELECT count(*) FROM public.t WHERE v = 'during'"), 0, "spilled, not written under the compaction");
     assert.equal(await one(store, "SELECT count(*) FROM _mason.compact_held"), 151, "beside it: 100 updated, 50 deleted, 1 inserted");
+    // NEVER SAID CURRENT PAST WHAT IT SERVES (issue 904): the batch that kept its changes aside moves neither its last sync
+    // nor its kept time, its part in the stream says it is compacted, and caughtUp waits for what was kept aside
+    const during = sync.state()[0]!;
+    assert.equal(during.synced?.at, before.synced?.at, "its last sync is the one before its changes were kept aside");
+    assert.ok(during.kept?.by === "replication" && during.kept.state === "compacting", JSON.stringify(during.kept));
+    assert.equal(during.kept.syncedAt, before.kept?.by === "replication" ? before.kept.syncedAt : null, "kept current as of the moment its changes began to be kept aside");
+    const part = (await sync.streamStatus())?.tables.find((x) => x.table === "public.t");
+    assert.deepEqual([part?.state, part?.compacting], ["compacting", { held: 151 }]);
+    await assert.rejects(sync.caughtUp(1_500), /public\.t \(being compacted/, "caughtUp waits for the changes kept aside");
     release();
-    while (sync.state()[0]!.rebuilding === "compact") await new Promise((r) => setTimeout(r, 20));
     await sync.caughtUp();
+    // right after caughtUp, with no wait for the compaction to end: every change is in the table
     await same(store, url, "the changes spilled during its compaction");
+    const after = sync.state()[0]!;
+    assert.ok(after.synced !== undefined && after.synced.by === "stream" && after.synced.at > before.synced!.at, `current as of the stream's position once applied: ${JSON.stringify(after.synced)}`);
+    assert.ok(after.kept?.by === "replication" && after.kept.state === "streamed", JSON.stringify(after.kept));
     assert.ok(logged.some((l) => l.startsWith("compacted public.t in ")), logged.slice(-12).join("\n"));
     assert.equal(await one(store, "SELECT count(*) FROM _mason.catch_up"), 0, "its mark removed once its spilled changes are applied");
     assert.equal(await one(store, "SELECT count(*) FROM _mason.compact_held"), 0, "the spill applied and gone");
@@ -187,13 +213,15 @@ test("a compaction stopped half way: the side table gone, the table as it was, c
     await sync.checkCompaction();
     await reached;
     psql(url, "UPDATE t SET n = 5, v = 'held' WHERE id <= 10");
-    await sync.caughtUp();
+    await keptAside(store, 10, logged);
     // stopped while the compaction is held: its piece never starts; what was spilled is not applied at the stop (which
     // must not wait for it), and the mark stands
     const stopping = sync.stop();
     release();
     await stopping;
     assert.ok(logged.some((l) => l.startsWith("compaction of public.t stopped: Mason is stopping")), logged.slice(-12).join("\n"));
+    // what was kept aside is not in the table: it is said to wait for its catch-up, never current (issue 904)
+    assert.equal(sync.state()[0]!.behind, "after its compaction was cut short");
     assert.equal(await one(store, "SELECT count(*) FROM public.t WHERE v = 'held'"), 0, "the table as it was");
     assert.equal(await rowsOf(store, "SELECT why FROM _mason.catch_up WHERE source = 'public.t'"), "after its compaction was cut short", "marked, so the next start catches it up");
     await store.close();

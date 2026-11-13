@@ -325,6 +325,14 @@ an ordinary statement whose failure is that table's alone.
   that finds nothing left ends the spilling and removes the mark (`replaySpill`). A stop does not wait for the replay:
   the mark stands, the spill is cleared at the next open, and that start catches the table up by one poll, as after a
   crash. A side table a stop or a crash left is dropped at the next open.
+- **Never said current past what it serves** (issue 904, 2026-11-13). The first version marked every streamed table
+  synced as of each batch's position, the one being compacted included, so `mason status`, `mason wait` and
+  `Sync.caughtUp` said current while the newest changes waited in the spill. `duck-stream.itest.ts`'s bulk test read
+  DuckDB straight after `caughtUp`, 1 run in 8, while the first check (60 s after the open) compacted its 600,000-row
+  table mid-transaction: 7,000 changes short, sometimes 9,900 more; with the checks every 3 s, every run. Now the
+  table's part in the stream is `compacting`, as of the moment its spill began; its `synced` moves to the stream's last
+  position only at the replay's last piece, `caughtUp` waits for the spill, and a stop or a failed replay leaves it
+  behind, as its mark says. A compaction past `REPLICATION_BEHIND_SECONDS` shows the table behind until it ends.
 - **Never a reason to stop the synced data.** Before a compaction is queued, and before each of its pieces, the disk
   where the synced data is must hold the rows it has left to write plus a quarter of the table's blocks and at least
   64 MiB (`diskShortFor`, the copy's `diskFree`; a disk that cannot be read is no room). Without it the table WAITS,
@@ -699,6 +707,22 @@ review", and `git show 9e20f15:.claude/workflows/pr-loop-slim.js`.
 **Kept.** The fresh reviewer that runs what changed instead of reading it; the oracle as the arbiter of a wrong answer;
 a test seen failing without its fix; the coordinator alone merging, pinned to the head read; and acting only on words
 from the repository's people, since anyone can open an issue here.
+
+### How CLAUDE.md is laid out (2026-11-13, issue 891)
+
+**Decision.** CLAUDE.md leads every rule with the rule, in one short sentence. Rules are grouped by when a session needs
+them: the words a user reads, security, the source database, how work is done, local gates, commands, conventions for
+code, and gotchas. Each role's mechanics are in its own skill (`.claude/skills/coordinate/`, `implement/`, `review/`),
+which only that role loads. CLAUDE.md keeps a short summary of each role and every hard limit: what blocks a merge, who
+merges, and what never happens. The story behind a rule moves here.
+
+**Why.** On 2026-11-12 CLAUDE.md was 400 lines and about 5,300 words, and sessions missed rules in it. A session wrote
+"Mason copies the tables" in an issue, though the file said "never copy". The causes:
+- Rules were buried mid-sentence. "Sync, never copy" was a clause inside a bullet that defined six other terms.
+- One topic was spread across sections. The rules for the words a user reads were in four places.
+- Rules carried their reasons and history inline, in parentheses, issue numbers and dates.
+- Every session read every role's mechanics: the coordinator's process, the implementer's gates and the reviewer's
+  checks.
 
 ### Issue labels and a bug's Severity (Tom, 2026-11-01)
 
@@ -1467,6 +1491,28 @@ stored, then the path stored:
 | `meta #>> array['order','status']` | 44-55 s | 1.3-1.4 s | |
 | `jsonb_extract_path_text(meta, VARIADIC array[…])` | 54-60 s | 1.4-1.6 s | |
 | `count(meta #> array['k'])` | | | 0.05-0.07 s |
+
+**A path bound as a parameter is the same route** (issues 465, 466). Metabase binds the path of every JSON field it
+unfolds (`col #>> array[?]::text[]`), which the Parse cannot see, so each such read was the function's. The plan says
+which parameters it reads as a path (`PlannedSql.pathParams`), and an Execute plans the statement again with their
+values as Postgres read them (`Session.pathsBound`). The plan is kept by those values and each folded read is
+guarded by them: `CASE WHEN $1::varchar = 'k' THEN <the native read> ELSE <the read as at the Parse> END`, so a value
+it was not planned for is read by the function. The guard first raised (DuckDB's `error()`), which DuckDB holds
+volatile, so a window keyed by the read was refused (PR 917's review). The guard also keeps every parameter in the
+SQL, since DuckDB numbers its parameters by the ones the text names (`SELECT $2` has one, and binding two fails). A
+folded read is not read from a stored column and does not count toward storing one: a stored path read under a late
+select list or a keyed GROUP BY names its column where it is not (issue 919), and Metabase's shapes would have met it
+once the policy stored their paths. 1 M rows of
+two jsonb columns of 270-290 B, a 4-vCPU machine at a load of about 24 (other agents' work), each against Postgres
+run alternately, three runs (2026-11-13):
+
+| statement | main | bound, read as its value | the path written |
+|---|---|---|---|
+| a grouped field, `#>> array[$1]::text[]` | 10.8-18.2 s, ×10.8 | 1.4-2.1 s, ×2.2 | 1.7-3.7 s, ×2.1-2.2 |
+| a grouped nested field, `array[$1, $2]` | 11.5-13.5 s, ×16 | 1.2-1.8 s, ×2.7 | |
+| a nested fingerprint, 49 fields, 68 parameters, LIMIT 10000 | 7.1-9.3 s, ×28 | 4.2-5.2 s, ×20 | 4.3-6.4 s, ×15-20 |
+
+The fingerprint stays ×15-20 written or bound: its numbers and booleans are the function's and their casts' (#464).
 
 `#>`, like `->`, stays the function until the path is stored: it answers a value's JSON text, which DuckDB's writer
 would respell. `(meta #> array['k'])::text` and `(meta -> 'k')::text` took 48-82 s and up to 168 s by the function
@@ -2416,6 +2462,11 @@ throwaway postgres:18 with a synthetic 5,000-row table synced by the stream, fou
 no `Check failed` in either log. `Check failed: end > addr`, seen once on Node 24 on an arm64 Mac at load ~114, was not
 met again and is not explained: it is not claimed to be this bug, nor fixed.
 
+**Match CI's tools before testing (2026-11-07).** A local run on another Node is a guess at CI. On Node 22,
+`tests/cli-ui-ssh.test.ts` cancels most of its tests, so PRs 725 and 728 could only be read there. So a session first
+installs what CI runs and the machine lacks (Node 26 from nodejs.org, its `SHASUMS256.txt` checked, first on `PATH`;
+`psql`; a Postgres for the integration tests).
+
 ### The turn (2026-10-31, issue 127)
 
 **Measured** on a synthetic 17 M-row table, 10 cores: while `to_char` ran, a probe on the executor's thread saw 999 function
@@ -2556,7 +2607,7 @@ notification; one test had deadlocked, so the job never exited and nothing came.
 shown as completed. Across that day's agents, about 31 of 115 agent-hours were idle until a notification or message
 arrived and about 11 went on sleep loops, against about 4 running the oracle.
 
-**The bound on a test (2026-11-02).** Measured on Node 26.13.0 over a test that never settles and holds an interval:
+**The bound on a test (2026-11-02, issue 139).** Measured on Node 26.13.0 over a test that never settles and holds an interval:
 `--test-timeout` alone names it (`test timed out after 2000ms`) but its file's process never exits, so the run does
 not end (alarm-killed at 20 s; on Node 24 still alive at 73 s); with `--test-force-exit` beside it the run exits 1 in
 about 3 s, the test listed under `✖ failing tests:`. The 2h07 hang above held a handle (0.43 s of CPU, never exiting,
@@ -2568,6 +2619,11 @@ main's five latest green runs the slowest test took 150.0 s (the state matrix), 
 varied 1.9x between runs (58.8 to 111.5 s), so the default is twice the slowest, 300 s (`TEST_TIMEOUT_MS`,
 `scripts/gate.ts`), and CI's unit shards carry it. The trade: `--test-force-exit` turns a handle leaked after a file's
 last test from a hang into a pass, and that hang never named anything (only CI's 30-minute job timeout ended it).
+
+**A gate an agent waits on (issue 504).** Two implementers ended their turn on a gate they had started in the
+background, and nothing woke them: an agent run by the Agent tool, or resumed by SendMessage, is not woken by its own
+background job once its turn has ended. So an agent that must wait on a heavy gate runs it through `scripts/done-file.ts`
+and waits with bounded `scripts/wait-file.ts` calls in the same turn.
 
 **A turn ended with nothing to wake it (2026-11-01).** Two issue leads, each running one Opus agent at a time, were
 read from their transcripts over seven hours: an agent worked 34% and 21% of the wall clock. Of the rest, about 3.5 h

@@ -59,7 +59,8 @@ The extended column has a trap, the last fact below: a catalog statement runs at
 2. **`Server.duckPlan`** is the plan cache.
    - `Server.schema` replaces the catalog if the copied tables moved, so a plan is always made over the current one.
    - It clears the cache if the schema, the keeper's generation (`kept.generation`) or the roles moved.
-   - The key is `searchPath`, `timeZone`, parameter OIDs, `wireBound`, role and text.
+   - The key is `searchPath`, `timeZone`, parameter OIDs, `wireBound`, role, the values of any bound json paths, and
+     text.
    - **A hit returns here.** Nothing below runs: no analysis, no `enforceGrants`, no check against `verified`.
    - On a miss it calls `DuckOptions.plan` (`DuckStore.listener`), which calls `planDuck`. A plan made while the schema moved
      is returned, not kept.
@@ -92,7 +93,8 @@ because the walk meets a CTE before the SELECT that reads it.
    moment. **Refusal point**.
 2. `readAside` reads any half-read portal to its end. DuckDB starts nothing on a connection with an open result.
 3. `this.running = controller` makes the statement cancellable. For an Execute with a row count, `boundOnWire` has
-   already chosen the plan made with `wireBound`.
+   already chosen the plan made with `wireBound`. For a plan that reads a json path bound as a parameter
+   (`PlannedSql.pathParams`), `pathsBound` has read the values and chosen the plan made with them (`boundPaths`).
 4. `duckValues`: parameters read by the catalog (`duckParameters`, `readParameters`). **Refusal point**: a value
    Postgres's input function refuses. The `clock` values are written in here.
 5. `duckSession` builds the settings, then `RemoteRunner.run` posts `runner.run` to the worker.

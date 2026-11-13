@@ -77,7 +77,7 @@ export function tableLine(t, now = Date.now()) {
   if (t.sync?.state === "catching-up") return { state: "catching-up", fraction: 1, what };
   // a copy the poll does not keep current (it waits for its catch-up) is a warning, as mason status paints it (paintBar)
   // and so is one behind what its sync promises (`tables[].sync.state`, src/cli/readiness.ts behindOf), of any kind
-  if ((t.kept?.by === "poll" && t.kept.pending !== undefined) || (t.kept?.by === "replication" && (t.kept.state !== "streamed" || t.kept.notRunning !== null)) || t.sync?.state === "behind") {
+  if ((t.kept?.by === "poll" && t.kept.pending !== undefined) || (t.kept?.by === "replication" && ((t.kept.state !== "streamed" && t.kept.state !== "compacting") || t.kept.notRunning !== null)) || t.sync?.state === "behind") {
     return { state: "unsynced", fraction: 1, what };
   }
   return { state: "done", fraction: 1, what };

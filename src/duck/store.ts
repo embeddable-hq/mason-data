@@ -483,8 +483,8 @@ export class DuckStore {
       collation: c,
       collations: resolver,
       open: () => this.runner(),
-      plan: (catalog, text, stmt, base, paramOids, under, userTypes, wireBound, grants, relations, outputs) =>
-        planDuck({ catalog, text, stmt, base, paramOids, searchPath: under.searchPath, timeZone: under.timeZone, dateStyle: under.dateStyle, collations: resolver, verified, userTypes, copies, kept: kept ?? null, wireBound: wireBound ?? false, grants, ...(relations === undefined ? {} : { relations }), outputs: outputs ?? false }),
+      plan: (catalog, text, stmt, base, paramOids, under, userTypes, wireBound, grants, relations, outputs, boundPaths) =>
+        planDuck({ catalog, text, stmt, base, paramOids, searchPath: under.searchPath, timeZone: under.timeZone, dateStyle: under.dateStyle, collations: resolver, verified, userTypes, copies, kept: kept ?? null, wireBound: wireBound ?? false, grants, ...(relations === undefined ? {} : { relations }), outputs: outputs ?? false, ...(boundPaths === undefined ? {} : { boundPaths }) }),
       parameters: duckParameters,
       // a SELECT of no table that orders text under a collation that is not byte order: the synced data's (issue 122);
       // one that maps case (upper, lower, initcap: issue 406) is the synced data's where its run answers it (the

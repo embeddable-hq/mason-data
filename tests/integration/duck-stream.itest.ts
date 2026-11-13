@@ -274,6 +274,10 @@ test("a transaction changing every row of a big table is applied in committed pi
     // ONE transaction: every row updated, a few deleted and inserted
     sql: "BEGIN; UPDATE bulk SET n = -n; DELETE FROM bulk WHERE n % 100 = 0; INSERT INTO bulk SELECT md5((-g)::text)::uuid, g FROM generate_series(1, 1000) g; COMMIT",
     checksum: "SELECT count(*), sum(n), sum(('0x' || substr(md5(id::VARCHAR), 1, 8))::UBIGINT) FROM public.bulk",
+    // ITS COMPACTION CHECKED EVERY 3 S, so the table is compacted while the transaction arrives (issue 904: its changes
+    // are kept aside meanwhile, and caughtUp resolved — the table said current — before they were applied, 1 run in 8
+    // with the default first check at 60 s; every run with these)
+    compact: { firstCheckMs: 3_000, checkMs: 3_000 },
   };
   const child = spawn(process.execPath, [`--max-old-space-size=${HEAP_MB}`, path.join(import.meta.dirname, "duck-stream-child.ts"), JSON.stringify(args)], { stdio: ["ignore", "pipe", "pipe"] });
   let out = "", err = "";
@@ -687,6 +691,65 @@ test("a slot made again whose tables' marks cannot be written again once it exis
     assert.equal(logged.slice(from).filter((l) => /^poll: /.test(l)).length, 1, `one catch-up poll, never polled again and again${said}`);
   } finally {
     writer.run = run;
+    await sync.stop();
+    await store.close();
+  }
+});
+
+// ISSUE 908: the stream's restart and the next pass shared one timer, and a kick clears the pass's timer. A slot dropped
+// under the run fails the stream, which waits before it starts again; a kick inside that wait ran a pass that made the
+// slot again but could not start the stream yet (too soon), and nothing was left to start it later. The replicated
+// tables then stayed as they were for the rest of the run. Here the kick lands inside the wait on purpose: the stream
+// must start again by itself, say it is not running meanwhile, and bring the changes made after it.
+test("a slot dropped under the run, with a pass kicked while the stream waits to start again: the stream starts again and later changes arrive", { skip }, async () => {
+  const db = `${tag}_kw`, url = urlOf(db);
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  psql(url, "CREATE TABLE items (id int PRIMARY KEY, v text); INSERT INTO items SELECT g, 'v' || g FROM generate_series(1, 20) g");
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const [ITEMS] = await tablesOf(parsed.source, ["public.items"]);
+  const repl = { slot: `${tag}_kw`, publication: `${tag}_kw`, owned: true };
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "kw.db"), (l) => logged.push(l));
+  // a 4 s interval: the stream's first restart waits 4 s, so the pass kicked below ends well inside that wait
+  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 4_000, "replication", repl);
+  const until = async (what: string, f: () => boolean, from: number, ms = 60_000): Promise<void> => {
+    for (const end = Date.now() + ms; !f(); await new Promise((r) => setTimeout(r, 50))) if (Date.now() > end) throw new Error(`${what} did not happen in ${ms / 1000} s:\n${logged.slice(from).join("\n")}`);
+  };
+  try {
+    await sync.open();
+    sync.setTables([ITEMS!]);
+    await sync.once();
+    await sync.caughtUp();
+    const from = logged.length;
+    for (let i = 0; psql(adminUrl!, `SELECT count(*) FROM pg_replication_slots WHERE slot_name = '${repl.slot}'`) !== "0"; i++) {
+      psql(adminUrl!, `SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = '${repl.slot}' AND active`);
+      psql(adminUrl!, `SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = '${repl.slot}' AND NOT active`);
+      if (i > 200) throw new Error("the slot could not be dropped");
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    await until("the stream's failure", () => logged.slice(from).some((l) => l.includes("the stream starts again in")), from);
+    const failedAt = Date.now();
+    // the kick lands inside the stream's wait: its pass makes the slot again, too soon to start the stream
+    sync.kick();
+    await until("the slot made again", () => logged.slice(from).some((l) => l.startsWith(`made replication slot ${repl.slot} at `)), from);
+    while ((sync as unknown as { running: Promise<void> | null }).running !== null) await (sync as unknown as { running: Promise<void> }).running;
+    const down = await sync.streamStatus();
+    const said = (): string => `\n${logged.slice(from).join("\n")}`;
+    assert.ok(Date.now() - failedAt < 3_500, `the kicked pass ended inside the stream's wait, so the test drives the case it names${said()}`);
+    // mason status says the stream is not running, and why (src/cli/commands.ts renders `failure` as "not running: …")
+    assert.equal(down?.running, false, `the stream is not running inside its wait${said()}`);
+    assert.ok(down?.failure !== null && down?.failure !== undefined, `its failure and restart time are said while it waits${said()}`);
+    // changes made while it is down, then the stream starts again by itself and brings them, and those after
+    psql(url, "INSERT INTO items VALUES (-1, 'while down'); UPDATE items SET v = 'while down' WHERE id = 2; DELETE FROM items WHERE id = 3");
+    await until("the stream running again", () => (sync as unknown as { stream: unknown }).stream !== null, from, 30_000);
+    await sync.caughtUp(30_000);
+    assert.equal(await rowsOf(store, "SELECT id, v FROM public.items ORDER BY 1"), psql(url, "SELECT id, v FROM items ORDER BY 1"), `items after the stream started again${said()}`);
+    psql(url, "INSERT INTO items VALUES (-2, 'streamed'); UPDATE items SET v = 'streamed' WHERE id = 4");
+    await sync.caughtUp(30_000);
+    assert.equal(await rowsOf(store, "SELECT id, v FROM public.items ORDER BY 1"), psql(url, "SELECT id, v FROM items ORDER BY 1"), `items streamed after${said()}`);
+    assert.equal((await sync.streamStatus())?.running, true, `the stream runs${said()}`);
+  } finally {
     await sync.stop();
     await store.close();
   }

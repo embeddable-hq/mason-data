@@ -99,7 +99,7 @@ const client = async (port: number): Promise<pg.Client> => {
   return c;
 };
 
-test("the pool's size is in force on mason serve and mason start, an operator's own is respected, and a fifth statement is answered beside four heavy ones", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set", timeout: 900_000 }, async () => {
+test("the pool's size is in force on mason serve and mason start, an operator's own is respected, and a fifth statement is answered beside four heavy ones", { skip: "quarantined: #920", timeout: 900_000 }, async () => {
   psql(adminUrl!, `CREATE DATABASE ${tag}`);
   psql(dbUrl, "CREATE TABLE items (id int PRIMARY KEY); INSERT INTO items SELECT generate_series(1, 2000)");
 

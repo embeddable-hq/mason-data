@@ -5128,6 +5128,155 @@ test("a constant path is the read ->> is, however it is spelled: no row reaches 
   } finally { await c.end(); }
 });
 
+// A JSON PATH BOUND AS A PARAMETER IS READ AS ITS VALUE (issues 465, 466): a BI tool binds the path of every JSON field
+// it reads (Metabase's `col #>> array[?]::text[]`), which the Parse cannot see, so every row went through the function
+// (a grouped field ×18 of Postgres, a sync's nested fingerprint ×45-63). At the Execute the statement is planned again
+// with the values as Postgres read them, and each read is the one its literal would be. One prepared statement bound
+// again to another path answers that path; a NULL stays the function's; every answer is Postgres's (PGlite's own).
+test("a json path bound as a parameter is read as its value at the Execute: no row reaches the function, each binding its own path", async () => {
+  const c = await client();
+  try {
+    const keys = ["a", "o", "e", "s", "*", "", "a.b", "a/b", "a~b", "$", "missing", "z", "n", "arr", "1", " 1", "+1", "01", "big", "é", 'q"k'];
+    const cases: Array<[string, Array<Array<string | null>>]> = [
+      ["SELECT id::text, b ->> $1 AS v, j ->> $1 AS w FROM jdocs ORDER BY id", [...keys.map((k) => [k]), [null]]],
+      ["SELECT id::text, (b -> $1)::text AS v, (j -> $1)::text AS w FROM jdocs ORDER BY id", [["a"], ["o"], ["n"], ["arr"], ["missing"], [null]]],
+      ["SELECT id::text, b #>> $1 AS v, (j #> $1)::text AS w FROM jdocs ORDER BY id",
+        [["{o,b}"], ["{o,0}"], ["{arr,0}"], ["{arr,-1}"], ['{"a.b"}'], ["{}"], ["{o,NULL}"], ["{1}"], ['{" 1"}'], ['{"1 "}'], ["{+1}"], ["{01}"], ["{o,k}"], [null]]],
+      ["SELECT id::text, b #>> $1::text[] AS v, jsonb_extract_path_text(b, VARIADIC $1::text[]) AS w FROM jdocs ORDER BY id", [["{o,b}"], ["{}"], [null]]],
+      // Metabase's spelling of a nested field: each element a parameter, beside a constant one
+      ["SELECT id::text, (b #>> array[$1, $2]::text[])::text AS v, j #>> array[$1]::text[] AS w, b #>> array['o', $2]::text[] AS x FROM jdocs ORDER BY id",
+        [["o", "b"], ["arr", "0"], ["a", null], [null, "b"], ["", ""], ["o", "0"]]],
+      ["SELECT id::text, jsonb_extract_path_text(b, $1, $2) AS v, json_extract_path_text(j, $1, $2) AS w FROM jdocs ORDER BY id", [["o", "b"], ["o", "k"], ["a", null]]],
+      // an index
+      ["SELECT id::text, (b -> $1::int)::text AS v, (j -> $1::int)::text AS w, b ->> $1::int AS x FROM jdocs ORDER BY id", [["0"], ["1"], ["-1"], ["-4"], ["7"], [null]]],
+      // a parameter that is a path and a value at once; the path grouped, filtered and tested for NULL
+      ["SELECT id::text, $1::text AS p, b ->> $1 AS v, (b ->> $1 = $1)::text AS same FROM jdocs ORDER BY id", [["a"], ["e"], [null]]],
+      ["SELECT b ->> $1 AS v, count(*)::text FROM jdocs GROUP BY b ->> $1 ORDER BY 1 NULLS FIRST", [["a"], ["e"], ["o"]]],
+      ["SELECT (b #>> array[$1]::text[])::text AS v, count(*)::text FROM jdocs GROUP BY 1 ORDER BY 1 NULLS FIRST", [["a"], ["o"]]],
+      ["SELECT id::text, ((b -> $1) IS NULL)::text AS m FROM jdocs WHERE b ->> $1 = $2 OR (b #> $3) IS NOT NULL ORDER BY id", [["a", "x", "{o,b}"], ["e", "", "{t}"]]],
+      ["SELECT s.v, count(*)::text FROM (SELECT b ->> $1 AS v FROM jdocs) s GROUP BY s.v ORDER BY 1 NULLS FIRST", [["a"]]],
+    ];
+    for (const [i, [sql, binds]] of cases.entries()) {
+      // one statement Parsed once and bound to each value in turn (node-postgres's named statement)
+      for (const values of binds) {
+        const got = (await c.query({ name: `bound_path_${i}`, text: sql, values, rowMode: "array", types: raw } as pg.QueryConfig)).rows;
+        assert.deepEqual(got, (await postgres(sql, values)).rows, `${sql} ${JSON.stringify(values)}`);
+      }
+    }
+    // the hops: a path to strings bound as a value makes none, as its literal makes none
+    const calls = async (): Promise<number> => (await store.functionCalls()).get("__mason_json_get") ?? 0;
+    for (const [sql, values] of [["SELECT b ->> $1 FROM jdocs", ["s"]], ["SELECT b #>> $1 FROM jdocs", ["{o,b}"]], ["SELECT b #>> $1::text[] FROM jdocs", ["{o,b}"]],
+      ["SELECT (b #>> array[$1, $2]::text[])::text FROM jdocs", ["o", "b"]], ["SELECT jsonb_extract_path_text(b, $1, $2) FROM jdocs", ["o", "b"]],
+      ["SELECT b ->> $1, count(*) FROM jdocs GROUP BY 1", ["s"]], ["SELECT count(*) FROM jdocs WHERE (b -> $1) IS NOT NULL", ["a"]]] as const) {
+      const before = await calls();
+      await answer(c, sql, [...values]);
+      assert.equal(await calls() - before, 0, `${sql} ${JSON.stringify(values)} reached the function`);
+    }
+    // a value the native read cannot answer still reaches the function: a number's digits
+    const before = await calls();
+    await answer(c, "SELECT b ->> $1 FROM jdocs", ["n"]);
+    assert.ok(await calls() > before, "a number's digits never reached the function");
+    // an EXPLAIN bound to a path explains the plan that runs: the native read for the value bound (the Parse's read in
+    // the ELSE, for any other, which no row takes)
+    const explained = (await c.query({ text: "EXPLAIN (VERBOSE) SELECT b ->> $1 FROM jdocs", values: ["s"], rowMode: "array" })).rows.map((r: unknown[]) => String(r[0])).join("\n");
+    assert.match(explained, /CASE WHEN CAST\(\$1 AS varchar\) = 's' THEN CASE WHEN b IS NULL THEN NULL WHEN json_type\(b, '\/s'\)/, explained);
+  } finally { await c.end(); }
+  // a path bound in binary, its type declared at the Parse (Npgsql's and JDBC's way): read as Postgres reads it
+  const s = await rawSession();
+  try {
+    const rows = (ms: BackendMessage[]): string[] => ms.flatMap((m) => m.type === "DataRow" ? [JSON.stringify(m.values.map((v) => v === null ? null : String(v)))] : m.type === "ErrorResponse" ? [`error ${m.fields.C} ${m.fields.M}`] : []);
+    const arraySent = Buffer.from((await truth.query<{ b: Uint8Array }>("SELECT array_send(ARRAY['o', 'b']::text[]) AS b")).rows[0]!.b);
+    const int4 = (n: number): Buffer => { const b = Buffer.alloc(4); b.writeInt32BE(n); return b; };
+    for (const [sql, oids, params] of [
+      ["SELECT id::text, b ->> $1 AS v FROM jdocs ORDER BY id", [1043], [Buffer.from("a")]],
+      ["SELECT id::text, b ->> $1 AS v FROM jdocs ORDER BY id", [25], [Buffer.from("a.b")]],
+      ["SELECT id::text, b #>> $1 AS v FROM jdocs ORDER BY id", [1009], [arraySent]],
+      ["SELECT id::text, b -> $1 AS v FROM jdocs ORDER BY id", [23], [int4(1)]],
+      ["SELECT id::text, b ->> $1 AS v FROM jdocs ORDER BY id", [0], [Buffer.from("o")]],
+      // a char(n) is read without its padding (never folded as its bytes); an expression of a parameter is computed
+      ["SELECT id::text, b ->> $1 AS v FROM jdocs ORDER BY id", [1042], [Buffer.from("a  ")]],
+      ["SELECT id::text, b ->> ($1 || 'a') AS v, b #>> array[$1 || '']::text[] AS w FROM jdocs ORDER BY id", [25], [Buffer.from("")]],
+    ] as const) {
+      const bind = Buffer.concat([wire.parse("", sql, [...oids]), wire.bind("", "", [...params], [0], oids[0] === 0 ? 0 : 1), wire.describe("P", ""), wire.execute(""), wire.sync()]);
+      const want = rows(wire.replies(await truth.execProtocolRaw(bind)));
+      s.socket.write(bind);
+      assert.deepEqual(rows(await s.untilReady()), want, `${sql} ${oids.join(",")}`);
+      assert.ok(want.length > 0 && !want[0]!.startsWith("error"), sql);
+    }
+    // a portal read a page at a time (an Execute's row count): the plan made for the bound path, its pages Postgres's
+    const paged = Buffer.concat([wire.parse("", "SELECT id::text, b ->> $1 AS v FROM jdocs ORDER BY id"), wire.bind("", "", ["s"], [0]), wire.execute("", 2), wire.execute("", 2), wire.execute("", 0), wire.sync()]);
+    const pages = rows(wire.replies(await truth.execProtocolRaw(paged)));
+    s.socket.write(paged);
+    assert.deepEqual(rows(await s.untilReady()), pages, "paged");
+  } finally { s.end(); }
+});
+
+// A BOUND PATH READ AS ITS VALUE IS NO VOLATILE EXPRESSION, AND NEVER A STORED COLUMN (PR 917's review): its guard
+// called DuckDB's error(), which DuckDB holds volatile, so a window keyed by the read was refused (42804); and a path
+// the keeper stored, read from its column under a late select list or a keyed GROUP BY, names the column where it is
+// not (issue 919: 42703, 42803). Every shape main answered, answered alike: over a listener whose keeper stored the
+// paths `a` and `n`, and over one with none.
+test("a json path bound as a parameter keys a window, and is read natively beside the path's stored column (issue 919)", async () => {
+  const { KeptJsonPaths } = await import("../src/duck/kept.ts");
+  const pglite = new PGlite();
+  const docs = (i: number): string | null => [`{"a": "x", "n": 1.50}`, `{"a": null, "n": 2}`, `{"a": "y"}`, null][i % 4]!;
+  const rows = Array.from({ length: 12 }, (_, k) => k + 1).map((i) => `(${i}, ${i % 3}, ${docs(i) === null ? "NULL" : `'${docs(i)}'`})`).join(", ");
+  await pglite.exec(`SET TimeZone = 'UTC'; CREATE TABLE public.jbound (id integer PRIMARY KEY, grp integer, b jsonb); INSERT INTO public.jbound VALUES ${rows}`);
+  await store.writer.run(`CREATE TABLE public.jbound (id INTEGER PRIMARY KEY, grp INTEGER, b JSON); INSERT INTO public.jbound VALUES ${rows}`);
+  const columns = [{ name: "id", type: "int4" as const }, { name: "grp", type: "int4" as const }, { name: "b", type: "jsonb" as const }];
+  const bound: PgSchema = { database: "app", tables: [{ name: "jbound", primaryKey: ["id"], joins: [], columns }], views: [] };
+  let turn: Promise<unknown> = Promise.resolve();
+  const keeper = new KeptJsonPaths(store, {
+    onWriter<T>(f: () => Promise<T>): Promise<T> { const t = turn.then(f); turn = t.then(() => undefined, () => undefined); return t; },
+    served: () => new Map([["public.jbound", columns]]), rebuilding: () => false, log: (l: string) => { logged.push(l); },
+  }, { enabled: true, eager: true, reviewMs: 0 });
+  await keeper.open();
+  const apis = await Promise.all([keeper, null].map(async (k) => startPostgresApi({
+    port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test",
+    authenticate: (password) => { const p = tokenProblem(API_KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
+    schema: () => bound, record: () => undefined, log: (l) => { logged.push(l); },
+    duck: await store.listener(undefined, undefined, undefined, () => [], ...(k === null ? [] : [k as never])),
+  })));
+  const clients = apis.map((a) => new pg.Client({ host: "127.0.0.1", port: a.port, database: "app", user: "mason", password: mintToken(API_KEY, 600).token }));
+  try {
+    const read = (steps: string) => ({ source: "public.jbound", column: "b", steps, either: false, canonical: true, asText: false });
+    await keeper.keepNow!([read('["a"]'), read('["n"]')]);
+    for (const steps of ['["a"]', '["n"]']) assert.ok(keeper.ready(read(steps))?.exact === true, `${steps} is stored: ${JSON.stringify(keeper.status())}`);
+    const truthOf = async (sql: string, values: unknown[]): Promise<unknown[][]> => (await pglite.query<unknown[]>(sql, values, { rowMode: "array", parsers: Object.fromEntries([20, 23, 25, 1700, 3802].map((o) => [o, (v: string) => v])) })).rows;
+    const cases: Array<[string, string[], "ordered" | "bag"]> = [
+      ["SELECT id, row_number() OVER (PARTITION BY b ->> $1 ORDER BY id) FROM jbound ORDER BY id", ["a"], "ordered"],
+      ["SELECT id, row_number() OVER (ORDER BY b ->> $1 NULLS FIRST, id) FROM jbound ORDER BY id", ["a"], "ordered"],
+      ["SELECT id, rank() OVER (PARTITION BY grp ORDER BY b #>> array[$1]::text[] NULLS LAST) FROM jbound ORDER BY id", ["a"], "ordered"],
+      ["SELECT id, count(*) OVER (PARTITION BY (b -> $1) IS NULL) FROM jbound ORDER BY id", ["a"], "ordered"],
+      ["SELECT id, sum(id) OVER w FROM jbound WINDOW w AS (PARTITION BY b ->> $1) ORDER BY id", ["a"], "ordered"],
+      ["SELECT ntile(2) OVER (ORDER BY b ->> $1, id), id FROM jbound ORDER BY id", ["a"], "ordered"],
+      ["SELECT id, first_value(id) OVER (PARTITION BY jsonb_extract_path_text(b, $1) ORDER BY id) FROM jbound ORDER BY id", ["a"], "ordered"],
+      // Metabase's shapes over a path the keeper stored (issue 919)
+      ["SELECT id, b ->> $1 AS f1 FROM jbound ORDER BY id LIMIT 3", ["a"], "ordered"],
+      ["SELECT CAST((b #>> array[$1]::text[]) AS decimal) AS v, count(*) AS count FROM jbound WHERE id % 4 IN (0, 1) GROUP BY CAST((b #>> array[$1]::text[]) AS decimal) ORDER BY 1 ASC", ["n"], "ordered"],
+      ["SELECT floor(((b #>> array[$1]::text[])::numeric) / 1) AS f, count(*) FROM jbound WHERE id % 4 IN (0, 1) GROUP BY floor(((b #>> array[$1]::text[])::numeric) / 1) ORDER BY 1", ["n"], "ordered"],
+      ["SELECT ((b ->> $1)::numeric) AS v, count(*) FROM jbound WHERE id % 4 IN (0, 1) GROUP BY 1 ORDER BY 1", ["n"], "ordered"],
+      ["SELECT (b #>> array[$1]::text[])::text AS a, (b #>> array[$2]::text[])::decimal AS n FROM jbound WHERE id % 4 IN (0, 1) LIMIT 10000", ["a", "n"], "bag"],
+      ["SELECT (b #>> array[$1]::text[])::text AS a FROM jbound ORDER BY id LIMIT 10000", ["a"], "ordered"],
+    ];
+    for (const [i, c] of clients.entries()) {
+      await c.connect();
+      for (const [sql, values, how] of cases) {
+        const say = `${sql} ${JSON.stringify(values)} (${i === 0 ? "the paths stored" : "nothing stored"})`;
+        const sorted = (r: unknown[][]): unknown[][] => how === "bag" ? [...r].sort((x, y) => JSON.stringify(x) < JSON.stringify(y) ? -1 : 1) : r;
+        const got = (await c.query({ text: sql, values, rowMode: "array", types: raw } as pg.QueryConfig).catch((e: Error & { code?: string }) => ({ rows: [[`error ${e.code}: ${e.message}`]] }))).rows as unknown[][];
+        assert.deepEqual(sorted(got), sorted(await truthOf(sql, values)), say);
+      }
+    }
+  } finally {
+    for (const c of clients) await c.end();
+    for (const a of apis) await a.close();
+    await keeper.stop();
+    await store.writer.run("DROP TABLE public.jbound");
+    await pglite.close();
+  }
+});
+
 // A TEXT[] PARAMETER IS ONE LIST OF DUCKDB'S (the review of issue 130): a value of two dimensions, or whose subscripts
 // do not start at 1, is no such list — read as one it answered wrong (an inner array a string of its JSON, the bounds
 // dropped), so it is refused by name, as its literal is. In binary (Npgsql sends every parameter so) it is array_send's

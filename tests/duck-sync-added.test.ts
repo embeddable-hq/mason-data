@@ -255,6 +255,18 @@ test("a recopied copy's last copy is the instant the ledger holds, said in UTC w
   assert.equal(keptText(at(states, "a")), "kept current by reading it again whole, last synced 2026-10-27 19:00:00 UTC");
 });
 
+// A STREAMED TABLE BEING COMPACTED (issue 904): its changes are kept aside until the compaction ends, so EXPLAIN says
+// so, as of when it was last synced, and FORMAT JSON still names the stream that keeps it current
+test("EXPLAIN says a streamed table being compacted is as of its last sync, its changes applied when the compaction ends", () => {
+  const { keptCurrentBy } = explainModule as unknown as { keptCurrentBy: (f: unknown) => string | null };
+  const why = "it is being compacted, and the changes made since are applied when the compaction ends";
+  const f = { source: "public.a", phase: "copied", rows: 10, error: null, rebuilding: "compact",
+    kept: { by: "replication", slot: "s", state: "compacting", why, position: "0/16B3F28", lastCommit: null, notRunning: null, syncedAt: "2026-10-27T19:58:39.000Z" } };
+  assert.equal(keptText(f, Date.parse("2026-10-27T19:59:39.000Z")),
+    `streamed by logical replication (slot s), replicated, at 0/16B3F28, last synced 60 s ago (2026-10-27 19:58:39 UTC), no change applied this run; ${why}`);
+  assert.equal(keptCurrentBy(f), "logical replication");
+});
+
 
 // MASON STATUS --JSON CARRIES THE SAME FACT (src/cli/run-server.ts runState): each added table's `kept` is the sync's
 // state's, beside the `unsynced` and the stream's tables that its text renders (tableLines, streamLines) — one
