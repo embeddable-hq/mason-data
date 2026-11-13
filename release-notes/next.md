@@ -41,7 +41,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   only window (the Since box and its help are gone; a bookmark that carried one opens over the range); the line on
   what is not listed (select 1, SET, SHOW, a BI tool's catalog queries) is said once, small, under the list; an empty
   log says "No queries in the last 15 minutes." (the range's span); and the filters are one row where the page is wide
-  enough. `mason logs --requests` is unchanged.
+  enough. The User filter is a dropdown of your users, All users first, then the active ones, then the removed ones
+  marked "(removed)", whose queries are still in the log; a link to a user not in the list (a share's login, say) still
+  filters and shows that name. `mason logs --requests` is unchanged.
 - **Connects from is a dropdown** on the Users page (adding a user, and a user's From…): "anywhere" or "only these
   addresses", which shows the box for the addresses beside it. Nothing in the form moves when you change it, and what
   is sent is as before. The form (Name, Role, Connects from and Add a user) is one line where the page is wide enough,

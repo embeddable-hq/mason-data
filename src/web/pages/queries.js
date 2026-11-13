@@ -10,13 +10,18 @@
  * or two lines in its cell, its title at most TITLE_MAX characters, and its expanded row the first STATEMENT_MAX of it.
  * The words are the commands': a request's duration in ms, its error, the empty log's sentence — and, while the log is
  * empty and unfiltered, one quiet line leading to the Users page, where a tool's user is made. Usage's rows lead here
- * filtered (`route`: `?user=`, `?client=`, `?slow=1`, `?status=`).
+ * filtered (`route`: `?user=`, `?client=`, `?slow=1`, `?status=`). The User filter is a dropdown of the users
+ * (`renderUserFilter`, from GET /api/users while Queries is shown), a text box when they could not be read.
  */
 import { VIEW_HASHES } from "../routes.js";
 import { statementMsText, agoText, bytesText, esc, firstLine, n, empty, renderFailure, rowsHtml, utcText, utcMsText, details, createOpenSet, status,
   clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, clientText, USERS_HASH, UNLISTED_STATEMENTS, statementCell, rangeEvery, usersReadOnly } from "../shared.js";
 
 const STATE = "api/state";
+/** The users, for the User filter's choices: `mason user list --json`'s shape, without the last use (a scan of the log
+ *  the dropdown does not show), read at the Users page's rate while Queries is shown. */
+const USERS = "api/users";
+const USERS_EVERY_MS = 30_000;
 const NEWEST_EVERY_MS = 5000;
 /** The newest page while a search is set: a search reads every statement's text of the range (7 days of a busy log,
  *  ~0.6 s a read), so it is read every 30 s, not 5 — said under the log (SEARCH_NOTE). */
@@ -110,6 +115,31 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
     `<tbody>${rows}</tbody></table></div>${sortNote}${unlisted}${nav}`;
 }
 
+/**
+ * THE USER FILTER (the form's `user`, the part `rq-user-field`: its label and its control): a dropdown, "All users" (no
+ * filter) then the users of `/api/users` (`users`: its body, `{ failure }`, or undefined before it answered) — the
+ * active first, then the removed, marked "(removed)", since their statements are still in the log; a name once. An
+ * option's value is the user's name, sent as `user=` as a typed name was: the server's one filter. `selected` (the
+ * filter set) not among them (a hash's `user=` naming a share's login, or a user whose record is gone) is one more
+ * option, selected, so a link still filters and says so. The users not read (a failure): the text box, as before.
+ */
+export function renderUserFilter(users, selected = "") {
+  const label = `<label for="rq-user">User</label>`;
+  if (users !== undefined && (users === null || "failure" in users || !Array.isArray(users.users)))
+    return `${label}<input id="rq-user" name="user" spellcheck="false" value="${esc(selected)}">`;
+  const list = users?.users ?? [];
+  const seen = new Set();
+  const options = [];
+  for (const u of [...list.filter((x) => x.removedAt == null), ...list.filter((x) => x.removedAt != null)]) {
+    if (typeof u.name !== "string" || seen.has(u.name)) continue;
+    seen.add(u.name);
+    options.push([u.name, u.removedAt == null ? u.name : `${u.name} (removed)`]);
+  }
+  if (selected !== "" && !seen.has(selected)) options.push([selected, selected]);
+  const option = (value, text) => `<option value="${esc(value)}"${value === selected ? " selected" : ""}>${esc(text)}</option>`;
+  return `${label}<select id="rq-user" name="user">${option("", "All users")}${options.map(([v, t]) => option(v, t)).join("")}</select>`;
+}
+
 /** The status filter's choices as the server's `outcome` list (src/api/request-log.ts): Completed is ok, Refused the
  *  statement's own fault, Failed Mason's or the machine's, Cancelled a cancel or a timeout (57014); Refused or failed is
  *  both, the count the Overview's query errors and Usage's Failed card lead here with. */
@@ -174,13 +204,17 @@ export const page = {
     return {
       model: m,
       // the newest page of the log every 5 s while the range is Now (30 s while a search is set), once when another
-      // range is chosen; an older page only when first asked. The state (whether the page makes users, for the empty log's line) every 30 s
-      reads: () => [{ path: path(), everyMs: m.before !== null ? Infinity : rangeEvery(ctx.range(), m.filters.search ? SEARCH_EVERY_MS : NEWEST_EVERY_MS) }, { path: STATE, everyMs: 30_000 }],
+      // range is chosen; an older page only when first asked. The state (whether the page makes users, for the empty log's line) every 30 s,
+      // and the users (the User filter's choices) at the Users page's rate
+      reads: () => [{ path: path(), everyMs: m.before !== null ? Infinity : rangeEvery(ctx.range(), m.filters.search ? SEARCH_EVERY_MS : NEWEST_EVERY_MS) }, { path: STATE, everyMs: 30_000 },
+        { path: USERS, everyMs: USERS_EVERY_MS }],
       actions,
       view() {
         const log = ctx.read(path());
         const s = ctx.read(STATE)?.body;
+        const users = ctx.read(USERS);
         return {
+          "rq-user-field": renderUserFilter(users === undefined ? undefined : users.failure ? { failure: users.failure } : users.body, m.filters.user),
           "request-log": (log?.failure ? renderFailure(log.failure) : "") + (log?.body ? renderRequests(log.body, { paged: m.before !== null, filtered: filtered(), isOpen: opened.has, now: ctx.now().getTime(), sort: m.sort,
             span: (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span, firstTool: s != null && usersReadOnly(s) === null }) : "") +
             (log?.body && m.filters.search && m.before === null ? `<p class="dim refresh-note">${esc(SEARCH_NOTE)}</p>` : ""),

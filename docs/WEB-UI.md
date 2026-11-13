@@ -185,7 +185,13 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
 - **Queries**, the request log: newest first, with a status dot and word per row as `mason logs --requests` says it: Completed,
   Refused (a statement Mason answers as designed, as a Postgres would refuse it: unsupported SQL, a missing relation),
   Failed (Mason's or the machine's fault) or Cancelled. Filter by status (each, or Refused or failed), user, client, a piece of the
-  statement's text (**Statement has**) and **Slow (1 s or more)**, with **Filter** and **Clear**: one row where they fit (a
+  statement's text (**Statement has**) and **Slow (1 s or more)**, with **Filter** and **Clear**. **User** is a dropdown:
+  All users (no filter), then the users of `GET /api/users` (`mason user list --json`; read while Queries is shown,
+  every 30 s as the Users page reads it, never with `?lastUsed=1`, and on a read-only page too) — the active first,
+  then the removed, marked "(removed)", since their statements are still in the log. A choice is sent as `user=<name>`,
+  the server's one filter, as a typed name was; a `?user=` the list does not have (a share's own login, a user whose
+  record is gone) still filters, the dropdown showing it as one more option, selected; the users not read, the text box
+  as before. The filters are one row where they fit (a
   1280 px window), wrapping by field below that; **Older** pages back and **Newest** returns, 40 a page. **Started**, **Duration** and **Rows** sort the page
   shown (said under it: the pages follow the log's order by start). A statement is one or two lines in its row; a row
   opens in place to its whole id, times, bytes sent, statement and error — the first 16 KiB of each, said when cut.

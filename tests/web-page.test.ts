@@ -2135,24 +2135,25 @@ test("the shell: only the page shown is asked, each endpoint at its own rate —
   assert.deepEqual(await asked(), ["GET api/state"], "the synced tables' sizes once a minute: they are measured every 10 min");
   app.show("users");
   assert.deepEqual(await asked(), ["GET api/users?lastUsed=1", "GET api/state", "GET api/share/choices"], "a page shown is read at once, the shell's state with it");
-  // Queries at Now, the default: the newest requests of the last 15 minutes, every 5 s (the state, how to connect, every 30 s)
+  // Queries at Now, the default: the newest requests of the last 15 minutes, every 5 s (the state, how to connect, and
+  // the users, the User filter's choices — never ?lastUsed=1, a scan of the log it does not show — every 30 s)
   app.show("queries");
-  assert.deepEqual(await asked(), ["GET api/requests?since=15m", "GET api/state"], "Queries: the request log alone, of the range");
+  assert.deepEqual(await asked(), ["GET api/requests?since=15m", "GET api/state", "GET api/users"], "Queries: the request log of the range, and the users for its filter");
   t += 2000;
   assert.deepEqual(await asked(), [], "2 s on: nothing is due");
   t += 4000;
   assert.deepEqual(await asked(), ["GET api/requests?since=15m"], "Now is live: the request log again every 5 s");
   // a past range is read ONCE, when chosen: never again by time, however long it is shown
   app.show("observability/queries?range=1h");
-  assert.deepEqual(await asked(), ["GET api/requests?since=1h", "GET api/state"], "the last hour, read when it is chosen");
-  for (let i = 0; i < 3; i++) { t += 60_000; assert.deepEqual(await asked(), ["GET api/state"], "a minute on: the range is not read again; the state at its own rate"); }
+  assert.deepEqual(await asked(), ["GET api/requests?since=1h", "GET api/state", "GET api/users"], "the last hour, read when it is chosen");
+  for (let i = 0; i < 3; i++) { t += 60_000; assert.deepEqual(await asked(), ["GET api/state", "GET api/users"], "a minute on: the range is not read again; the state and the users at their own rate"); }
   // read again only when the view is shown again (a range chosen, a link followed) or Refresh marks it stale
   (app as unknown as { markStale(): void }).markStale();
-  assert.deepEqual(await asked(), ["GET api/requests?since=1h", "GET api/state"], "Refresh: everything shown read again");
+  assert.deepEqual(await asked(), ["GET api/requests?since=1h", "GET api/state", "GET api/users"], "Refresh: everything shown read again");
   t += 10_000;
   assert.deepEqual(await asked(), [], "and once again only");
   app.show("observability/queries?range=1h");
-  assert.deepEqual(await asked(), ["GET api/requests?since=1h", "GET api/state"], "shown again: read again");
+  assert.deepEqual(await asked(), ["GET api/requests?since=1h", "GET api/state", "GET api/users"], "shown again: read again");
   // the page's own read failing is the banner; a slower one failing is said where it is shown, never as the banner
   app.show("status");
   run.answers.set("GET api/queries", answer({ error: "the request log cannot be read", failure: { code: "failed", message: "the request log cannot be read", next: [] } }, 500));
@@ -2693,7 +2694,8 @@ test("the request log's filters: each view has its own path — status as the se
   assert.match(textOf(app.view()["request-log"]!), /^No queries in the last 15 minutes\./);
   // the filters on one row where they fit: User and Client narrower, Statement has taking the rest; a phone's rules as before
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
-  assert.match(css, /@media \(min-width: 641px\) \{\s*form#request-filters \.field input:not\(\[type="search"\]\) \{ width: 9em; \}\s*form#request-filters \.field\.grow \{ flex: 1 1 10em; \}/);
+  assert.match(css, /@media \(min-width: 641px\) \{\s*form#request-filters \.field input:not\(\[type="search"\]\) \{ width: 9em; \}\s*form#request-filters #rq-user-field select \{ width: 9em; min-width: 0; text-overflow: ellipsis; \}\s*form#request-filters \.field\.grow \{ flex: 1 1 10em; \}/,
+    "the User dropdown as narrow as the text box it replaced");
 });
 
 test("the app: Usage's Cancel asks first; the confirm posts { session, statement } and reads the statements again; a 409 renders as its Failure", async () => {
@@ -2745,8 +2747,8 @@ test("the app: the newest page is read every 5 s; Older reads the page before wi
   const app = fn<[unknown, () => Date], QueriesApp>("createApp")(run.fetch, () => new Date(t));
   app.show("queries");
   const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
-  assert.deepEqual(await asked(), ["GET api/requests?since=15m", "GET api/state"],
-    "the request log alone (who is connected, what runs and the range's numbers are Usage's); the state, how to connect, beside it");
+  assert.deepEqual(await asked(), ["GET api/requests?since=15m", "GET api/state", "GET api/users"],
+    "the request log alone (who is connected, what runs and the range's numbers are Usage's); the state, how to connect, and the users, the User filter's choices, beside it");
   t += 2000;
   assert.deepEqual(await asked(), [], "nothing every 2 s");
   t += 3000;
@@ -2757,7 +2759,7 @@ test("the app: the newest page is read every 5 s; Older reads the page before wi
   assert.deepEqual(run.asked, ["GET api/requests?since=15m&before=CURSOR.1"], "Older asks with the cursor the page answered with");
   assert.match(textOf(app.view()["request-log"]!), /r-old .* Newest$/);
   t += 60_000;
-  assert.deepEqual(await asked(), ["GET api/state"], "an older page is never read again while paging");
+  assert.deepEqual(await asked(), ["GET api/state", "GET api/users"], "an older page is never read again while paging (the state and the users at their own rate)");
   await app.newestRequests();
   assert.match(textOf(app.view()["request-log"]!), /r-new .* Older$/);
   t += 5000;
@@ -3902,6 +3904,76 @@ test("Queries: Slow (1 s or more) and Statement has are the request log's slow a
     // each at the range of what it counts (the last day), never the views' default, Now
     assert.match(html2, new RegExp(`<a class="card[^"]*" href="${href!.replace(/[?]/g, "\\?")}"><p class="card-label">${label!.replace(/[()]/g, "\\$&")}</p>`), `${label} → ${href}`);
   }
+});
+
+test("Queries' User filter is a dropdown of the users: All users, the active, then the removed (marked); a choice sends user= as a typed name did; a hash's unknown user an extra option; the users unread, the text box", async () => {
+  const renderUserFilter = fnOf<[unknown, string?], string>(queriesModule, "renderUserFilter");
+  const index = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
+  assert.match(index, /<div class="field" id="rq-user-field"><\/div>/, "the field is the page's part, in the filters' one row");
+  assert.ok(!/<input id="rq-user"/.test(index), "no text box of its own in the document");
+  // two users and one removed (the removed one's statements are still in the log); a name removed and added again, once, active
+  const users = { users: [
+    { name: "old_etl", id: "a1", addedAt: "2026-10-20T09:00:00.000Z", removedAt: "2026-10-25T09:00:00.000Z", live: false },
+    { name: "metabase", id: "b2", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true },
+    { name: "app", id: "c3", addedAt: "2026-10-26T09:00:00.000Z", removedAt: "2026-10-26T10:00:00.000Z", live: false },
+    { name: "app", id: "d4", addedAt: "2026-10-27T10:00:00.000Z", removedAt: null, live: true },
+  ] };
+  const options = (html: string) => [...html.matchAll(/<option value="([^"]*)"( selected)?>([^<]*)<\/option>/g)].map((m) => [m[1], m[3], m[2] === " selected"]);
+  const all = renderUserFilter(users, "");
+  assert.match(all, /^<label for="rq-user">User<\/label><select id="rq-user" name="user">/);
+  assert.deepEqual(options(all), [["", "All users", true], ["metabase", "metabase", false], ["app", "app", false], ["old_etl", "old_etl (removed)", false]]);
+  assert.deepEqual(options(renderUserFilter(users, "old_etl")).filter(([, , s]) => s), [["old_etl", "old_etl (removed)", true]], "the filter set is the option selected");
+  // a user= the list does not have (a share's own login, a user whose record is gone): one more option, selected
+  assert.deepEqual(options(renderUserFilter(users, "share_ana")).slice(-1), [["share_ana", "share_ana", true]]);
+  assert.equal(options(renderUserFilter(users, "share_ana")).length, 5);
+  assert.match(renderUserFilter({ users: [] }, ""), /<select id="rq-user" name="user"><option value="" selected>All users<\/option><\/select>/, "no users yet: All users alone");
+  assert.match(renderUserFilter(undefined, "metabase"), /<select id="rq-user" name="user"><option value="">All users<\/option><option value="metabase" selected>metabase<\/option><\/select>/, "before the users answered: a link's user still shown");
+  assert.match(renderUserFilter({ users: [{ name: "<x>", removedAt: null }] }, ""), /<option value="&lt;x&gt;">&lt;x&gt;<\/option>/, "a name is escaped");
+  // the users could not be read: the text box, as before, showing the filter set
+  assert.equal(renderUserFilter({ failure: { code: "failed", message: "x" } }, "metabase"), `<label for="rq-user">User</label><input id="rq-user" name="user" spellcheck="false" value="metabase">`);
+
+  // the app: Queries reads GET api/users (never ?lastUsed=1) and writes the field; a choice is sent as user=
+  const run = fakeRun();
+  run.answers.set("GET api/users", answer(users));
+  run.answers.set("GET api/requests?since=15m&user=old_etl", answer({ requests: [REQUESTS[1]], keptDays: 7, before: null }));
+  run.answers.set("GET api/requests?since=15m&user=share_ana", answer({ requests: [], keptDays: 7, before: null }));
+  const app = fn<[unknown], ObsApp>("createApp")(run.fetch);
+  app.show("queries");
+  await app.poll();
+  assert.ok(run.asked.includes("GET api/users") && !run.asked.includes("GET api/users?lastUsed=1"), run.asked.join("\n"));
+  assert.deepEqual(options(app.view()["rq-user-field"]!).map(([v]) => v), ["", "metabase", "app", "old_etl"]);
+  const queries = app.pages.get("queries") as unknown as { submit(f: unknown): Promise<void> };
+  const form = (user: string) => ({ id: "request-filters", elements: { status: { value: "" }, user: { value: user }, client: { value: "" }, slow: { checked: false }, search: { value: "" } } });
+  run.asked.length = 0;
+  await queries.submit(form("old_etl"));
+  assert.deepEqual(run.asked, ["GET api/requests?since=15m&user=old_etl"], "the option's value is the name, sent as typing it was");
+  assert.deepEqual(options(app.view()["rq-user-field"]!).filter(([, , s]) => s), [["old_etl", "old_etl (removed)", true]]);
+  run.asked.length = 0;
+  await queries.submit(form(""));
+  assert.deepEqual(run.asked, ["GET api/requests?since=15m"], "All users: no user=");
+  // a link to a user the list does not have still filters, and the dropdown says so
+  app.show("#observability/queries?user=share_ana");
+  run.asked.length = 0; await app.poll();
+  assert.ok(run.asked.includes("GET api/requests?since=15m&user=share_ana"), run.asked.join("\n"));
+  assert.deepEqual(options(app.view()["rq-user-field"]!).slice(-1), [["share_ana", "share_ana", true]]);
+  // the users' read failing: the text box, the filter kept and still sent
+  run.answers.set("GET api/users", answer({ error: "no", failure: { code: "failed", message: "the users cannot be read", next: [] } }, 500));
+  (app as unknown as { markStale(): void }).markStale();
+  run.asked.length = 0; await app.poll();
+  assert.ok(run.asked.includes("GET api/users"));
+  assert.match(app.view()["rq-user-field"]!, /<input id="rq-user" name="user" spellcheck="false" value="share_ana">/);
+  assert.ok(!/<select id="rq-user"/.test(app.view()["rq-user-field"]!));
+  // a read-only page reads them too (a GET) and shows the dropdown
+  const ro = fakeRun();
+  ro.answers.set("GET api/state", answer({ ...CATALOG_STATE, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" }));
+  ro.answers.set("GET api/users", answer(users));
+  const roApp = fn<[unknown], ObsApp>("createApp")(ro.fetch);
+  roApp.show("queries"); await roApp.poll();
+  assert.deepEqual(options(roApp.view()["rq-user-field"]!).map(([v]) => v), ["", "metabase", "app", "old_etl"]);
+  // only while Queries is shown: another Observability view does not read them
+  app.show("#observability/syncs");
+  run.asked.length = 0; await app.poll();
+  assert.ok(!run.asked.some((a) => a.startsWith("GET api/users")), run.asked.join("\n"));
 });
 const renderStatusOf = (s: RunState) => fn<[unknown, Record<string, unknown>], string>("renderStatus")(s, { queries: QUERIES, syncErrors: EVENTS, now: NOW });
 

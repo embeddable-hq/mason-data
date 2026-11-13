@@ -815,6 +815,7 @@ form#request-filters input[type="checkbox"] { min-width: 0; }
    from a short basis; below that the toolbar wraps by field, as before */
 @media (min-width: 641px) {
   form#request-filters .field input:not([type="search"]) { width: 9em; }
+  form#request-filters #rq-user-field select { width: 9em; min-width: 0; text-overflow: ellipsis; }
   form#request-filters .field.grow { flex: 1 1 10em; }
   form#request-filters .field.grow input { width: 100%; min-width: 10em; }
 }
