@@ -505,7 +505,7 @@ table.catalog th.state { width: 146px; }
 table.catalog th.rows { width: 116px; }
 table.catalog th.key { width: 104px; }
 table.catalog th.last { width: 104px; }
-table.catalog th.size { width: 100px; }
+table.catalog th.size { width: 116px; }   /* "Measuring…" whole (issue 883), as wide as Rows */
 /* the actions' column holds an added table's three — View events, Sync now (in the room of Syncing…) and Remove — whole
    at the widest padding (12 px a side, above 1100 px): 250 px of buttons and gaps, and room to spare. The cells below
    cut what overflows with "…", so a column narrower than its buttons hides the last one (issue 881):
@@ -521,8 +521,8 @@ table.catalog th.act { width: 284px; }
 .panel:has(> table.catalog) { container: catalog / inline-size; }
 table.catalog .fold { display: none; }
 table.catalog .fold::before { content: attr(data-fold); }
-@container catalog (max-width: 1053px) { table.catalog :is(th, td).key { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-key { display: inline; } }
-@container catalog (max-width: 949px) { table.catalog :is(th, td).size { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-size { display: inline; } }
+@container catalog (max-width: 1069px) { table.catalog :is(th, td).key { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-key { display: inline; } }
+@container catalog (max-width: 965px) { table.catalog :is(th, td).size { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-size { display: inline; } }
 @container catalog (max-width: 849px) { table.catalog :is(th, td).last { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-last { display: inline; } }
 @container catalog (max-width: 745px) { table.catalog :is(th, td).rows { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-rows { display: inline; } }
 table.catalog th, table.catalog td { overflow: hidden; text-overflow: ellipsis; }

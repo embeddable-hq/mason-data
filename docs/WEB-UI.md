@@ -108,8 +108,8 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   scrolled clear of it. A tap on the answer is always the answer's, never a control's under it (`placePops`,
   src/web/shared.js).
 - **Tables**, **the name keeps its room at every width** (issue 884: it was 2 px at 1024 px): measured against the
-  list's card, the name gets at least 200 px, and the less important columns give way first: Key below about 1340 px,
-  then Size (1240), Last sync (1140) and Rows (1040) beside the full sidebar. A column given way says its fact in the
+  list's card, the name gets at least 200 px, and the less important columns give way first: Key below about 1350 px,
+  then Size (1250), Last sync (1140) and Rows (1040) beside the full sidebar. A column given way says its fact in the
   row's note instead ("key id", "size 1.2 MiB", "last sync 3 h ago, took 0.2 s", "1,200 rows"). **A table's name and
   its state are never cut with "…"** (the owner: "otherwise we can't see them"): each wraps in its cell — a name after
   its `.` and `_` where it can, anywhere where it must — and the row grows to fit. On a phone the same columns give way,

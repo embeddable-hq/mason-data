@@ -2461,6 +2461,10 @@ test("EXPLAIN says how a copy is kept current as the sync says it to mason statu
     copies = [copied({ by: "poll", sync: { mode: "off" }, syncedAt: daysAgo, nextAt: null })];
     assert.equal(await header(), `${head}off: last synced 3 days ago (${utc(daysAgo)}); mason sync public.orders syncs it now)`);
     await jsonSays(null, { Sync: "off", "Last Synced": daysAgo, "Next Poll": null });
+    // read again whole at its interval: what keeps it current said in the user's word, sync, never "copy" (issue 903)
+    copies = [copied({ by: "recopy", copiedAt: daysAgo, syncedAt: null })];
+    assert.equal(await header(), `${head}kept current by reading it again whole, last synced ${utc(daysAgo)})`);
+    await jsonSays("syncing again in full", {});
     // served as copied and skipped by the passes until copied again: NOT kept current, and why
     copies = [copied({ by: "poll", sync: every30, syncedAt: daysAgo, nextAt: null, pending: "its columns changed: it is read again whole, then caught up by one poll" })];
     assert.equal(await header(), `${head}NOT kept current (last synced 3 days ago (${utc(daysAgo)})): its columns changed: it is read again whole, then caught up by one poll)`);

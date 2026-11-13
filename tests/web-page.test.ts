@@ -509,7 +509,7 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   // long (a reason, an error, a copy's words, a Remove's question) a line of its own under the row
   assert.match(text, /^Table State Rows Key Last sync Size public\.customers /);
   assert.equal([...html.matchAll(/<table /g)].length, 1, "the added tables are not listed twice");
-  assert.match(text, /public\.customers Synced 100% 1,200 key id — View events Sync now Remove Sync… All columns public\.orders /, "every added table has its bar: 100% once copied");
+  assert.match(text, /public\.customers Synced 100% 1,200 key id View events Sync now Remove Sync… All columns public\.orders /, "every added table has its bar: 100% once copied");
   assert.equal([...html.matchAll(/<span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`).join(", "),
     "ok Synced, ok Synced, ok Synced, unknown Not added, unknown Not added, unknown Not added, unknown Not added", "a state is a dot AND the CLI's word");
   assert.match(html, /^<div class="panel"><table class="catalog">/, "one table, in a card");
@@ -1898,7 +1898,7 @@ test("the app: Add sends POST api/pick, says what was added beside its table's a
   assert.deepEqual(run.asked, [`POST api/pick ${JSON.stringify({ table: "public.accounts", picked: true })}`, "GET api/state"],
     "every column, as mason add accounts asks; then the state again (the page's own read: nothing else)");
   const v = app.view();
-  assert.match(textOf(v.tables!), /public\.accounts Waiting ~300 rows key id — View events Sync now Remove Sync… All but 1 column waiting for its first sync to start public\.event_log/);
+  assert.match(textOf(v.tables!), /public\.accounts Waiting ~300 rows key id View events Sync now Remove Sync… All but 1 column waiting for its first sync to start public\.event_log/);
   assert.match(textOf(popOf(v.tables!, "act-tables-public.accounts")), /^Added public\.accounts: every column but password_hash\. Its sync is Off: .* Left out password_hash: it looks like a secret/);
   assert.match(textOf(v.status!), /public\.accounts waiting for its first sync to start/, "the Overview shows the copy starting");
   app.dismissOutcome();
@@ -2268,7 +2268,7 @@ test("in the browser: the tables are written when they change, never at every po
   const { el, on, tick, settle } = fakeBrowser(run, "#tables");
   await settle();
   const tables = el("tables");
-  assert.match(textOf(tables.html), /public\.orders Syncing 15% 280,000 key id — View events Sync now Remove Sync… All columns syncing /);
+  assert.match(textOf(tables.html), /public\.orders Syncing 15% 280,000 key id View events Sync now Remove Sync… All columns syncing /);
   await on.get("click")!({ target: { closest: () => ({ dataset: { removeTable: "public.orders" } }) } });
   assert.match(textOf(tables.html), /Remove orders\? Mason will stop syncing it and delete its synced data\. Remove orders Cancel/);
   let writes = tables.writes;
@@ -2280,7 +2280,7 @@ test("in the browser: the tables are written when they change, never at every po
   run.answers.set("GET api/state", rowsOf(350));
   tick(); await settle();
   assert.equal(tables.writes, writes, "rows that moved while a Remove asks do not write the tables again: the confirm stays the one clicked");
-  assert.match(textOf(tables.html), /public\.orders Syncing 15% 280,000 key id — View events Sync now Remove Sync… All columns syncing .* public\.audit Not added ~50 rows key id Add Columns… /);
+  assert.match(textOf(tables.html), /public\.orders Syncing 15% 280,000 key id View events Sync now Remove Sync… All columns syncing .* public\.audit Not added ~50 rows key id Add Columns… /);
   assert.match(textOf(popOf(tables.html, "act-tables-public.orders")), /^Remove orders\? /, "the confirm, beside the row it asks about");
   await on.get("click")!({ target: { closest: () => ({ dataset: { cancelRemoveTable: "" } }) } });
   assert.match(textOf(tables.html), /public\.audit Not added ~350 rows key id/, "Cancel writes the rows as they are now");
@@ -2630,7 +2630,7 @@ test("Tables: each added table's state, rows, last sync and its age, how long it
   const text = textOf(html);
   assert.match(text, /^Table State Rows Key Last sync Size /);
   assert.match(text, /public\.customers Synced 100% 1,200 key id 30 s ago took 0\.4 s 512\.0 KiB View events Sync now Remove /);
-  assert.match(text, /public\.orders Failed 100% ~2,000,000 rows key id 65 min ago took 63 s — View events Sync now Remove Sync… All columns poll: connection reset the whole error poll: connection reset the sync tries it again in 5 s /);
+  assert.match(text, /public\.orders Failed 100% ~2,000,000 rows key id 65 min ago took 63 s View events Sync now Remove Sync… All columns poll: connection reset the whole error poll: connection reset the sync tries it again in 5 s /);
   // a copy served but not kept current: its amber bar, and the words mason status prints after it, under the row
   assert.match(text, /public\.events Synced 100% 30,000,000 key id 2 min ago took 13 min 3\.0 GiB View events Sync now Remove Sync: Off All columns public\.audit /, "a table whose sync is off is synced, its age its Last sync");
   assert.match(text, /public\.audit Not added ~50 rows key id Add Columns… /, "a table not added has no sync, and is in the same table");
@@ -2733,7 +2733,7 @@ test("Tables: what a sync did is said as mason sync says it, beside its Sync; a 
 
 test("Tables: the search box and the state filter narrow the one list, their text kept across polls; a form open keeps its table and its list still", async () => {
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
-  assert.match(textOf(renderTables(CATALOG_STATE, { filter: "ORD" })), /^1 with “ORD” in the name Table State Rows Key Last sync Size public\.orders Synced 100% 2,000,000 key id — View events Sync now Remove /);
+  assert.match(textOf(renderTables(CATALOG_STATE, { filter: "ORD" })), /^1 with “ORD” in the name Table State Rows Key Last sync Size public\.orders Synced 100% 2,000,000 key id View events Sync now Remove /);
   assert.equal(renderTables(CATALOG_STATE, { filter: "" }), renderTables(CATALOG_STATE), "nothing typed: every table, as before");
   assert.match(textOf(renderTables(CATALOG_STATE, { filter: "zzz", choosing: "public.audit", columns: columnsOf("public.audit") })), /^1 with “zzz” in the name .* public\.audit Not added ~50 rows key id Add Columns… The columns to sync/, "the table whose form is open stays");
   assert.match(textOf(renderTables(SYNCED, { filter: "nope" })), /No table's name has “nope”\./);
@@ -4465,7 +4465,7 @@ test("Add: the row says Adding… from the click, then waiting for its copy, the
   assert.equal(await adding, true);
   // answered: the state is read again and the row shows the copy waiting to start, an indeterminate bar
   row = accountsRow(app.view().tables!);
-  assert.match(textOf(row), /public\.accounts Waiting ~300 rows key id — View events Sync now Remove Sync… All but 1 column waiting for its first sync to start/);
+  assert.match(textOf(row), /public\.accounts Waiting ~300 rows key id View events Sync now Remove Sync… All but 1 column waiting for its first sync to start/);
   assert.match(row, /<span class="copybar indeterminate" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="public\.accounts: its first sync" aria-valuetext="waiting for its first sync to start"><span class="track" aria-hidden="true"><span class="fill"[^>]*><\/span><\/span><\/span>/);
   assert.ok(!/aria-valuenow/.test(row), "waiting: no value, an indeterminate bar");
   // syncing 37%: the bar's value, the aria, and the words mason wait prints (copyingText, held equal)
@@ -4750,9 +4750,50 @@ test("a page opened at its own address that reads no state (Users) still has the
   assert.deepEqual(run.asked, ["GET api/users?lastUsed=1", "GET api/state"], "Users reads the state itself now (its Connect panel), at its own rate");
 });
 
-test("Tables: an added copy not measured yet says so (—, with why in its title), never 0 B", () => {
+test("Tables: a synced table with no size says why — under the log's size, Measuring…, or nothing before its first sync — each with a tooltip, never — nor 0 B (issue 883)", () => {
+  const renderTables = fn<[unknown, unknown?], string>("renderTables");
+  // customers measured; orders measured since its first sync with no block (its rows all in a log of 2.3 MiB); events
+  // synced after the last measure (the run says so); audit's first sync not done
+  const state = stateOf([copied("public.customers", 1200, "2026-10-27T09:00:01.000Z"), copied("public.orders", 5_000, "2026-10-27T09:00:09.000Z"),
+    copied("public.events", 30_000_000, "2026-10-27T09:04:00.000Z"),
+    { source: "public.audit", phase: "copying", rows: null, bytes: null, seconds: null, copiedAt: null, error: null, rowsSoFar: 10, rowsEstimate: 50 }],
+  { now: NOW, sources: parseSourceText("kind: postgres\nurl: x\ntables:\n  customers: {}\n  orders: {}\n  events: {}\n  audit: {}\n", "shop", "/app/mason/sources/shop.yml") as typeof sourceFile });
+  const sizes = { ...USAGE, copySizes: [USAGE.copySizes[0]], sizedAt: "2026-10-27T09:00:00.000Z", walBytes: Math.round(2.3 * 2 ** 20),
+    unsized: [{ table: "public.events", why: "synced-since", underBytes: null }, { table: "public.orders", why: "in-log", underBytes: 3 * 2 ** 20 }] };
+  const html = renderTables(state, { sizes, now: NOW });
+  const sizeCell = (t: string): string => {
+    const row = new RegExp(`<tr class="c-added[^"]*"><th scope="row" class="name"><code class="name" title="${t.replace(".", "\\.")}">.*?</tr>`).exec(html)?.[0] ?? assert.fail(`no row for ${t}`);
+    return [...row.matchAll(/<td[^>]*>.*?<\/td>/g)].map((m) => m[0])[4]!;
+  };
+  assert.equal(sizeCell("public.customers"), `<td class="num size">512.0 KiB</td>`, "measured: its size, no tooltip");
+  assert.equal(sizeCell("public.orders"), `<td class="num size" title="Under 3 MiB. Its rows aren&#39;t in the main file yet, so it can&#39;t be measured exactly.">&lt; 3 MiB</td>`,
+    "its rows all in the log: under the log's size, rounded up");
+  assert.equal(sizeCell("public.events"), `<td class="num size" title="Synced since sizes were last measured. Sizes are measured every 10 minutes.">Measuring…</td>`);
+  assert.equal(sizeCell("public.audit"), `<td class="num size" title="No size until its first sync is done."></td>`, "its first sync not done: blank");
+  assert.doesNotMatch(textOf(html), /—|\b0 B\b/, "no dash, no 0 B");
+  // the cell is what mason usage writes on its line (src/cli/usage.ts unsizedCell): one grammar
+  for (const u of sizes.unsized) assert.ok(html.includes(`>${usageCliModule.unsizedCell(u as never).replace("<", "&lt;")}</td>`), u.table);
+  // a first sync done since the sizes were read (a minute ago; the state is read every poll): Measuring…, never blank
+  const unread = renderTables(state, { sizes: { ...sizes, unsized: [{ table: "public.orders", why: "in-log", underBytes: 3 * 2 ** 20 }] }, now: NOW });
+  assert.match(unread, /<td class="num size" title="Synced since sizes were last measured\. Sizes are measured every 10 minutes\.">Measuring…<\/td>/);
+  // EACH REASON THE RUN GIVES, its own words, never another's (review of PR 902): rows written to disk since the measure
+  // (a checkpoint), and no measure since Mason started (a restart) — never "Synced since", which neither was
+  const because = (why: string): string => {
+    const h = renderTables(state, { sizes: { ...sizes, unsized: [{ table: "public.orders", why, underBytes: null }, { table: "public.events", why, underBytes: null }] }, now: NOW });
+    return /<td class="num size" title="([^"]*)">Measuring…<\/td>/.exec(h)?.[1] ?? assert.fail(`no Measuring… for ${why}`);
+  };
+  assert.equal(because("written-since"), "Data was written to disk since sizes were last measured, and this table&#39;s rows may be in it. Sizes are measured every 10 minutes.");
+  assert.equal(because("not-measured-yet"), "Not measured since Mason started. Sizes are first measured a minute after it starts.");
+  assert.equal(because("synced-since"), "Synced since sizes were last measured. Sizes are measured every 10 minutes.");
+  for (const why of ["written-since", "not-measured-yet", "synced-since"]) assert.equal(usageCliModule.unsizedCell({ why, underBytes: null } as never), "Measuring…", why);
+  // the page never says the engine's file names
+  assert.doesNotMatch(html, /write-ahead|WAL|duck\.db/i);
+  // sizes not read yet: nothing said in the cell (the list says nothing of a size it has not read)
+  assert.doesNotMatch(renderTables(state, { now: NOW }), /Measuring…|&lt; \d/);
+});
+
+test("Tables: an added copy not measured never says 0 B", () => {
   const html = fn<[unknown, unknown?], string>("renderTables")(SYNCED, {});
-  assert.match(html, /<td class="num size" title="Not measured yet\. A synced table(?:'|&#39;)s size is measured every 10 minutes, once its rows are written to disk\. A small table(?:'|&#39;)s rows can wait in Mason(?:'|&#39;)s write-ahead log until it passes 16 MiB, or until Mason stops\.">—<\/td>/);
   assert.ok(!/\b0 B\b/.test(textOf(html)), "no 0 B");
   // a measure that is 0 (a file from an earlier run stored one) is not shown as a size either: the server skips it, the page never says 0 B for a copy
   assert.ok(!/\b0 B\b/.test(textOf(fn<[unknown, unknown?], string>("renderTables")(SYNCED, { sizes: { copySizes: [] } }))));
