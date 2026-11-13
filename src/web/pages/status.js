@@ -77,7 +77,7 @@ export function tableLine(t, now = Date.now()) {
   if (t.sync?.state === "catching-up") return { state: "catching-up", fraction: 1, what };
   // a copy the poll does not keep current (it waits for its catch-up) is a warning, as mason status paints it (paintBar)
   // and so is one behind what its sync promises (`tables[].sync.state`, src/cli/readiness.ts behindOf), of any kind
-  if ((t.kept?.by === "poll" && t.kept.pending !== undefined) || (t.kept?.by === "replication" && (t.kept.state !== "streamed" || t.kept.notRunning !== null)) || t.sync?.state === "behind") {
+  if ((t.kept?.by === "poll" && t.kept.pending !== undefined) || (t.kept?.by === "replication" && ((t.kept.state !== "streamed" && t.kept.state !== "compacting") || t.kept.notRunning !== null)) || t.sync?.state === "behind") {
     return { state: "unsynced", fraction: 1, what };
   }
   return { state: "done", fraction: 1, what };
@@ -124,6 +124,7 @@ export function keptAge(t, now = Date.now()) {
     return `${CATCHING_UP} (${at === null ? "never synced" : `last synced ${syncedAgo(at, now)}`})`;
   }
   if (k?.by === "replication") {
+    if (k.state === "compacting") return `replicated, ${k.syncedAt === null ? "never synced" : `last synced ${syncedAgo(k.syncedAt, now)}`} — ${k.why ?? "it is being compacted"}`;
     if (k.state !== "streamed") return `NOT kept current (${k.syncedAt === null ? "never synced" : `last synced ${syncedAgo(k.syncedAt, now)}`}): ${k.why ?? "it is not streamed yet"}`;
     const at = `replicated, at ${k.position}, ${k.syncedAt === null ? "not synced yet" : syncedAgo(k.syncedAt, now)}`;
     return k.notRunning === null || t.sync?.state === "behind" ? at : `${at} — NOT kept current now, the stream is not running: ${k.notRunning}`;

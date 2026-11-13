@@ -390,6 +390,7 @@ test("behind, left out, a failed catch-up, a stream down, off: each table's line
   const gap = "publication app_pub does not carry public.orders: ALTER PUBLICATION app_pub ADD TABLE public.orders — or give its entry sync: poll <interval> in the sources file, which needs no publication";
   const pending = "it is caught up by one poll after its whole read first — after a failure, tried again after 09:10 UTC";
   const every15 = { mode: "poll", every: "15m", seconds: 900 };
+  const COMPACTING = "it is being compacted, and the changes made since are applied when the compaction ends";
   const states: Array<[string, CopyState[]]> = [
     ["behind, the pass", [{ ...copied("public.customers", 1200, ago(7200)), kept: { by: "poll", sync: every15, syncedAt: ago(52 * 60), nextAt: null, promisedSeconds: 960, lateWhy: pass } } as CopyState]],
     ["behind, its own poll", [{ ...copied("public.customers", 1200, ago(7200)), kept: { by: "poll", sync: every15, syncedAt: ago(31 * 60), nextAt: null, promisedSeconds: 1620,
@@ -413,6 +414,13 @@ test("behind, left out, a failed catch-up, a stream down, off: each table's line
     ["catching up, replicated", [{ ...copied("public.orders", 2_000_000, ago(5)), behind: "after its whole read", rebuilding: "catch-up",
       kept: { by: "replication", slot: "s", state: "catching-up", why: "caught up by one poll after its whole read", position: "0/1", lastCommit: null, notRunning: null,
         syncedAt: ago(5), promisedSeconds: 120, lateWhy: "caught up by one poll after its whole read" } } as CopyState]],
+    // being compacted, its changes kept aside (issue 904): as of the moment they began to be, said so, and behind past its promise
+    ["compacting", [{ ...copied("public.orders", 2_000_000, ago(7200)), rebuilding: "compact",
+      kept: { by: "replication", slot: "s", state: "compacting", why: COMPACTING, position: "0/1", lastCommit: null, notRunning: null,
+        syncedAt: ago(30), promisedSeconds: 120, lateWhy: COMPACTING } } as CopyState]],
+    ["compacting, behind", [{ ...copied("public.orders", 2_000_000, ago(7200)), rebuilding: "compact",
+      kept: { by: "replication", slot: "s", state: "compacting", why: COMPACTING, position: "0/1", lastCommit: null, notRunning: null,
+        syncedAt: ago(300), promisedSeconds: 120, lateWhy: COMPACTING } } as CopyState]],
   ];
   const tableLine = fn<[unknown, number], { state: string; fraction: number; what: string }>("tableLine");
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
@@ -436,7 +444,12 @@ test("behind, left out, a failed catch-up, a stream down, off: each table's line
   }
   assert.deepEqual(words, { "behind, the pass": "warn Behind unsynced", "behind, its own poll": "warn Behind unsynced", "left out": "bad Failed failed", "a failed catch-up": "bad Failed failed",
     "a stream down past its bound": "warn Behind unsynced", "behind, recopied": "warn Behind unsynced", off: "ok Synced done", synced: "ok Synced done",
-    "catching up, off": "warn Finishing sync catching-up", "catching up, polled": "warn Finishing sync catching-up", "catching up, replicated": "warn Finishing sync catching-up" });
+    "catching up, off": "warn Finishing sync catching-up", "catching up, polled": "warn Finishing sync catching-up", "catching up, replicated": "warn Finishing sync catching-up",
+    compacting: "ok Synced done", "compacting, behind": "warn Behind unsynced" });
+  // being compacted, its words on mason status's line and the page's alike (issue 904)
+  const compacting = (name: string): string => tableLine(stateOf(states.find(([n]) => n === name)![1], { now: NOW }).tables.find((x) => x.table === "public.orders")!, NOW).what;
+  assert.equal(compacting("compacting"), `2,000,000 rows · synced · replicated, last synced 30 s ago — ${COMPACTING}`);
+  assert.equal(compacting("compacting, behind"), `2,000,000 rows · synced · replicated, last synced 5 min ago — ${COMPACTING} — behind by 3 min`);
   // one wording: the page's own constant is the CLI's (src/web/pages/status.js, src/cli/readiness.ts)
   assert.equal(page.CATCHING_UP, commands.CATCHING_UP);
   const recopied = stateOf(states.find(([n]) => n === "behind, recopied")![1], { now: NOW });
@@ -3375,6 +3388,9 @@ const STREAMS: Array<[string, typeof STREAM | Record<string, unknown>]> = [
   ["the slot uncapped, unreadable, past its cap", { ...STREAM, slotWal: { walHeldBytes: 9, walStatus: null, safeWalSizeBytes: null, at: "2026-10-27T09:05:29.000Z" } }],
   ["the slot's WAL unreadable", { ...STREAM, slotWal: { error: "no restart position yet\nmore" } }],
   ["the slot past its cap", { ...STREAM, slotWal: { walHeldBytes: 9, walStatus: "unreserved", safeWalSizeBytes: 0, at: "2026-10-27T09:05:29.000Z" } }],
+  // being compacted: its changes kept aside until the compaction ends (issue 904)
+  ["a table being compacted", { ...STREAM, tables: [STREAM.tables[0]!, { table: "public.orders", state: "compacting", why: "it is being compacted, and the changes made since are applied when the compaction ends",
+    compacting: { held: 151 }, applied: { inserts: 3, updates: 0, deletes: 0, truncates: 0 } }, { table: "public.events", state: "compacting", why: "x", compacting: { held: 1 }, applied: zero }] }],
   ["catch-up failed", { ...STREAM, tables: [{ ...STREAM.tables[1]!, catchUp: { phase: "queued", from: null, startedAt: null, held: 1, retryAt: "2026-10-27T09:07:00.000Z" }, applied: { inserts: 1, updates: 0, deletes: 0, truncates: 0 } }] }],
 ];
 const REPL = (stream: unknown, extra: Record<string, unknown> = {}) => ({ ...stateOf(THREE_COPIED(), { replication: true, now: NOW }), stream, ...extra }) as RunState;
