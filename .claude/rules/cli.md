@@ -368,7 +368,7 @@ CLI lacks).
   login even when the revoke did not reach the service, and says it was NOT revoked (tests/cli-login.test.ts, against
   a fake service on 127.0.0.1; every run's output held to carrying no token).
 - **`mason deploy` sends the project folder's files to a replica of that service and waits for the outcome**
-  (src/cli/deploy.ts; docs/HOSTED-API.md "Deploying a project"; needs the project). It checks the project first with the
+  (src/cli/deploy.ts; docs/HOSTED-API.md "Deploying a project"; needs the project's files alone, `needs: "files"`: with no `.mason/` at or above, the current folder's `mason/` (or `-C`'s) and never one elsewhere, `theProjectFolder`, src/cli/project.ts; a `.mason/` that cannot be checked refuses). It checks the project first with the
   readers `mason start` uses before it connects (`checkProject`: the pin, `readSourceFile` — `readSource`'s first half,
   never its URL —, `roleProblems` against the tables the sources file names, `readGenerated`'s refusals said), connects
   to no database, and refuses what a start would refuse, sending nothing. The files are `projectFiles` alone, held to
