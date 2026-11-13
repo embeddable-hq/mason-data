@@ -197,10 +197,12 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   next action's answer or question in its place (two lines a person may act on went mid-read: issue 811). A
   button whose label changes keeps the room of its longest (`ROOMS`: Sync → Syncing… → Synced ✓, Copy → Copied); one
   held while it asks stays where it was, disabled. The Tables list's columns are FIXED widths (`table-layout: fixed`,
-  a width per header class, the name the column that gives), every row two lines (a table not added keeps its bar's
-  line) and its note under it written for every row, empty or not. Only an expander the reader opens (a request's
+  a width per header class, the name the column that gives, never under 200 px: the less important give way first,
+  their facts in the note), every row at least two lines (a table not added keeps its bar's line) and its note under it
+  written for every row, empty or not. **A table's name and state are never cut** (issue 884, the owner: "otherwise
+  we can't see them"): each wraps in its cell, the row growing to fit (detector: tests/web-tables-layout.test.ts). Only an expander the reader opens (a request's
   details, a copy's whole error) pushes rows down — and never widens a column (`.detail-body`). A row's actions never
-  wrap (`td.act`), a bare table too wide scrolls in its own box (`.table-wrap`), and where the table scrolls a row's
+  wrap (`td.act`) but on a phone, where the Tables list stacks them in a column of their own, a bare table too wide scrolls in its own box (`.table-wrap`), and where the table scrolls a row's
   actions stay pinned at its card's right. The detector is `tests/web-page.test.ts` "layout guard" (no row, cell or
   question inserted by any click); walk every page at 1280, 1024, 900 and 375 px measuring rows and columns before and
   after each click (getBoundingClientRect) after a change to a row.
@@ -211,7 +213,7 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   need a cursor per order) — and in the page for a list read whole (the events, the samples).
 - **What the page writes is bounded, whatever the data**: a list of hundreds writes a page of rows and `moreRows`
   (Tables 100, the events 100), a by-client list its top 10 and one row for the rest, a long name or value is cut by the
-  stylesheet with its whole the `title`, a title is at most `TITLE_MAX` characters (`clip`), a statement is one or two
+  stylesheet with its whole the `title` (but a Tables name, which wraps whole), a title is at most `TITLE_MAX` characters (`clip`), a statement is one or two
   lines in its cell and the first `STATEMENT_MAX` in its expanded row (`capped`, which says it was cut and where the
   whole is). The tests render these with large fixtures (800 tables of 60-character names, 200 clients, a 64 KiB
   statement, 10,000 requests paged, 500 events, a week of samples with a spike) and hold the caps.

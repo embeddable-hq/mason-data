@@ -500,7 +500,7 @@ div.added .tip, .done .note, .done .tip { color: var(--muted); margin: 2px 0 6px
    over its bar, a line kept when it has none) and its note under it, across every column, written for every row (empty
    when it says nothing). A question, a form and an answer are popovers beside the row's actions (`.pop`), never a row.
    The row's actions never wrap and never leave the card: they stay pinned at its right where the table scrolls. */
-table.catalog { table-layout: fixed; width: 100%; min-width: 872px; }
+table.catalog { table-layout: fixed; width: 100%; min-width: 630px; }
 table.catalog th.state { width: 146px; }
 table.catalog th.rows { width: 116px; }
 table.catalog th.key { width: 104px; }
@@ -511,9 +511,27 @@ table.catalog th.size { width: 116px; }   /* "Measuring…" whole (issue 883), a
    cut what overflows with "…", so a column narrower than its buttons hides the last one (issue 881):
    tests/web-tables-actions.test.ts measures them in a browser */
 table.catalog th.act { width: 284px; }
+/* THE NAME KEEPS ITS ROOM, AT EVERY WIDTH (issue 884: it was 2 px at 1024 px, the fixed columns filling the list's least
+   width): measured against the list's own card (a container query, so the sidebar, the rail and the window's width are
+   all counted once), at least 200 px for the name — a typical schema.table, cut with "…" and whole on hover — and the
+   less important columns give way first: Key, then Size, then Last sync, then Rows. A column given way (no width, its
+   cells unseen: still the table's seven columns, which a note's colspan spans) says its fact in the row's note instead
+   (`.fold`, src/web/pages/tables.js), so nothing is lost. On a phone the same, the row's actions stacked (below).
+   Detector: tests/web-tables-layout.test.ts, 390 px and every width from 1000 to 1400 px. */
+.panel:has(> table.catalog) { container: catalog / inline-size; }
+table.catalog .fold { display: none; }
+table.catalog .fold::before { content: attr(data-fold); }
+@container catalog (max-width: 1069px) { table.catalog :is(th, td).key { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-key { display: inline; } }
+@container catalog (max-width: 965px) { table.catalog :is(th, td).size { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-size { display: inline; } }
+@container catalog (max-width: 849px) { table.catalog :is(th, td).last { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-last { display: inline; } }
+@container catalog (max-width: 745px) { table.catalog :is(th, td).rows { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-rows { display: inline; } }
 table.catalog th, table.catalog td { overflow: hidden; text-overflow: ellipsis; }
-table.catalog code.name { display: block; max-width: 100%; }
-table.catalog td.state { white-space: nowrap; }
+/* A TABLE'S NAME AND ITS STATE ARE NEVER CUT (issue 884, the owner: "otherwise we can't see them"): each wraps in its
+   cell, the row growing to fit — a name after its `.` and `_` where it can (`<wbr>`, src/web/pages/tables.js), anywhere
+   where it must — never cut with "…" */
+table.catalog th.name, table.catalog td.state { white-space: normal; text-overflow: clip; }
+table.catalog code.name { display: block; max-width: none; overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
+table.catalog td.state .indicator { white-space: normal; align-items: baseline; }
 table.catalog td.state .copyline { display: flex; flex-wrap: nowrap; align-items: center; height: 18px; margin-top: var(--space-1); }
 table.catalog td.state .pct { min-width: 0; }
 table.catalog td.state .copybar { width: 64px; }
@@ -531,6 +549,26 @@ table.catalog tr.note .under-body { font-size: var(--text-sm); line-height: 20px
 .pop.ask:has(.confirm) { border-top-color: var(--bad); }
 .pop.said { border-left: 4px solid var(--ok); }
 .pop.said:has(.failure) { border-left-color: var(--bad); }
+/* an answer with no place near its row that covers no control is a bar at the window's bottom, across it, its height
+   given to the page's end so every row scrolls clear of it (placePops, src/web/shared.js: `docked`, `--docked-h`) */
+/* Docked, a band of 16 px above it is its own, unseen (a transparent border, the surface clipped to the padding box): a
+   finger tapping its top edge never reaches the row above (the re-check: a tap 2 px inside pressed an Add above it).
+   Its line is an inset shadow inside the band. Its Dismiss stays in view however long the answer: pinned at its bottom
+   (sticky) while the rest scrolls in it, so a long table name never pushes it out of reach. */
+.pop.said.docked { top: auto; left: 0; right: 0; bottom: 0; width: auto; max-width: none; max-height: 50vh; overflow-y: auto;
+  border-radius: 0; border: 0; border-top: 16px solid transparent; background-clip: padding-box; box-shadow: inset 0 4px 0 var(--ok); }
+.pop.said.docked:has(.failure) { box-shadow: inset 0 4px 0 var(--bad); }
+.pop.said.docked [data-pop-close] { position: sticky; bottom: 0; }
+/* a long table name in an answer's facts wraps in its column, never squeezing the value beside it to a letter a line */
+.pop .facts { grid-template-columns: fit-content(45%) minmax(0, 1fr); }
+.pop .facts dt { overflow-wrap: break-word; }
+/* a name in an answer breaks after its . and _ (`<wbr>`, src/web/pages/tables.js `nameBreaks`) before anywhere else */
+.pop .done :is(.headline, .note, .tip) { overflow-wrap: break-word; }
+body { padding-bottom: var(--docked-h, 0px); }
+/* beside the page, never over the sidebar's nav: past the sidebar, the rail, or the whole width on a phone */
+.pop.said.docked { left: var(--sidebar-w); }
+@media (max-width: 999px) { .pop.said.docked { left: var(--rail-w); } }
+@media (max-width: 640px) { .pop.said.docked { left: 0; } }
 .pop > :first-child { margin-top: 0; }
 .pop > :last-child { margin-bottom: 0; }
 .pop .confirm { margin: 0 0 var(--space-2); color: var(--fg); }
@@ -561,9 +599,15 @@ table.catalog tbody tr:hover > td.act { background: var(--hover); }
 }
 /* a phone: the table scrolls inside its card, so a line under a row stays in the card's view, never as wide as the table */
 @media (max-width: 640px) {
-  /* the table scrolls inside its card (.panel) at its least width (table.catalog's min-width), still a table — a block
-     would lose its fixed columns — the name still the column that gives */
-  table.catalog { display: table; min-width: 956px; }
+  /* the list fits its card, still a table (a block would lose its fixed columns): the columns that give way have (the
+     container queries above), the state narrower, and a row's actions stacked in a column of their own, so its name
+     and state are read whole beside them (issue 884) */
+  table.catalog { display: table; min-width: 0; }
+  table.catalog th.state { width: 108px; }
+  table.catalog td.state .copybar { width: 44px; }
+  table.catalog th.act { width: 144px; }
+  table.catalog td.act { white-space: normal; }
+  table.catalog td.act > :is(button, a) { display: block; width: 100%; margin: 0 0 var(--space-1); }
   /* the users' too, at their least width: their card scrolls, and a row's actions stay pinned at its right */
   table.users { display: table; }
 }

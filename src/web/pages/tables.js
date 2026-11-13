@@ -1,7 +1,8 @@
 /**
  * THE TABLES PAGE (#tables): the database's tables in ONE table, as `mason tables` lists them. An added table shows its
  * copy's sync — state, rows, last sync and its age, how long it took, the copy's own size, and in replication mode its
- * stream state — and its error, with Sync (POST /api/sync, `mason sync`) and Remove (POST /api/remove, `mason remove`);
+ * stream state — and its error, with Sync (POST /api/sync, `mason sync`) and Remove (POST /api/remove, `mason remove`),
+ * and on its note which columns it syncs, a button that opens its column form (POST /api/pick, `mason add --columns`);
  * one not added shows its rows and key and why it cannot be added as it is, with Add, Columns… and Name its key…
  * (POST /api/pick, `mason add`). A search box filters by name, and All / Added / Failed / Not added by state
  * (`#tables?show=failed`, where the Overview's card leads). With hundreds of tables the page writes the first
@@ -10,7 +11,7 @@
  * `copySizes` and `unsized` every minute; a table's columns once, when its Columns… or Name its key… form opens
  * (`GET /api/tables/<table>/columns`, `columnsPath`).
  */
-import { msText, bytesText, button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText, pop, actId, ROOMS, POLL_MS, readOnlyLine, tablesReadOnly } from "../shared.js";
+import { msText, bytesText, button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, spanText, duration, status, streamRows, utcText, pop, actId, ROOMS, POLL_MS, readOnlyLine, tablesReadOnly } from "../shared.js";
 import { copyBar, copyingCount, createMonotone, tableLine } from "./status.js";
 
 /** `/api/usage` asked for the copies' own sizes alone: the last minute's samples (none needed), and `copySizes`. */
@@ -25,6 +26,10 @@ export const columnsPath = (table) => `api/tables/${encodeURIComponent(table)}/c
 
 /** A table's sync in one word (`/api/state` `tables[].sync.state`, src/cli/readiness.ts `syncStateOf`). */
 const SYNC_WORDS = { synced: "Synced", syncing: "Syncing", "catching-up": "Finishing sync", behind: "Behind", failed: "Failed", waiting: "Waiting" };
+
+/** A table's name, escaped, with a place to break after each `.` and `_` (`<wbr>`): it wraps there in its cell rather
+ *  than being cut (issue 884). */
+export const nameBreaks = (table) => esc(table).replace(/([._])/g, "$1<wbr>");
 
 /** Whether a table's name has the search box's text (any case; nothing typed: every table). */
 const nameMatches = (table, filter) => !filter || table.toLowerCase().includes(filter.trim().toLowerCase());
@@ -66,7 +71,9 @@ function syncedTips(tables) {
 /** A sync's answer said as `mason sync` says it, with Dismiss. `s`: the state, for the tables not kept current. */
 function renderSynced(b, table, s) {
   const r = syncedReport(b, [table], s.tables.filter((t) => t.table === table));
-  return `<div class="done"><p class="headline">${esc(r.headline)}</p>${rowsHtml(r.details)}${r.tips.map((x) => `<p class="tip">${esc(x)}</p>`).join("")}` +
+  // a table's name in it wraps after its . and _ (`nameBreaks`), never squeezing what is beside it (issue 884)
+  return `<div class="done"><p class="headline">${nameBreaks(r.headline)}</p>` +
+    `<dl class="facts">${r.details.map(([k, v]) => `<dt>${nameBreaks(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>${r.tips.map((x) => `<p class="tip">${nameBreaks(x)}</p>`).join("")}` +
     `${button("Dismiss", { dismissSynced: "", popClose: "" }, "small")}</div>`;
 }
 
@@ -98,8 +105,10 @@ export function tableFacts(t) {
  *  its notes — its sync, a poll's cost, the key added to the columns asked, the secret-looking columns left out. The
  *  facts are `mason add`'s (src/cli/commands.ts `addedLines`), in the page's words: no sources file, and the page's way
  *  to change a table's sync (its Sync button) where `mason add` names `--sync`. */
+/** The columns an entry syncs, from `/api/pick`'s answer: every column, every column but some, or the columns named. */
+const columnsWords = (b) => b.columns === null ? (b.exclude.length ? `every column but ${b.exclude.join(", ")}` : "every column") : `the columns ${b.columns.join(", ")}`;
 export function addedLines(b) {
-  const copies = b.columns === null ? (b.exclude.length ? `every column but ${b.exclude.join(", ")}` : "every column") : `the columns ${b.columns.join(", ")}`;
+  const copies = columnsWords(b);
   const s = b.skippedSecrets;
   const name = entryName(b.table);
   const change = "Its Sync button changes this.";
@@ -132,20 +141,26 @@ export function removedReport(removed) {
  */
 export const pickBody = (table, columns = [], key = []) => ({ table, picked: true, ...(columns.length ? { columns } : {}), ...(key.length ? { key } : {}) });
 
-/** A table just added (`/api/pick`'s answer, `mason add --json`'s `added` entry): `addedLines`. `savedSync`: the answer
- *  to a Sync choice saved, which says the sync saved and the notes after it, never "Added" (the table was added before). */
-export function renderTableAdded(b, savedSync = false) {
+/** A table just added (`/api/pick`'s answer, `mason add --json`'s `added` entry): `addedLines`. `saved`: the answer to a
+ *  Sync choice saved (`"sync"`, or true) or a column form saved (`"columns"`), which says what was saved and the notes
+ *  after it, never "Added" (the table was added before); the same columns saved again say nothing changed. */
+export function renderTableAdded(b, saved = false) {
   const l = addedLines(b);
-  const head = savedSync ? `Saved ${entryName(b.table)}'s sync.` : l.line;
-  const notes = savedSync ? [l.notes[0].replace(" Its Sync button changes this.", ""), ...l.notes.slice(1)] : l.notes;
-  return `<div class="done"><p class="headline">${esc(head)}</p>${notes.map((x) => `<p class="note">${esc(x)}</p>`).join("")}` +
+  const savedSync = saved === true || saved === "sync";
+  const name = entryName(b.table);
+  const head = savedSync ? `Saved ${name}'s sync.`
+    : saved === "columns" ? (b.already ? `Nothing changed: ${name} already syncs ${columnsWords(b)}.` : `Saved ${name}'s columns: ${columnsWords(b)}.`)
+    : l.line;
+  // after a column form, its sync is as it was: not said again
+  const notes = savedSync ? [l.notes[0].replace(" Its Sync button changes this.", ""), ...l.notes.slice(1)] : saved === "columns" ? l.notes.slice(1) : l.notes;
+  return `<div class="done"><p class="headline">${nameBreaks(head)}</p>${notes.map((x) => `<p class="note">${nameBreaks(x)}</p>`).join("")}` +
     `${button("Dismiss", { dismissOutcome: "", popClose: "" }, "small")}</div>`;
 }
 
 /** Tables just removed (`/api/remove`'s answer, `mason remove --json`'s shape): `removedReport`. */
 export function renderTablesRemoved(b) {
   const r = removedReport(b.removed);
-  return `<div class="done"><p class="headline">${esc(r.headline)}</p>${r.tips.map((x) => `<p class="tip">${esc(x)}</p>`).join("")}` +
+  return `<div class="done"><p class="headline">${nameBreaks(r.headline)}</p>${r.tips.map((x) => `<p class="tip">${nameBreaks(x)}</p>`).join("")}` +
     `${button("Dismiss", { dismissOutcome: "", popClose: "" }, "small")}</div>`;
 }
 
@@ -164,6 +179,92 @@ function pickForm(t, cols, ticked = null) {
     (t.key.length ? "" : `<fieldset><legend>Its key: the columns that tell its rows apart</legend>${boxes("key")}</fieldset>`) +
     `<fieldset><legend>The columns to sync (tick none to sync every column)</legend>${boxes("columns")}</fieldset>` +
     `<button type="submit" class="primary small">Add ${esc(name)}</button> ${button("Cancel", { cancelChoose: "", popClose: "" }, "small")}</form>`;
+}
+
+// ------------------------------------------------------------------ an added table's columns (issue 884)
+
+/** The element an added table's column form opens from (the summary in its note), and its popovers' anchor. */
+export const columnsId = (table) => `columns-tables-${table}`;
+
+const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
+const counted = (k, word) => `${n(k)} ${word}${k === 1 ? "" : "s"}`;
+
+/**
+ * WHICH COLUMNS AN ADDED TABLE SYNCS, IN A FEW WORDS (its row's note): "All columns", "5 of 12 columns" or "All but 1
+ * column", from `/api/state` `tables[].entry`, `addedColumns` and `columnCount`; the columns themselves are its title.
+ * null for a table not added, and from a run that does not say them.
+ */
+export function columnsSummary(t) {
+  const e = t.entry, all = t.columnCount, syncs = t.addedColumns;
+  if (!t.added || !e || typeof all !== "number" || !Array.isArray(syncs)) return null;
+  if (e.columns !== null) return { text: `${n(syncs.length)} of ${counted(all, "column")}`, title: `Synced: ${syncs.join(", ")}` };
+  const out = all - syncs.length;
+  if (out > 0) return { text: `All but ${counted(out, "column")}`, title: `Every column but ${e.exclude.filter((c) => !syncs.includes(c)).join(", ")}` };
+  return { text: "All columns", title: "Every column, and any column added to the table later" };
+}
+
+/**
+ * WHAT AN ADDED TABLE'S COLUMN FORM TICKS WHEN IT OPENS: its entry's `columns:`; none for every column (`{}`, or the
+ * `exclude:` every column writes: the secret-looking columns, `everyColumnLeavesOut`); its `key:`. An entry the boxes
+ * cannot show (an `exclude:` written by hand, or every column with a secret-looking one kept on purpose) is
+ * `exact: false`: its boxes are the columns synced now, and `said` is what the entry says — saving replaces it, which
+ * the form says first.
+ */
+export function columnsChoice(t) {
+  const e = t.entry, key = e.key ?? [];
+  if (e.columns !== null) return { exact: true, columns: e.columns, key };
+  const leaves = t.everyColumnLeavesOut ?? [];
+  if (sameSet(e.exclude, leaves)) return { exact: true, columns: [], key };
+  return { exact: false, columns: t.addedColumns ?? [], key,
+    said: e.exclude.length ? `every column but ${e.exclude.join(", ")}` : `every column, ${leaves.join(", ")} included` };
+}
+
+/**
+ * `POST /api/pick`'s body when an added table's column form is saved (as `mason add <table> --columns …`): the boxes
+ * ticked — but when they say what its entry says, the entry's own lists in its own order, so the run finds nothing
+ * changed (`already`), writes nothing and starts no sync.
+ */
+export function columnsBody(t, columns = [], key = []) {
+  const c = columnsChoice(t), e = t.entry;
+  const keyCols = t.key.length ? t.key : key;
+  const withKey = (xs) => [...new Set([...xs, ...keyCols])];
+  const sameKey = t.key.length > 0 || sameSet(key, c.key);
+  const same = e.columns === null ? columns.length === 0 : sameSet(withKey(columns), withKey(e.columns));
+  return c.exact && sameKey && same ? pickBody(t.table, e.columns ?? [], e.key ?? []) : pickBody(t.table, columns, key);
+}
+
+/** What saving a column form costs, said before it is saved (issue 884): the table synced again in full, its synced
+ *  data queried meanwhile; the same choice changes nothing. `exact`: whether saving the same boxes writes nothing. */
+export function columnsCost(t, exact = true) {
+  const name = entryName(t.table);
+  return `Saving different columns syncs ${name} again in full from your database${t.rows !== null ? ` (~${n(t.rows)} rows)` : ""}: ` +
+    `that takes a while, and on a big table it adds load to your database. Its synced data can still be queried until the new sync finishes. ` +
+    (exact ? "Saving the same columns changes nothing and starts no sync." : "Saving the same columns starts no sync.");
+}
+
+/**
+ * AN ADDED TABLE'S COLUMN FORM (a dialog beside its columns' summary, `pop`): its columns ticked as its entry says
+ * (`columnsChoice`), its key for a table with no primary key, what saving costs, Save and Cancel. `cols`: what
+ * `GET /api/tables/<table>/columns` answered ({ table, columns } | { table, failure }, null while read); `ticked`: the
+ * boxes a refused save sent, written back; `saving`: its save is asked.
+ */
+export function columnsForm(t, cols, ticked = null, saving = false) {
+  const name = entryName(t.table);
+  const cancel = button("Cancel", { cancelChoose: "", popClose: "" }, "small");
+  if (cols?.table !== t.table) return `<p class="dim">Reading ${esc(name)}'s columns…</p>${cancel}`;
+  if ("failure" in cols) return `${renderFailure(cols.failure)}${cancel}`;
+  const c = columnsChoice(t);
+  const on = ticked ?? { columns: c.columns, key: c.key };
+  const boxes = (field) => cols.columns.map((x) => tick(field, x, on[field].includes(x.name))).join("");
+  const leaves = t.everyColumnLeavesOut ?? [];
+  const none = `None ticked: every column, and any added to the table later${leaves.length
+    ? `, but ${leaves.join(", ")}, which ${leaves.length === 1 ? "looks like a secret" : "look like secrets"}` : ""}.`;
+  return `<form class="pick" data-pick-form="${esc(t.table)}" autocomplete="off">` +
+    (c.exact ? "" : `<p class="note replaces">Its entry in the sources file syncs ${esc(c.said)}, which these boxes cannot show: they show the columns synced now. Saving replaces the entry with the columns ticked.</p>`) +
+    (t.key.length ? "" : `<fieldset><legend>Its key: the columns that tell its rows apart</legend>${boxes("key")}</fieldset>`) +
+    `<fieldset><legend>The columns ${esc(name)} syncs</legend><p class="choice-what">${esc(none)}</p>${boxes("columns")}</fieldset>` +
+    `<p class="note cost">${esc(columnsCost(t, c.exact))}</p>` +
+    `<button type="submit" class="primary small"${saving ? " disabled" : ""}>${saving ? "Saving…" : "Save"}</button> ${cancel}</form>`;
 }
 
 // ------------------------------------------------------------------ a table's Sync choice (issue 840)
@@ -321,7 +422,8 @@ export function sizeCellOf(sizes) {
  * its error as a red line (the whole error in a details, `ui.open(key)` whether it is open), or why it cannot be added as
  * it is (`tableFacts`, as `mason tables` prints it). What can be done: Sync and Remove (asking first, `ui.removing`) for an
  * added table; Add (every column, as `mason add <table>`) and Columns… (the form) for one not added; Name its key… for
- * one with no primary key. `ui.choosing` is the table whose form is open (`ui.ticked` its boxes ticked: { columns, key };
+ * one with no primary key; an added table's columns in a few words on its note (`columnsSummary`), which open its column
+ * form (`columnsForm`; `ui.savingColumns` the table whose save is asked). `ui.choosing` is the table whose form is open (`ui.ticked` its boxes ticked: { columns, key };
  * `ui.columns` its columns as read when it opened: { table, columns } | { table, failure }, null while read);
  * `ui.outcome` what the last add or remove answered ({ table, added } | { table, removed } | { table, failure }) and
  * `ui.synced` what the last sync did, each a popover beside its table's actions, up until it is dismissed (its Dismiss,
@@ -332,7 +434,7 @@ export function sizeCellOf(sizes) {
  */
 export function renderTables(s, ui = {}) {
   const { removing = null, choosing = null, columns = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], adding = [], shares = new Map(), before = new Map(), synced = null, open = () => false, limit = TABLE_ROWS,
-    syncOpen = null, syncChoice = null, syncAsk = null, syncPicked = null } = ui;
+    syncOpen = null, syncChoice = null, syncAsk = null, syncPicked = null, savingColumns = null } = ui;
   const now = ui.now ?? Date.now();
   if (!s.tables.length) return empty(`${s.source.database} has no table this user can read.`);
   // why the page changes nothing (MASON_UI_READ_ONLY=1: not even a Sync), or null — null when its tables are still its
@@ -390,13 +492,19 @@ export function renderTables(s, ui = {}) {
     const state = adding_ ? status("warn", "Adding…") : t.added ? (y ? status(undefined, SYNC_WORDS[y.state]) : "") : status("unknown", "Not added");
     const took = t.added && y?.syncSeconds != null ? `<span class="took" title="${esc(tookTitle(y))}">took ${esc(tookText(y))}</span>` : "";
     const last = t.added && y?.syncedAt && y?.ageSeconds != null
-      ? `<td class="num"><span title="${esc(`${utcText(y.syncedAt)} UTC`)}">${esc(`${duration(y.ageSeconds)} ago`)}</span>${took}</td>` : `<td class="num">${took}</td>`;
+      ? `<td class="num last"><span title="${esc(`${utcText(y.syncedAt)} UTC`)}">${esc(`${duration(y.ageSeconds)} ago`)}</span>${took}</td>` : `<td class="num last">${took}</td>`;
     // what is said at length, its note under the row: the words the CLI prints after a bar that is not full and current,
     // an error (its first line; the whole in a details), why it cannot be added as it is, its stream state (replication mode)
     // ITS SYNC, first on its note: what the run keeps it by now, and — where the page may edit the sources file — the
     // button that opens its Sync choice (a dialog beside it); read-only, the words alone, the reason their title
     const keptNow = keptSync(t);
     const syncWord = keptNow === null ? "Sync…" : `Sync: ${syncWords(keptNow)}`;
+    // ITS COLUMNS, beside its sync: which it syncs in a few words (`columnsSummary`), the button that opens its column
+    // form where the page may edit the sources file; read-only, the words alone
+    const summary = t.added && !adding_ ? columnsSummary(t) : null;
+    const colsCtl = summary === null ? ""
+      : readOnly !== null ? `<span class="syncnow dim" title="${esc(summary.title)}">${esc(summary.text)}</span>`
+      : `<button type="button" class="small link syncnow" id="${esc(columnsId(t.table))}" data-choose="${esc(t.table)}"${choosing === t.table ? ` aria-expanded="true"` : ""} title="${esc(`${summary.title}. Choose which columns Mason syncs`)}">${esc(summary.text)}</button>`;
     const syncCtl = !t.added || adding_ ? ""
       : readOnly !== null ? `<span class="syncnow dim" title="${esc(readOnly)}">${esc(syncWord)}</span>`
       : `<button type="button" class="small link syncnow" id="${esc(syncId(t.table))}" data-choose-sync="${esc(t.table)}"${syncOpen === t.table ? ` aria-expanded="true"` : ""} title="${esc(`Choose how Mason keeps ${name} current`)}">${esc(syncWord)}</button>`;
@@ -406,31 +514,46 @@ export function renderTables(s, ui = {}) {
     const said_ = adding_ ? `<span class="dim">adding it…</span>`
       : t.added ? [
         syncCtl,
+        colsCtl,
         l && l.state !== "done" && !t.error ? `<span class="what-copy t-${l.state}">${esc(l.what)}</span>` : "",
         t.error ? `<span class="err">${esc(firstLine(t.error))}</span>${t.error.includes("\n") ? details(`error:${t.table}`, "the whole error", `<pre>${esc(t.error)}</pre>`, open(`error:${t.table}`)) : ""}` : "",
         stream && stream.get(t.table) ? `<span class="stream dim">Stream: ${esc(stream.get(t.table))}</span>` : "",
       ].filter(Boolean).join("")
       : f.state ? `<span class="dim">${esc(f.state)}</span>` : "";
-    const note = under(said_, "note");
+    // A COLUMN THE LIST'S CARD HAS NO ROOM FOR (app.css: Key, then Size, then Last sync, then Rows give way to the name)
+    // says its fact here, in the note: each `.fold` is shown only while its column is hidden, its words the stylesheet's
+    // (`data-fold`, drawn by `::before`) so the row's text is its cells' alone wherever every column is shown
+    const sizeText = size?.text ? `size ${size.text}` : "";
+    const lastText = t.added && y?.syncedAt && y?.ageSeconds != null ? `last sync ${duration(y.ageSeconds)} ago${y.syncSeconds != null ? `, took ${tookText(y)}` : ""}`
+      : t.added && y?.syncSeconds != null ? `took ${tookText(y)}` : "";
+    const folds = [["rows", t.added && t.copy && t.copy.phase !== "failed" ? `${rows} rows` : rows], ["key", f.key], ["last", lastText], ["size", sizeText]]
+      .filter(([, x]) => x).map(([c, x]) => `<span class="fold f-${c}" data-fold="${esc(x)}"></span>`).join("");
+    const note = under(folds + said_, "note");
     if (asking) {
       pops.push(pop(anchor, `<p class="confirm">Remove ${esc(name)}? Mason will stop syncing it and delete its synced data.</p>` +
         `<p class="pop-actions">${button(`Remove ${name}`, { confirmRemoveTable: t.table }, "danger small")} ${button("Cancel", { cancelRemoveTable: "", popClose: "" }, "small")}</p>`, { kind: "dialog", label: `Remove ${name}?` }));
     }
     // a refused add with its form open: the refusal is said in the form's popover, over the boxes as they were ticked
-    const formOpen = choosing === t.table && !t.added;
+    // a table not added: Columns… (Add with its columns); an added one: its columns' summary (its column form)
+    const formOpen = choosing === t.table && (!t.added || (summary !== null && readOnly === null));
+    const formAnchor = t.added ? columnsId(t.table) : anchor;
     const refusedHere = outcome?.table === t.table && "failure" in outcome;
-    if (formOpen) pops.push(pop(anchor, (refusedHere ? renderFailure(outcome.failure) : "") + pickForm(t, columns, ticked), { kind: "dialog", label: `Add ${name}` }));
+    if (formOpen) {
+      pops.push(pop(formAnchor, (refusedHere ? renderFailure(outcome.failure) : "") + (t.added ? columnsForm(t, columns, ticked, savingColumns === t.table) : pickForm(t, columns, ticked)),
+        { kind: "dialog", label: t.added ? `The columns ${name} syncs` : `Add ${name}` }));
+    }
     if (outcome?.table === t.table && !(formOpen && refusedHere)) {
       // a sync saved (or refused) is said beside the sync it changed; an add or a remove beside the row's actions
-      pops.push(pop(outcome.at === "sync" && t.added && readOnly === null ? syncId(t.table) : anchor,"failure" in outcome ? `${renderFailure(outcome.failure)}${button("Dismiss", { dismissOutcome: "", popClose: "" }, "small")}`
-        : "added" in outcome ? renderTableAdded(outcome.added, outcome.at === "sync") : renderTablesRemoved(outcome.removed)));
+      // a column form saved, beside its columns' summary
+      pops.push(pop(outcome.at === "sync" && t.added && readOnly === null ? syncId(t.table) : outcome.at === "columns" && t.added && summary !== null && readOnly === null ? columnsId(t.table) : anchor,"failure" in outcome ? `${renderFailure(outcome.failure)}${button("Dismiss", { dismissOutcome: "", popClose: "" }, "small")}`
+        : "added" in outcome ? renderTableAdded(outcome.added, outcome.at ?? false) : renderTablesRemoved(outcome.removed)));
     }
     if (synced?.table === t.table) {
       pops.push(pop(anchor, "failure" in synced ? `${renderFailure(synced.failure)}${button("Dismiss", { dismissSynced: "", popClose: "" }, "small")}` : renderSynced(synced.synced, t.table, s)));
     }
-    return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}${said_ ? " has-note" : ""}"><th scope="row" class="name"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
-      `<td class="state">${state}${bar}</td>${cell(rows, "num")}${cell(f.key, "mono", f.key)}${last}` +
-      `${size ? cell(size.text, "num", size.title) : cell("", "num")}` +
+    return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}${said_ ? " has-note" : ""}"><th scope="row" class="name"><code class="name" title="${esc(t.table)}">${nameBreaks(t.table)}</code></th>` +
+      `<td class="state">${state}${bar}</td>${cell(rows, "num rows")}${cell(f.key, "mono key", f.key)}${last}` +
+      `${size ? cell(size.text, "num size", size.title) : cell("", "num size")}` +
       `<td class="act" id="${esc(anchor)}">${act}</td></tr>` + note;
   };
   const added = s.tables.filter((t) => t.added).length;
@@ -461,7 +584,10 @@ export const page = {
       // the table whose Sync choice is open, what `GET api/tables/<table>/sync` answered for it (null while read), the
       // choice whose question is asked before it is saved, and the read in flight: ONE at a time for the page, never on
       // a timer — each is a connection to the database
-      syncOpen: null, syncChoice: null, syncAsk: null, syncRead: null, syncPicked: null, heldNow: null };
+      syncOpen: null, syncChoice: null, syncAsk: null, syncRead: null, syncPicked: null, heldNow: null,
+      // whether the table whose form is open was added when it opened (its column form, issue 884: else Columns…, its
+      // add), and the added table whose columns' save is asked
+      choosingAdded: false, savingColumns: null };
     const state = () => ctx.read("api/state")?.body ?? null;
     const monotone = createMonotone();
     // the details open (a copy's whole error), by key: a poll rewrites the part, and they stay open
@@ -500,6 +626,7 @@ export const page = {
       async choose(table) {
         // a question opened takes the last answer away: two popovers never stand on one another
         m.choosing = table; m.removing = null; m.syncOpen = null; m.ticked = null; m.columns = null; m.outcome = null; m.synced = null; hold();
+        m.choosingAdded = (m.held?.tables ?? []).some((t) => t.table === table && t.added);
         const r = await ctx.ask(columnsPath(table));
         // closed, or another table's opened, while it was read: that answer is not this form's
         if (m.choosing !== table) return false;
@@ -507,6 +634,19 @@ export const page = {
         return true;
       },
       cancelChoose() { m.choosing = null; m.columns = null; hold(); },
+      /** Save an added table's column form (`mason add <table> --columns …`, its sync kept): the answer beside its
+       *  columns' summary, then the state read again; refused, said over the form, its boxes as they were ticked. */
+      async saveColumns(table, columns = [], key = []) {
+        const t = (m.held ?? state())?.tables.find((x) => x.table === table);
+        if (!t?.added || m.savingColumns !== null) return false;
+        m.savingColumns = table;
+        const r = await ctx.ask("api/pick", json("POST", columnsBody(t, columns, key)));
+        m.savingColumns = null;
+        if ("failure" in r) { m.outcome = { table, failure: r.failure, at: "columns" }; if (m.choosing === table) m.ticked = { columns, key }; return false; }
+        m.outcome = { table, added: r.body, at: "columns" }; m.choosing = null; m.columns = null; hold();
+        await ctx.refresh(["api/state"]);
+        return true;
+      },
       /** Open a table's Sync choice: its sync, its polls' cost and Live's checks read now, once — after any read still in
        *  flight, so the page never has two checks of the database open at once. */
       async chooseSync(table) {
@@ -581,7 +721,8 @@ export const page = {
         // a table removed or added elsewhere (mason remove, mason add) takes its confirm or its form with it
         const added = (table) => s.tables.some((t) => t.table === table && t.added);
         if (m.removing !== null && !added(m.removing)) m.removing = null;
-        if (m.choosing !== null && added(m.choosing)) m.choosing = null;
+        // a form's table added (Columns…) or removed (its column form) elsewhere takes the form with it
+        if (m.choosing !== null && added(m.choosing) !== m.choosingAdded) m.choosing = null;
         if (m.syncOpen !== null && !added(m.syncOpen)) { m.syncOpen = null; m.syncChoice = null; m.syncAsk = null; }
         hold();
       },
@@ -595,7 +736,7 @@ export const page = {
           "tables-cards": latest ? renderTablesCards(latest) : "",
           tables: s ? renderTables(s, { removing: m.removing, choosing: m.choosing, columns: m.columns, outcome: m.outcome, ticked: m.ticked, now: m.heldNow ?? ctx.now().getTime(),
             filter: m.held ? m.heldFilter : m.filter, show: m.held ? m.heldShow : m.show, syncing: m.syncing, adding: m.adding, shares: monotone.of(latest ?? s), before: monotone.before, synced: m.synced, open: opened.has, limit: m.limit,
-            syncOpen: m.syncOpen, syncChoice: m.syncChoice, syncAsk: m.syncAsk, syncPicked: m.syncPicked,
+            syncOpen: m.syncOpen, syncChoice: m.syncChoice, syncAsk: m.syncAsk, syncPicked: m.syncPicked, savingColumns: m.savingColumns,
             sizes: sizes === undefined ? undefined : sizes.failure ? { failure: sizes.failure } : sizes.body }) : "",
         };
       },
@@ -606,6 +747,8 @@ export const page = {
         if (form.dataset?.syncForm !== undefined) return actions.chooseSyncValue(form.dataset.syncForm, new FormData(form).get("sync"));
         if (form.dataset?.pickForm === undefined) return null;
         const ticked = new FormData(form);
+        // an added table's column form: its columns saved; else Columns…: the table added with them
+        if (m.choosingAdded && form.dataset.pickForm === m.choosing) return actions.saveColumns(form.dataset.pickForm, ticked.getAll("columns"), ticked.getAll("key"));
         return actions.addTable(form.dataset.pickForm, ticked.getAll("columns"), ticked.getAll("key"));
       },
       /** `#tables?show=failed`: the state filter as the hash says (the select beside the search box shows it too). */

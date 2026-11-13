@@ -655,6 +655,19 @@ export function chooseColumns(t: SourceTable, asked: readonly string[], key: rea
   return { columns: [...new Set([...addedKey, ...named])], exclude: [], addedKey, skipped: [] };
 }
 
+/**
+ * THE COLUMNS EVERY COLUMN LEAVES OUT of `t` (`mason add <table>` with no `--columns`: the secret-looking ones, `skipped`),
+ * against the key it is synced by — its primary key, else `key` (an entry's `key:`). FAIL CLOSED: a key the file gets
+ * wrong (a column the table lacks, a key: beside a primary key) never un-flags a column — the rule is then asked against
+ * the table's own key alone, which every column passes. One rule for `mason tables --json`'s `secret` (src/cli/source-edit.ts
+ * `listTables`) and the run's state (`everyColumnLeavesOut`, src/cli/run-server.ts), which the web page's column form reads.
+ */
+export function everyColumnLeavesOut(t: SourceTable, key: readonly string[] | null): string[] {
+  const asked = chooseColumns(t, ["*"], t.key.length ? null : key);
+  const chosen = "problem" in asked ? chooseColumns(t, ["*"], null) : asked;
+  return "problem" in chosen ? t.columns.map((c) => c.name).filter(looksSecret) : chosen.skipped;
+}
+
 // ------------------------------------------------------------------ editing the file (mason add, mason remove)
 
 /** A name as YAML writes it: plain when it is an identifier YAML reads as a string, else quoted. */
