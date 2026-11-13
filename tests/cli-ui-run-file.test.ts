@@ -190,7 +190,7 @@ test("MASON_UI_RUN_FILE is a setting of mason serve's, on its one report and in 
 
   const dir = temp();
   fs.mkdirSync(path.join(dir, "mason", "sources"), { recursive: true });
-  const p = { root: dir, folder: path.join(dir, "mason"), config: newConfig("shop", "mason", false) } as unknown as Parameters<typeof startSettingRefusal>[0];
+  const p = { root: dir, folder: path.join(dir, "mason"), config: newConfig("shop", "mason") } as unknown as Parameters<typeof startSettingRefusal>[0];
   assert.deepEqual(startSettingRefusal(p, { MASON_UI_RUN_FILE: "/x/run.json" }, { serve: false }),
     { message: "MASON_UI_RUN_FILE is mason serve's setting, and mason start ignores no setting silently", code: "refused",
       fix: "unset MASON_UI_RUN_FILE: mason ui opens this run's page, and the mason commands reach the run by themselves" });

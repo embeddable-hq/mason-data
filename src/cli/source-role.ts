@@ -114,6 +114,8 @@ export interface DefinerFact {
 
 export interface RoleFacts {
   user: string; userSql: string; databaseSql: string;
+  /** the server's server_version_num */
+  version: number;
   roles: RoleFact[];
   relations: RelationFact[];
   schemas: SchemaFact[];
@@ -196,7 +198,7 @@ unchecked AS (SELECT evtfoid AS fn FROM pg_event_trigger WHERE evtenabled <> 'D'
   UNION SELECT unnest(ARRAY[rngcanonical::oid, rngsubdiff::oid]) FROM pg_range
   UNION SELECT conproc::oid FROM pg_conversion)
 SELECT json_build_object(
-  'user', me.rolname, 'user_sql', quote_ident(me.rolname), 'database_sql', quote_ident(current_database()),
+  'user', me.rolname, 'user_sql', quote_ident(me.rolname), 'database_sql', quote_ident(current_database()), 'version', current_setting('server_version_num')::int,
   'roles', (SELECT json_agg(json_build_object('name', rolname, 'self', self, 'superuser', rolsuper, 'bypassrls', rolbypassrls) ORDER BY NOT self, rolname) FROM r),
   'relations', (SELECT coalesce(json_agg(json_build_object('name', n.nspname || '.' || c.relname, 'sql', quote_ident(n.nspname) || '.' || quote_ident(c.relname),
       'kind', CASE x.rank WHEN 1 THEN 'table' WHEN 2 THEN CASE WHEN c.relispartition THEN 'partition' ELSE 'child' END WHEN 3 THEN 'parent' WHEN 4 THEN 'referenced'
@@ -239,7 +241,7 @@ SELECT json_build_object(
 }
 
 interface FactsRow {
-  user: string; user_sql: string; database_sql: string;
+  user: string; user_sql: string; database_sql: string; version: number;
   roles: Array<{ name: string; self: boolean; superuser: boolean; bypassrls: boolean }>;
   relations: Array<{ name: string; sql: string; kind: RelationKind; entry: string; schema_sql: string; owner: string; owned: boolean; row_security: boolean; privileges: Array<{ role: string; privileges: string[] }> }>;
   schemas: Array<{ name: string; sql: string; owner: string; owned: boolean; create: string[]; public_create: boolean }>;
@@ -253,7 +255,7 @@ export async function readRoleFacts(pg: Pick<PgConnection, "query">, tables: Rol
   const row = JSON.parse((await pg.query(roleFactsSql(tables))).rows[0]?.[0] ?? "null") as FactsRow | null;
   if (row === null) throw new Error("pg_roles has no row for the user connected");
   return {
-    user: row.user, userSql: row.user_sql, databaseSql: row.database_sql,
+    user: row.user, userSql: row.user_sql, databaseSql: row.database_sql, version: row.version,
     roles: row.roles,
     relations: row.relations.map((x) => ({ name: x.name, sql: x.sql, kind: x.kind, entry: x.entry, schemaSql: x.schema_sql, owner: x.owner, owned: x.owned,
       rowSecurity: x.row_security, privileges: x.privileges })),
@@ -325,7 +327,10 @@ export function roleChecks(f: RoleFacts, ask: RoleAsk): Check[] {
     });
     out.push(warn("role_writes_table", `${f.user} may ${held.join("; ")}`));
   }
-  const creates = f.schemas.filter((s) => s.create.length > 0 || s.publicCreate);
+  // PUBLIC's default CREATE on schema public before Postgres 15, and nothing else: every role's, so information, never a
+  // warning — its way out is not this role's to take (issue 888)
+  const byDefault = f.schemas.filter((s) => publicDefault(f, s));
+  const creates = f.schemas.filter((s) => (s.create.length > 0 || s.publicCreate) && !publicDefault(f, s));
   if (creates.length) {
     const held = creates.map((s) => `CREATE in schema ${s.name}${s.owned ? ` (${s.owner === f.user ? "it owns the schema" : `${s.owner}, which owns the schema`})` : route([...s.create.filter((r) => r !== f.user), ...(s.publicCreate ? ["PUBLIC"] : [])])}`);
     out.push(warn("role_creates_in_schema", `${f.user} may ${held.join("; ")}`));
@@ -344,15 +349,25 @@ export function roleChecks(f: RoleFacts, ask: RoleAsk): Check[] {
   // SECURITY DEFINER code: what it writes is in its body, which the catalog does not say, so it is LISTED for a person
   // to review, never "fixed" by a statement that changes another role's privileges, and never taken for "only reads"
   const definers = definerLine(f);
-  if (out.length) return definers === null ? out : [...out, { name: "role", ok: true, warn: true, code: "role_may_run_definer_code", detail: `${f.user} ${definers}`, why: DEFINER_WHY }];
+  const info: Check[] = byDefault.length ? [{ name: "role", ok: true, detail: PUBLIC_DEFAULT_CREATE }] : [];
+  if (out.length) return [...(definers === null ? out : [...out, { name: "role", ok: true, warn: true, code: "role_may_run_definer_code", detail: `${f.user} ${definers}`, why: DEFINER_WHY } as Check]), ...info];
   const unread = f.missing.length ? ` (not asked of ${list(f.missing)}, which the database does not have: mason start says so)` : "";
   const synced = f.relations.filter((x) => x.kind === "table").length;
   const itself = "not a superuser, no BYPASSRLS, no ADMIN OPTION, no server roles, no foreign server" + (synced ? `, and it neither owns nor may write to the ${synced} synced table(s) — ` +
     "nor to their partitions, inheritance children or parents, the tables their foreign keys act on, or the views and rules that write them — " +
-    "nor CREATE in their schemas" : ", and no table is added yet (the tables are asked once one is)");
-  if (definers !== null) return [{ name: "role", ok: true, warn: true, code: "role_may_run_definer_code", detail: `${f.user} may not write the synced tables itself: ${itself}. But it ${definers}${unread}`, why: DEFINER_WHY }];
-  return [{ name: "role", ok: true, detail: `${f.user} only reads: ${itself}, and it reaches no SECURITY DEFINER code whose owner may write${unread}` }];
+    `nor CREATE in their schemas${byDefault.length ? " (but PUBLIC's default, below)" : ""}` : ", and no table is added yet (the tables are asked once one is)");
+  if (definers !== null) return [{ name: "role", ok: true, warn: true, code: "role_may_run_definer_code", detail: `${f.user} may not write the synced tables itself: ${itself}. But it ${definers}${unread}`, why: DEFINER_WHY }, ...info];
+  return [{ name: "role", ok: true, detail: `${f.user} only reads: ${itself}, and it reaches no SECURITY DEFINER code whose owner may write${unread}` }, ...info];
 }
+
+/** What `mason doctor` says, as information, of PUBLIC's default CREATE on schema public before Postgres 15 (issue 888). */
+export const PUBLIC_DEFAULT_CREATE = "On Postgres before 15, every role can create tables in schema public by default. Mason never does.";
+
+/** Schema public, on a Postgres before 15, where PUBLIC holds CREATE (its default there) and the role owns nothing of
+ *  it: every role may CREATE there, the role the way out makes too, so no fix of this role's clears it. A schema it owns
+ *  is more than CREATE, and stays a warning; so does PUBLIC's CREATE from 15 on, which someone granted. */
+const publicDefault = (f: RoleFacts, s: SchemaFact): boolean =>
+  f.version < 150000 && s.name === "public" && s.publicCreate && !s.owned;
 
 /** "may run 2 SECURITY DEFINER function(s) of roles that may write the synced tables — …", or null (its `why` is DEFINER_WHY) */
 function definerLine(f: RoleFacts): string | null {

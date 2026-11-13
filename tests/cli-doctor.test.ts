@@ -13,7 +13,7 @@ import type { DevRun } from "../src/cli/runs.ts";
 import { newConfig, type Project } from "../src/cli/project.ts";
 import { ciNodeMajor, docNodeProblems, NODE_WITHOUT_THE_FIX } from "./node-versions.ts";
 
-const project: Project = { root: "/app", dir: "/app/.mason", folder: "/app/mason", config: newConfig("app", "mason", false) };
+const project: Project = { root: "/app", dir: "/app/.mason", folder: "/app/mason", config: newConfig("app", "mason") };
 const run: DevRun = { name: "app", root: "/app", home: "/app/.mason", folder: "/app/mason", pid: 1, apiKey: "k",
   control: { url: "http://127.0.0.1:4039", token: "t" }, postgresUrl: "postgresql://127.0.0.1:5433/app", postgresListener: { host: "127.0.0.1", tls: null } };
 

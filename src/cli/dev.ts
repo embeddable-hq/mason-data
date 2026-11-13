@@ -5,8 +5,9 @@
  *   0. A DEMO PROJECT'S DATABASE (`mason init demo`, src/cli/demo.ts): hosted by this process, opened first on the port
  *      the sources file's URL names, then connected to and read as any database is (by polling: it has no change log),
  *      and changed every few seconds so the copy is seen keeping current.
- *   1. THE DATABASE (src/cli/preflight.ts checkSource): connect as the run will, say what to change when it cannot;
- *      a database on another machine only when the project was made with --remote. A database restored to another server
+ *   1. THE DATABASE (src/cli/preflight.ts checkSource): connect as the run will, say what to change when it cannot,
+ *      and what is worth knowing of it as information (on another machine; the main database, until the first sync is
+ *      done). A database restored to another server
  *      is read again (its rows compared, the unchanged kept); another database is refused (mason destroy, then mason start).
  *   2. THE COPY (src/duck/store.ts, src/duck/sync.ts): DuckDB in this process, file-backed in `.mason/duck.db`; each
  *      added table copied whole from the database and kept current as its sync: in the sources file says: by the
@@ -28,7 +29,7 @@ import * as path from "node:path";
 import type { Server } from "node:http";
 import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
-import { checkSource, connectSource, maskedUrl, readSourceFacts, remoteConfirmation, remoteWarning, type SourceFacts } from "./preflight.ts";
+import { checkSource, connectSource, maskedUrl, PRIMARY_NOTE, readSourceFacts, type SourceFacts } from "./preflight.ts";
 import { uiReadOnlyAllowSetting, uiReadOnlySetting, type PageArea } from "./ui-read-only.ts";
 import { backLinkOf, uiBackLinkSetting } from "./ui-back-link.ts";
 import { navOf, uiNavSetting } from "./ui-nav.ts";
@@ -335,29 +336,22 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const db = maskedUrl(src.resolved);
   begin(`Connecting to ${db}`);
   const checkSaid: string[] = [];
-  const checked = await checkSource(src.resolved, { remote: cfg.remote, cmd: "mason start", say: (m) => checkSaid.push(m), name: src.from,
+  const checked = await checkSource(src.resolved, { cmd: "mason start", say: (m) => checkSaid.push(m), name: src.from,
     // the checklist's line says it is connecting; everything else checkSource says is the answer
     progress: () => undefined });
-  if ("needsRemote" in checked) {
-    // connected, but the project was not made for a database elsewhere: the step is done, the confirmation is the stop
-    const { source, facts, warnings } = checked.needsRemote;
-    done(`Connected to ${db}: Postgres ${facts.versionText}${facts.standby ? " (a read replica)" : ""}, ${facts.tables.length} table(s) this user can read`);
-    for (const w of warnings.filter((w) => w !== remoteWarning(source))) say(`  ! ${w}`);
-    const config = path.join(home, "config.json");
-    return failed("start", remoteConfirmation(source.host, { cmd: "mason start",
-      wayOut: `this project was not made with --remote: if you mean to sync from that machine, set "remote": true in ${config} and start again`,
-      next: [["mason start", `once ${config} says "remote": true`]] }), { json: false });
-  }
   if ("exit" in checked) {
     fail(`Connecting to ${db}`);
     for (const m of checkSaid) say(`  ${m.replace(/^mason start: /, "")}`);
     if (checked.exit !== 2) say(`  (the database's URL is ${src.from}: change it there if its host, port or password changed)`);
     return checked.exit === 2 ? 1 : checked.exit;
   }
-  const { source, warnings } = checked;
+  const { source, warnings, notes } = checked;
   // THE DATABASE A TOOL CONNECTS WITH (src/lib/database-name.ts): never the project's name, which names the slot below
   const database = connectDatabase(src, cfg, process.env);
   done(`Connected to ${db}: Postgres ${checked.facts.versionText}${checked.facts.standby ? " (a read replica)" : ""}, ${checked.facts.tables.length} table(s) this user can read`);
+  // information, not warnings (issue 888): the main database's line waits for the store, which says whether a first
+  // sync is done (below)
+  for (const n of notes.filter((n) => n !== PRIMARY_NOTE)) say(`  ${n}`);
   for (const w of warnings) say(`  ! ${w}`);
   // HOW THE CHANGES ARE READ (src/cli/replication-mode.ts): each table as its sync: in the sources file says — the tables
   // whose sync is replication through the project's ONE slot and publication, the others polled with SELECTs beside the
@@ -499,6 +493,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // the tables this copy already holds, before this start copies anything: an upgrade from a Mason that polled every
   // table says how many are not polled (`syncDefaultLine`)
   const copiedBefore = sync.state().filter((s) => s.phase === "copied" && sources.tables.some((t) => t.source === s.source)).length;
+  // THE MAIN DATABASE, SAID AS INFORMATION until a first sync is done (issue 888): mason status says which it is after
+  if (notes.includes(PRIMARY_NOTE) && sync.copiedSources().length === 0) say(`  ${PRIMARY_NOTE}`);
   // a database restored to another server: its transaction ids are not the watermarks', so every table is read again
   if (move.action === "reread") { await sync.rereadAll(); say(`  ${source.database} is on another server than the data was synced from: reading its tables again`); }
   if (move.action !== "same") { cfg.sourceServer = { systemIdentifier: facts.systemIdentifier, database: source.database }; writeConfig(home, cfg); }
