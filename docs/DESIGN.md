@@ -2172,8 +2172,13 @@ the read before, and a 20 s statement limit left a 6,500-table catalog never rea
 add's two steps each began a read, so a 44 s catalog was never added to; an actor was handed a read begun before it
 asked; eleven reads ran on the source at once; and a silent connection held every add for 15 minutes. So a read is
 given only to actors that asked before it began, one runs at a time (the next shared by all who ask meanwhile), an
-act carries its read's number across its requests (one read for a whole `mason add`), and a long read's session is
-asked after on the database every 15 s: idle there for over 10 s, the connection went silent and the read ends. **Why.** The 10-second timer connected about 8,640 times
+act carries its read's number across its requests (one read for a whole `mason add`), and a read is told slow from
+silent by its progress (`stallWatch`): while bytes arrive on its connection nothing is asked; after 15 s of none the
+database is asked about the read's session, within 10 s, on a connection of its own — working on it is slow, idle or
+gone or waiting to send results that never arrive (`ClientWrite`) is silent; and when the database cannot be asked
+either (a source that stopped answering altogether: a check made by the database's word alone was "couldn't tell" for
+the whole 15 minutes, the third re-check), a minute with neither bytes nor the database's word is silent. A silent read
+ends, said as such; the actor runs it again and the next read begins. **Why.** The 10-second timer connected about 8,640 times
 a day whatever each table's sync, so a serverless compute (Neon, Aurora Serverless) never suspended with every table
 `sync: off`. A failed read keeps the last one and is said in the log, and is not tried again within the minute.
 `tests/integration/cli-catalog-read.itest.ts` counts the run's connections over an idle window.

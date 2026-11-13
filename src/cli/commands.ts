@@ -191,15 +191,12 @@ export async function readState(run: DevRun, o: { fresh?: boolean } = {}): Promi
 
 /** `readState`, and the number of the read of the database's tables a `fresh` one was given: what the command's next
  *  requests carry, so one read serves the whole command (src/cli/control.ts callRunReading). */
-export async function readStateRead(run: DevRun, o: { fresh?: boolean } = {}): Promise<{ state: RunState; read: number | null }> {
+export async function readStateRead(run: DevRun, o: { fresh?: boolean; progress?: (said: string) => void } = {}): Promise<{ state: RunState; read: number | null }> {
   const route = `/api/state?columns=1${o.fresh === true ? "&fresh=1" : ""}`;
-  const r = o.fresh === true ? await callRunReading(run, "GET", route, undefined) : await callRun(run, "GET", route);
+  const r = o.fresh === true ? await callRunReading(run, "GET", route, undefined, null, o.progress ? { progress: o.progress } : {}) : await callRun(run, "GET", route);
   // the run is up and answered: a failure it says (the database's tables could not be read just now) is its own,
   // never said as the run not answering
-  if (r.status !== 200 && r.body.failure !== undefined) {
-    const next = (r.body.failure as { next?: Array<{ command: string; what?: string }> }).next ?? [];
-    throw new CommandFailed(runFailure(r, next.map((n): NextStep => n.what === undefined ? [n.command] : [n.command, n.what])));
-  }
+  if (r.status !== 200 && r.body.failure !== undefined) throw new CommandFailed(runFailure(r, runNext(r)));
   if (r.status !== 200) throw new RunUnreachable(String(r.body.error ?? `HTTP ${r.status}`));
   return { state: r.body as unknown as RunState, read: r.read };
 }
@@ -1183,8 +1180,10 @@ async function withoutRun(cmd: string, p: Project, json: boolean): Promise<{ db:
     edit: () => sourceToEdit(p.folder, p.root, () => projectSource(p)) };
 }
 
-/** What an edit answered, as the run's command server answers it: the result, or the refusal's HTTP status and sentence. */
-type Edited<T> = { ok: T } | { status: number; error: string; why?: string; fix?: string };
+/** What an edit answered, as the run's command server answers it: the result, or the refusal's HTTP status and sentence,
+ *  or `failure`: the run could not make the edit at all just now (the database's tables could not be read: a 503), said
+ *  whole as the command's failure — what is wrong, why, the way out and next — as the step before it says it. */
+type Edited<T> = { ok: T } | { status: number; error: string; failure?: Failure };
 function edited<T>(f: () => T): Edited<T> {
   try { return { ok: f() }; }
   catch (e) {
@@ -1200,8 +1199,9 @@ function edited<T>(f: () => T): Edited<T> {
 async function viaRun<T>(run: DevRun, route: "/api/pick" | "/api/remove", body: unknown, read: number | null = null): Promise<Edited<T>> {
   const r = await callRunReading(run, "POST", route, body, read);
   if (r.status === 200) return { ok: r.body as unknown as T };
-  const f = r.body.failure as { why?: unknown; fix?: unknown } | undefined;
-  return { status: r.status, error: String(r.body.error), ...(typeof f?.why === "string" ? { why: f.why } : {}), ...(typeof f?.fix === "string" ? { fix: f.fix } : {}) };
+  // a 503 is the run's own (src/cli/run-server.ts readNow): the database's tables could not be read just now, whatever
+  // the table; every other status refuses this one table, and an add goes on to the next
+  return { status: r.status, error: String(r.body.error), ...(r.status === 503 && r.body.failure !== undefined ? { failure: runFailure(r, runNext(r)) } : {}) };
 }
 
 // ------------------------------------------------------------------ mason add
@@ -1322,7 +1322,8 @@ export async function add(argv: string[]): Promise<number> {
     return guarded("add", json, async () => {
       // the tables as they are now: one made since the run last read them is one to add (the review of PR 900, B2)
       // one read of the database's tables for the whole add, every table of it (the re-check of PR 900)
-      const { state: s, read } = await readStateRead(run, { fresh: true });
+      // a large catalog's read outlasts one request: a person is told it goes on, a line each time the run says so
+      const { state: s, read } = await readStateRead(run, { fresh: true, ...(json ? {} : { progress: (said: string) => err(styleErr().dim(`  ${said} …`)) }) });
       return addTables({ tables: s.tables, file: s.source.file ?? null,
         pick: (table, columns, key) => viaRun<PickResult>(run, "/api/pick", { table, picked: true, columns, ...(key ? { key } : {}), ...(sync ? { sync: syncText(sync) } : {}), keep }, read),
         // --sync alone on tables already added: no copy starts (each is caught up by one poll), so wait has nothing to wait for
@@ -1370,10 +1371,19 @@ async function addTables(way: AddWay, specs: ReadonlyArray<{ table: string; colu
     if (!("table" in t)) { refused.push({ table: spec.table, message: t.message, code: t.code }); results.push({ table: spec.table, error: t.message }); if (!json) { steps.begin(`Adding ${spec.table}`); steps.fail(`Adding ${spec.table}`); note(`${t.message}${t.fix ? `: ${t.fix}` : ""}${t.next?.length ? ` (${t.next[0]![0]})` : ""}`); } continue; }
     if (!json) steps.begin(`Adding ${t.table}`);
     const r = await way.pick(t.table, spec.columns, spec.key);
+    if (!("ok" in r) && r.failure !== undefined) {
+      // THE RUN COULD NOT ADD AT ALL just now (the re-check of PR 900: the why and the way out were lost here): no later
+      // table could be added either, so the add stops and says the failure whole, with what to run for any added before
+      results.push({ table: t.table, error: r.error });
+      const f: Failure = { ...r.failure, next: [...(added.length ? way.next(added.length, wereAdded) : []), ...(r.failure.next ?? [])] };
+      if (json) { out(jsonText(ADD, { added: results, file, error: errorJson(f) }, f.next!)); return 1; }
+      steps.fail(`Adding ${t.table}`);
+      return failed("add", f, { json: false });
+    }
     if (!("ok" in r)) {
       refused.push({ table: t.table, message: r.error, code: r.status === 404 ? "not_found" : "refused" });
       results.push({ table: t.table, error: r.error });
-      if (!json) { steps.fail(`Adding ${t.table}`); note(r.error); if (r.why !== undefined) note(`why: ${r.why}`); if (r.fix !== undefined) note(`fix: ${r.fix}`); }
+      if (!json) { steps.fail(`Adding ${t.table}`); note(r.error); }
       continue;
     }
     const b = r.ok;
@@ -1488,6 +1498,8 @@ export async function remove(argv: string[]): Promise<number> {
 
 /** `mason remove`'s answer, the same whichever way the entries were cut; `running`: Mason is up, and dropped the copies. */
 function removedAnswer(r: Edited<RemoveResult>, names: readonly string[], running: boolean, json: boolean): number {
+  // the run could not remove at all just now (the database's tables could not be read): its failure, whole
+  if (!("ok" in r) && r.failure !== undefined) return failed("remove", r.failure, { json });
   if (!("ok" in r)) {
     return failed("remove", { message: `${names.join(", ")} ${names.length === 1 ? "was" : "were"} not removed`, code: r.status === 404 ? "not_found" : r.status === 400 ? "usage" : "refused", why: r.error,
       next: [["mason status", "the tables added"]] }, { json });
@@ -2010,6 +2022,12 @@ async function runningLogs(json: boolean): Promise<number> {
     out(endText({ next }, st));
     return 0;
   });
+}
+
+/** The next steps a run's failure names (`failure.next`, as src/cli/run-server.ts sendFailure writes them). */
+export function runNext(reply: { body: Record<string, unknown> }): NextStep[] {
+  const next = (reply.body.failure as { next?: Array<{ command: string; what?: string }> } | undefined)?.next ?? [];
+  return next.map((n): NextStep => n.what === undefined ? [n.command] : [n.command, n.what]);
 }
 
 /** A refusal the run answered, in the Failure shape it carries (`failure`, src/cli/run-server.ts sendFailure). */

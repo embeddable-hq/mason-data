@@ -135,8 +135,10 @@ CLI lacks).
   src/web/shared.js) ask again carrying the number, and an add's every step carries the number its first was given: ONE
   read serves the whole add. ONE READ AT A TIME on the database: an actor asking while one runs is given the next,
   shared by all who ask meanwhile. The read waits on a lock `CATALOG_LOCK_TIMEOUT_MS`, and on nothing else short: a
-  large catalog takes what it takes; a read whose session the database says does nothing for it is ended
-  (`silentWatch`), and `CATALOG_READ_TIMEOUT_MS` is the last guard. A usage sample and `/metrics` read `facts()` as it
+  large catalog takes what it takes. A read is told SLOW from SILENT by its progress (`stallWatch`): bytes arriving on
+  its connection; quiet `STALL_QUIET_MS`, the database is asked about its session (working on it: slow; idle, gone or
+  waiting to send to us: silent, ended); the database not answering either for `STALL_GIVE_UP_MS`: silent, ended.
+  `CATALOG_READ_TIMEOUT_MS` is the last guard. A usage sample and `/metrics` read `facts()` as it
   is. No
   timer reads it (tests/integration/cli-catalog-read.itest.ts counts an idle run's connections).
   **The request log's filters are read by ONE parser** (`requestFilter`, src/cli/request-filter.ts) at both entrances

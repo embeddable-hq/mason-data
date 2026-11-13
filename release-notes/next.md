@@ -88,7 +88,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   status`, `wait` and `doctor` and the web page reuse a read under a minute old and never wait more than 2 seconds for a
   new one; `mason tables`, `add` and `remove`, and the page's Columns and Sync choices, read them as they are now, and
   say so when they cannot (a lock held by a migration, a connection gone silent), changing nothing. One read serves a
-  whole `mason add`, however many tables, and Mason reads them one read at a time. With
+  whole `mason add`, however many tables, and Mason reads them one read at a time. A database with many tables can
+  take a minute to read: `mason add` waits for the read and says that it is still going. With
   every table `sync: off`, a run that nobody asks opens no connection after its first sync. A table made on the
   database can be added at once, and shows in `mason status` within about a minute.
 - **Table names are readable on the web page's Tables at laptop widths.** At 1024 px the name column was 2 px wide. Now

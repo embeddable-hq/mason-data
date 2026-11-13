@@ -48,12 +48,22 @@ function freePort(): Promise<number> {
 }
 /** A TCP proxy to the Postgres at `to`, listening on `host`: every connection made through it is counted. */
 /** `muteNext()`: the next connection made through it goes silent once logged in (its ReadyForQuery passed): nothing
- *  either way after it, the TCP connection kept — a connection gone silent, as a stalled network or proxy leaves it. */
-function countingProxy(host: string, to: { host: string; port: number }): Promise<{ port: number; connections: () => number; close: () => void; muteNext: () => void }> {
-  let n = 0, mute = false;
+ *  either way after it, the TCP connection kept — a connection gone silent, as a stalled network or proxy leaves it.
+ *  `darkAfterNext()`: the same, and every connection after it is taken and given nothing at all, until `light()` — a
+ *  database that stopped answering altogether, so it cannot be asked about the read either. */
+function countingProxy(host: string, to: { host: string; port: number }): Promise<{ port: number; connections: () => number; close: () => void; muteNext: () => void; darkAfterNext: () => void; light: () => void }> {
+  let n = 0, mute = false, dark = false, darkNext = false;
   const sockets = new Set<net.Socket>();
   const server = net.createServer((client) => {
     n++;
+    if (dark) {
+      // taken, and nothing ever answered: the client's own time limit is all that ends it
+      sockets.add(client);
+      client.on("data", () => undefined);
+      client.on("error", () => sockets.delete(client)).on("close", () => sockets.delete(client));
+      return;
+    }
+    if (darkNext) { darkNext = false; mute = true; dark = true; }
     const upstream = net.connect(to.port, to.host);
     sockets.add(client).add(upstream);
     if (mute) {
@@ -74,7 +84,8 @@ function countingProxy(host: string, to: { host: string; port: number }): Promis
   return new Promise((resolve, reject) => {
     server.on("error", reject);
     server.listen(0, host, () => resolve({ port: (server.address() as net.AddressInfo).port, connections: () => n,
-      close: () => { for (const s of sockets) s.destroy(); server.close(); }, muteNext: () => { mute = true; } }));
+      close: () => { for (const s of sockets) s.destroy(); server.close(); }, muteNext: () => { mute = true; },
+      darkAfterNext: () => { darkNext = true; }, light: () => { dark = false; } }));
   });
 }
 
@@ -212,6 +223,22 @@ test("an idle run whose tables are all sync: off opens no connection to the data
   assert.match((hushed.json as { error: { message: string } }).error.message, /could not be read just now: the database has had nothing to do for it for \d+ s .*the connection went silent/, hushed.stdout);
   assert.ok(Date.now() - began < 120_000, `said in ${Date.now() - began} ms, never after the last guard`);
   ok(await mason("add", "silenced", "--json"), "mason add, the next read answered");
+
+  // A DATABASE THAT STOPS ANSWERING ALTOGETHER mid-read (the third re-check of PR 900: the watch asked the database alone,
+  // could not reach it, and so "could not tell" for the whole quarter of an hour): nothing arrives on the read's
+  // connection, and the database cannot be asked either — after a minute of neither, the read ends, and the add says so
+  psql(dbUrl, "CREATE TABLE darkened (id int PRIMARY KEY)");
+  proxy.darkAfterNext();
+  const dark = Date.now();
+  try {
+    const unanswered = await mason("add", "darkened");
+    assert.equal(unanswered.status, 1, unanswered.stdout + unanswered.stderr);
+    assert.match(unanswered.stderr, /mason add: the tables of \S+ could not be read just now: nothing came from the database for \d+ s, and it could not be asked whether it still works on the read \(.*\): the connection went silent/, unanswered.stderr);
+    // the wait goes on, and a person is told so, never a silence
+    assert.match(unanswered.stderr, /the tables of \S+ are still being read \(for \d+ s\) …/, unanswered.stderr);
+    assert.ok(Date.now() - dark < 150_000, `said in ${Date.now() - dark} ms, never after the last guard`);
+  } finally { proxy.light(); }
+  ok(await mason("add", "darkened", "--json"), "mason add, the database answering again");
 
   // THE NEXT START, its first sync done: where the database is, still; that it is the main one, no longer
   ok(await mason("stop"), "mason stop");

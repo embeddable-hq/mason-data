@@ -125,7 +125,7 @@ export class PgConnection {
   private async handshake(hold: (s: net.Socket | tls.TLSSocket) => void): Promise<void> {
     const sock = await transport(this.opts, hold);
     this.socket = sock;
-    sock.on("data", (d: Buffer) => this.onData(d));
+    sock.on("data", (d: Buffer) => { this.heardAt = Date.now(); this.onData(d); });
     sock.on("error", (e) => this.fail(e));
     sock.on("close", () => this.fail(new Error("connection closed by the server")));
     await this.startup();
@@ -137,6 +137,11 @@ export class PgConnection {
   /** this session's backend on the server (BackendKeyData's process id), or null before it is known: what
    *  `pg_stat_activity` names it by (src/cli/dev.ts asks whether a long catalog read is still worked on) */
   get backendPid(): number | null { return this.key?.pid ?? null; }
+
+  /** when the server last sent this connection anything (`Date.now()`): a long read's progress, as the bytes that
+   *  arrive (src/cli/source-catalog.ts stallWatch) */
+  private heardAt = Date.now();
+  get lastHeardAt(): number { return this.heardAt; }
 
   /**
    * ASK THE SERVER TO CANCEL THIS SESSION'S RUNNING STATEMENT (Postgres's CancelRequest, on a connection of its own,

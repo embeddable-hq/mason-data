@@ -7,7 +7,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import type { SourceFacts } from "../src/cli/preflight.ts";
 // imported when the tests run: at a commit without the module the file still loads, and each test fails by name
-const { actRead, CATALOG_FRESH_MS, CATALOG_READ_HEADER, CATALOG_READ_TIMEOUT_MS, catalogFailure, silentWatch, sourceCatalog } = await import("../src/cli/source-catalog.ts" as string).catch(() => ({})) as typeof import("../src/cli/source-catalog.ts");
+const { actRead, CATALOG_FRESH_MS, CATALOG_READ_HEADER, CATALOG_READ_TIMEOUT_MS, catalogFailure, sourceCatalog, stallWatch } = await import("../src/cli/source-catalog.ts" as string).catch(() => ({})) as typeof import("../src/cli/source-catalog.ts");
 
 const factsOf = (tables: string[]): SourceFacts => ({ version: 160000, versionText: "16", standby: false, systemIdentifier: null,
   tables: tables.map((t) => ({ source: `public.${t}`, schema: "public", table: t, key: ["id"], rows: 1, bytes: 8192, comment: null, columns: [], foreignKeys: [] })) });
@@ -212,22 +212,62 @@ test("actRead: a carried number is waited on; a number this run never gave is a 
   assert.notEqual(made.read, 999);
 });
 
-// THE RE-CHECK OF PR 900 (finding 4): a connection silent after login held every add for the whole quarter of an hour
-test("a read's watch: the database's word that its session is not working on it ends the read once; a check that cannot tell goes on", async () => {
-  const answers: Array<string | null | Error> = [null, new Error("connection refused"), null, "its session is gone from the database", "never asked"];
+// THE RE-CHECKS OF PR 900 (finding 4): a connection silent after login held every add for the whole quarter of an hour;
+// then a source that stopped answering altogether did the same, its check "couldn't tell" every time
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const watchTimes = { lookMs: 5, quietMs: 40, giveUpMs: 150, checkMs: 20 };
+
+test("a read's watch: while bytes arrive the read progresses, and the database is never asked", async () => {
+  let checks = 0;
+  const said: string[] = [];
+  const stop = stallWatch({ ...watchTimes, lastHeard: () => Date.now(), check: async () => { checks++; return "never"; }, onSilent: (why) => said.push(why) });
+  await sleep(250);
+  stop();
+  assert.deepEqual([checks, said], [0, []]);
+});
+
+test("a read's watch: quiet, the database is asked; working on it is a slow read, never cut; not working on it ends the read once", async () => {
+  const heard = Date.now();
+  const slow: string[] = [];
+  let asked = 0;
+  const stop = stallWatch({ ...watchTimes, lastHeard: () => heard, check: async () => { asked++; return null; }, onSilent: (why) => slow.push(why) });
+  await sleep(300);
+  stop();
+  assert.ok(asked >= 2, `asked ${asked} times`);
+  assert.deepEqual(slow, [], "a long query the database works on is never cut, however long past giveUpMs");
   const said: string[] = [];
   let checks = 0;
-  const stop = silentWatch({ everyMs: 5, check: async () => { const a = answers[checks++]!; if (a instanceof Error) throw a; return a; }, onSilent: (why) => said.push(why) });
-  await new Promise((r) => setTimeout(r, 120));
-  stop();
-  assert.deepEqual(said, ["its session is gone from the database"], "told once, after a working answer and one that could not tell");
-  assert.equal(checks, 4, "no check after it");
-  // a slow read the database says it is working on is never cut
-  const none: string[] = [];
-  const stop2 = silentWatch({ everyMs: 5, check: async () => null, onSilent: (why) => none.push(why) });
-  await new Promise((r) => setTimeout(r, 60));
+  const stop2 = stallWatch({ ...watchTimes, lastHeard: () => heard, check: async () => (++checks === 1 ? null : "its session is gone from the database"), onSilent: (why) => said.push(why) });
+  await sleep(200);
   stop2();
-  assert.deepEqual(none, []);
+  assert.deepEqual(said, ["its session is gone from the database"]);
+  assert.equal(checks, 2, "no check after it");
+});
+
+test("a read's watch: a source that cannot be asked either ends the read once nothing was heard for giveUpMs, never before", async () => {
+  const heard = Date.now();
+  const said: Array<{ why: string; at: number }> = [];
+  let checks = 0;
+  const stop = stallWatch({ ...watchTimes, lastHeard: () => heard, check: async () => { checks++; throw new Error("connect ETIMEDOUT"); }, onSilent: (why) => said.push({ why, at: Date.now() - heard }) });
+  await sleep(320);
+  stop();
+  assert.equal(said.length, 1, JSON.stringify(said));
+  assert.ok(said[0]!.at >= watchTimes.giveUpMs, `ended at ${said[0]!.at} ms`);
+  assert.match(said[0]!.why, /^nothing came from the database for \d+ s, and it could not be asked whether it still works on the read \(connect ETIMEDOUT\): the connection went silent$/);
+  assert.ok(checks >= 2, "looked again while it could not tell");
+});
+
+test("a read's watch: a check that never answers is given up at checkMs, its connection told to close, and the watch goes on", async () => {
+  const heard = Date.now();
+  const signals: AbortSignal[] = [];
+  const said: string[] = [];
+  const stop = stallWatch({ ...watchTimes, lastHeard: () => heard, check: (signal) => { signals.push(signal); return new Promise<null>(() => undefined); }, onSilent: (why) => said.push(why) });
+  await sleep(320);
+  stop();
+  assert.ok(signals.length >= 2, `asked ${signals.length} times: a hung check never stops the watch`);
+  assert.ok(signals.slice(0, -1).every((s) => s.aborted), "each one given up is told to close");
+  assert.equal(said.length, 1);
+  assert.match(said[0]!, /\(no answer within 0 s\)/);
 });
 
 // THE COMMAND'S SIDE (src/cli/control.ts callRunReading): it asks again carrying the read's number while the read runs,
@@ -246,9 +286,11 @@ test("a command waits on its read by its number, across requests, and carries it
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
   try {
     const run = { name: "shop", pid: process.pid, control: { url: `http://127.0.0.1:${(server.address() as { port: number }).port}`, token: "t" } } as unknown as Parameters<typeof callRunReading>[0];
-    const r = await callRunReading(run, "GET", "/api/state?columns=1&fresh=1", undefined);
+    const progress: string[] = [];
+    const r = await callRunReading(run, "GET", "/api/state?columns=1&fresh=1", undefined, null, { progress: (said) => progress.push(said) });
     assert.deepEqual([r.status, r.read], [200, 7]);
     assert.deepEqual(seen, [undefined, "7", "7"], "asked again carrying the read's number");
+    assert.deepEqual(progress, ["still", "still"], "a person is told, at each ask, that the read goes on");
     const pick = await callRunReading(run, "POST", "/api/pick", { table: "x" }, r.read);
     assert.equal(pick.status, 200);
     assert.equal(seen.at(-1), "7", "the next step carries it");

@@ -169,28 +169,63 @@ export function sourceCatalog(first: SourceFacts, read: (signal: AbortSignal) =>
   };
 }
 
-/** How often a read that has not ended is asked after (the database, on a connection of its own, about the read's own
- *  session), and how long that session may have done nothing on it before the read is said gone silent. */
-export const SILENT_CHECK_MS = 15_000;
-export const SILENT_AFTER_S = 10;
+/** How often the watch on a read looks at it. */
+export const STALL_LOOK_MS = 5_000;
+/** Nothing received on the read's connection for this long: the database is asked whether it still works on the read. */
+export const STALL_QUIET_MS = 15_000;
+/** Nothing received, and no word from the database that it works on the read, for this long: the read went silent. */
+export const STALL_GIVE_UP_MS = 60_000;
+/** One question to the database about the read gets this long, its connection included. */
+export const STALL_CHECK_MS = 10_000;
 
 /**
- * A WATCH ON A READ THAT DOES NOT END (the re-check of PR 900: a connection gone silent after login held every add for
- * the whole quarter of an hour of the last guard): every `everyMs`, `check` asks the database whether the read's own
- * session is working on it, and answers a reason when it is not (gone, or idle a while), null when it is (a large
- * catalog's read is long, and is never cut); one that cannot tell (it throws: the database away, a connection refused)
- * is "couldn't tell", and the watch goes on. On a reason, `onSilent` is told once and the watch ends. A slow read pays one
- * small query each `everyMs`, only while it runs past it.
+ * A WATCH ON A READ THAT DOES NOT END (the re-checks of PR 900: a connection gone silent held every add for the whole
+ * quarter of an hour of the last guard). It tells SLOW BUT PROGRESSING from SILENT by progress, never by a cap a large
+ * catalog's read could need:
+ *
+ * - bytes arrive on the read's connection (`lastHeard`): it progresses, and nothing is asked;
+ * - none for `quietMs`: `check` asks the database, on a connection of its own and within `checkMs`, about the read's
+ *   session. Working on it (null: a long query of a large catalog) — it progresses. Not working on it (a reason: the
+ *   session is gone, idle, or waiting to send results that never arrive) — it went silent, and `onSilent` is told;
+ * - the database cannot be asked (`check` throws or outlasts `checkMs`: a source that stopped answering altogether) is
+ *   "couldn't tell", and the watch looks again; once neither the connection nor the database has said anything for
+ *   `giveUpMs`, the read went silent all the same. A read is cheap to begin again, and an add held for a quarter of an
+ *   hour is not.
+ *
+ * `onSilent` is told once, and the watch ends. A read that progresses costs the database nothing; a slow one, one small
+ * query each `lookMs` while it is quiet.
  */
-export function silentWatch(o: { everyMs?: number; check: () => Promise<string | null>; onSilent: (why: string) => void }): () => void {
+export function stallWatch(o: {
+  lastHeard: () => number; check: (signal: AbortSignal) => Promise<string | null>; onSilent: (why: string) => void;
+  now?: () => number; lookMs?: number; quietMs?: number; giveUpMs?: number; checkMs?: number;
+}): () => void {
+  const clock = o.now ?? Date.now;
+  const quietMs = o.quietMs ?? STALL_QUIET_MS, giveUpMs = o.giveUpMs ?? STALL_GIVE_UP_MS, checkMs = o.checkMs ?? STALL_CHECK_MS;
   let stopped = false, checking = false;
+  // when the database last said it works on the read
+  let confirmedAt = -Infinity;
+  const silent = (why: string): void => { if (!stopped) { stopped = true; clearInterval(timer); o.onSilent(why); } };
   const timer = setInterval(() => {
-    if (stopped || checking) return;
+    if (stopped || checking || clock() - o.lastHeard() < quietMs) return;
     checking = true;
-    void o.check().then((why) => {
-      if (why !== null && !stopped) { stopped = true; clearInterval(timer); o.onSilent(why); }
-    }, () => undefined /* couldn't tell: the read goes on, asked after again at the next turn */).finally(() => { checking = false; });
-  }, o.everyMs ?? SILENT_CHECK_MS);
+    const ask = new AbortController();
+    let limit: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<never>((_, reject) => {
+      limit = setTimeout(() => { ask.abort(); reject(new Error(`no answer within ${Math.round(checkMs / 1000)} s`)); }, checkMs);
+      limit.unref?.();
+    });
+    void Promise.race([o.check(ask.signal), late]).then((why) => {
+      if (why === null) confirmedAt = clock();
+      else silent(why);
+    }, (e: unknown) => {
+      // couldn't tell: the database could not be asked. Looked at again next time, until nothing at all was heard for
+      // giveUpMs: neither bytes on the read's connection nor the database's word
+      const heard = Math.max(o.lastHeard(), confirmedAt);
+      if (clock() - heard >= giveUpMs) {
+        silent(`nothing came from the database for ${Math.round((clock() - o.lastHeard()) / 1000)} s, and it could not be asked whether it still works on the read (${(e as Error).message}): the connection went silent`);
+      }
+    }).finally(() => { clearTimeout(limit); checking = false; });
+  }, o.lookMs ?? STALL_LOOK_MS);
   timer.unref?.();
   return () => { stopped = true; clearInterval(timer); };
 }

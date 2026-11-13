@@ -30,7 +30,7 @@ import type { Server } from "node:http";
 import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, PRIMARY_NOTE, readSourceFacts, type SourceFacts } from "./preflight.ts";
-import { actRead, CATALOG_LOCK_TIMEOUT_MS, SILENT_AFTER_S, silentWatch, sourceCatalog, STATE_WAIT_MS } from "./source-catalog.ts";
+import { actRead, CATALOG_LOCK_TIMEOUT_MS, sourceCatalog, stallWatch, STATE_WAIT_MS } from "./source-catalog.ts";
 import { uiReadOnlyAllowSetting, uiReadOnlySetting, type PageArea } from "./ui-read-only.ts";
 import { backLinkOf, uiBackLinkSetting } from "./ui-back-link.ts";
 import { navOf, uiNavSetting } from "./ui-nav.ts";
@@ -418,18 +418,28 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     // a read that ran out of time: its connection closed, so whatever it waits on ends (src/cli/source-catalog.ts)
     if (signal.aborted) { c.pg.close(); throw new Error("the read ran out of time"); }
     signal.addEventListener("abort", () => c.pg.close(), { once: true });
-    // A CONNECTION GONE SILENT is ended by the database's word, never by a cap a large catalog's read could need: while
-    // the read runs, the database is asked (on a connection of its own) whether this read's session is working on it
+    // A CONNECTION GONE SILENT is told from a slow read by its progress, never by a cap a large catalog's read could need
+    // (src/cli/source-catalog.ts stallWatch): bytes arriving on it, else the database's word about its session
     let silent: string | null = null;
     const pid = c.pg.backendPid;
-    const stopWatch = pid === null ? () => undefined : silentWatch({
-      check: async () => {
+    const stopWatch = stallWatch({
+      lastHeard: () => c.pg.lastHeardAt,
+      check: async (signal) => {
+        // a session the database never named (no BackendKeyData) cannot be asked after: couldn't tell
+        if (pid === null) throw new Error("the database did not name the read's session");
         const p = await connectSource(source);
         if ("failure" in p) throw new Error(p.failure.message);
+        if (signal.aborted) { p.pg.close(); throw new Error("no answer in time"); }
+        signal.addEventListener("abort", () => p.pg.close(), { once: true });
         try {
-          const row = (await p.pg.query(`SELECT state, extract(epoch FROM now() - state_change)::float8::text FROM pg_stat_activity WHERE pid = ${pid}`)).rows[0];
-          if (row === undefined) return "its session is gone from the database";
-          return row[0] !== "active" && Number(row[1]) > SILENT_AFTER_S ? `the database has had nothing to do for it for ${Math.round(Number(row[1]))} s (its session is ${row[0] ?? "unknown"}): the connection went silent` : null;
+          const row = (await p.pg.query(`SELECT state, wait_event, extract(epoch FROM now() - state_change)::float8::text FROM pg_stat_activity WHERE pid = ${pid}`)).rows[0];
+          if (row === undefined) return "its session is gone from the database: the connection went silent";
+          // a state this user may not see is no answer
+          if (row[0] === null || row[0] === undefined) throw new Error("the database does not show the read's session to this user");
+          // the database waits to send results this run never received: the connection, not the database, is stuck
+          if (row[0] === "active" && row[1] === "ClientWrite") return "the database has results for it that do not arrive: the connection went silent";
+          if (row[0] === "active") return null;
+          return `the database has had nothing to do for it for ${Math.round(Number(row[2]))} s (its session is ${row[0]}): the connection went silent`;
         } finally { p.pg.close(); }
       },
       onSilent: (why) => { silent = why; c.pg.close(); },

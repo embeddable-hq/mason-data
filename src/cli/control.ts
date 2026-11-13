@@ -50,13 +50,16 @@ export async function callRun(run: DevRun, method: "GET" | "POST", route: string
  * again carrying it — waiting on the same read, never a new one — until the read ends or fails, or `CATALOG_READ_TIMEOUT_MS`
  * passes (the re-check of PR 900: an add of a 10,000-table catalog, 44 s a read, failed ten times as "still being read").
  */
-export async function callRunReading(run: DevRun, method: "GET" | "POST", route: string, body: unknown, read: number | null = null): Promise<{ status: number; body: Record<string, unknown>; read: number | null }> {
+export async function callRunReading(run: DevRun, method: "GET" | "POST", route: string, body: unknown, read: number | null = null,
+  o: { progress?: (said: string) => void } = {}): Promise<{ status: number; body: Record<string, unknown>; read: number | null }> {
   let carried = read;
   const until = Date.now() + CATALOG_READ_TIMEOUT_MS;
   for (;;) {
     const r = await callRun(run, method, route, body, 30_000, carried !== null ? { [CATALOG_READ_HEADER]: String(carried) } : {});
     const again = r.status === 503 && typeof r.body.catalogRead === "number" && Number.isInteger(r.body.catalogRead);
     if (!again || Date.now() > until) return { ...r, read: r.read ?? carried };
+    // a person sees the wait go on (the run's own words: how long the read has run), never a silence or a failure
+    o.progress?.(String(r.body.error));
     carried = r.body.catalogRead as number;
   }
 }
