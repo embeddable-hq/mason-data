@@ -63,7 +63,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   nine with the host's (`MASON_UI_OVERVIEW_CARD`): four by two and three by three from 641 px up, two a row on a phone.
 - **Overview**, Getting started (while setting up is not done): ✓ Mason is running · ✓/○ Sync a table · ✓/○ Connect
   a tool — each step in the same words done or not (the ✓ or ○ says which), each ○ with its one action (Add a table →
-  Tables, Connect a tool → Users, where a user is added for it). Connect a tool is done once a tool has used
+  Tables, **Create a user first** → Users, where a user is added for it; the step's text stays Connect a tool). Connect a tool is done once a tool has used
   Mason, never because a user exists: a session of a `mason user` open now (`/api/state` `sessions.byClient`, which a
   tool's login with only its catalog queries already makes), one seen open while the page was shown (held by the page),
   or a statement completed in the request log's week (`/api/queries`). Gone once the three are done; not drawn while it
@@ -368,7 +368,7 @@ listens, and every browser connection crosses that one ssh connection as frames 
   (`src/cli/run-server.ts`).
 - **A page that only shows: `MASON_UI_READ_ONLY=1`.** For a page shown to someone who should only look (behind a
   reverse proxy, on the socket), `mason serve` with it set makes the page offer no control that changes anything — no
-  Add, Remove, Sync, Disable, Enable, Cancel, Add a user, Connect a tool or Share, each page saying
+  Add, Remove, Sync, Disable, Enable, Cancel, Add a user, Create a user first or Share, each page saying
   why — and its server refuses every request
   of the page that is not a GET or a HEAD, whatever its path, with "the web page is read-only here" in the failure shape
   (`src/cli/ui-read-only.ts`). Viewing is unchanged. It covers the page alone: a request with the run's token is the
@@ -385,7 +385,7 @@ listens, and every browser connection crosses that one ssh connection as frames 
   committed offers no Add or Remove and refuses them `409`, as without the allowance (Sync now stays).
 - **A read-only page that still manages its users: `MASON_UI_READ_ONLY_ALLOW=users`.** For a site that proxies the page
   and lets its users' changes through its own checks, `MASON_UI_READ_ONLY=1` beside it keeps the Users page's Add a
-  user (with its Connects from), its "from …" line, **Disable**, **Enable** and **Remove**, and the Overview's Getting started Connect a tool. The
+  user (with its Connects from), its "from …" line, **Disable**, **Enable** and **Remove**, and the Overview's Getting started Create a user first. The
   server lets through exactly these routes, each `<name>` exactly one path segment (a user's name, encoded), never a
   prefix:
   - `POST /api/users` (Add a user);

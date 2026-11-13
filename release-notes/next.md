@@ -7,7 +7,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   the added tables are synced while the rest sync; or how many tables' syncs failed, with a link to them on Tables.
   Getting started has three steps (Mason is running, Sync a table, Connect a tool), each in the same words done or not,
   and goes once those are done. Connect a tool is done once a tool has used Mason (it has logged in, or run a query),
-  no longer as soon as a user exists; its button goes to the Users page.
+  no longer as soon as a user exists; its button, "Create a user first", goes to the Users page.
 - **`mason status` and the web page's Overview say the same rows under new labels.** Source is now Sources file, Disk
   is Free disk, Sessions is Connections open, and the Mason row is two: Version (`dev`, or the version) and Up (how long
   and since when, with the pid in `mason status`; no more "one process"). On the Overview, Database and Changes are under

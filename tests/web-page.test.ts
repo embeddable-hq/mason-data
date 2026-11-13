@@ -843,7 +843,7 @@ test("a read-only page that still edits its tables (pageReadOnlyAllow: [tables])
   const nobody = { queries: { week: { completed: 0 } } };
   const fresh = checklist({ ...NONE, pageReadOnly: why, pageReadOnlyAllow: ["tables"] }, nobody);
   assert.match(fresh, /Add a table/);
-  assert.ok(!/href="#users"/.test(fresh), "no Connect a tool");
+  assert.ok(!/href="#users"/.test(fresh), "no Create a user first");
   assert.match(textOf(fresh), /○ Connect a tool \(to do\)$/, "the step still shows, without its button");
   // an allowance the page does not know is no allowance; without the page read-only it changes nothing
   const renderTables = fn<[unknown], string>("renderTables");
@@ -1069,7 +1069,7 @@ test("every link of Mason's own into a replaced view goes to the host's page: th
     const app = fn<[unknown], App>("createApp")(run.fetch);
     await app.poll();
     const overview = app.view().status!;
-    const leads = overview.match(/<a class="btn[^"]*" href="[^"]*"(?: rel="noreferrer")?>Connect a tool<\/a>/g) ?? [];
+    const leads = overview.match(/<a class="btn[^"]*" href="[^"]*"(?: rel="noreferrer")?>Create a user first<\/a>/g) ?? [];
     assert.equal(leads.length, 1, "Getting started's step");
     for (const a of leads) assert.ok(a.includes(pageNav === null ? 'href="#users">' : 'href="/host/users" rel="noreferrer">'), a);
   }
@@ -1715,7 +1715,7 @@ test("a read-only page that still manages its users (pageReadOnlyAllow: [users])
   const { renderChecklist: checklist } = await import(path.join(WEB, "pages", "status.js") as string) as { renderChecklist: (s: unknown, u: unknown) => string };
   const nobody = { queries: { week: { completed: 0 } } };
   const fresh = checklist({ ...NONE, pageReadOnly: why, pageReadOnlyAllow: ["users"] }, nobody);
-  assert.match(fresh, /href="#users">Connect a tool/);
+  assert.match(fresh, /href="#users">Create a user first/);
   assert.ok(!/Add a table/.test(fresh));
   // the renderers alone: an allowance the page does not know is no allowance; without the page read-only nothing changes
   const renderAddUser = fn<[unknown], string>("renderAddUser");
@@ -4561,11 +4561,11 @@ test("the Overview's first-run checklist: Mason is running, Sync a table, Connec
   const withSessions = (s: RunState, byClient: unknown[]) => ({ ...s, sessions: { open: byClient.length, byClient } });
   // a fresh install: a table added and synced, no tool has used Mason
   const fresh = renderChecklist(RUNNING, none);
-  assert.equal(textOf(fresh), "Getting started 2 of 3 done ✓ Mason is running (done) ✓ Sync a table (done) ○ Connect a tool (to do) Connect a tool");
+  assert.equal(textOf(fresh), "Getting started 2 of 3 done ✓ Mason is running (done) ✓ Sync a table (done) ○ Connect a tool (to do) Create a user first");
   // the steps drawn as courses of a wall beside its title: a brick a step, laid as it is done (drawing, hidden from a screen reader)
   assert.match(fresh, /<p class="checklist-title"><span class="courses" aria-hidden="true"><i class="on"><\/i><i class="on"><\/i><i><\/i><\/span>Getting started /);
-  assert.match(fresh, /<li class="step-todo"><span class="mark" aria-hidden="true">○<\/span><span class="what">Connect a tool<span class="sr"> \(to do\)<\/span><\/span><a class="btn small primary" href="#users">Connect a tool<\/a><\/li>/, "the next step is the primary action, to the Users page");
-  assert.ok(!/Create a user|A first statement answered|Copy the psql line|data-copy/.test(fresh));
+  assert.match(fresh, /<li class="step-todo"><span class="mark" aria-hidden="true">○<\/span><span class="what">Connect a tool<span class="sr"> \(to do\)<\/span><\/span><a class="btn small primary" href="#users">Create a user first<\/a><\/li>/, "the next step is the primary action, to the Users page: its text the step's, its button what to do first");
+  assert.ok(!/A first statement answered|Copy the psql line|data-copy/.test(fresh));
   // nothing added: Add a table leads to Tables
   assert.match(renderChecklist(NONE, none), /○<\/span><span class="what">Sync a table<span class="sr"> \(to do\)<\/span><\/span><a class="btn small primary" href="#tables">Add a table<\/a>/);
   // copying: no action, it is under way
@@ -4591,7 +4591,7 @@ test("the Overview's first-run checklist: Mason is running, Sync a table, Connec
   await app.poll();
   assert.ok(!run.asked.includes("GET api/users"), "the users are not read for it");
   const text = textOf(app.view().status!);
-  assert.match(text, /^mason status Ready Every added table is synced and served Database .*? Changes .*? Getting started 2 of 3 done .* ○ Connect a tool \(to do\) Connect a tool /);
+  assert.match(text, /^mason status Ready Every added table is synced and served Database .*? Changes .*? Getting started 2 of 3 done .* ○ Connect a tool \(to do\) Create a user first /);
   assert.ok(text.indexOf("Getting started") < text.indexOf("Tables synced"), "above the cards");
   // a tool logs in: done, and the checklist goes; its session closed before a statement reached the summary: still done
   run.answers.set("GET api/state", answer(withSessions(RUNNING, [{ user: "metabase", client: "Metabase", open: 1, running: 0 }])));

@@ -419,7 +419,7 @@ export const toolConnected = (s) => Array.isArray(s?.sessions?.byClient) && s.se
  * one served), Connect a tool — done once a tool has used Mason: a user's session open now (`toolConnected`), one seen
  * open while the page was shown (`seen`, the page's), or a statement completed in the request log's week (`queries`:
  * `/api/queries`' body, or `{ failure }`) — each step in its words done or not (the ✓ or ○ says which), a ○ with its one
- * action: Add a table (Tables), Connect a tool (Users, where a user is added for it). A user existing is not a tool
+ * action: Add a table (Tables), Create a user first (Users, where a user is added for it). A user existing is not a tool
  * connected. "" once all three are done, and while it cannot tell whether a tool connected (no session, and the request
  * log's summary not read or refused): a checklist never says ○ for what it could not tell.
  */
@@ -438,7 +438,7 @@ export function renderChecklist(s, queries, seen = false) {
   const steps = [
     ["Mason is running", true, ""],
     ["Sync a table", copied, copying ? `<span class="dim">syncing now</span>` : added || tablesLook ? "" : `<a class="btn small primary" href="${LINKS.tables}">Add a table</a>`],
-    ["Connect a tool", connected, looks ? "" : `<a class="btn small${copied ? " primary" : ""}" href="#users">Connect a tool</a>`],
+    ["Connect a tool", connected, looks ? "" : `<a class="btn small${copied ? " primary" : ""}" href="#users">Create a user first</a>`],
   ];
   const done = steps.filter(([, ok]) => ok).length;
   return `<div class="checklist" role="group" aria-label="Getting started"><p class="checklist-title"><span class="courses" aria-hidden="true">${steps.map(([, ok]) => `<i${ok ? ' class="on"' : ""}></i>`).join("")}</span>Getting started <span class="dim">${done} of ${steps.length} done</span></p><ol>` +
