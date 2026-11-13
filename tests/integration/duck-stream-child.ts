@@ -6,19 +6,20 @@
  * JSON line: the DuckDB checksum the test compares with the source's, and every line the sync logged. A heap that runs
  * out kills it, which the test reports with its stderr.
  *
- * argv[2]: JSON { url, file, memoryLimit, slot, publication, table: AddedTable, sql, checksum }
+ * argv[2]: JSON { url, file, memoryLimit, slot, publication, table: AddedTable, sql, checksum, compact?: CompactOptions }
  */
 import { spawnSync } from "node:child_process";
 import { DuckStore } from "../../src/duck/store.ts";
-import { Sync, type AddedTable } from "../../src/duck/sync.ts";
+import { Sync, type AddedTable, type CompactOptions } from "../../src/duck/sync.ts";
 import { parseSource } from "../../src/cli/preflight.ts";
 
-const a = JSON.parse(process.argv[2]!) as { url: string; file: string; memoryLimit: string; slot: string; publication: string; table: AddedTable; sql: string; checksum: string };
+const a = JSON.parse(process.argv[2]!) as { url: string; file: string; memoryLimit: string; slot: string; publication: string; table: AddedTable; sql: string; checksum: string; compact?: CompactOptions };
 const parsed = parseSource(a.url);
 if ("problem" in parsed) throw new Error(parsed.problem);
 const logged: string[] = [];
 const store = await DuckStore.open(a.file, (l) => logged.push(l), { memoryLimit: a.memoryLimit });
-const sync = new Sync(store, parsed.source, new URL(a.url).pathname.slice(1), (l) => logged.push(l), 3_600_000, "replication", { slot: a.slot, publication: a.publication, owned: true });
+const sync = new Sync(store, parsed.source, new URL(a.url).pathname.slice(1), (l) => logged.push(l), 3_600_000, "replication", { slot: a.slot, publication: a.publication, owned: true },
+  a.compact ? { compact: a.compact } : {});
 try {
   await sync.open();
   void sync.setTables([a.table]);

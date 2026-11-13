@@ -273,6 +273,10 @@ test("a transaction changing every row of a big table is applied in committed pi
     // ONE transaction: every row updated, a few deleted and inserted
     sql: "BEGIN; UPDATE bulk SET n = -n; DELETE FROM bulk WHERE n % 100 = 0; INSERT INTO bulk SELECT md5((-g)::text)::uuid, g FROM generate_series(1, 1000) g; COMMIT",
     checksum: "SELECT count(*), sum(n), sum(('0x' || substr(md5(id::VARCHAR), 1, 8))::UBIGINT) FROM public.bulk",
+    // ITS COMPACTION CHECKED EVERY 3 S, so the table is compacted while the transaction arrives (issue 904: its changes
+    // are kept aside meanwhile, and caughtUp resolved — the table said current — before they were applied, 1 run in 8
+    // with the default first check at 60 s; every run with these)
+    compact: { firstCheckMs: 3_000, checkMs: 3_000 },
   };
   const child = spawn(process.execPath, [`--max-old-space-size=${HEAP_MB}`, path.join(import.meta.dirname, "duck-stream-child.ts"), JSON.stringify(args)], { stdio: ["ignore", "pipe", "pipe"] });
   let out = "", err = "";

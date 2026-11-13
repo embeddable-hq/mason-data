@@ -182,6 +182,8 @@ export function keptText(f: CopyFacts | null, now: number = Date.now(), rows = t
   const where = `replicated, at ${k.position}, ${synced}, ${k.lastCommit === null ? "no change applied this run" : `last change committed ${utc(k.lastCommit)}`}`;
   if (k.state === "streamed") return k.notRunning === null ? `kept current by ${stream}, ${where}`
     : `streamed by ${stream}, ${where}; NOT kept current now, the stream is not running: ${k.notRunning}`;
+  // being compacted: as of the moment its changes began to be kept aside (issue 904)
+  if (k.state === "compacting") return `streamed by ${stream}, ${where}; ${k.why ?? ""}`;
   return k.state === "left-out" ? `NOT kept current: left out of ${stream}: ${k.why ?? ""}`
     : `${stream}, not streamed yet: ${k.why ?? ""}`;
 }

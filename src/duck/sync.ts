@@ -329,14 +329,16 @@ export interface StreamTableStatus {
   /** `schema.table` */
   table: string;
   /** streamed: its changes applied as they come; catching-up: copied, one poll from its watermark first (the stream holds
-   *  its changes meanwhile); waiting: not streamed until copied and caught up; left-out: the publication does not carry it */
-  state: "streamed" | "catching-up" | "waiting" | "left-out";
+   *  its changes meanwhile); compacting: being compacted, its changes kept aside until the compaction ends; waiting: not streamed until copied and caught up; left-out: the publication does not carry it */
+  state: "streamed" | "catching-up" | "compacting" | "waiting" | "left-out";
   /** why it is not streamed, in the reader's words; null when it is */
   why: string | null;
   /** catching up: queued for its poll, polling, or applying what the stream held meanwhile; from: the watermark's time
    *  (the poll reads every row changed since); startedAt: when its poll started; held: the changes the stream holds of it;
    *  retryAt: when it is tried again after a failure (`backOff`), null when it is not waiting out one */
   catchUp?: { phase: "queued" | "polling" | "applying"; from: string | null; startedAt: string | null; held: number; retryAt: string | null };
+  /** compacting: the changes the stream kept aside since its compaction began, applied when it ends (issue 904) */
+  compacting?: { held: number };
   /** the changes the stream applied to it this run, as the database made them */
   applied: ChangeCounts;
 }
@@ -964,6 +966,8 @@ const COMPACT_CUT_SHORT = "after its compaction was cut short";
 /** where a streamed table's changes go while it is compacted (`spilling`, `replaySpill`), and how many are read back a
  *  piece: a stream batch's own bound (`applySize`'s pieces), so a replay holds no more memory than a batch */
 const SPILL_TABLE = `${MASON_SCHEMA}.compact_held`;
+/** why a streamed table being compacted is not current now (`streamTable`'s `compacting`; issue 904), in the reader's words */
+export const COMPACTING_WHY = "it is being compacted, and the changes made since are applied when the compaction ends";
 const SPILL_PIECE = 50_000;
 /** when the space is read, and what makes a table due (src/duck/compact.ts `wasteOf`) */
 export interface CompactOptions { checkMs?: number; firstCheckMs?: number; wasteShare?: number; minWasteBlocks?: number;
@@ -1114,6 +1118,12 @@ export class Sync {
   private readonly compactRetries = new Map<string, { failures: number; at: number }>();
   /** the streamed tables being compacted: their changes are written to `SPILL_TABLE`, never into the table (`compact`) */
   private readonly spilling = new Set<string>();
+  /** WHEN EACH TABLE BEING COMPACTED WAS LAST CURRENT (issue 904): `keptOf`'s syncedAt at the moment its changes began to
+   *  be kept aside, and how many changes the stream kept aside since. Its `synced` stays as it was meanwhile
+   *  (`applyChanges`), and moves to the stream's last position only once what was kept aside is applied (`replaySpill`) */
+  private readonly heldFrom = new Map<string, { syncedAt: string | null; held: number }>();
+  /** the time of the last batch the stream applied with a position (`Synced.at` of a streamed table) */
+  private lastPositionAt: string | null = null;
   /** the spill's order: one number a change, rising across the run (a spill is cleared at every open) */
   private spillSeq = 0n;
   /** the connection the space is read on (`checkCompaction`): never the writer's, nor the rebuilds' a copy holds */
@@ -1452,6 +1462,8 @@ export class Sync {
         await this.store.writer.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.catch_up VALUES (${literal(source)}, ${literal(COMPACT_CUT_SHORT)}, now())`);
         // a spill a failure left behind is no change of this table's: the mark it stood under was caught up since
         await this.store.writer.run(`DELETE FROM ${SPILL_TABLE} WHERE source = $1`, [source]);
+        // current as of now, and no later until what is kept aside from here is applied (issue 904)
+        this.heldFrom.set(source, { syncedAt: this.streamedSyncedAt(source, this.joinedNow.has(source)), held: 0 });
         this.spilling.add(source);
       }
       this.refreshStreamed();
@@ -1494,8 +1506,14 @@ export class Sync {
         catch (f) { this.log(`${source}: what its compaction left could not be dropped (dropped at the next start): ${this.errorText(f)}`); }
         if (!(e instanceof Stopping)) {
           try { await this.replaySpill(t); }
-          catch (f) { this.log(`${source}: the changes the stream spilled during its compaction could not be applied (it is caught up by one poll at the next start): ${this.errorText(f)}`); }
+          catch (f) { this.log(`${source}: the changes the stream spilled during its compaction could not be applied (it is caught up by one poll): ${this.errorText(f)}`); }
         }
+      }
+      // STILL KEPT ASIDE (a stop, or a replay that failed before it ended): they are not in the table, so it is not
+      // current — behind, as its mark in `_mason.catch_up` says, until one poll catches it up (issue 904)
+      if (this.spilling.has(source)) {
+        this.behind.set(source, { why: COMPACT_CUT_SHORT });
+        this.refreshStreamed();
       }
       if (e instanceof Stopping) {
         this.log(`compaction of ${source} stopped: Mason is stopping (rolled back; its synced table serves as it was${replicated ? ", and is caught up by one poll at the next start" : ""})`);
@@ -1513,6 +1531,7 @@ export class Sync {
       await this.onWriter(async () => {
         if (this.rebuildingNow?.source === source) this.rebuildingNow = null;
         this.spilling.delete(source);
+        this.heldFrom.delete(source);
         this.refreshStreamed();
       });
     }
@@ -1544,8 +1563,15 @@ export class Sync {
         const rows = (await w.runAndReadAll(`SELECT seq, "key", change FROM ${SPILL_TABLE} WHERE source = $1 ORDER BY seq LIMIT ${SPILL_PIECE}`, [source])).getRowsJS() as Array<[bigint, string | null, string]>;
         if (rows.length === 0) {
           this.spilling.delete(source);
+          this.heldFrom.delete(source);
           await w.run(`DELETE FROM ${MASON_SCHEMA}.catch_up WHERE source = ${literal(source)} AND why = ${literal(COMPACT_CUT_SHORT)}`);
           this.refreshStreamed();
+          // EVERYTHING KEPT ASIDE IS IN THE TABLE NOW, and every batch from here is written into it: it is current as of
+          // the stream's last position, which it was not marked at while its changes waited (issue 904)
+          const was = this.synced.get(source);
+          if (this.joinedNow.has(source) && this.lastPositionAt !== null && (was === undefined || this.lastPositionAt > was.at)) {
+            this.synced.set(source, { at: this.lastPositionAt, seconds: null, by: "stream" });
+          }
           return false;
         }
         const piece = noChanges(this.streamed.get(source)?.stay ?? null);
@@ -1561,6 +1587,7 @@ export class Sync {
         } catch (e) {
           // not applied: the mark stands and the spill goes (the one poll that catches the table up reads what it held)
           this.spilling.delete(source);
+          this.heldFrom.delete(source);
           await w.run(`DELETE FROM ${SPILL_TABLE} WHERE source = $1`, [source]);
           if (widerIn(e, source)) this.snapshots.delete(source);
           else this.behind.set(source, { why: COMPACT_CUT_SHORT });
@@ -1865,14 +1892,21 @@ export class Sync {
     const s = this.stream;
     const part = this.streamTable(t, now, s);
     // current as of its last copy or poll, or — streamed — the last moment the stream had all the database wrote
-    const polled = this.polledAt.get(t.source) ?? null;
-    const streamed = part.state === "streamed" && this.streamCurrentAt !== null ? new Date(this.streamCurrentAt).toISOString() : null;
-    const syncedAt = streamed !== null && (polled === null || streamed > polled) ? streamed : polled;
+    // being compacted: as of the moment its changes began to be kept aside (issue 904)
+    const syncedAt = part.state === "compacting" ? this.heldFrom.get(t.source)?.syncedAt ?? null : this.streamedSyncedAt(t.source, part.state === "streamed");
     const notRunning = this.streamDownWhy(s, st);
     const promise = keptPromise({ mode: "replication", intervalSeconds: 0, lastPollMs: null, lastPassMs: this.lastPassMs, pending: part.state === "streamed" ? null : part.why,
       notRunning, passFailed: false, dueMs: null, now });
     return { by: "replication", slot: this.replication?.slot ?? "", state: part.state, why: part.why, position: formatLsn(s?.position() ?? this.appliedLsn),
       lastCommit: this.lastBatch === null ? null : new Date(this.lastBatch.committedAt).toISOString(), notRunning, syncedAt, ...promise };
+  }
+
+  /** a replicated table's copy is current as of its last copy or poll, or — `streamed` — the last moment the stream had
+   *  everything the database wrote (`keptOf`'s syncedAt) */
+  private streamedSyncedAt(source: string, streamed: boolean): string | null {
+    const polled = this.polledAt.get(source) ?? null;
+    const at = streamed && this.streamCurrentAt !== null ? new Date(this.streamCurrentAt).toISOString() : null;
+    return at !== null && (polled === null || at > polled) ? at : polled;
   }
 
   /** why the stream is not running, in the reader's words (null: it runs): its last failure and when it starts again; the
@@ -1904,6 +1938,9 @@ export class Sync {
         catchUp: { phase: c?.phase ?? "queued", from: this.polledAt.get(t.source) ?? null, startedAt: c ? iso(c.startedAt) : null, held: held ? held.inserts + held.updates + held.deletes + held.truncates : 0,
           retryAt: c === null && at > now ? iso(at) : null } };
     }
+    // its changes kept aside while it is compacted: not current past the moment they began to be (issue 904)
+    const held = this.heldFrom.get(t.source);
+    if (held !== undefined && this.spilling.has(t.source) && this.joinedNow.has(t.source)) return { state: "compacting", why: COMPACTING_WHY, compacting: { held: held.held } };
     if (this.joinedNow.has(t.source) || (s === null && !this.needsCopy(t))) return { state: "streamed", why: null };
     return { state: "waiting", why: this.notStreamedWhy(t.source) };
   }
@@ -2723,6 +2760,10 @@ export class Sync {
         applied.set(name, changes);
       }
       await this.applyChanges(applied, { lsn, committedAt }, { inTransaction: async () => { for (const [name, changes] of spill) await this.spill(name, changes); } });
+      for (const [name, changes] of spill) {
+        const h = this.heldFrom.get(name);
+        if (h !== undefined) h.held += changes.counts.inserts + changes.counts.updates + changes.counts.deletes + changes.counts.truncates;
+      }
     });
   }
 
@@ -2842,7 +2883,12 @@ export class Sync {
     }
     // every table the stream keeps current is current as of this batch's position (`Synced`); a piece of a large
     // transaction (no position) and the changes a catch-up held are not a position
-    if (position !== null) for (const source of this.joinedNow) this.synced.set(source, { at: position.at, seconds: (Date.now() - started) / 1000, by: "stream" });
+    // — but not a table being compacted, whose changes this batch kept aside: it is current as of this position only once
+    // they are applied (`replaySpill`; issue 904)
+    if (position !== null) {
+      this.lastPositionAt = position.at;
+      for (const source of this.joinedNow) if (!this.spilling.has(source)) this.synced.set(source, { at: position.at, seconds: (Date.now() - started) / 1000, by: "stream" });
+    }
   }
 
   /**
@@ -2947,7 +2993,8 @@ export class Sync {
   }
 
   /** for a test or a wait: resolves once every change the source had committed when it was called is in DuckDB, in every
-   *  table the stream keeps current — a table still copying is not waited for, one copied and not yet caught up is */
+   *  table the stream keeps current — a table still copying is not waited for, one copied and not yet caught up is, and
+   *  so is one being compacted, whose changes are kept aside until its compaction ends (issue 904) */
   async caughtUp(timeoutMs = 30_000): Promise<void> {
     while (this.running !== null) await this.running;
     const pg = await PgConnection.connect(this.pgOptions());
@@ -2956,7 +3003,8 @@ export class Sync {
     const until = Date.now() + timeoutMs;
     for (;;) {
       const s = this.stream;
-      const behind = [...this.behind.keys()].filter((x) => this.tables.has(x));
+      const behind = [...[...this.behind.keys()].filter((x) => this.tables.has(x)),
+        ...[...this.spilling].filter((x) => this.tables.has(x)).map((x) => `${x} (being compacted: its changes are kept aside until it ends)`)];
       if (s !== null && s.position() >= target && behind.length === 0) return;
       if (Date.now() > until) throw new Error(`the stream did not reach ${formatLsn(target)} in ${timeoutMs} ms (${s === null ? "no stream is running" : `at ${formatLsn(s.position())}`}${behind.length ? `; not caught up yet: ${behind.join(", ")}` : ""})`);
       s?.poke();
