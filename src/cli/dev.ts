@@ -7,7 +7,7 @@
  *      and changed every few seconds so the copy is seen keeping current.
  *   1. THE DATABASE (src/cli/preflight.ts checkSource): connect as the run will, say what to change when it cannot,
  *      and what is worth knowing of it as information (on another machine; the main database, until the first sync is
- *      done). A database restored to another server
+ *      done). Its catalog is read again only when asked (src/cli/source-catalog.ts). A database restored to another server
  *      is read again (its rows compared, the unchanged kept); another database is refused (mason destroy, then mason start).
  *   2. THE COPY (src/duck/store.ts, src/duck/sync.ts): DuckDB in this process, file-backed in `.mason/duck.db`; each
  *      added table copied whole from the database and kept current as its sync: in the sources file says: by the
@@ -30,6 +30,7 @@ import type { Server } from "node:http";
 import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, PRIMARY_NOTE, readSourceFacts, type SourceFacts } from "./preflight.ts";
+import { actRead, sourceCatalog, STATE_WAIT_MS, watchedRead } from "./source-catalog.ts";
 import { uiReadOnlyAllowSetting, uiReadOnlySetting, type PageArea } from "./ui-read-only.ts";
 import { backLinkOf, uiBackLinkSetting } from "./ui-back-link.ts";
 import { navOf, uiNavSetting } from "./ui-nav.ts";
@@ -412,7 +413,20 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   }
   // the project's mode, as an older start recorded it: the sources file says it per table now
   if (cfg.changes !== undefined) { delete cfg.changes; writeConfig(home, cfg); }
-  let facts: SourceFacts = checked.facts;
+  // the catalog the start read; read again only when something asks (src/cli/source-catalog.ts: no timer, issue 890)
+  const facts: SourceFacts = checked.facts;
+  const catalogLog = (m: string): void => logLine(`[sync] ${m}`);
+  const catalog = sourceCatalog(facts, async (signal) => {
+    // a read watched for a connection gone silent, its session told by what it runs, and cancelled on the database
+    // when given up on (src/cli/source-catalog.ts watchedRead)
+    const read = await watchedRead({
+      connect: async () => { const c = await connectSource(source); if ("failure" in c) throw new Error(c.failure.message); return c.pg; },
+      read: (pg) => readSourceFacts(pg, undefined, { collations: false }),
+      signal, log: catalogLog,
+    });
+    // the collations were read at the start, and are the start's for the whole run
+    return facts.collations !== undefined ? { ...read, collations: facts.collations } : read;
+  }, { log: catalogLog });
   const move = sourceMove(cfg.sourceServer ?? null, { database: source.database, systemIdentifier: facts.systemIdentifier });
   if ("refuse" in move) { say(`mason start: ${move.refuse}`); return 1; }
   // THE TABLES THE SOURCES FILE NAMES, against the database's catalog: every mistake said at once, before anything opens
@@ -502,11 +516,13 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // the views first: setting the tables rebuilds the catalog, which reads them. The sources file read again: a mistake in it
   // keeps the tables read before (a typo never drops a copy), said in the log and by mason status
   const added = (): Promise<void> => {
-    const r = rereadSources(sources, readSources(), src.resolved, facts.tables, source.database, project.root, { replicationChecked, slot: cfg.replication?.slot ?? null });
+    // the catalog as last read: an edit asked for a fresh one first (src/cli/run-server.ts /api/pick, /api/remove)
+    const now = catalog.facts();
+    const r = rereadSources(sources, readSources(), src.resolved, now.tables, source.database, project.root, { replicationChecked, slot: cfg.replication?.slot ?? null });
     if (r.said !== null) logLine(`[sync] ${r.said}`);
     sources = { file: r.file, tables: r.tables, problem: r.problem };
-    sync.setViews(facts.views ?? []);
-    sync.setCollations(facts.collations ?? []);
+    sync.setViews(now.views ?? []);
+    sync.setCollations(now.collations ?? []);
     return sync.setTables(sources.tables);
   };
 
@@ -671,7 +687,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const setupPort = o.exactPort === true ? o.port : await freePort(o.port, chosen);
   const token = newToken();
   const runCtx: RunContext = {
-    source, facts: () => facts, warnings: [...warnings, ...(memoryWarned === null ? [] : [memoryProblemText(memoryWarned)])], textOrder,
+    source, facts: () => catalog.facts(), freshFacts: async () => { await catalog.fresh({ waitMs: STATE_WAIT_MS }); }, factsNow: (carried) => actRead(catalog, carried, source.database), warnings: [...warnings, ...(memoryWarned === null ? [] : [memoryProblemText(memoryWarned)])], textOrder,
     // the slot and publication while a table's sync is replication (the run streams), as the sync says it now
     replication: () => sync.streams() ? repl : null, port: setupPort, token, folder: () => folder, root: project.root, home,
     version: o.version, startedAt,
@@ -747,15 +763,6 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // a sample is /api/state's facts at its moment (src/cli/run-server.ts usageFacts): one computation of each
   usage.start(() => usageFacts(runCtx));
   await listenOnLoopback(server, setupPort);
-  const refreshFacts = setInterval(() => {
-    void (async () => {
-      const c = await connectSource(source);
-      if ("failure" in c) return;   // the commands keep the last catalog; the sync says loudly if the source is away
-      const before = facts.collations;
-      try { facts = await readSourceFacts(c.pg, undefined, { collations: false }); } finally { c.pg.close(); }
-      if (before !== undefined) facts.collations = before;
-    })().catch((e: unknown) => logLine(`catalog refresh failed: ${(e as Error).message}`));
-  }, 10_000);
   const tablesSet = added();
   // the run's own start beside its pid (src/cli/runs.ts masonProcess): how a command tells this run, alive and silent,
   // from another process given the number later, whatever started it (mason start, mason serve, a supervisor, npx)
@@ -790,7 +797,6 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       stopping = true;
       say(`FATAL ERROR: Mason: the engine stopped (${reason})`);
       o.serve?.failed();
-      clearInterval(refreshFacts);
       hosted.stopChanges?.();
       server.close();
       void (async () => {
@@ -809,7 +815,6 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       stopping = true;
       o.serve?.stopping();
       say("\nmason start: stopping …");
-      clearInterval(refreshFacts);
       hosted.stopChanges?.();
       server.close();
       void (async () => {

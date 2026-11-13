@@ -388,7 +388,8 @@ interface TableRow {
   foreign_keys: Array<{ column: string; target: string; target_column: string }>;
 }
 
-/** What a never-analysed table counted to, by oid: `mason start` reads the catalog every 10 s, and a table is counted
+/** What a never-analysed table counted to, by oid: a run reads the catalog again whenever it is asked (at most once a
+ *  minute: src/cli/source-catalog.ts), and a table is counted
  *  once per run, never per read (review of #404: a remote one over the network each time). */
 const COUNTED = new Map<number, number>();
 
@@ -403,8 +404,8 @@ export async function collationVersion(pg: Pick<PgConnection, "query">, versionN
 }
 
 /** The database's facts: its version, whether it is a standby, and every table this user can read. */
-/** `collations: false` (the run's 10-second refresh) leaves the database's collations unread: they were read at the start */
-export async function readSourceFacts(pg: PgConnection, counted: Map<number, number> = COUNTED, o: { collations?: boolean } = {}): Promise<SourceFacts> {
+/** `collations: false` (the run's read when asked, src/cli/source-catalog.ts) leaves the database's collations unread: they were read at the start */
+export async function readSourceFacts(pg: Pick<PgConnection, "query">, counted: Map<number, number> = COUNTED, o: { collations?: boolean } = {}): Promise<SourceFacts> {
   const r = (await pg.query("SELECT current_setting('server_version_num'), current_setting('server_version'), pg_is_in_recovery()::text")).rows[0]!;
   const rows = JSON.parse((await pg.query(TABLES_SQL)).rows[0]?.[0] ?? "null") as TableRow[] | null;
   const tables: SourceTable[] = [];
@@ -443,7 +444,7 @@ export async function readSourceFacts(pg: PgConnection, counted: Map<number, num
 }
 
 /** The server's system identifier, or null when this user may not read it (only that refusal: any other error is real). */
-export async function systemIdentifier(pg: PgConnection): Promise<string | null> {
+export async function systemIdentifier(pg: Pick<PgConnection, "query">): Promise<string | null> {
   try { return (await pg.query("SELECT system_identifier::text FROM pg_control_system()")).rows[0]?.[0] ?? null; }
   catch (e) {
     // 42501 insufficient_privilege: a server that revoked pg_control_system from PUBLIC. The identity is then unknown,
@@ -487,14 +488,14 @@ export function sourceNotes(s: Source, standby: boolean | null): string[] {
   return standby === false ? [REMOTE_NOTE, PRIMARY_NOTE] : [REMOTE_NOTE];
 }
 
-/** The warnings `mason start` prints, and `mason status` shows: a serverless compute that a run keeps awake. What wakes
- *  it is said as it is (issue 888): a table polled or streamed, and the run's read of the database's tables, every 10 s
- *  while it runs (src/cli/dev.ts refreshFacts) — not the polling alone. */
+/** The warnings `mason start` prints, and `mason status` shows: a serverless compute that a sync keeps awake. What
+ *  wakes it is said as it is (issue 890): a table polled or streamed, and a read of the database's tables, which Mason
+ *  makes only when asked — never on a timer. */
 export function sourceWarnings(s: Source, _f: SourceFacts): string[] {
   if (!s.remote) return [];
   const sleeper = serverlessHost(s.host);
   return sleeper ? [`${sleeper} suspends an idle compute and bills while it runs. A table whose sync: is poll or replication keeps it running. ` +
-    "So does Mason itself while it runs: it reads the database's tables every 10 seconds, whatever each table's sync: is"] : [];
+    "With every table sync: off, Mason connects only when asked: mason sync, tables, add, remove, status, wait or doctor, and the web page while it is open (about once a minute)"] : [];
 }
 
 /** `pg_current_snapshot()` and xid8, which polling reads, arrived in Postgres 13. */

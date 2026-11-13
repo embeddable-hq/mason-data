@@ -187,7 +187,7 @@ test("a table without a primary key cannot be picked; one of any size can, where
   for (const rows of [5, 22_000_000, 1_000_000_000, null]) assert.equal(unpickableReason(table({ rows })), null, `rows: ${rows}`);
 });
 
-test("a database elsewhere is information, never a warning: where it is, and the main database; a serverless compute is the one warning (issue 888)", () => {
+test("a database elsewhere is information, never a warning: where it is, and the main database; a serverless compute is the one warning (issues 888, 890)", () => {
   const facts = (standby: boolean): SourceFacts => ({ version: 160000, versionText: "16", standby, tables: [], systemIdentifier: null });
   assert.equal(REMOTE_NOTE, "Your database is on another machine. Mason will sync the tables you choose to this machine.");
   assert.equal(PRIMARY_NOTE, "This is your main database, not a read replica. Mason only reads from it and keeps its load small. " +
@@ -200,10 +200,10 @@ test("a database elsewhere is information, never a warning: where it is, and the
   assert.deepEqual(sourceNotes(source("postgres://me@replica.example.com/app"), true), [REMOTE_NOTE]);
   assert.deepEqual(sourceNotes(source("postgres://me@db.example.com/app"), null), [REMOTE_NOTE]);
   assert.deepEqual(sourceWarnings(source("postgres://me@db.example.com/app"), facts(false)), [], "neither is a warning");
-  // a serverless compute: everything that keeps it awake, not the polling alone — the run's 10-second read too (issue 888)
+  // a serverless compute: what keeps it awake, as it is now — no timer of Mason's own (issue 890)
   assert.deepEqual(sourceWarnings(source("postgres://me@ep-x.us-east-2.aws.neon.tech/app"), facts(false)), [
     "Neon suspends an idle compute and bills while it runs. A table whose sync: is poll or replication keeps it running. " +
-    "So does Mason itself while it runs: it reads the database's tables every 10 seconds, whatever each table's sync: is"]);
+    "With every table sync: off, Mason connects only when asked: mason sync, tables, add, remove, status, wait or doctor, and the web page while it is open (about once a minute)"]);
   assert.equal(serverlessHost("db.abc.supabase.co"), null);
 });
 
