@@ -7,3 +7,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   status`, `mason wait` and the web page said the table was synced as of the newest change. Now its line says it is
   being compacted and when it was last synced, and that time moves on only once the waiting changes are in. If the
   compaction takes longer than two minutes, the table shows as behind until it ends. No data was ever lost.
+- **Tables under `sync: replication` no longer stop being kept current after the replication slot is dropped.** If the
+  slot was dropped while Mason ran, the stream stopped and waited a moment before it started again. Something else
+  that asked for a sync during that moment could cancel the restart. The stream then stayed stopped for the rest of
+  the run, and the tables kept serving old rows, with no error. Now the stream always starts again by itself.
+- **Under `sync: replication`, a table whose sync failed is always tried again.** When two tables' syncs failed at
+  different times, the one due to be tried later could wait until Mason started again. Now each is tried again at its
+  own time.
