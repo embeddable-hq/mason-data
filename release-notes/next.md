@@ -8,6 +8,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   table, the 2,000-row preview took about 5 s and now takes about 0.6 s. Postgres still answers it faster, so there is
   more to do. The rows are the same kind as before: any rows of the join, as Postgres allows for a query with no ORDER
   BY.
+- **The 20-row preview of such a join is faster too, when the table you start from is the bigger one.** Mason now takes
+  that table's first rows before it joins, so it no longer loads every row of the other table into memory first. A
+  small table joined to a big one is unchanged: that preview was already fast.
 
 ## What was wrong and is now right
 
