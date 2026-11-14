@@ -11,6 +11,16 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **A sync now says how many rows it added, updated and deleted**, such as "1,200 added, 282,770 updated, 0 deleted".
+  Before, it said "283,970 changed", which lumped new rows and edited rows together. The new words are in `mason sync`,
+  the web page's Sync now and Sync events, and `mason logs --events`. A first sync, or a table synced again whole, adds
+  every row. Over replication, the counts follow your database's inserts, updates and deletes. `mason status`, the web
+  page and the run's log say a replicated table's counts the same way, such as "1,000 added, 200 updated, 4 deleted".
+  Before, they said "1,204 changes (1,000 inserts, 200 updates, 4 deletes)". A poll's own lines in the run's log still
+  say "changed". A script
+  that reads `mason sync --json` must read `added` and `updated` in place of `changed`. A script that matched the
+  words of a `synced`, `polled`, `streamed` or `full_sync` event must match the new words.
+
 - **A whole number beside a numeric with very many decimals keeps at least 19 of its decimals.** This covers `div()`
   of two integers, an integer cast to `numeric`, a whole constant such as `2.5e2`, and a whole part of `extract`.
   Beside a column like `numeric(38,30)`, in a `UNION`, an `IN (SELECT …)`, a `CASE`, a `COALESCE` or `GREATEST`,
@@ -89,6 +99,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   lost. Then every poll of that table failed. Under `sync: replication`, the stream stopped for every table. Now Mason
   knows its own columns from what it records, whatever their names, so every column of your table is synced and
   served. A column named like Mason's other hidden columns, such as `__mason_scale_`, is kept the same way.
+- **Mason no longer crashes when it stops while a client is still connecting.** A connection that was still opening
+  as Mason stopped could crash the process with a segmentation fault or an abort. The supervisor then saw a signal and
+  no reason. Now the stop waits for each connection still opening, and then closes the synced data.
 - **A column added to, renamed in or dropped from a synced table on your database now reaches Mason without a restart.**
   Before, a new column never reached the synced data until Mason was started again, while `mason status` said every
   table was synced. A column renamed or dropped made the table's sync fail again and again until a restart. Now Mason

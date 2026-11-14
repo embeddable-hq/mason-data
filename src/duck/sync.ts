@@ -216,7 +216,14 @@ export function keptPromise(o: { mode: "poll" | "recopy" | "replication" | "off"
 }
 
 /** what one table's poll found (`Sync.pollNow`): the rows it wrote, the keys it deleted, the source's count after */
-export interface PolledTable { table: string; changed: number; deleted: number; rows: number; ms: number }
+/**
+ * WHAT ONE POLL DID TO ONE TABLE (`poll`; `mason sync --json`'s `tables[]`, the `synced` and `polled` events' words):
+ * `added` the rows whose key the synced table did not hold before the write, `updated` the rows whose key it held (its
+ * row replaced by the source's), `deleted` the keys the source no longer holds. Told apart on Mason's side, by what the
+ * write by key already counts (`writeStaged`'s delete, or a large poll's anti-join of its stage), never by another read
+ * of the source.
+ */
+export interface PolledTable { table: string; added: number; updated: number; deleted: number; rows: number; ms: number }
 
 /** a table `mason sync` named in replication mode (`Sync.pollNow`): nothing to poll, so where the stream is and its part */
 export interface StreamedAnswer { table: string; position: string; state: StreamTableStatus["state"]; why: string | null }
@@ -429,16 +436,19 @@ async function deleteKeys(w: DuckConnection, t: Pick<AddedTable, "key">, target:
 
 /** a poll's staged rows (`where`: a range of them, or all) written by key into the table: their keys deleted, then the
  *  rows inserted. The stage's columns are named by position (`c0`, `c1`, …), the table's order. A plain numeric of
- *  `scaled` (one its table holds a hidden scale column for) is staged as the source's text, and its scale computed from it */
+ *  `scaled` (one its table holds a hidden scale column for) is staged as the source's text, and its scale computed from it.
+ *  Answers how many of the staged rows' keys the table held before the write (the rows its delete removed): the rows
+ *  UPDATED, the rest of the stage ADDED (`PolledTable`) — DuckDB's own count of the delete, so no statement more */
 export async function writeStaged(w: DuckConnection, t: Pick<AddedTable, "key" | "columns" | "source">, target: string, stage: string, where: string, kept: KeptJsonPaths,
-  scaled: readonly string[] = []): Promise<void> {
+  scaled: readonly string[] = []): Promise<number> {
   const named = t.key.map((k) => `c${t.columns.findIndex((c) => c.name === k)}`);
-  await deleteKeys(w, t, target, `(SELECT ${named.map(ident).join(", ")} FROM ${stage}${where})`, named);
+  const held = await deleteKeys(w, t, target, `(SELECT ${named.map(ident).join(", ")} FROM ${stage}${where})`, named);
   // the table's columns named, its plain numerics' scales and its stored JSON paths computed from the staged text and JSON
   const stored = kept.stored(t.source, (c) => ident(`c${t.columns.findIndex((x) => x.name === c)}`));
   const scales = scaled.map((c) => scaleSql(ident(`c${t.columns.findIndex((x) => x.name === c)}`)));
   await w.run(`INSERT INTO ${target} (${[...t.columns.map((c) => ident(c.name)), ...scaled.map((c) => ident(scaleColumn(c, t.columns.map((x) => x.name)))), ...stored.names.map(ident)].join(", ")}) ` +
     `SELECT ${[...t.columns.map((_, i) => ident(`c${i}`)), ...scales, ...stored.values].join(", ")} FROM ${stage}${where}`);
+  return held;
 }
 
 /**
@@ -3814,7 +3824,7 @@ export class Sync {
     const timed: string[] = [];
     const found: PolledTable[] = [];
     // the tables whose changed rows are written in pieces once the snapshot's transaction commits
-    const pieced: Array<{ t: AddedTable; target: string; stage: string; staged: number; deleted: number; started: number }> = [];
+    const pieced: Array<{ t: AddedTable; target: string; stage: string; staged: number; added: number; deleted: number; started: number }> = [];
     // its row counts, kept until its transaction commits (the poll's own: a catch-up's runs beside a pass's)
     const pending = new Map<string, number>();
     const exacts = new Map<string, Map<string, number>>();
@@ -3875,19 +3885,21 @@ export class Sync {
             const on = t.key.map((k) => `s.${ident(`c${t.columns.findIndex((c) => c.name === k)}`)} = t.${ident(k)}`).join(" AND ");
             const adds = (await w.runAndReadAll(`SELECT count(*) FROM ${stage} s ANTI JOIN ${target} t ON ${on}`)).getRowsJS()[0]![0] as bigint;
             const { rows, deleted, countMs } = await reconcile(t, target, from, adds);
-            pieced.push({ t, target, stage, staged, deleted, started: c0 });
+            // the stage's keys the table lacks are the rows it ADDS, the rest it UPDATES (`PolledTable`): the count above
+            pieced.push({ t, target, stage, staged, added: Math.min(staged, Number(adds)), deleted, started: c0 });
             timed.push(`${t.source} ${staged} changed, staged in ${c1 - c0} ms, ${adds} new, counted in ${countMs} ms${deleted ? `, ${deleted} deleted` : ""}`);
             pending.set(t.source, rows);
             continue;
           }
           doing = `${t.source}: writing its ${staged} changed row(s) by key`;
-          await writeStaged(w, t, target, stage, "", this.kept, scaleds.get(t.source));
+          // the rows whose key the table held are UPDATED, the rest ADDED (`PolledTable`), as the delete by key counted them
+          const updated = Math.min(staged, await writeStaged(w, t, target, stage, "", this.kept, scaleds.get(t.source)));
           const c1 = Date.now();
           const { rows, deleted, countMs } = await reconcile(t, target, from);
           await w.run(this.pollStateSql(t, snapshot, polledAt));
           await w.run(`DROP TABLE ${stage}`);
           timed.push(`${t.source} ${staged} changed in ${c1 - c0} ms, counted in ${countMs} ms${deleted ? `, ${deleted} deleted in ${Date.now() - c1 - countMs} ms` : ""}`);
-          found.push({ table: t.source, changed: staged, deleted, rows, ms: Date.now() - c0 });
+          found.push({ table: t.source, added: staged - updated, updated, deleted, rows, ms: Date.now() - c0 });
           pending.set(t.source, rows);
         }
       });
@@ -3919,7 +3931,7 @@ export class Sync {
     try {
       for (const [source, rows] of pending) if (!pieced.some((p) => p.t.source === source)) await committed(source, rows, found.find((f) => f.table === source)?.ms ?? 0);
       this.log(`poll: ${timed.join("; ")}`);
-      for (const { t, target, stage, staged, deleted, started } of pieced) {
+      for (const { t, target, stage, staged, added, deleted, started } of pieced) {
         const p0 = Date.now();
         const n = Math.ceil(staged / POLL_PIECE_ROWS);
         for (let i = 0; i < n; i++) {
@@ -3939,14 +3951,14 @@ export class Sync {
         }
         const rows = pending.get(t.source)!;
         await committed(t.source, rows, Date.now() - started);
-        found.push({ table: t.source, changed: staged, deleted, rows, ms: Date.now() - started });
+        found.push({ table: t.source, added, updated: staged - added, deleted, rows, ms: Date.now() - started });
         this.log(`poll: ${t.source}: ${staged.toLocaleString("en-US")} changed row(s), written in ${n} pieces in ${Date.now() - p0} ms`);
       }
     } finally {
       for (const { stage } of pieced) await w.run(`DROP TABLE IF EXISTS ${stage}`);
     }
     // committed: a generated table over a table that changed is behind from here
-    for (const f of found) if (f.changed > 0 || f.deleted > 0) this.generated.changed(f.table);
+    for (const f of found) if (f.added > 0 || f.updated > 0 || f.deleted > 0) this.generated.changed(f.table);
     return found;
   }
 
@@ -4053,9 +4065,10 @@ export class Sync {
       await this.record({ source: t.source, phase: "copied", rows: p.rows, bytes: t.bytes, seconds, copiedAt, error: null }, t.columns, w);
       this.synced.set(t.source, { at: copiedAt, seconds, by: "copy" });
       // how long it took, in whole ms as a poll's: the message ends with it as a poll's does (` · 7 min 57 s`), and the
-      // web page shows it in a column of its own (src/duck/events.ts `tookMs`)
+      // web page shows it in a column of its own (src/duck/events.ts `tookMs`). A whole read ADDS every row it holds
+      // (`syncedText`, the words a poll's record says): the copy swapped in replaces the old
       const tookMs = Math.round(seconds * 1000);
-      this.event({ kind: "full_sync", table: t.source, message: `synced: ${p.rows.toLocaleString("en-US")} row(s) · ${msText(tookMs)}`, tookMs });
+      this.event({ kind: "full_sync", table: t.source, message: `synced whole: ${syncedText({ added: p.rows, updated: 0, deleted: 0, rows: p.rows, ms: tookMs })}`, tookMs });
       this.copiedAs.set(t.source, columnsKey(t.columns));
       // in the catalog at once: a pass's other copies may take hours
       await this.rebuildSchema();

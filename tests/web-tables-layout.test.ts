@@ -70,7 +70,7 @@ const STATE = (() => {
 /** What `/api/pick` answers for a table added (src/cli/source-edit.ts addEntry), and `/api/sync` for one synced. */
 const added = (table: string) => ({ table, file: "/app/mason/sources/shop.yml", entry: table.slice("public.".length), columns: null, exclude: ["api_token"], key: null,
   addedKey: [], skippedSecrets: ["api_token"], already: false, sync: { value: "off", from: "default" }, bigOff: false, notReplicated: null, pollCost: null });
-const synced = (table: string) => ({ tables: [{ table, changed: 3, deleted: 1, rows: 1200, ms: 140 }], streamed: [] });
+const synced = (table: string) => ({ tables: [{ table, added: 1, updated: 2, deleted: 1, rows: 1200, ms: 140 }], streamed: [] });
 
 // ------------------------------------------------------------------ the page, served as the run serves it
 

@@ -85,3 +85,60 @@ test("a run ended by a fatal error in the synced data exits 1 with its cause in 
   }
   t.diagnostic(`${RUNS} runs, each exit 1 with its cause in its log`);
 });
+
+/**
+ * A CONNECT IN FLIGHT WHEN THE SYNCED DATA CLOSES (issue 986: 20 connects, or 10 sessions opened, then the close, all at
+ * once, crashed the process in 7 runs of 8, exit 134 `Napi::Error` or 139 SIGSEGV). The shutdown refused a session's
+ * new statement, but closed the instance under a `connect` (or a session's open) it took before it. The race is held
+ * open by a hook, never left to luck: the copy's own worker, with DuckDB's `connect` made to start only when the
+ * shutdown arrives, so every connect is still on DuckDB's threads as the shutdown begins.
+ */
+const GATED_WORKER = `import { parentPort } from "node:worker_threads";
+import { createRequire } from "node:module";
+const { DuckDBInstance } = createRequire(${JSON.stringify(fileURLToPath(import.meta.url))})("@duckdb/node-api");
+let armed = false, open = () => undefined;
+const gate = new Promise((resolve) => { open = resolve; });
+const connect = DuckDBInstance.prototype.connect;
+DuckDBInstance.prototype.connect = function () { return armed ? gate.then(() => connect.call(this)) : connect.call(this); };
+const on = parentPort.on.bind(parentPort);
+parentPort.on = (event, f) => on(event, event !== "message" ? f : (m) => {
+  if (m.op === "connect" || m.op === "runner.open") armed = true;
+  if (m.op === "shutdown") open();
+  f(m);
+});
+await import(${src("duck/executor-worker.ts")});
+`;
+
+// THE ISSUE'S PROBE: connects and sessions asked, then the close at once; each answered or refused, never a crash
+const CLOSE_UNDER_CONNECTS = (file: string, worker: string): string => `
+const { DuckStore } = await import(${src("duck/store.ts")});
+const logged = [];
+const store = await DuckStore.open(${JSON.stringify(file)}, (l) => logged.push(l), { workerFile: ${JSON.stringify(worker)} });
+const asked = [];
+for (let i = 0; i < 20; i++) asked.push(store.instance.connect());
+for (let i = 0; i < 10; i++) asked.push(store.runner());
+const all = Promise.allSettled(asked);   // each one's refusal handled from the start, read once the close is done
+await store.close();
+const settled = await all;
+console.log(JSON.stringify({ answered: settled.filter((s) => s.status === "fulfilled").length,
+  refused: settled.filter((s) => s.status === "rejected").map((s) => s.reason.message), logged }));
+`;
+
+test("the synced data closed while connects and sessions are still opening waits for them, never crashing the process", { timeout: 300_000 }, async (t) => {
+  const worker = path.join(dir, "gated-worker.mjs");
+  fs.writeFileSync(worker, GATED_WORKER);
+  const RUNS = 10;
+  for (let i = 0; i < RUNS; i++) {
+    const script = path.join(dir, `close-${i}.mjs`);
+    fs.writeFileSync(script, CLOSE_UNDER_CONNECTS(path.join(dir, `close-${i}.db`), worker));
+    const run = await nodeProcess(script, 60_000);
+    assert.doesNotMatch(run.stderr, /Napi::Error|terminate called|FATAL ERROR/, `run ${i + 1} of ${RUNS}: aborted in native code\n${run.stderr}`);
+    assert.equal(run.signal, null, `run ${i + 1} of ${RUNS}: ended by a signal (a crash, or a hang killed)\n${run.stderr}`);
+    assert.equal(run.status, 0, `run ${i + 1} of ${RUNS}: its own exit code (134 is an abort, 139 a SIGSEGV)\n${run.stderr}`);
+    const said = JSON.parse(run.stdout) as { answered: number; refused: string[]; logged: string[] };
+    assert.equal(said.answered + said.refused.length, 30, `run ${i + 1} of ${RUNS}: every connect and session settled\n${run.stdout}`);
+    // the close did not give up on the thread: it waited for the calls in flight, and closed the instance after them
+    assert.ok(!said.logged.some((l) => /did not close within/.test(l)), `run ${i + 1} of ${RUNS}: the close gave up\n${said.logged.join("\n")}`);
+  }
+  t.diagnostic(`${RUNS} runs, each closed under 30 opens in flight with no crash`);
+});

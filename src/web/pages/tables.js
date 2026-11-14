@@ -37,7 +37,7 @@ const nameMatches = (table, filter) => !filter || table.toLowerCase().includes(f
 
 /**
  * WHAT A SYNC DID, as `mason sync` prints it from `POST /api/sync`'s answer (src/cli/sync.ts `syncedReport`, held equal
- * by the tests): the rows written and deleted, a line per table, and what happens next to each table synced (`syncedTips`:
+ * by the tests): the rows added, updated and deleted, a line per table, and what happens next to each table synced (`syncedTips`:
  * an `off` one stays as of this sync). A table whose sync is replication was not polled: its line says where the stream
  * is (`streamed`), and a sync of those alone has nothing to sync.
  */
@@ -47,12 +47,12 @@ export function syncedReport(b, picked, tables) {
   if (b.tables.length === 0 && streamed.length > 0) {
     return { headline: `Nothing to sync: logical replication keeps ${picked.join(", ")} current.`, details: streamedRows, tips: [] };
   }
-  const changed = b.tables.reduce((a, t) => a + t.changed, 0), deleted = b.tables.reduce((a, t) => a + t.deleted, 0);
+  const sum = (k) => b.tables.reduce((a, t) => a + t[k], 0);
   const streamedNames = new Set(streamed.map((t) => t.table));
   const polled = picked.filter((t) => !streamedNames.has(t));
   return {
-    headline: `Synced ${polled.join(", ")}: ${n(changed)} row(s) written, ${n(deleted)} deleted${streamedRows.length ? `; logical replication keeps ${streamedRows.map((r) => r[0]).join(", ")} current` : ""}.`,
-    details: [...b.tables.map((t) => [t.table, `${n(t.changed)} changed, ${n(t.deleted)} deleted, ${n(t.rows)} rows now · ${msText(t.ms)}`]), ...streamedRows],
+    headline: `Synced ${polled.join(", ")}: ${n(sum("added"))} added, ${n(sum("updated"))} updated, ${n(sum("deleted"))} deleted${streamedRows.length ? `; logical replication keeps ${streamedRows.map((r) => r[0]).join(", ")} current` : ""}.`,
+    details: [...b.tables.map((t) => [t.table, `${n(t.added)} added, ${n(t.updated)} updated, ${n(t.deleted)} deleted, ${n(t.rows)} rows now · ${msText(t.ms)}`]), ...streamedRows],
     tips: syncedTips(tables),
   };
 }

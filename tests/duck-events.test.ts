@@ -81,7 +81,7 @@ test("the scheduled syncs (polled, streamed) are kept, but read only when asked 
   // a busy minute of scheduled syncs after them: newer than the failure, more than the limit asked
   for (let i = 0; i < 5; i++) { clock += 1000; log.record({ kind: "polled", table: "public.orders", message: `synced on schedule: ${i} changed` }); }
   clock += 1000;
-  log.record({ kind: "streamed", table: "public.events", message: "streamed 3 changes (3 inserts) in the last 60 s" });
+  log.record({ kind: "streamed", table: "public.events", message: "streamed 3 added, 0 updated, 0 deleted in the last 60 s" });
   await log.flush();
   assert.deepEqual((await log.recent({ limit: 2 })).map((e) => e.kind), ["poll_failed", "recovered"], "left out: the newest 2 are the others'");
   assert.deepEqual((await log.recent({ limit: 2, scheduled: true })).map((e) => e.kind), ["polled", "streamed"], "asked for: the newest 2 of all");
