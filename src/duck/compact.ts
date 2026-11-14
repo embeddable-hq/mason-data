@@ -141,7 +141,8 @@ export async function rewrite(c: DuckConnection, schema: string, table: string, 
   const run = hooks.run ?? (async (sql: string) => { await c.run(sql); }), said = hooks.said ?? (() => undefined);
   const target = `${ident(schema)}.${ident(table)}`, side = sideOf(schema, table);
   // the side table's columns are the table's own, in its order, as the engine has them (types, NOT NULL, defaults; a
-  // stored JSON path's column too): CREATE TABLE AS would drop a NOT NULL
+  // stored JSON path's column and a plain numeric's hidden scale column too, src/duck/scale-column.ts): CREATE TABLE AS
+  // would drop a NOT NULL
   const cols = (await c.runAndReadAll(`SELECT column_name, data_type, is_nullable, column_default FROM duckdb_columns() WHERE database_name = current_database() AND schema_name = $1 AND table_name = $2 ORDER BY column_index`,
     [schema, table])).getRowsJS() as Array<[string, string, boolean, string | null]>;
   if (cols.length === 0) throw new Error(`${schema}.${table} is not a table of the synced data (Mason bug: report it)`);

@@ -196,7 +196,7 @@ test("an unconstrained or wide numeric is copied and polled exactly, and copied 
   sync.setTables([AMOUNTS]);
   const duck = async (sql: string): Promise<string[][]> =>
     ((await store.writer.runAndReadAll(sql)).getRowsJS() as unknown[][]).map((r) => r.map((x) => x === null ? "" : String(x)));
-  const typesOf = async (): Promise<string> => (await duck("SELECT column_name || ' ' || data_type FROM information_schema.columns WHERE table_catalog = current_database() AND table_name = 'amounts' ORDER BY ordinal_position")).map((r) => r[0]).join(", ");
+  const typesOf = async (): Promise<string> => (await duck("SELECT column_name || ' ' || data_type FROM information_schema.columns WHERE table_catalog = current_database() AND table_name = 'amounts' AND NOT starts_with(column_name, '__mason_scale_') ORDER BY ordinal_position")).map((r) => r[0]).join(", ");
   // each value as Postgres spells it at the copy's scale: the exact digits, compared as text
   const same = async (step: string, scale: number, q = 2): Promise<void> => {
     await sync.once();
@@ -212,7 +212,10 @@ test("an unconstrained or wide numeric is copied and polled exactly, and copied 
   assert.equal(await typesOf(), "id INTEGER, a DECIMAL(38,18), p DECIMAL(38,30), huge DOUBLE, odd DOUBLE, q DECIMAL(38,2)");
     assert.ok(logged.some((l) => /public\.amounts\.huge: values of 41 digit\(s\) and 0 decimal\(s\) do not fit the synced table's DECIMAL\(38\): synced as a double/.test(l)), logged.join("\n"));
     assert.ok(logged.some((l) => /public\.amounts\.odd: 1 value\(s\) NaN or Infinity/.test(l)), logged.join("\n"));
-    assert.ok(logged.some((l) => /public\.amounts\.a: values of 1 to 18 decimals: Mason answers each with 18, Postgres with its own/.test(l)), logged.join("\n"));
+    // a, declared with no precision, holds each value's own scale beside it (src/duck/scale-column.ts; issue 946)
+    const hidden = (await duck("SELECT column_name FROM duckdb_columns() WHERE table_name = 'amounts' AND starts_with(column_name, '__mason_scale_')")).map((r) => r[0]);
+    assert.equal(hidden.length, 1, "a's own scales, in one hidden column");
+    assert.deepEqual(await duck(`SELECT id, "${hidden[0]}" FROM public.amounts ORDER BY id`), psql(url, "SELECT id, scale(a) FROM amounts ORDER BY id").split("\n").map((l) => [...l.split("\t"), ""].slice(0, 2)));
 
     psql(url, "INSERT INTO amounts VALUES (4, 0.1, 0.000000000000000000000000000001, 7, 8, 0.5); UPDATE amounts SET a = 99.25, q = 7 WHERE id = 2");
     await same("a change that fits", 18);
