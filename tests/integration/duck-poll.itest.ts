@@ -930,7 +930,7 @@ test("a failed copy waits before it is tried again, and a change of its columns 
     let from = logged.length;
     void sync.setTables([T(true)]);
     await sync.once();
-    assert.deepEqual(events.map((e) => [e.kind, e.table]), [["copy_failed", "public.t"]]);
+    assert.deepEqual(events.map((e) => [e.kind, e.table]), [["full_sync_failed", "public.t"]]);
     assert.equal(`sync of public.t failed: ${events[0]!.message}`, logged.find((l) => l.startsWith("sync of public.t failed: ")));
     assert.equal(since(from, /^syncing public\.t:/), 1, logged.slice(from).join("\n"));
     assert.equal(since(from, /^sync of public\.t failed: [\s\S]*; tried again after \d\d:\d\d UTC \(failure 1 in a row\)/), 1, logged.slice(from).join("\n"));
@@ -946,7 +946,8 @@ test("a failed copy waits before it is tried again, and a change of its columns 
 
   // a restart tries at once (and fails again); the columns changed (the fix): tried at once, and copied
   store = await DuckStore.open(file, (l) => logged.push(l));
-  sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll");
+  events.length = 0;
+  sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll", null, { onEvent: (e) => { events.push(e); } });
   try {
     await sync.open();
     let from = logged.length;
@@ -958,6 +959,8 @@ test("a failed copy waits before it is tried again, and a change of its columns 
     await sync.once();
     assert.equal(since(from, /^syncing public\.t:/), 1, logged.slice(from).join("\n"));
     assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error, s.rows]), [["public.t", "copied", null, 100]]);
+    // the events say the failure and then the full sync that ended it, by the kinds a person reads (issue 953)
+    assert.deepEqual(events.map((e) => [e.kind, e.table]), [["full_sync_failed", "public.t"], ["full_sync", "public.t"]]);
   } finally { await sync.stop(); await store.close(); }
 });
 
@@ -1867,4 +1870,53 @@ test("a table of ~100 KB values synced one heap page a chunk under 128MB, and a 
     const digest = "count(*) || ' ' || md5(string_agg(id::text || ':' || md5(v), ',' ORDER BY id))";
     assert.equal(String((await read.writer.runAndReadAll(`SELECT ${digest} FROM public.big100`)).getRowsJS()[0]![0]), await psqlAsync(url, `SELECT ${digest} FROM big100`), `public.big100 differs from the source\n${logged.join("\n")}`);
   } finally { await read.close(); }
+});
+
+// A FAILED SYNC EVENT'S CODE AND ORIGIN (issue 924), read back from `_mason.sync_events` as `mason logs --events --json`
+// reads it: a poll that Postgres failed (its table renamed away: 42P01, which the engine passes on in words alone), one the
+// engine failed (a value the synced column cannot hold: its Conversion Error), and the database out of reach (a port
+// nothing listens on: ECONNREFUSED). Each origin is a file and a line in Mason's src/, never the bridge to the engine's
+// thread, a path outside Mason or a word of the data.
+test("a failed poll's event carries its code and origin: Postgres's SQLSTATE, the engine's error class, the system's errno", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  const source = ownDatabase("codes", "CREATE TABLE gone (id int PRIMARY KEY, v text); INSERT INTO gone SELECT g, 'v' || g FROM generate_series(1, 5) g; " +
+    "CREATE TABLE narrow (id int PRIMARY KEY, n int); INSERT INTO narrow VALUES (1, 1)");
+  const url = `postgres://${source.user}${source.password ? `:${encodeURIComponent(source.password)}` : ""}@${source.host}:${source.port}/${source.database}`;
+  const col = (name: string, type: string) => ({ name, type, notNull: false, comment: null });
+  const GONE: AddedTable = tableOf("gone", POLL("1s", 1));
+  const NARROW: AddedTable = { ...tableOf("narrow", POLL("1s", 1)), columns: [col("id", "integer"), col("n", "integer")] };
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "codes.db"), (l) => logged.push(l));
+  const { SyncEvents } = await import("../../src/duck/events.ts");
+  const events = await SyncEvents.open(store, (l) => logged.push(l), { days: 7 });
+  let sync = new Sync(store, source, source.database, (l) => logged.push(l), 3_600_000, "poll", null, { onEvent: (e) => events.record(e) });
+  try {
+    await sync.open();
+    void sync.setTables([GONE, NARROW]);
+    await sync.once();
+    // Postgres fails the one, the engine the other
+    psql(url, "ALTER TABLE gone RENAME TO gone_away; ALTER TABLE narrow ALTER COLUMN n TYPE text USING n::text; INSERT INTO narrow VALUES (2, 'not a number')");
+    await new Promise((r) => setTimeout(r, 1100));
+    await sync.once();
+    await sync.stop();
+    // the database out of reach
+    sync = new Sync(store, { ...source, port: 1 }, source.database, (l) => logged.push(l), 3_600_000, "poll", null, { onEvent: (e) => events.record(e) });
+    await sync.open();
+    void sync.setTables([GONE, NARROW]);
+    await sync.once();
+    await events.flush();
+    const failed = (await events.recent({ limit: 50, failed: true })).map((e) => ({ kind: e.kind, table: e.table, code: e.code, origin: e.origin }));
+    const said = JSON.stringify(failed, null, 1);
+    const of = (kind: string, table: string | null) => failed.find((e) => e.kind === kind && e.table === table);
+    assert.equal(of("poll_failed", "public.gone")?.code, "42P01", said);
+    assert.equal(of("poll_failed", "public.narrow")?.code, "conversion_error", said);
+    assert.equal(of("source_unreachable", null)?.code, "ECONNREFUSED", said);
+    for (const e of failed) {
+      assert.match(e.origin ?? "", /^src\/duck\/[a-z-]+\.ts:\d+$/, `a file of Mason's and a line: ${said}`);
+      assert.doesNotMatch(e.origin!, /executor/, "never the engine's thread bridge");
+    }
+    assert.ok(!said.includes(dir) && !said.includes(os.homedir()) && !said.includes("not a number"), "no path, no word of the data");
+    // good news has neither
+    const copied = (await events.recent({ limit: 50 })).filter((e) => e.kind === "full_sync");
+    assert.ok(copied.length === 2 && copied.every((e) => e.code === null && e.origin === null), JSON.stringify(copied));
+  } finally { await sync.stop(); await events.close(); await store.close(); }
 });

@@ -46,8 +46,10 @@ import { prepareUiRunFile, uiRunFileSetting, UI_RUN_FILE_SETTING, writeUiRunFile
 import { recordRefusal } from "./replication-mode.ts";
 import { pageAllowsText, UI_READ_ONLY_ALLOW_SETTING, UI_READ_ONLY_SETTING, uiReadOnlyAllowSetting, uiReadOnlySetting } from "./ui-read-only.ts";
 import { BACK_LABEL_MAX, BACK_URL_MAX, uiBackLinkSetting } from "./ui-back-link.ts";
+import { accountOf, uiAccountSetting, UI_ACCOUNT_SETTING } from "./ui-account.ts";
 import { NAV_LINKS_MAX, navLines, navOf, uiNavSetting } from "./ui-nav.ts";
 import { UI_OVERVIEW_CARD_SETTING, overviewCardOf, uiOverviewCardSetting } from "./ui-host-view.ts";
+import { ICON_BYTES_MAX, UI_ICON_SETTING, iconOf, uiIconSetting } from "./ui-icon.ts";
 import { pgPublicUrlSetting, PUBLIC_SSLMODES } from "./pg-public-url.ts";
 import { changesRetiredText, pollMsRetiredText, type SourcesTop } from "../lib/table-sync.ts";
 import { historyDaysSetting, historyDaysWrongText } from "../duck/history.ts";
@@ -143,9 +145,17 @@ export const SERVE: CommandSpec = {
                             address (host/status.json: no scheme, no //, no leading /, no .. segment), and shown as
                             text in the page's look (docs/WEB-UI.md "Host views"); anything else is refused
                             (default unset: none)
+    MASON_UI_ACCOUNT        who is signed in to the host, at the foot of the web page's sidebar, linking to where the
+                            account is managed or signed out of, in the same tab: {"label": …, "url": …}, the label
+                            plain text on one line, at most ${BACK_LABEL_MAX} characters, the URL read as MASON_UI_BACK_URL is;
+                            any other key, or a value of another type, is refused (default unset: none)
     MASON_UI_OVERVIEW_CARD  a card of the host's on the web page's Overview, beside Mason's own: the same JSON as a
                             view's, read from a path relative to the page's own address, read as a view's is
                             (default unset: none)
+    MASON_UI_ICON           the web page's icon in the browser's tab: a data: URL of a PNG or SVG image in base64,
+                            data:image/png;base64,… or data:image/svg+xml;base64,…, the image at most ${ICON_BYTES_MAX}
+                            bytes; it is inline, so the browser makes no request for it; any other value is refused
+                            (default unset: no icon)
     MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
@@ -267,9 +277,15 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   // the sidebar as the host says it (src/cli/ui-nav.ts): each URL read as the link back's, the links a short JSON list
   const nav = uiNavSetting(env);
   if (nav !== null && "problem" in nav) wrong.push(nav.problem);
+  // who is signed in to the host (src/cli/ui-account.ts): a label and a URL read as the link back's, else refused here
+  const account = uiAccountSetting(env);
+  if (account !== null && "problem" in account) wrong.push(account.problem);
   // the host's card on the Overview (src/cli/ui-host-view.ts): a path relative to the page's address, else refused here
   const card = uiOverviewCardSetting(env);
   if (card !== null && typeof card !== "string") wrong.push(card.problem);
+  // the page's icon (src/cli/ui-icon.ts): a data: URL of a small PNG or SVG in base64, else refused here
+  const icon = uiIconSetting(env);
+  if (icon !== null && typeof icon !== "string") wrong.push(icon.problem);
   // the address a client reaches (src/cli/pg-public-url.ts): its one reading, refused here with the rest
   const publicUrl = pgPublicUrlSetting(env);
   if (publicUrl !== null && "problem" in publicUrl) wrong.push(publicUrl.problem);
@@ -581,8 +597,12 @@ export async function serve(argv: string[]): Promise<number> {
   const backLink = uiBackLinkSetting(process.env);
   if (backLink !== null && !("problem" in backLink)) say(`  web page  a link back at the top of its sidebar, ${JSON.stringify(backLink.label)} (MASON_UI_BACK_URL)`);
   for (const l of navLines(navOf(uiNavSetting(process.env)))) say(`  web page  ${l}`);
+  const account = accountOf(uiAccountSetting(process.env));
+  if (account !== null) say(`  web page  ${JSON.stringify(account.label)} at the foot of its sidebar (${UI_ACCOUNT_SETTING})`);
   const card = overviewCardOf(uiOverviewCardSetting(process.env));
   if (card !== null) say(`  web page  the host's card on its Overview, read from the page's address (${UI_OVERVIEW_CARD_SETTING})`);
+  const icon = iconOf(uiIconSetting(process.env));
+  if (icon !== null) say(`  web page  its own icon in the browser's tab, ${icon.slice("data:".length, icon.indexOf(";"))} (${UI_ICON_SETTING})`);
   const pageAllow = uiReadOnlyAllowSetting(process.env);
   if (uiReadOnlySetting(process.env) === true) {
     const allowed = Array.isArray(pageAllow) ? pageAllowsText(pageAllow) : null;
