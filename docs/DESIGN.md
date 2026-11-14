@@ -2983,6 +2983,45 @@ docs-only, since a job skipped for a failed need reports success on a required c
 tests that read a doc (`DOCS_TESTS`), and `tests/ci-shards.test.ts` holds that list to every unit test whose code reads
 one, simulates the workflow's jobs and gates in each mode, and runs `changes` over real merges.
 
+### Release lines: patch the previous line, breaking changes on a new line (the owner, 2026-11-14)
+
+**Why.** A host that runs Mason for others pins each project to a release line. Before 1.0 a line is `0.<minor>.x`,
+and Mason runs only a project pinned to its own line (`src/lib/project-version.ts`). The host cannot move a project to
+a new line for its owner, because moving the pin is the owner's step ("Before you upgrade"). So a fix released only on
+a new line never reaches the projects still on the old one. A security fix must reach every line in use.
+
+**Decision.**
+- A release on the current line is a patch (`0.20.1`), unless it holds a breaking change. A host applies a patch with a
+  restart.
+- A breaking change is anything that reads a project differently. It waits for the next line (`0.21.0`), which is
+  occasional.
+- A security fix is released on the previous line as well as the current one (`0.19.x` and `0.20.x`).
+- A release from `main` carries all of `main`, so the current line moves to its own branch (`release/0.20`), cut
+  from `main` just before the first breaking change merges. Its patches are released from there, and `main` becomes the
+  next line.
+
+`release-notes/README.md` "Release lines" defines a breaking change from the code, says how to tell a patch from
+`next.md`, and has the steps for a patch on the previous line. That patch is a merge to the line's branch,
+`release/0.<minor>`, cut from its newest tag. `release.yml` runs on those branches too, and a branch releases its own
+line only. Only the newest release takes npm's `latest`, the image's `latest` and GitHub's Latest. An older line's
+patch is published under npm's `latest-0.<minor>`. The image's line tag (`0.<minor>`) moves only forward.
+`scripts/release-line.ts` decides all of this, and `tests/release-line.test.ts` holds it. Release-notes PRs had been
+opened from branches named `release/v<version>`, which `release/*` and its ruleset also match. They are now
+`notes/v<version>`, and a push to a branch under `release/` not named for a line is skipped quietly, with a green run.
+
+**No branch's release run is cancelled by another's, and `latest` never moves back** (the re-check of PR 999). A
+concurrency group holds one running and one pending run, and a third run replaces the pending one, whatever
+`cancel-in-progress` says. With one group for every branch, a push to `main` could cancel a pending release on
+`release/0.19`, and the security fix would not ship. So the group is per branch. On one branch, a third push still
+replaces the waiting run. If that push brought no notes, the newer run releases the waiting version, but tags the later
+commit. If it brought newer notes, the waiting version is never tagged or published, and its fixes ship in the newer
+release. Two branches' runs may overlap, and `decide`'s "newest" can be stale. Each job that moves a "newest" name
+re-reads the remote's tags just before: npm's dist-tag right before `npm publish`, and the image's `latest` and
+GitHub's Latest in the last job. A run pushes its tag minutes before it publishes, so an older release's re-check sees
+a newer one's tag. The re-check fails closed: a list without the release's own tag refuses the job. A newer release
+that is tagged but never finishes keeps `latest` from an older line's patch until it is finished. A branch's release
+notes are never copied to `main`, whose release run checks its newest notes against `cli/package.json`.
+
 ## A libc order, read level by level
 
 Issue 128: under en_US.utf8 one value holding U+FE0F (`❤️`) or a Thai vowel refused a whole column's sort, group and
