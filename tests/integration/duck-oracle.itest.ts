@@ -261,6 +261,8 @@ const KNOWN: Decided[] = [
   shapesDecided(VALUES_ARMS, { sql: /sum\(s::numeric\) (AS s )?FROM castable WHERE id IN \(71, 7[46]\)/, kind: "value", issue: 402, why: "a VALUES row's numeric NaN or Infinity in a set operation prints as the engine's double (`nan`, `inf`)" }),
   // min / max of a set operation's column where equal values have two scales: the listed min-max-scale-tie
   { shape: ["numeric-aggregate"], sql: /UNION ALL SELECT o\.id FROM star_o o ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES/, kind: "text", gap: "min-max-scale-tie", why: "max of 1 and 1.00000000000000000000: Postgres keeps the last it reads, Mason the greatest operands" },
+  // min / max of a plain numeric: the engine's own, at the column's one scale (the owner's decision on #946)
+  { shape: ["numeric-aggregate"], sql: /SELECT n, count\(\*\), sum\(n\) FROM typed_arrays/, kind: "text", gap: "mixed-scale-numeric", why: "min of 0 beside 1.5 in a column declared numeric with no precision: Postgres's 0, Mason's 0.0" },
   // a cast to a Postgres type in a VALUES list reaches the engine unmapped (citext, jsonb[], arrays, composites, time(n)[])
   shapesDecided(VALUES_ARMS, { sql: ANY, kind: "refused", issue: 266, why: "a VALUES list's cast to a mapped type is refused with the engine's error" }),
   // a set operation's inet, jsonb or array output beside a VALUES arm loses Postgres's text
