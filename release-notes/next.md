@@ -19,3 +19,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   array, NULL elements and quoted elements that hold commas or braces. An array sent in binary, as Npgsql sends it,
   works too. A `numeric[]` parameter is compared with every digit kept. It is answered only in `= ANY`, `<> ALL` and
   the other comparisons with `ANY` or `ALL`. Elsewhere Mason refuses it by name and says what to write instead.
+- **A table under `sync: replication` no longer blocks `ALTER TABLE … DROP COLUMN` on your database.** On Postgres 15
+  and later, the publication Mason makes for itself listed each table's columns. So your database refused to drop a
+  listed column, with "publication … depends on column", and never sent a column added later. Mason's publication now
+  names each table whole. Mason updates a publication it made before at its first start after the upgrade, once,
+  while it keeps syncing. Columns a table's entry leaves out, with `exclude:` or `columns:`, now reach Mason over
+  replication. Mason drops them as they arrive. They are never stored, logged or served. A publication you name with
+  `publication:` is still never changed. If it lists a table's columns, Mason now says once that the list blocks
+  `DROP COLUMN`, and how to name the table whole. This was listed as known in 0.20.0.

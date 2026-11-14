@@ -122,6 +122,10 @@ paths:
   was frozen for ever; the engine's own failure to set replication up says the same way out on the table's line.
   DETECTOR: `tests/integration/duck-stream.itest.ts` (a mixed project, the publication's list, a switch each way held to
   the ledger), `tests/cli-run-server.test.ts` (the live refusal). ("Each table's sync")
+- **Mason's own publication names each table whole, never a column list** (`ensurePublication`; issue 978): a column
+  list made the database refuse the application's own `DROP COLUMN` and hid every column added later, so the stream
+  carries every column and `projectTuple` drops the ones the copy lacks. Do not bring a list back without the owner's
+  decision (docs/DESIGN.md "Mason's own publication names each table whole", 2026-11-14).
 - **The slot outlives `mason stop` and holds the source's WAL** (said at the stop); it is dropped, with Mason's own
   publication, VERIFIED gone, when the file says no table's sync is `replication` any more (`retireReplication`: at the start, and live
   when the last one leaves) and at `mason destroy`, from what the config records (`config.replication`). A project with
