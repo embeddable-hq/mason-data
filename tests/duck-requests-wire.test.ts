@@ -34,13 +34,17 @@ const said: string[] = [];
 const schema: PgSchema = {
   database: "app",
   tables: [{ name: "orders", primaryKey: ["id"], joins: [],
-    columns: [{ name: "id", type: "int8" }, { name: "status", type: "text" }, { name: "qty", type: "int4" }] }],
+    columns: [{ name: "id", type: "int8" }, { name: "status", type: "text" }, { name: "qty", type: "int4" }] },
+  // an int4 column whose synced value is past its range: the XX000 of issue 924's test
+  { name: "wide", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int8" }, { name: "qty", type: "int4" }] }],
 };
 
 before(async () => {
   store = await DuckStore.open(path.join(dir, "duck.db"), () => undefined);
   await store.writer.run("CREATE TABLE public.orders (id BIGINT, status VARCHAR, qty INTEGER)");
   await store.writer.run("INSERT INTO public.orders VALUES (1, 'paid', 2), (2, 'paid', 1), (3, 'pending', 5)");
+  await store.writer.run("CREATE TABLE public.wide (id BIGINT, qty BIGINT)");
+  await store.writer.run("INSERT INTO public.wide VALUES (1, 99999999999)");
   const real = await store.instance.connect();
   // written only when a test flushes (a minute's timer never fires here): a batch holds exactly what the test sent
   ledger = await RequestLedger.open(store, (l) => said.push(l), { days: 7, flushMs: 60_000,
@@ -127,6 +131,28 @@ test("a statement an Execute's row count stopped is a row of _mason.requests whe
     ["EXECUTE", "ok", 2, "SELECT id FROM orders ORDER BY id", "jdbc-maxrows"],
     ["EXECUTE", "ok", 3, "SELECT id FROM orders ORDER BY id DESC", "jdbc-maxrows"],
   ], "one row each: the one stopped at its row count with the rows it sent");
+});
+
+// WHERE AN INTERNAL ERROR FAILED (issue 924): a row answered XX000 carries its origin, the first frame in Mason's own code
+// as a file and a line, relative to the source root; every other row carries none. The XX000 here: a value the synced
+// table holds that its Postgres type cannot carry (an int4 column whose synced value is past its range), which the
+// encoder refuses as Mason's own gap.
+test("a statement answered XX000 has its origin in the request log: a file and a line in Mason's code, never a path, a name or the message", async () => {
+  recorded = [];
+  const before = (await ledger.recent({ limit: 1000 })).length;
+  const c = await client("psql");
+  try {
+    await assert.rejects(c.query("SELECT qty FROM wide"), (e: Error & { code?: string }) => e.code === "XX000");
+    await assert.rejects(c.query("SELECT * FROM nope"), /relation "nope" does not exist/);
+  } finally { await c.end(); }
+  await ledger.flush();
+  const rows = (await ledger.recent({ limit: 1000 })).slice(before);
+  assert.deepEqual(rows.map((r) => [r.sqlstate, r.query]), [["XX000", "SELECT qty FROM wide"], ["42P01", "SELECT * FROM nope"]]);
+  assert.match(rows[0]!.origin ?? "", /^src\/[a-z/-]+\.ts:\d+$/, `a file under src/ and a line: ${rows[0]!.origin}`);
+  assert.ok(!rows[0]!.origin!.includes(dir) && !rows[0]!.origin!.includes(os.homedir()), "never an absolute path");
+  assert.doesNotMatch(rows[0]!.origin!, /^src\/duck\/executor\.ts/, "never the engine's thread bridge, which carries every engine error");
+  assert.equal(rows[1]!.origin, null, "a refusal of the statement's own is no internal error: no origin");
+  assert.equal(recorded[0]!.origin, rows[0]!.origin, "the listener's row and the ledger's agree");
 });
 
 test("a ledger that cannot write leaves every answer as it was, and says so once", async () => {

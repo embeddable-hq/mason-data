@@ -12,7 +12,7 @@
  *
  * A failure repeated word for word is ONE event (`REPEAT_MS`): a database away fails every pass, every few seconds,
  * and a list of the same line buries the one before it. It is written again once it was over in between, or an hour
- * later: a table's failure is over when the table is current again (`recovered`) or copied anew (`copied`); a failure
+ * later: a table's failure is over when the table is current again (`recovered`) or copied anew (`full_sync`); a failure
  * of the whole sync (`table: null`: the stream, the database) when the sync says it is (`recovered` of no table: the
  * stream applied a batch again, the database attached again), which ends every whole-sync failure's repeat at once —
  * an extra event at worst, never a failure dropped. While it lasts, the table's own `error` (mason status) says it.
@@ -27,13 +27,18 @@ import { maskPasswordKeyword } from "../lib/secret-mask.ts";
 import type { DuckDBValue } from "@duckdb/node-api";
 import { MASON_SCHEMA, type DuckStore } from "./store.ts";
 import { Batches, History, Streak, cutoff } from "./history.ts";
+import { UNKNOWN_CODE, failureCode, originOf } from "../lib/failure-facts.ts";
 
 /** One restart of the run as its supervisor records it in `.mason/restarts.json` (src/cli/supervise.ts, a process of
  *  its own): when, why the run stopped, how long it had been up. */
 export interface Restart { at: string; reason: string; upSeconds: number }
 
 export const EVENTS_TABLE = `${MASON_SCHEMA}.sync_events`;
-export const EVENTS_DDL = `CREATE TABLE IF NOT EXISTS ${EVENTS_TABLE} (happened_at TIMESTAMPTZ, seq BIGINT, kind VARCHAR, table_name VARCHAR, message VARCHAR)`;
+export const EVENTS_DDL = `CREATE TABLE IF NOT EXISTS ${EVENTS_TABLE} (happened_at TIMESTAMPTZ, seq BIGINT, kind VARCHAR, table_name VARCHAR, message VARCHAR, code VARCHAR, origin VARCHAR)`;
+/** A FAILURE'S CODE AND ORIGIN (issue 924; src/lib/failure-facts.ts): a store made before gains the columns, its old
+ *  rows NULL (read as null) */
+export const EVENTS_CODE_DDL = `ALTER TABLE ${EVENTS_TABLE} ADD COLUMN IF NOT EXISTS code VARCHAR`;
+export const EVENTS_ORIGIN_DDL = `ALTER TABLE ${EVENTS_TABLE} ADD COLUMN IF NOT EXISTS origin VARCHAR`;
 
 /**
  * WHAT AN EVENT IS, one word each: `full_sync_failed`, `poll_failed`, `catch_up_failed` (the one poll that brings a new copy
@@ -73,16 +78,29 @@ export interface SyncEvent {
   table: string | null;
   /** what happened, in the log's own words (its first line is the reason; further lines are its detail) */
   message: string;
+  /** A FAILURE'S CODE (src/lib/failure-facts.ts `failureCode`): its SQLSTATE when it came from Postgres, its errno
+   *  when it came from the system (`ECONNREFUSED`, `ENOSPC`), the engine's error class (`conversion_error`), the page's
+   *  error class for a `ui_error` (`TypeError`), else `unknown` (a restart's always); null for good news, and for an
+   *  event recorded before codes were kept */
+  code: string | null;
+  /** A FAILURE'S ORIGIN: the first stack frame in Mason's own code, as a file and a line (`src/duck/sync.ts:1234`),
+   *  for a `ui_error` the page's own script (`src/web/app.js:12`); null for good news, a restart, a failure with no
+   *  frame in Mason's code, and an event recorded before origins were kept */
+  origin: string | null;
 }
-/** what the sync records: the time, `failed` and a restart are the events' own */
-export interface SyncEventInput { kind: Exclude<SyncEventKind, "restart">; table: string | null; message: string }
+/**
+ * What the sync records: the time, `failed` and a restart are the events' own. A failure gives the error it caught
+ * (`cause`), which its code and origin are read from (never its words beyond the message); or, where it caught none (a
+ * gap it found, the page's report), its `code` and `origin` as it knows them.
+ */
+export interface SyncEventInput { kind: Exclude<SyncEventKind, "restart">; table: string | null; message: string; cause?: unknown; code?: string; origin?: string | null }
 
 const FLUSH_MS = 1000;
 const BATCH_ROWS = 500;
 /** a failure said word for word again within this is the event already written (unless it was over between: `record`) */
 export const REPEAT_MS = 60 * 60 * 1000;
 
-interface Pending { at: Date; seq: number; e: SyncEventInput }
+interface Pending { at: Date; seq: number; e: SyncEventInput; code: string | null; origin: string | null }
 
 export interface EventsOptions {
   /** days kept (MASON_HISTORY_DAYS) */
@@ -115,7 +133,7 @@ export class SyncEvents {
 
   /** The events of a store: their table made, the events past the retention deleted, and a trim every hour. */
   static async open(store: DuckStore, log: (line: string) => void, options: EventsOptions): Promise<SyncEvents> {
-    const history = await History.open(store, [EVENTS_DDL]);
+    const history = await History.open(store, [EVENTS_DDL, EVENTS_CODE_DDL, EVENTS_ORIGIN_DDL]);
     const events = new SyncEvents(history, log, options);
     events.next = Number((await history.reader.runAndReadAll(`SELECT coalesce(max(seq), -1) + 1 FROM ${EVENTS_TABLE}`)).getRowsJS()[0]![0]);
     await history.keepTrimmed(() => events.trim(), (e) => log(`sync events: deleting the events older than ${events.days} days failed: ${e.message}`));
@@ -136,16 +154,20 @@ export class SyncEvents {
       if (last !== undefined && last.message === e.message && now - last.at < REPEAT_MS) return;
       this.lastFailure.set(key, { message: e.message, at: now });
     }
-    this.batches.push({ at: new Date(now), seq: this.next++, e });
+    // a failure's code and origin, read now from what it caught (its stack is the error's, never this call's)
+    const failed = isFailure(e.kind);
+    const code = !failed ? null : e.code ?? (e.cause === undefined ? UNKNOWN_CODE : failureCode(e.cause));
+    const origin = !failed ? null : e.origin !== undefined ? e.origin : e.cause === undefined ? null : originOf(e.cause);
+    this.batches.push({ at: new Date(now), seq: this.next++, e, code, origin });
   }
 
   /** Writes what is waiting, after any flush in flight. Resolves whether it was written or not (a failure is said). */
   flush(): Promise<void> { return this.batches.flush(); }
 
   private async write(rows: Pending[]): Promise<void> {
-    const sql = `INSERT INTO ${EVENTS_TABLE} (happened_at, seq, kind, table_name, message) VALUES ` +
-      rows.map((_, i) => `($${i * 5 + 1}::TIMESTAMPTZ, $${i * 5 + 2}, $${i * 5 + 3}, $${i * 5 + 4}, $${i * 5 + 5})`).join(", ");
-    const values = rows.flatMap((r): DuckDBValue[] => [r.at.toISOString(), r.seq, r.e.kind, r.e.table, r.e.message]);
+    const sql = `INSERT INTO ${EVENTS_TABLE} (happened_at, seq, kind, table_name, message, code, origin) VALUES ` +
+      rows.map((_, i) => `($${i * 7 + 1}::TIMESTAMPTZ, $${i * 7 + 2}, $${i * 7 + 3}, $${i * 7 + 4}, $${i * 7 + 5}, $${i * 7 + 6}, $${i * 7 + 7})`).join(", ");
+    const values = rows.flatMap((r): DuckDBValue[] => [r.at.toISOString(), r.seq, r.e.kind, r.e.table, r.e.message, r.code, r.origin]);
     try {
       if (this.options.insert !== undefined) await this.options.insert(sql, values);
       else await this.history.writer.run(sql, values);
@@ -177,9 +199,9 @@ export class SyncEvents {
     if (o.failed) where.push(`kind IN (${[...FAILURES].map((k) => `'${k}'`).join(", ")})`);
     else if (o.scheduled !== true) where.push(`kind NOT IN (${[...SCHEDULED].map((k) => `'${k}'`).join(", ")})`);
     if (o.since !== undefined) { values.push(o.since); where.push(`happened_at >= $${values.length}::TIMESTAMPTZ`); }
-    const rows = (await this.history.reader.runAndReadAll(`SELECT * FROM (SELECT epoch_ms(happened_at) AS ms, seq, kind, table_name, message FROM ${EVENTS_TABLE}` +
-      `${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY happened_at DESC, seq DESC LIMIT $1) ORDER BY ms, seq`, values)).getRowsJS() as Array<[bigint | number, bigint, string, string | null, string]>;
-    return rows.map(([ms, , kind, table, message]) => eventOf(new Date(Number(ms)).toISOString(), kind as SyncEventKind, table, message));
+    const rows = (await this.history.reader.runAndReadAll(`SELECT * FROM (SELECT epoch_ms(happened_at) AS ms, seq, kind, table_name, message, code, origin FROM ${EVENTS_TABLE}` +
+      `${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY happened_at DESC, seq DESC LIMIT $1) ORDER BY ms, seq`, values)).getRowsJS() as Array<[bigint | number, bigint, string, string | null, string, string | null, string | null]>;
+    return rows.map(([ms, , kind, table, message, code, origin]) => eventOf(new Date(Number(ms)).toISOString(), kind as SyncEventKind, table, message, code, origin));
   }
 
   /** Writes what is waiting and closes the events' connections (mason stop). */
@@ -196,7 +218,8 @@ export interface EventsQuery { limit: number; since?: string; failed?: boolean; 
 
 /** an event as read back, any `password=` value in its message masked (src/lib/secret-mask.ts `maskPasswordKeyword`,
  *  the exact form an earlier Mason leaked, issue 599: the sync scrubs those rows at open, and this holds should one stay) */
-const eventOf = (at: string, kind: SyncEventKind, table: string | null, message: string): SyncEvent => ({ at, kind, failed: isFailure(kind), table, message: maskPasswordKeyword(message) });
+const eventOf = (at: string, kind: SyncEventKind, table: string | null, message: string, code: string | null = null, origin: string | null = null): SyncEvent =>
+  ({ at, kind, failed: isFailure(kind), table, message: maskPasswordKeyword(message), code, origin });
 
 /**
  * THE EVENTS WITH THE RUN'S RESTARTS (src/cli/supervise.ts `.mason/restarts.json`), as ONE list newest last, asked as
@@ -205,7 +228,9 @@ const eventOf = (at: string, kind: SyncEventKind, table: string | null, message:
 export function withRestarts(events: readonly SyncEvent[], restarts: readonly Restart[], o: EventsQuery & { days: number; now?: number }): SyncEvent[] {
   const from = Math.max(o.since === undefined ? -Infinity : Date.parse(o.since), (o.now ?? Date.now()) - o.days * 86_400_000);
   const said = restarts.filter((r) => Date.parse(r.at) >= from)
-    .map((r) => eventOf(new Date(r.at).toISOString(), "restart", null, `the run stopped (${r.reason}) after ${r.upSeconds} s up, and its supervisor started it again`));
+    .map((r) => eventOf(new Date(r.at).toISOString(), "restart", null, `the run stopped (${r.reason}) after ${r.upSeconds} s up, and its supervisor started it again`,
+      // the supervisor records why in words alone, and the run's frames died with it
+      UNKNOWN_CODE, null));
   // a stable sort: an event and a restart of one millisecond keep the events' order, the restart after
   return [...events, ...said].sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).slice(-o.limit);
 }

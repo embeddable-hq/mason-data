@@ -189,8 +189,8 @@ const activityOf = (o: { window?: Record<string, unknown>; clients?: unknown[]; 
   window: { days: 1, covered: 1, statements: 1204, completed: 1190, refused: 10, failed: 2, cancelled: 2, rows: 52_000, bytesSent: 3_145_728, durationMs: { avg: 120, p50: 40, p95: 900 }, ...o.window },
   clients: o.clients ?? CLIENTS, slowest: o.slowest ?? [],
   clientsTotal: o.clientsTotal ?? { clients: (o.clients ?? CLIENTS).length, sessions: (o.clients ?? CLIENTS).reduce((a: number, c) => a + (c as { sessions: number }).sessions, 0) } });
-const EVENT: SyncEvent = { at: "2026-10-27T09:03:10.123Z", kind: "poll_failed", failed: true, table: "public.orders", message: "poll: connection reset\nthe sync tries it again in 5 s" };
-const EVENTS = { events: [EVENT, { at: "2026-10-27T09:04:00.000Z", kind: "restart", failed: true, table: null, message: "the run was started again after it stopped" }], keptDays: 7 };
+const EVENT: SyncEvent = { at: "2026-10-27T09:03:10.123Z", kind: "poll_failed", failed: true, table: "public.orders", message: "poll: connection reset\nthe sync tries it again in 5 s", code: "ECONNRESET", origin: "src/duck/sync.ts:3640" };
+const EVENTS = { events: [EVENT, { at: "2026-10-27T09:04:00.000Z", kind: "restart", failed: true, table: null, message: "the run was started again after it stopped", code: "unknown", origin: null }], keptDays: 7 };
 const USAGE = { since: "2026-10-27T09:04:30.000Z", until: "2026-10-27T09:05:30.000Z", stepSeconds: null, sampleSeconds: 60, keptDays: 7, samples: [],
   copySizes: [{ table: "public.customers", bytes: 524_288, at: "2026-10-27T09:00:00.000Z" }, { table: "public.events", bytes: 3_221_225_472, at: "2026-10-27T09:00:00.000Z" }] };
 
@@ -1724,7 +1724,7 @@ test("the users' add form: a Role choice where the roles file names roles, its d
   assert.equal(renderAddUser({ ...state, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" }), "", "read-only: no form, no choice");
   // one line on roles under the form, with roles or without: the file and the command that explains it
   // the link opens in the same tab: a host's CSP sandbox with no allow-popups silently drops a target="_blank" one
-  for (const html of [form, plain]) assert.match(html, /<\/button><p class="dim roles-line">Roles limit a user to some tables and columns\. You write them in <code>mason\/roles\.yml<\/code>, and <a href="https:\/\/github\.com\/embeddable-hq\/mason-data#access-control" rel="noreferrer">the README<\/a> shows how\.<\/p><\/form>$/);
+  for (const html of [form, plain]) assert.match(html, /<\/button><p class="dim roles-line">Roles can limit a user to some tables, columns and rows\. Configure them via <code>mason\/roles\.yml<\/code>\. <a href="https:\/\/github\.com\/embeddable-hq\/mason-data#access-control" rel="noreferrer">The README<\/a> describes how\.<\/p><\/form>$/);
   // the README's section the link names is there: its heading's anchor
   assert.ok(/^### Access control$/m.test(fs.readFileSync(path.join(WEB, "..", "..", "README.md"), "utf8")), "README.md has the Access control section the link names");
   // no --set: attributes stay the command's
@@ -1945,7 +1945,7 @@ test("the users: From… asks where the user connects from in a popover beside i
 test("the add form: Connects from, a dropdown in mason user add's words — anywhere (the default, no from sent) or only these addresses, the box beside it, a comma list as --from takes it, the run judging each", async () => {
   const renderAddUser = fn<[unknown], string>("renderAddUser");
   const form = renderAddUser(CATALOG_STATE);
-  assert.match(textOf(form), /Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user Roles limit/);
+  assert.match(textOf(form), /Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user Roles can limit/);
   assert.match(form, /<span class="connects"><label for="add-user-connects">Connects from<\/label> <select id="add-user-connects" name="connects"><option value="any" selected>anywhere<\/option><option value="only">only these addresses<\/option><\/select> <span class="ranges">/,
     "a dropdown, its label; anywhere the default, as mason user add with no --from; the box beside it");
   assert.doesNotMatch(form, /type="radio"|<fieldset/, "no radios");
@@ -1970,7 +1970,7 @@ test("the add form on one line where its card is wide enough: each field a label
   const children = [...form.replace(/^<form[^>]*>|<\/form>$/g, "").matchAll(/<(span|button)\b[^>]*? class="([^"]*)"/g)];
   assert.match(form, /^<form id="add-user" class="formcard" autocomplete="off"><span class="name-field"><label for="user-name">Name<\/label> <input id="user-name"[^>]*><\/span> <span class="role-field">/);
   assert.ok(["name-field", "role-field", "connects", "primary"].every((c) => children.some((m) => m[2] === c)), "the four fields");
-  assert.match(textOf(renderAddUser(CATALOG_STATE)), /^Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user Roles limit a user to some tables and columns\. You write them in mason\/roles\.yml , and the README shows how\.$/);
+  assert.match(textOf(renderAddUser(CATALOG_STATE)), /^Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user Roles can limit a user to some tables, columns and rows\. Configure them via mason\/roles\.yml \. The README describes how\.$/);
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   assert.match(css, /#add-user \.roles-line \{ flex: 0 0 100%;/, "the line on roles is the form's own last row, under the fields");
   const rule = (sel: string) => css.match(new RegExp(`(?:^|\\})\\s*${sel.replace(/[.#[\]="]/g, "\\$&")}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
@@ -3585,6 +3585,17 @@ test("Usage: over the last 15 minutes what runs every poll, the range's statemen
   (app as unknown as { markStale(): void }).markStale(); await app.poll();
   assert.match(textOf(app.view().poll!), /✗ the request log cannot be read/);
   assert.match(textOf(app.view()["usage-kpis"]!), /Queries, last 24 hours 1,204/, "the last counts stay under the banner");
+});
+
+test("Sync events: a failure's code and where in Mason it happened are one quiet line under its message; none for good news or an event from before Mason kept them (issue 924)", () => {
+  const renderEvents = fnOf<[unknown, Record<string, unknown>?], string>(syncsPage, "renderEvents");
+  const at = Date.parse("2026-10-27T09:10:00.000Z");
+  const text = textOf(renderEvents(EVENTS, { now: at }));
+  assert.match(text, /poll: connection reset the sync tries it again in 5 s Code ECONNRESET ?, at src\/duck\/sync\.ts:3640$/);
+  assert.match(text, /the run was started again after it stopped Code unknown 7 min ago/, "a failure with no origin: its code alone");
+  const old = { ...EVENT, code: null, origin: null };
+  const good = { ...EVENT, kind: "full_sync", failed: false, code: null, origin: null };
+  assert.doesNotMatch(textOf(renderEvents({ events: [old, good], keptDays: 7 }, { now: at })), /Code/);
 });
 
 test("Sync events: the sync's events are mason logs --events' lines in a table, a failure marked, NEWEST FIRST (When turns it round); none is said as the CLI says it", () => {
@@ -5714,7 +5725,7 @@ test("Sync events' filters list every kind and every added table, whatever the r
   const renderEventFilters = of<[unknown, Record<string, string>, unknown], string>(syncsPage, "syncs.js", "renderEventFilters");
   const renderEvents = of<[unknown, Record<string, unknown>], string>(syncsPage, "syncs.js", "renderEvents");
   assert.deepEqual((syncsPage as Record<string, unknown>).EVENT_KINDS, [...EVENT_KINDS], "the page's kinds are src/duck/events.ts's");
-  const only = { events: [{ at: "2026-10-28T09:00:00.000Z", kind: "full_sync", failed: false, table: "public.orders", message: "copied" }], keptDays: 7 };
+  const only = { events: [{ at: "2026-10-28T09:00:00.000Z", kind: "full_sync", failed: false, table: "public.orders", message: "synced" }], keptDays: 7 };
   const text = textOf(renderEventFilters(only, { kind: "", table: "" }, RUNNING));
   // each kind in the page's words, its code the option's value: a word for every kind the sync records
   const words = (syncsPage as Record<string, unknown>).KIND_WORDS as Record<string, string>;

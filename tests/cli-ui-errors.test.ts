@@ -57,11 +57,14 @@ test("a report is recorded as ONE ui_error event of no table, a failure, its mes
   assert.equal(r.status, 200, JSON.stringify(r.json));
   assert.deepEqual(r.json, { recorded: true });
   assert.deepEqual(recorded, [{ kind: "ui_error", table: null, message: "the web page hit a TypeError on its observability/queries view in pages/queries.js at line 120, column 7\n" +
-    "The error's own words stay in the browser, in its console: the page never sends them, since they can quote synced data." }]);
+    "The error's own words stay in the browser, in its console: the page never sends them, since they can quote synced data.",
+    // its code the error's class, its origin the page's own script and line as Mason's source names it (issue 924)
+    code: "TypeError", origin: "src/web/pages/queries.js:120" }]);
   // what the page could not tell is null, and said as unknown — never a word of the page's
   recorded.length = 0;
   assert.equal((await post({ view: "overview", file: null, line: null, column: null, name: null })).status, 200);
   assert.equal(recorded[0]!.message.split("\n")[0], "the web page hit an error on its overview view");
+  assert.deepEqual([recorded[0]!.code, recorded[0]!.origin], ["unknown", null], "no class: its code says unknown; no file: no origin");
   const { isFailure } = await import("../src/duck/events.ts");
   assert.ok(isFailure("ui_error" as Parameters<typeof isFailure>[0]), "a ui_error is a failure: mason logs --events --failed, /api/events?failed=1, mason status' recent errors");
 });

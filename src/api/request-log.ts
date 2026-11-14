@@ -67,6 +67,9 @@ export interface ApiLogRow {
   /** the bytes the listener sent the session for this statement: from its message's arrival to its last frame (its
    *  rows, its CommandComplete or ErrorResponse) — what it cost to send; absent where nothing was counted */
   bytesSent?: number | undefined;
+  /** WHERE A STATEMENT ANSWERED XX000 FAILED (src/lib/failure-facts.ts `originOf`): the first frame in Mason's own code,
+   *  a file and a line (`src/duck/store.ts:897`); absent for every other row and where no Mason frame was found */
+  origin?: string | undefined;
   /** A SLOW STATEMENT'S PLAN (src/api/postgres/slow-plan.ts): a plain EXPLAIN of it, run once it ended, off its
    *  answer's path. The ledger holds the row until this settles (bounded) and writes the two together; it settles to
    *  null where none was recorded. Absent: none asked (not slow, refused, cancelled, or another plan was being recorded) */

@@ -1869,14 +1869,17 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     (completed, failed, cancelled: what a reader shows), sqlstate, message, detail, hint, rows,
     bytesSent, durationMs, query, queryTruncated, plan (a statement that took ${(SLOW_MS / 1000).toLocaleString("en-US")} s or more: the
     engine's plan of it, recorded once it ended — the tables and how fresh each was, the SQL sent to the engine, its
-    operators with their estimated rows — or why none could be; else null), planTruncated (cut at 8 KiB) }], keptDays,
+    operators with their estimated rows — or why none could be; else null), planTruncated (cut at 8 KiB), origin (an internal error, XX000:
+    where it failed in Mason, a file and a line such as src/duck/store.ts:897; else null) }], keptDays,
     before (the position of the page before,
     or null: none older) }; with --events { events: [{ at, kind (full_sync_failed, poll_failed,
     catch_up_failed, stream_failed, source_unreachable, generated_failed, compact_failed, restart, full_sync, recovered, synced (a sync
     asked by hand), sync_changed (a table's sync: changed), polled (a poll on its schedule, with --scheduled), streamed (a
     minute of the stream's changes to a table, with --scheduled), ui_error (the web page met an error of its own)), failed,
     table (null: the whole sync, the run or the web page),
-    message }], keptDays }; with --running { running: [{ session, user,
+    message, code (a failure: its SQLSTATE, its system error such as ECONNREFUSED, its error class, or unknown;
+    null for good news and for an event recorded before Mason kept it), origin (a failure: where it happened in
+    Mason, a file and a line such as src/duck/sync.ts:1234, or null) }], keptDays }; with --running { running: [{ session, user,
     applicationName, method, startedAt, runningMs, rows (sent so far), query, queryTruncated }] }; next
 `;
 

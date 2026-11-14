@@ -70,7 +70,7 @@ const pollNow = (sources: string[]): Promise<{ at: string; tables: PolledTable[]
 const asks: RequestQuery[] = [];
 const request: LedgerRequest = { requestId: "r1", startedAt: "2026-10-24T10:04:00.000Z", session: 3, applicationName: "Metabase", clientAddress: null, tokenName: "", user: "", role: "", attributes: null, method: "QUERY",
   outcome: "refused", status: "failed", sqlstate: "42P01", message: 'relation "nope" does not exist', detail: null, hint: null, rows: null, durationMs: 2,
-  endedAt: "2026-10-24T10:04:00.002Z", bytesSent: 120, query: "SELECT * FROM nope", queryTruncated: false, plan: null, planTruncated: false };
+  endedAt: "2026-10-24T10:04:00.002Z", bytesSent: 120, query: "SELECT * FROM nope", queryTruncated: false, plan: null, planTruncated: false, origin: null };
 const window = (days: number) => ({ days, covered: days, statements: 3, completed: 1, refused: 1, failed: 0, cancelled: 1, rows: 20, bytesSent: 900, durationMs: { avg: 5, p50: 5, p95: 5 } });
 const summary: QuerySummary = { keptDays: 7, day: window(1), week: window(7) };
 // the listener's statements running now, and its cancel (src/api/postgres/server.ts): a session running one, another idle
@@ -109,7 +109,7 @@ const requests = {
 };
 // the sync's events (src/duck/events.ts), as SyncEvents answers them, and the run's restarts (src/cli/supervise.ts)
 const eventAsks: Array<{ limit: number; since?: string; failed?: boolean }> = [];
-const syncEvent = { at: new Date(Date.now() - 120_000).toISOString(), kind: "poll_failed" as const, failed: true, table: "public.customers", message: "the poll failed, and is tried again at the next one" };
+const syncEvent = { at: new Date(Date.now() - 120_000).toISOString(), kind: "poll_failed" as const, failed: true, table: "public.customers", message: "the poll failed, and is tried again at the next one", code: "ECONNRESET", origin: "src/duck/sync.ts:3640" };
 const events = { days: 7, recent: async (o: { limit: number; since?: string; failed?: boolean }) => { eventAsks.push(o); return [syncEvent]; } };
 let restarts: Array<{ at: string; reason: string; upSeconds: number }> = [];
 let restartsUnreadable = false;
@@ -852,7 +852,7 @@ test("the sync's events: /api/events passes its filters to the record, merges th
     const all = await get(`/api/events?limit=5&failed=1&since=${since}`);
     assert.equal(all.status, 200);
     assert.deepEqual(all.body, { keptDays: 7, events: [syncEvent,
-      { at: recent, kind: "restart", failed: true, table: null, message: "the run stopped (it was killed (SIGKILL: often the system out of memory)) after 3600 s up, and its supervisor started it again" }] },
+      { at: recent, kind: "restart", failed: true, table: null, message: "the run stopped (it was killed (SIGKILL: often the system out of memory)) after 3600 s up, and its supervisor started it again", code: "unknown", origin: null }] },
       "newest last; a restart older than the retention is not one of them");
     assert.deepEqual(eventAsks, [{ limit: 5, failed: true, scheduled: false, since }]);
     assert.deepEqual((await get("/api/events")).body.events, [syncEvent, (all.body.events as unknown[])[1]]);
