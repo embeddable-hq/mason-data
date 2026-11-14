@@ -11,6 +11,11 @@
  * carry (`FOR ALL TABLES` carries every one), a column list without a copied column, a row filter (a filtered row's
  * delete never arrives). Each refusal is the publication EXPECTED — the found one plus the gap, as the `ALTER
  * PUBLICATION … ADD TABLE …` its owner runs — and the one FOUND. TRUNCATE not published is allowed and said once.
+ *
+ * A column list that carries every synced column is ACCEPTED, as it always was, and said once: while it lists a column,
+ * the database refuses the application's own `ALTER TABLE … DROP COLUMN` of it (`listsColumns`, `columnListText`). What
+ * Mason expects names each synced table WHOLE, never with a column list, for the same reason: Mason drops the columns
+ * it does not sync as they arrive (docs/DESIGN.md "Mason's own publication names each table whole").
  */
 import type { PgConnection } from "../cdc/pg-wire.ts";
 
@@ -25,6 +30,8 @@ export interface PublishedTable {
   published: string[] | null;
   /** the publication's row filter on the table (Postgres 15+), or null */
   rowFilter: string | null;
+  /** the publication names the table with a column list (Postgres 15+), which blocks a DROP COLUMN of a listed column */
+  columnList?: boolean;
 }
 
 /** The named publication and the tables it carries or the copy holds, as `readNamedPublication` read them. */
@@ -54,6 +61,8 @@ export interface NamedPublicationVerdict {
   tables: Map<string, string>;
   /** the publication does not publish TRUNCATE: a TRUNCATE on the database does not reach the copy */
   noTruncate: boolean;
+  /** the synced tables it carries with a column list: accepted, and said (`columnListText`) */
+  listsColumns: string[];
 }
 
 /** what the copy reads of each table: its columns but a generated one (not published before Postgres 18; the stream
@@ -67,25 +76,36 @@ const NEVER_ALTERED = "Mason reads a publication it is given as it is, never alt
   "or write publication: null in it, where Mason makes its own, carrying the replicated tables alone (not on a read replica).";
 
 /**
- * The verdict over a described publication (pure: `described` is what `readNamedPublication` read). `identities` are
- * the tables' `relreplident`: a table whose identity is not its key is expected WHOLE (a column list missing an
- * identity column would make the app's UPDATEs fail).
+ * The verdict over a described publication (pure: `described` is what `readNamedPublication` read).
  */
-export function namedPublicationVerdict(described: DescribedPublication, tables: readonly CopiedTable[], identities: ReadonlyMap<string, string>): NamedPublicationVerdict {
-  const whole = new Set(tables.filter((t) => identities.get(t.source) !== "d").map((t) => t.source));
+export function namedPublicationVerdict(described: DescribedPublication, tables: readonly CopiedTable[]): NamedPublicationVerdict {
   const pub = described.publication;
   const noTruncate = pub.exists && !pub.publish.includes("truncate");
   if (!pub.exists || !["insert", "update", "delete"].every((k) => pub.publish.includes(k))) {
     const all: Required = new Map(tables.map((t) => [t.source, requiredOf(t)]));
-    const m = checkPublication(all, described, whole) ?? `publication ${pub.name} cannot be read (Mason bug: report it)`;
-    return { refused: `${m}\n\n${NEVER_ALTERED}`, tables: new Map(), noTruncate };
+    const m = checkPublication(all, described) ?? `publication ${pub.name} cannot be read (Mason bug: report it)`;
+    return { refused: `${m}\n\n${NEVER_ALTERED}`, tables: new Map(), noTruncate, listsColumns: [] };
   }
   const out = new Map<string, string>();
   for (const t of tables) {
-    const m = checkPublication(new Map([[t.source, requiredOf(t)]]), described, whole);
+    const m = checkPublication(new Map([[t.source, requiredOf(t)]]), described);
     if (m !== null) out.set(t.source, `${m}\n\n${NEVER_ALTERED}`);
   }
-  return { refused: null, tables: out, noTruncate };
+  const listsColumns = tables.map((t) => t.source).filter((t) => !out.has(t) && described.tables.get(t)?.columnList === true).sort();
+  return { refused: null, tables: out, noTruncate, listsColumns };
+}
+
+/**
+ * WHAT A COLUMN LIST ON A NAMED PUBLICATION COSTS ITS OWNER, said once a run (src/duck/sync.ts `verifyPublication`):
+ * the database refuses `ALTER TABLE … DROP COLUMN` of a listed column while the list stands. Mason does not need the
+ * list, so the way out names each table whole, in one transaction. Accepted all the same: the publication is its owner's.
+ */
+export function columnListText(publication: string, tables: readonly string[]): string {
+  const names = tables.map(qualified).join(", ");
+  const one = tables.length === 1;
+  return `publication ${publication} lists the columns of ${names}. While it does, your database refuses ALTER TABLE … DROP COLUMN of a listed column. ` +
+    `Mason does not need the list: it drops the columns it does not sync as they arrive. To name ${one ? "the table" : "each table"} whole, run as ${one ? "its" : "their"} owner: ` +
+    `BEGIN; ALTER PUBLICATION ${q(publication)} DROP TABLE ${names}; ALTER PUBLICATION ${q(publication)} ADD TABLE ${names}; COMMIT;`;
 }
 
 /**
@@ -142,7 +162,7 @@ const inCatalogOrder = (d: PublishedTable | undefined, cols: Iterable<string>): 
  * publication that does not publish every insert, update and delete, and a row filter on a copied table. A table the
  * database does not have is no concern of the publication's (the copy refuses it).
  */
-function checkPublication(required: Required, described: DescribedPublication, whole: ReadonlySet<string>): string | null {
+function checkPublication(required: Required, described: DescribedPublication): string | null {
   const pub = described.publication;
   const columnLists = described.serverVersion >= 150000;
   const problems: string[] = [];
@@ -171,15 +191,11 @@ function checkPublication(required: Required, described: DescribedPublication, w
   if (pub.exists && publishes.length) problems.push(`publication ${pub.name} does not publish ${publishes.join(", ")}`);
   if (problems.length === 0) return null;
 
-  // EXPECTED: what it streams now, plus what the copy needs
+  // EXPECTED: what it streams now, plus each synced table WHOLE — never a column list, which blocks the database's own
+  // DROP COLUMN of a listed column, where Mason drops what it does not sync as it arrives (whole is never less than found)
   const expected = new Map<string, string[] | null>();
   for (const [t, d] of described.tables) if (d.published !== null) expected.set(t, [...d.published]);
-  for (const [table, cols] of required) {
-    const d = described.tables.get(table);
-    if (d === undefined) continue;
-    expected.set(table, inCatalogOrder(d, [...(expected.get(table) ?? []), ...cols]));
-  }
-  for (const t of whole) if (expected.has(t)) expected.set(t, null);
+  for (const table of required.keys()) if (described.tables.has(table)) expected.set(table, null);
   const expectedSql = !pub.exists
     ? [`  CREATE PUBLICATION ${q(pub.name)} FOR TABLE`, tableLines(expected, columnLists).join(",\n"), `  WITH (publish = 'insert, update, delete');`]
     : addStatements(pub, required, described, expected, columnLists, publishes);
@@ -260,7 +276,8 @@ SELECT json_build_object(
       FROM pg_attribute a WHERE a.attrelid = w.oid AND a.attnum > 0 AND NOT a.attisdropped),
     'in_publication', EXISTS (SELECT 1 FROM pt WHERE pt.t = w.t),
     'published', (SELECT pt.cols FROM pt WHERE pt.t = w.t),
-    'row_filter', (SELECT pt.rf FROM pt WHERE pt.t = w.t)
+    'row_filter', (SELECT pt.rf FROM pt WHERE pt.t = w.t),
+    'column_list', ${modern ? `EXISTS (SELECT 1 FROM pg_publication_rel r JOIN pg_publication p ON p.oid = r.prpubid WHERE p.pubname = ${lit(publication)} AND r.prrelid = w.oid AND r.prattrs IS NOT NULL)` : "false"}
   ) ORDER BY w.t), '[]'::json) FROM wanted w)
 )::text`;
 }
@@ -270,14 +287,14 @@ export interface PublicationAnswer {
   version: number;
   publication: { all_tables: boolean; publish: string[] } | null;
   others: string[];
-  tables: Array<{ t: string; columns: string[]; in_publication: boolean; published: string[] | null; row_filter: string | null }>;
+  tables: Array<{ t: string; columns: string[]; in_publication: boolean; published: string[] | null; row_filter: string | null; column_list?: boolean }>;
 }
 
 /** A catalog answer described: before Postgres 15 a publication carries whole rows, every column of a table it names. */
 export function describedOf(answer: PublicationAnswer, publication: string): DescribedPublication {
   return {
     publication: { name: publication, exists: answer.publication !== null, publish: answer.publication?.publish ?? [], allTables: answer.publication?.all_tables ?? false, others: answer.others },
-    tables: new Map(answer.tables.map((t) => [t.t, { columns: t.columns, published: t.in_publication ? (t.published ?? t.columns) : null, rowFilter: t.row_filter }])),
+    tables: new Map(answer.tables.map((t) => [t.t, { columns: t.columns, published: t.in_publication ? (t.published ?? t.columns) : null, rowFilter: t.row_filter, columnList: t.column_list === true }])),
     serverVersion: answer.version,
   };
 }
