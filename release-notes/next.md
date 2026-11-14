@@ -47,6 +47,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **After a fatal error in the synced data, Mason no longer aborts on its way out, and the cause reaches `mason logs`.**
+  Such an error is, for example, a checkpoint that fails on a full disk. Mason then ends the run so that it can start
+  again. Sometimes the run aborted instead (exit 134, `terminate called after throwing an instance of 'Napi::Error'`),
+  and the cause could be missing from `mason logs`. Now the run waits up to 5 seconds for the synced data to close,
+  then writes its log to the end and exits with code 1. If the synced data is still closing after 5 seconds, the log
+  says so, and the run exits anyway.
 - **A table's columns dialog on the web page now names the choice its row names.** On the Tables page, a table that
   leaves out columns which look like secrets says "All but 7 columns". Its columns dialog said "All columns, … but
   password, …", so it read like a different choice. Now the dialog's choice starts with the same words, "All but 7

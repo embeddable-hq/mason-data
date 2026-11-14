@@ -459,14 +459,15 @@ test("an EXPLAIN ANALYZE cancelled while it reads is told 57014, and its session
 // EVERY CALL TO THE WORKER SETTLES (src/duck/executor.ts SILENT_MS, CLOSE_GRACE_MS): a worker that stops answering —
 // here one that answers the open, then nothing but its shutdown 1.5 s late, in place of the copy's — leaves no request
 // waiting for ever: they are told 57P02 once it has been silent `silentMs`, the run is told, and a close settles within
-// its grace. And the thread is ENDED only once its shutdown answered, never at the grace (NOTHING ENDS THE WORKER'S
-// JAVASCRIPT: a terminate under a pending call of DuckDB's aborts the process).
+// its grace. And the thread ENDS only once its shutdown answered, never at the grace (NOTHING ENDS THE WORKER'S
+// JAVASCRIPT: a terminate under a pending call of DuckDB's aborts the process), and by itself (THE THREAD ENDS BY ITSELF).
 test("a copy's thread that stops answering: every request is told 57P02 within its bound, the run is told, close settles within its grace, and the thread is ended only once its shutdown answers", { timeout: 60_000 }, async () => {
   const silent = path.join(dir, "silent-worker.mjs");
   fs.writeFileSync(silent, `import { parentPort } from "node:worker_threads";
 parentPort.on("message", (m) => {
   if (m.op === "open") parentPort.postMessage({ id: m.id, ok: true, value: null });
-  if (m.op === "shutdown") setTimeout(() => parentPort.postMessage({ id: m.id, ok: true, value: null }), 1500);
+  // answered, it lets go of its port as the copy's worker does, and its thread ends by itself (issue 913)
+  if (m.op === "shutdown") setTimeout(() => { parentPort.postMessage({ id: m.id, ok: true, value: null }); parentPort.unref(); }, 1500);
 });
 `);
   type Exec = { runner(): Promise<unknown>; writer(): { run(sql: string): Promise<unknown> }; onCrash(f: (r: string) => void): void; close(graceMs?: number): Promise<void>; abandoned?: string | null; worker: Worker };
