@@ -39,6 +39,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **Removing a synced table whose name a generated table also uses no longer stops the sync.** While a synced table
+  holds a name, a generated table of that name is refused, as before. Once you remove the synced table, the generated
+  table is built again and served. Before, if no review of the generated tables ran between the add and the remove,
+  every sync pass failed with "Table with name … does not exist", and queries on the name failed until one of the
+  generated table's bases changed. A project already in that state recovers at its first start after the upgrade.
+- **A generated table whose name differs from a synced table's only in case is refused.** The synced data does not
+  tell such names apart, so `Orders.yml` beside a synced `orders` could replace the synced table's rows. Now it is
+  refused by name, as a generated file of the synced table's own name is. Two generated files whose names differ only
+  in case are refused the same way. Rename the file to fix either.
 - **A `numeric` column with no precision now prints each value as your database does.** Rails makes such a column from
   `t.decimal`. Mason printed every value with the most decimals any value in the column had, so `12.5` read `12.50` and
   `0` read `0.00`. Now a plain `SELECT`, `::text`, arithmetic, `sum`, windows, subqueries and the binary

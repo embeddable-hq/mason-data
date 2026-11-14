@@ -39,6 +39,7 @@ import type { Planner, GeneratedColumn, GeneratedRefusal, DefinitionPlan as Defi
 import { cycleRefusal, isNumeric, planDefinition, readsByName, refusalOf, refusalText, storedColumns, uncheckedRefusal, type EngineTypes } from "./generated-plan.ts";
 import { MASON_SCHEMA, pgErrorOf, type DuckStore } from "./store.ts";
 import { StatementError } from "./statement.ts";
+import { relationKey } from "../lib/relation-key.ts";
 import type { SyncEventInput } from "./events.ts";
 import type { CopyState } from "./sync.ts";
 
@@ -267,6 +268,16 @@ export class GeneratedTables {
       const at = name.indexOf(".");
       this.entry(name).deployed = { definition: { name, schema: name.slice(0, at), table: name.slice(at + 1), file, sql, orderBy, targetLag: { every, seconds: Number(seconds) }, comment },
         fingerprint, columns: JSON.parse(columns) as GeneratedColumn[], bases: JSON.parse(bases) as string[], basesSynced: basesSynced === null ? {} : JSON.parse(basesSynced) as Record<string, number | null>, snapshotAt: Number(snapshotAt), builtAt: Number(builtAt), rows: Number(count), seconds: took };
+    }
+    // A LEDGER ROW WITH NO TABLE UNDER IT is let go and built again (issue 996): a synced table that held the name and was
+    // dropped took the table with it, and an earlier Mason kept the row, so `served()` named a table the catalog's
+    // rebuild could not read, and every rebuild and pass failed on it. The engine finds a name by `relationKey`
+    const there = new Set(((await w.runAndReadAll(`SELECT schema_name || '.' || table_name FROM duckdb_tables() WHERE database_name = current_database()`)).getRowsJS() as Array<[string]>).map(([n]) => relationKey(n)));
+    for (const e of this.entries.values()) {
+      if (e.deployed === null || there.has(relationKey(e.name))) continue;
+      e.deployed = null;
+      await w.run(`DELETE FROM ${GENERATED_LEDGER} WHERE name = ${literal(e.name)}`);
+      this.host.log(`${e.name}: its table is not in the synced data, so the generated table is built again`);
     }
     // marks die with a run: a base whose last sync is not the one the snapshot saw may have changed since. Never "synced
     // after the snapshot": a poll's time is its start, so one that began before the snapshot and committed after it would
@@ -525,8 +536,10 @@ export class GeneratedTables {
     const planner = this.planner, schema = this.host.schema();
     if (planner === null) return;
     const def = e.wanted;
-    if (def === null) { e.checked = null; e.seen = null; e.refusals = []; e.waitingFor = null; return; }
     const held = this.host.added(e.name);
+    // a name a synced table holds is let go whatever its file says: a file refused at its read kept what was deployed,
+    // which the synced table's drop then left in `served()` with no table under it (issue 996)
+    if (def === null) { e.checked = null; e.seen = null; e.refusals = []; e.waitingFor = null; if (held !== null) await this.release(e); return; }
     if (held !== null) {
       e.checked = null; e.seen = null; e.waitingFor = null;
       await this.release(e);
@@ -711,6 +724,26 @@ export class GeneratedTables {
     e.deployed = null; e.dirtySince = null; e.taken = null; e.error = null;
     await this.host.onWriter(() => this.store.writer.run(`DELETE FROM ${GENERATED_LEDGER} WHERE name = ${literal(e.name)}`));
     this.host.log(`${e.name}: a synced table now holds its name, so the generated table is no longer kept`);
+  }
+
+  /**
+   * THE TABLE AT A NAME DROPPED BY THE SYNC (`mason remove` of a synced table, src/duck/sync.ts `pass`), called on the
+   * writer's turn, so it never takes one: a generated table of that name (by the engine's rule, `relationKey`) has no
+   * table any more, whatever it was last built from, so what it says it serves is let go with its ledger row. Kept, it
+   * was in `served()` with no table under it, and every rebuild of the catalog and every pass failed on it until a base
+   * changed (issue 996). Also while a run has it: that run's swap puts its table in, and one that fails leaves nothing
+   * said served. Its next review builds it again.
+   */
+  async dropped(source: string): Promise<void> {
+    const key = relationKey(source);
+    for (const e of this.entries.values()) {
+      if (relationKey(e.name) !== key || e.deployed === null) continue;
+      // a run's marks are its own until its swap: a change after its snapshot stays marked for the next run
+      e.deployed = null;
+      if (!e.running) { e.dirtySince = null; e.taken = null; e.error = null; }
+      await this.store.writer.run(`DELETE FROM ${GENERATED_LEDGER} WHERE name = ${literal(e.name)}`);
+      this.host.log(`${e.name}: the synced table that held its name is dropped, so the generated table is built again`);
+    }
   }
 
   /** what to build from now: the file's definition where the catalog passed it, else what was deployed; nothing where a

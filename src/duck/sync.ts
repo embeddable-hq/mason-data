@@ -84,6 +84,7 @@ import { COMPACT_DISK_MARGIN_BYTES, COMPACT_MIN_WASTE_BLOCKS, COMPACT_WASTE_SHAR
 import { extensionFailure, loadPostgresSql } from "./extensions.ts";
 import { errorCode, errorText, maskPasswordKeyword, messageOf } from "../lib/secret-mask.ts";
 import { BIG_TABLE_ROWS, intervalOf, msText, syncedText, syncText, syncWords, type PolledSync, type TableSync } from "../lib/table-sync.ts";
+import { relationKey } from "../lib/relation-key.ts";
 
 /** how a run keeps its copies current: each table as its `sync:` says (`poll`; a table with none — a test's — polled at
  *  the run's interval), each as its `sync:` says with a table with none streamed (`replication`: a test's run of the
@@ -1308,9 +1309,12 @@ export class Sync {
    * over a catalog without its base. The one place this is decided: the check and `ready` read it.
    */
   private addedAs(name: string): "copied" | "adding" | "view" | null {
-    const t = this.tables.get(name);
-    if (t !== undefined) return this.states.get(name)?.phase === "copied" && this.currentSchema.tables.some((x) => x.schema === t.schema && x.name === t.table) ? "copied" : "adding";
-    return this.views.some((v) => `${v.schema ?? "public"}.${v.name}` === name) ? "view" : null;
+    // ONE TABLE BY THE ENGINE'S RULE (src/lib/relation-key.ts, issue 996): a synced `public.gdup` holds `public.Gdup`'s
+    // name too, since the synced data stores them as one table
+    const key = relationKey(name);
+    const t = this.tables.get(name) ?? [...this.tables.values()].find((x) => relationKey(x.source) === key);
+    if (t !== undefined) return this.states.get(t.source)?.phase === "copied" && this.currentSchema.tables.some((x) => x.schema === t.schema && x.name === t.table) ? "copied" : "adding";
+    return this.views.some((v) => relationKey(`${v.schema ?? "public"}.${v.name}`) === key) ? "view" : null;
   }
 
   /** the rebuilds' connection: open from `open` until `stop` */
@@ -3244,6 +3248,10 @@ export class Sync {
         await w.run(`DROP TABLE IF EXISTS ${ident(schema)}.${ident(table)}`);
         // and what a copy of it that a crash cut short left beside it (`copy`)
         await w.run(`DROP TABLE IF EXISTS ${ident(schema)}.${ident(`${table}${SIDE_SUFFIX}`)}`);
+        // a generated table of the same name (issue 996) held no table while the synced one held it, and none is there
+        // now: what it says it serves is let go on this turn, before any rebuild of the catalog reads it, and it is
+        // built again at its next review
+        await this.generated.dropped(source);
         for (const ledger of ["copy_state", "poll_state", "catch_up", "copy_progress", "copy_chunks", "compactions", "compact_held"]) await w.run(`DELETE FROM ${MASON_SCHEMA}.${ledger} WHERE source = ${literal(source)}`);
         // its stored JSON paths and its view
         await this.kept.removed(source);
