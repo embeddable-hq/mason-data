@@ -71,6 +71,10 @@ paths:
   an arm of a set operation's included, `t.*`, a NATURAL JOIN, a whole row) reads the copy's view of its visible columns (`__mason_visible`, `hideKept`), and
   every copy served has that view. PGlite's catalog never has the column (`schemaBuilt` reads the copy's recorded
   columns), and nothing else may `SELECT *` a copy into an answer.
+  **A column is hidden only where the copy's record does not name it** (`src/duck/hidden-columns.ts`: `copy_state.columns`,
+  or a side table's `copy_progress.columns`), never by its name's pattern: a source column named `__mason_json_…` was
+  dropped at the next start, its values lost and the stream stopped for every table (issue 998). Every place that reads,
+  drops, hides, adds or fills a hidden column asks that module.
 - **A jsonb's order is stored as a read like a path's** (`ORDER_STEPS`, src/duck/kept-route.ts; the PR's measurement:
   `ORDER BY j LIMIT 100` over 20 M rows, 19 s by the key's function under C and 83 s under libc, 0.14 s from the
   stored key): the rewrite records `ORDER BY` / `GROUP BY` / `=` of a copied jsonb column as a read (`keptKey`), the

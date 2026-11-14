@@ -603,6 +603,7 @@ async function storedKey(store: DuckStore, logged: string[], libc: boolean): Pro
     // the writer's turn, one job at a time (src/duck/sync.ts onWriter): nothing else writes this copy
     onWriter<T>(f: () => Promise<T>): Promise<T> { const t = turn.then(f); turn = t.then(() => undefined, () => undefined); return t; },
     served: () => new Map([["public.orders", orders.columns.map((col) => ({ name: col.name, type: col.type }))]]),
+    recorded: async () => new Map([["public.orders", orders.columns.map((col) => col.name)]]),
     rebuilding: () => false,
     log: (l: string) => { logged.push(l); },
   }, { enabled: true, eager: true, reviewMs: 0 });

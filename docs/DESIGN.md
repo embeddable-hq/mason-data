@@ -1652,6 +1652,12 @@ column per path (`canonicalRead`): `#> '{a,b}'` and `-> 'a' -> 'b'` share it, `-
 way (`->>` reads "5" and 5 alike). A READY path with no marked row reads the column ALONE; a marked row, through a CASE.
 A `*`, `t.*` or NATURAL JOIN reads a view of the visible columns (`__mason_visible`).
 
+A column of a copy is a stored path's, or a plain numeric's scale, only where the copy's record (`copy_state.columns`,
+or a side table's `copy_progress.columns`) does not name it (`src/duck/hidden-columns.ts`). The name's pattern says only
+which kind of hidden column it is. Until issue 998, the start dropped every column named `__mason_json_…` that no
+stored path recorded. A source column of such a name lost its values, its table's poll failed, and in replication the
+stream stopped for every table. A copy an older Mason left without such a column is read again once (`MISSING_LAYOUT`).
+
 **Why.** 1 M rows of ~2 KB documents, `count(DISTINCT …)` of one path: the function 12.6 – 14.8 s; the CASE naming the
 document 0.33 – 0.49 s; the `->` column alone 5 – 8 ms; `->>` derived 8 – 9 ms (a second `->>` column, 5 – 7 ms, would
 cost a whole-table backfill). On the test server a whole-table read of big documents: 192.6 s by the function, 41.6 s by

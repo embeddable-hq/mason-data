@@ -59,13 +59,13 @@
 import type { DuckConnection } from "./executor.ts";
 import { DUCKDB_VERSION, MASON_SCHEMA, type DuckStore } from "./store.ts";
 import { createHash } from "node:crypto";
-import { canonicalRead, EQUAL_STEPS, HIDDEN_PREFIX, HIDDEN_RE, hiddenName, isEqualRead, isKeyRead, isOrderRead, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, knownSteps, ORDER_STEPS, pathKey,
+import { canonicalRead, EQUAL_STEPS, HIDDEN_RE, hiddenName, isEqualRead, isKeyRead, isOrderRead, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, knownSteps, ORDER_STEPS, pathKey,
   pathText, readOfKey, VISIBLE_CATALOG,
   type JsonRead, type KeptRoutes, type ReadyPath } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS, KEY_VERSION, libcUncovered, STORED_SUFFIX } from "./jsonb-order.ts";
 import { TURN_FUNCTION } from "./functions.ts";
 import { encodeLibcOrder, type LibcOrder } from "./libc-order.ts";
-import { SCALE_RE } from "./scale-column.ts";
+import { hiddenColumns, sourceHas, visibleColumns } from "./hidden-columns.ts";
 import type { DuckCollation } from "./rewrite.ts";
 
 /** a path read by this many statements in the request log is stored (a larger table's also needs `KEEP_FILL_SHARE`) */
@@ -188,6 +188,10 @@ export interface KeptHost {
   onWriter<T>(f: () => Promise<T>): Promise<T>;
   /** every copy served now, by source: its columns' names and source types (the copy's own, `copiedColumns`) */
   served(): ReadonlyMap<string, ReadonlyArray<{ name: string; type: string }>>;
+  /** the source columns the ledger records for each synced table, and for each copy in progress its side table's
+   *  (`<schema>.<table>__mason_copy`), by `<schema>.<table>`: what tells a source column from a hidden one
+   *  (src/duck/hidden-columns.ts) */
+  recorded(): Promise<ReadonlyMap<string, readonly string[]>>;
   /** a rebuild of it is under way: its copy, or its catch-up poll, which writes the table from another connection */
   rebuilding(source: string): boolean;
   log(line: string): void;
@@ -494,9 +498,26 @@ export class KeptJsonPaths implements KeptRoutes {
       if (p.state === "dropped" || p.state === "waiting" || (p.name === hiddenName(p) && !p.asText)) continue;
       await this.drop(w, p, earlier);
     }
-    // the hidden columns the file holds, by table (side tables of a copy in progress included)
-    const held = (await w.runAndReadAll(`SELECT schema_name || '.' || table_name, column_name FROM duckdb_columns() WHERE database_name = current_database() ` +
-      `AND schema_name <> ${literal(MASON_SCHEMA)} AND starts_with(column_name, ${literal(HIDDEN_PREFIX)})`)).getRowsJS() as Array<[string, string]>;
+    // the stored paths' columns the file holds, by table (side tables of a copy in progress included): each a column
+    // the ledger's record of its table does not name (src/duck/hidden-columns.ts), never one a name's pattern alone
+    // picks — a source column may be named like one, in any case, and is the source's (issue 998)
+    const recorded = await this.host.recorded();
+    const physical = new Map<string, string[]>();
+    for (const [table, column] of (await w.runAndReadAll(`SELECT schema_name || '.' || table_name, column_name FROM duckdb_columns() WHERE database_name = current_database() ` +
+      `AND schema_name <> ${literal(MASON_SCHEMA)} ORDER BY table_oid, column_index`)).getRowsJS() as Array<[string, string]>) {
+      const cols = physical.get(table) ?? [];
+      cols.push(column);
+      physical.set(table, cols);
+    }
+    const held: Array<[string, string]> = [];
+    const unknown: Array<[string, string]> = [];
+    for (const [table, cols] of physical) {
+      const own = recorded.get(table);
+      if (own !== undefined) { for (const h of hiddenColumns(cols, own)) if (h.kind === "json") held.push([table, h.name]); continue; }
+      // no record of the table's source columns: none of its columns can be told hidden, so none is dropped (fail closed)
+      for (const c of cols) if (HIDDEN_RE.test(c)) unknown.push([table, c]);
+    }
+    if (unknown.length > 0) this.host.log(`kept ${unknown.map(([t, c]) => `${t}.${c}`).join(", ")}: no record of the synced table's source columns tells whether it is a stored JSON path's column or the source's`);
     if (!this.enabled) {
       for (const [table, column] of held) await w.run(`ALTER TABLE ${tableOf(table)} DROP COLUMN ${ident(column)}`);
       const n = Number((await w.run(`UPDATE ${PATHS_TABLE} SET state = 'dropped', why = 'stored JSON paths are turned off (storeJsonPaths)' WHERE state <> 'dropped'`)).rowsChanged);
@@ -508,10 +529,11 @@ export class KeptJsonPaths implements KeptRoutes {
       return;
     }
     // what the ledger and the file disagree on: a column with no row is dropped, a row whose column is gone is dropped
-    const named = new Set(held.filter(([t]) => !t.endsWith("__mason_copy")).map(([t, c]) => `${t}\u0000${c}`));
+    // (a table with no record keeps every column, and the row of a path whose column it holds)
+    const named = new Set([...held, ...unknown].filter(([t]) => !t.endsWith("__mason_copy")).map(([t, c]) => `${t}\u0000${c}`));
     const live = (column: string, table: string): boolean => { const p = this.paths.get(column); return p !== undefined && p.source === table && (p.state === "backfilling" || p.state === "ready"); };
     for (const [table, column] of held) {
-      if (table.endsWith("__mason_copy") && live(column, table.slice(0, -"__mason_copy".length)) || HIDDEN_RE.test(column) && live(column, table)) continue;
+      if (table.endsWith("__mason_copy") && live(column, table.slice(0, -"__mason_copy".length)) || live(column, table)) continue;
       await w.run(`ALTER TABLE ${tableOf(table)} DROP COLUMN ${ident(column)}`);
       this.host.log(`${table}: dropped the column ${column}: no stored JSON path is recorded for it`);
     }
@@ -567,13 +589,12 @@ export class KeptJsonPaths implements KeptRoutes {
     const [schema, table] = [source.slice(0, at), source.slice(at + 1)];
     const w = this.store.writer;
     try {
-      // the source's own columns where the sync says them: a source column may be named as a hidden one is
-      // (`__mason_json_…`, `__mason_scale_…`), and is listed as any column is
+      // the source's own columns, as the sync records them (src/duck/hidden-columns.ts): a source column may be named
+      // as a hidden one is (`__mason_json_…`, `__mason_scale_…`), and is listed as any column is
       const own = columns ?? this.host.served().get(source)?.map((c) => c.name);
-      const named = own === undefined ? null : new Set(own);
-      const cols = (await w.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE database_name = current_database() AND schema_name = ${literal(schema)} ` +
-        `AND table_name = ${literal(table)} ORDER BY column_index`)).getRowsJS().map((r) => String(r[0]))
-        .filter((c) => named !== null ? named.has(c) : !HIDDEN_RE.test(c) && !SCALE_RE.test(c));
+      if (own === undefined) { this.views.delete(source); return; }
+      const cols = visibleColumns((await w.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE database_name = current_database() AND schema_name = ${literal(schema)} ` +
+        `AND table_name = ${literal(table)} ORDER BY column_index`)).getRowsJS().map((r) => String(r[0])), own);
       if (cols.length === 0) { this.views.delete(source); return; }
       const db = String((await w.runAndReadAll("SELECT current_database()")).getRowsJS()[0]![0]);
       await w.run(`CREATE SCHEMA IF NOT EXISTS ${VISIBLE_CATALOG}.${ident(schema)}`);
@@ -595,7 +616,9 @@ export class KeptJsonPaths implements KeptRoutes {
    */
   async fillSide(c: DuckConnection, source: string, side: string, columns: readonly string[], run: (sql: string) => Promise<number>): Promise<void> {
     if (!this.enabled) return;
-    for (const p of this.physical(source).filter((x) => columns.includes(x.column))) {
+    // never a path whose column's name the new copy holds as a source column of its own: that column is the source's,
+    // and the path is dropped at the swap (`swapping`)
+    for (const p of this.physical(source).filter((x) => columns.includes(x.column) && !sourceHas(columns, x.name))) {
       // no default: its NULL is "not stored yet", and an ADD COLUMN writes nothing into the rows (`keep`)
       await c.run(`ALTER TABLE ${side} ADD COLUMN IF NOT EXISTS ${ident(p.name)} ${columnType(p)}`);
       const end = Number((await c.runAndReadAll(`SELECT coalesce(max(rowid), -1) + 1 FROM ${side}`)).getRowsJS()[0]![0]);
@@ -609,12 +632,13 @@ export class KeptJsonPaths implements KeptRoutes {
     }
   }
 
-  /** In the swap's transaction (src/duck/sync.ts `swap`): the paths whose JSON column the new copy does not hold are
-   *  recorded dropped — their column goes with the old table — and forgotten here once it commits (`swapped`). */
+  /** In the swap's transaction (src/duck/sync.ts `swap`): the paths whose JSON column the new copy does not hold, or
+   *  whose column's name it holds as a source column of its own, are recorded dropped — their column goes with the old
+   *  table — and forgotten here once it commits (`swapped`). */
   async swapping(c: DuckConnection, source: string, columns: readonly string[]): Promise<void> {
     this.gone = [];
-    for (const p of this.physical(source).filter((x) => !columns.includes(x.column))) {
-      const why = `${p.column} is no longer a column of the synced table ${source}`;
+    for (const p of this.physical(source).filter((x) => !columns.includes(x.column) || sourceHas(columns, x.name))) {
+      const why = !columns.includes(p.column) ? `${p.column} is no longer a column of the synced table ${source}` : `the synced table ${source} has a column named ${p.name} of its own`;
       await c.run(`UPDATE ${PATHS_TABLE} SET state = 'dropped', why = ${literal(why)} WHERE name = ${literal(p.name)}`);
       this.gone.push({ p, why });
     }
@@ -827,7 +851,7 @@ export class KeptJsonPaths implements KeptRoutes {
     const why = col === undefined ? `${read.column} is not a column of the synced table`
       : !/^jsonb?$/.test(col.type) ? `${read.column} is a ${col.type}, not a json or jsonb`
       : isKeyRead(read) && col.type !== "jsonb" ? `${read.column} is a ${col.type}, which has no order or equality (a jsonb's is stored)`
-      : cols.some((c) => c.name.toLowerCase() === name) ? `the synced table has a column named ${name} of its own` : null;
+      : sourceHas(cols.map((c) => c.name), name) ? `the synced table has a column named ${name} of its own` : null;
     if (why === null) return true;
     const key = pathKey(read);
     if (!this.refusedSaid.has(key)) { this.refusedSaid.add(key); this.host.log(`${read.source}: ${pathText(read)} is not stored: ${why}`); }

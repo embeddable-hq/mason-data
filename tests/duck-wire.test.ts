@@ -5762,7 +5762,7 @@ test("a json path bound as a parameter keys a window, and is read natively besid
   let turn: Promise<unknown> = Promise.resolve();
   const keeper = new KeptJsonPaths(store, {
     onWriter<T>(f: () => Promise<T>): Promise<T> { const t = turn.then(f); turn = t.then(() => undefined, () => undefined); return t; },
-    served: () => new Map([["public.jbound", columns]]), rebuilding: () => false, log: (l: string) => { logged.push(l); },
+    served: () => new Map([["public.jbound", columns]]), recorded: async () => new Map([["public.jbound", columns.map((c) => c.name)]]), rebuilding: () => false, log: (l: string) => { logged.push(l); },
   }, { enabled: true, eager: true, reviewMs: 0 });
   await keeper.open();
   const apis = await Promise.all([keeper, null].map(async (k) => startPostgresApi({
