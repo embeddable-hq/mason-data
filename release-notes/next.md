@@ -9,6 +9,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   more to do. The rows are the same kind as before: any rows of the join, as Postgres allows for a query with no ORDER
   BY.
 
+- **Three shapes Metabase and other BI tools send are faster.** A count grouped by `to_char(created_at, 'YYYY-MM')`
+  over 4.5 M rows took 23–29 s and now takes under a second, about a quarter of Postgres's time. Formats with a
+  quarter (`Q`), a padded month name or an ordinal (`DDth`) are still slow. Metabase's week of the year over 12 M rows
+  now takes about 1 s, where Postgres takes about 4.5 s. A query that returns many `timestamptz` values in a session in
+  UTC sends them about three times as fast: 300,000 rows of a `DISTINCT ON` took 10 s and now take under 3 s, about
+  Postgres's time. In a session in another time zone, those values are still slow to send.
+
 ## What was wrong and is now right
 
 - **A polled table no longer costs an extra connection to your database now and then.** On some machines, Mason's
