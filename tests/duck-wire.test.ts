@@ -111,6 +111,22 @@ let fixedNow: number | undefined;
 const microsNow = (): number => Math.floor((performance.timeOrigin + performance.now()) * 1000);
 const truth = new PGlite({ extensions: { citext } });
 
+/** issue 983's rows, the same literals on both sides: a NULL in every column, an element text with a comma, braces, a
+ *  quote, a backslash and the word NULL, numerics apart past a double's digits, an instant before 2000 with a rest of
+ *  microseconds */
+const APARAMS = "(1, 1, 10, 'a', '00000000-0000-0000-0000-000000000001', 1.5, true, '2026-01-01', '2026-01-01 00:00:00+00', 1.5), " +
+  "(2, 2, 20, 'b,c', '00000000-0000-0000-0000-000000000002', 2.25, false, '2026-01-02', '2026-01-02 12:00:00+00', 0.1), " +
+  "(3, 3, 9007199254740993, '{x}', '00000000-0000-0000-0000-000000000003', 3.00010000000000000001, NULL, '1999-12-31', '1999-12-31 23:59:59.9995+00', -0.5), " +
+  "(4, NULL, NULL, 'NULL', NULL, NULL, true, NULL, NULL, NULL), " +
+  "(5, 5, 50, 'he said \"hi\"', '00000000-0000-0000-0000-000000000005', 3.0001, false, '2026-02-01', '2026-02-01 00:00:00+00', 1e-10), " +
+  "(6, 6, 60, 'x\\y', '00000000-0000-0000-0000-000000000006', 3.00010000000000000002, true, '2026-02-02', '2026-02-02 00:00:00+00', 6)";
+/** issue 983's second round, rows of the same table, with no column of their own (the store's fixture sits at the 40
+ *  MB of "a statement past what may spill"; a timestamp column against wider arrays is the oracle's and the sweep's):
+ *  instants either side of a day's end in zones off UTC by half hours, and either side of a change of daylight saving
+ *  (America's of 2026-03-08 and 2026-11-01, Europe's of 2026-03-29); as (id, ts, d) */
+const AZONES = "(101, '2026-01-01 00:00:00+00', '2026-01-01'), (102, '2025-12-31 20:30:00+00', '2025-12-31'), " +
+  "(103, '2026-03-08 07:00:00+00', '2026-03-08'), (104, '2026-11-01 05:30:00+00', '2026-11-01'), " +
+  "(105, '2026-03-29 01:00:00+00', '2026-03-29'), (106, '2026-01-01 03:30:00+00', '2026-01-02'), (107, NULL, NULL)";
 // one table in public, one in a schema of its own, as the copy lands them (<schema>.<table>, the key as the source's)
 const DDL = [
   "CREATE SCHEMA IF NOT EXISTS sales",
@@ -210,6 +226,10 @@ const DDL = [
   "INSERT INTO public.timetz_runs VALUES (401, '07:30:00.123+05:30', '07:30:00.123', 401), (402, '23:59:59.999999-04', '23:59:59.999999', 402), (403, '24:00:00+00', '24:00:00', 403), (404, NULL, NULL, 404)",
   "CREATE TABLE public.timetz_runs3 (id INTEGER PRIMARY KEY, run_at3 TIMETZ)",
   "INSERT INTO public.timetz_runs3 VALUES (1, '07:30:00.123+05:30'), (2, NULL)",
+  // issue 983, after the others: a column of each type an array parameter is compared with
+  "CREATE TABLE public.aparams (id INTEGER PRIMARY KEY, s SMALLINT, b BIGINT, x VARCHAR, u UUID, n DECIMAL(30,20), f BOOLEAN, d DATE, ts TIMESTAMPTZ, fl DOUBLE)",
+  `INSERT INTO public.aparams (id, s, b, x, u, n, f, d, ts, fl) VALUES ${APARAMS}`,
+  `INSERT INTO public.aparams (id, ts, d) VALUES ${AZONES}`,
 ];
 // the same rows in Postgres, typed as the source would type them
 const PG_DDL = [
@@ -297,6 +317,9 @@ const PG_DDL = [
   "INSERT INTO public.invoices VALUES (7, 70.5)",
   "CREATE TABLE sales.accounts (id INTEGER PRIMARY KEY, owner VARCHAR)",
   "INSERT INTO sales.accounts VALUES (1, 'x')",
+  "CREATE TABLE public.aparams (id integer PRIMARY KEY, s smallint, b bigint, x text, u uuid, n numeric(30,20), f boolean, d date, ts timestamptz, fl double precision)",
+  `INSERT INTO public.aparams (id, s, b, x, u, n, f, d, ts, fl) VALUES ${APARAMS}`,
+  `INSERT INTO public.aparams (id, ts, d) VALUES ${AZONES}`,
 ];
 const schema: PgSchema = {
   database: "app",
@@ -364,6 +387,9 @@ const schema: PgSchema = {
     { name: "timetz_runs", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "run_at", type: "text", spelled: "time with time zone" },
       { name: "t_at", type: "text", spelled: "time without time zone" }, { name: "n", type: "int4" }] },
     { name: "timetz_runs3", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "run_at3", type: "text", spelled: "time(3) with time zone" }] },
+    { name: "aparams", primaryKey: ["id"], joins: [],
+      columns: [{ name: "id", type: "int4" }, { name: "s", type: "int2" }, { name: "b", type: "int8" }, { name: "x", type: "text" }, { name: "u", type: "uuid" },
+        { name: "n", type: "numeric", spelled: "numeric(30,20)" }, { name: "f", type: "bool" }, { name: "d", type: "date" }, { name: "ts", type: "timestamptz" }, { name: "fl", type: "float8" }] },
   ],
   // as the source prints them under a search_path of pg_catalog alone (src/cli/preflight.ts VIEWS_SQL); `lost` reads a
   // table Mason has not copied, so the catalog leaves it out
@@ -550,7 +576,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "bins"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "pnum"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "timetz_runs"], ["public", "timetz_runs3"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["public", "wides"], ["sales", "accounts"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "aparams"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "bins"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "pnum"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "timetz_runs"], ["public", "timetz_runs3"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["public", "wides"], ["sales", "accounts"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'sales' AND table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -5936,6 +5962,234 @@ test("a binary text[] parameter's bad element bytes, element type, flags and dim
       s.socket.write(bind);
       assert.deepEqual(errors(await s.untilReady()), want, name);
       assert.match(want[0] ?? "", new RegExp(`^${code} `), name);
+    }
+  } finally { s.end(); }
+});
+
+// ISSUE 983: node-pg binds a JavaScript array as its text, every element quoted (`'{"1","3"}'`), with no type, which
+// Postgres infers from the statement (`id = ANY($1)`, an int4[]). The text is read by Postgres's own array_in, in the
+// catalog, never by the engine's cast of it, which reads no quoted element: one grammar at every entrance. The same
+// value with the array's OID, and in binary (array_send's bytes), is the same array.
+/** every type these statements answer, read as the wire's text */
+const ARRAY_TEXT = Object.fromEntries([16, 20, 21, 23, 25, 701, 1000, 1005, 1007, 1009, 1016, 1022, 1082, 1182, 1184, 1185, 1231, 1700, 2950, 2951].map((o) => [o, (v: string) => v]));
+const pgArray = (a: ReadonlyArray<string | number | boolean | null>): string => `{${a.map((e) => e === null ? "NULL" : `"${String(e).replace(/["\\]/g, (c) => `\\${c}`)}"`).join(",")}}`;
+const ARRAY_PARAMS: Array<[string, string, number, Array<Array<string | number | boolean | null>>]> = [
+  ["s", "int2", 1005, [[1, 3], [2, null], []]],
+  ["id", "int4", 1007, [[1, 3], [2, null, 5], []]],
+  ["b", "int8", 1016, [["10", "9007199254740993"], [null]]],
+  ["x", "text", 1009, [["b,c", "{x}"], ["NULL", 'he said "hi"'], ["x\\y", null], []]],
+  ["u", "uuid", 2951, [["00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000005"], []]],
+  ["n", "numeric", 1231, [["1.5", "3.0001"], ["3.00010000000000000001", null], ["3.0001000000000000000", "NaN"], []]],
+  ["f", "bool", 1000, [[true], [false, null]]],
+  ["d", "date", 1182, [["2026-01-01", "1999-12-31"], ["infinity", null], []]],
+  ["ts", "timestamptz", 1185, [["2026-01-02 13:00:00+01", "1999-12-31 23:59:59.9995+00"], ["infinity"]]],
+  ["fl", "float8", 1022, [[0.1, -0.5], ["NaN", 1e-10], []]],
+];
+/** the shapes an array parameter is read in: ANY of it bare and cast, ALL, a subquery's unnest, the list, a JOIN's ON,
+ *  a WITH query, a derived table, HAVING and CASE (a numeric[] only by ANY and ALL: the rest refused by name) */
+const arrayShapes = (c: string, t: string): string[] => [
+  `SELECT id FROM aparams WHERE ${c} = ANY($1) ORDER BY id`,
+  `SELECT id FROM aparams WHERE ${c} = ANY($1::${t}[]) ORDER BY id`,
+  `SELECT id FROM aparams WHERE ${c} <> ALL($1::${t}[]) ORDER BY id`,
+  `SELECT a.id, b.id FROM aparams a JOIN aparams b ON b.id = a.id + 1 AND a.${c} = ANY($1) ORDER BY 1`,
+  `WITH q AS (SELECT id FROM aparams WHERE ${c} = ANY($1::${t}[])) SELECT id FROM q ORDER BY 1`,
+  `SELECT id FROM (SELECT * FROM aparams WHERE ${c} = ANY($1)) s ORDER BY 1`,
+  `SELECT ${c}, count(*) FROM aparams GROUP BY ${c} HAVING ${c} = ANY($1::${t}[]) ORDER BY 2, 1`,
+  `SELECT id, CASE WHEN ${c} = ANY($1::${t}[]) THEN 'y' ELSE 'n' END FROM aparams ORDER BY 1`,
+  ...t === "numeric" ? [`SELECT id FROM aparams WHERE n < ANY($1) ORDER BY id`, `SELECT id FROM aparams WHERE n >= ALL($1::numeric[]) ORDER BY id`, `SELECT id FROM aparams WHERE id = ANY($1::numeric[]) ORDER BY id`]
+    : [`SELECT id FROM aparams WHERE ${c} IN (SELECT unnest($1::${t}[])) ORDER BY id`, `SELECT id, $1::${t}[] FROM aparams WHERE id < 3 ORDER BY id`],
+];
+
+test("issue 983: an array parameter bound as node-pg binds it, as its OID's text and in binary is the array Postgres reads", async () => {
+  const c = await client();
+  const s = await rawSession();
+  try {
+    const wrong: string[] = [];
+    const say = (m: Extract<BackendMessage, { type: "ErrorResponse" }>): string => `error ${m.fields.C} ${m.fields.M}`;
+    const rows = (ms: BackendMessage[]): string[] => ms.flatMap((m) => m.type === "DataRow" ? [JSON.stringify(m.values.map((v) => v === null ? null : String(v)))] : m.type === "ErrorResponse" ? [say(m)] : []);
+    for (const [column, type, oid, arrays] of ARRAY_PARAMS) {
+      for (const sql of arrayShapes(column, type)) {
+        for (const a of arrays) {
+          const value = pgArray(a);
+          // as node-pg sends it: text, no OID
+          const want = await truth.query<unknown[]>(sql, [value], { rowMode: "array", parsers: ARRAY_TEXT }).then((r) => JSON.stringify({ fields: r.fields.map((f) => [f.name, f.dataTypeID]), rows: r.rows }),
+            (e: Error & { code?: string }) => `error ${e.code} ${e.message}`);
+          const got = await answer(c, sql, [value]).then((r) => JSON.stringify(r), (e: Error & { code?: string }) => `error ${e.code} ${e.message}`);
+          if (got !== want) wrong.push(`${sql} bound ${value}\n  mason:    ${got}\n  postgres: ${want}`);
+          // with the array's OID, as text and as array_send's bytes
+          const bytes = Buffer.from((await truth.query<{ b: Uint8Array }>(`SELECT array_send($1::${type}[]) AS b`, [value])).rows[0]!.b);
+          for (const [how, bind] of [["text", Buffer.concat([wire.parse("", sql, [oid]), wire.bind("", "", [value], [0], 0), wire.describe("P", ""), wire.execute(""), wire.sync()])],
+            ["binary", Buffer.concat([wire.parse("", sql, [oid]), wire.bind("", "", [bytes], [0], 1), wire.describe("P", ""), wire.execute(""), wire.sync()])]] as const) {
+            const truthRows = rows(wire.replies(await truth.execProtocolRaw(bind)));
+            s.socket.write(bind);
+            const masonRows = rows(await s.untilReady());
+            if (JSON.stringify(masonRows) !== JSON.stringify(truthRows)) wrong.push(`${sql} bound ${value} (OID ${oid}, ${how})\n  mason:    ${JSON.stringify(masonRows)}\n  postgres: ${JSON.stringify(truthRows)}`);
+          }
+        }
+      }
+    }
+    assert.deepEqual(wrong, []);
+    // the issue's own two: Postgres's rows, never the engine's 22P02 or 42804
+    assert.deepEqual((await answer(c, "SELECT id FROM aparams WHERE id = ANY($1::int[]) ORDER BY id", [[1, 3]])).rows, [["1"], ["3"]]);
+    assert.deepEqual((await answer(c, "SELECT id FROM aparams WHERE id = ANY($1) ORDER BY id", [[1, 3]])).rows, [["1"], ["3"]]);
+    // a numeric[]'s elements compared exactly: equal to 3.0001 in a double's 15 digits, not in Postgres's
+    assert.deepEqual((await answer(c, "SELECT id FROM aparams WHERE n = ANY($1) ORDER BY id", [["3.00010000000000000001"]])).rows, [["3"]]);
+  } finally { s.end(); await c.end(); }
+});
+
+test("issue 983: an array parameter Postgres's array_in refuses is its 22P02; two dimensions, other bounds and a numeric[] read whole are refused by name", async () => {
+  const c = await client();
+  try {
+    for (const [sql, value] of [["SELECT id FROM aparams WHERE id = ANY($1) ORDER BY id", "{1,2"], ["SELECT id FROM aparams WHERE id = ANY($1) ORDER BY id", "1,2"],
+      ["SELECT id FROM aparams WHERE id = ANY($1) ORDER BY id", '{"x"}'], ["SELECT id FROM aparams WHERE d = ANY($1::date[]) ORDER BY id", "{2026-13-01}"],
+      ["SELECT id FROM aparams WHERE n = ANY($1) ORDER BY id", "{abc}"], ["SELECT id FROM aparams WHERE x = ANY($1) ORDER BY id", '{"a}']] as const) {
+      const want = await postgres(sql, [value]).then(() => "answered", (e: Error & { code?: string }) => `error ${e.code} ${e.message}`);
+      assert.match(want, /^error 22/, `${sql} ${value}`);
+      assert.equal(await answer(c, sql, [value]).then(() => "answered", (e: Error & { code?: string }) => `error ${e.code} ${e.message}`), want, `${sql} ${value}`);
+    }
+    // dimension decorations from 1 are answered; two dimensions and other bounds refused by name, as a text[]'s are
+    const ids = "SELECT id FROM aparams WHERE id = ANY($1) ORDER BY id";
+    for (const value of ["[1:2]={1,3}", "{ 1 , 3 }"]) assert.deepEqual((await answer(c, ids, [value])).rows, (await postgres(ids, [value])).rows, value);
+    const named = (gap: string) => (e: Error & { code?: string; detail?: string }): boolean => e.code === "0A000" && new RegExp(`Mason gap ${gap}\\b`).test(e.detail ?? "");
+    for (const [sql, value, gap] of [[ids, "{{1,2},{3,4}}", "multidim-array"], [ids, "[2:3]={1,3}", "array-lower-bound"],
+      ["SELECT id, $1::numeric[] FROM aparams ORDER BY id", '{"1.50"}', "numeric-array-parameter"],
+      ["SELECT id FROM aparams WHERE n IN (SELECT unnest($1::numeric[])) ORDER BY id", '{"1.5"}', "numeric-array-parameter"]] as const) {
+      await assert.rejects(answer(c, sql, [value]), named(gap), `${sql} ${value}`);
+    }
+  } finally { await c.end(); }
+});
+
+// ISSUE 983'S REVIEW: a NULL numeric[] under ANY or ALL is NULL, as a NULL array of any type is (the engine reads it as
+// an empty list); a numeric[] read whole is answered when it is NULL and refused by name for any other value; a
+// written-out ARRAY of numeric parameters is compared exactly (#598).
+test("issue 983: a NULL numeric[] parameter is NULL under ANY and ALL, answered whole, and ARRAY[$1::numeric, …] compares exactly", async () => {
+  const c = await client();
+  const s = await rawSession();
+  try {
+    const wrong: string[] = [];
+    const say = async (p: Promise<unknown>): Promise<string> => p.then((r) => JSON.stringify(r), (e: Error & { code?: string }) => `error ${e.code} ${e.message}`);
+    const cases: Array<[string, Array<Array<string | null>>]> = [
+      ["SELECT id FROM aparams WHERE n <> ALL($1) ORDER BY id", [[null], ['{"2.25",NULL}'], ["{NULL}"], ["{}"]]],
+      ["SELECT id FROM aparams WHERE NOT (n = ANY($1)) ORDER BY id", [[null], ['{"3.0001",NULL}']]],
+      ["SELECT id FROM aparams WHERE b <> ALL($1::numeric[]) ORDER BY id", [[null], ['{"10",NULL}']]],
+      ["SELECT id, n = ANY($1), n > ALL($1) FROM aparams ORDER BY id", [[null], ['{"2.25",NULL}'], ["{}"]]],
+      ["SELECT id FROM aparams WHERE (n < ANY($1)) IS NULL ORDER BY id", [[null], ['{NULL,"3.0001"}']]],
+      ["SELECT id, CASE WHEN n = ANY($1) THEN 'y' WHEN NOT (n = ANY($1)) THEN 'n' ELSE '?' END FROM aparams ORDER BY id", [[null], ['{"1.5",NULL}']]],
+      ["SELECT $1::numeric[] IS NULL, cardinality($1::numeric[]) FROM aparams WHERE id = 1", [[null]]],
+      ["SELECT id FROM aparams WHERE fl = ANY($1::numeric[]) ORDER BY id", [[null]]],
+      ["SELECT id FROM aparams WHERE b <> ALL($1::bigint[]) ORDER BY id", [[null], ["{NULL}"]]],
+      ["SELECT id FROM aparams WHERE d <> ALL($1::date[]) ORDER BY id", [[null]]],
+      // #598: an ARRAY of numeric parameters, written out
+      ["SELECT id FROM aparams WHERE n = ANY(ARRAY[$1::numeric, $2::numeric]) ORDER BY id", [["3.0001", "1.5"], ["3.00010000000000000001", null]]],
+      ["SELECT id FROM aparams WHERE n <> ALL(ARRAY[$1::numeric, $2::numeric]) ORDER BY id", [["3.00010000000000000001", "1.5"], ["3.00010000000000000001", null]]],
+      ["SELECT id, n = ANY(ARRAY[$1::numeric, 6]) FROM aparams ORDER BY id", [["3.00010000000000000001"]]],
+      ["SELECT id FROM aparams WHERE n = ANY(ARRAY[$1, $2]::numeric[]) ORDER BY id", [["3.00010000000000000001", "1.5"]]],
+    ];
+    for (const [sql, bindings] of cases) {
+      for (const values of bindings) {
+        const want = await say(truth.query<unknown[]>(sql, values, { rowMode: "array", parsers: ARRAY_TEXT }).then((r) => ({ fields: r.fields.map((f) => [f.name, f.dataTypeID]), rows: r.rows })));
+        const got = await say(answer(c, sql, values));
+        if (got !== want) wrong.push(`${sql} bound ${JSON.stringify(values)}\n  mason:    ${got}\n  postgres: ${want}`);
+        // the same NULL with the array's OID
+        if (values.length === 1 && values[0] === null && sql.includes("numeric")) {
+          const bind = Buffer.concat([wire.parse("", sql, [1231]), wire.bind("", "", [null], [0], 0), wire.describe("P", ""), wire.execute(""), wire.sync()]);
+          const rows = (ms: BackendMessage[]): string => JSON.stringify(ms.flatMap((m): unknown[] => m.type === "DataRow" ? [m.values.map((v) => v === null ? null : String(v))] : m.type === "ErrorResponse" ? [`error ${m.fields.C}`] : []));
+          const truthRows = rows(wire.replies(await truth.execProtocolRaw(bind)));
+          s.socket.write(bind);
+          const masonRows = rows(await s.untilReady());
+          if (masonRows !== truthRows) wrong.push(`${sql} bound NULL (OID 1231)\n  mason:    ${masonRows}\n  postgres: ${truthRows}`);
+        }
+      }
+    }
+    assert.deepEqual(wrong, []);
+    // a numeric[] read whole is refused by name for a value, at the Execute, where its NULL was answered
+    const whole = "SELECT $1::numeric[] IS NULL, cardinality($1::numeric[]) FROM aparams WHERE id = 1";
+    await assert.rejects(answer(c, whole, ['{"1.5"}']), (e: Error & { code?: string; detail?: string }) => e.code === "0A000" && /Mason gap numeric-array-parameter\b/.test(e.detail ?? ""));
+  } finally { s.end(); await c.end(); }
+});
+
+// ISSUE 983'S REVIEW: a time compared with ANY or ALL of an array of another time type is compared as Postgres's
+// cross-type operator compares it, the narrower side read as the wider one in the session's zone
+test("issue 983: a timestamptz, timestamp or date against an array of another of them is compared in the session's zone", async () => {
+  const c = await client();
+  try {
+    const wrong: string[] = [];
+    const pairs: Array<[string, string, string[][]]> = [
+      ["ts", "timestamp", [["2025-12-31 20:30:00"], ["2026-01-01 00:00:00", "2026-03-08 02:30:00"], ["2026-11-01 01:30:00", "2026-03-29 02:30:00"]]],
+      ["ts", "date", [["2026-01-01"], ["2025-12-31", "2026-03-08"], ["2026-11-01"]]],
+      ["d", "timestamptz", [["2026-01-01 00:00:00+00"], ["2026-01-01 03:30:00+00", "2025-12-31 03:00:00+00"]]],
+      ["d", "timestamp", [["2026-01-01 00:00:00"], ["2026-03-08 00:00:00"]]],
+    ];
+    for (const zone of ["UTC", "America/St_Johns", "Asia/Kolkata", "America/New_York", "Europe/Berlin", "Australia/Lord_Howe"]) {
+      await c.query(`SET TimeZone = '${zone}'`);
+      await truth.query(`SET TimeZone = '${zone}'`);
+      for (const [column, type, arrays] of pairs) {
+        for (const sql of [`SELECT id FROM aparams WHERE ${column} = ANY($1::${type}[]) ORDER BY id`, `SELECT id FROM aparams WHERE ${column} <> ALL($1::${type}[]) ORDER BY id`,
+          `SELECT id FROM aparams WHERE ${column} < ANY($1::${type}[]) ORDER BY id`, `SELECT id, ${column} >= ALL($1::${type}[]) FROM aparams ORDER BY id`]) {
+          for (const a of arrays) {
+            const value = pgArray(a);
+            const want = JSON.stringify((await truth.query<unknown[]>(sql, [value], { rowMode: "array", parsers: ARRAY_TEXT })).rows);
+            const got = await answer(c, sql, [value]).then((r) => JSON.stringify(r.rows), (e: Error & { code?: string }) => `error ${e.code} ${e.message}`);
+            if (got !== want) wrong.push(`${zone}: ${sql} bound ${value}\n  mason:    ${got}\n  postgres: ${want}`);
+          }
+        }
+      }
+    }
+    assert.deepEqual(wrong, []);
+  } finally { await truth.query("SET TimeZone = 'UTC'"); await c.end(); }
+});
+
+// ISSUE 983'S SECOND REVIEW: a cast of a written-out ARRAY of numeric parameters rounds or retypes each element before
+// the comparison, so it is the engine's to write, never the parameters' exact keys; and a time compared with a
+// subquery of another time type reads the narrower side in the session's zone, as with an array
+test("issue 983: a cast of ARRAY[$1::numeric, …] is honoured, and a time IN a subquery of another time type is compared in the session's zone", async () => {
+  const c = await client();
+  try {
+    const wrong: string[] = [];
+    const check = async (sql: string, values: Array<string | null>, zone = "UTC"): Promise<void> => {
+      await c.query(`SET TimeZone = '${zone}'`);
+      await truth.query(`SET TimeZone = '${zone}'`);
+      const want = await truth.query<unknown[]>(sql, values, { rowMode: "array", parsers: ARRAY_TEXT }).then((r) => JSON.stringify(r.rows), (e: Error & { code?: string }) => `error ${e.code}`);
+      const got = await answer(c, sql, values).then((r) => JSON.stringify(r.rows), (e: Error & { code?: string }) => `error ${e.code}`);
+      if (got !== want) wrong.push(`${zone}: ${sql} bound ${JSON.stringify(values)}\n  mason:    ${got}\n  postgres: ${want}`);
+    };
+    const a = "ARRAY[$1::numeric, $2::numeric]";
+    for (const [sql, bindings] of [
+      [`SELECT id FROM aparams WHERE s = ANY(${a}::int[]) ORDER BY id`, [["1.4", "2"], ["2.4", "5.4"]]],
+      [`SELECT id FROM aparams WHERE n = ANY(${a}::numeric(30,1)[]) ORDER BY id`, [["1.54", null], ["3.00010000000000000001", "2.21"]]],
+      [`SELECT id FROM aparams WHERE n = ANY(CAST(${a} AS decimal(30,1)[])) ORDER BY id`, [["1.54", "2.25"]]],
+      [`SELECT id FROM aparams WHERE fl = ANY(${a}::float8[]) ORDER BY id`, [["0.1", "1.5"]]],
+      [`SELECT id FROM aparams WHERE b = ANY(${a}::bigint[]) ORDER BY id`, [["10.4", "50"], ["20.6", "60"]]],
+      [`SELECT id FROM aparams WHERE n = ANY(${a}::numeric(10,0)[]) ORDER BY id`, [["2.6", "5"]]],
+      [`SELECT id FROM aparams WHERE s = ANY(ARRAY[$1::numeric, 1.04]::int[]) ORDER BY id`, [["2.6"]]],
+      [`SELECT id FROM aparams WHERE s <> ALL(${a}::int[]) ORDER BY id`, [["1.4", "2.6"]]],
+      [`SELECT id, n < ANY(${a}::numeric(30,1)[]) FROM aparams ORDER BY id`, [["2.24", "1.46"]]],
+      [`SELECT id FROM aparams WHERE s = ANY(${a}::int[]) ORDER BY id`, [["99999999999.5", "1"]]],
+    ] as Array<[string, Array<Array<string | null>>]>) for (const values of bindings) await check(sql, values);
+    for (const zone of ["America/St_Johns", "Europe/Berlin", "Asia/Kolkata", "America/New_York"]) {
+      for (const [sql, value] of [
+        ["SELECT id FROM aparams WHERE ts IN (SELECT unnest($1::timestamp[])) ORDER BY id", '{"2025-12-31 20:30:00","2026-01-01 05:00:00"}'],
+        ["SELECT id FROM aparams WHERE ts IN (SELECT unnest($1::date[])) ORDER BY id", '{"2026-01-01","2026-03-08"}'],
+        ["SELECT id FROM aparams WHERE ts NOT IN (SELECT unnest($1::timestamp[])) ORDER BY id", '{"2025-12-31 20:30:00"}'],
+        ["SELECT id FROM aparams WHERE ts < ALL (SELECT unnest($1::date[])) ORDER BY id", '{"2026-01-01"}'],
+        ["SELECT id FROM aparams WHERE d = ANY (SELECT unnest($1::timestamptz[])) ORDER BY id", '{"2026-01-01 03:30:00+00"}'],
+        ["SELECT id FROM aparams WHERE ts IN (SELECT '2025-12-31 20:30:00'::timestamp WHERE $1::text IS NOT NULL) ORDER BY id", "x"],
+      ] as Array<[string, string]>) await check(sql, [value], zone);
+    }
+    assert.deepEqual(wrong, []);
+  } finally { await truth.query("SET TimeZone = 'UTC'"); await c.end(); }
+});
+
+test("issue 983: a binary float array keeps the sign of a zero", async () => {
+  const s = await rawSession();
+  try {
+    for (const type of ["float8", "real"]) {
+      const sql = `SELECT $1::${type}[] FROM aparams WHERE id = 1`;
+      const bytes = Buffer.from((await truth.query<{ b: Uint8Array }>(`SELECT array_send('{-0,0,NaN,-Infinity}'::${type}[]) AS b`)).rows[0]!.b);
+      const bind = Buffer.concat([wire.parse("", sql, [type === "real" ? 1021 : 1022]), wire.bind("", "", [bytes], [0], 1), wire.describe("P", ""), wire.execute(""), wire.sync()]);
+      s.socket.write(bind);
+      const got = (await s.untilReady()).flatMap((m) => m.type === "DataRow" ? [String(m.values[0])] : m.type === "ErrorResponse" ? [`error ${m.fields.C} ${m.fields.M}`] : []);
+      assert.deepEqual(got, ["{-0,0,NaN,-Infinity}"], type);
     }
   } finally { s.end(); }
 });

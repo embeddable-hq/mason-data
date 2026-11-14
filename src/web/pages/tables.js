@@ -37,7 +37,7 @@ const nameMatches = (table, filter) => !filter || table.toLowerCase().includes(f
 
 /**
  * WHAT A SYNC DID, as `mason sync` prints it from `POST /api/sync`'s answer (src/cli/sync.ts `syncedReport`, held equal
- * by the tests): the rows written and deleted, a line per table, and what happens next to each table synced (`syncedTips`:
+ * by the tests): the rows added, updated and deleted, a line per table, and what happens next to each table synced (`syncedTips`:
  * an `off` one stays as of this sync). A table whose sync is replication was not polled: its line says where the stream
  * is (`streamed`), and a sync of those alone has nothing to sync.
  */
@@ -47,12 +47,12 @@ export function syncedReport(b, picked, tables) {
   if (b.tables.length === 0 && streamed.length > 0) {
     return { headline: `Nothing to sync: logical replication keeps ${picked.join(", ")} current.`, details: streamedRows, tips: [] };
   }
-  const changed = b.tables.reduce((a, t) => a + t.changed, 0), deleted = b.tables.reduce((a, t) => a + t.deleted, 0);
+  const sum = (k) => b.tables.reduce((a, t) => a + t[k], 0);
   const streamedNames = new Set(streamed.map((t) => t.table));
   const polled = picked.filter((t) => !streamedNames.has(t));
   return {
-    headline: `Synced ${polled.join(", ")}: ${n(changed)} row(s) written, ${n(deleted)} deleted${streamedRows.length ? `; logical replication keeps ${streamedRows.map((r) => r[0]).join(", ")} current` : ""}.`,
-    details: [...b.tables.map((t) => [t.table, `${n(t.changed)} changed, ${n(t.deleted)} deleted, ${n(t.rows)} rows now · ${msText(t.ms)}`]), ...streamedRows],
+    headline: `Synced ${polled.join(", ")}: ${n(sum("added"))} added, ${n(sum("updated"))} updated, ${n(sum("deleted"))} deleted${streamedRows.length ? `; logical replication keeps ${streamedRows.map((r) => r[0]).join(", ")} current` : ""}.`,
+    details: [...b.tables.map((t) => [t.table, `${n(t.added)} added, ${n(t.updated)} updated, ${n(t.deleted)} deleted, ${n(t.rows)} rows now · ${msText(t.ms)}`]), ...streamedRows],
     tips: syncedTips(tables),
   };
 }
@@ -196,9 +196,9 @@ const tick = (name, c, on) => `<label class="tick"><input type="checkbox" name="
  * out, All starts with the words of the row's label (`allBut`, issue 960): "All but 2 columns".
  */
 function columnsField(legend, cols, which, on, leaves = []) {
-  const all = leaves.length === 0 ? "All columns, and any added to the table later"
+  const all = leaves.length === 0 ? "All columns, and any added to the table later that do not look like secrets"
     : `${allBut(leaves.length)}. Left out because ${leaves.length === 1 ? "it looks like a secret" : "they look like secrets"}: ${leaves.join(", ")}. ` +
-      "Columns added to the table later are synced too.";
+      "Columns added to the table later are synced too, unless they look like secrets.";
   const radio = (value, words) => `<label><input type="radio" name="which" value="${value}"${which === value ? " checked" : ""}> <span>${esc(words)}</span></label>`;
   return `<fieldset><legend>${esc(legend)}</legend><div class="radios">${radio("all", all)}${radio("only", "Only these columns")}</div>` +
     `<div class="only-cols">${cols.map((c) => tick("columns", c, on.includes(c.name))).join("")}</div></fieldset>`;
@@ -250,10 +250,14 @@ const counted = (k, word) => `${n(k)} ${word}${k === 1 ? "" : "s"}`;
 export function columnsSummary(t) {
   const e = t.entry, all = t.columnCount, syncs = t.addedColumns;
   if (!t.added || !e || typeof all !== "number" || !Array.isArray(syncs)) return null;
+  // its columns changed on the database: what is synced now, and what its whole read syncs next (issue 977)
+  if (Array.isArray(t.columnsPending)) {
+    return { text: "Columns changed, syncing again", title: `Synced now: ${syncs.join(", ")}. After this sync: ${t.columnsPending.join(", ")}` };
+  }
   if (e.columns !== null) return { text: `${n(syncs.length)} of ${counted(all, "column")}`, title: `Synced: ${syncs.join(", ")}` };
   const out = leftOut(t);
   if (out.count > 0) return { text: allBut(out.count), title: out.names ? `Every column but ${out.names.join(", ")}` : `Its entry leaves out ${e.exclude.join(", ")}` };
-  return { text: "All columns", title: "Every column, and any column added to the table later" };
+  return { text: "All columns", title: "Every column, and any column added to the table later that does not look like a secret" };
 }
 
 /** The words an added table's row and its column form's All both start with when columns are left out (issue 960). */

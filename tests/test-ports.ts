@@ -40,6 +40,8 @@ import { portHolder } from "../src/cli/ports.ts";
 export const LOWEST = 10_000;
 const HIGHEST = 65_535;
 const TRIES = 200;
+/** the ports the Fetch standard calls bad, which Node's fetch refuses with "bad port": the ones at or above LOWEST */
+const FETCH_BAD_PORTS: ReadonlySet<number> = new Set([10080]);
 
 /** A closed interval of ports, first..last. */
 export interface PortRange { first: number; last: number }
@@ -157,6 +159,8 @@ export async function unassignedPort(opts: { candidates?: () => number; locks?: 
   for (let i = 0; i < TRIES; i++) {
     const port = next();
     if (inRanges(port, ranges)) throw new Error(`tests/test-ports.ts: candidate ${port} is in the ephemeral ranges ${ranges.map((r) => `${r.first}-${r.last}`).join(", ")}`);
+    // a port Node's fetch refuses ("bad port", the Fetch standard's list): a test that fetches its page failed on it (#1015)
+    if (FETCH_BAD_PORTS.has(port)) { seen.push(`${port} refused by fetch`); continue; }
     const file = path.join(locks, String(port));
     if (claimed.has(file) || !claim(locks, port)) { seen.push(`${port} claimed`); continue; }
     const held = await portHolder(port);

@@ -451,8 +451,14 @@ under another transaction's write fails its commit, hence swaps on the writer's 
   are native; only a reader that prints reads the scale: the column's program is `rescale(value, scale)`, which the wire
   evaluates on the text (0.06 µs a value; 1.4 µs through BigInt), and `x::text` is the engine's text cut natively. A copy
   an older Mason made without the column is read again once (`SCALE_LAYOUT`), serving as it was until then. Not yet:
-  the readers `mixed-scale-numeric` lists (to_json and its kin, concat, `||`, array_agg, a scalar subquery, a set
-  operation without ALL, a generated table …) keep the column's one scale. The hidden column's name is hashed again where
+  the readers `mixed-scale-numeric` lists (array_agg's numeric[], a scalar subquery, a set operation without ALL, a
+  generated table …) keep the column's one scale. Every reader that turns the value into text reads `pgText`, whose
+  `plainNumericText` cuts the engine's text natively: of a column, of arithmetic over one (`rowScale`), and of a min,
+  max or sum (`arg_min` / `arg_max` / `max` of the scale, only there: min / max themselves stay the engine's). In a
+  grouped SELECT the list's copy of an expression the engine groups as written (`GROUP BY concat(x)`, a grouping set's
+  member too) is cut as the GROUP BY's is, so the engine still finds it among its keys, and a column the group's key
+  decides reads its scale per group beside it (`decidedByKey`'s any_value): the review of PR 1004 met 42803 where the
+  two were cut apart and where a whole row's scale was read bare. The hidden column's name is hashed again where
   the table holds a column of that name (`scaleColumn`), and a copy's view lists the source's own columns, never a
   pattern of names. Measured on 4 M rows of 0–2 decimals: the hidden column is 1.5 MiB beside the value's 12.5 MiB, the
   copy's time is unchanged within noise. min / max print at the column's one scale (the owner's decision, 2026-11-14:
@@ -1401,8 +1407,8 @@ rewritten in place when the store opens, before the catalog serves it (`jsonb_la
 Over 1 M documents of about 340 bytes, on a 4-core machine at load 7 to 14, the canonical write took 27–42 s where a
 build that does not canonicalise took 0.7–2.8 s, and the rewrite in place of an old build took 29–45 s. A generated
 table that passes a jsonb column through pays nothing. A faster reader (V8's JSON.parse, each number a double would not
-keep handed over as a marked string) was tried and removed on the owner's word: twice it turned a text that is no JSON
-into a document (a number in a key's place; an invalid value a later duplicate key replaced; a string a stray
+keep handed over as a marked string) was tried and removed on the owner's word: it turned a text that is no JSON into
+a document in three ways (a number in a key's place; an invalid value a later duplicate key replaced; a string a stray
 backslash left open). `jsonbText` is the exact parser, and `tests/duck-jsonb-text.test.ts` holds those inputs refused.
 
 **Why.** On 2026-11-12, Metabase's `SELECT jsonb_object_keys(payload) AS key, count(*) … GROUP BY 1 ORDER BY 2 DESC, 1`
