@@ -5158,6 +5158,53 @@ test("a -> and an @> of a copied jsonb are DuckDB's own read where that is Postg
   } finally { await c.end(); }
 });
 
+// THE KEYS OF A COPIED JSON(B) COLUMN ARE DUCKDB'S OWN json_keys (issue 461): through the function a row, Metabase's
+// `jsonb_object_keys(col)` grouped over 3 M rows took 172–264 s (Postgres 4.4–8.4 s) and held every other session. A
+// copied jsonb is Postgres's canonical text, its keys in jsonb's order (length, then bytes) each once; a copied json is
+// the document as written, a key twice kept. A NULL is no rows, a non-object Postgres's 22023 (the function's), a json
+// holding a `\u` escape the function's; a jsonb the statement computes is the function's (it may hold a key twice).
+test("issue 461: json(b)_object_keys of a copied column is DuckDB's own read: Postgres's keys, in its order, and no row through the function", async () => {
+  const c = await client();
+  try {
+    const objects = "id NOT BETWEEN 3 AND 8";
+    for (const statement of [
+      `SELECT id, jsonb_object_keys(b) AS k FROM jnat WHERE ${objects}`, `SELECT id, json_object_keys(j) AS k FROM jnat WHERE ${objects}`,
+      `SELECT jsonb_object_keys(b) AS k, count(*) FROM jnat WHERE ${objects} GROUP BY 1 ORDER BY 2 DESC, 1`, `SELECT json_object_keys(j) AS k, count(*) FROM jnat WHERE ${objects} GROUP BY 1 ORDER BY 2 DESC, 1`,
+      `SELECT jsonb_object_keys(b) AS k, count(*) FROM jnat WHERE ${objects} GROUP BY jsonb_object_keys(b) ORDER BY k DESC`,
+      `SELECT DISTINCT jsonb_object_keys(b) AS k FROM jnat WHERE ${objects} ORDER BY 1`, `SELECT DISTINCT json_object_keys(j) FROM jnat WHERE ${objects} ORDER BY 1`,
+      `SELECT count(DISTINCT k) FROM (SELECT jsonb_object_keys(b) AS k FROM jnat WHERE ${objects}) s`,
+      `WITH ks AS (SELECT id, json_object_keys(j) AS k FROM jnat WHERE ${objects}) SELECT k, count(*) FROM ks GROUP BY k ORDER BY 2 DESC, 1`,
+      `SELECT t.id, k FROM jnat t LEFT JOIN jsonb_object_keys(t.b) AS k ON TRUE WHERE t.${objects}`, `SELECT t.id, k FROM jnat t LEFT JOIN json_object_keys(t.j) AS k ON TRUE WHERE t.${objects}`,
+      `SELECT k, count(*) FROM jnat t LEFT JOIN LATERAL jsonb_object_keys(t.b) AS k ON TRUE WHERE t.${objects} GROUP BY 1 ORDER BY 2 DESC, 1 NULLS FIRST`,
+      `SELECT count(*), count(k) FROM jnat t LEFT JOIN json_object_keys(t.j) AS k ON TRUE WHERE t.${objects}`,
+      `SELECT t.id, k FROM jnat t LEFT JOIN jsonb_object_keys(t.b) AS k ON TRUE WHERE t.${objects} LIMIT 30 OFFSET 2`,
+      `SELECT t.id, string_agg(k, ',') FROM jnat t LEFT JOIN json_object_keys(t.j) AS k ON TRUE WHERE t.${objects} GROUP BY 1 ORDER BY 1`,
+      `SELECT t.id, k FROM jnat t CROSS JOIN LATERAL jsonb_object_keys(t.b) AS k WHERE t.${objects} ORDER BY 1, 2`,
+    ]) assert.deepEqual(await answer(c, statement), await postgres(statement), statement);
+    // a non-object is Postgres's 22023, in a list and in a lateral
+    for (const statement of ["SELECT jsonb_object_keys(b) FROM jnat", "SELECT json_object_keys(j) FROM jnat", "SELECT count(k) FROM jnat t LEFT JOIN jsonb_object_keys(t.b) k ON TRUE"]) {
+      await assert.rejects(answer(c, statement), (e: Error & { code?: string }) => e.code === "22023", statement);
+      await assert.rejects(postgres(statement), (e: Error & { code?: string }) => e.code === "22023", statement);
+    }
+    const calls = async (): Promise<number> => [...(await store.functionCalls()).values()].reduce((a, b) => a + b, 0);
+    const hops = async (statement: string): Promise<number> => {
+      const before = await calls();
+      await answer(c, statement);
+      return (await calls()) - before;
+    };
+    // the json documents holding a `\u` escape (31, 32, 35, 37, 38) are the function's
+    const plain = `${objects} AND id NOT IN (31, 32, 35, 37, 38)`;
+    for (const statement of [`SELECT jsonb_object_keys(b) FROM jnat WHERE ${objects}`, `SELECT json_object_keys(j) FROM jnat WHERE ${plain}`,
+      `SELECT jsonb_object_keys(b) AS k, count(*) FROM jnat WHERE ${objects} GROUP BY 1 ORDER BY 2 DESC, 1`, `SELECT DISTINCT json_object_keys(j) FROM jnat WHERE ${plain}`,
+      `SELECT k, count(*) FROM jnat t LEFT JOIN jsonb_object_keys(t.b) AS k ON TRUE WHERE t.${objects} GROUP BY 1`, `SELECT t.id, k FROM jnat t LEFT JOIN json_object_keys(t.j) AS k ON TRUE WHERE t.${plain} LIMIT 5`]) {
+      assert.equal(await hops(statement), 0, `${statement} reached a function`);
+    }
+    for (const statement of ["SELECT json_object_keys(j) FROM jnat WHERE id = 31", `SELECT jsonb_object_keys(b::text::jsonb) FROM jnat WHERE ${objects}`, "SELECT jsonb_object_keys(b -> 'a') FROM jnat WHERE id = 25"]) {
+      assert.ok(await hops(statement) > 0, `${statement} never reached the function`);
+    }
+  } finally { await c.end(); }
+});
+
 // A PATH HAS ONE ROUTE HOWEVER IT IS SPELLED (issue 130): a BI tool's `#>> array['k']` was a to_json of the list, every
 // row through the function, where `->> 'k'` is DuckDB's own read. Read from the analysis, so a cast that changes the
 // text is never read as what was written, and a value only known at the Bind stays computed.

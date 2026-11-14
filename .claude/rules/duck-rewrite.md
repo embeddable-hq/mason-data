@@ -71,7 +71,9 @@ paths:
     kept other rows than Postgres's; the INNER one is its streaming UNNEST. But the UNNEST calls the function per ROW,
     the delimiter join per DISTINCT argument, so where every row is read anyway (a count, a GROUP BY, a DISTINCT, a
     window, a whole result, a sort by the lateral's column) DuckDB's own join stays (a count over 22 M rows: 79 s joined,
-    over 200 s streamed). Bounded: a LIMIT or OFFSET over the join, passing down through a derived table, a CTE and a
+    over 200 s streamed). The exception is a copied column's keys (`json(b)_object_keys`, `keysNative`), which call no
+    function: they are always streamed, bounded or not (issue 461: the join's hash group of every document took 63 s and
+    4.4 GiB over 1 M rows, and failed with 53400 at 3 M). Bounded: a LIMIT or OFFSET over the join, passing down through a derived table, a CTE and a
     UNION ALL's arms; under an ORDER BY only a LIMIT (never WITH TIES), and only when its first key, the nulls idiom
     folded, is a table's column sorted bare (no collation keys, citext, char(n), jsonb: the top N's filter reaches the
     scan); and an order-sensitive aggregate or window (string_agg, array_agg, row_number …) with no ORDER BY of its
@@ -307,6 +309,15 @@ paths:
     that changes the text (`varchar(n)[]`, `char(n)[]`, `name[]`) is refused, `json-path-type`. The oracle's
     `jsonPathCases` holds every spelling on both types, its setting scripts every bound one, `tests/duck-wire.test.ts`
     "a json path bound as a parameter …" the hops;
+  - **a copied column's keys are DuckDB's own `json_keys`** (`objectKeys`, `keysNative` in src/duck/rewrite.ts; issue
+    461: through the function, 56 µs a row, Metabase's grouped keys over 3 M rows took 172–264 s against Postgres's
+    4.4–8.4 s): `json(b)_object_keys` of a COPIED table's column of the function's own type, read once a row. A copied
+    jsonb is Postgres's canonical text, so its keys are already in jsonb's order, each once; a copied json is the
+    document as written, its keys in its order with a key twice kept, as `json_keys` reads them. The function answers
+    a non-object (22023) and a json whose text holds a `\u` (Postgres refuses `\u0000` and a lone surrogate, which
+    DuckDB reads); anything but a copied column (a cast, a `->`, a jsonb the statement computes) stays the function's.
+    A libc order's key of the keys is computed for the grouped output alone. `tests/duck-wire.test.ts` "issue 461",
+    the plan fixture's `native json keys:` entries, the oracle's `native json keys:` statements;
   - **the JSON paths statements keep reading are stored as columns** (`.claude/rules/duck-stored-json.md`), which answers a number's digits and
     the rest from a plain column. ("The executor worker", "A `->>` is DuckDB's own read")
 - **A jsonb is sorted, grouped and compared by ONE key, `jsonbKey` (src/duck/jsonb-order.ts), never by its text**:

@@ -3056,6 +3056,90 @@
       "sends": [],
       "delim_join": false,
       "full_sort": false
+    },
+    {
+      "name": "native json keys: jsonb_object_keys grouped, by count then key",
+      "sql": "SELECT jsonb_object_keys(\"meta\") AS \"key\", count(*) AS \"count\" FROM \"public\".\"orders\" GROUP BY 1 ORDER BY 2 DESC, 1",
+      "plan": [
+        "ORDER_BY",
+        "  HASH_GROUP_BY",
+        "    PROJECTION",
+        "      UNNEST",
+        "        TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_json_keys"
+      ],
+      "sends": [],
+      "keys": [
+        "list_transform"
+      ],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
+      "name": "native json keys: SELECT DISTINCT jsonb_object_keys",
+      "sql": "SELECT DISTINCT jsonb_object_keys(meta) FROM orders",
+      "plan": [
+        "HASH_GROUP_BY",
+        "  PROJECTION",
+        "    PROJECTION",
+        "      UNNEST",
+        "        TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_json_keys"
+      ],
+      "sends": [],
+      "keys": [
+        "list_transform"
+      ],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "native json keys: a LEFT lateral of jsonb_object_keys grouped, no LIMIT",
+      "sql": "SELECT k.key, count(*) FROM orders o LEFT JOIN LATERAL jsonb_object_keys(o.meta) AS k(key) ON TRUE GROUP BY 1 ORDER BY 2 DESC, 1",
+      "plan": [
+        "ORDER_BY",
+        "  HASH_GROUP_BY",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        UNNEST",
+        "          TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_json_keys"
+      ],
+      "sends": [],
+      "keys": [
+        "list_transform"
+      ],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
+      "name": "native json keys: jsonb_object_keys grouped under libc, by count then key",
+      "sql": "SELECT jsonb_object_keys(\"meta\") AS \"key\", count(*) AS \"count\" FROM \"public\".\"orders\" GROUP BY 1 ORDER BY 2 DESC, 1",
+      "on": "libc",
+      "plan": [
+        "ORDER_BY",
+        "  PROJECTION calls __mason_json_keys, __mason_libc_key, __mason_turn",
+        "    HASH_GROUP_BY",
+        "      PROJECTION",
+        "        UNNEST",
+        "          TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_json_keys",
+        "__mason_libc_key"
+      ],
+      "sends": [],
+      "keys": [
+        "list_transform"
+      ],
+      "delim_join": false,
+      "full_sort": true
     }
   ]
 }

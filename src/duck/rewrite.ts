@@ -438,6 +438,42 @@ class Rewriter {
     return { base, steps, either, canonical: a0 === JSONB };
   }
 
+  /**
+   * A json(b)_object_keys argument whose keys DuckDB's own `json_keys` reads exactly as Postgres does (issue 461: the
+   * function, one hop to the main thread per vector, was 56 µs a row and held every other session's statement): a
+   * COPIED table's column (Typed.relation) of the function's own type. A copied jsonb is Postgres's canonical text, so
+   * its keys are already in jsonb's order (length first, then bytes), each held once; a copied json is the document as
+   * written, whose keys Postgres reads in its order, a key held twice included, as `json_keys` does. Anything else (an
+   * expression, a cast, a jsonb the statement computes, which may hold a key twice) stays the function's.
+   */
+  private keysNative(arg: AstNode, canonical: boolean): boolean {
+    const t = kindOf(arg) === "ColumnRef" ? this.typed(arg) : null;
+    return t !== null && t.node === "VAR" && t.relation !== undefined && t.type === (canonical ? JSONB : JSON_OID);
+  }
+
+  /**
+   * The keys of `arg` as a list, for `unnest` (json(b)_object_keys in a SELECT list or in FROM): DuckDB's `json_keys`
+   * where keysNative says it is Postgres's answer, the function for every other row. A NULL document is no rows (one
+   * NULL for `orNull`: leftLateral), an empty object none (one NULL for `orNull`). The function answers a non-object
+   * (Postgres's 22023) and a json document that holds a `\u` escape and a key (Postgres refuses `\u0000` and a lone
+   * surrogate, which DuckDB reads). A copied jsonb never holds `\u0000`, and its other escapes are read alike.
+   */
+  private objectKeys(arg: AstNode, canonical: boolean, orNull: boolean): AstNode {
+    const call = fn("__mason_json_keys", [arg, boolConst(canonical), boolConst(orNull)]);
+    if (!this.keysNative(arg, canonical)) return call;
+    const doc = (): AstNode => this.cp(arg);
+    // the keys read ONCE (every json_* call parses the document again); an empty list is an empty object, a NULL
+    // document or a non-object, told apart on those rows alone
+    return bound(fn("json_keys", [doc()]), "__mason_k", (k) => {
+      const some = op(">", fn("len", [k()]), intConst(0));
+      return caseWhen([
+        [canonical ? some : and([some, not(fn("contains", [doc(), strConst("\\u")]))]), k()],
+        [isNull(doc()), orNull ? arrayOf([nullConst()]) : nullConst()],
+        [and([op("=", fn("len", [k()]), intConst(0)), op("=", fn("json_type", [doc()]), strConst("OBJECT"))]), orNull ? arrayOf([nullConst()]) : k()],
+      ], call);
+    });
+  }
+
   /** a copied table's column (Typed.relation): its jsonb text is the copy's, Postgres's canonical text, each key once */
   private copiedColumn(n: AstNode): boolean {
     const t = kindOf(n) === "ColumnRef" ? this.typed(n) : null;
@@ -5623,7 +5659,7 @@ class Rewriter {
       }
       case "jsonb_object_keys": case "json_object_keys":
         if (this.inFrom.has(b)) return null;
-        return fn("unnest", [fn("__mason_json_keys", [args[0]!, boolConst(name.startsWith("jsonb")), boolConst(false)])]);
+        return fn("unnest", [this.objectKeys(args[0]!, name.startsWith("jsonb"), false)]);
       case "jsonb_array_elements": case "json_array_elements": case "jsonb_array_elements_text": case "json_array_elements_text":
       case "jsonb_each": case "json_each": case "jsonb_each_text": case "json_each_text":
         throw new Unrewritable(`${name}() in a SELECT list is not supported by Mason`, `read it in FROM: SELECT … FROM ${name}(…) AS e`, "json-rows-in-select");
@@ -6667,7 +6703,6 @@ class Rewriter {
    */
   private leftLateral(b: Body): AstNode | null {
     const bounded = this.bounded.has(b);
-    if (!bounded && this.boundedOnWire?.has(b) !== true) return null;
     const quals = b.quals as AstNode | undefined;
     if (b.jointype !== "JOIN_LEFT" || b.isNatural === true || b.usingClause !== undefined || quals === undefined || kindOf(quals) !== "A_Const" || bodyOf(quals).boolval?.boolval !== true) return null;
     const rarg = b.rarg as AstNode | undefined;
@@ -6682,7 +6717,14 @@ class Rewriter {
     const name = lastName(c.funcname);
     if (args.length !== 1 || c.agg_star === true || c.func_variadic === true || kindOf(args[0]!) === "NamedArgExpr") return null;
     if (!LIST_ROWS.has(name) && name !== "unnest") return null;
-    if (!bounded) { this.unboundedLateral = true; return null; }
+    // a copied column's keys are DuckDB's own read (objectKeys), no call a row: streamed, they cost less than the
+    // delimiter join's hash group of every document (issue 461: 63 s and 4.4 GiB over 1 M rows, 53400 at 3 M), so
+    // they are written so bounded or not
+    const native = (name === "jsonb_object_keys" || name === "json_object_keys") && this.keysNative(args[0]!, name.startsWith("jsonb"));
+    if (!bounded && !native) {
+      if (this.boundedOnWire?.has(b) === true) this.unboundedLateral = true;
+      return null;
+    }
     this.nonEmpty.add(r);
     const { quals: _true, ...rest } = b;
     // DuckDB 2.0 streams the INNER lateral only where its list reads ONE column of the row, or an array column
@@ -6845,7 +6887,7 @@ class Rewriter {
       }
       case "jsonb_object_keys": case "json_object_keys": {
         const column = colnames[0] ?? aliasName ?? name;
-        const keys = fn("__mason_json_keys", [args[0]!, boolConst(canonical), boolConst(orNull)]);
+        const keys = this.objectKeys(args[0]!, canonical, orNull);
         if (orNull) return listLateral([{ name: column, list: keys }], aliasName ?? name, this.done);
         const item = bodyOf(items[0]!);
         return { RangeFunction: { ...b, functions: [{ List: { ...item, items: [fn("unnest", [keys]), ...(item.items as unknown[]).slice(1)] } }], alias: { aliasname: aliasName ?? name, colnames: [S(column)] } } };

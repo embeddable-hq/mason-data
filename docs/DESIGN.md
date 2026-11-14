@@ -1083,7 +1083,8 @@ Everywhere else — a count, a GROUP BY, a DISTINCT, a window, a whole result, a
 DuckDB's own plan stays, as do an INNER lateral, a condition and another function. The bound is decided in a pre-pass
 over the whole statement before the walk: libpg-query writes a SELECT's keys in its struct's order (its FROM before its
 WITH, a UNION's arms last), so the walk meets a CTE before the SELECT that reads it. (2026-10-29; until then every such
-join was rewritten, whatever stood above it.)
+join was rewritten, whatever stood above it.) A copied column's keys call no function, so they are rewritten
+everywhere ("A copied column's keys", 2026-11-14).
 
 **Why.** On the test server a BI tool's "expand the JSON" preview (`SELECT q.*, d.key, d.value FROM (SELECT …) q LEFT
 JOIN json_each(CASE … END) d ON TRUE LIMIT 100 OFFSET 0`) over 22 M rows took 37.9 s, its `count(*)` cut off at 16 s.
@@ -1262,6 +1263,42 @@ element is a list of lists where Postgres accumulates a multi-dimensional array 
 binder error (42804). Each is refused by name (`array-subquery-element`), decided by the element's type in the
 analysis (an array's subscript, which has no offset of its own, by the array's), and a type the analysis does not say
 is refused too.
+
+#### A copied column's keys (issue 461, 2026-11-14)
+
+**Decision.** `json(b)_object_keys` of a copied table's column of the function's own type is DuckDB's own `json_keys`,
+read once a row (`objectKeys`, `keysNative`). A copied jsonb is Postgres's canonical text, so its keys are already in
+jsonb's order (length first, then bytes), each held once. A copied json is the document as written, and Postgres reads
+its keys in that order, a key held twice included, as `json_keys` does. The function stays for the rows it must answer:
+a non-object (Postgres's 22023), and a json document whose text holds a `\u` escape (Postgres refuses `\u0000` and a
+lone surrogate, where DuckDB reads them). A cast, a `->` and a jsonb the statement computes stay the function's. Such a
+LEFT lateral is the never-empty INNER one bounded or not (`leftLateral`), since a row costs no call.
+
+**Why.** On 2026-11-12, Metabase's `SELECT jsonb_object_keys(payload) AS key, count(*) … GROUP BY 1 ORDER BY 2 DESC, 1`
+over 3 M rows took 172–264 s against Postgres's 4.4–8.4 s, and timed out above about 5 M rows. The profile here: the
+keys alone (`SELECT count(*) FROM (SELECT jsonb_object_keys(payload) …) s`) took 56–62 s over 1 M rows of ~340-byte
+documents, the grouped form 58–68 s. So the time was the function, 56–62 µs a row, a hop to the executor worker a
+vector (it also built every member's value text, which nothing read). The libc key in the ORDER BY was not the cost:
+DuckDB computes it over the grouped output, 27 keys, and the plan fixture holds that. The LEFT lateral was DuckDB's
+delimiter join, a hash group of every document: 63–71 s and 4.4 GiB over 1 M rows.
+
+The keys are read once through a lambda (`bound`): a `json_type` beside `json_keys` parsed each document twice, about
+twice the time in DuckDB alone (1 M documents, under load: 1.1–1.8 s against 0.6–1.0 s).
+
+Measured through Mason against Postgres 16 (en_US.UTF-8, libc), on a shared 4-core machine, over a synthetic table
+of ~340-byte jsonb documents, an 8 GB engine limit. Each statement was run twice, Postgres and Mason alternately under
+the same load, so the ratio to Postgres is the number to read (Mason's time over Postgres's, the range of the runs):
+
+| statement | 1 M rows, main | 1 M rows, now | 3 M rows, main | 3 M rows, now |
+|---|---|---|---|---|
+| the keys alone, counted | ×58–109 | ×0.62–0.92 | ×46–58 (197–212 s) | ×0.78–0.82 (3.0–3.4 s) |
+| grouped, `ORDER BY 2 DESC, 1` (Metabase's) | ×43–46 | ×0.68–0.82 | ×48–50 (188–228 s) | ×0.64–0.95 (3.1–4.6 s) |
+| `SELECT DISTINCT` | ×36–43 | ×0.83–0.84 | ×36–69 (194–200 s) | ×0.74–0.79 (3.0–3.6 s) |
+| a LEFT lateral, grouped | ×40–68 | ×0.53–0.75 | ×16–19 (69–72 s) | ×0.67–0.77 (2.6–2.7 s) |
+
+Mason's peak RSS was 0.75–1.3 GiB on main (4.4 GiB for the LEFT lateral at 1 M rows, 5.1 GiB at 3 M), and 0.7–1.6 GiB
+now. A small `count(*)` in another session took 0.004–0.017 s alone; beside main's statements it took up to 4–8 s, and
+beside these up to 0.34 s.
 
 #### Nulls placed by a key of their own
 
