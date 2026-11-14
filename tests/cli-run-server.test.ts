@@ -71,7 +71,7 @@ const pollNow = async (sources: string[]): Promise<{ at: string; tables: PolledT
   // a refusal met once the pass ahead of it ended, and a sync that failed on the database
   if (sources.includes("public.events")) throw new PollRefused("busy", "public.events is being caught up by one poll (its synced data serves as it was): it is caught up by one poll when that ends, so there is nothing to poll — mason wait waits for it");
   if (sources.includes("public.Shouty")) throw new Error("the poll failed: connection reset");
-  return { at: "2026-10-24T10:05:00.000Z", tables: sources.map((table) => ({ table, changed: 2, deleted: 1, rows: 3, ms: 40 })) };
+  return { at: "2026-10-24T10:05:00.000Z", tables: sources.map((table) => ({ table, added: 1, updated: 1, deleted: 1, rows: 3, ms: 40 })) };
 };
 // the sync's one check as it is asked (src/duck/sync.ts pollRefusal): its refusal by name, before any poll
 // a test marks a table whose sync the run has queued itself (src/duck/sync.ts scheduledNow): refused busy
@@ -399,7 +399,7 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
     };
     // mason sync's request (wait: true): held to the sync's end, its answer what the sync did
     const polled = await post("/api/sync", { tables: ["public.customers"], wait: true });
-    assert.deepEqual([polled.status, polled.body], [200, { at: "2026-10-24T10:05:00.000Z", tables: [{ table: "public.customers", changed: 2, deleted: 1, rows: 3, ms: 40 }] }]);
+    assert.deepEqual([polled.status, polled.body], [200, { at: "2026-10-24T10:05:00.000Z", tables: [{ table: "public.customers", added: 1, updated: 1, deleted: 1, rows: 3, ms: 40 }] }]);
     const refused = await post("/api/sync", { tables: ["public.logs"], wait: true });
     assert.deepEqual([refused.status, refused.body.code], [409, "nothing_yet"], "a refusal keeps the sync's code for the CLI");
     assert.match(String(refused.body.error), /public\.logs is not synced yet/);
@@ -497,7 +497,7 @@ test("POST /api/sync answers as the sync starts, and /api/state follows it to it
     await new Promise((r) => setTimeout(r, 50));
     const done = await byHand("public.orders") as { endedAt: string };
     assert.deepEqual(done, { id: sync.id, tables: ["public.orders"], state: "synced", startedAt: sync.startedAt, endedAt: done.endedAt,
-      answer: { at: "2026-10-24T10:05:00.000Z", tables: [{ table: "public.orders", changed: 2, deleted: 1, rows: 3, ms: 40 }] } }, "then what it did");
+      answer: { at: "2026-10-24T10:05:00.000Z", tables: [{ table: "public.orders", added: 1, updated: 1, deleted: 1, rows: 3, ms: 40 }] } }, "then what it did");
     assert.ok(Date.parse(done.endedAt) >= Date.parse(sync.startedAt));
     // A SYNC THAT FAILS: its reason on the state, the run's log says it once; one refused once the pass ahead ended keeps its code
     pollGate = null;

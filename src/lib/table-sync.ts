@@ -330,11 +330,12 @@ export function statementMsText(ms: number): string {
 /**
  * WHAT A SYNC DID TO ONE TABLE, in the words `mason sync` prints on its line and the web page's Sync now says
  * (src/cli/sync.ts `syncedReport`, src/web/pages/tables.js, held equal) — and a sync by hand records as its `synced`
- * event (src/duck/sync.ts pollNow), so the event and the answer the person read are one sentence.
+ * event (src/duck/sync.ts pollNow), a scheduled one as its `polled` and a whole read as its `full_sync` (which adds every
+ * row), so the event and the answer the person read are one sentence: the rows added, updated and deleted apart.
  */
-export function syncedText(t: { changed: number; deleted: number; rows: number; ms: number }): string {
+export function syncedText(t: { added: number; updated: number; deleted: number; rows: number; ms: number }): string {
   const n = (x: number): string => x.toLocaleString("en-US");
-  return `${n(t.changed)} changed, ${n(t.deleted)} deleted, ${n(t.rows)} rows now · ${msText(t.ms)}`;
+  return `${n(t.added)} added, ${n(t.updated)} updated, ${n(t.deleted)} deleted, ${n(t.rows)} rows now · ${msText(t.ms)}`;
 }
 
 /** WHAT A TABLE IN ITS ONE CATCH-UP POLL SAYS (`tables[].sync.state` `catching-up`): its line in `mason wait` and

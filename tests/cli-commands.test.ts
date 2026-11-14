@@ -269,7 +269,7 @@ test("mason status and wait in replication mode say where the stream is: its pos
     "position       0/1A2B3C8 · the database is at 0/1A2B4F0: 296 bytes behind (read 2.0 s ago)",
     "slot           holds 3.0 GiB of the database's WAL (extended) · 1.0 GiB more before Postgres invalidates it (max_slot_wal_keep_size) (read 2.0 s ago)",
     "last change    committed 5.0 s ago, applied 0.3 s after its commit",
-    "public.orders  streamed · 1,204 changes (1,000 inserts, 200 updates, 4 deletes) this run",
+    "public.orders  streamed · 1,000 added, 200 updated, 4 deleted this run",
     "shop.lines     getting the changes made since 2026-10-26 11:58 UTC: reading the changes, for 3.0 s · the stream holds 12 changes of it meanwhile",
     "public.events  left out: publication app_pub does not carry public.events: ALTER PUBLICATION app_pub ADD TABLE public.events",
     "public.big     not streamed yet: it is being read whole: it joins once synced and caught up by one poll",
@@ -874,7 +874,7 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
     logs: { capacity: 2000, recent: () => [] },
     duck: { copies: () => usageCopies as never[], file: path.join(s.root, "duck.db"), refused: () => refusedNext as never,
       // a sync that takes a while (a scan of each table): mason sync waits for its end and prints what it did (issue 1007)
-      poll: async (tables) => { polled.push(tables); await new Promise((r) => setTimeout(r, 400)); await syncHeld; return { at: "2026-11-07T10:00:00.000Z", tables: tables.map((table) => ({ table, changed: 5, deleted: 1, rows: 10, ms: 400 })) }; },
+      poll: async (tables) => { polled.push(tables); await new Promise((r) => setTimeout(r, 400)); await syncHeld; return { at: "2026-11-07T10:00:00.000Z", tables: tables.map((table, i) => ({ table, added: 1_200 + i, updated: 282_770, deleted: i, rows: 153_292_984, ms: 477_000 })) }; },
       stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }), slowest: async () => [], durationsBy: async () => new Map([[Date.parse(sample.at), { p50: sample.durationP50Ms, p95: sample.durationP95Ms }]]), 
         lastUsed: async (u) => u.map(() => null) }, events: { days: 7, recent: async () => [] },
@@ -988,13 +988,15 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
       assert.equal(all.code, 0, all.stdout + all.stderr);
       assert.deepEqual(polled, [["public.customers", "public.orders"]]);
       assert.deepEqual(nextOf(all.stdout), ["mason sync --all", "mason status"]);
-      // MASON SYNC WAITS FOR THE SYNC'S END, as before (issue 1007: the run answers the page as a sync starts): what the
-      // sync did, as --json and as the person's report, never the sync just started
-      const answer = JSON.parse(all.stdout) as { syncedAt: string; tables: Array<{ table: string; changed: number }> };
-      assert.deepEqual([answer.syncedAt, answer.tables.map((t) => [t.table, t.changed])], ["2026-11-07T10:00:00.000Z", [["public.customers", 5], ["public.orders", 5]]], all.stdout);
-      const person = await runMason(app, ["sync", "orders"], matrixEnv());
-      assert.equal(person.code, 0, person.stdout + person.stderr);
-      assert.match(person.stdout, /^Synced public\.orders: 5 row\(s\) written, 1 deleted\.\n {2}public\.orders {2}/, person.stdout);
+      // what each table's sync did, the rows added, updated and deleted apart (issue 1010): as data, and in words
+      assert.deepEqual((JSON.parse(all.stdout) as { tables: unknown[] }).tables, [
+        { table: "public.customers", added: 1_200, updated: 282_770, deleted: 0, rows: 153_292_984, ms: 477_000 },
+        { table: "public.orders", added: 1_201, updated: 282_770, deleted: 1, rows: 153_292_984, ms: 477_000 }]);
+      const said = await runMason(app, ["sync", "customers"], matrixEnv());
+      assert.equal(said.code, 0, said.stdout + said.stderr);
+      assert.match(said.stdout, /^Synced public\.customers: 1,200 added, 282,770 updated, 0 deleted\.\n/);
+      assert.match(said.stdout, /\n {2}public\.customers +1,200 added, 282,770 updated, 0 deleted, 153,292,984 rows now · 7 min 57 s\n/);
+      polled.length = 1;
       // MASON SYNC OF A TABLE ALREADY SYNCING (the page's Sync now of it running): refused at once, busy, as a person and
       // with --json, naming mason status; one read of it, never a second queued behind it (the owner, on issue 1007)
       let release!: () => void;
@@ -1010,7 +1012,7 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
         assert.deepEqual([busyJson.code, b.error.code, b.next.map((x) => x.command)], [1, "busy", ["mason status"]]);
         assert.match(b.error.message, /^public\.orders is already syncing \(started \d+ s ago\)$/);
       } finally { release(); syncHeld = null; }
-      assert.equal(polled.length, 3, "the page's sync alone read it: mason sync started none beside it");
+      assert.equal(polled.length, 2, "the page's sync alone read it: mason sync started none beside it");
       // THE RUN'S OWN READ OF IT (a whole read again, which mason wait waits for): its words and its next step agree
       refusedNext = { code: "busy", message: "public.orders is being read again whole (its columns changed): mason wait waits for it", follow: "wait" };
       try {
@@ -1019,7 +1021,7 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
         assert.deepEqual([reading.code, w.error.code, w.error.message, w.next.map((x) => x.command)],
           [1, "busy", "public.orders is being read again whole (its columns changed): mason wait waits for it", ["mason wait orders", "mason status"]]);
       } finally { refusedNext = null; }
-      assert.equal(polled.length, 3, "refused: nothing read");
+      assert.equal(polled.length, 2, "refused: nothing read");
       const both = await runMason(app, ["sync", "orders", "--all"], matrixEnv());
       assert.equal(both.code, 2);
       assert.match(both.stderr, /mason sync: --all syncs every added table: name tables \(orders\) or --all, not both/);
@@ -1039,7 +1041,7 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
       const none = await runMason(app, ["sync", "--all", "--json"], matrixEnv());
       assert.equal(none.code, 1, none.stdout + none.stderr);
       assert.equal((JSON.parse(none.stdout) as { error: { code: string } }).error.code, "nothing_yet");
-      assert.equal(polled.length, 3, "nothing polled for no table, nor for a refused command line");
+      assert.equal(polled.length, 2, "nothing polled for no table, nor for a refused command line");
     } finally { writeRunning(s.root, null); }
     // WHAT TO RUN NEXT, Mason up (a review finding): --sync alone on a table already added starts no copy (it is caught up
     // by one poll), so the next step is mason status, never mason wait's "the copy has started"; a new table's is mason wait
