@@ -283,6 +283,30 @@ paths:
   of its own scan, no operator named DELIM (`delimiterJoin`). ("The plan fixture")
 - **A result's names, types and typmods are Postgres's**, from the analysis, and a numeric Postgres computes exactly is
   computed by `src/lib/pg-numeric.ts`, never DuckDB's double or HUGEINT. ("How a statement is answered")
+- **A whole numeric the rewrite writes is a DECIMAL(19, 0), never a DECIMAL(38, 0)** (`wholeNumeric`, issue 929): an
+  integer cast to numeric, div() of two integers, a whole constant (`decimalConst`, its own digits where more) and a
+  whole part of extract. Beside another DECIMAL in an IN, a UNION, a CASE, a COALESCE, GREATEST or an ARRAY, DuckDB
+  brings both to DECIMAL(p + s, s) while that fits 38 digits, else DECIMAL(38, 38 − p): a DECIMAL(38, 0) kept none of
+  the other's decimals, so 0.01 matched 0. A width of 19 keeps at least 19 and every whole-number digit (the owner's
+  rule: a numeric's whole-number digits exact, and the value to 15 significant digits; the listed difference
+  `whole-beside-many-decimals`), and keeps a product of two in 128 bits (a DECIMAL(10, 0)
+  multiplies in 64 bits and fails past 18 digits). A sum of one of at most 19 digits (`wholeDigits`) is added as a
+  HUGEINT and read as a DECIMAL(28, 0)
+  (`SUM_WIDTH`): DuckDB sums a DECIMAL(p, 0) into a DECIMAL(38, 0), which keeps no decimals beside another, and a
+  HUGEINT sum beside a DECIMAL(38, s) overflowed past 38 − s digits where main answered; 28 overflows only past 10^28
+  and keeps 10 decimals beside; a sum of a product or of a longer constant is DuckDB's DECIMAL(38, 0), as on main. A
+  product of two is still DuckDB's DECIMAL(38, 0). The owner chose rounding over a
+  HUGEINT's 22003. Not every meeting is a unification: `=` and an IN list of constants cast the whole number into the
+  column's type (`n36 = 2.5e2` raises 22003, as on main), and so does a whole constant of more than 19 digits beside a
+  numeric(38,30) in a CASE. `tests/duck-wire.test.ts` "issue 929", the oracle's `whole:`
+  statements over `bins` and its `whole-beside-many-decimals` gap case.
+- **A set operation that compares rows (UNION, INTERSECT, EXCEPT, every ALL form but UNION ALL) of a numeric column
+  its queries give different scales is answered at ONE scale, the widest** (the listed difference `mixed-scale-numeric`,
+  the owner's decision on issue 929's review: answer more queries right, with the text's scale slightly off, rather
+  than refuse them): the rows are Postgres's, compared by value, and each prints at the widest scale where Postgres
+  prints the scale of the query it came from (`3.00` for `3`). A UNION ALL keeps each row's own scale (`exactArms`).
+  `displayScale` knows a whole numeric (div() of integers) and extract's scales, so a UNION ALL arm of either is
+  told apart from an unconstrained column's. `tests/duck-wire.test.ts` "issue 929: a set operation …".
 - **Whether a statement calls a Mason function is its PLAN's, never its text's** (a review finding: a `*` over a
   copy reads `__mason_visible`, which calls nothing, and a text match left every such statement uncancellable — 82 s
   past a 300 ms timeout): `PlannedSql.functions`, the `__mason_*` calls of the rewritten tree (`masonCalls`,

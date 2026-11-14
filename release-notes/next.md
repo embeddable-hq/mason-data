@@ -2,6 +2,19 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **A whole number beside a numeric with very many decimals keeps at least 19 of its decimals.** This covers `div()`
+  of two integers, an integer cast to `numeric`, a whole constant such as `2.5e2`, and a whole part of `extract`.
+  Beside a column like `numeric(38,30)`, in a `UNION`, an `IN (SELECT …)`, a `CASE`, a `COALESCE` or `GREATEST`,
+  Mason keeps every digit before the point and the column's first 19 decimals, and rounds the rest. Postgres keeps
+  all 30. A number of 1 or more is the same to at least 19 significant digits. A smaller one is the same to its
+  first 19 decimals, so a value smaller than 0.00000000000000000005 reads 0. Beside a sum of whole numbers, Mason
+  keeps 10 decimals.
+  - Values that differ only after the decimals kept compare equal: `UNION` and `DISTINCT` merge them, and `IN` and a
+    join match them.
+  - Before, Mason rounded away every decimal there.
+  - Comparing such a column with `=`, or with an `IN` list of constants, to a whole number that does not fit its type
+    still fails with `numeric field overflow`, as before.
+  - To get Postgres's rows exactly, cast the column to 18 decimals or fewer first, such as `::numeric(38,18)`.
 - **The smallest and largest value of a text column, and a page sorted by one, are many times faster when your
   database sorts text by a language's rules** (a collation such as `en_US.UTF-8`). Metabase reads them when it scans
   a table, and for a table's preview. Over 4.5 million rows they took 3 to 22 seconds, and now take 0.2 to 3 seconds.
@@ -12,6 +25,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **A whole number beside a decimal column no longer loses the column's decimals.** This covers `div()` of two
+  integers, an integer cast to `numeric`, a whole constant such as `2.5e2`, and a whole part of `extract`. When one
+  met a decimal column in an `IN (SELECT …)`, a `UNION`, an `INTERSECT`, an `EXCEPT`, a `CASE`, a `COALESCE` or
+  `GREATEST`, the column's decimals were rounded away with no error. So `a IN (SELECT div(i, 7) …)` matched 0.01 to 0,
+  and rows came back wrong or in the wrong order. Now the rows are Postgres's. A `UNION`, `INTERSECT` or `EXCEPT`
+  without `ALL` still prints every row at one scale, the widest (`3.00` where Postgres prints `3`), as listed.
 - **A table under `sync: replication` no longer blocks `ALTER TABLE … DROP COLUMN` on your database.** On Postgres 15
   and later, the publication Mason makes for itself listed each table's columns. So your database refused to drop a
   listed column, with "publication … depends on column", and never sent a column added later. Mason's publication now

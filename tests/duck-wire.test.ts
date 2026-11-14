@@ -140,6 +140,9 @@ const DDL = [
   // a numeric bin's edges (issues 464, 465): a cent either side of 12.5, negatives, each type's limits, NULL, and the
   // bigints whose quotient by 12.5 Postgres rounds to a whole number before its floor
   "CREATE TABLE public.bins (id INTEGER PRIMARY KEY, a DECIMAL(12,2), h DECIMAL(30,8), i INTEGER, s SMALLINT, b BIGINT)",
+  // a numeric of so many decimals that a whole number beside it does not fit 38 digits (issue 929: whole-beside-many-decimals)
+  "CREATE TABLE public.wides (id INTEGER PRIMARY KEY, i INTEGER, b BIGINT, n30 DECIMAL(38,30), n20 DECIMAL(38,20))",
+  "INSERT INTO public.wides VALUES (1, 0, 0, 0.000000000000000001, 0.5), (2, 1, 1, 0.123456789012345678901234567891, 1.000000000000000001), (3, -7, -7, -7.000000000000000001, -7), (4, 99999999, 99999999, 12.5, 99999999.12345678901234567891), (5, NULL, NULL, NULL, NULL), (6, 2147483647, 9223372036854775807, 0.30, 0.30)",
   "INSERT INTO public.bins VALUES (1, 0, 0, 0, 0, 0), (2, 12.5, 12.5, 25, 25, 25), (3, 12.49, 12.49999999, 24, 24, 24), (4, 12.51, 12.50000001, 26, 26, 1000000000000000012), (5, -12.5, -12.5, -25, -25, -1000000000000000012), (6, -12.49, -12.49999999, -24, -24, -24), (7, -12.51, -12.50000001, -26, -26, -26), (8, 0.01, 0.00000001, 1, 1, 1), (9, -0.01, -0.00000001, -1, -1, -1), (10, 9999999999.99, 9999999999999999999999.99999999, 2147483647, 32767, 9223372036854775807), (11, -9999999999.99, -9999999999999999999999.99999999, -2147483648, -32768, -9223372036854775808), (12, 124.99, 125, 124, 124, 999999999999999999), (13, NULL, NULL, NULL, NULL, NULL)",
   // issue 244's deep chains executed (#484): `deepShapes`' table, ten rows of NULLs, duplicates, ties, a padded char(4)
   "CREATE TABLE public.deep_t (id INTEGER PRIMARY KEY, a INTEGER, b VARCHAR, c DECIMAL(10,2), d VARCHAR)",
@@ -230,6 +233,8 @@ const PG_DDL = [
   "CREATE TABLE public.pnum (id integer PRIMARY KEY, u numeric, w numeric(65,30))",
   "INSERT INTO public.pnum VALUES (1, 1.2345, 19.99), (2, 7, 123456789012345678901234567890.25), (3, -0.5, 5), (4, NULL, NULL)",
   "CREATE TABLE public.bins (id integer PRIMARY KEY, a numeric(12,2), h numeric(30,8), i integer, s smallint, b bigint)",
+  "CREATE TABLE public.wides (id integer PRIMARY KEY, i integer, b bigint, n30 numeric(38,30), n20 numeric(38,20))",
+  "INSERT INTO public.wides VALUES (1, 0, 0, 0.000000000000000001, 0.5), (2, 1, 1, 0.123456789012345678901234567891, 1.000000000000000001), (3, -7, -7, -7.000000000000000001, -7), (4, 99999999, 99999999, 12.5, 99999999.12345678901234567891), (5, NULL, NULL, NULL, NULL), (6, 2147483647, 9223372036854775807, 0.30, 0.30)",
   "INSERT INTO public.bins VALUES (1, 0, 0, 0, 0, 0), (2, 12.5, 12.5, 25, 25, 25), (3, 12.49, 12.49999999, 24, 24, 24), (4, 12.51, 12.50000001, 26, 26, 1000000000000000012), (5, -12.5, -12.5, -25, -25, -1000000000000000012), (6, -12.49, -12.49999999, -24, -24, -24), (7, -12.51, -12.50000001, -26, -26, -26), (8, 0.01, 0.00000001, 1, 1, 1), (9, -0.01, -0.00000001, -1, -1, -1), (10, 9999999999.99, 9999999999999999999999.99999999, 2147483647, 32767, 9223372036854775807), (11, -9999999999.99, -9999999999999999999999.99999999, -2147483648, -32768, -9223372036854775808), (12, 124.99, 125, 124, 124, 999999999999999999), (13, NULL, NULL, NULL, NULL, NULL)",
   "CREATE TABLE public.deep_t (id integer PRIMARY KEY, a integer, b text, c numeric(10,2), d char(4))",
   "INSERT INTO public.deep_t VALUES (1, 5, 'x', 10.00, 'ab'), (2, -3, 'y', 0.00, 'abcd'), (3, NULL, 'x', -7.25, 'a'), (4, 7, NULL, 10.00, NULL), (5, 0, 'z', 99999999.99, 'zz'), " +
@@ -311,6 +316,8 @@ const schema: PgSchema = {
       columns: [{ name: "id", type: "int4" }, { name: "x", type: "numeric", spelled: "numeric(30,20)" }, { name: "y", type: "numeric", spelled: "numeric(30,20)" }] },
     { name: "pnum", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "u", type: "numeric", spelled: "numeric" }, { name: "w", type: "numeric", spelled: "numeric(65,30)" }] },
+    { name: "wides", primaryKey: ["id"], joins: [],
+      columns: [{ name: "id", type: "int4" }, { name: "i", type: "int4" }, { name: "b", type: "int8" }, { name: "n30", type: "numeric", spelled: "numeric(38,30)" }, { name: "n20", type: "numeric", spelled: "numeric(38,20)" }] },
     { name: "bins", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "a", type: "numeric", spelled: "numeric(12,2)" }, { name: "h", type: "numeric", spelled: "numeric(30,8)" },
         { name: "i", type: "int4" }, { name: "s", type: "int2" }, { name: "b", type: "int8" }] },
@@ -543,7 +550,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "bins"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "pnum"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "timetz_runs"], ["public", "timetz_runs3"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "accounts"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "bins"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "pnum"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "timetz_runs"], ["public", "timetz_runs3"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["public", "wides"], ["sales", "accounts"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'sales' AND table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -4247,6 +4254,172 @@ binReview("a bin by a divisor of 39 places is Postgres's", [
   "SELECT id, floor(a / 170141183460469231731687303715884105720) AS f, ceil(a / 170141183460469231731687303715884105720) AS c FROM bins ORDER BY id",
   "SELECT id, floor(a / 200000000000000000000000000000000000000) AS f, ceil(a / 200000000000000000000000000000000000000) AS c FROM bins ORDER BY id",
   "SELECT floor(a / 170141183460469231731687303715884105720) AS v, count(*) FROM bins GROUP BY 1 ORDER BY 1"]);
+
+// ISSUE 929: a whole numeric Postgres computes (div() of two integers, an integer cast to numeric, a whole constant,
+// extract of a whole part) was the engine's DECIMAL(38, 0). Beside another numeric's decimals in an IN, a UNION, a
+// CASE, a COALESCE or GREATEST the engine brought both to that type, so the decimals were rounded away: 0.01 IN a
+// div() of 0, 0.30 sorted before -0.01. Each arm carries its number, so equal values of two scales sort one way.
+const wholeBeside = (name: string, sqls: string[]): void => {
+  test(`issue 929: ${name}`, async () => {
+    const c = await client();
+    try {
+      for (const sql of sqls) assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    } finally { await c.end(); }
+  });
+};
+wholeBeside("div() beside a decimal column keeps the column's decimals", [
+  "SELECT id FROM bins WHERE a IN (SELECT div(i, 2) FROM bins) ORDER BY id",
+  "SELECT id FROM bins WHERE div(i, 2) IN (SELECT a FROM bins) ORDER BY id",
+  "SELECT id FROM bins WHERE a = ANY (SELECT div(s, 2) FROM bins) ORDER BY id",
+  "SELECT id FROM bins WHERE a NOT IN (SELECT div(i, 2) FROM bins WHERE i IS NOT NULL) ORDER BY id",
+  "SELECT div(i, 2) AS v, 1 AS arm FROM bins UNION ALL SELECT a, 2 FROM bins ORDER BY 1 NULLS FIRST, 2",
+  "SELECT a AS v, 1 AS arm FROM bins UNION ALL SELECT div(b, 2), 2 FROM bins ORDER BY 1 NULLS FIRST, 2",
+  "SELECT id, CASE WHEN id % 2 = 0 THEN div(i, 2) ELSE a END AS v FROM bins ORDER BY 2, 1",
+  "SELECT id, COALESCE(CASE WHEN id % 2 = 0 THEN NULL ELSE a END, div(i, 2)) AS v FROM bins ORDER BY 2, 1",
+  "SELECT id, GREATEST(a, div(i, 2)) AS g, LEAST(a, div(i, 2)) AS l FROM bins ORDER BY 2, 1",
+  "SELECT s.v, s.arm FROM (SELECT div(i, 2) AS v, 1 AS arm FROM bins UNION ALL SELECT a, 2 FROM bins) s WHERE s.v BETWEEN -1 AND 1 ORDER BY s.v, s.arm",
+  "WITH w AS (SELECT div(i, 2) AS v, 1 AS arm FROM bins UNION ALL SELECT a, 2 FROM bins) SELECT v, arm FROM w ORDER BY v DESC NULLS LAST, arm",
+  "SELECT count(*) AS n, sum(v) AS total FROM (SELECT div(i, 2) AS v FROM bins UNION ALL SELECT a FROM bins) s GROUP BY v ORDER BY v NULLS FIRST",
+  "SELECT x.id, y.id FROM bins x JOIN (SELECT id, CASE WHEN id % 2 = 0 THEN div(i, 2) ELSE a END AS v FROM bins) y ON y.v = x.a ORDER BY 1, 2",
+  "SELECT sum(div(i, 2)) AS v, 1 AS arm FROM bins WHERE id < 10 UNION ALL SELECT a, 2 FROM bins ORDER BY 1 NULLS FIRST, 2"]);
+wholeBeside("an integer cast to numeric, a whole constant and a whole part of extract beside a decimal column keep its decimals", [
+  "SELECT i::numeric AS v, 1 AS arm FROM bins UNION ALL SELECT a, 2 FROM bins ORDER BY 1 NULLS FIRST, 2",
+  "SELECT id FROM bins WHERE a IN (SELECT s::numeric FROM bins) ORDER BY id",
+  "SELECT id, COALESCE(CASE WHEN id % 2 = 0 THEN NULL ELSE a END, b::numeric) AS v FROM bins ORDER BY 2, 1",
+  "SELECT id, CASE WHEN id % 2 = 0 THEN i::numeric ELSE a END AS v FROM bins ORDER BY 2, 1",
+  "SELECT id FROM bins WHERE a IN (SELECT 0e1) ORDER BY id",
+  "SELECT id, CASE WHEN id % 2 = 0 THEN 1.2e1 ELSE a END AS v FROM bins ORDER BY 2, 1",
+  "SELECT id, CASE WHEN id % 2 = 0 THEN extract(day FROM interval '12 days 3 hours') ELSE a END AS v FROM bins ORDER BY 2, 1",
+  // (a UNION ALL arm of div() or extract beside an unconstrained column keeps its own scale: displayScale knows both)
+  "SELECT (SELECT max(v) FROM (SELECT extract(day FROM interval '14 days') AS v UNION ALL SELECT u FROM pnum) s) AS m",
+  "SELECT max(v) AS hi FROM (SELECT extract(epoch FROM date '2024-01-02') AS v UNION ALL SELECT u FROM pnum) s",
+  "SELECT max(v) AS hi FROM (SELECT div(i, 2) AS v FROM bins UNION ALL SELECT u FROM pnum) s"]);
+// ISSUE 929'S REVIEW: a set operation that compares rows (UNION, INTERSECT, EXCEPT, and their ALL forms but UNION ALL)
+// of a numeric column its queries give different scales. Postgres prints each row kept at its own query's scale (`3`
+// beside `7.00`); the engine unifies the queries to one DECIMAL, so every row prints at ONE scale, the widest: the
+// listed difference mixed-scale-numeric (the owner's decision). Its rows are Postgres's, compared by value, whichever
+// side the whole number is on (once the whole number was a DECIMAL(38, 0), the decimals were rounded away and the rows
+// were wrong). A column its queries give one scale, and an EXCEPT whose left query writes the widest scale (its rows
+// are that query's alone), are Postgres's text too
+test("issue 929: a set operation that compares rows of numerics of different scales answers Postgres's rows at one scale", async () => {
+  const c = await client();
+  try {
+    /** a numeric's text without its trailing zeros: the value, whatever its scale */
+    const value = (v: unknown): unknown => typeof v === "string" && /^-?\d+\.\d+$/.test(v) ? v.replace(/0+$/, "").replace(/\.$/, "") : v;
+    const scaleOf = (v: string): number => (v.split(".")[1] ?? "").length;
+    for (const sql of [
+      "SELECT i::numeric AS v FROM bins EXCEPT SELECT a FROM bins ORDER BY 1",
+      "SELECT a FROM bins EXCEPT SELECT h FROM bins ORDER BY 1",
+      "SELECT a FROM bins EXCEPT SELECT u FROM pnum ORDER BY 1",
+      "SELECT i::numeric AS v FROM bins INTERSECT SELECT a FROM bins ORDER BY 1",
+      "SELECT a FROM bins INTERSECT SELECT div(i, 2) FROM bins ORDER BY 1",
+      "SELECT div(i, 2) AS v FROM bins EXCEPT SELECT a FROM bins ORDER BY 1",
+      "SELECT b::numeric AS v FROM bins INTERSECT ALL SELECT a FROM bins ORDER BY 1",
+      "SELECT b::numeric AS v FROM bins EXCEPT ALL SELECT a FROM bins ORDER BY 1",
+      "SELECT 2.5e1 AS v INTERSECT SELECT a FROM bins ORDER BY 1",
+      "SELECT 0e1 AS v INTERSECT SELECT a FROM bins ORDER BY 1",
+      "SELECT extract(day FROM interval '12 days') AS v UNION SELECT a FROM bins ORDER BY 1",
+      "SELECT id, i::numeric AS v FROM bins UNION SELECT id, a FROM bins WHERE a > 1000000000000 ORDER BY 1",
+      "SELECT id, s::numeric AS v FROM bins UNION SELECT id, a FROM bins ORDER BY 1, 2",
+      "SELECT i AS v FROM bins EXCEPT SELECT a FROM bins ORDER BY 1",
+      "SELECT a FROM bins UNION SELECT h FROM bins ORDER BY 1",
+      "SELECT v FROM (SELECT i::numeric AS v FROM bins EXCEPT SELECT a FROM bins) s ORDER BY 1",
+      "WITH w AS (SELECT div(i, 2) AS v FROM bins INTERSECT SELECT a FROM bins) SELECT v FROM w ORDER BY 1"]) {
+      const got = await answer(c, sql), want = await postgres(sql);
+      assert.deepEqual(got.fields, want.fields, sql);
+      // the rows are Postgres's, by value, in its order
+      assert.deepEqual(got.rows.map((r) => r.map(value)), want.rows.map((r) => r.map(value)), sql);
+      // and every value of a numeric column is printed at one scale
+      got.fields.forEach(([, oid], k) => {
+        if (oid !== 1700) return;
+        const scales = new Set(got.rows.map((r) => r[k]).filter((v): v is string => typeof v === "string").map(scaleOf));
+        assert.ok(scales.size <= 1, `${sql}: column ${k + 1} at scales ${[...scales].join(", ")}`);
+      });
+    }
+    for (const sql of [
+      "SELECT a FROM bins INTERSECT SELECT a FROM bins WHERE id > 3 ORDER BY 1",
+      // (an EXCEPT keeps its left query's rows alone: Postgres's text where that query writes the widest scale)
+      "SELECT a FROM bins EXCEPT SELECT i::numeric FROM bins ORDER BY 1",
+      "SELECT a FROM bins EXCEPT ALL SELECT div(b, 2) FROM bins ORDER BY 1",
+      "SELECT h FROM bins EXCEPT SELECT a FROM bins EXCEPT SELECT 0 ORDER BY 1",
+      "SELECT extract(epoch FROM timestamp '2024-01-01 00:00:01.5') AS v EXCEPT SELECT a FROM bins ORDER BY 1",
+      // (a set operation whose rows are compared or counted, never printed: Postgres's answer whole)
+      "SELECT id, (SELECT count(*) FROM (SELECT b2.i::numeric FROM bins b2 WHERE b2.id = bins.id UNION SELECT a) AS u) AS n FROM bins ORDER BY id",
+      "SELECT id FROM bins WHERE a IN (SELECT i::numeric FROM bins UNION SELECT h FROM bins) ORDER BY id",
+      "SELECT id FROM bins WHERE a NOT IN (SELECT div(i, 2) FROM bins WHERE i IS NOT NULL INTERSECT SELECT a FROM bins) ORDER BY id",
+      "SELECT id FROM bins x WHERE EXISTS (SELECT x.i::numeric EXCEPT SELECT a FROM bins) ORDER BY id",
+      "SELECT count(*) FROM (SELECT i::numeric FROM bins INTERSECT SELECT a FROM bins) AS s",
+      "SELECT div(i, 2) AS v FROM bins EXCEPT SELECT i::numeric FROM bins ORDER BY 1",
+      "SELECT div(i, 2) AS v FROM bins UNION SELECT b::numeric FROM bins ORDER BY 1",
+      "SELECT i FROM bins INTERSECT SELECT s FROM bins ORDER BY 1",
+      "SELECT a FROM bins EXCEPT ALL SELECT 0.00 ORDER BY 1",
+      "SELECT a FROM bins UNION SELECT NULL ORDER BY 1 NULLS FIRST",
+      "SELECT div(i, 2) AS v, 1 AS arm FROM bins UNION ALL SELECT a, 2 FROM bins ORDER BY 1 NULLS FIRST, 2"]) {
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    }
+  } finally { await c.end(); }
+});
+// ISSUE 929, THE OWNER'S RULE: a whole number beside a numeric of so many decimals that the two do not fit 38 digits
+// (numeric(38,30), numeric(38,20)) keeps every whole-number digit and at least 19 of the decimals, the rest rounded
+// away: Postgres's answer under the owner's rule (its whole-number digits exact, the value to 15 significant digits;
+// the listed difference whole-beside-many-decimals). Never an overflow (22003) where Postgres answers
+test("issue 929: a whole number beside a numeric of many decimals answers Postgres's rows, its whole digits exact and to 15 significant digits", async () => {
+  const c = await client();
+  try {
+    /** a numeric's text as the rule reads it: its whole-number digits, and its value to 15 significant digits */
+    const ruled = (v: unknown): unknown => {
+      if (typeof v !== "string" || !/^-?\d+(\.\d+)?$/.test(v)) return v;
+      const negative = v.startsWith("-");
+      const [whole, frac = ""] = v.replace("-", "").split(".") as [string, string?];
+      const digits = `${whole}${frac}`.replace(/^0+/, "");
+      if (digits === "") return "0";
+      const lead = digits.slice(0, 15).padEnd(15, "0"), next = digits[15] ?? "0";
+      const sig = (BigInt(lead) + (next >= "5" ? 1n : 0n)).toString();
+      // the place of the first significant digit, so 0.000123 and 123 differ
+      const place = whole.replace(/^0+/, "").length > 0 ? whole.replace(/^0+/, "").length : -(frac.length - frac.replace(/^0+/, "").length);
+      return `${negative ? "-" : ""}${whole} ${sig} ${place}`;
+    };
+    for (const sql of [
+      "SELECT id, CASE WHEN id % 2 = 0 THEN i::numeric ELSE n30 END AS v FROM wides ORDER BY 2, 1",
+      "SELECT id, COALESCE(CASE WHEN id % 2 = 0 THEN NULL ELSE n30 END, b::numeric) AS v FROM wides ORDER BY 2, 1",
+      "SELECT id, GREATEST(n30, div(i, 7)) AS g, LEAST(n20, div(b, 7)) AS l FROM wides ORDER BY id",
+      "SELECT i::numeric AS v, 1 AS arm FROM wides UNION ALL SELECT n30, 2 FROM wides ORDER BY 1 NULLS FIRST, 2",
+      "SELECT b::numeric AS v FROM wides UNION SELECT n20 FROM wides ORDER BY 1 NULLS FIRST",
+      "SELECT id FROM wides WHERE n30 IN (SELECT div(i, 1) FROM wides) ORDER BY id",
+      "SELECT id FROM wides WHERE div(b, 1) IN (SELECT n20 FROM wides) ORDER BY id",
+      "SELECT n30 AS v FROM wides EXCEPT SELECT i::numeric FROM wides ORDER BY 1",
+      "SELECT id, ARRAY[n20, b::numeric] AS arr FROM wides ORDER BY id",
+      // (a sum of whole numbers: added as a HUGEINT, read at 28 places, so beside a numeric(38,30) it never overflows)
+      "SELECT sum(i::numeric) AS v FROM wides UNION ALL SELECT n30 FROM wides ORDER BY 1 NULLS FIRST",
+      "SELECT n20 AS v FROM wides UNION ALL SELECT sum(b::numeric) FROM wides ORDER BY 1 NULLS FIRST",
+      "SELECT CASE WHEN true THEN sum(div(b, 1)) ELSE max(n30) END AS v, COALESCE(sum(i::numeric), max(n20)) AS c FROM wides",
+      // (a sum of a product or of a constant of more than 19 digits is DuckDB's own, which holds 38 digits)
+      "SELECT sum(b::numeric * b::numeric) AS p, sum(99999999999999999999999999999999999) AS k FROM wides"]) {
+      const got = await answer(c, sql), want = await postgres(sql);
+      assert.deepEqual(got.fields, want.fields, sql);
+      const atRule = (rows: unknown[][]): unknown => rows.map((r) => r.map((v) => Array.isArray(v) ? v.map(ruled).join(",") : typeof v === "string" && v.startsWith("{") ? v.slice(1, -1).split(",").map((e) => e === "NULL" ? null : ruled(e)).join(",") : ruled(v)));
+      assert.deepEqual(atRule(got.rows), atRule(want.rows), sql);
+    }
+    // (the listed difference: values that differ only past the decimals kept compare equal, so 1e-30 matches 0)
+    const near = "SELECT 0.000000000000000000000000000001::numeric(38,30) IN (SELECT div(i, 1) FROM wides WHERE i IS NOT NULL) AS m";
+    assert.deepEqual((await answer(c, near)).rows, [["t"]], near);
+    assert.deepEqual((await postgres(near)).rows, [["f"]], near);
+  } finally { await c.end(); }
+});
+test("issue 929: a whole numeric compared with a numeric parameter is compared exactly", async () => {
+  const c = await client();
+  try {
+    for (const [sql, values] of [["SELECT id FROM bins WHERE div(i, 2) = $1 ORDER BY id", ["12"]], ["SELECT id FROM bins WHERE div(i, 2) = $1 ORDER BY id", ["12.5"]],
+      ["SELECT id FROM bins WHERE i::numeric < $1 ORDER BY id", ["0.5"]], ["SELECT id FROM bins WHERE div(b, 2) IN ($1, $2) ORDER BY id", ["0.5", "-500000000000000006"]]] as const) {
+      assert.deepEqual(await answer(c, sql, [...values]), await postgres(sql, [...values]), `${sql} ${values.join(", ")}`);
+    }
+  } finally { await c.end(); }
+});
+wholeBeside("a whole numeric's own arithmetic is Postgres's", [
+  "SELECT id, div(b, 2) * div(b, 2) AS sq, div(i, 2) * a AS m, div(i, 2) + a AS p, div(i, 2) / 3 AS q, round(div(i, 2), 2) AS r, floor(i::numeric) AS f, div(i, 2)::text AS t FROM bins ORDER BY id",
+  "SELECT sum(div(b, 2)) AS s, avg(div(i, 2)) AS m, min(div(i, 2)) AS lo, max(i::numeric) AS hi, sum(i::numeric) AS t FROM bins",
+  "SELECT div(i, 2) AS q, count(*) FROM bins GROUP BY 1 ORDER BY 1 NULLS FIRST",
+  "SELECT 2.5e2 * 2.5e2 AS w, 1e37 + 1 AS x, extract(epoch FROM date '2024-01-02') AS e"]);
 
 // issue 464: to_char of a time in a format DuckDB's strftime writes as Postgres does is DuckDB's own strftime, never the
 // function a row (a grouped month was x8-18 of Postgres over 4.5 M rows), and Postgres's text in every zone: a NULL, a

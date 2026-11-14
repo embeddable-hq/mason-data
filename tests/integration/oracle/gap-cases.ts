@@ -50,6 +50,8 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "numeric-ordered-set", sql: "SELECT percentile_disc(ARRAY[0.25, 0.75]) WITHIN GROUP (ORDER BY n2 / 3) FROM typed" },
   { gap: "view-forms", sql: "SELECT happy FROM happy" },
   { gap: "enum-forms", sql: "SELECT id, t::text::mood[] FROM moods WHERE false" },
+  // (issue 929: a whole number beside a numeric(38,30) keeps 19 of its decimals, so 1e-30 matches 0)
+  { gap: "whole-beside-many-decimals", sql: "SELECT o.id, 0.000000000000000000000000000001::numeric(38,30) IN (SELECT o.id::numeric - 1) AS m FROM public.one o" },
   { gap: "numeric-exact-sum", sql: "SELECT sum(s::numeric) FROM castable WHERE id IN (71, 79)" },
   { gap: "jsonb-compare", sql: "SELECT id, greatest(jb, '1') FROM typed ORDER BY id" },
   { gap: "held-type-compare", sql: "SELECT id FROM mapped ORDER BY mc, id" },
