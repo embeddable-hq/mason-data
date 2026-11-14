@@ -283,12 +283,15 @@ paths:
   of its own scan, no operator named DELIM (`delimiterJoin`). ("The plan fixture")
 - **A result's names, types and typmods are Postgres's**, from the analysis, and a numeric Postgres computes exactly is
   computed by `src/lib/pg-numeric.ts`, never DuckDB's double or HUGEINT. ("How a statement is answered")
-- **A numeric is right when its whole-number digits are Postgres's and it matches to 15 significant digits**: trailing
-  zeros and digits past the 15th significant digit may differ, and values that differ only there may merge or match.
-  Each such difference is a `differs` entry here (`mixed-scale-numeric`, `min-max-scale-tie`). A double holds whole
-  numbers exactly only up to 2^53 (about 9 × 10^15), so every entry that passes a numeric through one is within the rule
-  below that and a named exception above it: `numeric-parameter`, `numeric-array`, `nested-exact-numeric`,
-  `numeric-over-38-digits`, `numeric-stddev` and `numeric-quotient-compare`. Why: a rewrite may then round a wide
+- **A numeric is right when its whole-number digits are Postgres's and it equals Postgres's when both are rounded to
+  15 significant digits**: trailing zeros and digits past the 15th significant digit may differ, and values that differ
+  only there may merge or match. A whole-number digit changed only by that rounding's carry (0.99999999999999999
+  rounds to 1) is within the rule. Each such difference is a `differs` entry in `src/duck/gaps.ts`
+  (`mixed-scale-numeric`, `min-max-scale-tie`). A double holds whole numbers exactly only up to 2^53 (about 9 ×
+  10^15). So an entry that passes a numeric through one is within the rule below 2^53, and a named exception above it:
+  `numeric-parameter`, `numeric-array`, `nested-exact-numeric`, `numeric-over-38-digits`, `numeric-stddev` and
+  `numeric-quotient-compare`. Below 2^53 one rare value stays an exception too: one so close to a rounding boundary at
+  its 15th digit that the double's own error rounds it the other way. Why: a rewrite may then round a wide
   decimal beside a whole number, where keeping every digit overflows the engine's 38 digits and fails with 22003 (PR
   943). ("When a numeric is right")
 - **Whether a statement calls a Mason function is its PLAN's, never its text's** (a review finding: a `*` over a

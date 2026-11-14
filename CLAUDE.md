@@ -130,10 +130,12 @@ and its own publication when none is named. A named publication is read and veri
 Mason answers); a crash, hang or stuck state; synced data lost or corrupted; a security hole; a regression of what main
 got right; a red CI. Everything else is a note in the review, never a fix round and never an issue.
 - **A numeric is right when it matches Postgres's in two ways.** Its whole-number digits (left of the point) are the
-  same. And the value matches to 15 significant digits. So trailing zeros (2.5 beside 2.50) and digits past the 15th
-  significant digit may differ, as long as no whole-number digit does. Values that differ only there may merge or
-  match, in a UNION, a DISTINCT, an IN or a join, where Postgres keeps them apart. Such a difference never blocks a
-  merge. Anything outside the rule is a wrong answer, or is listed by name in `src/duck/gaps.ts` (docs/DESIGN.md "When a numeric is right").
+  same. And the two values are equal when both are rounded to 15 significant digits. So trailing zeros (2.5 beside
+  2.50) and digits past the 15th significant digit may differ, as long as no whole-number digit does. A whole-number
+  digit that changes only because that rounding carries (0.99999999999999999 rounds to 1) is within the rule. Values
+  that differ only past the 15th digit may merge or match, in a UNION, a DISTINCT, an IN or a join, where Postgres
+  keeps them apart. Such a difference never blocks a merge. Anything outside the rule is a wrong answer, or is listed
+  by name in `src/duck/gaps.ts` (docs/DESIGN.md "When a numeric is right").
 
 **Who merges what.**
 - The coordinator merges once nothing blocking is open, CI is green at the head, and it has read the whole diff. It

@@ -17,11 +17,12 @@ paths:
   sessions are in UTC; a type-matrix statement with a `zone` is asked with both sessions' TimeZone set to it (a time
   computed in the session's zone must be held in a zone with daylight saving, not UTC alone). Run it against a Linux
   Postgres (CI's `postgres:18` image): a macOS cluster's libc collation is not glibc's, and its `coll` statements differ.
-- **A numeric whose whole-number digits are Postgres's, and which matches to 15 significant digits, is right. Its
-  difference is decided, not failed.** The oracle still compares a numeric's text. A difference only in trailing zeros,
-  or only past the 15th significant digit with every whole-number digit the same (values merged or matched there
-  included), goes in `KNOWN` under its `differs` entry in `src/duck/gaps.ts`. Anything else is a wrong answer, unless a
-  gap names it. Why: the owner set this bar on 2026-11-14 (docs/DESIGN.md "When a numeric is right").
+- **A numeric whose whole-number digits are Postgres's, and which equals Postgres's when both are rounded to 15
+  significant digits, is right. Its difference is decided, not failed.** The oracle still compares a numeric's text. A
+  difference only in trailing zeros, or only past the 15th significant digit with every whole-number digit the same
+  (values merged or matched there included), goes in `KNOWN` under its `differs` entry in `src/duck/gaps.ts`. A
+  whole-number digit changed only by that rounding's carry (0.99999999999999999 rounds to 1) is within the rule.
+  Anything else is a wrong answer, unless a gap names it. Why: the owner set this bar on 2026-11-14 (docs/DESIGN.md "When a numeric is right").
 - **It needs a disposable Postgres, `IT_POSTGRES_URL`** (a database of its own is created and dropped; `duck-stream` needs
   `wal_level=logical`, the oracle and `duck-poll` any; `tests/integration/README.md`), never a shared deployment's source.
 - **The recorded corpus is answered whole offline** (`tests/duck-corpus.test.ts`: every statement psql, pgjdbc,

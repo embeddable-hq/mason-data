@@ -712,10 +712,12 @@ from the repository's people, since anyone can open an issue here.
 
 **Decision (the owner, 2026-11-14).** A `numeric` Mason returns is right when:
 1. its whole-number digits (left of the decimal point) match Postgres's exactly; and
-2. the value matches Postgres's to 15 significant digits.
+2. the value matches Postgres's to 15 significant digits: the two are equal when both are rounded to 15 significant
+   digits.
 
 So trailing zeros may differ: "2.5 vs 2.50 … that's a rendering difference, not a value difference." Digits past the
-15th significant digit may differ too, as long as no whole-number digit does. Values that differ only there may compare
+15th significant digit may differ too, as long as no whole-number digit does. A whole-number digit that changes only
+because that rounding carries (0.99999999999999999 rounds to 1) is within the rule. Values that differ only there may compare
 equal in Mason, and be merged by a UNION or a DISTINCT, or matched by an IN or a join, where Postgres keeps them apart.
 Such a difference is a `differs` entry in `src/duck/gaps.ts`, and the oracle's `KNOWN` decides it. It never blocks a
 merge. Anything outside the rule is a wrong answer, which blocks, or is listed by name in `src/duck/gaps.ts`.
@@ -732,14 +734,16 @@ choices brought this up:
 acceptable". That was replaced by the two parts above. 15 significant digits alone would let a large integer's last
 digits be wrong (an id of 19 digits off in its last four), so part 1 holds every whole-number digit exact.
 
-**The known edge.** With 13 or more whole-number digits, part 2 lets the decimals past the 15th significant digit
-differ: the cents on a total in the trillions. Mason still computes an exact sum exactly. The rule only says what is
+**The known edge.** With 14 or more whole-number digits, part 2 lets the decimals past the 15th significant digit
+differ: the cents on a total in the tens of trillions. Mason still computes an exact sum exactly. The rule only says what is
 acceptable.
 
 **The listed exceptions.** A double holds whole numbers exactly only up to 2^53, about 9 × 10^15. These entries pass
-a numeric through a double, so each is within the rule below that and breaks part 1 above it, where it stays a named
-exception: `numeric-parameter`, `numeric-array`, `nested-exact-numeric`, `numeric-over-38-digits`, `numeric-stddev`
-(a double's 15 digits) and `numeric-quotient-compare` (doubles equal to 17 significant digits). `float-last-digit` is
+a numeric through a double: `numeric-parameter`, `numeric-array`, `nested-exact-numeric`, `numeric-over-38-digits`,
+`numeric-stddev` (a double's 15 digits) and `numeric-quotient-compare` (doubles equal to 17 significant digits). Each
+is within the rule below 2^53, since a double keeps at least 15 significant digits. Above 2^53 it can break part 1, and
+stays a named exception there. Below 2^53 one rare value stays an exception too: one so close to a rounding boundary at
+its 15th digit that the double's own error rounds it the other way. `float-last-digit` is
 about float8, not numeric, and differs only in the 16th–17th digit.
 
 The oracle still compares a numeric's text, so each such difference is seen, and listed, never silently passed.
