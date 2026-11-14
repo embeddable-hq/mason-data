@@ -18,6 +18,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **A numeric column of a subquery whose name has a space in it now keeps its exact value.** Metabase names a JSON
+  field it unfolds `"meta → n"`, and a custom column can be `"Unit Price"`. When the outer query read such a column, Mason
+  could print the subquery's numeric with the wrong digits. `1000000000.00` came back as `1000000000`, and `x / 3` had
+  15 digits where Postgres gives 20. Whether a query was hit depended on its length, so a small edit could hide it. Now
+  every such name is read exactly, one with a no-break space or ending in a line break included. A name with several
+  line breaks may be refused by name (`name-unreadable`). Give it an alias without them.
 - **A `numeric` column with no precision now prints each value as your database does.** Rails makes such a column from
   `t.decimal`. Mason printed every value with the most decimals any value in the column had, so `12.5` read `12.50` and
   `0` read `0.00`. Now a plain `SELECT`, `::text`, arithmetic, `sum`, windows, subqueries and the binary

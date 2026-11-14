@@ -12,7 +12,7 @@ import { heldName, heldType, isHeldArray } from "./held-types.ts";
 import { collationOids, functionsCalled, outputExpressions, textOrdering, type TreeValue } from "./pgtree.ts";
 import { gapRefusal, StatementError, type DuckPlan } from "./statement.ts";
 import { parseSql } from "../api/postgres/parser.ts";
-import { analyze, catalogRows, readParameters } from "./analyze.ts";
+import { analyze, catalogRows, readParameters, writtenNames } from "./analyze.ts";
 import { CATALOG_BASE_SQL, sessionSetSql, type SessionState } from "../api/postgres/catalog.ts";
 import { argumentTypes, describeKeys, nameUserKeys, heldUses, nullTested, resolvedKeys } from "./resolved.ts";
 import { expandViews, MAX_VIEW_DEPTH, viewRefused } from "./views.ts";
@@ -368,7 +368,11 @@ async function madeTypeRefusal(catalog: Parameters<typeof catalogRows>[0], code:
  * data's plan or run fails.
  */
 export async function ordersText(o: { catalog: (bytes: Uint8Array) => Promise<Uint8Array>; text: string; paramOids: readonly number[]; under: SessionState; collations: CollationResolver; bindable: boolean }): Promise<"order" | "case" | null> {
-  const analysis = await analyze(o.catalog, o.text, o.paramOids, o.under);
+  let analysis: Awaited<ReturnType<typeof analyze>>;
+  // a name the log cannot tell apart (Mason gap name-unreadable): the synced data's plan, which reads
+  // the statement's own names, decides it, never the catalog
+  try { analysis = await analyze(o.catalog, o.text, o.paramOids, o.under); }
+  catch (e) { if (e instanceof StatementError && e.gap === "name-unreadable") return "order"; throw e; }
   if ("refused" in analysis) return null;
   // the analysis as the session runs the statement: a simple Query binds no parameter, so one naming `$1` is Postgres's
   // 42P02, which the catalog answers (the analysis above is a Parse's, which would infer its type)
@@ -455,7 +459,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
     depth = 0, kept = null, wireBound = false, boundPaths = new Map<number, string>(), grants, walls = null, relations, outputs = false } = options;
   const started = performance.now();
   const under: SessionState = { searchPath, timeZone, dateStyle };
-  const analysis = await analyze(catalog, text, paramOids, under);
+  const analysis = await analyze(catalog, text, paramOids, under, writtenNames(stmt));
   if ("refused" in analysis) {
     const f = analysis.refused;
     // a table the catalog does not hold: where its copy is, or the `mason add` away
