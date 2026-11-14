@@ -268,9 +268,10 @@ const KNOWN: Decided[] = [
   // fields and the rows the sessions set are held alike (`holds`)
   { sql: /^SHOW ALL$/, kind: "value", gap: "show-all", why: "the catalog Postgres's settings with the session's laid over, never the source's", holds: showAllHolds },
   // A NUMERIC COLUMN OF VALUES OF SEVERAL SCALES: Postgres keeps each value's (`1` beside `1.5`), a DuckDB DECIMAL
-  // column has one (`1.0`). Only where values of two scales meet in ONE column the exact programs cannot reach (a UNION
-  // without ALL; a UNION ALL's arms and a window's default are each their own since issue 358, src/duck/rewrite.ts exactArms)
-  { sql: /^SELECT v FROM \(SELECT 1 AS v FROM public\.one UNION SELECT 1\.5 FROM public\.one\)/, kind: "text", gap: "mixed-scale-numeric", why: "a DuckDB DECIMAL column has one scale; Postgres's numeric keeps each value's" },
+  // column has one (`1.0`). Only where values of two scales meet in ONE column the exact programs cannot reach (a VALUES
+  // list outside a set operation; a UNION ALL's arms and a window's default are each their own since issue 358,
+  // src/duck/rewrite.ts exactArms; a UNION, INTERSECT or EXCEPT that compares rows is refused, numeric-set-scales, issue 929)
+  { sql: /^SELECT v FROM \(VALUES \(1\), \(1\.5\)\) AS m\(v\), public\.one/, kind: "text", gap: "mixed-scale-numeric", why: "a DuckDB DECIMAL column has one scale; Postgres's numeric keeps each value's" },
   // THE TYPE MATRIX'S DECIDED ONES (oracle/type-matrix.ts): what a double's bits, -0 and an overflow do
   { sql: /greatest\((\w+, f4|f4, \w+)\), least/, kind: "text", gap: "negative-zero", why: "least(-0, 0): Postgres keeps the first, DuckDB the other" },
   { sql: /percentile_disc\(0\.25\) WITHIN GROUP \(ORDER BY f[48]\)/, kind: "text", gap: "negative-zero", why: "percentile_disc picks -0 or 0 of equal values" },
