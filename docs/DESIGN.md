@@ -1280,8 +1280,13 @@ table, but it holds the engine's text of what its SELECT computed: `jsonb_build_
 "a relation's column" for "a synced table's column", and answered `bb, a, bb, c` where Postgres answers `a, c, bb`. The
 same premise had read a generated table's `->` and `@>` by the first of the two `bb`s since issue 130 (`(j -> 'bb')`
 was `1`, `j @> '{"bb": 1}'` true, where Postgres has `2` and false). Now ONE decision says a column's jsonb is canonical
-(`copiedColumn`): a relation that the run's list of what each table is (`copies`, `kept.by` "generated") does not name
-as generated (`engineTextRelations`, src/duck/plan.ts). Every native read that skips checking each key is held once asks
+(`copiedColumn`): a relation the run's list of what each table is (`copies`) names as a SYNCED copy (`kept.by` not
+"generated"), by its schema-qualified name (`canonicalRelations`, src/duck/plan.ts). It fails closed. The second review
+found the first form of it, "every relation the list does not name as generated", open in a window: `remove`
+(src/duck/generated.ts) takes a generated table off the list at once, and drops it from the catalog only at the writer's
+turn, which a poll's full scan held for 25 s, so the table was read natively for about 40 s (`bb,a,bb,c`). Now a
+relation on neither list, a generated one and every relation of a listener given no list (a test passes its tables) is
+the function's: right, only slower. Every native read that skips checking each key is held once asks
 it.
 
 **Why.** On 2026-11-12, Metabase's `SELECT jsonb_object_keys(payload) AS key, count(*) … GROUP BY 1 ORDER BY 2 DESC, 1`

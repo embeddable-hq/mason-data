@@ -46,6 +46,7 @@ import type { LibcOrder } from "../src/duck/libc-order.ts";
 import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
 import { mintToken, tokenProblem } from "../src/duck/token.ts";
 import type { PgColumn, PgSchema } from "../src/api/postgres/schema.ts";
+import type { CopyState } from "../src/duck/sync.ts";
 import { BI_SHAPES } from "./integration/oracle/bi-shapes.ts";
 
 const UPDATE = process.env.UPDATE_FIXTURE === "1";
@@ -115,6 +116,10 @@ const schema: PgSchema = {
   ],
   views: [{ schema: "public", name: "customer_orders", definition: " SELECT o.id, o.meta, c.name, c.created_at FROM public.orders o LEFT JOIN public.customers c ON c.id = o.customer_id;" }],
 };
+
+/** the shop's tables as the run's list says SYNCED copies (src/duck/plan.ts `canonicalRelations`: a jsonb is read as
+ *  Postgres's canonical text only on a table that list names, fail closed), as `mason start` hands its listener */
+const synced = (): CopyState[] => schema.tables.map((t) => ({ source: `${t.schema ?? "public"}.${t.name}`, phase: "copied", rows: null, bytes: null, seconds: null, copiedAt: null, error: null }));
 
 /**
  * Where a statement is planned (`on`): the shop with nothing stored, under C (absent: every statement above the jsonb
@@ -594,7 +599,7 @@ async function storedKey(store: DuckStore, logged: string[], libc: boolean): Pro
   }, { enabled: true, eager: true, reviewMs: 0 });
   await keeper.open();
   closing.push(() => keeper.stop());
-  const duck = await store.listener(libc ? LIBC_COLLATION : undefined, undefined, libc ? libcOrder() : undefined, () => [], keeper);
+  const duck = await store.listener(libc ? LIBC_COLLATION : undefined, undefined, libc ? libcOrder() : undefined, synced, keeper);
   const read = { source: "public.orders", column: "meta", steps: ORDER_STEPS, either: false, canonical: true, asText: false };
   await keeper.keepNow?.([read]);
   const ready = keeper.ready(read);
@@ -636,7 +641,7 @@ function target(on: Where | undefined): Promise<Target> {
       const libc = on.startsWith("libc");
       const { store, logged } = await smallShop(libc ? "libc" : "c");
       if (on.endsWith("the key stored")) return storedKey(store, logged, libc);
-      return listen(store, logged, libc ? await store.listener(LIBC_COLLATION, undefined, libcOrder(), () => []) : await store.listener(undefined, undefined, undefined, () => []));
+      return listen(store, logged, libc ? await store.listener(LIBC_COLLATION, undefined, libcOrder(), synced) : await store.listener(undefined, undefined, undefined, synced));
     })();
     made.set(on, t);
   }
@@ -646,7 +651,7 @@ function target(on: Where | undefined): Promise<Target> {
 before(async () => {
   const logged: string[] = [];
   const store = await shopStore("duck", logged);
-  shop = await listen(store, logged, await store.listener(undefined, undefined, undefined, () => []));
+  shop = await listen(store, logged, await store.listener(undefined, undefined, undefined, synced));
 });
 after(async () => {
   await Promise.allSettled([...made.values(), ...smaller.values()]);

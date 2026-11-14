@@ -404,7 +404,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     if ("failure" in c) throw new Error(`connect: ${JSON.stringify(c.failure)}`);
     try { return await readLibcOrder(async (sql) => (await c.pg.query(sql)).rows, sc.collate ?? "C", sc.version ?? null, `${pgIdent(sc.schema)}.${pgIdent(sc.name)}`); } finally { c.pg.close(); }
   };
-  const duck = await theStore.listener(facts.collation, null, libc, () => [], theSync.kept, { ...(facts.collations === undefined ? {} : { collations: facts.collations }), readLibc });
+  const duck = await theStore.listener(facts.collation, null, libc, () => theSync.state(), theSync.kept, { ...(facts.collations === undefined ? {} : { collations: facts.collations }), readLibc });
   /**
    * DUCKDB ALONE (why a user would not just use DuckDB by itself): the same statement, as written, to
    * a plain connection of the same copy — no analysis, no rewrite, no Mason function — scored by the oracle's own

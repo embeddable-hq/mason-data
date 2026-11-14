@@ -49,23 +49,25 @@ async function keptLookup(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, t
 }
 
 /**
- * THE RELATIONS WHOSE JSON TEXT IS THE ENGINE'S, by relid (src/duck/rewrite.ts `Rewriter.engineText`): the generated
- * tables the statement reads a json or jsonb column of, by the run's own list of what each table served is (`copies`:
- * `kept.by` "generated", src/duck/generated.ts `copies`). A synced table's copy holds the source's text, a jsonb's
- * canonical; a generated table's is what the engine computed, a key held twice included (issue 461's review). The
- * catalog is asked only when the run serves a generated table.
+ * THE RELATIONS WHOSE JSONB TEXT IS POSTGRES'S CANONICAL TEXT, by relid (src/duck/rewrite.ts `Rewriter.canonicalText`):
+ * the SYNCED tables the statement reads a json or jsonb column of, positively known from the run's own list of what each
+ * table served is (`copies`: a copy whose `kept.by` is not "generated", by its schema-qualified name). A synced table's
+ * copy holds the source's jsonb_out text; anything else is the function's (fail closed, issue 461's reviews): a
+ * generated table's jsonb is what the engine computed, a key held twice included, and a relation on neither list (a
+ * generated table whose file was just removed, still in the catalog until the writer's turn drops it; a listener given
+ * no list) is not known to be canonical.
  */
-async function engineTextRelations(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, types: ReadonlyMap<number, ReadonlyArray<{ type: number; relation?: { relid: number; attno: number } }>>,
+async function canonicalRelations(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, types: ReadonlyMap<number, ReadonlyArray<{ type: number; relation?: { relid: number; attno: number } }>>,
   copies: readonly CopyState[]): Promise<ReadonlySet<number>> {
-  // (a name a synced table holds is the synced table's, which wins the catalog: src/duck/generated.ts `served`)
   const synced = new Set(copies.filter((c) => c.kept?.by !== "generated").map((c) => c.source));
-  const generated = new Set(copies.filter((c) => c.kept?.by === "generated" && !synced.has(c.source)).map((c) => c.source));
-  if (generated.size === 0) return new Set();
+  // (a name a generated table and a synced table both claim is the synced table's, which wins the catalog:
+  // src/duck/generated.ts `served`)
+  if (synced.size === 0) return new Set();
   const relids = new Set<number>();
   for (const t of [...types.values()].flat()) if (t.relation !== undefined && (t.type === JSON_OID || t.type === JSONB_OID)) relids.add(Math.trunc(t.relation.relid));
   if (relids.size === 0) return new Set();
   const rows = await catalogRows(catalog, `SELECT c.oid::text, n.nspname, c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid::int8 IN (${[...relids].join(", ")})`);
-  return new Set(rows.filter(([, schema, table]) => generated.has(`${schema}.${table}`)).map(([relid]) => Number(relid)));
+  return new Set(rows.filter(([, schema, table]) => synced.has(`${schema}.${table}`)).map(([relid]) => Number(relid)));
 }
 
 /** the count(DISTINCT x) of the statement that are count(x) (src/duck/distinct-key.ts), by their offsets into the
@@ -555,14 +557,14 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // the stored JSON paths the statement's JSON reads may be answered from (src/duck/kept-route.ts)
   const lookup = kept === null ? null : await keptLookup(catalog, analysis.types, kept);
   const keyCounts = await distinctKeys(catalog, analysis.tree);
-  const engineText = await engineTextRelations(catalog, analysis.types, copies());
+  const canonicalText = await canonicalRelations(catalog, analysis.types, copies());
   // WHAT EACH COLLATION OF THE ANALYSIS MEANS (src/duck/collation.ts), resolved before the rewrite reads any: a libc
   // order not read yet is read here, before the plan is made; a collation the source lacks or Mason cannot follow refused
   let collations: StatementCollations;
   try { collations = await resolver.prepare((sql) => catalogRows(catalog, sql), collationOids(analysis.tree)); }
   catch (e) { throw e instanceof Unrewritable ? unrewritableError(e, text) : e; }
   const analysed = performance.now();
-  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, engineText });
+  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, canonicalText });
   try {
     ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them

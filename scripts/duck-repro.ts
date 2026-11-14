@@ -77,7 +77,7 @@ try {
     authenticate: () => ({ filters: [], subject: undefined }), schema: () => theSync.schema(),
     record: () => undefined, log: (l) => log.push(l),
     // the source's collations, and a libc one other than the database's read on its first use, as mason start does
-    duck: await theStore.listener(facts.collation, null, libc, undefined, undefined, { ...(facts.collations === undefined ? {} : { collations: facts.collations }), readLibc: async (sc) => {
+    duck: await theStore.listener(facts.collation, null, libc, () => theSync.state(), undefined, { ...(facts.collations === undefined ? {} : { collations: facts.collations }), readLibc: async (sc) => {
       const c = await connectSource(parsed.source);
       if ("failure" in c) throw new Error(c.failure.message);
       try { return await readLibcOrder(async (sql) => (await c.pg.query(sql)).rows, sc.collate ?? "C", sc.version ?? null, `${pgIdent(sc.schema)}.${pgIdent(sc.name)}`); } finally { c.pg.close(); }

@@ -272,7 +272,7 @@ paths:
     src/duck/rewrite.ts: a string value, a missing path, a JSON null; a chain of reads off one column folded into one,
     `jsonChain`), and the function answers only the rows it must (a number's digits, an object, an array, an index, a
     document holding a key twice) — the CASE's ELSE, which DuckDB evaluates on those rows alone. Only a SYNCED table's
-    jsonb column (`copiedColumn`: `Typed.relation`, and no generated table's) is read without checking each object's
+    jsonb column (`copiedColumn`: a table the run's list names as synced) is read without checking each object's
     keys are held once: a jsonb the statement or a generated table computes (`jsonb_object_agg`, `jsonb_build_object`)
     is the rewrite's text and may hold a key twice, whose `->>` is the last (a review finding; issue 461's review). A `#>` element is an index by ONE definition, `pathIndex` (Postgres's
     `strtoint`), which the function and the native read both ask (`tests/conventions.test.ts`). Measured, 5 M
@@ -317,9 +317,12 @@ paths:
     function answers a non-object (22023) and a json whose text holds a `\u` (Postgres refuses `\u0000` and a lone
     surrogate, which DuckDB reads); anything else (a cast, a `->`, a jsonb the statement or a generated table computes)
     stays the function's. **Whether a column's jsonb text is canonical is ONE decision, `copiedColumn`**: a SYNCED
-    table's column, never a generated table's (`engineText`, from the run's list of what each table is: src/duck/plan.ts
-    `engineTextRelations`, `kept.by` "generated"), whose jsonb is the engine's text with a key written twice kept in the
-    order written (`jsonb_build_object('bb', 1, 'a', 2, 'bb', 3)`). Every native read that skips checking each key is
+    table's column, POSITIVELY KNOWN from the run's list of what each table is (`canonicalText`, src/duck/plan.ts
+    `canonicalRelations`: a copy whose `kept.by` is not "generated", by its schema-qualified name), and FAIL CLOSED: any
+    other relation is the function's — a generated table, whose jsonb is the engine's text with a key written twice kept in the
+    order written (`jsonb_build_object('bb', 1, 'a', 2, 'bb', 3)`); one whose file was just removed, off the list but in
+    the catalog until the writer's turn drops it; and every relation of a listener given no list (a test passes its
+    tables). Every native read that skips checking each key is
     held once asks it: the keys, `->>` and `->` (`jsonGet`, `jsonValueRead`), a `->` read's nullness and `@>`
     (`containsRead`); a relation alone (Typed.relation) is no proof (issue 461's review: main answered a generated
     table's `->` and `@>` by the first of a key written twice). `tests/duck-generated.test.ts` "issue 461",

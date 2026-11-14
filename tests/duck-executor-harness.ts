@@ -96,7 +96,8 @@ export function useServer(o: { warm?: boolean; wide?: boolean; jwide?: boolean }
       port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test", product: "mason-data",
       authenticate: (password) => { const p = tokenProblem(API_KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
       schema: () => schema, record: () => undefined, log: (l) => { logged.push(l); },
-      duck: await store.listener(undefined),
+      // its tables as the run's list says SYNCED copies: a jsonb is read natively only on one (src/duck/plan.ts canonicalRelations)
+      duck: await store.listener(undefined, undefined, undefined, () => schema.tables.map((t) => ({ source: `${t.schema ?? "public"}.${t.name}`, phase: "copied", rows: null, bytes: null, seconds: null, copiedAt: null, error: null }))),
     });
     // CALLED reaches the function: a test that must exercise it is voided where the rewrite answers it natively
     {
