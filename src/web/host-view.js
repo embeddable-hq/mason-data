@@ -7,6 +7,10 @@
  *   { title, sections: [{ heading, facts?: [{ label, value, copy?, status? }], text?, links?: [{ label, url, primary?, danger? }] }],
  *     refresh? }
  *
+ * `sections: []` is the host's "nothing now" (issue 1001): its `title` may be left out then (null in the view). The
+ * Overview draws no card for it. A view in the sidebar says it has nothing in it, under its sidebar label when it has
+ * no title.
+ *
  * READ IN THE PAGE, NOT AT THE START: the answer arrives when the view is shown, from whatever the proxy answers, so it is
  * untrusted data here — at most `HOST_BYTES_MAX` bytes, JSON, exactly the shape (a key it does not take, a string too
  * long or of a control character, a list too long is outside it), else the view's own failure (`renderFailure`). A
@@ -86,9 +90,11 @@ export function hostView(v) {
   if (!isObject(v)) return { problem: "it is not an object { title, sections }" };
   const stray = strayKey(v, ["title", "sections", "refresh"]);
   if (stray !== undefined) return { problem: `it has a key a view does not take (${isLine(stray, 64) ? JSON.stringify(stray) : "unreadable"}): a view is { title, sections, refresh? }` };
-  if (!isLine(v.title, L.line)) return { problem: `its title is not one line of text of at most ${L.line} characters` };
+  if (v.title !== undefined && !isLine(v.title, L.line)) return { problem: `its title is not one line of text of at most ${L.line} characters` };
   const sections = listOf(v.sections, L.sections);
   if (sections === null || v.sections === undefined) return { problem: `its sections is not a list of at most ${L.sections}` };
+  // "nothing now" is `sections: []`, which may leave its title out; a view with something in it has a title
+  if (v.title === undefined && sections.length > 0) return { problem: `it has sections and no title: a view with sections has a title of one line of at most ${L.line} characters` };
   let refresh = null;
   if (v.refresh !== undefined) {
     if (typeof v.refresh !== "number" || !Number.isFinite(v.refresh) || v.refresh <= 0) return { problem: "its refresh is not a number of seconds" };
@@ -131,7 +137,7 @@ export function hostView(v) {
     }
     out.push({ heading: s.heading, facts: fs, text: s.text ?? null, links: ls, dropped });
   }
-  return { view: { title: v.title, sections: out, refresh } };
+  return { view: { title: v.title ?? null, sections: out, refresh } };
 }
 
 /** The failure of a host's view or card, in the page's Failure shape: what could not be read, and why. */
@@ -228,19 +234,22 @@ export function renderHostView(view, key = "view") {
 }
 
 /**
- * THE HOST'S CARD ON THE OVERVIEW from its read (`r`: `{ body, failure }`, undefined before it): one card beside Mason's
- * own — its title the card's label, each section's facts as rows, its links under them. Its failure is said IN the card
- * (the last view read stays under it); before the first answer, that it is being read.
+ * THE HOST'S CARD ON THE OVERVIEW from its read (`r`: `{ body, failure }`, undefined before it): one card, FIRST on the
+ * Overview at its full width (issue 1001: it is for what needs the person's attention) — its title the card's label,
+ * each section's facts as rows, its links under them. Its failure is said IN the card (the last view read stays under
+ * it), so a broken host stays visible. NOTHING is drawn before the first answer, nor for an answer with no sections
+ * (the host's "nothing now"): no box and no title, so the common case never draws a card only to take it away.
  */
 export function renderHostCard(r) {
-  if (r === undefined) return `<div class="card host-card"><p class="card-label">The host's card</p><p class="dim">Reading it…</p></div>`;
+  if (r === undefined) return "";
   const v = r.body;
   const failed = r.failure ? `<p class="card-sub host-failed"><span class="mark" aria-hidden="true">✗</span> ${esc(r.failure.message)}: ${esc(r.failure.why ?? "")}</p>` : "";
   if (v === undefined) return `<div class="card host-card bad"><p class="card-label">The host's card</p><p class="card-value">unknown</p>${failed}</div>`;
+  if (v.sections.length === 0 && failed === "") return "";
   const body = v.sections.map((s, i) => (v.sections.length > 1 ? `<p class="card-sub host-heading">${esc(s.heading)}</p>` : "") +
     (s.facts.length ? `<dl class="facts">${s.facts.map((f, j) => `<dt>${esc(f.label)}</dt><dd>${factValue(f, `host-card-${i}-${j}`)}</dd>`).join("")}</dl>` : "") +
     (s.text === null ? "" : `<p class="card-sub host-text">${esc(s.text)}</p>`) + linksHtml(s.links) + droppedLine(s.dropped)).join("");
-  return `<div class="card host-card"><p class="card-label">${esc(v.title)}</p>${failed}${body}</div>`;
+  return `<div class="card host-card"><p class="card-label">${esc(v.title ?? "The host's card")}</p>${failed}${body}</div>`;
 }
 
 /** A host's view's whole part: its failure (the Failure shape) over the last view read, or that it is being read. */

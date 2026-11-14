@@ -443,6 +443,20 @@ under another transaction's write fails its commit, hence swaps on the writer's 
   `numeric(p > 38)` (Prisma's numeric(65,30)) as DOUBLE, 15 digits; Mason reads their text into DECIMAL(38, s), s the
   most decimals the values use (at scale 30 a sum past 10⁸ would overflow 38 digits). A wider later value re-copies the
   table (at most three times a run); past 38 digits or a NaN stays a double, said.
+- **A plain numeric keeps each value's own scale** (issue 946, `src/duck/scale-column.ts`): Postgres prints an
+  unconstrained `numeric` at each value's own scale (`12.5` beside `12.49`), and DECIMAL(38, s) has one. So the copy holds
+  a hidden UTINYINT beside it, the decimals of the source's text, written by every write (the copy's chunks, the poll's
+  stage, the stream's rows and its unchanged-TOAST update) and never listed (the copy's view of its visible columns, made
+  whether stored JSON paths are on or off). The value stays the engine's DECIMAL, so keys, filters, joins and aggregates
+  are native; only a reader that prints reads the scale: the column's program is `rescale(value, scale)`, which the wire
+  evaluates on the text (0.06 µs a value; 1.4 µs through BigInt), and `x::text` is the engine's text cut natively. A copy
+  an older Mason made without the column is read again once (`SCALE_LAYOUT`), serving as it was until then. Not yet:
+  the readers `mixed-scale-numeric` lists (to_json and its kin, concat, `||`, array_agg, a scalar subquery, a set
+  operation without ALL, a generated table …) keep the column's one scale. The hidden column's name is hashed again where
+  the table holds a column of that name (`scaleColumn`), and a copy's view lists the source's own columns, never a
+  pattern of names. Measured on 4 M rows of 0–2 decimals: the hidden column is 1.5 MiB beside the value's 12.5 MiB, the
+  copy's time is unchanged within noise. min / max print at the column's one scale (the owner's decision, 2026-11-14:
+  picking the row's scale by `arg_min` / `arg_max` cost about 2× grouped and 10× ungrouped, for a value already equal).
 - **A failed copy backs off** (`copyRetryDelayMs`: four times the attempt, at least 5 minutes, doubled per failure, at
   most 6 hours; at once after a restart or a column change) and keeps its committed chunks.
 - **`mason stop` interrupts a copy**, re-sent every 50 ms (DuckDB loses an interrupt that arrives before its statement
@@ -576,6 +590,51 @@ are `.claude/rules/duck-sync.md` "Keeping a copy current". Why each is so:
 
 **Where.** `src/duck/stream.ts`, `src/duck/publication.ts`; `tests/integration/duck-stream.itest.ts`.
 
+### Mason's own publication names each table whole
+
+**Decision** (2026-11-14, issue 978, the owner's). The publication Mason makes when the sources file names none lists
+each replicated table whole: `FOR TABLE t`, never `FOR TABLE t (a, b)`. This holds for every table, on every Postgres
+version, and for an entry with `exclude:` or `columns:` too. The stream then carries every column of the table. Mason
+drops the columns the synced table does not hold as they arrive (`projectTuple`, src/duck/stream.ts), in every message:
+an insert, an update, an unchanged TOAST value, an update's old key and a delete. A publication an earlier Mason made
+with column lists is named whole at its next pass, once (`ensurePublication`, src/duck/sync.ts). **Do not bring a
+column list back to Mason's own publication without the owner's decision.**
+
+**Why.** From Postgres 15, Mason listed the synced columns of each table whose replica identity is its primary key. The
+idea was that the stream should carry only what the synced table keeps. It had two costs, found in issue 978 on
+Postgres 16:
+- Postgres refused the application's own `ALTER TABLE … DROP COLUMN` of a listed column on its production database,
+  with "publication … depends on column". An ordinary migration failed because Mason was attached. Mason is meant to
+  read the source and never get in the way of its DDL.
+- Postgres never publishes a column added to the table later, so Mason could not pick a new column up from the stream.
+
+**The trade-off accepted.** A column the sources file leaves out, a secret-looking one included (`api_token`), now
+crosses the replication stream into Mason's process. Mason drops it on arrival. It is never stored, logged, written to
+the request log or served. `tests/integration/duck-stream.itest.ts` holds this for every kind of message, searching every
+text value in Mason's file and every log line for the excluded values.
+
+**Why that is acceptable.** Mason already holds the source's URL with read access to the whole table. It offers only
+tables on which its role holds SELECT on the whole table (`has_table_privilege` in `TABLES_SQL`, src/cli/preflight.ts),
+so the excluded column was always readable by it. What Mason reads by SELECT is narrower, and stays so: the first sync
+(`readChunks`), the poll (`poll`) and the stream's read of a row by its key (`sourceRows`) each SELECT the synced
+columns only. The stream is the one path that carries the other columns, and it drops them before anything is written.
+
+**Rejected.**
+- A column list only for a table with excluded columns. The DROP COLUMN problem would stay for exactly the tables an
+  application is most likely to change, and a new column would still never arrive.
+- Keeping the list, and handling the drop for the user (taking the table out of the publication, dropping the column,
+  putting it back). That is a write to the production database in the middle of the application's migration, which
+  Mason cannot time, and Postgres would still refuse a migration run while Mason is down.
+
+**A named publication** (`publication:`) is still the owner's. A column list on it that carries every synced column is
+accepted, as before. Mason says once a run that the list blocks `DROP COLUMN`, with the statements that name the table
+whole (`columnListText`, src/duck/publication.ts). When a named publication lacks something, the statements Mason gives
+its owner name each synced table whole, never with a column list.
+
+**Where.** `src/duck/sync.ts` (`ensurePublication`), `src/duck/publication.ts`, `src/duck/stream.ts` (`projectTuple`);
+`tests/integration/duck-stream.itest.ts` ("Mason's own publication names each table whole", "a publication an earlier
+Mason made with column lists").
+
 ## The statement path
 
 ### How a statement is answered: Postgres decides, DuckDB computes
@@ -707,6 +766,51 @@ review", and `git show 9e20f15:.claude/workflows/pr-loop-slim.js`.
 **Kept.** The fresh reviewer that runs what changed instead of reading it; the oracle as the arbiter of a wrong answer;
 a test seen failing without its fix; the coordinator alone merging, pinned to the head read; and acting only on words
 from the repository's people, since anyone can open an issue here.
+
+### When a numeric is right (the owner, 2026-11-14)
+
+**Decision (the owner, 2026-11-14).** A `numeric` Mason returns is right when:
+1. its whole-number digits (left of the decimal point) match Postgres's exactly; and
+2. the value matches Postgres's to 15 significant digits: the two are equal when both are rounded to 15 significant
+   digits.
+
+So trailing zeros may differ: "2.5 vs 2.50 … that's a rendering difference, not a value difference." Digits past the
+15th significant digit may differ too, as long as no whole-number digit does. A whole-number digit that changes only
+because that rounding carries (0.99999999999999999 rounds to 1) is within the rule. Values that differ only there may compare
+equal in Mason, and be merged by a UNION or a DISTINCT, or matched by an IN or a join, where Postgres keeps them apart.
+Such a difference is a `differs` entry in `src/duck/gaps.ts`, and the oracle's `KNOWN` decides it. It never blocks a
+merge. Anything outside the rule is a wrong answer, which blocks, or is listed by name in `src/duck/gaps.ts`.
+
+**Why.** The engine holds a numeric as a DECIMAL of at most 38 digits, and Postgres's numeric has no such limit. Two
+choices brought this up:
+- In PR 943, a whole number beside a wide decimal (a `numeric(38,30)`, say) in a UNION, an IN or a CASE overflowed the
+  38 digits. Mason failed with 22003 where Postgres answered. The owner chose to round the decimal side, and answer,
+  rather than fail.
+- In issue 946, a column declared `numeric` with no precision prints every value at the column's largest scale (12.50
+  for 12.5), and `min` / `max` print at that one scale too. The owner accepted it as a rendering difference.
+
+**Refined the same day.** The owner first said "as long as mason matches postgres to 18 decimal places, that's
+acceptable". That was replaced by the two parts above. 15 significant digits alone would let a large integer's last
+digits be wrong (an id of 19 digits off in its last four), so part 1 holds every whole-number digit exact.
+
+**The known edge.** With 14 or more whole-number digits, part 2 lets the decimals past the 15th significant digit
+differ: the cents on a total in the tens of trillions. Mason still computes an exact sum exactly. The rule only says what is
+acceptable.
+
+**The listed exceptions.** These entries go through a double, and each stays a named exception: `numeric-parameter`,
+`numeric-array`, `nested-exact-numeric`, `numeric-over-38-digits`, `numeric-stddev` and `numeric-quotient-compare`.
+Where they are within the rule:
+- A value stored or passed as a double is within it below 10^15 when it has a fraction, and below 2^53 (about
+  9 × 10^15) when it is whole. Values near a 15th-digit rounding boundary are the exception: the double's own error
+  can round them the other way. Past 10^15 a fraction breaks part 1: the double of 1000000000000000.99 prints as
+  1000000000000001, where Postgres's rounds to 1000000000000000.
+- A result computed in doubles (a stddev, arithmetic on a constant past 38 digits, a stddev of a subquery's quotient)
+  is not promised at any size. Subtracting nearly equal doubles loses digits. `stddev_samp` of 1.00000000000000001
+  and 1.00000000000000003 as numeric(20,17) is 0.0 in the engine, where Postgres answers 1.41421356237310e-17. A
+  stddev of 1000000.000000001, 1000000.000000002 and 1000000.000000004 is wrong in its second digit. `float-last-digit` is
+about float8, not numeric, and differs only in the 16th–17th digit.
+
+The oracle still compares a numeric's text, so each such difference is seen, and listed, never silently passed.
 
 ### How CLAUDE.md is laid out (2026-11-13, issue 891)
 

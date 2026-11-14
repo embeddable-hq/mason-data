@@ -65,7 +65,7 @@ test("Live's checks name what the database lacks with its fix, pass once fixed, 
   const refused = first.checks.filter((c) => c.state === "refused");
   assert.deepEqual(refused.map((c) => c.name), ["replication role", "publication"], JSON.stringify(first.checks));
   assert.equal(refused[0]!.sql, `ALTER ROLE ${role} WITH REPLICATION;`);
-  assert.equal(refused[1]!.sql, "ALTER PUBLICATION app_pub ADD TABLE public.orders (id, status);");
+  assert.equal(refused[1]!.sql, "ALTER PUBLICATION app_pub ADD TABLE public.orders;");
   for (const sql of first.sent) {
     assert.match(sql.trim(), /^(SELECT|WITH) /, "a read");
     assert.doesNotMatch(sql, /(^|;)\s*(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|GRANT)\b/i, "nothing written: one statement, a read");

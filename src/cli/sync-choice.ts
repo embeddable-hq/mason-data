@@ -97,7 +97,7 @@ export async function sourceLiveChecks(pg: PgConnection, t: SourceTable, o: { re
   }
   const keep = new Set(o.columns);
   const copied = [{ source: t.source, columns: t.columns.filter((c) => keep.has(c.name)) }];
-  const verdict = namedPublicationVerdict(await readNamedPublication(pg, o.repl.publication, copied), copied, new Map([[t.source, t.replicaIdentity ?? "d"]]));
+  const verdict = namedPublicationVerdict(await readNamedPublication(pg, o.repl.publication, copied), copied);
   const gaps = publicationProblems(verdict, o.repl.publication, o.shown);
   if (!gaps.length) out.push({ name: "publication", state: "ok", detail: `${o.repl.publication} carries ${entryName(t.source)}` });
   for (const p of gaps) out.push({ name: "publication", state: "refused", detail: p.sql === null ? `${p.message} — ${p.fix}` : p.message, ...(p.sql !== null ? { sql: p.sql } : {}) });
