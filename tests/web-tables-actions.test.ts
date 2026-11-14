@@ -71,11 +71,11 @@ function stateOf(o: { pageReadOnly?: boolean; allow?: string[]; sourcesReadOnly?
     duck: { file: "/app/.mason/duck.db", requests: { days: 7 }, restarts: () => [], disk: () => ({ path: "/app/.mason", freeBytes: null, projectedBytes: null }) },
   } as unknown as RunContext;
   const s = JSON.parse(JSON.stringify(runState(ctx, COPIES, null, Date.parse(at)))) as Record<string, unknown>;
-  return o.sourcesReadOnly ? { ...s, sourcesReadOnly: o.sourcesReadOnly } : s;
+  return o.sourcesReadOnly ? { ...s, sourcesReadOnly: o.sourcesReadOnly, sourcesReadOnlyKind: "deployed" } : s;
 }
 const MODES: Record<string, Record<string, unknown>> = {
   "editable": stateOf(),
-  "sources read-only": stateOf({ sourcesReadOnly: "the project's files are read-only here (MASON_PROJECT_READONLY=1); edit them where they are committed, and deploy" }),
+  "sources read-only": stateOf({ sourcesReadOnly: "The project's files are read-only here (MASON_PROJECT_READONLY=1). Run mason add or mason remove in your project, commit the change, and deploy it." }),
   "page read-only": stateOf({ pageReadOnly: true }),
   "page read-only, tables allowed": stateOf({ pageReadOnly: true, allow: ["tables"] }),
 };

@@ -348,7 +348,7 @@ test("a host view's path and MASON_UI_OVERVIEW_CARD refused at every entrance, n
 
 test("the host's views and card are mason serve's: in its --help, said at its start; mason start refuses MASON_UI_OVERVIEW_CARD, valid or not", () => {
   assert.match(SERVE.usage, /or \{"label": …, "view": …\}, a view of the host's the page shows inside itself at #host\/<n>/);
-  assert.match(SERVE.usage, /\n {4}MASON_UI_OVERVIEW_CARD {2}a card of the host's on the web page's Overview, beside Mason's own/);
+  assert.match(SERVE.usage, /\n {4}MASON_UI_OVERVIEW_CARD {2}a card of the host's on the web page's Overview, above Mason's own/);
   assert.deepEqual(navLines({ items: {}, links: [{ label: "Billing", url: "/b" }, { label: "Server", view: "host/s" }, { label: "Plans", view: "host/p" }] }), [
     `the sidebar links to "Billing" (MASON_UI_NAV_LINKS)`,
     `the sidebar shows the host's views "Server", "Plans", read from the page's address (MASON_UI_NAV_LINKS)`]);

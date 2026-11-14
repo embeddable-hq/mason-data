@@ -1026,9 +1026,12 @@ function* matrix(): Generator<Matrixed> {
   yield q("inet grouped", "SELECT ip, count(*) FROM typed GROUP BY ip ORDER BY count(*), ip::text");
   yield q("inet to_json", "SELECT id, to_json(ip), concat(ip), format('%s', ip) FROM typed ORDER BY id");
   // the array types the review found sent as text[], and a bytea
-  // (n is an unconstrained numeric holding 0 beside 1.5: one scale per DuckDB column, mixed-scale-numeric; at a declared
-  // scale it is exact)
+  // (n is an unconstrained numeric holding 0 beside 1.5; at a declared scale it is exact)
   yield q("json arrays and a bytea", "SELECT id, jba, ja, vca, by, jba[1], vca[2], array_length(jba, 1), n::numeric(30, 1), ca, ia, ca[1], ia[1] FROM typed_arrays ORDER BY id");
+  // the same n as it is: each value printed with its own scale, as Postgres does (src/duck/scale-column.ts, issue 946),
+  // through arithmetic, a cast to text, a GROUP BY and a sum
+  yield q("plain numeric: each value's own scale", "SELECT id, n, n::text, n + 1, n * 2, abs(n) FROM typed_arrays ORDER BY id");
+  yield q("plain numeric: grouped and summed", "SELECT n, count(*), sum(n) FROM typed_arrays GROUP BY n ORDER BY n NULLS FIRST");
   yield q("json arrays unnested", "SELECT id, unnest(jba), unnest(vca) FROM typed_arrays ORDER BY 1, 2::text, 3");
   // Metabase's week from Sunday: the literals of the GROUP BY and ORDER BY repeat the SELECT list's
   yield q("time literals grouped", "SELECT (date_trunc('week', (ts + INTERVAL '1 day')) + INTERVAL '-1 day') AS w, count(*) FROM typed GROUP BY (date_trunc('week', (ts + INTERVAL '1 day')) + INTERVAL '-1 day') ORDER BY (date_trunc('week', (ts + INTERVAL '1 day')) + INTERVAL '-1 day')");
@@ -2044,6 +2047,34 @@ function* binCases(): Generator<Matrixed> {
   yield q("bin: by a divisor of 39 places, grouped", "SELECT floor(a / 170141183460469231731687303715884105720) AS f, count(*) FROM public.bins GROUP BY 1 ORDER BY 1");
 }
 
-export const TYPE_MATRIX: Matrixed[] = [...matrix(), ...mappedTypes(), ...binCases(),...FROM_ITEMS_SORTED.map((f) => q(f.name, f.sql, f.zone)),
+/** A WHOLE NUMERIC beside another numeric's decimals over `bins` (issue 929): div() of two integers, an integer cast to
+ *  numeric, a whole constant and a whole part of extract, in an IN, a UNION, a CASE, a COALESCE and GREATEST, beside a
+ *  numeric(12,2) and a numeric(38,10): the engine once brought both to the whole number's type and rounded the decimals
+ *  away. Each UNION arm carries its number, so equal values of two scales sort one way */
+function* wholeCases(): Generator<Matrixed> {
+  yield q("whole: a column IN a subquery of div()", "SELECT id, a IN (SELECT div(i, 2) FROM public.bins) AS x, div(i, 2) IN (SELECT a FROM public.bins) AS y, m = ANY (SELECT div(s, 2) FROM public.bins) AS z FROM public.bins ORDER BY id");
+  yield q("whole: div() UNION ALL decimals", "SELECT div(i, 2) AS v, 1 AS arm FROM public.bins UNION ALL SELECT a, 2 FROM public.bins UNION ALL SELECT div(b, 7), 3 FROM public.bins ORDER BY 1 NULLS FIRST, 2");
+  yield q("whole: decimals UNION ALL div() of a numeric(38,10)", "SELECT m AS v, 1 AS arm FROM public.bins UNION ALL SELECT div(b, 2), 2 FROM public.bins ORDER BY 1 NULLS FIRST, 2");
+  // (a set operation that compares rows of a whole number and decimals prints them at one scale, the listed difference
+  // mixed-scale-numeric; of whole numbers alone, of decimals of one scale, or an EXCEPT whose left query has the widest
+  // scale, every row is at Postgres's own scale)
+  yield q("whole: div() INTERSECT and EXCEPT whole numbers", "SELECT div(i, 2) AS v FROM public.bins INTERSECT SELECT i::numeric FROM public.bins EXCEPT SELECT 0 ORDER BY 1");
+  yield q("whole: decimals EXCEPT whole numbers (the left query's rows, at its scale)", "SELECT a FROM public.bins EXCEPT SELECT div(i, 2) FROM public.bins EXCEPT ALL SELECT b::numeric FROM public.bins ORDER BY 1 NULLS FIRST");
+  yield q("whole: decimals UNION and EXCEPT ALL decimals of one scale", "SELECT a FROM public.bins UNION SELECT 0.75 EXCEPT ALL SELECT a FROM public.bins WHERE id > 12 ORDER BY 1 NULLS FIRST");
+  // (no whole value equals a decimal one, and the greatest is a decimal: a CASE or GREATEST of an
+  // integer and a decimal read through a derived table takes the decimal's scale in its text there, with or without
+  // div(), a difference of its own)
+  yield q("whole: a CASE of div() or a value, sorted", "SELECT id, CASE WHEN id % 2 = 1 THEN div(i, 2) ELSE a END AS v FROM public.bins ORDER BY 2, 1");
+  yield q("whole: a COALESCE of a value or div(), sorted", "SELECT id, COALESCE(CASE WHEN id % 2 = 1 THEN NULL ELSE m END, div(i, 2)) AS c FROM public.bins ORDER BY 2, 1");
+  yield q("whole: GREATEST of a value and div()", "SELECT id, GREATEST(a, div(i, 2)) AS g FROM public.bins WHERE id <> 1 ORDER BY id");
+  yield q("whole: div() and decimals through a WITH, grouped", "WITH w AS (SELECT div(i, 2) AS v FROM public.bins UNION ALL SELECT a FROM public.bins) SELECT count(*) AS n, sum(v) AS total FROM w GROUP BY v ORDER BY v NULLS FIRST");
+  yield q("whole: a sum of div() UNION ALL decimals", "SELECT sum(div(i, 2)) AS v, 1 AS arm FROM public.bins WHERE id < 10 UNION ALL SELECT a, 2 FROM public.bins ORDER BY 1 NULLS FIRST, 2");
+  yield q("whole: an integer cast to numeric beside decimals", "SELECT i::numeric AS v, 1 AS arm FROM public.bins UNION ALL SELECT a, 2 FROM public.bins ORDER BY 1 NULLS FIRST, 2");
+  yield q("whole: an integer cast to numeric in a CASE and IN", "SELECT id, CASE WHEN id % 2 = 1 THEN s::numeric ELSE a END AS v, a IN (SELECT b::numeric FROM public.bins) AS x FROM public.bins ORDER BY 2, 1");
+  yield q("whole: a whole constant and extract's whole part beside decimals", "SELECT id, CASE WHEN id % 2 = 0 THEN 1.2e1 ELSE a END AS v, CASE WHEN id % 3 = 0 THEN extract(day FROM interval '12 days') ELSE a END AS d, a IN (SELECT 0e1) AS z FROM public.bins ORDER BY 2, 1");
+  yield q("whole: div()'s own arithmetic", "SELECT id, div(b, 2) * div(b, 2) AS sq, div(i, 2) * a AS m, div(i, 2) + m AS p, div(i, 2) / 3 AS q, round(div(i, 2), 2) AS r, div(i, 2)::text AS t FROM public.bins ORDER BY id");
+}
+
+export const TYPE_MATRIX: Matrixed[] = [...matrix(), ...mappedTypes(), ...binCases(), ...wholeCases(),...FROM_ITEMS_SORTED.map((f) => q(f.name, f.sql, f.zone)),
   // issue 665: a quotient grouped by its exact key alone, its day of the year read in the session's zone
   q("issue 665: the week of year grouped in a session zone of daylight saving", "SELECT ceil(cast(extract(doy from o.created_at) as integer) / 7.0) AS w, count(*) FROM orders o GROUP BY 1 ORDER BY 1", "America/New_York")];
