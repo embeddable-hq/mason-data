@@ -46,9 +46,12 @@ These are not breaking changes, so they can go in a patch:
 - A fix for a wrong answer, a crash or lost data.
 - A query that Mason now answers, or now refuses by name because its answer was wrong.
 - A change that makes Mason sync a table again whole after the upgrade, once, such as a new layout of the synced data.
-  The project is read the same, but the restart reads every such table from the source again. So the notes must say
-  so plainly under "Before you upgrade": which tables, that their old data is served until then, and about how long
-  it takes (the owner, 2026-11-14).
+  The project is read the same, but the restart reads every such table from the source again. It may go in a patch
+  only if each such table keeps serving its old data until its new sync is done. The notes must say so under "Before
+  you upgrade" (the owner, 2026-11-14).
+
+A release that makes a table, or Mason itself, unavailable for an extended period is a new line (`0.21.0`), never a
+patch (the owner, 2026-11-14). Unavailable means refused, not built yet, or nothing served while Mason works.
 
 Not decided yet, so ask the owner before such a change goes in a patch:
 
@@ -66,6 +69,7 @@ section alone does not decide it.
 - **It is a new line** when it holds a breaking change, by the definition above. Its "Before you upgrade" then asks
   the reader to change a project's files, or says that a project is read or refused differently. The version is the
   next minor version (`0.21.0`), and the notes tell the reader to move the pin.
+- **It is a new line too** when it makes a table, or Mason itself, unavailable for an extended period (above).
 - **It is a patch** otherwise. Then the version is the next patch on the current line (`0.20.1`). Its "Before you
   upgrade" says that the pin needs no change (`v0.17.1.md` has the wording).
 
