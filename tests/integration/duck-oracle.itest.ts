@@ -250,6 +250,10 @@ const KNOWN: Decided[] = [
   // a numeric(65,30) or an unconstrained numeric past the engine's DECIMAL, in an arm or under a reader: its text is the
   // engine's digits
   shapesDecided([...SET_OPERATION_ARMS, ...NUMERIC_READERS], { sql: /o\.big\b|o\.amount_raw\b/, kind: "text", issue: 402, why: "a numeric(65,30) or unconstrained numeric in a set operation or under a reader prints the engine's digits" }),
+  // a plain numeric holding 1.5 beside 0, beside an arm of NULLs, integers or VALUES: its column's one scale (issue 946's
+  // second part; a UNION ALL of two plain numerics keeps each value's own)
+  shapesDecided(["null-arm", "null-arm-first", "integer-arm", "values-arm", "values-arm-first"], { sql: /n \* 2, abs\(n\) FROM typed_arrays/, kind: "text", issue: 946,
+    why: "a plain numeric in a UNION ALL beside an arm of NULLs, integers or VALUES prints at its column's one scale" }),
   // a value whose scale its row decides (greatest / least / coalesce of an integer and a numeric, a CASE … ELSE 0.0, a
   // sqrt or a text read as a numeric through a CTE), under an aggregate or a scalar subquery: the engine's one scale
   shapesDecided(NUMERIC_READERS, { sql: /greatest\(|least\(2\.5, 1\)|ELSE 0\.0 END|coalesce\(latest\(|sqrt\(abs\(n2\)\)|s::numeric FROM castable/, kind: "text", issue: 402, why: "a value whose scale its row decides, read by an aggregate or a scalar subquery, has the engine's one scale" }),
