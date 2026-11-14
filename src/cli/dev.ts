@@ -35,6 +35,7 @@ import { uiReadOnlyAllowSetting, uiReadOnlySetting, type PageArea } from "./ui-r
 import { backLinkOf, uiBackLinkSetting } from "./ui-back-link.ts";
 import { navOf, uiNavSetting } from "./ui-nav.ts";
 import { overviewCardOf, uiOverviewCardSetting } from "./ui-host-view.ts";
+import { iconOf, uiIconSetting } from "./ui-icon.ts";
 import { createRunServer, listenOnLoopback, metricsFacts, usageFacts, type RunContext } from "./run-server.ts";
 import { UiErrors } from "./ui-errors.ts";
 import type { RunMetrics } from "./metrics.ts";
@@ -706,6 +707,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     // MASON_UI_OVERVIEW_CARD: a server's Overview shows the host's card, read from a path relative to the page (mason
     // start refuses it above)
     pageCard: o.serve !== undefined ? overviewCardOf(uiOverviewCardSetting(process.env)) : null,
+    // MASON_UI_ICON: a server's page has the host's icon in its tab (mason start refuses it above)
+    pageIcon: o.serve !== undefined ? iconOf(uiIconSetting(process.env)) : null,
     // MASON_UI_SOCKET: the page on a Unix socket too (src/cli/ui-socket.ts), or null
     pageSocket: o.serve?.socket ?? null,
     demo: cfg.demo === true,

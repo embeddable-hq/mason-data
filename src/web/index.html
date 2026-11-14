@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mason</title>
-<!-- no favicon request: an empty one, inline (img-src allows data:) -->
+<!-- no favicon request: an empty one, inline (img-src allows data:); mason serve's MASON_UI_ICON replaces it with the
+     host's own, a data: URL too, when the run starts (src/cli/ui-icon.ts pageWithIcon) -->
 <link rel="icon" href="data:,">
 <!-- every file Mason's own, from its allowlist (src/cli/run-server.ts PAGE_ROUTES): the fonts are app.css's, vendored -->
 <link rel="stylesheet" href="app.css">

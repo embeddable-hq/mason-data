@@ -2,6 +2,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **A server's web page can show your own icon in the browser's tab.** Set `MASON_UI_ICON` on `mason serve` to a
+  `data:` URL of a PNG or SVG image in base64, up to 4096 bytes. The page shows it in place of its empty icon. The icon
+  is part of the page, so the browser makes no extra request. A value Mason cannot use stops the start, and the message
+  says what a valid one looks like. Unset, the page is as before.
 - **A failed sync event now says its code and where it happened.** `mason logs --events --json` and `/api/events` give
   each failure a `code` and an `origin`. The code is the error's SQLSTATE when your database failed it, the system's
   error when the network or the disk did (`ECONNREFUSED`, `ENOSPC`), or the error's class (`conversion_error`). It is
