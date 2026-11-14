@@ -487,12 +487,12 @@ test("each table's state says why mason sync of it is refused now, in the words 
       // A SYNC BY HAND QUEUED BEHIND A PASS THAT POLLED IT, that poll begun after it was asked: answered by that poll, no
       // second read (here a read fails: the source is not there), and said as a sync by hand
       const found = { table: "public.a", added: 4, updated: 0, deleted: 1, rows: 9, ms: 12 };
-      x.scheduledPolls.set("public.a", { startedAt: Date.now() + 60_000, found });
+      x.scheduledPolls.set("public.a", { startedAt: performance.now() + 60_000, found });
       const before = events.length;
       assert.deepEqual((await sync.pollNow(["public.a"])).tables, [found]);
       assert.deepEqual(events.slice(before).map((e) => [e.kind, e.message]), [["synced", "synced by hand (by its poll on schedule, which began as it was asked): 4 added, 0 updated, 1 deleted, 9 rows now · 12 ms"]]);
       // one begun before it was asked is no answer: the table is read again (and here that read fails)
-      x.scheduledPolls.set("public.a", { startedAt: Date.now() - 60_000, found });
+      x.scheduledPolls.set("public.a", { startedAt: performance.now() - 60_000, found });
       await assert.rejects(sync.pollNow(["public.a"]), /no source in this test/);
       x.scheduledPolls.delete("public.a");
     } finally { s.stopped = true; }

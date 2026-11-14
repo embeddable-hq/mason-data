@@ -1247,7 +1247,7 @@ export class Sync {
    *  refused `busy` meanwhile, never queued behind the pass to read it again (issue 1007) */
   private readonly scheduledNow = new Set<string>();
   /** each table's last poll on its schedule: when it began (before its snapshot) and what it found. A sync by hand asked
-   *  before it began and queued behind its pass is answered by it, never a second read (issue 1007's review: a Sync now
+   *  before it began (both `performance.now()`, monotonic) and queued behind its pass is answered by it, never a second read (issue 1007's review: a Sync now
    *  asked as the pass began, before it collected the tables due, read the table twice) */
   private readonly scheduledPolls = new Map<string, { startedAt: number; found: PolledTable }>();
   /** the stream's last failure and when it starts again; cleared when it starts */
@@ -2267,7 +2267,7 @@ export class Sync {
   private async pollNowOf(sources: readonly string[]): Promise<{ at: string; tables: PolledTable[]; streamed?: StreamedAnswer[] }> {
     const refused = this.askedRefusal(sources);
     if (refused !== null) throw refused;
-    const askedAt = Date.now();
+    const askedAt = performance.now(); // monotonic: a wall clock stepped back would take an earlier poll for one begun after the ask
     const tables = sources.map((s) => this.tables.get(s)!);
     // a replicated table: the stream keeps it current, so nothing to poll — its answer is where the stream is, and its part
     const said = (): StreamedAnswer[] => {
@@ -3604,7 +3604,7 @@ export class Sync {
         let startedAt = 0;
         const found = await this.onWriter(async () => {
           if (this.rebuildingNow?.source === t.source || this.behind.has(t.source)) return [];
-          startedAt = Date.now();
+          startedAt = performance.now();
           return this.poll(this.writerLane, [t]);
         });
         // a scheduled sync is an event too, listed only when a reader asks for the scheduled syncs (src/duck/events.ts)

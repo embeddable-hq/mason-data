@@ -860,7 +860,7 @@ a whole read again, its catch-up, and its poll in the pass the run is making now
 sync beside the refusal, as `sync`, and its `message` says when it started.
 
 Follow it in `GET /api/state`. Each table it covers has `syncByHand`, the same object. It says `syncing` until the
-sync ends. Then `state` is `synced` with `answer` (`{ at, tables: [{ table, changed, deleted, rows, ms }], streamed? }`,
+sync ends. Then `state` is `synced` with `answer` (`{ at, tables: [{ table, added, updated, deleted, rows, ms }], streamed? }`,
 what `mason sync --json` prints), or `failed` with `failure` (`{ code, message }`). The run keeps each table's last
 sync by hand until it stops. The sync's events (`GET /api/events`) record each one too, as `synced` or `sync_failed`.
 
