@@ -738,12 +738,17 @@ digits be wrong (an id of 19 digits off in its last four), so part 1 holds every
 differ: the cents on a total in the tens of trillions. Mason still computes an exact sum exactly. The rule only says what is
 acceptable.
 
-**The listed exceptions.** A double holds whole numbers exactly only up to 2^53, about 9 × 10^15. These entries pass
-a numeric through a double: `numeric-parameter`, `numeric-array`, `nested-exact-numeric`, `numeric-over-38-digits`,
-`numeric-stddev` (a double's 15 digits) and `numeric-quotient-compare` (doubles equal to 17 significant digits). Each
-is within the rule below 2^53, since a double keeps at least 15 significant digits. Above 2^53 it can break part 1, and
-stays a named exception there. Below 2^53 one rare value stays an exception too: one so close to a rounding boundary at
-its 15th digit that the double's own error rounds it the other way. `float-last-digit` is
+**The listed exceptions.** These entries go through a double, and each stays a named exception: `numeric-parameter`,
+`numeric-array`, `nested-exact-numeric`, `numeric-over-38-digits`, `numeric-stddev` and `numeric-quotient-compare`.
+Where they are within the rule:
+- A value stored or passed as a double is within it below 10^15 when it has a fraction, and below 2^53 (about
+  9 × 10^15) when it is whole. Values near a 15th-digit rounding boundary are the exception: the double's own error
+  can round them the other way. Past 10^15 a fraction breaks part 1: the double of 1000000000000000.99 prints as
+  1000000000000001, where Postgres's rounds to 1000000000000000.
+- A result computed in doubles (a stddev, arithmetic on a constant past 38 digits, a stddev of a subquery's quotient)
+  is not promised at any size. Subtracting nearly equal doubles loses digits. `stddev_samp` of 1.00000000000000001
+  and 1.00000000000000003 as numeric(20,17) is 0.0 in the engine, where Postgres answers 1.41421356237310e-17. A
+  stddev of 1000000.000000001, 1000000.000000002 and 1000000.000000004 is wrong in its second digit. `float-last-digit` is
 about float8, not numeric, and differs only in the 16th–17th digit.
 
 The oracle still compares a numeric's text, so each such difference is seen, and listed, never silently passed.
