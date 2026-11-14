@@ -43,7 +43,7 @@ import { addedTables, effectiveSync, entryName, replicatedEntries, rereadSources
 import { newToken } from "./security.ts";
 import { alive, liveRun, processStart } from "./runs.ts";
 import { DEMO_DIR, DUCK_FILE, projectReadOnlySetting, projectSource, startSettingRefusal, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
-import { LIVE_CHECKS_TIMEOUT_MS, sourceLiveChecks } from "./sync-choice.ts";
+import { boundedLiveChecks } from "./sync-choice.ts";
 import { closedWithin, closingOnce, DEMO_STILL_CLOSING, demoChanges, demoChangesRefusal, demoPort, demoSettings, openDemo } from "./demo.ts";
 import { postgresApiUrl, readPgTls, type PgListenerSettings } from "../api/postgres/listener.ts";
 import { connectDatabase } from "../lib/database-name.ts";
@@ -741,10 +741,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       const c = await connectSource(source);
       if ("failure" in c) return [{ name: "database", state: "refused", detail: "Mason could not connect to the database to read its checks now: mason doctor says why" }];
       try {
-        // bounded once connected: a query that hangs would hold the run's one-at-a-time checks, and every Sync choice and
-        // replication save behind them (SET is this session's alone: nothing on the database changes)
-        await c.pg.query(`SET statement_timeout = ${LIVE_CHECKS_TIMEOUT_MS}`);
-        return await sourceLiveChecks(c.pg, t, { repl, streaming: sync.streams(), columns, shown });
+        // bounded once connected, and the limit ends with the checks (boundedLiveChecks)
+        return await boundedLiveChecks(c.pg, t, { repl, streaming: sync.streams(), columns, shown }, (m) => say(`  the database's checks: ${m}`));
       }
       catch (e) { return [{ name: "database", state: "refused", detail: `the database's checks could not be read: ${(e as Error).message}` }]; }
       finally { c.pg.close(); }
