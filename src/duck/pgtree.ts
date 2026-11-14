@@ -42,7 +42,9 @@ export interface TreeNode { readonly _node: string; readonly [field: string]: Tr
 export function readParseLog(detail: Uint8Array, written: ReadonlySet<string> = new Set()): TreeValue {
   const trees: TreeValue[] = [];
   let failure: unknown = null;
-  const read = unwrapNodeDump(detail);
+  // a break inside a run with no space beside a parenthesis or a brace (a deep tree's `)})})`) splits no token whether
+  // it was a space or inserted: pg_strtok reads those as tokens of their own, so the reading is one either way
+  const read = unwrapNodeDump(detail).map((r) => ({ text: r.text, spaces: r.spaces.filter((at) => !besideDelimiter(r.text, at)) }));
   // every parse reads the whole log: past a few, the work is refused rather than done (a statement of many names of
   // line breaks once took 30 s on the listener's thread)
   if (read.reduce((n, r) => n + r.spaces.length + 1, 0) > MAX_PARSES) throw new UnreadableNames();
@@ -90,6 +92,14 @@ export class UnreadableNames extends Error {
   constructor(relations: number[] = []) { super("the catalog Postgres's parse tree holds a name that Mason cannot read back"); this.relations = relations; }
 }
 
+/** whether a space at `at` of the text would sit beside a parenthesis or a brace that ends or starts a token there (one
+ *  no backslash escapes), so that it splits no token */
+function besideDelimiter(text: Uint8Array, at: number): boolean {
+  const delimiter = (b: number | undefined): boolean => b === 0x28 || b === 0x29 || b === 0x7b || b === 0x7d;
+  const escapedAt = (k: number): boolean => { let n = 0; for (let j = k - 1; j >= 0 && text[j] === BACKSLASH; j--) n++; return n % 2 === 1; };
+  return (at > 0 && delimiter(text[at - 1]) && !escapedAt(at - 1)) || (delimiter(text[at]) && !escapedAt(at));
+}
+
 /** every relation a tree reads (a RANGETBLENTRY's relid) */
 function relationsOf(v: TreeValue): number[] {
   if (v === null || typeof v === "string") return [];
@@ -102,7 +112,7 @@ function relationsOf(v: TreeValue): number[] {
  *  parses), the most readings, and the most parses of a log (a statement's every name with a space is one reading and
  *  one parse) */
 const MAX_INSIDE_TOKEN = 4, MAX_READINGS = 16, MAX_PARSES = 24;
-/** the search's steps past one a line: a FIXED bound for each statement, so its work is the log's length and no more */
+/** the search's steps past two a line: a FIXED bound for each statement, so its work is the log's length and no more */
 const EXTRA_STEPS = 2000;
 
 /** every string of a tree that holds a line break: only a name can, as the log's breaks are undone */
@@ -175,15 +185,18 @@ export function unwrapNodeDump(wrapped: Uint8Array): Array<{ text: Uint8Array; s
   };
   const found: Array<{ text: Uint8Array; spaces: number[] }> = [];
   const stack: Frame[] = [{ at: 0, sLen: 0, lines: 0, checked: 0, spaces: 0, choices: choicesAt(0, 0), next: 0 }];
-  let budget = o.reduce((n, b) => b === LF ? n + 1 : n, 0) + EXTRA_STEPS;
+  // a line's break is tried at most twice where a name's escaped space ends it (a wrap or the name's own line break)
+  let lines = 0;
+  for (let k = o.indexOf(LF); k >= 0; k = o.indexOf(LF, k + 1)) lines++;
+  let budget = 2 * lines + EXTRA_STEPS;
   while (stack.length > 0) {
-    // past the bound, the readings are too many to tell apart: refused by name, never one guessed
-    if (--budget < 0 || found.length > MAX_READINGS) throw new UnreadableNames();
     const f = stack[stack.length - 1]!;
     starts.length = lengths.length = nexts.length = f.lines;
     spaces.length = f.spaces;
     const c = f.choices[f.next++];
     if (c === undefined) { stack.pop(); continue; }
+    // past the bound, the readings are too many to tell apart: refused by name, never one guessed
+    if (--budget < 0 || found.length > MAX_READINGS) throw new UnreadableNames();
     let sLen = f.sLen;
     o.copy(s, sLen, f.at, c.e);
     const start = sLen, length = c.e - f.at;
