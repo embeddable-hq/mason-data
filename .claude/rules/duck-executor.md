@@ -111,7 +111,8 @@ paths:
 - **Nothing ends the worker's JavaScript while DuckDB has work in flight on it** (a test file under load aborted at
   exit, `libc++abi: … Napi::Error`: its close outlasted the grace and the executor terminated the worker under a
   Mason function call; a 1 ms grace reproduced it 6 times in 6). A worker given up on (the grace, the silence) is asked
-  to SHUT DOWN (`shutDown`); until it exits it stays referenced, so the process cannot exit under it either — and an
+  to SHUT DOWN (`shutDown`); until it exits it stays referenced, so the process does not end by itself under it (a run's
+  `process.exit` after `close`'s grace still does) — and an
   answer's close is a request, answered once DuckDB handed it back (`answer.close`). Never `worker.terminate()` a copy's
   worker that may have a statement in flight: even a call-free one aborted the process 2 times in 12.
   `tests/duck-executor.test.ts` "never ends the copy's thread under a call" holds it (a close with a 1 ms grace, a

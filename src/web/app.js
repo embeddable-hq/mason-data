@@ -263,6 +263,18 @@ export function setBack(link, label, back) {
   link.hidden = false;
 }
 
+/**
+ * WHO IS SIGNED IN TO THE HOST (`/api/state` `pageAccount`: mason serve's MASON_UI_ACCOUNT, validated by the run at its
+ * start, src/cli/ui-account.ts), at the foot of the sidebar: the label as TEXT (escaped: `<b>` reads as `<b>`) beside
+ * the account icon, a link to the URL in the same tab, sending no referrer, as the link back. In the phone's menu sheet
+ * with the nav; on the icon rail the icon alone, its label the tooltip, as every nav link's. "" when the state names
+ * none (unset: nothing shows).
+ */
+export function renderAccount(account) {
+  if (account === null || typeof account !== "object" || typeof account.url !== "string" || typeof account.label !== "string") return "";
+  return `<a href="${esc(account.url)}" rel="noreferrer">${icon("circle-user")}<span class="label">${esc(account.label)}</span></a>`;
+}
+
 /** The line over the banner's Failure while the page shows what it read before (`app.stale()`): as of when, and why. */
 const staleNote = (stale, said) => stale === null || said ? "" : `<p class="stale-note">${esc(staleText(stale.at, stale.failure))} What this page shows is from then.</p>`;
 
@@ -409,6 +421,8 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
       const nav = st?.pageNav ?? null;
       return {
         nav: renderNav(m.shown, m.range, nav, pages.get(HOST_PAGE).model.view),
+        // who is signed in to the host, at the sidebar's foot (MASON_UI_ACCOUNT), or nothing
+        account: renderAccount(st?.pageAccount ?? null),
         // the range control in the shown view's header row (each group page's own slot; the others empty)
         ...Object.fromEntries(PAGES.filter((p) => p.parent).map((p) => [`range-${p.id}`, p.id === m.shown ? renderSubnav(m.shown, m.range, st?.engine?.keptDays) : ""])),
         where: st ? renderWhere(st) : "",

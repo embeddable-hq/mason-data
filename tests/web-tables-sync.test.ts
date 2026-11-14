@@ -371,13 +371,18 @@ const COLS = {
   sessions: ["id", "user_id", "api_token"],
   // no primary key: synced by its key:
   raw_log: ["tenant_id", "seq", "body"],
+  // every column but several secret-looking ones, as mason add writes it (issue 960)
+  members: ["id", "email", "password", "password_encrypted", "api_token"],
+  // an exclude: written by hand naming a column the table does not have, beside one it has (issue 960)
+  ledger: ["id", "name", "status"],
   // not added
   audit: ["id", "what"],
 } as const;
 const COL_TABLES: SourceTable[] = Object.entries(COLS).map(([name, cols]) => ({ source: `public.${name}`, schema: "public", table: name, key: name === "raw_log" ? [] : ["id"],
   rows: name === "orders" ? 40_000_000 : 1200, bytes: 8192, comment: null, columns: cols.map((c) => col(c, c === "id" ? "bigint" : "text")), foreignKeys: [] }));
 const COL_FILE = parseSourceText("kind: postgres\nurl: x\ntables:\n  customers: {}\n  orders:\n    columns: [id, status]\n  accounts:\n    exclude: [api_token]\n" +
-  "  invoices:\n    exclude: [name]\n  sessions: {}\n  raw_log:\n    key: [tenant_id, seq]\n    columns: [tenant_id, seq, body]\n", "shop", "/app/mason/sources/shop.yml");
+  "  invoices:\n    exclude: [name]\n  sessions: {}\n  raw_log:\n    key: [tenant_id, seq]\n    columns: [tenant_id, seq, body]\n" +
+  "  members:\n    exclude: [password, password_encrypted, api_token]\n  ledger:\n    exclude: [nope, name]\n", "shop", "/app/mason/sources/shop.yml");
 assert.ok(!("problems" in COL_FILE), JSON.stringify(COL_FILE));
 function colStateOf(o: { pageReadOnly?: boolean; sourcesReadOnly?: string } = {}): Record<string, unknown> {
   const ctx = {
@@ -461,7 +466,7 @@ test("the column form on an added table: All columns for every column, else Only
   const accounts = form("accounts");
   assert.deepEqual(whichOf(accounts), ["all"], "every column but the secret-looking one, as mason add writes it: All");
   assert.deepEqual(ticksOf(accounts, "columns"), ["id", "name"], "its boxes: every column but the one All leaves out");
-  assert.match(textOf(accounts), /All columns, and any added to the table later, but api_token, which looks like a secret Only these columns/);
+  assert.match(textOf(accounts), /All but 1 column\. Left out because it looks like a secret: api_token\. Columns added to the table later are synced too\. Only these columns/);
   // the boxes hidden by the radio itself while All is chosen: nothing is written when it changes
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   assert.match(css, /form\.pick:has\(input\[name="which"\]\[value="all"\]:checked\) \.only-cols \{ display: none; \}/);
@@ -487,6 +492,35 @@ test("an entry the form cannot show (an exclude: written by hand, a secret-looki
   assert.deepEqual(ticksOf(sessions, "columns"), ["id", "user_id", "api_token"]);
   const columnsChoice = fn<(t: unknown) => { exact: boolean }>(tables, "columnsChoice");
   assert.deepEqual(["customers", "orders", "accounts", "invoices", "sessions", "raw_log"].map((n) => columnsChoice(colTable(n)).exact), [true, true, true, false, false, true]);
+});
+
+test("the column form's All starts with the row's label: All but 3 columns, the secret-looking ones named; All columns with none left out (issue 960)", () => {
+  const html = renderTables(COL_STATE);
+  const label = (name: string) => new RegExp(`id="columns-tables-public\\.${name}"[^>]*>([^<]*)</button>`).exec(html)?.[1];
+  const all = (name: keyof typeof COLS) => /<input type="radio" name="which" value="all"( checked)?> <span>([^<]*)<\/span>/
+    .exec(popOf(renderTables(COL_STATE, { choosing: `public.${name}`, columns: columnsOf(name) }), `columns-tables-public.${name}`))!.slice(1);
+  assert.equal(label("members"), "All but 3 columns");
+  assert.deepEqual(all("members"), [" checked", "All but 3 columns. Left out because they look like secrets: password, password_encrypted, api_token. " +
+    "Columns added to the table later are synced too."]);
+  assert.equal(label("accounts"), "All but 1 column");
+  assert.deepEqual(all("accounts"), [" checked", "All but 1 column. Left out because it looks like a secret: api_token. Columns added to the table later are synced too."]);
+  assert.equal(label("customers"), "All columns");
+  assert.deepEqual(all("customers"), [" checked", "All columns, and any added to the table later"]);
+  // whenever All is the choice shown, it starts with the row's words: one count (leftOut) decides both
+  for (const name of Object.keys(COLS) as (keyof typeof COLS)[]) {
+    if (!colTable(name).added) continue;
+    const [chosen, words] = all(name);
+    if (chosen) assert.ok(words!.startsWith(label(name)!), `${name}: "${words}" under "${label(name)}"`);
+  }
+  // an exclude: naming a column the table lacks: the row counts the one it leaves out, and nothing says the other is a column
+  assert.equal(label("ledger"), "All but 1 column");
+  const ledger = popOf(renderTables(COL_STATE, { choosing: "public.ledger", columns: columnsOf("ledger") }), "columns-tables-public.ledger");
+  assert.match(textOf(ledger), /^Its entry in the sources file syncs every column but name, which these boxes cannot show/);
+  assert.deepEqual(whichOf(ledger), ["only"]);
+  const leftOut = fn<(t: unknown, columns?: string[]) => { count: number; names: string[] | null }>(tables, "leftOut");
+  assert.deepEqual(leftOut(colTable("ledger")), { count: 1, names: null }, "the lean state cannot tell which name is the column");
+  assert.deepEqual(leftOut(colTable("ledger"), ["id", "name", "status"]), { count: 1, names: ["name"] });
+  assert.deepEqual(leftOut(colTable("members")), { count: 3, names: ["password", "password_encrypted", "api_token"] });
 });
 
 /** The Tables page's submit of a column form, as the shell calls it: the boxes ticked by FormData's getAll, the columns

@@ -33,6 +33,7 @@ import { checkSource, connectSource, maskedUrl, PRIMARY_NOTE, readSourceFacts, t
 import { actRead, sourceCatalog, STATE_WAIT_MS, watchedRead } from "./source-catalog.ts";
 import { uiReadOnlyAllowSetting, uiReadOnlySetting, type PageArea } from "./ui-read-only.ts";
 import { backLinkOf, uiBackLinkSetting } from "./ui-back-link.ts";
+import { accountOf, uiAccountSetting } from "./ui-account.ts";
 import { navOf, uiNavSetting } from "./ui-nav.ts";
 import { overviewCardOf, uiOverviewCardSetting } from "./ui-host-view.ts";
 import { createRunServer, listenOnLoopback, metricsFacts, usageFacts, type RunContext } from "./run-server.ts";
@@ -715,6 +716,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     // MASON_UI_NAV_*: a server's sidebar, its items replaced by the host's pages and the host's links (mason start
     // refuses them above)
     pageNav: o.serve !== undefined ? navOf(uiNavSetting(process.env)) : null,
+    // MASON_UI_ACCOUNT: a server's sidebar names who is signed in to the host (mason start refuses it above)
+    pageAccount: o.serve !== undefined ? accountOf(uiAccountSetting(process.env)) : null,
     // MASON_UI_OVERVIEW_CARD: a server's Overview shows the host's card, read from a path relative to the page (mason
     // start refuses it above)
     pageCard: o.serve !== undefined ? overviewCardOf(uiOverviewCardSetting(process.env)) : null,

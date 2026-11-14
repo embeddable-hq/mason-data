@@ -204,6 +204,15 @@ const errorOf = (e: WireError): Error => {
   return err;
 };
 
+/** A FAILURE MADE AGAIN FROM THE WORKER'S ANSWER, GIVEN ITS CALLER'S FRAMES (issue 924): its own stack is this thread's
+ *  message handler (`errorOf`), which says nothing of where the request was made, so a failure's origin
+ *  (src/lib/failure-facts.ts `originOf`) read Mason's executor for every engine error. Its first line is its own. */
+function withSite(err: Error, site: { stack?: string }): Error {
+  const frames = site.stack === undefined ? -1 : site.stack.indexOf("\n");
+  if (frames >= 0) err.stack = `${err.name}: ${err.message}${site.stack!.slice(frames)}`;
+  return err;
+}
+
 /** a value a statement may be given across threads: plain, never a DuckDB value object (its class would be lost) */
 function plainValues(values: readonly unknown[] | undefined): unknown[] | undefined {
   if (values === undefined) return undefined;
@@ -241,8 +250,8 @@ export interface ExecutorOptions {
  *   only says it later.
  * - THE CLOSE IS BOUNDED: `close` gives the worker's shutdown `CLOSE_GRACE_MS` (a calling statement stops at its next
  *   call, milliseconds; a call-free one at DuckDB's interrupt; and the whole stop must fit inside a platform's 10 s
- *   before SIGKILL and `mason stop`'s 15 s), then declares it stopped the same way and resolves; the thread is ended
- *   once its shutdown answers (below).
+ *   before SIGKILL and `mason stop`'s 15 s), then declares it stopped the same way and resolves; the thread ends by
+ *   itself once its shutdown answers (below).
  * What neither can do: end a thread blocked inside native code. Such a process does not exit by itself, nor on
  * process.exit (measured); its supervisor's SIGKILL does. The copy is not opened again in this process
  * (`abandoned`): a second instance of the file would lose writes.
@@ -252,10 +261,10 @@ export interface ExecutorOptions {
  * executor TERMINATED the worker while DuckDB's threads were inside a Mason function call — the node API's callback met
  * a dying environment and threw where nothing catches. Reproduced every time by a close with a 1 ms grace under a
  * calling statement, tests/duck-executor.test.ts). So a worker given up on (the grace, the silence) is told nothing
- * more and asked to SHUT DOWN (`shutDown`: posted once, its answer awaited outside `pending`), and is ended only once
- * that shutdown has answered — DuckDB's statements stopped, its connections and instance closed — or it exits by
- * itself; until then it stays REFERENCED, so the process cannot end with the worker mid-call either (a process
- * exiting tears its workers down the same way). A drained answer is a request for the same reason (`answer.close`):
+ * more and asked to SHUT DOWN (`shutDown`: posted once, its answer awaited outside `pending`), and is never ended
+ * from outside (THE THREAD ENDS BY ITSELF, below); until it exits it stays REFERENCED, so the process does not end
+ * by itself with the worker mid-call (a process exiting tears its workers down the same way). A process that calls
+ * process.exit does not wait for it: `mason start` and `mason serve` exit once `close`'s grace has passed. A drained answer is a request for the same reason (`answer.close`):
  * DuckDB may call into the worker after the listener let go of the statement. A thread that never answers its
  * shutdown is the deadlock above: its supervisor's SIGKILL.
  *
@@ -277,7 +286,8 @@ export const ENDS_WITHIN_MS = 5_000;
 export class Executor {
   private readonly worker: Worker;
   private readonly log: (line: string) => void;
-  private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  /** each request in flight; `site`, the caller's frames, which its failure carries (`withSite`) */
+  private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; site: { stack?: string } }>();
   private nextId = 1;
   /** why the worker is gone, once it is */
   private gone: string | null = null;
@@ -322,7 +332,7 @@ export class Executor {
       const p = this.pending.get(m.id);
       if (p === undefined) return;
       this.settle(m.id);
-      if (m.ok) p.resolve(m.value); else p.reject(errorOf(m.error));
+      if (m.ok) p.resolve(m.value); else p.reject(withSite(errorOf(m.error), p.site));
     });
     let why: string | null = null;
     this.worker.on("error", (e) => {
@@ -353,7 +363,7 @@ export class Executor {
 
   /** the worker given up on without its exit: every request told so (57P02), the run told, and its shutdown asked —
    *  NEVER a terminate, which under a pending call of DuckDB's aborts the process (NOTHING ENDS THE WORKER'S
-   *  JAVASCRIPT above): it is ended once its shutdown answers, and holds the process until then */
+   *  JAVASCRIPT above): it ends by itself once its shutdown answers, and stays referenced until then */
   private abandon(reason: string): void {
     if (this.gone !== null) return;
     this.abandoned = reason;
@@ -390,7 +400,7 @@ export class Executor {
       if (this.hasExited) return;
       // said once, never acted on: a loop that does not end holds something of the engine's, and ending it from outside
       // is what aborted the process
-      const late = setTimeout(() => this.log(`the engine's thread has not ended ${ENDS_WITHIN_MS / 1000} s after its shutdown (something still holds it: Mason bug, report it with mason logs); the process waits for it`), ENDS_WITHIN_MS);
+      const late = setTimeout(() => this.log(`the engine's thread has not ended ${ENDS_WITHIN_MS / 1000} s after its shutdown (something still holds it: Mason bug, report it with mason logs); it is not ended from outside`), ENDS_WITHIN_MS);
       late.unref();
       void this.exited.then(() => clearTimeout(late));
     });
@@ -426,9 +436,13 @@ export class Executor {
   call<T>(m: Record<string, unknown>, transfer: TransferListItem[] = []): Promise<T> {
     if (this.gone !== null) return Promise.reject(new ExecutorGone(this.gone, this.closing));
     const id = this.nextId++;
+    // the caller's frames, taken now: a failure made again from the worker's answer has none of its own (`withSite`).
+    // Captured, not formatted: formatting is paid only by a failure that reads them
+    const site: { stack?: string } = {};
+    Error.captureStackTrace(site, this.call);
     return new Promise<T>((resolve, reject) => {
       if (this.pending.size === 0) this.worker.ref();
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, site });
       this.worker.postMessage({ ...m, id }, transfer);
     });
   }
@@ -483,7 +497,7 @@ export class Executor {
     const closed = (async () => { await this.shutDown(); await this.exited; return "closed" as const; })();
     try {
       if (await Promise.race([closed, late]) === "late") {
-        this.log(`the engine's thread did not close within ${graceMs / 1000} s: given up on (its sessions are told 57P02); it ends once its shutdown finishes, and the process waits for it (a thread stuck inside the engine needs a SIGKILL)`);
+        this.log(`the engine's thread did not close within ${graceMs / 1000} s: given up on (its sessions are told 57P02); it ends once its shutdown finishes, unless the run exits first (a thread stuck inside the engine needs a SIGKILL)`);
         this.abandon(`it did not close within ${graceMs / 1000} s`);
       }
     } finally { clearTimeout(timer); }

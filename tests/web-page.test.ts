@@ -189,8 +189,8 @@ const activityOf = (o: { window?: Record<string, unknown>; clients?: unknown[]; 
   window: { days: 1, covered: 1, statements: 1204, completed: 1190, refused: 10, failed: 2, cancelled: 2, rows: 52_000, bytesSent: 3_145_728, durationMs: { avg: 120, p50: 40, p95: 900 }, ...o.window },
   clients: o.clients ?? CLIENTS, slowest: o.slowest ?? [],
   clientsTotal: o.clientsTotal ?? { clients: (o.clients ?? CLIENTS).length, sessions: (o.clients ?? CLIENTS).reduce((a: number, c) => a + (c as { sessions: number }).sessions, 0) } });
-const EVENT: SyncEvent = { at: "2026-10-27T09:03:10.123Z", kind: "poll_failed", failed: true, table: "public.orders", message: "poll: connection reset\nthe sync tries it again in 5 s" };
-const EVENTS = { events: [EVENT, { at: "2026-10-27T09:04:00.000Z", kind: "restart", failed: true, table: null, message: "the run was started again after it stopped" }], keptDays: 7 };
+const EVENT: SyncEvent = { at: "2026-10-27T09:03:10.123Z", kind: "poll_failed", failed: true, table: "public.orders", message: "poll: connection reset\nthe sync tries it again in 5 s", code: "ECONNRESET", origin: "src/duck/sync.ts:3640" };
+const EVENTS = { events: [EVENT, { at: "2026-10-27T09:04:00.000Z", kind: "restart", failed: true, table: null, message: "the run was started again after it stopped", code: "unknown", origin: null }], keptDays: 7 };
 const USAGE = { since: "2026-10-27T09:04:30.000Z", until: "2026-10-27T09:05:30.000Z", stepSeconds: null, sampleSeconds: 60, keptDays: 7, samples: [],
   copySizes: [{ table: "public.customers", bytes: 524_288, at: "2026-10-27T09:00:00.000Z" }, { table: "public.events", bytes: 3_221_225_472, at: "2026-10-27T09:00:00.000Z" }] };
 
@@ -1123,6 +1123,60 @@ test("in the browser: the state's pageBack is the sidebar's link on every page, 
   assert.notEqual((oldEl("back") as unknown as { hidden?: boolean }).hidden, false);
 });
 
+// ------------------------------------------------------------------ who is signed in to the host (MASON_UI_ACCOUNT, issue 970)
+
+test("renderAccount: the label as TEXT beside the account icon, a link to the URL in the same tab sending no referrer; none: nothing", () => {
+  const renderAccount = fn<[unknown], string>("renderAccount");
+  const html = renderAccount({ label: "ada@example.com", url: "https://console.example.com/me?a=1&b=2" });
+  assert.match(html, /^<a href="https:\/\/console\.example\.com\/me\?a=1&amp;b=2" rel="noreferrer"><span class="icon" aria-hidden="true"><svg\s+class="lucide lucide-circle-user"/);
+  assert.match(html, /<\/span><span class="label">ada@example\.com<\/span><\/a>$/);
+  assert.ok(!/target=/.test(html), "in the same tab, as the link back");
+  // an operator's label that looks like markup is text: escaped, so `<b>x</b>` reads as `<b>x</b>`
+  const markup = renderAccount({ label: `<b>x</b> & "y" <img src=x onerror=alert(1)>`, url: "/account" });
+  assert.match(markup, /<span class="label">&lt;b&gt;x&lt;\/b&gt; &amp; &quot;y&quot; &lt;img src=x onerror=alert\(1\)&gt;<\/span>/);
+  assert.equal(textOf(markup), `<b>x</b> & "y" <img src=x onerror=alert(1)>`);
+  assert.ok(!/<b>|<img/.test(markup), "no element of the label's");
+  assert.match(renderAccount({ label: "x", url: `/a"b` }), /^<a href="\/a&quot;b" /, "the URL an attribute, escaped");
+  // none (unset, a state that cannot say, a run from before it): nothing written
+  for (const none of [null, undefined, {}, { url: 1, label: "x" }, { url: "/x" }, { label: "x" }, "x"]) assert.equal(renderAccount(none), "", JSON.stringify(none));
+});
+
+test("the sidebar's account: in index.html in the sidebar's body under the nav, so it is in the phone's menu sheet; above the foot; empty and not shown until the state names one; a tooltip on the icon rail", () => {
+  const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
+  const body = html.split('<div id="side-body" class="side-body">')[1]!.split("</aside>")[0]!;
+  assert.ok(body.indexOf('<nav id="nav"') < body.indexOf('<div id="account" class="account"></div>'), "under the nav, in the sheet the menu opens");
+  assert.ok(body.indexOf('<div id="account" class="account"></div>') < body.indexOf('<div class="side-foot">'), "above when it was updated and the version");
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
+  assert.match(css, /\.account:empty \{ display: none; \}/, "unset: nothing shows, the sidebar as before");
+  assert.match(css, /\.account \.label \{ min-width: 0; overflow-wrap: anywhere; \}/, "a long label wraps whole, never widening the sidebar");
+  const rail = css.split("@media (min-width: 641px) and (max-width: 999px) {")[1]!.split("\n}\n")[0]!;
+  assert.match(rail, /\.account \.label \{ position: absolute; left: calc\(100% \+ var\(--space-2\)\);[^}]*opacity: 0;/, "on the rail the icon alone, the label its tooltip");
+  assert.match(rail, /\.account a:hover \.label, \.account a:focus-visible \.label \{ opacity: 1; \}/, "shown on hover and on focus, as a nav link's");
+});
+
+test("in the browser: the state's pageAccount is at the sidebar's foot on every page, read-only too, the label as text; without it, nothing is written", async () => {
+  const account = { url: "/account", label: "<b>x</b>" };
+  for (const state of [{ ...CATALOG_STATE, pageAccount: account }, { ...CATALOG_STATE, pageAccount: account, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" }]) {
+    const run = fakeRun();
+    run.answers.set("GET api/state", () => new Response(JSON.stringify(state), { status: 200 }));
+    const { el, go, settle } = fakeBrowser(run);
+    await settle();
+    for (const hash of ["#overview", "#tables", "#users", "#observability/queries", "#observability/usage", "#observability/syncs"]) {
+      go(hash); await settle();
+      const html = el("account").html;
+      assert.match(html, /^<a href="\/account" rel="noreferrer"><span class="icon"/, hash);
+      assert.match(html, /<span class="label">&lt;b&gt;x&lt;\/b&gt;<\/span><\/a>$/, `${hash}: the label as text`);
+    }
+  }
+  for (const state of [{ ...CATALOG_STATE, pageAccount: null }, CATALOG_STATE]) {
+    const run = fakeRun();
+    run.answers.set("GET api/state", () => new Response(JSON.stringify(state), { status: 200 }));
+    const { el, settle } = fakeBrowser(run);
+    await settle();
+    assert.equal(el("account").html, "", "unset, or a run from before it: nothing");
+  }
+});
+
 // ------------------------------------------------------------- the host's sidebar (MASON_UI_NAV_*, issue 789)
 
 /** Every page's item replaced by the host, a URL each (`/api/state` `pageNav.items`, by its key there). */
@@ -1724,7 +1778,7 @@ test("the users' add form: a Role choice where the roles file names roles, its d
   assert.equal(renderAddUser({ ...state, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" }), "", "read-only: no form, no choice");
   // one line on roles under the form, with roles or without: the file and the command that explains it
   // the link opens in the same tab: a host's CSP sandbox with no allow-popups silently drops a target="_blank" one
-  for (const html of [form, plain]) assert.match(html, /<\/button><p class="dim roles-line">Roles limit a user to some tables and columns\. You write them in <code>mason\/roles\.yml<\/code>, and <a href="https:\/\/github\.com\/embeddable-hq\/mason-data#access-control" rel="noreferrer">the README<\/a> shows how\.<\/p><\/form>$/);
+  for (const html of [form, plain]) assert.match(html, /<\/button><p class="dim roles-line">Roles can limit a user to some tables, columns and rows\. Configure them via <code>mason\/roles\.yml<\/code>\. <a href="https:\/\/github\.com\/embeddable-hq\/mason-data#access-control" rel="noreferrer">The README<\/a> describes how\.<\/p><\/form>$/);
   // the README's section the link names is there: its heading's anchor
   assert.ok(/^### Access control$/m.test(fs.readFileSync(path.join(WEB, "..", "..", "README.md"), "utf8")), "README.md has the Access control section the link names");
   // no --set: attributes stay the command's
@@ -1945,7 +1999,7 @@ test("the users: From… asks where the user connects from in a popover beside i
 test("the add form: Connects from, a dropdown in mason user add's words — anywhere (the default, no from sent) or only these addresses, the box beside it, a comma list as --from takes it, the run judging each", async () => {
   const renderAddUser = fn<[unknown], string>("renderAddUser");
   const form = renderAddUser(CATALOG_STATE);
-  assert.match(textOf(form), /Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user Roles limit/);
+  assert.match(textOf(form), /Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user Roles can limit/);
   assert.match(form, /<span class="connects"><label for="add-user-connects">Connects from<\/label> <select id="add-user-connects" name="connects"><option value="any" selected>anywhere<\/option><option value="only">only these addresses<\/option><\/select> <span class="ranges">/,
     "a dropdown, its label; anywhere the default, as mason user add with no --from; the box beside it");
   assert.doesNotMatch(form, /type="radio"|<fieldset/, "no radios");
@@ -1970,7 +2024,7 @@ test("the add form on one line where its card is wide enough: each field a label
   const children = [...form.replace(/^<form[^>]*>|<\/form>$/g, "").matchAll(/<(span|button)\b[^>]*? class="([^"]*)"/g)];
   assert.match(form, /^<form id="add-user" class="formcard" autocomplete="off"><span class="name-field"><label for="user-name">Name<\/label> <input id="user-name"[^>]*><\/span> <span class="role-field">/);
   assert.ok(["name-field", "role-field", "connects", "primary"].every((c) => children.some((m) => m[2] === c)), "the four fields");
-  assert.match(textOf(renderAddUser(CATALOG_STATE)), /^Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user Roles limit a user to some tables and columns\. You write them in mason\/roles\.yml , and the README shows how\.$/);
+  assert.match(textOf(renderAddUser(CATALOG_STATE)), /^Name Connects from anywhere only these addresses Address ranges, comma-separated Add a user Roles can limit a user to some tables, columns and rows\. Configure them via mason\/roles\.yml \. The README describes how\.$/);
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   assert.match(css, /#add-user \.roles-line \{ flex: 0 0 100%;/, "the line on roles is the form's own last row, under the fields");
   const rule = (sel: string) => css.match(new RegExp(`(?:^|\\})\\s*${sel.replace(/[.#[\]="]/g, "\\$&")}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
@@ -2949,7 +3003,7 @@ test("the Overview: Ready, Under way and Failed under the title mason status, ea
   const many = { events: Array.from({ length: statusPage.SYNC_ERRORS_LIMIT as unknown as number }, () => EVENT), keptDays: 7 };
   assert.match(textOf(kpis(RUNNING, { now: NOW, queries: QUERIES, syncErrors: many })), /Errors, last day 1,000\+ at least 1,000: failed syncs, restarts and web page errors/);
   // what the run marks failed is counted, a restart and the web page's own error among them (src/duck/events.ts isFailure)
-  assert.match(textOf(kpis(RUNNING, { now: NOW, queries: QUERIES, syncErrors: { events: [EVENT, { ...EVENT, kind: "restart", failed: true }, { ...EVENT, kind: "ui_error", failed: true }, { ...EVENT, kind: "copied", failed: false }], keptDays: 7 } })), /Errors, last day 3 failed syncs, restarts and web page errors /);
+  assert.match(textOf(kpis(RUNNING, { now: NOW, queries: QUERIES, syncErrors: { events: [EVENT, { ...EVENT, kind: "restart", failed: true }, { ...EVENT, kind: "ui_error", failed: true }, { ...EVENT, kind: "full_sync", failed: false }], keptDays: 7 } })), /Errors, last day 3 failed syncs, restarts and web page errors /);
   for (const kind of ["restart", "ui_error"] as const) assert.equal(isFailure(kind), true, `${kind} is a failure the card counts`);
   assert.ok(!kpis(RUNNING, { now: NOW }).includes("errors, last day"), "not read yet: not shown");
   assert.ok(!kpis(NONE, { now: NOW, queries: QUERIES, syncErrors: EVENTS }).includes("errors, last day"), "nothing added: no error to count");
@@ -3480,8 +3534,8 @@ const IDLE = { ...SAMPLE, at: "2026-10-28T10:05:00.000Z", statements: 0, stateme
 const UL_USAGE = { since: "2026-10-27T09:05:00.000Z", until: "2026-10-28T09:05:00.000Z", stepSeconds: 3600, sampleSeconds: 60, keptDays: 7, samples: [SAMPLE, IDLE],
   copySizes: [{ table: "public.orders", bytes: 3 * 2 ** 30, at: "2026-10-28T09:00:12.000Z" }, { table: "public.customers", bytes: 40_000, at: "2026-10-28T09:00:12.000Z" }] };
 const UL_EVENTS = { keptDays: 7, events: [
-  { at: "2026-10-28T09:00:00.000Z", kind: "copied", failed: false, table: "public.orders", message: "copied 2,000,000 rows" },
-  { at: "2026-10-28T09:01:00.000Z", kind: "copy_failed", failed: true, table: "public.events", message: "the source closed the connection\nthe sync tries it again in 5 min" },
+  { at: "2026-10-28T09:00:00.000Z", kind: "full_sync", failed: false, table: "public.orders", message: "copied 2,000,000 rows" },
+  { at: "2026-10-28T09:01:00.000Z", kind: "full_sync_failed", failed: true, table: "public.events", message: "the source closed the connection\nthe sync tries it again in 5 min" },
   { at: "2026-10-28T09:05:00.000Z", kind: "restart", failed: true, table: null, message: "the run stopped <b>after</b> 42 s" }] };
 const LOG = { kept: 2000, lines: [{ at: "2026-10-28T09:00:00.000Z", text: "mason started" }, { at: null, text: "copy: public.orders\n  chunk 3 of 20 <read>" }] };
 const withUsageAnswers = (run: ReturnType<typeof fakeRun>) => {
@@ -3587,6 +3641,17 @@ test("Usage: over the last 15 minutes what runs every poll, the range's statemen
   assert.match(textOf(app.view()["usage-kpis"]!), /Queries, last 24 hours 1,204/, "the last counts stay under the banner");
 });
 
+test("Sync events: a failure's code and where in Mason it happened are one quiet line under its message; none for good news or an event from before Mason kept them (issue 924)", () => {
+  const renderEvents = fnOf<[unknown, Record<string, unknown>?], string>(syncsPage, "renderEvents");
+  const at = Date.parse("2026-10-27T09:10:00.000Z");
+  const text = textOf(renderEvents(EVENTS, { now: at }));
+  assert.match(text, /poll: connection reset the sync tries it again in 5 s Code ECONNRESET ?, at src\/duck\/sync\.ts:3640$/);
+  assert.match(text, /the run was started again after it stopped Code unknown 7 min ago/, "a failure with no origin: its code alone");
+  const old = { ...EVENT, code: null, origin: null };
+  const good = { ...EVENT, kind: "full_sync", failed: false, code: null, origin: null };
+  assert.doesNotMatch(textOf(renderEvents({ events: [old, good], keptDays: 7 }, { now: at })), /Code/);
+});
+
 test("Sync events: the sync's events are mason logs --events' lines in a table, a failure marked, NEWEST FIRST (When turns it round); none is said as the CLI says it", () => {
   const renderEvents = fnOf<[unknown, Record<string, unknown>?], string>(syncsPage, "renderEvents"), cells = fn<[unknown], Record<string, string>>("eventCells");
   for (const e of UL_EVENTS.events) {
@@ -3601,14 +3666,14 @@ test("Sync events: the sync's events are mason logs --events' lines in a table, 
     "oldest first, as the command lists them, when asked");
   assert.match(timeline, /<th scope="col" aria-sort="descending"><button type="button" class="sort on" data-sort-table="events" data-sort-key="time">When/);
   assert.match(timeline, /<time data-tick datetime="2026-10-28T09:00:00.000Z" title="2026-10-28 09:00:00 UTC">10 min ago<\/time>/, "how long ago, the UTC time as the command prints it its title");
-  assert.match(timeline, /<span title="copied"><span class="badge ok">Full sync<\/span><\/span>/); assert.equal([...timeline.matchAll(/<span class="badge bad">✗ /g)].length, 2, "a failure is a red badge with its ✗");
+  assert.match(timeline, /<span title="full_sync"><span class="badge ok">Full sync<\/span><\/span>/); assert.equal([...timeline.matchAll(/<span class="badge bad">✗ /g)].length, 2, "a failure is a red badge with its ✗");
   assert.equal([...html.matchAll(/class="t-failed"/g)].length, 2, "the failures are marked");
   // Failures only: what was read, narrowed in the page alone
   assert.equal(textOf(renderEvents(UL_EVENTS, { failuresOnly: true, now: at })), "2 of the 3 events read. When ↓ Kind Table Message 5 min ago ✗ Mason restarted Mason the run stopped <b>after</b> 42 s 9 min ago ✗ Full sync failed public.events the source closed the connection the sync tries it again in 5 min");
   // a kind and a table narrow it too, and compose
-  assert.match(textOf(renderEvents(UL_EVENTS, { kind: "copied", now: at })), /^1 of the 3 events read\. When ↓ Kind Table Message 10 min ago Full sync public\.orders/);
+  assert.match(textOf(renderEvents(UL_EVENTS, { kind: "full_sync", now: at })), /^1 of the 3 events read\. When ↓ Kind Table Message 10 min ago Full sync public\.orders/);
   assert.match(textOf(renderEvents(UL_EVENTS, { table: "Mason", now: at })), /^1 of the 3 events read\. .* Mason restarted Mason the run stopped/);
-  assert.equal(textOf(renderEvents(UL_EVENTS, { kind: "copied", failuresOnly: true })), "None of the 3 sync events read passes the filters.");
+  assert.equal(textOf(renderEvents(UL_EVENTS, { kind: "full_sync", failuresOnly: true })), "None of the 3 sync events read passes the filters.");
   assert.equal(textOf(renderEvents({ keptDays: 7, events: [UL_EVENTS.events[0]] }, { failuresOnly: true })), "None of the 1 sync event shown failed.");
   assert.doesNotMatch(html, /<b>/, "a message is escaped");
   assert.equal(textOf(renderEvents({ events: [], keptDays: 7 })), "No sync event in the last 7 days.");
@@ -4009,8 +4074,8 @@ test("the shell: the sidebar's project and a demo badge, its nav, its foot (upda
   const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
   assert.equal(app.view().version, "Mason 0.9.0", "the version, as mason status's Mason line says it");
   assert.match(app.view().updated!, /^Updated .* ago$/);
-  assert.match(html, /<aside id="sidebar" class="sidebar">\s*<div class="side-head">.*<h1 class="brand">.*<p id="where" class="where"><\/p><span id="badge"><\/span>.*<\/div>\s*<div id="side-body" class="side-body">.*<nav id="nav" class="nav" aria-label="Pages">.*<\/nav>\s*<div class="side-foot"><p id="updated" class="updated" aria-live="polite"><\/p><p id="version" class="version"><\/p><\/div>\s*<\/div>\s*<\/aside>/s,
-    "the sidebar: the project at its head, the nav, when it was updated and the version at its foot");
+  assert.match(html, /<aside id="sidebar" class="sidebar">\s*<div class="side-head">.*<h1 class="brand">.*<p id="where" class="where"><\/p><span id="badge"><\/span>.*<\/div>\s*<div id="side-body" class="side-body">.*<nav id="nav" class="nav" aria-label="Pages">.*<\/nav>\s*<!--[^]*?-->\s*<div id="account" class="account"><\/div>\s*<div class="side-foot"><p id="updated" class="updated" aria-live="polite"><\/p><p id="version" class="version"><\/p><\/div>\s*<\/div>\s*<\/aside>/s,
+    "the sidebar: the project at its head, the nav, the account the host names (empty when none), when it was updated and the version at its foot");
   assert.ok(!/class="topbar"|class="tabs"/.test(html), "no top nav beside it");
   assert.match(html, /<nav id="nav" class="nav" aria-label="Pages"><ul><li><a href=/, "the nav is a list of links: Tab reaches each, Enter follows it");
   assert.match(html, /<\/aside>\s*<div class="scrim" aria-hidden="true"><\/div>\s*<div class="content">\s*<div id="poll"><\/div>\s*<main>/, "the page beside the sidebar");
@@ -4030,7 +4095,7 @@ test("the vendored files: each a route, whole, pinned in its folder's name, with
   const { PAGE_ROUTES } = await import("../src/cli/run-server.ts") as { PAGE_ROUTES: Record<string, readonly [string, string]> };
   const vendor = webFiles().filter((f) => f.startsWith(`vendor${path.sep}`)).map((f) => f.split(path.sep).join("/")).sort();
   assert.deepEqual(vendor, ["vendor/README.md", "vendor/geist-1.7.2/Geist-Variable.woff2", "vendor/geist-1.7.2/GeistMono-Variable.woff2", "vendor/geist-1.7.2/LICENSE.txt",
-    "vendor/lucide-1.56.0/LICENSE.txt", "vendor/lucide-1.56.0/chart-column.mjs", "vendor/lucide-1.56.0/layout-dashboard.mjs", "vendor/lucide-1.56.0/link.mjs", "vendor/lucide-1.56.0/logs.mjs",
+    "vendor/lucide-1.56.0/LICENSE.txt", "vendor/lucide-1.56.0/chart-column.mjs", "vendor/lucide-1.56.0/circle-user.mjs", "vendor/lucide-1.56.0/layout-dashboard.mjs", "vendor/lucide-1.56.0/link.mjs", "vendor/lucide-1.56.0/logs.mjs",
     "vendor/lucide-1.56.0/menu.mjs", "vendor/lucide-1.56.0/panel-top.mjs", "vendor/lucide-1.56.0/square-terminal.mjs", "vendor/lucide-1.56.0/table.mjs", "vendor/lucide-1.56.0/users.mjs", "vendor/lucide-1.56.0/x.mjs",
     "vendor/uplot-1.6.32/LICENSE.txt", "vendor/uplot-1.6.32/uPlot.esm.js", "vendor/uplot-1.6.32/uPlot.min.css",
     "vendor/zilla-slab-5.3.0/LICENSE.txt", "vendor/zilla-slab-5.3.0/zilla-slab-latin-700-normal.woff2"]);
@@ -4491,7 +4556,7 @@ test("Sync events: Scheduled syncs (or a scheduled kind chosen) asks the run for
   assert.match(textOf(app.view()["syncs-events"]!), /^1 of the 5 events read\. When ↓ Kind Table Message 60s ago Scheduled sync public\.orders/);
   // another kind: no read, the page's filter alone
   run.asked.length = 0;
-  assert.equal(await app.pages.get("syncs")!.input({ id: "syncs-kind", value: "copied" }), undefined);
+  assert.equal(await app.pages.get("syncs")!.input({ id: "syncs-kind", value: "full_sync" }), undefined);
   assert.deepEqual(run.asked, ["GET api/events?limit=500&since=15m"], "back to the events without them");
 });
 
@@ -4532,8 +4597,8 @@ test("Sync events: 'Failures only' asks the run for the range's failures alone; 
   // read here names customers, orders and events; public.events has events, public.customers none)
   const words = (syncsPage as Record<string, unknown>).KIND_WORDS as Record<string, string>;
   assert.equal(textOf(app.view()["syncs-filters"]!), `Kind Every kind ${EVENT_KINDS.map((k) => words[k]).join(" ")} Table Every table Mason events public.customers public.events public.orders`);
-  assert.equal(app.pages.get("syncs")!.input({ id: "syncs-kind", value: "copy_failed" }), true);
-  assert.match(app.view()["syncs-filters"]!, /<option value="copy_failed" selected>/);
+  assert.equal(app.pages.get("syncs")!.input({ id: "syncs-kind", value: "full_sync_failed" }), true);
+  assert.match(app.view()["syncs-filters"]!, /<option value="full_sync_failed" selected>/);
   assert.match(textOf(app.view()["syncs-events"]!), /^1 of the 3 events read\. When ↓ Kind Table Message 9 min ago ✗ Full sync failed/);
   app.pages.get("syncs")!.input({ id: "syncs-kind", value: "" });
   run.asked.length = 0;
@@ -4862,7 +4927,7 @@ test("large data: a 64 KiB statement — one line in its cell, a title of at mos
 
 test("large data: 500 sync events — the 100 newest written, Show more; a 7-day window of samples with a spike — every point kept, the axis from zero, its labels days", () => {
   const renderEvents = fnOf<[unknown, Record<string, unknown>?], string>(syncsPage, "renderEvents");
-  const events = Array.from({ length: 500 }, (_, i) => ({ at: new Date(Date.UTC(2026, 9, 21) + i * 1200_000).toISOString(), kind: i % 10 ? "copied" : "poll_failed", failed: i % 10 === 0,
+  const events = Array.from({ length: 500 }, (_, i) => ({ at: new Date(Date.UTC(2026, 9, 21) + i * 1200_000).toISOString(), kind: i % 10 ? "full_sync" : "poll_failed", failed: i % 10 === 0,
     table: `analytics_warehouse_${i % 40}.fact_customer_order_line_items_${i}`, message: `m${i}` }));
   const html = renderEvents({ events, keptDays: 7 });
   assert.equal([...html.matchAll(/<tr/g)].length, 1 + 100);
@@ -5714,14 +5779,14 @@ test("Sync events' filters list every kind and every added table, whatever the r
   const renderEventFilters = of<[unknown, Record<string, string>, unknown], string>(syncsPage, "syncs.js", "renderEventFilters");
   const renderEvents = of<[unknown, Record<string, unknown>], string>(syncsPage, "syncs.js", "renderEvents");
   assert.deepEqual((syncsPage as Record<string, unknown>).EVENT_KINDS, [...EVENT_KINDS], "the page's kinds are src/duck/events.ts's");
-  const only = { events: [{ at: "2026-10-28T09:00:00.000Z", kind: "copied", failed: false, table: "public.orders", message: "copied" }], keptDays: 7 };
+  const only = { events: [{ at: "2026-10-28T09:00:00.000Z", kind: "full_sync", failed: false, table: "public.orders", message: "synced" }], keptDays: 7 };
   const text = textOf(renderEventFilters(only, { kind: "", table: "" }, RUNNING));
   // each kind in the page's words, its code the option's value: a word for every kind the sync records
   const words = (syncsPage as Record<string, unknown>).KIND_WORDS as Record<string, string>;
   for (const k of EVENT_KINDS) assert.ok(typeof words[k] === "string" && words[k] !== k, `${k} has its words on the page`);
   assert.equal(text, `Kind Every kind ${EVENT_KINDS.map((k) => words[k]).join(" ")} Table Every table Mason events public.customers public.events public.orders`);
   assert.match(renderEventFilters(only, { kind: "synced", table: "" }, RUNNING), /<option value="synced" selected>Manual sync<\/option>/);
-  assert.match(renderEventFilters(only, {}, RUNNING), /<option value="copied">Full sync<\/option>.*<option value="polled">Scheduled sync<\/option><option value="streamed">Live sync<\/option>/s);
+  assert.match(renderEventFilters(only, {}, RUNNING), /<option value="full_sync">Full sync<\/option>.*<option value="polled">Scheduled sync<\/option><option value="streamed">Live sync<\/option>/s);
   // a removed table's events keep it a choice; nothing read yet still lists the added tables
   assert.match(textOf(renderEventFilters({ events: [{ ...only.events[0], table: "public.gone" }], keptDays: 7 }, {}, RUNNING)), /public\.orders public\.gone$/);
   assert.match(textOf(renderEventFilters(undefined, {}, RUNNING)), /Every table Mason events public\.customers public\.events public\.orders$/);

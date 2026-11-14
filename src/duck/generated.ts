@@ -895,7 +895,7 @@ export class GeneratedTables {
       at.error = failureWords(x);
       const m = `its re-run failed (it serves what it last held; tried again after ${new Date(at.retryAt).toISOString()}): ${at.error}`;
       this.host.log(`${at.name}: ${m}`);
-      this.host.event({ kind: "generated_failed", table: at.name, message: m });
+      this.host.event({ kind: "generated_failed", table: at.name, message: m, cause: x });
       return at;
     } finally {
       for (const m of members) m.running = false;
