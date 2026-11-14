@@ -378,9 +378,6 @@ const recorded: ApiLogRow[] = [];
 const everLogged: string[] = [];
 
 before(async () => {
-  // every table is a synced copy, as the sync's build of the catalog declares it (src/api/postgres/schema.ts `PgTable.synced`): a jsonb
-  // is read as Postgres's canonical text only on one (src/duck/plan.ts `canonicalRelations`, fail closed)
-  for (const t of schema.tables) t.synced = true;
   store = await DuckStore.open(path.join(dir, "duck.db"), (l) => (logged.push(l), everLogged.push(l)));
   for (const s of DDL) await store.writer.run(s);
   // a session starts in UTC on this API, as on a server whose TimeZone is UTC

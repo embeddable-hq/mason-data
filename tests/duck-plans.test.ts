@@ -116,9 +116,6 @@ const schema: PgSchema = {
   ],
   views: [{ schema: "public", name: "customer_orders", definition: " SELECT o.id, o.meta, c.name, c.created_at FROM public.orders o LEFT JOIN public.customers c ON c.id = o.customer_id;" }],
 };
-// every table a synced copy, as the sync's build of the catalog declares it (src/api/postgres/schema.ts `PgTable.synced`): a
-// jsonb is read as Postgres's canonical text only on one (src/duck/plan.ts `canonicalRelations`, fail closed)
-for (const t of schema.tables) t.synced = true;
 
 /**
  * Where a statement is planned (`on`): the shop with nothing stored, under C (absent: every statement above the jsonb

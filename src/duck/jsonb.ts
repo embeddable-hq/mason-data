@@ -96,8 +96,12 @@ export function parseJson(text: string): Json {
   return v;
 }
 
+/** a character `quoteJson` writes otherwise than itself: `"`, `\` and the control characters */
+const NEEDS_ESCAPE = /["\\\u0000-\u001f]/;
 /** `escape_json`: a string as Postgres's json output quotes it */
 export function quoteJson(s: string): string {
+  // nothing to escape (most strings): quoted whole, never a character at a time
+  if (!NEEDS_ESCAPE.test(s)) return `"${s}"`;
   let out = '"';
   for (const ch of s) {
     const code = ch.codePointAt(0)!;
@@ -142,5 +146,50 @@ export function writeJson(v: Json): string {
 
 /** A JSON text as Postgres's jsonb writes it; throws a json syntax error for a text that is no JSON. */
 export function jsonbText(text: string): string {
-  return writeJson(parseJson(text));
+  return fastJsonbText(text) ?? writeJson(parseJson(text));
+}
+
+/** a JSON string (skipped whole) or a number, as JSON's grammar writes them (`parseJson`'s number) */
+const TOKENS = /"(?:[^"\\]|\\.)*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+const PLAIN_INTEGER = /^-?(?:0|[1-9]\d*)$/;
+const ASCII = /^[\x00-\x7f]*$/;
+
+/**
+ * `jsonbText` BY V8'S OWN PARSER, about 15 times faster than `parseJson` (issue 461: a generated table's build writes
+ * every jsonb it stores through it, 25 µs a 340-byte document the slow way, 40 s over 1 M rows): JSON.parse with each
+ * number a double would not keep handed over as its text, then written as `writeJson` writes it — the keys in jsonb's order, a key held twice
+ * kept once with its LAST value (as JSON.parse keeps it), `numeric_out`'s number text. Null where it does not answer
+ * exactly what the slow path answers, which then answers: a text holding a `\u` escape (`\u0000` and a lone surrogate,
+ * which jsonb refuses and JSON.parse reads), and a text JSON.parse refuses (the slow path says why in Postgres's words).
+ * `tests/duck-jsonb-text.test.ts` holds the two to the same text over every shape.
+ */
+function fastJsonbText(text: string): string | null {
+  if (text.includes("\\u")) return null;
+  let v: unknown;
+  try {
+    // each number whose text a double would not keep (a point, an exponent, `-0`, past 2^53) handed to JSON.parse as a
+    // string marked by a NUL, which no string of this text can hold (a raw NUL is no JSON, an escaped one goes the slow
+    // way): JSON.parse's reviver with its source text was 3-5 times its cost
+    v = JSON.parse(text.replace(TOKENS, (m) => m.charCodeAt(0) === 34 || (PLAIN_INTEGER.test(m) && m !== "-0" && Number.isSafeInteger(Number(m))) ? m : `"\\u0000${m}"`));
+  } catch (e) {
+    // not JSON to V8: the slow path reads it again and refuses it in Postgres's words (a tolerable failure, nothing changed)
+    if (e instanceof SyntaxError) return null;
+    throw e;
+  }
+  return fastWrite(v);
+}
+
+function fastWrite(v: unknown): string {
+  if (v === null) return "null";
+  if (v === true) return "true";
+  if (v === false) return "false";
+  if (typeof v === "number") return String(v);
+  if (typeof v === "string") return v.charCodeAt(0) === 0 ? numericText(parseNumeric(v.slice(1))) : quoteJson(v);
+  if (Array.isArray(v)) return `[${v.map(fastWrite).join(", ")}]`;
+  const o = v as Record<string, unknown>;
+  const keys = Object.keys(o);
+  // jsonb's order (`keyOrder`): by UTF-8 length, then bytes, which for ASCII keys is the string's length and its order
+  if (keys.every((k) => ASCII.test(k))) keys.sort((a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0));
+  else keys.sort(keyOrder);
+  return `{${keys.map((k) => `${quoteJson(k)}: ${fastWrite(o[k])}`).join(", ")}}`;
 }

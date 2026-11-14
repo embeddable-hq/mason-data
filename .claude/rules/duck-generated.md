@@ -89,6 +89,16 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   reason against every wrapper", tests/duck-generated-round6.test.ts "round 6: a numeric's reason is the type each
   node computes", and tests/duck-generated-round7-8.test.ts "round 7: the walk follows a sublink, a CTE, a set
   operation's arms and a subquery", each reason with its way out held exactly, built and stored.
+- **A jsonb a generated table stores is Postgres's text of it, as jsonb_out writes it** (`canonicalJsonb`, issue 461's
+  fourth review): keys by length then bytes, a key written twice kept once with its last value, jsonb_out's spacing and
+  number text, at every depth, through src/duck/jsonb.ts `jsonbText` once a row at the build. So every table's jsonb is
+  canonical, and every native read of a table's jsonb column (src/duck/rewrite.ts `copiedColumn`: the keys, `->`,
+  `->>`, `@>`) is Postgres's answer with no decision per relation. A column that is a table's jsonb read as it is
+  (src/duck/pgtree.ts `tableColumnThrough`: a synced table's, a generated parent's) is that text already, and kept as
+  it is. A table built before (`jsonb_layout` NULL on its ledger row, `JSONB_LAYOUT`) is rewritten in place at `open`,
+  with its ledger row in one transaction, before the catalog serves anything. Measured over 1 M rows of ~340-byte
+  documents on a loaded 4-core machine: a build that canonicalises took 24–32 s where one that does not took 2.5–3 s.
+  `tests/duck-generated.test.ts` "issue 461", `tests/duck-jsonb-text.test.ts`, `tests/integration/duck-generated.itest.ts` `jtwice`.
 - **The run's connection is a session's, set up by the ONE set-up** (src/duck/store.ts `SessionSetup`: the session
   variable every Mason function reads first, the null order, the zone, the search_path, the settings `current_setting`
   reads), never by hand: a connection without `__mason_session` answers NULL from every Mason function (DuckDB's NULL in,

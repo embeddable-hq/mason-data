@@ -1267,31 +1267,30 @@ is refused too.
 #### A copied column's keys (issue 461, 2026-11-14)
 
 **Decision.** `json(b)_object_keys` of a table's column of the function's own type is DuckDB's own `json_keys`, read
-once a row (`objectKeys`, `keysNative`). A synced table's jsonb is Postgres's canonical text, so its keys are already in
-jsonb's order (length first, then bytes), each held once. A json column is its text, and Postgres reads its keys in that
-order, a key held twice included, as `json_keys` does. The function stays for the rows it must answer: a non-object
+once a row (`objectKeys`, `keysNative`). Every jsonb a table holds is Postgres's canonical text, so its keys are already
+in jsonb's order (length first, then bytes), each held once. A json column is its text, and Postgres reads its keys in
+that order, a key held twice included, as `json_keys` does. The function stays for the rows it must answer: a non-object
 (Postgres's 22023), and a json document whose text holds a `\u` escape (Postgres refuses `\u0000` and a lone surrogate,
-where DuckDB reads them). A cast, a `->`, a jsonb the statement computes and a generated table's jsonb stay the
-function's. Such a LEFT lateral is the never-empty INNER one bounded or not (`leftLateral`), since a row costs no call.
+where DuckDB reads them). A cast, a `->` and a jsonb the statement computes stay the function's. Such a LEFT lateral is
+the never-empty INNER one bounded or not (`leftLateral`), since a row costs no call.
 
-**A generated table's jsonb is not canonical (the review, 2026-11-14).** It is a relation of the catalog like a synced
-table, but it holds the engine's text of what its SELECT computed: `jsonb_build_object('bb', 1, 'a', id, 'bb', 2, 'c',
-3)` keeps both `bb`s in the order written, where Postgres's jsonb is `{"a": 1, "c": 3, "bb": 2}`. The first round took
-"a relation's column" for "a synced table's column", and answered `bb, a, bb, c` where Postgres answers `a, c, bb`. The
-same premise had read a generated table's `->` and `@>` by the first of the two `bb`s since issue 130 (`(j -> 'bb')`
-was `1`, `j @> '{"bb": 1}'` true, where Postgres has `2` and false). Now ONE decision says a column's jsonb is canonical
-(`copiedColumn`): a relation the BUILD of the catalog the statement was analysed on declared a synced copy
-(`PgTable.synced`, from src/duck/sync.ts `schemaBuilt`; `PgCatalog.syncedOf` reads the running instance's build and
-resolves the relids on that same instance). It fails closed: a generated table, and every relation of a plan given no
-record, is the function's, right and only slower. Every native read that skips checking each key is held once asks it.
+**A generated table stores its jsonb as Postgres does (the owner's decision, 2026-11-14).** A generated table's build
+held the engine's text of what its SELECT computed: `jsonb_build_object('bb', 1, 'a', id, 'bb', 2, 'c', 3)` kept both
+`bb`s in the order written, where Postgres's jsonb is `{"a": 1, "c": 3, "bb": 2}`. Read natively, its keys were
+`bb, a, bb, c`, and main had read its `->` and `@>` by the first `bb` since issue 130. Three rounds decided per relation
+whether its jsonb was canonical: by any relation, then by the run's live list of what each table is, then by the build
+of the catalog. Each was open in a window: a removal took a table off the list before the catalog dropped it, an entry
+added under a generated table's name called it synced before the catalog was rebuilt, a rebuild during a plan reused
+relids, and a prepared statement kept a plan made before its table became generated. So the decision was removed:
+the build writes every jsonb it stores as jsonb_out writes it (src/duck/generated.ts `canonicalJsonb`, through
+src/duck/jsonb.ts `jsonbText` once a row), and every table's jsonb is canonical. A column that is a table's jsonb read
+as it is (src/duck/pgtree.ts `tableColumnThrough`) is that text already and is kept. A table an earlier Mason built is
+rewritten in place when the store opens, before the catalog serves it (`jsonb_layout` on its ledger row).
 
-Two forms of it read the run's live list of what each table is (`copies`) and were each open in a window, because that
-list moves before the catalog is rebuilt. The second review found "every relation the list does not name as generated"
-open while a generated table's file is removed: `remove` (src/duck/generated.ts) takes it off the list at once, and drops
-it from the catalog only at the writer's turn, which a poll's full scan held for 25 s, so it was read natively for about
-40 s (`bb,a,bb,c`). The third found "every relation the list names as synced" open when a sources entry is added for
-the name a generated table serves: the list calls it synced at once, and the catalog serves the generated table for
-100-200 ms more. Only the build that makes a relation says what it holds, so the two cannot disagree in any window.
+`jsonbText` was made about twice as fast for it: V8's JSON.parse with each number a double would not keep handed over
+as its text, and a string with nothing to escape quoted whole, where the slow path parsed and quoted a character at a
+time (25 µs a 340-byte document). Over 1 M such documents on a loaded 4-core machine a build that canonicalises took
+24–32 s where one that does not took 2.5–3 s. A generated table that passes a jsonb column through pays nothing.
 
 **Why.** On 2026-11-12, Metabase's `SELECT jsonb_object_keys(payload) AS key, count(*) … GROUP BY 1 ORDER BY 2 DESC, 1`
 over 3 M rows took 172–264 s against Postgres's 4.4–8.4 s, and timed out above about 5 M rows. The profile here: the
