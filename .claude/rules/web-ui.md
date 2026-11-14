@@ -81,7 +81,7 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   (`pop`, below). While a form is
   open or a Remove asks, the list is FROZEN at the state it opened over (`held`, src/web/pages/tables.js: no refresh, however
   long), so a poll never rewrites it under the person; it is written from the latest state again at Add, Cancel or confirm.
-  Sync is `POST /api/sync` `{ tables: [name] }` (`mason sync`), said beside its Sync as `mason sync` says it, but for its tips, which name the page's Sync now
+  Sync is `POST /api/sync` `{ tables: [name] }` (`mason sync`), answered as the sync starts and followed in `/api/state` `tables[].syncByHand` (Syncing… until it ends, a page reloaded mid-sync too: issue 1007, a big table's sync outlasted a proxy's wait), what it did said beside its Sync as `mason sync` says it, but for its tips, which name the page's Sync now
   (`syncedReport`, src/cli/sync.ts), and written disabled, in its room, its title the reason, while `/api/state`
   `tables[].syncRefusal` says why `mason sync` of it is refused now — the sync's one check, which `pollNow` refuses with
   (`Sync.syncRefusal`, src/duck/sync.ts), never a check of the page's own; the tables are two lists, Added over Not added, each table in the list it was in when the lists were last laid out (`layoutOf`: the page shown, the search or Failed only changed), so a table just added keeps its row; the search box filters both by name, and Failed only lists the failed tables alone, in the page alone (the endpoint returns every table).

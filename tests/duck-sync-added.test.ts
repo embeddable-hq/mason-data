@@ -423,7 +423,7 @@ test("mason sync of a table being read again says why, never that its first sync
 test("each table's state says why mason sync of it is refused now, in the words pollNow refuses with, or null when it runs (the page's Sync now, issue 812)", async () => {
   const names = ["a", "b", "c", "d", "e", "f", "g", "h", "i"];
   await withSync({ mode: "poll", tables: names.map((n) => table(n)),
-    seed: async (run) => { for (const n of ["a", "d", "e", "f", "g", "h", "i"]) { await run(copied(n)); await run(lastPoll(n)); } await run(copied("c", [column("id")], "failed", "could not read the next chunk")); } }, async (sync) => {
+    seed: async (run) => { for (const n of ["a", "d", "e", "f", "g", "h", "i"]) { await run(copied(n)); await run(lastPoll(n)); } await run(copied("c", [column("id")], "failed", "could not read the next chunk")); } }, async (sync, _logged, events) => {
     type Inner = { stopped: boolean; attach(): Promise<void>; states: Map<string, CopyState>; copiedAs: Map<string, string>; snapshots: Map<string, unknown>;
       retired: Map<string, { layout: string; short: string }>; behind: Map<string, { why: string }>; rebuildingNow: { source: string; kind: string } | null };
     const s = sync as unknown as Inner;
@@ -445,7 +445,10 @@ test("each table's state says why mason sync of it is refused now, in the words 
       const states = sync.state();
       const json = JSON.parse(JSON.stringify(runState(runContext([...names.map((n) => table(n)), table("zz")], "poll"), states, null))) as RunState & { tables: { table: string; syncRefusal?: string | null }[] };
       for (const n of [...names, "zz"]) {
+        // the check POST /api/sync answers at once, before any sync starts (issue 1007): pollNow's own refusal, the same words
+        const asked = sync.pollRefusal([`public.${n}`])?.message ?? null;
         const refused = await refusalOf(n);
+        assert.equal(asked, refused, `public.${n}: refused as it is asked exactly as pollNow refuses`);
         if (n === "a") assert.equal(refused, null, "a copied table, current: mason sync runs it (here it fails on the source, never refused)");
         else assert.ok(refused !== null, `public.${n} is refused`);
         if (n !== "zz") assert.equal(states.find((x) => x.source === `public.${n}`)!.syncRefusal, refused, `public.${n}: the state's reason is pollNow's refusal`);
@@ -455,6 +458,10 @@ test("each table's state says why mason sync of it is refused now, in the words 
       assert.match(states.find((x) => x.source === "public.c")!.syncRefusal!, /^public\.c is not synced yet \(its first sync failed: could not read the next chunk\)/);
       assert.match(states.find((x) => x.source === "public.e")!.syncRefusal!, /^public\.e is being read again whole \(its columns changed\)/);
       assert.match(states.find((x) => x.source === "public.h")!.syncRefusal!, /^public\.h is being caught up by one poll after its whole read/);
+      // A SYNC BY HAND THAT FAILED IS AN EVENT, as one that ran is (`synced`): its reason is the ledger's, never only an
+      // answer no one may hold (issue 1007); a refusal is none (nothing ran)
+      assert.deepEqual(events.filter((e) => e.kind === "sync_failed").map((e) => [e.table, e.message]), [["public.a", "sync by hand failed: no source in this test"]]);
+      assert.equal(sync.pollRefusal(["public.a", "public.b"])?.message, sync.pollRefusal(["public.b"])?.message, "one table refused refuses the sync");
     } finally { s.stopped = true; }
   });
   // a run that reads every table again whole: every table refused, in the one sentence
@@ -463,6 +470,7 @@ test("each table's state says why mason sync of it is refused now, in the words 
     const refused = await sync.pollNow(["public.a"]).then(() => null, (e: Error) => e.message);
     assert.match(refused ?? "", /MASON_DUCK_SYNC=recopy/);
     assert.equal(sync.state()[0]!.syncRefusal, refused);
+    assert.equal(sync.pollRefusal(["public.a"])?.message, refused, "refused as it is asked");
     (sync as unknown as { stopped: boolean }).stopped = true;
   });
 });

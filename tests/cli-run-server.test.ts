@@ -61,11 +61,19 @@ fs.writeFileSync(duckFile, "x".repeat(10));
 let copies: CopyState[] = [];
 // the sync's own poll (src/duck/sync.ts pollNow): what it found, or its refusal by name
 const asked: string[][] = [];
-const pollNow = (sources: string[]): Promise<{ at: string; tables: PolledTable[] }> => {
+// a test holds a sync running until it lets it end (`pollGate`), as a big table's scan does
+let pollGate: Promise<void> | null = null;
+const pollNow = async (sources: string[]): Promise<{ at: string; tables: PolledTable[] }> => {
   asked.push(sources);
-  if (sources.includes("public.logs")) return Promise.reject(new PollRefused("nothing_yet", "public.logs is not synced yet (its first sync has not finished): mason wait waits for it"));
-  return Promise.resolve({ at: "2026-10-24T10:05:00.000Z", tables: sources.map((table) => ({ table, changed: 2, deleted: 1, rows: 3, ms: 40 })) });
+  if (pollGate !== null) await pollGate;
+  // a refusal met once the pass ahead of it ended, and a sync that failed on the database
+  if (sources.includes("public.events")) throw new PollRefused("nothing_yet", "public.events is being caught up by one poll (its synced data serves as it was): it is caught up by one poll when that ends, so there is nothing to poll — mason wait waits for it");
+  if (sources.includes("public.Shouty")) throw new Error("the poll failed: connection reset");
+  return { at: "2026-10-24T10:05:00.000Z", tables: sources.map((table) => ({ table, changed: 2, deleted: 1, rows: 3, ms: 40 })) };
 };
+// the sync's one check as it is asked (src/duck/sync.ts pollRefusal): its refusal by name, before any poll
+const refusedNow = (sources: string[]): InstanceType<typeof PollRefused> | null =>
+  sources.includes("public.logs") ? new PollRefused("nothing_yet", "public.logs is not synced yet (its first sync has not finished): mason wait waits for it") : null;
 // the request log's reads (src/duck/requests.ts), as the ledger answers them: the server passes them on, never a copy
 const asks: RequestQuery[] = [];
 const request: LedgerRequest = { requestId: "r1", startedAt: "2026-10-24T10:04:00.000Z", session: 3, applicationName: "Metabase", clientAddress: null, tokenName: "", user: "", role: "", attributes: null, method: "QUERY",
@@ -131,7 +139,7 @@ const ctx: RunContext = {
   readSource: () => chosen === null ? { message: "no folder chosen", code: "bad_source" } : readSource(chosen, path.join(root, "app"), {}),
   runUrl: "postgres://me@localhost:5432/app", listener,
   logs: runLog,
-  duck: { copies: () => copies, file: duckFile, poll: pollNow, stream: async () => null, disk: () => disk, requests, events, usage, restarts: () => { if (restartsUnreadable) throw new SyntaxError("Unexpected end of JSON input"); return restarts; } },
+  duck: { copies: () => copies, file: duckFile, poll: pollNow, refused: refusedNow, stream: async () => null, disk: () => disk, requests, events, usage, restarts: () => { if (restartsUnreadable) throw new SyntaxError("Unexpected end of JSON input"); return restarts; } },
 };
 const server = createRunServer(ctx);
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
@@ -381,13 +389,15 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
       const r = await fetch(`http://127.0.0.1:${ctx.port}${p}`, { method: "POST", headers: { Authorization: "Bearer t0ken-of-this-run", "Content-Type": "application/json" }, body: JSON.stringify(body) });
       return { status: r.status, body: await r.json() as Record<string, unknown> };
     };
-    const polled = await post("/api/sync", { tables: ["public.customers"] });
+    // mason sync's request (wait: true): held to the sync's end, its answer what the sync did
+    const polled = await post("/api/sync", { tables: ["public.customers"], wait: true });
     assert.deepEqual([polled.status, polled.body], [200, { at: "2026-10-24T10:05:00.000Z", tables: [{ table: "public.customers", changed: 2, deleted: 1, rows: 3, ms: 40 }] }]);
-    const refused = await post("/api/sync", { tables: ["public.logs"] });
+    const refused = await post("/api/sync", { tables: ["public.logs"], wait: true });
     assert.deepEqual([refused.status, refused.body.code], [409, "nothing_yet"], "a refusal keeps the sync's code for the CLI");
     assert.match(String(refused.body.error), /public\.logs is not synced yet/);
     assert.equal((await post("/api/sync", { tables: [] })).status, 400);
-    assert.deepEqual(asked, [["public.customers"], ["public.logs"]]);
+    assert.equal((await post("/api/sync", { tables: ["public.customers"], wait: "yes" })).status, 400, "wait is true or false");
+    assert.deepEqual(asked, [["public.customers"]], "a refusal starts no sync");
     assert.deepEqual(s.body.sessions, sessionsNow, "the listener's own count, by user and client");
     assert.deepEqual(s.body.disk, { path: "/data", freeBytes: 75 * 2 ** 30, copyBytes: 10, projectedBytes: null }, "the disk under the copy: its file is engine.bytes, one fact");
     const { uptimeSeconds, ...engine } = s.body.engine as { uptimeSeconds: number };
@@ -432,6 +442,61 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
     assert.deepEqual((await get("/api/ping")).body, { pid: process.pid });
     for (const p of ["/api/builds", "/api/built-from", "/api/memory"]) assert.equal((await get(p)).status, 404, `${p} was the ClickHouse run's`);
   } finally { copies = []; }
+});
+
+test("POST /api/sync answers as the sync starts, and /api/state follows it to its end: syncing, then what it did or why it failed; a refusal at once; a second ask never a second sync (issue 1007)", async () => {
+  const call = async (method: string, p: string, body?: unknown): Promise<{ status: number; body: Record<string, unknown> }> => {
+    const r = await fetch(`http://127.0.0.1:${ctx.port}${p}`, { method, headers: { Authorization: "Bearer t0ken-of-this-run", ...(body === undefined ? {} : { "Content-Type": "application/json" }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    return { status: r.status, body: await r.json() as Record<string, unknown> };
+  };
+  const byHand = async (table: string): Promise<Record<string, unknown> | undefined> =>
+    ((await call("GET", "/api/state")).body.tables as Array<{ table: string; syncByHand?: Record<string, unknown> }>).find((t) => t.table === table)!.syncByHand;
+  asked.length = 0;
+  logged.length = 0;
+  let end!: () => void;
+  pollGate = new Promise<void>((r) => { end = r; });
+  try {
+    // A SLOW SYNC: answered 202 while it runs, never held to its end
+    const started = await Promise.race([call("POST", "/api/sync", { tables: ["public.orders"] }), new Promise<"held">((r) => setTimeout(() => r("held"), 3000))]);
+    assert.notEqual(started, "held", "answered before the sync ended");
+    if (started === "held") return;
+    const sync = started.body.sync as { id: number; startedAt: string };
+    assert.deepEqual([started.status, started.body], [202, { sync: { id: sync.id, tables: ["public.orders"], state: "syncing", startedAt: sync.startedAt, endedAt: null }, already: false }]);
+    assert.deepEqual(await byHand("public.orders"), { id: sync.id, tables: ["public.orders"], state: "syncing", startedAt: sync.startedAt, endedAt: null }, "the state says it runs: a page opened now says Syncing…");
+    // THE SAME TABLE AGAIN: that sync is the answer, never a second one; a sync of it beside another table is refused
+    const again = await call("POST", "/api/sync", { tables: ["public.orders"] });
+    assert.deepEqual([again.status, (again.body.sync as { id: number }).id, again.body.already], [202, sync.id, true]);
+    const beside = await call("POST", "/api/sync", { tables: ["public.customers", "public.orders"] });
+    assert.deepEqual([beside.status, beside.body.code], [409, "refused"]);
+    assert.equal(beside.body.error, `public.orders is already syncing (a sync of public.orders started at ${sync.startedAt}): sync the others alone, or again once it ends`);
+    // mason sync of it meanwhile (wait: true) waits for that same sync's end, and answers what it did
+    const waiting = call("POST", "/api/sync", { tables: ["public.orders"], wait: true });
+    // A REFUSAL IS AT ONCE, while another sync runs, and starts nothing
+    const refused = await call("POST", "/api/sync", { tables: ["public.logs"] });
+    assert.deepEqual([refused.status, refused.body.code], [409, "nothing_yet"]);
+    assert.match(String(refused.body.error), /^public\.logs is not synced yet/);
+    assert.deepEqual(asked, [["public.orders"]], "one sync, however many asks");
+    end();
+    const waited = await waiting;
+    assert.deepEqual([waited.status, waited.body], [200, { at: "2026-10-24T10:05:00.000Z", tables: [{ table: "public.orders", changed: 2, deleted: 1, rows: 3, ms: 40 }] }]);
+    const done = await byHand("public.orders") as { endedAt: string };
+    assert.deepEqual(done, { id: sync.id, tables: ["public.orders"], state: "synced", startedAt: sync.startedAt, endedAt: done.endedAt,
+      answer: { at: "2026-10-24T10:05:00.000Z", tables: [{ table: "public.orders", changed: 2, deleted: 1, rows: 3, ms: 40 }] } }, "then what it did");
+    assert.ok(Date.parse(done.endedAt) >= Date.parse(sync.startedAt));
+    // A SYNC THAT FAILS: its reason on the state, the run's log says it once; one refused once the pass ahead ended keeps its code
+    pollGate = null;
+    assert.equal((await call("POST", "/api/sync", { tables: ["public.Shouty"] })).status, 202);
+    assert.equal((await call("POST", "/api/sync", { tables: ["public.events"] })).status, 202);
+    await new Promise((r) => setTimeout(r, 50));
+    const failed = await byHand("public.Shouty") as { failure: unknown; state: string };
+    assert.deepEqual([failed.state, failed.failure], ["failed", { code: "failed", message: "the poll failed: connection reset" }]);
+    assert.ok(logged.includes("sync by hand of public.Shouty failed: the poll failed: connection reset"), logged.join("\n"));
+    const late = await byHand("public.events") as { failure: { code: string; message: string } };
+    assert.deepEqual([late.failure.code, late.failure.message.startsWith("public.events is being caught up")], ["nothing_yet", true]);
+    // and mason sync of one that fails: the failure as before (500, the run's log its next step)
+    const broke = await call("POST", "/api/sync", { tables: ["public.Shouty"], wait: true });
+    assert.deepEqual([broke.status, broke.body.error, (broke.body.failure as { next: unknown }).next], [500, "the poll failed: connection reset", [{ command: "mason logs", what: "the run's log: what it was doing" }]]);
+  } finally { end(); pollGate = null; }
 });
 
 test("each table's sync: its state in one word, when it was last brought current, by what and how long it took, its age now; and the copies in all", async () => {

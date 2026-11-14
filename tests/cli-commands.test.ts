@@ -868,7 +868,10 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
     folder: () => s.folder, root: app, home: path.join(app, ".mason"), version: "test", startedAt: Date.now(), sources: () => { const r = read(); return { file: "message" in r ? null : r, problem: null }; }, sourcesChanged: () => {}, log: () => {},
     readSource: () => { runEdits++; return read(); }, runUrl: s.url, listener: { running: () => [], cancel: (session) => ({ unknown: session }), openSessions: () => ({ open: 0, byClient: [] }) },
     logs: { capacity: 2000, recent: () => [] },
-    duck: { copies: () => usageCopies as never[], file: path.join(s.root, "duck.db"), poll: async (tables) => { polled.push(tables); return { at: "2026-11-07T10:00:00.000Z", tables: [] }; }, stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
+    duck: { copies: () => usageCopies as never[], file: path.join(s.root, "duck.db"), refused: () => null,
+      // a sync that takes a while (a scan of each table): mason sync waits for its end and prints what it did (issue 1007)
+      poll: async (tables) => { polled.push(tables); await new Promise((r) => setTimeout(r, 400)); return { at: "2026-11-07T10:00:00.000Z", tables: tables.map((table) => ({ table, changed: 5, deleted: 1, rows: 10, ms: 400 })) }; },
+      stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }), slowest: async () => [], durationsBy: async () => new Map([[Date.parse(sample.at), { p50: sample.durationP50Ms, p95: sample.durationP95Ms }]]), 
         lastUsed: async (u) => u.map(() => null) }, events: { days: 7, recent: async () => [] },
       usage: { days: 7, sampleSeconds: 60, samples: async (o) => { usageAsks.push(o); return [sample]; }, copySizes: async () => [{ table: "public.orders", bytes: 3 * 2 ** 20, at: "2026-10-28T09:10:00.000Z" }], lastMeasure: () => measure, statementTotals: () => ({ completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 }), lastDurations: () => null },
@@ -981,6 +984,13 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
       assert.equal(all.code, 0, all.stdout + all.stderr);
       assert.deepEqual(polled, [["public.customers", "public.orders"]]);
       assert.deepEqual(nextOf(all.stdout), ["mason sync --all", "mason status"]);
+      // MASON SYNC WAITS FOR THE SYNC'S END, as before (issue 1007: the run answers the page as a sync starts): what the
+      // sync did, as --json and as the person's report, never the sync just started
+      const answer = JSON.parse(all.stdout) as { syncedAt: string; tables: Array<{ table: string; changed: number }> };
+      assert.deepEqual([answer.syncedAt, answer.tables.map((t) => [t.table, t.changed])], ["2026-11-07T10:00:00.000Z", [["public.customers", 5], ["public.orders", 5]]], all.stdout);
+      const person = await runMason(app, ["sync", "orders"], matrixEnv());
+      assert.equal(person.code, 0, person.stdout + person.stderr);
+      assert.match(person.stdout, /^Synced public\.orders: 5 row\(s\) written, 1 deleted\.\n {2}public\.orders {2}/, person.stdout);
       const both = await runMason(app, ["sync", "orders", "--all"], matrixEnv());
       assert.equal(both.code, 2);
       assert.match(both.stderr, /mason sync: --all syncs every added table: name tables \(orders\) or --all, not both/);
@@ -1000,7 +1010,7 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
       const none = await runMason(app, ["sync", "--all", "--json"], matrixEnv());
       assert.equal(none.code, 1, none.stdout + none.stderr);
       assert.equal((JSON.parse(none.stdout) as { error: { code: string } }).error.code, "nothing_yet");
-      assert.equal(polled.length, 1, "nothing polled for no table, nor for a refused command line");
+      assert.equal(polled.length, 2, "nothing polled for no table, nor for a refused command line");
     } finally { writeRunning(s.root, null); }
     // WHAT TO RUN NEXT, Mason up (a review finding): --sync alone on a table already added starts no copy (it is caught up
     // by one poll), so the next step is mason status, never mason wait's "the copy has started"; a new table's is mason wait
@@ -1119,7 +1129,7 @@ test("stage 1b, the roles file decides a user added without --role: its default 
     readSource: () => readSource(folder, root, {}), runUrl: "postgres://mason:x@127.0.0.1:1/shop", roles: () => live.now(),
     listener: { openSessions: () => ({ open: 0, byClient: [] }), running: () => [], cancel: (session) => ({ unknown: session }) },
     logs: { capacity: 2000, recent: () => [] },
-    duck: { copies: () => [], file: path.join(root, "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
+    duck: { copies: () => [], file: path.join(root, "duck.db"), refused: () => null, poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }),
         summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }),
         slowest: async () => [], durationsBy: async () => new Map(), lastUsed: async (u) => u.map(() => null) },
@@ -1205,7 +1215,7 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
     listener: { openSessions: () => ({ open: 1, byClient: [{ user: "metabase", client: "Metabase", open: 1, running: 1 }] }), running: () => [running], cancel: (session, statement) => { cancelled.push(statement === undefined ? session : [session, statement]);
       return session === 4 && statement !== undefined && statement !== 9 ? { other: running, asked: statement } : session === 4 ? { cancelled: running } : session === 6 ? { cancelled: { ...running, session: 6, runningMs: 125_000 } } : session === 5 ? { idle: 5 } : { unknown: session }; } },
     logs: { capacity: 2000, recent: () => [] },
-    duck: { copies: () => [], file: path.join(root, "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
+    duck: { copies: () => [], file: path.join(root, "duck.db"), refused: () => null, poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       requests: { days: 7, unsupported: async (q) => { unsupportedAsks.push(q); return [unsupportedSql]; }, page: async (q) => { asked.push(q); return q.id !== undefined ? { requests: q.id === SLOW_ID ? [slowQuery] as never : [], before: null } : { requests: q.failed === true ? failedQueries as never : [], before: "2026-10-24T10:00:00.000Z~7" }; }, slow: async () => [],
         refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }), slowest: async () => [], durationsBy: async () => new Map(),  lastUsed: async (u) => u.map(() => null) },
       events: { days: 7, recent: async () => [] }, usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [], lastMeasure: () => null, statementTotals: () => ({ completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 }), lastDurations: () => null }, restarts: () => [] },
@@ -1365,7 +1375,7 @@ test("mason wait is ready only once a first sync's catch-up poll is over, and sa
     readSource: () => readSource(folder, app, {}), runUrl: "postgres://me@localhost:5432/shop",
     listener: { openSessions: () => ({ open: 0, byClient: [] }), running: () => [], cancel: (session: number) => ({ unknown: session }) },
     logs: { capacity: 2000, recent: () => [] },
-    duck: { copies: () => copies, file: path.join(root, "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
+    duck: { copies: () => copies, file: path.join(root, "duck.db"), refused: () => null, poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }),
         summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }),
         slowest: async () => [], durationsBy: async () => new Map(), lastUsed: async (u: unknown[]) => u.map(() => null) },
@@ -1864,7 +1874,7 @@ test("mason add and mason remove with Mason up: the database's tables not readab
     folder: () => folder, root: path.join(root, "app"), home: path.join(root, "app", ".mason"), version: "test", startedAt: Date.now(),
     sources: () => { const r = read(); return { file: "message" in r ? null : r, problem: null }; }, sourcesChanged: () => {}, log: () => {}, readSource: read, runUrl: url,
     listener: { running: () => [], openSessions: () => ({ open: 0, byClient: [] }) },
-    duck: { copies: () => [], file: path.join(root, "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
+    duck: { copies: () => [], file: path.join(root, "duck.db"), refused: () => null, poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       restarts: () => [], requests: { days: 7 } },
   } as unknown as RunContext;
   const server = createRunServer(ctx);

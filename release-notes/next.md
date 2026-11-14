@@ -36,8 +36,21 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **On a server that runs the project read-only, the web page links to how to deploy a change.** `mason status --json`
   words `sourcesReadOnly` as plain sentences now, so a script that matched its old text must match the new one. A new
   field, `sourcesReadOnlyKind`, says which reason it is: `deployed`, `unwritable` or `unknown`.
+- **`POST /api/sync` answers as soon as the sync has started.** It answers `202` with `{ sync: { id, tables, state,
+  startedAt, endedAt }, already }`. Each table in `/api/state` then has `syncByHand`, which says `syncing` until the
+  sync ends, then `synced` with what it did or `failed` with why. A script that calls the endpoint directly and needs
+  the old answer adds `"wait": true` to its body. `mason sync` does this, so it still waits and prints the same report.
+  A refusal is answered at once, as before. A second sync of a table that is syncing gets that sync as its answer,
+  and never starts another.
+- **A sync you start by hand that fails is now listed under Sync events**, as "Manual sync failed" (`sync_failed` in
+  `mason logs --events`).
 
 ## What was wrong and is now right
+
+- **Sync now on the web page no longer shows a timeout for a big table behind a proxy.** The page waited for the
+  whole sync in one request. A reverse proxy or load balancer in front of `mason serve` closed the request when its
+  own time limit ran out. The sync went on, but the page said it failed. Now the button says Syncing… while the sync runs, even after
+  the page is reloaded, and then says what the sync did or why it failed.
 
 - **A `numeric` column with no precision now prints each value as your database does.** Rails makes such a column from
   `t.decimal`. Mason printed every value with the most decimals any value in the column had, so `12.5` read `12.50` and

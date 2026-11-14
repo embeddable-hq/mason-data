@@ -102,8 +102,10 @@ export async function sync(argv: string[]): Promise<number> {
       return failed("sync", { message: `there is no added table ${JSON.stringify(name)}${didYouMean(name, added.flatMap((x) => [x.table, tableArg(x.table)]))}`, code: "not_found",
         next: [["mason status", "the added tables"], ["mason tables", "the database's tables"]] }, { json });
     }
-    // a sync scans each table whole on the database (and waits for a copy under way): minutes, not the commands' 30 s
-    const r = await callRun(run, "POST", "/api/sync", { tables: picked }, 60 * 60_000);
+    // a sync scans each table whole on the database (and waits for a copy under way): minutes, not the commands' 30 s.
+    // `wait: true` holds the request to the sync's end (the run answers the page as the sync starts, issue 1007); the
+    // command reaches the run on loopback, with no proxy between to give up on it
+    const r = await callRun(run, "POST", "/api/sync", { tables: picked, wait: true }, 60 * 60_000);
     if (r.status !== 200) {
       const code = failureCode(r.body.code, r.status === 404 ? "not_found" : "failed");
       return failed("sync", { message: `${picked.join(", ")} ${picked.length === 1 ? "was" : "were"} not synced`, code, why: String(r.body.error),

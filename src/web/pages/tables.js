@@ -69,9 +69,10 @@ function syncedTips(tables) {
   });
 }
 
-/** A sync's answer said as `mason sync` says it, with Dismiss. `s`: the state, for the tables not kept current. */
-function renderSynced(b, table, s) {
-  const r = syncedReport(b, [table], s.tables.filter((t) => t.table === table));
+/** A sync's answer said as `mason sync` says it, with Dismiss. `s`: the state, for the tables not kept current;
+ *  `picked`: the tables the sync covered (one, from its Sync now; more from a `mason sync` the page saw running). */
+function renderSynced(b, table, s, picked = [table]) {
+  const r = syncedReport(b, picked, s.tables.filter((t) => picked.includes(t.table)));
   // a table's name in it wraps after its . and _ (`nameBreaks`), never squeezing what is beside it (issue 884)
   return `<div class="done"><p class="headline">${nameBreaks(r.headline)}</p>` +
     `<dl class="facts">${r.details.map(([k, v]) => `<dt>${nameBreaks(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>${r.tips.map((x) => `<p class="tip">${nameBreaks(x)}</p>`).join("")}` +
@@ -577,6 +578,11 @@ export function renderTables(s, ui = {}) {
     const asking = removing === t.table;
     const anchor = actId("tables", t.table);
     const syncedNow = synced?.table === t.table && !("failure" in synced);
+    // A SYNC BY HAND OF IT RUNNING: asked here and not answered yet, or started (here, in another tab, by mason sync) and
+    // not ended — `/api/state` `syncByHand`, so a page opened mid-sync says it too (issue 1007). The run's own sync state
+    // says "syncing" only for a first sync or a read again whole, never for a sync by hand (a poll), so its Sync button
+    // says Syncing… and its State says Syncing, as Adding… does for an add
+    const syncingNow = t.added && !adding_ && (syncing.includes(t.table) || t.syncByHand?.state === "syncing");
     // why mason sync of it is refused now (its first sync not finished or failed, being read again, being caught up), or
     // null: the server's words, from the check the sync refuses with — never derived here (absent from an older run: offered)
     const syncRefused = t.syncRefusal ?? null;
@@ -584,7 +590,7 @@ export function renderTables(s, ui = {}) {
       // Sync now → Syncing… → Synced ✓ in the one room (ROOMS.sync), so the actions never move
       // View events: its sync events, on Observability › Sync events (a link: it goes to another page)
       ? `<a class="btn small" href="${esc(syncsHref(t.table))}">View events</a> ` +
-        (viewOnly ? "" : syncing.includes(t.table) ? button("Syncing…", {}, "small", { room: ROOMS.sync, disabled: true }) : button(syncedNow ? "Synced ✓" : "Sync now", syncRefused === null ? { syncTable: t.table } : {}, "small", { room: ROOMS.sync, disabled: syncRefused !== null, title: syncRefused ?? "" })) + " " +
+        (viewOnly ? "" : syncingNow ? button("Syncing…", {}, "small", { room: ROOMS.sync, disabled: true }) : button(syncedNow ? "Synced ✓" : "Sync now", syncRefused === null ? { syncTable: t.table } : {}, "small", { room: ROOMS.sync, disabled: syncRefused !== null, title: syncRefused ?? "" })) + " " +
         // while it asks, Remove stays where it was, held down: the question beside it answers it
         (readOnly ? "" : asking ? button("Remove", {}, "danger small", { disabled: true, expanded: true }) : button("Remove", { removeTable: t.table }, "danger small"))
       // a sources file this run cannot write (`s.sourcesReadOnly`, a server's): no control that could only fail
@@ -602,10 +608,7 @@ export function renderTables(s, ui = {}) {
     // a table with none keeps its line, empty, so the row is as tall either way
     const l = t.added && !adding_ ? tableLine(t, now) : null;
     const bar = l ? `<span class="copyline t-${l.state}">${copyBar(t.table, l, shares.get(t.table) ?? l.fraction, before.get(t.table))}</span>` : `<span class="copyline none" aria-hidden="true"></span>`;
-    // while this page's Sync now of it runs, its State says so, as Adding… does for an add: the run's own state says
-    // "syncing" only for a first sync or a read again whole, never for a sync by hand (a poll), and the click's answer
-    // comes when the sync is done, so the page's own request is the one sure sign
-    const syncingNow = t.added && !adding_ && syncing.includes(t.table);
+    // while a sync by hand of it runs (`syncingNow`), its State says so
     const state = adding_ ? status("warn", "Adding…") : syncingNow ? status("warn", SYNC_WORDS.syncing)
       : t.added ? (y ? status(undefined, SYNC_WORDS[y.state]) : "") : status("unknown", "Not added");
     const took = t.added && y?.syncSeconds != null ? `<span class="took" title="${esc(tookTitle(y))}">took ${esc(tookText(y))}</span>` : "";
@@ -667,7 +670,7 @@ export function renderTables(s, ui = {}) {
         : "added" in outcome ? renderTableAdded(outcome.added, outcome.at ?? false) : renderTablesRemoved(outcome.removed)));
     }
     if (synced?.table === t.table) {
-      pops.push(pop(anchor, "failure" in synced ? `${renderFailure(synced.failure)}${button("Dismiss", { dismissSynced: "", popClose: "" }, "small")}` : renderSynced(synced.synced, t.table, s)));
+      pops.push(pop(anchor, "failure" in synced ? `${renderFailure(synced.failure)}${button("Dismiss", { dismissSynced: "", popClose: "" }, "small")}` : renderSynced(synced.synced, t.table, s, synced.picked ?? [t.table])));
     }
     return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}${said_ ? " has-note" : ""}"><th scope="row" class="name"><code class="name" title="${esc(t.table)}">${nameBreaks(t.table)}</code></th>` +
       `<td class="state">${state}${bar}</td>${cell(rows, "num rows")}${cell(f.key, "mono key", f.key)}${last}` +
@@ -728,6 +731,9 @@ export const page = {
   title: "Tables",
   create(ctx) {
     const m = { removing: null, choosing: null, columns: null, outcome: null, ticked: null, held: null, heldFilter: null, heldFailed: null, filter: "", failed: false, syncing: [], adding: [], synced: null, limit: TABLE_ROWS,
+      // the syncs by hand this page follows to their end (`/api/state` `tables[].syncByHand`, by id): the ones it started,
+      // and the ones it saw running (a reload mid-sync, another tab, mason sync) — what each did is said when it ends
+      watching: new Set(),
       // the two lists as last laid out (`layoutOf`): null until the state is first read
       order: null,
       // the table whose Sync choice is open, what `GET api/tables/<table>/sync` answered for it (null while read), the
@@ -760,6 +766,25 @@ export const page = {
       // and the moment it is written as of: an age that moved would rewrite the part under the person (a choice ticked lost)
       m.heldNow = held ? m.heldNow ?? ctx.now().getTime() : null;
       if (m.choosing === null) m.ticked = null;
+    };
+    // EACH SYNC BY HAND FOLLOWED TO ITS END, from the state just read (`tables[].syncByHand`): one running that the page
+    // does not follow yet is followed (a reload mid-sync); one followed that ended is said beside its first table, as
+    // its answer — unless a question or a form is open, when it waits for that to close (two popovers never stand on one
+    // another); one the state no longer has (the run started again, the table removed) is let go
+    const settleSyncs = (s) => {
+      const syncs = new Map();
+      for (const t of Array.isArray(s.tables) ? s.tables : []) if (t.syncByHand) syncs.set(t.syncByHand.id, t.syncByHand);
+      for (const id of [...m.watching]) if (!syncs.has(id)) m.watching.delete(id);
+      for (const y of syncs.values()) {
+        if (y.state === "syncing") { m.watching.add(y.id); continue; }
+        if (!m.watching.has(y.id) || m.choosing !== null || m.removing !== null || m.syncOpen !== null) continue;
+        m.watching.delete(y.id);
+        const table = y.tables.find((x) => s.tables.some((t) => t.table === x)) ?? y.tables[0];
+        m.outcome = null;
+        // a failure as mason sync says it: what was not synced, and the sync's own reason
+        m.synced = y.answer ? { table, synced: y.answer, picked: y.tables }
+          : { table, failure: { code: y.failure?.code ?? "failed", message: `${y.tables.join(", ")} ${y.tables.length === 1 ? "was" : "were"} not synced`, why: y.failure?.message ?? "", next: [] } };
+      }
     };
     const actions = {
       /** Add a table (`mason add`): the answer beside its actions, then the state read again — the Overview shows its copy starting. */
@@ -845,15 +870,19 @@ export const page = {
         return true;
       },
       dismissOutcome() { m.outcome = null; },
-      /** Sync a table now (`mason sync <table>`): the answer beside its Sync, then the state read again. */
+      /** Sync a table now (`mason sync <table>`): the run answers as the sync starts (issue 1007: a big table's sync
+       *  outlasts a proxy's wait), so the page follows it in the state — Syncing… while it runs, then what it did, or
+       *  why it failed, beside its Sync (`settleSyncs`). A refusal is the answer at once. */
       async syncTable(table) {
         m.syncing = [...m.syncing, table];
         m.outcome = null; m.synced = null;
         const r = await ctx.ask("api/sync", json("POST", { tables: [table] }));
         m.syncing = m.syncing.filter((x) => x !== table);
-        m.synced = "failure" in r ? { table, failure: r.failure } : { table, synced: r.body };
+        if ("failure" in r) { m.synced = { table, failure: r.failure }; return false; }
+        // followed by its id until the state says it ended
+        if (typeof r.body?.sync?.id === "number") m.watching.add(r.body.sync.id);
         await ctx.refresh(["api/state"]);
-        return !("failure" in r);
+        return true;
       },
       dismissSynced() { m.synced = null; },
       /** Escape with no question open: the answer or refusal beside a row goes, as its Dismiss does */
@@ -879,6 +908,7 @@ export const page = {
         // a form's table added (Columns…) or removed (its column form) elsewhere takes the form with it
         if (m.choosing !== null && added(m.choosing) !== m.choosingAdded) m.choosing = null;
         if (m.syncOpen !== null && !added(m.syncOpen)) { m.syncOpen = null; m.syncChoice = null; m.syncAsk = null; }
+        settleSyncs(s);
         hold();
       },
       actions,

@@ -180,7 +180,7 @@ async function runOver(p: { root: string; folder: string; file: string }): Promi
     readSource: () => ({ name: "shop", file: p.file, kind: "postgres", url: { literal: "postgres://me@127.0.0.1:1/shop" }, tables: [{ name: "orders", table: "public.orders", columns: null, exclude: [], key: null }],
       resolved: "postgres://me@127.0.0.1:1/shop", from: "the sources file" }),
     sources: () => ({ file: { name: "shop", file: p.file, kind: "postgres", url: { literal: "postgres://me@127.0.0.1:1/shop" }, tables: [{ name: "orders", table: "public.orders", columns: null, exclude: [], key: null }] }, problem: null }),
-    duck: { copies: () => [], file: path.join(p.root, ".mason", "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
+    duck: { copies: () => [], file: path.join(p.root, ".mason", "duck.db"), refused: () => null, poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       restarts: () => [], requests: { days: 7 } },
   } as unknown as RunContext;
   const server = createRunServer(ctx);

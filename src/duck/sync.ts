@@ -2188,16 +2188,37 @@ export class Sync {
     // its failure is the command server's answer, sent as it is: a refusal is Mason's own words, any other error's are
     // made Mason's here (`errorText`), where they leave the sync
     try { return await this.pollNowOf(sources); }
-    catch (e) { throw e instanceof PollRefused || e instanceof Stopping ? e : new Error(this.errorText(e)); }
+    catch (e) {
+      if (e instanceof PollRefused || e instanceof Stopping) throw e;
+      const m = this.errorText(e);
+      // A FAILED SYNC BY HAND IS AN EVENT, as a done one is (`synced`): `POST /api/sync` answers the page before the sync
+      // ends (issue 1007), so its reason is the ledger's record, never only the answer of a request no one may hold
+      for (const s of sources) this.event({ kind: "sync_failed", table: s, message: `sync by hand failed: ${m.split("\n")[0]}`, cause: e });
+      throw new Error(m);
+    }
+  }
+
+  /**
+   * WHY A SYNC BY HAND OF THESE TABLES IS REFUSED NOW, or null when it would start — the ONE check `pollNowOf` makes as
+   * it is asked (and `syncRefusal` again, per table, once the pass ahead of it ended): the run, a table not added, then
+   * each table's `syncRefusal`. Synchronous, from what the sync holds in memory: `POST /api/sync` answers a refusal at
+   * once, and starts the sync only when there is none (issue 1007).
+   */
+  pollRefusal(sources: readonly string[]): PollRefused | null {
+    if (this.mode === "recopy") return this.recopyRefusal();
+    for (const s of sources) {
+      const t = this.tables.get(s);
+      if (t === undefined) return notAddedRefusal(s, [...this.tables.keys()]);
+      const refused = this.syncRefusal(t);
+      if (refused !== null) return refused;
+    }
+    return null;
   }
 
   private async pollNowOf(sources: readonly string[]): Promise<{ at: string; tables: PolledTable[]; streamed?: StreamedAnswer[] }> {
-    if (this.mode === "recopy") throw this.recopyRefusal();
-    const tables = sources.map((s) => {
-      const t = this.tables.get(s);
-      if (t === undefined) throw notAddedRefusal(s, [...this.tables.keys()]);
-      return t;
-    });
+    const refused = this.pollRefusal(sources);
+    if (refused !== null) throw refused;
+    const tables = sources.map((s) => this.tables.get(s)!);
     // a replicated table: the stream keeps it current, so nothing to poll — its answer is where the stream is, and its part
     const said = (): StreamedAnswer[] => {
       const now = Date.now(), position = formatLsn(this.stream?.position() ?? this.appliedLsn);
