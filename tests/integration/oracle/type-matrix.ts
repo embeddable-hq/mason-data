@@ -1750,6 +1750,18 @@ function* matrix(): Generator<Matrixed> {
       "date_trunc('month', at, 'UTC'), date_trunc('century', at, 'Europe/Berlin'), date_trunc('week', at, 'utc'), date_trunc('second', at, 'Australia/Lord_Howe'), date_trunc('quarter', at, 'Etc/UTC') FROM instants ORDER BY id", zone);
     yield q(`date_trunc of a date as a timestamptz, in ${zone}`, "SELECT id, date_trunc('week', at::date), date_trunc('hour', at::date) FROM instants WHERE isfinite(at) ORDER BY id", zone);
   }
+  // ---- issue 464: to_char of a time in a format DuckDB's strftime writes (src/duck/to-char.ts strftimeTemplate), and
+  // Metabase's US week grouped by the engine's integer: each side of a clock change, before 1970, a zone's local mean
+  // time, a year's end, a leap day, ±infinity and NULL, in zones of daylight saving and of a quarter hour ---------------
+  const FORMATS = ["YYYY-MM", "YYYY-MM-DD", "Mon YYYY", "FMMonth YYYY", "Dy DD Mon", "FMDay, DDD", "YYYY-MM-DD HH24:MI:SS", "YYYY-MM-DD\"T\"HH24:MI:SS.US", "HH24:MI:SS.MS", "IYYY-IW", "YYYY \"100%\" MM", "YYYY-\"Q\"Q", "Month YYYY"];
+  for (const zone of ["UTC", "America/New_York", "Asia/Kathmandu", "Australia/Lord_Howe"]) {
+    yield q(`issue 464: to_char of a timestamptz in a strftime format, in ${zone}`, `SELECT id, ${FORMATS.map((f, i) => `to_char(at, '${f.replace(/'/g, "''")}') AS f${i}`).join(", ")} FROM instants ORDER BY id`, zone);
+    yield q(`issue 464: to_char of a timestamp and a date in a strftime format, in ${zone}`, `SELECT id, ${FORMATS.map((f, i) => `to_char(at::timestamp, '${f.replace(/'/g, "''")}') AS t${i}, to_char(at::date, '${f.replace(/'/g, "''")}') AS d${i}`).join(", ")} FROM instants WHERE isfinite(at) ORDER BY id`, zone);
+    // a template that writes nothing, the empty one and one prefix an item (the review of PR 955)
+    yield q(`issue 464: to_char of an empty template or prefixes alone, in ${zone}`, `SELECT id, ${["FM", '""', "", "FMFM", "FMTMMonth", "FXFMDD"].map((f, i) => `to_char(at, '${f}') AS z${i}, to_char(at::timestamp, '${f}') AS t${i}, to_char(at::date, '${f}') AS d${i}`).join(", ")} FROM instants WHERE isfinite(at) OR at IS NULL ORDER BY id`, zone);
+    yield q(`issue 464: to_char of a month grouped, in ${zone}`, "SELECT to_char(i.at, 'YYYY-MM') AS m, count(*) FROM instants i GROUP BY 1 ORDER BY 1 NULLS FIRST", zone);
+    yield q(`issue 464: Metabase's US week grouped, in ${zone}`, "SELECT ceil((CAST(extract(doy from i.at) AS integer) / 7.0)) AS w, count(*) FROM instants i GROUP BY ceil((CAST(extract(doy from i.at) AS integer) / 7.0)) ORDER BY ceil((CAST(extract(doy from i.at) AS integer) / 7.0)) ASC NULLS FIRST", zone);
+  }
   // date_trunc is strict and reads its zone before the part: a NULL zone is NULL for every part (an infinite instant's
   // too), a row's zone is read for every row, and a zone it does not know is its error, whichever the part
   const parts = ["microseconds", "milliseconds", "second", "minute", "hour", "day"];
