@@ -270,5 +270,11 @@ port.on("message", (m: Request) => {
     if (m.id === undefined) log(`${m.op} failed: ${e instanceof Error ? e.message : String(e)}`);
     else port.postMessage({ id: m.id, ok: false, error: wireError(e) } satisfies Reply);
     probeInstance();
+  }).finally(() => {
+    // THE THREAD ENDS BY ITSELF (issue 913): once its shutdown answered, the port no longer holds its loop, so the loop
+    // ends when nothing else does — every task of DuckDB's handed back, every native callback run — and the thread
+    // exits. Never ended from outside (`worker.terminate`, src/duck/executor.ts): a terminate that met a native
+    // completion still on its way aborted the whole process (exit 134, `Napi::Error`)
+    if (m.op === "shutdown") port.unref();
   });
 });

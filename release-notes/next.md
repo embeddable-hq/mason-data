@@ -7,6 +7,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `recentErrors` in its `--json`) and in the web page's Syncs filter. If a script or an alert filters on the old names,
   change it. Events recorded before the upgrade keep their old names. They still show in the full list, but an old
   `copy_failed` no longer counts as a failure.
+- **Each synced table with a `numeric` column of no precision is synced again once, at the first start.** Mason now
+  keeps each such value's own decimals (below), which the data synced before does not hold. The table serves its old
+  data until then, and a large table takes about as long as its first sync did.
 
 ## What changes
 
@@ -32,6 +35,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **The 20-row preview of such a join is faster too, when the table you start from is the bigger one.** Mason now takes
   that table's first rows before it joins, so it no longer loads every row of the other table into memory first. A
   small table joined to a big one is unchanged: that preview was already fast.
+- **The SQL support list now says plainly what Mason prints for a `numeric` column with no precision.** Rails makes
+  one from `t.decimal`. Mason prints every value of such a column with the most decimals any of its values has, so
+  `12.5` reads `12.50` and `0` reads `0.00`. The values are right. Only their trailing zeros differ from Postgres's.
+  This was listed before, but it was hard to find. To get the same text from Mason and Postgres now, cast the column
+  to `numeric(p, s)` or use `round(x, s)`. A fix is planned.
 - **A host view's link can be marked as a destructive action.** Give it `"danger": true`. The page draws it like the
   Remove button on the Tables page, in red. A link that is both `primary` and `danger` is refused, and the view says
   why. So is a `danger` that is not `true` or `false`. Plain and primary links look as before.
@@ -42,17 +50,17 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
-- **A `numeric` column with no precision now prints each value as your database does.** Rails makes such a column from
-  `t.decimal`. Mason printed every value with the most decimals any value in the column had, so `12.5` read `12.50` and
-  `0` read `0.00`. Now a plain `SELECT`, `::text`, arithmetic, `sum`, `min`, `max`, windows, subqueries and the binary
-  wire all give your database's text. A few readers still print the old way: `to_json` and its kin, `concat`,
-  `format`, `||`, `array_agg`, a row's text, a scalar subquery, and a `UNION` without `ALL`. A fix for those is planned.
-  - **Before upgrading:** each synced table with such a column is synced again once, at the first start. It serves
-    its old data until then. A large table takes as long as its first sync did.
+- **After a fatal error in the synced data, Mason no longer aborts on its way out, and the cause reaches `mason logs`.**
+  Such an error is, for example, a checkpoint that fails on a full disk. Mason then ends the run so that it can start
+  again. Sometimes the run aborted instead (exit 134, `terminate called after throwing an instance of 'Napi::Error'`),
+  and the cause could be missing from `mason logs`. Now the run waits up to 5 seconds for the synced data to close,
+  then writes its log to the end and exits with code 1. If the synced data is still closing after 5 seconds, the log
+  says so, and the run exits anyway.
 - **A table's columns dialog on the web page now names the choice its row names.** On the Tables page, a table that
   leaves out columns which look like secrets says "All but 7 columns". Its columns dialog said "All columns, … but
   password, …", so it read like a different choice. Now the dialog's choice starts with the same words, "All but 7
   columns", and names the columns left out.
+
 - **A polled table no longer costs an extra connection to your database now and then.** On some machines, Mason's
   timer for the next poll woke a moment early. Mason then connected to your database, found no table due yet, and
   connected again a moment later to poll it. Now every timer waits until its time has come.
@@ -62,3 +70,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   your application next. Your application's queries could then be cancelled after 10 seconds, for up to an hour.
   `mason mcp` did the same on Mason's own Postgres API with each tool call's time limit. Now each limit ends with
   Mason's own query, whatever pooler sits in between.
+- **A `numeric` column with no precision now prints each value as your database does.** Rails makes such a column from
+  `t.decimal`. Mason printed every value with the most decimals any value in the column had, so `12.5` read `12.50` and
+  `0` read `0.00`. Now a plain `SELECT`, `::text`, arithmetic, `sum`, `min`, `max`, windows, subqueries and the binary
+  wire all give your database's text. A few readers still print the old way: `to_json` and its kin, `concat`,
+  `format`, `||`, `array_agg`, a row's text, a scalar subquery, and a `UNION` without `ALL`. A fix for those is planned.
