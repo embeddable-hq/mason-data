@@ -50,9 +50,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   which matched values that differ past the 15th digit. A NULL `numeric[]` is answered everywhere. Mason refuses any
   other `numeric[]` value by name, and says what to write instead, in two places. One is a `numeric[]` read anywhere
   else, such as in the SELECT list or in `unnest`. The other is a `numeric[]` compared with a float column.
-- **A timestamp with time zone compared with `ANY` or `ALL` of a `timestamp[]` or `date[]` now uses your session's time
-  zone.** Before, a session outside UTC got other rows. The same holds for a timestamp or a date compared with an
-  array of a wider time type.
+- **A timestamp with time zone compared with a `timestamp[]` or `date[]`, or with a subquery of timestamps or dates,
+  now uses your session's time zone.** This covers `ANY`, `ALL`, `IN` and `NOT IN`. Before, a session outside UTC got
+  other rows. The same holds for a timestamp or a date compared with a wider time type.
 - **A `numeric` column with no precision now prints each value as your database does.** Rails makes such a column from
   `t.decimal`. Mason printed every value with the most decimals any value in the column had, so `12.5` read `12.50` and
   `0` read `0.00`. Now a plain `SELECT`, `::text`, arithmetic, `sum`, windows, subqueries and the binary
