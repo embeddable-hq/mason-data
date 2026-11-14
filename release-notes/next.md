@@ -11,6 +11,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A query that failed inside Mason now says where.** A request-log row answered `XX000` has an `origin` in
   `mason logs --requests --json` and `/api/requests`. Every other row has none.
 - Both are new keys. Events and requests recorded before you upgrade are kept, and read with both null.
+- **Metabase's preview of a join to a table with JSON fields is faster.** When you join a table in Metabase's query
+  builder and show fields it unfolds from a JSON column, the preview is a `LIMIT 2000` with no sort. Mason now gathers
+  the rows the preview shows before it reads those fields, so it reads them in a few large batches. Over a 3 M-row
+  table, the 2,000-row preview took about 5 s and now takes about 0.6 s. Postgres still answers it faster, so there is
+  more to do. The rows are the same kind as before: any rows of the join, as Postgres allows for a query with no ORDER
+  BY.
 
 ## What was wrong and is now right
 
