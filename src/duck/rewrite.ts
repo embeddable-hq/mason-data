@@ -4105,6 +4105,27 @@ class Rewriter {
    * column's s, a literal's own, a sum / min / max of one, + and - the larger, * the sum (numeric.c's add_var, mul_var).
    * Null where the values decide (an unconstrained column, a division): DuckDB's own scale stands there.
    */
+  /** the most digits a whole numeric can have where the rewrite writes it at a width of its own (`wholeNumeric`): div()
+   *  of integers, an integer cast to numeric and extract at 19, a constant its own, a numeric(p, 0) column p; null for
+   *  anything else (a product, an unconstrained column), which no width bounds */
+  private wholeDigits(n: AstNode): number | null {
+    const k = kindOf(n), b = bodyOf(n);
+    const t = this.typed(n);
+    if (k === "A_Const") {
+      if (b.ival !== undefined) return 10;
+      // (as the writer reads it: `2.5e2` is the whole 250, `decimalConst`)
+      const text = b.fval === undefined ? null : numericConstText(String(b.fval.fval));
+      return text !== null && !text.includes(".") && engineReadsExactly(text) ? (text.match(/[0-9]/g) ?? []).length : null;
+    }
+    if (k === "ColumnRef") return t !== null && t.type === NUMERIC && t.typmod >= 4 && ((t.typmod - 4) & 0xffff) === 0 ? (t.typmod - 4) >> 16 : null;
+    if (k === "FuncCall" && ["div", "extract"].includes(lastName(b.funcname))) return this.displayScale(n) === 0 ? 19 : null;
+    if (k === "TypeCast" && ["numeric", "decimal"].includes(lastName(b.typeName?.names)) && ((b.typeName?.typmods ?? []) as unknown[]).length === 0 && isNode(b.arg)) {
+      const from = this.typeOf(b.arg as AstNode);
+      return from !== null && INTEGERS.has(from) ? 19 : null;
+    }
+    return null;
+  }
+
   private displayScale(n: AstNode): number | null {
     const k = kindOf(n), b = bodyOf(n);
     const t = this.typed(n);
@@ -5413,10 +5434,18 @@ class Rewriter {
     }
     if ((name === "sum" || name === "avg") && argType(0) === INTERVAL) throw new Unrewritable(`${name}() of an interval is not supported by Mason`, "sum(extract(epoch FROM x)) for the seconds", "interval-aggregates");
     if (name === "sum" && this.typeOf(args[0] ?? { A_Const: {} }) === FLOAT4 && argType(0) === FLOAT4) throw new Unrewritable("sum() of a real is not supported by Mason (Postgres adds in single precision)", "sum(x::double precision)", "sum-real");
-    // a sum of a whole numeric (`displayScale` 0: `wholeNumeric`'s, a numeric(p, 0)): DuckDB sums a DECIMAL(p, 0) into a
-    // DECIMAL(38, 0), which beside another DECIMAL keeps none of its decimals (issue 929); a HUGEINT sums into a HUGEINT,
-    // which beside a DECIMAL(w, s) is a DECIMAL(38, s), as a sum of an integer column always is
-    if (name === "sum" && args.length === 1 && argType(0) === NUMERIC && this.displayScale(args[0]!) === 0) b.args = [cast(args[0]!, ["hugeint"])];
+    // A SUM OF A WHOLE NUMERIC (`displayScale` 0: `wholeNumeric`'s, a numeric(p, 0)), issue 929: DuckDB sums a DECIMAL(p,
+    // 0) into a DECIMAL(38, 0), which beside another DECIMAL keeps none of its decimals; a HUGEINT sum beside a DECIMAL(38,
+    // s) is a DECIMAL(38, s), which a sum past 38 - s digits overflows (22003) where Postgres answers. So it is added as
+    // a HUGEINT and read as a DECIMAL(SUM_WIDTH, 0): beside a DECIMAL it keeps every whole digit and 38 - SUM_WIDTH
+    // decimals, the rest rounded (the listed difference whole-beside-many-decimals), and it overflows only past 10^28,
+    // a billion rows of values of 19 digits. Only a value of at most 19 digits (`wholeDigits`): a sum of a product or of a
+    // constant of more digits is DuckDB's DECIMAL(38, 0), as on main, which can hold it
+    const digits = name === "sum" && args.length === 1 && argType(0) === NUMERIC ? this.wholeDigits(args[0]!) : null;
+    if (digits !== null && digits <= 19) {
+      b.args = [cast(args[0]!, ["hugeint"])];
+      return cast({ FuncCall: b }, ["decimal", String(SUM_WIDTH), "0"]);
+    }
     // count(DISTINCT x) of a column unique on the source, over a FROM that repeats none of its table's rows: no value is
     // there twice, so it is count(x), its FILTER kept (src/duck/distinct-key.ts, `keyCounts`)
     if (b.agg_distinct === true && name === "count" && typeof b.location === "number" && this.keyCounts.has(b.location)) delete b.agg_distinct;
@@ -7664,6 +7693,9 @@ function decimalConst(text: string): AstNode {
  * did (a DECIMAL(10, 0) of an int4 multiplies in 64 bits and fails past 18 digits). A set operation that compares rows
  * of numerics of several scales prints them at one scale, the widest: the listed difference `mixed-scale-numeric`.
  */
+/** the width a sum of whole numerics is read at (`funcCall`'s sum): its digits, and 38 minus it decimals beside a DECIMAL */
+const SUM_WIDTH = 28;
+
 function wholeNumeric(n: AstNode, digits = 19): AstNode {
   return cast(n, ["decimal", String(Math.min(38, Math.max(19, digits))), "0"]);
 }

@@ -4388,7 +4388,13 @@ test("issue 929: a whole number beside a numeric of many decimals answers Postgr
       "SELECT id FROM wides WHERE n30 IN (SELECT div(i, 1) FROM wides) ORDER BY id",
       "SELECT id FROM wides WHERE div(b, 1) IN (SELECT n20 FROM wides) ORDER BY id",
       "SELECT n30 AS v FROM wides EXCEPT SELECT i::numeric FROM wides ORDER BY 1",
-      "SELECT id, ARRAY[n20, b::numeric] AS arr FROM wides ORDER BY id"]) {
+      "SELECT id, ARRAY[n20, b::numeric] AS arr FROM wides ORDER BY id",
+      // (a sum of whole numbers: added as a HUGEINT, read at 28 places, so beside a numeric(38,30) it never overflows)
+      "SELECT sum(i::numeric) AS v FROM wides UNION ALL SELECT n30 FROM wides ORDER BY 1 NULLS FIRST",
+      "SELECT n20 AS v FROM wides UNION ALL SELECT sum(b::numeric) FROM wides ORDER BY 1 NULLS FIRST",
+      "SELECT CASE WHEN true THEN sum(div(b, 1)) ELSE max(n30) END AS v, COALESCE(sum(i::numeric), max(n20)) AS c FROM wides",
+      // (a sum of a product or of a constant of more than 19 digits is DuckDB's own, which holds 38 digits)
+      "SELECT sum(b::numeric * b::numeric) AS p, sum(99999999999999999999999999999999999) AS k FROM wides"]) {
       const got = await answer(c, sql), want = await postgres(sql);
       assert.deepEqual(got.fields, want.fields, sql);
       const atRule = (rows: unknown[][]): unknown => rows.map((r) => r.map((v) => Array.isArray(v) ? v.map(ruled).join(",") : typeof v === "string" && v.startsWith("{") ? v.slice(1, -1).split(",").map((e) => e === "NULL" ? null : ruled(e)).join(",") : ruled(v)));
