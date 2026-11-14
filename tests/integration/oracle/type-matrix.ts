@@ -1757,6 +1757,8 @@ function* matrix(): Generator<Matrixed> {
   for (const zone of ["UTC", "America/New_York", "Asia/Kathmandu", "Australia/Lord_Howe"]) {
     yield q(`issue 464: to_char of a timestamptz in a strftime format, in ${zone}`, `SELECT id, ${FORMATS.map((f, i) => `to_char(at, '${f.replace(/'/g, "''")}') AS f${i}`).join(", ")} FROM instants ORDER BY id`, zone);
     yield q(`issue 464: to_char of a timestamp and a date in a strftime format, in ${zone}`, `SELECT id, ${FORMATS.map((f, i) => `to_char(at::timestamp, '${f.replace(/'/g, "''")}') AS t${i}, to_char(at::date, '${f.replace(/'/g, "''")}') AS d${i}`).join(", ")} FROM instants WHERE isfinite(at) ORDER BY id`, zone);
+    // a template that writes nothing, the empty one and one prefix an item (the review of PR 955)
+    yield q(`issue 464: to_char of an empty template or prefixes alone, in ${zone}`, `SELECT id, ${["FM", '""', "", "FMFM", "FMTMMonth", "FXFMDD"].map((f, i) => `to_char(at, '${f}') AS z${i}, to_char(at::timestamp, '${f}') AS t${i}, to_char(at::date, '${f}') AS d${i}`).join(", ")} FROM instants WHERE isfinite(at) OR at IS NULL ORDER BY id`, zone);
     yield q(`issue 464: to_char of a month grouped, in ${zone}`, "SELECT to_char(i.at, 'YYYY-MM') AS m, count(*) FROM instants i GROUP BY 1 ORDER BY 1 NULLS FIRST", zone);
     yield q(`issue 464: Metabase's US week grouped, in ${zone}`, "SELECT ceil((CAST(extract(doy from i.at) AS integer) / 7.0)) AS w, count(*) FROM instants i GROUP BY ceil((CAST(extract(doy from i.at) AS integer) / 7.0)) ORDER BY ceil((CAST(extract(doy from i.at) AS integer) / 7.0)) ASC NULLS FIRST", zone);
   }

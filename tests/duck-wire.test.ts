@@ -4259,7 +4259,10 @@ test("issue 464: to_char of a time in a format strftime writes is the engine's o
     "IYYY-IW", "YYYYMMDD", 'YYYY "100%" MM', "FMMon/FMDy"];
   // a pattern strftime does not write as Postgres does: a quarter, a padded name, FM on a number, an ordinal, another
   // case, a translated name
-  const kept = ['YYYY-"Q"Q', "Month YYYY", "FMDD", "DDth", "yyyy-mm", "MON YYYY", "TMMonth", "Day", "HH12:MI AM", "WW"];
+  const kept = ['YYYY-"Q"Q', "Month YYYY", "FMDD", "DDth", "yyyy-mm", "MON YYYY", "TMMonth", "Day", "HH12:MI AM", "WW",
+    // a template that writes nothing, or nothing but its prefix (the review of PR 955: an empty strftime format is
+    // DuckDB's bind error), the empty one (NULL), and one prefix an item (`FMFM` writes `FM`)
+    "FM", '""', "", "FMFM", "FMTMMonth", "fmFMDD", "FXFMDD", "FMFXDD"];
   try {
     for (const zone of ["UTC", "America/New_York", "Asia/Kolkata"]) {
       await c.query(`SET TimeZone = '${zone}'`);
@@ -4289,8 +4292,15 @@ test("issue 464: to_char of a time in a format strftime writes is the engine's o
         }
       } finally { await truth.exec("SET TimeZone = 'UTC'"); }
     }
-    // a format bound as a parameter is read where it runs: the function's, as before
+    // a volatile value is read once, by the function: the guard and strftime would read it twice (the review of PR 955)
     await c.query("SET TimeZone = 'UTC'");
+    for (const sql of ["SELECT id, to_char(created_at + (random() * 0) * interval '1 day', 'YYYY-MM-DD') AS v FROM orders ORDER BY id",
+      "SELECT to_char(o.created_at - (random() * 0) * interval '1 hour', 'YYYY-MM') AS m, count(*) FROM orders o GROUP BY 1 ORDER BY 1"]) {
+      const before = await called();
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      assert.ok(await called() - before > 0, `${sql}: a volatile value read by the guard and strftime apart`);
+    }
+    // a format bound as a parameter is read where it runs: the function's, as before
     const sql = "SELECT id, to_char(created_at, $1) FROM orders ORDER BY id";
     assert.deepEqual(await answer(c, sql, ["YYYY-MM"]), await postgres(sql, ["YYYY-MM"]));
   } finally { await c.query("SET TimeZone = 'UTC'"); await c.end(); }

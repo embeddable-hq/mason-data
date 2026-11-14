@@ -83,21 +83,21 @@ function named(name: string, pattern: string, fm: boolean, width: number): strin
 
 /** to_char(timestamp | timestamptz | date, fmt): `text` is DuckDB's text of the value (in the session's zone) */
 export function toCharTime(text: string, fmt: string): string | null {
+  // an empty template is NULL (timestamp_to_char)
+  if (fmt === "") return null;
   const w = readWall(text);
   if (w === null) return null;
   const { year, month, day, hour, minute, second, micro } = w;
   let out = "", i = 0;
   while (i < fmt.length) {
-    // FM (fill mode) and TM (translation: English here) prefix the next pattern
+    // FM (fill mode) or TM (translation: English here, and, as Postgres does, never padded) prefixes the next pattern:
+    // ONE prefix an item, as parse_format reads it, so a second is the text it spells (`FMFM` writes `FM`, `FMTMMonth`
+    // writes `T03onth`), and a prefix with nothing after it writes nothing (`FM` writes '')
     let fm = false;
-    for (;;) {
-      if (fmt.startsWith("FM", i) || fmt.startsWith("fm", i)) { fm = true; i += 2; continue; }
-      // TM translates the names (English here) and, as Postgres does, does not pad them
-      if (fmt.startsWith("TM", i) || fmt.startsWith("tm", i)) { fm = true; i += 2; continue; }
-      if (fmt.startsWith("FX", i) || fmt.startsWith("fx", i)) { i += 2; continue; }
-      break;
-    }
+    if (fmt.startsWith("FM", i) || fmt.startsWith("fm", i) || fmt.startsWith("TM", i) || fmt.startsWith("tm", i)) { fm = true; i += 2; }
     if (i >= fmt.length) break;
+    // FX is a pattern that writes nothing
+    if (fmt.startsWith("FX", i) || fmt.startsWith("fx", i)) { i += 2; continue; }
     const c = fmt[i]!;
     if (c === '"') {
       // a quoted literal; a backslash escapes the next character in it
@@ -203,12 +203,10 @@ export function strftimeTemplate(fmt: string, date: boolean): string | null {
   let out = "", i = 0;
   const literal = (c: string): string => c === "%" ? "%%" : c;
   while (i < fmt.length) {
+    // one prefix an item, as `toCharTime` reads it
     let fm = false;
-    for (;;) {
-      if (fmt.startsWith("FM", i) || fmt.startsWith("fm", i)) { fm = true; i += 2; continue; }
-      if (fmt.startsWith("TM", i) || fmt.startsWith("tm", i) || fmt.startsWith("FX", i) || fmt.startsWith("fx", i)) return null;
-      break;
-    }
+    if (fmt.startsWith("FM", i) || fmt.startsWith("fm", i)) { fm = true; i += 2; }
+    if (fmt.startsWith("TM", i) || fmt.startsWith("tm", i) || fmt.startsWith("FX", i) || fmt.startsWith("fx", i)) return null;
     if (i >= fmt.length) break;
     const c = fmt[i]!;
     if (c === "\\") return null;
@@ -228,7 +226,9 @@ export function strftimeTemplate(fmt: string, date: boolean): string | null {
     if (fm !== native.fm && !(native.fm && (pattern === "Mon" || pattern === "Dy"))) return null;
     out += native.spec;
   }
-  return out;
+  // a template that writes nothing (`FM`, `""`) is the function's: DuckDB refuses an empty format as it binds the
+  // statement, whichever rows reach it (the review of PR 955)
+  return out === "" ? null : out;
 }
 
 // ------------------------------------------------------------------------------------------------- numbers

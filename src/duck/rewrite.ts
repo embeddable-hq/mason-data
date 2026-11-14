@@ -7840,7 +7840,9 @@ function toChar(args: AstNode[], type: number | null, clone: (n: AstNode) => Ast
   if (args.length !== 2) throw new Unrewritable("to_char() takes a value and a format", "write to_char(value, 'format')", { postgres: "42883" });
   if (type !== null && [DATE, TIMESTAMP, TIMESTAMPTZ].includes(type)) {
     const fmt = constString(args[1]);
-    const spec = fmt === null ? null : strftimeTemplate(fmt, type === DATE);
+    // (the value is read by the guard and by strftime: a volatile one, `ts + random() * interval '1 day'`, would be two
+    // values where Postgres reads one, so it is the function's, read once)
+    const spec = fmt === null || callsVolatile(args[0]) ? null : strftimeTemplate(fmt, type === DATE);
     const called = (x: AstNode, f: AstNode): AstNode => fn("__mason_to_char_time", [cast(x, ["varchar"]), cast(f, ["varchar"])]);
     if (spec === null) return called(args[0]!, args[1]!);
     // A FORMAT STRFTIME WRITES AS POSTGRES DOES (issue 464: the function a row, a grouped month was x8-18 of Postgres):
@@ -8003,9 +8005,12 @@ const VOLATILE = new Set(["random", "gen_random_uuid", "uuid_generate_v4", "cloc
 /** A window ordered or partitioned by a volatile function (`row_number() OVER (ORDER BY random())`, a random row per
  *  group) is refused by name: DuckDB refuses a volatile expression there, and one it takes as deterministic is computed
  *  once for every row (one value: the order is the input's, never random) */
+/** whether a tree calls a volatile function anywhere in it (`VOLATILE`) */
+const callsVolatile = (x: unknown): boolean => Array.isArray(x) ? x.some(callsVolatile) : x !== null && typeof x === "object"
+  && ((isNode(x) && kindOf(x) === "FuncCall" && VOLATILE.has(lastName(bodyOf(x).funcname))) || Object.values(isNode(x) ? bodyOf(x) : x as Body).some(callsVolatile));
+
 function volatileWindows(v: unknown): void {
-  const calls = (x: unknown): boolean => Array.isArray(x) ? x.some(calls) : x !== null && typeof x === "object"
-    && ((isNode(x) && kindOf(x) === "FuncCall" && VOLATILE.has(lastName(bodyOf(x).funcname))) || Object.values(isNode(x) ? bodyOf(x) : x as Body).some(calls));
+  const calls = callsVolatile;
   const check = (w: Body): void => {
     if (calls(w.orderClause) || calls(w.partitionClause)) {
       throw new Unrewritable("a window ordered or partitioned by random() (or another volatile function) is not supported by Mason",

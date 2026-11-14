@@ -393,6 +393,13 @@ test("issue 464: a to_char template DuckDB's strftime takes writes the function'
   const refused = ['YYYY-"Q"Q', "Month YYYY", "Day", "FMDD", "DDth", "yyyy-mm", "MON YYYY", "mon", "TMMonth", "FXYYYY", "HH12:MI AM", "WW", "YYYY\\MM", 'YYYY"\\"MM',
     "IDDD", "J", "Y,YYY", "YY", "CC", "SSSS", "FF3", "RM", "D", "TZ", "OF", "FMYYYY"];
   for (const f of refused) assert.equal(strftimeTemplate(f, false), null, f);
+  // a template that writes nothing is the function's: DuckDB refuses an empty strftime format as it binds (the review
+  // of PR 955); and the function reads ONE prefix an item, as Postgres 18 does
+  for (const f of ["", "FM", '""', "FMFM", "fmFMDD", "FMTMMonth", "FXFMDD", "FMFXDD"]) assert.equal(strftimeTemplate(f, false), null, f);
+  assert.equal(toCharTime("2026-03-05 10:00:00", ""), null);
+  for (const [f, want] of [["FM", ""], ['""', ""], ["FMFM", "FM"], ["FMTMMonth", "T03onth"], ["TMFMMonth", "F03onth"], ["FXFMDD", "5"], ["FMFXDD", "05"], ["fmFMDD", "FM05"], ["FMYYYYFM", "2026"], ["fxDD", "05"], ["FMx", "x"]] as const) {
+    assert.equal(toCharTime("2026-03-05 10:00:00", f), want, f);
+  }
   // a date's: no pattern of the time of day
   assert.equal(strftimeTemplate("YYYY-MM-DD HH24:MI", true), null);
   assert.equal(strftimeTemplate("YYYY-MM-DD", true), "%Y-%m-%d");
