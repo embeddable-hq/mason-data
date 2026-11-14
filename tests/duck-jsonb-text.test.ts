@@ -21,7 +21,11 @@ const DOCS = [
   // a raw control character in a string: V8 refuses it, the slow path reads it, so the slow path answers
   '"a\nb"', '{"t": "a\tb"}',
 ];
-const BAD = ["", "{", '{"a": 1,}', "[1, 2", "nul", "01", "1.", '{"a" 1}', "{'a': 1}", "[1] x", '"\\x"', "NaN"];
+const BAD = ["", "{", '{"a": 1,}', "[1, 2", "nul", "01", "1.", '{"a" 1}', "{'a': 1}", "[1] x", '"\\x"', "NaN",
+  // a number in a key's place, which the fast path hands JSON.parse as a marked string (the round-5 review: `{1.5: 2}`
+  // was read as a key "\u00001.5"): every number the marking reaches, nested, in an array, after an escaped key
+  "{1: 2}", "{1.5: 2}", "{-0: 1}", "{12345678901234567890: 1}", "{1e2: 3}", "[1e2: 3]", '{"a": {2.5: 1}}', '[{"x": 1, 1e3: 2}]',
+  '{"a\\"b": 1, 0.5: 2}', '{"k": [1, {7.0: 1}]}', '{"a": 1, -1.25: 2, "b": 3}'];
 
 test("jsonbText answers exactly what parseJson and writeJson answer, over every shape", () => {
   for (const d of DOCS) assert.equal(jsonbText(d), slow(d), d);

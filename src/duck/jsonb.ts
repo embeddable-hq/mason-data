@@ -176,8 +176,15 @@ function fastJsonbText(text: string): string | null {
     if (e instanceof SyntaxError) return null;
     throw e;
   }
-  return fastWrite(v);
+  try { return fastWrite(v); } catch (e) {
+    // a marked number where JSON allows no number (a key: `{1.5: 2}` is no JSON): the slow path refuses it in Postgres's words
+    if (e === NOT_JSON) return null;
+    throw e;
+  }
 }
+
+/** thrown by `fastWrite` where the marked text was never JSON: a number the marking turned into a string stands as a key */
+const NOT_JSON = new Error("a marked number in a key's place");
 
 function fastWrite(v: unknown): string {
   if (v === null) return "null";
@@ -188,6 +195,8 @@ function fastWrite(v: unknown): string {
   if (Array.isArray(v)) return `[${v.map(fastWrite).join(", ")}]`;
   const o = v as Record<string, unknown>;
   const keys = Object.keys(o);
+  // a key no JSON string of this text can start with (`fastJsonbText`): a number marked in a key's place, which is no JSON
+  if (keys.some((k) => k.charCodeAt(0) === 0)) throw NOT_JSON;
   // jsonb's order (`keyOrder`): by UTF-8 length, then bytes, which for ASCII keys is the string's length and its order
   if (keys.every((k) => ASCII.test(k))) keys.sort((a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0));
   else keys.sort(keyOrder);
