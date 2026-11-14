@@ -137,7 +137,7 @@ async function listening(pageIcon?: string | null): Promise<number> {
     listener: { openSessions: () => ({ open: 0, byClient: [] }), running: () => [], cancel: (session: number) => ({ unknown: session }) },
     logs: { capacity: 10, recent: () => [] },
     readSource: () => ({ message: "none", code: "bad_source" }), runUrl: "",
-    duck: { copies: () => [], file: path.join(root, "duck.db"), poll: async () => ({ at: "2026-11-07T10:00:00.000Z", tables: [] }),
+    duck: { copies: () => [], file: path.join(root, "duck.db"), refused: () => null, poll: async () => ({ at: "2026-11-07T10:00:00.000Z", tables: [] }),
       stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }), restarts: () => [], requests: { days: 7 } },
   } as unknown as RunContext;
   const server = createRunServer(ctx);
