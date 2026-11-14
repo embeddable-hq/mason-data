@@ -90,6 +90,13 @@ test("THE RACE, its contender there first: a port something holds by the time it
   } finally { await close(holder); }
 });
 
+// #1015: Node's fetch refuses the Fetch standard's bad ports ("bad port"), so a test that fetched its page on one failed
+test("a port Node's fetch refuses is never picked, though nothing listens on it", async () => {
+  const free = await unassignedPort();
+  await assert.rejects(fetch("http://127.0.0.1:10080/"), (e: Error) => /bad port/.test(String(e.cause)));
+  assert.equal(await unassignedPort({ locks: lockDir(), ranges: [], candidates: these([10080], () => free) }), free);
+});
+
 test("a port another process claimed is skipped though nothing listens on it; one process never picks a port twice", async () => {
   const locks = lockDir();
   const [a, b, c] = [await unassignedPort(), await unassignedPort(), await unassignedPort()];
