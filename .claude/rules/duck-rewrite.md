@@ -163,7 +163,15 @@ paths:
     DISTINCT ON, a LATERAL item or a LIMIT that is a parameter; a schema-qualified column of the item is read by its
     name inside (`shortened`). It still reads the other side's whole join column (about 20 s cold at 153 M rows): an
     index or clustering is the owner's to decide. `tests/duck-wire.test.ts` "the preserved side of an outer join …",
-    the oracle's `preserved first:` and the plan fixture hold it ("A top N over joined tables");
+    the oracle's `preserved first:` and the plan fixture hold it ("A top N over joined tables"). **With no sort, the
+    preserved table is limited first only where it holds at least as many rows as every other FROM item**
+    (`biggestPreserved`, issue 463: Metabase's 20-row preview built a hash table of the smaller side's whole join
+    column): then the engine hashed each other item's whole join column before, and limited first it reads it at most
+    once. The rows are the sync's count of each copy (`LateContext.rows`, from `CopyState.rows` in src/duck/plan.ts),
+    so a table it does not know, a derived item of anything but one table, a walled read, a WHERE, a preserved item
+    that is no table, and issue 824's small preserved table beside a big one stay as they were. A statement's plan is
+    kept by its text, so a size read once decides until the plan is made again. `tests/duck-wire.test.ts` "the 20-row
+    preview", the plan fixture's "limited first" entries and the oracle's `preserved and biggest:` hold it;
   - **a grouped top N on a whole primary key reads its table's columns after the LIMIT** (`keyFirst`, src/duck/late.ts,
     issue 134, step 6): where the analysis proves a table's WHOLE primary key grouped (`keyGrouped`, pg_index's primary
     key only), the groups are formed as written with `any_value(t.rowid)`, the HAVING, ORDER BY and LIMIT applied, and

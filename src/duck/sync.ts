@@ -3850,7 +3850,7 @@ export class Sync {
       const copiedAt = new Date().toISOString();
       await this.record({ source: t.source, phase: "copied", rows: p.rows, bytes: t.bytes, seconds, copiedAt, error: null }, t.columns, w);
       this.synced.set(t.source, { at: copiedAt, seconds, by: "copy" });
-      this.event({ kind: "copied", table: t.source, message: `synced: ${p.rows.toLocaleString("en-US")} row(s) in ${seconds.toFixed(2)} s` });
+      this.event({ kind: "full_sync", table: t.source, message: `synced: ${p.rows.toLocaleString("en-US")} row(s) in ${seconds.toFixed(2)} s` });
       this.copiedAs.set(t.source, columnsKey(t.columns));
       // in the catalog at once: a pass's other copies may take hours
       await this.rebuildSchema();
@@ -3883,7 +3883,7 @@ export class Sync {
       const when = `tried again after ${new Date(at).toISOString().slice(11, 16)} UTC (failure ${failures} in a row), or at once when Mason starts again or its columns or key change` +
         (where === null ? "" : `; it continues ${where}`);
       this.log(`sync of ${t.source} failed: ${m}; ${when}`);
-      this.event({ kind: "copy_failed", table: t.source, message: `${m}; ${when}`, cause: e });
+      this.event({ kind: "full_sync_failed", table: t.source, message: `${m}; ${when}`, cause: e });
       // a table that was copied keeps serving its last copy; one never copied is failed
       await this.record({ ...this.states.get(t.source)!, phase: first ? "failed" : "copied", error: `${m} (${when})` }, undefined, w);
     }
@@ -4389,7 +4389,7 @@ export class Sync {
    *  that flow's alone while it writes it (a rebuild's table is not polled or streamed until caught up) */
   private async record(s: CopyState, columns?: readonly SourceColumnInfo[], c: DuckConnection = this.store.writer): Promise<void> {
     // A COPY CURRENT AGAIN after its poll, catch-up or stream failed (its error cleared by the flow that keeps it current,
-    // never by a copy of it: that is its own `copied` event) — the one place an error is cleared, so the one place said
+    // never by a copy of it: that is its own `full_sync` event) — the one place an error is cleared, so the one place said
     const was = this.states.get(s.source);
     if (was !== undefined && was.error !== null && s.error === null && was.phase === "copied" && s.phase === "copied" && was.copiedAt === s.copiedAt) {
       this.event({ kind: "recovered", table: s.source, message: `current again (it had failed: ${was.error.split("\n")[0]})` });

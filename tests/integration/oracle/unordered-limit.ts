@@ -106,6 +106,19 @@ const JOINED_TABLES: UnorderedLimit[] = [
       u("a JSON-unfolded derived side, the paths written", list, from("LEFT", '"B"."a_id"', "'k'", "'n'"), "LIMIT 2000"),
     ];
   })(),
+  // ISSUE 463, THE 20-ROW PREVIEW: the preserved table limited first where it holds as many rows as every other FROM
+  // item (top_b's 30 against top_a's few): a LEFT and a RIGHT join, no match, fan-out, paged past one row's matches, a
+  // chain, a JSON-unfolded side, Metabase's schema-qualified spelling; top_a preserved beside top_b stays as it was (above)
+  u("preserved and biggest: LEFT", "b.id, b.payload, a.note", "FROM top_b b LEFT JOIN top_a a ON a.id = b.a_id", "LIMIT 5"),
+  u("preserved and biggest: RIGHT", "b.id, a.name", "FROM top_a a RIGHT JOIN top_b b ON a.id = b.a_id", "LIMIT 6 OFFSET 2"),
+  u("preserved and biggest: no match", "b.id, a.id AS a, a.note", "FROM top_b b LEFT JOIN top_a a ON a.id = b.a_id + 1000", "LIMIT 4"),
+  u("preserved and biggest: fan-out past one row's matches", "x.id, y.id AS y, y.amount", "FROM top_b x LEFT JOIN top_b y ON y.a_id = x.a_id", "LIMIT 9 OFFSET 5"),
+  u("preserved and biggest: a chain", "c.id, c.label, b.payload, a.name", "FROM top_c c LEFT JOIN top_b b ON b.id = c.b_id LEFT JOIN top_a a ON a.id = b.a_id", "LIMIT 7"),
+  u("preserved and biggest: a JSON-unfolded side, the path bound", '"public"."top_b"."id" AS "id", "A"."name" AS "A__name", "B"."k" AS "B__k"',
+    'FROM "public"."top_b" LEFT JOIN "public"."top_a" AS "A" ON "public"."top_b"."a_id" = "A"."id" LEFT JOIN (SELECT "public"."top_b"."id" AS "id", ("public"."top_b"."payload" #>> array[$1]::text[])::text AS "k" FROM "public"."top_b") AS "B" ON "public"."top_b"."id" = "B"."id"',
+    "LIMIT 8", { values: ["k"], wholeValues: ["k"] }),
+  u("preserved and biggest: LIMIT 0", "b.id, a.note", "FROM top_b b LEFT JOIN top_a a ON a.id = b.a_id", "LIMIT 0"),
+  u("preserved and biggest: a page past the end", "b.id, a.note", "FROM top_b b LEFT JOIN top_a a ON a.id = b.a_id", "LIMIT 5 OFFSET 100"),
   u("a derived table of the join", "s.id, s.b", "FROM (SELECT a.id, b.id AS b FROM top_a a JOIN top_b b ON a.id = b.a_id LIMIT 3) s", "LIMIT 2", { whole: "FROM (SELECT a.id, b.id AS b FROM top_a a JOIN top_b b ON a.id = b.a_id) s" }),
 ];
 

@@ -12,7 +12,7 @@
  *
  * A failure repeated word for word is ONE event (`REPEAT_MS`): a database away fails every pass, every few seconds,
  * and a list of the same line buries the one before it. It is written again once it was over in between, or an hour
- * later: a table's failure is over when the table is current again (`recovered`) or copied anew (`copied`); a failure
+ * later: a table's failure is over when the table is current again (`recovered`) or copied anew (`full_sync`); a failure
  * of the whole sync (`table: null`: the stream, the database) when the sync says it is (`recovered` of no table: the
  * stream applied a batch again, the database attached again), which ends every whole-sync failure's repeat at once —
  * an extra event at worst, never a failure dropped. While it lasts, the table's own `error` (mason status) says it.
@@ -41,13 +41,13 @@ export const EVENTS_CODE_DDL = `ALTER TABLE ${EVENTS_TABLE} ADD COLUMN IF NOT EX
 export const EVENTS_ORIGIN_DDL = `ALTER TABLE ${EVENTS_TABLE} ADD COLUMN IF NOT EXISTS origin VARCHAR`;
 
 /**
- * WHAT AN EVENT IS, one word each: `copy_failed`, `poll_failed`, `catch_up_failed` (the one poll that brings a new copy
+ * WHAT AN EVENT IS, one word each: `full_sync_failed`, `poll_failed`, `catch_up_failed` (the one poll that brings a new copy
  * current), `stream_failed` (the stream stopped, or refused a table: `table` says which), `source_unreachable` (the
  * database could not be attached), `generated_failed` (a generated table's re-run failed, and it serves what it held),
  * `compact_failed` (a synced table's compaction failed: it serves and is kept current as it was, and is compacted again
  * after a back-off, src/duck/sync.ts `compact`), `restart` (the supervisor started the run again after it died), `ui_error` (the web page met an error of its own: where,
  * never its words, src/cli/ui-errors.ts) — each a failure;
- * `copied` (a copy finished and was swapped in), `recovered` (a table whose poll, catch-up, stream or re-run failed is
+ * `full_sync` (a copy, the first sync or a full read again, finished and was swapped in), `recovered` (a table whose poll, catch-up, stream or re-run failed is
  * current again; of no table, the stream applying changes or the database attached again after it failed) and
  * `synced` (a sync asked by hand — mason sync, the page's Sync now — and what it did), and `sync_changed` (a table's
  * `sync:` in the sources file changed while it is copied: from what, to what, and how its copy is caught up).
@@ -59,9 +59,9 @@ export const EVENTS_ORIGIN_DDL = `ALTER TABLE ${EVENTS_TABLE} ADD COLUMN IF NOT 
  * them past the newest `limit` a reader asks for. A poll is at most one a second a table (`poll 1s`, the floor), so a
  * table writes at most 86,400 rows a day, MASON_HISTORY_DAYS kept; a streamed table 1,440.
  */
-export const EVENT_KINDS = ["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "restart", "copied", "recovered", "synced", "sync_changed", "polled", "streamed", "ui_error"] as const;
+export const EVENT_KINDS = ["full_sync_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "restart", "full_sync", "recovered", "synced", "sync_changed", "polled", "streamed", "ui_error"] as const;
 export type SyncEventKind = (typeof EVENT_KINDS)[number];
-const FAILURES: ReadonlySet<SyncEventKind> = new Set(["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "restart", "ui_error"]);
+const FAILURES: ReadonlySet<SyncEventKind> = new Set(["full_sync_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "restart", "ui_error"]);
 /** whether an event of this kind is a failure: the one place that says it (the reader's filter, `failed`) */
 export const isFailure = (kind: SyncEventKind): boolean => FAILURES.has(kind);
 /** the scheduled syncs' kinds: listed only when a reader asks for them (`EventsQuery.scheduled`) */
@@ -147,7 +147,7 @@ export class SyncEvents {
     if (this.closed) { this.log(`sync events: an event after they closed, not recorded (${e.kind}${e.table ? ` ${e.table}` : ""}: ${e.message.split("\n")[0]})`); return; }
     const now = this.now();
     // a failure over (its table current again or copied anew; of no table, the whole sync's) is said again when it recurs
-    if (e.kind === "recovered" || e.kind === "copied") { for (const k of [...this.lastFailure.keys()]) if (k.endsWith(`\0${e.table ?? ""}`)) this.lastFailure.delete(k); }
+    if (e.kind === "recovered" || e.kind === "full_sync") { for (const k of [...this.lastFailure.keys()]) if (k.endsWith(`\0${e.table ?? ""}`)) this.lastFailure.delete(k); }
     else if (isFailure(e.kind)) {
       const key = `${e.kind}\0${e.table ?? ""}`;
       const last = this.lastFailure.get(key);

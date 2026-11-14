@@ -1872,8 +1872,8 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     operators with their estimated rows — or why none could be; else null), planTruncated (cut at 8 KiB), origin (an internal error, XX000:
     where it failed in Mason, a file and a line such as src/duck/store.ts:897; else null) }], keptDays,
     before (the position of the page before,
-    or null: none older) }; with --events { events: [{ at, kind (copy_failed, poll_failed,
-    catch_up_failed, stream_failed, source_unreachable, generated_failed, compact_failed, restart, copied, recovered, synced (a sync
+    or null: none older) }; with --events { events: [{ at, kind (full_sync_failed, poll_failed,
+    catch_up_failed, stream_failed, source_unreachable, generated_failed, compact_failed, restart, full_sync, recovered, synced (a sync
     asked by hand), sync_changed (a table's sync: changed), polled (a poll on its schedule, with --scheduled), streamed (a
     minute of the stream's changes to a table, with --scheduled), ui_error (the web page met an error of its own)), failed,
     table (null: the whole sync, the run or the web page),
