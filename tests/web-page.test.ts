@@ -6268,7 +6268,7 @@ test("a host's view is held to its shape: taken and read whole, refresh held wit
   assert.ok(view);
   assert.equal(view.title, "Server <b>one</b>");
   assert.equal(view.refresh, 30);
-  assert.deepEqual(view.sections[0]!.links, [{ label: "Upgrade", url: "/console/upgrade", primary: true }, { label: "Docs <i>", url: "https://docs.example.com/a?b=1&c=2", primary: false }]);
+  assert.deepEqual(view.sections[0]!.links, [{ label: "Upgrade", url: "/console/upgrade", primary: true, danger: false }, { label: "Docs <i>", url: "https://docs.example.com/a?b=1&c=2", primary: false, danger: false }]);
   assert.equal(view.sections[0]!.dropped, 2, "javascript: and a text that is no URL");
   assert.deepEqual(view.sections[1], { heading: "<img src=x onerror=alert(5)>", facts: [], text: null, links: [], dropped: 0 }, "facts, text and links may be left out");
   const refresh = (r: unknown) => hostView({ title: "t", sections: [], refresh: r }).view?.refresh;
@@ -6300,7 +6300,10 @@ test("a host's view is held to its shape: taken and read whole, refresh held wit
     [section({ facts: [{ label: "l", value: "v", status: "great" }] }), "sections[0].facts[0].status is not ok, warn or bad"],
     [section({ facts: [{ label: "l", value: "v", copy: "yes" }] }), "sections[0].facts[0].copy is not true or false"],
     [section({ links: [{ url: "/x" }] }), "sections[0].links[0].label is not one line of text of at most 200 characters"],
-    [section({ links: [{ label: "x", url: "/x", target: "_blank" }] }), "sections[0].links[0] is not { label, url, primary? }"],
+    [section({ links: [{ label: "x", url: "/x", target: "_blank" }] }), "sections[0].links[0] is not { label, url, primary?, danger? }"],
+    [section({ links: [{ label: "x", url: "/x", danger: "yes" }] }), "sections[0].links[0].danger is not true or false"],
+    [section({ links: [{ label: "x", url: "/x", danger: 1 }] }), "sections[0].links[0].danger is not true or false"],
+    [section({ links: [{ label: "x", url: "/x" }, { label: "y", url: "/y", primary: true, danger: true }] }), "sections[0].links[1] is both primary and danger: a link may be one of them, not both"],
     [section({ links: many(21, () => ({ label: "x", url: "/x" })) }), "sections[0].links is not a list of at most 20"],
   ];
   for (const [v, problem] of refused) assert.deepEqual(hostView(v), { problem }, JSON.stringify(v)?.slice(0, 80));
@@ -6334,6 +6337,24 @@ test("a host's view and card as the page writes them: every string TEXT (a <scri
   assert.match(textOf(renderHostCard({ body: hostView(HOST_CARD).view, failure })), /^Plan <u> ✗ the host's view at host\/card\.json could not be read: it answered HTTP 404 Tier/);
   assert.equal(textOf(renderHostCard({ body: undefined, failure })), "The host's card unknown ✗ the host's view at host/card.json could not be read: it answered HTTP 404");
   assert.equal(textOf(renderHostCard(undefined)), "The host's card Reading it…");
+});
+
+test("a host's danger link is drawn as the page's destructive action (issue 971): `btn small danger`, in the Remove button's colours; a plain and a primary link as before", () => {
+  const hostView = fn<[unknown], { view: unknown }>("hostView");
+  const renderHostView = fn<[unknown, string?], string>("renderHostView");
+  const renderHostCard = fn<[unknown], string>("renderHostCard");
+  const v = { title: "t", sections: [{ heading: "h", links: [{ label: "Docs", url: "/docs" }, { label: "Upgrade", url: "/up", primary: true, danger: false },
+    { label: "Delete server", url: "/delete", danger: true }, { label: "Both off", url: "/off", primary: false, danger: false }] }] };
+  const links = '<p class="host-links"><a class="btn small" href="/docs" rel="noreferrer">Docs</a> <a class="btn small primary" href="/up" rel="noreferrer">Upgrade</a> ' +
+    '<a class="btn small danger" href="/delete" rel="noreferrer">Delete server</a> <a class="btn small" href="/off" rel="noreferrer">Both off</a></p>';
+  const view = hostView(v).view;
+  assert.ok(view, "a danger link is taken");
+  assert.ok(renderHostView(view).includes(links), "the view: plain, primary, danger, plain");
+  assert.ok(renderHostCard({ body: view, failure: null }).includes(links), "the card the same");
+  // the page's own danger colours, no new ones: the Remove button's rule names the link too
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
+  assert.match(css, /^button\.danger, a\.btn\.danger \{ color: var\(--bad\); \}$/m);
+  assert.match(css, /^button\.danger:hover, a\.btn\.danger:hover \{ background: var\(--bad-soft\); border-color: var\(--bad\); \}$/m);
 });
 
 test("a host's view in the app: its link in the sidebar's host group, current while shown; read when shown and in the same poll the state names it; again every refresh while shown, never once another page is", async () => {
