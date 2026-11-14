@@ -4248,6 +4248,57 @@ binReview("a bin by a divisor of 39 places is Postgres's", [
   "SELECT id, floor(a / 200000000000000000000000000000000000000) AS f, ceil(a / 200000000000000000000000000000000000000) AS c FROM bins ORDER BY id",
   "SELECT floor(a / 170141183460469231731687303715884105720) AS v, count(*) FROM bins GROUP BY 1 ORDER BY 1"]);
 
+// ISSUE 929: a whole numeric Postgres computes (div() of two integers, an integer cast to numeric, a whole constant,
+// extract of a whole part) was the engine's DECIMAL(38, 0). Beside another numeric's decimals in an IN, a UNION, a
+// CASE, a COALESCE or GREATEST the engine brought both to that type, so the decimals were rounded away: 0.01 IN a
+// div() of 0, 0.30 sorted before -0.01. Each arm carries its number, so equal values of two scales sort one way.
+const wholeBeside = (name: string, sqls: string[]): void => {
+  test(`issue 929: ${name}`, async () => {
+    const c = await client();
+    try {
+      for (const sql of sqls) assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    } finally { await c.end(); }
+  });
+};
+wholeBeside("div() beside a decimal column keeps the column's decimals", [
+  "SELECT id FROM bins WHERE a IN (SELECT div(i, 2) FROM bins) ORDER BY id",
+  "SELECT id FROM bins WHERE div(i, 2) IN (SELECT a FROM bins) ORDER BY id",
+  "SELECT id FROM bins WHERE a = ANY (SELECT div(s, 2) FROM bins) ORDER BY id",
+  "SELECT id FROM bins WHERE a NOT IN (SELECT div(i, 2) FROM bins WHERE i IS NOT NULL) ORDER BY id",
+  "SELECT div(i, 2) AS v, 1 AS arm FROM bins UNION ALL SELECT a, 2 FROM bins ORDER BY 1 NULLS FIRST, 2",
+  "SELECT a AS v, 1 AS arm FROM bins UNION ALL SELECT div(b, 2), 2 FROM bins ORDER BY 1 NULLS FIRST, 2",
+  "SELECT a FROM bins INTERSECT SELECT div(i, 2) FROM bins ORDER BY 1",
+  "SELECT id, CASE WHEN id % 2 = 0 THEN div(i, 2) ELSE a END AS v FROM bins ORDER BY 2, 1",
+  "SELECT id, COALESCE(CASE WHEN id % 2 = 0 THEN NULL ELSE a END, div(i, 2)) AS v FROM bins ORDER BY 2, 1",
+  "SELECT id, GREATEST(a, div(i, 2)) AS g, LEAST(a, div(i, 2)) AS l FROM bins ORDER BY 2, 1",
+  "SELECT s.v, s.arm FROM (SELECT div(i, 2) AS v, 1 AS arm FROM bins UNION ALL SELECT a, 2 FROM bins) s WHERE s.v BETWEEN -1 AND 1 ORDER BY s.v, s.arm",
+  "WITH w AS (SELECT div(i, 2) AS v, 1 AS arm FROM bins UNION ALL SELECT a, 2 FROM bins) SELECT v, arm FROM w ORDER BY v DESC NULLS LAST, arm",
+  "SELECT count(*) AS n, sum(v) AS total FROM (SELECT div(i, 2) AS v FROM bins UNION ALL SELECT a FROM bins) s GROUP BY v ORDER BY v NULLS FIRST",
+  "SELECT x.id, y.id FROM bins x JOIN (SELECT id, CASE WHEN id % 2 = 0 THEN div(i, 2) ELSE a END AS v FROM bins) y ON y.v = x.a ORDER BY 1, 2",
+  "SELECT sum(div(i, 2)) AS v, 1 AS arm FROM bins WHERE id < 10 UNION ALL SELECT a, 2 FROM bins ORDER BY 1 NULLS FIRST, 2"]);
+wholeBeside("an integer cast to numeric, a whole constant and a whole part of extract beside a decimal column keep its decimals", [
+  "SELECT i::numeric AS v, 1 AS arm FROM bins UNION ALL SELECT a, 2 FROM bins ORDER BY 1 NULLS FIRST, 2",
+  "SELECT id FROM bins WHERE a IN (SELECT s::numeric FROM bins) ORDER BY id",
+  "SELECT id, COALESCE(CASE WHEN id % 2 = 0 THEN NULL ELSE a END, b::numeric) AS v FROM bins ORDER BY 2, 1",
+  "SELECT id, CASE WHEN id % 2 = 0 THEN i::numeric ELSE a END AS v FROM bins ORDER BY 2, 1",
+  "SELECT id FROM bins WHERE a IN (SELECT 0e1) ORDER BY id",
+  "SELECT id, CASE WHEN id % 2 = 0 THEN 1.2e1 ELSE a END AS v FROM bins ORDER BY 2, 1",
+  "SELECT id, CASE WHEN id % 2 = 0 THEN extract(day FROM interval '12 days 3 hours') ELSE a END AS v FROM bins ORDER BY 2, 1"]);
+test("issue 929: a whole numeric compared with a numeric parameter is compared exactly", async () => {
+  const c = await client();
+  try {
+    for (const [sql, values] of [["SELECT id FROM bins WHERE div(i, 2) = $1 ORDER BY id", ["12"]], ["SELECT id FROM bins WHERE div(i, 2) = $1 ORDER BY id", ["12.5"]],
+      ["SELECT id FROM bins WHERE i::numeric < $1 ORDER BY id", ["0.5"]], ["SELECT id FROM bins WHERE div(b, 2) IN ($1, $2) ORDER BY id", ["0.5", "-500000000000000006"]]] as const) {
+      assert.deepEqual(await answer(c, sql, [...values]), await postgres(sql, [...values]), `${sql} ${values.join(", ")}`);
+    }
+  } finally { await c.end(); }
+});
+wholeBeside("a whole numeric's own arithmetic is Postgres's", [
+  "SELECT id, div(b, 2) * div(b, 2) AS sq, div(i, 2) * a AS m, div(i, 2) + a AS p, div(i, 2) / 3 AS q, round(div(i, 2), 2) AS r, floor(i::numeric) AS f, div(i, 2)::text AS t FROM bins ORDER BY id",
+  "SELECT sum(div(b, 2)) AS s, avg(div(i, 2)) AS m, min(div(i, 2)) AS lo, max(i::numeric) AS hi, sum(i::numeric) AS t FROM bins",
+  "SELECT div(i, 2) AS q, count(*) FROM bins GROUP BY 1 ORDER BY 1 NULLS FIRST",
+  "SELECT 2.5e2 * 2.5e2 AS w, 1e37 + 1 AS x, extract(epoch FROM date '2024-01-02') AS e"]);
+
 /** an answer's rows in one order: quotients equal to a double's 17 digits are in no defined order on Mason (the listed
  *  difference numeric-quotient-compare), so a test of their equality reads the rows as a set */
 const rowSet = (a: { fields: Array<[string, number | string]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => JSON.stringify(r)).sort() });

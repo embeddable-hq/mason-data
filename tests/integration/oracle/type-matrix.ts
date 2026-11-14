@@ -1996,6 +1996,29 @@ function* binCases(): Generator<Matrixed> {
   yield q("bin: by a divisor of 39 places, grouped", "SELECT floor(a / 170141183460469231731687303715884105720) AS f, count(*) FROM public.bins GROUP BY 1 ORDER BY 1");
 }
 
-export const TYPE_MATRIX: Matrixed[] = [...matrix(), ...mappedTypes(), ...binCases(),...FROM_ITEMS_SORTED.map((f) => q(f.name, f.sql, f.zone)),
+/** A WHOLE NUMERIC beside another numeric's decimals over `bins` (issue 929): div() of two integers, an integer cast to
+ *  numeric, a whole constant and a whole part of extract, in an IN, a UNION, a CASE, a COALESCE and GREATEST, beside a
+ *  numeric(12,2) and a numeric(38,10): the engine once brought both to the whole number's type and rounded the decimals
+ *  away. Each UNION arm carries its number, so equal values of two scales sort one way */
+function* wholeCases(): Generator<Matrixed> {
+  yield q("whole: a column IN a subquery of div()", "SELECT id, a IN (SELECT div(i, 2) FROM public.bins) AS x, div(i, 2) IN (SELECT a FROM public.bins) AS y, m = ANY (SELECT div(s, 2) FROM public.bins) AS z FROM public.bins ORDER BY id");
+  yield q("whole: div() UNION ALL decimals", "SELECT div(i, 2) AS v, 1 AS arm FROM public.bins UNION ALL SELECT a, 2 FROM public.bins UNION ALL SELECT div(b, 7), 3 FROM public.bins ORDER BY 1 NULLS FIRST, 2");
+  yield q("whole: decimals UNION ALL div() of a numeric(38,10)", "SELECT m AS v, 1 AS arm FROM public.bins UNION ALL SELECT div(b, 2), 2 FROM public.bins ORDER BY 1 NULLS FIRST, 2");
+  yield q("whole: div() INTERSECT decimals", "SELECT a FROM public.bins INTERSECT SELECT div(i, 2) FROM public.bins ORDER BY 1");
+  // (no whole value equals a decimal one, and the greatest is a decimal: a CASE or GREATEST of an
+  // integer and a decimal read through a derived table takes the decimal's scale in its text there, with or without
+  // div(), a difference of its own)
+  yield q("whole: a CASE of div() or a value, sorted", "SELECT id, CASE WHEN id % 2 = 1 THEN div(i, 2) ELSE a END AS v FROM public.bins ORDER BY 2, 1");
+  yield q("whole: a COALESCE of a value or div(), sorted", "SELECT id, COALESCE(CASE WHEN id % 2 = 1 THEN NULL ELSE m END, div(i, 2)) AS c FROM public.bins ORDER BY 2, 1");
+  yield q("whole: GREATEST of a value and div()", "SELECT id, GREATEST(a, div(i, 2)) AS g FROM public.bins WHERE id <> 1 ORDER BY id");
+  yield q("whole: div() and decimals through a WITH, grouped", "WITH w AS (SELECT div(i, 2) AS v FROM public.bins UNION ALL SELECT a FROM public.bins) SELECT count(*) AS n, sum(v) AS total FROM w GROUP BY v ORDER BY v NULLS FIRST");
+  yield q("whole: a sum of div() UNION ALL decimals", "SELECT sum(div(i, 2)) AS v, 1 AS arm FROM public.bins WHERE id < 10 UNION ALL SELECT a, 2 FROM public.bins ORDER BY 1 NULLS FIRST, 2");
+  yield q("whole: an integer cast to numeric beside decimals", "SELECT i::numeric AS v, 1 AS arm FROM public.bins UNION ALL SELECT a, 2 FROM public.bins ORDER BY 1 NULLS FIRST, 2");
+  yield q("whole: an integer cast to numeric in a CASE and IN", "SELECT id, CASE WHEN id % 2 = 1 THEN s::numeric ELSE a END AS v, a IN (SELECT b::numeric FROM public.bins) AS x FROM public.bins ORDER BY 2, 1");
+  yield q("whole: a whole constant and extract's whole part beside decimals", "SELECT id, CASE WHEN id % 2 = 0 THEN 1.2e1 ELSE a END AS v, CASE WHEN id % 3 = 0 THEN extract(day FROM interval '12 days') ELSE a END AS d, a IN (SELECT 0e1) AS z FROM public.bins ORDER BY 2, 1");
+  yield q("whole: div()'s own arithmetic", "SELECT id, div(b, 2) * div(b, 2) AS sq, div(i, 2) * a AS m, div(i, 2) + m AS p, div(i, 2) / 3 AS q, round(div(i, 2), 2) AS r, div(i, 2)::text AS t FROM public.bins ORDER BY id");
+}
+
+export const TYPE_MATRIX: Matrixed[] = [...matrix(), ...mappedTypes(), ...binCases(), ...wholeCases(),...FROM_ITEMS_SORTED.map((f) => q(f.name, f.sql, f.zone)),
   // issue 665: a quotient grouped by its exact key alone, its day of the year read in the session's zone
   q("issue 665: the week of year grouped in a session zone of daylight saving", "SELECT ceil(cast(extract(doy from o.created_at) as integer) / 7.0) AS w, count(*) FROM orders o GROUP BY 1 ORDER BY 1", "America/New_York")];

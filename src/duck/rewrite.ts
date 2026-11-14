@@ -5556,7 +5556,7 @@ class Rewriter {
       case "div": {
         // div of two integers is their integer quotient, truncated toward zero
         const own = args.map((a) => this.typeOf(a));
-        if (args.length === 2 && own.every((x) => x !== null && INTEGERS.has(x))) return cast(op("//", args[0]!, nonZero(this.cp, args[1]!)), ["decimal", "38", "0"]);
+        if (args.length === 2 && own.every((x) => x !== null && INTEGERS.has(x))) return wholeNumeric(op("//", args[0]!, nonZero(this.cp, args[1]!)));
         throw new Unrewritable("div() of a value that is not an integer is not supported by Mason", "trunc(a / b)", "div-numeric");
       }
       case "width_bucket": {
@@ -5950,7 +5950,11 @@ class Rewriter {
     const type = this.typeOf(x);
     this.unitSupported(field, type);
     // an interval's parts as Postgres computes them (src/duck/functions.ts intervalPart)
-    if (type === INTERVAL) return cast(fn("__mason_interval_part", [strConst(field), x]), ["decimal", "38", INTERVAL_SCALE[field] ?? "0"]);
+    if (type === INTERVAL) {
+      const scale = INTERVAL_SCALE[field];
+      const part = fn("__mason_interval_part", [strConst(field), x]);
+      return scale === undefined ? wholeNumeric(part) : cast(part, ["decimal", "38", scale]);
+    }
     // a field that grows with time is ±Infinity of an infinite time, which a DECIMAL cannot hold: refused when met
     if ((type === DATE || type === TIMESTAMP || type === TIMESTAMPTZ) && MONOTONIC.has(field)) {
       const inner = this.extractFinite(field, this.clone(x), type) ?? fn("date_part", [strConst(field), this.clone(x)]);
@@ -5972,10 +5976,10 @@ class Rewriter {
     const micros = (expr: AstNode, scale: string): AstNode => op("*", cast(expr, ["decimal", "38", "0"]), numConst(scale));
     switch (field) {
       case "epoch":
-        return type === DATE ? cast(fn("epoch", [x]), ["decimal", "38", "0"]) : micros(fn("epoch_us", [x]), "0.000001");
+        return type === DATE ? wholeNumeric(fn("epoch", [x])) : micros(fn("epoch_us", [x]), "0.000001");
       case "second": return micros(fn("microsecond", [x]), "0.000001");
       case "milliseconds": return micros(fn("microsecond", [x]), "0.001");
-      case "microseconds": return cast(fn("microsecond", [x]), ["decimal", "38", "0"]);
+      case "microseconds": return wholeNumeric(fn("microsecond", [x]));
       case "julian": throw new Unrewritable("extract(julian …) is not supported by Mason", "compute it from extract(epoch …) / 86400 + 2440587.5", "extract-julian");
       default: return null;
     }
@@ -6184,7 +6188,7 @@ class Rewriter {
       switch (w.as) {
         case "double": return cast(arg, ["double"]);
         case "decimal": return cast(arg, ["decimal", String(w.precision), String(w.scale)]);
-        case "whole": return cast(arg, ["decimal", "38", "0"]);
+        case "whole": return wholeNumeric(arg);
         case "literal": return decimalConst(w.text);
         case "same": return arg;
         case "as written": return null;
@@ -7621,13 +7625,26 @@ function positional(text: string): string {
 }
 
 /** a numeric constant written positionally, as DuckDB's DECIMAL: `0.025` reads as one, but a whole `250` (from `2.5e2`)
- *  would read back as an INTEGER — integer arithmetic, an overflow where Postgres's numeric has none — so it is cast,
- *  as an integer cast to numeric is, to DECIMAL(38, 0) (DuckDB keeps a product of two 18-digit decimals in 64 bits and
- *  fails past it). Past DuckDB's 38 digits it stays as written: DuckDB's double, as before */
+ *  would read back as an INTEGER — integer arithmetic, an overflow where Postgres's numeric has none — so it is
+ *  written as an integer cast to numeric is (`wholeNumeric`). Past DuckDB's 38 digits it stays as written: DuckDB's
+ *  double, as before */
 function decimalConst(text: string): AstNode {
   if (text.includes(".") || !engineReadsExactly(text)) return numConst(text);
   const n = Number(text);
-  return cast(Number.isSafeInteger(n) && n >= -2147483648 && n <= 2147483647 ? intConst(n) : numConst(text), ["decimal", "38", "0"]);
+  return wholeNumeric(Number.isSafeInteger(n) && n >= -2147483648 && n <= 2147483647 ? intConst(n) : numConst(text));
+}
+
+/**
+ * A WHOLE NUMERIC Postgres computes (an integer cast to numeric, div() of two integers, a whole constant, extract of a
+ * whole part) as the engine's HUGEINT, never a DECIMAL(38, 0) (issue 929). Beside another DECIMAL in a UNION, an IN, a
+ * CASE, a COALESCE, GREATEST or an ARRAY, DuckDB brings both to one type; a DECIMAL(38, 0) leaves no room for the
+ * other's decimals, so DuckDB drops them and rows and order are wrong. An integer type takes the other DECIMAL's type
+ * whole, as `sum` of an integer column (a HUGEINT) always has, and a value past it is DuckDB's error, never rounded.
+ * HUGEINT still keeps a product in 128 bits, as DECIMAL(38, 0) did (DuckDB keeps a product of two 18-digit decimals in
+ * 64 bits and fails past it).
+ */
+function wholeNumeric(n: AstNode): AstNode {
+  return cast(n, ["hugeint"]);
 }
 
 /** WHETHER THE ENGINE READS A NUMERIC CONSTANT EXACTLY, AS IT IS WRITTEN FOR IT (the one reader of a constant's

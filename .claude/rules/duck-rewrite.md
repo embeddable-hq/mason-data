@@ -255,6 +255,13 @@ paths:
   of its own scan, no operator named DELIM (`delimiterJoin`). ("The plan fixture")
 - **A result's names, types and typmods are Postgres's**, from the analysis, and a numeric Postgres computes exactly is
   computed by `src/lib/pg-numeric.ts`, never DuckDB's double or HUGEINT. ("How a statement is answered")
+- **A whole numeric the rewrite writes is the engine's HUGEINT, never a DECIMAL(38, 0)** (`wholeNumeric`, issue 929):
+  an integer cast to numeric, div() of two integers, a whole constant (`decimalConst`) and a whole part of extract.
+  Beside another DECIMAL in an IN, a UNION, a CASE, a COALESCE, GREATEST or an ARRAY, DuckDB brings both to one type,
+  and a DECIMAL(38, 0) leaves no room for the other's decimals, so they were rounded away. An integer type takes the
+  other DECIMAL's type whole, as `sum` of an integer column always has; a value past it is DuckDB's 22003, never
+  rounded (a numeric(38,30) column has 8 integer digits). `tests/duck-wire.test.ts` "issue 929", the oracle's `whole:`
+  statements over `bins`.
 - **Whether a statement calls a Mason function is its PLAN's, never its text's** (a review finding: a `*` over a
   copy reads `__mason_visible`, which calls nothing, and a text match left every such statement uncancellable — 82 s
   past a 300 ms timeout): `PlannedSql.functions`, the `__mason_*` calls of the rewritten tree (`masonCalls`,
