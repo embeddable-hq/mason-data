@@ -20,7 +20,11 @@ import { HELD } from "./held-types.ts";
 import { CATALOG_BASE_SQL, sessionSetSql, type SessionState } from "../api/postgres/catalog.ts";
 import { cstr, decodeBackend, frame, int16, int32, splitFrames } from "../api/postgres/protocol.ts";
 import { gapRefusal } from "./statement.ts";
-import { outputsByLocation, readParseLog, typesByLocation, UnreadableNames, type QueryOutputs, type Typed, type TreeValue } from "./pgtree.ts";
+import { GAPS } from "./gaps.ts";
+
+/** the way out of a name Mason cannot read back, as the registry says it */
+const NAME_UNREADABLE_WAY_OUT = GAPS["name-unreadable"].wayOut;
+import { NamesNeedColumns, outputsByLocation, readParseLog, typesByLocation, UnreadableNames, type QueryOutputs, type Typed, type TreeValue } from "./pgtree.ts";
 
 export interface PgField { name: string; oid: number; typmod: number }
 export interface PgAnalysis {
@@ -77,20 +81,20 @@ export async function analyze(run: (bytes: Uint8Array) => Promise<Uint8Array>, s
   if (frames.length !== messages.length) throw new Error(`the catalog Postgres's reply split into ${frames.length} frames and ${messages.length} messages: report it`);
   const detail = noticeField(frames[z + 1 + at]!.frame, "D");
   let tree: TreeValue;
-  try { tree = readParseLog(detail, written); }
-  catch (e) {
-    if (!(e instanceof UnreadableNames)) throw e;
-    // a name with a line break the statement does not write is a column's (every relation lists all its columns'
-    // names): the columns so named of the relations the statement reads tell it too
-    const relations = e.relations.filter((r) => Number.isSafeInteger(r) && r > 0);
-    const columns = relations.length === 0 ? [] : await catalogRows(run, "SELECT attname::text FROM pg_catalog.pg_attribute WHERE attnum > 0 AND NOT attisdropped " +
-      `AND strpos(attname::text, chr(10)) > 0 AND attrelid IN (${relations.join(", ")})`);
-    try { tree = readParseLog(detail, new Set([...written, ...columns.flatMap(([n]) => typeof n === "string" ? [n] : [])])); }
-    catch (again) {
-      if (!(again instanceof UnreadableNames)) throw again;
-      throw gapRefusal("name-unreadable", "Mason cannot read back a name in this statement from Postgres's analysis of it",
-        "give the columns whose names hold line breaks, or many of ( ) { } \\ and tabs, aliases without them", sql);
+  try {
+    try { tree = readParseLog(detail, written); }
+    catch (e) {
+      if (!(e instanceof NamesNeedColumns)) throw e;
+      // a name the statement's own do not tell: the columns of the relations it reads (every relation lists all its
+      // columns' names), asked only then, and the log read once more with them
+      const relations = e.relations.filter((r) => Number.isSafeInteger(r) && r > 0);
+      const columns = relations.length === 0 ? [] : await catalogRows(run, "SELECT attname::text FROM pg_catalog.pg_attribute WHERE attnum > 0 AND NOT attisdropped " +
+        `AND attrelid IN (${relations.join(", ")})`);
+      tree = readParseLog(detail, written, new Set(columns.flatMap(([n]) => typeof n === "string" ? [n] : [])));
     }
+  } catch (e) {
+    if (!(e instanceof UnreadableNames || e instanceof NamesNeedColumns)) throw e;
+    throw gapRefusal("name-unreadable", "Mason cannot read back a name in this statement from Postgres's analysis of it", NAME_UNREADABLE_WAY_OUT, sql);
   }
   const pd = mine.find((m) => m.type === "ParameterDescription");
   const rd = mine.find((m) => m.type === "RowDescription");

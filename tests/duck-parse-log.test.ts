@@ -118,7 +118,7 @@ test("issue 956: a tree wrapped by Postgres's rule is read back with every name 
     const text = `{QUERY :pad ${"z".repeat(1 + rand(80))} :targetList (${names.map((m, i) => `{TARGETENTRY :resno ${i + 1} :resname ${outToken(m)} :location -1}`).join(" ")}) ` +
       `:colnames (${names.map((m) => `"${outToken(m)}"`).join(" ")}) :constvalue 5 [ 20 0 0 0 110 ]}`;
     let tree: TreeValue;
-    try { tree = readParseLog(formatNodeDump(Buffer.from(text)), new Set(names)); }
+    try { tree = readParseLog(formatNodeDump(Buffer.from(text)), new Set(names), new Set()); }
     catch (e) {
       assert.ok(e instanceof UnreadableNames && lines, `${text}: ${String(e)}`);
       refused++;
@@ -135,7 +135,7 @@ test("issue 956: a run of 78 bytes or more with no space is broken inside it, an
   for (const name of ["(".repeat(40), `${"(".repeat(30)}→${")".repeat(20)}`, "{}".repeat(31), `a ${"\\".repeat(45)}`]) {
     for (let pad = 1; pad <= 80; pad++) {
       const text = `{QUERY :pad ${"z".repeat(pad)} :targetList ({TARGETENTRY :resname ${outToken(name)}}) :colnames ("${outToken(name)}")}`;
-      const tree = readParseLog(formatNodeDump(Buffer.from(text)));
+      const tree = readParseLog(formatNodeDump(Buffer.from(text)), new Set([name]), new Set());
       assert.deepEqual(resnames(tree), [name], text);
       assert.deepEqual(colnames(tree), [name], text);
     }
@@ -164,8 +164,8 @@ test("issue 956: a log whose names no reading tells apart is refused by name (Ma
   let detail: string | undefined;
   for (let pad = 1; pad <= 80 && detail === undefined; pad++) {
     const wrapped = formatNodeDump(Buffer.from(`{QUERY :pad ${"z".repeat(pad)} :colnames ("id" "${name}") :x 1}`));
-    const { unwrapNodeDump } = await import("../src/duck/pgtree.ts");
-    if (unwrapNodeDump(wrapped).length > 1) detail = wrapped.toString("utf8");
+    const { readParseLog, UnreadableNames } = await import("../src/duck/pgtree.ts");
+    try { readParseLog(wrapped, new Set(), new Set()); } catch (e) { if (e instanceof UnreadableNames) detail = wrapped.toString("utf8"); else throw e; }
   }
   assert.ok(detail !== undefined, "a log that reads two ways");
   // the catalog as analyze talks to it: the analysis's two replies, then the read of the columns' names (none)
