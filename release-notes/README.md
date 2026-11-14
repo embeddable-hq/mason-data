@@ -45,13 +45,15 @@ These are not breaking changes, so they can go in a patch:
 - A new key, a new setting or a new command that a project does not have to use.
 - A fix for a wrong answer, a crash or lost data.
 - A query that Mason now answers, or now refuses by name because its answer was wrong.
+- A change that makes Mason sync a table again whole after the upgrade, once, such as a new layout of the synced data.
+  The project is read the same, but the restart reads every such table from the source again. So the notes must say
+  so plainly under "Before you upgrade": which tables, that their old data is served until then, and about how long
+  it takes (the owner, 2026-11-14).
 
 Not decided yet, so ask the owner before such a change goes in a patch:
 
 - A renamed or removed `--json` key, event kind, metric or log line, such as `copied` becoming `full_sync` in 0.20.0.
   The project is read the same, but a host's script or alert can stop matching.
-- A change that makes Mason sync a table again whole after the upgrade, once, such as a new layout of the synced data.
-  The project is read the same, but the restart reads every such table from the source again.
 - A renamed or removed setting the host sets: a `MASON_*` variable, or the variable the sources file names for the
   URL. The project is read the same, but a setting under an old name stops the start, so a restart alone no longer
   works.
