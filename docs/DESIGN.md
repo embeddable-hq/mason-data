@@ -443,6 +443,20 @@ under another transaction's write fails its commit, hence swaps on the writer's 
   `numeric(p > 38)` (Prisma's numeric(65,30)) as DOUBLE, 15 digits; Mason reads their text into DECIMAL(38, s), s the
   most decimals the values use (at scale 30 a sum past 10⁸ would overflow 38 digits). A wider later value re-copies the
   table (at most three times a run); past 38 digits or a NaN stays a double, said.
+- **A plain numeric keeps each value's own scale** (issue 946, `src/duck/scale-column.ts`): Postgres prints an
+  unconstrained `numeric` at each value's own scale (`12.5` beside `12.49`), and DECIMAL(38, s) has one. So the copy holds
+  a hidden UTINYINT beside it, the decimals of the source's text, written by every write (the copy's chunks, the poll's
+  stage, the stream's rows and its unchanged-TOAST update) and never listed (the copy's view of its visible columns, made
+  whether stored JSON paths are on or off). The value stays the engine's DECIMAL, so keys, filters, joins and aggregates
+  are native; only a reader that prints reads the scale: the column's program is `rescale(value, scale)`, which the wire
+  evaluates on the text (0.06 µs a value; 1.4 µs through BigInt), and `x::text` is the engine's text cut natively. A copy
+  an older Mason made without the column is read again once (`SCALE_LAYOUT`), serving as it was until then. Not yet:
+  the readers `mixed-scale-numeric` lists (to_json and its kin, concat, `||`, array_agg, a scalar subquery, a set
+  operation without ALL, a generated table …) keep the column's one scale. The hidden column's name is hashed again where
+  the table holds a column of that name (`scaleColumn`), and a copy's view lists the source's own columns, never a
+  pattern of names. Measured on 4 M rows of 0–2 decimals: the hidden column is 1.5 MiB beside the value's 12.5 MiB, the
+  copy's time is unchanged within noise. min / max print at the column's one scale (the owner's decision, 2026-11-14:
+  picking the row's scale by `arg_min` / `arg_max` cost about 2× grouped and 10× ungrouped, for a value already equal).
 - **A failed copy backs off** (`copyRetryDelayMs`: four times the attempt, at least 5 minutes, doubled per failure, at
   most 6 hours; at once after a restart or a column change) and keeps its committed chunks.
 - **`mason stop` interrupts a copy**, re-sent every 50 ms (DuckDB loses an interrupt that arrives before its statement
@@ -752,6 +766,51 @@ review", and `git show 9e20f15:.claude/workflows/pr-loop-slim.js`.
 **Kept.** The fresh reviewer that runs what changed instead of reading it; the oracle as the arbiter of a wrong answer;
 a test seen failing without its fix; the coordinator alone merging, pinned to the head read; and acting only on words
 from the repository's people, since anyone can open an issue here.
+
+### When a numeric is right (the owner, 2026-11-14)
+
+**Decision (the owner, 2026-11-14).** A `numeric` Mason returns is right when:
+1. its whole-number digits (left of the decimal point) match Postgres's exactly; and
+2. the value matches Postgres's to 15 significant digits: the two are equal when both are rounded to 15 significant
+   digits.
+
+So trailing zeros may differ: "2.5 vs 2.50 … that's a rendering difference, not a value difference." Digits past the
+15th significant digit may differ too, as long as no whole-number digit does. A whole-number digit that changes only
+because that rounding carries (0.99999999999999999 rounds to 1) is within the rule. Values that differ only there may compare
+equal in Mason, and be merged by a UNION or a DISTINCT, or matched by an IN or a join, where Postgres keeps them apart.
+Such a difference is a `differs` entry in `src/duck/gaps.ts`, and the oracle's `KNOWN` decides it. It never blocks a
+merge. Anything outside the rule is a wrong answer, which blocks, or is listed by name in `src/duck/gaps.ts`.
+
+**Why.** The engine holds a numeric as a DECIMAL of at most 38 digits, and Postgres's numeric has no such limit. Two
+choices brought this up:
+- In PR 943, a whole number beside a wide decimal (a `numeric(38,30)`, say) in a UNION, an IN or a CASE overflowed the
+  38 digits. Mason failed with 22003 where Postgres answered. The owner chose to round the decimal side, and answer,
+  rather than fail.
+- In issue 946, a column declared `numeric` with no precision prints every value at the column's largest scale (12.50
+  for 12.5), and `min` / `max` print at that one scale too. The owner accepted it as a rendering difference.
+
+**Refined the same day.** The owner first said "as long as mason matches postgres to 18 decimal places, that's
+acceptable". That was replaced by the two parts above. 15 significant digits alone would let a large integer's last
+digits be wrong (an id of 19 digits off in its last four), so part 1 holds every whole-number digit exact.
+
+**The known edge.** With 14 or more whole-number digits, part 2 lets the decimals past the 15th significant digit
+differ: the cents on a total in the tens of trillions. Mason still computes an exact sum exactly. The rule only says what is
+acceptable.
+
+**The listed exceptions.** These entries go through a double, and each stays a named exception: `numeric-parameter`,
+`numeric-array`, `nested-exact-numeric`, `numeric-over-38-digits`, `numeric-stddev` and `numeric-quotient-compare`.
+Where they are within the rule:
+- A value stored or passed as a double is within it below 10^15 when it has a fraction, and below 2^53 (about
+  9 × 10^15) when it is whole. Values near a 15th-digit rounding boundary are the exception: the double's own error
+  can round them the other way. Past 10^15 a fraction breaks part 1: the double of 1000000000000000.99 prints as
+  1000000000000001, where Postgres's rounds to 1000000000000000.
+- A result computed in doubles (a stddev, arithmetic on a constant past 38 digits, a stddev of a subquery's quotient)
+  is not promised at any size. Subtracting nearly equal doubles loses digits. `stddev_samp` of 1.00000000000000001
+  and 1.00000000000000003 as numeric(20,17) is 0.0 in the engine, where Postgres answers 1.41421356237310e-17. A
+  stddev of 1000000.000000001, 1000000.000000002 and 1000000.000000004 is wrong in its second digit. `float-last-digit` is
+about float8, not numeric, and differs only in the 16th–17th digit.
+
+The oracle still compares a numeric's text, so each such difference is seen, and listed, never silently passed.
 
 ### How CLAUDE.md is laid out (2026-11-13, issue 891)
 
