@@ -8202,3 +8202,29 @@ test("collation resolver: two libc collations in one session, each by its own or
     assert.equal(reads, 1, "the second collation's order is read once, then held");
   } finally { await c.end(); await a.close(); }
 });
+
+/**
+ * Issue 956: Postgres wraps its parse tree's log at 78 bytes, breaking at a space, a name's own escaped space (`\ `)
+ * included. Read as text, `meta → n` came back as `meta\n→ n`, the derived table's column was not found by its name,
+ * and its exact numeric was sent as the engine's double. A padding column's name moves every break across the names,
+ * so one lands at every byte of each.
+ */
+const WRAPPED_NAMES = (pad: string, outer: string): string =>
+  `SELECT u.id, s."Unit Price", s."meta → n", s."meta → path", s."a b c d e f g h", s."x / 3", s.${outer}, g."avg of c", s.lit ` +
+  `FROM deep_t u JOIN (SELECT d.id AS "${pad.slice(0, 60)}", d.id AS "o${pad.slice(60)}", (j.b ->> 'n')::numeric AS "Unit Price", (j.b ->> 'n')::numeric AS "meta → n", ` +
+  `(j.b #>> array['n']::text[])::numeric AS "meta → path", d.c / 7 AS "a b c d e f g h", d.c / 3 AS "x / 3", d.c / 9 AS ${outer}, ` +
+  `'a b  c d   e' AS lit FROM deep_t d LEFT JOIN jdocs j ON j.id = d.id) s ON s."${pad.slice(0, 60)}" = u.id ` +
+  `LEFT JOIN (SELECT e.a, avg(e.c) AS "avg of c" FROM deep_t e GROUP BY e.a) g ON g.a = u.a ORDER BY 1`;
+
+test("issue 956: a derived table's column whose name holds a space is read by that name wherever the parse tree's log breaks a line", async () => {
+  const c = await client();
+  try {
+    const statements: Array<readonly [string, "ordered"]> = [];
+    for (let n = 1; n <= 80; n++) {
+      statements.push([WRAPPED_NAMES("p".repeat(n), `"q ${"r ".repeat(n % 7)}s"`), "ordered"]);
+      // a line break that IS the name's (U&"…\000A…"), beside the ones Postgres wraps
+      if (n % 4 === 0) statements.push([WRAPPED_NAMES("p".repeat(n), `U&"line\\000Abreak ${"w".repeat(n % 9)}"`), "ordered"]);
+    }
+    assert.deepEqual(await unlike(c, statements), []);
+  } finally { await c.end(); }
+});

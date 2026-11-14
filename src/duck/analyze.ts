@@ -18,8 +18,9 @@
  */
 import { HELD } from "./held-types.ts";
 import { CATALOG_BASE_SQL, sessionSetSql, type SessionState } from "../api/postgres/catalog.ts";
-import { cstr, decodeBackend, frame, int16, int32 } from "../api/postgres/protocol.ts";
-import { outputsByLocation, parseTree, typesByLocation, type QueryOutputs, type Typed, type TreeValue } from "./pgtree.ts";
+import { cstr, decodeBackend, frame, int16, int32, splitFrames } from "../api/postgres/protocol.ts";
+import { gapRefusal } from "./statement.ts";
+import { outputsByLocation, readParseLog, typesByLocation, UnreadableNames, type QueryOutputs, type Typed, type TreeValue } from "./pgtree.ts";
 
 export interface PgField { name: string; oid: number; typmod: number }
 export interface PgAnalysis {
@@ -41,8 +42,11 @@ const NAME = "__mason_analysis";
 const NO_SESSION: SessionState = { timeZone: "UTC", searchPath: "public", dateStyle: "ISO, MDY" };
 const query = (sql: string): Buffer => frame("Q", cstr(sql));
 
-/** Asks the catalog Postgres to analyse `sql` (with these declared parameter OIDs, 0 = infer). */
-export async function analyze(run: (bytes: Uint8Array) => Promise<Uint8Array>, sql: string, paramOids: readonly number[], under: SessionState = NO_SESSION): Promise<PgAnalysis | PgRefusal> {
+/** Asks the catalog Postgres to analyse `sql` (with these declared parameter OIDs, 0 = infer). `written`: every name the
+ *  statement writes (`writtenNames` of its raw tree), which tells a name holding a line break apart in the log (pgtree.ts
+ *  `readParseLog`); without it, such a name the log cannot tell apart is refused by name. */
+export async function analyze(run: (bytes: Uint8Array) => Promise<Uint8Array>, sql: string, paramOids: readonly number[], under: SessionState = NO_SESSION,
+  written: ReadonlySet<string> = new Set()): Promise<PgAnalysis | PgRefusal> {
   const bytes = Buffer.concat([
     // the session's state: Postgres parses a literal under its zone and order ('2026-01-01 12:00'::timestamptz is that
     // zone's noon), and the rewrite writes the value it parsed (src/duck/rewrite.ts `aConst`)
@@ -55,7 +59,8 @@ export async function analyze(run: (bytes: Uint8Array) => Promise<Uint8Array>, s
     // zone, under which the catalog then answered what reads no table
     query(`RESET debug_print_parse; RESET debug_pretty_print; RESET client_min_messages; ${CATALOG_BASE_SQL}`),
   ]);
-  const messages = decodeBackend(Buffer.from(await run(bytes)));
+  const reply = Buffer.from(await run(bytes));
+  const messages = decodeBackend(reply);
   // the replies to the first Query end at its ReadyForQuery; the statement's run to the next one
   const z = messages.findIndex((m) => m.type === "ReadyForQuery");
   const end = messages.findIndex((m, i) => i > z && m.type === "ReadyForQuery");
@@ -65,9 +70,17 @@ export async function analyze(run: (bytes: Uint8Array) => Promise<Uint8Array>, s
   if (refused?.type === "ErrorResponse") return { refused: refused.fields };
   const firstError = messages.find((m) => m.type === "ErrorResponse");
   if (firstError?.type === "ErrorResponse") throw new Error(`the catalog Postgres could not switch its analysis log on or off: ${firstError.fields.M}`);
-  const log = mine.find((m) => m.type === "NoticeResponse" && /^\{QUERY\b/.test(m.fields.D ?? ""));
-  if (log?.type !== "NoticeResponse") throw new Error("the catalog Postgres logged no parse tree for the statement: report it");
-  const tree = parseTree(log.fields.D!);
+  const at = mine.findIndex((m) => m.type === "NoticeResponse" && /^\{QUERY\b/.test(m.fields.D ?? ""));
+  if (at < 0) throw new Error("the catalog Postgres logged no parse tree for the statement: report it");
+  // the log's own BYTES, never its text decoded: Postgres wraps it by bytes, and may break a line inside a character
+  const frames = splitFrames(reply);
+  if (frames.length !== messages.length) throw new Error(`the catalog Postgres's reply split into ${frames.length} frames and ${messages.length} messages: report it`);
+  let tree: TreeValue;
+  try { tree = readParseLog(noticeField(frames[z + 1 + at]!.frame, "D"), written); }
+  catch (e) {
+    if (!(e instanceof UnreadableNames)) throw e;
+    throw gapRefusal("name-unreadable", "Mason cannot read back a name in this statement from Postgres's analysis of it", "name the column in the statement, or give it an alias without a line break", sql);
+  }
   const pd = mine.find((m) => m.type === "ParameterDescription");
   const rd = mine.find((m) => m.type === "RowDescription");
   return {
@@ -77,6 +90,32 @@ export async function analyze(run: (bytes: Uint8Array) => Promise<Uint8Array>, s
     outputs: outputsByLocation(tree),
     tree,
   };
+}
+
+/** Every string a raw parse tree (libpg-query's) holds: each name the statement writes, as Postgres read it (an
+ *  identifier folded, a U&"…" escape undone), for `analyze` to tell a name with a line break by. */
+export function writtenNames(raw: unknown): Set<string> {
+  const out = new Set<string>();
+  const visit = (v: unknown): void => {
+    if (typeof v === "string") out.add(v);
+    else if (Array.isArray(v)) v.forEach(visit);
+    else if (v !== null && typeof v === "object") Object.values(v).forEach(visit);
+  };
+  visit(raw);
+  return out;
+}
+
+/** One field of a NoticeResponse frame (its type byte included) as the bytes Postgres sent: a code byte, then a
+ *  NUL-terminated value, closed by a zero byte. */
+function noticeField(f: Buffer, code: string): Buffer {
+  const want = code.charCodeAt(0);
+  for (let off = 5; off < f.length && f[off] !== 0;) {
+    const end = f.indexOf(0, off + 1);
+    if (end < 0) break;
+    if (f[off] === want) return f.subarray(off + 1, end);
+    off = end + 1;
+  }
+  throw new Error(`the catalog Postgres's notice has no ${code} field: report it`);
 }
 
 /** the types whose input DuckDB reads otherwise than Postgres, as the catalog Postgres writes their value back */

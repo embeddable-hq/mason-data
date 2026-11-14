@@ -18,8 +18,152 @@ import { constantExpression } from "./constant-key.ts";
 export type TreeValue = TreeNode | TreeValue[] | string | null;
 export interface TreeNode { readonly _node: string; readonly [field: string]: TreeValue }
 
-/** Parses one node-format text (outfuncs.c's nodeToString), or throws with the offset where it went wrong. */
-export function parseTree(text: string): TreeValue {
+/**
+ * THE LOG'S ONE GRAMMAR (issue 956): the analysed tree as `debug_print_parse` logs it (the DETAIL's bytes), read with
+ * Postgres's line wrapping undone, so every reader of the tree gets each name exactly as written.
+ *
+ * Postgres writes the tree (nodeToString) and then wraps it (`format_node_dump`, src/backend/nodes/print.c), counting
+ * BYTES, even with `debug_pretty_print = off`. A line takes the next 78 bytes. If the byte after them is a space, that
+ * space becomes the line break. Otherwise the last space among the line's bytes 1 to 77 becomes the break, and what
+ * follows it starts the next line. With no such space, a line break is inserted after the 78 bytes, inside a token.
+ * Every line, the last one too, ends in a line break.
+ *
+ * The space Postgres breaks at can be a name's own: outToken writes a space in a name as `\ `, so a break there leaves
+ * `\` and a line break, which is just how Postgres writes a line break that IS in the name. Read as text, `meta → n`
+ * came back as `meta\n→ n`, and the rewrite could not find the column by its name (a numeric's exact value lost). So the
+ * bytes are not read line by line: every reading of the line breaks (a space, an inserted break, the end, or a name's
+ * own line break where it is escaped) is wrapped again by Postgres's own rule, and only a reading that gives back the
+ * very same bytes is kept. A break inside a run of 78 bytes with no space may have been a space too: a space read
+ * between two halves of a quoted name or a field's value does not parse (outToken escapes every space it writes), so
+ * the parse decides. A name's own line break that can trade places with a wrapped space is told by the names the
+ * statement writes. One reading must be left. Where more are, Mason refuses by name (`name-unreadable`), and never
+ * guesses.
+ */
+export function readParseLog(detail: Uint8Array, written: ReadonlySet<string> = new Set()): TreeValue {
+  const trees: TreeValue[] = [];
+  let failure: unknown = null;
+  for (const r of unwrapNodeDump(detail)) {
+    // each break inside a run of 78 bytes with no space was a space, or was inserted: each choice is its own (what
+    // follows is the same either way), so every combination is parsed, up to a bound past which none is guessed
+    if (r.spaces.length > MAX_INSIDE_TOKEN) throw new UnreadableNames();
+    for (let combo = 0; combo < 2 ** r.spaces.length; combo++) {
+      const parts: Uint8Array[] = [];
+      let from = 0;
+      r.spaces.forEach((at, k) => { if (combo & (1 << k)) { parts.push(r.text.subarray(from, at), Buffer.from(" ")); from = at; } });
+      parts.push(r.text.subarray(from));
+      try { trees.push(parseTree(Buffer.concat(parts).toString("utf8"))); }
+      // a reading that does not parse is not what Postgres wrote: the next is tried, and the error kept for the report
+      catch (e) { failure = e; }
+    }
+  }
+  if (trees.length === 1) return trees[0]!;
+  if (trees.length === 0) throw failure ?? new Error("the catalog Postgres's parse tree: its log's line breaks can be read no way: report it");
+  // A name's own line break near a space in a name can trade places with the break Postgres wrapped at, and the bytes
+  // are the same either way (`line\ break\` + LF + `here` is `line break\nhere` or `line\nbreak here`). Such a name
+  // is told by the statement: a reading is kept only if each name it holds with a line break is one the statement writes
+  const plausible = trees.filter((t) => namesWithLineBreak(t).every((n) => written.has(n)));
+  if (plausible.length === 1) return plausible[0]!;
+  throw new UnreadableNames();
+}
+
+/** a parse tree's log that more than one tree could have been wrapped into, or too many ways to read: a name with a line
+ *  break the statement does not write (a table's column so named) beside a space at a line's end, or many long names of
+ *  characters Postgres escapes (Mason gap `name-unreadable`) */
+export class UnreadableNames extends Error {
+  constructor() { super("the catalog Postgres's parse tree holds a name that Mason cannot read back"); }
+}
+
+/** the most breaks inside a token one reading of a log is parsed with (each doubles the parses), and the most readings */
+const MAX_INSIDE_TOKEN = 8, MAX_READINGS = 64;
+
+/** every string of a tree that holds a line break: only a name can, as the log's breaks are undone */
+function namesWithLineBreak(v: TreeValue): string[] {
+  if (v === null) return [];
+  if (typeof v === "string") return v.includes("\n") ? [v] : [];
+  if (Array.isArray(v)) return v.flatMap(namesWithLineBreak);
+  return Object.entries(v).flatMap(([k, x]) => k === "_node" ? [] : namesWithLineBreak(x));
+}
+
+const LINE = 78, LF = 10, SPACE = 32, BACKSLASH = 92;
+
+/** format_node_dump's choice for the line of `s` starting at `at`: its length and where the next line starts, or null
+ *  where the text ends within the line. `length` is the whole text's, or Infinity while more than this line is known. */
+function pgLineEnd(s: Uint8Array, at: number, length: number): { length: number; next: number } | null {
+  if (length - at <= LINE) return null;
+  if (s[at + LINE] === SPACE) return { length: LINE, next: at + LINE + 1 };
+  for (let k = LINE - 1; k > 0; k--) if (s[at + k] === SPACE) return { length: k, next: at + k + 1 };
+  return { length: LINE, next: at + LINE };
+}
+
+/**
+ * Every text Postgres could have wrapped into `wrapped` (one, unless a name holds a line break or a run of 78 bytes has
+ * no space), each with the places a break inside such a run may have been a space. A depth-first search, line by line, each line's choice checked by Postgres's own rule as soon as the 79
+ * bytes it reads are known, so a wrong choice dies within two lines and the search is linear in the log.
+ */
+export function unwrapNodeDump(wrapped: Uint8Array): Array<{ text: Uint8Array; spaces: number[] }> {
+  // the DETAIL as sent ends in the last line's break; one without it is read as if it had it
+  const o = wrapped.length > 0 && wrapped[wrapped.length - 1] === LF ? Buffer.from(wrapped) : Buffer.concat([wrapped, Buffer.from([LF])]);
+  const s = Buffer.alloc(o.length);
+  // each line chosen, in the text's coordinates: where it starts, how long it is, where the next starts (-1: the end)
+  const starts: number[] = [], lengths: number[] = [], nexts: number[] = [];
+  // "either": a break inside 78 bytes with no space, before a byte that is no space, was a space or was inserted;
+  // read as inserted, with where the space would go kept (`spaces`)
+  type Choice = { e: number; kind: "space" | "either" | "end" };
+  type Frame = { at: number; sLen: number; lines: number; checked: number; spaces: number; choices: Choice[]; next: number };
+  const spaces: number[] = [];
+  const escaped = (e: number): boolean => { let n = 0; for (let k = e - 1; k >= 0 && o[k] === BACKSLASH; k--) n++; return n % 2 === 1; };
+  /** the lines whose 79 bytes are known, held to Postgres's rule; false where one breaks elsewhere */
+  const holds = (from: number, sLen: number, complete: boolean): { ok: boolean; checked: number } => {
+    let i = from;
+    for (; i < starts.length; i++) {
+      if (!complete && sLen < starts[i]! + LINE + 1) break;
+      const r = pgLineEnd(s, starts[i]!, complete ? sLen : Infinity);
+      if (r === null ? nexts[i] !== -1 : r.length !== lengths[i] || r.next !== nexts[i]) return { ok: false, checked: i };
+    }
+    return { ok: true, checked: i };
+  };
+  const choicesAt = (at: number): Choice[] => {
+    const out: Choice[] = [];
+    for (let e = at + 1; e <= Math.min(at + LINE, o.length - 1); e++) {
+      if (o[e] !== LF) continue;
+      if (e === o.length - 1) { out.push({ e, kind: "end" }); break; }
+      const inside = e - at === LINE && o[e + 1] !== SPACE && !o.subarray(at + 1, e).includes(SPACE);
+      out.push({ e, kind: inside ? "either" : "space" });
+      // a line break that is not escaped is never a name's own, so it is this line's end
+      if (!escaped(e)) break;
+    }
+    return out;
+  };
+  const found: Array<{ text: Uint8Array; spaces: number[] }> = [];
+  const stack: Frame[] = [{ at: 0, sLen: 0, lines: 0, checked: 0, spaces: 0, choices: choicesAt(0), next: 0 }];
+  let budget = 64 * o.length + 10_000;
+  while (stack.length > 0) {
+    // past the bound, the readings are too many to tell apart: refused by name, never one guessed
+    if (--budget < 0 || found.length > MAX_READINGS) throw new UnreadableNames();
+    const f = stack[stack.length - 1]!;
+    starts.length = lengths.length = nexts.length = f.lines;
+    spaces.length = f.spaces;
+    const c = f.choices[f.next++];
+    if (c === undefined) { stack.pop(); continue; }
+    let sLen = f.sLen;
+    o.copy(s, sLen, f.at, c.e);
+    const start = sLen, length = c.e - f.at;
+    sLen += length;
+    if (c.kind === "space") s[sLen++] = SPACE;
+    if (c.kind === "either") spaces.push(sLen);
+    starts.push(start); lengths.push(length); nexts.push(c.kind === "end" ? -1 : sLen);
+    const complete = c.kind === "end";
+    const held = holds(f.checked, sLen, complete);
+    if (!held.ok) continue;
+    if (complete) { found.push({ text: Buffer.from(s.subarray(0, sLen)), spaces: [...spaces] }); continue; }
+    stack.push({ at: c.e + 1, sLen, lines: starts.length, checked: held.checked, spaces: spaces.length, choices: choicesAt(c.e + 1), next: 0 });
+  }
+  return found;
+}
+
+/** Parses one node-format text (outfuncs.c's nodeToString), or throws with the offset where it went wrong. A space or
+ *  line break inside a quoted name that is not escaped is no text outToken writes, and is refused as such. */
+function parseTree(text: string): TreeValue {
   let i = 0;
   const ws = (): void => { while (i < text.length && /\s/.test(text[i]!)) i++; };
   const fail = (what: string): never => { throw new Error(`the catalog Postgres's parse tree: ${what} at offset ${i}: ${JSON.stringify(text.slice(i, i + 40))}`); };
@@ -48,14 +192,17 @@ export function parseTree(text: string): TreeValue {
     }
     if (c === "<" && text[i + 1] === ">") { i += 2; return null; }
     if (c === '"') {
+      // pg_strtok's token (read.c): it ends where any token ends, and is a string when its last character is a quote
+      // that is not escaped (a quote inside a name is not escaped: `"a"b"`)
       i++;
-      let s = "";
-      while (i < text.length && text[i] !== '"') {
-        if (text[i] === "\\" && i + 1 < text.length) { s += text[i + 1]; i += 2; continue; }
+      let s = "", closed = false;
+      while (i < text.length && !/[\s(){}]/.test(text[i]!)) {
+        if (text[i] === "\\" && i + 1 < text.length) { s += text[i + 1]; i += 2; closed = false; continue; }
+        closed = text[i] === '"';
         s += text[i++];
       }
-      i++;
-      return s;
+      if (!closed) fail("a quoted name that does not end in a quote");
+      return s.slice(0, -1);
     }
     const tok = bare();
     // a datum: its length, then its bytes in brackets
@@ -352,7 +499,7 @@ export function exprType(n: TreeNode): { type: number; typmod: number } | null {
       // a length coercion (numeric(p, s), varchar(n)) carries its typmod as its second argument's constant
       if (r && num(n.funcformat) !== 0 && Array.isArray(n.args) && n.args.length >= 2 && isNode(n.args[1]!) && n.args[1]._node === "CONST") {
         const datum = n.args[1].constvalue;
-        // the bytes as debug_print_parse wraps them: any whitespace, a line break included (`4 [\n2 0 0 0 ]`)
+        // the bytes, spaced as nodeToString writes them (the log's line breaks undone: readParseLog)
         const m = typeof datum === "string" ? /\[\s*(-?\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)\s*\]/.exec(datum) : null;
         if (m) r.typmod = (Number(m[1]) & 255) | ((Number(m[2]) & 255) << 8) | ((Number(m[3]) & 255) << 16) | ((Number(m[4]) & 255) << 24);
       }
