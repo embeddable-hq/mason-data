@@ -1391,7 +1391,7 @@ test("a table is said kept current only when a poll of it would run: not while i
     assert.equal(now()?.rebuilding, "copy", "still being read again");
     assert.match((now()?.kept as { pending?: string }).pending ?? "", /being read whole/);
     assert.equal(pendingOf("public.u"), "it is queued to be read whole: it joins once synced and caught up by one poll — queued behind public.t's whole read (one rebuild at a time)");
-    await assert.rejects(sync.pollNow(["public.t"]), (e: Error) => e instanceof PollRefused && e.code === "nothing_yet");
+    await assert.rejects(sync.pollNow(["public.t"]), (e: Error) => e instanceof PollRefused && e.code === "busy", "a read of it running: a sync by hand is refused busy, never queued behind it (issue 1007)");
     copyOfT.release();
     await until("both read again with the restored columns, and caught up", settled(sync, ["public.t", "public.u"]));
     assert.deepEqual((await sync.pollNow(["public.t"])).tables.map((t) => t.table), ["public.t"]);
