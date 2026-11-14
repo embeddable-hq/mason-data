@@ -59,6 +59,22 @@ async function keptLookup(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, t
   return { at: (relid, attno) => at.get(`${relid}.${attno}`) ?? null, ready: (read) => kept.ready(read) };
 }
 
+/**
+ * THE RELATIONS WHOSE JSONB TEXT IS POSTGRES'S CANONICAL TEXT, by relid (src/duck/rewrite.ts `Rewriter.canonicalText`):
+ * of the relations whose json or jsonb column the statement reads, those the BUILD of the catalog the statement was
+ * analysed on declared synced copies (`synced`: src/api/postgres/catalog.ts `PgCatalog.syncedOf`, `PgTable.synced`).
+ * Never the live list of what each table is, which moves before the catalog does (issue 461's third review: a sources
+ * entry added for a name a generated table serves). Fail closed: a relation the build did not declare synced (a
+ * generated table; one whose file was just removed; every relation of a plan given no record) is the function's.
+ */
+async function canonicalRelations(types: ReadonlyMap<number, ReadonlyArray<{ type: number; relation?: { relid: number; attno: number } }>>,
+  synced: ((relids: readonly number[]) => Promise<ReadonlySet<number>>) | undefined): Promise<ReadonlySet<number>> {
+  if (synced === undefined) return new Set();
+  const relids = new Set<number>();
+  for (const t of [...types.values()].flat()) if (t.relation !== undefined && (t.type === JSON_OID || t.type === JSONB_OID)) relids.add(t.relation.relid);
+  return relids.size === 0 ? new Set() : synced([...relids]);
+}
+
 /** the count(DISTINCT x) of the statement that are count(x) (src/duck/distinct-key.ts), by their offsets into the
  *  analysed text: x unique by the CATALOG's own pg_index — the source's keys as the catalog declares them — read only
  *  for a statement that counts DISTINCT values at all */
@@ -307,6 +323,9 @@ export interface PlanOptions {
   walls?: Walls | null;
   /** a generated table's run (src/duck/generated.ts): `schema.table` → the table read in its place, in the same schema */
   relations?: ReadonlyMap<string, string>;
+  /** which of the relids the catalog's build declared synced copies (src/api/postgres/catalog.ts `PgCatalog.syncedOf`):
+   *  a jsonb is read as canonical text only on one (`canonicalRelations`); absent, none is */
+  synced?: (relids: readonly number[]) => Promise<ReadonlySet<number>>;
   /** the generated planner's ask for each output column's followed analysed expression (`DuckPlan.outputs`): only it
    *  reads them, so a wire statement never pays for them (PR 202 round 14) */
   outputs?: boolean;
@@ -546,13 +565,14 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // the stored JSON paths the statement's JSON reads may be answered from (src/duck/kept-route.ts)
   const lookup = kept === null ? null : await keptLookup(catalog, analysis.types, kept);
   const keyCounts = await distinctKeys(catalog, analysis.tree);
+  const canonicalText = await canonicalRelations(analysis.types, options.synced);
   // WHAT EACH COLLATION OF THE ANALYSIS MEANS (src/duck/collation.ts), resolved before the rewrite reads any: a libc
   // order not read yet is read here, before the plan is made; a collation the source lacks or Mason cannot follow refused
   let collations: StatementCollations;
   try { collations = await resolver.prepare((sql) => catalogRows(catalog, sql), collationOids(analysis.tree)); }
   catch (e) { throw e instanceof Unrewritable ? unrewritableError(e, text) : e; }
   const analysed = performance.now();
-  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths });
+  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, canonicalText });
   try {
     ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them

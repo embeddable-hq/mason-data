@@ -116,6 +116,9 @@ const schema: PgSchema = {
   ],
   views: [{ schema: "public", name: "customer_orders", definition: " SELECT o.id, o.meta, c.name, c.created_at FROM public.orders o LEFT JOIN public.customers c ON c.id = o.customer_id;" }],
 };
+// every table a synced copy, as the sync's build of the catalog declares it (src/api/postgres/schema.ts `PgTable.synced`): a
+// jsonb is read as Postgres's canonical text only on one (src/duck/plan.ts `canonicalRelations`, fail closed)
+for (const t of schema.tables) t.synced = true;
 
 /**
  * Where a statement is planned (`on`): the shop with nothing stored, under C (absent: every statement above the jsonb
@@ -354,6 +357,13 @@ const JSONB_SHAPES: Shape[] = [
   { name: "text under libc: a table's page, ORDER BY a text LIMIT 50, the key for the candidates alone", sql: "SELECT o.id, o.status, o.amount FROM orders o ORDER BY o.status LIMIT 50", on: "libc" },
   { name: "text under libc: SELECT * ORDER BY a text DESC LIMIT 50, the key for the candidates alone", sql: "SELECT * FROM orders ORDER BY status DESC LIMIT 50", on: "libc" },
   { name: "text under libc: min and max of a text, the key for the candidates alone", sql: "SELECT min(status), max(status) FROM orders", on: "libc" },
+  // issue 461: a jsonb column's keys, grouped as Metabase sends it, DISTINCT, and in a LEFT lateral with no LIMIT:
+  // DuckDB's own json_keys a row (src/duck/rewrite.ts objectKeys), the lateral a streaming UNNEST, never the delimiter
+  // join's hash group of every document; under libc the key's function for the grouped output alone
+  { name: "native json keys: jsonb_object_keys grouped, by count then key", sql: "SELECT jsonb_object_keys(\"meta\") AS \"key\", count(*) AS \"count\" FROM \"public\".\"orders\" GROUP BY 1 ORDER BY 2 DESC, 1" },
+  { name: "native json keys: SELECT DISTINCT jsonb_object_keys", sql: "SELECT DISTINCT jsonb_object_keys(meta) FROM orders" },
+  { name: "native json keys: a LEFT lateral of jsonb_object_keys grouped, no LIMIT", sql: "SELECT k.key, count(*) FROM orders o LEFT JOIN LATERAL jsonb_object_keys(o.meta) AS k(key) ON TRUE GROUP BY 1 ORDER BY 2 DESC, 1" },
+  { name: "native json keys: jsonb_object_keys grouped under libc, by count then key", sql: "SELECT jsonb_object_keys(\"meta\") AS \"key\", count(*) AS \"count\" FROM \"public\".\"orders\" GROUP BY 1 ORDER BY 2 DESC, 1", on: "libc" },
 ];
 
 /**
@@ -845,7 +855,8 @@ async function rowsOf(sql: string, on?: Where, values?: string[]): Promise<Map<s
 // that every other session's statement waits behind)
 test("a native json filter or read hands no row to any Mason function", async (t) => {
   for (const name of ["native json: an @> filter of a string", "native json: a -> read's nullness", "native json: a -> read of a string or a JSON null",
-    "native json: a field Metabase binds, grouped", "native json: a ->> of a bound key"]) {
+    "native json: a field Metabase binds, grouped", "native json: a ->> of a bound key",
+    "native json keys: jsonb_object_keys grouped, by count then key", "native json keys: SELECT DISTINCT jsonb_object_keys", "native json keys: a LEFT lateral of jsonb_object_keys grouped, no LIMIT"]) {
     const rows = [...(await rowsOf(sqlOf(name), undefined, SHAPES.find((s) => s.name === name)!.values)).values()].reduce((a, b) => a + b, 0);
     t.diagnostic(`${name}: ${rows} rows handed to Mason functions`);
     assert.equal(rows, 0, `${name}: ${rows} rows handed to Mason functions`);
@@ -890,6 +901,16 @@ test("issues 464, 465: a numeric bin of a numeric(12,2) column is grouped by the
     assert.ok(!rows.some(([k]) => k === "__mason_numeric_program_key"), `${name}: grouped by the program's key a row (${rows.map(([k, n]) => `${k} ${n}`).join(", ")})`);
     assert.ok(total <= 10_000, `${name}: the Mason functions were handed ${total} rows of the ${ORDERS} orders (${rows.map(([k, n]) => `${k} ${n}`).join(", ")}): per row, not per group`);
   }
+});
+
+// issue 461: a jsonb's keys grouped and sorted by key under a libc order: the keys are DuckDB's own read, and the libc
+// key's function is handed the grouped keys (the orders' documents hold three), never a key occurrence of every row
+test("issue 461: jsonb_object_keys grouped under libc hands the libc key the groups alone, and no row to the keys' function", async (t) => {
+  const rows = await rowsOf(sqlOf("native json keys: jsonb_object_keys grouped under libc, by count then key"), "libc");
+  const said = [...rows].filter(([, n]) => n > 0).map(([k, n]) => `${k} ${n}`).join(", ") || "none";
+  t.diagnostic(said);
+  assert.equal(rows.get("__mason_json_keys") ?? 0, 0, `the keys went through the function: ${said}`);
+  assert.ok((rows.get("__mason_libc_key") ?? 0) <= 100, `the libc key was handed more than the groups: ${said}`);
 });
 
 // issue 464: a month grouped by its to_char text is DuckDB's strftime (src/duck/to-char.ts `strftimeTemplate`): the

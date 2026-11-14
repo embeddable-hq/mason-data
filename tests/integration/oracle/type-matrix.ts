@@ -509,6 +509,30 @@ function* nativeJsonCases(): Generator<Matrixed> {
   yield n("in a set operation's arm", `SELECT id, jb -> 'a' FROM jcontain WHERE jb @> '{"a": 1}' UNION ALL SELECT id, jb -> 'b' FROM jcontain WHERE (jb -> 'b') IS NOT NULL ORDER BY 1, 2`);
 }
 
+/**
+ * A COPIED COLUMN'S KEYS (issue 461, src/duck/rewrite.ts `objectKeys`): DuckDB's own json_keys, in jsonb's order (length,
+ * then bytes, each key once) or as a json document holds them (its order, a key twice kept), over jpath's documents (a
+ * key twice, spaces around a json's tokens, an empty object, every kind of root, NULL) and jcontain's (keys that differ
+ * only in case, unicode keys, `\u` escapes in a json's text), in the forms Metabase and a person send: grouped,
+ * DISTINCT, a LEFT lateral grouped, a row's keys in order, a LEFT lateral's page, and a non-object's 22023.
+ */
+function* objectKeysCases(): Generator<Matrixed> {
+  const n = (name: string, sql: string, inOrder?: boolean): Matrixed => ({ ...q(`native json keys: ${name}`, sql), ...(inOrder === undefined ? {} : { inOrder }) });
+  for (const c of ["j", "jb"] as const) {
+    const fn = c === "j" ? "json" : "jsonb";
+    for (const table of ["jpath", "jcontain"]) {
+      const objects = `${fn}_typeof(t.${c}) = 'object'`;
+      yield n(`${fn}_object_keys grouped, ${table}`, `SELECT ${fn}_object_keys(t.${c}) AS key, count(*) AS count FROM ${table} t WHERE ${objects} GROUP BY 1 ORDER BY 2 DESC, 1`);
+      yield n(`${fn}_object_keys grouped, ordered under C, ${table}`, `SELECT ${fn}_object_keys(t.${c}) AS key, count(*) FROM ${table} t WHERE ${objects} GROUP BY 1 ORDER BY key COLLATE "C" DESC`);
+      yield n(`SELECT DISTINCT ${fn}_object_keys, ${table}`, `SELECT DISTINCT ${fn}_object_keys(t.${c}) FROM ${table} t WHERE ${objects} ORDER BY 1`);
+      yield n(`${fn}_object_keys in a LEFT lateral, grouped, ${table}`, `SELECT k.key, count(*) FROM ${table} t LEFT JOIN LATERAL ${fn}_object_keys(t.${c}) AS k(key) ON TRUE WHERE ${objects} OR t.${c} IS NULL GROUP BY 1 ORDER BY 2 DESC, 1 NULLS FIRST`);
+      yield n(`a row's ${fn}_object_keys in their order, ${table}`, `SELECT t.id, string_agg(k, ' | ') FROM ${table} t LEFT JOIN ${fn}_object_keys(t.${c}) AS k ON TRUE WHERE ${objects} OR t.${c} IS NULL GROUP BY 1 ORDER BY 1`);
+      yield n(`${fn}_object_keys in a LEFT lateral's page, ${table}`, `SELECT t.id, k FROM ${table} t LEFT JOIN ${fn}_object_keys(t.${c}) AS k ON TRUE WHERE ${objects} OR t.${c} IS NULL LIMIT 25 OFFSET 3`, true);
+      yield n(`${fn}_object_keys of a non-object, ${table}`, `SELECT ${fn}_object_keys(t.${c}) FROM ${table} t`);
+    }
+  }
+}
+
 function* jsonPathCases(): Generator<Matrixed> {
   const paths: string[][] = [["k"], ["n"], ["t"], ["f"], ["z"], ["o"], ["a"], ["missing"], ["o", "b"], ["o", "0"], ["o", "missing"], ["k", "b"], ["0"], ["1"], ["-1"], ["2"],
     ["a", "0"], ["a", "1"], ["a", "2", "0"], ["a", "-1"], ["a", "-7"], ["a", "4", "1"], ["a", "5", "x"], ["2", "1"], ["2", "2", "1"], ["a.b"], ['q"r'], ["o.b"], ["e"], ["k", "0"], ["+1"], [" 1"], ["1 "], ["01"], [""]];
@@ -883,6 +907,7 @@ function* matrix(): Generator<Matrixed> {
     .flatMap((e) => [`"JB" #>> '${e}'`, `"J" #>> '${e}'`]).join(", ") + ", jsonb_extract_path_text(\"JB\", '+1'), json_extract_path_text(\"J\", ' 1'), \"JB\" #>> '{o,b,+1}' FROM jcased ORDER BY id");
   yield* jsonPathCases();
   yield* nativeJsonCases();
+  yield* objectKeysCases();
   yield q("jsonb operators", "SELECT id, jb @> '{\"a\": 1}', jb <@ '{\"a\": 1, \"b\": 2}', jb ? 'a', jb ?| ARRAY['a', 'z'], jb ?& ARRAY['a', 'b'], jb || '{\"z\": 0}', jb - 'a' FROM typed ORDER BY id");
   yield q("jsonb sorted", "SELECT id, jb FROM typed ORDER BY jb, id");
   // ---- jsonb's order and equality (src/duck/jsonb-order.ts), over JORDER: every pair compared, sorted every way ----

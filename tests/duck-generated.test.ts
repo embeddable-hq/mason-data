@@ -848,3 +848,56 @@ test("a child of a generated table built but not yet in the catalog waits for it
     refusedAt((await w.until((s) => s.state === "refused", "public.gone_child")).refusals, "sql", /relation "gone_parent" does not exist/);
   }, { onStep: (s, n) => { clock.onStep(s, n); if (s === "swapped" && n === "public.late_parent") onSwap?.(); } });
 });
+
+// ISSUE 461's REVIEW: a generated table's jsonb is the ENGINE's text of what its SELECT computed, never Postgres's
+// canonical text, so a key written twice is there twice, in the order written. Its keys, `->>`, `->`, a `->` read's
+// nullness and `@>` are each the function's (src/duck/rewrite.ts `copiedColumn`, from the run's list of what each table
+// is: src/duck/plan.ts `engineTextRelations`), never DuckDB's read of a synced table's canonical text. What Postgres
+// answers over the same SQL: jsonb_build_object('bb', 1, 'a', id, 'bb', 2, 'c', 3) is {"a": id, "c": 3, "bb": 2}, and
+// jsonb_object_agg holds each kind once, in jsonb's order (length, then bytes).
+test("issue 461: a generated table's jsonb holding a key twice answers its keys and reads as Postgres does", async () => {
+  await withWorld({
+    g_build: "kind: scheduled\ntarget_lag: 1s\nsql: SELECT id, jsonb_build_object('bb', 1, 'a', id, 'bb', 2, 'c', 3) AS j FROM events\n",
+    g_agg: "kind: scheduled\ntarget_lag: 1s\nsql: SELECT tenant_id, jsonb_object_agg(kind, id) AS j FROM events GROUP BY 1\n",
+  }, async (w) => {
+    await w.until(served(w.logged), "public.g_build");
+    await w.until(served(w.logged), "public.g_agg");
+    const c = await w.client();
+    try {
+      const rows = async (sql: string): Promise<unknown[][]> => (await c.query({ text: sql, rowMode: "array", types: { getTypeParser: () => (v: string) => v } } as pg.QueryConfig)).rows as unknown[][];
+      const keys = ["a", "c", "bb"];
+      assert.deepEqual(await rows("SELECT id, jsonb_object_keys(j) FROM g_build WHERE id = 1"), keys.map((k) => ["1", k]));
+      assert.deepEqual(await rows("SELECT count(*) FROM (SELECT jsonb_object_keys(j) FROM g_build) s"), [["12"]]);
+      assert.deepEqual(await rows("SELECT jsonb_object_keys(j) AS key, count(*) FROM g_build GROUP BY 1 ORDER BY 2 DESC, 1"), [["a", "4"], ["bb", "4"], ["c", "4"]]);
+      assert.deepEqual(await rows("SELECT DISTINCT jsonb_object_keys(j) FROM g_build ORDER BY 1"), [["a"], ["bb"], ["c"]]);
+      assert.deepEqual(await rows("SELECT g.id, k FROM g_build g LEFT JOIN jsonb_object_keys(g.j) AS k ON TRUE WHERE g.id = 2 ORDER BY 1, 2"), [["2", "a"], ["2", "bb"], ["2", "c"]]);
+      assert.deepEqual(await rows("SELECT k, count(*) FROM g_build g LEFT JOIN LATERAL jsonb_object_keys(g.j) AS k ON TRUE GROUP BY 1 ORDER BY 1"), [["a", "4"], ["bb", "4"], ["c", "4"]]);
+      assert.deepEqual(await rows("SELECT tenant_id, jsonb_object_keys(j) FROM g_agg ORDER BY 1, 2"), [["1", "query"], ["2", "load"], ["2", "query"]]);
+      assert.deepEqual(await rows("SELECT g.tenant_id, string_agg(k, ',') FROM g_agg g LEFT JOIN jsonb_object_keys(g.j) AS k ON TRUE GROUP BY 1 ORDER BY 1"), [["1", "query"], ["2", "load,query"]]);
+      // the reads that took the same premise: the LAST value of a key written twice, as jsonb holds it
+      assert.deepEqual(await rows("SELECT id, j ->> 'bb', (j -> 'bb')::text, j @> '{\"bb\": 1}', j @> '{\"bb\": 2}', (j -> 'bb') IS NULL FROM g_build WHERE id = 1"), [["1", "2", "2", "f", "t", "f"]]);
+      assert.deepEqual(await rows("SELECT j::text FROM g_build WHERE id = 1"), [['{"a": 1, "c": 3, "bb": 2}']]);
+      // WHAT A RELATION HOLDS IS THE CATALOG BUILD'S, NEVER THE LIVE LIST'S (issue 461's second and third reviews): the
+      // list of what each table is moves before the catalog is rebuilt, either way. A generated table's file removed
+      // takes it off the list at once, and out of the catalog only at the writer's turn (a poll's scan held it 25 s); a
+      // sources entry added for the name a generated table serves calls it synced at once, while the catalog serves the
+      // generated table until its rebuild (100-200 ms). Each window, held here for as long as the test likes: the list
+      // as it is then, the catalog as it was built. The build declared g_build no synced copy, so its jsonb is the
+      // function's: Postgres's keys and reads
+      const generated = w.sync.generated, listed = generated.copies.bind(generated), states = w.sync.state.bind(w.sync);
+      const ask = async (tag: string): Promise<void> => {
+        assert.deepEqual(await rows(`SELECT id, jsonb_object_keys(j) AS ${tag} FROM g_build WHERE id = 3`), keys.map((k) => ["3", k]), tag);
+        assert.deepEqual(await rows(`SELECT count(*) AS ${tag} FROM (SELECT jsonb_object_keys(j) FROM g_build) s`), [["12"]], tag);
+        assert.deepEqual(await rows(`SELECT id, (j -> 'bb')::text AS ${tag}, j @> '{"bb": 2}' FROM g_build WHERE id = 3`), [["3", "2", "t"]], tag);
+      };
+      try {
+        // removed: on neither list
+        generated.copies = () => listed().filter((x) => x.source !== "public.g_build");
+        await ask("off_the_list");
+        // a synced table added under its name: the list calls it synced, the catalog still serves the generated table
+        w.sync.state = () => [...states(), { source: "public.g_build", phase: "copied", rows: 4, bytes: null, seconds: null, copiedAt: null, error: null }];
+        await ask("listed_synced");
+      } finally { generated.copies = listed; w.sync.state = states; }
+    } finally { await c.end(); }
+  });
+});

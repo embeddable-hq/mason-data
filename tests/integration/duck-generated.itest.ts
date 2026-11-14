@@ -100,6 +100,20 @@ const DEFINITIONS: Array<{ name: string; schema: string; table: string; sql: str
       "SELECT id, payload ->> 'k' AS k, payload_name FROM joined WHERE payload ->> 'k' = '1' ORDER BY id LIMIT 5",
       "SELECT on_day, utc::text AS utc, created_at::text AS created_at, taken::text AS taken, ref::text AS ref FROM joined WHERE id < 5 ORDER BY id",
     ] },
+  // A JSONB HOLDING A KEY TWICE (issue 461's review): the generated table holds the engine's text, both b's in the order
+  // written, never Postgres's canonical text, so its keys, `->`, `->>` and `@>` are read as Postgres reads the jsonb
+  { name: "jtwice", schema: "public", table: "jtwice",
+    sql: "SELECT tenant_id, jsonb_build_object('bb', 1, 'a', tenant_id, 'bb', 2, 'c', 3) AS j, jsonb_object_agg(coalesce(status, 'none'), id) AS agg FROM orders GROUP BY 1",
+    orderBy: "tenant_id",
+    statements: [
+      "SELECT tenant_id, jsonb_object_keys(j) AS k FROM jtwice ORDER BY 1, 2",
+      "SELECT jsonb_object_keys(j) AS key, count(*) FROM jtwice GROUP BY 1 ORDER BY 2 DESC, 1",
+      "SELECT DISTINCT jsonb_object_keys(agg) FROM jtwice ORDER BY 1",
+      "SELECT count(*) FROM (SELECT jsonb_object_keys(agg) FROM jtwice) s",
+      "SELECT t.tenant_id, string_agg(k, ',') FROM jtwice t LEFT JOIN jsonb_object_keys(t.agg) AS k ON TRUE GROUP BY 1 ORDER BY 1",
+      "SELECT k, count(*) FROM jtwice t LEFT JOIN LATERAL jsonb_object_keys(t.j) AS k ON TRUE GROUP BY 1 ORDER BY 1",
+      "SELECT tenant_id, j ->> 'bb' AS b, (j -> 'bb')::text AS bj, j @> '{\"bb\": 1}' AS c1, j @> '{\"bb\": 2}' AS c2, (j -> 'bb') IS NULL AS n FROM jtwice ORDER BY 1",
+    ] },
   // NUMERICS AND USER TYPES (stage 3, issue 175): stored as a copy of the column holds them, held to Postgres's text
   { name: "nums", schema: "public", table: "nums",
     sql: "SELECT id, amount, big, small, mood FROM ledger",

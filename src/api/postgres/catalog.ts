@@ -608,6 +608,9 @@ export class PgCatalog {
    *  with the schema (`replace`), so a change is said again */
   #said = new Set<string>();
   #db: CatalogWorker | null = null;
+  /** the schema the running instance was BUILT from (`#ensureStarted`), which `syncedOf` reads: never `#schema`, which a
+   *  `replace` moves before the instance it names has started */
+  #builtFrom: PgSchema | null = null;
   /** the one queue every call runs on; always resolved, so a failed call never blocks the next (its rejection is the caller's) */
   #chain: Promise<void> = Promise.resolve();
   #idleTimer: NodeJS.Timeout | null = null;
@@ -652,6 +655,25 @@ export class PgCatalog {
       const reply = await this.#ask(db, { op: "query", sql }, "a query");
       this.#touch();
       return { rows: reply.rows ?? [] };
+    });
+  }
+
+  /**
+   * WHICH OF `relids` THE RUNNING INSTANCE'S BUILD DECLARED SYNCED (`PgTable.synced`, issue 461's third review): read on
+   * the one chain, the relids resolved and the record read on the SAME instance, so a relation and whether its jsonb
+   * text is canonical are one build's facts. The live list moves first (a sources entry added for a name a generated
+   * table serves calls it synced at once) while the catalog serves the generated table until it is rebuilt; nothing but
+   * the build that made the relation may say what it holds. A relation the build did not declare synced is not.
+   */
+  syncedOf(relids: readonly number[]): Promise<ReadonlySet<number>> {
+    return this.#enqueue(async () => {
+      const db = await this.#ensureStarted();
+      const synced = new Set((this.#builtFrom?.tables ?? []).filter((t) => t.synced === true).map((t) => `${t.schema ?? "public"}.${t.name}`));
+      const ids = [...new Set(relids.map((r) => Math.trunc(r)))].filter((r) => Number.isSafeInteger(r));
+      if (synced.size === 0 || ids.length === 0) return new Set<number>();
+      const reply = await this.#ask(db, { op: "query", sql: `SELECT c.oid::int8::text AS oid, n.nspname AS schema, c.relname AS name FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid::int8 IN (${ids.join(", ")})` }, "a lookup");
+      this.#touch();
+      return new Set((reply.rows ?? []).filter((r) => synced.has(`${String(r.schema)}.${String(r.name)}`)).map((r) => Number(r.oid)));
     });
   }
 
@@ -733,6 +755,7 @@ export class PgCatalog {
       throw new Error(`PGlite could not start: ${errorMessage(e)}`, { cause: e });
     }
     this.#db = db;
+    this.#builtFrom = schema;
     this.#log(`catalog: PGlite started in ${Date.now() - t0} ms with ${schema.tables.length} table(s)${roles.size > 0 ? ` and ${roles.size} role(s)` : ""}`);
     this.#touch();
     return db;
