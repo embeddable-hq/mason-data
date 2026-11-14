@@ -65,6 +65,7 @@ import { canonicalRead, EQUAL_STEPS, HIDDEN_PREFIX, HIDDEN_RE, hiddenName, isEqu
 import { JSONB_KEY_FUNCTIONS, KEY_VERSION, libcUncovered, STORED_SUFFIX } from "./jsonb-order.ts";
 import { TURN_FUNCTION } from "./functions.ts";
 import { encodeLibcOrder, type LibcOrder } from "./libc-order.ts";
+import { SCALE_RE } from "./scale-column.ts";
 import type { DuckCollation } from "./rewrite.ts";
 
 /** a path read by this many statements in the request log is stored (a larger table's also needs `KEEP_FILL_SHARE`) */
@@ -501,6 +502,9 @@ export class KeptJsonPaths implements KeptRoutes {
       const n = Number((await w.run(`UPDATE ${PATHS_TABLE} SET state = 'dropped', why = 'stored JSON paths are turned off (storeJsonPaths)' WHERE state <> 'dropped'`)).rowsChanged);
       for (const p of this.paths.values()) if (p.state !== "dropped") Object.assign(p, { state: "dropped", why: "stored JSON paths are turned off (storeJsonPaths)" });
       if (held.length || n) this.host.log(`stored JSON paths are turned off (storeJsonPaths): dropped ${held.length} stored column(s) of ${n} path(s); their reads are computed per row again`);
+      // a plain numeric's hidden scale column is the copy's own (src/duck/scale-column.ts): still never listed
+      await w.run(`ATTACH IF NOT EXISTS ':memory:' AS ${VISIBLE_CATALOG}`);
+      for (const source of this.host.served().keys()) await this.view(source);
       return;
     }
     // what the ledger and the file disagree on: a column with no row is dropped, a row whose column is gone is dropped
@@ -554,16 +558,17 @@ export class KeptJsonPaths implements KeptRoutes {
    * A COPY'S VIEW OF ITS VISIBLE COLUMNS (`VISIBLE_CATALOG`): made for every served copy, before the catalog serves it
    * and before any column is stored in it, and made again after every swap (its columns or their types may be other).
    * DuckDB writes one attached database a transaction, so never inside the swap's. A view that cannot be made is said;
-   * its table then gets no stored column (`keep`), so nothing of it is hidden that its statements could list.
+   * its table then gets no stored column (`keep`), so nothing of it is hidden that its statements could list. Made
+   * whether stored paths are on or off: a plain numeric's hidden scale column (src/duck/scale-column.ts) is never
+   * listed either.
    */
   private async view(source: string): Promise<void> {
-    if (!this.enabled) return;
     const at = source.indexOf(".");
     const [schema, table] = [source.slice(0, at), source.slice(at + 1)];
     const w = this.store.writer;
     try {
       const cols = (await w.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE database_name = current_database() AND schema_name = ${literal(schema)} ` +
-        `AND table_name = ${literal(table)} ORDER BY column_index`)).getRowsJS().map((r) => String(r[0])).filter((c) => !HIDDEN_RE.test(c));
+        `AND table_name = ${literal(table)} ORDER BY column_index`)).getRowsJS().map((r) => String(r[0])).filter((c) => !HIDDEN_RE.test(c) && !SCALE_RE.test(c));
       if (cols.length === 0) { this.views.delete(source); return; }
       const db = String((await w.runAndReadAll("SELECT current_database()")).getRowsJS()[0]![0]);
       await w.run(`CREATE SCHEMA IF NOT EXISTS ${VISIBLE_CATALOG}.${ident(schema)}`);

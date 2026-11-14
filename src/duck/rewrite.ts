@@ -288,6 +288,8 @@ class Rewriter {
    * says which parameters would fold (`pathParams`), so the listener plans it again at the Execute with the values.
    */
   boundPaths: ReadonlyMap<number, string> = new Map();
+  /** the plain numerics whose copy holds each value's own scale (`scaleOf`) */
+  scales: ScaleLookup | null = null;
   /** the parameters met as a json read's path, or an element or key of one, of a type read as a constant (`foldParam`) */
   readonly pathParams = new Set<number>();
   /** the parameters the read being written folded, and the text each was bound to (`folded`); null outside a json
@@ -2118,6 +2120,8 @@ class Rewriter {
       // a subquery's column holding such a text (carry): its program, the text Postgres writes
       else if (TEXTS.has(field.oid) && (field.typmod ?? -1) < 0 && kindOf(node) === "ColumnRef" && (this.carry(node) as { text?: boolean } | null)?.text === true) text = true;
       else if (field.oid !== NUMERIC) return;
+      // (a plain numeric's text that is itself a GROUP BY key is the engine's, written as its GROUP BY twin is: `typeCast`)
+      if (grouped && text && groupShapes.has(shapeOf(uncollated)) && this.scaleOf(node, false) !== null) return;
       const mine: typeof cells = [];
       const cell = (n: AstNode, conv: CellConv = "exact"): NumericProgram => {
         if (grouped && !this.validGrouped(n, groupShapes)) throw NOT_EXACT;
@@ -2126,13 +2130,18 @@ class Rewriter {
         if (at < 0) { mine.push({ node: n, conv, shape }); at = mine.length - 1; }
         return { op: "cell", key: String(at) };
       };
-      const built = this.programOf(node, cell);
+      let built: Built | null;
+      // (a plain numeric's own scale is read per group under a GROUP BY: `scaleOf`)
+      this.scaleGrouped = grouped;
+      try { built = this.programOf(node, cell); } finally { this.scaleGrouped = false; }
       // (the one test of whether its text needs the program: `programNeeded`)
       if (built === null || !this.programNeeded(node, built.p, mine, text ? -1 : field.typmod ?? -1)) return;
       // the column's cells after every earlier column's
       const base = cells.length;
       cells.push(...mine);
       out.push({ column: i, program: offsetCells(built.p, base), cells: [], text });
+      // (its text is the program's, so the engine computes none of it: `typeCast`)
+      if (text && kindOf(uncollated) === "TypeCast") this.printedByProgram.add(bodyOf(uncollated));
     });
     if (out.length === 0) return [];
     for (const c of out) c.cells = cells.map((x) => x.conv);
@@ -2154,7 +2163,8 @@ class Rewriter {
     // (a reference written for a star's column names it: two of one name under one FROM item would be one column)
     const refs = outputs.filter((o) => o.star).map((o) => names(bodyOf(o.value).fields).join(".").toLowerCase());
     if (new Set(refs).size !== refs.length) return null;
-    if (!outputs.some((o) => this.typeOf(o.value) === NUMERIC && !this.duckExact(o.value))) return null;
+    // (or a plain numeric whose copy holds each value's own scale, printed with it: issue 946)
+    if (!outputs.some((o) => this.typeOf(o.value) === NUMERIC && (!this.duckExact(o.value) || this.scaleOf(o.value) !== null))) return null;
     const written = targets.flatMap((t, i) => {
       if (!hasStar(bodyOf(t).val)) return [t];
       return outputs.filter((o) => o.target === i).map((o): AstNode => ({ ResTarget: { name: o.name, val: o.value } }));
@@ -3076,7 +3086,11 @@ class Rewriter {
       // a column of a FROM item whose query decided it exactly: that query's program over its cells, which ride (carry)
       case "ColumnRef": {
         const carried = this.carried(n, cell);
-        return carried === "uncarried" ? null : carried !== null ? numeric(carried) : asCell();
+        if (carried === "uncarried") return null;
+        if (carried !== null) return numeric(carried);
+        // a plain numeric whose copy holds each value's own scale: the engine's value at that scale (issue 946)
+        const scale = this.scaleOf(n);
+        return scale !== null ? numeric({ op: "rescale", arg: cell(n), scale: cell(scale) }) : asCell();
       }
       // A SCALAR SUBQUERY whose one column has a program (issue 350): ONE cell, read as text, the subquery answering its
       // column's exact text, built inside it by the one builder (`subqueryText`), so every reader of the value (its
@@ -3107,6 +3121,12 @@ class Rewriter {
           // operand: review r1 of PR 506, nullif-pick-null-lost-outside-subquery)
           const keyL = this.clone(sides[0]);
           return numeric({ op: "pick", index: cell(caseWhen([[or([op("=", sides[0], sides[1]), isNull(keyL)]), nullConst()]], intConst(0))), args: [l.p] });
+        }
+        // NULLIF(a, b) of a value the engine holds exactly whose row decides its scale (a plain numeric, issue 946): the
+        // engine's NULLIF, at a's scale
+        if (b.kind === "AEXPR_NULLIF" && type === NUMERIC && isNode(b.lexpr) && this.duckExact(b.lexpr) && this.displayScale(b.lexpr) === null) {
+          const scale = this.rowScale(b.lexpr as AstNode);
+          if (scale !== null) return numeric({ op: "rescale", arg: cell(n), scale: cell(scale) });
         }
         // x ^ y: Postgres's own power, as power(x, y) is (`pgNumeric`)
         if (b.kind === "AEXPR_OP" && name === "^" && type === NUMERIC) { const text = this.pgNumeric(n); return text === null ? asCell() : numeric(cell(text, "text")); }
@@ -3157,6 +3177,11 @@ class Rewriter {
         return numeric({ op: opName, args: args.map((a) => a!.p) });
       }
       case "FuncCall": {
+        // an aggregate's argument is read per row: a plain numeric's own scale in it is a row's (`scaleOf`)
+        if (this.scaleGrouped && this.typed(n)?.node === "AGGREF") {
+          this.scaleGrouped = false;
+          try { return this.exactOf(n, cell); } finally { this.scaleGrouped = true; }
+        }
         const name = lastName(b.funcname);
         const args = (b.args ?? []) as AstNode[];
         const plain = b.over === undefined && b.agg_within_group !== true;
@@ -3306,7 +3331,8 @@ class Rewriter {
     if (b.subLinkType !== "EXPR_SUBLINK" || !isNode(b.subselect)) return null;
     const target = scalarTarget(n);
     if (target !== null) {
-      if (this.duckExact(target)) return null;
+      // (a value the engine holds exactly whose text is its own: a plain numeric at its row's scale, issue 946)
+      if (this.duckExact(target) && !this.approximateValue(target)) return null;
       const text = this.exactText(target);
       if (text === null) return null;
       const sub = this.clone(b);
@@ -3843,6 +3869,9 @@ class Rewriter {
   /** each cast in a grouped SELECT, by the SELECT: a program's text the CAST reader builds there is read per group
    *  (`overGroups`), never over cells the group does not decide (review r1 of PR 506: the engine's 42803) */
   private readonly groupedCasts = new WeakMap<Body, Body>();
+  /** each cast of a numeric to text a list's output Mason prints from its program (`exactColumns`): the engine's text of it
+   *  is never read, so none is computed (`typeCast`) */
+  private readonly printedByProgram = new WeakSet<Body>();
   /** each column of an expression the engine groups by its key alone (`cells`, issue 665) where a SELECT's list, HAVING
    *  or ORDER BY reads it (decidedByKey): read through first() when the walk reaches it, so that the expression is
    *  computed once per group, never once per row. Marked, never wrapped there: every rule above the column (a
@@ -4064,6 +4093,9 @@ class Rewriter {
     const k = kindOf(n), b = bodyOf(n);
     const of = (x: unknown): AstNode | null => isNode(x) ? this.rowScale(x) : null;
     switch (k) {
+      // a plain numeric whose copy holds each value's own scale (issue 946): one row's, never a group's (an aggregate
+      // reads it: `summed`)
+      case "ColumnRef": return this.scaleOf(n, false);
       case "CaseExpr": {
         const whens = (b.args ?? []) as AstNode[];
         const results = whens.map((w) => of(bodyOf(w).result));
@@ -4094,6 +4126,34 @@ class Rewriter {
       default: return null;
     }
   }
+
+  /**
+   * A PLAIN NUMERIC'S OWN SCALE, ONE ROW'S (issue 946, src/duck/scale-column.ts): for a column of a table whose copy
+   * holds each value's scale in a hidden column, a reference to that column, qualified by the FROM item the column is
+   * read from (two tables' columns of one name have hidden columns of one name). Null for anything else: a column of a
+   * subquery, a CTE or a merged join column, a copy that holds none (an older Mason's, served until it is read again),
+   * and a column Postgres read from an outer query. Under a GROUP BY (`scaleGrouped`) the scale is a group's, one row's
+   * (`first`): the value is the group's key, and every row of the group holds it, Postgres printing the one it met.
+   */
+  private scaleOf(n: AstNode, grouped = this.scaleGrouped): AstNode | null {
+    if (this.scales === null || kindOf(n) !== "ColumnRef") return null;
+    const t = this.typed(n);
+    if (t === null || t.node !== "VAR" || t.levelsUp !== 0 || t.relation === undefined || t.type !== NUMERIC || t.typmod >= 0) return null;
+    const hidden = this.scales.at(t.relation.relid, t.relation.attno);
+    const owner = t.column?.owner ?? null;
+    if (hidden === null || owner === null) return null;
+    const ref: AstNode = { ColumnRef: { fields: [S(owner), S(hidden)] } };
+    // (an integer the engine holds exactly: `duckExact`)
+    this.synthetic.set(bodyOf(ref), { node: "SCALE", type: INT2, typmod: -1, args: [], oid: null, format: null, collation: 0, inputCollation: 0,
+      levelsUp: 0, datum: null, qualifier: null, renamed: null });
+    if (!grouped) return ref;
+    const first: AstNode = { FuncCall: { funcname: [S("first")], args: [ref], funcformat: "COERCE_EXPLICIT_CALL" } };
+    this.synthetic.set(bodyOf(first), { node: "AGGREF", type: INT4, typmod: -1, args: [], oid: null, format: null, collation: 0, inputCollation: 0,
+      levelsUp: null, datum: null, qualifier: null, renamed: null });
+    return first;
+  }
+  /** whether a scale is read for a grouped query's list (`scaleOf`): set by `exactColumns` while it builds one */
+  private scaleGrouped = false;
 
   /**
    * The decimals Postgres writes for an expression's every value, where its types alone decide them: a numeric(p, s)
@@ -6126,6 +6186,17 @@ class Rewriter {
     }
     // a value's text is Postgres's (an array's `{a,b}`, a jsonb's canonical text, a float's shortest digits …), cut to a
     // varchar(n)'s length as the explicit cast cuts it
+    // A PLAIN NUMERIC'S TEXT AT ITS OWN SCALE (issue 946, src/duck/scale-column.ts): the engine's text, which has the
+    // column's most decimals, cut to the row's own — native, no call a row. Not a list's output Mason prints from its
+    // program (`printedByProgram`), nor in a grouped query, where the row's scale is no group's (the text as before)
+    if (t !== null && from === NUMERIC && (t.type === TEXT || t.type === VARCHAR) && t.typmod < 0 && !this.printedByProgram.has(b) && !this.groupedCasts.has(b)) {
+      const scale = this.scaleOf(arg, false);
+      if (scale !== null) {
+        const text = (): AstNode => cast(this.clone(arg), ["varchar"]);
+        return caseWhen([[op("=", scale, intConst(0)), fn("split_part", [text(), strConst("."), intConst(1)])]],
+          fn("left", [text(), op("+", fn("strpos", [text(), strConst(".")]), this.scaleOf(arg, false)!)]));
+      }
+    }
     // A NUMERIC THE ENGINE HOLDS AS A DOUBLE, CAST (issue 252, the CAST reader): its program's exact text (`exactText`),
     // never the double's — its text, its nearest double (numeric_float8 reads numeric_out's text) and its integer
     // rounded half away from zero (numeric_int4), as Postgres computes each
@@ -7945,13 +8016,20 @@ export interface RewriteOptions {
   keyCounts?: ReadonlySet<number>;
   /** the values an Execute bound to the parameters read as a json path, by number (`Rewriter.boundPaths`) */
   boundPaths?: ReadonlyMap<number, string>;
+  /** the plain numerics whose copy holds each value's own scale (src/duck/scale-column.ts, src/duck/plan.ts `scaleLookup`) */
+  scales?: ScaleLookup | null;
 }
 
+/** THE HIDDEN SCALE COLUMN OF A PLAIN NUMERIC (src/duck/scale-column.ts) a VAR reads, by the catalog's OIDs
+ *  (Typed.relation): its name, or null where the copy holds none */
+export interface ScaleLookup { at(relid: number, attno: number): string | null }
+
 export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(), citextHeld = new Set(), typeNames = new Map(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
-  wireBound = false, keyCounts = new Set(), boundPaths = new Map() }: RewriteOptions):
+  wireBound = false, keyCounts = new Set(), boundPaths = new Map(), scales = null }: RewriteOptions):
   { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean; pathParams: number[] } {
   const r = new Rewriter(analysis, base, collations, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts, citextHeld, typeNames);
   r.boundPaths = boundPaths;
+  r.scales = scales;
   if (joinsUsing(analysis.tree, new Set([JSONB, JSONB_ARRAY]))) {
     throw new Unrewritable("a JOIN … USING or a NATURAL JOIN on a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "JOIN … ON a.j = b.j", "jsonb-compare");
   }

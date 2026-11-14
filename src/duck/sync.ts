@@ -73,6 +73,7 @@ import * as path from "node:path";
 import { PgConnection, formatLsn, parseLsn, pgLiteral, type PgConnectOptions } from "../cdc/pg-wire.ts";
 import { createSlot, currentLsn, dropSlot, readSlot, type SlotState } from "../cdc/source.ts";
 import { holdOf } from "./held-types.ts";
+import { scaleColumn, scaleOfText, scaleSql, SCALE_RE } from "./scale-column.ts";
 import { addCounts, countsText, duckValue, fold, foldInto, noChanges, noCounts, ReplicationStream, type ChangeCounts, type StreamedTable, type TableChanges } from "./stream.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { numericWiderThan } from "../lib/pg-numeric.ts";
@@ -420,14 +421,17 @@ async function deleteKeys(w: DuckConnection, t: Pick<AddedTable, "key">, target:
 }
 
 /** a poll's staged rows (`where`: a range of them, or all) written by key into the table: their keys deleted, then the
- *  rows inserted. The stage's columns are named by position (`c0`, `c1`, …), the table's order */
-export async function writeStaged(w: DuckConnection, t: Pick<AddedTable, "key" | "columns" | "source">, target: string, stage: string, where: string, kept: KeptJsonPaths): Promise<void> {
+ *  rows inserted. The stage's columns are named by position (`c0`, `c1`, …), the table's order. A plain numeric of
+ *  `scaled` (one its table holds a hidden scale column for) is staged as the source's text, and its scale computed from it */
+export async function writeStaged(w: DuckConnection, t: Pick<AddedTable, "key" | "columns" | "source">, target: string, stage: string, where: string, kept: KeptJsonPaths,
+  scaled: readonly string[] = []): Promise<void> {
   const named = t.key.map((k) => `c${t.columns.findIndex((c) => c.name === k)}`);
   await deleteKeys(w, t, target, `(SELECT ${named.map(ident).join(", ")} FROM ${stage}${where})`, named);
-  // the table's columns named, and its stored JSON paths computed from the staged JSON (src/duck/kept.ts)
+  // the table's columns named, its plain numerics' scales and its stored JSON paths computed from the staged text and JSON
   const stored = kept.stored(t.source, (c) => ident(`c${t.columns.findIndex((x) => x.name === c)}`));
-  await w.run(`INSERT INTO ${target} (${[...t.columns.map((c) => ident(c.name)), ...stored.names.map(ident)].join(", ")}) ` +
-    `SELECT ${[...t.columns.map((_, i) => ident(`c${i}`)), ...stored.values].join(", ")} FROM ${stage}${where}`);
+  const scales = scaled.map((c) => scaleSql(ident(`c${t.columns.findIndex((x) => x.name === c)}`)));
+  await w.run(`INSERT INTO ${target} (${[...t.columns.map((c) => ident(c.name)), ...scaled.map((c) => ident(scaleColumn(c))), ...stored.names.map(ident)].join(", ")}) ` +
+    `SELECT ${[...t.columns.map((_, i) => ident(`c${i}`)), ...scales, ...stored.values].join(", ")} FROM ${stage}${where}`);
 }
 
 /**
@@ -446,6 +450,14 @@ export const RETIRED_LAYOUT = "stored in key order with an index, by an older Ma
  * was until its swap; never converted in place.
  */
 export const HELD_LAYOUT = "stored by an older Mason with a column not held as the source's text: read again whole, each such column as its text";
+
+/**
+ * A COPY AN OLDER MASON MADE BEFORE A PLAIN NUMERIC'S OWN SCALE WAS HELD (issue 946, src/duck/scale-column.ts): a column
+ * declared `numeric` with no precision, stored as a DECIMAL with no hidden scale column beside it, so every value prints
+ * with the column's most decimals. The scales are the source's alone: found by what the copy physically is, copied
+ * again through the normal path (`needsCopy`) once, serving as it was until its swap.
+ */
+export const SCALE_LAYOUT = "stored by an older Mason without each numeric value's own decimals: read again whole, once";
 
 /** a copy in a layout this Mason no longer keeps: the layout as `mason status` says it, and its short form for a line */
 interface Retired { layout: string; short: string }
@@ -938,6 +950,13 @@ export function widerIn(e: unknown, source: string): boolean {
 function readsAsDouble(type: string): boolean {
   const m = NUMERIC_TYPE.exec(type);
   return m !== null && (m[1] === undefined || Number(m[1]) > 38);
+}
+
+/** a source numeric declared with no precision (a Rails `decimal`): synced exactly, its values' own scales held beside it
+ *  in a hidden column (src/duck/scale-column.ts) where its copy holds it as a DECIMAL */
+export function plainNumeric(type: string): boolean {
+  const m = NUMERIC_TYPE.exec(type);
+  return m !== null && m[1] === undefined;
 }
 
 /** a DuckDB check on a numeric's text that it fits DECIMAL(38, scale): an error naming the table where it does not */
@@ -2913,6 +2932,7 @@ export class Sync {
         const types = await this.columnTypes(t, target);
         const cols = t.columns.map((c) => c.name);
         const exact = await this.exactOf(t);
+        const scaled = await this.scaledOf(t);
         const declared = (c: string): boolean => NUMERIC_TYPE.exec(t.columns.find((x) => x.name === c)?.type ?? "")?.[1] !== undefined;
         const value = (c: string, v: string | null): string => {
           const scale = exact.get(c);
@@ -2934,12 +2954,12 @@ export class Sync {
           partial.set(carried, same);
           same.push({ key, values: change.values });
         }
-        for (const [carried, rows] of partial) fetch.push(...await this.updateCarried(t, target, carried.split("\0"), rows, value, types));
+        for (const [carried, rows] of partial) fetch.push(...await this.updateCarried(t, target, carried.split("\0"), rows, value, types, scaled));
         if (fetch.length) {
           source ??= await PgConnection.connect(this.pgOptions());
           whole.push(...await this.sourceRows(source, t, fetch));
         }
-        delta += await this.writeByKey(t, target, gone, whole, value);
+        delta += await this.writeByKey(t, target, gone, whole, value, scaled);
         // a copy whose rows the ledger does not know (none should be: its copy counts them) is counted, once
         const known = this.states.get(name)?.rows ?? null;
         const rows = known === null ? Number((await w.runAndReadAll(`SELECT count(*) FROM ${target}`)).getRowsJS()[0]![0] as bigint) : known + delta;
@@ -3006,17 +3026,21 @@ export class Sync {
    * into 195 M uuid keys at 2.7 GiB took 1.5–1.8 s). Answers the keys DuckDB holds no row of, read whole from the source.
    */
   private async updateCarried(t: AddedTable, target: string, carried: readonly string[], rows: ReadonlyArray<{ key: Array<string | null>; values: Array<string | null | undefined> }>,
-    value: (c: string, v: string | null) => string, types: ReadonlyMap<string, string>): Promise<Array<Array<string | null>>> {
+    value: (c: string, v: string | null) => string, types: ReadonlyMap<string, string>, scaled: readonly string[] = []): Promise<Array<Array<string | null>>> {
     const w = this.store.writer;
     const cols = t.columns.map((c) => c.name);
     const set = carried.filter((c) => !t.key.includes(c));
-    await w.run(`CREATE OR REPLACE TEMP TABLE ${WRITE_PARTIAL} (${ident(WRITE_ROW)} INTEGER, ${carried.map((c) => `${ident(c)} ${types.get(c)!}`).join(", ")})`);
+    // a plain numeric it carries, with its own scale (src/duck/scale-column.ts)
+    const scales = set.filter((c) => scaled.includes(c));
+    await w.run(`CREATE OR REPLACE TEMP TABLE ${WRITE_PARTIAL} (${ident(WRITE_ROW)} INTEGER, ${[...carried.map((c) => `${ident(c)} ${types.get(c)!}`), ...scales.map((c) => `${ident(scaleColumn(c))} UTINYINT`)].join(", ")})`);
     for (let i = 0; i < rows.length; i += 500) {
-      await w.run(`INSERT INTO ${WRITE_PARTIAL} VALUES ${rows.slice(i, i + 500).map((r, j) => `(${i + j}, ${carried.map((c) => value(c, r.values[cols.indexOf(c)] ?? null)).join(", ")})`).join(", ")}`);
+      await w.run(`INSERT INTO ${WRITE_PARTIAL} VALUES ${rows.slice(i, i + 500).map((r, j) => `(${[String(i + j), ...carried.map((c) => value(c, r.values[cols.indexOf(c)] ?? null)),
+        ...scales.map((c) => String(scaleOfText(r.values[cols.indexOf(c)] ?? null) ?? "NULL"))].join(", ")})`).join(", ")}`);
     }
     const on = t.key.map((k) => `t.${ident(k)} = p.${ident(k)}`).join(" AND ");
     // a stored JSON path of a JSON column it carries, computed from the new value (one it does not carry is unchanged)
-    const assign = [...set.map((c) => `${ident(c)} = p.${ident(c)}`), ...this.kept.storedSet(t.source, set, (c) => `p.${ident(c)}`)];
+    const assign = [...set.map((c) => `${ident(c)} = p.${ident(c)}`), ...scales.map((c) => `${ident(scaleColumn(c))} = p.${ident(scaleColumn(c))}`),
+      ...this.kept.storedSet(t.source, set, (c) => `p.${ident(c)}`)];
     const matched = set.length === 0 ? 0 : Number((await w.run(`UPDATE ${target} AS t SET ${assign.join(", ")} FROM ${WRITE_PARTIAL} p WHERE ${on}`)).rowsChanged);
     // only when some row was not there: another scan, to say which
     const missing = matched === rows.length ? [] : (await w.runAndReadAll(`SELECT p.${ident(WRITE_ROW)} FROM ${WRITE_PARTIAL} p ANTI JOIN ${target} t ON ${on}`)).getRowsJS().map((r) => Number(r[0]));
@@ -3042,16 +3066,19 @@ export class Sync {
    * only, and the keys deleted are read from both of them at once, never gathered by an INSERT … SELECT.
    * tests/duck-compact.test.ts holds a held set of 300,000 keys through the catch-up's replay.
    */
-  private async writeByKey(t: AddedTable, target: string, gone: ReadonlyArray<Array<string | null>>, whole: ReadonlyArray<Array<string | null>>, value: (c: string, v: string | null) => string): Promise<number> {
+  private async writeByKey(t: AddedTable, target: string, gone: ReadonlyArray<Array<string | null>>, whole: ReadonlyArray<Array<string | null>>, value: (c: string, v: string | null) => string,
+    scaled: readonly string[] = []): Promise<number> {
     if (gone.length === 0 && whole.length === 0) return 0;
     let delta = 0;
     const w = this.store.writer;
     const cols = t.columns.map((c) => c.name);
-    const list = cols.map(ident).join(", ");
+    // the columns written: the copy's, then each plain numeric's own scale from the text the source wrote (src/duck/scale-column.ts)
+    const list = [...cols.map(ident), ...scaled.map((c) => ident(scaleColumn(c)))].join(", ");
+    const at = scaled.map((c) => cols.indexOf(c));
     if (whole.length) {
       await w.run(`CREATE OR REPLACE TEMP TABLE ${WRITE_ROWS} AS SELECT ${list} FROM ${target} LIMIT 0`);
       for (let i = 0; i < whole.length; i += 500) {
-        await w.run(`INSERT INTO ${WRITE_ROWS} VALUES ${whole.slice(i, i + 500).map((v) => `(${v.map((x, k) => value(cols[k]!, x)).join(", ")})`).join(", ")}`);
+        await w.run(`INSERT INTO ${WRITE_ROWS} VALUES ${whole.slice(i, i + 500).map((v) => `(${[...v.map((x, k) => value(cols[k]!, x)), ...at.map((k) => String(scaleOfText(v[k] ?? null) ?? "NULL"))].join(", ")})`).join(", ")}`);
       }
     }
     if (t.key.length > 0) {
@@ -3587,6 +3614,9 @@ export class Sync {
     const exacts = new Map<string, Map<string, number>>();
     const declared = (t: AddedTable, column: string): boolean => NUMERIC_TYPE.exec(t.columns.find((c) => c.name === column)?.type ?? "")?.[1] !== undefined;
     for (const t of tables) exacts.set(t.source, await this.exactOf(t, w));
+    // the plain numerics each table holds a hidden scale column for (src/duck/scale-column.ts)
+    const scaleds = new Map<string, string[]>();
+    for (const t of tables) scaleds.set(t.source, await this.scaledOf(t, w));
     // the statement running, for the error of one that fails
     let doing = "reading the source's snapshot";
     const named = (e: unknown): unknown => e instanceof Stopping || !(e instanceof Error) ? e : new Error(`${doing}: ${e.message}`, { cause: e });
@@ -3645,7 +3675,7 @@ export class Sync {
             continue;
           }
           doing = `${t.source}: writing its ${staged} changed row(s) by key`;
-          await writeStaged(w, t, target, stage, "", this.kept);
+          await writeStaged(w, t, target, stage, "", this.kept, scaleds.get(t.source));
           const c1 = Date.now();
           const { rows, deleted, countMs } = await reconcile(t, target, from);
           await w.run(this.pollStateSql(t, snapshot, polledAt));
@@ -3690,7 +3720,7 @@ export class Sync {
           await w.run("BEGIN TRANSACTION");
           try {
             doing = `${t.source}: writing piece ${i + 1} of ${n} of its ${staged} changed row(s) by key`;
-            await this.interruptible(lane, () => writeStaged(w, t, target, stage, ` WHERE rowid >= ${i * POLL_PIECE_ROWS} AND rowid < ${(i + 1) * POLL_PIECE_ROWS}`, this.kept));
+            await this.interruptible(lane, () => writeStaged(w, t, target, stage, ` WHERE rowid >= ${i * POLL_PIECE_ROWS} AND rowid < ${(i + 1) * POLL_PIECE_ROWS}`, this.kept, scaleds.get(t.source)));
             if (i === n - 1) {
               await w.run(this.pollStateSql(t, snapshot, polledAt));
             }
@@ -3948,6 +3978,10 @@ export class Sync {
       // is the one a passthrough read types otherwise than the attached scan)
       const lists = await enumLists(w, side);
       const read = t.columns.map((c) => pgColumnSql(c, p.exact, lists)).join(", ");
+      // each plain numeric's own scale, from the text the source wrote (src/duck/scale-column.ts)
+      const scaled = t.columns.filter((c) => p.exact.has(c.name) && plainNumeric(c.type)).map((c) => c.name);
+      const scaledNames = scaled.map((c) => `, ${ident(scaleColumn(c))}`).join("");
+      const scaledValues = scaled.map((c) => `, ${scaleSql(ident(c))}`).join("");
       const watermark = p.snapshot === null ? null : snapshotXmin(p.snapshot);
       // THE COPY'S FILE: the first a chunk read (or the one its committed chunks were read from); set before any commit
       // after it, so of two chunks that read different files the second to look starts the copy over, whichever commits
@@ -4007,7 +4041,7 @@ export class Sync {
                 }
               }
               const where = `ctid >= '(${first},0)'::tid${end === null ? "" : ` AND ctid < '(${end},0)'::tid`}`;
-              const r = await c.run(`INSERT INTO ${side} (${named}) SELECT ${stored} FROM ${pq(`SELECT ${read} FROM ${pgFrom} WHERE ${watermark === null ? where : `${where} AND ${xminBeforeSql(watermark)}`}`)}`);
+              const r = await c.run(`INSERT INTO ${side} (${named}${scaledNames}) SELECT ${stored}${scaledValues} FROM ${pq(`SELECT ${read} FROM ${pgFrom} WHERE ${watermark === null ? where : `${where} AND ${xminBeforeSql(watermark)}`}`)}`);
               // the table's file, under the lock this transaction's read holds until it ends: a rewrite moved its rows
               const node = Number((await c.runAndReadAll(`SELECT * FROM ${pq(`SELECT pg_relation_filenode(${pgLiteral(pgFrom)}::regclass)::bigint`)}`)).getRowsJS()[0]![0]);
               filenode ??= node;
@@ -4130,6 +4164,8 @@ export class Sync {
     // the numerics the extension would read as doubles: their widths, in the copy's snapshot (NUMERIC_TYPE)
     const exact = await this.exactNumerics(t, scanned, pgFrom);
     const defs = t.columns.map((c) => `${ident(c.name)} ${exact.has(c.name) ? `DECIMAL(38,${exact.get(c.name)})` : storedType(c, scanned.get(c.name) ?? "VARCHAR")}`);
+    // each plain numeric's own scales, hidden beside it (src/duck/scale-column.ts)
+    for (const c of t.columns) if (exact.has(c.name) && plainNumeric(c.type)) defs.push(`${ident(scaleColumn(c.name))} UTINYINT`);
     await w.run(`CREATE SCHEMA IF NOT EXISTS ${ident(t.schema)}`);
     await w.run(`CREATE OR REPLACE TABLE ${side} (${defs.join(", ")})`);
     const pages = Number((await w.runAndReadAll(`SELECT * FROM ${pq(`SELECT (pg_relation_size(${pgLiteral(pgFrom)}::regclass) / current_setting('block_size')::int)::bigint`)}`)).getRowsJS()[0]![0]);
@@ -4180,6 +4216,12 @@ export class Sync {
     const done = chunks.map(([first, end]) => ({ first: Number(first), end: end === null ? null : Number(end) }));
     const rows = chunks.reduce((n, c) => n + Number(c[2]), 0);
     const p: CopyProgress = { snapshot: row[0], columns: row[1], exact: new Map(JSON.parse(row[2]) as Array<[string, number]>), filenode: chunks.length ? Number(chunks[0]![3]) : null, pages: Number(row[3]), done, rows };
+    // a sync begun by a Mason that held no plain numeric's own scale: its rows have none, so it starts over
+    const held = await this.scaledOf(t, w, `${t.table}${SIDE_SUFFIX}`);
+    if (t.columns.some((c) => p.exact.has(c.name) && plainNumeric(c.type) && !held.includes(c.name))) {
+      this.log(`starting the sync of ${t.source} over, from its first page: it was begun by an older Mason, which did not keep each numeric value's own decimals`);
+      return this.forgetCopy(t, side);
+    }
     const at = readThrough(done);
     this.log(at === null ? `resuming the sync of ${t.source} with every page read (${rows} row(s) in): its swap is next`
       : `resuming the sync of ${t.source} at page ${at} of ${p.pages}${pastPages(done)}, ${rows} row(s) in, held to its first snapshot ${p.snapshot}: the pages read before are not read again`);
@@ -4258,6 +4300,7 @@ export class Sync {
       const types = physical.get(source);
       if (this.states.get(source)?.phase !== "copied" || types === undefined || this.retired.has(source)) continue;
       const mis: string[] = [];
+      const unscaled: string[] = [];
       const completed = columns.map((c) => {
         const type = types.get(c.name);
         if (type === undefined) return c;
@@ -4265,10 +4308,17 @@ export class Sync {
         const hold = holdOf(c.type, c.typeKind);
         const want = hold === "text" ? "VARCHAR" : hold === "text[]" ? "VARCHAR[]" : null;
         if (want !== null && type !== want) mis.push(`${c.name} (${c.type})`);
+        // a plain numeric synced exactly, its values' own scales not held beside it (`SCALE_LAYOUT`)
+        if (plainNumeric(c.type) && type.startsWith("DECIMAL(38,") && !types.has(scaleColumn(c.name))) unscaled.push(c.name);
         return c;
       });
       this.copiedColumns.set(source, completed);
       this.copiedAs.set(source, columnsKey(completed));
+      if (mis.length === 0 && unscaled.length > 0) {
+        this.retired.set(source, { layout: SCALE_LAYOUT, short: `in an older Mason's layout, ${unscaled.join(", ")} without each value's own decimals` });
+        this.log(`${source}: it is ${SCALE_LAYOUT} (${unscaled.join(", ")}) — its synced data serves as it was until then, each value of those columns printed with the column's most decimals`);
+        continue;
+      }
       if (mis.length === 0) continue;
       this.retired.set(source, { layout: HELD_LAYOUT, short: `in an older Mason's layout, ${mis.join(", ")} not held as the source's text` });
       this.log(`${source}: it is ${HELD_LAYOUT} (${mis.join(", ")}) — it is read again whole; its synced data serves as it was until then`);
@@ -4320,6 +4370,17 @@ export class Sync {
     return new Map(rows.filter(([name]) => numerics.has(name)).map(([name, scale]) => [name, Number(scale)]));
   }
 
+  /** the plain numerics (`plainNumeric`) a copied table (or its side table, `table`) holds a hidden scale column for
+   *  (src/duck/scale-column.ts), in the table's order, on the connection of the caller's transaction: what every write
+   *  of its rows computes. A copy made before the column was held has none, and is read again (`findHeldLayout`) */
+  private async scaledOf(t: Pick<AddedTable, "schema" | "table" | "columns">, c: DuckConnection = this.store.writer, table = t.table): Promise<string[]> {
+    const plain = t.columns.filter((x) => plainNumeric(x.type)).map((x) => x.name);
+    if (plain.length === 0) return [];
+    const held = new Set((await c.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE database_name = current_database() AND schema_name = ${literal(t.schema)} ` +
+      `AND table_name = ${literal(table)}`)).getRowsJS().map((r) => String(r[0])).filter((n) => SCALE_RE.test(n)));
+    return plain.filter((x) => held.has(scaleColumn(x)));
+  }
+
   /** the state, kept and written to the ledger, on the connection of the flow that knows it (awaited, and on the
    *  writer only on its turn: a statement on a connection lands inside the transaction open there). The table's row is
    *  that flow's alone while it writes it (a rebuild's table is not polled or streamed until caught up) */
@@ -4365,7 +4426,11 @@ export class Sync {
       // catalog read reaches the commands' facts, not this): what the copy recorded describes its types, which a
       // change of recopies
       const now = new Map(t.columns.map((c) => [c.name, c]));
-      const columns: PgColumn[] = cols.filter((c) => duckTypes.has(c.name)).map((c) => pgColumn(c, duckTypes.get(c.name)!, now.get(c.name)));
+      // (a plain numeric whose own scales the copy holds in a hidden column is said so: src/duck/scale-column.ts)
+      const columns: PgColumn[] = cols.filter((c) => duckTypes.has(c.name)).map((c) => {
+        const col = pgColumn(c, duckTypes.get(c.name)!, now.get(c.name));
+        return plainNumeric(c.type) && duckTypes.has(scaleColumn(c.name)) ? { ...col, scaled: true } : col;
+      });
       const joins: PgJoin[] = t.foreignKeys.filter((f) => this.tables.has(f.target) && columns.some((c) => c.name === f.column))
         .map((f) => ({ name: f.target.split(".")[1]!, table: f.target, on: [f.column, f.targetColumn], relationship: "many_to_one" }));
       // a unique index over columns the copy keeps: the catalog's too, so a foreign key to it is one (and pg_indexes lists it)

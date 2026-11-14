@@ -140,7 +140,8 @@ export interface RewriteHooks {
 export async function rewrite(c: DuckConnection, schema: string, table: string, firstPiece: number, hooks: RewriteHooks = {}): Promise<{ rows: number; pieces: number; pieceRows: number }> {
   const run = hooks.run ?? (async (sql: string) => { await c.run(sql); }), said = hooks.said ?? (() => undefined);
   const target = `${ident(schema)}.${ident(table)}`, side = sideOf(schema, table);
-  // the side table's columns are the table's own, in its order, as the engine has them (types, NOT NULL, defaults; a
+  // the side table's columns are the table's own, in its order, as the engine has them (types, NOT NULL, defaults; a plain
+  // numeric's hidden scale column (src/duck/scale-column.ts) and a
   // stored JSON path's column too): CREATE TABLE AS would drop a NOT NULL
   const cols = (await c.runAndReadAll(`SELECT column_name, data_type, is_nullable, column_default FROM duckdb_columns() WHERE database_name = current_database() AND schema_name = $1 AND table_name = $2 ORDER BY column_index`,
     [schema, table])).getRowsJS() as Array<[string, string, boolean, string | null]>;
