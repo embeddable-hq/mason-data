@@ -149,7 +149,7 @@ export const SERVE: CommandSpec = {
                             account is managed or signed out of, in the same tab: {"label": …, "url": …}, the label
                             plain text on one line, at most ${BACK_LABEL_MAX} characters, the URL read as MASON_UI_BACK_URL is;
                             any other key, or a value of another type, is refused (default unset: none)
-    MASON_UI_OVERVIEW_CARD  a card of the host's on the web page's Overview, beside Mason's own: the same JSON as a
+    MASON_UI_OVERVIEW_CARD  a card of the host's on the web page's Overview, above Mason's own: the same JSON as a
                             view's, read from a path relative to the page's own address, read as a view's is
                             (default unset: none)
     MASON_UI_ICON           the web page's icon in the browser's tab: a data: URL of a PNG or SVG image in base64,

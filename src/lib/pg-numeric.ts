@@ -644,8 +644,31 @@ function specialNode(p: NumericProgram, row: Readonly<Record<string, unknown>>, 
   return undefined;
 }
 
+/** `rescale` of a decimal's text `v` to the scale `s` (a cell's digits) done on the text: its decimals' trailing zeros
+ *  cut, or zeros added, to `s`, and the value left as it is where cutting would drop a digit that is not 0 (as
+ *  `evaluate`'s rescale does). Undefined where the cells are not plain digits (a NULL, an exponent): `evaluate` decides */
+function rescaledText(v: unknown, s: unknown): string | null | undefined {
+  if (v === null || s === null) return v === null ? null : undefined;
+  if (typeof v !== "string" || typeof s !== "string" || !/^-?\d+(\.\d+)?$/.test(v) || !/^\d{1,4}$/.test(s)) return undefined;
+  const point = v.indexOf(".");
+  const have = point < 0 ? 0 : v.length - point - 1;
+  const to = Number(s);
+  if (to === have) return v;
+  if (to > have) return `${point < 0 ? `${v}.` : v}${"0".repeat(to - have)}`;
+  const cut = v.slice(v.length - (have - to));
+  if (!/^0+$/.test(cut)) return v;
+  const kept = v.slice(0, v.length - (have - to));
+  return to === 0 ? kept.slice(0, -1) : kept;
+}
+
 /** The program's value as `numeric_out` writes it, or null: each node computed at most once for the row. */
 export const evaluateText = (p: NumericProgram, row: Readonly<Record<string, unknown>>): string | null => {
+  // a plain numeric printed with its own scale (issue 946, src/duck/scale-column.ts), every value of a column a scan
+  // prints: its text's zeros trimmed or added, as `rescale` computes it (1.4 µs a value through BigInt, 0.06 here)
+  if (p.op === "rescale" && p.arg.op === "cell" && p.scale.op === "cell") {
+    const fast = rescaledText(row[p.arg.key], row[p.scale.key]);
+    if (fast !== undefined) return fast;
+  }
   const memo = new Map<NumericProgram, PgNumeric | null>();
   const special = specialOf(p, row, memo, new Map());
   if (special !== undefined) return special;

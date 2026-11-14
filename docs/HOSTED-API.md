@@ -695,8 +695,8 @@ data, so it runs beside the replica's running Mason. Its `--json` answer carries
 ```json
 { "error": { "code": "refused", "message": "the database cannot serve this project as its files say: 1 problem", "why": "…", "fix": "…" },
   "problems": [{ "code": "publication", "table": "public.orders", "message": "publication mason: missing: public.orders",
-    "fix": "the database's owner runs ALTER PUBLICATION mason ADD TABLE public.orders (id, status); …",
-    "sql": "ALTER PUBLICATION mason ADD TABLE public.orders (id, status);" }], "next": [ … ] }
+    "fix": "the database's owner runs ALTER PUBLICATION mason ADD TABLE public.orders; …",
+    "sql": "ALTER PUBLICATION mason ADD TABLE public.orders;" }], "next": [ … ] }
 ```
 
 `code` is one of `unreachable`, `version`, `missing_table`, `table`, `replication`, `publication`, `roles`; `table`

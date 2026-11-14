@@ -443,6 +443,20 @@ under another transaction's write fails its commit, hence swaps on the writer's 
   `numeric(p > 38)` (Prisma's numeric(65,30)) as DOUBLE, 15 digits; Mason reads their text into DECIMAL(38, s), s the
   most decimals the values use (at scale 30 a sum past 10⁸ would overflow 38 digits). A wider later value re-copies the
   table (at most three times a run); past 38 digits or a NaN stays a double, said.
+- **A plain numeric keeps each value's own scale** (issue 946, `src/duck/scale-column.ts`): Postgres prints an
+  unconstrained `numeric` at each value's own scale (`12.5` beside `12.49`), and DECIMAL(38, s) has one. So the copy holds
+  a hidden UTINYINT beside it, the decimals of the source's text, written by every write (the copy's chunks, the poll's
+  stage, the stream's rows and its unchanged-TOAST update) and never listed (the copy's view of its visible columns, made
+  whether stored JSON paths are on or off). The value stays the engine's DECIMAL, so keys, filters, joins and aggregates
+  are native; only a reader that prints reads the scale: the column's program is `rescale(value, scale)`, which the wire
+  evaluates on the text (0.06 µs a value; 1.4 µs through BigInt), and `x::text` is the engine's text cut natively. A copy
+  an older Mason made without the column is read again once (`SCALE_LAYOUT`), serving as it was until then. Not yet:
+  the readers `mixed-scale-numeric` lists (to_json and its kin, concat, `||`, array_agg, a scalar subquery, a set
+  operation without ALL, a generated table …) keep the column's one scale. The hidden column's name is hashed again where
+  the table holds a column of that name (`scaleColumn`), and a copy's view lists the source's own columns, never a
+  pattern of names. Measured on 4 M rows of 0–2 decimals: the hidden column is 1.5 MiB beside the value's 12.5 MiB, the
+  copy's time is unchanged within noise. min / max print at the column's one scale (the owner's decision, 2026-11-14:
+  picking the row's scale by `arg_min` / `arg_max` cost about 2× grouped and 10× ungrouped, for a value already equal).
 - **A failed copy backs off** (`copyRetryDelayMs`: four times the attempt, at least 5 minutes, doubled per failure, at
   most 6 hours; at once after a restart or a column change) and keeps its committed chunks.
 - **`mason stop` interrupts a copy**, re-sent every 50 ms (DuckDB loses an interrupt that arrives before its statement
@@ -575,6 +589,51 @@ are `.claude/rules/duck-sync.md` "Keeping a copy current". Why each is so:
 | any failure but the source going away restarts the stream, back-off doubled, at most 5 minutes | each start decodes the slot's WAL again on the source |
 
 **Where.** `src/duck/stream.ts`, `src/duck/publication.ts`; `tests/integration/duck-stream.itest.ts`.
+
+### Mason's own publication names each table whole
+
+**Decision** (2026-11-14, issue 978, the owner's). The publication Mason makes when the sources file names none lists
+each replicated table whole: `FOR TABLE t`, never `FOR TABLE t (a, b)`. This holds for every table, on every Postgres
+version, and for an entry with `exclude:` or `columns:` too. The stream then carries every column of the table. Mason
+drops the columns the synced table does not hold as they arrive (`projectTuple`, src/duck/stream.ts), in every message:
+an insert, an update, an unchanged TOAST value, an update's old key and a delete. A publication an earlier Mason made
+with column lists is named whole at its next pass, once (`ensurePublication`, src/duck/sync.ts). **Do not bring a
+column list back to Mason's own publication without the owner's decision.**
+
+**Why.** From Postgres 15, Mason listed the synced columns of each table whose replica identity is its primary key. The
+idea was that the stream should carry only what the synced table keeps. It had two costs, found in issue 978 on
+Postgres 16:
+- Postgres refused the application's own `ALTER TABLE … DROP COLUMN` of a listed column on its production database,
+  with "publication … depends on column". An ordinary migration failed because Mason was attached. Mason is meant to
+  read the source and never get in the way of its DDL.
+- Postgres never publishes a column added to the table later, so Mason could not pick a new column up from the stream.
+
+**The trade-off accepted.** A column the sources file leaves out, a secret-looking one included (`api_token`), now
+crosses the replication stream into Mason's process. Mason drops it on arrival. It is never stored, logged, written to
+the request log or served. `tests/integration/duck-stream.itest.ts` holds this for every kind of message, searching every
+text value in Mason's file and every log line for the excluded values.
+
+**Why that is acceptable.** Mason already holds the source's URL with read access to the whole table. It offers only
+tables on which its role holds SELECT on the whole table (`has_table_privilege` in `TABLES_SQL`, src/cli/preflight.ts),
+so the excluded column was always readable by it. What Mason reads by SELECT is narrower, and stays so: the first sync
+(`readChunks`), the poll (`poll`) and the stream's read of a row by its key (`sourceRows`) each SELECT the synced
+columns only. The stream is the one path that carries the other columns, and it drops them before anything is written.
+
+**Rejected.**
+- A column list only for a table with excluded columns. The DROP COLUMN problem would stay for exactly the tables an
+  application is most likely to change, and a new column would still never arrive.
+- Keeping the list, and handling the drop for the user (taking the table out of the publication, dropping the column,
+  putting it back). That is a write to the production database in the middle of the application's migration, which
+  Mason cannot time, and Postgres would still refuse a migration run while Mason is down.
+
+**A named publication** (`publication:`) is still the owner's. A column list on it that carries every synced column is
+accepted, as before. Mason says once a run that the list blocks `DROP COLUMN`, with the statements that name the table
+whole (`columnListText`, src/duck/publication.ts). When a named publication lacks something, the statements Mason gives
+its owner name each synced table whole, never with a column list.
+
+**Where.** `src/duck/sync.ts` (`ensurePublication`), `src/duck/publication.ts`, `src/duck/stream.ts` (`projectTuple`);
+`tests/integration/duck-stream.itest.ts` ("Mason's own publication names each table whole", "a publication an earlier
+Mason made with column lists").
 
 ## The statement path
 

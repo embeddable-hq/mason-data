@@ -156,8 +156,7 @@ async function problemsOver(pg: PgConnection, src: ProjectSource, database: stri
     const own = ownReaderFreed(await readServerFacts(pg), await readSlotFacts(pg, repl.slot));
     problems.push(...replicationProblems(readinessVerdict(own.server, repl.slot, own.slot, repl).refused, shown));
     if (named !== null && streamed.length > 0) {
-      const identities = new Map(streamed.map((t) => [t.source, t.replicaIdentity ?? "d"]));
-      problems.push(...publicationProblems(namedPublicationVerdict(await readNamedPublication(pg, named.name, streamed), streamed, identities), named.name, shown));
+      problems.push(...publicationProblems(namedPublicationVerdict(await readNamedPublication(pg, named.name, streamed), streamed), named.name, shown));
     }
   }
   problems.push(...rolesProblems(o.folder, o.root, src, added));
