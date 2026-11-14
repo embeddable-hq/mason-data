@@ -239,6 +239,9 @@ const aliasOf = (rv: Body): string => isObject(rv.alias) ? String(rv.alias.alias
  * and whose FROM names a table itself (a `*` over a subquery lists the subquery's columns); a `t.*` anywhere whose `t`
  * is a table's name or alias in the statement; a NATURAL JOIN with a table on either side; or one bare name equal to a
  * table's name or alias (a whole row — `row_to_json(t)`, `SELECT t FROM t` — or a column of that name, taken as one).
+ * A bare name a WITH query in scope has is that WITH query, never a table (as `hideKept` resolves it): `WITH q AS
+ * (SELECT id, n FROM t) SELECT * FROM q` lists q's columns, which name t's (issue 946: a plain numeric's hidden scale
+ * column is read by name, through no view).
  */
 export function exposes(tree: unknown): boolean {
   const aliases = new Set<string>();
@@ -251,22 +254,34 @@ export function exposes(tree: unknown): boolean {
   };
   collect(tree);
   const star = (n: unknown): boolean => kindOf(n) === "ColumnRef" && Array.isArray(bodyOf(n).fields) && (bodyOf(n).fields as unknown[]).length === 1 && kindOf((bodyOf(n).fields as unknown[])[0]) === "A_Star";
-  const found = (v: unknown): boolean => {
-    if (Array.isArray(v)) return v.some(found);
+  // the tables of a FROM, a WITH query's name in scope left out
+  const tables = (from: unknown, ctes: ReadonlySet<string>): Body[] =>
+    directTables(from).filter((rv) => (typeof rv.schemaname === "string" && rv.schemaname !== "") || !ctes.has(String(rv.relname ?? "")));
+  const found = (v: unknown, ctes: ReadonlySet<string> = new Set()): boolean => {
+    if (Array.isArray(v)) return v.some((x) => found(x, ctes));
     if (!isObject(v)) return false;
     const k = kindOf(v);
     const b = k === null ? v : bodyOf(v);
+    // a WITH query sees the ones before it (all of them, RECURSIVE); the rest of the statement sees all
+    if ((k === "SelectStmt" || k === null) && isObject(b.withClause) && Array.isArray(b.withClause.ctes)) {
+      const w = b.withClause;
+      const list = (w.ctes as unknown[]).filter((c) => kindOf(c) === "CommonTableExpr").map(bodyOf);
+      const all = new Set([...ctes, ...list.map((c) => String(c.ctename ?? ""))]);
+      if (list.some((c, i) => found(c.ctequery, w.recursive === true ? all : new Set([...ctes, ...list.slice(0, i).map((x) => String(x.ctename ?? ""))])))) return true;
+      const { withClause: _w, ...rest } = b;
+      return found(k === null ? rest : { SelectStmt: rest }, all);
+    }
     // (an arm of a set operation is a SelectStmt with no wrapper of its own: k is null)
-    if ((k === "SelectStmt" || k === null) && Array.isArray(b.targetList) && directTables(b.fromClause).length > 0
+    if ((k === "SelectStmt" || k === null) && Array.isArray(b.targetList) && tables(b.fromClause, ctes).length > 0
       && b.targetList.some((t) => kindOf(t) === "ResTarget" && star(bodyOf(t).val))) return true;
-    if (k === "JoinExpr" && b.isNatural === true && directTables([b.larg, b.rarg]).length > 0) return true;
+    if (k === "JoinExpr" && b.isNatural === true && tables([b.larg, b.rarg], ctes).length > 0) return true;
     if (k === "ColumnRef" && Array.isArray(b.fields)) {
       const fields = b.fields as unknown[];
       const last = fields[fields.length - 1];
       if (fields.length >= 2 && kindOf(last) === "A_Star" && aliases.has(sval(fields[fields.length - 2]) ?? "")) return true;
       if (fields.length === 1 && aliases.has(sval(fields[0]) ?? "\u0000")) return true;
     }
-    return Object.values(b).some(found);
+    return Object.values(b).some((x) => found(x, ctes));
   };
   return found(tree);
 }

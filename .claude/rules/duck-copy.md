@@ -96,6 +96,13 @@ paths:
   numeric as text, and as `text[]` a citext[] / inet[] / json[] (`KEPT_ARRAYS`) and an enum array (`enumLists`, by its
   stored type) — `postgres_query` hands each over as one VARCHAR DuckDB cannot cast to the column (the
   oracle's enum array failed to copy, and a poll of a changed one had always failed).
+- **A plain numeric's own scale is a hidden column every write computes** (`src/duck/scale-column.ts`, issue 946): a
+  column declared `numeric` with no precision is DECIMAL(38, s) with a UTINYINT beside it, each value's decimals read
+  from the source's text — the copy's chunks (`scaleSql`), the poll's `writeStaged`, the stream's `writeByKey` and
+  `updateCarried` (`scaleOfText`). A new write path into a copy names it too, or that column prints at s again. It is
+  never listed (the copy's view of its visible columns, stored JSON paths on or off), and the rewrite reads it only to
+  print (`scaleOf`): keys, filters and aggregates stay the engine's DECIMAL. A copy without it is read again once
+  (`SCALE_LAYOUT`). Why: Postgres prints `12.5` beside `12.49`, and one DECIMAL scale printed `12.50`.
 - **What heap order gives up**, said as such: a wide uuid-keyed table's click takes seconds, a point lookup by a random
   uuid is a scan, and uniqueness is the write path's (the oracle holds every copy to the source), not the engine's. The
   later step is a sort by a declared time column once the sources file names one.

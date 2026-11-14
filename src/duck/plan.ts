@@ -28,8 +28,10 @@ import type { PrimaryKeys } from "./distinct-key.ts";
 import { enforceGrants, type RoleGrants } from "./grants.ts";
 import { attributeRefused, expandRowFilters, wallStatistics, wallSwitch, type Walls } from "./row-filter.ts";
 import type { PgAnalysis } from "./analyze.ts";
+import type { ScaleLookup } from "./rewrite.ts";
+import { scaledOf } from "./scale-column.ts";
 
-const JSON_OID = 114, JSONB_OID = 3802;
+const JSON_OID = 114, JSONB_OID = 3802, NUMERIC_OID = 1700;
 /** pg_catalog.pg_typeof(any): its argument's type named by the catalog (src/duck/rewrite.ts) */
 const PG_TYPEOF = 1619;
 
@@ -57,6 +59,36 @@ async function keptLookup(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, t
     `JOIN pg_attribute a ON a.attrelid = c.oid WHERE (c.oid::int8, a.attnum::int8) IN (${pairs}) AND c.relkind = 'r' AND NOT a.attisdropped`);
   const at = new Map(rows.map(([relid, attno, schema, table, column]) => [`${relid}.${attno}`, { source: `${schema}.${table}`, column: column! }]));
   return { at: (relid, attno) => at.get(`${relid}.${attno}`) ?? null, ready: (read) => kept.ready(read) };
+}
+
+/** THE PLAIN NUMERICS THE STATEMENT READS FROM A TABLE WHOSE COPY HOLDS EACH VALUE'S OWN SCALE (src/duck/scale-column.ts):
+ *  each such column's hidden scale column by the catalog's OIDs (Typed.relation), the listener saying which copies hold
+ *  one (`SCALED_KEY` in `userTypes`); null when it reads none */
+async function scaleLookup(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, types: ReadonlyMap<number, ReadonlyArray<{ type: number; typmod: number; relation?: { relid: number; attno: number } }>>,
+  userTypes: ReadonlyMap<string, number>): Promise<ScaleLookup | null> {
+  // each scaled column's hidden column, by schema, table and column
+  const hidden = new Map<string, string>();
+  for (const k of userTypes.keys()) { const s = scaledOf(k); if (s !== null) hidden.set(JSON.stringify([s.schema, s.table, s.column]), s.hidden); }
+  if (hidden.size === 0) return null;
+  const wanted = new Map<string, { relid: number; attno: number }>();
+  for (const t of [...types.values()].flat()) if (t.relation !== undefined && t.type === NUMERIC_OID && t.typmod < 0) wanted.set(`${t.relation.relid}.${t.relation.attno}`, t.relation);
+  if (wanted.size === 0) return null;
+  const pairs = [...wanted.values()].map((r) => `(${Math.trunc(r.relid)}, ${Math.trunc(r.attno)})`).join(", ");
+  const rows = await catalogRows(catalog, `SELECT c.oid::text, a.attnum::text, n.nspname, c.relname, a.attname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace ` +
+    `JOIN pg_attribute a ON a.attrelid = c.oid WHERE (c.oid::int8, a.attnum::int8) IN (${pairs}) AND c.relkind = 'r' AND NOT a.attisdropped`);
+  const at = new Map(rows.flatMap(([relid, attno, schema, table, column]) => {
+    const name = hidden.get(JSON.stringify([schema, table, column]));
+    return name === undefined ? [] : [[`${relid}.${attno}`, name] as const];
+  }));
+  return at.size === 0 ? null : { at: (relid, attno) => at.get(`${relid}.${attno}`) ?? null };
+}
+
+/** the copies that hold a plain numeric's hidden scale column, `schema.table` (`SCALED_KEY`): a statement that lists one's
+ *  columns without naming them reads its view of its visible columns (`hideKept`), stored JSON paths on or off */
+function scaledTables(userTypes: ReadonlyMap<string, number>): Set<string> {
+  const out = new Set<string>();
+  for (const k of userTypes.keys()) { const s = scaledOf(k); if (s !== null) out.add(`${s.schema}.${s.table}`); }
+  return out;
 }
 
 /** the count(DISTINCT x) of the statement that are count(x) (src/duck/distinct-key.ts), by their offsets into the
@@ -549,6 +581,9 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   }
   // the stored JSON paths the statement's JSON reads may be answered from (src/duck/kept-route.ts)
   const lookup = kept === null ? null : await keptLookup(catalog, analysis.types, kept);
+  // the plain numerics it reads whose own scales their copy holds (src/duck/scale-column.ts); not a generated table's run
+  // (`outputs`), whose stored column holds the engine's DECIMAL as a copy of the column does, no scale beside it
+  const scales = outputs ? null : await scaleLookup(catalog, analysis.types, userTypes);
   const keyCounts = await distinctKeys(catalog, analysis.tree);
   // WHAT EACH COLLATION OF THE ANALYSIS MEANS (src/duck/collation.ts), resolved before the rewrite reads any: a libc
   // order not read yet is read here, before the plan is made; a collation the source lacks or Mason cannot follow refused
@@ -556,7 +591,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   try { collations = await resolver.prepare((sql) => catalogRows(catalog, sql), collationOids(analysis.tree)); }
   catch (e) { throw e instanceof Unrewritable ? unrewritableError(e, text) : e; }
   const analysed = performance.now();
-  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths });
+  const rewritten = (l = lookup, sc = scales): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, scales: sc });
   try {
     ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them
@@ -566,7 +601,11 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
     }
     // a statement that lists a copy's columns without naming them reads none from a stored column (hideKept): made
     // again with every read its call, the reads still recorded
-    if (lookup !== null && exposes(tree)) ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams } = rewritten({ at: (relid, attno) => lookup.at(relid, attno), ready: () => null }));
+    // (and none from a plain numeric's hidden scale column, which that view does not list: its values print with the
+    // column's one scale there, `mixed-scale-numeric`)
+    if ((lookup !== null || scales !== null) && exposes(tree)) {
+      ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams } = rewritten(lookup === null ? null : { at: (relid, attno) => lookup.at(relid, attno), ready: () => null }, null));
+    }
   }
   catch (e) {
     if (e instanceof Unrewritable) throw unrewritableError(e, text);
@@ -574,7 +613,9 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   }
   // a statement that lists a copy's columns without naming them reads its visible ones (src/duck/kept-route.ts); before
   // the late select list, which then reads the columns this leaves
-  if (kept !== null) hideKept(tree, { visible: kept.visible(), searchPath: searchSchemas(searchPath) });
+  // (a copy holding a plain numeric's hidden scale column has that view whether stored JSON paths are on or off)
+  const visible = kept !== null ? kept.visible() : scaledTables(userTypes);
+  if (visible.size > 0) hideKept(tree, { visible, searchPath: searchSchemas(searchPath) });
   // a sorted, limited select list is computed over the rows the limit keeps (src/duck/late.ts)
   // (a role's walled read it fetches through itself is one more wall: counted, so `wallStatistics` still walls every one)
   const lateWall = walls !== null ? { alias: walls.alias, added: 0 } : null;
