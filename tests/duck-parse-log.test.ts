@@ -105,19 +105,29 @@ function formatNodeDump(dump: Buffer): Buffer {
 /** outToken's escaping (src/backend/nodes/outfuncs.c) */
 const outToken = (s: string): string => (/^[<"0-9]|^[+-][0-9.]/.test(s) ? "\\" : "") + s.replace(/[ \n\t(){}\\]/g, (c) => `\\${c}`);
 
-test("issue 956: a tree wrapped by Postgres's rule is read back with every name as written", async () => {
-  const { readParseLog } = await import("../src/duck/pgtree.ts");
+test("issue 956: a tree wrapped by Postgres's rule is read back with every name as written, or refused by name where names hold line breaks", async () => {
+  const { readParseLog, UnreadableNames } = await import("../src/duck/pgtree.ts");
   let seed = 956;
   const rand = (n: number): number => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
-  const alphabet = ["a", "b", " ", " ", "→", "é", "\n", "(", ")", "{", "}", "\\", "\t", "x", "1", '"', "<"];
-  for (let round = 0; round < 400; round++) {
+  let refused = 0;
+  for (let round = 0; round < 800; round++) {
+    // half the rounds hold names with line breaks, which may be refused (never read otherwise); the rest are always read
+    const lines = round % 2 === 1;
+    const alphabet = ["a", "b", " ", " ", "→", "é", "(", ")", "{", "}", "\\", "\t", "x", "1", '"', "<", ...(lines ? ["\n"] : [])];
     const names = Array.from({ length: 1 + rand(8) }, () => Array.from({ length: 1 + rand(63) }, () => alphabet[rand(alphabet.length)]!).join(""));
     const text = `{QUERY :pad ${"z".repeat(1 + rand(80))} :targetList (${names.map((m, i) => `{TARGETENTRY :resno ${i + 1} :resname ${outToken(m)} :location -1}`).join(" ")}) ` +
       `:colnames (${names.map((m) => `"${outToken(m)}"`).join(" ")}) :constvalue 5 [ 20 0 0 0 110 ]}`;
-    const tree = readParseLog(formatNodeDump(Buffer.from(text)), new Set(names));
+    let tree: TreeValue;
+    try { tree = readParseLog(formatNodeDump(Buffer.from(text)), new Set(names)); }
+    catch (e) {
+      assert.ok(e instanceof UnreadableNames && lines, `${text}: ${String(e)}`);
+      refused++;
+      continue;
+    }
     assert.deepEqual(resnames(tree), names, text);
     assert.deepEqual(colnames(tree), names, text);
   }
+  assert.ok(refused < 400, `every round with line breaks refused (${refused})`);
 });
 
 test("issue 956: a run of 78 bytes or more with no space is broken inside it, and read back whole", async () => {
@@ -208,4 +218,17 @@ test("issue 956: a name that ends in a line break, or is one, is read exactly th
     if (JSON.stringify(got) !== JSON.stringify([...names, ...names])) wrong.push(`${sql}\n  got ${JSON.stringify(got)}`);
   }
   assert.deepEqual(wrong, []);
+});
+
+test("issue 956: a statement of 400 names made of line breaks and spaces is refused by name at once, never read for seconds", async () => {
+  // the re-check of PR 974: unbounded, the search over its readings held the listener's thread 29 to 53 s; a fixed
+  // number of steps and parses refuses it in about the time Postgres's own analysis takes
+  const name = (i: number): string => `${"\n ".repeat(30)}${String.fromCharCode(65 + (i % 26)).repeat(3)}${i}`;
+  const sql = `SELECT s.* FROM (SELECT ${Array.from({ length: 400 }, (_, i) => `t.id + ${i} AS ${ident(name(i))}`).join(", ")} FROM t) s`;
+  const started = performance.now();
+  const e = await analyze(catalog, sql, [], undefined, writtenNames((await parseSql(sql)).stmts![0]!.stmt)).then(() => null, (x: unknown) => x as { fields?: { code?: string; detail?: string } });
+  const took = performance.now() - started;
+  assert.equal(e?.fields?.code, "0A000");
+  assert.match(e?.fields?.detail ?? "", /Mason gap name-unreadable/);
+  assert.ok(took < 5000, `refused in ${Math.round(took)} ms`);
 });

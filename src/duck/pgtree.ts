@@ -42,7 +42,11 @@ export interface TreeNode { readonly _node: string; readonly [field: string]: Tr
 export function readParseLog(detail: Uint8Array, written: ReadonlySet<string> = new Set()): TreeValue {
   const trees: TreeValue[] = [];
   let failure: unknown = null;
-  for (const r of unwrapNodeDump(detail)) {
+  const read = unwrapNodeDump(detail);
+  // every parse reads the whole log: past a few, the work is refused rather than done (a statement of many names of
+  // line breaks once took 30 s on the listener's thread)
+  if (read.reduce((n, r) => n + r.spaces.length + 1, 0) > MAX_PARSES) throw new UnreadableNames();
+  for (const r of read) {
     // each break inside a run of 78 bytes with no space was a space, or was inserted: each choice is its own (what
     // follows is the same either way). A reading with spaces at the sites `combo` names, parsed:
     const parsed = (combo: (k: number) => boolean): { tree: TreeValue } | { error: unknown; at: number } => {
@@ -77,9 +81,9 @@ export function readParseLog(detail: Uint8Array, written: ReadonlySet<string> = 
   throw new UnreadableNames([...new Set(trees.flatMap(relationsOf))]);
 }
 
-/** a parse tree's log that more than one tree could have been wrapped into, or too many ways to read: a name with a line
- *  break beside a space that the names given do not tell, more than 64 readings, or more than eight breaks inside
- *  tokens that single readings do not settle (Mason gap `name-unreadable`) */
+/** a parse tree's log that more than one tree could have been wrapped into, or past the fixed work its reading may take:
+ *  a name with a line break beside a space that the names given do not tell, more readings, parses or search steps
+ *  than the bounds below, or more breaks inside tokens than single readings settle (Mason gap `name-unreadable`) */
 export class UnreadableNames extends Error {
   /** the relations (pg_class OIDs) the readings read, whose columns' names may tell them apart */
   readonly relations: number[];
@@ -95,8 +99,11 @@ function relationsOf(v: TreeValue): number[] {
 }
 
 /** the most breaks inside a token whose every combination one reading of a log is parsed with (each doubles the
- *  parses), and the most readings */
-const MAX_INSIDE_TOKEN = 8, MAX_READINGS = 64;
+ *  parses), the most readings, and the most parses of a log (a statement's every name with a space is one reading and
+ *  one parse) */
+const MAX_INSIDE_TOKEN = 4, MAX_READINGS = 16, MAX_PARSES = 24;
+/** the search's steps past one a line: a FIXED bound for each statement, so its work is the log's length and no more */
+const EXTRA_STEPS = 2000;
 
 /** every string of a tree that holds a line break: only a name can, as the log's breaks are undone */
 function namesWithLineBreak(v: TreeValue): string[] {
@@ -146,19 +153,29 @@ export function unwrapNodeDump(wrapped: Uint8Array): Array<{ text: Uint8Array; s
     }
     return { ok: true, checked: i };
   };
-  const choicesAt = (at: number): Choice[] => {
+  /** whether a line break at `e` of the line starting at `at` can be the text's own: escaped by the backslashes before
+   *  it, in this line and, where the line starts with them, at the end of the text read so far (`sLen`) */
+  const escapable = (at: number, e: number, sLen: number): boolean => {
+    let n = 0, k = e - 1;
+    for (; k >= at && o[k] === BACKSLASH; k--) n++;
+    if (k < at) for (let j = sLen - 1; j >= 0 && s[j] === BACKSLASH; j--) n++;
+    return n % 2 === 1;
+  };
+  const choicesAt = (at: number, sLen: number): Choice[] => {
     const out: Choice[] = [];
     for (let e = at + 1; e <= Math.min(at + LINE, o.length - 1); e++) {
       if (o[e] !== LF) continue;
       if (e === o.length - 1) { out.push({ e, kind: "end" }); break; }
       const inside = e - at === LINE && o[e + 1] !== SPACE && !o.subarray(at + 1, e).includes(SPACE);
       out.push({ e, kind: inside ? "either" : "space" });
+      // a line break no backslash escapes is never the text's own, so the line ends there at the latest
+      if (!escapable(at, e, sLen)) break;
     }
     return out;
   };
   const found: Array<{ text: Uint8Array; spaces: number[] }> = [];
-  const stack: Frame[] = [{ at: 0, sLen: 0, lines: 0, checked: 0, spaces: 0, choices: choicesAt(0), next: 0 }];
-  let budget = 64 * o.length + 10_000;
+  const stack: Frame[] = [{ at: 0, sLen: 0, lines: 0, checked: 0, spaces: 0, choices: choicesAt(0, 0), next: 0 }];
+  let budget = o.reduce((n, b) => b === LF ? n + 1 : n, 0) + EXTRA_STEPS;
   while (stack.length > 0) {
     // past the bound, the readings are too many to tell apart: refused by name, never one guessed
     if (--budget < 0 || found.length > MAX_READINGS) throw new UnreadableNames();
@@ -182,7 +199,7 @@ export function unwrapNodeDump(wrapped: Uint8Array): Array<{ text: Uint8Array; s
     const held = holds(f.checked, sLen, complete);
     if (!held.ok) continue;
     if (complete) { found.push({ text: Buffer.from(s.subarray(0, sLen)), spaces: [...spaces] }); continue; }
-    stack.push({ at: c.e + 1, sLen, lines: starts.length, checked: held.checked, spaces: spaces.length, choices: choicesAt(c.e + 1), next: 0 });
+    stack.push({ at: c.e + 1, sLen, lines: starts.length, checked: held.checked, spaces: spaces.length, choices: choicesAt(c.e + 1, sLen), next: 0 });
   }
   return found;
 }

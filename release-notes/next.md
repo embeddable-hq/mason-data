@@ -16,4 +16,5 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   field it unfolds `"meta → n"`, and a custom column can be `"Unit Price"`. When the outer query read such a column, Mason
   could print the subquery's numeric with the wrong digits. `1000000000.00` came back as `1000000000`, and `x / 3` had
   15 digits where Postgres gives 20. Whether a query was hit depended on its length, so a small edit could hide it. Now
-  every such name is read exactly, one with a line break or a no-break space in it included.
+  every such name is read exactly, one with a no-break space or ending in a line break included. A name with several
+  line breaks may be refused by name (`name-unreadable`). Give it an alias without them.
