@@ -283,13 +283,16 @@ paths:
   of its own scan, no operator named DELIM (`delimiterJoin`). ("The plan fixture")
 - **A result's names, types and typmods are Postgres's**, from the analysis, and a numeric Postgres computes exactly is
   computed by `src/lib/pg-numeric.ts`, never DuckDB's double or HUGEINT. ("How a statement is answered")
-- **A whole numeric the rewrite writes is the engine's HUGEINT, never a DECIMAL(38, 0)** (`wholeNumeric`, issue 929):
-  an integer cast to numeric, div() of two integers, a whole constant (`decimalConst`) and a whole part of extract.
-  Beside another DECIMAL in an IN, a UNION, a CASE, a COALESCE, GREATEST or an ARRAY, DuckDB brings both to one type,
-  and a DECIMAL(38, 0) leaves no room for the other's decimals, so they were rounded away. A HUGEINT beside a
-  DECIMAL(w, s) is brought to DECIMAL(38, s), as `sum` of an integer column always was: the scale is kept. A whole
-  value of more than 38 − s digits does not fit, and is DuckDB's 22003 where Postgres answers, never rounded (beside a
-  numeric(38,30), a 9-digit integer). `tests/duck-wire.test.ts` "issue 929", the oracle's `whole:` statements over `bins`.
+- **A whole numeric the rewrite writes is a DECIMAL(19, 0), never a DECIMAL(38, 0)** (`wholeNumeric`, issue 929): an
+  integer cast to numeric, div() of two integers, a whole constant (`decimalConst`, its own digits where more) and a
+  whole part of extract. Beside another DECIMAL in an IN, a UNION, a CASE, a COALESCE, GREATEST or an ARRAY, DuckDB
+  brings both to DECIMAL(p + s, s) while that fits 38 digits, else DECIMAL(38, 38 − p): a DECIMAL(38, 0) kept none of
+  the other's decimals, so 0.01 matched 0. A width of 19 keeps at least 19 (the owner's rule: Postgres to 18 decimal
+  places; the listed difference `whole-beside-many-decimals`), and keeps a product of two in 128 bits (a DECIMAL(10, 0)
+  multiplies in 64 bits and fails past 18 digits). A sum of one is a HUGEINT's (DuckDB sums a DECIMAL(p, 0) into a
+  DECIMAL(38, 0)), which beside a DECIMAL(w, s) is a DECIMAL(38, s). A product of two is still DuckDB's DECIMAL(38, 0).
+  The owner chose rounding over a HUGEINT's 22003. `tests/duck-wire.test.ts` "issue 929", the oracle's `whole:`
+  statements over `bins` and its `whole-beside-many-decimals` gap case.
 - **A set operation that compares rows (UNION, INTERSECT, EXCEPT, every ALL form but UNION ALL) of a numeric column
   its queries give different scales is answered at ONE scale, the widest** (the listed difference `mixed-scale-numeric`,
   the owner's decision on issue 929's review: answer more queries right, with the text's scale slightly off, rather

@@ -284,7 +284,7 @@ instead. None was answered with a wrong value.
 
 [docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md) is generated from the code. It lists the 1,153 verified pieces (types, functions,
 operators, aggregates, window functions, casts, constructs and their forms). It also lists the 62 refused shapes, the
-19 that are answered differently and the 8 limits, each with what to write instead.
+20 that are answered differently and the 8 limits, each with what to write instead.
 <!-- END GENERATED -->
 
 [`docs/POSTGRES-API.md`](docs/POSTGRES-API.md) says how a query is answered and how this is tested.

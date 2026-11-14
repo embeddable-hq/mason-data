@@ -5413,6 +5413,10 @@ class Rewriter {
     }
     if ((name === "sum" || name === "avg") && argType(0) === INTERVAL) throw new Unrewritable(`${name}() of an interval is not supported by Mason`, "sum(extract(epoch FROM x)) for the seconds", "interval-aggregates");
     if (name === "sum" && this.typeOf(args[0] ?? { A_Const: {} }) === FLOAT4 && argType(0) === FLOAT4) throw new Unrewritable("sum() of a real is not supported by Mason (Postgres adds in single precision)", "sum(x::double precision)", "sum-real");
+    // a sum of a whole numeric (`displayScale` 0: `wholeNumeric`'s, a numeric(p, 0)): DuckDB sums a DECIMAL(p, 0) into a
+    // DECIMAL(38, 0), which beside another DECIMAL keeps none of its decimals (issue 929); a HUGEINT sums into a HUGEINT,
+    // which beside a DECIMAL(w, s) is a DECIMAL(38, s), as a sum of an integer column always is
+    if (name === "sum" && args.length === 1 && argType(0) === NUMERIC && this.displayScale(args[0]!) === 0) b.args = [cast(args[0]!, ["hugeint"])];
     // count(DISTINCT x) of a column unique on the source, over a FROM that repeats none of its table's rows: no value is
     // there twice, so it is count(x), its FILTER kept (src/duck/distinct-key.ts, `keyCounts`)
     if (b.agg_distinct === true && name === "count" && typeof b.location === "number" && this.keyCounts.has(b.location)) delete b.agg_distinct;
@@ -7645,22 +7649,22 @@ function positional(text: string): string {
 function decimalConst(text: string): AstNode {
   if (text.includes(".") || !engineReadsExactly(text)) return numConst(text);
   const n = Number(text);
-  return wholeNumeric(Number.isSafeInteger(n) && n >= -2147483648 && n <= 2147483647 ? intConst(n) : numConst(text));
+  return wholeNumeric(Number.isSafeInteger(n) && n >= -2147483648 && n <= 2147483647 ? intConst(n) : numConst(text), (text.match(/[0-9]/g) ?? []).length);
 }
 
 /**
  * A WHOLE NUMERIC Postgres computes (an integer cast to numeric, div() of two integers, a whole constant, extract of a
- * whole part) as the engine's HUGEINT, never a DECIMAL(38, 0) (issue 929). Beside another DECIMAL in a UNION, an IN, a
- * CASE, a COALESCE, GREATEST or an ARRAY, DuckDB brings both to one type; a DECIMAL(38, 0) leaves no room for the
- * other's decimals, so DuckDB drops them and rows and order are wrong. A HUGEINT beside a DECIMAL(w, s) is brought to
- * DECIMAL(38, s): the scale is kept and the width is 38, as for `sum` of an integer column (a HUGEINT). A whole value
- * of more than 38 − s digits does not fit it, and is DuckDB's error (22003 on the wire), never rounded: beside a
- * numeric(38,30), a 9-digit integer. HUGEINT still keeps a product in 128 bits, as DECIMAL(38, 0) did (DuckDB keeps a
- * product of two 18-digit decimals in 64 bits and fails past it). A set operation that compares rows of numerics of
- * several scales prints them at one scale, the widest: the listed difference `mixed-scale-numeric`.
+ * whole part) as a DECIMAL of its own width, never a DECIMAL(38, 0) (issue 929). Beside another DECIMAL in a UNION, an
+ * IN, a CASE, a COALESCE, GREATEST or an ARRAY, DuckDB brings both to one type: DECIMAL(p + s, s) while that fits 38
+ * digits, else DECIMAL(38, 38 - p) — the decimal side's last decimals rounded away. A DECIMAL(38, 0) kept none of them,
+ * so 0.01 matched 0 and rows were wrong. Its width is 19 (a bigint's digits) whatever its type, or a constant's own digits
+ * where more: beside a DECIMAL it keeps at least 19 decimals, within the owner's rule (Postgres to 18 decimal places;
+ * the listed difference `whole-beside-many-decimals`), and DuckDB keeps a product of it in 128 bits, as DECIMAL(38, 0)
+ * did (a DECIMAL(10, 0) of an int4 multiplies in 64 bits and fails past 18 digits). A set operation that compares rows
+ * of numerics of several scales prints them at one scale, the widest: the listed difference `mixed-scale-numeric`.
  */
-function wholeNumeric(n: AstNode): AstNode {
-  return cast(n, ["hugeint"]);
+function wholeNumeric(n: AstNode, digits = 19): AstNode {
+  return cast(n, ["decimal", String(Math.min(38, Math.max(19, digits))), "0"]);
 }
 
 /** WHETHER THE ENGINE READS A NUMERIC CONSTANT EXACTLY, AS IT IS WRITTEN FOR IT (the one reader of a constant's
