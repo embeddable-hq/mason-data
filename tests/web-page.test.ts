@@ -2958,12 +2958,14 @@ test("the Overview: the word and its line, the cards (tables synced N of M, rows
   });
 });
 
-test("the Overview's eight cards and nine (the host's beside them) leave no card alone on a row: four by two and three by three from a tablet up, two a row on a phone", () => {
+test("the Overview's eight cards leave no card alone on a row: four by two from a tablet up, two a row on a phone; the host's card is not among them (issue 1001)", () => {
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
-  assert.match(css, /@media \(min-width: 641px\) \{ \.cards\.n8 \{ grid-template-columns: repeat\(4, 1fr\); \} \.cards\.n9 \{ grid-template-columns: repeat\(3, 1fr\); \} \}/,
-    "from 641 px up (the 640–1099, 1100–1439 and 1440 widths alike): 8 = 4 + 4, 9 = 3 + 3 + 3");
+  assert.match(css, /@media \(min-width: 641px\) \{ \.cards\.n8 \{ grid-template-columns: repeat\(4, 1fr\); \} \}/,
+    "from 641 px up (the 640–1099, 1100–1439 and 1440 widths alike): 8 = 4 + 4");
+  assert.ok(!css.includes(".cards.n9"), "no ninth card: the host's is drawn first, on its own, at the full width");
+  assert.match(css, /\n\.host-card \{ margin: 0 0 var\(--space-5\); \}/, "the host's card, on its own, keeps the space under it");
   assert.match(css, /\n {2}\.cards \{ grid-template-columns: 1fr 1fr; gap: var\(--space-2\); \}/, "a phone (its 640 px block): two a row, 8 = 2 × 4");
-  assert.match(css, /\.cards > :last-child:nth-child\(odd\) \{ grid-column: 1 \/ -1; \}/, "a phone: nine's last card spans its row");
+  assert.match(css, /\.cards > :last-child:nth-child\(odd\) \{ grid-column: 1 \/ -1; \}/, "a phone: an odd last card spans its row");
   // the box's title on its top edge, as Getting started's
   assert.match(css, /\.connect \.connect-title, \.checklist \.checklist-title, \.health \.health-title, #page-users \.user-added \.added-title \{ width: fit-content;/, "the Users page's New user added on its box's edge as mason status is");
   assert.match(css, /\.health-title, #page-users \.user-added \.added-title,/, "in the same type as mason status");
@@ -6327,6 +6329,10 @@ test("a host's view is held to its shape: taken and read whole, refresh held wit
   assert.deepEqual(view.sections[1], { heading: "<img src=x onerror=alert(5)>", facts: [], text: null, links: [], dropped: 0 }, "facts, text and links may be left out");
   const refresh = (r: unknown) => hostView({ title: "t", sections: [], refresh: r }).view?.refresh;
   assert.deepEqual([refresh(1), refresh(5), refresh(29.6), refresh(3600), refresh(999_999), hostView({ title: "t", sections: [] }).view?.refresh], [5, 5, 30, 3600, 3600, null]);
+  // "nothing now" (issue 1001): no sections, and its title may be left out; one given is still held to the shape
+  assert.deepEqual(hostView({ refresh: 60, sections: [] }), { view: { title: null, sections: [], refresh: 60 } }, "an empty answer without a title");
+  assert.deepEqual(hostView({ sections: [] }), { view: { title: null, sections: [], refresh: null } }, "and without refresh");
+  assert.deepEqual(hostView({ title: "t", sections: [] }), { view: { title: "t", sections: [], refresh: null } }, "an empty answer with its title, as before");
   const many = (n: number, f: (i: number) => unknown) => Array.from({ length: n }, (_, i) => f(i));
   const section = (s: Record<string, unknown>) => ({ title: "t", sections: [{ heading: "h", ...s }] });
   const refused: Array<[unknown, string]> = [
@@ -6337,7 +6343,8 @@ test("a host's view is held to its shape: taken and read whole, refresh held wit
     [{ title: "t", sections: {} }, "its sections is not a list of at most 20"],
     [{ title: "t", sections: many(21, () => ({ heading: "h" })) }, "its sections is not a list of at most 20"],
     [{ title: "t", sections: [], html: "<b>x</b>" }, `it has a key a view does not take ("html"): a view is { title, sections, refresh? }`],
-    [{ sections: [] }, "its title is not one line of text of at most 200 characters"],
+    [{ sections: [{ heading: "h" }] }, "it has sections and no title: a view with sections has a title of one line of at most 200 characters"],
+    [{ title: null, sections: [] }, "its title is not one line of text of at most 200 characters"],
     [{ title: "a\nb", sections: [] }, "its title is not one line of text of at most 200 characters"],
     [{ title: "‮evil", sections: [] }, "its title is not one line of text of at most 200 characters"],
     [{ title: "t".repeat(201), sections: [] }, "its title is not one line of text of at most 200 characters"],
@@ -6390,7 +6397,7 @@ test("a host's view and card as the page writes them: every string TEXT (a <scri
   const failure = { code: "failed", message: "the host's view at host/card.json could not be read", why: "it answered HTTP 404" };
   assert.match(textOf(renderHostCard({ body: hostView(HOST_CARD).view, failure })), /^Plan <u> ✗ the host's view at host\/card\.json could not be read: it answered HTTP 404 Tier/);
   assert.equal(textOf(renderHostCard({ body: undefined, failure })), "The host's card unknown ✗ the host's view at host/card.json could not be read: it answered HTTP 404");
-  assert.equal(textOf(renderHostCard(undefined)), "The host's card Reading it…");
+  assert.equal(renderHostCard(undefined), "", "before its first answer: nothing, so a host with nothing to say never draws a card to take it away");
 });
 
 test("a host's danger link is drawn as the page's destructive action (issue 971): `btn small danger`, in the Remove button's colours; a plain and a primary link as before", () => {
@@ -6520,7 +6527,7 @@ test("in the browser: a host's view has its own address — opened at it, follow
   assert.ok(!plainRun.asked.some((a) => a.startsWith("GET host/")));
 });
 
-test("the host's card on the Overview (pageCard): one card beside Mason's own, read with the Overview, again at its refresh; its failure in the card; the state says it and mason status --json declares it; unset, the Overview as before", async () => {
+test("the host's card on the Overview (pageCard): one card above Mason's own, read with the Overview, again at its refresh; its failure in the card; the state says it and mason status --json declares it; unset, the Overview as before", async () => {
   let t = Date.UTC(2026, 9, 27, 9, 0, 0);
   let answer = jsonAnswer({ ...HOST_CARD, refresh: 60 });
   const run = hostRun({ ...CATALOG_STATE, pageCard: "host/card.json" }, { "host/card.json": () => answer() });
@@ -6533,9 +6540,8 @@ test("the host's card on the Overview (pageCard): one card beside Mason's own, r
   const plain = fn<[unknown], App>("createApp")(fakeRun().fetch);
   await plain.poll();
   const before = Number(/<div class="cards n(\d)">/.exec(plain.view().status!)![1]);
-  assert.equal(Number(grid![1]), before + 1, "one more card than Mason's own");
-  assert.deepEqual([before, Number(grid![1])], [8, 9], "eight of Mason's own on a run with tables added, nine with the host's (app.css lays both out)");
-  assert.match(overview, /<div class="card host-card"><p class="card-label">Plan &lt;u&gt;<\/p>.*?<\/div><\/div>/s, "the host's card, last");
+  assert.deepEqual([before, Number(grid![1])], [8, 8], "eight of Mason's own on a run with tables added, with the host's card or without it: the host's is not among them");
+  assert.match(overview, /^<div class="card host-card"><p class="card-label">Plan &lt;u&gt;<\/p>/, "the host's card, first");
   assert.ok(!overview.includes("<img src=x"));
   run.asked.length = 0; t += 30_000; await app.poll(); await app.settled();
   assert.ok(!run.asked.includes("GET host/card.json"), "30 s on: not yet");
@@ -6567,6 +6573,77 @@ test("the host's card on the Overview (pageCard): one card beside Mason's own, r
   }
 });
 
+test("the host's card is drawn first and says nothing when the host has nothing to say (issue 1001): above the box and Mason's cards; an empty answer draws no card and no title, read again at its refresh so a card that appears later is drawn; a failure still shown", async () => {
+  let t = Date.UTC(2026, 9, 27, 9, 0, 0);
+  const EMPTY = { refresh: 60, sections: [] };
+  let answer = jsonAnswer(EMPTY);
+  const run = hostRun({ ...CATALOG_STATE, pageCard: "host/card.json" }, { "host/card.json": () => answer() });
+  const app = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => new Date(t));
+  // the Overview of the same run without a host's card, at the same time: what "nothing" must equal
+  const plainOverview = async () => {
+    const p = hostRun({ ...CATALOG_STATE }, {});
+    const a = fn<[unknown, () => Date], App>("createApp")(p.fetch, () => new Date(t));
+    await a.poll(); await a.settled();
+    return a.view().status!;
+  };
+  const read = async () => { run.asked.length = 0; await app.poll(); await app.settled(); return run.asked.includes("GET host/card.json"); };
+  assert.ok(await read(), "read with the Overview");
+  let overview = app.view().status!;
+  assert.ok(!overview.includes("host-card") && !textOf(overview).includes("The host's card"), "an empty answer: no card, no title");
+  assert.equal(overview, await plainOverview(), "an empty answer: the Overview exactly as without a host's card");
+  // its refresh held: not before 60 s, then read again
+  t += 30_000;
+  assert.ok(!(await read()), "30 s on: not read yet");
+  // the host has something to say: drawn on the next read, FIRST, above the box and Mason's cards
+  answer = jsonAnswer({ ...HOST_CARD, refresh: 60 });
+  t += 30_000;
+  assert.ok(await read(), "its refresh, 60 s: read again");
+  overview = app.view().status!;
+  assert.match(overview, /^<div class="card host-card"><p class="card-label">Plan &lt;u&gt;<\/p>/, "the card, first");
+  const at = (s: string) => overview.indexOf(s);
+  assert.ok(at("host-card") < at(`<div class="health`) && at(`<div class="health`) < at(`<div class="cards n8">`), "the card, then the box, then Mason's eight cards");
+  assert.ok(!/<div class="cards n\d+">(?:(?!<\/main>).)*host-card/s.test(overview), "the card is not among Mason's cards");
+  // the host says nothing again: the card goes
+  answer = jsonAnswer(EMPTY);
+  t += 60_000;
+  assert.ok(await read());
+  assert.equal(app.view().status!, await plainOverview(), "gone again on the next read");
+  // a failure is still shown, in a card, first: an error status, bad JSON, an answer outside the shape
+  for (const [bad, why] of [[() => new Response("nope", { status: 503 }), "it answered HTTP 503"], [() => new Response("{nope", { status: 200 }), "its answer is not JSON"],
+    [jsonAnswer({ sections: [{ heading: "h" }] }), "its answer is outside a view's shape: it has sections and no title"]] as const) {
+    answer = bad;
+    t += 60_000;
+    assert.ok(await read());
+    overview = app.view().status!;
+    assert.match(overview, /^<div class="card host-card"><p class="card-label">The host&#39;s card<\/p>/, `${why}: a card, first, under the card's own name (the last answer had no title)`);
+    assert.ok(textOf(overview).includes(`✗ the host's view at host/card.json could not be read: ${why}`), why);
+    answer = jsonAnswer(EMPTY);
+    t += 60_000;
+    assert.ok(await read());
+    assert.ok(!app.view().status!.includes("host-card"), `${why}: gone once the host answers nothing again`);
+  }
+  // a read not answered in time is a failure in the same card (readHost's deadline, said by renderHostCard)
+  const renderHostCard = fn<[unknown], string>("renderHostCard");
+  const hostView = fn<[unknown], { view: unknown }>("hostView");
+  const late = { code: "failed", message: "the host's view at host/card.json could not be read", why: "it was not answered whole within 10 s" };
+  assert.equal(textOf(renderHostCard({ body: hostView(EMPTY).view, failure: late })), "The host's card ✗ the host's view at host/card.json could not be read: it was not answered whole within 10 s");
+  assert.equal(textOf(renderHostCard({ body: undefined, failure: late })), "The host's card unknown ✗ the host's view at host/card.json could not be read: it was not answered whole within 10 s");
+  assert.equal(renderHostCard({ body: hostView({ title: "Notices", sections: [] }).view, failure: null }), "", "an empty answer with a title: nothing either");
+  // while getting started too, the card is the first thing on the Overview
+  const start = hostRun({ ...NONE, pageCard: "host/card.json" }, { "host/card.json": jsonAnswer(HOST_CARD) });
+  const s = fn<[unknown, () => Date], App>("createApp")(start.fetch, () => new Date(t));
+  await s.poll(); await s.settled();
+  assert.match(s.view().status!, /^<div class="card host-card"><p class="card-label">Plan &lt;u&gt;<\/p>/, "getting started: the card first");
+  assert.ok(s.view().status!.includes("checklist"), "over the checklist");
+});
+
+test("a host's view that says nothing (sections: [], no title) keeps its place: headed by its sidebar label, it says it has nothing in it (issue 1001)", async () => {
+  const run = hostRun({ ...CATALOG_STATE, pageNav: HOST_NAV }, { "host/status.json": jsonAnswer({ sections: [] }) });
+  const app = fn<[unknown, () => Date, string], App>("createApp")(run.fetch, () => new Date(Date.UTC(2026, 9, 27, 9, 0, 0)), "#host/2");
+  await app.poll(); await app.settled();
+  assert.equal(app.view()["host-h"], "Server", "its sidebar label, the answer having no title");
+  assert.equal(textOf(app.view()["host-view"]!), "The host's view has nothing in it.");
+});
 
 /** A host that never sends its headers: the fetch never settles (and does not heed an abort). */
 const NEVER = (() => new Promise<Response>(() => undefined)) as unknown as () => Response;
@@ -6632,7 +6709,8 @@ test("a host's card that never answers holds up nothing: the Overview is written
   await within(app.poll(), "the Overview's first poll");
   const overview = app.view().status!;
   assert.ok(!textOf(overview).startsWith("Asking Mason"), "the Overview is written");
-  assert.match(overview, /<div class="card host-card"><p class="card-label">The host's card<\/p><p class="dim">Reading it…<\/p><\/div>/);
+  assert.ok(!overview.includes("host-card"), "no card while it is read: a host with nothing to say draws none, and its failure is said at the deadline");
+  assert.match(overview, /<div class="cards n8">/, "Mason's own cards, written");
   run.asked.length = 0; t += 2000;
   await within(app.poll(), "the next poll");
   assert.deepEqual(run.asked, ["GET api/state"], "the state at its rate; the card, in flight, not asked again");
@@ -6648,5 +6726,5 @@ test("a host's card that never answers holds up nothing: the Overview is written
   await until(() => walk.asked.includes("GET api/requests?since=15m"), "Queries read");
   walk.asked.length = 0;
   b.go("#overview");
-  await until(() => walk.asked.includes("GET api/queries") && /Reading it…/.test(b.el("status").html), "the Overview read and written, its card being read");
+  await until(() => walk.asked.includes("GET api/queries") && /<div class="cards n/.test(b.el("status").html), "the Overview read and written, its card being read");
 });
