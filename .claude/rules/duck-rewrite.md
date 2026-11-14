@@ -103,14 +103,26 @@ paths:
     Postgres over 12 M rows): e·10^(c's scale) floored in a DECIMAL, divided in HUGEINT, and every reader of the value
     computed per group from its program. Postgres floors the quotient ROUNDED to `select_div_scale`'s rscale, so the
     bin is the engine's only where no quotient that is not whole can round to one (2·|c|·10^S < 10^rscale, rscale at
-    least 16 − 4·the quotient's largest base-10000 weight), only where e is + and − of columns of a bounded type
-    (numeric(p ≤ 38, s), the integers) and constants, whose magnitude and display scale are read from the types, c is
+    least 16 − 4·the quotient's largest base-10000 weight), only where e is an expression Postgres types as an integer
+    (Metabase's US week, `ceil(CAST(extract(doy FROM x) AS integer) / 7.0)`: keyed a row, ×5 of Postgres over 12 M rows)
+    or + and − of columns of a bounded type (numeric(p ≤ 38, s), the integers) and constants, whose magnitude and
+    display scale are read from the types, c is
     at most 18 places, and e·10^(c's scale) and the bin fit 38 places. A bigint by 12.5 is not (1000000000000000012 /
     12.5 floors to …01), nor a numeric of no typmod: the program's key, as before. **The bin is the KEY only**, never a
     value `duckExact` calls exact (the review of PR 922): read as the engine's DECIMAL(38, 0) beside another DECIMAL in a
     UNION, an IN, a CASE or a comparison it was cast to a type that rounds the other's decimals, and a product of it
     passed 38 places where Postgres answers. `tests/duck-wire.test.ts` "issues 464, 465", the plan fixture's BINS, the
     oracle's `bin:` statements over `bins`;
+  - **a to_char of a time in a format DuckDB's strftime writes as Postgres does is `strftime`** (`strftimeTemplate`,
+    src/duck/to-char.ts; `toChar`, issue 464: the function a row, a grouped month was ×8–18 of Postgres over 4.5 M
+    rows): the template read as the function reads it, and taken only when every pattern is one strftime writes alike
+    (YYYY MM DD DDD IYYY IW Mon Dy FMMonth FMDay HH24 MI SS MS US, a date's without the time of day) and the format is
+    a constant; anything else (Q, a padded name, FM on a number, TH, TM, another case, a parameter, a template that
+    writes nothing, which DuckDB refuses as it binds, and a volatile value, which the guard would read twice) is the function's.
+    The value is read in the session's zone by DuckDB's calendar, as the function's text of it was, and only for a
+    year 1 to 9999 AD in any zone (a CASE: NULL is NULL, ±infinity, BC and a year past 9999 the function's).
+    `tests/duck-functions.test.ts` holds each taken template to the function, `tests/duck-wire.test.ts` "issue 464"
+    the wire in three zones, the plan fixture's `issue 464` and the oracle's `issue 464: to_char` statements;
   - **a count(DISTINCT x) of a key is count(x)** (`src/duck/distinct-key.ts`): x alone its table's PRIMARY KEY in
     the CATALOG's pg_index (the key the copy is written by; never a sources file's `key:`, and NEVER another UNIQUE
     index — the copy may hold its value twice for a moment, and the catalog's indexes are the source's as of the start

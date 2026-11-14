@@ -4252,6 +4252,126 @@ binReview("a bin by a divisor of 39 places is Postgres's", [
   "SELECT id, floor(a / 200000000000000000000000000000000000000) AS f, ceil(a / 200000000000000000000000000000000000000) AS c FROM bins ORDER BY id",
   "SELECT floor(a / 170141183460469231731687303715884105720) AS v, count(*) FROM bins GROUP BY 1 ORDER BY 1"]);
 
+// issue 464: to_char of a time in a format DuckDB's strftime writes as Postgres does is DuckDB's own strftime, never the
+// function a row (a grouped month was x8-18 of Postgres over 4.5 M rows), and Postgres's text in every zone: a NULL, a
+// microsecond, before 1970, a zone's local mean time, each side of a clock change; ±infinity and every other format
+// stay the function's (src/duck/to-char.ts `strftimeTemplate`, src/duck/rewrite.ts `toChar`)
+test("issue 464: to_char of a time in a format strftime writes is the engine's own, Postgres's text in every zone and type", async () => {
+  const c = await client();
+  const called = async (): Promise<number> => (await store.functionRows()).get("__mason_to_char_time") ?? 0;
+  const native = ["YYYY-MM", "YYYY-MM-DD", "Mon YYYY", "FMMonth YYYY", "Dy DD Mon", "FMDay, DDD", "YYYY-MM-DD HH24:MI:SS", 'YYYY-MM-DD"T"HH24:MI:SS.US', "HH24:MI:SS.MS",
+    "IYYY-IW", "YYYYMMDD", 'YYYY "100%" MM', "FMMon/FMDy"];
+  // a pattern strftime does not write as Postgres does: a quarter, a padded name, FM on a number, an ordinal, another
+  // case, a translated name
+  const kept = ['YYYY-"Q"Q', "Month YYYY", "FMDD", "DDth", "yyyy-mm", "MON YYYY", "TMMonth", "Day", "HH12:MI AM", "WW",
+    // a template that writes nothing, or nothing but its prefix (the review of PR 955: an empty strftime format is
+    // DuckDB's bind error), the empty one (NULL), and one prefix an item (`FMFM` writes `FM`)
+    "FM", '""', "", "FMFM", "FMTMMonth", "fmFMDD", "FXFMDD", "FMFXDD"];
+  try {
+    for (const zone of ["UTC", "America/New_York", "Asia/Kolkata"]) {
+      await c.query(`SET TimeZone = '${zone}'`);
+      await truth.exec(`SET TimeZone = '${zone}'`);
+      try {
+        for (const fmt of [...native, ...kept]) {
+          const time = /HH|MI|SS|MS|US/.test(fmt);
+          for (const [sql, finite] of [[`SELECT id, to_char("at", '${fmt}') AS v FROM instants ORDER BY id`, false], [`SELECT id, to_char(ts, '${fmt}') AS v FROM nullish ORDER BY id`, true],
+            [`SELECT id, to_char(d, '${fmt}') AS v FROM ratios ORDER BY id`, !time]] as const) {
+            const before = await called();
+            assert.deepEqual(await answer(c, sql), await postgres(sql), `${sql} in ${zone}`);
+            const rows = await called() - before;
+            // the instants' ±infinity rows are the function's alone
+            if (native.includes(fmt)) assert.ok(rows <= (finite ? 0 : 2), `${sql} in ${zone}: ${rows} rows handed to the function`);
+            else assert.ok(rows > 0, `${sql} in ${zone}: answered without the function where strftime is not proven`);
+          }
+        }
+        // grouped, ordered by it, through a derived table, in a CASE and a UNION arm, as a tool writes them
+        for (const sql of ["SELECT to_char(o.created_at, 'YYYY-MM') AS m, count(*) FROM orders o GROUP BY 1 ORDER BY 1",
+          "SELECT to_char(created_at, 'Mon YYYY') AS m, sum(amount) FROM orders GROUP BY to_char(created_at, 'Mon YYYY') ORDER BY to_char(created_at, 'Mon YYYY') DESC",
+          "SELECT s.m, count(*) FROM (SELECT to_char(\"at\", 'YYYY-MM-DD') AS m FROM instants) s GROUP BY s.m ORDER BY s.m NULLS FIRST",
+          "SELECT id, CASE WHEN id > 1 THEN to_char(created_at, 'YYYY') ELSE 'x' END FROM orders ORDER BY id",
+          "SELECT to_char(created_at, 'YYYY-MM') FROM orders UNION ALL SELECT to_char(ts, 'YYYY-MM') FROM nullish ORDER BY 1 NULLS FIRST"]) {
+          const before = await called();
+          assert.deepEqual(await answer(c, sql), await postgres(sql), `${sql} in ${zone}`);
+          if (!/instants/.test(sql)) assert.equal(await called() - before, 0, `${sql} in ${zone}: rows handed to the function`);
+        }
+      } finally { await truth.exec("SET TimeZone = 'UTC'"); }
+    }
+    // a volatile value is read once, by the function: the guard and strftime would read it twice (the review of PR 955)
+    await c.query("SET TimeZone = 'UTC'");
+    for (const sql of ["SELECT id, to_char(created_at + (random() * 0) * interval '1 day', 'YYYY-MM-DD') AS v FROM orders ORDER BY id",
+      "SELECT to_char(o.created_at - (random() * 0) * interval '1 hour', 'YYYY-MM') AS m, count(*) FROM orders o GROUP BY 1 ORDER BY 1"]) {
+      const before = await called();
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      assert.ok(await called() - before > 0, `${sql}: a volatile value read by the guard and strftime apart`);
+    }
+    // a format bound as a parameter is read where it runs: the function's, as before
+    const sql = "SELECT id, to_char(created_at, $1) FROM orders ORDER BY id";
+    assert.deepEqual(await answer(c, sql, ["YYYY-MM"]), await postgres(sql, ["YYYY-MM"]));
+  } finally { await c.query("SET TimeZone = 'UTC'"); await c.end(); }
+});
+
+// issue 464: Metabase's US week of year, `ceil(CAST(extract(doy FROM x) AS integer) / 7.0)`, is a numeric bin of an
+// integer-typed expression, grouped by the engine's integer (src/duck/rewrite.ts `binMagnitude`), never the program's
+// key a row (28 s against Postgres's 5.4 s over 12 M rows): every answer Postgres's, across a year's end, a leap day,
+// ±infinity, NULL, in a zone of daylight saving
+test("issue 464: Metabase's US week of year is grouped by the engine's integer, Postgres's answer in every form", async () => {
+  const c = await client();
+  const keyed = async (): Promise<number> => (await store.functionRows()).get("__mason_numeric_program_key") ?? 0;
+  const week = (x: string): string => `ceil((CAST(extract(doy from ${x}) AS integer) / 7.0))`;
+  try {
+    for (const zone of ["UTC", "America/New_York"]) {
+      await c.query(`SET TimeZone = '${zone}'`);
+      await truth.exec(`SET TimeZone = '${zone}'`);
+      try {
+        for (const sql of [
+          `SELECT ${week('"public"."instants"."at"')} AS "at", COUNT(*) AS "count" FROM "public"."instants" GROUP BY ${week('"public"."instants"."at"')} ORDER BY ${week('"public"."instants"."at"')} ASC`,
+          `SELECT ${week("ts")} AS w, count(*) FROM nullish GROUP BY 1 ORDER BY 1 NULLS FIRST`,
+          `SELECT ${week("d")} AS w, count(*) FROM ratios GROUP BY w ORDER BY w DESC NULLS LAST`,
+          `SELECT ${week("created_at")} AS w, ${week("created_at")}::text AS t, count(*) FROM orders GROUP BY 1 HAVING ${week("created_at")} > 0 ORDER BY 1`,
+          `SELECT floor(CAST(extract(dow from "at") AS integer) / 2.0) * 2.0 AS w, count(*) FROM instants GROUP BY 1 ORDER BY 1 NULLS FIRST`,
+          `SELECT ceil((CAST(extract(year from ts) AS integer) - 2000) / 7.0) AS w, count(*) FROM nullish GROUP BY 1 ORDER BY 1 NULLS FIRST`,
+          `SELECT ceil(length(status) / 3.0) AS w, count(*) FROM orders GROUP BY 1 ORDER BY 1`]) {
+          const before = await keyed();
+          assert.deepEqual(await answer(c, sql), await postgres(sql), `${sql} in ${zone}`);
+          assert.equal(await keyed() - before, 0, `${sql} in ${zone}: grouped by the program's key a row, not the engine's integer`);
+        }
+      } finally { await truth.exec("SET TimeZone = 'UTC'"); }
+    }
+  } finally { await c.query("SET TimeZone = 'UTC'"); await c.end(); }
+});
+
+// issue 464: a timestamptz's text in a session of UTC (or an alias of it) is written from its microseconds, never through
+// Intl's calendar (~13 us a value, most of a 300,000-row DISTINCT ON's time), and is Postgres's text: a microsecond, a
+// fraction's trailing zeros, before 1970, year 1, year 9999, past it
+test("issue 464: a timestamptz in a session of UTC is written without Intl's calendar, as Postgres writes it", async () => {
+  const values = ["2026-01-02 03:04:05+00", "2026-07-01 12:34:56.123456+00", "2026-07-01 12:34:56.5+00", "2026-07-01 12:34:56.000001+00", "1969-12-31 23:59:59.5+00",
+    "1880-06-15 12:00:30+00", "0001-01-01 00:00:00+00", "9999-12-31 23:59:59.999999+00", "10000-01-01 00:00:00+00", "2024-02-29 00:00:00+00"];
+  const r = await store.writer.runAndReadAll(`SELECT ${values.map((v, i) => `TIMESTAMPTZ '${v}' AS c${i}`).join(", ")}`);
+  const row = r.getRows()[0]!;
+  const proto = Intl.DateTimeFormat.prototype;
+  const original = proto.formatToParts;
+  let calls = 0;
+  proto.formatToParts = function (this: Intl.DateTimeFormat, d?: Date | number): Intl.DateTimeFormatPart[] { calls++; return original.call(this, d); };
+  try {
+    for (const zone of ["UTC", "Etc/UTC", "utc"]) {
+      for (let i = 0; i < values.length; i++) {
+        const want = (await truth.query<{ t: string }>(`SELECT (timestamptz '${values[i]}')::text AS t`)).rows[0]!.t;
+        const before = calls;
+        assert.equal(wireColumn(`c${i}`, r.columnType(i)).encode(row[i]!, 0, { timeZone: zone })!.toString("utf8"), want, `${values[i]} in ${zone}`);
+        if (!values[i]!.startsWith("10000")) assert.equal(calls - before, 0, `${values[i]} in ${zone}: written through Intl's calendar`);
+      }
+    }
+    // another zone is the calendar's, as before
+    const before = calls;
+    await truth.exec("SET TimeZone = 'America/New_York'");
+    try {
+      const want = (await truth.query<{ t: string }>(`SELECT (timestamptz '${values[1]}')::text AS t`)).rows[0]!.t;
+      assert.equal(wireColumn("c1", r.columnType(1)).encode(row[1]!, 0, { timeZone: "America/New_York" })!.toString("utf8"), want);
+    } finally { await truth.exec("SET TimeZone = 'UTC'"); }
+    assert.ok(calls > before, "a zone with an offset written without its calendar");
+  } finally { proto.formatToParts = original; }
+});
+
 /** an answer's rows in one order: quotients equal to a double's 17 digits are in no defined order on Mason (the listed
  *  difference numeric-quotient-compare), so a test of their equality reads the rows as a set */
 const rowSet = (a: { fields: Array<[string, number | string]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => JSON.stringify(r)).sort() });

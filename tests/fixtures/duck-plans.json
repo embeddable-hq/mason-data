@@ -1413,6 +1413,30 @@
       "full_sort": false
     },
     {
+      "name": "issue 665: a quotient grouped that is no engine's bin: the day of an epoch",
+      "sql": "SELECT floor(extract(epoch FROM o.created_at) / 86400.0) AS d, count(*) FROM orders o GROUP BY 1 ORDER BY 1",
+      "plan": [
+        "ORDER_BY",
+        "  PROJECTION calls __mason_numeric_order, __mason_numeric_program, __mason_turn",
+        "    PROJECTION",
+        "      HASH_GROUP_BY",
+        "        PROJECTION calls __mason_numeric_program_key, __mason_turn",
+        "          PROJECTION",
+        "            TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_numeric_div",
+        "__mason_numeric_order",
+        "__mason_numeric_program",
+        "__mason_numeric_program_key"
+      ],
+      "sends": [
+        "epoch_us"
+      ],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
       "name": "count distinct key: count(DISTINCT id) over the table alone",
       "sql": "SELECT count(DISTINCT o.id) FROM orders o",
       "plan": [
@@ -1793,16 +1817,15 @@
         "  ORDER_BY",
         "    PROJECTION",
         "      PROJECTION",
-        "        PROJECTION calls __mason_turn",
+        "        PROJECTION",
         "          PROJECTION",
-        "            PROJECTION",
-        "              ORDER_BY",
+        "            ORDER_BY",
+        "              PROJECTION",
         "                PROJECTION",
-        "                  PROJECTION",
-        "                    HASH_JOIN",
-        "                      TABLE_SCAN public.orders",
-        "                      TOP_N (1 key)",
-        "                        TABLE_SCAN public.orders [top-N filter: id]"
+        "                  HASH_JOIN",
+        "                    TABLE_SCAN public.orders",
+        "                    TOP_N (1 key)",
+        "                      TABLE_SCAN public.orders [top-N filter: id]"
       ],
       "calls": [
         "__mason_to_char_number",
@@ -2523,15 +2546,30 @@
         "    PROJECTION calls __mason_turn",
         "      PROJECTION",
         "        HASH_GROUP_BY",
-        "          PROJECTION calls __mason_numeric_program_key, __mason_turn",
+        "          PROJECTION",
         "            PROJECTION",
         "              TABLE_SCAN public.orders"
       ],
       "calls": [
         "__mason_numeric_div",
         "__mason_numeric_order",
-        "__mason_numeric_program",
-        "__mason_numeric_program_key"
+        "__mason_numeric_program"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
+      "name": "BI shape: issue 464: to_char of a month grouped",
+      "sql": "SELECT to_char(o.created_at, 'YYYY-MM') AS m, count(*) FROM orders o GROUP BY 1 ORDER BY 1",
+      "plan": [
+        "ORDER_BY",
+        "  HASH_GROUP_BY",
+        "    PROJECTION",
+        "      TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_to_char_time"
       ],
       "sends": [],
       "delim_join": false,
