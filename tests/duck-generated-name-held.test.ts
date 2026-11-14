@@ -74,6 +74,41 @@ test("a synced table added over a built generated table and removed before the n
   });
 });
 
+test("a base change while a run is in flight and the sync drops the name under it: marked for the next run, never current while stale (issue 996)", async () => {
+  let gate: Promise<void> | null = null, open: () => void = () => undefined, blocked = false;
+  await withWorld({ counts: COUNTS }, async (w) => {
+    await w.until(served(w.logged));
+    const events = inner(w).tables.get("public.events")!;
+    gate = new Promise<void>((r) => { open = r; });
+    await w.store.writer.run("INSERT INTO public.events VALUES (10, 3, 'query', 'ok', '10', '2026-01-03 00:00:00+00', NULL, 1.00, NULL)");
+    w.sync.generated.changed("public.events");
+    for (const end = Date.now() + BUILD_BOUND_MS; !blocked && Date.now() < end;) { await w.sync.generated.review(); await new Promise((r) => setTimeout(r, 50)); }
+    assert.ok(blocked, "the run reached its snapshot");
+    // while it is held there: `mason add counts`, then `mason remove counts`, and a base commit after its snapshot
+    await addCounts(w, events);
+    await removeCounts(w, events);
+    await w.store.writer.run("INSERT INTO public.events VALUES (11, 4, 'query', 'ok', '11', '2026-01-04 00:00:00+00', NULL, 1.00, NULL)");
+    w.sync.generated.changed("public.events");
+    const from = w.logged.length;
+    gate = null; open();
+    await w.until(served(w.logged, from));
+    // the commit after the snapshot is not in that run: marked, so the next run brings it
+    await w.until((s) => s.state === "current" && (s.lastRun?.rows ?? 0) === 4);
+    assert.deepEqual(await ask(w, "SELECT tenant_id, requests FROM counts ORDER BY tenant_id"), [[1, "2"], [2, "2"], [3, "1"], [4, "1"]]);
+  }, { onStep: async (s, n) => { if (s === "snapshot" && n === "public.counts" && gate !== null) { blocked = true; await gate; } } });
+});
+
+test("a generated table whose name differs from a view of the database only in case is served beside it: a view is no table in the synced data (issue 996)", async () => {
+  await withWorld({ Report: COUNTS }, async (w) => {
+    w.sync.setViews([{ schema: "public", name: "report", definition: "SELECT id, tenant_id FROM public.events WHERE id < 3", comment: null }]);
+    await inner(w).rebuildSchema();
+    await w.until(served(w.logged), "public.Report");
+    await inner(w).rebuildSchema();
+    assert.deepEqual(await ask(w, `SELECT tenant_id, requests FROM "Report" ORDER BY tenant_id`), [[1, "2"], [2, "2"]]);
+    assert.deepEqual(await ask(w, "SELECT id, tenant_id FROM report ORDER BY id"), [["1", 1], ["2", 1]]);
+  });
+});
+
 test("a ledger row whose table is gone, as an earlier Mason left a removed synced table's name: the start lets it go and builds the generated table again (issue 996)", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-generated-gone-"));
   try {

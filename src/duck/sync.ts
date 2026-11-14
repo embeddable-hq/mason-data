@@ -1310,11 +1310,12 @@ export class Sync {
    */
   private addedAs(name: string): "copied" | "adding" | "view" | null {
     // ONE TABLE BY THE ENGINE'S RULE (src/lib/relation-key.ts, issue 996): a synced `public.gdup` holds `public.Gdup`'s
-    // name too, since the synced data stores them as one table
+    // name too, since the synced data stores them as one table. A view of the database is no table there
+    // (`expandViews`), and the catalog keeps `"Report"` and `report` apart, so a view holds its own spelling alone
     const key = relationKey(name);
     const t = this.tables.get(name) ?? [...this.tables.values()].find((x) => relationKey(x.source) === key);
     if (t !== undefined) return this.states.get(t.source)?.phase === "copied" && this.currentSchema.tables.some((x) => x.schema === t.schema && x.name === t.table) ? "copied" : "adding";
-    return this.views.some((v) => relationKey(`${v.schema ?? "public"}.${v.name}`) === key) ? "view" : null;
+    return this.views.some((v) => `${v.schema ?? "public"}.${v.name}` === name) ? "view" : null;
   }
 
   /** the rebuilds' connection: open from `open` until `stop` */
