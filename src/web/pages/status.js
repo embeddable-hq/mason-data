@@ -286,8 +286,7 @@ export const copyingCount = (s) => s.tables.filter((t) => t.added && tableLine(t
  * `/api/events?failed=1&since=24h`'s body, or `{ failure }`) and the statements refused or failed (`q`'s `day`). A count
  * that could not be read is "unknown" with its reason, never 0; one not read yet is not shown. Each card's sparkline is the last 24 hours (`usage`), only where there
  * are two hours to draw; its numbers are the card's text either way. These facts are said here, and not in the facts table.
- * With the host's card (`/api/state` `pageCard`, mason serve's MASON_UI_OVERVIEW_CARD; `o.hostCard` its read), it is one
- * more card, last (src/web/host-view.js `renderHostCard`); without it, nothing changes.
+ * The host's card is not among them: `renderStatus` draws it first, above everything (issue 1001).
  */
 export function renderKpis(s, o = {}) {
   const now = o.now ?? Date.now();
@@ -336,7 +335,6 @@ export function renderKpis(s, o = {}) {
       list.push(card("Query errors, last day", n(day.failed), `${n(day.refused)} refused`, "", day.failed ? "warn" : "", LINKS.failedQueries));
     }
   }
-  if (typeof s.pageCard === "string") list.push(renderHostCard(o.hostCard));
   return cards(list);
 }
 
@@ -511,13 +509,17 @@ const readOnlyWhat = (tables, users) => tables && users ? null : tables ? "No us
  * WHILE GETTING STARTED IS NOT DONE, the word's box and the checklist alone (the owner, 2026-11-13); the cards and the
  * rest once its three steps are done. The word's box is always shown (the owner, 2026-11-13, later that day), so the
  * state of the synced data is never hidden behind "Sync a table ○".
+ * THE HOST'S CARD (`/api/state` `pageCard`, mason serve's MASON_UI_OVERVIEW_CARD; `o.hostCard` its read) is drawn FIRST,
+ * above everything, at the full width, while getting started too (issue 1001: it is for what needs the person's
+ * attention, a maintenance notice or a disk warning). Before its first answer, and while the host says nothing
+ * (`sections: []`), nothing is drawn (src/web/host-view.js `renderHostCard`). Without it, nothing changes.
  */
 export function renderStatus(s, o = {}) {
   const now = o.now ?? Date.now();
   const added = s.tables.some((t) => t.added);
   // a read-only page (MASON_UI_READ_ONLY=1): why it offers no user and no table to add, as Tables and Users say it
   const what = readOnlyWhat(tablesReadOnly(s) === null, usersReadOnly(s) === null);
-  const lead = what === null ? "" : readOnlyLine(what, s.pageReadOnly);
+  const lead = (typeof s.pageCard === "string" ? renderHostCard(o.hostCard) : "") + (what === null ? "" : readOnlyLine(what, s.pageReadOnly));
   const checklist = renderChecklist(s);
   if (checklist !== "") return lead + renderHealth(s, o.stale ?? null) + checklist;
   return lead + renderHealth(s, o.stale ?? null) + renderKpis(s, { ...o, now }) +
