@@ -3340,8 +3340,7 @@ class Rewriter {
     if (b.subLinkType !== "EXPR_SUBLINK" || !isNode(b.subselect)) return null;
     const target = scalarTarget(n);
     if (target !== null) {
-      // (a value the engine holds exactly whose text is its own: a plain numeric at its row's scale, issue 946)
-      if (this.duckExact(target) && !this.approximateValue(target)) return null;
+      if (this.duckExact(target)) return null;
       const text = this.exactText(target);
       if (text === null) return null;
       const sub = this.clone(b);

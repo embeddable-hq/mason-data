@@ -39,7 +39,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `t.decimal`. Mason printed every value with the most decimals any value in the column had, so `12.5` read `12.50` and
   `0` read `0.00`. Now a plain `SELECT`, `::text`, arithmetic, `sum`, `min`, `max`, windows, subqueries and the binary
   wire all give your database's text. A few readers still print the old way: `to_json` and its kin, `concat`,
-  `format`, `||`, `array_agg`, a row's text, and a `UNION` without `ALL`. A fix for those is planned.
+  `format`, `||`, `array_agg`, a row's text, a scalar subquery, and a `UNION` without `ALL`. A fix for those is planned.
   - **Before upgrading:** each synced table with such a column is synced again once, at the first start. It serves
     its old data until then. A large table takes as long as its first sync did.
 - **A table's columns dialog on the web page now names the choice its row names.** On the Tables page, a table that

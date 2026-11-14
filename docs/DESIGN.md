@@ -451,7 +451,7 @@ under another transaction's write fails its commit, hence swaps on the writer's 
   are native; only a reader that prints reads the scale: the column's program is `rescale(value, scale)`, which the wire
   evaluates on the text (0.06 µs a value; 1.4 µs through BigInt), and `x::text` is the engine's text cut natively. A copy
   an older Mason made without the column is read again once (`SCALE_LAYOUT`), serving as it was until then. Not yet:
-  to_json and its kin, concat, format, `||`, array_agg, a row's text and a set operation without ALL keep the column's
+  to_json and its kin, concat, format, `||`, array_agg, a row's text, a scalar subquery and a set operation without ALL keep the column's
   one scale (`mixed-scale-numeric`); a generated table stores the engine's DECIMAL, as before. Measured on 4 M rows of
   0–2 decimals: the hidden column is 1.5 MiB beside the value's 12.5 MiB, and the copy's time is unchanged within noise.
 - **A failed copy backs off** (`copyRetryDelayMs`: four times the attempt, at least 5 minutes, doubled per failure, at
