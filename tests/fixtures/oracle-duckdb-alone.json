@@ -7,10 +7,10 @@
     "differs": 0
   },
   "duckdb": {
-    "exact": 1959,
+    "exact": 1960,
     "name": 1401,
     "refused": 1661,
-    "value": 1086,
+    "value": 1085,
     "rows": 623,
     "text": 83,
     "other": 650
@@ -123,6 +123,7 @@
         "latest-quotient": { "planted": 3, "natural": 0 },
         "like-any-array": { "planted": 3, "natural": 0 },
         "multidim-array": { "planted": 0, "natural": 17 },
+        "numeric-array-parameter": { "planted": 0, "natural": 1 },
         "numeric-double-integer": { "planted": 3, "natural": 0 },
         "numeric-exact-sum": { "planted": 3, "natural": 43 },
         "numeric-math": { "planted": 3, "natural": 0 },
