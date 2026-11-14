@@ -74,14 +74,24 @@ export function readParseLog(detail: Uint8Array, written: ReadonlySet<string> = 
   // is told by the statement: a reading is kept only if each name it holds with a line break is one the statement writes
   const plausible = trees.filter((t) => namesWithLineBreak(t).every((n) => written.has(n)));
   if (plausible.length === 1) return plausible[0]!;
-  throw new UnreadableNames();
+  throw new UnreadableNames([...new Set(trees.flatMap(relationsOf))]);
 }
 
 /** a parse tree's log that more than one tree could have been wrapped into, or too many ways to read: a name with a line
  *  break beside a space that the names given do not tell, more than 64 readings, or more than eight breaks inside
  *  tokens that single readings do not settle (Mason gap `name-unreadable`) */
 export class UnreadableNames extends Error {
-  constructor() { super("the catalog Postgres's parse tree holds a name that Mason cannot read back"); }
+  /** the relations (pg_class OIDs) the readings read, whose columns' names may tell them apart */
+  readonly relations: number[];
+  constructor(relations: number[] = []) { super("the catalog Postgres's parse tree holds a name that Mason cannot read back"); this.relations = relations; }
+}
+
+/** every relation a tree reads (a RANGETBLENTRY's relid) */
+function relationsOf(v: TreeValue): number[] {
+  if (v === null || typeof v === "string") return [];
+  if (Array.isArray(v)) return v.flatMap(relationsOf);
+  const own = v._node === "RANGETBLENTRY" && typeof v.relid === "string" && /^[1-9]\d*$/.test(v.relid) ? [Number(v.relid)] : [];
+  return [...own, ...Object.entries(v).flatMap(([k, x]) => k === "_node" ? [] : relationsOf(x))];
 }
 
 /** the most breaks inside a token whose every combination one reading of a log is parsed with (each doubles the
@@ -123,7 +133,9 @@ export function unwrapNodeDump(wrapped: Uint8Array): Array<{ text: Uint8Array; s
   type Choice = { e: number; kind: "space" | "either" | "end" };
   type Frame = { at: number; sLen: number; lines: number; checked: number; spaces: number; choices: Choice[]; next: number };
   const spaces: number[] = [];
-  const escaped = (e: number): boolean => { let n = 0; for (let k = e - 1; k >= 0 && o[k] === BACKSLASH; k--) n++; return n % 2 === 1; };
+  /** whether the text read so far escapes its byte at `e` (an odd run of backslashes before it), as outToken escapes
+   *  every line break of a name: one that is not is never the text's own */
+  const escapedInText = (e: number): boolean => { let n = 0; for (let k = e - 1; k >= 0 && s[k] === BACKSLASH; k--) n++; return n % 2 === 1; };
   /** the lines whose 79 bytes are known, held to Postgres's rule; false where one breaks elsewhere */
   const holds = (from: number, sLen: number, complete: boolean): { ok: boolean; checked: number } => {
     let i = from;
@@ -141,8 +153,6 @@ export function unwrapNodeDump(wrapped: Uint8Array): Array<{ text: Uint8Array; s
       if (e === o.length - 1) { out.push({ e, kind: "end" }); break; }
       const inside = e - at === LINE && o[e + 1] !== SPACE && !o.subarray(at + 1, e).includes(SPACE);
       out.push({ e, kind: inside ? "either" : "space" });
-      // a line break that is not escaped is never a name's own, so it is this line's end
-      if (!escaped(e)) break;
     }
     return out;
   };
@@ -164,6 +174,10 @@ export function unwrapNodeDump(wrapped: Uint8Array): Array<{ text: Uint8Array; s
     if (c.kind === "space") s[sLen++] = SPACE;
     if (c.kind === "either") spaces.push(sLen);
     starts.push(start); lengths.push(length); nexts.push(c.kind === "end" ? -1 : sLen);
+    // every line break this reading keeps as the text's own (the line's first byte included) is escaped in the text
+    let own = true;
+    for (let k = start; k < start + length && own; k++) if (s[k] === LF && !escapedInText(k)) own = false;
+    if (!own) continue;
     const complete = c.kind === "end";
     const held = holds(f.checked, sLen, complete);
     if (!held.ok) continue;

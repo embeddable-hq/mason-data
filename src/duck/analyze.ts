@@ -81,8 +81,10 @@ export async function analyze(run: (bytes: Uint8Array) => Promise<Uint8Array>, s
   catch (e) {
     if (!(e instanceof UnreadableNames)) throw e;
     // a name with a line break the statement does not write is a column's (every relation lists all its columns'
-    // names): the catalog's columns so named tell it too
-    const columns = await catalogRows(run, "SELECT attname::text FROM pg_catalog.pg_attribute WHERE attnum > 0 AND NOT attisdropped AND strpos(attname::text, chr(10)) > 0");
+    // names): the columns so named of the relations the statement reads tell it too
+    const relations = e.relations.filter((r) => Number.isSafeInteger(r) && r > 0);
+    const columns = relations.length === 0 ? [] : await catalogRows(run, "SELECT attname::text FROM pg_catalog.pg_attribute WHERE attnum > 0 AND NOT attisdropped " +
+      `AND strpos(attname::text, chr(10)) > 0 AND attrelid IN (${relations.join(", ")})`);
     try { tree = readParseLog(detail, new Set([...written, ...columns.flatMap(([n]) => typeof n === "string" ? [n] : [])])); }
     catch (again) {
       if (!(again instanceof UnreadableNames)) throw again;

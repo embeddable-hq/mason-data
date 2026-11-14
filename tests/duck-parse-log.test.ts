@@ -5,7 +5,7 @@
  * catalog Postgres itself), and over random trees wrapped by a port of Postgres's own rule. A name with a line break
  * the log cannot tell apart is refused by name (Mason gap name-unreadable).
  */
-import { test, after } from "node:test";
+import { test, after, before } from "node:test";
 import assert from "node:assert/strict";
 import { PGlite } from "@electric-sql/pglite";
 import * as analyzeModule from "../src/duck/analyze.ts";
@@ -18,6 +18,7 @@ const { analyze } = analyzeModule;
 const writtenNames = (analyzeModule as { writtenNames?: (raw: unknown) => Set<string> }).writtenNames ?? ((): Set<string> => new Set());
 const pglite = new PGlite();
 const catalog = (b: Uint8Array): Promise<Uint8Array> => pglite.execProtocolRaw(b);
+before(async () => { await pglite.exec("CREATE TABLE t (id int PRIMARY KEY, j jsonb, x numeric(12,2))"); });
 after(async () => { await pglite.close(); await stopParser(); });
 
 /** every TARGETENTRY's resname of the tree, in the order met */
@@ -47,7 +48,6 @@ async function parseLog(sql: string): Promise<string> {
 }
 
 test("issue 956: every name in the analysed tree is read exactly, with a line break of the log on each of its spaces", async () => {
-  await pglite.exec("CREATE TABLE t (id int PRIMARY KEY, j jsonb, x numeric(12,2))");
   const names = ["Unit Price", "meta → n", "a b c d e f g h", "x / 3", "two  spaces", " lead", "trail "];
   // also read exactly, beside them: a name's own line break, parentheses, braces, a backslash, a tab
   const others = ["line\nbreak here", "(paren) {brace} \\back", "tab\there"];
@@ -134,6 +134,8 @@ test("issue 956: a run of 78 bytes or more with no space is broken inside it, an
 
 test("issue 956: a table's column with a line break that the statement does not write is read exactly, told by the catalog's columns", async () => {
   await pglite.exec(`CREATE TABLE lb (id int PRIMARY KEY, ${ident(LB)} int)`);
+  // another table whose column is the name the swap would read: only the columns of the relations read tell them apart
+  await pglite.exec(`CREATE TABLE lb_swapped (id int PRIMARY KEY, ${ident("line break\nhere")} int)`);
   for (let n = 1; n <= 80; n++) {
     // the WITH queries come first in the log, so their names move every break across the table's columns; the
     // statement never names the column (read through a `*`, and not read at all)
@@ -174,4 +176,36 @@ test("issue 956: many long names of characters Postgres escapes, each broken ins
     assert.ok(!("refused" in a), sql);
     assert.deepEqual(resnames(a.tree), ["o".repeat(pad), ...names, "o".repeat(pad), ...names], sql);
   }
+});
+
+test("issue 956: a name that ends in a line break, or is one, is read exactly through a * and by its name", async () => {
+  // re-check of PR 974: a reading that kept a line's first byte, a bare line break, as text read "note\n" as "note "
+  await pglite.exec(`CREATE TABLE tl (id int PRIMARY KEY, ${ident("note\n")} text, ${ident("\n")} int, amount numeric(12,2))`);
+  const wrong: string[] = [];
+  for (let n = 1; n <= 80; n++) {
+    const ctes = `WITH "${"p".repeat(Math.min(n, 60))}" AS (SELECT 1), "${"q".repeat(Math.max(1, n - 59))}" AS (SELECT 2)`;
+    for (const [sql, last] of [
+      [`${ctes} SELECT * FROM tl ORDER BY id`, ["id", "note\n", "\n", "amount"]],
+      [`${ctes} SELECT tl.* FROM tl ORDER BY 1`, ["id", "note\n", "\n", "amount"]],
+      [`${ctes} SELECT id, ${ident("note\n")}, ${ident("\n")} FROM tl ORDER BY id`, ["id", "note\n", "\n"]],
+    ] as const) {
+      const a = await analyze(catalog, sql, [], undefined, writtenNames((await parseSql(sql)).stmts![0]!.stmt)).catch((e: unknown) => e as Error);
+      if (a instanceof Error) { wrong.push(`${sql}: ${a.message}`); continue; }
+      if ("refused" in a) { wrong.push(`${sql}: refused ${a.refused.M}`); continue; }
+      const got = resnames(a.tree).slice(-last.length);
+      if (JSON.stringify(got) !== JSON.stringify(last)) wrong.push(`${sql}\n  got ${JSON.stringify(got)}`);
+    }
+  }
+  // aliases ending in a line break, a prefix inside each moving it past every line's end
+  for (let m = 0; m <= 47; m++) {
+    const pre = "p".repeat(m);
+    const names = [`${pre}a\n`, `${pre} \n`, `${pre}x \n`, "\n", `${pre}\n`];
+    const sql = `SELECT s.* FROM (SELECT ${names.map((x, i) => `t.id + ${i} AS ${ident(x)}`).join(", ")} FROM t) s`;
+    const a = await analyze(catalog, sql, [], undefined, writtenNames((await parseSql(sql)).stmts![0]!.stmt)).catch((e: unknown) => e as Error);
+    if (a instanceof Error) { wrong.push(`${sql}: ${a.message}`); continue; }
+    if ("refused" in a) { wrong.push(`${sql}: refused ${a.refused.M}`); continue; }
+    const got = resnames(a.tree);
+    if (JSON.stringify(got) !== JSON.stringify([...names, ...names])) wrong.push(`${sql}\n  got ${JSON.stringify(got)}`);
+  }
+  assert.deepEqual(wrong, []);
 });
