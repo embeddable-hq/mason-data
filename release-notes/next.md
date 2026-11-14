@@ -1,85 +1,24 @@
 The next release's notes, gathered here until its `v<version>.md` is written: a `v*.md` file is itself the release.
 
-## Before you upgrade
-
-- **Two sync event kinds have new names.** `copied` is now `full_sync`, and `copy_failed` is now `full_sync_failed`.
-  You see them in `mason logs --events` and its `--json`, in `mason status` (its Sync errors section, and
-  `recentErrors` in its `--json`) and in the web page's Syncs filter. If a script or an alert filters on the old names,
-  change it. Events recorded before the upgrade keep their old names. They still show in the full list, but an old
-  `copy_failed` no longer counts as a failure.
-
 ## What changes
 
-- **A server's web page can show your own icon in the browser's tab.** Set `MASON_UI_ICON` on `mason serve` to a
-  `data:` URL of a PNG or SVG image in base64, up to 4096 bytes. The page shows it in place of its empty icon. The icon
-  is part of the page, so the browser makes no extra request. A value Mason cannot use stops the start, and the message
-  says what a valid one looks like. Unset, the page is as before.
-- **A failed sync event now says its code and where it happened.** `mason logs --events --json` and `/api/events` give
-  each failure a `code` and an `origin`. The code is the error's SQLSTATE when your database failed it, the system's
-  error when the network or the disk did (`ECONNREFUSED`, `ENOSPC`), or the error's class (`conversion_error`). It is
-  `unknown` when none of these is known. The origin is a file and a line in Mason's code, such as
-  `src/duck/sync.ts:3637`. Group failures by the code, and give the origin when you report one. Good news has neither.
-  The Sync events page shows both under a failure's message.
-- **A query that failed inside Mason now says where.** A request-log row answered `XX000` has an `origin` in
-  `mason logs --requests --json` and `/api/requests`. Every other row has none.
-- Both are new keys. Events and requests recorded before you upgrade are kept, and read with both null.
-- **Metabase's preview of a join to a table with JSON fields is faster.** When you join a table in Metabase's query
-  builder and show fields it unfolds from a JSON column, the preview is a `LIMIT 2000` with no sort. Mason now gathers
-  the rows the preview shows before it reads those fields, so it reads them in a few large batches. Over a 3 M-row
-  table, the 2,000-row preview took about 5 s and now takes about 0.6 s. Postgres still answers it faster, so there is
-  more to do. The rows are the same kind as before: any rows of the join, as Postgres allows for a query with no ORDER
-  BY.
-- **The 20-row preview of such a join is faster too, when the table you start from is the bigger one.** Mason now takes
-  that table's first rows before it joins, so it no longer loads every row of the other table into memory first. A
-  small table joined to a big one is unchanged: that preview was already fast.
-- **The SQL support list now says plainly what Mason prints for a `numeric` column with no precision.** Rails makes
-  one from `t.decimal`. Mason prints every value of such a column with the most decimals any of its values has, so
-  `12.5` reads `12.50` and `0` reads `0.00`. The values are right. Only their trailing zeros differ from Postgres's.
-  This was listed before, but it was hard to find. To get the same text from Mason and Postgres now, cast the column
-  to `numeric(p, s)` or use `round(x, s)`. A fix is planned.
-- **A host view's link can be marked as a destructive action.** Give it `"danger": true`. The page draws it like the
-  Remove button on the Tables page, in red. A link that is both `primary` and `danger` is refused, and the view says
-  why. So is a `danger` that is not `true` or `false`. Plain and primary links look as before.
-- **A host can show who is signed in on the web page.** Set `MASON_UI_ACCOUNT` on `mason serve` to JSON with a
-  `label` and a `url`, such as `{"label":"ada@example.com","url":"/account"}`. The label shows at the foot of the
-  sidebar, as a link to the URL. On a narrow window it is in the menu with the nav. A value that is not valid stops the
-  start and says what is wrong. Unset, the page is as before.
-
-- **Three shapes Metabase and other BI tools send are faster.** A count grouped by `to_char(created_at, 'YYYY-MM')`
-  over 4.5 M rows took 23–29 s and now takes under a second, about a quarter of Postgres's time. Formats with a
-  quarter (`Q`), a padded month name or an ordinal (`DDth`) are still slow. Metabase's week of the year over 12 M rows
-  now takes about 1 s, where Postgres takes about 4.5 s. A query that returns many `timestamptz` values in a session in
-  UTC sends them about three times as fast: 300,000 rows of a `DISTINCT ON` took 10 s and now take under 3 s, about
-  Postgres's time. In a session in another time zone, those values are still slow to send.
-
-## What was wrong and is now right
-
-- **After a fatal error in the synced data, Mason no longer aborts on its way out, and the cause reaches `mason logs`.**
-  Such an error is, for example, a checkpoint that fails on a full disk. Mason then ends the run so that it can start
-  again. Sometimes the run aborted instead (exit 134, `terminate called after throwing an instance of 'Napi::Error'`),
-  and the cause could be missing from `mason logs`. Now the run waits up to 5 seconds for the synced data to close,
-  then writes its log to the end and exits with code 1. If the synced data is still closing after 5 seconds, the log
-  says so, and the run exits anyway.
-- **A table's columns dialog on the web page now names the choice its row names.** On the Tables page, a table that
-  leaves out columns which look like secrets says "All but 7 columns". Its columns dialog said "All columns, … but
-  password, …", so it read like a different choice. Now the dialog's choice starts with the same words, "All but 7
-  columns", and names the columns left out.
-
-- **A polled table no longer costs an extra connection to your database now and then.** On some machines, Mason's
-  timer for the next poll woke a moment early. Mason then connected to your database, found no table due yet, and
-  connected again a moment later to poll it. Now every timer waits until its time has come.
-- **Mason no longer leaves a time limit on your database's pooled connections.** When the web page checked whether a
-  table could be kept current by replication, Mason set a 10-second time limit on its connection and never took it off.
-  Behind a pooler in transaction mode (PgBouncer, or Supabase's default pooler URL), that connection is handed on to
-  your application next. Your application's queries could then be cancelled after 10 seconds, for up to an hour.
-  `mason mcp` did the same on Mason's own Postgres API with each tool call's time limit. Now each limit ends with
-  Mason's own query, whatever pooler sits in between.
+- **The smallest and largest value of a text column, and a page sorted by one, are many times faster when your
+  database sorts text by a language's rules** (a collation such as `en_US.UTF-8`). Metabase reads them when it scans
+  a table, and for a table's preview. Over 4.5 million rows they took 3 to 22 seconds, and now take 0.2 to 3 seconds.
+  The slowest case was a column where most rows hold the same value, such as a status. Over 30 million names they took
+  2 to 4.5 minutes, close to the 5-minute limit, and now take 13 to 26 seconds. Names that begin with an accented
+  letter, such as É, Ø or Ł, are as fast as the rest. The answers are the same as before. A list of distinct values,
+  a smallest value per group and `FETCH FIRST … WITH TIES` are still slow.
 - **Listing a JSON column's keys is now about as fast as on Postgres.** `jsonb_object_keys` and `json_object_keys` of a
   column took 16 to 70 times as long as on Postgres, grouped as Metabase sends it, with `DISTINCT`, or in a `LEFT JOIN
   LATERAL`. Over about 5 million rows they timed out. While one ran, a small query in another session waited up to 8
   seconds. Over 3 million rows they now take 3 to 5 seconds, a little less than Postgres, and other queries no longer
-  wait. This holds for a synced table's column, and for a generated table's `json` column. A generated table's
-  `jsonb` column gives the same answers as before, at the same speed.
-- **A generated table's jsonb column now answers `->` and `@>` as Postgres does when its SQL wrote a key twice.** For
-  example, `jsonb_build_object('a', 1, 'a', 2)` keeps the last `a` in Postgres. `->` read the first one, and `@>` checked
-  against the first one.
+  wait. This holds for a synced table's column, and for a generated table's `json` column.
+
+## What was wrong and is now right
+
+- **A generated table's `jsonb` column now answers as Postgres does when its SQL wrote a key twice.** For example,
+  `jsonb_build_object('a', 1, 'a', 2)` keeps only the last `a` in Postgres. Mason kept both. `->` read the first one,
+  and `@>` checked against the first one, so both could answer wrong. Now they answer as Postgres does. To be right,
+  Mason now reads a generated table's `jsonb` the slow way: `->`, `->>`, `@>`, `IS NULL` of a path and
+  `jsonb_object_keys` over it can take longer than before.

@@ -3021,6 +3021,8 @@ The decisions, each measured or tested:
   counted as one more wall (tests/duck-roles-barrier-wire.test.ts), and only where reading them twice reads the same
   rows (nothing volatile, no window or set-returning select list, no LIMIT or sample inside). Everything else, a join,
   a set operation, GROUP BY, DISTINCT, WITH TIES, a grouped or FILTER'd min, runs as written and as fast as before.
+  (A top N over joined tables that src/duck/late.ts writes as a SELECT of one FROM item is bounded there: the
+  preserved side limited first, or the row numbers chosen.)
 - **NULL rows are never candidates** unless the sort puts them first: a sentinel in the threshold's `count(*) >= n`
   case and the row's `coalesce` keep them out (61,490 NULL rows were keyed for a `LIMIT 50` before it).
 
@@ -3055,6 +3057,71 @@ run and 35 at its end; main's ran at 90 and 10 to 30):
 300 s timeout that main's met. What is left is the bounds, one native pass over every row: the key itself is computed
 for 1 to 81,920 rows of 1 M (tests/duck-plans.test.ts), never for every row. A `DESC` sort whose NULLs come first keys
 every NULL row, as they are all candidates.
+
+### The key once a distinct value (2026-11-14, issue 666)
+
+On a real deployment the bounds did not reproduce the laptop's numbers: over varchar columns of names and codes, and
+columns where one value covers 97–98 % of the rows, a min / max and a top N were still 10 to 50 times Postgres's time.
+Profiled with EXPLAIN ANALYZE over synthetic data of those shapes (a Postgres 16 `en_US.UTF-8` database, 0.9 M and
+4.5 M names, a 16,900-value code and a status 98 % one value over 4.5 M rows, 650,000 codes over 12 M), one shape at a
+time, the time went three ways:
+- **The bounds themselves.** One bound over 4.5 M rows took 6 s of the engine's thread time (1.3 µs a row: three
+  regular expressions, a `lower` and a `left`, not the 0.05 µs measured before), and a min / max computed it three
+  times a row (two thresholds and the CASE). A min / max of the code column keyed 502 rows and still took 4 to 9 s.
+- **The key where the bounds rule nothing out.** A page of the status column left the 4.4 M rows of its one value
+  candidates, each keyed in JavaScript (about 3 µs a row of `libcKey`, and as much again for the crossing): 19 s.
+- **A first letter that is not ASCII.** Such a value had no run, so it was always a candidate: 7 % of the synthetic
+  names (636,939 rows keyed for a min / max over 4.5 M), and a third of a 30 M-row column of international names.
+
+The key and the bounds are functions of the value, so the decision (`Values`, src/duck/libc-bound.ts) computes them
+once a DISTINCT value: the statement's distinct values (a native hash aggregate, 0.07 s over the 4.5 M codes, 0.3 s
+over 1.2 M distinct names) are a MATERIALIZED WITH query with each value's weights, and the threshold, the bounds'
+filter and the key read it. A min / max is the least key of the values the bounds keep; a top N joins its rows to the
+keys of the values the bounds keep and sorts by the joined key. A SELECT that may read an outer query (inside a
+subquery expression or a LATERAL item) keeps the row-by-row form: a WITH query of its own could not read it. And a
+letter of Latin whose first level is an ASCII letter's is folded into the run (`folds`): É by the engine's
+`strip_accents` (its decomposition, which tests/duck-libc-order.test.ts holds to `stripped` over every character it may
+fold), and a letter of no decomposition by a `replace` of its own (on glibc's en_US: Ø, ł, ð, Đ, Ħ, ŀ, ſ, ª and ¹ ² ³),
+each read from the source's order, never a table by hand. The names the change writes are none the statement holds
+(a column of its own named `__mason_v` was an ambiguous reference beside the keys', the review of PR 945). Folding every
+value doubled a unique 192-character column's min / max (3 s to 6 s), so a head of ASCII alone is read unfolded.
+
+Measured over the wire, main and the change in turn under the same load (a shared 4-core machine, load 5 to 10), the
+source Postgres's time beside each. Main ran three rounds and the change two; a time is the best of its round, and the
+ratio is Mason's best over Postgres's best of the same round:
+
+| statement | rows | main | this change | Postgres | ratio, main | ratio, this change |
+|---|---|---|---|---|---|---|
+| `min(name), max(name)` | 0.9 M | 1.85, 2.57, 3.12 s | 0.44, 0.36 s | 0.09–0.19 s | ×14–29 | ×3.4–3.6 |
+| `* ORDER BY name, id LIMIT 50` | 0.9 M | 1.54, 1.67, 2.07 s | 0.41, 0.47 s | 0.07–0.16 s | ×16–21 | ×3.6–6.1 |
+| `min(name), max(name)` | 4.5 M | 13.9, 11.6, 13.6 s | 1.39, 1.43 s | 0.43–1.02 s | ×19–27 | ×2.6–2.9 |
+| `id, name ORDER BY name DESC, id LIMIT 50` | 4.5 M | 4.29, 5.46, 7.47 s | 1.39, 1.84 s | 0.38–0.85 s | ×8.8–12 | ×2.5–3.7 |
+| `* ORDER BY status, id LIMIT 50`, 98 % one value | 4.5 M | 18.5, 21.8, 21.8 s | 0.64, 0.86 s | 0.20–0.45 s | ×62–74 | ×1.7–2.5 |
+| Metabase's preview of a code, `ASC LIMIT 2000` | 4.5 M | 3.00, 2.77, 1.89 s | 0.26, 0.39 s | 0.33–0.64 s | ×4.8–5.8 | ×0.6–0.9 |
+| the same, `DESC` | 4.5 M | 3.42, 3.15, 1.84 s | 0.26, 0.33 s | 0.37–0.77 s | ×5.0–7.9 | ×0.6–0.9 |
+| `min(code), max(code)`, 16,900 values | 4.5 M | 4.14, 3.96, 3.47 s | 0.16, 0.15 s | 0.39–0.59 s | ×8.8–10 | ×0.3–0.4 |
+| `min(code), max(code)`, 650,000 values | 12 M | 7.76, 10.4, 6.37 s | 0.65, 1.04 s | 1.07–1.77 s | ×5.4–9.7 | ×0.6–1.0 |
+| `id, kind ORDER BY kind, id LIMIT 50`, 97 % one value | 12 M | 7.42, 6.15, 3.70 s | 0.44, 0.57 s | 0.61–0.91 s | ×5.9–9.2 | ×0.7 |
+| `min(note), max(note)`, every value its own, 192 characters | 4.5 M | 13.1, 9.38, 5.77 s | 3.03, 4.12 s | 0.39–0.83 s | ×13–18 | ×5.8–11 |
+| `id ORDER BY note LIMIT 50`, the same | 4.5 M | 5.68, 3.82, 3.24 s | 2.92, 3.83 s | 0.44–0.85 s | ×7.3–7.9 | ×5.1–6.8 |
+
+Over 30 M rows of names, a third of them beginning with É, Á, Ø or Ł and nearly every one its own (main once, the
+change twice):
+
+| statement | main | this change | Postgres | ratio, main | ratio, this change |
+|---|---|---|---|---|---|
+| `min(name), max(name)` | 273 s | 16.5, 23.0 s | 1.9–4.6 s | ×59 | ×7.5–8.6 |
+| `* ORDER BY name, id LIMIT 50` | 120 s | 18.7, 14.1 s | 1.2–2.3 s | ×55 | ×8.1–12 |
+| Metabase's preview, `DESC LIMIT 2000` | 133 s | 13.3, 13.1 s | 1.8–2.1 s | ×63 | ×7.4 |
+| `* ORDER BY status, id LIMIT 50`, 97 % one value | 13.5 s | 0.80, 2.36 s | 1.1–1.6 s | ×9.3 | ×0.7–1.7 |
+
+What is left: a column whose every value is its own pays the hash aggregate of its values, about what the bounds'
+passes saved (the unique 192-character column's top N is within the noise of main's, and the 30 M names' are the
+aggregate and the bounds over 30 M distinct values). A first letter of no decomposition and no ASCII letter's weight
+(Hangul, Cyrillic) still has no run. A list of distinct values, a grouped min / max and `FETCH FIRST … WITH TIES` still
+key every row (over the 4.5 M sales, `SELECT DISTINCT code … ORDER BY code` 15.4 s at main and 14.0 s here, Postgres
+0.37–0.85 s; a grouped min / max 16.3 and 12.9 s, 0.42–1.13 s; `FETCH FIRST 5 ROWS WITH TIES` 47 and 30 s, 3.7–6.4 s):
+they are written elsewhere in the rewrite, and are issue 666's next step.
 
 ## Measurements
 
