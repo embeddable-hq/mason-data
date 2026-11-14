@@ -292,8 +292,8 @@ skill.
   machine whose page cache is smaller than the table.
 - **An approximate value cannot be compared for equality** (`src/lib/float-equal.ts`).
 - **A `numeric` Postgres computes exactly is computed by `src/lib/pg-numeric.ts`**, never DuckDB's double. The oracle
-  holds every numeric to Postgres's text. A difference within the numeric rule ("Only these block a merge") is a
-  listed decision in its `KNOWN`, never a failure.
+  judges a numeric by the numeric rule ("Only these block a merge"), not by its text. A difference within the rule is
+  no difference there. A numeric read as text (`x::text`, a JSON) is held as text.
 
 ## Hard-won gotchas
 
