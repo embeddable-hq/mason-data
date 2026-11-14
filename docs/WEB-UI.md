@@ -759,7 +759,7 @@ busyPercent, basis: measured | first-sync | assumed, rowsPerSecond }`); and `liv
 refused) and `checks`, each `{ name, state, detail, sql? }` with `state` `ok`, `warn` or `refused` — the table's own
 (`primary key`, `replica identity`), then the database's (`wal_level`, `standby`, `replication role`, `slot`, `wal
 senders`, `WAL cap`, `publication`), read now over one connection that reads settings, the catalog and the statistics
-views, never a row, each statement bounded (`statement_timeout` 10 s), and is closed. One read at a time for the whole run;
+views, never a row, each statement bounded (`SET LOCAL statement_timeout` 10 s, in one read-only transaction: never a session SET, which a pooler would hand on), and is closed. One read at a time for the whole run;
 at a save, a named publication is held to the columns of the entry the save will write. A database that cannot be reached, or whose
 checks cannot be read, is one refused check, `database`, never Live allowed; the answer never carries the database's
 address. A table the catalog lacks is `404` `not_found`.

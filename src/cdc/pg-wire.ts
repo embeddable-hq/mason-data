@@ -87,6 +87,8 @@ export class PgConnection {
   /** the bytes of the messages in `queue`: what backpressure bounds (onData) */
   private queued = 0;
   private closedWith: Error | null = null;
+  /** the connection is closed (by `close`, or by the server): nothing sent on it any more is answered */
+  get closed(): boolean { return this.closedWith !== null; }
   /** Server parameters (server_version, TimeZone, …) as reported at startup. */
   readonly parameters: Record<string, string> = {};
   private readonly opts: PgConnectOptions;

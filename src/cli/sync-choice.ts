@@ -25,9 +25,10 @@ import { pollLoad, unreplicableReason, type PollLoad, type PollMeasure } from ".
 import { copiedColumns, effectiveSync, entryName, type SourceFile } from "./sources.ts";
 import { namedPublicationVerdict, readNamedPublication } from "../duck/publication.ts";
 import { BIG_TABLE_ROWS, parseSync, syncText } from "../lib/table-sync.ts";
+import { withLocalSettings } from "../lib/local-settings.ts";
 
-/** How long one of the checks' statements may run (`statement_timeout` on their connection): they read settings and the
- *  catalog, milliseconds each, and one that hangs would hold every check queued behind it. */
+/** How long one of the checks' statements may run (`SET LOCAL statement_timeout` in their read-only transaction): they
+ *  read settings and the catalog, milliseconds each, and one that hangs would hold every check queued behind it. */
 export const LIVE_CHECKS_TIMEOUT_MS = 10_000;
 
 /** The intervals the page offers a poll at: presets only, never a free interval (issue 840). */
@@ -67,6 +68,17 @@ export function tableLiveChecks(t: Pick<SourceTable, "key" | "replicaIdentity">)
   ];
 }
 const REPLICA_IDENTITY: Record<string, string> = { d: "DEFAULT (its primary key)", f: "FULL", i: "an index", n: "NOTHING" };
+
+/**
+ * THE CHECKS AS THE RUN READS THEM: `sourceLiveChecks` with each statement held to `LIVE_CHECKS_TIMEOUT_MS`, the limit
+ * LOCAL to one read-only transaction around them (`withLocalSettings`), never a session SET. A session SET stayed on a
+ * pooler's server connection in transaction mode, and the application's next clients ran under it (issue 930). The
+ * caller closes the connection after.
+ */
+export function boundedLiveChecks(pg: PgConnection, t: SourceTable, o: Parameters<typeof sourceLiveChecks>[2], log: (m: string) => void): Promise<LiveCheck[]> {
+  return withLocalSettings({ query: (sql) => pg.query(sql), settings: [["statement_timeout", LIVE_CHECKS_TIMEOUT_MS]],
+    work: () => sourceLiveChecks(pg, t, o), answers: () => !pg.closed, log });
+}
 
 /**
  * THE DATABASE'S CHECKS FOR ONE TABLE, over the connection given (read-only: settings, the catalog, the statistics

@@ -109,6 +109,32 @@ test("Live's checks read settings and the catalog alone: never a row of the tabl
   }
 });
 
+test("Live's checks as the run reads them: their limit SET LOCAL in one read-only transaction, never a session SET, ended on every way out (issue 930)", async () => {
+  assert.equal(typeof choice.boundedLiveChecks, "function", "src/cli/sync-choice.ts exports boundedLiveChecks, the checks as the run reads them");
+  /** the fake connection, its transaction statements answered too, and one statement made to fail */
+  const wrapped = (failing: RegExp | null) => {
+    const f = fakePg({});
+    const pg = { closed: false, query: async (sql: string) => {
+      if (/^(BEGIN READ ONLY|SET LOCAL statement_timeout = \d+|COMMIT|ROLLBACK)$/.test(sql)) { f.sent.push(sql); return { rows: [] }; }
+      if (failing?.test(sql)) { f.sent.push(sql); throw new Error("canceling statement due to statement timeout"); }
+      return f.pg.query(sql);
+    } } as unknown as PgConnection;
+    return { pg, sent: f.sent };
+  };
+  const ok = wrapped(null);
+  const checks = await choice.boundedLiveChecks!(ok.pg, TABLES[0]!, { repl: OWN, streaming: false, columns: ["id", "name"], shown: "mason/sources/app.yml" }, () => undefined);
+  assert.deepEqual(refusedNames(checks), []);
+  assert.deepEqual([ok.sent.slice(0, 2), ok.sent.at(-1)], [["BEGIN READ ONLY", `SET LOCAL statement_timeout = ${choice.LIVE_CHECKS_TIMEOUT_MS}`], "COMMIT"], ok.sent.join("\n"));
+  assert.ok(!ok.sent.some((s) => /^SET (?!LOCAL)/i.test(s)), "no session SET");
+
+  // a check that times out: the transaction rolled back, the error the caller's (src/cli/dev.ts says it as a refused check)
+  const slow = wrapped(/pg_replication_slots/);
+  await assert.rejects(choice.boundedLiveChecks!(slow.pg, TABLES[0]!, { repl: OWN, streaming: false, columns: ["id", "name"], shown: "mason/sources/app.yml" }, () => undefined),
+    /statement timeout/);
+  assert.equal(slow.sent.at(-1), "ROLLBACK", slow.sent.join("\n"));
+  assert.ok(!slow.sent.includes("COMMIT"));
+});
+
 test("the table's own checks: no primary key and REPLICA IDENTITY NOTHING refuse Live, in mason add's words", () => {
   assert.equal(typeof choice.tableLiveChecks, "function", "src/cli/sync-choice.ts exports tableLiveChecks");
   assert.deepEqual(choice.tableLiveChecks!(TABLES[0]!).map((c) => c.state), ["ok", "ok"]);

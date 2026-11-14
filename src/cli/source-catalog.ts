@@ -30,6 +30,7 @@
  * There is no timer here, and none may be added: nothing reads the database's catalog unless something asked.
  */
 import { randomBytes } from "node:crypto";
+import { withLocalSettings } from "../lib/local-settings.ts";
 import type { SourceFacts } from "./preflight.ts";
 import type { Failure } from "./command.ts";
 
@@ -331,33 +332,25 @@ export async function watchedRead<C extends CatalogConnection>(o: {
     onSilent: giveUp,
   });
   const tagged = { query: ((sql: string) => c.query(`${marked(++statement)} ${sql}`)) as C["query"] };
-  let begun = false;
+  const settle = (): void => { settled = true; stopWatch(); };
   try {
-    await tagged.query("BEGIN READ ONLY");
-    begun = true;
     // never queued behind a lock for long: the sizes it reads take a lock of every table, which a migration's ALTER (or
-    // one queued behind another session) holds. LOCAL: this transaction's alone, never the server connection's
-    await tagged.query(`SET LOCAL lock_timeout = ${CATALOG_LOCK_TIMEOUT_MS}`);
-    const facts = await o.read(tagged);
-    await tagged.query("COMMIT");
-    begun = false;
-    return facts;
+    // one queued behind another session) holds. LOCAL, in one read-only transaction (src/lib/local-settings.ts): this
+    // read's alone, never the server connection's
+    return await withLocalSettings({
+      query: tagged.query, settings: [["lock_timeout", CATALOG_LOCK_TIMEOUT_MS]], work: () => o.read(tagged),
+      // the read is over before its ROLLBACK: the watch gives nothing up meanwhile
+      settle,
+      // the transaction ended on every way out: rolled back while the connection answers (bounded), else by its close
+      answers: () => !closed, rollback: () => c.query("ROLLBACK"), rollbackMs: cancelMs,
+      log: (m) => o.log(`a read of the database's tables: ${m}`),
+    });
   } catch (e) {
     // the read the watch gave up on: said as what it found, never as the cancel or the closed connection
     if (silent !== null) throw new Error(silent);
     throw e;
   } finally {
-    settled = true;
-    stopWatch();
-    // the transaction ended on every way out: rolled back while the connection answers (bounded), else by its close
-    if (begun && !closed) {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const late = new Promise<void>((resolve) => { timer = setTimeout(resolve, cancelMs); timer.unref?.(); });
-      // tolerated: the connection is closed next, and the database rolls back a transaction whose client is gone
-      await Promise.race([c.query("ROLLBACK").then(() => undefined), late])
-        .catch((e: unknown) => o.log(`a read of the database's tables could not be rolled back (${(e as Error).message}): its connection is closed, which ends it`))
-        .finally(() => clearTimeout(timer));
-    }
+    settle();
     close();
   }
 }
