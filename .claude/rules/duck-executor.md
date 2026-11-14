@@ -111,11 +111,20 @@ paths:
 - **Nothing ends the worker's JavaScript while DuckDB has work in flight on it** (a test file under load aborted at
   exit, `libc++abi: … Napi::Error`: its close outlasted the grace and the executor terminated the worker under a
   Mason function call; a 1 ms grace reproduced it 6 times in 6). A worker given up on (the grace, the silence) is asked
-  to SHUT DOWN (`shutDown`) and terminated only once that shutdown answered or it exited; until then it stays
-  referenced, so the process cannot exit under it either — and an answer's close is a request, answered once DuckDB
-  handed it back (`answer.close`). Never `worker.terminate()` a copy's worker that may have a statement in flight:
-  even a call-free one aborted the process 2 times in 12. `tests/duck-executor.test.ts` "never ends the copy's thread
-  under a call" holds it (a close with a 1 ms grace, a process ending while an answer drains).
+  to SHUT DOWN (`shutDown`); until it exits it stays referenced, so the process cannot exit under it either — and an
+  answer's close is a request, answered once DuckDB handed it back (`answer.close`). Never `worker.terminate()` a copy's
+  worker that may have a statement in flight: even a call-free one aborted the process 2 times in 12.
+  `tests/duck-executor.test.ts` "never ends the copy's thread under a call" holds it (a close with a 1 ms grace, a
+  process ending while an answer drains).
+- **The engine's thread ends by itself, never by `worker.terminate()`** (issue 913: after a fatal error the run aborted,
+  exit 134, `Napi::Error`, 1 test in 40, its shutdown already answered and the terminate the last step logged; a
+  terminate meets any DuckDB completion still on its way, and a worker terminated while it ran connects aborted every
+  time). Once its shutdown answered, the worker unrefs its port (src/duck/executor-worker.ts), so its loop ends when
+  nothing of DuckDB's is left on it, and the executor waits for that exit, referenced, saying a thread not ended
+  `ENDS_WITHIN_MS` after its shutdown. The run ends the same way: after a crash it closes the synced data before it
+  exits (a process's exit tears a live thread down as a terminate does), and its log is ended, and waited for, last
+  (src/cli/dev.ts `dev`), so the cause line is in `mason logs`. `tests/duck-executor-end.test.ts` holds it (DuckDB
+  calls still running on the thread after its shutdown answered: 20 aborts in 20 before, none after).
 - **A statement closed while it STARTS is released only once DuckDB hands its start back** (Linux CI: the stop met a
   calling count inside `stream()`, released it at once with nothing to close, and the result handed back after was
   never closed — the connection and the instance closed under its running tasks, and the thread's end met their

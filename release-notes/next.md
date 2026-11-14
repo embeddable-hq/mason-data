@@ -16,6 +16,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **After a fatal error in the synced data, Mason now always exits in the orderly way, with the cause in `mason logs`.**
+  Such an error is, for example, a checkpoint that fails on a full disk. Mason then ends the run so that it can start
+  again. Sometimes the run aborted instead (exit 134, `terminate called after throwing an instance of 'Napi::Error'`),
+  and the cause could be missing from `mason logs`. Now the run waits for the synced data to close, writes its log to
+  the end, and exits with code 1.
+
 - **A polled table no longer costs an extra connection to your database now and then.** On some machines, Mason's
   timer for the next poll woke a moment early. Mason then connected to your database, found no table due yet, and
   connected again a moment later to poll it. Now every timer waits until its time has come.

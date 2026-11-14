@@ -144,13 +144,19 @@ export function sourceMove(recorded: ProjectConfig["sourceServer"], now: { datab
   return { action: "same" };
 }
 
-/** What the run hosts beside the copy (a demo project's database), stopped and closed however the run ends. */
+/** What the run hosts beside the copy (a demo project's database), stopped and closed however the run ends, and its
+ *  log, ended last. */
 interface Hosted {
   /** the demo database's writer, once it runs */
   stopChanges: (() => void) | null;
   /** closes the demo database, once (src/cli/demo.ts closingOnce); null when there is none, or it was closed */
   close: (() => Promise<string | null>) | null;
+  /** the run's log file, once it is open: ended, its lines written, before the process exits */
+  log: RunLog | null;
 }
+
+/** how long the run's end waits for its log's last lines to reach the file */
+const LOG_END_MS = 2_000;
 
 /**
  * The run, and whatever it hosts closed however it ends: a demo database that was opened is closed at the stop (after
@@ -158,11 +164,16 @@ interface Hosted {
  * folder, a close that fails said.
  */
 export async function dev(o: DevOptions): Promise<number> {
-  const hosted: Hosted = { stopChanges: null, close: null };
+  const hosted: Hosted = { stopChanges: null, close: null, log: null };
   try { return await run(o, hosted); }
   finally {
     hosted.stopChanges?.();
     await closeDemo(hosted, null);
+    // LAST, AND WAITED FOR (issue 913): the log is written through a stream, and the process exits at once after this
+    // (src/lib/exit-when-written.ts), which drops what the stream still holds — a crash's cause line among it, and the
+    // supervisor then said "it crashed" with no cause in mason logs
+    const log = hosted.log;
+    if (log !== null) await closedWithin(log.end(), LOG_END_MS, () => say(`  the run's log ${log.file} was still being written after ${LOG_END_MS / 1000} s; its last lines may be missing`));
   }
 }
 
@@ -317,6 +328,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     terminalLine("stderr", `${text}\n`);
     beside(textEntry(`${new Date().toISOString()} `, `[log] ${text}`));
   } });
+  hosted.log = log;
   const logLine = (l: string): void => {
     const entry = textEntry(`${new Date().toISOString()} `, withDiskWayOut(l));
     log.write(entry);
@@ -804,7 +816,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
         // the demo database's data flushed to its folder before the log it writes to ends (dev() closes it otherwise)
         // (a close still going after 2 s is said: the process ends without it, and the folder may not be whole)
         await closedWithin(closeDemo(hosted, null), 2_000, () => say(`  ${DEMO_STILL_CLOSING(2_000)}`));
-        void log.end();
+        // the engine's thread ends before the process does (issue 913): the process's exit tears a live thread down as a
+        // terminate does, and one that met DuckDB's last callbacks aborted the process (exit 134) instead of this exit 1.
+        // Bounded by its grace (src/duck/executor.ts CLOSE_GRACE_MS); dev() ends the log after it
+        await store.close();
         resolve(1);
       })();
     };
@@ -845,7 +860,6 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
         // over a config that still names it — a stop is never undone — and a command reads the pid it names as gone
         try { writeConfig(home, cfg); }
         catch (e) { say(`  ${writeFailureText("the stop's record in .mason/config.json", e)}; mason status reads the run as stopped all the same`); }
-        void log.end();
         resolve(0);
       })();
     };

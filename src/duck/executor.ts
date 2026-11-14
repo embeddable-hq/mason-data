@@ -258,10 +258,21 @@ export interface ExecutorOptions {
  * exiting tears its workers down the same way). A drained answer is a request for the same reason (`answer.close`):
  * DuckDB may call into the worker after the listener let go of the statement. A thread that never answers its
  * shutdown is the deadlock above: its supervisor's SIGKILL.
+ *
+ * THE THREAD ENDS BY ITSELF, NEVER BY `worker.terminate()` (issue 913: after a fatal error the run aborted, exit 134,
+ * `Napi::Error`, 1 test in 40, with the shutdown already answered — DuckDB's instance and connections closed — and the
+ * terminate the last step logged). A terminate stops the thread's JavaScript wherever it is, and a native callback of
+ * DuckDB's node API that runs then (a call's completion settling its promise) meets a dying environment and throws where
+ * nothing catches: measured, a worker terminated while it ran connect-and-SELECT 1 in a loop aborted the process every
+ * time, one closed and idle never did (200 in 200). So once its shutdown answered, the worker lets go of its port
+ * (executor-worker.ts) and its loop ends when nothing of DuckDB's is left on it; the executor waits for that exit,
+ * referenced, and says once a thread that has not ended `ENDS_WITHIN_MS` after its shutdown.
  */
 export const PING_MS = 5_000;
 export const SILENT_MS = 60_000;
 export const CLOSE_GRACE_MS = 5_000;
+/** how long after its shutdown answered the worker's thread may take to end by itself before that is said */
+export const ENDS_WITHIN_MS = 5_000;
 
 export class Executor {
   private readonly worker: Worker;
@@ -364,8 +375,8 @@ export class Executor {
   }
 
   /** Asks the worker to stop (executor-worker.ts `shutdown`: every statement stopped, every connection and the instance
-   *  closed once nothing runs on them), once; settles when it answered, or exited. Only then is it terminated: nothing
-   *  of DuckDB's calls into it any more. The worker stays referenced meanwhile, so the process waits for it. */
+   *  closed once nothing runs on them), once; settles when it answered, or exited. The worker then ENDS BY ITSELF, never
+   *  terminated (THE THREAD ENDS BY ITSELF, above); it stays referenced until it exits, so the process waits for it. */
   private shutDown(): Promise<void> {
     if (this.shutdown !== null) return this.shutdown;
     this.shutdown = new Promise<void>((resolve) => { this.shutdownAnswered = resolve; });
@@ -375,8 +386,14 @@ export class Executor {
       this.worker.ref();
       this.worker.postMessage({ op: "shutdown", id: this.shutdownId });
     }
-    void this.shutdown.then(async () => { if (!this.hasExited) await this.worker.terminate(); })
-      .catch((e: unknown) => this.log(`ending the engine's thread failed: ${(e as Error).message}`));
+    void this.shutdown.then(() => {
+      if (this.hasExited) return;
+      // said once, never acted on: a loop that does not end holds something of the engine's, and ending it from outside
+      // is what aborted the process
+      const late = setTimeout(() => this.log(`the engine's thread has not ended ${ENDS_WITHIN_MS / 1000} s after its shutdown (something still holds it: Mason bug, report it with mason logs); the process waits for it`), ENDS_WITHIN_MS);
+      late.unref();
+      void this.exited.then(() => clearTimeout(late));
+    });
     return this.shutdown;
   }
 
@@ -462,7 +479,7 @@ export class Executor {
     this.closing = true;
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<"late">((resolve) => { timer = setTimeout(() => resolve("late"), graceMs); });
-    // the shutdown, then the terminate once it answered (`shutDown`), then the exit — or the worker's own exit
+    // the shutdown, then the worker's own exit once it answered (`shutDown`)
     const closed = (async () => { await this.shutDown(); await this.exited; return "closed" as const; })();
     try {
       if (await Promise.race([closed, late]) === "late") {
