@@ -3,10 +3,12 @@
 #   ghcr.io/embeddable-hq/mason-data   one container, `mason serve` (docker/mason-data.Dockerfile)
 #
 # Every push to main publishes it as `main` (a moving tag: what deploy/mason-data/compose.yml pulls by default before a
-# release exists) and `sha-<commit>` (pinnable). A release publishes `<version>` and `latest`: release.yml calls this
-# workflow with the version once the merge of release-notes/v<version>.md is tagged (a tag made by a workflow's own
-# token triggers no workflow, so it is a call, not a tag push); a tag `v<version>` pushed by hand still publishes the
-# same. Both platforms an application deploys on: amd64 (a server) and arm64 (a developer's Mac).
+# release exists) and `sha-<commit>` (pinnable). A release publishes `<version>`, its line `<major>.<minor>` (a moving
+# tag: the line's newest patch) and, when it is the newest release, `latest`: release.yml calls this workflow with the
+# version and `latest` once the merge of release-notes/v<version>.md is tagged (a tag made by a workflow's own token
+# triggers no workflow, so it is a call, not a tag push). A patch on an older line (release-notes/README.md) never moves
+# `latest`. A tag `v<version>` pushed by hand still publishes `<version>` and `latest`, so push one by hand only for the
+# newest release. Both platforms an application deploys on: amd64 (a server) and arm64 (a developer's Mac).
 #
 # The registry credential is the workflow's own GITHUB_TOKEN (packages: write); nothing is stored. The image is
 # PUBLIC, as the repository is: a machine pulls it with no login.
@@ -19,9 +21,13 @@ on:
   workflow_call:
     inputs:
       version:
-        description: the release's version (1.2.3), published as <version> and latest
+        description: the release's version (1.2.3), published as <version> and its line <major>.<minor>
         required: true
         type: string
+      latest:
+        description: whether the release is the newest, published as latest too (false for a patch on an older line)
+        required: true
+        type: boolean
 
 permissions:
   contents: read
@@ -42,18 +48,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # the release's line, `0.19` for 0.19.1; empty when no version is given
+      - id: line
+        env:
+          VERSION: ${{ inputs.version }}
+        run: echo "line=${VERSION%.*}" >> "$GITHUB_OUTPUT"
+
       - id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/mason-data
-          # a release (the version given, or a v* tag pushed by hand): <version> and latest; main: main and sha-<commit>
+          # a release given: <version>, its line and (the newest only) latest; a v* tag pushed by hand: <version> and
+          # latest; main: main and sha-<commit>
           tags: |
             type=raw,value=${{ inputs.version }},enable=${{ inputs.version != '' }}
+            type=raw,value=${{ steps.line.outputs.line }},enable=${{ inputs.version != '' }}
             type=ref,event=branch,enable=${{ inputs.version == '' }}
             type=sha,prefix=sha-,enable=${{ inputs.version == '' }}
             type=semver,pattern={{version}}
-          # `latest` only on a release, never on main
-          flavor: latest=${{ inputs.version != '' || startsWith(github.ref, 'refs/tags/v') }}
+          # `latest` only on the newest release, never on main nor on a patch on an older line
+          flavor: latest=${{ (inputs.version != '' && inputs.latest) || startsWith(github.ref, 'refs/tags/v') }}
 
       - uses: docker/build-push-action@v6
         with:

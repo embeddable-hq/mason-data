@@ -1,4 +1,5 @@
-# A RELEASE IS A MERGE. Every push to main looks at the newest release-notes/v<version>.md. When no GitHub release
+# A RELEASE IS A MERGE. Every push to main (or to a release/* branch, below) looks at the newest
+# release-notes/v<version>.md. When no GitHub release
 # exists for that version, this push is the release, and the workflow does what would otherwise be done by hand:
 #
 #   1. the annotated tag v<version> on the merge commit (skipped when the tag already exists)
@@ -14,6 +15,12 @@
 # Every step is idempotent, so a failed run is re-run from the Actions page and picks up where it stopped. A merge
 # whose newest notes file is already released does nothing (`decide` says so), and so does one before the first notes
 # file exists.
+#
+# A PATCH ON AN OLDER LINE IS A MERGE TO ITS BRANCH, release/0.<minor> (release-notes/README.md "A patch on the previous
+# line"), released as a merge to main is. Only the newest release takes the names that mean "the newest": npm's
+# `latest` (an older line's patch is published under `latest-0.<minor>`), the image's `latest`, and GitHub's Latest.
+# The newest is the highest version among this release and every v* tag (`decide`'s `newest`). Every release, the
+# newest or not, also tags the image with its line (`0.<minor>`).
 #
 # NO NPM CREDENTIAL IS STORED IN THIS REPOSITORY. Trusted publishing on npmjs.com, set up once by an owner of the
 # @mason-data org (Settings -> Trusted publisher -> GitHub Actions, repository embeddable-hq/mason-data, workflow
@@ -35,7 +42,7 @@ name: Release
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'release/*']
 
 permissions:
   contents: write    # the tag and the release
@@ -52,6 +59,8 @@ jobs:
     outputs:
       version: ${{ steps.decide.outputs.version }}
       cli_publish: ${{ steps.decide.outputs.cli_publish }}
+      newest: ${{ steps.decide.outputs.newest }}
+      npm_tag: ${{ steps.decide.outputs.npm_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -76,6 +85,16 @@ jobs:
           cli="$(node -p 'require("./cli/package.json").version')"
           if [ "$cli" != "$version" ]; then
             echo "cli/package.json is $cli, the newest release notes are v$version: they must agree" >&2; exit 1
+          fi
+          # the newest release takes `latest` (npm, the image, GitHub); a patch on an older line takes its line's npm tag
+          # instead. npm refuses a tag that reads as a version range (`0.19`), so the line's tag is `latest-0.19`
+          highest="$( { git tag -l 'v*' | sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p'; echo "$version"; } | sort -V | tail -1)"
+          if [ "$highest" = "$version" ]; then
+            echo "v$version is the newest release: it takes latest"
+            echo "newest=true" >> "$GITHUB_OUTPUT"; echo "npm_tag=latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "v$version is older than v$highest: it takes latest-${version%.*}, never latest"
+            echo "newest=false" >> "$GITHUB_OUTPUT"; echo "npm_tag=latest-${version%.*}" >> "$GITHUB_OUTPUT"
           fi
           # the CLI is judged on its own: a release whose page exists but whose CLI never reached npm (the first publish
           # is by hand, and may not have happened) is still published by the next push to main
@@ -119,6 +138,7 @@ jobs:
     uses: ./.github/workflows/images-publish.yml
     with:
       version: ${{ needs.decide.outputs.version }}
+      latest: ${{ needs.decide.outputs.newest == 'true' }}
     permissions:
       contents: read
       packages: write
@@ -148,12 +168,13 @@ jobs:
         env:
           # Empty when the secret is not set, which is the trusted-publishing case.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TAG: ${{ needs.decide.outputs.npm_tag }}
         run: |
           set -euo pipefail
           for dir in cli/platforms/*/; do
             name="$(node -p "require('./${dir}package.json').name")"; version="$(node -p "require('./${dir}package.json').version")"
             if npm view "$name@$version" version >/dev/null 2>&1; then echo "$name $version is on npm already"; continue; fi
-            (cd "$dir" && npm publish --access public)
+            (cd "$dir" && npm publish --access public --tag "$NPM_TAG")
           done
 
   cli:
@@ -174,11 +195,12 @@ jobs:
       # the package builds from the repo's src/ with the repo's TypeScript (cli/build.ts, its prepack); cli/ has no lock
       # of its own (its optional platform packages are published by the job before this one)
       - run: npm ci
-      - run: npm publish --access public
+      - run: npm publish --access public --tag "$NPM_TAG"
         working-directory: cli
         env:
           # Empty when the secret is not set, which is the trusted-publishing case.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TAG: ${{ needs.decide.outputs.npm_tag }}
 
   release:
     needs: [decide, tag, image, extensions, cli]
@@ -191,8 +213,10 @@ jobs:
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.decide.outputs.version }}
+          NEWEST: ${{ needs.decide.outputs.newest }}
         run: |
           set -euo pipefail
           # the file's first line is the release's name; the rest is its body
           tail -n +2 "release-notes/v$VERSION.md" > /tmp/notes.md
-          gh release create "v$VERSION" --title "Mason v$VERSION" --notes-file /tmp/notes.md --verify-tag
+          # GitHub marks a new release Latest unless told not to, whatever its version: a patch on an older line is told
+          gh release create "v$VERSION" --title "Mason v$VERSION" --notes-file /tmp/notes.md --verify-tag --latest="$NEWEST"

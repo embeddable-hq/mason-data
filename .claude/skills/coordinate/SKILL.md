@@ -55,6 +55,11 @@ a PR, and takes changes through a PR only.
 word. The merge itself tags, publishes the image and the CLI, and creates the GitHub release
 (`.github/workflows/release.yml`). Nothing after the merge is done by hand.
 
+**The release lines** (`release-notes/README.md` "Release lines" has the rule and the steps):
+- Choose the version by the rule. A release on the current line is a patch (`0.20.1`). Only a breaking change, which
+  reads a project differently, makes a new line (`0.21.0`), and it waits on `main` for that line.
+- A security fix also goes to the previous line (`0.19.x`), as a release merged to its `release/0.<minor>` branch.
+
 ## Waiting
 
 Agents run in the background and wake you when they finish. For CI, leave one background
