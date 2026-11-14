@@ -200,14 +200,47 @@ export function unwrapNodeDump(wrapped: Uint8Array, written: ReadonlySet<string>
     return { head, startO, endO, sites: sites.filter((x) => !decided.has(x.k)) };
   };
 
+  /** every way to read the sites of the token holding the line break at `e`, and the name each gives; null where the
+   *  token cannot be read so */
+  const variantsOf = (at: number, e: number, sLen: number): Array<{ map: Map<number, Way>; name: string }> | null => {
+    const tok = tokenAround(at, e, sLen);
+    if (tok === null || tok.sites.length === 0 || tok.sites.length > MAX_SITES) return null;
+    const variants: Array<{ map: Map<number, Way>; name: string }> = [];
+    const total = tok.sites.reduce((n, x) => n * x.ways.length, 1);
+    for (let combo = 0; combo < total; combo++) {
+      const map = new Map<number, Way>();
+      let rest = combo;
+      for (const x of tok.sites) { map.set(x.k, x.ways[rest % x.ways.length]!); rest = Math.floor(rest / x.ways.length); }
+      const parts: Buffer[] = [tok.head];
+      let from = tok.startO;
+      for (const x of tok.sites) {
+        parts.push(o.subarray(from, x.k));
+        const w = map.get(x.k);
+        if (w === "own") parts.push(Buffer.from([LF])); else if (w === "wrap") parts.push(Buffer.from([SPACE]));
+        from = x.k + 1;
+      }
+      parts.push(o.subarray(from, tok.endO));
+      variants.push({ map, name: nameOf(Buffer.concat(parts)) });
+    }
+    return variants;
+  };
+  const isTold = (v: { name: string }): boolean => written.has(v.name) || (columns?.has(v.name) ?? false);
+
   /**
    * Whether the lines from `at` can go on, under the ways `ways` gives some sites, at least until a line starts at
-   * `limit` or past (or the log ends), every line whose 79 bytes are then known held to the rule. Other sites are tried
-   * every way. Leaves the text and the lines as it found them.
+   * `limit` or past (or the log ends), every line whose 79 bytes are then known held to the rule. Another name's sites
+   * are read as the one name the statement or the tables give it, where there is one, and else tried every way. Leaves
+   * the text and the lines as it found them.
    */
-  const goesOn = (at: number, sLen: number, checked: number, ways: ReadonlyMap<number, Way>, limit: number): boolean => {
+  const goesOn = (at: number, sLen: number, checked: number, given: ReadonlyMap<number, Way>, limit: number): boolean => {
     const mark = starts.length;
     const cs = candidates(at, sLen);
+    let ways = given;
+    for (const c of cs) {
+      if (c.last || !c.escaped || ways.has(c.e) || decided.has(c.e)) continue;
+      const told = (variantsOf(at, c.e, sLen) ?? []).filter(isTold);
+      if (told.length === 1) ways = new Map([...ways, ...told[0]!.map]);
+    }
     const way = (e: number): Way | undefined => ways.get(e) ?? decided.get(e);
     for (let i = 0; i < cs.length; i++) {
       const c = cs[i]!;
@@ -237,32 +270,16 @@ export function unwrapNodeDump(wrapped: Uint8Array, written: ReadonlySet<string>
 
   /** decides every site of the token holding the line break at `e`, from the lines that follow each way, then its name */
   const decideToken = (at: number, e: number, sLen: number, checked: number): void => {
-    const tok = tokenAround(at, e, sLen);
-    if (tok === null || tok.sites.length === 0 || tok.sites.length > MAX_SITES) throw new UnreadableNames();
-    // every way to read the token's sites, and the name each gives
-    const variants: Array<{ map: Map<number, Way>; name: string }> = [];
-    const total = tok.sites.reduce((n, x) => n * x.ways.length, 1);
-    for (let combo = 0; combo < total; combo++) {
-      const map = new Map<number, Way>();
-      let rest = combo;
-      for (const x of tok.sites) { map.set(x.k, x.ways[rest % x.ways.length]!); rest = Math.floor(rest / x.ways.length); }
-      const parts: Buffer[] = [tok.head];
-      let from = tok.startO;
-      for (const x of tok.sites) {
-        parts.push(o.subarray(from, x.k));
-        const w = map.get(x.k);
-        if (w === "own") parts.push(Buffer.from([LF])); else if (w === "wrap") parts.push(Buffer.from([SPACE]));
-        from = x.k + 1;
-      }
-      parts.push(o.subarray(from, tok.endO));
-      variants.push({ map, name: nameOf(Buffer.concat(parts)) });
-    }
+    const variants = variantsOf(at, e, sLen);
+    if (variants === null) throw new UnreadableNames();
+    const tok = tokenAround(at, e, sLen)!;
     // a way is held to the rule over the line it ends and the next: no further line's break depends on it
     const limit = tok.endO + LINE + 2;
     const holdsWay = (v: { map: Map<number, Way> }): boolean => goesOn(at, sLen, checked, v.map, limit);
     const pick = (w: { map: Map<number, Way> }): void => { for (const [k, v] of w.map) decided.set(k, v); };
-    const isTold = (v: { name: string }): boolean => written.has(v.name) || (columns?.has(v.name) ?? false);
-    // the names the statement or the tables give, first: one of them that the rule holds is the name
+    // the names the statement or the tables give, first: one of them that the rule holds is the name. With none the
+    // statement gives, the tables' columns are asked before any way is held to the rule
+    if (columns === null && !variants.some(isTold) && variants.some((v) => v.name !== variants[0]!.name)) throw new NamesNeedColumns(relationsIn(o));
     const told = variants.filter(isTold).filter(holdsWay);
     if (told.length === 1) return pick(told[0]!);
     if (told.length > 1) throw new UnreadableNames();
