@@ -239,7 +239,8 @@ export function unwrapNodeDump(wrapped: Uint8Array, written: ReadonlySet<string>
   const decideToken = (at: number, e: number, sLen: number, checked: number): void => {
     const tok = tokenAround(at, e, sLen);
     if (tok === null || tok.sites.length === 0 || tok.sites.length > MAX_SITES) throw new UnreadableNames();
-    const ways: Array<{ map: Map<number, Way>; name: string }> = [];
+    // every way to read the token's sites, and the name each gives
+    const variants: Array<{ map: Map<number, Way>; name: string }> = [];
     const total = tok.sites.reduce((n, x) => n * x.ways.length, 1);
     for (let combo = 0; combo < total; combo++) {
       const map = new Map<number, Way>();
@@ -254,16 +255,22 @@ export function unwrapNodeDump(wrapped: Uint8Array, written: ReadonlySet<string>
         from = x.k + 1;
       }
       parts.push(o.subarray(from, tok.endO));
-      if (goesOn(at, sLen, checked, map, tok.endO + 2 * (LINE + 1))) ways.push({ map, name: nameOf(Buffer.concat(parts)) });
+      variants.push({ map, name: nameOf(Buffer.concat(parts)) });
     }
+    // a way is held to the rule over the line it ends and the next: no further line's break depends on it
+    const limit = tok.endO + LINE + 2;
+    const holdsWay = (v: { map: Map<number, Way> }): boolean => goesOn(at, sLen, checked, v.map, limit);
     const pick = (w: { map: Map<number, Way> }): void => { for (const [k, v] of w.map) decided.set(k, v); };
-    if (ways.length === 1) return pick(ways[0]!);
-    if (ways.length === 0) throw new UnreadableNames();
-    // the same name every way (a break inside a run between two of its bytes, or beside an escaped space): any of them
-    if (ways.every((w) => w.name === ways[0]!.name)) return pick(ways[0]!);
-    const told = ways.filter((w) => written.has(w.name) || (columns?.has(w.name) ?? false));
+    const isTold = (v: { name: string }): boolean => written.has(v.name) || (columns?.has(v.name) ?? false);
+    // the names the statement or the tables give, first: one of them that the rule holds is the name
+    const told = variants.filter(isTold).filter(holdsWay);
     if (told.length === 1) return pick(told[0]!);
     if (told.length > 1) throw new UnreadableNames();
+    const held = variants.filter(holdsWay);
+    if (held.length === 1) return pick(held[0]!);
+    if (held.length === 0) throw new UnreadableNames();
+    // the same name every way (a break inside a run between two of its bytes, or beside an escaped space): any of them
+    if (held.every((w) => w.name === held[0]!.name)) return pick(held[0]!);
     if (columns === null) throw new NamesNeedColumns(relationsIn(o));
     throw new UnreadableNames();
   };

@@ -232,3 +232,58 @@ test("issue 956: a statement of 400 names made of line breaks and spaces is refu
   assert.match(e?.fields?.detail ?? "", /Mason gap name-unreadable/);
   assert.ok(took < 5000, `refused in ${Math.round(took)} ms`);
 });
+
+/** the analysed names of `sql`, or the refusal's message */
+async function namesOf(sql: string): Promise<string[] | string> {
+  const a = await analyze(catalog, sql, [], undefined, writtenNames((await parseSql(sql)).stmts![0]!.stmt)).catch((e: unknown) => e as Error);
+  if (a instanceof Error) return a.message;
+  return "refused" in a ? `refused ${a.refused.M}` : resnames(a.tree);
+}
+
+test("issue 956: any number of names that end in a line break, or hold one, are read exactly, never refused for the work", async () => {
+  // re-check of PR 974: a bound on the whole log's work refused 14 such names or more
+  const wrong: string[] = [];
+  for (const count of [2, 9, 14, 20, 39]) {
+    for (const pad of [1, 7, 13, 20, 31, 42, 55, 63]) {
+      for (const shape of [(i: number) => `note${i}\n`, (i: number) => `a${i}\nb`]) {
+        const names = Array.from({ length: count }, (_, i) => shape(i));
+        const sql = `SELECT s.* FROM (SELECT t.id AS ${"p".repeat(pad)}, ${names.map((n, i) => `t.x / ${i + 3} AS ${ident(n)}`).join(", ")} FROM t) s ORDER BY 1`;
+        const got = await namesOf(sql);
+        const want = ["p".repeat(pad), ...names];
+        if (JSON.stringify(got) !== JSON.stringify([...want, ...want])) wrong.push(`${count} names, pad ${pad}: ${JSON.stringify(got).slice(0, 200)}`);
+      }
+    }
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test("issue 956: a name of quotes and backslashes in turn is read exactly, alone and beside others", async () => {
+  // re-check of PR 974: a break inside it read as a space could split it in two strings, and the name was refused
+  const name = (i: number): string => `${"\"\\".repeat(30)}"A${String.fromCharCode(90 - i)}`;
+  const wrong: string[] = [];
+  for (let count = 1; count <= 4; count++) {
+    for (let pad = 1; pad <= 40; pad += 3) {
+      const names = Array.from({ length: count }, (_, i) => name(i));
+      const sql = `SELECT t.id AS ${"p".repeat(pad)}, ${names.map((n, i) => `t.x / ${i + 3} AS ${ident(n)}`).join(", ")} FROM t ORDER BY 1`;
+      const got = await namesOf(sql);
+      if (JSON.stringify(got) !== JSON.stringify(["p".repeat(pad), ...names])) wrong.push(`${count} names, pad ${pad}: ${JSON.stringify(got).slice(0, 200)}`);
+    }
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test("issue 956: a long statement of names of quotes and backslashes is read in about the time of a plain one of its size", async () => {
+  // re-check of PR 974: the log was parsed again for each way to read it, and a 64 KB statement held the listener's
+  // thread 1.56 s where main took 79 ms; the log is now walked once and parsed once
+  const list = `WHERE 1 IN (${Array.from({ length: 10730 }, (_, i) => i).join(", ")})`;
+  const odd = `SELECT ${Array.from({ length: 4 }, (_, i) => `t.id + ${i} AS ${ident(`${"\"\\".repeat(30)}"A${i}`)}`).join(", ")} FROM t ${list}`;
+  const plain = `SELECT ${Array.from({ length: 4 }, (_, i) => `t.id + ${i} AS q${i}`).join(", ")} FROM t ${list}`;
+  const timed = async (sql: string): Promise<number> => {
+    const written = writtenNames((await parseSql(sql)).stmts![0]!.stmt);
+    let best = Infinity;
+    for (let r = 0; r < 3; r++) { const t0 = performance.now(); await analyze(catalog, sql, [], undefined, written); best = Math.min(best, performance.now() - t0); }
+    return best;
+  };
+  const p = await timed(plain), q = await timed(odd);
+  assert.ok(q < 3 * p + 150, `the names took ${Math.round(q)} ms, a plain statement of the size ${Math.round(p)} ms`);
+});
