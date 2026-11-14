@@ -3,10 +3,15 @@
  * WHICH LINE A RELEASE IS ON, AND WHETHER IT IS THE NEWEST (.github/workflows/release.yml's `decide`;
  * release-notes/README.md "Release lines"; tests/release-line.test.ts).
  *
- *   git tag -l 'v*' | node scripts/release-line.ts <ref> <version>
+ *   git tag -l 'v*' | node scripts/release-line.ts <ref> <version>            newest=, npm_tag= and line_tag= lines
+ *   git ls-remote --tags --refs origin 'refs/tags/v*' | node scripts/release-line.ts <ref> <version> <key>
+ *                                                                              that one value alone (newest, npm_tag)
  *
- * prints `newest=`, `npm_tag=`, `line=` and `line_tag=` lines for GITHUB_OUTPUT, or says why the release is refused, on
- * stderr, with exit 1 (exit 2 on a bad argument). Only Node's builtins: `decide` runs it with no npm ci.
+ * The tags come on stdin, one a line, as `git tag -l` prints them (`v0.20.0`) or as `git ls-remote` does
+ * (`<sha>\trefs/tags/v0.20.0`). The first form is for GITHUB_OUTPUT. The second is THE RE-CHECK: a job that moves a
+ * name meaning "the newest" (npm's `latest`, the image's `latest`, GitHub's Latest) reads the remote's tags again just
+ * before it moves it (release.yml says why). A refused release says why on stderr, with exit 1 (exit 2 on a bad
+ * argument). Only Node's builtins: the jobs run it with no npm ci.
  *
  * A release from main may be on any line. A release from a branch must be on that branch's line: `release/0.19` releases
  * 0.19.x and nothing else, so a notes file of another line merged there by mistake never publishes. Any other ref
@@ -58,16 +63,24 @@ export function decideLine(ref: string, version: string, tags: readonly string[]
   return { newest, npmTag: newest ? "latest" : `latest-${line}`, line, lineTag };
 }
 
+/** The tag names in `git tag -l`'s or `git ls-remote`'s lines: `v0.20.0` either way. */
+export function tagNames(text: string): string[] {
+  return text.split("\n").map((l) => l.trim().split(/\s+/).pop() ?? "").filter((t) => t !== "")
+    .map((t) => t.replace(/^refs\/tags\//, ""));
+}
+
+const KEYS = ["newest", "npm_tag", "line_tag"] as const;
+
 function main(args: string[]): number {
-  const [ref, version] = args;
-  if (ref === undefined || version === undefined || args.length !== 2) {
-    process.stderr.write("usage: git tag -l 'v*' | node scripts/release-line.ts <ref> <version>\n");
+  const [ref, version, key] = args;
+  if (ref === undefined || version === undefined || args.length > 3 || (key !== undefined && !(KEYS as readonly string[]).includes(key))) {
+    process.stderr.write(`usage: git tag -l 'v*' | node scripts/release-line.ts <ref> <version> [${KEYS.join(" | ")}]\n`);
     return 2;
   }
-  const tags = fs.readFileSync(0, "utf8").split("\n").filter((t) => t.trim() !== "");
-  const d = decideLine(ref, version, tags);
+  const d = decideLine(ref, version, tagNames(fs.readFileSync(0, "utf8")));
   if ("problem" in d) { process.stderr.write(`${d.problem}\n`); return 1; }
-  process.stdout.write(`newest=${d.newest}\nnpm_tag=${d.npmTag}\nline=${d.line}\nline_tag=${d.lineTag}\n`);
+  const values: Record<(typeof KEYS)[number], string> = { newest: String(d.newest), npm_tag: d.npmTag, line_tag: String(d.lineTag) };
+  process.stdout.write(key === undefined ? KEYS.map((k) => `${k}=${values[k]}\n`).join("") : `${values[key as (typeof KEYS)[number]]}\n`);
   return 0;
 }
 

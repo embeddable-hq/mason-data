@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { decideLine } from "../scripts/release-line.ts";
+import { decideLine, tagNames } from "../scripts/release-line.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TAGS = ["v0.17.0", "v0.17.1", "v0.18.0", "v0.19.0", "v0.20.0"];
@@ -60,22 +60,66 @@ test("a branch not named release/<major>.<minor>, or no branch at all, releases 
   assert.ok("problem" in decideLine(MAIN, "0.20", TAGS));
 });
 
+const SCRIPT = path.join(ROOT, "scripts", "release-line.ts");
+const run = (input: string, ...args: string[]) => spawnSync(process.execPath, [SCRIPT, ...args], { input, encoding: "utf8" });
+
 test("the script prints decide's outputs, or refuses with exit 1 and the reason", () => {
-  const run = (ref: string, version: string) => spawnSync(process.execPath, [path.join(ROOT, "scripts", "release-line.ts"), ref, version],
-    { input: TAGS.join("\n") + "\n", encoding: "utf8" });
-  const ok = run("refs/heads/release/0.19", "0.19.1");
+  const ok = run(TAGS.join("\n") + "\n", "refs/heads/release/0.19", "0.19.1");
   assert.equal(ok.status, 0, ok.stderr);
-  assert.equal(ok.stdout, "newest=false\nnpm_tag=latest-0.19\nline=0.19\nline_tag=true\n");
-  const no = run("refs/heads/release/0.19", "0.21.0");
+  assert.equal(ok.stdout, "newest=false\nnpm_tag=latest-0.19\nline_tag=true\n");
+  const no = run(TAGS.join("\n") + "\n", "refs/heads/release/0.19", "0.21.0");
   assert.equal(no.status, 1);
   assert.equal(no.stdout, "");
   assert.match(no.stderr, /release\/0\.19 releases 0\.19\.x only/);
+  assert.equal(run("", "refs/heads/main", "0.20.1", "line").status, 2, "an unknown key is a bad argument");
 });
 
-test("release.yml's decide runs the script before it tags or publishes, and passes its outputs on", () => {
+test("the re-check reads git ls-remote's tags: a newer release tagged meanwhile keeps an older one off latest", () => {
+  const remote = (tags: string[]) => tags.map((t, i) => `${String(i).padStart(40, "0")}\trefs/tags/${t}\n`).join("");
+  assert.deepEqual(tagNames(remote(["v0.19.0", "v0.20.0"])), ["v0.19.0", "v0.20.0"]);
+  assert.deepEqual(tagNames("v0.19.0\nv0.20.0\n\n"), ["v0.19.0", "v0.20.0"]);
+  // decide saw 0.20.1 as the newest; by the publish, 0.21.0 was tagged by main's run
+  const before = run(remote(TAGS), "refs/heads/release/0.20", "0.20.1", "npm_tag");
+  assert.equal(before.status, 0, before.stderr);
+  assert.equal(before.stdout, "latest\n");
+  const after = run(remote([...TAGS, "v0.20.1", "v0.21.0"]), "refs/heads/release/0.20", "0.20.1", "npm_tag");
+  assert.equal(after.stdout, "latest-0.20\n");
+  assert.equal(run(remote([...TAGS, "v0.20.1", "v0.21.0"]), "refs/heads/release/0.20", "0.20.1", "newest").stdout, "false\n");
+  // the newer release's own re-check, with the older one tagged too, keeps latest
+  assert.equal(run(remote([...TAGS, "v0.20.1", "v0.21.0"]), MAIN, "0.21.0", "newest").stdout, "true\n");
+  // the re-check refuses what decide refuses
+  assert.equal(run(remote(TAGS), "refs/heads/release/0.19", "0.21.0", "npm_tag").status, 1);
+});
+
+/** One job of release.yml, by its name. */
+const job = (yml: string, name: string): string => new RegExp(`\\n  ${name}:\\n[\\s\\S]*?(?=\\n  [\\w-]+:\\n|$)`).exec(yml)?.[0] ?? "";
+
+test("release.yml checks the line before it tags, and re-checks the newest just before each move of latest", () => {
   const yml = fs.readFileSync(path.join(ROOT, ".github", "workflows", "release.yml"), "utf8");
-  const decide = /\n  decide:\n[\s\S]*?(?=\n  tag:\n)/.exec(yml)?.[0] ?? "";
-  assert.match(decide, /node scripts\/release-line\.ts "\$GITHUB_REF" "\$version"/);
-  for (const out of ["newest", "npm_tag", "line_tag"]) assert.match(decide, new RegExp(`${out}: \\$\\{\\{ steps\\.decide\\.outputs\\.${out} \\}\\}`));
+  assert.match(job(yml, "decide"), /node scripts\/release-line\.ts "\$GITHUB_REF" "\$version"/);
+  assert.match(job(yml, "decide"), /line_tag: \$\{\{ steps\.decide\.outputs\.line_tag \}\}/);
   assert.match(yml, /branches: \[main, 'release\/\*'\]/);
+  const recheck = /git ls-remote --tags --refs origin 'refs\/tags\/v\*' \| node scripts\/release-line\.ts "\$GITHUB_REF" "\$\w+" (\w+)/;
+  for (const [name, key] of [["extensions", "npm_tag"], ["cli", "npm_tag"], ["release", "newest"]] as const) {
+    const j = job(yml, name);
+    assert.equal(recheck.exec(j)?.[1], key, `${name} re-checks ${key} from the remote's tags`);
+  }
+  for (const name of ["extensions", "cli"]) assert.match(job(yml, name), /npm publish --access public --tag "\$tag"/);
+  const release = job(yml, "release");
+  assert.match(release, /if: steps\.newest\.outputs\.newest == 'true'[\s\S]*imagetools create --tag "\$IMAGE:latest"/);
+  assert.match(release, /--latest="\$NEWEST"/);
+  assert.match(release, /NEWEST: \$\{\{ steps\.newest\.outputs\.newest \}\}/);
+  // no name meaning "the newest" moves on decide's word alone
+  assert.doesNotMatch(yml, /needs\.decide\.outputs\.(newest|npm_tag)/);
+});
+
+test("a release run is never cancelled by another branch's push: the concurrency group is per branch", () => {
+  const yml = fs.readFileSync(path.join(ROOT, ".github", "workflows", "release.yml"), "utf8");
+  const group = /\nconcurrency:\n  group: (.+?)(?:\s+#[^\n]*)?\n  cancel-in-progress: (\w+)/.exec(yml);
+  assert.ok(group !== null, "release.yml has a concurrency group");
+  assert.equal(group[1], "release-${{ github.ref }}");
+  assert.equal(group[2], "false");
+  const images = fs.readFileSync(path.join(ROOT, ".github", "workflows", "images-publish.yml"), "utf8");
+  assert.match(images, /flavor: latest=\$\{\{ inputs\.version == '' && startsWith\(github\.ref, 'refs\/tags\/v'\) \}\}/,
+    "a release's image takes latest only from the release job's re-check");
 });

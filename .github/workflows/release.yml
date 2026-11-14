@@ -16,12 +16,23 @@
 # whose newest notes file is already released does nothing (`decide` says so), and so does one before the first notes
 # file exists.
 #
-# A PATCH ON AN OLDER LINE IS A MERGE TO ITS BRANCH, release/<major>.<minor> (release-notes/README.md "A patch on the
-# previous line"). The merge releases it in the same way as a merge to main. A release branch releases its own line
-# only: `decide` refuses any other version there, before anything is tagged or published. Only the newest release takes
-# the names that mean "the newest": npm's `latest` (an older line's patch is published under `latest-<major>.<minor>`),
-# the image's `latest`, and GitHub's Latest. The newest is the highest version among this release and every v* tag.
-# The image's line tag (`0.19`) moves only forward. scripts/release-line.ts decides all of it.
+# A PATCH ON A LINE'S BRANCH IS A MERGE TO IT, release/<major>.<minor> (release-notes/README.md "A patch on a line's
+# branch"). The merge releases it in the same way as a merge to main. A release branch releases its own line only:
+# `decide` refuses any other version there, before anything is tagged or published. Only the newest release takes the
+# names that mean "the newest": npm's `latest` (an older line's patch is published under `latest-<major>.<minor>`), the
+# image's `latest`, and GitHub's Latest. The newest is the highest version among this release and every v* tag. The
+# image's line tag (`0.19`) moves only forward. scripts/release-line.ts decides all of it.
+#
+# NO RELEASE RUN IS EVER CANCELLED, AND `latest` NEVER MOVES BACK. A concurrency group holds one running and one pending
+# run, and a third run REPLACES the pending one (cancel-in-progress only spares the running one). One group for every
+# branch would let a push to main cancel a pending release on release/0.19, and a security fix would silently not
+# ship. So the group is per branch: runs of different branches never cancel each other. On one branch, a replaced run
+# loses nothing that is not released again: the newer run reads the same newest notes, and releases them if they are
+# not released yet. Runs of two branches may then overlap, so `decide`'s view of "the newest" can be stale by the time a
+# job moves `latest`. Each move re-checks just before it, from the remote's tags (`git ls-remote`): npm's tag in the
+# extensions and cli jobs, right before `npm publish`, and the image's `latest` and GitHub's Latest in the release job,
+# last. Every run pushes its own tag first, minutes before it builds the image and publishes, so a newer release's tag
+# is on the remote long before its own publish, and an older one's re-check sees it.
 #
 # NO NPM CREDENTIAL IS STORED IN THIS REPOSITORY. Trusted publishing on npmjs.com, set up once by an owner of the
 # @mason-data org (Settings -> Trusted publisher -> GitHub Actions, repository embeddable-hq/mason-data, workflow
@@ -51,7 +62,7 @@ permissions:
   id-token: write    # npm's trusted publishing
 
 concurrency:
-  group: release
+  group: release-${{ github.ref }}   # per branch: a push to one never cancels a release pending on another (above)
   cancel-in-progress: false
 
 jobs:
@@ -60,8 +71,6 @@ jobs:
     outputs:
       version: ${{ steps.decide.outputs.version }}
       cli_publish: ${{ steps.decide.outputs.cli_publish }}
-      newest: ${{ steps.decide.outputs.newest }}
-      npm_tag: ${{ steps.decide.outputs.npm_tag }}
       line_tag: ${{ steps.decide.outputs.line_tag }}
     steps:
       - uses: actions/checkout@v4
@@ -88,8 +97,9 @@ jobs:
           if [ "$cli" != "$version" ]; then
             echo "cli/package.json is $cli, the newest release notes are v$version: they must agree" >&2; exit 1
           fi
-          # the release's line and whether it is the newest (scripts/release-line.ts): a release branch releases its own
-          # line only, and refuses here, before anything is tagged or published; the newest alone takes `latest`
+          # the release's line (scripts/release-line.ts): a release branch releases its own line only, and refuses here,
+          # before anything is tagged or published. `newest` is said for the log only: each job that moves `latest`
+          # re-checks it just before (the header says why)
           line="$(git tag -l 'v*' | node scripts/release-line.ts "$GITHUB_REF" "$version")"
           echo "$line"; echo "$line" >> "$GITHUB_OUTPUT"
           # the CLI is judged on its own: a release whose page exists but whose CLI never reached npm (the first publish
@@ -134,7 +144,6 @@ jobs:
     uses: ./.github/workflows/images-publish.yml
     with:
       version: ${{ needs.decide.outputs.version }}
-      latest: ${{ needs.decide.outputs.newest == 'true' }}
       line: ${{ needs.decide.outputs.line_tag == 'true' }}
     permissions:
       contents: read
@@ -165,13 +174,15 @@ jobs:
         env:
           # Empty when the secret is not set, which is the trusted-publishing case.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_TAG: ${{ needs.decide.outputs.npm_tag }}
         run: |
           set -euo pipefail
           for dir in cli/platforms/*/; do
             name="$(node -p "require('./${dir}package.json').name")"; version="$(node -p "require('./${dir}package.json').version")"
             if npm view "$name@$version" version >/dev/null 2>&1; then echo "$name $version is on npm already"; continue; fi
-            (cd "$dir" && npm publish --access public --tag "$NPM_TAG")
+            # the re-check, from the remote's tags, just before the publish moves a dist-tag (the header says why)
+            tag="$(git ls-remote --tags --refs origin 'refs/tags/v*' | node scripts/release-line.ts "$GITHUB_REF" "$version" npm_tag)"
+            echo "$name $version is published under $tag"
+            (cd "$dir" && npm publish --access public --tag "$tag")
           done
 
   cli:
@@ -192,12 +203,17 @@ jobs:
       # the package builds from the repo's src/ with the repo's TypeScript (cli/build.ts, its prepack); cli/ has no lock
       # of its own (its optional platform packages are published by the job before this one)
       - run: npm ci
-      - run: npm publish --access public --tag "$NPM_TAG"
-        working-directory: cli
+      - name: publish, under the dist-tag the remote's tags say now
         env:
           # Empty when the secret is not set, which is the trusted-publishing case.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_TAG: ${{ needs.decide.outputs.npm_tag }}
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./cli/package.json").version')"
+          # the re-check, from the remote's tags, just before the publish moves a dist-tag (the header says why)
+          tag="$(git ls-remote --tags --refs origin 'refs/tags/v*' | node scripts/release-line.ts "$GITHUB_REF" "$version" npm_tag)"
+          echo "@mason-data/cli $version is published under $tag"
+          cd cli && npm publish --access public --tag "$tag"
 
   release:
     needs: [decide, tag, image, extensions, cli]
@@ -207,13 +223,37 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'          # never 24: ci.yml's build job says why
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # the re-check, from the remote's tags, just before `latest` moves (the header says why)
+      - id: newest
+        env:
+          VERSION: ${{ needs.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+          newest="$(git ls-remote --tags --refs origin 'refs/tags/v*' | node scripts/release-line.ts "$GITHUB_REF" "$VERSION" newest)"
+          echo "v$VERSION is the newest release: $newest"
+          echo "newest=$newest" >> "$GITHUB_OUTPUT"
+      # the image's `latest`, on the newest release only: the image job published <version> and its line, never latest
+      - if: steps.newest.outputs.newest == 'true'
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/mason-data
+          VERSION: ${{ needs.decide.outputs.version }}
+        run: docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE:$VERSION"
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.decide.outputs.version }}
-          NEWEST: ${{ needs.decide.outputs.newest }}
+          NEWEST: ${{ steps.newest.outputs.newest }}
         run: |
           set -euo pipefail
           # the file's first line is the release's name; the rest is its body
           tail -n +2 "release-notes/v$VERSION.md" > /tmp/notes.md
-          # GitHub marks a new release Latest unless told not to, whatever its version: a patch on an older line is told
+          # Latest is set from the re-check, never left to GitHub, which would choose by date and version itself
           gh release create "v$VERSION" --title "Mason v$VERSION" --notes-file /tmp/notes.md --verify-tag --latest="$NEWEST"

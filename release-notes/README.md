@@ -35,8 +35,6 @@ A project is its folder: `mason.yml`, the sources file (`sources/<name>.yml`), `
   value means something else, such as which tables a role may read or what a user with no role reads.
 - **A project the previous patch accepted is now refused.** A value it took is now invalid. A file it read now fails
   to load. The start stops where it used to run.
-- **A setting the host sets is renamed or removed.** This is a `MASON_*` variable, or the variable the sources file
-  names for the URL. A setting under an old name stops the start, so a restart alone no longer works.
 
 These are not breaking changes, so they can go in a patch:
 
@@ -50,14 +48,18 @@ Not decided yet, so ask the owner before such a change goes in a patch:
   The project is read the same, but a host's script or alert can stop matching.
 - A change that makes Mason sync a table again whole after the upgrade, once, such as a new layout of the synced data.
   The project is read the same, but the restart reads every such table from the source again.
+- A renamed or removed setting the host sets: a `MASON_*` variable, or the variable the sources file names for the
+  URL. The project is read the same, but a setting under an old name stops the start, so a restart alone no longer
+  works.
 
 ## Is the next release a patch or a new line?
 
-Read `release-notes/next.md` before you choose the version.
+Read `release-notes/next.md` before you choose the version. A patch may have a "Before you upgrade" too, so that
+section alone does not decide it.
 
-- **It is a new line** when its "Before you upgrade" asks the reader to change a project's files or a setting, or says
-  that a project is read or refused differently. Then the version is the next minor version (`0.21.0`), and the
-  notes tell the reader to move the pin.
+- **It is a new line** when it holds a breaking change, by the definition above. Its "Before you upgrade" then asks
+  the reader to change a project's files, or says that a project is read or refused differently. The version is the
+  next minor version (`0.21.0`), and the notes tell the reader to move the pin.
 - **It is a patch** otherwise. Then the version is the next patch on the current line (`0.20.1`). Its "Before you
   upgrade" says that the pin needs no change (`v0.17.1.md` has the wording).
 
@@ -67,8 +69,9 @@ A release from `main` carries everything merged to `main`. So a breaking change 
 patch. The current line moves to its own branch first (the owner, 2026-11-14):
 
 - **Before the first breaking change merges to `main`, cut the current line's branch** (`release/0.20`) from `main`, at
-  the commit just before it. The coordinator cuts it before merging a PR whose release note goes under "Before you
-  upgrade", or that the review marks breaking.
+  the commit just before it. The trigger is a PR that the review marks breaking, by the definition above. The
+  coordinator does not merge that PR until the branch exists. An implementer cuts it, since the coordinator pushes
+  nothing.
 - **From then on, every patch on the current line is released from that branch,** security or not. It is released in
   the same way as a patch on the previous line (below). While it is the newest release, it takes `latest`.
 - **A fix needed on both lines goes to `main` first.** Then cherry-pick it to the branch, in its own PR.
@@ -78,6 +81,10 @@ patch. The current line moves to its own branch first (the owner, 2026-11-14):
 
 A security fix goes to the previous line as well as the current one. Each line that is no longer on `main` has a
 branch, `release/0.<minor>`.
+
+**Every `release/*` branch must be protected like `main`.** A push to one publishes a release. So it needs a ruleset
+like `main`'s: changes by PR only, the same required checks, no force-push and no deletion. The owner sets it up.
+Until it exists, a push to a release branch is a release that nobody reviewed.
 
 1. **Cut the branch once.** For the previous line, cut it from the line's newest tag:
    `git push origin 'v0.19.0^{commit}:refs/heads/release/0.19'`. For the current line, cut it from `main` at the
@@ -101,6 +108,10 @@ The newest release keeps the names that mean "the newest". A patch on an older l
   moves forward, to the line's highest patch. Only the newest release also gets `latest`.
 - **GitHub:** only the newest release is marked Latest.
 
-"The newest" is the highest version among this release and every `v*` tag (`scripts/release-line.ts`). Put the
-notes of a patch released from a branch on `main` as well, once it is released, so that `main` keeps every release's
-notes. `main` releases only its own newest notes, so an older file there releases nothing.
+"The newest" is the highest version among this release and every `v*` tag (`scripts/release-line.ts`). Each job
+that moves one of these names reads the tags again just before it does, so two releases at once never move `latest`
+back (`.github/workflows/release.yml` says how).
+
+**Never copy a branch's release notes to `main`.** `main` releases its newest notes file, and checks it against
+`cli/package.json`. A `v0.20.1.md` on a `main` that is at `0.20.0` fails every release run on `main` until
+`v0.21.0.md` lands. A patch's notes stay on its branch and in its GitHub release.
