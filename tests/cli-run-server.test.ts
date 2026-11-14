@@ -122,7 +122,7 @@ const requests = {
 };
 // the sync's events (src/duck/events.ts), as SyncEvents answers them, and the run's restarts (src/cli/supervise.ts)
 const eventAsks: Array<{ limit: number; since?: string; failed?: boolean }> = [];
-const syncEvent = { at: new Date(Date.now() - 120_000).toISOString(), kind: "poll_failed" as const, failed: true, table: "public.customers", message: "the poll failed, and is tried again at the next one", code: "ECONNRESET", origin: "src/duck/sync.ts:3640" };
+const syncEvent = { at: new Date(Date.now() - 120_000).toISOString(), kind: "poll_failed" as const, failed: true, table: "public.customers", message: "the poll failed, and is tried again at the next one", code: "ECONNRESET", origin: "src/duck/sync.ts:3640", tookMs: null };
 const events = { days: 7, recent: async (o: { limit: number; since?: string; failed?: boolean }) => { eventAsks.push(o); return [syncEvent]; } };
 let restarts: Array<{ at: string; reason: string; upSeconds: number }> = [];
 let restartsUnreadable = false;
@@ -930,7 +930,7 @@ test("the sync's events: /api/events passes its filters to the record, merges th
     const all = await get(`/api/events?limit=5&failed=1&since=${since}`);
     assert.equal(all.status, 200);
     assert.deepEqual(all.body, { keptDays: 7, events: [syncEvent,
-      { at: recent, kind: "restart", failed: true, table: null, message: "the run stopped (it was killed (SIGKILL: often the system out of memory)) after 3600 s up, and its supervisor started it again", code: "unknown", origin: null }] },
+      { at: recent, kind: "restart", failed: true, table: null, message: "the run stopped (it was killed (SIGKILL: often the system out of memory)) after 3600 s up, and its supervisor started it again", code: "unknown", origin: null, tookMs: null }] },
       "newest last; a restart older than the retention is not one of them");
     assert.deepEqual(eventAsks, [{ limit: 5, failed: true, scheduled: false, since }]);
     assert.deepEqual((await get("/api/events")).body.events, [syncEvent, (all.body.events as unknown[])[1]]);

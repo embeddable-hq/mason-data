@@ -49,6 +49,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   must match `busy`.
 - **A sync you start by hand that fails is now listed under Sync events**, as "Manual sync failed" (`sync_failed` in
   `mason logs --events`).
+- **The web page's Sync events list shows how long each sync took in a column of its own.** The Took column holds
+  it, such as `570 ms` or `7 min 57 s`, and you can sort the list by it. The message no longer ends with it there.
+  `mason logs --events --json` gives it as a new field, `tookMs`. A first sync's event now ends with its time as a
+  poll's does, such as `synced: 1,000 row(s) · 2.0 s`, where it said `in 2.00 s`. Events recorded before the upgrade
+  keep their time in the message.
 
 ## What was wrong and is now right
 
@@ -60,10 +65,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A `numeric` column with no precision now prints each value as your database does.** Rails makes such a column from
   `t.decimal`. Mason printed every value with the most decimals any value in the column had, so `12.5` read `12.50` and
   `0` read `0.00`. Now a plain `SELECT`, `::text`, arithmetic, `sum`, windows, subqueries and the binary
-  wire all give your database's text. A few readers still print the old way: `to_json` and its kin, `concat`,
-  `format`, `||`, `array_agg`, a row's text, a scalar subquery, `min`, `max`, `percentile_disc`, `mode()`, `sum(DISTINCT …)`, a
-  `UNION` without `ALL`, and a generated table's column. `docs/SQL-SUPPORT.md` lists them all, under
-  `mixed-scale-numeric`. A fix for most of them is planned.
+  wire all give your database's text. So does every way such a value is turned into text: `to_json` and the other
+  JSON functions, a row's text, `concat`, `format`, `||`, `string_agg`, an array's text, and the text of a `min`,
+  `max` or `sum`. `SELECT DISTINCT x::text` keeps `12.5` and `12.50` apart, as your database does. A few readers
+  still print the old way: `array_agg` itself, `min` and `max` themselves, a scalar subquery, `percentile_disc`,
+  `mode()`, a `UNION` without `ALL`, and a generated table's column. `docs/SQL-SUPPORT.md` lists them all, under
+  `mixed-scale-numeric`.
 - **A whole number beside a decimal column no longer loses the column's decimals.** This covers `div()` of two
   integers, an integer cast to `numeric`, a whole constant such as `2.5e2`, and a whole part of `extract`. When one
   met a decimal column in an `IN (SELECT …)`, a `UNION`, an `INTERSECT`, an `EXCEPT`, a `CASE`, a `COALESCE` or

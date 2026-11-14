@@ -305,7 +305,8 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
 - **Observability › Sync events** (`#observability/syncs`): the sync's events of the range — each first sync, each
   failure and recovery, each sync asked by hand (`synced`: `mason sync`, a table's **Sync now**) — newest first (**When**
   turns it round), with when, kind (in words: Manual sync, Full sync, Scheduled sync, Live sync, Scheduled sync failed…;
-  the code `mason logs --events` prints is its title), table and reason. The scheduled syncs that succeed (each poll on
+  the code `mason logs --events` prints is its title), table, reason and, in **Took**, how long a sync took (`570 ms`,
+  `7 min 57 s`: `tookMs`, said once, not again at the reason's end; **Took** sorts the longest first). The scheduled syncs that succeed (each poll on
   its schedule, and each minute the stream applied changes, a row a table) are listed only while **Scheduled syncs** is
   ticked, or one of their kinds is chosen: Mason is asked for them then (`?scheduled=1`), so they never push a failure
   out of the newest 500 read. **Failures only** asks Mason for the range's failures alone (`?failed=1`), so every failure
