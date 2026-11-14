@@ -11,8 +11,8 @@
  * (`TypeError`), and else `unknown` — said plainly, never an empty value that a filter could match by accident.
  *
  * THE ORIGIN (`originOf`) is the first stack frame in Mason's own code, as a file and a line ONLY
- * (`src/duck/sync.ts:1234`), relative to Mason's source root, in a checkout (`src/duck/sync.ts`) and in the built
- * package (`dist/src/duck/sync.js`, said as `src/duck/sync.js`) alike. A frame outside `src/` under that root (node_modules, `node:` internals,
+ * (`src/duck/sync.ts:1234`), relative to Mason's source root, in a checkout and in the built package alike (there the
+ * root is the package's `dist/`, and the file is the compiled one, its `.js` name and line). A frame outside `src/` under that root (node_modules, `node:` internals,
  * a test, any other path) is skipped; so is the frame of the error's own constructor (`new PgError`), which says where
  * errors are built, never where this one was, and a frame of the engine's thread bridge (`BRIDGES`), whose rejection
  * carries the caller's frames (src/duck/executor.ts `call`). No Mason frame: null. It never holds an absolute path, a

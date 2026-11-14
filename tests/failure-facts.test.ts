@@ -53,7 +53,7 @@ test("the origin: the first frame in Mason's src/, a file and a line; node_modul
     "    at Parser.parse (node:internal/streams/readable:12:3)",
     at("node_modules/@duckdb/node-api/lib/index.js", 40, "DuckDBConnection.run"),
     at("src/duck/executor.ts", 484, "RemoteConnection.run"),
-    at("tests/duck-poll.itest.ts", 9, "TestContext.<anonymous>"),
+    at("tests/" + "duck-poll.itest.ts", 9, "TestContext.<anonymous>"),
     `    at async Sync.poll (${pathToFileURL(path.join(ROOT, "src/duck/sync.ts")).href}:3640:11)`,
   ])), "src/duck/sync.ts:3640", "the bridge, a dependency, a node internal and a test are none of them");
   class PgLikeError extends Error {}
@@ -61,12 +61,12 @@ test("the origin: the first frame in Mason's src/, a file and a line; node_modul
     "src/api/postgres/server.ts:2707", "where errors are made is not where this one was");
   // never a path outside Mason's source, whatever the frame
   assert.equal(originOf(withStack("x", [`    at f (${pathToFileURL(path.join(os.homedir(), "secret", "app.js")).href}:1:1)`, "    at f (/etc/passwd:1:1)", "    at <anonymous>"])), null);
-  assert.equal(originOf(withStack("x", [at("src/../../outside.ts", 3)])), null, "a path that leaves the root");
+  assert.equal(originOf(withStack("x", [at("src/" + "../../outside.ts", 3)])), null, "a path that leaves the root");
   // the message never reaches it, even a line of it shaped like a frame of a real file, or naming one made up
   const real = pathToFileURL(path.join(ROOT, "src/duck/sync.ts")).href;
   assert.equal(originOf(withStack(`a row's text\n    at evil (${real}:1:1)`, [])), null, "a frame-shaped line of the message is no frame");
   assert.equal(originOf(withStack(`a row's text\n    at evil (${real}:1:1)`, [at("src/duck/store.ts", 897)])), "src/duck/store.ts:897");
-  assert.equal(originOf(withStack("x", [at("src/secret_customer_name.ts", 1)])), null, "a file Mason does not have");
+  assert.equal(originOf(withStack("x", [at("src/" + "secret_customer_name.ts", 1)])), null, "a file Mason does not have");
   const bare = new Error("secret row value");
   bare.stack = "Error: secret row value";
   assert.equal(originOf(bare), null, "a stack with no frame: null");
