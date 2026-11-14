@@ -8,6 +8,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   table, the 2,000-row preview took about 5 s and now takes about 0.6 s. Postgres still answers it faster, so there is
   more to do. The rows are the same kind as before: any rows of the join, as Postgres allows for a query with no ORDER
   BY.
+- **The SQL support list now says plainly what Mason prints for a `numeric` column with no precision.** Rails makes
+  one from `t.decimal`. Mason prints every value of such a column with the most decimals any of its values has, so
+  `12.5` reads `12.50` and `0` reads `0.00`. The values are right. Only their trailing zeros differ from Postgres's.
+  This was listed before, but it was hard to find. To get the same text from Mason and Postgres now, cast the column
+  to `numeric(p, s)` or use `round(x, s)`. A fix is planned.
 
 ## What was wrong and is now right
 
