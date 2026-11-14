@@ -129,11 +129,11 @@ and its own publication when none is named. A named publication is read and veri
 **Only these block a merge**: a wrong answer (rows, text, types, order or SQLSTATE that differ from Postgres's where
 Mason answers); a crash, hang or stuck state; synced data lost or corrupted; a security hole; a regression of what main
 got right; a red CI. Everything else is a note in the review, never a fix round and never an issue.
-- **A numeric is right when it matches Postgres's to 18 decimal places.** Trailing zeros may differ (2.5 beside 2.50),
-  and so may digits past the 18th. Values that differ only past the 18th may merge or match, in a UNION, a DISTINCT, an
-  IN or a join, where Postgres keeps them apart. List each such difference in `src/duck/gaps.ts` as a `differs` entry.
-  It never blocks a merge. A value off within 18 places still does (docs/DESIGN.md "A numeric is right to 18 decimal
-  places").
+- **A numeric is right when it matches Postgres's in two ways.** Its whole-number digits (left of the point) are the
+  same. And the value matches to 15 significant digits. So trailing zeros (2.5 beside 2.50) and digits past the 15th
+  significant digit may differ, as long as no whole-number digit does. Values that differ only there may merge or
+  match, in a UNION, a DISTINCT, an IN or a join, where Postgres keeps them apart. Such a difference never blocks a
+  merge. Anything outside the rule is a wrong answer, or is listed by name in `src/duck/gaps.ts` (docs/DESIGN.md "When a numeric is right").
 
 **Who merges what.**
 - The coordinator merges once nothing blocking is open, CI is green at the head, and it has read the whole diff. It
@@ -290,7 +290,7 @@ skill.
   machine whose page cache is smaller than the table.
 - **An approximate value cannot be compared for equality** (`src/lib/float-equal.ts`).
 - **A `numeric` Postgres computes exactly is computed by `src/lib/pg-numeric.ts`**, never DuckDB's double. The oracle
-  holds every numeric to Postgres's text. A difference within the 18-decimal rule ("Only these block a merge") is a
+  holds every numeric to Postgres's text. A difference within the numeric rule ("Only these block a merge") is a
   listed decision in its `KNOWN`, never a failure.
 
 ## Hard-won gotchas

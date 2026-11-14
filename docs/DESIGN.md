@@ -708,15 +708,17 @@ review", and `git show 9e20f15:.claude/workflows/pr-loop-slim.js`.
 a test seen failing without its fix; the coordinator alone merging, pinned to the head read; and acting only on words
 from the repository's people, since anyone can open an issue here.
 
-### A numeric is right to 18 decimal places (the owner, 2026-11-14)
+### When a numeric is right (the owner, 2026-11-14)
 
-**Decision (the owner, 2026-11-14).** "As long as mason matches postgres to 18 decimal places, that's acceptable." A
-`numeric` Mason returns is the right answer when it equals Postgres's value to 18 decimal places. Trailing zeros may
-differ: "2.5 vs 2.50 … that's a rendering difference, not a value difference." Digits past the 18th decimal place may
-differ too. So values that differ only there may compare equal in Mason, and be merged by a UNION or a DISTINCT, or
-matched by an IN or a join, where Postgres keeps them apart. Each such difference is a `differs` entry in
-`src/duck/gaps.ts`, and the oracle's `KNOWN` decides it. It never blocks a merge. A value off within 18 places, other
-rows for any other reason, a wrong type or a wrong SQLSTATE still block.
+**Decision (the owner, 2026-11-14).** A `numeric` Mason returns is right when:
+1. its whole-number digits (left of the decimal point) match Postgres's exactly; and
+2. the value matches Postgres's to 15 significant digits.
+
+So trailing zeros may differ: "2.5 vs 2.50 … that's a rendering difference, not a value difference." Digits past the
+15th significant digit may differ too, as long as no whole-number digit does. Values that differ only there may compare
+equal in Mason, and be merged by a UNION or a DISTINCT, or matched by an IN or a join, where Postgres keeps them apart.
+Such a difference is a `differs` entry in `src/duck/gaps.ts`, and the oracle's `KNOWN` decides it. It never blocks a
+merge. Anything outside the rule is a wrong answer, which blocks, or is listed by name in `src/duck/gaps.ts`.
 
 **Why.** The engine holds a numeric as a DECIMAL of at most 38 digits, and Postgres's numeric has no such limit. Two
 choices brought this up:
@@ -725,6 +727,20 @@ choices brought this up:
   rather than fail.
 - In issue 946, a column declared `numeric` with no precision prints every value at the column's largest scale (12.50
   for 12.5), and `min` / `max` print at that one scale too. The owner accepted it as a rendering difference.
+
+**Refined the same day.** The owner first said "as long as mason matches postgres to 18 decimal places, that's
+acceptable". That was replaced by the two parts above. 15 significant digits alone would let a large integer's last
+digits be wrong (an id of 19 digits off in its last four), so part 1 holds every whole-number digit exact.
+
+**The known edge.** With 13 or more whole-number digits, part 2 lets the decimals past the 15th significant digit
+differ: the cents on a total in the trillions. Mason still computes an exact sum exactly. The rule only says what is
+acceptable.
+
+**The listed exceptions.** A double holds whole numbers exactly only up to 2^53, about 9 × 10^15. These entries pass
+a numeric through a double, so each is within the rule below that and breaks part 1 above it, where it stays a named
+exception: `numeric-parameter`, `numeric-array`, `nested-exact-numeric`, `numeric-over-38-digits`, `numeric-stddev`
+(a double's 15 digits) and `numeric-quotient-compare` (doubles equal to 17 significant digits). `float-last-digit` is
+about float8, not numeric, and differs only in the 16th–17th digit.
 
 The oracle still compares a numeric's text, so each such difference is seen, and listed, never silently passed.
 
