@@ -97,7 +97,9 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   (src/duck/pgtree.ts `tableColumnThrough`: a synced table's, a generated parent's) is that text already, and kept as
   it is. A table built before (`jsonb_layout` NULL on its ledger row, `JSONB_LAYOUT`) is rewritten in place at `open`,
   with its ledger row in one transaction, before the catalog serves anything. Measured over 1 M rows of ~340-byte
-  documents on a loaded 4-core machine: a build that canonicalises took 24–32 s where one that does not took 2.5–3 s.
+  documents on a loaded 4-core machine: the canonical write took 27–42 s, a build without it 0.7–2.8 s, the rewrite in
+  place 29–45 s. `jsonbText` is the exact parser: a faster reader through JSON.parse turned a text that is no JSON into
+  a document twice, and was removed.
   `tests/duck-generated.test.ts` "issue 461", `tests/duck-jsonb-text.test.ts`, `tests/integration/duck-generated.itest.ts` `jtwice`.
 - **The run's connection is a session's, set up by the ONE set-up** (src/duck/store.ts `SessionSetup`: the session
   variable every Mason function reads first, the null order, the zone, the search_path, the settings `current_setting`

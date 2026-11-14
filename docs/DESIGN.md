@@ -1391,10 +1391,12 @@ src/duck/jsonb.ts `jsonbText` once a row), and every table's jsonb is canonical.
 as it is (src/duck/pgtree.ts `tableColumnThrough`) is that text already and is kept. A table an earlier Mason built is
 rewritten in place when the store opens, before the catalog serves it (`jsonb_layout` on its ledger row).
 
-`jsonbText` was made about twice as fast for it: V8's JSON.parse with each number a double would not keep handed over
-as its text, and a string with nothing to escape quoted whole, where the slow path parsed and quoted a character at a
-time (25 µs a 340-byte document). Over 1 M such documents on a loaded 4-core machine a build that canonicalises took
-24–32 s where one that does not took 2.5–3 s. A generated table that passes a jsonb column through pays nothing.
+Over 1 M documents of about 340 bytes, on a 4-core machine at load 7 to 14, the canonical write took 27–42 s where a
+build that does not canonicalise took 0.7–2.8 s, and the rewrite in place of an old build took 29–45 s. A generated
+table that passes a jsonb column through pays nothing. A faster reader (V8's JSON.parse, each number a double would not
+keep handed over as a marked string) was tried and removed on the owner's word: twice it turned a text that is no JSON
+into a document (a number in a key's place; an invalid value a later duplicate key replaced; a string a stray
+backslash left open). `jsonbText` is the exact parser, and `tests/duck-jsonb-text.test.ts` holds those inputs refused.
 
 **Why.** On 2026-11-12, Metabase's `SELECT jsonb_object_keys(payload) AS key, count(*) … GROUP BY 1 ORDER BY 2 DESC, 1`
 over 3 M rows took 172–264 s against Postgres's 4.4–8.4 s, and timed out above about 5 M rows. The profile here: the

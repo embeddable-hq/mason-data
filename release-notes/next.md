@@ -2,12 +2,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## Before you upgrade
 
-- **Allow for a longer first start if a generated table has a `jsonb` column.** At its first start after the upgrade,
-  Mason rewrites each such table's `jsonb` values once, in the form Postgres stores them. This takes about 10 seconds a
-  million rows. Nothing is served until it is done, and `/healthz` answers 503 meanwhile. The log names each table
-  rewritten. If your platform restarts a container that stays unhealthy, give the first start room in its health check
-  for your largest generated tables. The image's own check gives up after about 2 minutes 45 seconds, which is about
-  15 million rows.
+- **Allow for a longer first start if a generated table has a `jsonb` column.** At Mason's first start after the
+  upgrade, Mason rewrites each such table's `jsonb` values once, in the form Postgres stores them. This takes about 30
+  to 45 seconds a million rows on a 4-core machine. Nothing is served until it is done, and `/healthz` answers 503
+  meanwhile. The log names each table rewritten. If your platform restarts a container that stays unhealthy, give the
+  first start room in its health check for your largest generated tables. The image's own check gives up after about
+  2 minutes 45 seconds, which is about 4 million rows.
 - **Each synced table with a `numeric` column of no precision is synced again once, at the first start.** Mason now
   keeps each such value's own decimals (below), which the data synced before does not hold. The table serves its old
   data until then, and a large table takes about as long as its first sync did.
@@ -78,5 +78,5 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   built: keys in Postgres's order, each key once, at every depth. These reads are right, and as fast as on a synced
   table.
 - **A generated table that computes a `jsonb` column now takes longer to build.** Writing each value in Postgres's form
-  costs about 25 seconds a million rows on a 4-core machine. A `jsonb` column taken as it is from another table costs
+  costs about 30 to 40 seconds a million rows on a 4-core machine. A `jsonb` column taken as it is from another table costs
   nothing more.
