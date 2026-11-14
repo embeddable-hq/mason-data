@@ -269,7 +269,7 @@ test("mason status and wait in replication mode say where the stream is: its pos
     "position       0/1A2B3C8 · the database is at 0/1A2B4F0: 296 bytes behind (read 2.0 s ago)",
     "slot           holds 3.0 GiB of the database's WAL (extended) · 1.0 GiB more before Postgres invalidates it (max_slot_wal_keep_size) (read 2.0 s ago)",
     "last change    committed 5.0 s ago, applied 0.3 s after its commit",
-    "public.orders  streamed · 1,204 changes (1,000 inserts, 200 updates, 4 deletes) this run",
+    "public.orders  streamed · 1,000 added, 200 updated, 4 deleted this run",
     "shop.lines     getting the changes made since 2026-10-26 11:58 UTC: reading the changes, for 3.0 s · the stream holds 12 changes of it meanwhile",
     "public.events  left out: publication app_pub does not carry public.events: ALTER PUBLICATION app_pub ADD TABLE public.events",
     "public.big     not streamed yet: it is being read whole: it joins once synced and caught up by one poll",
@@ -868,7 +868,7 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
     folder: () => s.folder, root: app, home: path.join(app, ".mason"), version: "test", startedAt: Date.now(), sources: () => { const r = read(); return { file: "message" in r ? null : r, problem: null }; }, sourcesChanged: () => {}, log: () => {},
     readSource: () => { runEdits++; return read(); }, runUrl: s.url, listener: { running: () => [], cancel: (session) => ({ unknown: session }), openSessions: () => ({ open: 0, byClient: [] }) },
     logs: { capacity: 2000, recent: () => [] },
-    duck: { copies: () => usageCopies as never[], file: path.join(s.root, "duck.db"), poll: async (tables) => { polled.push(tables); return { at: "2026-11-07T10:00:00.000Z", tables: [] }; }, stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
+    duck: { copies: () => usageCopies as never[], file: path.join(s.root, "duck.db"), poll: async (tables) => { polled.push(tables); return { at: "2026-11-07T10:00:00.000Z", tables: tables.map((table, i) => ({ table, added: 1_200 + i, updated: 282_770, deleted: i, rows: 153_292_984, ms: 477_000 })) }; }, stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }), slowest: async () => [], durationsBy: async () => new Map([[Date.parse(sample.at), { p50: sample.durationP50Ms, p95: sample.durationP95Ms }]]), 
         lastUsed: async (u) => u.map(() => null) }, events: { days: 7, recent: async () => [] },
       usage: { days: 7, sampleSeconds: 60, samples: async (o) => { usageAsks.push(o); return [sample]; }, copySizes: async () => [{ table: "public.orders", bytes: 3 * 2 ** 20, at: "2026-10-28T09:10:00.000Z" }], lastMeasure: () => measure, statementTotals: () => ({ completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 }), lastDurations: () => null },
@@ -905,9 +905,9 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
     // a column the table lacks, said with the closest
     await same(["add", "customers", "--columns", "nme"], /public\.customers has no column \\"nme\\" — did you mean `name`\?/);
     // A SECOND ENTRY OF THE FILE THAT FAILS against the database: the add and the remove are refused, the file as it was
-    fs.writeFileSync(s.file, `kind: postgres\nurl: ${s.url}\ntables:\n  customers: {}\n  orders:\n    columns: [id, gone]\n`);
-    await same(["add", "products"], /mason\/sources\/shop\.yml: tables\.orders\.columns: public\.orders has no column gone \(its columns: [^)]*\) — fix it first, then add products/);
-    await same(["remove", "customers"], /mason\/sources\/shop\.yml: tables\.orders\.columns: public\.orders has no column gone \(its columns: [^)]*\) — fix it first, then remove customers/);
+    fs.writeFileSync(s.file, `kind: postgres\nurl: ${s.url}\ntables:\n  customers: {}\n  orders:\n    columns: [id, idd]\n`);
+    await same(["add", "products"], /mason\/sources\/shop\.yml: tables\.orders\.columns: public\.orders has no column idd — did you mean `id`\? \(its columns: [^)]*\) — fix it first, then add products/);
+    await same(["remove", "customers"], /mason\/sources\/shop\.yml: tables\.orders\.columns: public\.orders has no column idd — did you mean `id`\? \(its columns: [^)]*\) — fix it first, then remove customers/);
     // a name the file does not have, with the closest it has
     await same(["remove", "customer"], /shop\.yml names no table customer — did you mean `customers`\?/);
     // MASON USAGE asks the run's /api/usage and prints its answer: as it is under --json, a line a span for a person
@@ -981,6 +981,15 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
       assert.equal(all.code, 0, all.stdout + all.stderr);
       assert.deepEqual(polled, [["public.customers", "public.orders"]]);
       assert.deepEqual(nextOf(all.stdout), ["mason sync --all", "mason status"]);
+      // what each table's sync did, the rows added, updated and deleted apart (issue 1010): as data, and in words
+      assert.deepEqual((JSON.parse(all.stdout) as { tables: unknown[] }).tables, [
+        { table: "public.customers", added: 1_200, updated: 282_770, deleted: 0, rows: 153_292_984, ms: 477_000 },
+        { table: "public.orders", added: 1_201, updated: 282_770, deleted: 1, rows: 153_292_984, ms: 477_000 }]);
+      const said = await runMason(app, ["sync", "customers"], matrixEnv());
+      assert.equal(said.code, 0, said.stdout + said.stderr);
+      assert.match(said.stdout, /^Synced public\.customers: 1,200 added, 282,770 updated, 0 deleted\.\n/);
+      assert.match(said.stdout, /\n {2}public\.customers +1,200 added, 282,770 updated, 0 deleted, 153,292,984 rows now · 7 min 57 s\n/);
+      polled.length = 1;
       const both = await runMason(app, ["sync", "orders", "--all"], matrixEnv());
       assert.equal(both.code, 2);
       assert.match(both.stderr, /mason sync: --all syncs every added table: name tables \(orders\) or --all, not both/);
