@@ -18,7 +18,6 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `format`, `||`, `array_agg`, a row's text, and a `UNION` without `ALL`. A fix for those is planned.
   - **Before upgrading:** each synced table with such a column is synced again once, at the first start. It serves
     its old data until then. A large table takes as long as its first sync did.
-
 - **A polled table no longer costs an extra connection to your database now and then.** On some machines, Mason's
   timer for the next poll woke a moment early. Mason then connected to your database, found no table due yet, and
   connected again a moment later to poll it. Now every timer waits until its time has come.
