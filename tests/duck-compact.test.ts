@@ -15,7 +15,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { DuckStore, MASON_SCHEMA, pgErrorOf } from "../src/duck/store.ts";
 import type * as compactModule from "../src/duck/compact.ts";
-import { Sync, type AddedTable } from "../src/duck/sync.ts";
+import { Sync, type AddedTable, type TimerAt } from "../src/duck/sync.ts";
 import type { Source } from "../src/cli/preflight.ts";
 import type { DuckConnection } from "../src/duck/executor.ts";
 import { noCounts, type TableChanges } from "../src/duck/stream.ts";
@@ -427,7 +427,7 @@ test("a compaction's end never moves the next pass later: a polled table is poll
   try {
     await sync.open();
     await sync.stop();
-    const s = sync as unknown as { stopped: boolean; timer: NodeJS.Timeout | null; rearm: () => void; nextPassDelay: () => number | null; running: unknown;
+    const s = sync as unknown as { stopped: boolean; timer: TimerAt | null; rearm: () => void; nextPassDelay: () => number | null; running: unknown;
       kick: () => void };
     // a pass timed in 1 s, as a pass's end times it; rearm asked when the next due would be later: the timer stands
     s.stopped = false;
@@ -441,6 +441,6 @@ test("a compaction's end never moves the next pass later: a polled table is poll
     s.nextPassDelay = () => 10;
     s.rearm();
     assert.notEqual(s.timer, first, "an earlier one is taken");
-    clearTimeout(s.timer!); s.timer = null; s.stopped = true;
+    s.timer?.cancel(); s.timer = null; s.stopped = true;
   } finally { await store.close(); }
 });

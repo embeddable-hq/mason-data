@@ -15,7 +15,7 @@ import * as path from "node:path";
 import { DuckStore, MASON_SCHEMA } from "../src/duck/store.ts";
 import * as syncModule from "../src/duck/sync.ts";
 import * as explainModule from "../src/duck/explain.ts";
-import type { AddedTable, CopyState, StreamStatus, Sync as SyncClass, SyncMode, SyncReplication } from "../src/duck/sync.ts";
+import type { AddedTable, CopyState, StreamStatus, Sync as SyncClass, SyncMode, SyncReplication, TimerAt } from "../src/duck/sync.ts";
 import type { Source } from "../src/cli/preflight.ts";
 import { runState, type RunContext } from "../src/cli/run-server.ts";
 import { EVENT_KINDS, type SyncEventInput } from "../src/duck/events.ts";
@@ -382,12 +382,12 @@ test("a table not copied now says so in kept itself — waiting for its copy, it
 // refuses at once) and no pass runs (a timer set is read, then cleared)
 type Schedule = {
   nextPassDelay(): number | null; followUp(source: string): void; attach(): Promise<void>;
-  stopped: boolean; timer: NodeJS.Timeout | null; due: Map<string, number>; behind: Map<string, { why: string }>;
+  stopped: boolean; timer: TimerAt | null; due: Map<string, number>; behind: Map<string, { why: string }>;
   queued: Map<string, unknown>; rebuildingNow: { source: string; kind: string } | null;
 };
 const scheduleOf = (s: SyncClass): Schedule => s as unknown as Schedule;
 /** the sync's timer, read and cleared (null: none set), so no pass it would run ever starts */
-const takeTimer = (s: Schedule): NodeJS.Timeout | null => { const t = s.timer; if (t !== null) clearTimeout(t); s.timer = null; return t; };
+const takeTimer = (s: Schedule): TimerAt | null => { const t = s.timer; t?.cancel(); s.timer = null; return t; };
 const polledUnder = (n: string, sync: string): string =>
   `INSERT INTO ${MASON_SCHEMA}.poll_state (source, snapshot, polled_at, sync) VALUES ('public.${n}', '100:100:', '2026-10-27 19:58:39+00', '${sync}')`;
 
@@ -481,13 +481,13 @@ test("a table out of its copy is polled from then on: the timer is set again aft
       assert.notEqual(takeTimer(s), null, "the next pass timed for a's next poll");
       // mason sync b held the pass slot while a came out of its catch-up: its end times the next pass, replacing an
       // earlier timer (a's next poll moved: the old one would run a pass that polls nothing)
-      const stale = setTimeout(() => undefined, 7_200_000);
+      const stale = syncModule.timerAt(Date.now() + 7_200_000, () => undefined);
       s.timer = stale;
       await assert.rejects(sync.pollNow(["public.b"]), /no source in this test/);
       // the slot's release runs after the poll's failure reaches the caller: a turn later
       await new Promise((r) => setImmediate(r));
       const after = takeTimer(s);
-      clearTimeout(stale);
+      stale.cancel();
       assert.ok(after !== null && after !== stale, "mason sync's end set the timer again, from the state then");
     } finally { takeTimer(s); s.stopped = true; }
   });

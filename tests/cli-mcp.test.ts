@@ -464,6 +464,40 @@ test("query: rows and Postgres's types for a GROUP BY, an enum by its name, trun
   assert.ok(c.lines.every((l) => (JSON.parse(l) as { jsonrpc?: string }).jsonrpc === "2.0"), "stdout: JSON-RPC frames alone");
 });
 
+test("behind a pooler in transaction mode, query's and explain's timeout_ms leave nothing on the server connection: the next client has the listener's own statement_timeout (issue 930)", async () => {
+  const { PgConnection } = await import("../src/cdc/pg-wire.ts");
+  const { transactionPooler } = await import("./tx-pooler.ts");
+  const user = new URL(url);
+  const at = (port: number) => PgConnection.connect({ host: "127.0.0.1", port, database: "shop", user: decodeURIComponent(user.username),
+    password: decodeURIComponent(user.password), sslmode: "disable", applicationName: "the app", connectTimeoutMs: 10_000, textForms: [] });
+  const shownBy = async (port: number): Promise<string | null | undefined> => { const pg = await at(port); try { return (await pg.query("SHOW statement_timeout")).rows[0]?.[0]; } finally { pg.close(); } };
+  const listenerDefault = await shownBy(api.port);
+  const pooler = await transactionPooler({ host: "127.0.0.1", port: api.port });
+  try {
+    const via = new URL(url);
+    via.port = String(pooler.port);
+    // the pooler speaks no TLS: a client that asked for it first would wait for an answer it never forwards
+    via.searchParams.set("sslmode", "disable");
+    const c = await started(via.toString());
+    try {
+      // every way a call ends: an answer, a refusal, its own timeout, and EXPLAIN's answer and refusal
+      const ok = await c.call("query", { sql: "SELECT status, count(*) AS n FROM orders GROUP BY status ORDER BY status", timeout_ms: 1_234 });
+      assert.deepEqual(ok.structured.rows, [["paid", "3"], ["pending", "2"]], ok.text);
+      const refused = await c.call("query", { sql: "SELECT count(*) FROM orders JOIN customers USING (meta)", timeout_ms: 1_234 });
+      assert.equal((refused.structured.error as { sqlstate: string }).sqlstate, "0A000", refused.text);
+      const slow = await c.call("query", { sql: "SELECT count(*) FROM events a, events b WHERE (a.id::bigint * b.id) % 7 = 3", timeout_ms: 300 });
+      assert.equal((slow.structured.error as { sqlstate: string }).sqlstate, "57014", slow.text);
+      const plan = await c.call("explain", { sql: "SELECT count(*) FROM orders", timeout_ms: 1_234 });
+      assert.equal(plan.isError, undefined, plan.text);
+      const pos = await c.call("explain", { sql: "SELECT nope FROM orders", timeout_ms: 1_234 });
+      assert.equal((pos.structured.error as { position?: number }).position, "SELECT ".length + 1, "a refusal's position is the statement's, inside the transaction too");
+    } finally { await c.close(); }
+    // the application's next clients, given the same server connection
+    for (let i = 0; i < 2; i++) assert.equal(await shownBy(pooler.port), listenerDefault, `client ${i + 1} after mason mcp: the listener's own statement_timeout`);
+    assert.equal(pooler.serverConnections(), 1, "every client was given the one server connection");
+  } finally { pooler.close(); }
+});
+
 test("a cancelled request: its statement is cancelled where it runs, and it is answered no further", async () => {
   const c = await started();
   try {

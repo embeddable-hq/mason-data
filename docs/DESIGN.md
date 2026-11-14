@@ -362,7 +362,7 @@ an ordinary statement whose failure is that table's alone.
   in the synced data's file, and the check before each piece reads the free disk then, the spill's growth with it.
 - **The next pass is never moved later by a compaction.** Every rebuild's end re-times the passes (`followUp` →
   `rearm`); `rearm` set the timer from now, four times the last pass on, so with frequent compactions no polled table
-  was polled for 20 minutes (the review of PR 856). It now only ever moves the next pass earlier (`timerAts`).
+  was polled for 20 minutes (the review of PR 856). It now only ever moves the next pass earlier (the timer's `at`, `timerAt`).
 
 **Why it cannot be the merge issue 371 met.** That merge ran INSIDE a checkpoint, and a checkpoint that fails
 invalidates the database. A compaction is statements, measured on DuckDB 2.0.0 (a laptop, synthetic tables, one store
@@ -2026,7 +2026,7 @@ a client of the Postgres API like any tool, connected as a `mason user` by the U
 (`CommandSpec.stdout: "protocol"`): a failure to start is the failure shape on stderr, the MCP client's log. Its tools are named in Mason's words: `tables` (each copy's
 rows and how it is kept current), `describe` (columns, Postgres types, key, foreign keys), `query` (one statement through
 the extended protocol, `max_rows` the Execute's row count so the server stops there and says so, `timeout_ms` a
-`SET statement_timeout`) and `explain`; the agent's guide and `mason help mcp` are its resources. The rows and the kept
+`SET LOCAL statement_timeout` in a read-only transaction around the statement) and `explain`; the agent's guide and `mason help mcp` are its resources. The rows and the kept
 line come from `EXPLAIN (FORMAT JSON)`'s `Mason.Tables` over the wire, never the run's command server: a remote
 `mason serve` answers as a local run does, and the words are the sync's own, as `mason status` prints them. One
 EXPLAIN a table, a few at once: a union of them all failed whole for one table it could not plan, and left a refusal
