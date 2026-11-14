@@ -101,6 +101,28 @@
  *    list reads comes through the inner query as `__mason_c<i>`, unchanged, as it did before. A function or a VALUES list
  *    in the FROM is none of the three, and the statement stays as it was.
  *
+ * WITH NO ORDER BY, A PLAIN SIDE'S LIST IS COMPUTED OVER THE KEPT ROWS GATHERED (issue 463: Metabase's preview of a join
+ * to a table whose JSON fields it unfolds, `… LEFT JOIN (SELECT id, (j #>> array[$1]::text[])::text AS f, … FROM t) AS
+ * d … LIMIT 2000`, took 15–21 s against Postgres's 0.3–1.3 s over 3 M rows). The fetch above is a hash join whose side
+ * the engine scans whole, filtered by the kept rows' numbers: the list is computed for those rows, but a vector at a time
+ * as the scan meets them, a row or two in each, and each vector is a call of every Mason function on the executor
+ * worker (4,420 calls for 2,000 rows, about 5 s). So where there is no sort and the statement's list reads a column the
+ * side computes (`readsComputed`), the fetch reads only the rows the kept rows name, gathered by a SEMI join into full
+ * vectors (20 calls, about 0.6 s):
+ *
+ *      WITH __mason_late AS MATERIALIZED (SELECT … LIMIT …)
+ *      SELECT <the list as written> FROM __mason_late LEFT JOIN a ON a.rowid = __mason_late.__mason_r1
+ *      LEFT JOIN (SELECT <the derived list>, t.rowid AS __mason_rid FROM t
+ *                 WHERE t.rowid IN (SELECT __mason_late.__mason_r2 FROM __mason_late)) AS d ON d.__mason_rid = __mason_late.__mason_r2
+ *
+ *    THE SAME ROWS, WHATEVER THE JOIN: the fetch joins on `d.__mason_rid = __mason_late.__mason_r2`, so a row of t whose
+ *    number no kept row holds matches nothing, and leaving it out of the fetch changes no row; a kept row whose number is
+ *    NULL (an outer join supplied none) finds none either way. This holds for every kind of join, since the kept rows are
+ *    the inner query's, chosen as before. The kept rows are read twice, so they are a WITH query MATERIALIZED: an
+ *    unordered LIMIT may keep other rows each time it runs, and the fetch must name the rows the outer query reads. A
+ *    side the list reads only plain columns of stays as it was (the engine leaves its unread columns out of the fetch),
+ *    and so does a sorted statement.
+ *
  * A QUERY WHOSE ONE FROM ITEM IS A PROJECTION AND A WHERE OVER FROM ITEMS IS FOLDED INTO IT FIRST (`fold`: a view of a
  * join, `SELECT * FROM (<join>) t LIMIT 100`, a WITH query over a join, a view of a view), the way Postgres pulls a
  * subquery up: each column of the wrapper read as the expression it is, the WHEREs and'd. Nothing there is volatile, so
@@ -1281,13 +1303,42 @@ function ownTable(t: Body): AstNode { const { catalogname: _c, ...rest } = t; re
 
 /** a plain side as a FROM item: the query it was, each row exposing its row number; a walled read it reads keeps its
  *  filter, its barrier and its wall, whether or not the side keeps its own WHERE */
-function exposed(side: PlainSide, alias: Body, where: boolean, wall: string | null): AstNode {
+function exposed(side: PlainSide, alias: Body, where: boolean, wall: string | null, chosen: AstNode | null = null): AstNode {
   const { whereClause, ...rest } = side.body;
-  return { RangeSubselect: { alias: structuredClone(alias), subquery: { SelectStmt: structuredClone({ ...rest,
+  return { RangeSubselect: { alias: structuredClone(alias), subquery: { SelectStmt: { ...structuredClone({ ...rest,
     targetList: [...side.list, { ResTarget: { name: ROW_ID, val: side.id } }],
     fromClause: [side.walled ? walledExposed(side.source, wall!) : ownTable(bodyOf(side.source))],
-    ...(where && whereClause !== undefined ? { whereClause } : {}) }) } } };
+    ...(where && whereClause !== undefined ? { whereClause } : {}) }), ...(chosen !== null ? { whereClause: chosen } : {}) } } } };
 }
+
+/** whether the statement's list reads a column a plain side computes (a value no bare column is), which its fetch
+ *  computes as its scan meets the kept rows: a column of that name qualified by the side's name or bare (a bare name may
+ *  be the side's), the side's `*`, or its whole row. What no one reads, the engine leaves out of the fetch */
+function readsComputed(side: PlainSide, alias: string, list: unknown): boolean {
+  const computed = new Set(side.list.flatMap((t) => kindOf(bodyOf(t).val) === "ColumnRef" ? [] : [outputName(t) ?? ""]));
+  if (computed.size === 0) return false;
+  let reads = false;
+  const walk = (n: unknown): void => {
+    if (reads) return;
+    if (Array.isArray(n)) { n.forEach(walk); return; }
+    if (!isObject(n)) return;
+    if (kindOf(n) === "ColumnRef" && isObject(n.ColumnRef)) {
+      const names = fieldNames(n.ColumnRef);
+      const last = names.at(-1);
+      // (a column qualified by another item's name is that item's; a bare name may be the side's)
+      reads = names.length === 1 ? last === alias || computed.has(String(last)) || computed.has("") : names.at(-2) === alias && (last === null || computed.has(String(last)) || computed.has(""));
+      return;
+    }
+    Object.values(n).forEach(walk);
+  };
+  walk(list);
+  return reads;
+}
+
+/** `id IN (SELECT __mason_late.<column> FROM __mason_late)`: the fetched rows of a side, those the chosen rows name */
+const inChosen = (id: AstNode, column: string): AstNode => ({ SubLink: { subLinkType: "ANY_SUBLINK", testexpr: structuredClone(id), subselect: { SelectStmt: {
+  targetList: [{ ResTarget: { val: ref(LATE, column) } }], fromClause: [{ RangeVar: { relname: LATE, inh: true, relpersistence: "p" } }],
+  limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE" } } } });
 
 /** the same tree with every column of a carried item replaced by `__mason_late.__mason_c<i>`, which `columns` names */
 function overCarried(n: unknown, carried: readonly Listed[], columns: Map<string, { name: string; val: AstNode }>): unknown {
@@ -1540,18 +1591,27 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
   ...(sorts.length > 0 ? { sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: volatileKeys ? ref(`__mason_o${i + 1}`) : keys[i] } })) } : {}) };
   // the preserved item is a derived table now, which a schema's name cannot qualify: its columns are read by its name alone
   const inner: Body = { ...(lead === null ? inner0 : shortened(inner0, aliases[lead.at]!) as Body), fromClause: from };
-  let joined: AstNode = { RangeSubselect: { subquery: { SelectStmt: inner }, alias: { aliasname: LATE } } };
+  // THE DERIVED LIST OVER THE CHOSEN ROWS GATHERED (issue 463): a plain side's fetch scans its whole table, and hands its
+  // list the chosen rows a vector at a time as the scan meets them, a row or two in each, a call of every Mason function
+  // a vector. With no sort, its fetch reads only the rows whose numbers the chosen rows hold, gathered by a SEMI join
+  // into full vectors; the chosen rows are then a WITH query read twice, MATERIALIZED, so both reads are the one set of
+  // rows (see above)
+  const narrowed = sorts.length === 0 && on === null
+    ? new Set(fetched.flatMap((t, i) => { const side = sides[t.at]; return side !== null && side !== undefined && readsComputed(side, t.alias, list) ? [i] : []; })) : new Set<number>();
+  let joined: AstNode = narrowed.size > 0 ? { RangeVar: { relname: LATE, inh: true, relpersistence: "p" } } : { RangeSubselect: { subquery: { SelectStmt: inner }, alias: { aliasname: LATE } } };
   // the fetch reads a walled read through itself again, filter, barrier and wall: one more wall each
   let walls = 0;
   fetched.forEach((t, i) => {
     const side = sides[t.at];
     const walled = listed[t.at]!.kind === "walled";
     if (walled || side?.walled === true) walls++;
-    const rarg = side !== null && side !== undefined ? exposed(side, bodyOf(t.node).alias as Body, false, wall) : walled ? walledExposed(t.node, wall!) : ownTable(bodyOf(t.node));
+    const rarg = side !== null && side !== undefined ? exposed(side, bodyOf(t.node).alias as Body, false, wall, narrowed.has(i) ? inChosen(side.id, `__mason_r${i + 1}`) : null)
+      : walled ? walledExposed(t.node, wall!) : ownTable(bodyOf(t.node));
     joined = { JoinExpr: { jointype: "JOIN_LEFT", larg: joined, rarg, quals: { A_Expr: {
       kind: "AEXPR_OP", name: [S("=")], lexpr: structuredClone(t.id), rexpr: ref(LATE, `__mason_r${i + 1}`) } } } };
   });
   return { walls, select: { SelectStmt: {
+    ...(narrowed.size > 0 ? { withClause: { ctes: [{ CommonTableExpr: { ctename: LATE, ctematerialized: "CTEMaterializeAlways", ctequery: { SelectStmt: inner } } }] } } : {}),
     targetList: list,
     fromClause: [joined],
     ...(sorts.length > 0 ? { sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: ref(LATE, `__mason_o${i + 1}`) } })) } : {}),
