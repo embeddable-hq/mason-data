@@ -26,7 +26,7 @@
  * answered differently. The rewritten tree is printed with pgsql-deparser; the server parses the printed text again
  * and refuses the statement unless it reads back as exactly this tree (`sameTree`), so a printing gap can only refuse.
  */
-import { HELD, heldType, isHeldArray, ZONED_HELD } from "./held-types.ts";
+import { HELD, heldType, isHeldArray, PARAM_ARRAYS, ZONED_HELD } from "./held-types.ts";
 import { pgEvalSync } from "./pg-eval.ts";
 import type { GapId, PostgresRefuses } from "./gaps.ts";
 import type { PgAnalysis } from "./analyze.ts";
@@ -3967,6 +3967,39 @@ class Rewriter {
     return caseWhen([[guards.length === 1 ? guards[0]! : and(guards), { A_Expr: b }]], keyed);
   }
 
+  /**
+   * A NUMERIC[] PARAMETER UNDER ANY OR ALL, compared with a value the engine holds exactly (issues 583, 983): `x =
+   * ANY($1)`, `x <> ALL($1::numeric[])`, `x < ANY($1)` — never the elements' doubles, which equate and order values
+   * Postgres tells apart past 15 digits. Each side by its exact key, as `numericParamComparison` keys a scalar one: x's
+   * text (or its program's) and each element's text as Postgres's array_in read it (src/duck/analyze.ts readParameters),
+   * `__mason_numeric_key` to equate and `__mason_numeric_order` to order (NaN above every number, a NULL element NULL, so
+   * SQL's three values are ANY's and ALL's). The parameter cast to nothing but numeric[] with no typmod; null for any
+   * other form, left as it was (the elements' doubles).
+   */
+  private numericArrayComparison(b: Body): AstNode | null {
+    const kind = String(b.kind), name = lastName(b.name);
+    if (kind !== "AEXPR_OP_ANY" && kind !== "AEXPR_OP_ALL") return null;
+    const equating = ["=", "<>", "!="].includes(name), ordering = ["<", "<=", ">", ">="].includes(name);
+    const l = b.lexpr, r = b.rexpr;
+    if ((!equating && !ordering) || !isNode(l) || !isNode(r)) return null;
+    let p = r;
+    while (kindOf(p) === "TypeCast" && isNode(bodyOf(p).arg)) {
+      const t = bodyOf(p).typeName;
+      if (!["numeric", "decimal"].includes(lastName(t?.names)) || ((t?.typmods ?? []) as unknown[]).length > 0 || !Array.isArray(t?.arrayBounds)) return null;
+      p = bodyOf(p).arg as AstNode;
+    }
+    if (kindOf(p) !== "ParamRef" || this.params[Number(bodyOf(p).number) - 1] !== NUMERIC_ARRAY) return null;
+    const lt = this.typeOf(l);
+    if (lt !== NUMERIC && (lt === null || !INTEGERS.has(lt))) return null;
+    const left = this.duckExact(l) ? cast(l, ["varchar"]) : this.exactText(l);
+    if (left === null) return null;
+    const f = equating ? "__mason_numeric_key" : "__mason_numeric_order";
+    const e = (): AstNode => ({ ColumnRef: { fields: [S("__mason_e")] } });
+    // (a parameter of the rewrite's own, never the statement's node: that one's rule, `param`, refuses a numeric[])
+    const elements = fn("from_json", [cast({ ParamRef: { number: Number(bodyOf(p).number) } }, ["varchar"]), strConst('["VARCHAR"]')]);
+    return { A_Expr: { ...b, lexpr: fn(f, [left]), rexpr: fn("list_transform", [elements, op("->", e(), fn(f, [e()]))]) } };
+  }
+
   /** CASE x WHEN $1 …, x a value the engine holds exactly and a WHEN a numeric parameter (issue 214): each WHEN written
    *  as the comparison it is, x = v, the parameter's by `numericParamComparison` (Postgres resolved each WHEN's `=` as
    *  numeric's: every operand is a numeric or an integer, one a numeric parameter); x read once a WHEN, as CASE reads it */
@@ -4977,6 +5010,8 @@ class Rewriter {
     // bound value, else by exact keys — never the parameter's double (issue 214)
     const viaParameter = this.numericParamComparison(b);
     if (viaParameter !== null) return viaParameter;
+    const viaArray = this.numericArrayComparison(b);
+    if (viaArray !== null) return viaArray;
     // a numeric decided exactly, compared for equality: by its exact key, the other side by its own (exactKey)
     if (b.kind === "AEXPR_OP" && (name === "=" || name === "<>" || name === "!=") && a0 === NUMERIC && a1 === NUMERIC && l !== undefined && r !== undefined) {
       const sides = this.exactEquality(l, r);
@@ -6281,8 +6316,22 @@ class Rewriter {
     // engine's double (a program over its `$n` cell where its digits are printed, `exactOf`); one COMPARED with a value
     // the engine holds exactly never reaches here (`numericParamComparison`, issue 214)
     const oid = this.params[Number(b.number) - 1];
-    // a text array is bound as the JSON Postgres read it to (src/duck/analyze.ts readParameters)
-    if (oid === TEXT_ARRAY || oid === VARCHAR_ARRAY) return fn("from_json", [cast({ ParamRef: b }, ["varchar"]), strConst('["VARCHAR"]')]);
+    // an array is bound as the JSON list of its elements' texts Postgres's array_in read it to (src/duck/analyze.ts
+    // readParameters, issue 983), each element then cast to its type as a scalar parameter is: never DuckDB's cast of
+    // the array's text, which reads no quoted element (node-pg binds `'{"1","3"}'`). A numeric[] compared by ANY or
+    // ALL with a value the engine holds exactly never reaches here (`numericArrayComparison`); read anywhere else it is
+    // refused by name, since no list type of the engine holds every element exactly (its doubles were wrong past 15
+    // digits, and printed at a scale of their own)
+    const element = oid === undefined ? undefined : PARAM_ARRAYS.get(oid);
+    if (element === NUMERIC) {
+      throw new Unrewritable(`a numeric[] parameter ($${String(b.number)}) is supported by Mason only compared by ANY or ALL with a number`,
+        "compare it: x = ANY($1), x <> ALL($1), or bind each value: x IN ($1, $2)", "numeric-array-parameter");
+    }
+    if (element !== undefined) {
+      const texts = fn("from_json", [cast({ ParamRef: b }, ["varchar"]), strConst('["VARCHAR"]')]);
+      const type = duckTypeOf(element);
+      return type === null || type[0] === "varchar" ? texts : arrayCast(texts, type[0]!);
+    }
     const asEnum = oid === undefined || !this.enums.labels.has(oid) ? null : this.enumValue({ ParamRef: b }, oid, null);
     if (asEnum !== null) return asEnum;
     const type = oid === undefined ? null : oid === NUMERIC ? ["double"] : duckTypeOf(oid);

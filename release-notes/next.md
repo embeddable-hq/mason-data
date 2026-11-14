@@ -12,6 +12,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **A list of values passed as one query parameter now works, as node-pg passes it.** node-pg, and the ORMs built on
+  it, send a JavaScript array as text such as `{"1","3"}`, and let the database work out its type. Mason answered
+  `WHERE id = ANY($1)` and `WHERE id = ANY($1::int[])` with an error for such a value. Now it answers them as Postgres
+  does, for arrays of integers, text, uuids, numerics, booleans, dates, timestamps and floats. That includes an empty
+  array, NULL elements and quoted elements that hold commas or braces. An array sent in binary, as Npgsql sends it,
+  works too. A `numeric[]` parameter is compared with every digit kept. It is answered only in `= ANY`, `<> ALL` and
+  the other comparisons with `ANY` or `ALL`. Elsewhere Mason refuses it by name and says what to write instead.
 - **A table under `sync: replication` no longer blocks `ALTER TABLE … DROP COLUMN` on your database.** On Postgres 15
   and later, the publication Mason makes for itself listed each table's columns. So your database refused to drop a
   listed column, with "publication … depends on column", and never sent a column added later. Mason's publication now

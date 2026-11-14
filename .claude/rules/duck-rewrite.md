@@ -451,6 +451,12 @@ paths:
 - **A literal or a parameter of a held type is Postgres's text of it** (`pgEvalSync`, `readParameters`), so `'0800.2b01.0203'`
   equals the column. A money's text is the source's lc_monetary's, which no other Postgres writes, so its literal
   is refused (`literal: false`).
+- **An array parameter is read by Postgres's own array_in, never by the engine's cast of its text** (issue 983:
+  node-pg binds `'{"1","3"}'`, which DuckDB's cast cannot read). `PARAM_ARRAYS` (src/duck/held-types.ts) is the one
+  list: `readParameters` reads the value in the catalog into the JSON of its elements' texts, `param` binds it as a
+  list of the element type, and a binary Bind is decoded to the same literal (`arrayFromBinary`). A numeric[] is
+  compared by ANY or ALL on exact keys (`numericArrayComparison`) and refused anywhere else
+  (`numeric-array-parameter`): no list of the engine holds every element exactly.
 - **A type a database made is declared in the catalog under its name, with nothing over it** (`PgColumn.made`, `catalogDdl`):
   a tool reads its name, and what Postgres's analysis cannot find over it is the gap, never Postgres's 42883
   (`madeTypeRefusal`). All such types are one allowlist key (`made`). A domain's column is its base type (`domain-column`).

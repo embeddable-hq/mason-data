@@ -8,7 +8,7 @@
 import { deparseSync, QuoteUtils } from "pgsql-deparser";
 import type { Node } from "libpg-query";
 import { HELD_ROW_INPUT, HELD_TYPE_INPUT } from "../api/postgres/schema.ts";
-import { heldName, heldType, isHeldArray } from "./held-types.ts";
+import { heldName, heldType, isHeldArray, PARAM_ARRAYS } from "./held-types.ts";
 import { collationOids, functionsCalled, outputExpressions, textOrdering, type TreeValue } from "./pgtree.ts";
 import { gapRefusal, StatementError, type DuckPlan } from "./statement.ts";
 import { parseSql } from "../api/postgres/parser.ts";
@@ -166,15 +166,22 @@ export async function duckParameters(catalog: (bytes: Uint8Array) => Promise<Uin
       ? gapRefusal("multidim-array", `a multi-dimensional array as parameter $${read.parameter} is not supported by Mason`, "bind a one-dimensional array")
       : gapRefusal("array-lower-bound", `an array whose subscripts do not start at 1 as parameter $${read.parameter} is not supported by Mason`, "bind the array without its bounds ('{a,b}', not '[2:3]={a,b}')");
   }
+  const le = (n: bigint, bytes: number): number[] => Array.from({ length: bytes }, (_, k) => Number((BigInt.asUintN(bytes * 8, n) >> BigInt(8 * k)) & 255n));
+  // one value of a scalar type, as DuckDB reads it
+  const duckText = (oid: number, text: string): string | null => {
+    if (/^-?infinity$/.test(text)) return text;
+    if (oid === 1082) return datumText(1082, le(BigInt(text), 4));
+    if (oid === 1114 || oid === 1184) return datumText(oid, le(BigInt(text), 8));
+    if (oid === 1186) { const [m, d, us] = text.split(" "); return `${m} months ${d} days ${us} microseconds`; }
+    return text;
+  };
   return values.map((v, i) => {
     const r = read.values[i];
     if (v === null || r === undefined || r === null) return v;
-    if (/^-?infinity$/.test(r.text)) return r.text;
-    const le = (n: bigint, bytes: number): number[] => Array.from({ length: bytes }, (_, k) => Number((BigInt.asUintN(bytes * 8, n) >> BigInt(8 * k)) & 255n));
-    if (r.oid === 1082) return datumText(1082, le(BigInt(r.text), 4));
-    if (r.oid === 1114 || r.oid === 1184) return datumText(r.oid, le(BigInt(r.text), 8));
-    if (r.oid === 1186) { const [m, d, us] = r.text.split(" "); return `${m} months ${d} days ${us} microseconds`; }
-    return r.text;
+    // an array: the JSON list of its elements' texts, each as DuckDB reads its element type (Rewriter.param reads it)
+    const element = PARAM_ARRAYS.get(r.oid);
+    if (element !== undefined) return JSON.stringify((JSON.parse(r.text) as Array<string | null>).map((e) => e === null ? null : duckText(element, e)));
+    return duckText(r.oid, r.text);
   });
 }
 

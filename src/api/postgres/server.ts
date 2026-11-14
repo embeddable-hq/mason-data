@@ -67,6 +67,7 @@ import * as net from "node:net";
 import * as tls from "node:tls";
 import type { RawStmt } from "libpg-query";
 import { catalogRows } from "../../duck/analyze.ts";
+import { PARAM_ARRAYS } from "../../duck/held-types.ts";
 import type { Planner } from "../../duck/generated-plan.ts";
 import { ADDRESS_NOT_ALLOWED, ApiError, USER_DISABLED } from "../error.ts";
 import { hashCaller, outcomeOf, SLOW_MS, storedPayload, type ApiLogRow, type StoredPlan } from "../request-log.ts";
@@ -2576,7 +2577,8 @@ class Session {
       const format = m.paramFormats.length === 0 ? 0 : m.paramFormats.length === 1 ? m.paramFormats[0]! : m.paramFormats[i] ?? 0;
       if (format === 0) return p.toString("utf8");
       const oid = statement.paramOids[i] || planned?.params[i] || 0;
-      if (TEXT_ARRAYS.has(oid)) return textArrayFromBinary(p, i, oid === 1015 ? 1043 : 25);
+      const element = PARAM_ARRAYS.get(oid);
+      if (element !== undefined) return arrayFromBinary(p, i, element);
       const type = oidOf(statement.paramOids[i] ?? 0) ?? (planned !== undefined ? oidOf(planned.params[i] ?? 0) : undefined) ?? "text";
       return decodeBinaryParam(type, p, i);
     });
@@ -2939,20 +2941,32 @@ const PG_EPOCH_MS = Date.UTC(2000, 0, 1);
 /** an element type's name, as array_recv's 42804 says it */
 const ELEMENT_NAMES: Record<number, string> = { 25: "text", 1043: "character varying", 16: "boolean", 20: "bigint", 21: "smallint", 23: "integer", 700: "real", 701: "double precision", 1700: "numeric", 2950: "uuid", 1082: "date", 1114: "timestamp without time zone", 1184: "timestamp with time zone", 3802: "jsonb", 114: "json" };
 
-/** text[] and varchar[], the array types whose binary form a Bind is decoded from (textArrayFromBinary) */
-const TEXT_ARRAYS = new Set([1009, 1015]);
+/** the bytes each fixed-length element type's binary form holds (its typlen) */
+const ELEMENT_SIZES: Record<number, number> = { 16: 1, 21: 2, 23: 4, 20: 8, 700: 4, 701: 8, 2950: 16, 1082: 4, 1114: 8, 1184: 8 };
+
+/** one element of a binary array, as text its type's input function reads to the same value */
+function elementFromBinary(element: number, bytes: Buffer, i: number, k: number): string {
+  if (element === 25 || element === 1043) return utf8Element(bytes);
+  const size = ELEMENT_SIZES[element];
+  // the element's own recv reads past its bytes (pq_getmsgint's 08P01), or leaves some unread (ReadArrayBinary's 22P03)
+  if (size !== undefined && bytes.length < size) throw new PgError({ code: "08P01", message: "insufficient data left in message" });
+  if (size !== undefined && bytes.length > size) throw new PgError({ code: "22P03", message: `improper binary format in array element ${k}` });
+  // a timestamp without time zone: its microseconds since 2000-01-01, a wall clock with no zone
+  if (element === 1114) return decodeBinaryParam("timestamptz", bytes, i).replace(/Z$/, "");
+  return decodeBinaryParam(oidOf(element)!, bytes, i);
+}
 
 /**
- * A BINARY text[] (or varchar[]) PARAMETER, as the literal array_in reads to the same array (Npgsql sends every
- * parameter binary): array_send's form, its dimensions, a NULL flag, the element type, each dimension's length and lower
- * bound, then each element's length (-1 a NULL) and bytes. Every element is quoted, so any character is itself; a lower
- * bound other than 1 and a second dimension are written as array_in reads them, and refused where every text[] value is
- * (src/duck/analyze.ts readParameters). Bytes that are no such array are refused as array_recv refuses them, in its
- * order: too few 08P01 (22P03 within an element), flags other than 0 or 1 22P03, an element type other than the
- * parameter's own 42804, a negative or too large dimension 54000, an element that is no UTF-8 or holds a NUL 22021, too
- * many bytes 22P03 naming the parameter.
+ * A BINARY ARRAY PARAMETER of `PARAM_ARRAYS` (src/duck/held-types.ts), as the literal array_in reads to the same array
+ * (Npgsql sends every parameter binary): array_send's form, its dimensions, a NULL flag, the element type, each
+ * dimension's length and lower bound, then each element's length (-1 a NULL) and bytes. Every element is quoted, so any
+ * character is itself; a lower bound other than 1 and a second dimension are written as array_in reads them, and
+ * refused where every array value is (src/duck/analyze.ts readParameters). Bytes that are no such array are refused as
+ * array_recv refuses them, in its order: too few 08P01 (22P03 within an element), flags other than 0 or 1 22P03, an
+ * element type other than the parameter's own 42804, a negative or too large dimension 54000, an element that is no
+ * UTF-8 or holds a NUL 22021, too many bytes 22P03 naming the parameter.
  */
-function textArrayFromBinary(bytes: Buffer, i: number, expected: 25 | 1043): string {
+function arrayFromBinary(bytes: Buffer, i: number, expected: number): string {
   const bad = (): PgError => new PgError({ code: "22P03", message: `incorrect binary data format in bind parameter ${i + 1}` });
   const short = (): PgError => new PgError({ code: "08P01", message: "insufficient data left in message" });
   let at = 0;
@@ -2978,12 +2992,14 @@ function textArrayFromBinary(bytes: Buffer, i: number, expected: 25 | 1043): str
     if (items > 0x7fffffff) throw tooBig();
   }
   if (items > MAX_ARRAY_SIZE) throw tooBig();
+  let k = 0;
   const elementText = (): string => {
     const length = int();
+    k++;
     if (length === -1) return "NULL";
     // ReadArrayBinary's own check is 22P03, where reading a length past the end is pq_getmsgint's 08P01
     if (length < 0 || at + length > bytes.length) throw new PgError({ code: "22P03", message: "insufficient data left in message" });
-    const text = utf8Element(bytes.subarray(at, at + length)); at += length;
+    const text = elementFromBinary(expected, bytes.subarray(at, at + length), i, k); at += length;
     return `"${text.replace(/[\\"]/g, (c) => `\\${c}`)}"`;
   };
   const level = (d: number): string => `{${Array.from({ length: dims[d]!.length }, () => d === ndim - 1 ? elementText() : level(d + 1)).join(",")}}`;
@@ -3043,12 +3059,22 @@ function decodeBinaryParam(type: PgApiType, bytes: Buffer, i: number): string {
     }
     case "bool": need(1); return bytes[0] === 0 ? "f" : "t";
     case "uuid": { need(16); const h = bytes.toString("hex"); return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`; }
-    case "date": { need(4); return new Date(PG_EPOCH_MS + bytes.readInt32BE(0) * 86_400_000).toISOString().slice(0, 10); }
+    case "date": {
+      need(4);
+      // DATEVAL_NOBEGIN and DATEVAL_NOEND: -infinity and infinity
+      const days = bytes.readInt32BE(0);
+      if (days === -0x80000000 || days === 0x7fffffff) return days < 0 ? "-infinity" : "infinity";
+      return new Date(PG_EPOCH_MS + days * 86_400_000).toISOString().slice(0, 10);
+    }
     case "timestamptz": {
       need(8);
       const micros = bytes.readBigInt64BE(0);
-      const ms = Number(micros / 1000n) + PG_EPOCH_MS;
-      const rest = Number(micros % 1000n);
+      // DT_NOBEGIN and DT_NOEND: -infinity and infinity
+      if (micros === -0x8000000000000000n || micros === 0x7fffffffffffffffn) return micros < 0n ? "-infinity" : "infinity";
+      // the milliseconds floored, so an instant before 2000 keeps a positive rest of microseconds
+      const whole = micros >= 0n ? micros / 1000n : -((-micros + 999n) / 1000n);
+      const ms = Number(whole) + PG_EPOCH_MS;
+      const rest = Number(micros - whole * 1000n);
       return new Date(ms).toISOString().replace("Z", `${rest ? String(rest).padStart(3, "0") : ""}Z`);
     }
     case "text": return bytes.toString("utf8");

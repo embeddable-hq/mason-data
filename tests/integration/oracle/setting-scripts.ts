@@ -12,7 +12,7 @@ import { GAP_MARK, type GapId } from "../../../src/duck/gaps.ts";
 /** a named statement run (Bind, Describe, Execute); `refused`: Mason's reply must be the 0A000 naming that gap
  *  (src/duck/gaps.ts), where Postgres answers — the step met as a refusal by name, never held equal */
 export type Run = { run: string; values?: Array<string | null>; refused?: GapId };
-export type Step = string | { pipeline: string[] } | { prepare: string; sql: string } | Run
+export type Step = string | { pipeline: string[] } | { prepare: string; sql: string; refused?: GapId } | Run
   /** a Parse, Bind and Execute of a row count of one, then `then`'s statements, in one batch */
   | { suspend: string; then: string[] }
   /** a named statement bound to a named portal, and that portal's own messages, each to its own Sync */
@@ -82,7 +82,28 @@ const NUMERIC_PARAMETERS: Array<[string, string, Array<Array<string | null>>]> =
     [["1.2345", "19.995"], ["1.23450000000000000001", "19.99"], ["NaN", "123456789012345678901234567890.251"], [null, "Infinity"]]],
 ];
 
-const TEXT_ARRAY_STEPS: Step[] = [{ run: "p", values: ["{{1},{2}}"], refused: "multidim-array" }, { run: "p", values: ["[2:3]={1,2}"], refused: "array-lower-bound" }, { run: "p", values: ["{1,2}"] }];
+/** an array parameter as node-pg binds one (issue 983): its text, every element quoted, its type inferred from the
+ *  statement (no OID). Each statement parsed once and run with each value: a list, quoted elements holding a comma, a
+ *  brace, a quote or a backslash, a NULL element, the empty array, a NULL array, dimension decorations. A literal the
+ *  array's input refuses is not here: Mason reads parameters at the Execute, so its 22P02 comes after the Bind's
+ *  BindComplete, where Postgres's comes in place of it (tests/duck-wire.test.ts "issue 983" holds the error) */
+const ARRAY_PARAMETERS: Array<[string, string, Array<Array<string | null>>]> = [
+  ["int4 = ANY", "SELECT id FROM public.typed WHERE i4 = ANY($1) ORDER BY id", [['{"1","7"}'], ['{"2",NULL}'], ["{}"], [null], ["[1:2]={1,7}"]]],
+  ["int2 <> ALL", "SELECT id FROM public.typed WHERE i2 <> ALL($1::smallint[]) ORDER BY id", [['{"1","7"}'], ['{"1",NULL}'], ["{}"]]],
+  ["int8 = ANY of a cast", "SELECT id FROM public.typed WHERE i8 = ANY($1::bigint[]) ORDER BY id", [['{"9007199254740993","-5"}'], ["{ 1 , 7 }"]]],
+  ["text = ANY", "SELECT id FROM public.typed WHERE t = ANY($1) ORDER BY id", [['{"a","b,c","{x}","he said \\"hi\\"","x\\\\y"}'], ['{"NULL",NULL," space"}'], ["{}"]]],
+  ["varchar IN unnest", "SELECT id FROM public.typed WHERE vc IN (SELECT unnest($1::varchar[])) ORDER BY id", [['{"a","é"}'], ['{"Ab","10"}']]],
+  ["uuid = ANY", "SELECT id FROM public.typed WHERE u = ANY($1) ORDER BY id", [['{"a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11","FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"}'], ["{}"]]],
+  ["numeric = ANY", "SELECT id FROM public.typed WHERE n = ANY($1) ORDER BY id", [['{"1.5","0.1","99999999999999999999.99"}'], ['{"1.50000000000000000001","NaN"}'], ['{"-2.25",NULL}'], ["{}"]]],
+  ["numeric(12,2) < ANY and >= ALL", "SELECT id FROM public.typed WHERE n2 < ANY($1::numeric[]) AND n2 >= ALL($2::numeric[]) ORDER BY id", [['{"1.50000000000000000001"}', '{"1.5"}'], ['{"NaN"}', '{"-7.5"}']]],
+  ["bool = ANY", "SELECT id FROM public.typed WHERE b = ANY($1) ORDER BY id", [['{"true"}'], ['{"f",NULL}']]],
+  ["date = ANY", "SELECT id FROM public.typed WHERE d = ANY($1) ORDER BY id", [['{"2026-01-01","1999-12-31"}'], ['{"infinity","-infinity"}']]],
+  ["timestamptz = ANY", "SELECT id FROM public.typed WHERE tz = ANY($1) ORDER BY id", [['{"2026-01-01 00:00:00+00","2024-02-29 23:30:00-05"}'], ['{"2026-09-15 10:04:05.123456+02"}']]],
+  ["float8 = ANY", "SELECT id FROM public.typed WHERE f8 = ANY($1) ORDER BY id", [['{"0.1","1e-10","NaN"}'], ['{"-0","Infinity"}']]],
+  ["each in the list", "SELECT $1::int[], $2::text[], $3::date[], $4::bool[] FROM public.one", [['{"1",NULL,"3"}', '{"a b","{",""}', '{"2026-01-01","infinity"}', '{"t",NULL}'], ["{}", "{}", "{}", "{}"]]],
+];
+
+const TEXT_ARRAY_STEPS: Step[] =[{ run: "p", values: ["{{1},{2}}"], refused: "multidim-array" }, { run: "p", values: ["[2:3]={1,2}"], refused: "array-lower-bound" }, { run: "p", values: ["{1,2}"] }];
 
 export const SETTING_SCRIPTS: SettingScript[] = [
   // a type the copy holds as another: a statement parsed in one zone, run after a SET of another. A literal with no zone
@@ -233,6 +254,9 @@ export const SETTING_SCRIPTS: SettingScript[] = [
   ...BOUND_PATHS.map(([name, sql, values]) => s(`a json path bound as a parameter, ${name}`, { prepare: "p", sql }, ...values.flatMap((v, i): Step[] => [{ run: "p", values: v }, ...(i === 1 ? ["SET TimeZone = 'Asia/Tokyo'"] : [])]))),
   ...TEXT_ARRAY_PARAMETERS.map(([name, sql]) => s(`a text[] parameter of two dimensions or other bounds, ${name}`, { prepare: "p", sql }, ...TEXT_ARRAY_STEPS)),
   ...NUMERIC_PARAMETERS.map(([name, sql, values]) => s(`numeric parameter: ${name}`, { prepare: "p", sql }, ...values.map((v): Step => ({ run: "p", values: v })))),
+  ...ARRAY_PARAMETERS.map(([name, sql, values]) => s(`array parameter as node-pg binds it: ${name}`, { prepare: "p", sql }, ...values.map((v): Step => ({ run: "p", values: v })))),
+  // a numeric[] parameter read other than by ANY or ALL: no list of the engine holds every element exactly
+  s("a numeric[] parameter read in the list", { prepare: "p", sql: "SELECT $1::numeric[], (SELECT count(*) FROM unnest($1::numeric[])) FROM public.one", refused: "numeric-array-parameter" }),
   s("a json path element as a parameter", { prepare: "p", sql: "SELECT id, jb #>> ARRAY[$1], j #>> ARRAY[$1, 'b'], jsonb_extract_path_text(jb, $1, 'b') FROM public.jpath ORDER BY id" }, { run: "p", values: ["o"] }, "SET TimeZone = 'Asia/Tokyo'", { run: "p", values: ["k"] }, { run: "p", values: [null] }, { run: "p", values: ["0"] }),
   // native json (issue 130): an @> template known only at the Bind stays the function's; a native read prepared, run
   // again after a SET
@@ -407,9 +431,10 @@ export async function traceStep(client: pg.Client, step: Step): Promise<string[]
   return at < 0 ? lines : [...others.slice(0, at), ...lines.filter(isStatus).sort(), ...others.slice(at)];
 }
 
-/** a step that must be refused by its gap: null when Mason's reply is that refusal, else what it was */
+/** a step that must be refused by its gap (a run's value, or a Parse Mason plans and refuses at once): null when
+ *  Mason's reply is that refusal, else what it was */
 export function refusedAsNamed(step: Step, got: string[]): { gap: GapId; differs: string | null } | null {
-  if (typeof step === "string" || !("run" in step) || step.refused === undefined) return null;
+  if (typeof step === "string" || !("run" in step || "prepare" in step) || step.refused === undefined) return null;
   const gap = step.refused;
   return { gap, differs: got.some((l) => l.startsWith("error 0A000 ") && l.endsWith(` [gap ${gap}]`)) ? null : `${JSON.stringify(got)} where Mason refuses by the gap ${gap}` };
 }
