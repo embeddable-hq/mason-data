@@ -5185,6 +5185,85 @@ test("a LIMIT with no ORDER BY over joined tables chooses its rows by row number
   } finally { await c.end(); }
 });
 
+// ISSUE 463: Metabase's preview of a join to a table whose JSON fields it unfolds, `… LEFT JOIN (SELECT id, (j #>>
+// array[$1]::text[])::text AS "j → n", … FROM t) AS "T" ON … LIMIT 2000`, fetched the derived side by row number above a
+// scan of its whole table that handed the side's list each vector it met, a row or two in each, a call of every
+// function a vector (4,420 calls against 20, ~5 s against ~0.6 s, over 3 M rows). With no ORDER BY the fetch reads only
+// the rows the kept rows name, gathered by a SEMI join into full vectors; the kept rows are a WITH query read twice,
+// MATERIALIZED, so both reads are the one set of rows. What is held: the form; the rows are rows of the join, as many as
+// Postgres's, every column's text and type Postgres's; and what keeps today's route keeps it
+test("a LIMIT with no ORDER BY computes a plain derived side's list for the rows it keeps alone (issue 463)", async () => {
+  const c = await client();
+  const one = (v: unknown): unknown => typeof v === "string" ? v.replaceAll('": ', '":') : v;
+  const key = (r: unknown[]): string => JSON.stringify(r.map(one));
+  const sent = async (sql: string, values?: unknown[]): Promise<string> => {
+    logged.length = 0;
+    await c.query(sql, values as unknown[]);
+    const line = logged.findLast((l) => l.startsWith("statement: "));
+    assert.ok(line !== undefined, sql);
+    return line;
+  };
+  /** the statement's rows: as many as Postgres's, each a row of the whole join, none more often than the join holds it */
+  const held = async (sql: string, whole: string, values?: unknown[], wholeValues = values): Promise<void> => {
+    const [limited, all] = [await postgres(sql, values), await postgres(whole, wholeValues)];
+    const got = await answer(c, sql, values);
+    assert.deepEqual(got.fields, limited.fields, sql);
+    assert.equal(got.rows.length, limited.rows.length, sql);
+    const left = new Map<string, number>();
+    for (const r of all.rows) left.set(key(r), (left.get(key(r)) ?? 0) + 1);
+    for (const r of got.rows) {
+      const n = left.get(key(r));
+      assert.ok(n !== undefined && n > 0, `${sql}: ${key(r)} is no row of the join, or more often than it holds it`);
+      left.set(key(r), n - 1);
+    }
+  };
+  // Metabase's spelling: the joined table nested as a derived table of its unfolded fields, each path bound
+  const side = `(SELECT "public"."late"."id" AS "id", "public"."late"."c" AS "c", ("public"."late"."j" #>> array[$1]::text[])::text AS "j → n", ("public"."late"."j" #>> array[$1, $2]::text[])::text AS "j → n → 0" FROM "public"."late") AS "Late"`;
+  const list = `"public"."late_c"."id" AS "id", "public"."late_c"."name" AS "name", "Late"."id" AS "Late__id", "Late"."j → n" AS "Late__j → n", "Late"."j → n → 0" AS "Late__j → n → 0"`;
+  const NARROWED = /^statement: [^—]* — WITH __mason_late AS MATERIALIZED \((?!.* ORDER BY ).*\) SELECT .* FROM __mason_late .*\.rowid AS __mason_rid FROM public\.late WHERE late\.rowid IN \(SELECT __mason_late\.__mason_r\d FROM __mason_late\) \) AS "Late" ON "Late"\.__mason_rid = __mason_late\.__mason_r\d/;
+  try {
+    for (const [kind, tail] of [["LEFT", "LIMIT 20"], ["LEFT", "LIMIT 7 OFFSET 30"], ["RIGHT", "LIMIT 20"], ["FULL", "LIMIT 60 OFFSET 1950"], ["INNER", "LIMIT 2000"], ["LEFT", "LIMIT $3"]] as const) {
+      const from = `FROM "public"."late_c" ${kind} JOIN ${side} ON "public"."late_c"."id" = "Late"."c"`;
+      const values = tail.includes("$3") ? ["n", "0", 5] : ["n", "0"];
+      const sql = `SELECT ${list} ${from} ${tail}`;
+      // each preserved row has many matches (each late_c row matches 40 of late's), so a LIMIT past one row's matches fans out
+      await held(sql, `SELECT ${list} ${from}`, values, values.slice(0, 2));
+      assert.match(await sent(sql, values), NARROWED, sql);
+    }
+    // a preserved row with no match: its derived columns NULL, as Postgres's
+    const none = `SELECT ${list} FROM "public"."late_c" LEFT JOIN ${side} ON "public"."late_c"."id" = "Late"."c" + 1000 LIMIT 5`;
+    await held(none, none.replace(/ LIMIT 5$/, ""), ["n", "0"]);
+    assert.ok((await answer(c, none, ["n", "0"])).rows.every((r) => r.slice(2).every((v) => v === null)), none);
+    assert.match(await sent(none, ["n", "0"]), NARROWED);
+    // the path written, an expression of the side's column outside, a derived side with a WHERE (fetched without it, as before)
+    for (const sql of [
+      `SELECT c.name, d.n FROM late_c c LEFT JOIN (SELECT id, c, j #>> '{n}' AS n FROM late) d ON d.c = c.id LIMIT 30`,
+      `SELECT c.name, upper(d.n) || 'x' AS u FROM late_c c LEFT JOIN (SELECT id, c, (j ->> 'n') || '!' AS n FROM late) d ON d.c = c.id LIMIT 30`,
+      `SELECT c.name, d.n FROM late_c c LEFT JOIN (SELECT id, c, j #>> '{n}' AS n FROM late WHERE k > 1000) d ON d.c = c.id LIMIT 30`,
+    ]) {
+      await held(sql, sql.replace(/ LIMIT \d+$/, ""));
+      assert.match(await sent(sql), /^statement: [^—]* — WITH __mason_late AS MATERIALIZED .*\.rowid IN \(SELECT __mason_late\.__mason_r\d FROM __mason_late\)/, sql);
+    }
+    // TODAY'S ROUTE: an ORDER BY; a side that is no plain read (a GROUP BY, a DISTINCT, an aggregate, a window, two
+    // tables), carried as it was; a side whose list computes nothing, which DuckDB already reads alone
+    const kept = [
+      `SELECT c.name, d.n FROM late_c c LEFT JOIN (SELECT id, c, j #>> '{n}' AS n FROM late) d ON d.c = c.id ORDER BY c.id, d.id LIMIT 30`,
+      `SELECT c.name, d.n FROM late_c c LEFT JOIN (SELECT c, max(j #>> '{n}') AS n FROM late GROUP BY c) d ON d.c = c.id LIMIT 30`,
+      `SELECT c.name, d.n FROM late_c c LEFT JOIN (SELECT DISTINCT c, j #>> '{n}' AS n FROM late) d ON d.c = c.id LIMIT 30`,
+      `SELECT c.name, d.n FROM late_c c LEFT JOIN (SELECT c, count(*)::text AS n FROM late GROUP BY c) d ON d.c = c.id LIMIT 30`,
+      `SELECT c.name, d.n FROM late_c c LEFT JOIN (SELECT c, j #>> '{n}' AS n, row_number() OVER (PARTITION BY c ORDER BY id) AS r FROM late) d ON d.c = c.id LIMIT 30`,
+      `SELECT c.name, d.n FROM late_c c LEFT JOIN (SELECT l.c, l.j #>> '{n}' AS n FROM late l JOIN late_c x ON x.id = l.c) d ON d.c = c.id LIMIT 30`,
+      `SELECT c.name, d.k FROM late_c c LEFT JOIN (SELECT id, c, k FROM late) d ON d.c = c.id LIMIT 30`,
+    ];
+    for (const sql of kept) {
+      await held(sql, sql.replace(/( ORDER BY c\.id, d\.id)? LIMIT \d+$/, ""));
+      assert.doesNotMatch(await sent(sql), /WITH __mason_late|IN \(SELECT __mason_late/, sql);
+    }
+    // an ORDER BY's rows are Postgres's own, in its order
+    assert.deepEqual(await answer(c, kept[0]!), await postgres(kept[0]!));
+  } finally { await c.end(); }
+});
+
 // A `->>` OF A COLUMN IS DUCKDB'S OWN READ (the test server: every JSON read was a hop to the main thread per
 // vector, 98 s over 22 M rows with every other session waiting). Where DuckDB's reader answers as Postgres does (a string,
 // a missing path, a JSON null) the statement never reaches the function; the rest (a number's digits, an object, an

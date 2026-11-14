@@ -589,7 +589,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   const unorderedLimit = async (q: UnorderedLimit, source: pg.Client, mason: pg.Client): Promise<string | null> => {
     const sql = unorderedSql(q), head = q.head ?? "";
     if (q.zone !== undefined) for (const c of [source, mason]) await c.query(`SET TimeZone = '${q.zone}'`);
-    const [want, whole, got] = [await ask(source, sql, q.values), await ask(source, `${head}SELECT ${q.list} ${q.whole ?? q.from}`), await ask(mason, sql, q.values)];
+    const [want, whole, got] = [await ask(source, sql, q.values), await ask(source, `${head}SELECT ${q.list} ${q.whole ?? q.from}`, q.wholeValues), await ask(mason, sql, q.values)];
     if (q.zone !== undefined) for (const c of [source, mason]) await c.query("SET TimeZone = 'UTC'");
     if ("code" in want || "code" in whole) return `Postgres refuses it: ${JSON.stringify("code" in want ? want : whole)}`;
     if ("code" in got) return `refused: ${got.code} ${got.message}`;
