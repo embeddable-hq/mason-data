@@ -10,6 +10,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **A server's web page can show your own icon in the browser's tab.** Set `MASON_UI_ICON` on `mason serve` to a
+  `data:` URL of a PNG or SVG image in base64, up to 4096 bytes. The page shows it in place of its empty icon. The icon
+  is part of the page, so the browser makes no extra request. A value Mason cannot use stops the start, and the message
+  says what a valid one looks like. Unset, the page is as before.
 - **A failed sync event now says its code and where it happened.** `mason logs --events --json` and `/api/events` give
   each failure a `code` and an `origin`. The code is the error's SQLSTATE when your database failed it, the system's
   error when the network or the disk did (`ECONNREFUSED`, `ENOSPC`), or the error's class (`conversion_error`). It is
@@ -28,6 +32,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **The 20-row preview of such a join is faster too, when the table you start from is the bigger one.** Mason now takes
   that table's first rows before it joins, so it no longer loads every row of the other table into memory first. A
   small table joined to a big one is unchanged: that preview was already fast.
+- **A host view's link can be marked as a destructive action.** Give it `"danger": true`. The page draws it like the
+  Remove button on the Tables page, in red. A link that is both `primary` and `danger` is refused, and the view says
+  why. So is a `danger` that is not `true` or `false`. Plain and primary links look as before.
 - **A host can show who is signed in on the web page.** Set `MASON_UI_ACCOUNT` on `mason serve` to JSON with a
   `label` and a `url`, such as `{"label":"ada@example.com","url":"/account"}`. The label shows at the foot of the
   sidebar, as a link to the URL. On a narrow window it is in the menu with the nav. A value that is not valid stops the

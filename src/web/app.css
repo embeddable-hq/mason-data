@@ -299,8 +299,9 @@ button:hover { background: var(--btn-hover); }
 button:active:not(:disabled) { transform: translate(1px, 1px); box-shadow: var(--bevel-pressed); }
 button.primary { background: var(--cta); color: var(--cta-fg); border-color: var(--cta-line); }
 button.primary:hover { background: var(--cta-hover); }
-button.danger { color: var(--bad); }
-button.danger:hover { background: var(--bad-soft); border-color: var(--bad); }
+/* a destructive action: its words in the failed red, its hover a red tint; a host view's danger link the same (a.btn) */
+button.danger, a.btn.danger { color: var(--bad); }
+button.danger:hover, a.btn.danger:hover { background: var(--bad-soft); border-color: var(--bad); }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 button.small { height: var(--control-sm); padding: 0 var(--space-2); font-size: var(--text-xs); }
 button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
