@@ -1026,9 +1026,12 @@ function* matrix(): Generator<Matrixed> {
   yield q("inet grouped", "SELECT ip, count(*) FROM typed GROUP BY ip ORDER BY count(*), ip::text");
   yield q("inet to_json", "SELECT id, to_json(ip), concat(ip), format('%s', ip) FROM typed ORDER BY id");
   // the array types the review found sent as text[], and a bytea
-  // (n is an unconstrained numeric holding 0 beside 1.5: one scale per DuckDB column, mixed-scale-numeric; at a declared
-  // scale it is exact)
+  // (n is an unconstrained numeric holding 0 beside 1.5; at a declared scale it is exact)
   yield q("json arrays and a bytea", "SELECT id, jba, ja, vca, by, jba[1], vca[2], array_length(jba, 1), n::numeric(30, 1), ca, ia, ca[1], ia[1] FROM typed_arrays ORDER BY id");
+  // the same n as it is: each value printed with its own scale, as Postgres does (src/duck/scale-column.ts, issue 946),
+  // through arithmetic, a cast to text, a GROUP BY and a sum
+  yield q("plain numeric: each value's own scale", "SELECT id, n, n::text, n + 1, n * 2, abs(n) FROM typed_arrays ORDER BY id");
+  yield q("plain numeric: grouped and summed", "SELECT n, count(*), sum(n) FROM typed_arrays GROUP BY n ORDER BY n NULLS FIRST");
   yield q("json arrays unnested", "SELECT id, unnest(jba), unnest(vca) FROM typed_arrays ORDER BY 1, 2::text, 3");
   // Metabase's week from Sunday: the literals of the GROUP BY and ORDER BY repeat the SELECT list's
   yield q("time literals grouped", "SELECT (date_trunc('week', (ts + INTERVAL '1 day')) + INTERVAL '-1 day') AS w, count(*) FROM typed GROUP BY (date_trunc('week', (ts + INTERVAL '1 day')) + INTERVAL '-1 day') ORDER BY (date_trunc('week', (ts + INTERVAL '1 day')) + INTERVAL '-1 day')");

@@ -250,6 +250,10 @@ const KNOWN: Decided[] = [
   // a numeric(65,30) or an unconstrained numeric past the engine's DECIMAL, in an arm or under a reader: its text is the
   // engine's digits
   shapesDecided([...SET_OPERATION_ARMS, ...NUMERIC_READERS], { sql: /o\.big\b|o\.amount_raw\b/, kind: "text", issue: 402, why: "a numeric(65,30) or unconstrained numeric in a set operation or under a reader prints the engine's digits" }),
+  // a plain numeric holding 1.5 beside 0, beside an arm of NULLs, integers or VALUES: its column's one scale (issue 946's
+  // second part; a UNION ALL of two plain numerics keeps each value's own)
+  shapesDecided(["null-arm", "null-arm-first", "integer-arm", "integer-arm-first", "values-arm", "values-arm-first"], { sql: /n \* 2, abs\(n\) FROM typed_arrays/, kind: "text", issue: 946,
+    why: "a plain numeric in a UNION ALL beside an arm of NULLs, integers or VALUES prints at its column's one scale" }),
   // a value whose scale its row decides (greatest / least / coalesce of an integer and a numeric, a CASE … ELSE 0.0, a
   // sqrt or a text read as a numeric through a CTE), under an aggregate or a scalar subquery: the engine's one scale
   shapesDecided(NUMERIC_READERS, { sql: /greatest\(|least\(2\.5, 1\)|ELSE 0\.0 END|coalesce\(latest\(|sqrt\(abs\(n2\)\)|s::numeric FROM castable/, kind: "text", issue: 402, why: "a value whose scale its row decides, read by an aggregate or a scalar subquery, has the engine's one scale" }),
@@ -257,6 +261,8 @@ const KNOWN: Decided[] = [
   shapesDecided(VALUES_ARMS, { sql: /sum\(s::numeric\) (AS s )?FROM castable WHERE id IN \(71, 7[46]\)/, kind: "value", issue: 402, why: "a VALUES row's numeric NaN or Infinity in a set operation prints as the engine's double (`nan`, `inf`)" }),
   // min / max of a set operation's column where equal values have two scales: the listed min-max-scale-tie
   { shape: ["numeric-aggregate"], sql: /UNION ALL SELECT o\.id FROM star_o o ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES/, kind: "text", gap: "min-max-scale-tie", why: "max of 1 and 1.00000000000000000000: Postgres keeps the last it reads, Mason the greatest operands" },
+  // min / max of a plain numeric: the engine's own, at the column's one scale (the owner's decision on #946)
+  { shape: ["numeric-aggregate"], sql: /SELECT n, count\(\*\), sum\(n\) FROM typed_arrays/, kind: "text", gap: "mixed-scale-numeric", why: "min of 0 beside 1.5 in a column declared numeric with no precision: Postgres's 0, Mason's 0.0" },
   // a cast to a Postgres type in a VALUES list reaches the engine unmapped (citext, jsonb[], arrays, composites, time(n)[])
   shapesDecided(VALUES_ARMS, { sql: ANY, kind: "refused", issue: 266, why: "a VALUES list's cast to a mapped type is refused with the engine's error" }),
   // a set operation's inet, jsonb or array output beside a VALUES arm loses Postgres's text

@@ -1,18 +1,18 @@
 {
-  "statements": 7461,
+  "statements": 7447,
   "mason": {
-    "exact": 6943,
-    "decided": 49,
+    "exact": 6930,
+    "decided": 48,
     "refused": 469,
     "differs": 0
   },
   "duckdb": {
-    "exact": 1874,
+    "exact": 1873,
     "name": 1303,
-    "refused": 1661,
+    "refused": 1649,
     "value": 1038,
     "rows": 617,
-    "text": 318,
+    "text": 317,
     "other": 650
   },
   "gaps": {
@@ -91,12 +91,11 @@
         "numeric-stddev": { "planted": 0, "natural": 2 },
         "show-all": { "planted": 1, "natural": 0 },
         "unicode-16-case": { "planted": 1, "natural": 0 },
-        "whole-beside-many-decimals": { "planted": 1, "natural": 0 },
         "window-partition-order": { "planted": 0, "natural": 2 }
       }
     },
     "everyAsk": {
-      "asked": 104299,
+      "asked": 104029,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
@@ -127,7 +126,7 @@
         "like-any-array": { "planted": 3, "natural": 0 },
         "multidim-array": { "planted": 0, "natural": 17 },
         "numeric-double-integer": { "planted": 3, "natural": 0 },
-        "numeric-exact-sum": { "planted": 3, "natural": 43 },
+        "numeric-exact-sum": { "planted": 3, "natural": 42 },
         "numeric-math": { "planted": 3, "natural": 0 },
         "numeric-ordered-set": { "planted": 3, "natural": 0 },
         "numeric-quotient-equality": { "planted": 9, "natural": 121 },
@@ -165,14 +164,13 @@
         "limit-lateral-argument": { "planted": 0, "natural": 6 },
         "limit-lateral-filter": { "planted": 0, "natural": 8 },
         "min-max-scale-tie": { "planted": 3, "natural": 1 },
-        "mixed-scale-numeric": { "planted": 3, "natural": 0 },
+        "mixed-scale-numeric": { "planted": 3, "natural": 1 },
         "negative-zero": { "planted": 0, "natural": 25 },
         "nested-exact-numeric": { "planted": 3, "natural": 0 },
         "numeric-quotient-compare": { "planted": 3, "natural": 0 },
         "numeric-stddev": { "planted": 0, "natural": 6 },
         "show-all": { "planted": 3, "natural": 0 },
         "unicode-16-case": { "planted": 3, "natural": 0 },
-        "whole-beside-many-decimals": { "planted": 3, "natural": 0 },
         "window-partition-order": { "planted": 0, "natural": 6 }
       }
     }
