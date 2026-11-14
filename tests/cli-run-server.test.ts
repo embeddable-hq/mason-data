@@ -55,6 +55,8 @@ assert.ok("source" in parsed);
 let chosen: string | null = null;
 const logged: string[] = [];
 let changed = 0;
+/** the tables each edit told the run it wrote the columns of (`sourcesChanged`) */
+let edited: string[][] = [];
 const duckFile = path.join(root, "duck.db");
 fs.writeFileSync(duckFile, "x".repeat(10));
 // the copies as the sync has them (src/duck/sync.ts CopyState): a test sets what the state reads
@@ -126,7 +128,7 @@ const ctx: RunContext = {
   page: true, users: { file: usersFile, apiKey: API_KEY, database: "app", postgresUrl: "postgresql://127.0.0.1:5433/app" },
   source: parsed.source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables, systemIdentifier: null }), warnings: [],
   replication: () => null, port: 0, token: "t0ken-of-this-run",
-  folder: () => chosen, root: path.join(root, "app"), home: path.join(root, "app", ".mason"), version: "9.9.9", startedAt: Date.parse("2026-10-28T08:00:00.000Z"), sources: () => ({ file: null, problem: null }), sourcesChanged: () => { changed++; }, log: (m) => logged.push(m),
+  folder: () => chosen, root: path.join(root, "app"), home: path.join(root, "app", ".mason"), version: "9.9.9", startedAt: Date.parse("2026-10-28T08:00:00.000Z"), sources: () => ({ file: null, problem: null }), sourcesChanged: (tables) => { changed++; edited.push([...tables]); }, log: (m) => logged.push(m),
   // the file as the run reads it: its URL resolved from no environment (the test's file writes it whole)
   readSource: () => chosen === null ? { message: "no folder chosen", code: "bad_source" } : readSource(chosen, path.join(root, "app"), {}),
   runUrl: "postgres://me@localhost:5432/app", listener,
@@ -276,12 +278,12 @@ test("mason remove: the table's entry goes, every other byte of the file as it w
     // ANOTHER ENTRY THAT NO LONGER HOLDS (a column dropped on the database): the remove is refused, the file as it was —
     // else the run's re-read refuses the file, keeps the removed table and goes on copying it, while the command says
     // "Removed" (the review of the sources file)
-    const stale = "kind: postgres\nurl: postgres://me@localhost:5432/app\ntables:\n  customers: {}\n  orders:\n    columns: [id, gone]\n";
+    const stale = "kind: postgres\nurl: postgres://me@localhost:5432/app\ntables:\n  customers: {}\n  orders:\n    columns: [id, idd]\n";
     fs.writeFileSync(sourceFile, stale);
     changed = 0;
     const held = await remove(["customers"]);
     assert.equal(held.status, 409);
-    assert.equal(JSON.parse(held.text).error, "mason/sources/app.yml: tables.orders.columns: public.orders has no column gone (its columns: id, customer_id) — fix it first, then remove customers");
+    assert.equal(JSON.parse(held.text).error, "mason/sources/app.yml: tables.orders.columns: public.orders has no column idd — did you mean `id`? (its columns: id, customer_id) — fix it first, then remove customers");
     assert.equal(fs.readFileSync(sourceFile, "utf8"), stale, "nothing written");
     assert.equal(changed, 0, "the run is not told of a change that was not made");
     // A url: THAT NOW NAMES ANOTHER DATABASE (a .env edited): this run's catalog is the old one's — refused, the way out said
@@ -1129,6 +1131,8 @@ test("a table set to sync: replication while the run is up, on a database that c
     const polled = await call("POST", "/api/pick", { body: { table: "public.customers", picked: true, sync: "poll 30s", keep: true } });
     assert.equal(polled.status, 200, polled.text);
     assert.equal(changed, 1);
+    // a sync alone asked: its columns are not the person's choice now, so what arrived meanwhile is still left out (issue 977)
+    assert.deepEqual(edited.at(-1), [], "a sync-only edit names no table whose columns it chose");
     assert.deepEqual(checked, [["customers"], []]);
   } finally { delete ctx.checkReplication; fs.writeFileSync(sourceFile, text); }
 });
@@ -1396,4 +1400,23 @@ test("an add and a remove answer with the state of the read they acted on: never
     fs.writeFileSync(sourceFile, was);
     chosen = wasChosen;
   }
+});
+
+test("a table whose columns changed on the database says what its synced data holds now, and what its next whole read syncs (issue 977)", async () => {
+  const runServer = await import("../src/cli/run-server.ts");
+  const at = "2026-10-24T10:00:00.000Z";
+  // orders has id and customer_id on the database now; its synced data holds id and a column renamed since
+  const states = [{ source: "public.orders", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: at, error: null, syncedColumns: ["id", "customer"] }] as unknown as CopyState[];
+  const entry = { name: "orders", table: "public.orders", columns: null, exclude: [], key: null, sync: null };
+  const run = (next: string[]) => ({ file: { name: "app", file: sourceFile, tables: [entry] }, problem: null,
+    tables: [{ source: "public.orders", columns: next.map((name) => ({ name })) }] }) as unknown as ReturnType<RunContext["sources"]>;
+  const orders = (next: string[]) => (runServer.runState({ ...ctx, sources: () => run(next) }, states, null) as { tables: Array<Record<string, unknown>> }).tables.find((t) => t.table === "public.orders")!;
+  const pending = orders(["id", "customer_id"]);
+  assert.deepEqual([pending.addedColumns, pending.columnsPending], [["id", "customer"], ["id", "customer_id"]], "what is synced now, and next");
+  const settled = orders(["id", "customer"]);
+  assert.deepEqual([settled.addedColumns, "columnsPending" in settled], [["id", "customer"], false], "synced as the run syncs it: nothing pending");
+  // the page's row says it in its words: what is synced now, and after this sync
+  const { columnsSummary } = await import("../src/web/pages/tables.js" as string) as { columnsSummary: (t: unknown) => { text: string; title: string } | null };
+  assert.deepEqual(columnsSummary({ ...pending, entry: { columns: null, exclude: [], key: null } }),
+    { text: "Columns changed, syncing again", title: "Synced now: id, customer. After this sync: id, customer_id" });
 });

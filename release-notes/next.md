@@ -53,6 +53,20 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   tell such names apart, so `Orders.yml` beside a synced `orders` could replace the synced table's rows. Now it is
   refused by name, as a generated file of the synced table's own name is. Two generated files whose names differ only
   in case are refused the same way. Rename the file to fix either.
+- **A list of values passed as one query parameter now works, as node-pg passes it.** node-pg, and the ORMs built on
+  it, send a JavaScript array as text such as `{"1","3"}`, and let the database work out its type. Mason answered
+  `WHERE id = ANY($1)` and `WHERE id = ANY($1::int[])` with an error for such a value. Now it answers them as Postgres
+  does, for arrays of integers, text, uuids, numerics, booleans, dates, timestamps and floats. That includes an empty
+  array, NULL elements and quoted elements that hold commas or braces. An array sent in binary, as Npgsql sends it,
+  works too.
+- **A `numeric[]` parameter is compared with every digit kept.** This holds for a numeric or an integer column, in
+  `= ANY`, `<> ALL` and the other comparisons with `ANY` or `ALL`. So does `x = ANY(ARRAY[$1::numeric, $2::numeric])`,
+  which matched values that differ past the 15th digit. A NULL `numeric[]` is answered everywhere. Mason refuses any
+  other `numeric[]` value by name, and says what to write instead, in two places. One is a `numeric[]` read anywhere
+  else, such as in the SELECT list or in `unnest`. The other is a `numeric[]` compared with a float column.
+- **A timestamp with time zone compared with a `timestamp[]` or `date[]`, or with a subquery of timestamps or dates,
+  now uses your session's time zone.** This covers `ANY`, `ALL`, `IN` and `NOT IN`. Before, a session outside UTC got
+  other rows. The same holds for a timestamp or a date compared with a wider time type.
 - **A `numeric` column with no precision now prints each value as your database does.** Rails makes such a column from
   `t.decimal`. Mason printed every value with the most decimals any value in the column had, so `12.5` read `12.50` and
   `0` read `0.00`. Now a plain `SELECT`, `::text`, arithmetic, `sum`, windows, subqueries and the binary
@@ -76,3 +90,20 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   replication. Mason drops them as they arrive. They are never stored, logged or served. A publication you name with
   `publication:` is still never changed. If it lists a table's columns, Mason now says once that the list blocks
   `DROP COLUMN`, and how to name the table whole. This was listed as known in 0.20.0.
+- **A column added to, renamed in or dropped from a synced table on your database now reaches Mason without a restart.**
+  Before, a new column never reached the synced data until Mason was started again, while `mason status` said every
+  table was synced. A column renamed or dropped made the table's sync fail again and again until a restart. Now Mason
+  checks the table's columns before each poll, at `mason sync` and when the change log says the table changed. The
+  check reads only the database's catalog. When the columns changed, Mason syncs that table again whole, and serves its
+  old data until that ends. A new column that looks like a secret, such as `api_token`, is left out, as `mason add`
+  leaves it out. Mason writes `exclude:` on the table's entry in the sources file, and says so in its log, its events
+  and `mason status`. To sync it, run `mason add <table> --include <column>`.
+  A column that `exclude:` names and that is renamed while Mason runs is never synced: Mason writes its new name in
+  `exclude:` in its place. When the project's files are read-only, Mason leaves it out and says the line to write.
+  One that is dropped while Mason runs is taken out of `exclude:`. A column that `columns:`
+  names and that your database dropped no longer stops Mason from starting: Mason says so in `mason status`, and syncs
+  the columns that are left. A whole sync that fails because a column changed under it now reads the columns again
+  and starts over with them, instead of failing again and again.
+  A publication you name in the sources file (`publication:`) is never changed by Mason. If it lists a table's columns,
+  Postgres does not send a new column, so Mason stops keeping that table current and says the `ALTER PUBLICATION` line
+  that adds the column.
