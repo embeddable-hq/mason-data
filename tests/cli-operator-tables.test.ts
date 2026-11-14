@@ -262,7 +262,7 @@ test("an edit of a project deployed read-only (MASON_PROJECT_READONLY=1) is refu
   process.env.MASON_PROJECT_READONLY = "1";
   try {
     const state = json(await ask(op, "GET", "/api/state"));
-    assert.match(String(state.sourcesReadOnly), /^the project's files are read-only here \(MASON_PROJECT_READONLY=1\); /, "the list says so first");
+    assert.match(String(state.sourcesReadOnly), /^The project's files are read-only here \(MASON_PROJECT_READONLY=1\)\. /, "the list says so first");
     for (const [p, body] of [["/api/pick", { table: "public.customers", picked: true }], ["/api/remove", { tables: ["customers"] }]] as const) {
       const f = refusal(await ask(op, "POST", p, { body }), 409, "refused");
       assert.equal(f.message, "the project's files are read-only here (MASON_PROJECT_READONLY=1)", p);
@@ -415,7 +415,7 @@ test("MASON_PROJECT_READONLY=1 wins over MASON_UI_READ_ONLY_ALLOW=tables: the pa
   process.env.MASON_PROJECT_READONLY = "1";
   try {
     const state = json(await ask(op, "GET", "/api/state", { as: "page" }));
-    assert.match(String(state.sourcesReadOnly), /^the project's files are read-only here \(MASON_PROJECT_READONLY=1\); /, "the page offers no Add or Remove");
+    assert.match(String(state.sourcesReadOnly), /^The project's files are read-only here \(MASON_PROJECT_READONLY=1\)\. /, "the page offers no Add or Remove");
     for (const [p, body] of [["/api/pick", { table: "public.customers", picked: true }], ["/api/pick", { table: "public.events", picked: true, key: ["tenant_id", "id"] }],
       ["/api/pick", { table: "public.customers", picked: false }], ["/api/remove", { tables: ["customers"] }]] as const) {
       const f = refusal(await ask(op, "POST", p, { body, as: "page" }), 409, "refused");

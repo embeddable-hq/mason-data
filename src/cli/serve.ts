@@ -96,7 +96,7 @@ export const SERVE: CommandSpec = {
     MASON_PROJECT           the project folder: sources/, mason.yml (default ./mason)
     MASON_PROJECT_READONLY  1 when the project folder is deployed as committed (CI, GitOps, a platform that deploys
                             the folder): every edit of its files is refused — mason add and mason remove, beside it or
-                            on the web page — and says to edit the files and deploy them (default 0)
+                            on the web page — and says to commit the change and deploy it (default 0)
     MASON_DATA              the folder whose .mason/ holds the synced data and the state: the volume (default .)
     MASON_NAME              the project's name, which the replication slot is named for (default mason); renaming it
                             over the same synced data is refused
@@ -411,8 +411,8 @@ export function serveSource(s: ServeSettings, env: NodeJS.ProcessEnv): { wrote: 
     const readOnly = projectWriteRefusal(null, env);
     if (readOnly !== null) {
       return { ...readOnly, message: `the project folder (${s.project}) has no sources file, and ${readOnly.message}`,
-        fix: "edit the files and deploy them: mason init and mason add where the project is committed write its sources file; commit it, and deploy the folder with it",
-        next: [["mason serve --help", "every setting, with its default"]] };
+        fix: "run mason init and mason add in your project to write its sources file, commit it, and deploy the folder with it",
+        next: [["mason serve --help", "every setting, with its default"], ["mason help production", "how to deploy a change to a server"]] };
     }
     const p = parseSource(url);
     const file = path.join(sourcesDir(s.project), `${sourceNameFor("source" in p ? p.source.database : "")}.yml`);

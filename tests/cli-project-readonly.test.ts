@@ -37,7 +37,10 @@ const SOURCE = "kind: postgres\nurl: postgres://me@127.0.0.1:1/shop\ntables:\n  
 const READ_ONLY = "the project's files are read-only here (MASON_PROJECT_READONLY=1)";
 const RECORDED = "the project's files are read-only here (MASON_PROJECT_READONLY=1 when Mason last started)";
 const WHY = "Mason runs them as they were deployed: an edit here would run what nobody committed, and the next deploy would undo it";
-const FIX = "edit the files and deploy them: mason add or mason remove where the project is committed, then commit and deploy";
+const FIX = "run mason add or mason remove in your project, commit the change, and deploy it";
+const NEXT = [{ command: "mason status", what: "what Mason syncs here, as the deployed files say" }, { command: "mason help production", what: "how to deploy a change to a server" }];
+/** what the page and `mason status --json` say (`sourcesReadOnly`): the refusal's message and fix as two sentences */
+const SAID = (message: string): string => `${message.charAt(0).toUpperCase()}${message.slice(1)}. ${FIX.charAt(0).toUpperCase()}${FIX.slice(1)}.`;
 
 /** A project folder: its sources file naming orders, and a config that records the read-only start or not. */
 function project(o: { recorded?: boolean; running?: { port: number; token: string } } = {}): { root: string; folder: string; file: string } {
@@ -76,7 +79,7 @@ test("the authority: 1 refuses, 0 and unset do not, the run's record refuses wha
   assert.equal(projectWriteRefusal(plain.root, { MASON_PROJECT_READONLY: "0" }), null);
   assert.equal(projectWriteRefusal(null, {}), null);
   assert.deepEqual(projectWriteRefusal(plain.root, { MASON_PROJECT_READONLY: "1" }), { message: READ_ONLY, code: "refused", why: WHY, fix: FIX,
-    next: [["mason status", "what Mason syncs here, as the deployed files say"]] });
+    next: NEXT.map((n) => [n.command, n.what]) });
   assert.equal(projectWriteRefusal(null, { MASON_PROJECT_READONLY: "1" })?.message, READ_ONLY);
   const recorded = project({ recorded: true });
   for (const env of [{}, { MASON_PROJECT_READONLY: "0" }]) assert.equal(projectWriteRefusal(recorded.root, env)?.message, RECORDED, JSON.stringify(env));
@@ -133,8 +136,8 @@ test("mason serve: MASON_PROJECT_READONLY is read as 1 or 0 on its settings' one
   const refused = serveSource(settings, { ...base, MASON_PROJECT_READONLY: "1" });
   assert.ok("message" in refused);
   assert.deepEqual([refused.code, refused.message, refused.why], ["refused", `the project folder (${settings.project}) has no sources file, and ${READ_ONLY}`, WHY]);
-  assert.match(refused.fix!, /^edit the files and deploy them: /);
-  assert.deepEqual(refused.next, [["mason serve --help", "every setting, with its default"]], "a serve that did not start: its settings, not mason status");
+  assert.equal(refused.fix, "run mason init and mason add in your project to write its sources file, commit it, and deploy the folder with it");
+  assert.deepEqual(refused.next, [["mason serve --help", "every setting, with its default"], ["mason help production", "how to deploy a change to a server"]], "a serve that did not start: its settings and how to deploy, not mason status");
   assert.deepEqual(files(cwd), was, "no sources file written");
   const wrote = serveSource(settings, base);
   assert.ok(!("message" in wrote) && wrote.wrote !== null, "unset: the file mason init writes, as before");
@@ -210,11 +213,11 @@ test("the run's POST /api/pick and /api/remove (the page's Add and Remove) are r
       const r = await call(run.port, "POST", route, body);
       assert.equal(r.status, 409, `${route} ${JSON.stringify(body)}`);
       assert.equal(r.json.error, RECORDED);
-      assert.deepEqual(r.json.failure, { code: "refused", message: RECORDED, why: WHY, fix: FIX, next: [{ command: "mason status", what: "what Mason syncs here, as the deployed files say" }] });
+      assert.deepEqual(r.json.failure, { code: "refused", message: RECORDED, why: WHY, fix: FIX, next: NEXT });
       assert.deepEqual(files(p.root), was, `${route}: nothing written`);
     }
     const state = await call(run.port, "GET", "/api/state");
-    assert.equal(state.json.sourcesReadOnly, `${RECORDED}; ${FIX}`);
+    assert.equal(state.json.sourcesReadOnly, SAID(RECORDED));
   } finally { run.close(); }
   // without the record or the setting: the page offers Add and Remove, and an add is written as before
   const open = project();
@@ -241,11 +244,11 @@ test("mason add and mason remove with Mason up, beside a run that started read-o
         const a = await runMason(p.root, [...argv, "--json"], matrixEnv(env));
         assert.equal(a.code, 1, a.stdout + a.stderr);
         const v = JSON.parse(a.stdout) as { error: { code: string; message: string; why: string; fix: string }; next: Array<{ command: string }> };
-        assert.deepEqual([v.error.code, v.error.message, v.error.why, v.error.fix, v.next.map((n) => n.command)], ["refused", RECORDED, WHY, FIX, ["mason status"]], `${argv.join(" ")} ${JSON.stringify(env)}`);
+        assert.deepEqual([v.error.code, v.error.message, v.error.why, v.error.fix, v.next.map((n) => n.command)], ["refused", RECORDED, WHY, FIX, ["mason status", "mason help production"]], `${argv.join(" ")} ${JSON.stringify(env)}`);
         assert.deepEqual(files(p.root), was);
       }
     }
     // the run says the same, from the same record: the page offers no Add or Remove
-    assert.equal((await call(run.port, "GET", "/api/state")).json.sourcesReadOnly, `${RECORDED}; ${FIX}`);
+    assert.equal((await call(run.port, "GET", "/api/state")).json.sourcesReadOnly, SAID(RECORDED));
   } finally { run.close(); }
 });

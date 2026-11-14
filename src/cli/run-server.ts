@@ -339,11 +339,14 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
  */
 function sourcesReadOnly(ctx: RunContext, file: string | null): string | null {
   const readOnly = projectWriteRefusal(ctx.root, process.env);
-  if (readOnly !== null) return `${readOnly.message}; ${readOnly.fix}`;
+  if (readOnly !== null) return `${sentence(readOnly.message)}${readOnly.fix ? ` ${sentence(readOnly.fix)}` : ""}`;
   if (ctx.served !== true || file === null) return null;
   try { fs.accessSync(file, fs.constants.W_OK); return null; }
-  catch (e) { return `the sources file cannot be written on this server (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}): commit a change to it, and deploy`; }
+  catch (e) { return `The sources file cannot be written on this server (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}). Commit a change to it in your project, and deploy it.`; }
 }
+
+/** a failure's clause as a sentence of its own, for a reader of prose (the page's note, `mason status --json`) */
+const sentence = (clause: string): string => `${clause.charAt(0).toUpperCase()}${clause.slice(1)}${/[.!?]$/.test(clause) ? "" : "."}`;
 
 /** the synced data's size, its write-ahead log's included (src/duck/file-bytes.ts, the one reader), or null where it
  *  cannot be read (the run's own DuckDB file: it exists while the run does) */

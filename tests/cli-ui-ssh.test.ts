@@ -583,7 +583,7 @@ test("/api/state says whether the page may offer Add and Remove: a server's file
   assert.equal(state(true, file).served, true);
   assert.equal(state(true, file).sourcesReadOnly, null);
   const gone = state(true, path.join(dir, "no-such-folder", "shop.yml"));
-  assert.match(gone.sourcesReadOnly!, /^the sources file cannot be written on this server \(ENOENT\): commit a change to it, and deploy$/);
+  assert.match(gone.sourcesReadOnly!, /^The sources file cannot be written on this server \(ENOENT\)\. Commit a change to it in your project, and deploy it\.$/);
   assert.equal(state(false, path.join(dir, "no-such-folder", "shop.yml")).sourcesReadOnly, null);
 });
 
