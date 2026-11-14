@@ -2,8 +2,9 @@
  * HOW MUCH OF THE ORACLE EACH GAP ACCOUNTS FOR (src/duck/gaps.ts; tests/integration/duck-oracle.itest.ts `meet`): the
  * refusals and decided differences by the gap they name, each count split in two:
  *  - `planted`: a statement there only to meet its gap, so the registry cannot list a gap the oracle never saw: one of
- *    oracle/gap-cases.ts (`group: "gap case"`), or MIXED_SCALE (`group: "decided"`, postgres-cases.ts), which carries
- *    the decision mixed-scale-numeric. It says the gap exists, and nothing about how often it is met;
+ *    oracle/gap-cases.ts (`group: "gap case"`), or a statement of `group: "decided"` that carries its decision (none
+ *    since issue 997: MIXED_SCALE, postgres-cases.ts, is within the owner's numeric rule). It says the gap exists, and
+ *    nothing about how often it is met;
  *  - `natural`: every other statement of the oracle, written for something else, which met the gap in passing.
  * Two measures, never to be added: `copyPhase`, each of the oracle's statements once, as `tallies.mason` counts them, so
  * its counts sum to that tally; `everyAsk`, the three phases and the shapes. A shape wraps only what was answered alike,

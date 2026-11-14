@@ -127,7 +127,8 @@ export const CASES: string[] = [
 // the names sort alike by bytes and by a locale ('Ab' < 'b' < 'c'): what a row proves is the clause, never the declared
 // collation divergence (the grammar harness has that one); the one COLLATE "C" case below is the translator accepting it.
 // Every `x` has one scale (`-1.0`): a numeric column of literals of several scales is its own case (MIXED_SCALE below),
-// which the DuckDB endpoint answers in one scale — decided, not something each of these should differ by
+// which the DuckDB endpoint answers in one scale — within the owner's numeric rule since issue 997, so the oracle holds
+// it alike, and tests/duck-wire.test.ts holds the difference in text (Mason gap mixed-scale-numeric)
 export const T = "(SELECT 1 AS id, 'Ab' AS name, 1.5 AS x, timestamptz '2026-01-01 10:00:00+00' AS at UNION ALL SELECT 2, NULL, NULL, timestamptz '2026-01-02 00:30:00+00' UNION ALL SELECT 3, 'b', 2.5, timestamptz '2026-02-01 00:00:00+00' UNION ALL SELECT 4, 'c', -1.0, NULL) AS t";
 /** a numeric column whose values have their own scales: Postgres keeps each (`1`, `1.5`), DuckDB's DECIMAL has one (it
  *  reads the copied `public.one`, or the catalog Postgres would answer it, as Postgres by construction) */

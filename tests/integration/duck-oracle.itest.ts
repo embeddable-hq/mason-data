@@ -227,23 +227,12 @@ const KNOWN: Decided[] = [
   shapesDecided(CHAR_ARMS, { sql: ANY, kind: "value", issue: 247, why: "a char(n) arm in a text set operation keeps its trailing spaces" }),
   shapesDecided(CHAR_ARMS, { sql: ANY, kind: "rows", issue: 247, why: "a char(n) arm's padding keeps a row Postgres's UNION dedupes" }),
   // AN EXACT NUMERIC IN A SET OPERATION OR A READER OF ONE, what still differs after issue 358 (round 2 of the class
-  // exact-numeric-leaves-exact-path, #252's): a set operation WITHOUT ALL keeps the engine's one DECIMAL scale (the
-  // char-arm shapes' UNION, over every base with a numeric column of several scales), #402
-  shapesDecided(CHAR_ARMS, { sql: ANY, kind: "text", issue: 402, why: "a numeric column of a UNION without ALL prints at the engine's one scale, where Postgres keeps each value's" }),
-  // and what main already differed on, each class by the statements it meets (#402; main decided them all as #252's,
-  // over every arm and reader shape): an integer arm beside a value the record cannot carry (an ordered-set aggregate,
-  // an array's element, an arm of a column it gives up) prints at that arm's scale
-  shapesDecided(["integer-arm", "integer-arm-first"], { sql: /percentile_disc|mode\(\) WITHIN GROUP|array_agg\(1\.5::numeric|n::numeric\(30, 1\)/, kind: "text", issue: 402, why: "an integer arm beside a numeric the record cannot carry prints at that numeric's scale" }),
-  // a numeric(65,30) or an unconstrained numeric past the engine's DECIMAL, in an arm or under a reader: its text is the
-  // engine's digits
+  // exact-numeric-leaves-exact-path, #252's), #402. (A numeric printed at the engine's one scale, or at another arm's,
+  // is within the owner's numeric rule since issue 997, and no difference to the oracle.) A numeric(65,30) or an
+  // unconstrained numeric past the engine's DECIMAL, in an arm or under a reader: its text is the engine's digits
   shapesDecided([...SET_OPERATION_ARMS, ...NUMERIC_READERS], { sql: /o\.big\b|o\.amount_raw\b/, kind: "text", issue: 402, why: "a numeric(65,30) or unconstrained numeric in a set operation or under a reader prints the engine's digits" }),
-  // a value whose scale its row decides (greatest / least / coalesce of an integer and a numeric, a CASE … ELSE 0.0, a
-  // sqrt or a text read as a numeric through a CTE), under an aggregate or a scalar subquery: the engine's one scale
-  shapesDecided(NUMERIC_READERS, { sql: /greatest\(|least\(2\.5, 1\)|ELSE 0\.0 END|coalesce\(latest\(|sqrt\(abs\(n2\)\)|s::numeric FROM castable/, kind: "text", issue: 402, why: "a value whose scale its row decides, read by an aggregate or a scalar subquery, has the engine's one scale" }),
   // a VALUES row's NaN or Infinity beside a SELECT arm's numeric sum of one: the engine's double's text
   shapesDecided(VALUES_ARMS, { sql: /sum\(s::numeric\) (AS s )?FROM castable WHERE id IN \(71, 7[46]\)/, kind: "value", issue: 402, why: "a VALUES row's numeric NaN or Infinity in a set operation prints as the engine's double (`nan`, `inf`)" }),
-  // min / max of a set operation's column where equal values have two scales: the listed min-max-scale-tie
-  { shape: ["numeric-aggregate"], sql: /UNION ALL SELECT o\.id FROM star_o o ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES/, kind: "text", gap: "min-max-scale-tie", why: "max of 1 and 1.00000000000000000000: Postgres keeps the last it reads, Mason the greatest operands" },
   // a cast to a Postgres type in a VALUES list reaches the engine unmapped (citext, jsonb[], arrays, composites, time(n)[])
   shapesDecided(VALUES_ARMS, { sql: ANY, kind: "refused", issue: 266, why: "a VALUES list's cast to a mapped type is refused with the engine's error" }),
   // a set operation's inet, jsonb or array output beside a VALUES arm loses Postgres's text
@@ -254,10 +243,6 @@ const KNOWN: Decided[] = [
   // laid over — never the source's, so its values differ (and its rows, where the two servers list other settings); its
   // fields and the rows the sessions set are held alike (`holds`)
   { sql: /^SHOW ALL$/, kind: "value", gap: "show-all", why: "the catalog Postgres's settings with the session's laid over, never the source's", holds: showAllHolds },
-  // A NUMERIC COLUMN OF VALUES OF SEVERAL SCALES: Postgres keeps each value's (`1` beside `1.5`), a DuckDB DECIMAL
-  // column has one (`1.0`). Only where values of two scales meet in ONE column the exact programs cannot reach (a UNION
-  // without ALL; a UNION ALL's arms and a window's default are each their own since issue 358, src/duck/rewrite.ts exactArms)
-  { sql: /^SELECT v FROM \(SELECT 1 AS v FROM public\.one UNION SELECT 1\.5 FROM public\.one\)/, kind: "text", gap: "mixed-scale-numeric", why: "a DuckDB DECIMAL column has one scale; Postgres's numeric keeps each value's" },
   // THE TYPE MATRIX'S DECIDED ONES (oracle/type-matrix.ts): what a double's bits, -0 and an overflow do
   { sql: /greatest\((\w+, f4|f4, \w+)\), least/, kind: "text", gap: "negative-zero", why: "least(-0, 0): Postgres keeps the first, DuckDB the other" },
   { sql: /percentile_disc\(0\.25\) WITHIN GROUP \(ORDER BY f[48]\)/, kind: "text", gap: "negative-zero", why: "percentile_disc picks -0 or 0 of equal values" },
@@ -281,9 +266,9 @@ const KNOWN: Decided[] = [
   { sql: /^SELECT E'\\uA79A' < E'\\u00C4' FROM public\.one$/, collation: "libc", kind: "value", gap: "libc-rare-letter", why: "a rare letter's weight no spelling of it says" },
   { sql: /sqrt\(abs\((i2|f4)\)\)/, kind: "text", gap: "float-last-digit", why: "log10's last digit: libm's against DuckDB's", machineFloat: true },
   { sql: /sqrt\(abs\((i4|i8|f8)\)\)/, kind: "answered", gap: "float-overflow", why: "exp past a double's range: Postgres's error, DuckDB's Infinity (or 0 below it)" },
-  { sql: /stddev\(DISTINCT (i4|n2)\)|stddev\(n\)/, kind: "text", gap: "numeric-stddev", why: "Postgres's numeric stddev of DISTINCT values, or of an unconstrained numeric, is exact to its scale; DuckDB's a double" },
-  { sql: /^SELECT min\(a \/ b\), max\(a \/ b\) FROM public\.one, \(VALUES/, kind: "text", gap: "min-max-scale-tie", why: "min of 0 / 7 and 0 / 1000000, equal values at two scales: Postgres keeps the last it reads, Mason the least operands" },
-  { sql: /^SELECT var_samp\(x\) FROM \(SELECT 7 \/ 3\.0 AS x/, kind: "text", gap: "nested-exact-numeric", why: "the subquery's quotients are DuckDB's doubles where the outer query takes their variance (a sum, an avg, min / max and an ORDER BY read their programs)" },
+  // (outside the owner's numeric rule: Postgres prints 14 significant digits at its own scale, 4115226300.5483, Mason
+  // the double's 15, 4115226300.54833, and the two differ when rounded to 15 significant digits)
+  { sql: /stddev\(DISTINCT (i4|n2)\)|stddev\(n\)/, kind: "value", gap: "numeric-stddev", why: "Postgres's numeric stddev of DISTINCT values, or of an unconstrained numeric, is exact to its scale; DuckDB's a double" },
   { sql: /^SELECT count\(\*\) FROM public\.one, \(VALUES \(1\.00000000000000000001::numeric\(30,20\)\), \(1\.00000000000000000002\)\) AS v\(x\) WHERE v\.x \/ 1 = ANY \(ARRAY\[1\.00000000000000000001\]\)$/, kind: "value", gap: "numeric-quotient-compare", why: "= ANY equates the two quotients' doubles, which Postgres's exact values tell apart" },
   { sql: /^SELECT DISTINCT ON \(l\.c\) l\.c, l\.id, \(l\.j ->> 'n'\)::int AS n FROM late l ORDER BY l\.c, l\.id LIMIT 3$/, kind: "answered", gap: "limit-errors", why: "row 2000's 'x' is in c = 0's group but not its first row: Postgres computes the list below its Unique for every row, Mason chooses the kept rows by row number and computes the list for them" },
   { sql: /^SELECT upper\('\u{10D70}'\)/u, kind: "value", gap: "unicode-16-case", why: "a Garay letter (Unicode 16): DuckDB's ICU predates it" },
