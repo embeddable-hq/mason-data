@@ -12,6 +12,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **Each synced table with a `numeric` column of no precision is synced again once, at the first start.** Mason now
   keeps each such value's own decimals (below), which the data synced before does not hold. The table serves its old
   data until then, and a large table takes about as long as its first sync did.
+- **A table that an older Mason left without one of its columns is synced again once, at the first start.** This is
+  a table with a column whose name begins with `__mason_json_`, which that Mason dropped (below). The table serves
+  its old data until then, and a large table takes about as long as its first sync did.
 
 ## What changes
 
@@ -103,6 +106,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   replication. Mason drops them as they arrive. They are never stored, logged or served. A publication you name with
   `publication:` is still never changed. If it lists a table's columns, Mason now says once that the list blocks
   `DROP COLUMN`, and how to name the table whole. This was listed as known in 0.20.0.
+- **A column whose name begins with `__mason_json_` is no longer dropped from the synced data.** Mason uses names like
+  this for columns of its own. At each start, Mason dropped a column of your table named like that, and its values were
+  lost. Then every poll of that table failed. Under `sync: replication`, the stream stopped for every table. Now Mason
+  knows its own columns from what it records, whatever their names, so every column of your table is synced and
+  served. A column named like Mason's other hidden columns, such as `__mason_scale_`, is kept the same way.
 - **Mason no longer crashes when it stops while a client is still connecting.** A connection that was still opening
   as Mason stopped could crash the process with a segmentation fault or an abort. The supervisor then saw a signal and
   no reason. Now the stop waits for each connection still opening, and then closes the synced data.
