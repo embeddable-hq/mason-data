@@ -170,6 +170,7 @@ Key: ✅ built · ⏸ deferred
 | Synced / Syncing / Failed / Pending | ✅ | the first sync's phase: `copy.phase` is `done`, `copying` or `failed`, and `copy` is null while the table waits |
 | Sync duration | ✅ | `sync.syncSeconds`: how long the sync that brought the synced table current took |
 | Sync error | ✅ | the current one on the table; its history is the sync events (`mason logs --events`) |
+| A sync failure's code and origin | ✅ | each failed event's `code` (its SQLSTATE, its system error such as `ECONNREFUSED`, its error class, or `unknown`) and `origin` (the first frame in Mason's code, a file and a line, or null; src/lib/failure-facts.ts): `mason logs --events --json`, `/api/events` |
 | Size of the synced table | ✅ | `bytes` is the SOURCE table's size; the synced table's own size is measured every 10 min from its blocks (`/api/usage` `copySizes`, `mason usage`), never per request; a synced table with none says why (`unsized`: its rows all in the write-ahead log, under its size `walBytes` while the file is unwritten since the measure; else why it is being measured: the file written, synced, or no measure since the start, `sizedAt`) |
 | Search / filter | ✅ | over the list the endpoint returns; no server change for hundreds of tables |
 
@@ -185,6 +186,7 @@ Key: ✅ built · ⏸ deferred
 | User | ✅ | `user`; and the client's `applicationName` |
 | Query ID | ✅ | `requestId` |
 | The plan of a slow statement | ✅ | `plan`, `planTruncated` ("The plan of a slow statement" below): in the row's details, and whole in `mason logs --requests --id <requestId>` |
+| Where an internal error failed | ✅ | `origin` on a row answered XX000: the first frame in Mason's code, a file and a line (src/lib/failure-facts.ts); null on every other row |
 | Rows scanned | ⏸ | **Decide later: may add cost to every query.** DuckDB reports it only with its profiler on per statement, whose cost is not measured. Measure (about half a day) before promising it. |
 | Filters: status, date, user | ✅ | `/api/requests`: outcome, `failed`, since / until, user, client, `slow`, `search`, and paging (`before`) |
 

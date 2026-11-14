@@ -35,7 +35,7 @@ test("the web page's own error (ui_error, src/cli/ui-errors.ts) is a failure of 
     clock += 1000;
     log.record({ kind: "copied", table: "public.orders", message: "copied" });
     await log.flush();
-    assert.deepEqual(await log.recent({ limit: 10, failed: true }), [{ at: "2026-11-13T09:00:00.000Z", kind: "ui_error", failed: true, table: null, message }]);
+    assert.deepEqual(await log.recent({ limit: 10, failed: true }), [{ at: "2026-11-13T09:00:00.000Z", kind: "ui_error", failed: true, table: null, message, code: "unknown", origin: null }]);
     await log.close();
   } finally { await own.close(); fs.rmSync(dir2, { recursive: true, force: true }); }
 });
@@ -53,9 +53,9 @@ test("every event is read back as the sync recorded it, newest last; --failed is
   assert.deepEqual(await log.recent({ limit: 10 }), [], "nothing is read before its batch commits");
   await log.flush();
   assert.deepEqual(await log.recent({ limit: 10 }), [
-    { at: "2026-10-28T09:00:00.000Z", kind: "copy_failed", failed: true, table: "public.orders", message: "the source closed the connection; tried again after 09:05 UTC" },
-    { at: "2026-10-28T09:00:01.000Z", kind: "copied", failed: false, table: "public.orders", message: "copied: 1,000 row(s) in 2.00 s" },
-    { at: "2026-10-28T09:00:02.000Z", kind: "stream_failed", failed: true, table: null, message: "replication: the slot is in use" },
+    { at: "2026-10-28T09:00:00.000Z", kind: "copy_failed", failed: true, table: "public.orders", message: "the source closed the connection; tried again after 09:05 UTC", code: "unknown", origin: null },
+    { at: "2026-10-28T09:00:01.000Z", kind: "copied", failed: false, table: "public.orders", message: "copied: 1,000 row(s) in 2.00 s", code: null, origin: null },
+    { at: "2026-10-28T09:00:02.000Z", kind: "stream_failed", failed: true, table: null, message: "replication: the slot is in use", code: "unknown", origin: null },
   ]);
   assert.deepEqual((await log.recent({ limit: 10, failed: true })).map((e) => e.kind), ["copy_failed", "stream_failed"], "the failures alone");
   assert.deepEqual((await log.recent({ limit: 1 })).map((e) => e.kind), ["stream_failed"], "the newest n, newest last");
@@ -174,7 +174,7 @@ test("events older than the retention are deleted, said with their count; a writ
   await store.writer.run(`CREATE TABLE IF NOT EXISTS ${EVENTS_TABLE} (happened_at TIMESTAMPTZ, seq BIGINT, kind VARCHAR, table_name VARCHAR, message VARCHAR)`);
   // dated by the process's clock, the one the events read when given none (never the engine's now())
   const ago = (days: number): string => new Date(Date.now() - days * 86_400_000).toISOString();
-  await store.writer.run(`INSERT INTO ${EVENTS_TABLE} VALUES ($1::TIMESTAMPTZ, 0, 'copied', 'public.a', 'old'), ($2::TIMESTAMPTZ, 1, 'copied', 'public.a', 'recent')`, [ago(10), ago(1)]);
+  await store.writer.run(`INSERT INTO ${EVENTS_TABLE} (happened_at, seq, kind, table_name, message) VALUES ($1::TIMESTAMPTZ, 0, 'copied', 'public.a', 'old'), ($2::TIMESTAMPTZ, 1, 'copied', 'public.a', 'recent')`, [ago(10), ago(1)]);
   const said: string[] = [];
   const kept = await SyncEvents.open(store, (l) => said.push(l), { days: 7 });
   assert.deepEqual(said, ["sync events: deleted 1 event(s) older than 7 days (MASON_HISTORY_DAYS)"]);
@@ -202,13 +202,65 @@ test("events older than the retention are deleted, said with their count; a writ
 test("the run's restarts are merged with the events, newest last, asked as the events are: since, the newest n, within the retention", async () => {
   const { withRestarts } = await events();
   const now = Date.parse("2026-10-28T12:00:00.000Z");
-  const e = (at: string, kind: "copied" | "poll_failed") => ({ at, kind, failed: kind !== "copied", table: "public.a", message: kind });
+  const e = (at: string, kind: "copied" | "poll_failed") => ({ at, kind, failed: kind !== "copied", table: "public.a", message: kind, code: kind === "copied" ? null : "unknown", origin: null });
   const list = [e("2026-10-28T10:00:00.000Z", "copied"), e("2026-10-28T11:00:00.000Z", "poll_failed")];
   const restarts = [{ at: "2026-10-01T00:00:00.000Z", reason: "too old", upSeconds: 1 }, { at: "2026-10-28T10:30:00.000Z", reason: "it crashed (SIGSEGV)", upSeconds: 42 }];
   const merged = withRestarts(list, restarts, { limit: 10, days: 7, now });
   assert.deepEqual(merged.map((x) => `${x.at.slice(11, 16)} ${x.kind}`), ["10:00 copied", "10:30 restart", "11:00 poll_failed"]);
   assert.deepEqual(merged[1], { at: "2026-10-28T10:30:00.000Z", kind: "restart", failed: true, table: null,
-    message: "the run stopped (it crashed (SIGSEGV)) after 42 s up, and its supervisor started it again" });
+    message: "the run stopped (it crashed (SIGSEGV)) after 42 s up, and its supervisor started it again", code: "unknown", origin: null });
   assert.deepEqual(withRestarts(list, restarts, { limit: 2, days: 7, now }).map((x) => x.kind), ["restart", "poll_failed"], "the newest 2 of both");
   assert.deepEqual(withRestarts([], restarts, { limit: 10, days: 7, now, since: "2026-10-28T11:00:00.000Z" }), [], "since applies to a restart too");
+});
+
+// A FAILURE'S CODE AND ORIGIN (issue 924): read from the error the sync caught, kept with the event, and read back; good
+// news has neither. A store made before the change opens, keeps its rows, and reads them with both null.
+test("a failure keeps the code and the origin of the error it caught; good news has none; a code given (the page's) is kept as given", async () => {
+  const { SyncEvents, EVENTS_TABLE } = await events();
+  const clock = Date.parse("2026-11-14T09:00:00.000Z");
+  const log = await SyncEvents.open(store, () => undefined, { days: 7, now: () => clock });
+  const refused = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:1"), { code: "ECONNREFUSED" });
+  const engine = new Error("public.t: writing its 2 changed row(s) by key: Conversion Error: Could not convert string 'abc' to INT32");
+  log.record({ kind: "source_unreachable", table: null, message: "could not attach the database", cause: refused });
+  log.record({ kind: "poll_failed", table: "public.t", message: "the poll failed", cause: engine });
+  log.record({ kind: "stream_failed", table: "public.t", message: "not synced or streamed: a gap", origin: "src/duck/sync.ts:2430" });
+  log.record({ kind: "ui_error", table: null, message: "the web page hit a TypeError", code: "TypeError", origin: "src/web/app.js:12" });
+  log.record({ kind: "copied", table: "public.t", message: "synced", cause: engine });
+  await log.flush();
+  const read = await log.recent({ limit: 10 });
+  assert.deepEqual(read.map((e) => [e.kind, e.code, e.origin === null ? null : e.origin.replace(/:\d+$/, ":<line>")]), [
+    ["source_unreachable", "ECONNREFUSED", null],
+    ["poll_failed", "conversion_error", null],
+    ["stream_failed", "unknown", "src/duck/sync.ts:<line>"],
+    ["ui_error", "TypeError", "src/web/app.js:<line>"],
+    ["copied", null, null],
+  ], "an error made in a test has no frame in Mason's src/: no origin, never the test's path");
+  await log.close();
+  await store.writer.run(`DELETE FROM ${EVENTS_TABLE}`);
+});
+
+test("a store made before codes and origins were kept opens, keeps its events, and reads them with code and origin null", async () => {
+  const { SyncEvents } = await events();
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), "mason-events-old-"));
+  const file = path.join(dir2, "duck.db");
+  try {
+    // the table as the release before wrote it, with its rows
+    const old = await DuckStore.open(file, () => undefined);
+    await old.writer.run("CREATE SCHEMA IF NOT EXISTS _mason");
+    await old.writer.run("CREATE TABLE _mason.sync_events (happened_at TIMESTAMPTZ, seq BIGINT, kind VARCHAR, table_name VARCHAR, message VARCHAR)");
+    await old.writer.run("INSERT INTO _mason.sync_events VALUES ('2026-11-14T08:00:00Z', 0, 'poll_failed', 'public.t', 'the poll failed: connection refused'), ('2026-11-14T08:00:01Z', 1, 'copied', 'public.t', 'synced')");
+    await old.close();
+    const store2 = await DuckStore.open(file, () => undefined);
+    try {
+      const log = await SyncEvents.open(store2, () => undefined, { days: 7, now: () => Date.parse("2026-11-14T09:00:00.000Z") });
+      log.record({ kind: "poll_failed", table: "public.t", message: "the poll failed again", cause: Object.assign(new Error("x"), { code: "57014" }) });
+      await log.flush();
+      assert.deepEqual(await log.recent({ limit: 10 }), [
+        { at: "2026-11-14T08:00:00.000Z", kind: "poll_failed", failed: true, table: "public.t", message: "the poll failed: connection refused", code: null, origin: null },
+        { at: "2026-11-14T08:00:01.000Z", kind: "copied", failed: false, table: "public.t", message: "synced", code: null, origin: null },
+        { at: "2026-11-14T09:00:00.000Z", kind: "poll_failed", failed: true, table: "public.t", message: "the poll failed again", code: "57014", origin: null },
+      ], "the old rows kept, numbered on from them");
+      await log.close();
+    } finally { await store2.close(); }
+  } finally { fs.rmSync(dir2, { recursive: true, force: true }); }
 });

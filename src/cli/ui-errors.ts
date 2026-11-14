@@ -17,6 +17,7 @@
  */
 import type { Failure } from "./command.ts";
 import type { SyncEventInput } from "../duck/events.ts";
+import { UNKNOWN_CODE } from "../lib/failure-facts.ts";
 
 /** The largest body the route reads, bytes: five short fields fit many times over. */
 export const UI_ERROR_BODY_MAX = 1024;
@@ -84,6 +85,13 @@ export function uiErrorMessage(r: UiErrorReport): string {
     "The error's own words stay in the browser, in its console: the page never sends them, since they can quote synced data.";
 }
 
+/** The event's code and origin (src/duck/events.ts, issue 924), from the validated fields alone: its code the error's
+ *  class (`TypeError`), else `unknown`; its origin the page's own script and line as Mason's source names it (the page
+ *  is served from src/web/, so `app.js` at line 12 is `src/web/app.js:12`), else null. */
+export function uiErrorFacts(r: UiErrorReport): { code: string; origin: string | null } {
+  return { code: r.name ?? UNKNOWN_CODE, origin: r.file === null || r.line === null ? null : `src/web/${r.file}:${r.line}` };
+}
+
 /**
  * THE RUN'S RECORD OF THE PAGE'S ERRORS: each valid report counted (`total`, what `/metrics` says), and recorded as a
  * `ui_error` event unless UI_ERRORS_PER_MINUTE were recorded in the minute before it.
@@ -115,7 +123,7 @@ export class UiErrors {
       return false;
     }
     this.recorded.push(now);
-    this.record({ kind: "ui_error", table: null, message: uiErrorMessage(r) });
+    this.record({ kind: "ui_error", table: null, message: uiErrorMessage(r), ...uiErrorFacts(r) });
     return true;
   }
 }

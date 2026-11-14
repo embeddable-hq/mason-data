@@ -228,6 +228,11 @@ paths:
   read as failed once readiness read the state, issue 254), never at a pass's publication check (`settlePrepared`, which runs while the stream waits out its back-off)
   nor at a piece of a large transaction; the check clears only what it owns — a named publication's gap once the table is
   carried again, and its own failure on a table never copied.
+  **A failure carries a `code` and an `origin`, read from the error it caught (`cause`) by ONE module**
+  (src/lib/failure-facts.ts; issue 924: grouping failures took reading their words): the SQLSTATE, the errno, the
+  engine's class, else `unknown`, never empty; the first frame in Mason's `src/` as a file and a line, never a path,
+  a name or a word of the message. An engine error's frames are its caller's (src/duck/executor.ts `withSite`), and a
+  failure that caught nothing has its origin where it is said (`originHere`).
   The supervisor's restarts stay in `.mason/restarts.json` (a process of its own cannot open the file) and are merged
   when read (`withRestarts`). `mason logs --events` and `mason status` (`recentErrors`) read them through the command
   server's `/api/events`.
