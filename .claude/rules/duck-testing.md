@@ -12,7 +12,12 @@ paths:
 
 - **The oracle is the arbiter** (`tests/integration/duck-oracle.itest.ts`, `IT_ORACLE_ONLY=<regex>` for a subset): every
   statement asked of a real Postgres and of the endpoint, after the copy and after two rounds of changes, and again in
-  six shapes (`oracle/shapes.ts`); names, OIDs, text, order and SQLSTATEs must be equal. A fix for a class adds a
+  six shapes (`oracle/shapes.ts`); names, OIDs, text, order and SQLSTATEs must be equal. A column both sides send as
+  `numeric` (OID 1700) is judged by the owner's rule, not by its text (`numericWithinRule`, `oracle/compare.ts`,
+  computed exactly by `src/lib/pg-numeric.ts`): its whole-number digits are Postgres's, and the two are equal rounded
+  to 15 significant digits, a carry from that rounding included. A difference within the rule is no difference and needs
+  no `KNOWN` entry. One outside it is a wrong value. Unordered rows are paired by the rule too, so `2.5` meets `2.50`.
+  A numeric inside a JSON, an array or a row's text is a string to the client, and is held as one. A fix for a class adds a
   statement to it (`postgres-cases.ts`, `oracle/bi-shapes.ts`, `oracle/type-matrix.ts`, `oracle/gap-cases.ts`). The
   sessions are in UTC; a type-matrix statement with a `zone` is asked with both sessions' TimeZone set to it (a time
   computed in the session's zone must be held in a zone with daylight saving, not UTC alone). Run it against a Linux

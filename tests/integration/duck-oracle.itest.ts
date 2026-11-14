@@ -60,7 +60,7 @@ import { Sync } from "../../src/duck/sync.ts";
 import { startPostgresApi, type PgApiServer } from "../../src/api/postgres/server.ts";
 import { connectSource, parseSource, readSourceFacts } from "../../src/cli/preflight.ts";
 import { mutations, KEY_OF, SCHEMA, STAMPING, seed, TABLES } from "./oracle/data.ts";
-import { normalise, same } from "./oracle/compare.ts";
+import { compareRows, NUMERIC_OID } from "./oracle/compare.ts";
 import { CASES, MIXED_SCALE, QUERY_CASES, REFUSED_CASES, T, U, Z } from "./postgres-cases.ts";
 import { BI_SHAPES, META } from "./oracle/bi-shapes.ts";
 import { TYPE_MATRIX, TYPED, typedMutations } from "./oracle/type-matrix.ts";
@@ -166,7 +166,8 @@ const ordered = (sql: string): boolean => { let s = sql, prev = ""; while (s !==
 
 /**
  * THE VERDICT ON ONE STATEMENT, as the kinds of difference a tool can see, worst first: a wrong VALUE (normalised as
- * the oracle does: `1.50` and `1.5` are one value), a different TEXT of the same value, a different TYPE (OID), a
+ * the oracle does: `1.50` and `1.5` are one value; a numeric column is judged by the owner's rule, and a difference
+ * within it is none), a different TEXT of the same value, a different TYPE (OID), a
  * different NAME, a refusal where Postgres answered (or the reverse, or another SQLSTATE). null when identical. A type a
  * database made is held equal by what each side's pg_type names its OID, a built-in one by the OID (oracle/made-types.ts).
  */
@@ -175,24 +176,10 @@ export function verdict(want: Answer, got: Answer, inOrder: boolean): { kind: "v
   if ("code" in want) return { kind: "answered", detail: `answered where Postgres refuses ${want.code} ${want.message}` };
   if ("code" in got) return { kind: "refused", detail: `${got.code} ${got.message}${got.detail ? ` (${got.detail})` : ""}` };
   if (want.rows.length !== got.rows.length) return { kind: "rows", detail: `${got.rows.length} row(s) where Postgres has ${want.rows.length}` };
-  const key = (r: (string | null)[]): string => JSON.stringify(r);
-  const sorted = (rs: (string | null)[][]): (string | null)[][] => [...rs].sort((a, b) => key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0);
-  const [w, g] = inOrder ? [want.rows, got.rows] : [sorted(want.rows), sorted(got.rows)];
-  let text: string | null = null;
-  for (let i = 0; i < w.length; i++) {
-    for (let j = 0; j < w[i]!.length; j++) {
-      const a = w[i]![j]!, b = g[i]![j]!;
-      if (a === b) continue;
-      const loc = `row ${i + 1}, ${JSON.stringify(want.names[j])}: ${JSON.stringify(b)} where Postgres has ${JSON.stringify(a)}`;
-      if (!same(normalise(a), normalise(b))) {
-        // the rows may be the same SET in another order: a sort difference, not a value
-        if (inOrder && key(sorted(w).flat()) === key(sorted(g).flat())) return { kind: "rows", detail: `the same rows in another ORDER (first at ${loc})` };
-        return { kind: "value", detail: loc };
-      }
-      text ??= loc;
-    }
-  }
-  if (text !== null) return { kind: "text", detail: text };
+  // a column both send as numeric is judged by the owner's rule (oracle/compare.ts numericWithinRule)
+  const numeric = want.oids.map((o, j) => o === NUMERIC_OID && got.oids[j] === NUMERIC_OID);
+  const rows = compareRows(want.rows, got.rows, want.names, numeric, inOrder);
+  if (rows !== null) return rows;
   const types = want.oids.map((o, i) => sameType(o, got.oids[i]!) ? null : `${JSON.stringify(want.names[i])} OID ${got.oids[i]} where Postgres sends ${o}`).filter((x) => x !== null);
   if (types.length) return { kind: "type", detail: types.join(", ") };
   if (want.names.join("\u0000") !== got.names.join("\u0000")) return { kind: "name", detail: `${JSON.stringify(got.names)} where Postgres names ${JSON.stringify(want.names)}` };
