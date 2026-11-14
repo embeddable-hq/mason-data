@@ -132,6 +132,10 @@ test("a plain numeric's every reader prints each value with its own scale, as Po
     // a subquery, a CTE, a scalar subquery, a UNION ALL, a sort and a limit
     "SELECT x FROM (SELECT u AS x, id FROM p) s ORDER BY id",
     "WITH w AS (SELECT id, u FROM p WHERE id < 6) SELECT u, id FROM w ORDER BY id",
+    // a `*` over a WITH query lists its columns, never a table's: no view, the hidden scale read by name
+    "WITH w AS (SELECT id, u FROM p) SELECT * FROM w ORDER BY id",
+    "WITH w AS (SELECT g, sum(u) AS s FROM p GROUP BY g) SELECT * FROM w ORDER BY g",
+    "SELECT * FROM (SELECT * FROM p) s ORDER BY id",
     "SELECT u FROM p WHERE id < 4 UNION ALL SELECT u FROM q ORDER BY 1",
     "SELECT id, u FROM p ORDER BY u DESC NULLS LAST LIMIT 3",
     "SELECT p.id, p.u, q.v FROM p LEFT JOIN q ON q.p_id = p.id ORDER BY p.u, p.id LIMIT 4",
