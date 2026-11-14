@@ -28,6 +28,7 @@ import { version } from "./version.ts";
 import { PgConnection, PgError, pgIdent, pgLiteral, socketErrorText, type ExtendedResult } from "../cdc/pg-wire.ts";
 import { qualifiedName, type TableName } from "../duck/explain.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
+import { withLocalSettings } from "../lib/local-settings.ts";
 
 /** The URL a client is shown in the help: a user's, as mason user add prints it. */
 const EXAMPLE_URL = "postgres://claude:<password>@127.0.0.1:5433/mason";
@@ -556,22 +557,24 @@ class McpServer {
     };
   }
 
-  private async query(pg: PgConnection, sql: string, maxRows: number, timeoutMs: number): Promise<Record<string, unknown>> {
-    await pg.query(`SET statement_timeout = ${timeoutMs}`);
-    const r = await pg.extended(sql, maxRows);
-    if (r.empty) throw badArgument("sql", "a statement (it holds only comments or whitespace)");
-    return { columns: await this.columns(pg, r), rows: r.rows, row_count: r.rows.length, truncated: r.suspended, ...(r.command ? { command: r.command } : {}) };
+  private query(pg: PgConnection, sql: string, maxRows: number, timeoutMs: number): Promise<Record<string, unknown>> {
+    return limited(pg, timeoutMs, async () => {
+      const r = await pg.extended(sql, maxRows);
+      if (r.empty) throw badArgument("sql", "a statement (it holds only comments or whitespace)");
+      return { columns: await this.columns(pg, r), rows: r.rows, row_count: r.rows.length, truncated: r.suspended, ...(r.command ? { command: r.command } : {}) };
+    });
   }
 
-  private async explain(pg: PgConnection, sql: string, analyze: boolean, timeoutMs: number): Promise<Record<string, unknown>> {
-    await pg.query(`SET statement_timeout = ${timeoutMs}`);
-    const prefix = `EXPLAIN ${analyze ? "(ANALYZE) " : ""}`;
-    let r: ExtendedResult;
-    // a refusal's position is the statement's, not the EXPLAIN's around it
-    try { r = await pg.extended(`${prefix}${sql}`, 0); }
-    catch (e) { if (e instanceof PgError) throw new ToolAnswerError(refusal(e, prefix.length)); throw e; }
-    if (r.empty) throw badArgument("sql", "a statement (it holds only comments or whitespace)");
-    return { plan: r.rows.map((row) => row[0] ?? "").join("\n") };
+  private explain(pg: PgConnection, sql: string, analyze: boolean, timeoutMs: number): Promise<Record<string, unknown>> {
+    return limited(pg, timeoutMs, async () => {
+      const prefix = `EXPLAIN ${analyze ? "(ANALYZE) " : ""}`;
+      let r: ExtendedResult;
+      // a refusal's position is the statement's, not the EXPLAIN's around it
+      try { r = await pg.extended(`${prefix}${sql}`, 0); }
+      catch (e) { if (e instanceof PgError) throw new ToolAnswerError(refusal(e, prefix.length)); throw e; }
+      if (r.empty) throw badArgument("sql", "a statement (it holds only comments or whitespace)");
+      return { plan: r.rows.map((row) => row[0] ?? "").join("\n") };
+    });
   }
 
   /**
@@ -646,6 +649,13 @@ function copyFacts(c: CopyRow | { error: string } | undefined): Record<string, u
   if ("error" in c) return { rows_about: null, kept: `how it is kept current could not be read: ${c.error}` };
   return { rows_about: c["Estimated Rows"] ?? null, kept: c["Kept Current"], kept_current_by: c["Kept Current By"],
     ...(c.Sync !== undefined ? { sync: c.Sync, last_synced: c["Last Synced"] ?? null } : {}) };
+}
+
+/** A tool call's statement under its `timeout_ms`: `SET LOCAL statement_timeout` in one read-only transaction around it
+ *  (src/lib/local-settings.ts), never a session SET, which a pooler in transaction mode in front of the server hands on
+ *  to its next clients (issue 930). The statement's own error is thrown as it was, its position unchanged. */
+function limited<T>(pg: PgConnection, timeoutMs: number, work: () => Promise<T>): Promise<T> {
+  return withLocalSettings({ query: (sql) => pg.query(sql), settings: [["statement_timeout", timeoutMs]], work, answers: () => !pg.closed, log });
 }
 
 /** A refusal as the model reads it: Postgres's fields, as psql prints them, and the same as structured content.
