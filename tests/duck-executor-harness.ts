@@ -114,7 +114,7 @@ export function useServer(o: { warm?: boolean; wide?: boolean; jwide?: boolean }
       replication: () => null, port: 0, token: TOKEN, page: false, users: { file: path.join(dir, "users.json"), apiKey: API_KEY, database: "app", postgresUrl: "postgresql://127.0.0.1:5433/app" }, folder: () => null, root: dir, home: dir, version: "test", startedAt: Date.now(), sources: () => ({ file: null, problem: null }), sourcesChanged: () => undefined,
       readSource: () => ({ message: "no sources file here", code: "bad_source" }), runUrl: "", log: () => undefined, listener: api,
       logs: { capacity: 2000, recent: () => [] },
-      duck: { copies: () => [], file: path.join(dir, "duck.db"), poll: async () => ({ at: new Date().toISOString(), tables: [] }), stream: async () => null, disk: () => ({ path: dir, freeBytes: null, projectedBytes: null }),
+      duck: { copies: () => [], file: path.join(dir, "duck.db"), refused: () => null, poll: async () => ({ at: new Date().toISOString(), tables: [] }), stream: async () => null, disk: () => ({ path: dir, freeBytes: null, projectedBytes: null }),
         requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }), slowest: async () => [], durationsBy: async () => new Map(), 
           lastUsed: async (u) => u.map(() => null) }, events: { days: 7, recent: async () => [] },
         usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [], lastMeasure: () => null, statementTotals: () => ({ completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 }), lastDurations: () => null }, restarts: () => [] },
@@ -202,7 +202,8 @@ export async function inProcess(name: string, body: string, ms = 90_000): Promis
     await store.writer.run("CREATE TABLE public.docs AS SELECT range::INTEGER AS id, ('{\\"s\\": \\"x' || (range % 7) || '\\", \\"n\\": ' || range || ', \\"o\\": [' || range || ']}')::JSON AS j FROM range(" + (process.env.ROWS ?? "200000") + ")");
     let turn = Promise.resolve();
     const host = { onWriter(f) { const t = turn.then(f); turn = t.then(() => undefined, () => undefined); return t; },
-      served: () => new Map([["public.docs", [{ name: "id", type: "integer" }, { name: "j", type: "jsonb" }]]]), rebuilding: () => false, log: (l) => logged.push(l) };
+      served: () => new Map([["public.docs", [{ name: "id", type: "integer" }, { name: "j", type: "jsonb" }]]]), recorded: async () => new Map([["public.docs", ["id", "j"]]]),
+      rebuilding: () => false, log: (l) => logged.push(l) };
     const keeper = process.env.NO_KEEPER ? undefined : new KeptJsonPaths(store, host, { enabled: true, eager: true, reviewMs: 0 });
     await keeper?.open();
     const schema = { database: "app", tables: [{ name: "docs", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "j", type: "jsonb" }] }] };

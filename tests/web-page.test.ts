@@ -1425,6 +1425,21 @@ test("MASON_PG_PUBLIC_URL: /api/state's postgres is the address a client reaches
 
 // ------------------------------------------------------------------ the app, over a fake fetch
 
+/** A sync by hand that ends at once (issue 1007): `POST api/sync` answers `202 { sync }` as it starts, and the state read
+ *  after it carries that sync ended on each table it covers, with what it did (`answered`, over `state`). */
+function quickSync(run: { answers: Map<string, () => Response> }, state: { tables: Array<{ table: string }> }, answered: { at: string; tables: Array<{ table: string } & Record<string, unknown>> }): () => Response {
+  let id = 0;
+  return () => {
+    id += 1;
+    const tables = answered.tables.map((t) => t.table);
+    const sync = { id, tables, state: "syncing", startedAt: answered.at, endedAt: null };
+    const ended = { ...sync, state: "synced", endedAt: answered.at, answer: answered };
+    const now = { ...state, tables: state.tables.map((t) => tables.includes(t.table) ? { ...t, syncByHand: ended } : t) };
+    run.answers.set("GET api/state", () => new Response(JSON.stringify(now)));
+    return new Response(JSON.stringify({ sync, already: false }), { status: 202 });
+  };
+}
+
 /** A fake run: its answers by method and path, and every request the page made. */
 function fakeRun(): { fetch: (p: string, init?: { method?: string; body?: string }) => Promise<Response>; asked: string[]; answers: Map<string, () => Response> } {
   const answers = new Map<string, () => Response>();
@@ -3138,10 +3153,22 @@ test("Tables: what a sync did is said as mason sync says it, beside its Sync; a 
   const app = fn<[unknown], App>("createApp")(run.fetch) as App & { syncTable(t: string): Promise<boolean>; dismissSynced(): void };
   app.show("tables");
   await app.poll();
-  run.answers.set("POST api/sync", answer(answered));
+  // THE RUN ANSWERS AS THE SYNC STARTS (issue 1007): the page follows it in the state, Syncing… while it runs
+  const started = { id: 7, tables: ["public.events"], state: "syncing", startedAt: "2026-10-27T09:05:22.000Z", endedAt: null };
+  const withSync = (y: unknown) => ({ ...SYNCED, tables: SYNCED.tables.map((t) => t.table === "public.events" ? { ...t, syncByHand: y } : t) });
+  run.answers.set("POST api/sync", answer({ sync: started, already: false }, 202));
+  run.answers.set("GET api/state", answer(withSync(started)));
   run.asked.length = 0;
   assert.equal(await app.syncTable("public.events"), true);
   assert.deepEqual(run.asked, [`POST api/sync ${JSON.stringify({ tables: ["public.events"] })}`, "GET api/state"], "mason sync events; then the state again");
+  assert.match(app.view().tables!, /<button type="button" class="small" data-room="Syncing…" disabled>Syncing…<\/button>/, "Syncing… while it runs");
+  assert.match(textOf(app.view().tables!), /public\.events Syncing /, "and its State says so");
+  assert.equal(popOf(app.view().tables!, "act-tables-public.events"), "", "nothing said beside it until it ends");
+  await app.poll();
+  assert.match(app.view().tables!, />Syncing…<\/button>/, "a poll while it runs: still Syncing…");
+  // it ends: the next poll's state says what it did
+  run.answers.set("GET api/state", answer(withSync({ ...started, state: "synced", endedAt: "2026-10-27T09:05:31.000Z", answer: answered })));
+  await app.poll();
   // the button says it in its own room, and what the sync did is said beside it, as mason sync prints it
   assert.match(textOf(app.view().tables!), /public\.events Synced .* Synced ✓ Remove Sync: Off All columns Not added \(1\) Table State Rows Key Last sync Size public\.audit /);
   assert.match(app.view().tables!, /<button type="button" class="small" data-sync-table="public\.events" data-room="Syncing…">Synced ✓<\/button>/);
@@ -3152,6 +3179,57 @@ test("Tables: what a sync did is said as mason sync says it, beside its Sync; a 
   run.answers.set("POST api/sync", answer({ error: message, code: "nothing_yet", failure: { code: "nothing_yet", message, next: [] } }, 409));
   assert.equal(await app.syncTable("public.orders"), false);
   assert.ok(app.view().tables!.includes(`<div class="failure" role="alert"><p class="message"><span class="mark" aria-hidden="true">✗</span> ${message}</p></div>`), "the server's words, as renderFailure says them");
+});
+
+test("Tables: a page opened while a sync runs (a reload, another tab, mason sync) says Syncing…, then what it did; a sync that failed says why; one that ended before the page opened says nothing (issue 1007)", async () => {
+  const withSync = (table: string, y: unknown) => ({ ...SYNCED, tables: SYNCED.tables.map((t) => t.table === table ? { ...t, syncByHand: y } : t) });
+  const running = { id: 3, tables: ["public.customers"], state: "syncing", startedAt: "2026-10-27T09:05:22.000Z", endedAt: null };
+  const run = fakeRun();
+  run.answers.set("GET api/state", answer(withSync("public.customers", running)));
+  const app = fn<[unknown], App>("createApp")(run.fetch) as App & { dismissSynced(): void };
+  app.show("tables");
+  await app.poll();
+  assert.match(app.view().tables!, /<button type="button" class="small" data-room="Syncing…" disabled>Syncing…<\/button>/, "a page opened mid-sync: Syncing…");
+  const answered = { at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", added: 3, updated: 0, deleted: 1, rows: 1202, ms: 9_000 }] };
+  run.answers.set("GET api/state", answer(withSync("public.customers", { ...running, state: "synced", endedAt: "2026-10-27T09:05:31.000Z", answer: answered })));
+  await app.poll();
+  assert.match(textOf(popOf(app.view().tables!, "act-tables-public.customers")), /^Synced public\.customers: 3 added, 0 updated, 1 deleted\. public\.customers 3 added, 0 updated, 1 deleted, 1,202 rows now · 9\.0 s /);
+  assert.match(app.view().tables!, />Synced ✓<\/button>/);
+  app.dismissSynced();
+  await app.poll();
+  assert.equal(popOf(app.view().tables!, "act-tables-public.customers"), "", "said once: a poll after it never says it again");
+  // A SYNC THAT FAILED: what was not synced, and why, as mason sync says it
+  run.answers.set("GET api/state", answer(withSync("public.customers", { ...running, id: 4 })));
+  await app.poll();
+  run.answers.set("GET api/state", answer(withSync("public.customers", { ...running, id: 4, state: "failed", endedAt: "2026-10-27T09:06:00.000Z", failure: { code: "failed", message: "the poll failed: connection reset" } })));
+  await app.poll();
+  const failed = popOf(app.view().tables!, "act-tables-public.customers");
+  assert.match(textOf(failed), /^✗ public\.customers was not synced why the poll failed: connection reset Dismiss$/, textOf(failed));
+  // a sync that ended before the page opened: the page never saw it run, so it says nothing of it
+  const later = fn<[unknown], App>("createApp")(run.fetch);
+  later.show("tables");
+  await later.poll();
+  assert.equal(popOf(later.view().tables!, "act-tables-public.customers"), "");
+  assert.match(later.view().tables!, />Sync now<\/button>/);
+});
+
+test("Tables: Sync now of a table already syncing (another tab, mason sync) is refused busy at once: what is happening and that its row shows when it ends; the row then says Syncing… (issue 1007)", async () => {
+  const run = fakeRun();
+  run.answers.set("GET api/state", answer(SYNCED));
+  const app = fn<[unknown], App>("createApp")(run.fetch) as App & { syncTable(t: string): Promise<boolean> };
+  app.show("tables");
+  await app.poll();
+  const running = { id: 9, tables: ["public.customers"], state: "syncing", startedAt: "2026-10-27T09:03:00.000Z", endedAt: null };
+  const message = "public.customers is already syncing (started 2 min ago)";
+  run.answers.set("POST api/sync", answer({ error: message, code: "busy", sync: running,
+    failure: { code: "busy", message, fix: "it ends by itself, and a second sync is never started beside it", next: [{ command: "mason status", what: "when each table was last synced" }] } }, 409));
+  run.answers.set("GET api/state", answer({ ...SYNCED, tables: SYNCED.tables.map((t) => t.table === "public.customers" ? { ...t, syncByHand: running } : t) }));
+  run.asked.length = 0;
+  assert.equal(await app.syncTable("public.customers"), false);
+  assert.deepEqual(run.asked, [`POST api/sync ${JSON.stringify({ tables: ["public.customers"] })}`, "GET api/state"], "refused, then the state read again: the row says the sync running");
+  const said = popOf(app.view().tables!, "act-tables-public.customers");
+  assert.equal(textOf(said), "✗ public.customers is already syncing (started 2 min ago). Its row shows when it ends. Dismiss", "in the page's words: no command named");
+  assert.match(app.view().tables!, /<button type="button" class="small" data-room="Syncing…" disabled>Syncing…<\/button>/);
 });
 
 test("Tables: while the page's Sync now of a table runs, its State says Syncing (amber), as Adding… does for an add; the others keep their own word", () => {
@@ -3198,7 +3276,11 @@ test("Tables: the search box narrows both lists and Failed only lists the failed
   // Sync clicked: its button says Syncing… at once (written before the answer comes), the answer under it once it does
   let release!: () => void;
   const answered = new Promise<void>((r) => { release = r; });
-  run.answers.set("POST api/sync", () => new Response(JSON.stringify({ at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", added: 1, updated: 0, deleted: 0, rows: 1201, ms: 40 }] })));
+  // the run answers as it starts (issue 1007); a quick sync has ended by the state read after it
+  const started = { id: 1, tables: ["public.customers"], state: "syncing", startedAt: "2026-10-27T09:05:31.000Z", endedAt: null };
+  run.answers.set("POST api/sync", () => new Response(JSON.stringify({ sync: started, already: false }), { status: 202 }));
+  run.answers.set("GET api/state", answer({ ...SYNCED, tables: SYNCED.tables.map((t) => t.table === "public.customers" ? { ...t, syncByHand: { ...started, state: "synced", endedAt: "2026-10-27T09:05:31.040Z",
+    answer: { at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", added: 1, updated: 0, deleted: 0, rows: 1201, ms: 40 }] } } } : t) }));
   const fetchNow = run.fetch;
   run.fetch = async (p, init) => { if (p === "api/sync") await answered; return fetchNow(p, init); };
   const click = on.get("click")!({ target: { closest: () => ({ dataset: { syncTable: "public.customers" } }) } });
@@ -5766,7 +5848,7 @@ test("an answer beside its button stays up until it is dismissed — Dismiss, Es
   const pops = () => popsOf(app.view().tables!);
   const later = async () => { t += hour; await app.poll(); };
   // a sync's answer: an hour of polls on, still said; Dismiss takes it
-  run.answers.set("POST api/sync", answer(synced));
+  run.answers.set("POST api/sync", quickSync(run, CATALOG_STATE, synced));
   await app.syncTable("public.customers");
   await later();
   assert.deepEqual(pops().map((p) => p.anchor), ["act-tables-public.customers"], "a sync's answer, an hour of polls on");
@@ -5783,7 +5865,7 @@ test("an answer beside its button stays up until it is dismissed — Dismiss, Es
   // the next action's answer takes the last one's place, and so does its question
   await app.syncTable("public.customers");
   await later();
-  run.answers.set("POST api/sync", answer({ ...synced, tables: [{ ...synced.tables[0]!, table: "public.orders" }] }));
+  run.answers.set("POST api/sync", quickSync(run, CATALOG_STATE, { ...synced, tables: [{ ...synced.tables[0]!, table: "public.orders" }] }));
   await app.syncTable("public.orders");
   assert.deepEqual(pops().map((p) => p.anchor), ["act-tables-public.orders"], "the next sync's answer in the last one's place");
   app.askRemoveTable("public.customers");
@@ -5798,7 +5880,7 @@ test("Escape with no question open dismisses the answer beside a button, in the 
   await settle();
   const press = (key: string) => on.get("keydown")!({ key, preventDefault: () => undefined });
   const click = (dataset: Record<string, string>) => on.get("click")!({ target: { closest: (sel: string) => sel === "button" ? { dataset } : null } });
-  run.answers.set("POST api/sync", answer({ at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", added: 1, updated: 0, deleted: 0, rows: 1201, ms: 40 }] }));
+  run.answers.set("POST api/sync", quickSync(run, CATALOG_STATE, { at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", added: 1, updated: 0, deleted: 0, rows: 1201, ms: 40 }] }));
   await click({ syncTable: "public.customers" });
   await settle();
   assert.match(textOf(el("tables").html), /Synced public\.customers:/, "the answer, said");

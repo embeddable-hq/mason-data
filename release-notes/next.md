@@ -12,6 +12,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **Each synced table with a `numeric` column of no precision is synced again once, at the first start.** Mason now
   keeps each such value's own decimals (below), which the data synced before does not hold. The table serves its old
   data until then, and a large table takes about as long as its first sync did.
+- **A table that an older Mason left without one of its columns is synced again once, at the first start.** This is
+  a table with a column whose name begins with `__mason_json_`, which that Mason dropped (below). The table serves
+  its old data until then, and a large table takes about as long as its first sync did.
 
 ## What changes
 
@@ -58,6 +61,21 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **On a server that runs the project read-only, the web page links to how to deploy a change.** `mason status --json`
   words `sourcesReadOnly` as plain sentences now, so a script that matched its old text must match the new one. A new
   field, `sourcesReadOnlyKind`, says which reason it is: `deployed`, `unwritable` or `unknown`.
+- **`POST /api/sync` answers as soon as the sync has started.** It answers `202` with `{ sync: { id, tables, state,
+  startedAt, endedAt } }`. Each table in `/api/state` then has `syncByHand`, which says `syncing` until the sync
+  ends, then `synced` with what it did or `failed` with why. A script that calls the endpoint directly and needs the
+  old answer adds `"wait": true` to its body. `mason sync` does this, so it still waits and prints the same report.
+  A refusal is answered at once, as before.
+- **A sync of a table that is already syncing, or waiting to start, is refused at once.** This holds for the web
+  page's Sync now, for `mason sync` and for `POST /api/sync`. It is never queued for another read of the table. The
+  refusal has a new code, `busy` (exit 1), and says when the running sync started. The page says the table's row shows
+  when it ends. `mason sync` names `mason status` when a sync by hand or a scheduled poll is running. When the table's
+  first sync, whole read again, catch-up or column change is under way, it names `mason wait <table>` first, then
+  `mason status`. A table whose first sync, whole read again or catch-up is under
+  way was refused before with `nothing_yet`, and is now refused with `busy`. A script that matched `nothing_yet` there
+  must match `busy`.
+- **A sync you start by hand that fails is now listed under Sync events**, as "Manual sync failed" (`sync_failed` in
+  `mason logs --events`).
 - **The web page's Sync events list shows how long each sync took in a column of its own.** The Took column holds
   it, such as `570 ms` or `7 min 57 s`, and you can sort the list by it. The message no longer ends with it there.
   `mason logs --events --json` gives it as a new field, `tookMs`. A first sync's event now ends with its time as a
@@ -66,6 +84,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **Removing a synced table whose name a generated table also uses no longer stops the sync.** While a synced table
+  holds a name, a generated table of that name is refused, as before. Once you remove the synced table, the generated
+  table is built again and served. Before, if no review of the generated tables ran between the add and the remove,
+  every sync pass failed with "Table with name … does not exist", and queries on the name failed until one of the
+  generated table's bases changed. A project already in that state recovers at its first start after the upgrade.
+- **A generated table whose name differs from a synced table's only in case is refused.** The synced data does not
+  tell such names apart, so `Orders.yml` beside a synced `orders` could replace the synced table's rows. Now it is
+  refused by name, as a generated file of the synced table's own name is. Two generated files whose names differ only
+  in case are refused the same way. Rename the file to fix either.
 - **A list of values passed as one query parameter now works, as node-pg passes it.** node-pg, and the ORMs built on
   it, send a JavaScript array as text such as `{"1","3"}`, and let the database work out its type. Mason answered
   `WHERE id = ANY($1)` and `WHERE id = ANY($1::int[])` with an error for such a value. Now it answers them as Postgres
@@ -80,6 +107,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A timestamp with time zone compared with a `timestamp[]` or `date[]`, or with a subquery of timestamps or dates,
   now uses your session's time zone.** This covers `ANY`, `ALL`, `IN` and `NOT IN`. Before, a session outside UTC got
   other rows. The same holds for a timestamp or a date compared with a wider time type.
+- **Sync now on the web page no longer shows a timeout for a big table behind a proxy.** The page waited for the
+  whole sync in one request. A reverse proxy or load balancer in front of `mason serve` closed the request when its
+  own time limit ran out. The sync went on, but the page said it failed. Now the button says Syncing… while the sync runs, even after
+  the page is reloaded, and then says what the sync did or why it failed.
+
 - **A `numeric` column with no precision now prints each value as your database does.** Rails makes such a column from
   `t.decimal`. Mason printed every value with the most decimals any value in the column had, so `12.5` read `12.50` and
   `0` read `0.00`. Now a plain `SELECT`, `::text`, arithmetic, `sum`, windows, subqueries and the binary
@@ -103,6 +135,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   replication. Mason drops them as they arrive. They are never stored, logged or served. A publication you name with
   `publication:` is still never changed. If it lists a table's columns, Mason now says once that the list blocks
   `DROP COLUMN`, and how to name the table whole. This was listed as known in 0.20.0.
+- **A column whose name begins with `__mason_json_` is no longer dropped from the synced data.** Mason uses names like
+  this for columns of its own. At each start, Mason dropped a column of your table named like that, and its values were
+  lost. Then every poll of that table failed. Under `sync: replication`, the stream stopped for every table. Now Mason
+  knows its own columns from what it records, whatever their names, so every column of your table is synced and
+  served. A column named like Mason's other hidden columns, such as `__mason_scale_`, is kept the same way.
 - **Mason no longer crashes when it stops while a client is still connecting.** A connection that was still opening
   as Mason stopped could crash the process with a segmentation fault or an abort. The supervisor then saw a signal and
   no reason. Now the stop waits for each connection still opening, and then closes the synced data.

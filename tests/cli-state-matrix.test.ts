@@ -231,7 +231,7 @@ async function upProject(changes: "poll" | "replication", copies: CopyState[], s
     port: 0, token, page: false, users: { file: path.join(root, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
     listener: { openSessions: () => ({ open: 0, byClient: [] }), running: () => [] }, folder: () => folder, root, home: path.join(root, ".mason"), version: "test", startedAt: Date.now(), sourcesChanged: () => undefined, log: () => undefined, readSource: () => ({ message: "none", code: "bad_source" }), runUrl: "",
     sources: () => ({ file: { name: "shop", file, kind: "postgres", url: { env: "DATABASE_URL" }, tables: ["orders", "events", "fresh"].map((t) => ({ name: t, table: `public.${t}`, columns: null, exclude: [], key: null })) }, problem: null }),
-    duck: { copies: () => copies, generated: () => generated, file: path.join(root, ".mason", "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => stream, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
+    duck: { copies: () => copies, generated: () => generated, file: path.join(root, ".mason", "duck.db"), refused: () => null, poll: async () => ({ at: "", tables: [] }), stream: async () => stream, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }) } },
   } as unknown as RunContext;
   const server = createRunServer(ctx);

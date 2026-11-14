@@ -70,7 +70,7 @@ function runServer(o: { pageReadOnly?: boolean; pageReadOnlyAllow?: string[] } =
     listener: { openSessions: () => ({ open: 0, byClient: [] }), running: () => [], cancel: (session: number) => { changes.push(`cancel ${session}`); return { unknown: session }; } },
     logs: { capacity: 10, recent: () => [] },
     readSource: () => ({ message: "none", code: "bad_source" }), runUrl: "",
-    duck: { copies: () => [], file: path.join(root, "duck.db"), poll: async (t: string[]) => { changes.push(`sync ${t.join(",")}`); return { at: "2026-11-07T10:00:00.000Z", tables: [] }; },
+    duck: { copies: () => [], file: path.join(root, "duck.db"), refused: () => null, poll: async (t: string[]) => { changes.push(`sync ${t.join(",")}`); return { at: "2026-11-07T10:00:00.000Z", tables: [] }; },
       stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }), restarts: () => [],
       requests: { days: 7 } },
   } as unknown as RunContext;
@@ -176,7 +176,7 @@ test("HEAD on every path of the server answers what GET answers — its status a
 test("read-only: the commands' requests (the run's token) are served as before — mason sync, mason cancel — the page alone is read-only", async () => {
   const { ctx, changes } = await listening({ pageReadOnly: true });
   const bearer = (method: string) => ({ Host: `127.0.0.1:${ctx.port}`, Authorization: `Bearer ${TOKEN}`, ...(method === "GET" ? {} : { "Content-Type": "application/json" }) });
-  const synced = await call({ port: ctx.port, method: "POST", path: "/api/sync", headers: bearer("POST"), body: JSON.stringify({ tables: ["public.orders"] }) });
+  const synced = await call({ port: ctx.port, method: "POST", path: "/api/sync", headers: bearer("POST"), body: JSON.stringify({ tables: ["public.orders"], wait: true }) });
   assert.equal(synced.status, 200, synced.text);
   const cancelled = await call({ port: ctx.port, method: "POST", path: "/api/cancel", headers: bearer("POST"), body: JSON.stringify({ session: 7 }) });
   assert.equal(cancelled.status, 404, "the listener answered: no session 7");
@@ -231,7 +231,7 @@ test("without the setting nothing changes: the page's change is served, and the 
   for (const o of [{}, { pageReadOnly: false }]) {
     const { ctx, changes } = await listening(o);
     const a = await call({ port: ctx.port, method: "POST", path: "/api/sync", headers: pageHeaders(ctx.port, "POST"), body: JSON.stringify({ tables: ["public.orders"] }) });
-    assert.equal(a.status, 200, a.text);
+    assert.equal(a.status, 202, `the sync started: ${a.text}`);
     assert.deepEqual(changes, ["sync public.orders"]);
     assert.equal((JSON.parse((await call({ port: ctx.port, path: "/api/state", headers: pageHeaders(ctx.port, "GET") })).text) as { pageReadOnly: unknown }).pageReadOnly, null);
   }

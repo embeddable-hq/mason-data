@@ -423,7 +423,7 @@ test("mason sync of a table being read again says why, never that its first sync
 test("each table's state says why mason sync of it is refused now, in the words pollNow refuses with, or null when it runs (the page's Sync now, issue 812)", async () => {
   const names = ["a", "b", "c", "d", "e", "f", "g", "h", "i"];
   await withSync({ mode: "poll", tables: names.map((n) => table(n)),
-    seed: async (run) => { for (const n of ["a", "d", "e", "f", "g", "h", "i"]) { await run(copied(n)); await run(lastPoll(n)); } await run(copied("c", [column("id")], "failed", "could not read the next chunk")); } }, async (sync) => {
+    seed: async (run) => { for (const n of ["a", "d", "e", "f", "g", "h", "i"]) { await run(copied(n)); await run(lastPoll(n)); } await run(copied("c", [column("id")], "failed", "could not read the next chunk")); } }, async (sync, _logged, events) => {
     type Inner = { stopped: boolean; attach(): Promise<void>; states: Map<string, CopyState>; copiedAs: Map<string, string>; snapshots: Map<string, unknown>;
       retired: Map<string, { layout: string; short: string }>; behind: Map<string, { why: string }>; rebuildingNow: { source: string; kind: string } | null };
     const s = sync as unknown as Inner;
@@ -445,7 +445,10 @@ test("each table's state says why mason sync of it is refused now, in the words 
       const states = sync.state();
       const json = JSON.parse(JSON.stringify(runState(runContext([...names.map((n) => table(n)), table("zz")], "poll"), states, null))) as RunState & { tables: { table: string; syncRefusal?: string | null }[] };
       for (const n of [...names, "zz"]) {
+        // the check POST /api/sync answers at once, before any sync starts (issue 1007): pollNow's own refusal, the same words
+        const asked = sync.pollRefusal([`public.${n}`])?.message ?? null;
         const refused = await refusalOf(n);
+        assert.equal(asked, refused, `public.${n}: refused as it is asked exactly as pollNow refuses`);
         if (n === "a") assert.equal(refused, null, "a copied table, current: mason sync runs it (here it fails on the source, never refused)");
         else assert.ok(refused !== null, `public.${n} is refused`);
         if (n !== "zz") assert.equal(states.find((x) => x.source === `public.${n}`)!.syncRefusal, refused, `public.${n}: the state's reason is pollNow's refusal`);
@@ -455,6 +458,43 @@ test("each table's state says why mason sync of it is refused now, in the words 
       assert.match(states.find((x) => x.source === "public.c")!.syncRefusal!, /^public\.c is not synced yet \(its first sync failed: could not read the next chunk\)/);
       assert.match(states.find((x) => x.source === "public.e")!.syncRefusal!, /^public\.e is being read again whole \(its columns changed\)/);
       assert.match(states.find((x) => x.source === "public.h")!.syncRefusal!, /^public\.h is being caught up by one poll after its whole read/);
+      // A SYNC BY HAND THAT FAILED IS AN EVENT, as one that ran is (`synced`): its reason is the ledger's, never only an
+      // answer no one may hold (issue 1007); a refusal is none (nothing ran)
+      assert.deepEqual(events.filter((e) => e.kind === "sync_failed").map((e) => [e.table, e.message]), [["public.a", "sync by hand failed: no source in this test"]]);
+      assert.equal(sync.pollRefusal(["public.a", "public.b"])?.message, sync.pollRefusal(["public.b"])?.message, "one table refused refuses the sync");
+      // A SYNC OF IT RUNNING OR WAITING TO START IS `busy` (the owner, on issue 1007: never queued for another read): its
+      // first sync, a whole read again, a catch-up, a retired layout's read again; a failed first sync is not
+      const codeOf = (n: string): string | undefined => sync.pollRefusal([`public.${n}`])?.code;
+      assert.deepEqual(["b", "c", "d", "e", "f", "g", "h", "i"].map((n) => [n, codeOf(n)]),
+        [["b", "busy"], ["c", "nothing_yet"], ["d", "busy"], ["e", "busy"], ["f", "busy"], ["g", "busy"], ["h", "busy"], ["i", "busy"]]);
+      // the run's own read, which mason wait waits for, as each says: followed by mason wait
+      assert.deepEqual(["b", "d", "e", "f", "g", "h", "i"].map((n) => [n, sync.pollRefusal([`public.${n}`])?.follow]), ["b", "d", "e", "f", "g", "h", "i"].map((n) => [n, "wait"]));
+      type More = { scheduledNow: Set<string>; reshaping: Map<string, Promise<void>>; scheduledPolls: Map<string, { startedAt: number; found: unknown }> };
+      const x = s as unknown as More;
+      // ITS POLL QUEUED IN THE PASS RUNNING NOW: busy until that poll ends, never polled again behind it
+      x.scheduledNow.add("public.a");
+      const queued = sync.pollRefusal(["public.a"]);
+      assert.deepEqual([queued?.code, queued?.message, queued?.follow], ["busy", "public.a is being synced now, on its schedule (polled every 5s): it is current when that ends", null]);
+      await assert.rejects(sync.pollNow(["public.a"]), { message: queued?.message });
+      assert.equal(sync.state().find((y) => y.source === "public.a")!.syncRefusal, queued?.message, "the page's Sync now is offered disabled meanwhile, with the reason");
+      x.scheduledNow.delete("public.a");
+      // ITS COLUMNS BEING READ AGAIN (issue 977): busy as it is asked, and pollNow agrees
+      x.reshaping.set("public.a", new Promise<void>(() => undefined));
+      const reshaped = sync.pollRefusal(["public.a"]);
+      assert.deepEqual([reshaped?.code, reshaped?.follow, reshaped?.message], ["busy", "wait", "public.a's columns changed on the database: they are being read again, and it is synced again whole with them — mason wait waits for it"]);
+      await assert.rejects(sync.pollNow(["public.a"]), { message: reshaped?.message });
+      x.reshaping.delete("public.a");
+      // A SYNC BY HAND QUEUED BEHIND A PASS THAT POLLED IT, that poll begun after it was asked: answered by that poll, no
+      // second read (here a read fails: the source is not there), and said as a sync by hand
+      const found = { table: "public.a", added: 4, updated: 0, deleted: 1, rows: 9, ms: 12 };
+      x.scheduledPolls.set("public.a", { startedAt: performance.now() + 60_000, found });
+      const before = events.length;
+      assert.deepEqual((await sync.pollNow(["public.a"])).tables, [found]);
+      assert.deepEqual(events.slice(before).map((e) => [e.kind, e.message]), [["synced", "synced by hand (by its poll on schedule, which began as it was asked): 4 added, 0 updated, 1 deleted, 9 rows now · 12 ms"]]);
+      // one begun before it was asked is no answer: the table is read again (and here that read fails)
+      x.scheduledPolls.set("public.a", { startedAt: performance.now() - 60_000, found });
+      await assert.rejects(sync.pollNow(["public.a"]), /no source in this test/);
+      x.scheduledPolls.delete("public.a");
     } finally { s.stopped = true; }
   });
   // a run that reads every table again whole: every table refused, in the one sentence
@@ -463,6 +503,7 @@ test("each table's state says why mason sync of it is refused now, in the words 
     const refused = await sync.pollNow(["public.a"]).then(() => null, (e: Error) => e.message);
     assert.match(refused ?? "", /MASON_DUCK_SYNC=recopy/);
     assert.equal(sync.state()[0]!.syncRefusal, refused);
+    assert.equal(sync.pollRefusal(["public.a"])?.message, refused, "refused as it is asked");
     (sync as unknown as { stopped: boolean }).stopped = true;
   });
 });

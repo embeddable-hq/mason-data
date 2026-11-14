@@ -234,7 +234,7 @@ paths:
   was kept only as a table's CURRENT error, wiped by the next success, and earlier ones only in the log file): the sync
   says each where it logs it (`Sync.event`: copy, poll, catch-up and stream failures, the database out of reach, a copy
   finished, a table current again — the last detected in `record`, the one place an error is cleared — and a sync asked
-  by hand, `synced`, in the words mason sync answers: without it a person who synced read the list as a sync lost —
+  by hand, `synced`, in the words mason sync answers: without it a person who synced read the list as a sync lost — and its failure, `sync_failed` (`POST /api/sync` answers the page as it starts, issue 1007) —
   and the scheduled syncs that succeed, `polled` a poll and `streamed` ONE a table a minute of the stream's changes
   (`reportStream`, never one a batch), which a reader gets only when it asks (`SCHEDULED`, `?scheduled=1`,
   `--scheduled`: in the query, so they never take a failure's place among the newest asked for)), `SyncEvents`

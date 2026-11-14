@@ -47,7 +47,7 @@ async function server(page = true): Promise<{ root: string; port: number; logs: 
     port: 0, token: TOKEN, page, served: true, users: { file: path.join(root, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://localhost:5433/shop" },
     folder: () => null, root, home: path.join(root, ".mason"), version: "test", startedAt: Date.now(), sources: () => ({ file: null, problem: null }), sourcesChanged: () => undefined, log: (l: string) => { logs.push(l); },
     listener: { openSessions: () => ({ open: 0, sessions: [] }) }, readSource: () => ({ message: "none", code: "bad_source" }), runUrl: "",
-    duck: { copies: () => [], file: path.join(root, "duck.db"), poll: async () => ({ at: "t", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }), restarts: () => [],
+    duck: { copies: () => [], file: path.join(root, "duck.db"), refused: () => null, poll: async () => ({ at: "t", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }), restarts: () => [],
       requests: { days: 7 } },
   } as unknown as RunContext;
   const s = createRunServer(ctx);

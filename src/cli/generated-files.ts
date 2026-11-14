@@ -22,6 +22,7 @@ import * as path from "node:path";
 import { parseDocument } from "yaml";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { parseLag } from "../lib/table-sync.ts";
+import { relationKey } from "../lib/relation-key.ts";
 import { shownPath, tableNameProblem } from "./sources.ts";
 import type { GeneratedDefinition, GeneratedFileRefused, GeneratedRead } from "../duck/generated.ts";
 import type { GeneratedRefusal } from "../duck/generated-plan.ts";
@@ -112,12 +113,13 @@ export function readGenerated(folder: string, root: string): GeneratedRead {
       out.refused.push({ name: dot < 0 ? `public.${stem}` : stem, schema: dot < 0 ? "public" : stem.slice(0, dot), table: dot < 0 ? stem : stem.slice(dot + 1), file: shown, kind: null, refusals: [refusal(null, t, ["rename the file: its name is the table's"])] });
       continue;
     }
-    const table = `${t.schema}.${t.table}`, before = seen.get(table);
+    // two spellings of one table in the synced data (`Daily.yml` beside `daily.yml`) are one name: `relationKey`
+    const table = `${t.schema}.${t.table}`, before = seen.get(relationKey(table));
     if (before !== undefined) {
       out.refused.push({ name: table, ...t, file: shown, kind: null, refusals: [refusal(null, `names the table ${table}, as ${before} does`, ["keep one"])] });
       continue;
     }
-    seen.set(table, shown);
+    seen.set(relationKey(table), shown);
     let text: string;
     try { text = fs.readFileSync(full, "utf8"); }
     catch (e) { out.refused.push({ name: table, ...t, file: shown, kind: null, refusals: [refusal(null, `it cannot be read: ${(e as Error).message}`)] }); continue; }

@@ -39,6 +39,7 @@ import type { Planner, GeneratedColumn, GeneratedRefusal, DefinitionPlan as Defi
 import { cycleRefusal, isNumeric, planDefinition, readsByName, refusalOf, refusalText, storedColumns, uncheckedRefusal, type EngineTypes } from "./generated-plan.ts";
 import { MASON_SCHEMA, pgErrorOf, type DuckStore } from "./store.ts";
 import { StatementError } from "./statement.ts";
+import { relationKey } from "../lib/relation-key.ts";
 import type { SyncEventInput } from "./events.ts";
 import type { CopyState } from "./sync.ts";
 import { TURN_FUNCTION } from "./functions.ts";
@@ -168,6 +169,9 @@ interface Entry {
   taken: number | null;
   queued: boolean;
   running: boolean;
+  /** the bases the run going now reads, while it runs: a commit to one after its snapshot is marked for the next run
+   *  whatever is deployed, also when nothing is (a first build, or one the sync's drop let go: issue 996) */
+  runBases: string[] | null;
   failures: number;
   retryAt: number;
   error: string | null;
@@ -288,6 +292,16 @@ export class GeneratedTables {
       this.entry(name).deployed = { definition: { name, schema: name.slice(0, at), table: name.slice(at + 1), file, sql, orderBy, targetLag: { every, seconds: Number(seconds) }, comment },
         fingerprint, columns: JSON.parse(columns) as GeneratedColumn[], bases: JSON.parse(bases) as string[], basesSynced: basesSynced === null ? {} : JSON.parse(basesSynced) as Record<string, number | null>, snapshotAt: Number(snapshotAt), builtAt: Number(builtAt), rows: Number(count), seconds: took };
     }
+    // A LEDGER ROW WITH NO TABLE UNDER IT is let go and built again (issue 996): a synced table that held the name and was
+    // dropped took the table with it, and an earlier Mason kept the row, so `served()` named a table the catalog's
+    // rebuild could not read, and every rebuild and pass failed on it. The engine finds a name by `relationKey`
+    const there = new Set(((await w.runAndReadAll(`SELECT schema_name || '.' || table_name FROM duckdb_tables() WHERE database_name = current_database()`)).getRowsJS() as Array<[string]>).map(([n]) => relationKey(n)));
+    for (const e of this.entries.values()) {
+      if (e.deployed === null || there.has(relationKey(e.name))) continue;
+      e.deployed = null;
+      await w.run(`DELETE FROM ${GENERATED_LEDGER} WHERE name = ${literal(e.name)}`);
+      this.host.log(`${e.name}: its table is not in the synced data, so the generated table is built again`);
+    }
     // marks die with a run: a base whose last sync is not the one the snapshot saw may have changed since. Never "synced
     // after the snapshot": a poll's time is its start, so one that began before the snapshot and committed after it would
     // be missed. A generated base's "last sync" is its own snapshot (`baseSynced`): a parent swapped in alone since the
@@ -353,7 +367,7 @@ export class GeneratedTables {
   private entry(name: string): Entry {
     let e = this.entries.get(name);
     if (e === undefined) {
-      e = { name, wanted: null, fileRefused: null, checked: null, reads: [], cycle: null, blocked: null, seen: null, refusals: [], said: null, warnings: [], warned: null, waitingFor: null, deployed: null, dirtySince: null, taken: null, queued: false, running: false, failures: 0, retryAt: 0, error: null };
+      e = { name, wanted: null, fileRefused: null, checked: null, reads: [], cycle: null, blocked: null, seen: null, refusals: [], said: null, warnings: [], warned: null, waitingFor: null, deployed: null, dirtySince: null, taken: null, queued: false, running: false, runBases: null, failures: 0, retryAt: 0, error: null };
       this.entries.set(name, e);
     }
     return e;
@@ -382,7 +396,7 @@ export class GeneratedTables {
   /** a base's commit changed its rows: called on the writer's turn, after that commit */
   changed(base: string): void {
     const now = Date.now();
-    for (const e of this.entries.values()) if (e.dirtySince === null && e.deployed?.bases.includes(base)) e.dirtySince = now;
+    for (const e of this.entries.values()) if (e.dirtySince === null && (e.deployed?.bases.includes(base) || e.runBases?.includes(base))) e.dirtySince = now;
   }
 
   /** how far behind its bases a table is, seconds, across its chain: 0 when nothing is unreflected */
@@ -558,8 +572,10 @@ export class GeneratedTables {
     const planner = this.planner, schema = this.host.schema();
     if (planner === null) return;
     const def = e.wanted;
-    if (def === null) { e.checked = null; e.seen = null; e.refusals = []; e.waitingFor = null; return; }
     const held = this.host.added(e.name);
+    // a name a synced table holds is let go whatever its file says: a file refused at its read kept what was deployed,
+    // which the synced table's drop then left in `served()` with no table under it (issue 996)
+    if (def === null) { e.checked = null; e.seen = null; e.refusals = []; e.waitingFor = null; if (held !== null) await this.release(e); return; }
     if (held !== null) {
       e.checked = null; e.seen = null; e.waitingFor = null;
       await this.release(e);
@@ -746,6 +762,30 @@ export class GeneratedTables {
     this.host.log(`${e.name}: a synced table now holds its name, so the generated table is no longer kept`);
   }
 
+  /**
+   * THE TABLE AT A NAME DROPPED BY THE SYNC (`mason remove` of a synced table, src/duck/sync.ts `pass`), called on the
+   * writer's turn, so it never takes one: a generated table of that name (by the engine's rule, `relationKey`) has no
+   * table any more, whatever it was last built from, so what it says it serves is let go with its ledger row. Kept, it
+   * was in `served()` with no table under it, and every rebuild of the catalog and every pass failed on it until a base
+   * changed (issue 996). Also while a run has it: that run's swap puts its table in, and one that fails leaves nothing
+   * said served; a base commit meanwhile is marked by the run's own bases (`runBases`). Its next review builds it again.
+   */
+  async dropped(source: string): Promise<void> {
+    const key = relationKey(source);
+    // every one let go before anything awaits: a rebuild of the catalog reads `served()` meanwhile
+    const gone = [...this.entries.values()].filter((e) => relationKey(e.name) === key && e.deployed !== null);
+    for (const e of gone) {
+      // a run's marks are its own until its swap: what it took, and a change after its snapshot (`runBases`), stay
+      // marked for the next run
+      e.deployed = null;
+      if (!e.running) { e.dirtySince = null; e.taken = null; e.error = null; }
+    }
+    for (const e of gone) {
+      await this.store.writer.run(`DELETE FROM ${GENERATED_LEDGER} WHERE name = ${literal(e.name)}`);
+      this.host.log(`${e.name}: the synced table that held its name is dropped, so the generated table is built again`);
+    }
+  }
+
   /** what to build from now: the file's definition where the catalog passed it, else what was deployed; nothing where a
    *  synced table holds the name */
   private buildable(e: Entry): { definition: GeneratedDefinition; fingerprint: string; bases: string[] } | null {
@@ -814,7 +854,7 @@ export class GeneratedTables {
     const buildables = members.map((m) => this.buildable(m));
     if (buildables.some((b) => b === null)) return null;
     const c = this.host.connection();
-    for (const m of members) m.running = true;
+    for (const [i, m] of members.entries()) { m.running = true; m.runBases = buildables[i]!.bases; }
     try {
       const sides = new Map<string, string>();
       const plans: Array<{ e: Entry; b: NonNullable<ReturnType<GeneratedTables["buildable"]>>; plan: DefinitionPlanOf; target: string; side: string }> = [];
@@ -933,7 +973,7 @@ export class GeneratedTables {
       this.host.event({ kind: "generated_failed", table: at.name, message: m, cause: x });
       return at;
     } finally {
-      for (const m of members) m.running = false;
+      for (const m of members) { m.running = false; m.runBases = null; }
     }
     // a file gone, or changed, while it ran: the next review looks
   }

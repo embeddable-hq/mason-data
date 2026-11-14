@@ -70,7 +70,12 @@ const STATE = (() => {
 /** What `/api/pick` answers for a table added (src/cli/source-edit.ts addEntry), and `/api/sync` for one synced. */
 const added = (table: string) => ({ table, file: "/app/mason/sources/shop.yml", entry: table.slice("public.".length), columns: null, exclude: ["api_token"], key: null,
   addedKey: [], skippedSecrets: ["api_token"], already: false, sync: { value: "off", from: "default" }, bigOff: false, notReplicated: null, pollCost: null });
-const synced = (table: string) => ({ tables: [{ table, added: 1, updated: 2, deleted: 1, rows: 1200, ms: 140 }], streamed: [] });
+const synced = (table: string) => ({ at, tables: [{ table, added: 1, updated: 2, deleted: 1, rows: 1200, ms: 140 }], streamed: [] });
+/** Each table's last sync by hand (`/api/state` `syncByHand`, issue 1007): `/api/sync` answers as it starts, and the
+ *  state read after it says it ended, with what it did */
+const byHand = new Map<string, unknown>();
+let syncs = 0;
+const stateNow = () => ({ ...STATE, tables: (STATE.tables as Array<{ table: string }>).map((t) => byHand.has(t.table) ? { ...t, syncByHand: byHand.get(t.table) } : t) });
 
 // ------------------------------------------------------------------ the page, served as the run serves it
 
@@ -80,14 +85,19 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://x");
   if (url.pathname.startsWith("/api/")) asked.push(`${req.method} ${url.pathname}`);
   const json = (body: unknown) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
-  if (url.pathname === "/api/state") return json(STATE);
+  if (url.pathname === "/api/state") return json(stateNow());
   if (url.pathname === "/api/usage") return json({ samples: [], copySizes: [] });
   if (url.pathname === "/api/pick" || url.pathname === "/api/sync") {
     let body = "";
     req.on("data", (c: Buffer) => { body += c.toString(); });
     req.on("end", () => {
       const asked = JSON.parse(body) as { table?: string; tables?: string[] };
-      json(url.pathname === "/api/pick" ? added(asked.table!) : synced(asked.tables![0]!));
+      if (url.pathname === "/api/pick") return json(added(asked.table!));
+      const table = asked.tables![0]!;
+      const sync = { id: ++syncs, tables: [table], state: "syncing", startedAt: at, endedAt: null };
+      byHand.set(table, { ...sync, state: "synced", endedAt: at, answer: synced(table) });
+      res.writeHead(202, { "content-type": "application/json" });
+      res.end(JSON.stringify({ sync, already: false }));
     });
     return;
   }
