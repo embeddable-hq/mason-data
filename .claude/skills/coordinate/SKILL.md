@@ -57,7 +57,11 @@ word. The merge itself tags, publishes the image and the CLI, and creates the Gi
 
 **The release lines** (`release-notes/README.md` "Release lines" has the rule and the steps):
 - Choose the version by the rule. A release on the current line is a patch (`0.20.1`). Only a breaking change, which
-  reads a project differently, makes a new line (`0.21.0`), and it waits on `main` for that line.
+  reads a project differently, makes a new line (`0.21.0`).
+- Before you merge the first breaking change to `main`, cut the current line's branch (`release/0.20`) from `main`, at
+  the commit just before it. That is a PR whose release note goes under "Before you upgrade", or that the review marks
+  breaking. From then on, every patch on the current line is released from that branch, and `main`'s next release is
+  `0.21.0`. A fix needed on both lines merges to `main`, then is cherry-picked to the branch in its own PR.
 - A security fix also goes to the previous line (`0.19.x`), as a release merged to its `release/0.<minor>` branch.
 
 ## Waiting

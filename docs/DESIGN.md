@@ -2930,12 +2930,16 @@ a new line never reaches the projects still on the old one. A security fix must 
 - A breaking change is anything that reads a project differently. It waits for the next line (`0.21.0`), which is
   occasional.
 - A security fix is released on the previous line as well as the current one (`0.19.x` and `0.20.x`).
+- A release from `main` carries all of `main`, so the current line moves to its own branch (`release/0.20`), cut
+  from `main` just before the first breaking change merges. Its patches are released from there, and `main` becomes the
+  next line.
 
 `release-notes/README.md` "Release lines" defines a breaking change from the code, says how to tell a patch from
 `next.md`, and has the steps for a patch on the previous line. That patch is a merge to the line's branch,
-`release/0.<minor>`, cut from its newest tag. `release.yml` runs on those branches too. Only the newest release takes
-npm's `latest`, the image's `latest` and GitHub's Latest. An older line's patch is published under npm's
-`latest-0.<minor>`, and every release tags the image with its line (`0.<minor>`).
+`release/0.<minor>`, cut from its newest tag. `release.yml` runs on those branches too, and a branch releases its own
+line only. Only the newest release takes npm's `latest`, the image's `latest` and GitHub's Latest. An older line's
+patch is published under npm's `latest-0.<minor>`. The image's line tag (`0.<minor>`) moves only forward.
+`scripts/release-line.ts` decides all of this, and `tests/release-line.test.ts` holds it.
 
 ## A libc order, read level by level
 

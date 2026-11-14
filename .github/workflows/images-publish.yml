@@ -4,8 +4,8 @@
 #
 # Every push to main publishes it as `main` (a moving tag: what deploy/mason-data/compose.yml pulls by default before a
 # release exists) and `sha-<commit>` (pinnable). A release publishes `<version>`, its line `<major>.<minor>` (a moving
-# tag: the line's newest patch) and, when it is the newest release, `latest`: release.yml calls this workflow with the
-# version and `latest` once the merge of release-notes/v<version>.md is tagged (a tag made by a workflow's own token
+# tag: the line's newest patch, so never moved back) and, when it is the newest release, `latest`: release.yml calls this
+# workflow with the version, `latest` and `line` (scripts/release-line.ts) once the merge of release-notes/v<version>.md is tagged (a tag made by a workflow's own token
 # triggers no workflow, so it is a call, not a tag push). A patch on an older line (release-notes/README.md) never moves
 # `latest`. A tag `v<version>` pushed by hand still publishes `<version>` and `latest`, so push one by hand only for the
 # newest release. Both platforms an application deploys on: amd64 (a server) and arm64 (a developer's Mac).
@@ -26,6 +26,10 @@ on:
         type: string
       latest:
         description: whether the release is the newest, published as latest too (false for a patch on an older line)
+        required: true
+        type: boolean
+      line:
+        description: whether to move the line's tag <major>.<minor> to this release (false when a higher patch of the line is released)
         required: true
         type: boolean
 
@@ -62,7 +66,7 @@ jobs:
           # latest; main: main and sha-<commit>
           tags: |
             type=raw,value=${{ inputs.version }},enable=${{ inputs.version != '' }}
-            type=raw,value=${{ steps.line.outputs.line }},enable=${{ inputs.version != '' }}
+            type=raw,value=${{ steps.line.outputs.line }},enable=${{ inputs.version != '' && inputs.line }}
             type=ref,event=branch,enable=${{ inputs.version == '' }}
             type=sha,prefix=sha-,enable=${{ inputs.version == '' }}
             type=semver,pattern={{version}}
