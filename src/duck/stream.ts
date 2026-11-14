@@ -167,13 +167,12 @@ export const noCounts = (): ChangeCounts => ({ inserts: 0, updates: 0, deletes: 
 export function addCounts(to: ChangeCounts, from: ChangeCounts): void {
   to.inserts += from.inserts; to.updates += from.updates; to.deletes += from.deletes; to.truncates += from.truncates;
 }
-/** `1,204 changes (1,000 inserts, 200 updates, 4 deletes)`: what the log and `mason status` say of a table's counts */
+/** `1,000 added, 200 updated, 4 deleted`: what the log, the `streamed` event and `mason status` say of a table's counts
+ *  — the rows the database's INSERTs added, its UPDATEs updated and its DELETEs deleted, in the words a poll's record
+ *  says them (src/lib/table-sync.ts `syncedText`), a TRUNCATE's after them when there was one */
 export function countsText(c: ChangeCounts): string {
   const n = (x: number): string => x.toLocaleString("en-US");
-  const total = c.inserts + c.updates + c.deletes + c.truncates;
-  const parts = ([[c.inserts, "insert"], [c.updates, "update"], [c.deletes, "delete"], [c.truncates, "truncate"]] as const)
-    .filter(([k]) => k > 0).map(([k, w]) => `${n(k)} ${w}${k === 1 ? "" : "s"}`);
-  return `${n(total)} change${total === 1 ? "" : "s"}${parts.length ? ` (${parts.join(", ")})` : ""}`;
+  return `${n(c.inserts)} added, ${n(c.updates)} updated, ${n(c.deletes)} deleted${c.truncates > 0 ? `, emptied ${n(c.truncates)} time${c.truncates === 1 ? "" : "s"} by a TRUNCATE` : ""}`;
 }
 
 /** A table's changes in a batch, folded to one per key, in what they mean once applied in commit order. */

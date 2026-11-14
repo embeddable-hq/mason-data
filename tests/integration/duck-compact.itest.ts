@@ -108,7 +108,7 @@ test("a polled table churned through many polls and checkpoints: compacted from 
       // row past the database's oldest open transaction, so on a busy server it writes more: counted, not assumed)
       psql(url, `UPDATE t SET n = ${r}, v = md5(id::text || '${r}') WHERE (id * 7 + ${r}) % 10 = 0; INSERT INTO t SELECT g, md5(g::text), ${r} FROM generate_series(${20_000 + r * 50 - 49}, ${20_000 + r * 50}) g`);
       const polled = await sync.pollNow(["public.t"]);
-      wrote = Math.max(wrote, polled.tables[0]!.changed + polled.tables[0]!.deleted);
+      wrote = Math.max(wrote, polled.tables[0]!.added + polled.tables[0]!.updated + polled.tables[0]!.deleted);
       // the checkpoint DuckDB takes at 16 MiB of log, and at every stop
       await store.writer.run("CHECKPOINT");
       // what a scan reads: its stored rows, the deleted ones too — held to the threshold (0.3 of its space) and one
