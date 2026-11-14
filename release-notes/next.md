@@ -11,6 +11,14 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **A `numeric` column with no precision now prints each value as your database does.** Rails makes such a column from
+  `t.decimal`. Mason printed every value with the most decimals any value in the column had, so `12.5` read `12.50` and
+  `0` read `0.00`. Now a plain `SELECT`, `::text`, arithmetic, `sum`, `min`, `max`, windows, subqueries and the binary
+  wire all give your database's text. A few readers still print the old way: `to_json` and its kin, `concat`,
+  `format`, `||`, `array_agg`, a row's text, and a `UNION` without `ALL`. A fix for those is planned.
+  - **Before upgrading:** each synced table with such a column is synced again once, at the first start. It serves
+    its old data until then. A large table takes as long as its first sync did.
+
 - **A polled table no longer costs an extra connection to your database now and then.** On some machines, Mason's
   timer for the next poll woke a moment early. Mason then connected to your database, found no table due yet, and
   connected again a moment later to poll it. Now every timer waits until its time has come.

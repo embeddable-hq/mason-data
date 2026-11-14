@@ -931,7 +931,8 @@ const pq = (sql: string): string => `postgres_query(${literal(SRC)}, ${literal(s
  * the wire and the rewrite (src/duck/types.ts `padDecimals`, src/duck/rewrite.ts `displayScale`). One that does not fit
  * stays a double, said in the log. A later value with more digits or decimals than s re-copies the table at its new
  * width (`WIDER`) rather than being rounded. Postgres keeps each value's own scale where an unconstrained column's
- * differ (`1` beside `1.50`); the copy answers them all with s decimals, also said.
+ * differ (`1` beside `1.50`), so beside such a column the copy holds each value's in a hidden column, which every write
+ * computes from the source's text (src/duck/scale-column.ts; issue 946) and the rewrite prints each value with.
  */
 const NUMERIC_TYPE = /^numeric(?:\((\d+)(?:,\s*(\d+))?\))?$/;
 const WIDER = "mason: a numeric value wider than its synced column";
@@ -4350,13 +4351,12 @@ export class Sync {
     // in the copy's transaction, on the rebuilds' connection: its snapshot
     const row = (await this.rebuilder.conn.runAndReadAll(`SELECT * FROM ${pq(`SELECT ${parts.join(", ")} FROM ${pgFrom}`)}`)).getRowsJS()[0] as Array<bigint | number | null>;
     wide.forEach((c, k) => {
-      const [maxScale, minScale, used, digits, special] = row.slice(5 * k, 5 * k + 5).map((x) => x === null ? null : Number(x));
+      const [maxScale, , used, digits, special] = row.slice(5 * k, 5 * k + 5).map((x) => x === null ? null : Number(x));
       const declared = NUMERIC_TYPE.exec(c.type)!;
       const scale = declared[1] !== undefined ? used ?? 0 : maxScale ?? 0;
       const width = (digits ?? 1) + scale;
       if ((special ?? 0) > 0) { this.log(`${t.source}.${c.name}: ${special} value(s) NaN or Infinity, which the synced table's DECIMAL cannot hold: synced as a double`); return; }
       if (scale > 38 || width > 38) { this.log(`${t.source}.${c.name}: values of ${digits ?? 1} digit(s) and ${scale} decimal(s) do not fit the synced table's DECIMAL(38): synced as a double (15 significant digits)`); return; }
-      if (declared[1] === undefined && minScale !== null && minScale !== maxScale) this.log(`${t.source}.${c.name}: values of ${minScale} to ${maxScale} decimals: Mason answers each with ${scale}, Postgres with its own`);
       out.set(c.name, scale);
     });
     return out;
