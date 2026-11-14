@@ -18,7 +18,7 @@ export interface SyncAnswer { at: string; tables: PolledTable[]; streamed?: Stre
 
 /** A sync that failed: its reason in Mason's words, and the CLI's failure code (`refused`, `nothing_yet` for a refusal
  *  met once the pass ahead of it ended, `failed` otherwise). */
-export interface SyncFailure { code: "not_found" | "nothing_yet" | "refused" | "busy" | "failed"; message: string }
+export interface SyncFailure { code: "not_found" | "nothing_yet" | "refused" | "busy" | "failed"; message: string; follow?: "wait" }
 
 /**
  * ONE SYNC BY HAND, as `/api/state` carries it on each table it covers (`syncByHand`) and `POST /api/sync` answers it:

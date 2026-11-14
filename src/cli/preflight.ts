@@ -10,6 +10,7 @@
  */
 import * as os from "node:os";
 import { PgConnection, PgError } from "../cdc/pg-wire.ts";
+import { regclassName, shapeSql } from "../cdc/shape.ts";
 import { parseDatabaseUrl, queryProblem, type PgConnection as UrlParts } from "../lib/database-url.ts";
 import { closest } from "../lib/did-you-mean.ts";
 import type { SourceCollation } from "../duck/collation.ts";
@@ -205,6 +206,9 @@ export async function connectSource(s: Source, o: ConnectContext = {}): Promise<
 export interface SourceTable {
   /** `schema.table` */
   source: string;
+  /** its columns' names and types as the catalog read them (`shapeSql`): what the sync compares the database's now with,
+   *  before a poll and at a stream's relation message (issue 977); absent from a catalog built without it */
+  shape?: string;
   schema: string;
   table: string;
   /** the primary key's columns, in key order; empty when it has none (and cannot be replicated) */
@@ -312,9 +316,17 @@ export const VIEWS_SQL = `SET LOCAL search_path = pg_catalog; SELECT coalesce(js
     AND has_table_privilege(c.oid, 'SELECT')
 ) v`;
 
-/** One catalog read: every ordinary or partitioned table outside the system schemas, its key, size, comments and FKs. */
-export const TABLES_SQL = `SELECT json_agg(t ORDER BY t.schema, t.table)::text FROM (
+/** `TABLES_SQL`, or with `only` the catalog of those tables alone: a table's columns read again when its shape (src/cdc/shape.ts)
+ *  changed (src/cli/source-catalog.ts `refreshTables`), never every table's. */
+export function tablesSql(only: ReadonlyArray<{ schema: string; table: string }> | null = null): string {
+  // a function, never a replacement string: a table's name may hold `$&`
+  return TABLES_SQL_BODY.replace("/*ONLY*/", () => only === null ? "" : only.length === 0 ? "AND false" :
+    `AND c.oid = ANY (ARRAY[${only.map((t) => `to_regclass(${regclassName(t.schema, t.table)})`).join(", ")}]::oid[])`);
+}
+
+const TABLES_SQL_BODY = `SELECT json_agg(t ORDER BY t.schema, t.table)::text FROM (
   SELECT n.nspname AS schema, c.relname AS table, c.oid, c.reltype AS row_type_oid, c.relreplident AS replica_identity,
+    ${shapeSql("c.oid")} AS shape,
     -- a PARTITIONED table's rows and bytes are its leaves' (its own are -1 / 0 and ~0 bytes); "never analysed" is
     -- relpages = 0 AND reltuples <= 0 on any leaf, which Postgres 13 (reltuples 0) and 14+ (-1) both read
     CASE WHEN c.relkind = 'p'
@@ -376,11 +388,14 @@ export const TABLES_SQL = `SELECT json_agg(t ORDER BY t.schema, t.table)::text F
   WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition
     AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%'
     -- readable: SELECT on the table AND USAGE on its schema, without which the SELECT is refused (issue 779)
-    AND has_table_privilege(c.oid, 'SELECT') AND has_schema_privilege(n.oid, 'USAGE')
+    AND has_table_privilege(c.oid, 'SELECT') AND has_schema_privilege(n.oid, 'USAGE') /*ONLY*/
 ) t`;
 
+/** One catalog read: every ordinary or partitioned table outside the system schemas, its key, size, comments and FKs. */
+export const TABLES_SQL = tablesSql();
+
 interface TableRow {
-  schema: string; table: string; oid: number; row_type_oid: number | string; replica_identity: string; reltuples: number; unanalysed: boolean; bytes: number; comment: string | null; key: string[];
+  schema: string; table: string; oid: number; shape: string; row_type_oid: number | string; replica_identity: string; reltuples: number; unanalysed: boolean; bytes: number; comment: string | null; key: string[];
   row_security_hides_from: string | null;
   unique_keys: Array<{ name: string; constraint: boolean; nulls_not_distinct: boolean; columns: string[] }>;
   columns: Array<{ name: string; type: string; domain: boolean; type_kind: string; not_null: boolean; comment: string | null; type_oid: number | string; type_array_oid: number | string;
@@ -407,7 +422,25 @@ export async function collationVersion(pg: Pick<PgConnection, "query">, versionN
 /** `collations: false` (the run's read when asked, src/cli/source-catalog.ts) leaves the database's collations unread: they were read at the start */
 export async function readSourceFacts(pg: Pick<PgConnection, "query">, counted: Map<number, number> = COUNTED, o: { collations?: boolean } = {}): Promise<SourceFacts> {
   const r = (await pg.query("SELECT current_setting('server_version_num'), current_setting('server_version'), pg_is_in_recovery()::text")).rows[0]!;
-  const rows = JSON.parse((await pg.query(TABLES_SQL)).rows[0]?.[0] ?? "null") as TableRow[] | null;
+  const tables = await readTables(pg, null, counted);
+  // the columns differ by version (datlocprovider from 15, daticulocale 15–16, datlocale from 17): read the row whole
+  const db = JSON.parse((await pg.query("SELECT to_jsonb(d)::text FROM pg_database d WHERE datname = current_database()")).rows[0]?.[0] ?? "{}") as Record<string, string | null>;
+  // the library's version of it NOW (Postgres 15+; glibc's for libc): datcollversion is what the database was created or
+  // last refreshed under, so it stays where it was through an OS upgrade, which is what must read the order again
+  const collation = { provider: db.datlocprovider ?? "c", collate: db.datcollate ?? "C", ctype: db.datctype ?? db.datcollate ?? "C", locale: db.datlocale ?? db.daticulocale ?? null, version: await collationVersion(pg, Number(r[0]), db.datcollversion ?? null) };
+  const views = (JSON.parse((await pg.query(VIEWS_SQL)).rows[0]?.[0] ?? "[]") as Array<SourceView & { oid: number }>)
+    .map((v) => ({ schema: v.schema, name: v.name, definition: v.definition, comment: v.comment }));
+  const collations = o.collations === false ? undefined : await readCollations(pg, Number(r[0]));
+  return { version: Number(r[0]), versionText: r[1] ?? "", standby: r[2] === "true", tables, systemIdentifier: await systemIdentifier(pg), collation, ...(collations !== undefined ? { collations } : {}), views };
+}
+
+/**
+ * The tables `TABLES_SQL` reads, as `SourceTable`s — every one, or with `only` those alone (`tablesSql`: the catalog of a
+ * table whose shape changed, read again without the rest; one gone or no longer readable is absent).
+ */
+export async function readTables(pg: Pick<PgConnection, "query">, only: ReadonlyArray<{ schema: string; table: string }> | null = null,
+  counted: Map<number, number> = COUNTED): Promise<SourceTable[]> {
+  const rows = JSON.parse((await pg.query(tablesSql(only))).rows[0]?.[0] ?? "null") as TableRow[] | null;
   const tables: SourceTable[] = [];
   for (const t of rows ?? []) {
     let count: number | null = t.unanalysed ? counted.get(t.oid) ?? null : Number(t.reltuples);
@@ -417,7 +450,7 @@ export async function readSourceFacts(pg: Pick<PgConnection, "query">, counted: 
       counted.set(t.oid, count);
     }
     tables.push({
-      source: `${t.schema}.${t.table}`, schema: t.schema, table: t.table, key: t.key, rows: count, bytes: Number(t.bytes), comment: t.comment,
+      source: `${t.schema}.${t.table}`, schema: t.schema, table: t.table, shape: t.shape, key: t.key, rows: count, bytes: Number(t.bytes), comment: t.comment,
       columns: t.columns.map((c) => ({ name: c.name, type: c.type, typeKind: c.type_kind, ...(c.domain ? { domain: true as const } : {}), notNull: c.not_null, comment: c.comment,
         // an oid is a STRING in Postgres's JSON (only the int, float and numeric types are numbers): one spelling, here
         ...(Number(c.type_oid) >= 16384 ? { typeOid: Number(c.type_oid), ...(Number(c.type_array_oid) > 0 ? { typeArrayOid: Number(c.type_array_oid) } : {}) } : {}),
@@ -432,15 +465,7 @@ export async function readSourceFacts(pg: Pick<PgConnection, "query">, counted: 
       ...(typeof t.row_security_hides_from === "string" ? { rowSecurityHidesFrom: t.row_security_hides_from } : {}),
     });
   }
-  // the columns differ by version (datlocprovider from 15, daticulocale 15–16, datlocale from 17): read the row whole
-  const db = JSON.parse((await pg.query("SELECT to_jsonb(d)::text FROM pg_database d WHERE datname = current_database()")).rows[0]?.[0] ?? "{}") as Record<string, string | null>;
-  // the library's version of it NOW (Postgres 15+; glibc's for libc): datcollversion is what the database was created or
-  // last refreshed under, so it stays where it was through an OS upgrade, which is what must read the order again
-  const collation = { provider: db.datlocprovider ?? "c", collate: db.datcollate ?? "C", ctype: db.datctype ?? db.datcollate ?? "C", locale: db.datlocale ?? db.daticulocale ?? null, version: await collationVersion(pg, Number(r[0]), db.datcollversion ?? null) };
-  const views = (JSON.parse((await pg.query(VIEWS_SQL)).rows[0]?.[0] ?? "[]") as Array<SourceView & { oid: number }>)
-    .map((v) => ({ schema: v.schema, name: v.name, definition: v.definition, comment: v.comment }));
-  const collations = o.collations === false ? undefined : await readCollations(pg, Number(r[0]));
-  return { version: Number(r[0]), versionText: r[1] ?? "", standby: r[2] === "true", tables, systemIdentifier: await systemIdentifier(pg), collation, ...(collations !== undefined ? { collations } : {}), views };
+  return tables;
 }
 
 /** The server's system identifier, or null when this user may not read it (only that refusal: any other error is real). */

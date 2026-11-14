@@ -871,7 +871,7 @@ With `wait` true the request is held until the sync ends, and answers `200` with
 |---|---|---|
 | 400 | `usage` | `tables` is not a non-empty list of strings, or `wait` is not true or false (`send { tables: [schema.table, …], wait?: true }`) |
 | 404 | `not_found` | a table that is not added (`<table> is not added (mason add adds it)`) |
-| 409 | `busy` | a table already syncing (`<table> is already syncing (started 2 min ago)`, with `fix` and `mason status` next), or whose first sync, whole read again, catch-up or scheduled poll is running or waiting to start |
+| 409 | `busy` | a table already syncing (`<table> is already syncing (started 2 min ago)`, with `fix` and `mason status` next), or whose first sync, whole read again, columns read again, catch-up or scheduled poll is running or waiting to start (`follow: "wait"` beside it when `mason wait` waits for it) |
 | 409 | `nothing_yet` | a table whose first sync failed, or that is being compacted |
 | 409 | `refused` | a run that reads every table again whole |
 

@@ -861,6 +861,8 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
   const polled: string[][] = [];
   // a sync held running until the test lets it end (issue 1007: a second sync of it is refused busy meanwhile)
   let syncHeld: Promise<void> | null = null;
+  // the run's own refusal of the next sync, as src/duck/sync.ts pollRefusal makes it, or none
+  let refusedNext: { code: string; message: string; follow: "wait" | null } | null = null;
   // the copies the run serves and when sizes were last measured, as mason usage's section sets them (issue 883)
   let usageCopies: Array<{ source: string; phase: string; copiedAt: string | null }> = [];
   let measure: { at: string; fileStamp: string | null } | null = null;
@@ -870,7 +872,7 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
     folder: () => s.folder, root: app, home: path.join(app, ".mason"), version: "test", startedAt: Date.now(), sources: () => { const r = read(); return { file: "message" in r ? null : r, problem: null }; }, sourcesChanged: () => {}, log: () => {},
     readSource: () => { runEdits++; return read(); }, runUrl: s.url, listener: { running: () => [], cancel: (session) => ({ unknown: session }), openSessions: () => ({ open: 0, byClient: [] }) },
     logs: { capacity: 2000, recent: () => [] },
-    duck: { copies: () => usageCopies as never[], file: path.join(s.root, "duck.db"), refused: () => null,
+    duck: { copies: () => usageCopies as never[], file: path.join(s.root, "duck.db"), refused: () => refusedNext as never,
       // a sync that takes a while (a scan of each table): mason sync waits for its end and prints what it did (issue 1007)
       poll: async (tables) => { polled.push(tables); await new Promise((r) => setTimeout(r, 400)); await syncHeld; return { at: "2026-11-07T10:00:00.000Z", tables: tables.map((table) => ({ table, changed: 5, deleted: 1, rows: 10, ms: 400 })) }; },
       stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
@@ -910,9 +912,9 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
     // a column the table lacks, said with the closest
     await same(["add", "customers", "--columns", "nme"], /public\.customers has no column \\"nme\\" — did you mean `name`\?/);
     // A SECOND ENTRY OF THE FILE THAT FAILS against the database: the add and the remove are refused, the file as it was
-    fs.writeFileSync(s.file, `kind: postgres\nurl: ${s.url}\ntables:\n  customers: {}\n  orders:\n    columns: [id, gone]\n`);
-    await same(["add", "products"], /mason\/sources\/shop\.yml: tables\.orders\.columns: public\.orders has no column gone \(its columns: [^)]*\) — fix it first, then add products/);
-    await same(["remove", "customers"], /mason\/sources\/shop\.yml: tables\.orders\.columns: public\.orders has no column gone \(its columns: [^)]*\) — fix it first, then remove customers/);
+    fs.writeFileSync(s.file, `kind: postgres\nurl: ${s.url}\ntables:\n  customers: {}\n  orders:\n    columns: [id, idd]\n`);
+    await same(["add", "products"], /mason\/sources\/shop\.yml: tables\.orders\.columns: public\.orders has no column idd — did you mean `id`\? \(its columns: [^)]*\) — fix it first, then add products/);
+    await same(["remove", "customers"], /mason\/sources\/shop\.yml: tables\.orders\.columns: public\.orders has no column idd — did you mean `id`\? \(its columns: [^)]*\) — fix it first, then remove customers/);
     // a name the file does not have, with the closest it has
     await same(["remove", "customer"], /shop\.yml names no table customer — did you mean `customers`\?/);
     // MASON USAGE asks the run's /api/usage and prints its answer: as it is under --json, a line a span for a person
@@ -1009,6 +1011,15 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
         assert.match(b.error.message, /^public\.orders is already syncing \(started \d+ s ago\)$/);
       } finally { release(); syncHeld = null; }
       assert.equal(polled.length, 3, "the page's sync alone read it: mason sync started none beside it");
+      // THE RUN'S OWN READ OF IT (a whole read again, which mason wait waits for): its words and its next step agree
+      refusedNext = { code: "busy", message: "public.orders is being read again whole (its columns changed): mason wait waits for it", follow: "wait" };
+      try {
+        const reading = await runMason(app, ["sync", "orders", "--json"], matrixEnv());
+        const w = JSON.parse(reading.stdout) as { error: { code: string; message: string }; next: Array<{ command: string }> };
+        assert.deepEqual([reading.code, w.error.code, w.error.message, w.next.map((x) => x.command)],
+          [1, "busy", "public.orders is being read again whole (its columns changed): mason wait waits for it", ["mason wait orders", "mason status"]]);
+      } finally { refusedNext = null; }
+      assert.equal(polled.length, 3, "refused: nothing read");
       const both = await runMason(app, ["sync", "orders", "--all"], matrixEnv());
       assert.equal(both.code, 2);
       assert.match(both.stderr, /mason sync: --all syncs every added table: name tables \(orders\) or --all, not both/);

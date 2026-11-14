@@ -467,13 +467,34 @@ test("each table's state says why mason sync of it is refused now, in the words 
       const codeOf = (n: string): string | undefined => sync.pollRefusal([`public.${n}`])?.code;
       assert.deepEqual(["b", "c", "d", "e", "f", "g", "h", "i"].map((n) => [n, codeOf(n)]),
         [["b", "busy"], ["c", "nothing_yet"], ["d", "busy"], ["e", "busy"], ["f", "busy"], ["g", "busy"], ["h", "busy"], ["i", "busy"]]);
+      // the run's own read, which mason wait waits for, as each says: followed by mason wait
+      assert.deepEqual(["b", "d", "e", "f", "g", "h", "i"].map((n) => [n, sync.pollRefusal([`public.${n}`])?.follow]), ["b", "d", "e", "f", "g", "h", "i"].map((n) => [n, "wait"]));
+      type More = { scheduledNow: Set<string>; reshaping: Map<string, Promise<void>>; scheduledPolls: Map<string, { startedAt: number; found: unknown }> };
+      const x = s as unknown as More;
       // ITS POLL QUEUED IN THE PASS RUNNING NOW: busy until that poll ends, never polled again behind it
-      (s as unknown as { scheduledNow: Set<string> }).scheduledNow.add("public.a");
+      x.scheduledNow.add("public.a");
       const queued = sync.pollRefusal(["public.a"]);
-      assert.deepEqual([queued?.code, queued?.message], ["busy", "public.a is being synced now, on its schedule (polled every 5s): it is current when that ends"]);
+      assert.deepEqual([queued?.code, queued?.message, queued?.follow], ["busy", "public.a is being synced now, on its schedule (polled every 5s): it is current when that ends", null]);
       await assert.rejects(sync.pollNow(["public.a"]), { message: queued?.message });
-      assert.equal(sync.state().find((x) => x.source === "public.a")!.syncRefusal, queued?.message, "the page's Sync now is offered disabled meanwhile, with the reason");
-      (s as unknown as { scheduledNow: Set<string> }).scheduledNow.delete("public.a");
+      assert.equal(sync.state().find((y) => y.source === "public.a")!.syncRefusal, queued?.message, "the page's Sync now is offered disabled meanwhile, with the reason");
+      x.scheduledNow.delete("public.a");
+      // ITS COLUMNS BEING READ AGAIN (issue 977): busy as it is asked, and pollNow agrees
+      x.reshaping.set("public.a", new Promise<void>(() => undefined));
+      const reshaped = sync.pollRefusal(["public.a"]);
+      assert.deepEqual([reshaped?.code, reshaped?.follow, reshaped?.message], ["busy", "wait", "public.a's columns changed on the database: they are being read again, and it is synced again whole with them — mason wait waits for it"]);
+      await assert.rejects(sync.pollNow(["public.a"]), { message: reshaped?.message });
+      x.reshaping.delete("public.a");
+      // A SYNC BY HAND QUEUED BEHIND A PASS THAT POLLED IT, that poll begun after it was asked: answered by that poll, no
+      // second read (here a read fails: the source is not there), and said as a sync by hand
+      const found = { table: "public.a", changed: 4, deleted: 1, rows: 9, ms: 12 };
+      x.scheduledPolls.set("public.a", { startedAt: Date.now() + 60_000, found });
+      const before = events.length;
+      assert.deepEqual((await sync.pollNow(["public.a"])).tables, [found]);
+      assert.deepEqual(events.slice(before).map((e) => [e.kind, e.message]), [["synced", "synced by hand (by its poll on schedule, which began as it was asked): 4 changed, 1 deleted, 9 rows now · 12 ms"]]);
+      // one begun before it was asked is no answer: the table is read again (and here that read fails)
+      x.scheduledPolls.set("public.a", { startedAt: Date.now() - 60_000, found });
+      await assert.rejects(sync.pollNow(["public.a"]), /no source in this test/);
+      x.scheduledPolls.delete("public.a");
     } finally { s.stopped = true; }
   });
   // a run that reads every table again whole: every table refused, in the one sentence

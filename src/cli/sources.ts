@@ -492,9 +492,13 @@ export function entryProblems(t: SourceTable | undefined, e: TableEntry, all: re
     return [`${at}: ${database} has no table ${e.table} this user can read${didYouMean(e.name, names)}${names.length ? "" : " (it has none this user can read)"}`];
   }
   const have = t.columns.map((c) => c.name);
-  const missing = (list: readonly string[], key: string): string[] => list.filter((c) => !have.includes(c)).map((c) =>
-    `${at}.${key}: ${t.source} has no column ${c}${didYouMean(c, have)} (its columns: ${have.join(", ")})`);
-  const out = [...missing(e.columns ?? [], "columns"), ...missing(e.exclude, "exclude")];
+  const missing = (list: readonly string[], key: string, then = ""): string[] => list.filter((c) => !have.includes(c)).map((c) =>
+    `${at}.${key}: ${t.source} has no column ${c}${didYouMean(c, have)} (its columns: ${have.join(", ")})${then}`);
+  // a name of columns: no column is close to was dropped on the database: passed over, said (`goneColumns`) — it only
+  // narrows. A name of exclude: the table lacks is ALWAYS refused (fail closed): renamed, its column would be synced
+  const near = (list: readonly string[]): string[] => list.filter((c) => !have.includes(c) && didYouMean(c, have) !== "");
+  const out = [...missing(near(e.columns ?? []), "columns"),
+    ...missing(e.exclude, "exclude", " — if it was renamed on the database, write its new name in exclude:; if it was dropped, take it out of exclude:")];
   if (e.key !== null) {
     if (t.key.length) out.push(`${at}.key: ${t.source} has a primary key (${t.key.join(", ")}), which Mason keys it by — remove key`);
     else {
@@ -517,6 +521,34 @@ export function entryProblems(t: SourceTable | undefined, e: TableEntry, all: re
   if (sync.mode === "replication" && t.replicaIdentity === "n" && e.key === null) {
     out.push(`${at}: ${t.source} has REPLICA IDENTITY NOTHING, and a publication carrying it would make your app's own UPDATEs and DELETEs on it fail (sync: replication) — ` +
       `give its entry sync: poll <interval> (poll 5m), or sync: off; or ALTER TABLE ${t.source} REPLICA IDENTITY DEFAULT on the database`);
+  }
+  return out;
+}
+
+/**
+ * THE COLUMNS AN ENTRY'S `columns:` NAMES THAT ITS TABLE NO LONGER HAS (issue 977: a column dropped on the database that
+ * an entry named refused the whole project at the next start, until the file was edited): each name the table lacks and
+ * that no column of it is close to (`didYouMean` finds none). Such a name is passed over — the entry syncs the columns
+ * it still names, never one more — and said (`goneNotes`). A name close to a column (a typo, a rename) is still
+ * refused with the name it is close to (`entryProblems`). NEVER a name of `exclude:`: passed over, a column renamed
+ * from it would be synced (a salary renamed annual_pay, served). The run itself moves a name of `exclude:` that went
+ * while it was up (`leftOutArrivals`); one gone while it was down refuses the file, the way out said.
+ */
+export function goneColumns(t: Pick<SourceTable, "columns">, e: Pick<TableEntry, "columns">): { columns: string[] } {
+  const have = t.columns.map((c) => c.name);
+  return { columns: (e.columns ?? []).filter((c) => !have.includes(c) && didYouMean(c, have) === "") };
+}
+
+/** What the run says of the names its entries pass over (`goneColumns`), a line each, at the key that names them. */
+export function goneNotes(src: Pick<SourceFile, "file" | "tables">, tables: readonly SourceTable[], root: string): string[] {
+  const out: string[] = [];
+  for (const e of src.tables) {
+    const t = tables.find((x) => x.source === e.table);
+    if (t === undefined) continue;
+    const g = goneColumns(t, e);
+    const at = `${shownPath(root, src.file)}: tables.${e.name}`;
+    const one = (xs: readonly string[]): boolean => xs.length === 1;
+    if (g.columns.length) out.push(`${at}.columns: ${t.source} no longer has ${g.columns.join(", ")}, so ${one(g.columns) ? "it is" : "they are"} not synced. Take ${one(g.columns) ? "it" : "them"} out of columns:`);
   }
   return out;
 }
@@ -653,6 +685,71 @@ export function chooseColumns(t: SourceTable, asked: readonly string[], key: rea
   // the key columns are written into the list, first: the file says every column the copy holds
   const addedKey = keyCols.filter((k) => !named.includes(k));
   return { columns: [...new Set([...addedKey, ...named])], exclude: [], addedKey, skipped: [] };
+}
+
+/** What the run leaves out of an every-column entry as the database changes under it (`leftOutArrivals`): the columns
+ *  it leaves out, and the names of `exclude:` gone from the table that they take the place of. */
+export interface LeftOut { entry: TableEntry; columns: string[]; gone: string[] }
+
+/**
+ * WHAT ARRIVED ON THE DATABASE WHILE THE RUN WAS UP, AND IS LEFT OUT (issue 977), of each entry that syncs every column
+ * (no `columns:`), against `before`, the columns each table had when the run's tables were last set:
+ * - a column that arrived and looks like a secret (`looksSecret`) is left out, as `mason add` leaves it out (a column
+ *   added on the database was synced as soon as the run read it, `api_token` too);
+ * - a name of `exclude:` that was there and is gone: FAIL CLOSED. A rename is a name gone and one arrived at once (a
+ *   salary renamed annual_pay was served), so EVERY column that arrived with it is left out, in its place, until the
+ *   person says otherwise (`mason add <table> --include …`); gone with nothing arrived, it was dropped, and is taken out.
+ * A key column is never left out. `edited` are the tables an edit just wrote their columns of (`mason add`, `mason
+ * remove`): their entry is the person's choice, read as it is (`mason add <table> --include api_token` syncs it). A
+ * table `before` has no columns for is new to the run.
+ */
+export function leftOutArrivals(file: Pick<SourceFile, "tables">, tables: readonly SourceTable[], before: ReadonlyMap<string, readonly string[]>,
+  edited: readonly string[] = []): LeftOut[] {
+  const out: LeftOut[] = [];
+  for (const e of file.tables) {
+    if (e.columns !== null || edited.includes(e.table)) continue;
+    const t = tables.find((x) => x.source === e.table), was = before.get(e.table);
+    if (t === undefined || was === undefined) continue;
+    const key = e.key ?? t.key, have = t.columns.map((c) => c.name);
+    const gone = e.exclude.filter((c) => !have.includes(c) && was.includes(c));
+    const arrived = have.filter((c) => !was.includes(c) && !key.includes(c) && !e.exclude.includes(c));
+    const columns = gone.length ? arrived : arrived.filter(looksSecret);
+    if (columns.length || gone.length) out.push({ entry: e, columns, gone });
+  }
+  return out;
+}
+
+/** An entry's `exclude:` once `a` is left out: its gone names taken out, the columns left out added. */
+export const excludeOf = (a: LeftOut): string[] => [...a.entry.exclude.filter((c) => !a.gone.includes(c)), ...a.columns];
+
+/** What the run says of what it left out (`leftOutArrivals`): `written`, the sources file it wrote `exclude:` in, or
+ *  null when it could not write it (`why`; the line to write, and what a start does without it). One sentence each for
+ *  the log, the event and `mason status`. */
+export function leftOutText(a: LeftOut, written: string | null, why: string | null = null): string {
+  const cols = a.columns, one = cols.length === 1, name = entryName(a.entry.table);
+  const they = one ? "it" : "they", is = one ? "is" : "are", line = `exclude: ${flowList(excludeOf(a))}`;
+  const gone = a.gone.join(", "), goneOne = a.gone.length === 1;
+  const head = a.gone.length === 0
+    ? `${a.entry.table}: the new column${one ? "" : "s"} ${cols.join(", ")} ${one ? "looks" : "look"} like ${one ? "a secret" : "secrets"}, so ${they} ${is} not synced`
+    : cols.length === 0
+      ? `${a.entry.table}: ${gone}, which exclude: names, ${goneOne ? "is" : "are"} gone from the database`
+      : `${a.entry.table}: ${gone}, which exclude: names, ${goneOne ? "is" : "are"} gone from the database, and ${cols.join(", ")} arrived at the same time ` +
+        `(a rename keeps its data), so ${they} ${is} not synced either`;
+  const opt = cols.length ? `. To sync ${one ? "it" : "one"}, run mason add ${name} --include ${cols[0]}` : "";
+  if (written !== null) return `${head}. Mason wrote ${line} on its entry in ${written}${opt}`;
+  return `${head}, in this run${why ? ` (${why})` : ""}. Write ${line} on its entry in the sources file: ` +
+    (a.gone.length ? "a start refuses the file until then" : `a start syncs what the file says`);
+}
+
+/** The file with each entry's `exclude:` as the run takes it where it could not write it (`leftOutArrivals`): `left`,
+ *  by table, added, and `gone` taken out. */
+export function withLeftOut<F extends Pick<SourceFile, "tables">>(file: F, left: ReadonlyMap<string, readonly string[]>, gone: ReadonlyMap<string, readonly string[]> = new Map()): F {
+  if (left.size === 0 && gone.size === 0) return file;
+  return { ...file, tables: file.tables.map((e) => {
+    if (e.columns !== null) return e;
+    const g = gone.get(e.table) ?? [], add = (left.get(e.table) ?? []).filter((c) => !e.exclude.includes(c));
+    return add.length || e.exclude.some((c) => g.includes(c)) ? { ...e, exclude: [...e.exclude.filter((c) => !g.includes(c)), ...add] } : e;
+  }) };
 }
 
 /**

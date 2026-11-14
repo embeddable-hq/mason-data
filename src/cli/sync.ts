@@ -115,8 +115,12 @@ export async function sync(argv: string[]): Promise<number> {
       // command would print is a sync it did not start, whose read began before it was asked; the run's own words
       if (code === "busy") {
         const f = r.body.failure as { message?: unknown; fix?: unknown } | undefined;
-        return failed("sync", { message: String(f?.message ?? r.body.error), code, ...(typeof f?.fix === "string" ? { fix: f.fix } : {}),
-          next: [["mason status", "when each table was last synced: run this again once it says so, for the changes made since"]] }, { json });
+        // the run's own read of it that mason wait waits for (a first sync, a whole read again, a catch-up: `follow`
+        // wait, as its words say), else a sync by hand or a poll on schedule running: mason status says when it ended
+        const next: NextStep[] = r.body.follow === "wait"
+          ? [[`mason wait ${picked.map(tableArg).join(" ")}`, "waits until its sync ends"], ["mason status", "how each table is kept current, and when it was last synced"]]
+          : [["mason status", "when each table was last synced: run this again once it says so, for the changes made since"]];
+        return failed("sync", { message: String(f?.message ?? r.body.error), code, ...(typeof f?.fix === "string" ? { fix: f.fix } : {}), next }, { json });
       }
       return failed("sync", { message: `${picked.join(", ")} ${picked.length === 1 ? "was" : "were"} not synced`, code, why: String(r.body.error),
         next: [["mason status", "each synced table"], ["mason logs", "the run's log"]] }, { json });
