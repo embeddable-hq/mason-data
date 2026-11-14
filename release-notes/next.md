@@ -16,6 +16,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **A table's columns dialog on the web page now names the choice its row names.** On the Tables page, a table that
+  leaves out columns which look like secrets says "All but 7 columns". Its columns dialog said "All columns, … but
+  password, …", so it read like a different choice. Now the dialog's choice starts with the same words, "All but 7
+  columns", and names the columns left out.
+
 - **A polled table no longer costs an extra connection to your database now and then.** On some machines, Mason's
   timer for the next poll woke a moment early. Mason then connected to your database, found no table due yet, and
   connected again a moment later to poll it. Now every timer waits until its time has come.

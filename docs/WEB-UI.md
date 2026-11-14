@@ -124,7 +124,9 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   `addedColumns`, `columnCount`). It is a button that opens the table's **column form**, a dialog beside it that reads
   `GET /api/tables/<table>/columns` once, as it opens. It has two choices: **All columns, and any added to the table
   later**, chosen for every column (`{}`, or the `exclude:` of secret-looking columns `mason add` writes:
-  `everyColumnLeavesOut`, which All names); and **Only these columns**, chosen for a `columns:` list, with its boxes
+  `everyColumnLeavesOut`, which All names); with columns left out, All starts with the row's own words ("All but 7
+  columns. Left out because they look like secrets: …"), its count from the same helper as the row's (`leftOut`,
+  issue 960); and **Only these columns**, chosen for a `columns:` list, with its boxes
   under it ticked as the list says. The boxes are hidden while All is chosen (by the radio, in app.css), and are every
   column but what All leaves out, so choosing Only these starts from what is synced. Only these with no box ticked is
   refused on the page, since an empty list would be sent as every column. For a table with no primary key, it also
