@@ -85,7 +85,7 @@ const JSON_SPACE = new Set([" ", "\t", "\n", "\r"]);
  * grammar. A key is a string whose next character but JSON's white space is `:`; an entry is a value directly in the
  * list, counted by the list's commas; only the keys of an object directly in the list are kept.
  */
-function writtenKeys(text: string): Map<number, string[]> {
+export function writtenKeys(text: string): Map<number, string[]> {
   const keys = new Map<number, string[]>();
   let depth = 0, entry = 0;
   for (let i = 0; i < text.length; i++) {
