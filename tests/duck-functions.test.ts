@@ -7,7 +7,8 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { arrayText, floatNumericText, initcap, jsonArrayLength, jsonBuild, jsonbContains, jsonbExists, jsonElements, jsonGet, jsonMembers, jsonValue, pgCase, stringToArray } from "../src/duck/functions.ts";
-import { toCharNumber, toCharTime } from "../src/duck/to-char.ts";
+import { strftimeTemplate, toCharNumber, toCharTime } from "../src/duck/to-char.ts";
+import { DuckDBInstance } from "@duckdb/node-api";
 import { caseMappingOf, type CaseMapping } from "../src/duck/collation.ts";
 import { giveTurns, masonCalls, similarToRe2 } from "../src/duck/rewrite.ts";
 import { parseSql, stopParser } from "../src/api/postgres/parser.ts";
@@ -379,6 +380,41 @@ test("SIMILAR TO's pattern as RE2's: % and _, the escape, . ^ $ themselves", () 
   assert.equal(similarToRe2("a_b|(c)", "\\"), "a.b|(?:c)");
   assert.equal(similarToRe2("100#%", "#"), "100\\%");
   assert.equal(similarToRe2("[a-c]%", "\\"), "[a-c].*");
+});
+
+// issue 464: the strftime format a template is sent as (src/duck/rewrite.ts `toChar`) writes what the function writes,
+// for every template strftime takes, over times at their edges (an ISO year that is not the calendar's, a leap day,
+// midnight and noon, a fraction, a year under 1000 and the last day of 9999); every other template is the function's
+test("issue 464: a to_char template DuckDB's strftime takes writes the function's text, and the rest are the function's", async () => {
+  const times = ["2026-09-15 10:04:05", "2026-01-01 00:00:00", "2020-12-31 23:59:59.999999", "2021-01-03 08:30:00.5", "2024-02-29 13:07:09.012345",
+    "2026-12-28 00:00:01", "0005-03-01 01:02:03.000001", "0999-12-31 23:59:59", "9999-12-28 12:00:00"];
+  const taken = ["YYYY-MM", "YYYY-MM-DD", "Mon YYYY", "FMMonth YYYY", "Dy DD Mon", "FMDay, DDD", "FMMon/FMDy", "YYYY-MM-DD HH24:MI:SS", 'YYYY-MM-DD"T"HH24:MI:SS.US',
+    "HH24:MI:SS.MS", "IYYY-IW", "YYYYMMDD", 'YYYY "100%" MM', "MM/DD/YYYY", "DD.MM.YYYY HH24:MI", '"week" IW "of" IYYY', "YYYY %m"];
+  const refused = ['YYYY-"Q"Q', "Month YYYY", "Day", "FMDD", "DDth", "yyyy-mm", "MON YYYY", "mon", "TMMonth", "FXYYYY", "HH12:MI AM", "WW", "YYYY\\MM", 'YYYY"\\"MM',
+    "IDDD", "J", "Y,YYY", "YY", "CC", "SSSS", "FF3", "RM", "D", "TZ", "OF", "FMYYYY"];
+  for (const f of refused) assert.equal(strftimeTemplate(f, false), null, f);
+  // a template that writes nothing is the function's: DuckDB refuses an empty strftime format as it binds (the review
+  // of PR 955); and the function reads ONE prefix an item, as Postgres 18 does
+  for (const f of ["", "FM", '""', "FMFM", "fmFMDD", "FMTMMonth", "FXFMDD", "FMFXDD"]) assert.equal(strftimeTemplate(f, false), null, f);
+  assert.equal(toCharTime("2026-03-05 10:00:00", ""), null);
+  for (const [f, want] of [["FM", ""], ['""', ""], ["FMFM", "FM"], ["FMTMMonth", "T03onth"], ["TMFMMonth", "F03onth"], ["FXFMDD", "5"], ["FMFXDD", "05"], ["fmFMDD", "FM05"], ["FMYYYYFM", "2026"], ["fxDD", "05"], ["FMx", "x"]] as const) {
+    assert.equal(toCharTime("2026-03-05 10:00:00", f), want, f);
+  }
+  // a date's: no pattern of the time of day
+  assert.equal(strftimeTemplate("YYYY-MM-DD HH24:MI", true), null);
+  assert.equal(strftimeTemplate("YYYY-MM-DD", true), "%Y-%m-%d");
+  const db = await DuckDBInstance.create(":memory:");
+  const c = await db.connect();
+  try {
+    for (const f of taken) {
+      const spec = strftimeTemplate(f, false);
+      assert.notEqual(spec, null, f);
+      for (const t of times) {
+        const got = (await c.runAndReadAll(`SELECT strftime(TIMESTAMP '${t}', '${spec!.replace(/'/g, "''")}')`)).getRows()[0]![0];
+        assert.equal(got, toCharTime(t, f), `${f} of ${t}: strftime ${spec}`);
+      }
+    }
+  } finally { c.closeSync(); db.closeSync(); }
 });
 
 test("to_char: Postgres's time patterns and number templates, read from Postgres 18", () => {
