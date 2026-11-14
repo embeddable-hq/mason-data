@@ -7,10 +7,10 @@
     "differs": 0
   },
   "duckdb": {
-    "exact": 1874,
+    "exact": 1873,
     "name": 1303,
     "refused": 1649,
-    "value": 1037,
+    "value": 1038,
     "rows": 617,
     "text": 317,
     "other": 650
@@ -164,7 +164,7 @@
         "limit-lateral-argument": { "planted": 0, "natural": 6 },
         "limit-lateral-filter": { "planted": 0, "natural": 8 },
         "min-max-scale-tie": { "planted": 3, "natural": 1 },
-        "mixed-scale-numeric": { "planted": 3, "natural": 0 },
+        "mixed-scale-numeric": { "planted": 3, "natural": 1 },
         "negative-zero": { "planted": 0, "natural": 25 },
         "nested-exact-numeric": { "planted": 3, "natural": 0 },
         "numeric-quotient-compare": { "planted": 3, "natural": 0 },
