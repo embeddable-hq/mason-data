@@ -2949,7 +2949,7 @@ test("the Overview: Ready, Under way and Failed under the title mason status, ea
   const many = { events: Array.from({ length: statusPage.SYNC_ERRORS_LIMIT as unknown as number }, () => EVENT), keptDays: 7 };
   assert.match(textOf(kpis(RUNNING, { now: NOW, queries: QUERIES, syncErrors: many })), /Errors, last day 1,000\+ at least 1,000: failed syncs, restarts and web page errors/);
   // what the run marks failed is counted, a restart and the web page's own error among them (src/duck/events.ts isFailure)
-  assert.match(textOf(kpis(RUNNING, { now: NOW, queries: QUERIES, syncErrors: { events: [EVENT, { ...EVENT, kind: "restart", failed: true }, { ...EVENT, kind: "ui_error", failed: true }, { ...EVENT, kind: "copied", failed: false }], keptDays: 7 } })), /Errors, last day 3 failed syncs, restarts and web page errors /);
+  assert.match(textOf(kpis(RUNNING, { now: NOW, queries: QUERIES, syncErrors: { events: [EVENT, { ...EVENT, kind: "restart", failed: true }, { ...EVENT, kind: "ui_error", failed: true }, { ...EVENT, kind: "full_sync", failed: false }], keptDays: 7 } })), /Errors, last day 3 failed syncs, restarts and web page errors /);
   for (const kind of ["restart", "ui_error"] as const) assert.equal(isFailure(kind), true, `${kind} is a failure the card counts`);
   assert.ok(!kpis(RUNNING, { now: NOW }).includes("errors, last day"), "not read yet: not shown");
   assert.ok(!kpis(NONE, { now: NOW, queries: QUERIES, syncErrors: EVENTS }).includes("errors, last day"), "nothing added: no error to count");
@@ -3480,8 +3480,8 @@ const IDLE = { ...SAMPLE, at: "2026-10-28T10:05:00.000Z", statements: 0, stateme
 const UL_USAGE = { since: "2026-10-27T09:05:00.000Z", until: "2026-10-28T09:05:00.000Z", stepSeconds: 3600, sampleSeconds: 60, keptDays: 7, samples: [SAMPLE, IDLE],
   copySizes: [{ table: "public.orders", bytes: 3 * 2 ** 30, at: "2026-10-28T09:00:12.000Z" }, { table: "public.customers", bytes: 40_000, at: "2026-10-28T09:00:12.000Z" }] };
 const UL_EVENTS = { keptDays: 7, events: [
-  { at: "2026-10-28T09:00:00.000Z", kind: "copied", failed: false, table: "public.orders", message: "copied 2,000,000 rows" },
-  { at: "2026-10-28T09:01:00.000Z", kind: "copy_failed", failed: true, table: "public.events", message: "the source closed the connection\nthe sync tries it again in 5 min" },
+  { at: "2026-10-28T09:00:00.000Z", kind: "full_sync", failed: false, table: "public.orders", message: "copied 2,000,000 rows" },
+  { at: "2026-10-28T09:01:00.000Z", kind: "full_sync_failed", failed: true, table: "public.events", message: "the source closed the connection\nthe sync tries it again in 5 min" },
   { at: "2026-10-28T09:05:00.000Z", kind: "restart", failed: true, table: null, message: "the run stopped <b>after</b> 42 s" }] };
 const LOG = { kept: 2000, lines: [{ at: "2026-10-28T09:00:00.000Z", text: "mason started" }, { at: null, text: "copy: public.orders\n  chunk 3 of 20 <read>" }] };
 const withUsageAnswers = (run: ReturnType<typeof fakeRun>) => {
@@ -3601,14 +3601,14 @@ test("Sync events: the sync's events are mason logs --events' lines in a table, 
     "oldest first, as the command lists them, when asked");
   assert.match(timeline, /<th scope="col" aria-sort="descending"><button type="button" class="sort on" data-sort-table="events" data-sort-key="time">When/);
   assert.match(timeline, /<time data-tick datetime="2026-10-28T09:00:00.000Z" title="2026-10-28 09:00:00 UTC">10 min ago<\/time>/, "how long ago, the UTC time as the command prints it its title");
-  assert.match(timeline, /<span title="copied"><span class="badge ok">Full sync<\/span><\/span>/); assert.equal([...timeline.matchAll(/<span class="badge bad">✗ /g)].length, 2, "a failure is a red badge with its ✗");
+  assert.match(timeline, /<span title="full_sync"><span class="badge ok">Full sync<\/span><\/span>/); assert.equal([...timeline.matchAll(/<span class="badge bad">✗ /g)].length, 2, "a failure is a red badge with its ✗");
   assert.equal([...html.matchAll(/class="t-failed"/g)].length, 2, "the failures are marked");
   // Failures only: what was read, narrowed in the page alone
   assert.equal(textOf(renderEvents(UL_EVENTS, { failuresOnly: true, now: at })), "2 of the 3 events read. When ↓ Kind Table Message 5 min ago ✗ Mason restarted Mason the run stopped <b>after</b> 42 s 9 min ago ✗ Full sync failed public.events the source closed the connection the sync tries it again in 5 min");
   // a kind and a table narrow it too, and compose
-  assert.match(textOf(renderEvents(UL_EVENTS, { kind: "copied", now: at })), /^1 of the 3 events read\. When ↓ Kind Table Message 10 min ago Full sync public\.orders/);
+  assert.match(textOf(renderEvents(UL_EVENTS, { kind: "full_sync", now: at })), /^1 of the 3 events read\. When ↓ Kind Table Message 10 min ago Full sync public\.orders/);
   assert.match(textOf(renderEvents(UL_EVENTS, { table: "Mason", now: at })), /^1 of the 3 events read\. .* Mason restarted Mason the run stopped/);
-  assert.equal(textOf(renderEvents(UL_EVENTS, { kind: "copied", failuresOnly: true })), "None of the 3 sync events read passes the filters.");
+  assert.equal(textOf(renderEvents(UL_EVENTS, { kind: "full_sync", failuresOnly: true })), "None of the 3 sync events read passes the filters.");
   assert.equal(textOf(renderEvents({ keptDays: 7, events: [UL_EVENTS.events[0]] }, { failuresOnly: true })), "None of the 1 sync event shown failed.");
   assert.doesNotMatch(html, /<b>/, "a message is escaped");
   assert.equal(textOf(renderEvents({ events: [], keptDays: 7 })), "No sync event in the last 7 days.");
@@ -4491,7 +4491,7 @@ test("Sync events: Scheduled syncs (or a scheduled kind chosen) asks the run for
   assert.match(textOf(app.view()["syncs-events"]!), /^1 of the 5 events read\. When ↓ Kind Table Message 60s ago Scheduled sync public\.orders/);
   // another kind: no read, the page's filter alone
   run.asked.length = 0;
-  assert.equal(await app.pages.get("syncs")!.input({ id: "syncs-kind", value: "copied" }), undefined);
+  assert.equal(await app.pages.get("syncs")!.input({ id: "syncs-kind", value: "full_sync" }), undefined);
   assert.deepEqual(run.asked, ["GET api/events?limit=500&since=15m"], "back to the events without them");
 });
 
@@ -4532,8 +4532,8 @@ test("Sync events: 'Failures only' asks the run for the range's failures alone; 
   // read here names customers, orders and events; public.events has events, public.customers none)
   const words = (syncsPage as Record<string, unknown>).KIND_WORDS as Record<string, string>;
   assert.equal(textOf(app.view()["syncs-filters"]!), `Kind Every kind ${EVENT_KINDS.map((k) => words[k]).join(" ")} Table Every table Mason events public.customers public.events public.orders`);
-  assert.equal(app.pages.get("syncs")!.input({ id: "syncs-kind", value: "copy_failed" }), true);
-  assert.match(app.view()["syncs-filters"]!, /<option value="copy_failed" selected>/);
+  assert.equal(app.pages.get("syncs")!.input({ id: "syncs-kind", value: "full_sync_failed" }), true);
+  assert.match(app.view()["syncs-filters"]!, /<option value="full_sync_failed" selected>/);
   assert.match(textOf(app.view()["syncs-events"]!), /^1 of the 3 events read\. When ↓ Kind Table Message 9 min ago ✗ Full sync failed/);
   app.pages.get("syncs")!.input({ id: "syncs-kind", value: "" });
   run.asked.length = 0;
@@ -4862,7 +4862,7 @@ test("large data: a 64 KiB statement — one line in its cell, a title of at mos
 
 test("large data: 500 sync events — the 100 newest written, Show more; a 7-day window of samples with a spike — every point kept, the axis from zero, its labels days", () => {
   const renderEvents = fnOf<[unknown, Record<string, unknown>?], string>(syncsPage, "renderEvents");
-  const events = Array.from({ length: 500 }, (_, i) => ({ at: new Date(Date.UTC(2026, 9, 21) + i * 1200_000).toISOString(), kind: i % 10 ? "copied" : "poll_failed", failed: i % 10 === 0,
+  const events = Array.from({ length: 500 }, (_, i) => ({ at: new Date(Date.UTC(2026, 9, 21) + i * 1200_000).toISOString(), kind: i % 10 ? "full_sync" : "poll_failed", failed: i % 10 === 0,
     table: `analytics_warehouse_${i % 40}.fact_customer_order_line_items_${i}`, message: `m${i}` }));
   const html = renderEvents({ events, keptDays: 7 });
   assert.equal([...html.matchAll(/<tr/g)].length, 1 + 100);
@@ -5714,14 +5714,14 @@ test("Sync events' filters list every kind and every added table, whatever the r
   const renderEventFilters = of<[unknown, Record<string, string>, unknown], string>(syncsPage, "syncs.js", "renderEventFilters");
   const renderEvents = of<[unknown, Record<string, unknown>], string>(syncsPage, "syncs.js", "renderEvents");
   assert.deepEqual((syncsPage as Record<string, unknown>).EVENT_KINDS, [...EVENT_KINDS], "the page's kinds are src/duck/events.ts's");
-  const only = { events: [{ at: "2026-10-28T09:00:00.000Z", kind: "copied", failed: false, table: "public.orders", message: "copied" }], keptDays: 7 };
+  const only = { events: [{ at: "2026-10-28T09:00:00.000Z", kind: "full_sync", failed: false, table: "public.orders", message: "copied" }], keptDays: 7 };
   const text = textOf(renderEventFilters(only, { kind: "", table: "" }, RUNNING));
   // each kind in the page's words, its code the option's value: a word for every kind the sync records
   const words = (syncsPage as Record<string, unknown>).KIND_WORDS as Record<string, string>;
   for (const k of EVENT_KINDS) assert.ok(typeof words[k] === "string" && words[k] !== k, `${k} has its words on the page`);
   assert.equal(text, `Kind Every kind ${EVENT_KINDS.map((k) => words[k]).join(" ")} Table Every table Mason events public.customers public.events public.orders`);
   assert.match(renderEventFilters(only, { kind: "synced", table: "" }, RUNNING), /<option value="synced" selected>Manual sync<\/option>/);
-  assert.match(renderEventFilters(only, {}, RUNNING), /<option value="copied">Full sync<\/option>.*<option value="polled">Scheduled sync<\/option><option value="streamed">Live sync<\/option>/s);
+  assert.match(renderEventFilters(only, {}, RUNNING), /<option value="full_sync">Full sync<\/option>.*<option value="polled">Scheduled sync<\/option><option value="streamed">Live sync<\/option>/s);
   // a removed table's events keep it a choice; nothing read yet still lists the added tables
   assert.match(textOf(renderEventFilters({ events: [{ ...only.events[0], table: "public.gone" }], keptDays: 7 }, {}, RUNNING)), /public\.orders public\.gone$/);
   assert.match(textOf(renderEventFilters(undefined, {}, RUNNING)), /Every table Mason events public\.customers public\.events public\.orders$/);

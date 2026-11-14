@@ -219,7 +219,7 @@ paths:
   `--scheduled`: in the query, so they never take a failure's place among the newest asked for)), `SyncEvents`
   writes them in batches on a connection of its own, never the writer's turn, a failed write said once and never
   failing the sync; a failure repeated word for word within an hour is one event unless it was over between — a
-  table's when it is current again (`recovered`) or copied anew (`copied`), the whole sync's (`table: null`) when the
+  table's when it is current again (`recovered`) or copied anew (`full_sync`), the whole sync's (`table: null`) when the
   sync says so (`recovered` of no table: the stream applied a batch WITH A POSITION, the publication and slot were made
   ready, the database attached — `wholeFailure`); never a failure whose end nothing says. **A copy's replication error
   is over only when the stream applies a batch with a position** (`applyChanges`: every table it keeps current is current

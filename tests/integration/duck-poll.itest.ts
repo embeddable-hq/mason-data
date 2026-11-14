@@ -930,7 +930,7 @@ test("a failed copy waits before it is tried again, and a change of its columns 
     let from = logged.length;
     void sync.setTables([T(true)]);
     await sync.once();
-    assert.deepEqual(events.map((e) => [e.kind, e.table]), [["copy_failed", "public.t"]]);
+    assert.deepEqual(events.map((e) => [e.kind, e.table]), [["full_sync_failed", "public.t"]]);
     assert.equal(`sync of public.t failed: ${events[0]!.message}`, logged.find((l) => l.startsWith("sync of public.t failed: ")));
     assert.equal(since(from, /^syncing public\.t:/), 1, logged.slice(from).join("\n"));
     assert.equal(since(from, /^sync of public\.t failed: [\s\S]*; tried again after \d\d:\d\d UTC \(failure 1 in a row\)/), 1, logged.slice(from).join("\n"));
@@ -946,7 +946,8 @@ test("a failed copy waits before it is tried again, and a change of its columns 
 
   // a restart tries at once (and fails again); the columns changed (the fix): tried at once, and copied
   store = await DuckStore.open(file, (l) => logged.push(l));
-  sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll");
+  events.length = 0;
+  sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll", null, { onEvent: (e) => { events.push(e); } });
   try {
     await sync.open();
     let from = logged.length;
@@ -958,6 +959,8 @@ test("a failed copy waits before it is tried again, and a change of its columns 
     await sync.once();
     assert.equal(since(from, /^syncing public\.t:/), 1, logged.slice(from).join("\n"));
     assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error, s.rows]), [["public.t", "copied", null, 100]]);
+    // the events say the failure and then the full sync that ended it, by the kinds a person reads (issue 953)
+    assert.deepEqual(events.map((e) => [e.kind, e.table]), [["full_sync_failed", "public.t"], ["full_sync", "public.t"]]);
   } finally { await sync.stop(); await store.close(); }
 });
 
