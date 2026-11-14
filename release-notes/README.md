@@ -112,6 +112,11 @@ The newest release keeps the names that mean "the newest". A patch on an older l
 that moves one of these names reads the tags again just before it does, so two releases at once never move `latest`
 back (`.github/workflows/release.yml` says how).
 
+**Finish every release that was tagged.** A newer release counts as the newest once its tag exists, even if its run
+failed later, at the image or npm. Until it is finished, `latest` stays where it was, and no patch on an older line
+takes it. So re-run the failed release from the Actions page, or fix it and merge again, until its GitHub release
+exists.
+
 **Never copy a branch's release notes to `main`.** `main` releases its newest notes file, and checks it against
 `cli/package.json`. A `v0.20.1.md` on a `main` that is at `0.20.0` fails every release run on `main` until
 `v0.21.0.md` lands. A patch's notes stay on its branch and in its GitHub release.

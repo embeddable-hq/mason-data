@@ -79,7 +79,7 @@ test("the re-check reads git ls-remote's tags: a newer release tagged meanwhile 
   assert.deepEqual(tagNames(remote(["v0.19.0", "v0.20.0"])), ["v0.19.0", "v0.20.0"]);
   assert.deepEqual(tagNames("v0.19.0\nv0.20.0\n\n"), ["v0.19.0", "v0.20.0"]);
   // decide saw 0.20.1 as the newest; by the publish, 0.21.0 was tagged by main's run
-  const before = run(remote(TAGS), "refs/heads/release/0.20", "0.20.1", "npm_tag");
+  const before = run(remote([...TAGS, "v0.20.1"]), "refs/heads/release/0.20", "0.20.1", "npm_tag");
   assert.equal(before.status, 0, before.stderr);
   assert.equal(before.stdout, "latest\n");
   const after = run(remote([...TAGS, "v0.20.1", "v0.21.0"]), "refs/heads/release/0.20", "0.20.1", "npm_tag");
@@ -88,7 +88,24 @@ test("the re-check reads git ls-remote's tags: a newer release tagged meanwhile 
   // the newer release's own re-check, with the older one tagged too, keeps latest
   assert.equal(run(remote([...TAGS, "v0.20.1", "v0.21.0"]), MAIN, "0.21.0", "newest").stdout, "true\n");
   // the re-check refuses what decide refuses
-  assert.equal(run(remote(TAGS), "refs/heads/release/0.19", "0.21.0", "npm_tag").status, 1);
+  const other = run(remote([...TAGS, "v0.21.0"]), "refs/heads/release/0.19", "0.21.0", "npm_tag");
+  assert.equal(other.status, 1);
+  assert.match(other.stderr, /release\/0\.19 releases 0\.19\.x only/);
+});
+
+test("the re-check fails closed: a list without the release's own tag never reads as the newest", () => {
+  const remote = (tags: string[]) => tags.map((t) => `${"0".repeat(40)}\trefs/tags/${t}\n`).join("");
+  for (const input of ["", "\n", remote(["v0.20.0"]), remote(["v0.20.10", "v0.2.1"])]) {
+    for (const key of ["newest", "npm_tag", "line_tag"]) {
+      const r = run(input, MAIN, "0.21.0", key);
+      assert.equal(r.status, 1, `${JSON.stringify(input)} ${key}`);
+      assert.equal(r.stdout, "");
+      assert.match(r.stderr, /hold no v0\.21\.0/);
+    }
+  }
+  assert.equal(run(remote(["v0.20.0", "v0.21.0"]), MAIN, "0.21.0", "newest").stdout, "true\n");
+  // decide's own read, before the tag exists, needs no tag of its own
+  assert.equal(run("v0.20.0\n", MAIN, "0.21.0").status, 0);
 });
 
 /** One job of release.yml, by its name. */

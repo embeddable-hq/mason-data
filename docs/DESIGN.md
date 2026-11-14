@@ -2941,14 +2941,18 @@ line only. Only the newest release takes npm's `latest`, the image's `latest` an
 patch is published under npm's `latest-0.<minor>`. The image's line tag (`0.<minor>`) moves only forward.
 `scripts/release-line.ts` decides all of this, and `tests/release-line.test.ts` holds it.
 
-**No release run is cancelled, and `latest` never moves back** (the re-check of PR 999). A concurrency group holds one
-running and one pending run, and a third run replaces the pending one, whatever `cancel-in-progress` says. With one
-group for every branch, a push to `main` could cancel a pending release on `release/0.19`, and the security fix would
-not ship. So the group is per branch. Two branches' runs may then overlap, and `decide`'s "newest" can be stale. Each
-job that moves a "newest" name re-reads the remote's tags just before: npm's dist-tag right before `npm publish`, and
-the image's `latest` and GitHub's Latest in the last job. A run pushes its tag minutes before it publishes, so an
-older release's re-check sees a newer one's tag. A branch's release notes are never copied to `main`, whose release
-run checks its newest notes against `cli/package.json`.
+**No branch's release run is cancelled by another's, and `latest` never moves back** (the re-check of PR 999). A
+concurrency group holds one running and one pending run, and a third run replaces the pending one, whatever
+`cancel-in-progress` says. With one group for every branch, a push to `main` could cancel a pending release on
+`release/0.19`, and the security fix would not ship. So the group is per branch. On one branch, a third push still
+replaces the waiting run. If that push brought no notes, the newer run releases the waiting version, but tags the later
+commit. If it brought newer notes, the waiting version is never tagged or published, and its fixes ship in the newer
+release. Two branches' runs may overlap, and `decide`'s "newest" can be stale. Each job that moves a "newest" name
+re-reads the remote's tags just before: npm's dist-tag right before `npm publish`, and the image's `latest` and
+GitHub's Latest in the last job. A run pushes its tag minutes before it publishes, so an older release's re-check sees
+a newer one's tag. The re-check fails closed: a list without the release's own tag refuses the job. A newer release
+that is tagged but never finishes keeps `latest` from an older line's patch until it is finished. A branch's release
+notes are never copied to `main`, whose release run checks its newest notes against `cli/package.json`.
 
 ## A libc order, read level by level
 

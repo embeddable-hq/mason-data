@@ -10,7 +10,8 @@
  * The tags come on stdin, one a line, as `git tag -l` prints them (`v0.20.0`) or as `git ls-remote` does
  * (`<sha>\trefs/tags/v0.20.0`). The first form is for GITHUB_OUTPUT. The second is THE RE-CHECK: a job that moves a
  * name meaning "the newest" (npm's `latest`, the image's `latest`, GitHub's Latest) reads the remote's tags again just
- * before it moves it (release.yml says why). A refused release says why on stderr, with exit 1 (exit 2 on a bad
+ * before it moves it (release.yml says why). It refuses a list without the release's own tag, which it pushed first:
+ * such a list cannot tell what is newest. A refused release says why on stderr, with exit 1 (exit 2 on a bad
  * argument). Only Node's builtins: the jobs run it with no npm ci.
  *
  * A release from main may be on any line. A release from a branch must be on that branch's line: `release/0.19` releases
@@ -77,7 +78,14 @@ function main(args: string[]): number {
     process.stderr.write(`usage: git tag -l 'v*' | node scripts/release-line.ts <ref> <version> [${KEYS.join(" | ")}]\n`);
     return 2;
   }
-  const d = decideLine(ref, version, tagNames(fs.readFileSync(0, "utf8")));
+  const tags = tagNames(fs.readFileSync(0, "utf8"));
+  // THE RE-CHECK FAILS CLOSED: it runs after the release's own tag is pushed, so a list without it (an empty answer
+  // from the remote, a list cut short) cannot tell what is newest, and must never read as "the newest"
+  if (key !== undefined && !tags.includes(`v${version}`)) {
+    process.stderr.write(`The tags read hold no v${version}, the tag this release pushed first. They cannot tell whether ${version} is the newest release, so nothing is published under latest. Re-run the job once the tag is on the remote.\n`);
+    return 1;
+  }
+  const d = decideLine(ref, version, tags);
   if ("problem" in d) { process.stderr.write(`${d.problem}\n`); return 1; }
   const values: Record<(typeof KEYS)[number], string> = { newest: String(d.newest), npm_tag: d.npmTag, line_tag: String(d.lineTag) };
   process.stdout.write(key === undefined ? KEYS.map((k) => `${k}=${values[k]}\n`).join("") : `${values[key as (typeof KEYS)[number]]}\n`);

@@ -26,13 +26,19 @@
 # NO RELEASE RUN IS EVER CANCELLED, AND `latest` NEVER MOVES BACK. A concurrency group holds one running and one pending
 # run, and a third run REPLACES the pending one (cancel-in-progress only spares the running one). One group for every
 # branch would let a push to main cancel a pending release on release/0.19, and a security fix would silently not
-# ship. So the group is per branch: runs of different branches never cancel each other. On one branch, a replaced run
-# loses nothing that is not released again: the newer run reads the same newest notes, and releases them if they are
-# not released yet. Runs of two branches may then overlap, so `decide`'s view of "the newest" can be stale by the time a
+# ship. So the group is per branch: runs of different branches never cancel each other. On one branch, a third push
+# while one run runs and one waits still replaces the waiting one. The newer run reads the branch's newest notes:
+#   - when the push brought none, it releases the waiting version itself, but tags the later commit it ran on, not the
+#     merge of the notes (as on main before release lines);
+#   - when the push brought newer notes, the waiting version is never tagged or published. Its fixes ship in the newer
+#     release, which holds them.
+# Runs of two branches may then overlap, so `decide`'s view of "the newest" can be stale by the time a
 # job moves `latest`. Each move re-checks just before it, from the remote's tags (`git ls-remote`): npm's tag in the
 # extensions and cli jobs, right before `npm publish`, and the image's `latest` and GitHub's Latest in the release job,
 # last. Every run pushes its own tag first, minutes before it builds the image and publishes, so a newer release's tag
-# is on the remote long before its own publish, and an older one's re-check sees it.
+# is on the remote long before its own publish, and an older one's re-check sees it. The re-check fails closed: a list
+# of tags without the release's own refuses the job, and never reads as "the newest". A newer release that is tagged
+# but never finishes keeps `latest` from an older line's patch, so finish or re-run it (release-notes/README.md).
 #
 # NO NPM CREDENTIAL IS STORED IN THIS REPOSITORY. Trusted publishing on npmjs.com, set up once by an owner of the
 # @mason-data org (Settings -> Trusted publisher -> GitHub Actions, repository embeddable-hq/mason-data, workflow
