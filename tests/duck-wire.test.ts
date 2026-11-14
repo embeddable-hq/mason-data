@@ -8140,8 +8140,29 @@ test("libc top N: a top N and an ungrouped min / max are bounded natively, the d
     ];
     for (const [sql, rows] of bounded) {
       // (the second round: the bounds of each DISTINCT value, once, in a WITH query of the statement's own)
-      assert.match(await sent(sql), /WITH __mason_values1 AS MATERIALIZED \(SELECT __mason_v, regexp_replace\(.*regexp_extract\(.*SELECT DISTINCT .* AS __mason_v FROM colls/, sql);
+      assert.match(await sent(sql), /WITH __mason_values\d* AS MATERIALIZED \(SELECT __mason_v, regexp_replace\(.*regexp_extract\(.*SELECT DISTINCT .* AS __mason_v FROM colls/, sql);
       assert.deepEqual((await answer(c, sql)).rows, rows, sql);
+    }
+    // A STATEMENT'S OWN NAMES THE KEYS' WOULD BE (the review of PR 945: a column `__mason_v` was an ambiguous reference
+    // beside the joined keys', an alias `__mason_keys1` a duplicate alias, a WITH query `__mason_values1` a duplicate
+    // WITH query): the names chosen are none the statement holds, so each answers as its plain twin does
+    const w = "(SELECT id, d, d AS __mason_v, c AS __mason_k, c AS __mason_w, d AS __mason_bound FROM colls)";
+    for (const [own, plain] of [
+      [`SELECT __mason_v, __mason_k, d FROM ${w} AS w ORDER BY d, id LIMIT 6`, `SELECT d, c, d FROM colls ORDER BY d, id LIMIT 6`],
+      [`SELECT id, __mason_v FROM ${w} AS w ORDER BY __mason_v, id LIMIT 3`, `SELECT id, d FROM colls ORDER BY d, id LIMIT 3`],
+      [`SELECT id, __mason_v FROM ${w} AS w ORDER BY __mason_v DESC, id LIMIT 3`, `SELECT id, d FROM colls ORDER BY d DESC, id LIMIT 3`],
+      [`SELECT id, __mason_w, __mason_bound FROM ${w} AS w WHERE __mason_k <> 'b' ORDER BY d, id LIMIT 3`, `SELECT id, c, d FROM colls WHERE c <> 'b' ORDER BY d, id LIMIT 3`],
+      [`SELECT min(__mason_v), max(__mason_k), min(d) FROM ${w} AS w`, `SELECT min(d), max(c), min(d) FROM colls`],
+      ["SELECT * FROM colls AS __mason_keys1 ORDER BY d, id LIMIT 3", "SELECT * FROM colls ORDER BY d, id LIMIT 3"],
+      ["SELECT __mason_values1.id FROM colls AS __mason_values1 ORDER BY __mason_values1.d DESC, 1 LIMIT 3", "SELECT id FROM colls ORDER BY d DESC, 1 LIMIT 3"],
+      ["SELECT * FROM colls AS __mason_distinct ORDER BY d, id LIMIT 3", "SELECT * FROM colls ORDER BY d, id LIMIT 3"],
+      ["SELECT min(d), max(d) FROM colls AS __mason_bounds", "SELECT min(d), max(d) FROM colls"],
+      ["WITH __mason_values1 AS (SELECT id, d FROM colls) SELECT min(d), max(d) FROM __mason_values1", "SELECT min(d), max(d) FROM colls"],
+      ["WITH __mason_values1 AS (SELECT 1 AS one) SELECT min(d), max(d) FROM colls", "SELECT min(d), max(d) FROM colls"],
+      ["WITH __mason_values1 AS (SELECT id, d FROM colls), __mason_keys1 AS (SELECT 1 AS one) SELECT id FROM __mason_values1 ORDER BY d, id LIMIT 3", "SELECT id FROM colls ORDER BY d, id LIMIT 3"],
+    ] as const) {
+      assert.deepEqual((await answer(c, own)).rows, (await answer(c, plain)).rows, own);
+      assert.match(await sent(own), /__mason_values\d* AS MATERIALIZED \(SELECT __mason_v\d*, /, own);
     }
     // a parameter in the WHERE the threshold reads too: bound once, read in both, and again after the session moved
     const bound = "SELECT id FROM colls WHERE id > $1 ORDER BY d, id LIMIT 3";

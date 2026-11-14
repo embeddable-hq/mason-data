@@ -26,11 +26,13 @@
  * LETTERS OF LATIN ARE FOLDED INTO THE RUN (the second round of issue 666: over 30 M names a third beginning with É, Ø
  * or Ł had no run, and all were keyed): a character of `FOLD_BLOCKS` the order covers, lists and begins no contraction
  * with, whose first level is a mapped character's, is written as it, by the engine's `strip_accents` (É, ö, İ: its
- * decomposition, held to `stripped`) or a `replace` of its own (Ø, ł, ª: none), and a mark `strip_accents` drops is
- * dropped where its first level is none. A head of ASCII alone (as many bytes as characters) is read as above; any
- * other is folded first over its longest prefix of such characters, and the run read from what that writes. A mark of
- * a weight of its own (U+0363), a letter of two (Ǣ) or of one no mapped character has (ð) stops the run, as any
- * unmapped character does, and a contraction a folded character could complete unmaps its first character.
+ * decomposition, held to `stripped`) or a `replace` of its own where it has none (glibc's en_US: Ø, ł, ð and Ð, Đ,
+ * Ħ, ŀ and Ŀ, ſ, ª, º, ¹, ² and ³), and a mark `strip_accents` drops is dropped where its first level is none. A head
+ * of ASCII alone (as many bytes as characters) is read as above; any other is folded first over its longest prefix of
+ * such characters, and the run read from what that writes. A mark of a weight of its own (U+0363), a letter of two
+ * weights (Ǣ) or of one no mapped character has stops the run, as any unmapped character does, and a contraction a
+ * folded character could complete unmaps its first character. Which letters fold is the order's to say, never a list:
+ * the list above is what the code reads from en_US.utf8 on glibc.
  * THE PROOF OBLIGATION: hi(a) < lo(b) implies libcKey(a) < libcKey(b) at the first level, strictly; lo(s) <= hi(s);
  * equal strings have equal bounds (tests/duck-libc-order.test.ts and tests/integration/duck-libc-read.itest.ts hold it
  * over the engine's own expressions). Why it holds: the run's weights are a prefix W' of s's first level W; s whole in
@@ -60,8 +62,9 @@
  * the statement (pg_proc's provolatile, `functionsCalled`), no window function or set-returning select list anywhere,
  * no aggregate but the min/max's own query (a top N: none), one FROM item, and no LIMIT, OFFSET, DISTINCT ON or sample
  * inside what is cloned but a role's barrier (src/duck/row-filter.ts `BARRIER`), which every row passes. Anything else
- * stays as written: a join, a set operation, a window's ORDER BY, WITH TIES, GROUP BY and DISTINCT, a FILTER'd or
- * grouped min, a LIMIT that is not a constant.
+ * stays as written: a join (but a top N over joined tables src/duck/late.ts writes as a SELECT of one FROM item, the
+ * preserved side limited first or the row numbers chosen, is bounded there), a set operation, a window's ORDER BY,
+ * WITH TIES, GROUP BY and DISTINCT, a FILTER'd or grouped min, a LIMIT that is not a constant.
  *
  * WHAT CHANGES BESIDE THE TIME: a value the bounds rule out is never keyed, so under a locale whose order leaves a
  * character uncovered (`libc-uncovered`), a value holding it that is outside the top N no longer refuses the statement;
@@ -372,7 +375,13 @@ interface Pick { f: Body; case: Body; call: AstNode; x: AstNode; bound: Bound; m
 const col = (...names: string[]): AstNode => ({ ColumnRef: { fields: names.map(S) } });
 /** a node without its offsets: two spellings of one expression at two places */
 const shapeOf = (n: AstNode): string => JSON.stringify(n, (k, v: unknown) => k === "location" ? undefined : v);
-const VALUE = "__mason_v", WEIGHTS = "__mason_w", KEY = "__mason_k";
+/** every name in `v` (a string a node holds: an identifier, an alias, a WITH query's name, a column's), lower-cased */
+function namesIn(v: unknown, out = new Set<string>()): Set<string> {
+  if (typeof v === "string") out.add(v.toLowerCase());
+  else if (Array.isArray(v)) for (const x of v) namesIn(x, out);
+  else if (isObject(v)) for (const x of Object.values(v)) namesIn(x, out);
+  return out;
+}
 
 /** the SELECTs that may read the query around them: inside a subquery expression or a LATERAL item, at any depth. A
  *  WITH query of theirs could not read it, so they are bounded row by row */
@@ -414,10 +423,25 @@ const itemName = (item: AstNode): string | null => {
  */
 class Values {
   private readonly made = new Map<Body, Map<string, string>>();
-  private count = 0;
-  private joins = 0;
   private readonly counted: (n: AstNode) => AstNode;
-  constructor(counted: (n: AstNode) => AstNode) { this.counted = counted; }
+  /** every name the statement holds, lower-cased (the engine's identifiers are read without case): a name chosen here
+   *  is none of them, nor one chosen before (`fresh`) */
+  private readonly taken: Set<string>;
+  /** the columns of the values and of their keys, chosen once for the statement */
+  private readonly v: string; private readonly w: string; private readonly k: string; private readonly bound: string;
+  constructor(tree: unknown, counted: (n: AstNode) => AstNode) {
+    this.counted = counted;
+    this.taken = namesIn(tree);
+    [this.v, this.w, this.k, this.bound] = [this.fresh("__mason_v"), this.fresh("__mason_w"), this.fresh("__mason_k"), this.fresh("__mason_bound")];
+  }
+
+  /** a name no part of the statement holds: `base`, else `base` and the first number that makes it one */
+  private fresh(base: string): string {
+    let name = base;
+    for (let i = 1; this.taken.has(name.toLowerCase()); i++) name = `${base}${i}`;
+    this.taken.add(name.toLowerCase());
+    return name;
+  }
 
   /** the WITH query of the DISTINCT values of `x` over the SELECT's rows, made once per SELECT and x: its name */
   of(s: Body, item: AstNode, x: AstNode, bound: Bound): string {
@@ -426,13 +450,13 @@ class Values {
     this.made.set(s, mine);
     const known = mine.get(shape);
     if (known !== undefined) return known;
-    const name = `__mason_values${++this.count}`;
+    const name = this.fresh("__mason_values");
     const where = and([...(s.whereClause !== undefined ? [structuredClone(s.whereClause as AstNode)] : []), nullTest(structuredClone(x), "IS_NOT_NULL")]);
-    const distinct: Body = { distinctClause: [{}], targetList: [{ ResTarget: { name: VALUE, val: structuredClone(x) } }],
+    const distinct: Body = { distinctClause: [{}], targetList: [{ ResTarget: { name: this.v, val: structuredClone(x) } }],
       fromClause: [this.counted(structuredClone(item))], whereClause: where, limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE" };
     const query: Body = {
-      targetList: [{ ResTarget: { val: col(VALUE) } }, { ResTarget: { name: WEIGHTS, val: weightsOf(bound, col(VALUE)) } }],
-      fromClause: [{ RangeSubselect: { subquery: { SelectStmt: distinct }, alias: { aliasname: "__mason_distinct" } } }],
+      targetList: [{ ResTarget: { val: col(this.v) } }, { ResTarget: { name: this.w, val: weightsOf(bound, col(this.v)) } }],
+      fromClause: [{ RangeSubselect: { subquery: { SelectStmt: distinct }, alias: { aliasname: this.fresh("__mason_distinct") } } }],
       limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
     };
     const w = (s.withClause as Body | undefined) ?? {};
@@ -442,7 +466,7 @@ class Values {
   }
 
   /** a value's lo (`L` after its weights) or hi (`H`) */
-  private static mark(low: boolean): AstNode { return op("||", col(WEIGHTS), chr(low ? L : H)); }
+  private mark(low: boolean): AstNode { return op("||", col(this.w), chr(low ? L : H)); }
   /** `SELECT <list> FROM <values> [WHERE …]` */
   private static over(name: string, list: AstNode[], where?: AstNode, more: Body = {}): AstNode {
     return { SelectStmt: { targetList: list.map((val) => ({ ResTarget: { val } })), fromClause: [{ RangeVar: { relname: name, inh: true, relpersistence: "p" } }],
@@ -452,11 +476,11 @@ class Values {
 
   /** the min or max: `any_value((SELECT arg_min(v, ROW(key(v), v)) FROM <values> WHERE lo <= (SELECT min(hi) FROM <values>)))` */
   pick(p: Pick, name: string): void {
-    const limit = Values.scalar(Values.over(name, [call(p.min ? "min" : "max", [Values.mark(!p.min)])]));
-    const kept = op(p.min ? "<=" : ">=", Values.mark(p.min), limit);
+    const limit = Values.scalar(Values.over(name, [call(p.min ? "min" : "max", [this.mark(!p.min)])]));
+    const kept = op(p.min ? "<=" : ">=", this.mark(p.min), limit);
     const row = structuredClone(p.case.result as AstNode);
-    bodyOf(row).args = [keyOf(p.call, col(VALUE)), col(VALUE)];
-    const chosen = Values.scalar(Values.over(name, [call(p.min ? "arg_min" : "arg_max", [col(VALUE), row])], kept));
+    bodyOf(row).args = [keyOf(p.call, col(this.v)), col(this.v)];
+    const chosen = Values.scalar(Values.over(name, [call(p.min ? "arg_min" : "arg_max", [col(this.v), row])], kept));
     for (const k of Object.keys(p.f)) delete p.f[k];
     Object.assign(p.f, { funcname: [S("any_value")], args: [chosen], funcformat: "COERCE_EXPLICIT_CALL" });
   }
@@ -464,18 +488,18 @@ class Values {
   /** the top N: its FROM item LEFT JOINed to the keys of the values the bounds keep, sorted by the joined key */
   top(t: Top, item: AstNode, own: string): void {
     const name = this.of(t.s, item, t.x, t.bound);
-    const keys = `__mason_keys${++this.joins}`;
+    const keys = this.fresh("__mason_keys"), bounds = this.fresh("__mason_bounds");
     // ASC: the n-th smallest value's hi (fewer than n values: `H`, above every lo); DESC: the n-th largest lo ('')
-    const bounds: AstNode = { SelectStmt: {
+    const threshold: AstNode = { SelectStmt: {
       targetList: [{ ResTarget: { val: { CaseExpr: { args: [{ CaseWhen: { expr: op(">=", { FuncCall: { funcname: [S("count")], agg_star: true, funcformat: "COERCE_EXPLICIT_CALL" } }, int(t.n)),
-        result: call(t.desc ? "min" : "max", [col("__mason_bounds", "__mason_bound")]) } }], defresult: t.desc ? str("") : chr(H) } } } }],
+        result: call(t.desc ? "min" : "max", [col(bounds, this.bound)]) } }], defresult: t.desc ? str("") : chr(H) } } } }],
       fromClause: [{ RangeSubselect: { subquery: Values.over(name, [], undefined, {
-        targetList: [{ ResTarget: { name: "__mason_bound", val: Values.mark(t.desc) } }],
+        targetList: [{ ResTarget: { name: this.bound, val: this.mark(t.desc) } }],
         sortClause: [{ SortBy: { node: int(1), sortby_dir: t.desc ? "SORTBY_DESC" : "SORTBY_DEFAULT", sortby_nulls: "SORTBY_NULLS_DEFAULT" } }],
-        limitCount: int(t.n), limitOption: "LIMIT_OPTION_COUNT" }), alias: { aliasname: "__mason_bounds" } } }],
+        limitCount: int(t.n), limitOption: "LIMIT_OPTION_COUNT" }), alias: { aliasname: bounds } } }],
       limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE" } };
-    const kept = op(t.desc ? ">=" : "<=", Values.mark(!t.desc), Values.scalar(bounds));
-    const keyed: Body = { targetList: [{ ResTarget: { val: col(VALUE) } }, { ResTarget: { name: KEY, val: keyOf(t.call, col(VALUE)) } }],
+    const kept = op(t.desc ? ">=" : "<=", this.mark(!t.desc), Values.scalar(threshold));
+    const keyed: Body = { targetList: [{ ResTarget: { val: col(this.v) } }, { ResTarget: { name: this.k, val: keyOf(t.call, col(this.v)) } }],
       fromClause: [{ RangeVar: { relname: name, inh: true, relpersistence: "p" } }], whereClause: kept, limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE" };
     // the list's `*` is the FROM item's columns, never the keys' (`<item>.*`)
     for (const target of (t.s.targetList ?? []) as AstNode[]) {
@@ -484,17 +508,17 @@ class Values {
       if (fields?.length === 1 && isNodeOf(fields[0], "A_Star")) bodyOf(v).fields = [S(own), fields[0]];
     }
     t.s.fromClause = [{ JoinExpr: { jointype: "JOIN_LEFT", larg: (t.s.fromClause as AstNode[])[0], rarg: { RangeSubselect: { subquery: { SelectStmt: keyed }, alias: { aliasname: keys } } },
-      quals: op("=", structuredClone(t.x), col(keys, VALUE)) } }];
-    const joined = { BoolExpr: { boolop: "OR_EXPR", args: [nullTest(structuredClone(t.x), "IS_NULL"), nullTest(col(keys, VALUE), "IS_NOT_NULL")] } };
+      quals: op("=", structuredClone(t.x), col(keys, this.v)) } }];
+    const joined = { BoolExpr: { boolop: "OR_EXPR", args: [nullTest(structuredClone(t.x), "IS_NULL"), nullTest(col(keys, this.v), "IS_NOT_NULL")] } };
     t.s.whereClause = t.s.whereClause === undefined ? joined : and([t.s.whereClause as AstNode, joined]);
-    t.sort.node = col(keys, KEY);
+    t.sort.node = col(keys, this.k);
     // the same key in the list (the late select list's sort output, src/duck/late.ts) is the joined one too: else it is
     // computed for every row the join keeps
     const shape = shapeOf(t.call);
     const swap = (v: unknown): void => {
-      if (Array.isArray(v)) { v.forEach((x, i) => { if (isObject(x) && shapeOf(x as AstNode) === shape) v[i] = col(keys, KEY); else swap(x); }); return; }
+      if (Array.isArray(v)) { v.forEach((x, i) => { if (isObject(x) && shapeOf(x as AstNode) === shape) v[i] = col(keys, this.k); else swap(x); }); return; }
       if (!isObject(v) || isNodeOf(v, "SubLink")) return;
-      for (const [k, x] of Object.entries(v)) { if (isObject(x) && kindOf(x) === "FuncCall" && shapeOf(x as AstNode) === shape) v[k] = col(keys, KEY); else swap(x); }
+      for (const [k, x] of Object.entries(v)) { if (isObject(x) && kindOf(x) === "FuncCall" && shapeOf(x as AstNode) === shape) v[k] = col(keys, this.k); else swap(x); }
     };
     swap(t.s.targetList);
   }
@@ -574,7 +598,7 @@ export async function libcBounded(tree: AstNode, analysis: TreeValue, context: B
   // a SELECT that may read the query around it is bounded row by row (its threshold a subquery over its own rows); any
   // other reads its DISTINCT values once, a WITH query of its own (`Values`)
   const inner = correlatable(tree);
-  const values = new Values(counted);
+  const values = new Values(tree, counted);
   for (const t of chosen.tops) {
     const item = oneItem(t.s, ctes)!;
     const named = itemName(item);

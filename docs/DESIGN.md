@@ -2964,6 +2964,8 @@ The decisions, each measured or tested:
   counted as one more wall (tests/duck-roles-barrier-wire.test.ts), and only where reading them twice reads the same
   rows (nothing volatile, no window or set-returning select list, no LIMIT or sample inside). Everything else, a join,
   a set operation, GROUP BY, DISTINCT, WITH TIES, a grouped or FILTER'd min, runs as written and as fast as before.
+  (A top N over joined tables that src/duck/late.ts writes as a SELECT of one FROM item is bounded there: the
+  preserved side limited first, or the row numbers chosen.)
 - **NULL rows are never candidates** unless the sort puts them first: a sentinel in the threshold's `count(*) >= n`
   case and the row's `coalesce` keep them out (61,490 NULL rows were keyed for a `LIMIT 50` before it).
 
@@ -3022,7 +3024,9 @@ keys of the values the bounds keep and sorts by the joined key. A SELECT that ma
 subquery expression or a LATERAL item) keeps the row-by-row form: a WITH query of its own could not read it. And a
 letter of Latin whose first level is an ASCII letter's is folded into the run (`folds`): É by the engine's
 `strip_accents` (its decomposition, which tests/duck-libc-order.test.ts holds to `stripped` over every character it may
-fold), Ø and ł by a `replace` of their own, each read from the source's order, never a table by hand. Folding every
+fold), and a letter of no decomposition by a `replace` of its own (on glibc's en_US: Ø, ł, ð, Đ, Ħ, ŀ, ſ, ª and ¹ ² ³),
+each read from the source's order, never a table by hand. The names the change writes are none the statement holds
+(a column of its own named `__mason_v` was an ambiguous reference beside the keys', the review of PR 945). Folding every
 value doubled a unique 192-character column's min / max (3 s to 6 s), so a head of ASCII alone is read unfolded.
 
 Measured over the wire, main and the change in turn under the same load (a shared 4-core machine, load 5 to 10), the
