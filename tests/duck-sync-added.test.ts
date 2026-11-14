@@ -510,7 +510,7 @@ test("a sync changed is a catch-up by one poll, said once, beside the stream as 
 
 test("a sync changed is recorded as the sync's event of its table, in the words its log line says: the history keeps what a table's sync was", async () => {
   const seed = async (run: (sql: string) => Promise<unknown>): Promise<void> => { await run(copied("a")); await run(polledUnder("a", "poll 5m")); };
-  const changed = (t: Started) => withSync(t, async (_sync, _logged, events) => events.filter((e) => e.kind !== "copied" && e.kind !== "recovered"));
+  const changed = (t: Started) => withSync(t, async (_sync, _logged, events) => events.filter((e) => e.kind !== "full_sync" && e.kind !== "recovered"));
   assert.deepEqual(await changed({ mode: "poll", tables: [{ ...table("a"), sync: every("30s", 30) }], seed }),
     [{ kind: "sync_changed", table: "public.a", message: "sync: poll 5m → poll 30s: its synced data is kept, and caught up by one poll now" }]);
   assert.deepEqual(await changed({ mode: "replication", replication: replicationX, tables: [{ ...table("a"), sync: { mode: "replication" } }], seed }),

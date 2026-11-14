@@ -3244,6 +3244,21 @@ over the side's whole join column. The kept rows are read twice, so they are a W
 unordered LIMIT may keep other rows each time it runs. A sorted statement was left as it was: issue 463 asked for the
 unordered preview.
 
+**With no ORDER BY, the preserved table first where it is the biggest (issue 463, the 20-row preview, 2026-11-14).**
+After the change above, the 20-row preview's inner join still built a hash table of the JSON side's whole join column,
+3 M ids, to keep 20 rows. Limiting the preserved table first removes that, but issue 824 measured its other side: a
+small preserved table beside a big one streams the big table and stops early, and limited first its few rows wait for
+their matches across the big table's whole join column (116–146 ms against 5 ms at 30 M rows). The engine builds its
+hash table of the smaller side, so the two cases are told apart by size. Where the preserved table holds at least as
+many rows as every other FROM item, the engine read each other item's whole join column into a hash table before, and
+limited first it reads that column at most once and builds no hash table of it. So that is the only case limited
+first. The sizes are the sync's count of each copy (`CopyState.rows`), which the plan already has; anything it cannot
+size stays as it was. Measured as above (load 10–25 from other sessions, so the ranges are wide), the inner join of the
+20-row preview went from about 0.15 s to 3 ms under EXPLAIN ANALYZE. The whole preview went from 0.54–1.45 s
+(×40–592) to 0.13–0.46 s (×14–239) against Postgres's 1–14 ms. What is left there is the fetch's Mason function calls
+for the 20 rows' casts. Issue 824's `small LEFT JOIN big LIMIT 100` (25 k × 8 M rows) keeps its plan: 12–21 ms here
+against 17–44 ms at main, the same form. `big LEFT JOIN small LIMIT 100` is limited first: 8–14 ms against 12–20 ms.
+
 **A join's FROM items (issue 134, step 2, 2026-10-31).** `joinRows` stopped at a table, so a view, a WITH query, a tool's
 wrapper and a derived side each carried every wide column through the join again. The issue's comment measured the shapes
 by hand; the real rewrite, through the listener, over 8 M facts, 3 M rows of about 3 kB and a 2 GB limit (minimum of three
