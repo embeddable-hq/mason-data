@@ -92,6 +92,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # first, whether this branch may release at all: `release/*` also matches a branch not named for a line (an old
+          # release-notes PR's release/v0.20.0). Such a push releases nothing, and the run stays green
+          ref="$(node scripts/release-line.ts --ref "$GITHUB_REF")"
+          echo "$ref"
+          if ! grep -qx 'releases=true' <<<"$ref"; then
+            echo "version=" >> "$GITHUB_OUTPUT"; echo "cli_publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # the newest notes file by version, not by name
           version="$(ls release-notes 2>/dev/null | sed -n 's/^v\([0-9][0-9.]*\)\.md$/\1/p' | sort -V | tail -1)"
           if [ -z "$version" ]; then

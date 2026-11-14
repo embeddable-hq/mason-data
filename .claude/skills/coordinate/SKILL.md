@@ -55,6 +55,8 @@ a PR, and takes changes through a PR only.
 word. The merge itself tags, publishes the image and the CLI, and creates the GitHub release
 (`.github/workflows/release.yml`). Nothing after the merge is done by hand.
 
+A release-notes PR's branch is `notes/v<version>`, never under `release/`, which is the lines' (below).
+
 **The release lines** (`release-notes/README.md` "Release lines" has the rule and the steps):
 - Choose the version by the rule. A release on the current line is a patch (`0.20.1`). Only a breaking change, which
   reads a project differently, makes a new line (`0.21.0`).

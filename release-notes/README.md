@@ -5,6 +5,10 @@ itself tags, publishes the image and the CLI, and creates the GitHub release (`.
 nothing after the merge is done by hand. A patch on a line that has its own branch is merged to that branch,
 `release/0.<minor>`, instead ("Where breaking changes wait" and "A patch on a line's branch", below).
 
+**A release-notes PR's branch is `notes/v<version>`**, such as `notes/v0.21.0`. Never name it under `release/`. A
+`release/*` branch is a line's, and its ruleset takes changes by PR only. A push to a branch under `release/` that is
+not named for a line, such as an old `release/v0.20.0`, releases nothing, and its run stays green.
+
 The notes are for the team RUNNING Mason — what to do before upgrading, what changes for them, what was wrong and
 is now right — never what was implemented. The file's first line is the release's name (`# Mason v0.7.0`); the rest
 is its body.

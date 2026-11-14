@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { decideLine, tagNames } from "../scripts/release-line.ts";
+import { decideLine, refLine, tagNames } from "../scripts/release-line.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TAGS = ["v0.17.0", "v0.17.1", "v0.18.0", "v0.19.0", "v0.20.0"];
@@ -45,19 +45,39 @@ test("a release branch refuses a release of another line, before anything is pub
   assert.ok("problem" in decideLine("refs/heads/release/0.19", "1.19.0", TAGS));
 });
 
+// branches the `release/*` trigger reaches that are not named for a line: old release-notes PRs' branches among them
+const NOT_A_LINE = ["refs/heads/release/v0.20.0", "refs/heads/release/v0.8.0", "refs/heads/release/0.19.x", "refs/heads/release/v0.19",
+  "refs/heads/release/0.19-hotfix", "refs/heads/release/019", "refs/heads/release/0.019", "refs/heads/release/", "refs/heads/release/0.19/fix"];
+
 test("a branch not named release/<major>.<minor>, or no branch at all, releases nothing", () => {
-  for (const ref of ["refs/heads/release/0.19.x", "refs/heads/release/v0.19", "refs/heads/release/0.19-hotfix", "refs/heads/release/019",
-    "refs/heads/release/0.019", "refs/heads/release/", "refs/heads/release/0.19/fix"]) {
+  for (const ref of [...NOT_A_LINE, "refs/heads/feature", "refs/heads/notes/v0.21.0", "refs/tags/v0.19.1", "refs/heads/mainline"]) {
+    assert.ok("skip" in refLine(ref), `${ref} is skipped`);
     const d = decideLine(ref, "0.19.1", TAGS);
-    assert.ok("problem" in d, `${ref} must be refused`);
-    assert.match(d.problem, /is not named for a line/, ref);
-  }
-  for (const ref of ["refs/heads/feature", "refs/tags/v0.19.1", "refs/heads/mainline"]) {
-    const d = decideLine(ref, "0.19.1", TAGS);
-    assert.ok("problem" in d, `${ref} must be refused`);
+    assert.ok("problem" in d, `${ref} must never release`);
     assert.match(d.problem, /releases nothing/, ref);
   }
+  assert.deepEqual(refLine(MAIN), { main: true });
+  assert.deepEqual(refLine("refs/heads/release/0.19"), { major: 0, minor: 19, branch: "release/0.19" });
   assert.ok("problem" in decideLine(MAIN, "0.20", TAGS));
+});
+
+test("--ref: a push to a branch under release/ not named for a line is skipped quietly, with exit 0", () => {
+  for (const ref of NOT_A_LINE) {
+    const r = run("", "--ref", ref);
+    assert.equal(r.status, 0, `${ref}: ${r.stderr}`);
+    assert.match(r.stdout, /^releases=false\nwhy=.*releases nothing\n$/, ref);
+  }
+  for (const ref of [MAIN, "refs/heads/release/0.19", "refs/heads/release/1.0"]) assert.equal(run("", "--ref", ref).stdout, "releases=true\n", ref);
+  assert.equal(run("", "--ref").status, 2);
+});
+
+test("release.yml's decide skips a branch not named for a line first, before it reads the notes, and stays green", () => {
+  const yml = fs.readFileSync(path.join(ROOT, ".github", "workflows", "release.yml"), "utf8");
+  const decide = job(yml, "decide");
+  const skip = decide.indexOf('node scripts/release-line.ts --ref "$GITHUB_REF"');
+  assert.ok(skip > 0, "decide asks --ref");
+  assert.ok(skip < decide.indexOf("ls release-notes"), "before it reads the notes or cli/package.json");
+  assert.match(decide.slice(skip), /if ! grep -qx 'releases=true' <<<"\$ref"; then\n\s+echo "version=" >> "\$GITHUB_OUTPUT"; echo "cli_publish=false" >> "\$GITHUB_OUTPUT"\n\s+exit 0/);
 });
 
 const SCRIPT = path.join(ROOT, "scripts", "release-line.ts");

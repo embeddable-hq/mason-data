@@ -2939,7 +2939,9 @@ a new line never reaches the projects still on the old one. A security fix must 
 `release/0.<minor>`, cut from its newest tag. `release.yml` runs on those branches too, and a branch releases its own
 line only. Only the newest release takes npm's `latest`, the image's `latest` and GitHub's Latest. An older line's
 patch is published under npm's `latest-0.<minor>`. The image's line tag (`0.<minor>`) moves only forward.
-`scripts/release-line.ts` decides all of this, and `tests/release-line.test.ts` holds it.
+`scripts/release-line.ts` decides all of this, and `tests/release-line.test.ts` holds it. Release-notes PRs had been
+opened from branches named `release/v<version>`, which `release/*` and its ruleset also match. They are now
+`notes/v<version>`, and a push to a branch under `release/` not named for a line is skipped quietly, with a green run.
 
 **No branch's release run is cancelled by another's, and `latest` never moves back** (the re-check of PR 999). A
 concurrency group holds one running and one pending run, and a third run replaces the pending one, whatever
