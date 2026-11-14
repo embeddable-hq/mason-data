@@ -2999,6 +2999,55 @@ run and 35 at its end; main's ran at 90 and 10 to 30):
 for 1 to 81,920 rows of 1 M (tests/duck-plans.test.ts), never for every row. A `DESC` sort whose NULLs come first keys
 every NULL row, as they are all candidates.
 
+### The key once a distinct value (2026-11-14, issue 666)
+
+On a real deployment the bounds did not reproduce the laptop's numbers: over varchar columns of names and codes, and
+columns where one value covers 97–98 % of the rows, a min / max and a top N were still 10 to 50 times Postgres's time.
+Profiled with EXPLAIN ANALYZE over synthetic data of those shapes (a Postgres 16 `en_US.UTF-8` database, 0.9 M and
+4.5 M names, a 16,900-value code and a status 98 % one value over 4.5 M rows, 650,000 codes over 12 M), one shape at a
+time, the time went two ways:
+- **The bounds themselves.** One bound over 4.5 M rows took 6 s of the engine's thread time (1.3 µs a row: three
+  regular expressions, a `lower` and a `left`, not the 0.05 µs measured before), and a min / max computed it three
+  times a row (two thresholds and the CASE). A min / max of the code column keyed 502 rows and still took 6 to 9 s.
+- **The key where the bounds rule nothing out.** A page of the status column left the 4.4 M rows of its one value
+  candidates, each keyed in JavaScript (about 3 µs a row of `libcKey` and as much again for the crossing): 19 s.
+
+Both are functions of the value, so the decision (`Values`, src/duck/libc-bound.ts) computes them once a DISTINCT
+value: the statement's distinct values (a native hash aggregate, 0.07 s over the 4.5 M codes, 0.3 s over 1.2 M
+distinct names) are a MATERIALIZED WITH query with each value's weights, and the threshold, the bounds' filter and the
+key read it. A min / max is the least key of the values the bounds keep; a top N joins its rows to the keys of the
+values the bounds keep and sorts by the joined key. A unique column pays the hash aggregate and gains the passes: a
+min / max over 4.5 M unique 192-character values went from 13–18 s to about 3 s. A SELECT that may read an outer query
+(inside a subquery expression or a LATERAL item) keeps the row-by-row form: a WITH query of its own could not read it.
+
+Measured over the wire, main and the change in turn, two rounds under the same load (a shared 4-core machine, load 7 to
+10), the source Postgres's time beside each; the ratio is Mason's best over Postgres's best of the round:
+
+| statement | rows | main | this change | Postgres | ratio, main | ratio, this change |
+|---|---|---|---|---|---|---|
+| `min(name), max(name)` | 0.9 M | 1.85, 2.57 s | 0.67, 0.60 s | 0.09–0.13 s | ×14–29 | ×5.2–5.5 |
+| `* ORDER BY name, id LIMIT 50` | 0.9 M | 1.54, 1.67 s | 0.67, 0.56 s | 0.07–0.12 s | ×17–21 | ×5.4–6.7 |
+| `min(name), max(name)` | 4.5 M | 13.9, 11.6 s | 2.87, 1.86 s | 0.53–0.73 s | ×19–21 | ×3.4–5.4 |
+| `id, name ORDER BY name DESC, id LIMIT 50` | 4.5 M | 4.29, 5.46 s | 2.34, 1.48 s | 0.38–0.62 s | ×11–12 | ×3.8–3.9 |
+| `* ORDER BY status, id LIMIT 50`, 98 % one value | 4.5 M | 18.5, 21.8 s | 1.10, 0.47 s | 0.20–0.37 s | ×68–74 | ×2.3–3.0 |
+| Metabase's preview of a code, `ASC LIMIT 2000` | 4.5 M | 3.00, 2.77 s | 0.45, 0.24 s | 0.33–0.64 s | ×5.1–5.8 | ×0.7 |
+| the same, `DESC` | 4.5 M | 3.42, 3.15 s | 0.26, 0.21 s | 0.38–0.77 s | ×7.2–7.9 | ×0.6 |
+| `min(code), max(code)`, 16,900 values | 4.5 M | 4.14, 3.96 s | 0.16, 0.17 s | 0.39–0.59 s | ×9.3–10 | ×0.4 |
+| `min(code), max(code)`, 650,000 values | 12 M | 7.76, 10.4 s | 0.69, 0.70 s | 1.07–1.66 s | ×6.2–9.7 | ×0.6 |
+| `id, kind ORDER BY kind, id LIMIT 50`, 97 % one value | 12 M | 7.42, 6.15 s | 0.54, 0.42 s | 0.54–0.88 s | ×7.3–9.2 | ×0.8 |
+| `min(note), max(note)`, every value its own, 192 characters | 4.5 M | 13.1, 9.38 s | 3.07, 2.33 s | 0.36–0.83 s | ×15–18 | ×6.4–6.8 |
+| `id ORDER BY note LIMIT 50`, the same | 4.5 M | 5.68, 3.82 s | 3.20, 3.62 s | 0.45–0.85 s | ×7.8–7.9 | ×5.8–8.1 |
+
+The last shape is the change's worst: the hash aggregate of 4.5 M unique wide values costs what the bounds' passes
+saved, and the two are within the noise of each other. The statements it does not touch were as slow at both: over
+the 4.5 M sales, `SELECT DISTINCT code … ORDER BY code` 15.4 s at main and 14.0 s here (Postgres 0.37–0.85 s), a
+grouped min / max 16.3 and 12.9 s (0.42–1.13 s), `FETCH FIRST 5 ROWS WITH TIES` 47 and 30 s (3.7–6.4 s).
+
+What is left: the names' min / max keys the values whose first letter is not ASCII (7 % of them, 175,000 of 1.2 M
+distinct names; 1 to 1.6 s of the 2 to 3 s), since the bounds map printable ASCII alone, and a unique wide column pays
+its hash aggregate. A list of distinct values, a grouped min / max and `FETCH FIRST … WITH TIES` still key every row
+(30 to 50 times Postgres): they are written elsewhere in the rewrite, and are issue 666's next step.
+
 ## Measurements
 
 ### The stored fold, larger than memory (issue 124 stage 5, 2026-11-02)
