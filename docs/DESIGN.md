@@ -451,8 +451,10 @@ under another transaction's write fails its commit, hence swaps on the writer's 
   are native; only a reader that prints reads the scale: the column's program is `rescale(value, scale)`, which the wire
   evaluates on the text (0.06 µs a value; 1.4 µs through BigInt), and `x::text` is the engine's text cut natively. A copy
   an older Mason made without the column is read again once (`SCALE_LAYOUT`), serving as it was until then. Not yet:
-  the readers `mixed-scale-numeric` lists (to_json and its kin, concat, `||`, array_agg, a scalar subquery, a set
-  operation without ALL, a generated table …) keep the column's one scale. The hidden column's name is hashed again where
+  the readers `mixed-scale-numeric` lists (array_agg's numeric[], a scalar subquery, a set operation without ALL, a
+  generated table …) keep the column's one scale. Every reader that turns the value into text reads `pgText`, whose
+  `plainNumericText` cuts the engine's text natively: of a column, of arithmetic over one (`rowScale`), and of a min,
+  max or sum (`arg_min` / `arg_max` / `max` of the scale, only there: min / max themselves stay the engine's). The hidden column's name is hashed again where
   the table holds a column of that name (`scaleColumn`), and a copy's view lists the source's own columns, never a
   pattern of names. Measured on 4 M rows of 0–2 decimals: the hidden column is 1.5 MiB beside the value's 12.5 MiB, the
   copy's time is unchanged within noise. min / max print at the column's one scale (the owner's decision, 2026-11-14:

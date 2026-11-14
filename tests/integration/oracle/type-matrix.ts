@@ -1032,6 +1032,10 @@ function* matrix(): Generator<Matrixed> {
   // through arithmetic, a cast to text, a GROUP BY and a sum
   yield q("plain numeric: each value's own scale", "SELECT id, n, n::text, n + 1, n * 2, abs(n) FROM typed_arrays ORDER BY id");
   yield q("plain numeric: grouped and summed", "SELECT n, count(*), sum(n) FROM typed_arrays GROUP BY n ORDER BY n NULLS FIRST");
+  // and turned into text: Postgres's own string of each value (issue 946's second part)
+  yield q("plain numeric: as text", "SELECT id, to_json(n), json_build_object('n', n)::text, concat(n), n || 'x', format('%s', n), row(id, n)::text FROM typed_arrays ORDER BY id");
+  yield q("plain numeric: gathered as text", "SELECT json_agg(n ORDER BY id)::text, string_agg(n::text, ',' ORDER BY id), max(n)::text, concat(min(n)), concat(sum(n)) FROM typed_arrays");
+  yield q("plain numeric: its text distinct", "SELECT DISTINCT n::text FROM typed_arrays ORDER BY 1");
   yield q("json arrays unnested", "SELECT id, unnest(jba), unnest(vca) FROM typed_arrays ORDER BY 1, 2::text, 3");
   // Metabase's week from Sunday: the literals of the GROUP BY and ORDER BY repeat the SELECT list's
   yield q("time literals grouped", "SELECT (date_trunc('week', (ts + INTERVAL '1 day')) + INTERVAL '-1 day') AS w, count(*) FROM typed GROUP BY (date_trunc('week', (ts + INTERVAL '1 day')) + INTERVAL '-1 day') ORDER BY (date_trunc('week', (ts + INTERVAL '1 day')) + INTERVAL '-1 day')");

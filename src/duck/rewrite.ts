@@ -710,6 +710,10 @@ class Rewriter {
     if (isNode(v) && this.writtenKeys.has(bodyOf(v))) this.writtenKeys.add(bodyOf(out as AstNode));
     if (isNode(v) && this.readPerGroup.has(bodyOf(v))) this.readPerGroup.add(bodyOf(out as AstNode));
     if (isNode(v) && this.nativeKeys.has(bodyOf(v))) this.nativeKeys.add(bodyOf(out as AstNode));
+    // (a GROUP BY key's column, whose plain numeric's text reads a group's scale: `plainNumericText`)
+    if (isNode(v) && this.groupedRefs.has(bodyOf(v))) this.groupedRefs.add(bodyOf(out as AstNode));
+    const rowScale = isNode(v) ? this.rowScales.get(bodyOf(v)) : undefined;
+    if (rowScale !== undefined) this.rowScales.set(bodyOf(out as AstNode), rowScale);
     // a node the rewrite typed itself stays typed (a picked operand of min / max, exactOf)
     const own = isNode(v) ? this.synthetic.get(bodyOf(v)) : undefined;
     if (own !== undefined) this.synthetic.set(bodyOf(out as AstNode), own);
@@ -4204,11 +4208,13 @@ class Rewriter {
     const b = bodyOf(n);
     const name = kindOf(n) === "FuncCall" ? lastName(b.funcname) : "";
     const args = (b.args ?? []) as AstNode[];
-    if ((name === "min" || name === "max") && args.length === 1 && b.agg_star !== true && b.agg_distinct !== true && b.agg_within_group !== true && b.over === undefined
+    if ((name === "min" || name === "max" || name === "sum") && args.length === 1 && b.agg_star !== true && b.agg_distinct !== true && b.agg_within_group !== true && b.over === undefined
       && this.typed(n)?.node === "AGGREF" && kindOf(args[0]!) === "ColumnRef") {
       const scale = this.scaleOf(args[0]!, false);
       if (scale === null) return null;
-      const picked = fn(name === "min" ? "arg_min" : "arg_max", [scale, this.clone(args[0]!)], b.agg_filter === undefined ? {} : { agg_filter: this.clone(b.agg_filter) });
+      // (a sum's scale is the most its rows have, add_var's)
+      const picked = name === "sum" ? fn("max", [scale], b.agg_filter === undefined ? {} : { agg_filter: this.clone(b.agg_filter) })
+        : fn(name === "min" ? "arg_min" : "arg_max", [scale, this.clone(args[0]!)], b.agg_filter === undefined ? {} : { agg_filter: this.clone(b.agg_filter) });
       this.synthetic.set(bodyOf(picked), { node: "AGGREF", type: INT4, typmod: -1, args: [], oid: null, format: null, collation: 0, inputCollation: 0,
         levelsUp: null, datum: null, qualifier: null, renamed: null });
       return this.cutText(n, picked);
