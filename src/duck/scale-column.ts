@@ -21,10 +21,11 @@ export const SCALE_RE = /^__mason_scale_[0-9a-f]{12}$/;
  *  table may name one anything, and two columns of one name fail the copy for good. Every reader computes it the same
  *  way from the same columns (the copy's own, as recorded) */
 export function scaleColumn(column: string, columns: readonly string[]): string {
-  const taken = new Set(columns);
+  // (compared as the engine compares names: case-insensitively)
+  const taken = new Set(columns.map((c) => c.toLowerCase()));
   for (let n = 0; ; n++) {
     const name = `${SCALE_PREFIX}${createHash("sha256").update(n === 0 ? column : `${column}\u0000${n}`).digest("hex").slice(0, 12)}`;
-    if (!taken.has(name)) return name;
+    if (!taken.has(name.toLowerCase())) return name;
   }
 }
 

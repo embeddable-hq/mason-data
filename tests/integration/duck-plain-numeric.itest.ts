@@ -211,16 +211,17 @@ test("the stream writes each plain numeric value's own scale: a whole row, and a
   }
 });
 
-test("a source column named as a plain numeric's hidden column would be: the table syncs, its own column listed and the scale held beside", { skip }, async () => {
-  const db = `${tag}_clash`, url = urlOf(db);
-  const clash = firstScaleName("u");
+for (const [kind, clash] of [["as", firstScaleName("u")], ["in capitals as", firstScaleName("u").toUpperCase()]] as const) {
+test(`a source column named ${kind} a plain numeric's hidden column would be: the table syncs, its own column listed and the scale held beside`, { skip }, async () => {
+  // (the engine compares names case-insensitively: a column in capitals is the same name to it)
+  const db = `${tag}_clash${kind.length}`, url = urlOf(db);
   psql(adminUrl!, `CREATE DATABASE ${db}`);
   psql(url, `CREATE TABLE p (id int PRIMARY KEY, u numeric, "${clash}" int); INSERT INTO p (id, u) VALUES ${MIXED}; UPDATE p SET "${clash}" = id * 10`);
   const parsed = parseSource(url);
   if ("problem" in parsed) throw new Error(parsed.problem);
   const [P] = await tablesOf(parsed.source, ["public.p"]);
   const logged: string[] = [];
-  const store = await DuckStore.open(path.join(dir, "clash.db"), (l) => logged.push(l));
+  const store = await DuckStore.open(path.join(dir, `clash${kind.length}.db`), (l) => logged.push(l));
   const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll");
   try {
     await sync.open();
@@ -228,7 +229,7 @@ test("a source column named as a plain numeric's hidden column would be: the tab
     await sync.once();
     assert.deepEqual(sync.state().map((x) => [x.source, x.phase, x.error]), [["public.p", "copied", null]], logged.slice(-6).join("\n"));
     const hidden = await hiddenOf(store, "p", [clash]);
-    assert.ok(hidden !== null && hidden !== clash, "the hidden column takes another name");
+    assert.ok(hidden !== null && hidden.toLowerCase() !== clash.toLowerCase(), "the hidden column takes another name");
     assert.equal(((await store.writer.runAndReadAll(`SELECT id, "${hidden}" FROM public.p ORDER BY id`)).getRowsJS() as unknown[][])
       .map((r) => r.map((x) => x === null ? "" : String(x)).join("\t")).join("\n").trimEnd(), psql(url, "SELECT id, scale(u) FROM p ORDER BY id"));
     const api = await listen(store, sync, db);
@@ -240,3 +241,4 @@ test("a source column named as a plain numeric's hidden column would be: the tab
     await store.close();
   }
 });
+}
