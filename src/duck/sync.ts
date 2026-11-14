@@ -75,7 +75,8 @@ import * as path from "node:path";
 import { PgConnection, formatLsn, parseLsn, pgLiteral, type PgConnectOptions } from "../cdc/pg-wire.ts";
 import { createSlot, currentLsn, dropSlot, readSlot, type SlotState } from "../cdc/source.ts";
 import { holdOf } from "./held-types.ts";
-import { scaleColumn, scaleOfText, scaleSql, SCALE_RE } from "./scale-column.ts";
+import { scaleColumn, scaleOfText, scaleSql } from "./scale-column.ts";
+import { hiddenColumns } from "./hidden-columns.ts";
 import { addCounts, countsText, duckValue, fold, foldInto, noChanges, noCounts, ReplicationStream, type ChangeCounts, type StreamedTable, type TableChanges } from "./stream.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { numericWiderThan } from "../lib/pg-numeric.ts";
@@ -480,6 +481,14 @@ export const HELD_LAYOUT = "stored by an older Mason with a column not held as t
  * again through the normal path (`needsCopy`) once, serving as it was until its swap.
  */
 export const SCALE_LAYOUT = "stored by an older Mason without each numeric value's own decimals: read again whole, once";
+
+/**
+ * A COPY MISSING A COLUMN ITS RECORD NAMES (issue 998): an older Mason dropped a source column named like one of its
+ * own hidden columns (`__mason_json_…`) at a start, so the copy lacks a column it syncs, and every poll and stream write
+ * of it failed. Its values are the source's alone: found by what the copy physically is, copied again through the normal
+ * path (`needsCopy`), serving as it was until its swap.
+ */
+export const MISSING_LAYOUT = "missing a column it syncs, which an older Mason dropped: read again whole, once";
 
 /** a copy in a layout this Mason no longer keeps: the layout as `mason status` says it, and its short form for a line */
 interface Retired { layout: string; short: string }
@@ -1307,6 +1316,7 @@ export class Sync {
       // every copy served, by its own columns (a table removed serves until the pass drops it)
       served: () => new Map([...this.states.values()].filter((s) => s.phase === "copied" && this.copiedColumns.has(s.source))
         .map((s) => [s.source, this.copiedColumns.get(s.source)!.map((c) => ({ name: c.name, type: c.type }))])),
+      recorded: () => this.recordedColumns(),
       rebuilding: (source) => this.rebuildingNow?.source === source,
       log: (line) => this.log(line),
     }, { enabled: options.json?.enabled ?? true, ...options.json });
@@ -4590,9 +4600,10 @@ export class Sync {
       if (this.states.get(source)?.phase !== "copied" || types === undefined || this.retired.has(source)) continue;
       const mis: string[] = [];
       const unscaled: string[] = [];
+      const missing: string[] = [];
       const completed = columns.map((c) => {
         const type = types.get(c.name);
-        if (type === undefined) return c;
+        if (type === undefined) { missing.push(c.name); return c; }
         if (c.typeKind === undefined && type.startsWith("ENUM(")) return { ...c, typeKind: "e" };
         const hold = holdOf(c.type, c.typeKind);
         const want = hold === "text" ? "VARCHAR" : hold === "text[]" ? "VARCHAR[]" : null;
@@ -4603,6 +4614,11 @@ export class Sync {
       });
       this.copiedColumns.set(source, completed);
       this.copiedAs.set(source, columnsKey(completed));
+      if (missing.length > 0) {
+        this.retired.set(source, { layout: MISSING_LAYOUT, short: `missing ${missing.join(", ")}, which an older Mason dropped` });
+        this.log(`${source}: it is ${MISSING_LAYOUT} (${missing.join(", ")}) — its synced data serves as it was until then`);
+        continue;
+      }
       if (mis.length === 0 && unscaled.length > 0) {
         this.retired.set(source, { layout: SCALE_LAYOUT, short: `in an older Mason's layout, ${unscaled.join(", ")} without each value's own decimals` });
         this.log(`${source}: it is ${SCALE_LAYOUT} (${unscaled.join(", ")}) — its synced data serves as it was until then, each value of those columns printed with the column's most decimals`);
@@ -4664,9 +4680,23 @@ export class Sync {
   private async scaledOf(t: Pick<AddedTable, "schema" | "table" | "columns">, c: DuckConnection = this.store.writer, table = t.table): Promise<string[]> {
     const plain = t.columns.filter((x) => plainNumeric(x.type)).map((x) => x.name);
     if (plain.length === 0) return [];
-    const held = new Set((await c.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE database_name = current_database() AND schema_name = ${literal(t.schema)} ` +
-      `AND table_name = ${literal(table)}`)).getRowsJS().map((r) => String(r[0])).filter((n) => SCALE_RE.test(n)));
-    return plain.filter((x) => held.has(scaleColumn(x, t.columns.map((c) => c.name))));
+    const own = t.columns.map((c) => c.name);
+    // the hidden ones alone (src/duck/hidden-columns.ts): a source column may be named like a scale column
+    const held = new Set(hiddenColumns((await c.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE database_name = current_database() AND schema_name = ${literal(t.schema)} ` +
+      `AND table_name = ${literal(table)}`)).getRowsJS().map((r) => String(r[0])), own).filter((h) => h.kind === "scale").map((h) => h.name));
+    return plain.filter((x) => held.has(scaleColumn(x, own)));
+  }
+
+  /** the source columns the ledger records for each synced table (`copy_state.columns`, as read and kept since:
+   *  `copiedColumns`) and for each copy in progress its side table (`copy_progress.columns`), by `<schema>.<table>`:
+   *  what tells a source column from a column Mason added (src/duck/hidden-columns.ts, issue 998) */
+  private async recordedColumns(): Promise<Map<string, string[]>> {
+    const out = new Map<string, string[]>([...this.copiedColumns].map(([source, columns]) => [source, columns.map((c) => c.name)]));
+    for (const [source, key] of (await this.store.writer.runAndReadAll(`SELECT source, columns FROM ${MASON_SCHEMA}.copy_progress`)).getRowsJS() as Array<[string, string | null]>) {
+      if (key === null) continue;
+      out.set(`${source}${SIDE_SUFFIX}`, (JSON.parse(key) as unknown[][]).map((c) => String(c[0])));
+    }
+    return out;
   }
 
   /** the state, kept and written to the ledger, on the connection of the flow that knows it (awaited, and on the

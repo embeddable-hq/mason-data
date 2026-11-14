@@ -27,7 +27,7 @@ import { treeDifference } from "./rewrite.ts";
 import { StatementError, type DuckPlan } from "./statement.ts";
 import type { NumericProgram } from "../lib/pg-numeric.ts";
 import type { CellConv } from "./types.ts";
-import { exprType, type TreeNode, type TreeValue } from "./pgtree.ts";
+import { exprType, tableColumnThrough, type TreeNode, type TreeValue } from "./pgtree.ts";
 
 /** A refusal of a generated table: its key in the file (null: the file itself), what is wrong, why, and the ways out. */
 export interface GeneratedRefusal { key: string | null; message: string; why: string | null; options: string[] }
@@ -68,6 +68,9 @@ export interface DefinitionPlan {
   /** each output column's own expression as the user wrote it (the raw tree's), else null (a set operation's): what a
    *  way out that casts the whole column is written over */
   roots: unknown[];
+  /** each output column that is a table's column read as it is (src/duck/pgtree.ts `tableColumnThrough`): a jsonb one
+   *  is already Postgres's text, which src/duck/generated.ts `canonicalJsonb` then leaves as it is */
+  asRead: boolean[];
 }
 
 /**
@@ -1036,6 +1039,7 @@ export async function planDefinition(p: Planner, sql: string, orderBy: string | 
   if (refused.length > 0) return { refused };
   const definition: DefinitionPlan = { plan, bases, warnings: statement.warnings, numerics, forms: await formsOf(p.rows, plan.outputs, statement.stmt, fields.length),
     roots: ((raw) => fields.map((_, i) => raw !== null && raw.length === fields.length ? raw[i] : null))(rawTargets(statement.stmt)),
+    asRead: fields.map((_, i) => plan.outputs !== undefined && plan.outputs.length === fields.length && tableColumnThrough(plan.outputs[i] ?? null)),
     columns: fields.map((f, i) => ({ name: f.name, type: typeNames.get(i)!, duck: numerics.some((n) => n.column === i) ? null : STORED_TYPES.get(f.oid) ?? null })) };
   if (describe === undefined || !definition.columns.some(isNumeric)) return { definition };
   const stored = storedColumns(definition, await describe(plan.sql.text));

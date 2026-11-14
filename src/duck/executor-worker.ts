@@ -35,8 +35,19 @@ let nextRunner = 1;
 const closing = new Map<number, Promise<void>>();
 /** every connection call still running, by connection: the shutdown closes a connection only once its calls settled */
 const connCalls = new Map<number, Set<Promise<unknown>>>();
-/** set by `shutdown`: a session's new statement is refused 57P01, a connection's new call refused */
+/** set by `shutdown`: a session's new statement is refused 57P01, any other request that would start work on the
+ *  instance refused (`DURING_STOP` names the few still answered) */
 let stopping = false;
+/** every request still being answered but the shutdown, with its op: the shutdown closes the instance only once
+ *  each has settled (issue 986: a `connect` asked just before the close was still on DuckDB's threads as the instance
+ *  closed, and the process crashed, exit 134 `Napi::Error` or 139 SIGSEGV) */
+const requests = new Map<Promise<unknown>, string>();
+/** the requests still answered once the shutdown began: each ends work or reads a count, and starts none on the
+ *  instance. Every other op is refused then, so an op added later is refused by default, never run under the close */
+const DURING_STOP = new Set(["runner.abort", "runner.close", "answer.close", "conn.interrupt", "conn.close", "calls", "function rows"]);
+/** how long the shutdown waits for what is in flight before it says what it still waits for (it goes on waiting:
+ *  closing the instance under a call of DuckDB's crashes the process, and the executor's own close is bounded) */
+export const SHUTDOWN_SAYS_MS = 3_000;
 /** a session's statement in flight: its signal (the main thread's, carried across) and, once DuckDB answered, its rows */
 interface InFlight { controller: AbortController; answer: DuckAnswer | null }
 const statements = new Map<string, InFlight>();
@@ -72,6 +83,19 @@ function closeRunner(n: number): Promise<void> {
   return p;
 }
 
+/** what the shutdown still waits for, in a few words, for its log line */
+function stillRunning(): string {
+  const ops = new Map<string, number>();
+  for (const op of requests.values()) ops.set(op, (ops.get(op) ?? 0) + 1);
+  let calls = 0;
+  for (const c of connCalls.values()) calls += c.size;
+  const parts = [...ops].map(([op, k]) => `${k} × ${op}`);
+  if (closing.size > 0) parts.push(`${closing.size} session close(s)`);
+  if (calls > 0) parts.push(`${calls} connection call(s)`);
+  if (probe !== null) parts.push("the check after a failed request");
+  return parts.length > 0 ? parts.join(", ") : "nothing left: closing now";
+}
+
 const need = <T>(m: Map<number, T>, n: number, what: string): T => {
   const v = m.get(n);
   if (v === undefined) throw new Error(`no ${what} ${n} on the engine's thread (Mason bug: report it)`);
@@ -81,8 +105,12 @@ const need = <T>(m: Map<number, T>, n: number, what: string): T => {
 type Request = Record<string, unknown> & { id?: number; op: string };
 
 async function answer(m: Request): Promise<{ value: unknown; transfer?: TransferListItem[] } | undefined> {
-  // a session's statement asked once the stop began: told so, never started under the closing instance
-  if (stopping && ["runner.open", "runner.run", "runner.explain", "answer.fetch"].includes(m.op)) throw new StatementError(STOPPING, "");
+  // asked once the stop began: a session's statement is told so (57P01), anything else refused, never started under the
+  // closing instance
+  if (stopping && !DURING_STOP.has(m.op)) {
+    if (["runner.open", "runner.run", "runner.explain", "answer.fetch"].includes(m.op)) throw new StatementError(STOPPING, "");
+    throw new Error(`the engine is closing: ${m.op} does not start on it any more`);
+  }
   switch (m.op) {
     case "open": {
       const opened = await openDuck(String(m.file), m.settings as Record<string, string>);
@@ -94,6 +122,8 @@ async function answer(m: Request): Promise<{ value: unknown; transfer?: Transfer
       if (instance === null) throw new Error("the engine is not open (Mason bug: report it)");
       const n = nextConn++;
       conns.set(n, await instance.connect());
+      // opened as the stop began (issue 986): the shutdown closes it with the rest, and nobody is handed it
+      if (stopping) throw new Error("the engine is closing: a connection opened as it began closing is closed with it");
       return { value: n };
     }
     case "conn.run": {
@@ -131,6 +161,8 @@ async function answer(m: Request): Promise<{ value: unknown; transfer?: Transfer
       if (instance === null) throw new Error("the engine is not open (Mason bug: report it)");
       const n = nextRunner++;
       runners.set(n, await SessionRunner.open(instance, log, Number(m.slot), cancels));
+      // opened as the stop began (issue 986): closed at once (the shutdown waits for that close), and told 57P01
+      if (stopping) { await closeRunner(n); throw new StatementError(STOPPING, ""); }
       return { value: n };
     }
     case "runner.run": {
@@ -201,15 +233,29 @@ async function answer(m: Request): Promise<{ value: unknown; transfer?: Transfer
       // session is told 57P01 (STOPPING), never "ok" and never a hang; then every session's connection is closed once
       // nothing runs on it (the listener's own closes, still in flight, included), and only then the connections and
       // the instance. Nothing is closed under a pending call of DuckDB's: that aborted the process
-      for (const s of statements.values()) abortWith(s.controller, { fields: STOPPING });
-      for (const n of [...runners.keys()]) void closeRunner(n);
-      await Promise.allSettled([...closing.values()]);
-      // a connection's call left running (the sync and the request log stop theirs first): interrupted, and waited
-      // for — never closed under (a task of it inside a call waits for this thread)
-      for (const [n, calls] of connCalls) if (calls.size > 0) conns.get(n)?.interrupt();
-      for (const calls of connCalls.values()) await Promise.allSettled([...calls]);
-      // the instance's check after a failure (`probeInstance`): none starts once stopping, one running ends first
-      while (probe !== null) await probe;
+      const said = setTimeout(() => log(`the engine's shutdown has waited ${SHUTDOWN_SAYS_MS / 1000} s for what is still running on it (${stillRunning()}); it closes the synced data only once that ends, never under it`), SHUTDOWN_SAYS_MS);
+      try {
+        for (const s of statements.values()) abortWith(s.controller, { fields: STOPPING });
+        for (const n of [...runners.keys()]) void closeRunner(n);
+        await Promise.allSettled([...closing.values()]);
+        // a connection's call left running (the sync and the request log stop theirs first): interrupted, and waited
+        // for — never closed under (a task of it inside a call waits for this thread)
+        for (const [n, calls] of connCalls) if (calls.size > 0) conns.get(n)?.interrupt();
+        for (const calls of connCalls.values()) await Promise.allSettled([...calls]);
+        // EVERY REQUEST TAKEN BEFORE THE STOP (issue 986): a `connect` or a session's open still on DuckDB's threads, a
+        // close still draining, waited for; what one opened meanwhile (a session, a connection) is closed in turn below.
+        // Until nothing is left: a session opened while this waited is closed, and its close waited for, in the next pass
+        for (;;) {
+          for (const s of statements.values()) abortWith(s.controller, { fields: STOPPING });
+          for (const n of [...runners.keys()]) void closeRunner(n);
+          for (const [n, calls] of connCalls) if (calls.size > 0) conns.get(n)?.interrupt();
+          const waiting = [...requests.keys(), ...closing.values(), ...[...connCalls.values()].flatMap((c) => [...c])];
+          if (waiting.length === 0) break;
+          await Promise.allSettled(waiting);
+        }
+        // the instance's check after a failure (`probeInstance`): none starts once stopping, one running ends first
+        while (probe !== null) await probe;
+      } finally { clearTimeout(said); }
       for (const [n, c] of [...conns].reverse()) { conns.delete(n); c.closeSync(); }
       instance?.closeSync();
       instance = null;
@@ -263,7 +309,12 @@ function probeInstance(): void {
 port.on("message", (m: Request) => {
   // the executor's watch (src/duck/executor.ts SILENT_MS): answered at once, by a thread whose loop turns
   if (m.op === "ping") { port.postMessage({ pong: true } satisfies Reply); return; }
-  answer(m).then((r) => {
+  const answering = answer(m);
+  if (m.op !== "shutdown") {
+    requests.set(answering, m.op);
+    void answering.then(() => requests.delete(answering), () => requests.delete(answering));
+  }
+  answering.then((r) => {
     if (m.id === undefined) return;
     port.postMessage({ id: m.id, ok: true, value: r?.value ?? null } satisfies Reply, r?.transfer ?? []);
   }, (e: unknown) => {

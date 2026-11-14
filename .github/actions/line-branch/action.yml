@@ -1,0 +1,73 @@
+# CREATES A LINE'S BRANCH AT A TAG, NEVER MOVING ONE (release.yml's `tag` job and release-line-branch.yml call it, once
+# scripts/release-line.ts has decided the branch and the tag; release-notes/README.md "The ruleset on release/*").
+#
+# - With no deploy key, it creates the branch with the job's GITHUB_TOKEN, through the REST API (POST /git/refs), which
+#   refuses a ref that exists.
+# - With a deploy key (the secret RELEASE_BRANCH_DEPLOY_KEY of the environment `release-branches`, set only when the
+#   ruleset refuses the token), it pushes over SSH with `--force-with-lease=<ref>:`, which refuses a ref that exists.
+# - A branch that exists already, because another run created it meanwhile, is left where it is, and the step passes.
+# - Otherwise a refusal fails the step, before anything is tagged or published, and prints GitHub's answer word for
+#   word: it names the rule that refused it.
+# - Afterwards it checks that the remote has the branch at the tag's commit.
+name: line branch
+description: create release/<major>.<minor> at a tag, never moving an existing branch
+inputs:
+  branch:
+    description: the branch to create, such as release/0.20
+    required: true
+  from:
+    description: the tag to create it at, such as v0.20.3
+    required: true
+  token:
+    description: the job's GITHUB_TOKEN
+    required: true
+  deploy-key:
+    description: a deploy key's private key that the ruleset lets bypass it; empty to use the token
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        BRANCH: ${{ inputs.branch }}
+        FROM: ${{ inputs.from }}
+        GH_TOKEN: ${{ inputs.token }}
+        DEPLOY_KEY: ${{ inputs.deploy-key }}
+      run: |
+        set -euo pipefail
+        case "$BRANCH" in release/[0-9]*.[0-9]*) ;; *) echo "not a line's branch: $BRANCH" >&2; exit 1;; esac
+        sha="$(git rev-parse "refs/tags/$FROM^{commit}")"
+        answer="$RUNNER_TEMP/line-branch-answer"
+        if [ -n "$DEPLOY_KEY" ]; then
+          how="a push with the deploy key"
+          key="$RUNNER_TEMP/line-branch-key"; hosts="$RUNNER_TEMP/line-branch-hosts"
+          trap 'rm -f "$key"' EXIT   # removed on every way out, a failure included
+          (umask 077; printf '%s\n' "$DEPLOY_KEY" > "$key")
+          # GitHub's SSH host keys, read over HTTPS from its API with the job's token (an unauthenticated read shares a
+          # shared runner's 60 an hour)
+          gh api meta --jq '.ssh_keys[] | "github.com " + .' > "$hosts"
+          [ -s "$hosts" ] || { echo "GitHub's API returned no SSH host keys, so the deploy key is not used" >&2; exit 1; }
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$hosts"
+          # an empty lease: the push is refused if the ref exists at all
+          if git push --force-with-lease="refs/heads/$BRANCH:" "git@github.com:$GITHUB_REPOSITORY.git" "$sha:refs/heads/$BRANCH" > "$answer" 2>&1; then ok=1; else ok=0; fi
+        else
+          how="the REST API with GITHUB_TOKEN"
+          if gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$sha" > "$answer" 2>&1; then ok=1; else ok=0; fi
+        fi
+        if [ "$ok" != 1 ]; then
+          # another run may have created it meanwhile: a branch that exists is kept where it is, wherever that is
+          if git ls-remote --exit-code --heads origin "refs/heads/$BRANCH" >/dev/null; then
+            echo "$BRANCH exists already, at $(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1): it is not moved"; exit 0
+          fi
+          {
+            echo "Could not create $BRANCH at $FROM ($sha) by $how. Nothing was created, tagged or published."
+            echo "GitHub's answer, word for word:"
+            cat "$answer"
+            echo "release-notes/README.md \"The ruleset on release/*\" says what to do next."
+          } >&2
+          exit 1
+        fi
+        at="$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)"
+        if [ "$at" != "$sha" ]; then echo "$BRANCH was created, but the remote shows it at '$at', not $sha" >&2; exit 1; fi
+        echo "$BRANCH is cut at $FROM ($sha), by $how"

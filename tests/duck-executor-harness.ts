@@ -202,7 +202,8 @@ export async function inProcess(name: string, body: string, ms = 90_000): Promis
     await store.writer.run("CREATE TABLE public.docs AS SELECT range::INTEGER AS id, ('{\\"s\\": \\"x' || (range % 7) || '\\", \\"n\\": ' || range || ', \\"o\\": [' || range || ']}')::JSON AS j FROM range(" + (process.env.ROWS ?? "200000") + ")");
     let turn = Promise.resolve();
     const host = { onWriter(f) { const t = turn.then(f); turn = t.then(() => undefined, () => undefined); return t; },
-      served: () => new Map([["public.docs", [{ name: "id", type: "integer" }, { name: "j", type: "jsonb" }]]]), rebuilding: () => false, log: (l) => logged.push(l) };
+      served: () => new Map([["public.docs", [{ name: "id", type: "integer" }, { name: "j", type: "jsonb" }]]]), recorded: async () => new Map([["public.docs", ["id", "j"]]]),
+      rebuilding: () => false, log: (l) => logged.push(l) };
     const keeper = process.env.NO_KEEPER ? undefined : new KeptJsonPaths(store, host, { enabled: true, eager: true, reviewMs: 0 });
     await keeper?.open();
     const schema = { database: "app", tables: [{ name: "docs", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "j", type: "jsonb" }] }] };

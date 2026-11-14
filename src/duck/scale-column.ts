@@ -11,9 +11,10 @@
  */
 import { createHash } from "node:crypto";
 
-/** the hidden column's name prefix; never a name a source column is given in practice, and never listed (`SCALE_RE`) */
+/** the hidden column's name prefix */
 export const SCALE_PREFIX = "__mason_scale_";
-/** a hidden scale column's name, and nothing else */
+/** a hidden scale column's name pattern: what tells its kind among the columns the copy's record does not name
+ *  (src/duck/hidden-columns.ts), never alone whether a column is hidden — a source column may be named so */
 export const SCALE_RE = /^__mason_scale_[0-9a-f]{12}$/;
 
 /** the hidden column holding `column`'s scale: its name hashed, so any column name gives one plain identifier, and hashed
