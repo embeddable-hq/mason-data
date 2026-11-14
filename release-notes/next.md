@@ -1,5 +1,13 @@
 The next release's notes, gathered here until its `v<version>.md` is written: a `v*.md` file is itself the release.
 
+## Before you upgrade
+
+- **Two sync event kinds have new names.** `copied` is now `full_sync`, and `copy_failed` is now `full_sync_failed`.
+  You see them in `mason logs --events` and its `--json`, in `mason status` (its Sync errors section, and
+  `recentErrors` in its `--json`) and in the web page's Syncs filter. If a script or an alert filters on the old names,
+  change it. Events recorded before the upgrade keep their old names. They still show in the full list, but an old
+  `copy_failed` no longer counts as a failure.
+
 ## What changes
 
 - **A failed sync event now says its code and where it happened.** `mason logs --events --json` and `/api/events` give
