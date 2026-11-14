@@ -470,7 +470,10 @@ paths:
   a min / max is `any_value` of the least key of the values its bounds keep, and a top N is LEFT JOINed to the keys of
   the values its bounds keep (the n-th distinct value's hi), sorted by the joined key, its `*` written as its item's.
   A SELECT inside a subquery expression or a LATERAL item, which may read the query around it, keeps the row-by-row
-  threshold (`correlatable`). Anything else is sent as written (a join, GROUP BY, DISTINCT, WITH TIES, a set
+  threshold (`correlatable`). **A letter of Latin weighed as a mapped character is folded into the run** (`folds`: É by
+  `strip_accents`, Ø and ł by a `replace`, a mark of no first-level weight dropped), each read from the order and
+  `strip_accents` held to `stripped` over every character of `FOLD_BLOCKS`; a head of ASCII alone is read unfolded,
+  since folding every value doubled a unique wide column's time. Anything else is sent as written (a join, GROUP BY, DISTINCT, WITH TIES, a set
   operation, a window, FILTER). Detector: `libc top N:` (tests/duck-wire.test.ts) and the `text under libc:` plan
   entries and rows test (tests/duck-plans.test.ts), the oracle's `text top N:` and `text min/max:`.
 - **A tie under ICU is two strings, ordered by their bytes** (U+FE0F is ignorable there): every order under ICU ends in

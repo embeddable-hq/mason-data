@@ -23,6 +23,14 @@
  * the end of the text took a U+0002 inside it for the end, and `ab` U+0002 `cd` sorted before `abc`).
  * Case is folded only within the run: the engine's `lower()` maps U+212A KELVIN SIGN to `k`, which no run holds.
  * A contraction's first character (`l` of `l·`) ends a run before an unmapped character: its weight there is not known.
+ * LETTERS OF LATIN ARE FOLDED INTO THE RUN (the second round of issue 666: over 30 M names a third beginning with É, Ø
+ * or Ł had no run, and all were keyed): a character of `FOLD_BLOCKS` the order covers, lists and begins no contraction
+ * with, whose first level is a mapped character's, is written as it, by the engine's `strip_accents` (É, ö, İ: its
+ * decomposition, held to `stripped`) or a `replace` of its own (Ø, ł, ª: none), and a mark `strip_accents` drops is
+ * dropped where its first level is none. A head of ASCII alone (as many bytes as characters) is read as above; any
+ * other is folded first over its longest prefix of such characters, and the run read from what that writes. A mark of
+ * a weight of its own (U+0363), a letter of two (Ǣ) or of one no mapped character has (ð) stops the run, as any
+ * unmapped character does, and a contraction a folded character could complete unmaps its first character.
  * THE PROOF OBLIGATION: hi(a) < lo(b) implies libcKey(a) < libcKey(b) at the first level, strictly; lo(s) <= hi(s);
  * equal strings have equal bounds (tests/duck-libc-order.test.ts and tests/integration/duck-libc-read.itest.ts hold it
  * over the engine's own expressions). Why it holds: the run's weights are a prefix W' of s's first level W; s whole in
@@ -89,8 +97,18 @@ const nullTest = (arg: AstNode, type: "IS_NULL" | "IS_NOT_NULL"): AstNode => ({ 
 const chr = (code: number): AstNode => call("chr", [int(code)]);
 
 /** what a libc order's bounds are written from: the run's pattern, the pattern of a text whole in the run (every
- *  character mapped), and the pattern of its characters of no first-level weight (null: none) */
-export interface Bound { run: string; whole: string; dropped: string | null }
+ *  character mapped), and the pattern of its characters of no first-level weight (null: none); and where a letter of
+ *  Latin is weighed as a character of the run (`folds`), the characters a run may begin from (`allowed`: the mapped
+ *  ones, the letters the engine's `strip_accents` takes to one, the marks it drops) and the letters written as one by
+ *  `replace` (`replaced`, each with the mapped character of its weight) */
+export interface Bound { run: string; whole: string; dropped: string | null; folds: { allowed: string; replaced: Array<[string, string]> } | null }
+
+/** the engine's `strip_accents` of a text, as utf8proc computes it: decomposed, every mark dropped, composed again
+ *  (tests/duck-libc-order.test.ts holds it to the engine's own over every character of `FOLD_BLOCKS`) */
+export const stripped = (s: string): string => s.normalize("NFD").replace(/\p{M}/gu, "").normalize("NFC");
+/** the characters a letter may be folded from: Latin-1, Latin Extended-A and -B, the combining marks and Latin Extended
+ *  Additional, where the engine's `strip_accents` is held to `stripped` */
+export const FOLD_BLOCKS: ReadonlyArray<readonly [number, number]> = [[0x80, 0x24f], [0x300, 0x36f], [0x1e00, 0x1eff]];
 
 /** a character class of code points, as RE2 reads it: each as `\x{…}`, runs as ranges */
 function charClass(points: readonly number[]): string {
@@ -124,8 +142,31 @@ export function boundOf(o: LibcOrder): Bound | null {
     // a character whose first level is its own: covered, listed, no sequence of weights
     const mapped = new Set<number>();
     for (let g = FIRST; g <= LAST; g++) if (o.uncovered[g] === 0 && o.unlisted[g] === 0 && !o.sequences.has(g)) mapped.add(g);
-    // a contraction a mapped character could complete makes its first character's weight depend on what follows: not mapped
-    for (const g of [...mapped]) if ((o.contractions.get(g) ?? []).some((c) => c.rest.length > 0 && mapped.has(c.rest[0]!))) mapped.delete(g);
+    // A LETTER OF LATIN WEIGHED AS A MAPPED CHARACTER IS FOLDED TO IT (the second round of issue 666: a name beginning
+    // with É, Ø or Ł had no run, so it was always a candidate): a character of FOLD_BLOCKS the order covers, lists and
+    // begins no contraction with, whose first level is a mapped character's — written as that character by the
+    // engine's `strip_accents` (É, ö, İ) or by a `replace` of its own (Ø, ł: no decomposition) — or, a mark
+    // `strip_accents` drops, none. Any other is not folded, and a run stops at it, as at any unmapped character
+    const firstOf = (g: number): readonly number[] => o.sequences.get(g)?.l1 ?? (o.l1[g]! > 0 ? [o.l1[g]!] : []);
+    const weighs = (g: number, a: number): boolean => { const [x, y] = [firstOf(g), firstOf(a)]; return x.length === y.length && x.every((w, i) => w === y[i]); };
+    const byWeight = new Map<number, number>();
+    for (const g of mapped) if (o.l1[g]! > 0 && !byWeight.has(o.l1[g]!)) byWeight.set(o.l1[g]!, folded(g));
+    const folds = new Map<number, number | null>(), replaces = new Map<number, number>();
+    for (const [lo, hi] of FOLD_BLOCKS) for (let g = lo; g <= hi; g++) {
+      if (o.uncovered[g] !== 0 || o.unlisted[g] !== 0 || o.contractions.has(g)) continue;
+      const c = String.fromCodePoint(g), s = stripped(c);
+      if (s === "") { if (firstOf(g).length === 0) folds.set(g, null); continue; }
+      const a = s.codePointAt(0)!;
+      if (s !== c) { if (s.length === 1 && mapped.has(a) && weighs(g, a)) folds.set(g, a); continue; }
+      const one = firstOf(g);
+      const like = one.length === 1 ? byWeight.get(one[0]!) : undefined;
+      if (like !== undefined && weighs(g, like)) replaces.set(g, like);
+    }
+    // a contraction a mapped character could complete makes its first character's weight depend on what follows: not
+    // mapped; a folded character completes it as its own self, which a fold would hide
+    for (const g of [...mapped]) if ((o.contractions.get(g) ?? []).some((c) => c.rest.length > 0 && (mapped.has(c.rest[0]!) || folds.has(c.rest[0]!) || replaces.has(c.rest[0]!)))) mapped.delete(g);
+    for (const [g, a] of [...folds]) if (a !== null && !mapped.has(a)) folds.delete(g);
+    for (const [g, a] of [...replaces]) if (!mapped.has(a)) replaces.delete(g);
     // (the rest begin a contraction only before an unmapped character: known where a mapped one follows, or the text ends)
     const plain = [...mapped].filter((g) => !o.contractions.has(g));
     const weighted = [...mapped].filter((g) => o.l1[g]! > 0), dropped = [...mapped].filter((g) => o.l1[g] === 0);
@@ -140,6 +181,10 @@ export function boundOf(o: LibcOrder): Bound | null {
         run: `^${charClass([...mapped])}*${charClass(plain)}`,
         whole: `${charClass([...mapped])}*`,
         dropped: dropped.length === 0 ? null : charClass(dropped),
+        folds: folds.size + replaces.size === 0 ? null : {
+          allowed: charClass([...mapped, ...folds.keys(), ...replaces.keys()]),
+          replaced: [...replaces].sort(([x], [y]) => x - y).map(([g, a]) => [String.fromCodePoint(g), String.fromCodePoint(a)]),
+        },
       };
     }
   }
@@ -153,8 +198,20 @@ export function boundOf(o: LibcOrder): Bound | null {
 function weightsOf(b: Bound, x: AstNode): AstNode {
   const head = (): AstNode => call("left", [structuredClone(x), int(BOUND_CHARS + 1)]);
   const whole = and([op("<=", call("strlen", [structuredClone(x)]), int(BOUND_CHARS)), call("regexp_full_match", [head(), str(b.whole)])]);
-  const run = call("lower", [{ CaseExpr: { args: [{ CaseWhen: { expr: whole, result: op("||", structuredClone(x), chr(E)) } }],
-    defresult: call("regexp_extract", [head(), str(b.run)]) } }]);
+  const arms = [{ CaseWhen: { expr: whole, result: op("||", structuredClone(x), chr(E)) } }];
+  let rest = call("regexp_extract", [head(), str(b.run)]);
+  if (b.folds !== null) {
+    // A HEAD OF ASCII ALONE (as many bytes as characters) is as before. Any other is folded first, over the longest
+    // prefix of characters the folds map (`allowed`): each is then a mapped one. x of at most `BOUND_CHARS` bytes, each
+    // allowed, is whole in the run. (Folding every value cost a unique 192-character column's min / max twice its time)
+    const { allowed, replaced } = b.folds;
+    const fold = (v: AstNode): AstNode => replaced.reduce((t, [from, to]) => call("replace", [t, str(from), str(to)]), call("strip_accents", [v]));
+    const folded = and([op("<=", call("strlen", [structuredClone(x)]), int(BOUND_CHARS)), call("regexp_full_match", [head(), str(`${allowed}*`)])]);
+    arms.push({ CaseWhen: { expr: op("=", call("strlen", [head()]), call("length", [head()])), result: rest } });
+    arms.push({ CaseWhen: { expr: folded, result: op("||", fold(head()), chr(E)) } });
+    rest = call("regexp_extract", [fold(call("regexp_extract", [head(), str(`^${allowed}*`)])), str(b.run)]);
+  }
+  const run = call("lower", [{ CaseExpr: { args: arms, defresult: rest } }]);
   return b.dropped === null ? run : call("regexp_replace", [run, str(b.dropped), str(""), str("g")]);
 }
 /** `lo(x)` and `hi(x)` (the module's header), each its own copy of `x` */

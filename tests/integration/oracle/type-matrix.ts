@@ -298,11 +298,13 @@ export const TYPED = `${MAPPED_TABLE} CREATE EXTENSION IF NOT EXISTS citext; CRE
   "ELSE (ARRAY['e' || chr(769), 'é', 'E'])[1 + (g / 10) % 3] || g END AS s FROM generate_series(1, 3000) g) AS x;" +
   // THE SAME VALUES MANY TIMES (issue 666, the second round: the key once a DISTINCT value): 4,000 rows, nine in ten one
   // value, one in fifty NULL, the rest a pool of case, accents, punctuation, spaces, control characters and values glibc
-  // weighs alike (U+212A beside k and K, an accent spelled by its mark beside its letter), each many times
+  // weighs alike (U+212A beside k and K, an accent spelled by its mark beside its letter, Ø and Ł beside o and l, a mark
+  // with a weight of its own, U+0363), each many times
   `CREATE TABLE public.coll_rep (id int PRIMARY KEY, s text, v varchar(20), n int); INSERT INTO public.coll_rep SELECT g, s, left(s, 20), g % 7 FROM (SELECT g, CASE ` +
   "WHEN g % 50 < 45 THEN 'completed' WHEN g % 50 = 45 THEN NULL ELSE (ARRAY['Completed', 'COMPLETED', 'complete', 'completed ', 'completed-', 'co-mpleted', " +
   "'Pending', 'pending', 'on-hold', 'on hold', 'onhold', 'refunded', 'Refunded', 'réfunded', 'é', 'e', 'E', 'e' || chr(769), 'k', 'K', chr(8490), " +
-  "'ab' || chr(2) || 'c', 'abc', '', '  ', '$5', '5', '-5', 'zz', 'Z z'])[1 + (g / 50) % 30] END AS s FROM generate_series(1, 4000) g) AS x;" +
+  "'ab' || chr(2) || 'c', 'abc', '', '  ', '$5', '5', '-5', 'zz', 'Z z', 'Øster', 'oster', 'Łódź', 'lodz', 'Ölbaum', 'olbaum', 'ŀl', 'l·l', " +
+  "'ª', '²', 'É' || chr(865) || 'x', 'e' || chr(867) || 'x'])[1 + (g / 50) % 42] END AS s FROM generate_series(1, 4000) g) AS x;" +
   // ENUMS IN THEIR DECLARED ORDER (the BI-tools test of #517): a label with a quote, an enum of another schema, an
   // array of one, NULL and empty arrays, and a text column read as the enum
   "CREATE TYPE public.mood AS ENUM ('sad', 'ok', 'happy', 'it''s'); CREATE SCHEMA IF NOT EXISTS other; CREATE TYPE other.level AS ENUM ('low', 'high'); " +
@@ -1319,6 +1321,9 @@ function* matrix(): Generator<Matrixed> {
     ["min and max", "SELECT min(s), max(s) FROM coll_rep"],
     ["min and max beside a count", "SELECT count(*), min(s), max(v), min(v), max(s) FROM coll_rep WHERE n <> 2"],
     ["min and max of the values weighed alike", "SELECT min(s), max(s) FROM coll_rep WHERE s IN ('k', 'K', chr(8490), 'é', 'e' || chr(769))"],
+    ["letters of Latin beside their ASCII", "SELECT id, s FROM coll_rep WHERE left(s, 1) IN ('Ø', 'o', 'Ł', 'l', 'Ö', 'ŀ', 'ª', 'a', '²', '2', 'É', 'e') ORDER BY s, id LIMIT 40"],
+    ["letters of Latin beside their ASCII, descending", "SELECT id, s FROM coll_rep WHERE left(s, 1) IN ('Ø', 'o', 'Ł', 'l', 'Ö', 'ŀ', 'ª', 'a', '²', '2', 'É', 'e') ORDER BY s DESC, id LIMIT 40"],
+    ["min and max of letters of Latin", "SELECT min(s), max(s) FROM coll_rep WHERE left(s, 1) IN ('Ø', 'o', 'Ł', 'l', 'Ö', 'ŀ', 'ª', 'a', '²', '2', 'É', 'e')"],
     ["min and max, no row", "SELECT min(s), max(s) FROM coll_rep WHERE n > 7"],
     ["bytes (as written)", `SELECT id, s FROM coll_rep ORDER BY s COLLATE "C", id LIMIT 10`],
     ["min and max in bytes (as written)", `SELECT min(s COLLATE "C"), max(s COLLATE "C") FROM coll_rep`],

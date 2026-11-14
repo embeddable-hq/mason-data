@@ -93,6 +93,12 @@ export async function holdBounds(o: LibcOrder, strings: readonly string[]): Prom
   return { failures: failures.slice(0, 20), ruledOut: top === null ? 0 : bounds.filter(([lo]) => lo > top).length };
 }
 
+/** letters of Latin a run may fold (src/duck/libc-bound.ts `folds`), beside what it must not: a letter `strip_accents`
+ *  takes to ASCII (É, İ), one a `replace` writes (Ø, ł, ŀ, ª, ²), marks it drops (U+0301, U+0306) and one of a weight
+ *  of its own (U+0363), letters of two weights (Ǣ, ß) or none of ASCII's (ð, ı), and words of them beside their ASCII */
+export const LATIN_PIECES: readonly string[] = ["É", "é", "é", "Ĕ", "Ø", "ø", "o", "Ł", "ł", "ŀ", "Ö", "ö", "İ", "ı", "ª", "²", "́", "̆",
+  "ͣ", "Ǣ", "ǣ", "ð", "Đ", "Ħ", "ſ", "ß", "Ǿ", "ḯ", "Ỳ", "Øster", "oster", "Łódź", "lodz", "Émile", "emile", "eͣx", "ŀl", "l·l"];
+
 /** random strings of `pool`'s pieces (each a character or a few), 0 to `most` of them, by a generator of its own */
 export function randomStrings(pool: readonly string[], n: number, most: number, seed: number): string[] {
   const next = (k: number): number => {
