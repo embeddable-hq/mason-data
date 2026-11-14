@@ -2,6 +2,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **A failed sync event now says its code and where it happened.** `mason logs --events --json` and `/api/events` give
+  each failure a `code` and an `origin`. The code is the error's SQLSTATE when your database failed it, the system's
+  error when the network or the disk did (`ECONNREFUSED`, `ENOSPC`), or the error's class (`conversion_error`). It is
+  `unknown` when none of these is known. The origin is a file and a line in Mason's code, such as
+  `src/duck/sync.ts:3637`. Group failures by the code, and give the origin when you report one. Good news has neither.
+  The Sync events page shows both under a failure's message.
+- **A query that failed inside Mason now says where.** A request-log row answered `XX000` has an `origin` in
+  `mason logs --requests --json` and `/api/requests`. Every other row has none.
+- Both are new keys. Events and requests recorded before you upgrade are kept, and read with both null.
 - **Metabase's preview of a join to a table with JSON fields is faster.** When you join a table in Metabase's query
   builder and show fields it unfolds from a JSON column, the preview is a `LIMIT 2000` with no sort. Mason now gathers
   the rows the preview shows before it reads those fields, so it reads them in a few large batches. Over a 3 M-row
@@ -18,6 +27,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `format`, `||`, `array_agg`, a row's text, and a `UNION` without `ALL`. A fix for those is planned.
   - **Before upgrading:** each synced table with such a column is synced again once, at the first start. It serves
     its old data until then. A large table takes as long as its first sync did.
+- **A table's columns dialog on the web page now names the choice its row names.** On the Tables page, a table that
+  leaves out columns which look like secrets says "All but 7 columns". Its columns dialog said "All columns, … but
+  password, …", so it read like a different choice. Now the dialog's choice starts with the same words, "All but 7
+  columns", and names the columns left out.
 - **A polled table no longer costs an extra connection to your database now and then.** On some machines, Mason's
   timer for the next poll woke a moment early. Mason then connected to your database, found no table due yet, and
   connected again a moment later to poll it. Now every timer waits until its time has come.

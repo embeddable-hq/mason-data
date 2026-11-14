@@ -204,6 +204,15 @@ const errorOf = (e: WireError): Error => {
   return err;
 };
 
+/** A FAILURE MADE AGAIN FROM THE WORKER'S ANSWER, GIVEN ITS CALLER'S FRAMES (issue 924): its own stack is this thread's
+ *  message handler (`errorOf`), which says nothing of where the request was made, so a failure's origin
+ *  (src/lib/failure-facts.ts `originOf`) read Mason's executor for every engine error. Its first line is its own. */
+function withSite(err: Error, site: { stack?: string }): Error {
+  const frames = site.stack === undefined ? -1 : site.stack.indexOf("\n");
+  if (frames >= 0) err.stack = `${err.name}: ${err.message}${site.stack!.slice(frames)}`;
+  return err;
+}
+
 /** a value a statement may be given across threads: plain, never a DuckDB value object (its class would be lost) */
 function plainValues(values: readonly unknown[] | undefined): unknown[] | undefined {
   if (values === undefined) return undefined;
@@ -266,7 +275,8 @@ export const CLOSE_GRACE_MS = 5_000;
 export class Executor {
   private readonly worker: Worker;
   private readonly log: (line: string) => void;
-  private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  /** each request in flight; `site`, the caller's frames, which its failure carries (`withSite`) */
+  private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; site: { stack?: string } }>();
   private nextId = 1;
   /** why the worker is gone, once it is */
   private gone: string | null = null;
@@ -311,7 +321,7 @@ export class Executor {
       const p = this.pending.get(m.id);
       if (p === undefined) return;
       this.settle(m.id);
-      if (m.ok) p.resolve(m.value); else p.reject(errorOf(m.error));
+      if (m.ok) p.resolve(m.value); else p.reject(withSite(errorOf(m.error), p.site));
     });
     let why: string | null = null;
     this.worker.on("error", (e) => {
@@ -409,9 +419,13 @@ export class Executor {
   call<T>(m: Record<string, unknown>, transfer: TransferListItem[] = []): Promise<T> {
     if (this.gone !== null) return Promise.reject(new ExecutorGone(this.gone, this.closing));
     const id = this.nextId++;
+    // the caller's frames, taken now: a failure made again from the worker's answer has none of its own (`withSite`).
+    // Captured, not formatted: formatting is paid only by a failure that reads them
+    const site: { stack?: string } = {};
+    Error.captureStackTrace(site, this.call);
     return new Promise<T>((resolve, reject) => {
       if (this.pending.size === 0) this.worker.ref();
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, site });
       this.worker.postMessage({ ...m, id }, transfer);
     });
   }

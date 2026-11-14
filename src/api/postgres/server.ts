@@ -82,6 +82,7 @@ import { attributeSetting, bindFilter, filterProbe, filterTypes, missingAttribut
 import { EncodeError, OID, fieldOf } from "./encode.ts";
 import { numericFromBinary, NumericError } from "../../lib/pg-numeric.ts";
 import { instantText, nowMicros } from "../../lib/instant.ts";
+import { originOf } from "../../lib/failure-facts.ts";
 import { parseSql, PostgresSyntaxError, stopParser } from "./parser.ts";
 import {
   FrontendDecoder, ProtocolError, authenticationCleartextPassword, authenticationOk, backendKeyData, bindComplete,
@@ -493,12 +494,22 @@ class PgError extends Error {
   readonly status: number;
   /** the registry entry that refused it (StatementError.gap): the request log's `gap` */
   readonly gap: GapId | null;
+  /** the error it was made from (`asPgError`), whose frames say where it failed: the request log's `origin` of an
+   *  XX000 (issue 924); undefined for one raised as itself, whose own frames say it */
+  from: unknown;
   constructor(fields: Omit<ErrorFields, "severity"> & { severity?: string }, status = 400, gap: GapId | null = null) {
     super(fields.message);
     this.fields = { severity: "ERROR", ...fields };
     this.status = status;
     this.gap = gap;
   }
+}
+
+/** Where an internal error (XX000) failed, for its request-log row: the first Mason frame of the error it was made
+ *  from, else of its own (src/lib/failure-facts.ts); none for any other SQLSTATE. */
+function originOfAnswer(e: PgError): string | undefined {
+  if (e.fields.code !== "XX000") return undefined;
+  return originOf(e.from) ?? originOf(e) ?? undefined;
 }
 
 /** The SQLSTATE an ApiError's status is told as (a refused login's, src/duck/users.ts). */
@@ -532,6 +543,12 @@ export function refusalLine(session: number, f: Omit<ErrorFields, "severity">, s
 
 function asPgError(err: unknown, sql: string): PgError {
   if (err instanceof PgError) return err;
+  const e = pgErrorFrom(err, sql);
+  e.from = err;
+  return e;
+}
+
+function pgErrorFrom(err: unknown, sql: string): PgError {
   if (err instanceof StatementError) return new PgError({ ...err.fields, position: err.fields.position ?? undefined }, err.fields.code.startsWith("XX") ? 500 : 400, err.gap);
   if (err instanceof Unsupported) {
     return new PgError({ code: err.sqlstate, message: err.message, position: positionOf(sql, err.offset), hint: err.hint, detail: "Mason answers the Postgres subset in docs/POSTGRES-API.md" }, 400, err.gap);
@@ -1574,6 +1591,7 @@ class Session {
     const role = this.roleName();
     const durationMs = Date.now() - startedAt;
     const plan = this.slowPlan(answer, asked?.ran, durationMs);
+    const origin = answer instanceof PgError ? originOfAnswer(answer) : undefined;
     this.server.options.record({
       requestId: crypto.randomUUID(), at: new Date(startedAt), method: asked?.method ?? "QUERY", durationMs,
       client: `postgres:${this.vars.applicationName || "unnamed"}`, session: this.id, payload: stored.text, payloadTruncated: stored.truncated,
@@ -1586,7 +1604,7 @@ class Session {
       ...(answer instanceof PgError
         ? { status: answer.status, sqlstate: answer.fields.code, error: answer.fields.message,
             ...(answer.fields.detail ? { detail: answer.fields.detail } : {}), ...(answer.fields.hint ? { hint: answer.fields.hint } : {}),
-            ...(answer.gap !== null ? { gap: answer.gap } : {}) }
+            ...(answer.gap !== null ? { gap: answer.gap } : {}), ...(origin !== undefined ? { origin } : {}) }
         : { status: 200, rows: answer.rows }),
       ...(plan !== undefined ? { plan } : {}),
     });
