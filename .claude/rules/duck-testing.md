@@ -12,22 +12,20 @@ paths:
 
 - **The oracle is the arbiter** (`tests/integration/duck-oracle.itest.ts`, `IT_ORACLE_ONLY=<regex>` for a subset): every
   statement asked of a real Postgres and of the endpoint, after the copy and after two rounds of changes, and again in
-  six shapes (`oracle/shapes.ts`); names, OIDs, text, order and SQLSTATEs must be equal. A column both sides send as
-  `numeric` (OID 1700) is judged by the owner's rule, not by its text (`numericWithinRule`, `oracle/compare.ts`,
-  computed exactly by `src/lib/pg-numeric.ts`): its whole-number digits are Postgres's, and the two are equal rounded
-  to 15 significant digits, a carry from that rounding included. A difference within the rule is no difference and needs
-  no `KNOWN` entry. One outside it is a wrong value. Unordered rows are paired by the rule too, so `2.5` meets `2.50`.
-  A numeric inside a JSON, an array or a row's text is a string to the client, and is held as one. A fix for a class adds a
+  six shapes (`oracle/shapes.ts`); names, OIDs, text, order and SQLSTATEs must be equal (a numeric by the rule below). A fix for a class adds a
   statement to it (`postgres-cases.ts`, `oracle/bi-shapes.ts`, `oracle/type-matrix.ts`, `oracle/gap-cases.ts`). The
   sessions are in UTC; a type-matrix statement with a `zone` is asked with both sessions' TimeZone set to it (a time
   computed in the session's zone must be held in a zone with daylight saving, not UTC alone). Run it against a Linux
   Postgres (CI's `postgres:18` image): a macOS cluster's libc collation is not glibc's, and its `coll` statements differ.
-- **A numeric whose whole-number digits are Postgres's, and which equals Postgres's when both are rounded to 15
-  significant digits, is right. Its difference is decided, not failed.** The oracle still compares a numeric's text. A
-  difference only in trailing zeros, or only past the 15th significant digit with every whole-number digit the same
-  (values merged or matched there included), goes in `KNOWN` under its `differs` entry in `src/duck/gaps.ts`. A
-  whole-number digit changed only by that rounding's carry (0.99999999999999999 rounds to 1) is within the rule.
-  Anything else is a wrong answer, unless a gap names it. Why: the owner set this bar on 2026-11-14 (docs/DESIGN.md "When a numeric is right").
+- **The oracle judges a numeric by the owner's rule, not by its text** (`numericWithinRule`, `oracle/compare.ts`,
+  computed exactly by `src/lib/pg-numeric.ts`, never a double). A column both sides send as `numeric` (OID 1700) is
+  right when its whole-number digits are Postgres's and the two are equal when both are rounded to 15 significant
+  digits. A whole-number digit changed only by that rounding's carry (0.99999999999999999 rounds to 1) is within the
+  rule. A difference within it is no difference, and needs no `KNOWN` entry. One outside it is a wrong value, unless a
+  gap names it. Unordered rows are paired by the rule too, so `2.5` meets `2.50`. A numeric read as text (`x::text`, a
+  JSON, an array, a row's text) is a string to the client, and is held as one: its difference goes in `KNOWN` under its
+  `differs` entry. Why: the owner set this bar on 2026-11-14 (docs/DESIGN.md "When a numeric is right"), and the oracle
+  holds it since issue 997.
 - **It needs a disposable Postgres, `IT_POSTGRES_URL`** (a database of its own is created and dropped; `duck-stream` needs
   `wal_level=logical`, the oracle and `duck-poll` any; `tests/integration/README.md`), never a shared deployment's source.
 - **The recorded corpus is answered whole offline** (`tests/duck-corpus.test.ts`: every statement psql, pgjdbc,

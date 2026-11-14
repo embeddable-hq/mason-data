@@ -778,7 +778,7 @@ So trailing zeros may differ: "2.5 vs 2.50 … that's a rendering difference, no
 15th significant digit may differ too, as long as no whole-number digit does. A whole-number digit that changes only
 because that rounding carries (0.99999999999999999 rounds to 1) is within the rule. Values that differ only there may compare
 equal in Mason, and be merged by a UNION or a DISTINCT, or matched by an IN or a join, where Postgres keeps them apart.
-Such a difference is a `differs` entry in `src/duck/gaps.ts`, and the oracle's `KNOWN` decides it. It never blocks a
+Such a difference is a `differs` entry in `src/duck/gaps.ts`, so a user can read it. It never blocks a
 merge. Anything outside the rule is a wrong answer, which blocks, or is listed by name in `src/duck/gaps.ts`.
 
 **Why.** The engine holds a numeric as a DECIMAL of at most 38 digits, and Postgres's numeric has no such limit. Two
@@ -810,7 +810,12 @@ Where they are within the rule:
   stddev of 1000000.000000001, 1000000.000000002 and 1000000.000000004 is wrong in its second digit. `float-last-digit` is
 about float8, not numeric, and differs only in the 16th–17th digit.
 
-The oracle still compares a numeric's text, so each such difference is seen, and listed, never silently passed.
+**The oracle judges by the rule (issue 997).** At first the oracle still compared a numeric's text, so each such
+difference needed a hand-written `KNOWN` entry. Now a column both sides send as `numeric` is compared by the rule,
+exactly, with `src/lib/pg-numeric.ts` (`numericWithinRule`, tests/integration/oracle/compare.ts). A difference within it
+is none, and one outside it is a wrong value. The carry is read narrowly: only a value rounded at a decimal (fewer than
+15 whole-number digits) may carry into a whole-number digit, so a 17-digit id never passes by rounding. A numeric read
+as text (`x::text`, a JSON, an array) is a string to the client, and its difference is still a listed decision.
 
 ### How CLAUDE.md is laid out (2026-11-13, issue 891)
 
