@@ -150,14 +150,30 @@ paths:
     N over every joined row, 19.8–46.6 s for a 100-row preview of a 25 k × 153 M-row LEFT JOIN, and its exact cheaper
     form (the preserved side limited first) still reads the big table's whole join column. OFFSET alone and LIMIT ALL
     stay as they were, and `afterLimit` still needs a sort. The plan fixture and `tests/duck-wire.test.ts` hold the
-    form, `oracle/unordered-limit.ts` the rows. **A sort whose every key and WHERE read the side an outer join
+    form, `oracle/unordered-limit.ts` the rows. **With no sort, a plain side whose computed column the list reads is
+    fetched for the kept rows gathered** (`readsComputed`, issue 463: the fetch's scan of the side's whole table handed
+    Metabase's JSON fields the kept rows a vector at a time, a row or two in each, a call of every Mason function a
+    vector, 4,420 calls and ~5 s for 2,000 rows of 3 M): its fetch adds `WHERE t.rowid IN (SELECT
+    __mason_r<i> FROM __mason_late)`, and the kept rows become a WITH query `AS MATERIALIZED`, since an unordered
+    LIMIT read twice may keep other rows. The same rows under every join kind: a row of t no kept row names matched
+    nothing. A sorted statement, a side of plain columns only, and a carried side stay as they were. The plan fixture's
+    "JSON-unfolded derived side" entries, `tests/duck-wire.test.ts` "issue 463" and the oracle's
+    `JSON-unfolded derived side` hold it. **A sort whose every key and WHERE read the side an outer join
     preserves limits that side first** (`preservedFirst`, issue 824 part 2): its first OFFSET + LIMIT rows by the same
     keys (each yields at least one joined row, each key is its row's), then the join, sort and limit as written. Never
     through an INNER, FULL or comma join, a WHERE or key of another side or a merged column, a volatile key or WHERE, a
     DISTINCT ON, a LATERAL item or a LIMIT that is a parameter; a schema-qualified column of the item is read by its
     name inside (`shortened`). It still reads the other side's whole join column (about 20 s cold at 153 M rows): an
     index or clustering is the owner's to decide. `tests/duck-wire.test.ts` "the preserved side of an outer join …",
-    the oracle's `preserved first:` and the plan fixture hold it ("A top N over joined tables");
+    the oracle's `preserved first:` and the plan fixture hold it ("A top N over joined tables"). **With no sort, the
+    preserved table is limited first only where it holds at least as many rows as every other FROM item**
+    (`biggestPreserved`, issue 463: Metabase's 20-row preview built a hash table of the smaller side's whole join
+    column): then the engine hashed each other item's whole join column before, and limited first it reads it at most
+    once. The rows are the sync's count of each copy (`LateContext.rows`, from `CopyState.rows` in src/duck/plan.ts),
+    so a table it does not know, a derived item of anything but one table, a walled read, a WHERE, a preserved item
+    that is no table, and issue 824's small preserved table beside a big one stay as they were. A statement's plan is
+    kept by its text, so a size read once decides until the plan is made again. `tests/duck-wire.test.ts` "the 20-row
+    preview", the plan fixture's "limited first" entries and the oracle's `preserved and biggest:` hold it;
   - **a grouped top N on a whole primary key reads its table's columns after the LIMIT** (`keyFirst`, src/duck/late.ts,
     issue 134, step 6): where the analysis proves a table's WHOLE primary key grouped (`keyGrouped`, pg_index's primary
     key only), the groups are formed as written with `any_value(t.rowid)`, the HAVING, ORDER BY and LIMIT applied, and

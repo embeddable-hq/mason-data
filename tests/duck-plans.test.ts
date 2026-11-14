@@ -159,6 +159,18 @@ const REWRITTEN: Shape[] = [
   { name: "a top N over a WITH query of joins, sorted", sql: "WITH j AS (SELECT o.id, o.meta, c.created_at FROM orders o JOIN customers c ON c.id = o.customer_id) SELECT * FROM j ORDER BY created_at DESC LIMIT 100" },
   { name: "a top N beside a plain derived side, sorted", sql: "SELECT c.id, o.meta, o.notes FROM customers c LEFT JOIN (SELECT id, customer_id, meta, notes FROM orders WHERE amount > 1) o ON o.customer_id = c.id ORDER BY c.created_at DESC LIMIT 100" },
   { name: "a LIMIT with no ORDER BY beside a plain derived side on its key: no sort", sql: "SELECT o.meta, d.name FROM orders o JOIN (SELECT id, name FROM customers) d ON d.id = o.customer_id LIMIT 100" },
+  // issue 463: Metabase's preview of a join to a table whose JSON fields it unfolds, its paths bound: the derived side's
+  // list (the JSON reads, the functions) computed over the kept rows' derived rows alone, gathered by a SEMI join to
+  // their row numbers (a WITH query read twice, materialized) into full vectors, never above a scan of every order that
+  // hands each vector it meets to the functions with a row or two in it (4,420 calls against 20 for a 2,000-row preview
+  // over 3 M rows, ~5 s against ~0.6 s); the paths written alike
+  { name: "a LIMIT with no ORDER BY over a LEFT join to a JSON-unfolded derived side, the paths bound (Metabase's preview)", sql: 'SELECT "public"."customers"."id" AS "id", "public"."customers"."name" AS "name", "Orders"."id" AS "Orders__id", "Orders"."meta → status" AS "Orders__meta → status", "Orders"."meta → n" AS "Orders__meta → n" FROM "public"."customers" LEFT JOIN (SELECT "public"."orders"."id" AS "id", "public"."orders"."customer_id" AS "customer_id", ("public"."orders"."meta" #>> array[$1]::text[])::text AS "meta → status", ("public"."orders"."meta" #>> array[$2]::text[])::numeric AS "meta → n" FROM "public"."orders") AS "Orders" ON "public"."customers"."id" = "Orders"."customer_id" LIMIT 2000', values: ["status", "n"] },
+  { name: "a LIMIT with no ORDER BY over a LEFT join to a JSON-unfolded derived side, the paths written", sql: "SELECT c.id, c.name, o.status, o.n FROM customers c LEFT JOIN (SELECT id, customer_id, (meta #>> array['status']::text[])::text AS status, (meta #>> array['n']::text[])::numeric AS n FROM orders) o ON c.id = o.customer_id LIMIT 20" },
+  // issue 463, the 20-row preview: with no ORDER BY the preserved table limited first where it holds at least as many
+  // rows as every other FROM item (the sync's counts, SHOP_COPIES), so no hash table of the other side's whole join
+  // column is built; a small table preserved beside a big one (issue 824's case, above) stays as it was
+  { name: "a LIMIT with no ORDER BY over a LEFT join, the preserved table the biggest: limited first", sql: "SELECT o.id, o.status, c.name FROM orders o LEFT JOIN customers c ON c.id = o.customer_id LIMIT 20" },
+  { name: "a LIMIT with no ORDER BY over a LEFT join to a JSON-unfolded derived side of its size: limited first", sql: 'SELECT "public"."orders"."id" AS "id", "D"."meta → status" AS "D__meta → status" FROM "public"."orders" LEFT JOIN (SELECT "public"."orders"."id" AS "id", ("public"."orders"."meta" #>> array[$1]::text[])::text AS "meta → status" FROM "public"."orders") AS "D" ON "public"."orders"."id" = "D"."id" LIMIT 20', values: ["status"] },
   { name: "a top N beside a WITH query", sql: "WITH c AS (SELECT id, name FROM customers WHERE tenant_id = 'acme') SELECT o.meta, c.name FROM orders o JOIN c ON c.id = o.customer_id ORDER BY o.id DESC LIMIT 100" },
   { name: "a top N beside an aggregated side, carried", sql: "SELECT o.id, o.meta, s.n FROM orders o JOIN (SELECT customer_id, count(*) AS n FROM order_items i JOIN orders x ON x.id = i.order_id GROUP BY customer_id) s ON s.customer_id = o.customer_id ORDER BY o.id DESC LIMIT 100" },
   // merged columns and computed keys (issue 134, step 3): a USING and a NATURAL of the wide table by row number, read through
@@ -552,6 +564,10 @@ async function shopStore(name: string, logged: string[], ddl: readonly string[] 
   for (const s of ddl) await store.writer.run(s);
   return store;
 }
+/** the shop's copies as the sync counts them (`Sync.state`): what a plan reads of each table's size (src/duck/late.ts
+ *  `LateContext.rows`) */
+const SHOP_COPIES: CopyState[] = ([["tenants", 3], ["customers", 20_000], ["orders", ORDERS], ["order_items", 300_000], ["products", 12], ["categories", 7], ["order_tags", 300_000]] as const)
+  .map(([name, rows]) => ({ source: `public.${name}`, phase: "copied", rows, bytes: null, seconds: null, copiedAt: null, error: null }));
 /** the listener over `store` under a collation (`duck`), and a client of it */
 async function listen(store: DuckStore, logged: string[], duck: Awaited<ReturnType<DuckStore["listener"]>>): Promise<Target> {
   const api = await startPostgresApi({
@@ -651,7 +667,7 @@ function target(on: Where | undefined): Promise<Target> {
 before(async () => {
   const logged: string[] = [];
   const store = await shopStore("duck", logged);
-  shop = await listen(store, logged, await store.listener(undefined, undefined, undefined, synced));
+  shop = await listen(store, logged, await store.listener(undefined, undefined, undefined, () => SHOP_COPIES));
 });
 after(async () => {
   await Promise.allSettled([...made.values(), ...smaller.values()]);

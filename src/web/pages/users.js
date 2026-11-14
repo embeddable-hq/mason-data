@@ -420,8 +420,8 @@ export const ROLES_DOCS_URL = "https://github.com/embeddable-hq/mason-data#acces
 
 /** The add form's line on roles, its last row (app.css): the page cannot write a role, so it names the file, and links
  *  to the README's section that shows how. */
-export const ROLES_LINE = `<p class="dim roles-line">Roles limit a user to some tables and columns. ` +
-  `You write them in ${code("mason/roles.yml")}, and <a href="${ROLES_DOCS_URL}" rel="noreferrer">the README</a> shows how.</p>`;
+export const ROLES_LINE = `<p class="dim roles-line">Roles can limit a user to some tables, columns and rows. ` +
+  `Configure them via ${code("mason/roles.yml")}. <a href="${ROLES_DOCS_URL}" rel="noreferrer">The README</a> describes how.</p>`;
 
 /** The add form's Role choice from `/api/state` `roles`: "" with no roles file, one naming none, or one that cannot be
  *  read now (the roles it names are not known then) */

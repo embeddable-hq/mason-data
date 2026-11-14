@@ -33,6 +33,17 @@ const JSON_OID = 114, JSONB_OID = 3802;
 /** pg_catalog.pg_typeof(any): its argument's type named by the catalog (src/duck/rewrite.ts) */
 const PG_TYPEOF = 1619;
 
+/** a copied table's rows as the sync counted them, by its schema as written or else the first schema of the search_path
+ *  that holds a copy of its name (src/duck/late.ts `LateContext.rows`); null where no copy says */
+function copiedRows(copies: readonly CopyState[], schemas: readonly string[]): (schema: string | null, name: string) => number | null {
+  const of = (source: string): number | null => { const c = copies.find((x) => x.source === source); return c === undefined || c.phase !== "copied" ? null : c.rows; };
+  return (schema, name) => {
+    if (schema !== null) return of(`${schema}.${name}`);
+    const found = schemas.find((s) => copies.some((c) => c.source === `${s}.${name}`));
+    return found === undefined ? null : of(`${found}.${name}`);
+  };
+}
+
 /** what the rewrite asks of the stored JSON paths (src/duck/kept-route.ts KeptLookup): the copied table and column of
  *  each json or jsonb column the statement reads from a table (Typed.relation), by the catalog's OIDs; null when it
  *  reads none */
@@ -587,7 +598,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // (a role's walled read it fetches through itself is one more wall: counted, so `wallStatistics` still walls every one)
   const lateWall = walls !== null ? { alias: walls.alias, added: 0 } : null;
   tree = await selectListAfterLimit(tree as Record<string, unknown>, analysis.tree, () => joinKeys(catalog, analysis.tree),
-    { volatile: (functions) => volatileFunctions(catalog, functions), wall: lateWall }) ?? tree;
+    { volatile: (functions) => volatileFunctions(catalog, functions), wall: lateWall, rows: copiedRows(copies(), searchSchemas(searchPath)) }) ?? tree;
   // a top N and a min or max under a libc order keyed for their candidates alone (src/duck/libc-bound.ts): after the
   // late select list, whose inner query holds the sort and the limit; a walled read it reads again is one more wall
   tree = await libcBounded(tree as Record<string, unknown>, analysis.tree, { order: (collate) => resolver.libcOrder(collate),

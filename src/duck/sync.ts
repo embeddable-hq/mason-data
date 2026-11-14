@@ -77,7 +77,8 @@ import { addCounts, countsText, duckValue, fold, foldInto, noChanges, noCounts, 
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { numericWiderThan } from "../lib/pg-numeric.ts";
 import { gapLine, namedPublicationVerdict, readNamedPublication } from "./publication.ts";
-import type { SyncEventInput } from "./events.ts";
+import { isFailure, type SyncEventInput } from "./events.ts";
+import { originHere } from "../lib/failure-facts.ts";
 import { COMPACT_DISK_MARGIN_BYTES, COMPACT_MIN_WASTE_BLOCKS, COMPACT_WASTE_SHARE, CompactNoRoom, CompactTooLarge, dropLeftovers, pieceRows, readShape, rewrite, sideOf, spilled, swapSql, unspilled, wasteOf, type TableShape, type Waste } from "./compact.ts";
 import { extensionFailure, loadPostgresSql } from "./extensions.ts";
 import { errorCode, errorText, maskPasswordKeyword, messageOf } from "../lib/secret-mask.ts";
@@ -1299,6 +1300,8 @@ export class Sync {
   /** an event of the sync, to its record (src/duck/events.ts), which never throws into the sync; a sink that does is
    *  said, and the sync goes on (its state and its log line hold what happened) */
   private event(e: SyncEventInput): void {
+    // a failure that caught no error (a gap the sync found itself) has its origin where it is said (issue 924)
+    if (isFailure(e.kind) && e.cause === undefined && e.origin === undefined) e = { ...e, origin: originHere(this.event) };
     try { this.onEvent(e); }
     catch (x) { this.log(`the sync's event (${e.kind}${e.table ? ` ${e.table}` : ""}) could not be recorded: ${this.errorText(x)}`); }
   }
@@ -1570,7 +1573,7 @@ export class Sync {
       const why = e instanceof CompactTooLarge ? `${e.message} in ${humanBytes(this.store.memoryLimitBytes)} of memory (MASON_DUCKDB_MEMORY)` : e instanceof CompactNoRoom ? e.message : this.errorText(e);
       const m = `its compaction failed, and is tried again after ${clock(retryAt)} UTC (failure ${failures} in a row; its synced table serves as it was, and is kept current): ${why}`;
       this.log(`${source}: ${m}`);
-      this.event({ kind: "compact_failed", table: source, message: m });
+      this.event({ kind: "compact_failed", table: source, message: m, cause: e });
       this.compactions.set(source, { ...this.compactionOf(source), error: m, retryAt: new Date(retryAt).toISOString() });
     } finally {
       await this.onWriter(async () => {
@@ -2611,7 +2614,7 @@ export class Sync {
       this.log(`${m} (the stream starts again in ${wait / 1000} s, failure ${this.streamFailures} in a row; the synced tables serve as they are)`);
       // one event for the stream, never one per table it kept current (each table's error says it); its failures in a
       // row are left out of the words, so a stream failing for good is one event, not one per restart
-      this.event({ kind: "stream_failed", table: null, message: `${m} (the stream starts again by itself; the synced tables serve as they are)` });
+      this.event({ kind: "stream_failed", table: null, message: `${m} (the stream starts again by itself; the synced tables serve as they are)`, cause: e });
       this.wholeFailure.stream = m;
       // on the tables the stream kept current when it failed (one being caught up says its own)
       await this.onWriter(async () => { for (const source of this.streamed.keys()) if (!this.held.has(source)) await this.record({ ...this.states.get(source)!, error: m }); });
@@ -3233,7 +3236,7 @@ export class Sync {
         const names = this.replicatedTables().map((t) => t.source);
         const m = `replication: ${said}${/sync: poll/.test(messageOf(e)) ? "" : ` — ${names.join(", ")} ${names.length === 1 ? "is" : "are"} NOT kept current until it is fixed: ` +
           `give ${names.length === 1 ? "its entry" : "their entries"} sync: poll <interval> (poll 5m) in the sources file to poll ${names.length === 1 ? "it" : "them"} instead`}`;
-        this.event({ kind: "stream_failed", table: null, message: m });
+        this.event({ kind: "stream_failed", table: null, message: m, cause: e });
         this.wholeFailure.prepare = m;
         // a table copied before keeps serving its copy; one never copied is failed, so mason status says why
         await this.onWriter(async () => {
@@ -3252,7 +3255,7 @@ export class Sync {
     try { await this.onWriter(() => this.attach()); }
     catch (e) {
       const m = this.errorText(e);
-      this.event({ kind: "source_unreachable", table: null, message: `could not attach the database: ${m}` });
+      this.event({ kind: "source_unreachable", table: null, message: `could not attach the database: ${m}`, cause: e });
       this.wholeFailure.attach = m;
       // a table copied before keeps serving its copy (and its place in the catalog): the source being away is its error,
       // not a reason to copy it whole again when the source is back; one never copied is failed
@@ -3319,7 +3322,7 @@ export class Sync {
         // tables are polled as ever
         const m = `the poll failed, and is tried again at the next one (the synced data serves as it was): ${this.errorText(e)}`;
         this.log(`${t.source}: ${m}`);
-        this.event({ kind: "poll_failed", table: t.source, message: m });
+        this.event({ kind: "poll_failed", table: t.source, message: m, cause: e });
         await this.onWriter(() => this.record({ ...this.states.get(t.source)!, error: m }));
       }
     }
@@ -3389,7 +3392,7 @@ export class Sync {
         // the next pass says the same of every table, and queues it again
         const m = `could not attach the database: ${this.errorText(e)}`;
         this.log(`${kind} of ${t.source} waits: ${m}`);
-        this.event({ kind: "source_unreachable", table: t.source, message: `its ${kind} waits: ${m}` });
+        this.event({ kind: "source_unreachable", table: t.source, message: `its ${kind} waits: ${m}`, cause: e });
         const st = this.states.get(t.source)!;
         await this.onWriter(() => this.record({ ...st, phase: st.phase === "copied" ? "copied" : "failed", error: m }));
         return null;
@@ -3436,7 +3439,7 @@ export class Sync {
       const when = this.backOff(t.source, Date.now() - started);
       const m = `${what} (the synced data serves as it was; it is caught up by one poll again after ${when}): ${this.errorText(e)}`;
       this.log(`${t.source}: ${m}`);
-      this.event({ kind: "catch_up_failed", table: t.source, message: m });
+      this.event({ kind: "catch_up_failed", table: t.source, message: m, cause: e });
       return this.onWriter(() => this.record({ ...this.states.get(t.source)!, error: m }));
     };
     // the catch-up's poll reads the columns the copy holds (`asCopied`)
@@ -3816,7 +3819,7 @@ export class Sync {
       const copiedAt = new Date().toISOString();
       await this.record({ source: t.source, phase: "copied", rows: p.rows, bytes: t.bytes, seconds, copiedAt, error: null }, t.columns, w);
       this.synced.set(t.source, { at: copiedAt, seconds, by: "copy" });
-      this.event({ kind: "copied", table: t.source, message: `synced: ${p.rows.toLocaleString("en-US")} row(s) in ${seconds.toFixed(2)} s` });
+      this.event({ kind: "full_sync", table: t.source, message: `synced: ${p.rows.toLocaleString("en-US")} row(s) in ${seconds.toFixed(2)} s` });
       this.copiedAs.set(t.source, columnsKey(t.columns));
       // in the catalog at once: a pass's other copies may take hours
       await this.rebuildSchema();
@@ -3849,7 +3852,7 @@ export class Sync {
       const when = `tried again after ${new Date(at).toISOString().slice(11, 16)} UTC (failure ${failures} in a row), or at once when Mason starts again or its columns or key change` +
         (where === null ? "" : `; it continues ${where}`);
       this.log(`sync of ${t.source} failed: ${m}; ${when}`);
-      this.event({ kind: "copy_failed", table: t.source, message: `${m}; ${when}` });
+      this.event({ kind: "full_sync_failed", table: t.source, message: `${m}; ${when}`, cause: e });
       // a table that was copied keeps serving its last copy; one never copied is failed
       await this.record({ ...this.states.get(t.source)!, phase: first ? "failed" : "copied", error: `${m} (${when})` }, undefined, w);
     }
@@ -4325,7 +4328,7 @@ export class Sync {
    *  that flow's alone while it writes it (a rebuild's table is not polled or streamed until caught up) */
   private async record(s: CopyState, columns?: readonly SourceColumnInfo[], c: DuckConnection = this.store.writer): Promise<void> {
     // A COPY CURRENT AGAIN after its poll, catch-up or stream failed (its error cleared by the flow that keeps it current,
-    // never by a copy of it: that is its own `copied` event) — the one place an error is cleared, so the one place said
+    // never by a copy of it: that is its own `full_sync` event) — the one place an error is cleared, so the one place said
     const was = this.states.get(s.source);
     if (was !== undefined && was.error !== null && s.error === null && was.phase === "copied" && s.phase === "copied" && was.copiedAt === s.copiedAt) {
       this.event({ kind: "recovered", table: s.source, message: `current again (it had failed: ${was.error.split("\n")[0]})` });

@@ -192,11 +192,13 @@ const tick = (name, c, on) => `<label class="tick"><input type="checkbox" name="
  * any added later, as `mason add <table>` with no `--columns` — or Only these columns, its boxes under it (app.css hides
  * them while All is chosen, so nothing is written while the person ticks) and sent as `--columns`. Boxes left empty
  * read as "nothing chosen", never as "every column": so every column is a choice of its own. `which`: "all" | "only";
- * `on`: the names of the boxes ticked; `leaves`: what every column leaves out (`everyColumnLeavesOut`), said at All.
+ * `on`: the names of the boxes ticked; `leaves`: the secret-looking columns All leaves out, said at All. With some left
+ * out, All starts with the words of the row's label (`allBut`, issue 960): "All but 2 columns".
  */
 function columnsField(legend, cols, which, on, leaves = []) {
-  const all = `All columns, and any added to the table later${leaves.length
-    ? `, but ${leaves.join(", ")}, which ${leaves.length === 1 ? "looks like a secret" : "look like secrets"}` : ""}`;
+  const all = leaves.length === 0 ? "All columns, and any added to the table later"
+    : `${allBut(leaves.length)}. Left out because ${leaves.length === 1 ? "it looks like a secret" : "they look like secrets"}: ${leaves.join(", ")}. ` +
+      "Columns added to the table later are synced too.";
   const radio = (value, words) => `<label><input type="radio" name="which" value="${value}"${which === value ? " checked" : ""}> <span>${esc(words)}</span></label>`;
   return `<fieldset><legend>${esc(legend)}</legend><div class="radios">${radio("all", all)}${radio("only", "Only these columns")}</div>` +
     `<div class="only-cols">${cols.map((c) => tick("columns", c, on.includes(c.name))).join("")}</div></fieldset>`;
@@ -249,9 +251,29 @@ export function columnsSummary(t) {
   const e = t.entry, all = t.columnCount, syncs = t.addedColumns;
   if (!t.added || !e || typeof all !== "number" || !Array.isArray(syncs)) return null;
   if (e.columns !== null) return { text: `${n(syncs.length)} of ${counted(all, "column")}`, title: `Synced: ${syncs.join(", ")}` };
-  const out = all - syncs.length;
-  if (out > 0) return { text: `All but ${counted(out, "column")}`, title: `Every column but ${e.exclude.filter((c) => !syncs.includes(c)).join(", ")}` };
+  const out = leftOut(t);
+  if (out.count > 0) return { text: allBut(out.count), title: out.names ? `Every column but ${out.names.join(", ")}` : `Its entry leaves out ${e.exclude.join(", ")}` };
   return { text: "All columns", title: "Every column, and any column added to the table later" };
+}
+
+/** The words an added table's row and its column form's All both start with when columns are left out (issue 960). */
+const allBut = (k) => `All but ${counted(k, "column")}`;
+
+/**
+ * THE COLUMNS AN ADDED TABLE LEAVES OUT while its entry syncs every column (no `columns:`): how many, and which. The one
+ * place its row's label (`columnsSummary`) and its column form's All (`columnsForm`) take them from, so the two cannot
+ * disagree (issue 960). The table has `columnCount` columns and syncs `addedColumns`, so `count` is the difference.
+ * `names` are its `exclude:` less what it syncs (a key column is synced whatever `exclude:` says) and less any name the
+ * table has no column of. Such a name is a mistake of the file (the run refuses the entry), and the lean state cannot
+ * tell which name it is: `columns`, the table's own (the column form's read), tells them apart; without them, `names`
+ * is null when the names are not as many as the columns left out. `{ count: 0, names: [] }` for an entry with `columns:`.
+ */
+export function leftOut(t, columns = null) {
+  const e = t.entry, syncs = t.addedColumns ?? [];
+  if (!e || e.columns !== null) return { count: 0, names: [] };
+  const names = e.exclude.filter((c) => !syncs.includes(c) && (columns === null || columns.includes(c)));
+  const count = typeof t.columnCount === "number" ? t.columnCount - syncs.length : names.length;
+  return { count, names: names.length === count ? names : null };
 }
 
 /**
@@ -261,13 +283,15 @@ export function columnsSummary(t) {
  * `exact: false`: its boxes are the columns synced now, and `said` is what the entry says — saving replaces it, which
  * the form says first.
  */
-export function columnsChoice(t) {
+export function columnsChoice(t, columns = null) {
   const e = t.entry, key = e.key ?? [];
   if (e.columns !== null) return { exact: true, columns: e.columns, key };
   const leaves = t.everyColumnLeavesOut ?? [];
   if (sameSet(e.exclude, leaves)) return { exact: true, columns: [], key };
+  // what it syncs, from the one count of what it leaves out (`leftOut`): never a name the table has no column of
+  const out = leftOut(t, columns).names ?? e.exclude, kept = leaves.filter((c) => !e.exclude.includes(c));
   return { exact: false, columns: t.addedColumns ?? [], key,
-    said: e.exclude.length ? `every column but ${e.exclude.join(", ")}` : `every column, ${leaves.join(", ")} included` };
+    said: out.length ? `every column but ${out.join(", ")}` : kept.length ? `every column, ${kept.join(", ")} included` : "every column" };
 }
 
 /**
@@ -304,13 +328,16 @@ export function columnsForm(t, cols, ticked = null, saving = false) {
   const cancel = button("Cancel", { cancelChoose: "", popClose: "" }, "small");
   if (cols?.table !== t.table) return `<p class="dim">Reading ${esc(name)}'s columns…</p>${cancel}`;
   if ("failure" in cols) return `${renderFailure(cols.failure)}${cancel}`;
-  const c = columnsChoice(t);
-  const leaves = t.everyColumnLeavesOut ?? [];
+  const names = cols.columns.map((x) => x.name);
+  const c = columnsChoice(t, names);
   // every column (as its entry says it): All, its boxes every column but what All leaves out, so Only these starts
   // from what is synced now; a list, or an entry the boxes cannot show: Only these, the boxes as columnsChoice says
   const everyColumn = c.exact && c.columns.length === 0;
+  // what All leaves out: chosen, what the row's label counts (`leftOut`, so the two say the same number, issue 960);
+  // else what choosing it would leave out
+  const leaves = everyColumn ? leftOut(t, names).names ?? [] : t.everyColumnLeavesOut ?? [];
   const which = ticked?.which ?? (everyColumn ? "all" : "only");
-  const on = ticked ?? { columns: everyColumn ? cols.columns.map((x) => x.name).filter((x) => !leaves.includes(x)) : c.columns, key: c.key };
+  const on = ticked ?? { columns: everyColumn ? names.filter((x) => !leaves.includes(x)) : c.columns, key: c.key };
   const boxes = (field) => cols.columns.map((x) => tick(field, x, on[field].includes(x.name))).join("");
   return `<form class="pick" data-pick-form="${esc(t.table)}" autocomplete="off">` +
     (c.exact ? "" : `<p class="note replaces">Its entry in the sources file syncs ${esc(c.said)}, which these boxes cannot show: they show the columns synced now. Saving replaces the entry with the columns ticked.</p>`) +
