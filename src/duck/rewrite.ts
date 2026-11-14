@@ -713,6 +713,12 @@ class Rewriter {
     if (isNode(v) && this.writtenKeys.has(bodyOf(v))) this.writtenKeys.add(bodyOf(out as AstNode));
     if (isNode(v) && this.readPerGroup.has(bodyOf(v))) this.readPerGroup.add(bodyOf(out as AstNode));
     if (isNode(v) && this.nativeKeys.has(bodyOf(v))) this.nativeKeys.add(bodyOf(out as AstNode));
+    // (a GROUP BY key's column, whose plain numeric's text reads a group's scale: `plainNumericText`)
+    if (isNode(v) && this.groupedRefs.has(bodyOf(v))) this.groupedRefs.add(bodyOf(out as AstNode));
+    const listedIn = isNode(v) ? this.perGroup.get(bodyOf(v)) : undefined;
+    if (listedIn !== undefined) this.perGroup.set(bodyOf(out as AstNode), listedIn);
+    const rowScale = isNode(v) ? this.rowScales.get(bodyOf(v)) : undefined;
+    if (rowScale !== undefined) this.rowScales.set(bodyOf(out as AstNode), rowScale);
     // a node the rewrite typed itself stays typed (a picked operand of min / max, exactOf)
     const own = isNode(v) ? this.synthetic.get(bodyOf(v)) : undefined;
     if (own !== undefined) this.synthetic.set(bodyOf(out as AstNode), own);
@@ -985,7 +991,16 @@ class Rewriter {
     if (t === null || t.node !== "VAR" || !this.isRowType(t.type)) return null;
     const alias = String(bodyOf(fields[0]!).sval);
     const table = this.rowTypes.get(t.type);
-    if (table !== undefined) return table.map((c) => ({ name: c.name, value: this.typedRef([alias, c.name], c.type, c.typmod, c.collation), type: c.type }));
+    if (table !== undefined) {
+      // (a plain numeric's hidden scale column, where its copy holds one: `scaleOf`)
+      const source = this.userTypes.get(t.type)?.replace(/^rowtype:/, "") ?? null;
+      return table.map((c) => {
+        const value = this.typedRef([alias, c.name], c.type, c.typmod, c.collation);
+        const hidden = source === null || this.scales === null || c.type !== NUMERIC || c.typmod >= 0 ? null : this.scales.named(source, c.name);
+        if (hidden !== null) this.rowScales.set(bodyOf(value), hidden);
+        return { name: c.name, value, type: c.type };
+      });
+    }
     if (t.type !== RECORD) throw new Unrewritable(`a row of ${this.userTypes.get(t.type)?.replace(/^rowtype:/, "") ?? "a table"} is not supported by Mason: Mason synced the table in part`, "name its columns instead", "row-value");
     const source = this.fromSources(select).filter((q) => q.alias === alias);
     if (source.length !== 1) throw new Unrewritable("a row of this FROM item is not supported by Mason", "name its columns instead", "row-value");
@@ -1104,12 +1119,37 @@ class Rewriter {
       const casts = (v: unknown): void => {
         if (Array.isArray(v)) { for (const x of v) casts(x); return; }
         if (v === null || typeof v !== "object") return;
+        // (a column that is itself a GROUP BY key: its plain numeric's scale is a group's, `plainNumericText`)
+        if (isNode(v) && kindOf(v) === "ColumnRef" && this.groupedAs(v, b) !== null) this.groupedRefs.add(bodyOf(v));
         if (isNode(v) && (kindOf(v) === "SelectStmt" || kindOf(v) === "SubLink" || this.groupedAs(v, b) !== null)) return;
         if (isNode(v) && kindOf(v) === "FuncCall" && (bodyOf(v).over !== undefined || this.typed(v)?.node === "AGGREF" || bodyOf(v).agg_within_group === true)) return;
         if (isNode(v) && kindOf(v) === "TypeCast") this.groupedCasts.set(bodyOf(v), b);
         for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) casts(x);
       };
       casts([b.targetList, b.sortClause, b.havingClause]);
+      // every node of the list, ORDER BY and HAVING outside an aggregate's or a window's argument: read per group, so a
+      // plain numeric's text there reads a row's scale only of a column that is itself a key (`plainNumericText`).
+      // Never INSIDE an expression the engine groups as written (`GROUP BY concat(x)`, `GROUP BY (x * 1)::text`): it is
+      // rewritten there as in the GROUP BY itself, so the engine still finds the list's expression among its keys (the
+      // review of PR 1004: the list's copy kept the engine's text, the key's read the scale, 42803), a grouping set's
+      // member included (`GROUP BY ROLLUP (concat(x))`, which `grouping` does not record)
+      const inSets = new Set<string>();
+      const member = (g: AstNode): void => {
+        if (kindOf(g) === "GroupingSet") { for (const x of (bodyOf(g).content ?? []) as AstNode[]) if (isNode(x)) member(x); return; }
+        if (kindOf(g) === "RowExpr") { for (const x of (bodyOf(g).args ?? []) as AstNode[]) if (isNode(x)) member(x); return; }
+        inSets.add(shapeOf(this.groupedExpression(g, b)));
+      };
+      for (const g of (b.groupClause ?? []) as AstNode[]) if (isNode(g) && kindOf(g) === "GroupingSet") member(g);
+      const listed = (v: unknown): void => {
+        if (Array.isArray(v)) { for (const x of v) listed(x); return; }
+        if (v === null || typeof v !== "object") return;
+        if (isNode(v) && (kindOf(v) === "SelectStmt" || kindOf(v) === "SubLink")) return;
+        if (isNode(v) && kindOf(v) === "FuncCall" && (bodyOf(v).over !== undefined || this.typed(v)?.node === "AGGREF" || bodyOf(v).agg_within_group === true)) return;
+        if (isNode(v)) this.perGroup.set(bodyOf(v), b);
+        if (isNode(v) && (this.groupedAs(v, b) === "engine" || inSets.has(shapeOf(v)))) return;
+        for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) listed(x);
+      };
+      listed([b.targetList, b.sortClause, b.havingClause]);
     }
     this.rowValues(b);
     for (const w of (b.windowClause ?? []) as AstNode[]) if (isNode(w)) this.keyedPartition(bodyOf(w));
@@ -1669,7 +1709,9 @@ class Rewriter {
         if (!cells && !windowed && depth === 0 && this.outputNamed(v, targets)) return v;
         const t = this.typed(v);
         // (a WINDOW's name Postgres bound by equality to an entry has no node at its offset: an input column all the same)
-        const column = t?.node === "VAR" ? t.levelsUp === depth : windowed && depth === 0 && t === null;
+        // (a plain numeric's hidden scale column the rewrite reads beside a row's column, `scaleOf`: a column of this
+        // query too, read per group as the column is; the review of PR 1004)
+        const column = t?.node === "VAR" ? t.levelsUp === depth : t?.node === "SCALE" ? depth === 0 : windowed && depth === 0 && t === null;
         // a cell riding beside a FROM item's column the group decides (carry): its value is the group's too
         if (!(depth === 0 && isCellRef(v, this.cellPrefix)) && !column) return v;
         if (inCells) { this.readPerGroup.add(n); return v; }
@@ -2126,6 +2168,8 @@ class Rewriter {
       else if (field.oid !== NUMERIC) return;
       // (a plain numeric's text that is itself a GROUP BY key is the engine's, written as its GROUP BY twin is: `typeCast`)
       if (grouped && text && groupShapes.has(shapeOf(uncollated)) && this.scaleOf(node, false) !== null) return;
+      // (and under a DISTINCT, where the engine must compare the text itself: 12.5 and 12.50 are two rows of it)
+      if (plainDistinct && text && this.scaleOf(node, false) !== null) return;
       const mine: typeof cells = [];
       const cell = (n: AstNode, conv: CellConv = "exact"): NumericProgram => {
         if (grouped && !this.validGrouped(n, groupShapes)) throw NOT_EXACT;
@@ -3883,6 +3927,13 @@ class Rewriter {
   /** each cast of a numeric to text a list's output Mason prints from its program (`exactColumns`): the engine's text of it
    *  is never read, so none is computed (`typeCast`) */
   private readonly printedByProgram = new WeakSet<Body>();
+  /** each column of a grouped SELECT's list, ORDER BY or HAVING that is itself a GROUP BY key, outside an aggregate: a
+   *  plain numeric's text there reads one row's scale of the group (`plainNumericText`) */
+  private readonly groupedRefs = new WeakSet<Body>();
+  /** each node of a grouped SELECT's list, ORDER BY or HAVING outside an aggregate (`plainNumericText`) */
+  private readonly perGroup = new WeakMap<Body, Body>();
+  /** a column a whole row of a table reads (`rowFields`), as its table's hidden scale column names it (`scaleOf`) */
+  private readonly rowScales = new WeakMap<Body, string>();
   /** each column of an expression the engine groups by its key alone (`cells`, issue 665) where a SELECT's list, HAVING
    *  or ORDER BY reads it (decidedByKey): read through first() when the walk reaches it, so that the expression is
    *  computed once per group, never once per row. Marked, never wrapped there: every rule above the column (a
@@ -4233,15 +4284,23 @@ class Rewriter {
    */
   private scaleOf(n: AstNode, grouped = this.scaleGrouped): AstNode | null {
     if (this.scales === null || kindOf(n) !== "ColumnRef") return null;
-    const t = this.typed(n);
-    if (t === null || t.node !== "VAR" || t.levelsUp !== 0 || t.relation === undefined || t.type !== NUMERIC || t.typmod >= 0) return null;
-    const hidden = this.scales.at(t.relation.relid, t.relation.attno);
-    const owner = t.column?.owner ?? null;
-    if (hidden === null || owner === null) return null;
-    const ref: AstNode = { ColumnRef: { fields: [S(owner), S(hidden)] } };
-    // (read per group as its column is, where the engine groups an expression of it by its key: `readPerGroup`)
-    if (this.readPerGroup.has(bodyOf(n))) this.readPerGroup.add(bodyOf(ref));
-    // (an integer the engine holds exactly: `duckExact`)
+    // a whole row's column (`rowFields`): its table's hidden column, read through the row's FROM name
+    const own = this.rowScales.get(bodyOf(n));
+    let ref: AstNode;
+    if (own !== undefined) {
+      const fields = (bodyOf(n).fields ?? []) as AstNode[];
+      ref = { ColumnRef: { fields: [this.clone(fields[0]!), S(own)] } };
+    } else {
+      const t = this.typed(n);
+      if (t === null || t.node !== "VAR" || t.levelsUp !== 0 || t.relation === undefined || t.type !== NUMERIC || t.typmod >= 0) return null;
+      const hidden = this.scales.at(t.relation.relid, t.relation.attno);
+      const owner = t.column?.owner ?? null;
+      if (hidden === null || owner === null) return null;
+      ref = { ColumnRef: { fields: [S(owner), S(hidden)] } };
+      // (read per group as its column is, where the engine groups an expression of it by its key: `readPerGroup`)
+      if (this.readPerGroup.has(bodyOf(n))) this.readPerGroup.add(bodyOf(ref));
+    }
+    // (an integer the engine holds exactly: `duckExact`; a column of this query, which `decidedByKey` reads per group)
     this.synthetic.set(bodyOf(ref), { node: "SCALE", type: INT2, typmod: -1, args: [], oid: null, format: null, collation: 0, inputCollation: 0,
       levelsUp: 0, datum: null, qualifier: null, renamed: null });
     if (!grouped) return ref;
@@ -4250,6 +4309,94 @@ class Rewriter {
       levelsUp: null, datum: null, qualifier: null, renamed: null });
     return first;
   }
+  /**
+   * A PLAIN NUMERIC'S TEXT AS POSTGRES WRITES IT (issue 946): the engine's text of its DECIMAL, which has the column's
+   * most decimals, cut to the row's own scale, natively. Of a column (one row's scale; a group's, `first`, where the
+   * column is itself a GROUP BY key: `groupedRefs`), and of a min or max of one, whose row's scale is picked by
+   * `arg_min` / `arg_max` only here, where its value becomes text (min / max themselves stay the engine's, the owner's
+   * decision). Null for anything else: its text is the engine's, as before.
+   */
+  private plainNumericText(n: AstNode): AstNode | null {
+    if (kindOf(n) === "ColumnRef") {
+      // (read per group and no key itself, the engine's text as before: its row's scale is no group's)
+      // (read per group and no key itself: a column the group's key decides, which `decidedByKey` reads per group, its
+      // scale beside it, read so too; under a grouping set, which it leaves be, the engine's text as before)
+      const select = this.perGroup.get(bodyOf(n));
+      if (select !== undefined && !this.groupedRefs.has(bodyOf(n)) && !this.decidedPerGroup(select)) return null;
+      const scale = this.scaleOf(n, this.groupedRefs.has(bodyOf(n)));
+      return scale === null ? null : this.cutText(n, scale);
+    }
+    const b = bodyOf(n);
+    const name = kindOf(n) === "FuncCall" ? lastName(b.funcname) : "";
+    const args = (b.args ?? []) as AstNode[];
+    // a column the group's key decides, read per group through the rewrite's any_value (`decidedByKey`): every row of
+    // the group is one row of its table, so its scale is that row's too, `first`
+    if (name === "any_value" && this.done.has(b) && args.length === 1 && b.over === undefined && kindOf(args[0]!) === "ColumnRef") {
+      const scale = this.scaleOf(args[0]!, true);
+      return scale === null ? null : this.cutText(n, scale);
+    }
+    if ((name === "min" || name === "max" || name === "sum") && args.length === 1 && b.agg_star !== true && b.agg_distinct !== true && b.agg_within_group !== true && b.over === undefined
+      && this.typed(n)?.node === "AGGREF" && kindOf(args[0]!) === "ColumnRef") {
+      const scale = this.scaleOf(args[0]!, false);
+      if (scale === null) return null;
+      // (a sum's scale is the most its rows have, add_var's)
+      const picked = name === "sum" ? fn("max", [scale], b.agg_filter === undefined ? {} : { agg_filter: this.clone(b.agg_filter) })
+        : fn(name === "min" ? "arg_min" : "arg_max", [scale, this.clone(args[0]!)], b.agg_filter === undefined ? {} : { agg_filter: this.clone(b.agg_filter) });
+      this.synthetic.set(bodyOf(picked), { node: "AGGREF", type: INT4, typmod: -1, args: [], oid: null, format: null, collation: 0, inputCollation: 0,
+        levelsUp: null, datum: null, qualifier: null, renamed: null });
+      return this.cutText(n, picked);
+    }
+    // arithmetic, a CASE or a coalesce over one: the scale Postgres's rules give the row (`rowScale`), never inside a
+    // grouped SELECT's list (its columns are read per group there)
+    if (["A_Expr", "CaseExpr", "CoalesceExpr"].includes(kindOf(n)) && this.displayScale(n) === null && !this.perGroup.has(bodyOf(n)) && !this.readsGroupedRef(n)) {
+      const scale = this.rowScale(n);
+      return scale === null ? null : this.cutText(n, scale);
+    }
+    return null;
+  }
+
+  /** whether `decidedByKey` reads SELECT `b`'s columns per group: a GROUP BY of no grouping set */
+  private decidedPerGroup(b: Body): boolean {
+    const groups = (b.groupClause ?? []) as AstNode[];
+    return groups.length > 0 && !groups.some((g) => kindOf(g) === "GroupingSet");
+  }
+
+  /** a numeric[] of plain numerics as a list of each element's text (`plainNumericText`): an array_agg of one, or an
+   *  ARRAY[…] holding one; null for anything else */
+  private plainNumericTexts(n: AstNode): AstNode | null {
+    const b = bodyOf(n);
+    if (kindOf(n) === "A_ArrayExpr") {
+      const elements = (b.elements ?? []) as AstNode[];
+      const texts = elements.map((e) => this.plainNumericText(e));
+      if (texts.every((x) => x === null)) return null;
+      return arrayOf(elements.map((e, i) => texts[i] ?? cast(this.clone(e), ["varchar"])));
+    }
+    const args = (b.args ?? []) as AstNode[];
+    if (kindOf(n) !== "FuncCall" || lastName(b.funcname) !== "array_agg" || args.length !== 1 || b.over !== undefined || this.typed(n)?.node !== "AGGREF") return null;
+    const text = this.plainNumericText(args[0]!);
+    if (text === null) return null;
+    const call: AstNode = { FuncCall: { ...this.clone(n).FuncCall as Body, args: [text] } };
+    this.synthetic.set(bodyOf(call), { node: "AGGREF", type: TEXT_ARRAY, typmod: -1, args: [], oid: null, format: null, collation: 0, inputCollation: 0,
+      levelsUp: null, datum: null, qualifier: null, renamed: null });
+    return call;
+  }
+
+  /** whether an expression reads a column that is itself a GROUP BY key (`groupedRefs`) */
+  private readsGroupedRef(v: unknown): boolean {
+    if (Array.isArray(v)) return v.some((x) => this.readsGroupedRef(x));
+    if (v === null || typeof v !== "object") return false;
+    if (isNode(v) && kindOf(v) === "ColumnRef") return this.groupedRefs.has(bodyOf(v));
+    return Object.values(isNode(v) ? bodyOf(v) : v as Body).some((x) => this.readsGroupedRef(x));
+  }
+
+  /** the engine's text of a DECIMAL `n` cut to `scale` decimals (an integer expression): its zeros past them dropped,
+   *  and its point where none is left. `scale` is placed once, `n` three times (each a clone) */
+  private cutText(n: AstNode, scale: AstNode): AstNode {
+    const text = (): AstNode => cast(this.clone(n), ["varchar"]);
+    return caseWhen([[op("=", scale, intConst(0)), fn("split_part", [text(), strConst("."), intConst(1)])]],
+      fn("left", [text(), op("+", fn("strpos", [text(), strConst(".")]), this.clone(scale))]));
+  }
+
   /** whether a scale is read for a grouped query's list (`scaleOf`): set by `exactColumns` while it builds one */
   private scaleGrouped = false;
 
@@ -6110,6 +6257,10 @@ class Rewriter {
    */
   private pgText(n: AstNode, type: number | null, asCast: boolean): AstNode | null {
     if (type === null) return null;
+    // a plain numeric's text at its row's own scale (issue 946)
+    if (type === NUMERIC) { const text = this.plainNumericText(n); if (text !== null) return text; }
+    // an array of them, gathered (array_agg) or written (ARRAY[…]): each element's text so, the array's text of those
+    if (type === NUMERIC_ARRAY) { const texts = this.plainNumericTexts(n); if (texts !== null) return fn("__mason_array_text", [texts, boolConst(false)]); }
     // a char(n)'s output is padded; its cast to text drops the padding
     if (type === BPCHAR) return asCast ? fn("rtrim", [n]) : null;
     // a float cast to numeric is a DuckDB double; Postgres's numeric holds the float's shortest digits, written plainly
@@ -8225,7 +8376,11 @@ export interface RewriteOptions {
 
 /** THE HIDDEN SCALE COLUMN OF A PLAIN NUMERIC (src/duck/scale-column.ts) a VAR reads, by the catalog's OIDs
  *  (Typed.relation): its name, or null where the copy holds none */
-export interface ScaleLookup { at(relid: number, attno: number): string | null }
+export interface ScaleLookup {
+  at(relid: number, attno: number): string | null;
+  /** the same by the table's `schema.table` and the column's name (a whole row's columns: `rowFields`) */
+  named(source: string, column: string): string | null;
+}
 
 export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(), citextHeld = new Set(), typeNames = new Map(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
   wireBound = false, keyCounts = new Set(), boundPaths = new Map(), scales = null }: RewriteOptions):
