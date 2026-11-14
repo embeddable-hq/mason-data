@@ -81,6 +81,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `mason logs --events --json` gives it as a new field, `tookMs`. A first sync's event now ends with its time as a
   poll's does, such as `synced: 1,000 row(s) · 2.0 s`, where it said `in 2.00 s`. Events recorded before the upgrade
   keep their time in the message.
+- **The web page's Sync events list shows each sync while it runs.** A sync you start by hand, a first sync, a table
+  synced again whole and the catch-up after it each get a row at the top of the list. The row says "Syncing…", and
+  Took counts how long it has run so far. When the sync ends, its event takes the row's place. Scheduled syncs are
+  not shown while they run, as each takes a moment. `mason status --json` gives each table's own sync running now
+  as a new field, `rebuilding` (`kind` is `copy` or `catch-up`, and `startedAt`).
 
 ## What was wrong and is now right
 

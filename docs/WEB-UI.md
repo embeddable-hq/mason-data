@@ -311,7 +311,15 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   ticked, or one of their kinds is chosen: Mason is asked for them then (`?scheduled=1`), so they never push a failure
   out of the newest 500 read. **Failures only** asks Mason for the range's failures alone (`?failed=1`), so every failure
   of the range is listed, whatever else is ticked. A **Kind** (every kind of event) and a **Table** (every added table, whether the range has an event of it or not: one with none says so by its name) narrow the list; 100 are
-  written at once, then **Show more**.
+  written at once, then **Show more**. **Every sync running now is a row of its own at the top** (at the bottom when
+  **When** puts the oldest first), read from the state at every poll, so a page opened mid-sync shows it too: a sync
+  asked by hand (Manual sync, `syncByHand`), a First sync, a Full sync again (whose columns changed, when they did) and
+  the Catch-up after it (`rebuilding`). It says **Syncing…** and, in **Took**, how long it has run so far, ticking.
+  When it ends, its event as recorded takes its place (the row stays until that event is read, 20 s at most). A
+  **Kind** keeps it when it is a kind the sync ends as (Manual sync and Manual sync failed for a sync asked by hand;
+  Full sync and Full sync failed for a first or full sync; Catch-up failed for a catch-up), a **Table** when it is
+  its table, and **Failures only** never. A scheduled sync running is not listed: the state does not say one, and each
+  takes a moment. While a sync runs, the events are read at every poll too.
 - **Sync events**, the run's raw log: behind a closed details, for debugging (it has internal tags and paths), newest first. Mason
   is asked for it only while the details is open.
 
@@ -775,6 +783,9 @@ reads:
   read again whole, being caught up), or null when it would run. Once the sync holds it there are
   also `kept` (how it is kept current now: `by` is `poll`, with its `sync`, or `replication` or `recopy`) and `duck`.
   A table synced by hand since the run started also has `syncByHand`, its last such sync (`POST /api/sync`, below).
+  While the run's own sync of a table runs, the table has `rebuilding`: `kind` is `copy` (its first sync, or the table
+  read again whole) or `catch-up` (the one sync of what changed meanwhile that follows it), and `startedAt` is when it
+  began.
 - `copy`, null until the sync reaches the table, is `phase` (`copying`, `done` or `failed`), `rowsCopied` (the rows
   read so far, or the copy's rows once done) and `updatedAt` (when it was copied, `""` before). It also has `progress`
   while its chunks are read (`chunksDone`, `chunksTotal`, `reading`, `readingSeconds`, `rowsReading`, `rowsPerSecond`,

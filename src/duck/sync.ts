@@ -276,6 +276,9 @@ export interface CopyState {
   behind?: string;
   /** a copy or a catch-up of it is running now (one rebuild at a time): a table copied before serves that copy meanwhile */
   rebuilding?: "copy" | "catch-up" | "compact";
+  /** when the rebuild running now (`rebuilding`) began, ISO 8601 UTC: a copy's whole read, then its catch-up from its
+   *  own start — what the web page's Sync events says it has run for so far (issue 1011) */
+  rebuildingSince?: string;
   /** what its space holds that is no longer its rows, and its last compaction (`Sync.compact`, src/duck/compact.ts):
    *  present once its first check read it, or once it was compacted */
   compaction?: Compaction;
@@ -1197,7 +1200,8 @@ export class Sync {
   private writerTurn: Promise<void> = Promise.resolve();
   /** the rebuilds waiting, by source; the one running and its loop (`drainRebuilds`) */
   private readonly queued = new Map<string, Rebuild>();
-  private rebuildingNow: { source: string; kind: Rebuilt } | null = null;
+  /** the rebuild running now, and since when (ms): a copy's whole read, then its catch-up from the moment that begins */
+  private rebuildingNow: { source: string; kind: Rebuilt; since: number } | null = null;
   private rebuilding: Promise<void> | null = null;
   /** the source attached for this many users (a pass, a rebuild): DETACHed when the last ends (`detach`) */
   private sourceUsers = 0;
@@ -1581,7 +1585,7 @@ export class Sync {
     const frozen = await this.onWriter(async () => {
       // decided on the turn: the table may have been removed, changed or marked behind since it was queued
       if (this.stopped || !this.tables.has(source) || !this.compactable(t)) return false;
-      this.rebuildingNow = { source, kind: "compact" };
+      this.rebuildingNow = { source, kind: "compact", since: Date.now() };
       if (replicated) {
         await this.store.writer.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.catch_up VALUES (${literal(source)}, ${literal(COMPACT_CUT_SHORT)}, now())`);
         // a spill a failure left behind is no change of this table's: the mark it stood under was caught up since
@@ -1981,8 +1985,9 @@ export class Sync {
       // when it was last brought current, whether it waits for its catch-up, and whether it is being rebuilt now
       .map((s) => {
         const synced = this.synced.get(s.source), behind = this.behind.get(s.source)?.why;
-        const rebuilding = this.rebuildingNow?.source === s.source ? this.rebuildingNow.kind : undefined;
-        return { ...s, ...(synced ? { synced } : {}), ...(behind !== undefined ? { behind } : {}), ...(rebuilding ? { rebuilding } : {}) };
+        const now = this.rebuildingNow?.source === s.source ? this.rebuildingNow : null;
+        return { ...s, ...(synced ? { synced } : {}), ...(behind !== undefined ? { behind } : {}),
+          ...(now !== null ? { rebuilding: now.kind, rebuildingSince: new Date(now.since).toISOString() } : {}) };
       })
       // why a sync by hand of it would be refused now, from the one check pollNow refuses with (in memory: the page asks every 2 s)
       .map((s) => { const t = this.tables.get(s.source); return t === undefined ? s : { ...s, syncRefusal: this.syncRefusal(t)?.message ?? null }; })
@@ -3689,7 +3694,7 @@ export class Sync {
    */
   private async rebuild(t: AddedTable, kind: TableRebuild): Promise<"copy again" | null> {
     await this.onWriter(async () => {
-      this.rebuildingNow = { source: t.source, kind };
+      this.rebuildingNow = { source: t.source, kind, since: Date.now() };
       this.refreshStreamed();
     });
     let attached = false;
@@ -3707,7 +3712,8 @@ export class Sync {
       if (kind === "copy") await this.copy(t);
       // the whole read is over, whatever comes next: what the table is said to be doing from here (`notStreamedReason`,
       // `refuseRebuilding`, `state`'s `rebuilding`)
-      this.rebuildingNow = { source: t.source, kind: "catch-up" };
+      // a catch-up after a whole read starts its own clock: the page says how long each has run (issue 1011)
+      if (this.rebuildingNow?.source !== t.source || this.rebuildingNow.kind !== "catch-up") this.rebuildingNow = { source: t.source, kind: "catch-up", since: Date.now() };
       // a table its copy left behind (`swap`), or one marked so before: one poll, unless a copy of it comes first — the
       // table as it is added NOW, which may have changed while it was copied (then copied again at once: `followUp`)
       const now = this.tables.get(t.source);

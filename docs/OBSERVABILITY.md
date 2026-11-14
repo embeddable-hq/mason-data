@@ -125,7 +125,9 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
 - **Observability › Sync events** (`#observability/syncs`): the sync's events of the range (`/api/events?limit=500&since=`, 10 s;
   24 hours 30 s, a week or more 60 s; with `&failed=1` while Failures only is ticked, so every failure of the range is
   listed, and `&scheduled=1` while Scheduled syncs is), newest first, narrowed by a kind (every kind) and a table (every added table,
-  from `/api/state`, whether the range has an event of it or not; Tables' View events chooses it). The run's raw log
+  from `/api/state`, whether the range has an event of it or not; Tables' View events chooses it). Every sync running
+  now is a row at the top, from `/api/state` (2 s: `syncByHand`, `rebuilding`), its time so far in Took, until its event
+  is read (the events every 2 s meanwhile). The run's raw log
   (`/api/logs`, 5 s) is debugging output with internal tags and paths: it is behind a closed details, newest first, and
   read only while that is open.
 
