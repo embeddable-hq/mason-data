@@ -30,27 +30,35 @@ const th = (cols) => cols.map((c) => `<th scope="col">${esc(c)}</th>`).join("");
 
 /** EACH KIND IN THE PAGE'S WORDS (the code, which the CLI and `--json` print, is the badge's title): so a sync you
  *  started, a full sync and a scheduled one are told apart at a glance. "Live" is replication, as the Tables page says. */
-export const KIND_WORDS = { copy_failed: "Full sync failed", poll_failed: "Scheduled sync failed", catch_up_failed: "Catch-up failed",
+export const KIND_WORDS = { full_sync_failed: "Full sync failed", poll_failed: "Scheduled sync failed", catch_up_failed: "Catch-up failed",
   stream_failed: "Live sync failed", source_unreachable: "Database unreachable", generated_failed: "Generated table failed",
-  compact_failed: "Compaction failed", restart: "Mason restarted", copied: "Full sync", recovered: "Working again", synced: "Manual sync",
+  compact_failed: "Compaction failed", restart: "Mason restarted", full_sync: "Full sync", recovered: "Working again", synced: "Manual sync",
   sync_changed: "Sync setting changed", polled: "Scheduled sync", streamed: "Live sync", ui_error: "Web page error" };
 /** A kind's words; a kind this page does not know, its code. */
 export const kindWords = (kind) => Object.hasOwn(KIND_WORDS, kind) ? KIND_WORDS[kind] : kind;
 
 /** An event's kind as a badge in words (its code the title): a failure red (with its ✗), a sync done or a failure
  *  recovered green, any other gray. */
-const kindBadge = (e) => `<span title="${esc(e.kind)}">${badge(e.failed ? `✗ ${kindWords(e.kind)}` : kindWords(e.kind), e.failed ? "bad" : /^(copied|recovered|synced|polled|streamed)$/.test(e.kind) ? "ok" : "")}</span>`;
+const kindBadge = (e) => `<span title="${esc(e.kind)}">${badge(e.failed ? `✗ ${kindWords(e.kind)}` : kindWords(e.kind), e.failed ? "bad" : /^(full_sync|recovered|synced|polled|streamed)$/.test(e.kind) ? "ok" : "")}</span>`;
 
 /** The events read that pass the page's filters: failures only, a kind, a table ("" any; Mason's own, of no one table,
  *  is MASON_TABLE). */
 const eventsShown = (events, { failuresOnly = false, kind = "", table = "" } = {}) =>
   events.filter((e) => (!failuresOnly || e.failed) && (!kind || e.kind === kind) && (!table || (e.table ?? MASON_TABLE) === table));
 
+/** A failure's code and where in Mason it happened (`code`, `origin`, src/duck/events.ts), as one quiet line under its
+ *  message; nothing for good news or an event recorded before Mason kept them. */
+export function failureFacts(e) {
+  if (!e.failed || e.code == null) return "";
+  return `<p class="dim">Code <code>${esc(e.code)}</code>${e.origin == null ? "" : `, at <code>${esc(e.origin)}</code>`}</p>`;
+}
+
 /**
  * The sync's events as a timeline, NEWEST FIRST (`sort.dir` "asc": oldest first, as the command lists them): when (how
  * long ago; the UTC time, as the command prints it, is the title), the kind as a badge, the table, the reason's first line
- * and, under it, its further lines. `failuresOnly`, `kind` and `table` (the page's filters) keep the events of what was
- * read that pass (`eventsShown`); at most `limit` rows are written. `span` the range's words; `now` the page's clock.
+ * and, under it, its further lines and a failure's code and origin (`failureFacts`). `failuresOnly`, `kind` and `table`
+ * (the page's filters) keep the events of what was read that pass (`eventsShown`); at most `limit` rows are written.
+ * `span` the range's words; `now` the page's clock.
  */
 export function renderEvents(b, { failuresOnly = false, kind = "", table = "", now = Date.now(), sort = { key: "time", dir: "desc" }, limit = EVENTS_SHOWN, span = "" } = {}) {
   const days = `${b.keptDays} day${b.keptDays === 1 ? "" : "s"}`;
@@ -68,7 +76,7 @@ export function renderEvents(b, { failuresOnly = false, kind = "", table = "", n
   const ordered = sort.dir === "asc" ? passing : [...passing].reverse();
   const rows = ordered.slice(0, limit).map((e) => {
     const c = eventCells(e);
-    const more = e.message.includes("\n") ? `<pre>${esc(e.message.split("\n").slice(1).join("\n"))}</pre>` : "";
+    const more = (e.message.includes("\n") ? `<pre>${esc(e.message.split("\n").slice(1).join("\n"))}</pre>` : "") + failureFacts(e);
     return `<tr${e.failed ? ` class="t-failed"` : ""}><th scope="row"><time data-tick datetime="${esc(e.at)}" title="${esc(c.time)} UTC">${esc(agoText(e.at, now))}</time></th><td>${kindBadge(e)}</td>` +
       `<td>${e.table == null ? `<span class="dim">${esc(c.table)}</span>` : `<code class="name" title="${esc(c.table)}">${esc(c.table)}</code>`}</td><td>${esc(c.message)}${more}</td></tr>`;
   }).join("");
@@ -79,7 +87,7 @@ export function renderEvents(b, { failuresOnly = false, kind = "", table = "", n
 
 /** EVERY KIND OF SYNC EVENT, in its order (src/duck/events.ts `EVENT_KINDS`, held equal by the tests): the Kind filter
  *  offers each, whether the range has one or not. */
-export const EVENT_KINDS = ["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "restart", "copied", "recovered", "synced", "sync_changed", "polled", "streamed", "ui_error"];
+export const EVENT_KINDS = ["full_sync_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "restart", "full_sync", "recovered", "synced", "sync_changed", "polled", "streamed", "ui_error"];
 
 /** The kind and table filters' controls: EVERY kind (EVENT_KINDS), and EVERY added table (`/api/state` `tables`, `s`) —
  *  Mason's own events first ("Mason events", MASON_TABLE) — whether the range has an event of it or not, so the choices never depend on what

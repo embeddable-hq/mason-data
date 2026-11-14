@@ -4367,6 +4367,126 @@ wholeBeside("a whole numeric's own arithmetic is Postgres's", [
   "SELECT div(i, 2) AS q, count(*) FROM bins GROUP BY 1 ORDER BY 1 NULLS FIRST",
   "SELECT 2.5e2 * 2.5e2 AS w, 1e37 + 1 AS x, extract(epoch FROM date '2024-01-02') AS e"]);
 
+// issue 464: to_char of a time in a format DuckDB's strftime writes as Postgres does is DuckDB's own strftime, never the
+// function a row (a grouped month was x8-18 of Postgres over 4.5 M rows), and Postgres's text in every zone: a NULL, a
+// microsecond, before 1970, a zone's local mean time, each side of a clock change; ±infinity and every other format
+// stay the function's (src/duck/to-char.ts `strftimeTemplate`, src/duck/rewrite.ts `toChar`)
+test("issue 464: to_char of a time in a format strftime writes is the engine's own, Postgres's text in every zone and type", async () => {
+  const c = await client();
+  const called = async (): Promise<number> => (await store.functionRows()).get("__mason_to_char_time") ?? 0;
+  const native = ["YYYY-MM", "YYYY-MM-DD", "Mon YYYY", "FMMonth YYYY", "Dy DD Mon", "FMDay, DDD", "YYYY-MM-DD HH24:MI:SS", 'YYYY-MM-DD"T"HH24:MI:SS.US', "HH24:MI:SS.MS",
+    "IYYY-IW", "YYYYMMDD", 'YYYY "100%" MM', "FMMon/FMDy"];
+  // a pattern strftime does not write as Postgres does: a quarter, a padded name, FM on a number, an ordinal, another
+  // case, a translated name
+  const kept = ['YYYY-"Q"Q', "Month YYYY", "FMDD", "DDth", "yyyy-mm", "MON YYYY", "TMMonth", "Day", "HH12:MI AM", "WW",
+    // a template that writes nothing, or nothing but its prefix (the review of PR 955: an empty strftime format is
+    // DuckDB's bind error), the empty one (NULL), and one prefix an item (`FMFM` writes `FM`)
+    "FM", '""', "", "FMFM", "FMTMMonth", "fmFMDD", "FXFMDD", "FMFXDD"];
+  try {
+    for (const zone of ["UTC", "America/New_York", "Asia/Kolkata"]) {
+      await c.query(`SET TimeZone = '${zone}'`);
+      await truth.exec(`SET TimeZone = '${zone}'`);
+      try {
+        for (const fmt of [...native, ...kept]) {
+          const time = /HH|MI|SS|MS|US/.test(fmt);
+          for (const [sql, finite] of [[`SELECT id, to_char("at", '${fmt}') AS v FROM instants ORDER BY id`, false], [`SELECT id, to_char(ts, '${fmt}') AS v FROM nullish ORDER BY id`, true],
+            [`SELECT id, to_char(d, '${fmt}') AS v FROM ratios ORDER BY id`, !time]] as const) {
+            const before = await called();
+            assert.deepEqual(await answer(c, sql), await postgres(sql), `${sql} in ${zone}`);
+            const rows = await called() - before;
+            // the instants' ±infinity rows are the function's alone
+            if (native.includes(fmt)) assert.ok(rows <= (finite ? 0 : 2), `${sql} in ${zone}: ${rows} rows handed to the function`);
+            else assert.ok(rows > 0, `${sql} in ${zone}: answered without the function where strftime is not proven`);
+          }
+        }
+        // grouped, ordered by it, through a derived table, in a CASE and a UNION arm, as a tool writes them
+        for (const sql of ["SELECT to_char(o.created_at, 'YYYY-MM') AS m, count(*) FROM orders o GROUP BY 1 ORDER BY 1",
+          "SELECT to_char(created_at, 'Mon YYYY') AS m, sum(amount) FROM orders GROUP BY to_char(created_at, 'Mon YYYY') ORDER BY to_char(created_at, 'Mon YYYY') DESC",
+          "SELECT s.m, count(*) FROM (SELECT to_char(\"at\", 'YYYY-MM-DD') AS m FROM instants) s GROUP BY s.m ORDER BY s.m NULLS FIRST",
+          "SELECT id, CASE WHEN id > 1 THEN to_char(created_at, 'YYYY') ELSE 'x' END FROM orders ORDER BY id",
+          "SELECT to_char(created_at, 'YYYY-MM') FROM orders UNION ALL SELECT to_char(ts, 'YYYY-MM') FROM nullish ORDER BY 1 NULLS FIRST"]) {
+          const before = await called();
+          assert.deepEqual(await answer(c, sql), await postgres(sql), `${sql} in ${zone}`);
+          if (!/instants/.test(sql)) assert.equal(await called() - before, 0, `${sql} in ${zone}: rows handed to the function`);
+        }
+      } finally { await truth.exec("SET TimeZone = 'UTC'"); }
+    }
+    // a volatile value is read once, by the function: the guard and strftime would read it twice (the review of PR 955)
+    await c.query("SET TimeZone = 'UTC'");
+    for (const sql of ["SELECT id, to_char(created_at + (random() * 0) * interval '1 day', 'YYYY-MM-DD') AS v FROM orders ORDER BY id",
+      "SELECT to_char(o.created_at - (random() * 0) * interval '1 hour', 'YYYY-MM') AS m, count(*) FROM orders o GROUP BY 1 ORDER BY 1"]) {
+      const before = await called();
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      assert.ok(await called() - before > 0, `${sql}: a volatile value read by the guard and strftime apart`);
+    }
+    // a format bound as a parameter is read where it runs: the function's, as before
+    const sql = "SELECT id, to_char(created_at, $1) FROM orders ORDER BY id";
+    assert.deepEqual(await answer(c, sql, ["YYYY-MM"]), await postgres(sql, ["YYYY-MM"]));
+  } finally { await c.query("SET TimeZone = 'UTC'"); await c.end(); }
+});
+
+// issue 464: Metabase's US week of year, `ceil(CAST(extract(doy FROM x) AS integer) / 7.0)`, is a numeric bin of an
+// integer-typed expression, grouped by the engine's integer (src/duck/rewrite.ts `binMagnitude`), never the program's
+// key a row (28 s against Postgres's 5.4 s over 12 M rows): every answer Postgres's, across a year's end, a leap day,
+// ±infinity, NULL, in a zone of daylight saving
+test("issue 464: Metabase's US week of year is grouped by the engine's integer, Postgres's answer in every form", async () => {
+  const c = await client();
+  const keyed = async (): Promise<number> => (await store.functionRows()).get("__mason_numeric_program_key") ?? 0;
+  const week = (x: string): string => `ceil((CAST(extract(doy from ${x}) AS integer) / 7.0))`;
+  try {
+    for (const zone of ["UTC", "America/New_York"]) {
+      await c.query(`SET TimeZone = '${zone}'`);
+      await truth.exec(`SET TimeZone = '${zone}'`);
+      try {
+        for (const sql of [
+          `SELECT ${week('"public"."instants"."at"')} AS "at", COUNT(*) AS "count" FROM "public"."instants" GROUP BY ${week('"public"."instants"."at"')} ORDER BY ${week('"public"."instants"."at"')} ASC`,
+          `SELECT ${week("ts")} AS w, count(*) FROM nullish GROUP BY 1 ORDER BY 1 NULLS FIRST`,
+          `SELECT ${week("d")} AS w, count(*) FROM ratios GROUP BY w ORDER BY w DESC NULLS LAST`,
+          `SELECT ${week("created_at")} AS w, ${week("created_at")}::text AS t, count(*) FROM orders GROUP BY 1 HAVING ${week("created_at")} > 0 ORDER BY 1`,
+          `SELECT floor(CAST(extract(dow from "at") AS integer) / 2.0) * 2.0 AS w, count(*) FROM instants GROUP BY 1 ORDER BY 1 NULLS FIRST`,
+          `SELECT ceil((CAST(extract(year from ts) AS integer) - 2000) / 7.0) AS w, count(*) FROM nullish GROUP BY 1 ORDER BY 1 NULLS FIRST`,
+          `SELECT ceil(length(status) / 3.0) AS w, count(*) FROM orders GROUP BY 1 ORDER BY 1`]) {
+          const before = await keyed();
+          assert.deepEqual(await answer(c, sql), await postgres(sql), `${sql} in ${zone}`);
+          assert.equal(await keyed() - before, 0, `${sql} in ${zone}: grouped by the program's key a row, not the engine's integer`);
+        }
+      } finally { await truth.exec("SET TimeZone = 'UTC'"); }
+    }
+  } finally { await c.query("SET TimeZone = 'UTC'"); await c.end(); }
+});
+
+// issue 464: a timestamptz's text in a session of UTC (or an alias of it) is written from its microseconds, never through
+// Intl's calendar (~13 us a value, most of a 300,000-row DISTINCT ON's time), and is Postgres's text: a microsecond, a
+// fraction's trailing zeros, before 1970, year 1, year 9999, past it
+test("issue 464: a timestamptz in a session of UTC is written without Intl's calendar, as Postgres writes it", async () => {
+  const values = ["2026-01-02 03:04:05+00", "2026-07-01 12:34:56.123456+00", "2026-07-01 12:34:56.5+00", "2026-07-01 12:34:56.000001+00", "1969-12-31 23:59:59.5+00",
+    "1880-06-15 12:00:30+00", "0001-01-01 00:00:00+00", "9999-12-31 23:59:59.999999+00", "10000-01-01 00:00:00+00", "2024-02-29 00:00:00+00"];
+  const r = await store.writer.runAndReadAll(`SELECT ${values.map((v, i) => `TIMESTAMPTZ '${v}' AS c${i}`).join(", ")}`);
+  const row = r.getRows()[0]!;
+  const proto = Intl.DateTimeFormat.prototype;
+  const original = proto.formatToParts;
+  let calls = 0;
+  proto.formatToParts = function (this: Intl.DateTimeFormat, d?: Date | number): Intl.DateTimeFormatPart[] { calls++; return original.call(this, d); };
+  try {
+    for (const zone of ["UTC", "Etc/UTC", "utc"]) {
+      for (let i = 0; i < values.length; i++) {
+        const want = (await truth.query<{ t: string }>(`SELECT (timestamptz '${values[i]}')::text AS t`)).rows[0]!.t;
+        const before = calls;
+        assert.equal(wireColumn(`c${i}`, r.columnType(i)).encode(row[i]!, 0, { timeZone: zone })!.toString("utf8"), want, `${values[i]} in ${zone}`);
+        if (!values[i]!.startsWith("10000")) assert.equal(calls - before, 0, `${values[i]} in ${zone}: written through Intl's calendar`);
+      }
+    }
+    // another zone is the calendar's, as before
+    const before = calls;
+    await truth.exec("SET TimeZone = 'America/New_York'");
+    try {
+      const want = (await truth.query<{ t: string }>(`SELECT (timestamptz '${values[1]}')::text AS t`)).rows[0]!.t;
+      assert.equal(wireColumn("c1", r.columnType(1)).encode(row[1]!, 0, { timeZone: "America/New_York" })!.toString("utf8"), want);
+    } finally { await truth.exec("SET TimeZone = 'UTC'"); }
+    assert.ok(calls > before, "a zone with an offset written without its calendar");
+  } finally { proto.formatToParts = original; }
+});
+
 /** an answer's rows in one order: quotients equal to a double's 17 digits are in no defined order on Mason (the listed
  *  difference numeric-quotient-compare), so a test of their equality reads the rows as a set */
 const rowSet = (a: { fields: Array<[string, number | string]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => JSON.stringify(r)).sort() });
@@ -5277,6 +5397,89 @@ test("a LIMIT with no ORDER BY computes a plain derived side's list for the rows
     // an ORDER BY's rows are Postgres's own, in its order
     assert.deepEqual(await answer(c, kept[0]!), await postgres(kept[0]!));
   } finally { await c.end(); }
+});
+
+// ISSUE 463, THE 20-ROW PREVIEW: with no ORDER BY, the preserved table of an outer join is limited to its first OFFSET +
+// LIMIT rows before the join, where it holds at least as many rows as every other FROM item (src/duck/late.ts
+// `biggestPreserved`, read from the sync's counts of the copies): the engine built a hash table of the smaller side's
+// whole join column before. Never where the preserved table is the smaller (issue 824's `small LEFT JOIN big`, which
+// streams the big table and stops early), where a size is unknown, under a WHERE, an inner, FULL or comma join. What
+// is held: the form, and the rows are rows of the whole join, as many as Postgres's, under fan-out and no match
+test("a LIMIT with no ORDER BY limits the preserved table first where it is the biggest FROM item (issue 463, the 20-row preview)", async () => {
+  const c = await client();
+  const one = (v: unknown): unknown => typeof v === "string" ? v.replaceAll('": ', '":') : v;
+  const key = (r: unknown[]): string => JSON.stringify(r.map(one));
+  const sent = async (sql: string, values?: unknown[]): Promise<string> => {
+    logged.length = 0;
+    await c.query(sql, values as unknown[]);
+    const line = logged.findLast((l) => l.startsWith("statement: "));
+    assert.ok(line !== undefined, sql);
+    return line;
+  };
+  /** the statement's rows: as many as Postgres's, each a row of the whole join, none more often than the join holds it */
+  const held = async (sql: string, whole: string, values?: unknown[], wholeValues = values): Promise<void> => {
+    const [limited, all] = [await postgres(sql, values), await postgres(whole, wholeValues)];
+    const got = await answer(c, sql, values);
+    assert.deepEqual(got.fields, limited.fields, sql);
+    assert.equal(got.rows.length, limited.rows.length, sql);
+    const left = new Map<string, number>();
+    for (const r of all.rows) left.set(key(r), (left.get(key(r)) ?? 0) + 1);
+    for (const r of got.rows) {
+      const n = left.get(key(r));
+      assert.ok(n !== undefined && n > 0, `${sql}: ${key(r)} is no row of the join, or more often than it holds it`);
+      left.set(key(r), n - 1);
+    }
+  };
+  const copied = (source: string, rows: number): CopyState => ({ source, phase: "copied", rows, bytes: 8192, seconds: 1, copiedAt: "2026-11-14T00:00:00Z", error: null });
+  const SIZES = [copied("public.late", 2000), copied("public.late_c", 50), copied("public.late_p", 200)];
+  /** the preserved table `alias` read first: its first rows, no sort, a derived table of its own inside the kept rows' query */
+  const first = (alias: string, table: string): RegExp => new RegExp(`\\( SELECT \\*, ${alias}\\.rowid AS __mason_rid FROM (public\\.)?${table} AS ${alias} LIMIT \\d+ \\) AS ${alias} `);
+  const FIRST = /AS __mason_rid FROM (public\.)?\w+( AS \w+)? LIMIT \d+ \) AS /;
+  const tail = (sql: string): string => sql.replace(/ LIMIT .*$/, "");
+  try {
+    copies = SIZES;
+    const preserved: Array<[string, unknown[]?, unknown[]?]> = [
+      ["SELECT l.id, l.k, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c LIMIT 20"],
+      ["SELECT l.id, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c LIMIT 7 OFFSET 30"],
+      // a preserved row with no match: the other side's columns NULL
+      ["SELECT l.id, c.id AS c, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c + 1000 LIMIT 5"],
+      // fan-out: each preserved row matches 40 rows of the same size of table, so the LIMIT falls inside one row's matches
+      ["SELECT l.id, y.id AS y FROM late l LEFT JOIN late y ON y.c = l.c LIMIT 50"],
+      ["SELECT l.id, y.id AS y FROM late l LEFT JOIN late y ON y.c = l.c LIMIT 30 OFFSET 2000"],
+      // a RIGHT join's preserved side, a chain, a schema-qualified column of the preserved table (Metabase's spelling)
+      ["SELECT l.id, c.name FROM late_c c RIGHT JOIN late l ON c.id = l.c LIMIT 20"],
+      ["SELECT l.id, c.name, p.note FROM late l LEFT JOIN late_c c ON c.id = l.c LEFT JOIN late_p p ON p.c = l.c LIMIT 20"],
+      ['SELECT "public"."late"."id" AS "id", "C"."name" AS "C__name" FROM "public"."late" LEFT JOIN (SELECT "public"."late_c"."id" AS "id", upper("public"."late_c"."name") AS "name" FROM "public"."late_c") AS "C" ON "public"."late"."c" = "C"."id" LIMIT 20'],
+      // the JSON-unfolded side of #944, its paths bound, beside a preserved table of its size
+      ['SELECT "public"."late"."id" AS "id", "D"."n" AS "D__n" FROM "public"."late" LEFT JOIN (SELECT "public"."late"."id" AS "id", ("public"."late"."j" #>> array[$1]::text[])::text AS "n" FROM "public"."late") AS "D" ON "public"."late"."k" = "D"."id" LIMIT 20', ["n"]],
+      ["SELECT l.id, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c LIMIT 0"],
+    ];
+    for (const [sql, values] of preserved) {
+      await held(sql, tail(sql), values);
+      assert.match(await sent(sql, values), FIRST, sql);
+    }
+    assert.match(await sent(preserved[0]![0]), first("l", "late"));
+    // TODAY'S ROUTE: the preserved table the smaller (issue 824's case), sizes unknown, a WHERE, an inner, FULL or comma
+    // join, a LIMIT parameter, a sort
+    const kept = [
+      "SELECT c.id, l.id AS l FROM late_c c LEFT JOIN late l ON l.c = c.id LIMIT 20",
+      "SELECT l.id, c.name FROM late_c c RIGHT JOIN late l ON c.id = l.c WHERE l.k > 5 LIMIT 20",
+      "SELECT l.id, c.name FROM late l JOIN late_c c ON c.id = l.c LIMIT 20",
+      "SELECT l.id, c.id AS c FROM late l FULL JOIN late_c c ON c.id = l.c LIMIT 20",
+      "SELECT l.id, c.name FROM late l, late_c c WHERE c.id = l.c LIMIT 20",
+      "SELECT l.id, d.n FROM late l LEFT JOIN (SELECT c, count(*) AS n FROM late GROUP BY c) d ON d.c = l.c LIMIT 20",
+    ];
+    for (const sql of kept) {
+      await held(sql, tail(sql));
+      assert.doesNotMatch(await sent(sql), FIRST, sql);
+    }
+    assert.doesNotMatch(await sent("SELECT l.id, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c LIMIT $1", [20]), FIRST);
+    // (another text each: a statement's plan is kept by its text, sizes and all)
+    copies = [copied("public.late_c", 50)];
+    assert.doesNotMatch(await sent(preserved[0]![0].replace("LIMIT 20", "LIMIT 21")), FIRST, "a size unknown");
+    copies = [copied("public.late", 2000), copied("public.late_c", 5000)];
+    assert.doesNotMatch(await sent(preserved[0]![0].replace("LIMIT 20", "LIMIT 22")), FIRST, "the preserved table the smaller");
+  } finally { copies = []; await c.end(); }
 });
 
 // A `->>` OF A COLUMN IS DUCKDB'S OWN READ (the test server: every JSON read was a hop to the main thread per
@@ -8258,8 +8461,30 @@ test("libc top N: a top N and an ungrouped min / max are bounded natively, the d
       ["SELECT min(d), max(d) FROM colls WHERE id < 0", [[null, null]]],
     ];
     for (const [sql, rows] of bounded) {
-      assert.match(await sent(sql), /regexp_extract\(.*\(SELECT (CASE WHEN count\(\*\) >= \d+ THEN )?(min|max)\(__mason_bounds\.__mason_bound\)/, sql);
+      // (the second round: the bounds of each DISTINCT value, once, in a WITH query of the statement's own)
+      assert.match(await sent(sql), /WITH __mason_values\d* AS MATERIALIZED \(SELECT __mason_v, regexp_replace\(.*regexp_extract\(.*SELECT DISTINCT .* AS __mason_v FROM colls/, sql);
       assert.deepEqual((await answer(c, sql)).rows, rows, sql);
+    }
+    // A STATEMENT'S OWN NAMES THE KEYS' WOULD BE (the review of PR 945: a column `__mason_v` was an ambiguous reference
+    // beside the joined keys', an alias `__mason_keys1` a duplicate alias, a WITH query `__mason_values1` a duplicate
+    // WITH query): the names chosen are none the statement holds, so each answers as its plain twin does
+    const w = "(SELECT id, d, d AS __mason_v, c AS __mason_k, c AS __mason_w, d AS __mason_bound FROM colls)";
+    for (const [own, plain] of [
+      [`SELECT __mason_v, __mason_k, d FROM ${w} AS w ORDER BY d, id LIMIT 6`, `SELECT d, c, d FROM colls ORDER BY d, id LIMIT 6`],
+      [`SELECT id, __mason_v FROM ${w} AS w ORDER BY __mason_v, id LIMIT 3`, `SELECT id, d FROM colls ORDER BY d, id LIMIT 3`],
+      [`SELECT id, __mason_v FROM ${w} AS w ORDER BY __mason_v DESC, id LIMIT 3`, `SELECT id, d FROM colls ORDER BY d DESC, id LIMIT 3`],
+      [`SELECT id, __mason_w, __mason_bound FROM ${w} AS w WHERE __mason_k <> 'b' ORDER BY d, id LIMIT 3`, `SELECT id, c, d FROM colls WHERE c <> 'b' ORDER BY d, id LIMIT 3`],
+      [`SELECT min(__mason_v), max(__mason_k), min(d) FROM ${w} AS w`, `SELECT min(d), max(c), min(d) FROM colls`],
+      ["SELECT * FROM colls AS __mason_keys1 ORDER BY d, id LIMIT 3", "SELECT * FROM colls ORDER BY d, id LIMIT 3"],
+      ["SELECT __mason_values1.id FROM colls AS __mason_values1 ORDER BY __mason_values1.d DESC, 1 LIMIT 3", "SELECT id FROM colls ORDER BY d DESC, 1 LIMIT 3"],
+      ["SELECT * FROM colls AS __mason_distinct ORDER BY d, id LIMIT 3", "SELECT * FROM colls ORDER BY d, id LIMIT 3"],
+      ["SELECT min(d), max(d) FROM colls AS __mason_bounds", "SELECT min(d), max(d) FROM colls"],
+      ["WITH __mason_values1 AS (SELECT id, d FROM colls) SELECT min(d), max(d) FROM __mason_values1", "SELECT min(d), max(d) FROM colls"],
+      ["WITH __mason_values1 AS (SELECT 1 AS one) SELECT min(d), max(d) FROM colls", "SELECT min(d), max(d) FROM colls"],
+      ["WITH __mason_values1 AS (SELECT id, d FROM colls), __mason_keys1 AS (SELECT 1 AS one) SELECT id FROM __mason_values1 ORDER BY d, id LIMIT 3", "SELECT id FROM colls ORDER BY d, id LIMIT 3"],
+    ] as const) {
+      assert.deepEqual((await answer(c, own)).rows, (await answer(c, plain)).rows, own);
+      assert.match(await sent(own), /__mason_values\d* AS MATERIALIZED \(SELECT __mason_v\d*, /, own);
     }
     // a parameter in the WHERE the threshold reads too: bound once, read in both, and again after the session moved
     const bound = "SELECT id FROM colls WHERE id > $1 ORDER BY d, id LIMIT 3";
@@ -8301,6 +8526,34 @@ test("libc top N: a top N and an ungrouped min / max are bounded natively, the d
       }
       assert.deepEqual(sorted([100, 101], false), [100, 101], "the order itself: 'abc' before 'ab' U+0002 'cd'");
     } finally { await store.writer.run("DELETE FROM public.colls WHERE id >= 100"); }
+    // THE KEY ONCE A DISTINCT VALUE (the second round): 2,000 rows of five values and NULL, each value hundreds of times.
+    // A top N and a min / max hand the libc key each value at most once, never each row the bounds cannot rule out
+    // (before: every row of the least value, 400 of them, and of each value whose bounds tie)
+    const pool = ["beta", "Beta", "alpha", "é", "e"];
+    const many = new Map<number, string | null>(Array.from({ length: 2000 }, (_, i) => [200 + i, i % 10 === 9 ? null : pool[i % 5]!] as const));
+    await store.writer.run(`INSERT INTO public.colls SELECT id, x, x, x FROM (VALUES ${[...many].map(([id, x]) => `(${id}, ${x === null ? "NULL" : `'${x}'`})`).join(", ")}) AS s(id, x)`);
+    try {
+      const sorted = (desc: boolean, nullsFirst = desc): number[] => [...many.keys()].sort((i, j) => {
+        const [x, y] = [many.get(i)!, many.get(j)!];
+        if (x === null || y === null) return x === y ? i - j : (x === null) === nullsFirst ? -1 : 1;
+        const [k, l] = [libcKey(letters, x), libcKey(letters, y)];
+        const by = k !== l ? (k < l ? -1 : 1) : Buffer.compare(Buffer.from(x), Buffer.from(y));
+        return by !== 0 ? (desc ? -by : by) : i - j;
+      });
+      const nonNull = (desc: boolean): string => many.get(sorted(desc, false)[0]!)!;
+      for (const [sql, rows] of [
+        ["SELECT id FROM colls WHERE id >= 200 ORDER BY d, id LIMIT 5", ids(sorted(false).slice(0, 5))],
+        ["SELECT id FROM colls WHERE id >= 200 ORDER BY d DESC, id LIMIT 5", ids(sorted(true).slice(0, 5))],
+        ["SELECT id FROM colls WHERE id >= 200 ORDER BY d DESC NULLS LAST, id LIMIT 5 OFFSET 1190", ids(sorted(true, false).slice(1190, 1195))],
+        ["SELECT id, upper(d) FROM colls WHERE id >= 200 ORDER BY d, id LIMIT 3", sorted(false).slice(0, 3).map((id) => [String(id), many.get(id)!.toUpperCase()])],
+        ["SELECT min(d), max(d) FROM colls WHERE id >= 200", [[nonNull(false), nonNull(true)]]],
+      ] as Array<[string, unknown[][]]>) {
+        const before = (await store.functionRows()).get("__mason_libc_key") ?? 0;
+        assert.deepEqual((await answer(c, sql)).rows, rows, sql);
+        const keyed = ((await store.functionRows()).get("__mason_libc_key") ?? 0) - before;
+        assert.ok(keyed <= 2 * pool.length, `${sql}: the libc key was handed ${keyed} rows of five values: per row, not once a value`);
+      }
+    } finally { await store.writer.run("DELETE FROM public.colls WHERE id >= 200"); }
   } finally { await c.end(); await a.close(); }
 });
 

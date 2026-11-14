@@ -13,8 +13,8 @@ import { Buffer } from "node:buffer";
 import pg from "pg";
 import { assignedCodePoints, decodeLibcOrder, encodeLibcOrder, isPlainTable, libcKey, readLibcOrder } from "../../src/duck/libc-order.ts";
 import { isLibcCollation } from "../../src/duck/rewrite.ts";
-import { boundOf, BOUND_CHARS } from "../../src/duck/libc-bound.ts";
-import { holdBounds, randomStrings } from "../libc-order-fixture.ts";
+import { boundOf, BOUND_CHARS, FOLD_BLOCKS } from "../../src/duck/libc-bound.ts";
+import { holdBounds, LATIN_PIECES, randomStrings } from "../libc-order-fixture.ts";
 
 const adminUrl = process.env.IT_POSTGRES_URL;
 const tag = `it_libc_${process.pid}`;
@@ -104,7 +104,7 @@ test("the bounds of the order read: hi(a) < lo(b) orders the keys at the first l
     if (isPlainTable(collate)) assert.notEqual(boundOf(o), null, `${collate} has bounds`);
     if (boundOf(o) === null) { t.skip(`${collate}'s order has no bounds`); return; }
     const ascii = range(0x20, 0x7e).map((g) => String.fromCodePoint(g));
-    const pool = [...ascii, ..."abcAB01$ -.", "l·", "L·", "K", "İ", "é", "é", "ß", "가", "❤️", "", "͸"];
+    const pool = [...ascii, ..."abcAB01$ -.", "l·", "L·", "K", "İ", "é", "é", "ß", "가", "❤️", "", "͸", ...LATIN_PIECES];
     // the control characters the bounds once wrote as marks, which glibc ignores at the first three levels (review r1 of
     // PR 675: U+0002 inside a value was taken for the end of the text)
     pool.push("\u0001", "\u0002", "\u007f");
@@ -112,7 +112,8 @@ test("the bounds of the order read: hi(a) < lo(b) orders the keys at the first l
     const strings = [...randomStrings(pool, 20_000, 8, 666),
       "abc", "ab\u0002cd", "aa", "a\u0002z", "aaz", "\u0002zz", "b", "\u0002", "ab\u0001c", "ab\u007f",
       "cel·la", "cella", "celLa", "cel·La", "", "k", "K", "K", "Kb", "istanbul", "İstanbul", "$5", "5", "-5",
-      long, `${long}a`, `${long}·`, `${long}l·`, long.slice(0, BOUND_CHARS), long.slice(0, BOUND_CHARS + 1), `${long.slice(0, BOUND_CHARS)}é`];
+      long, `${long}a`, `${long}·`, `${long}l·`, long.slice(0, BOUND_CHARS), long.slice(0, BOUND_CHARS + 1), `${long.slice(0, BOUND_CHARS)}é`,
+      ...FOLD_BLOCKS.flatMap(([lo, hi]) => range(lo, hi).flatMap((g) => [String.fromCodePoint(g), `${String.fromCodePoint(g)}b`, `a${String.fromCodePoint(g)}`]))];
     const { failures, ruledOut } = await holdBounds(o, strings);
     assert.deepEqual(failures, []);
     assert.ok(ruledOut > strings.length / 2, `a top 1 rules out ${ruledOut} of ${strings.length}`);

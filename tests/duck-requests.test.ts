@@ -37,10 +37,10 @@ test("every request is read back as the listener built it: the statement, the ou
   assert.deepEqual(all.map((r) => r.requestId), ["a1", "a2", "a3"], "newest last");
   assert.deepEqual(all[0], { requestId: "a1", startedAt: new Date(t0).toISOString(), session: 4, applicationName: "Metabase", clientAddress: "203.0.113.7", tokenName: "", user: "", role: "", attributes: null, method: "QUERY", outcome: "ok", status: "completed",
     sqlstate: null, message: null, detail: null, hint: null, rows: 20, durationMs: 12, endedAt: new Date(t0 + 12).toISOString(), bytesSent: 812,
-    query: "SELECT id FROM public.orders LIMIT 20", queryTruncated: false, plan: null, planTruncated: false }, "ended: started + its duration; the bytes the listener counted; the client's address as client_addr");
+    query: "SELECT id FROM public.orders LIMIT 20", queryTruncated: false, plan: null, planTruncated: false, origin: null }, "ended: started + its duration; the bytes the listener counted; the client's address as client_addr");
   assert.deepEqual(all[1], { requestId: "a2", startedAt: new Date(t0 + 1000).toISOString(), session: 4, applicationName: "", clientAddress: null, tokenName: "bi-tool", user: "", role: "", attributes: null, method: "EXECUTE", outcome: "refused", status: "failed",
     sqlstate: "42P01", message: 'relation "nope" does not exist', detail: "the detail", hint: "the hint", rows: null, durationMs: 3, endedAt: new Date(t0 + 1003).toISOString(),
-    bytesSent: null, query: "SELECT * FROM nope", queryTruncated: false, plan: null, planTruncated: false },
+    bytesSent: null, query: "SELECT * FROM nope", queryTruncated: false, plan: null, planTruncated: false, origin: null },
     "a client with no application_name is '', never the log's placeholder");
   assert.deepEqual([all[2]!.outcome, all[2]!.queryTruncated], ["failed", true]);
   assert.deepEqual((await ledger.recent({ limit: 10, failed: true })).map((r) => r.requestId), ["a2", "a3"], "--failed: the refused and failed ones");
@@ -336,6 +336,28 @@ test("a ledger made before the bytes were counted gains the column; its old rows
     ledger.record(row({ requestId: "new", bytesSent: 64 }));
     await ledger.flush();
     assert.deepEqual((await ledger.recent({ limit: 10 })).map((r) => [r.requestId, r.bytesSent]), [["old", null], ["new", 64]]);
+    await ledger.close();
+  } finally { await old.close(); fs.rmSync(d2, { recursive: true, force: true }); }
+});
+
+// WHERE AN XX000 FAILED (issue 924): a row keeps the origin the listener gave it; a ledger the release before made (its
+// table as that release wrote it, every column up to the plan's) gains the column, and its old rows read null.
+test("a ledger made before origins were kept gains the column; its old rows read origin null, a new XX000 row its own", async () => {
+  const d2 = fs.mkdtempSync(path.join(os.tmpdir(), "mason-requests-origin-"));
+  const old = await DuckStore.open(path.join(d2, "duck.db"), () => undefined);
+  try {
+    await old.writer.run("CREATE SCHEMA IF NOT EXISTS _mason");
+    await old.writer.run(`CREATE TABLE ${REQUESTS_TABLE} (request_id VARCHAR, started_at TIMESTAMPTZ, session INTEGER, application_name VARCHAR, token_name VARCHAR, user_name VARCHAR, ` +
+      `method VARCHAR, sqlstate VARCHAR, message VARCHAR, detail VARCHAR, hint VARCHAR, "rows" BIGINT, duration_ms INTEGER, query VARCHAR, query_truncated BOOLEAN, seq BIGINT, json_reads VARCHAR, ` +
+      `bytes_sent BIGINT, gap VARCHAR, role VARCHAR, attributes VARCHAR, client_addr VARCHAR, plan VARCHAR, plan_truncated BOOLEAN)`);
+    await old.writer.run(`INSERT INTO ${REQUESTS_TABLE} (request_id, started_at, method, sqlstate, message, duration_ms, query, query_truncated, seq) ` +
+      `VALUES ('old', now() - INTERVAL 1 MINUTE, 'QUERY', 'XX000', 'an internal error', 3, 'SELECT 1', false, 0)`);
+    const ledger = await RequestLedger.open(old, () => undefined, { days: 7 });
+    ledger.record(row({ requestId: "new", status: 500, sqlstate: "XX000", error: "an internal error", origin: "src/api/postgres/server.ts:2176" }));
+    ledger.record(row({ requestId: "ok" }));
+    await ledger.flush();
+    assert.deepEqual((await ledger.recent({ limit: 10 })).map((r) => [r.requestId, r.sqlstate, r.origin]),
+      [["old", "XX000", null], ["new", "XX000", "src/api/postgres/server.ts:2176"], ["ok", null, null]]);
     await ledger.close();
   } finally { await old.close(); fs.rmSync(d2, { recursive: true, force: true }); }
 });

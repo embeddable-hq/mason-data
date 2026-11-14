@@ -130,7 +130,7 @@ function psql(url: string, sql: string): string {
 }
 
 /** every table the oracle copies: the shop's, `one`, and the type matrix's (oracle/type-matrix.ts TYPED) */
-const COPIED = [...TABLES, "one", "dup", "dup2", "typed", "mapped", "grouped", "typed_arrays", "castable", "cased", "jcased", "jpath", "jcontain", "coll", "coll_top", "colls", "colls_case", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "pnums", "bins", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog", ...LATEST_TABLES];
+const COPIED = [...TABLES, "one", "dup", "dup2", "typed", "mapped", "grouped", "typed_arrays", "castable", "cased", "jcased", "jpath", "jcontain", "coll", "coll_top", "coll_rep", "colls", "colls_case", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "pnums", "bins", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog", ...LATEST_TABLES];
 
 /** the one-row table every dialect case reads, so DuckDB (not the catalog Postgres) answers it */
 const ONE = "CREATE TABLE public.one (id int PRIMARY KEY); INSERT INTO public.one VALUES (1);";
@@ -404,7 +404,8 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     if ("failure" in c) throw new Error(`connect: ${JSON.stringify(c.failure)}`);
     try { return await readLibcOrder(async (sql) => (await c.pg.query(sql)).rows, sc.collate ?? "C", sc.version ?? null, `${pgIdent(sc.schema)}.${pgIdent(sc.name)}`); } finally { c.pg.close(); }
   };
-  const duck = await theStore.listener(facts.collation, null, libc, () => [], theSync.kept, { ...(facts.collations === undefined ? {} : { collations: facts.collations }), readLibc });
+  // the sync's state of each copy, as mason start passes it (a plan reads a copy's rows from it: src/duck/late.ts)
+  const duck = await theStore.listener(facts.collation, null, libc, () => theSync.state(), theSync.kept, { ...(facts.collations === undefined ? {} : { collations: facts.collations }), readLibc });
   /**
    * DUCKDB ALONE (why a user would not just use DuckDB by itself): the same statement, as written, to
    * a plain connection of the same copy — no analysis, no rewrite, no Mason function — scored by the oracle's own

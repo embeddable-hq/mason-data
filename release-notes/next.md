@@ -2,38 +2,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
-- **Metabase's preview of a join to a table with JSON fields is faster.** When you join a table in Metabase's query
-  builder and show fields it unfolds from a JSON column, the preview is a `LIMIT 2000` with no sort. Mason now gathers
-  the rows the preview shows before it reads those fields, so it reads them in a few large batches. Over a 3 M-row
-  table, the 2,000-row preview took about 5 s and now takes about 0.6 s. Postgres still answers it faster, so there is
-  more to do. The rows are the same kind as before: any rows of the join, as Postgres allows for a query with no ORDER
-  BY.
-- **The SQL support list now says plainly what Mason prints for a `numeric` column with no precision.** Rails makes
-  one from `t.decimal`. Mason prints every value of such a column with the most decimals any of its values has, so
-  `12.5` reads `12.50` and `0` reads `0.00`. The values are right. Only their trailing zeros differ from Postgres's.
-  This was listed before, but it was hard to find. To get the same text from Mason and Postgres now, cast the column
-  to `numeric(p, s)` or use `round(x, s)`. A fix is planned.
-
-## What was wrong and is now right
-
-- **A polled table no longer costs an extra connection to your database now and then.** On some machines, Mason's
-  timer for the next poll woke a moment early. Mason then connected to your database, found no table due yet, and
-  connected again a moment later to poll it. Now every timer waits until its time has come.
-- **Mason no longer leaves a time limit on your database's pooled connections.** When the web page checked whether a
-  table could be kept current by replication, Mason set a 10-second time limit on its connection and never took it off.
-  Behind a pooler in transaction mode (PgBouncer, or Supabase's default pooler URL), that connection is handed on to
-  your application next. Your application's queries could then be cancelled after 10 seconds, for up to an hour.
-  `mason mcp` did the same on Mason's own Postgres API with each tool call's time limit. Now each limit ends with
-  Mason's own query, whatever pooler sits in between.
-- **A whole number beside a decimal column no longer loses the column's decimals.** This covers `div()` of two
-  integers, an integer cast to `numeric`, a whole constant such as `2.5e2`, and a whole part of `extract`. When one
-  met a decimal column in an `IN (SELECT …)`, a `UNION`, an `INTERSECT`, an `EXCEPT`, a `CASE`, a `COALESCE` or
-  `GREATEST`, the column's decimals were rounded away with no error. So `a IN (SELECT div(i, 7) …)` matched 0.01 to 0,
-  and rows came back wrong or in the wrong order. Now the rows are Postgres's.
-  - A `UNION`, `INTERSECT` or `EXCEPT` without `ALL` of numbers of different scales prints every row at one scale,
-    the widest. This difference is already listed (`mixed-scale-numeric`). Postgres prints `3` where Mason prints
-    `3.00`. To get Postgres's text, cast each query's column to one scale, such as `::numeric(12,2)`, or use
-    `UNION ALL`, which keeps each row's own scale.
-  - Beside a decimal column with many decimals, such as `numeric(38,30)`, a whole number with too many digits now
-    fails with `numeric field overflow` (22003). Before, Mason rounded the column's decimals away with no error. A
-    `numeric(38,30)` column has room for 8 digits before the point.
+- **The smallest and largest value of a text column, and a page sorted by one, are many times faster when your
+  database sorts text by a language's rules** (a collation such as `en_US.UTF-8`). Metabase reads them when it scans
+  a table, and for a table's preview. Over 4.5 million rows they took 3 to 22 seconds, and now take 0.2 to 3 seconds.
+  The slowest case was a column where most rows hold the same value, such as a status. Over 30 million names they took
+  2 to 4.5 minutes, close to the 5-minute limit, and now take 13 to 26 seconds. Names that begin with an accented
+  letter, such as É, Ø or Ł, are as fast as the rest. The answers are the same as before. A list of distinct values,
+  a smallest value per group and `FETCH FIRST … WITH TIES` are still slow.

@@ -4,7 +4,7 @@
  * to the page's own address (same origin: the page's `default-src 'self'` holds), held here to ONE small shape, and
  * rendered in the page's own look — every string as TEXT, never HTML; no form and no button that changes anything.
  *
- *   { title, sections: [{ heading, facts?: [{ label, value, copy?, status? }], text?, links?: [{ label, url, primary? }] }],
+ *   { title, sections: [{ heading, facts?: [{ label, value, copy?, status? }], text?, links?: [{ label, url, primary?, danger? }] }],
  *     refresh? }
  *
  * READ IN THE PAGE, NOT AT THE START: the answer arrives when the view is shown, from whatever the proxy answers, so it is
@@ -12,7 +12,8 @@
  * long or of a control character, a list too long is outside it), else the view's own failure (`renderFailure`). A
  * link's URL is read by the link back's rules (`hostLinkUrl`, held by tests/web-page.test.ts to accept nothing
  * src/cli/ui-back-link.ts `linkUrl` refuses: the page cannot import the CLI, and the server never sees this data); a
- * link that fails them is DROPPED and said, never rendered. `refresh` (seconds) is held within
+ * link that fails them is DROPPED and said, never rendered. A link is plain, `primary` (the page's primary action) or
+ * `danger` (a destructive one, drawn as the Tables page's Remove), never both. `refresh` (seconds) is held within
  * `REFRESH_MIN_S`..`REFRESH_MAX_S`; without it, the view is read once each time it is shown. A read not answered whole
  * within `HOST_READ_MS` is aborted and said as the view's failure.
  */
@@ -119,12 +120,14 @@ export function hostView(v) {
     let dropped = 0;
     for (const [j, l] of links.entries()) {
       const lat = `${at}.links[${j}]`;
-      if (!isObject(l) || strayKey(l, ["label", "url", "primary"]) !== undefined) return { problem: `${lat} is not { label, url, primary? }` };
+      if (!isObject(l) || strayKey(l, ["label", "url", "primary", "danger"]) !== undefined) return { problem: `${lat} is not { label, url, primary?, danger? }` };
       if (!isLine(l.label, L.line) || l.label.trim() === "") return { problem: `${lat}.label is not one line of text of at most ${L.line} characters` };
       if (l.primary !== undefined && typeof l.primary !== "boolean") return { problem: `${lat}.primary is not true or false` };
+      if (l.danger !== undefined && typeof l.danger !== "boolean") return { problem: `${lat}.danger is not true or false` };
+      if (l.primary === true && l.danger === true) return { problem: `${lat} is both primary and danger: a link may be one of them, not both` };
       const url = hostLinkUrl(l.url);
       if (url === null) { dropped++; continue; }
-      ls.push({ label: l.label, url, primary: l.primary === true });
+      ls.push({ label: l.label, url, primary: l.primary === true, danger: l.danger === true });
     }
     out.push({ heading: s.heading, facts: fs, text: s.text ?? null, links: ls, dropped });
   }
@@ -208,9 +211,10 @@ function factValue(f, id) {
 /** What a section says of the links it left out: never rendered, said. */
 const droppedLine = (n) => n === 0 ? "" : `<p class="dim">${n} link${n === 1 ? "" : "s"} left out: ${n === 1 ? "its URL is" : "their URLs are"} neither a path on this host (/something) nor an https or http URL with its host.</p>`;
 
-/** A section's links: each in the same tab, sending no referrer; the primary one the page's primary action. */
+/** A section's links: each in the same tab, sending no referrer; the primary one the page's primary action, a danger
+ *  one in the page's colours of a destructive action. */
 const linksHtml = (links) => links.length === 0 ? "" : `<p class="host-links">${links.map((l) =>
-  `<a class="btn small${l.primary ? " primary" : ""}" href="${esc(l.url)}" rel="noreferrer">${esc(l.label)}</a>`).join(" ")}</p>`;
+  `<a class="btn small${l.primary ? " primary" : l.danger ? " danger" : ""}" href="${esc(l.url)}" rel="noreferrer">${esc(l.label)}</a>`).join(" ")}</p>`;
 
 /**
  * A HOST'S VIEW AS THE PAGE WRITES IT (`key` names its Copy buttons apart): a panel a section — its heading, its facts

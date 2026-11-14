@@ -37,6 +37,7 @@ import { analysedQueries, caseTwins, FIRST_USER_OID, implicitTimetzCasts, joinsU
 import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
+import { strftimeTemplate } from "./to-char.ts";
 import { jsonbText, parseJson, storedPairs, type Json } from "./jsonb.ts";
 import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
 import type { CaseMapping, DuckCollation, StatementCollations } from "./collation.ts";
@@ -3488,7 +3489,8 @@ class Rewriter {
    * is at least 1 / (|c|·10^S) from every integer, so the floor is exact when 2·|c|·10^S < 10^rscale (two units of the
    * last place, a margin past a division off by its last digit; half of one is the bound), rscale at least
    * 16 − 4·(the quotient's largest base-10000 weight), and at least each operand's display scale. Everything is read
-   * from types and constants: e is + and − of columns of a bounded type (numeric(p, s), smallint, integer, bigint) and
+   * from types and constants: e is an expression Postgres types as an integer (any, `CAST(extract(doy FROM x) AS
+   * integer)` included), or + and − of columns of a bounded type (numeric(p, s), smallint, integer, bigint) and
    * constants, so its magnitude and its display scale are known; e·10^(c's scale) must fit DuckDB's 38 digits, and so
    * must the bin; c is at most 18 places. Anything else (no typmod, a wider column, a computed e) keeps the program's key.
    */
@@ -3533,19 +3535,22 @@ class Rewriter {
     // 128 bits too, whatever the width is written with)
     return { e, up: name !== "floor", shift: (cm[1] === "-" ? -1n : 1n) * 10n ** BigInt(sc), divisor: cAbs, scale: se, wide: d + sc + se > 17 };
   }
-  /** the digits d of a bound |e| < 10^d for a native bin's dividend (`nativeBin`): + and − of columns of a bounded type
-   *  and constants, or null where none is known (a numeric of no typmod, a computed value, a parameter) */
+  /** the digits d of a bound |e| < 10^d for a native bin's dividend (`nativeBin`): an integer-typed expression, + and −
+   *  of columns of a bounded type and constants, or null where none is known (a numeric of no typmod, a computed
+   *  numeric, a parameter) */
   private binMagnitude(read: AstNode): number | null {
     // (a column a grouped query reads through the rewrite's any_value or first is that column's value)
     const e = perGroupRead(read);
     const k = kindOf(e), b = bodyOf(e), t = this.typed(e);
+    // any expression Postgres types as an integer is bounded by its type, whatever computes it: a cast to integer, a
+    // function of one (Metabase's US week, `ceil(CAST(extract(doy FROM x) AS integer) / 7.0)`: issue 464), the engine's
+    // integer being the value it answers everywhere else
+    if (t !== null && t.type === INT2) return 5;
+    if (t !== null && t.type === INT4) return 10;
+    if (t !== null && t.type === INT8) return 19;
     switch (k) {
       case "ColumnRef": {
-        if (t === null) return null;
-        if (t.type === INT2) return 5;
-        if (t.type === INT4) return 10;
-        if (t.type === INT8) return 19;
-        if (t.type !== NUMERIC || t.typmod < 4) return null;
+        if (t === null || t.type !== NUMERIC || t.typmod < 4) return null;
         const precision = ((t.typmod - 4) >> 16) & 0xffff, scale = (t.typmod - 4) & 0xffff;
         // (a negative scale, numeric(5, -2), reads here as a scale past its precision: not bounded here)
         return precision >= 1 && precision <= 38 && scale <= precision ? Math.max(precision - scale, 0) : null;
@@ -5670,7 +5675,7 @@ class Rewriter {
         if (args.length === 3 && argType(1) !== null && TEXTS.has(argType(1)!)) throw new Unrewritable("substring(… SIMILAR … ESCAPE …) is not supported by Mason", "use substring(text from pattern) with a POSIX regular expression", "similar-to-forms");
         return null;
       case "octet_length": if (argType(0) !== null && TEXTS.has(argType(0)!)) return fn("strlen", args); return null;
-      case "to_char": return toChar(args, argType(0));
+      case "to_char": return toChar(args, argType(0), (x) => this.clone(x));
       case "to_timestamp": if (args.length === 2) return cast(fn("strptime", [args[0]!, strConst(strptimeFormat(args[1]!))]), ["timestamptz"]); return null;
       case "to_date": if (args.length === 2) return cast(fn("strptime", [args[0]!, strConst(strptimeFormat(args[1]!))]), ["date"]); return null;
       case "format": return formatCall(args, (a, i) => this.pgText(a, argType(i), false) ?? cast(a, ["varchar"]));
@@ -7859,9 +7864,26 @@ function translateTemplate(fmt: string, forParse: boolean): string {
 }
 
 /** to_char of a time or a number, by Postgres's template rules (src/duck/to-char.ts): the value's text, the format's */
-function toChar(args: AstNode[], type: number | null): AstNode {
+function toChar(args: AstNode[], type: number | null, clone: (n: AstNode) => AstNode): AstNode {
   if (args.length !== 2) throw new Unrewritable("to_char() takes a value and a format", "write to_char(value, 'format')", { postgres: "42883" });
-  if (type !== null && [DATE, TIMESTAMP, TIMESTAMPTZ].includes(type)) return fn("__mason_to_char_time", [cast(args[0]!, ["varchar"]), cast(args[1]!, ["varchar"])]);
+  if (type !== null && [DATE, TIMESTAMP, TIMESTAMPTZ].includes(type)) {
+    const fmt = constString(args[1]);
+    // (the value is read by the guard and by strftime: a volatile one, `ts + random() * interval '1 day'`, would be two
+    // values where Postgres reads one, so it is the function's, read once)
+    const spec = fmt === null || callsVolatile(args[0]) ? null : strftimeTemplate(fmt, type === DATE);
+    const called = (x: AstNode, f: AstNode): AstNode => fn("__mason_to_char_time", [cast(x, ["varchar"]), cast(f, ["varchar"])]);
+    if (spec === null) return called(args[0]!, args[1]!);
+    // A FORMAT STRFTIME WRITES AS POSTGRES DOES (issue 464: the function a row, a grouped month was x8-18 of Postgres):
+    // DuckDB's own strftime of the value, in the session's zone as the function's text of it is, wherever the year is
+    // 1 to 9999 AD in any zone (two days inside either end); infinity, BC and a year past 9999 stay the function's
+    const duckType = type === DATE ? "date" : type === TIMESTAMP ? "timestamp" : "timestamptz";
+    const bound = (day: string): AstNode => cast(strConst(type === DATE ? day : type === TIMESTAMP ? `${day} 00:00:00` : `${day} 00:00:00+00`), [duckType]);
+    const x = args[0]!;
+    return caseWhen([
+      [isNull(clone(x)), nullConst()],
+      [and([op(">=", clone(x), bound("0001-01-03")), op("<", clone(x), bound("9999-12-29"))]), fn("strftime", [clone(x), strConst(spec)])],
+    ], called(x, args[1]!));
+  }
   if (type !== null && (INTEGERS.has(type) || FLOATS.has(type) || type === NUMERIC)) return fn("__mason_to_char_number", [cast(args[0]!, ["varchar"]), cast(args[1]!, ["varchar"])]);
   throw new Unrewritable("to_char of an interval is not supported by Mason", "format its parts with extract(… from interval), or to_char a timestamp", "to-char-patterns");
 }
@@ -8011,9 +8033,12 @@ const VOLATILE = new Set(["random", "gen_random_uuid", "uuid_generate_v4", "cloc
 /** A window ordered or partitioned by a volatile function (`row_number() OVER (ORDER BY random())`, a random row per
  *  group) is refused by name: DuckDB refuses a volatile expression there, and one it takes as deterministic is computed
  *  once for every row (one value: the order is the input's, never random) */
+/** whether a tree calls a volatile function anywhere in it (`VOLATILE`) */
+const callsVolatile = (x: unknown): boolean => Array.isArray(x) ? x.some(callsVolatile) : x !== null && typeof x === "object"
+  && ((isNode(x) && kindOf(x) === "FuncCall" && VOLATILE.has(lastName(bodyOf(x).funcname))) || Object.values(isNode(x) ? bodyOf(x) : x as Body).some(callsVolatile));
+
 function volatileWindows(v: unknown): void {
-  const calls = (x: unknown): boolean => Array.isArray(x) ? x.some(calls) : x !== null && typeof x === "object"
-    && ((isNode(x) && kindOf(x) === "FuncCall" && VOLATILE.has(lastName(bodyOf(x).funcname))) || Object.values(isNode(x) ? bodyOf(x) : x as Body).some(calls));
+  const calls = callsVolatile;
   const check = (w: Body): void => {
     if (calls(w.orderClause) || calls(w.partitionClause)) {
       throw new Unrewritable("a window ordered or partitioned by random() (or another volatile function) is not supported by Mason",

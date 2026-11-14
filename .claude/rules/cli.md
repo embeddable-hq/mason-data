@@ -443,7 +443,7 @@ CLI lacks).
   pin that fits neither `version` nor `next` (`pinRefusal`, by `pinFits`, the image's rule) before it sends, where a 200
   says them; a service that says none, or an answer it cannot read (unless it carries a secret), leaves the pin to the replica (tests/cli-replica-upgrade.test.ts).
 - **The road to production is commands too** (the journey from running it locally to deploying it in production; the
-  README's "Going to production", `mason help production` offline). Only the project folder
+  README's "Run it on a server", `mason help production` offline). Only the project folder
   travels. **`mason.yml` pins the version** the project is written for (src/lib/project-version.ts: init writes it,
   start adds it to an older project; the image refuses another release line or a newer patch, as `mason serve`'s own
   failure before it writes anything (`servePin`, src/cli/serve.ts), and what it says follows from where the version was

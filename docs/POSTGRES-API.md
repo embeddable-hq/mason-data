@@ -129,9 +129,9 @@ the end is on stderr with the exit code.
 
 ### Roles
 
-**A role limits what a user reads to tables and columns**: `mason user add <name> --role <role>` names a role of the
-project's roles file, `mason/roles.yml` beside the sources file, written in the sources file's own words. `mason init`
-writes it, with today's access said in it — one role reading everything, the default:
+**A role can limit a user to some tables, columns and rows.** Roles live in `mason/roles.yml`, beside the sources
+file, and use the sources file's words. `mason user add <name> --role <role>` gives a user one of them. `mason init`
+writes the file with one role that reads everything, as the default:
 
 ```yaml
 default: everything              # the role of a user added without --role

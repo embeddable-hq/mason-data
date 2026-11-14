@@ -46,6 +46,7 @@ import type { LibcOrder } from "../src/duck/libc-order.ts";
 import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
 import { mintToken, tokenProblem } from "../src/duck/token.ts";
 import type { PgColumn, PgSchema } from "../src/api/postgres/schema.ts";
+import type { CopyState } from "../src/duck/sync.ts";
 import { BI_SHAPES } from "./integration/oracle/bi-shapes.ts";
 
 const UPDATE = process.env.UPDATE_FIXTURE === "1";
@@ -161,6 +162,11 @@ const REWRITTEN: Shape[] = [
   // over 3 M rows, ~5 s against ~0.6 s); the paths written alike
   { name: "a LIMIT with no ORDER BY over a LEFT join to a JSON-unfolded derived side, the paths bound (Metabase's preview)", sql: 'SELECT "public"."customers"."id" AS "id", "public"."customers"."name" AS "name", "Orders"."id" AS "Orders__id", "Orders"."meta → status" AS "Orders__meta → status", "Orders"."meta → n" AS "Orders__meta → n" FROM "public"."customers" LEFT JOIN (SELECT "public"."orders"."id" AS "id", "public"."orders"."customer_id" AS "customer_id", ("public"."orders"."meta" #>> array[$1]::text[])::text AS "meta → status", ("public"."orders"."meta" #>> array[$2]::text[])::numeric AS "meta → n" FROM "public"."orders") AS "Orders" ON "public"."customers"."id" = "Orders"."customer_id" LIMIT 2000', values: ["status", "n"] },
   { name: "a LIMIT with no ORDER BY over a LEFT join to a JSON-unfolded derived side, the paths written", sql: "SELECT c.id, c.name, o.status, o.n FROM customers c LEFT JOIN (SELECT id, customer_id, (meta #>> array['status']::text[])::text AS status, (meta #>> array['n']::text[])::numeric AS n FROM orders) o ON c.id = o.customer_id LIMIT 20" },
+  // issue 463, the 20-row preview: with no ORDER BY the preserved table limited first where it holds at least as many
+  // rows as every other FROM item (the sync's counts, SHOP_COPIES), so no hash table of the other side's whole join
+  // column is built; a small table preserved beside a big one (issue 824's case, above) stays as it was
+  { name: "a LIMIT with no ORDER BY over a LEFT join, the preserved table the biggest: limited first", sql: "SELECT o.id, o.status, c.name FROM orders o LEFT JOIN customers c ON c.id = o.customer_id LIMIT 20" },
+  { name: "a LIMIT with no ORDER BY over a LEFT join to a JSON-unfolded derived side of its size: limited first", sql: 'SELECT "public"."orders"."id" AS "id", "D"."meta → status" AS "D__meta → status" FROM "public"."orders" LEFT JOIN (SELECT "public"."orders"."id" AS "id", ("public"."orders"."meta" #>> array[$1]::text[])::text AS "meta → status" FROM "public"."orders") AS "D" ON "public"."orders"."id" = "D"."id" LIMIT 20', values: ["status"] },
   { name: "a top N beside a WITH query", sql: "WITH c AS (SELECT id, name FROM customers WHERE tenant_id = 'acme') SELECT o.meta, c.name FROM orders o JOIN c ON c.id = o.customer_id ORDER BY o.id DESC LIMIT 100" },
   { name: "a top N beside an aggregated side, carried", sql: "SELECT o.id, o.meta, s.n FROM orders o JOIN (SELECT customer_id, count(*) AS n FROM order_items i JOIN orders x ON x.id = i.order_id GROUP BY customer_id) s ON s.customer_id = o.customer_id ORDER BY o.id DESC LIMIT 100" },
   // merged columns and computed keys (issue 134, step 3): a USING and a NATURAL of the wide table by row number, read through
@@ -232,6 +238,9 @@ const REWRITTEN: Shape[] = [
   // the column under a guard DuckDB folds at Execute, no Mason function per row (never the parameter's double)
   { name: "a numeric column = a bound parameter: the scan's filter", sql: "SELECT o.id FROM orders o WHERE o.amount = $1", values: ["19.99"] },
   { name: "a numeric column BETWEEN two bound parameters: the scan's filter", sql: "SELECT count(*) FROM orders o WHERE o.amount BETWEEN $1 AND $2", values: ["10", "20"] },
+  // a numeric quotient grouped that is no bin the engine computes (its dividend a numeric of no bound): keyed a row by
+  // the program's one call (issue 665)
+  { name: "issue 665: a quotient grouped that is no engine's bin: the day of an epoch", sql: "SELECT floor(extract(epoch FROM o.created_at) / 86400.0) AS d, count(*) FROM orders o GROUP BY 1 ORDER BY 1" },
 ];
 
 /** the BI shapes (tests/integration/oracle/bi-shapes.ts) whose plans are held: one of each structure — joins,
@@ -273,6 +282,7 @@ const HELD_BI = [
   "Metabase's sum where: sum(CASE … ELSE 0.0 END), the arms the rows took",
   "Grafana's $__timeGroup: floor(epoch / n) * n",
   "issue 665: Metabase's week of year, the expression repeated",
+  "issue 464: to_char of a month grouped",
   "issue 665: Metabase's numeric auto-bin",
   "issue 665: the auto-bin of a bare column named as its output",
   "issue 665: the grouped quotient read as text and as a cast",
@@ -547,6 +557,10 @@ async function shopStore(name: string, logged: string[], ddl: readonly string[] 
   for (const s of ddl) await store.writer.run(s);
   return store;
 }
+/** the shop's copies as the sync counts them (`Sync.state`): what a plan reads of each table's size (src/duck/late.ts
+ *  `LateContext.rows`) */
+const SHOP_COPIES: CopyState[] = ([["tenants", 3], ["customers", 20_000], ["orders", ORDERS], ["order_items", 300_000], ["products", 12], ["categories", 7], ["order_tags", 300_000]] as const)
+  .map(([name, rows]) => ({ source: `public.${name}`, phase: "copied", rows, bytes: null, seconds: null, copiedAt: null, error: null }));
 /** the listener over `store` under a collation (`duck`), and a client of it */
 async function listen(store: DuckStore, logged: string[], duck: Awaited<ReturnType<DuckStore["listener"]>>): Promise<Target> {
   const api = await startPostgresApi({
@@ -646,7 +660,7 @@ function target(on: Where | undefined): Promise<Target> {
 before(async () => {
   const logged: string[] = [];
   const store = await shopStore("duck", logged);
-  shop = await listen(store, logged, await store.listener(undefined, undefined, undefined, () => []));
+  shop = await listen(store, logged, await store.listener(undefined, undefined, undefined, () => SHOP_COPIES));
 });
 after(async () => {
   await Promise.allSettled([...made.values(), ...smaller.values()]);
@@ -843,13 +857,14 @@ test("a native json filter or read hands no row to any Mason function", async (t
 // key, the printed cells — computed once per GROUP over the group's columns (src/duck/rewrite.ts keyedGroups,
 // `readPerGroup`). Grouped beside its key as well (4861a5b), the week of year handed the functions three rows a row (the
 // double, the program, the key) and a fourth for the ORDER BY's program inside any_value: 3x the time of 09204fa's one.
-// The bound: the rows, plus a few calls a group (the week of year has 53 groups over the orders' 694 days;
+// The bound: the rows, plus a few calls a group (the day of an epoch has 694 groups over the orders' 694 days;
 // each thread's partial groups may evaluate a projection again), never a second call a row. The turn
-// (`__mason_turn`, a vector's hop) is no row's call: left out
-const GROUPED_QUOTIENTS = ["issue 665: Metabase's week of year, the expression repeated"];
+// (`__mason_turn`, a vector's hop) is no row's call: left out. (Metabase's week of year was this shape until issue 464
+// made it a bin of an integer, below)
+const GROUPED_QUOTIENTS = ["issue 665: a quotient grouped that is no engine's bin: the day of an epoch"];
 test("issue 665: a grouped numeric quotient hands the Mason functions one row a row, the rest per group", async (t) => {
   for (const name of GROUPED_QUOTIENTS) {
-    const rows = [...(await rowsOf(sqlOf(`BI shape: ${name}`)))].filter(([k, n]) => k !== "__mason_turn" && n > 0);
+    const rows = [...(await rowsOf(sqlOf(name)))].filter(([k, n]) => k !== "__mason_turn" && n > 0);
     const total = rows.reduce((a, [, n]) => a + n, 0);
     t.diagnostic(`${name}: ${rows.map(([k, n]) => `${k} ${n}`).join(", ")}; ${total} rows of ${ORDERS}`);
     assert.ok(total >= ORDERS, `${name}: the Mason functions were handed ${total} rows of the ${ORDERS} orders: no key a row — a native plan? Read it, and tighten this invariant`);
@@ -863,8 +878,10 @@ test("issue 665: a grouped numeric quotient hands the Mason functions one row a 
 // group. Keyed a row by `__mason_numeric_program_key` (issue 665's one call a row), the binned card took 46–76 s over
 // 12 M rows against Postgres's 2.6–6.7 s. The bound: a few calls a group (80 bins of the orders' amounts at most;
 // each thread's partial groups may evaluate a projection again), never one a row
+// Metabase's US week of year, `ceil(CAST(extract(doy FROM x) AS integer) / 7.0)`, is a bin of an integer-typed
+// expression (issue 464: keyed a row, 28 s against Postgres's 5.4 s over 12 M rows)
 const BINS = ["issue 665: Metabase's numeric auto-bin", "issue 665: the auto-bin of a bare column named as its output",
-  "issues 464, 465: Metabase's binned card, from a min below zero", "issues 464, 465: Metabase's binned implicit join"];
+  "issues 464, 465: Metabase's binned card, from a min below zero", "issues 464, 465: Metabase's binned implicit join", "issue 665: Metabase's week of year, the expression repeated"];
 test("issues 464, 465: a numeric bin of a numeric(12,2) column is grouped by the engine's integer: the Mason functions see each group, never each row", async (t) => {
   for (const name of BINS) {
     const rows = [...(await rowsOf(sqlOf(`BI shape: ${name}`)))].filter(([k, n]) => k !== "__mason_turn" && n > 0);
@@ -875,13 +892,25 @@ test("issues 464, 465: a numeric bin of a numeric(12,2) column is grouped by the
   }
 });
 
-// issue 666: a text's top N and min / max under a libc order hand the libc key the rows its native bounds cannot rule
-// out, never every row. The notes are 50,000 values over the 750,000 rows that hold one: a page and a min or max are a
-// value's few rows each. The statuses are six values: a sixth of the rows tie on the least (all of them candidates, as
-// a tie is broken by the key), never the million
-test("a text's top N and min / max under a libc order hand the libc key their candidates, never every row", async (t) => {
-  for (const [sql, most] of [["SELECT id, notes FROM orders ORDER BY notes LIMIT 50", 1_000], ["SELECT id FROM orders ORDER BY notes DESC NULLS LAST, id LIMIT 2000", 40_000],
-    ["SELECT min(notes), max(notes) FROM orders", 1_000], ["SELECT min(status), max(status) FROM orders", ORDERS / 3], ["SELECT o.id, o.status, o.amount FROM orders o ORDER BY o.status LIMIT 50", ORDERS / 5]] as const) {
+// issue 464: a month grouped by its to_char text is DuckDB's strftime (src/duck/to-char.ts `strftimeTemplate`): the
+// function is handed no row of the million (it was handed each, x8-18 of Postgres over 4.5 M rows); the ORDER BY's
+// libc key is computed per group
+test("issue 464: to_char of a month grouped hands the to_char function no row", async (t) => {
+  const rows = [...(await rowsOf(sqlOf("BI shape: issue 464: to_char of a month grouped")))].filter(([k, n]) => k !== "__mason_turn" && n > 0);
+  t.diagnostic(rows.map(([k, n]) => `${k} ${n}`).join(", ") || "none");
+  assert.equal(rows.find(([k]) => k === "__mason_to_char_time")?.[1] ?? 0, 0, `the to_char function was handed rows: ${rows.map(([k, n]) => `${k} ${n}`).join(", ")}`);
+  assert.ok(rows.reduce((a, [, n]) => a + n, 0) <= 10_000, `the Mason functions were handed ${rows.map(([k, n]) => `${k} ${n}`).join(", ")}: per row, not per group`);
+});
+
+// issue 666: a text's top N and min / max under a libc order hand the libc key each DISTINCT value its native bounds
+// cannot rule out, once, never a row. The notes are 50,000 values over the 750,000 rows that hold one: a page keys its
+// n values (`LIMIT 2000`: the 2,000 smallest values' keys), a min or a max one value each. The statuses are six values
+// over the million rows: before the second round a sixth of the rows tied on the least and each was keyed (166,000 for
+// a page, 333,000 for a min and a max); now each status at most once
+test("a text's top N and min / max under a libc order hand the libc key each distinct candidate value once, never every row", async (t) => {
+  for (const [sql, most] of [["SELECT id, notes FROM orders ORDER BY notes LIMIT 50", 50], ["SELECT id FROM orders ORDER BY notes DESC NULLS LAST, id LIMIT 2000", 2_000],
+    ["SELECT min(notes), max(notes) FROM orders", 2], ["SELECT min(status), max(status) FROM orders", 2 * 6], ["SELECT o.id, o.status, o.amount FROM orders o ORDER BY o.status LIMIT 50", 6],
+    ["SELECT * FROM orders ORDER BY status DESC LIMIT 50", 6]] as const) {
     const keyed = (await rowsOf(sql, "libc")).get("__mason_libc_key") ?? 0;
     t.diagnostic(`${sql}: __mason_libc_key handed ${keyed} rows of ${ORDERS}`);
     assert.ok(keyed > 0, `${sql}: the libc key was handed no row — the function counter or the statement changed`);

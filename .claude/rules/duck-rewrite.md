@@ -101,14 +101,26 @@ paths:
     Postgres over 12 M rows): e·10^(c's scale) floored in a DECIMAL, divided in HUGEINT, and every reader of the value
     computed per group from its program. Postgres floors the quotient ROUNDED to `select_div_scale`'s rscale, so the
     bin is the engine's only where no quotient that is not whole can round to one (2·|c|·10^S < 10^rscale, rscale at
-    least 16 − 4·the quotient's largest base-10000 weight), only where e is + and − of columns of a bounded type
-    (numeric(p ≤ 38, s), the integers) and constants, whose magnitude and display scale are read from the types, c is
+    least 16 − 4·the quotient's largest base-10000 weight), only where e is an expression Postgres types as an integer
+    (Metabase's US week, `ceil(CAST(extract(doy FROM x) AS integer) / 7.0)`: keyed a row, ×5 of Postgres over 12 M rows)
+    or + and − of columns of a bounded type (numeric(p ≤ 38, s), the integers) and constants, whose magnitude and
+    display scale are read from the types, c is
     at most 18 places, and e·10^(c's scale) and the bin fit 38 places. A bigint by 12.5 is not (1000000000000000012 /
     12.5 floors to …01), nor a numeric of no typmod: the program's key, as before. **The bin is the KEY only**, never a
     value `duckExact` calls exact (the review of PR 922): read as the engine's DECIMAL(38, 0) beside another DECIMAL in a
     UNION, an IN, a CASE or a comparison it was cast to a type that rounds the other's decimals, and a product of it
     passed 38 places where Postgres answers. `tests/duck-wire.test.ts` "issues 464, 465", the plan fixture's BINS, the
     oracle's `bin:` statements over `bins`;
+  - **a to_char of a time in a format DuckDB's strftime writes as Postgres does is `strftime`** (`strftimeTemplate`,
+    src/duck/to-char.ts; `toChar`, issue 464: the function a row, a grouped month was ×8–18 of Postgres over 4.5 M
+    rows): the template read as the function reads it, and taken only when every pattern is one strftime writes alike
+    (YYYY MM DD DDD IYYY IW Mon Dy FMMonth FMDay HH24 MI SS MS US, a date's without the time of day) and the format is
+    a constant; anything else (Q, a padded name, FM on a number, TH, TM, another case, a parameter, a template that
+    writes nothing, which DuckDB refuses as it binds, and a volatile value, which the guard would read twice) is the function's.
+    The value is read in the session's zone by DuckDB's calendar, as the function's text of it was, and only for a
+    year 1 to 9999 AD in any zone (a CASE: NULL is NULL, ±infinity, BC and a year past 9999 the function's).
+    `tests/duck-functions.test.ts` holds each taken template to the function, `tests/duck-wire.test.ts` "issue 464"
+    the wire in three zones, the plan fixture's `issue 464` and the oracle's `issue 464: to_char` statements;
   - **a count(DISTINCT x) of a key is count(x)** (`src/duck/distinct-key.ts`): x alone its table's PRIMARY KEY in
     the CATALOG's pg_index (the key the copy is written by; never a sources file's `key:`, and NEVER another UNIQUE
     index — the copy may hold its value twice for a moment, and the catalog's indexes are the source's as of the start
@@ -163,7 +175,15 @@ paths:
     DISTINCT ON, a LATERAL item or a LIMIT that is a parameter; a schema-qualified column of the item is read by its
     name inside (`shortened`). It still reads the other side's whole join column (about 20 s cold at 153 M rows): an
     index or clustering is the owner's to decide. `tests/duck-wire.test.ts` "the preserved side of an outer join …",
-    the oracle's `preserved first:` and the plan fixture hold it ("A top N over joined tables");
+    the oracle's `preserved first:` and the plan fixture hold it ("A top N over joined tables"). **With no sort, the
+    preserved table is limited first only where it holds at least as many rows as every other FROM item**
+    (`biggestPreserved`, issue 463: Metabase's 20-row preview built a hash table of the smaller side's whole join
+    column): then the engine hashed each other item's whole join column before, and limited first it reads it at most
+    once. The rows are the sync's count of each copy (`LateContext.rows`, from `CopyState.rows` in src/duck/plan.ts),
+    so a table it does not know, a derived item of anything but one table, a walled read, a WHERE, a preserved item
+    that is no table, and issue 824's small preserved table beside a big one stay as they were. A statement's plan is
+    kept by its text, so a size read once decides until the plan is made again. `tests/duck-wire.test.ts` "the 20-row
+    preview", the plan fixture's "limited first" entries and the oracle's `preserved and biggest:` hold it;
   - **a grouped top N on a whole primary key reads its table's columns after the LIMIT** (`keyFirst`, src/duck/late.ts,
     issue 134, step 6): where the analysis proves a table's WHOLE primary key grouped (`keyGrouped`, pg_index's primary
     key only), the groups are formed as written with `any_value(t.rowid)`, the HAVING, ORDER BY and LIMIT applied, and
@@ -486,8 +506,21 @@ paths:
   `libc bound:`, the source's order in the read test's `bound`. The threshold's subquery clones the SELECT's one FROM
   item and WHERE, so it holds only where they read the same rows twice: nothing volatile, no window or set-returning
   list, no aggregate but the min / max's own, no LIMIT, DISTINCT ON or sample inside but a role's barrier; a cloned
-  walled read is counted as a wall. Anything else is sent as written (a join, GROUP BY, DISTINCT, WITH TIES, a set
-  operation, a window, FILTER). Detector: `libc top N:` (tests/duck-wire.test.ts) and the `text under libc:` plan
+  walled read is counted as a wall. **The bounds and the key are computed once a DISTINCT value, never a row** (`Values`,
+  the second round of issue 666: three native passes of the bounds over 4.5 M rows took 6 s, and a status 98 % one value
+  left those rows candidates, 19 s of keys): the SELECT's distinct values of x are a MATERIALIZED WITH query of its own,
+  a min / max is `any_value` of the least key of the values its bounds keep, and a top N is LEFT JOINed to the keys of
+  the values its bounds keep (the n-th distinct value's hi), sorted by the joined key, its `*` written as its item's.
+  A SELECT inside a subquery expression or a LATERAL item, which may read the query around it, keeps the row-by-row
+  threshold (`correlatable`). The names it writes (its WITH query, the keys' alias, their columns) are none the
+  statement holds (`namesIn`, `fresh`): a column `__mason_v` of the statement's own was an ambiguous reference beside
+  the keys' (the review of PR 945). **A letter of Latin weighed as a mapped character is folded into the run** (`folds`:
+  É by `strip_accents`; where it does not decompose, a `replace`, which on glibc's en_US writes Ø, ł, ð, Đ, Ħ, ŀ, ſ, ª
+  and ¹ ² ³; a mark of no first-level weight dropped), each read from the order and `strip_accents` held to `stripped`
+  over every character of `FOLD_BLOCKS`; a head of ASCII alone is read unfolded, since folding every value doubled a
+  unique wide column's time. Anything else is sent as written (GROUP BY, DISTINCT, WITH TIES, a set operation, a
+  window, FILTER, and a join as a join; but a top N over joined tables that src/duck/late.ts writes as a SELECT of one
+  FROM item, the preserved side limited first or the row numbers chosen, is bounded there as any other). Detector: `libc top N:` (tests/duck-wire.test.ts) and the `text under libc:` plan
   entries and rows test (tests/duck-plans.test.ts), the oracle's `text top N:` and `text min/max:`.
 - **A tie under ICU is two strings, ordered by their bytes** (U+FE0F is ignorable there): every order under ICU ends in
   the bytes, `sortKeys`, `icuKey`, `textMinMax`.

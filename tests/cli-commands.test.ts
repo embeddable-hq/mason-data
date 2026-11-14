@@ -440,7 +440,7 @@ test("statementMsText: a statement's time is always whole milliseconds with thou
 
 test("mason logs --requests: a request a line, newest last — when, the outcome and SQLSTATE, the time, the rows, who, the statement and the error", () => {
   const { requestLine } = commands;
-  const base = { requestId: "r", session: 1, method: "QUERY", clientAddress: null, detail: null, hint: null, queryTruncated: false, user: "", role: "", attributes: null, endedAt: "2026-10-26T14:02:12.357Z", bytesSent: 100, plan: null, planTruncated: false };
+  const base = { requestId: "r", session: 1, method: "QUERY", clientAddress: null, detail: null, hint: null, queryTruncated: false, user: "", role: "", attributes: null, endedAt: "2026-10-26T14:02:12.357Z", bytesSent: 100, plan: null, planTruncated: false, origin: null };
   assert.equal(requestLine({ ...base, startedAt: "2026-10-26T14:02:11.123Z", applicationName: "Metabase", tokenName: "", outcome: "ok", status: "completed", sqlstate: null, message: null,
     rows: 20, durationMs: 1234, query: "SELECT id\n FROM public.orders LIMIT 20" }, PLAIN),
     "2026-10-26 14:02:11  ok                1,234 ms      20 rows  Metabase  SELECT id FROM public.orders LIMIT 20");
@@ -461,9 +461,9 @@ test("the sync's events: a line each in mason logs --events and mason status's S
   const { eventLine, syncErrorLines, totalsText, LOGS } = commands as unknown as {
     eventLine: (e: unknown, st: typeof PLAIN) => string; syncErrorLines: (r: unknown, st: typeof PLAIN) => string[];
     totalsText: (t: unknown, now?: number) => string; LOGS: typeof STATUS };
-  const failedCopy = { at: "2026-10-28T09:00:00.000Z", kind: "copy_failed", failed: true, table: "public.orders", message: "the source closed the connection\nmore detail" };
+  const failedCopy = { at: "2026-10-28T09:00:00.000Z", kind: "full_sync_failed", failed: true, table: "public.orders", message: "the source closed the connection\nmore detail" };
   const restart = { at: "2026-10-28T09:05:00.000Z", kind: "restart", failed: true, table: null, message: "the run stopped (it crashed (SIGSEGV)) after 42 s up, and its supervisor started it again" };
-  assert.equal(eventLine(failedCopy, PLAIN), "2026-10-28 09:00:00  copy_failed         public.orders  the source closed the connection");
+  assert.equal(eventLine(failedCopy, PLAIN), "2026-10-28 09:00:00  full_sync_failed    public.orders  the source closed the connection");
   assert.equal(eventLine(restart, PLAIN), "2026-10-28 09:05:00  restart             Mason  the run stopped (it crashed (SIGSEGV)) after 42 s up, and its supervisor started it again");
   assert.deepEqual(syncErrorLines({ sync: [failedCopy, restart], error: null }, PLAIN), [
     "\nSync errors (the latest, newest last; mason logs --events lists every event):",
