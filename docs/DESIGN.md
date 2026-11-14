@@ -708,6 +708,26 @@ review", and `git show 9e20f15:.claude/workflows/pr-loop-slim.js`.
 a test seen failing without its fix; the coordinator alone merging, pinned to the head read; and acting only on words
 from the repository's people, since anyone can open an issue here.
 
+### A numeric is right to 18 decimal places (the owner, 2026-11-14)
+
+**Decision (the owner, 2026-11-14).** "As long as mason matches postgres to 18 decimal places, that's acceptable." A
+`numeric` Mason returns is the right answer when it equals Postgres's value to 18 decimal places. Trailing zeros may
+differ: "2.5 vs 2.50 … that's a rendering difference, not a value difference." Digits past the 18th decimal place may
+differ too. So values that differ only there may compare equal in Mason, and be merged by a UNION or a DISTINCT, or
+matched by an IN or a join, where Postgres keeps them apart. Each such difference is a `differs` entry in
+`src/duck/gaps.ts`, and the oracle's `KNOWN` decides it. It never blocks a merge. A value off within 18 places, other
+rows for any other reason, a wrong type or a wrong SQLSTATE still block.
+
+**Why.** The engine holds a numeric as a DECIMAL of at most 38 digits, and Postgres's numeric has no such limit. Two
+choices brought this up:
+- In PR 943, a whole number beside a wide decimal (a `numeric(38,30)`, say) in a UNION, an IN or a CASE overflowed the
+  38 digits. Mason failed with 22003 where Postgres answered. The owner chose to round the decimal side, and answer,
+  rather than fail.
+- In issue 946, a column declared `numeric` with no precision prints every value at the column's largest scale (12.50
+  for 12.5), and `min` / `max` print at that one scale too. The owner accepted it as a rendering difference.
+
+The oracle still compares a numeric's text, so each such difference is seen, and listed, never silently passed.
+
 ### How CLAUDE.md is laid out (2026-11-13, issue 891)
 
 **Decision.** CLAUDE.md leads every rule with the rule, in one short sentence. Rules are grouped by when a session needs
