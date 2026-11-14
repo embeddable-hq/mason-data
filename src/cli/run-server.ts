@@ -52,8 +52,8 @@ import { catalogTable, copiedColumns, effectiveSync, entryName, everyColumnLeave
 import { projectWriteState } from "./project.ts";
 import { addEntry, plannedEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type PollMeasure, type RemoveResult } from "./source-edit.ts";
 import { notAddedRefusal, PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamedAnswer, type StreamStatus } from "../duck/sync.ts";
-import { SyncsByHand } from "./sync-by-hand.ts";
-import { DEFAULT_SYNC, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
+import { SyncsByHand, type SyncByHand } from "./sync-by-hand.ts";
+import { agoText, DEFAULT_SYNC, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
 import type { LogBuffer } from "../lib/log-buffer.ts";
 import type { ClientActivity, LedgerRequest, QueryWindow, RequestLedger, UnsupportedSql } from "../duck/requests.ts";
 import { eventLimit, requestFilter, requestFilterText, SLOW_MS, timeOf } from "./request-filter.ts";
@@ -221,6 +221,15 @@ export function usersFact(file: string): { active: number } | { error: string } 
 /** THE RUN'S SYNCS BY HAND (src/cli/sync-by-hand.ts), one registry a run: what `POST /api/sync` starts and `/api/state`
  *  says of each table */
 const byHandOf = new WeakMap<RunContext, SyncsByHand>();
+
+/** A SYNC ASKED OF A TABLE ALREADY SYNCING BY HAND (issue 1007): what is happening, when it started, and where to follow
+ *  it — `mason status`, which the command says; the page says the table's row, in its own words */
+export function busyFailure(tables: readonly string[], running: SyncByHand, now = Date.now()): Failure {
+  const busy = tables.filter((t) => running.tables.includes(t));
+  return { code: "busy", message: `${busy.join(", ")} ${busy.length === 1 ? "is" : "are"} already syncing (started ${agoText(running.startedAt, now)})`,
+    fix: "it ends by itself, and a second sync is never started beside it",
+    next: [["mason status", "when each table was last synced"]] };
+}
 function syncsOf(ctx: RunContext): SyncsByHand {
   let s = byHandOf.get(ctx);
   if (s === undefined) { s = new SyncsByHand(); byHandOf.set(ctx, s); }
@@ -1116,23 +1125,20 @@ export function createRunServer(ctx: RunContext): http.Server {
           }
           const tables = [...new Set(body.tables as string[])];
           const syncs = syncsOf(ctx);
+          // A SYNC BY HAND OF ONE OF THEM RUNNING, or waiting for the pass ahead of it: refused `busy` at once (the owner, on
+          // issue 1007: a second Sync now is never queued for another read of the table), with that sync beside it
           const running = syncs.running(tables);
-          if (running !== null && !running.same) {
-            const busy = tables.filter((t) => running.sync.tables.includes(t));
-            sendFailure(res, 409, { message: `${busy.join(", ")} ${busy.length === 1 ? "is" : "are"} already syncing (a sync of ${running.sync.tables.join(", ")} started at ${running.sync.startedAt}): sync the others alone, or again once it ends`, code: "refused" }, { code: "refused" });
-            return;
-          }
-          // the sync's one check, as it is asked: a refusal now is the answer, and no sync starts
-          const refused = running === null ? ctx.duck.refused(tables) : null;
+          if (running !== null) { sendFailure(res, 409, busyFailure(tables, running), { code: "busy", sync: running }); return; }
+          // the sync's one check, as it is asked: a refusal now is the answer (`busy` while the run itself syncs it), and no sync starts
+          const refused = ctx.duck.refused(tables);
           if (refused !== null) { sendFailure(res, refused.code === "not_found" ? 404 : 409, { message: refused.message, code: refused.code }, { code: refused.code }); return; }
-          // the same tables syncing already: that sync is the answer, never a second one
-          const started = running?.same ? { sync: running.sync, done: running.done } : syncs.start(tables, () => ctx.duck.poll(tables), (e) => {
+          const started = syncs.start(tables, () => ctx.duck.poll(tables), (e) => {
             if (e instanceof PollRefused) return { code: e.code, message: e.message };
             const why = ((e as Error).message.split("\n---\n").pop() ?? String(e)).split("\n")[0]!;
             ctx.log(`sync by hand of ${tables.join(", ")} failed: ${why}`);
             return { code: "failed", message: (e as Error).message };
           });
-          if (body.wait !== true) { sendJson(res, 202, { sync: started.sync, already: running !== null }); return; }
+          if (body.wait !== true) { sendJson(res, 202, { sync: started.sync }); return; }
           const done = await started.done;
           if (done.answer !== undefined) { sendJson(res, 200, done.answer); return; }
           const f = done.failure!;

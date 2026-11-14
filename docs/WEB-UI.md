@@ -850,11 +850,13 @@ with `removed` (the tables whose entries were cut, as `schema.table`), `file` (t
 
 `{ "tables": ["public.orders"], "wait"?: true }`, each as `schema.table`. It syncs those tables now, as `mason sync`
 does. A sync reads each table whole on the database, so a big table takes minutes. So the answer comes as soon as the
-sync has started: `202` with `sync` and `already`.
+sync has started: `202` with `sync`. It has `id` (a number, new for each sync of this run), `tables` (the tables it
+covers), `state`, `startedAt` and `endedAt`. `state` is `syncing`, and `endedAt` is null.
 
-- `sync` has `id` (a number, new for each sync of this run), `tables` (the tables it covers), `state`, `startedAt` and
-  `endedAt`. `state` is `syncing`, and `endedAt` is null.
-- `already` is true when a sync of exactly these tables was running. That sync is the answer, and no second one starts.
+A table whose sync is already running or waiting to start is refused `409` `busy`, at once. A second sync is never
+queued behind it. That covers a sync asked by hand before (from the page, `mason sync` or this route), its first sync,
+a whole read again, its catch-up, and its poll in the pass the run is making now. A sync asked by hand carries that
+sync beside the refusal, as `sync`, and its `message` says when it started.
 
 Follow it in `GET /api/state`. Each table it covers has `syncByHand`, the same object. It says `syncing` until the
 sync ends. Then `state` is `synced` with `answer` (`{ at, tables: [{ table, changed, deleted, rows, ms }], streamed? }`,
@@ -868,8 +870,9 @@ With `wait` true the request is held until the sync ends, and answers `200` with
 |---|---|---|
 | 400 | `usage` | `tables` is not a non-empty list of strings, or `wait` is not true or false (`send { tables: [schema.table, …], wait?: true }`) |
 | 404 | `not_found` | a table that is not added (`<table> is not added (mason add adds it)`) |
-| 409 | `nothing_yet` | a table whose first sync has not finished or failed, or that is being read again whole or caught up |
-| 409 | `refused` | a table a running sync covers beside others (`<table> is already syncing (…): sync the others alone, or again once it ends`); a run that reads every table again whole |
+| 409 | `busy` | a table already syncing (`<table> is already syncing (started 2 min ago)`, with `fix` and `mason status` next), or whose first sync, whole read again, catch-up or scheduled poll is running or waiting to start |
+| 409 | `nothing_yet` | a table whose first sync failed, or that is being compacted |
+| 409 | `refused` | a run that reads every table again whole |
 
 A refusal is answered at once, and starts no sync. With `"wait": true`, a sync that fails once started is answered
 the same way, or `500` `failed` with the reason.

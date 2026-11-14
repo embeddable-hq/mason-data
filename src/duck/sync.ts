@@ -220,7 +220,8 @@ export interface StreamedAnswer { table: string; position: string; state: Stream
 
 /** a poll asked for that cannot run (`Sync.pollNow`), its reason in the asker's words: `code` is the CLI's failure code */
 export class PollRefused extends Error {
-  readonly code: "not_found" | "nothing_yet" | "refused";
+  /** `busy`: a sync of the table is running or waiting to start, and a second is never queued (issue 1007) */
+  readonly code: "not_found" | "nothing_yet" | "refused" | "busy";
   constructor(code: PollRefused["code"], message: string) { super(message); this.code = code; }
 }
 
@@ -1209,6 +1210,9 @@ export class Sync {
   private readonly joinWhy = new Map<string, string>();
   /** the table being caught up, and what its catch-up is doing */
   private catchingUp: { source: string; phase: "polling" | "applying"; startedAt: number } | null = null;
+  /** the tables the pass running now polls on their schedule, each until its poll ended: a sync by hand of one is
+   *  refused `busy` meanwhile, never queued behind the pass to read it again (issue 1007) */
+  private readonly scheduledNow = new Set<string>();
   /** the stream's last failure and when it starts again; cleared when it starts */
   private streamFailure: { error: string; retryAt: number } | null = null;
   /** A WHOLE-SYNC FAILURE NOT YET OVER, as its event said it (`table: null`): the stream stopped, over when it next applies
@@ -2316,13 +2320,22 @@ export class Sync {
   private syncRefusal(t: AddedTable): PollRefused | null {
     if (this.mode === "recopy") return this.recopyRefusal();
     if (this.replicated(t)) return null;
+    // A SYNC OF IT RUNNING OR WAITING TO START IS `busy` (issue 1007: a second is never queued for another read of the
+    // table): its first sync, a whole read again, its catch-up, its poll in the pass running now; a failed first sync is not
     const st = this.states.get(t.source);
-    if (st?.phase !== "copied") return new PollRefused("nothing_yet", `${t.source} is not synced yet (${st?.phase === "failed" ? `its first sync failed: ${st.error ?? "mason logs says why"}` : "its first sync has not finished"}): mason wait waits for it`);
+    if (st?.phase === "failed") return new PollRefused("nothing_yet", `${t.source} is not synced yet (its first sync failed: ${st.error ?? "mason logs says why"}): mason wait waits for it`);
+    if (st?.phase !== "copied") return new PollRefused("busy", `${t.source} is not synced yet (its first sync has not finished): mason wait waits for it`);
     const again = this.readAgainWhy(t);
-    if (again !== null) return new PollRefused("nothing_yet", `${t.source} is being read again whole (${again}): mason wait waits for it`);
+    if (again !== null) return new PollRefused("busy", `${t.source} is being read again whole (${again}): mason wait waits for it`);
     const r = this.retired.get(t.source);
-    if (r !== undefined) return new PollRefused("nothing_yet", `${t.source} is ${r.layout} (its synced data serves as it was): it is current once read again — mason wait waits for it`);
-    return this.rebuildingRefusal(t);
+    if (r !== undefined) return new PollRefused("busy", `${t.source} is ${r.layout} (its synced data serves as it was): it is current once read again — mason wait waits for it`);
+    const rebuilding = this.rebuildingRefusal(t);
+    if (rebuilding !== null) return rebuilding;
+    if (this.scheduledNow.has(t.source)) {
+      const s = this.syncOf(t);
+      return new PollRefused("busy", `${t.source} is being synced now${s.mode === "poll" ? `, on its schedule (${syncWords(s)})` : ""}: it is current when that ends`);
+    }
+    return null;
   }
 
   /** a poll asked of a table while it is rebuilt or not yet caught up: refused, by name (it is caught up when that ends) */
@@ -2332,7 +2345,7 @@ export class Sync {
     // a compaction rewrites the synced table and reads no source: its polls wait until it ends, then go on from its watermark
     if (now === "compact") return new PollRefused("nothing_yet", `${t.source} is being compacted (its synced data serves as it was, and its polls wait until that ends): mason sync ${t.source} again once it ends`);
     const doing = now === "copy" ? "being read again whole" : `being caught up by one poll ${this.behind.get(t.source)?.why ?? ""}`.trimEnd();
-    return new PollRefused("nothing_yet", `${t.source} is ${doing} (its synced data serves as it was): it is caught up by one poll when that ends, so there is nothing to poll — mason wait waits for it`);
+    return new PollRefused("busy", `${t.source} is ${doing} (its synced data serves as it was): it is caught up by one poll when that ends, so there is nothing to poll — mason wait waits for it`);
   }
 
   /** a poll asked of a table that a rebuild started on since it was asked: refused, by name */
@@ -3373,6 +3386,16 @@ export class Sync {
     // new columns could not be copied (its copy failed above): it is not polled with them
     const now = Date.now();
     const kept = this.mode !== "recopy" ? [...this.tables.values()].filter((t) => !this.replicated(t) && this.pollable(t) && (this.dueAt(t) ?? Infinity) <= now) : [];
+    for (const t of kept) this.scheduledNow.add(t.source);
+    let went = true;
+    try { went = await this.pollScheduled(kept); } finally { this.scheduledNow.clear(); }
+    if (!went) return;
+    if (this.mode !== "recopy") await this.onWriter(() => this.readPolledAt());
+    this.lastPassMs = Date.now() - started;
+  }
+
+  /** the pass's polls of the tables due, in turn, each leaving `scheduledNow` as its poll ends: false when Mason is stopping */
+  private async pollScheduled(kept: readonly AddedTable[]): Promise<boolean> {
     for (const t of kept) {
       if (this.stopped) break;
       // A TRANSACTION PER TABLE, on the writer's turn: one table's slow scan holds no other, and a batch of the stream
@@ -3383,7 +3406,7 @@ export class Sync {
         // a scheduled sync is an event too, listed only when a reader asks for the scheduled syncs (src/duck/events.ts)
         for (const f of found) { this.polledNow(t, f.ms); this.event({ kind: "polled", table: f.table, message: `synced on schedule: ${syncedText(f)}` }); }
       } catch (e) {
-        if (e instanceof Stopping) { this.log("poll stopped: Mason is stopping (rolled back; the synced tables serve as they were)"); return; }
+        if (e instanceof Stopping) { this.log("poll stopped: Mason is stopping (rolled back; the synced tables serve as they were)"); return false; }
         // tried again after its interval (an `off` table whose sync changed: after the sync's), never at every pass
         const s = this.syncOf(t);
         this.due.set(t.source, Date.now() + (s.mode === "poll" ? s.seconds * 1000 : this.intervalMs));
@@ -3393,10 +3416,9 @@ export class Sync {
         this.log(`${t.source}: ${m}`);
         this.event({ kind: "poll_failed", table: t.source, message: m, cause: e });
         await this.onWriter(() => this.record({ ...this.states.get(t.source)!, error: m }));
-      }
+      } finally { this.scheduledNow.delete(t.source); }
     }
-    if (this.mode !== "recopy") await this.onWriter(() => this.readPolledAt());
-    this.lastPassMs = Date.now() - started;
+    return true;
   }
 
   /** a rebuild queued, unless that table's is queued or running already; the queue started if idle. A copy or a

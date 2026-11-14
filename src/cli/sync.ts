@@ -35,6 +35,9 @@ export const SYNC_USAGE = `usage: mason sync (<table>… | --all) [--json]
   --all    every table the sources file names, instead of naming them
   --json   as data: { syncedAt, tables: [{ table, changed, deleted, rows, ms }] (the tables polled), streamed (the
            tables whose sync: is replication, not polled: [{ table, position, state, why }]), next }
+
+  A table whose sync is already running or waiting to start (from the web page, another mason sync, its schedule)
+  is refused at once, code busy: mason status says when it ends.
 `;
 
 export const SYNC: CommandSpec & { needs: "run" } = {
@@ -108,6 +111,13 @@ export async function sync(argv: string[]): Promise<number> {
     const r = await callRun(run, "POST", "/api/sync", { tables: picked, wait: true }, 60 * 60_000);
     if (r.status !== 200) {
       const code = failureCode(r.body.code, r.status === 404 ? "not_found" : "failed");
+      // A SYNC OF IT ALREADY RUNNING OR WAITING TO START (issue 1007): refused at once, never waited on — what this
+      // command would print is a sync it did not start, whose read began before it was asked; the run's own words
+      if (code === "busy") {
+        const f = r.body.failure as { message?: unknown; fix?: unknown } | undefined;
+        return failed("sync", { message: String(f?.message ?? r.body.error), code, ...(typeof f?.fix === "string" ? { fix: f.fix } : {}),
+          next: [["mason status", "when each table was last synced: run this again once it says so, for the changes made since"]] }, { json });
+      }
       return failed("sync", { message: `${picked.join(", ")} ${picked.length === 1 ? "was" : "were"} not synced`, code, why: String(r.body.error),
         next: [["mason status", "each synced table"], ["mason logs", "the run's log"]] }, { json });
     }

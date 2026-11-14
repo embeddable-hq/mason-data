@@ -462,6 +462,18 @@ test("each table's state says why mason sync of it is refused now, in the words 
       // answer no one may hold (issue 1007); a refusal is none (nothing ran)
       assert.deepEqual(events.filter((e) => e.kind === "sync_failed").map((e) => [e.table, e.message]), [["public.a", "sync by hand failed: no source in this test"]]);
       assert.equal(sync.pollRefusal(["public.a", "public.b"])?.message, sync.pollRefusal(["public.b"])?.message, "one table refused refuses the sync");
+      // A SYNC OF IT RUNNING OR WAITING TO START IS `busy` (the owner, on issue 1007: never queued for another read): its
+      // first sync, a whole read again, a catch-up, a retired layout's read again; a failed first sync is not
+      const codeOf = (n: string): string | undefined => sync.pollRefusal([`public.${n}`])?.code;
+      assert.deepEqual(["b", "c", "d", "e", "f", "g", "h", "i"].map((n) => [n, codeOf(n)]),
+        [["b", "busy"], ["c", "nothing_yet"], ["d", "busy"], ["e", "busy"], ["f", "busy"], ["g", "busy"], ["h", "busy"], ["i", "busy"]]);
+      // ITS POLL QUEUED IN THE PASS RUNNING NOW: busy until that poll ends, never polled again behind it
+      (s as unknown as { scheduledNow: Set<string> }).scheduledNow.add("public.a");
+      const queued = sync.pollRefusal(["public.a"]);
+      assert.deepEqual([queued?.code, queued?.message], ["busy", "public.a is being synced now, on its schedule (polled every 5s): it is current when that ends"]);
+      await assert.rejects(sync.pollNow(["public.a"]), { message: queued?.message });
+      assert.equal(sync.state().find((x) => x.source === "public.a")!.syncRefusal, queued?.message, "the page's Sync now is offered disabled meanwhile, with the reason");
+      (s as unknown as { scheduledNow: Set<string> }).scheduledNow.delete("public.a");
     } finally { s.stopped = true; }
   });
   // a run that reads every table again whole: every table refused, in the one sentence

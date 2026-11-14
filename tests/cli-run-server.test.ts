@@ -67,13 +67,18 @@ const pollNow = async (sources: string[]): Promise<{ at: string; tables: PolledT
   asked.push(sources);
   if (pollGate !== null) await pollGate;
   // a refusal met once the pass ahead of it ended, and a sync that failed on the database
-  if (sources.includes("public.events")) throw new PollRefused("nothing_yet", "public.events is being caught up by one poll (its synced data serves as it was): it is caught up by one poll when that ends, so there is nothing to poll — mason wait waits for it");
+  if (sources.includes("public.events")) throw new PollRefused("busy", "public.events is being caught up by one poll (its synced data serves as it was): it is caught up by one poll when that ends, so there is nothing to poll — mason wait waits for it");
   if (sources.includes("public.Shouty")) throw new Error("the poll failed: connection reset");
   return { at: "2026-10-24T10:05:00.000Z", tables: sources.map((table) => ({ table, changed: 2, deleted: 1, rows: 3, ms: 40 })) };
 };
 // the sync's one check as it is asked (src/duck/sync.ts pollRefusal): its refusal by name, before any poll
-const refusedNow = (sources: string[]): InstanceType<typeof PollRefused> | null =>
-  sources.includes("public.logs") ? new PollRefused("nothing_yet", "public.logs is not synced yet (its first sync has not finished): mason wait waits for it") : null;
+// a test marks a table whose sync the run has queued itself (src/duck/sync.ts scheduledNow): refused busy
+const queuedNow = new Set<string>();
+const refusedNow = (sources: string[]): InstanceType<typeof PollRefused> | null => {
+  const queued = sources.find((s) => queuedNow.has(s));
+  if (queued !== undefined) return new PollRefused("busy", `${queued} is being synced now, on its schedule (polled every 5m): it is current when that ends`);
+  return sources.includes("public.logs") ? new PollRefused("nothing_yet", "public.logs is not synced yet (its first sync failed: it broke): mason wait waits for it") : null;
+};
 // the request log's reads (src/duck/requests.ts), as the ledger answers them: the server passes them on, never a copy
 const asks: RequestQuery[] = [];
 const request: LedgerRequest = { requestId: "r1", startedAt: "2026-10-24T10:04:00.000Z", session: 3, applicationName: "Metabase", clientAddress: null, tokenName: "", user: "", role: "", attributes: null, method: "QUERY",
@@ -444,7 +449,7 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
   } finally { copies = []; }
 });
 
-test("POST /api/sync answers as the sync starts, and /api/state follows it to its end: syncing, then what it did or why it failed; a refusal at once; a second ask never a second sync (issue 1007)", async () => {
+test("POST /api/sync answers as the sync starts, and /api/state follows it to its end: syncing, then what it did or why it failed; a refusal at once; a second sync of a table running or queued refused busy, one read (issue 1007)", async () => {
   const call = async (method: string, p: string, body?: unknown): Promise<{ status: number; body: Record<string, unknown> }> => {
     const r = await fetch(`http://127.0.0.1:${ctx.port}${p}`, { method, headers: { Authorization: "Bearer t0ken-of-this-run", ...(body === undefined ? {} : { "Content-Type": "application/json" }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     return { status: r.status, body: await r.json() as Record<string, unknown> };
@@ -461,24 +466,32 @@ test("POST /api/sync answers as the sync starts, and /api/state follows it to it
     assert.notEqual(started, "held", "answered before the sync ended");
     if (started === "held") return;
     const sync = started.body.sync as { id: number; startedAt: string };
-    assert.deepEqual([started.status, started.body], [202, { sync: { id: sync.id, tables: ["public.orders"], state: "syncing", startedAt: sync.startedAt, endedAt: null }, already: false }]);
+    assert.deepEqual([started.status, started.body], [202, { sync: { id: sync.id, tables: ["public.orders"], state: "syncing", startedAt: sync.startedAt, endedAt: null } }]);
     assert.deepEqual(await byHand("public.orders"), { id: sync.id, tables: ["public.orders"], state: "syncing", startedAt: sync.startedAt, endedAt: null }, "the state says it runs: a page opened now says Syncing…");
-    // THE SAME TABLE AGAIN: that sync is the answer, never a second one; a sync of it beside another table is refused
-    const again = await call("POST", "/api/sync", { tables: ["public.orders"] });
-    assert.deepEqual([again.status, (again.body.sync as { id: number }).id, again.body.already], [202, sync.id, true]);
-    const beside = await call("POST", "/api/sync", { tables: ["public.customers", "public.orders"] });
-    assert.deepEqual([beside.status, beside.body.code], [409, "refused"]);
-    assert.equal(beside.body.error, `public.orders is already syncing (a sync of public.orders started at ${sync.startedAt}): sync the others alone, or again once it ends`);
-    // mason sync of it meanwhile (wait: true) waits for that same sync's end, and answers what it did
-    const waiting = call("POST", "/api/sync", { tables: ["public.orders"], wait: true });
+    // A SECOND SYNC OF IT WHILE IT RUNS (the owner, on issue 1007): refused `busy` at once, never queued for another
+    // read — the page's, beside another table, and mason sync's (wait: true) alike, the sync running beside the refusal
+    for (const body of [{ tables: ["public.orders"] }, { tables: ["public.customers", "public.orders"] }, { tables: ["public.orders"], wait: true }]) {
+      const again = await Promise.race([call("POST", "/api/sync", body), new Promise<"held">((r) => setTimeout(() => r("held"), 3000))]);
+      assert.notEqual(again, "held", `${JSON.stringify(body)}: refused at once, never held`);
+      if (again === "held") return;
+      assert.deepEqual([again.status, again.body.code, (again.body.sync as { id: number }).id], [409, "busy", sync.id], JSON.stringify(body));
+      const said = String(again.body.error);
+      assert.match(said, /^public\.orders is already syncing \(started \d+ s ago\)$/);
+      assert.deepEqual(again.body.failure, { code: "busy", message: said, fix: "it ends by itself, and a second sync is never started beside it",
+        next: [{ command: "mason status", what: "when each table was last synced" }] });
+    }
     // A REFUSAL IS AT ONCE, while another sync runs, and starts nothing
     const refused = await call("POST", "/api/sync", { tables: ["public.logs"] });
     assert.deepEqual([refused.status, refused.body.code], [409, "nothing_yet"]);
     assert.match(String(refused.body.error), /^public\.logs is not synced yet/);
-    assert.deepEqual(asked, [["public.orders"]], "one sync, however many asks");
+    // A SYNC OF IT WAITING TO START IN THE RUN (its poll queued in the pass running now): busy too, in the sync's words
+    queuedNow.add("public.customers");
+    const queued = await call("POST", "/api/sync", { tables: ["public.customers"], wait: true });
+    assert.deepEqual([queued.status, queued.body.code, queued.body.error], [409, "busy", "public.customers is being synced now, on its schedule (polled every 5m): it is current when that ends"]);
+    queuedNow.clear();
+    assert.deepEqual(asked, [["public.orders"]], "one read, however many asks");
     end();
-    const waited = await waiting;
-    assert.deepEqual([waited.status, waited.body], [200, { at: "2026-10-24T10:05:00.000Z", tables: [{ table: "public.orders", changed: 2, deleted: 1, rows: 3, ms: 40 }] }]);
+    await new Promise((r) => setTimeout(r, 50));
     const done = await byHand("public.orders") as { endedAt: string };
     assert.deepEqual(done, { id: sync.id, tables: ["public.orders"], state: "synced", startedAt: sync.startedAt, endedAt: done.endedAt,
       answer: { at: "2026-10-24T10:05:00.000Z", tables: [{ table: "public.orders", changed: 2, deleted: 1, rows: 3, ms: 40 }] } }, "then what it did");
@@ -492,7 +505,7 @@ test("POST /api/sync answers as the sync starts, and /api/state follows it to it
     assert.deepEqual([failed.state, failed.failure], ["failed", { code: "failed", message: "the poll failed: connection reset" }]);
     assert.ok(logged.includes("sync by hand of public.Shouty failed: the poll failed: connection reset"), logged.join("\n"));
     const late = await byHand("public.events") as { failure: { code: string; message: string } };
-    assert.deepEqual([late.failure.code, late.failure.message.startsWith("public.events is being caught up")], ["nothing_yet", true]);
+    assert.deepEqual([late.failure.code, late.failure.message.startsWith("public.events is being caught up")], ["busy", true]);
     // and mason sync of one that fails: the failure as before (500, the run's log its next step)
     const broke = await call("POST", "/api/sync", { tables: ["public.Shouty"], wait: true });
     assert.deepEqual([broke.status, broke.body.error, (broke.body.failure as { next: unknown }).next], [500, "the poll failed: connection reset", [{ command: "mason logs", what: "the run's log: what it was doing" }]]);

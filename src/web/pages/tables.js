@@ -69,6 +69,12 @@ function syncedTips(tables) {
   });
 }
 
+/** A SYNC NOW OF A TABLE ALREADY SYNCING (`busy`, issue 1007): the run's words for what is happening, and the way to
+ *  follow it on the page — its row — where the run's failure names `mason status` for the command line. */
+export function busyHere(f) {
+  return { code: "busy", message: `${f.message}. Its row shows when it ends.`, next: [] };
+}
+
 /** A sync's answer said as `mason sync` says it, with Dismiss. `s`: the state, for the tables not kept current;
  *  `picked`: the tables the sync covered (one, from its Sync now; more from a `mason sync` the page saw running). */
 function renderSynced(b, table, s, picked = [table]) {
@@ -878,6 +884,8 @@ export const page = {
         m.outcome = null; m.synced = null;
         const r = await ctx.ask("api/sync", json("POST", { tables: [table] }));
         m.syncing = m.syncing.filter((x) => x !== table);
+        // already syncing (another tab, mason sync, its schedule): the run's words, and how to follow it on the page
+        if ("failure" in r && r.failure.code === "busy") { m.synced = { table, failure: busyHere(r.failure) }; await ctx.refresh(["api/state"]); return false; }
         if ("failure" in r) { m.synced = { table, failure: r.failure }; return false; }
         // followed by its id until the state says it ended
         if (typeof r.body?.sync?.id === "number") m.watching.add(r.body.sync.id);

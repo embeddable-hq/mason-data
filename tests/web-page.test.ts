@@ -3212,6 +3212,25 @@ test("Tables: a page opened while a sync runs (a reload, another tab, mason sync
   assert.match(later.view().tables!, />Sync now<\/button>/);
 });
 
+test("Tables: Sync now of a table already syncing (another tab, mason sync) is refused busy at once: what is happening and that its row shows when it ends; the row then says Syncing… (issue 1007)", async () => {
+  const run = fakeRun();
+  run.answers.set("GET api/state", answer(SYNCED));
+  const app = fn<[unknown], App>("createApp")(run.fetch) as App & { syncTable(t: string): Promise<boolean> };
+  app.show("tables");
+  await app.poll();
+  const running = { id: 9, tables: ["public.customers"], state: "syncing", startedAt: "2026-10-27T09:03:00.000Z", endedAt: null };
+  const message = "public.customers is already syncing (started 2 min ago)";
+  run.answers.set("POST api/sync", answer({ error: message, code: "busy", sync: running,
+    failure: { code: "busy", message, fix: "it ends by itself, and a second sync is never started beside it", next: [{ command: "mason status", what: "when each table was last synced" }] } }, 409));
+  run.answers.set("GET api/state", answer({ ...SYNCED, tables: SYNCED.tables.map((t) => t.table === "public.customers" ? { ...t, syncByHand: running } : t) }));
+  run.asked.length = 0;
+  assert.equal(await app.syncTable("public.customers"), false);
+  assert.deepEqual(run.asked, [`POST api/sync ${JSON.stringify({ tables: ["public.customers"] })}`, "GET api/state"], "refused, then the state read again: the row says the sync running");
+  const said = popOf(app.view().tables!, "act-tables-public.customers");
+  assert.equal(textOf(said), "✗ public.customers is already syncing (started 2 min ago). Its row shows when it ends. Dismiss", "in the page's words: no command named");
+  assert.match(app.view().tables!, /<button type="button" class="small" data-room="Syncing…" disabled>Syncing…<\/button>/);
+});
+
 test("Tables: while the page's Sync now of a table runs, its State says Syncing (amber), as Adding… does for an add; the others keep their own word", () => {
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
   const states = (html: string) => [...html.matchAll(/<td class="state"><span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`);

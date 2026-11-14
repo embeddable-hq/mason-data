@@ -37,11 +37,16 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   words `sourcesReadOnly` as plain sentences now, so a script that matched its old text must match the new one. A new
   field, `sourcesReadOnlyKind`, says which reason it is: `deployed`, `unwritable` or `unknown`.
 - **`POST /api/sync` answers as soon as the sync has started.** It answers `202` with `{ sync: { id, tables, state,
-  startedAt, endedAt }, already }`. Each table in `/api/state` then has `syncByHand`, which says `syncing` until the
-  sync ends, then `synced` with what it did or `failed` with why. A script that calls the endpoint directly and needs
-  the old answer adds `"wait": true` to its body. `mason sync` does this, so it still waits and prints the same report.
-  A refusal is answered at once, as before. A second sync of a table that is syncing gets that sync as its answer,
-  and never starts another.
+  startedAt, endedAt } }`. Each table in `/api/state` then has `syncByHand`, which says `syncing` until the sync
+  ends, then `synced` with what it did or `failed` with why. A script that calls the endpoint directly and needs the
+  old answer adds `"wait": true` to its body. `mason sync` does this, so it still waits and prints the same report.
+  A refusal is answered at once, as before.
+- **A sync of a table that is already syncing, or waiting to start, is refused at once.** This holds for the web
+  page's Sync now, for `mason sync` and for `POST /api/sync`. It is never queued for another read of the table. The
+  refusal has a new code, `busy` (exit 1), and says when the running sync started. The page says the table's row shows
+  when it ends, and `mason sync` names `mason status`. A table whose first sync, whole read again or catch-up is under
+  way was refused before with `nothing_yet`, and is now refused with `busy`. A script that matched `nothing_yet` there
+  must match `busy`.
 - **A sync you start by hand that fails is now listed under Sync events**, as "Manual sync failed" (`sync_failed` in
   `mason logs --events`).
 

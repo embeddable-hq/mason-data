@@ -4,8 +4,8 @@
  * in front of `mason serve` keeps a request open. So the run answers as soon as a sync has started, and the page follows
  * it through `/api/state` (`tables[].syncByHand`): syncing while it runs, then what it did or why it failed.
  *
- * ONE SYNC AT A TIME A TABLE: a second ask for the very tables of a sync running joins it (its answer is that sync's),
- * and one naming a table a sync covers beside others is refused, naming it — two never run at once.
+ * ONE SYNC AT A TIME A TABLE (the owner, on issue 1007): an ask naming a table a sync running covers — waiting for the
+ * pass ahead of it included — is refused `busy` at once, never queued for another read of the table.
  *
  * What a sync did is the sync's ledger's record too (src/duck/events.ts `synced`, `sync_failed`, written by
  * `Sync.pollNow`): this holds only what the run is doing now and the last outcome a table had in this run, for the
@@ -18,7 +18,7 @@ export interface SyncAnswer { at: string; tables: PolledTable[]; streamed?: Stre
 
 /** A sync that failed: its reason in Mason's words, and the CLI's failure code (`refused`, `nothing_yet` for a refusal
  *  met once the pass ahead of it ended, `failed` otherwise). */
-export interface SyncFailure { code: "not_found" | "nothing_yet" | "refused" | "failed"; message: string }
+export interface SyncFailure { code: "not_found" | "nothing_yet" | "refused" | "busy" | "failed"; message: string }
 
 /**
  * ONE SYNC BY HAND, as `/api/state` carries it on each table it covers (`syncByHand`) and `POST /api/sync` answers it:
@@ -36,28 +36,17 @@ export interface SyncByHand {
   failure?: SyncFailure;
 }
 
-/** A second ask while a sync covers one of its tables: the sync running, and whether the ask is that very sync. */
-export type Running = { same: true; sync: SyncByHand; done: Promise<SyncByHand> } | { same: false; sync: SyncByHand };
-
 export class SyncsByHand {
   private next = 1;
   /** each table's last sync by hand in this run, running or ended */
   private readonly last = new Map<string, SyncByHand>();
-  /** each sync running: its end */
-  private readonly ends = new Map<number, Promise<SyncByHand>>();
 
   /** the last sync by hand of this table in this run, running or ended, or null */
   of(table: string): SyncByHand | null { return this.last.get(table) ?? null; }
 
-  /** a sync running that covers one of these tables, or null: the same tables (joined), or others beside (refused) */
-  running(tables: readonly string[]): Running | null {
-    for (const t of tables) {
-      const s = this.last.get(t);
-      if (s?.state !== "syncing") continue;
-      const done = this.ends.get(s.id)!;
-      const same = s.tables.length === new Set(tables).size && tables.every((x) => s.tables.includes(x));
-      return same ? { same: true, sync: s, done } : { same: false, sync: s };
-    }
+  /** a sync by hand running (or waiting for the pass ahead of it) that covers one of these tables, or null */
+  running(tables: readonly string[]): SyncByHand | null {
+    for (const t of tables) { const s = this.last.get(t); if (s?.state === "syncing") return s; }
     return null;
   }
 
@@ -72,14 +61,12 @@ export class SyncsByHand {
     const ended = (e: Omit<SyncByHand, "id" | "tables" | "startedAt" | "endedAt">): SyncByHand => {
       const done: SyncByHand = { id: sync.id, tables: sync.tables, startedAt: sync.startedAt, endedAt: now().toISOString(), ...e };
       for (const t of tables) if (this.last.get(t)?.id === sync.id) this.last.set(t, done);
-      this.ends.delete(sync.id);
       return done;
     };
     const done = (async () => {
       try { return ended({ state: "synced", answer: await poll() }); }
       catch (e) { return ended({ state: "failed", failure: failureOf(e) }); }
     })();
-    this.ends.set(sync.id, done);
     return { sync, done };
   }
 }
