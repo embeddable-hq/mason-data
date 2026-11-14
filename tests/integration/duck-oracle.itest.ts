@@ -231,6 +231,8 @@ const KNOWN: Decided[] = [
   // is within the owner's numeric rule since issue 997, and no difference to the oracle.) A numeric(65,30) or an
   // unconstrained numeric past the engine's DECIMAL, in an arm or under a reader: its text is the engine's digits
   shapesDecided([...SET_OPERATION_ARMS, ...NUMERIC_READERS], { sql: /o\.big\b|o\.amount_raw\b/, kind: "text", issue: 402, why: "a numeric(65,30) or unconstrained numeric in a set operation or under a reader prints the engine's digits" }),
+  // (#946's plain numeric printed at its column's one scale, beside another arm or under min / max, is within the
+  // owner's numeric rule since issue 997, and no difference to the oracle)
   // a VALUES row's NaN or Infinity beside a SELECT arm's numeric sum of one: the engine's double's text
   shapesDecided(VALUES_ARMS, { sql: /sum\(s::numeric\) (AS s )?FROM castable WHERE id IN \(71, 7[46]\)/, kind: "value", issue: 402, why: "a VALUES row's numeric NaN or Infinity in a set operation prints as the engine's double (`nan`, `inf`)" }),
   // a cast to a Postgres type in a VALUES list reaches the engine unmapped (citext, jsonb[], arrays, composites, time(n)[])

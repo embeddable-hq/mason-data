@@ -60,6 +60,7 @@
 import type { ExactColumn } from "../../duck/rewrite.ts";
 import type { PlannedSql } from "../../duck/plan.ts";
 import { copyFacts, type CopyFacts } from "../../duck/explain.ts";
+import { scaledKey } from "../../duck/scale-column.ts";
 import type { CopyState } from "../../duck/sync.ts";
 import { explainedText, explainOptions, type ExplainOptions } from "./explain.ts";
 import * as crypto from "node:crypto";
@@ -3086,6 +3087,8 @@ class Server {
     for (const t of this.options.schema().tables) {
       // a table's row type, by its schema and name (src/duck/plan.ts names the catalog's alike)
       if (t.rowTypeOid !== undefined) out.set(`rowtype:${t.schema ?? "public"}.${t.name}`, t.rowTypeOid);
+      // a plain numeric whose own scales the copy holds (src/duck/scale-column.ts), by schema, table and column
+      for (const c of t.columns) if (c.scaled !== undefined) out.set(scaledKey(t.schema ?? "public", t.name, c.name, c.scaled), 1);
     }
     for (const t of this.options.schema().tables) for (const c of t.columns) {
       if (c.typeOid === undefined || c.spelled === undefined) continue;
