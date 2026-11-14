@@ -312,6 +312,75 @@
       "full_sort": false
     },
     {
+      "name": "a LIMIT with no ORDER BY over a LEFT join to a JSON-unfolded derived side, the paths bound (Metabase's preview)",
+      "sql": "SELECT \"public\".\"customers\".\"id\" AS \"id\", \"public\".\"customers\".\"name\" AS \"name\", \"Orders\".\"id\" AS \"Orders__id\", \"Orders\".\"meta → status\" AS \"Orders__meta → status\", \"Orders\".\"meta → n\" AS \"Orders__meta → n\" FROM \"public\".\"customers\" LEFT JOIN (SELECT \"public\".\"orders\".\"id\" AS \"id\", \"public\".\"orders\".\"customer_id\" AS \"customer_id\", (\"public\".\"orders\".\"meta\" #>> array[$1]::text[])::text AS \"meta → status\", (\"public\".\"orders\".\"meta\" #>> array[$2]::text[])::numeric AS \"meta → n\" FROM \"public\".\"orders\") AS \"Orders\" ON \"public\".\"customers\".\"id\" = \"Orders\".\"customer_id\" LIMIT 2000",
+      "values": [
+        "status",
+        "n"
+      ],
+      "plan": [
+        "CTE",
+        "  PROJECTION",
+        "    LIMIT",
+        "      HASH_JOIN",
+        "        TABLE_SCAN public.orders",
+        "        TABLE_SCAN public.customers",
+        "  PROJECTION",
+        "    HASH_JOIN",
+        "      PROJECTION",
+        "        PROJECTION",
+        "          HASH_JOIN",
+        "            TABLE_SCAN public.orders",
+        "            PROJECTION",
+        "              CTE_SCAN",
+        "      HASH_JOIN",
+        "        TABLE_SCAN public.customers",
+        "        CTE_SCAN"
+      ],
+      "calls": [
+        "__mason_json_get",
+        "__mason_pg_text"
+      ],
+      "sends": [
+        "current_setting"
+      ],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "a LIMIT with no ORDER BY over a LEFT join to a JSON-unfolded derived side, the paths written",
+      "sql": "SELECT c.id, c.name, o.status, o.n FROM customers c LEFT JOIN (SELECT id, customer_id, (meta #>> array['status']::text[])::text AS status, (meta #>> array['n']::text[])::numeric AS n FROM orders) o ON c.id = o.customer_id LIMIT 20",
+      "plan": [
+        "CTE",
+        "  PROJECTION",
+        "    LIMIT",
+        "      HASH_JOIN",
+        "        TABLE_SCAN public.orders",
+        "        TABLE_SCAN public.customers",
+        "  PROJECTION",
+        "    HASH_JOIN",
+        "      PROJECTION",
+        "        PROJECTION calls __mason_json_get, __mason_pg_text, __mason_turn",
+        "          PROJECTION",
+        "            HASH_JOIN",
+        "              TABLE_SCAN public.orders",
+        "              PROJECTION",
+        "                CTE_SCAN",
+        "      HASH_JOIN",
+        "        TABLE_SCAN public.customers",
+        "        CTE_SCAN"
+      ],
+      "calls": [
+        "__mason_json_get",
+        "__mason_pg_text"
+      ],
+      "sends": [
+        "current_setting"
+      ],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
       "name": "a top N beside a WITH query",
       "sql": "WITH c AS (SELECT id, name FROM customers WHERE tenant_id = 'acme') SELECT o.meta, c.name FROM orders o JOIN c ON c.id = o.customer_id ORDER BY o.id DESC LIMIT 100",
       "plan": [

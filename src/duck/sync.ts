@@ -125,6 +125,45 @@ export function passDelayMs(earliestDueMs: number, nowMs: number, lastPassMs: nu
   return Math.min(2 ** 31 - 1, Math.max(0, earliestDueMs - nowMs, 4 * lastPassMs));
 }
 
+/** A schedule's timer (`timerAt`): the time it fires at by `Date.now()`, and how to cancel it, a re-arm included. */
+export interface TimerAt { readonly at: number; cancel(): void }
+
+/**
+ * A TIMER THAT NEVER FIRES BEFORE `at` BY `Date.now()` (issues 925, 937). Every schedule of the sync is one: the next
+ * pass (`timer`), a back-off's wake (`wake`), the stream's restart (`streamTimer`) and the compaction's check.
+ *  - Why: a timer counts on the event loop's clock, which can run up to a millisecond ahead of `Date.now()`, and on
+ *    some machines always does. The code a timer runs decides by `Date.now()` (a pass polls the tables whose `dueAt` has
+ *    come). A pass that fired a millisecond early attached the source and polled nothing.
+ *  - So a timer that fires before `at` arms itself again for the time left, at least 1 ms. It never spins: each re-arm
+ *    waits out what `Date.now()` says is left. A clock stepped back waits the longer, as every time the sync derives
+ *    from `Date.now()` does.
+ *  - `cancel` clears whichever timeout is armed, so nothing is left behind after `stop`, and a re-arm never fires.
+ *  - Each schedule keeps its own handle. A kick cancels only the next pass's, never another schedule's (issue 908).
+ */
+export function timerAt(at: number, fire: () => void, opts: { unref?: boolean } = {}): TimerAt {
+  let timeout: NodeJS.Timeout | null = null;
+  let cancelled = false;
+  const arm = (least: number): void => {
+    // setTimeout's own bound: a later time is waited for in steps
+    timeout = setTimeout(() => {
+      timeout = null;
+      if (cancelled) return;
+      if (Date.now() < at) { arm(1); return; }
+      cancelled = true;
+      fire();
+    }, Math.min(2 ** 31 - 1, Math.max(least, Math.ceil(at - Date.now()))));
+    if (opts.unref === true) timeout.unref();
+  };
+  arm(0);
+  return {
+    at,
+    cancel: () => {
+      cancelled = true;
+      if (timeout !== null) { clearTimeout(timeout); timeout = null; }
+    },
+  };
+}
+
 /** The least grace a polled or recopied table is given past its interval before it is behind (`keptPromise`): a pass
  *  attaches the source and queues on the writer, so a poll due now lands a little later. */
 export const POLL_GRACE_FLOOR_SECONDS = 60;
@@ -1016,16 +1055,14 @@ export class Sync {
    *  never the sources file's columns of the moment nor the publication's */
   private readonly copiedColumns = new Map<string, SourceColumnInfo[]>();
   /** the pass a failed rebuild's back-off waits for (`wakeAt`): replication mode runs a pass only when kicked */
-  private wake: { timer: NodeJS.Timeout; at: number } | null = null;
+  private wake: TimerAt | null = null;
   /** THE NEXT PASS's timer, and nothing else: a kick clears it. Each other schedule has a field of its own (`wake`,
    *  `streamTimer`, `compactTimer`), so a kick, or a pass timed again, never discards one (issue 908: the stream's restart
    *  lived here, a kick inside its wait cleared it, and the stream stayed stopped for the rest of the run) */
-  private timer: NodeJS.Timeout | null = null;
+  private timer: TimerAt | null = null;
   /** the stream's restart after a failure (`startStream`): a pass at `streamAt`, which starts it. Never cleared by a kick:
    *  a pass kicked sooner is too soon to start the stream, and this one is still to come */
-  private streamTimer: NodeJS.Timeout | null = null;
-  /** when each timer of the passes fires (`rearm` never moves the next pass later); a timer not here is replaced */
-  private readonly timerAts = new WeakMap<NodeJS.Timeout, number>();
+  private streamTimer: TimerAt | null = null;
   private running: Promise<void> | null = null;
   private attached = false;
   private loaded = false;
@@ -1137,7 +1174,7 @@ export class Sync {
   private spillSeq = 0n;
   /** the connection the space is read on (`checkCompaction`): never the writer's, nor the rebuilds' a copy holds */
   private compactReader: DuckConnection | null = null;
-  private compactTimer: NodeJS.Timeout | null = null;
+  private compactTimer: TimerAt | null = null;
   private checkingCompaction: Promise<void> | null = null;
   private readonly compactOptions: Required<Omit<CompactOptions, "beforePiece">> & Pick<CompactOptions, "beforePiece">;
   private reportTimer: NodeJS.Timeout | null = null;
@@ -1368,14 +1405,13 @@ export class Sync {
   /** the next read of the synced tables' space, `ms` from now (`checkCompaction`); never while stopped */
   private timeCompactionCheck(ms: number): void {
     if (this.stopped || this.mode === "recopy") return;
-    if (this.compactTimer !== null) clearTimeout(this.compactTimer);
-    this.compactTimer = setTimeout(() => {
+    this.compactTimer?.cancel();
+    this.compactTimer = timerAt(Date.now() + ms, () => {
       this.compactTimer = null;
       this.checkingCompaction = this.checkCompaction().catch((e: unknown) => {
         this.log(`the synced tables' space could not be read (read again in ${Math.round(this.compactOptions.checkMs / 60_000)} min): ${this.errorText(e)}`);
       }).finally(() => { this.checkingCompaction = null; this.timeCompactionCheck(this.compactOptions.checkMs); });
-    }, ms);
-    this.compactTimer.unref();
+    }, { unref: true });
   }
 
   /** the table's space as a reader is told it (`CopyState.compaction`): its last read and compaction, its failure */
@@ -2009,7 +2045,7 @@ export class Sync {
   /** a pass now (or right after the one running) */
   kick(): void {
     if (this.stopped) return;
-    if (this.timer !== null) { clearTimeout(this.timer); this.timer = null; }
+    if (this.timer !== null) { this.timer.cancel(); this.timer = null; }
     if (this.running !== null) { void this.running.then(() => this.kick()); return; }
     this.running = this.pass().then(() => { this.passFailed = false; }, (e: unknown) => {
       this.passFailed = true;
@@ -2021,7 +2057,7 @@ export class Sync {
       // and a pass runs for it when the tables change — or after the interval, when it failed or a table waits for a copy
       // or catch-up nothing has queued (a copy that failed waits its turn, `copyRetryDelayMs`)
       const d = this.nextPassDelay();
-      if (d !== null) { this.timer = setTimeout(() => this.kick(), d); this.timerAts.set(this.timer, Date.now() + d); }
+      if (d !== null) this.timer = timerAt(Date.now() + d, () => this.kick());
       this.wakeForBackOffs();
     });
   }
@@ -2062,22 +2098,13 @@ export class Sync {
 
   /**
    * A pass at `at` (the earliest asked for wins): in replication mode nothing else runs one when a back-off ends.
-   * NEVER BEFORE `at` BY `Date.now()` (issue 925): a timer counts on the event loop's clock, which can run up to a
-   * millisecond ahead of `Date.now()`. A pass kicked then found the back-off not yet over and skipped the table, and
-   * the next wake ran a second pass for it. So a wake that fires early waits out the rest.
+   * Never before `at` by `Date.now()` (`timerAt`, issue 925): a pass kicked early found the back-off not yet over and
+   * skipped the table, and the next wake ran a second pass for it.
    */
   private wakeAt(at: number): void {
     if (this.stopped || (this.wake !== null && this.wake.at <= at)) return;
-    if (this.wake !== null) clearTimeout(this.wake.timer);
-    const arm = (): void => {
-      const timer = setTimeout(() => {
-        if (Date.now() < at) { arm(); return; }
-        this.wake = null;
-        this.kick();
-      }, Math.max(0, at - Date.now()));
-      this.wake = { timer, at };
-    };
-    arm();
+    this.wake?.cancel();
+    this.wake = timerAt(at, () => { this.wake = null; this.kick(); });
   }
 
   /**
@@ -2110,11 +2137,9 @@ export class Sync {
     // NEVER LATER than the pass already timed (issue 851's review: every compaction's end re-timed the next pass from
     // now, four times the last pass on, and with frequent compactions no polled table was polled for 20 minutes)
     const at = Date.now() + d;
-    const timed = this.timer === null ? undefined : this.timerAts.get(this.timer);
-    if (timed !== undefined && timed <= at) return;
-    if (this.timer !== null) clearTimeout(this.timer);
-    this.timer = setTimeout(() => this.kick(), d);
-    this.timerAts.set(this.timer, at);
+    if (this.timer !== null && this.timer.at <= at) return;
+    this.timer?.cancel();
+    this.timer = timerAt(at, () => this.kick());
   }
 
   /** one pass, now, every polled table taken as due (an `off` one is not: it is polled only when asked), and its end
@@ -2196,11 +2221,11 @@ export class Sync {
    */
   async stop(): Promise<void> {
     this.stopped = true;
-    if (this.timer !== null) clearTimeout(this.timer);
-    if (this.streamTimer !== null) { clearTimeout(this.streamTimer); this.streamTimer = null; }
-    if (this.wake !== null) { clearTimeout(this.wake.timer); this.wake = null; }
+    if (this.timer !== null) { this.timer.cancel(); this.timer = null; }
+    if (this.streamTimer !== null) { this.streamTimer.cancel(); this.streamTimer = null; }
+    if (this.wake !== null) { this.wake.cancel(); this.wake = null; }
     if (this.reportTimer !== null) { clearInterval(this.reportTimer); this.reportTimer = null; }
-    if (this.compactTimer !== null) { clearTimeout(this.compactTimer); this.compactTimer = null; }
+    if (this.compactTimer !== null) { this.compactTimer.cancel(); this.compactTimer = null; }
     // the stream, the pass and the rebuild end together: a batch waiting for the writer's turn behind a poll must not
     // wait for that poll, so each connection's long statement is interrupted from the start
     const interrupt = (): void => { for (const lane of [this.writerLane, this.rebuilderLane, this.generatedLane, ...this.copyLanes]) if (lane?.inFlight) lane.conn.interrupt(); };
@@ -2552,7 +2577,7 @@ export class Sync {
     });
     this.stream = s;
     this.streamFailure = null;
-    if (this.streamTimer !== null) { clearTimeout(this.streamTimer); this.streamTimer = null; }
+    if (this.streamTimer !== null) { this.streamTimer.cancel(); this.streamTimer = null; }
     this.lineAt = Date.now();
     // the stream's periodic line: at most every streamReportMs, and only when it applied something (`reportStream`)
     if (this.reportTimer === null) { this.reportTimer = setInterval(() => this.reportStream(), this.streamReportMs); this.reportTimer.unref(); }
@@ -2580,8 +2605,8 @@ export class Sync {
       // the source
       this.streamFailures++;
       const wait = streamRetryDelayMs(this.intervalMs, this.streamFailures);
-      // a timer may fire a little early: the pass it kicks starts the stream
-      this.streamAt = Date.now() + wait - 50;
+      // the pass `streamTimer` kicks at this time starts the stream: never before it by `Date.now()` (`timerAt`)
+      this.streamAt = Date.now() + wait;
       this.streamFailure = { error: m, retryAt: this.streamAt };
       this.log(`${m} (the stream starts again in ${wait / 1000} s, failure ${this.streamFailures} in a row; the synced tables serve as they are)`);
       // one event for the stream, never one per table it kept current (each table's error says it); its failures in a
@@ -2593,8 +2618,8 @@ export class Sync {
       // a timer of its own, never the pass's (issue 908): a kick meanwhile runs a pass too soon to start the stream
       // and clears the pass's timer, and this pass is the one that starts it
       if (this.stopped) return;
-      if (this.streamTimer !== null) clearTimeout(this.streamTimer);
-      this.streamTimer = setTimeout(() => { this.streamTimer = null; this.kick(); }, wait);
+      this.streamTimer?.cancel();
+      this.streamTimer = timerAt(this.streamAt, () => { this.streamTimer = null; this.kick(); });
     });
   }
 

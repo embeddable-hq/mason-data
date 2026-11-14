@@ -59,7 +59,9 @@ paths:
   for good. **Each schedule has a timer of its own, never one field for two** (issue 908): `timer` is the next pass's and a
   kick clears it; the stream's restart is `streamTimer` (a kick inside its wait ran a pass too soon to start the stream,
   cleared the restart, and the stream stayed stopped for the run); `wake` holds the earliest back-off and is set again
-  for the next after every pass (`wakeForBackOffs`). DETECTOR: `duck-stream.itest.ts` "a pass kicked while the stream
+  for the next after every pass (`wakeForBackOffs`). **Every schedule's timer is a `timerAt`, which never fires before
+  its time by `Date.now()`** (issues 925, 937): a timer's clock can run a millisecond ahead of `Date.now()`, and a pass
+  that fired early attached the source and polled nothing. DETECTOR: `duck-stream.itest.ts` "a pass kicked while the stream
   waits", `tests/duck-sync-schedule.test.ts`. A failed catch-up backs off as a failed copy does (`backOff`, `copyRetryDelayMs`), its whole error and next
   attempt said in the log and `mason status` (`catchUp.retryAt`). ("Logical replication")
 - **A multi-line reason is ONE log entry**, its further lines indented (`textEntry`, src/lib/log.ts: the

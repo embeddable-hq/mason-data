@@ -362,7 +362,7 @@ an ordinary statement whose failure is that table's alone.
   in the synced data's file, and the check before each piece reads the free disk then, the spill's growth with it.
 - **The next pass is never moved later by a compaction.** Every rebuild's end re-times the passes (`followUp` →
   `rearm`); `rearm` set the timer from now, four times the last pass on, so with frequent compactions no polled table
-  was polled for 20 minutes (the review of PR 856). It now only ever moves the next pass earlier (`timerAts`).
+  was polled for 20 minutes (the review of PR 856). It now only ever moves the next pass earlier (the timer's `at`, `timerAt`).
 
 **Why it cannot be the merge issue 371 met.** That merge ran INSIDE a checkpoint, and a checkpoint that fails
 invalidates the database. A compaction is statements, measured on DuckDB 2.0.0 (a laptop, synthetic tables, one store
@@ -3291,6 +3291,21 @@ What would remove the read, measured warm at 10 M rows (`big` 1,982 blocks), and
   it for one constant id only (2 ms, 395 rows): neither the join, nor a constant `IN` list of the 100 ids (220 ms, every
   row read), nor a UNION ALL of 100 point lookups (61 ms, no faster than the scan). The rows of one id are scattered
   through the table, so even its lookups read most of the column's blocks.
+
+**With no ORDER BY, a plain side's list for the kept rows alone (issue 463, 2026-11-14).** Metabase's preview of a join
+to a table whose JSON fields it unfolds is `… LEFT JOIN (SELECT id, (j #>> array[$1]::text[])::text AS f, … FROM t) AS
+d … LIMIT 2000`, no sort. `joinRows` chose its rows by row number, then fetched the side by a hash join on its row
+number. The engine filtered the side's scan by the kept rows' numbers, so it computed the list for the kept rows only.
+But the scan handed the list each vector it met, with a row or two in each, and every vector is one call of each
+Mason function on the executor worker. Measured on a shared 4-vCPU machine, Postgres 16 beside it, alternately, over a
+synthetic 3 M-row table with two jsonb columns of about 310 B joined from a 4.5 M-row one, 15 fields: the 2,000-row
+LEFT preview took 5.0–5.3 s against Postgres's 0.03–0.06 s (×94–171), with 4,420 calls of `__mason_json_get`. The fetch
+now reads `WHERE t.rowid IN (SELECT __mason_r<i> FROM __mason_late)`, a SEMI join that gathers the rows into full
+vectors: 20 calls, 0.60–0.76 s (×14–22). The inner join is 0.65–0.74 s (×20–29) against 5.0–6.5 s. The 20-row preview
+moved less, 0.22–0.30 s to 0.16–0.19 s, against Postgres's 1–3 ms: what is left there is the inner join's hash table
+over the side's whole join column. The kept rows are read twice, so they are a WITH query `AS MATERIALIZED`, since an
+unordered LIMIT may keep other rows each time it runs. A sorted statement was left as it was: issue 463 asked for the
+unordered preview.
 
 **A join's FROM items (issue 134, step 2, 2026-10-31).** `joinRows` stopped at a table, so a view, a WITH query, a tool's
 wrapper and a derived side each carried every wide column through the join again. The issue's comment measured the shapes

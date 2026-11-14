@@ -6,6 +6,7 @@
  */
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
+import { setTimeout as sleep } from "node:timers/promises";
 import * as syncModule from "../src/duck/sync.ts";
 
 // read from the module, not imported by name: the file loads at a commit without them (scripts/fails-without.ts)
@@ -132,5 +133,121 @@ test("a back-off's wake that fires before its end by the clock waits out the res
     assert.deepEqual(passes.map((p) => p >= end), [true], `one pass, once the back-off has ended (passes at ${passes.map((p) => p - start).join(", ")} ms)`);
   } finally {
     await (sync.stop as () => Promise<void>).call(sync);
+  }
+});
+
+// ISSUE 937, THE CLASS OF 925: EVERY SCHEDULE'S TIMER NEVER FIRES BEFORE ITS TIME BY `Date.now()` (`timerAt`). The next
+// pass's timer fired a millisecond early on machines whose two clocks sit that way. The pass then polled only the
+// tables whose `dueAt` had come by `Date.now()`, found none, and still attached the source: an extra connection to the
+// database each interval. Here `Date.now()` is held behind the timers' clock (as issue 925's test holds it), so a timer
+// that trusts its delay always fires early by it. The passes are counted, not run: a pass that runs before its time
+// by `Date.now()` is the empty one. `nextPassDelay` answers as a polled table due at `due` makes it answer.
+type PassSeen = { at: number; kicked: boolean };
+type ScheduleSync = Record<string, unknown> & { rearm(): void; kick(): void; wakeAt(at: number): void; stop(): Promise<void> };
+function scheduleSync(due: number): { sync: ScheduleSync; passes: PassSeen[]; kicking: { now: boolean } } {
+  const Sync = (syncModule as unknown as { Sync: new (...a: unknown[]) => ScheduleSync }).Sync;
+  const sync = new Sync({ writer: {} }, { host: "localhost" }, "x", () => undefined, 5_000, "poll");
+  const passes: PassSeen[] = [];
+  const kicking = { now: false };
+  sync.pass = async () => { passes.push({ at: Date.now(), kicked: kicking.now }); kicking.now = false; };
+  // a table due at `due` until a pass on the schedule has run at or after it
+  sync.nextPassDelay = () => passes.some((p) => !p.kicked && p.at >= due) ? null : Math.max(0, due - Date.now());
+  return { sync, passes, kicking };
+}
+const seen = (passes: PassSeen[], start: number): string => passes.map((p) => `${p.at - start}${p.kicked ? " (kicked)" : ""}`).join(", ") || "none";
+/** waits by the timers' clock until `done`, then `settle` ms more for anything that should not come, `cap` ms at most */
+async function waitFor(realNow: () => number, done: () => boolean, settle: number, cap: number): Promise<void> {
+  let at: number | null = null;
+  for (const until = realNow() + cap; realNow() < until && (at === null || realNow() < at + settle);) {
+    await sleep(10);
+    if (at === null && done()) at = realNow();
+  }
+}
+
+for (const [name, lag] of [["a millisecond's worth (20 ms)", 20], ["seconds (2 s)", 2_000]] as const) {
+  test(`a pass due at a time polls on its first pass, never an empty one before it, with the clock behind the timers by ${name}`, async (t) => {
+    const realNow = Date.now.bind(Date);
+    let behind = 0;
+    t.mock.method(Date, "now", () => realNow() - behind);
+    const start = Date.now(), due = start + 100;
+    const { sync, passes } = scheduleSync(due);
+    try {
+      sync.rearm();
+      behind = lag;
+      await waitFor(realNow, () => passes.some((p) => p.at >= due), 150, lag + 5_000);
+      assert.deepEqual(passes.map((p) => p.at >= due), [true], `one pass, at or after its time (passes at ${seen(passes, start)} ms)`);
+    } finally {
+      await sync.stop();
+    }
+  });
+}
+
+test("a clock stepped back and stuck before a pass's time: the timer waits it out without spinning, then one pass on time", async (t) => {
+  const realNow = Date.now.bind(Date);
+  let frozen: number | null = null, behind = 0;
+  t.mock.method(Date, "now", () => frozen ?? realNow() - behind);
+  const arms = t.mock.method(globalThis, "setTimeout");
+  const start = Date.now(), due = start + 100;
+  const { sync, passes } = scheduleSync(due);
+  try {
+    sync.rearm();
+    // stepped back to the start, and stuck there for 600 ms by the timers' clock; then running again, 50 ms behind
+    frozen = start;
+    await sleep(600);
+    frozen = null;
+    behind = 50;
+    await waitFor(realNow, () => passes.some((p) => p.at >= due), 150, 5_000);
+    assert.deepEqual(passes.map((p) => p.at >= due), [true], `one pass, at or after its time (passes at ${seen(passes, start)} ms)`);
+    // each re-arm waits what `Date.now()` says is left (100 ms while stuck): a handful of timers, never thousands
+    assert.ok(arms.mock.callCount() <= 20, `the timer armed ${arms.mock.callCount()} times`);
+  } finally {
+    await sync.stop();
+  }
+});
+
+test("a stop while a pass's timer waits out the rest: no pass, and no timer left behind", async (t) => {
+  const realNow = Date.now.bind(Date);
+  let behind = 0;
+  t.mock.method(Date, "now", () => realNow() - behind);
+  const arms = t.mock.method(globalThis, "setTimeout");
+  const timeouts = (): number => process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+  const before = timeouts();
+  const start = Date.now(), due = start + 100;
+  const { sync, passes } = scheduleSync(due);
+  sync.rearm();
+  behind = 300;
+  // until the timer fired early and armed itself again for the rest (or, before the fix, ran its pass)
+  await waitFor(realNow, () => arms.mock.callCount() >= 2 || passes.length > 0, 0, 3_000);
+  await sync.stop();
+  await sleep(500);
+  assert.deepEqual(passes.map((p) => p.at - start), [], "no pass after the stop, nor before its time");
+  assert.equal(timeouts(), before, "no timer left after the stop");
+});
+
+test("a kick while a pass's timer waits out the rest: the kicked pass runs, the pass on time follows, and the back-off's wake is kept", async (t) => {
+  const realNow = Date.now.bind(Date);
+  let behind = 0;
+  t.mock.method(Date, "now", () => realNow() - behind);
+  const arms = t.mock.method(globalThis, "setTimeout");
+  const start = Date.now(), due = start + 100, backOffEnd = start + 400;
+  const { sync, passes, kicking } = scheduleSync(due);
+  sync.tables = new Map([["public.a", { source: "public.a" }]]);
+  (sync.retries as Map<string, { failures: number; at: number }>).set("public.a", { failures: 1, at: backOffEnd });
+  try {
+    sync.rearm();
+    sync.wakeAt(backOffEnd);
+    behind = 300;
+    // until the pass's timer fired early and armed itself again (or, before the fix, ran its pass); then `mason sync`'s kick
+    await waitFor(realNow, () => arms.mock.callCount() >= 3 || passes.length > 0, 0, 3_000);
+    kicking.now = true;
+    sync.kick();
+    await waitFor(realNow, () => passes.some((p) => !p.kicked && p.at >= backOffEnd), 150, 5_000);
+    const at = seen(passes, start);
+    assert.equal(passes.filter((p) => p.kicked).length, 1, `the kicked pass ran (passes at ${at} ms)`);
+    assert.ok(passes.every((p) => p.kicked || p.at >= due), `no pass on the schedule before its time (passes at ${at} ms)`);
+    assert.ok(passes.some((p) => !p.kicked && p.at >= backOffEnd), `the back-off's wake ran its pass after the kick (passes at ${at} ms)`);
+    assert.ok(passes.length <= 3, `the kicked pass, the one due and the wake's at most (passes at ${at} ms)`);
+  } finally {
+    await sync.stop();
   }
 });

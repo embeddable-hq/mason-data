@@ -17,7 +17,9 @@ export interface UnorderedLimit { name: string; list: string; from: string; tail
   /** a WITH clause before the SELECT */
   head?: string;
   /** the session's TimeZone it is asked in (UTC where none is said) */
-  zone?: string }
+  zone?: string;
+  /** the values the whole join is asked with, where its list or FROM binds some (none where none is said) */
+  wholeValues?: string[] }
 
 const JOINED = "FROM top_a a LEFT JOIN top_b b ON a.id = b.a_id LEFT JOIN top_c c ON b.id = c.b_id";
 const u = (name: string, list: string, from: string, tail: string, more: Partial<UnorderedLimit> = {}): UnorderedLimit => ({ name, list, from, tail, ...more });
@@ -85,6 +87,25 @@ const JOINED_TABLES: UnorderedLimit[] = [
   u("a star of keys", "b.id, a.note, c.label", "FROM top_c c JOIN top_b b ON b.id = c.b_id JOIN top_a a ON a.id = b.a_id", "LIMIT 6"),
   u("a comma join on a key", "c.id, b.payload", "FROM top_c c, top_b b WHERE b.id = c.b_id", "LIMIT 6"),
   u("a varchar key from a text column", "k.id, v.label", "FROM keyed k LEFT JOIN vkeys v ON v.id = k.ref", "LIMIT 3"),
+  // ISSUE 463: Metabase's preview of a join to a table whose JSON fields it unfolds, the joined table a derived table of
+  // its fields (each path bound, `col #>> array[$n]::text[]`, as Metabase sends it): its list computed for the kept rows
+  // alone, under each join kind, a preserved row with many matches and one with none, paged, the paths written
+  ...((): UnorderedLimit[] => {
+    const list = '"public"."top_a"."id" AS "id", "public"."top_a"."note" AS "note", "B"."id" AS "B__id", "B"."payload → k" AS "B__payload → k", "B"."payload → n" AS "B__payload → n"';
+    const side = (k: string, n: string): string => `(SELECT "public"."top_b"."id" AS "id", "public"."top_b"."a_id" AS "a_id", ("public"."top_b"."payload" #>> array[${k}]::text[])::text AS "payload → k", ("public"."top_b"."payload" #>> array[${n}]::text[])::bigint AS "payload → n" FROM "public"."top_b") AS "B"`;
+    const from = (kind: string, on = '"B"."a_id"', k = "$1", n = "$2"): string => `FROM "public"."top_a" ${kind} JOIN ${side(k, n)} ON "public"."top_a"."id" = ${on}`;
+    const bound = { values: ["k", "n"], wholeValues: ["k", "n"] };
+    return [
+      u("a JSON-unfolded derived side, LEFT, the paths bound (Metabase's preview)", list, from("LEFT"), "LIMIT 2000", bound),
+      u("a JSON-unfolded derived side, LEFT, LIMIT 20", list, from("LEFT"), "LIMIT 20", bound),
+      u("a JSON-unfolded derived side, LEFT, paged", list, from("LEFT"), "LIMIT 4 OFFSET 3", bound),
+      u("a JSON-unfolded derived side, LEFT with no match", list, from("LEFT", '"B"."a_id" + 1000'), "LIMIT 6", bound),
+      u("a JSON-unfolded derived side, RIGHT", list, from("RIGHT"), "LIMIT 9 OFFSET 2", bound),
+      u("a JSON-unfolded derived side, FULL", list, from("FULL"), "LIMIT 2000", bound),
+      u("a JSON-unfolded derived side, inner", list, from("INNER"), "LIMIT 7", bound),
+      u("a JSON-unfolded derived side, the paths written", list, from("LEFT", '"B"."a_id"', "'k'", "'n'"), "LIMIT 2000"),
+    ];
+  })(),
   u("a derived table of the join", "s.id, s.b", "FROM (SELECT a.id, b.id AS b FROM top_a a JOIN top_b b ON a.id = b.a_id LIMIT 3) s", "LIMIT 2", { whole: "FROM (SELECT a.id, b.id AS b FROM top_a a JOIN top_b b ON a.id = b.a_id) s" }),
 ];
 

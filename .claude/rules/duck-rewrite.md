@@ -148,7 +148,15 @@ paths:
     N over every joined row, 19.8–46.6 s for a 100-row preview of a 25 k × 153 M-row LEFT JOIN, and its exact cheaper
     form (the preserved side limited first) still reads the big table's whole join column. OFFSET alone and LIMIT ALL
     stay as they were, and `afterLimit` still needs a sort. The plan fixture and `tests/duck-wire.test.ts` hold the
-    form, `oracle/unordered-limit.ts` the rows. **A sort whose every key and WHERE read the side an outer join
+    form, `oracle/unordered-limit.ts` the rows. **With no sort, a plain side whose computed column the list reads is
+    fetched for the kept rows gathered** (`readsComputed`, issue 463: the fetch's scan of the side's whole table handed
+    Metabase's JSON fields the kept rows a vector at a time, a row or two in each, a call of every Mason function a
+    vector, 4,420 calls and ~5 s for 2,000 rows of 3 M): its fetch adds `WHERE t.rowid IN (SELECT
+    __mason_r<i> FROM __mason_late)`, and the kept rows become a WITH query `AS MATERIALIZED`, since an unordered
+    LIMIT read twice may keep other rows. The same rows under every join kind: a row of t no kept row names matched
+    nothing. A sorted statement, a side of plain columns only, and a carried side stay as they were. The plan fixture's
+    "JSON-unfolded derived side" entries, `tests/duck-wire.test.ts` "issue 463" and the oracle's
+    `JSON-unfolded derived side` hold it. **A sort whose every key and WHERE read the side an outer join
     preserves limits that side first** (`preservedFirst`, issue 824 part 2): its first OFFSET + LIMIT rows by the same
     keys (each yields at least one joined row, each key is its row's), then the join, sort and limit as written. Never
     through an INNER, FULL or comma join, a WHERE or key of another side or a merged column, a volatile key or WHERE, a
