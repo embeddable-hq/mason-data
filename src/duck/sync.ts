@@ -2332,9 +2332,6 @@ export class Sync {
     return { host: s.host, port: s.port, database: s.database, user: s.user, password: s.password, sslmode: s.sslmode, applicationName: "mason-data", connectTimeoutMs: 10_000 };
   }
 
-  /** an added table with no copy to keep current (never copied, or to be copied again: its columns changed, a numeric
-   *  outgrew its copy, or its copy is in a retired layout, `RETIRED_LAYOUT`). A table a named publication does not carry (`unpublished`) needs one too, but waits for
-   *  its owner, never for the interval: its callers skip it */
   /**
    * THE SHAPES OF THESE TABLES ON THE DATABASE NOW (src/cdc/shape.ts), by source — ONE catalog query for them all, through
    * the source attached (no connection of its own), each an index lookup of `pg_attribute`: no lock, no row of a table
@@ -2423,6 +2420,9 @@ export class Sync {
     this.kick();
   }
 
+  /** an added table with no copy to keep current (never copied, or to be copied again: its columns changed, a numeric
+   *  outgrew its copy, or its copy is in a retired layout, `RETIRED_LAYOUT`). A table a named publication does not carry (`unpublished`) needs one too, but waits for
+   *  its owner, never for the interval: its callers skip it */
   private needsCopy(t: AddedTable): boolean {
     return this.states.get(t.source)?.phase !== "copied" || !this.snapshots.has(t.source) || this.copiedAs.get(t.source) !== columnsKey(t.columns) || this.retired.has(t.source);
   }

@@ -582,12 +582,12 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       runWarnings.push(m);
     }
   };
-  const added = (o: { edited?: readonly string[] } = {}): Promise<void> => {
+  const added = (edit: { edited?: readonly string[] } = {}): Promise<void> => {
     // the catalog as last read: an edit asked for a fresh one first (src/cli/run-server.ts /api/pick, /api/remove)
     const now = catalog.facts();
     let read = readSources();
     if (!("message" in read)) {
-      const arrived = arrivedSecrets(read, now.tables, columnsSet, o.edited ?? []);
+      const arrived = arrivedSecrets(read, now.tables, columnsSet, edit.edited ?? []);
       if (arrived.length) { leaveOut(read, arrived); read = readSources(); }
       if (!("message" in read)) read = withLeftOut(read, leftOut);
     }
