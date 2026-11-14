@@ -531,6 +531,17 @@ listens, and every browser connection crosses that one ssh connection as frames 
   silently), or a label or URL that is wrong refuses the start, every problem on one line, naming the entry. `mason start` refuses both settings, as the other `MASON_UI_*` server settings.
   An entry may name a **host view** instead of a link (`{ "label", "view" }`, below): exactly one of `url` and `view`,
   both refused; it counts within the 5.
+- **Who is signed in to the host: `MASON_UI_ACCOUNT`.** For a page behind a host that signs people in, the host can
+  name who is signed in and link to where they manage their account or sign out:
+  `MASON_UI_ACCOUNT='{"label":"ada@example.com","url":"/account"}'`. The label shows at the foot of the sidebar, under
+  the nav, beside an account icon, as a link to the URL. It opens in the same tab and sends no referrer, as the link
+  back does. On the icon rail the icon shows alone, and the label is its tooltip. On a phone it is in the menu's sheet,
+  with the nav. The URL is read exactly as `MASON_UI_BACK_URL`'s. The label is read as `MASON_UI_BACK_LABEL` is: one
+  line of plain text, at most 64 characters. It is trimmed, and an empty one is refused. It is shown as text, never as
+  HTML. Text that is not JSON, a value that is not an object, a key other than `label` and `url`, a key written twice,
+  a value that is not a string, or a label or URL that is wrong refuses the start, every problem on one line
+  (`src/cli/ui-account.ts`). `/api/state` and `mason status --json` say `pageAccount: { label, url }`, or `null`.
+  Unset, nothing shows. `mason start` refuses it.
 - **The host's views and card: `MASON_UI_NAV_LINKS`' `view`, `MASON_UI_OVERVIEW_CARD`.** See "Host views" below.
 - **In the image, Mason's user is uid 1000, gid 1000 (`node`), and stays so**: an image that changes it names it under
   "Before you upgrade" in its release notes (deploy/mason-data/README.md). A supervisor that creates the folder of the

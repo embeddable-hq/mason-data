@@ -36,6 +36,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A host view's link can be marked as a destructive action.** Give it `"danger": true`. The page draws it like the
   Remove button on the Tables page, in red. A link that is both `primary` and `danger` is refused, and the view says
   why. So is a `danger` that is not `true` or `false`. Plain and primary links look as before.
+- **A host can show who is signed in on the web page.** Set `MASON_UI_ACCOUNT` on `mason serve` to JSON with a
+  `label` and a `url`, such as `{"label":"ada@example.com","url":"/account"}`. The label shows at the foot of the
+  sidebar, as a link to the URL. On a narrow window it is in the menu with the nav. A value that is not valid stops the
+  start and says what is wrong. Unset, the page is as before.
 
 ## What was wrong and is now right
 

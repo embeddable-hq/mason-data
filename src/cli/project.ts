@@ -27,6 +27,7 @@ import { PROJECT_FILE } from "../lib/project-file.ts";
 import { UI_SOCKET_SETTING } from "./ui-socket.ts";
 import { UI_RUN_FILE_SETTING } from "./ui-run-file.ts";
 import { backLinkSettingsSet, uiBackLinkSetting } from "./ui-back-link.ts";
+import { UI_ACCOUNT_SETTING, uiAccountSetting } from "./ui-account.ts";
 import { UI_OVERVIEW_CARD_SETTING, uiOverviewCardSetting } from "./ui-host-view.ts";
 import { NAV_SETTINGS, navSettingsSet, notNavSettings, uiNavSetting } from "./ui-nav.ts";
 import { PG_PUBLIC_URL_SETTING, pgPublicUrlSetting } from "./pg-public-url.ts";
@@ -485,6 +486,13 @@ export function startSettingRefusal(p: Project, env: NodeJS.ProcessEnv, o: { ser
   }
   const navSetting = uiNavSetting(env);
   if (navSetting !== null && "problem" in navSetting) return { message: navSetting.problem, code: "refused", fix: "set them as mason serve --help says, or unset them" };
+  // who is signed in to the host is a server's too (src/cli/ui-account.ts): mason start's page has no host
+  if (!o.serve && env[UI_ACCOUNT_SETTING]) {
+    return { message: `${UI_ACCOUNT_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",
+      fix: `unset ${UI_ACCOUNT_SETTING}: mason start's page is yours alone, opened with mason ui` };
+  }
+  const account = uiAccountSetting(env);
+  if (account !== null && "problem" in account) return { message: account.problem, code: "refused", fix: "set it as mason serve --help says, or unset it" };
   // the host's card on the Overview is a server's too (src/cli/ui-host-view.ts): mason start's page is Mason's alone
   if (!o.serve && env[UI_OVERVIEW_CARD_SETTING]) {
     return { message: `${UI_OVERVIEW_CARD_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",
