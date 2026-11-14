@@ -189,8 +189,8 @@ const activityOf = (o: { window?: Record<string, unknown>; clients?: unknown[]; 
   window: { days: 1, covered: 1, statements: 1204, completed: 1190, refused: 10, failed: 2, cancelled: 2, rows: 52_000, bytesSent: 3_145_728, durationMs: { avg: 120, p50: 40, p95: 900 }, ...o.window },
   clients: o.clients ?? CLIENTS, slowest: o.slowest ?? [],
   clientsTotal: o.clientsTotal ?? { clients: (o.clients ?? CLIENTS).length, sessions: (o.clients ?? CLIENTS).reduce((a: number, c) => a + (c as { sessions: number }).sessions, 0) } });
-const EVENT: SyncEvent = { at: "2026-10-27T09:03:10.123Z", kind: "poll_failed", failed: true, table: "public.orders", message: "poll: connection reset\nthe sync tries it again in 5 s" };
-const EVENTS = { events: [EVENT, { at: "2026-10-27T09:04:00.000Z", kind: "restart", failed: true, table: null, message: "the run was started again after it stopped" }], keptDays: 7 };
+const EVENT: SyncEvent = { at: "2026-10-27T09:03:10.123Z", kind: "poll_failed", failed: true, table: "public.orders", message: "poll: connection reset\nthe sync tries it again in 5 s", code: "ECONNRESET", origin: "src/duck/sync.ts:3640" };
+const EVENTS = { events: [EVENT, { at: "2026-10-27T09:04:00.000Z", kind: "restart", failed: true, table: null, message: "the run was started again after it stopped", code: "unknown", origin: null }], keptDays: 7 };
 const USAGE = { since: "2026-10-27T09:04:30.000Z", until: "2026-10-27T09:05:30.000Z", stepSeconds: null, sampleSeconds: 60, keptDays: 7, samples: [],
   copySizes: [{ table: "public.customers", bytes: 524_288, at: "2026-10-27T09:00:00.000Z" }, { table: "public.events", bytes: 3_221_225_472, at: "2026-10-27T09:00:00.000Z" }] };
 
@@ -3585,6 +3585,17 @@ test("Usage: over the last 15 minutes what runs every poll, the range's statemen
   (app as unknown as { markStale(): void }).markStale(); await app.poll();
   assert.match(textOf(app.view().poll!), /✗ the request log cannot be read/);
   assert.match(textOf(app.view()["usage-kpis"]!), /Queries, last 24 hours 1,204/, "the last counts stay under the banner");
+});
+
+test("Sync events: a failure's code and where in Mason it happened are one quiet line under its message; none for good news or an event from before Mason kept them (issue 924)", () => {
+  const renderEvents = fnOf<[unknown, Record<string, unknown>?], string>(syncsPage, "renderEvents");
+  const at = Date.parse("2026-10-27T09:10:00.000Z");
+  const text = textOf(renderEvents(EVENTS, { now: at }));
+  assert.match(text, /poll: connection reset the sync tries it again in 5 s Code ECONNRESET ?, at src\/duck\/sync\.ts:3640$/);
+  assert.match(text, /the run was started again after it stopped Code unknown 7 min ago/, "a failure with no origin: its code alone");
+  const old = { ...EVENT, code: null, origin: null };
+  const good = { ...EVENT, kind: "copied", failed: false, code: null, origin: null };
+  assert.doesNotMatch(textOf(renderEvents({ events: [old, good], keptDays: 7 }, { now: at })), /Code/);
 });
 
 test("Sync events: the sync's events are mason logs --events' lines in a table, a failure marked, NEWEST FIRST (When turns it round); none is said as the CLI says it", () => {
