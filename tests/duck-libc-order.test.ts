@@ -18,7 +18,7 @@ import { startPostgresApi, type PgApiServer } from "../src/api/postgres/server.t
 import { mintToken, tokenProblem } from "../src/duck/token.ts";
 import type { PgSchema } from "../src/api/postgres/schema.ts";
 import type { LibcOrder } from "../src/duck/libc-order.ts";
-import { handLibcOrder, holdBounds, lettersOf, randomStrings } from "./libc-order-fixture.ts";
+import { handLibcOrder, holdBounds, LATIN_PIECES, lettersOf, randomStrings } from "./libc-order-fixture.ts";
 import { withLookups } from "../src/duck/libc-order.ts";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "duck-libc-"));
@@ -334,7 +334,7 @@ test("libc bound: hi(a) < lo(b) orders the keys at the first level, lo <= hi, eq
   const o = boundOrder();
   const { BOUND_CHARS } = await import("../src/duck/libc-bound.ts");
   const ascii = Array.from({ length: 0x7f - 0x20 }, (_, i) => String.fromCharCode(0x20 + i));
-  const pool = [...ascii, ..."abcAB01$ -.", "l·", "L·", "K", "İ", "é", "é", "ß", "가", "❤️", "", "͸"];
+  const pool = [...ascii, ..."abcAB01$ -.", "l·", "L·", "K", "İ", "é", "é", "ß", "가", "❤️", "", "͸", ...LATIN_PIECES];
   pool.push(...CONTROL);
   const long = "abcdefghij".repeat(6);
   const strings = [...randomStrings(pool, 20_000, 8, 0x5eed),
@@ -344,6 +344,52 @@ test("libc bound: hi(a) < lo(b) orders the keys at the first level, lo <= hi, eq
   const { failures, ruledOut } = await holdBounds(o, strings);
   assert.deepEqual(failures, []);
   assert.ok(ruledOut > strings.length / 2, `a top 1 rules out ${ruledOut} of ${strings.length}`);
+});
+
+// THE SECOND ROUND OF ISSUE 666: a letter of Latin weighed as a mapped character is folded to it, so a value beginning
+// with É, Ø or ł has a run of its own, and is ruled out as any other is; a mark of a weight of its own, a letter of two
+// weights and one of a weight no ASCII character has are not, and the run stops at them
+test("libc bound: letters of Latin a run folds, and those it must not, hold the bounds; a value beginning with one is ruled out", async () => {
+  const { boundOf, BOUND_CHARS, FOLD_BLOCKS } = await import("../src/duck/libc-bound.ts");
+  const punctuation = [..." !\"#%&'()*+,-./:;<=>?@[\\]^_`{|}~"].join("");
+  // é and İ by their marks (strip_accents), ø and ł of an ASCII letter's weight (a replace), ð of none, Ǣ of two, U+0363 a
+  // mark of its own weight, U+0301 a mark of none
+  const o = withLookups(handLibcOrder(["$", ..."0123456789", ...lettersOf({ e: "éÉ", i: "İ", o: "øØ", l: "łŁ" }), "ð", "ͣ"],
+    [punctuation + "́̆" + CONTROL], { expansions: { "Ǣ": "ae" } }));
+  const bound = boundOf(o)!;
+  assert.ok(bound.folds !== null, "the order has folds");
+  assert.deepEqual(bound.folds.replaced, [["Ø", "o"], ["ø", "o"], ["Ł", "l"], ["ł", "l"]]);
+  const pool = [..."abcelotz0 -", ...LATIN_PIECES, ...CONTROL];
+  const strings = [...randomStrings(pool, 20_000, 8, 0x666), ...FOLD_BLOCKS.flatMap(([lo, hi]) => Array.from({ length: hi - lo + 1 }, (_, i) => String.fromCodePoint(lo + i)))
+    .flatMap((c) => [c, `${c}b`, `a${c}`, `${"e".repeat(BOUND_CHARS - 1)}${c}`])];
+  const { failures, ruledOut } = await holdBounds(o, strings);
+  assert.deepEqual(failures, []);
+  // (a character the order does not cover is never folded: a value beginning with one is no value a top 1 rules out)
+  assert.ok(ruledOut > strings.length / 3, `a top 1 rules out ${ruledOut} of ${strings.length}`);
+  // a value beginning with a folded letter is ruled out by a top 1 of an ASCII one, as its ASCII twin is
+  const { failures: none, ruledOut: out } = await holdBounds(o, ["abc", "Øster", "oster", "Łódź", "lodz", "Émile", "emile"]);
+  assert.deepEqual(none, []);
+  assert.equal(out, 6, "every value but the least ruled out");
+});
+
+// the engine's strip_accents is the fold's `stripped` over every character a letter may be folded from: a character it
+// wrote otherwise would put a value's run under another letter
+test("libc bound: the engine's strip_accents is `stripped` over every character of FOLD_BLOCKS", async () => {
+  const { stripped, FOLD_BLOCKS } = await import("../src/duck/libc-bound.ts");
+  const { DuckDBInstance } = await import("@duckdb/node-api");
+  const db = await DuckDBInstance.create(":memory:");
+  const c = await db.connect();
+  try {
+    for (const [lo, hi] of FOLD_BLOCKS) {
+      const rows = (await c.runAndReadAll(`SELECT g, strip_accents(chr(g::INTEGER)), strip_accents('a' || chr(g::INTEGER) || 'b') FROM range(${lo}, ${hi + 1}) t(g)`)).getRows();
+      assert.equal(rows.length, hi - lo + 1);
+      for (const [g, one, inside] of rows) {
+        const ch = String.fromCodePoint(Number(g));
+        assert.equal(one, stripped(ch), `U+${Number(g).toString(16)}`);
+        assert.equal(inside, stripped(`a${ch}b`), `a U+${Number(g).toString(16)} b`);
+      }
+    }
+  } finally { c.closeSync(); db.closeSync(); }
 });
 
 test("libc bound: an order whose characters' bytes do not order their weights has none, and an unread one none", async () => {

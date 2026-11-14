@@ -296,6 +296,15 @@ export const TYPED = `${MAPPED_TABLE} CREATE EXTENSION IF NOT EXISTS citext; CRE
   "WHEN g % 10 = 7 THEN (ARRAY['$', '', '-', ' ', '+'])[1 + (g / 10) % 5] || g " +
   "WHEN g % 10 = 8 THEN (ARRAY[upper(md5(g::text)), md5(g::text), initcap(translate(md5(g::text), '0123', ' ,.-'))])[1 + (g / 10) % 3] " +
   "ELSE (ARRAY['e' || chr(769), 'é', 'E'])[1 + (g / 10) % 3] || g END AS s FROM generate_series(1, 3000) g) AS x;" +
+  // THE SAME VALUES MANY TIMES (issue 666, the second round: the key once a DISTINCT value): 4,000 rows, nine in ten one
+  // value, one in fifty NULL, the rest a pool of case, accents, punctuation, spaces, control characters and values glibc
+  // weighs alike (U+212A beside k and K, an accent spelled by its mark beside its letter, Ø and Ł beside o and l, a mark
+  // with a weight of its own, U+0363), each many times
+  `CREATE TABLE public.coll_rep (id int PRIMARY KEY, s text, v varchar(20), n int); INSERT INTO public.coll_rep SELECT g, s, left(s, 20), g % 7 FROM (SELECT g, CASE ` +
+  "WHEN g % 50 < 45 THEN 'completed' WHEN g % 50 = 45 THEN NULL ELSE (ARRAY['Completed', 'COMPLETED', 'complete', 'completed ', 'completed-', 'co-mpleted', " +
+  "'Pending', 'pending', 'on-hold', 'on hold', 'onhold', 'refunded', 'Refunded', 'réfunded', 'é', 'e', 'E', 'e' || chr(769), 'k', 'K', chr(8490), " +
+  "'ab' || chr(2) || 'c', 'abc', '', '  ', '$5', '5', '-5', 'zz', 'Z z', 'Øster', 'oster', 'Łódź', 'lodz', 'Ölbaum', 'olbaum', 'ŀl', 'l·l', " +
+  "'ª', '²', 'É' || chr(865) || 'x', 'e' || chr(867) || 'x'])[1 + (g / 50) % 42] END AS s FROM generate_series(1, 4000) g) AS x;" +
   // ENUMS IN THEIR DECLARED ORDER (the BI-tools test of #517): a label with a quote, an enum of another schema, an
   // array of one, NULL and empty arrays, and a text column read as the enum
   "CREATE TYPE public.mood AS ENUM ('sad', 'ok', 'happy', 'it''s'); CREATE SCHEMA IF NOT EXISTS other; CREATE TYPE other.level AS ENUM ('low', 'high'); " +
@@ -1295,6 +1304,33 @@ function* matrix(): Generator<Matrixed> {
     ["a control character first", "SELECT min(s), max(s) FROM coll_top WHERE s IN (chr(2) || 'zz', 'z z')"],
     ["control characters beside letters", "SELECT min(s), max(s) FROM coll_top WHERE s LIKE 'a%' OR s LIKE '%' || chr(2) || '%'"],
   ] as Array<[string, string]>) yield q(`text min/max: ${name}`, sql);
+  // the second round: each DISTINCT value keyed once, the rows joined to their keys (src/duck/libc-bound.ts `Values`)
+  for (const [name, sql] of [
+    ["a page", "SELECT id, s FROM coll_rep ORDER BY s, id LIMIT 30"],
+    ["descending", "SELECT id, s FROM coll_rep ORDER BY s DESC, id LIMIT 30"],
+    ["descending, NULLs last", "SELECT id, s FROM coll_rep ORDER BY s DESC NULLS LAST, id LIMIT 30"],
+    ["NULLs first", "SELECT id, s FROM coll_rep ORDER BY s NULLS FIRST, id LIMIT 30"],
+    ["past the value most rows hold", "SELECT id, s FROM coll_rep ORDER BY s, id LIMIT 40 OFFSET 3580"],
+    ["descending past it", "SELECT id, s FROM coll_rep ORDER BY s DESC, id LIMIT 40 OFFSET 300"],
+    ["a * beside it", "SELECT *, s FROM coll_rep ORDER BY s, id LIMIT 10"],
+    ["the list computed after the LIMIT", "SELECT id, upper(s), s IS NULL FROM coll_rep ORDER BY s DESC, id LIMIT 12"],
+    ["values glibc weighs alike", "SELECT id, s FROM coll_rep WHERE s IN ('k', 'K', chr(8490), 'é', 'e' || chr(769), 'E', 'e') ORDER BY s, id LIMIT 20"],
+    ["values glibc weighs alike, descending", "SELECT id, s FROM coll_rep WHERE s IN ('k', 'K', chr(8490), 'é', 'e' || chr(769)) ORDER BY s DESC, id LIMIT 20"],
+    ["a WHERE", "SELECT id, s FROM coll_rep WHERE n = 3 AND s <> 'completed' ORDER BY s, id LIMIT 15"],
+    ["a varchar", "SELECT id, v FROM coll_rep ORDER BY v DESC, id LIMIT 15"],
+    ["an alias and a derived table", "SELECT r.id, r.s FROM (SELECT id, s FROM coll_rep WHERE n > 1) r ORDER BY r.s, r.id LIMIT 15"],
+    ["a * of a derived table of no alias", "SELECT * FROM (SELECT id, s FROM coll_rep WHERE n > 1) ORDER BY s DESC, id LIMIT 15"],
+    ["in subqueries, correlated", "SELECT n, (SELECT min(r.s) FROM coll_rep r WHERE r.n = o.n), (SELECT r.s FROM coll_rep r WHERE r.n = o.n ORDER BY r.s DESC LIMIT 1) FROM generate_series(0, 7) o(n) ORDER BY n"],
+    ["min and max", "SELECT min(s), max(s) FROM coll_rep"],
+    ["min and max beside a count", "SELECT count(*), min(s), max(v), min(v), max(s) FROM coll_rep WHERE n <> 2"],
+    ["min and max of the values weighed alike", "SELECT min(s), max(s) FROM coll_rep WHERE s IN ('k', 'K', chr(8490), 'é', 'e' || chr(769))"],
+    ["letters of Latin beside their ASCII", "SELECT id, s FROM coll_rep WHERE left(s, 1) IN ('Ø', 'o', 'Ł', 'l', 'Ö', 'ŀ', 'ª', 'a', '²', '2', 'É', 'e') ORDER BY s, id LIMIT 40"],
+    ["letters of Latin beside their ASCII, descending", "SELECT id, s FROM coll_rep WHERE left(s, 1) IN ('Ø', 'o', 'Ł', 'l', 'Ö', 'ŀ', 'ª', 'a', '²', '2', 'É', 'e') ORDER BY s DESC, id LIMIT 40"],
+    ["min and max of letters of Latin", "SELECT min(s), max(s) FROM coll_rep WHERE left(s, 1) IN ('Ø', 'o', 'Ł', 'l', 'Ö', 'ŀ', 'ª', 'a', '²', '2', 'É', 'e')"],
+    ["min and max, no row", "SELECT min(s), max(s) FROM coll_rep WHERE n > 7"],
+    ["bytes (as written)", `SELECT id, s FROM coll_rep ORDER BY s COLLATE "C", id LIMIT 10`],
+    ["min and max in bytes (as written)", `SELECT min(s COLLATE "C"), max(s COLLATE "C") FROM coll_rep`],
+  ] as Array<[string, string]>) yield q(`text keyed once a value: ${name}`, sql);
   // ---- the corpus rerun of fbbf8f08: what reached DuckDB and failed, and the pieces still unverified -------------------
   // a name another table has in another case: qualified with the table Postgres resolved it to
   yield q("a name in another case, joined", `SELECT id, "T", t, "Tz" FROM typed JOIN cased USING (id) ORDER BY id`);
