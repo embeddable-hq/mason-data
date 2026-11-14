@@ -397,6 +397,9 @@ export function numericBinary(n: PgNumeric): Buffer {
 export function numericFromBinary(bytes: Buffer): string {
   if (bytes.length < 8) throw new NumericError(`incorrect binary data format: ${bytes.length} byte(s) for numeric`, "22P03");
   const ndigits = bytes.readInt16BE(0), weight = bytes.readInt16BE(2), sign = bytes.readUInt16BE(4), scale = bytes.readInt16BE(6);
+  // numeric_recv's special values: NUMERIC_NAN, NUMERIC_PINF, NUMERIC_NINF, with no digit groups
+  const special = ({ 0xc000: "NaN", 0xd000: "Infinity", 0xf000: "-Infinity" } as Record<number, string>)[sign];
+  if (special !== undefined && bytes.length === 8 && ndigits === 0) return special;
   if (bytes.length !== 8 + 2 * ndigits || ndigits < 0 || scale < 0 || (sign !== 0 && sign !== 0x4000)) {
     throw new NumericError(`incorrect binary data format: ${bytes.length} byte(s), ${ndigits} digit group(s), sign 0x${sign.toString(16)} for numeric`, "22P03");
   }

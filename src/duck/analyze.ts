@@ -16,7 +16,7 @@
  * left in the sidecar between calls — another session's Sync can lose nothing (tests/postgres-api/server.test.ts "a
  * catalog statement's portal, beside another session's").
  */
-import { HELD } from "./held-types.ts";
+import { HELD, PARAM_ARRAYS } from "./held-types.ts";
 import { CATALOG_BASE_SQL, sessionSetSql, type SessionState } from "../api/postgres/catalog.ts";
 import { cstr, decodeBackend, frame, int16, int32 } from "../api/postgres/protocol.ts";
 import { outputsByLocation, parseTree, typesByLocation, type QueryOutputs, type Typed, type TreeValue } from "./pgtree.ts";
@@ -83,33 +83,46 @@ export async function analyze(run: (bytes: Uint8Array) => Promise<Uint8Array>, s
 const PARAM_TYPES: Record<number, string> = {
   16: "boolean", 21: "smallint", 23: "integer", 20: "bigint", 700: "real", 701: "double precision", 1700: "numeric",
   2950: "uuid", 114: "json", 3802: "jsonb", 1083: "time", 1082: "date", 1114: "timestamp", 1184: "timestamptz", 1186: "interval", 869: "inet", 1266: "timetz",
-  1009: "text[]", 1015: "varchar[]",
   // a type the copy holds as its text: the text Postgres writes the value as
   ...Object.fromEntries(Object.entries(HELD).map(([name, h]) => [h.oid, name])),
 };
+
+/** the SQL that writes `x`, a value of type `oid`, as the text DuckDB reads to the same value (`readParameters`) */
+function valueText(oid: number, x: string): string {
+  if (oid === 1082) return `CASE WHEN isfinite(${x}) THEN (${x} - date '2000-01-01')::text ELSE ${x}::text END`;
+  if (oid === 1114 || oid === 1184) return `CASE WHEN isfinite(${x}) THEN (extract(epoch FROM ${x}) * 1000000 - 946684800000000)::int8::text ELSE ${x}::text END`;
+  if (oid === 1186) return `(extract(year FROM ${x}) * 12 + extract(month FROM ${x}))::text || ' ' || extract(day FROM ${x})::text || ' ' || ((extract(hour FROM ${x}) * 60 + extract(minute FROM ${x})) * 60000000 + extract(microseconds FROM ${x}))::int8::text`;
+  return `${x}::text`;
+}
 
 /**
  * A statement's parameters as Postgres reads them: each value through its type's input function (the type Postgres
  * inferred, or the one declared), under the session's state (its TimeZone and DateStyle) — so `'1.5'` for a smallint
  * is Postgres's 22P02, and `'01/02/2026'` for a date is 2026-01-02 (2026-02-01 under `ISO, DMY`). A value comes back as text DuckDB reads to the same value: a number, a
  * boolean or a uuid canonical; a date as days and a timestamp as microseconds since 2000-01-01 (src/duck/rewrite.ts
- * `datumText` writes them), an interval as its months, days and microseconds; `infinity` as itself.
+ * `datumText` writes them), an interval as its months, days and microseconds; `infinity` as itself. An array of
+ * `PARAM_ARRAYS` comes back as the JSON list of its elements' texts, each written as its element type's value is, a
+ * NULL element JSON's null.
  */
 export async function readParameters(run: (bytes: Uint8Array) => Promise<Uint8Array>, oids: readonly number[], values: readonly (string | null)[],
   under: SessionState): Promise<{ values: Array<{ oid: number; text: string } | null> } | PgRefusal | TextArrayRefusal> {
   const quote = (s: string): string => `'${s.replace(/'/g, "''")}'`;
   const items = values.map((v, i) => {
-    const oid = oids[i] ?? 0, type = PARAM_TYPES[oid];
-    if (v === null || type === undefined) return null;
-    const x = `${quote(v)}::${type}`;
-    if (oid === 1082) return `CASE WHEN isfinite(${x}) THEN (${x} - date '2000-01-01')::text ELSE ${x}::text END`;
-    if (oid === 1114 || oid === 1184) return `CASE WHEN isfinite(${x}) THEN (extract(epoch FROM ${x}) * 1000000 - 946684800000000)::int8::text ELSE ${x}::text END`;
-    // a text array as JSON, which holds what array_in read (a NULL element, any character) as DuckDB reads it back; a
-    // JSON array always starts with `[`, so a word in its place says why the value cannot be read as one list
-    // (TEXT_ARRAY_REFUSALS): several dimensions, or subscripts that do not start at 1, which a list of DuckDB's has not
-    if (oid === 1009 || oid === 1015) return `CASE WHEN array_ndims(${x}) > 1 THEN 'multidim-array' WHEN array_lower(${x}, 1) <> 1 THEN 'array-lower-bound' ELSE to_json(${x})::text END`;
-    if (oid === 1186) return `(extract(year FROM ${x}) * 12 + extract(month FROM ${x}))::text || ' ' || extract(day FROM ${x})::text || ' ' || ((extract(hour FROM ${x}) * 60 + extract(minute FROM ${x})) * 60000000 + extract(microseconds FROM ${x}))::int8::text`;
-    return `${x}::text`;
+    const oid = oids[i] ?? 0, element = PARAM_ARRAYS.get(oid);
+    if (v === null) return null;
+    // an array (issue 983: node-pg binds `'{"1","3"}'`, its type inferred) is read by Postgres's own array_in, never
+    // DuckDB's cast of the text, which reads no quoted element: one grammar, Postgres's, at every entrance. It comes
+    // back as the JSON list of its elements' texts, which holds what array_in read (a NULL element, any character)
+    // as DuckDB reads it back; a JSON array always starts with `[`, so a word in its place says why the value cannot be
+    // read as one list (TEXT_ARRAY_REFUSALS): several dimensions, or subscripts that do not start at 1, which a list of
+    // DuckDB's has not. An empty array has no dimension, and is `[]`
+    if (element !== undefined) {
+      const x = `${quote(v)}::${element === 25 ? "text" : element === 1043 ? "varchar" : PARAM_TYPES[element]}[]`;
+      return `CASE WHEN array_ndims(${x}) > 1 THEN 'multidim-array' WHEN array_lower(${x}, 1) <> 1 THEN 'array-lower-bound' `
+        + `ELSE (SELECT coalesce(json_agg(${valueText(element, "e")} ORDER BY i), '[]') FROM unnest(${x}) WITH ORDINALITY AS u(e, i))::text END`;
+    }
+    const type = PARAM_TYPES[oid];
+    return type === undefined ? null : valueText(oid, `${quote(v)}::${type}`);
   });
   if (items.every((x) => x === null)) return { values: values.map(() => null) };
   const sql = `${sessionSetSql(under)}; SELECT ${items.map((x) => x ?? "NULL").join(", ")}; ${CATALOG_BASE_SQL}`;
@@ -123,12 +136,12 @@ export async function readParameters(run: (bytes: Uint8Array) => Promise<Uint8Ar
   const row = messages.find((m) => m.type === "DataRow");
   if (row?.type !== "DataRow") throw new Error("the catalog Postgres read the parameters and answered no row: report it");
   const read = items.map((x, i) => x === null ? null : { oid: oids[i]!, text: row.values[i]!.toString("utf8") });
-  const unlisted = read.findIndex((r) => r !== null && (r.oid === 1009 || r.oid === 1015) && !r.text.startsWith("["));
+  const unlisted = read.findIndex((r) => r !== null && PARAM_ARRAYS.has(r.oid) && !r.text.startsWith("["));
   if (unlisted >= 0) return { gap: read[unlisted]!.text as TextArrayRefusal["gap"], parameter: unlisted + 1 };
   return { values: read };
 }
 
-/** a text[] parameter Postgres read, which no list of DuckDB's holds: its gap, and the parameter's number ($1 is 1) */
+/** an array parameter Postgres read, which no list of DuckDB's holds: its gap, and the parameter's number ($1 is 1) */
 export type TextArrayRefusal = { gap: "multidim-array" | "array-lower-bound"; parameter: number };
 
 /** One read of the catalog Postgres's own catalog (a signature from pg_proc, a type's name): its rows as text. */

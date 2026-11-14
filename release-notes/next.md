@@ -9,3 +9,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   2 to 4.5 minutes, close to the 5-minute limit, and now take 13 to 26 seconds. Names that begin with an accented
   letter, such as É, Ø or Ł, are as fast as the rest. The answers are the same as before. A list of distinct values,
   a smallest value per group and `FETCH FIRST … WITH TIES` are still slow.
+
+## What was wrong and is now right
+
+- **A list of values passed as one query parameter now works, as node-pg passes it.** node-pg, and the ORMs built on
+  it, send a JavaScript array as text such as `{"1","3"}`, and let the database work out its type. Mason answered
+  `WHERE id = ANY($1)` and `WHERE id = ANY($1::int[])` with an error for such a value. Now it answers them as Postgres
+  does, for arrays of integers, text, uuids, numerics, booleans, dates, timestamps and floats. That includes an empty
+  array, NULL elements and quoted elements that hold commas or braces. An array sent in binary, as Npgsql sends it,
+  works too. A `numeric[]` parameter is compared with every digit kept. It is answered only in `= ANY`, `<> ALL` and
+  the other comparisons with `ANY` or `ALL`. Elsewhere Mason refuses it by name and says what to write instead.
