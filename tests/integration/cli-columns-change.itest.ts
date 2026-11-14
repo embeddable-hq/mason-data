@@ -8,7 +8,8 @@
  * secret-looking one), renames a column, and drops one. After each, with no restart, the synced data and `SELECT *`
  * over the Postgres API equal the source's columns but the secret-looking one, which is left out and said — written as
  * `exclude:` on its entry, as `mason add` would have, in the events and among `mason status`'s warnings — and the
- * table's line in `mason status` ends synced, with no error.
+ * table's line in `mason status` ends synced, with no error. A column dropped while Mason is stopped, one its `exclude:`
+ * names and a synced one, is passed over at the next start and said, never a refusal of the project.
  *
  * What it needs: IT_POSTGRES_URL (`wal_level = logical` for the replication test), psql on PATH, and DuckDB's postgres
  * extension. Each test writes only inside a database it creates, `it_columns_<random>`, drops it at the end, and runs
@@ -113,7 +114,7 @@ async function columnsChange(mode: "off" | "poll 1s" | "replication"): Promise<v
       // a sync by hand reads its columns first: synced, or refused while it is read again whole with its new columns
       const r = mason("sync", "t", "--json");
       if (r.status !== 0) assert.match(JSON.stringify(r.json), /read again whole|columns changed|being caught up/, `mason sync t:\n${r.stdout}${r.stderr}`);
-    } else if (mode === "replication") psql(dbUrl, "UPDATE t SET b = b + 1 WHERE id = 1");
+    } else if (mode === "replication") psql(dbUrl, "UPDATE t SET id = id WHERE id = 1");
   };
   /** the table's line in mason status --json: synced, no error */
   const settled = (): boolean => {
@@ -143,17 +144,22 @@ async function columnsChange(mode: "off" | "poll 1s" | "replication"): Promise<v
   await step("a column renamed", "ALTER TABLE t RENAME COLUMN a TO a2; UPDATE t SET b = b + 1 WHERE id = 2");
   assert.match(served()!.columns, /^id\ta2\tb\tc\td$/);
 
-  // DROPPED. Mason's own publication lists a replicated table's columns (#978), and Postgres refuses to drop a column a
-  // publication lists: that step waits for #978 under replication
-  let dropped = true;
-  if (mode === "replication") {
-    const r = spawnSync("psql", ["-X", "-q", "-v", "ON_ERROR_STOP=1", dbUrl, "-c", "ALTER TABLE t DROP COLUMN b"], { encoding: "utf8" });
-    if (r.status !== 0) { assert.match(r.stderr, /publication/, r.stderr); dropped = false; }
-    else { psql(dbUrl, "UPDATE t SET d = 'dropped' WHERE id = 1"); await step("a column dropped", "SELECT 1"); }
-  } else await step("a column dropped", "ALTER TABLE t DROP COLUMN b");
-  if (dropped) assert.match(served()!.columns, /^id\ta2\tc\td$/);
+  // DROPPED (Mason's own publication names each table whole, #978: the database never refuses the drop)
+  await step("a column dropped", "ALTER TABLE t DROP COLUMN b");
+  assert.match(served()!.columns, /^id\ta2\tc\td$/);
 
-  // and the events say no failure was left behind: the table is current, its poll or stream applying again
+  // WHILE MASON IS STOPPED, a column its exclude: names and a synced one are dropped (#993's review: the next start
+  // refused the whole project until the sources file was edited): the start passes over the name and says so, and the
+  // table is synced again with its columns now
+  ok(mason("stop", "--json"), "mason stop");
+  psql(dbUrl, "ALTER TABLE t DROP COLUMN api_token, DROP COLUMN c");
+  const started = ok(mason("start"), "mason start after a column exclude: names was dropped");
+  const gone = /tables\.t\.exclude: public\.t no longer has api_token, so there is nothing to leave out\. Take it out of exclude:/;
+  assert.match(started.stdout + started.stderr, gone);
+  await until(`${mode}: after the restart: SELECT * to equal the source`, () => { bump(); return same(); });
+  assert.match(served()!.columns, /^id\ta2\td$/);
+  assert.ok((ok(mason("status", "--json"), "mason status").json.warnings as string[]).some((w) => gone.test(w)), "said among mason status's warnings");
+  await until(`${mode}: after the restart: mason status to say it is synced`, () => { bump(); return settled(); });
   ok(mason("stop", "--json"), "mason stop");
 }
 

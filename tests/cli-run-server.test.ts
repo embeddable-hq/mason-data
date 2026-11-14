@@ -276,12 +276,12 @@ test("mason remove: the table's entry goes, every other byte of the file as it w
     // ANOTHER ENTRY THAT NO LONGER HOLDS (a column dropped on the database): the remove is refused, the file as it was —
     // else the run's re-read refuses the file, keeps the removed table and goes on copying it, while the command says
     // "Removed" (the review of the sources file)
-    const stale = "kind: postgres\nurl: postgres://me@localhost:5432/app\ntables:\n  customers: {}\n  orders:\n    columns: [id, gone]\n";
+    const stale = "kind: postgres\nurl: postgres://me@localhost:5432/app\ntables:\n  customers: {}\n  orders:\n    columns: [id, idd]\n";
     fs.writeFileSync(sourceFile, stale);
     changed = 0;
     const held = await remove(["customers"]);
     assert.equal(held.status, 409);
-    assert.equal(JSON.parse(held.text).error, "mason/sources/app.yml: tables.orders.columns: public.orders has no column gone (its columns: id, customer_id) — fix it first, then remove customers");
+    assert.equal(JSON.parse(held.text).error, "mason/sources/app.yml: tables.orders.columns: public.orders has no column idd — did you mean `id`? (its columns: id, customer_id) — fix it first, then remove customers");
     assert.equal(fs.readFileSync(sourceFile, "utf8"), stale, "nothing written");
     assert.equal(changed, 0, "the run is not told of a change that was not made");
     // A url: THAT NOW NAMES ANOTHER DATABASE (a .env edited): this run's catalog is the old one's — refused, the way out said

@@ -186,7 +186,8 @@ CLI lacks).
   second file is refused ("one source per project for now"). ONE reader (`readSource`, `parseSourceText`, then
   `addedTables` against the catalog, src/cli/sources.ts) for the run, `mason tables`, `mason add` and `serve`; every
   mistake of a file on ONE report (`sourceFailure`, code `bad_source`), each with its key, a `did you mean` and the
-  way out. A file that cannot be read mid-run keeps the tables read before: a typo never drops a copy.
+  way out. A name of `columns:` or `exclude:` its table lacks and no column is close to was dropped on the
+  database: passed over and said, never a refusal (`goneColumns`, `goneNotes`; issue 977); one close to a column is refused. A file that cannot be read mid-run keeps the tables read before: a typo never drops a copy.
 - **`mason add` and `mason remove` work before `mason start` as after it** (`needs: "project"`): the sources file is
   the list, and `mason init demo` already writes entries before any run, so `mason init && mason add orders && mason
   start` is a natural order. With Mason up they ask the run (`/api/pick`, `/api/remove`: the copy starts or is dropped

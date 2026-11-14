@@ -12,6 +12,14 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **A table under `sync: replication` no longer blocks `ALTER TABLE … DROP COLUMN` on your database.** On Postgres 15
+  and later, the publication Mason makes for itself listed each table's columns. So your database refused to drop a
+  listed column, with "publication … depends on column", and never sent a column added later. Mason's publication now
+  names each table whole. Mason updates a publication it made before at its first start after the upgrade, once,
+  while it keeps syncing. Columns a table's entry leaves out, with `exclude:` or `columns:`, now reach Mason over
+  replication. Mason drops them as they arrive. They are never stored, logged or served. A publication you name with
+  `publication:` is still never changed. If it lists a table's columns, Mason now says once that the list blocks
+  `DROP COLUMN`, and how to name the table whole. This was listed as known in 0.20.0.
 - **A column added to, renamed in or dropped from a synced table on your database now reaches Mason without a restart.**
   Before, a new column never reached the synced data until Mason was started again, while `mason status` said every
   table was synced. A column renamed or dropped made the table's sync fail again and again until a restart. Now Mason
@@ -20,6 +28,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   old data until that ends. A new column that looks like a secret, such as `api_token`, is left out, as `mason add`
   leaves it out. Mason writes `exclude:` on the table's entry in the sources file, and says so in its log, its events
   and `mason status`. To sync it, run `mason add <table> --include <column>`.
+  A column that the sources file names in `exclude:` or `columns:` and that your database dropped no longer stops Mason
+  from starting. Mason passes over the name, says so in `mason status`, and syncs the table with the columns it has. A
+  name that is close to a column, such as a typo, is still refused, with the name it is close to.
   A publication you name in the sources file (`publication:`) is never changed by Mason. If it lists a table's columns,
   Postgres does not send a new column, so Mason stops keeping that table current and says the `ALTER PUBLICATION` line
   that adds the column.

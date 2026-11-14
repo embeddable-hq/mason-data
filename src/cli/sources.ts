@@ -494,7 +494,9 @@ export function entryProblems(t: SourceTable | undefined, e: TableEntry, all: re
   const have = t.columns.map((c) => c.name);
   const missing = (list: readonly string[], key: string): string[] => list.filter((c) => !have.includes(c)).map((c) =>
     `${at}.${key}: ${t.source} has no column ${c}${didYouMean(c, have)} (its columns: ${have.join(", ")})`);
-  const out = [...missing(e.columns ?? [], "columns"), ...missing(e.exclude, "exclude")];
+  // a name of columns: or exclude: no column is close to was dropped on the database: passed over, said (`goneColumns`)
+  const near = (list: readonly string[]): string[] => list.filter((c) => !have.includes(c) && didYouMean(c, have) !== "");
+  const out = [...missing(near(e.columns ?? []), "columns"), ...missing(near(e.exclude), "exclude")];
   if (e.key !== null) {
     if (t.key.length) out.push(`${at}.key: ${t.source} has a primary key (${t.key.join(", ")}), which Mason keys it by — remove key`);
     else {
@@ -517,6 +519,35 @@ export function entryProblems(t: SourceTable | undefined, e: TableEntry, all: re
   if (sync.mode === "replication" && t.replicaIdentity === "n" && e.key === null) {
     out.push(`${at}: ${t.source} has REPLICA IDENTITY NOTHING, and a publication carrying it would make your app's own UPDATEs and DELETEs on it fail (sync: replication) — ` +
       `give its entry sync: poll <interval> (poll 5m), or sync: off; or ALTER TABLE ${t.source} REPLICA IDENTITY DEFAULT on the database`);
+  }
+  return out;
+}
+
+/**
+ * THE COLUMNS AN ENTRY NAMES THAT ITS TABLE NO LONGER HAS (issue 977: a column dropped on the database that an entry's
+ * `exclude:` or `columns:` named refused the whole project at the next start, until the file was edited): each name of
+ * `columns:` or `exclude:` the table lacks and that no column of it is close to (`didYouMean` finds none). Such a name is
+ * passed over — `columns:` syncs the columns it still names, `exclude:` has nothing to leave out — and said
+ * (`goneNotes`). A name close to a column (a typo, or a column renamed) is still refused, with the name it is close to
+ * (`entryProblems`): `exclude: [api_tokn]` must never sync `api_token`. A `key:` column is never passed over.
+ */
+export function goneColumns(t: Pick<SourceTable, "columns">, e: Pick<TableEntry, "columns" | "exclude">): { columns: string[]; exclude: string[] } {
+  const have = t.columns.map((c) => c.name);
+  const gone = (list: readonly string[]): string[] => list.filter((c) => !have.includes(c) && didYouMean(c, have) === "");
+  return { columns: gone(e.columns ?? []), exclude: gone(e.exclude) };
+}
+
+/** What the run says of the names its entries pass over (`goneColumns`), a line each, at the key that names them. */
+export function goneNotes(src: Pick<SourceFile, "file" | "tables">, tables: readonly SourceTable[], root: string): string[] {
+  const out: string[] = [];
+  for (const e of src.tables) {
+    const t = tables.find((x) => x.source === e.table);
+    if (t === undefined) continue;
+    const g = goneColumns(t, e);
+    const at = `${shownPath(root, src.file)}: tables.${e.name}`;
+    const one = (xs: readonly string[]): boolean => xs.length === 1;
+    if (g.columns.length) out.push(`${at}.columns: ${t.source} no longer has ${g.columns.join(", ")}, so ${one(g.columns) ? "it is" : "they are"} not synced. Take ${one(g.columns) ? "it" : "them"} out of columns:`);
+    if (g.exclude.length) out.push(`${at}.exclude: ${t.source} no longer has ${g.exclude.join(", ")}, so there is nothing to leave out. Take ${one(g.exclude) ? "it" : "them"} out of exclude:`);
   }
   return out;
 }

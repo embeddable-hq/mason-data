@@ -42,7 +42,7 @@ import { createRunServer, listenOnLoopback, metricsFacts, usageFacts, type RunCo
 import { UiErrors } from "./ui-errors.ts";
 import type { RunMetrics } from "./metrics.ts";
 import { readGenerated } from "./generated-files.ts";
-import { addedTables, arrivedSecrets, effectiveSync, entryName, leftOutText, replicatedEntries, rereadSources, shownPath, syncWritten, withLeftOut, withTable, type ArrivedSecrets, type RunSources, type SourceFile } from "./sources.ts";
+import { addedTables, arrivedSecrets, effectiveSync, entryName, goneNotes, leftOutText, replicatedEntries, rereadSources, shownPath, syncWritten, withLeftOut, withTable, type ArrivedSecrets, type RunSources, type SourceFile } from "./sources.ts";
 import { newToken } from "./security.ts";
 import { alive, liveRun, processStart } from "./runs.ts";
 import { DEMO_DIR, DUCK_FILE, projectReadOnlySetting, projectSource, projectWriteRefusal, startSettingRefusal, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
@@ -455,6 +455,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // THE TABLES THE SOURCES FILE NAMES, against the database's catalog: every mistake said at once, before anything opens
   const firstTables = addedTables(src, facts.tables, source.database, project.root);
   if (!Array.isArray(firstTables)) return failed("start", firstTables, { json: false });
+  // A COLUMN AN ENTRY NAMES THAT THE DATABASE DROPPED is passed over, never a refusal of the project (issue 977): said
+  // here, in the log and among the run's warnings for as long as the file names it
+  let fileNotes = goneNotes(src, facts.tables, project.root);
+  for (const n of fileNotes) say(`  ! ${n}`);
   // what the run copies: the sources file as last read, and what is wrong with it now (an edit the run cannot take)
   let sources: RunSources = { file: src, tables: firstTables, problem: null };
   // THE ROLES FILE (mason/roles.yml, src/cli/roles.ts): what each role may read, held against the tables the sources
@@ -513,7 +517,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   }
   // THE RUN'S WARNINGS, which mason status, --json and the web page read for as long as it runs: the start's, and what
   // the run says later (a new column that looks like a secret, left out: issue 977)
-  const runWarnings: string[] = [...warnings, ...(memoryWarned === null ? [] : [memoryProblemText(memoryWarned)])];
+  const runWarnings: string[] = [...warnings, ...(memoryWarned === null ? [] : [memoryProblemText(memoryWarned)]), ...fileNotes];
+  for (const n of fileNotes) logLine(`[sync] ${n}`);
   const syncMode = syncModeOf(process.env);
   // THE SYNC'S EVENTS (src/duck/events.ts): its failures and notable events, kept as the request log is, before the sync
   // that records them starts
@@ -596,6 +601,12 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     // the columns the run's tables now stand on: only once the file was taken, so a column that arrived while the file
     // could not be is still new when it can
     if (r.problem === null) columnsSet = new Map(now.tables.map((t) => [t.source, t.columns.map((c) => c.name)]));
+    // the names the file's entries pass over now (`goneNotes`): a new one said, and the warnings the file's as it is now
+    const notes = goneNotes(r.file, now.tables, project.root);
+    for (const n of notes) if (!fileNotes.includes(n)) logLine(`[sync] ${n}`);
+    for (const n of fileNotes) { const i = runWarnings.indexOf(n); if (i >= 0) runWarnings.splice(i, 1); }
+    runWarnings.push(...notes);
+    fileNotes = notes;
     sources = { file: r.file, tables: r.tables, problem: r.problem };
     sync.setViews(now.views ?? []);
     sync.setCollations(now.collations ?? []);

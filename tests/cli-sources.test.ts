@@ -847,3 +847,20 @@ test("leftOutText says what was left out, where it is written and how to sync it
   const left = S.withLeftOut(file, new Map([["public.orders", ["deploy_key"]], ["public.customers", ["password"]]]));
   assert.deepEqual(left.tables.map((e) => [e.table, e.columns, e.exclude]), [["public.orders", null, ["api_token", "deploy_key"]], ["public.customers", ["id", "name"], []]]);
 });
+
+test("a column the database dropped that an entry's columns: or exclude: names is passed over and said, never a refusal of the file; a near name is still refused (issue 977)", () => {
+  const file = parse("kind: postgres\nurl: ${DATABASE_URL}\ntables:\n  orders:\n    exclude: [api_token, old_secret]\n  customers:\n    columns: [id, name, nickname]\n") as Sources.SourceFile;
+  const added = S.addedTables(file, CATALOG, "shop", "/app");
+  assert.ok(Array.isArray(added), JSON.stringify(added));
+  assert.deepEqual(added.map((t) => [t.source, t.columns.map((c) => c.name)]),
+    [["public.orders", ["id", "customer_id", "status", "amount", "payload"]], ["public.customers", ["id", "name"]]], "synced with the columns it has");
+  assert.deepEqual(S.goneNotes(file, CATALOG, "/app"), [
+    "mason/sources/app.yml: tables.orders.exclude: public.orders no longer has old_secret, so there is nothing to leave out. Take it out of exclude:",
+    "mason/sources/app.yml: tables.customers.columns: public.customers no longer has nickname, so it is not synced. Take it out of columns:",
+  ]);
+  // a name close to a column is a typo or a rename: refused with the closest, so exclude: [api_tokn] never syncs api_token
+  const typo = S.addedTables(parse("kind: postgres\nurl: ${DATABASE_URL}\ntables:\n  orders:\n    exclude: [api_tokn]\n") as Sources.SourceFile, CATALOG, "shop", "/app");
+  assert.ok(!Array.isArray(typo));
+  assert.match(JSON.stringify(typo), /tables\.orders\.exclude: public\.orders has no column api_tokn — did you mean `api_token`\?/);
+  assert.deepEqual(S.goneColumns(orders, { columns: null, exclude: ["api_tokn"] }), { columns: [], exclude: [] }, "never passed over");
+});

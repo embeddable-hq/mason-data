@@ -576,6 +576,51 @@ are `.claude/rules/duck-sync.md` "Keeping a copy current". Why each is so:
 
 **Where.** `src/duck/stream.ts`, `src/duck/publication.ts`; `tests/integration/duck-stream.itest.ts`.
 
+### Mason's own publication names each table whole
+
+**Decision** (2026-11-14, issue 978, the owner's). The publication Mason makes when the sources file names none lists
+each replicated table whole: `FOR TABLE t`, never `FOR TABLE t (a, b)`. This holds for every table, on every Postgres
+version, and for an entry with `exclude:` or `columns:` too. The stream then carries every column of the table. Mason
+drops the columns the synced table does not hold as they arrive (`projectTuple`, src/duck/stream.ts), in every message:
+an insert, an update, an unchanged TOAST value, an update's old key and a delete. A publication an earlier Mason made
+with column lists is named whole at its next pass, once (`ensurePublication`, src/duck/sync.ts). **Do not bring a
+column list back to Mason's own publication without the owner's decision.**
+
+**Why.** From Postgres 15, Mason listed the synced columns of each table whose replica identity is its primary key. The
+idea was that the stream should carry only what the synced table keeps. It had two costs, found in issue 978 on
+Postgres 16:
+- Postgres refused the application's own `ALTER TABLE … DROP COLUMN` of a listed column on its production database,
+  with "publication … depends on column". An ordinary migration failed because Mason was attached. Mason is meant to
+  read the source and never get in the way of its DDL.
+- Postgres never publishes a column added to the table later, so Mason could not pick a new column up from the stream.
+
+**The trade-off accepted.** A column the sources file leaves out, a secret-looking one included (`api_token`), now
+crosses the replication stream into Mason's process. Mason drops it on arrival. It is never stored, logged, written to
+the request log or served. `tests/integration/duck-stream.itest.ts` holds this for every kind of message, searching every
+text value in Mason's file and every log line for the excluded values.
+
+**Why that is acceptable.** Mason already holds the source's URL with read access to the whole table. It offers only
+tables on which its role holds SELECT on the whole table (`has_table_privilege` in `TABLES_SQL`, src/cli/preflight.ts),
+so the excluded column was always readable by it. What Mason reads by SELECT is narrower, and stays so: the first sync
+(`readChunks`), the poll (`poll`) and the stream's read of a row by its key (`sourceRows`) each SELECT the synced
+columns only. The stream is the one path that carries the other columns, and it drops them before anything is written.
+
+**Rejected.**
+- A column list only for a table with excluded columns. The DROP COLUMN problem would stay for exactly the tables an
+  application is most likely to change, and a new column would still never arrive.
+- Keeping the list, and handling the drop for the user (taking the table out of the publication, dropping the column,
+  putting it back). That is a write to the production database in the middle of the application's migration, which
+  Mason cannot time, and Postgres would still refuse a migration run while Mason is down.
+
+**A named publication** (`publication:`) is still the owner's. A column list on it that carries every synced column is
+accepted, as before. Mason says once a run that the list blocks `DROP COLUMN`, with the statements that name the table
+whole (`columnListText`, src/duck/publication.ts). When a named publication lacks something, the statements Mason gives
+its owner name each synced table whole, never with a column list.
+
+**Where.** `src/duck/sync.ts` (`ensurePublication`), `src/duck/publication.ts`, `src/duck/stream.ts` (`projectTuple`);
+`tests/integration/duck-stream.itest.ts` ("Mason's own publication names each table whole", "a publication an earlier
+Mason made with column lists").
+
 ## The statement path
 
 ### How a statement is answered: Postgres decides, DuckDB computes
