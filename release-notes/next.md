@@ -31,3 +31,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `GREATEST`, the column's decimals were rounded away with no error. So `a IN (SELECT div(i, 7) …)` matched 0.01 to 0,
   and rows came back wrong or in the wrong order. Now the rows are Postgres's. A `UNION`, `INTERSECT` or `EXCEPT`
   without `ALL` still prints every row at one scale, the widest (`3.00` where Postgres prints `3`), as listed.
+- **A table under `sync: replication` no longer blocks `ALTER TABLE … DROP COLUMN` on your database.** On Postgres 15
+  and later, the publication Mason makes for itself listed each table's columns. So your database refused to drop a
+  listed column, with "publication … depends on column", and never sent a column added later. Mason's publication now
+  names each table whole. Mason updates a publication it made before at its first start after the upgrade, once,
+  while it keeps syncing. Columns a table's entry leaves out, with `exclude:` or `columns:`, now reach Mason over
+  replication. Mason drops them as they arrive. They are never stored, logged or served. A publication you name with
+  `publication:` is still never changed. If it lists a table's columns, Mason now says once that the list blocks
+  `DROP COLUMN`, and how to name the table whole. This was listed as known in 0.20.0.
