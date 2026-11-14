@@ -468,7 +468,7 @@ names the agent. Its tools say over this wire what a bare SQL tool would leave a
   once, so a remote `mason serve` answers as a local run does; a table is named as EXPLAIN names it, as a statement
   writes it (`public."Clients"`);
 - `query` sends ONE statement through the extended protocol (a second is Postgres's 42601), its `max_rows` the
-  Execute's row count (the server stops there and answers PortalSuspended: `truncated`), after `SET statement_timeout`
+  Execute's row count (the server stops there and answers PortalSuspended: `truncated`), inside a read-only transaction under `SET LOCAL statement_timeout`
   to its `timeout_ms` (57014 past it); the column types are the catalog's `format_type(oid, typmod)` of the
   RowDescription's OID and modifier. The wire sends the catalog's own OID for every type, a type the source made (an
   enum, a citext) included, so pg_type names it as the source names its own;

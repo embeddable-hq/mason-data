@@ -1989,7 +1989,7 @@ a client of the Postgres API like any tool, connected as a `mason user` by the U
 (`CommandSpec.stdout: "protocol"`): a failure to start is the failure shape on stderr, the MCP client's log. Its tools are named in Mason's words: `tables` (each copy's
 rows and how it is kept current), `describe` (columns, Postgres types, key, foreign keys), `query` (one statement through
 the extended protocol, `max_rows` the Execute's row count so the server stops there and says so, `timeout_ms` a
-`SET statement_timeout`) and `explain`; the agent's guide and `mason help mcp` are its resources. The rows and the kept
+`SET LOCAL statement_timeout` in a read-only transaction around the statement) and `explain`; the agent's guide and `mason help mcp` are its resources. The rows and the kept
 line come from `EXPLAIN (FORMAT JSON)`'s `Mason.Tables` over the wire, never the run's command server: a remote
 `mason serve` answers as a local run does, and the words are the sync's own, as `mason status` prints them. One
 EXPLAIN a table, a few at once: a union of them all failed whole for one table it could not plan, and left a refusal
