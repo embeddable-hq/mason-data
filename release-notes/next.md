@@ -22,4 +22,6 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `t.decimal`. Mason printed every value with the most decimals any value in the column had, so `12.5` read `12.50` and
   `0` read `0.00`. Now a plain `SELECT`, `::text`, arithmetic, `sum`, `min`, `max`, windows, subqueries and the binary
   wire all give your database's text. A few readers still print the old way: `to_json` and its kin, `concat`,
-  `format`, `||`, `array_agg`, a row's text, a scalar subquery, and a `UNION` without `ALL`. A fix for those is planned.
+  `format`, `||`, `array_agg`, a row's text, a scalar subquery, `percentile_disc`, `mode()`, `sum(DISTINCT …)`, a
+  `UNION` without `ALL`, and a generated table's column. `docs/SQL-SUPPORT.md` lists them all, under
+  `mixed-scale-numeric`. A fix for most of them is planned.
