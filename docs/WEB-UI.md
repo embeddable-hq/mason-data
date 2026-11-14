@@ -61,8 +61,9 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   24-hour sparkline once there are two hours to draw, and **each is a link** into the view that lists what it counts:
   the tables (the failed ones when a first sync failed), Usage for the synced data's file, Queries for the statements,
   the slow ones for the p95, the refused or failed ones for the query errors, and Sync events' failures over the last
-  24 hours for the errors. A count the page could not read is "unknown" with its reason, never 0. Eight cards,
-  nine with the host's (`MASON_UI_OVERVIEW_CARD`): four by two and three by three from 641 px up, two a row on a phone.
+  24 hours for the errors. A count the page could not read is "unknown" with its reason, never 0. Eight cards:
+  four by two from 641 px up, two a row on a phone. The host's card (`MASON_UI_OVERVIEW_CARD`) is not among them. It is
+  drawn first, above everything, at the full width ("Host views").
 - **Overview**, Getting started (while setting up is not done): ✓ Mason is running · ✓/○ Sync a table · ✓/○ Create
   a user — each step in the same words done or not (the ✓ or ○ says which), each ○ with its one action (**Add a table**
   → Tables, **Add a user** → Users). It is done while at least one added table is synced and at least one user exists
@@ -628,8 +629,23 @@ the Overview and Tables. Unset, nothing on the page changes.
   panel icon, and shows the view at the page's own address `#host/<n>` (`n` the entry's place in the list, from 1), so
   Back, Forward and a bookmark work and the sidebar marks it as the current page. A `#host/<n>` that names no view (an
   older bookmark, or a page with no host's sidebar) lands on the Overview, as an unknown address always has.
-- **A card on the Overview**: `MASON_UI_OVERVIEW_CARD=host/card.json`, the same JSON, shown as one more card after
-  Mason's own (its title the card's label, its facts as rows, its links under them).
+- **A card on the Overview**: `MASON_UI_OVERVIEW_CARD=host/card.json`, the same JSON. It is for what needs the
+  person's attention, such as a maintenance notice, a disk warning or the machine being out of reach. So it is drawn
+  **first**, above the box and Mason's own cards, at the full width of the page, while getting started too. Its title is
+  the card's label, its facts are rows, and its links are under them. Nothing is drawn until the first answer arrives.
+
+**To say "nothing now"**, answer with no sections. The title may be left out then:
+
+```json
+{ "refresh": 60, "sections": [] }
+```
+
+The Overview then draws no card at all: no box and no title. It reads the path again every `refresh` seconds, so a card
+the host adds later shows up on the next read, and goes when the host says nothing again. Without `refresh`, the path
+is read once each time the Overview is shown, as any card is, so a card added later shows only when the Overview is
+opened again. Give a `refresh` when the card can appear at any time. A view in the sidebar that answers with no
+sections says "The host's view has nothing in it.", under its sidebar label when it has no title. A read that fails is
+still shown in the card, so a broken host stays visible.
 
 **The path is relative to the page's own address**, and the page reads it with a GET from its own origin, so the CSP's
 `default-src 'self'` holds and whatever serves the page answers it: a proxy serving the page at
@@ -672,7 +688,8 @@ the view's failure: a host that hangs holds up neither the run's reads nor anoth
 }
 ```
 
-- `title` (one line, at most 200 characters): the view's heading, or the card's label. `sections`: at most 20, each a
+- `title` (one line, at most 200 characters): the view's heading, or the card's label. It may be left out only when
+  `sections` is empty. `sections`: at most 20, each a
   `heading` (one line), and optionally `facts` (at most 50), `text` (at most 8,000 characters, line breaks kept) and
   `links` (at most 20). `refresh`: seconds, optional.
 - A fact is `{ label, value }` (one line each; a value at most 2,000 characters), with `copy: true` for a Copy button
