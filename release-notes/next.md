@@ -20,6 +20,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   be left out. The Overview then draws no card at all, and reads the path again at its `refresh`, so a card added
   later shows up on the next read. A read that fails is still shown in the card. Before, an empty answer drew a box
   with only its title, and the card came last.
+- **On a server that runs the project read-only, the web page links to how to deploy a change.** `mason status --json`
+  words `sourcesReadOnly` as plain sentences now, so a script that matched its old text must match the new one. A new
+  field, `sourcesReadOnlyKind`, says which reason it is: `deployed`, `unwritable` or `unknown`.
 
 ## What was wrong and is now right
 

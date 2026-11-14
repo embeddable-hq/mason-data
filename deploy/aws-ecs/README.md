@@ -104,7 +104,7 @@ A tool connects to the instance's address (its Elastic IP, or the NLB) on 5433 w
   deployment. To ship your committed `mason/` instead, build an image that carries it
   ([`deploy/fly/README.md`](../fly/README.md#the-project-folder) has the two-line Dockerfile), drop `MASON_PROJECT` and
   set `MASON_PROJECT_READONLY=1`, which refuses every edit beside the server (`mason add`, `mason remove`, the page's Add and
-  Remove) with "edit the files and deploy them".
+  Remove) with "commit the change, and deploy it".
 - **The network**: `bridge` mode with host ports 5433 and 4140 on the instance. The database allows the instance's
   address.
 

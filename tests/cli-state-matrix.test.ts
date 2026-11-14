@@ -512,7 +512,7 @@ test("a deployed project (MASON_PROJECT_READONLY): mason add, mason remove and m
   const deployedFailure = (e: { code: string; message: string; why?: string; fix?: string }, next: Array<{ command: string }>, message: string): void => {
     assert.deepEqual([e.code, e.message, e.why, e.fix, next.map((n) => n.command)], ["refused", message,
       "Mason runs them as they were deployed: an edit here would run what nobody committed, and the next deploy would undo it",
-      "edit the files and deploy them: mason add or mason remove where the project is committed, then commit and deploy", ["mason status"]]);
+      "run mason add or mason remove in your project, commit the change, and deploy it", ["mason status", "mason help production"]]);
   };
   // the record (the run started with it), the setting in this shell, and the record under a shell saying 0: each refuses
   const ways: Array<{ state: "deployed" | "stopped"; env: Record<string, string>; message: string }> = [
