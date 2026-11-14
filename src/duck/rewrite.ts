@@ -288,6 +288,9 @@ class Rewriter {
    * says which parameters would fold (`pathParams`), so the listener plans it again at the Execute with the values.
    */
   boundPaths: ReadonlyMap<number, string> = new Map();
+  /** the relations of the analysis whose json text is the ENGINE's, never the source's (a generated table: src/duck/plan.ts
+   *  `engineTextRelations`), by relid: `copiedColumn` never calls a column of one Postgres's canonical text */
+  engineText: ReadonlySet<number> = new Set();
   /** the parameters met as a json read's path, or an element or key of one, of a type read as a constant (`foldParam`) */
   readonly pathParams = new Set<number>();
   /** the parameters the read being written folded, and the text each was bound to (`folded`); null outside a json
@@ -441,14 +444,17 @@ class Rewriter {
   /**
    * A json(b)_object_keys argument whose keys DuckDB's own `json_keys` reads exactly as Postgres does (issue 461: the
    * function, one hop to the main thread per vector, was 56 µs a row and held every other session's statement): a
-   * COPIED table's column (Typed.relation) of the function's own type. A copied jsonb is Postgres's canonical text, so
-   * its keys are already in jsonb's order (length first, then bytes), each held once; a copied json is the document as
-   * written, whose keys Postgres reads in its order, a key held twice included, as `json_keys` does. Anything else (an
-   * expression, a cast, a jsonb the statement computes, which may hold a key twice) stays the function's.
+   * column of a relation, of the function's own type. A jsonb only where `copiedColumn` says its text is Postgres's
+   * canonical text (a synced table's, never a generated table's), so its keys are already in jsonb's order (length
+   * first, then bytes), each held once. A json column's text is the document Postgres reads (a synced table's as
+   * written, a generated table's as the rewrite wrote it), and `json_keys` reads its keys as the function does: in its
+   * order, a key held twice included. Anything else (an expression, a cast, a jsonb the statement or a generated table
+   * computes, which may hold a key twice in the order written) stays the function's.
    */
   private keysNative(arg: AstNode, canonical: boolean): boolean {
     const t = kindOf(arg) === "ColumnRef" ? this.typed(arg) : null;
-    return t !== null && t.node === "VAR" && t.relation !== undefined && t.type === (canonical ? JSONB : JSON_OID);
+    if (t === null || t.node !== "VAR" || t.relation === undefined || t.type !== (canonical ? JSONB : JSON_OID)) return false;
+    return !canonical || this.copiedColumn(arg);
   }
 
   /**
@@ -474,10 +480,18 @@ class Rewriter {
     });
   }
 
-  /** a copied table's column (Typed.relation): its jsonb text is the copy's, Postgres's canonical text, each key once */
+  /**
+   * THE ONE DECISION THAT A COLUMN'S JSONB TEXT IS POSTGRES'S CANONICAL TEXT, each key once in jsonb's order: a column of
+   * a SYNCED table (Typed.relation), whose copy holds the source's jsonb_out text. A generated table is a relation of the
+   * catalog too, but its jsonb is the engine's text of what its SELECT computed (`jsonb_build_object('b', 1, 'a', 2,
+   * 'b', 3)` keeps both b's, in the order written), so a column of one (`engineText`, from the run's own list of what
+   * each table is: src/duck/plan.ts `engineTextRelations`) is never canonical (issue 461's review). Every reader of the
+   * premise asks here: `->>` and `->` read natively without checking each key is held once (jsonGet, jsonValueRead),
+   * a `->` read's nullness, `@>` (containsRead) and the keys (keysNative).
+   */
   private copiedColumn(n: AstNode): boolean {
     const t = kindOf(n) === "ColumnRef" ? this.typed(n) : null;
-    return t !== null && t.node === "VAR" && t.relation !== undefined;
+    return t !== null && t.node === "VAR" && t.relation !== undefined && !this.engineText.has(t.relation.relid);
   }
 
   /**
@@ -7987,13 +8001,16 @@ export interface RewriteOptions {
   keyCounts?: ReadonlySet<number>;
   /** the values an Execute bound to the parameters read as a json path, by number (`Rewriter.boundPaths`) */
   boundPaths?: ReadonlyMap<number, string>;
+  /** the relations whose json text is the engine's, by relid (`Rewriter.engineText`) */
+  engineText?: ReadonlySet<number>;
 }
 
 export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(), citextHeld = new Set(), typeNames = new Map(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
-  wireBound = false, keyCounts = new Set(), boundPaths = new Map() }: RewriteOptions):
+  wireBound = false, keyCounts = new Set(), boundPaths = new Map(), engineText = new Set() }: RewriteOptions):
   { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean; pathParams: number[] } {
   const r = new Rewriter(analysis, base, collations, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts, citextHeld, typeNames);
   r.boundPaths = boundPaths;
+  r.engineText = engineText;
   if (joinsUsing(analysis.tree, new Set([JSONB, JSONB_ARRAY]))) {
     throw new Unrewritable("a JOIN … USING or a NATURAL JOIN on a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "JOIN … ON a.j = b.j", "jsonb-compare");
   }

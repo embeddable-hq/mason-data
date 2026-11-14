@@ -848,3 +848,35 @@ test("a child of a generated table built but not yet in the catalog waits for it
     refusedAt((await w.until((s) => s.state === "refused", "public.gone_child")).refusals, "sql", /relation "gone_parent" does not exist/);
   }, { onStep: (s, n) => { clock.onStep(s, n); if (s === "swapped" && n === "public.late_parent") onSwap?.(); } });
 });
+
+// ISSUE 461's REVIEW: a generated table's jsonb is the ENGINE's text of what its SELECT computed, never Postgres's
+// canonical text, so a key written twice is there twice, in the order written. Its keys, `->>`, `->`, a `->` read's
+// nullness and `@>` are each the function's (src/duck/rewrite.ts `copiedColumn`, from the run's list of what each table
+// is: src/duck/plan.ts `engineTextRelations`), never DuckDB's read of a synced table's canonical text. What Postgres
+// answers over the same SQL: jsonb_build_object('bb', 1, 'a', id, 'bb', 2, 'c', 3) is {"a": id, "c": 3, "bb": 2}, and
+// jsonb_object_agg holds each kind once, in jsonb's order (length, then bytes).
+test("issue 461: a generated table's jsonb holding a key twice answers its keys and reads as Postgres does", async () => {
+  await withWorld({
+    g_build: "kind: scheduled\ntarget_lag: 1s\nsql: SELECT id, jsonb_build_object('bb', 1, 'a', id, 'bb', 2, 'c', 3) AS j FROM events\n",
+    g_agg: "kind: scheduled\ntarget_lag: 1s\nsql: SELECT tenant_id, jsonb_object_agg(kind, id) AS j FROM events GROUP BY 1\n",
+  }, async (w) => {
+    await w.until(served(w.logged), "public.g_build");
+    await w.until(served(w.logged), "public.g_agg");
+    const c = await w.client();
+    try {
+      const rows = async (sql: string): Promise<unknown[][]> => (await c.query({ text: sql, rowMode: "array", types: { getTypeParser: () => (v: string) => v } } as pg.QueryConfig)).rows as unknown[][];
+      const keys = ["a", "c", "bb"];
+      assert.deepEqual(await rows("SELECT id, jsonb_object_keys(j) FROM g_build WHERE id = 1"), keys.map((k) => ["1", k]));
+      assert.deepEqual(await rows("SELECT count(*) FROM (SELECT jsonb_object_keys(j) FROM g_build) s"), [["12"]]);
+      assert.deepEqual(await rows("SELECT jsonb_object_keys(j) AS key, count(*) FROM g_build GROUP BY 1 ORDER BY 2 DESC, 1"), [["a", "4"], ["bb", "4"], ["c", "4"]]);
+      assert.deepEqual(await rows("SELECT DISTINCT jsonb_object_keys(j) FROM g_build ORDER BY 1"), [["a"], ["bb"], ["c"]]);
+      assert.deepEqual(await rows("SELECT g.id, k FROM g_build g LEFT JOIN jsonb_object_keys(g.j) AS k ON TRUE WHERE g.id = 2 ORDER BY 1, 2"), [["2", "a"], ["2", "bb"], ["2", "c"]]);
+      assert.deepEqual(await rows("SELECT k, count(*) FROM g_build g LEFT JOIN LATERAL jsonb_object_keys(g.j) AS k ON TRUE GROUP BY 1 ORDER BY 1"), [["a", "4"], ["bb", "4"], ["c", "4"]]);
+      assert.deepEqual(await rows("SELECT tenant_id, jsonb_object_keys(j) FROM g_agg ORDER BY 1, 2"), [["1", "query"], ["2", "load"], ["2", "query"]]);
+      assert.deepEqual(await rows("SELECT g.tenant_id, string_agg(k, ',') FROM g_agg g LEFT JOIN jsonb_object_keys(g.j) AS k ON TRUE GROUP BY 1 ORDER BY 1"), [["1", "query"], ["2", "load,query"]]);
+      // the reads that took the same premise: the LAST value of a key written twice, as jsonb holds it
+      assert.deepEqual(await rows("SELECT id, j ->> 'bb', (j -> 'bb')::text, j @> '{\"bb\": 1}', j @> '{\"bb\": 2}', (j -> 'bb') IS NULL FROM g_build WHERE id = 1"), [["1", "2", "2", "f", "t", "f"]]);
+      assert.deepEqual(await rows("SELECT j::text FROM g_build WHERE id = 1"), [['{"a": 1, "c": 3, "bb": 2}']]);
+    } finally { await c.end(); }
+  });
+});

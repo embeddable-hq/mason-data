@@ -1266,13 +1266,23 @@ is refused too.
 
 #### A copied column's keys (issue 461, 2026-11-14)
 
-**Decision.** `json(b)_object_keys` of a copied table's column of the function's own type is DuckDB's own `json_keys`,
-read once a row (`objectKeys`, `keysNative`). A copied jsonb is Postgres's canonical text, so its keys are already in
-jsonb's order (length first, then bytes), each held once. A copied json is the document as written, and Postgres reads
-its keys in that order, a key held twice included, as `json_keys` does. The function stays for the rows it must answer:
-a non-object (Postgres's 22023), and a json document whose text holds a `\u` escape (Postgres refuses `\u0000` and a
-lone surrogate, where DuckDB reads them). A cast, a `->` and a jsonb the statement computes stay the function's. Such a
-LEFT lateral is the never-empty INNER one bounded or not (`leftLateral`), since a row costs no call.
+**Decision.** `json(b)_object_keys` of a table's column of the function's own type is DuckDB's own `json_keys`, read
+once a row (`objectKeys`, `keysNative`). A synced table's jsonb is Postgres's canonical text, so its keys are already in
+jsonb's order (length first, then bytes), each held once. A json column is its text, and Postgres reads its keys in that
+order, a key held twice included, as `json_keys` does. The function stays for the rows it must answer: a non-object
+(Postgres's 22023), and a json document whose text holds a `\u` escape (Postgres refuses `\u0000` and a lone surrogate,
+where DuckDB reads them). A cast, a `->`, a jsonb the statement computes and a generated table's jsonb stay the
+function's. Such a LEFT lateral is the never-empty INNER one bounded or not (`leftLateral`), since a row costs no call.
+
+**A generated table's jsonb is not canonical (the review, 2026-11-14).** It is a relation of the catalog like a synced
+table, but it holds the engine's text of what its SELECT computed: `jsonb_build_object('bb', 1, 'a', id, 'bb', 2, 'c',
+3)` keeps both `bb`s in the order written, where Postgres's jsonb is `{"a": 1, "c": 3, "bb": 2}`. The first round took
+"a relation's column" for "a synced table's column", and answered `bb, a, bb, c` where Postgres answers `a, c, bb`. The
+same premise had read a generated table's `->` and `@>` by the first of the two `bb`s since issue 130 (`(j -> 'bb')`
+was `1`, `j @> '{"bb": 1}'` true, where Postgres has `2` and false). Now ONE decision says a column's jsonb is canonical
+(`copiedColumn`): a relation that the run's list of what each table is (`copies`, `kept.by` "generated") does not name
+as generated (`engineTextRelations`, src/duck/plan.ts). Every native read that skips checking each key is held once asks
+it.
 
 **Why.** On 2026-11-12, Metabase's `SELECT jsonb_object_keys(payload) AS key, count(*) … GROUP BY 1 ORDER BY 2 DESC, 1`
 over 3 M rows took 172–264 s against Postgres's 4.4–8.4 s, and timed out above about 5 M rows. The profile here: the

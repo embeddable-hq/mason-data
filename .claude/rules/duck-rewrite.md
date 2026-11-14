@@ -271,10 +271,10 @@ paths:
   - **a `->>` / `#>>` of a COLUMN is DuckDB's own read where that read is Postgres's answer** (`jsonGet` in
     src/duck/rewrite.ts: a string value, a missing path, a JSON null; a chain of reads off one column folded into one,
     `jsonChain`), and the function answers only the rows it must (a number's digits, an object, an array, an index, a
-    document holding a key twice) — the CASE's ELSE, which DuckDB evaluates on those rows alone. Only a COPIED table's
-    jsonb column (`Typed.relation`) is read without checking each object's keys are held once: a jsonb the statement
-    computes (`jsonb_object_agg`, `jsonb_build_object`) is the rewrite's text and may hold a key twice, whose `->>` is
-    the last (a review finding). A `#>` element is an index by ONE definition, `pathIndex` (Postgres's
+    document holding a key twice) — the CASE's ELSE, which DuckDB evaluates on those rows alone. Only a SYNCED table's
+    jsonb column (`copiedColumn`: `Typed.relation`, and no generated table's) is read without checking each object's
+    keys are held once: a jsonb the statement or a generated table computes (`jsonb_object_agg`, `jsonb_build_object`)
+    is the rewrite's text and may hold a key twice, whose `->>` is the last (a review finding; issue 461's review). A `#>` element is an index by ONE definition, `pathIndex` (Postgres's
     `strtoint`), which the function and the native read both ask (`tests/conventions.test.ts`). Measured, 5 M
     rows: 0.21 s native, 8.8 s through the function. A new native read is held to Postgres by `tests/duck-wire.test.ts`
     "a ->> of a column is DuckDB's own read" (every shape, against PGlite, and the hops counted:
@@ -311,11 +311,19 @@ paths:
     "a json path bound as a parameter …" the hops;
   - **a copied column's keys are DuckDB's own `json_keys`** (`objectKeys`, `keysNative` in src/duck/rewrite.ts; issue
     461: through the function, 56 µs a row, Metabase's grouped keys over 3 M rows took 172–264 s against Postgres's
-    4.4–8.4 s): `json(b)_object_keys` of a COPIED table's column of the function's own type, read once a row. A copied
-    jsonb is Postgres's canonical text, so its keys are already in jsonb's order, each once; a copied json is the
-    document as written, its keys in its order with a key twice kept, as `json_keys` reads them. The function answers
-    a non-object (22023) and a json whose text holds a `\u` (Postgres refuses `\u0000` and a lone surrogate, which
-    DuckDB reads); anything but a copied column (a cast, a `->`, a jsonb the statement computes) stays the function's.
+    4.4–8.4 s): `json(b)_object_keys` of a table's column of the function's own type, read once a row. A jsonb only
+    where `copiedColumn` says its text is Postgres's canonical text, so its keys are already in jsonb's order, each
+    once; a json column is its text, its keys in its order with a key twice kept, as `json_keys` reads them. The
+    function answers a non-object (22023) and a json whose text holds a `\u` (Postgres refuses `\u0000` and a lone
+    surrogate, which DuckDB reads); anything else (a cast, a `->`, a jsonb the statement or a generated table computes)
+    stays the function's. **Whether a column's jsonb text is canonical is ONE decision, `copiedColumn`**: a SYNCED
+    table's column, never a generated table's (`engineText`, from the run's list of what each table is: src/duck/plan.ts
+    `engineTextRelations`, `kept.by` "generated"), whose jsonb is the engine's text with a key written twice kept in the
+    order written (`jsonb_build_object('bb', 1, 'a', 2, 'bb', 3)`). Every native read that skips checking each key is
+    held once asks it: the keys, `->>` and `->` (`jsonGet`, `jsonValueRead`), a `->` read's nullness and `@>`
+    (`containsRead`); a relation alone (Typed.relation) is no proof (issue 461's review: main answered a generated
+    table's `->` and `@>` by the first of a key written twice). `tests/duck-generated.test.ts` "issue 461",
+    `tests/integration/duck-generated.itest.ts` `jtwice`.
     A libc order's key of the keys is computed for the grouped output alone. `tests/duck-wire.test.ts` "issue 461",
     the plan fixture's `native json keys:` entries, the oracle's `native json keys:` statements;
   - **the JSON paths statements keep reading are stored as columns** (`.claude/rules/duck-stored-json.md`), which answers a number's digits and
