@@ -80,12 +80,11 @@ test("a named publication: a table it does not carry is one problem naming the A
   const described = describedOf({ version: 160000, publication: { all_tables: false, publish: ["insert", "update", "delete", "truncate"] }, others: [],
     tables: [{ t: "public.orders", columns: ["id", "status"], in_publication: false, published: null, row_filter: null },
       { t: "public.items", columns: ["id"], in_publication: true, published: ["id"], row_filter: null }] }, "mason");
-  const identities = new Map([["public.orders", "d"], ["public.items", "d"]]);
-  const p = check.publicationProblems(namedPublicationVerdict(described, tables, identities), "mason", shown);
-  assert.deepEqual(p.map((x) => [x.code, x.table, x.message, x.sql]), [["publication", "public.orders", "publication mason: missing: public.orders", "ALTER PUBLICATION mason ADD TABLE public.orders (id, status);"]]);
-  assert.match(p[0]!.fix, /^the database's owner runs ALTER PUBLICATION mason ADD TABLE public\.orders \(id, status\); \(Mason never alters a publication it is given\)/);
+  const p = check.publicationProblems(namedPublicationVerdict(described, tables), "mason", shown);
+  assert.deepEqual(p.map((x) => [x.code, x.table, x.message, x.sql]), [["publication", "public.orders", "publication mason: missing: public.orders", "ALTER PUBLICATION mason ADD TABLE public.orders;"]]);
+  assert.match(p[0]!.fix, /^the database's owner runs ALTER PUBLICATION mason ADD TABLE public\.orders; \(Mason never alters a publication it is given\)/);
   const none = describedOf({ version: 160000, publication: null, others: ["app_pub"], tables: [] }, "mason");
-  const whole = check.publicationProblems(namedPublicationVerdict(none, tables, identities), "mason", shown);
+  const whole = check.publicationProblems(namedPublicationVerdict(none, tables), "mason", shown);
   assert.deepEqual(whole.map((x) => [x.table, x.message]), [[null, "publication mason: Found: no publication named mason. Publications on this database: app_pub."]]);
 });
 
@@ -132,14 +131,13 @@ test("a table replication cannot carry (no primary key, a key: or not; REPLICA I
   assert.deepEqual(r.problems.map((p) => p.table), ["public.nokey", "public.keyless", "public.ident_nothing"], "each has its table problem");
   assert.deepEqual(r.streamed.map((t) => t.source), ["public.orders"], "only what replication can carry is held to the publication");
   const unreplicable = /nokey|keyless|ident_nothing/;
-  const identities = new Map(r.streamed.map((t) => [t.source, t.replicaIdentity ?? "d"]));
   const catalog = [{ t: "public.orders", columns: ["id", "status"], in_publication: false, published: null, row_filter: null }];
   // pub1 there, carrying nothing; pub1 missing: CREATE PUBLICATION … FOR TABLE names the tables held to it alone
   for (const publication of [{ all_tables: false, publish: ["insert", "update", "delete"] }, null]) {
-    const v = namedPublicationVerdict(describedOf({ version: 160000, publication, others: [], tables: catalog }, "pub1"), r.streamed, identities);
+    const v = namedPublicationVerdict(describedOf({ version: 160000, publication, others: [], tables: catalog }, "pub1"), r.streamed);
     const said = check.publicationProblems(v, "pub1", "sources/app.yml");
     assert.equal(said.length, 1);
-    assert.match(said[0]!.sql ?? "", publication === null ? /^CREATE PUBLICATION pub1 FOR TABLE public\.orders \(id, status\)/ : /^ALTER PUBLICATION pub1 ADD TABLE public\.orders \(id, status\);$/);
+    assert.match(said[0]!.sql ?? "", publication === null ? /^CREATE PUBLICATION pub1 FOR TABLE public\.orders WITH/ : /^ALTER PUBLICATION pub1 ADD TABLE public\.orders;$/);
     for (const p of said) for (const text of [p.sql ?? "", p.fix, p.message]) assert.doesNotMatch(text, unreplicable);
   }
 });

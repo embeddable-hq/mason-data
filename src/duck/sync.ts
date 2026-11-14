@@ -77,7 +77,7 @@ import { scaleColumn, scaleOfText, scaleSql, SCALE_RE } from "./scale-column.ts"
 import { addCounts, countsText, duckValue, fold, foldInto, noChanges, noCounts, ReplicationStream, type ChangeCounts, type StreamedTable, type TableChanges } from "./stream.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { numericWiderThan } from "../lib/pg-numeric.ts";
-import { gapLine, namedPublicationVerdict, readNamedPublication } from "./publication.ts";
+import { columnListText, gapLine, namedPublicationVerdict, readNamedPublication } from "./publication.ts";
 import { isFailure, type SyncEventInput } from "./events.ts";
 import { originHere } from "../lib/failure-facts.ts";
 import { COMPACT_DISK_MARGIN_BYTES, COMPACT_MIN_WASTE_BLOCKS, COMPACT_WASTE_SHARE, CompactNoRoom, CompactTooLarge, dropLeftovers, pieceRows, readShape, rewrite, sideOf, spilled, swapSql, unspilled, wasteOf, type TableShape, type Waste } from "./compact.ts";
@@ -1124,6 +1124,8 @@ export class Sync {
   private readonly gapErrors = new Map<string, string>();
   /** a named publication that does not publish TRUNCATE has been said (once a run) */
   private truncateSaid = false;
+  /** the tables a named publication carries with a column list, said once a run (`columnListText`) */
+  private readonly columnListSaid = new Set<string>();
   /** the last pass failed: in replication mode it is tried again after the interval, the stream started by it */
   private passFailed = false;
   /** a table copied again because a numeric arrived wider than its copy, this run: bounded (`startStream`) */
@@ -2362,8 +2364,8 @@ export class Sync {
           `would make the app's own UPDATEs and DELETEs fail, so Mason does not replicate ${nothing.length === 1 ? "it" : "them"}. Give ${nothing.length === 1 ? "its entry" : "their entries"} ` +
           `sync: poll <interval> (poll 5m) in the sources file, or ALTER TABLE … REPLICA IDENTITY DEFAULT on the database`);
       }
-      if (r.owned) await this.ensurePublication(pg, tables, identities);
-      else await this.verifyPublication(pg, tables, identities);
+      if (r.owned) await this.ensurePublication(pg, tables);
+      else await this.verifyPublication(pg, tables);
       const slot = await readSlot(pg, r.slot);
       if (slot.exists && slot.walStatus === "lost") {
         this.log(`replication slot ${r.slot} was invalidated by the database (wal_status lost: it held more WAL than max_slot_wal_keep_size), so changes are missing from it: made again, and the synced tables caught up by one poll`);
@@ -2469,9 +2471,9 @@ export class Sync {
    * One that cannot be read through at all refuses the pass; a table it does not carry is left out of the copy and the
    * stream (`unpublished`), every other table going on.
    */
-  private async verifyPublication(pg: PgConnection, tables: readonly AddedTable[], identities: ReadonlyMap<string, string>): Promise<void> {
+  private async verifyPublication(pg: PgConnection, tables: readonly AddedTable[]): Promise<void> {
     const name = this.replication!.publication;
-    const v = namedPublicationVerdict(await readNamedPublication(pg, name, tables), tables, identities);
+    const v = namedPublicationVerdict(await readNamedPublication(pg, name, tables), tables);
     if (v.refused !== null) throw new Error(v.refused);
     this.unpublished.clear();
     for (const [source, m] of v.tables) this.unpublished.set(source, m);
@@ -2479,28 +2481,37 @@ export class Sync {
       this.log(`publication ${name} does not publish truncate: a TRUNCATE on the database does not reach the synced data (the poll's count would see it: sync: poll <interval> on its entry)`);
       this.truncateSaid = true;
     }
+    // a column list is accepted (the publication is its owner's), and what it costs them is said once a run, per table
+    const listed = v.listsColumns.filter((t) => !this.columnListSaid.has(t));
+    if (listed.length) {
+      this.log(columnListText(name, listed));
+      for (const t of listed) this.columnListSaid.add(t);
+    }
   }
 
   /**
    * Mason's own publication made, or re-pointed, to carry exactly the added tables, with inserts, updates, deletes and
-   * truncates. A table with the default identity (its primary key) carries its added columns only (Postgres 15's
-   * column lists): what the stream sends is what the copy keeps. Any other identity carries the whole table, since a
-   * column list that misses an identity column makes the app's UPDATEs fail; a generated column is never listed (Postgres
-   * refuses it there; the stream reads it from the source, `refetch`).
+   * truncates, EACH TABLE WHOLE: never a column list, on any Postgres version, whatever the table's entry syncs.
+   * A column list (Postgres 15+) makes the database refuse the application's own `ALTER TABLE … DROP COLUMN` of a listed
+   * column, and never publishes a column added later. So the stream carries every column, and the ones the synced table
+   * does not hold (an `exclude:`, a `columns:` entry) are dropped as they arrive (`projectTuple`, src/duck/stream.ts),
+   * never stored, logged or served. A publication an earlier Mason made with column lists is re-pointed to whole tables
+   * at the next pass, once. docs/DESIGN.md "Mason's own publication names each table whole" (2026-11-14) has why, and
+   * what was weighed: do not bring a column list back without the owner's decision.
    */
-  private async ensurePublication(pg: PgConnection, tables: readonly AddedTable[], identities: ReadonlyMap<string, string>): Promise<void> {
+  private async ensurePublication(pg: PgConnection, tables: readonly AddedTable[]): Promise<void> {
     const name = this.replication!.publication;
     const lists = Number((await pg.query("SHOW server_version_num")).rows[0]?.[0] ?? 0) >= 150000;
-    const want = new Map(tables.map((t) => [t.source, lists && identities.get(t.source) === "d" ? t.columns.filter((c) => !c.generated).map((c) => c.name).sort() : null]));
     const flags = (await pg.query(`SELECT pubinsert AND pubupdate AND pubdelete AND pubtruncate, puballtables FROM pg_publication WHERE pubname = ${pgLiteral(name)}`)).rows[0];
+    // each table it carries, and whether it lists columns (a column list exists from Postgres 15: before, none can)
     const now = new Map((await pg.query(lists
-      ? `SELECT n.nspname || '.' || c.relname, CASE WHEN r.prattrs IS NULL THEN NULL ELSE (SELECT string_agg(a.attname, ',' ORDER BY a.attname) FROM pg_attribute a WHERE a.attrelid = r.prrelid AND a.attnum = ANY(r.prattrs)) END ` +
-        `FROM pg_publication_rel r JOIN pg_publication p ON p.oid = r.prpubid JOIN pg_class c ON c.oid = r.prrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE p.pubname = ${pgLiteral(name)}`
-      : `SELECT schemaname || '.' || tablename, NULL FROM pg_publication_tables WHERE pubname = ${pgLiteral(name)}`)).rows.map((x) => [x[0]!, x[1] ?? null] as const));
-    const same = flags !== undefined && flags[0] === "t" && flags[1] === "f" && now.size === want.size &&
-      [...want].every(([source, cols]) => now.has(source) && now.get(source) === (cols === null ? null : [...cols].sort((a, b) => a < b ? -1 : a > b ? 1 : 0).join(",")));
+      ? `SELECT n.nspname || '.' || c.relname, r.prattrs IS NOT NULL FROM pg_publication_rel r JOIN pg_publication p ON p.oid = r.prpubid JOIN pg_class c ON c.oid = r.prrelid ` +
+        `JOIN pg_namespace n ON n.oid = c.relnamespace WHERE p.pubname = ${pgLiteral(name)}`
+      : `SELECT schemaname || '.' || tablename, 'f' FROM pg_publication_tables WHERE pubname = ${pgLiteral(name)}`)).rows.map((x) => [x[0]!, x[1] === "t"] as const));
+    const listed = [...now].filter(([, l]) => l).map(([t]) => t).sort();
+    const same = flags !== undefined && flags[0] === "t" && flags[1] === "f" && now.size === tables.length && listed.length === 0 && tables.every((t) => now.has(t.source));
     if (same) return;
-    const list = tables.map((t) => { const cols = want.get(t.source); return `${pgIdent(t.schema)}.${pgIdent(t.table)}${cols ? ` (${cols.map(pgIdent).join(", ")})` : ""}`; }).join(", ");
+    const list = tables.map((t) => `${pgIdent(t.schema)}.${pgIdent(t.table)}`).join(", ");
     if (flags === undefined) {
       await pg.query(`CREATE PUBLICATION ${pgIdent(name)} FOR TABLE ${list} WITH (publish = 'insert, update, delete, truncate')`);
       this.log(`made publication ${name} for ${tables.map((t) => t.source).join(", ")}`);
@@ -2508,13 +2519,19 @@ export class Sync {
       if (flags[1] === "t") throw new Error(`publication ${name} is FOR ALL TABLES: it is not the one Mason made (drop it, or name another project)`);
       await pg.query(`ALTER PUBLICATION ${pgIdent(name)} SET TABLE ${list}`);
       await pg.query(`ALTER PUBLICATION ${pgIdent(name)} SET (publish = 'insert, update, delete, truncate')`);
-      this.log(`re-pointed publication ${name} at ${tables.map((t) => t.source).join(", ")}: the tables whose sync is replication`);
+      this.log(`re-pointed publication ${name} at ${tables.map((t) => t.source).join(", ")}: the tables whose sync is replication` +
+        (listed.length ? `, each named whole (an earlier Mason listed the columns of ${listed.join(", ")}, which made the database refuse ALTER TABLE … DROP COLUMN of them; the columns Mason does not sync now arrive and are dropped, never stored)` : ""));
     }
     // VERIFIED, never assumed: what the publication carries is what the database says it does
     const carried = (await pg.query(`SELECT schemaname || '.' || tablename FROM pg_publication_tables WHERE pubname = ${pgLiteral(name)}`)).rows.map((x) => x[0]!).sort();
     const wanted = tables.map((t) => t.source).sort();
     if (carried.join("\n") !== wanted.join("\n")) {
       throw new Error(`publication ${name} carries ${carried.join(", ") || "no table"} after it was set to ${wanted.join(", ")} (Mason bug: report it, with mason logs)`);
+    }
+    if (lists) {
+      const still = (await pg.query(`SELECT n.nspname || '.' || c.relname FROM pg_publication_rel r JOIN pg_publication p ON p.oid = r.prpubid JOIN pg_class c ON c.oid = r.prrelid ` +
+        `JOIN pg_namespace n ON n.oid = c.relnamespace WHERE p.pubname = ${pgLiteral(name)} AND r.prattrs IS NOT NULL ORDER BY 1`)).rows.map((x) => x[0]!);
+      if (still.length) throw new Error(`publication ${name} still lists columns of ${still.join(", ")} after it was set to whole tables (Mason bug: report it, with mason logs)`);
     }
   }
 

@@ -25,3 +25,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `format`, `||`, `array_agg`, a row's text, a scalar subquery, `min`, `max`, `percentile_disc`, `mode()`, `sum(DISTINCT …)`, a
   `UNION` without `ALL`, and a generated table's column. `docs/SQL-SUPPORT.md` lists them all, under
   `mixed-scale-numeric`. A fix for most of them is planned.
+- **A table under `sync: replication` no longer blocks `ALTER TABLE … DROP COLUMN` on your database.** On Postgres 15
+  and later, the publication Mason makes for itself listed each table's columns. So your database refused to drop a
+  listed column, with "publication … depends on column", and never sent a column added later. Mason's publication now
+  names each table whole. Mason updates a publication it made before at its first start after the upgrade, once,
+  while it keeps syncing. Columns a table's entry leaves out, with `exclude:` or `columns:`, now reach Mason over
+  replication. Mason drops them as they arrive. They are never stored, logged or served. A publication you name with
+  `publication:` is still never changed. If it lists a table's columns, Mason now says once that the list blocks
+  `DROP COLUMN`, and how to name the table whole. This was listed as known in 0.20.0.

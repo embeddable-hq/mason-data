@@ -75,7 +75,7 @@ test("mason serve --check names every problem the database has with the project,
   assert.match(by("table", "public.vault").message, new RegExp(`row-level security on public\\.vault hides every row from ${role}`));
   assert.match(by("replication", null).message, new RegExp(`^replication role: ${role} may not open a replication connection`));
   assert.equal(by("replication", null).sql, `ALTER ROLE ${role} WITH REPLICATION;`);
-  assert.equal(by("publication", "public.items").sql, "ALTER PUBLICATION app_pub ADD TABLE public.items (id, name);");
+  assert.equal(by("publication", "public.items").sql, "ALTER PUBLICATION app_pub ADD TABLE public.items;");
   assert.equal(by("publication", "public.items").message, "publication app_pub: missing: public.items");
 
   // a publication that does not exist: the whole of it, once, naming the ones there are
