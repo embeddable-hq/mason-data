@@ -129,6 +129,12 @@ export interface PlannedSql {
    * its literal would be. Absent: none
    */
   readonly pathParams?: readonly number[];
+  /**
+   * the numeric[] parameters it reads other than by ANY or ALL with a number (src/duck/rewrite.ts `param`): bound as a
+   * list of doubles, which holds a NULL exactly and nothing else, so an Execute that binds another value to one is
+   * refused (`numeric-array-parameter`, src/api/postgres/server.ts `duckValues`). Absent: none
+   */
+  readonly wholeNumericArrays?: readonly number[];
   readonly [PLANNED]: true;
 }
 
@@ -539,7 +545,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
       typeNames.set(Number(oid), name!);
     }
   }
-  let tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams: number[];
+  let tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams: number[], wholeNumericArrays: number[];
   // a table's row the source has otherwise (copied in part: no source OID for it) is not the source's row
   const sourceRows = new Map([...rowTypes].filter(([oid]) => userTypes.has(catalogTypes.get(oid) ?? "")));
   // IS [NOT] NULL of a composite reads its fields (a row of NULLs IS NULL), which the copy's text does not
@@ -561,15 +567,15 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   const analysed = performance.now();
   const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths });
   try {
-    ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams } = rewritten());
+    ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them
     if (kept?.keepNow != null && lookup !== null && jsonReads.some((r) => kept.ready(r) === null)) {
       await kept.keepNow(jsonReads);
-      ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams } = rewritten());
+      ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays } = rewritten());
     }
     // a statement that lists a copy's columns without naming them reads none from a stored column (hideKept): made
     // again with every read its call, the reads still recorded
-    if (lookup !== null && exposes(tree)) ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams } = rewritten({ at: (relid, attno) => lookup.at(relid, attno), ready: () => null }));
+    if (lookup !== null && exposes(tree)) ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams, wholeNumericArrays } = rewritten({ at: (relid, attno) => lookup.at(relid, attno), ready: () => null }));
   }
   catch (e) {
     if (e instanceof Unrewritable) throw unrewritableError(e, text);
@@ -614,7 +620,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
       detail: `read back: ${difference}; the rewritten SQL: ${sql}` }, text);
   }
   const planned = { text: sql, functions: masonCalls(tree), ...(unboundedLateral ? { unboundedLateral: true } : {}),
-    ...(pathParams.length > 0 ? { pathParams } : {}) } as unknown as PlannedSql;
+    ...(pathParams.length > 0 ? { pathParams } : {}), ...(wholeNumericArrays.length > 0 ? { wholeNumericArrays } : {}) } as unknown as PlannedSql;
   return { sql: planned, params: analysis.params, fields: fields?.map((f) => ({ ...f, size: pgTyplen(f.oid) })) ?? null, withTies, ...(exact.length > 0 ? { exact } : {}), resolved: keys, argumentTypes: argumentTypes(analysis.tree), ...(outputs ? { outputs: outputExpressions(analysis.tree) ?? [] } : {}),
     ...(Object.keys(clock).length > 0 ? { clock } : {}), ...(jsonReads.length > 0 ? { jsonReads: jsonReads.map(readKey) } : {}), ...(reads !== undefined ? { reads } : {}),
     timing: { analysisMs: analysed - started, rewriteMs: performance.now() - analysed } };

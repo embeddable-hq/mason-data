@@ -12,7 +12,7 @@ import { GAP_MARK, type GapId } from "../../../src/duck/gaps.ts";
 /** a named statement run (Bind, Describe, Execute); `refused`: Mason's reply must be the 0A000 naming that gap
  *  (src/duck/gaps.ts), where Postgres answers — the step met as a refusal by name, never held equal */
 export type Run = { run: string; values?: Array<string | null>; refused?: GapId };
-export type Step = string | { pipeline: string[] } | { prepare: string; sql: string; refused?: GapId } | Run
+export type Step = string | { pipeline: string[] } | { prepare: string; sql: string } | Run
   /** a Parse, Bind and Execute of a row count of one, then `then`'s statements, in one batch */
   | { suspend: string; then: string[] }
   /** a named statement bound to a named portal, and that portal's own messages, each to its own Sync */
@@ -96,6 +96,9 @@ const ARRAY_PARAMETERS: Array<[string, string, Array<Array<string | null>>]> = [
   ["uuid = ANY", "SELECT id FROM public.typed WHERE u = ANY($1) ORDER BY id", [['{"a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11","FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"}'], ["{}"]]],
   ["numeric = ANY", "SELECT id FROM public.typed WHERE n = ANY($1) ORDER BY id", [['{"1.5","0.1","99999999999999999999.99"}'], ['{"1.50000000000000000001","NaN"}'], ['{"-2.25",NULL}'], ["{}"]]],
   ["numeric(12,2) < ANY and >= ALL", "SELECT id FROM public.typed WHERE n2 < ANY($1::numeric[]) AND n2 >= ALL($2::numeric[]) ORDER BY id", [['{"1.50000000000000000001"}', '{"1.5"}'], ['{"NaN"}', '{"-7.5"}']]],
+  // a NULL array is NULL under ANY and ALL, a NULL element as SQL's three values say
+  ["numeric NULL under ANY and ALL", "SELECT id, n2 = ANY($1), n2 <> ALL($1), i8 < ANY($1::numeric[]) FROM public.typed ORDER BY id", [[null], ['{"1.5",NULL}'], ["{NULL}"]]],
+  ["an ARRAY of numeric parameters (#598)", "SELECT id FROM public.typed WHERE n2 = ANY(ARRAY[$1::numeric, $2::numeric]) OR n2 > ALL(ARRAY[$3::numeric, 0]) ORDER BY id", [["1.50000000000000000001", "-2.25", "9999999999.989"], ["1.5", null, "1"]]],
   ["bool = ANY", "SELECT id FROM public.typed WHERE b = ANY($1) ORDER BY id", [['{"true"}'], ['{"f",NULL}']]],
   ["date = ANY", "SELECT id FROM public.typed WHERE d = ANY($1) ORDER BY id", [['{"2026-01-01","1999-12-31"}'], ['{"infinity","-infinity"}']]],
   ["timestamptz = ANY", "SELECT id FROM public.typed WHERE tz = ANY($1) ORDER BY id", [['{"2026-01-01 00:00:00+00","2024-02-29 23:30:00-05"}'], ['{"2026-09-15 10:04:05.123456+02"}']]],
@@ -255,8 +258,14 @@ export const SETTING_SCRIPTS: SettingScript[] = [
   ...TEXT_ARRAY_PARAMETERS.map(([name, sql]) => s(`a text[] parameter of two dimensions or other bounds, ${name}`, { prepare: "p", sql }, ...TEXT_ARRAY_STEPS)),
   ...NUMERIC_PARAMETERS.map(([name, sql, values]) => s(`numeric parameter: ${name}`, { prepare: "p", sql }, ...values.map((v): Step => ({ run: "p", values: v })))),
   ...ARRAY_PARAMETERS.map(([name, sql, values]) => s(`array parameter as node-pg binds it: ${name}`, { prepare: "p", sql }, ...values.map((v): Step => ({ run: "p", values: v })))),
-  // a numeric[] parameter read other than by ANY or ALL: no list of the engine holds every element exactly
-  s("a numeric[] parameter read in the list", { prepare: "p", sql: "SELECT $1::numeric[], (SELECT count(*) FROM unnest($1::numeric[])) FROM public.one", refused: "numeric-array-parameter" }),
+  // a time against an array of another time type: the narrower read as the wider in the session's zone, a half-hour one
+  // and one across a change of daylight saving
+  s("array parameter of another time type, in zones off UTC", { prepare: "p", sql: "SELECT id, tz = ANY($1::timestamp[]), tz <> ALL($2::date[]), d < ANY($3::timestamptz[]), ts >= ALL($3::timestamptz[]) FROM public.typed ORDER BY id" },
+    ...["America/St_Johns", "Europe/Berlin"].flatMap((zone): Step[] => [`SET TimeZone = '${zone}'`,
+      { run: "p", values: ['{"2026-01-01 05:00:00","2024-02-29 23:30:00","2025-12-31 20:30:00"}', '{"2026-01-01","1970-01-01","2024-02-29"}', '{"2026-01-01 03:30:00+00","1999-12-31 23:00:00-08"}'] }])),
+  // a numeric[] parameter read other than by ANY or ALL: no list of the engine holds every element exactly, so its NULL
+  // is answered and any other value refused
+  s("a numeric[] parameter read in the list", { prepare: "p", sql: "SELECT $1::numeric[] IS NULL, cardinality($1::numeric[]), (SELECT count(*) FROM unnest($1::numeric[])) FROM public.one" }, { run: "p", values: [null] }, { run: "p", values: ['{"1.50","3.00010000000000000001"}'], refused: "numeric-array-parameter" }),
   s("a json path element as a parameter", { prepare: "p", sql: "SELECT id, jb #>> ARRAY[$1], j #>> ARRAY[$1, 'b'], jsonb_extract_path_text(jb, $1, 'b') FROM public.jpath ORDER BY id" }, { run: "p", values: ["o"] }, "SET TimeZone = 'Asia/Tokyo'", { run: "p", values: ["k"] }, { run: "p", values: [null] }, { run: "p", values: ["0"] }),
   // native json (issue 130): an @> template known only at the Bind stays the function's; a native read prepared, run
   // again after a SET
@@ -431,10 +440,9 @@ export async function traceStep(client: pg.Client, step: Step): Promise<string[]
   return at < 0 ? lines : [...others.slice(0, at), ...lines.filter(isStatus).sort(), ...others.slice(at)];
 }
 
-/** a step that must be refused by its gap (a run's value, or a Parse Mason plans and refuses at once): null when
- *  Mason's reply is that refusal, else what it was */
+/** a step that must be refused by its gap: null when Mason's reply is that refusal, else what it was */
 export function refusedAsNamed(step: Step, got: string[]): { gap: GapId; differs: string | null } | null {
-  if (typeof step === "string" || !("run" in step || "prepare" in step) || step.refused === undefined) return null;
+  if (typeof step === "string" || !("run" in step) || step.refused === undefined) return null;
   const gap = step.refused;
   return { gap, differs: got.some((l) => l.startsWith("error 0A000 ") && l.endsWith(` [gap ${gap}]`)) ? null : `${JSON.stringify(got)} where Mason refuses by the gap ${gap}` };
 }

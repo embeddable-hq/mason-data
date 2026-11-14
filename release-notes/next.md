@@ -17,8 +17,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `WHERE id = ANY($1)` and `WHERE id = ANY($1::int[])` with an error for such a value. Now it answers them as Postgres
   does, for arrays of integers, text, uuids, numerics, booleans, dates, timestamps and floats. That includes an empty
   array, NULL elements and quoted elements that hold commas or braces. An array sent in binary, as Npgsql sends it,
-  works too. A `numeric[]` parameter is compared with every digit kept. It is answered only in `= ANY`, `<> ALL` and
-  the other comparisons with `ANY` or `ALL`. Elsewhere Mason refuses it by name and says what to write instead.
+  works too.
+- **A `numeric[]` parameter is compared with every digit kept.** This holds for a numeric or an integer column, in
+  `= ANY`, `<> ALL` and the other comparisons with `ANY` or `ALL`. So does `x = ANY(ARRAY[$1::numeric, $2::numeric])`,
+  which matched values that differ past the 15th digit. A NULL `numeric[]` is answered everywhere. Mason refuses any
+  other `numeric[]` value by name, and says what to write instead, in two places. One is a `numeric[]` read anywhere
+  else, such as in the SELECT list or in `unnest`. The other is a `numeric[]` compared with a float column.
+- **A timestamp with time zone compared with `ANY` or `ALL` of a `timestamp[]` or `date[]` now uses your session's time
+  zone.** Before, a session outside UTC got other rows. The same holds for a timestamp or a date compared with an
+  array of a wider time type.
 - **A table under `sync: replication` no longer blocks `ALTER TABLE … DROP COLUMN` on your database.** On Postgres 15
   and later, the publication Mason makes for itself listed each table's columns. So your database refused to drop a
   listed column, with "publication … depends on column", and never sent a column added later. Mason's publication now

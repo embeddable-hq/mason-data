@@ -2092,6 +2092,13 @@ class Session {
    *  transaction's start where the plan reads it (its positions follow the statement's own parameters) */
   private async duckValues(plan: DuckPlan, params: readonly (string | null)[], clock: { parse: number; exec: number }, read?: readonly (string | null)[]): Promise<(string | null)[]> {
     // (`read`: the bound values already read so, for the same parameter types: Session.pathsBound)
+    // a numeric[] read whole holds a NULL alone exactly (PlannedSql.wholeNumericArrays): any other value is refused
+    for (const n of plan.sql.wholeNumericArrays ?? []) {
+      if (params[n - 1] !== null && params[n - 1] !== undefined) {
+        throw gapRefusal("numeric-array-parameter", `a numeric[] parameter ($${n}) is supported by Mason only compared by ANY or ALL with a number`,
+          "compare it: x = ANY($1), x <> ALL($1), or bind each value: x IN ($1, $2)");
+      }
+    }
     const own = params.length === 0 ? params
       : read ?? await this.server.options.duck.parameters((b) => this.server.catalog.run(b), plan.params, params, this.sessionState());
     const values = [...own];
@@ -3037,6 +3044,9 @@ function utf8Element(bytes: Uint8Array): string {
   throw new PgError({ code: "XX000", message: "a text[] element failed to decode as UTF-8 at no character: report it" });
 }
 
+/** a float's text float8in reads to the same value: its sign kept on a zero (`String(-0)` is `0`) */
+const floatText = (x: number): string => Object.is(x, -0) ? "-0" : String(x);
+
 /** A binary-format parameter, as text Postgres's input function reads (DuckOptions.parameters). */
 function decodeBinaryParam(type: PgApiType, bytes: Buffer, i: number): string {
   const need = (n: number): void => {
@@ -3046,8 +3056,8 @@ function decodeBinaryParam(type: PgApiType, bytes: Buffer, i: number): string {
     case "int2": need(2); return String(bytes.readInt16BE(0));
     case "int4": need(4); return String(bytes.readInt32BE(0));
     case "int8": need(8); return bytes.readBigInt64BE(0).toString();
-    case "float4": need(4); return String(bytes.readFloatBE(0));
-    case "float8": need(8); return String(bytes.readDoubleBE(0));
+    case "float4": need(4); return floatText(bytes.readFloatBE(0));
+    case "float8": need(8); return floatText(bytes.readDoubleBE(0));
     case "numeric": {
       try {
         return numericFromBinary(bytes);

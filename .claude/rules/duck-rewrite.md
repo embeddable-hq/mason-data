@@ -455,8 +455,11 @@ paths:
   node-pg binds `'{"1","3"}'`, which DuckDB's cast cannot read). `PARAM_ARRAYS` (src/duck/held-types.ts) is the one
   list: `readParameters` reads the value in the catalog into the JSON of its elements' texts, `param` binds it as a
   list of the element type, and a binary Bind is decoded to the same literal (`arrayFromBinary`). A numeric[] is
-  compared by ANY or ALL on exact keys (`numericArrayComparison`) and refused anywhere else
-  (`numeric-array-parameter`): no list of the engine holds every element exactly.
+  compared by ANY or ALL on exact keys (`numericArrayComparison`, a written-out `ARRAY[$1::numeric, …]` too), under
+  the NULL array's guard every ANY and ALL of an array takes; read anywhere else its NULL is answered and any other
+  value refused at the Execute (`PlannedSql.wholeNumericArrays`, `numeric-array-parameter`): no list of the engine
+  holds every element exactly. A time against ANY or ALL of an array of another time type is compared as Postgres's
+  cross-type operator compares it, the narrower side cast to the wider in the session's zone (`timeArrayCoerced`).
 - **A type a database made is declared in the catalog under its name, with nothing over it** (`PgColumn.made`, `catalogDdl`):
   a tool reads its name, and what Postgres's analysis cannot find over it is the gap, never Postgres's 42883
   (`madeTypeRefusal`). All such types are one allowlist key (`made`). A domain's column is its base type (`domain-column`).
