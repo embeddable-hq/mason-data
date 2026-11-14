@@ -375,12 +375,12 @@ ul.checks pre.sql { margin: var(--space-1) 0 0; padding: var(--space-1) var(--sp
   .cards.n6 { grid-template-columns: repeat(3, 1fr); }
   .cards.n5 { grid-template-columns: repeat(6, 1fr); } .cards.n5 > * { grid-column: span 2; } .cards.n5 > :nth-child(n+4) { grid-column: span 3; }
 }
-/* seven (Mason's six and the host's card): four over three on a wide screen (a twelve-column grid), and below it as
-   auto-fit lays them, the odd last one spanning on a phone */
+/* seven (the query cards read before the errors): four over three on a wide screen (a twelve-column grid), and below it
+   as auto-fit lays them, the odd last one spanning on a phone */
 @media (min-width: 1100px) { .cards.n7 { grid-template-columns: repeat(12, 1fr); } .cards.n7 > * { grid-column: span 3; } .cards.n7 > :nth-child(n+5) { grid-column: span 4; } }
 /* eight (Mason's own: the copies, rows, last sync, file, statements, p95, sync errors, query errors) as four over four
-   from a tablet up; nine (with the host's card) as three by three. On a phone two a row, nine's last spanning it */
-@media (min-width: 641px) { .cards.n8 { grid-template-columns: repeat(4, 1fr); } .cards.n9 { grid-template-columns: repeat(3, 1fr); } }
+   from a tablet up; on a phone two a row */
+@media (min-width: 641px) { .cards.n8 { grid-template-columns: repeat(4, 1fr); } }
 .card { background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-4); min-width: 0;
   display: flex; flex-direction: column; gap: var(--space-1); }
 .card-label { margin: 0; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
@@ -441,6 +441,8 @@ table.facts-table td { overflow-wrap: anywhere; }
 .host-section table.facts-table { margin: 0 0 var(--space-3); }
 .host-text { white-space: pre-line; overflow-wrap: anywhere; }
 .host-links { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-2) 0 0; }
+/* the host's card is first on the Overview, at the full width, above the box and the cards (issue 1001) */
+.host-card { margin: 0 0 var(--space-5); }
 .host-card .facts { margin-top: var(--space-1); }
 .host-card .host-heading { margin-top: var(--space-2); text-transform: uppercase; letter-spacing: 0.08em; }
 .host-card .host-failed .mark { color: var(--bad); }

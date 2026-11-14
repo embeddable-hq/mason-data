@@ -283,6 +283,18 @@ paths:
   of its own scan, no operator named DELIM (`delimiterJoin`). ("The plan fixture")
 - **A result's names, types and typmods are Postgres's**, from the analysis, and a numeric Postgres computes exactly is
   computed by `src/lib/pg-numeric.ts`, never DuckDB's double or HUGEINT. ("How a statement is answered")
+- **A numeric is right when its whole-number digits are Postgres's and it equals Postgres's when both are rounded to
+  15 significant digits**: trailing zeros and digits past the 15th significant digit may differ, and values that differ
+  only there may merge or match. A whole-number digit changed only by that rounding's carry (0.99999999999999999
+  rounds to 1) is within the rule. Each such difference is a `differs` entry in `src/duck/gaps.ts`
+  (`mixed-scale-numeric`, `min-max-scale-tie`). The entries that go through a double stay named exceptions:
+  `numeric-parameter`, `numeric-array`, `nested-exact-numeric`, `numeric-over-38-digits`, `numeric-stddev` and
+  `numeric-quotient-compare`. A value stored or passed as a double is within the rule below 10^15 when it has a
+  fraction, and below 2^53 (about 9 × 10^15) when it is whole, except values near a 15th-digit rounding boundary. A
+  result computed in doubles (a stddev, arithmetic) is not promised at any size: subtracting nearly equal doubles
+  loses digits. Why: a rewrite may then round a wide
+  decimal beside a whole number, where keeping every digit overflows the engine's 38 digits and fails with 22003 (PR
+  943). ("When a numeric is right")
 - **Whether a statement calls a Mason function is its PLAN's, never its text's** (a review finding: a `*` over a
   copy reads `__mason_visible`, which calls nothing, and a text match left every such statement uncancellable — 82 s
   past a 300 ms timeout): `PlannedSql.functions`, the `__mason_*` calls of the rewritten tree (`masonCalls`,
