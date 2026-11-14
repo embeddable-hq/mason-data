@@ -115,7 +115,8 @@ paths:
     src/duck/to-char.ts; `toChar`, issue 464: the function a row, a grouped month was ×8–18 of Postgres over 4.5 M
     rows): the template read as the function reads it, and taken only when every pattern is one strftime writes alike
     (YYYY MM DD DDD IYYY IW Mon Dy FMMonth FMDay HH24 MI SS MS US, a date's without the time of day) and the format is
-    a constant; anything else (Q, a padded name, FM on a number, TH, TM, another case, a parameter) is the function's.
+    a constant; anything else (Q, a padded name, FM on a number, TH, TM, another case, a parameter, a template that
+    writes nothing, which DuckDB refuses as it binds, and a volatile value, which the guard would read twice) is the function's.
     The value is read in the session's zone by DuckDB's calendar, as the function's text of it was, and only for a
     year 1 to 9999 AD in any zone (a CASE: NULL is NULL, ±infinity, BC and a year past 9999 the function's).
     `tests/duck-functions.test.ts` holds each taken template to the function, `tests/duck-wire.test.ts` "issue 464"
