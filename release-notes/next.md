@@ -28,6 +28,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **The 20-row preview of such a join is faster too, when the table you start from is the bigger one.** Mason now takes
   that table's first rows before it joins, so it no longer loads every row of the other table into memory first. A
   small table joined to a big one is unchanged: that preview was already fast.
+- **A host can show who is signed in on the web page.** Set `MASON_UI_ACCOUNT` on `mason serve` to JSON with a
+  `label` and a `url`, such as `{"label":"ada@example.com","url":"/account"}`. The label shows at the foot of the
+  sidebar, as a link to the URL. On a narrow window it is in the menu with the nav. A value that is not valid stops the
+  start and says what is wrong. Unset, the page is as before.
 
 ## What was wrong and is now right
 

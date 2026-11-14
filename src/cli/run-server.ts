@@ -29,6 +29,7 @@ import { readBody, sendJson } from "../lib/http-json.ts";
 import { projectFingerprint } from "../lib/project-files.ts";
 import { guard, newTunnel, SECURITY_HEADERS, type PageTunnel } from "./security.ts";
 import type { BackLink } from "./ui-back-link.ts";
+import type { PageAccount } from "./ui-account.ts";
 import type { PageNav } from "./ui-nav.ts";
 import { PAGE_READ_ONLY_WHY, pageAllows, pageReadOnlyRefusal, pageWrite, type PageArea } from "./ui-read-only.ts";
 import { maskedUrl, type Source, type SourceFacts, type SourceTable } from "./preflight.ts";
@@ -111,6 +112,9 @@ export interface RunContext {
   /** MASON_UI_NAV_<ITEM>_URL and MASON_UI_NAV_LINKS (src/cli/ui-nav.ts): the sidebar's items replaced by the host's pages,
    *  and the host's own links, validated at the start, or null. Links only: what the server answers is unchanged */
   pageNav?: PageNav | null;
+  /** MASON_UI_ACCOUNT (src/cli/ui-account.ts): who is signed in to the host, at the sidebar's foot, a label and a URL,
+   *  validated at the start, or null */
+  pageAccount?: PageAccount | null;
   /** MASON_UI_OVERVIEW_CARD (src/cli/ui-host-view.ts): the path, relative to the page's address, the Overview reads the
    *  host's card from, validated at the start, or null. The page reads it, never the server */
   pageCard?: string | null;
@@ -272,6 +276,8 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     pageBack: ctx.pageBack ?? null,
     // the sidebar as the host says it (MASON_UI_NAV_*, src/cli/ui-nav.ts): { items, links }, or null
     pageNav: ctx.pageNav ?? null,
+    // who is signed in to the host (MASON_UI_ACCOUNT, src/cli/ui-account.ts): { label, url }, or null
+    pageAccount: ctx.pageAccount ?? null,
     // the host's card on the Overview (MASON_UI_OVERVIEW_CARD, src/cli/ui-host-view.ts): its path, or null
     pageCard: ctx.pageCard ?? null,
     // the Unix socket the page is served on too (MASON_UI_SOCKET), or null: mason status says it
@@ -678,6 +684,7 @@ export const PAGE_ROUTES: Readonly<Record<string, readonly [file: string, type: 
   "/vendor/uplot-1.6.32/uPlot.min.css": ["vendor/uplot-1.6.32/uPlot.min.css", "text/css; charset=utf-8"],
   "/vendor/uplot-1.6.32/LICENSE.txt": ["vendor/uplot-1.6.32/LICENSE.txt", "text/plain; charset=utf-8"],
   // the nav's icons (src/web/shared.js ICONS): Lucide's, one ES module per icon, each its SVG as a string
+  "/vendor/lucide-1.56.0/circle-user.mjs": ["vendor/lucide-1.56.0/circle-user.mjs", "text/javascript; charset=utf-8"],
   "/vendor/lucide-1.56.0/chart-column.mjs": ["vendor/lucide-1.56.0/chart-column.mjs", "text/javascript; charset=utf-8"],
   "/vendor/lucide-1.56.0/layout-dashboard.mjs": ["vendor/lucide-1.56.0/layout-dashboard.mjs", "text/javascript; charset=utf-8"],
   "/vendor/lucide-1.56.0/logs.mjs": ["vendor/lucide-1.56.0/logs.mjs", "text/javascript; charset=utf-8"],

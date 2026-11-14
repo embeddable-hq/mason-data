@@ -46,6 +46,7 @@ import { prepareUiRunFile, uiRunFileSetting, UI_RUN_FILE_SETTING, writeUiRunFile
 import { recordRefusal } from "./replication-mode.ts";
 import { pageAllowsText, UI_READ_ONLY_ALLOW_SETTING, UI_READ_ONLY_SETTING, uiReadOnlyAllowSetting, uiReadOnlySetting } from "./ui-read-only.ts";
 import { BACK_LABEL_MAX, BACK_URL_MAX, uiBackLinkSetting } from "./ui-back-link.ts";
+import { accountOf, uiAccountSetting, UI_ACCOUNT_SETTING } from "./ui-account.ts";
 import { NAV_LINKS_MAX, navLines, navOf, uiNavSetting } from "./ui-nav.ts";
 import { UI_OVERVIEW_CARD_SETTING, overviewCardOf, uiOverviewCardSetting } from "./ui-host-view.ts";
 import { pgPublicUrlSetting, PUBLIC_SSLMODES } from "./pg-public-url.ts";
@@ -143,6 +144,10 @@ export const SERVE: CommandSpec = {
                             address (host/status.json: no scheme, no //, no leading /, no .. segment), and shown as
                             text in the page's look (docs/WEB-UI.md "Host views"); anything else is refused
                             (default unset: none)
+    MASON_UI_ACCOUNT        who is signed in to the host, at the foot of the web page's sidebar, linking to where the
+                            account is managed or signed out of, in the same tab: {"label": …, "url": …}, the label
+                            plain text on one line, at most ${BACK_LABEL_MAX} characters, the URL read as MASON_UI_BACK_URL is;
+                            any other key, or a value of another type, is refused (default unset: none)
     MASON_UI_OVERVIEW_CARD  a card of the host's on the web page's Overview, beside Mason's own: the same JSON as a
                             view's, read from a path relative to the page's own address, read as a view's is
                             (default unset: none)
@@ -267,6 +272,9 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   // the sidebar as the host says it (src/cli/ui-nav.ts): each URL read as the link back's, the links a short JSON list
   const nav = uiNavSetting(env);
   if (nav !== null && "problem" in nav) wrong.push(nav.problem);
+  // who is signed in to the host (src/cli/ui-account.ts): a label and a URL read as the link back's, else refused here
+  const account = uiAccountSetting(env);
+  if (account !== null && "problem" in account) wrong.push(account.problem);
   // the host's card on the Overview (src/cli/ui-host-view.ts): a path relative to the page's address, else refused here
   const card = uiOverviewCardSetting(env);
   if (card !== null && typeof card !== "string") wrong.push(card.problem);
@@ -581,6 +589,8 @@ export async function serve(argv: string[]): Promise<number> {
   const backLink = uiBackLinkSetting(process.env);
   if (backLink !== null && !("problem" in backLink)) say(`  web page  a link back at the top of its sidebar, ${JSON.stringify(backLink.label)} (MASON_UI_BACK_URL)`);
   for (const l of navLines(navOf(uiNavSetting(process.env)))) say(`  web page  ${l}`);
+  const account = accountOf(uiAccountSetting(process.env));
+  if (account !== null) say(`  web page  ${JSON.stringify(account.label)} at the foot of its sidebar (${UI_ACCOUNT_SETTING})`);
   const card = overviewCardOf(uiOverviewCardSetting(process.env));
   if (card !== null) say(`  web page  the host's card on its Overview, read from the page's address (${UI_OVERVIEW_CARD_SETTING})`);
   const pageAllow = uiReadOnlyAllowSetting(process.env);

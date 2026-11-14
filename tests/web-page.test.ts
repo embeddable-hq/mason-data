@@ -1123,6 +1123,60 @@ test("in the browser: the state's pageBack is the sidebar's link on every page, 
   assert.notEqual((oldEl("back") as unknown as { hidden?: boolean }).hidden, false);
 });
 
+// ------------------------------------------------------------------ who is signed in to the host (MASON_UI_ACCOUNT, issue 970)
+
+test("renderAccount: the label as TEXT beside the account icon, a link to the URL in the same tab sending no referrer; none: nothing", () => {
+  const renderAccount = fn<[unknown], string>("renderAccount");
+  const html = renderAccount({ label: "ada@example.com", url: "https://console.example.com/me?a=1&b=2" });
+  assert.match(html, /^<a href="https:\/\/console\.example\.com\/me\?a=1&amp;b=2" rel="noreferrer"><span class="icon" aria-hidden="true"><svg\s+class="lucide lucide-circle-user"/);
+  assert.match(html, /<\/span><span class="label">ada@example\.com<\/span><\/a>$/);
+  assert.ok(!/target=/.test(html), "in the same tab, as the link back");
+  // an operator's label that looks like markup is text: escaped, so `<b>x</b>` reads as `<b>x</b>`
+  const markup = renderAccount({ label: `<b>x</b> & "y" <img src=x onerror=alert(1)>`, url: "/account" });
+  assert.match(markup, /<span class="label">&lt;b&gt;x&lt;\/b&gt; &amp; &quot;y&quot; &lt;img src=x onerror=alert\(1\)&gt;<\/span>/);
+  assert.equal(textOf(markup), `<b>x</b> & "y" <img src=x onerror=alert(1)>`);
+  assert.ok(!/<b>|<img/.test(markup), "no element of the label's");
+  assert.match(renderAccount({ label: "x", url: `/a"b` }), /^<a href="\/a&quot;b" /, "the URL an attribute, escaped");
+  // none (unset, a state that cannot say, a run from before it): nothing written
+  for (const none of [null, undefined, {}, { url: 1, label: "x" }, { url: "/x" }, { label: "x" }, "x"]) assert.equal(renderAccount(none), "", JSON.stringify(none));
+});
+
+test("the sidebar's account: in index.html in the sidebar's body under the nav, so it is in the phone's menu sheet; above the foot; empty and not shown until the state names one; a tooltip on the icon rail", () => {
+  const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
+  const body = html.split('<div id="side-body" class="side-body">')[1]!.split("</aside>")[0]!;
+  assert.ok(body.indexOf('<nav id="nav"') < body.indexOf('<div id="account" class="account"></div>'), "under the nav, in the sheet the menu opens");
+  assert.ok(body.indexOf('<div id="account" class="account"></div>') < body.indexOf('<div class="side-foot">'), "above when it was updated and the version");
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
+  assert.match(css, /\.account:empty \{ display: none; \}/, "unset: nothing shows, the sidebar as before");
+  assert.match(css, /\.account \.label \{ min-width: 0; overflow-wrap: anywhere; \}/, "a long label wraps whole, never widening the sidebar");
+  const rail = css.split("@media (min-width: 641px) and (max-width: 999px) {")[1]!.split("\n}\n")[0]!;
+  assert.match(rail, /\.account \.label \{ position: absolute; left: calc\(100% \+ var\(--space-2\)\);[^}]*opacity: 0;/, "on the rail the icon alone, the label its tooltip");
+  assert.match(rail, /\.account a:hover \.label, \.account a:focus-visible \.label \{ opacity: 1; \}/, "shown on hover and on focus, as a nav link's");
+});
+
+test("in the browser: the state's pageAccount is at the sidebar's foot on every page, read-only too, the label as text; without it, nothing is written", async () => {
+  const account = { url: "/account", label: "<b>x</b>" };
+  for (const state of [{ ...CATALOG_STATE, pageAccount: account }, { ...CATALOG_STATE, pageAccount: account, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" }]) {
+    const run = fakeRun();
+    run.answers.set("GET api/state", () => new Response(JSON.stringify(state), { status: 200 }));
+    const { el, go, settle } = fakeBrowser(run);
+    await settle();
+    for (const hash of ["#overview", "#tables", "#users", "#observability/queries", "#observability/usage", "#observability/syncs"]) {
+      go(hash); await settle();
+      const html = el("account").html;
+      assert.match(html, /^<a href="\/account" rel="noreferrer"><span class="icon"/, hash);
+      assert.match(html, /<span class="label">&lt;b&gt;x&lt;\/b&gt;<\/span><\/a>$/, `${hash}: the label as text`);
+    }
+  }
+  for (const state of [{ ...CATALOG_STATE, pageAccount: null }, CATALOG_STATE]) {
+    const run = fakeRun();
+    run.answers.set("GET api/state", () => new Response(JSON.stringify(state), { status: 200 }));
+    const { el, settle } = fakeBrowser(run);
+    await settle();
+    assert.equal(el("account").html, "", "unset, or a run from before it: nothing");
+  }
+});
+
 // ------------------------------------------------------------- the host's sidebar (MASON_UI_NAV_*, issue 789)
 
 /** Every page's item replaced by the host, a URL each (`/api/state` `pageNav.items`, by its key there). */
@@ -4020,8 +4074,8 @@ test("the shell: the sidebar's project and a demo badge, its nav, its foot (upda
   const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
   assert.equal(app.view().version, "Mason 0.9.0", "the version, as mason status's Mason line says it");
   assert.match(app.view().updated!, /^Updated .* ago$/);
-  assert.match(html, /<aside id="sidebar" class="sidebar">\s*<div class="side-head">.*<h1 class="brand">.*<p id="where" class="where"><\/p><span id="badge"><\/span>.*<\/div>\s*<div id="side-body" class="side-body">.*<nav id="nav" class="nav" aria-label="Pages">.*<\/nav>\s*<div class="side-foot"><p id="updated" class="updated" aria-live="polite"><\/p><p id="version" class="version"><\/p><\/div>\s*<\/div>\s*<\/aside>/s,
-    "the sidebar: the project at its head, the nav, when it was updated and the version at its foot");
+  assert.match(html, /<aside id="sidebar" class="sidebar">\s*<div class="side-head">.*<h1 class="brand">.*<p id="where" class="where"><\/p><span id="badge"><\/span>.*<\/div>\s*<div id="side-body" class="side-body">.*<nav id="nav" class="nav" aria-label="Pages">.*<\/nav>\s*<!--[^]*?-->\s*<div id="account" class="account"><\/div>\s*<div class="side-foot"><p id="updated" class="updated" aria-live="polite"><\/p><p id="version" class="version"><\/p><\/div>\s*<\/div>\s*<\/aside>/s,
+    "the sidebar: the project at its head, the nav, the account the host names (empty when none), when it was updated and the version at its foot");
   assert.ok(!/class="topbar"|class="tabs"/.test(html), "no top nav beside it");
   assert.match(html, /<nav id="nav" class="nav" aria-label="Pages"><ul><li><a href=/, "the nav is a list of links: Tab reaches each, Enter follows it");
   assert.match(html, /<\/aside>\s*<div class="scrim" aria-hidden="true"><\/div>\s*<div class="content">\s*<div id="poll"><\/div>\s*<main>/, "the page beside the sidebar");
@@ -4041,7 +4095,7 @@ test("the vendored files: each a route, whole, pinned in its folder's name, with
   const { PAGE_ROUTES } = await import("../src/cli/run-server.ts") as { PAGE_ROUTES: Record<string, readonly [string, string]> };
   const vendor = webFiles().filter((f) => f.startsWith(`vendor${path.sep}`)).map((f) => f.split(path.sep).join("/")).sort();
   assert.deepEqual(vendor, ["vendor/README.md", "vendor/geist-1.7.2/Geist-Variable.woff2", "vendor/geist-1.7.2/GeistMono-Variable.woff2", "vendor/geist-1.7.2/LICENSE.txt",
-    "vendor/lucide-1.56.0/LICENSE.txt", "vendor/lucide-1.56.0/chart-column.mjs", "vendor/lucide-1.56.0/layout-dashboard.mjs", "vendor/lucide-1.56.0/link.mjs", "vendor/lucide-1.56.0/logs.mjs",
+    "vendor/lucide-1.56.0/LICENSE.txt", "vendor/lucide-1.56.0/chart-column.mjs", "vendor/lucide-1.56.0/circle-user.mjs", "vendor/lucide-1.56.0/layout-dashboard.mjs", "vendor/lucide-1.56.0/link.mjs", "vendor/lucide-1.56.0/logs.mjs",
     "vendor/lucide-1.56.0/menu.mjs", "vendor/lucide-1.56.0/panel-top.mjs", "vendor/lucide-1.56.0/square-terminal.mjs", "vendor/lucide-1.56.0/table.mjs", "vendor/lucide-1.56.0/users.mjs", "vendor/lucide-1.56.0/x.mjs",
     "vendor/uplot-1.6.32/LICENSE.txt", "vendor/uplot-1.6.32/uPlot.esm.js", "vendor/uplot-1.6.32/uPlot.min.css",
     "vendor/zilla-slab-5.3.0/LICENSE.txt", "vendor/zilla-slab-5.3.0/zilla-slab-latin-700-normal.woff2"]);
