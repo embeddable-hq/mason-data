@@ -39,6 +39,9 @@ let api: PgApiServer;
 const P = ["(1, 1, 0)", "(2, 1, 12.5)", "(3, 1, 12.49)", "(4, 2, -12.5)", "(5, 2, 0.01)", "(6, 2, 9999999999.99)", "(7, 3, 7.77)", "(8, 3, 0.30)", "(9, 3, 12.50)", "(10, 3, NULL)"];
 const Q = ["(1, 2, 1.5, 100)", "(2, 2, 2.25, 0.000)", "(3, 4, 3, 7.1)", "(4, 9, 0.10, NULL)"];
 const scaleOf = (row: string): string => { const v = row.slice(1, -1).split(", ").at(-1)!; return v === "NULL" ? "NULL" : String(v.includes(".") ? v.length - v.indexOf(".") - 1 : 0); };
+// the readers that turn one into text (issue 946's second part): each value's text as Postgres holds it, 0 beside 0.000,
+// 12.5 beside 12.50, a NULL and a value of 20 decimals, so the copy is DECIMAL(38, 20)
+const R: Array<[number, number, string | null]> = [[1, 1, "12.5"], [2, 1, "12.50"], [3, 1, "0"], [4, 2, "0.000"], [5, 2, "-1.10"], [6, 2, "0.00000000000000000001"], [7, 3, null], [8, 3, "7"], [9, 3, "0.30"]];
 const qScales = (row: string): [string, string] => {
   const [, , u, v] = row.slice(1, -1).split(", ");
   const s = (x: string): string => x === "NULL" ? "NULL" : String(x.includes(".") ? x.length - x.indexOf(".") - 1 : 0);
@@ -49,6 +52,7 @@ const schema: PgSchema = {
   database: "app",
   tables: [
     { name: "p", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "g", type: "int4" }, { name: "u", type: "numeric", spelled: "numeric", scaled: hidden }] },
+    { name: "r", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "g", type: "int4" }, { name: "u", type: "numeric", spelled: "numeric", scaled: hidden }] },
     { name: "q", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "p_id", type: "int4" }, { name: "u", type: "numeric", spelled: "numeric", scaled: hidden },
       { name: "v", type: "numeric", spelled: "numeric", scaled: scaleColumn("v") }] },
   ],
@@ -62,13 +66,17 @@ before(async () => {
   await w.run(`INSERT INTO public.p VALUES ${P.map((r) => `${r.slice(0, -1)}, ${scaleOf(r)})`).join(", ")}`);
   await w.run(`CREATE TABLE public.q (id INTEGER, p_id INTEGER, u DECIMAL(38,2), v DECIMAL(38,3), "${hidden}" UTINYINT, "${scaleColumn("v")}" UTINYINT)`);
   await w.run(`INSERT INTO public.q VALUES ${Q.map((r) => `${r.slice(0, -1)}, ${qScales(r).join(", ")})`).join(", ")}`);
+  await w.run(`CREATE TABLE public.r (id INTEGER, g INTEGER, u DECIMAL(38,20), "${hidden}" UTINYINT)`);
+  await w.run(`INSERT INTO public.r VALUES ${R.map(([id, g, u]) => `(${id}, ${g}, ${u === null ? "NULL" : `'${u}'`}, ${u === null ? "NULL" : u.includes(".") ? u.length - u.indexOf(".") - 1 : 0})`).join(", ")}`);
   // each copy's view of its visible columns, as the sync makes it (src/duck/kept.ts `view`)
   await w.run("ATTACH IF NOT EXISTS ':memory:' AS __mason_visible");
   await w.run("CREATE SCHEMA IF NOT EXISTS __mason_visible.public");
   await w.run(`CREATE VIEW __mason_visible.public.p AS SELECT id, g, u FROM "${db}".public.p`);
   await w.run(`CREATE VIEW __mason_visible.public.q AS SELECT id, p_id, u, v FROM "${db}".public.q`);
+  await w.run(`CREATE VIEW __mason_visible.public.r AS SELECT id, g, u FROM "${db}".public.r`);
   await truth.exec("CREATE TABLE p (id integer PRIMARY KEY, g integer, u numeric); CREATE TABLE q (id integer PRIMARY KEY, p_id integer, u numeric, v numeric)");
   await truth.exec(`INSERT INTO p VALUES ${P.join(", ")}; INSERT INTO q VALUES ${Q.join(", ")}`);
+  await truth.exec(`CREATE TABLE r (id integer PRIMARY KEY, g integer, u numeric); INSERT INTO r VALUES ${R.map(([id, g, u]) => `(${id}, ${g}, ${u ?? "NULL"})`).join(", ")}`);
   api = await startPostgresApi({
     port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test", product: "mason-data",
     authenticate: (password) => { const problem = tokenProblem(API_KEY, password); if (problem !== null) throw new Error(problem); return { filters: [], subject: undefined }; },
@@ -84,7 +92,7 @@ after(async () => {
 });
 
 const raw = { getTypeParser: () => (v: string) => v };
-const TEXT_PARSERS = Object.fromEntries([16, 20, 21, 23, 25, 1043, 1231, 1700].map((o) => [o, (v: string) => v]));
+const TEXT_PARSERS = Object.fromEntries([16, 20, 21, 23, 25, 114, 1043, 1231, 1700, 3802].map((o) => [o, (v: string) => v]));
 
 /** the statements whose answers (names, types, text, order) differ between Mason and Postgres */
 async function unlike(statements: readonly string[]): Promise<string[]> {
@@ -174,6 +182,25 @@ test("a plain numeric's own scale reaches a client that reads the wire in binary
   for (const sql of ["SELECT u FROM p ORDER BY id", "SELECT g, sum(u) FROM p GROUP BY g ORDER BY g", "SELECT u + 1, u * 2 FROM p ORDER BY id"]) {
     assert.deepEqual(await binaryRows(sql), rowsOf(await truth.execProtocolRaw(wire.extended(sql, [], [1]))), sql);
   }
+});
+
+test("a plain numeric turned into text is Postgres's text: JSON, a row's text, concat, format, ||, a min or max's text, a DISTINCT of its text", async () => {
+  assert.deepEqual(await unlike([
+    "SELECT id, to_json(u), to_jsonb(u), json_build_object('k', u)::text, jsonb_build_object('k', u)::text FROM r ORDER BY id",
+    "SELECT json_agg(u ORDER BY id)::text, jsonb_agg(u ORDER BY id)::text, json_object_agg(id, u ORDER BY id)::text FROM r",
+    "SELECT g, json_agg(u ORDER BY id)::text FROM r GROUP BY g ORDER BY g",
+    "SELECT id, row(id, u)::text, row(u, g)::text FROM r ORDER BY id",
+    "SELECT id, concat(u), concat_ws(',', u, id), format('%s|%s', u, u), u || 'x', 'x' || u FROM r ORDER BY id",
+    "SELECT id, json_build_object('a', u, 'b', u + 1, 'c', u * 2, 'd', -u)::text, concat(coalesce(u, 0)) FROM r ORDER BY id",
+    "SELECT g, string_agg(u::text, ',' ORDER BY id) FROM r GROUP BY g ORDER BY g",
+    // a min or max's text: the row holding it (12.5 and 12.50, equal, are left out: Postgres keeps the last it reads)
+    "SELECT max(u)::text, concat(min(u)), to_json(max(u))::text FROM r WHERE id <> 2",
+    "SELECT g, max(u)::text, concat(min(u)), to_json(min(u))::text FROM r WHERE id <> 2 GROUP BY g ORDER BY g",
+    // a GROUP BY key's text, and a DISTINCT of the text: 12.5 and 12.50 are two
+    "SELECT DISTINCT u::text FROM r ORDER BY 1",
+    "SELECT concat(u), count(*) FROM r WHERE id <> 2 GROUP BY u ORDER BY 2, 1",
+    "SELECT r.id, concat(r.u, q.u) FROM r JOIN q ON q.p_id = r.id ORDER BY 1, 2",
+  ]), []);
 });
 
 test("a set operation that compares rows keeps a plain numeric's one scale (mixed-scale-numeric), never splitting equal values", async () => {
