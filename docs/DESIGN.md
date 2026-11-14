@@ -3002,9 +3002,24 @@ a new line never reaches the projects still on the old one. A security fix must 
 - A breaking change is anything that reads a project differently. It waits for the next line (`0.21.0`), which is
   occasional.
 - A security fix is released on the previous line as well as the current one (`0.19.x` and `0.20.x`).
-- A release from `main` carries all of `main`, so the current line moves to its own branch (`release/0.20`), cut
-  from `main` just before the first breaking change merges. Its patches are released from there, and `main` becomes the
-  next line.
+- A release from `main` carries all of `main`, so once a breaking change merges there, `main`'s next release is the
+  next line. The release of that line cuts the previous line's branch (`release/0.20`), from that line's newest tag
+  (the owner, 2026-11-14, issue 1020). Its patches are released from there.
+
+**The branch is cut by the release, never by hand** (issue 1020). PR 999 had the coordinator cut the current line's
+branch from `main` just before the first breaking change merged. Spotting that moment took judgment, and creating the
+branch took a person. Now `release.yml`'s `tag` job, on a release from `main` whose line is newer than every other
+tag's, first creates `release/<major>.<minor>` for the newest line below it, at that line's newest tag, through the
+REST API (`POST /git/refs`, which refuses a ref that exists, so a branch is never moved). It does this before it tags.
+A failure fails the run, before anything is tagged or published. So a patch of the old line starts from exactly what
+its users run, not from `main` just before a breaking change, which could hold unreleased fixes. The cost: between the
+first breaking merge and the new line's release, the current line gets no patch. `scripts/release-line.ts --cut`
+decides it, and `tests/release-line.test.ts` holds it. The ruleset on `release/*` judges the workflow's `GITHUB_TOKEN`
+as the GitHub Actions app, which its bypass list (Repository admin) does not cover. GitHub's docs say required status
+checks apply to a branch's creation unless "Do not require status checks on creation" is set, and say nothing of the
+pull request rule on creation. A tag's commit may have no green checks, since a later push to `main` cancels CI's run
+on it. So the owner adds the GitHub Actions app to the ruleset's bypass list once (`release-notes/README.md` "The
+ruleset on `release/*`").
 
 `release-notes/README.md` "Release lines" defines a breaking change from the code, says how to tell a patch from
 `next.md`, and has the steps for a patch on the previous line. That patch is a merge to the line's branch,

@@ -7,6 +7,8 @@
  *   git ls-remote --tags --refs origin 'refs/tags/v*' | node scripts/release-line.ts <ref> <version> <key>
  *                                                                              that one value alone (newest, npm_tag)
  *   node scripts/release-line.ts --ref <ref>          releases=true, or releases=false and why= (exit 0 either way)
+ *   git ls-remote --refs origin 'refs/tags/v*' 'refs/heads/release/*' | node scripts/release-line.ts --cut <ref> <version>
+ *                                                     cut=true, branch= and from=; or cut=false and why= (exit 0 either way)
  *
  * `--ref` is `decide`'s first step: a branch under release/ that is not named for a line releases nothing, quietly.
  *
@@ -25,6 +27,12 @@
  * image's `latest` and GitHub's Latest. A patch on an older line is published under npm's `latest-<major>.<minor>`
  * (npm refuses a tag that reads as a version range, such as `0.19`). The image's line tag (`0.19`) moves only forward:
  * not when a higher patch of the line is tagged already.
+ *
+ * THE PREVIOUS LINE'S BRANCH IS CUT BY THE RELEASE OF A NEW LINE (`--cut`, release.yml's `tag` job, before it tags). A
+ * release from main whose line is newer than every other tag's starts a new line. Before it is tagged, the newest line
+ * below it gets its branch, `release/<major>.<minor>`, at that line's newest tag, unless the branch exists. So a patch
+ * of the old line starts from exactly what its users run. A release from a line's branch never cuts one, and neither
+ * does the first line ever.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -75,6 +83,33 @@ export function decideLine(ref: string, version: string, tags: readonly string[]
   return { newest, npmTag: newest ? "latest" : `latest-${line}`, line, lineTag };
 }
 
+export type CutDecision = { cut: true; branch: string; from: string } | { cut: false; why: string };
+
+/**
+ * Whether a release of `version` pushed to `ref` cuts the previous line's branch first, given the remote's refs: its
+ * `v*` tags and its `release/*` branches, as `git ls-remote --refs` prints them (or as bare names, `v0.20.3` and
+ * `refs/heads/release/0.20`). The release's own tag, on a re-run, does not count against it being a new line.
+ */
+export function decideCut(ref: string, version: string, refs: readonly string[]): CutDecision | { problem: string } {
+  const v = parse(version);
+  if (v === null) return { problem: `${version} is not a version (x.y.z, such as 0.20.1)` };
+  const at = refLine(ref);
+  if ("skip" in at) return { problem: `${at.skip}.` };
+  if ("branch" in at) return { cut: false, why: `a release from ${at.branch} never cuts a branch` };
+  const names = refs.map((r) => r.trim().replace(/^refs\/tags\//, "")).filter((r) => r !== "");
+  const released = names.map((t) => /^v(\d+\.\d+\.\d+)$/.exec(t)?.[1]).filter((t): t is string => t !== undefined && t !== version).map(parse)
+    .filter((t): t is Version => t !== null);
+  const line = (t: Version): Version => ({ major: t.major, minor: t.minor, patch: 0 });
+  if (released.some((t) => compare(line(t), line(v)) >= 0)) {
+    return { cut: false, why: `${version} is not a new line: ${v.major}.${v.minor} or a newer line is released already` };
+  }
+  const previous = released.reduce<Version | null>((best, t) => (best === null || compare(t, best) > 0 ? t : best), null);
+  if (previous === null) return { cut: false, why: `${version} is the first line: no line is released before it` };
+  const branch = `release/${previous.major}.${previous.minor}`;
+  if (names.includes(`refs/heads/${branch}`)) return { cut: false, why: `${branch} exists already, and is never moved` };
+  return { cut: true, branch, from: `v${previous.major}.${previous.minor}.${previous.patch}` };
+}
+
 /** The tag names in `git tag -l`'s or `git ls-remote`'s lines: `v0.20.0` either way. */
 export function tagNames(text: string): string[] {
   return text.split("\n").map((l) => l.trim().split(/\s+/).pop() ?? "").filter((t) => t !== "")
@@ -90,6 +125,20 @@ function main(args: string[]): number {
     if (args.length !== 2 || args[1] === undefined) { process.stderr.write("usage: node scripts/release-line.ts --ref <ref>\n"); return 2; }
     const at = refLine(args[1]);
     process.stdout.write("skip" in at ? `releases=false\nwhy=${at.skip}\n` : "releases=true\n");
+    return 0;
+  }
+  if (args[0] === "--cut") {
+    // whether this release cuts the previous line's branch first: `cut=true`, the branch and the tag to cut it from; or
+    // `cut=false` and why. Exit 1 only for what `decide` refuses already
+    const [, ref, version] = args;
+    if (args.length !== 3 || ref === undefined || version === undefined) {
+      process.stderr.write("usage: git ls-remote --refs origin 'refs/tags/v*' 'refs/heads/release/*' | node scripts/release-line.ts --cut <ref> <version>\n");
+      return 2;
+    }
+    const refs = fs.readFileSync(0, "utf8").split("\n").map((l) => l.trim().split(/\s+/).pop() ?? "");
+    const d = decideCut(ref, version, refs);
+    if ("problem" in d) { process.stderr.write(`${d.problem}\n`); return 1; }
+    process.stdout.write(d.cut ? `cut=true\nbranch=${d.branch}\nfrom=${d.from}\n` : `cut=false\nwhy=${d.why}\n`);
     return 0;
   }
   const [ref, version, key] = args;

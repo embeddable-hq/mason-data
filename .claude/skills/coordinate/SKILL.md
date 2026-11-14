@@ -60,11 +60,13 @@ A release-notes PR's branch is `notes/v<version>`, never under `release/`, which
 **The release lines** (`release-notes/README.md` "Release lines" has the rule and the steps):
 - Choose the version by the rule. A release on the current line is a patch (`0.20.1`). Only a breaking change, which
   reads a project differently, makes a new line (`0.21.0`).
-- Before you merge the first breaking change to `main`, have the current line's branch (`release/0.20`) cut from
-  `main`, at the commit just before it. The trigger is a PR the review marks breaking, by the README's definition. An
-  implementer cuts it, since you push nothing. From then on, every patch on the current line is released from that
-  branch, and `main`'s next release is `0.21.0`. A fix needed on both lines merges to `main`, then is cherry-picked to
-  the branch in its own PR.
+- Once a breaking change merges to `main`, `main`'s next release is the new line (`0.21.0`). Until then, `main`
+  releases no patch of the current line.
+- Nobody cuts a line's branch by hand. The release of a new line from `main` creates the previous line's branch
+  (`release/0.20`) at that line's newest tag, before it tags (`release.yml`, `scripts/release-line.ts --cut`). It never
+  moves a branch that exists. If it cannot create the branch, the run fails before it publishes anything, and the
+  README's "The ruleset on `release/*`" names the owner's fix. From then on, every patch on the old line is released
+  from its branch. A fix needed on both lines merges to `main`, then is cherry-picked to the branch in its own PR.
 - A security fix also goes to the previous line (`0.19.x`), as a release merged to its `release/0.<minor>` branch.
 - Every `release/*` branch needs a ruleset like `main`'s (PR only, the required checks, no force-push, no deletion),
   because a push to one publishes. The owner sets it up. Never copy a branch's release notes to `main`.

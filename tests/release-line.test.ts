@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { decideLine, refLine, tagNames } from "../scripts/release-line.ts";
+import { decideCut, decideLine, refLine, tagNames } from "../scripts/release-line.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TAGS = ["v0.17.0", "v0.17.1", "v0.18.0", "v0.19.0", "v0.20.0"];
@@ -159,4 +159,66 @@ test("a release run is never cancelled by another branch's push: the concurrency
   const images = fs.readFileSync(path.join(ROOT, ".github", "workflows", "images-publish.yml"), "utf8");
   assert.match(images, /flavor: latest=\$\{\{ inputs\.version == '' && startsWith\(github\.ref, 'refs\/tags\/v'\) \}\}/,
     "a release's image takes latest only from the release job's re-check");
+});
+
+// THE PREVIOUS LINE'S BRANCH, CUT BY A NEW LINE'S RELEASE (scripts/release-line.ts `--cut`, release.yml's `tag` job)
+const LINES = ["v0.19.0", "v0.19.1", "v0.20.0", "v0.20.3"];
+
+test("a new line from main cuts the previous line's branch at that line's newest tag", () => {
+  assert.deepEqual(decideCut(MAIN, "0.21.0", LINES), { cut: true, branch: "release/0.20", from: "v0.20.3" });
+  // by version, not by text: v0.20.10 is the line's newest, above v0.20.9
+  assert.deepEqual(decideCut(MAIN, "0.21.0", [...LINES, "v0.20.9", "v0.20.10"]), { cut: true, branch: "release/0.20", from: "v0.20.10" });
+  // a tag that is not a release is not a line's newest
+  assert.deepEqual(decideCut(MAIN, "0.21.0", [...LINES, "v0.20.4-rc1", "nightly"]), { cut: true, branch: "release/0.20", from: "v0.20.3" });
+  // another line's branch is not this one
+  assert.deepEqual(decideCut(MAIN, "0.21.0", [...LINES, "refs/heads/release/0.19"]), { cut: true, branch: "release/0.20", from: "v0.20.3" });
+  // a new major: the previous line is the newest one below it, whatever its major
+  assert.deepEqual(decideCut(MAIN, "1.0.0", LINES), { cut: true, branch: "release/0.20", from: "v0.20.3" });
+  // a re-run once the release's own tag exists decides the same
+  assert.deepEqual(decideCut(MAIN, "0.21.0", [...LINES, "v0.21.0"]), { cut: true, branch: "release/0.20", from: "v0.20.3" });
+});
+
+test("no cut: a patch on main, a branch that exists, the first line ever, a release from a line's branch", () => {
+  const no = (d: ReturnType<typeof decideCut>, why: RegExp) => {
+    assert.ok(!("problem" in d) && !d.cut, JSON.stringify(d));
+    assert.match(d.why, why);
+  };
+  no(decideCut(MAIN, "0.20.4", LINES), /not a new line/);
+  no(decideCut(MAIN, "0.21.1", [...LINES, "v0.21.0"]), /not a new line/);
+  // an older line released from main is not a new line either
+  no(decideCut(MAIN, "0.19.2", LINES), /not a new line/);
+  // the branch exists already: it is never moved, wherever it is
+  no(decideCut(MAIN, "0.21.0", [...LINES, "refs/heads/release/0.20"]), /release\/0\.20 exists already/);
+  no(decideCut(MAIN, "0.1.0", []), /first line/);
+  no(decideCut(MAIN, "0.1.0", ["v0.1.0", "nightly"]), /first line/);
+  no(decideCut("refs/heads/release/0.20", "0.20.4", LINES), /never cuts/);
+  no(decideCut("refs/heads/release/0.20", "0.20.4", []), /never cuts/);
+  assert.ok("problem" in decideCut("refs/heads/release/v0.20.0", "0.21.0", LINES));
+  assert.ok("problem" in decideCut(MAIN, "0.21", LINES));
+});
+
+test("--cut reads git ls-remote's tags and branches, and prints the branch and the tag", () => {
+  const remote = (refs: string[]) => refs.map((r) => `${"0".repeat(40)}\t${r.startsWith("refs/") ? r : `refs/tags/${r}`}\n`).join("");
+  const yes = run(remote(LINES), "--cut", MAIN, "0.21.0");
+  assert.equal(yes.status, 0, yes.stderr);
+  assert.equal(yes.stdout, "cut=true\nbranch=release/0.20\nfrom=v0.20.3\n");
+  const exists = run(remote([...LINES, "refs/heads/release/0.20"]), "--cut", MAIN, "0.21.0");
+  assert.equal(exists.status, 0, exists.stderr);
+  assert.match(exists.stdout, /^cut=false\nwhy=release\/0\.20 exists already/);
+  assert.equal(run("", "--cut", MAIN, "0.21.0").stdout, "cut=false\nwhy=0.21.0 is the first line: no line is released before it\n");
+  assert.equal(run(remote(LINES), "--cut", "refs/heads/release/v0.20.0", "0.21.0").status, 1);
+  assert.equal(run("", "--cut", MAIN).status, 2);
+});
+
+test("release.yml cuts the branch in the tag job, before it tags, with contents: write alone", () => {
+  const yml = fs.readFileSync(path.join(ROOT, ".github", "workflows", "release.yml"), "utf8");
+  const tag = job(yml, "tag");
+  const cut = tag.indexOf(`git ls-remote --refs origin 'refs/tags/v*' 'refs/heads/release/*' | node scripts/release-line.ts --cut "$GITHUB_REF" "$VERSION"`);
+  assert.ok(cut > 0, "the tag job asks --cut, from the remote's refs");
+  assert.ok(cut < tag.indexOf('git tag -a "v$VERSION"'), "before it tags");
+  assert.match(tag, /\n    permissions:\n      contents: write(\s+#[^\n]*)?\n    steps:/);
+  // the branch is created by the API, which refuses a ref that exists, so it never moves one; a refusal fails the run
+  assert.match(tag.slice(cut), /gh api -X POST "repos\/\$GITHUB_REPOSITORY\/git\/refs" -f ref="refs\/heads\/\$branch" -f sha="\$sha"/);
+  assert.doesNotMatch(tag, /refs\/heads\/\$branch[^\n]*(--force|-X PATCH)|git push[^\n]*heads/);
+  assert.match(tag.slice(cut), />&2\n\s+exit 1/);
 });

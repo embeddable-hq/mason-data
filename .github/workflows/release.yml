@@ -2,7 +2,9 @@
 # release-notes/v<version>.md. When no GitHub release
 # exists for that version, this push is the release, and the workflow does what would otherwise be done by hand:
 #
-#   1. the annotated tag v<version> on the merge commit (skipped when the tag already exists)
+#   1. the annotated tag v<version> on the merge commit (skipped when the tag already exists). A release from main that
+#      starts a new line first cuts the previous line's branch, release/<major>.<minor>, at that line's newest tag,
+#      unless the branch exists (the `tag` job says how)
 #   2. the image (images-publish.yml, called as a job: a tag made by GITHUB_TOKEN never triggers another workflow)
 #   3. the CLI, @mason-data/cli, when its version is not on npm yet; this one also runs when the release page already
 #      exists and only the CLI is missing from npm, since its first publish is by hand and may not have happened.
@@ -135,10 +137,41 @@ jobs:
     needs: decide
     if: needs.decide.outputs.version != ''
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # the previous line's branch and the tag; nothing else
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'          # never 24: ci.yml's build job says why
+      # A NEW LINE CUTS THE PREVIOUS LINE'S BRANCH FIRST (scripts/release-line.ts `--cut`; release-notes/README.md "Where
+      # breaking changes wait"): release/<major>.<minor> at that line's newest tag, before this release is tagged. It
+      # never moves a branch that exists. When it cannot create the branch, the run fails here, before anything is
+      # tagged or published, and a re-run picks up from this step
+      - name: the previous line's branch, when this release starts a new line
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+          cut="$(git ls-remote --refs origin 'refs/tags/v*' 'refs/heads/release/*' | node scripts/release-line.ts --cut "$GITHUB_REF" "$VERSION")"
+          echo "$cut"
+          grep -qx 'cut=true' <<<"$cut" || exit 0
+          branch="$(sed -n 's/^branch=//p' <<<"$cut")"; from="$(sed -n 's/^from=//p' <<<"$cut")"
+          sha="$(git rev-parse "refs/tags/$from^{commit}")"
+          if ! gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/$branch" -f sha="$sha" >/dev/null; then
+            # another run may have cut it meanwhile: a branch that exists is kept where it is, wherever that is
+            if git ls-remote --exit-code --heads origin "refs/heads/$branch" >/dev/null; then
+              echo "$branch exists already, at $(git ls-remote --heads origin "refs/heads/$branch" | cut -f1): it is not moved"; exit 0
+            fi
+            echo "Could not create $branch at $from ($sha), so v$VERSION is not tagged or published. The release ruleset on release/* must let GitHub Actions create the branch: release-notes/README.md \"The ruleset on release/*\" says how. Then re-run this run." >&2
+            exit 1
+          fi
+          at="$(git ls-remote --heads origin "refs/heads/$branch" | cut -f1)"
+          if [ "$at" != "$sha" ]; then echo "$branch was created, but the remote shows it at '$at', not $sha" >&2; exit 1; fi
+          echo "$branch is cut at $from ($sha)"
       - name: the annotated tag, on the merge commit
         env:
           VERSION: ${{ needs.decide.outputs.version }}
