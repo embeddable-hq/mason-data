@@ -66,7 +66,11 @@ A release-notes PR's branch is `notes/v<version>`, never under `release/`, which
   (`release/0.20`) at that line's newest tag, before it tags (`release.yml`, `scripts/release-line.ts --cut`). It never
   moves a branch that exists. If it cannot create the branch, the run fails before it publishes anything, and the
   README's "The ruleset on `release/*`" names the owner's fix. From then on, every patch on the old line is released
-  from its branch. A fix needed on both lines merges to `main`, then is cherry-picked to the branch in its own PR.
+  from its branch.
+- A line released before that, such as `0.19`, has no branch. When it needs a patch, run the "Release line branch"
+  workflow (`release-line-branch.yml`, a `workflow_dispatch` with the input `line`) through the GitHub tools. It cuts
+  `release/<major>.<minor>` at the line's newest tag. It refuses a line with no tag and the newest line, and never
+  moves a branch that exists. No release step is done by hand. A fix needed on both lines merges to `main`, then is cherry-picked to the branch in its own PR.
 - A security fix also goes to the previous line (`0.19.x`), as a release merged to its `release/0.<minor>` branch.
 - Every `release/*` branch needs a ruleset like `main`'s (PR only, the required checks, no force-push, no deletion),
   because a push to one publishes. The owner sets it up. Never copy a branch's release notes to `main`.

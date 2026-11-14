@@ -99,25 +99,29 @@ Until it exists, a push to a release branch is a release that nobody reviewed.
 Settings, then Rules, then Rulesets, then the `release` ruleset. Under "Bypass list", click "Add bypass", choose the
 "GitHub Actions" app, and keep "Always allow". Save the ruleset.
 
-- The workflow creates the branch with its `GITHUB_TOKEN`. That token belongs to the GitHub Actions app, so the
-  ruleset judges the app. A bypass list that holds only "Repository admin" does not cover it.
+- Two workflows create a line's branch: `release.yml`, and "Release line branch" for an older line. Each uses its
+  `GITHUB_TOKEN`. That token belongs to the GitHub Actions app, so the ruleset judges the app. A bypass list that
+  holds only "Repository admin" does not cover it.
 - GitHub applies a ruleset's required status checks to a new branch too, unless the rule has "Do not require status
   checks on creation". A tag's commit may have no green checks: a later push to `main` cancels the run on it. And
   GitHub's docs do not say that the pull request rule allows a new branch.
 - With the bypass, a workflow with write access to the repository's contents can push to `release/*` without a PR.
-  Only `release.yml` asks for that access today.
+  Only `release.yml` and "Release line branch" ask for that access today.
 
-Without the bypass, the release of a new line fails at its first step, and names this section.
+Without the bypass, the release of a new line fails at its first step, and so does "Release line branch". Both name
+this section.
 
 ## A patch on a line's branch
 
 A security fix goes to the previous line as well as the current one. Each line that is no longer on `main` has a
 branch, `release/0.<minor>`.
 
-1. **Find the line's branch.** The release of the next line cut it ("Where breaking changes wait"). Lines released
-   before the workflow cut branches, `0.19` and older, have none. To patch one of those, the owner cuts its branch
-   once, from the line's newest tag: `git push origin 'v0.19.0^{commit}:refs/heads/release/0.19'`. The ruleset lets
-   only its bypass list create it.
+1. **Find the line's branch.** The release of the next line cut it ("Where breaking changes wait"). A line released
+   before the workflow cut branches, such as `0.19`, has none. To patch one of those, run the "Release line branch"
+   workflow (`.github/workflows/release-line-branch.yml`) from the Actions page, with the line (`0.19`). It creates
+   `release/0.19` at the line's newest tag, and checks the commit afterwards. It refuses a line with no tag, and the
+   newest line, whose branch the next line's release cuts. It never moves a branch that exists. Nobody cuts a branch
+   by hand.
 2. **Make the fix on a branch from `release/0.19`,** and open its PR against `release/0.19`. CI runs on it as on any
    PR. A fix that is on `main` already is cherry-picked to the branch, in its own PR.
    - The first PR to a new branch also takes `main`'s `.github/workflows/release.yml`, `images-publish.yml` and

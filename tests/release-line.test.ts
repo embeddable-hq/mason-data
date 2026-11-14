@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { decideCut, decideLine, refLine, tagNames } from "../scripts/release-line.ts";
+import { decideCut, decideLine, decideLineCut, refLine, tagNames } from "../scripts/release-line.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TAGS = ["v0.17.0", "v0.17.1", "v0.18.0", "v0.19.0", "v0.20.0"];
@@ -221,4 +221,63 @@ test("release.yml cuts the branch in the tag job, before it tags, with contents:
   assert.match(tag.slice(cut), /gh api -X POST "repos\/\$GITHUB_REPOSITORY\/git\/refs" -f ref="refs\/heads\/\$branch" -f sha="\$sha"/);
   assert.doesNotMatch(tag, /refs\/heads\/\$branch[^\n]*(--force|-X PATCH)|git push[^\n]*heads/);
   assert.match(tag.slice(cut), />&2\n\s+exit 1/);
+});
+
+// AN OLDER LINE'S BRANCH, CUT ON REQUEST (scripts/release-line.ts `--cut-line`, release-line-branch.yml)
+test("an older line's branch is cut at that line's newest tag, and an existing branch is never moved", () => {
+  assert.deepEqual(decideLineCut("0.19", LINES), { cut: true, branch: "release/0.19", from: "v0.19.1" });
+  assert.deepEqual(decideLineCut("0.19", [...LINES, "v0.19.9", "v0.19.10"]), { cut: true, branch: "release/0.19", from: "v0.19.10" });
+  // another line's branch is not this one
+  assert.deepEqual(decideLineCut("0.19", [...LINES, "refs/heads/release/0.20"]), { cut: true, branch: "release/0.19", from: "v0.19.1" });
+  // an older major's line
+  assert.deepEqual(decideLineCut("0.20", [...LINES, "v1.0.0"]), { cut: true, branch: "release/0.20", from: "v0.20.3" });
+  const exists = decideLineCut("0.19", [...LINES, "refs/heads/release/0.19"]);
+  assert.ok(!("problem" in exists) && !exists.cut, JSON.stringify(exists));
+  assert.match(exists.why, /release\/0\.19 exists already, and is never moved/);
+});
+
+test("a line with no tag, the newest line, or a name that is not a line is refused", () => {
+  const refused = (d: ReturnType<typeof decideLineCut>, problem: RegExp) => {
+    assert.ok("problem" in d, JSON.stringify(d));
+    assert.match(d.problem, problem);
+  };
+  refused(decideLineCut("0.18", LINES), /0\.18 has no release/);
+  refused(decideLineCut("0.19", []), /0\.19 has no release/);
+  refused(decideLineCut("0.19", ["v0.19.1-rc1", "nightly", "refs/heads/release/0.19"]), /has no release/);
+  refused(decideLineCut("0.20", LINES), /0\.20 is the newest line/);
+  refused(decideLineCut("0.20", [...LINES, "refs/heads/release/0.20"]), /newest line/);
+  for (const bad of ["0.19.1", "v0.19", "0.019", "019", "", "0.19; rm -rf /", "release/0.19"]) refused(decideLineCut(bad, LINES), /is not a line/);
+});
+
+test("--cut-line prints the branch and the tag, and refuses with exit 1", () => {
+  const remote = (refs: string[]) => refs.map((r) => `${"0".repeat(40)}\t${r.startsWith("refs/") ? r : `refs/tags/${r}`}\n`).join("");
+  const yes = run(remote(LINES), "--cut-line", "0.19");
+  assert.equal(yes.status, 0, yes.stderr);
+  assert.equal(yes.stdout, "cut=true\nbranch=release/0.19\nfrom=v0.19.1\n");
+  const exists = run(remote([...LINES, "refs/heads/release/0.19"]), "--cut-line", "0.19");
+  assert.equal(exists.status, 0, exists.stderr);
+  assert.match(exists.stdout, /^cut=false\nwhy=release\/0\.19 exists already/);
+  const none = run(remote(LINES), "--cut-line", "0.18");
+  assert.equal(none.status, 1);
+  assert.equal(none.stdout, "");
+  assert.match(none.stderr, /0\.18 has no release/);
+  assert.equal(run("", "--cut-line").status, 2);
+  assert.equal(run("", "--cut-line", "0.19", "extra").status, 2);
+});
+
+test("release-line-branch.yml cuts by --cut-line on request, with contents: write alone, and never moves a branch", () => {
+  const yml = fs.readFileSync(path.join(ROOT, ".github", "workflows", "release-line-branch.yml"), "utf8");
+  assert.match(yml, /\non:\n  workflow_dispatch:\n    inputs:\n      line:\n/);
+  assert.match(yml, /\npermissions:\n  contents: write(\s+#[^\n]*)?\n\n/);
+  assert.doesNotMatch(yml, /\n +permissions:/, "no job asks for more");
+  // the input reaches the script through the environment, never into the script's text
+  assert.match(yml, /LINE: \$\{\{ inputs\.line \}\}/);
+  assert.equal(yml.match(/\$\{\{ inputs\.line \}\}/g)?.length, 2, "the environment and the concurrency group only");
+  const cut = yml.indexOf(`git ls-remote --refs origin 'refs/tags/v*' 'refs/heads/release/*' | node scripts/release-line.ts --cut-line "$LINE"`);
+  assert.ok(cut > 0, "it asks --cut-line, from the remote's refs");
+  assert.match(yml.slice(cut), /gh api -X POST "repos\/\$GITHUB_REPOSITORY\/git\/refs" -f ref="refs\/heads\/\$branch" -f sha="\$sha"/);
+  assert.doesNotMatch(yml, /--force|-X PATCH|git push/);
+  assert.match(yml.slice(cut), />&2\n\s+exit 1/);
+  // the commit is verified afterwards
+  assert.match(yml.slice(cut), /if \[ "\$at" != "\$sha" \]; then[^\n]*>&2; exit 1; fi/);
 });

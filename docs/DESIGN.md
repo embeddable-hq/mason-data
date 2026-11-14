@@ -3021,6 +3021,13 @@ pull request rule on creation. A tag's commit may have no green checks, since a 
 on it. So the owner adds the GitHub Actions app to the ruleset's bypass list once (`release-notes/README.md` "The
 ruleset on `release/*`").
 
+A line released before this change has no branch. The owner wants no release step that needs a person, so such a
+line's branch is cut by running `release-line-branch.yml` (a `workflow_dispatch` with the line), never by hand. It
+cuts `release/<major>.<minor>` at the line's newest tag by the same rules (`scripts/release-line.ts --cut-line`). It
+refuses a line with no tag, and the newest line, whose branch must wait for the next line's release so that it is cut
+from that line's last patch. It never moves a branch, and checks the commit afterwards. Anyone with Actions access can
+run it, a coordinator session included.
+
 `release-notes/README.md` "Release lines" defines a breaking change from the code, says how to tell a patch from
 `next.md`, and has the steps for a patch on the previous line. That patch is a merge to the line's branch,
 `release/0.<minor>`, cut from its newest tag. `release.yml` runs on those branches too, and a branch releases its own
