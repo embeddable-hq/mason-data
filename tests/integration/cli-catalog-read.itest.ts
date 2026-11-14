@@ -122,7 +122,7 @@ after(() => {
 });
 
 
-test("an idle run whose tables are all sync: off opens no connection to the database; a table made since shows once asked, read once a minute at most", { skip: adminUrl ? "quarantined: #948" : "IT_POSTGRES_URL is not set", timeout: 600_000 }, async () => {
+test("an idle run whose tables are all sync: off opens no connection to the database; a table made since shows once asked, read once a minute at most", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set", timeout: 600_000 }, async () => {
   psql(adminUrl!, `CREATE DATABASE ${tag}`);
   psql(dbUrl, "CREATE TABLE customers (id int PRIMARY KEY, name text); INSERT INTO customers SELECT g, 'c' || g FROM generate_series(1, 50) g; " +
     // a table this user reads and nothing adds: what another session's lock is taken on below

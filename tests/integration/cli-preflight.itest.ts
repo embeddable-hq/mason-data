@@ -24,7 +24,7 @@ after(() => {
   if (adminUrl && psql(adminUrl, `SELECT count(*) FROM pg_database WHERE datname = '${tag}'`) === "1") psql(adminUrl, `DROP DATABASE "${tag}" WITH (FORCE)`);
 });
 
-test("the catalog read: a partitioned table is its leaves, a never-analysed one is counted once", { skip: adminUrl ? "quarantined: #959" : "IT_POSTGRES_URL is not set" }, async () => {
+test("the catalog read: a partitioned table is its leaves, a never-analysed one is counted once", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
   psql(adminUrl!, `CREATE DATABASE "${tag}"`);
   psql(dbUrl, "CREATE TABLE events (id bigint, at date, PRIMARY KEY (id, at)) PARTITION BY RANGE (at); " +
     "CREATE TABLE events_2026_09 PARTITION OF events FOR VALUES FROM ('2026-09-01') TO ('2026-10-01'); " +
