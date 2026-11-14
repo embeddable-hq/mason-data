@@ -166,7 +166,16 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   from, as any refusal does.
 - **A file's name is its table.** A name a synced table holds is refused, and the synced table wins the catalog
   (`served`, `names`) and the table: what was deployed under that name is let go with its ledger row (`release`), and
-  nothing is built or swapped over it (`buildable`).
+  nothing is built or swapped over it (`buildable`), also while its file is refused at its read. **One name is one
+  table by the engine's rule** (src/lib/relation-key.ts `relationKey`: DuckDB ignores ASCII case, so `Counts.yml` is
+  `public.counts`'s name, and two files so spelled are refused at the read; a view of the database is no table there, so
+  it holds its own spelling alone). **The sync's drop of a removed synced table
+  lets go of a generated table of its name on that writer's turn, before the drop** (`dropped`; a synced table removed
+  but not dropped yet still holds the name, `addedAs`, so no rebuild of the catalog serves the generated one over it), and `open` lets go of a ledger row with
+  no table under it: either one kept was in `served()` with nothing there, and every rebuild of the catalog and every
+  pass failed until a base changed (issue 996). A run in flight then marks a base commit by its own bases (`runBases`),
+  since nothing deployed reads it. Removed, the generated table is built again at its next review.
+  Detector: tests/duck-generated-name-held.test.ts.
 - **A base is there when the catalog holds it, never when the copy's phase says copied** (issue 387). The host's `added`
   (src/duck/sync.ts `addedAs`, the one place) says `copied` only when the catalog's schema holds the table; the copy
   records `copied` before its rebuild of the catalog, so the phase alone refused a definition at every `mason start`.
