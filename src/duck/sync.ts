@@ -75,7 +75,8 @@ import * as path from "node:path";
 import { PgConnection, formatLsn, parseLsn, pgLiteral, type PgConnectOptions } from "../cdc/pg-wire.ts";
 import { createSlot, currentLsn, dropSlot, readSlot, type SlotState } from "../cdc/source.ts";
 import { holdOf } from "./held-types.ts";
-import { scaleColumn, scaleOfText, scaleSql, SCALE_RE } from "./scale-column.ts";
+import { scaleColumn, scaleOfText, scaleSql } from "./scale-column.ts";
+import { hiddenColumns } from "./hidden-columns.ts";
 import { addCounts, countsText, duckValue, fold, foldInto, noChanges, noCounts, ReplicationStream, type ChangeCounts, type StreamedTable, type TableChanges } from "./stream.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { numericWiderThan } from "../lib/pg-numeric.ts";
@@ -216,7 +217,14 @@ export function keptPromise(o: { mode: "poll" | "recopy" | "replication" | "off"
 }
 
 /** what one table's poll found (`Sync.pollNow`): the rows it wrote, the keys it deleted, the source's count after */
-export interface PolledTable { table: string; changed: number; deleted: number; rows: number; ms: number }
+/**
+ * WHAT ONE POLL DID TO ONE TABLE (`poll`; `mason sync --json`'s `tables[]`, the `synced` and `polled` events' words):
+ * `added` the rows whose key the synced table did not hold before the write, `updated` the rows whose key it held (its
+ * row replaced by the source's), `deleted` the keys the source no longer holds. Told apart on Mason's side, by what the
+ * write by key already counts (`writeStaged`'s delete, or a large poll's anti-join of its stage), never by another read
+ * of the source.
+ */
+export interface PolledTable { table: string; added: number; updated: number; deleted: number; rows: number; ms: number }
 
 /** a table `mason sync` named in replication mode (`Sync.pollNow`): nothing to poll, so where the stream is and its part */
 export interface StreamedAnswer { table: string; position: string; state: StreamTableStatus["state"]; why: string | null }
@@ -429,16 +437,19 @@ async function deleteKeys(w: DuckConnection, t: Pick<AddedTable, "key">, target:
 
 /** a poll's staged rows (`where`: a range of them, or all) written by key into the table: their keys deleted, then the
  *  rows inserted. The stage's columns are named by position (`c0`, `c1`, …), the table's order. A plain numeric of
- *  `scaled` (one its table holds a hidden scale column for) is staged as the source's text, and its scale computed from it */
+ *  `scaled` (one its table holds a hidden scale column for) is staged as the source's text, and its scale computed from it.
+ *  Answers how many of the staged rows' keys the table held before the write (the rows its delete removed): the rows
+ *  UPDATED, the rest of the stage ADDED (`PolledTable`) — DuckDB's own count of the delete, so no statement more */
 export async function writeStaged(w: DuckConnection, t: Pick<AddedTable, "key" | "columns" | "source">, target: string, stage: string, where: string, kept: KeptJsonPaths,
-  scaled: readonly string[] = []): Promise<void> {
+  scaled: readonly string[] = []): Promise<number> {
   const named = t.key.map((k) => `c${t.columns.findIndex((c) => c.name === k)}`);
-  await deleteKeys(w, t, target, `(SELECT ${named.map(ident).join(", ")} FROM ${stage}${where})`, named);
+  const held = await deleteKeys(w, t, target, `(SELECT ${named.map(ident).join(", ")} FROM ${stage}${where})`, named);
   // the table's columns named, its plain numerics' scales and its stored JSON paths computed from the staged text and JSON
   const stored = kept.stored(t.source, (c) => ident(`c${t.columns.findIndex((x) => x.name === c)}`));
   const scales = scaled.map((c) => scaleSql(ident(`c${t.columns.findIndex((x) => x.name === c)}`)));
   await w.run(`INSERT INTO ${target} (${[...t.columns.map((c) => ident(c.name)), ...scaled.map((c) => ident(scaleColumn(c, t.columns.map((x) => x.name)))), ...stored.names.map(ident)].join(", ")}) ` +
     `SELECT ${[...t.columns.map((_, i) => ident(`c${i}`)), ...scales, ...stored.values].join(", ")} FROM ${stage}${where}`);
+  return held;
 }
 
 /**
@@ -465,6 +476,14 @@ export const HELD_LAYOUT = "stored by an older Mason with a column not held as t
  * again through the normal path (`needsCopy`) once, serving as it was until its swap.
  */
 export const SCALE_LAYOUT = "stored by an older Mason without each numeric value's own decimals: read again whole, once";
+
+/**
+ * A COPY MISSING A COLUMN ITS RECORD NAMES (issue 998): an older Mason dropped a source column named like one of its
+ * own hidden columns (`__mason_json_…`) at a start, so the copy lacks a column it syncs, and every poll and stream write
+ * of it failed. Its values are the source's alone: found by what the copy physically is, copied again through the normal
+ * path (`needsCopy`), serving as it was until its swap.
+ */
+export const MISSING_LAYOUT = "missing a column it syncs, which an older Mason dropped: read again whole, once";
 
 /** a copy in a layout this Mason no longer keeps: the layout as `mason status` says it, and its short form for a line */
 interface Retired { layout: string; short: string }
@@ -1285,6 +1304,7 @@ export class Sync {
       // every copy served, by its own columns (a table removed serves until the pass drops it)
       served: () => new Map([...this.states.values()].filter((s) => s.phase === "copied" && this.copiedColumns.has(s.source))
         .map((s) => [s.source, this.copiedColumns.get(s.source)!.map((c) => ({ name: c.name, type: c.type }))])),
+      recorded: () => this.recordedColumns(),
       rebuilding: (source) => this.rebuildingNow?.source === source,
       log: (line) => this.log(line),
     }, { enabled: options.json?.enabled ?? true, ...options.json });
@@ -3816,7 +3836,7 @@ export class Sync {
     const timed: string[] = [];
     const found: PolledTable[] = [];
     // the tables whose changed rows are written in pieces once the snapshot's transaction commits
-    const pieced: Array<{ t: AddedTable; target: string; stage: string; staged: number; deleted: number; started: number }> = [];
+    const pieced: Array<{ t: AddedTable; target: string; stage: string; staged: number; added: number; deleted: number; started: number }> = [];
     // its row counts, kept until its transaction commits (the poll's own: a catch-up's runs beside a pass's)
     const pending = new Map<string, number>();
     const exacts = new Map<string, Map<string, number>>();
@@ -3877,19 +3897,21 @@ export class Sync {
             const on = t.key.map((k) => `s.${ident(`c${t.columns.findIndex((c) => c.name === k)}`)} = t.${ident(k)}`).join(" AND ");
             const adds = (await w.runAndReadAll(`SELECT count(*) FROM ${stage} s ANTI JOIN ${target} t ON ${on}`)).getRowsJS()[0]![0] as bigint;
             const { rows, deleted, countMs } = await reconcile(t, target, from, adds);
-            pieced.push({ t, target, stage, staged, deleted, started: c0 });
+            // the stage's keys the table lacks are the rows it ADDS, the rest it UPDATES (`PolledTable`): the count above
+            pieced.push({ t, target, stage, staged, added: Math.min(staged, Number(adds)), deleted, started: c0 });
             timed.push(`${t.source} ${staged} changed, staged in ${c1 - c0} ms, ${adds} new, counted in ${countMs} ms${deleted ? `, ${deleted} deleted` : ""}`);
             pending.set(t.source, rows);
             continue;
           }
           doing = `${t.source}: writing its ${staged} changed row(s) by key`;
-          await writeStaged(w, t, target, stage, "", this.kept, scaleds.get(t.source));
+          // the rows whose key the table held are UPDATED, the rest ADDED (`PolledTable`), as the delete by key counted them
+          const updated = Math.min(staged, await writeStaged(w, t, target, stage, "", this.kept, scaleds.get(t.source)));
           const c1 = Date.now();
           const { rows, deleted, countMs } = await reconcile(t, target, from);
           await w.run(this.pollStateSql(t, snapshot, polledAt));
           await w.run(`DROP TABLE ${stage}`);
           timed.push(`${t.source} ${staged} changed in ${c1 - c0} ms, counted in ${countMs} ms${deleted ? `, ${deleted} deleted in ${Date.now() - c1 - countMs} ms` : ""}`);
-          found.push({ table: t.source, changed: staged, deleted, rows, ms: Date.now() - c0 });
+          found.push({ table: t.source, added: staged - updated, updated, deleted, rows, ms: Date.now() - c0 });
           pending.set(t.source, rows);
         }
       });
@@ -3921,7 +3943,7 @@ export class Sync {
     try {
       for (const [source, rows] of pending) if (!pieced.some((p) => p.t.source === source)) await committed(source, rows, found.find((f) => f.table === source)?.ms ?? 0);
       this.log(`poll: ${timed.join("; ")}`);
-      for (const { t, target, stage, staged, deleted, started } of pieced) {
+      for (const { t, target, stage, staged, added, deleted, started } of pieced) {
         const p0 = Date.now();
         const n = Math.ceil(staged / POLL_PIECE_ROWS);
         for (let i = 0; i < n; i++) {
@@ -3941,14 +3963,14 @@ export class Sync {
         }
         const rows = pending.get(t.source)!;
         await committed(t.source, rows, Date.now() - started);
-        found.push({ table: t.source, changed: staged, deleted, rows, ms: Date.now() - started });
+        found.push({ table: t.source, added, updated: staged - added, deleted, rows, ms: Date.now() - started });
         this.log(`poll: ${t.source}: ${staged.toLocaleString("en-US")} changed row(s), written in ${n} pieces in ${Date.now() - p0} ms`);
       }
     } finally {
       for (const { stage } of pieced) await w.run(`DROP TABLE IF EXISTS ${stage}`);
     }
     // committed: a generated table over a table that changed is behind from here
-    for (const f of found) if (f.changed > 0 || f.deleted > 0) this.generated.changed(f.table);
+    for (const f of found) if (f.added > 0 || f.updated > 0 || f.deleted > 0) this.generated.changed(f.table);
     return found;
   }
 
@@ -4055,9 +4077,10 @@ export class Sync {
       await this.record({ source: t.source, phase: "copied", rows: p.rows, bytes: t.bytes, seconds, copiedAt, error: null }, t.columns, w);
       this.synced.set(t.source, { at: copiedAt, seconds, by: "copy" });
       // how long it took, in whole ms as a poll's: the message ends with it as a poll's does (` · 7 min 57 s`), and the
-      // web page shows it in a column of its own (src/duck/events.ts `tookMs`)
+      // web page shows it in a column of its own (src/duck/events.ts `tookMs`). A whole read ADDS every row it holds
+      // (`syncedText`, the words a poll's record says): the copy swapped in replaces the old
       const tookMs = Math.round(seconds * 1000);
-      this.event({ kind: "full_sync", table: t.source, message: `synced: ${p.rows.toLocaleString("en-US")} row(s) · ${msText(tookMs)}`, tookMs });
+      this.event({ kind: "full_sync", table: t.source, message: `synced whole: ${syncedText({ added: p.rows, updated: 0, deleted: 0, rows: p.rows, ms: tookMs })}`, tookMs });
       this.copiedAs.set(t.source, columnsKey(t.columns));
       // in the catalog at once: a pass's other copies may take hours
       await this.rebuildSchema();
@@ -4515,9 +4538,10 @@ export class Sync {
       if (this.states.get(source)?.phase !== "copied" || types === undefined || this.retired.has(source)) continue;
       const mis: string[] = [];
       const unscaled: string[] = [];
+      const missing: string[] = [];
       const completed = columns.map((c) => {
         const type = types.get(c.name);
-        if (type === undefined) return c;
+        if (type === undefined) { missing.push(c.name); return c; }
         if (c.typeKind === undefined && type.startsWith("ENUM(")) return { ...c, typeKind: "e" };
         const hold = holdOf(c.type, c.typeKind);
         const want = hold === "text" ? "VARCHAR" : hold === "text[]" ? "VARCHAR[]" : null;
@@ -4528,6 +4552,11 @@ export class Sync {
       });
       this.copiedColumns.set(source, completed);
       this.copiedAs.set(source, columnsKey(completed));
+      if (missing.length > 0) {
+        this.retired.set(source, { layout: MISSING_LAYOUT, short: `missing ${missing.join(", ")}, which an older Mason dropped` });
+        this.log(`${source}: it is ${MISSING_LAYOUT} (${missing.join(", ")}) — its synced data serves as it was until then`);
+        continue;
+      }
       if (mis.length === 0 && unscaled.length > 0) {
         this.retired.set(source, { layout: SCALE_LAYOUT, short: `in an older Mason's layout, ${unscaled.join(", ")} without each value's own decimals` });
         this.log(`${source}: it is ${SCALE_LAYOUT} (${unscaled.join(", ")}) — its synced data serves as it was until then, each value of those columns printed with the column's most decimals`);
@@ -4589,9 +4618,23 @@ export class Sync {
   private async scaledOf(t: Pick<AddedTable, "schema" | "table" | "columns">, c: DuckConnection = this.store.writer, table = t.table): Promise<string[]> {
     const plain = t.columns.filter((x) => plainNumeric(x.type)).map((x) => x.name);
     if (plain.length === 0) return [];
-    const held = new Set((await c.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE database_name = current_database() AND schema_name = ${literal(t.schema)} ` +
-      `AND table_name = ${literal(table)}`)).getRowsJS().map((r) => String(r[0])).filter((n) => SCALE_RE.test(n)));
-    return plain.filter((x) => held.has(scaleColumn(x, t.columns.map((c) => c.name))));
+    const own = t.columns.map((c) => c.name);
+    // the hidden ones alone (src/duck/hidden-columns.ts): a source column may be named like a scale column
+    const held = new Set(hiddenColumns((await c.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE database_name = current_database() AND schema_name = ${literal(t.schema)} ` +
+      `AND table_name = ${literal(table)}`)).getRowsJS().map((r) => String(r[0])), own).filter((h) => h.kind === "scale").map((h) => h.name));
+    return plain.filter((x) => held.has(scaleColumn(x, own)));
+  }
+
+  /** the source columns the ledger records for each synced table (`copy_state.columns`, as read and kept since:
+   *  `copiedColumns`) and for each copy in progress its side table (`copy_progress.columns`), by `<schema>.<table>`:
+   *  what tells a source column from a column Mason added (src/duck/hidden-columns.ts, issue 998) */
+  private async recordedColumns(): Promise<Map<string, string[]>> {
+    const out = new Map<string, string[]>([...this.copiedColumns].map(([source, columns]) => [source, columns.map((c) => c.name)]));
+    for (const [source, key] of (await this.store.writer.runAndReadAll(`SELECT source, columns FROM ${MASON_SCHEMA}.copy_progress`)).getRowsJS() as Array<[string, string | null]>) {
+      if (key === null) continue;
+      out.set(`${source}${SIDE_SUFFIX}`, (JSON.parse(key) as unknown[][]).map((c) => String(c[0])));
+    }
+    return out;
   }
 
   /** the state, kept and written to the ledger, on the connection of the flow that knows it (awaited, and on the

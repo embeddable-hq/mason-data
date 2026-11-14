@@ -1,0 +1,56 @@
+# AN OLDER LINE'S BRANCH, CUT ON REQUEST (release-notes/README.md "A patch on a line's branch"). The release of a new line
+# cuts the previous line's branch itself (release.yml's `tag` job). A line released before that has no branch. To patch
+# one, run this workflow from the Actions page ("Run workflow"), or through the API, with the line (`0.19`). It creates
+# release/<major>.<minor> at that line's newest tag, and verifies the commit afterwards. scripts/release-line.ts
+# `--cut-line` decides it:
+#   - a line with no tag is refused;
+#   - a branch that exists is never moved, and the run says where it is and stays green.
+# .github/actions/line-branch creates it, as for release.yml: with GITHUB_TOKEN, or with the deploy key when the secret
+# RELEASE_BRANCH_DEPLOY_KEY is set in the environment `release-branches`. A refusal fails the run, creates nothing, and prints GitHub's answer word for word
+# (release-notes/README.md "The ruleset on release/*").
+name: Release line branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      line:
+        description: the line whose branch to cut, <major>.<minor> (such as 0.19)
+        required: true
+        type: string
+
+permissions:
+  contents: write   # the branch; nothing else
+
+concurrency:
+  group: release-line-branch-${{ inputs.line }}
+  cancel-in-progress: false
+
+jobs:
+  cut:
+    runs-on: ubuntu-latest
+    # the deploy key's secret, if one is set, lives in this environment, which only main and release/* may use
+    # (release-notes/README.md "The ruleset on release/*")
+    environment: release-branches
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the tags
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'          # never 24: ci.yml's build job says why
+      - id: cut
+        name: the line's newest tag, and whether its branch exists
+        env:
+          LINE: ${{ inputs.line }}   # through the environment, never into the script's text
+        run: |
+          set -euo pipefail
+          cut="$(git ls-remote --refs origin 'refs/tags/v*' 'refs/heads/release/*' | node scripts/release-line.ts --cut-line "$LINE")"
+          echo "$cut"; echo "$cut" >> "$GITHUB_OUTPUT"
+      - name: the line's branch, at its newest tag
+        if: steps.cut.outputs.cut == 'true'
+        uses: ./.github/actions/line-branch
+        with:
+          branch: ${{ steps.cut.outputs.branch }}
+          from: ${{ steps.cut.outputs.from }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          deploy-key: ${{ secrets.RELEASE_BRANCH_DEPLOY_KEY }}

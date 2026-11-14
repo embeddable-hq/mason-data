@@ -33,7 +33,7 @@ export const SYNC_USAGE = `usage: mason sync (<table>… | --all) [--json]
     mason sync --all               every table the sources file names (each one a scan of its table)
 
   --all    every table the sources file names, instead of naming them
-  --json   as data: { syncedAt, tables: [{ table, changed, deleted, rows, ms }] (the tables polled), streamed (the
+  --json   as data: { syncedAt, tables: [{ table, added, updated, deleted, rows, ms }] (the tables polled), streamed (the
            tables whose sync: is replication, not polled: [{ table, position, state, why }]), next }
 `;
 
@@ -48,7 +48,7 @@ export const SYNC: CommandSpec & { needs: "run" } = {
 
 /**
  * WHAT A SYNC DID, as `mason sync` prints it from `POST /api/sync`'s answer (the web page's Sync button says the same,
- * src/web/pages/tables.js; tests/web-page.test.ts holds the two equal): the rows written and deleted, a line per table,
+ * src/web/pages/tables.js; tests/web-page.test.ts holds the two equal): the rows added, updated and deleted, a line per table,
  * and what happens next to each table synced (`syncedTips`: an `off` one stays as of this sync). A table whose sync is
  * replication was not polled: its line says where the stream is (`streamed`), and a sync of those alone has nothing to sync.
  */
@@ -59,11 +59,11 @@ export function syncedReport(b: { tables: readonly PolledTable[]; streamed?: rea
   if (b.tables.length === 0 && streamed.length > 0) {
     return { headline: `Nothing to sync: logical replication keeps ${picked.join(", ")} current.`, details: streamedRows, tips: [] };
   }
-  const changed = b.tables.reduce((a, t) => a + t.changed, 0), deleted = b.tables.reduce((a, t) => a + t.deleted, 0);
+  const sum = (k: "added" | "updated" | "deleted"): number => b.tables.reduce((a, t) => a + t[k], 0);
   const streamedNames = new Set(streamed.map((t) => t.table));
   const polled = picked.filter((t) => !streamedNames.has(t));
   return {
-    headline: `Synced ${polled.join(", ")}: ${n(changed)} row(s) written, ${n(deleted)} deleted${streamedRows.length ? `; logical replication keeps ${streamedRows.map((r) => r[0]).join(", ")} current` : ""}.`,
+    headline: `Synced ${polled.join(", ")}: ${n(sum("added"))} added, ${n(sum("updated"))} updated, ${n(sum("deleted"))} deleted${streamedRows.length ? `; logical replication keeps ${streamedRows.map((r) => r[0]).join(", ")} current` : ""}.`,
     details: [...b.tables.map((t) => [t.table, syncedText(t)] as const), ...streamedRows],
     // what happens next to each: an `off` table stays as of now, a polled one is polled again after its interval
     tips: syncedTips(tables),

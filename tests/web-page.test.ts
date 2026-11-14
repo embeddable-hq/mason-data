@@ -3123,7 +3123,7 @@ test("Tables: what a sync did is said as mason sync says it, beside its Sync; a 
   const cli = syncCommand as unknown as { syncedReport?: (b: unknown, picked: string[], unsynced: unknown[]) => unknown };
   assert.equal(typeof cli.syncedReport, "function", "src/cli/sync.ts exports syncedReport");
   const syncedReport = of<[unknown, string[], unknown[]], unknown>(tablesPage, "tables.js", "syncedReport");
-  const answered = { at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.events", changed: 1234, deleted: 5, rows: 30_001_229, ms: 8_500 }] };
+  const answered = { at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.events", added: 34, updated: 1200, deleted: 5, rows: 30_001_229, ms: 8_500 }] };
   for (const picked of [["public.events"], ["public.customers"]]) {
     const named = SYNCED.tables.filter((t) => picked.includes(t.table));
     // the headline and the rows are mason sync's; its tips name the page's Sync now, where the CLI names mason sync (issue 877)
@@ -3145,7 +3145,7 @@ test("Tables: what a sync did is said as mason sync says it, beside its Sync; a 
   // the button says it in its own room, and what the sync did is said beside it, as mason sync prints it
   assert.match(textOf(app.view().tables!), /public\.events Synced .* Synced ✓ Remove Sync: Off All columns Not added \(1\) Table State Rows Key Last sync Size public\.audit /);
   assert.match(app.view().tables!, /<button type="button" class="small" data-sync-table="public\.events" data-room="Syncing…">Synced ✓<\/button>/);
-  assert.equal(textOf(popOf(app.view().tables!, "act-tables-public.events")), "Synced public.events: 1,234 row(s) written, 5 deleted. public.events 1,234 changed, 5 deleted, 30,001,229 rows now · 8.5 s public.events's sync is off, so it stays as it is now until you press Sync now again. Dismiss");
+  assert.equal(textOf(popOf(app.view().tables!, "act-tables-public.events")), "Synced public.events: 34 added, 1,200 updated, 5 deleted. public.events 34 added, 1,200 updated, 5 deleted, 30,001,229 rows now · 8.5 s public.events's sync is off, so it stays as it is now until you press Sync now again. Dismiss");
   app.dismissSynced();
   assert.ok(!/Synced public\.events:/.test(app.view().tables!));
   const message = "public.orders has no copy yet: it is synced once it is copied";
@@ -3198,7 +3198,7 @@ test("Tables: the search box narrows both lists and Failed only lists the failed
   // Sync clicked: its button says Syncing… at once (written before the answer comes), the answer under it once it does
   let release!: () => void;
   const answered = new Promise<void>((r) => { release = r; });
-  run.answers.set("POST api/sync", () => new Response(JSON.stringify({ at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", changed: 1, deleted: 0, rows: 1201, ms: 40 }] })));
+  run.answers.set("POST api/sync", () => new Response(JSON.stringify({ at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", added: 1, updated: 0, deleted: 0, rows: 1201, ms: 40 }] })));
   const fetchNow = run.fetch;
   run.fetch = async (p, init) => { if (p === "api/sync") await answered; return fetchNow(p, init); };
   const click = on.get("click")!({ target: { closest: () => ({ dataset: { syncTable: "public.customers" } }) } });
@@ -3207,7 +3207,7 @@ test("Tables: the search box narrows both lists and Failed only lists the failed
   assert.match(textOf(el("tables").html), /public\.customers Syncing 100% /, "and its State says Syncing meanwhile");
   release();
   await click;
-  assert.match(textOf(el("tables").html), /Synced public\.customers: 1 row\(s\) written, 0 deleted\./);
+  assert.match(textOf(el("tables").html), /Synced public\.customers: 1 added, 0 updated, 0 deleted\./);
   // frozen: a form open holds the filter it opened over
   await on.get("click")!({ target: { closest: () => ({ dataset: { choose: "public.audit" } }) } });
   await on.get("input")!({ target: { id: "tables-failed", checked: true } });
@@ -3707,11 +3707,11 @@ test("Sync events: the sync's events are mason logs --events' lines in a table, 
 // no more; a row with none leaves the cell empty; Took sorts the longest first, a row with none last.
 test("Sync events: how long a sync took is the Took column, in the commands' words, and not again in the message; a row with none is empty; Took sorts (issue 1012)", () => {
   const renderEvents = fnOf<[unknown, Record<string, unknown>?], string>(syncsPage, "renderEvents");
-  const counts = { changed: 3, deleted: 0, rows: 153_292_984 };
+  const counts = { added: 1, updated: 2, deleted: 0, rows: 153_292_984 };
   // the messages as the sync writes them (src/duck/sync.ts): a sync by hand and a scheduled one in mason sync's words
   // (`syncedText`), a first sync ending the same way
   const events = { keptDays: 7, events: [
-    { at: "2026-10-28T09:00:00.000Z", kind: "full_sync", failed: false, table: "public.orders", message: `synced: 2,000,000 row(s) · ${commands.msText(477_000)}`, code: null, origin: null, tookMs: 477_000 },
+    { at: "2026-10-28T09:00:00.000Z", kind: "full_sync", failed: false, table: "public.orders", message: `synced whole: ${tableSync.syncedText({ added: 2_000_000, updated: 0, deleted: 0, rows: 2_000_000, ms: 477_000 })}`, code: null, origin: null, tookMs: 477_000 },
     { at: "2026-10-28T09:01:00.000Z", kind: "polled", failed: false, table: "public.orders", message: `synced on schedule: ${tableSync.syncedText({ ...counts, ms: 570 })}`, code: null, origin: null, tookMs: 570 },
     { at: "2026-10-28T09:02:00.000Z", kind: "synced", failed: false, table: "public.events", message: `synced by hand: ${tableSync.syncedText({ ...counts, ms: 13_703 })}`, code: null, origin: null, tookMs: 13_703 },
     { at: "2026-10-28T09:03:00.000Z", kind: "restart", failed: true, table: null, message: "the run stopped after 42 s up", code: "unknown", origin: null, tookMs: null },
@@ -3724,9 +3724,9 @@ test("Sync events: how long a sync took is the Took column, in the commands' wor
   assert.deepEqual(rows(html), [
     "6 min ago Manual sync public.old synced by hand: 1 changed, 0 deleted, 9 rows now · 41 ms",
     "7 min ago ✗ Mason restarted Mason the run stopped after 42 s up Code unknown",
-    "8 min ago Manual sync public.events synced by hand: 3 changed, 0 deleted, 153,292,984 rows now 13.7 s",
-    "9 min ago Scheduled sync public.orders synced on schedule: 3 changed, 0 deleted, 153,292,984 rows now 570 ms",
-    "10 min ago Full sync public.orders synced: 2,000,000 row(s) 7 min 57 s",
+    "8 min ago Manual sync public.events synced by hand: 1 added, 2 updated, 0 deleted, 153,292,984 rows now 13.7 s",
+    "9 min ago Scheduled sync public.orders synced on schedule: 1 added, 2 updated, 0 deleted, 153,292,984 rows now 570 ms",
+    "10 min ago Full sync public.orders synced whole: 2,000,000 added, 0 updated, 0 deleted, 2,000,000 rows now 7 min 57 s",
   ]);
   assert.equal([...html.matchAll(/<td class="num"><\/td>/g)].length, 2, "the restart's and the old event's cells are empty");
   assert.match(html, /153,292,984 rows now<\/td><td class="num">570 ms<\/td>/, "the time in its cell, not in the message");
@@ -3988,7 +3988,7 @@ test("Tables: in replication mode each added table's stream state is a column, i
   assert.match(text, /^Added \(\d+\) Table State Rows Key Last sync Size public\.customers /);
   const { tables } = fn<[unknown, number], { tables: Array<[string, string]> }>("streamRows")(STREAM, NOW);
   for (const [t, words] of tables.filter(([t]) => ["public.customers", "public.orders", "public.events"].includes(t))) assert.ok(text.includes(words), `${t}: ${words}`);
-  assert.match(text, /public\.customers Synced .* streamed · 1,204 changes \(1,000 inserts, 200 updates, 4 deletes\) this run /);
+  assert.match(text, /public\.customers Synced .* streamed · 1,000 added, 200 updated, 4 deleted this run /);
   assert.match(text, /getting the changes made since 2026-10-27 09:00 UTC: reading the changes, for 30 s · the stream holds 12 changes of it meanwhile/);
   assert.match(text, /not streamed yet: it is not copied yet/);
   assert.ok(!text.includes("left out: the publication"), "a table not added is not streamed: left-out is for the added ones the publication lacks");
@@ -4379,7 +4379,7 @@ test("a popover that can be closed has an X at its top right, named Close, which
   assert.ok(!pop("a", "<p>Reading…</p>").includes("data-pop-x"), "nothing to close: no X");
   // on the pages: an answer, a refusal and a question each have one
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
-  const synced = { at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", changed: 1, deleted: 0, rows: 1201, ms: 40 }] };
+  const synced = { at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", added: 1, updated: 0, deleted: 0, rows: 1201, ms: 40 }] };
   for (const [what, ui] of [["a sync's answer", { synced: { table: "public.customers", synced } }], ["a refusal", { synced: { table: "public.customers", failure: { code: "refused", message: "no" } } }],
     ["Remove's question", { removing: "public.customers" }]] as const) {
     assert.ok(popOf(renderTables(CATALOG_STATE, ui), "act-tables-public.customers").includes(X), `${what}: its X`);
@@ -4603,16 +4603,16 @@ test("Sync events: the page and mason logs --events say what the list leaves out
   assert.match(html, /<a href="#observability\/syncs"><span class="label">Sync events<\/span><\/a>/, "the nav names the page Sync events; its route is unchanged");
   // a synced event is good news, as copied and recovered are
   const renderEvents = of<[unknown], string>(syncsPage, "syncs.js", "renderEvents");
-  const row = renderEvents({ events: [{ at: "2026-10-27T09:04:00.000Z", kind: "synced", failed: false, table: "public.orders", message: "synced by hand: 3 changed, 0 deleted, 1,200 rows now · 41 ms" }], keptDays: 7 });
+  const row = renderEvents({ events: [{ at: "2026-10-27T09:04:00.000Z", kind: "synced", failed: false, table: "public.orders", message: "synced by hand: 1 added, 2 updated, 0 deleted, 1,200 rows now · 41 ms" }], keptDays: 7 });
   assert.match(row, /<span title="synced"><span class="badge ok">Manual sync<\/span><\/span>/, "in words, its code the title");
-  assert.match(textOf(row), /Manual sync public\.orders synced by hand: 3 changed, 0 deleted, 1,200 rows now · 41 ms/);
+  assert.match(textOf(row), /Manual sync public\.orders synced by hand: 1 added, 2 updated, 0 deleted, 1,200 rows now · 41 ms/);
 });
 
 test("Sync events: Scheduled syncs (or a scheduled kind chosen) asks the run for them, read at once and written when answered; cleared, the run is asked without", async () => {
   const run = fakeRun(); withUsageAnswers(run);
   const scheduled = { keptDays: 7, events: [...UL_EVENTS.events,
-    { at: "2026-10-28T09:09:00.000Z", kind: "polled", failed: false, table: "public.orders", message: "synced on schedule: 2 changed, 0 deleted, 1,202 rows now · 40 ms" },
-    { at: "2026-10-28T09:09:30.000Z", kind: "streamed", failed: false, table: "public.events", message: "streamed 4 changes (4 inserts) in the last 60 s" }] };
+    { at: "2026-10-28T09:09:00.000Z", kind: "polled", failed: false, table: "public.orders", message: "synced on schedule: 2 added, 0 updated, 0 deleted, 1,202 rows now · 40 ms" },
+    { at: "2026-10-28T09:09:30.000Z", kind: "streamed", failed: false, table: "public.events", message: "streamed 4 added, 0 updated, 0 deleted in the last 60 s" }] };
   run.answers.set("GET api/events?limit=500&since=15m&scheduled=1", answer(scheduled));
   const t = Date.parse("2026-10-28T09:10:00.000Z");
   const app = fn<[unknown, () => Date], App & { pages: Map<string, { input(t: unknown): unknown }> }>("createApp")(run.fetch, () => new Date(t));
@@ -4623,7 +4623,7 @@ test("Sync events: Scheduled syncs (or a scheduled kind chosen) asks the run for
   await app.pages.get("syncs")!.input({ id: "syncs-scheduled", checked: true });
   assert.deepEqual(run.asked, ["GET api/events?limit=500&since=15m&scheduled=1"], "the run is asked for them, at once");
   const text = textOf(app.view()["syncs-events"]!);
-  assert.match(text, /^When ↓ Kind Table Message Took ↕ 30s ago Live sync public\.events streamed 4 changes \(4 inserts\) in the last 60 s 60s ago Scheduled sync public\.orders synced on schedule: 2 changed/);
+  assert.match(text, /^When ↓ Kind Table Message Took ↕ 30s ago Live sync public\.events streamed 4 added, 0 updated, 0 deleted in the last 60 s 60s ago Scheduled sync public\.orders synced on schedule: 2 added, 0 updated/);
   assert.match(app.view()["syncs-events"]!, /<span title="polled"><span class="badge ok">Scheduled sync<\/span><\/span>/, "good news, in words");
   run.asked.length = 0;
   await app.pages.get("syncs")!.input({ id: "syncs-scheduled", checked: false });
@@ -5630,7 +5630,7 @@ test("layout guard: a click moves no row and no column — a question, a form an
   const renderRunning = fn<[unknown[], string | null, unknown?], string>("renderRunning");
   const users = { users: [{ name: "a".repeat(40), id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: null, url: "postgres://x@127.0.0.1:5433/shop" },
     { name: "b", id: "fedcba9876543210", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: null, url: "postgres://b@127.0.0.1:5433/shop" }], lastUsedNote: null, urlNote: null, requestLogDays: 7 };
-  const synced = { at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", changed: 1, deleted: 0, rows: 1201, ms: 40 }] };
+  const synced = { at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", added: 1, updated: 0, deleted: 0, rows: 1201, ms: 40 }] };
   const failure = { code: "refused", message: "no" };
   // b disabled: its Disable says Enable, in the same room
   const disabledUsers = { ...users, users: users.users.map((u) => u.name === "b" ? { ...u, disabledAt: "2026-10-28T09:00:00.000Z", live: false } : u) };
@@ -5747,7 +5747,7 @@ test("layout guard: a click moves no row and no column — a question, a form an
 test("an answer beside its button stays up until it is dismissed — Dismiss, Escape, or the next action's answer or question — as a refusal does (issue 811)", async () => {
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
   assert.equal((page as Record<string, unknown>).OUTCOME_MS, undefined, "no answer goes by itself: no time it is shown for");
-  const synced = { at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", changed: 1, deleted: 0, rows: 1201, ms: 40 }] };
+  const synced = { at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", added: 1, updated: 0, deleted: 0, rows: 1201, ms: 40 }] };
   const hour = 3_600_000;
   const shown = (o: Record<string, unknown>) => popsOf(renderTables(CATALOG_STATE, { ...o, now: Date.now() + hour })).length;
   assert.equal(shown({ synced: { table: "public.customers", synced } }), 1, "a sync's answer, an hour on");
@@ -5798,7 +5798,7 @@ test("Escape with no question open dismisses the answer beside a button, in the 
   await settle();
   const press = (key: string) => on.get("keydown")!({ key, preventDefault: () => undefined });
   const click = (dataset: Record<string, string>) => on.get("click")!({ target: { closest: (sel: string) => sel === "button" ? { dataset } : null } });
-  run.answers.set("POST api/sync", answer({ at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", changed: 1, deleted: 0, rows: 1201, ms: 40 }] }));
+  run.answers.set("POST api/sync", answer({ at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", added: 1, updated: 0, deleted: 0, rows: 1201, ms: 40 }] }));
   await click({ syncTable: "public.customers" });
   await settle();
   assert.match(textOf(el("tables").html), /Synced public\.customers:/, "the answer, said");

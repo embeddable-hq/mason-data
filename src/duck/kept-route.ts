@@ -86,8 +86,10 @@ export const pathKey = (r: Omit<JsonRead, "asText">): string => { const c = cano
 
 /**
  * THE HIDDEN COLUMN'S NAME: `__mason_json_` and 12 hex digits of the stored path's hash (`pathKey`), over the table too, so two tables'
- * columns never share a name (a NATURAL JOIN of two tables would join on it). Mason's prefix: a source column of that
- * very name is refused by the keeper (DuckDB names are case-insensitive), never shadowed.
+ * columns never share a name (a NATURAL JOIN of two tables would join on it). Mason's prefix: a path whose name a source
+ * column holds is never stored (DuckDB names are case-insensitive), never shadowed. A source column may be named like
+ * one, and is the source's: a column is a stored path's only where the copy's record does not name it
+ * (src/duck/hidden-columns.ts), never by this pattern alone.
  */
 export const HIDDEN_PREFIX = "__mason_json_";
 export const HIDDEN_RE = /^__mason_json_[0-9a-f]{12}$/;

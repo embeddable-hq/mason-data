@@ -42,10 +42,27 @@ import { StatementError } from "./statement.ts";
 import { relationKey } from "../lib/relation-key.ts";
 import type { SyncEventInput } from "./events.ts";
 import type { CopyState } from "./sync.ts";
+import { TURN_FUNCTION } from "./functions.ts";
 
 export const GENERATED_LEDGER = `${MASON_SCHEMA}.generated_tables`;
 const LEDGER_DDL = `CREATE TABLE IF NOT EXISTS ${GENERATED_LEDGER} (name VARCHAR PRIMARY KEY, file VARCHAR, sql VARCHAR, order_by VARCHAR, target_every VARCHAR, target_seconds BIGINT, comment VARCHAR, ` +
   `fingerprint VARCHAR, columns VARCHAR, bases VARCHAR, snapshot_at TIMESTAMPTZ, built_at TIMESTAMPTZ, "rows" BIGINT, seconds DOUBLE, bases_synced VARCHAR)`;
+/**
+ * HOW A GENERATED TABLE'S JSONB IS WRITTEN (issue 461's fourth review), recorded on its ledger row (`jsonb_layout`):
+ * 1, as Postgres's jsonb_out writes it (`canonicalJsonb`). A table built before (NULL) held the engine's text of what its
+ * SELECT computed, a key written twice kept in the order written, which a native read (src/duck/rewrite.ts
+ * `copiedColumn`) reads as no Postgres would: it is rewritten in place at `open`, before the catalog serves anything.
+ */
+const JSONB_LAYOUT = 1;
+const isJsonb = (c: GeneratedColumn): boolean => c.type === "jsonb";
+/**
+ * A JSONB VALUE AS A GENERATED TABLE STORES IT: Postgres's canonical text (src/duck/jsonb.ts `jsonbText`: keys by
+ * length then bytes, a key written twice kept once with its last value, jsonb_out's spacing and number text, at every
+ * depth), so every jsonb any table holds is what a synced table's is, and every native read of a table's jsonb column is
+ * right (src/duck/rewrite.ts `copiedColumn`). One call a row at the build (its turn first, as `keptValueSql` gives one:
+ * src/duck/kept.ts), never at a read. No DuckDB expression writes jsonb_out's text (its key order, a number's digits).
+ */
+const canonicalJsonb = (v: string): string => `__mason_jsonb_text(${TURN_FUNCTION}(NULL, ${v}), ${v})`;
 /** the table a run writes, beside the one served until the swap */
 const SIDE_SUFFIX = "__mason_generated";
 /** how often the folder is read and each table's due time looked at */
@@ -265,9 +282,12 @@ export class GeneratedTables {
   async open(): Promise<void> {
     const w = this.store.writer;
     await w.run(LEDGER_DDL);
-    const rows = (await w.runAndReadAll(`SELECT name, file, sql, order_by, target_every, target_seconds, comment, fingerprint, columns, bases, epoch_ms(snapshot_at), epoch_ms(built_at), "rows", seconds, bases_synced FROM ${GENERATED_LEDGER}`)).getRowsJS() as
-      Array<[string, string, string, string | null, string, bigint, string | null, string, string, string, number | bigint, number | bigint, bigint, number, string | null]>;
-    for (const [name, file, sql, orderBy, every, seconds, comment, fingerprint, columns, bases, snapshotAt, builtAt, count, took, basesSynced] of rows) {
+    await w.run(`ALTER TABLE ${GENERATED_LEDGER} ADD COLUMN IF NOT EXISTS jsonb_layout INTEGER`);
+    const rows = (await w.runAndReadAll(`SELECT name, file, sql, order_by, target_every, target_seconds, comment, fingerprint, columns, bases, epoch_ms(snapshot_at), epoch_ms(built_at), "rows", seconds, bases_synced, jsonb_layout FROM ${GENERATED_LEDGER}`)).getRowsJS() as
+      Array<[string, string, string, string | null, string, bigint, string | null, string, string, string, number | bigint, number | bigint, bigint, number, string | null, number | null]>;
+    const older: Array<{ name: string; schema: string; table: string; columns: GeneratedColumn[] }> = [];
+    for (const [name, file, sql, orderBy, every, seconds, comment, fingerprint, columns, bases, snapshotAt, builtAt, count, took, basesSynced, layout] of rows) {
+      if (layout !== JSONB_LAYOUT) older.push({ name, schema: name.slice(0, name.indexOf(".")), table: name.slice(name.indexOf(".") + 1), columns: JSON.parse(columns) as GeneratedColumn[] });
       const at = name.indexOf(".");
       this.entry(name).deployed = { definition: { name, schema: name.slice(0, at), table: name.slice(at + 1), file, sql, orderBy, targetLag: { every, seconds: Number(seconds) }, comment },
         fingerprint, columns: JSON.parse(columns) as GeneratedColumn[], bases: JSON.parse(bases) as string[], basesSynced: basesSynced === null ? {} : JSON.parse(basesSynced) as Record<string, number | null>, snapshotAt: Number(snapshotAt), builtAt: Number(builtAt), rows: Number(count), seconds: took };
@@ -290,6 +310,19 @@ export class GeneratedTables {
       const d = entry.deployed;
       if (d === null) continue;
       if (d.bases.some((b) => { const s = this.baseSynced(b); return s === null || d.basesSynced[b] === undefined || d.basesSynced[b] !== s; })) entry.dirtySince = d.snapshotAt;
+    }
+    // A TABLE BUILT BEFORE ITS JSONB WAS WRITTEN AS POSTGRES'S (`JSONB_LAYOUT`): its jsonb columns rewritten in place,
+    // with its ledger row, in one transaction, before the catalog serves anything, so no read meets the old text
+    for (const o of older) {
+      const jsonb = o.columns.filter(isJsonb);
+      const there = jsonb.length > 0 && (await w.runAndReadAll(`SELECT count(*) FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = ${literal(o.schema)} AND table_name = ${literal(o.table)}`)).getRowsJS()[0]![0] !== 0n;
+      await w.run("BEGIN TRANSACTION");
+      try {
+        if (there) await w.run(`UPDATE ${ident(o.schema)}.${ident(o.table)} SET ${jsonb.map((c) => `${ident(c.name)} = CAST(${canonicalJsonb(ident(c.name))} AS JSON)`).join(", ")}`);
+        await w.run(`UPDATE ${GENERATED_LEDGER} SET jsonb_layout = ${JSONB_LAYOUT} WHERE name = ${literal(o.name)}`);
+        await w.run("COMMIT");
+      } catch (x) { await w.run("ROLLBACK"); throw x; }
+      if (there) this.host.log(`generated ${o.name}: its jsonb columns (${jsonb.map((c) => c.name).join(", ")}) rewritten as Postgres stores jsonb, once, after an upgrade`);
     }
     const left = (await w.runAndReadAll(`SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = current_database() AND ends_with(table_name, '${SIDE_SUFFIX}')`)).getRowsJS() as Array<[string, string]>;
     for (const [schema, table] of left) await w.run(`DROP TABLE ${ident(schema)}.${ident(table)}`);
@@ -872,7 +905,9 @@ export class GeneratedTables {
         // a computed numeric's shared nodes, each written once as a column of its own, a layer over the one before
         // (src/duck/generated-plan.ts `storedProgram`): the columns' expressions read them by name
         const from = layers.reduce((inner, layer) => `(SELECT *, ${layer} FROM ${inner}) AS __mason_output`, `(${plan.sql.text}) AS __mason_output(${aliases.join(", ")})`);
-        const sql = `CREATE OR REPLACE TABLE ${p.side} (${columns.map((x) => ident(x.name)).join(", ")}) AS SELECT ${columns.map((x, i) => { const v = x.expr ?? aliases[i]!; return x.duck === null ? v : `CAST(${v} AS ${x.duck})`; }).join(", ")} ` +
+        // a jsonb as Postgres stores it (`canonicalJsonb`): never the engine's text of what the SELECT computed. A table's
+        // jsonb read as it is (`asRead`: a synced table's, a generated parent's) is that text already, and kept as it is
+        const sql = `CREATE OR REPLACE TABLE ${p.side} (${columns.map((x) => ident(x.name)).join(", ")}) AS SELECT ${columns.map((x, i) => { const v = isJsonb(x) && p.plan.asRead[i] !== true ? canonicalJsonb(x.expr ?? aliases[i]!) : x.expr ?? aliases[i]!; return x.duck === null ? v : `CAST(${v} AS ${x.duck})`; }).join(", ")} ` +
           `FROM ${from}`;
         const { rowsChanged } = await this.host.interruptible(() => c.run(sql, params.length > 0 ? params : undefined));
         await this.onStep("written", p.e.name);
@@ -967,9 +1002,9 @@ export class GeneratedTables {
         const d = n.definition;
         await w.run(`DROP TABLE IF EXISTS ${target}`);
         await w.run(`ALTER TABLE ${side} RENAME TO ${ident(d.table)}`);
-        await w.run(`INSERT OR REPLACE INTO ${GENERATED_LEDGER} VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::TIMESTAMPTZ, $12::TIMESTAMPTZ, $13, $14, $15)`,
+        await w.run(`INSERT OR REPLACE INTO ${GENERATED_LEDGER} VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::TIMESTAMPTZ, $12::TIMESTAMPTZ, $13, $14, $15, $16)`,
           [e.name, d.file, d.sql, d.orderBy, d.targetLag.every, d.targetLag.seconds, d.comment, n.fingerprint, JSON.stringify(n.columns), JSON.stringify(n.bases),
-            new Date(n.snapshotAt).toISOString(), new Date(n.builtAt).toISOString(), n.rows, n.seconds, JSON.stringify(n.basesSynced)]);
+            new Date(n.snapshotAt).toISOString(), new Date(n.builtAt).toISOString(), n.rows, n.seconds, JSON.stringify(n.basesSynced), JSONB_LAYOUT]);
       }
       await w.run("COMMIT");
     } catch (x) { await w.run("ROLLBACK"); throw x; }
