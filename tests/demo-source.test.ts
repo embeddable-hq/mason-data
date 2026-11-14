@@ -21,6 +21,7 @@ import { checkSource, parseSource, readSourceFacts } from "../src/cli/preflight.
 import { DuckStore } from "../src/duck/store.ts";
 import { Sync, type ChunkEvent } from "../src/duck/sync.ts";
 import * as syncCommand from "../src/cli/sync.ts";
+import { msText } from "../src/lib/table-sync.ts";
 
 // imported when the tests run: at a commit without the module the file still loads, and each test fails by name
 const demoModule = await import("../src/demo/source.ts" as string).catch(() => ({})) as Record<string, unknown>;
@@ -368,7 +369,7 @@ test("a sync asked by hand (mason sync, the page's Sync now) is a synced event i
   const parsed = parseSource(s.url);
   if ("problem" in parsed) throw new Error(parsed.problem);
   const logged: string[] = [];
-  const events: Array<{ kind: string; table: string | null; message: string }> = [];
+  const events: Array<{ kind: string; table: string | null; message: string; tookMs?: number }> = [];
   const store = await DuckStore.open(path.join(dir, "duck.db"), (l) => logged.push(l), { memoryLimit: "256MB" });
   const sync = new Sync(store, parsed.source, "demo", (l) => logged.push(l), 3_600_000, "poll", null, { onEvent: (e) => { events.push(e); } });
   try {
@@ -377,6 +378,11 @@ test("a sync asked by hand (mason sync, the page's Sync now) is a synced event i
     await sync.setTables(facts.tables.filter((t) => t.source === "public.orders").map((t) => ({ ...t, sync: { mode: "poll" as const, every: "5s", seconds: 5 } })));
     await sync.once();
     assert.ok(sync.state().every((x) => x.phase === "copied"), JSON.stringify(sync.state()));
+    // HOW LONG EACH SYNC TOOK (issue 1012): the event's tookMs, and its message ends with it in the commands' words, which
+    // the web page takes off when it shows the time in its Took column (src/web/pages/syncs.js `tookCells`)
+    const tookSaid = (e: { message: string; tookMs?: number }): boolean => typeof e.tookMs === "number" && e.message.endsWith(` · ${msText(e.tookMs)}`);
+    const full = events.filter((e) => e.kind === "full_sync");
+    assert.ok(full.length > 0 && full.every(tookSaid), `a first sync's event says how long it took: ${JSON.stringify(full)}`);
     events.length = 0;
     await s.change();
     await sync.once();
@@ -386,12 +392,13 @@ test("a sync asked by hand (mason sync, the page's Sync now) is a synced event i
     assert.equal(polled.length, 1, `the scheduled poll's event: ${JSON.stringify(events)}\n${logged.slice(-6).join("\n")}`);
     assert.equal(polled[0]!.table, "public.orders");
     assert.match(polled[0]!.message, /^synced on schedule: [\d,]+ changed, [\d,]+ deleted, [\d,]+ rows now · [\d.]+ (ms|s)$/);
+    assert.ok(tookSaid(polled[0]!), `a scheduled poll's event says how long it took: ${JSON.stringify(polled[0])}`);
     await s.change();
     const asked = await sync.pollNow(["public.orders"]);
     const synced = events.filter((e) => e.kind === "synced");
     // the words mason sync prints on the table's line (and the page's Sync now, held equal to it), after "synced by hand"
     const said = syncCommand.syncedReport(asked, ["public.orders"], []).details[0]![1];
-    assert.deepEqual(synced, [{ kind: "synced", table: "public.orders", message: `synced by hand: ${said}` }], `${JSON.stringify(events)}\n${logged.slice(-6).join("\n")}`);
+    assert.deepEqual(synced, [{ kind: "synced", table: "public.orders", message: `synced by hand: ${said}`, tookMs: asked.tables[0]!.ms }], `${JSON.stringify(events)}\n${logged.slice(-6).join("\n")}`);
     assert.match(synced[0]!.message, /^synced by hand: [\d,]+ changed, [\d,]+ deleted, [\d,]+ rows now · [\d.]+ (ms|s)$/);
   } finally {
     await sync.stop();

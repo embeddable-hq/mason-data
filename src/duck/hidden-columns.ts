@@ -9,8 +9,9 @@
  * columns the record leaves out. Never decide by the pattern alone: a source column named like a stored path's column
  * was dropped at the next start, its values lost, and its table's poll and the whole stream stopped.
  *
- * The one module that tells a synced table's hidden columns from its source columns. Every place that reads, drops,
- * hides, adds or fills one asks it.
+ * The one module that tells a synced table's hidden columns from its source columns. Every place that decides whether a
+ * column is hidden, to read, drop, hide, add or fill it, asks it. One place rewords by the pattern and decides nothing:
+ * src/duck/store.ts `pgErrorOf`, whose Binder error says "a numeric's scale" for a quoted scale column's name.
  */
 import { HIDDEN_RE } from "./kept-route.ts";
 import { SCALE_RE } from "./scale-column.ts";

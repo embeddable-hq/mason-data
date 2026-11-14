@@ -22,6 +22,7 @@ import type { CopyProgressView, CopyState } from "../src/duck/sync.ts";
 import type { RunState } from "../src/cli/commands.ts";
 import * as commands from "../src/cli/commands.ts";
 import * as syncCommand from "../src/cli/sync.ts";
+import * as tableSync from "../src/lib/table-sync.ts";
 import { PLAIN } from "../src/cli/style.ts";
 import { EVENT_KINDS, isFailure, type SyncEvent } from "../src/duck/events.ts";
 import { timeOf } from "../src/cli/request-filter.ts";
@@ -189,7 +190,7 @@ const activityOf = (o: { window?: Record<string, unknown>; clients?: unknown[]; 
   window: { days: 1, covered: 1, statements: 1204, completed: 1190, refused: 10, failed: 2, cancelled: 2, rows: 52_000, bytesSent: 3_145_728, durationMs: { avg: 120, p50: 40, p95: 900 }, ...o.window },
   clients: o.clients ?? CLIENTS, slowest: o.slowest ?? [],
   clientsTotal: o.clientsTotal ?? { clients: (o.clients ?? CLIENTS).length, sessions: (o.clients ?? CLIENTS).reduce((a: number, c) => a + (c as { sessions: number }).sessions, 0) } });
-const EVENT: SyncEvent = { at: "2026-10-27T09:03:10.123Z", kind: "poll_failed", failed: true, table: "public.orders", message: "poll: connection reset\nthe sync tries it again in 5 s", code: "ECONNRESET", origin: "src/duck/sync.ts:3640" };
+const EVENT: SyncEvent = { at: "2026-10-27T09:03:10.123Z", kind: "poll_failed", failed: true, table: "public.orders", message: "poll: connection reset\nthe sync tries it again in 5 s", code: "ECONNRESET", origin: "src/duck/sync.ts:3640", tookMs: null };
 const EVENTS = { events: [EVENT, { at: "2026-10-27T09:04:00.000Z", kind: "restart", failed: true, table: null, message: "the run was started again after it stopped", code: "unknown", origin: null }], keptDays: 7 };
 const USAGE = { since: "2026-10-27T09:04:30.000Z", until: "2026-10-27T09:05:30.000Z", stepSeconds: null, sampleSeconds: 60, keptDays: 7, samples: [],
   copySizes: [{ table: "public.customers", bytes: 524_288, at: "2026-10-27T09:00:00.000Z" }, { table: "public.events", bytes: 3_221_225_472, at: "2026-10-27T09:00:00.000Z" }] };
@@ -607,7 +608,7 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   const keyForm = renderTables(CATALOG_STATE, { choosing: "public.event_log", columns: columnsOf("public.event_log") });
   assert.match(keyForm, /<form class="pick" data-pick-form="public\.event_log"/);
   assert.match(keyForm, /<button type="submit" class="primary small">Add event_log<\/button>/);
-  assert.match(textOf(keyForm), /Its key: the columns that tell its rows apart tenant_id bigint id bigint payload jsonb The columns to sync All columns, and any added to the table later Only these columns tenant_id bigint id bigint payload jsonb Add event_log Cancel/);
+  assert.match(textOf(keyForm), /Its key: the columns that tell its rows apart tenant_id bigint id bigint payload jsonb The columns to sync All columns, and any added to the table later that do not look like secrets Only these columns tenant_id bigint id bigint payload jsonb Add event_log Cancel/);
   assert.deepEqual([...keyForm.matchAll(/name="(key|columns)" value="([^"]*)"/g)].map((m) => `${m[1]}=${m[2]}`),
     ["key=tenant_id", "key=id", "key=payload", "columns=tenant_id", "columns=id", "columns=payload"]);
   // All at first; under Only these every box ticked, so choosing it starts from every column; the key's boxes none
@@ -3681,17 +3682,17 @@ test("Sync events: the sync's events are mason logs --events' lines in a table, 
   const html = renderEvents(UL_EVENTS);
   const at = Date.parse("2026-10-28T09:10:00.000Z");
   const timeline = renderEvents(UL_EVENTS, { now: at });
-  assert.equal(textOf(timeline), "When ↓ Kind Table Message 5 min ago ✗ Mason restarted Mason the run stopped <b>after</b> 42 s 9 min ago ✗ Full sync failed public.events the source closed the connection the sync tries it again in 5 min 10 min ago Full sync public.orders copied 2,000,000 rows");
-  assert.equal(textOf(renderEvents(UL_EVENTS, { now: at, sort: { key: "time", dir: "asc" } })), "When ↑ Kind Table Message 10 min ago Full sync public.orders copied 2,000,000 rows 9 min ago ✗ Full sync failed public.events the source closed the connection the sync tries it again in 5 min 5 min ago ✗ Mason restarted Mason the run stopped <b>after</b> 42 s",
+  assert.equal(textOf(timeline), "When ↓ Kind Table Message Took ↕ 5 min ago ✗ Mason restarted Mason the run stopped <b>after</b> 42 s 9 min ago ✗ Full sync failed public.events the source closed the connection the sync tries it again in 5 min 10 min ago Full sync public.orders copied 2,000,000 rows");
+  assert.equal(textOf(renderEvents(UL_EVENTS, { now: at, sort: { key: "time", dir: "asc" } })), "When ↑ Kind Table Message Took ↕ 10 min ago Full sync public.orders copied 2,000,000 rows 9 min ago ✗ Full sync failed public.events the source closed the connection the sync tries it again in 5 min 5 min ago ✗ Mason restarted Mason the run stopped <b>after</b> 42 s",
     "oldest first, as the command lists them, when asked");
   assert.match(timeline, /<th scope="col" aria-sort="descending"><button type="button" class="sort on" data-sort-table="events" data-sort-key="time">When/);
   assert.match(timeline, /<time data-tick datetime="2026-10-28T09:00:00.000Z" title="2026-10-28 09:00:00 UTC">10 min ago<\/time>/, "how long ago, the UTC time as the command prints it its title");
   assert.match(timeline, /<span title="full_sync"><span class="badge ok">Full sync<\/span><\/span>/); assert.equal([...timeline.matchAll(/<span class="badge bad">✗ /g)].length, 2, "a failure is a red badge with its ✗");
   assert.equal([...html.matchAll(/class="t-failed"/g)].length, 2, "the failures are marked");
   // Failures only: what was read, narrowed in the page alone
-  assert.equal(textOf(renderEvents(UL_EVENTS, { failuresOnly: true, now: at })), "2 of the 3 events read. When ↓ Kind Table Message 5 min ago ✗ Mason restarted Mason the run stopped <b>after</b> 42 s 9 min ago ✗ Full sync failed public.events the source closed the connection the sync tries it again in 5 min");
+  assert.equal(textOf(renderEvents(UL_EVENTS, { failuresOnly: true, now: at })), "2 of the 3 events read. When ↓ Kind Table Message Took ↕ 5 min ago ✗ Mason restarted Mason the run stopped <b>after</b> 42 s 9 min ago ✗ Full sync failed public.events the source closed the connection the sync tries it again in 5 min");
   // a kind and a table narrow it too, and compose
-  assert.match(textOf(renderEvents(UL_EVENTS, { kind: "full_sync", now: at })), /^1 of the 3 events read\. When ↓ Kind Table Message 10 min ago Full sync public\.orders/);
+  assert.match(textOf(renderEvents(UL_EVENTS, { kind: "full_sync", now: at })), /^1 of the 3 events read\. When ↓ Kind Table Message Took ↕ 10 min ago Full sync public\.orders/);
   assert.match(textOf(renderEvents(UL_EVENTS, { table: "Mason", now: at })), /^1 of the 3 events read\. .* Mason restarted Mason the run stopped/);
   assert.equal(textOf(renderEvents(UL_EVENTS, { kind: "full_sync", failuresOnly: true })), "None of the 3 sync events read passes the filters.");
   assert.equal(textOf(renderEvents({ keptDays: 7, events: [UL_EVENTS.events[0]] }, { failuresOnly: true })), "None of the 1 sync event shown failed.");
@@ -3699,6 +3700,65 @@ test("Sync events: the sync's events are mason logs --events' lines in a table, 
   assert.equal(textOf(renderEvents({ events: [], keptDays: 7 })), "No sync event in the last 7 days.");
   assert.equal(textOf(renderEvents({ events: [], keptDays: 7 }, { span: "the last hour" })), "No sync event in the last hour. Mason keeps 7 days of history.");
   assert.equal(textOf(renderEvents({ events: [], keptDays: 1 })), "No sync event in the last 1 day.");
+});
+
+// HOW LONG A SYNC TOOK IS A COLUMN OF ITS OWN (issue 1012): it was the end of the message ("… rows now · 7 min 57 s"),
+// hard to find and impossible to sort by. The event's `tookMs` is the column, in the commands' words; the message says it
+// no more; a row with none leaves the cell empty; Took sorts the longest first, a row with none last.
+test("Sync events: how long a sync took is the Took column, in the commands' words, and not again in the message; a row with none is empty; Took sorts (issue 1012)", () => {
+  const renderEvents = fnOf<[unknown, Record<string, unknown>?], string>(syncsPage, "renderEvents");
+  const counts = { changed: 3, deleted: 0, rows: 153_292_984 };
+  // the messages as the sync writes them (src/duck/sync.ts): a sync by hand and a scheduled one in mason sync's words
+  // (`syncedText`), a first sync ending the same way
+  const events = { keptDays: 7, events: [
+    { at: "2026-10-28T09:00:00.000Z", kind: "full_sync", failed: false, table: "public.orders", message: `synced: 2,000,000 row(s) · ${commands.msText(477_000)}`, code: null, origin: null, tookMs: 477_000 },
+    { at: "2026-10-28T09:01:00.000Z", kind: "polled", failed: false, table: "public.orders", message: `synced on schedule: ${tableSync.syncedText({ ...counts, ms: 570 })}`, code: null, origin: null, tookMs: 570 },
+    { at: "2026-10-28T09:02:00.000Z", kind: "synced", failed: false, table: "public.events", message: `synced by hand: ${tableSync.syncedText({ ...counts, ms: 13_703 })}`, code: null, origin: null, tookMs: 13_703 },
+    { at: "2026-10-28T09:03:00.000Z", kind: "restart", failed: true, table: null, message: "the run stopped after 42 s up", code: "unknown", origin: null, tookMs: null },
+    // recorded before Mason kept it: its message whole, as it was written
+    { at: "2026-10-28T09:04:00.000Z", kind: "synced", failed: false, table: "public.old", message: "synced by hand: 1 changed, 0 deleted, 9 rows now · 41 ms", code: null, origin: null }] };
+  const at = Date.parse("2026-10-28T09:10:00.000Z");
+  const rows = (html: string) => [...html.matchAll(/<tr[^>]*><th scope="row">[\s\S]*?<\/tr>/g)].map((m) => textOf(m[0]));
+  const html = renderEvents(events, { now: at });
+  assert.match(html, /<th scope="col" aria-sort="none" class="num"><button type="button" class="sort" data-sort-table="events" data-sort-key="took">Took/, "a sortable column, numbers right-aligned");
+  assert.deepEqual(rows(html), [
+    "6 min ago Manual sync public.old synced by hand: 1 changed, 0 deleted, 9 rows now · 41 ms",
+    "7 min ago ✗ Mason restarted Mason the run stopped after 42 s up Code unknown",
+    "8 min ago Manual sync public.events synced by hand: 3 changed, 0 deleted, 153,292,984 rows now 13.7 s",
+    "9 min ago Scheduled sync public.orders synced on schedule: 3 changed, 0 deleted, 153,292,984 rows now 570 ms",
+    "10 min ago Full sync public.orders synced: 2,000,000 row(s) 7 min 57 s",
+  ]);
+  assert.equal([...html.matchAll(/<td class="num"><\/td>/g)].length, 2, "the restart's and the old event's cells are empty");
+  assert.match(html, /153,292,984 rows now<\/td><td class="num">570 ms<\/td>/, "the time in its cell, not in the message");
+  // Took sorts the longest first, then the shortest; a row with none last either way, newest first among them
+  assert.deepEqual(rows(renderEvents(events, { now: at, sort: { key: "took", dir: "desc" } })).map((r) => r.split(" ").slice(0, 3).join(" ")),
+    ["10 min ago", "8 min ago", "9 min ago", "6 min ago", "7 min ago"]);
+  assert.deepEqual(rows(renderEvents(events, { now: at, sort: { key: "took", dir: "asc" } })).map((r) => r.split(" ").slice(0, 3).join(" ")),
+    ["9 min ago", "8 min ago", "10 min ago", "6 min ago", "7 min ago"]);
+  assert.match(renderEvents(events, { now: at, sort: { key: "took", dir: "desc" } }), /aria-sort="descending" class="num"><button type="button" class="sort on" data-sort-table="events" data-sort-key="took">Took<span class="arrow" aria-hidden="true">↓/);
+  // on a phone each event is a block, how long it took on its first line beside when, never past the screen's edge
+  const css = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "web", "app.css"), "utf8");
+  const phone = /@media \(max-width: 640px\) \{\n  #page-syncs table\.events[\s\S]*?\n\}/.exec(css)?.[0] ?? "";
+  assert.match(phone, /grid-template-areas: "when when took" "kind name name" "msg msg msg"/, "the phone's layout of an event");
+  assert.match(phone, /tbody tr > :nth-child\(5\) \{ grid-area: took;/, "Took, the fifth cell, on the first line");
+});
+
+test("Sync events: pressing Took sorts the list by how long each sync took, and When sorts it by time again (issue 1012)", async () => {
+  const run = fakeRun(); withUsageAnswers(run);
+  const t = Date.parse("2026-10-28T09:10:00.000Z");
+  run.answers.set("GET api/events?limit=500&since=15m", answer({ keptDays: 7, events: [
+    { at: "2026-10-28T09:01:00.000Z", kind: "full_sync", failed: false, table: "public.big", message: "synced: 9 row(s) · 2 min 5 s", tookMs: 125_000 },
+    { at: "2026-10-28T09:02:00.000Z", kind: "synced", failed: false, table: "public.small", message: "synced by hand: 1 changed, 0 deleted, 9 rows now · 41 ms", tookMs: 41 }] }));
+  const app = fn<[unknown, () => Date], ObsApp>("createApp")(run.fetch, () => new Date(t));
+  app.show("syncs"); await app.poll();
+  const order = () => [...app.view()["syncs-events"]!.matchAll(/<code class="name" title="([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(order(), ["public.small", "public.big"], "newest first");
+  assert.equal(app.pages.get("syncs")!.click!({ sortTable: "events", sortKey: "took" }, null, { doc: {} }), true);
+  assert.deepEqual(order(), ["public.big", "public.small"], "the longest first");
+  app.pages.get("syncs")!.click!({ sortTable: "events", sortKey: "took" }, null, { doc: {} });
+  assert.deepEqual(order(), ["public.small", "public.big"], "the shortest first");
+  app.pages.get("syncs")!.click!({ sortTable: "events", sortKey: "time" }, null, { doc: {} });
+  assert.match(app.view()["syncs-events"]!, /aria-sort="descending"><button type="button" class="sort on" data-sort-table="events" data-sort-key="time">When/, "When again, newest first");
 });
 
 test("Sync events: the run's entries are rows, NEWEST FIRST, a multi-line entry kept as one preformatted row", () => {
@@ -4563,7 +4623,7 @@ test("Sync events: Scheduled syncs (or a scheduled kind chosen) asks the run for
   await app.pages.get("syncs")!.input({ id: "syncs-scheduled", checked: true });
   assert.deepEqual(run.asked, ["GET api/events?limit=500&since=15m&scheduled=1"], "the run is asked for them, at once");
   const text = textOf(app.view()["syncs-events"]!);
-  assert.match(text, /^When ↓ Kind Table Message 30s ago Live sync public\.events streamed 4 changes \(4 inserts\) in the last 60 s 60s ago Scheduled sync public\.orders synced on schedule: 2 changed/);
+  assert.match(text, /^When ↓ Kind Table Message Took ↕ 30s ago Live sync public\.events streamed 4 changes \(4 inserts\) in the last 60 s 60s ago Scheduled sync public\.orders synced on schedule: 2 changed/);
   assert.match(app.view()["syncs-events"]!, /<span title="polled"><span class="badge ok">Scheduled sync<\/span><\/span>/, "good news, in words");
   run.asked.length = 0;
   await app.pages.get("syncs")!.input({ id: "syncs-scheduled", checked: false });
@@ -4573,7 +4633,7 @@ test("Sync events: Scheduled syncs (or a scheduled kind chosen) asks the run for
   run.asked.length = 0;
   await app.pages.get("syncs")!.input({ id: "syncs-kind", value: "polled" });
   assert.deepEqual(run.asked, ["GET api/events?limit=500&since=15m&scheduled=1"]);
-  assert.match(textOf(app.view()["syncs-events"]!), /^1 of the 5 events read\. When ↓ Kind Table Message 60s ago Scheduled sync public\.orders/);
+  assert.match(textOf(app.view()["syncs-events"]!), /^1 of the 5 events read\. When ↓ Kind Table Message Took ↕ 60s ago Scheduled sync public\.orders/);
   // another kind: no read, the page's filter alone
   run.asked.length = 0;
   assert.equal(await app.pages.get("syncs")!.input({ id: "syncs-kind", value: "full_sync" }), undefined);
@@ -4612,14 +4672,14 @@ test("Sync events: 'Failures only' asks the run for the range's failures alone; 
   const app = fn<[unknown, () => Date], App & { pages: Map<string, { input(t: unknown): unknown }> }>("createApp")(run.fetch, () => new Date(t));
   app.show("syncs");
   await app.poll();
-  assert.match(textOf(app.view()["syncs-events"]!), /^When ↓ Kind Table Message 5 min ago ✗ Mason restarted .* ✗ Full sync failed .* 10 min ago Full sync public\.orders/);
+  assert.match(textOf(app.view()["syncs-events"]!), /^When ↓ Kind Table Message Took ↕ 5 min ago ✗ Mason restarted .* ✗ Full sync failed .* 10 min ago Full sync public\.orders/);
   // the kind and table filters: EVERY kind, and the sync and EVERY added table, whatever the range read (the state
   // read here names customers, orders and events; public.events has events, public.customers none)
   const words = (syncsPage as Record<string, unknown>).KIND_WORDS as Record<string, string>;
   assert.equal(textOf(app.view()["syncs-filters"]!), `Kind Every kind ${EVENT_KINDS.map((k) => words[k]).join(" ")} Table Every table Mason events public.customers public.events public.orders`);
   assert.equal(app.pages.get("syncs")!.input({ id: "syncs-kind", value: "full_sync_failed" }), true);
   assert.match(app.view()["syncs-filters"]!, /<option value="full_sync_failed" selected>/);
-  assert.match(textOf(app.view()["syncs-events"]!), /^1 of the 3 events read\. When ↓ Kind Table Message 9 min ago ✗ Full sync failed/);
+  assert.match(textOf(app.view()["syncs-events"]!), /^1 of the 3 events read\. When ↓ Kind Table Message Took ↕ 9 min ago ✗ Full sync failed/);
   app.pages.get("syncs")!.input({ id: "syncs-kind", value: "" });
   run.asked.length = 0;
   run.answers.set("GET api/events?limit=500&since=15m&failed=1", answer({ keptDays: 7, events: UL_EVENTS.events.filter((e) => e.failed) }));
@@ -4952,7 +5012,7 @@ test("large data: 500 sync events — the 100 newest written, Show more; a 7-day
   const html = renderEvents({ events, keptDays: 7 });
   assert.equal([...html.matchAll(/<tr/g)].length, 1 + 100);
   assert.match(textOf(html), /Showing 100 of 500\. Show 100 more Show all 500$/);
-  assert.match(textOf(html), /^When ↓ Kind Table Message \S+ \S+ ago poll_failed|^When ↓ Kind Table Message .* m499 /, "the newest first");
+  assert.match(textOf(html), /^When ↓ Kind Table Message Took ↕ \S+ \S+ ago poll_failed|^When ↓ Kind Table Message Took ↕ .* m499 /, "the newest first");
   assert.equal([...renderEvents({ events, keptDays: 7 }, { limit: Infinity }).matchAll(/<tr/g)].length, 501);
   // a week, six hours a point, with one spike a thousand times the rest
   const usageSpecs = fnOf<[unknown], Record<string, { x: number[]; y: number[]; unit: string; label: string }>>(usagePage, "usageSpecs");
@@ -5836,7 +5896,7 @@ test("Sync events: #observability/syncs?table= (a table's View events) narrows t
   const m = app.pages.get("syncs")!.model;
   assert.deepEqual([m.table, m.failuresOnly], ["public.events", false]);
   assert.match(app.view()["syncs-filters"]!, /<option value="public\.events" selected>public\.events<\/option>/, "the Table filter shows it");
-  assert.match(textOf(app.view()["syncs-events"]!), /^1 of the 3 events read\. When ↓ Kind Table Message 9 min ago ✗ Full sync failed public\.events /, "its events alone");
+  assert.match(textOf(app.view()["syncs-events"]!), /^1 of the 3 events read\. When ↓ Kind Table Message Took ↕ 9 min ago ✗ Full sync failed public\.events /, "its events alone");
   // the Overview's sync errors: the failures of every table over the week, the box ticked
   app.show("#observability/syncs?failures=1&range=7d", { doc });
   assert.deepEqual([m.table, m.failuresOnly, box.checked], ["", true, true]);

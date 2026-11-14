@@ -88,11 +88,13 @@ const READS = [
 const READ: JsonRead = { source: "public.h", column: "j", steps: '["a"]', either: false, canonical: true, asText: true };
 
 /** a run of the sync over `file`, opened as `mason start` opens it */
-async function start(file: string, source: Source, db: string, tables: AddedTable[], logged: string[], mode: "poll" | "replication", names: { slot: string; publication: string; owned: boolean } | null) {
+async function start(file: string, source: Source, db: string, tables: AddedTable[], logged: string[], mode: "poll" | "replication", names: { slot: string; publication: string; owned: boolean } | null,
+  onColumnsChanged?: (sync: Sync) => Promise<void>) {
   const store = await DuckStore.open(file, (l) => logged.push(l));
-  const sync = new Sync(store, source, db, (l) => logged.push(l), mode === "poll" ? 3_600_000 : 1_000, mode, names, { json: { eager: true } });
+  const sync: Sync = new Sync(store, source, db, (l) => logged.push(l), mode === "poll" ? 3_600_000 : 1_000, mode, names,
+    { json: { eager: true }, ...(onColumnsChanged === undefined ? {} : { onColumnsChanged: () => onColumnsChanged(sync) }) });
   await sync.open();
-  sync.setTables(tables);
+  await sync.setTables(tables);
   return { store, sync, close: async () => { await sync.stop(); await store.close(); } };
 }
 
@@ -221,7 +223,7 @@ test("a source column added under a stored path's very name is the source's: the
     const taken = hiddenName(READ);
     psql(url, `ALTER TABLE h ADD COLUMN ${quoted(taken)} text; UPDATE h SET ${quoted(taken)} = 'mine ' || id`);
     const wider = await tablesOf(parsed.source, ["public.h", "public.other"]);
-    run.sync.setTables(wider);
+    await run.sync.setTables(wider);
     await run.sync.once();
     const sql = `SELECT id, ${quoted(taken)}, j ->> 'a' FROM h ORDER BY id`;
     let api = await listen(run.store, run.sync, db);
@@ -236,6 +238,52 @@ test("a source column added under a stored path's very name is the source's: the
     await run.sync.pollNow(["public.h"]);
     api = await listen(run.store, run.sync, db);
     try { assert.equal(await api.ask(sql), psql(url, sql), `${sql}, after a restart and a poll`); } finally { await api.close(); }
+  } finally {
+    await run.close();
+  }
+});
+
+test("columns added and renamed on the database to hidden-looking names while it runs: synced again whole, the stored path kept, nothing taken for Mason's own", { skip }, async () => {
+  const db = `${tag}_reshape`, url = urlOf(db);
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  psql(url, `${SCHEMA}; ${rows(1, 40)}`);
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const names = ["public.h", "public.other"];
+  // the run's own re-read of the columns (src/cli/dev.ts): the catalog read again, the tables set again
+  const reread = async (sync: Sync): Promise<void> => { await sync.setTables(await tablesOf(parsed.source, names)); };
+  const logged: string[] = [];
+  const file = path.join(dir, "reshape.db");
+  let run = await start(file, parsed.source, db, await tablesOf(parsed.source, names), logged, "poll", null, reread);
+  const added = `__mason_json_${hex("c")}`, renamed = `__MASON_SCALE_${hex("d").toUpperCase()}`;
+  const reads = ["SELECT * FROM h ORDER BY id", `SELECT id, "${added}", "${renamed}", j ->> 'a', n::text FROM h ORDER BY id`, "SELECT * FROM other ORDER BY id"];
+  const answers = async (step: string): Promise<void> => {
+    assert.deepEqual(logged.filter((l) => /dropped the column/.test(l)), [], `${step}: nothing dropped`);
+    const api = await listen(run.store, run.sync, db);
+    try { for (const sql of reads) assert.equal(await api.ask(sql), psql(url, sql), `${sql}, ${step}\n${logged.slice(-10).join("\n")}`); } finally { await api.close(); }
+    assert.deepEqual(run.sync.kept.status().map((p) => p.state), ["ready"], `${step}: the stored path is kept`);
+  };
+  try {
+    await run.sync.once();
+    await run.sync.kept.keepNow!([READ]);
+    const mark = logged.length;
+    psql(url, `ALTER TABLE h ADD COLUMN "${added}" text; UPDATE h SET "${added}" = 'added ' || id; ALTER TABLE h RENAME COLUMN "__mason_json_x" TO "${renamed}"`);
+    // the poll's check of the columns sees the change and refuses this poll: the table is synced again whole
+    const refused = await run.sync.pollNow(["public.h"]).then(() => null, (e: unknown) => e instanceof Error ? e.message : String(e));
+    for (const end = Date.now() + 120_000; ;) {
+      await run.sync.once();
+      const copied = run.sync.state().find((s) => s.source === "public.h");
+      if (copied?.phase === "copied" && copied.error === null && logged.slice(mark).some((l) => /^synced public\.h\b/.test(l))) break;
+      if (Date.now() > end) assert.fail(`public.h was never synced again (the poll said: ${refused ?? "nothing"}):\n${logged.slice(-20).join("\n")}`);
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    await answers("synced again whole with its new columns");
+    await run.close();
+    run = await start(file, parsed.source, db, await tablesOf(parsed.source, names), logged, "poll", null, reread);
+    psql(url, `UPDATE h SET "${added}" = 'after ' || id, "${renamed}" = -id WHERE id % 2 = 0`);
+    await run.sync.once();
+    await run.sync.pollNow(names);
+    await answers("after a restart and a poll");
   } finally {
     await run.close();
   }

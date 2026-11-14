@@ -130,7 +130,7 @@ function psql(url: string, sql: string): string {
 }
 
 /** every table the oracle copies: the shop's, `one`, and the type matrix's (oracle/type-matrix.ts TYPED) */
-const COPIED = [...TABLES, "one", "dup", "dup2", "typed", "mapped", "grouped", "typed_arrays", "castable", "cased", "jcased", "jpath", "jcontain", "coll", "coll_top", "coll_rep", "colls", "colls_case", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "pnums", "bins", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog", ...LATEST_TABLES];
+const COPIED = [...TABLES, "one", "dup", "dup2", "typed", "mapped", "grouped", "typed_arrays", "plain_n", "castable", "cased", "jcased", "jpath", "jcontain", "coll", "coll_top", "coll_rep", "colls", "colls_case", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "pnums", "bins", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog", ...LATEST_TABLES];
 
 /** the one-row table every dialect case reads, so DuckDB (not the catalog Postgres) answers it */
 const ONE = "CREATE TABLE public.one (id int PRIMARY KEY); INSERT INTO public.one VALUES (1);";
@@ -231,11 +231,6 @@ const KNOWN: Decided[] = [
   // is within the owner's numeric rule since issue 997, and no difference to the oracle.) A numeric(65,30) or an
   // unconstrained numeric past the engine's DECIMAL, in an arm or under a reader: its text is the engine's digits
   shapesDecided([...SET_OPERATION_ARMS, ...NUMERIC_READERS], { sql: /o\.big\b|o\.amount_raw\b/, kind: "text", issue: 402, why: "a numeric(65,30) or unconstrained numeric in a set operation or under a reader prints the engine's digits" }),
-  // a plain numeric holding 1.5 beside 0, beside an arm of NULLs, integers or VALUES: its column's one scale (issue 946's
-  // second part; a UNION ALL of two plain numerics keeps each value's own). The numeric itself is within the owner's
-  // numeric rule (issue 997); its text, `n::text`, is a string to the client, and differs
-  shapesDecided(["null-arm", "null-arm-first", "integer-arm", "integer-arm-first", "values-arm", "values-arm-first"], { sql: /n \* 2, abs\(n\) FROM typed_arrays/, kind: "text", issue: 946,
-    why: "a plain numeric in a UNION ALL beside an arm of NULLs, integers or VALUES prints at its column's one scale" }),
   // A NUMERIC WITHIN THE OWNER'S RULE, READ AS TEXT (issue 997): the base statement's numeric is held alike, and a
   // shape's `::text` of it is a string to the client, so its other scale or digits past the 15th differ there
   { shape: ["numeric-text", "numeric-set-ordered"], sql: /^SELECT v FROM \(SELECT 1 AS v FROM public\.one UNION SELECT 1\.5 FROM public\.one\)/, kind: "text", gap: "mixed-scale-numeric", why: "a DuckDB DECIMAL column has one scale; Postgres's numeric keeps each value's (1.0 where Postgres has 1)" },

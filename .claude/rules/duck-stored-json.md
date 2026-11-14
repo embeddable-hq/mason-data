@@ -73,8 +73,10 @@ paths:
   columns), and nothing else may `SELECT *` a copy into an answer.
   **A column is hidden only where the copy's record does not name it** (`src/duck/hidden-columns.ts`: `copy_state.columns`,
   or a side table's `copy_progress.columns`), never by its name's pattern: a source column named `__mason_json_…` was
-  dropped at the next start, its values lost and the stream stopped for every table (issue 998). Every place that reads,
-  drops, hides, adds or fills a hidden column asks that module.
+  dropped at the next start, its values lost and the stream stopped for every table (issue 998). Every place that decides
+  whether a column of a copy is hidden, to read, drop, hide, add or fill it, asks that module. One place rewords by the
+  pattern alone and decides nothing: `pgErrorOf` (src/duck/store.ts) says "a numeric's scale" for a quoted
+  `__mason_scale_<12 hex>` in an engine Binder error, so a source column of that very name is reworded there too.
 - **A jsonb's order is stored as a read like a path's** (`ORDER_STEPS`, src/duck/kept-route.ts; the PR's measurement:
   `ORDER BY j LIMIT 100` over 20 M rows, 19 s by the key's function under C and 83 s under libc, 0.14 s from the
   stored key): the rewrite records `ORDER BY` / `GROUP BY` / `=` of a copied jsonb column as a read (`keptKey`), the

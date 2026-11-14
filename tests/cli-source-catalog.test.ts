@@ -451,3 +451,62 @@ test("what the database says of the read's statement: working, or why it went si
   assert.throws(() => statementVerdict([]), /runs no statement of the read just now/, "queued in a pooler, or gone: couldn't tell");
   assert.throws(() => statementVerdict([[null, null, null]]), /does not show the read's session/);
 });
+
+// ------------------------------------------------------------------ a table's columns read again alone (issue 977)
+
+const shaped = (tables: Array<[string, string]>): SourceFacts => {
+  const f = factsOf(tables.map(([t]) => t));
+  return { ...f, tables: f.tables.map((t, i) => ({ ...t, shape: tables[i]![1] })) };
+};
+const shapes = (f: SourceFacts): string[] => f.tables.map((t) => `${t.table}:${t.shape}`);
+
+test("refreshTables reads the tables named alone, puts them in place of what the catalog said of them, and drops one gone", async () => {
+  let full = 0;
+  const asked: string[][] = [];
+  let database: Array<[string, string]> = [["a", "1"], ["b", "1"], ["c", "1"]];
+  const c = sourceCatalog(shaped(database), async () => { full++; return shaped(database); }, {
+    log: () => undefined,
+    readTables: async (_signal, only) => { asked.push([...only]); return shaped(database).tables.filter((t) => only.includes(t.source)); },
+  });
+  database = [["a", "1"], ["b", "2"], ["c", "1"]];
+  const r = await c.refreshTables(["public.b"]);
+  assert.ok("tables" in r);
+  assert.deepEqual(asked, [["public.b"]], "that table alone");
+  assert.equal(full, 0, "never the whole catalog");
+  assert.deepEqual(shapes(c.facts()), ["a:1", "b:2", "c:1"], "in its place, in the catalog's order");
+  database = [["a", "1"], ["c", "1"]];
+  await c.refreshTables(["public.b"]);
+  assert.deepEqual(shapes(c.facts()), ["a:1", "c:1"], "a table gone from the database is gone from the catalog");
+});
+
+test("a whole read that began before a table was read alone keeps the newer row: it never puts the older one back", async () => {
+  let now = 0;
+  let release: (f: SourceFacts) => void = () => undefined;
+  const c = sourceCatalog(shaped([["a", "1"], ["b", "1"]]), () => new Promise<SourceFacts>((r) => { release = r; }), {
+    log: () => undefined, now: () => now,
+    readTables: async () => shaped([["b", "2"]]).tables,
+  });
+  now = CATALOG_FRESH_MS;
+  // the whole read begins, reading b as it was
+  const whole = c.fresh();
+  now += 10;
+  await c.refreshTables(["public.b"]);
+  // ends after: a, as it read it; b as the read alone put it
+  release(shaped([["a", "9"], ["b", "1"]]));
+  assert.deepEqual(shapes(await whole), ["a:9", "b:2"]);
+  // a whole read begun AFTER the read alone is the newest of both
+  now += CATALOG_FRESH_MS;
+  const later = c.fresh();
+  release(shaped([["a", "9"], ["b", "3"]]));
+  assert.deepEqual(shapes(await later), ["a:9", "b:3"]);
+});
+
+test("a read alone that fails leaves the catalog as it was, says why in the log, and answers why", async () => {
+  const logged: string[] = [];
+  const c = sourceCatalog(shaped([["a", "1"]]), async () => shaped([["a", "1"]]), {
+    log: (m) => logged.push(m), readTables: async () => { throw new Error("connection refused"); },
+  });
+  assert.deepEqual(await c.refreshTables(["public.a"]), { failed: "connection refused" });
+  assert.deepEqual(shapes(c.facts()), ["a:1"]);
+  assert.deepEqual(logged, ["the columns of public.a could not be read again (connection refused): they are read again at the next check"]);
+});
