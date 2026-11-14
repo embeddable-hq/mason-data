@@ -96,10 +96,14 @@ export interface LedgerRequest {
    *  whose plan was not recorded (another's was being recorded: the log says so), cut at 8 KiB (`planTruncated`) */
   plan: string | null;
   planTruncated: boolean;
+  /** WHERE A STATEMENT ANSWERED XX000 (an internal error) FAILED: the first stack frame in Mason's own code, as a file
+   *  and a line (`src/duck/store.ts:897`; src/lib/failure-facts.ts); null for every other row, for one whose error had
+   *  no frame in Mason's code, and for a row recorded before origins were kept */
+  origin: string | null;
 }
 
 const COLUMNS = ["request_id", "started_at", "session", "application_name", "token_name", "user_name", "method", "sqlstate", "message", "detail", "hint",
-  "rows", "duration_ms", "query", "query_truncated", "seq", "json_reads", "bytes_sent", "gap", "role", "attributes", "client_addr", "plan", "plan_truncated"] as const;
+  "rows", "duration_ms", "query", "query_truncated", "seq", "json_reads", "bytes_sent", "gap", "role", "attributes", "client_addr", "plan", "plan_truncated", "origin"] as const;
 
 /** the ledger's DDL: one row per request, named for a developer who knows pg_stat_activity */
 /** a ledger made before `mason user` gains its column; a column added last is named in every INSERT */
@@ -144,9 +148,13 @@ export const REQUESTS_CLIENT_ADDR_DDL = `ALTER TABLE ${REQUESTS_TABLE} ADD COLUM
 export const REQUESTS_PLAN_DDL = `ALTER TABLE ${REQUESTS_TABLE} ADD COLUMN IF NOT EXISTS plan VARCHAR`;
 export const REQUESTS_PLAN_TRUNCATED_DDL = `ALTER TABLE ${REQUESTS_TABLE} ADD COLUMN IF NOT EXISTS plan_truncated BOOLEAN`;
 
+/** WHERE AN XX000 FAILED (ApiLogRow.origin; LedgerRequest.origin, issue 924): NULL for every other row. A ledger made
+ *  before gains it; its old rows are NULL. */
+export const REQUESTS_ORIGIN_DDL = `ALTER TABLE ${REQUESTS_TABLE} ADD COLUMN IF NOT EXISTS origin VARCHAR`;
+
 export const REQUESTS_DDL = `CREATE TABLE IF NOT EXISTS ${REQUESTS_TABLE} (request_id VARCHAR, started_at TIMESTAMPTZ, session INTEGER, ` +
   `application_name VARCHAR, token_name VARCHAR, user_name VARCHAR, method VARCHAR, sqlstate VARCHAR, message VARCHAR, detail VARCHAR, hint VARCHAR, ` +
-  `"rows" BIGINT, duration_ms INTEGER, query VARCHAR, query_truncated BOOLEAN, seq BIGINT, json_reads VARCHAR, bytes_sent BIGINT, gap VARCHAR, role VARCHAR, attributes VARCHAR, client_addr VARCHAR, plan VARCHAR, plan_truncated BOOLEAN)`;
+  `"rows" BIGINT, duration_ms INTEGER, query VARCHAR, query_truncated BOOLEAN, seq BIGINT, json_reads VARCHAR, bytes_sent BIGINT, gap VARCHAR, role VARCHAR, attributes VARCHAR, client_addr VARCHAR, plan VARCHAR, plan_truncated BOOLEAN, origin VARCHAR)`;
 
 /** a row as the ledger buffers it: the listener's row, its number in arrival order, and its plan once it settled */
 interface Numbered { row: ApiLogRow; seq: number; plan?: StoredPlan | null }
@@ -159,7 +167,7 @@ function valuesOf({ row: r, seq, plan }: Numbered): DuckDBValue[] {
     r.rows === undefined ? null : r.rows, Math.round(r.durationMs), r.payload ?? "", r.payloadTruncated === true, seq,
     r.jsonReads === undefined || r.jsonReads.length === 0 ? null : JSON.stringify(r.jsonReads), r.bytesSent === undefined ? null : r.bytesSent, r.gap ?? null, r.role ?? "",
     r.attributes === undefined || Object.keys(r.attributes).length === 0 ? null : JSON.stringify(r.attributes), r.clientAddress ?? null,
-    plan?.text ?? null, plan === undefined || plan === null ? null : plan.truncated];
+    plan?.text ?? null, plan === undefined || plan === null ? null : plan.truncated, r.origin ?? null];
 }
 
 /** A ledger row as the commands read it. */
@@ -177,6 +185,7 @@ function requestOf(o: Record<string, unknown>): LedgerRequest {
     endedAt: new Date(startedAt.getTime() + Number(o.duration_ms)).toISOString(), bytesSent: o.bytes_sent === null || o.bytes_sent === undefined ? null : Number(o.bytes_sent),
     query: String(o.query ?? ""), queryTruncated: o.query_truncated === true,
     plan: typeof o.plan === "string" ? o.plan : null, planTruncated: o.plan_truncated === true,
+    origin: typeof o.origin === "string" ? o.origin : null,
   };
 }
 
@@ -320,7 +329,7 @@ export class RequestLedger {
   /** The ledger of a store: its table made, the rows past the retention deleted, and a trim every hour. */
   static async open(store: DuckStore, log: (line: string) => void, options: LedgerOptions): Promise<RequestLedger> {
     const history = await History.open(store, [REQUESTS_DDL, REQUESTS_USER_DDL, REQUESTS_SEQ_DDL, REQUESTS_JSON_DDL, REQUESTS_BYTES_DDL, REQUESTS_GAP_DDL, REQUESTS_ROLE_DDL, REQUESTS_ATTRIBUTES_DDL, REQUESTS_CLIENT_ADDR_DDL,
-      REQUESTS_PLAN_DDL, REQUESTS_PLAN_TRUNCATED_DDL]);
+      REQUESTS_PLAN_DDL, REQUESTS_PLAN_TRUNCATED_DDL, REQUESTS_ORIGIN_DDL]);
     const ledger = new RequestLedger(history, log, options);
     ledger.next = Number((await history.reader.runAndReadAll(`SELECT coalesce(max(seq), -1) + 1 FROM ${REQUESTS_TABLE}`)).getRowsJS()[0]![0]);
     await history.keepTrimmed(() => ledger.trim(), (e) => log(`request log: deleting the requests older than ${ledger.days} days failed: ${e.message}`));

@@ -59,9 +59,9 @@ wire.
   - Keep sentences short, one idea each. Don't chain clauses with colons, semicolons and commas.
   - Use common words: "query", not "statement", where a user reads it; "set up", not "provision".
   - Cut a sentence that doesn't help the reader act or understand. A clear label needs no explanation.
-  - Write "Choose where metabase can connect from. If you limit it, open sessions from other addresses end at their
-    next query." Not "Where metabase connects from, as mason user from metabase sets it: the sessions it holds from
-    another address end at their next statement."
+  - Write "Roles can limit a user to some tables, columns and rows. Configure them via `mason/roles.yml`. The README
+    describes how." Not "Roles limit a user to some tables and columns. You write them in `mason/roles.yml`, and the
+    README shows how."
 - **Speak to the interface the reader is using.** On the web page, say how to do it on the page. Name a command or a
   file only when the page can't do it. In the CLI, name the commands.
 - **Vocabulary.** The *sources file* names what is synced, one *entry* per table. What Mason does to a table's data is

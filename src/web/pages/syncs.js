@@ -46,11 +46,19 @@ const kindBadge = (e) => `<span title="${esc(e.kind)}">${badge(e.failed ? `✗ $
 const eventsShown = (events, { failuresOnly = false, kind = "", table = "" } = {}) =>
   events.filter((e) => (!failuresOnly || e.failed) && (!kind || e.kind === kind) && (!table || (e.table ?? MASON_TABLE) === table));
 
+/** A failure's code and where in Mason it happened (`code`, `origin`, src/duck/events.ts), as one quiet line under its
+ *  message; nothing for good news or an event recorded before Mason kept them. */
+export function failureFacts(e) {
+  if (!e.failed || e.code == null) return "";
+  return `<p class="dim">Code <code>${esc(e.code)}</code>${e.origin == null ? "" : `, at <code>${esc(e.origin)}</code>`}</p>`;
+}
+
 /**
  * The sync's events as a timeline, NEWEST FIRST (`sort.dir` "asc": oldest first, as the command lists them): when (how
  * long ago; the UTC time, as the command prints it, is the title), the kind as a badge, the table, the reason's first line
- * and, under it, its further lines. `failuresOnly`, `kind` and `table` (the page's filters) keep the events of what was
- * read that pass (`eventsShown`); at most `limit` rows are written. `span` the range's words; `now` the page's clock.
+ * and, under it, its further lines and a failure's code and origin (`failureFacts`). `failuresOnly`, `kind` and `table`
+ * (the page's filters) keep the events of what was read that pass (`eventsShown`); at most `limit` rows are written.
+ * `span` the range's words; `now` the page's clock.
  */
 export function renderEvents(b, { failuresOnly = false, kind = "", table = "", now = Date.now(), sort = { key: "time", dir: "desc" }, limit = EVENTS_SHOWN, span = "" } = {}) {
   const days = `${b.keptDays} day${b.keptDays === 1 ? "" : "s"}`;
@@ -68,7 +76,7 @@ export function renderEvents(b, { failuresOnly = false, kind = "", table = "", n
   const ordered = sort.dir === "asc" ? passing : [...passing].reverse();
   const rows = ordered.slice(0, limit).map((e) => {
     const c = eventCells(e);
-    const more = e.message.includes("\n") ? `<pre>${esc(e.message.split("\n").slice(1).join("\n"))}</pre>` : "";
+    const more = (e.message.includes("\n") ? `<pre>${esc(e.message.split("\n").slice(1).join("\n"))}</pre>` : "") + failureFacts(e);
     return `<tr${e.failed ? ` class="t-failed"` : ""}><th scope="row"><time data-tick datetime="${esc(e.at)}" title="${esc(c.time)} UTC">${esc(agoText(e.at, now))}</time></th><td>${kindBadge(e)}</td>` +
       `<td>${e.table == null ? `<span class="dim">${esc(c.table)}</span>` : `<code class="name" title="${esc(c.table)}">${esc(c.table)}</code>`}</td><td>${esc(c.message)}${more}</td></tr>`;
   }).join("");
