@@ -4267,7 +4267,6 @@ wholeBeside("div() beside a decimal column keeps the column's decimals", [
   "SELECT id FROM bins WHERE a NOT IN (SELECT div(i, 2) FROM bins WHERE i IS NOT NULL) ORDER BY id",
   "SELECT div(i, 2) AS v, 1 AS arm FROM bins UNION ALL SELECT a, 2 FROM bins ORDER BY 1 NULLS FIRST, 2",
   "SELECT a AS v, 1 AS arm FROM bins UNION ALL SELECT div(b, 2), 2 FROM bins ORDER BY 1 NULLS FIRST, 2",
-  "SELECT a FROM bins INTERSECT SELECT div(i, 2) FROM bins ORDER BY 1",
   "SELECT id, CASE WHEN id % 2 = 0 THEN div(i, 2) ELSE a END AS v FROM bins ORDER BY 2, 1",
   "SELECT id, COALESCE(CASE WHEN id % 2 = 0 THEN NULL ELSE a END, div(i, 2)) AS v FROM bins ORDER BY 2, 1",
   "SELECT id, GREATEST(a, div(i, 2)) AS g, LEAST(a, div(i, 2)) AS l FROM bins ORDER BY 2, 1",
@@ -4284,6 +4283,60 @@ wholeBeside("an integer cast to numeric, a whole constant and a whole part of ex
   "SELECT id FROM bins WHERE a IN (SELECT 0e1) ORDER BY id",
   "SELECT id, CASE WHEN id % 2 = 0 THEN 1.2e1 ELSE a END AS v FROM bins ORDER BY 2, 1",
   "SELECT id, CASE WHEN id % 2 = 0 THEN extract(day FROM interval '12 days 3 hours') ELSE a END AS v FROM bins ORDER BY 2, 1"]);
+// ISSUE 929'S REVIEW: a set operation that compares rows (UNION, INTERSECT, EXCEPT, and their ALL forms but UNION ALL)
+// of a numeric column its queries give different scales. Postgres prints each row kept at its own query's scale (`3`
+// beside `7.00`); the engine unified the queries to one DECIMAL first, so every row printed at the widest scale (and
+// once the whole number was a DECIMAL(38, 0), the decimals were rounded away). Refused by name, whichever side the
+// whole number is on; a column its queries give one scale is answered, and an EXCEPT whose left query writes the
+// widest scale (its rows are that query's alone)
+test("issue 929: a set operation that compares rows of numerics of different scales is refused by name, of one scale answered", async () => {
+  const c = await client();
+  try {
+    const refusedBy = async (sql: string): Promise<string> => answer(c, sql).then(() => "answered", (e: pg.DatabaseError) => `${e.code} ${`${e.message} ${e.detail ?? ""}`.includes("numeric-set-scales") ? "numeric-set-scales" : e.message}`);
+    for (const sql of [
+      "SELECT i::numeric AS v FROM bins EXCEPT SELECT a FROM bins ORDER BY 1",
+      "SELECT a FROM bins EXCEPT SELECT h FROM bins ORDER BY 1",
+      "SELECT u FROM pnum EXCEPT SELECT a FROM bins ORDER BY 1",
+      "SELECT a FROM bins EXCEPT SELECT u FROM pnum ORDER BY 1",
+      "SELECT extract(day FROM interval '3 days') AS v INTERSECT SELECT u FROM pnum ORDER BY 1",
+      "SELECT i::numeric AS v FROM bins INTERSECT SELECT a FROM bins ORDER BY 1",
+      "SELECT a FROM bins INTERSECT SELECT div(i, 2) FROM bins ORDER BY 1",
+      "SELECT div(i, 2) AS v FROM bins EXCEPT SELECT a FROM bins ORDER BY 1",
+      "SELECT b::numeric AS v FROM bins INTERSECT ALL SELECT a FROM bins ORDER BY 1",
+      "SELECT b::numeric AS v FROM bins EXCEPT ALL SELECT a FROM bins ORDER BY 1",
+      "SELECT 2.5e1 AS v INTERSECT SELECT a FROM bins ORDER BY 1",
+      "SELECT extract(day FROM interval '12 days') AS v UNION SELECT a FROM bins ORDER BY 1",
+      "SELECT id, i::numeric AS v FROM bins UNION SELECT id, a FROM bins WHERE a > 1000000000000 ORDER BY 1",
+      "SELECT i AS v FROM bins EXCEPT SELECT a FROM bins ORDER BY 1",
+      "SELECT a FROM bins UNION SELECT h FROM bins ORDER BY 1",
+      "SELECT v FROM (SELECT i::numeric AS v FROM bins EXCEPT SELECT a FROM bins) s ORDER BY 1",
+      "WITH w AS (SELECT div(i, 2) AS v FROM bins INTERSECT SELECT a FROM bins) SELECT v::text FROM w ORDER BY 1",
+      "SELECT u FROM pnum UNION SELECT a FROM bins ORDER BY 1"]) {
+      assert.equal(await refusedBy(sql), "0A000 numeric-set-scales", sql);
+    }
+    for (const sql of [
+      "SELECT a FROM bins INTERSECT SELECT a FROM bins WHERE id > 3 ORDER BY 1",
+      // (an EXCEPT keeps its left query's rows alone: answered where that query writes the widest scale)
+      "SELECT a FROM bins EXCEPT SELECT i::numeric FROM bins ORDER BY 1",
+      "SELECT a FROM bins EXCEPT ALL SELECT div(b, 2) FROM bins ORDER BY 1",
+      "SELECT h FROM bins EXCEPT SELECT a FROM bins EXCEPT SELECT 0 ORDER BY 1",
+      "SELECT extract(epoch FROM timestamp '2024-01-01 00:00:01.5') AS v EXCEPT SELECT a FROM bins ORDER BY 1",
+      // (a set operation whose rows are compared or counted, never printed: no row's text is read)
+      "SELECT id, (SELECT count(*) FROM (SELECT b2.i::numeric FROM bins b2 WHERE b2.id = bins.id UNION SELECT a) AS u) AS n FROM bins ORDER BY id",
+      "SELECT id FROM bins WHERE a IN (SELECT i::numeric FROM bins UNION SELECT h FROM bins) ORDER BY id",
+      "SELECT id FROM bins WHERE a NOT IN (SELECT div(i, 2) FROM bins WHERE i IS NOT NULL INTERSECT SELECT a FROM bins) ORDER BY id",
+      "SELECT id FROM bins x WHERE EXISTS (SELECT x.i::numeric EXCEPT SELECT a FROM bins) ORDER BY id",
+      "SELECT count(*) FROM (SELECT i::numeric FROM bins INTERSECT SELECT a FROM bins) AS s",
+      "SELECT div(i, 2) AS v FROM bins EXCEPT SELECT i::numeric FROM bins ORDER BY 1",
+      "SELECT div(i, 2) AS v FROM bins UNION SELECT b::numeric FROM bins ORDER BY 1",
+      "SELECT i FROM bins INTERSECT SELECT s FROM bins ORDER BY 1",
+      "SELECT a FROM bins EXCEPT ALL SELECT 0.00 ORDER BY 1",
+      "SELECT a FROM bins UNION SELECT NULL ORDER BY 1 NULLS FIRST",
+      "SELECT div(i, 2) AS v, 1 AS arm FROM bins UNION ALL SELECT a, 2 FROM bins ORDER BY 1 NULLS FIRST, 2"]) {
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    }
+  } finally { await c.end(); }
+});
 test("issue 929: a whole numeric compared with a numeric parameter is compared exactly", async () => {
   const c = await client();
   try {

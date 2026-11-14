@@ -258,10 +258,21 @@ paths:
 - **A whole numeric the rewrite writes is the engine's HUGEINT, never a DECIMAL(38, 0)** (`wholeNumeric`, issue 929):
   an integer cast to numeric, div() of two integers, a whole constant (`decimalConst`) and a whole part of extract.
   Beside another DECIMAL in an IN, a UNION, a CASE, a COALESCE, GREATEST or an ARRAY, DuckDB brings both to one type,
-  and a DECIMAL(38, 0) leaves no room for the other's decimals, so they were rounded away. An integer type takes the
-  other DECIMAL's type whole, as `sum` of an integer column always has; a value past it is DuckDB's 22003, never
-  rounded (a numeric(38,30) column has 8 integer digits). `tests/duck-wire.test.ts` "issue 929", the oracle's `whole:`
-  statements over `bins`.
+  and a DECIMAL(38, 0) leaves no room for the other's decimals, so they were rounded away. A HUGEINT beside a
+  DECIMAL(w, s) is brought to DECIMAL(38, s), as `sum` of an integer column always was: the scale is kept. A whole
+  value of more than 38 − s digits does not fit, and is DuckDB's 22003 where Postgres answers, never rounded (beside a
+  numeric(38,30), a 9-digit integer). `tests/duck-wire.test.ts` "issue 929", the oracle's `whole:` statements over `bins`.
+- **A set operation that compares rows (UNION, INTERSECT, EXCEPT, every ALL form but UNION ALL) of a numeric column
+  its queries give different scales is refused, `numeric-set-scales`** (issue 929's review): Postgres prints each kept
+  row at its own query's scale (`3` beside `7.00`), and which query's row a duplicate keeps is its plan's; the engine
+  unifies the queries to one DECIMAL first, so every row printed at the widest scale. A scale is `armScales` /
+  `displayScale`'s, and a query whose values decide theirs (an unconstrained column) counts as a scale of its own. A
+  UNION ALL keeps each row's own query's scale (`exactArms`), and is answered; an EXCEPT keeps its left queries' rows
+  alone, and is answered where they write the widest known scale. An INTERSECT is not: Postgres may read the smaller
+  input first, so which query's row it keeps is its plan's. Only where a row's text can be read: the query of an
+  EXISTS, an IN, = ANY or ALL, and a FROM item of a query that names no column (`count(*)`), compare or count values
+  and are answered (`markUnreadSetOps`). `tests/duck-wire.test.ts` "issue 929: a
+  set operation …", oracle/gap-cases.ts.
 - **Whether a statement calls a Mason function is its PLAN's, never its text's** (a review finding: a `*` over a
   copy reads `__mason_visible`, which calls nothing, and a text match left every such statement uncancellable — 82 s
   past a 300 ms timeout): `PlannedSql.functions`, the `__mason_*` calls of the rewritten tree (`masonCalls`,
