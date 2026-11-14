@@ -426,11 +426,11 @@ test("an added table's row says which columns it syncs in a few words — All co
   const summary = (name: string) => new RegExp(`<button type="button" class="small link syncnow" id="columns-tables-public\\.${name}" data-choose="public\\.${name}" title="([^"]*)">([^<]*)</button>`).exec(html);
   const said = Object.fromEntries(["customers", "orders", "accounts", "invoices", "sessions", "raw_log"].map((n) => [n, summary(n)?.slice(1)]));
   assert.deepEqual(said, {
-    customers: ["Every column, and any column added to the table later. Choose which columns Mason syncs", "All columns"],
+    customers: ["Every column, and any column added to the table later that does not look like a secret. Choose which columns Mason syncs", "All columns"],
     orders: ["Synced: id, status. Choose which columns Mason syncs", "2 of 4 columns"],
     accounts: ["Every column but api_token. Choose which columns Mason syncs", "All but 1 column"],
     invoices: ["Every column but name. Choose which columns Mason syncs", "All but 1 column"],
-    sessions: ["Every column, and any column added to the table later. Choose which columns Mason syncs", "All columns"],
+    sessions: ["Every column, and any column added to the table later that does not look like a secret. Choose which columns Mason syncs", "All columns"],
     raw_log: ["Synced: tenant_id, seq, body. Choose which columns Mason syncs", "3 of 3 columns"],
   });
   assert.match(textOf(html), /public\.orders Synced .* Remove Sync: Off 2 of 4 columns public\.accounts /, "on its note, beside its sync");
@@ -454,9 +454,9 @@ test("the column form on an added table: All columns for every column, else Only
   assert.deepEqual(whichOf(orders), ["only"], "a list of columns: Only these");
   assert.deepEqual(ticksOf(orders, "columns"), ["id", "status"]);
   assert.ok(!orders.includes('name="key"'), "a table with a primary key: no key to tick");
-  assert.match(orders, /<div class="radios"><label><input type="radio" name="which" value="all"> <span>All columns, and any added to the table later<\/span><\/label><label><input type="radio" name="which" value="only" checked> <span>Only these columns<\/span><\/label><\/div><div class="only-cols">/,
+  assert.match(orders, /<div class="radios"><label><input type="radio" name="which" value="all"> <span>All columns, and any added to the table later that do not look like secrets<\/span><\/label><label><input type="radio" name="which" value="only" checked> <span>Only these columns<\/span><\/label><\/div><div class="only-cols">/,
     "two choices, the boxes under Only these");
-  assert.equal(textOf(orders), "The columns orders syncs All columns, and any added to the table later Only these columns id bigint name text status text created_at text " +
+  assert.equal(textOf(orders), "The columns orders syncs All columns, and any added to the table later that do not look like secrets Only these columns id bigint name text status text created_at text " +
     "Saving different columns syncs orders again in full from your database (~40,000,000 rows): that takes a while, and on a big table it adds load to your database. " +
     "Its synced data can still be queried until the new sync finishes. Saving the same columns changes nothing and starts no sync. Save Cancel");
   // every column: All chosen, never an empty set of boxes; under Only these every box ticked, so choosing it starts from what is synced
@@ -466,7 +466,7 @@ test("the column form on an added table: All columns for every column, else Only
   const accounts = form("accounts");
   assert.deepEqual(whichOf(accounts), ["all"], "every column but the secret-looking one, as mason add writes it: All");
   assert.deepEqual(ticksOf(accounts, "columns"), ["id", "name"], "its boxes: every column but the one All leaves out");
-  assert.match(textOf(accounts), /All but 1 column\. Left out because it looks like a secret: api_token\. Columns added to the table later are synced too\. Only these columns/);
+  assert.match(textOf(accounts), /All but 1 column\. Left out because it looks like a secret: api_token\. Columns added to the table later are synced too, unless they look like secrets\. Only these columns/);
   // the boxes hidden by the radio itself while All is chosen: nothing is written when it changes
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   assert.match(css, /form\.pick:has\(input\[name="which"\]\[value="all"\]:checked\) \.only-cols \{ display: none; \}/);
@@ -501,11 +501,11 @@ test("the column form's All starts with the row's label: All but 3 columns, the 
     .exec(popOf(renderTables(COL_STATE, { choosing: `public.${name}`, columns: columnsOf(name) }), `columns-tables-public.${name}`))!.slice(1);
   assert.equal(label("members"), "All but 3 columns");
   assert.deepEqual(all("members"), [" checked", "All but 3 columns. Left out because they look like secrets: password, password_encrypted, api_token. " +
-    "Columns added to the table later are synced too."]);
+    "Columns added to the table later are synced too, unless they look like secrets."]);
   assert.equal(label("accounts"), "All but 1 column");
-  assert.deepEqual(all("accounts"), [" checked", "All but 1 column. Left out because it looks like a secret: api_token. Columns added to the table later are synced too."]);
+  assert.deepEqual(all("accounts"), [" checked", "All but 1 column. Left out because it looks like a secret: api_token. Columns added to the table later are synced too, unless they look like secrets."]);
   assert.equal(label("customers"), "All columns");
-  assert.deepEqual(all("customers"), [" checked", "All columns, and any added to the table later"]);
+  assert.deepEqual(all("customers"), [" checked", "All columns, and any added to the table later that do not look like secrets"]);
   // whenever All is the choice shown, it starts with the row's words: one count (leftOut) decides both
   for (const name of Object.keys(COLS) as (keyof typeof COLS)[]) {
     if (!colTable(name).added) continue;

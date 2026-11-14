@@ -27,11 +27,16 @@
  * only shows the catalog does not try again within `CATALOG_FRESH_MS`, so a database that is away is not asked every 2 s
  * by an open page.
  *
+ * A TABLE WHOSE SHAPE CHANGED on the database (issue 977: the sync saw it before a poll, or at a stream's relation
+ * message) has its catalog read again ALONE (`refreshTables`: `TABLES_SQL` narrowed to it), never every table's: a read
+ * of its own, one at a time, put in place of the table's row in `facts`. A full read that began before it never puts
+ * the older row back.
+ *
  * There is no timer here, and none may be added: nothing reads the database's catalog unless something asked.
  */
 import { randomBytes } from "node:crypto";
 import { withLocalSettings } from "../lib/local-settings.ts";
-import type { SourceFacts } from "./preflight.ts";
+import type { SourceFacts, SourceTable } from "./preflight.ts";
 import type { Failure } from "./command.ts";
 
 /** How old a read of the catalog may be and still be shown: about a minute (the owner's choice, issue 890). */
@@ -65,6 +70,10 @@ export interface SourceCatalog {
   /** The read numbered `read` (or a later one that succeeded), waited for at most `waitMs`; null for a number this
    *  catalog never gave (the actor asks again). */
   wait(read: number, o?: { waitMs?: number }): Promise<ReadNow | null>;
+  /** The catalog of these tables (`schema.table`) read again alone, now (after the one running of these, if any), and
+   *  put in `facts` in place of what it said of them: a table gone from the database, or no longer readable, is gone from
+   *  it. Never fails: a failed read leaves `facts` as it was, said in the log, and answers why. */
+  refreshTables(sources: readonly string[]): Promise<{ tables: SourceTable[] } | { failed: string }>;
 }
 
 interface Read { seq: number; askedAt: number; startedAt: number | null; outcome: Outcome | null; done: Promise<Outcome> }
@@ -75,7 +84,9 @@ interface Read { seq: number; askedAt: number; startedAt: number | null; outcome
  * connection when `signal` aborts.
  */
 export function sourceCatalog(first: SourceFacts, read: (signal: AbortSignal) => Promise<SourceFacts>,
-  o: { log: (m: string) => void; now?: () => number; freshMs?: number; readTimeoutMs?: number }): SourceCatalog {
+  o: { log: (m: string) => void; now?: () => number; freshMs?: number; readTimeoutMs?: number;
+    /** reads the catalog of these tables alone (`readTables` with `only`), connecting and closing as `read` does */
+    readTables?: (signal: AbortSignal, sources: readonly string[]) => Promise<SourceTable[]> }): SourceCatalog {
   const clock = o.now ?? Date.now;
   const freshMs = o.freshMs ?? CATALOG_FRESH_MS;
   const readTimeoutMs = o.readTimeoutMs ?? CATALOG_READ_TIMEOUT_MS;
@@ -91,6 +102,17 @@ export function sourceCatalog(first: SourceFacts, read: (signal: AbortSignal) =>
   let queued: Read | null = null;
   // the reads given out, kept a while by number: an actor waits on its own again by it
   const reads = new Map<number, Read>();
+  // when the newest read of a table ALONE began, by table (`refreshTables`): a full read that began before it keeps that
+  // table's row as the narrow read put it, never the older one it read
+  const narrowAt = new Map<string, number>();
+  // the narrow reads, one after another
+  let narrow: Promise<unknown> = Promise.resolve();
+  /** `f`'s tables, but each read alone since `since` as `facts` holds it */
+  const withNarrow = (f: SourceFacts, since: number): SourceFacts => {
+    const keep = [...narrowAt].filter(([, at]) => at > since).map(([source]) => source);
+    if (keep.length === 0) return f;
+    return { ...f, tables: tablesOrdered([...f.tables.filter((t) => !keep.includes(t.source)), ...facts.tables.filter((t) => keep.includes(t.source))]) };
+  };
 
   const keep = (r: Read): void => {
     reads.set(r.seq, r);
@@ -109,7 +131,7 @@ export function sourceCatalog(first: SourceFacts, read: (signal: AbortSignal) =>
     });
     return Promise.race([read(stop.signal), timedOut]).then((f): Outcome => {
       // one read at a time, so a later number is a later read: the newest that succeeded is what is shown
-      if (r.seq >= factsSeq) { facts = f; factsSeq = r.seq; }
+      if (r.seq >= factsSeq) { facts = withNarrow(f, r.startedAt ?? 0); factsSeq = r.seq; }
       return { facts: f };
     }, (e: unknown): Outcome => {
       // tolerated for what shows the catalog: the last read stays in place, and the failure is said; an actor is told it
@@ -171,8 +193,38 @@ export function sourceCatalog(first: SourceFacts, read: (signal: AbortSignal) =>
       if ("failed" in answer && factsSeq > seq) return { facts };
       return "facts" in answer ? { facts } : answer;
     },
+    refreshTables: (sources) => {
+      const one = async (): Promise<{ tables: SourceTable[] } | { failed: string }> => {
+        if (o.readTables === undefined) return { failed: "this run reads its catalog whole only" };
+        const startedAt = clock();
+        const stop = new AbortController();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timedOut = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => { stop.abort(); reject(new Error(`no answer within ${Math.round(readTimeoutMs / 1000)} s`)); }, readTimeoutMs);
+          timer.unref?.();
+        });
+        try {
+          const tables = await Promise.race([o.readTables(stop.signal, sources), timedOut]);
+          for (const s of sources) narrowAt.set(s, startedAt);
+          facts = { ...facts, tables: tablesOrdered([...facts.tables.filter((t) => !sources.includes(t.source)), ...tables.filter((t) => sources.includes(t.source))]) };
+          return { tables };
+        } catch (e) {
+          // tolerated as a full read's failure is: what was read before stays, said; the caller is told why
+          const failed = (e as Error).message;
+          o.log(`the columns of ${sources.join(", ")} could not be read again (${failed}): they are read again at the next check`);
+          return { failed };
+        } finally { clearTimeout(timer); }
+      };
+      const p = narrow.then(one, one);
+      narrow = p;
+      return p;
+    },
   };
 }
+
+/** Tables in the order the catalog's read gives them (`TABLES_SQL`: by schema, then name). */
+const tablesOrdered = (ts: SourceTable[]): SourceTable[] =>
+  ts.sort((a, b) => a.schema < b.schema ? -1 : a.schema > b.schema ? 1 : a.table < b.table ? -1 : a.table > b.table ? 1 : 0);
 
 /** How often the watch on a read looks at it. */
 export const STALL_LOOK_MS = 5_000;
@@ -274,15 +326,15 @@ export const CANCEL_SEND_MS = 5_000;
  * server-side (it never hands on a connection in a transaction). Nothing the read runs refuses a transaction: it is
  * SELECTs alone.
  */
-export async function watchedRead<C extends CatalogConnection>(o: {
+export async function watchedRead<C extends CatalogConnection, R = SourceFacts>(o: {
   connect: () => Promise<C>;
-  read: (pg: Pick<C, "query">) => Promise<SourceFacts>;
+  read: (pg: Pick<C, "query">) => Promise<R>;
   signal: AbortSignal;
   log: (m: string) => void;
   mark?: string;
   watch?: { now?: () => number; lookMs?: number; quietMs?: number; giveUpMs?: number; checkMs?: number };
   cancelMs?: number;
-}): Promise<SourceFacts> {
+}): Promise<R> {
   const mark = o.mark ?? `mason catalog read ${randomBytes(8).toString("hex")}`;
   const c = await o.connect();
   // the statement running now, by its number: what the check asks the database about

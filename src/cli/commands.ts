@@ -65,6 +65,9 @@ export interface TableState extends Omit<CatalogTable, "columns"> {
   /** an added table's columns that every column leaves out (`mason add <table>` with no --columns: the secret-looking
    *  ones, sources.ts everyColumnLeavesOut); absent with `entry` */
   everyColumnLeavesOut?: string[];
+  /** its columns changed on the database and it is read again whole: the columns it syncs then (`addedColumns` are the
+   *  ones its synced data holds now, issue 977); absent otherwise */
+  columnsPending?: string[];
   copy: { phase: "copying" | "done" | "failed"; rowsCopied: number; updatedAt: string;
     /** while its chunks are read: the chunks done and reading, the measured rate, the time left, as of the moment the
      *  state was asked (src/duck/sync.ts copyProgressNow) */
@@ -510,7 +513,8 @@ const STATUS_USAGE = `usage: mason status [--json]
     bytes, key, added, columnCount (how many columns the table has), entry (an added table's entry as the sources file
     says it: { columns (null: every column but exclude), exclude, key (null: its primary key) }), everyColumnLeavesOut
     (an added table's columns that mason add <table> with no --columns leaves out: they look like secrets),
-    addedColumns, copy, error (why its sync failed: its first sync, or the poll, catch-up, stream or
+    columnsPending (its columns changed on the database: the columns its next whole read syncs; absent otherwise),
+    addedColumns, copy, error (addedColumns: the columns its synced data holds now; error: why its sync failed: its first sync, or the poll, catch-up, stream or
     publication check keeping a synced table current; null otherwise), kept, syncRefusal (why mason sync <table> is
     refused now, in its words: its first sync not finished or failed, being read again whole, being caught up; null
     when it would run), sync: { state (synced, syncing, catching-up: served and caught up by one poll
@@ -1878,7 +1882,7 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     before (the position of the page before,
     or null: none older) }; with --events { events: [{ at, kind (full_sync_failed, poll_failed,
     catch_up_failed, stream_failed, source_unreachable, generated_failed, compact_failed, restart, full_sync, recovered, synced (a sync
-    asked by hand), sync_changed (a table's sync: changed), polled (a poll on its schedule, with --scheduled), streamed (a
+    asked by hand), sync_changed (a table's sync: changed), columns_changed (a table's columns changed on the database), polled (a poll on its schedule, with --scheduled), streamed (a
     minute of the stream's changes to a table, with --scheduled), ui_error (the web page met an error of its own)), failed,
     table (null: the whole sync, the run or the web page),
     message, code (a failure: its SQLSTATE, its system error such as ECONNREFUSED, its error class, or unknown;

@@ -1397,3 +1397,22 @@ test("an add and a remove answer with the state of the read they acted on: never
     chosen = wasChosen;
   }
 });
+
+test("a table whose columns changed on the database says what its synced data holds now, and what its next whole read syncs (issue 977)", async () => {
+  const runServer = await import("../src/cli/run-server.ts");
+  const at = "2026-10-24T10:00:00.000Z";
+  // orders has id and customer_id on the database now; its synced data holds id and a column renamed since
+  const states = [{ source: "public.orders", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: at, error: null, syncedColumns: ["id", "customer"] }] as unknown as CopyState[];
+  const entry = { name: "orders", table: "public.orders", columns: null, exclude: [], key: null, sync: null };
+  const run = (next: string[]) => ({ file: { name: "app", file: sourceFile, tables: [entry] }, problem: null,
+    tables: [{ source: "public.orders", columns: next.map((name) => ({ name })) }] }) as unknown as ReturnType<RunContext["sources"]>;
+  const orders = (next: string[]) => (runServer.runState({ ...ctx, sources: () => run(next) }, states, null) as { tables: Array<Record<string, unknown>> }).tables.find((t) => t.table === "public.orders")!;
+  const pending = orders(["id", "customer_id"]);
+  assert.deepEqual([pending.addedColumns, pending.columnsPending], [["id", "customer"], ["id", "customer_id"]], "what is synced now, and next");
+  const settled = orders(["id", "customer"]);
+  assert.deepEqual([settled.addedColumns, "columnsPending" in settled], [["id", "customer"], false], "synced as the run syncs it: nothing pending");
+  // the page's row says it in its words: what is synced now, and after this sync
+  const { columnsSummary } = await import("../src/web/pages/tables.js" as string) as { columnsSummary: (t: unknown) => { text: string; title: string } | null };
+  assert.deepEqual(columnsSummary({ ...pending, entry: { columns: null, exclude: [], key: null } }),
+    { text: "Columns changed, syncing again", title: "Synced now: id, customer. After this sync: id, customer_id" });
+});

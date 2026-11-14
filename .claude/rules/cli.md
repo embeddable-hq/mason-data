@@ -148,6 +148,9 @@ CLI lacks).
   once nothing was heard for `STALL_GIVE_UP_MS`. A read given up on is CANCELLED on the database (a CancelRequest the
   way its connection came, which a pooler maps) before its connection is closed. `CATALOG_READ_TIMEOUT_MS` is the last
   guard. A usage sample and `/metrics` read `facts()` as it is. No timer reads it (tests/integration/cli-catalog-read.itest.ts counts an idle run's connections).
+  A table whose columns the sync saw change on the database (before a poll, or at a stream relation message; issue 977)
+  has its catalog read again ALONE (`refreshTables`, `TABLES_SQL` narrowed by `tablesSql`), one at a time, put in place
+  of its row; a whole read begun before it never puts the older row back.
   **The request log's filters are read by ONE parser** (`requestFilter`, src/cli/request-filter.ts) at both entrances
   — `mason logs --requests`' options and `/api/requests`' query string — so a filter means one thing and a mistake is
   worded once (its key spelled as the entrance spells it). `mason status`'s query summary is its own endpoint

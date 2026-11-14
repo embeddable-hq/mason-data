@@ -150,10 +150,11 @@ export interface RunContext {
   /** the run's version (src/cli/version.ts) and when this process started, ms: `engine.version`, `startedAt`, uptime */
   version: string;
   startedAt: number;
-  /** the sources file the run copies from as it last read it, and what is wrong with it now (null: nothing) */
-  sources: () => { file: SourceFile | null; problem: string | null };
-  /** the sources file changed (a table added or removed): the run reads it again */
-  sourcesChanged: () => void;
+  /** the sources file the run copies from as it last read it, and what is wrong with it now (null: nothing); `tables`,
+   *  each added table's columns as the run syncs them from its next whole read (absent: a run that does not say) */
+  sources: () => { file: SourceFile | null; problem: string | null; tables?: ReadonlyArray<{ source: string; columns: ReadonlyArray<{ name: string }> }> };
+  /** the sources file was edited (`edited`: the tables the edit wrote, `schema.table`): the run reads it again */
+  sourcesChanged: (edited: readonly string[]) => void;
   /** a sources file that replicates a table, held to the database's checks for logical replication when this run never
    *  made them (it replicated nothing when it started): the refusal, or null when it may (absent: never refused) */
   checkReplication?: (file: SourceFile) => Promise<Failure | null>;
@@ -226,8 +227,13 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
   const tables = facts.tables.map((t) => {
     const c = by.get(t.source), entry = sources.file?.tables.find((e) => e.table === t.source);
     const { columns: cols, ...catalog } = catalogTable(t, entry);
+    // WHAT IS SYNCED NOW (issue 977): the synced data's own columns, while its columns changed on the database and it is
+    // read again whole — and then the columns that whole read syncs (`columnsPending`), the run's own
+    const synced = entry !== undefined && c?.syncedColumns !== undefined ? c.syncedColumns : null;
+    const next = sources.tables?.find((x) => x.source === t.source)?.columns.map((x) => x.name) ?? null;
+    const pending = synced !== null && next !== null && next.join("\0") !== synced.join("\0") ? next : null;
     return {
-      ...catalog, ...(columns ? { columns: cols } : {}),
+      ...catalog, ...(synced !== null ? { addedColumns: synced } : {}), ...(pending !== null ? { columnsPending: pending } : {}), ...(columns ? { columns: cols } : {}),
       // how many columns it has, in the lean state too: the page's "5 of 12 columns" on an added table's row
       columnCount: cols.length,
       // an added table's entry as the sources file says it — `columns:` (null: every column but `exclude:`), `exclude:`,
@@ -962,12 +968,12 @@ export function createRunServer(ctx: RunContext): http.Server {
             const refused = now === null || "problems" in now ? null : await ctx.checkReplication!(now);
             if (refused !== null) { fs.writeFileSync(at.file, at.text); sendFailure(res, statusOf(refused), refused); return; }
             if (!r.already) ctx.log(`added ${r.table} to ${r.file}`);
-            ctx.sourcesChanged();
+            ctx.sourcesChanged([r.table]);
             sendJson(res, 200, { ...r, state: await state(ctx, false, false) });
           } else {
             const r = removeTables(ctx, [body.table]);
             for (const t of r.removed) ctx.log(`removed ${t} from ${r.file}`);
-            ctx.sourcesChanged();
+            ctx.sourcesChanged(r.removed);
             sendJson(res, 200, { ...r, state: await state(ctx, false, false) });
           }
         } else if (method === "POST" && url.pathname === "/api/ui/error") {
@@ -1089,7 +1095,7 @@ export function createRunServer(ctx: RunContext): http.Server {
           if (!await readNow(ctx, req, res)) return;
           const r = removeTables(ctx, body.tables as string[]);
           // the sync stops copying a removed table, and drops its copy
-          ctx.sourcesChanged();
+          ctx.sourcesChanged(r.removed);
           for (const t of r.removed) ctx.log(`removed ${t} from ${r.file}`);
           sendJson(res, 200, { ...r, state: await state(ctx, false, false) });
         } else {
