@@ -38,7 +38,8 @@
  *
  * A LINE RELEASED BEFORE THAT HAS NO BRANCH, and is cut by name (`--cut-line`, .github/workflows/release-line-branch.yml,
  * run from the Actions page): `release/<major>.<minor>` at that line's newest tag, by the same rules. It refuses a line
- * with no tag, and the newest line, whose branch the release of the next line cuts. A branch that exists is never moved.
+ * with no tag. A branch that exists is never moved, by either path. The newest line may be cut too: from then on its
+ * patches are released from its branch, and the release of the next line finds the branch there and leaves it.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -115,8 +116,7 @@ export function decideCut(ref: string, version: string, refs: readonly string[])
 
 /**
  * Whether the branch of an older line, asked for by name (`0.19`), is cut, given the remote's refs as `decideCut` reads
- * them: at the line's newest tag, unless the branch exists. Refused: a name that is not a line, a line with no tag, and
- * the newest line (its branch is cut by the release of the next line, from its newest tag then).
+ * them: at the line's newest tag, unless the branch exists. Refused: a name that is not a line, and a line with no tag.
  */
 export function decideLineCut(line: string, refs: readonly string[]): CutDecision | { problem: string } {
   const m = /^(\d+)\.(\d+)$/.exec(line.trim());
@@ -124,12 +124,8 @@ export function decideLineCut(line: string, refs: readonly string[]): CutDecisio
     return { problem: `${line} is not a line (<major>.<minor>, such as 0.19)` };
   }
   const names = refs.map((r) => r.trim().replace(/^refs\/tags\//, "")).filter((r) => r !== "");
-  const released = releases(names);
-  const newest = highest(released.filter((t) => t.major === Number(m[1]) && t.minor === Number(m[2])));
+  const newest = highest(releases(names).filter((t) => t.major === Number(m[1]) && t.minor === Number(m[2])));
   if (newest === null) return { problem: `${line} has no release: no v${line}.<patch> tag, so there is nothing to cut its branch from` };
-  if (released.every((t) => t.major < newest.major || (t.major === newest.major && t.minor <= newest.minor))) {
-    return { problem: `${line} is the newest line. Its patches are released from main, and the release of the next line cuts its branch` };
-  }
   return cutAt(newest, names);
 }
 

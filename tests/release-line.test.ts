@@ -210,33 +210,62 @@ test("--cut reads git ls-remote's tags and branches, and prints the branch and t
   assert.equal(run("", "--cut", MAIN).status, 2);
 });
 
+/** A workflow step that uses the line-branch action, with the outputs of the `cut` step. */
+const USES_ACTION = /\n      - name: [^\n]+\n        if: steps\.cut\.outputs\.cut == 'true'\n        uses: \.\/\.github\/actions\/line-branch\n        with:\n          branch: \$\{\{ steps\.cut\.outputs\.branch \}\}\n          from: \$\{\{ steps\.cut\.outputs\.from \}\}\n          token: \$\{\{ secrets\.GITHUB_TOKEN \}\}\n          deploy-key: \$\{\{ secrets\.RELEASE_BRANCH_DEPLOY_KEY \}\}\n/;
+
 test("release.yml cuts the branch in the tag job, before it tags, with contents: write alone", () => {
   const yml = fs.readFileSync(path.join(ROOT, ".github", "workflows", "release.yml"), "utf8");
   const tag = job(yml, "tag");
   const cut = tag.indexOf(`git ls-remote --refs origin 'refs/tags/v*' 'refs/heads/release/*' | node scripts/release-line.ts --cut "$GITHUB_REF" "$VERSION"`);
   assert.ok(cut > 0, "the tag job asks --cut, from the remote's refs");
-  assert.ok(cut < tag.indexOf('git tag -a "v$VERSION"'), "before it tags");
+  assert.match(tag, /\n      - id: cut\n/);
+  const uses = USES_ACTION.exec(tag);
+  assert.ok(uses !== null, "the tag job creates the branch with the line-branch action");
+  assert.ok(cut < uses.index && uses.index < tag.indexOf('git tag -a "v$VERSION"'), "after the decision, before it tags");
   assert.match(tag, /\n    permissions:\n      contents: write(\s+#[^\n]*)?\n    steps:/);
-  // the branch is created by the API, which refuses a ref that exists, so it never moves one; a refusal fails the run
-  assert.match(tag.slice(cut), /gh api -X POST "repos\/\$GITHUB_REPOSITORY\/git\/refs" -f ref="refs\/heads\/\$branch" -f sha="\$sha"/);
-  assert.doesNotMatch(tag, /refs\/heads\/\$branch[^\n]*(--force|-X PATCH)|git push[^\n]*heads/);
-  assert.match(tag.slice(cut), />&2\n\s+exit 1/);
+  assert.doesNotMatch(tag, /git push[^\n]*heads|-X PATCH/);
+});
+
+test("the line-branch action never moves a branch, fails closed, and prints GitHub's refusal word for word", () => {
+  const action = fs.readFileSync(path.join(ROOT, ".github", "actions", "line-branch", "action.yml"), "utf8");
+  assert.match(action, /\nruns:\n  using: composite\n/);
+  // with no deploy key: the REST API, which refuses a ref that exists
+  assert.match(action, /gh api -X POST "repos\/\$GITHUB_REPOSITORY\/git\/refs" -f ref="refs\/heads\/\$BRANCH" -f sha="\$sha" > "\$answer" 2>&1/);
+  // with one: a push whose empty lease refuses a ref that exists at all, never a plain or forced push
+  assert.match(action, /if \[ -n "\$DEPLOY_KEY" \]; then/);
+  assert.match(action, /git push --force-with-lease="refs\/heads\/\$BRANCH:" "git@github\.com:\$GITHUB_REPOSITORY\.git" "\$sha:refs\/heads\/\$BRANCH" > "\$answer" 2>&1/);
+  assert.equal(action.match(/git push/g)?.length, 1);
+  assert.doesNotMatch(action, /--force(?!-with-lease)|-X PATCH| -f "\$sha/);
+  // the key is a 0600 file, checked against GitHub's host keys, and removed; it is never printed
+  assert.match(action, /\(umask 077; printf '%s\\n' "\$DEPLOY_KEY" > "\$key"\)/);
+  assert.match(action, /StrictHostKeyChecking=yes/);
+  assert.match(action, /trap 'rm -f "\$key"' EXIT/);
+  assert.doesNotMatch(action, /echo[^\n]*DEPLOY_KEY/);
+  // a refusal: a branch made meanwhile is kept; otherwise GitHub's answer, word for word, and exit 1
+  assert.match(action, /if \[ "\$ok" != 1 \]; then\n\s+# [^\n]*\n\s+if git ls-remote --exit-code --heads origin "refs\/heads\/\$BRANCH"/);
+  assert.match(action, /echo "GitHub's answer, word for word:"\n\s+cat "\$answer"\n[\s\S]*?\} >&2\n\s+exit 1/);
+  // the commit is verified afterwards
+  assert.match(action, /if \[ "\$at" != "\$sha" \]; then[^\n]*>&2; exit 1; fi/);
 });
 
 // AN OLDER LINE'S BRANCH, CUT ON REQUEST (scripts/release-line.ts `--cut-line`, release-line-branch.yml)
-test("an older line's branch is cut at that line's newest tag, and an existing branch is never moved", () => {
+test("a line's branch is cut on request at that line's newest tag, and an existing branch is never moved", () => {
   assert.deepEqual(decideLineCut("0.19", LINES), { cut: true, branch: "release/0.19", from: "v0.19.1" });
   assert.deepEqual(decideLineCut("0.19", [...LINES, "v0.19.9", "v0.19.10"]), { cut: true, branch: "release/0.19", from: "v0.19.10" });
   // another line's branch is not this one
   assert.deepEqual(decideLineCut("0.19", [...LINES, "refs/heads/release/0.20"]), { cut: true, branch: "release/0.19", from: "v0.19.1" });
-  // an older major's line
+  // the newest line too (its patches are then released from the branch), and an older major's line
+  assert.deepEqual(decideLineCut("0.20", LINES), { cut: true, branch: "release/0.20", from: "v0.20.3" });
+  assert.deepEqual(decideLineCut("0.20", ["v0.20.0"]), { cut: true, branch: "release/0.20", from: "v0.20.0" });
   assert.deepEqual(decideLineCut("0.20", [...LINES, "v1.0.0"]), { cut: true, branch: "release/0.20", from: "v0.20.3" });
-  const exists = decideLineCut("0.19", [...LINES, "refs/heads/release/0.19"]);
-  assert.ok(!("problem" in exists) && !exists.cut, JSON.stringify(exists));
-  assert.match(exists.why, /release\/0\.19 exists already, and is never moved/);
+  for (const line of ["0.19", "0.20"]) {
+    const exists = decideLineCut(line, [...LINES, `refs/heads/release/${line}`]);
+    assert.ok(!("problem" in exists) && !exists.cut, JSON.stringify(exists));
+    assert.match(exists.why, new RegExp(`release/${line.replace(".", "\\.")} exists already, and is never moved`));
+  }
 });
 
-test("a line with no tag, the newest line, or a name that is not a line is refused", () => {
+test("a line with no tag, or a name that is not a line, is refused", () => {
   const refused = (d: ReturnType<typeof decideLineCut>, problem: RegExp) => {
     assert.ok("problem" in d, JSON.stringify(d));
     assert.match(d.problem, problem);
@@ -244,8 +273,6 @@ test("a line with no tag, the newest line, or a name that is not a line is refus
   refused(decideLineCut("0.18", LINES), /0\.18 has no release/);
   refused(decideLineCut("0.19", []), /0\.19 has no release/);
   refused(decideLineCut("0.19", ["v0.19.1-rc1", "nightly", "refs/heads/release/0.19"]), /has no release/);
-  refused(decideLineCut("0.20", LINES), /0\.20 is the newest line/);
-  refused(decideLineCut("0.20", [...LINES, "refs/heads/release/0.20"]), /newest line/);
   for (const bad of ["0.19.1", "v0.19", "0.019", "019", "", "0.19; rm -rf /", "release/0.19"]) refused(decideLineCut(bad, LINES), /is not a line/);
 });
 
@@ -265,7 +292,7 @@ test("--cut-line prints the branch and the tag, and refuses with exit 1", () => 
   assert.equal(run("", "--cut-line", "0.19", "extra").status, 2);
 });
 
-test("release-line-branch.yml cuts by --cut-line on request, with contents: write alone, and never moves a branch", () => {
+test("release-line-branch.yml cuts by --cut-line on request, with contents: write alone, through the line-branch action", () => {
   const yml = fs.readFileSync(path.join(ROOT, ".github", "workflows", "release-line-branch.yml"), "utf8");
   assert.match(yml, /\non:\n  workflow_dispatch:\n    inputs:\n      line:\n/);
   assert.match(yml, /\npermissions:\n  contents: write(\s+#[^\n]*)?\n\n/);
@@ -275,9 +302,7 @@ test("release-line-branch.yml cuts by --cut-line on request, with contents: writ
   assert.equal(yml.match(/\$\{\{ inputs\.line \}\}/g)?.length, 2, "the environment and the concurrency group only");
   const cut = yml.indexOf(`git ls-remote --refs origin 'refs/tags/v*' 'refs/heads/release/*' | node scripts/release-line.ts --cut-line "$LINE"`);
   assert.ok(cut > 0, "it asks --cut-line, from the remote's refs");
-  assert.match(yml.slice(cut), /gh api -X POST "repos\/\$GITHUB_REPOSITORY\/git\/refs" -f ref="refs\/heads\/\$branch" -f sha="\$sha"/);
+  const uses = USES_ACTION.exec(yml);
+  assert.ok(uses !== null && uses.index > cut, "then creates the branch with the line-branch action");
   assert.doesNotMatch(yml, /--force|-X PATCH|git push/);
-  assert.match(yml.slice(cut), />&2\n\s+exit 1/);
-  // the commit is verified afterwards
-  assert.match(yml.slice(cut), /if \[ "\$at" != "\$sha" \]; then[^\n]*>&2; exit 1; fi/);
 });

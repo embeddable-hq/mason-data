@@ -150,28 +150,22 @@ jobs:
       # breaking changes wait"): release/<major>.<minor> at that line's newest tag, before this release is tagged. It
       # never moves a branch that exists. When it cannot create the branch, the run fails here, before anything is
       # tagged or published, and a re-run picks up from this step
-      - name: the previous line's branch, when this release starts a new line
+      - id: cut
+        name: whether this release starts a new line, and which branch it cuts
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.decide.outputs.version }}
         run: |
           set -euo pipefail
           cut="$(git ls-remote --refs origin 'refs/tags/v*' 'refs/heads/release/*' | node scripts/release-line.ts --cut "$GITHUB_REF" "$VERSION")"
-          echo "$cut"
-          grep -qx 'cut=true' <<<"$cut" || exit 0
-          branch="$(sed -n 's/^branch=//p' <<<"$cut")"; from="$(sed -n 's/^from=//p' <<<"$cut")"
-          sha="$(git rev-parse "refs/tags/$from^{commit}")"
-          if ! gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/$branch" -f sha="$sha" >/dev/null; then
-            # another run may have cut it meanwhile: a branch that exists is kept where it is, wherever that is
-            if git ls-remote --exit-code --heads origin "refs/heads/$branch" >/dev/null; then
-              echo "$branch exists already, at $(git ls-remote --heads origin "refs/heads/$branch" | cut -f1): it is not moved"; exit 0
-            fi
-            echo "Could not create $branch at $from ($sha), so v$VERSION is not tagged or published. The release ruleset on release/* must let GitHub Actions create the branch: release-notes/README.md \"The ruleset on release/*\" says how. Then re-run this run." >&2
-            exit 1
-          fi
-          at="$(git ls-remote --heads origin "refs/heads/$branch" | cut -f1)"
-          if [ "$at" != "$sha" ]; then echo "$branch was created, but the remote shows it at '$at', not $sha" >&2; exit 1; fi
-          echo "$branch is cut at $from ($sha)"
+          echo "$cut"; echo "$cut" >> "$GITHUB_OUTPUT"
+      - name: the previous line's branch
+        if: steps.cut.outputs.cut == 'true'
+        uses: ./.github/actions/line-branch
+        with:
+          branch: ${{ steps.cut.outputs.branch }}
+          from: ${{ steps.cut.outputs.from }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          deploy-key: ${{ secrets.RELEASE_BRANCH_DEPLOY_KEY }}
       - name: the annotated tag, on the merge commit
         env:
           VERSION: ${{ needs.decide.outputs.version }}

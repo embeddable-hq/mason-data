@@ -3,10 +3,11 @@
 # one, run this workflow from the Actions page ("Run workflow"), or through the API, with the line (`0.19`). It creates
 # release/<major>.<minor> at that line's newest tag, and verifies the commit afterwards. scripts/release-line.ts
 # `--cut-line` decides it:
-#   - a line with no tag is refused, and so is the newest line (the release of the next line cuts its branch);
+#   - a line with no tag is refused;
 #   - a branch that exists is never moved, and the run says where it is and stays green.
-# The branch is created with the REST API, which refuses a ref that exists. The release ruleset on release/* must let
-# GitHub Actions create it (release-notes/README.md "The ruleset on release/*").
+# .github/actions/line-branch creates it, as for release.yml: with GITHUB_TOKEN, or with the deploy key when the secret
+# RELEASE_BRANCH_DEPLOY_KEY is set. A refusal fails the run, creates nothing, and prints GitHub's answer word for word
+# (release-notes/README.md "The ruleset on release/*").
 name: Release line branch
 
 on:
@@ -34,25 +35,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '26'          # never 24: ci.yml's build job says why
-      - name: the line's branch, at its newest tag
+      - id: cut
+        name: the line's newest tag, and whether its branch exists
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LINE: ${{ inputs.line }}   # through the environment, never into the script's text
         run: |
           set -euo pipefail
           cut="$(git ls-remote --refs origin 'refs/tags/v*' 'refs/heads/release/*' | node scripts/release-line.ts --cut-line "$LINE")"
-          echo "$cut"
-          grep -qx 'cut=true' <<<"$cut" || exit 0
-          branch="$(sed -n 's/^branch=//p' <<<"$cut")"; from="$(sed -n 's/^from=//p' <<<"$cut")"
-          sha="$(git rev-parse "refs/tags/$from^{commit}")"
-          if ! gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/$branch" -f sha="$sha" >/dev/null; then
-            # another run may have cut it meanwhile: a branch that exists is kept where it is, wherever that is
-            if git ls-remote --exit-code --heads origin "refs/heads/$branch" >/dev/null; then
-              echo "$branch exists already, at $(git ls-remote --heads origin "refs/heads/$branch" | cut -f1): it is not moved"; exit 0
-            fi
-            echo "Could not create $branch at $from ($sha). The release ruleset on release/* must let GitHub Actions create the branch: release-notes/README.md \"The ruleset on release/*\" says how. Then run this workflow again." >&2
-            exit 1
-          fi
-          at="$(git ls-remote --heads origin "refs/heads/$branch" | cut -f1)"
-          if [ "$at" != "$sha" ]; then echo "$branch was created, but the remote shows it at '$at', not $sha" >&2; exit 1; fi
-          echo "$branch is cut at $from ($sha)"
+          echo "$cut"; echo "$cut" >> "$GITHUB_OUTPUT"
+      - name: the line's branch, at its newest tag
+        if: steps.cut.outputs.cut == 'true'
+        uses: ./.github/actions/line-branch
+        with:
+          branch: ${{ steps.cut.outputs.branch }}
+          from: ${{ steps.cut.outputs.from }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          deploy-key: ${{ secrets.RELEASE_BRANCH_DEPLOY_KEY }}
