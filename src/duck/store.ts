@@ -551,9 +551,10 @@ export function pgErrorOf(err: unknown, sql: string): StatementError {
   const full = err instanceof Error ? err.message : String(err);
   const kind = /^([A-Za-z ]+) Error: /.exec(full)?.[1] ?? "";
   // (a plain numeric's hidden scale column, src/duck/scale-column.ts, is the rewrite's: its name never reaches a client's
-  // message; the review of PR 1004 met it in a 42803)
-  const message = full.replace(/^[A-Za-z ]+ Error: /, "").replace(/\n\n?LINE \d+:[\s\S]*$/, "").trim()
-    .replace(new RegExp(`${SCALE_PREFIX}[0-9a-f]{12}`, "g"), "a numeric's scale");
+  // message; the review of PR 1004 met it in a 42803. Only as a column the engine's BINDER names, in double quotes: a
+  // value a conversion error quotes is the user's data, whatever it holds, and is never touched)
+  const stripped = full.replace(/^[A-Za-z ]+ Error: /, "").replace(/\n\n?LINE \d+:[\s\S]*$/, "").trim();
+  const message = kind === "Binder" ? stripped.replace(new RegExp(`"${SCALE_PREFIX}[0-9a-f]{12}"`, "g"), "a numeric's scale") : stripped;
   // NO ROOM TO SPILL (issue 105): the ceiling, or the disk itself before it. Postgres's class for a full disk, in
   // Mason's words: the engine's text names a path and a setting no client of Mason has, so it stays out of the answer
   // Read by the engine's own kind and sentence: a statement's literal may hold the same words in any other error

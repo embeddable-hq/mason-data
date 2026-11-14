@@ -54,6 +54,7 @@ const schema: PgSchema = {
     { name: "p", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "g", type: "int4" }, { name: "u", type: "numeric", spelled: "numeric", scaled: hidden }] },
     // (its row type, so a whole row of r is the source's: any OID the source would give it)
     { name: "r", primaryKey: ["id"], joins: [], rowTypeOid: 99001, columns: [{ name: "id", type: "int4" }, { name: "g", type: "int4" }, { name: "u", type: "numeric", spelled: "numeric", scaled: hidden }] },
+    { name: "z", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "t", type: "text" }] },
     { name: "q", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "p_id", type: "int4" }, { name: "u", type: "numeric", spelled: "numeric", scaled: hidden },
       { name: "v", type: "numeric", spelled: "numeric", scaled: scaleColumn("v") }] },
   ],
@@ -75,6 +76,10 @@ before(async () => {
   await w.run(`CREATE VIEW __mason_visible.public.p AS SELECT id, g, u FROM "${db}".public.p`);
   await w.run(`CREATE VIEW __mason_visible.public.q AS SELECT id, p_id, u, v FROM "${db}".public.q`);
   await w.run(`CREATE VIEW __mason_visible.public.r AS SELECT id, g, u FROM "${db}".public.r`);
+  // a text column whose value looks like a hidden scale column's name: data, quoted as it is in an error
+  await w.run("CREATE TABLE public.z (id INTEGER, t VARCHAR); INSERT INTO public.z VALUES (6, '__mason_scale_0123456789ab')");
+  await w.run(`CREATE VIEW __mason_visible.public.z AS SELECT id, t FROM "${db}".public.z`);
+  await truth.exec("CREATE TABLE z (id integer PRIMARY KEY, t text); INSERT INTO z VALUES (6, '__mason_scale_0123456789ab')");
   await truth.exec("CREATE TABLE p (id integer PRIMARY KEY, g integer, u numeric); CREATE TABLE q (id integer PRIMARY KEY, p_id integer, u numeric, v numeric)");
   await truth.exec(`INSERT INTO p VALUES ${P.join(", ")}; INSERT INTO q VALUES ${Q.join(", ")}`);
   await truth.exec(`CREATE TABLE r (id integer PRIMARY KEY, g integer, u numeric); INSERT INTO r VALUES ${R.map(([id, g, u]) => `(${id}, ${g}, ${u ?? "NULL"})`).join(", ")}`);
@@ -229,6 +234,13 @@ test("a plain numeric's text grouped by itself, spelled out, by number, by name 
     "SELECT r::text, count(*) FROM r GROUP BY r.id ORDER BY 1",
     "SELECT r.id, to_json(r)::text, count(q.id) FROM r LEFT JOIN q ON q.p_id = r.id GROUP BY r.id ORDER BY 1",
     "SELECT id, concat(u), to_json(u)::text, format('%s', u), row(u)::text FROM r GROUP BY id ORDER BY 1",
+  ]), []);
+});
+
+test("an engine error quotes a value that looks like a hidden scale column's name as it is: the user's data, never masked (the review of PR 1004)", async () => {
+  assert.deepEqual(await unlike([
+    "SELECT t::int FROM z WHERE id = 6",
+    "SELECT (u::text || '__mason_scale_abcdefabcdef')::int FROM r WHERE id = 1",
   ]), []);
 });
 
