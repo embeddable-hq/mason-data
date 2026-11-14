@@ -157,6 +157,9 @@ export interface RunState {
    *  src/cli/ui-nav.ts): the items replaced, a URL each, and the host's links, or null: src/cli/run-server.ts runState;
    *  a run from before it has none */
   pageNav?: { items: Record<string, string>; links: Array<{ url: string; label: string } | { view: string; label: string }> } | null;
+  /** who is signed in to the host (mason serve with MASON_UI_ACCOUNT, src/cli/ui-account.ts), shown at the foot of the
+   *  page's sidebar, or null: src/cli/run-server.ts runState; a run from before it has none */
+  pageAccount?: { url: string; label: string } | null;
   /** the path, relative to the web page's address, its Overview reads the host's card from (mason serve with
    *  MASON_UI_OVERVIEW_CARD, src/cli/ui-host-view.ts), or null: src/cli/run-server.ts runState; a run from before it has none */
   pageCard?: string | null;
@@ -548,7 +551,8 @@ const STATUS_USAGE = `usage: mason status [--json]
     page's link back to the site that links to it, mason serve with MASON_UI_BACK_URL — or null), pageNav ({ items, links }: the sidebar's
     items that link to the host's own pages instead — items has overview, tables, users, queries, usage or syncEvents,
     each the URL it links to, mason serve with MASON_UI_NAV_<ITEM>_URL — and the host's links, [{ url, label }] or a view
-    of the host's the page shows, [{ view, label }], with MASON_UI_NAV_LINKS — or null), pageCard (the path, relative to
+    of the host's the page shows, [{ view, label }], with MASON_UI_NAV_LINKS — or null), pageAccount ({ label, url }: who is signed in to the host, at the foot of
+    the page's sidebar, mason serve with MASON_UI_ACCOUNT — or null), pageCard (the path, relative to
     the page's address, its Overview reads the host's card from: mason serve with MASON_UI_OVERVIEW_CARD — or null), pageSocket (the Unix socket the
     page is served on too: mason serve with MASON_UI_SOCKET — or null), next }.
     Each table's kept is how it is kept current now (absent for a table the sync does not hold):
@@ -592,7 +596,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
   json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "generatedTables", "queries", "slowQueries", "refusedQueries",
-    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "pageReadOnly", "pageReadOnlyAllow", "pageBack", "pageNav", "pageCard", "pageSocket",
+    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "pageReadOnly", "pageReadOnlyAllow", "pageBack", "pageNav", "pageAccount", "pageCard", "pageSocket",
     "users", "roles", "share", "shareEnded", "lastRun", "lastStop", "hung", "next"],
 };
 
@@ -1872,8 +1876,8 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     operators with their estimated rows — or why none could be; else null), planTruncated (cut at 8 KiB), origin (an internal error, XX000:
     where it failed in Mason, a file and a line such as src/duck/store.ts:897; else null) }], keptDays,
     before (the position of the page before,
-    or null: none older) }; with --events { events: [{ at, kind (copy_failed, poll_failed,
-    catch_up_failed, stream_failed, source_unreachable, generated_failed, compact_failed, restart, copied, recovered, synced (a sync
+    or null: none older) }; with --events { events: [{ at, kind (full_sync_failed, poll_failed,
+    catch_up_failed, stream_failed, source_unreachable, generated_failed, compact_failed, restart, full_sync, recovered, synced (a sync
     asked by hand), sync_changed (a table's sync: changed), polled (a poll on its schedule, with --scheduled), streamed (a
     minute of the stream's changes to a table, with --scheduled), ui_error (the web page met an error of its own)), failed,
     table (null: the whole sync, the run or the web page),

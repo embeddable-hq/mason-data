@@ -26,11 +26,13 @@ after(() => {
 
 test("the catalog read: a partitioned table is its leaves, a never-analysed one is counted once", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
   psql(adminUrl!, `CREATE DATABASE "${tag}"`);
+  // autovacuum is off on every table that holds rows: it analyses a leaf of 1,500 rows within its naptime, and an
+  // analysed table is read from the catalog, never counted, which is what the last step tests (#959)
   psql(dbUrl, "CREATE TABLE events (id bigint, at date, PRIMARY KEY (id, at)) PARTITION BY RANGE (at); " +
-    "CREATE TABLE events_2026_09 PARTITION OF events FOR VALUES FROM ('2026-09-01') TO ('2026-10-01'); " +
-    "CREATE TABLE events_2026_10 PARTITION OF events FOR VALUES FROM ('2026-10-01') TO ('2026-11-01'); " +
+    "CREATE TABLE events_2026_09 PARTITION OF events FOR VALUES FROM ('2026-09-01') TO ('2026-10-01') WITH (autovacuum_enabled = false); " +
+    "CREATE TABLE events_2026_10 PARTITION OF events FOR VALUES FROM ('2026-10-01') TO ('2026-11-01') WITH (autovacuum_enabled = false); " +
     "INSERT INTO events SELECT i, DATE '2026-09-15' + (i % 30) FROM generate_series(1, 3000) i; " +
-    "CREATE TABLE items (id int PRIMARY KEY); INSERT INTO items SELECT generate_series(1, 40)");
+    "CREATE TABLE items (id int PRIMARY KEY) WITH (autovacuum_enabled = false); INSERT INTO items SELECT generate_series(1, 40)");
   const parsed = parseSource(dbUrl);
   assert.ok("source" in parsed, JSON.stringify(parsed));
   const read = async (counted: Map<number, number>) => {

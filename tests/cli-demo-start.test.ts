@@ -337,9 +337,14 @@ describe("mason init demo, then the run as a person drives it", { timeout: 300_0
     try {
       const count = async (): Promise<number> => Number((await client.query<{ n: string }>("SELECT count(*) AS n FROM orders")).rows[0]!.n);
       const [copied, served] = [await rows(), await count()];
-      // a round every 0.3 s, a poll every second: three seconds are several orders
-      await new Promise((r) => setTimeout(r, 3_000));
-      const [copied2, served2] = [await rows(), await count()];
+      // a round every 0.3 s and a poll every second, but no fixed span is promised: a pass waits at least four times what
+      // the last one took (src/duck/sync.ts passDelayMs), and on a loaded machine that was over 6 s (#976). So wait
+      // for both to grow, bounded: a poll that stopped still fails
+      let [copied2, served2] = [copied, served];
+      for (const end = Date.now() + 60_000; !(copied2 > copied && served2 > served) && Date.now() < end;) {
+        await new Promise((r) => setTimeout(r, 250));
+        [copied2, served2] = [await rows(), await count()];
+      }
       assert.ok(copied2 > copied, `the copy's orders grew: ${copied} then ${copied2}`);
       assert.ok(served2 > served, `the Postgres API's orders grew: ${served} then ${served2}`);
     } finally { await client.end(); }

@@ -20,6 +20,7 @@ import { jsonbText } from "./jsonb.ts";
 import { gapMark } from "./gaps.ts";
 import { heldType, ZONED_HELD } from "./held-types.ts";
 import { pgEvalSync } from "./pg-eval.ts";
+import { isUtc } from "../lib/timezone.ts";
 import { EncodeError, encodeValue, OID, TIMESTAMP, type ApiValue, type PgSession, type WireType } from "../api/postgres/encode.ts";
 
 /** One result column as the wire describes it, and how its cells are written. */
@@ -68,6 +69,18 @@ function wallText(micros: bigint): string {
   const rest = micros - day * MICROS_PER_DAY;
   const secs = rest / 1_000_000n, frac = rest % 1_000_000n;
   return `${dayText(Number(day))}T${pad(secs / 3600n)}:${pad((secs % 3600n) / 60n)}:${pad(secs % 60n)}${frac === 0n ? "" : `.${pad(frac, 6)}`}`;
+}
+
+/** 10000-01-01 from 1970 in micros: a timestamp before it is written with a year of four digits */
+const FIRST_FIVE_DIGIT_YEAR_MICROS = 253_402_300_800_000_000n;
+
+/** micros from 1970, year 1 to 9999, as timestamptz_out writes them in UTC under DateStyle ISO:
+ *  `YYYY-MM-DD HH:MM:SS[.ffffff, its trailing zeros dropped]+00` */
+function utcInstantText(micros: bigint): string {
+  const day = micros >= 0n ? micros / MICROS_PER_DAY : -((-micros + MICROS_PER_DAY - 1n) / MICROS_PER_DAY);
+  const rest = micros - day * MICROS_PER_DAY;
+  const secs = rest / 1_000_000n, frac = rest % 1_000_000n;
+  return `${dayText(Number(day))} ${pad(secs / 3600n)}:${pad((secs % 3600n) / 60n)}:${pad(secs % 60n)}${frac === 0n ? "" : `.${pad(frac, 6).replace(/0+$/, "")}`}+00`;
 }
 
 /** A column sent through the Postgres API's own encoder: the DuckDB value turned into what that encoder reads. */
@@ -137,6 +150,10 @@ function timestampColumn(name: string, tz: boolean): WireColumn {
         if (tz && s.timeZone.toUpperCase() !== "UTC") throw new EncodeError(`Mason writes a timestamptz before year 1 only in UTC, not in ${s.timeZone} (${gapMark("bc-timestamptz-zone")})`, "0A000", "bc-timestamptz-zone");
         return Buffer.from(bcTimestampText(m, tz), "ascii");
       }
+      // a timestamptz's text in a session of UTC, written from its microseconds: the same text the API's encoder writes
+      // through Intl's calendar (encode.ts `timestamptzText`, offset 0 at every instant), which cost ~13 us a value, most
+      // of a result's time (issue 464: 300,000 rows of a DISTINCT ON, 10 s against Postgres's 4 s)
+      if (tz && format === 0 && m < FIRST_FIVE_DIGIT_YEAR_MICROS && isUtc(s.timeZone)) return Buffer.from(utcInstantText(m), "ascii");
       return base.encode(v, format, s);
     },
   };

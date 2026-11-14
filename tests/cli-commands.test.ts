@@ -461,9 +461,9 @@ test("the sync's events: a line each in mason logs --events and mason status's S
   const { eventLine, syncErrorLines, totalsText, LOGS } = commands as unknown as {
     eventLine: (e: unknown, st: typeof PLAIN) => string; syncErrorLines: (r: unknown, st: typeof PLAIN) => string[];
     totalsText: (t: unknown, now?: number) => string; LOGS: typeof STATUS };
-  const failedCopy = { at: "2026-10-28T09:00:00.000Z", kind: "copy_failed", failed: true, table: "public.orders", message: "the source closed the connection\nmore detail" };
+  const failedCopy = { at: "2026-10-28T09:00:00.000Z", kind: "full_sync_failed", failed: true, table: "public.orders", message: "the source closed the connection\nmore detail" };
   const restart = { at: "2026-10-28T09:05:00.000Z", kind: "restart", failed: true, table: null, message: "the run stopped (it crashed (SIGSEGV)) after 42 s up, and its supervisor started it again" };
-  assert.equal(eventLine(failedCopy, PLAIN), "2026-10-28 09:00:00  copy_failed         public.orders  the source closed the connection");
+  assert.equal(eventLine(failedCopy, PLAIN), "2026-10-28 09:00:00  full_sync_failed    public.orders  the source closed the connection");
   assert.equal(eventLine(restart, PLAIN), "2026-10-28 09:05:00  restart             Mason  the run stopped (it crashed (SIGSEGV)) after 42 s up, and its supervisor started it again");
   assert.deepEqual(syncErrorLines({ sync: [failedCopy, restart], error: null }, PLAIN), [
     "\nSync errors (the latest, newest last; mason logs --events lists every event):",

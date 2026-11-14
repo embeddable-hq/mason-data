@@ -83,21 +83,21 @@ function named(name: string, pattern: string, fm: boolean, width: number): strin
 
 /** to_char(timestamp | timestamptz | date, fmt): `text` is DuckDB's text of the value (in the session's zone) */
 export function toCharTime(text: string, fmt: string): string | null {
+  // an empty template is NULL (timestamp_to_char)
+  if (fmt === "") return null;
   const w = readWall(text);
   if (w === null) return null;
   const { year, month, day, hour, minute, second, micro } = w;
   let out = "", i = 0;
   while (i < fmt.length) {
-    // FM (fill mode) and TM (translation: English here) prefix the next pattern
+    // FM (fill mode) or TM (translation: English here, and, as Postgres does, never padded) prefixes the next pattern:
+    // ONE prefix an item, as parse_format reads it, so a second is the text it spells (`FMFM` writes `FM`, `FMTMMonth`
+    // writes `T03onth`), and a prefix with nothing after it writes nothing (`FM` writes '')
     let fm = false;
-    for (;;) {
-      if (fmt.startsWith("FM", i) || fmt.startsWith("fm", i)) { fm = true; i += 2; continue; }
-      // TM translates the names (English here) and, as Postgres does, does not pad them
-      if (fmt.startsWith("TM", i) || fmt.startsWith("tm", i)) { fm = true; i += 2; continue; }
-      if (fmt.startsWith("FX", i) || fmt.startsWith("fx", i)) { i += 2; continue; }
-      break;
-    }
+    if (fmt.startsWith("FM", i) || fmt.startsWith("fm", i) || fmt.startsWith("TM", i) || fmt.startsWith("tm", i)) { fm = true; i += 2; }
     if (i >= fmt.length) break;
+    // FX is a pattern that writes nothing
+    if (fmt.startsWith("FX", i) || fmt.startsWith("fx", i)) { i += 2; continue; }
     const c = fmt[i]!;
     if (c === '"') {
       // a quoted literal; a backslash escapes the next character in it
@@ -177,6 +177,58 @@ export function toCharTime(text: string, fmt: string): string | null {
     }
   }
   return out;
+}
+
+/** the patterns DuckDB's strftime writes as `toCharTime` does over a year of four digits, AD: each number zero-padded to
+ *  its width, each name English (issue 464). A pattern of the time of day is a time's only (a date's would be the
+ *  midnight of a zone, which a day of daylight saving may not have) */
+const STRFTIME: ReadonlyMap<string, { spec: string; time: boolean; fm: boolean }> = new Map([
+  ["YYYY", { spec: "%Y", time: false, fm: false }], ["MM", { spec: "%m", time: false, fm: false }], ["DD", { spec: "%d", time: false, fm: false }],
+  ["DDD", { spec: "%j", time: false, fm: false }], ["IYYY", { spec: "%G", time: false, fm: false }], ["IW", { spec: "%V", time: false, fm: false }],
+  // a three-letter name is never padded, FM or not; Month and Day are padded to nine unless FM, which strftime is not
+  ["Mon", { spec: "%b", time: false, fm: true }], ["Dy", { spec: "%a", time: false, fm: true }],
+  ["Month", { spec: "%B", time: false, fm: true }], ["Day", { spec: "%A", time: false, fm: true }],
+  ["HH24", { spec: "%H", time: true, fm: false }], ["MI", { spec: "%M", time: true, fm: false }], ["SS", { spec: "%S", time: true, fm: false }],
+  ["MS", { spec: "%g", time: true, fm: false }], ["US", { spec: "%f", time: true, fm: false }],
+]);
+
+/**
+ * The strftime format that writes `toCharTime(text, fmt)` for every value whose year is 1 to 9999 AD, or null where no
+ * format is proven to (issue 464: the function a row was ×8–18 of Postgres for a grouped month). The template is read
+ * as `toCharTime` reads it — its prefixes, its quoted literals, its patterns longest first — and is answered only when
+ * every pattern met is in `STRFTIME` as written there: no other case (`MON`, `mon`), no FM on a number or a padded
+ * name, no TM, FX, TH or SP. `date` is whether the value is a date (no pattern of the time of day then).
+ */
+export function strftimeTemplate(fmt: string, date: boolean): string | null {
+  let out = "", i = 0;
+  const literal = (c: string): string => c === "%" ? "%%" : c;
+  while (i < fmt.length) {
+    // one prefix an item, as `toCharTime` reads it
+    let fm = false;
+    if (fmt.startsWith("FM", i) || fmt.startsWith("fm", i)) { fm = true; i += 2; }
+    if (fmt.startsWith("TM", i) || fmt.startsWith("tm", i) || fmt.startsWith("FX", i) || fmt.startsWith("fx", i)) return null;
+    if (i >= fmt.length) break;
+    const c = fmt[i]!;
+    if (c === "\\") return null;
+    if (c === '"') {
+      if (fm) return null;
+      i++;
+      while (i < fmt.length && fmt[i] !== '"') { if (fmt[i] === "\\") return null; out += literal(fmt[i]!); i++; }
+      i++;
+      continue;
+    }
+    const pattern = TIME_PATTERNS.find((p) => fmt.startsWith(p, i));
+    if (pattern === undefined) { if (fm) return null; out += literal(c); i++; continue; }
+    i += pattern.length;
+    if (/^(TH|th|SP|sp)/.test(fmt.slice(i))) return null;
+    const native = STRFTIME.get(pattern);
+    if (native === undefined || (native.time && date)) return null;
+    if (fm !== native.fm && !(native.fm && (pattern === "Mon" || pattern === "Dy"))) return null;
+    out += native.spec;
+  }
+  // a template that writes nothing (`FM`, `""`) is the function's: DuckDB refuses an empty format as it binds the
+  // statement, whichever rows reach it (the review of PR 955)
+  return out === "" ? null : out;
 }
 
 // ------------------------------------------------------------------------------------------------- numbers
