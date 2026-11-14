@@ -5923,6 +5923,48 @@ test("issue 983: a timestamptz, timestamp or date against an array of another of
   } finally { await truth.query("SET TimeZone = 'UTC'"); await c.end(); }
 });
 
+// ISSUE 983'S SECOND REVIEW: a cast of a written-out ARRAY of numeric parameters rounds or retypes each element before
+// the comparison, so it is the engine's to write, never the parameters' exact keys; and a time compared with a
+// subquery of another time type reads the narrower side in the session's zone, as with an array
+test("issue 983: a cast of ARRAY[$1::numeric, …] is honoured, and a time IN a subquery of another time type is compared in the session's zone", async () => {
+  const c = await client();
+  try {
+    const wrong: string[] = [];
+    const check = async (sql: string, values: Array<string | null>, zone = "UTC"): Promise<void> => {
+      await c.query(`SET TimeZone = '${zone}'`);
+      await truth.query(`SET TimeZone = '${zone}'`);
+      const want = await truth.query<unknown[]>(sql, values, { rowMode: "array", parsers: ARRAY_TEXT }).then((r) => JSON.stringify(r.rows), (e: Error & { code?: string }) => `error ${e.code}`);
+      const got = await answer(c, sql, values).then((r) => JSON.stringify(r.rows), (e: Error & { code?: string }) => `error ${e.code}`);
+      if (got !== want) wrong.push(`${zone}: ${sql} bound ${JSON.stringify(values)}\n  mason:    ${got}\n  postgres: ${want}`);
+    };
+    const a = "ARRAY[$1::numeric, $2::numeric]";
+    for (const [sql, bindings] of [
+      [`SELECT id FROM aparams WHERE s = ANY(${a}::int[]) ORDER BY id`, [["1.4", "2"], ["2.4", "5.4"]]],
+      [`SELECT id FROM aparams WHERE n = ANY(${a}::numeric(30,1)[]) ORDER BY id`, [["1.54", null], ["3.00010000000000000001", "2.21"]]],
+      [`SELECT id FROM aparams WHERE n = ANY(CAST(${a} AS decimal(30,1)[])) ORDER BY id`, [["1.54", "2.25"]]],
+      [`SELECT id FROM aparams WHERE fl = ANY(${a}::float8[]) ORDER BY id`, [["0.1", "1.5"]]],
+      [`SELECT id FROM aparams WHERE b = ANY(${a}::bigint[]) ORDER BY id`, [["10.4", "50"], ["20.6", "60"]]],
+      [`SELECT id FROM aparams WHERE n = ANY(${a}::numeric(10,0)[]) ORDER BY id`, [["2.6", "5"]]],
+      [`SELECT id FROM aparams WHERE s = ANY(ARRAY[$1::numeric, 1.04]::int[]) ORDER BY id`, [["2.6"]]],
+      [`SELECT id FROM aparams WHERE s <> ALL(${a}::int[]) ORDER BY id`, [["1.4", "2.6"]]],
+      [`SELECT id, n < ANY(${a}::numeric(30,1)[]) FROM aparams ORDER BY id`, [["2.24", "1.46"]]],
+      [`SELECT id FROM aparams WHERE s = ANY(${a}::int[]) ORDER BY id`, [["99999999999.5", "1"]]],
+    ] as Array<[string, Array<Array<string | null>>]>) for (const values of bindings) await check(sql, values);
+    for (const zone of ["America/St_Johns", "Europe/Berlin", "Asia/Kolkata", "America/New_York"]) {
+      for (const [sql, value] of [
+        ["SELECT id FROM azones WHERE tz IN (SELECT unnest($1::timestamp[])) ORDER BY id", '{"2025-12-31 20:30:00","2026-01-01 05:00:00"}'],
+        ["SELECT id FROM azones WHERE tz IN (SELECT unnest($1::date[])) ORDER BY id", '{"2026-01-01","2026-03-08"}'],
+        ["SELECT id FROM azones WHERE tz NOT IN (SELECT unnest($1::timestamp[])) ORDER BY id", '{"2025-12-31 20:30:00"}'],
+        ["SELECT id FROM azones WHERE tz < ALL (SELECT unnest($1::date[])) ORDER BY id", '{"2026-01-01"}'],
+        ["SELECT id FROM azones WHERE tl IN (SELECT unnest($1::timestamptz[])) ORDER BY id", '{"2026-01-01 00:00:00+00","2026-03-08 07:00:00+00"}'],
+        ["SELECT id FROM azones WHERE d = ANY (SELECT unnest($1::timestamptz[])) ORDER BY id", '{"2026-01-01 03:30:00+00"}'],
+        ["SELECT id FROM azones WHERE tz IN (SELECT '2025-12-31 20:30:00'::timestamp WHERE $1::text IS NOT NULL) ORDER BY id", "x"],
+      ] as Array<[string, string]>) await check(sql, [value], zone);
+    }
+    assert.deepEqual(wrong, []);
+  } finally { await truth.query("SET TimeZone = 'UTC'"); await c.end(); }
+});
+
 test("issue 983: a binary float array keeps the sign of a zero", async () => {
   const s = await rawSession();
   try {

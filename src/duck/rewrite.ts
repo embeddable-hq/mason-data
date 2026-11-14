@@ -4019,7 +4019,14 @@ class Rewriter {
     if ((!equating && !ordering) || !isNode(l) || !isNode(r)) return null;
     // ARRAY[$1::numeric, $2] written out (#598): each element a plain numeric parameter, keyed by its bound text, or a
     // value the engine holds exactly, by its own; never the parameters' doubles
-    const written = stripCasts(r);
+    // (only under no cast, or casts to numeric[] of no typmod: another cast of the whole array rounds or retypes each
+    // element first, `::int[]`, `::numeric(30,1)[]`, `::float8[]`, and is the engine's to write, as it was)
+    let written = r;
+    while (kindOf(written) === "TypeCast" && isNode(bodyOf(written).arg)) {
+      const t = bodyOf(written).typeName;
+      if (!["numeric", "decimal"].includes(lastName(t?.names)) || ((t?.typmods ?? []) as unknown[]).length > 0 || !Array.isArray(t?.arrayBounds)) return null;
+      written = bodyOf(written).arg as AstNode;
+    }
     if (kindOf(written) === "A_ArrayExpr") {
       const lt = this.typeOf(l);
       if (lt !== NUMERIC && (lt === null || !INTEGERS.has(lt))) return null;
@@ -4915,6 +4922,11 @@ class Rewriter {
    */
   private compared(n: AstNode, own: number | null | undefined, other: number | null | undefined, comparison: boolean): AstNode {
     if (comparison && own === BPCHAR && other === BPCHAR) { const r = fn("rtrim", [n]); this.typedLike.set(bodyOf(r), n); return r; }
+    // a time beside a wider one (timestamptz_eq_timestamp, date_lt_timestamptz …): read as the wider type at the
+    // session's zone, as Postgres's cross-type operator reads it; a subquery's output compared otherwise in the engine
+    // (issue 983's review: `tz IN (SELECT unnest($1::timestamp[]))` matched the UTC wall clock)
+    const rank = (t: number | null | undefined): number => t === DATE ? 0 : t === TIMESTAMP ? 1 : t === TIMESTAMPTZ ? 2 : -1;
+    if (comparison && rank(own) >= 0 && rank(other) > rank(own)) return cast(n, [other === TIMESTAMPTZ ? "timestamptz" : "timestamp"]);
     return this.widen(n, own) as AstNode;
   }
 
