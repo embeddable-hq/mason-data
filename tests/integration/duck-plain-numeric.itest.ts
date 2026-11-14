@@ -15,6 +15,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import pg from "pg";
 import { DuckStore } from "../../src/duck/store.ts";
 import { Sync, type AddedTable } from "../../src/duck/sync.ts";
@@ -53,10 +54,15 @@ async function tablesOf(source: Source, names: readonly string[]): Promise<Added
 }
 
 /** the hidden scale column's name, read from the copy (the one column of its kind the table holds) */
-async function hiddenOf(store: DuckStore, table: string): Promise<string | null> {
-  const r = (await store.writer.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE schema_name = 'public' AND table_name = '${table}' AND starts_with(column_name, '__mason_scale_')`)).getRowsJS();
-  return r.length === 0 ? null : String(r[0]![0]);
+async function hiddenOf(store: DuckStore, table: string, own: readonly string[] = []): Promise<string | null> {
+  const r = (await store.writer.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE schema_name = 'public' AND table_name = '${table}' AND starts_with(column_name, '__mason_scale_')`)).getRowsJS()
+    .map((x) => String(x[0])).filter((c) => !own.includes(c));
+  return r.length === 0 ? null : r[0]!;
 }
+
+/** the name a hidden scale column of `column` takes first (src/duck/scale-column.ts), spelled here so the file loads at
+ *  a commit without that module (scripts/fails-without.ts) */
+const firstScaleName = (column: string): string => `__mason_scale_${createHash("sha256").update(column).digest("hex").slice(0, 12)}`;
 
 /** each row's id and the scale the copy holds for its `u`, as psql prints them */
 async function scalesOf(store: DuckStore, table: string): Promise<string> {
@@ -199,6 +205,36 @@ test("the stream writes each plain numeric value's own scale: a whole row, and a
     assert.equal(await scalesOf(store, "p"), psql(url, scales), `the stream writes each value's scale\n${logged.slice(-8).join("\n")}`);
     const api = await listen(store, sync, db);
     try { for (const sql of READS) assert.equal(await api.ask(sql), psql(url, sql), sql); } finally { await api.close(); }
+  } finally {
+    await sync.stop();
+    await store.close();
+  }
+});
+
+test("a source column named as a plain numeric's hidden column would be: the table syncs, its own column listed and the scale held beside", { skip }, async () => {
+  const db = `${tag}_clash`, url = urlOf(db);
+  const clash = firstScaleName("u");
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  psql(url, `CREATE TABLE p (id int PRIMARY KEY, u numeric, "${clash}" int); INSERT INTO p (id, u) VALUES ${MIXED}; UPDATE p SET "${clash}" = id * 10`);
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const [P] = await tablesOf(parsed.source, ["public.p"]);
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "clash.db"), (l) => logged.push(l));
+  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll");
+  try {
+    await sync.open();
+    sync.setTables([P!]);
+    await sync.once();
+    assert.deepEqual(sync.state().map((x) => [x.source, x.phase, x.error]), [["public.p", "copied", null]], logged.slice(-6).join("\n"));
+    const hidden = await hiddenOf(store, "p", [clash]);
+    assert.ok(hidden !== null && hidden !== clash, "the hidden column takes another name");
+    assert.equal(((await store.writer.runAndReadAll(`SELECT id, "${hidden}" FROM public.p ORDER BY id`)).getRowsJS() as unknown[][])
+      .map((r) => r.map((x) => x === null ? "" : String(x)).join("\t")).join("\n").trimEnd(), psql(url, "SELECT id, scale(u) FROM p ORDER BY id"));
+    const api = await listen(store, sync, db);
+    try {
+      for (const sql of ["SELECT * FROM p ORDER BY id", "SELECT id, u, u::text FROM p ORDER BY id", `SELECT id, "${clash}" FROM p ORDER BY id`]) assert.equal(await api.ask(sql), psql(url, sql), sql);
+    } finally { await api.close(); }
   } finally {
     await sync.stop();
     await store.close();

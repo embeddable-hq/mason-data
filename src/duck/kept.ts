@@ -562,13 +562,18 @@ export class KeptJsonPaths implements KeptRoutes {
    * whether stored paths are on or off: a plain numeric's hidden scale column (src/duck/scale-column.ts) is never
    * listed either.
    */
-  private async view(source: string): Promise<void> {
+  private async view(source: string, columns?: readonly string[]): Promise<void> {
     const at = source.indexOf(".");
     const [schema, table] = [source.slice(0, at), source.slice(at + 1)];
     const w = this.store.writer;
     try {
+      // the source's own columns where the sync says them: a source column may be named as a hidden one is
+      // (`__mason_json_…`, `__mason_scale_…`), and is listed as any column is
+      const own = columns ?? this.host.served().get(source)?.map((c) => c.name);
+      const named = own === undefined ? null : new Set(own);
       const cols = (await w.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE database_name = current_database() AND schema_name = ${literal(schema)} ` +
-        `AND table_name = ${literal(table)} ORDER BY column_index`)).getRowsJS().map((r) => String(r[0])).filter((c) => !HIDDEN_RE.test(c) && !SCALE_RE.test(c));
+        `AND table_name = ${literal(table)} ORDER BY column_index`)).getRowsJS().map((r) => String(r[0]))
+        .filter((c) => named !== null ? named.has(c) : !HIDDEN_RE.test(c) && !SCALE_RE.test(c));
       if (cols.length === 0) { this.views.delete(source); return; }
       const db = String((await w.runAndReadAll("SELECT current_database()")).getRowsJS()[0]![0]);
       await w.run(`CREATE SCHEMA IF NOT EXISTS ${VISIBLE_CATALOG}.${ident(schema)}`);
@@ -619,7 +624,7 @@ export class KeptJsonPaths implements KeptRoutes {
 
   /** After the swap committed, on the writer's turn: the paths it dropped forgotten, the table's view made again; a
    *  backfill of the old table is over — the side table was filled whole (`fillSide`), so the next review finds it ready. */
-  async swapped(source: string): Promise<void> {
+  async swapped(source: string, columns?: readonly string[]): Promise<void> {
     for (const { p, why } of this.gone) {
       if (p.state === "ready") this.gen++;
       Object.assign(p, { state: "dropped", why });
@@ -627,7 +632,7 @@ export class KeptJsonPaths implements KeptRoutes {
       this.host.log(`${source}: ${pathText(p)} is no longer stored: ${why}`);
     }
     this.gone = [];
-    await this.view(source);
+    await this.view(source, columns);
     for (const p of this.physical(source)) {
       this.cursors.set(p.name, Number.MAX_SAFE_INTEGER);
       await this.settle(p);

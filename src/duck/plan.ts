@@ -29,7 +29,7 @@ import { enforceGrants, type RoleGrants } from "./grants.ts";
 import { attributeRefused, expandRowFilters, wallStatistics, wallSwitch, type Walls } from "./row-filter.ts";
 import type { PgAnalysis } from "./analyze.ts";
 import type { ScaleLookup } from "./rewrite.ts";
-import { SCALED_KEY, scaleColumn } from "./scale-column.ts";
+import { scaledOf } from "./scale-column.ts";
 
 const JSON_OID = 114, JSONB_OID = 3802, NUMERIC_OID = 1700;
 /** pg_catalog.pg_typeof(any): its argument's type named by the catalog (src/duck/rewrite.ts) */
@@ -66,15 +66,20 @@ async function keptLookup(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, t
  *  one (`SCALED_KEY` in `userTypes`); null when it reads none */
 async function scaleLookup(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, types: ReadonlyMap<number, ReadonlyArray<{ type: number; typmod: number; relation?: { relid: number; attno: number } }>>,
   userTypes: ReadonlyMap<string, number>): Promise<ScaleLookup | null> {
-  if (![...userTypes.keys()].some((k) => k.startsWith(SCALED_KEY))) return null;
+  // each scaled column's hidden column, by schema, table and column
+  const hidden = new Map<string, string>();
+  for (const k of userTypes.keys()) { const s = scaledOf(k); if (s !== null) hidden.set(JSON.stringify([s.schema, s.table, s.column]), s.hidden); }
+  if (hidden.size === 0) return null;
   const wanted = new Map<string, { relid: number; attno: number }>();
   for (const t of [...types.values()].flat()) if (t.relation !== undefined && t.type === NUMERIC_OID && t.typmod < 0) wanted.set(`${t.relation.relid}.${t.relation.attno}`, t.relation);
   if (wanted.size === 0) return null;
   const pairs = [...wanted.values()].map((r) => `(${Math.trunc(r.relid)}, ${Math.trunc(r.attno)})`).join(", ");
   const rows = await catalogRows(catalog, `SELECT c.oid::text, a.attnum::text, n.nspname, c.relname, a.attname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace ` +
     `JOIN pg_attribute a ON a.attrelid = c.oid WHERE (c.oid::int8, a.attnum::int8) IN (${pairs}) AND c.relkind = 'r' AND NOT a.attisdropped`);
-  const at = new Map(rows.filter(([, , schema, table, column]) => userTypes.has(`${SCALED_KEY}${schema}.${table}.${column}`))
-    .map(([relid, attno, , , column]) => [`${relid}.${attno}`, scaleColumn(column!)]));
+  const at = new Map(rows.flatMap(([relid, attno, schema, table, column]) => {
+    const name = hidden.get(JSON.stringify([schema, table, column]));
+    return name === undefined ? [] : [[`${relid}.${attno}`, name] as const];
+  }));
   return at.size === 0 ? null : { at: (relid, attno) => at.get(`${relid}.${attno}`) ?? null };
 }
 
@@ -82,7 +87,7 @@ async function scaleLookup(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, 
  *  columns without naming them reads its view of its visible columns (`hideKept`), stored JSON paths on or off */
 function scaledTables(userTypes: ReadonlyMap<string, number>): Set<string> {
   const out = new Set<string>();
-  for (const k of userTypes.keys()) if (k.startsWith(SCALED_KEY)) out.add(k.slice(SCALED_KEY.length).split(".").slice(0, 2).join("."));
+  for (const k of userTypes.keys()) { const s = scaledOf(k); if (s !== null) out.add(`${s.schema}.${s.table}`); }
   return out;
 }
 

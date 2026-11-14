@@ -16,8 +16,17 @@ export const SCALE_PREFIX = "__mason_scale_";
 /** a hidden scale column's name, and nothing else */
 export const SCALE_RE = /^__mason_scale_[0-9a-f]{12}$/;
 
-/** the hidden column holding `column`'s scale: its name hashed, so any column name gives one plain identifier */
-export const scaleColumn = (column: string): string => `${SCALE_PREFIX}${createHash("sha256").update(column).digest("hex").slice(0, 12)}`;
+/** the hidden column holding `column`'s scale: its name hashed, so any column name gives one plain identifier, and hashed
+ *  again with a count where the table (`columns`, the source's column names) holds a column of that name itself — a
+ *  table may name one anything, and two columns of one name fail the copy for good. Every reader computes it the same
+ *  way from the same columns (the copy's own, as recorded) */
+export function scaleColumn(column: string, columns: readonly string[]): string {
+  const taken = new Set(columns);
+  for (let n = 0; ; n++) {
+    const name = `${SCALE_PREFIX}${createHash("sha256").update(n === 0 ? column : `${column}\u0000${n}`).digest("hex").slice(0, 12)}`;
+    if (!taken.has(name)) return name;
+  }
+}
 
 /** the scale of a numeric's text `text` (a SQL expression of the engine's VARCHAR, as Postgres's numeric_out wrote it:
  *  never an exponent), as the engine computes it: the digits after its point, 0 with none; NULL for NULL */
@@ -32,5 +41,14 @@ export function scaleOfText(text: string | null): number | null {
 }
 
 /** how the listener tells the plan a column holds its own scales (`userTypes`, src/api/postgres/server.ts): this prefix,
- *  then `<schema>.<table>.<column>` */
+ *  then the JSON of [schema, table, column, its hidden scale column's name] (`scaledKey`, `scaledOf`) */
 export const SCALED_KEY = "scaled:";
+export const scaledKey = (schema: string, table: string, column: string, hidden: string): string => `${SCALED_KEY}${JSON.stringify([schema, table, column, hidden])}`;
+/** a `scaledKey`'s parts, or null for any other key */
+export function scaledOf(key: string): { schema: string; table: string; column: string; hidden: string } | null {
+  if (!key.startsWith(SCALED_KEY)) return null;
+  const parts = JSON.parse(key.slice(SCALED_KEY.length)) as unknown;
+  if (!Array.isArray(parts) || parts.length !== 4 || !parts.every((x) => typeof x === "string")) return null;
+  const [schema, table, column, hidden] = parts as [string, string, string, string];
+  return { schema, table, column, hidden };
+}

@@ -48,9 +48,9 @@ const qScales = (row: string): [string, string] => {
 const schema: PgSchema = {
   database: "app",
   tables: [
-    { name: "p", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "g", type: "int4" }, { name: "u", type: "numeric", spelled: "numeric", scaled: true }] },
-    { name: "q", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "p_id", type: "int4" }, { name: "u", type: "numeric", spelled: "numeric", scaled: true },
-      { name: "v", type: "numeric", spelled: "numeric", scaled: true }] },
+    { name: "p", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "g", type: "int4" }, { name: "u", type: "numeric", spelled: "numeric", scaled: hidden }] },
+    { name: "q", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "p_id", type: "int4" }, { name: "u", type: "numeric", spelled: "numeric", scaled: hidden },
+      { name: "v", type: "numeric", spelled: "numeric", scaled: scaleColumn("v") }] },
   ],
 };
 

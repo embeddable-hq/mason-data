@@ -48,9 +48,9 @@ export interface PgColumn {
   /** the column's own collation where it is not its type's (src/cli/preflight.ts), by schema and name: the catalog
    *  declares the column `COLLATE` it, so Postgres's analysis orders it as the source does */
   collation?: { schema: string; name: string } | undefined;
-  /** a plain numeric (no precision) whose copy holds each value's own scale in a hidden column (src/duck/scale-column.ts):
-   *  the rewrite prints each value with it, as Postgres does. Never declared to the catalog */
-  scaled?: boolean | undefined;
+  /** a plain numeric (no precision) whose copy holds each value's own scale in a hidden column (src/duck/scale-column.ts),
+   *  that column's name: the rewrite prints each value with it, as Postgres does. Never declared to the catalog */
+  scaled?: string | undefined;
 }
 
 /** A collation of the source (pg_collation), as the catalog declares one it lacks (src/duck/collation.ts SourceCollation) */
