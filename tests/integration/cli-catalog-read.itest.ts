@@ -45,12 +45,17 @@ function freePort(): Promise<number> {
     s.on("error", reject);
   });
 }
+/** What every statement of a catalog read begins with (src/cli/source-catalog.ts `watchedRead`). */
+const READ_MARK = Buffer.from("/* mason catalog read ");
 /** A TCP proxy to the Postgres at `to`, listening on `host`: every connection made through it is counted. */
-/** `muteNext()`: the next connection made through it goes silent once logged in (its ReadyForQuery passed): what the
- *  client sends still reaches the database, and nothing the database answers comes back, the TCP connection kept — a
- *  connection gone silent one way, as a stalled network or proxy leaves it.
- *  `darkAfterNext()`: the same, and every connection after it is taken and given nothing at all, until `light()` — a
- *  database that stopped answering altogether, so it cannot be asked about the read either. */
+/** `muteNext()`: the next catalog read's connection goes silent from its first query on: what the client sends still
+ *  reaches the database, and nothing the database answers comes back, the TCP connection kept — a connection gone
+ *  silent one way, as a stalled network or proxy leaves it.
+ *  `darkAfterNext()`: the same, and every connection made after it is taken and given nothing at all, until `light()` —
+ *  a database that stopped answering altogether, so it cannot be asked about the read either.
+ *  The read's connection is told by its first query, which begins with `READ_MARK`, never by being the next connection
+ *  made: the run opens others of its own (an added table's first sync begins after `mason add` has returned), and one
+ *  of those taking the read's place left the read with no connection at all (#948). */
 function countingProxy(host: string, to: { host: string; port: number }): Promise<{ port: number; connections: () => number; close: () => void; muteNext: () => void; darkAfterNext: () => void; light: () => void }> {
   let n = 0, mute = false, dark = false, darkNext = false;
   const sockets = new Set<net.Socket>();
@@ -63,20 +68,26 @@ function countingProxy(host: string, to: { host: string; port: number }): Promis
       client.on("error", () => sockets.delete(client)).on("close", () => sockets.delete(client));
       return;
     }
-    if (darkNext) { darkNext = false; mute = true; dark = true; }
     const upstream = net.connect(to.port, to.host);
     sockets.add(client).add(upstream);
-    if (mute) {
-      mute = false;
-      let silent = false;
-      client.on("data", (d: Buffer) => { upstream.write(d); });
-      upstream.on("data", (d: Buffer) => {
-        if (silent) return;
-        client.write(d);
-        // ReadyForQuery ('Z', length 5): logged in; from here on nothing passes
-        if (d.includes(Buffer.from([0x5a, 0, 0, 0, 5]))) silent = true;
-      });
-    } else client.pipe(upstream).pipe(client);
+    // the end of what the client sent before, so a mark split across two chunks is still seen
+    let tail = Buffer.alloc(0), silent = false;
+    client.on("data", (d: Buffer) => {
+      if (!silent && (mute || darkNext)) {
+        const seen = Buffer.concat([tail, d]);
+        const at = seen.indexOf(READ_MARK);
+        // a simple Query ('Q', then its length) whose text begins with the mark: a read's statement. The check that asks
+        // the database about a read names the mark too, but inside a query that begins with SELECT
+        if (at >= 5 && seen[at - 5] === 0x51) {
+          silent = true;
+          mute = false;
+          if (darkNext) { darkNext = false; dark = true; }
+        } else tail = seen.subarray(Math.max(0, seen.length - READ_MARK.length - 5));
+      }
+      upstream.write(d);
+    });
+    // from the read's statement on, nothing the database answers passes
+    upstream.on("data", (d: Buffer) => { if (!silent) client.write(d); });
     const end = (): void => { client.destroy(); upstream.destroy(); sockets.delete(client); sockets.delete(upstream); };
     client.on("error", end).on("close", end);
     upstream.on("error", end).on("close", end);
@@ -195,8 +206,10 @@ test("an idle run whose tables are all sync: off opens no connection to the data
   assert.ok((shown.json.tables as Array<{ table: string; added: boolean }>).some((t) => t.table === "public.orders" && t.added), JSON.stringify(shown.json.tables));
 
   // A CONNECTION GONE SILENT (the re-check of PR 900: one held every add for the quarter of an hour of the last guard):
-  // the read's own connection goes silent once logged in; the database, asked on a connection of its own, says its
-  // session does nothing for it, and the read ends — the add says so, and the next add reads anew and adds
+  // the read's own connection goes silent from its first query; the database, asked on a connection of its own, says
+  // its session does nothing for it, and the read ends — the add says so, and the next add reads anew and adds. The
+  // first sync of the table added above is waited for first, so nothing of the run's own is on the database meanwhile
+  ok(await mason("wait", "--timeout", "120", "--json"), "mason wait, before the read goes silent");
   psql(dbUrl, "CREATE TABLE silenced (id int PRIMARY KEY)");
   proxy.muteNext();
   const began = Date.now();
@@ -209,6 +222,7 @@ test("an idle run whose tables are all sync: off opens no connection to the data
   // A DATABASE THAT STOPS ANSWERING ALTOGETHER mid-read (the third re-check of PR 900: the watch asked the database alone,
   // could not reach it, and so "could not tell" for the whole quarter of an hour): nothing arrives on the read's
   // connection, and the database cannot be asked either — after a minute of neither, the read ends, and the add says so
+  ok(await mason("wait", "--timeout", "120", "--json"), "mason wait, before the database goes dark");
   psql(dbUrl, "CREATE TABLE darkened (id int PRIMARY KEY)");
   proxy.darkAfterNext();
   const dark = Date.now();
