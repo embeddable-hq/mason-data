@@ -2004,8 +2004,9 @@ function* wholeCases(): Generator<Matrixed> {
   yield q("whole: a column IN a subquery of div()", "SELECT id, a IN (SELECT div(i, 2) FROM public.bins) AS x, div(i, 2) IN (SELECT a FROM public.bins) AS y, m = ANY (SELECT div(s, 2) FROM public.bins) AS z FROM public.bins ORDER BY id");
   yield q("whole: div() UNION ALL decimals", "SELECT div(i, 2) AS v, 1 AS arm FROM public.bins UNION ALL SELECT a, 2 FROM public.bins UNION ALL SELECT div(b, 7), 3 FROM public.bins ORDER BY 1 NULLS FIRST, 2");
   yield q("whole: decimals UNION ALL div() of a numeric(38,10)", "SELECT m AS v, 1 AS arm FROM public.bins UNION ALL SELECT div(b, 2), 2 FROM public.bins ORDER BY 1 NULLS FIRST, 2");
-  // (a set operation that compares rows of a whole number and decimals is refused, `numeric-set-scales`, oracle/gap-cases.ts;
-  // of whole numbers alone, of decimals of one scale, or an EXCEPT whose left query has the widest scale, it is answered)
+  // (a set operation that compares rows of a whole number and decimals prints them at one scale, the listed difference
+  // mixed-scale-numeric; of whole numbers alone, of decimals of one scale, or an EXCEPT whose left query has the widest
+  // scale, every row is at Postgres's own scale)
   yield q("whole: div() INTERSECT and EXCEPT whole numbers", "SELECT div(i, 2) AS v FROM public.bins INTERSECT SELECT i::numeric FROM public.bins EXCEPT SELECT 0 ORDER BY 1");
   yield q("whole: decimals EXCEPT whole numbers (the left query's rows, at its scale)", "SELECT a FROM public.bins EXCEPT SELECT div(i, 2) FROM public.bins EXCEPT ALL SELECT b::numeric FROM public.bins ORDER BY 1 NULLS FIRST");
   yield q("whole: decimals UNION and EXCEPT ALL decimals of one scale", "SELECT a FROM public.bins UNION SELECT 0.75 EXCEPT ALL SELECT a FROM public.bins WHERE id > 12 ORDER BY 1 NULLS FIRST");

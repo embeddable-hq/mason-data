@@ -50,10 +50,6 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "numeric-ordered-set", sql: "SELECT percentile_disc(ARRAY[0.25, 0.75]) WITHIN GROUP (ORDER BY n2 / 3) FROM typed" },
   { gap: "view-forms", sql: "SELECT happy FROM happy" },
   { gap: "enum-forms", sql: "SELECT id, t::text::mood[] FROM moods WHERE false" },
-  // (issue 929's review: a whole number beside decimals in a set operation that compares rows, either side)
-  { gap: "numeric-set-scales", sql: "SELECT i::numeric AS v FROM public.bins EXCEPT SELECT a FROM public.bins ORDER BY 1" },
-  { gap: "numeric-set-scales", sql: "SELECT a FROM public.bins INTERSECT SELECT div(i, 2) FROM public.bins ORDER BY 1" },
-  { gap: "numeric-set-scales", sql: "SELECT id, b::numeric AS v FROM public.bins UNION SELECT id, h FROM public.bins ORDER BY 1, 2" },
   { gap: "numeric-exact-sum", sql: "SELECT sum(s::numeric) FROM castable WHERE id IN (71, 79)" },
   { gap: "jsonb-compare", sql: "SELECT id, greatest(jb, '1') FROM typed ORDER BY id" },
   { gap: "held-type-compare", sql: "SELECT id FROM mapped ORDER BY mc, id" },

@@ -271,16 +271,12 @@ paths:
   value of more than 38 − s digits does not fit, and is DuckDB's 22003 where Postgres answers, never rounded (beside a
   numeric(38,30), a 9-digit integer). `tests/duck-wire.test.ts` "issue 929", the oracle's `whole:` statements over `bins`.
 - **A set operation that compares rows (UNION, INTERSECT, EXCEPT, every ALL form but UNION ALL) of a numeric column
-  its queries give different scales is refused, `numeric-set-scales`** (issue 929's review): Postgres prints each kept
-  row at its own query's scale (`3` beside `7.00`), and which query's row a duplicate keeps is its plan's; the engine
-  unifies the queries to one DECIMAL first, so every row printed at the widest scale. A scale is `armScales` /
-  `displayScale`'s, and a query whose values decide theirs (an unconstrained column) counts as a scale of its own. A
-  UNION ALL keeps each row's own query's scale (`exactArms`), and is answered; an EXCEPT keeps its left queries' rows
-  alone, and is answered where they write the widest known scale. An INTERSECT is not: Postgres may read the smaller
-  input first, so which query's row it keeps is its plan's. Only where a row's text can be read: the query of an
-  EXISTS, an IN, = ANY or ALL, and a FROM item of a query that names no column (`count(*)`), compare or count values
-  and are answered (`markUnreadSetOps`). `tests/duck-wire.test.ts` "issue 929: a
-  set operation …", oracle/gap-cases.ts.
+  its queries give different scales is answered at ONE scale, the widest** (the listed difference `mixed-scale-numeric`,
+  the owner's decision on issue 929's review: answer more queries right, with the text's scale slightly off, rather
+  than refuse them): the rows are Postgres's, compared by value, and each prints at the widest scale where Postgres
+  prints the scale of the query it came from (`3.00` for `3`). A UNION ALL keeps each row's own scale (`exactArms`).
+  `displayScale` knows a whole numeric (div() of integers) and extract's scales, so a UNION ALL arm of either is
+  told apart from an unconstrained column's. `tests/duck-wire.test.ts` "issue 929: a set operation …".
 - **Whether a statement calls a Mason function is its PLAN's, never its text's** (a review finding: a `*` over a
   copy reads `__mason_visible`, which calls nothing, and a text match left every such statement uncancellable — 82 s
   past a 300 ms timeout): `PlannedSql.functions`, the `__mason_*` calls of the rewritten tree (`masonCalls`,

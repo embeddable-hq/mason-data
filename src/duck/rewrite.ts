@@ -1138,28 +1138,6 @@ class Rewriter {
       const armsOf = (x: Body): void => { if (x.op !== undefined && x.op !== "SETOP_NONE" && x.larg !== undefined && x.rarg !== undefined) { armsOf(x.larg as Body); armsOf(x.rarg as Body); } else arms.push(x); };
       armsOf(b);
       for (const arm of arms) for (const t of (arm.targetList ?? []) as AstNode[]) if (isNode(bodyOf(t).val)) this.refuseExactEquality(bodyOf(t).val as AstNode, what);
-      // A NUMERIC COLUMN WHOSE ARMS WRITE IT AT SEVERAL SCALES (issue 929's review): Postgres prints each row it keeps at
-      // the scale of the arm the row came from (`3` from an integer, `7.00` from a numeric(12,2)); the engine unifies the
-      // arms to one DECIMAL first, so every row prints at the widest scale. A UNION ALL keeps each row's own arm
-      // (`exactArms`). A UNION keeps rows of every arm, and which arm's row a duplicate keeps is the plan's; so does an
-      // INTERSECT (Postgres may read the smaller input first). An EXCEPT keeps rows of its left arms alone, so it prints as
-      // Postgres does where those arms write the widest scale. An arm whose scale its values decide (null: an
-      // unconstrained column) counts as a scale of its own, never the widest
-      const columns = this.unreadSetOps.has(b) ? [] : this.setOperationColumns(b, false) ?? [];
-      const leftArms: Body[] = [];
-      if (b.op === "SETOP_EXCEPT" && b.larg !== undefined) { const collect = (x: Body): void => { if (isSetOp(x) && x.larg !== undefined && x.rarg !== undefined) { collect(x.larg as Body); if (x.op !== "SETOP_EXCEPT") collect(x.rarg as Body); } else leftArms.push(x); }; collect(b.larg as Body); }
-      columns.forEach((c, i) => {
-        if (c?.type !== NUMERIC) return;
-        const scalesOf = (of: readonly Body[]): Array<number | null> => of.flatMap((arm) => this.armScales({ SelectStmt: arm }, i));
-        const scales = scalesOf(arms);
-        if (new Set(scales).size <= 1) return;
-        if (b.op === "SETOP_EXCEPT" && !scales.includes(null)) {
-          const widest = Math.max(...(scales as number[]));
-          if (scalesOf(leftArms).every((x) => x === widest)) return;
-        }
-        throw new Unrewritable(`${what} numeric values of different scales (column ${i + 1}) is not supported by Mason (Postgres prints each row at its own query's scale)`,
-          "cast each query's column to one scale, numeric(p, s), or use UNION ALL", "numeric-set-scales");
-      });
     }
     this.decidedByKey(b);
     // (after decidedByKey: a DISTINCT ON a target names it as the SELECT list reads it, through any_value where it must)
@@ -2247,28 +2225,6 @@ class Rewriter {
   private readonly whyUncarried = new Map<Body, { what: string; where: string; why: string }>();
   /** the subqueries in a FROM given a name for their cells to be read by */
   private named = 0;
-
-  /** the set operations whose rows are compared or counted, never printed (`markUnreadSetOps`) */
-  private readonly unreadSetOps = new WeakSet<Body>();
-
-  /**
-   * THE SET OPERATIONS WHOSE COLUMNS NO ONE READS AS TEXT (`numeric-set-scales` refuses only where a row's text is read,
-   * the class `refusal-wider-than-the-wrong-answer`): the query of an EXISTS, an IN, = ANY or ALL, which compares
-   * values, and a FROM item of a query that names no column at all (`SELECT count(*) FROM (… UNION …) AS u`)
-   */
-  markUnreadSetOps(v: unknown): void {
-    if (Array.isArray(v)) { for (const x of v) this.markUnreadSetOps(x); return; }
-    if (v === null || typeof v !== "object" || !isNode(v)) return;
-    const k = kindOf(v), b = bodyOf(v);
-    const setOp = (n: unknown): Body | null => isNode(n) && kindOf(n) === "SelectStmt" && isSetOp(bodyOf(n)) ? bodyOf(n) : null;
-    if (k === "SubLink" && ["EXISTS_SUBLINK", "ANY_SUBLINK", "ALL_SUBLINK"].includes(String(b.subLinkType))) { const q = setOp(b.subselect); if (q !== null) this.unreadSetOps.add(q); }
-    if (k === "SelectStmt" && !isSetOp(b) && Array.isArray(b.fromClause)) {
-      const names = (n: unknown): boolean => Array.isArray(n) ? n.some(names) : isNode(n) ? kindOf(n) === "ColumnRef" || Object.values(bodyOf(n)).some(names) : false;
-      const outer = [b.targetList, b.whereClause, b.groupClause, b.havingClause, b.sortClause, b.windowClause, b.distinctClause];
-      if (!names(outer)) for (const f of b.fromClause as AstNode[]) { if (kindOf(f) === "RangeSubselect") { const q = setOp(bodyOf(f).subquery); if (q !== null) this.unreadSetOps.add(q); } }
-    }
-    for (const x of Object.values(b)) this.markUnreadSetOps(x);
-  }
 
   /** Before anything else: which query each column reference is read in (`carry` resolves its FROM item there) */
   scopeColumns(v: unknown, stack: Frame[] = []): void {
@@ -7696,7 +7652,7 @@ function decimalConst(text: string): AstNode {
  * of more than 38 − s digits does not fit it, and is DuckDB's error (22003 on the wire), never rounded: beside a
  * numeric(38,30), a 9-digit integer. HUGEINT still keeps a product in 128 bits, as DECIMAL(38, 0) did (DuckDB keeps a
  * product of two 18-digit decimals in 64 bits and fails past it). A set operation that compares rows of numerics of
- * several scales is refused (`numeric-set-scales`): its rows would all print at the widest scale.
+ * several scales prints them at one scale, the widest: the listed difference `mixed-scale-numeric`.
  */
 function wholeNumeric(n: AstNode): AstNode {
   return cast(n, ["hugeint"]);
@@ -8037,7 +7993,6 @@ export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(
   r.indexShapes(own);
   r.repeatedKeyCounts(own);
   r.scopeColumns(own);
-  r.markUnreadSetOps(own);
   r.refuseExactRows(own);
   r.castArms(own);
   r.coerceImplicit(own);

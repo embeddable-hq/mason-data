@@ -22,14 +22,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   Mason's own query, whatever pooler sits in between.
 - **A whole number beside a decimal column no longer loses the column's decimals.** This covers `div()` of two
   integers, an integer cast to `numeric`, a whole constant such as `2.5e2`, and a whole part of `extract`. When one
-  met a decimal column in an `IN (SELECT …)`, a `UNION ALL`, a `CASE`, a `COALESCE` or `GREATEST`, the column's
-  decimals were rounded away with no error. So `a IN (SELECT div(i, 7) …)` matched 0.01 to 0, and rows came back in
-  the wrong order. Now the answer is Postgres's.
-  - A `UNION`, `INTERSECT` or `EXCEPT` without `ALL` (and `INTERSECT ALL`, `EXCEPT ALL`) of numbers of different
-    scales is now refused by name (`numeric-set-scales`). Postgres prints each row at the scale of the query it came
-    from, and Mason printed every row at the widest scale. An `EXCEPT` whose first query has the widest scale is
-    still answered. To get an answer, cast each query's column to one scale, such as `::numeric(12,2)`, or use
-    `UNION ALL`.
+  met a decimal column in an `IN (SELECT …)`, a `UNION`, an `INTERSECT`, an `EXCEPT`, a `CASE`, a `COALESCE` or
+  `GREATEST`, the column's decimals were rounded away with no error. So `a IN (SELECT div(i, 7) …)` matched 0.01 to 0,
+  and rows came back wrong or in the wrong order. Now the rows are Postgres's.
+  - A `UNION`, `INTERSECT` or `EXCEPT` without `ALL` of numbers of different scales prints every row at one scale,
+    the widest. This difference is already listed (`mixed-scale-numeric`). Postgres prints `3` where Mason prints
+    `3.00`. To get Postgres's text, cast each query's column to one scale, such as `::numeric(12,2)`, or use
+    `UNION ALL`, which keeps each row's own scale.
   - Beside a decimal column with many decimals, such as `numeric(38,30)`, a whole number with too many digits now
     fails with `numeric field overflow` (22003). Before, Mason rounded the column's decimals away with no error. A
     `numeric(38,30)` column has room for 8 digits before the point.
