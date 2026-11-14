@@ -2199,24 +2199,27 @@ export class Sync {
   }
 
   /**
-   * WHY A SYNC BY HAND OF THESE TABLES IS REFUSED NOW, or null when it would start — the ONE check `pollNowOf` makes as
-   * it is asked (and `syncRefusal` again, per table, once the pass ahead of it ended): the run, a table not added, then
-   * each table's `syncRefusal`. Synchronous, from what the sync holds in memory: `POST /api/sync` answers a refusal at
-   * once, and starts the sync only when there is none (issue 1007).
+   * WHY A SYNC BY HAND OF THESE TABLES IS REFUSED NOW, or null when it would start — the checks `pollNowOf` makes, in
+   * one call: the run and a table not added (`askedRefusal`, as it is asked), then each table's `syncRefusal` (which
+   * `pollNowOf` asks once the pass ahead of it ended). Synchronous, from what the sync holds in memory: `POST /api/sync`
+   * answers a refusal at once, and starts the sync only when there is none (issue 1007).
    */
   pollRefusal(sources: readonly string[]): PollRefused | null {
-    if (this.mode === "recopy") return this.recopyRefusal();
-    for (const s of sources) {
-      const t = this.tables.get(s);
-      if (t === undefined) return notAddedRefusal(s, [...this.tables.keys()]);
-      const refused = this.syncRefusal(t);
-      if (refused !== null) return refused;
-    }
+    const asked = this.askedRefusal(sources);
+    if (asked !== null) return asked;
+    for (const s of sources) { const refused = this.syncRefusal(this.tables.get(s)!); if (refused !== null) return refused; }
     return null;
   }
 
+  /** a sync by hand refused as it is asked, whatever the pass ahead does: the run reads every table whole, or a table is not added */
+  private askedRefusal(sources: readonly string[]): PollRefused | null {
+    if (this.mode === "recopy") return this.recopyRefusal();
+    const missing = sources.find((s) => !this.tables.has(s));
+    return missing === undefined ? null : notAddedRefusal(missing, [...this.tables.keys()]);
+  }
+
   private async pollNowOf(sources: readonly string[]): Promise<{ at: string; tables: PolledTable[]; streamed?: StreamedAnswer[] }> {
-    const refused = this.pollRefusal(sources);
+    const refused = this.askedRefusal(sources);
     if (refused !== null) throw refused;
     const tables = sources.map((s) => this.tables.get(s)!);
     // a replicated table: the stream keeps it current, so nothing to poll — its answer is where the stream is, and its part
