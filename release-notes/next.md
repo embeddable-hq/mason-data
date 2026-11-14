@@ -9,6 +9,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   2 to 4.5 minutes, close to the 5-minute limit, and now take 13 to 26 seconds. Names that begin with an accented
   letter, such as É, Ø or Ł, are as fast as the rest. The answers are the same as before. A list of distinct values,
   a smallest value per group and `FETCH FIRST … WITH TIES` are still slow.
+- **The host's card (`MASON_UI_OVERVIEW_CARD`) is now the first thing on the web page's Overview**, above Mason's own
+  cards, at the full width. A host with nothing to say answers `{ "refresh": 60, "sections": [] }`, and the title may
+  be left out. The Overview then draws no card at all, and reads the path again at its `refresh`, so a card added
+  later shows up on the next read. A read that fails is still shown in the card. Before, an empty answer drew a box
+  with only its title, and the card came last.
 
 ## What was wrong and is now right
 

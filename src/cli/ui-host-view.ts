@@ -5,7 +5,7 @@
  *
  *   - a VIEW in the sidebar: an entry of `MASON_UI_NAV_LINKS` with `view` in place of `url` (src/cli/ui-nav.ts), shown at
  *     the page's own hash `#host/<n>` (n the entry's place in the list);
- *   - a CARD on the Overview: `MASON_UI_OVERVIEW_CARD`, beside Mason's own cards.
+ *   - a CARD on the Overview: `MASON_UI_OVERVIEW_CARD`, first, above Mason's own cards (issue 1001).
  *
  * Each names a PATH RELATIVE TO THE PAGE'S OWN ADDRESS (`host/status.json`), which the page reads with a GET from its
  * own origin (the page's `default-src 'self'` holds), so a proxy that serves the page at `/mason/` answers
