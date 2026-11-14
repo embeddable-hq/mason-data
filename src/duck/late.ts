@@ -68,6 +68,13 @@
  * 20 s at 125 MB/s (an estimate from the column's 16.4 bytes a row), and only an index or the data clustered by the join
  * key would remove it (docs/DESIGN.md "A top N over joined tables").
  *
+ * WITH NO SORT THE PRESERVED SIDE IS LIMITED FIRST TOO, BUT ONLY WHERE IT IS THE BIGGEST FROM ITEM (issue 463: Metabase's
+ * 20-row preview of `big LEFT JOIN (<a smaller table's JSON fields>) … LIMIT 20` built a hash table of the smaller
+ * table's whole join column to keep 20 rows). Any OFFSET + LIMIT rows of it are a right choice then, and where it holds
+ * at least as many rows as every other item (the sync's counts) the engine read each other item's whole join column
+ * into a hash table before, so limited first it is never slower; issue 824's small preserved table beside a big one,
+ * which streams and stops early, stays as it was (`biggestPreserved` holds the reasons and where it does not apply).
+ *
  * Measured over a 4 M-row join with wide JSON in the last table (a 2 GB
  * limit): 12.9 s and 8.6 GiB spilled before, 0.19 s and none after; LIMIT 10,000 failed for memory before and takes 2.9 s.
  *
@@ -348,7 +355,10 @@ function overLate(n: unknown, columns: Map<string, string>): unknown {
 
 /** what the plan knows beside the statement: which of a statement's functions are volatile (the catalog's pg_proc), and
  *  the name of a role's walled reads (src/duck/row-filter.ts `Walls`), with how many more of them the rewrite wrote */
-export interface LateContext { volatile: (functions: number[]) => Promise<ReadonlySet<number>>; wall: { alias: string; added: number } | null }
+export interface LateContext { volatile: (functions: number[]) => Promise<ReadonlySet<number>>; wall: { alias: string; added: number } | null;
+  /** a copied table's rows as the sync counted them (`CopyState.rows`), by its schema as written (null where none is)
+   *  and its name; null where unknown. Absent: every table's rows unknown */
+  rows?: (schema: string | null, name: string) => number | null }
 /** with no catalog to ask, every function is volatile: nothing is read twice */
 const UNKNOWN: LateContext = { volatile: async (functions) => new Set(functions), wall: null };
 
@@ -370,7 +380,7 @@ export async function selectListAfterLimit(tree: AstNode, analysis: TreeValue, k
   const written = (select: AstNode): AstNode | null => {
     const grouped = keyFirst(select, relations);
     if (grouped !== null || !around) return grouped;
-    const rows = joinRows(select, relations, wall?.alias ?? null);
+    const rows = joinRows(select, relations, wall?.alias ?? null, context.rows ?? null);
     if (rows !== null) { if (wall !== null) wall.added += rows.walls; return rows.select; }
     return strict ? afterLimit(select) : null;
   };
@@ -1473,8 +1483,41 @@ function preservedFirst(s: Body, items: readonly AstNode[], listed: ReadonlyArra
   return { at, count: { A_Const: { ival: limit + offset === 0 ? {} : { ival: limit + offset } } } };
 }
 
+/**
+ * THE PRESERVED SIDE FIRST WITH NO SORT (issue 463: Metabase's 20-row preview of `big LEFT JOIN (<JSON fields of a
+ * smaller table>) … LIMIT 20` built a hash table of the smaller table's whole join column, about 0.15 s against
+ * Postgres's 1–3 ms over 3 M rows). With no ORDER BY any OFFSET + LIMIT rows of the preserved table are a right choice
+ * (`preservedFirst`'s proof with no keys: each yields at least one joined row, and the join of those rows comes first in
+ * an order the statement allows), so they are limited first and the join runs over them alone.
+ *
+ * WHERE IT IS NEVER SLOWER (issue 824's case: `small LEFT JOIN big … LIMIT 100`, where the engine builds its hash table
+ * of the small table, streams the big one and stops early; limited first, the few rows kept wait for their matches
+ * across the big table's whole join column, 116–146 ms against 5 ms at 30 M rows). The engine builds its hash table of
+ * the smaller side. So only where the preserved table holds at least as many rows as every other FROM item: then the
+ * engine read each other item's whole join column into a hash table before, and limited first it reads that column
+ * at most once, into no hash table. The rows are the sync's count of each copy (`LateContext.rows`): a table it does
+ * not know, a derived item of anything but one table, a role's walled read, a WHERE (which may keep few of the
+ * preserved table's rows) and a preserved item that is not a table all leave it as it was.
+ */
+function biggestPreserved(lead: { at: number; count: AstNode } | null, items: readonly AstNode[], listed: ReadonlyArray<Table | Derived | Walled>,
+  sides: ReadonlyArray<PlainSide | null>, rows: LateContext["rows"] | null): { at: number; count: AstNode } | null {
+  if (lead === null || rows === null || rows === undefined || listed[lead.at]!.kind !== "table") return null;
+  const tableOf = (i: number): Body | null => {
+    const r = listed[i]!, side = sides[i];
+    if (r.kind === "table") return kindOf(items[i]) === "RangeVar" ? bodyOf(items[i]) : null;
+    return r.kind === "derived" && side !== null && side !== undefined && !side.walled && kindOf(side.source) === "RangeVar" ? bodyOf(side.source) : null;
+  };
+  const sized = items.map((_, i) => {
+    const t = tableOf(i);
+    return t === null ? null : rows(typeof t.schemaname === "string" ? t.schemaname : null, String(t.relname));
+  });
+  const own = sized[lead.at];
+  if (own === null || own === undefined || sized.some((n) => n === null || n === undefined)) return null;
+  return sized.every((n, i) => i === lead.at || n! <= own) ? lead : null;
+}
+
 /** one SELECT over joined FROM items written with its rows chosen by row number (see above), or null where it is not so shaped */
-function joinRows(select: AstNode, relations: Query[], wall: string | null): { select: AstNode; walls: number } | null {
+function joinRows(select: AstNode, relations: Query[], wall: string | null, rows: LateContext["rows"] | null = null): { select: AstNode; walls: number } | null {
   const written0 = bodyOf(select);
   // a DISTINCT ON keeps one whole row of its FROM per group: that row's numbers fetch it, whatever the ON expressions
   const on0 = distinctOnOf(written0);
@@ -1553,7 +1596,9 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
   if (written === null) return null;
   const isFetched = (i: number): boolean => written.read.has(aliases[i]!) && (listed[i]!.kind !== "derived" || sides[i] !== null);
   // THE PRESERVED SIDE FIRST (issue 824, part 2): its rows limited before the join, where that is the same answer
-  const lead = on === null && !volatileKeys && sorts.length > 0 && !named.some((q) => q.volatileWhere) ? preservedFirst(s, items, listed, query, keys) : null;
+  const lead = on === null && !volatileKeys && sorts.length > 0 && !named.some((q) => q.volatileWhere) ? preservedFirst(s, items, listed, query, keys)
+    // WITH NO SORT, only where the preserved table is the biggest FROM item (issue 463, see `biggestPreserved`)
+    : on === null && sorts.length === 0 && s.whereClause === undefined ? biggestPreserved(preservedFirst(s, items, listed, query, []), items, listed, sides, rows) : null;
   // (a table limited first is a derived table: its row number is the column it exposes, inside; the fetch reads the table)
   const innerId = (i: number): AstNode => listed[i]!.kind === "table" && lead?.at !== i ? rowNumber(aliases[i]!) : ref(aliases[i]!, ROW_ID);
   const fetched = items.flatMap((n, i) => isFetched(i) ? [{ node: n, at: i, alias: aliases[i]!, id: listed[i]!.kind === "table" ? rowNumber(aliases[i]!) : ref(aliases[i]!, ROW_ID), inner: innerId(i) }] : []);
@@ -1573,7 +1618,7 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
         ...(listed[i]!.kind === "table" && isFetched(i) ? [{ ResTarget: { name: ROW_ID, val: rowNumber(aliases[i]!) } }] : [])],
       fromClause: [placed(n, i)],
       ...(s.whereClause !== undefined ? { whereClause: structuredClone(s.whereClause) } : {}),
-      sortClause: sorts.map((sort, k) => ({ SortBy: { ...bodyOf(sort), node: structuredClone(keys[k]!) } })),
+      ...(sorts.length > 0 ? { sortClause: sorts.map((sort, k) => ({ SortBy: { ...bodyOf(sort), node: structuredClone(keys[k]!) } })) } : {}),
       limitCount: lead.count, limitOption: "LIMIT_OPTION_COUNT", op: "SETOP_NONE",
     } } } };
   }, (b) => lead === null ? b : { ...b, ...(b.quals !== undefined ? { quals: shortened(b.quals, aliases[lead.at]!) } : {}) });
