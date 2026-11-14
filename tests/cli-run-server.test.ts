@@ -64,7 +64,7 @@ const asked: string[][] = [];
 const pollNow = (sources: string[]): Promise<{ at: string; tables: PolledTable[] }> => {
   asked.push(sources);
   if (sources.includes("public.logs")) return Promise.reject(new PollRefused("nothing_yet", "public.logs is not synced yet (its first sync has not finished): mason wait waits for it"));
-  return Promise.resolve({ at: "2026-10-24T10:05:00.000Z", tables: sources.map((table) => ({ table, changed: 2, deleted: 1, rows: 3, ms: 40 })) });
+  return Promise.resolve({ at: "2026-10-24T10:05:00.000Z", tables: sources.map((table) => ({ table, added: 1, updated: 1, deleted: 1, rows: 3, ms: 40 })) });
 };
 // the request log's reads (src/duck/requests.ts), as the ledger answers them: the server passes them on, never a copy
 const asks: RequestQuery[] = [];
@@ -382,7 +382,7 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
       return { status: r.status, body: await r.json() as Record<string, unknown> };
     };
     const polled = await post("/api/sync", { tables: ["public.customers"] });
-    assert.deepEqual([polled.status, polled.body], [200, { at: "2026-10-24T10:05:00.000Z", tables: [{ table: "public.customers", changed: 2, deleted: 1, rows: 3, ms: 40 }] }]);
+    assert.deepEqual([polled.status, polled.body], [200, { at: "2026-10-24T10:05:00.000Z", tables: [{ table: "public.customers", added: 1, updated: 1, deleted: 1, rows: 3, ms: 40 }] }]);
     const refused = await post("/api/sync", { tables: ["public.logs"] });
     assert.deepEqual([refused.status, refused.body.code], [409, "nothing_yet"], "a refusal keeps the sync's code for the CLI");
     assert.match(String(refused.body.error), /public\.logs is not synced yet/);

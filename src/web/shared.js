@@ -173,12 +173,10 @@ export const percent = (share) => `${Math.floor(Math.max(0, Math.min(1, share)) 
 /** The time a copy has left, as the commands print it: `~12 min left`; "" when nothing is measured yet. */
 export const leftText = (secondsLeft) => secondsLeft === null || secondsLeft === undefined ? "" : `~${duration(secondsLeft)} left`;
 
-/** `1,204 changes (1,000 inserts, 200 updates, 4 deletes)`: a table's counts as the stream's lines say them (src/duck/stream.ts `countsText`). */
+/** `1,000 added, 200 updated, 4 deleted`: a table's counts as the stream's lines say them, a TRUNCATE's after them when
+ *  there was one (src/duck/stream.ts `countsText`, held equal by the tests). */
 export function countsText(c) {
-  const total = c.inserts + c.updates + c.deletes + c.truncates;
-  const parts = [[c.inserts, "insert"], [c.updates, "update"], [c.deletes, "delete"], [c.truncates, "truncate"]]
-    .filter(([k]) => k > 0).map(([k, w]) => `${n(k)} ${w}${k === 1 ? "" : "s"}`);
-  return `${n(total)} change${total === 1 ? "" : "s"}${parts.length ? ` (${parts.join(", ")})` : ""}`;
+  return `${n(c.inserts)} added, ${n(c.updates)} updated, ${n(c.deletes)} deleted${c.truncates > 0 ? `, emptied ${n(c.truncates)} time${c.truncates === 1 ? "" : "s"} by a TRUNCATE` : ""}`;
 }
 
 /**

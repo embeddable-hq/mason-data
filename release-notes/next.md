@@ -8,6 +8,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **A sync now says how many rows it added, updated and deleted**, such as "1,200 added, 282,770 updated, 0 deleted".
+  Before, it said "283,970 changed", which lumped new rows and edited rows together. This holds in `mason sync`, the
+  web page's Sync now and Sync events, `mason logs --events` and the run's log. A first sync, or a table synced again
+  whole, adds every row. Over replication, the counts follow your database's inserts, updates and deletes. A script
+  that reads `mason sync --json` must read `added` and `updated` in place of `changed`. A script that matched the
+  words of a `synced`, `polled`, `streamed` or `full_sync` event must match the new words.
+
 - **A whole number beside a numeric with very many decimals keeps at least 19 of its decimals.** This covers `div()`
   of two integers, an integer cast to `numeric`, a whole constant such as `2.5e2`, and a whole part of `extract`.
   Beside a column like `numeric(38,30)`, in a `UNION`, an `IN (SELECT …)`, a `CASE`, a `COALESCE` or `GREATEST`,

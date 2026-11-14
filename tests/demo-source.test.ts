@@ -385,14 +385,14 @@ test("a sync asked by hand (mason sync, the page's Sync now) is a synced event i
     const polled = events.filter((e) => e.kind === "polled");
     assert.equal(polled.length, 1, `the scheduled poll's event: ${JSON.stringify(events)}\n${logged.slice(-6).join("\n")}`);
     assert.equal(polled[0]!.table, "public.orders");
-    assert.match(polled[0]!.message, /^synced on schedule: [\d,]+ changed, [\d,]+ deleted, [\d,]+ rows now · [\d.]+ (ms|s)$/);
+    assert.match(polled[0]!.message, /^synced on schedule: [\d,]+ added, [\d,]+ updated, [\d,]+ deleted, [\d,]+ rows now · [\d.]+ (ms|s)$/);
     await s.change();
     const asked = await sync.pollNow(["public.orders"]);
     const synced = events.filter((e) => e.kind === "synced");
     // the words mason sync prints on the table's line (and the page's Sync now, held equal to it), after "synced by hand"
     const said = syncCommand.syncedReport(asked, ["public.orders"], []).details[0]![1];
     assert.deepEqual(synced, [{ kind: "synced", table: "public.orders", message: `synced by hand: ${said}` }], `${JSON.stringify(events)}\n${logged.slice(-6).join("\n")}`);
-    assert.match(synced[0]!.message, /^synced by hand: [\d,]+ changed, [\d,]+ deleted, [\d,]+ rows now · [\d.]+ (ms|s)$/);
+    assert.match(synced[0]!.message, /^synced by hand: [\d,]+ added, [\d,]+ updated, [\d,]+ deleted, [\d,]+ rows now · [\d.]+ (ms|s)$/);
   } finally {
     await sync.stop();
     await store.close();

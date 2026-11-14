@@ -858,11 +858,11 @@ test("the stream says where it is: a table joins and leaves on a line with its p
     assert.equal(typeof s1.lag.bytes, "number");
 
     // THE PERIODIC LINE says what moved since the last one, and nothing while idle
-    await until(() => logged.some((l) => new RegExp(`^replication: applied through ${LSN} · in the last [\\d.]+ s: public\\.a 6 changes \\(3 inserts, 2 updates, 1 delete\\) · [\\d,]+ bytes behind the database; the newest change applied was committed`).test(l)),
+    await until(() => logged.some((l) => new RegExp(`^replication: applied through ${LSN} · in the last [\\d.]+ s: public\\.a 3 added, 2 updated, 1 deleted · [\\d,]+ bytes behind the database; the newest change applied was committed`).test(l)),
       "the periodic line", logged, 5_000);
     // and ONE scheduled-sync event a table for it (src/duck/events.ts `streamed`), never one a batch
     assert.deepEqual(events.filter((e) => e.kind === "streamed").map((e) => `${e.table} ${e.message.replace(/in the last [\d.]+ s$/, "in the last # s")}`),
-      ["public.a streamed 6 changes (3 inserts, 2 updates, 1 delete) in the last # s"], JSON.stringify(events));
+      ["public.a streamed 3 added, 2 updated, 1 deleted in the last # s"], JSON.stringify(events));
     const idleFrom = logged.length, idleEvents = events.length;
     await new Promise((r) => setTimeout(r, 1_200));
     assert.deepEqual(logged.slice(idleFrom).filter((l) => /^replication: applied through /.test(l)), [], "silent while idle");
