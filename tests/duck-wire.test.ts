@@ -120,12 +120,13 @@ const APARAMS = "(1, 1, 10, 'a', '00000000-0000-0000-0000-000000000001', 1.5, tr
   "(4, NULL, NULL, 'NULL', NULL, NULL, true, NULL, NULL, NULL), " +
   "(5, 5, 50, 'he said \"hi\"', '00000000-0000-0000-0000-000000000005', 3.0001, false, '2026-02-01', '2026-02-01 00:00:00+00', 1e-10), " +
   "(6, 6, 60, 'x\\y', '00000000-0000-0000-0000-000000000006', 3.00010000000000000002, true, '2026-02-02', '2026-02-02 00:00:00+00', 6)";
-/** issue 983's second round, rows of the same table (one more table tips the 40 MB of "a statement past what may
- *  spill"): instants (ts) and wall clocks (tl) either side of a day's end in zones off UTC by half hours, and either
- *  side of a change of daylight saving (America's of 2026-03-08 and 2026-11-01, Europe's of 2026-03-29); as (id, ts, tl, d) */
-const AZONES = "(101, '2026-01-01 00:00:00+00', '2026-01-01 00:00:00', '2026-01-01'), (102, '2025-12-31 20:30:00+00', '2025-12-31 20:30:00', '2025-12-31'), " +
-  "(103, '2026-03-08 07:00:00+00', '2026-03-08 02:30:00', '2026-03-08'), (104, '2026-11-01 05:30:00+00', '2026-11-01 01:30:00', '2026-11-01'), " +
-  "(105, '2026-03-29 01:00:00+00', '2026-03-29 02:30:00', '2026-03-29'), (106, '2026-01-01 03:30:00+00', '2026-01-01 03:30:00', '2026-01-02'), (107, NULL, NULL, NULL)";
+/** issue 983's second round, rows of the same table, with no column of their own (the store's fixture sits at the 40
+ *  MB of "a statement past what may spill"; a timestamp column against wider arrays is the oracle's and the sweep's):
+ *  instants either side of a day's end in zones off UTC by half hours, and either side of a change of daylight saving
+ *  (America's of 2026-03-08 and 2026-11-01, Europe's of 2026-03-29); as (id, ts, d) */
+const AZONES = "(101, '2026-01-01 00:00:00+00', '2026-01-01'), (102, '2025-12-31 20:30:00+00', '2025-12-31'), " +
+  "(103, '2026-03-08 07:00:00+00', '2026-03-08'), (104, '2026-11-01 05:30:00+00', '2026-11-01'), " +
+  "(105, '2026-03-29 01:00:00+00', '2026-03-29'), (106, '2026-01-01 03:30:00+00', '2026-01-02'), (107, NULL, NULL)";
 // one table in public, one in a schema of its own, as the copy lands them (<schema>.<table>, the key as the source's)
 const DDL = [
   "CREATE SCHEMA IF NOT EXISTS sales",
@@ -226,9 +227,9 @@ const DDL = [
   "CREATE TABLE public.timetz_runs3 (id INTEGER PRIMARY KEY, run_at3 TIMETZ)",
   "INSERT INTO public.timetz_runs3 VALUES (1, '07:30:00.123+05:30'), (2, NULL)",
   // issue 983, after the others: a column of each type an array parameter is compared with
-  "CREATE TABLE public.aparams (id INTEGER PRIMARY KEY, s SMALLINT, b BIGINT, x VARCHAR, u UUID, n DECIMAL(30,20), f BOOLEAN, d DATE, ts TIMESTAMPTZ, fl DOUBLE, tl TIMESTAMP)",
+  "CREATE TABLE public.aparams (id INTEGER PRIMARY KEY, s SMALLINT, b BIGINT, x VARCHAR, u UUID, n DECIMAL(30,20), f BOOLEAN, d DATE, ts TIMESTAMPTZ, fl DOUBLE)",
   `INSERT INTO public.aparams (id, s, b, x, u, n, f, d, ts, fl) VALUES ${APARAMS}`,
-  `INSERT INTO public.aparams (id, ts, tl, d) VALUES ${AZONES}`,
+  `INSERT INTO public.aparams (id, ts, d) VALUES ${AZONES}`,
 ];
 // the same rows in Postgres, typed as the source would type them
 const PG_DDL = [
@@ -316,9 +317,9 @@ const PG_DDL = [
   "INSERT INTO public.invoices VALUES (7, 70.5)",
   "CREATE TABLE sales.accounts (id INTEGER PRIMARY KEY, owner VARCHAR)",
   "INSERT INTO sales.accounts VALUES (1, 'x')",
-  "CREATE TABLE public.aparams (id integer PRIMARY KEY, s smallint, b bigint, x text, u uuid, n numeric(30,20), f boolean, d date, ts timestamptz, fl double precision, tl timestamp)",
+  "CREATE TABLE public.aparams (id integer PRIMARY KEY, s smallint, b bigint, x text, u uuid, n numeric(30,20), f boolean, d date, ts timestamptz, fl double precision)",
   `INSERT INTO public.aparams (id, s, b, x, u, n, f, d, ts, fl) VALUES ${APARAMS}`,
-  `INSERT INTO public.aparams (id, ts, tl, d) VALUES ${AZONES}`,
+  `INSERT INTO public.aparams (id, ts, d) VALUES ${AZONES}`,
 ];
 const schema: PgSchema = {
   database: "app",
@@ -388,8 +389,7 @@ const schema: PgSchema = {
     { name: "timetz_runs3", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "run_at3", type: "text", spelled: "time(3) with time zone" }] },
     { name: "aparams", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "s", type: "int2" }, { name: "b", type: "int8" }, { name: "x", type: "text" }, { name: "u", type: "uuid" },
-        { name: "n", type: "numeric", spelled: "numeric(30,20)" }, { name: "f", type: "bool" }, { name: "d", type: "date" }, { name: "ts", type: "timestamptz" }, { name: "fl", type: "float8" },
-        { name: "tl", type: "timestamptz", spelled: "timestamp" }] },
+        { name: "n", type: "numeric", spelled: "numeric(30,20)" }, { name: "f", type: "bool" }, { name: "d", type: "date" }, { name: "ts", type: "timestamptz" }, { name: "fl", type: "float8" }] },
   ],
   // as the source prints them under a search_path of pg_catalog alone (src/cli/preflight.ts VIEWS_SQL); `lost` reads a
   // table Mason has not copied, so the catalog leaves it out
@@ -6070,8 +6070,6 @@ test("issue 983: a timestamptz, timestamp or date against an array of another of
     const pairs: Array<[string, string, string[][]]> = [
       ["ts", "timestamp", [["2025-12-31 20:30:00"], ["2026-01-01 00:00:00", "2026-03-08 02:30:00"], ["2026-11-01 01:30:00", "2026-03-29 02:30:00"]]],
       ["ts", "date", [["2026-01-01"], ["2025-12-31", "2026-03-08"], ["2026-11-01"]]],
-      ["tl", "timestamptz", [["2026-01-01 00:00:00+00"], ["2025-12-31 20:30:00-03:30", "2026-03-08 07:00:00+00"], ["2026-11-01 05:30:00+00"]]],
-      ["tl", "date", [["2026-01-01"], ["2026-03-08"]]],
       ["d", "timestamptz", [["2026-01-01 00:00:00+00"], ["2026-01-01 03:30:00+00", "2025-12-31 03:00:00+00"]]],
       ["d", "timestamp", [["2026-01-01 00:00:00"], ["2026-03-08 00:00:00"]]],
     ];
@@ -6127,7 +6125,6 @@ test("issue 983: a cast of ARRAY[$1::numeric, …] is honoured, and a time IN a 
         ["SELECT id FROM aparams WHERE ts IN (SELECT unnest($1::date[])) ORDER BY id", '{"2026-01-01","2026-03-08"}'],
         ["SELECT id FROM aparams WHERE ts NOT IN (SELECT unnest($1::timestamp[])) ORDER BY id", '{"2025-12-31 20:30:00"}'],
         ["SELECT id FROM aparams WHERE ts < ALL (SELECT unnest($1::date[])) ORDER BY id", '{"2026-01-01"}'],
-        ["SELECT id FROM aparams WHERE tl IN (SELECT unnest($1::timestamptz[])) ORDER BY id", '{"2026-01-01 00:00:00+00","2026-03-08 07:00:00+00"}'],
         ["SELECT id FROM aparams WHERE d = ANY (SELECT unnest($1::timestamptz[])) ORDER BY id", '{"2026-01-01 03:30:00+00"}'],
         ["SELECT id FROM aparams WHERE ts IN (SELECT '2025-12-31 20:30:00'::timestamp WHERE $1::text IS NOT NULL) ORDER BY id", "x"],
       ] as Array<[string, string]>) await check(sql, [value], zone);
