@@ -127,14 +127,48 @@ const smallsBeside = async (q: ReturnType<typeof heavy>, b: pg.Client): Promise<
  * fast machine's idle of a millisecond from making the bound smaller than a scheduler's slice.
  */
 const mostBeside = (idleMs: number): number => Math.max(25 * idleMs, 100);
+/**
+ * THE EXECUTOR'S LOOP ITSELF, beside a heavy statement that calls nothing: a request that touches no engine (the
+ * function counts, `store.functionCalls`) is answered by the worker's loop alone, so its time is how long that loop was
+ * held, never DuckDB's work beside it. Asked again and again, side by side with the small statements, so a single hold
+ * meets a request in flight (a hold as a statement starts met none of the small statements' own waits). Its median idle
+ * is a millisecond or less; beside the engine's own work, loaded or not, its worst was WORST_LOOP_SEEN here. A small
+ * statement's own worst is no bound: the engine's work beside it once held one 889 ms against 3 ms idle.
+ */
+const loopIdle = async (): Promise<number> => {
+  const idle: number[] = [];
+  for (let i = 0; i < SAMPLES; i++) idle.push((await timed(() => store.functionCalls())).ms);
+  return median(idle);
+};
+const loopBeside = async (q: ReturnType<typeof heavy>, done: () => boolean): Promise<number[]> => {
+  const waits: number[] = [];
+  // (5 ms apart: a hold of the loop longer than that still meets a request in flight)
+  while (q.running() && !done()) { waits.push((await timed(() => store.functionCalls())).ms); await sleep(5); }
+  return waits;
+};
+/** small statements beside `q` (`smallsBeside`) and the executor's loop beside them (`loopBeside`), until the first end */
+const besideNative = async (q: ReturnType<typeof heavy>, b: pg.Client): Promise<{ waits: number[]; loop: number[] }> => {
+  let done = false;
+  const [waits, loop] = await Promise.all([smallsBeside(q, b).finally(() => { done = true; }), loopBeside(q, () => done)]);
+  return { waits, loop };
+};
+/** The most the executor's loop may be held once beside a heavy statement that calls nothing, against its median idle:
+ *  looser than a median's bound, since a scheduler under load parks a thread now and then. */
+const mostHeld = (idleMs: number): number => Math.max(50 * idleMs, 250);
 /** the rounds of a login, a ping and a new session's statement asked beside the calling statement */
 const ROUNDS = 5;
 
 test("a statement calling a Mason function on every row starves no one but its thread: another session, a new login and the command server answer within a few of its vectors", { timeout: 120_000 }, async (t) => {
-  const a = await client();
+  const a = await client(), b = await client();
   const login = (): Promise<number> => (async () => { const c = await client(); try { return (await c.query("SELECT 1 AS one")).rows[0].one as number; } finally { await c.end(); } })();
   // a statement over a copied table is a request to the engine's thread
   const copied = (): Promise<string> => (async () => { const c = await client(); try { return (await c.query("SELECT count(*) AS n FROM small")).rows[0].n as string; } finally { await c.end(); } })();
+  // A LOGIN AND THE COMMAND SERVER ARE THE MAIN THREAD'S, and never wait for the worker, so the calling statement's
+  // vectors are the wrong clock for them (most of what they would count is the clock's own reading, a request to the
+  // worker). They are timed in ms against a small statement's median idle on an open session, measured just before
+  // on the same machine and load (`mostBeside`): the main thread held 1.5 s on each ping is caught, as main's fixed
+  // second caught it, and a slow runner slows both sides.
+  const idle = await idleMedian(b);
   const slow = heavy(t, a, CALLING, 90_000);
   try {
     const clock = await vectorClock(slow, CALLING);
@@ -149,18 +183,19 @@ test("a statement calling a Mason function on every row starves no one but its t
       assert.equal(l.value, 1);
       assert.equal(p.value, 200);
       assert.equal(s.value, "10");
-      logins.push(l.vectors); pings.push(p.vectors); copies.push(s.vectors);
+      logins.push(Math.round(l.ms)); pings.push(Math.round(p.ms)); copies.push(s.vectors);
       if (slow.running()) beside++;
     }
-    const said = `a login + SELECT 1 ${logins.join(", ")}; /api/ping ${pings.join(", ")}; a statement over a copied table ${copies.join(", ")}`;
-    t.diagnostic(`in vectors of the calling statement: ${said}`);
-    assert.equal(beside, ROUNDS, `${beside} of ${ROUNDS} rounds were answered in the ${clock.ran()} vectors of the calling statement (${said}): they waited for it, or ROWS is too few for this machine`);
-    assert.ok(median(logins) <= MOST_VECTORS, `a new session's login and SELECT 1 waited for ${logins.join(", ")} vectors of the calling statement`);
-    assert.ok(median(pings) <= MOST_VECTORS, `the command server's /api/ping waited for ${pings.join(", ")} vectors of the calling statement`);
+    const said = `a login + SELECT 1 ${logins.join(", ")} ms; /api/ping ${pings.join(", ")} ms; a statement over a copied table ${copies.join(", ")} vectors; against ${Math.round(idle)} ms idle`;
+    t.diagnostic(`beside the calling statement: ${said}`);
+    // the rounds take seconds and the statement tens of them (6 M rows): only rounds held behind it see it end first
+    assert.equal(beside, ROUNDS, `${beside} of ${ROUNDS} rounds were answered in the ${clock.ran()} vectors of the calling statement (${said}): they waited for it to end`);
+    assert.ok(median(logins) <= mostBeside(idle), `a new session's login and SELECT 1 took ${logins.join(", ")} ms during the calling statement, against ${Math.round(idle)} ms idle`);
+    assert.ok(median(pings) <= mostBeside(idle), `the command server's /api/ping took ${pings.join(", ")} ms during the calling statement, against ${Math.round(idle)} ms idle`);
     assert.ok(median(copies) <= MOST_VECTORS, `a statement over a copied table waited for ${copies.join(", ")} vectors of the calling statement`);
     slow.stop();
     await endedWell(slow, CALLING);
-  } finally { try { await slow.end(); } finally { await a.end(); } }
+  } finally { try { await slow.end(); } finally { await a.end(); await b.end(); } }
 });
 
 // A SMALL STATEMENT NEVER WAITS FOR A HEAVY ONE'S CALLS (issue 127, src/duck/functions.ts `registerTurn`): `select count(*)`
@@ -206,18 +241,19 @@ for (const [shape, sql, rows, calls] of [
         assert.ok(waits.length >= 5, `${waits.length} small statements were answered in ${ran} vectors of ${shape}: it held the executor's loop`);
         assert.ok(median(waits) <= MOST_VECTORS, `a small statement waited for a median of ${median(waits)} vectors of ${shape}: it held the executor's loop`);
       } else {
-        const idle = await idleMedian(b);
+        const idle = await idleMedian(b), held = await loopIdle();
         const before = await vectorsSoFar();
         q = heavy(t, a, sql, 150_000);
-        const waits = await smallsBeside(q, b);
+        const { waits, loop } = await besideNative(q, b);
         q.stop();
         const r = await endedWell(q, sql);
         const ran = (await vectorsSoFar()) - before;
-        t.diagnostic(`${waits.length} small statements beside ${shape}${r === null ? " (then cancelled)" : " (all of it)"}, ${ran} vectors of Mason functions: median ${Math.round(median(waits))} ms, worst ${Math.round(Math.max(...waits))} ms, against ${Math.round(idle)} ms idle`);
+        t.diagnostic(`${waits.length} small statements beside ${shape}${r === null ? " (then cancelled)" : " (all of it)"}, ${ran} vectors of Mason functions: median ${Math.round(median(waits))} ms, worst ${Math.round(Math.max(...waits))} ms, against ${Math.round(idle)} ms idle; the executor's loop ${loop.length} times, worst ${Math.round(Math.max(...loop))} ms, against ${held.toFixed(1)} ms idle`);
         assert.ok(ran <= FEW_VECTORS, `${shape} called Mason functions for ${ran} vectors: it calls one per vector now, so give it \`calls: true\``);
         if (r !== null) assert.equal(r.length, rows, "and the heavy statement answers");
         assert.ok(waits.length >= 5, `${waits.length} small statements were answered beside ${shape}`);
         assert.ok(median(waits) <= mostBeside(idle), `the small statement's median wait beside ${shape} was ${Math.round(median(waits))} ms, against ${Math.round(idle)} ms idle`);
+        assert.ok(Math.max(...loop) <= mostHeld(held), `the executor's loop was held ${Math.round(Math.max(...loop))} ms beside ${shape}, against ${held.toFixed(1)} ms idle`);
       }
     } finally { try { await q?.end(); } finally { await a.end(); await b.end(); } }
   });
@@ -243,20 +279,21 @@ test("a small statement is not held by a native @> or -> over wide jsonb documen
     const a = await client(), b = await client();
     let q: ReturnType<typeof heavy> | undefined;
     try {
-      const idle = await idleMedian(b);
+      const idle = await idleMedian(b), held = await loopIdle();
       const before = await calls();
       const t0 = Date.now();
       q = heavy(t, a, sql, 60_000);
-      const waits = await smallsBeside(q, b);
+      const { waits, loop } = await besideNative(q, b);
       q.stop();
       const r = await endedWell(q, sql);
       const heavyMs = Date.now() - t0;
       const hops = (await calls()) - before;
-      t.diagnostic(`${sql}: ${heavyMs} ms${r === null ? " (then cancelled)" : " (all of it)"}, ${hops} function calls; ${waits.length} small statements beside it, median ${Math.round(median(waits))} ms, worst ${Math.round(Math.max(...waits))} ms, against ${Math.round(idle)} ms idle`);
+      t.diagnostic(`${sql}: ${heavyMs} ms${r === null ? " (then cancelled)" : " (all of it)"}, ${hops} function calls; ${waits.length} small statements beside it, median ${Math.round(median(waits))} ms, worst ${Math.round(Math.max(...waits))} ms, against ${Math.round(idle)} ms idle; the executor's loop ${loop.length} times, worst ${Math.round(Math.max(...loop))} ms, against ${held.toFixed(1)} ms idle`);
       assert.equal(hops, 0, `${sql} reached a function ${hops} times (the turn's included)`);
       if (r !== null) assert.equal(String(r[0].count), String(want), `${sql} answers`);
       assert.ok(waits.length >= 5, `${waits.length} small statements were answered beside ${sql} in ${heavyMs} ms`);
       assert.ok(median(waits) <= mostBeside(idle), `the small statement's median wait beside ${sql} was ${Math.round(median(waits))} ms, against ${Math.round(idle)} ms idle`);
+      assert.ok(Math.max(...loop) <= mostHeld(held), `the executor's loop was held ${Math.round(Math.max(...loop))} ms beside ${sql}, against ${held.toFixed(1)} ms idle`);
     } finally { try { await q?.end(); } finally { await a.end(); await b.end(); } }
   }
 });
