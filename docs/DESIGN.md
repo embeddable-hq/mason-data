@@ -815,7 +815,9 @@ difference needed a hand-written `KNOWN` entry. Now a column both sides send as 
 exactly, with `src/lib/pg-numeric.ts` (`numericWithinRule`, tests/integration/oracle/compare.ts). A difference within it
 is none, and one outside it is a wrong value. The carry is read narrowly: only a value rounded at a decimal (fewer than
 15 whole-number digits) may carry into a whole-number digit, so a 17-digit id never passes by rounding. A numeric read
-as text (`x::text`, a JSON, an array) is a string to the client, and its difference is still a listed decision.
+as text (`x::text`, a JSON, an array) is a string to the client, and its difference is still a listed decision. So is
+a difference in the rows, or in a boolean, where the rule let two values merge or match (a UNION, a DISTINCT, an IN or a
+join): it needs a `KNOWN` entry under its gap.
 
 ### How CLAUDE.md is laid out (2026-11-13, issue 891)
 

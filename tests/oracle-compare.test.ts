@@ -88,13 +88,25 @@ test("numericWithinRule: very large values hold every whole-number digit, tiny o
   assert.equal(numericWithinRule("0.0000000000000000001234567890123456", "0.000000000000000000123456789012346"), true, "tiny, 15 significant digits");
   assert.equal(numericWithinRule("0.0000000000000000001", "0.0000000000000000002"), false, "tiny, its one digit off");
   assert.equal(numericWithinRule("0.0000000000000000001", "0"), false, "a tiny value is not zero");
-  assert.equal(numericWithinRule("1.5e3", "1500.0"), true, "an exponent read as numeric_in reads it");
+});
+
+test("numericWithinRule: only the plain form Postgres writes is judged by the rule; any other text is a wrong value", () => {
+  // a review finding: `1.6e1` beside `16` passed, and the plain DuckDB connection's `4.6566142782038325e-9` was counted
+  // exact. No writer of Mason's sends these, but one that did would be wrong, whatever its value
+  for (const got of ["1.6e1", "1.6E1", " 16", "16 ", "016", "+16", "16.", "1_6", "0x10"]) assert.equal(numericWithinRule("16", got), false, got);
+  assert.equal(numericWithinRule("0.5", ".5"), false, "no digit before the point");
+  assert.equal(numericWithinRule("0.0000000046566142782038325", "4.6566142782038325e-9"), false, "a double's exponent");
+  assert.equal(numericWithinRule("0", "-0"), false, "Postgres never writes -0");
+  assert.equal(numericWithinRule("0.00", "-0.00"), false);
+  assert.equal(numericWithinRule("0", "0.000"), true);
+  assert.equal(numericWithinRule("0.5", "0.50"), true);
+  assert.equal(numericWithinRule("-0.5", "-0.50"), true, "a negative below 1 is plain");
 });
 
 test("numericWithinRule: negatives, NaN and Infinity are only themselves, and a text no numeric reads is never within", () => {
   assert.equal(numericWithinRule("-2.5", "-2.500"), true);
   assert.equal(numericWithinRule("-2.5", "2.5"), false, "the sign");
-  assert.equal(numericWithinRule("0", "-0.00"), true);
+  assert.equal(numericWithinRule("0", "0.00"), true);
   assert.equal(numericWithinRule("NaN", "NaN"), true);
   assert.equal(numericWithinRule("NaN", "nan"), false, "the engine's double's text is not Postgres's");
   assert.equal(numericWithinRule("Infinity", "Infinity"), true);

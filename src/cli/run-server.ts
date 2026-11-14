@@ -45,11 +45,11 @@ import { fileStamp, syncedDataBytes, walBytes } from "../duck/file-bytes.ts";
 import { NO_ROLES, type RolesLive } from "../duck/grants.ts";
 import { addedNext, addUser, attributesToAdd, disabledNext, disableUser, enabledNext, enableUser, fromNext, listUsers, rangesText, removeUser, REMOVED_NEXT, roleToAdd, setUserFrom, withLastUsed } from "./user.ts";
 import { userRole } from "./roles.ts";
-import type { RunState } from "./commands.ts";
+import type { RunState, SourcesReadOnlyKind } from "./commands.ts";
 import { clientLink, postgresFacts } from "./pg-url.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
 import { catalogTable, copiedColumns, effectiveSync, entryName, everyColumnLeavesOut, parseSourceText, shownPath, type CatalogColumn, type ProjectSource, type SourceFile } from "./sources.ts";
-import { projectWriteRefusal } from "./project.ts";
+import { projectWriteState } from "./project.ts";
 import { addEntry, plannedEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type PollMeasure, type RemoveResult } from "./source-edit.ts";
 import { notAddedRefusal, PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamedAnswer, type StreamStatus } from "../duck/sync.ts";
 import { DEFAULT_SYNC, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
@@ -270,7 +270,8 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     served: ctx.served === true,
     // why the page offers no Add or Remove, or null: the project's files deployed read-only (MASON_PROJECT_READONLY), or
     // a server's project folder mounted read-only — a control that can only fail is not offered
-    sourcesReadOnly: sourcesReadOnly(ctx, sources.file?.file ?? null),
+    // and which reason it is (`deployed`, `unwritable`: a deploy is the way out, and the page links to how; `unknown`)
+    ...sourcesReadOnlyFacts(sourcesReadOnly(ctx, sources.file?.file ?? null)),
     // why the page offers no control that changes anything (MASON_UI_READ_ONLY=1, src/cli/ui-read-only.ts), or null:
     // every change it would send is refused
     pageReadOnly: ctx.pageReadOnly === true ? PAGE_READ_ONLY_WHY : null,
@@ -333,17 +334,26 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
 
 /**
  * Why the run could not write its sources file now, or null — ONE fact for the page and `mason status --json`, computed
- * here: first the project's own word (src/cli/project.ts `projectWriteRefusal`, the authority every edit asks, so the page
+ * here: first the project's own word (src/cli/project.ts `projectWriteState`, the authority every edit asks, so the page
  * offers no Add or Remove exactly when `/api/pick` and `/api/remove` would refuse them); then, on a server, a file it
  * cannot write (a folder mounted read-only). `mason start`'s file is the developer's, and never asked of the disk.
  */
-function sourcesReadOnly(ctx: RunContext, file: string | null): string | null {
-  const readOnly = projectWriteRefusal(ctx.root, process.env);
-  if (readOnly !== null) return `${readOnly.message}; ${readOnly.fix}`;
+function sourcesReadOnly(ctx: RunContext, file: string | null): { text: string; kind: SourcesReadOnlyKind } | null {
+  const state = projectWriteState(ctx.root, process.env);
+  if (state !== null) return { text: `${sentence(state.refusal.message)}${state.refusal.fix ? ` ${sentence(state.refusal.fix)}` : ""}`, kind: state.kind };
   if (ctx.served !== true || file === null) return null;
   try { fs.accessSync(file, fs.constants.W_OK); return null; }
-  catch (e) { return `the sources file cannot be written on this server (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}): commit a change to it, and deploy`; }
+  catch (e) {
+    return { text: `The sources file cannot be written on this server (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}). Commit a change to it in your project, and deploy it.`, kind: "unwritable" };
+  }
 }
+
+/** `RunState.sourcesReadOnly` and `sourcesReadOnlyKind`, both null when the run may write its sources file */
+const sourcesReadOnlyFacts = (r: { text: string; kind: SourcesReadOnlyKind } | null): Pick<RunState, "sourcesReadOnly" | "sourcesReadOnlyKind"> =>
+  ({ sourcesReadOnly: r?.text ?? null, sourcesReadOnlyKind: r?.kind ?? null });
+
+/** a failure's clause as a sentence of its own, for a reader of prose (the page's note, `mason status --json`) */
+const sentence = (clause: string): string => `${clause.charAt(0).toUpperCase()}${clause.slice(1)}${/[.!?]$/.test(clause) ? "" : "."}`;
 
 /** the synced data's size, its write-ahead log's included (src/duck/file-bytes.ts, the one reader), or null where it
  *  cannot be read (the run's own DuckDB file: it exists while the run does) */

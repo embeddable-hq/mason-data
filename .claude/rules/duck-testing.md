@@ -22,7 +22,9 @@ paths:
   right when its whole-number digits are Postgres's and the two are equal when both are rounded to 15 significant
   digits. A whole-number digit changed only by that rounding's carry (0.99999999999999999 rounds to 1) is within the
   rule. A difference within it is no difference, and needs no `KNOWN` entry. One outside it is a wrong value, unless a
-  gap names it. Unordered rows are paired by the rule too, so `2.5` meets `2.50`. A numeric read as text (`x::text`, a
+  gap names it. Unordered rows are paired by the rule too, so `2.5` meets `2.50`. Values the rule lets merge or match
+  (in a UNION, a DISTINCT, an IN or a join) still change the rows, or a boolean, and that difference still needs a
+  `KNOWN` entry under its gap. A numeric read as text (`x::text`, a
   JSON, an array, a row's text) is a string to the client, and is held as one: its difference goes in `KNOWN` under its
   `differs` entry. Why: the owner set this bar on 2026-11-14 (docs/DESIGN.md "When a numeric is right"), and the oracle
   holds it since issue 997.

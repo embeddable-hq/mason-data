@@ -253,6 +253,9 @@ const KNOWN: Decided[] = [
   // laid over — never the source's, so its values differ (and its rows, where the two servers list other settings); its
   // fields and the rows the sessions set are held alike (`holds`)
   { sql: /^SHOW ALL$/, kind: "value", gap: "show-all", why: "the catalog Postgres's settings with the session's laid over, never the source's", holds: showAllHolds },
+  // A WHOLE NUMBER BESIDE A NUMERIC OF MANY DECIMALS (issue 929, the owner's rule: whole-number digits exact, 15 significant digits): the two fit
+  // DuckDB's 38 digits only with the decimal side's last decimals rounded away, at least 19 kept, so 1e-30 matches 0
+  { sql: /^SELECT o\.id, 0\.000000000000000000000000000001::numeric\(38,30\) IN \(SELECT o\.id::numeric - 1\)/, kind: "value", gap: "whole-beside-many-decimals", why: "a whole number beside a numeric(38,30) keeps 19 of its decimals" },
   // THE TYPE MATRIX'S DECIDED ONES (oracle/type-matrix.ts): what a double's bits, -0 and an overflow do
   { sql: /greatest\((\w+, f4|f4, \w+)\), least/, kind: "text", gap: "negative-zero", why: "least(-0, 0): Postgres keeps the first, DuckDB the other" },
   { sql: /percentile_disc\(0\.25\) WITHIN GROUP \(ORDER BY f[48]\)/, kind: "text", gap: "negative-zero", why: "percentile_disc picks -0 or 0 of equal values" },

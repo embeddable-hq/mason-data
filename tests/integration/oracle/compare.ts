@@ -69,9 +69,16 @@ const rounded = (n: PgNumeric): PgNumeric => round(n, SIGNIFICANT - exponentOf(n
 /** the whole-number part, toward zero */
 const whole = (n: PgNumeric): bigint => trunc(n, 0).unscaled;
 
-/** the numeric a text is, or its special value's name; undefined for a text no numeric reads as */
+/** the form `numeric_out` writes a finite value in: digits, a point and digits, no exponent, no `+`, no leading zero
+ *  before another digit, no space; and never `-0`, which Postgres writes as `0` */
+const PLAIN_NUMERIC = /^-?(0|[1-9]\d*)(\.\d+)?$/;
+const NEGATIVE_ZERO = /^-0(\.0+)?$/;
+
+/** the numeric a text is, or its special value's name; undefined for a text no numeric reads as, or one written in a
+ *  form Postgres never writes (`1.6e1`, ` 16 `, `016`, `.5`, `-0`): a writer that sent it is wrong, whatever its value */
 function numericOf(text: string): PgNumeric | string | undefined {
   if (SPECIAL.has(text)) return text;
+  if (!PLAIN_NUMERIC.test(text) || NEGATIVE_ZERO.test(text)) return undefined;
   try { return parseNumeric(text); }
   catch (e) {
     // (a text no numeric reads as is a wrong value, never within the rule: the caller says so)
