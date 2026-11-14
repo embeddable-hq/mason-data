@@ -413,6 +413,11 @@ test("a NAMED publication is read as it is, never altered: a table it lacks is r
     assert.equal(definition(), defined, "no ALTER PUBLICATION ran at the first pass: the definition is byte-equal");
     assert.equal(psql(url, `SELECT count(*) FROM pg_replication_slots WHERE slot_name = '${repl.slot}'`), "1", "the slot is made");
     assert.equal(logged.filter((l) => /^publication app_pub does not publish truncate: a TRUNCATE on the database does not reach the synced data/.test(l)).length, 1, logged.join("\n"));
+    // its column list on a carries every synced column: accepted, and what it costs the owner said once, with the way out
+    // (issue 978: the database refuses DROP COLUMN of a listed column)
+    assert.deepEqual(logged.filter((l) => l.startsWith("publication app_pub lists the columns of")), ["publication app_pub lists the columns of public.a. " +
+      "While it does, your database refuses ALTER TABLE … DROP COLUMN of a listed column. Mason does not need the list: it drops the columns it does not sync as they arrive. " +
+      "To name the table whole, run as its owner: BEGIN; ALTER PUBLICATION app_pub DROP TABLE public.a; ALTER PUBLICATION app_pub ADD TABLE public.a; COMMIT;"], logged.join("\n"));
     psql(url, "INSERT INTO a VALUES (11, 'new', 'y'); UPDATE b SET v = 'changed' WHERE id = 2; DELETE FROM a WHERE id = 3");
     await same("an insert, an update, a delete");
 
@@ -423,12 +428,12 @@ test("a NAMED publication is read as it is, never altered: a table it lacks is r
     const c = sync.state().find((s) => s.source === "public.c")!;
     assert.equal(c.phase, "failed");
     assert.match(c.error!, /^replication: publication app_pub does not carry what Mason's synced table holds\.\n\n {2}missing: public\.c \(read by Mason's sync\)\n/);
-    assert.match(c.error!, /\n {2}ALTER PUBLICATION app_pub ADD TABLE\n {4}public\.c \(id, v\);\n\nFound: publication app_pub \(publish = 'insert, update, delete'\)\n {4}public\.a \(id, v, extra\),\n {4}public\.b \(id, v\)\n/);
+    assert.match(c.error!, /\n {2}ALTER PUBLICATION app_pub ADD TABLE\n {4}public\.c;\n\nFound: publication app_pub \(publish = 'insert, update, delete'\)\n {4}public\.a \(id, v, extra\),\n {4}public\.b \(id, v\)\n/);
     assert.match(c.error!, /never altering it/);
     // in one word, failed, and its line's reason gives the statement and the way that needs no publication (issue 254)
     const r = await import("../../src/cli/readiness.ts") as unknown as { syncStateOf: (c: unknown) => string };
     assert.equal(r.syncStateOf(c), "failed");
-    assert.match(String((c.kept as { why: string | null }).why), /^publication app_pub does not carry what Mason's synced table holds\. — the database's owner runs ALTER PUBLICATION app_pub ADD TABLE public\.c \(id, v\); — or give its entry sync: poll <interval>/);
+    assert.match(String((c.kept as { why: string | null }).why), /^publication app_pub does not carry what Mason's synced table holds\. — the database's owner runs ALTER PUBLICATION app_pub ADD TABLE public\.c; — or give its entry sync: poll <interval>/);
     assert.equal(await rowsOf(store, "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'c'"), "0", "not copied");
     psql(url, "UPDATE a SET v = 'beside the refusal' WHERE id = 4; INSERT INTO b VALUES (12, 'b12'); INSERT INTO c VALUES (2, 'c2')");
     await same("a refused table beside them");
@@ -783,7 +788,7 @@ test("a named publication that cannot carry the copy is refused in the developer
   const a = narrow.states.find((s) => s.source === "public.a")!;
   assert.equal(a.phase, "failed");
   assert.match(a.error!, /\n {2}missing: public\.a columns extra \(read by Mason's sync\)\n/);
-  assert.match(a.error!, /\n {2}BEGIN;\n {2}ALTER PUBLICATION narrow DROP TABLE public\.a;\n {2}ALTER PUBLICATION narrow ADD TABLE\n {4}public\.a \(id, v, extra\);\n {2}COMMIT;\n/);
+  assert.match(a.error!, /\n {2}BEGIN;\n {2}ALTER PUBLICATION narrow DROP TABLE public\.a;\n {2}ALTER PUBLICATION narrow ADD TABLE\n {4}public\.a;\n {2}COMMIT;\n/);
   assert.deepEqual(narrow.states.filter((s) => s.source === "public.b").map((s) => [s.phase, s.error]), [["copied", null]], "the other table is copied and streamed");
 
   // no delete published: the run is refused by name before any slot is made
@@ -902,15 +907,16 @@ test("the stream says where it is: a table joins and leaves on a line with its p
  * THE PROJECT AFTER `mason add <table> --columns …` (null: every column): its sources file written as the CLI writes it
  * (one entry per table, spliced in) and read back as `mason start` reads it (`readSource`, then `addedTables`).
  */
-async function pick(source: Source, folder: string, picks: ReadonlyArray<readonly [string, readonly string[] | null]>): Promise<AddedTable[]> {
+async function pick(source: Source, folder: string, picks: ReadonlyArray<readonly [string, readonly string[] | null] | readonly [string, null, readonly string[]]>): Promise<AddedTable[]> {
   const c = await connectSource(source);
   if ("failure" in c) throw new Error(c.failure.message);
   let facts;
   try { facts = await readSourceFacts(c.pg); } finally { c.pg.close(); }
   // every table this file streams is replicated: the file's top sync: says so (a polled or off table is written so)
   let text = newSourceText(source.url, [], { mode: "replication" });
-  for (const [n, cols] of picks) {
-    const r = withTable(text, { name: entryName(n), table: n, columns: cols === null ? null : [...cols], exclude: [], key: null });
+  // [table, columns] syncs those (null: every column); [table, null, exclude] every column but those
+  for (const [n, cols, exclude] of picks) {
+    const r = withTable(text, { name: entryName(n), table: n, columns: cols === null ? null : [...cols], exclude: exclude === undefined ? [] : [...exclude], key: null });
     if ("problem" in r) throw new Error(r.problem);
     text = r.text;
   }
@@ -1223,6 +1229,225 @@ test("a column dropped on the database while streaming refuses that table by nam
   }
 });
 
+// MASON'S OWN PUBLICATION NAMES EACH TABLE WHOLE (issue 978; docs/DESIGN.md "Mason's own publication names each table
+// whole"): a column list on it made the database refuse the application's own `ALTER TABLE … DROP COLUMN` ("publication …
+// depends on column") and hid every column added later. So it carries every column of every replicated table, an entry
+// with `exclude:` or `columns:` included, and the columns the synced table does not hold are dropped as they arrive
+// (`projectTuple`): through an insert, an update, an unchanged-TOAST value, an old key and a delete, never reaching the
+// synced data, the request log or a log line.
+const SECRET = "tok-978-";
+/** every text value Mason holds, in every table of its own file (the synced data, `_mason`'s ledgers, the request log
+ *  and the sync's events), that carries the excluded column's marker: none may */
+async function secretsHeld(read: (sql: string) => Promise<string>): Promise<string[]> {
+  const columns = (await read("SELECT schema_name, table_name, column_name FROM duckdb_columns() WHERE database_name = current_database() AND data_type IN ('VARCHAR', 'JSON', 'BLOB') ORDER BY ALL"))
+    .split("\n").filter(Boolean).map((l) => l.split("\t") as [string, string, string]);
+  assert.ok(columns.length > 0, "the scan reads something");
+  const q = (s: string): string => `"${s.replace(/"/g, '""')}"`;
+  const found: string[] = [];
+  for (const [s, t, c] of columns) {
+    const n = await read(`SELECT count(*) FROM ${q(s)}.${q(t)} WHERE CAST(${q(c)} AS VARCHAR) LIKE '%${SECRET}%'`);
+    if (n !== "0") found.push(`${s}.${t}.${c}: ${n}`);
+  }
+  return found;
+}
+
+test("Mason's own publication names each table whole: the database's DROP COLUMN succeeds, of a synced, an excluded or an unsynced column, and an excluded column's values cross the stream and are dropped", { skip }, async () => {
+  const db = `${tag}_w`, url = urlOf(db);
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  // excl's api_token is stored out of line: an UPDATE of another column sends it as unchanged TOAST; excl_full's
+  // identity is FULL, so an update's and a delete's old row carries its api_token
+  psql(url, "CREATE TABLE whole_t (id int PRIMARY KEY, a text, gone text); " +
+    "CREATE TABLE excl (id int PRIMARY KEY, a text, b text, api_token text); ALTER TABLE excl ALTER COLUMN api_token SET STORAGE EXTERNAL; " +
+    "CREATE TABLE excl_full (id int PRIMARY KEY, a text, api_token text); ALTER TABLE excl_full REPLICA IDENTITY FULL; " +
+    "CREATE TABLE cols (id int PRIMARY KEY, a text, b text, c text); " +
+    "INSERT INTO whole_t SELECT g, 'a' || g, 'g' || g FROM generate_series(1, 20) g; " +
+    `INSERT INTO excl SELECT g, 'a' || g, 'b' || g, CASE WHEN g = 20 THEN NULL ELSE '${SECRET}' || repeat(md5(g::text), 100) END FROM generate_series(1, 20) g; ` +
+    `INSERT INTO excl_full SELECT g, 'a' || g, '${SECRET}' || g FROM generate_series(1, 20) g; ` +
+    "INSERT INTO cols SELECT g, 'a' || g, 'b' || g, 'c' || g FROM generate_series(1, 20) g");
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const folder = path.join(dir, "w-project");
+  const names = { slot: `${tag}_w`, publication: `${tag}_w`, owned: true };
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "w.db"), (l) => logged.push(l));
+  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", names);
+  const reader = await store.instance.connect();
+  const read = async (sql: string): Promise<string> => ((await reader.runAndReadAll(sql)).getRowsJS() as unknown[][]).map((r) => r.map((x) => x === null ? "" : String(x)).join("\t")).join("\n");
+  // each table's synced columns, and DuckDB's copy against the source projected to them (it holds no other)
+  let synced: Record<string, string[]> = { whole_t: ["id", "a", "gone"], excl: ["id", "a", "b"], excl_full: ["id", "a"], cols: ["id", "a"] };
+  const same = async (step: string, from: number): Promise<void> => {
+    await sync.caughtUp();
+    const said = `\n${logged.slice(from).join("\n")}`;
+    for (const [t, cols] of Object.entries(synced)) {
+      assert.equal(await read(`SELECT column_name FROM information_schema.columns WHERE table_catalog = current_database() AND table_schema = 'public' AND table_name = '${t}' ORDER BY ordinal_position`),
+        cols.join("\n"), `${t} holds its synced columns, no other (${step})${said}`);
+      assert.equal(await read(`SELECT ${cols.join(", ")} FROM public.${t} ORDER BY id`), psql(url, `SELECT ${cols.join(", ")} FROM ${t} ORDER BY id`), `${t} after ${step}${said}`);
+    }
+  };
+  const ALL = (): Array<readonly [string, readonly string[] | null] | readonly [string, null, readonly string[]]> =>
+    [["public.whole_t", null], ["public.excl", null, ["api_token"]], ["public.excl_full", null, ["api_token"]], ["public.cols", ["id", "a"]]];
+  const refusedSince = (from: number, table: string): string[] => logged.slice(from).filter((l) => l.startsWith(`public.${table}: replication: the stream no longer carries`));
+  try {
+    await sync.open();
+    void sync.setTables(await pick(parsed.source, folder, ALL()));
+    await sync.once();
+    let from = 0;
+    await same("the first sync", from);
+
+    // EVERY TABLE WHOLE: no column list, an excluded column's table and a columns: entry's included
+    assert.equal(psql(url, `SELECT string_agg(r.prrelid::regclass || ' ' || coalesce(r.prattrs::text, 'whole'), ', ' ORDER BY r.prrelid::regclass::text) FROM pg_publication_rel r JOIN pg_publication p ON p.oid = r.prpubid WHERE p.pubname = '${names.publication}'`),
+      "cols whole, excl whole, excl_full whole, whole_t whole");
+    assert.equal(psql(url, `SELECT string_agg(tablename || ' ' || attnames::text, ', ' ORDER BY tablename) FROM pg_publication_tables WHERE pubname = '${names.publication}'`),
+      "cols {id,a,b,c}, excl {id,a,b,api_token}, excl_full {id,a,api_token}, whole_t {id,a,gone}", "every column crosses the stream");
+
+    // EVERY KIND OF CHANGE, each carrying an excluded or unsynced value: an insert, an update of a synced column (excl's
+    // api_token unchanged TOAST), an update of the excluded or unsynced column alone, a key change (the old key), a delete
+    from = logged.length;
+    psql(url, `INSERT INTO excl VALUES (21, 'new', 'b21', '${SECRET}' || repeat('x', 9000)), (22, 'new null', 'b22', NULL); ` +
+      "UPDATE excl SET a = 'toast kept' WHERE id = 1; " +
+      `UPDATE excl SET api_token = '${SECRET}rotated' WHERE id = 2; ` +
+      "UPDATE excl SET id = 1000 WHERE id = 3; DELETE FROM excl WHERE id = 4; " +
+      `INSERT INTO excl_full VALUES (21, 'new', '${SECRET}21'); UPDATE excl_full SET a = 'changed' WHERE id = 1; UPDATE excl_full SET api_token = '${SECRET}rotated' WHERE id = 2; ` +
+      "UPDATE excl_full SET id = 1000 WHERE id = 3; DELETE FROM excl_full WHERE id = 4; " +
+      "INSERT INTO cols VALUES (21, 'a21', 'b21', 'c21'); UPDATE cols SET c = 'only c' WHERE id = 1; UPDATE cols SET a = 'changed', b = 'b changed' WHERE id = 2; " +
+      "UPDATE cols SET id = 1000 WHERE id = 3; DELETE FROM cols WHERE id = 4; " +
+      "INSERT INTO whole_t VALUES (21, 'a21', 'g21'); UPDATE whole_t SET gone = 'changed' WHERE id = 1; DELETE FROM whole_t WHERE id = 2");
+    await same("every kind of change", from);
+    assert.deepEqual(await secretsHeld(read), [], "no excluded value is held anywhere in Mason's file");
+
+    // THE DATABASE'S OWN DROP COLUMN, of an excluded column and of a column a columns: entry does not sync: it succeeds
+    // (Postgres refused it while the publication listed the column), and the tables stream on, never refused
+    from = logged.length;
+    psql(url, "ALTER TABLE excl DROP COLUMN api_token; ALTER TABLE excl_full DROP COLUMN api_token; ALTER TABLE cols DROP COLUMN c");
+    psql(url, "INSERT INTO excl VALUES (30, 'after the drop', 'b30'); UPDATE excl SET a = 'after' WHERE id = 5; DELETE FROM excl WHERE id = 6; " +
+      "INSERT INTO excl_full VALUES (30, 'after the drop'); UPDATE excl_full SET a = 'after' WHERE id = 5; DELETE FROM excl_full WHERE id = 6; " +
+      "INSERT INTO cols VALUES (30, 'after the drop', 'b30'); UPDATE cols SET a = 'after' WHERE id = 5; DELETE FROM cols WHERE id = 6");
+    await same("an excluded and an unsynced column dropped on the database", from);
+    for (const t of ["excl", "excl_full", "cols"]) {
+      assert.deepEqual(refusedSince(from, t), [], `${t} streams on`);
+      assert.ok(!logged.slice(from).some((l) => l.startsWith(`public.${t} leaves the stream`)), `${t} never left the stream\n${logged.slice(from).join("\n")}`);
+    }
+
+    // A SYNCED COLUMN DROPPED: it succeeds on the database too. The table is handled as a column the stream stops
+    // carrying always was (or synced again on its own, once Mason picks a column change up), never a stuck stream:
+    // the other tables stream on, and the entry without the column is synced again and streamed
+    from = logged.length;
+    psql(url, "ALTER TABLE whole_t DROP COLUMN gone; ALTER TABLE excl DROP COLUMN b; ALTER TABLE cols DROP COLUMN b, DROP COLUMN a");
+    psql(url, "INSERT INTO whole_t VALUES (40, 'after'); INSERT INTO excl VALUES (40, 'after'); INSERT INTO excl_full VALUES (40, 'beside them'); INSERT INTO cols VALUES (40)");
+    await until(async () => await read("SELECT a FROM public.excl_full WHERE id = 40") === "beside them", "excl_full streams on beside the dropped columns", logged, 20_000);
+    void sync.setTables(await pick(parsed.source, folder, [["public.whole_t", null], ["public.excl", ["id", "a"]], ["public.excl_full", null], ["public.cols", ["id"]]]));
+    synced = { whole_t: ["id", "a"], excl: ["id", "a"], excl_full: ["id", "a"], cols: ["id"] };
+    await until(() => sync.state().every((s) => s.phase === "copied" && s.error === null) && ["whole_t", "excl", "cols"].every((t) =>
+      logged.slice(from).some((l) => l.startsWith(`caught up public.${t} by one poll after its whole read`))), "each table synced again without its dropped columns", logged, 60_000);
+    psql(url, "INSERT INTO whole_t VALUES (41, 'streamed'); UPDATE excl SET a = 'streamed' WHERE id = 7; DELETE FROM cols WHERE id = 7; UPDATE excl_full SET a = 'streamed' WHERE id = 7");
+    await same("synced columns dropped on the database, the entries narrowed", from);
+    assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]).sort(), [["public.cols", "copied", null], ["public.excl", "copied", null], ["public.excl_full", "copied", null], ["public.whole_t", "copied", null]]);
+    assert.deepEqual(await secretsHeld(read), [], "no excluded value is held anywhere in Mason's file");
+  } finally {
+    reader.closeSync();
+    await sync.stop();
+    await store.close();
+  }
+  assert.deepEqual(logged.filter((l) => l.includes(SECRET)), [], "no log line carries an excluded value");
+});
+
+// A PUBLICATION AN EARLIER MASON MADE WITH COLUMN LISTS is re-pointed to whole tables at the next pass, ONCE: at a
+// restart (the stream resuming over changes made while it was stopped, decoded with the list) and while streaming, with
+// the application writing all along. What the stream sees when the publication's columns change is a new relation
+// message, wider: the columns the synced table lacks are dropped as they arrive, and no change is lost or misapplied.
+test("a publication an earlier Mason made with column lists is named whole at the next pass, once, while the application writes and the stream goes on", { skip }, async () => {
+  const db = `${tag}_u`, url = urlOf(db);
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  psql(url, "CREATE TABLE t (id int PRIMARY KEY, a text, secret text); CREATE TABLE stop_writing (x int); " +
+    `INSERT INTO t SELECT g, 'a' || g, '${SECRET}' || g FROM generate_series(1, 200) g`);
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const folder = path.join(dir, "u-project");
+  const names = { slot: `${tag}_u`, publication: `${tag}_u`, owned: true };
+  const logged: string[] = [];
+  const file = path.join(dir, "u.db");
+  let store = await DuckStore.open(file, (l) => logged.push(l));
+  let sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", names);
+  const T = async (): Promise<AddedTable[]> => pick(parsed.source, folder, [["public.t", null, ["secret"]]]);
+  const listed = (): string => psql(url, `SELECT coalesce(r.prattrs::text, 'whole') FROM pg_publication_rel r JOIN pg_publication p ON p.oid = r.prpubid WHERE p.pubname = '${names.publication}'`);
+  // as an earlier Mason left it: the table's synced columns listed
+  const asEarlierMasonMadeIt = (): void => { psql(url, `ALTER PUBLICATION ${names.publication} SET TABLE t (id, a)`); assert.equal(listed(), "1 2"); };
+  const repointed = (from: number): string[] => logged.slice(from).filter((l) => l.startsWith(`re-pointed publication ${names.publication} `));
+  const same = async (step: string, from: number): Promise<void> => {
+    await sync.caughtUp();
+    const reader = await store.instance.connect();
+    try {
+      const duck = ((await reader.runAndReadAll("SELECT id, a FROM public.t ORDER BY id")).getRowsJS() as unknown[][]).map((r) => r.map(String).join("\t")).join("\n");
+      assert.equal(duck, psql(url, "SELECT id, a FROM t ORDER BY id"), `${step}\n${logged.slice(from).join("\n")}`);
+    } finally { reader.closeSync(); }
+  };
+  // the application writing all along, one committed change every 20 ms, until told
+  const writing = (): Promise<void> => {
+    psql(url, "TRUNCATE stop_writing");
+    const app = spawn("psql", ["-X", "-q", "-v", "ON_ERROR_STOP=1", url, "-c",
+      `DO $$ BEGIN FOR i IN 1..3000 LOOP EXIT WHEN EXISTS (SELECT 1 FROM stop_writing); UPDATE t SET a = 'app ' || i, secret = '${SECRET}' || i WHERE id = 1 + i % 200; ` +
+      `IF i % 7 = 0 THEN INSERT INTO t VALUES (1000 + i, 'new ' || i, '${SECRET}new') ON CONFLICT (id) DO UPDATE SET a = excluded.a || ' again'; END IF; COMMIT; PERFORM pg_sleep(0.02); END LOOP; END $$`], { stdio: ["ignore", "ignore", "pipe"] });
+    after(() => { if (app.exitCode === null) app.kill(); });
+    let err = "";
+    app.stderr.on("data", (d: Buffer) => { err += d.toString(); });
+    return new Promise<void>((resolve, reject) => app.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`the writing app exited ${code}: ${err}`))));
+  };
+  try {
+    await sync.open();
+    void sync.setTables(await T());
+    await sync.once();
+    await same("the first sync", 0);
+    assert.equal(listed(), "whole");
+
+    // AT A RESTART: an earlier Mason's list, changes made while it was stopped, the application writing as it starts
+    await sync.stop();
+    await store.close();
+    asEarlierMasonMadeIt();
+    psql(url, `UPDATE t SET a = 'while stopped', secret = '${SECRET}stopped' WHERE id <= 10; DELETE FROM t WHERE id = 11; INSERT INTO t VALUES (500, 'while stopped', '${SECRET}500')`);
+    let from = logged.length;
+    let app = writing();
+    store = await DuckStore.open(file, (l) => logged.push(l));
+    sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", names);
+    await sync.open();
+    void sync.setTables(await T());
+    await sync.once();
+    assert.equal(listed(), "whole", "named whole at the first pass");
+    assert.deepEqual(repointed(from).map((l) => l.replace(/ at public\.t: .*?, each/, " …, each")),
+      [`re-pointed publication ${names.publication} …, each named whole (an earlier Mason listed the columns of public.t, which made the database refuse ALTER TABLE … DROP COLUMN of them; the columns Mason does not sync now arrive and are dropped, never stored)`],
+      logged.slice(from).join("\n"));
+    await new Promise((r) => setTimeout(r, 500));
+    psql(url, "INSERT INTO stop_writing VALUES (1)");
+    await app;
+    await same("a restart that named the publication's table whole", from);
+    assert.ok(!logged.slice(from).some((l) => /^(synced|caught up) /.test(l)), `nothing synced again:\n${logged.slice(from).join("\n")}`);
+    // once: the next pass finds it whole and leaves it
+    from = logged.length;
+    await sync.once();
+    assert.deepEqual(repointed(from), [], "re-pointed once");
+
+    // WHILE STREAMING: the same list, named whole at the next pass while the application writes
+    asEarlierMasonMadeIt();
+    from = logged.length;
+    app = writing();
+    await new Promise((r) => setTimeout(r, 300));
+    await sync.once();
+    assert.equal(listed(), "whole");
+    assert.equal(repointed(from).length, 1, logged.slice(from).join("\n"));
+    await new Promise((r) => setTimeout(r, 500));
+    psql(url, "INSERT INTO stop_writing VALUES (1)");
+    await app;
+    await same("named whole while streaming", from);
+    assert.ok(!logged.slice(from).some((l) => /^(synced|caught up) |no longer carries|leaves the stream/.test(l)), `the stream went on:\n${logged.slice(from).join("\n")}`);
+    // and the application's migration now runs
+    psql(url, "ALTER TABLE t DROP COLUMN secret; INSERT INTO t VALUES (9999, 'after the drop')");
+    await same("the excluded column dropped on the database", from);
+  } finally {
+    await sync.stop();
+    await store.close();
+  }
+  assert.deepEqual(logged.filter((l) => l.includes(SECRET)), [], "no log line carries an excluded value");
+});
+
 // EACH TABLE KEPT CURRENT AS ITS SYNC SAYS, ONE PROJECT (issue 33, PR 2): `off`, `poll <interval>` and `replication` side
 // by side — the stream through the project's one slot and its own publication, which carries the replicated tables
 // alone; the polled table polled beside the stream; the off one read only when asked.
@@ -1405,7 +1630,7 @@ test("a named publication is never altered by a sync change: a replicated table 
     await until(() => sync.state().find((s) => s.source === "public.b")?.error?.startsWith("replication: ") === true && settled(sync, ["public.a", "public.c"])(), "b refused, a and c kept", logged);
     const b = sync.state().find((s) => s.source === "public.b")!;
     assert.match(b.error!, /^replication: publication owners_pub does not carry what Mason's synced table holds\.\n/);
-    assert.match(b.error!, /\n {2}ALTER PUBLICATION owners_pub ADD TABLE\n {4}public\.b \(id, v\);\n/);
+    assert.match(b.error!, /\n {2}ALTER PUBLICATION owners_pub ADD TABLE\n {4}public\.b;\n/);
     assert.match(b.error!, /give the table's entry sync: poll <interval> in the sources file/);
     // left out: failed on its own row, and mason wait is not ready (issue 100)
     const r = await import("../../src/cli/readiness.ts") as unknown as { tableSync: (c: unknown, now: number) => { state: string };
