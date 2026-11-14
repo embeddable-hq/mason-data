@@ -80,7 +80,7 @@ const delimiterByte = (b: number | undefined): boolean => b === SPACE || b === L
  */
 export function unwrapNodeDump(wrapped: Uint8Array, written: ReadonlySet<string> = new Set(), columns: ReadonlySet<string> | null = null): Uint8Array {
   // the DETAIL as sent ends in the last line's break; one without it is read as if it had it
-  const o = wrapped.length > 0 && wrapped[wrapped.length - 1] === LF ? Buffer.from(wrapped) : Buffer.concat([wrapped, Buffer.from([LF])]);
+  const o = wrapped.length > 0 && wrapped[wrapped.length - 1] === LF ? Buffer.from(wrapped.buffer, wrapped.byteOffset, wrapped.byteLength) : Buffer.concat([wrapped, Buffer.from([LF])]);
   const s = Buffer.alloc(o.length);
   // each line taken, in the text's coordinates: where it starts, how long it is, where the next starts (-1: the end)
   const starts: number[] = [], lengths: number[] = [], nexts: number[] = [];
@@ -112,8 +112,9 @@ export function unwrapNodeDump(wrapped: Uint8Array, written: ReadonlySet<string>
   /** the line breaks that may end the line starting at `at`: each escaped one, up to the first that is not (or the end) */
   const candidates = (at: number, sLen: number): Candidate[] => {
     const out: Candidate[] = [];
-    for (let e = at + 1; e <= Math.min(at + LINE, o.length - 1); e++) {
-      if (o[e] !== LF) continue;
+    const max = Math.min(at + LINE, o.length - 1);
+    const window = o.subarray(0, max + 1);
+    for (let e = window.indexOf(LF, at + 1); e >= 0; e = window.indexOf(LF, e + 1)) {
       if (e === o.length - 1) { out.push({ e, escaped: false, run: false, last: true }); break; }
       const escaped = escapedO(at, e, sLen);
       out.push({ e, escaped, run: insideRun(at, e), last: false });
@@ -136,8 +137,9 @@ export function unwrapNodeDump(wrapped: Uint8Array, written: ReadonlySet<string>
     o.copy(s, sLen, at, e);
     const start = sLen;
     let end = sLen + (e - at);
-    for (let k = start; k < end; k++) {
-      if (s[k] !== LF) continue;
+    const line = s.subarray(start, end);
+    for (let i = line.indexOf(LF); i >= 0; i = line.indexOf(LF, i + 1)) {
+      const k = start + i;
       let n = 0;
       for (let j = k - 1; j >= 0 && s[j] === BACKSLASH; j--) n++;
       if (n % 2 === 0) return null;
@@ -373,7 +375,7 @@ export function unwrapNodeDump(wrapped: Uint8Array, written: ReadonlySet<string>
     if (!held.ok) throw new UnreadableNames();
     checked = held.checked;
     sLen = end;
-    if (kind === "end") return Buffer.from(s.subarray(0, sLen));
+    if (kind === "end") return s.subarray(0, sLen);
     at = c.e + 1;
   }
 }
