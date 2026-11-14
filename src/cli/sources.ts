@@ -655,6 +655,52 @@ export function chooseColumns(t: SourceTable, asked: readonly string[], key: rea
   return { columns: [...new Set([...addedKey, ...named])], exclude: [], addedKey, skipped: [] };
 }
 
+/** A secret-looking column that arrived on the database while the run was up, in an entry that syncs every column. */
+export interface ArrivedSecrets { entry: TableEntry; columns: string[] }
+
+/**
+ * THE SECRET-LOOKING COLUMNS THAT ARRIVED WHILE THE RUN WAS UP (issue 977: a column added on the database was synced as
+ * soon as the run read it, `api_token` too, where `mason add` would have left it out): of each entry that syncs every
+ * column (no `columns:`), the columns `tables` has that `before` did not — the columns each table had when the run's
+ * tables were last set — and that look like a secret (`looksSecret`), its key and its `exclude:` aside. `edited` are
+ * the tables an edit just wrote (`mason add`, `mason remove`): their entry says what the person chose, read as it is
+ * (`mason add <table> --include api_token` syncs it). A table `before` has no columns for is new to the run, and its
+ * entry is the person's.
+ */
+export function arrivedSecrets(file: Pick<SourceFile, "tables">, tables: readonly SourceTable[], before: ReadonlyMap<string, readonly string[]>,
+  edited: readonly string[] = []): ArrivedSecrets[] {
+  const out: ArrivedSecrets[] = [];
+  for (const e of file.tables) {
+    if (e.columns !== null || edited.includes(e.table)) continue;
+    const t = tables.find((x) => x.source === e.table), was = before.get(e.table);
+    if (t === undefined || was === undefined) continue;
+    const key = e.key ?? t.key;
+    const columns = t.columns.map((c) => c.name).filter((c) => !was.includes(c) && looksSecret(c) && !key.includes(c) && !e.exclude.includes(c));
+    if (columns.length) out.push({ entry: e, columns });
+  }
+  return out;
+}
+
+/** What the run says of secret-looking columns it left out of a table as they arrived (`arrivedSecrets`): `written`, the
+ *  sources file it wrote `exclude:` in, or null when it could not write it (the line to add, and that a start reads the
+ *  file as it is). One sentence each for the log, the event and `mason status`. */
+export function leftOutText(a: ArrivedSecrets, written: string | null, why: string | null = null): string {
+  const cols = a.columns, one = cols.length === 1;
+  const name = entryName(a.entry.table);
+  const head = `${a.entry.table}: the new column${one ? "" : "s"} ${cols.join(", ")} ${one ? "looks" : "look"} like ${one ? "a secret" : "secrets"}, so ${one ? "it is" : "they are"} not synced`;
+  if (written !== null) return `${head}. Mason wrote exclude: ${flowList([...a.entry.exclude, ...cols])} on its entry in ${written}. To sync ${one ? "it" : "one"}, run mason add ${name} --include ${cols[0]}`;
+  return `${head} in this run${why ? ` (${why})` : ""}. Add exclude: ${flowList([...a.entry.exclude, ...cols])} to its entry in the sources file to keep ${one ? "it" : "them"} out after a restart: a start syncs what the file says`;
+}
+
+/** The file with each entry's `exclude:` also naming `left` (by table), as the run takes it when it could not write them. */
+export function withLeftOut<F extends Pick<SourceFile, "tables">>(file: F, left: ReadonlyMap<string, readonly string[]>): F {
+  if (left.size === 0) return file;
+  return { ...file, tables: file.tables.map((e) => {
+    const cols = e.columns === null ? (left.get(e.table) ?? []).filter((c) => !e.exclude.includes(c)) : [];
+    return cols.length ? { ...e, exclude: [...e.exclude, ...cols] } : e;
+  }) };
+}
+
 /**
  * THE COLUMNS EVERY COLUMN LEAVES OUT of `t` (`mason add <table>` with no `--columns`: the secret-looking ones, `skipped`),
  * against the key it is synced by — its primary key, else `key` (an entry's `key:`). FAIL CLOSED: a key the file gets

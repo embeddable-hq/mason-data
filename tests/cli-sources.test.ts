@@ -815,3 +815,35 @@ test("a file whose values the YAML library refuses to expand (more aliases than 
   assert.deepEqual(problems(text).map((p) => p.replace(/: .*$/, ":")), ["it cannot be read as values:"]);
   assert.match(problems(text)[0]!, /^it cannot be read as values: \S/);
 });
+
+// ------------------------------------------------------------------ columns that arrive while the run is up (issue 977)
+
+test("arrivedSecrets: a secret-looking column new since the run's tables were set, of an every-column entry, is left out; a column chosen by an edit is not", () => {
+  const file = parse("kind: postgres\nurl: ${DATABASE_URL}\ntables:\n  orders: {}\n  customers:\n    columns: [id, name]\n  events:\n    key: [tenant_id, id]\n    exclude: [raw_body]\n") as Sources.SourceFile;
+  const now = [
+    table({ table: "orders", columns: [...orders.columns, col("deploy_key_content"), col("passwordHash"), col("token_id"), col("note")] }),
+    table({ table: "customers", columns: [col("id", "bigint", true), col("name"), col("password")] }),
+    table({ table: "events", key: [], columns: [col("tenant_id", "bigint", true), col("id", "bigint", true), col("raw_body"), col("secret")] }),
+  ];
+  const before = new Map([["public.orders", orders.columns.map((c) => c.name)], ["public.customers", ["id", "name"]], ["public.events", ["tenant_id", "id", "raw_body"]]]);
+  assert.deepEqual(S.arrivedSecrets(file, now, before).map((a) => [a.entry.table, a.columns]), [
+    // api_token was there before: the entry's {} took it, as the person left it; token_id names an identifier, note no secret
+    ["public.orders", ["deploy_key_content", "passwordHash"]],
+    // a columns: entry syncs only what it names: nothing arrives in it
+    ["public.events", ["secret"]],
+  ]);
+  assert.deepEqual(S.arrivedSecrets(file, now, before, ["public.orders"]).map((a) => a.entry.table), ["public.events"], "an edit's own table is as the person chose it");
+  assert.deepEqual(S.arrivedSecrets(file, now, new Map()), [], "a table new to the run is the person's entry");
+});
+
+test("leftOutText says what was left out, where it is written and how to sync it; withLeftOut leaves it out of an every-column entry", () => {
+  const file = parse("kind: postgres\nurl: ${DATABASE_URL}\ntables:\n  orders:\n    exclude: [api_token]\n  customers:\n    columns: [id, name]\n") as Sources.SourceFile;
+  const a = { entry: file.tables[0]!, columns: ["deploy_key"] };
+  assert.equal(S.leftOutText(a, "mason/sources/app.yml"),
+    "public.orders: the new column deploy_key looks like a secret, so it is not synced. Mason wrote exclude: [api_token, deploy_key] on its entry in mason/sources/app.yml. To sync it, run mason add orders --include deploy_key");
+  assert.equal(S.leftOutText({ ...a, columns: ["deploy_key", "salt"] }, null, "MASON_PROJECT_READONLY=1"),
+    "public.orders: the new columns deploy_key, salt look like secrets, so they are not synced in this run (MASON_PROJECT_READONLY=1). " +
+    "Add exclude: [api_token, deploy_key, salt] to its entry in the sources file to keep them out after a restart: a start syncs what the file says");
+  const left = S.withLeftOut(file, new Map([["public.orders", ["deploy_key"]], ["public.customers", ["password"]]]));
+  assert.deepEqual(left.tables.map((e) => [e.table, e.columns, e.exclude]), [["public.orders", null, ["api_token", "deploy_key"]], ["public.customers", ["id", "name"], []]]);
+});

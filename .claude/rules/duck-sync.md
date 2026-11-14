@@ -43,8 +43,20 @@ paths:
   new copy (its snapshot holds them). The sources file changes while a copy runs: the test server's 22 M-row table once had a
   column removed and restored mid-copy, and the held changes were written naming a column the new copy lacked (`Binder
   Error`). A relation that stops carrying a column the copy holds (a DDL, a narrower publication) refuses THAT table by
-  name with the way out, marked behind before anything past it is acknowledged; the others stream on.
-  ("Logical replication")
+  name with the way out, marked behind before anything past it is acknowledged; the others stream on — and its columns
+  are checked at once (next bullet). ("Logical replication")
+- **A table's columns changed on the database are read again without a restart** (issue 977: a running Mason polled a
+  table's old columns for ever, a column renamed or dropped failed every poll, and a new `api_token` was synced without a
+  word at the next start): its SHAPE (src/cdc/shape.ts, one SQL fragment for the catalog's read and the sync's check:
+  `pg_attribute`'s names, type oids and typmods, no lock, no row read) is compared with the catalog's before every poll
+  (`shapeGate`: the catch-up's and `mason sync`'s too) and after a stream relation message (`relationSeen`: at once when
+  its columns are not the copy's, else once a minute), over the source already attached, never a connection or a timer of
+  its own (about 0.2 ms on the database, measured). A shape that differs has that table's catalog read again ALONE
+  (`onColumnsChanged`, `refreshTables`, src/cli/source-catalog.ts), once a shape (`reshapedTo`), and the tables set
+  again, so `needsCopy` syncs it again whole while its old copy serves; meanwhile it is polled with its old columns only
+  while they all still exist, and `mason sync` of it answers that it is read again whole. A secret-looking column that
+  arrived in an every-column entry is left out, `exclude:` written as `mason add` writes it (src/cli/dev.ts `leaveOut`,
+  `arrivedSecrets`), and said in the log, as a `columns_changed` event and among the run's warnings.
 - **A batch holds a table's changes of ONE STAY in the stream, and only the stay it is in now is applied**
   (`StreamedTable.stay`: a new number when the table enters `streamed` or its copy is swapped, never used twice;
   `streamOnce`, `applyStreamed`): an ended stay's changes committed before the next copy's catch-up, so that copy or

@@ -25,11 +25,12 @@
  *
  * What a run keeps between runs (the API key, the copy, the users, the logs) is in the project's `.mason/`.
  */
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Server } from "node:http";
 import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
-import { checkSource, connectSource, maskedUrl, PRIMARY_NOTE, readSourceFacts, type SourceFacts } from "./preflight.ts";
+import { checkSource, connectSource, maskedUrl, PRIMARY_NOTE, readSourceFacts, readTables, type SourceFacts } from "./preflight.ts";
 import { actRead, sourceCatalog, STATE_WAIT_MS, watchedRead } from "./source-catalog.ts";
 import { uiReadOnlyAllowSetting, uiReadOnlySetting, type PageArea } from "./ui-read-only.ts";
 import { backLinkOf, uiBackLinkSetting } from "./ui-back-link.ts";
@@ -41,10 +42,10 @@ import { createRunServer, listenOnLoopback, metricsFacts, usageFacts, type RunCo
 import { UiErrors } from "./ui-errors.ts";
 import type { RunMetrics } from "./metrics.ts";
 import { readGenerated } from "./generated-files.ts";
-import { addedTables, effectiveSync, entryName, replicatedEntries, rereadSources, shownPath, syncWritten, type RunSources, type SourceFile } from "./sources.ts";
+import { addedTables, arrivedSecrets, effectiveSync, entryName, leftOutText, replicatedEntries, rereadSources, shownPath, syncWritten, withLeftOut, withTable, type ArrivedSecrets, type RunSources, type SourceFile } from "./sources.ts";
 import { newToken } from "./security.ts";
 import { alive, liveRun, processStart } from "./runs.ts";
-import { DEMO_DIR, DUCK_FILE, projectReadOnlySetting, projectSource, startSettingRefusal, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
+import { DEMO_DIR, DUCK_FILE, projectReadOnlySetting, projectSource, projectWriteRefusal, startSettingRefusal, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
 import { boundedLiveChecks } from "./sync-choice.ts";
 import { closedWithin, closingOnce, DEMO_STILL_CLOSING, demoChanges, demoChangesRefusal, demoPort, demoSettings, openDemo } from "./demo.ts";
 import { postgresApiUrl, readPgTls, type PgListenerSettings } from "../api/postgres/listener.ts";
@@ -440,7 +441,15 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     });
     // the collations were read at the start, and are the start's for the whole run
     return facts.collations !== undefined ? { ...read, collations: facts.collations } : read;
-  }, { log: catalogLog });
+  }, {
+    log: catalogLog,
+    // A TABLE WHOSE COLUMNS CHANGED, read again alone (issue 977), on a connection watched as the whole read's is
+    readTables: (signal, only) => watchedRead({
+      connect: async () => { const c = await connectSource(source); if ("failure" in c) throw new Error(c.failure.message); return c.pg; },
+      read: (pg) => readTables(pg, only.map((s) => catalog.facts().tables.find((t) => t.source === s) ?? { schema: s.slice(0, s.indexOf(".")), table: s.slice(s.indexOf(".") + 1) })),
+      signal, log: catalogLog,
+    }),
+  });
   const move = sourceMove(cfg.sourceServer ?? null, { database: source.database, systemIdentifier: facts.systemIdentifier });
   if ("refuse" in move) { say(`mason start: ${move.refuse}`); return 1; }
   // THE TABLES THE SOURCES FILE NAMES, against the database's catalog: every mistake said at once, before anything opens
@@ -502,6 +511,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     logLine(`[engine] warning: ${memoryProblemText(memoryWarned)}`);
     if (o.serve === undefined) say(`  ! ${memoryProblemText(memoryWarned)}`);
   }
+  // THE RUN'S WARNINGS, which mason status, --json and the web page read for as long as it runs: the start's, and what
+  // the run says later (a new column that looks like a secret, left out: issue 977)
+  const runWarnings: string[] = [...warnings, ...(memoryWarned === null ? [] : [memoryProblemText(memoryWarned)])];
   const syncMode = syncModeOf(process.env);
   // THE SYNC'S EVENTS (src/duck/events.ts): its failures and notable events, kept as the request log is, before the sync
   // that records them starts
@@ -513,6 +525,13 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // is replicated, now or after a mason add --sync replication (the demo database has no change log: none)
   const sync = new Sync(store, source, database, (l) => { logLine(`[sync] ${l}`); if (!o.serve && /^synced |failed/.test(l)) say(textEntry("  ", l).trimEnd()); }, PASS_RETRY_MS, syncMode,
     cfg.demo === true ? null : repl, { copyParallel, copyChunkSeconds, json: { enabled: storeJsonPaths }, onEvent: (e) => events.record(e),
+      // A TABLE'S COLUMNS CHANGED ON THE DATABASE (issue 977): its catalog read again alone, then the sources file read
+      // against it, so the sync syncs it again whole with its columns now
+      onColumnsChanged: async (changed) => {
+        const r = await catalog.refreshTables(changed);
+        if ("failed" in r) throw new Error(r.failed);
+        await added();
+      },
       // what the run made on the database, recorded as it is made and dropped: mason destroy drops it by that name
       onReplication: (made) => {
         if (made) recordReplication(cfg, repl, home);
@@ -529,11 +548,54 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   if (move.action !== "same") { cfg.sourceServer = { systemIdentifier: facts.systemIdentifier, database: source.database }; writeConfig(home, cfg); }
   // the views first: setting the tables rebuilds the catalog, which reads them. The sources file read again: a mistake in it
   // keeps the tables read before (a typo never drops a copy), said in the log and by mason status
-  const added = (): Promise<void> => {
+  // THE COLUMNS EACH TABLE HAD when the run's tables were last set from the catalog (issue 977): a column the database
+  // has beyond them arrived while the run was up, and one that looks like a secret is left out (`arrivedSecrets`)
+  let columnsSet = new Map(facts.tables.map((t) => [t.source, t.columns.map((c) => c.name)]));
+  // what the run left out where it could not write the sources file (its files read-only here), by table: for this run
+  const leftOut = new Map<string, string[]>();
+  /** Leaves out the secret-looking columns that arrived: `exclude:` written on each entry, as `mason add` writes it —
+   *  else, where the project's files may not be written, left out for this run, with the line to add. Said in the log,
+   *  as an event and among the run's warnings (`mason status`, the web page). */
+  const leaveOut = (file: SourceFile, arrived: readonly ArrivedSecrets[]): void => {
+    const shown = shownPath(project.root, file.file);
+    let why: string | null = projectWriteRefusal(project.root, process.env)?.message ?? null;
+    let written = false;
+    if (why === null) {
+      // every entry or none: read, edited and written at once, between two reads of the run (one thread: an edit by
+      // mason add is never interleaved). What fails is said, and the columns left out for this run all the same
+      try {
+        let text = fs.readFileSync(file.file, "utf8");
+        for (const a of arrived) {
+          const r = withTable(text, { ...a.entry, exclude: [...a.entry.exclude, ...a.columns] });
+          if ("problem" in r) throw new Error(`it cannot be edited: ${r.problem}`);
+          text = r.text;
+        }
+        fs.writeFileSync(file.file, text);
+        written = true;
+      } catch (e) { why = `${shown}: ${(e as Error).message}`; }
+    }
+    for (const a of arrived) {
+      if (!written) leftOut.set(a.entry.table, [...(leftOut.get(a.entry.table) ?? []), ...a.columns]);
+      const m = leftOutText(a, written ? shown : null, why);
+      logLine(`[sync] ${m}`);
+      events.record({ kind: "columns_changed", table: a.entry.table, message: m });
+      runWarnings.push(m);
+    }
+  };
+  const added = (edit: { edited?: readonly string[] } = {}): Promise<void> => {
     // the catalog as last read: an edit asked for a fresh one first (src/cli/run-server.ts /api/pick, /api/remove)
     const now = catalog.facts();
-    const r = rereadSources(sources, readSources(), src.resolved, now.tables, source.database, project.root, { replicationChecked, slot: cfg.replication?.slot ?? null });
+    let read = readSources();
+    if (!("message" in read)) {
+      const arrived = arrivedSecrets(read, now.tables, columnsSet, edit.edited ?? []);
+      if (arrived.length) { leaveOut(read, arrived); read = readSources(); }
+      if (!("message" in read)) read = withLeftOut(read, leftOut);
+    }
+    const r = rereadSources(sources, read, src.resolved, now.tables, source.database, project.root, { replicationChecked, slot: cfg.replication?.slot ?? null });
     if (r.said !== null) logLine(`[sync] ${r.said}`);
+    // the columns the run's tables now stand on: only once the file was taken, so a column that arrived while the file
+    // could not be is still new when it can
+    if (r.problem === null) columnsSet = new Map(now.tables.map((t) => [t.source, t.columns.map((c) => c.name)]));
     sources = { file: r.file, tables: r.tables, problem: r.problem };
     sync.setViews(now.views ?? []);
     sync.setCollations(now.collations ?? []);
@@ -701,7 +763,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const setupPort = o.exactPort === true ? o.port : await freePort(o.port, chosen);
   const token = newToken();
   const runCtx: RunContext = {
-    source, facts: () => catalog.facts(), freshFacts: async () => { await catalog.fresh({ waitMs: STATE_WAIT_MS }); }, factsNow: (carried) => actRead(catalog, carried, source.database), warnings: [...warnings, ...(memoryWarned === null ? [] : [memoryProblemText(memoryWarned)])], textOrder,
+    source, facts: () => catalog.facts(), freshFacts: async () => { await catalog.fresh({ waitMs: STATE_WAIT_MS }); }, factsNow: (carried) => actRead(catalog, carried, source.database), warnings: runWarnings, textOrder,
     // the slot and publication while a table's sync is replication (the run streams), as the sync says it now
     replication: () => sync.streams() ? repl : null, port: setupPort, token, folder: () => folder, root: project.root, home,
     version: o.version, startedAt,
@@ -732,7 +794,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     roles: () => api.roles(),
     ...(shares !== undefined ? { shares, pageShares: new PageShares({ shares, home, log: logLine }) } : {}),
     // the sources file is the list of what is added: a change to it is read by the sync at once
-    sources: () => sources, sourcesChanged: () => { void added(); }, readSource: readSources, runUrl: src.resolved,
+    sources: () => sources, sourcesChanged: (edited) => { void added({ edited }); }, readSource: readSources, runUrl: src.resolved,
     // a table set to sync: replication while the run is up, in a run that never checked the database for it: the
     // start's own checks, now, and the edit refused when they fail (src/cli/run-server.ts /api/pick)
     checkReplication: async (file) => {

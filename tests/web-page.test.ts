@@ -607,7 +607,7 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   const keyForm = renderTables(CATALOG_STATE, { choosing: "public.event_log", columns: columnsOf("public.event_log") });
   assert.match(keyForm, /<form class="pick" data-pick-form="public\.event_log"/);
   assert.match(keyForm, /<button type="submit" class="primary small">Add event_log<\/button>/);
-  assert.match(textOf(keyForm), /Its key: the columns that tell its rows apart tenant_id bigint id bigint payload jsonb The columns to sync All columns, and any added to the table later Only these columns tenant_id bigint id bigint payload jsonb Add event_log Cancel/);
+  assert.match(textOf(keyForm), /Its key: the columns that tell its rows apart tenant_id bigint id bigint payload jsonb The columns to sync All columns, and any added to the table later that do not look like secrets Only these columns tenant_id bigint id bigint payload jsonb Add event_log Cancel/);
   assert.deepEqual([...keyForm.matchAll(/name="(key|columns)" value="([^"]*)"/g)].map((m) => `${m[1]}=${m[2]}`),
     ["key=tenant_id", "key=id", "key=payload", "columns=tenant_id", "columns=id", "columns=payload"]);
   // All at first; under Only these every box ticked, so choosing it starts from every column; the key's boxes none

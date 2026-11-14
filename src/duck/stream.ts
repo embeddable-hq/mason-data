@@ -265,6 +265,10 @@ export interface StreamTarget {
    *  the stream, saying why and the way out — recorded before the stream goes on, so nothing past the change is
    *  acknowledged without it. Called once per `tables()` entry */
   refuse(source: string, missing: readonly string[]): Promise<void>;
+  /** told of each relation message, with the columns it carries: Postgres sends one before a table's first change in a
+   *  stream, and again after its definition changed (an ALTER TABLE), so the target checks whether the table's columns
+   *  changed on the database (issue 977). Never awaited: the check is the target's, beside the stream */
+  relation?(source: string, columns: readonly string[]): void;
   /** apply the batch in one DuckDB transaction recording `lsn`; the commits at or below `applied()` are not sent. A null
    *  `lsn` is a piece of a transaction still arriving: committed, its position not recorded. `committedAt` is when its
    *  newest transaction committed on the database (pgoutput's commit time, the begin's for a piece) */
@@ -430,6 +434,7 @@ export class ReplicationStream {
             break;
           case "relation":
             relations.set(msg.relid, { source: `${msg.namespace}.${msg.name}`, columns: msg.columns });
+            this.target.relation?.(`${msg.namespace}.${msg.name}`, msg.columns.map((c) => c.name));
             break;
           case "insert": case "update": case "delete": case "truncate": {
             if (skipping) break;
