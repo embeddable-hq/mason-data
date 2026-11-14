@@ -2768,11 +2768,15 @@ export class Sync {
       const pub = this.replication!.publication;
       // ITS COLUMNS ARE CHECKED NOW (issue 977): a column renamed or dropped on the database is read again, and the table
       // synced again whole with its columns now — never a way out that narrows an every-column entry
-      if (t.shape !== undefined && this.onColumnsChanged !== undefined) { this.shapeChecks.add(source); this.relationCheckedAt.set(source, Date.now()); }
+      const checked = t.shape !== undefined && this.onColumnsChanged !== undefined;
+      if (checked) { this.shapeChecks.add(source); this.relationCheckedAt.set(source, Date.now()); }
+      const them = missing.length === 1 ? "it" : "them";
       const m = `replication: the stream no longer carries ${source}'s ${cols}, which its synced table holds (a column dropped or renamed on the database, or the publication's column list narrowed), ` +
-        `so its changes are not applied: its columns are read again from the database now, and it is synced again whole with them` +
-        `${this.replication!.owned ? "" : `; if ${pub} still lists its columns, a column it does not list is never streamed: publish ${missing.length === 1 ? "it" : "them"} again (ALTER PUBLICATION ${pub} …), or give its entry sync: poll <interval>`}` +
-        `; an entry that names ${cols} in columns: in the sources file is refused until ${missing.length === 1 ? "it is" : "they are"} taken out (else it is caught up by one poll again after ${when})`;
+        `so its changes are not applied. ${checked ? "Its columns are read again from the database now, and it is synced again whole with them"
+          : "It is synced again whole once its columns are read again: at the next start, or at a mason add of it"}. ` +
+        `If its entry in the sources file names ${cols} in columns:, take ${them} out` +
+        `${this.replication!.owned ? "" : `; if ${pub} lists its columns, publish ${them} again (ALTER PUBLICATION ${pub} …)`}. ` +
+        `Until then it is caught up by one poll again after ${when}`;
       this.log(`${source}: ${m}`);
       this.event({ kind: "stream_failed", table: source, message: m });
       await this.record({ ...this.states.get(source)!, error: m });
