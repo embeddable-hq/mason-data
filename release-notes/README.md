@@ -83,8 +83,10 @@ release from `main` is the next line (`0.21.0`). The line before it gets its own
   on `release/*`" (below) says how.
 - **Until the new line is released, `main` releases no patch of the current line.** A patch the current line needs
   before then waits for the new line's release, which cuts the branch. Then it is released from the branch.
-- **From then on, every patch on the old line is released from its branch,** security or not ("A patch on a line's
-  branch", below).
+- **Once a line has its branch, its patches are released from that branch only,** security or not ("A patch on a
+  line's branch", below). `main` refuses to release a version of that line, before anything is tagged, and names the
+  branch. A patch released from `main` would be missing from the branch, and the branch's next patch would lack its
+  fixes.
 - **A fix needed on both lines goes to `main` first.** Then cherry-pick it to the branch, in its own PR.
 
 `scripts/release-line.ts` decides whether a release is a new line, which branch it cuts and from which tag.
@@ -98,12 +100,13 @@ Until it exists, a push to a release branch is a release that nobody reviewed.
 
 **A workflow creates each line's branch.** Two workflows do it, through `.github/actions/line-branch`:
 `release.yml` at a new line's release, and "Release line branch" on request. Each uses its `GITHUB_TOKEN`, unless the
-repository secret `RELEASE_BRANCH_DEPLOY_KEY` is set (below).
+secret `RELEASE_BRANCH_DEPLOY_KEY` is set in the environment `release-branches` (below).
 
 - That token belongs to the GitHub Actions app. GitHub offers no "GitHub Actions" entry in the ruleset's bypass list.
 - GitHub applies a ruleset's required status checks to a new branch too, unless the rule has "Do not require status
   checks on creation". GitHub's docs do not say whether the pull request rule allows a new branch.
 - So whether the ruleset lets the token create a branch is found out by running it once.
+- If the ruleset lets `GITHUB_TOKEN` create a `release/*` branch, any writer's workflow could create one too.
 - A refusal fails the run. Nothing is created, tagged or published. The run prints GitHub's answer word for word, which
   names the rule.
 
@@ -114,12 +117,20 @@ with the line `0.20`. It cuts `release/0.20` at `v0.20.0`.
 - **If GitHub refuses it,** the owner adds a deploy key once:
   1. Make an SSH key pair. In the repository's Settings, under "Deploy keys", add its public key with write access.
   2. In the `release` ruleset's "Bypass list", add that deploy key (under "Others"), with "Always allow".
-  3. Save its private key as the repository secret `RELEASE_BRANCH_DEPLOY_KEY`.
-  4. Run "Release line branch" again.
+  3. In the repository's Settings, under "Environments", open `release-branches` (create it if it is not there).
+     Under "Deployment branches and tags", choose "Selected branches and tags", and add the rules `main` and
+     `release/*`. Nothing else.
+  4. In that environment, add its private key as the environment secret `RELEASE_BRANCH_DEPLOY_KEY`. Never make it a
+     repository secret.
+  5. Run "Release line branch" again.
 
   With the secret set, both workflows push the branch over SSH with the deploy key. The push still never moves a
-  branch: it is refused if the ref exists at all. A deploy key in the bypass list can push to `release/*` without a
-  PR, so the secret is read only by the step that creates a branch.
+  branch: it is refused if the ref exists at all.
+
+  The key can push to `release/*` without a PR, and a push there publishes a release. A repository secret can be read
+  by any workflow, on any branch that a writer pushes. An environment secret is read only by a job that names the
+  environment, on a branch the environment allows. So the key goes in `release-branches`, which allows only `main` and
+  `release/*`, where every change comes through a reviewed PR.
 
 ## A patch on a line's branch
 
@@ -130,8 +141,8 @@ branch, `release/0.<minor>`.
    before the workflow cut branches, such as `0.19`, has none. To patch one of those, run the "Release line branch"
    workflow (`.github/workflows/release-line-branch.yml`) from the Actions page, with the line (`0.19`). It creates
    `release/0.19` at the line's newest tag, and checks the commit afterwards. It refuses a line with no tag. It never
-   moves a branch that exists. Nobody cuts a branch by hand. It may cut the newest line's branch too. Once a line has
-   its branch, release that line's patches from the branch, not from `main`.
+   moves a branch that exists. Nobody cuts a branch by hand. It may cut the newest line's branch too ("Where breaking
+   changes wait" says what that means for `main`).
 2. **Make the fix on a branch from `release/0.19`,** and open its PR against `release/0.19`. CI runs on it as on any
    PR. A fix that is on `main` already is cherry-picked to the branch, in its own PR.
    - The first PR to a new branch also takes `main`'s `.github/workflows/release.yml`, `images-publish.yml` and

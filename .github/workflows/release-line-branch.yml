@@ -6,7 +6,7 @@
 #   - a line with no tag is refused;
 #   - a branch that exists is never moved, and the run says where it is and stays green.
 # .github/actions/line-branch creates it, as for release.yml: with GITHUB_TOKEN, or with the deploy key when the secret
-# RELEASE_BRANCH_DEPLOY_KEY is set. A refusal fails the run, creates nothing, and prints GitHub's answer word for word
+# RELEASE_BRANCH_DEPLOY_KEY is set in the environment `release-branches`. A refusal fails the run, creates nothing, and prints GitHub's answer word for word
 # (release-notes/README.md "The ruleset on release/*").
 name: Release line branch
 
@@ -28,6 +28,9 @@ concurrency:
 jobs:
   cut:
     runs-on: ubuntu-latest
+    # the deploy key's secret, if one is set, lives in this environment, which only main and release/* may use
+    # (release-notes/README.md "The ruleset on release/*")
+    environment: release-branches
     steps:
       - uses: actions/checkout@v4
         with:

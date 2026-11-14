@@ -60,8 +60,8 @@ A release-notes PR's branch is `notes/v<version>`, never under `release/`, which
 **The release lines** (`release-notes/README.md` "Release lines" has the rule and the steps):
 - Choose the version by the rule. A release on the current line is a patch (`0.20.1`). Only a breaking change, which
   reads a project differently, makes a new line (`0.21.0`).
-- Once a breaking change merges to `main`, `main`'s next release is the new line (`0.21.0`). Until then, `main`
-  releases no patch of the current line.
+- Once a breaking change merges to `main`, `main`'s next release is the new line (`0.21.0`). Until the new line is
+  released, `main` releases no patch of the current line.
 - Nobody cuts a line's branch by hand. The release of a new line from `main` creates the previous line's branch
   (`release/0.20`) at that line's newest tag, before it tags (`release.yml`, `scripts/release-line.ts --cut`). It never
   moves a branch that exists. If it cannot create the branch, the run fails before it publishes anything, and prints
@@ -69,10 +69,11 @@ A release-notes PR's branch is `notes/v<version>`, never under `release/`, which
 - A line with no branch, such as `0.19`, gets one from the "Release line branch" workflow (`release-line-branch.yml`,
   a `workflow_dispatch` with the input `line`). Run it through the GitHub tools. It cuts `release/<major>.<minor>` at
   the line's newest tag, refuses a line with no tag, and never moves a branch that exists. Once a line has its branch,
-  its patches are released from the branch, not from `main`. No release step is done by hand.
+  its patches are released from the branch only: `main`'s release run refuses that line's versions, before it tags,
+  and names the branch. No release step is done by hand.
 - Right after the PR that added that workflow merges, run it with the line `0.20`. If GitHub refuses the workflow's
   token, the run names the rule. Then ask the owner for the deploy key that the README's "The ruleset on
-  `release/*`" describes, and run it again once the secret is set.
+  `release/*`" describes, saved in the environment `release-branches`, and run it again once the secret is set.
 - A fix needed on both lines merges to `main`, then is cherry-picked to the branch in its own PR.
 - A security fix also goes to the previous line (`0.19.x`), as a release merged to its `release/0.<minor>` branch.
 - Every `release/*` branch needs a ruleset like `main`'s (PR only, the required checks, no force-push, no deletion),

@@ -3,7 +3,8 @@
  * WHICH LINE A RELEASE IS ON, AND WHETHER IT IS THE NEWEST (.github/workflows/release.yml's `decide`;
  * release-notes/README.md "Release lines"; tests/release-line.test.ts).
  *
- *   git tag -l 'v*' | node scripts/release-line.ts <ref> <version>            newest=, npm_tag= and line_tag= lines
+ *   git ls-remote --refs origin 'refs/tags/v*' 'refs/heads/release/*' | node scripts/release-line.ts <ref> <version>
+ *                                                                              newest=, npm_tag= and line_tag= lines
  *   git ls-remote --tags --refs origin 'refs/tags/v*' | node scripts/release-line.ts <ref> <version> <key>
  *                                                                              that one value alone (newest, npm_tag)
  *   node scripts/release-line.ts --ref <ref>          releases=true, or releases=false and why= (exit 0 either way)
@@ -21,9 +22,11 @@
  * such a list cannot tell what is newest. A refused release says why on stderr, with exit 1 (exit 2 on a bad
  * argument). Only Node's builtins: the jobs run it with no npm ci.
  *
- * A release from main may be on any line. A release from a branch must be on that branch's line: `release/0.19` releases
- * 0.19.x and nothing else, so a notes file of another line merged there by mistake never publishes. Any other ref
- * releases nothing.
+ * A release from main may be on any line that has no branch yet. Once `release/0.20` exists, 0.20.x is released from it
+ * alone: a 0.20.1 from main would be missing from the branch, and the branch's next patch would lack its fixes. `decide`
+ * reads the remote's branches with its tags and refuses it, before anything is tagged. A release from a branch must be
+ * on that branch's line: `release/0.19` releases 0.19.x and nothing else, so a notes file of another line merged there
+ * by mistake never publishes. Any other ref releases nothing.
  *
  * The newest release is the highest version among this one and every v<x.y.z> tag. Only it takes npm's `latest`, the
  * image's `latest` and GitHub's Latest. A patch on an older line is published under npm's `latest-<major>.<minor>`
@@ -72,7 +75,11 @@ export function refLine(ref: string): { main: true } | { major: number; minor: n
   return { major: Number(m[1]), minor: Number(m[2]), branch };
 }
 
-/** What `decide` does with a release of `version` pushed to `ref`, given the repository's tags; or why it is refused. */
+/**
+ * What `decide` does with a release of `version` pushed to `ref`, given the repository's tags and its `release/*`
+ * branches (`refs/heads/release/0.20`, as `git ls-remote` names them); or why it is refused. A release from main of a
+ * line that has its branch is refused (the header says why). The re-check reads tags alone, after `decide` passed.
+ */
 export function decideLine(ref: string, version: string, tags: readonly string[]): LineDecision | { problem: string } {
   const v = parse(version);
   if (v === null) return { problem: `${version} is not a version (x.y.z, such as 0.20.1)` };
@@ -82,6 +89,13 @@ export function decideLine(ref: string, version: string, tags: readonly string[]
   if ("branch" in at && (at.major !== v.major || at.minor !== v.minor)) {
     return { problem: `The branch ${at.branch} releases ${at.major}.${at.minor}.x only, and its newest release notes are v${version}. ` +
       `Release ${version} from main or from release/${line}, or remove release-notes/v${version}.md from ${at.branch}.` };
+  }
+  // only a release not tagged yet: main's newest notes stay a released version's (v0.20.0.md) until the next line's
+  // land, and every push to main reads them, so a tagged version is not refused (nothing new ships under it)
+  if ("main" in at && tags.some((t) => t.trim() === `refs/heads/release/${line}`) && !tags.some((t) => t.trim() === `v${version}`)) {
+    return { problem: `The line ${line} has its branch, release/${line}, so ${version} is released from that branch, not from main. ` +
+      `A release from main would be missing from the branch, and its next patch would lack these fixes. Merge release-notes/v${version}.md ` +
+      `and the fix to release/${line} instead, and remove release-notes/v${version}.md from main.` };
   }
   const released = tags.map((t) => /^v(\d+\.\d+\.\d+)$/.exec(t.trim())?.[1]).filter((t) => t !== undefined).map(parse)
     .filter((t): t is Version => t !== null);
@@ -144,7 +158,7 @@ function cutAt(tag: Version, names: readonly string[]): CutDecision {
   return { cut: true, branch, from: `v${tag.major}.${tag.minor}.${tag.patch}` };
 }
 
-/** The tag names in `git tag -l`'s or `git ls-remote`'s lines: `v0.20.0` either way. */
+/** The tag names in `git tag -l`'s or `git ls-remote`'s lines: `v0.20.0` either way. A branch keeps its full name. */
 export function tagNames(text: string): string[] {
   return text.split("\n").map((l) => l.trim().split(/\s+/).pop() ?? "").filter((t) => t !== "")
     .map((t) => t.replace(/^refs\/tags\//, ""));
@@ -179,7 +193,7 @@ function main(args: string[]): number {
   }
   const [ref, version, key] = args;
   if (ref === undefined || version === undefined || args.length > 3 || (key !== undefined && !(KEYS as readonly string[]).includes(key))) {
-    process.stderr.write(`usage: git tag -l 'v*' | node scripts/release-line.ts <ref> <version> [${KEYS.join(" | ")}]\n`);
+    process.stderr.write(`usage: git ls-remote --refs origin 'refs/tags/v*' 'refs/heads/release/*' | node scripts/release-line.ts <ref> <version> [${KEYS.join(" | ")}]\n`);
     return 2;
   }
   const tags = tagNames(fs.readFileSync(0, "utf8"));

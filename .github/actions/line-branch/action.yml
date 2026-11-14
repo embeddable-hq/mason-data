@@ -3,8 +3,8 @@
 #
 # - With no deploy key, it creates the branch with the job's GITHUB_TOKEN, through the REST API (POST /git/refs), which
 #   refuses a ref that exists.
-# - With a deploy key (the repository secret RELEASE_BRANCH_DEPLOY_KEY, set only when the ruleset refuses the token), it
-#   pushes over SSH with `--force-with-lease=<ref>:`, which refuses a ref that exists.
+# - With a deploy key (the secret RELEASE_BRANCH_DEPLOY_KEY of the environment `release-branches`, set only when the
+#   ruleset refuses the token), it pushes over SSH with `--force-with-lease=<ref>:`, which refuses a ref that exists.
 # - A branch that exists already, because another run created it meanwhile, is left where it is, and the step passes.
 # - Otherwise a refusal fails the step, before anything is tagged or published, and prints GitHub's answer word for
 #   word: it names the rule that refused it.
@@ -44,8 +44,10 @@ runs:
           key="$RUNNER_TEMP/line-branch-key"; hosts="$RUNNER_TEMP/line-branch-hosts"
           trap 'rm -f "$key"' EXIT   # removed on every way out, a failure included
           (umask 077; printf '%s\n' "$DEPLOY_KEY" > "$key")
-          # GitHub's SSH host keys, read over HTTPS from its API
-          curl -fsS https://api.github.com/meta | node -e 'for (const k of JSON.parse(require("fs").readFileSync(0, "utf8")).ssh_keys) console.log(`github.com ${k}`)' > "$hosts"
+          # GitHub's SSH host keys, read over HTTPS from its API with the job's token (an unauthenticated read shares a
+          # shared runner's 60 an hour)
+          gh api meta --jq '.ssh_keys[] | "github.com " + .' > "$hosts"
+          [ -s "$hosts" ] || { echo "GitHub's API returned no SSH host keys, so the deploy key is not used" >&2; exit 1; }
           export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$hosts"
           # an empty lease: the push is refused if the ref exists at all
           if git push --force-with-lease="refs/heads/$BRANCH:" "git@github.com:$GITHUB_REPOSITORY.git" "$sha:refs/heads/$BRANCH" > "$answer" 2>&1; then ok=1; else ok=0; fi

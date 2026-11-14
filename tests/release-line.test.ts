@@ -37,6 +37,36 @@ test("the line's image tag moves only forward", () => {
   assert.equal(d.newest, false);
 });
 
+test("main refuses a release of a line that has its branch, before anything is tagged, and names the branch", () => {
+  const branched = [...TAGS, "refs/heads/release/0.20"];
+  const d = decideLine(MAIN, "0.20.1", branched);
+  assert.ok("problem" in d, "v0.20.1 from main would be missing from release/0.20");
+  assert.match(d.problem, /The line 0\.20 has its branch, release\/0\.20, so 0\.20\.1 is released from that branch, not from main/);
+  // the branch releases it, and main still releases the next line, and a line with no branch
+  assert.deepEqual(decideLine("refs/heads/release/0.20", "0.20.1", branched), { newest: true, npmTag: "latest", line: "0.20", lineTag: true });
+  assert.deepEqual(decideLine(MAIN, "0.21.0", branched), { newest: true, npmTag: "latest", line: "0.21", lineTag: true });
+  assert.ok(!("problem" in decideLine(MAIN, "0.19.1", branched)), "0.19 has no branch");
+  assert.ok("problem" in decideLine(MAIN, "0.19.1", [...branched, "refs/heads/release/0.19"]));
+  // a version tagged already is not refused: main's newest notes stay v0.20.0.md until the next line's land, and every
+  // push to main reads them
+  assert.ok(!("problem" in decideLine(MAIN, "0.20.0", branched)));
+  // a branch's name is not a tag
+  assert.ok(!("problem" in decideLine(MAIN, "0.20.1", [...TAGS, "refs/heads/release/0.20-old", "release/0.20"])));
+});
+
+test("decide reads the branches with the tags, in one git ls-remote call, and refuses with exit 1", () => {
+  const remote = (refs: string[]) => refs.map((r) => `${"0".repeat(40)}\t${r.startsWith("refs/") ? r : `refs/tags/${r}`}\n`).join("");
+  const no = run(remote([...TAGS, "refs/heads/release/0.20"]), MAIN, "0.20.1");
+  assert.equal(no.status, 1);
+  assert.equal(no.stdout, "");
+  assert.match(no.stderr, /released from that branch, not from main/);
+  assert.equal(run(remote([...TAGS, "refs/heads/release/0.20"]), "refs/heads/release/0.20", "0.20.1").status, 0);
+  const yml = fs.readFileSync(path.join(ROOT, ".github", "workflows", "release.yml"), "utf8");
+  const decide = job(yml, "decide");
+  assert.ok(decide.includes(`line="$(git ls-remote --refs origin 'refs/tags/v*' 'refs/heads/release/*' | node scripts/release-line.ts "$GITHUB_REF" "$version")"`));
+  assert.ok(decide.indexOf("release-line.ts \"$GITHUB_REF\" \"$version\"") < decide.indexOf('echo "version=$version"'), "before it says what to release");
+});
+
 test("a release branch refuses a release of another line, before anything is published", () => {
   const d = decideLine("refs/heads/release/0.19", "0.21.0", TAGS);
   assert.ok("problem" in d, "release/0.19 holding v0.21.0.md must not publish 0.21.0 as latest");
@@ -222,8 +252,27 @@ test("release.yml cuts the branch in the tag job, before it tags, with contents:
   const uses = USES_ACTION.exec(tag);
   assert.ok(uses !== null, "the tag job creates the branch with the line-branch action");
   assert.ok(cut < uses.index && uses.index < tag.indexOf('git tag -a "v$VERSION"'), "after the decision, before it tags");
-  assert.match(tag, /\n    permissions:\n      contents: write(\s+#[^\n]*)?\n    steps:/);
+  assert.match(tag, /\n    permissions:\n      contents: write(\s+#[^\n]*)?\n(    #[^\n]*\n)*    environment: release-branches\n    steps:/);
   assert.doesNotMatch(tag, /git push[^\n]*heads|-X PATCH/);
+});
+
+test("the deploy key is read only by the jobs that cut a branch, through the environment release-branches", () => {
+  for (const [file, name] of [["release.yml", "tag"], ["release-line-branch.yml", "cut"]] as const) {
+    const yml = fs.readFileSync(path.join(ROOT, ".github", "workflows", file), "utf8");
+    assert.equal(yml.match(/secrets\.RELEASE_BRANCH_DEPLOY_KEY/g)?.length, 1, `${file} reads the key once`);
+    const j = job(yml, name);
+    assert.match(j, /secrets\.RELEASE_BRANCH_DEPLOY_KEY/, `${file}'s ${name} job reads it`);
+    assert.match(j, /\n    environment: release-branches\n/, `${file}'s ${name} job names the environment`);
+    assert.equal(yml.match(/environment: /g)?.length, 1, `${file}: no other job names it`);
+  }
+  for (const file of fs.readdirSync(path.join(ROOT, ".github", "workflows"))) {
+    if (file === "release.yml" || file === "release-line-branch.yml") continue;
+    assert.doesNotMatch(fs.readFileSync(path.join(ROOT, ".github", "workflows", file), "utf8"), /RELEASE_BRANCH_DEPLOY_KEY|release-branches/, file);
+  }
+  // GitHub's host keys come from its API with the job's token, never an unauthenticated read
+  const action = fs.readFileSync(path.join(ROOT, ".github", "actions", "line-branch", "action.yml"), "utf8");
+  assert.match(action, /gh api meta --jq '\.ssh_keys\[\] \| "github\.com " \+ \.' > "\$hosts"/);
+  assert.doesNotMatch(action, /curl/);
 });
 
 test("the line-branch action never moves a branch, fails closed, and prints GitHub's refusal word for word", () => {
