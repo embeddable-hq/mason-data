@@ -2,7 +2,7 @@
  * THE SYNCS VIEW (#observability/syncs, a view of the Observability group; `#observability/logs`, `#logs` and `#syncs`
  * land here;
  * docs/OBSERVABILITY.md "Pages"): the sync's events (`mason logs --events`) over the time range the Observability views
- * share, as a timeline table NEWEST FIRST (When sorts it the other way) — the scheduled syncs that succeeded read only
+ * share, as a timeline table NEWEST FIRST (When sorts it the other way; Took by how long a sync took, its own column) — the scheduled syncs that succeeded read only
  * while "Scheduled syncs" is ticked (or one of their kinds chosen: `?scheduled=1`, filtered by the run, so they never
  * take the place of a failure among the newest EVENTS_LIMIT), "Failures only" asked of the run too (`?failed=1`: every
  * failure of the range, whatever else was read), and narrowed in the page alone by a kind and a table (every kind, and every added table from `/api/state`, events or not), at most EVENTS_SHOWN rows written with
@@ -12,7 +12,7 @@
  * details is open (the page's own state: nothing is read when it is closed). A page module (src/web/app.js has the contract). Never the engine's name.
  */
 import { VIEW_HASHES } from "../routes.js";
-import { esc, agoText, utcText, badge, empty, panel, n, sortTh, nextSort, moreRows, readPart, eventCells, MASON_TABLE, RANGES, DEFAULT_RANGE, rangeOf, rangeEvery } from "../shared.js";
+import { esc, agoText, utcText, badge, empty, panel, n, sortTh, sortedBy, nextSort, msText, moreRows, readPart, eventCells, MASON_TABLE, RANGES, DEFAULT_RANGE, rangeOf, rangeEvery } from "../shared.js";
 
 /** How many of the range's events are read (the newest), and how many of those the page writes at once. */
 const EVENTS_LIMIT = 500;
@@ -33,7 +33,7 @@ const th = (cols) => cols.map((c) => `<th scope="col">${esc(c)}</th>`).join("");
 export const KIND_WORDS = { full_sync_failed: "Full sync failed", poll_failed: "Scheduled sync failed", catch_up_failed: "Catch-up failed",
   stream_failed: "Live sync failed", source_unreachable: "Database unreachable", generated_failed: "Generated table failed",
   compact_failed: "Compaction failed", restart: "Mason restarted", full_sync: "Full sync", recovered: "Working again", synced: "Manual sync",
-  sync_changed: "Sync setting changed", polled: "Scheduled sync", streamed: "Live sync", ui_error: "Web page error" };
+  sync_changed: "Sync setting changed", columns_changed: "Columns changed", polled: "Scheduled sync", streamed: "Live sync", ui_error: "Web page error" };
 /** A kind's words; a kind this page does not know, its code. */
 export const kindWords = (kind) => Object.hasOwn(KIND_WORDS, kind) ? KIND_WORDS[kind] : kind;
 
@@ -51,6 +51,16 @@ const eventsShown = (events, { failuresOnly = false, kind = "", table = "" } = {
 export function failureFacts(e) {
   if (!e.failed || e.code == null) return "";
   return `<p class="dim">Code <code>${esc(e.code)}</code>${e.origin == null ? "" : `, at <code>${esc(e.origin)}</code>`}</p>`;
+}
+
+/** HOW LONG A SYNC TOOK, IN A COLUMN OF ITS OWN (issue 1012): the event's `tookMs` in the commands' words (`msText`:
+ *  `570 ms`, `7 min 57 s`), and its message without the ` · <took>` it ends with (src/duck/events.ts `tookMs`), so the
+ *  time is said once; an event with none (a restart, a failure, one recorded before Mason kept it) has "" and its
+ *  message whole. */
+export function tookCells(e, message) {
+  if (typeof e.tookMs !== "number") return { took: "", message };
+  const took = msText(e.tookMs), end = ` · ${took}`;
+  return { took, message: message.endsWith(end) ? message.slice(0, -end.length) : message };
 }
 
 /**
@@ -73,21 +83,24 @@ export function renderEvents(b, { failuresOnly = false, kind = "", table = "", n
   if (!passing.length) {
     return empty(failuresOnly && !kind && !table ? `None of the ${b.events.length} sync event${b.events.length === 1 ? "" : "s"} shown failed.` : `None of the ${n(b.events.length)} sync event${b.events.length === 1 ? "" : "s"} read passes the filters.`);
   }
-  const ordered = sort.dir === "asc" ? passing : [...passing].reverse();
+  // Took sorts the longest first (an event with none last, whatever the order), newest first among equals
+  const ordered = sort.key === "took" ? sortedBy([...passing].reverse(), (e) => typeof e.tookMs === "number" ? e.tookMs : null, sort.dir)
+    : sort.dir === "asc" ? passing : [...passing].reverse();
   const rows = ordered.slice(0, limit).map((e) => {
     const c = eventCells(e);
+    const t = tookCells(e, c.message);
     const more = (e.message.includes("\n") ? `<pre>${esc(e.message.split("\n").slice(1).join("\n"))}</pre>` : "") + failureFacts(e);
     return `<tr${e.failed ? ` class="t-failed"` : ""}><th scope="row"><time data-tick datetime="${esc(e.at)}" title="${esc(c.time)} UTC">${esc(agoText(e.at, now))}</time></th><td>${kindBadge(e)}</td>` +
-      `<td>${e.table == null ? `<span class="dim">${esc(c.table)}</span>` : `<code class="name" title="${esc(c.table)}">${esc(c.table)}</code>`}</td><td>${esc(c.message)}${more}</td></tr>`;
+      `<td>${e.table == null ? `<span class="dim">${esc(c.table)}</span>` : `<code class="name" title="${esc(c.table)}">${esc(c.table)}</code>`}</td><td>${esc(t.message)}${more}</td><td class="num">${esc(t.took)}</td></tr>`;
   }).join("");
   const count = narrowed ? `<p class="dim">${n(passing.length)} of the ${n(b.events.length)} events read.</p>` : "";
-  return count + panel(`<table class="events"><thead><tr>${sortTh("events", "time", "When", sort)}${th(["Kind", "Table", "Message"])}</tr></thead><tbody>${rows}</tbody></table>`) +
+  return count + panel(`<table class="events"><thead><tr>${sortTh("events", "time", "When", sort)}${th(["Kind", "Table", "Message"])}${sortTh("events", "took", "Took", sort, "num")}</tr></thead><tbody>${rows}</tbody></table>`) +
     moreRows("events", Math.min(limit, passing.length), passing.length, EVENTS_SHOWN);
 }
 
 /** EVERY KIND OF SYNC EVENT, in its order (src/duck/events.ts `EVENT_KINDS`, held equal by the tests): the Kind filter
  *  offers each, whether the range has one or not. */
-export const EVENT_KINDS = ["full_sync_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "restart", "full_sync", "recovered", "synced", "sync_changed", "polled", "streamed", "ui_error"];
+export const EVENT_KINDS = ["full_sync_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "restart", "full_sync", "recovered", "synced", "sync_changed", "columns_changed", "polled", "streamed", "ui_error"];
 
 /** The kind and table filters' controls: EVERY kind (EVENT_KINDS), and EVERY added table (`/api/state` `tables`, `s`) —
  *  Mason's own events first ("Mason events", MASON_TABLE) — whether the range has an event of it or not, so the choices never depend on what
@@ -139,7 +152,8 @@ export const page = {
       },
       /** Scheduled syncs ticked or cleared (or a kind chosen that changes what is read): the events read now, from the run. */
       async readEvents() { await ctx.refresh([events()]); },
-      sortEvents() { m.sort = nextSort(m.sort, "time"); },
+      /** When or Took pressed: newest first, or the longest first, then the other way at the next press. */
+      sortEvents(key = "time") { m.sort = nextSort(m.sort, key === "took" ? "took" : "time"); },
       showMoreEvents() { m.limit += EVENTS_SHOWN; },
       showAllEvents() { m.limit = Infinity; },
     };
@@ -179,7 +193,7 @@ export const page = {
         return true;
       },
       click(d) {
-        if (d.sortTable === "events") return actions.sortEvents() ?? true;
+        if (d.sortTable === "events") return actions.sortEvents(d.sortKey) ?? true;
         if (d.showMore === "events") return actions.showMoreEvents() ?? true;
         if (d.showAll === "events") return actions.showAllEvents() ?? true;
         return null;

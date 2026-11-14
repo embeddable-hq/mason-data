@@ -858,11 +858,11 @@ test("the stream says where it is: a table joins and leaves on a line with its p
     assert.equal(typeof s1.lag.bytes, "number");
 
     // THE PERIODIC LINE says what moved since the last one, and nothing while idle
-    await until(() => logged.some((l) => new RegExp(`^replication: applied through ${LSN} · in the last [\\d.]+ s: public\\.a 6 changes \\(3 inserts, 2 updates, 1 delete\\) · [\\d,]+ bytes behind the database; the newest change applied was committed`).test(l)),
+    await until(() => logged.some((l) => new RegExp(`^replication: applied through ${LSN} · in the last [\\d.]+ s: public\\.a 3 added, 2 updated, 1 deleted · [\\d,]+ bytes behind the database; the newest change applied was committed`).test(l)),
       "the periodic line", logged, 5_000);
     // and ONE scheduled-sync event a table for it (src/duck/events.ts `streamed`), never one a batch
     assert.deepEqual(events.filter((e) => e.kind === "streamed").map((e) => `${e.table} ${e.message.replace(/in the last [\d.]+ s$/, "in the last # s")}`),
-      ["public.a streamed 6 changes (3 inserts, 2 updates, 1 delete) in the last # s"], JSON.stringify(events));
+      ["public.a streamed 3 added, 2 updated, 1 deleted in the last # s"], JSON.stringify(events));
     const idleFrom = logged.length, idleEvents = events.length;
     await new Promise((r) => setTimeout(r, 1_200));
     assert.deepEqual(logged.slice(idleFrom).filter((l) => /^replication: applied through /.test(l)), [], "silent while idle");
@@ -1204,7 +1204,8 @@ test("a column dropped on the database while streaming refuses that table by nam
     await until(async () => await read("SELECT v FROM public.b WHERE id = 11") === "b after the drop", "b is current", logged, 20_000);
     const refused = logged.slice(from).filter((l) => l.startsWith("public.a: replication: the stream no longer carries"));
     assert.equal(refused.length, 1, logged.slice(from).join("\n"));
-    assert.match(refused[0]!, /^public\.a: replication: the stream no longer carries public\.a's x, which its synced table holds \(a column dropped or renamed on the database, or the publication's column list narrowed\), so its changes are not applied: it is caught up by one poll again after \d\d:\d\d UTC \(failure 1 in a row\), or at once when Mason starts again or its columns or key change\. The way out: remove x from its columns in the sources file \(mason add public\.a --columns … picks the columns it has; it is read again whole at once\), or publish it again \(ALTER PUBLICATION app_pub …\)$/);
+    assert.match(refused[0]!, /^public\.a: replication: the stream no longer carries public\.a's x, which its synced table holds \(a column dropped or renamed on the database, or app_pub's column list narrowed\), so its changes are not applied\. It is synced again whole once its columns are read again: at the next start, or at a mason add of it\. If app_pub lists its columns, publish it again \(ALTER PUBLICATION app_pub …\)\. Until then it is caught up by one poll again after \d\d:\d\d UTC \(failure 1 in a row\), or at once when Mason starts again or its columns or key change$/);
+    assert.doesNotMatch(refused[0]!, /remove x from its columns|--columns/, "never a way out that narrows an every-column entry (issue 977)");
     assert.ok(logged.slice(from).some((l) => /^public\.a leaves the stream at /.test(l)), logged.slice(from).join("\n"));
     // mason status: its error, and its catch-up's next attempt
     assert.equal(sync.state().find((x) => x.source === "public.a")?.error, refused[0]!.slice("public.a: ".length));

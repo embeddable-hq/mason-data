@@ -60,6 +60,17 @@ export const heldName = (oid: number): string => Object.entries(HELD).find(([, h
 /** an array of a type held as its text: a list of each element's text */
 export const isHeldArray = (oid: number | null): boolean => oid !== null && HELD_ARRAYS.has(oid);
 
+/**
+ * THE ARRAY TYPES A PARAMETER IS BOUND AS A LIST OF, each by its element's OID (issue 983): read by Postgres's own
+ * array_in in the catalog (src/duck/analyze.ts readParameters), bound for DuckDB as the list of its elements
+ * (src/duck/rewrite.ts `param`), and decoded from a binary Bind (src/api/postgres/server.ts `arrayFromBinary`). One
+ * table, so the three agree on which arrays are lists.
+ */
+export const PARAM_ARRAYS: ReadonlyMap<number, number> = new Map([
+  [1000, 16], [1005, 21], [1007, 23], [1016, 20], [1021, 700], [1022, 701], [1231, 1700], [2951, 2950],
+  [1182, 1082], [1115, 1114], [1185, 1184], [1009, 25], [1015, 1043],
+]);
+
 /** a time written in the session's zone, which the copy's text cannot be: written again where the statement executes */
 export const ZONED_HELD: ReadonlyMap<number, string> = new Map([[3910, "tstzrange"], [4534, "tstzmultirange"]]);
 
