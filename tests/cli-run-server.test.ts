@@ -55,6 +55,8 @@ assert.ok("source" in parsed);
 let chosen: string | null = null;
 const logged: string[] = [];
 let changed = 0;
+/** the tables each edit told the run it wrote the columns of (`sourcesChanged`) */
+let edited: string[][] = [];
 const duckFile = path.join(root, "duck.db");
 fs.writeFileSync(duckFile, "x".repeat(10));
 // the copies as the sync has them (src/duck/sync.ts CopyState): a test sets what the state reads
@@ -126,7 +128,7 @@ const ctx: RunContext = {
   page: true, users: { file: usersFile, apiKey: API_KEY, database: "app", postgresUrl: "postgresql://127.0.0.1:5433/app" },
   source: parsed.source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables, systemIdentifier: null }), warnings: [],
   replication: () => null, port: 0, token: "t0ken-of-this-run",
-  folder: () => chosen, root: path.join(root, "app"), home: path.join(root, "app", ".mason"), version: "9.9.9", startedAt: Date.parse("2026-10-28T08:00:00.000Z"), sources: () => ({ file: null, problem: null }), sourcesChanged: () => { changed++; }, log: (m) => logged.push(m),
+  folder: () => chosen, root: path.join(root, "app"), home: path.join(root, "app", ".mason"), version: "9.9.9", startedAt: Date.parse("2026-10-28T08:00:00.000Z"), sources: () => ({ file: null, problem: null }), sourcesChanged: (tables) => { changed++; edited.push([...tables]); }, log: (m) => logged.push(m),
   // the file as the run reads it: its URL resolved from no environment (the test's file writes it whole)
   readSource: () => chosen === null ? { message: "no folder chosen", code: "bad_source" } : readSource(chosen, path.join(root, "app"), {}),
   runUrl: "postgres://me@localhost:5432/app", listener,
@@ -1129,6 +1131,8 @@ test("a table set to sync: replication while the run is up, on a database that c
     const polled = await call("POST", "/api/pick", { body: { table: "public.customers", picked: true, sync: "poll 30s", keep: true } });
     assert.equal(polled.status, 200, polled.text);
     assert.equal(changed, 1);
+    // a sync alone asked: its columns are not the person's choice now, so what arrived meanwhile is still left out (issue 977)
+    assert.deepEqual(edited.at(-1), [], "a sync-only edit names no table whose columns it chose");
     assert.deepEqual(checked, [["customers"], []]);
   } finally { delete ctx.checkReplication; fs.writeFileSync(sourceFile, text); }
 });

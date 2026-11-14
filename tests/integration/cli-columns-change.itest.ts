@@ -8,8 +8,9 @@
  * secret-looking one), renames a column, and drops one. After each, with no restart, the synced data and `SELECT *`
  * over the Postgres API equal the source's columns but the secret-looking one, which is left out and said — written as
  * `exclude:` on its entry, as `mason add` would have, in the events and among `mason status`'s warnings — and the
- * table's line in `mason status` ends synced, with no error. A column dropped while Mason is stopped, one its `exclude:`
- * names and a synced one, is passed over at the next start and said, never a refusal of the project.
+ * table's line in `mason status` ends synced, with no error. A column `exclude:` names, renamed, is never served, live or
+ * after a restart: its new name takes its place in `exclude:`; dropped, it is taken out, so the next start never refuses
+ * the project. A synced column dropped while Mason is stopped: the start syncs the table again with its columns now.
  *
  * What it needs: IT_POSTGRES_URL (`wal_level = logical` for the replication test), psql on PATH, and DuckDB's postgres
  * extension. Each test writes only inside a database it creates, `it_columns_<random>`, drops it at the end, and runs
@@ -101,10 +102,13 @@ async function columnsChange(mode: "off" | "poll 1s" | "replication"): Promise<v
   ok(mason("wait", "--timeout", "120", "--json"), "mason wait");
   const api = ok(mason("user", "add", "it", "--json"), "mason user add").json.url as string;
 
-  /** the source's columns and rows but `api_token`, as SELECT * over the Postgres API must answer them */
+  /** the names the entry's exclude: holds now, as the file says them */
+  const excluded = (): string[] => (/^ {2}t:\n {4}exclude: \[([^\]]*)\]/m.exec(fs.readFileSync(file, "utf8"))?.[1] ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+  /** the source's columns and rows but those exclude: names, as SELECT * over the Postgres API must answer them */
   const expected = (): { columns: string; rows: string } => {
+    const out = ["api_token", ...excluded()];
     const cols = psql(dbUrl, "SELECT string_agg(attname, ',' ORDER BY attnum) FROM pg_attribute WHERE attrelid = 't'::regclass AND attnum > 0 AND NOT attisdropped")
-      .split(",").filter((c) => c !== "api_token");
+      .split(",").filter((c) => !out.includes(c));
     return { columns: cols.join("\t"), rows: psql(dbUrl, `SELECT ${cols.join(", ")} FROM t ORDER BY id`) };
   };
   const served = (): { columns: string; rows: string } | null => psqlWithHeader(api, "SELECT * FROM public.t ORDER BY id");
@@ -122,11 +126,12 @@ async function columnsChange(mode: "off" | "poll 1s" | "replication"): Promise<v
     const t = (s.json.tables as Array<{ table: string; error: string | null; sync?: { state: string }; columnsPending?: string[] }> | undefined)?.find((x) => x.table === "public.t");
     return t !== undefined && t.error === null && t.sync?.state === "synced" && t.columnsPending === undefined;
   };
-  const step = async (what: string, sql: string): Promise<void> => {
+  /** `check` is held at every look while it waits: what must never be served meanwhile */
+  const step = async (what: string, sql: string, check: () => void = () => undefined): Promise<void> => {
     psql(dbUrl, sql);
     if (mode === "replication") await new Promise((r) => setTimeout(r, 300));
-    await until(`${mode}: ${what}: SELECT * to equal the source`, () => { bump(); return same(); });
-    await until(`${mode}: ${what}: mason status to say it is synced`, () => { bump(); return settled(); });
+    await until(`${mode}: ${what}: SELECT * to equal the source`, () => { check(); bump(); return same(); });
+    await until(`${mode}: ${what}: mason status to say it is synced`, () => { check(); bump(); return settled(); });
   };
 
   // ADDED: one column with a default, one without, and one that looks like a secret
@@ -148,17 +153,30 @@ async function columnsChange(mode: "off" | "poll 1s" | "replication"): Promise<v
   await step("a column dropped", "ALTER TABLE t DROP COLUMN b");
   assert.match(served()!.columns, /^id\ta2\tc\td$/);
 
-  // WHILE MASON IS STOPPED, a column its exclude: names and a synced one are dropped (#993's review: the next start
-  // refused the whole project until the sources file was edited): the start passes over the name and says so, and the
-  // table is synced again with its columns now
+  // AN EXCLUDED COLUMN RENAMED (the review of PR 995: a salary renamed annual_pay was served at once, and after a
+  // restart): its data is never served, live or after a restart. A rename is a name gone and one arrived at once, so the
+  // new name is left out in its place, written in exclude:, and said
+  const never = (): void => { const s = served(); assert.ok(s === null || !s.columns.split("\t").includes("pay_note"), `pay_note served: ${s?.columns}`); };
+  await step("an excluded column renamed", "ALTER TABLE t RENAME COLUMN api_token TO pay_note; UPDATE t SET d = 'renamed' WHERE id = 1", never);
+  await until(`${mode}: exclude: to name pay_note`, () => { never(); bump(); return excluded().join(",") === "pay_note"; });
+  assert.match(served()!.columns, /^id\ta2\tc\td$/);
+  const renamed = /public\.t: api_token, which exclude: names, is gone from the database, and pay_note arrived at the same time \(a rename keeps its data\), so it is not synced either\. Mason wrote exclude: \[pay_note\]/;
+  assert.ok((ok(mason("status", "--json"), "mason status").json.warnings as string[]).some((w) => renamed.test(w)), "said among mason status's warnings");
   ok(mason("stop", "--json"), "mason stop");
-  psql(dbUrl, "ALTER TABLE t DROP COLUMN api_token, DROP COLUMN c");
-  const started = ok(mason("start"), "mason start after a column exclude: names was dropped");
-  const gone = /tables\.t\.exclude: public\.t no longer has api_token, so there is nothing to leave out\. Take it out of exclude:/;
-  assert.match(started.stdout + started.stderr, gone);
+  ok(mason("start"), "mason start after an excluded column was renamed");
+  await until(`${mode}: after the restart: SELECT * to equal the source`, () => { never(); bump(); return same(); });
+  assert.match(served()!.columns, /^id\ta2\tc\td$/, "never pay_note after a restart");
+
+  // AN EXCLUDED COLUMN DROPPED: taken out of exclude:, so the next start never refuses the project (#993's review)
+  await step("an excluded column dropped", "ALTER TABLE t DROP COLUMN pay_note");
+  await until(`${mode}: exclude: emptied`, () => { bump(); return /^ {2}t: \{\}\n/m.test(fs.readFileSync(file, "utf8")); });
+
+  // WHILE MASON IS STOPPED, a synced column dropped: the start syncs the table again with its columns now
+  ok(mason("stop", "--json"), "mason stop");
+  psql(dbUrl, "ALTER TABLE t DROP COLUMN c");
+  ok(mason("start"), "mason start after a synced column was dropped");
   await until(`${mode}: after the restart: SELECT * to equal the source`, () => { bump(); return same(); });
   assert.match(served()!.columns, /^id\ta2\td$/);
-  assert.ok((ok(mason("status", "--json"), "mason status").json.warnings as string[]).some((w) => gone.test(w)), "said among mason status's warnings");
   await until(`${mode}: after the restart: mason status to say it is synced`, () => { bump(); return settled(); });
   ok(mason("stop", "--json"), "mason stop");
 }

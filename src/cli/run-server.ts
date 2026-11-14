@@ -968,7 +968,9 @@ export function createRunServer(ctx: RunContext): http.Server {
             const refused = now === null || "problems" in now ? null : await ctx.checkReplication!(now);
             if (refused !== null) { fs.writeFileSync(at.file, at.text); sendFailure(res, statusOf(refused), refused); return; }
             if (!r.already) ctx.log(`added ${r.table} to ${r.file}`);
-            ctx.sourcesChanged([r.table]);
+            // a sync alone asked of a table added (--sync): its columns are not the person's choice now, so what arrived
+            // meanwhile is left out as the run leaves it out (src/cli/dev.ts leaveOut)
+            ctx.sourcesChanged(body.keep === true ? [] : [r.table]);
             sendJson(res, 200, { ...r, state: await state(ctx, false, false) });
           } else {
             const r = removeTables(ctx, [body.table]);

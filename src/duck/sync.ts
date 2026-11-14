@@ -68,7 +68,8 @@ import type { PgApiType, PgCollation, PgColumn, PgJoin, PgSchema, PgTable, PgVie
 import { wireColumn } from "./types.ts";
 import { nextPollDelayMs, SNAPSHOT_SQL, snapshotXmin, xmin8Sql, xminBeforeHolds, xminBeforeSql } from "../cdc/poll.ts";
 import { pgIdent } from "../cdc/pg-wire.ts";
-import { regclassName, shapeColumns, shapeSql } from "../cdc/shape.ts";
+import { regclassName, shapeColumns, shapeSql, shapeTuples } from "../cdc/shape.ts";
+import type { RelationColumn } from "../cdc/pgoutput.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { PgConnection, formatLsn, parseLsn, pgLiteral, type PgConnectOptions } from "../cdc/pg-wire.ts";
@@ -2427,16 +2428,35 @@ export class Sync {
   }
 
   /**
-   * A STREAM'S RELATION MESSAGE OF A REPLICATED TABLE (src/duck/stream.ts `relation`): its shape is checked at the next
-   * pass (`work`) — at once when the relation's columns are not its copy's, else at most once a minute (Postgres sends
-   * one again after any change of the table's definition, a VACUUM's statistics too). A column the copy holds that
-   * Postgres never publishes (a generated one before 18) is no difference.
+   * AFTER A WHOLE READ FAILED, ITS TABLE'S SHAPE NOW (issue 977): a column dropped, renamed or retyped on the database
+   * while it was read fails every attempt that names the old columns, so a shape that differs is read again
+   * (`columnsChanged`), and the run's tables set again re-plan it — copied with its columns now, or polled again when
+   * they are its copy's. A check that fails is said, and made again after its next attempt fails.
    */
-  private relationSeen(source: string, columns: readonly string[]): void {
+  private async reshapeAfterFailure(w: DuckConnection, t: AddedTable): Promise<void> {
+    if (t.shape === undefined || this.onColumnsChanged === undefined || this.stopped) return;
+    try {
+      const shape = (await this.shapesNow(w, [t])).get(t.source);
+      if (shape !== undefined && shape !== null && shape !== t.shape) this.columnsChanged(t, shape);
+    } catch (e) {
+      this.log(`${t.source}: its columns could not be checked after its sync failed (checked again after its next attempt): ${this.errorText(e)}`);
+    }
+  }
+
+  /**
+   * A STREAM'S RELATION MESSAGE OF A REPLICATED TABLE (src/duck/stream.ts `relation`): its shape is checked at the next
+   * pass (`work`) — at once when the relation's columns, their types or type modifiers are not its catalog shape's (a
+   * column added, renamed, dropped or of another type: Mason's own publication names each table whole), else at most
+   * once a minute (Postgres sends one again after any change of the table's definition, a VACUUM's statistics too; a
+   * named publication's column list sends a narrower relation). A generated column Postgres never publishes before 18
+   * is no difference.
+   */
+  private relationSeen(source: string, columns: readonly RelationColumn[]): void {
     const t = this.tables.get(source);
     if (t === undefined || !this.replicated(t) || t.shape === undefined || this.onColumnsChanged === undefined || this.stopped) return;
-    const copy = this.asCopied(t).columns.filter((c) => !c.generated).map((c) => c.name);
-    const differs = copy.length !== columns.length || copy.some((c) => !columns.includes(c));
+    const generated = new Set(t.columns.filter((c) => c.generated).map((c) => c.name));
+    const shape = shapeTuples(t.shape).filter((c) => !generated.has(c.name));
+    const differs = shape.length !== columns.length || shape.some((c, i) => c.name !== columns[i]!.name || c.typeOid !== columns[i]!.typeOid || c.typmod !== columns[i]!.typmod);
     if (!differs && Date.now() - (this.relationCheckedAt.get(source) ?? 0) < 60_000) return;
     this.relationCheckedAt.set(source, Date.now());
     this.shapeChecks.add(source);
@@ -4058,6 +4078,9 @@ export class Sync {
       this.event({ kind: "full_sync_failed", table: t.source, message: `${m}; ${when}`, cause: e });
       // a table that was copied keeps serving its last copy; one never copied is failed
       await this.record({ ...this.states.get(t.source)!, phase: first ? "failed" : "copied", error: `${m} (${when})` }, undefined, w);
+      // A COLUMN CHANGED UNDER ITS WHOLE READ (issue 977: a column dropped or renamed while it was read failed it for ever
+      // with the same columns): its shape checked now, and a change read again, which syncs it with its columns now
+      await this.reshapeAfterFailure(w, t);
     }
   }
 

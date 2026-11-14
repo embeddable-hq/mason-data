@@ -42,7 +42,7 @@ import { createRunServer, listenOnLoopback, metricsFacts, usageFacts, type RunCo
 import { UiErrors } from "./ui-errors.ts";
 import type { RunMetrics } from "./metrics.ts";
 import { readGenerated } from "./generated-files.ts";
-import { addedTables, arrivedSecrets, effectiveSync, entryName, goneNotes, leftOutText, replicatedEntries, rereadSources, shownPath, syncWritten, withLeftOut, withTable, type ArrivedSecrets, type RunSources, type SourceFile } from "./sources.ts";
+import { addedTables, effectiveSync, entryName, excludeOf, goneNotes, leftOutArrivals, leftOutText, replicatedEntries, rereadSources, shownPath, syncWritten, withLeftOut, withTable, type LeftOut, type RunSources, type SourceFile } from "./sources.ts";
 import { newToken } from "./security.ts";
 import { alive, liveRun, processStart } from "./runs.ts";
 import { DEMO_DIR, DUCK_FILE, projectReadOnlySetting, projectSource, projectWriteRefusal, startSettingRefusal, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
@@ -554,14 +554,16 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // the views first: setting the tables rebuilds the catalog, which reads them. The sources file read again: a mistake in it
   // keeps the tables read before (a typo never drops a copy), said in the log and by mason status
   // THE COLUMNS EACH TABLE HAD when the run's tables were last set from the catalog (issue 977): a column the database
-  // has beyond them arrived while the run was up, and one that looks like a secret is left out (`arrivedSecrets`)
+  // has beyond them arrived while the run was up, and is left out where it may not be synced (`leftOutArrivals`)
   let columnsSet = new Map(facts.tables.map((t) => [t.source, t.columns.map((c) => c.name)]));
-  // what the run left out where it could not write the sources file (its files read-only here), by table: for this run
+  // what the run left out where it could not write the sources file (its files read-only here), by table, and the names
+  // of exclude: it took out: for this run
   const leftOut = new Map<string, string[]>();
+  const goneOut = new Map<string, string[]>();
   /** Leaves out the secret-looking columns that arrived: `exclude:` written on each entry, as `mason add` writes it —
    *  else, where the project's files may not be written, left out for this run, with the line to add. Said in the log,
    *  as an event and among the run's warnings (`mason status`, the web page). */
-  const leaveOut = (file: SourceFile, arrived: readonly ArrivedSecrets[]): void => {
+  const leaveOut = (file: SourceFile, arrived: readonly LeftOut[]): void => {
     const shown = shownPath(project.root, file.file);
     let why: string | null = projectWriteRefusal(project.root, process.env)?.message ?? null;
     let written = false;
@@ -571,7 +573,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       try {
         let text = fs.readFileSync(file.file, "utf8");
         for (const a of arrived) {
-          const r = withTable(text, { ...a.entry, exclude: [...a.entry.exclude, ...a.columns] });
+          const r = withTable(text, { ...a.entry, exclude: excludeOf(a) });
           if ("problem" in r) throw new Error(`it cannot be edited: ${r.problem}`);
           text = r.text;
         }
@@ -580,7 +582,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       } catch (e) { why = `${shown}: ${(e as Error).message}`; }
     }
     for (const a of arrived) {
-      if (!written) leftOut.set(a.entry.table, [...(leftOut.get(a.entry.table) ?? []), ...a.columns]);
+      if (!written) {
+        leftOut.set(a.entry.table, [...(leftOut.get(a.entry.table) ?? []), ...a.columns]);
+        goneOut.set(a.entry.table, [...(goneOut.get(a.entry.table) ?? []), ...a.gone]);
+      }
       const m = leftOutText(a, written ? shown : null, why);
       logLine(`[sync] ${m}`);
       events.record({ kind: "columns_changed", table: a.entry.table, message: m });
@@ -592,9 +597,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     const now = catalog.facts();
     let read = readSources();
     if (!("message" in read)) {
-      const arrived = arrivedSecrets(read, now.tables, columnsSet, edit.edited ?? []);
+      const arrived = leftOutArrivals(read, now.tables, columnsSet, edit.edited ?? []);
       if (arrived.length) { leaveOut(read, arrived); read = readSources(); }
-      if (!("message" in read)) read = withLeftOut(read, leftOut);
+      if (!("message" in read)) read = withLeftOut(read, leftOut, goneOut);
     }
     const r = rereadSources(sources, read, src.resolved, now.tables, source.database, project.root, { replicationChecked, slot: cfg.replication?.slot ?? null });
     if (r.said !== null) logLine(`[sync] ${r.said}`);

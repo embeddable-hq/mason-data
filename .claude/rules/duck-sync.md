@@ -56,7 +56,12 @@ paths:
   again, so `needsCopy` syncs it again whole while its old copy serves; meanwhile it is polled with its old columns only
   while they all still exist, and `mason sync` of it answers that it is read again whole. A secret-looking column that
   arrived in an every-column entry is left out, `exclude:` written as `mason add` writes it (src/cli/dev.ts `leaveOut`,
-  `arrivedSecrets`), and said in the log, as a `columns_changed` event and among the run's warnings.
+  `leftOutArrivals`), and said in the log, as a `columns_changed` event and among the run's warnings; a name of
+  `exclude:` gone while the run is up FAILS CLOSED: every column that arrived with it is left out in its place (a rename
+  keeps its data: the review of PR 995 served a salary renamed annual_pay), and one gone with nothing arrived is taken
+  out. **A whole read that fails checks its table's shape again** (`reshapeAfterFailure`; the same review: a column
+  dropped during a resync, or renamed during a first sync, failed it for ever with the same columns), so a change
+  re-plans it. A relation message whose columns, type oids or typmods are not the shape's is checked at once.
 - **A batch holds a table's changes of ONE STAY in the stream, and only the stay it is in now is applied**
   (`StreamedTable.stay`: a new number when the table enters `streamed` or its copy is swapped, never used twice;
   `streamOnce`, `applyStreamed`): an ended stay's changes committed before the next copy's catch-up, so that copy or

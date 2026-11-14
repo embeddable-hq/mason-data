@@ -20,14 +20,18 @@ export const shapeSql = (rel: string): string => "(SELECT coalesce(json_agg(json
  *  it names. */
 export const regclassName = (schema: string, table: string): string => pgLiteral(`${pgIdent(schema)}.${pgIdent(table)}`);
 
-/** The column names a shape holds, in order: a shape this module did not write reads as none. */
-export function shapeColumns(shape: string): string[] {
+/** A shape's columns, in order, each its name, type oid and type modifier (Postgres's JSON writes an oid as a string):
+ *  a shape this module did not write reads as none. */
+export function shapeTuples(shape: string): Array<{ name: string; typeOid: number; typmod: number }> {
   try {
     const cols = JSON.parse(shape) as unknown;
-    return Array.isArray(cols) ? cols.flatMap((c) => Array.isArray(c) && typeof c[0] === "string" ? [c[0]] : []) : [];
+    return Array.isArray(cols) ? cols.flatMap((c) => Array.isArray(c) && typeof c[0] === "string" ? [{ name: c[0], typeOid: Number(c[1]), typmod: Number(c[2]) }] : []) : [];
   } catch (e) {
     // a shape is written by `shapeSql` alone, so a text that is not JSON is a bug: said by its caller as no columns
     if (e instanceof SyntaxError) return [];
     throw e;
   }
 }
+
+/** The column names a shape holds, in order. */
+export const shapeColumns = (shape: string): string[] => shapeTuples(shape).map((c) => c.name);
