@@ -1280,14 +1280,18 @@ table, but it holds the engine's text of what its SELECT computed: `jsonb_build_
 "a relation's column" for "a synced table's column", and answered `bb, a, bb, c` where Postgres answers `a, c, bb`. The
 same premise had read a generated table's `->` and `@>` by the first of the two `bb`s since issue 130 (`(j -> 'bb')`
 was `1`, `j @> '{"bb": 1}'` true, where Postgres has `2` and false). Now ONE decision says a column's jsonb is canonical
-(`copiedColumn`): a relation the run's list of what each table is (`copies`) names as a SYNCED copy (`kept.by` not
-"generated"), by its schema-qualified name (`canonicalRelations`, src/duck/plan.ts). It fails closed. The second review
-found the first form of it, "every relation the list does not name as generated", open in a window: `remove`
-(src/duck/generated.ts) takes a generated table off the list at once, and drops it from the catalog only at the writer's
-turn, which a poll's full scan held for 25 s, so the table was read natively for about 40 s (`bb,a,bb,c`). Now a
-relation on neither list, a generated one and every relation of a listener given no list (a test passes its tables) is
-the function's: right, only slower. Every native read that skips checking each key is held once asks
-it.
+(`copiedColumn`): a relation the BUILD of the catalog the statement was analysed on declared a synced copy
+(`PgTable.synced`, from src/duck/sync.ts `schemaBuilt`; `PgCatalog.syncedOf` reads the running instance's build and
+resolves the relids on that same instance). It fails closed: a generated table, and every relation of a plan given no
+record, is the function's, right and only slower. Every native read that skips checking each key is held once asks it.
+
+Two forms of it read the run's live list of what each table is (`copies`) and were each open in a window, because that
+list moves before the catalog is rebuilt. The second review found "every relation the list does not name as generated"
+open while a generated table's file is removed: `remove` (src/duck/generated.ts) takes it off the list at once, and drops
+it from the catalog only at the writer's turn, which a poll's full scan held for 25 s, so it was read natively for about
+40 s (`bb,a,bb,c`). The third found "every relation the list names as synced" open when a sources entry is added for
+the name a generated table serves: the list calls it synced at once, and the catalog serves the generated table for
+100-200 ms more. Only the build that makes a relation says what it holds, so the two cannot disagree in any window.
 
 **Why.** On 2026-11-12, Metabase's `SELECT jsonb_object_keys(payload) AS key, count(*) … GROUP BY 1 ORDER BY 2 DESC, 1`
 over 3 M rows took 172–264 s against Postgres's 4.4–8.4 s, and timed out above about 5 M rows. The profile here: the

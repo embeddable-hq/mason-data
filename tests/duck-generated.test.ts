@@ -877,17 +877,27 @@ test("issue 461: a generated table's jsonb holding a key twice answers its keys 
       // the reads that took the same premise: the LAST value of a key written twice, as jsonb holds it
       assert.deepEqual(await rows("SELECT id, j ->> 'bb', (j -> 'bb')::text, j @> '{\"bb\": 1}', j @> '{\"bb\": 2}', (j -> 'bb') IS NULL FROM g_build WHERE id = 1"), [["1", "2", "2", "f", "t", "f"]]);
       assert.deepEqual(await rows("SELECT j::text FROM g_build WHERE id = 1"), [['{"a": 1, "c": 3, "bb": 2}']]);
-      // FAIL CLOSED (round 2's review): a relation the run's list names as NEITHER synced nor generated is not known to
-      // be canonical. A generated table's file removed is such a window: `remove` drops the entry from the list at once,
-      // and the table from the catalog only at the writer's turn, which a poll's scan can hold for seconds. The list
-      // without it, as in that window, while the catalog still serves it: the function's path, Postgres's keys
-      const generated = w.sync.generated, listed = generated.copies.bind(generated);
-      generated.copies = () => listed().filter((x) => x.source !== "public.g_build");
+      // WHAT A RELATION HOLDS IS THE CATALOG BUILD'S, NEVER THE LIVE LIST'S (issue 461's second and third reviews): the
+      // list of what each table is moves before the catalog is rebuilt, either way. A generated table's file removed
+      // takes it off the list at once, and out of the catalog only at the writer's turn (a poll's scan held it 25 s); a
+      // sources entry added for the name a generated table serves calls it synced at once, while the catalog serves the
+      // generated table until its rebuild (100-200 ms). Each window, held here for as long as the test likes: the list
+      // as it is then, the catalog as it was built. The build declared g_build no synced copy, so its jsonb is the
+      // function's: Postgres's keys and reads
+      const generated = w.sync.generated, listed = generated.copies.bind(generated), states = w.sync.state.bind(w.sync);
+      const ask = async (tag: string): Promise<void> => {
+        assert.deepEqual(await rows(`SELECT id, jsonb_object_keys(j) AS ${tag} FROM g_build WHERE id = 3`), keys.map((k) => ["3", k]), tag);
+        assert.deepEqual(await rows(`SELECT count(*) AS ${tag} FROM (SELECT jsonb_object_keys(j) FROM g_build) s`), [["12"]], tag);
+        assert.deepEqual(await rows(`SELECT id, (j -> 'bb')::text AS ${tag}, j @> '{"bb": 2}' FROM g_build WHERE id = 3`), [["3", "2", "t"]], tag);
+      };
       try {
-        assert.deepEqual(await rows("SELECT id, jsonb_object_keys(j) AS off_the_list FROM g_build WHERE id = 3"), keys.map((k) => ["3", k]));
-        assert.deepEqual(await rows("SELECT count(*) AS off_the_list FROM (SELECT jsonb_object_keys(j) FROM g_build) s"), [["12"]]);
-        assert.deepEqual(await rows("SELECT id, (j -> 'bb')::text AS off_the_list, j @> '{\"bb\": 2}' FROM g_build WHERE id = 3"), [["3", "2", "t"]]);
-      } finally { generated.copies = listed; }
+        // removed: on neither list
+        generated.copies = () => listed().filter((x) => x.source !== "public.g_build");
+        await ask("off_the_list");
+        // a synced table added under its name: the list calls it synced, the catalog still serves the generated table
+        w.sync.state = () => [...states(), { source: "public.g_build", phase: "copied", rows: 4, bytes: null, seconds: null, copiedAt: null, error: null }];
+        await ask("listed_synced");
+      } finally { generated.copies = listed; w.sync.state = states; }
     } finally { await c.end(); }
   });
 });

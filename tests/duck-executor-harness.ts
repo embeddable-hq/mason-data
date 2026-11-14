@@ -57,6 +57,8 @@ export const schema: PgSchema = {
     { name: "jwide", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "j", type: "jsonb" }] },
   ],
 };
+// every table a synced copy, as the sync's build of the catalog declares it (src/api/postgres/schema.ts `PgTable.synced`)
+for (const t of schema.tables) t.synced = true;
 /**
  * `jwide`'s rows (issue 130): 20 kB jsonb documents, `{"a": <id % 50>, "b": "v<id % 7>", "pad": "x…"}`, a BI tool's
  * filter over a wide JSON column. A Mason function's vector of them is ~200 ms of the executor's loop, and a loop turn
@@ -96,8 +98,7 @@ export function useServer(o: { warm?: boolean; wide?: boolean; jwide?: boolean }
       port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test", product: "mason-data",
       authenticate: (password) => { const p = tokenProblem(API_KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
       schema: () => schema, record: () => undefined, log: (l) => { logged.push(l); },
-      // its tables as the run's list says SYNCED copies: a jsonb is read natively only on one (src/duck/plan.ts canonicalRelations)
-      duck: await store.listener(undefined, undefined, undefined, () => schema.tables.map((t) => ({ source: `${t.schema ?? "public"}.${t.name}`, phase: "copied", rows: null, bytes: null, seconds: null, copiedAt: null, error: null }))),
+      duck: await store.listener(undefined),
     });
     // CALLED reaches the function: a test that must exercise it is voided where the rewrite answers it natively
     {

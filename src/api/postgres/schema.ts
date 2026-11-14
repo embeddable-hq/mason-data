@@ -119,6 +119,10 @@ export interface PgTable {
   /** the copied columns, in the source's order */
   columns: PgColumn[];
   joins: PgJoin[];
+  /** a SYNCED copy, whose text is the source's own (a jsonb's canonical text): declared by the build that makes the
+   *  catalog's relations (src/duck/sync.ts `schemaBuilt`), never by a later list, so a plan asks the build it was
+   *  analysed on (src/api/postgres/catalog.ts `PgCatalog.syncedOf`). Absent: not known to be one (a generated table) */
+  synced?: true | undefined;
 }
 
 export interface PgSchema {

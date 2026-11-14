@@ -61,24 +61,18 @@ async function keptLookup(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, t
 
 /**
  * THE RELATIONS WHOSE JSONB TEXT IS POSTGRES'S CANONICAL TEXT, by relid (src/duck/rewrite.ts `Rewriter.canonicalText`):
- * the SYNCED tables the statement reads a json or jsonb column of, positively known from the run's own list of what each
- * table served is (`copies`: a copy whose `kept.by` is not "generated", by its schema-qualified name). A synced table's
- * copy holds the source's jsonb_out text; anything else is the function's (fail closed, issue 461's reviews): a
- * generated table's jsonb is what the engine computed, a key held twice included, and a relation on neither list (a
- * generated table whose file was just removed, still in the catalog until the writer's turn drops it; a listener given
- * no list) is not known to be canonical.
+ * of the relations whose json or jsonb column the statement reads, those the BUILD of the catalog the statement was
+ * analysed on declared synced copies (`synced`: src/api/postgres/catalog.ts `PgCatalog.syncedOf`, `PgTable.synced`).
+ * Never the live list of what each table is, which moves before the catalog does (issue 461's third review: a sources
+ * entry added for a name a generated table serves). Fail closed: a relation the build did not declare synced (a
+ * generated table; one whose file was just removed; every relation of a plan given no record) is the function's.
  */
-async function canonicalRelations(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, types: ReadonlyMap<number, ReadonlyArray<{ type: number; relation?: { relid: number; attno: number } }>>,
-  copies: readonly CopyState[]): Promise<ReadonlySet<number>> {
-  const synced = new Set(copies.filter((c) => c.kept?.by !== "generated").map((c) => c.source));
-  // (a name a generated table and a synced table both claim is the synced table's, which wins the catalog:
-  // src/duck/generated.ts `served`)
-  if (synced.size === 0) return new Set();
+async function canonicalRelations(types: ReadonlyMap<number, ReadonlyArray<{ type: number; relation?: { relid: number; attno: number } }>>,
+  synced: ((relids: readonly number[]) => Promise<ReadonlySet<number>>) | undefined): Promise<ReadonlySet<number>> {
+  if (synced === undefined) return new Set();
   const relids = new Set<number>();
-  for (const t of [...types.values()].flat()) if (t.relation !== undefined && (t.type === JSON_OID || t.type === JSONB_OID)) relids.add(Math.trunc(t.relation.relid));
-  if (relids.size === 0) return new Set();
-  const rows = await catalogRows(catalog, `SELECT c.oid::text, n.nspname, c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid::int8 IN (${[...relids].join(", ")})`);
-  return new Set(rows.filter(([, schema, table]) => synced.has(`${schema}.${table}`)).map(([relid]) => Number(relid)));
+  for (const t of [...types.values()].flat()) if (t.relation !== undefined && (t.type === JSON_OID || t.type === JSONB_OID)) relids.add(t.relation.relid);
+  return relids.size === 0 ? new Set() : synced([...relids]);
 }
 
 /** the count(DISTINCT x) of the statement that are count(x) (src/duck/distinct-key.ts), by their offsets into the
@@ -329,6 +323,9 @@ export interface PlanOptions {
   walls?: Walls | null;
   /** a generated table's run (src/duck/generated.ts): `schema.table` → the table read in its place, in the same schema */
   relations?: ReadonlyMap<string, string>;
+  /** which of the relids the catalog's build declared synced copies (src/api/postgres/catalog.ts `PgCatalog.syncedOf`):
+   *  a jsonb is read as canonical text only on one (`canonicalRelations`); absent, none is */
+  synced?: (relids: readonly number[]) => Promise<ReadonlySet<number>>;
   /** the generated planner's ask for each output column's followed analysed expression (`DuckPlan.outputs`): only it
    *  reads them, so a wire statement never pays for them (PR 202 round 14) */
   outputs?: boolean;
@@ -568,7 +565,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // the stored JSON paths the statement's JSON reads may be answered from (src/duck/kept-route.ts)
   const lookup = kept === null ? null : await keptLookup(catalog, analysis.types, kept);
   const keyCounts = await distinctKeys(catalog, analysis.tree);
-  const canonicalText = await canonicalRelations(catalog, analysis.types, copies());
+  const canonicalText = await canonicalRelations(analysis.types, options.synced);
   // WHAT EACH COLLATION OF THE ANALYSIS MEANS (src/duck/collation.ts), resolved before the rewrite reads any: a libc
   // order not read yet is read here, before the plan is made; a collation the source lacks or Mason cannot follow refused
   let collations: StatementCollations;

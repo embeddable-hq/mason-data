@@ -290,7 +290,8 @@ class Rewriter {
    */
   boundPaths: ReadonlyMap<number, string> = new Map();
   /** the relations of the analysis whose jsonb text is Postgres's canonical text, the SYNCED tables positively known
-   *  (src/duck/plan.ts `canonicalRelations`), by relid: `copiedColumn` calls no other relation's column canonical */
+   *  (src/duck/plan.ts `canonicalRelations`, from the catalog's build), by relid: `copiedColumn` calls no other
+   *  relation's column canonical */
   canonicalText: ReadonlySet<number> = new Set();
   /** the parameters met as a json read's path, or an element or key of one, of a type read as a constant (`foldParam`) */
   readonly pathParams = new Set<number>();
@@ -483,11 +484,11 @@ class Rewriter {
 
   /**
    * THE ONE DECISION THAT A COLUMN'S JSONB TEXT IS POSTGRES'S CANONICAL TEXT, each key once in jsonb's order: a column of
-   * a relation POSITIVELY KNOWN to be a SYNCED table (`canonicalText`, from the run's own list of what each table is:
-   * src/duck/plan.ts `canonicalRelations`), whose copy holds the source's jsonb_out text. Anything else fails closed to
-   * the function: a generated table's jsonb is the engine's text of what its SELECT computed (`jsonb_build_object('b',
-   * 1, 'a', 2, 'b', 3)` keeps both b's, in the order written), and a relation on no list (a generated table whose file
-   * was just removed, served until the writer's turn drops it) is not known to be one (issue 461's reviews). Every
+   * a relation POSITIVELY KNOWN to be a SYNCED table (`canonicalText`: what the build of the catalog the statement was
+   * analysed on declared, src/duck/plan.ts `canonicalRelations`, never the live list, which moves first), whose copy
+   * holds the source's jsonb_out text. Anything else fails closed to the function: a generated table's jsonb is the
+   * engine's text of what its SELECT computed (`jsonb_build_object('b', 1, 'a', 2, 'b', 3)` keeps both b's, in the
+   * order written), and a relation the build did not declare synced is not known to be one (issue 461's reviews). Every
    * reader of the premise asks here: `->>` and `->` read natively without checking each key is held once (jsonGet,
    * jsonValueRead), a `->` read's nullness, `@>` (containsRead) and the keys (keysNative).
    */

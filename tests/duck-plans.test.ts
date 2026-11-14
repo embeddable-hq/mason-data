@@ -116,10 +116,9 @@ const schema: PgSchema = {
   ],
   views: [{ schema: "public", name: "customer_orders", definition: " SELECT o.id, o.meta, c.name, c.created_at FROM public.orders o LEFT JOIN public.customers c ON c.id = o.customer_id;" }],
 };
-
-/** the shop's tables as the run's list says SYNCED copies (src/duck/plan.ts `canonicalRelations`: a jsonb is read as
- *  Postgres's canonical text only on a table that list names, fail closed), as `mason start` hands its listener */
-const synced = (): CopyState[] => schema.tables.map((t) => ({ source: `${t.schema ?? "public"}.${t.name}`, phase: "copied", rows: null, bytes: null, seconds: null, copiedAt: null, error: null }));
+// every table a synced copy, as the sync's build of the catalog declares it (src/api/postgres/schema.ts `PgTable.synced`): a
+// jsonb is read as Postgres's canonical text only on one (src/duck/plan.ts `canonicalRelations`, fail closed)
+for (const t of schema.tables) t.synced = true;
 
 /**
  * Where a statement is planned (`on`): the shop with nothing stored, under C (absent: every statement above the jsonb
@@ -619,7 +618,7 @@ async function storedKey(store: DuckStore, logged: string[], libc: boolean): Pro
   }, { enabled: true, eager: true, reviewMs: 0 });
   await keeper.open();
   closing.push(() => keeper.stop());
-  const duck = await store.listener(libc ? LIBC_COLLATION : undefined, undefined, libc ? libcOrder() : undefined, synced, keeper);
+  const duck = await store.listener(libc ? LIBC_COLLATION : undefined, undefined, libc ? libcOrder() : undefined, () => [], keeper);
   const read = { source: "public.orders", column: "meta", steps: ORDER_STEPS, either: false, canonical: true, asText: false };
   await keeper.keepNow?.([read]);
   const ready = keeper.ready(read);
@@ -661,7 +660,7 @@ function target(on: Where | undefined): Promise<Target> {
       const libc = on.startsWith("libc");
       const { store, logged } = await smallShop(libc ? "libc" : "c");
       if (on.endsWith("the key stored")) return storedKey(store, logged, libc);
-      return listen(store, logged, libc ? await store.listener(LIBC_COLLATION, undefined, libcOrder(), synced) : await store.listener(undefined, undefined, undefined, synced));
+      return listen(store, logged, libc ? await store.listener(LIBC_COLLATION, undefined, libcOrder(), () => []) : await store.listener(undefined, undefined, undefined, () => []));
     })();
     made.set(on, t);
   }

@@ -371,10 +371,6 @@ const schema: PgSchema = {
 };
 /** the sync's copy state the listener reads for a table the catalog does not hold (`Sync.state` in a run) */
 let copies: CopyState[] = [];
-/** each table of a schema as the run's list says a SYNCED copy (no `kept`: EXPLAIN says how it is kept current is
- *  unknown, as with no record), after the test's own `copies`, which EXPLAIN finds first: a jsonb column is read as
- *  Postgres's canonical text only on a table that list names (src/duck/plan.ts `canonicalRelations`, fail closed) */
-const synced = (s: PgSchema): CopyState[] => s.tables.map((t) => ({ source: `${t.schema ?? "public"}.${t.name}`, phase: "copied", rows: null, bytes: null, seconds: null, copiedAt: null, error: null }));
 const logged: string[] = [];
 /** the request log's rows as the listener built them (src/api/request-log.ts ApiLogRow) */
 const recorded: ApiLogRow[] = [];
@@ -382,6 +378,9 @@ const recorded: ApiLogRow[] = [];
 const everLogged: string[] = [];
 
 before(async () => {
+  // every table is a synced copy, as the sync's build of the catalog declares it (src/api/postgres/schema.ts `PgTable.synced`): a jsonb
+  // is read as Postgres's canonical text only on one (src/duck/plan.ts `canonicalRelations`, fail closed)
+  for (const t of schema.tables) t.synced = true;
   store = await DuckStore.open(path.join(dir, "duck.db"), (l) => (logged.push(l), everLogged.push(l)));
   for (const s of DDL) await store.writer.run(s);
   // a session starts in UTC on this API, as on a server whose TimeZone is UTC
@@ -403,7 +402,7 @@ before(async () => {
     authenticate: (password) => { const p = tokenProblem(API_KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
     schema: () => schema,
     record: (r) => { recorded.push(r); }, log: (l) => (logged.push(l), everLogged.push(l)),
-    duck: await store.listener(undefined, undefined, undefined, () => [...copies, ...synced(schema)]),
+    duck: await store.listener(undefined, undefined, undefined, () => copies),
     clock: () => fixedNow ?? microsNow(),
   });
 });
@@ -1877,7 +1876,7 @@ test("a LEFT JOIN LATERAL of json rows ON TRUE is Postgres's rows; under a LIMIT
 // result. Where every row is read anyway (an aggregate, a GROUP BY, an ORDER BY of the lateral's column), or a LIMIT
 // already bounds it, nothing is planned again.
 test("an Execute's row count over a LEFT lateral streams Postgres's first rows: planned again once, kept, the portal paged on", async () => {
-  const duck = await store.listener(undefined, undefined, undefined, () => [...copies, ...synced(schema)]);
+  const duck = await store.listener(undefined, undefined, undefined, () => copies);
   const planned: Array<{ text: string; wire: boolean }> = [];
   /** the search_path and TimeZone each plan made again for a row count was made under */
   const under: string[] = [];

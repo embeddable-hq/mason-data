@@ -226,10 +226,12 @@ export interface DuckOptions {
    *  it reads what the role may not; null for a session with no role beside roles; undefined where no roles exist.
    *  `outputs`: the generated planner's alone (src/duck/plan.ts `PlanOptions.outputs`), never a wire statement's.
    *  `boundPaths`: an Execute's values of the parameters the plan reads as a json path (PlannedSql.pathParams), by
-   *  number: each such read made as its constant (src/duck/plan.ts `PlanOptions.boundPaths`) */
+   *  number: each such read made as its constant (src/duck/plan.ts `PlanOptions.boundPaths`).
+   *  `synced`: which relids the catalog's build declared synced copies (`PgCatalog.syncedOf`, src/duck/plan.ts
+   *  `PlanOptions.synced`); absent, none is */
   plan(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, stmt: NonNullable<RawStmt["stmt"]>, base: number, paramOids: readonly number[], under: SessionState,
     userTypes: ReadonlyMap<string, number>, wireBound?: boolean, grants?: RoleGrants | null, relations?: ReadonlyMap<string, string>, outputs?: boolean,
-    boundPaths?: ReadonlyMap<number, string>): Promise<DuckPlan>;
+    boundPaths?: ReadonlyMap<number, string>, synced?: (relids: readonly number[]) => Promise<ReadonlySet<number>>): Promise<DuckPlan>;
   /** a Bind's values as DuckDB must read them: each through Postgres's input function for the plan's parameter type
    *  (a StatementError with Postgres's own error for a value it refuses) */
   parameters(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, oids: readonly number[], values: readonly (string | null)[], under: SessionState): Promise<(string | null)[]>;
@@ -1757,7 +1759,7 @@ class Session {
     const paths = boundPaths === undefined || boundPaths.size === 0 ? "" : `\u0000paths ${JSON.stringify([...boundPaths])}`;
     return this.server.duckPlan(text, paramOids, under, wireBound, key + paths, async () => {
       const plan = await this.server.options.duck.plan((b) => this.server.catalog.run(b), text, stmt, base, paramOids, under, this.server.userTypes(), wireBound, grants,
-        undefined, undefined, boundPaths);
+        undefined, undefined, boundPaths, (relids) => this.server.catalog.syncedOf(relids));
       return rowsKey === "" ? plan : { ...plan, rowsKey };
     });
   }
@@ -2044,7 +2046,7 @@ class Session {
     const made = async (paths?: ReadonlyMap<number, string>): Promise<DuckPlan> => {
       const grants = this.grants();
       const p = await this.server.options.duck.plan((b) => this.server.catalog.run(b), found.text, t.query, base + Buffer.byteLength(text.slice(0, found.offset)), paramOids,
-        under, this.server.userTypes(), false, grants, undefined, undefined, paths);
+        under, this.server.userTypes(), false, grants, undefined, undefined, paths, (relids) => this.server.catalog.syncedOf(relids));
       // the row filters it was made under, as every plan of a session carries them (Session.duckPlan)
       const rowsKey = rowsKeyOf(grants);
       return rowsKey === "" ? p : { ...p, rowsKey };
@@ -3202,7 +3204,7 @@ class Server {
     if (duck === undefined) throw new Error("a generated table needs the listener's engine (Mason bug: report it)");
     const catalog = (b: Uint8Array): Promise<Uint8Array> => this.catalog.run(b);
     return {
-      plan: (text, stmt, relations) => { this.schema(); return duck.plan(catalog, text, stmt as NonNullable<RawStmt["stmt"]>, 0, [], GENERATED_SESSION, this.userTypes(), false, null, relations, true); },
+      plan: (text, stmt, relations) => { this.schema(); return duck.plan(catalog, text, stmt as NonNullable<RawStmt["stmt"]>, 0, [], GENERATED_SESSION, this.userTypes(), false, null, relations, true, undefined, (relids) => this.catalog.syncedOf(relids)); },
       rows: (sql) => { this.schema(); return catalogRows(catalog, sql); },
     };
   }

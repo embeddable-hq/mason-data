@@ -4373,7 +4373,7 @@ export class Sync {
         .map((f) => ({ name: f.target.split(".")[1]!, table: f.target, on: [f.column, f.targetColumn], relationship: "many_to_one" }));
       // a unique index over columns the copy keeps: the catalog's too, so a foreign key to it is one (and pg_indexes lists it)
       const uniqueKeys = (t.uniqueKeys ?? []).filter((u) => u.columns.every((c) => columns.some((x) => x.name === c)));
-      tables.push({ name: t.table, schema: t.schema, primaryKey: t.primaryKey ?? t.key, columns, joins,
+      tables.push({ name: t.table, schema: t.schema, primaryKey: t.primaryKey ?? t.key, columns, joins, synced: true,
         ...(uniqueKeys.length ? { uniqueKeys } : {}),
         ...(t.rowTypeOid !== undefined && columns.length === cols.length ? { rowTypeOid: t.rowTypeOid } : {}) });
     }
