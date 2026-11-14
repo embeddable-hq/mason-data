@@ -9,9 +9,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 ## What changes
 
 - **A sync now says how many rows it added, updated and deleted**, such as "1,200 added, 282,770 updated, 0 deleted".
-  Before, it said "283,970 changed", which lumped new rows and edited rows together. This holds in `mason sync`, the
-  web page's Sync now and Sync events, `mason logs --events` and the run's log. A first sync, or a table synced again
-  whole, adds every row. Over replication, the counts follow your database's inserts, updates and deletes. A script
+  Before, it said "283,970 changed", which lumped new rows and edited rows together. The new words are in `mason sync`,
+  the web page's Sync now and Sync events, and `mason logs --events`. A first sync, or a table synced again whole, adds
+  every row. Over replication, the counts follow your database's inserts, updates and deletes. `mason status`, the web
+  page and the run's log say a replicated table's counts the same way, such as "1,000 added, 200 updated, 4 deleted".
+  Before, they said "1,204 changes (1,000 inserts, 200 updates, 4 deletes)". A poll's own lines in the run's log still
+  say "changed". A script
   that reads `mason sync --json` must read `added` and `updated` in place of `changed`. A script that matched the
   words of a `synced`, `polled`, `streamed` or `full_sync` event must match the new words.
 
@@ -43,16 +46,23 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **On a server that runs the project read-only, the web page links to how to deploy a change.** `mason status --json`
   words `sourcesReadOnly` as plain sentences now, so a script that matched its old text must match the new one. A new
   field, `sourcesReadOnlyKind`, says which reason it is: `deployed`, `unwritable` or `unknown`.
+- **The web page's Sync events list shows how long each sync took in a column of its own.** The Took column holds
+  it, such as `570 ms` or `7 min 57 s`, and you can sort the list by it. The message no longer ends with it there.
+  `mason logs --events --json` gives it as a new field, `tookMs`. A first sync's event now ends with its time as a
+  poll's does, such as `synced: 1,000 row(s) · 2.0 s`, where it said `in 2.00 s`. Events recorded before the upgrade
+  keep their time in the message.
 
 ## What was wrong and is now right
 
 - **A `numeric` column with no precision now prints each value as your database does.** Rails makes such a column from
   `t.decimal`. Mason printed every value with the most decimals any value in the column had, so `12.5` read `12.50` and
   `0` read `0.00`. Now a plain `SELECT`, `::text`, arithmetic, `sum`, windows, subqueries and the binary
-  wire all give your database's text. A few readers still print the old way: `to_json` and its kin, `concat`,
-  `format`, `||`, `array_agg`, a row's text, a scalar subquery, `min`, `max`, `percentile_disc`, `mode()`, `sum(DISTINCT …)`, a
-  `UNION` without `ALL`, and a generated table's column. `docs/SQL-SUPPORT.md` lists them all, under
-  `mixed-scale-numeric`. A fix for most of them is planned.
+  wire all give your database's text. So does every way such a value is turned into text: `to_json` and the other
+  JSON functions, a row's text, `concat`, `format`, `||`, `string_agg`, an array's text, and the text of a `min`,
+  `max` or `sum`. `SELECT DISTINCT x::text` keeps `12.5` and `12.50` apart, as your database does. A few readers
+  still print the old way: `array_agg` itself, `min` and `max` themselves, a scalar subquery, `percentile_disc`,
+  `mode()`, a `UNION` without `ALL`, and a generated table's column. `docs/SQL-SUPPORT.md` lists them all, under
+  `mixed-scale-numeric`.
 - **A whole number beside a decimal column no longer loses the column's decimals.** This covers `div()` of two
   integers, an integer cast to `numeric`, a whole constant such as `2.5e2`, and a whole part of `extract`. When one
   met a decimal column in an `IN (SELECT …)`, a `UNION`, an `INTERSECT`, an `EXCEPT`, a `CASE`, a `COALESCE` or

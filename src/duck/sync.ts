@@ -2241,7 +2241,7 @@ export class Sync {
     // a scheduled poll's `polled` event is listed only when a reader asks for the scheduled syncs, so without this one a
     // person who synced and then read the events found only an older copy, and read it as a sync lost. A replicated
     // table asked for is answered with the stream's position and records none: nothing was read for it
-    for (const x of found) this.event({ kind: "synced", table: x.table, message: `synced by hand: ${syncedText(x)}` });
+    for (const x of found) this.event({ kind: "synced", table: x.table, message: `synced by hand: ${syncedText(x)}`, tookMs: x.ms });
     const missing = polled.filter((t) => !found.some((f) => f.table === t.source));
     if (missing.length) throw new Error(`${missing.map((t) => t.source).join(", ")} has a numeric value wider than its synced DECIMAL column: it is read again whole at the next pass, and current once read`);
     const streamed = said();
@@ -3367,7 +3367,7 @@ export class Sync {
       try {
         const found = await this.onWriter(async () => this.rebuildingNow?.source !== t.source && !this.behind.has(t.source) ? this.poll(this.writerLane, [t]) : []);
         // a scheduled sync is an event too, listed only when a reader asks for the scheduled syncs (src/duck/events.ts)
-        for (const f of found) { this.polledNow(t, f.ms); this.event({ kind: "polled", table: f.table, message: `synced on schedule: ${syncedText(f)}` }); }
+        for (const f of found) { this.polledNow(t, f.ms); this.event({ kind: "polled", table: f.table, message: `synced on schedule: ${syncedText(f)}`, tookMs: f.ms }); }
       } catch (e) {
         if (e instanceof Stopping) { this.log("poll stopped: Mason is stopping (rolled back; the synced tables serve as they were)"); return; }
         // tried again after its interval (an `off` table whose sync changed: after the sync's), never at every pass
@@ -3880,8 +3880,11 @@ export class Sync {
       const copiedAt = new Date().toISOString();
       await this.record({ source: t.source, phase: "copied", rows: p.rows, bytes: t.bytes, seconds, copiedAt, error: null }, t.columns, w);
       this.synced.set(t.source, { at: copiedAt, seconds, by: "copy" });
-      // a whole read ADDS every row it holds (`syncedText`, the words a poll's record says): the copy swapped in replaces the old
-      this.event({ kind: "full_sync", table: t.source, message: `synced whole: ${syncedText({ added: p.rows, updated: 0, deleted: 0, rows: p.rows, ms: seconds * 1000 })}` });
+      // how long it took, in whole ms as a poll's: the message ends with it as a poll's does (` · 7 min 57 s`), and the
+      // web page shows it in a column of its own (src/duck/events.ts `tookMs`). A whole read ADDS every row it holds
+      // (`syncedText`, the words a poll's record says): the copy swapped in replaces the old
+      const tookMs = Math.round(seconds * 1000);
+      this.event({ kind: "full_sync", table: t.source, message: `synced whole: ${syncedText({ added: p.rows, updated: 0, deleted: 0, rows: p.rows, ms: tookMs })}`, tookMs });
       this.copiedAs.set(t.source, columnsKey(t.columns));
       // in the catalog at once: a pass's other copies may take hours
       await this.rebuildSchema();

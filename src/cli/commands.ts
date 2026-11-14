@@ -1892,7 +1892,8 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     table (null: the whole sync, the run or the web page),
     message, code (a failure: its SQLSTATE, its system error such as ECONNREFUSED, its error class, or unknown;
     null for good news and for an event recorded before Mason kept it), origin (a failure: where it happened in
-    Mason, a file and a line such as src/duck/sync.ts:1234, or null) }], keptDays }; with --running { running: [{ session, user,
+    Mason, a file and a line such as src/duck/sync.ts:1234, or null), tookMs (how long a sync took, in ms: full_sync,
+    synced, polled; else null) }], keptDays }; with --running { running: [{ session, user,
     applicationName, method, startedAt, runningMs, rows (sent so far), query, queryTruncated }] }; next
 `;
 
