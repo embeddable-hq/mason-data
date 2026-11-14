@@ -218,12 +218,14 @@ test("the run's POST /api/pick and /api/remove (the page's Add and Remove) are r
     }
     const state = await call(run.port, "GET", "/api/state");
     assert.equal(state.json.sourcesReadOnly, SAID(RECORDED));
+    assert.equal(state.json.sourcesReadOnlyKind, "deployed");
   } finally { run.close(); }
   // without the record or the setting: the page offers Add and Remove, and an add is written as before
   const open = project();
   const run2 = await runOver(open);
   try {
-    assert.equal((await call(run2.port, "GET", "/api/state")).json.sourcesReadOnly, null);
+    const openState = (await call(run2.port, "GET", "/api/state")).json;
+    assert.deepEqual([openState.sourcesReadOnly, openState.sourcesReadOnlyKind], [null, null]);
     const added = await call(run2.port, "POST", "/api/pick", { table: "public.customers", picked: true });
     assert.equal(added.status, 200, JSON.stringify(added.json));
     assert.match(fs.readFileSync(open.file, "utf8"), /customers: \{\}/);

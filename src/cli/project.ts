@@ -414,22 +414,31 @@ const DEPLOY_NEXT: NonNullable<Failure["next"]> = [...READONLY_NEXT, ["mason hel
  * 1, or a config that cannot be read, cannot tell, and refuses.
  */
 export function projectWriteRefusal(root: string | null, env: Readonly<Record<string, string | undefined>>): Failure | null {
+  return projectWriteState(root, env)?.refusal ?? null;
+}
+
+/**
+ * `projectWriteRefusal` with which refusal it is: `deployed` when the project is deployed read-only (its way out is a
+ * deploy), `unknown` when whether it is cannot be told (a setting or a config to repair). The page links to the README's
+ * deploy section for the first alone (`/api/state` `sourcesReadOnlyKind`, src/cli/run-server.ts).
+ */
+export function projectWriteState(root: string | null, env: Readonly<Record<string, string | undefined>>): { refusal: Failure; kind: "deployed" | "unknown" } | null {
   const set = projectReadOnlySetting(env);
   if (typeof set !== "boolean") {
-    return { message: `${set.problem}, so whether the project's files may be written here cannot be told`, code: "refused",
-      why: "Mason writes none of them until it can tell", fix: `set ${READONLY_SETTING}=1 or ${READONLY_SETTING}=0, or unset it`, next: READONLY_NEXT };
+    return { kind: "unknown", refusal: { message: `${set.problem}, so whether the project's files may be written here cannot be told`, code: "refused",
+      why: "Mason writes none of them until it can tell", fix: `set ${READONLY_SETTING}=1 or ${READONLY_SETTING}=0, or unset it`, next: READONLY_NEXT } };
   }
   const p = root === null ? null : readProject(root);
   if (p !== null && "broken" in p) {
-    return { message: `whether the project's files may be written here cannot be told: ${p.file}: ${p.broken}`, code: "refused",
-      why: "the config records whether Mason runs the project read-only, and Mason writes none of its files until it can tell", fix: brokenProblem(p).fix, next: READONLY_NEXT };
+    return { kind: "unknown", refusal: { message: `whether the project's files may be written here cannot be told: ${p.file}: ${p.broken}`, code: "refused",
+      why: "the config records whether Mason runs the project read-only, and Mason writes none of its files until it can tell", fix: brokenProblem(p).fix, next: READONLY_NEXT } };
   }
   const recorded = p?.config.projectReadOnly === true;
   if (!set && !recorded) return null;
-  return { message: `the project's files are read-only here (${READONLY_SETTING}=1${set ? "" : " when Mason last started"})`, code: "refused",
+  return { kind: "deployed", refusal: { message: `the project's files are read-only here (${READONLY_SETTING}=1${set ? "" : " when Mason last started"})`, code: "refused",
     why: "Mason runs them as they were deployed: an edit here would run what nobody committed, and the next deploy would undo it",
     fix: "run mason add or mason remove in your project, commit the change, and deploy it",
-    next: DEPLOY_NEXT };
+    next: DEPLOY_NEXT } };
 }
 
 /**

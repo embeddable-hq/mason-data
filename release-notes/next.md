@@ -9,3 +9,6 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   2 to 4.5 minutes, close to the 5-minute limit, and now take 13 to 26 seconds. Names that begin with an accented
   letter, such as É, Ø or Ł, are as fast as the rest. The answers are the same as before. A list of distinct values,
   a smallest value per group and `FETCH FIRST … WITH TIES` are still slow.
+- **On a server that runs the project read-only, the web page links to how to deploy a change.** `mason status --json`
+  words `sourcesReadOnly` as plain sentences now, so a script that matched its old text must match the new one. A new
+  field, `sourcesReadOnlyKind`, says which reason it is: `deployed`, `unwritable` or `unknown`.

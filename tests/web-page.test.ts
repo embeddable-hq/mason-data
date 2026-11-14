@@ -843,15 +843,24 @@ test("a sources file the server cannot write: no Add, Columns…, Name its key�
   const renderTables = fn<[unknown], string>("renderTables");
   assert.match(textOf(renderTables(CATALOG_STATE)), /Remove/);
   const why = "The sources file cannot be written on this server (EROFS). Commit a change to it in your project, and deploy it.";
-  const html = renderTables({ ...CATALOG_STATE, sourcesReadOnly: why, served: true });
+  const html = renderTables({ ...CATALOG_STATE, sourcesReadOnly: why, sourcesReadOnlyKind: "unwritable", served: true });
   for (const control of ["data-remove-table", "data-add-table", "data-choose"]) assert.ok(!html.includes(control), control);
   assert.match(html, /data-sync-table/);
   assert.ok(textOf(html).includes(`You can't add or remove tables from this page. ${why} The README describes how.`));
   // the README's deploy section, linked as the page links to the README (users.js ROLES_DOCS_URL): same tab, no referrer
   assert.ok(html.includes(`${why} <a href="https://github.com/embeddable-hq/mason-data#run-it-on-a-server" rel="noreferrer">The README</a> describes how.`), "the README's link");
   // no table added yet: nothing says Add
-  const none = renderTables({ ...CATALOG_STATE, sourcesReadOnly: why, tables: CATALOG_STATE.tables.map((t) => ({ ...t, added: false, copy: null })) });
+  const none = renderTables({ ...CATALOG_STATE, sourcesReadOnly: why, sourcesReadOnlyKind: "unwritable", tables: CATALOG_STATE.tables.map((t) => ({ ...t, added: false, copy: null })) });
   assert.ok(!textOf(none).includes("Add one from the list"));
+});
+
+test("whether the project's files are read-only cannot be told (a config to repair): the page says why, and sends no one to the deploy guide", () => {
+  const renderTables = fn<[unknown], string>("renderTables");
+  const why = "Whether the project's files may be written here cannot be told: /app/.mason/config.json: not JSON. Repair it.";
+  const html = renderTables({ ...CATALOG_STATE, sourcesReadOnly: why, sourcesReadOnlyKind: "unknown", served: true });
+  for (const control of ["data-remove-table", "data-add-table", "data-choose"]) assert.ok(!html.includes(control), control);
+  assert.ok(textOf(html).includes(`You can't add or remove tables from this page. ${why}`), textOf(html));
+  assert.ok(!html.includes("#run-it-on-a-server") && !textOf(html).includes("The README"), "no README line");
 });
 
 test("a project deployed read-only (MASON_PROJECT_READONLY=1): the state the run answers says why, and the Tables list has no Add, Columns…, Name its key… or Remove; unset, it has", () => {
@@ -864,6 +873,7 @@ test("a project deployed read-only (MASON_PROJECT_READONLY=1): the state the run
   finally { if (was === undefined) delete process.env.MASON_PROJECT_READONLY; else process.env.MASON_PROJECT_READONLY = was; }
   const why = "The project's files are read-only here (MASON_PROJECT_READONLY=1). Run mason add or mason remove in your project, commit the change, and deploy it.";
   assert.equal(deployed.sourcesReadOnly, why);
+  assert.equal(deployed.sourcesReadOnlyKind, "deployed");
   const html = renderTables(deployed);
   for (const control of ["data-remove-table", "data-add-table", "data-choose"]) assert.ok(!html.includes(control), control);
   assert.match(html, /data-sync-table/, "Sync stays: the sync is unchanged");
@@ -874,6 +884,8 @@ test("a project deployed read-only (MASON_PROJECT_READONLY=1): the state the run
   for (const t of CATALOG) assert.ok(html.includes(`title="${t.source}"`), t.source);
   // unset: nothing changes
   assert.equal(CATALOG_STATE.sourcesReadOnly, null);
+  assert.equal(CATALOG_STATE.sourcesReadOnlyKind, null);
+  assert.ok(commands.STATUS.json!.includes("sourcesReadOnlyKind"), "mason status --json declares it");
   const open = renderTables(CATALOG_STATE);
   for (const control of ["data-remove-table", "data-add-table", "data-choose"]) assert.ok(open.includes(control), control);
 });
@@ -1008,11 +1020,11 @@ test("a read-only page that still edits its tables (pageReadOnlyAllow: [tables])
 test("MASON_PROJECT_READONLY=1 wins over the allowance: a read-only page that edits its tables offers no Add, Columns…, Name its key… or Remove on a project deployed as committed, and says why; Sync now stays (issue 789)", () => {
   const renderTables = fn<[unknown], string>("renderTables");
   const projectWhy = "The project's files are read-only here (MASON_PROJECT_READONLY=1). Run mason add or mason remove in your project, commit the change, and deploy it.";
-  const html = renderTables({ ...CATALOG_STATE, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)", pageReadOnlyAllow: ["tables"], sourcesReadOnly: projectWhy, served: true });
+  const html = renderTables({ ...CATALOG_STATE, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)", pageReadOnlyAllow: ["tables"], sourcesReadOnly: projectWhy, sourcesReadOnlyKind: "deployed", served: true });
   for (const control of ["data-remove-table", "data-add-table", "data-choose"]) assert.ok(!html.includes(control), control);
   assert.match(html, /data-sync-table/);
   assert.ok(textOf(html).includes(`You can't add or remove tables from this page. ${projectWhy} The README describes how.`));
-  assert.equal(html, renderTables({ ...CATALOG_STATE, sourcesReadOnly: projectWhy, served: true }), "as on a page that is not read-only");
+  assert.equal(html, renderTables({ ...CATALOG_STATE, sourcesReadOnly: projectWhy, sourcesReadOnlyKind: "deployed", served: true }), "as on a page that is not read-only");
 });
 
 test("the state says pageReadOnly: why under MASON_UI_READ_ONLY=1 as the run reads it, null without; and nothing else of the state changes", () => {

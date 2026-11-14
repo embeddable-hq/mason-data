@@ -575,16 +575,24 @@ test("/api/state says whether the page may offer Add and Remove: a server's file
   const dir = temp("sources");
   const file = path.join(dir, "shop.yml");
   fs.writeFileSync(file, "tables: {}\n");
-  const state = (served: boolean, at: string): { served: boolean; sourcesReadOnly: string | null } => runState({
+  type Said = { served: boolean; sourcesReadOnly: string | null; sourcesReadOnlyKind: string | null };
+  const state = (served: boolean, at: string): Said => runState({
     source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables: [], systemIdentifier: null }), warnings: [], replication: () => null, page: true, served,
     users: { postgresUrl: "postgresql://localhost:5433/shop" }, folder: () => null, root: dir, home: dir, version: "t", startedAt: 0, sources: () => ({ file: { file: at, name: "shop", tables: [] }, problem: null }),
     listener: { openSessions: () => ({ open: 0 }) }, duck: { file, requests: { days: 7 }, restarts: () => [], disk: () => ({ path: dir, freeBytes: null, projectedBytes: null }) },
-  } as unknown as RunContext, [], null) as { served: boolean; sourcesReadOnly: string | null };
+  } as unknown as RunContext, [], null) as Said;
   assert.equal(state(true, file).served, true);
-  assert.equal(state(true, file).sourcesReadOnly, null);
+  assert.deepEqual([state(true, file).sourcesReadOnly, state(true, file).sourcesReadOnlyKind], [null, null]);
   const gone = state(true, path.join(dir, "no-such-folder", "shop.yml"));
   assert.match(gone.sourcesReadOnly!, /^The sources file cannot be written on this server \(ENOENT\)\. Commit a change to it in your project, and deploy it\.$/);
-  assert.equal(state(false, path.join(dir, "no-such-folder", "shop.yml")).sourcesReadOnly, null);
+  assert.equal(gone.sourcesReadOnlyKind, "unwritable", "a deploy is the way out: the page links to how");
+  assert.deepEqual([state(false, path.join(dir, "no-such-folder", "shop.yml")).sourcesReadOnly, state(false, path.join(dir, "no-such-folder", "shop.yml")).sourcesReadOnlyKind], [null, null]);
+  // a config that cannot be read: whether the files are read-only cannot be told, and a deploy is not the way out
+  fs.mkdirSync(path.join(dir, ".mason"), { recursive: true });
+  fs.writeFileSync(path.join(dir, ".mason", "config.json"), "{");
+  const broken = state(true, file);
+  assert.match(broken.sourcesReadOnly!, /^Whether the project's files may be written here cannot be told: /);
+  assert.equal(broken.sourcesReadOnlyKind, "unknown");
 });
 
 test("mason serve's settings: the page's port is a setting, and an address for it is refused by name", () => {

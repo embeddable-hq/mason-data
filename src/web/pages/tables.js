@@ -707,7 +707,7 @@ export function renderTables(s, ui = {}) {
   const otherHtml = failed && !otherShown.length || otherShown.length && !otherWritten.length ? ""
     : heading("Not added", otherShown.length) + (otherWritten.length ? list(otherWritten) : otherNone);
   return stray + (viewOnly !== null ? readOnlyLine("Tables are not added, removed or synced", viewOnly)
-    : readOnly === null ? "" : `<p class="count">You can't add or remove tables from this page. ${esc(readOnly)} <a href="${DEPLOY_DOCS_URL}" rel="noreferrer">The README</a> describes how.</p>`) +
+    : readOnly === null ? "" : `<p class="count">You can't add or remove tables from this page. ${esc(readOnly)}${deployLink(s.sourcesReadOnlyKind)}</p>`) +
     matching + addedHtml + otherHtml + pops.join("") + moreRows("tables", Math.min(limit, shown), shown, TABLE_ROWS) + sizesFailed +
     (added ? `<p class="dim">A synced table's size is measured every 10 minutes, once its rows are written to disk.</p>` : "");
 }
@@ -716,6 +716,12 @@ export function renderTables(s, ui = {}) {
  *  repository), for a project deployed read-only. As `ROLES_DOCS_URL` (users.js): no referrer, since the page's address
  *  may carry a host's token, and the same tab, since a host may serve the page in a sandbox with no `allow-popups`. */
 export const DEPLOY_DOCS_URL = "https://github.com/embeddable-hq/mason-data#run-it-on-a-server";
+
+/** The README's line after the read-only reason, where a deploy is the way out (`/api/state` `sourcesReadOnlyKind`:
+ *  `deployed`, `unwritable`); none where whether the files are read-only cannot be told (`unknown`: a setting or a
+ *  config to repair, which the deploy section does not help with). */
+const deployLink = (kind) => kind === "deployed" || kind === "unwritable"
+  ? ` <a href="${DEPLOY_DOCS_URL}" rel="noreferrer">The README</a> describes how.` : "";
 
 export const page = {
   id: "tables",

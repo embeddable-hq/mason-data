@@ -69,7 +69,7 @@ function stateOf(o: { pageReadOnly?: boolean; allow?: string[]; sourcesReadOnly?
     duck: { file: "/app/.mason/duck.db", requests: { days: 7 }, restarts: () => [], disk: () => ({ path: "/app/.mason", freeBytes: null, projectedBytes: null }) },
   } as unknown as RunContext;
   const s = JSON.parse(JSON.stringify(runState(ctx, COPIES, null, Date.parse(at)))) as Record<string, unknown>;
-  return o.sourcesReadOnly ? { ...s, sourcesReadOnly: o.sourcesReadOnly } : s;
+  return o.sourcesReadOnly ? { ...s, sourcesReadOnly: o.sourcesReadOnly, sourcesReadOnlyKind: "deployed" } : s;
 }
 const STATE = stateOf();
 const tableOf = (name: string) => (STATE.tables as Array<{ table: string }>).find((t) => t.table === name)!;
@@ -115,13 +115,21 @@ test("every added table says its sync on its note, in the page's words, and open
 });
 
 test("read-only: no choice where the project's files are read-only or the page may not edit tables — the sync said alone, the reason its title and above the list", () => {
-  const why = "the project's files are read-only here (MASON_PROJECT_READONLY=1); edit them where they are committed, and deploy";
-  for (const s of [stateOf({ sourcesReadOnly: why }), stateOf({ pageReadOnly: true }), stateOf({ pageReadOnly: true, allow: ["users"] })]) {
+  const why = "The project's files are read-only here (MASON_PROJECT_READONLY=1). Run mason add or mason remove in your project, commit the change, and deploy it.";
+  // each state, and the note it says above the list: the project's files read-only (the server's reason, and how to
+  // deploy), or the page read-only (MASON_UI_READ_ONLY=1, which a deploy does not undo)
+  const pageNote = "Tables are not added, removed or synced from this page: the web page is read-only here (MASON_UI_READ_ONLY=1).";
+  const cases: Array<[Record<string, unknown>, string]> = [
+    [stateOf({ sourcesReadOnly: why }), `You can't add or remove tables from this page. ${why} The README describes how.`],
+    [stateOf({ pageReadOnly: true }), pageNote], [stateOf({ pageReadOnly: true, allow: ["users"] }), pageNote]];
+  for (const [s, note] of cases) {
     const html = renderTables(s, { syncOpen: "public.customers", syncChoice: choiceOf("public.customers") });
     assert.ok(!html.includes("data-choose-sync"), "no button");
     assert.ok(!html.includes("data-sync-form") && !html.includes("data-save-sync"), "no dialog, even one the model says is open");
     assert.match(html, /<span class="syncnow dim" title="[^"]+">Sync: Off<\/span>/);
-    assert.match(textOf(html), /Tables are not added, removed or synced|You can't add or remove tables from this page/, "the reason, above the list");
+    assert.ok(textOf(html).includes(note), `the reason, above the list: ${note}`);
+    const other = note === pageNote ? "You can't add or remove tables" : "Tables are not added, removed or synced";
+    assert.ok(!textOf(html).includes(other), `only its own note: not "${other}"`);
   }
   assert.ok(renderTables(stateOf({ sourcesReadOnly: why })).includes(`title="${why.replace(/'/g, "&#39;")}">Sync: Off`));
   // a read-only page that still edits its tables (MASON_UI_READ_ONLY_ALLOW=tables) offers the choice
@@ -397,7 +405,7 @@ function colStateOf(o: { pageReadOnly?: boolean; sourcesReadOnly?: string } = {}
   const kept: CopyState["kept"] = { by: "poll", sync: { mode: "off" }, syncedAt: at, nextAt: null };
   const copies = Object.keys(COLS).filter((n) => n !== "audit").map((n) => copied(`public.${n}`, 1200, kept));
   const s = JSON.parse(JSON.stringify(runState(ctx, copies, null, Date.parse(at)))) as Record<string, unknown>;
-  return o.sourcesReadOnly ? { ...s, sourcesReadOnly: o.sourcesReadOnly } : s;
+  return o.sourcesReadOnly ? { ...s, sourcesReadOnly: o.sourcesReadOnly, sourcesReadOnlyKind: "deployed" } : s;
 }
 const COL_STATE = colStateOf();
 type ColTable = { table: string; added: boolean; columnCount?: number; entry?: unknown; everyColumnLeavesOut?: string[]; addedColumns: string[] | null };
@@ -439,7 +447,7 @@ test("an added table's row says which columns it syncs in a few words — All co
 });
 
 test("read-only: the columns said, no form — where the project's files are read-only or the page may not edit tables", () => {
-  for (const s of [colStateOf({ sourcesReadOnly: "the project's files are read-only here (MASON_PROJECT_READONLY=1)" }), colStateOf({ pageReadOnly: true })]) {
+  for (const s of [colStateOf({ sourcesReadOnly: "The project's files are read-only here (MASON_PROJECT_READONLY=1). Run mason add or mason remove in your project, commit the change, and deploy it." }), colStateOf({ pageReadOnly: true })]) {
     const html = renderTables(s, { choosing: "public.orders", columns: columnsOf("orders") });
     assert.match(html, /<span class="syncnow dim" title="Synced: id, status">2 of 4 columns<\/span>/);
     assert.ok(!html.includes('id="columns-tables-'), "no button");
