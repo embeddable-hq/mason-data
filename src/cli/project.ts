@@ -29,6 +29,7 @@ import { UI_RUN_FILE_SETTING } from "./ui-run-file.ts";
 import { backLinkSettingsSet, uiBackLinkSetting } from "./ui-back-link.ts";
 import { UI_ACCOUNT_SETTING, uiAccountSetting } from "./ui-account.ts";
 import { UI_OVERVIEW_CARD_SETTING, uiOverviewCardSetting } from "./ui-host-view.ts";
+import { UI_ICON_SETTING, uiIconSetting } from "./ui-icon.ts";
 import { NAV_SETTINGS, navSettingsSet, notNavSettings, uiNavSetting } from "./ui-nav.ts";
 import { PG_PUBLIC_URL_SETTING, pgPublicUrlSetting } from "./pg-public-url.ts";
 import { UI_READ_ONLY_ALLOW_FIX, UI_READ_ONLY_ALLOW_SETTING, UI_READ_ONLY_SETTING, uiReadOnlyAllowSetting, uiReadOnlySetting } from "./ui-read-only.ts";
@@ -500,6 +501,13 @@ export function startSettingRefusal(p: Project, env: NodeJS.ProcessEnv, o: { ser
   }
   const card = uiOverviewCardSetting(env);
   if (card !== null && typeof card !== "string") return { message: card.problem, code: "refused", fix: "set it as mason serve --help says, or unset it" };
+  // the page's icon is a server's too (src/cli/ui-icon.ts): mason start's page is Mason's alone
+  if (!o.serve && env[UI_ICON_SETTING]) {
+    return { message: `${UI_ICON_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",
+      fix: `unset ${UI_ICON_SETTING}: mason start's page is yours alone, opened with mason ui` };
+  }
+  const icon = uiIconSetting(env);
+  if (icon !== null && typeof icon !== "string") return { message: icon.problem, code: "refused", fix: "set it as mason serve --help says, or unset it" };
   // the address clients reach is a server's (src/cli/pg-public-url.ts): mason start's URL is this machine's own
   if (!o.serve && env[PG_PUBLIC_URL_SETTING]) {
     return { message: `${PG_PUBLIC_URL_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",

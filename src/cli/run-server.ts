@@ -58,6 +58,7 @@ import type { ClientActivity, LedgerRequest, QueryWindow, RequestLedger, Unsuppo
 import { eventLimit, requestFilter, requestFilterText, SLOW_MS, timeOf } from "./request-filter.ts";
 import type { PgApiServer } from "../api/postgres/server.ts";
 import { tunnelReport, type RunShares } from "./share-run.ts";
+import { pageWithIcon } from "./ui-icon.ts";
 import { UI_ERROR_BODY_MAX, uiErrorReport, type UiErrors } from "./ui-errors.ts";
 import type { PageShares } from "./page-share.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
@@ -118,6 +119,9 @@ export interface RunContext {
   /** MASON_UI_OVERVIEW_CARD (src/cli/ui-host-view.ts): the path, relative to the page's address, the Overview reads the
    *  host's card from, validated at the start, or null. The page reads it, never the server */
   pageCard?: string | null;
+  /** MASON_UI_ICON (src/cli/ui-icon.ts): the page's icon, a data: URL validated at the start, or null. Written into the
+   *  page's HTML once, when the server starts (`pageWithIcon`) */
+  pageIcon?: string | null;
   /** MASON_UI_SOCKET (src/cli/ui-socket.ts): the Unix socket the page is served on too, or null */
   pageSocket?: string | null;
   /** the project's database is the demo database this run hosts (`mason init demo`, src/cli/demo.ts): mason status says so */
@@ -829,6 +833,9 @@ export function createRunServer(ctx: RunContext): http.Server {
   const live: Live = oneAtATime(({ t, columns }: { t: SourceTable; columns: readonly string[] }) => ctx.liveChecks !== undefined ? ctx.liveChecks(t, columns) : Promise.resolve([NO_LIVE_CHECKS]));
   // read once, here: nothing a request names is ever read from disk
   const page = ctx.page ? pageFiles() : new Map<string, PageFile>();
+  // the page's icon (MASON_UI_ICON, src/cli/ui-icon.ts), written into its HTML once, here: unset, the same bytes
+  const html = page.get("/");
+  if (html !== undefined) page.set("/", { ...html, body: pageWithIcon(html.body, ctx.pageIcon ?? null) });
   return http.createServer((req, res) => {
     for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
     const v = guard({ method: req.method ?? "GET", url: req.url ?? "/", host: req.headers.host, origin: req.headers.origin, cookie: req.headers.cookie, authorization: req.headers.authorization }, ctx.port, ctx.token, tunnels);

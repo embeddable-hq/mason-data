@@ -543,6 +543,16 @@ listens, and every browser connection crosses that one ssh connection as frames 
   (`src/cli/ui-account.ts`). `/api/state` and `mason status --json` say `pageAccount: { label, url }`, or `null`.
   Unset, nothing shows. `mason start` refuses it.
 - **The host's views and card: `MASON_UI_NAV_LINKS`' `view`, `MASON_UI_OVERVIEW_CARD`.** See "Host views" below.
+- **The page's icon in the browser's tab: `MASON_UI_ICON`.** Set it to a `data:` URL of a PNG or SVG image in base64:
+  `MASON_UI_ICON="data:image/svg+xml;base64,$(base64 -w0 icon.svg)"`, or `data:image/png;base64,…`. The image is at
+  most 4096 bytes. The run writes it into the page's HTML when it starts, in place of the page's empty icon
+  (`<link rel="icon" href="data:,">`). It is inline, so the browser makes no request for it, and the page's
+  `img-src 'self' data:` already allows it. Unset, the page is served as before.
+  The value is checked strictly, and a wrong one refuses the start (`src/cli/ui-icon.ts`). It must be `data:`, then
+  `image/png` or `image/svg+xml`, then `;base64,` and nothing else between. Its base64 must be valid, with only A-Z, a-z,
+  0-9, `+`, `/` and its `=` padding: no space and no %-encoding. A PNG must start as a PNG file does. An SVG must be
+  UTF-8 text with an `<svg>` element. The message never repeats the value. The icon is not in `/api/state` or `mason
+  status --json`: the page has it in its HTML. `mason start` refuses it, as the other `MASON_UI_*` server settings.
 - **In the image, Mason's user is uid 1000, gid 1000 (`node`), and stays so**: an image that changes it names it under
   "Before you upgrade" in its release notes (deploy/mason-data/README.md). A supervisor that creates the folder of the
   socket or the run file makes it owned by `1000:1000`, mode 0700, where the container mounts it (the one folder rule of
