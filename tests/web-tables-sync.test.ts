@@ -121,7 +121,7 @@ test("read-only: no choice where the project's files are read-only or the page m
     assert.ok(!html.includes("data-choose-sync"), "no button");
     assert.ok(!html.includes("data-sync-form") && !html.includes("data-save-sync"), "no dialog, even one the model says is open");
     assert.match(html, /<span class="syncnow dim" title="[^"]+">Sync: Off<\/span>/);
-    assert.match(textOf(html), /Tables are not added(,| or) removed/, "the reason, above the list");
+    assert.match(textOf(html), /Tables are not added, removed or synced|You can't add or remove tables from this page/, "the reason, above the list");
   }
   assert.ok(renderTables(stateOf({ sourcesReadOnly: why })).includes(`title="${why.replace(/'/g, "&#39;")}">Sync: Off`));
   // a read-only page that still edits its tables (MASON_UI_READ_ONLY_ALLOW=tables) offers the choice

@@ -707,10 +707,15 @@ export function renderTables(s, ui = {}) {
   const otherHtml = failed && !otherShown.length || otherShown.length && !otherWritten.length ? ""
     : heading("Not added", otherShown.length) + (otherWritten.length ? list(otherWritten) : otherNone);
   return stray + (viewOnly !== null ? readOnlyLine("Tables are not added, removed or synced", viewOnly)
-    : readOnly === null ? "" : `<p class="count">Tables are not added or removed from this page: ${esc(readOnly)}.</p>`) +
+    : readOnly === null ? "" : `<p class="count">You can't add or remove tables from this page. ${esc(readOnly)} <a href="${DEPLOY_DOCS_URL}" rel="noreferrer">The README</a> describes how.</p>`) +
     matching + addedHtml + otherHtml + pops.join("") + moreRows("tables", Math.min(limit, shown), shown, TABLE_ROWS) + sizesFailed +
     (added ? `<p class="dim">A synced table's size is measured every 10 minutes, once its rows are written to disk.</p>` : "");
 }
+
+/** Where the README says how to deploy a change to a server (its "Run it on a server" section, on the public
+ *  repository), for a project deployed read-only. As `ROLES_DOCS_URL` (users.js): no referrer, since the page's address
+ *  may carry a host's token, and the same tab, since a host may serve the page in a sandbox with no `allow-popups`. */
+export const DEPLOY_DOCS_URL = "https://github.com/embeddable-hq/mason-data#run-it-on-a-server";
 
 export const page = {
   id: "tables",

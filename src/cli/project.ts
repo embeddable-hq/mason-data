@@ -392,6 +392,10 @@ export function projectReadOnlySetting(env: Readonly<Record<string, string | und
 /** what a refused edit of a deployed project says to run next */
 const READONLY_NEXT: NonNullable<Failure["next"]> = [["mason status", "what Mason syncs here, as the deployed files say"]];
 
+/** what a refused edit of a deployed project says to run next, when the project is deployed read-only: how to deploy a
+ *  change (the README's "Run it on a server", offline) */
+const DEPLOY_NEXT: NonNullable<Failure["next"]> = [...READONLY_NEXT, ["mason help production", "how to deploy a change to a server"]];
+
 /**
  * WHETHER THE PROJECT'S FILES MAY BE WRITTEN HERE — THE ONE AUTHORITY (issue 473): null when they may, else the refusal.
  * A deployment that ships its committed project folder (CI, GitOps, a platform that deploys the folder) runs the files
@@ -424,8 +428,8 @@ export function projectWriteRefusal(root: string | null, env: Readonly<Record<st
   if (!set && !recorded) return null;
   return { message: `the project's files are read-only here (${READONLY_SETTING}=1${set ? "" : " when Mason last started"})`, code: "refused",
     why: "Mason runs them as they were deployed: an edit here would run what nobody committed, and the next deploy would undo it",
-    fix: "edit the files and deploy them: mason add or mason remove where the project is committed, then commit and deploy",
-    next: READONLY_NEXT };
+    fix: "run mason add or mason remove in your project, commit the change, and deploy it",
+    next: DEPLOY_NEXT };
 }
 
 /**

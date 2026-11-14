@@ -842,11 +842,13 @@ test("a server's page, through a tunnel: what it words itself names mason ui --s
 test("a sources file the server cannot write: no Add, Columns…, Name its key… or Remove, and the page says why; Sync stays", () => {
   const renderTables = fn<[unknown], string>("renderTables");
   assert.match(textOf(renderTables(CATALOG_STATE)), /Remove/);
-  const why = "the sources file cannot be written on this server (EROFS): commit a change to it, and deploy";
+  const why = "The sources file cannot be written on this server (EROFS). Commit a change to it in your project, and deploy it.";
   const html = renderTables({ ...CATALOG_STATE, sourcesReadOnly: why, served: true });
   for (const control of ["data-remove-table", "data-add-table", "data-choose"]) assert.ok(!html.includes(control), control);
   assert.match(html, /data-sync-table/);
-  assert.ok(textOf(html).includes(`Tables are not added or removed from this page: ${why}.`));
+  assert.ok(textOf(html).includes(`You can't add or remove tables from this page. ${why} The README describes how.`));
+  // the README's deploy section, linked as the page links to the README (users.js ROLES_DOCS_URL): same tab, no referrer
+  assert.ok(html.includes(`${why} <a href="https://github.com/embeddable-hq/mason-data#run-it-on-a-server" rel="noreferrer">The README</a> describes how.`), "the README's link");
   // no table added yet: nothing says Add
   const none = renderTables({ ...CATALOG_STATE, sourcesReadOnly: why, tables: CATALOG_STATE.tables.map((t) => ({ ...t, added: false, copy: null })) });
   assert.ok(!textOf(none).includes("Add one from the list"));
@@ -860,12 +862,14 @@ test("a project deployed read-only (MASON_PROJECT_READONLY=1): the state the run
   let deployed: RunState;
   try { deployed = stateOf(THREE_COPIED(), { tables: CATALOG }); }
   finally { if (was === undefined) delete process.env.MASON_PROJECT_READONLY; else process.env.MASON_PROJECT_READONLY = was; }
-  const why = "the project's files are read-only here (MASON_PROJECT_READONLY=1); edit the files and deploy them: mason add or mason remove where the project is committed, then commit and deploy";
+  const why = "The project's files are read-only here (MASON_PROJECT_READONLY=1). Run mason add or mason remove in your project, commit the change, and deploy it.";
   assert.equal(deployed.sourcesReadOnly, why);
   const html = renderTables(deployed);
   for (const control of ["data-remove-table", "data-add-table", "data-choose"]) assert.ok(!html.includes(control), control);
   assert.match(html, /data-sync-table/, "Sync stays: the sync is unchanged");
-  assert.ok(textOf(html).includes(`Tables are not added or removed from this page: ${why}.`));
+  assert.ok(textOf(html).includes(`You can't add or remove tables from this page. ${why} The README describes how.`), textOf(html));
+  // the way to deploy links to the README's "Run it on a server", in the same tab and with no referrer
+  assert.ok(html.includes(`${why.replace(/'/g, "&#39;")} <a href="https://github.com/embeddable-hq/mason-data#run-it-on-a-server" rel="noreferrer">The README</a> describes how.`), "the README's link");
   // every table of the list is still written, added or not
   for (const t of CATALOG) assert.ok(html.includes(`title="${t.source}"`), t.source);
   // unset: nothing changes
@@ -1003,11 +1007,11 @@ test("a read-only page that still edits its tables (pageReadOnlyAllow: [tables])
 
 test("MASON_PROJECT_READONLY=1 wins over the allowance: a read-only page that edits its tables offers no Add, Columns…, Name its key… or Remove on a project deployed as committed, and says why; Sync now stays (issue 789)", () => {
   const renderTables = fn<[unknown], string>("renderTables");
-  const projectWhy = "the project's files are read-only here (MASON_PROJECT_READONLY=1); edit them where they are committed, and deploy";
+  const projectWhy = "The project's files are read-only here (MASON_PROJECT_READONLY=1). Run mason add or mason remove in your project, commit the change, and deploy it.";
   const html = renderTables({ ...CATALOG_STATE, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)", pageReadOnlyAllow: ["tables"], sourcesReadOnly: projectWhy, served: true });
   for (const control of ["data-remove-table", "data-add-table", "data-choose"]) assert.ok(!html.includes(control), control);
   assert.match(html, /data-sync-table/);
-  assert.ok(textOf(html).includes(`Tables are not added or removed from this page: ${projectWhy}.`));
+  assert.ok(textOf(html).includes(`You can't add or remove tables from this page. ${projectWhy} The README describes how.`));
   assert.equal(html, renderTables({ ...CATALOG_STATE, sourcesReadOnly: projectWhy, served: true }), "as on a page that is not read-only");
 });
 
@@ -2271,9 +2275,11 @@ test("the page's files fetch nothing from elsewhere and never touch the token: t
   for (const f of files) {
     // what is vendored is a third party's, copied whole (src/web/vendor/README.md): its comments name its sites, and it is never edited
     if (f.startsWith(`vendor${path.sep}`)) continue;
-    // the one site the page names is a link to its README's roles section (users.js ROLES_DOCS_URL): a link the reader
-    // follows loads nothing into the page, so the CSP holds; nothing else is ever named
-    const text = fs.readFileSync(path.join(WEB, f), "utf8").replace(/ROLES_DOCS_URL = "https:\/\/github\.com\/embeddable-hq\/mason-data#access-control";/, "");
+    // the one site the page names is its README, linked at two sections (users.js ROLES_DOCS_URL, tables.js
+    // DEPLOY_DOCS_URL): a link the reader follows loads nothing into the page, so the CSP holds; nothing else is ever named
+    const text = fs.readFileSync(path.join(WEB, f), "utf8")
+      .replace(/ROLES_DOCS_URL = "https:\/\/github\.com\/embeddable-hq\/mason-data#access-control";/, "")
+      .replace(/DEPLOY_DOCS_URL = "https:\/\/github\.com\/embeddable-hq\/mason-data#run-it-on-a-server";/, "");
     assert.ok(!/https?:\/\//.test(text), `${f} names no other site: a CDN or a font would break the CSP`);
     assert.ok(!/@import/.test(text), `${f} loads no stylesheet but the page's own`);
     // url( only for a font of the page's own, in an @font-face: a relative path to a woff2 under vendor/ that is a route
