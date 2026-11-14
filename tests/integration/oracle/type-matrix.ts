@@ -259,6 +259,9 @@ export const TYPED = `${MAPPED_TABLE} CREATE EXTENSION IF NOT EXISTS citext; CRE
   "CREATE TABLE public.typed_arrays (id int PRIMARY KEY, jba jsonb[], ja json[], vca varchar(5)[], by bytea, n numeric, ca citext[], ia inet[]); " +
   "INSERT INTO public.typed_arrays VALUES (1, ARRAY['{\"a\": 1}'::jsonb, '[1, 2]'], ARRAY['{\"a\":1}'::json, ' 2 '], ARRAY['ß', 'alpha'], '\\x00ff', 1.5, '{ß,alpha}', '{10.3.6.45,::1}'), (2, '{}', '{}', '{}', '', 0, '{}', '{}'), (3, NULL, NULL, NULL, NULL, NULL, NULL, NULL), " +
   "(4, ARRAY[NULL, '\"s\"'::jsonb], ARRAY['[]'::json], ARRAY['a b', NULL, '\"q\"', 'NULL', '', 'x,y', 'b\\\\'], '\\x5c27', 12345678901234567890.5, '{\"a b\",NULL}', '{10.0.0.0/8}');" +
+  // a plain numeric whose values have several scales, 12.5 beside 12.50 and 0 beside 0.000, read as text grouped by
+  // its text and as a whole row grouped by its key (issue 946; the review of PR 1004)
+  "CREATE TABLE public.plain_n (id int PRIMARY KEY, g int, u numeric); INSERT INTO public.plain_n VALUES (1, 1, 12.5), (2, 1, 12.50), (3, 1, 0), (4, 2, 0.000), (5, 2, -1.10), (6, 2, 1e-20), (7, 3, NULL), (8, 3, 7), (9, 3, 0.30); " +
   `CREATE TABLE public.castable (id int PRIMARY KEY, s text); INSERT INTO public.castable VALUES ${CASTABLE.map(([id, v]) => `(${id}, '${v.replace(/'/g, "''")}')`).join(", ")}; ` +
   // a column named as typed's `t` in another case: DuckDB binds names case-insensitively (the corpus rerun)
   `CREATE TABLE public.cased (id int PRIMARY KEY, "T" text, "Tz" text); INSERT INTO public.cased VALUES (1, 'one', 'Europe/London'), (2, 'a', 'utc'), (4, 'B', 'UT'), (9, NULL, 'asia/kolkata');` +
@@ -1036,6 +1039,12 @@ function* matrix(): Generator<Matrixed> {
   yield q("plain numeric: as text", "SELECT id, to_json(n), json_build_object('n', n)::text, concat(n), n || 'x', format('%s', n), row(id, n)::text FROM typed_arrays ORDER BY id");
   yield q("plain numeric: gathered as text", "SELECT json_agg(n ORDER BY id)::text, string_agg(n::text, ',' ORDER BY id), max(n)::text, concat(min(n)), concat(sum(n)) FROM typed_arrays");
   yield q("plain numeric: its text distinct", "SELECT DISTINCT n::text FROM typed_arrays ORDER BY 1");
+  // grouped by its text, spelled out (the list's expression and the key's read each value's scale alike), and a whole
+  // row grouped by its key (the review of PR 1004: 42803 where Postgres answers)
+  yield q("plain numeric: grouped by its text", "SELECT concat(u), 'x' || u, to_json(u)::text, count(*) FROM plain_n GROUP BY concat(u), 'x' || u, to_json(u)::text ORDER BY min(id)");
+  yield q("plain numeric: grouped by arithmetic's text", "SELECT g, (u * 1)::text, (-u)::text, format('%s', u), count(*) FROM plain_n GROUP BY g, (u * 1)::text, (-u)::text, format('%s', u) ORDER BY min(id)");
+  yield q("plain numeric: a whole row grouped by its key", "SELECT p.id, row_to_json(p)::text, p::text, concat(p.u), count(*) FROM plain_n p GROUP BY p.id ORDER BY 1");
+  yield q("plain numeric: its text in a grouping set", "SELECT concat(u), count(*) FROM plain_n GROUP BY ROLLUP (concat(u)) ORDER BY count(*), min(id)");
   yield q("json arrays unnested", "SELECT id, unnest(jba), unnest(vca) FROM typed_arrays ORDER BY 1, 2::text, 3");
   // Metabase's week from Sunday: the literals of the GROUP BY and ORDER BY repeat the SELECT list's
   yield q("time literals grouped", "SELECT (date_trunc('week', (ts + INTERVAL '1 day')) + INTERVAL '-1 day') AS w, count(*) FROM typed GROUP BY (date_trunc('week', (ts + INTERVAL '1 day')) + INTERVAL '-1 day') ORDER BY (date_trunc('week', (ts + INTERVAL '1 day')) + INTERVAL '-1 day')");

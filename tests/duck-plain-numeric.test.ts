@@ -52,7 +52,8 @@ const schema: PgSchema = {
   database: "app",
   tables: [
     { name: "p", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "g", type: "int4" }, { name: "u", type: "numeric", spelled: "numeric", scaled: hidden }] },
-    { name: "r", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "g", type: "int4" }, { name: "u", type: "numeric", spelled: "numeric", scaled: hidden }] },
+    // (its row type, so a whole row of r is the source's: any OID the source would give it)
+    { name: "r", primaryKey: ["id"], joins: [], rowTypeOid: 99001, columns: [{ name: "id", type: "int4" }, { name: "g", type: "int4" }, { name: "u", type: "numeric", spelled: "numeric", scaled: hidden }] },
     { name: "q", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "p_id", type: "int4" }, { name: "u", type: "numeric", spelled: "numeric", scaled: hidden },
       { name: "v", type: "numeric", spelled: "numeric", scaled: scaleColumn("v") }] },
   ],
@@ -202,6 +203,32 @@ test("a plain numeric turned into text is Postgres's text: JSON, a row's text, c
     "SELECT r.id, concat(r.u, q.u) FROM r JOIN q ON q.p_id = r.id ORDER BY 1, 2",
     // a grouped expression's text: its group's own, never a row's scale outside the GROUP BY (42803)
     "SELECT id, (u * 1)::text FROM r GROUP BY id, u * 1 ORDER BY id",
+  ]), []);
+});
+
+test("a plain numeric's text grouped by itself, spelled out, by number, by name or in a grouping set, and a whole row grouped by its key, is Postgres's (the review of PR 1004: 42803)", async () => {
+  assert.deepEqual(await unlike([
+    // a text expression as the key, spelled out: the list's and the key's read the scale alike
+    "SELECT concat(u), count(*) FROM r GROUP BY concat(u) ORDER BY 1",
+    "SELECT 'x' || u, count(*) FROM r GROUP BY 'x' || u ORDER BY 1",
+    "SELECT format('%s', u), count(*) FROM r GROUP BY format('%s', u) ORDER BY 1",
+    "SELECT to_json(u)::text, count(*) FROM r GROUP BY to_json(u)::text ORDER BY 1",
+    "SELECT concat(u, 'a'), count(*) FROM r GROUP BY concat(u, 'a') ORDER BY 1",
+    "SELECT g, concat(u), count(*) FROM r GROUP BY g, concat(u) HAVING concat(u) <> '' ORDER BY 1, concat(u)",
+    "SELECT concat(u), count(*) FROM r GROUP BY 1 ORDER BY 1",
+    "SELECT concat(u) AS c, count(*) FROM r GROUP BY c ORDER BY 1",
+    "SELECT concat(u), count(*) FROM r GROUP BY ROLLUP (concat(u)) ORDER BY 1",
+    // a cast of arithmetic to text as the key
+    "SELECT (u * 1)::text, count(*) FROM r GROUP BY (u * 1)::text ORDER BY 1",
+    "SELECT (u + 0)::text, (-u)::text, count(*) FROM r GROUP BY (u + 0)::text, (-u)::text ORDER BY 1",
+    "SELECT (u * 2)::varchar, count(*) FROM r GROUP BY (u * 2)::varchar ORDER BY 1",
+    "SELECT g, (u * 1)::text, count(*) FROM r GROUP BY g, (u * 1)::text ORDER BY 1, 2",
+    "SELECT (u * 1)::text AS t, count(*) FROM r GROUP BY t ORDER BY 1",
+    // a whole row and a column its key decides, grouped by the key
+    "SELECT row_to_json(r)::text FROM r GROUP BY id ORDER BY 1",
+    "SELECT r::text, count(*) FROM r GROUP BY r.id ORDER BY 1",
+    "SELECT r.id, to_json(r)::text, count(q.id) FROM r LEFT JOIN q ON q.p_id = r.id GROUP BY r.id ORDER BY 1",
+    "SELECT id, concat(u), to_json(u)::text, format('%s', u), row(u)::text FROM r GROUP BY id ORDER BY 1",
   ]), []);
 });
 
