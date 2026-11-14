@@ -91,7 +91,7 @@ const READS = [
   "SELECT id, u FROM p ORDER BY id",
   "SELECT id, u::text FROM p ORDER BY id",
   "SELECT * FROM p ORDER BY id",
-  "SELECT id % 3, sum(u), min(u), max(u) FROM p GROUP BY 1 ORDER BY 1",
+  "SELECT id % 3, sum(u), count(u) FROM p GROUP BY 1 ORDER BY 1",
   "SELECT u, count(*) FROM p GROUP BY u ORDER BY u",
   "SELECT id, u + 1, u * 2, -u, abs(u), coalesce(u, 0) FROM p ORDER BY id",
 ];

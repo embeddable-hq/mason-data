@@ -455,7 +455,8 @@ under another transaction's write fails its commit, hence swaps on the writer's 
   operation without ALL, a generated table …) keep the column's one scale. The hidden column's name is hashed again where
   the table holds a column of that name (`scaleColumn`), and a copy's view lists the source's own columns, never a
   pattern of names. Measured on 4 M rows of 0–2 decimals: the hidden column is 1.5 MiB beside the value's 12.5 MiB, the
-  copy's time is unchanged within noise, and min / max cost `arg_min` / `arg_max` (about 2× grouped, 10× ungrouped).
+  copy's time is unchanged within noise. min / max print at the column's one scale (the owner's decision, 2026-11-14:
+  picking the row's scale by `arg_min` / `arg_max` cost about 2× grouped and 10× ungrouped, for a value already equal).
 - **A failed copy backs off** (`copyRetryDelayMs`: four times the attempt, at least 5 minutes, doubled per failure, at
   most 6 hours; at once after a restart or a column change) and keeps its committed chunks.
 - **`mason stop` interrupts a copy**, re-sent every 50 ms (DuckDB loses an interrupt that arrives before its statement

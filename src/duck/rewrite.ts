@@ -3275,15 +3275,10 @@ class Rewriter {
             const probe = this.exactOf(args[0]!, (m) => { operands.push(m); return { op: "cell", key: String(operands.length - 1) }; });
             // a column's own min is DuckDB's exact decimal, padded to its scale
             if (probe === null || ((probe.p.op === "cell" || (probe.p.op === "pad" && probe.p.arg.op === "cell")) && this.duckExact(args[0]!)) || (this.duckExact(args[0]!) && !worthComputing(probe.p))) return asCell();
-            // a plain numeric (issue 946): the engine's own min / max, at the scale of a row holding it (arg_min / arg_max:
-            // native, where a pick by a row's key is a comparison of structs a row, 25 times the aggregate's time)
-            if (probe.p.op === "rescale" && probe.p.arg.op === "cell" && probe.p.scale.op === "cell" && operands.length === 2 && this.duckExact(args[0]!)) {
-              const at = fn(name === "min" ? "arg_min" : "arg_max", [this.clone(operands[1]!), this.clone(operands[0]!)],
-                { ...(b.agg_filter === undefined ? {} : { agg_filter: this.clone(b.agg_filter) }), ...(b.over === undefined ? {} : { over: this.clone(b.over) }) });
-              this.synthetic.set(bodyOf(at), { node: b.over === undefined ? "AGGREF" : "WINDOWFUNC", type: INT4, typmod: -1, args: [], oid: null, format: null, collation: 0, inputCollation: 0,
-                levelsUp: null, datum: null, qualifier: null, renamed: null });
-              return numeric({ op: "rescale", arg: cell(n), scale: cell(at) });
-            }
+            // a plain numeric (issue 946): the engine's own min / max, at the column's one scale — the owner's decision of
+            // 2026-11-14: picking the row's scale (arg_min / arg_max) cost about 10 times an ungrouped min's time for a
+            // value equal to Postgres's (`mixed-scale-numeric`)
+            if (probe.p.op === "rescale" && probe.p.arg.op === "cell" && probe.p.scale.op === "cell" && this.duckExact(args[0]!)) return asCell();
             // picked by its exact value's order key (`exactOrderKey`, issue 252), its operands breaking a tie of scales;
             // an aggregate's argument is read per row, so its key is no group's (null)
             const key = caseWhen([[isNotNull(this.clone(args[0]!)), row([this.exactOrderKey(args[0]!, null) ??this.clone(args[0]!), ...operands.map((m) => this.clone(m))])]], null);
