@@ -8228,3 +8228,43 @@ test("issue 956: a derived table's column whose name holds a space is read by th
     assert.deepEqual(await unlike(c, statements), []);
   } finally { await c.end(); }
 });
+
+/**
+ * Issue 956's review: Postgres's pg_strtok ends a token at a space, a line break or a tab only, and outToken writes
+ * every other whitespace in a name as it is. Every relation lists its columns' names in the analysed tree, so a column
+ * named with a BOM (a CSV header's), a no-break space, an ideographic space (a Japanese name), U+2028, a carriage
+ * return, a form feed or a vertical tab once broke every statement over its table.
+ */
+const ODD_SPACES = ["x\uFEFFcode", "a\u00A0b", "\u58F2\u4E0A\u3000\u91D1\u984D", "l\u2028s", "c\rr", "f\ff", "v\vt"];
+/** a BOM that starts a name: held on Mason's side alone, as PGlite's text decoder drops a leading BOM from a field's name */
+const LEAD_BOM = "\uFEFFlead";
+const wsTable: PgSchema["tables"][number] = { name: "wsn", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "j", type: "jsonb" },
+  ...ODD_SPACES.map((n) => ({ name: n, type: "numeric" as const, spelled: "numeric(10,2)" })), { name: LEAD_BOM, type: "int4" }] };
+test("issue 956: a column named with whitespace pg_strtok does not split at is read by its name, plainly and through a derived table", async () => {
+  const q = (n: string): string => `"${n}"`;
+  const values = "(1, '{\"n\": 7.50}', " + ODD_SPACES.map((_, i) => `${i + 1}.25`).join(", ") + ", 9), (2, NULL, " + ODD_SPACES.map(() => "NULL").join(", ") + ", NULL)";
+  await store.writer.run(`CREATE TABLE public.wsn (id INTEGER PRIMARY KEY, j JSON, ${ODD_SPACES.map((n) => `${q(n)} DECIMAL(10,2)`).join(", ")}, ${q(LEAD_BOM)} INTEGER)`);
+  await store.writer.run(`INSERT INTO public.wsn VALUES ${values}`);
+  await truth.exec(`CREATE TABLE public.wsn (id int PRIMARY KEY, j jsonb, ${ODD_SPACES.map((n) => `${q(n)} numeric(10,2)`).join(", ")}, ${q(LEAD_BOM)} int)`);
+  await truth.exec(`INSERT INTO public.wsn VALUES ${values}`);
+  const withWs: PgSchema = { ...schema, tables: [...schema.tables, wsTable] };
+  const a = await startPostgresApi({
+    port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test",
+    authenticate: (password) => { const p = tokenProblem(API_KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
+    schema: () => withWs, record: () => undefined, log: (l) => (logged.push(l), everLogged.push(l)), duck: await store.listener(undefined, undefined, undefined, () => copies),
+  });
+  const c = new pg.Client({ host: "127.0.0.1", port: a.port, database: "app", user: "mason", password: mintToken(API_KEY, 600).token });
+  await c.connect();
+  try {
+    assert.deepEqual(await unlike(c, [
+      ["SELECT id FROM wsn ORDER BY id", "ordered"],
+      ["SELECT count(*) FROM wsn", "ordered"],
+      [`SELECT id, j, ${ODD_SPACES.map(q).join(", ")} FROM wsn ORDER BY id`, "ordered"],
+      ...ODD_SPACES.map((n): readonly [string, "ordered"] => [`SELECT w.id, w.${q(n)} / 3 AS ${q(`${n} / 3`)} FROM wsn w ORDER BY 1`, "ordered"]),
+      // a JSON numeric and a quotient out of a derived table under a join, each named with every such character
+      [`SELECT u.id, ${ODD_SPACES.map((n) => `s.${q(`${n} n`)}, s.${q(`${n} q`)}`).join(", ")} FROM wsn u JOIN (SELECT w.id, ` +
+        ODD_SPACES.map((n) => `(w.j ->> 'n')::numeric AS ${q(`${n} n`)}, w.${q(n)} / 3 AS ${q(`${n} q`)}`).join(", ") + " FROM wsn w) s ON s.id = u.id ORDER BY 1", "ordered"],
+    ]), []);
+    assert.deepEqual(await answer(c, `SELECT id, ${q(LEAD_BOM)} FROM wsn ORDER BY id`), { fields: [["id", 23], [LEAD_BOM, 23]], rows: [["1", "9"], ["2", null]] });
+  } finally { await c.end(); await a.close(); }
+});

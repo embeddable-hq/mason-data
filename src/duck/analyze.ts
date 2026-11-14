@@ -75,11 +75,20 @@ export async function analyze(run: (bytes: Uint8Array) => Promise<Uint8Array>, s
   // the log's own BYTES, never its text decoded: Postgres wraps it by bytes, and may break a line inside a character
   const frames = splitFrames(reply);
   if (frames.length !== messages.length) throw new Error(`the catalog Postgres's reply split into ${frames.length} frames and ${messages.length} messages: report it`);
+  const detail = noticeField(frames[z + 1 + at]!.frame, "D");
   let tree: TreeValue;
-  try { tree = readParseLog(noticeField(frames[z + 1 + at]!.frame, "D"), written); }
+  try { tree = readParseLog(detail, written); }
   catch (e) {
     if (!(e instanceof UnreadableNames)) throw e;
-    throw gapRefusal("name-unreadable", "Mason cannot read back a name in this statement from Postgres's analysis of it", "name the column in the statement, or give it an alias without a line break", sql);
+    // a name with a line break the statement does not write is a column's (every relation lists all its columns'
+    // names): the catalog's columns so named tell it too
+    const columns = await catalogRows(run, "SELECT attname::text FROM pg_catalog.pg_attribute WHERE attnum > 0 AND NOT attisdropped AND strpos(attname::text, chr(10)) > 0");
+    try { tree = readParseLog(detail, new Set([...written, ...columns.flatMap(([n]) => typeof n === "string" ? [n] : [])])); }
+    catch (again) {
+      if (!(again instanceof UnreadableNames)) throw again;
+      throw gapRefusal("name-unreadable", "Mason cannot read back a name in this statement from Postgres's analysis of it",
+        "give the columns whose names hold line breaks, or many of ( ) { } \\ and tabs, aliases without them", sql);
+    }
   }
   const pd = mine.find((m) => m.type === "ParameterDescription");
   const rd = mine.find((m) => m.type === "RowDescription");

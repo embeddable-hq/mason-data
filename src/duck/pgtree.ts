@@ -36,7 +36,7 @@ export interface TreeNode { readonly _node: string; readonly [field: string]: Tr
  * very same bytes is kept. A break inside a run of 78 bytes with no space may have been a space too: a space read
  * between two halves of a quoted name or a field's value does not parse (outToken escapes every space it writes), so
  * the parse decides. A name's own line break that can trade places with a wrapped space is told by the names the
- * statement writes. One reading must be left. Where more are, Mason refuses by name (`name-unreadable`), and never
+ * statement writes, and then by the catalog's columns (analyze.ts). One reading must be left. Where more are, Mason refuses by name (`name-unreadable`), and never
  * guesses.
  */
 export function readParseLog(detail: Uint8Array, written: ReadonlySet<string> = new Set()): TreeValue {
@@ -44,17 +44,28 @@ export function readParseLog(detail: Uint8Array, written: ReadonlySet<string> = 
   let failure: unknown = null;
   for (const r of unwrapNodeDump(detail)) {
     // each break inside a run of 78 bytes with no space was a space, or was inserted: each choice is its own (what
-    // follows is the same either way), so every combination is parsed, up to a bound past which none is guessed
-    if (r.spaces.length > MAX_INSIDE_TOKEN) throw new UnreadableNames();
-    for (let combo = 0; combo < 2 ** r.spaces.length; combo++) {
+    // follows is the same either way). A reading with spaces at the sites `combo` names, parsed:
+    const parsed = (combo: (k: number) => boolean): { tree: TreeValue } | { error: unknown; at: number } => {
       const parts: Uint8Array[] = [];
       let from = 0;
-      r.spaces.forEach((at, k) => { if (combo & (1 << k)) { parts.push(r.text.subarray(from, at), Buffer.from(" ")); from = at; } });
+      r.spaces.forEach((at, k) => { if (combo(k)) { parts.push(r.text.subarray(from, at), Buffer.from(" ")); from = at; } });
       parts.push(r.text.subarray(from));
-      try { trees.push(parseTree(Buffer.concat(parts).toString("utf8"))); }
-      // a reading that does not parse is not what Postgres wrote: the next is tried, and the error kept for the report
-      catch (e) { failure = e; }
-    }
+      try { return { tree: parseTree(Buffer.concat(parts).toString("utf8")) }; }
+      catch (e) { return { error: e, at: e instanceof TreeSyntaxError ? e.at : Infinity }; }
+    };
+    // Each site read as inserted, then each one alone as a space. Where every single space fails to parse before the
+    // next site, every reading with spaces fails at its first one just so, as all before it is the same: the one
+    // with none is the only one. Otherwise every combination is parsed, up to a bound past which none is guessed
+    const none = parsed(() => false);
+    const decided = r.spaces.every((_, k) => {
+      const one = parsed((j) => j === k);
+      return !("tree" in one) && one.at < (r.spaces[k + 1] ?? Infinity) + 1;
+    });
+    const readings = decided ? [none] : r.spaces.length > MAX_INSIDE_TOKEN ? null
+      : Array.from({ length: 2 ** r.spaces.length }, (_, combo) => parsed((k) => (combo & (1 << k)) !== 0));
+    if (readings === null) throw new UnreadableNames();
+    // a reading that does not parse is not what Postgres wrote: the next is tried, and the error kept for the report
+    for (const x of readings) { if ("tree" in x) trees.push(x.tree); else failure = x.error; }
   }
   if (trees.length === 1) return trees[0]!;
   if (trees.length === 0) throw failure ?? new Error("the catalog Postgres's parse tree: its log's line breaks can be read no way: report it");
@@ -67,13 +78,14 @@ export function readParseLog(detail: Uint8Array, written: ReadonlySet<string> = 
 }
 
 /** a parse tree's log that more than one tree could have been wrapped into, or too many ways to read: a name with a line
- *  break the statement does not write (a table's column so named) beside a space at a line's end, or many long names of
- *  characters Postgres escapes (Mason gap `name-unreadable`) */
+ *  break beside a space that the names given do not tell, more than 64 readings, or more than eight breaks inside
+ *  tokens that single readings do not settle (Mason gap `name-unreadable`) */
 export class UnreadableNames extends Error {
   constructor() { super("the catalog Postgres's parse tree holds a name that Mason cannot read back"); }
 }
 
-/** the most breaks inside a token one reading of a log is parsed with (each doubles the parses), and the most readings */
+/** the most breaks inside a token whose every combination one reading of a log is parsed with (each doubles the
+ *  parses), and the most readings */
 const MAX_INSIDE_TOKEN = 8, MAX_READINGS = 64;
 
 /** every string of a tree that holds a line break: only a name can, as the log's breaks are undone */
@@ -161,15 +173,29 @@ export function unwrapNodeDump(wrapped: Uint8Array): Array<{ text: Uint8Array; s
   return found;
 }
 
-/** Parses one node-format text (outfuncs.c's nodeToString), or throws with the offset where it went wrong. A space or
- *  line break inside a quoted name that is not escaped is no text outToken writes, and is refused as such. */
+/** a text the node format does not read, and the byte where it went wrong */
+class TreeSyntaxError extends Error {
+  readonly at: number;
+  constructor(message: string, at: number) { super(message); this.at = at; }
+}
+
+/** pg_strtok's (read.c) whitespace between tokens: a space, a line break or a tab, and nothing else. Every other
+ *  character (a no-break space, U+3000, a BOM, a carriage return, a form feed) is part of a name, which outToken writes
+ *  unescaped */
+const BETWEEN = (c: string): boolean => c === " " || c === "\n" || c === "\t";
+/** where pg_strtok ends a token: its whitespace, or a parenthesis or a brace */
+const ENDS_TOKEN = (c: string): boolean => BETWEEN(c) || c === "(" || c === ")" || c === "{" || c === "}";
+
+/** Parses one node-format text (outfuncs.c's nodeToString), tokens split as pg_strtok splits them, or throws with the
+ *  offset where it went wrong. A space or line break inside a quoted name that is not escaped is no text outToken
+ *  writes, and is refused as such. */
 function parseTree(text: string): TreeValue {
   let i = 0;
-  const ws = (): void => { while (i < text.length && /\s/.test(text[i]!)) i++; };
-  const fail = (what: string): never => { throw new Error(`the catalog Postgres's parse tree: ${what} at offset ${i}: ${JSON.stringify(text.slice(i, i + 40))}`); };
+  const ws = (): void => { while (i < text.length && BETWEEN(text[i]!)) i++; };
+  const fail = (what: string): never => { throw new TreeSyntaxError(`the catalog Postgres's parse tree: ${what} at offset ${i}: ${JSON.stringify(text.slice(i, i + 40))}`, Buffer.byteLength(text.slice(0, i))); };
   const bare = (): string => {
     let s = "";
-    while (i < text.length && !/[\s(){}]/.test(text[i]!)) {
+    while (i < text.length && !ENDS_TOKEN(text[i]!)) {
       if (text[i] === "\\" && i + 1 < text.length) { s += text[i + 1]; i += 2; continue; }
       s += text[i++];
     }
@@ -196,7 +222,7 @@ function parseTree(text: string): TreeValue {
       // that is not escaped (a quote inside a name is not escaped: `"a"b"`)
       i++;
       let s = "", closed = false;
-      while (i < text.length && !/[\s(){}]/.test(text[i]!)) {
+      while (i < text.length && !ENDS_TOKEN(text[i]!)) {
         if (text[i] === "\\" && i + 1 < text.length) { s += text[i + 1]; i += 2; closed = false; continue; }
         closed = text[i] === '"';
         s += text[i++];
