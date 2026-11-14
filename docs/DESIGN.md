@@ -362,7 +362,7 @@ an ordinary statement whose failure is that table's alone.
   in the synced data's file, and the check before each piece reads the free disk then, the spill's growth with it.
 - **The next pass is never moved later by a compaction.** Every rebuild's end re-times the passes (`followUp` →
   `rearm`); `rearm` set the timer from now, four times the last pass on, so with frequent compactions no polled table
-  was polled for 20 minutes (the review of PR 856). It now only ever moves the next pass earlier (`timerAts`).
+  was polled for 20 minutes (the review of PR 856). It now only ever moves the next pass earlier (the timer's `at`, `timerAt`).
 
 **Why it cannot be the merge issue 371 met.** That merge ran INSIDE a checkpoint, and a checkpoint that fails
 invalidates the database. A compaction is statements, measured on DuckDB 2.0.0 (a laptop, synthetic tables, one store
