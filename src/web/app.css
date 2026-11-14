@@ -880,6 +880,25 @@ details.hours > summary { margin-bottom: var(--space-2); }
 /* Logs: the run's raw log as a terminal's lines, in mono, the newest at the bottom */
 #page-logs table.events th[scope="row"] time { font-weight: 400; }
 #page-logs table.events code { color: var(--fg); }
+/* Sync events on a phone (issue 1012): five columns side by side left the message a sliver and Took past the edge, so
+   each event is a block of three lines (when and how long it took; the kind and the table; the message), and the header
+   keeps its two sorts, When at the left and Took at the right. Nothing scrolls sideways. */
+@media (max-width: 640px) {
+  #page-syncs table.events, #page-syncs table.events thead, #page-syncs table.events tbody { display: block; }
+  #page-syncs table.events thead tr { display: flex; justify-content: space-between; background: var(--thead-bg); border-bottom: 1px solid var(--line-strong); }
+  #page-syncs table.events thead th { position: static; border: 0; }
+  #page-syncs table.events thead th:nth-child(2), #page-syncs table.events thead th:nth-child(3), #page-syncs table.events thead th:nth-child(4) { display: none; }
+  #page-syncs table.events tbody tr { display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas: "when when took" "kind name name" "msg msg msg"; border-top: 1px solid var(--line); }
+  #page-syncs table.events tbody tr:first-child { border-top: 0; }
+  #page-syncs table.events tbody tr > * { border-top: 0; }
+  #page-syncs table.events tbody tr > :nth-child(1) { grid-area: when; padding-bottom: 0; }
+  #page-syncs table.events tbody tr > :nth-child(2) { grid-area: kind; padding-bottom: 0; }
+  #page-syncs table.events tbody tr > :nth-child(3) { grid-area: name; padding-bottom: 0; padding-left: 0; }
+  #page-syncs table.events tbody tr > :nth-child(4) { grid-area: msg; overflow-wrap: anywhere; }
+  #page-syncs table.events tbody tr > :nth-child(5) { grid-area: took; padding-bottom: 0; }
+  #page-syncs table.events code.name { max-width: 100%; }
+}
 .terminal { background: var(--code-bg); color: var(--code-fg); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-3) var(--space-4);
   max-height: 480px; overflow: auto; font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.6; }
 .terminal .log-line { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-3); }
