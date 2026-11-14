@@ -43,7 +43,7 @@ kubectl get service mason-pg                        # EXTERNAL-IP: the address a
   next start syncs the tables again from the start.
 - **The project folder is a ConfigMap**, mounted read-only at `/mason/project`: the sources file naming the tables, and
   `mason.yml`. `mason serve` writes nothing there, so `mason add` beside the server is refused (with
-  `MASON_PROJECT_READONLY=1` set, by name and before anything is read: edit the files and deploy them); change the ConfigMap and
+  `MASON_PROJECT_READONLY=1` set, by name and before anything is read: commit the change, and deploy it); change the ConfigMap and
   `kubectl rollout restart statefulset/mason`: the table is synced (or dropped) at the next start. The chart restarts the
   pod itself when the sources file changes. To let `mason add` work beside the server instead, set
   `MASON_PROJECT=/mason/data/project` and drop the mount: the folder then lives on the volume, uncommitted.

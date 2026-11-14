@@ -24,19 +24,19 @@ each). The synced data is read-only.
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 7,447 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 7,463 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same synced tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 7,447 statements | Mason | DuckDB alone |
+| Of 7,463 statements | Mason | DuckDB alone |
 |---|---|---|
-| answered exactly as Postgres: the rows, their text, the column names | 93% | 25% |
+| answered exactly as Postgres: the rows, their text, the column names | 93% | 26% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
 | refused, naming what to write instead (SQLSTATE 0A000, `Mason gap <id>`) | 6% | — |
-| the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 17% |
+| the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 19% |
 | refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 22% |
-| a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 14% |
+| a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 15% |
 | wrong rows, or the rows in another order | — | 8% |
-| the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 4% |
+| the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 1% |
 | another error than Postgres's, or answered where Postgres refuses | — | 9% |
 
 A tool that reads Postgres reads the first row's answers; the rest it would have to work around, statement by
@@ -126,7 +126,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 
 ## Answered differently
 
-19 cases are answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
+20 cases are answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
 
 | Gap | What | Postgres | Mason | Instead |
 |---|---|---|---|---|
@@ -138,6 +138,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `limit-lateral-argument` | a LEFT JOIN of a list's rows ON TRUE (unnest, json_each, jsonb_array_elements, …) under a LIMIT, or a row count an Execute sets on the wire, and no ORDER BY, whose argument holds a subquery (unnest(ARRAY(SELECT …))), or reads two or more columns of the row and no array (CASE WHEN t.kind = 'doc' THEN t.body END) in a SELECT whose list is a bare * or inside a join with a name of its own ((a LEFT JOIN … ON TRUE) AS j) | the first rows of the base, in its order, each row's members in theirs | DuckDB plans such a lateral as a delimiter join and hands the rows back in an order of its own, so the LIMIT keeps other rows (elsewhere an argument of two columns is computed in a step of its own before the lateral, which a * would read as a column; a subquery is a delimiter join in every form) | name the columns instead of *, or ORDER BY the base's key before the LIMIT |
 | `window-partition-order` | a window function that reads its frame in order (row_number, lag, lead, first_value, last_value, nth_value, ntile) over a window with PARTITION BY and no ORDER BY | a partition's rows in the order its sort hands them back: in practice the order they came in | a partition's rows in the order DuckDB's partitioning hands them back, another one | ORDER BY in the window (OVER (PARTITION BY a ORDER BY b)) |
 | `mixed-scale-numeric` | a column declared numeric with no precision (Rails' `t.decimal`) where Mason reads no value's own scale: to_json, json_build_object, json_agg, concat, format, \|\|, array_agg, a row's text, a scalar subquery (SELECT (SELECT max(x) FROM t)), min and max (windowed too), percentile_disc, mode(), sum(DISTINCT x), a LATERAL column, WITH RECURSIVE, a MATERIALIZED WITH query read by q.*, SELECT * of a NATURAL JOIN, a GROUP BY over a source view, a generated table's column, TABLE t (in a subquery or a WITH query too), a UNION without ALL, an INTERSECT or EXCEPT with or without ALL, and a UNION ALL beside an arm of NULLs, integers or VALUES: each value printed with the most decimals any value has, 12.50 for 12.5 (read anywhere else, each value has its own); SELECT DISTINCT x::text of such a column, which keeps 12.5 and 12.50 as one row; and GROUP BY x or DISTINCT x, whose one value of 12.5 and 12.50 may be printed with the other's scale; and any numeric column whose values have several scales: an integer beside a numeric in a UNION, INTERSECT or EXCEPT without ALL, the rows of a VALUES list outside a set operation (VALUES (1), (2.5)) (a UNION ALL's arms and lead or lag's default each keep their own) | each value its own scale: 1, 1.5 | one scale per column: 1.0, 1.5 | cast to numeric(p, s), or round(x, s) |
+| `whole-beside-many-decimals` | a whole number (an integer cast to numeric, div() of two integers, a whole constant, a whole part of extract) beside a numeric with so many decimals that the two do not fit in 38 digits (numeric(38,30), or one with no precision holding 20 or more decimals), in a UNION, an IN (SELECT …), a CASE, a COALESCE, GREATEST or LEAST | keeps every decimal | keeps every whole-number digit, and at least 19 decimals (38 minus the whole number's digits; 10 beside a sum of whole numbers), rounding away the rest: a number of 1 or more is the same to at least 19 significant digits, a smaller one to its first 19 decimals. Values that differ only past the decimals kept compare equal: UNION and DISTINCT merge them, and IN and a join match them. Compared with = or in an IN list of constants (n36 = 2.5e2, n36 IN (2.5e2, 0.01)), or a whole constant of more than 19 digits beside such a column, it raises numeric field overflow (22003) as before, where Postgres answers | cast the decimal side to 18 decimals or fewer, such as ::numeric(38,18) |
 | `unicode-16-case` | upper / lower of letters added in Unicode 16 under a libc collation (en_US.utf8); initcap beside a letter added in Unicode 17 | maps the Unicode 16 letters (its own tables, glibc's and ICU's are Unicode 16), and reads a Unicode 17 letter as none, so the letter after it starts a word | leaves the Unicode 16 letters as they are (DuckDB's ICU predates Unicode 16), and reads a Unicode 17 letter as a letter where Mason's runtime knows Unicode 17 | none needed for letters before Unicode 16 |
 | `float-last-digit` | stddev / variance of a float, and ln, log, exp, power of a double: the last digit may differ | its algorithm and its machine's libm | DuckDB's and its machine's: alike on some pairs of machines, apart in the 16th–17th digit on others | round(x::numeric, 12), or compare within a tolerance (abs(a - b) <= 1e-12 * abs(b)) |
 | `negative-zero` | -0 beside 0 in greatest / least / percentile_disc | keeps the one it met first | may answer the other | x + 0 makes -0 into 0 |

@@ -90,6 +90,9 @@ export interface TableState extends Omit<CatalogTable, "columns"> {
    *  absent from a run before it was said */
   syncRefusal?: string | null;
 }
+/** which reason the run cannot write its sources file (`RunState.sourcesReadOnlyKind`) */
+export type SourcesReadOnlyKind = "deployed" | "unwritable" | "unknown";
+
 export interface RunState {
   /** the database the run copies from: a JSON key named `source` is always this object, never a table (a table is `table`) */
   source: { url: string; database: string; remote: boolean; version: string; standby: boolean; changes: "poll" | "replication";
@@ -147,6 +150,10 @@ export interface RunState {
   /** why the page offers no Add or Remove (the project's files deployed read-only, MASON_PROJECT_READONLY; a server's
    *  sources file that cannot be written), or null: src/cli/run-server.ts sourcesReadOnly */
   sourcesReadOnly?: string | null;
+  /** which reason `sourcesReadOnly` is, or null: `deployed` (MASON_PROJECT_READONLY) and `unwritable` (a server's
+   *  sources file it cannot write) are undone by a deploy, so the page links to how; `unknown`, whether the files are
+   *  read-only cannot be told (a setting or a config to repair) */
+  sourcesReadOnlyKind?: SourcesReadOnlyKind | null;
   /** why the page offers no control that changes anything (MASON_UI_READ_ONLY=1, src/cli/ui-read-only.ts), or null:
    *  src/cli/run-server.ts runState; a run from before it has none */
   pageReadOnly?: string | null;
@@ -549,7 +556,9 @@ const STATUS_USAGE = `usage: mason status [--json]
     readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), served (this is
     mason serve's run: mason ui --ssh opens its page), sourcesReadOnly (why the page offers no Add or Remove — the
     project's files deployed read-only, MASON_PROJECT_READONLY, which mason add and mason remove refuse too, or a
-    server's sources file it cannot write — or null), pageReadOnly (why the page changes nothing: mason serve with
+    server's sources file it cannot write — or null), sourcesReadOnlyKind (which of them: deployed, the project's
+    files deployed read-only, or unwritable, a server's sources file it cannot write, each undone by a deploy; unknown,
+    whether they are read-only cannot be told — or null), pageReadOnly (why the page changes nothing: mason serve with
     MASON_UI_READ_ONLY=1, which refuses every change the page sends — or null), pageReadOnlyAllow (what that page
     still changes: [tables], [users] or [tables, users] as MASON_UI_READ_ONLY_ALLOW names them, else []), pageBack ({ url, label }: the
     page's link back to the site that links to it, mason serve with MASON_UI_BACK_URL — or null), pageNav ({ items, links }: the sidebar's
@@ -600,7 +609,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
   json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "generatedTables", "queries", "slowQueries", "refusedQueries",
-    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "pageReadOnly", "pageReadOnlyAllow", "pageBack", "pageNav", "pageAccount", "pageCard", "pageSocket",
+    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "sourcesReadOnlyKind", "pageReadOnly", "pageReadOnlyAllow", "pageBack", "pageNav", "pageAccount", "pageCard", "pageSocket",
     "users", "roles", "share", "shareEnded", "lastRun", "lastStop", "hung", "next"],
 };
 
