@@ -72,7 +72,7 @@ async function scaleLookup(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, 
   if (hidden.size === 0) return null;
   const wanted = new Map<string, { relid: number; attno: number }>();
   for (const t of [...types.values()].flat()) if (t.relation !== undefined && t.type === NUMERIC_OID && t.typmod < 0) wanted.set(`${t.relation.relid}.${t.relation.attno}`, t.relation);
-  if (wanted.size === 0) return null;
+  if (wanted.size === 0) return { at: () => null, named: (source, column) => { const dot = source.indexOf("."); return hidden.get(JSON.stringify([source.slice(0, dot), source.slice(dot + 1), column])) ?? null; } };
   const pairs = [...wanted.values()].map((r) => `(${Math.trunc(r.relid)}, ${Math.trunc(r.attno)})`).join(", ");
   const rows = await catalogRows(catalog, `SELECT c.oid::text, a.attnum::text, n.nspname, c.relname, a.attname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace ` +
     `JOIN pg_attribute a ON a.attrelid = c.oid WHERE (c.oid::int8, a.attnum::int8) IN (${pairs}) AND c.relkind = 'r' AND NOT a.attisdropped`);
@@ -80,7 +80,8 @@ async function scaleLookup(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, 
     const name = hidden.get(JSON.stringify([schema, table, column]));
     return name === undefined ? [] : [[`${relid}.${attno}`, name] as const];
   }));
-  return at.size === 0 ? null : { at: (relid, attno) => at.get(`${relid}.${attno}`) ?? null };
+  return { at: (relid, attno) => at.get(`${relid}.${attno}`) ?? null,
+    named: (source, column) => { const dot = source.indexOf("."); return hidden.get(JSON.stringify([source.slice(0, dot), source.slice(dot + 1), column])) ?? null; } };
 }
 
 /** the copies that hold a plain numeric's hidden scale column, `schema.table` (`SCALED_KEY`): a statement that lists one's
