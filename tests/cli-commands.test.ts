@@ -905,9 +905,9 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
     // a column the table lacks, said with the closest
     await same(["add", "customers", "--columns", "nme"], /public\.customers has no column \\"nme\\" — did you mean `name`\?/);
     // A SECOND ENTRY OF THE FILE THAT FAILS against the database: the add and the remove are refused, the file as it was
-    fs.writeFileSync(s.file, `kind: postgres\nurl: ${s.url}\ntables:\n  customers: {}\n  orders:\n    columns: [id, gone]\n`);
-    await same(["add", "products"], /mason\/sources\/shop\.yml: tables\.orders\.columns: public\.orders has no column gone \(its columns: [^)]*\) — fix it first, then add products/);
-    await same(["remove", "customers"], /mason\/sources\/shop\.yml: tables\.orders\.columns: public\.orders has no column gone \(its columns: [^)]*\) — fix it first, then remove customers/);
+    fs.writeFileSync(s.file, `kind: postgres\nurl: ${s.url}\ntables:\n  customers: {}\n  orders:\n    columns: [id, idd]\n`);
+    await same(["add", "products"], /mason\/sources\/shop\.yml: tables\.orders\.columns: public\.orders has no column idd — did you mean `id`\? \(its columns: [^)]*\) — fix it first, then add products/);
+    await same(["remove", "customers"], /mason\/sources\/shop\.yml: tables\.orders\.columns: public\.orders has no column idd — did you mean `id`\? \(its columns: [^)]*\) — fix it first, then remove customers/);
     // a name the file does not have, with the closest it has
     await same(["remove", "customer"], /shop\.yml names no table customer — did you mean `customers`\?/);
     // MASON USAGE asks the run's /api/usage and prints its answer: as it is under --json, a line a span for a person

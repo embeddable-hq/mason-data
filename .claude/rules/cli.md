@@ -148,6 +148,9 @@ CLI lacks).
   once nothing was heard for `STALL_GIVE_UP_MS`. A read given up on is CANCELLED on the database (a CancelRequest the
   way its connection came, which a pooler maps) before its connection is closed. `CATALOG_READ_TIMEOUT_MS` is the last
   guard. A usage sample and `/metrics` read `facts()` as it is. No timer reads it (tests/integration/cli-catalog-read.itest.ts counts an idle run's connections).
+  A table whose columns the sync saw change on the database (before a poll, or at a stream relation message; issue 977)
+  has its catalog read again ALONE (`refreshTables`, `TABLES_SQL` narrowed by `tablesSql`), one at a time, put in place
+  of its row; a whole read begun before it never puts the older row back.
   **The request log's filters are read by ONE parser** (`requestFilter`, src/cli/request-filter.ts) at both entrances
   — `mason logs --requests`' options and `/api/requests`' query string — so a filter means one thing and a mistake is
   worded once (its key spelled as the entrance spells it). `mason status`'s query summary is its own endpoint
@@ -183,7 +186,10 @@ CLI lacks).
   second file is refused ("one source per project for now"). ONE reader (`readSource`, `parseSourceText`, then
   `addedTables` against the catalog, src/cli/sources.ts) for the run, `mason tables`, `mason add` and `serve`; every
   mistake of a file on ONE report (`sourceFailure`, code `bad_source`), each with its key, a `did you mean` and the
-  way out. A file that cannot be read mid-run keeps the tables read before: a typo never drops a copy.
+  way out. A name of `columns:` its table lacks and no column is close to was dropped on the database: passed over and
+  said, never a refusal (`goneColumns`, `goneNotes`; issue 977), since it only narrows; one close to a column is refused.
+  A name of `exclude:` the table lacks is ALWAYS refused, fail closed (the review of PR 995: passed over, a salary renamed
+  annual_pay was served), with the way out; the run moves one that went while it was up (`leftOutArrivals`). A file that cannot be read mid-run keeps the tables read before: a typo never drops a copy.
 - **`mason add` and `mason remove` work before `mason start` as after it** (`needs: "project"`): the sources file is
   the list, and `mason init demo` already writes entries before any run, so `mason init && mason add orders && mason
   start` is a natural order. With Mason up they ask the run (`/api/pick`, `/api/remove`: the copy starts or is dropped

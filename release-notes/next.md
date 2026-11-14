@@ -67,3 +67,20 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   replication. Mason drops them as they arrive. They are never stored, logged or served. A publication you name with
   `publication:` is still never changed. If it lists a table's columns, Mason now says once that the list blocks
   `DROP COLUMN`, and how to name the table whole. This was listed as known in 0.20.0.
+- **A column added to, renamed in or dropped from a synced table on your database now reaches Mason without a restart.**
+  Before, a new column never reached the synced data until Mason was started again, while `mason status` said every
+  table was synced. A column renamed or dropped made the table's sync fail again and again until a restart. Now Mason
+  checks the table's columns before each poll, at `mason sync` and when the change log says the table changed. The
+  check reads only the database's catalog. When the columns changed, Mason syncs that table again whole, and serves its
+  old data until that ends. A new column that looks like a secret, such as `api_token`, is left out, as `mason add`
+  leaves it out. Mason writes `exclude:` on the table's entry in the sources file, and says so in its log, its events
+  and `mason status`. To sync it, run `mason add <table> --include <column>`.
+  A column that `exclude:` names and that is renamed while Mason runs is never synced: Mason writes its new name in
+  `exclude:` in its place. When the project's files are read-only, Mason leaves it out and says the line to write.
+  One that is dropped while Mason runs is taken out of `exclude:`. A column that `columns:`
+  names and that your database dropped no longer stops Mason from starting: Mason says so in `mason status`, and syncs
+  the columns that are left. A whole sync that fails because a column changed under it now reads the columns again
+  and starts over with them, instead of failing again and again.
+  A publication you name in the sources file (`publication:`) is never changed by Mason. If it lists a table's columns,
+  Postgres does not send a new column, so Mason stops keeping that table current and says the `ALTER PUBLICATION` line
+  that adds the column.
