@@ -3059,9 +3059,44 @@ a new line never reaches the projects still on the old one. A security fix must 
 - A breaking change is anything that reads a project differently. It waits for the next line (`0.21.0`), which is
   occasional.
 - A security fix is released on the previous line as well as the current one (`0.19.x` and `0.20.x`).
-- A release from `main` carries all of `main`, so the current line moves to its own branch (`release/0.20`), cut
-  from `main` just before the first breaking change merges. Its patches are released from there, and `main` becomes the
-  next line.
+- A release from `main` carries all of `main`, so once a breaking change merges there, `main`'s next release is the
+  next line. The release of that line cuts the previous line's branch (`release/0.20`), from that line's newest tag
+  (the owner, 2026-11-14, issue 1020). Its patches are released from there.
+
+**The branch is cut by the release, never by hand** (issue 1020). PR 999 had the coordinator cut the current line's
+branch from `main` just before the first breaking change merged. Spotting that moment took judgment, and creating the
+branch took a person. Now `release.yml`'s `tag` job, on a release from `main` whose line is newer than every other
+tag's, first creates `release/<major>.<minor>` for the newest line below it, at that line's newest tag, through the
+REST API (`POST /git/refs`, which refuses a ref that exists, so a branch is never moved). It does this before it tags.
+A failure fails the run, before anything is tagged or published. So a patch of the old line starts from exactly what
+its users run, not from `main` just before a breaking change, which could hold unreleased fixes. The rule that goes
+with it: once a line has its branch, its versions are released from that branch only. `decide` reads the remote's
+`release/*` branches with its tags, and on `main` refuses a version of a line that has its branch (unless that version
+is tagged already), before anything is tagged. Otherwise a `0.20.1` from `main` would be missing from `release/0.20`,
+and the branch's next patch would lack its fixes (the review of PR 1023). Between the first breaking merge and the new
+line's release, `main` releases no patch of the current line. `scripts/release-line.ts --cut`
+decides it, and `tests/release-line.test.ts` holds it.
+
+A line released before this change has no branch. The owner wants no release step that needs a person, so such a
+line's branch is cut by running `release-line-branch.yml` (a `workflow_dispatch` with the line), never by hand. It
+cuts `release/<major>.<minor>` at the line's newest tag (`scripts/release-line.ts --cut-line`), and refuses a line with
+no tag. It may cut the newest line too. From then on that line's patches are released from its branch, and the next
+line's release finds the branch and leaves it. Anyone with Actions access can run it, a coordinator session included.
+
+Both workflows create a branch through one composite action, `.github/actions/line-branch`. It never moves a branch,
+and checks the commit afterwards. A refusal fails the run, creates nothing, and prints GitHub's answer word for word,
+so the run names the rule. Whether the `release` ruleset lets the workflow's `GITHUB_TOKEN` create a branch could not
+be settled from the docs. The token is the GitHub Actions app's, and GitHub offers no such entry in the ruleset's bypass
+list (the owner checked, 2026-11-14). The docs say required status checks apply to a branch's creation unless "Do not
+require status checks on creation" is set, and say nothing of the pull request rule on creation. So the first run, for
+`0.20` right after the change merges, finds out. If it is refused, the fallback is a deploy key with write access,
+added once to the ruleset's bypass list and saved as the secret `RELEASE_BRANCH_DEPLOY_KEY`. With the secret set, the
+action pushes over SSH with `--force-with-lease=<ref>:`, which is refused if the ref exists at all. The key bypasses
+the ruleset, and a push to `release/*` publishes. A repository secret can be read by any workflow on any branch a writer
+pushes, so the key is an environment secret of `release-branches`, whose deployment branches are `main` and
+`release/*` alone, and only the jobs that create a branch name that environment (`release-notes/README.md` "The ruleset
+on `release/*`"). If the ruleset lets `GITHUB_TOKEN` create a `release/*` branch instead, any writer's workflow could
+create one too.
 
 `release-notes/README.md` "Release lines" defines a breaking change from the code, says how to tell a patch from
 `next.md`, and has the steps for a patch on the previous line. That patch is a merge to the line's branch,
