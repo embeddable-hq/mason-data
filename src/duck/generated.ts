@@ -739,12 +739,15 @@ export class GeneratedTables {
    */
   async dropped(source: string): Promise<void> {
     const key = relationKey(source);
-    for (const e of this.entries.values()) {
-      if (relationKey(e.name) !== key || e.deployed === null) continue;
+    // every one let go before anything awaits: a rebuild of the catalog reads `served()` meanwhile
+    const gone = [...this.entries.values()].filter((e) => relationKey(e.name) === key && e.deployed !== null);
+    for (const e of gone) {
       // a run's marks are its own until its swap: what it took, and a change after its snapshot (`runBases`), stay
       // marked for the next run
       e.deployed = null;
       if (!e.running) { e.dirtySince = null; e.taken = null; e.error = null; }
+    }
+    for (const e of gone) {
       await this.store.writer.run(`DELETE FROM ${GENERATED_LEDGER} WHERE name = ${literal(e.name)}`);
       this.host.log(`${e.name}: the synced table that held its name is dropped, so the generated table is built again`);
     }

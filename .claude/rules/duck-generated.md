@@ -158,7 +158,8 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   table by the engine's rule** (src/lib/relation-key.ts `relationKey`: DuckDB ignores ASCII case, so `Counts.yml` is
   `public.counts`'s name, and two files so spelled are refused at the read; a view of the database is no table there, so
   it holds its own spelling alone). **The sync's drop of a removed synced table
-  lets go of a generated table of its name on that writer's turn** (`dropped`), and `open` lets go of a ledger row with
+  lets go of a generated table of its name on that writer's turn, before the drop** (`dropped`; a synced table removed
+  but not dropped yet still holds the name, `addedAs`, so no rebuild of the catalog serves the generated one over it), and `open` lets go of a ledger row with
   no table under it: either one kept was in `served()` with nothing there, and every rebuild of the catalog and every
   pass failed until a base changed (issue 996). A run in flight then marks a base commit by its own bases (`runBases`),
   since nothing deployed reads it. Removed, the generated table is built again at its next review.

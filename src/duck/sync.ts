@@ -1315,6 +1315,9 @@ export class Sync {
     const key = relationKey(name);
     const t = this.tables.get(name) ?? [...this.tables.values()].find((x) => relationKey(x.source) === key);
     if (t !== undefined) return this.states.get(t.source)?.phase === "copied" && this.currentSchema.tables.some((x) => x.schema === t.schema && x.name === t.table) ? "copied" : "adding";
+    // removed (`mason remove`) but not dropped yet: its table holds the name until the pass drops it, which lets a
+    // generated table of the name go first (`generated.dropped`)
+    if ([...this.states.keys()].some((s) => relationKey(s) === key)) return "adding";
     return this.views.some((v) => `${v.schema ?? "public"}.${v.name}` === name) ? "view" : null;
   }
 
@@ -3246,13 +3249,13 @@ export class Sync {
       this.queued.delete(source);
       await this.onWriter(async () => {
         const w = this.store.writer;
+        // a generated table of the same name (issue 996) held no table while the synced one held it, and none will be
+        // there: what it says it serves is let go on this turn, BEFORE the drop, so no rebuild of the catalog (on its own
+        // connection, `setTables` starts one) reads it with nothing under it; it is built again at its next review
+        await this.generated.dropped(source);
         await w.run(`DROP TABLE IF EXISTS ${ident(schema)}.${ident(table)}`);
         // and what a copy of it that a crash cut short left beside it (`copy`)
         await w.run(`DROP TABLE IF EXISTS ${ident(schema)}.${ident(`${table}${SIDE_SUFFIX}`)}`);
-        // a generated table of the same name (issue 996) held no table while the synced one held it, and none is there
-        // now: what it says it serves is let go on this turn, before any rebuild of the catalog reads it, and it is
-        // built again at its next review
-        await this.generated.dropped(source);
         for (const ledger of ["copy_state", "poll_state", "catch_up", "copy_progress", "copy_chunks", "compactions", "compact_held"]) await w.run(`DELETE FROM ${MASON_SCHEMA}.${ledger} WHERE source = ${literal(source)}`);
         // its stored JSON paths and its view
         await this.kept.removed(source);
