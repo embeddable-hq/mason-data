@@ -582,7 +582,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   try { collations = await resolver.prepare((sql) => catalogRows(catalog, sql), collationOids(analysis.tree)); }
   catch (e) { throw e instanceof Unrewritable ? unrewritableError(e, text) : e; }
   const analysed = performance.now();
-  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, scales });
+  const rewritten = (l = lookup, sc = scales): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, typeNames, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts, boundPaths, scales: sc });
   try {
     ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them
@@ -592,7 +592,11 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
     }
     // a statement that lists a copy's columns without naming them reads none from a stored column (hideKept): made
     // again with every read its call, the reads still recorded
-    if (lookup !== null && exposes(tree)) ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams } = rewritten({ at: (relid, attno) => lookup.at(relid, attno), ready: () => null }));
+    // (and none from a plain numeric's hidden scale column, which that view does not list: its values print with the
+    // column's one scale there, `mixed-scale-numeric`)
+    if ((lookup !== null || scales !== null) && exposes(tree)) {
+      ({ tree, withTies, exact, clock, jsonReads, unboundedLateral, pathParams } = rewritten(lookup === null ? null : { at: (relid, attno) => lookup.at(relid, attno), ready: () => null }, null));
+    }
   }
   catch (e) {
     if (e instanceof Unrewritable) throw unrewritableError(e, text);

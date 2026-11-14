@@ -4152,6 +4152,8 @@ class Rewriter {
     const owner = t.column?.owner ?? null;
     if (hidden === null || owner === null) return null;
     const ref: AstNode = { ColumnRef: { fields: [S(owner), S(hidden)] } };
+    // (read per group as its column is, where the engine groups an expression of it by its key: `readPerGroup`)
+    if (this.readPerGroup.has(bodyOf(n))) this.readPerGroup.add(bodyOf(ref));
     // (an integer the engine holds exactly: `duckExact`)
     this.synthetic.set(bodyOf(ref), { node: "SCALE", type: INT2, typmod: -1, args: [], oid: null, format: null, collation: 0, inputCollation: 0,
       levelsUp: 0, datum: null, qualifier: null, renamed: null });
