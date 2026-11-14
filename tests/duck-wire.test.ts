@@ -8060,7 +8060,8 @@ test("libc top N: a top N and an ungrouped min / max are bounded natively, the d
       ["SELECT min(d), max(d) FROM colls WHERE id < 0", [[null, null]]],
     ];
     for (const [sql, rows] of bounded) {
-      assert.match(await sent(sql), /regexp_extract\(.*\(SELECT (CASE WHEN count\(\*\) >= \d+ THEN )?(min|max)\(__mason_bounds\.__mason_bound\)/, sql);
+      // (the second round: the bounds of each DISTINCT value, once, in a WITH query of the statement's own)
+      assert.match(await sent(sql), /WITH __mason_values1 AS MATERIALIZED \(SELECT __mason_v, regexp_replace\(.*regexp_extract\(.*SELECT DISTINCT .* AS __mason_v FROM colls/, sql);
       assert.deepEqual((await answer(c, sql)).rows, rows, sql);
     }
     // a parameter in the WHERE the threshold reads too: bound once, read in both, and again after the session moved
@@ -8103,6 +8104,34 @@ test("libc top N: a top N and an ungrouped min / max are bounded natively, the d
       }
       assert.deepEqual(sorted([100, 101], false), [100, 101], "the order itself: 'abc' before 'ab' U+0002 'cd'");
     } finally { await store.writer.run("DELETE FROM public.colls WHERE id >= 100"); }
+    // THE KEY ONCE A DISTINCT VALUE (the second round): 2,000 rows of five values and NULL, each value hundreds of times.
+    // A top N and a min / max hand the libc key each value at most once, never each row the bounds cannot rule out
+    // (before: every row of the least value, 400 of them, and of each value whose bounds tie)
+    const pool = ["beta", "Beta", "alpha", "é", "e"];
+    const many = new Map<number, string | null>(Array.from({ length: 2000 }, (_, i) => [200 + i, i % 10 === 9 ? null : pool[i % 5]!] as const));
+    await store.writer.run(`INSERT INTO public.colls SELECT id, x, x, x FROM (VALUES ${[...many].map(([id, x]) => `(${id}, ${x === null ? "NULL" : `'${x}'`})`).join(", ")}) AS s(id, x)`);
+    try {
+      const sorted = (desc: boolean, nullsFirst = desc): number[] => [...many.keys()].sort((i, j) => {
+        const [x, y] = [many.get(i)!, many.get(j)!];
+        if (x === null || y === null) return x === y ? i - j : (x === null) === nullsFirst ? -1 : 1;
+        const [k, l] = [libcKey(letters, x), libcKey(letters, y)];
+        const by = k !== l ? (k < l ? -1 : 1) : Buffer.compare(Buffer.from(x), Buffer.from(y));
+        return by !== 0 ? (desc ? -by : by) : i - j;
+      });
+      const nonNull = (desc: boolean): string => many.get(sorted(desc, false)[0]!)!;
+      for (const [sql, rows] of [
+        ["SELECT id FROM colls WHERE id >= 200 ORDER BY d, id LIMIT 5", ids(sorted(false).slice(0, 5))],
+        ["SELECT id FROM colls WHERE id >= 200 ORDER BY d DESC, id LIMIT 5", ids(sorted(true).slice(0, 5))],
+        ["SELECT id FROM colls WHERE id >= 200 ORDER BY d DESC NULLS LAST, id LIMIT 5 OFFSET 1190", ids(sorted(true, false).slice(1190, 1195))],
+        ["SELECT id, upper(d) FROM colls WHERE id >= 200 ORDER BY d, id LIMIT 3", sorted(false).slice(0, 3).map((id) => [String(id), many.get(id)!.toUpperCase()])],
+        ["SELECT min(d), max(d) FROM colls WHERE id >= 200", [[nonNull(false), nonNull(true)]]],
+      ] as Array<[string, unknown[][]]>) {
+        const before = (await store.functionRows()).get("__mason_libc_key") ?? 0;
+        assert.deepEqual((await answer(c, sql)).rows, rows, sql);
+        const keyed = ((await store.functionRows()).get("__mason_libc_key") ?? 0) - before;
+        assert.ok(keyed <= 2 * pool.length, `${sql}: the libc key was handed ${keyed} rows of five values: per row, not once a value`);
+      }
+    } finally { await store.writer.run("DELETE FROM public.colls WHERE id >= 200"); }
   } finally { await c.end(); await a.close(); }
 });
 

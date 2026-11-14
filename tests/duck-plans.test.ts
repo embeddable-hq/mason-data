@@ -868,13 +868,15 @@ test("issues 464, 465: a numeric bin of a numeric(12,2) column is grouped by the
   }
 });
 
-// issue 666: a text's top N and min / max under a libc order hand the libc key the rows its native bounds cannot rule
-// out, never every row. The notes are 50,000 values over the 750,000 rows that hold one: a page and a min or max are a
-// value's few rows each. The statuses are six values: a sixth of the rows tie on the least (all of them candidates, as
-// a tie is broken by the key), never the million
-test("a text's top N and min / max under a libc order hand the libc key their candidates, never every row", async (t) => {
-  for (const [sql, most] of [["SELECT id, notes FROM orders ORDER BY notes LIMIT 50", 1_000], ["SELECT id FROM orders ORDER BY notes DESC NULLS LAST, id LIMIT 2000", 40_000],
-    ["SELECT min(notes), max(notes) FROM orders", 1_000], ["SELECT min(status), max(status) FROM orders", ORDERS / 3], ["SELECT o.id, o.status, o.amount FROM orders o ORDER BY o.status LIMIT 50", ORDERS / 5]] as const) {
+// issue 666: a text's top N and min / max under a libc order hand the libc key each DISTINCT value its native bounds
+// cannot rule out, once, never a row. The notes are 50,000 values over the 750,000 rows that hold one: a page keys its
+// n values (`LIMIT 2000`: the 2,000 smallest values' keys), a min or a max one value each. The statuses are six values
+// over the million rows: before the second round a sixth of the rows tied on the least and each was keyed (166,000 for
+// a page, 333,000 for a min and a max); now each status at most once
+test("a text's top N and min / max under a libc order hand the libc key each distinct candidate value once, never every row", async (t) => {
+  for (const [sql, most] of [["SELECT id, notes FROM orders ORDER BY notes LIMIT 50", 50], ["SELECT id FROM orders ORDER BY notes DESC NULLS LAST, id LIMIT 2000", 2_000],
+    ["SELECT min(notes), max(notes) FROM orders", 2], ["SELECT min(status), max(status) FROM orders", 2 * 6], ["SELECT o.id, o.status, o.amount FROM orders o ORDER BY o.status LIMIT 50", 6],
+    ["SELECT * FROM orders ORDER BY status DESC LIMIT 50", 6]] as const) {
     const keyed = (await rowsOf(sql, "libc")).get("__mason_libc_key") ?? 0;
     t.diagnostic(`${sql}: __mason_libc_key handed ${keyed} rows of ${ORDERS}`);
     assert.ok(keyed > 0, `${sql}: the libc key was handed no row — the function counter or the statement changed`);

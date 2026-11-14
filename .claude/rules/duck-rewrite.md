@@ -464,7 +464,13 @@ paths:
   `libc bound:`, the source's order in the read test's `bound`. The threshold's subquery clones the SELECT's one FROM
   item and WHERE, so it holds only where they read the same rows twice: nothing volatile, no window or set-returning
   list, no aggregate but the min / max's own, no LIMIT, DISTINCT ON or sample inside but a role's barrier; a cloned
-  walled read is counted as a wall. Anything else is sent as written (a join, GROUP BY, DISTINCT, WITH TIES, a set
+  walled read is counted as a wall. **The bounds and the key are computed once a DISTINCT value, never a row** (`Values`,
+  the second round of issue 666: three native passes of the bounds over 4.5 M rows took 6 s, and a status 98 % one value
+  left those rows candidates, 19 s of keys): the SELECT's distinct values of x are a MATERIALIZED WITH query of its own,
+  a min / max is `any_value` of the least key of the values its bounds keep, and a top N is LEFT JOINed to the keys of
+  the values its bounds keep (the n-th distinct value's hi), sorted by the joined key, its `*` written as its item's.
+  A SELECT inside a subquery expression or a LATERAL item, which may read the query around it, keeps the row-by-row
+  threshold (`correlatable`). Anything else is sent as written (a join, GROUP BY, DISTINCT, WITH TIES, a set
   operation, a window, FILTER). Detector: `libc top N:` (tests/duck-wire.test.ts) and the `text under libc:` plan
   entries and rows test (tests/duck-plans.test.ts), the oracle's `text top N:` and `text min/max:`.
 - **A tie under ICU is two strings, ordered by their bytes** (U+FE0F is ignorable there): every order under ICU ends in
