@@ -664,7 +664,8 @@ the view's failure: a host that hangs holds up neither the run's reads nor anoth
       "text": "Upgrades run in the maintenance window.",
       "links": [
         { "label": "Upgrade available", "url": "/console/upgrade", "primary": true },
-        { "label": "Connect from outside", "url": "https://docs.example.com/connect" }
+        { "label": "Connect from outside", "url": "https://docs.example.com/connect" },
+        { "label": "Delete this server", "url": "/console/delete", "danger": true }
       ]
     }
   ]
@@ -676,7 +677,10 @@ the view's failure: a host that hangs holds up neither the run's reads nor anoth
   `links` (at most 20). `refresh`: seconds, optional.
 - A fact is `{ label, value }` (one line each; a value at most 2,000 characters), with `copy: true` for a Copy button
   beside it and `status` `ok`, `warn` or `bad` for the page's own marker beside its word (never colour alone).
-- A link is `{ label, url }`, with `primary: true` for the page's primary action. Its URL follows `MASON_UI_BACK_URL`'s
+- A link is `{ label, url }`, with `primary: true` for the page's primary action, or `danger: true` for a destructive
+  one. A danger link looks like the Remove button on the Tables page: red words, and a red tint on hover. It still only
+  goes to the host's page, which does the change behind its own sign-in. A link may be primary or danger, not both, and
+  each is `true` or `false`. Its URL follows `MASON_UI_BACK_URL`'s
   rules (a path from the host's root, or an `https://` / `http://` URL with no user or password), read in the page by
   `hostLinkUrl`, which `tests/web-page.test.ts` holds to accept nothing the server's `linkUrl` refuses, and to write
   what both take the same: the data arrives when the view is shown, never at the start, so the page reads it itself.
