@@ -2096,8 +2096,8 @@ class Session {
     // a numeric[] read whole holds a NULL alone exactly (PlannedSql.wholeNumericArrays): any other value is refused
     for (const n of plan.sql.wholeNumericArrays ?? []) {
       if (params[n - 1] !== null && params[n - 1] !== undefined) {
-        throw gapRefusal("numeric-array-parameter", `a numeric[] parameter ($${n}) is supported by Mason only compared by ANY or ALL with a number`,
-          "compare it: x = ANY($1), x <> ALL($1), or bind each value: x IN ($1, $2)");
+        throw gapRefusal("numeric-array-parameter", `a numeric[] parameter ($${n}) is supported by Mason only compared by ANY or ALL with a numeric or an integer column, cast to nothing but numeric[] (no precision, such as numeric(30,1)[], and no other type)`,
+          "compare it as it is bound: x = ANY($1), x <> ALL($1), x = ANY($1::numeric[]), or bind each value: x IN ($1, $2)");
       }
     }
     const own = params.length === 0 ? params
