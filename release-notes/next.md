@@ -60,3 +60,6 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   replication. Mason drops them as they arrive. They are never stored, logged or served. A publication you name with
   `publication:` is still never changed. If it lists a table's columns, Mason now says once that the list blocks
   `DROP COLUMN`, and how to name the table whole. This was listed as known in 0.20.0.
+- **Mason no longer crashes when it stops while a client is still connecting.** A connection that was still opening
+  as Mason stopped could crash the process with a segmentation fault or an abort. The supervisor then saw a signal and
+  no reason. Now the stop waits for each connection still opening, and then closes the synced data.
