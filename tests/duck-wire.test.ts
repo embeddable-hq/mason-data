@@ -34,6 +34,7 @@ import type { ApiLogRow } from "../src/api/request-log.ts";
 import type { BackendMessage } from "../src/api/postgres/protocol.ts";
 import * as wire from "./postgres-api/wire.ts";
 import { withinDuckDBRounding } from "./memory-text.ts";
+import { numericWithinRule } from "./integration/oracle/compare.ts";
 import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
 import { libcKey } from "../src/duck/libc-order.ts";
 import { catalogDdl } from "../src/api/postgres/catalog.ts";
@@ -966,6 +967,30 @@ test("the rerun at ae2c5169: min / max of a numeric quotient keeps the quotient'
     await alike("SELECT min(a / b), max(a / b) FROM ratios WHERE false");
     // DuckDB evaluated an aggregate's argument on every row before its FILTER: a division by a row's zero raised
     await alike("SELECT min(a / (b - 0.1)) FILTER (WHERE b <> 0.1), sum(n / (n - 3)) FILTER (WHERE n <> 3), string_agg(team, ',' ORDER BY 10 / (n - 3), id) FILTER (WHERE n <> 3) FROM ratios");
+  } finally { await c.end(); }
+});
+
+// ISSUE 997: the oracle judges a numeric by the owner's rule (tests/integration/oracle/compare.ts numericWithinRule),
+// so a difference within it is none to the oracle, and no oracle statement meets these three listed differences. They
+// are held here instead: each still differs from Postgres's text, and each value is within the rule.
+// (Mason gap mixed-scale-numeric, Mason gap min-max-scale-tie, Mason gap nested-exact-numeric)
+test("the listed numeric differences within the owner's rule: another text of Postgres's value, never another value", async () => {
+  const c = await client();
+  try {
+    for (const [gap, sql] of [
+      ["mixed-scale-numeric", "SELECT v FROM (SELECT 1 AS v FROM ratios WHERE id = 1 UNION SELECT 1.5 FROM ratios WHERE id = 1) AS s ORDER BY 1"],
+      ["min-max-scale-tie", "SELECT min(v.a / v.b), max(v.a / v.b) FROM ratios r, (VALUES (0::numeric, 7::numeric), (0, 1000000)) AS v(a, b) WHERE r.id = 1"],
+      ["nested-exact-numeric", "SELECT var_samp(x) FROM (SELECT 7 / 3.0 AS x FROM ratios WHERE id = 1 UNION ALL SELECT 1 / 3.0 FROM ratios WHERE id = 1) AS s"],
+    ] as const) {
+      const [got, want] = [await answer(c, sql), await postgres(sql)];
+      assert.deepEqual(got.fields, want.fields, sql);
+      assert.notDeepEqual(got.rows, want.rows, `${gap}: no longer differs, so the entry and this case go (${sql})`);
+      assert.equal(got.rows.length, want.rows.length, sql);
+      want.rows.forEach((w, i) => w.forEach((v, j) => {
+        const g = got.rows[i]![j];
+        assert.ok(v === g || (typeof v === "string" && typeof g === "string" && numericWithinRule(v, g)), `${gap}: ${JSON.stringify(g)} where Postgres has ${JSON.stringify(v)}, outside the rule (${sql})`);
+      }));
+    }
   } finally { await c.end(); }
 });
 
