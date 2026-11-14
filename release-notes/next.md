@@ -36,6 +36,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **On a server that runs the project read-only, the web page links to how to deploy a change.** `mason status --json`
   words `sourcesReadOnly` as plain sentences now, so a script that matched its old text must match the new one. A new
   field, `sourcesReadOnlyKind`, says which reason it is: `deployed`, `unwritable` or `unknown`.
+- **The web page's Sync events list shows how long each sync took in a column of its own.** The Took column holds
+  it, such as `570 ms` or `7 min 57 s`, and you can sort the list by it. The message no longer ends with it there.
+  `mason logs --events --json` gives it as a new field, `tookMs`. A first sync's event now ends with its time as a
+  poll's does, such as `synced: 1,000 row(s) · 2.0 s`, where it said `in 2.00 s`. Events recorded before the upgrade
+  keep their time in the message.
 
 ## What was wrong and is now right
 

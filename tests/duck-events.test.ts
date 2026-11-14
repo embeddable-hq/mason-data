@@ -35,7 +35,7 @@ test("the web page's own error (ui_error, src/cli/ui-errors.ts) is a failure of 
     clock += 1000;
     log.record({ kind: "full_sync", table: "public.orders", message: "synced" });
     await log.flush();
-    assert.deepEqual(await log.recent({ limit: 10, failed: true }), [{ at: "2026-11-13T09:00:00.000Z", kind: "ui_error", failed: true, table: null, message, code: "unknown", origin: null }]);
+    assert.deepEqual(await log.recent({ limit: 10, failed: true }), [{ at: "2026-11-13T09:00:00.000Z", kind: "ui_error", failed: true, table: null, message, code: "unknown", origin: null, tookMs: null }]);
     await log.close();
   } finally { await own.close(); fs.rmSync(dir2, { recursive: true, force: true }); }
 });
@@ -47,15 +47,15 @@ test("every event is read back as the sync recorded it, newest last; --failed is
   const log = await SyncEvents.open(store, (l) => said.push(l), { days: 7, now: () => clock });
   log.record({ kind: "full_sync_failed", table: "public.orders", message: "the source closed the connection; tried again after 09:05 UTC" });
   clock += 1000;
-  log.record({ kind: "full_sync", table: "public.orders", message: "synced: 1,000 row(s) in 2.00 s" });
+  log.record({ kind: "full_sync", table: "public.orders", message: "synced: 1,000 row(s) · 2.0 s", tookMs: 2000 });
   clock += 1000;
   log.record({ kind: "stream_failed", table: null, message: "replication: the slot is in use" });
   assert.deepEqual(await log.recent({ limit: 10 }), [], "nothing is read before its batch commits");
   await log.flush();
   assert.deepEqual(await log.recent({ limit: 10 }), [
-    { at: "2026-10-28T09:00:00.000Z", kind: "full_sync_failed", failed: true, table: "public.orders", message: "the source closed the connection; tried again after 09:05 UTC", code: "unknown", origin: null },
-    { at: "2026-10-28T09:00:01.000Z", kind: "full_sync", failed: false, table: "public.orders", message: "synced: 1,000 row(s) in 2.00 s", code: null, origin: null },
-    { at: "2026-10-28T09:00:02.000Z", kind: "stream_failed", failed: true, table: null, message: "replication: the slot is in use", code: "unknown", origin: null },
+    { at: "2026-10-28T09:00:00.000Z", kind: "full_sync_failed", failed: true, table: "public.orders", message: "the source closed the connection; tried again after 09:05 UTC", code: "unknown", origin: null, tookMs: null },
+    { at: "2026-10-28T09:00:01.000Z", kind: "full_sync", failed: false, table: "public.orders", message: "synced: 1,000 row(s) · 2.0 s", code: null, origin: null, tookMs: 2000 },
+    { at: "2026-10-28T09:00:02.000Z", kind: "stream_failed", failed: true, table: null, message: "replication: the slot is in use", code: "unknown", origin: null, tookMs: null },
   ]);
   assert.deepEqual((await log.recent({ limit: 10, failed: true })).map((e) => e.kind), ["full_sync_failed", "stream_failed"], "the failures alone");
   assert.deepEqual((await log.recent({ limit: 1 })).map((e) => e.kind), ["stream_failed"], "the newest n, newest last");
@@ -202,13 +202,13 @@ test("events older than the retention are deleted, said with their count; a writ
 test("the run's restarts are merged with the events, newest last, asked as the events are: since, the newest n, within the retention", async () => {
   const { withRestarts } = await events();
   const now = Date.parse("2026-10-28T12:00:00.000Z");
-  const e = (at: string, kind: "full_sync" | "poll_failed") => ({ at, kind, failed: kind !== "full_sync", table: "public.a", message: kind, code: kind === "full_sync" ? null : "unknown", origin: null });
+  const e = (at: string, kind: "full_sync" | "poll_failed") => ({ at, kind, failed: kind !== "full_sync", table: "public.a", message: kind, code: kind === "full_sync" ? null : "unknown", origin: null, tookMs: null });
   const list = [e("2026-10-28T10:00:00.000Z", "full_sync"), e("2026-10-28T11:00:00.000Z", "poll_failed")];
   const restarts = [{ at: "2026-10-01T00:00:00.000Z", reason: "too old", upSeconds: 1 }, { at: "2026-10-28T10:30:00.000Z", reason: "it crashed (SIGSEGV)", upSeconds: 42 }];
   const merged = withRestarts(list, restarts, { limit: 10, days: 7, now });
   assert.deepEqual(merged.map((x) => `${x.at.slice(11, 16)} ${x.kind}`), ["10:00 full_sync", "10:30 restart", "11:00 poll_failed"]);
   assert.deepEqual(merged[1], { at: "2026-10-28T10:30:00.000Z", kind: "restart", failed: true, table: null,
-    message: "the run stopped (it crashed (SIGSEGV)) after 42 s up, and its supervisor started it again", code: "unknown", origin: null });
+    message: "the run stopped (it crashed (SIGSEGV)) after 42 s up, and its supervisor started it again", code: "unknown", origin: null, tookMs: null });
   assert.deepEqual(withRestarts(list, restarts, { limit: 2, days: 7, now }).map((x) => x.kind), ["restart", "poll_failed"], "the newest 2 of both");
   assert.deepEqual(withRestarts([], restarts, { limit: 10, days: 7, now, since: "2026-10-28T11:00:00.000Z" }), [], "since applies to a restart too");
 });
@@ -282,9 +282,9 @@ test("a store made before codes and origins were kept opens, keeps its events, a
       log.record({ kind: "poll_failed", table: "public.t", message: "the poll failed again", cause: Object.assign(new Error("x"), { code: "57014" }) });
       await log.flush();
       assert.deepEqual(await log.recent({ limit: 10 }), [
-        { at: "2026-11-14T08:00:00.000Z", kind: "poll_failed", failed: true, table: "public.t", message: "the poll failed: connection refused", code: null, origin: null },
-        { at: "2026-11-14T08:00:01.000Z", kind: "full_sync", failed: false, table: "public.t", message: "synced", code: null, origin: null },
-        { at: "2026-11-14T09:00:00.000Z", kind: "poll_failed", failed: true, table: "public.t", message: "the poll failed again", code: "57014", origin: null },
+        { at: "2026-11-14T08:00:00.000Z", kind: "poll_failed", failed: true, table: "public.t", message: "the poll failed: connection refused", code: null, origin: null, tookMs: null },
+        { at: "2026-11-14T08:00:01.000Z", kind: "full_sync", failed: false, table: "public.t", message: "synced", code: null, origin: null, tookMs: null },
+        { at: "2026-11-14T09:00:00.000Z", kind: "poll_failed", failed: true, table: "public.t", message: "the poll failed again", code: "57014", origin: null, tookMs: null },
       ], "the old rows kept, numbered on from them");
       await log.close();
     } finally { await store2.close(); }
