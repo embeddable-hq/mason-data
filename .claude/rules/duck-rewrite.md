@@ -287,8 +287,9 @@ paths:
   integer cast to numeric, div() of two integers, a whole constant (`decimalConst`, its own digits where more) and a
   whole part of extract. Beside another DECIMAL in an IN, a UNION, a CASE, a COALESCE, GREATEST or an ARRAY, DuckDB
   brings both to DECIMAL(p + s, s) while that fits 38 digits, else DECIMAL(38, 38 − p): a DECIMAL(38, 0) kept none of
-  the other's decimals, so 0.01 matched 0. A width of 19 keeps at least 19 (the owner's rule: Postgres to 18 decimal
-  places; the listed difference `whole-beside-many-decimals`), and keeps a product of two in 128 bits (a DECIMAL(10, 0)
+  the other's decimals, so 0.01 matched 0. A width of 19 keeps at least 19 and every whole-number digit (the owner's
+  rule: a numeric's whole-number digits exact, and the value to 15 significant digits; the listed difference
+  `whole-beside-many-decimals`), and keeps a product of two in 128 bits (a DECIMAL(10, 0)
   multiplies in 64 bits and fails past 18 digits). A sum of one is a HUGEINT's (DuckDB sums a DECIMAL(p, 0) into a
   DECIMAL(38, 0)), which beside a DECIMAL(w, s) is a DECIMAL(38, s). A product of two is still DuckDB's DECIMAL(38, 0).
   The owner chose rounding over a HUGEINT's 22003. `tests/duck-wire.test.ts` "issue 929", the oracle's `whole:`

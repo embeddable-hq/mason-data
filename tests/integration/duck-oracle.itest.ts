@@ -271,7 +271,7 @@ const KNOWN: Decided[] = [
   // column has one (`1.0`). Only where values of two scales meet in ONE column the exact programs cannot reach (a UNION
   // without ALL; a UNION ALL's arms and a window's default are each their own since issue 358, src/duck/rewrite.ts exactArms)
   { sql: /^SELECT v FROM \(SELECT 1 AS v FROM public\.one UNION SELECT 1\.5 FROM public\.one\)/, kind: "text", gap: "mixed-scale-numeric", why: "a DuckDB DECIMAL column has one scale; Postgres's numeric keeps each value's" },
-  // A WHOLE NUMBER BESIDE A NUMERIC OF MANY DECIMALS (issue 929, the owner's rule of 18 decimal places): the two fit
+  // A WHOLE NUMBER BESIDE A NUMERIC OF MANY DECIMALS (issue 929, the owner's rule: whole-number digits exact, 15 significant digits): the two fit
   // DuckDB's 38 digits only with the decimal side's last decimals rounded away, at least 19 kept, so 1e-30 matches 0
   { sql: /^SELECT o\.id, 0\.000000000000000000000000000001::numeric\(38,30\) IN \(SELECT o\.id::numeric - 1\)/, kind: "value", gap: "whole-beside-many-decimals", why: "a whole number beside a numeric(38,30) keeps 19 of its decimals" },
   // THE TYPE MATRIX'S DECIDED ONES (oracle/type-matrix.ts): what a double's bits, -0 and an overflow do

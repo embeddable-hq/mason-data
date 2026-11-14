@@ -1,18 +1,18 @@
 {
-  "statements": 7421,
+  "statements": 7461,
   "mason": {
-    "exact": 6904,
-    "decided": 48,
+    "exact": 6943,
+    "decided": 49,
     "refused": 469,
     "differs": 0
   },
   "duckdb": {
-    "exact": 1872,
-    "name": 1299,
-    "refused": 1631,
-    "value": 1037,
-    "rows": 616,
-    "text": 316,
+    "exact": 1874,
+    "name": 1303,
+    "refused": 1661,
+    "value": 1038,
+    "rows": 617,
+    "text": 318,
     "other": 650
   },
   "gaps": {
@@ -91,11 +91,12 @@
         "numeric-stddev": { "planted": 0, "natural": 2 },
         "show-all": { "planted": 1, "natural": 0 },
         "unicode-16-case": { "planted": 1, "natural": 0 },
+        "whole-beside-many-decimals": { "planted": 1, "natural": 0 },
         "window-partition-order": { "planted": 0, "natural": 2 }
       }
     },
     "everyAsk": {
-      "asked": 103578,
+      "asked": 104299,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
@@ -126,10 +127,10 @@
         "like-any-array": { "planted": 3, "natural": 0 },
         "multidim-array": { "planted": 0, "natural": 17 },
         "numeric-double-integer": { "planted": 3, "natural": 0 },
-        "numeric-exact-sum": { "planted": 3, "natural": 42 },
+        "numeric-exact-sum": { "planted": 3, "natural": 43 },
         "numeric-math": { "planted": 3, "natural": 0 },
         "numeric-ordered-set": { "planted": 3, "natural": 0 },
-        "numeric-quotient-equality": { "planted": 9, "natural": 119 },
+        "numeric-quotient-equality": { "planted": 9, "natural": 121 },
         "numeric-special": { "planted": 0, "natural": 6 },
         "quote-ident": { "planted": 0, "natural": 9 },
         "regexp-flags": { "planted": 3, "natural": 0 },
@@ -171,6 +172,7 @@
         "numeric-stddev": { "planted": 0, "natural": 6 },
         "show-all": { "planted": 3, "natural": 0 },
         "unicode-16-case": { "planted": 3, "natural": 0 },
+        "whole-beside-many-decimals": { "planted": 3, "natural": 0 },
         "window-partition-order": { "planted": 0, "natural": 6 }
       }
     }

@@ -7658,7 +7658,8 @@ function decimalConst(text: string): AstNode {
  * IN, a CASE, a COALESCE, GREATEST or an ARRAY, DuckDB brings both to one type: DECIMAL(p + s, s) while that fits 38
  * digits, else DECIMAL(38, 38 - p) — the decimal side's last decimals rounded away. A DECIMAL(38, 0) kept none of them,
  * so 0.01 matched 0 and rows were wrong. Its width is 19 (a bigint's digits) whatever its type, or a constant's own digits
- * where more: beside a DECIMAL it keeps at least 19 decimals, within the owner's rule (Postgres to 18 decimal places;
+ * where more: beside a DECIMAL it keeps at least 19 decimals and never changes a whole-number digit, within the
+ * owner's rule (a numeric's whole-number digits exact, and the value to 15 significant digits;
  * the listed difference `whole-beside-many-decimals`), and DuckDB keeps a product of it in 128 bits, as DECIMAL(38, 0)
  * did (a DECIMAL(10, 0) of an int4 multiplies in 64 bits and fails past 18 digits). A set operation that compares rows
  * of numerics of several scales prints them at one scale, the widest: the listed difference `mixed-scale-numeric`.

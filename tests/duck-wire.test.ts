@@ -4360,20 +4360,24 @@ test("issue 929: a set operation that compares rows of numerics of different sca
   } finally { await c.end(); }
 });
 // ISSUE 929, THE OWNER'S RULE: a whole number beside a numeric of so many decimals that the two do not fit 38 digits
-// (numeric(38,30), numeric(38,20)) keeps at least 19 of its decimals, the rest rounded away: Postgres's answer to 18
-// decimal places (the listed difference whole-beside-many-decimals). Never an overflow (22003) where Postgres answers
-test("issue 929: a whole number beside a numeric of many decimals answers Postgres's rows to 18 decimal places", async () => {
+// (numeric(38,30), numeric(38,20)) keeps every whole-number digit and at least 19 of the decimals, the rest rounded
+// away: Postgres's answer under the owner's rule (its whole-number digits exact, the value to 15 significant digits;
+// the listed difference whole-beside-many-decimals). Never an overflow (22003) where Postgres answers
+test("issue 929: a whole number beside a numeric of many decimals answers Postgres's rows, its whole digits exact and to 15 significant digits", async () => {
   const c = await client();
   try {
-    /** a numeric's text rounded half away from zero to 18 decimal places, its trailing zeros dropped */
-    const to18 = (v: unknown): unknown => {
-      if (typeof v !== "string" || !/^-?\d+\.\d+$/.test(v)) return v;
-      const [whole, frac] = v.replace("-", "").split(".") as [string, string];
-      let digits = BigInt(whole + frac.slice(0, 18).padEnd(18, "0"));
-      if ((frac[18] ?? "0") >= "5") digits += 1n;
-      const t = digits.toString().padStart(19, "0");
-      const text = `${t.slice(0, -18)}.${t.slice(-18)}`.replace(/0+$/, "").replace(/\.$/, "");
-      return v.startsWith("-") && text !== "0" ? `-${text}` : text;
+    /** a numeric's text as the rule reads it: its whole-number digits, and its value to 15 significant digits */
+    const ruled = (v: unknown): unknown => {
+      if (typeof v !== "string" || !/^-?\d+(\.\d+)?$/.test(v)) return v;
+      const negative = v.startsWith("-");
+      const [whole, frac = ""] = v.replace("-", "").split(".") as [string, string?];
+      const digits = `${whole}${frac}`.replace(/^0+/, "");
+      if (digits === "") return "0";
+      const lead = digits.slice(0, 15).padEnd(15, "0"), next = digits[15] ?? "0";
+      const sig = (BigInt(lead) + (next >= "5" ? 1n : 0n)).toString();
+      // the place of the first significant digit, so 0.000123 and 123 differ
+      const place = whole.replace(/^0+/, "").length > 0 ? whole.replace(/^0+/, "").length : -(frac.length - frac.replace(/^0+/, "").length);
+      return `${negative ? "-" : ""}${whole} ${sig} ${place}`;
     };
     for (const sql of [
       "SELECT id, CASE WHEN id % 2 = 0 THEN i::numeric ELSE n30 END AS v FROM wides ORDER BY 2, 1",
@@ -4387,8 +4391,8 @@ test("issue 929: a whole number beside a numeric of many decimals answers Postgr
       "SELECT id, ARRAY[n20, b::numeric] AS arr FROM wides ORDER BY id"]) {
       const got = await answer(c, sql), want = await postgres(sql);
       assert.deepEqual(got.fields, want.fields, sql);
-      const at18 = (rows: unknown[][]): unknown => rows.map((r) => r.map((v) => Array.isArray(v) ? v.map(to18).join(",") : typeof v === "string" && v.startsWith("{") ? v.slice(1, -1).split(",").map((e) => e === "NULL" ? null : to18(e)).join(",") : to18(v)));
-      assert.deepEqual(at18(got.rows), at18(want.rows), sql);
+      const atRule = (rows: unknown[][]): unknown => rows.map((r) => r.map((v) => Array.isArray(v) ? v.map(ruled).join(",") : typeof v === "string" && v.startsWith("{") ? v.slice(1, -1).split(",").map((e) => e === "NULL" ? null : ruled(e)).join(",") : ruled(v)));
+      assert.deepEqual(atRule(got.rows), atRule(want.rows), sql);
     }
     // (the listed difference: values that differ only past the decimals kept compare equal, so 1e-30 matches 0)
     const near = "SELECT 0.000000000000000000000000000001::numeric(38,30) IN (SELECT div(i, 1) FROM wides WHERE i IS NOT NULL) AS m";
