@@ -200,6 +200,8 @@ test("a plain numeric turned into text is Postgres's text: JSON, a row's text, c
     "SELECT DISTINCT u::text FROM r ORDER BY 1",
     "SELECT concat(u), count(*) FROM r WHERE id <> 2 GROUP BY u ORDER BY 2, 1",
     "SELECT r.id, concat(r.u, q.u) FROM r JOIN q ON q.p_id = r.id ORDER BY 1, 2",
+    // a grouped expression's text: its group's own, never a row's scale outside the GROUP BY (42803)
+    "SELECT id, (u * 1)::text FROM r GROUP BY id, u * 1 ORDER BY id",
   ]), []);
 });
 

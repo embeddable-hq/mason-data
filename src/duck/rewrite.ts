@@ -712,6 +712,7 @@ class Rewriter {
     if (isNode(v) && this.nativeKeys.has(bodyOf(v))) this.nativeKeys.add(bodyOf(out as AstNode));
     // (a GROUP BY key's column, whose plain numeric's text reads a group's scale: `plainNumericText`)
     if (isNode(v) && this.groupedRefs.has(bodyOf(v))) this.groupedRefs.add(bodyOf(out as AstNode));
+    if (isNode(v) && this.perGroup.has(bodyOf(v))) this.perGroup.add(bodyOf(out as AstNode));
     const rowScale = isNode(v) ? this.rowScales.get(bodyOf(v)) : undefined;
     if (rowScale !== undefined) this.rowScales.set(bodyOf(out as AstNode), rowScale);
     // a node the rewrite typed itself stays typed (a picked operand of min / max, exactOf)
@@ -1122,6 +1123,17 @@ class Rewriter {
         for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) casts(x);
       };
       casts([b.targetList, b.sortClause, b.havingClause]);
+      // every node of the list, ORDER BY and HAVING outside an aggregate's or a window's argument: read per group, so a
+      // plain numeric's text there reads a row's scale only of a column that is itself a key (`plainNumericText`)
+      const listed = (v: unknown): void => {
+        if (Array.isArray(v)) { for (const x of v) listed(x); return; }
+        if (v === null || typeof v !== "object") return;
+        if (isNode(v) && (kindOf(v) === "SelectStmt" || kindOf(v) === "SubLink")) return;
+        if (isNode(v) && kindOf(v) === "FuncCall" && (bodyOf(v).over !== undefined || this.typed(v)?.node === "AGGREF" || bodyOf(v).agg_within_group === true)) return;
+        if (isNode(v)) this.perGroup.add(bodyOf(v));
+        for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) listed(x);
+      };
+      listed([b.targetList, b.sortClause, b.havingClause]);
     }
     this.rowValues(b);
     for (const w of (b.windowClause ?? []) as AstNode[]) if (isNode(w)) this.keyedPartition(bodyOf(w));
@@ -3900,6 +3912,8 @@ class Rewriter {
   /** each column of a grouped SELECT's list, ORDER BY or HAVING that is itself a GROUP BY key, outside an aggregate: a
    *  plain numeric's text there reads one row's scale of the group (`plainNumericText`) */
   private readonly groupedRefs = new WeakSet<Body>();
+  /** each node of a grouped SELECT's list, ORDER BY or HAVING outside an aggregate (`plainNumericText`) */
+  private readonly perGroup = new WeakSet<Body>();
   /** a column a whole row of a table reads (`rowFields`), as its table's hidden scale column names it (`scaleOf`) */
   private readonly rowScales = new WeakMap<Body, string>();
   /** each column of an expression the engine groups by its key alone (`cells`, issue 665) where a SELECT's list, HAVING
@@ -4202,6 +4216,8 @@ class Rewriter {
    */
   private plainNumericText(n: AstNode): AstNode | null {
     if (kindOf(n) === "ColumnRef") {
+      // (read per group and no key itself, the engine's text as before: its row's scale is no group's)
+      if (this.perGroup.has(bodyOf(n)) && !this.groupedRefs.has(bodyOf(n))) return null;
       const scale = this.scaleOf(n, this.groupedRefs.has(bodyOf(n)));
       return scale === null ? null : this.cutText(n, scale);
     }
@@ -4221,7 +4237,7 @@ class Rewriter {
     }
     // arithmetic, a CASE or a coalesce over one: the scale Postgres's rules give the row (`rowScale`), never inside a
     // grouped SELECT's list (its columns are read per group there)
-    if (["A_Expr", "CaseExpr", "CoalesceExpr"].includes(kindOf(n)) && this.displayScale(n) === null && !this.readsGroupedRef(n)) {
+    if (["A_Expr", "CaseExpr", "CoalesceExpr"].includes(kindOf(n)) && this.displayScale(n) === null && !this.perGroup.has(bodyOf(n)) && !this.readsGroupedRef(n)) {
       const scale = this.rowScale(n);
       return scale === null ? null : this.cutText(n, scale);
     }
