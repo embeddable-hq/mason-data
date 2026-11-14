@@ -179,6 +179,58 @@ export function toCharTime(text: string, fmt: string): string | null {
   return out;
 }
 
+/** the patterns DuckDB's strftime writes as `toCharTime` does over a year of four digits, AD: each number zero-padded to
+ *  its width, each name English (issue 464). A pattern of the time of day is a time's only (a date's would be the
+ *  midnight of a zone, which a day of daylight saving may not have) */
+const STRFTIME: ReadonlyMap<string, { spec: string; time: boolean; fm: boolean }> = new Map([
+  ["YYYY", { spec: "%Y", time: false, fm: false }], ["MM", { spec: "%m", time: false, fm: false }], ["DD", { spec: "%d", time: false, fm: false }],
+  ["DDD", { spec: "%j", time: false, fm: false }], ["IYYY", { spec: "%G", time: false, fm: false }], ["IW", { spec: "%V", time: false, fm: false }],
+  // a three-letter name is never padded, FM or not; Month and Day are padded to nine unless FM, which strftime is not
+  ["Mon", { spec: "%b", time: false, fm: true }], ["Dy", { spec: "%a", time: false, fm: true }],
+  ["Month", { spec: "%B", time: false, fm: true }], ["Day", { spec: "%A", time: false, fm: true }],
+  ["HH24", { spec: "%H", time: true, fm: false }], ["MI", { spec: "%M", time: true, fm: false }], ["SS", { spec: "%S", time: true, fm: false }],
+  ["MS", { spec: "%g", time: true, fm: false }], ["US", { spec: "%f", time: true, fm: false }],
+]);
+
+/**
+ * The strftime format that writes `toCharTime(text, fmt)` for every value whose year is 1 to 9999 AD, or null where no
+ * format is proven to (issue 464: the function a row was ×8–18 of Postgres for a grouped month). The template is read
+ * as `toCharTime` reads it — its prefixes, its quoted literals, its patterns longest first — and is answered only when
+ * every pattern met is in `STRFTIME` as written there: no other case (`MON`, `mon`), no FM on a number or a padded
+ * name, no TM, FX, TH or SP. `date` is whether the value is a date (no pattern of the time of day then).
+ */
+export function strftimeTemplate(fmt: string, date: boolean): string | null {
+  let out = "", i = 0;
+  const literal = (c: string): string => c === "%" ? "%%" : c;
+  while (i < fmt.length) {
+    let fm = false;
+    for (;;) {
+      if (fmt.startsWith("FM", i) || fmt.startsWith("fm", i)) { fm = true; i += 2; continue; }
+      if (fmt.startsWith("TM", i) || fmt.startsWith("tm", i) || fmt.startsWith("FX", i) || fmt.startsWith("fx", i)) return null;
+      break;
+    }
+    if (i >= fmt.length) break;
+    const c = fmt[i]!;
+    if (c === "\\") return null;
+    if (c === '"') {
+      if (fm) return null;
+      i++;
+      while (i < fmt.length && fmt[i] !== '"') { if (fmt[i] === "\\") return null; out += literal(fmt[i]!); i++; }
+      i++;
+      continue;
+    }
+    const pattern = TIME_PATTERNS.find((p) => fmt.startsWith(p, i));
+    if (pattern === undefined) { if (fm) return null; out += literal(c); i++; continue; }
+    i += pattern.length;
+    if (/^(TH|th|SP|sp)/.test(fmt.slice(i))) return null;
+    const native = STRFTIME.get(pattern);
+    if (native === undefined || (native.time && date)) return null;
+    if (fm !== native.fm && !(native.fm && (pattern === "Mon" || pattern === "Dy"))) return null;
+    out += native.spec;
+  }
+  return out;
+}
+
 // ------------------------------------------------------------------------------------------------- numbers
 
 /** a decimal text rounded half away from zero to `scale` decimals: its sign, integer digits and fraction digits */

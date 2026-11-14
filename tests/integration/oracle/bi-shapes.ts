@@ -286,6 +286,12 @@ export const BI_SHAPES: Array<{ name: string; sql: string }> = [
   { name: "issue 665: the week of year by output name, DESC, LIMIT", sql: "SELECT ceil(cast(extract(doy from o.created_at) as integer) / 7.0) AS w, count(*) FROM orders o GROUP BY w ORDER BY w DESC LIMIT 5" },
   { name: "issue 665: the week of year, no ORDER BY", sql: "SELECT ceil(cast(extract(doy from o.created_at) as integer) / 7.0) AS w, count(*) FROM orders o GROUP BY 1" },
   { name: "issue 665: the week of year with a NULL group", sql: "SELECT ceil(cast(extract(doy from c.created_at) as integer) / 7.0) AS w, count(*) FROM orders o LEFT JOIN customers c ON c.id = o.customer_id AND c.id % 4 = 0 GROUP BY 1 ORDER BY 1 NULLS FIRST" },
+  // issue 464: a month grouped by its to_char text (DuckDB's strftime, never the function a row), the US week of year
+  // grouped by the engine's integer, and a DISTINCT ON returning every group's latest row, its ties broken by the key
+  { name: "issue 464: to_char of a month grouped", sql: "SELECT to_char(o.created_at, 'YYYY-MM') AS m, count(*) FROM orders o GROUP BY 1 ORDER BY 1" },
+  { name: "issue 464: to_char of a day and a month's name grouped, ordered by the count", sql: "SELECT to_char(o.created_at, 'YYYY-MM-DD') AS d, to_char(o.created_at, 'FMMonth YYYY') AS m, count(*) AS n FROM orders o GROUP BY 1, 2 ORDER BY 3 DESC, 1 LIMIT 10" },
+  { name: "issue 464: DISTINCT ON each customer's latest order, every row, ties by the key", sql: "SELECT DISTINCT ON (o.customer_id) o.customer_id, o.id, o.created_at, o.amount FROM orders o ORDER BY o.customer_id NULLS FIRST, o.created_at DESC, o.id" },
+  { name: "issue 464: DISTINCT ON a tied key, every row", sql: "SELECT DISTINCT ON (o.status, o.tenant_id) o.status, o.tenant_id, o.created_at, o.id FROM orders o ORDER BY o.status NULLS FIRST, o.tenant_id, o.amount, o.id DESC" },
   { name: "issue 665: Metabase's numeric auto-bin", sql: "SELECT (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) AS amount, count(*) AS count FROM orders o GROUP BY (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) ORDER BY (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) ASC" },
   { name: "issue 665: the auto-bin of a bare column named as its output", sql: "SELECT floor(amount / 12.5) * 12.5 AS amount, count(*) FROM orders GROUP BY floor(amount / 12.5) * 12.5 ORDER BY floor(amount / 12.5) * 12.5 DESC" },
   { name: "issue 665: a bin of an unconstrained numeric, beside an aggregate", sql: "SELECT floor(o.amount_raw / 25.0) * 25.0 AS b, count(*), sum(o.amount) FROM orders o GROUP BY 1 ORDER BY 1" },
