@@ -1,11 +1,16 @@
 /**
- * THE SYNC EVENTS LIST AT EVERY WIDTH, IN A REAL BROWSER (issue 1038; src/web/pages/syncs.js, src/web/app.css): the page
- * over the server's own state (`runState`) and its own files (PAGE_ROUTES), with events whose messages, tables and
- * times are as long as a run writes them, and a sync running now.
+ * THE SYNC EVENTS LIST AT EVERY WIDTH, IN A REAL BROWSER (issues 1038, 1048; src/web/pages/syncs.js, src/web/app.css):
+ * the page over the server's own state (`runState`) and its own files (PAGE_ROUTES), with events whose messages, tables
+ * and times are as long as a run writes them, and a sync running now. At every width from 320 to 1600 px, light and dark:
  *
- * - EVERY CELL KEEPS ITS TEXT INSIDE IT, at every width from 320 to 1600 px, light and dark: no line of a cell runs past
- *   its cell's edges, and the list never runs past its card (Took spilled out of its cell at the middle widths, between
- *   the phone layout and a desktop's width).
+ * - EVERY CELL KEEPS ITS TEXT INSIDE IT: no line of a cell runs past its cell's edges (Took spilled out of its cell at
+ *   the middle widths, between the phone layout and a desktop's width: issue 1038).
+ * - THE LIST SCROLLS INSIDE ITS CARD, AS THE TABLES AND USERS LISTS DO (issue 1048): above the phone layout the list has
+ *   a least width. Where its card is narrower, the card scrolls sideways, with the list at that width and no wider.
+ *   Where the card is as wide, nothing scrolls. On a phone each event is a block, and nothing scrolls. The page never
+ *   scrolls sideways.
+ * - A NAME OF USUAL LENGTH IS WHOLE (issue 1048: #1043 cut every name to "publi…" between 650 and 1080 px). Only the
+ *   long name is cut, with its whole as its title.
  *
  * A browser is needed: this runs where Playwright and its Chromium are installed (`require("playwright")`), and says it
  * did not run elsewhere (tests/web-tables-layout.test.ts is the same harness).
@@ -110,14 +115,35 @@ async function open(width: number, colorScheme: "light" | "dark"): Promise<Page>
 /** 320 to 1600 px, every 10 px. */
 const WIDTHS = Array.from({ length: 129 }, (_, i) => 320 + 10 * i);
 
-/** Each cell of the list whose text runs past its edges (by each line's box, so a wrapped cell is measured line by
- *  line), and how far the list runs past its card; "" for none. */
+/** What is wrong with the list at this width, a line each, none when nothing is: a cell whose text runs past its edges
+ *  (by each line's box, so a wrapped cell is measured line by line), a card that scrolls where it should not or does
+ *  not where it should, a page that scrolls sideways, and a name of usual length cut. */
 const spills = (p: Page) => p.evaluate<string[]>(`(() => {
   const out = [];
   const table = document.querySelector("#syncs-events table.events");
   const card = table.closest(".panel");
-  if (card.scrollWidth > card.clientWidth + 1) out.push("the list runs " + (card.scrollWidth - card.clientWidth) + " px past its card");
+  const phone = window.innerWidth <= 640;
+  const least = parseFloat(getComputedStyle(table).minWidth) || 0;
+  const scrolls = card.scrollWidth > card.clientWidth + 1;
+  const wide = table.getBoundingClientRect().width;
+  if (phone) {
+    if (scrolls) out.push("on a phone the list runs " + (card.scrollWidth - card.clientWidth) + " px past its card");
+  } else if (least < 400) {
+    out.push("the list has no least width (min-width " + getComputedStyle(table).minWidth + ")");
+  } else if (card.clientWidth + 1 < least) {
+    if (!scrolls) out.push("the card (" + card.clientWidth + " px) is narrower than the list's least width (" + least + " px) and does not scroll");
+    if (!["auto", "scroll"].includes(getComputedStyle(card).overflowX)) out.push("the card cannot scroll (overflow-x " + getComputedStyle(card).overflowX + ")");
+    if (Math.abs(wide - least) > 1) out.push("the list is " + wide.toFixed(1) + " px wide in a card that scrolls, not its least width " + least + " px");
+  } else if (scrolls) out.push("the list runs " + (card.scrollWidth - card.clientWidth) + " px past a card as wide as it needs");
   if (document.documentElement.scrollWidth > window.innerWidth) out.push("the page scrolls sideways");
+  // a name is cut where its box holds less than its text, across or down (a clamped line): above the phone layout only
+  // the long one may be, and a cut name's whole is its title (on a phone, a name beside the widest kinds is cut at
+  // 320 px, as it was before issue 1048, which kept the phone layout)
+  for (const name of table.querySelectorAll("code.name")) {
+    const cut = name.scrollWidth > name.clientWidth + 0.5 || name.scrollHeight > name.clientHeight + 0.5;
+    if (cut && !phone && name.textContent.length < 30) out.push("the name " + JSON.stringify(name.textContent) + " is cut (" + name.clientWidth + " of " + name.scrollWidth + " px)");
+    if (cut && name.title !== name.textContent) out.push("the cut name " + JSON.stringify(name.textContent) + " has no title with its whole");
+  }
   const heads = [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
   for (const tr of table.querySelectorAll("tr")) {
     [...tr.children].forEach((cell, i) => {
@@ -146,7 +172,7 @@ const spills = (p: Page) => p.evaluate<string[]>(`(() => {
 })()`);
 
 for (const scheme of ["light", "dark"] as const) {
-  test(`every cell of the Sync events list keeps its text inside it at every width from 320 to 1600 px (${scheme})`, { skip: noBrowser }, async () => {
+  test(`the Sync events list keeps each cell's text inside it, scrolls inside its card below its least width, and keeps usual names whole, from 320 to 1600 px (${scheme})`, { skip: noBrowser }, async () => {
     const p = await open(WIDTHS[0]!, scheme);
     const found: string[] = [];
     for (const width of WIDTHS) {
@@ -155,6 +181,6 @@ for (const scheme of ["light", "dark"] as const) {
       for (const s of await spills(p)) found.push(`${width} px: ${s}`);
     }
     await p.close();
-    assert.deepEqual(found, [], `cells whose text runs past them:\n${found.join("\n")}`);
+    assert.deepEqual(found, [], `what is wrong with the list:\n${found.join("\n")}`);
   });
 }

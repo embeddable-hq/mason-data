@@ -907,16 +907,18 @@ details.hours > summary { margin-bottom: var(--space-2); }
   #page-syncs table.events tbody tr > :nth-child(5) { grid-area: took; padding-bottom: 0; }
   #page-syncs table.events code.name { max-width: 100%; }
 }
-/* Sync events between the phone and a wide card (issue 1038): a table's name kept its whole 36ch, so the list was
-   wider than its card and Took ran past the card's edge. Where the card is narrower than the list needs, a long name
-   gives way: it is cut with an ellipsis at whatever width its column gets (its whole is the title). A wider card is
-   as before. */
-#page-syncs .panel:has(> table.events) { container: sync-events / inline-size; }
+/* Sync events above the phone (issue 1048): FIXED COLUMNS, as the Tables and Users lists have, and a least width at
+   which every column reads whole: When, Kind and Took as wide as their longest words, the table's name a usual
+   schema.table whole, and the message the column that gives. Below that width the list scrolls inside its card, never
+   the page. A name longer than its column is cut with "…", its whole the title, as the other lists cut one. */
 @media (min-width: 641px) {
-  @container sync-events (max-width: 799px) {
-    #page-syncs table.events code.name { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; line-clamp: 1;
-      white-space: normal; overflow-wrap: anywhere; }
-  }
+  #page-syncs table.events { table-layout: fixed; min-width: 880px; }
+  #page-syncs table.events thead th:nth-child(1) { width: 104px; }
+  #page-syncs table.events thead th:nth-child(2) { width: 216px; }
+  #page-syncs table.events thead th:nth-child(3) { width: 27%; }
+  #page-syncs table.events thead th:nth-child(5) { width: 104px; }
+  #page-syncs table.events tbody tr > :is(:nth-child(1), :nth-child(3), :nth-child(5)) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #page-syncs table.events code.name { max-width: 100%; }
 }
 .terminal { background: var(--code-bg); color: var(--code-fg); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-3) var(--space-4);
   max-height: 480px; overflow: auto; font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.6; }
