@@ -88,8 +88,8 @@ test("ci-wait: reads the PR and its head's required checks through REST alone, a
   assert.match(w.out, /\npull \(exit 0\): mergeable true, mergeable_state clean\ncheck-runs \(exit 0\):\nchecks\tcompleted\tsuccess\t\S+\nimage\t/, "both reads printed for the record");
   w = runWait(cmd, { pull: [pull(true, "blocked")], runs: [runs(...REQUIRED_NAMES.map((n): Run => [n, "completed", n === "image" ? "skipped" : "success"]))] });
   assert.equal(w.status, 0, `skipped is a pass, blocked no verdict: ${w.out}`);
-  // red: any required check failed, cancelled or timed out is failed, at once, whatever the others are doing
-  for (const red of ["failure", "cancelled", "timed_out"]) {
+  // red: any required check failed, timed out, needing action or failed to start is failed, at once, whatever the others are doing
+  for (const red of ["failure", "timed_out", "action_required", "startup_failure"]) {
     w = runWait(cmd, { pull: [pull(true, "blocked")], runs: [runs(["checks", "in_progress", null], ["image", "completed", "success"], ["integration (oracle)", "completed", red])] });
     assert.match(w.first, /^PR 900: failed at /, `${red}: ${w.out}`);
     assert.equal(w.status, 3, `${red}: failed exits 3`);
@@ -109,8 +109,9 @@ test("ci-wait: reads the PR and its head's required checks through REST alone, a
   // the head's latest run of a name decides: a re-run's newer success over its first, cancelled, attempt is green
   w = runWait(cmd, { pull: [pull(true, "clean")], runs: [all("success", ["checks", "completed", "cancelled", 1])] });
   assert.equal(w.status, 0, `the older cancelled run of checks is superseded: ${w.out}`);
-  w = runWait(cmd, { pull: [pull(true, "clean")], runs: [all("success", ["checks", "completed", "cancelled", 999])] });
-  assert.equal(w.status, 3, `the newer cancelled run of checks is the verdict: ${w.out}`);
+  w = runWait(cmd, { pull: [pull(true, "clean")], runs: [all("success", ["checks", "completed", "cancelled", 999]), GREEN] });
+  assert.equal(w.status, 0, `a newer cancelled run of checks is a wait, never failed: ${w.out}`);
+  assert.equal(w.checks.length, 2, "it waited a pass");
   // a conclusion not named (stale) is couldn't tell, a wait
   w = runWait(cmd, { pull: [pull(true, "clean")], runs: [all("stale"), GREEN] });
   assert.equal(w.checks.length, 2, `stale waited: ${w.out}`);
@@ -254,6 +255,32 @@ test("ci-wait --queued: a PR in the merge queue waits for its merge at the head 
   w = runWait(`900 2 --queued ${SHA}`, { pull: [queuedPull()], refs: [NONE_LIVE], groups: [groupRuns()], runs: [GREEN] }, false);
   assert.equal(w.status, 8, w.out + w.err);
   assert.match(w.out, /^PR 900: pending at 0123[^\n]*\npull \(exit 0\): mergeable true, mergeable_state clean, open, queued at 0123[^\n]*\nmerge group: none yet for gh-readonly-queue\/main\/pr-900 [^\n]*\nnext: 8 again is a wait/);
+});
+
+test("ci-wait: two runs at one commit, the older cancelled by CI's concurrency group, is never failed: the newer run decides", () => {
+  const cmd = `node ${ROOT}/scripts/ci-wait.ts 900 540`;
+  // the older run's gates ran on its cancel (always()) and read `cancelled`, newer ids than the newer run's jobs that
+  // have not started yet; the newer run's gates report later, with higher ids still, and decide
+  const cancelled = REQUIRED_NAMES.map((n, i): Run => [n, "completed", "cancelled", 500 + i]);
+  const newerRunning = REQUIRED_NAMES.map((n, i): Run => [n, "in_progress", null, 100 + i]);
+  const newerGreen = REQUIRED_NAMES.map((n, i): Run => [n, "completed", "success", 900 + i]);
+  const newerRed = REQUIRED_NAMES.map((n, i): Run => [n, "completed", n === "checks" ? "failure" : "success", 900 + i]);
+  let w = runWait(cmd, { pull: [pull(true, "blocked")], runs: [runs(...cancelled), runs(...cancelled, ...newerRunning), runs(...cancelled, ...newerGreen)] });
+  assert.match(w.first, /^PR 900: green at /, `the cancelled run was a wait, twice, then the newer run's green decided: ${w.out}`);
+  assert.equal(w.status, 0);
+  assert.equal(w.checks.length, 3);
+  // and the newer run's real failure is still failed
+  w = runWait(cmd, { pull: [pull(true, "blocked")], runs: [runs(...cancelled, ...newerRed)] });
+  assert.equal(w.status, 3, w.out);
+  // a run that stays cancelled (cancelled by hand, nothing newer) is pending at the deadline, never failed
+  w = runWait("900 2", { pull: [pull(true, "clean")], runs: [runs(...cancelled)] }, false);
+  assert.equal(w.status, 8, w.out + w.err);
+  assert.match(w.first, /^PR 900: pending at /);
+  assert.match(w.out, /\nchecks\tcompleted\tcancelled\t/, "the cancelled run is printed for the record");
+  // the same for a merge group's live checks
+  w = runWait(`900 2 --queued ${SHA}`, { pull: [queuedPull()], refs: [liveRefs([OURS, GROUP_SHA])], groups: [groupRuns()], runs: [runs(...cancelled)] }, false);
+  assert.equal(w.status, 8, w.out + w.err);
+  assert.match(w.first, /^PR 900: pending at /, w.out);
 });
 
 test("ci-wait: its required checks are the four ci.yml names", () => {

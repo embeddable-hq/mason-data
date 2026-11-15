@@ -12,10 +12,12 @@
  * a merge conflict, so its checks never come (issue 255); null (computed lazily after a push), or a read that fails or
  * does not parse, is "couldn't tell", a wait; only true lets the checks decide. `mergeable_state` (blocked, behind,
  * draft, ...) is printed, never a verdict. Then `gh api repos/{owner}/{repo}/commits/<head.sha>/check-runs`: the HEAD's
- * runs only (a superseded run's cancelled jobs are on an older commit), the latest of each name. Of the REQUIRED checks:
- * any one failed, cancelled, timed out, needing action or failed to start is failed; all of them success, skipped or
- * neutral (what a required check passes on) is green; one not there yet, not completed, or a conclusion not named here
- * is a wait. A read that fails or does not parse is "couldn't tell", a wait. Both answers are parsed, never grepped.
+ * runs only, the latest (highest id) of each name. Of the REQUIRED checks: any one failed, timed out, needing action or
+ * failed to start is failed; all of them success, skipped or neutral (what a required check passes on) is green; one
+ * not there yet, not completed, cancelled, or a conclusion not named here is a wait. CANCELLED IS NEVER FAILED: two runs
+ * can start at the same commit, and CI's concurrency group cancels the older, whose jobs then read `cancelled` beside
+ * the newer run's (twice read as failed for a green PR). The newer run's job of the same name has a higher id and
+ * decides once it reports; until then the answer is "couldn't tell". A read that fails or does not parse is "couldn't tell", a wait. Both answers are parsed, never grepped.
  *
  * --queued <sha>: THE MERGE QUEUE. A PR put in the queue (`PUT /pulls/<n>/merge-async` with `merge_action=merge_queue`
  * and `sha`, CLAUDE.md "Who merges what") is merged by GitHub once the required checks pass on its merge group, a commit
@@ -58,7 +60,8 @@ type Verdict = keyof typeof VERDICT;
 /** A call killed past its bound reads as the shell's 128 + SIGKILL; gh not found, as the shell's 127. */
 const KILLED = 137, NOT_RUN = 127;
 const PASSED = new Set(["success", "skipped", "neutral"]);
-const RED = new Set(["failure", "cancelled", "timed_out", "action_required", "startup_failure"]);
+// never `cancelled`: a run CI's concurrency group cancelled for a newer one at the same commit is no verdict (above)
+const RED = new Set(["failure", "timed_out", "action_required", "startup_failure"]);
 
 const now = (): number => performance.now();
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
