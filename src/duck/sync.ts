@@ -67,7 +67,7 @@ import { DuckDBEnumType, DuckDBListType, type DuckDBType } from "@duckdb/node-ap
 import type { DuckConnection } from "./executor.ts";
 import type { PgApiType, PgCollation, PgColumn, PgJoin, PgSchema, PgTable, PgView } from "../api/postgres/schema.ts";
 import { wireColumn } from "./types.ts";
-import { fileFactsSql, nextPollDelayMs, rowsHeldSql, SNAPSHOT_SQL, snapshotXmin, xmin8Sql, xminBeforeHolds, xminBeforeSql } from "../cdc/poll.ts";
+import { fileFactsSql, holderSql, nextPollDelayMs, rowsHeldSql, SNAPSHOT_SQL, snapshotXmin, xmin8Sql, xminBeforeHolds, xminBeforeSql } from "../cdc/poll.ts";
 import { pgIdent } from "../cdc/pg-wire.ts";
 import { regclassName, shapeColumns, shapeSql, shapeTuples } from "../cdc/shape.ts";
 import { keyHeldProblem, keyHeldSql } from "../cdc/key-held.ts";
@@ -311,6 +311,10 @@ export interface CopyState {
   synced?: Synced;
   /** copied, and caught up by one poll before the polls or the stream keep it current again (`behind`): why */
   behind?: string;
+  /** ITS WHOLE SYNC WAITS for an open transaction on the database to end (`RewriteWait`, issue 1066): why, in the words
+   *  of its last check (the transaction named only while it was open then), and when that check was, ISO 8601 UTC. A
+   *  wait, never a failure: a first sync still waiting, a table synced before serving its synced data meanwhile */
+  syncWaits?: { why: string; checkedAt: string };
   /** a copy or a catch-up of it is running now (one rebuild at a time): a table copied before serves that copy meanwhile */
   rebuilding?: "copy" | "catch-up" | "compact";
   /** when the rebuild running now (`rebuilding`) began, ISO 8601 UTC: a copy's whole read, then its catch-up from its
@@ -483,14 +487,15 @@ async function deleteKeys(w: DuckConnection, t: Pick<AddedTable, "key">, target:
 /** a poll's staged rows (`where`: a range of them, or all) written by key into the table: their keys deleted, then the
  *  rows inserted. The stage's columns are named by position (`c0`, `c1`, …), the table's order. A plain numeric of
  *  `scaled` (one its table holds a hidden scale column for) is staged as the source's text, and its scale computed from it.
+ *  `kept` null writes no stored JSON path: a whole sync's side table, whose paths `fillSide` fills before its swap.
  *  Answers how many of the staged rows' keys the table held before the write (the rows its delete removed): the rows
  *  UPDATED, the rest of the stage ADDED (`PolledTable`) — DuckDB's own count of the delete, so no statement more */
-export async function writeStaged(w: DuckConnection, t: Pick<AddedTable, "key" | "columns" | "source">, target: string, stage: string, where: string, kept: KeptJsonPaths,
+export async function writeStaged(w: DuckConnection, t: Pick<AddedTable, "key" | "columns" | "source">, target: string, stage: string, where: string, kept: KeptJsonPaths | null,
   scaled: readonly string[] = []): Promise<number> {
   const named = t.key.map((k) => `c${t.columns.findIndex((c) => c.name === k)}`);
   const held = await deleteKeys(w, t, target, `(SELECT ${named.map(ident).join(", ")} FROM ${stage}${where})`, named);
   // the table's columns named, its plain numerics' scales and its stored JSON paths computed from the staged text and JSON
-  const stored = kept.stored(t.source, (c) => ident(`c${t.columns.findIndex((x) => x.name === c)}`));
+  const stored = kept?.stored(t.source, (c) => ident(`c${t.columns.findIndex((x) => x.name === c)}`)) ?? { names: [], values: [] };
   const scales = scaled.map((c) => scaleSql(ident(`c${t.columns.findIndex((x) => x.name === c)}`)));
   await w.run(`INSERT INTO ${target} (${[...t.columns.map((c) => ident(c.name)), ...scaled.map((c) => ident(scaleColumn(c, t.columns.map((x) => x.name)))), ...stored.names.map(ident)].join(", ")}) ` +
     `SELECT ${[...t.columns.map((_, i) => ident(`c${i}`)), ...scales, ...stored.values].join(", ")} FROM ${stage}${where}`);
@@ -928,6 +933,21 @@ export function copyParallelOf(env: NodeJS.ProcessEnv): number {
 /** a copy begun before that cannot be continued as it stands (`copy`): started over once, said with this reason */
 class StartOver extends Error {}
 
+/** A WHOLE SYNC'S SIDE TABLE, CAUGHT UP BEFORE ITS SWAP (`catchUpSide`, `poll`'s `into`): its name in the table's
+ *  schema, the whole read's first snapshot it is caught up from, and — once the poll committed — the snapshot and the
+ *  time it was read at, which the swap carries as the table's watermark and `polled_at` */
+interface IntoSide { table: string; watermark: string; done?: { snapshot: string; at: string } }
+
+/** A WHOLE SYNC'S SIDE TABLE, CAUGHT UP (`catchUpSide`): the snapshot and the time its catch-up read at (the swap's
+ *  watermark and `polled_at`), the table's rows then and the rows that poll changed, how long it took, whether the
+ *  stream held the table's changes from before it (`holding`, replication), and the table's catch-up mark as it began:
+ *  a mark set since (a slot made meanwhile) is not this catch-up's to end (`swapCaughtUp`) */
+interface SideCaught { snapshot: string; at: string; rows: number; changed: number; ms: number; holding: boolean; mark: { why: string } | undefined }
+
+/** WHY A WHOLE SYNC'S TABLE IS MARKED BEHIND at its swap (`_mason.catch_up`): ended in the swap's own writer's turn once
+ *  the changes the stream held are applied, or by its catch-up when a slot was made meanwhile (`catchUpSide`) */
+const WHOLE_READ_WHY = "after its whole read";
+
 /** HOW OFTEN A WHOLE SYNC THAT WAITS FOR AN OPEN TRANSACTION CHECKS AGAIN (`RewriteWait`): a read of the catalog, and
  *  of the table only for a rewrite not checked before (`rowsHeldSql`) */
 export const REWRITE_RECHECK_MS = 30_000;
@@ -936,9 +956,12 @@ export const REWRITE_RECHECK_MS = 30_000;
  * A WHOLE SYNC THAT WOULD READ NONE OF ITS TABLE'S ROWS (issue 1025): the table was rewritten (an ALTER TABLE that
  * rewrites it, a TRUNCATE and a load, pg_repack) after the oldest transaction still open on the database began, so
  * every row now carries an xmin at or past the first snapshot's xmin, which the copy's hold (`xminBeforeSql`) leaves
- * out: swapped in, the table served 0 rows until its catch-up. Never swapped: the sync waits for that transaction to
- * end, checked every `REWRITE_RECHECK_MS`, and the table's synced data serves as it was meanwhile. `writtenBy` is the
- * rewrite's catalog row (`fileFactsSql`), so a check again of the same rewrite reads no row (`said`: said before).
+ * out: its chunks would read none, and its catch-up every row in one read of the source (`catchUpSide`; before issue
+ * 1066, swapped in first, the table served 0 rows until it). So the sync WAITS for that transaction to end, checked
+ * every `REWRITE_RECHECK_MS`, and the table's synced data serves as it was meanwhile: a wait, never a failure, said as
+ * one (`waits`, `CopyState.syncWaits`, a `sync_waits` event), its holder named only while it is open (`holderSql`).
+ * `writtenBy` is the rewrite's catalog row (`fileFactsSql`), so a check again of the same rewrite reads no row (`said`:
+ * said before, in these words).
  */
 class RewriteWait extends Error {
   readonly writtenBy: string;
@@ -1199,6 +1222,9 @@ export class Sync {
   /** THE COPY'S OWN COLUMNS, as `_mason.copy_state.columns` records them: what every write to it is shaped by (`asCopied`),
    *  never the sources file's columns of the moment nor the publication's */
   private readonly copiedColumns = new Map<string, SourceColumnInfo[]>();
+  /** A WHOLE SYNC'S SIDE TABLE'S COLUMNS, from the moment its catch-up begins until its swap (`catchUpSide`): the changes
+   *  the stream holds meanwhile are written into it once swapped in, so they are decoded in its columns (`asCopied`) */
+  private readonly sideColumns = new Map<string, SourceColumnInfo[]>();
   /** the pass a failed rebuild's back-off waits for (`wakeAt`): replication mode runs a pass only when kicked */
   private wake: TimerAt | null = null;
   /** THE NEXT PASS's timer, and nothing else: a kick clears it. Each other schedule has a field of its own (`wake`,
@@ -1316,8 +1342,10 @@ export class Sync {
   /** how often a whole sync that waits for an open transaction checks again (`RewriteWait`) */
   private readonly rewriteRecheckMs: number;
   /** the tables whose whole sync waits for an open transaction older than their rewrite (`RewriteWait`): the rewrite's
-   *  catalog row (`fileFactsSql` `written_by`) and the words said of it, so a check again of it reads no row */
-  private readonly rewriteWaits = new Map<string, { writtenBy: string; message: string; decided: boolean }>();
+   *  catalog row (`fileFactsSql` `written_by`) and the words said of it at the last check, with its holder as it was
+   *  then (`holderSql`), and when that was — so a check again of it reads no row, and `state` says the wait
+   *  (`CopyState.syncWaits`) */
+  private readonly rewriteWaits = new Map<string, { writtenBy: string; message: string; decided: boolean; checkedAt: string }>();
   /** each copy whose chunks are being read, as they are (`CopyLive`): `state` renders it at the moment it is asked */
   private readonly copyLive = new Map<string, CopyLive>();
   /** each table whose last whole read stopped short of disk, its numbers (`DiskShortError`): said on its state until a
@@ -2180,6 +2208,11 @@ export class Sync {
         return { ...s, ...(synced ? { synced } : {}), ...(behind !== undefined ? { behind } : {}),
           ...(now !== null ? { rebuilding: now.kind, rebuildingSince: new Date(now.since).toISOString() } : {}) };
       })
+      // its whole sync waits for an open transaction (`rewriteWaits`), while it still needs one: a wait, never a failure
+      .map((s) => {
+        const wait = this.rewriteWaits.get(s.source), t = this.tables.get(s.source);
+        return wait === undefined || t === undefined || !this.needsCopy(t) ? s : { ...s, syncWaits: { why: wait.message, checkedAt: wait.checkedAt } };
+      })
       // why a sync by hand of it would be refused now, from the one check pollNow refuses with (in memory: the page asks every 2 s)
       .map((s) => { const t = this.tables.get(s.source); return t === undefined ? s : { ...s, syncRefusal: this.syncRefusal(t)?.message ?? null }; })
       // its first sync stopped short of disk, as numbers, until a whole read of it is swapped in (`shortages`)
@@ -2792,10 +2825,12 @@ export class Sync {
    * THE TABLE AS ITS COPY HOLDS IT: its columns the copy's own (`copiedColumns`), the rest the added table's. Every write to a
    * copy — a stream batch, the changes held during a catch-up, an unchanged-TOAST update, a delete by key, a catch-up poll
    * — is shaped by it, never by the added columns of the moment (which change while a copy runs, as on the test server)
-   * nor by what pgoutput's relation carries. A table not copied yet is as it is added.
+   * nor by what pgoutput's relation carries. A table not copied yet is as it is added. While a whole sync's side table is
+   * caught up before its swap (`sideColumns`), its columns: nothing writes the old copy then, and what the stream holds
+   * is written into the side table once it is swapped in.
    */
   private asCopied(t: AddedTable): AddedTable {
-    const columns = this.copiedColumns.get(t.source);
+    const columns = this.sideColumns.get(t.source) ?? this.copiedColumns.get(t.source);
     return columns === undefined ? t : { ...t, columns };
   }
 
@@ -3344,6 +3379,9 @@ export class Sync {
   private notStreamedWhy(source: string): string {
     const why = this.notStreamedReason(source);
     const at = this.retries.get(source)?.at ?? 0;
+    // a sync that waits says when it checks again in its own words: no failure
+    const t = this.tables.get(source);
+    if (t !== undefined && this.rewriteWaits.has(source) && this.needsCopy(t)) return why;
     if (at > Date.now()) return `${why} — after a failure, tried again after ${clock(at)} UTC`;
     const ahead = this.rebuildingNow;
     if (this.queued.has(source) && ahead !== null && ahead.source !== source) return `${why} — queued behind ${ahead.source}'s ${ahead.kind === "copy" ? "whole read" : ahead.kind === "compact" ? "compaction" : "catch-up"} (one rebuild at a time)`;
@@ -3362,6 +3400,9 @@ export class Sync {
     const gap = this.unpublished.get(source);
     if (gap !== undefined) return gapLine(gap);
     const st = this.states.get(source);
+    // its whole sync waits for an open transaction (`RewriteWait`): said in the words of its last check
+    const wait = this.rewriteWaits.get(source);
+    if (wait !== undefined && this.needsCopy(t)) return wait.message;
     if (this.copiedAs.has(source) && this.copiedAs.get(source) !== columnsKey(t.columns)) return "its columns changed: it is read again whole, then caught up by one poll";
     if (st?.phase === "copied" && !this.snapshots.has(source)) return "a numeric value outgrew its synced DECIMAL column: it is read again whole, wider, then caught up by one poll";
     const r = this.retired.get(source);
@@ -4202,7 +4243,8 @@ export class Sync {
         await this.onWriter(() => this.record({ ...st, phase: st.phase === "copied" ? "copied" : "failed", error: m }));
         return null;
       }
-      if (kind === "copy") await this.copy(t);
+      // a numeric wider than the side table's column, found by its catch-up: read again whole, next
+      if (kind === "copy" && await this.copy(t) === "copy again") return "copy again";
       if (this.cutting.has(t.source)) return null;
       // the whole read is over, whatever comes next: what the table is said to be doing from here (`notStreamedReason`,
       // `refuseRebuilding`, `state`'s `rebuilding`)
@@ -4345,12 +4387,95 @@ export class Sync {
     if (heldFailure !== null) await failed("the changes the stream held during its catch-up could not be applied", heldFailure);
     if (joined !== true) return joined || null;
     if (saidJoin) return null;
+    this.log(`caught up ${t.source} by one poll ${mark.why}: ${this.caughtUpTail(t, replication)}`);
+    return null;
+  }
+
+  /** what keeps a table current once it is caught up, in the words its catch-up's line ends with (`catchUp`,
+   *  `catchUpSide`): a join the stream said itself is not said again */
+  private caughtUpTail(t: AddedTable, replication: boolean): string {
     const s = this.syncOf(t);
-    const tail = replication ? (this.behind.has(t.source) ? "it is caught up again first (the slot was made again meanwhile)" : "the stream carries what follows once it runs again")
+    return replication ? (this.behind.has(t.source) ? "it is caught up again first (the slot was made again meanwhile)" : "the stream carries what follows once it runs again")
       : s.mode === "off" ? `its sync is off, so it is served as of now: mason sync ${t.source} syncs it again`
         : `the poll keeps it current (${syncWords(s)})`;
-    this.log(`caught up ${t.source} by one poll ${mark.why}: ${tail}`);
-    return null;
+  }
+
+  /**
+   * A WHOLE SYNC IS SERVED ONLY ONCE IT IS WHOLE (issue 1066): ITS SIDE TABLE IS CAUGHT UP BEFORE IT IS SWAPPED IN. The
+   * chunks keep only the rows written before the first snapshot's xmin (`xminBeforeSql`), and an open transaction holds
+   * that xmin back — a TRUNCATE, then a transaction left open, then the reload committed, and every row was past it: the
+   * table was swapped in with 0 rows and served so until its catch-up. Every rewrite, load or update since the
+   * transaction began was the same class, on a smaller scale. So the ONE poll from the whole read's watermark that
+   * brings a copy current (`catchUp`) runs INTO THE SIDE TABLE first (`poll`'s `into`), on the rebuilds' connection,
+   * and the table is swapped in as of that poll's snapshot, or not at all: until then the table serves its previous
+   * synced data, or is not served. In replication mode the stream holds the table's changes from a writer's turn before
+   * that poll's snapshot, in the side table's columns (`sideColumns`) and a stay of their own, which goes on past the
+   * swap; the swap's own turn applies them (`swapCaughtUp`), as a catch-up's held changes are (src/duck/stream.ts "why
+   * replaying is safe"). Answers what it read, "columns changed" (its columns are read again: `columnsChanged`), or
+   * "copy again" (a numeric wider than the side table's column).
+   */
+  private async catchUpSide(t: AddedTable, watermark: string): Promise<SideCaught | "columns changed" | "copy again"> {
+    const holding = this.replicated(t);
+    let mark: { why: string } | undefined;
+    // J, as a catch-up's: from the writer's turn on, every batch's changes of this table are held (`applyStreamed`), in a
+    // new stay of the side table's columns — what the stream decoded before is older than the poll's snapshot
+    await this.onWriter(async () => {
+      mark = this.behind.get(t.source);
+      this.sideColumns.set(t.source, [...t.columns]);
+      if (holding) { this.held.set(t.source, noChanges()); this.streamed.delete(t.source); }
+      this.refreshStreamed();
+    });
+    const started = Date.now();
+    const into: IntoSide = { table: `${t.table}${SIDE_SUFFIX}`, watermark };
+    const found = await this.poll(this.rebuilder, [t], { into });
+    const f = found[0];
+    if (f === undefined) return this.reshaping.has(t.source) ? "columns changed" : "copy again";
+    if (into.done === undefined) throw new Error(`the catch-up of ${t.source}'s side table recorded no snapshot (Mason bug: report it, with mason logs)`);
+    this.polledNow(t, f.ms);
+    return { ...into.done, rows: f.rows, changed: f.added + f.updated + f.deleted, ms: Date.now() - started, holding, mark };
+  }
+
+  /**
+   * A SIDE TABLE CAUGHT UP, SWAPPED IN, ON THE WRITER'S TURN (`catchUpSide`): with the catch-up's watermark and time. In
+   * replication mode the changes the stream held since it began are applied next, in the same turn (`applySideHeld`),
+   * so the table joins the stream with none missing: answered true. Its catch-up ends unless a mark was set since it
+   * began (a slot made, or being made, meanwhile: `makingSlot`), which its own catch-up ends after (`rebuild`,
+   * `catchUp`). A replicated table is marked behind in the swap's transaction, so a run that dies before the held
+   * changes are applied catches it up by one poll, as one that dies inside a catch-up does.
+   */
+  private async swapCaughtUp(t: AddedTable, side: string, c: SideCaught): Promise<boolean> {
+    const ends = this.behind.get(t.source) === c.mark && !(c.holding && this.makingSlot);
+    await this.swap(t, side, { snapshot: c.snapshot, behind: c.holding || !ends ? WHOLE_READ_WHY : null, caughtUp: { at: c.at, holding: c.holding } });
+    return c.holding && ends;
+  }
+
+  /** THE CHANGES THE STREAM HELD WHILE A SIDE TABLE WAS CAUGHT UP, applied on its swap's writer's turn once its ledger row
+   *  holds its rows (`swapCaughtUp`), its mark ended and the table joined to the stream. Held changes that cannot be
+   *  applied leave it marked, the next ones held for its catch-up, whose poll reads what they changed. Answers whether
+   *  the stream said its join (`refreshStreamed`): a stream not running says none */
+  private async applySideHeld(t: AddedTable): Promise<boolean> {
+    const held = this.held.get(t.source);
+    if (held !== undefined && (held.truncated || held.keys.size > 0)) {
+      try { await this.applyChanges(new Map([[t.source, held]]), "held"); }
+      catch (e) {
+        this.held.set(t.source, noChanges());
+        this.refreshStreamed();
+        this.log(`${t.source}: the changes the stream held while its sync caught up could not be applied, so it is caught up by one poll: ${this.errorText(e)}`);
+        return false;
+      }
+    }
+    await this.store.writer.run(`DELETE FROM ${MASON_SCHEMA}.catch_up WHERE source = ${literal(t.source)}`);
+    this.behind.delete(t.source);
+    this.held.delete(t.source);
+    // ITS JOIN, said with the position it joins at, on the line that says it was caught up (`refreshStreamed`)
+    this.joinWhy.set(t.source, `caught up ${t.source} by one poll ${WHOLE_READ_WHY}`);
+    return this.refreshStreamed().includes(t.source);
+  }
+
+  /** a side table's catch-up that ends without a swap (`catchUpSide`): nothing more held for it, and its old copy's
+   *  columns its own again */
+  private releaseSide(source: string): Promise<void> {
+    return this.onWriter(async () => { this.sideColumns.delete(source); this.held.delete(source); this.refreshStreamed(); });
   }
 
   /**
@@ -4360,18 +4485,22 @@ export class Sync {
    * was copied — the table marked behind (`_mason.catch_up`), its changes held from now (replication), so one poll
    * catches it up (`catchUp`). A copy in a retired layout (`RETIRED_LAYOUT`) is replaced whole here, never converted.
    */
-  private async swap(t: AddedTable, side: string, o: { snapshot: string | null; behind: string | null }): Promise<void> {
+  private async swap(t: AddedTable, side: string, o: { snapshot: string | null; behind: string | null; caughtUp?: { at: string; holding: boolean } }): Promise<void> {
     const w = this.store.writer;
     const target = `${ident(t.schema)}.${ident(t.table)}`;
     // the copy's time in the ledger and in this run, ONE value, and before `copied_at`, recorded after the swap
-    // (`readSynced`: a copy recorded at or after its polled_at was last brought current by that copy)
-    const at = new Date().toISOString();
+    // (`readSynced`: a copy recorded at or after its polled_at was last brought current by that copy). A side table
+    // caught up before its swap (`caughtUp`): the time its catch-up's snapshot was taken at, so it never says more than
+    // the rows hold
+    const at = o.caughtUp?.at ?? new Date().toISOString();
     await w.run("BEGIN TRANSACTION");
     try {
       await w.run(`DROP TABLE IF EXISTS ${target}`);
       await w.run(`ALTER TABLE ${side} RENAME TO ${ident(t.table)}`);
       if (o.snapshot !== null) await w.run(this.pollStateSql(t, o.snapshot, at));
       if (o.behind !== null) await w.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.catch_up VALUES (${literal(t.source)}, ${literal(o.behind)}, now())`);
+      // caught up as of its watermark: a mark from before its catch-up began is over (`catchUpSide`)
+      else if (o.caughtUp !== undefined) await w.run(`DELETE FROM ${MASON_SCHEMA}.catch_up WHERE source = ${literal(t.source)}`);
       // the copy is whole: nothing of it is left to continue
       await w.run(`DELETE FROM ${MASON_SCHEMA}.copy_progress WHERE source = ${literal(t.source)}`);
       await w.run(`DELETE FROM ${MASON_SCHEMA}.copy_chunks WHERE source = ${literal(t.source)}`);
@@ -4397,12 +4526,17 @@ export class Sync {
     }
     if (o.behind !== null) {
       this.behind.set(t.source, { why: o.behind });
-      if (this.replicated(t)) this.held.set(t.source, noChanges());
-    }
+      // the changes held since its catch-up began are kept: they are applied next (`catchUpSide`)
+      if (this.replicated(t) && o.caughtUp?.holding !== true) this.held.set(t.source, noChanges());
+    } else if (o.caughtUp !== undefined) this.behind.delete(t.source);
+    // its columns are the copy's now (`copiedColumns`, above)
+    this.sideColumns.delete(t.source);
     this.retired.delete(t.source);
     this.duckTypes.delete(t.source);
-    // a new copy, a new stay, whatever the columns: what the stream decoded before this moment is not for it
-    this.streamed.delete(t.source);
+    // a new copy, a new stay, whatever the columns: what the stream decoded before this moment is not for it — unless
+    // its side table was caught up while the stream held its changes, in this copy's columns (`catchUpSide`): that stay
+    // began before its catch-up's snapshot, and goes on
+    if (o.caughtUp?.holding !== true) this.streamed.delete(t.source);
     this.refreshStreamed();
   }
 
@@ -4445,9 +4579,15 @@ export class Sync {
    * one table's poll before another's. A statement that fails is named in the error (`doing`): a poll runs several
    * against the source and DuckDB, and the engine's message names none. Answers what it found per table (a pieced
    * table's once its last piece is in), or none when a numeric wider than its copy rolled it back.
+   *
+   * `into` (one table) is A WHOLE SYNC'S SIDE TABLE, caught up before its swap (`catchUpSide`): written there from the
+   * whole read's watermark, and nothing of the table served is moved — no watermark, row count, time or error, which its
+   * swap carries — and a numeric wider than the side's columns answers none, as it does for a copy.
    */
-  private async poll(lane: Lane, all: readonly AddedTable[], o: { strict?: boolean } = {}): Promise<PolledTable[]> {
+  private async poll(lane: Lane, all: readonly AddedTable[], o: { strict?: boolean; into?: IntoSide } = {}): Promise<PolledTable[]> {
     const w = lane.conn;
+    const into = o.into;
+    if (into !== undefined && all.length !== 1) throw new Error(`a whole sync's side table is caught up alone, never beside ${all.length - 1} other table(s) (Mason bug: report it)`);
     // its columns as they are on the database NOW, before its snapshot: a table whose columns changed is read again
     // (`columnsChanged`), and not polled when its copy holds a column it lacks now (renamed or dropped) — or, strict, at all
     const tables = await this.shapeGate(w, all, o.strict === true);
@@ -4460,10 +4600,12 @@ export class Sync {
     const pending = new Map<string, number>();
     const exacts = new Map<string, Map<string, number>>();
     const declared = (t: AddedTable, column: string): boolean => NUMERIC_TYPE.exec(t.columns.find((c) => c.name === column)?.type ?? "")?.[1] !== undefined;
-    for (const t of tables) exacts.set(t.source, await this.exactOf(t, w));
+    // the table written: the synced one, or a whole sync's side table (`into`)
+    const tableOf = (t: AddedTable): string => into?.table ?? t.table;
+    for (const t of tables) exacts.set(t.source, await this.exactOf({ ...t, table: tableOf(t) }, w));
     // the plain numerics each table holds a hidden scale column for (src/duck/scale-column.ts)
     const scaleds = new Map<string, string[]>();
-    for (const t of tables) scaleds.set(t.source, await this.scaledOf(t, w));
+    for (const t of tables) scaleds.set(t.source, await this.scaledOf(t, w, tableOf(t)));
     // the statement running, for the error of one that fails
     let doing = "reading the source's snapshot";
     const named = (e: unknown): unknown => e instanceof Stopping || e instanceof KeyNotHeld || !(e instanceof Error) ? e : new Error(`${doing}: ${e.message}`, { cause: e });
@@ -4497,7 +4639,7 @@ export class Sync {
         const xmax = BigInt(at[1]);
         timed.push(`snapshot ${Date.now() - t0} ms`);
         for (const t of tables) {
-          const target = `${ident(t.schema)}.${ident(t.table)}`;
+          const target = `${ident(t.schema)}.${ident(tableOf(t))}`;
           const from = `${pgIdent(t.schema)}.${pgIdent(t.table)}`;
           const exact = exacts.get(t.source)!;
           // ITS KEY STILL KEPT APART BY THE DATABASE, as this snapshot sees it (issue 1027): written by a key two rows
@@ -4509,7 +4651,7 @@ export class Sync {
           const cols = t.columns.map((c) => exact.has(c.name) ? fitsDecimal(c.name, exact.get(c.name)!, t.source, declared(t, c.name)) : storedValue(c)).join(", ");
           const enums = await enumLists(w, target);
           const pgCols = t.columns.map((c) => pgColumnSql(c, exact, enums)).join(", ");
-          const watermark = snapshotXmin(this.snapshots.get(t.source)!);
+          const watermark = snapshotXmin(into?.watermark ?? this.snapshots.get(t.source)!);
           const stage = `temp.main.${ident(`${POLL_STAGE}${pieced.length}`)}`;
           const c0 = Date.now();
           doing = `${t.source}: reading its changed rows from the source into the poll's stage`;
@@ -4537,10 +4679,10 @@ export class Sync {
           }
           doing = `${t.source}: writing its ${staged} changed row(s) by key`;
           // the rows whose key the table held are UPDATED, the rest ADDED (`PolledTable`), as the delete by key counted them
-          const updated = Math.min(staged, await writeStaged(w, t, target, stage, "", this.kept, scaleds.get(t.source)));
+          const updated = Math.min(staged, await writeStaged(w, t, target, stage, "", into === undefined ? this.kept : null, scaleds.get(t.source)));
           const c1 = Date.now();
           const { rows, deleted, countMs } = await reconcile(t, target, from);
-          await w.run(this.pollStateSql(t, snapshot, polledAt));
+          if (into === undefined) await w.run(this.pollStateSql(t, snapshot, polledAt));
           await w.run(`DROP TABLE ${stage}`);
           timed.push(`${t.source} ${staged} changed in ${c1 - c0} ms, counted in ${countMs} ms${deleted ? `, ${deleted} deleted in ${Date.now() - c1 - countMs} ms` : ""}`);
           found.push({ table: t.source, added: staged - updated, updated, deleted, rows, ms: Date.now() - c0 });
@@ -4557,6 +4699,8 @@ export class Sync {
       // a numeric wider than its copy: that table is copied again (wider) at the next pass, the others polled
       // matched against the tables' own names (a name may hold a space)
       const wider = e instanceof Error ? tables.find((t) => widerIn(e, t.source))?.source : undefined;
+      // a side table's: its whole sync starts over, wider (`catchUpSide`); the table served keeps its watermark
+      if (wider !== undefined && into !== undefined) return [];
       if (wider !== undefined && this.snapshots.delete(wider)) {
         this.log(`poll: ${wider} has a numeric value wider than its synced DECIMAL column: it is read again whole at the next pass`);
         return [];
@@ -4566,6 +4710,8 @@ export class Sync {
     // committed: the watermarks and the row counts move together (a pieced table's with its last piece)
     // and the table's last sync (`Synced`): the poll's time as the ledger now holds it, and how long THIS table's poll took
     const committed = async (source: string, rows: number, ms: number): Promise<void> => {
+      // a side table's: what it was read at, for its swap to carry; the table served is as it was
+      if (into !== undefined) { into.done = { snapshot, at: polledAt }; return; }
       this.polledAt.set(source, polledAt);
       const st = this.states.get(source)!;
       if (st.rows !== rows || st.error !== null) await this.record({ ...st, rows, error: null }, undefined, w);
@@ -4582,8 +4728,8 @@ export class Sync {
           await w.run("BEGIN TRANSACTION");
           try {
             doing = `${t.source}: writing piece ${i + 1} of ${n} of its ${staged} changed row(s) by key`;
-            await this.interruptible(lane, () => writeStaged(w, t, target, stage, ` WHERE rowid >= ${i * POLL_PIECE_ROWS} AND rowid < ${(i + 1) * POLL_PIECE_ROWS}`, this.kept, scaleds.get(t.source)));
-            if (i === n - 1) {
+            await this.interruptible(lane, () => writeStaged(w, t, target, stage, ` WHERE rowid >= ${i * POLL_PIECE_ROWS} AND rowid < ${(i + 1) * POLL_PIECE_ROWS}`, into === undefined ? this.kept : null, scaleds.get(t.source)));
+            if (i === n - 1 && into === undefined) {
               await w.run(this.pollStateSql(t, snapshot, polledAt));
             }
             doing = `${t.source}: committing piece ${i + 1} of ${n}`;
@@ -4601,8 +4747,8 @@ export class Sync {
     } finally {
       for (const { stage } of pieced) await w.run(`DROP TABLE IF EXISTS ${stage}`);
     }
-    // committed: a generated table over a table that changed is behind from here
-    for (const f of found) if (f.added > 0 || f.updated > 0 || f.deleted > 0) this.generated.changed(f.table);
+    // committed: a generated table over a table that changed is behind from here (a side table's, once it is swapped in)
+    if (into === undefined) for (const f of found) if (f.added > 0 || f.updated > 0 || f.deleted > 0) this.generated.changed(f.table);
     return found;
   }
 
@@ -4650,7 +4796,7 @@ export class Sync {
    * snapshot changed: its chunks are one transaction on one connection, and it does not resume. Read-only on the
    * source: SELECTs.
    */
-  private async copy(t: AddedTable): Promise<void> {
+  private async copy(t: AddedTable): Promise<"copy again" | void> {
     const was = this.states.get(t.source)!;
     const first = was.phase !== "copied";
     const w = this.rebuilder.conn;
@@ -4660,6 +4806,8 @@ export class Sync {
     const recopy = this.mode === "recopy";
     // what this copy has committed of itself: kept for the next attempt (a failure, a stop), dropped when it cannot be
     let kept: CopyProgress | null = null;
+    // its side table's catch-up began (`catchUpSide`), and whether the side table was swapped in
+    let holdingSide = false, swapped = false;
     try {
       // a copy begun before (a run that died or stopped, a copy that failed): continued where its columns are the same
       kept = recopy ? await this.forgetCopy(t, side) : await this.resumable(t, side);
@@ -4701,41 +4849,83 @@ export class Sync {
           throw new Error(`its synced data holds ${rows} rows but ${keys} distinct keys (Mason bug: report it, with mason logs): it was not swapped in, and is read again from its first page`);
         }
       }
-      // its stored JSON paths filled, so the table swapped in has every one whole (src/duck/kept.ts fillSide)
+      // CAUGHT UP BEFORE IT IS SWAPPED IN (issue 1066; `catchUpSide`): what the chunks left out — every row changed since
+      // the first snapshot's xmin, which an open transaction holds back — is read by ONE poll into the side table, so
+      // what is swapped in is the whole table as of that poll's snapshot, never a part of it (none in recopy mode: its
+      // one transaction is whole)
+      let caught: SideCaught | null = null;
+      if (p.snapshot !== null) {
+        holdingSide = true;
+        const c = await this.catchUpSide(t, p.snapshot);
+        if (c === "copy again" || c === "columns changed") {
+          await this.releaseSide(t.source);
+          this.copyLive.delete(t.source);
+          // a numeric wider than the side table's column: read again from its first page, its columns sized again
+          if (c === "copy again") {
+            kept = await this.forgetCopy(t, side);
+            this.log(`${t.source}: a numeric value is wider than its synced DECIMAL column: it is read again whole, wider`);
+            return "copy again";
+          }
+          // its columns changed on the database meanwhile: they are read again (`columnsChanged`), and it is synced with them
+          if (first) await this.record({ ...was, phase: "waiting", error: null }, undefined, w);
+          return;
+        }
+        caught = c;
+      }
+      const rows = caught?.rows ?? p.rows;
+      // its stored JSON paths filled, so the table swapped in has every one whole (src/duck/kept.ts fillSide): after its
+      // catch-up, whose rows carry none
       await this.kept.fillSide(w, t.source, side, t.columns.map((c) => c.name), (sql) => this.interruptible(this.rebuilder, async () => Number((await w.run(sql)).rowsChanged)));
-      // THE SWAP, on the writer's turn: one transaction, between two of the stream's or the polls'. It carries the copy's
-      // watermark (its first snapshot), removes its progress, and leaves the table behind until its catch-up (none in
-      // recopy mode: no poll)
+      // THE SWAP, on the writer's turn: one transaction, between two of the stream's or the polls'. It carries the
+      // catch-up's watermark and removes the copy's progress; the changes the stream held since the catch-up began are
+      // applied in the same turn, and the table joins the stream (`swapCaughtUp`). In recopy mode, its one snapshot
       // never for a table removed meanwhile (`cutShort`): decided on the swap's own turn, so a removal before it is seen
+      // Its ledger row is written in the same turn, before the held changes are applied (which count from its rows) and
+      // before the stream can write it: the table is a copy of these columns from here (`needsCopy`), or it would not
+      // join the stream
+      let seconds = 0, copiedAt = "", saidJoin = false;
       await this.onWriter(async () => {
         if (this.cutting.has(t.source)) throw new Removed(t.source);
-        await this.swap(t, side, { snapshot: p.snapshot, behind: p.snapshot === null ? null : "after its whole read" });
+        let held = false;
+        if (caught === null) await this.swap(t, side, { snapshot: p.snapshot, behind: null });
+        else held = await this.swapCaughtUp(t, side, caught);
+        swapped = true;
+        seconds = (Date.now() - started) / 1000;
+        copiedAt = new Date().toISOString();
+        await this.record({ source: t.source, phase: "copied", rows, bytes: t.bytes, seconds, copiedAt, error: null }, t.columns, this.store.writer);
+        this.copiedAs.set(t.source, columnsKey(t.columns));
+        if (held) saidJoin = await this.applySideHeld(t);
       });
       this.copyLive.delete(t.source);
       kept = null;
       this.retries.delete(t.source);
-      const seconds = (Date.now() - started) / 1000;
-      this.log(`synced ${t.source}: ${p.rows} row(s), ${t.bytes} source bytes, in ${seconds.toFixed(2)} s (read in ${read.seconds.toFixed(2)} s` +
-        `${resumed === null ? "" : `, resumed at page ${readThrough(resumed.done) ?? p.pages} of ${resumed.pages}${pastPages(resumed.done)} with ${resumed.rows} row(s) in`}), stored as the source's scan delivered them, with no index`);
-      const copiedAt = new Date().toISOString();
-      await this.record({ source: t.source, phase: "copied", rows: p.rows, bytes: t.bytes, seconds, copiedAt, error: null }, t.columns, w);
+      this.log(`synced ${t.source}: ${rows} row(s), ${t.bytes} source bytes, in ${seconds.toFixed(2)} s (read in ${read.seconds.toFixed(2)} s` +
+        `${resumed === null ? "" : `, resumed at page ${readThrough(resumed.done) ?? p.pages} of ${resumed.pages}${pastPages(resumed.done)} with ${resumed.rows} row(s) in`}` +
+        `${caught === null ? "" : `, then the ${caught.changed} row(s) changed since its read began synced by one poll in ${(caught.ms / 1000).toFixed(2)} s, before it was served`}), stored as the source's scan delivered them, with no index`);
       this.synced.set(t.source, { at: copiedAt, seconds, by: "copy" });
+      // its catch-up's line, as a catch-up after a swap says it (`catchUp`), unless the stream said its join, a mark set
+      // meanwhile leaves it to a catch-up of its own, or its columns changed while it was read (it is read again whole)
+      const now = this.tables.get(t.source);
+      if (caught !== null && !saidJoin && !this.behind.has(t.source) && now !== undefined && !this.needsCopy(now)) {
+        this.log(`caught up ${t.source} by one poll ${WHOLE_READ_WHY}: ${this.caughtUpTail(t, caught.holding)}`);
+      }
       // how long it took, in whole ms as a poll's: the message ends with it as a poll's does (` · 7 min 57 s`), and the
       // web page shows it in a column of its own (src/duck/events.ts `tookMs`). A whole read ADDS every row it holds
       // (`syncedText`, the words a poll's record says): the copy swapped in replaces the old
       const tookMs = Math.round(seconds * 1000);
-      this.event({ kind: "full_sync", table: t.source, message: `synced whole: ${syncedText({ added: p.rows, updated: 0, deleted: 0, rows: p.rows, ms: tookMs }, "exact")}`, tookMs });
+      this.event({ kind: "full_sync", table: t.source, message: `synced whole: ${syncedText({ added: rows, updated: 0, deleted: 0, rows, ms: tookMs }, "exact")}`, tookMs });
       this.shortages.delete(t.source);
-      this.copiedAs.set(t.source, columnsKey(t.columns));
       // in the catalog at once: a pass's other copies may take hours
       await this.rebuildSchema();
     } catch (e) {
       // its chunks are no longer read (a failure after every chunk was read, at its check, fill or swap, included)
       this.copyLive.delete(t.source);
+      // nothing more is held for a side table that is not swapped in (`catchUpSide`): its next attempt holds anew
+      if (holdingSide && !swapped) await this.releaseSide(t.source);
       // CUT SHORT BY ITS REMOVAL (`cutShort`, issue 1034): its chunks in flight rolled back and no reader reads any more;
       // what it read is dropped as its rebuild ends (`rebuild`), never kept to resume, never a failure or a back-off
       if (this.cutting.has(t.source) && !(e instanceof Stopping)) {
-        this.log(`sync of ${t.source} stopped: it is no longer added (the chunks in flight rolled back)`);
+        this.log(holdingSide && !swapped ? `catch-up of ${t.source} stopped: it is no longer added (rolled back)` : `sync of ${t.source} stopped: it is no longer added (the chunks in flight rolled back)`);
         return;
       }
       let k: CopyProgress | null = kept;
@@ -4749,22 +4939,25 @@ export class Sync {
       const where = k === null ? null : through === null ? "with every page read (its swap is next)" : `at page ${through} of ${k.pages}${pastPages(k.done)}, ${k.rows} row(s) in`;
       if (e instanceof Stopping) {
         // the chunks in flight rolled back: a table never copied continues at the next start, one copied before serves its
-        // copy as it was meanwhile
-        this.log(`sync of ${t.source} stopped: Mason is stopping (${where === null ? "rolled back; it is synced at the next start" : `the chunks in flight rolled back; it continues ${where} at the next start`})`);
+        // copy as it was meanwhile. Its catch-up before its swap (`catchUpSide`) is said as a catch-up's stop is
+        if (holdingSide && !swapped) this.log(`catch-up of ${t.source} stopped: Mason is stopping (rolled back; its whole read is kept, and it is caught up by one poll at the next start, before it is served)`);
+        else this.log(`sync of ${t.source} stopped: Mason is stopping (${where === null ? "rolled back; it is synced at the next start" : `the chunks in flight rolled back; it continues ${where} at the next start`})`);
         if (first) await this.record({ ...was, phase: "waiting", error: null }, undefined, w);
         return;
       }
-      // A TABLE REWRITTEN AFTER AN OPEN TRANSACTION BEGAN (issue 1025, `heldFile`): never swapped in empty. It waits for
-      // that transaction, checked again soon and not backed off as a failure is (a check is a catalog read); said once
-      // a rewrite, and kept on its line meanwhile. A copy served before serves as it was
+      // A TABLE REWRITTEN AFTER AN OPEN TRANSACTION BEGAN (issue 1025, `heldFile`): it waits for that transaction,
+      // checked again soon and not backed off as a failure is (a check is a catalog read); said once in each wording
+      // (a new holder is new words), and said on its line meanwhile (`state`'s `syncWaits`). A WAIT, NEVER A FAILURE
+      // (issue 1066: a first sync that waited was `failed`, and `mason add t && mason wait` exited 1 while Mason was
+      // only waiting): no error, a first sync still waiting, a copy served before serving as it was
       if (e instanceof RewriteWait) {
-        const m = `${this.errorText(e)}${first ? "" : "; the synced data serves as it was until then"}`;
+        const m = this.errorText(e);
         this.retries.set(t.source, { failures: this.retries.get(t.source)?.failures ?? 0, at: Date.now() + this.rewriteRecheckMs });
         if (!e.said) {
-          this.log(`sync of ${t.source} waits: ${m}`);
-          this.event({ kind: "full_sync_failed", table: t.source, message: m, cause: e });
+          this.log(`${t.source}: ${m}`);
+          this.event({ kind: "sync_waits", table: t.source, message: m });
         }
-        await this.record({ ...this.states.get(t.source)!, phase: first ? "failed" : "copied", error: m }, undefined, w);
+        await this.record({ ...this.states.get(t.source)!, phase: first ? "waiting" : "copied", error: null }, undefined, w);
         // the rewrite may have changed its columns (an ALTER TABLE … TYPE): read again now, as a failed sync's are
         await this.reshapeAfterFailure(w, t);
         return;
@@ -5107,29 +5300,38 @@ export class Sync {
 
   /**
    * WHETHER A COPY HELD TO `watermark` READS NONE OF THE TABLE'S ROWS, which it has (`rowsHeldSql`, a sample of its
-   * rows), in the connection's transaction: with the backend whose transaction is the watermark, when there is one.
+   * rows), in the connection's transaction.
    * HELD TO A CHUNK'S TIME ON THE SOURCE (issue 1066: #1058's check read the whole table under AccessShareLock, and a
    * migration's ALTER queued behind it, the application behind the ALTER): `lock_timeout` (`REWRITE_CHECK_LOCK_MS`) and
    * `statement_timeout` (`MASON_COPY_CHUNK_SECONDS`) set for this one read, `SET LOCAL` in the same transaction. A read
    * they stop could not tell (`none` null): Postgres has aborted the transaction, so the caller ends it, and the sync
    * waits as for a rewrite that kept no row, checked again (fail closed: never a swap it could not verify).
    */
-  private async heldReadsNone(c: DuckConnection, pgFrom: string, watermark: bigint): Promise<{ none: boolean | null; pid: number | null }> {
+  private async heldReadsNone(c: DuckConnection, pgFrom: string, watermark: bigint): Promise<{ none: boolean | null }> {
     const statementMs = Math.round(this.copyChunkSeconds * 1000);
     await c.run(`CALL postgres_execute(${literal(SRC)}, ${literal(`SET LOCAL lock_timeout = ${Math.min(REWRITE_CHECK_LOCK_MS, statementMs)}`)})`);
     await c.run(`CALL postgres_execute(${literal(SRC)}, ${literal(`SET LOCAL statement_timeout = ${statementMs}`)})`);
-    let r: [boolean, boolean, number | null];
+    let r: [boolean, boolean];
     try {
-      r = (await c.runAndReadAll(`SELECT * FROM ${pq(rowsHeldSql(pgFrom, watermark))}`)).getRowsJS()[0] as [boolean, boolean, number | null];
+      r = (await c.runAndReadAll(`SELECT * FROM ${pq(rowsHeldSql(pgFrom, watermark))}`)).getRowsJS()[0] as [boolean, boolean];
     } catch (e) {
       if (!sourceTimedOut(e)) throw e;
       this.log(`the check of ${pgFrom} for rows a sync would read was stopped by its time limit on the database, so it could not tell: ${this.errorText(e)}`);
-      return { none: null, pid: null };
+      return { none: null };
     }
     // the rest of the transaction runs as the session's settings say
     await c.run(`CALL postgres_execute(${literal(SRC)}, ${literal("SET LOCAL lock_timeout TO DEFAULT")})`);
     await c.run(`CALL postgres_execute(${literal(SRC)}, ${literal("SET LOCAL statement_timeout TO DEFAULT")})`);
-    return { none: !r[0] && r[1], pid: r[2] === null ? null : Number(r[2]) };
+    return { none: !r[0] && r[1] };
+  }
+
+  /** THE TRANSACTION A WHOLE SYNC WAITS FOR, as it is NOW (`holderSql`, issue 1066), in the connection's transaction:
+   *  read before any check of the table's rows (one stopped by its time limit aborts the transaction). Its id and pid
+   *  only while it is still open; null once it ended (the next check names the next one) */
+  private async holderOf(c: DuckConnection, watermark: bigint): Promise<{ xid: string; pid: number | null } | null> {
+    const r = (await c.runAndReadAll(`SELECT * FROM ${pq(holderSql(watermark))}`)).getRowsJS()[0] as [boolean | null, number | null] | undefined;
+    if (r?.[0] !== true) return null;
+    return { xid: String(watermark & 0xffffffffn), pid: r[1] === null ? null : Number(r[1]) };
   }
 
   /**
@@ -5154,27 +5356,40 @@ export class Sync {
       this.rewriteWaits.delete(t.source);
       return f.seen;
     }
-    // a rewrite decided before is not read again; one whose check could not tell is
+    // its holder as it is now, at every check (the oldest transaction open then may have ended, and another older
+    // than the rewrite hold it now); a rewrite decided before is not read again, one whose check could not tell is
+    const holder = await this.holderOf(c, watermark);
     const known = this.rewriteWaits.get(t.source);
-    if (known?.writtenBy === f.writtenBy && known.decided) throw new RewriteWait(known.message, f.writtenBy, true);
+    if (known?.writtenBy === f.writtenBy && known.decided) throw this.waits(t, f.writtenBy, true, this.rewriteWaitText(t, { none: true }, holder));
     const held = await this.heldReadsNone(c, pgFrom, watermark);
     if (held.none === false) {
       this.rewriteWaits.delete(t.source);
       return f.seen;
     }
-    const message = this.rewriteWaitText(t, watermark, held);
-    this.rewriteWaits.set(t.source, { writtenBy: f.writtenBy, message, decided: held.none === true });
-    throw new RewriteWait(message, f.writtenBy, known?.writtenBy === f.writtenBy && known.message === message);
+    throw this.waits(t, f.writtenBy, held.none === true, this.rewriteWaitText(t, held, holder));
+  }
+
+  /** A WHOLE SYNC THAT WAITS (`RewriteWait`), recorded for `state` to say (`rewriteWaits`): said again only when its words
+   *  change (a new holder, a check that could tell) */
+  private waits(t: AddedTable, writtenBy: string, decided: boolean, message: string): RewriteWait {
+    const known = this.rewriteWaits.get(t.source);
+    this.rewriteWaits.set(t.source, { writtenBy, message, decided, checkedAt: new Date().toISOString() });
+    return new RewriteWait(message, writtenBy, known?.writtenBy === writtenBy && known.message === message);
   }
 
   /** the words for a whole sync that waits for an open transaction older than its table's rewrite (`RewriteWait`):
-   *  because a sync now would read none of its rows, or because the check of its rows could not tell in its time */
-  private rewriteWaitText(t: AddedTable, watermark: bigint, held: { none: boolean | null; pid: number | null }): string {
-    const holder = `transaction ${watermark & 0xffffffffn}${held.pid === null ? "" : ` (pid ${held.pid} in pg_stat_activity)`}`;
-    const why = held.none === true ? "so a sync now would read none of its rows"
-      : `and a short read of its rows could not tell within ${this.copyChunkSeconds} s whether a sync now would read them (another session held a lock on it, or its first rows are far into the table)`;
-    return `${rewrittenText(t.source, "after a transaction that is still open on the database began")}, ${why}. ` +
-      `Its sync waits for that ${holder} to end, and checks again every ${this.rewriteRecheckMs >= 1000 ? `${Math.round(this.rewriteRecheckMs / 1000)} s` : `${this.rewriteRecheckMs} ms`}`;
+   *  because a sync now would read none of its rows, or because the check of its rows could not tell in its time. The
+   *  transaction is named only while it is open (`holderOf`): once it ended, its id and its pid are another's to take */
+  private rewriteWaitText(t: AddedTable, held: { none: boolean | null }, holder: { xid: string; pid: number | null } | null): string {
+    const each = this.rewriteRecheckMs >= 1000 ? `${Math.round(this.rewriteRecheckMs / 1000)} s` : `${this.rewriteRecheckMs} ms`;
+    const rewrite = "(an ALTER TABLE that rewrites it, a TRUNCATE and a load, or a tool such as pg_repack)";
+    const what = holder === null
+      ? `its sync waits for the transactions that were open on the database before it was rewritten ${rewrite} to end.`
+      : `its sync waits for transaction ${holder.xid}${holder.pid === null ? "" : ` (pid ${holder.pid} in pg_stat_activity)`} to end. It was open on the database before the table was rewritten ${rewrite}.`;
+    const why = held.none === true ? "So a sync now would read none of its rows."
+      : `A short read of its rows could not tell within ${this.copyChunkSeconds} s whether a sync now would read them. Another session held a lock on the table, or its first rows are far into it.`;
+    const serves = this.states.get(t.source)?.phase === "copied" ? " The synced data serves as it was until then." : "";
+    return `${what} ${why} Mason checks again every ${each}.${serves}`;
   }
 
   /** A RESUMED COPY'S FILE, in a transaction of its own before its chunks read on (issue 1025): the file is the one its
@@ -5188,14 +5403,11 @@ export class Sync {
         const f = await this.fileFacts(w, pgFrom, watermark);
         if (f.seen === null || f.now !== filenode) return `the source rewrote ${t.source} since its sync began (its file changed: a VACUUM FULL, CLUSTER, TRUNCATE or column type change), so its rows moved between pages`;
         if (f.fresh !== true || f.replaced !== true) return null;
+        const holder = await this.holderOf(w, watermark);
         const held = await this.heldReadsNone(w, pgFrom, watermark);
         if (held.none === true) return `${rewrittenText(t.source, "after its sync's first snapshot")}, so its chunks read none of its rows`;
         // could not tell in its time (issue 1066): the copy keeps its chunks and waits, checked again
-        if (held.none === null) {
-          const message = this.rewriteWaitText(t, watermark, held), writtenBy = f.writtenBy ?? "", known = this.rewriteWaits.get(t.source);
-          this.rewriteWaits.set(t.source, { writtenBy, message, decided: false });
-          return new RewriteWait(message, writtenBy, known?.writtenBy === writtenBy && known.message === message);
-        }
+        if (held.none === null) return this.waits(t, f.writtenBy ?? "", false, this.rewriteWaitText(t, held, holder));
         this.rewriteWaits.delete(t.source);
         return null;
       });

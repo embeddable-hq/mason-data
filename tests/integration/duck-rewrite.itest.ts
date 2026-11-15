@@ -24,6 +24,7 @@ import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:chil
 import { DuckStore } from "../../src/duck/store.ts";
 import { Sync, SOURCE_APPLICATION_NAME, type AddedTable } from "../../src/duck/sync.ts";
 import { connectSource, parseSource, readSourceFacts, type Source } from "../../src/cli/preflight.ts";
+import { syncStateOf } from "../../src/cli/readiness.ts";
 
 const adminUrl = process.env.IT_POSTGRES_URL;
 const tag = `it_rewrite_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
@@ -61,7 +62,7 @@ after(() => {
  * A TRANSACTION THE TEST HOLDS OPEN in a psql session of its own: `sql` run in it (its last statement's answer read
  * before this returns), then COMMIT at `commit()`. Closed in a `finally` (`end`), committed or not.
  */
-async function openTransaction(url: string, sql: string): Promise<{ commit: () => Promise<void>; end: () => void }> {
+async function openTransaction(url: string, sql: string): Promise<{ commit: () => Promise<void>; end: () => void; xid: () => string }> {
   const p: ChildProcessWithoutNullStreams = spawn("psql", ["-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", url]);
   let out = "", err = "";
   p.stdout.on("data", (d: Buffer) => { out += d.toString(); });
@@ -79,6 +80,8 @@ async function openTransaction(url: string, sql: string): Promise<{ commit: () =
       if (code !== 0) throw new Error(`the held transaction did not commit: ${err.trim()}`);
     },
     end: () => { if (p.exitCode === null) p.kill(); },
+    // its id, when `sql` was `SELECT txid_current()` (its first line of output)
+    xid: () => out.split("\n")[0]!.trim(),
   };
 }
 
@@ -242,10 +245,15 @@ for (const mode of ["poll", "replication"] as const) {
       await f.sync.once();
       const text = f.logged.join("\n");
       assert.deepEqual(emptied(f), [], `never swapped in empty\n${text}`);
-      assert.equal(f.logged.filter((l) => /^sync of public\.t waits: the database rewrote public\.t after a transaction that is still open on the database began .*, so a sync now would read none of its rows\. Its sync waits for that transaction \d+ \(pid \d+ in pg_stat_activity\) to end, and checks again every 300 ms; the synced data serves as it was until then$/.test(l)).length, 1, `said once, though checked again\n${text}`);
+      const words = new RegExp(`^its sync waits for transaction ${holder.xid()} \\(pid \\d+ in pg_stat_activity\\) to end\\. It was open on the database before the table was rewritten \\(.*\\)\\. ` +
+        "So a sync now would read none of its rows\\. Mason checks again every 300 ms\\. The synced data serves as it was until then\\.$");
+      assert.equal(f.logged.filter((l) => l.startsWith("public.t: ") && words.test(l.slice("public.t: ".length))).length, 1, `said once, though checked again\n${text}`);
+      // A WAIT, NEVER A FAILURE (issue 1066): no error on its line, its state waiting, its words the wait's
       const st = f.sync.state().find((s) => s.source === "public.t")!;
       assert.equal(st.phase, "copied", "it serves its copy");
-      assert.match(st.error ?? "", /^the database rewrote public\.t after a transaction that is still open/, "said on its line (mason status)");
+      assert.equal(st.error, null, `no error: it only waits\n${text}`);
+      assert.match(st.syncWaits?.why ?? "", words, "said on its line (mason status)");
+      assert.equal(syncStateOf(st), "waiting", "mason status and the page say waiting");
       assert.equal(Number((await f.store.writer.runAndReadAll("SELECT count(*) FROM public.t")).getRowsJS()[0]![0]), ROWS, "its old data serves");
       await holder.commit();
       await syncedWith(f, mode, "id, v, w");
@@ -293,13 +301,17 @@ for (const mode of ["poll", "replication"] as const) {
       await f.sync.setTables([anchor, f.table, kept, sparseAlter, sparseCluster]);
       await f.sync.once();
       const text = f.logged.join("\n");
-      assert.match(f.sync.state().find((s) => s.source === "public.sparse_alter")?.error ?? "", /^the database rewrote public\.sparse_alter after a transaction that is still open on the database began .*, so a sync now would read none of its rows/,
+      assert.match(f.sync.state().find((s) => s.source === "public.sparse_alter")?.syncWaits?.why ?? "", /^its sync waits for transaction \d+ .* So a sync now would read none of its rows\./,
         `an ALTER's rows past pages emptied by deletes: it waits\n${text}`);
       assert.ok(f.logged.some((l) => new RegExp(`^synced public\\.sparse_cluster: ${ROWS - front} row\\(s\\)`).test(l)), `a CLUSTER's rows past pages emptied by deletes: synced at once\n${text}`);
       assert.deepEqual(emptied(f), [], `never swapped in empty\n${text}`);
       assert.equal(f.served().reads, 0, "public.t is not served before its first sync");
+      // A FIRST SYNC THAT WAITS IS WAITING, NEVER FAILED (issue 1066): `mason add t && mason wait` waits on, and exits 0
+      // once it is synced
       const st = f.sync.state().find((s) => s.source === "public.t")!;
-      assert.match(st.error ?? "", /^the database rewrote public\.t after a transaction that is still open on the database began .* Its sync waits for that transaction \d+/, `said on its line\n${text}`);
+      assert.match(st.syncWaits?.why ?? "", new RegExp(`^its sync waits for transaction ${holder.xid()} \\(pid \\d+ in pg_stat_activity\\) to end\\. .* Mason checks again every 300 ms\\.$`), `said on its line\n${text}`);
+      assert.deepEqual([st.phase, st.error, syncStateOf(st)], ["waiting", null, "waiting"], `a wait, not a failure\n${text}`);
+      assert.ok(!f.logged.some((l) => /sync of public\.t failed/.test(l)), `never said as a failure\n${text}`);
       assert.ok(f.logged.some((l) => /^synced public\.kept: 500 row\(s\)/.test(l)), `a VACUUM FULL and a CLUSTER keep each row's xmin: synced at once, whole\n${text}`);
       await holder.commit();
       await syncedWith(f, mode, "id, v");
@@ -310,7 +322,104 @@ for (const mode of ["poll", "replication"] as const) {
       await f.stop();
     }
   });
+
+  // A WHOLE SYNC IS SERVED ONLY ONCE IT IS WHOLE (issue 1066): a TRUNCATE, then a transaction that stays open, then the
+  // reload committed. No rewrite happened after that transaction began, so nothing waits; and every row is past its
+  // id, which every snapshot's xmin is held at, so the whole read's chunks keep none. The sync again was swapped in with
+  // 0 rows and served so until its catch-up. Its catch-up runs into the side table first now: served whole at once,
+  // the transaction still open, and never short meanwhile.
+  test(`${mode}: a whole sync again of a table emptied, then loaded again after a transaction began that is still open, is served whole at once and never short (issue 1066)`, { skip }, async () => {
+    const f = await fixture(`reload_${mode[0]}`, mode);
+    let holder: Awaited<ReturnType<typeof openTransaction>> | null = null;
+    try {
+      psql(f.url, "TRUNCATE t");
+      holder = await openTransaction(f.url, "SELECT txid_current()");
+      psql(f.url, `INSERT INTO t SELECT g, g + 1, g FROM generate_series(1, ${ROWS + 500}) g`);
+      // under replication the stream carries the source's own TRUNCATE to the table served, which the source then was:
+      // its least count is the read's from here
+      const before = f.served().least;
+      await f.sync.setTables([f.whole]);
+      await f.sync.once();
+      const text = f.logged.join("\n");
+      assert.deepEqual(emptied(f), [], `never swapped in empty\n${text}`);
+      assert.ok(f.logged.some((l) => new RegExp(`^synced public\\.t: ${ROWS + 500} row\\(s\\), .* then the ${ROWS + 500} row\\(s\\) changed since its read began synced by one poll`).test(l)),
+        `swapped in whole, the transaction still open\n${text}`);
+      const st = f.sync.state().find((s) => s.source === "public.t")!;
+      assert.deepEqual([st.phase, st.error, st.behind, st.syncWaits, st.rows], ["copied", null, undefined, undefined, ROWS + 500], `synced, caught up, nothing waits\n${text}`);
+      await equalToSource(f, "id, v, w");
+      if (mode === "poll") assert.equal(f.served().least, before, `served with ${f.served().least} rows at least, never fewer than before its whole read\n${text}`);
+      await holder.commit();
+      holder = null;
+    } finally {
+      holder?.end();
+      await f.stop();
+    }
+  });
+
+  // THE SAME ON A FIRST SYNC: the table is served first with every row, never 0 until its catch-up.
+  test(`${mode}: a first sync of a table emptied, then loaded again after a transaction began that is still open, is served whole from its first read (issue 1066)`, { skip }, async () => {
+    const f = await fixture(`reload_first_${mode[0]}`, mode, { first: false });
+    let holder: Awaited<ReturnType<typeof openTransaction>> | null = null;
+    try {
+      psql(f.url, "CREATE TABLE anchor (id int PRIMARY KEY); INSERT INTO anchor VALUES (1)");
+      const anchor = await tableOf(parseSourceOf(f.url), "public.anchor");
+      // another table synced first: in replication mode its first sync makes the slot, which waits for every
+      // transaction with an id to end (the one held open below would hold it)
+      await f.sync.setTables([anchor]);
+      await f.sync.once();
+      psql(f.url, "TRUNCATE t");
+      holder = await openTransaction(f.url, "SELECT txid_current()");
+      psql(f.url, `INSERT INTO t SELECT g, g + 1, g FROM generate_series(1, ${ROWS + 500}) g`);
+      await f.sync.setTables([anchor, f.table]);
+      await f.sync.once();
+      const text = f.logged.join("\n");
+      assert.deepEqual(emptied(f), [], `never swapped in empty\n${text}`);
+      assert.ok(f.logged.some((l) => new RegExp(`^synced public\\.t: ${ROWS + 500} row\\(s\\)`).test(l)), `swapped in whole, the transaction still open\n${text}`);
+      await equalToSource(f, "id, v");
+      assert.ok(f.served().reads > 0, "the count was read once it was served");
+      assert.equal(f.served().least, ROWS + 500, `served whole from its first read\n${text}`);
+      await holder.commit();
+      holder = null;
+    } finally {
+      holder?.end();
+      await f.stop();
+    }
+  });
 }
+
+// A SYNC THAT WAITS NAMES THE TRANSACTION IT WAITS FOR ONLY WHILE THAT IS OPEN (issue 1066): two transactions older than
+// the rewrite, and the first ends. #1058's message kept naming the first, its id and its pid, which may be another
+// session's by then; each check names the one open at that check.
+test("poll: a whole sync that waits names the transaction it waits for only while it is open, never one that ended (issue 1066)", { skip: skipPoll }, async () => {
+  const f = await fixture("holders", "poll");
+  let first: Awaited<ReturnType<typeof openTransaction>> | null = null;
+  let second: Awaited<ReturnType<typeof openTransaction>> | null = null;
+  try {
+    first = await openTransaction(f.url, "SELECT txid_current()");
+    second = await openTransaction(f.url, "SELECT txid_current()");
+    psql(f.url, "ALTER TABLE t ALTER COLUMN v TYPE int USING v + 0");
+    await f.sync.setTables([f.whole]);
+    await f.sync.once();
+    const why = (): string => f.sync.state().find((s) => s.source === "public.t")?.syncWaits?.why ?? "";
+    assert.match(why(), new RegExp(`^its sync waits for transaction ${first.xid()} \\(pid \\d+ in pg_stat_activity\\) to end\\.`), `the oldest open transaction, named\n${f.logged.join("\n")}`);
+    const firstXid = first.xid();
+    await first.commit();
+    first = null;
+    await sleep(400);
+    await f.sync.once();
+    const text = f.logged.join("\n");
+    assert.doesNotMatch(why(), new RegExp(`transaction ${firstXid}\\b`), `never the transaction that ended\n${text}`);
+    assert.match(why(), new RegExp(`^its sync waits for transaction ${second.xid()} \\(pid \\d+ in pg_stat_activity\\) to end\\.`), `the one open now\n${text}`);
+    assert.ok(f.logged.some((l) => l.startsWith(`public.t: its sync waits for transaction ${second!.xid()} `)), `said again, with the new one\n${text}`);
+    await second.commit();
+    second = null;
+    await syncedWith(f, "poll", "id, v, w");
+  } finally {
+    first?.end();
+    second?.end();
+    await f.stop();
+  }
+});
 
 // A REWRITE WAITING FOR ITS LOCK AS A POLL BEGINS: the poll's snapshot is taken before the TRUNCATE and its load commit,
 // its read waits for the lock and then finds the new file, whose rows that snapshot cannot see — and its count found 0
@@ -403,7 +512,7 @@ test("poll: the check of a table rewritten after a transaction still open began 
     await f.sync.setTables([big]);
     await f.sync.once();
     const text = f.logged.join("\n");
-    assert.match(f.sync.state().find((s) => s.source === "public.big")?.error ?? "", /^the database rewrote public\.big after a transaction that is still open on the database began .*, so a sync now would read none of its rows/, `it waits, as before\n${text}`);
+    assert.match(f.sync.state().find((s) => s.source === "public.big")?.syncWaits?.why ?? "", /^its sync waits for transaction \d+ .* So a sync now would read none of its rows\./, `it waits, as before\n${text}`);
     const read = (await scannedSettled(f.url, "big", before)) - before;
     assert.ok(read <= 1_000, `the check read ${read} of the table's ${BIG} rows: a sample of at most 1,000, never the whole table\n${text}`);
     await holder.commit();
@@ -432,7 +541,7 @@ test("poll: the check of a rewritten table gives up soon behind another session'
     const ended = await Promise.race([pass, sleep(15_000).then(() => "waiting" as const)]);
     const text = f.logged.join("\n");
     assert.equal(ended, "ended", `the sync's pass ended while the lock was held, within 15 s (it waited ${Date.now() - started} ms)\n${text}`);
-    assert.match(f.sync.state().find((s) => s.source === "public.big")?.error ?? "", /^the database rewrote public\.big after a transaction that is still open on the database began .*, and a short read of its rows could not tell within \d+ s whether a sync now would read them/,
+    assert.match(f.sync.state().find((s) => s.source === "public.big")?.syncWaits?.why ?? "", /^its sync waits for transaction \d+ .* A short read of its rows could not tell within \d+ s whether a sync now would read them\./,
       `said on its line\n${text}`);
     const waiting = psql(f.url, `SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid WHERE a.datname = '${f.db}' AND a.application_name = '${SOURCE_APPLICATION_NAME}' AND l.relation = 'big'::regclass`);
     assert.equal(waiting, "0", "no backend of the sync holds or waits for a lock on the table");

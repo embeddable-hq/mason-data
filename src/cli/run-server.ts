@@ -290,6 +290,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
       // its sync's error, whatever its phase: a copied table whose poll, catch-up, stream or publication check failed
       // carries it on its own row, as its sync's state says failed (issue 100)
       error: c?.error ?? null,
+      // ITS WHOLE SYNC WAITS for an open transaction on the database (issue 1066): why, and when that was last checked —
+      // a wait, never its error (src/duck/sync.ts `RewriteWait`)
+      ...(c?.syncWaits !== undefined ? { syncWaits: c.syncWaits } : {}),
       // how the run keeps the copy current NOW, as the sync derives it once (src/duck/sync.ts KeptCurrent, `keptOf`): its
       // sync and when it was last synced, what mason status and the stream's tables say, and EXPLAIN says over the wire
       ...(c?.kept ? { kept: c.kept } : {}),

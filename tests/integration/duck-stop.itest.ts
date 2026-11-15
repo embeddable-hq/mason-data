@@ -197,19 +197,21 @@ test("a stop while a catch-up waits on the source ends within seconds and leaves
   seed(url);
   await rowsOlderThanEverySnapshot(url, "big");
   const lock = sourceLock(url, "big");
-  // ONE reader: once its last chunk (open-ended) committed, the source holds the catch-up's read of big that follows the swap
+  // ONE reader: once its last chunk (open-ended) committed, the source holds the catch-up's read of big, which comes
+  // before its swap (issue 1066: a whole read is served only together with its catch-up)
   const onChunk = async (e: ChunkEvent): Promise<void> => { if (e.source === "public.big" && e.phase === "committed" && e.end === null) await lock.take(); };
   const w = await world(url, "catchup.db", onChunk, 1);
   try {
     void w.sync.setTables([BIG]);
-    await w.until(() => w.logged.some((l) => /^synced public\.big: /.test(l)), "big's whole read swapped in");
     await w.until(() => waitingOnLock(url) >= 1, "big's catch-up waits on the source");
+    assert.ok(!w.logged.some((l) => /^synced public\.big: /.test(l)), `never served before its catch-up\n${w.logged.join("\n")}`);
     const from = w.logged.length;
     await stopWithin(w, lock);
     await nothingLeftOnSource(url);
     const said = w.logged.slice(from).join("\n");
     assert.ok(w.logged.slice(from).some((l) => l.startsWith("catch-up of public.big stopped: Mason is stopping")), said);
     assert.ok(!/failed|tried again/.test(said), `a stop, never a failure\n${said}`);
+    assert.ok(!w.logged.some((l) => /^synced public\.big: /.test(l)), `not swapped in by the stop\n${said}`);
   } finally { lock.release(); await w.close(); }
 });
 

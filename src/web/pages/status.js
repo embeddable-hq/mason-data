@@ -67,7 +67,7 @@ export function tableLine(t, now = Date.now()) {
     const c = copyingText(t.copy.rowsCopied, t.rows, t.copy.progress);
     return { state: "copying", fraction: c.fraction ?? 0, what: /^\d/.test(c.text) ? `syncing ${c.text}` : c.text };
   }
-  if (!t.copy) return { state: "waiting", fraction: 0, what: "waiting for its first sync to start" };
+  if (!t.copy) return { state: "waiting", fraction: 0, what: t.syncWaits?.why ?? "waiting for its first sync to start" };
   const age = keptWords(t, now), space = compactionWords(t.copy.compaction, now);
   const what = `${n(t.copy.rowsCopied ?? 0)} rows · synced${t.copy.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}${space ? ` · ${space}` : ""}`;
   // in its one catch-up poll: at work, the accent as mason status paints it cyan (paintBar), never amber (issue 834)

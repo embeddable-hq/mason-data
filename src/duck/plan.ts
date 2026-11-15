@@ -238,7 +238,8 @@ export function missingRelationHint(relation: string, copies: readonly CopyState
   const served = "it is served once its first sync commits; mason wait waits for it (mason status shows how far it is)";
   if (c === undefined) return `a table is in Mason once it is added: mason add ${relation} syncs it (mason tables lists the database's)`;
   switch (c.phase) {
-    case "waiting": return `${c.source} is added and waits its turn to be synced: ${served}`;
+    case "waiting": return c.syncWaits === undefined ? `${c.source} is added and waits its turn to be synced: ${served}`
+      : `${c.source} is added, and its first sync waits for an open transaction on the database to end (mason status says which): ${served}`;
     case "copying": {
       // the share is of the heap's PAGES read (`CopyProgressView.share`: exact, so it never moves backwards), the count
       // the rows the committed chunks and the ones reading have in; a copy can outrun the source's estimate (Postgres's

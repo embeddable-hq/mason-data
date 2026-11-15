@@ -29,7 +29,8 @@ paths:
   there; the last chunk open-ended) appended in a DuckDB transaction of its own with ITS OWN row in
   `_mason.copy_chunks` (its page range, rows, the source's filenode; keyed by source and first page), COMMITTED — what
   the copy was begun with (first snapshot, columns, exact numerics, pages) is `_mason.copy_progress`, written once in a
-  transaction of its own; then swapped in on the writer's turn (`swap`, which removes both) and caught up (`catchUp`).
+  transaction of its own; then caught up by one poll into the side table (`catchUpSide`, below) and swapped in on the
+  writer's turn (`swap`, which removes both).
   A copy that died (a crash, `mason stop`, a failure) continues with exactly the ranges no chunk committed
   (`chunksToRead`) when its columns are the same, said; a stop rolls back only the chunks in flight, and a copy that
   ends before any chunk committed keeps nothing. `rowsSoFar` is the committed chunks' rows (exact). Step 0 (`recopy`) is
@@ -102,9 +103,15 @@ paths:
   file must be that one (else started over); a resumed copy checks its file once (`resumedFileHolds`), and one begun
   with no chunk committed begins again. A file the snapshot sees whose catalog row was written at or after the
   watermark, by a rewrite (`relfilenode` no longer the oid), is checked for a row the hold keeps: none (an ALTER, a
-  TRUNCATE and a load, pg_repack) and the copy WAITS for the open transaction that holds the watermark back, checked
-  every `REWRITE_RECHECK_MS` (30 s), never backed off, said once and on the table's line, the old copy serving; a
-  CLUSTER, VACUUM FULL or SET TABLESPACE keeps each row's xmin and goes on. **That check reads a SAMPLE, never the
+  TRUNCATE and a load, pg_repack) and the copy WAITS for the open transaction that holds the watermark back (else its
+  catch-up would read every row in one read of the source), checked every `REWRITE_RECHECK_MS` (30 s), never backed
+  off, the old copy serving; a CLUSTER, VACUUM FULL or SET TABLESPACE keeps each row's xmin and goes on. **A wait is
+  never a failure** (issue 1066: #1058 recorded a first sync that waited as `failed`, so `mason add t && mason wait`
+  exited 1 while Mason only waited): no `error`, a first sync's phase `waiting`, said as `CopyState.syncWaits` (its
+  why and when it was checked), `sync.state` `waiting`, a `sync_waits` event that is no failure, and on the table's
+  line (`notStreamedReason`), each time in the words of its last check. **The transaction is named only while it is
+  open** (`holderSql`, `holderOf`, read at every check, the decided ones included): #1058's words kept naming the
+  first of two transactions older than the rewrite after it ended, a pid another session may hold by then. **That check reads a SAMPLE, never the
   whole table** (issue 1066: #1058's read every row of an ALTERed table under AccessShareLock, minutes on a large one,
   a migration's ALTER queued behind it and the application behind the ALTER): `rowsHeldSql` reads the first
   `HELD_SAMPLE_ROWS` visible rows of a plain scan (no ctid, no ORDER BY), since a rewrite treats every row alike, under
@@ -114,8 +121,18 @@ paths:
   waits rather than swap in part of it. **A poll is held
   to its snapshot's file the same way**: a read whose file is not the one the snapshot sees writes nothing and fails
   (its count found 0 and deleted every key). `tests/integration/duck-rewrite.itest.ts` holds each, in both modes.
-  Still served late, by design: rows written after the oldest open transaction began, on a table not rewritten, wait
-  for the catch-up.
+- **A whole read is served only together with its catch-up** (issue 1066; `catchUpSide`, `swapCaughtUp`): the chunks
+  keep only the rows written before the first snapshot's xmin, which an open transaction holds back, so a TRUNCATE,
+  then a transaction left open, then the reload, was swapped in with 0 rows and served so until its catch-up — and
+  every load or update since the oldest open transaction began was missing the same way, on a smaller scale. So the
+  ONE poll from the whole read's watermark runs INTO THE SIDE TABLE (`poll`'s `into`, which moves nothing of the table
+  served), and the swap carries that poll's snapshot as the watermark: what is swapped in is the whole table as of one
+  snapshot, or nothing is. Until then the table serves its previous synced data, or is not served. Under replication
+  the stream holds the table's changes from a writer's turn before that poll, in the side table's columns
+  (`sideColumns`) and a stay that goes on past the swap, and the swap's turn applies them (`applySideHeld`), the
+  table marked behind in the swap's transaction until then (a crash between is caught up by one poll). A mark set
+  while it caught up (a slot made, `makingSlot`) is left to its own catch-up. `tests/integration/duck-rewrite.itest.ts`
+  "loaded again after a transaction began" holds it in both modes.
 - **A passthrough read (`pq`) names its columns through `pgColumnSql`**, the copy's chunks and the poll alike: an exact
   numeric as text, and as `text[]` a citext[] / inet[] / json[] (`KEPT_ARRAYS`) and an enum array (`enumLists`, by its
   stored type) — `postgres_query` hands each over as one VARCHAR DuckDB cannot cast to the column (the
