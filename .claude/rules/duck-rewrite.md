@@ -493,9 +493,12 @@ paths:
 
 - **A name holding a line break is refused by name, before the parse log is read** (`name-line-break`,
   src/duck/analyze.ts): the statement's own names, the names and columns of the tables, functions and row types it
-  reads, and a CR in the log. A caller that reads only the types and shape (a role's row filter, `names` false) is
-  never refused for one, so the roles check never fails on such a table; each statement that reads it is refused. Postgres writes a name's line break in its wrapped log just as it writes a wrapped space, so no reading of the
-  log can tell them; every other name is read in one pass and one parse (src/duck/pgtree.ts `readParseLog`).
+  reads, and a CR in the log. A statement no client wrote (a role's row filter, and the statement its filters expand:
+  `names` false, `PlanOptions.filtered`) is never refused for a line-break name of a table it reads, and reads it with
+  a space for its line break (`spaceLineBreaks`). So a filter or a `through:` on such a table refuses only the
+  statements that read the table themselves. Postgres writes a name's line break in its wrapped log just as it writes
+  a wrapped space, so no reading of the log can tell them; every other name is read in one pass and one parse
+  (src/duck/pgtree.ts `readParseLog`).
 
 - **A column is the source's type, whatever the copy holds** (`src/duck/held-types.ts`, the only place that says what the
   copy holds, issues 126 and 129): the catalog declares `format_type`'s spelling and the wire sends its OID, so Postgres's

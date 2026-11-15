@@ -43,16 +43,30 @@ export interface TreeNode { readonly _node: string; readonly [field: string]: Tr
  * column of the tables it reads (`told`), tells which. What none tells, or no reading of the rule gives, is refused
  * by name (`name-unreadable`), never guessed.
  */
-export function readParseLog(detail: Uint8Array, told: ReadonlySet<string> = new Set(), names = true): TreeValue {
-  try { return parseTree(Buffer.from(unwrapNodeDump(detail, told)).toString("utf8")); }
-  catch (e) {
-    // a caller that reads the tree's types and shape alone (`names` false) gets them where a name cannot be read back:
-    // every line break read as a space, which only a name's text can differ by
-    if (names || !(e instanceof UnreadableNames)) throw e;
-    const text = Buffer.from(detail);
-    for (let k = text.indexOf(LF); k >= 0; k = text.indexOf(LF, k + 1)) text[k] = SPACE;
-    return parseTree(text.toString("utf8"));
+export function readParseLog(detail: Uint8Array, told: ReadonlySet<string> = new Set()): TreeValue {
+  return parseTree(Buffer.from(unwrapNodeDump(detail, told)).toString("utf8"));
+}
+
+/**
+ * The log with each line break of these names (a table's columns that a statement no client wrote reads, analyze.ts
+ * `names` false) written as a space where the name stands whole: as outToken writes it, between delimiters or quotes.
+ * Postgres counts a name's line break as a byte of its line and breaks only at a space, so the lines are then the ones
+ * Postgres made, and the name is read with a space for its line break. Where one is wrapped inside, its line break
+ * stays, and no reading of the rule gives the line (`name-unreadable`).
+ */
+export function spaceLineBreaks(detail: Uint8Array, names: readonly string[]): Uint8Array {
+  if (names.length === 0) return detail;
+  const out = Buffer.from(detail);
+  const bounded = (b: number | undefined): boolean => b === undefined || b === QUOTE || delimiterByte(b);
+  for (const name of names) {
+    const escaped = Buffer.from(name.replace(/[ \n\t(){}\\]/g, (c) => `\\${c}`), "utf8");
+    for (let k = out.indexOf(escaped); k >= 0; k = out.indexOf(escaped, k + 1)) {
+      const before = k > 0 && out[k - 1] === BACKSLASH ? k - 1 : k;
+      if (!bounded(before > 0 ? out[before - 1] : undefined) || !bounded(out[k + escaped.length])) continue;
+      for (let j = k; j < k + escaped.length; j++) if (out[j] === LF) out[j] = SPACE;
+    }
   }
+  return out;
 }
 
 /** a parse tree's log Mason cannot read back: a line no reading of Postgres's rule gives, or a long name of escaped

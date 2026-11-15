@@ -22,7 +22,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A name with a line break is now refused by name.** Such a name could be read as another name, and a query could
   then read the wrong column. It might be an alias, a table's name, or a column of a table, a view or a row type. Now a
   query that reads one is refused with the name (`name-line-break`). Give the column an alias without a line break. A
-  role's row filter on such a table still applies, and the role's other queries are answered.
+  role's row filter on such a table still applies, and the role's other queries are answered. So are queries on a
+  table the role filters `through:` it.
 - **A table rewritten on your database while Mason read it is no longer served empty or partial.** A rewrite is a
   `TRUNCATE`, `VACUUM FULL`, `CLUSTER`, an `ALTER TABLE` that rewrites the table (such as a column's type change), or
   a tool that swaps its file, such as pg_repack. Before, a first sync or a table synced again whole could read none of

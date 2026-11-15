@@ -351,6 +351,9 @@ export interface PlanOptions {
   boundPaths?: ReadonlyMap<number, string>;
   grants?: RoleGrants | null | undefined;
   walls?: Walls | null;
+  /** the statement a role's row filters expanded (expandRowFilters): the names the client's statement reaches were
+   *  held to Mason gap name-line-break when it was planned, so a table only a filter reads is no refusal here */
+  filtered?: boolean;
   /** a generated table's run (src/duck/generated.ts): `schema.table` → the table read in its place, in the same schema */
   relations?: ReadonlyMap<string, string>;
   /** the generated planner's ask for each output column's followed analysed expression (`DuckPlan.outputs`): only it
@@ -383,10 +386,10 @@ async function madeTypeRefusal(catalog: Parameters<typeof catalogRows>[0], code:
  */
 export async function ordersText(o: { catalog: (bytes: Uint8Array) => Promise<Uint8Array>; text: string; paramOids: readonly number[]; under: SessionState; collations: CollationResolver; bindable: boolean }): Promise<"order" | "case" | null> {
   let analysis: Awaited<ReturnType<typeof analyze>>;
-  // the analysis's collations and types alone, never a name (`names` false): a name with a line break (Mason gap
-  // name-line-break) is no refusal here, so the catalog still answers a statement it keeps, and the synced data's plan
-  // refuses one it routes there
-  analysis = await analyze(o.catalog, o.text, o.paramOids, o.under, undefined, false);
+  // a name with a line break, or one the log cannot tell apart (Mason gaps name-line-break, name-unreadable): the synced
+  // data's plan, which reads the statement's own names, decides it, never the catalog
+  try { analysis = await analyze(o.catalog, o.text, o.paramOids, o.under); }
+  catch (e) { if (e instanceof StatementError && (e.gap === "name-unreadable" || e.gap === "name-line-break")) return "order"; throw e; }
   if ("refused" in analysis) return null;
   // the analysis as the session runs the statement: a simple Query binds no parameter, so one naming `$1` is Postgres's
   // 42P02, which the catalog answers (the analysis above is a Parse's, which would infer its type)
@@ -470,10 +473,10 @@ async function heldRefusal(catalog: Parameters<typeof catalogRows>[0], tree: Tre
  *  `walls`: `text` is the statement with its filtered reads in place (expandRowFilters), each of which the wall ends */
 export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   const { catalog, text, stmt, base, paramOids, searchPath, timeZone, dateStyle = "ISO, MDY", collations: resolver, verified, userTypes = new Map<string, number>(), copies = () => [],
-    depth = 0, kept = null, wireBound = false, boundPaths = new Map<number, string>(), grants, walls = null, relations, outputs = false } = options;
+    depth = 0, kept = null, wireBound = false, boundPaths = new Map<number, string>(), grants, walls = null, relations, outputs = false, filtered: expansion = false } = options;
   const started = performance.now();
   const under: SessionState = { searchPath, timeZone, dateStyle };
-  const analysis = await analyze(catalog, text, paramOids, under, writtenNames(stmt));
+  const analysis = await analyze(catalog, text, paramOids, under, writtenNames(stmt), !expansion);
   if ("refused" in analysis) {
     const f = analysis.refused;
     // a table the catalog does not hold: where its copy is, or the `mason add` away
@@ -515,7 +518,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
     const filtered = await expandRowFilters(catalog, stmt, analysis, under, grants.rows);
     if (filtered !== null) {
       let inner: DuckPlan;
-      try { inner = await planDuck({ ...options, text: filtered.text, stmt: filtered.stmt, base: 0, paramOids: analysis.params, depth: depth + 1, grants: undefined, walls: filtered.walls }); }
+      try { inner = await planDuck({ ...options, text: filtered.text, stmt: filtered.stmt, base: 0, paramOids: analysis.params, depth: depth + 1, grants: undefined, walls: filtered.walls, filtered: true }); }
       catch (e) {
         if (!(e instanceof StatementError)) throw e;
         // a data exception may be a bound value's, not the statement's: `--set tenant=abc` on an integer

@@ -24,8 +24,10 @@ const LB = "a\nb";
 const schema: PgSchema = { database: "shop", tables: [
   { name: "orders", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int8" }, { name: "tenant_id", type: "int4" }] },
   { name: "lbt", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int8" }, { name: "tenant_id", type: "int4" }, { name: LB, type: "int4" }] },
+  { name: "items", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int8" }, { name: "lbt_id", type: "int8" }, { name: "qty", type: "int4" }] },
 ] };
-const copied = schema.tables.map((t) => ({ source: `public.${t.name}`, columns: t.columns.map((c) => ({ name: c.name })), key: t.primaryKey, foreignKeys: [] }));
+const keys: Record<string, unknown[]> = { items: [{ column: "lbt_id", target: "public.lbt", targetColumn: "id" }] };
+const copied = schema.tables.map((t) => ({ source: `public.${t.name}`, columns: t.columns.map((c) => ({ name: c.name })), key: t.primaryKey, foreignKeys: keys[t.name] ?? [] }));
 let store: DuckStore, api: PgApiServer;
 const clients: pg.Client[] = [];
 
@@ -41,12 +43,15 @@ roles:
     tables:
       orders: { where: "tenant_id = :tenant" }
       lbt: { where: "tenant_id = :tenant" }
+      items: { through: lbt }
 `);
   store = await DuckStore.open(path.join(home, "duck.db"), () => undefined);
   await store.writer.run("CREATE TABLE public.orders (id BIGINT, tenant_id INTEGER)");
   await store.writer.run("INSERT INTO public.orders VALUES (1, 1), (2, 2), (3, 1)");
   await store.writer.run(`CREATE TABLE public.lbt (id BIGINT, tenant_id INTEGER, "a\nb" INTEGER)`);
-  await store.writer.run("INSERT INTO public.lbt VALUES (1, 1, 10), (2, 2, 20)");
+  await store.writer.run("INSERT INTO public.lbt VALUES (1, 1, 10), (2, 2, 20), (3, 1, 30)");
+  await store.writer.run("CREATE TABLE public.items (id BIGINT, lbt_id BIGINT, qty INTEGER)");
+  await store.writer.run("INSERT INTO public.items VALUES (10, 1, 4), (11, 2, 5), (12, 3, 6)");
   const live = new LiveRoles(folder, root, () => copied as never);
   const wired = { ...listenerLogins(new LiveUsers(usersFile, API_KEY), API_KEY), roles: () => live.now() };
   api = await startPostgresApi({ port: 0, host: "127.0.0.1", tls: null, database: "shop", masonVersion: "test",
@@ -83,15 +88,28 @@ test("issue 956: a role's row filter on a table with a line-break column blocks 
   assert.match(lb, /^ERROR 0A000: .*line break.*"a\\nb".*Mason gap name-line-break/, lb);
 });
 
-test("issue 956: a statement of no table that orders text, with a line-break alias, is answered as before", async () => {
-  // src/duck/plan.ts `ordersText` reads the analysis's collations and types alone (names false): the catalog answers
-  // such a statement whole, so its own aliases are never refused there
+test("issue 956: a role's through: a table with a line-break column answers the child table's statements", async () => {
+  // the filter's expansion reads lbt, whose column no statement of the client's names: only the names the client's
+  // statement reaches are refused (the re-check of 0c65fb94 found every statement on items refused by name)
+  const c = new pg.Client({ host: "127.0.0.1", port: api.port, database: "shop", user: "t2", password: addUser("t2", "tenant", { tenant: "1" }) });
+  await c.connect();
+  clients.push(c);
+  assert.equal(await ask(c, "SELECT count(*) FROM items"), '[["2"]]');
+  assert.equal(await ask(c, "SELECT id, qty FROM items ORDER BY id"), '[["10",4],["12",6]]');
+  assert.equal(await ask(c, "SELECT sum(qty) FROM items WHERE qty > 0"), '[["10"]]');
+  const lb = await ask(c, "SELECT i.id FROM items i JOIN lbt l ON l.id = i.lbt_id");
+  assert.match(lb, /^ERROR 0A000: .*"a\\nb".*Mason gap name-line-break/, lb);
+});
+
+test("issue 956: a statement of no table that orders text under a long escaped alias is answered or refused by name, never a crash", async () => {
+  // the re-check of 0c65fb94: its analysis read every line break as a space, and `\ (` crashed the parse (XX000)
   const c = new pg.Client({ host: "127.0.0.1", port: api.port, database: "shop", user: "e1", password: addUser("e1", "everything") });
   await c.connect();
   clients.push(c);
-  for (const sql of [`SELECT 'a' < 'b' AS "x\ny"`, `SELECT max(v) AS "x\ny" FROM (VALUES ('a'), ('b')) t(v)`]) {
-    const r = await c.query({ text: sql, rowMode: "array" }).catch((e: Error) => e);
-    assert.ok(!(r instanceof Error), `${sql}: ${r instanceof Error ? r.message : ""}`);
-    assert.equal(r.fields[0]!.name, "x\ny", sql);
-  }
+  const parens = (n: number): string => "(".repeat(n);
+  // this listener's database is C, where B sorts before a
+  assert.equal(await ask(c, `SELECT min(v) FROM (VALUES ('a', 1), ('B', 2)) t(v, "${parens(40)} (")`), '[["B"]]');
+  const lf = `${parens(20)}\n${parens(20)}`;
+  const r = await ask(c, `WITH c("${lf}") AS (VALUES ('a'), ('B')) SELECT min(c."${lf}") FROM c`);
+  assert.ok(r === '[["B"]]' || /^ERROR 0A000: .*Mason gap name-(line-break|unreadable)/.test(r), r);
 });
