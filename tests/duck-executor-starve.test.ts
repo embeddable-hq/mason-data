@@ -8,8 +8,11 @@
  * the small ones in that statement's own vectors (`vectorClock`): how many vectors of Mason functions the executor ran
  * while a small statement waited. A load slows the calls and the small statements alike, so the count stays put. Without
  * the turn (src/duck/functions.ts `registerTurn`) the executor's loop runs 1,000 calls before it turns, and a small
- * statement needs about eight turns, so it waits thousands of vectors. With the turn it waits tens. And no heavy
- * statement runs to its end for the test's sake: each is cancelled once its test has seen enough of its vectors.
+ * statement needs about eight turns, so it waits thousands of vectors. With the turn it waits tens. What is timed in ms
+ * is held to a baseline measured just before, in the same run on the same machine: a small statement's median idle
+ * (`mostBeside`, for a login, the command server and a shape that calls nothing) and the executor's loop's own
+ * (`mostHeld`, its worst single hold). And no heavy statement runs to its end for the test's sake: each is cancelled
+ * once its test has seen enough.
  */
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
@@ -66,12 +69,22 @@ const vectorsSoFar = async (): Promise<number> => {
  * THE HEAVY STATEMENT'S OWN CLOCK: `vectorClock` waits until `q` runs Mason functions (its first vector counted), and
  * `timed(f)` then times `f` in vectors: how many the executor ran from the end of the last reading to the end of this
  * one, `f`'s wait and the reading's own included. `ran` is every vector since the first.
+ *
+ * Until that first vector nothing calls, so each reading is the executor's loop alone (`loopBeside`): the statement's
+ * start must not hold it either, past `mostHeld` of `heldIdle`, the loop's median idle measured before it.
  */
-async function vectorClock(q: ReturnType<typeof heavy>, what: string): Promise<{ timed: <T>(f: () => Promise<T>) => Promise<{ ms: number; vectors: number; value: T }>; ran: () => number }> {
-  const zero = await vectorsSoFar();
-  let last = zero;
-  while (q.running() && last === zero) { await sleep(10); last = await vectorsSoFar(); }
+async function vectorClock(q: ReturnType<typeof heavy>, what: string, heldIdle: number): Promise<{ timed: <T>(f: () => Promise<T>) => Promise<{ ms: number; vectors: number; value: T }>; ran: () => number; started: string }> {
+  const read = await timed(vectorsSoFar);
+  const zero = read.value;
+  let last = zero, worst = read.ms;
+  while (q.running() && last === zero) {
+    await sleep(10);
+    const r = await timed(vectorsSoFar);
+    last = r.value;
+    worst = Math.max(worst, r.ms);   // (the reading that met the first vector waited one turn at most)
+  }
   if (last === zero) { const r = await q.answer; assert.fail(`${what} ended before it called a Mason function: ${r instanceof Error ? r.message : `${r.rowCount} row(s)`}`); }
+  assert.ok(worst <= mostHeld(heldIdle), `the executor's loop was held ${Math.round(worst)} ms as ${what} started, against ${heldIdle.toFixed(1)} ms idle`);
   const first = last;
   return {
     timed: async (f) => {
@@ -82,6 +95,7 @@ async function vectorClock(q: ReturnType<typeof heavy>, what: string): Promise<{
       return { ms: r.ms, vectors, value: r.value };
     },
     ran: () => last - first,
+    started: `the executor's loop as it started ${Math.round(worst)} ms at worst, against ${heldIdle.toFixed(1)} ms idle`,
   };
 }
 const median = (xs: readonly number[]): number => { const s = [...xs].sort((x, y) => x - y); return s.length === 0 ? Infinity : s[Math.floor((s.length - 1) / 2)]!; };
@@ -132,8 +146,9 @@ const mostBeside = (idleMs: number): number => Math.max(25 * idleMs, 100);
  * function counts, `store.functionCalls`) is answered by the worker's loop alone, so its time is how long that loop was
  * held, never DuckDB's work beside it. Asked again and again, side by side with the small statements, so a single hold
  * meets a request in flight (a hold as a statement starts met none of the small statements' own waits). Its median idle
- * is a millisecond or less; beside the engine's own work, loaded or not, its worst was WORST_LOOP_SEEN here. A small
- * statement's own worst is no bound: the engine's work beside it once held one 889 ms against 3 ms idle.
+ * is a millisecond or less. Beside the engine's own work its worst was 48 ms here under load, and 117 ms as a
+ * function-calling statement started (`vectorClock`); held 1 s, it is 1 s. A small statement's own worst is no bound:
+ * the engine's work beside it once held one 889 ms against 3 ms idle.
  */
 const loopIdle = async (): Promise<number> => {
   const idle: number[] = [];
@@ -152,9 +167,9 @@ const besideNative = async (q: ReturnType<typeof heavy>, b: pg.Client): Promise<
   const [waits, loop] = await Promise.all([smallsBeside(q, b).finally(() => { done = true; }), loopBeside(q, () => done)]);
   return { waits, loop };
 };
-/** The most the executor's loop may be held once beside a heavy statement that calls nothing, against its median idle:
- *  looser than a median's bound, since a scheduler under load parks a thread now and then. */
-const mostHeld = (idleMs: number): number => Math.max(50 * idleMs, 250);
+/** The most the executor's loop may be held once, against its median idle, beside a heavy statement that calls nothing
+ *  or as one starts: looser than a median's bound, since a scheduler under load parks a thread now and then. */
+const mostHeld = (idleMs: number): number => Math.max(50 * idleMs, 400);
 /** the rounds of a login, a ping and a new session's statement asked beside the calling statement */
 const ROUNDS = 5;
 
@@ -168,10 +183,10 @@ test("a statement calling a Mason function on every row starves no one but its t
   // worker). They are timed in ms against a small statement's median idle on an open session, measured just before
   // on the same machine and load (`mostBeside`): the main thread held 1.5 s on each ping is caught, as main's fixed
   // second caught it, and a slow runner slows both sides.
-  const idle = await idleMedian(b);
+  const idle = await idleMedian(b), held = await loopIdle();
   const slow = heavy(t, a, CALLING, 90_000);
   try {
-    const clock = await vectorClock(slow, CALLING);
+    const clock = await vectorClock(slow, CALLING, held);
     const logins: number[] = [], pings: number[] = [], copies: number[] = [];
     // only rounds answered wholly beside the calling statement are judged: a wait it ended is no wait beside it (the
     // round it ended is still said)
@@ -187,7 +202,7 @@ test("a statement calling a Mason function on every row starves no one but its t
       if (slow.running()) beside++;
     }
     const said = `a login + SELECT 1 ${logins.join(", ")} ms; /api/ping ${pings.join(", ")} ms; a statement over a copied table ${copies.join(", ")} vectors; against ${Math.round(idle)} ms idle`;
-    t.diagnostic(`beside the calling statement: ${said}`);
+    t.diagnostic(`beside the calling statement: ${said}; ${clock.started}`);
     // the rounds take seconds and the statement tens of them (6 M rows): only rounds held behind it see it end first
     assert.equal(beside, ROUNDS, `${beside} of ${ROUNDS} rounds were answered in the ${clock.ran()} vectors of the calling statement (${said}): they waited for it to end`);
     assert.ok(median(logins) <= mostBeside(idle), `a new session's login and SELECT 1 took ${logins.join(", ")} ms during the calling statement, against ${Math.round(idle)} ms idle`);
@@ -203,7 +218,7 @@ test("a statement calling a Mason function on every row starves no one but its t
 // timed in its own vectors (above): `VECTORS` of them, about a third of a statement over `wide`, hold fewer than one small
 // statement without the turn, and dozens with it. A shape the engine computes itself (`calls: false`: `to_char` and the
 // week's arithmetic are DuckDB's own today, with a call or two per group at most) is held as the jsonb test below holds
-// one: the small statement's median wait beside it against its own median idle (`mostBeside`). Each shape says which it
+// one: the small statement's median wait beside it against its own median idle (`mostBeside`), and the executor's loop beside it (`mostHeld`). Each shape says which it
 // is, and is held to it: a shape that stopped calling would time nothing in vectors, and one that started calling would
 // be timed by the wrong clock. The heavy statement is cancelled once the test has seen enough; where it ends before, its
 // rows are checked.
@@ -224,8 +239,9 @@ for (const [shape, sql, rows, calls] of [
     let q: ReturnType<typeof heavy> | undefined;
     try {
       if (calls) {
+        const held = await loopIdle();
         q = heavy(t, a, sql, 150_000);
-        const clock = await vectorClock(q, sql);
+        const clock = await vectorClock(q, sql, held);
         const waits: number[] = [], ms: number[] = [];
         while (q.running() && clock.ran() < VECTORS) {
           const small = await clock.timed(() => b.query("SELECT 1 FROM small LIMIT 1"));
@@ -236,7 +252,7 @@ for (const [shape, sql, rows, calls] of [
         const ran = clock.ran();
         q.stop();
         const r = await endedWell(q, sql);
-        t.diagnostic(`${waits.length} small statements in ${ran} vectors of ${shape}${r === null ? " (then cancelled)" : " (all of it)"}: a median wait of ${median(waits)} vectors, the most ${Math.max(...waits)}; ${Math.round(median(ms))} ms median, ${Math.round(Math.max(...ms))} ms the slowest`);
+        t.diagnostic(`${waits.length} small statements in ${ran} vectors of ${shape}${r === null ? " (then cancelled)" : " (all of it)"}: a median wait of ${median(waits)} vectors, the most ${Math.max(...waits)}; ${Math.round(median(ms))} ms median, ${Math.round(Math.max(...ms))} ms the slowest; ${clock.started}`);
         if (r !== null) assert.equal(r.length, rows, "and the heavy statement answers");
         assert.ok(waits.length >= 5, `${waits.length} small statements were answered in ${ran} vectors of ${shape}: it held the executor's loop`);
         assert.ok(median(waits) <= MOST_VECTORS, `a small statement waited for a median of ${median(waits)} vectors of ${shape}: it held the executor's loop`);
@@ -264,9 +280,9 @@ for (const [shape, sql, rows, calls] of [
 // 20 kB documents (~200 ms a vector) a small statement of another session waited 10.3 s median, 15.2 s at worst, beside
 // `count(*) … WHERE j @> '{"a": 1}'` over 1 M rows (11.4 s / 12.5 s beside `(j -> 'a') IS NOT NULL`), against ~9 ms
 // idle. No turn can bound that; only no call can: a template of scalars and a read's nullness are DuckDB's own SQL
-// (src/duck/rewrite.ts nativeContains, jsonNullTest). Held two ways: DETERMINISTIC, no function at all (the turn
+// (src/duck/rewrite.ts nativeContains, jsonNullTest). Held three ways: DETERMINISTIC, no function at all (the turn
 // counted too) across the statement; and the small statement's median wait beside it against its own median idle
-// (`mostBeside`). No vector clock here, since nothing calls: the samples stop at `SAMPLES` or the statement's end, and
+// (`mostBeside`), and the executor's loop beside it (`mostHeld`). No vector clock here, since nothing calls: the samples stop at `SAMPLES` or the statement's end, and
 // the heavy statement is cancelled then, so a slow runner cuts short nothing the test needs.
 test("a small statement is not held by a native @> or -> over wide jsonb documents", { timeout: 240_000 }, async (t) => {
   t.diagnostic(`jwide: ${JWIDE_ROWS} rows of 20 kB documents built in ${Math.round(jwideBuild.ms)} ms`);
