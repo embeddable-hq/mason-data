@@ -1386,8 +1386,9 @@ test("a key restored with synchronous_commit = off, or dropped and restored in o
     assert.ok(logged.slice(from).some((l) => /^public\.g: replication: \S+app\.yml: tables\.g: public\.g had no primary key \(id\) on the database when some of its changes were written, so two of its rows could share it then, though it is back now\. /.test(l)), logged.slice(from).join("\n"));
     assert.ok(!logged.slice(from).some((l) => l.startsWith("public.df: replication: ")), `df is never refused\n${logged.slice(from).join("\n")}`);
 
-    // THE KEY'S RETURN COMMITTED ASYNCHRONOUSLY, just before the catch-up reads it: three times
-    for (let cycle = 1; cycle <= 3; cycle++) {
+    // THE KEY'S RETURN COMMITTED ASYNCHRONOUSLY, just before the catch-up reads it: six times, as the commit's WAL may
+    // still be written before that read (with the write position, one cycle in three or so lost the row)
+    for (let cycle = 1; cycle <= 6; cycle++) {
       let entered!: () => void, go!: () => void;
       const reached = new Promise<void>((r) => { entered = r; });
       hold = { entered, go: new Promise<void>((r) => { go = r; }) };
@@ -1395,6 +1396,14 @@ test("a key restored with synchronous_commit = off, or dropped and restored in o
         psql(url, "ALTER TABLE a DROP CONSTRAINT a_pkey");
         psql(url, "INSERT INTO a VALUES (3, 'twin')");
         await Promise.race([reached, new Promise((_, no) => setTimeout(() => no(new Error(`cycle ${cycle}: a's catch-up never reached its key\n${logged.slice(-12).join("\n")}`)), 30_000))]);
+        // the stream current with what the database has WRITTEN, so a position read now that stops there is passed at
+        // once, before the asynchronous commit below reaches the stream (the review's losing runs; its runs whose
+        // stream was behind stayed equal)
+        const written = parseLsn(psql(url, "SELECT pg_current_wal_lsn()"));
+        await until(async () => {
+          (sync as unknown as { stream: { poke(): void } | null }).stream?.poke();
+          return parseLsn((await sync.streamStatus({ refresh: false }))!.position) >= written;
+        }, `cycle ${cycle}: the stream current`, logged, 20_000);
         await c.pg.query("SET synchronous_commit = off; BEGIN; ALTER TABLE a REPLICA IDENTITY FULL; DELETE FROM a WHERE v = 'twin'; ALTER TABLE a ADD PRIMARY KEY (id); " +
           "ALTER TABLE a REPLICA IDENTITY DEFAULT; COMMIT");
       } finally { go(); }
