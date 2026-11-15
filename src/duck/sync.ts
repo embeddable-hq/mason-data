@@ -66,7 +66,7 @@ import { DuckDBEnumType, DuckDBListType, type DuckDBType } from "@duckdb/node-ap
 import type { DuckConnection } from "./executor.ts";
 import type { PgApiType, PgCollation, PgColumn, PgJoin, PgSchema, PgTable, PgView } from "../api/postgres/schema.ts";
 import { wireColumn } from "./types.ts";
-import { nextPollDelayMs, SNAPSHOT_SQL, snapshotXmin, xmin8Sql, xminBeforeHolds, xminBeforeSql } from "../cdc/poll.ts";
+import { fileFactsSql, nextPollDelayMs, rowsHeldSql, SNAPSHOT_SQL, snapshotXmin, xmin8Sql, xminBeforeHolds, xminBeforeSql } from "../cdc/poll.ts";
 import { pgIdent } from "../cdc/pg-wire.ts";
 import { regclassName, shapeColumns, shapeSql, shapeTuples } from "../cdc/shape.ts";
 import type { RelationColumn } from "../cdc/pgoutput.ts";
@@ -904,6 +904,29 @@ export function copyParallelOf(env: NodeJS.ProcessEnv): number {
 /** a copy begun before that cannot be continued as it stands (`copy`): started over once, said with this reason */
 class StartOver extends Error {}
 
+/** HOW OFTEN A WHOLE SYNC THAT WAITS FOR AN OPEN TRANSACTION CHECKS AGAIN (`RewriteWait`): a read of the catalog, and
+ *  of the table only for a rewrite not checked before (`rowsHeldSql`) */
+export const REWRITE_RECHECK_MS = 30_000;
+
+/**
+ * A WHOLE SYNC THAT WOULD READ NONE OF ITS TABLE'S ROWS (issue 1025): the table was rewritten (an ALTER TABLE that
+ * rewrites it, a TRUNCATE and a load, pg_repack) after the oldest transaction still open on the database began, so
+ * every row now carries an xmin at or past the first snapshot's xmin, which the copy's hold (`xminBeforeSql`) leaves
+ * out: swapped in, the table served 0 rows until its catch-up. Never swapped: the sync waits for that transaction to
+ * end, checked every `REWRITE_RECHECK_MS`, and the table's synced data serves as it was meanwhile. `writtenBy` is the
+ * rewrite's catalog row (`fileFactsSql`), so a check again of the same rewrite reads no row (`said`: said before).
+ */
+class RewriteWait extends Error {
+  readonly writtenBy: string;
+  readonly said: boolean;
+  constructor(message: string, writtenBy: string, said: boolean) { super(message); this.writtenBy = writtenBy; this.said = said; }
+}
+
+/** the words for a table rewritten after a read's snapshot was taken (issue 1025), `when` saying which read */
+function rewrittenText(source: string, when: string): string {
+  return `the database rewrote ${source} ${when} (its file changed: a TRUNCATE, VACUUM FULL, CLUSTER, an ALTER TABLE that rewrites it, or a tool that swaps its file such as pg_repack)`;
+}
+
 /** A COPY IN PROGRESS: what it was begun with (`_mason.copy_progress`, one row per table, written once in its own
  *  transaction) — the first snapshot every chunk is held to (null: a recopy, one transaction), the columns it is made
  *  with (`columnsKey`), its exact numerics' scales, its heap pages when it began — and what it has committed since
@@ -1254,6 +1277,11 @@ export class Sync {
   private readonly copyParallel: number;
   /** how long a copy's chunk should take to read, in seconds (`COPY_CHUNK_SECONDS`, `nextChunkPages`) */
   private readonly copyChunkSeconds: number;
+  /** how often a whole sync that waits for an open transaction checks again (`RewriteWait`) */
+  private readonly rewriteRecheckMs: number;
+  /** the tables whose whole sync waits for an open transaction older than their rewrite (`RewriteWait`): the rewrite's
+   *  catalog row (`fileFactsSql` `written_by`) and the words said of it, so a check again of it reads no row */
+  private readonly rewriteWaits = new Map<string, { writtenBy: string; message: string }>();
   /** each copy whose chunks are being read, as they are (`CopyLive`): `state` renders it at the moment it is asked */
   private readonly copyLive = new Map<string, CopyLive>();
   /** a test's: told what each chunk did (`ChunkEvent`), inside the chunk's transaction before it commits ("read") and
@@ -1337,7 +1365,7 @@ export class Sync {
 
   constructor(store: DuckStore, source: Source, database: string, log: (line: string) => void, intervalMs: number, mode: SyncMode = "poll",
     replication: SyncReplication | null = null,
-    options: { streamReportMs?: number; copyChunkRows?: number; copyParallel?: number; copyChunkSeconds?: number; onChunk?: (e: ChunkEvent) => void | Promise<void>; diskFree?: (dir: string) => number;
+    options: { streamReportMs?: number; copyChunkRows?: number; copyParallel?: number; copyChunkSeconds?: number; rewriteRecheckMs?: number; onChunk?: (e: ChunkEvent) => void | Promise<void>; diskFree?: (dir: string) => number;
       json?: Partial<KeptOptions>; generated?: GeneratedOptions; onReplication?: (made: boolean) => void;
       /** each failure and notable event of the sync, as it happens (src/duck/events.ts): the run records them */
       onEvent?: (e: SyncEventInput) => void;
@@ -1355,6 +1383,7 @@ export class Sync {
     }
     this.copyChunkSeconds = options.copyChunkSeconds ?? COPY_CHUNK_SECONDS;
     if (!(this.copyChunkSeconds > 0)) throw new Error(`a first sync's chunk takes a positive number of seconds, not ${this.copyChunkSeconds} (Mason bug: report it; copyChunkSecondsOf reads MASON_COPY_CHUNK_SECONDS)`);
+    this.rewriteRecheckMs = options.rewriteRecheckMs ?? REWRITE_RECHECK_MS;
     this.onChunk = options.onChunk;
     this.onEvent = options.onEvent ?? (() => undefined);
     this.onColumnsChanged = options.onColumnsChanged;
@@ -3786,7 +3815,8 @@ export class Sync {
       if (this.queuedRebuild(t.source) || this.rebuildingNow?.source === t.source) continue;
       // its columns are being read again: copied once they are, with them
       if (this.reshaping.has(t.source)) continue;
-      if (this.states.get(t.source)?.phase === "copied" && this.copiedAs.get(t.source) !== columnsKey(t.columns)) this.log(`${t.source}: its columns are not the ones it was synced with: it is read again whole`);
+      // said once: a sync that waits for an open transaction (`RewriteWait`) is queued again at every check
+      if (!this.rewriteWaits.has(t.source) && this.states.get(t.source)?.phase === "copied" && this.copiedAs.get(t.source) !== columnsKey(t.columns)) this.log(`${t.source}: its columns are not the ones it was synced with: it is read again whole`);
       this.enqueue(t.source, { kind: "copy" });
     }
     // a table copied and not yet caught up (a slot new to the copy, or a run that stopped first): its one poll
@@ -4208,6 +4238,13 @@ export class Sync {
           // its columns named by position: a source column named rowid would hide the stage's own, which a piece reads
           const staged = Number((await w.run(`CREATE OR REPLACE TEMP TABLE ${ident(`${POLL_STAGE}${pieced.length}`)} AS SELECT * FROM (SELECT ${cols} FROM ` +
             `${pq(`SELECT ${pgCols} FROM ${from} WHERE ${xmin8Sql(xmax)} >= ${watermark}`)}) AS polled(${t.columns.map((_, i) => `c${i}`).join(", ")})`)).rowsChanged);
+          // REWRITTEN SINCE THE POLL'S SNAPSHOT (issue 1025): its read, under the lock it still holds, found the new file,
+          // whose rows (an ALTER TABLE's, a TRUNCATE's load) the snapshot cannot see, and the count below would then
+          // delete every key the synced table holds. Nothing of it is written; its next poll reads every row again
+          const file = await this.fileFacts(w, from, null);
+          if (file.seen === null || file.seen !== file.now) {
+            throw new Error(`${rewrittenText(t.source, "while this poll read it")}, so the poll's snapshot sees none of its rows: nothing of this read was written, and its next poll reads it again`);
+          }
           if (staged > POLL_PIECE_ROWS) {
             const c1 = Date.now();
             doing = `${t.source}: counting the keys its ${staged} changed row(s) add to the synced table (the stage anti-joined with its keys)`;
@@ -4349,7 +4386,8 @@ export class Sync {
       // a copy begun before (a run that died or stopped, a copy that failed): continued where its columns are the same
       kept = recopy ? await this.forgetCopy(t, side) : await this.resumable(t, side);
       const resumed = kept;
-      if (resumed === null) {
+      // said once, never at every check of a sync that waits for an open transaction (`RewriteWait`)
+      if (resumed === null && !this.rewriteWaits.has(t.source)) {
         // the stream (or the other tables' polls) goes on: the slot holds no WAL for this copy, and the table joins once
         // caught up from the copy's snapshot
         const beside = this.replicated(t) ? "beside the stream, which goes on keeping the other tables current: it is streamed once caught up by one poll from the snapshot it was read at"
@@ -4428,6 +4466,21 @@ export class Sync {
         // copy as it was meanwhile
         this.log(`sync of ${t.source} stopped: Mason is stopping (${where === null ? "rolled back; it is synced at the next start" : `the chunks in flight rolled back; it continues ${where} at the next start`})`);
         if (first) await this.record({ ...was, phase: "waiting", error: null }, undefined, w);
+        return;
+      }
+      // A TABLE REWRITTEN AFTER AN OPEN TRANSACTION BEGAN (issue 1025, `heldFile`): never swapped in empty. It waits for
+      // that transaction, checked again soon and not backed off as a failure is (a check is a catalog read); said once
+      // a rewrite, and kept on its line meanwhile. A copy served before serves as it was
+      if (e instanceof RewriteWait) {
+        const m = `${this.errorText(e)}${first ? "" : "; the synced data serves as it was until then"}`;
+        this.retries.set(t.source, { failures: this.retries.get(t.source)?.failures ?? 0, at: Date.now() + this.rewriteRecheckMs });
+        if (!e.said) {
+          this.log(`sync of ${t.source} waits: ${m}`);
+          this.event({ kind: "full_sync_failed", table: t.source, message: m, cause: e });
+        }
+        await this.record({ ...this.states.get(t.source)!, phase: first ? "failed" : "copied", error: m }, undefined, w);
+        // the rewrite may have changed its columns (an ALTER TABLE … TYPE): read again now, as a failed sync's are
+        await this.reshapeAfterFailure(w, t);
         return;
       }
       const m = this.errorText(e);
@@ -4547,9 +4600,13 @@ export class Sync {
       const scaledNames = scaled.map((c) => `, ${ident(scaleColumn(c, t.columns.map((x) => x.name)))}`).join("");
       const scaledValues = scaled.map((c) => `, ${scaleSql(ident(c))}`).join("");
       const watermark = p.snapshot === null ? null : snapshotXmin(p.snapshot);
-      // THE COPY'S FILE: the first a chunk read (or the one its committed chunks were read from); set before any commit
-      // after it, so of two chunks that read different files the second to look starts the copy over, whichever commits
-      let filenode = p.filenode;
+      // THE COPY'S FILE: the one its first snapshot sees (`heldFile`), or the one its committed chunks were read from; a
+      // chunk that reads another starts the copy over, whichever commits
+      const filenode = p.filenode;
+      if (filenode === null) throw new Error(`the sync of ${t.source} has no file of the source table to hold its chunks to (Mason bug: report it, with mason logs)`);
+      // A COPY RESUMED: what a new snapshot sees of its file, before any chunk reads on (issue 1025; one begun by an
+      // earlier Mason took its file from its first chunk)
+      if (from !== null && watermark !== null) await this.resumedFileHolds(t, pgFrom, filenode, watermark);
       // as many readers as the first chunks fill (a small table opens only the readers it has chunks for)
       const readers = recopy ? 1 : Math.max(1, Math.min(this.copyParallel, chunksToRead(p.pages, nextChunkPages(ceiling, null, this.copyChunkSeconds), p.done).length));
       const pagesDone = pagesRead(p.done, p.pages);
@@ -4611,7 +4668,6 @@ export class Sync {
               const r = await c.run(`INSERT INTO ${side} (${named}${scaledNames}) SELECT ${stored}${scaledValues} FROM ${pq(`SELECT ${read} FROM ${pgFrom} WHERE ${watermark === null ? where : `${where} AND ${xminBeforeSql(watermark)}`}`)}`);
               // the table's file, under the lock this transaction's read holds until it ends: a rewrite moved its rows
               const node = Number((await c.runAndReadAll(`SELECT * FROM ${pq(`SELECT pg_relation_filenode(${pgLiteral(pgFrom)}::regclass)::bigint`)}`)).getRowsJS()[0]![0]);
-              filenode ??= node;
               if (node !== filenode) {
                 throw new StartOver(`the source rewrote ${t.source} since its sync began (its file changed: a VACUUM FULL, CLUSTER, TRUNCATE or column type change), so its rows moved between pages`);
               }
@@ -4724,7 +4780,9 @@ export class Sync {
     const snapshot = this.mode !== "recopy" ? ((await w.runAndReadAll(`SELECT * FROM ${pq(SNAPSHOT_SQL)}`)).getRowsJS()[0] as [string, string])[0] : null;
     // the backend this transaction reads on, once its snapshot is fixed: what a removal cancels (`noteBackend`)
     await this.noteBackend(this.rebuilder);
-    const described = await w.runAndReadAll(`DESCRIBE SELECT ${t.columns.map((c) => ident(c.name)).join(", ")} FROM ${SRC}.${ident(t.schema)}.${ident(t.table)}`);
+    // THE FILE EVERY CHUNK IS HELD TO, the one this snapshot sees, checked before anything reads the table (issue 1025)
+    const filenode = await this.heldFile(t, pgFrom, snapshot === null ? null : snapshotXmin(snapshot));
+    const described =await w.runAndReadAll(`DESCRIBE SELECT ${t.columns.map((c) => ident(c.name)).join(", ")} FROM ${SRC}.${ident(t.schema)}.${ident(t.table)}`);
     const scanned = new Map((described.getRowsJS() as unknown[][]).map((r) => [String(r[0]), String(r[1])]));
     // a domain's column as its base type reads: the extension's scan of the table does not know a domain
     const domains = t.columns.filter((c) => c.domain === true);
@@ -4748,7 +4806,77 @@ export class Sync {
     this.log(`syncing ${t.source}${snapshot === null ? "" : ` as of the source's snapshot ${snapshot}: what commits after it is caught up by one poll once read`}; ` +
       `${pages} page(s) in chunks sized to ~${this.copyChunkSeconds} s of reading each at the rate measured here (MASON_COPY_CHUNK_SECONDS; at most ${ceiling} page(s)${byBytes}), ` +
       `the first of ${firstSize} page(s) to measure it, ${readers === 1 ? "one at a time" : `${readers} at a time (MASON_COPY_PARALLEL), each a backend on the database`}`);
-    return { snapshot, columns: columnsKey(t.columns), exact, filenode: null, pages, done: [], rows: 0 };
+    return { snapshot, columns: columnsKey(t.columns), exact, filenode, pages, done: [], rows: 0 };
+  }
+
+  /** THE SOURCE TABLE'S FILE AS THE CONNECTION'S TRANSACTION SEES IT AND AS IT IS NOW (`fileFactsSql`) */
+  private async fileFacts(c: DuckConnection, pgFrom: string, watermark: bigint | null): Promise<{ seen: number | null; now: number; replaced: boolean | null; fresh: boolean | null; writtenBy: string | null }> {
+    const r = (await c.runAndReadAll(`SELECT * FROM ${pq(fileFactsSql(`${pgLiteral(pgFrom)}::regclass`, watermark))}`)).getRowsJS()[0] as [bigint | null, bigint, boolean | null, boolean | null, string | null];
+    return { seen: r[0] === null ? null : Number(r[0]), now: Number(r[1]), replaced: r[2], fresh: r[3], writtenBy: r[4] };
+  }
+
+  /** WHETHER A COPY HELD TO `watermark` READS NONE OF THE TABLE'S ROWS, which it has (`rowsHeldSql`), in the connection's
+   *  transaction: with the backend whose transaction is the watermark, when there is one */
+  private async heldReadsNone(c: DuckConnection, pgFrom: string, watermark: bigint): Promise<{ none: boolean; pid: number | null }> {
+    const r = (await c.runAndReadAll(`SELECT * FROM ${pq(rowsHeldSql(pgFrom, watermark))}`)).getRowsJS()[0] as [boolean, boolean, number | null];
+    return { none: !r[0] && r[1], pid: r[2] === null ? null : Number(r[2]) };
+  }
+
+  /**
+   * THE FILE A COPY IS HELD TO (issue 1025), read in its beginning's transaction right after its snapshot, before any
+   * read of the table: the file THAT SNAPSHOT SEES (`fileFactsSql` `seen`), never the one a first chunk happens to read
+   * — a rewrite between the snapshot and the first chunk was read as the copy's file, and its rows, invisible to the
+   * hold, were swapped in as 0. Every chunk compares the file it read under its lock with this one (`readChunks`).
+   *  - The file changed since the snapshot (`seen` not `now`, or the name is another table now): started over (`StartOver`),
+   *    a new snapshot.
+   *  - The file the snapshot sees was made at or after the hold's watermark (`fresh`, `replaced`), so by a rewrite after
+   *    the oldest transaction still open began: when the hold keeps none of the rows the table has (`heldReadsNone`: a
+   *    rewrite that writes its rows again), the sync waits for that transaction (`RewriteWait`); a CLUSTER, VACUUM FULL or
+   *    SET TABLESPACE keeps each row's xmin, and the copy goes on. A rewrite found before is not read again.
+   * A table created after the watermark is never `replaced`, and is read as before (its rows' xmins past the watermark
+   * are its catch-up's).
+   */
+  private async heldFile(t: AddedTable, pgFrom: string, watermark: bigint | null): Promise<number> {
+    const c = this.rebuilder.conn;
+    const f = await this.fileFacts(c, pgFrom, watermark);
+    if (f.seen === null || f.seen !== f.now) throw new StartOver(`${rewrittenText(t.source, "as its sync began")}, so it is read from a new snapshot`);
+    if (watermark === null || f.fresh !== true || f.replaced !== true || f.writtenBy === null) {
+      this.rewriteWaits.delete(t.source);
+      return f.seen;
+    }
+    const known = this.rewriteWaits.get(t.source);
+    if (known?.writtenBy === f.writtenBy) throw new RewriteWait(known.message, f.writtenBy, true);
+    const held = await this.heldReadsNone(c, pgFrom, watermark);
+    if (!held.none) {
+      this.rewriteWaits.delete(t.source);
+      return f.seen;
+    }
+    const holder = `transaction ${watermark & 0xffffffffn}${held.pid === null ? "" : ` (pid ${held.pid} in pg_stat_activity)`}`;
+    const message = `${rewrittenText(t.source, "after a transaction that is still open on the database began")}, so a sync now would read none of its rows. ` +
+      `Its sync waits for that ${holder} to end, and checks again every ${this.rewriteRecheckMs >= 1000 ? `${Math.round(this.rewriteRecheckMs / 1000)} s` : `${this.rewriteRecheckMs} ms`}`;
+    this.rewriteWaits.set(t.source, { writtenBy: f.writtenBy, message });
+    throw new RewriteWait(message, f.writtenBy, false);
+  }
+
+  /** A RESUMED COPY'S FILE, in a transaction of its own before its chunks read on (issue 1025): the file is the one its
+   *  chunks were read from, and was not made after its first snapshot's watermark by a rewrite that wrote its rows
+   *  again (which a copy begun by an earlier Mason could have taken from its first chunk); else started over */
+  private async resumedFileHolds(t: AddedTable, pgFrom: string, filenode: number, watermark: bigint): Promise<void> {
+    const w = this.rebuilder.conn;
+    await w.run("BEGIN TRANSACTION");
+    try {
+      const why = await this.interruptible(this.rebuilder, async (): Promise<string | null> => {
+        const f = await this.fileFacts(w, pgFrom, watermark);
+        if (f.seen === null || f.now !== filenode) return `the source rewrote ${t.source} since its sync began (its file changed: a VACUUM FULL, CLUSTER, TRUNCATE or column type change), so its rows moved between pages`;
+        if (f.fresh === true && f.replaced === true && (await this.heldReadsNone(w, pgFrom, watermark)).none) return `${rewrittenText(t.source, "after its sync's first snapshot")}, so its chunks read none of its rows`;
+        return null;
+      });
+      await w.run("COMMIT");
+      if (why !== null) throw new StartOver(why);
+    } catch (e) {
+      if (!(e instanceof StartOver)) await w.run("ROLLBACK");
+      throw e;
+    }
   }
 
   /** THE SOURCE TABLE'S VALUES OUT OF LINE, in bytes: its TOAST table's (`pg_table_size`, no index), 0 with none; the
@@ -4784,6 +4912,12 @@ export class Sync {
       return this.forgetCopy(t, side);
     }
     const chunks = (await w.runAndReadAll(`SELECT first_page, end_page, "rows", filenode FROM ${MASON_SCHEMA}.copy_chunks WHERE source = ${literal(t.source)} ORDER BY first_page`)).getRowsJS() as Array<[bigint, bigint | null, bigint, bigint]>;
+    // begun and no chunk committed (a run that died between the two): nothing read to keep, and no file its chunks were
+    // read from to hold the next ones to (issue 1025), so it begins again, a new snapshot
+    if (chunks.length === 0) {
+      this.log(`starting the sync of ${t.source} over, from its first page: no chunk of it was read before`);
+      return this.forgetCopy(t, side);
+    }
     const done = chunks.map(([first, end]) => ({ first: Number(first), end: end === null ? null : Number(end) }));
     const rows = chunks.reduce((n, c) => n + Number(c[2]), 0);
     const p: CopyProgress = { snapshot: row[0], columns: row[1], exact: new Map(JSON.parse(row[2]) as Array<[string, number]>), filenode: chunks.length ? Number(chunks[0]![3]) : null, pages: Number(row[3]), done, rows };

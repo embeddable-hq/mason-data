@@ -7,6 +7,7 @@ paths:
   - "tests/duck-copy-retry.test.ts"
   - "tests/duck-extensions.test.ts"
   - "tests/integration/duck-poll.itest.ts"
+  - "tests/integration/duck-rewrite.itest.ts"
 ---
 
 <!-- Loaded only when a matching file is read or edited (the paths above). CLAUDE.md lists every rules file. -->
@@ -88,10 +89,25 @@ paths:
   without the hold a row updated between two chunks is read twice (its old version from an early page, its new one at
   the heap's end; 250 keys of `duck-poll`'s resume test) or missed. Written with `age()`, never a text cast of `xmin`
   (the casts cost the source 5× a scan's CPU). It is exact only while no table rewrite (VACUUM FULL, CLUSTER, TRUNCATE,
-  a type change: rows MOVE between pages) happened since the first chunk and fewer than 2^30 transactions ran: the
+  a type change: rows MOVE between pages) happened since the first snapshot and fewer than 2^30 transactions ran: the
   table's `pg_relation_filenode`, read after each chunk under the lock its read still holds, and the snapshot's age are
   checked, and either starts the copy over from page 0, said. The swap asserts as many distinct keys as rows (a failure
   is a Mason bug: not swapped, copied again).
+- **A copy is held to the file its FIRST SNAPSHOT sees, never one a chunk happens to read, and never reads a rewritten
+  table as empty** (issue 1025; `heldFile`, `fileFactsSql`, `RewriteWait`): a rewrite is not MVCC-safe, so a snapshot
+  taken before it commits reads the new file once its read gets the lock, and an ALTER's or a TRUNCATE's rows there are
+  invisible to it; a copy that took its file from its first chunk swapped in 0 rows, served until its catch-up. The
+  beginning's transaction reads `pg_class.relfilenode` through its snapshot right after taking it, and every chunk's
+  file must be that one (else started over); a resumed copy checks its file once (`resumedFileHolds`), and one begun
+  with no chunk committed begins again. A file the snapshot sees whose catalog row was written at or after the
+  watermark, by a rewrite (`relfilenode` no longer the oid), is checked for a row the hold keeps (`rowsHeldSql`, a scan
+  only then): none (an ALTER, a TRUNCATE and a load, pg_repack) and the copy WAITS for the open transaction that holds
+  the watermark back, checked every `REWRITE_RECHECK_MS` (30 s), never backed off, said once and on the table's line,
+  the old copy serving; a CLUSTER, VACUUM FULL or SET TABLESPACE keeps each row's xmin and goes on. **A poll is held
+  to its snapshot's file the same way**: a read whose file is not the one the snapshot sees writes nothing and fails
+  (its count found 0 and deleted every key). `tests/integration/duck-rewrite.itest.ts` holds each, in both modes.
+  Still served late, by design: rows written after the oldest open transaction began, on a table not rewritten, wait
+  for the catch-up.
 - **A passthrough read (`pq`) names its columns through `pgColumnSql`**, the copy's chunks and the poll alike: an exact
   numeric as text, and as `text[]` a citext[] / inet[] / json[] (`KEPT_ARRAYS`) and an enum array (`enumLists`, by its
   stored type) — `postgres_query` hands each over as one VARCHAR DuckDB cannot cast to the column (the
