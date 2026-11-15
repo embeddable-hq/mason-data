@@ -79,18 +79,28 @@ export function fileFactsSql(regclass: string, watermark: bigint | null): string
     `c.xmin::text AS written_by FROM (SELECT ${regclass}::oid AS rel) r LEFT JOIN LATERAL (SELECT oid, relfilenode, xmin, ${fresh} AS fresh FROM pg_class WHERE oid = r.rel) c ON true`;
 }
 
+/** HOW MANY ROWS `rowsHeldSql` READS: the first visible rows of the table's scan, never the whole table (issue 1066) */
+export const HELD_SAMPLE_ROWS = 1_000;
+
 /**
- * WHETHER A COPY HELD TO `watermark` WOULD READ ANY ROW OF A TABLE (issue 1025), in the reading transaction's snapshot:
- * a row it keeps exists (`kept`), any row exists (`any`), and the backend whose transaction is the watermark, when one
- * is (`pid`: what holds every snapshot's xmin back). Asked only of a table whose file the snapshot sees was made at or
- * after the watermark (`fileFactsSql` `fresh` and `replaced`): a CLUSTER, a VACUUM FULL or a SET TABLESPACE keeps each
- * row's xmin, so `kept` finds one at once; a rewrite that writes its rows again (an ALTER TABLE, a TRUNCATE and a load,
- * pg_repack) leaves none, and the scan reads the table to its end once. Never an ORDER BY on the source.
+ * WHETHER A COPY HELD TO `watermark` WOULD READ ANY ROW OF A TABLE (issues 1025, 1066), from a SAMPLE of its rows in the
+ * reading transaction's snapshot: among the first `rows` visible rows of a plain scan, one the hold keeps (`kept`), any
+ * at all (`any`), and the backend whose transaction is the watermark, when one is (`pid`: what holds every snapshot's
+ * xmin back). Asked only of a table whose file the snapshot sees was made at or after the watermark (`fileFactsSql`
+ * `fresh` and `replaced`), so by a rewrite, and a rewrite treats EVERY row alike: an ALTER TABLE that rewrites, a
+ * TRUNCATE and a load, or pg_repack writes every row again, with an xmin the hold leaves out, so no row of any sample is
+ * kept; a CLUSTER, a VACUUM FULL or a SET TABLESPACE keeps every row's xmin, so the first row read is kept. The sample
+ * tells them apart as the whole table does (#1058's check read it all, minutes of AccessShareLock on a large table). It
+ * can differ only for a table that holds both kinds of row: a rewrite that kept xmins, then rows changed since the
+ * watermark ahead of every kept one in the scan; it then reads "none" where the whole table holds a kept row, so the
+ * sync waits for the open transaction rather than swap in part of the table. No ORDER BY and no ctid on the source:
+ * the scan stops at the LIMIT, and the caller bounds its time (pages emptied by deletes are read past) with a timeout.
  */
-export function rowsHeldSql(pgFrom: string, watermark: bigint): string {
+export function rowsHeldSql(pgFrom: string, watermark: bigint, rows: number = HELD_SAMPLE_ROWS): string {
   const low = watermark & 0xffffffffn;
-  return `SELECT EXISTS (SELECT 1 FROM ${pgFrom} WHERE ${xminBeforeSql(watermark)}) AS kept, EXISTS (SELECT 1 FROM ${pgFrom}) AS any, ` +
-    `(SELECT pid FROM pg_stat_activity WHERE backend_xid = '${low}'::xid LIMIT 1) AS pid`;
+  return `SELECT COALESCE(bool_or(s.kept), false) AS kept, count(*) > 0 AS any, ` +
+    `(SELECT pid FROM pg_stat_activity WHERE backend_xid = '${low}'::xid LIMIT 1) AS pid ` +
+    `FROM (SELECT ${xminBeforeSql(watermark)} AS kept FROM ${pgFrom} LIMIT ${Math.max(1, Math.floor(rows))}) s`;
 }
 
 /** `xminBeforeSql` is exact while the transaction's latest id is within 2^31 of the watermark: held to a margin of half

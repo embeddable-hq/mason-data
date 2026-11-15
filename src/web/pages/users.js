@@ -3,7 +3,7 @@
  * POST /api/users/<name>/from, /disable and /enable, DELETE /api/users/<name>. An added user's password lives in this page's memory while its one-time dialog is open, never in
  * storage, a URL or a log line.
  */
-import { actId, badge, button, code, copyable, copyClick, duration, empty, esc, json, panel, pop, renderFailure, ROOMS, serverHostNote, spanText, status, utcMinute, readOnlyLine, usersReadOnly, sendButton, failurePop } from "../shared.js";
+import { actId, badge, button, code, copyable, copyClick, duration, empty, esc, json, pop, renderFailure, ROOMS, serverHostNote, spanText, status, utcMinute, readOnlyLine, usersReadOnly, sendButton, failurePop, listTable } from "../shared.js";
 import { VIEW_HASHES } from "../routes.js";
 
 /** The users as the page reads them: with each one's last use (`mason user list` asks the same), then every 30 s. */
@@ -131,7 +131,7 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
   // a Remove's or a Disable's question is a popover beside the user's actions (`pop`), never a row: no row below it moves
   const pops = [];
   const ask = askOf(confirming);
-  return why + brokenNote + tabs + panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col" class="role">Role</th><th scope="col" class="status">Status</th><th scope="col" class="added">Added</th><th scope="col" class="num last">Last used</th><th scope="col" class="act"></th></tr></thead><tbody>${users.map((u) => {
+  return why + brokenNote + tabs + listTable("users", `<thead><tr><th scope="col">User</th><th scope="col" class="role">Role</th><th scope="col" class="status">Status</th><th scope="col" class="added">Added</th><th scope="col" class="num last">Last used</th><th scope="col" class="act"></th></tr></thead><tbody>${users.map((u) => {
     const active = u.removedAt == null;
     const last = lastUsedText(u, list.lastUsedNote, list.requestLogDays, now);
     const lastCell = !active ? "" : u.lastUsedAt != null
@@ -155,7 +155,7 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
       `<p class="pop-actions">${sendButton(`Change ${u.name}`, "Changing…", {}, "primary small", { busy, submit: true })} ${cancel}</p>` +
       `<input type="hidden" name="user" value="${esc(u.name)}"></form>`, { kind: "dialog", label: `Where ${u.name} connects from` }));
     else if (refused?.name === u.name) pops.push(failurePop(anchor, refused.failure, { dismissRefused: "" }));
-    return `<tr${active ? "" : ` class="removed"`}><th scope="row"><code class="name" title="${esc(u.name)}">${esc(u.name)}</code> <span class="dim">id ${esc(u.id)}</span></th>` +
+    return `<tr${active ? "" : ` class="removed"`}><th scope="row"><code class="name" title="${esc(u.name)}">${esc(u.name)}</code> <span class="dim" title="id ${esc(u.id)}">id ${esc(u.id)}</span></th>` +
       // the role it reads as (src/cli/roles.ts userRole): its own (mason user add --role) — one the roles file does not name,
       // said — or the file's default; none under a file with no default reads nothing, said; no roles file, every table
       `<td>${broken ? `<span class="warn">refused: the roles file can't be read</span>` : u.readsNothing === true ? `<span class="warn">no role, and the roles file has no default: its queries are refused</span>`
@@ -175,7 +175,7 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
       // Queries: its statements of the last 24 hours on Observability › Queries (a removed user's too: its past)
       `<td class="act" id="${esc(anchor)}"><a class="btn small" href="${esc(userQueriesHref(u.name))}" title="the queries ${esc(u.name)} sent in the last 24 hours">Queries</a>${!active || readOnly !== null ? "" : ` ${toggle(u, disabled, asking === "disable", busy && asking === null)} ${asking === "remove" ? button("Remove", {}, "danger small", { disabled: true, expanded: true })
         : button("Remove", { remove: u.name }, "danger small")}`}</td></tr>`;
-  }).join("")}</tbody></table>`) + pops.join("") + note("Last used", list.lastUsedNote);
+  }).join("")}</tbody>`) + pops.join("") + note("Last used", list.lastUsedNote);
 }
 
 /**
