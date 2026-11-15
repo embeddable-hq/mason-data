@@ -5073,10 +5073,11 @@ export class Sync {
       this.unread.delete(name);
       return types;
     } catch (e) {
-      const said = this.errorText(e);
-      if (this.unread.get(name) !== said) {
-        this.unread.set(name, said);
-        this.log(`${name} is left out of the catalog, as its synced data could not be read (every other table is served): ${said}`);
+      // once a reason, told by the error's own words (`messageOf`), never by the words Mason repeats
+      const reason = messageOf(e);
+      if (this.unread.get(name) !== reason) {
+        this.unread.set(name, reason);
+        this.log(`${name} is left out of the catalog, as its synced data could not be read (every other table is served): ${this.errorText(e)}`);
       }
       if (this.tables.has(name)) {
         void this.onWriter(() => this.forgetMissing(name)).then((gone) => { if (gone.length > 0) { this.kick(); void this.rebuildSchema().catch((x: unknown) => this.log(`the catalog could not be rebuilt (it is at the next pass): ${this.errorText(x)}`)); } }, (x: unknown) => {
