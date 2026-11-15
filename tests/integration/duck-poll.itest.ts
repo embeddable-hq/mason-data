@@ -1935,3 +1935,58 @@ test("a failed poll's event carries its code and origin: Postgres's SQLSTATE, th
     assert.ok(copied.length === 2 && copied.every((e) => e.code === null && e.origin === null), JSON.stringify(copied));
   } finally { await sync.stop(); await events.close(); await store.close(); }
 });
+
+// A KEY THE DATABASE NO LONGER KEEPS APART LOSES NO SYNCED ROW (issue 1027): a `key:` accepted over a unique index whose
+// index is dropped while Mason runs. Two rows then share a key, and the poll's write by key deleted BOTH synced rows and
+// inserted only the one it read: (1, 3, 'c') vanished from the synced data while the database still held it. Now every
+// read that writes by key asks the database first (src/cdc/key-held.ts): the poll is refused and rolled back, the
+// synced data serves as it was, and the table's error names the file, the key and the way out. A copy is refused the
+// same way before it reads a page. Once the index is back, the poll runs again and the synced data equals the source.
+test("a key: whose unique index is dropped while Mason runs: the poll is refused with the file and the key, and no synced row is lost", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  const source = ownDatabase("keyheld", "CREATE TABLE logs (tenant_id int NOT NULL, id int NOT NULL, note text, CONSTRAINT logs_pair UNIQUE (tenant_id, id)); " +
+    "INSERT INTO logs SELECT 1, g, chr(96 + g) FROM generate_series(1, 5) g; " +
+    "CREATE TABLE later (tenant_id int NOT NULL, id int NOT NULL, note text, CONSTRAINT later_pair UNIQUE (tenant_id, id)); INSERT INTO later VALUES (1, 1, 'a'), (1, 2, 'b')");
+  const url = `postgres://${source.user}${source.password ? `:${encodeURIComponent(source.password)}` : ""}@${source.host}:${source.port}/${source.database}`;
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "keyheld.db"), (l) => logged.push(l));
+  const sync = new Sync(store, source, source.database, (l) => logged.push(l), 3_600_000, "poll");
+  const cols = [{ name: "tenant_id", type: "integer", notNull: true, comment: null }, { name: "id", type: "integer", notNull: true, comment: null }, { name: "note", type: "text", notNull: false, comment: null }];
+  // built as src/cli/sources.ts addedTables builds a `key:` entry; `entryAt` is read through a cast, so the file loads at a commit without it
+  const keyed = (t: string): AddedTable => ({ source: `public.${t}`, schema: "public", table: t, key: ["tenant_id", "id"], primaryKey: [], bytes: 0, rows: null, foreignKeys: [], columns: cols,
+    sync: POLL("1h", 3600), ...{ entryAt: `mason/sources/app.yml: tables.${t}` } } as AddedTable);
+  const duck = async (t: string): Promise<string> =>
+    ((await store.writer.runAndReadAll(`SELECT tenant_id, id, note FROM public.${t} ORDER BY 1, 2, 3`)).getRowsJS() as unknown[][]).map((r) => r.join("\t")).join("\n");
+  const pg = (t: string): string => psql(url, `SELECT tenant_id, id, note FROM ${t} ORDER BY 1, 2, 3`);
+  const errorOf = (t: string): string | null => sync.state().find((s) => s.source === `public.${t}`)?.error ?? null;
+  try {
+    await sync.open();
+    await sync.setTables([keyed("logs")]);
+    await sync.once();
+    await sync.once();
+    assert.equal(await duck("logs"), pg("logs"), `synced, then caught up\n${logged.slice(-5).join("\n")}`);
+    const before = await duck("logs");
+    // the index gone, and a second row with the key (1, 3): the poll reads only the new row
+    psql(url, "ALTER TABLE logs DROP CONSTRAINT logs_pair; INSERT INTO logs VALUES (1, 3, 'twin')");
+    await sync.once();
+    assert.ok((await duck("logs")).includes("1\t3\tc"), `no synced row is lost: (1, 3, 'c') is still synced\n${await duck("logs")}\n${logged.slice(-5).join("\n")}`);
+    assert.equal(await duck("logs"), before, "the poll was rolled back whole: the synced data serves as it was");
+    const said = errorOf("logs") ?? "";
+    assert.match(said, /mason\/sources\/app\.yml: tables\.logs\.key: public\.logs has no unique index over \(tenant_id, id\) on the database now/, said);
+    assert.match(said, /the synced data serves as it was/, said);
+    assert.match(said, /Mason does not sync it until that is fixed, so that no synced row is lost\. Ask the database's owner to add a unique index over NOT NULL columns, or a primary key\./, said);
+    // a sync by hand is refused with the same words
+    await assert.rejects(sync.pollNow(["public.logs"]), /tables\.logs\.key: public\.logs has no unique index over \(tenant_id, id\)/);
+    assert.equal(await duck("logs"), before);
+    // a whole read is refused before it reads a page: the index dropped before the table is added
+    psql(url, "ALTER TABLE later DROP CONSTRAINT later_pair");
+    await sync.setTables([keyed("logs"), keyed("later")]);
+    await sync.once();
+    assert.match(errorOf("later") ?? "", /mason\/sources\/app\.yml: tables\.later\.key: public\.later has no unique index over \(tenant_id, id\)/, String(errorOf("later")));
+    assert.ok(!logged.some((l) => /^synced public\.later/.test(l)), "never swapped in");
+    // fixed on the database: the twin removed and the index back, so the next poll runs and the synced data is the source's
+    psql(url, "DELETE FROM logs WHERE note = 'twin'; ALTER TABLE logs ADD CONSTRAINT logs_pair UNIQUE (tenant_id, id); UPDATE logs SET note = 'polled' WHERE id = 4");
+    await sync.once();
+    assert.equal(await duck("logs"), pg("logs"), logged.slice(-5).join("\n"));
+    assert.equal(errorOf("logs"), null, "its error is cleared by the poll that ran");
+  } finally { await sync.stop(); await store.close(); }
+});
