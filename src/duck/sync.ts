@@ -1219,7 +1219,7 @@ export class Sync {
   /** a NAMED publication's gaps: each added table it does not carry, with the refusal (neither copied nor streamed) */
   private readonly unpublished = new Map<string, string>();
   /** a NAMED publication's column list, of each table it lists the columns of (`verifyPublication`): what the stream's
-   *  relation carries of it (`streamedOf`) */
+   *  relation carries of it (`relationOf`) */
   private readonly publishedColumns = new Map<string, readonly string[]>();
   /** WHAT THE RUN TOOK OF EACH TABLE'S COLUMNS, BY IDENTITY (`_mason.column_identity`, src/duck/column-identity.ts; issue
    *  1073): its oid, and each column's number, the name it was taken under and whether it is synced */
@@ -2754,9 +2754,8 @@ export class Sync {
    * columns held to what the run took of them before (`columnRecords`). A table whose entry would sync a column it left
    * out, under another name, is HELD (`unplaced`): said in the log, as an event and as its error while it is held (`state`:
    * `mason status`, the web page), with the line to write; not copied, polled, caught up or streamed, its synced data
-   * served as it was. A
-   * replicated one is marked behind, so it is caught up by one poll once it is let go (the stream skips its changes
-   * meanwhile). Every other table's record is written as taken. A copy recorded by a Mason before columns had numbers
+   * served as it was. A replicated one is marked behind, so it is caught up by one poll once it is let go (the stream
+   * skips its changes meanwhile). Every other table's record is written as taken. A copy recorded by a Mason before columns had numbers
    * takes them from its table now, where its names and types are the same: never read again for it.
    */
   private placeColumns(tables: readonly AddedTable[], confirmed: ReadonlySet<string>): void {
