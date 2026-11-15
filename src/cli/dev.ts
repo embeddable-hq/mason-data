@@ -30,7 +30,7 @@ import * as path from "node:path";
 import type { Server } from "node:http";
 import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
-import { checkSource, connectSource, maskedUrl, PRIMARY_NOTE, readSourceFacts, readTables, type SourceFacts } from "./preflight.ts";
+import { checkSource, connectSource, maskedUrl, PRIMARY_NOTE, readSourceFacts, readTables, type SourceFacts, type SourceTable } from "./preflight.ts";
 import { actRead, sourceCatalog, STATE_WAIT_MS, watchedRead } from "./source-catalog.ts";
 import { uiReadOnlyAllowSetting, uiReadOnlySetting, type PageArea } from "./ui-read-only.ts";
 import { backLinkOf, uiBackLinkSetting } from "./ui-back-link.ts";
@@ -42,7 +42,7 @@ import { createRunServer, listenOnLoopback, metricsFacts, usageFacts, type RunCo
 import { UiErrors } from "./ui-errors.ts";
 import type { RunMetrics } from "./metrics.ts";
 import { readGenerated } from "./generated-files.ts";
-import { addedTables, effectiveSync, entryName, excludeOf, goneNotes, leftOutArrivals, leftOutText, replicatedEntries, rereadSources, shownPath, syncWritten, withLeftOut, withTable, type LeftOut, type RunSources, type SourceFile } from "./sources.ts";
+import { addedTables, effectiveSync, entryName, excludeOf, goneNotes, leftOutArrivals, leftOutText, replicatedEntries, rereadSources, shownPath, syncWritten, keepLeftOut, keptBack, withLeftOut, withTable, type KeptOut, type LeftOut, type RunSources, type SourceFile } from "./sources.ts";
 import { newToken } from "./security.ts";
 import { alive, liveRun, processStart } from "./runs.ts";
 import { DEMO_DIR, DUCK_FILE, projectReadOnlySetting, projectSource, projectWriteRefusal, startSettingRefusal, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
@@ -556,14 +556,14 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // THE COLUMNS EACH TABLE HAD when the run's tables were last set from the catalog (issue 977): a column the database
   // has beyond them arrived while the run was up, and is left out where it may not be synced (`leftOutArrivals`)
   let columnsSet = new Map(facts.tables.map((t) => [t.source, t.columns.map((c) => c.name)]));
-  // what the run left out where it could not write the sources file (its files read-only here), by table, and the names
-  // of exclude: it took out: for this run
-  const leftOut = new Map<string, string[]>();
-  const goneOut = new Map<string, string[]>();
+  // what the run left out where it could not write the sources file (its files read-only here), by table: ONE net record
+  // for this run (`KeptOut`), and the warning that says its line to write now, which a later change replaces
+  const kept = new Map<string, KeptOut>();
+  const keptSaid = new Map<string, string>();
   /** Leaves out the secret-looking columns that arrived: `exclude:` written on each entry, as `mason add` writes it —
    *  else, where the project's files may not be written, left out for this run, with the line to add. Said in the log,
    *  as an event and among the run's warnings (`mason status`, the web page). */
-  const leaveOut = (file: SourceFile, arrived: readonly LeftOut[]): void => {
+  const leaveOut = (file: SourceFile, arrived: readonly LeftOut[], tables: readonly SourceTable[]): void => {
     const shown = shownPath(project.root, file.file);
     let why: string | null = projectWriteRefusal(project.root, process.env)?.message ?? null;
     let written = false;
@@ -582,13 +582,21 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       } catch (e) { why = `${shown}: ${(e as Error).message}`; }
     }
     for (const a of arrived) {
-      if (!written) {
-        leftOut.set(a.entry.table, [...(leftOut.get(a.entry.table) ?? []), ...a.columns]);
-        goneOut.set(a.entry.table, [...(goneOut.get(a.entry.table) ?? []), ...a.gone]);
-      }
-      const m = leftOutText(a, written ? shown : null, why);
+      // written, the file holds the whole exclude: now (`excludeOf` of the entry as the run took it); else kept for this run
+      if (written) kept.delete(a.entry.table);
+      else keepLeftOut(kept, a);
+      // what a start does with the file as it is: refuses it while its exclude: names a column the table lacks
+      const have = tables.find((t) => t.source === a.entry.table)?.columns.map((c) => c.name) ?? [];
+      const refused = file.tables.find((e) => e.table === a.entry.table)?.exclude.some((c) => !have.includes(c)) ?? false;
+      const m = leftOutText(a, written ? shown : null, why, refused);
       logLine(`[sync] ${m}`);
       events.record({ kind: "columns_changed", table: a.entry.table, message: m });
+      // a line to write said before for this table is out of date: the newest says the whole exclude: to write
+      const before = keptSaid.get(a.entry.table);
+      const i = before === undefined ? -1 : runWarnings.indexOf(before);
+      if (i >= 0) runWarnings.splice(i, 1);
+      if (written) keptSaid.delete(a.entry.table);
+      else keptSaid.set(a.entry.table, m);
       runWarnings.push(m);
     }
   };
@@ -597,9 +605,12 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     const now = catalog.facts();
     let read = readSources();
     if (!("message" in read)) {
-      const arrived = leftOutArrivals(read, now.tables, columnsSet, edit.edited ?? []);
-      if (arrived.length) { leaveOut(read, arrived); read = readSources(); }
-      if (!("message" in read)) read = withLeftOut(read, leftOut, goneOut);
+      // what arrived is found against the file AS THE RUN TAKES IT (`withLeftOut`: what it left out where it could not
+      // write it), never the file alone: a second rename of an excluded column is a name gone from THAT (issue 1026)
+      const taken = withLeftOut(read, kept, now.tables);
+      const arrived = [...keptBack(taken, kept, now.tables), ...leftOutArrivals(taken, now.tables, columnsSet, edit.edited ?? [])];
+      if (arrived.length) { leaveOut(read, arrived, now.tables); read = readSources(); }
+      if (!("message" in read)) read = withLeftOut(read, kept, now.tables);
     }
     const r = rereadSources(sources, read, src.resolved, now.tables, source.database, project.root, { replicationChecked, slot: cfg.replication?.slot ?? null });
     if (r.said !== null) logLine(`[sync] ${r.said}`);

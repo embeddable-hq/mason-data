@@ -57,7 +57,7 @@ async function until(what: string, check: () => boolean, ms = 120_000): Promise<
 
 interface Ran { status: number | null; stdout: string; stderr: string; json: Record<string, unknown> }
 /** A project of its own, on a database of its own. */
-async function project(mode: string): Promise<{ root: string; dbUrl: string; tag: string; mason: (...args: string[]) => Ran; ok: (r: Ran, what: string) => Ran }> {
+async function project(mode: string): Promise<{ root: string; dbUrl: string; tag: string; env: Record<string, string>; mason: (...args: string[]) => Ran; ok: (r: Ran, what: string) => Ran }> {
   const tag = `it_columns_${mode.replace(/\W/g, "")}_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
   const dbUrl = (() => { const u = new URL(adminUrl!); u.pathname = `/${tag}`; return u.toString(); })();
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "it-columns-")));
@@ -82,7 +82,7 @@ async function project(mode: string): Promise<{ root: string; dbUrl: string; tag
     psql(adminUrl!, `DROP DATABASE IF EXISTS ${tag} WITH (FORCE)`);
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
   });
-  return { root, dbUrl, tag, mason, ok: (r, what) => { assert.equal(r.status, 0, `${what}:\n${r.stdout}${r.stderr}`); return r; } };
+  return { root, dbUrl, tag, env, mason, ok: (r, what) => { assert.equal(r.status, 0, `${what}:\n${r.stdout}${r.stderr}`); return r; } };
 }
 
 /**
@@ -184,3 +184,99 @@ async function columnsChange(mode: "off" | "poll 1s" | "replication"): Promise<v
 test("sync: off — a column added, renamed or dropped is picked up at mason sync, a secret-looking one left out and said", { skip, timeout: 900_000 }, () => columnsChange("off"));
 test("sync: poll — a column added, renamed or dropped is picked up at the next poll, a secret-looking one left out and said", { skip, timeout: 900_000 }, () => columnsChange("poll 1s"));
 test("sync: replication — a column added, renamed or dropped is picked up at the stream's relation message, a secret-looking one left out and said", { skip, timeout: 900_000 }, () => columnsChange("replication"));
+
+/**
+ * A RUN THAT CANNOT WRITE ITS SOURCES FILE (issue 1026; `MASON_PROJECT_READONLY=1`, polled every second): it keeps what
+ * it leaves out in memory and says the line to write. A second rename of an excluded column used to refuse the file as
+ * the run took it (the first new name, gone, named in exclude:), and from then on no column change of any table was
+ * taken: a column added to another table was never synced, and one renamed there failed every poll. Here, a sequence of
+ * renames, adds and drops on two tables, excluded columns and synced ones, one look apart or in one transaction: after
+ * each, SELECT * over the Postgres API equals the source but what is left out, an excluded column is never served
+ * meanwhile, the sources file is never written, and `mason status` says one line to write for the table, the whole
+ * exclude: now. Written, a start without the setting serves the same.
+ */
+test("a read-only run: any number of renames, adds and drops of excluded and synced columns, on two tables, are each taken, an excluded column never served, and the line to write said", { skip, timeout: 900_000 }, async () => {
+  const p = await project("readonly");
+  const { dbUrl, mason, ok } = p;
+  psql(adminUrl!, `CREATE DATABASE ${p.tag}`);
+  psql(dbUrl, "CREATE TABLE t (id int PRIMARY KEY, a text, salary int); INSERT INTO t SELECT g, 'a' || g, g * 1000 FROM generate_series(1, 5) g; " +
+    "CREATE TABLE t2 (id int PRIMARY KEY, v text, w int); INSERT INTO t2 SELECT g, 'v' || g, g FROM generate_series(1, 4) g");
+  ok(mason("init", dbUrl, "--json"), "mason init");
+  const file = path.join(p.root, "mason", "sources", `${p.tag}.yml`);
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/^sync: off {3}#.*$/m, "sync: poll 1s"));
+  ok(mason("add", "t", "t2", "--json"), "mason add t t2 (every column)");
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/^ {2}t: \{\}\n/m, "  t:\n    exclude: [salary]\n"));
+  const deployed = fs.readFileSync(file, "utf8");
+  assert.match(deployed, /^ {2}t:\n {4}exclude: \[salary\]\n {2}t2: \{\}\n/m, deployed);
+  p.env.MASON_PROJECT_READONLY = "1";
+  ok(mason("start", "--json"), "mason start, read-only");
+  ok(mason("wait", "--timeout", "120", "--json"), "mason wait");
+  const api = ok(mason("user", "add", "it", "--json"), "mason user add").json.url as string;
+
+  /** what the run leaves out now, by table, as the test knows it */
+  const out: Record<string, string[]> = { t: ["salary"], t2: [] };
+  const expected = (tbl: string): { columns: string; rows: string } => {
+    const cols = psql(dbUrl, `SELECT string_agg(attname, ',' ORDER BY attnum) FROM pg_attribute WHERE attrelid = '${tbl}'::regclass AND attnum > 0 AND NOT attisdropped`)
+      .split(",").filter((c) => !out[tbl]!.includes(c));
+    return { columns: cols.join("\t"), rows: psql(dbUrl, `SELECT ${cols.join(", ")} FROM ${tbl} ORDER BY id`) };
+  };
+  const served = (tbl: string) => psqlWithHeader(api, `SELECT * FROM public.${tbl} ORDER BY id`);
+  /** never served, at every look: a column the source has that the run leaves out */
+  const never = (): void => {
+    for (const tbl of ["t", "t2"]) {
+      const s = served(tbl);
+      const leaked = s === null ? [] : s.columns.split("\t").filter((c) => out[tbl]!.includes(c) || ["salary", "annual_pay", "pay3", "pay4", "api_key"].includes(c));
+      assert.deepEqual(leaked, [], `${tbl} served ${s?.columns}`);
+    }
+  };
+  const same = (): boolean => ["t", "t2"].every((tbl) => JSON.stringify(served(tbl)) === JSON.stringify(expected(tbl)));
+  const settled = (): boolean => {
+    const s = mason("status", "--json");
+    const ts = s.json.tables as Array<{ table: string; error: string | null; sync?: { state: string }; columnsPending?: string[] }> | undefined;
+    return ["public.t", "public.t2"].every((n) => { const x = ts?.find((y) => y.table === n); return x !== undefined && x.error === null && x.sync?.state === "synced" && x.columnsPending === undefined; });
+  };
+  const step = async (what: string, sql: string): Promise<void> => {
+    psql(dbUrl, sql);
+    await until(`read-only: ${what}: SELECT * to equal the source`, () => { never(); return same(); });
+    await until(`read-only: ${what}: mason status to say both tables are synced`, () => { never(); return settled(); });
+    assert.equal(fs.readFileSync(file, "utf8"), deployed, `${what}: the sources file is never written`);
+  };
+  /** mason status's lines to write for t: exactly one, and it names `line` */
+  const saysLine = (line: string): void => {
+    const lines = (ok(mason("status", "--json"), "mason status").json.warnings as string[]).filter((w) => w.startsWith("public.t:") && /Write exclude:/.test(w));
+    assert.equal(lines.length, 1, JSON.stringify(lines));
+    assert.match(lines[0]!, new RegExp(`Write exclude: \\[${line}\\] on its entry in the sources file`), lines[0]);
+  };
+
+  // THE ISSUE'S STEPS: an excluded column renamed twice, then the other table's changes
+  out.t = ["annual_pay"];
+  await step("an excluded column renamed", "ALTER TABLE t RENAME COLUMN salary TO annual_pay");
+  saysLine("annual_pay");
+  out.t = ["pay3"];
+  await step("the excluded column renamed again", "ALTER TABLE t RENAME COLUMN annual_pay TO pay3");
+  saysLine("pay3");
+  await step("a column added to the other table", "ALTER TABLE t2 ADD COLUMN y int DEFAULT 3");
+  await step("a column renamed on the other table", "ALTER TABLE t2 RENAME COLUMN w TO w2");
+  // A LONGER SEQUENCE: a rename and an add in one transaction (fail closed: both left out), a drop, a name the file
+  // excludes back on the table, a synced column renamed, a secret-looking column on the other table
+  out.t = ["pay4", "note"];
+  await step("an excluded column renamed and a column added at once", "BEGIN; ALTER TABLE t RENAME COLUMN pay3 TO pay4; ALTER TABLE t ADD COLUMN note text DEFAULT 'n'; COMMIT");
+  saysLine("pay4, note");
+  out.t = ["note"];
+  await step("an excluded column dropped", "ALTER TABLE t DROP COLUMN pay4");
+  saysLine("note");
+  out.t = ["salary", "note"];
+  await step("a column the file excludes added back", "ALTER TABLE t ADD COLUMN salary int DEFAULT 1");
+  saysLine("salary, note");
+  await step("a synced column renamed", "ALTER TABLE t RENAME COLUMN a TO a2");
+  out.t2 = ["api_key"];
+  await step("a secret-looking column added to the other table", "ALTER TABLE t2 ADD COLUMN api_key text DEFAULT 'k'");
+
+  // THE LINE WRITTEN: a start without the setting serves the same, never what was left out
+  ok(mason("stop", "--json"), "mason stop");
+  delete p.env.MASON_PROJECT_READONLY;
+  fs.writeFileSync(file, deployed.replace(/exclude: \[salary\]\n {2}t2: \{\}\n/, "exclude: [salary, note]\n  t2:\n    exclude: [api_key]\n"));
+  ok(mason("start"), "mason start, the lines written");
+  await until("read-only: after the lines are written and a start: SELECT * to equal the source", () => { never(); return same(); });
+  ok(mason("stop", "--json"), "mason stop");
+});

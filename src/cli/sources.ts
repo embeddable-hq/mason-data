@@ -689,7 +689,7 @@ export function chooseColumns(t: SourceTable, asked: readonly string[], key: rea
 
 /** What the run leaves out of an every-column entry as the database changes under it (`leftOutArrivals`): the columns
  *  it leaves out, and the names of `exclude:` gone from the table that they take the place of. */
-export interface LeftOut { entry: TableEntry; columns: string[]; gone: string[] }
+export interface LeftOut { entry: TableEntry; columns: string[]; gone: string[]; back?: string[] }
 
 /**
  * WHAT ARRIVED ON THE DATABASE WHILE THE RUN WAS UP, AND IS LEFT OUT (issue 977), of each entry that syncs every column
@@ -723,13 +723,17 @@ export function leftOutArrivals(file: Pick<SourceFile, "tables">, tables: readon
 export const excludeOf = (a: LeftOut): string[] => [...a.entry.exclude.filter((c) => !a.gone.includes(c)), ...a.columns];
 
 /** What the run says of what it left out (`leftOutArrivals`): `written`, the sources file it wrote `exclude:` in, or
- *  null when it could not write it (`why`; the line to write, and what a start does without it). One sentence each for
- *  the log, the event and `mason status`. */
-export function leftOutText(a: LeftOut, written: string | null, why: string | null = null): string {
+ *  null when it could not write it (`why`; the line to write, and what a start does without it: `refused`, whether the
+ *  file as it is names a column the table lacks — by default, whether a name went now). One sentence each for the log,
+ *  the event and `mason status`. */
+export function leftOutText(a: LeftOut, written: string | null, why: string | null = null, refused: boolean = a.gone.length > 0): string {
   const cols = a.columns, one = cols.length === 1, name = entryName(a.entry.table);
   const they = one ? "it" : "they", is = one ? "is" : "are", line = `exclude: ${flowList(excludeOf(a))}`;
   const gone = a.gone.join(", "), goneOne = a.gone.length === 1;
-  const head = a.gone.length === 0
+  const back = a.back ?? [], backOne = back.length === 1;
+  const head = back.length
+    ? `${a.entry.table}: ${back.join(", ")}, which exclude: names, ${backOne ? "is" : "are"} back on the database, so ${backOne ? "it is" : "they are"} not synced`
+    : a.gone.length === 0
     ? `${a.entry.table}: the new column${one ? "" : "s"} ${cols.join(", ")} ${one ? "looks" : "look"} like ${one ? "a secret" : "secrets"}, so ${they} ${is} not synced`
     : cols.length === 0
       ? `${a.entry.table}: ${gone}, which exclude: names, ${goneOne ? "is" : "are"} gone from the database`
@@ -738,18 +742,63 @@ export function leftOutText(a: LeftOut, written: string | null, why: string | nu
   const opt = cols.length ? `. To sync ${one ? "it" : "one"}, run mason add ${name} --include ${cols[0]}` : "";
   if (written !== null) return `${head}. Mason wrote ${line} on its entry in ${written}${opt}`;
   return `${head}, in this run${why ? ` (${why})` : ""}. Write ${line} on its entry in the sources file: ` +
-    (a.gone.length ? "a start refuses the file until then" : `a start syncs what the file says`);
+    (refused ? "a start refuses the file until then" : `a start syncs what the file says`);
 }
 
-/** The file with each entry's `exclude:` as the run takes it where it could not write it (`leftOutArrivals`): `left`,
- *  by table, added, and `gone` taken out. */
-export function withLeftOut<F extends Pick<SourceFile, "tables">>(file: F, left: ReadonlyMap<string, readonly string[]>, gone: ReadonlyMap<string, readonly string[]> = new Map()): F {
-  if (left.size === 0 && gone.size === 0) return file;
+/**
+ * WHAT THE RUN LEAVES OUT OF ONE ENTRY WHERE IT COULD NOT WRITE THE SOURCES FILE (`leftOutArrivals`; its files read-only
+ * here): `left`, the columns it left out, and `gone`, the names of the file's `exclude:` it took out as gone from the
+ * table. ONE NET RECORD, folded by `keepLeftOut` and applied by `withLeftOut` (issue 1026: two lists that only grew were
+ * applied after the arrivals were found against the file alone, so a second rename of an excluded column found nothing,
+ * and its first new name, gone, refused the file, and every column change of every table after it, for the run).
+ */
+export interface KeptOut { left: string[]; gone: string[] }
+
+/**
+ * The file with each every-column entry's `exclude:` as the run takes it where it could not write it (`kept`, by
+ * table), against the tables as they are now: the file's names it took out as gone are taken out while the table lacks
+ * them — a column of that name back on the table is left out again, as the file says (fail closed) — and the columns
+ * it left out are added. `leftOutArrivals` is asked of THIS file, never the file alone, so each round starts from what
+ * the run leaves out now.
+ */
+export function withLeftOut<F extends Pick<SourceFile, "tables">>(file: F, kept: ReadonlyMap<string, KeptOut>, tables: readonly SourceTable[]): F {
+  if (kept.size === 0) return file;
   return { ...file, tables: file.tables.map((e) => {
-    if (e.columns !== null) return e;
-    const g = gone.get(e.table) ?? [], add = (left.get(e.table) ?? []).filter((c) => !e.exclude.includes(c));
-    return add.length || e.exclude.some((c) => g.includes(c)) ? { ...e, exclude: [...e.exclude.filter((c) => !g.includes(c)), ...add] } : e;
+    const k = kept.get(e.table);
+    if (e.columns !== null || k === undefined) return e;
+    const have = tables.find((t) => t.source === e.table)?.columns.map((c) => c.name) ?? [];
+    const exclude = e.exclude.filter((c) => !k.gone.includes(c) || have.includes(c));
+    const add = k.left.filter((c) => !exclude.includes(c));
+    return add.length || exclude.length !== e.exclude.length ? { ...e, exclude: [...exclude, ...add] } : e;
   }) };
+}
+
+/**
+ * Folds what the run just left out of an entry (`a`, found against `withLeftOut`'s file) into `kept`, where it could
+ * not write it: a name gone is no longer left out and is taken out of the file's names, and each column that arrived
+ * in its place is left out. Asked again with the same arrivals, it changes nothing.
+ */
+export function keepLeftOut(kept: Map<string, KeptOut>, a: LeftOut): void {
+  const k = kept.get(a.entry.table) ?? { left: [], gone: [] }, back = a.back ?? [];
+  const left = [...k.left.filter((c) => !a.gone.includes(c)), ...a.columns.filter((c) => !k.left.includes(c))];
+  const gone = [...k.gone.filter((c) => !back.includes(c)), ...a.gone.filter((c) => !k.gone.includes(c))];
+  kept.set(a.entry.table, { left, gone });
+}
+
+/**
+ * The names of an entry's `exclude:` the run took out as gone (`KeptOut.gone`) that its table has again: left out
+ * again, as the file says (`withLeftOut`), and said with the line to write now — the line said when they went omits
+ * them, and written, it would sync the column back at the next start. One per entry, found against `withLeftOut`'s file.
+ */
+export function keptBack(file: Pick<SourceFile, "tables">, kept: ReadonlyMap<string, KeptOut>, tables: readonly SourceTable[]): LeftOut[] {
+  const out: LeftOut[] = [];
+  for (const e of file.tables) {
+    const k = kept.get(e.table), t = tables.find((x) => x.source === e.table);
+    if (e.columns !== null || k === undefined || t === undefined) continue;
+    const back = k.gone.filter((c) => e.exclude.includes(c) && t.columns.some((x) => x.name === c));
+    if (back.length) out.push({ entry: e, columns: [], gone: [], back });
+  }
+  return out;
 }
 
 /**

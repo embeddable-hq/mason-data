@@ -59,7 +59,11 @@ paths:
   `leftOutArrivals`), and said in the log, as a `columns_changed` event and among the run's warnings; a name of
   `exclude:` gone while the run is up FAILS CLOSED: every column that arrived with it is left out in its place (a rename
   keeps its data: the review of PR 995 served a salary renamed annual_pay), and one gone with nothing arrived is taken
-  out. **A whole read that fails checks its table's shape again** (`reshapeAfterFailure`; the same review: a column
+  out. Where the file cannot be written, what the run left out is ONE net record a table (`KeptOut`, folded by
+  `keepLeftOut`), and the arrivals are found against the file AS THE RUN TAKES IT (`withLeftOut`), never the file alone
+  (issue 1026: two lists that only grew refused the file at an excluded column's second rename, and every column change
+  after it for the run); a name of the file's `exclude:` back on the table is left out again (`keptBack`), and the
+  table's line to write in `mason status` is replaced by its newest. **A whole read that fails checks its table's shape again** (`reshapeAfterFailure`; the same review: a column
   dropped during a resync, or renamed during a first sync, failed it for ever with the same columns), so a change
   re-plans it. A relation message whose columns, type oids or typmods are not the shape's is checked at once.
 - **A batch holds a table's changes of ONE STAY in the stream, and only the stay it is in now is applied**
