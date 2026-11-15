@@ -60,8 +60,6 @@ const REST_WEIGHTS: Readonly<Record<string, number>> = {
   "tests/integration/duck-libc-read.itest.ts": 129,
   "tests/integration/cli-upgrade.itest.ts": 123,
   "tests/integration/cli-sources.itest.ts": 82,
-  // measured on a laptop at PR 1078's head, not on CI's runner: its three tests 105 s, 109 s and 34 s
-  "tests/integration/cli-column-identity.itest.ts": 250,
   "tests/integration/duck-serve.itest.ts": 74,
   "tests/integration/duck-json-paths.itest.ts": 14,
   "tests/integration/cli-source-role.itest.ts": 14,
