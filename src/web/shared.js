@@ -173,10 +173,15 @@ export const percent = (share) => `${Math.floor(Math.max(0, Math.min(1, share)) 
 /** The time a copy has left, as the commands print it: `~12 min left`; "" when nothing is measured yet. */
 export const leftText = (secondsLeft) => secondsLeft === null || secondsLeft === undefined ? "" : `~${duration(secondsLeft)} left`;
 
+/** A sync's updated count as a person reads it: `~64,383 updated` from a poll (`by` "poll"), whose count may include rows
+ *  it read again, and `200 updated` when it is exact; a poll's 0 is exact (src/lib/table-sync.ts `updatedCountText`, the one
+ *  rule, held equal by the tests; issue 1040). */
+export const updatedCountText = (updated, by) => `${by === "poll" && updated > 0 ? "~" : ""}${n(updated)} updated`;
+
 /** `1,000 added, 200 updated, 4 deleted`: a table's counts as the stream's lines say them, a TRUNCATE's after them when
  *  there was one (src/duck/stream.ts `countsText`, held equal by the tests). */
 export function countsText(c) {
-  return `${n(c.inserts)} added, ${n(c.updates)} updated, ${n(c.deletes)} deleted${c.truncates > 0 ? `, emptied ${n(c.truncates)} time${c.truncates === 1 ? "" : "s"} by a TRUNCATE` : ""}`;
+  return `${n(c.inserts)} added, ${updatedCountText(c.updates, "exact")}, ${n(c.deletes)} deleted${c.truncates > 0 ? `, emptied ${n(c.truncates)} time${c.truncates === 1 ? "" : "s"} by a TRUNCATE` : ""}`;
 }
 
 /**

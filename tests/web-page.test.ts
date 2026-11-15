@@ -3149,6 +3149,8 @@ test("Tables: what a sync did is said as mason sync says it, beside its Sync; a 
     const ours = syncedReport(answered, picked, named) as { headline: string; details: unknown; tips: string[] };
     const theirs = cli.syncedReport!(answered, picked, named) as { headline: string; details: unknown; tips: string[] };
     assert.deepEqual([ours.headline, ours.details], [theirs.headline, theirs.details]);
+    // a poll's updated count is an estimate, said with a ~ (issue 1040)
+    assert.match(ours.headline, /: 34 added, ~1,200 updated, 5 deleted\./, ours.headline);
     assert.equal(ours.tips.length, theirs.tips.length);
     for (const tip of ours.tips) assert.doesNotMatch(tip, /mason /, tip);
   }
@@ -3176,7 +3178,7 @@ test("Tables: what a sync did is said as mason sync says it, beside its Sync; a 
   // the button says it in its own room, and what the sync did is said beside it, as mason sync prints it
   assert.match(textOf(app.view().tables!), /public\.events Synced .* Synced ✓ Remove Sync: Off All columns Not added \(1\) Table State Rows Key Last sync Size public\.audit /);
   assert.match(app.view().tables!, /<button type="button" class="small" data-sync-table="public\.events" data-room="Syncing…">Synced ✓<\/button>/);
-  assert.equal(textOf(popOf(app.view().tables!, "act-tables-public.events")), "Synced public.events: 34 added, 1,200 updated, 5 deleted. public.events 34 added, 1,200 updated, 5 deleted, 30,001,229 rows now · 8.5 s public.events's sync is off, so it stays as it is now until you press Sync now again. Dismiss");
+  assert.equal(textOf(popOf(app.view().tables!, "act-tables-public.events")), "Synced public.events: 34 added, ~1,200 updated, 5 deleted. public.events 34 added, ~1,200 updated, 5 deleted, 30,001,229 rows now · 8.5 s public.events's sync is off, so it stays as it is now until you press Sync now again. Dismiss");
   app.dismissSynced();
   assert.ok(!/Synced public\.events:/.test(app.view().tables!));
   const message = "public.orders has no copy yet: it is synced once it is copied";
@@ -3797,9 +3799,9 @@ test("Sync events: how long a sync took is the Took column, in the commands' wor
   // the messages as the sync writes them (src/duck/sync.ts): a sync by hand and a scheduled one in mason sync's words
   // (`syncedText`), a first sync ending the same way
   const events = { keptDays: 7, events: [
-    { at: "2026-10-28T09:00:00.000Z", kind: "full_sync", failed: false, table: "public.orders", message: `synced whole: ${tableSync.syncedText({ added: 2_000_000, updated: 0, deleted: 0, rows: 2_000_000, ms: 477_000 })}`, code: null, origin: null, tookMs: 477_000 },
-    { at: "2026-10-28T09:01:00.000Z", kind: "polled", failed: false, table: "public.orders", message: `synced on schedule: ${tableSync.syncedText({ ...counts, ms: 570 })}`, code: null, origin: null, tookMs: 570 },
-    { at: "2026-10-28T09:02:00.000Z", kind: "synced", failed: false, table: "public.events", message: `synced by hand: ${tableSync.syncedText({ ...counts, ms: 13_703 })}`, code: null, origin: null, tookMs: 13_703 },
+    { at: "2026-10-28T09:00:00.000Z", kind: "full_sync", failed: false, table: "public.orders", message: `synced whole: ${tableSync.syncedText({ added: 2_000_000, updated: 0, deleted: 0, rows: 2_000_000, ms: 477_000 }, "exact")}`, code: null, origin: null, tookMs: 477_000 },
+    { at: "2026-10-28T09:01:00.000Z", kind: "polled", failed: false, table: "public.orders", message: `synced on schedule: ${tableSync.syncedText({ ...counts, ms: 570 }, "poll")}`, code: null, origin: null, tookMs: 570 },
+    { at: "2026-10-28T09:02:00.000Z", kind: "synced", failed: false, table: "public.events", message: `synced by hand: ${tableSync.syncedText({ ...counts, ms: 13_703 }, "poll")}`, code: null, origin: null, tookMs: 13_703 },
     { at: "2026-10-28T09:03:00.000Z", kind: "restart", failed: true, table: null, message: "the run stopped after 42 s up", code: "unknown", origin: null, tookMs: null },
     // recorded before Mason kept it: its message whole, as it was written
     { at: "2026-10-28T09:04:00.000Z", kind: "synced", failed: false, table: "public.old", message: "synced by hand: 1 changed, 0 deleted, 9 rows now · 41 ms", code: null, origin: null }] };
@@ -3810,8 +3812,8 @@ test("Sync events: how long a sync took is the Took column, in the commands' wor
   assert.deepEqual(rows(html), [
     "6 min ago Manual sync public.old synced by hand: 1 changed, 0 deleted, 9 rows now · 41 ms",
     "7 min ago ✗ Mason restarted Mason the run stopped after 42 s up Code unknown",
-    "8 min ago Manual sync public.events synced by hand: 1 added, 2 updated, 0 deleted, 153,292,984 rows now 13.7 s",
-    "9 min ago Scheduled sync public.orders synced on schedule: 1 added, 2 updated, 0 deleted, 153,292,984 rows now 570 ms",
+    "8 min ago Manual sync public.events synced by hand: 1 added, ~2 updated, 0 deleted, 153,292,984 rows now 13.7 s",
+    "9 min ago Scheduled sync public.orders synced on schedule: 1 added, ~2 updated, 0 deleted, 153,292,984 rows now 570 ms",
     "10 min ago Full sync public.orders synced whole: 2,000,000 added, 0 updated, 0 deleted, 2,000,000 rows now 7 min 57 s",
   ]);
   assert.equal([...html.matchAll(/<td class="num"><\/td>/g)].length, 2, "the restart's and the old event's cells are empty");
@@ -7102,4 +7104,20 @@ test("a host's card that never answers holds up nothing: the Overview is written
   walk.asked.length = 0;
   b.go("#overview");
   await until(() => walk.asked.includes("GET api/queries") && /<div class="cards n/.test(b.el("status").html), "the Overview read and written, its card being read");
+});
+
+// A POLL'S UPDATED COUNT IS AN ESTIMATE (issue 1040): the page says it as the commands do, by ONE rule held equal to
+// theirs (src/lib/table-sync.ts `updatedCountText`): `~N updated` for a poll's, the number alone for an exact count (the
+// stream's, a whole read's) and for a poll's 0. The stream's rows keep no ~.
+test("the page says a poll's updated count as an estimate (~N updated) by the commands' one rule; the stream's count is exact (issue 1040)", () => {
+  const updatedCountText = fn<[number, string], string>("updatedCountText");
+  const lib = tableSync as unknown as { updatedCountText?: (u: number, by: string) => string };
+  assert.equal(typeof lib.updatedCountText, "function", "src/lib/table-sync.ts exports updatedCountText");
+  for (const u of [0, 1, 999, 64_383, 1_234_567]) for (const by of ["poll", "exact"]) assert.equal(updatedCountText(u, by), lib.updatedCountText!(u, by), `${u} ${by}`);
+  assert.equal(updatedCountText(64_383, "poll"), "~64,383 updated");
+  const syncedReport = of<[unknown, string[], unknown[]], { headline: string; details: Array<[string, string]> }>(tablesPage, "tables.js", "syncedReport");
+  const r = syncedReport({ at: "2026-11-15T09:00:00.000Z", tables: [{ table: "public.orders", added: 60_000, updated: 64_383, deleted: 0, rows: 60_000, ms: 900 }] }, ["public.orders"], []);
+  assert.equal(r.headline, "Synced public.orders: 60,000 added, ~64,383 updated, 0 deleted.");
+  assert.deepEqual(r.details, [["public.orders", "60,000 added, ~64,383 updated, 0 deleted, 60,000 rows now · 900 ms"]]);
+  assert.equal(fn<[unknown], string>("countsText")({ inserts: 1, updates: 64_383, deletes: 0, truncates: 0 }), "1 added, 64,383 updated, 0 deleted");
 });

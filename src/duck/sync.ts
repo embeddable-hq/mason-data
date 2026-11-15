@@ -2422,7 +2422,7 @@ export class Sync {
     // table asked for is answered with the stream's position and records none: nothing was read for it
     for (const x of found) {
       const by = answered.has(x.table) ? " (by its poll on schedule, which began as it was asked)" : "";
-      this.event({ kind: "synced", table: x.table, message: `synced by hand${by}: ${syncedText(x)}`, tookMs: x.ms });
+      this.event({ kind: "synced", table: x.table, message: `synced by hand${by}: ${syncedText(x, "poll")}`, tookMs: x.ms });
     }
     // ITS COLUMNS CHANGED ON THE DATABASE (issue 977): read again, then the answer is what that made of it — read again
     // whole with them, which mason wait waits for
@@ -3807,7 +3807,7 @@ export class Sync {
           return this.writerPoll(t);
         });
         // a scheduled sync is an event too, listed only when a reader asks for the scheduled syncs (src/duck/events.ts)
-        for (const f of found) { this.polledNow(t, f.ms); this.event({ kind: "polled", table: f.table, message: `synced on schedule: ${syncedText(f)}`, tookMs: f.ms }); }
+        for (const f of found) { this.polledNow(t, f.ms); this.event({ kind: "polled", table: f.table, message: `synced on schedule: ${syncedText(f, "poll")}`, tookMs: f.ms }); }
         // a sync by hand asked before this poll began, waiting behind the pass, is answered by it (`pollNowOf`)
         for (const f of found) this.scheduledPolls.set(t.source, { startedAt, found: f });
       } catch (e) {
@@ -4386,7 +4386,7 @@ export class Sync {
       // web page shows it in a column of its own (src/duck/events.ts `tookMs`). A whole read ADDS every row it holds
       // (`syncedText`, the words a poll's record says): the copy swapped in replaces the old
       const tookMs = Math.round(seconds * 1000);
-      this.event({ kind: "full_sync", table: t.source, message: `synced whole: ${syncedText({ added: p.rows, updated: 0, deleted: 0, rows: p.rows, ms: tookMs })}`, tookMs });
+      this.event({ kind: "full_sync", table: t.source, message: `synced whole: ${syncedText({ added: p.rows, updated: 0, deleted: 0, rows: p.rows, ms: tookMs }, "exact")}`, tookMs });
       this.copiedAs.set(t.source, columnsKey(t.columns));
       // in the catalog at once: a pass's other copies may take hours
       await this.rebuildSchema();

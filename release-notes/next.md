@@ -18,15 +18,20 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
-- **A sync now says how many rows it added, updated and deleted**, such as "1,200 added, 282,770 updated, 0 deleted".
+- **A sync now says how many rows it added, updated and deleted**, such as "1,200 added, ~282,770 updated, 0 deleted".
   Before, it said "283,970 changed", which lumped new rows and edited rows together. The new words are in `mason sync`,
   the web page's Sync now and Sync events, and `mason logs --events`. A first sync, or a table synced again whole, adds
-  every row. Over replication, the counts follow your database's inserts, updates and deletes. `mason status`, the web
-  page and the run's log say a replicated table's counts the same way, such as "1,000 added, 200 updated, 4 deleted".
-  Before, they said "1,204 changes (1,000 inserts, 200 updates, 4 deletes)". A poll's own lines in the run's log still
-  say "changed". A script
-  that reads `mason sync --json` must read `added` and `updated` in place of `changed`. A script that matched the
-  words of a `synced`, `polled`, `streamed` or `full_sync` event must match the new words.
+  every row.
+  - A poll's updated count is an estimate, so it starts with `~`. It can be too high, never too low, so a count of 0
+    is exact and has no `~`. While a
+    transaction is open on your database, a poll reads some rows again, and counts them as updated though nothing in
+    them changed. Its added and deleted counts are exact. `mason sync --json` keeps the plain number in `updated`.
+  - Over replication, the counts follow your database's inserts, updates and deletes, and are exact. `mason status`,
+    the web page and the run's log say a replicated table's counts the same way, such as "1,000 added, 200 updated, 4
+    deleted". Before, they said "1,204 changes (1,000 inserts, 200 updates, 4 deletes)".
+  - A poll's own lines in the run's log still say "changed".
+  - A script that reads `mason sync --json` must read `added` and `updated` in place of `changed`. A script that
+    matched the words of a `synced`, `polled`, `streamed` or `full_sync` event must match the new words.
 
 - **A whole number beside a numeric with very many decimals keeps at least 19 of its decimals.** This covers `div()`
   of two integers, an integer cast to `numeric`, a whole constant such as `2.5e2`, and a whole part of `extract`.
