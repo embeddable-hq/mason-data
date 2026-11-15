@@ -258,14 +258,15 @@ replica when you would rather not run and upgrade the container, the volume and 
 ### Change a deployed project
 
 A deployed project runs exactly what you deployed. So its web page is read-only, and you can't add or remove tables
-there. Changes go through the project folder in your app's repository instead. This holds on your own server and on a
-hosted replica.
+there. Changes go through the project folder in your app's repository instead. This holds on a hosted replica. On your
+own server, the page is read-only when you set `MASON_PROJECT_READONLY=1`, or when Mason cannot write the project
+folder.
 
 1. Edit `mason/`. In its sources file, add or remove a table, or change a table's `sync:` or its columns. On your
    machine, `mason add` and `mason remove` edit the file for you.
 2. Commit the change.
-3. Deploy it with the Mason version that `mason/mason.yml` names. The `mason` command refuses a project written for
-   another version.
+3. Deploy it with the Mason version that `mason/mason.yml` names. Mason runs a project pinned to its own release line
+   (the minor version before 1.0), at its own patch or an older one. It refuses any other pin.
    - On a hosted replica, run `npx @mason-data/cli@<version> deploy --replica <org>/<name>`. It shows what the
      deploy changes before it sends it.
    - On your own server, ship `mason/` with your release and restart the container, which runs
@@ -275,10 +276,15 @@ A table you add is synced once the deploy runs. A table you remove has its synce
 
 To move to a newer Mason:
 
-1. Read that release's "Before you upgrade" in the [release notes](release-notes/README.md), and make the changes it
-   lists.
-2. Set `version:` in `mason/mason.yml` to the new version.
-3. Deploy as in step 3 above, with the new version.
+1. Read that release's "Before you upgrade" in its
+   [release notes](https://github.com/embeddable-hq/mason-data/releases), and make the changes it lists.
+2. On a hosted replica, an owner of the organisation runs `mason replica upgrade <org>/<name>` first. It installs the
+   newest Mason the service offers. Mason on the replica restarts, and its connections drop. On the same release line,
+   it then runs the newest patch. A new release line waits beside the old one until you deploy a project pinned to it.
+   `mason replica status <org>/<name>` shows the versions the replica has. Skip this step when it already has the
+   version you pin.
+3. Set `version:` in `mason/mason.yml` to the new version.
+4. Deploy the change as the first list says, with the new version.
 
 ## Speed and compatibility
 
