@@ -14,7 +14,7 @@
  * details is open (the page's own state: nothing is read when it is closed). A page module (src/web/app.js has the contract). Never the engine's name.
  */
 import { VIEW_HASHES } from "../routes.js";
-import { esc, agoText, utcText, badge, empty, panel, n, sortTh, sortedBy, nextSort, msText, moreRows, readPart, eventCells, MASON_TABLE, RANGES, DEFAULT_RANGE, rangeOf, rangeEvery, POLL_MS } from "../shared.js";
+import { esc, agoText, utcText, badge, empty, n, sortTh, sortedBy, nextSort, msText, moreRows, readPart, eventCells, MASON_TABLE, RANGES, DEFAULT_RANGE, rangeOf, rangeEvery, POLL_MS, listTable } from "../shared.js";
 
 /** How many of the range's events are read (the newest), and how many of those the page writes at once. */
 const EVENTS_LIMIT = 500;
@@ -214,7 +214,7 @@ function renderTimeline(passing, read, { narrowed, now, sort, limit, live, asOf 
   const liveRows = (oldestFirst ? started.reverse() : started).map((r) => runningRow(r, asOf, now)).join("");
   const body = oldestFirst ? rows + liveRows : liveRows + rows;
   const count = narrowed && read > 0 ? `<p class="dim">${n(passing.length)} of the ${n(read)} events read.</p>` : "";
-  return count + panel(`<table class="events"><thead><tr>${sortTh("events", "time", "When", sort)}${th(["Kind", "Table", "Message"])}${sortTh("events", "took", "Took", sort, "num")}</tr></thead><tbody>${body}</tbody></table>`) +
+  return count + listTable("events", `<thead><tr>${sortTh("events", "time", "When", sort)}${th(["Kind", "Table", "Message"])}${sortTh("events", "took", "Took", sort, "num")}</tr></thead><tbody>${body}</tbody>`) +
     moreRows("events", Math.min(limit, passing.length), passing.length, EVENTS_SHOWN);
 }
 

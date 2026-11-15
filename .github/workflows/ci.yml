@@ -170,6 +170,19 @@ jobs:
 
       - run: npm ci
 
+      # A browser for the tests that measure the web page in one (tests/web-*.test.ts that require "playwright"): such a
+      # test skips where Playwright is missing, so without this they never ran here (issue 1049). Playwright is installed
+      # at a pinned version, never a dependency of the package, with its Chromium, cached by version: the whole browser,
+      # which tests/web-radio-groups.test.ts looks for, and the headless shell the others launch.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-1.63.0-chromium-${{ runner.os }}
+      - name: a browser for the web page's tests
+        run: |
+          npm install --no-save --no-audit --no-fund playwright@1.63.0
+          npx playwright install chromium
+
       - name: unit tests
         env:
           CI_SHARD_DIR: ${{ runner.temp }}/ran
