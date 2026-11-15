@@ -257,9 +257,9 @@ replica when you would rather not run and upgrade the container, the volume and 
 
 ### Change a deployed project
 
-A deployed project runs exactly what you deployed. So its web page is read-only: you can't add or remove tables there.
-Changes go through the project folder in your app's repository instead. This holds on your own server and on a hosted
-replica.
+A deployed project runs exactly what you deployed. So its web page is read-only, and you can't add or remove tables
+there. Changes go through the project folder in your app's repository instead. This holds on your own server and on a
+hosted replica.
 
 1. Edit `mason/`. In its sources file, add or remove a table, or change a table's `sync:` or its columns. On your
    machine, `mason add` and `mason remove` edit the file for you.
