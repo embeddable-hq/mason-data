@@ -30,8 +30,8 @@ export interface ColumnRecord { oid: number; columns: RecordedColumn[] }
 
 /** The entry of the sources file a table is synced by, as the run takes it, for the words of a hold. */
 export interface EntryWords {
-  /** the sources file, as a person reads its path */
-  file: string;
+  /** where the file names it, as a person reads it (`mason/sources/app.yml: tables.orders`) */
+  at: string;
   /** the entry's name in the file (`orders`, `billing.invoices`) */
   name: string;
   /** its `columns:`, or null for an entry that syncs every column but its `exclude:` */
@@ -99,7 +99,7 @@ function heldText(t: IdentityInput, names: readonly string[], conflicts: Readonl
   const e = t.entry;
   if (e === undefined) return `${head}.`;
   const gone = new Set(conflicts.map((c) => c.name));
-  const at = `${e.file}: tables.${e.name}`;
+  const at = e.at;
   const listed = e.columns === null ? [] : renamedOut;
   const line = e.columns === null
     ? `exclude: ${flow([...e.exclude.filter((x) => names.includes(x)), ...conflicts.map((c) => c.name).filter((x) => !e.exclude.includes(x))])}`

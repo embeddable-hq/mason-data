@@ -69,6 +69,7 @@ import { wireColumn } from "./types.ts";
 import { fileFactsSql, nextPollDelayMs, rowsHeldSql, SNAPSHOT_SQL, snapshotXmin, xmin8Sql, xminBeforeHolds, xminBeforeSql } from "../cdc/poll.ts";
 import { pgIdent } from "../cdc/pg-wire.ts";
 import { identitySql, regclassName, shapeColumns, shapeSql, shapeTuples } from "../cdc/shape.ts";
+import { keyHeldProblem, keyHeldSql } from "../cdc/key-held.ts";
 import { identityVerdict, recordOf, type ColumnRecord, type EntryWords } from "./column-identity.ts";
 import type { RelationColumn } from "../cdc/pgoutput.ts";
 import * as fs from "node:fs";
@@ -104,10 +105,15 @@ export function syncModeOf(env: NodeJS.ProcessEnv): SyncMode {
  *  them; src/cli/sources.ts addedTables). `key` is what it is copied by; `primaryKey`, when present, the source's own
  *  primary key (none) where the sources file names a `key:` — the catalog declares only what the source does. `sync`
  *  is how the sources file keeps it current after its first copy (its entry's, else the file's, else `off`); a table
- *  with none — a test's — is polled at the sync's own interval (`Sync.syncOf`). */
+ *  with none — a test's — is polled at the sync's own interval (`Sync.syncOf`). Its key is written by only while the
+ *  database still enforces it (src/cdc/key-held.ts, issue 1027). */
 export type AddedTable = Pick<SourceTable, "source" | "schema" | "table" | "key" | "columns" | "foreignKeys" | "bytes" | "rows"> & Partial<Pick<SourceTable, "rowTypeOid" | "uniqueKeys" | "shape" | "oid">> &
   { primaryKey?: string[]; sync?: TableSync; replicaIdentity?: SourceTable["replicaIdentity"];
-    /** its entry in the sources file, for the line a hold says (src/duck/column-identity.ts); absent from a test's table */
+    /** where the sources file names it (`mason/sources/app.yml: tables.logs`), for a refusal that names the file and the
+     *  key (`keyNotHeld`); none for a test's table */
+    entryAt?: string;
+    /** its entry in the sources file, for the line a hold for its columns says (src/duck/column-identity.ts); absent from
+     *  a test's table */
     entry?: EntryWords };
 
 export type CopyPhase = "waiting" | "copying" | "copied" | "failed";
@@ -260,6 +266,10 @@ export class Removed extends Error {
   readonly source: string;
   constructor(source: string) { super(`${source} is no longer added`); this.source = source; }
 }
+
+/** a table the database no longer keeps apart by the key it is synced by (src/cdc/key-held.ts, issue 1027): its read is
+ *  refused before it writes by that key, the synced data left as it was, its words the developer's (`keyNotHeld`) */
+export class KeyNotHeld extends Error {}
 
 export interface CopyState {
   source: string;
@@ -925,6 +935,16 @@ class RewriteWait extends Error {
   constructor(message: string, writtenBy: string, said: boolean) { super(message); this.writtenBy = writtenBy; this.said = said; }
 }
 
+/** HOW LONG THE CHECK OF A REWRITTEN TABLE'S ROWS WAITS FOR ITS LOCK ON THE SOURCE (`heldReadsNone`, issue 1066): a
+ *  check queued behind a migration's ACCESS EXCLUSIVE lock gives up soon, and is tried again `REWRITE_RECHECK_MS` later */
+export const REWRITE_CHECK_LOCK_MS = 1_000;
+
+/** Whether `e` is a read the source stopped by its `statement_timeout` or `lock_timeout` (`heldReadsNone`): a decision,
+ *  so it reads the error's raw words (`messageOf`), Postgres's own (the extension passes them on, as "ERROR: …") */
+function sourceTimedOut(e: unknown): boolean {
+  return /canceling statement due to (?:statement|lock) timeout/.test(messageOf(e));
+}
+
 /** the words for a table rewritten after a read's snapshot was taken (issue 1025), `when` saying which read */
 function rewrittenText(source: string, when: string): string {
   return `the database rewrote ${source} ${when} (its file changed: a TRUNCATE, VACUUM FULL, CLUSTER, an ALTER TABLE that rewrites it, or a tool that swaps its file such as pg_repack)`;
@@ -1302,7 +1322,7 @@ export class Sync {
   private readonly rewriteRecheckMs: number;
   /** the tables whose whole sync waits for an open transaction older than their rewrite (`RewriteWait`): the rewrite's
    *  catalog row (`fileFactsSql` `written_by`) and the words said of it, so a check again of it reads no row */
-  private readonly rewriteWaits = new Map<string, { writtenBy: string; message: string }>();
+  private readonly rewriteWaits = new Map<string, { writtenBy: string; message: string; decided: boolean }>();
   /** each copy whose chunks are being read, as they are (`CopyLive`): `state` renders it at the moment it is asked */
   private readonly copyLive = new Map<string, CopyLive>();
   /** a test's: told what each chunk did (`ChunkEvent`), inside the chunk's transaction before it commits ("read") and
@@ -2645,6 +2665,19 @@ export class Sync {
    * the source attached (no connection of its own), each an index lookup of `pg_attribute`: no lock, no row of a table
    * read. null for a table no longer there.
    */
+  /**
+   * WHY ITS KEY CANNOT BE WRITTEN BY NOW (issue 1027), or null: the database no longer enforces it (src/cdc/key-held.ts).
+   * One small catalog query over the source already attached, on `w`: inside a poll's transaction it reads that poll's
+   * snapshot. A table with no key is never written by key.
+   */
+  private async keyNotHeld(w: DuckConnection, t: AddedTable): Promise<string | null> {
+    if (t.key.length === 0) return null;
+    const r = (await w.runAndReadAll(`SELECT * FROM ${pq(keyHeldSql(t.schema, t.table, t.key))}`)).getRowsJS()[0] as [boolean, string | null, boolean, string | null] | undefined;
+    if (r === undefined) return null;
+    return keyHeldProblem({ found: r[0], nullable: r[1], held: r[2], usable: r[3] },
+      { source: t.source, key: t.key, at: t.entryAt ?? `the sources file's entry for ${t.source}`, own: t.primaryKey !== undefined });
+  }
+
   private async shapesNow(w: DuckConnection, tables: readonly AddedTable[]): Promise<Map<string, string | null>> {
     const names = tables.map((t) => regclassName(t.schema, t.table));
     const sql = `SELECT s.i, ${shapeSql("to_regclass(s.n)")} AS shape FROM unnest(ARRAY[${names.join(", ")}]::text[]) WITH ORDINALITY AS s(n, i)`;
@@ -4359,7 +4392,7 @@ export class Sync {
     for (const t of tables) scaleds.set(t.source, await this.scaledOf(t, w));
     // the statement running, for the error of one that fails
     let doing = "reading the source's snapshot";
-    const named = (e: unknown): unknown => e instanceof Stopping || !(e instanceof Error) ? e : new Error(`${doing}: ${e.message}`, { cause: e });
+    const named = (e: unknown): unknown => e instanceof Stopping || e instanceof KeyNotHeld || !(e instanceof Error) ? e : new Error(`${doing}: ${e.message}`, { cause: e });
     // the source's count against DuckDB's, and when they differ the keys DuckDB holds that the source does not deleted
     // (`adds`: the keys a stage still to be written adds to DuckDB's count)
     const reconcile = async (t: AddedTable, target: string, from: string, adds = 0n): Promise<{ rows: number; deleted: number; countMs: number }> => {
@@ -4393,6 +4426,11 @@ export class Sync {
           const target = `${ident(t.schema)}.${ident(t.table)}`;
           const from = `${pgIdent(t.schema)}.${pgIdent(t.table)}`;
           const exact = exacts.get(t.source)!;
+          // ITS KEY STILL KEPT APART BY THE DATABASE, as this snapshot sees it (issue 1027): written by a key two rows
+          // share, the delete by key removes a synced row the poll does not insert again. Refused, rolled back
+          doing = `${t.source}: checking that the database still keeps its rows apart by its key`;
+          const unsafe = await this.keyNotHeld(w, t);
+          if (unsafe !== null) throw new KeyNotHeld(unsafe);
           // an exact numeric as its text, checked to fit its copy's DECIMAL (WIDER: the table is copied again, wider)
           const cols = t.columns.map((c) => exact.has(c.name) ? fitsDecimal(c.name, exact.get(c.name)!, t.source, declared(t, c.name)) : storedValue(c)).join(", ");
           const enums = await enumLists(w, target);
@@ -4564,6 +4602,10 @@ export class Sync {
         const again = r !== undefined ? `, again (it is ${r.layout})` : "";
         this.log(`syncing ${t.source}${again}: ${t.rows === null ? "rows unknown" : `about ${t.rows} row(s)`}, ${t.bytes} source bytes, ${beside}`);
       }
+      // ITS KEY KEPT APART BY THE DATABASE (issue 1027), before a page is read: a copy of rows that share a key is
+      // never swapped in (below), and is caught up and polled by that key after
+      const unsafe = await this.keyNotHeld(w, t);
+      if (unsafe !== null) throw new KeyNotHeld(unsafe);
       let read: { rows: number; seconds: number; progress: CopyProgress };
       try { read = await this.readChunks(t, side, kept, (p) => { kept = p; }); }
       catch (e) {
@@ -4581,6 +4623,9 @@ export class Sync {
         const [rows, keys] = (await w.runAndReadAll(`SELECT count(*), count(DISTINCT (${t.key.map(ident).join(", ")})) FROM ${side}`)).getRowsJS()[0] as [bigint, bigint];
         if (rows !== keys) {
           kept = await this.forgetCopy(t, side);
+          // a key the database stopped enforcing while it was read (an index dropped) is the developer's to fix, said so
+          const unsafe = await this.keyNotHeld(w, t);
+          if (unsafe !== null) throw new KeyNotHeld(unsafe);
           throw new Error(`its synced data holds ${rows} rows but ${keys} distinct keys (Mason bug: report it, with mason logs): it was not swapped in, and is read again from its first page`);
         }
       }
@@ -4985,10 +5030,30 @@ export class Sync {
     return { seen: r[0] === null ? null : Number(r[0]), now: Number(r[1]), replaced: r[2], fresh: r[3], writtenBy: r[4] };
   }
 
-  /** WHETHER A COPY HELD TO `watermark` READS NONE OF THE TABLE'S ROWS, which it has (`rowsHeldSql`), in the connection's
-   *  transaction: with the backend whose transaction is the watermark, when there is one */
-  private async heldReadsNone(c: DuckConnection, pgFrom: string, watermark: bigint): Promise<{ none: boolean; pid: number | null }> {
-    const r = (await c.runAndReadAll(`SELECT * FROM ${pq(rowsHeldSql(pgFrom, watermark))}`)).getRowsJS()[0] as [boolean, boolean, number | null];
+  /**
+   * WHETHER A COPY HELD TO `watermark` READS NONE OF THE TABLE'S ROWS, which it has (`rowsHeldSql`, a sample of its
+   * rows), in the connection's transaction: with the backend whose transaction is the watermark, when there is one.
+   * HELD TO A CHUNK'S TIME ON THE SOURCE (issue 1066: #1058's check read the whole table under AccessShareLock, and a
+   * migration's ALTER queued behind it, the application behind the ALTER): `lock_timeout` (`REWRITE_CHECK_LOCK_MS`) and
+   * `statement_timeout` (`MASON_COPY_CHUNK_SECONDS`) set for this one read, `SET LOCAL` in the same transaction. A read
+   * they stop could not tell (`none` null): Postgres has aborted the transaction, so the caller ends it, and the sync
+   * waits as for a rewrite that kept no row, checked again (fail closed: never a swap it could not verify).
+   */
+  private async heldReadsNone(c: DuckConnection, pgFrom: string, watermark: bigint): Promise<{ none: boolean | null; pid: number | null }> {
+    const statementMs = Math.round(this.copyChunkSeconds * 1000);
+    await c.run(`CALL postgres_execute(${literal(SRC)}, ${literal(`SET LOCAL lock_timeout = ${Math.min(REWRITE_CHECK_LOCK_MS, statementMs)}`)})`);
+    await c.run(`CALL postgres_execute(${literal(SRC)}, ${literal(`SET LOCAL statement_timeout = ${statementMs}`)})`);
+    let r: [boolean, boolean, number | null];
+    try {
+      r = (await c.runAndReadAll(`SELECT * FROM ${pq(rowsHeldSql(pgFrom, watermark))}`)).getRowsJS()[0] as [boolean, boolean, number | null];
+    } catch (e) {
+      if (!sourceTimedOut(e)) throw e;
+      this.log(`the check of ${pgFrom} for rows a sync would read was stopped by its time limit on the database, so it could not tell: ${this.errorText(e)}`);
+      return { none: null, pid: null };
+    }
+    // the rest of the transaction runs as the session's settings say
+    await c.run(`CALL postgres_execute(${literal(SRC)}, ${literal("SET LOCAL lock_timeout TO DEFAULT")})`);
+    await c.run(`CALL postgres_execute(${literal(SRC)}, ${literal("SET LOCAL statement_timeout TO DEFAULT")})`);
     return { none: !r[0] && r[1], pid: r[2] === null ? null : Number(r[2]) };
   }
 
@@ -5014,18 +5079,27 @@ export class Sync {
       this.rewriteWaits.delete(t.source);
       return f.seen;
     }
+    // a rewrite decided before is not read again; one whose check could not tell is
     const known = this.rewriteWaits.get(t.source);
-    if (known?.writtenBy === f.writtenBy) throw new RewriteWait(known.message, f.writtenBy, true);
+    if (known?.writtenBy === f.writtenBy && known.decided) throw new RewriteWait(known.message, f.writtenBy, true);
     const held = await this.heldReadsNone(c, pgFrom, watermark);
-    if (!held.none) {
+    if (held.none === false) {
       this.rewriteWaits.delete(t.source);
       return f.seen;
     }
+    const message = this.rewriteWaitText(t, watermark, held);
+    this.rewriteWaits.set(t.source, { writtenBy: f.writtenBy, message, decided: held.none === true });
+    throw new RewriteWait(message, f.writtenBy, known?.writtenBy === f.writtenBy && known.message === message);
+  }
+
+  /** the words for a whole sync that waits for an open transaction older than its table's rewrite (`RewriteWait`):
+   *  because a sync now would read none of its rows, or because the check of its rows could not tell in its time */
+  private rewriteWaitText(t: AddedTable, watermark: bigint, held: { none: boolean | null; pid: number | null }): string {
     const holder = `transaction ${watermark & 0xffffffffn}${held.pid === null ? "" : ` (pid ${held.pid} in pg_stat_activity)`}`;
-    const message = `${rewrittenText(t.source, "after a transaction that is still open on the database began")}, so a sync now would read none of its rows. ` +
+    const why = held.none === true ? "so a sync now would read none of its rows"
+      : `and a short read of its rows could not tell within ${this.copyChunkSeconds} s whether a sync now would read them (another session held a lock on it, or its first rows are far into the table)`;
+    return `${rewrittenText(t.source, "after a transaction that is still open on the database began")}, ${why}. ` +
       `Its sync waits for that ${holder} to end, and checks again every ${this.rewriteRecheckMs >= 1000 ? `${Math.round(this.rewriteRecheckMs / 1000)} s` : `${this.rewriteRecheckMs} ms`}`;
-    this.rewriteWaits.set(t.source, { writtenBy: f.writtenBy, message });
-    throw new RewriteWait(message, f.writtenBy, false);
   }
 
   /** A RESUMED COPY'S FILE, in a transaction of its own before its chunks read on (issue 1025): the file is the one its
@@ -5035,12 +5109,22 @@ export class Sync {
     const w = this.rebuilder.conn;
     await w.run("BEGIN TRANSACTION");
     try {
-      const why = await this.interruptible(this.rebuilder, async (): Promise<string | null> => {
+      const why = await this.interruptible(this.rebuilder, async (): Promise<string | RewriteWait | null> => {
         const f = await this.fileFacts(w, pgFrom, watermark);
         if (f.seen === null || f.now !== filenode) return `the source rewrote ${t.source} since its sync began (its file changed: a VACUUM FULL, CLUSTER, TRUNCATE or column type change), so its rows moved between pages`;
-        if (f.fresh === true && f.replaced === true && (await this.heldReadsNone(w, pgFrom, watermark)).none) return `${rewrittenText(t.source, "after its sync's first snapshot")}, so its chunks read none of its rows`;
+        if (f.fresh !== true || f.replaced !== true) return null;
+        const held = await this.heldReadsNone(w, pgFrom, watermark);
+        if (held.none === true) return `${rewrittenText(t.source, "after its sync's first snapshot")}, so its chunks read none of its rows`;
+        // could not tell in its time (issue 1066): the copy keeps its chunks and waits, checked again
+        if (held.none === null) {
+          const message = this.rewriteWaitText(t, watermark, held), writtenBy = f.writtenBy ?? "", known = this.rewriteWaits.get(t.source);
+          this.rewriteWaits.set(t.source, { writtenBy, message, decided: false });
+          return new RewriteWait(message, writtenBy, known?.writtenBy === writtenBy && known.message === message);
+        }
+        this.rewriteWaits.delete(t.source);
         return null;
       });
+      if (why instanceof RewriteWait) throw why;
       await w.run("COMMIT");
       if (why !== null) throw new StartOver(why);
     } catch (e) {

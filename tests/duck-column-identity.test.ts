@@ -12,7 +12,7 @@ type Recorded = { attnum: number; name: string; synced: boolean };
 type Record_ = { oid: number; columns: Recorded[] };
 type Verdict = { kind: "unknown" } | { kind: "taken"; record: Record_ } | { kind: "held"; why: string; conflicts: Array<{ name: string; was: string }> };
 interface Module {
-  identityVerdict(t: { source: string; oid?: number; shape?: string; synced: readonly string[]; entry?: { file: string; name: string; columns: readonly string[] | null; exclude: readonly string[] } }, record: Record_ | undefined, confirmed: boolean): Verdict;
+  identityVerdict(t: { source: string; oid?: number; shape?: string; synced: readonly string[]; entry?: { at: string; name: string; columns: readonly string[] | null; exclude: readonly string[] } }, record: Record_ | undefined, confirmed: boolean): Verdict;
   recordOf(oid: unknown, columns: unknown): Record_ | null;
 }
 
@@ -24,8 +24,8 @@ async function load(): Promise<Module> {
 
 /** a shape as src/cdc/shape.ts reads it: each column's name, type oid, typmod, number and whether it is generated */
 const shape = (...cols: Array<[string, number]>): string => JSON.stringify(cols.map(([name, attnum]) => [name, 25, -1, attnum, false]));
-const every = (exclude: string[]) => ({ file: "mason/sources/app.yml", name: "t", columns: null, exclude });
-const listed = (columns: string[]) => ({ file: "mason/sources/app.yml", name: "t", columns, exclude: [] });
+const every = (exclude: string[]) => ({ at: "mason/sources/app.yml: tables.t", name: "t", columns: null, exclude });
+const listed = (columns: string[]) => ({ at: "mason/sources/app.yml: tables.t", name: "t", columns, exclude: [] });
 const OID = 16_400;
 const record = (...cols: Array<[number, string, boolean]>): Record_ => ({ oid: OID, columns: cols.map(([attnum, name, synced]) => ({ attnum, name, synced })) });
 

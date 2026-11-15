@@ -43,7 +43,9 @@ const noBrowser = playwright === null ? "Playwright is not installed here (requi
 
 const col = (name: string, type = "text") => ({ name, type, notNull: false, comment: null });
 const LONG = "customer_subscription_billing_events_archive_2026_full";
-const NAMES = ["orders", "order_items", "customers", LONG];
+// "public.locked_for_running_sync": a usual name of 30 characters, the longest held whole (issue 1049)
+const USUAL = "locked_for_running_sync";
+const NAMES = ["orders", "order_items", "customers", USUAL, LONG];
 const TABLES: SourceTable[] = NAMES.map((name, i) => ({ source: `public.${name}`, schema: "public", table: name, key: ["id"], rows: 1000 * (i + 1), bytes: 8192, comment: null,
   columns: [col("id", "bigint"), col("status")], foreignKeys: [] }));
 const parsed = parseSource("postgres://shop:secret@db.example.com:5432/shop");
@@ -81,6 +83,7 @@ const eventsNow = (): SyncEvent[] => [
   { at: ago(3_600_000), kind: "synced", failed: false, table: "public.customers", message: `synced by hand: ${tableSync.syncedText({ ...counts, ms: 13_703 }, "exact")}`, code: null, origin: null, tookMs: 13_703 },
   { at: ago(600_000), kind: "full_sync", failed: false, table: "public.orders", message: `synced whole: ${tableSync.syncedText({ ...counts, ms: 477_000 }, "exact")}`, code: null, origin: null, tookMs: 477_000 },
   { at: ago(60_000), kind: "polled", failed: false, table: "public.orders", message: `synced on schedule: ${tableSync.syncedText({ ...counts, ms: 570 }, "poll")}`, code: null, origin: null, tookMs: 570 },
+  { at: ago(30_000), kind: "synced", failed: false, table: `public.${USUAL}`, message: `synced by hand: ${tableSync.syncedText({ ...counts, ms: 2_500 }, "exact")}`, code: null, origin: null, tookMs: 2_500 },
 ];
 
 // ------------------------------------------------------------------ the page, served as the run serves it
@@ -121,7 +124,7 @@ const WIDTHS = Array.from({ length: 129 }, (_, i) => 320 + 10 * i);
 const spills = (p: Page) => p.evaluate<string[]>(`(() => {
   const out = [];
   const table = document.querySelector("#syncs-events table.events");
-  const card = table.closest(".panel");
+  const card = table.closest(".list");
   const phone = window.innerWidth <= 640;
   const least = parseFloat(getComputedStyle(table).minWidth) || 0;
   const scrolls = card.scrollWidth > card.clientWidth + 1;
@@ -137,11 +140,15 @@ const spills = (p: Page) => p.evaluate<string[]>(`(() => {
   } else if (scrolls) out.push("the list runs " + (card.scrollWidth - card.clientWidth) + " px past a card as wide as it needs");
   if (document.documentElement.scrollWidth > window.innerWidth) out.push("the page scrolls sideways");
   // a name is cut where its box holds less than its text, across or down (a clamped line): above the phone layout only
-  // the long one may be, and a cut name's whole is its title (on a phone, a name beside the widest kinds is cut at
-  // 320 px, as it was before issue 1048, which kept the phone layout)
+  // a name longer than 30 characters may be, and a cut name's whole is its title (on a phone, a name beside the widest
+  // kinds is cut at 320 px, as it was before issue 1048, which kept the phone layout). The text's own width, from a
+  // range, against the box's: scrollWidth is whole pixels, and missed a cut under one (issue 1049)
   for (const name of table.querySelectorAll("code.name")) {
-    const cut = name.scrollWidth > name.clientWidth + 0.5 || name.scrollHeight > name.clientHeight + 0.5;
-    if (cut && !phone && name.textContent.length < 30) out.push("the name " + JSON.stringify(name.textContent) + " is cut (" + name.clientWidth + " of " + name.scrollWidth + " px)");
+    const range = document.createRange();
+    range.selectNodeContents(name);
+    const text = range.getBoundingClientRect().width, box = name.getBoundingClientRect().width;
+    const cut = text > box + 0.05 || name.scrollWidth > name.clientWidth + 0.5 || name.scrollHeight > name.clientHeight + 0.5;
+    if (cut && !phone && name.textContent.length <= 30) out.push("the name " + JSON.stringify(name.textContent) + " is cut (" + box.toFixed(2) + " of " + text.toFixed(2) + " px)");
     if (cut && name.title !== name.textContent) out.push("the cut name " + JSON.stringify(name.textContent) + " has no title with its whole");
   }
   const heads = [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
