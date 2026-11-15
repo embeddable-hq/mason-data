@@ -69,6 +69,7 @@ import { wireColumn } from "./types.ts";
 import { fileFactsSql, nextPollDelayMs, rowsHeldSql, SNAPSHOT_SQL, snapshotXmin, xmin8Sql, xminBeforeHolds, xminBeforeSql } from "../cdc/poll.ts";
 import { pgIdent } from "../cdc/pg-wire.ts";
 import { regclassName, shapeColumns, shapeSql, shapeTuples } from "../cdc/shape.ts";
+import { keyHeldProblem, keyHeldSql } from "../cdc/key-held.ts";
 import type { RelationColumn } from "../cdc/pgoutput.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -103,9 +104,13 @@ export function syncModeOf(env: NodeJS.ProcessEnv): SyncMode {
  *  them; src/cli/sources.ts addedTables). `key` is what it is copied by; `primaryKey`, when present, the source's own
  *  primary key (none) where the sources file names a `key:` — the catalog declares only what the source does. `sync`
  *  is how the sources file keeps it current after its first copy (its entry's, else the file's, else `off`); a table
- *  with none — a test's — is polled at the sync's own interval (`Sync.syncOf`). */
+ *  with none — a test's — is polled at the sync's own interval (`Sync.syncOf`). Its key is written by only while the
+ *  database still enforces it (src/cdc/key-held.ts, issue 1027). */
 export type AddedTable = Pick<SourceTable, "source" | "schema" | "table" | "key" | "columns" | "foreignKeys" | "bytes" | "rows"> & Partial<Pick<SourceTable, "rowTypeOid" | "uniqueKeys" | "shape">> &
-  { primaryKey?: string[]; sync?: TableSync; replicaIdentity?: SourceTable["replicaIdentity"] };
+  { primaryKey?: string[]; sync?: TableSync; replicaIdentity?: SourceTable["replicaIdentity"];
+    /** where the sources file names it (`mason/sources/app.yml: tables.logs`), for a refusal that names the file and the
+     *  key (`keyNotHeld`); none for a test's table */
+    entryAt?: string };
 
 export type CopyPhase = "waiting" | "copying" | "copied" | "failed";
 
@@ -257,6 +262,10 @@ export class Removed extends Error {
   readonly source: string;
   constructor(source: string) { super(`${source} is no longer added`); this.source = source; }
 }
+
+/** a table the database no longer keeps apart by the key it is synced by (src/cdc/key-held.ts, issue 1027): its read is
+ *  refused before it writes by that key, the synced data left as it was, its words the developer's (`keyNotHeld`) */
+export class KeyNotHeld extends Error {}
 
 export interface CopyState {
   source: string;
@@ -2606,6 +2615,19 @@ export class Sync {
    * the source attached (no connection of its own), each an index lookup of `pg_attribute`: no lock, no row of a table
    * read. null for a table no longer there.
    */
+  /**
+   * WHY ITS KEY CANNOT BE WRITTEN BY NOW (issue 1027), or null: the database no longer enforces it (src/cdc/key-held.ts).
+   * One small catalog query over the source already attached, on `w`: inside a poll's transaction it reads that poll's
+   * snapshot. A table with no key is never written by key.
+   */
+  private async keyNotHeld(w: DuckConnection, t: AddedTable): Promise<string | null> {
+    if (t.key.length === 0) return null;
+    const r = (await w.runAndReadAll(`SELECT * FROM ${pq(keyHeldSql(t.schema, t.table, t.key))}`)).getRowsJS()[0] as [boolean, string | null, boolean, string | null] | undefined;
+    if (r === undefined) return null;
+    return keyHeldProblem({ found: r[0], nullable: r[1], held: r[2], usable: r[3] },
+      { source: t.source, key: t.key, at: t.entryAt ?? `the sources file's entry for ${t.source}`, own: t.primaryKey !== undefined });
+  }
+
   private async shapesNow(w: DuckConnection, tables: readonly AddedTable[]): Promise<Map<string, string | null>> {
     const names = tables.map((t) => regclassName(t.schema, t.table));
     const sql = `SELECT s.i, ${shapeSql("to_regclass(s.n)")} AS shape FROM unnest(ARRAY[${names.join(", ")}]::text[]) WITH ORDINALITY AS s(n, i)`;
@@ -4193,7 +4215,7 @@ export class Sync {
     for (const t of tables) scaleds.set(t.source, await this.scaledOf(t, w));
     // the statement running, for the error of one that fails
     let doing = "reading the source's snapshot";
-    const named = (e: unknown): unknown => e instanceof Stopping || !(e instanceof Error) ? e : new Error(`${doing}: ${e.message}`, { cause: e });
+    const named = (e: unknown): unknown => e instanceof Stopping || e instanceof KeyNotHeld || !(e instanceof Error) ? e : new Error(`${doing}: ${e.message}`, { cause: e });
     // the source's count against DuckDB's, and when they differ the keys DuckDB holds that the source does not deleted
     // (`adds`: the keys a stage still to be written adds to DuckDB's count)
     const reconcile = async (t: AddedTable, target: string, from: string, adds = 0n): Promise<{ rows: number; deleted: number; countMs: number }> => {
@@ -4227,6 +4249,11 @@ export class Sync {
           const target = `${ident(t.schema)}.${ident(t.table)}`;
           const from = `${pgIdent(t.schema)}.${pgIdent(t.table)}`;
           const exact = exacts.get(t.source)!;
+          // ITS KEY STILL KEPT APART BY THE DATABASE, as this snapshot sees it (issue 1027): written by a key two rows
+          // share, the delete by key removes a synced row the poll does not insert again. Refused, rolled back
+          doing = `${t.source}: checking that the database still keeps its rows apart by its key`;
+          const unsafe = await this.keyNotHeld(w, t);
+          if (unsafe !== null) throw new KeyNotHeld(unsafe);
           // an exact numeric as its text, checked to fit its copy's DECIMAL (WIDER: the table is copied again, wider)
           const cols = t.columns.map((c) => exact.has(c.name) ? fitsDecimal(c.name, exact.get(c.name)!, t.source, declared(t, c.name)) : storedValue(c)).join(", ");
           const enums = await enumLists(w, target);
@@ -4396,6 +4423,10 @@ export class Sync {
         const again = r !== undefined ? `, again (it is ${r.layout})` : "";
         this.log(`syncing ${t.source}${again}: ${t.rows === null ? "rows unknown" : `about ${t.rows} row(s)`}, ${t.bytes} source bytes, ${beside}`);
       }
+      // ITS KEY KEPT APART BY THE DATABASE (issue 1027), before a page is read: a copy of rows that share a key is
+      // never swapped in (below), and is caught up and polled by that key after
+      const unsafe = await this.keyNotHeld(w, t);
+      if (unsafe !== null) throw new KeyNotHeld(unsafe);
       let read: { rows: number; seconds: number; progress: CopyProgress };
       try { read = await this.readChunks(t, side, kept, (p) => { kept = p; }); }
       catch (e) {
@@ -4413,6 +4444,9 @@ export class Sync {
         const [rows, keys] = (await w.runAndReadAll(`SELECT count(*), count(DISTINCT (${t.key.map(ident).join(", ")})) FROM ${side}`)).getRowsJS()[0] as [bigint, bigint];
         if (rows !== keys) {
           kept = await this.forgetCopy(t, side);
+          // a key the database stopped enforcing while it was read (an index dropped) is the developer's to fix, said so
+          const unsafe = await this.keyNotHeld(w, t);
+          if (unsafe !== null) throw new KeyNotHeld(unsafe);
           throw new Error(`its synced data holds ${rows} rows but ${keys} distinct keys (Mason bug: report it, with mason logs): it was not swapped in, and is read again from its first page`);
         }
       }

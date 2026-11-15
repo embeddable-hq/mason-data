@@ -92,7 +92,8 @@ paths:
   a type change: rows MOVE between pages) happened since the first snapshot and fewer than 2^30 transactions ran: the
   table's `pg_relation_filenode`, read after each chunk under the lock its read still holds, and the snapshot's age are
   checked, and either starts the copy over from page 0, said. The swap asserts as many distinct keys as rows (a failure
-  is a Mason bug: not swapped, copied again).
+  is a Mason bug: not swapped, copied again), unless the database no longer enforces the key, which is said as the
+  key's refusal (duck-sync.md "A key is written by only while the database enforces it"), as it is before the first page.
 - **A copy is held to the file its FIRST SNAPSHOT sees, never one a chunk happens to read, and never reads a rewritten
   table as empty** (issue 1025; `heldFile`, `fileFactsSql`, `RewriteWait`): a rewrite is not MVCC-safe, so a snapshot
   taken before it commits reads the new file once its read gets the lock, and an ALTER's or a TRUNCATE's rows there are
