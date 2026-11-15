@@ -74,13 +74,13 @@ const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
 const counts = { added: 1_234_567, updated: 89_012, deleted: 3_456, rows: 12_345_678 };
 const eventsNow = (): SyncEvent[] => [
   { at: ago(9 * 86_400_000), kind: "restart", failed: false, table: null, message: "Mason restarted", code: null, origin: null, tookMs: null },
-  { at: ago(3 * 86_400_000), kind: "full_sync", failed: false, table: `public.${LONG}`, message: `synced whole: ${tableSync.syncedText({ ...counts, ms: 7_384_000 })}`, code: null, origin: null, tookMs: 7_384_000 },
+  { at: ago(3 * 86_400_000), kind: "full_sync", failed: false, table: `public.${LONG}`, message: `synced whole: ${tableSync.syncedText({ ...counts, ms: 7_384_000 }, "exact")}`, code: null, origin: null, tookMs: 7_384_000 },
   { at: ago(86_400_000), kind: "full_sync_failed", failed: true, table: "public.order_items", message: "full sync: connection to the source was lost while reading chunk 14 of 220\nthe sync tries it again in 30 s", code: "ECONNRESET", origin: "src/duck/sync.ts:3640", tookMs: null },
   // the widest kind's words
   { at: ago(7_200_000), kind: "generated_failed", failed: true, table: `public.${LONG}`, message: "generated table: the query failed", code: "42P01", origin: "src/duck/generated.ts:210", tookMs: null },
-  { at: ago(3_600_000), kind: "synced", failed: false, table: "public.customers", message: `synced by hand: ${tableSync.syncedText({ ...counts, ms: 13_703 })}`, code: null, origin: null, tookMs: 13_703 },
-  { at: ago(600_000), kind: "full_sync", failed: false, table: "public.orders", message: `synced whole: ${tableSync.syncedText({ ...counts, ms: 477_000 })}`, code: null, origin: null, tookMs: 477_000 },
-  { at: ago(60_000), kind: "polled", failed: false, table: "public.orders", message: `synced on schedule: ${tableSync.syncedText({ ...counts, ms: 570 })}`, code: null, origin: null, tookMs: 570 },
+  { at: ago(3_600_000), kind: "synced", failed: false, table: "public.customers", message: `synced by hand: ${tableSync.syncedText({ ...counts, ms: 13_703 }, "exact")}`, code: null, origin: null, tookMs: 13_703 },
+  { at: ago(600_000), kind: "full_sync", failed: false, table: "public.orders", message: `synced whole: ${tableSync.syncedText({ ...counts, ms: 477_000 }, "exact")}`, code: null, origin: null, tookMs: 477_000 },
+  { at: ago(60_000), kind: "polled", failed: false, table: "public.orders", message: `synced on schedule: ${tableSync.syncedText({ ...counts, ms: 570 }, "poll")}`, code: null, origin: null, tookMs: 570 },
 ];
 
 // ------------------------------------------------------------------ the page, served as the run serves it
