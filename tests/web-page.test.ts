@@ -849,9 +849,19 @@ test("a sources file the server cannot write: no Add, Columns…, Name its key�
   const html = renderTables({ ...CATALOG_STATE, sourcesReadOnly: why, sourcesReadOnlyKind: "unwritable", served: true });
   for (const control of ["data-remove-table", "data-add-table", "data-choose"]) assert.ok(!html.includes(control), control);
   assert.match(html, /data-sync-table/);
-  assert.ok(textOf(html).includes(`You can't add or remove tables from this page. ${why} The README describes how.`));
-  // the README's deploy section, linked as the page links to the README (users.js ROLES_DOCS_URL): same tab, no referrer
-  assert.ok(html.includes(`${why} <a href="https://github.com/embeddable-hq/mason-data#run-it-on-a-server" rel="noreferrer">The README</a> describes how.`), "the README's link");
+  assert.ok(textOf(html).includes(`You can't add or remove tables from this page. ${why} Read how to change a deployed project .`));
+  // the README's "Change a deployed project" (the state's pageDeployDocs), linked as the page links to the README
+  // (users.js ROLES_DOCS_URL): same tab, no referrer
+  assert.equal(CATALOG_STATE.pageDeployDocs, "https://github.com/embeddable-hq/mason-data#change-a-deployed-project", "the run's state names the README's section");
+  assert.ok(html.includes(`${why} <a href="https://github.com/embeddable-hq/mason-data#change-a-deployed-project" rel="noreferrer">Read how to change a deployed project</a>.`), "the README's link");
+  // a host's own steps (MASON_UI_DEPLOY_DOCS_URL): the state's URL, escaped into the attribute
+  const hosted = renderTables({ ...CATALOG_STATE, sourcesReadOnly: why, sourcesReadOnlyKind: "deployed", pageDeployDocs: "/docs/deploy?a=1&b=\"2\"" });
+  assert.ok(hosted.includes(`${why} <a href="/docs/deploy?a=1&amp;b=&quot;2&quot;" rel="noreferrer">Read how to change a deployed project</a>.`), hosted);
+  assert.ok(!hosted.includes("github.com"), "the host's link alone");
+  // a state that names no URL (a run from before it): the reason alone, no link to nowhere
+  const { pageDeployDocs: _, ...older } = { ...CATALOG_STATE, sourcesReadOnly: why, sourcesReadOnlyKind: "deployed" };
+  const olderHtml = renderTables(older);
+  assert.ok(textOf(olderHtml).includes(`You can't add or remove tables from this page. ${why}`) && !olderHtml.includes("Read how"), olderHtml);
   // no table added yet: nothing says Add
   const none = renderTables({ ...CATALOG_STATE, sourcesReadOnly: why, sourcesReadOnlyKind: "unwritable", tables: CATALOG_STATE.tables.map((t) => ({ ...t, added: false, copy: null })) });
   assert.ok(!textOf(none).includes("Add one from the list"));
@@ -863,7 +873,7 @@ test("whether the project's files are read-only cannot be told (a config to repa
   const html = renderTables({ ...CATALOG_STATE, sourcesReadOnly: why, sourcesReadOnlyKind: "unknown", served: true });
   for (const control of ["data-remove-table", "data-add-table", "data-choose"]) assert.ok(!html.includes(control), control);
   assert.ok(textOf(html).includes(`You can't add or remove tables from this page. ${why}`), textOf(html));
-  assert.ok(!html.includes("#run-it-on-a-server") && !textOf(html).includes("The README"), "no README line");
+  assert.ok(!html.includes("#change-a-deployed-project") && !textOf(html).includes("Read how"), "no deploy line");
 });
 
 test("a project deployed read-only (MASON_PROJECT_READONLY=1): the state the run answers says why, and the Tables list has no Add, Columns…, Name its key… or Remove; unset, it has", () => {
@@ -880,9 +890,9 @@ test("a project deployed read-only (MASON_PROJECT_READONLY=1): the state the run
   const html = renderTables(deployed);
   for (const control of ["data-remove-table", "data-add-table", "data-choose"]) assert.ok(!html.includes(control), control);
   assert.match(html, /data-sync-table/, "Sync stays: the sync is unchanged");
-  assert.ok(textOf(html).includes(`You can't add or remove tables from this page. ${why} The README describes how.`), textOf(html));
-  // the way to deploy links to the README's "Run it on a server", in the same tab and with no referrer
-  assert.ok(html.includes(`${why.replace(/'/g, "&#39;")} <a href="https://github.com/embeddable-hq/mason-data#run-it-on-a-server" rel="noreferrer">The README</a> describes how.`), "the README's link");
+  assert.ok(textOf(html).includes(`You can't add or remove tables from this page. ${why} Read how to change a deployed project .`), textOf(html));
+  // the way to deploy links to the README's "Change a deployed project", in the same tab and with no referrer
+  assert.ok(html.includes(`${why.replace(/'/g, "&#39;")} <a href="https://github.com/embeddable-hq/mason-data#change-a-deployed-project" rel="noreferrer">Read how to change a deployed project</a>.`), "the README's link");
   // every table of the list is still written, added or not
   for (const t of CATALOG) assert.ok(html.includes(`title="${t.source}"`), t.source);
   // unset: nothing changes
@@ -1026,7 +1036,7 @@ test("MASON_PROJECT_READONLY=1 wins over the allowance: a read-only page that ed
   const html = renderTables({ ...CATALOG_STATE, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)", pageReadOnlyAllow: ["tables"], sourcesReadOnly: projectWhy, sourcesReadOnlyKind: "deployed", served: true });
   for (const control of ["data-remove-table", "data-add-table", "data-choose"]) assert.ok(!html.includes(control), control);
   assert.match(html, /data-sync-table/);
-  assert.ok(textOf(html).includes(`You can't add or remove tables from this page. ${projectWhy} The README describes how.`));
+  assert.ok(textOf(html).includes(`You can't add or remove tables from this page. ${projectWhy} Read how to change a deployed project .`));
   assert.equal(html, renderTables({ ...CATALOG_STATE, sourcesReadOnly: projectWhy, sourcesReadOnlyKind: "deployed", served: true }), "as on a page that is not read-only");
 });
 
@@ -2307,11 +2317,10 @@ test("the page's files fetch nothing from elsewhere and never touch the token: t
   for (const f of files) {
     // what is vendored is a third party's, copied whole (src/web/vendor/README.md): its comments name its sites, and it is never edited
     if (f.startsWith(`vendor${path.sep}`)) continue;
-    // the one site the page names is its README, linked at two sections (users.js ROLES_DOCS_URL, tables.js
-    // DEPLOY_DOCS_URL): a link the reader follows loads nothing into the page, so the CSP holds; nothing else is ever named
+    // the one site the page names is its README, at its roles section (users.js ROLES_DOCS_URL; the deploy steps are the
+    // state's pageDeployDocs): a link the reader follows loads nothing into the page, so the CSP holds; nothing else is named
     const text = fs.readFileSync(path.join(WEB, f), "utf8")
-      .replace(/ROLES_DOCS_URL = "https:\/\/github\.com\/embeddable-hq\/mason-data#access-control";/, "")
-      .replace(/DEPLOY_DOCS_URL = "https:\/\/github\.com\/embeddable-hq\/mason-data#run-it-on-a-server";/, "");
+      .replace(/ROLES_DOCS_URL = "https:\/\/github\.com\/embeddable-hq\/mason-data#access-control";/, "");
     assert.ok(!/https?:\/\//.test(text), `${f} names no other site: a CDN or a font would break the CSP`);
     assert.ok(!/@import/.test(text), `${f} loads no stylesheet but the page's own`);
     // url( only for a font of the page's own, in an @font-face: a relative path to a woff2 under vendor/ that is a route

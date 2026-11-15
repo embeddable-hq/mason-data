@@ -927,6 +927,16 @@ test("a link in the README, docs/MEASUREMENTS.md and docs/SQL-SUPPORT.md resolve
   assert.deepEqual(broken, [], "a link to nothing: point it at the file or heading that is there");
 });
 
+test("the web page's link to change a deployed project names a heading of the README (issue 1059)", async () => {
+  // imported when the test runs: at a commit without the module, this test fails by name and the rest still load
+  const docs = await import("../src/cli/ui-deploy-docs.ts" as string).catch(() => ({})) as { DEPLOY_DOCS_DEFAULT?: string };
+  const url = docs.DEPLOY_DOCS_DEFAULT ?? assert.fail("src/cli/ui-deploy-docs.ts is not in this tree");
+  const [base, anchor] = url.split("#");
+  assert.equal(base, "https://github.com/embeddable-hq/mason-data", "the repository's README, as GitHub shows it");
+  assert.equal(anchor, "change-a-deployed-project");
+  assert.ok(markdownAnchors(fs.readFileSync(path.join(ROOT, "README.md"), "utf8")).has(anchor!), `README.md has a heading whose anchor is #${anchor}`);
+});
+
 test("the link guard would catch the real thing", () => {
   const files: Record<string, string> = {
     "README.md": "# Mason\n\n## SQL support\n\n## Why Mason\n\n## Why Mason\n\n```yaml\n# not a heading\n```\n",
