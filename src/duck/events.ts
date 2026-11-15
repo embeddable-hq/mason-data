@@ -52,9 +52,10 @@ export const EVENTS_TOOK_DDL = `ALTER TABLE ${EVENTS_TABLE} ADD COLUMN IF NOT EX
  * `full_sync` (a copy, the first sync or a full read again, finished and was swapped in), `recovered` (a table whose poll, catch-up, stream or re-run failed is
  * current again; of no table, the stream applying changes or the database attached again after it failed) and
  * `synced` (a sync asked by hand — mason sync, the page's Sync now — and what it did), `sync_changed` (a table's
- * `sync:` in the sources file changed while it is copied: from what, to what, and how its copy is caught up), and
+ * `sync:` in the sources file changed while it is copied: from what, to what, and how its copy is caught up),
  * `columns_changed` (a table's columns changed on the database: what changed, that it is synced again whole with them,
- * and a new column that looks like a secret left out, issue 977).
+ * and a new column that looks like a secret left out, issue 977), and `sync_stopped` (a table's sync stopped because the
+ * table was removed while it ran, and what it had read was dropped: issue 1034, src/duck/sync.ts `cutShort`).
  *
  * THE SCHEDULED SYNCS (`SCHEDULED`): `polled` (a poll on the table's schedule that succeeded, and what it did) and
  * `streamed` (a table's changes the stream applied in the last minute, ONE row a table a minute, and only in a minute
@@ -63,7 +64,7 @@ export const EVENTS_TOOK_DDL = `ALTER TABLE ${EVENTS_TABLE} ADD COLUMN IF NOT EX
  * them past the newest `limit` a reader asks for. A poll is at most one a second a table (`poll 1s`, the floor), so a
  * table writes at most 86,400 rows a day, MASON_HISTORY_DAYS kept; a streamed table 1,440.
  */
-export const EVENT_KINDS = ["full_sync_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "sync_failed", "restart", "full_sync", "recovered", "synced", "sync_changed", "columns_changed", "polled", "streamed", "ui_error"] as const;
+export const EVENT_KINDS = ["full_sync_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "sync_failed", "restart", "full_sync", "recovered", "synced", "sync_changed", "columns_changed", "sync_stopped", "polled", "streamed", "ui_error"] as const;
 export type SyncEventKind = (typeof EVENT_KINDS)[number];
 const FAILURES: ReadonlySet<SyncEventKind> = new Set(["full_sync_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "sync_failed", "restart", "ui_error"]);
 /** whether an event of this kind is a failure: the one place that says it (the reader's filter, `failed`) */

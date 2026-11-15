@@ -90,6 +90,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **Removing a table while it syncs now stops its sync at once.** This covers a table's first sync, a table synced
+  again whole, the catch-up after it, and a sync you started by hand. Before, the sync ran to its end, which took hours
+  for a large table. Every table added beside it waited until then, and your database kept reading the removed table.
+  Now Mason cancels its reads on your database, drops what it had synced of the table, and starts the next table's
+  sync within seconds. The log and Sync events say "Sync stopped" with the reason, and it is never shown as a failure.
+  A table you add again right after removing it starts a new first sync.
+
 - **Removing a synced table whose name a generated table also uses no longer stops the sync.** While a synced table
   holds a name, a generated table of that name is refused, as before. Once you remove the synced table, the generated
   table is built again and served. Before, if no review of the generated tables ran between the add and the remove,
