@@ -6,7 +6,7 @@
  * polled: its answer is where the stream is, beside the polled ones'. The run's `POST /api/sync` (src/cli/run-server.ts) answers it, through the sync's own
  * poll (`Sync.pollNow`).
  */
-import { failed, failureCode, jsonText, parseCommand, reportText, type CommandSpec, type NextStep } from "./command.ts";
+import { exitOf, failed, failureCode, jsonText, parseCommand, reportText, type CommandSpec, type Failure, type NextStep } from "./command.ts";
 import { out as styleOut } from "./style.ts";
 import { callRun } from "./control.ts";
 import { reach } from "./state.ts";
@@ -37,7 +37,9 @@ export const SYNC_USAGE = `usage: mason sync (<table>… | --all) [--json]
            replication, not polled: [{ table, position, state, why }]), next }
 
   A table whose sync is already running or waiting to start (from the web page, another mason sync, its schedule)
-  is refused at once, code busy: mason status says when it ends.
+  is never synced a second time beside it. mason sync says it is in progress, when it started and how to follow it,
+  and exits 1, since the sync asked for did not run. With --json it is { error: { code: "busy", message, fix },
+  syncing (the sync running: { tables, startedAt }, or null when it is Mason's own sync of it), next }.
 `;
 
 export const SYNC: CommandSpec & { needs: "run" } = {
@@ -119,8 +121,16 @@ export async function sync(argv: string[]): Promise<number> {
         // wait, as its words say), else a sync by hand or a poll on schedule running: mason status says when it ended
         const next: NextStep[] = r.body.follow === "wait"
           ? [[`mason wait ${picked.map(tableArg).join(" ")}`, "waits until its sync ends"], ["mason status", "how each table is kept current, and when it was last synced"]]
-          : [["mason status", "when each table was last synced: run this again once it says so, for the changes made since"]];
-        return failed("sync", { message: String(f?.message ?? r.body.error), code, ...(typeof f?.fix === "string" ? { fix: f.fix } : {}), next }, { json });
+          : [["mason status", "when each table was last synced. Once its sync has ended, mason sync again picks up the changes made since"]];
+        const busy: Failure = { message: String(f?.message ?? r.body.error), code, ...(typeof f?.fix === "string" ? { fix: f.fix } : {}), next };
+        // AN AGENT reads the refusal's shape, code busy, so it never takes this for a sync it started, and when the
+        // running sync began (`syncing`: a sync by hand's; null for the run's own, whose words say which it is)
+        if (json) return failed("sync", busy, { json, beside: { syncing: busySyncing(r.body.sync, picked) } });
+        // A PERSON reads it as progress, never as a failure to start a sync (the owner, on issue 1039): what is
+        // syncing and since when, then how to follow it. The exit is still busy's, 1: the sync asked for did not run
+        // (a script's `mason sync orders && report` must not go on as if its tables were current as of now)
+        out(reportText({ headline: busyHeadline(busy), next }, styleOut()));
+        return exitOf(busy);
       }
       return failed("sync", { message: `${picked.join(", ")} ${picked.length === 1 ? "was" : "were"} not synced`, code, why: String(r.body.error),
         next: [["mason status", "each synced table"], ["mason logs", "the run's log"]] }, { json });
@@ -131,6 +141,23 @@ export async function sync(argv: string[]): Promise<number> {
     out(reportText({ ...syncedReport(b, picked, added.filter((t) => picked.includes(t.table))), next }, styleOut()));
     return 0;
   });
+}
+
+/** A sync asked of a table already syncing, as a person reads it (issue 1039): the run's words for what is syncing and
+ *  since when, then its way out — "Mason never starts a second sync beside it." — as one line of progress. */
+export function busyHeadline(f: Pick<Failure, "message" | "fix">): string {
+  const said = /[.!?]$/.test(f.message) ? f.message : `${f.message}.`;
+  return f.fix ? `${said} ${f.fix}` : said;
+}
+
+/** `mason sync --json`'s `syncing` beside a `busy` refusal: the sync by hand running (`POST /api/sync`'s `sync`), its
+ *  tables among those asked and when it started; null when it is the run's own sync (a first sync, a whole read again,
+ *  a catch-up, a poll on schedule), whose start the run does not say. */
+export function busySyncing(sync: unknown, picked: readonly string[]): { tables: string[]; startedAt: string } | null {
+  const s = sync as { tables?: unknown; startedAt?: unknown } | null | undefined;
+  if (typeof s?.startedAt !== "string" || !Array.isArray(s.tables)) return null;
+  const tables = (s.tables as unknown[]).filter((t): t is string => typeof t === "string" && picked.includes(t));
+  return { tables, startedAt: s.startedAt };
 }
 
 /** What happens to each table synced after now, by its sync (src/duck/sync.ts KeptCurrent): an `off` table stays as of

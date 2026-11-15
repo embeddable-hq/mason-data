@@ -1006,22 +1006,32 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
       try {
         const page = await fetch(`http://127.0.0.1:${ctx.port}/api/sync`, { method: "POST", headers: { Authorization: `Bearer ${ctx.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ tables: ["public.orders"] }) });
         assert.equal(page.status, 202, await page.clone().text());
+        // A PERSON READS IT AS PROGRESS, never as a failure to start a sync (issue 1039): no failure's mark or
+        // `mason sync:` head, on stdout as an answer is; exit 1 still, as the sync asked for did not run
         const busy = await runMason(app, ["sync", "orders"], matrixEnv());
         assert.equal(busy.code, 1, busy.stdout + busy.stderr);
-        assert.match(busy.stderr, /^✗ mason sync: public\.orders is already syncing \(started \d+ s ago\)\n {2}fix {3}it ends by itself, and a second sync is never started beside it\n\nNext:\n {2}mason status +when each table was last synced: run this again once it says so, for the changes made since\n$/, busy.stderr);
+        assert.equal(busy.stderr, "", "nothing said as a failure");
+        assert.match(busy.stdout, /^public\.orders is already syncing\. It started \d+ s ago\. Mason never starts a second sync beside it\.\n\nNext:\n {2}mason status +when each table was last synced\. Once its sync has ended, mason sync again picks up the changes made since\n$/, busy.stdout);
+        // AN AGENT reads code busy, so it never takes it for a sync it started, and when the running sync began
         const busyJson = await runMason(app, ["sync", "orders", "--json"], matrixEnv());
-        const b = JSON.parse(busyJson.stdout) as { error: { code: string; message: string }; next: Array<{ command: string }> };
-        assert.deepEqual([busyJson.code, b.error.code, b.next.map((x) => x.command)], [1, "busy", ["mason status"]]);
-        assert.match(b.error.message, /^public\.orders is already syncing \(started \d+ s ago\)$/);
+        const b = JSON.parse(busyJson.stdout) as { error: { code: string; message: string; fix: string }; syncing: { tables: string[]; startedAt: string }; next: Array<{ command: string }> };
+        assert.deepEqual([busyJson.code, Object.keys(b), Object.keys(b.error), b.error.code, b.error.fix, b.syncing.tables, b.next.map((x) => x.command)],
+          [1, ["error", "syncing", "next"], ["code", "message", "fix"], "busy", "Mason never starts a second sync beside it.", ["public.orders"], ["mason status"]]);
+        assert.match(b.error.message, /^public\.orders is already syncing\. It started \d+ s ago\.$/);
+        assert.ok(Math.abs(Date.now() - Date.parse(b.syncing.startedAt)) < 60_000, b.syncing.startedAt);
       } finally { release(); syncHeld = null; }
       assert.equal(polled.length, 2, "the page's sync alone read it: mason sync started none beside it");
       // THE RUN'S OWN READ OF IT (a whole read again, which mason wait waits for): its words and its next step agree
       refusedNext = { code: "busy", message: "public.orders is being read again whole (its columns changed): mason wait waits for it", follow: "wait" };
       try {
         const reading = await runMason(app, ["sync", "orders", "--json"], matrixEnv());
-        const w = JSON.parse(reading.stdout) as { error: { code: string; message: string }; next: Array<{ command: string }> };
-        assert.deepEqual([reading.code, w.error.code, w.error.message, w.next.map((x) => x.command)],
-          [1, "busy", "public.orders is being read again whole (its columns changed): mason wait waits for it", ["mason wait orders", "mason status"]]);
+        const w = JSON.parse(reading.stdout) as { error: { code: string; message: string }; syncing: unknown; next: Array<{ command: string }> };
+        assert.deepEqual([reading.code, w.error.code, w.error.message, w.syncing, w.next.map((x) => x.command)],
+          [1, "busy", "public.orders is being read again whole (its columns changed): mason wait waits for it", null, ["mason wait orders", "mason status"]]);
+        // and to a person, as progress: the run's words, then mason wait first
+        const readingSaid = await runMason(app, ["sync", "orders"], matrixEnv());
+        assert.deepEqual([readingSaid.code, readingSaid.stderr], [1, ""]);
+        assert.match(readingSaid.stdout, /^public\.orders is being read again whole \(its columns changed\): mason wait waits for it\. Mason never starts a second sync beside it\.\n\nNext:\n {2}mason wait orders +waits until its sync ends\n {2}mason status +/, readingSaid.stdout);
       } finally { refusedNext = null; }
       assert.equal(polled.length, 2, "refused: nothing read");
       const both = await runMason(app, ["sync", "orders", "--all"], matrixEnv());

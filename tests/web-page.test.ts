@@ -3219,23 +3219,46 @@ test("Tables: a page opened while a sync runs (a reload, another tab, mason sync
   assert.match(later.view().tables!, />Sync now<\/button>/);
 });
 
-test("Tables: Sync now of a table already syncing (another tab, mason sync) is refused busy at once: what is happening and that its row shows when it ends; the row then says Syncing… (issue 1007)", async () => {
+test("Tables: Sync now of a table already syncing (another tab, mason sync) is refused busy at once, said as progress beside its Sync: what is syncing, since when, and that its row shows when it ends; the row then says Syncing… (issues 1007, 1039)", async () => {
+  const run = fakeRun();
+  run.answers.set("GET api/state", answer(SYNCED));
+  const app = fn<[unknown], App>("createApp")(run.fetch) as App & { syncTable(t: string): Promise<boolean>; dismissSynced(): void };
+  app.show("tables");
+  await app.poll();
+  const running = { id: 9, tables: ["public.customers"], state: "syncing", startedAt: "2026-10-27T09:03:00.000Z", endedAt: null };
+  const message = "public.customers is already syncing. It started 2 min ago.";
+  run.answers.set("POST api/sync", answer({ error: message, code: "busy", sync: running,
+    failure: { code: "busy", message, fix: "Mason never starts a second sync beside it.", next: [{ command: "mason status", what: "when each table was last synced" }] } }, 409));
+  run.answers.set("GET api/state", answer({ ...SYNCED, tables: SYNCED.tables.map((t) => t.table === "public.customers" ? { ...t, syncByHand: running } : t) }));
+  run.asked.length = 0;
+  const before = app.view().tables!;
+  assert.equal(await app.syncTable("public.customers"), false);
+  assert.deepEqual(run.asked, [`POST api/sync ${JSON.stringify({ tables: ["public.customers"] })}`, "GET api/state"], "refused, then the state read again: the row says the sync running");
+  const said = popOf(app.view().tables!, "act-tables-public.customers");
+  assert.equal(textOf(said), "public.customers is already syncing. It started 2 min ago. Mason never starts a second sync beside it. Its row shows when it ends. Dismiss", "in the page's words: no command named");
+  // IN PROGRESS, NOT A FAILURE (issue 1039): no failure's mark, no alert, no failure's box; a status a reader is told
+  assert.ok(!said.includes("✗") && !said.includes(`role="alert"`) && !said.includes(`class="failure"`), said);
+  assert.match(said, /<div class="done syncing" role="status">/);
+  assert.match(app.view().tables!, /<button type="button" class="small" data-sync-table="[^"]*" data-room="Syncing…" aria-busy="true" disabled>Syncing…<\/button>/);
+  // a click moves no other row: the rows are the rows they were, the popover written after the table
+  const rows = (html: string) => [...html.matchAll(/<tr class="[^"]*"><th scope="row"/g)].length;
+  assert.equal(rows(app.view().tables!), rows(before));
+  app.dismissSynced();
+  assert.equal(popOf(app.view().tables!, "act-tables-public.customers"), "", "Dismiss takes it away");
+});
+
+test("Tables: Sync now refused busy by the run's own sync of it (a poll on schedule, no sync by hand): progress beside it, and the button never says Synced ✓ (issue 1039)", async () => {
   const run = fakeRun();
   run.answers.set("GET api/state", answer(SYNCED));
   const app = fn<[unknown], App>("createApp")(run.fetch) as App & { syncTable(t: string): Promise<boolean> };
   app.show("tables");
   await app.poll();
-  const running = { id: 9, tables: ["public.customers"], state: "syncing", startedAt: "2026-10-27T09:03:00.000Z", endedAt: null };
-  const message = "public.customers is already syncing (started 2 min ago)";
-  run.answers.set("POST api/sync", answer({ error: message, code: "busy", sync: running,
-    failure: { code: "busy", message, fix: "it ends by itself, and a second sync is never started beside it", next: [{ command: "mason status", what: "when each table was last synced" }] } }, 409));
-  run.answers.set("GET api/state", answer({ ...SYNCED, tables: SYNCED.tables.map((t) => t.table === "public.customers" ? { ...t, syncByHand: running } : t) }));
-  run.asked.length = 0;
+  const message = "public.customers is being synced now, on its schedule (polled every 5m): it is current when that ends";
+  run.answers.set("POST api/sync", answer({ error: message, code: "busy", failure: { code: "busy", message, fix: "Mason never starts a second sync beside it.", next: [] } }, 409));
   assert.equal(await app.syncTable("public.customers"), false);
-  assert.deepEqual(run.asked, [`POST api/sync ${JSON.stringify({ tables: ["public.customers"] })}`, "GET api/state"], "refused, then the state read again: the row says the sync running");
-  const said = popOf(app.view().tables!, "act-tables-public.customers");
-  assert.equal(textOf(said), "✗ public.customers is already syncing (started 2 min ago). Its row shows when it ends. Dismiss", "in the page's words: no command named");
-  assert.match(app.view().tables!, /<button type="button" class="small" data-sync-table="[^"]*" data-room="Syncing…" aria-busy="true" disabled>Syncing…<\/button>/);
+  const html = app.view().tables!;
+  assert.equal(textOf(popOf(html, "act-tables-public.customers")), `${message}. Mason never starts a second sync beside it. Its row shows when it ends. Dismiss`);
+  assert.ok(!html.includes("Synced ✓"), "a sync it did not do is never said done");
 });
 
 test("Tables: while the page's Sync now of a table runs, its State says Syncing (amber), as Adding… does for an add; the others keep their own word", () => {

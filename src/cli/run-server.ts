@@ -223,12 +223,18 @@ export function usersFact(file: string): { active: number } | { error: string } 
  *  says of each table */
 const byHandOf = new WeakMap<RunContext, SyncsByHand>();
 
+/** What a sync asked of a table already syncing says after what is happening (`busy`, issue 1039): nothing went wrong,
+ *  and there is nothing to do but follow it. Every `busy` answer of `POST /api/sync` carries it as its `fix`. */
+export const BUSY_FIX = "Mason never starts a second sync beside it.";
+
 /** A SYNC ASKED OF A TABLE ALREADY SYNCING BY HAND (issue 1007): what is happening, when it started, and where to follow
- *  it — `mason status`, which the command says; the page says the table's row, in its own words */
+ *  it — `mason status`, which the command says; the page says the table's row, in its own words. Worded as progress,
+ *  never as a failure to start a sync (the owner, on issue 1039). */
 export function busyFailure(tables: readonly string[], running: SyncByHand, now = Date.now()): Failure {
   const busy = tables.filter((t) => running.tables.includes(t));
-  return { code: "busy", message: `${busy.join(", ")} ${busy.length === 1 ? "is" : "are"} already syncing (started ${agoText(running.startedAt, now)})`,
-    fix: "it ends by itself, and a second sync is never started beside it",
+  const one = busy.length === 1;
+  return { code: "busy", message: `${busy.join(", ")} ${one ? "is" : "are"} already syncing. ${one ? "It" : "The sync"} started ${agoText(running.startedAt, now)}.`,
+    fix: BUSY_FIX,
     next: [["mason status", "when each table was last synced"]] };
 }
 function syncsOf(ctx: RunContext): SyncsByHand {
@@ -1144,7 +1150,7 @@ export function createRunServer(ctx: RunContext): http.Server {
           if (running !== null) { sendFailure(res, 409, busyFailure(tables, running), { code: "busy", sync: running }); return; }
           // the sync's one check, as it is asked: a refusal now is the answer (`busy` while the run itself syncs it), and no sync starts
           const refused = ctx.duck.refused(tables);
-          if (refused !== null) { sendFailure(res, refused.code === "not_found" ? 404 : 409, { message: refused.message, code: refused.code }, { code: refused.code, ...(refused.follow !== null ? { follow: refused.follow } : {}) }); return; }
+          if (refused !== null) { sendFailure(res, refused.code === "not_found" ? 404 : 409, { message: refused.message, code: refused.code, ...(refused.code === "busy" ? { fix: BUSY_FIX } : {}) }, { code: refused.code, ...(refused.follow !== null ? { follow: refused.follow } : {}) }); return; }
           const started = syncs.start(tables, () => ctx.duck.poll(tables), (e) => {
             if (e instanceof PollRefused) return { code: e.code, message: e.message, ...(e.follow !== null ? { follow: e.follow } : {}) };
             const why = ((e as Error).message.split("\n---\n").pop() ?? String(e)).split("\n")[0]!;
@@ -1156,7 +1162,7 @@ export function createRunServer(ctx: RunContext): http.Server {
           if (done.answer !== undefined) { sendJson(res, 200, done.answer); return; }
           const f = done.failure!;
           if (f.code === "failed") sendFailure(res, 500, { message: f.message, code: "failed", next: [["mason logs", "the run's log: what it was doing"]] });
-          else sendFailure(res, f.code === "not_found" ? 404 : 409, { message: f.message, code: f.code }, { code: f.code, ...(f.follow !== undefined ? { follow: f.follow } : {}) });
+          else sendFailure(res, f.code === "not_found" ? 404 : 409, { message: f.message, code: f.code, ...(f.code === "busy" ? { fix: BUSY_FIX } : {}) }, { code: f.code, ...(f.follow !== undefined ? { follow: f.follow } : {}) });
         } else if (method === "POST" && url.pathname === "/api/remove") {
           const body = JSON.parse(await readBody(req, 64 * 1024)) as { tables?: unknown };
           if (!Array.isArray(body.tables) || !body.tables.length || !body.tables.every((m) => typeof m === "string")) throw new Refusal(400, "send { tables: [name, …] }");

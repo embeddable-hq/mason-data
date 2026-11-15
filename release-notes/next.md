@@ -72,9 +72,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   old answer adds `"wait": true` to its body. `mason sync` does this, so it still waits and prints the same report.
   A refusal is answered at once, as before.
 - **A sync of a table that is already syncing, or waiting to start, is refused at once.** This holds for the web
-  page's Sync now, for `mason sync` and for `POST /api/sync`. It is never queued for another read of the table. The
-  refusal has a new code, `busy` (exit 1), and says when the running sync started. The page says the table's row shows
-  when it ends. `mason sync` names `mason status` when a sync by hand or a scheduled poll is running. When the table's
+  page's Sync now, for `mason sync` and for `POST /api/sync`. It is never queued for another read of the table. It is
+  said as progress, not as a failure. `mason sync` prints "orders is already syncing. It started 2 min ago. Mason never
+  starts a second sync beside it." on stdout, with how to follow it. The page says it beside Sync now, and that the
+  table's row shows when it ends. The refusal has a new code, `busy`, and exits 1, since the sync you asked for did not
+  run. With `--json`, it is the failure shape with code `busy`, and `syncing` beside it: `{ tables, startedAt }` of the
+  sync running, or null when it is Mason's own sync of the table. `mason sync` names `mason status` when a sync by hand
+  or a scheduled poll is running. When the table's
   first sync, whole read again, catch-up or column change is under way, it names `mason wait <table>` first, then
   `mason status`. A table whose first sync, whole read again or catch-up is under
   way was refused before with `nothing_yet`, and is now refused with `busy`. A script that matched `nothing_yet` there
