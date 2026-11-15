@@ -17,14 +17,23 @@ import { regclassName } from "./shape.ts";
 
 /** An index (SQL alias `i`, a `pg_index` row) that keeps rows apart on its key columns: unique, valid (a failed
  *  CREATE UNIQUE INDEX CONCURRENTLY leaves an invalid one, its duplicates still in the table), over the whole table
- *  and over columns only. The catalog's read narrows it further (src/cli/preflight.ts `TABLES_SQL` `unique_keys`). */
+ *  and over columns only. The catalog's read takes the same (src/cli/preflight.ts `TABLES_SQL` `unique_keys`, the
+ *  primary key apart), so a way out the sync names is a key the sources file takes. */
 export const enforcingIndexSql = (i: string): string =>
   `${i}.indisunique AND ${i}.indisvalid AND ${i}.indpred IS NULL AND ${i}.indexprs IS NULL`;
 
-/** The key columns of index `i` (never its INCLUDE columns), as text[] in their order. */
-const indexColumnsSql = (i: string): string =>
-  `(SELECT array_agg(a.attname::text ORDER BY k.n) FROM unnest(${i}.indkey) WITH ORDINALITY AS k(attnum, n) ` +
-  `JOIN pg_attribute a ON a.attrelid = ${i}.indrelid AND a.attnum = k.attnum WHERE k.n <= ${i}.indnkeyatts)`;
+/**
+ * THE KEY COLUMNS OF INDEX `i`, NEVER ITS INCLUDE COLUMNS: a FROM clause naming each as `a` (a `pg_attribute` row) at
+ * position `k.n`. An INCLUDE column is carried by the index and keeps nothing apart (the review of PR 1057: a primary key
+ * read with its INCLUDE column was the key `[id, v]`, and `v` may be NULL). Every reader of an index's columns as a key
+ * reads them through it: the catalog's primary key and unique indexes (src/cli/preflight.ts `TABLES_SQL`) and the sync's
+ * check below.
+ */
+export const indexKeyColumnsFrom = (i: string): string =>
+  `unnest(${i}.indkey) WITH ORDINALITY AS k(attnum, n) JOIN pg_attribute a ON a.attrelid = ${i}.indrelid AND a.attnum = k.attnum AND k.n <= ${i}.indnkeyatts`;
+
+/** The key columns of index `i`, as text[] in their order. */
+const indexColumnsSql = (i: string): string => `(SELECT array_agg(a.attname::text ORDER BY k.n) FROM ${indexKeyColumnsFrom(i)})`;
 
 /**
  * One row about the table `schema.table` and its key `key`: `found` (false when the table is gone, whose read fails as
@@ -34,8 +43,7 @@ const indexColumnsSql = (i: string): string =>
  */
 export function keyHeldSql(schema: string, table: string, key: readonly string[]): string {
   const names = `ARRAY[${key.map(pgLiteral).join(", ")}]::text[]`;
-  const notNullIndex = `NOT EXISTS (SELECT FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, n) JOIN pg_attribute a ON a.attrelid = i.indrelid ` +
-    "AND a.attnum = k.attnum WHERE k.n <= i.indnkeyatts AND NOT a.attnotnull)";
+  const notNullIndex = `NOT EXISTS (SELECT FROM ${indexKeyColumnsFrom("i")} WHERE NOT a.attnotnull)`;
   return `SELECT r.oid IS NOT NULL AS found, ` +
     `(SELECT coalesce(json_agg(a.attname ORDER BY a.attnum), '[]'::json)::text FROM pg_attribute a WHERE a.attrelid = r.oid AND a.attnum > 0 ` +
     `AND NOT a.attisdropped AND NOT a.attnotnull AND a.attname::text = ANY (${names})) AS nullable, ` +
@@ -80,6 +88,6 @@ export function keyHeldProblem(row: KeyHeldRow, o: { source: string; key: readon
   const usable = jsonList<string[]>(row.usable).filter((c) => Array.isArray(c) && c.length > 0);
   const way = usable.length
     ? `Name the columns of one of its unique indexes in key: (${usable.map((c) => `key: [${c.join(", ")}]`).join(" or ")}), or ask the database's owner to ${o.own ? "add a unique index over the key" : "restore the primary key"}.`
-    : `Ask the database's owner to ${o.own ? "add a unique index over NOT NULL columns, or a primary key" : "restore the primary key"}.`;
+    : `Ask the database's owner to ${o.own ? "add a unique index over NOT NULL columns" : "restore the primary key"}.`;
   return `${where}: ${what.join(" ")} Mason does not sync it until that is fixed, so that no synced row is lost. ${way}`;
 }

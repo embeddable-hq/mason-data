@@ -194,13 +194,16 @@ paths:
   src/cdc/key-held.ts; issue 1027: a `key:` whose unique index was dropped while Mason ran let two rows share a key, and
   a poll deleted both synced rows and inserted only the one it read). Every key column NOT NULL and a valid, whole-table
   unique index over columns only, its key columns all the key's (`enforcingIndexSql`, which `TABLES_SQL`'s `unique_keys`
-  narrows), asked by ONE catalog query: inside each poll's own snapshot (the catch-up's and `mason sync`'s too), so the
+  reads too), asked by ONE catalog query: inside each poll's own snapshot (the catch-up's and `mason sync`'s too), so the
   index it sees holds for the rows it reads, and before a whole read's first page and at its distinct-key check. A key
   not held refuses that table's read, rolled back, the synced data as it was, said at the sources file's entry and key
-  with the unique index to name (`AddedTable.entryAt`, `KeyNotHeld`). A primary key dropped is said the same way. The
-  stream applies a replicated table's changes by its primary key unchecked: a primary key dropped under replication
-  makes the database refuse the application's own UPDATEs on a published table first. DETECTOR:
-  `tests/integration/duck-poll.itest.ts` "a key: whose unique index is dropped", `tests/key-held.test.ts`.
+  with a unique index the file would take (`AddedTable.entryAt`, `KeyNotHeld`). A polled table's primary key dropped is
+  said the same way. **An index's key is its key columns alone, never its INCLUDE columns** (`indexKeyColumnsFrom`,
+  read by `TABLES_SQL`'s primary key and unique indexes and by the check; the review of PR 1057: `PRIMARY KEY (id)
+  INCLUDE (v)` was the key [id, v], and the check refused it for ever as v may be NULL). NOT CHECKED: the stream
+  applies a replicated table's changes by its primary key with no such check, so a primary key dropped under
+  replication still lets a duplicate's INSERT replace a synced row. DETECTOR: `tests/integration/duck-poll.itest.ts` "a
+  key: whose unique index is dropped" and "never holds an index's INCLUDE columns", `tests/key-held.test.ts`.
 - **How a copy is kept current is derived ONCE, by the sync** (`Sync.keptOf`, carried on `Sync.state` as `kept`):
   `mason status` (`kept`: its sync, `syncedAt`, `nextAt`; `streamStatus`'s tables) and EXPLAIN's first line (`keptText`, src/duck/explain.ts) both
   read it, never the poll's ledger (a project switched to replication keeps its last poll there: EXPLAIN said "kept

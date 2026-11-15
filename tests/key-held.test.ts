@@ -27,13 +27,13 @@ test("a key: with no unique index over it names the file, the key, and a unique 
     "Name the columns of one of its unique indexes in key: (key: [id] or key: [tenant_id, seq]), or ask the database's owner to add a unique index over the key.");
   assert.equal(K.keyHeldProblem({ found: true, nullable: "[]", held: false, usable: "[]" }, own),
     "mason/sources/app.yml: tables.logs.key: public.logs has no unique index over (tenant_id, id) on the database now, so two of its rows can share a key. " +
-    "Mason does not sync it until that is fixed, so that no synced row is lost. Ask the database's owner to add a unique index over NOT NULL columns, or a primary key.");
+    "Mason does not sync it until that is fixed, so that no synced row is lost. Ask the database's owner to add a unique index over NOT NULL columns.");
 });
 
 test("a key column that may be NULL now is refused too, as the sources file's check refuses it", () => {
   assert.equal(K.keyHeldProblem({ found: true, nullable: '["id"]', held: true, usable: "[]" }, own),
     "mason/sources/app.yml: tables.logs.key: id can be NULL in public.logs now, and rows with NULL there cannot be told apart. " +
-    "Mason does not sync it until that is fixed, so that no synced row is lost. Ask the database's owner to add a unique index over NOT NULL columns, or a primary key.");
+    "Mason does not sync it until that is fixed, so that no synced row is lost. Ask the database's owner to add a unique index over NOT NULL columns.");
 });
 
 test("a primary key dropped while Mason runs is said at the entry, with key: as the way out", () => {

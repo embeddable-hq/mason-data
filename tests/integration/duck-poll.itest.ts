@@ -20,7 +20,8 @@ import type { DuckConnection } from "../../src/duck/executor.ts";
 import { DuckStore } from "../../src/duck/store.ts";
 import { Sync, type AddedTable } from "../../src/duck/sync.ts";
 import * as syncModule from "../../src/duck/sync.ts";
-import { parseSource, type Source } from "../../src/cli/preflight.ts";
+import { connectSource, parseSource, readTables, type Source, type SourceTable } from "../../src/cli/preflight.ts";
+import { addedTables, parseSourceText } from "../../src/cli/sources.ts";
 import { heldCopy } from "./held-copy.ts";
 
 // read from the module, not imported by name: the file loads at a commit without them (scripts/fails-without.ts)
@@ -1973,7 +1974,7 @@ test("a key: whose unique index is dropped while Mason runs: the poll is refused
     const said = errorOf("logs") ?? "";
     assert.match(said, /mason\/sources\/app\.yml: tables\.logs\.key: public\.logs has no unique index over \(tenant_id, id\) on the database now/, said);
     assert.match(said, /the synced data serves as it was/, said);
-    assert.match(said, /Mason does not sync it until that is fixed, so that no synced row is lost\. Ask the database's owner to add a unique index over NOT NULL columns, or a primary key\./, said);
+    assert.match(said, /Mason does not sync it until that is fixed, so that no synced row is lost\. Ask the database's owner to add a unique index over NOT NULL columns\./, said);
     // a sync by hand is refused with the same words
     await assert.rejects(sync.pollNow(["public.logs"]), /tables\.logs\.key: public\.logs has no unique index over \(tenant_id, id\)/);
     assert.equal(await duck("logs"), before);
@@ -1988,6 +1989,77 @@ test("a key: whose unique index is dropped while Mason runs: the poll is refused
     await sync.once();
     assert.equal(await duck("logs"), pg("logs"), logged.slice(-5).join("\n"));
     assert.equal(errorOf("logs"), null, "its error is cleared by the poll that ran");
+  } finally { await sync.stop(); await store.close(); }
+});
+
+// A KEY READ FROM THE CATALOG IS ITS INDEX'S KEY COLUMNS, NEVER ITS INCLUDE COLUMNS (the review of PR 1057): the catalog
+// read a primary key from every column of its index, so `PRIMARY KEY (id) INCLUDE (v)` was the key [id, v], and the
+// sync's check refused the table for ever because v may be NULL — a table main synced. Read here as the run reads it
+// (`readTables`, then `addedTables` over a sources file): its key is [id], and `UNIQUE (a) INCLUDE (b)` is a key: [a] the
+// file takes. AN UPGRADE: a table synced under the wider key (as main's catalog gave it) keeps its synced data — no
+// whole read again, since a key alone never re-reads a table — and is polled by [id] from then on, NULLs in v included.
+test("a key read from the catalog never holds an index's INCLUDE columns, and a table synced under the wider key keeps syncing without a whole read", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  const source = ownDatabase("keyinc", "CREATE TABLE pk_inc (id int, v text, PRIMARY KEY (id) INCLUDE (v)); INSERT INTO pk_inc SELECT g, CASE WHEN g % 4 = 0 THEN NULL ELSE 'v' || g END FROM generate_series(1, 20) g; " +
+    "CREATE TABLE uniq_inc (a int NOT NULL, b text, UNIQUE (a) INCLUDE (b)); INSERT INTO uniq_inc SELECT g, 'b' || g FROM generate_series(1, 5) g; " +
+    "CREATE TABLE old (id int, v text NOT NULL, w text, PRIMARY KEY (id) INCLUDE (v)); INSERT INTO old SELECT g, 'v' || g, 'w' || g FROM generate_series(1, 10) g");
+  const url = `postgres://${source.user}${source.password ? `:${encodeURIComponent(source.password)}` : ""}@${source.host}:${source.port}/${source.database}`;
+  const connected = await connectSource(source);
+  if ("failure" in connected) throw new Error(connected.failure.message);
+  const catalog = async (): Promise<SourceTable[]> => { const c = await connectSource(source); if ("failure" in c) throw new Error(c.failure.message); try { return await readTables(c.pg); } finally { c.pg.close(); } };
+  connected.pg.close();
+  const tables = await catalog();
+  const at = (name: string): SourceTable => tables.find((t) => t.source === `public.${name}`)!;
+  assert.deepEqual(at("pk_inc").key, ["id"], "a primary key's INCLUDE column is no part of its key");
+  assert.deepEqual((at("uniq_inc").uniqueKeys ?? []).map((u) => u.columns), [["a"]], "a unique index's INCLUDE column is no part of it");
+  const file = "/p/mason/sources/app.yml";
+  const added = (text: string, from: readonly SourceTable[]): AddedTable[] => {
+    const parsed = parseSourceText(text, "app", file);
+    if ("problems" in parsed) throw new Error(parsed.problems.join("\n"));
+    const a = addedTables(parsed, from, source.database, "/p");
+    if (!Array.isArray(a)) throw new Error(a.message);
+    return a;
+  };
+  const logged: string[] = [];
+  const dbFile = path.join(dir, "keyinc.db");
+  let store = await DuckStore.open(dbFile, (l) => logged.push(l));
+  let sync = new Sync(store, source, source.database, (l) => logged.push(l), 3_600_000, "poll");
+  const duck = async (t: string, cols: string): Promise<string> =>
+    ((await store.writer.runAndReadAll(`SELECT ${cols} FROM public.${t} ORDER BY 1`)).getRowsJS() as unknown[][]).map((r) => r.map((x) => x === null ? "" : String(x)).join("\t")).join("\n").trimEnd();   // as psql's output is trimmed
+  const pg = (t: string, cols: string): string => psql(url, `SELECT ${cols} FROM ${t} ORDER BY 1`);
+  const errorOf = (s: Sync, t: string): string | null => s.state().find((x) => x.source === `public.${t}`)?.error ?? null;
+  try {
+    // the sources file as the run reads it: `{}` on the primary key, key: over the unique index with INCLUDE
+    const text = "kind: postgres\nurl: x\nsync: poll 1h\ntables:\n  pk_inc: {}\n  uniq_inc: { key: [a] }\n";
+    await sync.open();
+    await sync.setTables(added(text, tables));
+    await sync.once();
+    await sync.once();
+    psql(url, "UPDATE pk_inc SET v = NULL WHERE id = 3; INSERT INTO pk_inc VALUES (21, NULL); UPDATE uniq_inc SET b = 'polled' WHERE a = 2");
+    await sync.once();
+    assert.equal(await duck("pk_inc", "id, v"), pg("pk_inc", "id, v"), `${errorOf(sync, "pk_inc")}\n${logged.slice(-5).join("\n")}`);
+    assert.equal(await duck("uniq_inc", "a, b"), pg("uniq_inc", "a, b"), String(errorOf(sync, "uniq_inc")));
+    assert.deepEqual([errorOf(sync, "pk_inc"), errorOf(sync, "uniq_inc")], [null, null]);
+    // THE UPGRADE: `old` synced under the key main's catalog gave it, [id, v] (v NOT NULL then, so it syncs here too)
+    await sync.setTables([...added(text, tables), { ...added("kind: postgres\nurl: x\nsync: poll 1h\ntables:\n  old: {}\n", tables)[0]!, key: ["id", "v"] }]);
+    await sync.once();
+    await sync.once();
+    assert.equal(await duck("old", "id, v, w"), pg("old", "id, v, w"));
+    await sync.stop();
+    await store.close();
+    // then v may be NULL, and rows change while Mason is down
+    psql(url, "ALTER TABLE old ALTER COLUMN v DROP NOT NULL; UPDATE old SET v = NULL, w = 'down' WHERE id = 2; INSERT INTO old VALUES (11, NULL, 'new'); DELETE FROM old WHERE id = 5");
+    const after = logged.length;
+    store = await DuckStore.open(dbFile, (l) => logged.push(l));
+    sync = new Sync(store, source, source.database, (l) => logged.push(l), 3_600_000, "poll");
+    await sync.open();
+    const now = added("kind: postgres\nurl: x\nsync: poll 1h\ntables:\n  old: {}\n", await catalog());
+    assert.deepEqual(now[0]!.key, ["id"]);
+    await sync.setTables(now);
+    await sync.once();
+    assert.equal(errorOf(sync, "old"), null, logged.slice(after).join("\n"));
+    assert.equal(await duck("old", "id, v, w"), pg("old", "id, v, w"), logged.slice(after).join("\n"));
+    assert.ok(logged.slice(0, after).some((l) => /^syncing public\.old/.test(l)), "its first sync is said so (what the line below would see)");
+    assert.ok(!logged.slice(after).some((l) => /^syncing public\.old/.test(l)), `kept its synced data, never read again whole:\n${logged.slice(after).join("\n")}`);
   } finally { await sync.stop(); await store.close(); }
 });
 
