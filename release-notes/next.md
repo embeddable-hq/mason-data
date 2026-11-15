@@ -1,5 +1,9 @@
 The next release's notes, gathered here until its `v<version>.md` is written: a `v*.md` file is itself the release.
 
+## Before you upgrade
+
+- No table is read again.
+
 ## What was wrong and is now right
 
 - **A table rewritten on your database while Mason read it is no longer served empty or partial.** A rewrite is a

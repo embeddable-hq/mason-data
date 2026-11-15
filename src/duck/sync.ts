@@ -4541,8 +4541,8 @@ export class Sync {
    * in flight, never one read twice (the key of `copy_chunks` refuses that at its commit) nor one skipped.
    *
    * EVERY CHUNK IS HELD TO THE FIRST SNAPSHOT (`xminBeforeSql` from `beginCopy`'s one read; `copy`'s header), whichever
-   * reader reads it and whenever, and checks the source table's file after its read: the first file read is the
-   * copy's, and a chunk that reads another starts the whole copy over (`StartOver`). The first reader to fail —
+   * reader reads it and whenever, and checks the source table's file after its read: the copy's file is the one its
+   * first snapshot sees (`heldFile`), and a chunk that reads another starts the whole copy over (`StartOver`). The first reader to fail —
    * a rewrite, a snapshot held too long, an error, `mason stop` — interrupts the others (sent again every 50 ms: DuckDB
    * loses an interrupt that arrives before its statement starts) and none commits after it: their chunks roll back and
    * are read again by the next attempt. A recopy is one transaction on one reader, no progress. `kept` hears each

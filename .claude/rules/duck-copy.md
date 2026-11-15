@@ -80,7 +80,7 @@ paths:
   reader needs a side table of its own that the swap UNIONs ALL) and commit out of order; a chunk's range is a row of
   its own, never an update of one progress row (two readers updating one row would conflict), and the key refuses a
   chunk committed twice. Every chunk is held to the first snapshot and checks the filenode whichever reader reads it
-  (the first file a chunk reads is the copy's). The first reader to fail — a rewrite, an error, `mason stop` —
+  (the copy's file is the one its first snapshot sees, `heldFile`). The first reader to fail — a rewrite, an error, `mason stop` —
   interrupts the others (`interruptible` per connection, `copyLanes`, re-sent every 50 ms) and none commits after it.
   A chunk's size does not grow with N (docs/DESIGN.md "Chunks read N at a time" says why). Raise N only against
   the source's own headroom, never past 8 (the extension's pool is 15 connections, the writer's poll among them).
