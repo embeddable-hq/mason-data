@@ -15,18 +15,26 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A table that an older Mason left without one of its columns is synced again once, at the first start.** This is
   a table with a column whose name begins with `__mason_json_`, which that Mason dropped (below). The table serves
   its old data until then, and a large table takes about as long as its first sync did.
+- **A synced table with a column whose name begins with a byte-order mark (U+FEFF) is synced again once, at the first
+  start**, if that column is not text. Mason stored such a column as text (below). The table serves its old data until
+  then, and a large table takes about as long as its first sync did.
 
 ## What changes
 
-- **A sync now says how many rows it added, updated and deleted**, such as "1,200 added, 282,770 updated, 0 deleted".
+- **A sync now says how many rows it added, updated and deleted**, such as "1,200 added, ~282,770 updated, 0 deleted".
   Before, it said "283,970 changed", which lumped new rows and edited rows together. The new words are in `mason sync`,
   the web page's Sync now and Sync events, and `mason logs --events`. A first sync, or a table synced again whole, adds
-  every row. Over replication, the counts follow your database's inserts, updates and deletes. `mason status`, the web
-  page and the run's log say a replicated table's counts the same way, such as "1,000 added, 200 updated, 4 deleted".
-  Before, they said "1,204 changes (1,000 inserts, 200 updates, 4 deletes)". A poll's own lines in the run's log still
-  say "changed". A script
-  that reads `mason sync --json` must read `added` and `updated` in place of `changed`. A script that matched the
-  words of a `synced`, `polled`, `streamed` or `full_sync` event must match the new words.
+  every row.
+  - A poll's updated count is an estimate, so it starts with `~`. It can be too high, never too low, so a count of 0
+    is exact and has no `~`. While a
+    transaction is open on your database, a poll reads some rows again, and counts them as updated though nothing in
+    them changed. Its added and deleted counts are exact. `mason sync --json` keeps the plain number in `updated`.
+  - Over replication, the counts follow your database's inserts, updates and deletes, and are exact. `mason status`,
+    the web page and the run's log say a replicated table's counts the same way, such as "1,000 added, 200 updated, 4
+    deleted". Before, they said "1,204 changes (1,000 inserts, 200 updates, 4 deletes)".
+  - A poll's own lines in the run's log still say "changed".
+  - A script that reads `mason sync --json` must read `added` and `updated` in place of `changed`. A script that
+    matched the words of a `synced`, `polled`, `streamed` or `full_sync` event must match the new words.
 
 - **A whole number beside a numeric with very many decimals keeps at least 19 of its decimals.** This covers `div()`
   of two integers, an integer cast to `numeric`, a whole constant such as `2.5e2`, and a whole part of `extract`.
@@ -67,9 +75,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   old answer adds `"wait": true` to its body. `mason sync` does this, so it still waits and prints the same report.
   A refusal is answered at once, as before.
 - **A sync of a table that is already syncing, or waiting to start, is refused at once.** This holds for the web
-  page's Sync now, for `mason sync` and for `POST /api/sync`. It is never queued for another read of the table. The
-  refusal has a new code, `busy` (exit 1), and says when the running sync started. The page says the table's row shows
-  when it ends. `mason sync` names `mason status` when a sync by hand or a scheduled poll is running. When the table's
+  page's Sync now, for `mason sync` and for `POST /api/sync`. It is never queued for another read of the table. It is
+  said as progress, not as a failure. `mason sync` prints "orders is already syncing. It started 2 min ago. Mason never
+  starts a second sync beside it." on stdout, with how to follow it. The page says it beside Sync now, and that the
+  table's row shows when it ends. The refusal has a new code, `busy`, and exits 1, since the sync you asked for did not
+  run. With `--json`, it is the failure shape with code `busy`, and `syncing` beside it: `{ tables, startedAt }` of the
+  sync running, or null when it is Mason's own sync of the table. `mason sync` names `mason status` when a sync by hand
+  or a scheduled poll is running. When the table's
   first sync, whole read again, catch-up or column change is under way, it names `mason wait <table>` first, then
   `mason status`. A table whose first sync, whole read again or catch-up is under
   way was refused before with `nothing_yet`, and is now refused with `busy`. A script that matched `nothing_yet` there
@@ -77,7 +89,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A sync you start by hand that fails is now listed under Sync events**, as "Manual sync failed" (`sync_failed` in
   `mason logs --events`).
 - **The web page's Sync events list shows how long each sync took in a column of its own.** The Took column holds
-  it, such as `570 ms` or `7 min 57 s`, and you can sort the list by it. The message no longer ends with it there.
+  it, such as `570 ms` or `7 min 57 s`, and you can sort the list by it. In a narrow window, the list scrolls sideways
+  inside its box, as the Tables and Users lists do, so every column stays readable. A very long table name is cut
+  short. Hover over it to read it whole. The message no longer ends with it there.
   `mason logs --events --json` gives it as a new field, `tookMs`. A first sync's event now ends with its time as a
   poll's does, such as `synced: 1,000 row(s) · 2.0 s`, where it said `in 2.00 s`. Events recorded before the upgrade
   keep their time in the message.
@@ -98,6 +112,27 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A column name with a line break is now refused by name.** Such a name, as an alias or a table's column, could be
   read as another name, and a query could then read the wrong column. Now a query that holds one is refused with the
   name (`name-line-break`). Give the column an alias without a line break.
+- **`mason stop` now ends within seconds when one of Mason's reads waits on your database.** A table's first sync, its
+  catch-up or a scheduled sync can wait on a lock that another session holds on the table. Before, the stop waited
+  until that lock was released, which could be never. Now Mason cancels its own waiting reads on your database, and
+  nothing of Mason's is left running there. A first sync keeps what it had synced and resumes at the next start. If
+  your database refuses the cancel, the log says so once, and the stop waits for the read as before.
+- **Text that starts with a byte-order mark (U+FEFF) now keeps it.** A CSV import can leave one at the start of a
+  value or of a column's name. Mason dropped the mark from every value that began with one, so a value that was only a
+  mark read as empty, and two values that differed only by it looked like duplicate rows under `GROUP BY` or
+  `DISTINCT`. This held for text and varchar columns, elements of a `text[]`, `->>` of a JSON string, and a `text[]`
+  parameter sent in binary, as Npgsql sends it. A `numeric` column whose name began with a mark was synced as text, so
+  `3` read `3.0`. This held for a column of any type but text. Now each reads as your database has it. An element of a
+  `text[]` that begins with a mark or a non-breaking space is no longer put in quotes where your database leaves it
+  bare. Over replication, such an element no longer loses its mark.
+
+- **Removing a table while it syncs now stops its sync at once.** This covers a table's first sync, a table synced
+  again whole, the catch-up after it, and a sync you started by hand. Before, the sync ran to its end, which took hours
+  for a large table. Every table added beside it waited until then, and your database kept reading the removed table.
+  Now Mason cancels its reads on your database, drops what it had synced of the table, and starts the next table's
+  sync within seconds. The log and Sync events say "Sync stopped" with the reason, and it is never shown as a failure.
+  A table you add again right after removing it starts a new first sync.
+
 - **Removing a synced table whose name a generated table also uses no longer stops the sync.** While a synced table
   holds a name, a generated table of that name is refused, as before. Once you remove the synced table, the generated
   table is built again and served. Before, if no review of the generated tables ran between the add and the remove,
@@ -183,3 +218,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A generated table that computes a `jsonb` column now takes longer to build.** Writing each value in Postgres's form
   costs about 30 to 40 seconds a million rows on a 4-core machine. A `jsonb` column taken as it is from another table costs
   nothing more.
+- **Every button on the web page that changes something now shows that it is working, and can't be sent twice.** Its
+  label says what it is doing, such as Removing…, Disabling… or Opening…, and the button stays the same size. Before,
+  most of them gave no sign until the answer came. A double click on a Remove or a Cancel query sent it twice, and
+  the second, refused, hid that the first had worked. Now one request is sent, and the page says what it did.
+- **A refused Stop of a temporary cloud login is now said, beside Stop.** It says that the login is still open and
+  that its address and password still work. Before, the page said nothing, and the login stayed public.
+- **A change the web page sends that fails is said beside its button, with Dismiss.** Escape dismisses it too. This
+  includes Add a user's error, which could not be dismissed and pushed the rest of the page down, and the cloud
+  login's. Nothing on the page moves when a failure is said, or while a button is working. A request that gets no
+  answer is given up after 60 seconds, and says so. Before, its button could stay busy for ever.
+- **Changing a filter or a page of Queries or Sync events keeps the last list on the page, greyed, until the new one
+  is read.** Before, the list went blank and the page jumped.

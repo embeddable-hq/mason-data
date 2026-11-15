@@ -328,14 +328,40 @@ export function statementMsText(ms: number): string {
 }
 
 /**
+ * HOW A SYNC'S COUNTS WERE MADE (issue 1040): by a POLL, whose `updated` may count rows it read again (while a
+ * transaction is open on the source, a poll reads again some rows it already synced, and they count as updated though
+ * nothing in them changed: 60,000 added beside 64,383 updated, where none were), or EXACTLY (the stream's, from the
+ * database's own UPDATEs; a first sync's or a whole read's, which updates none). Added and deleted are always exact.
+ */
+export type CountedBy = "poll" | "exact";
+
+/**
+ * A SYNC'S UPDATED COUNT AS A PERSON READS IT: `~64,383 updated` from a poll, an estimate, and `200 updated` when it is
+ * exact. The one function that decides the `~`, read by every line that says a count (`changesText`, `syncedText`, the
+ * stream's `countsText` in src/duck/stream.ts; the web page's `updatedCountText` in src/web/shared.js, held equal by the
+ * tests), so no line can drift from it. A poll's count is only ever too high, so its 0 is exact and has no `~`.
+ * `--json` keeps the plain number (src/cli/sync.ts says so at its key).
+ */
+export function updatedCountText(updated: number, by: CountedBy): string {
+  return `${by === "poll" && updated > 0 ? "~" : ""}${updated.toLocaleString("en-US")} updated`;
+}
+
+/** A sync's counts on one line, `1,200 added, ~282,770 updated, 0 deleted`: `mason sync`'s headline (src/cli/sync.ts
+ *  `syncedReport`) and the start of each table's line (`syncedText`). */
+export function changesText(t: { added: number; updated: number; deleted: number }, by: CountedBy): string {
+  const n = (x: number): string => x.toLocaleString("en-US");
+  return `${n(t.added)} added, ${updatedCountText(t.updated, by)}, ${n(t.deleted)} deleted`;
+}
+
+/**
  * WHAT A SYNC DID TO ONE TABLE, in the words `mason sync` prints on its line and the web page's Sync now says
  * (src/cli/sync.ts `syncedReport`, src/web/pages/tables.js, held equal) — and a sync by hand records as its `synced`
  * event (src/duck/sync.ts pollNow), a scheduled one as its `polled` and a whole read as its `full_sync` (which adds every
- * row), so the event and the answer the person read are one sentence: the rows added, updated and deleted apart.
+ * row), so the event and the answer the person read are one sentence: the rows added, updated and deleted apart. `by`:
+ * a poll's (its updated an estimate) or a whole read's (exact).
  */
-export function syncedText(t: { added: number; updated: number; deleted: number; rows: number; ms: number }): string {
-  const n = (x: number): string => x.toLocaleString("en-US");
-  return `${n(t.added)} added, ${n(t.updated)} updated, ${n(t.deleted)} deleted, ${n(t.rows)} rows now · ${msText(t.ms)}`;
+export function syncedText(t: { added: number; updated: number; deleted: number; rows: number; ms: number }, by: CountedBy): string {
+  return `${changesText(t, by)}, ${t.rows.toLocaleString("en-US")} rows now · ${msText(t.ms)}`;
 }
 
 /** WHAT A TABLE IN ITS ONE CATCH-UP POLL SAYS (`tables[].sync.state` `catching-up`): its line in `mason wait` and

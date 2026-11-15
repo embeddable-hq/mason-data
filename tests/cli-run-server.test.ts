@@ -479,8 +479,9 @@ test("POST /api/sync answers as the sync starts, and /api/state follows it to it
       if (again === "held") return;
       assert.deepEqual([again.status, again.body.code, (again.body.sync as { id: number }).id], [409, "busy", sync.id], JSON.stringify(body));
       const said = String(again.body.error);
-      assert.match(said, /^public\.orders is already syncing \(started \d+ s ago\)$/);
-      assert.deepEqual(again.body.failure, { code: "busy", message: said, fix: "it ends by itself, and a second sync is never started beside it",
+      // IN PROGRESS, NEVER A FAILURE TO START ONE (issue 1039): what is syncing, since when, and that no second starts
+      assert.match(said, /^public\.orders is already syncing\. It started \d+ s ago\.$/);
+      assert.deepEqual(again.body.failure, { code: "busy", message: said, fix: "Mason never starts a second sync beside it.",
         next: [{ command: "mason status", what: "when each table was last synced" }] });
     }
     // A REFUSAL IS AT ONCE, while another sync runs, and starts nothing
@@ -491,6 +492,7 @@ test("POST /api/sync answers as the sync starts, and /api/state follows it to it
     queuedNow.add("public.customers");
     const queued = await call("POST", "/api/sync", { tables: ["public.customers"], wait: true });
     assert.deepEqual([queued.status, queued.body.code, queued.body.error], [409, "busy", "public.customers is being synced now, on its schedule (polled every 5m): it is current when that ends"]);
+    assert.deepEqual(queued.body.failure, { code: "busy", message: queued.body.error, fix: "Mason never starts a second sync beside it.", next: [] }, "the same way out as a sync by hand's");
     queuedNow.clear();
     assert.deepEqual(asked, [["public.orders"]], "one read, however many asks");
     end();

@@ -46,8 +46,10 @@
  * as one whose row the copy holds always is.
  */
 import { errorText, messageOf } from "../lib/secret-mask.ts";
+import { updatedCountText } from "../lib/table-sync.ts";
 import { decode, type RelationColumn, type TupleValue } from "../cdc/pgoutput.ts";
 import { PgConnection, formatLsn, pgIdent, pgLiteral } from "../cdc/pg-wire.ts";
+import { isPgSpace, pgTrim } from "./text.ts";
 
 const lit = (s: string): string => `'${s.replace(/'/g, "''")}'`;
 
@@ -80,7 +82,7 @@ export function pgArrayTree(text: string): PgArray {
   if (s.startsWith("[") && eq > 0) s = s.slice(eq + 1);
   let i = 0;
   const fail = (): never => { throw new Error(`malformed array literal: ${text}`); };
-  const space = (): void => { while (i < s.length && /\s/.test(s[i]!)) i++; };
+  const space = (): void => { while (i < s.length && isPgSpace(s[i]!)) i++; };
   const list = (): PgArray => {
     if (s[i] !== "{") fail();
     i++;
@@ -100,7 +102,7 @@ export function pgArrayTree(text: string): PgArray {
       } else {
         let v = "";
         while (i < s.length && s[i] !== "," && s[i] !== "}") v += s[i++];
-        v = v.trim();
+        v = pgTrim(v);
         out.push(v.toUpperCase() === "NULL" ? null : v);
       }
       space();
@@ -172,7 +174,8 @@ export function addCounts(to: ChangeCounts, from: ChangeCounts): void {
  *  says them (src/lib/table-sync.ts `syncedText`), a TRUNCATE's after them when there was one */
 export function countsText(c: ChangeCounts): string {
   const n = (x: number): string => x.toLocaleString("en-US");
-  return `${n(c.inserts)} added, ${n(c.updates)} updated, ${n(c.deletes)} deleted${c.truncates > 0 ? `, emptied ${n(c.truncates)} time${c.truncates === 1 ? "" : "s"} by a TRUNCATE` : ""}`;
+  // the stream's updated count is the database's own UPDATEs: exact, no `~` (`updatedCountText`, issue 1040)
+  return `${n(c.inserts)} added, ${updatedCountText(c.updates, "exact")}, ${n(c.deletes)} deleted${c.truncates > 0 ? `, emptied ${n(c.truncates)} time${c.truncates === 1 ? "" : "s"} by a TRUNCATE` : ""}`;
 }
 
 /** A table's changes in a batch, folded to one per key, in what they mean once applied in commit order. */

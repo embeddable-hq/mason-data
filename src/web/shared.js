@@ -173,10 +173,15 @@ export const percent = (share) => `${Math.floor(Math.max(0, Math.min(1, share)) 
 /** The time a copy has left, as the commands print it: `~12 min left`; "" when nothing is measured yet. */
 export const leftText = (secondsLeft) => secondsLeft === null || secondsLeft === undefined ? "" : `~${duration(secondsLeft)} left`;
 
+/** A sync's updated count as a person reads it: `~64,383 updated` from a poll (`by` "poll"), whose count may include rows
+ *  it read again, and `200 updated` when it is exact; a poll's 0 is exact (src/lib/table-sync.ts `updatedCountText`, the one
+ *  rule, held equal by the tests; issue 1040). */
+export const updatedCountText = (updated, by) => `${by === "poll" && updated > 0 ? "~" : ""}${n(updated)} updated`;
+
 /** `1,000 added, 200 updated, 4 deleted`: a table's counts as the stream's lines say them, a TRUNCATE's after them when
  *  there was one (src/duck/stream.ts `countsText`, held equal by the tests). */
 export function countsText(c) {
-  return `${n(c.inserts)} added, ${n(c.updates)} updated, ${n(c.deletes)} deleted${c.truncates > 0 ? `, emptied ${n(c.truncates)} time${c.truncates === 1 ? "" : "s"} by a TRUNCATE` : ""}`;
+  return `${n(c.inserts)} added, ${updatedCountText(c.updates, "exact")}, ${n(c.deletes)} deleted${c.truncates > 0 ? `, emptied ${n(c.truncates)} time${c.truncates === 1 ? "" : "s"} by a TRUNCATE` : ""}`;
 }
 
 /**
@@ -294,12 +299,21 @@ export function overTunnel(f) {
 }
 
 /** A part of a page written from one read: its body rendered, its Failure said where it shows when `says` (not the
- *  page's first read's: that is the banner), or that it is being asked. */
-export function readPart(ctx, path, render, says) {
+ *  page's first read's: that is the banner), or that it is being asked. `before`: the path this part showed last (a filter
+ *  or a page of results just changed it). While the new path is unread, what that one read stays, greyed and busy
+ *  (`reading`), never a blank part that moves the page. */
+export function readPart(ctx, path, render, says, before = null) {
   const r = ctx.read(path);
-  if (r === undefined) return `<p class="dim">Asking Mason…</p>`;
+  if (r === undefined) {
+    const b = before === null || before === path ? undefined : ctx.read(before);
+    return b?.body === undefined ? `<p class="dim">Asking Mason…</p>` : reading(render(b.body));
+  }
   return (r.failure && says ? renderFailure(r.failure) : "") + (r.body === undefined ? "" : render(r.body));
 }
+
+/** What a list showed, kept while the next one is read (a new filter, an older page): greyed and `aria-busy`, so it reads
+ *  as being replaced, and no row moves until the answer comes. */
+export const reading = (html) => `<div class="reading" aria-busy="true">${html}</div>`;
 
 /**
  * WHAT A PAGE SHOWS WHILE ITS POLL FAILS (issue 886): the last body it read stays, greyed, and says when it was read
@@ -310,22 +324,56 @@ export function readPart(ctx, path, render, says) {
 export const staleWhy = (failure) => failure?.code === "unreachable" ? "Mason can't be reached." : "The latest read failed.";
 export const staleText = (at, failure) => `As of ${utcMinute(at.toISOString()).slice(11)} UTC. ${staleWhy(failure)}`;
 
-/** One request to the run over `fetchFn`: `{ body }`, its JSON, or `{ failure }` when it was refused or nothing answered. */
-export function createAsk(fetchFn) {
+/** The longest one request to the run may take, its answer whole, in ms: past it the request is aborted and said as its
+ *  failure, so a button never stays busy for ever (issue 1033). A catalog read the run is still making answers well
+ *  within it (src/cli/source-catalog.ts ACT_WAIT_MS: 20 s), and a cloud login opens within 30 s. */
+export const ASK_MS = 60_000;
+
+/**
+ * WORK UNDER A DEADLINE: `work(signal)` raced against `ms`. Past it the signal aborts, and the answer is `late()`,
+ * whatever the work does after. The timer is cleared either way. `createAsk` and a host's read (`readHost`) both use it.
+ */
+export async function withDeadline(work, ms, late, timers = globalThis) {
+  const ctl = typeof AbortController === "function" ? new AbortController() : null;
+  let timer;
+  const over = new Promise((resolve) => { timer = timers.setTimeout(() => { ctl?.abort(); resolve(late()); }, ms); });
+  try { return await Promise.race([work(ctl?.signal), over]); }
+  finally { timers.clearTimeout(timer); }
+}
+
+/** A request the run did not answer within the deadline (`ASK_MS`), as a Failure. */
+export const timedOut = (ms) => ({ code: "timeout", message: `Mason did not answer within ${ms / 1000} s`,
+  why: "It may still be busy with it, or the connection to it was lost.", fix: "Wait a moment, then try again. The page shows what has changed.",
+  next: [{ command: "mason status", what: "says whether Mason runs, and what it is doing" }, { command: "mason logs", what: "shows Mason's log: what it was doing" }] });
+
+/**
+ * One request to the run over `fetchFn`: `{ body }`, its JSON, or `{ failure }` when it was refused, nothing answered,
+ * the answer was cut off, or it took longer than `deadlineMs`. It never throws, so whatever asked always paints again.
+ */
+export function createAsk(fetchFn, { deadlineMs = ASK_MS, timers = globalThis } = {}) {
+  // one try, its answer read whole within the deadline: { res, text } or { failure }
+  const once = (path, init) => withDeadline(async (signal) => {
+    let res;
+    try { res = await fetchFn(path, { credentials: "same-origin", ...init, ...(signal ? { signal } : {}) }); }
+    catch (e) { return { failure: failureOf(null, e?.message ?? String(e)) }; }
+    // the connection cut while the answer was read: nothing whole came back
+    try { return { res, text: await res.text() }; }
+    catch (e) { return { failure: { ...failureOf(null, e?.message ?? String(e)), message: "Mason's answer was cut off" } }; }
+  }, deadlineMs, () => ({ failure: timedOut(deadlineMs) }), timers);
   return async (path, init) => {
-    let res, text;
+    let got;
     // AN ACT ON THE DATABASE'S TABLES WHOSE READ STILL RUNS (a Columns or Sync choice, an add, a remove over a large
     // catalog: the run's 503 says `catalogRead`): asked again carrying that read's number, so it waits on the same read
     // and never begins another (src/cli/source-catalog.ts); a quarter of an hour at most, as the run's own guard
     for (let read = null, tries = 0; ; tries++) {
       const asked = read === null ? init : { ...init, headers: { ...init?.headers, [CATALOG_READ_HEADER]: String(read) } };
-      try { res = await fetchFn(path, { credentials: "same-origin", ...asked }); }
-      catch (e) { return { failure: failureOf(null, e?.message ?? String(e)) }; }
-      text = await res.text();
-      const running = res.status === 503 && tries < 45 ? runningRead(text) : null;
+      got = await once(path, asked);
+      if ("failure" in got) return got;
+      const running = got.res.status === 503 && tries < 45 ? runningRead(got.text) : null;
       if (running === null) break;
       read = running;
     }
+    const { res, text } = got;
     if (!res.ok) return { failure: failureOf(res.status, text) };
     try { return { body: JSON.parse(text) }; }
     catch (e) { return { failure: { code: "failed", message: `the run's answer to ${path} is not JSON: ${e.message}` } }; }
@@ -390,11 +438,34 @@ export const cards = (list) => list.length ? `<div class="cards n${list.length}"
 export const panel = (html) => `<div class="panel">${html}</div>`;
 
 /** A button: `button("Sync", { sync: "public.orders" }, "primary")` → data-sync="public.orders"; `variant` primary,
- *  danger or "" (secondary), with " small" for a compact one in a row. `title`: its whole, where the stylesheet cuts it. */
-export function button(label, data = {}, variant = "", { room = "", disabled = false, expanded = false, title = "", id = "" } = {}) {
+ *  danger or "" (secondary), with " small" for a compact one in a row. `title`: its whole, where the stylesheet cuts it.
+ *  `room`: its longest label (`ROOMS`), or the two labels it may say (`[idle, busy]`), each laid under it unseen so its
+ *  width is the widest of them (app.css `button[data-room]`). `busy`: its request is in flight (`ctx.send`): disabled and
+ *  `aria-busy`, its data kept so it is still the same control. `submit`: a form's submit button. */
+export function button(label, data = {}, variant = "", { room = "", disabled = false, expanded = false, title = "", id = "", busy = false, submit = false } = {}) {
   const attrs = Object.entries(data).map(([k, v]) => ` data-${k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}="${esc(v)}"`).join("");
-  return `<button type="button"${id ? ` id="${esc(id)}"` : ""}${variant ? ` class="${esc(variant)}"` : ""}${attrs}${room ? ` data-room="${esc(room)}"` : ""}${title ? ` title="${esc(title)}"` : ""}${expanded ? ` aria-expanded="true"` : ""}${disabled ? " disabled" : ""}>${esc(label)}</button>`;
+  const rooms = (Array.isArray(room) ? room : [room]).filter((r) => r !== "");
+  const roomAttrs = rooms.length === 0 ? "" : ` data-room="${esc(rooms[0])}"${rooms[1] !== undefined ? ` data-room2="${esc(rooms[1])}"` : ""}`;
+  return `<button type="${submit ? "submit" : "button"}"${id ? ` id="${esc(id)}"` : ""}${variant ? ` class="${esc(variant)}"` : ""}${attrs}${roomAttrs}` +
+    `${title ? ` title="${esc(title)}"` : ""}${expanded ? ` aria-expanded="true"` : ""}${busy ? ` aria-busy="true"` : ""}${disabled || busy ? " disabled" : ""}>${esc(label)}</button>`;
 }
+
+/**
+ * A BUTTON THAT SENDS A CHANGE (`ctx.send` of src/web/app.js): its label, or while its request is in flight (`busy`) its
+ * busy label (Remove → Removing…), disabled and `aria-busy`. Both labels are its rooms, so it is one width whichever it
+ * says, by construction: its row and whatever is beside it never move.
+ */
+export const sendButton = (label, busyLabel, data, variant, { busy = false, ...o } = {}) =>
+  button(busy ? busyLabel : label, data, variant, { ...o, busy, room: [label, busyLabel] });
+
+/**
+ * A REQUEST THAT FAILED, SAID BESIDE WHAT SENT IT: a popover (`pop`) anchored to that control's element (or its row's
+ * actions), with the Failure as the run words it and Dismiss (`dismiss`: its data, the page's), which its X and Escape
+ * press too. `lead` (HTML) says first what still stands, where the page must add it. It covers no other control and
+ * pushes nothing down (`placePops`).
+ */
+export const failurePop = (anchor, failure, dismiss, lead = "") =>
+  pop(anchor, `${lead}${renderFailure(failure)}<p class="pop-actions">${button("Dismiss", { ...dismiss, popClose: "" }, "small")}</p>`);
 
 /**
  * A BUTTON WHOSE LABEL CHANGES KEEPS ITS WIDTH: `room` is its longest label (Sync → Syncing… → Synced ✓, Copy → Copied),
@@ -403,7 +474,7 @@ export function button(label, data = {}, variant = "", { room = "", disabled = f
  * column never move when it changes. The rooms of the buttons whose label changes, by what they do (a user's Disable
  * becomes Enable once it is disabled: one room, the longer).
  */
-export const ROOMS = { sync: "Syncing…", add: "Adding…", copy: "Press ⌘C", disable: "Disable" };
+export const ROOMS = { sync: "Syncing…", add: "Adding…", copy: "Press ⌘C", disable: "Disable", enabling: "Enabling…" };
 
 /**
  * A POPOVER ANCHORED TO WHAT ASKED FOR IT — a confirm, a form, what an action answered — so nothing is inserted into a
@@ -450,7 +521,13 @@ export function placePops(doc, win) {
     if (a === null || typeof a.getBoundingClientRect !== "function") { el.hidden = true; continue; }
     el.hidden = false;
     const r = a.getBoundingClientRect();
-    const w = el.offsetWidth, h = el.offsetHeight;
+    // measured as a popover, never as the bar it was docked as at the last placing (a bar's width is the window's, and
+    // a popover measured so never found a place again)
+    el.classList?.remove?.("docked");
+    // (a width tried at the last placing, below, is not this one's)
+    const sized = typeof el.style?.setProperty === "function";
+    if (sized) el.style.removeProperty("max-width");
+    let w = el.offsetWidth, h = el.offsetHeight;
     const below = r.bottom + gap;
     // too tall for the room on either side: kept inside the window, over its anchor, rather than past the window's edge
     // where no scroll reaches it (a fixed box)
@@ -459,15 +536,34 @@ export function placePops(doc, win) {
     // AN ANSWER (`said`: what an Add or a Sync now answered, up until it is dismissed) NEVER COVERS ANOTHER CONTROL
     // (issue 884: under a row's actions it covered the next row's Sync now and Remove), and is never a way through to
     // one (a tap on its words once added the table under it): it goes where it covers none — under its anchor, over it,
-    // or beside it on its left, level with its top or its bottom — and where every place covers one (a phone's rows, a
-    // long answer beside a narrow list), it is a bar fixed at the window's bottom (`docked`), the page given its height
-    // at its end (`--docked-h`), so every row can be scrolled clear of it
+    // or beside it on its left, level with its top or its bottom, else the nearest place in the window that covers none,
+    // wider or narrower if it must — and where every place covers one (a phone's rows, a long answer beside a narrow
+    // list), it is a bar fixed at the window's bottom (`docked`), the page given its height at its end (`--docked-h`), so
+    // every row can be scrolled clear of it
     let docked = false;
     if (el.classList?.contains("said")) {
       const all = controlsNow();
       const covers = (p) => all.some((b) => b.left < p.left + w - 0.5 && b.right > p.left + 0.5 && b.top < p.top + h - 0.5 && b.bottom > p.top + 0.5);
-      const clear = [at, inside(r.right - w, below, w, h), inside(r.right - w, r.top - gap - h, w, h), inside(r.left - gap - w, r.top, w, h), inside(r.left - gap - w, r.bottom - h, w, h)]
-        .find((p) => !covers(p));
+      const near = [at, inside(r.right - w, below, w, h), inside(r.right - w, r.top - gap - h, w, h), inside(r.left - gap - w, r.top, w, h), inside(r.left - gap - w, r.bottom - h, w, h)];
+      // none of those: the nearest place to it that covers none (issue 1033: a long failure under a row covered the next
+      // rows' buttons), tried on a grid of 32 px from beside it outwards — only when the five above are all taken
+      const nearest = () => {
+        const xs = Array.from({ length: Math.ceil(vw / 32) + 1 }, (_, i) => gutter + i * 32).filter((x) => x <= vw - gutter - w);
+        const ys = Array.from({ length: Math.ceil(vh / 32) + 1 }, (_, i) => gutter + i * 32).filter((y) => y <= vh - gutter - h);
+        const from = { left: r.left - gap - w, top: r.top };
+        return xs.flatMap((left) => ys.map((top) => ({ left, top })))
+          .sort((a, b) => Math.abs(a.left - from.left) + Math.abs(a.top - from.top) - Math.abs(b.left - from.left) - Math.abs(b.top - from.top))
+          .find((p) => !covers(p));
+      };
+      let clear = near.find((p) => !covers(p)) ?? nearest();
+      // still none: the same words wider (so shorter), then narrower (so taller), before it is docked
+      for (const width of ["min(46rem, calc(100vw - 32px))", "min(38rem, calc(100vw - 32px))", "min(22rem, calc(100vw - 32px))"]) {
+        if (clear !== undefined || !sized) break;
+        el.style.setProperty("max-width", width);
+        w = el.offsetWidth; h = el.offsetHeight;
+        clear = nearest();
+      }
+      if (clear === undefined && sized) { el.style.removeProperty("max-width"); w = el.offsetWidth; h = el.offsetHeight; }
       docked = clear === undefined;
       el.classList.toggle("docked", docked);
       if (!docked) at = clear;

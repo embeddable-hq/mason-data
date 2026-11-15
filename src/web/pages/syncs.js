@@ -35,7 +35,7 @@ const th = (cols) => cols.map((c) => `<th scope="col">${esc(c)}</th>`).join("");
 export const KIND_WORDS = { full_sync_failed: "Full sync failed", poll_failed: "Scheduled sync failed", catch_up_failed: "Catch-up failed",
   stream_failed: "Live sync failed", source_unreachable: "Database unreachable", generated_failed: "Generated table failed",
   compact_failed: "Compaction failed", sync_failed: "Manual sync failed", restart: "Mason restarted", full_sync: "Full sync", recovered: "Working again", synced: "Manual sync",
-  sync_changed: "Sync setting changed", columns_changed: "Columns changed", polled: "Scheduled sync", streamed: "Live sync", ui_error: "Web page error" };
+  sync_changed: "Sync setting changed", columns_changed: "Columns changed", sync_stopped: "Sync stopped", polled: "Scheduled sync", streamed: "Live sync", ui_error: "Web page error" };
 /** A kind's words; a kind this page does not know, its code. */
 export const kindWords = (kind) => Object.hasOwn(KIND_WORDS, kind) ? KIND_WORDS[kind] : kind;
 
@@ -85,14 +85,14 @@ export function runningSyncs(s) {
     if (r && (r.kind === "copy" || r.kind === "catch-up")) {
       const key = `${r.kind}:${t.table}:${r.startedAt}`, by = r.kind;
       if (r.kind === "catch-up") {
-        out.push({ key, by, table: t.table, startedAt: r.startedAt, words: "Catch-up", note: "It syncs the rows that changed since its last full sync.", ends: ["catch_up_failed"] });
+        out.push({ key, by, table: t.table, startedAt: r.startedAt, words: "Catch-up", note: "It syncs the rows that changed since its last full sync.", ends: ["catch_up_failed", "sync_stopped"] });
       } else if (t.copy?.phase === "copying") {
         const share = t.copy.progress?.share;
-        out.push({ key, by, table: t.table, startedAt: r.startedAt, words: "First sync", note: typeof share === "number" ? `${Math.floor(share * 100)}% done.` : "", ends: ["full_sync", "full_sync_failed"] });
+        out.push({ key, by, table: t.table, startedAt: r.startedAt, words: "First sync", note: typeof share === "number" ? `${Math.floor(share * 100)}% done.` : "", ends: ["full_sync", "full_sync_failed", "sync_stopped"] });
       } else if (Array.isArray(t.columnsPending)) {
-        out.push({ key, by, table: t.table, startedAt: r.startedAt, words: KIND_WORDS.full_sync, note: "Its columns changed, so it is synced again whole.", ends: ["full_sync", "full_sync_failed", "columns_changed"] });
+        out.push({ key, by, table: t.table, startedAt: r.startedAt, words: KIND_WORDS.full_sync, note: "Its columns changed, so it is synced again whole.", ends: ["full_sync", "full_sync_failed", "columns_changed", "sync_stopped"] });
       } else {
-        out.push({ key, by, table: t.table, startedAt: r.startedAt, words: KIND_WORDS.full_sync, note: "It is synced again whole.", ends: ["full_sync", "full_sync_failed"] });
+        out.push({ key, by, table: t.table, startedAt: r.startedAt, words: KIND_WORDS.full_sync, note: "It is synced again whole.", ends: ["full_sync", "full_sync_failed", "sync_stopped"] });
       }
     }
   }
@@ -220,7 +220,7 @@ function renderTimeline(passing, read, { narrowed, now, sort, limit, live, asOf 
 
 /** EVERY KIND OF SYNC EVENT, in its order (src/duck/events.ts `EVENT_KINDS`, held equal by the tests): the Kind filter
  *  offers each, whether the range has one or not. */
-export const EVENT_KINDS = ["full_sync_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "sync_failed", "restart", "full_sync", "recovered", "synced", "sync_changed", "columns_changed", "polled", "streamed", "ui_error"];
+export const EVENT_KINDS = ["full_sync_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "sync_failed", "restart", "full_sync", "recovered", "synced", "sync_changed", "columns_changed", "sync_stopped", "polled", "streamed", "ui_error"];
 
 /** The kind and table filters' controls: EVERY kind (EVENT_KINDS), and EVERY added table (`/api/state` `tables`, `s`) —
  *  Mason's own events first ("Mason events", MASON_TABLE) — whether the range has an event of it or not, so the choices never depend on what
@@ -259,13 +259,15 @@ export const page = {
   create(ctx) {
     const m = { rawOpen: false, failuresOnly: false, scheduled: false, kind: "", table: "", sort: { key: "time", dir: "desc" }, limit: EVENTS_SHOWN,
       // the syncs running now, by key, and those just ended whose event is not read yet (`settleRunning`)
-      running: new Map() };
+      running: new Map(),
+      // the events last read whole (their path), kept on the page (greyed) while a filter's new read is asked
+      shownEvents: null };
     // the scheduled syncs are read when the box is ticked, or one of their kinds is chosen (else that kind lists none)
     const scheduledRead = () => m.scheduled || SCHEDULED_KINDS.includes(m.kind);
     // FAILURES ONLY IS ASKED OF THE RUN (`failed=1`), never filtered from the newest EVENTS_LIMIT read: the scheduled syncs,
     // one a table a poll, fill 500 rows in minutes, and a failure among them must still be listed
     const events = () => eventsPath(ctx.range(), { scheduled: scheduledRead(), failed: m.failuresOnly });
-    const part = (path, render, says) => readPart(ctx, path, render, says);
+    const part = (path, render, says, before = null) => readPart(ctx, path, render, says, before);
     // a sync that ended waits for its event: the events are read again once, a poll after it was seen to end (its event
     // is written within a second of its end, src/duck/events.ts FLUSH_MS), unless they were read since then already
     const handOver = () => {
@@ -300,14 +302,17 @@ export const page = {
       actions,
       /** After each read: the syncs running now from the state, and each one ended handed over to its event (`settleRunning`). */
       afterRead() {
+        if (ctx.read(events())?.body !== undefined) m.shownEvents = events();
         const s = ctx.read(STATE)?.body;
         if (s === undefined) return;
         m.running = settleRunning(m.running, s, ctx.read(events())?.body?.events, ctx.now().getTime());
       },
+      // FAILURES ONLY, SCHEDULED SYNCS OR A KIND JUST CHANGED, ITS EVENTS NOT READ YET: the events read last stay, greyed
+      // and busy (`readPart`'s `before`), and the filters keep their choices, so nothing moves until the answer comes
       view: () => ({
-        "syncs-filters": renderEventFilters(ctx.read(events())?.body, m, ctx.read(STATE)?.body ?? null),
+        "syncs-filters": renderEventFilters(ctx.read(events())?.body ?? (m.shownEvents === null ? undefined : ctx.read(m.shownEvents)?.body), m, ctx.read(STATE)?.body ?? null),
         "syncs-events": part(events(), (b) => renderEvents(b, { failuresOnly: m.failuresOnly, kind: m.kind, table: m.table, now: ctx.now().getTime(), sort: m.sort, limit: m.limit,
-          span: RANGES[ctx.range()]?.span ?? "", running: [...m.running.values()], runningAsOf: runningAsOf() }), false),
+          span: RANGES[ctx.range()]?.span ?? "", running: [...m.running.values()], runningAsOf: runningAsOf() }), false, m.shownEvents),
         "syncs-run": renderRawLog(m.rawOpen, m.rawOpen ? part(LOGS, renderLogs, true) : ""),
       }),
       /** The kind or the table chosen: the events read are filtered in the page alone. "Failures only" and "Scheduled

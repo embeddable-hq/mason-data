@@ -114,7 +114,8 @@ paths:
 - **A failed copy backs off** (`copyRetryDelayMs`: four times the attempt, at least 5 minutes, doubled per failure in a
   row, at most 6 hours; at once after a restart or a column/key change) and then CONTINUES with the ranges no chunk
   committed (its committed chunks are kept), and `mason stop` interrupts the chunks in flight, rolled back, never
-  failing it. A table removed, or whose columns changed, loses its side table, progress row and chunk rows.
+  failing it (one waiting on the source is cancelled there: duck-sync.md "A stop cancels"). A table removed, or whose columns changed, loses its side table, progress row and chunk rows; one removed
+  while it is read stops at once, its chunks in flight cancelled on the source (duck-sync.md "cut short").
 - **Nothing yields to BI queries between chunks**: the listener keeps no count of statements in flight
   that the sync could read, so none was invented; DuckDB has no per-connection thread or priority control (`threads` is
   GLOBAL in 2.0, "cannot be set locally"). A reader is one Postgres backend and about one DuckDB core: beside one, a

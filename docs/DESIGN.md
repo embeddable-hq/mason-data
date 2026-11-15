@@ -170,6 +170,38 @@ about ⌈chunks ÷ N⌉ chunk-times, so 11 chunks at N=3 are 4 rounds against 3.
 against 1.7 (20 %), and re-read N times more at a stop. **Where.** `src/duck/sync.ts` (`COPY_PARALLEL`, `readChunks`);
 `tests/duck-copy-order.test.ts`, `duck-poll.itest.ts`.
 
+### A table removed while it syncs (issue 1034, 2026-11-15)
+
+**What happened.** A real deployment removed a ~150 M-row table partway through its first sync. The sync ran on to its
+end, because the pass skipped dropping a table while its rebuild ran, and the copy never checked between chunks. Two
+small tables added beside it waited behind it in the one rebuild queue, and the source kept scanning a table nobody
+wanted. **Decision.** A removal cuts that table's sync short (`cutShort`): its first sync, its whole read again, its
+catch-up, or the writer's poll of it. DuckDB's interrupt alone is not enough. Measured on Postgres 16, a chunk whose
+query waited on the source (a lock) never saw it, as the extension checks it only between the rows it fetches. So each
+lane notes its backend and its transaction's start (`pg_backend_pid()`, `now()`), and the cut cancels exactly that
+backend's query with `pg_cancel_backend`, guarded by `xact_start` so a backend the pool gave to another read is never
+touched. That is Mason's own query cancelled, never a write. What it read is dropped on the writer's turn once nothing
+writes the side table. A cancel that fails (refused, or the source's connection limit reached) is said once a cut, and
+changes nothing. The read then runs until DuckDB's interrupt reaches it between two rows, or until its query ends, and
+the cut waits for it. Measured with every cancel failing (issue 1037), a chunk waiting on a lock held the cut for as
+long as the lock was held. **Where.** `src/duck/sync.ts` (`cutShort`, `cancelBackends`, `rebuild`, `droppedCut`);
+`tests/integration/duck-remove.itest.ts`.
+
+### A stop while a read waits on the source (issue 1037, 2026-11-15)
+
+**What happened.** `mason stop` interrupts each of its DuckDB connections, and waits for the work on them to end. A
+first sync's chunk, a catch-up or a poll whose query waited on a lock in the source never saw that interrupt (the same
+measurement as above). So the stop waited until the lock was released, which can be never. The test held a lock on the
+source, and each stop took longer than its 10 s bound. **Decision.** The stop cancels on the source what the interrupt
+has not ended. Every lane still in flight 200 ms after the stop began has its noted backend's query cancelled, guarded
+by `xact_start`, as a removal's cut does. It is asked again every 200 ms until the lane ends. Its failure reads as the
+stop, never as a failed read (`cancelSent`), so a first sync keeps its committed chunks and resumes, and nothing backs
+off. One round of cancels is bounded to 5 s, its connect included (`CANCEL_DEADLINE_MS`), and the stop waits for the
+round in flight, so no connection of Mason's is left open on the source. A cancel that fails is said once a stop, and
+the stop then waits for that query, as every stop did before. With the change each stop took 4–8 s in the test, most
+of it the test's own setup and checks. **Where.** `src/duck/sync.ts` (`stop`, `cancelOnSource`, `cancelBackends`,
+`interruptible`); `tests/integration/duck-stop.itest.ts`.
+
 ### Chunks sized by time, and progress between commits
 
 **Decision.** A copy's first chunks (one per reader) are a tenth of the ceiling, at least 128 pages; every later one is
@@ -466,7 +498,8 @@ under another transaction's write fails its commit, hence swaps on the writer's 
 - **A failed copy backs off** (`copyRetryDelayMs`: four times the attempt, at least 5 minutes, doubled per failure, at
   most 6 hours; at once after a restart or a column change) and keeps its committed chunks.
 - **`mason stop` interrupts a copy**, re-sent every 50 ms (DuckDB loses an interrupt that arrives before its statement
-  starts); the table is `waiting`, never failed.
+  starts), and cancels on the source a chunk the interrupt has not ended within 200 ms ("A stop while a read waits on
+  the source"); the table is `waiting`, never failed.
 - **The catalog serves a table the moment its copy commits**, on a connection no copy holds (after a restart it had been
   empty for hours behind a large copy).
 - **An enum array is read as `text[]`**: a passthrough read hands it over as one VARCHAR DuckDB cannot cast.

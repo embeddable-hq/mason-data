@@ -1494,7 +1494,7 @@ test("a poll of a transaction that changed most of a big table writes it in comm
     // its record: the 1,000 new keys ADDED, the rest of what it read UPDATED, the 8,000 gone DELETED (issue 1010)
     const polled = events.filter((e) => e.kind === "polled").map((e) => e.message);
     assert.equal(polled.length, 1, JSON.stringify(events));
-    assert.match(polled[0]!, /^synced on schedule: 1,000 added, 720,000 updated, 8,000 deleted, 793,000 rows now · /, polled[0]);
+    assert.match(polled[0]!, /^synced on schedule: 1,000 added, ~720,000 updated, 8,000 deleted, 793,000 rows now · /, polled[0]);
     // the watermark moved with the last piece: a restart polls nothing again of it
     await sync.stop(); await store.close();
     store = await DuckStore.open(file, (l) => logged.push(l), { memoryLimit: "64MB" });

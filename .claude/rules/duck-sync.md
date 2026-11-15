@@ -81,6 +81,21 @@ paths:
   that fired early attached the source and polled nothing. DETECTOR: `duck-stream.itest.ts` "a pass kicked while the stream
   waits", `tests/duck-sync-schedule.test.ts`. A failed catch-up backs off as a failed copy does (`backOff`, `copyRetryDelayMs`), its whole error and next
   attempt said in the log and `mason status` (`catchUp.retryAt`). ("Logical replication")
+- **A table removed while its sync runs has that sync cut short at once** (`cutShort`, issue 1034: a removed table's
+  first sync ran for hours while every table queued behind it waited): its first sync, whole read again or catch-up
+  (`rebuildingNow`), or the writer's poll of it (`writerPolling`), interrupted every 50 ms, and its reads cancelled ON
+  THE SOURCE by `pg_cancel_backend` of the backend each lane noted (`noteBackend`), only while that backend is still in
+  the transaction noted (`xact_start`) — DuckDB's interrupt never reaches a query that waits there. No chunk commits
+  after, no swap follows, and what it read is dropped on the writer's turn as its rebuild ends (`droppedCut`,
+  `dropRemoved`), said as `sync_stopped`, never a failure or a back-off. A rebuild the queue took before a removal and
+  started after it is cut short too (`removals`), so a table added again starts anew. DETECTOR:
+  `tests/integration/duck-remove.itest.ts`.
+- **A stop cancels on the source every read its interrupt has not ended within 200 ms** (`stop`, `cancelOnSource`,
+  issue 1037: a chunk, a catch-up or a poll waiting on a lock in the source held `mason stop` until the lock was
+  released). It uses the cut's guarded `pg_cancel_backend` (`cancelBackends`), and that statement fails as `Stopping`,
+  never as a failed read (`cancelSent`), so committed chunks are kept and nothing backs off. One round is bounded
+  (`CANCEL_DEADLINE_MS`), and a failed cancel is said once a cut or a stop, never at every round. DETECTOR:
+  `tests/integration/duck-stop.itest.ts`.
 - **A multi-line reason is ONE log entry**, its further lines indented (`textEntry`, src/lib/log.ts: the
   run's log, mason.log, is written through it, src/cli/dev.ts) — the test server's Binder Error was read as its first line.
 - **A table being caught up holds its decoded changes in Node's heap** until its catch-up poll ends (`held`, `catchUp`):

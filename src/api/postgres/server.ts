@@ -60,6 +60,7 @@
 import type { ExactColumn } from "../../duck/rewrite.ts";
 import type { PlannedSql } from "../../duck/plan.ts";
 import { copyFacts, type CopyFacts } from "../../duck/explain.ts";
+import { utf8Fatal } from "../../duck/text.ts";
 import { scaledKey } from "../../duck/scale-column.ts";
 import type { CopyState } from "../../duck/sync.ts";
 import { explainedText, explainOptions, type ExplainOptions } from "./explain.ts";
@@ -3017,7 +3018,6 @@ function arrayFromBinary(bytes: Buffer, i: number, expected: number): string {
   return bounds + body;
 }
 
-const fatalUtf8 = new TextDecoder("utf-8", { fatal: true });
 
 /**
  * An element's text, as textrecv reads it (pg_verify_mbstr): bytes that are no UTF-8, or a NUL, are refused 22021 naming
@@ -3027,7 +3027,7 @@ const fatalUtf8 = new TextDecoder("utf-8", { fatal: true });
 function utf8Element(bytes: Uint8Array): string {
   if (!bytes.includes(0)) {
     // a fatal TextDecoder throws exactly TypeError on bytes that are no UTF-8: the scan below names them
-    try { return fatalUtf8.decode(bytes); } catch (err) { if (!(err instanceof TypeError)) throw err; }
+    try { return utf8Fatal.decode(bytes); } catch (err) { if (!(err instanceof TypeError)) throw err; }
   }
   // find the first character Postgres refuses: a NUL, or a character no UTF-8 decoder reads alone
   for (let at = 0; at < bytes.length;) {
@@ -3035,7 +3035,7 @@ function utf8Element(bytes: Uint8Array): string {
     const length = b < 0x80 ? 1 : (b & 0xe0) === 0xc0 ? 2 : (b & 0xf0) === 0xe0 ? 3 : (b & 0xf8) === 0xf0 ? 4 : 1;
     const char = bytes.subarray(at, at + length);
     let legal = b !== 0 && char.length === length;
-    if (legal && b >= 0x80) { try { fatalUtf8.decode(char); } catch (err) { if (!(err instanceof TypeError)) throw err; legal = false; } }
+    if (legal && b >= 0x80) { try { utf8Fatal.decode(char); } catch (err) { if (!(err instanceof TypeError)) throw err; legal = false; } }
     if (!legal) {
       const shown = Array.from(char, (c) => `0x${c.toString(16).padStart(2, "0")}`).join(" ");
       throw new PgError({ code: "22021", message: `invalid byte sequence for encoding "UTF8": ${shown}` });

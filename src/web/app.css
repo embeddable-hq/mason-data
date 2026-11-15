@@ -622,6 +622,13 @@ body { padding-bottom: var(--docked-h, 0px); }
 /* A BUTTON WHOSE LABEL CHANGES KEEPS ITS WIDTH (`room`, src/web/shared.js ROOMS): its longest label laid under it, unseen
    and of no height, so Sync, Syncing… and Synced ✓ (Copy, Copied) are one width */
 button[data-room]::after { content: attr(data-room); display: block; height: 0; overflow: hidden; visibility: hidden; }
+/* a button that sends a change has two rooms, its label and its busy label (`sendButton`): both laid under it, unseen,
+   so Remove and Removing… are one width by construction, whatever the font */
+button[data-room2]::before { content: attr(data-room2); display: block; height: 0; overflow: hidden; visibility: hidden; }
+/* its request in flight: held, and the pointer says it is working (`aria-busy`, src/web/app.js ctx.send) */
+button[aria-busy="true"]:disabled { cursor: progress; }
+/* a list kept while the next one is read (a new filter, an older page: `reading`): greyed, in its place, until it is replaced */
+.reading[aria-busy="true"] { opacity: 0.55; pointer-events: none; }
 td.act, th.act { white-space: nowrap; text-align: right; }
 td.act > * { vertical-align: middle; }
 table.catalog td.act, table.catalog th.act { position: sticky; right: 0; }
@@ -775,10 +782,11 @@ table.users button.from-line:disabled, table.users button.from-line:disabled:hov
 table.users td { white-space: nowrap; }
 /* FIXED COLUMNS, as the tables' catalog's: Disable → "Disabled <when>" widens no column and moves no button */
 table.users { table-layout: fixed; width: 100%; min-width: 960px; }
-table.users th.status { width: 200px; }
+table.users th.status { width: 180px; }
 table.users th.added { width: 188px; }
 table.users th.last { width: 150px; }
-table.users th.act { width: 240px; }
+/* Queries, Disable (in the room of Enabling…, its Enable sent) and Remove, whole */
+table.users th.act { width: 270px; }
 /* where the table scrolls in its card (a narrower window, a phone), a row's actions stay pinned at the card's right */
 table.users td.act, table.users th.act { position: sticky; right: 0; }
 table.users td.act { background: var(--surface); }
@@ -897,6 +905,19 @@ details.hours > summary { margin-bottom: var(--space-2); }
   #page-syncs table.events tbody tr > :nth-child(3) { grid-area: name; padding-bottom: 0; padding-left: 0; }
   #page-syncs table.events tbody tr > :nth-child(4) { grid-area: msg; overflow-wrap: anywhere; }
   #page-syncs table.events tbody tr > :nth-child(5) { grid-area: took; padding-bottom: 0; }
+  #page-syncs table.events code.name { max-width: 100%; }
+}
+/* Sync events above the phone (issue 1048): FIXED COLUMNS, as the Tables and Users lists have, and a least width at
+   which every column reads whole: When, Kind and Took as wide as their longest words, the table's name a usual
+   schema.table whole, and the message the column that gives. Below that width the list scrolls inside its card, never
+   the page. A name longer than its column is cut with "…", its whole the title, as the other lists cut one. */
+@media (min-width: 641px) {
+  #page-syncs table.events { table-layout: fixed; min-width: 880px; }
+  #page-syncs table.events thead th:nth-child(1) { width: 104px; }
+  #page-syncs table.events thead th:nth-child(2) { width: 216px; }
+  #page-syncs table.events thead th:nth-child(3) { width: 27%; }
+  #page-syncs table.events thead th:nth-child(5) { width: 104px; }
+  #page-syncs table.events tbody tr > :is(:nth-child(1), :nth-child(3), :nth-child(5)) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #page-syncs table.events code.name { max-width: 100%; }
 }
 .terminal { background: var(--code-bg); color: var(--code-fg); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-3) var(--space-4);

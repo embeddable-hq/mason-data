@@ -74,7 +74,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { PgConnection, formatLsn, parseLsn, pgLiteral, type PgConnectOptions } from "../cdc/pg-wire.ts";
 import { createSlot, currentLsn, dropSlot, readSlot, type SlotState } from "../cdc/source.ts";
-import { holdOf } from "./held-types.ts";
+import { holdOf, nativeVarchar } from "./held-types.ts";
 import { scaleColumn, scaleOfText, scaleSql } from "./scale-column.ts";
 import { hiddenColumns } from "./hidden-columns.ts";
 import { addCounts, countsText, duckValue, fold, foldInto, noChanges, noCounts, ReplicationStream, type ChangeCounts, type StreamedTable, type TableChanges } from "./stream.ts";
@@ -249,6 +249,13 @@ export const notAddedRefusal = (source: string, known: readonly string[]): PollR
 /** a statement interrupted, or never started, because the sync is stopping (`Sync.stop`): a stop, never a failure */
 export class Stopping extends Error {
   constructor() { super("Mason is stopping"); }
+}
+
+/** a sync of a table cut short because the table was removed while it ran (issue 1034, `Sync.cutShort`): a stop of that
+ *  table's sync alone, never a failure and never a back-off */
+export class Removed extends Error {
+  readonly source: string;
+  constructor(source: string) { super(`${source} is no longer added`); this.source = source; }
 }
 
 export interface CopyState {
@@ -493,6 +500,21 @@ export const SCALE_LAYOUT = "stored by an older Mason without each numeric value
  * path (`needsCopy`), serving as it was until its swap.
  */
 export const MISSING_LAYOUT = "missing a column it syncs, which an older Mason dropped: read again whole, once";
+
+/**
+ * A COPY AN OLDER MASON MADE OF A COLUMN WHOSE NAME STARTS WITH U+FEFF (issue 991, src/duck/text.ts): it looked the
+ * column's type up by the name DuckDB handed back, which had lost its byte-order mark, found none, and stored the
+ * column as a VARCHAR whatever its type (a numeric served as text). Found by what the copy physically is (`lostType`),
+ * copied again through the normal path (`needsCopy`) once, serving as it was until its swap.
+ */
+export const BOM_LAYOUT = "stored by an older Mason with a column whose name starts with a byte-order mark as text: read again whole, once";
+
+/** a copied column an older Mason stored as a VARCHAR only because its name starts with U+FEFF (`BOM_LAYOUT`): one the
+ *  copy now stores as its own type (a native type that is no text, an array, an enum). A domain is left as it is. */
+export function lostType(c: SourceColumnInfo, stored: string): boolean {
+  return c.name.startsWith("\uFEFF") && stored === "VARCHAR" && c.domain !== true && holdOf(c.type, c.typeKind) === "same" &&
+    !/^jsonb?$/.test(c.type) && !nativeVarchar(c.type);
+}
 
 /** a copy in a layout this Mason no longer keeps: the layout as `mason status` says it, and its short form for a line */
 interface Retired { layout: string; short: string }
@@ -1024,7 +1046,18 @@ function storedType(c: SourceColumnInfo, scanned: string): string {
 
 /** a DuckDB connection the sync runs statements on, and whether a long one is running on it (`interruptible`): what
  *  `stop` interrupts, each connection its own */
-interface Lane { readonly conn: DuckConnection; inFlight: boolean }
+interface Lane { readonly conn: DuckConnection; inFlight: boolean;
+  /** the source's backend its long statement reads on, and its transaction's start (`noteBackend`): what a removal
+   *  cancels on the source (`cutShort`), as DuckDB's interrupt does not reach a query that waits there */
+  backend?: SourceBackend | null;
+  /** a stop's cancel on the source was sent for this statement (`stop`): its failure is the stop's, never the read's */
+  cancelSent?: boolean }
+interface SourceBackend { pid: number; since: string }
+/** one cut or one stop whose reads are cancelled on the source (`cancelBackends`): what it is said as, and whether a
+ *  failed cancel was said already, so it is said once, never at every round */
+interface CancelEpisode { readonly what: string; failureSaid: boolean }
+/** how long one round of cancels on the source may take, its connect included (`cancelBackends`) */
+const CANCEL_DEADLINE_MS = 5_000;
 
 /** a rebuild waiting its turn (`enqueue`): a whole copy, or the one poll that catches a table up before it is kept
  *  current again */
@@ -1230,6 +1263,21 @@ export class Sync {
   private readonly diskFree: (dir: string) => number;
   /** the copy's readers past the rebuilds' own connection, open while it reads (`readChunks`): what `stop` interrupts too */
   private readonly copyLanes = new Set<Lane>();
+  /** THE TABLES WHOSE SYNC IS CUT SHORT because they were removed while it ran (issue 1034: a removed table's first sync
+   *  ran on for hours, and every table queued behind it waited): its statements interrupted every 50 ms (`cutTimer`)
+   *  until the rebuild or the poll ends, which drops what it left (`rebuild`) or kicks the pass that does */
+  private readonly cutting = new Set<string>();
+  private cutTimer: NodeJS.Timeout | null = null;
+  /** the cancels on the source of a cut or a stop (`cancelOnSource`): the round in flight, when the last began, and the
+   *  cut's episode (a new one each time the cut's timer starts) */
+  private cancelling: Promise<void> | null = null;
+  private cancelledAt = 0;
+  private cutEpisode: CancelEpisode = { what: "a removed table's read", failureSaid: false };
+  /** how many times each table was removed this run (`setTables`): a rebuild taken from the queue before a removal and
+   *  started after it is cut short too, even when the table was added again meanwhile (`rebuild`) */
+  private readonly removals = new Map<string, number>();
+  /** the table the writer's poll reads now (a pass's poll on schedule, a sync by hand): what its removal interrupts */
+  private writerPolling: string | null = null;
   /** each synced table's space and last compaction (`Compaction`), and the back-off of a compaction that failed */
   private readonly compactions = new Map<string, Compaction>();
   private readonly compactRetries = new Map<string, { failures: number; at: number }>();
@@ -1773,6 +1821,53 @@ export class Sync {
     }
   }
 
+  /**
+   * A REMOVED TABLE'S SYNC, CUT SHORT NOW (issue 1034: a table removed during its first sync was read to its end, hours
+   * for a large one, while every table queued behind it waited and the source scanned a table nobody wanted): its first
+   * sync, a whole read again or its catch-up (the rebuild running, `rebuildingNow`), or the writer's poll of it (on
+   * schedule or by hand, `writerPolling`). Its statements are interrupted as `stop` interrupts them, again every 50 ms
+   * (DuckDB loses an interrupt that arrives before its statement starts), until it ends: the chunks in flight roll back,
+   * no chunk commits after, and no swap follows. What it left is dropped once nothing writes it any more (`rebuild`'s
+   * end, on the writer's turn), and the queue moves on. A compaction is not cut short: it reads no source, and the pass
+   * after it drops the table.
+   */
+  private cutShort(source: string): void {
+    const rebuilding = this.rebuildingNow?.source === source && this.rebuildingNow.kind !== "compact";
+    if (!rebuilding && this.writerPolling !== source) return;
+    this.cutting.add(source);
+    this.log(`${source}: its sync is stopped now, as it is no longer added`);
+    if (this.cutTimer === null) {
+      this.cutEpisode = { what: "a removed table's read", failureSaid: false };
+      this.cutTimer = setInterval(() => this.interruptCut(), 50);
+    }
+    this.interruptCut();
+  }
+
+  /** the statements of every sync being cut short (`cutting`) interrupted, each on its own connection; the timer ends
+   *  with the last */
+  private interruptCut(): void {
+    if (this.cutting.size === 0) { if (this.cutTimer !== null) { clearInterval(this.cutTimer); this.cutTimer = null; } return; }
+    const backends: SourceBackend[] = [];
+    for (const source of this.cutting) {
+      const lanes = this.rebuildingNow?.source === source ? [this.rebuilderLane, ...this.copyLanes] : this.writerPolling === source ? [this.writerLane] : [];
+      for (const lane of lanes) {
+        if (!lane?.inFlight) continue;
+        lane.conn.interrupt();
+        if (lane.backend) backends.push(lane.backend);
+      }
+    }
+    this.cancelOnSource(backends, this.cutEpisode);
+  }
+
+  /** the reads of these backends cancelled on the source (`cancelBackends`), one round at a time, at most every 200 ms:
+   *  a cancel that lands between two statements of the read is lost, as an interrupt is, so the caller asks again */
+  private cancelOnSource(backends: readonly SourceBackend[], episode: CancelEpisode): boolean {
+    if (backends.length === 0 || this.cancelling !== null || Date.now() - this.cancelledAt < 200) return false;
+    this.cancelledAt = Date.now();
+    this.cancelling = this.cancelBackends(backends, episode).finally(() => { this.cancelling = null; });
+    return true;
+  }
+
   /** the tables the project adds now (its sources file): a new one is copied at the next pass unless its copy is already
    *  here and current (said as its records say it, `addedText`), a removed one dropped.
    *  What it returns is the catalog rebuilt over them (never rejected: a failure is said in the log) */
@@ -1826,6 +1921,8 @@ export class Sync {
     // loud: the copy goes with the table's entry, and comes back only by reading the source again (the test server: a 53 GB
     // copy, 21 minutes of a production replica, dropped by a project file moved aside)
     if (removed.length) this.log(`removed ${removed.join(", ")}: no longer added, so ${removed.length === 1 ? "its synced data is" : "their synced data is"} DROPPED at the next pass — mason add syncs ${removed.length === 1 ? "it" : "them"} again from the source, whole`);
+    // A REMOVED TABLE'S SYNC RUNNING NOW STOPS NOW (issue 1034), and one waiting in the queue never starts
+    for (const s of removed) { this.removals.set(s, (this.removals.get(s) ?? 0) + 1); this.queued.delete(s); this.cutShort(s); }
     for (const t of tables) if (!this.states.has(t.source)) this.states.set(t.source, { source: t.source, phase: "waiting", rows: null, bytes: t.bytes, seconds: null, copiedAt: null, error: null });
     // a failed copy whose table changed (its columns or key) is tried at once: the change may be its fix
     const shape = (t: AddedTable): string => JSON.stringify([columnsKey(t.columns), t.key]);
@@ -2259,6 +2356,13 @@ export class Sync {
     try { return await this.pollNowOf(sources); }
     catch (e) {
       if (e instanceof PollRefused || e instanceof Stopping) throw e;
+      // A TABLE REMOVED WHILE IT WAS SYNCED BY HAND (`cutShort`, issue 1034): its sync stopped, rolled back — said as a
+      // stop, never a failure, and answered as a table not added is
+      if (e instanceof Removed) {
+        const m = "its sync by hand stopped, as the table was removed (rolled back)";
+        this.event({ kind: "sync_stopped", table: e.source, message: m });
+        throw new PollRefused("not_found", `${e.source} was removed while it was synced by hand, so that sync stopped (rolled back)`);
+      }
       const m = this.errorText(e);
       // A FAILED SYNC BY HAND IS AN EVENT, as a done one is (`synced`): `POST /api/sync` answers the page before the sync
       // ends (issue 1007), so its reason is the ledger's record, never only the answer of a request no one may hold
@@ -2314,7 +2418,7 @@ export class Sync {
         // a transaction per table, as the passes poll; a table whose rebuild started since it was asked is refused
         const found: PolledTable[] = [...answered.values()];
         for (const t of toPoll) {
-          const f = await this.onWriter(async () => { this.refuseRebuilding(t); return this.poll(this.writerLane, [t], { strict: true }); });
+          const f = await this.onWriter(async () => { this.refuseRebuilding(t); return this.writerPoll(t, { strict: true }); });
           for (const x of f) this.polledNow(t, x.ms);
           found.push(...f);
         }
@@ -2333,7 +2437,7 @@ export class Sync {
     // table asked for is answered with the stream's position and records none: nothing was read for it
     for (const x of found) {
       const by = answered.has(x.table) ? " (by its poll on schedule, which began as it was asked)" : "";
-      this.event({ kind: "synced", table: x.table, message: `synced by hand${by}: ${syncedText(x)}`, tookMs: x.ms });
+      this.event({ kind: "synced", table: x.table, message: `synced by hand${by}: ${syncedText(x, "poll")}`, tookMs: x.ms });
     }
     // ITS COLUMNS CHANGED ON THE DATABASE (issue 977): read again, then the answer is what that made of it — read again
     // whole with them, which mason wait waits for
@@ -2355,6 +2459,11 @@ export class Sync {
    * reads; `interruptible`) interrupted, rolled back and said as stopped, never failed (`mason
    * stop` waited for a 30 GB table's sort). DuckDB loses an interrupt that arrives before its statement has started
    * (measured: the statement ran to its end), so it is sent again every 50 ms until the pass has ended.
+   * A READ WAITING ON THE SOURCE IS CANCELLED THERE (issue 1037: a chunk, a catch-up or a poll waiting on a lock in the
+   * source never saw the interrupt, and the stop waited until the lock was released, which can be never): every lane
+   * still in flight 200 ms after the stop began has its noted backend's query cancelled (`cancelOnSource`, as a
+   * removal's cut does), again every 200 ms until it ends. A cancel that fails is said once, and the stop then waits
+   * for that query to end, as it did before.
    */
   async stop(): Promise<void> {
     this.stopped = true;
@@ -2363,9 +2472,23 @@ export class Sync {
     if (this.wake !== null) { this.wake.cancel(); this.wake = null; }
     if (this.reportTimer !== null) { clearInterval(this.reportTimer); this.reportTimer = null; }
     if (this.compactTimer !== null) { this.compactTimer.cancel(); this.compactTimer = null; }
+    // a removed table's sync being cut short (`cutShort`) is now the stop's to interrupt, with everything else
+    if (this.cutTimer !== null) { clearInterval(this.cutTimer); this.cutTimer = null; }
     // the stream, the pass and the rebuild end together: a batch waiting for the writer's turn behind a poll must not
-    // wait for that poll, so each connection's long statement is interrupted from the start
-    const interrupt = (): void => { for (const lane of [this.writerLane, this.rebuilderLane, this.generatedLane, ...this.copyLanes]) if (lane?.inFlight) lane.conn.interrupt(); };
+    // wait for that poll, so each connection's long statement is interrupted from the start; a read the interrupt has
+    // not ended within 200 ms is cancelled on the source too (one round at a time)
+    const episode: CancelEpisode = { what: "a read Mason was stopping", failureSaid: false };
+    this.cancelledAt = Math.max(this.cancelledAt, Date.now());
+    const interrupt = (): void => {
+      const reading: Lane[] = [];
+      for (const lane of [this.writerLane, this.rebuilderLane, this.generatedLane, ...this.copyLanes]) {
+        if (!lane?.inFlight) continue;
+        lane.conn.interrupt();
+        if (lane.backend) reading.push(lane);
+      }
+      // each statement a cancel is sent for fails as stopped (`interruptible`), never as a failed read
+      if (this.cancelOnSource(reading.map((l) => l.backend!), episode)) for (const l of reading) l.cancelSent = true;
+    };
     const again = setInterval(interrupt, 50);
     interrupt();
     try {
@@ -2373,6 +2496,9 @@ export class Sync {
       await Promise.all([this.stream?.stop(), this.running, this.rebuilding, this.kept.stop(), this.generated.stop(), this.checkingCompaction]);
       await this.writerTurn;
     } finally { clearInterval(again); }
+    // the round of cancels in flight, if any, ends before the stop does (bounded by `CANCEL_DEADLINE_MS`): no connection
+    // of Mason's is left open on the source
+    await this.cancelling;
     this.stream = null;
     // the last catalog rebuild ended, either way, before its connection closes: a failure of it is said by its caller
     await new Promise<void>((done) => { this.schemaBuild.then(done, done); });
@@ -3421,8 +3547,57 @@ export class Sync {
     if (this.stopped) throw new Stopping();
     lane.inFlight = true;
     try { return await f(); }
-    catch (e) { throw this.stopped && e instanceof Error && /^INTERRUPT Error/.test(e.message) ? new Stopping() : e; }
-    finally { lane.inFlight = false; }
+    catch (e) { throw this.stopped && e instanceof Error && (/^INTERRUPT Error/.test(e.message) || lane.cancelSent === true) ? new Stopping() : e; }
+    finally { lane.inFlight = false; lane.backend = null; lane.cancelSent = false; }
+  }
+
+  /** THE SOURCE'S BACKEND A LANE'S TRANSACTION READS ON, and that transaction's start (`now()`, pg_stat_activity's
+   *  `xact_start`): one row, read first inside the long statement it is for (`interruptible` forgets it as that ends), so
+   *  a removal can cancel exactly that read on the source (`cancelBackends`) */
+  private async noteBackend(lane: Lane): Promise<void> {
+    const [pid, since] = (await lane.conn.runAndReadAll(`SELECT * FROM ${pq("SELECT pg_backend_pid(), now()::text")}`)).getRowsJS()[0] as [number, string];
+    lane.backend = { pid: Number(pid), since };
+  }
+
+  /**
+   * MASON'S READS CANCELLED ON THE SOURCE: a removed table's (`cutShort`, issue 1034), or every read still in flight at a
+   * stop (`stop`, issue 1037). DuckDB's interrupt stops a statement only between the rows it fetches, so a chunk, a poll
+   * or a catch-up whose query waits on the source (a lock, a slow scan before its first row) ran on, and its backend
+   * with it. Each one is cancelled by `pg_cancel_backend`, on a connection of its own, only while that backend is still
+   * in the transaction the lane noted (its `xact_start`): a backend the extension's pool handed to another read since is
+   * never touched. Mason's own query, cancelled — no row and no object on the source changes. The round is bounded
+   * (`CANCEL_DEADLINE_MS`, its connect included), so a source that does not answer never holds a stop longer.
+   * A cancel that fails (refused, the source's connection limit reached) is said once a cut or a stop, in the error's
+   * masked words (`errorText`), and changes nothing on the source: that backend reads on until its query ends. Its
+   * lane then ends when DuckDB's interrupt reaches the read (between two rows it fetches) or when the query ends,
+   * whichever is first, and the cut or the stop waits for its lanes, as before cancels were sent. Measured with every
+   * cancel failing (issue 1037): a chunk waiting on a lock held both the cut and the stop for as long as the lock was
+   * held. The cancel is asked again every 200 ms, so a source that refused once can still free it.
+   */
+  private async cancelBackends(backends: readonly SourceBackend[], episode: CancelEpisode): Promise<void> {
+    let pg: PgConnection | null = null;
+    let over = false;
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => { over = true; (pg as PgConnection | null)?.close(); reject(new Error(`no answer from the database within ${CANCEL_DEADLINE_MS / 1000} s`)); }, CANCEL_DEADLINE_MS);
+    });
+    try {
+      await Promise.race([late, (async () => {
+        const c = await PgConnection.connect({ ...this.pgOptions(), connectTimeoutMs: CANCEL_DEADLINE_MS });
+        pg = c;
+        // connected only after the deadline: closed at once, nothing sent
+        if (over) { c.close(); return; }
+        for (const b of backends) await c.query(`SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE pid = ${b.pid} AND xact_start = ${pgLiteral(b.since)}::timestamptz`);
+      })()]);
+    } catch (e) {
+      if (!episode.failureSaid) {
+        episode.failureSaid = true;
+        this.log(`${episode.what} could not be cancelled on the database (said once; it ends when its query ends): ${this.errorText(e)}`);
+      }
+    } finally {
+      clearTimeout(timer);
+      (pg as PgConnection | null)?.close();
+    }
   }
 
   /** the source attached for one more user (a pass, a rebuild), on the writer's turn: ATTACHed by the first. A user
@@ -3473,44 +3648,56 @@ export class Sync {
     catch (e) { this.log(`the source could not be detached after the pass (tried again after the next): ${this.errorText(e)}`); }
   }
 
+  /**
+   * A REMOVED TABLE'S SYNCED DATA DROPPED, ON THE WRITER'S TURN (the caller's): its table, the side table a copy left, its
+   * ledger rows, its stored JSON paths and what the run holds of it — by the pass, or at the end of its rebuild cut short
+   * by its removal (`rebuild`, issue 1034). A table added again since it was removed starts anew: a first sync, waiting,
+   * from page 0 (nothing is left to resume or swap in).
+   */
+  private async dropRemoved(source: string): Promise<void> {
+    const [schema, table] = [source.slice(0, source.indexOf(".")), source.slice(source.indexOf(".") + 1)];
+    const w = this.store.writer;
+    // a generated table of the same name (issue 996) held no table while the synced one held it, and none will be
+    // there: what it says it serves is let go on this turn, BEFORE the drop, so no rebuild of the catalog (on its own
+    // connection, `setTables` starts one) reads it with nothing under it; it is built again at its next review
+    await this.generated.dropped(source);
+    await w.run(`DROP TABLE IF EXISTS ${ident(schema)}.${ident(table)}`);
+    // and what a copy of it left beside it (a crash, a stop, a failure, a removal while it was read: `copy`)
+    await w.run(`DROP TABLE IF EXISTS ${ident(schema)}.${ident(`${table}${SIDE_SUFFIX}`)}`);
+    for (const ledger of ["copy_state", "poll_state", "catch_up", "copy_progress", "copy_chunks", "compactions", "compact_held"]) await w.run(`DELETE FROM ${MASON_SCHEMA}.${ledger} WHERE source = ${literal(source)}`);
+    // its stored JSON paths and its view
+    await this.kept.removed(source);
+    this.behind.delete(source);
+    this.held.delete(source);
+    this.refreshStreamed();
+    this.snapshots.delete(source);
+    this.retries.delete(source);
+    this.due.delete(source);
+    this.lastPollMs.delete(source);
+    this.recordedSync.delete(source);
+    this.switched.delete(source);
+    this.retired.delete(source);
+    this.copiedAs.delete(source);
+    this.copiedColumns.delete(source);
+    this.states.delete(source);
+    this.synced.delete(source);
+    this.compactions.delete(source);
+    this.compactRetries.delete(source);
+    this.copyLive.delete(source);
+    const again = this.tables.get(source);
+    if (again === undefined) { this.log(`dropped ${source}'s synced data: it is no longer added (mason add ${source} syncs it again from the source, whole)`); return; }
+    this.states.set(source, { source, phase: "waiting", rows: null, bytes: again.bytes, seconds: null, copiedAt: null, error: null });
+    this.log(`dropped what ${source} held when it was removed: it is added again, so its first sync starts anew from the source, whole`);
+  }
+
   /** one pass: every removed table dropped, every added table needing it queued for a copy (step 0: whole, again) or
    *  a catch-up (`enqueue`, run beside), and in poll mode every table kept current polled */
   private async pass(): Promise<void> {
-    // a table no longer added (mason remove) is dropped, and its ledger rows with it — one whose rebuild is running at
-    // the pass after that rebuild ends (its swap would make it again)
+    // a table no longer added (mason remove) is dropped, and its ledger rows with it — one whose rebuild is running is
+    // cut short by its removal (`cutShort`) and dropped as that rebuild ends (`rebuild`)
     for (const source of [...this.states.keys()].filter((s) => !this.tables.has(s) && this.rebuildingNow?.source !== s)) {
-      const [schema, table] = [source.slice(0, source.indexOf(".")), source.slice(source.indexOf(".") + 1)];
       this.queued.delete(source);
-      await this.onWriter(async () => {
-        const w = this.store.writer;
-        // a generated table of the same name (issue 996) held no table while the synced one held it, and none will be
-        // there: what it says it serves is let go on this turn, BEFORE the drop, so no rebuild of the catalog (on its own
-        // connection, `setTables` starts one) reads it with nothing under it; it is built again at its next review
-        await this.generated.dropped(source);
-        await w.run(`DROP TABLE IF EXISTS ${ident(schema)}.${ident(table)}`);
-        // and what a copy of it that a crash cut short left beside it (`copy`)
-        await w.run(`DROP TABLE IF EXISTS ${ident(schema)}.${ident(`${table}${SIDE_SUFFIX}`)}`);
-        for (const ledger of ["copy_state", "poll_state", "catch_up", "copy_progress", "copy_chunks", "compactions", "compact_held"]) await w.run(`DELETE FROM ${MASON_SCHEMA}.${ledger} WHERE source = ${literal(source)}`);
-        // its stored JSON paths and its view
-        await this.kept.removed(source);
-        this.behind.delete(source);
-        this.held.delete(source);
-        this.refreshStreamed();
-      });
-      this.snapshots.delete(source);
-      this.retries.delete(source);
-      this.due.delete(source);
-      this.lastPollMs.delete(source);
-      this.recordedSync.delete(source);
-      this.switched.delete(source);
-      this.retired.delete(source);
-      this.copiedAs.delete(source);
-      this.copiedColumns.delete(source);
-      this.states.delete(source);
-      this.synced.delete(source);
-      this.compactions.delete(source);
-      this.compactRetries.delete(source);
-      this.log(`dropped ${source}'s synced data: it is no longer added (mason add ${source} syncs it again from the source, whole)`);
+      await this.onWriter(() => this.dropRemoved(source));
     }
     // REPLICATION, as the tables' syncs say: the publication and slot made ready for the replicated tables and the stream
     // started — or, when none is replicated any more, the slot dropped (verified gone). Its failure is the replicated
@@ -3632,14 +3819,21 @@ export class Sync {
         const found = await this.onWriter(async () => {
           if (this.rebuildingNow?.source === t.source || this.behind.has(t.source)) return [];
           startedAt = performance.now();
-          return this.poll(this.writerLane, [t]);
+          return this.writerPoll(t);
         });
         // a scheduled sync is an event too, listed only when a reader asks for the scheduled syncs (src/duck/events.ts)
-        for (const f of found) { this.polledNow(t, f.ms); this.event({ kind: "polled", table: f.table, message: `synced on schedule: ${syncedText(f)}`, tookMs: f.ms }); }
+        for (const f of found) { this.polledNow(t, f.ms); this.event({ kind: "polled", table: f.table, message: `synced on schedule: ${syncedText(f, "poll")}`, tookMs: f.ms }); }
         // a sync by hand asked before this poll began, waiting behind the pass, is answered by it (`pollNowOf`)
         for (const f of found) this.scheduledPolls.set(t.source, { startedAt, found: f });
       } catch (e) {
         if (e instanceof Stopping) { this.log("poll stopped: Mason is stopping (rolled back; the synced tables serve as they were)"); return false; }
+        // removed meanwhile (`cutShort`): rolled back, and dropped by the pass it kicked — never a failure
+        if (e instanceof Removed) {
+          const m = "its scheduled sync stopped, as the table was removed (rolled back)";
+          this.log(`${t.source}: ${m}`);
+          this.event({ kind: "sync_stopped", table: t.source, message: m });
+          continue;
+        }
         // tried again after its interval (an `off` table whose sync changed: after the sync's), never at every pass
         const s = this.syncOf(t);
         this.due.set(t.source, Date.now() + (s.mode === "poll" ? s.seconds * 1000 : this.intervalMs));
@@ -3685,7 +3879,7 @@ export class Sync {
         // (its columns changed meanwhile, or its held changes could not be applied: its follow-up below)
         if (kind === "compact") { if (t !== undefined) await this.compact(t); this.followUp(next[0]); }
         // a catch-up that found a numeric wider than the copy: copied again, next
-        else if (t !== undefined && await this.rebuild(t, kind) === "copy again") this.enqueue(t.source, { kind: "copy" });
+        else if (t !== undefined && await this.rebuild(t, kind, this.removals.get(t.source) ?? 0) === "copy again") this.enqueue(t.source, { kind: "copy" });
         // still needing a copy or a catch-up: a pass now, or when its back-off ends
         else this.followUp(next[0]);
         // removed while it was rebuilt: the pass that removal kicked left it for this one to drop
@@ -3703,14 +3897,22 @@ export class Sync {
   /**
    * ONE REBUILD, beside the stream and the polls: the table marked as rebuilt on the writer's turn (from then on no poll
    * starts on it), then its copy on the rebuilds' connection, then — a table left behind by it — its catch-up.
+   * A REBUILD CUT SHORT BY ITS TABLE'S REMOVAL (`cutShort`, issue 1034) ends here, on the writer's turn, once nothing of it
+   * writes any more (every chunk rolled back, no swap): what it and the table held dropped (`droppedCut`), said as a
+   * stop, never a failure. `removals` is how many times the table was removed when the queue took it: one removed
+   * since, and added again before this turn, is cut short as well, so its new add starts anew.
    */
-  private async rebuild(t: AddedTable, kind: TableRebuild): Promise<"copy again" | null> {
+  private async rebuild(t: AddedTable, kind: TableRebuild, removals: number): Promise<"copy again" | null> {
+    // a copy in the words its stop is said in (a first sync, a whole read again); a catch-up is said as one, at its end
+    const whole = this.states.get(t.source)?.phase === "copied" ? "whole read again" : "first sync";
     await this.onWriter(async () => {
       this.rebuildingNow = { source: t.source, kind, since: Date.now() };
+      if ((this.removals.get(t.source) ?? 0) !== removals) this.cutting.add(t.source);
       this.refreshStreamed();
     });
     let attached = false;
     try {
+      if (this.cutting.has(t.source)) return null;
       try { await this.onWriter(() => this.attach()); attached = true; }
       catch (e) {
         // the next pass says the same of every table, and queues it again
@@ -3722,6 +3924,7 @@ export class Sync {
         return null;
       }
       if (kind === "copy") await this.copy(t);
+      if (this.cutting.has(t.source)) return null;
       // the whole read is over, whatever comes next: what the table is said to be doing from here (`notStreamedReason`,
       // `refuseRebuilding`, `state`'s `rebuilding`)
       // a catch-up after a whole read starts its own clock: the page says how long each has run (issue 1011)
@@ -3736,10 +3939,23 @@ export class Sync {
     } finally {
       await this.onWriter(async () => {
         if (attached) await this.detach();
+        if (this.cutting.delete(t.source)) await this.droppedCut(t.source, this.rebuildingNow?.kind === "catch-up" ? "catch-up" : whole);
         this.rebuildingNow = null;
         this.refreshStreamed();
       });
     }
+  }
+
+  /** a rebuild cut short by its table's removal, ended on the writer's turn (`rebuild`): what it held dropped, said in
+   *  the log and as a `sync_stopped` event — a stop, never a failure. A drop that fails is said, and the next pass
+   *  drops it again (a table not added is dropped at every pass until it is gone) */
+  private async droppedCut(source: string, what: string): Promise<void> {
+    this.held.delete(source);
+    const m = `its ${what} stopped, as the table was removed: what it had read is dropped${this.tables.has(source) ? " (it is added again, so its first sync starts anew)" : ""}`;
+    this.log(`${source}: ${m}`);
+    this.event({ kind: "sync_stopped", table: source, message: m });
+    try { await this.dropRemoved(source); }
+    catch (e) { this.log(`${source}: what its ${what} had read could not be dropped (the next pass drops it): ${this.errorText(e)}`); }
   }
 
   /**
@@ -3773,6 +3989,8 @@ export class Sync {
       this.catchingUp = null;
       await release();
       if (e instanceof Stopping) { this.log(`catch-up of ${t.source} stopped: Mason is stopping (rolled back; it is caught up by one poll at the next start)`); return null; }
+      // removed meanwhile (`cutShort`): rolled back, and dropped as its rebuild ends — never a failure or a back-off
+      if (this.cutting.has(t.source)) { this.log(`catch-up of ${t.source} stopped: it is no longer added (rolled back)`); return null; }
       await failed("its catch-up poll failed", e);
       return null;
     }
@@ -3788,6 +4006,8 @@ export class Sync {
       this.catchingUp = null;
       const held = this.held.get(t.source);
       this.held.delete(t.source);
+      // removed since its poll ended (`cutShort`): nothing more is applied to it, and it is dropped as its rebuild ends
+      if (this.cutting.has(t.source)) { this.refreshStreamed(); return false; }
       if (held !== undefined && (held.truncated || held.keys.size > 0)) {
         try { await this.applyChanges(new Map([[t.source, held]]), "held"); }
         catch (e) {
@@ -3890,6 +4110,22 @@ export class Sync {
   }
 
   /**
+   * THE WRITER'S POLL OF ONE TABLE (a pass's on schedule, a sync by hand), on the writer's turn (the caller's): cut short
+   * when the table is removed meanwhile (`cutShort`, issue 1034; a poll is a full scan of the source table), thrown as
+   * `Removed`, and a table removed before its turn is never polled. What it leaves is dropped by the pass it kicks.
+   */
+  private async writerPoll(t: AddedTable, o: { strict?: boolean } = {}): Promise<PolledTable[]> {
+    if (!this.tables.has(t.source)) throw new Removed(t.source);
+    this.writerPolling = t.source;
+    try { return await this.poll(this.writerLane, [t], o); }
+    catch (e) { throw this.cutting.has(t.source) && !(e instanceof Stopping) ? new Removed(t.source) : e; }
+    finally {
+      this.writerPolling = null;
+      if (this.cutting.delete(t.source)) this.kick();
+    }
+  }
+
+  /**
    * One poll of the tables given (the passes and `pollNow` give one at a time), in ONE DuckDB transaction over ONE
    * source snapshot (the module's header), on the lane's connection — the writer's, or the rebuilds' for a catch-up —
    * except a table with more than `POLL_PIECE_ROWS` changed rows. Every table's changed rows are read into a STAGE (a
@@ -3951,6 +4187,7 @@ export class Sync {
     await w.run("BEGIN TRANSACTION");
     try {
       await this.interruptible(lane, async () => {
+        await this.noteBackend(lane);
         const t0 = Date.now();
         const at = (await w.runAndReadAll(`SELECT * FROM ${pq(SNAPSHOT_SQL)}`)).getRowsJS()[0] as [string, string];
         snapshot = at[0];
@@ -4146,7 +4383,11 @@ export class Sync {
       // THE SWAP, on the writer's turn: one transaction, between two of the stream's or the polls'. It carries the copy's
       // watermark (its first snapshot), removes its progress, and leaves the table behind until its catch-up (none in
       // recopy mode: no poll)
-      await this.onWriter(() => this.swap(t, side, { snapshot: p.snapshot, behind: p.snapshot === null ? null : "after its whole read" }));
+      // never for a table removed meanwhile (`cutShort`): decided on the swap's own turn, so a removal before it is seen
+      await this.onWriter(async () => {
+        if (this.cutting.has(t.source)) throw new Removed(t.source);
+        await this.swap(t, side, { snapshot: p.snapshot, behind: p.snapshot === null ? null : "after its whole read" });
+      });
       this.copyLive.delete(t.source);
       kept = null;
       this.retries.delete(t.source);
@@ -4160,13 +4401,19 @@ export class Sync {
       // web page shows it in a column of its own (src/duck/events.ts `tookMs`). A whole read ADDS every row it holds
       // (`syncedText`, the words a poll's record says): the copy swapped in replaces the old
       const tookMs = Math.round(seconds * 1000);
-      this.event({ kind: "full_sync", table: t.source, message: `synced whole: ${syncedText({ added: p.rows, updated: 0, deleted: 0, rows: p.rows, ms: tookMs })}`, tookMs });
+      this.event({ kind: "full_sync", table: t.source, message: `synced whole: ${syncedText({ added: p.rows, updated: 0, deleted: 0, rows: p.rows, ms: tookMs }, "exact")}`, tookMs });
       this.copiedAs.set(t.source, columnsKey(t.columns));
       // in the catalog at once: a pass's other copies may take hours
       await this.rebuildSchema();
     } catch (e) {
       // its chunks are no longer read (a failure after every chunk was read, at its check, fill or swap, included)
       this.copyLive.delete(t.source);
+      // CUT SHORT BY ITS REMOVAL (`cutShort`, issue 1034): its chunks in flight rolled back and no reader reads any more;
+      // what it read is dropped as its rebuild ends (`rebuild`), never kept to resume, never a failure or a back-off
+      if (this.cutting.has(t.source) && !(e instanceof Stopping)) {
+        this.log(`sync of ${t.source} stopped: it is no longer added (the chunks in flight rolled back)`);
+        return;
+      }
       let k: CopyProgress | null = kept;
       // begun, and no chunk committed: nothing of the source's rows to keep, so its next attempt begins again (a new
       // snapshot), as when the beginning and the first chunk were one transaction
@@ -4331,6 +4578,8 @@ export class Sync {
         const c = lane.conn;
         for (;;) {
           if (failure !== null) return;
+          // removed meanwhile (`cutShort`): no further chunk is taken, and the others stop at this failure
+          if (this.cutting.has(t.source)) { fail(new Removed(t.source)); return; }
           if (sole !== null && sole !== k) return;
           const sizedBy = rate;
           const range = takeChunk(gaps, p.pages, Math.min(memoryPages, nextChunkPages(ceiling, sizedBy, this.copyChunkSeconds)));
@@ -4350,6 +4599,7 @@ export class Sync {
           try {
             if (!recopy) { await c.run("BEGIN TRANSACTION"); inTx = true; }
             const rows = await this.interruptible(lane, async (): Promise<number> => {
+              await this.noteBackend(lane);
               // each chunk is a transaction, so a snapshot, of its own: held to the first one while that can tell
               if (watermark !== null) {
                 const xmax = BigInt((await c.runAndReadAll(`SELECT * FROM ${pq(SNAPSHOT_SQL)}`)).getRowsJS()[0]![1] as string);
@@ -4370,7 +4620,9 @@ export class Sync {
               if (!recopy) await this.recordChunk(c, t, range, n, node);
               return n;
             });
-            // another reader failed while this one read (its interrupt arrived between two statements): never committed
+            // another reader failed while this one read (its interrupt arrived between two statements), or the table was
+            // removed (`cutShort`): never committed
+            if (failure === null && this.cutting.has(t.source)) fail(new Removed(t.source));
             if (failure !== null) throw (failure as { error: unknown }).error;
             if (!recopy) await c.run("COMMIT");
             const seconds = (Date.now() - c0) / 1000;
@@ -4470,6 +4722,8 @@ export class Sync {
   private async beginCopy(t: AddedTable, side: string, pgFrom: string, ceilingOf: (pages: number) => number, outOfLine: number | null): Promise<CopyProgress> {
     const w = this.rebuilder.conn;
     const snapshot = this.mode !== "recopy" ? ((await w.runAndReadAll(`SELECT * FROM ${pq(SNAPSHOT_SQL)}`)).getRowsJS()[0] as [string, string])[0] : null;
+    // the backend this transaction reads on, once its snapshot is fixed: what a removal cancels (`noteBackend`)
+    await this.noteBackend(this.rebuilder);
     const described = await w.runAndReadAll(`DESCRIBE SELECT ${t.columns.map((c) => ident(c.name)).join(", ")} FROM ${SRC}.${ident(t.schema)}.${ident(t.table)}`);
     const scanned = new Map((described.getRowsJS() as unknown[][]).map((r) => [String(r[0]), String(r[1])]));
     // a domain's column as its base type reads: the extension's scan of the table does not know a domain
@@ -4619,10 +4873,12 @@ export class Sync {
       const mis: string[] = [];
       const unscaled: string[] = [];
       const missing: string[] = [];
+      const untyped: string[] = [];
       const completed = columns.map((c) => {
         const type = types.get(c.name);
         if (type === undefined) { missing.push(c.name); return c; }
         if (c.typeKind === undefined && type.startsWith("ENUM(")) return { ...c, typeKind: "e" };
+        if (lostType(c, type)) untyped.push(c.name);
         const hold = holdOf(c.type, c.typeKind);
         const want = hold === "text" ? "VARCHAR" : hold === "text[]" ? "VARCHAR[]" : null;
         if (want !== null && type !== want) mis.push(`${c.name} (${c.type})`);
@@ -4635,6 +4891,12 @@ export class Sync {
       if (missing.length > 0) {
         this.retired.set(source, { layout: MISSING_LAYOUT, short: `missing ${missing.join(", ")}, which an older Mason dropped` });
         this.log(`${source}: it is ${MISSING_LAYOUT} (${missing.join(", ")}) — its synced data serves as it was until then`);
+        continue;
+      }
+      if (mis.length === 0 && untyped.length > 0) {
+        const named = untyped.map((n) => JSON.stringify(n)).join(", ");
+        this.retired.set(source, { layout: BOM_LAYOUT, short: `in an older Mason's layout, ${named} stored as text` });
+        this.log(`${source}: it is ${BOM_LAYOUT} (${named}) — its synced data serves as it was until then`);
         continue;
       }
       if (mis.length === 0 && unscaled.length > 0) {

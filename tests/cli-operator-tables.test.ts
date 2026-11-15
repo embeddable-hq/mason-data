@@ -451,8 +451,8 @@ test("POST /api/sync: 202 { sync } as the sync starts, then each table's syncByH
       assert.equal(busy.status, 409, busy.text);
       const b = json(busy) as { error: string; code: string; sync: { id: unknown }; failure: { code: string; message: string; fix: string; next: unknown } };
       assert.deepEqual([keys(b), b.code, b.sync.id, b.failure.code, b.failure.message, b.failure.fix, b.failure.next], [["code", "error", "failure", "sync"], "busy", r.sync.id, "busy", b.error,
-        "it ends by itself, and a second sync is never started beside it", [{ command: "mason status", what: "when each table was last synced" }]]);
-      assert.match(b.error, /^public\.customers is already syncing \(started \d+ s ago\)$/);
+        "Mason never starts a second sync beside it.", [{ command: "mason status", what: "when each table was last synced" }]]);
+      assert.match(b.error, /^public\.customers is already syncing\. It started \d+ s ago\.$/);
     }
     assert.deepEqual(op.polled, ["public.customers"], "one read");
   } finally { release(); syncGate = null; }
