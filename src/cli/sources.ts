@@ -728,7 +728,7 @@ export const excludeOf = (a: LeftOut): string[] => [...a.entry.exclude.filter((c
  *  the event and `mason status`. */
 export function leftOutText(a: LeftOut, written: string | null, why: string | null = null, refused: boolean = a.gone.length > 0): string {
   const cols = a.columns, one = cols.length === 1, name = entryName(a.entry.table);
-  const they = one ? "it" : "they", is = one ? "is" : "are", line = `exclude: ${flowList(excludeOf(a))}`;
+  const they = one ? "it" : "they", is = one ? "is" : "are";
   const gone = a.gone.join(", "), goneOne = a.gone.length === 1;
   const back = a.back ?? [], backOne = back.length === 1;
   const head = back.length
@@ -740,9 +740,22 @@ export function leftOutText(a: LeftOut, written: string | null, why: string | nu
       : `${a.entry.table}: ${gone}, which exclude: names, ${goneOne ? "is" : "are"} gone from the database, and ${cols.join(", ")} arrived at the same time ` +
         `(a rename keeps its data), so ${they} ${is} not synced either`;
   const opt = cols.length ? `. To sync ${one ? "it" : "one"}, run mason add ${name} --include ${cols[0]}` : "";
-  if (written !== null) return `${head}. Mason wrote ${line} on its entry in ${written}${opt}`;
-  return `${head}, in this run${why ? ` (${why})` : ""}. Write ${line} on its entry in the sources file: ` +
+  const w = writeLine(a.entry, excludeOf(a));
+  if (written !== null) return `${head}. Mason ${w.wrote} in ${written}${opt}`;
+  return `${head}, in this run${why ? ` (${why})` : ""}. ${w.ask} in the sources file: ` +
     (refused ? "a start refuses the file until then" : `a start syncs what the file says`);
+}
+
+/**
+ * The line that writes an every-column entry's `exclude:` as the file must say it, as the writer writes it
+ * (`entryText`): the list when it names a column; else the entry `name: {}` when nothing else is on it, or the key taken
+ * out (a start refuses `exclude: []`: the review of PR 1065). `ask` for a person, `wrote` for what Mason wrote.
+ */
+export function writeLine(e: Pick<TableEntry, "name" | "columns" | "key" | "sync">, exclude: readonly string[]): { ask: string; wrote: string } {
+  if (exclude.length) { const l = `exclude: ${flowList(exclude)}`; return { ask: `Write ${l} on its entry`, wrote: `wrote ${l} on its entry` }; }
+  const text = entryText({ ...e, columns: null, exclude: [] }, "").trimEnd();
+  if (!text.includes("\n")) return { ask: `Write ${text} as its entry`, wrote: `wrote ${text} as its entry` };
+  return { ask: "Take exclude: out of its entry", wrote: "took exclude: out of its entry" };
 }
 
 /**
@@ -783,6 +796,35 @@ export function keepLeftOut(kept: Map<string, KeptOut>, a: LeftOut): void {
   const left = [...k.left.filter((c) => !a.gone.includes(c)), ...a.columns.filter((c) => !k.left.includes(c))];
   const gone = [...k.gone.filter((c) => !back.includes(c)), ...a.gone.filter((c) => !k.gone.includes(c))];
   kept.set(a.entry.table, { left, gone });
+}
+
+/**
+ * WHAT A RUN HAS SEEN OF ITS TABLES' COLUMNS, AND WHAT IT LEFT OUT WHERE IT COULD NOT WRITE THE SOURCES FILE: one record,
+ * so the two never part (the review of PR 1065: the left-out record was folded at a look whose re-read was then refused,
+ * while the columns the arrivals were found against moved only at a re-read taken, so a second rename was never seen as
+ * the first new name gone, and the file as the run took it named that name for the run). `look` finds what arrived
+ * since the last look, against the file AS THE RUN TAKES IT (`taken`), and the columns it looked at are the next look's
+ * at once, whatever the re-read decides; the caller then keeps each arrival (`keep`) or writes it in the file (`written`).
+ * A file that cannot be read is no look: what arrives meanwhile is still new at the next.
+ */
+export class LeftOutRecord {
+  private readonly kept = new Map<string, KeptOut>();
+  private before: Map<string, string[]>;
+  constructor(tables: readonly SourceTable[]) { this.before = LeftOutRecord.columnsOf(tables); }
+  private static columnsOf(tables: readonly SourceTable[]): Map<string, string[]> { return new Map(tables.map((t) => [t.source, t.columns.map((c) => c.name)])); }
+  /** The file with what the run keeps out (`withLeftOut`). */
+  taken<F extends Pick<SourceFile, "tables">>(file: F, tables: readonly SourceTable[]): F { return withLeftOut(file, this.kept, tables); }
+  /** What arrived since the last look and is left out (`keptBack`, `leftOutArrivals`), each of the file as the run takes it. */
+  look(file: Pick<SourceFile, "tables">, tables: readonly SourceTable[], edited: readonly string[] = []): LeftOut[] {
+    const taken = this.taken(file, tables);
+    const arrived = [...keptBack(taken, this.kept, tables), ...leftOutArrivals(taken, tables, this.before, edited)];
+    this.before = LeftOutRecord.columnsOf(tables);
+    return arrived;
+  }
+  /** An arrival left out for this run (`keepLeftOut`). */
+  keep(a: LeftOut): void { keepLeftOut(this.kept, a); }
+  /** A table whose whole `exclude:` the file now says: nothing kept for it. */
+  written(table: string): void { this.kept.delete(table); }
 }
 
 /**

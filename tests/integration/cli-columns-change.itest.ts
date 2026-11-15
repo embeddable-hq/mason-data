@@ -280,3 +280,69 @@ test("a read-only run: any number of renames, adds and drops of excluded and syn
   await until("read-only: after the lines are written and a start: SELECT * to equal the source", () => { never(); return same(); });
   ok(mason("stop", "--json"), "mason stop");
 });
+
+/**
+ * THE SOURCES FILE REFUSED FOR ANOTHER REASON WHILE AN EXCLUDED COLUMN IS RENAMED TWICE (the review of PR 1065), in a
+ * read-only run polled every second: the run's record of what it left out moved at a look whose re-read was refused,
+ * and the columns it found arrivals against did not, so the second rename was never seen as the first new name gone.
+ * Once the other cause was fixed, the file as the run took it named that name for the run: a column added to another
+ * table was never synced, a renamed one failed every poll, and the line said named a column gone. Here, each line says
+ * the column's name now, and once the file is fixed every later change is taken; a left-out column is never served.
+ */
+test("a read-only run: the file refused for another reason while an excluded column is renamed twice — once fixed, every later change is taken, and the line says the name now", { skip, timeout: 900_000 }, async () => {
+  const p = await project("refusedrename");
+  const { dbUrl, mason, ok } = p;
+  psql(adminUrl!, `CREATE DATABASE ${p.tag}`);
+  psql(dbUrl, "CREATE TABLE t1 (id int PRIMARY KEY, a text, salary int); INSERT INTO t1 SELECT g, 'a' || g, g * 1000 FROM generate_series(1, 3) g; " +
+    "CREATE TABLE t2 (id int PRIMARY KEY, v text); INSERT INTO t2 SELECT g, 'v' || g FROM generate_series(1, 3) g; " +
+    "CREATE TABLE t3 (id int PRIMARY KEY, amount_total int, other text); INSERT INTO t3 SELECT g, g, 'o' FROM generate_series(1, 3) g");
+  ok(mason("init", dbUrl, "--json"), "mason init");
+  const file = path.join(p.root, "mason", "sources", `${p.tag}.yml`);
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/^sync: off {3}#.*$/m, "sync: poll 1s"));
+  ok(mason("add", "t1", "t2", "t3", "--json"), "mason add t1 t2 t3");
+  const entries = (t1: string, t3: string): string => fs.readFileSync(file, "utf8").replace(/^tables:\n(?: {2}.*\n)+/m, `tables:\n${t1}  t2: {}\n  t3:\n    columns: [id, ${t3}]\n`);
+  fs.writeFileSync(file, entries("  t1:\n    exclude: [salary]\n", "amount_total"));
+  assert.match(fs.readFileSync(file, "utf8"), /^ {2}t1:\n {4}exclude: \[salary\]\n {2}t2: \{\}\n {2}t3:\n {4}columns: \[id, amount_total\]\n/m);
+  p.env.MASON_PROJECT_READONLY = "1";
+  ok(mason("start", "--json"), "mason start, read-only");
+  ok(mason("wait", "--timeout", "120", "--json"), "mason wait");
+  const api = ok(mason("user", "add", "it", "--json"), "mason user add").json.url as string;
+
+  const served = (tbl: string) => psqlWithHeader(api, `SELECT * FROM public.${tbl} ORDER BY id`);
+  const never = (): void => {
+    const s = served("t1");
+    assert.ok(s === null || !/\b(salary|p1|p2)\b/.test(s.columns), `t1 served ${s?.columns}`);
+  };
+  const warnings = (): string[] => (mason("status", "--json").json.warnings as string[] | undefined) ?? [];
+  const saysLine = (line: string) => (): boolean => {
+    const lines = warnings().filter((w) => w.startsWith("public.t1:") && /Write exclude:/.test(w));
+    return lines.length === 1 && lines[0]!.includes(`Write exclude: [${line}] on its entry`);
+  };
+  const servesT2 = (columns: string) => (): boolean => served("t2")?.columns === columns;
+
+  // t3's listed column renamed to a close name: the file is refused, for t3
+  psql(dbUrl, "ALTER TABLE t3 RENAME COLUMN amount_total TO amount_total2");
+  await until("the file refused for t3", () => { never(); return warnings().some((w) => /tables\.t3\.columns: public\.t3 has no column amount_total/.test(w)); });
+  // the excluded column renamed twice while it is refused: each line names the column now
+  psql(dbUrl, "ALTER TABLE t1 RENAME COLUMN salary TO p1");
+  await until("the line to write names p1", () => { never(); return saysLine("p1")(); });
+  psql(dbUrl, "ALTER TABLE t1 RENAME COLUMN p1 TO p2");
+  await until("the line to write names p2", () => { never(); return saysLine("p2")(); });
+  // t3 fixed by hand; the next change is taken
+  fs.writeFileSync(file, entries("  t1:\n    exclude: [salary]\n", "amount_total2"));
+  psql(dbUrl, "ALTER TABLE t2 ADD COLUMN y int DEFAULT 1");
+  await until("t2's new column synced once t3 is fixed", () => { never(); return servesT2("id\tv\ty")(); });
+  // the run's own line written on t1 too: later changes are taken, and t2 is synced again with no error
+  fs.writeFileSync(file, entries("  t1:\n    exclude: [p2]\n", "amount_total2"));
+  psql(dbUrl, "ALTER TABLE t2 ADD COLUMN y2 int DEFAULT 2");
+  await until("t2's second new column synced", () => { never(); return servesT2("id\tv\ty\ty2")(); });
+  psql(dbUrl, "ALTER TABLE t2 RENAME COLUMN v TO v2");
+  await until("t2's renamed column synced", () => { never(); return servesT2("id\tv2\ty\ty2")(); });
+  await until("t2 synced with no error", () => {
+    const t = (mason("status", "--json").json.tables as Array<{ table: string; error: string | null; sync?: { state: string } }> | undefined)?.find((x) => x.table === "public.t2");
+    return t !== undefined && t.error === null && t.sync?.state === "synced";
+  });
+  assert.equal(served("t1")?.columns, "id\ta");
+  assert.equal(served("t3")?.columns, "id\tamount_total2");
+  ok(mason("stop", "--json"), "mason stop");
+});

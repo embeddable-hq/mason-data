@@ -42,7 +42,7 @@ import { createRunServer, listenOnLoopback, metricsFacts, usageFacts, type RunCo
 import { UiErrors } from "./ui-errors.ts";
 import type { RunMetrics } from "./metrics.ts";
 import { readGenerated } from "./generated-files.ts";
-import { addedTables, effectiveSync, entryName, excludeOf, goneNotes, leftOutArrivals, leftOutText, replicatedEntries, rereadSources, shownPath, syncWritten, keepLeftOut, keptBack, withLeftOut, withTable, type KeptOut, type LeftOut, type RunSources, type SourceFile } from "./sources.ts";
+import { addedTables, effectiveSync, entryName, excludeOf, goneNotes, leftOutText, LeftOutRecord, replicatedEntries, rereadSources, shownPath, syncWritten, withTable, type LeftOut, type RunSources, type SourceFile } from "./sources.ts";
 import { newToken } from "./security.ts";
 import { alive, liveRun, processStart } from "./runs.ts";
 import { DEMO_DIR, DUCK_FILE, projectReadOnlySetting, projectSource, projectWriteRefusal, startSettingRefusal, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
@@ -553,12 +553,11 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   if (move.action !== "same") { cfg.sourceServer = { systemIdentifier: facts.systemIdentifier, database: source.database }; writeConfig(home, cfg); }
   // the views first: setting the tables rebuilds the catalog, which reads them. The sources file read again: a mistake in it
   // keeps the tables read before (a typo never drops a copy), said in the log and by mason status
-  // THE COLUMNS EACH TABLE HAD when the run's tables were last set from the catalog (issue 977): a column the database
-  // has beyond them arrived while the run was up, and is left out where it may not be synced (`leftOutArrivals`)
-  let columnsSet = new Map(facts.tables.map((t) => [t.source, t.columns.map((c) => c.name)]));
-  // what the run left out where it could not write the sources file (its files read-only here), by table: ONE net record
-  // for this run (`KeptOut`), and the warning that says its line to write now, which a later change replaces
-  const kept = new Map<string, KeptOut>();
+  // THE COLUMNS EACH TABLE HAD when the run last looked at the sources file against the catalog (issue 977): a column the
+  // database has beyond them arrived while the run was up, and is left out where it may not be synced
+  // (`leftOutArrivals`) — and what the run left out where it could not write the file (its files read-only here): ONE
+  // record of both (`LeftOutRecord`), and the warning that says a table's line to write now, which a later change replaces
+  const record = new LeftOutRecord(facts.tables);
   const keptSaid = new Map<string, string>();
   /** Leaves out the secret-looking columns that arrived: `exclude:` written on each entry, as `mason add` writes it —
    *  else, where the project's files may not be written, left out for this run, with the line to add. Said in the log,
@@ -583,8 +582,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     }
     for (const a of arrived) {
       // written, the file holds the whole exclude: now (`excludeOf` of the entry as the run took it); else kept for this run
-      if (written) kept.delete(a.entry.table);
-      else keepLeftOut(kept, a);
+      if (written) record.written(a.entry.table);
+      else record.keep(a);
       // what a start does with the file as it is: refuses it while its exclude: names a column the table lacks
       const have = tables.find((t) => t.source === a.entry.table)?.columns.map((c) => c.name) ?? [];
       const refused = file.tables.find((e) => e.table === a.entry.table)?.exclude.some((c) => !have.includes(c)) ?? false;
@@ -605,18 +604,15 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     const now = catalog.facts();
     let read = readSources();
     if (!("message" in read)) {
-      // what arrived is found against the file AS THE RUN TAKES IT (`withLeftOut`: what it left out where it could not
-      // write it), never the file alone: a second rename of an excluded column is a name gone from THAT (issue 1026)
-      const taken = withLeftOut(read, kept, now.tables);
-      const arrived = [...keptBack(taken, kept, now.tables), ...leftOutArrivals(taken, now.tables, columnsSet, edit.edited ?? [])];
+      // what arrived is found against the file AS THE RUN TAKES IT, never the file alone (a second rename of an excluded
+      // column is a name gone from THAT, issue 1026), and the columns looked at are the next look's whatever the re-read
+      // below decides (`LeftOutRecord`)
+      const arrived = record.look(read, now.tables, edit.edited ?? []);
       if (arrived.length) { leaveOut(read, arrived, now.tables); read = readSources(); }
-      if (!("message" in read)) read = withLeftOut(read, kept, now.tables);
+      if (!("message" in read)) read = record.taken(read, now.tables);
     }
     const r = rereadSources(sources, read, src.resolved, now.tables, source.database, project.root, { replicationChecked, slot: cfg.replication?.slot ?? null });
     if (r.said !== null) logLine(`[sync] ${r.said}`);
-    // the columns the run's tables now stand on: only once the file was taken, so a column that arrived while the file
-    // could not be is still new when it can
-    if (r.problem === null) columnsSet = new Map(now.tables.map((t) => [t.source, t.columns.map((c) => c.name)]));
     // the names the file's entries pass over now (`goneNotes`): a new one said, and the warnings the file's as it is now
     const notes = goneNotes(r.file, now.tables, project.root);
     for (const n of notes) if (!fileNotes.includes(n)) logLine(`[sync] ${n}`);
