@@ -3287,6 +3287,9 @@ class Server {
             try { await this.options.duck.plan((b) => this.catalog.run(b), probe, stmt, 0, [], GENERATED_SESSION, this.userTypes(), false, undefined); }
             catch (e) {
               if (!(e instanceof StatementError)) throw e;
+              // a name of the table Mason does not read (a column with a line break) is no fault of the predicate: each
+              // statement that reads the table is refused by name when it is planned, and the role's others are answered
+              if (e.gap === "name-line-break" || e.gap === "name-unreadable") continue;
               problems.push(`${f.at}.where: ${e.fields.message}${e.fields.hint !== undefined ? ` (${e.fields.hint})` : ""} — the predicate is read as SELECT 1 FROM ${f.table} WHERE ${f.where.text}`);
             }
           }

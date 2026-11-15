@@ -43,8 +43,16 @@ export interface TreeNode { readonly _node: string; readonly [field: string]: Tr
  * column of the tables it reads (`told`), tells which. What none tells, or no reading of the rule gives, is refused
  * by name (`name-unreadable`), never guessed.
  */
-export function readParseLog(detail: Uint8Array, told: ReadonlySet<string> = new Set()): TreeValue {
-  return parseTree(Buffer.from(unwrapNodeDump(detail, told)).toString("utf8"));
+export function readParseLog(detail: Uint8Array, told: ReadonlySet<string> = new Set(), names = true): TreeValue {
+  try { return parseTree(Buffer.from(unwrapNodeDump(detail, told)).toString("utf8")); }
+  catch (e) {
+    // a caller that reads the tree's types and shape alone (`names` false) gets them where a name cannot be read back:
+    // every line break read as a space, which only a name's text can differ by
+    if (names || !(e instanceof UnreadableNames)) throw e;
+    const text = Buffer.from(detail);
+    for (let k = text.indexOf(LF); k >= 0; k = text.indexOf(LF, k + 1)) text[k] = SPACE;
+    return parseTree(text.toString("utf8"));
+  }
 }
 
 /** a parse tree's log Mason cannot read back: a line no reading of Postgres's rule gives, or a long name of escaped

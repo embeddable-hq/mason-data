@@ -173,7 +173,7 @@ export async function filterTypes(run: Catalog, f: RowFilter, shapes: ReadonlyMa
     const message = (r.M ?? "Postgres refused it").replace(/\$(\d+)/g, (m, k: string) => names[Number(k) - 1] !== undefined ? `:${names[Number(k) - 1]}` : m);
     return { problem: `${f.at}.where: ${message}${at} — the predicate is checked by Postgres as SELECT 1 FROM ${f.table} WHERE ${f.where!.text}` };
   };
-  const first = await analyze(run, sql, names.map(() => 0));
+  const first = await analyze(run, sql, names.map(() => 0), undefined, undefined, false);
   if ("refused" in first) return said(first.refused);
   if (hasSubquery(first.tree)) return { problem: `${f.at}.where: reads another table (a subquery) — a where: reads its own table's columns; through: <table> makes a row visible through another table's` };
   const oids = first.params;
@@ -197,7 +197,7 @@ export async function filterTypes(run: Catalog, f: RowFilter, shapes: ReadonlyMa
   }
   if (mismatch !== null) {
     // Postgres's own refusal, the parameter declared of the shape the file says
-    const again = await analyze(run, sql, declared);
+    const again = await analyze(run, sql, declared, undefined, undefined, false);
     if ("refused" in again) return { problem: `${said(again.refused).problem} (${mismatch})` };
     return { problem: `${f.at}.where: ${mismatch}` };
   }
@@ -267,7 +267,7 @@ export function bindFilter(f: RowFilter, types: ReadonlyMap<string, string>, val
 export async function attributeRefused(run: Catalog, rows: ReadonlyMap<string, BoundFilter>, tables: readonly string[]): Promise<{ name: string; type: string; at: string; where: string; problem: string } | null> {
   for (const table of tables) {
     for (const a of rows.get(table)?.attributes ?? []) {
-      const r = await analyze(run, `SELECT ${a.sql}`, []);
+      const r = await analyze(run, `SELECT ${a.sql}`, [], undefined, undefined, false);
       if ("refused" in r) return { name: a.name, type: a.type, at: a.at, where: a.where, problem: r.refused.M ?? "Postgres refused it" };
     }
   }

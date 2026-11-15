@@ -492,8 +492,9 @@ paths:
 ## What a column is
 
 - **A name holding a line break is refused by name, before the parse log is read** (`name-line-break`,
-  src/duck/analyze.ts): the statement's own names, the columns of the tables and functions it reads, and a CR in the
-  log. Postgres writes a name's line break in its wrapped log just as it writes a wrapped space, so no reading of the
+  src/duck/analyze.ts): the statement's own names, the names and columns of the tables, functions and row types it
+  reads, and a CR in the log. A caller that reads only the types and shape (a role's row filter, `names` false) is
+  never refused for one, so the roles check never fails on such a table; each statement that reads it is refused. Postgres writes a name's line break in its wrapped log just as it writes a wrapped space, so no reading of the
   log can tell them; every other name is read in one pass and one parse (src/duck/pgtree.ts `readParseLog`).
 
 - **A column is the source's type, whatever the copy holds** (`src/duck/held-types.ts`, the only place that says what the

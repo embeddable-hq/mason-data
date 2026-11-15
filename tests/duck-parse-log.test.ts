@@ -280,3 +280,35 @@ test("issue 956: a long statement of names of quotes and backslashes is read in 
   const p = await timed(plain), q = await timed(odd);
   assert.ok(q < 3 * p + 150, `the names took ${Math.round(q)} ms, a plain statement of the size ${Math.round(p)} ms`);
 });
+
+test("issue 956: a table's or a row type's name with a line break is refused as a name with a line break, naming it", async () => {
+  // the re-check of 9b867a05: a row type's field was refused as name-unreadable, whose way out does not apply, and a
+  // table's own name was called a column's
+  await pglite.exec(`CREATE TYPE lbpair AS (${ident("x\ny z")} int, w int)`);
+  await pglite.exec(`CREATE TABLE lbrow (id int PRIMARY KEY, pair lbpair)`);
+  await pglite.exec(`CREATE TABLE ${ident("lb\ntable")} (id int PRIMARY KEY, v int)`);
+  // a field the query does not name never reaches the log, and is answered (a row's text holds no field name)
+  assert.deepEqual(await readOf("SELECT id, (pair).w FROM lbrow"), ["id", "w"]);
+  assert.deepEqual(await readOf("SELECT * FROM lbrow"), ["id", "pair"]);
+  for (const [sql, name] of [
+    ["SELECT (pair).* FROM lbrow", "x\ny z"],
+    ["SELECT (r.pair).* FROM lbrow r WHERE r.id > 0", "x\ny z"],
+    [`SELECT id FROM ${ident("lb\ntable")}`, "lb\ntable"],
+    [`SELECT t.id FROM ${ident("lb\ntable")} t`, "lb\ntable"],
+  ] as const) {
+    const r = await readOf(sql);
+    assert.ok(!Array.isArray(r) && r.gap === "name-line-break", `${sql}: ${JSON.stringify(r)}`);
+    assert.ok(!Array.isArray(r) && r.message === `Mason does not support a name with a line break: ${JSON.stringify(name)}`, `${sql}: ${JSON.stringify(r)}`);
+  }
+});
+
+test("issue 956: a row filter's analysis reads the shape alone, so a table with a line-break column is no refusal there", async () => {
+  // src/duck/row-filter.ts asks for the types and shape (names false); the statements that read the table are refused
+  await pglite.exec(`CREATE TABLE lbfilter (id int PRIMARY KEY, tenant int, ${ident("n\no")} int)`);
+  const sql = "SELECT 1 FROM lbfilter WHERE tenant = $1";
+  const a = await analyze(catalog, sql, [0], undefined, undefined, false);
+  assert.ok(!("refused" in a), sql);
+  assert.deepEqual(a.params, [23]);
+  const r = await readOf("SELECT 1 FROM lbfilter WHERE tenant = 1");
+  assert.ok(!Array.isArray(r) && r.gap === "name-line-break", JSON.stringify(r));
+});
