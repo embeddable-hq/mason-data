@@ -2,14 +2,14 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## Before you upgrade
 
-- **Allow for one whole sync of a table whose primary key has an INCLUDE column, if its entry names `columns:`.**
-  Mason used to count an index's INCLUDE columns as part of the table's key. A table's key is always synced. So for
-  `PRIMARY KEY (id) INCLUDE (v)`, Mason synced `v` even when the entry's `columns:` left it out.
-  - Now the key is `id` alone, so `v` is synced only if the entry names it.
-  - At the first start, such a table is synced again whole, to drop `v`. The log says so. Its synced data serves as
-    it was meanwhile.
-  - To keep `v`, add it to the entry's `columns:` before you upgrade. Then nothing is synced again.
-  - A table whose entry is `{}` or `exclude:` is not synced again.
+- **A table whose primary key has an INCLUDE column, and whose entry's `columns:` leaves that column out, is read
+  again whole, once.** Plan for a full read of each such table from your database. It keeps serving its old data
+  until the new sync is done, and the log says so. No other table is read again.
+  - Why: Mason used to count an index's INCLUDE columns as part of the table's key, and a table's key is always
+    synced. So for `PRIMARY KEY (id) INCLUDE (v)`, Mason synced `v` even when `columns:` left it out. Now the key is
+    `id` alone, so `v` is synced only if the entry names it.
+  - To avoid the read, add the INCLUDE column to the entry's `columns:` before you upgrade.
+  - A table whose entry is `{}` or `exclude:` is not read again.
 
 ## What was wrong and is now right
 
