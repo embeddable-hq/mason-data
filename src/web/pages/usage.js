@@ -13,9 +13,7 @@
  * samples' table. A page module (src/web/app.js has the contract). Never the engine's name.
  */
 import { VIEW_HASHES } from "../routes.js";
-import { esc, n, statementMsText, bytesText, fileSize, duration, details, createOpenSet, cards, card, empty, panel, skeleton, sortTh, sortedBy, nextSort, readPart, usagePath, utcMinute,
-  RANGES, DEFAULT_RANGE, rangeOf, isNow, rangeEvery, firstLine, spanText, agoText, utcText, clientText, clip, TITLE_MAX, unsupportedEntry, renderFailure, json, pop, actId,
-  statementCell, POLL_MS, readOnlyLine, button, sendButton } from "../shared.js";
+import { esc, n, statementMsText, bytesText, fileSize, duration, details, createOpenSet, cards, card, empty, panel, skeleton, sortTh, sortedBy, nextSort, readPart, usagePath, utcMinute, RANGES, DEFAULT_RANGE, rangeOf, isNow, rangeEvery, firstLine, spanText, agoText, utcText, clientText, clip, TITLE_MAX, unsupportedEntry, renderFailure, json, pop, actId, statementCell, POLL_MS, readOnlyLine, button, sendButton, listTable } from "../shared.js";
 import { spark, seriesChart, seriesOf, drawable } from "../charts.js";
 
 const EVERY_MS = 60_000;
@@ -140,9 +138,9 @@ export function renderSessions(sessions, top = SESSIONS_TOP, range = DEFAULT_RAN
   const sum = (list, k) => list.reduce((a, c) => a + c[k], 0);
   const others = rest.length ? `<tr class="others"><td colspan="2">${esc(n(rest.length))} other client${rest.length === 1 ? "" : "s"}</td><td class="num">${esc(n(sum(rest, "open")))}</td><td class="num">${esc(n(sum(rest, "running")))}</td><td></td></tr>` : "";
   const cell = (v) => `<td><span class="clip" title="${esc(v)}">${esc(v)}</span></td>`;
-  return panel(`<table class="sessions"><thead><tr><th scope="col">User</th><th scope="col">Client</th><th scope="col" class="num">Open</th><th scope="col" class="num">Running</th><th scope="col" class="act"></th></tr></thead><tbody>` +
+  return listTable("sessions", `<thead><tr><th scope="col">User</th><th scope="col">Client</th><th scope="col" class="num">Open</th><th scope="col" class="num">Running</th><th scope="col" class="act"></th></tr></thead><tbody>` +
     shown.map((c) => `<tr>${cell(c.user || "(no user)")}${cell(clientText(c.client))}<td class="num">${esc(n(c.open))}</td><td class="num">${esc(n(c.running))}</td><td class="act">${queriesLink(c.user, c.client, range)}</td></tr>`).join("") + others +
-    `</tbody></table>`) + `<p class="dim">${esc(n(sessions.open))} session${sessions.open === 1 ? "" : "s"} open${rest.length ? `, from ${esc(n(byOpen.length))} clients` : ""}.</p>`;
+    `</tbody>`) + `<p class="dim">${esc(n(sessions.open))} session${sessions.open === 1 ? "" : "s"} open${rest.length ? `, from ${esc(n(byOpen.length))} clients` : ""}.</p>`;
 }
 
 /**
@@ -191,8 +189,8 @@ export function renderRunning(running, asking = null, outcome = null, now = Date
       `<td>${statementCell(r.query)}</td>${readOnly !== null ? "" : `<td class="act" id="${esc(anchor)}">${asking === key ? `<button type="button" class="danger small" aria-expanded="true" disabled>Cancel</button>` : `<button type="button" class="danger small" data-ask-cancel="${esc(key)}">Cancel</button>`}</td>`}</tr>`;
   }).join("");
   const table = running.length
-    ? `<div class="scroll"><table class="running"><thead><tr><th scope="col">Session</th><th scope="col" title="the query's number in its session">No.</th><th scope="col">User</th><th scope="col">Client</th>` +
-      `<th scope="col" class="num">Running for</th><th scope="col">Rows</th><th scope="col">Query</th>${readOnly !== null ? "" : `<th scope="col"></th>`}</tr></thead><tbody>${rows}</tbody></table></div>`
+    ? listTable("running", `<thead><tr><th scope="col">Session</th><th scope="col" title="the query's number in its session">No.</th><th scope="col">User</th><th scope="col">Client</th>` +
+      `<th scope="col" class="num">Running for</th><th scope="col">Rows</th><th scope="col">Query</th>${readOnly !== null ? "" : `<th scope="col"></th>`}</tr></thead><tbody>${rows}</tbody>`)
     : empty("No query is running now.");
   // the statement ended since: said beside the part, which is there whatever it lists
   if (said !== null && !shown) pops.push(pop("usage-running", outcomeHtml(said)));
@@ -229,12 +227,12 @@ export function renderClients(clients, { top = SESSIONS_TOP, range = DEFAULT_RAN
   const sum = (k) => rest.reduce((a, c) => a + c[k], 0);
   const cell = (v) => `<td><span class="clip" title="${esc(v)}">${esc(v)}</span></td>`;
   const who = (c) => c.user || (c.tokenName ? `token ${c.tokenName}` : "(no user)");
-  return panel(`<table class="sessions"><thead><tr><th scope="col">User</th><th scope="col">Client</th><th scope="col" class="num">Queries</th><th scope="col" class="num">Failed</th>` +
+  return listTable("sessions", `<thead><tr><th scope="col">User</th><th scope="col">Client</th><th scope="col" class="num">Queries</th><th scope="col" class="num">Failed</th>` +
     `<th scope="col" class="num">Sessions</th><th scope="col">Last</th><th scope="col" class="act"></th></tr></thead><tbody>` +
     shown.map((c) => `<tr>${cell(who(c))}${cell(clientText(c.client))}<td class="num">${esc(n(c.statements))}</td><td class="num">${c.failed ? esc(n(c.failed)) : ""}</td>` +
       `<td class="num">${esc(n(c.sessions))}</td><td><time data-tick datetime="${esc(c.last)}" title="${esc(utcText(c.last))} UTC">${esc(agoText(c.last, now))}</time></td><td class="act">${queriesLink(c.user, c.client, range)}</td></tr>`).join("") +
     (rest.length ? `<tr class="others"><td colspan="2">${esc(n(rest.length))} other client${rest.length === 1 ? "" : "s"}</td><td class="num">${esc(n(sum("statements")))}</td><td class="num">${esc(n(sum("failed")))}</td><td class="num">${esc(n(sum("sessions")))}</td><td></td><td></td></tr>` : "") +
-    `</tbody></table>`) + `<p class="dim">${esc(plural(total, "client"))}${total > clients.length ? ` (the ${esc(n(clients.length))} with the most queries are listed)` : ""} sent queries in ${esc(span)}. A session that sent only queries Mason does not list (select 1, SET, a catalog query) is not here.</p>`;
+    `</tbody>`) + `<p class="dim">${esc(plural(total, "client"))}${total > clients.length ? ` (the ${esc(n(clients.length))} with the most queries are listed)` : ""} sent queries in ${esc(span)}. A session that sent only queries Mason does not list (select 1, SET, a catalog query) is not here.</p>`;
 }
 
 /**
@@ -245,13 +243,13 @@ export function renderClients(clients, { top = SESSIONS_TOP, range = DEFAULT_RAN
 export function renderSlowest(list, { range = DEFAULT_RANGE, now = Date.now() } = {}) {
   const span = RANGES[rangeOf(range)].span;
   if (!list.length) return empty(`No query completed in ${span}.`);
-  return `<div class="scroll"><table class="running"><thead><tr><th scope="col">Started</th><th scope="col" class="num">Took</th><th scope="col">User</th><th scope="col">Client</th>` +
+  return listTable("running", `<thead><tr><th scope="col">Started</th><th scope="col" class="num">Took</th><th scope="col">User</th><th scope="col">Client</th>` +
     `<th scope="col" class="num">Rows</th><th scope="col">Query</th><th scope="col" class="act"></th></tr></thead><tbody>` +
     list.map((r) => `<tr><td><time data-tick datetime="${esc(r.startedAt)}" title="${esc(utcText(r.startedAt))} UTC">${esc(agoText(r.startedAt, now))}</time></td><td class="num">${esc(statementMsText(r.durationMs))}</td>` +
       `<td><span class="clip" title="${esc(r.user || r.tokenName)}">${esc(r.user || (r.tokenName ? `token ${r.tokenName}` : ""))}</span></td><td><span class="clip" title="${esc(clientText(r.applicationName))}">${esc(clientText(r.applicationName))}</span></td>` +
       `<td class="num">${r.rows === null ? "" : esc(n(r.rows))}</td><td class="stmt-cell">${statementCell(r.query)}</td>` +
       `<td class="act"><a class="btn small" href="${esc(queriesHref({ user: r.user, client: r.applicationName, slow: r.durationMs >= 1000 ? "1" : "" }, range))}" title="its client's queries on the Queries page">Queries</a></td></tr>`).join("") +
-    `</tbody></table></div>`;
+    `</tbody>`);
 }
 
 /**
@@ -305,16 +303,16 @@ export function renderUsage(b, isOpen = () => false, sort = { key: "time", dir: 
     // newest first unless the time's header turned it round (the charts read left to right, oldest first)
     const ordered = sort.dir === "asc" ? b.samples : [...b.samples].reverse();
     const head = (list) => `<thead><tr>${sortTh("hours", "time", list[0], sort)}${list.slice(1).map((c) => `<th scope="col"${c === "Time (UTC)" ? "" : ` class="num"`}>${esc(c)}</th>`).join("")}</tr></thead>`;
-    const hours = panel(`<table class="samples">${head(cols)}<tbody>` + ordered.map((s) => {
+    const hours = listTable("samples", `${head(cols)}<tbody>` + ordered.map((s) => {
       const c = sampleCells(s);
       return `<tr><th scope="row">${esc(c.time)}</th>${[c.statements, c.errors, c.rowsSent, c.bytesSent, c.p95, c.copy, c.rows, c.failing, c.oldest, ...(withLag ? [c.lag] : [])].map(num).join("")}</tr>`;
-    }).join("") + "</tbody></table>");
+    }).join("") + "</tbody>");
     // the charts draw these numbers: then they are one click away, and open by the person's choice (keyed: a poll rewrites the hours)
     samples = (Object.keys(usageSpecs(b)).some((k) => CHARTS.some(([key]) => key === k)) ? details("usage-hours", `The numbers, ${perStep(b.stepSeconds ?? 60).replace(/^every /, "")} a line`, hours, isOpen("usage-hours"), "hours") : hours) +
       // the process's memory, an hour a line: a debugging aid, behind a closed details
       // (keyed: a poll rewrites the hours, and an open Memory stays open)
-      details("usage-memory", "Memory", panel(`<table class="samples">${th(["Time (UTC)", "Memory"])}<tbody>` +
-        ordered.map((s) => { const c = sampleCells(s); return `<tr><th scope="row">${esc(c.time)}</th><td>${esc(c.memory)}</td></tr>`; }).join("") + "</tbody></table>"), isOpen("usage-memory"), "memory");
+      details("usage-memory", "Memory", listTable("samples", `${th(["Time (UTC)", "Memory"])}<tbody>` +
+        ordered.map((s) => { const c = sampleCells(s); return `<tr><th scope="row">${esc(c.time)}</th><td>${esc(c.memory)}</td></tr>`; }).join("") + "</tbody>"), isOpen("usage-memory"), "memory");
   }
   return head + samples;
 }
@@ -322,8 +320,8 @@ export function renderUsage(b, isOpen = () => false, sort = { key: "time", dir: 
 /** Each synced table's own size, measured every 10 min (src/cli/usage.ts): table, bytes, when. */
 export function renderCopySizes(sizes) {
   if (!sizes.length) return empty(`No table measured yet: each is measured every ${duration(SIZE_EVERY_SECONDS)}.`);
-  return `<p class="dim">Measured every ${esc(duration(SIZE_EVERY_SECONDS))}.</p>` + panel(`<table class="sizes">${th(["Table", "Size", "Measured at (UTC)"])}<tbody>` +
-    sizes.map((c) => `<tr><th scope="row"><code class="name" title="${esc(c.table)}">${esc(c.table)}</code></th>${num(fileSize(c.bytes))}<td>${esc(c.at.slice(11, 16))}</td></tr>`).join("") + "</tbody></table>");
+  return `<p class="dim">Measured every ${esc(duration(SIZE_EVERY_SECONDS))}.</p>` + listTable("sizes", `${th(["Table", "Size", "Measured at (UTC)"])}<tbody>` +
+    sizes.map((c) => `<tr><th scope="row"><code class="name" title="${esc(c.table)}">${esc(c.table)}</code></th>${num(fileSize(c.bytes))}<td>${esc(c.at.slice(11, 16))}</td></tr>`).join("") + "</tbody>");
 }
 
 export const page = {

@@ -145,7 +145,7 @@ const clipped = (p: Page) => p.evaluate<{ cells: number; out: string[] }>(`(() =
       const box = r(td);
       const pad = getComputedStyle(td);
       const cell = { left: box.left + parseFloat(pad.paddingLeft), right: box.right - parseFloat(pad.paddingRight) };
-      const card = r(td.closest(".panel") ?? document.body);
+      const card = r(td.closest(".list") ?? document.body);
       const b = r(el);
       const said = row + ': "' + (el.textContent ?? "").trim() + '"';
       if (b.right - b.left < 1) { out.push(said + " has no width"); continue; }
@@ -187,7 +187,7 @@ for (const m of Object.keys(MODES)) {
       // the page never scrolls sideways; at 1280 px neither does the list (narrower, it scrolls in its card, its
       // actions pinned at the card's right)
       const wide = await p.evaluate<{ page: number; list: number }>(`({ page: document.documentElement.scrollWidth - window.innerWidth,
-        list: ((e) => e ? e.scrollWidth - e.clientWidth : 0)(document.querySelector("#tables table.catalog")?.closest(".panel") ?? null) })`);
+        list: ((e) => e ? e.scrollWidth - e.clientWidth : 0)(document.querySelector("#tables table.catalog")?.closest(".list") ?? null) })`);
       await p.close();
       assert.equal(cells, TABLES.length, `${width} px: a row's actions for each table`);
       assert.deepEqual(out, [], `${width} px, ${m}: every action seen whole`);

@@ -16,6 +16,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   others can link to its own steps instead. Set `MASON_UI_DEPLOY_DOCS_URL` on `mason serve` to a path on the page's
   host or an `https://` or `http://` URL. It follows `MASON_UI_BACK_URL`'s rules. A value Mason cannot use stops the
   start with a message that says what is wrong.
+- **Every list on the web page now behaves the same in a narrow window.** Where a list is wider than the window, it
+  scrolls sideways inside its box, and each row's buttons stay in view at its right. The page itself never scrolls
+  sideways.
 
 ## What was wrong and is now right
 
@@ -40,6 +43,19 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   refuses a file that names both. The same holds for two schemas, such as `"Billing".invoices` and `billing.invoices`.
 - **A generated table whose SELECT names two columns that differ only in case is refused at its file**, such as
   `SELECT 1 AS "U", 2 AS u`. Before, its build failed at every run.
+- **Some lists on the web page read badly in a narrow window. They now read whole.**
+  - On the Users page, the Role column was cut to "every t…" in a middle-width window. It now shows the role whole.
+    A user's id is cut short where the name's column is narrow. Hover over it to read it whole.
+  - On the Users page, on a phone 320 to 390 px wide, a user's "from …" line could sit under the Queries, Disable and
+    Remove buttons, so a tap on it pressed one of them. It now sits beside them, and a long one is cut short. Hover
+    over it to read it whole.
+  - On the Tables page, on a phone 320 to 350 px wide, the Table column was squeezed to a few letters a line. The list
+    now scrolls sideways there instead. A row count too long for its column, such as "~40,000,000 rows", is cut short.
+    Hover over it to read it whole.
+  - On the Sync events page, a table name of 30 characters was cut short in a middle-width window. A name of up to 30
+    characters is now shown whole.
+  - On a phone, after Add or Sync now, the answer shown at the bottom of the screen covered the last rows' buttons, and
+    the page could not be scrolled far enough to reach them. It now can.
 - **In a project Mason cannot write, a column `exclude:` names can now be renamed more than once while Mason runs.**
   This is a project run with `MASON_PROJECT_READONLY=1`, or one whose sources file Mason cannot write. Before, a second
   rename of such a column made Mason stop taking column changes for the rest of the run, in every table. This also
