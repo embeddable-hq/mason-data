@@ -41,6 +41,7 @@ import { strftimeTemplate } from "./to-char.ts";
 import { jsonbText, parseJson, storedPairs, type Json } from "./jsonb.ts";
 import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
 import type { CaseMapping, DuckCollation, StatementCollations } from "./collation.ts";
+import { pgTrim } from "./text.ts";
 
 /** A parse-tree node (`{ Kind: body }`) and a body, as libpg-query's JSON has them. */
 type Body = Record<string, any>;
@@ -7919,10 +7920,10 @@ const ARRAY_ELEMENT: Record<string, string> = { text: "varchar", varchar: "varch
 
 /** an array literal's elements as array_in reads them: quotes and backslashes, an unquoted NULL is NULL */
 function arrayLiteral(text: string): Array<string | null> {
-  const inner = text.trim();
+  const inner = pgTrim(text);
   if (!inner.startsWith("{") || !inner.endsWith("}")) throw new Unrewritable(`malformed array literal: "${text}"`, 'write it as \'{a,b}\'', { postgres: "22P02" });
   const body = inner.slice(1, -1);
-  if (body.trim() === "") return [];
+  if (pgTrim(body) === "") return [];
   const out: Array<string | null> = [];
   let cur = "", quoted = false, wasQuoted = false;
   for (let i = 0; i < body.length; i++) {
@@ -7935,10 +7936,10 @@ function arrayLiteral(text: string): Array<string | null> {
     if (c === "{") throw new Unrewritable("a multi-dimensional array literal is not supported by Mason", "write a one-dimensional array", "multidim-array");
     if (c === '"') { quoted = true; wasQuoted = true; continue; }
     if (c === "\\") { cur += body[++i] ?? ""; continue; }
-    if (c === ",") { out.push(!wasQuoted && cur.trim().toUpperCase() === "NULL" ? null : wasQuoted ? cur : cur.trim()); cur = ""; wasQuoted = false; continue; }
+    if (c === ",") { out.push(!wasQuoted && pgTrim(cur).toUpperCase() === "NULL" ? null : wasQuoted ? cur : pgTrim(cur)); cur = ""; wasQuoted = false; continue; }
     cur += c;
   }
-  out.push(!wasQuoted && cur.trim().toUpperCase() === "NULL" ? null : wasQuoted ? cur : cur.trim());
+  out.push(!wasQuoted && pgTrim(cur).toUpperCase() === "NULL" ? null : wasQuoted ? cur : pgTrim(cur));
   return out;
 }
 

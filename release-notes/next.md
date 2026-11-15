@@ -15,6 +15,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A table that an older Mason left without one of its columns is synced again once, at the first start.** This is
   a table with a column whose name begins with `__mason_json_`, which that Mason dropped (below). The table serves
   its old data until then, and a large table takes about as long as its first sync did.
+- **A synced table with a column whose name begins with a byte-order mark (U+FEFF) is synced again once, at the first
+  start**, if that column is not text. Mason stored such a column as text (below). The table serves its old data until
+  then, and a large table takes about as long as its first sync did.
 
 ## What changes
 
@@ -89,6 +92,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   as a new field, `rebuilding` (`kind` is `copy` or `catch-up`, and `startedAt`).
 
 ## What was wrong and is now right
+
+- **Text that starts with a byte-order mark (U+FEFF) now keeps it.** A CSV import can leave one at the start of a
+  value or of a column's name. Mason dropped the mark from every value that began with one, so a value that was only a
+  mark read as empty, and two values that differed only by it looked like duplicate rows under `GROUP BY` or
+  `DISTINCT`. This held for text and varchar columns, elements of a `text[]`, `->>` of a JSON string, and a `text[]`
+  parameter sent in binary, as Npgsql sends it. A `numeric` column whose name began with a mark was synced as text, so
+  `3` read `3.0`. This held for a column of any type but text. Now each reads as your database has it. An element of a
+  `text[]` that begins with a mark or a non-breaking space is no longer put in quotes where your database leaves it
+  bare. Over replication, such an element no longer loses its mark.
 
 - **Removing a table while it syncs now stops its sync at once.** This covers a table's first sync, a table synced
   again whole, the catch-up after it, and a sync you started by hand. Before, the sync ran to its end, which took hours

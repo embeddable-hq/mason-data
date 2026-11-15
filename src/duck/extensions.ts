@@ -23,6 +23,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
 import { DuckDBInstance, version } from "@duckdb/node-api";
+import { keepLeadingBom } from "./text.ts";
 
 /** Each platform a package is built for: Node's `<platform>-<arch>` (the package's name) and DuckDB's name for it (the
  *  folder of the extension repository, and of `extension_directory`). Linux is glibc's: musl has no package. */
@@ -139,6 +140,7 @@ export interface ExtensionProbe { ok: boolean | null; detail: string }
  */
 export async function probeExtensions(x: Extensions = findExtensions()): Promise<ExtensionProbe> {
   let instance: DuckDBInstance;
+  keepLeadingBom();
   try { instance = await DuckDBInstance.create(":memory:", { autoinstall_known_extensions: "false", ...extensionSettings(x) }); }
   catch (e) { return { ok: null, detail: `could not open an engine to check them: ${(e as Error).message}` }; }
   try {

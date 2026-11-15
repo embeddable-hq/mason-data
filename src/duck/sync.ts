@@ -74,7 +74,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { PgConnection, formatLsn, parseLsn, pgLiteral, type PgConnectOptions } from "../cdc/pg-wire.ts";
 import { createSlot, currentLsn, dropSlot, readSlot, type SlotState } from "../cdc/source.ts";
-import { holdOf } from "./held-types.ts";
+import { holdOf, nativeVarchar } from "./held-types.ts";
 import { scaleColumn, scaleOfText, scaleSql } from "./scale-column.ts";
 import { hiddenColumns } from "./hidden-columns.ts";
 import { addCounts, countsText, duckValue, fold, foldInto, noChanges, noCounts, ReplicationStream, type ChangeCounts, type StreamedTable, type TableChanges } from "./stream.ts";
@@ -500,6 +500,21 @@ export const SCALE_LAYOUT = "stored by an older Mason without each numeric value
  * path (`needsCopy`), serving as it was until its swap.
  */
 export const MISSING_LAYOUT = "missing a column it syncs, which an older Mason dropped: read again whole, once";
+
+/**
+ * A COPY AN OLDER MASON MADE OF A COLUMN WHOSE NAME STARTS WITH U+FEFF (issue 991, src/duck/text.ts): it looked the
+ * column's type up by the name DuckDB handed back, which had lost its byte-order mark, found none, and stored the
+ * column as a VARCHAR whatever its type (a numeric served as text). Found by what the copy physically is (`lostType`),
+ * copied again through the normal path (`needsCopy`) once, serving as it was until its swap.
+ */
+export const BOM_LAYOUT = "stored by an older Mason with a column whose name starts with a byte-order mark as text: read again whole, once";
+
+/** a copied column an older Mason stored as a VARCHAR only because its name starts with U+FEFF (`BOM_LAYOUT`): one the
+ *  copy now stores as its own type (a native type that is no text, an array, an enum). A domain is left as it is. */
+export function lostType(c: SourceColumnInfo, stored: string): boolean {
+  return c.name.startsWith("\uFEFF") && stored === "VARCHAR" && c.domain !== true && holdOf(c.type, c.typeKind) === "same" &&
+    !/^jsonb?$/.test(c.type) && !nativeVarchar(c.type);
+}
 
 /** a copy in a layout this Mason no longer keeps: the layout as `mason status` says it, and its short form for a line */
 interface Retired { layout: string; short: string }
@@ -4798,10 +4813,12 @@ export class Sync {
       const mis: string[] = [];
       const unscaled: string[] = [];
       const missing: string[] = [];
+      const untyped: string[] = [];
       const completed = columns.map((c) => {
         const type = types.get(c.name);
         if (type === undefined) { missing.push(c.name); return c; }
         if (c.typeKind === undefined && type.startsWith("ENUM(")) return { ...c, typeKind: "e" };
+        if (lostType(c, type)) untyped.push(c.name);
         const hold = holdOf(c.type, c.typeKind);
         const want = hold === "text" ? "VARCHAR" : hold === "text[]" ? "VARCHAR[]" : null;
         if (want !== null && type !== want) mis.push(`${c.name} (${c.type})`);
@@ -4814,6 +4831,12 @@ export class Sync {
       if (missing.length > 0) {
         this.retired.set(source, { layout: MISSING_LAYOUT, short: `missing ${missing.join(", ")}, which an older Mason dropped` });
         this.log(`${source}: it is ${MISSING_LAYOUT} (${missing.join(", ")}) — its synced data serves as it was until then`);
+        continue;
+      }
+      if (mis.length === 0 && untyped.length > 0) {
+        const named = untyped.map((n) => JSON.stringify(n)).join(", ");
+        this.retired.set(source, { layout: BOM_LAYOUT, short: `in an older Mason's layout, ${named} stored as text` });
+        this.log(`${source}: it is ${BOM_LAYOUT} (${named}) — its synced data serves as it was until then`);
         continue;
       }
       if (mis.length === 0 && unscaled.length > 0) {

@@ -80,6 +80,11 @@ const baseOf = (spelled: string): string => spelled.replace(/\[\]$/, "").replace
 /** whether DuckDB holds a value of this type as itself */
 export const isNative = (spelled: string): boolean => NATIVE.has(baseOf(spelled));
 
+/** the native types the copy stores as a VARCHAR (the extension reads them as text, or the copy holds their text) */
+const NATIVE_VARCHAR = new Set(["text", "character varying", "character", "name", '"char"', "inet", "citext"]);
+/** whether a native column of this type is stored as a VARCHAR: never an array, which is a list */
+export const nativeVarchar = (spelled: string): boolean => !spelled.endsWith("[]") && NATIVE_VARCHAR.has(baseOf(spelled));
+
 /** How the copy holds a column of the source's type `spelled` (`typeKind`: pg_type.typtype of the type or its element).
  *  An enum is DuckDB's ENUM; any other type a database made is its text. */
 export function holdOf(spelled: string, typeKind?: string): "same" | "text" | "text[]" {

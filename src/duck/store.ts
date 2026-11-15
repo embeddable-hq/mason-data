@@ -50,6 +50,7 @@ import type { DuckDBType } from "@duckdb/node-api";
 import { extensionSettings, findExtensions, type Extensions } from "./extensions.ts";
 import { messageOf } from "../lib/secret-mask.ts";
 import { SCALE_PREFIX } from "./scale-column.ts";
+import { BOM_PROBE, keepLeadingBom } from "./text.ts";
 
 export const MASON_SCHEMA = "_mason";
 
@@ -291,6 +292,7 @@ const opened = new Map<string, { closed: Promise<void> | null; abandoned: string
  */
 export async function openDuck(file: string, settings: Record<string, string>): Promise<{ instance: DuckDBInstance; writer: DuckDBConnection }> {
   let instance: DuckDBInstance;
+  keepLeadingBom();
   try { instance = await DuckDBInstance.create(file, settings); }
   catch (e) {
     const m = (e as Error).message;
@@ -303,6 +305,11 @@ export async function openDuck(file: string, settings: Record<string, string>): 
         : `Mason could not open the synced data ${file}: ${m}. mason destroy deletes the synced data, and the next mason start syncs again`);
   }
   const writer = await instance.connect();
+  // the decoder took on this instance (src/duck/text.ts): text that lost a leading U+FEFF is a wrong answer, so refuse
+  const probe = (await writer.runAndReadAll(`SELECT '${BOM_PROBE}'`)).getRowsJS()[0]?.[0];
+  if (probe !== BOM_PROBE) {
+    throw new Error("Mason cannot read the synced data's text exactly: @duckdb/node-api dropped a leading byte-order mark (U+FEFF). Install the @duckdb/node-api version package.json pins");
+  }
   await writer.run(`CREATE SCHEMA IF NOT EXISTS ${MASON_SCHEMA}`);
   // a session's search_path is Postgres's `"$user", public`: DuckDB has no `public` until a public table is copied,
   // and SET search_path to a schema that does not exist is refused

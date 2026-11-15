@@ -22,6 +22,7 @@ import { heldType, ZONED_HELD } from "./held-types.ts";
 import { pgEvalSync } from "./pg-eval.ts";
 import { isUtc } from "../lib/timezone.ts";
 import { EncodeError, encodeValue, OID, TIMESTAMP, type ApiValue, type PgSession, type WireType } from "../api/postgres/encode.ts";
+import { arrayQuotes } from "./text.ts";
 
 /** One result column as the wire describes it, and how its cells are written. */
 export interface WireColumn {
@@ -230,7 +231,7 @@ export function inetBytes(text: string): Buffer {
 
 function arrayElement(text: string | null): string {
   if (text === null) return "NULL";
-  if (text === "" || /^null$/i.test(text) || /[{},"\\\s]/.test(text)) return `"${text.replace(/["\\]/g, (c) => `\\${c}`)}"`;
+  if (arrayQuotes(text)) return `"${text.replace(/["\\]/g, (c) => `\\${c}`)}"`;
   return text;
 }
 
