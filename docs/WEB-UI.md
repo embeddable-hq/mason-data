@@ -558,6 +558,12 @@ listens, and every browser connection crosses that one ssh connection as frames 
   a value that is not a string, or a label or URL that is wrong refuses the start, every problem on one line
   (`src/cli/ui-account.ts`). `/api/state` and `mason status --json` say `pageAccount: { label, url }`, or `null`.
   Unset, nothing shows. `mason start` refuses it.
+- **Where to change a deployed project: `MASON_UI_DEPLOY_DOCS_URL`.** When the project's files are read-only because
+  they were deployed (`sourcesReadOnlyKind` `deployed` or `unwritable`), the Tables page says so and links to how to
+  change a deployed project. By default that is the README's "Change a deployed project". A host that runs Mason for
+  others can link to its own steps instead. The URL is read exactly as `MASON_UI_BACK_URL`'s, and a wrong one refuses
+  the start (`src/cli/ui-deploy-docs.ts`). The link opens in the same tab and sends no referrer. `/api/state` and
+  `mason status --json` say the URL as `pageDeployDocs`, the README's when unset. `mason start` refuses the setting.
 - **The host's views and card: `MASON_UI_NAV_LINKS`' `view`, `MASON_UI_OVERVIEW_CARD`.** See "Host views" below.
 - **The page's icon in the browser's tab: `MASON_UI_ICON`.** Set it to a `data:` URL of a PNG or SVG image in base64:
   `MASON_UI_ICON="data:image/svg+xml;base64,$(base64 -w0 icon.svg)"`, or `data:image/png;base64,…`. The image is at
