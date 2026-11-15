@@ -37,6 +37,13 @@ function psql(url: string, sql: string): string {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/** what `p` settles to within `ms`, else the words "not within …": a wait that never ends fails the test instead */
+async function within<T>(p: Promise<T>, ms: number): Promise<T | string> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<string>((r) => { timer = setTimeout(() => r(`not within ${ms / 1000} s`), ms); });
+  try { return await Promise.race([p, late]); } finally { clearTimeout(timer); }
+}
+
 /** a database of the test's own, dropped at the end whatever happens */
 function database(suffix: string): string {
   const db = `${tag}_${suffix}`;
@@ -274,7 +281,8 @@ test("a table removed during its sync by hand stops that sync at once: rolled ba
     const from = w.logged.length;
     void w.sync.setTables([SMALL]);
     const t0 = Date.now();
-    const answer = await asked as Error & { code?: string };
+    // bounded: without the cut it waits for the lock, so it fails here rather than hanging
+    const answer = await within(asked, 10_000) as Error & { code?: string };
     assert.ok(answer instanceof Error && answer.code === "not_found" && answer.message === "public.big was removed while it was synced by hand, so that sync stopped (rolled back)", String(answer));
     assert.ok(Date.now() - t0 < 10_000, `answered ${Date.now() - t0} ms after the removal`);
     await w.until(() => w.logged.some((l) => l.startsWith("dropped public.big's synced data")), "big dropped", 10_000);
@@ -299,9 +307,10 @@ test("a stop while a removed table's first sync is being stopped ends promptly, 
     void w.sync.setTables([BIG]);
     await w.until(() => /Lock/.test(busyBackends(url)), "big's readers wait on the source");
     void w.sync.setTables([]);
-    const t0 = Date.now();
-    await w.sync.stop();
-    assert.ok(Date.now() - t0 < 10_000, `stopped in ${Date.now() - t0} ms\n${w.logged.join("\n")}`);
+    // bounded: a stop that waits for the source's lock fails here, and the lock is let go so it can end
+    const stopped = await within(w.sync.stop().then(() => "stopped"), 10_000);
+    if (stopped !== "stopped") lock.release();
+    assert.equal(stopped, "stopped", `the stop did not end within 10 s\n${w.logged.join("\n")}`);
     assert.equal(busyBackends(url), "", "no backend of Mason's is busy on the source");
     await w.close();
     // the next start: big is not added, so whatever is left of it is dropped
