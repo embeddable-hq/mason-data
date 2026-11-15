@@ -907,6 +907,17 @@ details.hours > summary { margin-bottom: var(--space-2); }
   #page-syncs table.events tbody tr > :nth-child(5) { grid-area: took; padding-bottom: 0; }
   #page-syncs table.events code.name { max-width: 100%; }
 }
+/* Sync events between the phone and a wide card (issue 1038): a table's name kept its whole 36ch, so the list was
+   wider than its card and Took ran past the card's edge. Where the card is narrower than the list needs, a long name
+   gives way: it is cut with an ellipsis at whatever width its column gets (its whole is the title). A wider card is
+   as before. */
+#page-syncs .panel:has(> table.events) { container: sync-events / inline-size; }
+@media (min-width: 641px) {
+  @container sync-events (max-width: 799px) {
+    #page-syncs table.events code.name { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; line-clamp: 1;
+      white-space: normal; overflow-wrap: anywhere; }
+  }
+}
 .terminal { background: var(--code-bg); color: var(--code-fg); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-3) var(--space-4);
   max-height: 480px; overflow: auto; font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.6; }
 .terminal .log-line { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-3); }
