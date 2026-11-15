@@ -50,3 +50,59 @@ test("a batch holding a big table's change waits 5 s and holds 50,000 changes; o
   assert.deepEqual(applySize!(true, 500, 10_000), { ms: 5_000, rows: 50_000 });
   assert.deepEqual(applySize!(true, 60_000, 100_000), { ms: 60_000, rows: 100_000 }, "never smaller than the stream's own");
 });
+
+// A RELATION MESSAGE SHOWS THE KEY HELD only through the replica identity's index (issue 1062): the default identity's
+// primary key, or the index USING INDEX names, each unique over NOT NULL columns. Anything else asks the database.
+type Col = { name: string; typeOid: number; typmod: number; isKey: boolean };
+test("a relation message shows a key kept apart only by a default or USING INDEX identity whose flagged columns are the key's", () => {
+  const keyShown = (stream as { keyShown?: (r: { replicaIdentity: string; columns: Col[] }, key: readonly string[]) => boolean }).keyShown;
+  assert.equal(typeof keyShown, "function", "the stream reads a relation's replica identity before it writes by key");
+  const cols = (...keys: string[]): Col[] => ["id", "tenant_id", "code", "v"].map((name) => ({ name, typeOid: 25, typmod: -1, isKey: keys.includes(name) }));
+  // the primary key, as the default identity flags it
+  assert.equal(keyShown!({ replicaIdentity: "d", columns: cols("id") }, ["id"]), true);
+  assert.equal(keyShown!({ replicaIdentity: "d", columns: cols("tenant_id", "id") }, ["tenant_id", "id"]), true);
+  // a unique index over fewer of the key's columns keeps the key apart too
+  assert.equal(keyShown!({ replicaIdentity: "i", columns: cols("id") }, ["tenant_id", "id"]), true);
+  // the primary key dropped: nothing flagged, so the database is asked
+  assert.equal(keyShown!({ replicaIdentity: "d", columns: cols() }, ["id"]), false);
+  // an identity over another column says nothing of the key
+  assert.equal(keyShown!({ replicaIdentity: "i", columns: cols("code") }, ["id"]), false);
+  assert.equal(keyShown!({ replicaIdentity: "d", columns: cols("tenant_id", "id") }, ["id"]), false);
+  // FULL flags every column, unique or not, even where every flagged column is the key's
+  assert.equal(keyShown!({ replicaIdentity: "f", columns: cols("id", "tenant_id", "code", "v") }, ["id"]), false);
+  assert.equal(keyShown!({ replicaIdentity: "f", columns: cols("id") }, ["id"]), false);
+  assert.equal(keyShown!({ replicaIdentity: "n", columns: cols() }, ["id"]), false);
+});
+
+// A RELATION MESSAGE SHOWS THE PRIMARY KEY GONE when the default identity flags no column (the review of PR 1068): a key
+// held by the time the stream reads it does not clear the changes written before it came back.
+test("a relation message shows the primary key gone only under the default identity with no column flagged", () => {
+  const keyShownGone = (stream as { keyShownGone?: (r: { replicaIdentity: string; columns: Col[] }) => boolean }).keyShownGone;
+  assert.equal(typeof keyShownGone, "function", "the stream reads a dropped primary key from the relation message");
+  const cols = (...keys: string[]): Col[] => ["id", "v"].map((name) => ({ name, typeOid: 25, typmod: -1, isKey: keys.includes(name) }));
+  assert.equal(keyShownGone!({ replicaIdentity: "d", columns: cols() }), true);
+  assert.equal(keyShownGone!({ replicaIdentity: "d", columns: cols("id") }), false);
+  // an identity over an index, FULL or NOTHING says nothing of the primary key
+  assert.equal(keyShownGone!({ replicaIdentity: "i", columns: cols() }), false);
+  assert.equal(keyShownGone!({ replicaIdentity: "f", columns: cols("id", "v") }), false);
+  assert.equal(keyShownGone!({ replicaIdentity: "n", columns: cols() }), false);
+});
+
+// WHERE A CATCH-UP WAITS FOR THE STREAM (the review of PR 1068): the insert position, which is past every commit another
+// session can see, taken back to a page's start when it sits just past a page header, where no stream position lands.
+test("an insert position just past a page header is taken back to the page's start, any other is kept", async () => {
+  const source = await import("../src/cdc/source.ts" as string).catch(() => ({})) as { afterPageHeader?: (at: bigint, block: bigint, segment: bigint) => bigint };
+  assert.equal(typeof source.afterPageHeader, "function", "the catch-up's position is read where every visible commit ends");
+  const at = source.afterPageHeader!;
+  const block = 8192n, segment = 16n * 1024n * 1024n;
+  // past a page's short header, and a segment's long one
+  assert.equal(at(5n * block + 24n, block, segment), 5n * block);
+  assert.equal(at(3n * segment + 40n, block, segment), 3n * segment);
+  // a record's end anywhere else in a page, or the page's start, as it is
+  assert.equal(at(5n * block + 32n, block, segment), 5n * block + 32n);
+  assert.equal(at(5n * block + 4096n, block, segment), 5n * block + 4096n);
+  assert.equal(at(5n * block, block, segment), 5n * block);
+  // where values align to 4: 20- and 36-byte headers
+  assert.equal(at(7n * block + 20n, block, segment), 7n * block);
+  assert.equal(at(2n * segment + 36n, block, segment), 2n * segment);
+});

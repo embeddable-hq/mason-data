@@ -200,10 +200,40 @@ paths:
   with a unique index the file would take (`AddedTable.entryAt`, `KeyNotHeld`). A polled table's primary key dropped is
   said the same way. **An index's key is its key columns alone, never its INCLUDE columns** (`indexKeyColumnsFrom`,
   read by `TABLES_SQL`'s primary key and unique indexes and by the check; the review of PR 1057: `PRIMARY KEY (id)
-  INCLUDE (v)` was the key [id, v], and the check refused it for ever as v may be NULL). NOT CHECKED: the stream
-  applies a replicated table's changes by its primary key with no such check, so a primary key dropped under
-  replication still lets a duplicate's INSERT replace a synced row. DETECTOR: `tests/integration/duck-poll.itest.ts` "a
-  key: whose unique index is dropped" and "never holds an index's INCLUDE columns", `tests/key-held.test.ts`.
+  INCLUDE (v)` was the key [id, v], and the check refused it for ever as v may be NULL). DETECTOR:
+  `tests/integration/duck-poll.itest.ts` "a key: whose unique index is dropped" and "never holds an index's INCLUDE
+  columns", `tests/key-held.test.ts`.
+- **The stream asks for a table's key before its first change after each of its relation messages** (`keyed`,
+  src/duck/stream.ts; issue 1062: with the primary key dropped, a duplicate's INSERT replaced the synced row it shared a
+  key with, under every replica identity and in the DDL's own transaction). Postgres sends one after any change of the
+  table's definition, before its next change. The message shows the key held when its identity is the default or
+  `USING INDEX` and its flagged columns are all the key's (`keyShown`), with no read. Else (`FULL`, the key gone) the
+  same `keyHeldSql` is asked on a connection of its own (`streamKeyHeld`), never the writer's turn or the attachment,
+  and never per batch or on a timer. **The default identity with no column flagged shows the primary key GONE when the
+  change was written** (`keyShownGone`): an immediate primary key the catalog has now was restored since, and refuses
+  the table too (the review of PR 1068: dropped, a duplicate inserted, deleted under `FULL` and the key restored, all
+  before the stream decoded them, a "now" read let the duplicate's INSERT replace the synced row). A DEFERRABLE primary
+  key (never the identity) and a key held by another unique index while the primary key stays dropped are as the first
+  read says. A key not held refuses THAT table as a missing column does (`refuseKey`): out of the stream, marked behind
+  before anything past it is acknowledged, its synced data serving as it was, said in the log, a `stream_failed` event
+  and its error, with the way out (restore the primary key, or poll it by a unique index; never `key:` under
+  replication). Its catch-up asks for the key every `KEY_RETRY_MS`, never a failure's growing back-off nor counted as a
+  failure (`keyRetryAt`: 7 minutes refused made the next ordinary failure back off 6 hours), reads no row until it
+  holds, and says its wait ONCE, again only when the words change (`keyWaitSaid`; a line and an event a minute
+  otherwise). **Its changes are held only once the stream has passed a position past every commit the key's read could
+  see** (`keyBackPassed`, `visibleLsn`; its mark `KEY_REFUSED_WHY`, so after a restart too): the way out deletes the
+  duplicate and restores the key, often in one transaction, and that DELETE, held or streamed from before the stream
+  decoded it, deleted the duplicate's KEY and with it the synced row. That position is the INSERT position on a primary
+  (a commit's record is inserted before it is made visible), taken back to a page's start when just past its header,
+  and the RECEIVED position on a standby. NEVER the write position (`currentLsn`): an asynchronous commit is visible
+  before its WAL is written (2 to 197 ms, 40 of 40 on the review's server), and the review lost the row so. A table is
+  checked by its STAY, never its `tables()` entry, which is made again at every batch. A read that fails ends the
+  stream, nothing past it acknowledged (fail closed). NOT COVERED: the key dropped, a duplicate written and deleted,
+  and the key restored, all before the stream decodes the first, when the duplicate was written under `FULL` or an
+  identity over other columns, or the key came back as a unique index, not a primary key (docs/DESIGN.md "Logical
+  replication"). DETECTOR: `tests/integration/duck-stream.itest.ts` "a primary key dropped on the database under the
+  stream" and "a key restored with synchronous_commit = off", `tests/duck-stream.test.ts`, `tests/key-held.test.ts`,
+  `tests/duck-sync-schedule.test.ts` "never grows its ordinary back-off".
 - **How a copy is kept current is derived ONCE, by the sync** (`Sync.keptOf`, carried on `Sync.state` as `kept`):
   `mason status` (`kept`: its sync, `syncedAt`, `nextAt`; `streamStatus`'s tables) and EXPLAIN's first line (`keptText`, src/duck/explain.ts) both
   read it, never the poll's ledger (a project switched to replication keeps its last poll there: EXPLAIN said "kept

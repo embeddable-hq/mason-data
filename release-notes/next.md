@@ -48,8 +48,27 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   - If none does, Mason does not sync that table, and the synced data stays as it was. `mason status`, `mason sync`
     and the web page say so. They name the sources file and the key, and the unique index to name instead, if the
     table has one.
-  - A polled table whose primary key is dropped is held to the same check. A table under `sync: replication` is not
-    checked yet.
+  - A polled table whose primary key is dropped is held to the same check.
+  - Mason asks your database again every minute, and syncs the table once the key holds again. The log says that the
+    table waits for its key once, and again only if the reason changes.
+- **A table under `sync: replication` no longer loses a synced row when its primary key is dropped on your
+  database.** Before, a row inserted with the same key as a synced row replaced that row in the synced data, and
+  nothing reported it. This happened with every replica identity, and when the key was dropped in the same
+  transaction as the insert.
+  - Now the stream checks the table's key after any change to the table's definition, before it applies the table's
+    next change. Most tables need no extra query. A table with `REPLICA IDENTITY FULL`, or one whose key is gone,
+    costs one catalog query on a short connection.
+  - If the key no longer keeps the rows apart, Mason stops applying that table's changes and keeps serving its synced
+    data. The other tables keep streaming. `mason status` and the log say why, and what to do: restore the primary
+    key, or poll the table by one of its unique indexes.
+  - Mason asks again every minute, and the log says it once. Once the key is back, one poll catches the table up, and
+    it streams again. This holds when the key's return was committed with `synchronous_commit = off` too.
+  - A row can still be lost in one narrow case, as before this release. The key is dropped, a duplicate row is
+    written, that duplicate is deleted, and the key is restored, all before the stream reads the first of these
+    changes. This can happen while Mason is stopped, or when the stream lags behind your database. It loses a row only
+    if the duplicate was written while the table's replica identity was `FULL` or `USING INDEX`, or if the key came
+    back as a unique index instead of a primary key. To avoid it, make these changes while Mason is running and its
+    stream is current. `mason status` shows how far behind it is.
 - **A unique index with INCLUDE columns can be a table's `key:`.** For `UNIQUE (a) INCLUDE (b)`, `key: [a]` is now
   accepted. Before, it was refused as though no unique index covered `a`.
 - **A table rewritten on your database while Mason read it is no longer served empty or partial.** A rewrite is a
