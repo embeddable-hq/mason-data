@@ -1221,6 +1221,9 @@ export class Sync {
   /** a NAMED publication's column list, of each table it lists the columns of (`verifyPublication`): what the stream's
    *  relation carries of it (`relationOf`) */
   private readonly publishedColumns = new Map<string, readonly string[]>();
+  /** the shape each table's stream relation was last refused under for columns that moved (`refuseStreamed`): refused
+   *  again under it, it backs off, so a relation that never lines up is not caught up again and again */
+  private readonly movedUnder = new Map<string, string | undefined>();
   /** WHAT THE RUN TOOK OF EACH TABLE'S COLUMNS, BY IDENTITY (`_mason.column_identity`, src/duck/column-identity.ts; issue
    *  1073): its oid, and each column's number, the name it was taken under and whether it is synced */
   private readonly columnRecords = new Map<string, ColumnRecord>();
@@ -3215,21 +3218,26 @@ export class Sync {
       await this.store.writer.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.catch_up VALUES (${literal(source)}, ${literal(why)}, now())`);
       this.behind.set(source, { why });
       this.held.delete(source);
-      const when = this.backOff(source, 0);
-      const pub = this.replication!.publication;
       // ITS COLUMNS ARE CHECKED NOW (issue 977): a column renamed or dropped on the database is read again, and the table
       // synced again whole with its columns now — never a way out that narrows an every-column entry
       const checked = t.shape !== undefined && this.onColumnsChanged !== undefined;
       if (checked) { this.shapeChecks.add(source); this.relationCheckedAt.set(source, Date.now()); }
+      // A RELATION WHOSE COLUMNS MOVED (issue 1073: a column the copy does not hold renamed, too) is caught up by one poll
+      // as soon as its columns are read again, never after a back-off; refused again under the same columns, it backs off
+      const moved = "moved" in refusal;
+      const again = moved && this.movedUnder.get(source) === t.shape;
+      if (moved) this.movedUnder.set(source, t.shape);
+      const when = moved && !again && checked ? null : this.backOff(source, 0);
+      const pub = this.replication!.publication;
       const them = missing.length === 1 ? "it" : "them";
       const owned = this.replication!.owned;
       const m = ("moved" in refusal ? `replication: ${source}: ${refusal.moved}, so the stream may name another column's values as one it syncs, and its changes are not applied. `
         : `replication: the stream no longer carries ${source}'s ${cols}, which its synced table holds (a column dropped or renamed on the database` +
         `${owned ? "" : `, or ${pub}'s column list narrowed`}), so its changes are not applied. `) +
-        `${checked ? "Its columns are read again from the database now, and it is synced again whole with them"
+        `${checked ? `Its columns are read again from the database now, and it is synced again whole with them${moved ? " where the columns it syncs changed" : ""}`
           : "It is synced again whole once its columns are read again: at the next start, or at a mason add of it"}. ` +
-        `${owned || "moved" in refusal ? "" : `If ${pub} lists its columns, publish ${them} again (ALTER PUBLICATION ${pub} …). `}` +
-        `Until then it is caught up by one poll again after ${when}`;
+        `${owned || moved ? "" : `If ${pub} lists its columns, publish ${them} again (ALTER PUBLICATION ${pub} …). `}` +
+        (when === null ? "Until then it is caught up by one poll once they are read" : `Until then it is caught up by one poll again after ${when}`);
       this.log(`${source}: ${m}`);
       this.event({ kind: "stream_failed", table: source, message: m });
       await this.record({ ...this.states.get(source)!, error: m });
@@ -3861,6 +3869,7 @@ export class Sync {
     // its record of which column is which goes with it: added again, its entry is taken afresh, by name
     this.columnRecords.delete(source);
     this.unplaced.delete(source);
+    this.movedUnder.delete(source);
     this.states.delete(source);
     this.synced.delete(source);
     this.compactions.delete(source);
