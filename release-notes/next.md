@@ -2,6 +2,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## Before you upgrade
 
+- No table is read again.
 - **Mason now refuses to start when the sources file names a table it cannot sync for the case of its names.** This
   is a table with two columns whose names differ only in case, such as `"Status"` and `status`. It is also two tables
   whose names differ only in case, such as `"Orders"` and `orders`. Before, the first never synced, and the second
