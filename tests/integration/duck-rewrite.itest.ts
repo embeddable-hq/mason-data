@@ -210,7 +210,7 @@ for (const mode of ["poll", "replication"] as const) {
       rewrite = await openTransaction(f.url, "ALTER TABLE t ALTER COLUMN v TYPE int USING v + 0");
       // w added: the table is synced again whole, and its reads wait for the ALTER
       // w added, as mason add adds it: its entry confirmed, so the column the first sync left out is synced again (src/duck/column-identity.ts)
-      const whole = f.sync.setTables([f.whole], { confirmed: ["public.t"] }).then(() => f.sync.once());
+      const whole = f.sync.setTables([f.whole], { confirmed: [{ table: "public.t", shape: f.whole.shape }] }).then(() => f.sync.once());
       await syncWaitsForALock(f.db, f.logged);
       await rewrite.commit();
       await whole;
@@ -238,7 +238,7 @@ for (const mode of ["poll", "replication"] as const) {
       holder = await openTransaction(f.url, "SELECT txid_current()");
       psql(f.url, "ALTER TABLE t ALTER COLUMN v TYPE int USING v + 0");
       // w added, as mason add adds it: its entry confirmed, so the column the first sync left out is synced again (src/duck/column-identity.ts)
-      await f.sync.setTables([f.whole], { confirmed: ["public.t"] });
+      await f.sync.setTables([f.whole], { confirmed: [{ table: "public.t", shape: f.whole.shape }] });
       await f.sync.once();
       await sleep(400);
       await f.sync.once();

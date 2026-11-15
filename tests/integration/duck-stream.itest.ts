@@ -905,7 +905,7 @@ test("the stream says where it is: a table joins and leaves on a line with its p
 
 /** The tables `pick` wrote, set as a run sets them after `mason add`: each entry confirmed, written against the columns
  *  as they are now, so a column an earlier pick left out is synced again (src/duck/column-identity.ts) */
-const setPicked = (sync: Sync, tables: AddedTable[]): Promise<void> => sync.setTables(tables, { confirmed: tables.map((t) => t.source) });
+const setPicked = (sync: Sync, tables: AddedTable[]): Promise<void> => sync.setTables(tables, { confirmed: tables.map((t) => ({ table: t.source, shape: t.shape })) });
 
 /**
  * THE PROJECT AFTER `mason add <table> --columns …` (null: every column): its sources file written as the CLI writes it

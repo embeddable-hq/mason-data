@@ -76,7 +76,10 @@ paths:
   itself and takes a gone name out (the review of PR 1078 served a column renamed away and back). When the file would
   sync it, the table is HELD (`unplaced`): it is not copied, polled, caught up or streamed, it serves what it holds, and
   its line says why with the line to write. Only `mason add` confirms it (through the run, or recorded in `.mason/` while
-  Mason is stopped, src/cli/confirmed.ts), or its entry removed. In a project deployed read-only the committed file is
+  Mason is stopped, src/cli/confirmed.ts), and only for the table's shape as the add read it, or its entry removed. A
+  table is placed against EVERY record of its oid, every entry's and the ones kept by oid
+  (`_mason.column_identity_former`), all read before any is written (issue 1080: two tables or schemas swapped names and
+  the entry syncing every column served the other's left-out column). In a project deployed read-only the committed file is
   the owner's word, the run never writing it: a column that did not move is taken as the file says, and a hold's way
   out is one that works there. Every read checks its columns too: the poll, each chunk of a copy and the stream's read
   of a row again by key (`sourceRows`, issue 1081) ask `pg_identify_object` in their own transaction after the read

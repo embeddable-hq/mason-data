@@ -637,6 +637,13 @@ wrote it (the run writes `exclude:` too), nor whether its author knew of a renam
 column out. The command it suggests names every column, because `mason add` writes the entry anew and would drop the
 file's other excludes, and a plain `mason add` leaves secret-looking columns out again.
 
+**A confirmation is of the table the add read** (the third re-check of PR 1078). An add made while Mason was stopped
+confirmed whatever table its name meant at the next start. `a` and the left-out `c` swapped after the add, and the start
+served the secret as `a`. So each confirmation carries the table's shape as the add read it: its oid, and each column's
+number, name and type. The start, or the run after an add through it, takes the entry afresh only when the table's
+shape is still that one. Otherwise the table is placed as the run took it before, held where it must be, and the log
+says the add was no confirmation.
+
 **A read-only project** (the re-check of PR 1078). There `mason add` is refused, and the committed file is how the
 owner changes the project; the run never writes it. So the file confirms a column left out that did not move: the same
 column, under the name it was last taken under. A column that moved stays held, and the hold names a way out that works
@@ -646,7 +653,22 @@ there: the entry taken out and put back, each started with.
 into its place, has another oid. The shape begins with the oid, so the change is seen and the table's columns are read
 again; before, its shape read as the same and every poll failed for ever. The record of another oid cannot tell its
 columns apart by number, so they are decided by name, and a name the old table left out stays out: a file that syncs one
-holds the table. Its synced data is another table's, so its watermark is forgotten and it is read again whole.
+holds the table. Its synced data is another table's, so its watermark is forgotten and it is read again whole. Under
+`sync: replication` such a table is not read again by itself: the stream no longer carries it.
+
+**Tables that swap names** (issue 1080, the third re-check of PR 1078). The record was kept by the entry's name. Two
+tables swapped names in one transaction, `t` leaving `c` out and `u` syncing every column. `u` then named `t`'s old
+table, with an oid its own record did not have, so it was decided by name, and it served every old value of `c`. Two
+schemas swapped did the same. So a table is placed against every record of its oid, whichever entry holds it, and a
+column any of them left out stays out. Every record is read before any is written. A table can move between entries in
+two steps, each found by its own read (one table's poll sees the swap before the other's). So the record a table leaves
+behind when it is taken as another relation is kept by its oid (`_mason.column_identity_former`), as is the record a
+table is held by when that record is not its own. A table taken as that oid makes it its own record. The entry that now
+names the secret's table is held, and the hold names the entry that left the column out. The table that moved the other
+way is read again whole, its own entry's columns left out as before. A read-only project's file confirms only a column
+of its entry's own record, so a swap holds there too. Removing the held entry forgets the record that holds it, as a
+removal forgets its own. The cost: two tables swapped back hold the entry that syncs every column, because the other
+entry's record of its table left that column out, until the person confirms.
 
 **A row read again from the database** (issue 1081). Before Postgres 18, the stream carries no generated column, so
 Mason reads such a row again by key and by column name. The read checks its columns' identity after it, in its own
@@ -671,7 +693,7 @@ autovacuum's statistics too), so the check is a short connection now and then, n
 **What is left.** The first start of this release has no record, so a rename made before it is taken by name, as
 before.
 
-**Where.** `src/duck/column-identity.ts`, `src/duck/sync.ts` (`placeColumns`, `readStillPlaced`, `relationOf`, `verifyStreamed`),
+**Where.** `src/duck/column-identity.ts`, `src/cli/confirmed.ts`, `src/duck/sync.ts` (`placeColumns`, `readStillPlaced`, `relationOf`, `verifyStreamed`),
 `src/duck/stream.ts` (`relationMoved`), `src/cdc/shape.ts` (`identitySql`); `tests/duck-column-identity.test.ts`,
 `tests/integration/cli-column-identity.itest.ts`.
 

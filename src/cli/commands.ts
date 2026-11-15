@@ -1463,7 +1463,7 @@ export async function add(argv: string[]): Promise<number> {
         const ok = addEntry(down.edit(), db, table, columns, key, how);
         // ITS ENTRY CONFIRMED (src/cli/confirmed.ts): written against the columns as they are now, so the next start takes
         // it afresh, a column it left out before included — as a run takes an add at once (a sync's own change is no choice of columns)
-        if (how.keep !== true) confirmEntries(where.project.dir, [ok.table]);
+        if (how.keep !== true) confirmEntries(where.project.dir, [{ table: ok.table, shape: db.tables.find((t) => t.source === ok.table)?.shape }]);
         return ok;
       });
       if ("ok" in r && r.ok.disk !== null && "fits" in r.ok.disk) ahead.set(table, r.ok.disk.estimateBytes);

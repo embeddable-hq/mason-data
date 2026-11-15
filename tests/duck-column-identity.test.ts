@@ -10,10 +10,12 @@ import assert from "node:assert/strict";
 
 type Recorded = { attnum: number; name: string; synced: boolean };
 type Record_ = { oid: number; columns: Recorded[] };
-type Verdict = { kind: "unknown" } | { kind: "taken"; record: Record_; replaced?: true } | { kind: "held"; why: string; conflicts: Array<{ name: string; was: string }> };
+type Verdict = { kind: "unknown" } | { kind: "taken"; record: Record_; replaced?: true } | { kind: "held"; why: string; conflicts: Array<{ name: string; was: string; from?: string }>; record?: Record_ };
 interface Module {
-  identityVerdict(t: { source: string; oid?: number; shape?: string; synced: readonly string[]; entry?: { at: string; name: string; columns: readonly string[] | null; exclude: readonly string[] } }, record: Record_ | undefined, confirmed: boolean, readOnly?: boolean): Verdict;
+  identityVerdict(t: { source: string; oid?: number; shape?: string; synced: readonly string[]; entry?: { at: string; name: string; columns: readonly string[] | null; exclude: readonly string[] } }, record: Record_ | undefined, confirmed: boolean, readOnly?: boolean,
+    carried?: ReadonlyArray<Record_ & { from: string }>): Verdict;
   recordOf(oid: unknown, columns: unknown): Record_ | null;
+  unionOut?(a: readonly Recorded[], b: readonly Recorded[]): Recorded[];
 }
 
 // loaded here, not imported: the file loads at a commit without the module, and fails by name there (scripts/fails-without.ts)
@@ -187,6 +189,43 @@ test("in a read-only project the committed file syncs a column left out that did
     "Its entry would sync it. A column the file left out is synced again only once you confirm it, so Mason holds the table and serves its synced data as it was. " +
     "To keep it out, write exclude: [c, d] on mason/sources/app.yml: tables.t in the committed sources file, and start Mason with it. " +
     "To sync it, take the entry out of the committed file and start Mason with it, then put the entry back and start Mason again: the table is synced again whole");
+});
+
+test("two tables swapped on the database (issue 1080): the column one entry left out stays out under the entry that names its table now, and that entry is held", async () => {
+  const { identityVerdict } = await load();
+  const T = OID, U = OID + 1;
+  // t: { exclude: [c] } took relation T; u: {} took relation U; then their names were swapped in one transaction
+  const tRecord = { oid: T, columns: [{ attnum: 1, name: "id", synced: true }, { attnum: 2, name: "a", synced: true }, { attnum: 3, name: "c", synced: false }] };
+  const uRecord = { oid: U, columns: [{ attnum: 1, name: "id", synced: true }, { attnum: 2, name: "a", synced: true }, { attnum: 3, name: "c", synced: true }] };
+  const cols = shape(["id", 1], ["a", 2], ["c", 3]);
+  const uNow = { source: "public.u", oid: T, shape: cols, synced: ["id", "a", "c"], entry: { at: "mason/sources/app.yml: tables.u", name: "u", columns: null, exclude: [] } };
+  // by its own record alone (main, and this PR before the fix) u was a table made again, decided by name: c synced
+  const v = identityVerdict(uNow, uRecord, false, false, [{ ...tRecord, from: "public.t" }]);
+  assert.equal(v.kind, "held");
+  assert.deepEqual((v as { conflicts: unknown }).conflicts, [{ name: "c", was: "c", from: "public.t" }]);
+  assert.equal((v as { why: string }).why,
+    "public.u is not synced: c is a column the sources file left out of public.t, and public.u is that table now (tables or schemas were renamed on the database). " +
+    "Its entry would sync it. A column the file left out is synced again only once you confirm it, so Mason holds the table and serves its synced data as it was. " +
+    "To keep it out, write exclude: [c] on mason/sources/app.yml: tables.u, then run mason stop && mason start. " +
+    "To sync it, run mason add u --columns id,a,c while Mason runs");
+  // what holds it is the record of T, by number: kept so, a restart holds it the same
+  assert.deepEqual((v as { record: unknown }).record, { oid: T, columns: [{ attnum: 1, name: "id", synced: true }, { attnum: 2, name: "a", synced: true }, { attnum: 3, name: "c", synced: false }] });
+  // a read-only project's committed file confirms only a column of the entry's OWN record: held there too
+  assert.equal(identityVerdict(uNow, uRecord, false, true, [{ ...tRecord, from: "public.t" }]).kind, "held");
+  // the same under a name the entry never synced before (a table renamed into a new entry's name)
+  assert.equal(identityVerdict(uNow, undefined, false, false, [{ ...tRecord, from: "public.t" }]).kind, "held");
+  // the entry confirmed against the table as it is now: taken, and read again whole
+  assert.deepEqual(identityVerdict(uNow, uRecord, true, false, [{ ...tRecord, from: "public.t" }]), { kind: "taken", record: { oid: T, columns: uRecord.columns }, replaced: true });
+  // t, now relation U: no worse off — its column c still out by its own file, taken and read again whole
+  const tNow = identityVerdict({ source: "public.t", oid: U, shape: cols, synced: ["id", "a"], entry: every(["c"]) }, tRecord, false, false, [{ ...uRecord, from: "public.u" }]);
+  assert.deepEqual(tNow, { kind: "taken", record: { oid: U, columns: tRecord.columns }, replaced: true });
+});
+
+test("two records of one relation are one: a column either left out is left out", async () => {
+  const { unionOut } = await load();
+  assert.ok(unionOut !== undefined, "src/duck/column-identity.ts has no unionOut");
+  assert.deepEqual(unionOut([{ attnum: 1, name: "id", synced: true }, { attnum: 3, name: "c", synced: true }], [{ attnum: 3, name: "salary", synced: false }, { attnum: 2, name: "a", synced: true }]),
+    [{ attnum: 1, name: "id", synced: true }, { attnum: 2, name: "a", synced: true }, { attnum: 3, name: "salary", synced: false }]);
 });
 
 test("a record is read back as it was written, and one this module did not write reads as none", async () => {

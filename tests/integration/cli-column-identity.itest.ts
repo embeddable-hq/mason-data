@@ -16,6 +16,12 @@
  *   file synced `c`, the secret, at every look and after a restart.
  * - `r_t`: a rename while Mason was stopped, then a start from the file as it was (`salary` renamed `pay2`, a new
  *   `salary` added): the start synced `pay2`.
+ * - `oa_t`: the third re-check of PR 1078. `mason add oa_t --columns id,a,b` while Mason is stopped, then `a` and the
+ *   left-out `c` swapped before the start: the add's confirmation applied to the swapped table, and the secret was
+ *   served as `a`. A confirmation is of the table the add read.
+ * - `w_t` and `w_u` (issue 1080): two tables, `w_t` leaving `c` out and `w_u` syncing every column, swap names in one
+ *   transaction: `w_u` served every old value of `c`. `s1.st` and `s2.st`: the same with two schemas swapped. `m_t`
+ *   renamed into `m_u`'s name (`m_u` dropped, `m_t`'s entry removed) while Mason is stopped: the same at the start.
  * Each change is followed by an update of every row, so a poll or the stream reads each one again. At every look no value
  * marked SECRET is served, and each held table's line in `mason status` says why with the line to write. The ways out
  * the lines name sync the tables again without the secret.
@@ -67,7 +73,7 @@ async function until(what: string, check: () => boolean, ms = 180_000): Promise<
 type Mode = "poll 1s" | "replication";
 interface Ran { status: number | null; stdout: string; stderr: string; json: Record<string, unknown> }
 
-const TABLES = ["s_t", "s_u", "l_t", "i_t", "i_w", "i_u", "n_t", "b_t", "r_t", "d_t", "o_t"];
+const TABLES = ["s_t", "s_u", "l_t", "i_t", "i_w", "i_u", "n_t", "b_t", "r_t", "d_t", "o_t", "oa_t", "w_t", "w_u", "s1.st", "s2.st", "m_t", "m_u"];
 const SQL = [
   "CREATE TABLE s_t (id int PRIMARY KEY, a text, salary text, b text); INSERT INTO s_t SELECT g, 'p_a' || g, 'SECRET_' || g, 'p_b' || g FROM generate_series(1, 4) g",
   "CREATE TABLE s_u (id int PRIMARY KEY, v text, w text); INSERT INTO s_u SELECT g, 'p_v' || g, 'p_w' || g FROM generate_series(1, 4) g",
@@ -80,15 +86,29 @@ const SQL = [
   "CREATE TABLE r_t (id int PRIMARY KEY, a text, salary text); INSERT INTO r_t SELECT g, 'p_a' || g, 'SECRET_' || g FROM generate_series(1, 4) g",
   "CREATE TABLE d_t (id int PRIMARY KEY, a text, c text, b text); INSERT INTO d_t SELECT g, 'p_a' || g, 'SECRET_' || g, 'p_b' || g FROM generate_series(1, 4) g",
   "CREATE TABLE o_t (id int PRIMARY KEY, a text, c text); INSERT INTO o_t SELECT g, 'p_a' || g, 'p_c' || g FROM generate_series(1, 4) g",
+  "CREATE TABLE oa_t (id int PRIMARY KEY, a text, c text, b text); INSERT INTO oa_t SELECT g, 'p_a' || g, 'SECRET_' || g, 'p_b' || g FROM generate_series(1, 4) g",
+  // two of each pair, told apart by their rows: the one leaving c out holds the secret
+  "CREATE TABLE w_t (id int PRIMARY KEY, a text, c text, b text); INSERT INTO w_t SELECT g, 'p_ta' || g, 'SECRET_' || g, 'p_tb' || g FROM generate_series(1, 4) g",
+  "CREATE TABLE w_u (id int PRIMARY KEY, a text, c text, b text); INSERT INTO w_u SELECT g, 'p_ua' || g, 'p_uc' || g, 'p_ub' || g FROM generate_series(1, 5) g",
+  "CREATE SCHEMA s1; CREATE SCHEMA s2",
+  "CREATE TABLE s1.st (id int PRIMARY KEY, a text, c text, b text); INSERT INTO s1.st SELECT g, 'p_1a' || g, 'SECRET_' || g, 'p_1b' || g FROM generate_series(1, 4) g",
+  "CREATE TABLE s2.st (id int PRIMARY KEY, a text, c text, b text); INSERT INTO s2.st SELECT g, 'p_2a' || g, 'p_2c' || g, 'p_2b' || g FROM generate_series(1, 5) g",
+  "CREATE TABLE m_t (id int PRIMARY KEY, a text, c text, b text); INSERT INTO m_t SELECT g, 'p_ma' || g, 'SECRET_' || g, 'p_mb' || g FROM generate_series(1, 4) g",
+  "CREATE TABLE m_u (id int PRIMARY KEY, a text, c text, b text); INSERT INTO m_u SELECT g, 'p_na' || g, 'p_nc' || g, 'p_nb' || g FROM generate_series(1, 5) g",
 ].join("; ");
 const ENTRIES = "  s_t:\n    exclude: [salary]\n  s_u: {}\n  l_t:\n    columns: [id, amount_total]\n  i_t:\n    exclude: [salary]\n  i_w:\n    exclude: [salary]\n" +
-  "  i_u:\n    exclude: [note]\n  n_t:\n    exclude: [salary]\n  b_t:\n    exclude: [c]\n  r_t:\n    exclude: [salary]\n  d_t:\n    exclude: [c]\n  o_t:\n    exclude: [c]\n";
+  "  i_u:\n    exclude: [note]\n  n_t:\n    exclude: [salary]\n  b_t:\n    exclude: [c]\n  r_t:\n    exclude: [salary]\n  d_t:\n    exclude: [c]\n  o_t:\n    exclude: [c]\n" +
+  "  oa_t:\n    exclude: [c]\n  w_t:\n    exclude: [c]\n  w_u: {}\n  s1.st:\n    exclude: [c]\n  s2.st: {}\n  m_t:\n    exclude: [c]\n  m_u: {}\n";
 
 /** a table held, its line as `mason status` says it: the column it would sync, the column it was left out as (the same
  *  when it was not renamed), and the line that keeps it out */
 const held = (table: string, column: string, was: string, line: string): RegExp => new RegExp(`^public\\.${table} is not synced: ` +
   (column === was ? `${column} is a column the sources file left out\\. ` : `its columns were renamed on the database, and ${column} is the column the sources file left out as ${was}\\. `) +
   `.*To keep it out, write ${line.replace(/[[\]]/g, "\\$&")} on mason/sources/[^ ]+\\.yml: tables\\.${table}, then run mason stop && mason start\\. To sync it, run mason add ${table} --columns `);
+
+/** a table held by the record of another entry, whose table it is now (issue 1080) */
+const heldFrom = (table: string, from: string): RegExp => new RegExp(`^${table.replace(".", "\\.")} is not synced: c is a column the sources file left out of ${from.replace(".", "\\.")}, ` +
+  `and ${table.replace(".", "\\.")} is that table now \\(tables or schemas were renamed on the database\\)\\. .*To keep it out, write exclude: \\[c\\] on mason/sources/[^ ]+\\.yml: tables\\.`);
 
 /** A project of its own on a database of its own, its tables made by `sql` and its entries `entries`, started and
  *  synced; `env` beside the run's own (MASON_PROJECT_READONLY=1). What a test reads of it: */
@@ -130,7 +150,8 @@ async function project(mode: Mode, sql: string, entries: string, tables: readonl
   ok(mason("wait", "--timeout", "180", "--json"), "mason wait");
   const api = ok(mason("user", "add", "it", "--json"), "mason user add").json.url as string;
 
-  const served = (table: string): { columns: string; rows: string } | null => psqlWithHeader(api, `SELECT * FROM public.${table} ORDER BY id`);
+  const qualified = (table: string): string => table.includes(".") ? table : `public.${table}`;
+  const served = (table: string): { columns: string; rows: string } | null => psqlWithHeader(api, `SELECT * FROM ${qualified(table)} ORDER BY id`);
   /** no value marked SECRET served by any table, at this look */
   const neverSecret = (when: string): void => {
     for (const t of tables) {
@@ -146,8 +167,12 @@ async function project(mode: Mode, sql: string, entries: string, tables: readonl
   const lines = (): Map<string, { error: string | null; state: string | undefined }> => new Map(
     ((mason("status", "--json").json.tables as Array<{ table: string; error: string | null; sync?: { state: string } }> | undefined) ?? [])
       .map((t) => [t.table.replace(/^public\./, ""), { error: t.error, state: t.sync?.state }]));
-  /** the stream sees a definition change only with a row change after it */
-  const bump = (): void => { if (mode === "replication") psql(dbUrl, tables.map((t) => `UPDATE ${t} SET id = id WHERE id = 1`).join("; ")); };
+  /** the stream sees a definition change only with a row change after it: each table there is now (a form renames some away) */
+  const bump = (): void => {
+    if (mode !== "replication") return;
+    psql(dbUrl, `DO $$ DECLARE r text; BEGIN FOREACH r IN ARRAY ARRAY[${tables.map((t) => `'${qualified(t)}'`).join(", ")}] LOOP ` +
+      "IF to_regclass(r) IS NOT NULL THEN EXECUTE format('UPDATE %s SET id = id WHERE id = 1', r); END IF; END LOOP; END $$");
+  };
   /** waits until every check holds at one look, holding that no secret is served at each */
   const all = async (what: string, checks: Record<string, (l: ReturnType<typeof lines>) => boolean>): Promise<void> => {
     let failing: string[] = [];
@@ -176,13 +201,17 @@ async function identity(mode: Mode): Promise<void> {
   psql(dbUrl, "ALTER TABLE i_u DROP COLUMN note");
   psql(dbUrl, "BEGIN; ALTER TABLE n_t RENAME salary TO pay; ALTER TABLE n_t ADD COLUMN salary text DEFAULT 'p_new'; COMMIT");
   psql(dbUrl, "ALTER TABLE b_t RENAME c TO d");
+  // ISSUE 1080: two tables' names swapped, and two schemas'
+  psql(dbUrl, "BEGIN; ALTER TABLE w_t RENAME TO w_tmp; ALTER TABLE w_u RENAME TO w_t; ALTER TABLE w_tmp RENAME TO w_u; COMMIT");
+  psql(dbUrl, "BEGIN; ALTER SCHEMA s1 RENAME TO s_tmp; ALTER SCHEMA s2 RENAME TO s1; ALTER SCHEMA s_tmp RENAME TO s2; COMMIT");
   // d_t, THE RE-CHECK OF PR 1078 (poll): the table dropped and made again with the same columns, then written to. It failed
   // every poll for ever (its shape read as the same, so it was never read again with its new oid)
   if (mode === "poll 1s") {
     psql(dbUrl, "BEGIN; DROP TABLE d_t; CREATE TABLE d_t (id int PRIMARY KEY, a text, c text, b text); " +
       "INSERT INTO d_t SELECT g, 'p_new_a' || g, 'SECRET_' || g, 'p_b' || g FROM generate_series(1, 6) g; COMMIT");
   }
-  psql(dbUrl, TABLES.filter((t) => t !== "r_t" && t !== "d_t").map((t) => `UPDATE ${t} SET id = id`).join("; "));
+  psql(dbUrl, TABLES.filter((t) => t !== "r_t" && t !== "d_t" && t !== "m_t" && t !== "m_u").map((t) => `UPDATE ${t} SET id = id`).join("; "));
+  psql(dbUrl, "INSERT INTO w_t VALUES (30, 'p_late_a', 'p_late_c', 'p_late_b'); INSERT INTO s1.st VALUES (30, 'p_late_a', 'p_late_c', 'p_late_b')");
   await all("every form held, said on its line", {
     s_t: (l) => held("s_t", "a", "salary", "exclude: [salary, a]").test(errorOf(l, "s_t")),
     // two synced columns swapped: synced again whole, each value under its new name (never the old copy's)
@@ -196,6 +225,11 @@ async function identity(mode: Mode): Promise<void> {
     b_t: () => /^ {2}b_t:\n {4}exclude: \[d\]\n/m.test(fs.readFileSync(file, "utf8")),
     // made again: read again whole by itself, its c still left out by its name
     d_t: (l) => mode !== "poll 1s" || (equal("d_t", ["id", "a", "b"]) && synced(l, "d_t")),
+    // the table that took the secret's table held; the one that left it is no worse off: read again whole, c still out
+    w_u: (l) => heldFrom("public.w_u", "public.w_t").test(errorOf(l, "w_u")),
+    w_t: (l) => equal("w_t", ["id", "a", "b"]) && synced(l, "w_t"),
+    "s2.st": (l) => heldFrom("s2.st", "s1.st").test(errorOf(l, "s2.st")),
+    "s1.st": (l) => equal("s1.st", ["id", "a", "b"]) && synced(l, "s1.st"),
   });
   assert.equal(served("s_t")?.columns, "id\ta\tb", "a held table serves its synced data as it was");
   assert.match(served("s_t")!.rows, /^1\tp_a1\tp_b1$/m, "its old values, never the salary");
@@ -227,6 +261,16 @@ async function identity(mode: Mode): Promise<void> {
   assert.ok(before.includes("  s_t:\n    exclude: [salary]\n"), before);
   fs.writeFileSync(file, before.replace("  s_t:\n    exclude: [salary]\n", "  s_t:\n    exclude: [salary, a]\n"));
   ok(mason("add", "o_t", "--columns", "id,a,c", "--json"), "mason add o_t --columns id,a,c, with Mason stopped");
+  // oa_t added with its columns as they are, then a and the left-out c swapped before the start: the add confirmed
+  // another table than the one it read
+  ok(mason("add", "oa_t", "--columns", "id,a,b", "--json"), "mason add oa_t --columns id,a,b, with Mason stopped");
+  psql(dbUrl, "BEGIN; ALTER TABLE oa_t RENAME a TO tmp; ALTER TABLE oa_t RENAME c TO a; ALTER TABLE oa_t RENAME tmp TO c; COMMIT; " +
+    "INSERT INTO oa_t VALUES (9, 'p_a9', 'SECRET_9', 'p_b9')");
+  // m_t renamed into m_u's name, its entry removed
+  psql(dbUrl, "BEGIN; DROP TABLE m_u; ALTER TABLE m_t RENAME TO m_u; COMMIT; UPDATE m_u SET id = id");
+  const added = fs.readFileSync(file, "utf8");
+  assert.ok(added.includes("  m_t:\n    exclude: [c]\n"), added);
+  fs.writeFileSync(file, added.replace("  m_t:\n    exclude: [c]\n", ""));
   ok(mason("start", "--json"), "mason start from the file as it was, s_t's line written");
   await all("after the restart", {
     r_t: (l) => held("r_t", "pay2", "salary", "exclude: [salary, pay2]").test(errorOf(l, "r_t")),
@@ -237,6 +281,14 @@ async function identity(mode: Mode): Promise<void> {
     s_t: (l) => equal("s_t", ["id", "b"]) && synced(l, "s_t"),
     // the add made while Mason was stopped: synced with c at the start, as its next step said, never held
     o_t: (l) => equal("o_t", ["id", "a", "c"]) && synced(l, "o_t"),
+    // the table changed after its add read it: held, the add no confirmation
+    oa_t: (l) => /^public\.oa_t is not synced: its columns were renamed on the database, and a is the column the sources file left out as c\. /.test(errorOf(l, "oa_t")),
+    // held after a restart as before it
+    w_u: (l) => heldFrom("public.w_u", "public.w_t").test(errorOf(l, "w_u")),
+    w_t: (l) => equal("w_t", ["id", "a", "b"]) && synced(l, "w_t"),
+    "s2.st": (l) => heldFrom("s2.st", "s1.st").test(errorOf(l, "s2.st")),
+    // renamed into another entry's name while stopped
+    m_u: (l) => heldFrom("public.m_u", "public.m_t").test(errorOf(l, "m_u")),
   });
   for (let i = 0; i < 6; i++) { neverSecret("after the restart"); await sleep(500); }
   ok(mason("stop", "--json"), "mason stop");

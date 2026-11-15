@@ -6,6 +6,11 @@
  * command said the sync begins at mason start (the re-check of PR 1078). So the command records which tables it
  * confirmed, here in `.mason/` (the machine's, never the project's files), and the next start takes those entries
  * afresh, then forgets them (src/cli/dev.ts).
+ *
+ * A CONFIRMATION IS OF THE TABLE THE ADD READ (the third re-check of PR 1078): each carries the table's shape as the
+ * add read it (src/cli/preflight.ts `shape`: its oid, and each column's name, type and number). Columns renamed on the
+ * database before the start (a left-out column swapped into a name the entry syncs) change it, and the start takes the
+ * entry as it took it before, holding the table (src/duck/sync.ts `placeColumns`).
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -13,9 +18,12 @@ import { replaceFile } from "../lib/disk-full.ts";
 
 export const CONFIRMED_FILE = "confirmed-entries.json";
 
-/** The tables `mason add` confirmed while Mason was stopped (`schema.table`), none when there is no record; a record
- *  this module did not write is said by its caller and read as none. */
-export function readConfirmed(dir: string): { tables: string[] } | { problem: string } {
+/** A table `mason add` confirmed, and its shape when the add read it (undefined: the catalog gave none). */
+export interface Confirmation { table: string; shape: string | undefined }
+
+/** The tables `mason add` confirmed while Mason was stopped, none when there is no record; a record this module did not
+ *  write is said by its caller and read as none. */
+export function readConfirmed(dir: string): { tables: Confirmation[] } | { problem: string } {
   let text: string;
   try { text = fs.readFileSync(path.join(dir, CONFIRMED_FILE), "utf8"); }
   catch (e) {
@@ -30,15 +38,19 @@ export function readConfirmed(dir: string): { tables: string[] } | { problem: st
     throw e;
   }
   const tables = (parsed as { tables?: unknown } | null)?.tables;
-  if (!Array.isArray(tables) || !tables.every((t) => typeof t === "string")) return { problem: `.mason/${CONFIRMED_FILE} does not list tables` };
-  return { tables };
+  const one = (t: unknown): t is { table: string; shape: string | null } => typeof t === "object" && t !== null
+    && typeof (t as { table?: unknown }).table === "string" && (typeof (t as { shape?: unknown }).shape === "string" || (t as { shape?: unknown }).shape === null);
+  if (!Array.isArray(tables) || !tables.every(one)) return { problem: `.mason/${CONFIRMED_FILE} does not list tables` };
+  return { tables: tables.map((t) => ({ table: t.table, shape: t.shape ?? undefined })) };
 }
 
-/** `tables` recorded as confirmed by `mason add` while Mason is stopped, beside those recorded before. */
-export function confirmEntries(dir: string, tables: readonly string[]): void {
+/** `tables` recorded as confirmed by `mason add` while Mason is stopped, beside those recorded before: a table added
+ *  again is recorded as this add read it. */
+export function confirmEntries(dir: string, tables: readonly Confirmation[]): void {
   const now = readConfirmed(dir);
-  const before = "tables" in now ? now.tables : [];
-  replaceFile(path.join(dir, CONFIRMED_FILE), `${JSON.stringify({ tables: [...new Set([...before, ...tables])] })}\n`);
+  const all = new Map(("tables" in now ? now.tables : []).map((t) => [t.table, t.shape]));
+  for (const t of tables) all.set(t.table, t.shape);
+  replaceFile(path.join(dir, CONFIRMED_FILE), `${JSON.stringify({ tables: [...all].map(([table, shape]) => ({ table, shape: shape ?? null })) })}\n`);
 }
 
 /** The record forgotten, once a start took its entries (`readConfirmed`). */
