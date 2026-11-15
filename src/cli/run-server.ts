@@ -290,6 +290,11 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
       // its last sync asked by hand in this run (mason sync, the page's Sync now; src/cli/sync-by-hand.ts): syncing,
       // then what it did or why it failed — `POST /api/sync` answers as it starts, and the page follows it here
       ...(byHand !== null ? { syncByHand: byHand } : {}),
+      // THE RUN'S OWN SYNC OF IT RUNNING NOW, and since when (issue 1011): `copy` its whole read (a first sync, or read
+      // again whole), `catch-up` the one poll after it — the page's Sync events lists it while it runs. A compaction is
+      // no sync of the database's rows, and is not said here
+      ...(c?.rebuilding !== undefined && c.rebuilding !== "compact" && c.rebuildingSince !== undefined
+        ? { rebuilding: { kind: c.rebuilding, startedAt: c.rebuildingSince } } : {}),
     };
   });
   return {
