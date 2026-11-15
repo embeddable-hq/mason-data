@@ -177,8 +177,9 @@ test("a stop while a first sync's chunks wait on the source ends within seconds,
     await nothingLeftOnSource(url);
     const said = w.logged.slice(from).join("\n");
     assert.ok(!/failed|tried again/.test(said), `a stop, never a failure\n${said}`);
-    // the stop names no secret and no URL
-    assert.ok(!said.includes(new URL(url).password || "\u0000never") && !said.includes(url), "the stop's lines name no secret");
+    // the stop names no URL and no password (a password's value is masked where words repeat it, never searched for as
+    // a substring: a common one is a word of any log line)
+    assert.ok(!said.includes(url) && !/password=(?!\*)/.test(said), "the stop's lines name no URL and no password");
     await w.close();
     // the committed chunks are kept: the next start resumes from them, the lock let go
     lock.release();
