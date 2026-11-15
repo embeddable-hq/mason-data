@@ -212,9 +212,13 @@ paths:
   and never per batch or on a timer. A key not held refuses THAT table as a missing column does (`refuseKey`): out of
   the stream, marked behind before anything past it is acknowledged, its synced data serving as it was, said in the
   log, a `stream_failed` event and its error, with the way out (restore the primary key, or poll it by a unique index;
-  never `key:` under replication). Its catch-up asks for the key in its own snapshot every `KEY_RETRY_MS`, never a
-  failure's growing back-off, and reads no row until it holds. A read that fails ends the stream, nothing past it
-  acknowledged (fail closed). NOT COVERED: under `FULL` or an identity over other columns, a key dropped and restored
+  never `key:` under replication). Its catch-up asks for the key every `KEY_RETRY_MS`, never a failure's growing
+  back-off, and reads no row until it holds. **Its changes are held only once the stream has passed the database's
+  position read just after the key was found back** (`keyBackPassed`, its mark `KEY_REFUSED_WHY`, so after a restart
+  too): the way out deletes the duplicate and restores the key, often in one transaction, and that DELETE, held or
+  streamed from before the stream decoded it, deleted the duplicate's KEY and with it the synced row (all four tables of
+  the itest, the gate off). A table is checked by its STAY, never its `tables()` entry, which is made again at every
+  batch. A read that fails ends the stream, nothing past it acknowledged (fail closed). NOT COVERED: under `FULL` or an identity over other columns, a key dropped and restored
   with a duplicate written and gone between, all before the stream decodes them (docs/DESIGN.md "Logical
   replication"). DETECTOR: `tests/integration/duck-stream.itest.ts` "a primary key dropped on the database under the
   stream", `tests/duck-stream.test.ts`, `tests/key-held.test.ts`.

@@ -1252,7 +1252,10 @@ test("a primary key dropped on the database under the stream never loses a synce
   const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", { slot: `${tag}_pk`, publication: "app_pub", owned: false }, { keyRetryMs: 1_000 });
   const reader = await store.instance.connect();
   const read = async (sql: string): Promise<string> => ((await reader.runAndReadAll(sql)).getRowsJS() as unknown[][]).map((r) => r.map((x) => x === null ? "" : String(x)).join("\t")).join("\n");
-  const same = async (t: string): Promise<boolean> => await read(`SELECT id, v, code FROM public.${t} ORDER BY ALL`) === psql(url, `SELECT id, v, code FROM ${t} ORDER BY 1, 2, 3`);
+  // b's 100,000 bulk rows (below) by their count, every other row by its values
+  const same = async (t: string): Promise<boolean> =>
+    await read(`SELECT id, v, code FROM public.${t} WHERE id < 100 ORDER BY ALL`) === psql(url, `SELECT id, v, code FROM ${t} WHERE id < 100 ORDER BY 1, 2, 3`) &&
+    await read(`SELECT count(*) FROM public.${t}`) === psql(url, `SELECT count(*) FROM ${t}`);
   try {
     await sync.open();
     void sync.setTables(await pick(parsed.source, folder, tables.map((t) => [`public.${t}`, null] as const)));
@@ -1294,18 +1297,27 @@ test("a primary key dropped on the database under the stream never loses a synce
     assert.equal(d.state, "catching-up");
     assert.match(d.why ?? "", /^caught up by one poll after the database stopped keeping its rows apart by its key/);
     // its catch-up asks for the key and is refused, reading nothing, until the key is back
-    await until(() => logged.slice(from).some((l) => /^public\.d: its catch-up poll failed \(.*when Mason asks the database for its key again\): .*no longer has its primary key/.test(l)), "d's catch-up is refused for its key", logged, 30_000);
+    await until(() => logged.slice(from).some((l) => /^public\.d: its catch-up (waits for its key|poll failed) \(.*when Mason asks the database for its key again\): .*no longer has its primary key/.test(l)), "d's catch-up is refused for its key", logged, 30_000);
     assert.equal(await read("SELECT id, v FROM public.d WHERE id = 3"), "3\tv3");
     // a change while it is refused: its catch-up reads it
     psql(url, "INSERT INTO d VALUES (7, 'while refused', 'c7')");
 
-    // THE WAY OUT: the duplicate gone and the key restored (a table with no identity takes no DELETE: FULL for it)
-    for (const t of ["d", "f", "i", "s"]) {
-      psql(url, `ALTER TABLE ${t} REPLICA IDENTITY FULL; DELETE FROM ${t} WHERE v = 'twin'; ALTER TABLE ${t} ADD PRIMARY KEY (id); ` +
-        `ALTER TABLE ${t} REPLICA IDENTITY ${t === "f" ? "FULL" : t === "i" ? "USING INDEX i_code" : "DEFAULT"}`);
-    }
+    // THE WAY OUT: the duplicate gone and the key restored (a table with no identity takes no DELETE: FULL for it), in
+    // ONE transaction that first writes 100,000 rows of b, so the stream decodes it for seconds after it commits while
+    // the catch-ups, asked every second, already see the key back. The DELETE of a duplicate is a delete of its key:
+    // held or streamed from before the stream passed this transaction, it removed the synced row sharing the key
+    psql(url, "INSERT INTO b SELECT g, 'bulk', 'c' || g FROM generate_series(100, 100099) g; " + ["d", "f", "i", "s"].map((t) =>
+      `ALTER TABLE ${t} REPLICA IDENTITY FULL; DELETE FROM ${t} WHERE v = 'twin'; ALTER TABLE ${t} ADD PRIMARY KEY (id); ` +
+      `ALTER TABLE ${t} REPLICA IDENTITY ${t === "f" ? "FULL" : t === "i" ? "USING INDEX i_code" : "DEFAULT"};`).join(" "));
     const caught = (t: string): boolean => logged.slice(from).some((l) => l.startsWith(`caught up public.${t} by one poll after the database stopped keeping its rows apart by its key`));
     await until(() => ["d", "f", "i", "s"].every(caught), "every refused table caught up, said", logged, 60_000);
+    // the stream past the restoring transaction (b's 100,000 rows in), so its every change was held, streamed or skipped
+    await until(async () => await read("SELECT count(*) FROM public.b") === psql(url, "SELECT count(*) FROM b"), "the stream passed the transaction that restored the keys", logged, 60_000);
+    await sync.caughtUp();
+    const kept: Record<string, string> = {};
+    for (const t of ["d", "f", "i", "s"]) kept[t] = await read(`SELECT string_agg(id || ' ' || v, ', ' ORDER BY id) FROM public.${t}`);
+    assert.deepEqual(kept, Object.fromEntries(["d", "f", "i", "s"].map((t) => [t, psql(url, `SELECT string_agg(id || ' ' || v, ', ' ORDER BY id) FROM ${t}`)])),
+      `once caught up, each equals the database: the restoring transaction's DELETE of the duplicate never removes the row sharing its key\n${logged.slice(from).join("\n")}`);
     for (const t of ["d", "f", "i", "s"]) assert.ok(await same(t), `${t} equals the database once caught up`);
     assert.equal(await read("SELECT v FROM public.d WHERE id = 7"), "while refused", "the change made while it was refused is read by its catch-up");
     // and streamed again (u, with no replica identity now, takes no UPDATE on the database)

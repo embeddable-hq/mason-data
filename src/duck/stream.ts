@@ -392,9 +392,10 @@ export class ReplicationStream {
     const relations = new Map<number, Relation>();
     // the streamed tables refused by a relation lacking a copied column, by their `tables()` entry: once each
     const refused = new WeakSet<StreamedTable>();
-    // the streamed table (its `tables()` entry, so one stay) each relation's key was last shown or found to hold for:
-    // asked again after the relation's next message, which Postgres sends after any change of the table's definition
-    const keyed = new Map<number, StreamedTable>();
+    // the STAY each relation's key was last shown or found to hold for: asked again after the relation's next message,
+    // which Postgres sends after any change of the table's definition, and when the table joins the stream again. Never
+    // the `tables()` entry, which is made again at every batch (a catalog query a batch for a FULL table)
+    const keyed = new Map<number, number>();
     let batch = new Map<string, TableChanges>();
     let rows = 0, firstAt = 0;
     // the batch holds a change of a big table: applied by `applySize`'s larger bounds
@@ -488,9 +489,9 @@ export class ReplicationStream {
               // a change of a table two of whose rows share a key is written over the other row. Refused, the table leaves
               // the stream: this change and what the batch holds of it are dropped, and its catch-up poll reads them
               if (refused.has(table)) continue;
-              if (keyed.get(relid) !== table) {
+              if (keyed.get(relid) !== table.stay) {
                 if (!keyShown(rel, table.key) && !await this.target.keyHeld(rel.source)) { refused.add(table); continue; }
-                keyed.set(relid, table);
+                keyed.set(relid, table.stay);
               }
               if (table.big === true) big = true;
               // ONE STAY A BATCH: what an ended stay left in it would be dropped at the apply (`applyStreamed`), and held
