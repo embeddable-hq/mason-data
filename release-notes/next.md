@@ -77,8 +77,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A sync you start by hand that fails is now listed under Sync events**, as "Manual sync failed" (`sync_failed` in
   `mason logs --events`).
 - **The web page's Sync events list shows how long each sync took in a column of its own.** The Took column holds
-  it, such as `570 ms` or `7 min 57 s`, and you can sort the list by it. In a narrow window, a long table name is cut
-  short so that Took stays in view. Hover over the name to read it whole. The message no longer ends with it there.
+  it, such as `570 ms` or `7 min 57 s`, and you can sort the list by it. In a narrow window, the list scrolls sideways
+  inside its box, as the Tables and Users lists do, so every column stays readable. A very long table name is cut
+  short. Hover over it to read it whole. The message no longer ends with it there.
   `mason logs --events --json` gives it as a new field, `tookMs`. A first sync's event now ends with its time as a
   poll's does, such as `synced: 1,000 row(s) · 2.0 s`, where it said `in 2.00 s`. Events recorded before the upgrade
   keep their time in the message.
