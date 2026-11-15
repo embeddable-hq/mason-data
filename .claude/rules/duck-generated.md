@@ -89,6 +89,18 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   reason against every wrapper", tests/duck-generated-round6.test.ts "round 6: a numeric's reason is the type each
   node computes", and tests/duck-generated-round7-8.test.ts "round 7: the walk follows a sublink, a CTE, a set
   operation's arms and a subquery", each reason with its way out held exactly, built and stored.
+- **A jsonb a generated table stores is Postgres's text of it, as jsonb_out writes it** (`canonicalJsonb`, issue 461's
+  fourth review): keys by length then bytes, a key written twice kept once with its last value, jsonb_out's spacing and
+  number text, at every depth, through src/duck/jsonb.ts `jsonbText` once a row at the build. So every table's jsonb is
+  canonical, and every native read of a table's jsonb column (src/duck/rewrite.ts `copiedColumn`: the keys, `->`,
+  `->>`, `@>`) is Postgres's answer with no decision per relation. A column that is a table's jsonb read as it is
+  (src/duck/pgtree.ts `tableColumnThrough`: a synced table's, a generated parent's) is that text already, and kept as
+  it is. A table built before (`jsonb_layout` NULL on its ledger row, `JSONB_LAYOUT`) is rewritten in place at `open`,
+  with its ledger row in one transaction, before the catalog serves anything. Measured over 1 M rows of ~340-byte
+  documents on a loaded 4-core machine: the canonical write took 27–42 s, a build without it 0.7–2.8 s, the rewrite in
+  place 29–45 s. `jsonbText` is the exact parser: a faster reader through JSON.parse turned a text that is no JSON into
+  a document in three ways, and was removed.
+  `tests/duck-generated.test.ts` "issue 461", `tests/duck-jsonb-text.test.ts`, `tests/integration/duck-generated.itest.ts` `jtwice`.
 - **The run's connection is a session's, set up by the ONE set-up** (src/duck/store.ts `SessionSetup`: the session
   variable every Mason function reads first, the null order, the zone, the search_path, the settings `current_setting`
   reads), never by hand: a connection without `__mason_session` answers NULL from every Mason function (DuckDB's NULL in,
@@ -154,7 +166,16 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   from, as any refusal does.
 - **A file's name is its table.** A name a synced table holds is refused, and the synced table wins the catalog
   (`served`, `names`) and the table: what was deployed under that name is let go with its ledger row (`release`), and
-  nothing is built or swapped over it (`buildable`).
+  nothing is built or swapped over it (`buildable`), also while its file is refused at its read. **One name is one
+  table by the engine's rule** (src/lib/relation-key.ts `relationKey`: DuckDB ignores ASCII case, so `Counts.yml` is
+  `public.counts`'s name, and two files so spelled are refused at the read; a view of the database is no table there, so
+  it holds its own spelling alone). **The sync's drop of a removed synced table
+  lets go of a generated table of its name on that writer's turn, before the drop** (`dropped`; a synced table removed
+  but not dropped yet still holds the name, `addedAs`, so no rebuild of the catalog serves the generated one over it), and `open` lets go of a ledger row with
+  no table under it: either one kept was in `served()` with nothing there, and every rebuild of the catalog and every
+  pass failed until a base changed (issue 996). A run in flight then marks a base commit by its own bases (`runBases`),
+  since nothing deployed reads it. Removed, the generated table is built again at its next review.
+  Detector: tests/duck-generated-name-held.test.ts.
 - **A base is there when the catalog holds it, never when the copy's phase says copied** (issue 387). The host's `added`
   (src/duck/sync.ts `addedAs`, the one place) says `copied` only when the catalog's schema holds the table; the copy
   records `copied` before its rebuild of the catalog, so the phase alone refused a definition at every `mason start`.

@@ -1231,6 +1231,8 @@ class Follow {
     const rte = q.rtable[(num(v.varno ?? null) ?? 0) - 1];
     if (rte === undefined || !isNode(rte)) return out;
     const kind = num(rte.rtekind ?? null);
+    // a column of a table read as it is: marked, so a reader can tell it from a function's or VALUES' column (`tableColumnThrough`)
+    if (kind === RTE_RELATION) return { ...out, fromTable: "true" };
     let reads: TreeNode[] = [];
     if (kind === RTE_SUBQUERY && isNode(rte.subquery ?? null)) reads = this.outputOf(rte.subquery as TreeNode, attno, base);
     else if (kind === RTE_CTE) {
@@ -1279,6 +1281,24 @@ class Follow {
 }
 const RTE_SUBQUERY = 1;
 const RTE_CTE = 6;
+
+/**
+ * WHETHER AN OUTPUT (`outputExpressions`) IS A TABLE'S COLUMN READ AS IT IS: a VAR, followed through subqueries, WITH
+ * queries, views and join aliases one VAR at a time, to a VAR of a table (RTE_RELATION). Its value is that table's own,
+ * so a generated table keeps it as it is (src/duck/generated.ts: a jsonb any table holds is already Postgres's text).
+ * A set operation, a cast, a function or a FULL JOIN's merged column is no such column.
+ */
+export function tableColumnThrough(e: TreeNode | null): boolean {
+  let n: TreeNode | null = e;
+  for (let depth = 0; n !== null && depth < 256; depth++) {
+    if (n._node !== "VAR") return false;
+    if (n.fromTable === "true") return true;
+    const f = n.followed;
+    const one = Array.isArray(f) && f.length === 1 ? f[0] : undefined;
+    n = one !== undefined && isNode(one) ? one : null;
+  }
+  return false;
+}
 
 /** The analysed query's output columns, in order (resjunk ones, which a sort may add, left out): their types. */
 export function outputTypes(tree: TreeValue): Array<{ name: string | null; type: number; typmod: number }> | null {

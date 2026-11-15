@@ -173,7 +173,18 @@ test("mason serve: healthy once it answers, a table added beside it copied, stop
     assert.deepEqual([state.served, state.sourcesReadOnly, state.totals.copied], [true, null, 1]);
     // what the page does, through the tunnel: a sync on demand, from its own Origin
     const synced = await fetch(`${pageAt}/api/sync`, { method: "POST", headers: { Cookie: cookie, Origin: pageAt, "Content-Type": "application/json" }, body: JSON.stringify({ tables: ["public.items"] }) });
-    assert.equal(synced.status, 200, await synced.clone().text());
+    // answered as it starts (issue 1007), then followed in the state to its end, as the page follows it
+    assert.equal(synced.status, 202, await synced.clone().text());
+    const id = ((await synced.json()) as { sync: { id: number } }).sync.id;
+    type ByHand = { id: number; state: string; answer?: { tables: Array<{ table: string }> }; failure?: unknown };
+    let byHand: ByHand | undefined;
+    for (let i = 0; i < 300; i++) {
+      const s = await (await fetch(`${pageAt}/api/state`, { headers: { Cookie: cookie } })).json() as { tables: Array<{ table: string; syncByHand?: ByHand }> };
+      byHand = s.tables.find((t) => t.table === "public.items")?.syncByHand;
+      if (byHand !== undefined && byHand.state !== "syncing") break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.deepEqual([byHand?.id, byHand?.state, byHand?.answer?.tables.map((t) => t.table)], [id, "synced", ["public.items"]], JSON.stringify(byHand));
     laptop.kill("SIGINT");
     assert.equal(await closed, 0, said);
     for (const seen of [printed, said, second.out()]) assert.ok(!seen.includes(config.running.token), "the run's token is printed nowhere");

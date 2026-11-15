@@ -185,6 +185,7 @@ async function keeperOver(store: DuckStore, kept: KeptModule, options: Record<st
     turns: 0, logged: [] as string[],
     onWriter<T>(f: () => Promise<T>): Promise<T> { this.turns++; const t = turn.then(f); turn = t.then(() => undefined, () => undefined); return t; },
     served: () => new Map([["public.docs", [{ name: "id", type: "integer" }, { name: "j", type: "jsonb" }, { name: "k", type: "json" }]]]),
+    recorded: async () => new Map([["public.docs", ["id", "j", "k"]]]),
     rebuilding,
     log(l: string) { this.logged.push(l); },
   };
@@ -493,7 +494,8 @@ test("a table removed leaves no stored path, and turned off every stored column 
     const again = await syncWithStored(STORED.slice(0, 1));
     try {
       const logged: string[] = [];
-      const off = new kept.KeptJsonPaths(again.store, { onWriter: <T>(f: () => Promise<T>) => f(), served: () => new Map(), rebuilding: () => false, log: (l: string) => logged.push(l) }, { enabled: false });
+      const off = new kept.KeptJsonPaths(again.store, { onWriter: <T>(f: () => Promise<T>) => f(), served: () => new Map(),
+        recorded: async () => new Map([["public.docs", DOCS.columns.map((c) => c.name)]]), rebuilding: () => false, log: (l: string) => logged.push(l) }, { enabled: false });
       await off.open();
       assert.deepEqual(await rows(again.store, "SELECT count(*) FROM duckdb_columns() WHERE starts_with(column_name, '__mason_json_')"), [[0n]]);
       assert.deepEqual(await rows(again.store, `SELECT state FROM ${MASON_SCHEMA}.json_paths`), [["dropped"]]);
@@ -1192,6 +1194,7 @@ test("adding a stored path's column writes no value into its rows, and holds the
         turn = t.then(() => undefined, () => undefined); return t;
       },
       served: () => new Map([["public.docs", [{ name: "id", type: "integer" }, { name: "j", type: "jsonb" }, { name: "k", type: "json" }]]]),
+      recorded: async () => new Map([["public.docs", ["id", "j", "k"]]]),
       rebuilding: () => holding, log: (): void => undefined,
     };
     const keeper = new kept.KeptJsonPaths(store, host, { enabled: true, reviewMs: 0 });
@@ -1358,6 +1361,7 @@ test("a review runs while a fill runs: the waiting rows' evidence is current, an
       logged: [] as string[],
       onWriter<T>(f: () => Promise<T>): Promise<T> { const t = turn.then(() => new Promise((r) => setTimeout(r, slow))).then(f); turn = t.then(() => undefined, () => undefined); return t; },
       served: () => new Map([["public.docs", [{ name: "id", type: "integer" }, { name: "j", type: "jsonb" }, { name: "k", type: "json" }]]]),
+      recorded: async () => new Map([["public.docs", ["id", "j", "k"]]]),
       rebuilding: () => false,
       log(l: string) { this.logged.push(l); },
     };

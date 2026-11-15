@@ -33,8 +33,11 @@ export const SYNC_USAGE = `usage: mason sync (<table>… | --all) [--json]
     mason sync --all               every table the sources file names (each one a scan of its table)
 
   --all    every table the sources file names, instead of naming them
-  --json   as data: { syncedAt, tables: [{ table, changed, deleted, rows, ms }] (the tables polled), streamed (the
+  --json   as data: { syncedAt, tables: [{ table, added, updated, deleted, rows, ms }] (the tables polled), streamed (the
            tables whose sync: is replication, not polled: [{ table, position, state, why }]), next }
+
+  A table whose sync is already running or waiting to start (from the web page, another mason sync, its schedule)
+  is refused at once, code busy: mason status says when it ends.
 `;
 
 export const SYNC: CommandSpec & { needs: "run" } = {
@@ -48,7 +51,7 @@ export const SYNC: CommandSpec & { needs: "run" } = {
 
 /**
  * WHAT A SYNC DID, as `mason sync` prints it from `POST /api/sync`'s answer (the web page's Sync button says the same,
- * src/web/pages/tables.js; tests/web-page.test.ts holds the two equal): the rows written and deleted, a line per table,
+ * src/web/pages/tables.js; tests/web-page.test.ts holds the two equal): the rows added, updated and deleted, a line per table,
  * and what happens next to each table synced (`syncedTips`: an `off` one stays as of this sync). A table whose sync is
  * replication was not polled: its line says where the stream is (`streamed`), and a sync of those alone has nothing to sync.
  */
@@ -59,11 +62,11 @@ export function syncedReport(b: { tables: readonly PolledTable[]; streamed?: rea
   if (b.tables.length === 0 && streamed.length > 0) {
     return { headline: `Nothing to sync: logical replication keeps ${picked.join(", ")} current.`, details: streamedRows, tips: [] };
   }
-  const changed = b.tables.reduce((a, t) => a + t.changed, 0), deleted = b.tables.reduce((a, t) => a + t.deleted, 0);
+  const sum = (k: "added" | "updated" | "deleted"): number => b.tables.reduce((a, t) => a + t[k], 0);
   const streamedNames = new Set(streamed.map((t) => t.table));
   const polled = picked.filter((t) => !streamedNames.has(t));
   return {
-    headline: `Synced ${polled.join(", ")}: ${n(changed)} row(s) written, ${n(deleted)} deleted${streamedRows.length ? `; logical replication keeps ${streamedRows.map((r) => r[0]).join(", ")} current` : ""}.`,
+    headline: `Synced ${polled.join(", ")}: ${n(sum("added"))} added, ${n(sum("updated"))} updated, ${n(sum("deleted"))} deleted${streamedRows.length ? `; logical replication keeps ${streamedRows.map((r) => r[0]).join(", ")} current` : ""}.`,
     details: [...b.tables.map((t) => [t.table, syncedText(t)] as const), ...streamedRows],
     // what happens next to each: an `off` table stays as of now, a polled one is polled again after its interval
     tips: syncedTips(tables),
@@ -102,10 +105,23 @@ export async function sync(argv: string[]): Promise<number> {
       return failed("sync", { message: `there is no added table ${JSON.stringify(name)}${didYouMean(name, added.flatMap((x) => [x.table, tableArg(x.table)]))}`, code: "not_found",
         next: [["mason status", "the added tables"], ["mason tables", "the database's tables"]] }, { json });
     }
-    // a sync scans each table whole on the database (and waits for a copy under way): minutes, not the commands' 30 s
-    const r = await callRun(run, "POST", "/api/sync", { tables: picked }, 60 * 60_000);
+    // a sync scans each table whole on the database (and waits for a copy under way): minutes, not the commands' 30 s.
+    // `wait: true` holds the request to the sync's end (the run answers the page as the sync starts, issue 1007); the
+    // command reaches the run on loopback, with no proxy between to give up on it
+    const r = await callRun(run, "POST", "/api/sync", { tables: picked, wait: true }, 60 * 60_000);
     if (r.status !== 200) {
       const code = failureCode(r.body.code, r.status === 404 ? "not_found" : "failed");
+      // A SYNC OF IT ALREADY RUNNING OR WAITING TO START (issue 1007): refused at once, never waited on — what this
+      // command would print is a sync it did not start, whose read began before it was asked; the run's own words
+      if (code === "busy") {
+        const f = r.body.failure as { message?: unknown; fix?: unknown } | undefined;
+        // the run's own read of it that mason wait waits for (a first sync, a whole read again, a catch-up: `follow`
+        // wait, as its words say), else a sync by hand or a poll on schedule running: mason status says when it ended
+        const next: NextStep[] = r.body.follow === "wait"
+          ? [[`mason wait ${picked.map(tableArg).join(" ")}`, "waits until its sync ends"], ["mason status", "how each table is kept current, and when it was last synced"]]
+          : [["mason status", "when each table was last synced: run this again once it says so, for the changes made since"]];
+        return failed("sync", { message: String(f?.message ?? r.body.error), code, ...(typeof f?.fix === "string" ? { fix: f.fix } : {}), next }, { json });
+      }
       return failed("sync", { message: `${picked.join(", ")} ${picked.length === 1 ? "was" : "were"} not synced`, code, why: String(r.body.error),
         next: [["mason status", "each synced table"], ["mason logs", "the run's log"]] }, { json });
     }

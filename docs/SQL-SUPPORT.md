@@ -20,14 +20,14 @@ each). The synced data is read-only.
 | The types: "char", a type the source made, bigint, bit, bit varying, boolean, box, bytea, character, character varying, cid, cidr, circle, date, daterange, double precision, inet, int4multirange, int4range, int8range, integer, interval, json, jsonb, jsonpath, line, lseg, macaddr, macaddr8, money, name, numeric, numrange, oid, path, pg_lsn, point, polygon, real, regclass, regtype, smallint, text, tid, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsquery, tsrange, tstzmultirange, tstzrange, tsvector, uuid, xid, xid8, xml; arrays of bigint, bit, boolean, character, character varying, cidr, date, double precision, inet, int4range, integer, interval, json, jsonb, macaddr, money, numeric, oid, point, real, smallint, text, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsvector, uuid; the source's enums and citext; a table's row | answered (93 types verified) |
 | Functions, operators, aggregates, window functions and casts | answered exactly: 255 functions, 388 operators, 97 aggregates, 58 window functions and 126 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
-| Anything else: 64 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
+| Anything else: 63 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 7,475 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 7,471 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same synced tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 7,475 statements | Mason | DuckDB alone |
+| Of 7,471 statements | Mason | DuckDB alone |
 |---|---|---|
 | answered exactly as Postgres: the rows, their text, the column names | 93% | 26% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
@@ -55,7 +55,7 @@ Postgres did, after the first sync and after two rounds of changes. A statement 
 What is known **beyond** that list is below. A refusal names its gap in the error's detail (`Mason gap <id>`) and
 says what to write instead in its hint.
 
-## Refused (64)
+## Refused (63)
 
 A statement using one of these is refused with SQLSTATE 0A000, where Postgres would answer it.
 
@@ -82,11 +82,10 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `extract-julian` | extract(julian FROM …) | answers | refused | extract(epoch FROM …) / 86400 + 2440587.5 |
 | `with-ordinality` | a function in FROM … WITH ORDINALITY | numbers the rows | refused | row_number() OVER () instead |
 | `array-subquery-element` | ARRAY(SELECT x …) whose x is a numeric, an array or a row; array_agg(x) of a numeric quotient or average not rounded to a fixed scale (round, trunc or a cast to numeric(p,s)); x = ANY or ALL (ARRAY(SELECT …)) | a numeric[] computed exactly, a multi-dimensional array (2202E on an empty element, 22004 on a NULL one), a record[] | refused (DuckDB makes a list of doubles, of lists, of structs; it binds ANY (ARRAY(SELECT …)) as a comparison of its own) | ARRAY(SELECT x::text …) or array_agg(x::text), array_agg(x ORDER BY …) of a column in a subquery, or x = ANY (SELECT …) without the ARRAY |
-| `name-line-break` | a name holding a line break (CR or LF): an alias, a column of a table, a view or a function the query reads (by name or through a *), a WITH query's or a subquery's column | answers | refused, naming the name | give the column an alias without a line break |
-| `name-unreadable` | a long name made mostly of ( ) { } \ and tabs that Postgres's analysis wraps inside, where it reads two ways that neither the query's own names nor the columns of the tables it reads tell apart (a function's column, say) | answers | refused | give the column a shorter alias |
 | `json-path-type` | a json read's path cast to a type that changes its text (`varchar(n)[]`, `char(n)[]`, `name[]`) | answers | refused | cast the path to `text[]` |
-| `multidim-array` | a multi-dimensional array literal, or one bound as a `text[]` parameter | answers | refused | a one-dimensional array |
-| `array-lower-bound` | a `text[]` parameter whose subscripts do not start at 1 (`[2:3]={a,b}`) | answers, its first element at subscript 2 | refused | bind the array without its bounds (`{a,b}`) |
+| `multidim-array` | a multi-dimensional array literal, or one bound as an array parameter (`$1::int[]`, `= ANY($1)`) | answers | refused | a one-dimensional array |
+| `array-lower-bound` | an array parameter whose subscripts do not start at 1 (`[2:3]={a,b}`) | answers, its first element at subscript 2 | refused | bind the array without its bounds (`{a,b}`) |
+| `numeric-array-parameter` | a `numeric[]` parameter bound to a value other than NULL and read other than compared by ANY or ALL with a numeric or an integer (`$1::numeric[]` in the SELECT list, `unnest($1::numeric[])`, a function of it, a float compared with it) | answers, each element exact | refused when it is bound (`x = ANY($1)`, `x <> ALL($1)` and `x < ANY($1)` of a numeric or an integer compare each element exactly, and a NULL is answered everywhere) | compare it by ANY or ALL, or bind each value: `x IN ($1, $2)` |
 | `format-specifiers` | format() with a specifier other than %s (%I, %L, widths, positions) | answers | refused | concatenate with \|\|, or %s only |
 | `to-char-patterns` | to_char of an interval or a time; its TZ, SP, EEEE, RN, V, B, L patterns; a day or month name padded to 9 characters in a parse | answers | refused | the patterns listed in the hint; extract(… FROM interval) for an interval's parts |
 | `to-timestamp-format` | to_timestamp / to_date with a format that is not a literal | answers | refused | write the format as a string literal |

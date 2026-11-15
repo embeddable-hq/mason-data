@@ -66,6 +66,12 @@ paths:
   fetch settled), and the worker's shutdown waits for every session close in flight and every connection's call before
   it closes the connections and the instance; a statement still in flight is stopped as a cancel stops it and told
   57P01 (`STOPPING`, src/duck/executor.ts), a later one too; a connection's call still running is interrupted first.
+  **Every request is counted, and the shutdown waits for each one taken before it** (issue 986: a `connect` or a
+  session's open asked just before the close was still on DuckDB's threads as the instance closed, exit 134 or 139 in
+  7 runs of 8): `requests` holds each until it settles; once stopping, every op but `DURING_STOP`'s refuses (so a new op
+  is refused by default), and a connection or session opened as the stop began is closed with it and refused. A wait
+  past `SHUTDOWN_SAYS_MS` says what it still waits for and goes on waiting, never closing under it (the executor's
+  close is bounded on its own). `tests/duck-executor-end.test.ts` "still opening" holds it, the race held open by a hook.
 - **Every call to the worker settles** (src/duck/executor.ts `SILENT_MS`, `CLOSE_GRACE_MS`): a worker silent 60 s with
   a request pending is given up on — every request told 57P02, the run told (`onCrash`) — and `close` settles within
   5 s whatever the worker does. A thread blocked inside native code is never ended by `terminate` or `process.exit`
@@ -94,8 +100,9 @@ paths:
   queue of its own that a thread passes through between two calls (`registerTurn`, src/duck/functions.ts), so the
   running queue empties after one call per DuckDB thread. `giveTurns` (src/duck/rewrite.ts) gives every call that reads
   a column its turn on the finished tree; SQL written by hand with a per-row call does the same (`keptValueSql`,
-  `orderKeySql`, src/duck/kept.ts). DETECTOR: `tests/duck-executor-starve.test.ts` counts small statements answered
-  beside each heavy shape, `tests/duck-functions.test.ts` holds which argument the turn takes. RESPONSE: the loop turns
+  `orderKeySql`, src/duck/kept.ts). DETECTOR: `tests/duck-executor-starve.test.ts` times small statements beside
+  a function-calling shape in that shape's own vectors, and beside a shape the engine computes itself against the same
+  session's idle with the executor's loop timed beside them, never against a fixed time (issue 984), `tests/duck-functions.test.ts` holds which argument the turn takes. RESPONSE: the loop turns
   every few calls. ("The turn")
 - **Libuv's pool is sized before anything uses it, by the entry, in one file** (issue 88: a statement in flight holds a
   libuv thread, and at Node's four a fifth waited 10 to 50 s; the pool is read once, at its first task, and Node 22 has

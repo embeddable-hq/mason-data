@@ -24,7 +24,7 @@ same JSON; the web page and the managed service read those endpoints, never a se
 | `GET /api/users[?lastUsed=1]` | `mason user list` | the users, removed ones kept; the last use only when asked (a scan of the request log) |
 | `POST /api/users/<name>/disable`, `POST /api/users/<name>/enable` | `mason user disable <name>`, `mason user enable <name>` | a user kept with its password, its logins refused (28000) until enabled; `{ disabled \| enabled, already, next }` |
 | `GET /api/logs?lines=&since=` | `mason logs --json` | the run's last log entries from memory (`mason serve` has no file) |
-| `POST /api/sync { tables }` | `mason sync` | sync now, per table |
+| `POST /api/sync { tables, wait? }` | `mason sync` (`wait: true`) | sync now, per table: answered `202 { sync }` as it starts, followed in `/api/state` `tables[].syncByHand`; `wait: true` answers what it did once it ends; a table already syncing or waiting to start refused `409 busy` |
 
 `/api/state` also says the run's health beyond the synced tables (each `mason status` says on a line of its own, and each
 sampled once a minute where it moves):
@@ -125,7 +125,10 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
 - **Observability › Sync events** (`#observability/syncs`): the sync's events of the range (`/api/events?limit=500&since=`, 10 s;
   24 hours 30 s, a week or more 60 s; with `&failed=1` while Failures only is ticked, so every failure of the range is
   listed, and `&scheduled=1` while Scheduled syncs is), newest first, narrowed by a kind (every kind) and a table (every added table,
-  from `/api/state`, whether the range has an event of it or not; Tables' View events chooses it). The run's raw log
+  from `/api/state`, whether the range has an event of it or not; Tables' View events chooses it). Every sync running
+  now is a row at the top, from `/api/state` (2 s: `syncByHand`, `rebuilding`), its time so far in Took. Once the state
+  says it ended, the row says what it did until its event is read (the events read once more then, 20 s at most). The
+  run's raw log
   (`/api/logs`, 5 s) is debugging output with internal tags and paths: it is behind a closed details, newest first, and
   read only while that is open.
 
@@ -166,7 +169,7 @@ Key: ✅ built · ⏸ deferred
 |---|---|---|
 | Row count | ✅ | as Total rows above |
 | Last sync time, and how old the synced data is | ✅ | per table: `sync.syncedAt`, `sync.ageSeconds` |
-| Sync now, per table | ✅ | `POST /api/sync { tables }` (`mason sync`) |
+| Sync now, per table | ✅ | `POST /api/sync { tables }` (`mason sync`), followed in `tables[].syncByHand` |
 | Synced / Syncing / Failed / Pending | ✅ | the first sync's phase: `copy.phase` is `done`, `copying` or `failed`, and `copy` is null while the table waits |
 | Sync duration | ✅ | `sync.syncSeconds`: how long the sync that brought the synced table current took |
 | Sync error | ✅ | the current one on the table; its history is the sync events (`mason logs --events`) |

@@ -40,14 +40,14 @@ const server = (o: Partial<ServerFacts> = {}): ServerFacts => ({
 
 test("the tables: every missing one listed, each table's problem said by its entry, row-level security that hides every row refused", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-check-"));
-  const src = fileOf("kind: postgres\nurl: ${DATABASE_URL}\ntables:\n  orders: {}\n  ordrs: {}\n  gone: {}\n  items:\n    columns: [id, colour]\n  vault: {}\n", root);
+  const src = fileOf("kind: postgres\nurl: ${DATABASE_URL}\ntables:\n  orders: {}\n  ordrs: {}\n  gone: {}\n  items:\n    columns: [id, statsu]\n  vault: {}\n", root);
   const facts = { tables: [table("public.orders"), table("public.items"), table("public.vault", { rowSecurityHidesFrom: "mason" })] };
   const r = check.tableCheck(src, facts, "shop", root);
   assert.deepEqual(r.problems.map((p) => [p.code, p.table]), [
     ["missing_table", "public.ordrs"], ["missing_table", "public.gone"], ["table", "public.items"], ["table", "public.vault"]]);
   assert.match(r.problems[0]!.message, /^tables\.ordrs: shop has no table public\.ordrs this user can read — did you mean `orders`\?$/);
   assert.match(r.problems[0]!.fix, /remove tables\.ordrs from sources\/app\.yml.*USAGE on its schema/);
-  assert.match(r.problems[2]!.message, /tables\.items\.columns: public\.items has no column colour/);
+  assert.match(r.problems[2]!.message, /tables\.items\.columns: public\.items has no column statsu — did you mean `status`\?/);
   assert.equal(r.problems[3]!.message, "tables.vault: row-level security on public.vault hides every row from mason (no SELECT policy for it, and it is not the owner or BYPASSRLS), " +
     "so its synced table would be empty — the table's owner adds a policy for the rows Mason may read (CREATE POLICY mason_read ON public.vault FOR SELECT TO \"mason\" USING (…);), or remove its entry");
   assert.deepEqual(r.added.map((t) => t.source), ["public.orders"], "what passes is what the run would sync");

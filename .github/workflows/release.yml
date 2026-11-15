@@ -2,7 +2,9 @@
 # release-notes/v<version>.md. When no GitHub release
 # exists for that version, this push is the release, and the workflow does what would otherwise be done by hand:
 #
-#   1. the annotated tag v<version> on the merge commit (skipped when the tag already exists)
+#   1. the annotated tag v<version> on the merge commit (skipped when the tag already exists). A release from main that
+#      starts a new line first cuts the previous line's branch, release/<major>.<minor>, at that line's newest tag,
+#      unless the branch exists (the `tag` job says how)
 #   2. the image (images-publish.yml, called as a job: a tag made by GITHUB_TOKEN never triggers another workflow)
 #   3. the CLI, @mason-data/cli, when its version is not on npm yet; this one also runs when the release page already
 #      exists and only the CLI is missing from npm, since its first publish is by hand and may not have happened.
@@ -111,10 +113,11 @@ jobs:
           if [ "$cli" != "$version" ]; then
             echo "cli/package.json is $cli, the newest release notes are v$version: they must agree" >&2; exit 1
           fi
-          # the release's line (scripts/release-line.ts): a release branch releases its own line only, and refuses here,
-          # before anything is tagged or published. `newest` is said for the log only: each job that moves `latest`
-          # re-checks it just before (the header says why)
-          line="$(git tag -l 'v*' | node scripts/release-line.ts "$GITHUB_REF" "$version")"
+          # the release's line (scripts/release-line.ts): a release branch releases its own line only, and main never
+          # releases a line that has its branch (release/<major>.<minor>); both refuse here, before anything is tagged or
+          # published. It reads the remote's tags and branches in one call. `newest` is said for the log only: each job
+          # that moves `latest` re-checks it just before (the header says why)
+          line="$(git ls-remote --refs origin 'refs/tags/v*' 'refs/heads/release/*' | node scripts/release-line.ts "$GITHUB_REF" "$version")"
           echo "$line"; echo "$line" >> "$GITHUB_OUTPUT"
           # the CLI is judged on its own: a release whose page exists but whose CLI never reached npm (the first publish
           # is by hand, and may not have happened) is still published by the next push to this branch
@@ -135,10 +138,38 @@ jobs:
     needs: decide
     if: needs.decide.outputs.version != ''
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # the previous line's branch and the tag; nothing else
+    # the deploy key's secret, if one is set, lives in this environment, which only main and release/* may use
+    # (release-notes/README.md "The ruleset on release/*")
+    environment: release-branches
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'          # never 24: ci.yml's build job says why
+      # A NEW LINE CUTS THE PREVIOUS LINE'S BRANCH FIRST (scripts/release-line.ts `--cut`; release-notes/README.md "Where
+      # breaking changes wait"): release/<major>.<minor> at that line's newest tag, before this release is tagged. It
+      # never moves a branch that exists. When it cannot create the branch, the run fails here, before anything is
+      # tagged or published, and a re-run picks up from this step
+      - id: cut
+        name: whether this release starts a new line, and which branch it cuts
+        env:
+          VERSION: ${{ needs.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+          cut="$(git ls-remote --refs origin 'refs/tags/v*' 'refs/heads/release/*' | node scripts/release-line.ts --cut "$GITHUB_REF" "$VERSION")"
+          echo "$cut"; echo "$cut" >> "$GITHUB_OUTPUT"
+      - name: the previous line's branch
+        if: steps.cut.outputs.cut == 'true'
+        uses: ./.github/actions/line-branch
+        with:
+          branch: ${{ steps.cut.outputs.branch }}
+          from: ${{ steps.cut.outputs.from }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          deploy-key: ${{ secrets.RELEASE_BRANCH_DEPLOY_KEY }}
       - name: the annotated tag, on the merge commit
         env:
           VERSION: ${{ needs.decide.outputs.version }}

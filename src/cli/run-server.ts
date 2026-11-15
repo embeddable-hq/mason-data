@@ -52,7 +52,8 @@ import { catalogTable, copiedColumns, effectiveSync, entryName, everyColumnLeave
 import { projectWriteState } from "./project.ts";
 import { addEntry, plannedEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type PollMeasure, type RemoveResult } from "./source-edit.ts";
 import { notAddedRefusal, PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamedAnswer, type StreamStatus } from "../duck/sync.ts";
-import { DEFAULT_SYNC, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
+import { SyncsByHand, type SyncByHand } from "./sync-by-hand.ts";
+import { agoText, DEFAULT_SYNC, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
 import type { LogBuffer } from "../lib/log-buffer.ts";
 import type { ClientActivity, LedgerRequest, QueryWindow, RequestLedger, UnsupportedSql } from "../duck/requests.ts";
 import { eventLimit, requestFilter, requestFilterText, SLOW_MS, timeOf } from "./request-filter.ts";
@@ -150,10 +151,11 @@ export interface RunContext {
   /** the run's version (src/cli/version.ts) and when this process started, ms: `engine.version`, `startedAt`, uptime */
   version: string;
   startedAt: number;
-  /** the sources file the run copies from as it last read it, and what is wrong with it now (null: nothing) */
-  sources: () => { file: SourceFile | null; problem: string | null };
-  /** the sources file changed (a table added or removed): the run reads it again */
-  sourcesChanged: () => void;
+  /** the sources file the run copies from as it last read it, and what is wrong with it now (null: nothing); `tables`,
+   *  each added table's columns as the run syncs them from its next whole read (absent: a run that does not say) */
+  sources: () => { file: SourceFile | null; problem: string | null; tables?: ReadonlyArray<{ source: string; columns: ReadonlyArray<{ name: string }> }> };
+  /** the sources file was edited (`edited`: the tables the edit wrote, `schema.table`): the run reads it again */
+  sourcesChanged: (edited: readonly string[]) => void;
   /** a sources file that replicates a table, held to the database's checks for logical replication when this run never
    *  made them (it replicated nothing when it started): the refusal, or null when it may (absent: never refused) */
   checkReplication?: (file: SourceFile) => Promise<Failure | null>;
@@ -175,6 +177,9 @@ export interface RunContext {
     /** a poll of exactly these tables, now (mason sync; src/duck/sync.ts pollNow); in replication mode none, and where the
      *  stream is (`streamed`) */
     poll: (sources: string[]) => Promise<{ at: string; tables: PolledTable[]; streamed?: StreamedAnswer[] }>;
+    /** why a poll of these tables is refused now, or null when it would start (src/duck/sync.ts pollRefusal, the check
+     *  `poll` refuses with): `POST /api/sync` answers it at once, before any sync starts */
+    refused: (sources: string[]) => PollRefused | null;
     /** where the replication stream is (src/duck/sync.ts streamStatus): null outside replication mode; `refresh: false`
      *  never reaches the database (the position and the slot as last read) */
     stream: (o?: { refresh?: boolean }) => Promise<StreamStatus | null>;
@@ -214,6 +219,24 @@ export function usersFact(file: string): { active: number } | { error: string } 
  * table's on opening (`GET /api/tables/<table>/columns`, `tableColumns`); `mason status --json` asks with them
  * (`?columns=1`), its shape unchanged. One computation either way: the columns are left out, never built apart.
  */
+/** THE RUN'S SYNCS BY HAND (src/cli/sync-by-hand.ts), one registry a run: what `POST /api/sync` starts and `/api/state`
+ *  says of each table */
+const byHandOf = new WeakMap<RunContext, SyncsByHand>();
+
+/** A SYNC ASKED OF A TABLE ALREADY SYNCING BY HAND (issue 1007): what is happening, when it started, and where to follow
+ *  it — `mason status`, which the command says; the page says the table's row, in its own words */
+export function busyFailure(tables: readonly string[], running: SyncByHand, now = Date.now()): Failure {
+  const busy = tables.filter((t) => running.tables.includes(t));
+  return { code: "busy", message: `${busy.join(", ")} ${busy.length === 1 ? "is" : "are"} already syncing (started ${agoText(running.startedAt, now)})`,
+    fix: "it ends by itself, and a second sync is never started beside it",
+    next: [["mason status", "when each table was last synced"]] };
+}
+function syncsOf(ctx: RunContext): SyncsByHand {
+  let s = byHandOf.get(ctx);
+  if (s === undefined) { s = new SyncsByHand(); byHandOf.set(ctx, s); }
+  return s;
+}
+
 export function runState(ctx: RunContext, copies: readonly CopyState[], stream: StreamStatus | null, now = Date.now(), { columns = false }: { columns?: boolean } = {}): unknown {
   const folder = ctx.folder();
   const sources = ctx.sources();
@@ -225,9 +248,15 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
   const disk = ctx.duck.disk();
   const tables = facts.tables.map((t) => {
     const c = by.get(t.source), entry = sources.file?.tables.find((e) => e.table === t.source);
+    const byHand = syncsOf(ctx).of(t.source);
     const { columns: cols, ...catalog } = catalogTable(t, entry);
+    // WHAT IS SYNCED NOW (issue 977): the synced data's own columns, while its columns changed on the database and it is
+    // read again whole — and then the columns that whole read syncs (`columnsPending`), the run's own
+    const synced = entry !== undefined && c?.syncedColumns !== undefined ? c.syncedColumns : null;
+    const next = sources.tables?.find((x) => x.source === t.source)?.columns.map((x) => x.name) ?? null;
+    const pending = synced !== null && next !== null && next.join("\0") !== synced.join("\0") ? next : null;
     return {
-      ...catalog, ...(columns ? { columns: cols } : {}),
+      ...catalog, ...(synced !== null ? { addedColumns: synced } : {}), ...(pending !== null ? { columnsPending: pending } : {}), ...(columns ? { columns: cols } : {}),
       // how many columns it has, in the lean state too: the page's "5 of 12 columns" on an added table's row
       columnCount: cols.length,
       // an added table's entry as the sources file says it — `columns:` (null: every column but `exclude:`), `exclude:`,
@@ -258,6 +287,14 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
       // would run — the sync's one check, which pollNow refuses with (src/duck/sync.ts syncRefusal); one the sync does not
       // hold yet (just added), pollNow's not_found
       ...(c !== undefined || entry !== undefined ? { syncRefusal: c !== undefined ? c.syncRefusal ?? null : notAddedRefusal(t.source, copies.map((x) => x.source)).message } : {}),
+      // its last sync asked by hand in this run (mason sync, the page's Sync now; src/cli/sync-by-hand.ts): syncing,
+      // then what it did or why it failed — `POST /api/sync` answers as it starts, and the page follows it here
+      ...(byHand !== null ? { syncByHand: byHand } : {}),
+      // THE RUN'S OWN SYNC OF IT RUNNING NOW, and since when (issue 1011): `copy` its whole read (a first sync, or read
+      // again whole), `catch-up` the one poll after it — the page's Sync events lists it while it runs. A compaction is
+      // no sync of the database's rows, and is not said here
+      ...(c?.rebuilding !== undefined && c.rebuilding !== "compact" && c.rebuildingSince !== undefined
+        ? { rebuilding: { kind: c.rebuilding, startedAt: c.rebuildingSince } } : {}),
     };
   });
   return {
@@ -972,12 +1009,14 @@ export function createRunServer(ctx: RunContext): http.Server {
             const refused = now === null || "problems" in now ? null : await ctx.checkReplication!(now);
             if (refused !== null) { fs.writeFileSync(at.file, at.text); sendFailure(res, statusOf(refused), refused); return; }
             if (!r.already) ctx.log(`added ${r.table} to ${r.file}`);
-            ctx.sourcesChanged();
+            // a sync alone asked of a table added (--sync): its columns are not the person's choice now, so what arrived
+            // meanwhile is left out as the run leaves it out (src/cli/dev.ts leaveOut)
+            ctx.sourcesChanged(body.keep === true ? [] : [r.table]);
             sendJson(res, 200, { ...r, state: await state(ctx, false, false) });
           } else {
             const r = removeTables(ctx, [body.table]);
             for (const t of r.removed) ctx.log(`removed ${t} from ${r.file}`);
-            ctx.sourcesChanged();
+            ctx.sourcesChanged(r.removed);
             sendJson(res, 200, { ...r, state: await state(ctx, false, false) });
           }
         } else if (method === "POST" && url.pathname === "/api/ui/error") {
@@ -1089,17 +1128,42 @@ export function createRunServer(ctx: RunContext): http.Server {
           ctx.log(`user ${r.removed.name} removed`);
           sendJson(res, 200, { ...r, next: nextJson(REMOVED_NEXT) });
         } else if (method === "POST" && url.pathname === "/api/sync") {
-          const body = JSON.parse(await readBody(req, 64 * 1024)) as { tables?: unknown };
-          if (!Array.isArray(body.tables) || !body.tables.length || !body.tables.every((x) => typeof x === "string")) throw new Refusal(400, "send { tables: [schema.table, …] }");
-          try { sendJson(res, 200, await ctx.duck.poll(body.tables as string[])); }
-          catch (e) { if (e instanceof PollRefused) { sendFailure(res, e.code === "not_found" ? 404 : 409, { message: e.message, code: e.code }, { code: e.code }); return; } throw e; }
+          // A SYNC IS ANSWERED AS SOON AS IT HAS STARTED (issue 1007): it scans each table whole on the database, minutes
+          // for a big one, longer than a proxy in front of mason serve keeps a request open. `202 { sync }`, then
+          // `/api/state` `tables[].syncByHand` follows it to its end. `wait: true` (mason sync, on loopback) holds the
+          // request to the end and answers what the sync did, as before. A refusal is answered at once either way.
+          const body = JSON.parse(await readBody(req, 64 * 1024)) as { tables?: unknown; wait?: unknown };
+          if (!Array.isArray(body.tables) || !body.tables.length || !body.tables.every((x) => typeof x === "string") || (body.wait !== undefined && typeof body.wait !== "boolean")) {
+            throw new Refusal(400, "send { tables: [schema.table, …], wait?: true }");
+          }
+          const tables = [...new Set(body.tables as string[])];
+          const syncs = syncsOf(ctx);
+          // A SYNC BY HAND OF ONE OF THEM RUNNING, or waiting for the pass ahead of it: refused `busy` at once (the owner, on
+          // issue 1007: a second Sync now is never queued for another read of the table), with that sync beside it
+          const running = syncs.running(tables);
+          if (running !== null) { sendFailure(res, 409, busyFailure(tables, running), { code: "busy", sync: running }); return; }
+          // the sync's one check, as it is asked: a refusal now is the answer (`busy` while the run itself syncs it), and no sync starts
+          const refused = ctx.duck.refused(tables);
+          if (refused !== null) { sendFailure(res, refused.code === "not_found" ? 404 : 409, { message: refused.message, code: refused.code }, { code: refused.code, ...(refused.follow !== null ? { follow: refused.follow } : {}) }); return; }
+          const started = syncs.start(tables, () => ctx.duck.poll(tables), (e) => {
+            if (e instanceof PollRefused) return { code: e.code, message: e.message, ...(e.follow !== null ? { follow: e.follow } : {}) };
+            const why = ((e as Error).message.split("\n---\n").pop() ?? String(e)).split("\n")[0]!;
+            ctx.log(`sync by hand of ${tables.join(", ")} failed: ${why}`);
+            return { code: "failed", message: (e as Error).message };
+          });
+          if (body.wait !== true) { sendJson(res, 202, { sync: started.sync }); return; }
+          const done = await started.done;
+          if (done.answer !== undefined) { sendJson(res, 200, done.answer); return; }
+          const f = done.failure!;
+          if (f.code === "failed") sendFailure(res, 500, { message: f.message, code: "failed", next: [["mason logs", "the run's log: what it was doing"]] });
+          else sendFailure(res, f.code === "not_found" ? 404 : 409, { message: f.message, code: f.code }, { code: f.code, ...(f.follow !== undefined ? { follow: f.follow } : {}) });
         } else if (method === "POST" && url.pathname === "/api/remove") {
           const body = JSON.parse(await readBody(req, 64 * 1024)) as { tables?: unknown };
           if (!Array.isArray(body.tables) || !body.tables.length || !body.tables.every((m) => typeof m === "string")) throw new Refusal(400, "send { tables: [name, …] }");
           if (!await readNow(ctx, req, res)) return;
           const r = removeTables(ctx, body.tables as string[]);
           // the sync stops copying a removed table, and drops its copy
-          ctx.sourcesChanged();
+          ctx.sourcesChanged(r.removed);
           for (const t of r.removed) ctx.log(`removed ${t} from ${r.file}`);
           sendJson(res, 200, { ...r, state: await state(ctx, false, false) });
         } else {

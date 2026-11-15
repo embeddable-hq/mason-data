@@ -1204,7 +1204,8 @@ Everywhere else — a count, a GROUP BY, a DISTINCT, a window, a whole result, a
 DuckDB's own plan stays, as do an INNER lateral, a condition and another function. The bound is decided in a pre-pass
 over the whole statement before the walk: libpg-query writes a SELECT's keys in its struct's order (its FROM before its
 WITH, a UNION's arms last), so the walk meets a CTE before the SELECT that reads it. (2026-10-29; until then every such
-join was rewritten, whatever stood above it.)
+join was rewritten, whatever stood above it.) A copied column's keys call no function, so they are rewritten
+everywhere ("A copied column's keys", 2026-11-14).
 
 **Why.** On the test server a BI tool's "expand the JSON" preview (`SELECT q.*, d.key, d.value FROM (SELECT …) q LEFT
 JOIN json_each(CASE … END) d ON TRUE LIMIT 100 OFFSET 0`) over 22 M rows took 37.9 s, its `count(*)` cut off at 16 s.
@@ -1383,6 +1384,62 @@ element is a list of lists where Postgres accumulates a multi-dimensional array 
 binder error (42804). Each is refused by name (`array-subquery-element`), decided by the element's type in the
 analysis (an array's subscript, which has no offset of its own, by the array's), and a type the analysis does not say
 is refused too.
+
+#### A copied column's keys (issue 461, 2026-11-14)
+
+**Decision.** `json(b)_object_keys` of a table's column of the function's own type is DuckDB's own `json_keys`, read
+once a row (`objectKeys`, `keysNative`). Every jsonb a table holds is Postgres's canonical text, so its keys are already
+in jsonb's order (length first, then bytes), each held once. A json column is its text, and Postgres reads its keys in
+that order, a key held twice included, as `json_keys` does. The function stays for the rows it must answer: a non-object
+(Postgres's 22023), and a json document whose text holds a `\u` escape (Postgres refuses `\u0000` and a lone surrogate,
+where DuckDB reads them). A cast, a `->` and a jsonb the statement computes stay the function's. Such a LEFT lateral is
+the never-empty INNER one bounded or not (`leftLateral`), since a row costs no call.
+
+**A generated table stores its jsonb as Postgres does (the owner's decision, 2026-11-14).** A generated table's build
+held the engine's text of what its SELECT computed: `jsonb_build_object('bb', 1, 'a', id, 'bb', 2, 'c', 3)` kept both
+`bb`s in the order written, where Postgres's jsonb is `{"a": 1, "c": 3, "bb": 2}`. Read natively, its keys were
+`bb, a, bb, c`, and main had read its `->` and `@>` by the first `bb` since issue 130. Three rounds decided per relation
+whether its jsonb was canonical: by any relation, then by the run's live list of what each table is, then by the build
+of the catalog. Each was open in a window: a removal took a table off the list before the catalog dropped it, an entry
+added under a generated table's name called it synced before the catalog was rebuilt, a rebuild during a plan reused
+relids, and a prepared statement kept a plan made before its table became generated. So the decision was removed:
+the build writes every jsonb it stores as jsonb_out writes it (src/duck/generated.ts `canonicalJsonb`, through
+src/duck/jsonb.ts `jsonbText` once a row), and every table's jsonb is canonical. A column that is a table's jsonb read
+as it is (src/duck/pgtree.ts `tableColumnThrough`) is that text already and is kept. A table an earlier Mason built is
+rewritten in place when the store opens, before the catalog serves it (`jsonb_layout` on its ledger row).
+
+Over 1 M documents of about 340 bytes, on a 4-core machine at load 7 to 14, the canonical write took 27–42 s where a
+build that does not canonicalise took 0.7–2.8 s, and the rewrite in place of an old build took 29–45 s. A generated
+table that passes a jsonb column through pays nothing. A faster reader (V8's JSON.parse, each number a double would not
+keep handed over as a marked string) was tried and removed on the owner's word: it turned a text that is no JSON into
+a document in three ways (a number in a key's place; an invalid value a later duplicate key replaced; a string a stray
+backslash left open). `jsonbText` is the exact parser, and `tests/duck-jsonb-text.test.ts` holds those inputs refused.
+
+**Why.** On 2026-11-12, Metabase's `SELECT jsonb_object_keys(payload) AS key, count(*) … GROUP BY 1 ORDER BY 2 DESC, 1`
+over 3 M rows took 172–264 s against Postgres's 4.4–8.4 s, and timed out above about 5 M rows. The profile here: the
+keys alone (`SELECT count(*) FROM (SELECT jsonb_object_keys(payload) …) s`) took 56–62 s over 1 M rows of ~340-byte
+documents, the grouped form 58–68 s. So the time was the function, 56–62 µs a row, a hop to the executor worker a
+vector (it also built every member's value text, which nothing read). The libc key in the ORDER BY was not the cost:
+DuckDB computes it over the grouped output, 27 keys, and the plan fixture holds that. The LEFT lateral was DuckDB's
+delimiter join, a hash group of every document: 63–71 s and 4.4 GiB over 1 M rows.
+
+The keys are read once through a lambda (`bound`): a `json_type` beside `json_keys` parsed each document twice, about
+twice the time in DuckDB alone (1 M documents, under load: 1.1–1.8 s against 0.6–1.0 s).
+
+Measured through Mason against Postgres 16 (en_US.UTF-8, libc), on a shared 4-core machine, over a synthetic table
+of ~340-byte jsonb documents, an 8 GB engine limit. Each statement was run twice, Postgres and Mason alternately under
+the same load, so the ratio to Postgres is the number to read (Mason's time over Postgres's, the range of the runs):
+
+| statement | 1 M rows, main | 1 M rows, now | 3 M rows, main | 3 M rows, now |
+|---|---|---|---|---|
+| the keys alone, counted | ×58–109 | ×0.62–0.92 | ×46–58 (197–212 s) | ×0.78–0.82 (3.0–3.4 s) |
+| grouped, `ORDER BY 2 DESC, 1` (Metabase's) | ×43–46 | ×0.68–0.82 | ×48–50 (188–228 s) | ×0.64–0.95 (3.1–4.6 s) |
+| `SELECT DISTINCT` | ×36–43 | ×0.83–0.84 | ×36–69 (194–200 s) | ×0.74–0.79 (3.0–3.6 s) |
+| a LEFT lateral, grouped | ×40–68 | ×0.53–0.75 | ×16–19 (69–72 s) | ×0.67–0.77 (2.6–2.7 s) |
+
+Mason's peak RSS was 0.75–1.3 GiB on main (4.4 GiB for the LEFT lateral at 1 M rows, 5.1 GiB at 3 M), and 0.7–1.6 GiB
+now. A small `count(*)` in another session took 0.004–0.017 s alone; beside main's statements it took up to 4–8 s, and
+beside these up to 0.34 s.
 
 #### Nulls placed by a key of their own
 
@@ -1661,6 +1718,12 @@ holding the function's `->` answer per row: the JSON text, `KEPT_NULL` (a NUL), 
 column per path (`canonicalRead`): `#> '{a,b}'` and `-> 'a' -> 'b'` share it, `->>` derived from `->`, never the other
 way (`->>` reads "5" and 5 alike). A READY path with no marked row reads the column ALONE; a marked row, through a CASE.
 A `*`, `t.*` or NATURAL JOIN reads a view of the visible columns (`__mason_visible`).
+
+A column of a copy is a stored path's, or a plain numeric's scale, only where the copy's record (`copy_state.columns`,
+or a side table's `copy_progress.columns`) does not name it (`src/duck/hidden-columns.ts`). The name's pattern says only
+which kind of hidden column it is. Until issue 998, the start dropped every column named `__mason_json_…` that no
+stored path recorded. A source column of such a name lost its values, its table's poll failed, and in replication the
+stream stopped for every table. A copy an older Mason left without such a column is read again once (`MISSING_LAYOUT`).
 
 **Why.** 1 M rows of ~2 KB documents, `count(DISTINCT …)` of one path: the function 12.6 – 14.8 s; the CASE naming the
 document 0.33 – 0.49 s; the `->` column alone 5 – 8 ms; `->>` derived 8 – 9 ms (a second `->>` column, 5 – 7 ms, would
@@ -3006,9 +3069,44 @@ a new line never reaches the projects still on the old one. A security fix must 
 - A breaking change is anything that reads a project differently. It waits for the next line (`0.21.0`), which is
   occasional.
 - A security fix is released on the previous line as well as the current one (`0.19.x` and `0.20.x`).
-- A release from `main` carries all of `main`, so the current line moves to its own branch (`release/0.20`), cut
-  from `main` just before the first breaking change merges. Its patches are released from there, and `main` becomes the
-  next line.
+- A release from `main` carries all of `main`, so once a breaking change merges there, `main`'s next release is the
+  next line. The release of that line cuts the previous line's branch (`release/0.20`), from that line's newest tag
+  (the owner, 2026-11-14, issue 1020). Its patches are released from there.
+
+**The branch is cut by the release, never by hand** (issue 1020). PR 999 had the coordinator cut the current line's
+branch from `main` just before the first breaking change merged. Spotting that moment took judgment, and creating the
+branch took a person. Now `release.yml`'s `tag` job, on a release from `main` whose line is newer than every other
+tag's, first creates `release/<major>.<minor>` for the newest line below it, at that line's newest tag, through the
+REST API (`POST /git/refs`, which refuses a ref that exists, so a branch is never moved). It does this before it tags.
+A failure fails the run, before anything is tagged or published. So a patch of the old line starts from exactly what
+its users run, not from `main` just before a breaking change, which could hold unreleased fixes. The rule that goes
+with it: once a line has its branch, its versions are released from that branch only. `decide` reads the remote's
+`release/*` branches with its tags, and on `main` refuses a version of a line that has its branch (unless that version
+is tagged already), before anything is tagged. Otherwise a `0.20.1` from `main` would be missing from `release/0.20`,
+and the branch's next patch would lack its fixes (the review of PR 1023). Between the first breaking merge and the new
+line's release, `main` releases no patch of the current line. `scripts/release-line.ts --cut`
+decides it, and `tests/release-line.test.ts` holds it.
+
+A line released before this change has no branch. The owner wants no release step that needs a person, so such a
+line's branch is cut by running `release-line-branch.yml` (a `workflow_dispatch` with the line), never by hand. It
+cuts `release/<major>.<minor>` at the line's newest tag (`scripts/release-line.ts --cut-line`), and refuses a line with
+no tag. It may cut the newest line too. From then on that line's patches are released from its branch, and the next
+line's release finds the branch and leaves it. Anyone with Actions access can run it, a coordinator session included.
+
+Both workflows create a branch through one composite action, `.github/actions/line-branch`. It never moves a branch,
+and checks the commit afterwards. A refusal fails the run, creates nothing, and prints GitHub's answer word for word,
+so the run names the rule. Whether the `release` ruleset lets the workflow's `GITHUB_TOKEN` create a branch could not
+be settled from the docs. The token is the GitHub Actions app's, and GitHub offers no such entry in the ruleset's bypass
+list (the owner checked, 2026-11-14). The docs say required status checks apply to a branch's creation unless "Do not
+require status checks on creation" is set, and say nothing of the pull request rule on creation. So the first run, for
+`0.20` right after the change merges, finds out. If it is refused, the fallback is a deploy key with write access,
+added once to the ruleset's bypass list and saved as the secret `RELEASE_BRANCH_DEPLOY_KEY`. With the secret set, the
+action pushes over SSH with `--force-with-lease=<ref>:`, which is refused if the ref exists at all. The key bypasses
+the ruleset, and a push to `release/*` publishes. A repository secret can be read by any workflow on any branch a writer
+pushes, so the key is an environment secret of `release-branches`, whose deployment branches are `main` and
+`release/*` alone, and only the jobs that create a branch name that environment (`release-notes/README.md` "The ruleset
+on `release/*`"). If the ruleset lets `GITHUB_TOKEN` create a `release/*` branch instead, any writer's workflow could
+create one too.
 
 `release-notes/README.md` "Release lines" defines a breaking change from the code, says how to tell a patch from
 `next.md`, and has the steps for a patch on the previous line. That patch is a merge to the line's branch,

@@ -188,7 +188,7 @@ async function projectUp(): Promise<{ root: string; port: number; token: string;
     readSource: () => readSource(folder, root, {}), runUrl: "postgres://mason:x@127.0.0.1:1/shop", roles: () => live.now(),
     listener: { openSessions: () => ({ open: 0, byClient: [] }), running: () => [], cancel: (session) => ({ unknown: session }) },
     logs: { capacity: 2000, recent: () => [] },
-    duck: { copies: () => [], file: path.join(root, "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
+    duck: { copies: () => [], file: path.join(root, "duck.db"), refused: () => null, poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }),
         summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }),
         slowest: async () => [], durationsBy: async () => new Map(), lastUsed: async (u) => u.map(() => null) },

@@ -96,7 +96,8 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   cannot be added, its stream state) is its note, a line of its own under the row, across every column — written for
   every row, empty when it says nothing, so a note that comes or goes moves no row. **View events** opens Sync events narrowed
   to that table; **Sync now** runs `mason sync` for it
-  (its button says Syncing…, then Synced ✓, in one width), and is shown disabled, with the reason as its title, while
+  (its button says Syncing…, then Synced ✓, in one width; the run answers as the sync starts and the page follows it in
+  `/api/state` `tables[].syncByHand`, so a reload mid-sync still says Syncing…), and is shown disabled, with the reason as its title, while
   `mason sync` of the table would be refused: its first sync not finished or failed, being read again whole, being
   caught up (`/api/state` `tables[].syncRefusal`, the sync's own check); **Remove** asks first, then runs `mason remove`.
   **Nothing a click does moves another row or a column**: the columns are fixed widths, a question (Remove's), a form
@@ -304,12 +305,26 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
 - **Observability › Sync events** (`#observability/syncs`): the sync's events of the range — each first sync, each
   failure and recovery, each sync asked by hand (`synced`: `mason sync`, a table's **Sync now**) — newest first (**When**
   turns it round), with when, kind (in words: Manual sync, Full sync, Scheduled sync, Live sync, Scheduled sync failed…;
-  the code `mason logs --events` prints is its title), table and reason. The scheduled syncs that succeed (each poll on
+  the code `mason logs --events` prints is its title), table, reason and, in **Took**, how long a sync took (`570 ms`,
+  `7 min 57 s`: `tookMs`, said once, not again at the reason's end; **Took** sorts the longest first). The scheduled syncs that succeed (each poll on
   its schedule, and each minute the stream applied changes, a row a table) are listed only while **Scheduled syncs** is
   ticked, or one of their kinds is chosen: Mason is asked for them then (`?scheduled=1`), so they never push a failure
   out of the newest 500 read. **Failures only** asks Mason for the range's failures alone (`?failed=1`), so every failure
   of the range is listed, whatever else is ticked. A **Kind** (every kind of event) and a **Table** (every added table, whether the range has an event of it or not: one with none says so by its name) narrow the list; 100 are
-  written at once, then **Show more**.
+  written at once, then **Show more**. **Every sync running now is a row of its own at the top** (at the bottom when
+  **When** puts the oldest first), read from the state at every poll, so a page opened mid-sync shows it too: a sync
+  asked by hand (Manual sync, `syncByHand`), a First sync, a Full sync again (whose columns changed, when they did) and
+  the Catch-up after it (`rebuilding`). It says **Syncing…** and, in **Took**, how long it has run so far, ticking.
+  While Mason does not answer, that time stands still. The moment the state says a sync ended, its row stops saying
+  Syncing…. A sync asked by hand then says what it did (Synced., or why it failed), and a first or full sync that
+  synced its table says Synced whole., each with the time it took. Its event as recorded takes the row's place once it
+  is read: the events are read once more right after the end, and the row goes after 20 s if no event comes. A sync
+  that ended with nothing the state can say (a catch-up, which records no event when it succeeds; a whole read that
+  did not finish) loses its row at once. A **Kind** keeps a row when it is a kind the sync ends as (Manual sync and
+  Manual sync failed for a sync asked by hand; Full sync and Full sync failed for a first or full sync; Catch-up failed
+  for a catch-up), a **Table** when it is its table, and **Failures only** never. A scheduled sync running is not
+  listed: the state does not say one, and each takes a moment. The events are read at the range's own rate whatever
+  runs.
 - **Sync events**, the run's raw log: behind a closed details, for debugging (it has internal tags and paths), newest first. Mason
   is asked for it only while the details is open.
 
@@ -772,6 +787,10 @@ reads:
   sync <table>` (Sync now) is refused now, in the words it refuses with (its first sync not finished or failed, being
   read again whole, being caught up), or null when it would run. Once the sync holds it there are
   also `kept` (how it is kept current now: `by` is `poll`, with its `sync`, or `replication` or `recopy`) and `duck`.
+  A table synced by hand since the run started also has `syncByHand`, its last such sync (`POST /api/sync`, below).
+  While the run's own sync of a table runs, the table has `rebuilding`: `kind` is `copy` (its first sync, or the table
+  read again whole) or `catch-up` (the one sync of what changed meanwhile that follows it), and `startedAt` is when it
+  began.
 - `copy`, null until the sync reaches the table, is `phase` (`copying`, `done` or `failed`), `rowsCopied` (the rows
   read so far, or the copy's rows once done) and `updatedAt` (when it was copied, `""` before). It also has `progress`
   while its chunks are read (`chunksDone`, `chunksTotal`, `reading`, `readingSeconds`, `rowsReading`, `rowsPerSecond`,
@@ -843,6 +862,37 @@ with `removed` (the tables whose entries were cut, as `schema.table`), `file` (t
 | 400 | `usage` | `tables` is not a non-empty list of strings (`send { tables: [name, …] }`); a name that is not a table's name |
 | 404 | `not_found` | a name the file does not have, with the closest one it has |
 | 409 | `refused` | the project's files are read-only; an entry that stays fails against the database; the file's `url:` now names another database |
+
+### Sync tables now: `POST /api/sync`
+
+`{ "tables": ["public.orders"], "wait"?: true }`, each as `schema.table`. It syncs those tables now, as `mason sync`
+does. A sync reads each table whole on the database, so a big table takes minutes. So the answer comes as soon as the
+sync has started: `202` with `sync`. It has `id` (a number, new for each sync of this run), `tables` (the tables it
+covers), `state`, `startedAt` and `endedAt`. `state` is `syncing`, and `endedAt` is null.
+
+A table whose sync is already running or waiting to start is refused `409` `busy`, at once. A second sync is never
+queued behind it. That covers a sync asked by hand before (from the page, `mason sync` or this route), its first sync,
+a whole read again, its catch-up, and its poll in the pass the run is making now. A sync asked by hand carries that
+sync beside the refusal, as `sync`, and its `message` says when it started.
+
+Follow it in `GET /api/state`. Each table it covers has `syncByHand`, the same object. It says `syncing` until the
+sync ends. Then `state` is `synced` with `answer` (`{ at, tables: [{ table, added, updated, deleted, rows, ms }], streamed? }`,
+what `mason sync --json` prints), or `failed` with `failure` (`{ code, message }`). The run keeps each table's last
+sync by hand until it stops. The sync's events (`GET /api/events`) record each one too, as `synced` or `sync_failed`.
+
+With `wait` true the request is held until the sync ends, and answers `200` with the `answer` above. This is what
+`mason sync` sends, on loopback. A proxy in front of the server may close a request held that long.
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `usage` | `tables` is not a non-empty list of strings, or `wait` is not true or false (`send { tables: [schema.table, …], wait?: true }`) |
+| 404 | `not_found` | a table that is not added (`<table> is not added (mason add adds it)`) |
+| 409 | `busy` | a table already syncing (`<table> is already syncing (started 2 min ago)`, with `fix` and `mason status` next), or whose first sync, whole read again, columns read again, catch-up or scheduled poll is running or waiting to start (`follow: "wait"` beside it when `mason wait` waits for it) |
+| 409 | `nothing_yet` | a table whose first sync failed, or that is being compacted |
+| 409 | `refused` | a run that reads every table again whole |
+
+A refusal is answered at once, and starts no sync. With `"wait": true`, a sync that fails once started is answered
+the same way, or `500` `failed` with the reason.
 
 Nothing an operator asks for is answered or logged with the token. The run logs `added <table> to <file>` and
 `removed <table> from <file>`.

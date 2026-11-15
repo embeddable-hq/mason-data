@@ -2,17 +2,19 @@
  * THE SYNCS VIEW (#observability/syncs, a view of the Observability group; `#observability/logs`, `#logs` and `#syncs`
  * land here;
  * docs/OBSERVABILITY.md "Pages"): the sync's events (`mason logs --events`) over the time range the Observability views
- * share, as a timeline table NEWEST FIRST (When sorts it the other way) — the scheduled syncs that succeeded read only
+ * share, as a timeline table NEWEST FIRST (When sorts it the other way; Took by how long a sync took, its own column) — the scheduled syncs that succeeded read only
  * while "Scheduled syncs" is ticked (or one of their kinds chosen: `?scheduled=1`, filtered by the run, so they never
  * take the place of a failure among the newest EVENTS_LIMIT), "Failures only" asked of the run too (`?failed=1`: every
  * failure of the range, whatever else was read), and narrowed in the page alone by a kind and a table (every kind, and every added table from `/api/state`, events or not), at most EVENTS_SHOWN rows written with
  * "Show more" — and, behind a closed details "The run's raw log (for debugging)", the run's last log entries, newest
- * first (`mason logs`: they carry internal tags and absolute paths, so they are not the page's content). Reads
- * `/api/events` every 10 s (a longer range at its own rate, `rangeEvery`), and `/api/logs` every 5 s ONLY WHILE the
+ * first (`mason logs`: they carry internal tags and absolute paths, so they are not the page's content). EVERY SYNC
+ * RUNNING NOW is a row of its own at the top (issue 1011: `runningSyncs`, from `/api/state`, read every 2 s), its time
+ * so far ticking in Took; once the state says it ended, what it did, until its event as recorded is read (`settleRunning`). Reads
+ * `/api/events` every 10 s (a longer range at its own rate, `rangeEvery`; once more right after a sync ended), and `/api/logs` every 5 s ONLY WHILE the
  * details is open (the page's own state: nothing is read when it is closed). A page module (src/web/app.js has the contract). Never the engine's name.
  */
 import { VIEW_HASHES } from "../routes.js";
-import { esc, agoText, utcText, badge, empty, panel, n, sortTh, nextSort, moreRows, readPart, eventCells, MASON_TABLE, RANGES, DEFAULT_RANGE, rangeOf, rangeEvery } from "../shared.js";
+import { esc, agoText, utcText, badge, empty, panel, n, sortTh, sortedBy, nextSort, msText, moreRows, readPart, eventCells, MASON_TABLE, RANGES, DEFAULT_RANGE, rangeOf, rangeEvery, POLL_MS } from "../shared.js";
 
 /** How many of the range's events are read (the newest), and how many of those the page writes at once. */
 const EVENTS_LIMIT = 500;
@@ -32,8 +34,8 @@ const th = (cols) => cols.map((c) => `<th scope="col">${esc(c)}</th>`).join("");
  *  started, a full sync and a scheduled one are told apart at a glance. "Live" is replication, as the Tables page says. */
 export const KIND_WORDS = { full_sync_failed: "Full sync failed", poll_failed: "Scheduled sync failed", catch_up_failed: "Catch-up failed",
   stream_failed: "Live sync failed", source_unreachable: "Database unreachable", generated_failed: "Generated table failed",
-  compact_failed: "Compaction failed", restart: "Mason restarted", full_sync: "Full sync", recovered: "Working again", synced: "Manual sync",
-  sync_changed: "Sync setting changed", polled: "Scheduled sync", streamed: "Live sync", ui_error: "Web page error" };
+  compact_failed: "Compaction failed", sync_failed: "Manual sync failed", restart: "Mason restarted", full_sync: "Full sync", recovered: "Working again", synced: "Manual sync",
+  sync_changed: "Sync setting changed", columns_changed: "Columns changed", polled: "Scheduled sync", streamed: "Live sync", ui_error: "Web page error" };
 /** A kind's words; a kind this page does not know, its code. */
 export const kindWords = (kind) => Object.hasOwn(KIND_WORDS, kind) ? KIND_WORDS[kind] : kind;
 
@@ -53,6 +55,121 @@ export function failureFacts(e) {
   return `<p class="dim">Code <code>${esc(e.code)}</code>${e.origin == null ? "" : `, at <code>${esc(e.origin)}</code>`}</p>`;
 }
 
+/** HOW LONG A SYNC TOOK, IN A COLUMN OF ITS OWN (issue 1012): the event's `tookMs` in the commands' words (`msText`:
+ *  `570 ms`, `7 min 57 s`), and its message without the ` · <took>` it ends with (src/duck/events.ts `tookMs`), so the
+ *  time is said once; an event with none (a restart, a failure, one recorded before Mason kept it) has "" and its
+ *  message whole. */
+export function tookCells(e, message) {
+  if (typeof e.tookMs !== "number") return { took: "", message };
+  const took = msText(e.tookMs), end = ` · ${took}`;
+  return { took, message: message.endsWith(end) ? message.slice(0, -end.length) : message };
+}
+
+/**
+ * THE SYNCS RUNNING NOW (issue 1011), from `/api/state`: a sync asked by hand (`syncByHand`, `syncing` while it runs
+ * or waits for the pass ahead), and the run's own sync of a table (`rebuilding`: `copy` a first sync or a full sync again,
+ * whose columns changed when `columnsPending` says so; `catch-up` the one sync of what changed meanwhile that follows
+ * it). A row each, its table, its kind in words, a line under "Syncing…" and since when. `ends` are the kinds of event
+ * it ends as: the Kind filter keeps it when one of them is chosen, and the page lets it go once one of them is read
+ * (`settleRunning`). A scheduled sync running is not said: the state does not carry one, and a poll is over in moments.
+ */
+export function runningSyncs(s) {
+  const out = [];
+  for (const t of Array.isArray(s?.tables) ? s.tables : []) {
+    if (!t.added) continue;
+    const y = t.syncByHand;
+    if (y?.state === "syncing") {
+      out.push({ key: `hand:${y.id}:${t.table}`, by: "hand", id: y.id, table: t.table, startedAt: y.startedAt, words: KIND_WORDS.synced, note: "", ends: ["synced", "sync_failed"] });
+    }
+    const r = t.rebuilding;
+    if (r && (r.kind === "copy" || r.kind === "catch-up")) {
+      const key = `${r.kind}:${t.table}:${r.startedAt}`, by = r.kind;
+      if (r.kind === "catch-up") {
+        out.push({ key, by, table: t.table, startedAt: r.startedAt, words: "Catch-up", note: "It syncs the rows that changed since its last full sync.", ends: ["catch_up_failed"] });
+      } else if (t.copy?.phase === "copying") {
+        const share = t.copy.progress?.share;
+        out.push({ key, by, table: t.table, startedAt: r.startedAt, words: "First sync", note: typeof share === "number" ? `${Math.floor(share * 100)}% done.` : "", ends: ["full_sync", "full_sync_failed"] });
+      } else if (Array.isArray(t.columnsPending)) {
+        out.push({ key, by, table: t.table, startedAt: r.startedAt, words: KIND_WORDS.full_sync, note: "Its columns changed, so it is synced again whole.", ends: ["full_sync", "full_sync_failed", "columns_changed"] });
+      } else {
+        out.push({ key, by, table: t.table, startedAt: r.startedAt, words: KIND_WORDS.full_sync, note: "It is synced again whole.", ends: ["full_sync", "full_sync_failed"] });
+      }
+    }
+  }
+  return out;
+}
+
+/** How long a sync that ended is shown with its outcome, though no event of its end was read: the event may have been
+ *  left out (a range, a filter of the run) or never written. The events are read again once it ended (`page.reads`),
+ *  so it is long enough for that read. */
+export const HANDOVER_MS = 20_000;
+
+/**
+ * WHAT A SYNC THAT ENDED DID, AS THE STATE SAYS IT (`state`, the one just read; null: nothing to say, and its row goes
+ * at once): a sync by hand's outcome (`syncByHand` of its id, `synced` or `failed` with its reason) and its end; a first
+ * or full sync whose synced data is now as of a copy made since it began (`sync.syncedBy` copy). A catch-up, or a whole
+ * read that ended otherwise, says nothing here: a catch-up that succeeds records no event, and one that failed is its
+ * own event.
+ */
+function endedOutcome(r, state) {
+  const t = (Array.isArray(state?.tables) ? state.tables : []).find((x) => x.table === r.table);
+  if (t === undefined) return null;
+  if (r.by === "hand") {
+    const y = t.syncByHand;
+    if (y?.id !== r.id || y.state === "syncing" || typeof y.endedAt !== "string") return null;
+    return y.state === "failed" ? { failed: true, endedAt: y.endedAt, message: y.failure?.message ?? "it failed" }
+      : { failed: false, endedAt: y.endedAt, message: "Synced." };
+  }
+  if (r.by === "copy" && t.sync?.syncedBy === "copy" && typeof t.sync.syncedAt === "string" && Date.parse(t.sync.syncedAt) >= Date.parse(r.startedAt)) {
+    return { failed: false, endedAt: t.sync.syncedAt, message: "Synced whole." };
+  }
+  return null;
+}
+
+/**
+ * THE HAND-OVER FROM A RUNNING ROW TO ITS EVENT, decided by the state (`state`, just read): the rows running now
+ * (`runningSyncs`), and each one shown before that the state no longer has — ended. An ended row never says
+ * "Syncing…": it says what the state says it did (`endedOutcome`), its time stopped at its end, until an event of its
+ * end for its table, at or after its start, is among the events read, or HANDOVER_MS passed since it was seen to end
+ * (`seen`, the moment `at` it was first missed); one the state says nothing of goes at once.
+ */
+export function settleRunning(before, state, events, at) {
+  const next = new Map(runningSyncs(state).map((r) => [r.key, r]));
+  for (const [key, r] of before) {
+    if (next.has(key)) continue;
+    const outcome = r.outcome ?? endedOutcome(r, state);
+    if (outcome === null) continue;
+    const seen = r.seen ?? at;
+    const recorded = (events ?? []).some((e) => e.table === r.table && r.ends.includes(e.kind) && Date.parse(e.at) >= Date.parse(r.startedAt));
+    if (!recorded && at - seen < HANDOVER_MS) next.set(key, { ...r, outcome, seen });
+  }
+  return next;
+}
+
+/** The running rows that pass the page's filters: none under Failures only (a sync running has not failed, and one
+ *  that failed is listed by its event); a kind only when the sync ends as it; a table its own. */
+const runningShown = (running, { failuresOnly = false, kind = "", table = "" } = {}) =>
+  failuresOnly ? [] : running.filter((r) => (!kind || r.ends.includes(kind)) && (!table || r.table === table));
+
+/** A running sync's row: Now (its start the title), its kind in words, its table, "Syncing…" and its line, and how long
+ *  it has run so far in Took (`<time data-tick>`, so only the clock moves at each write), counted to `asOf` — the
+ *  page's clock, or the last moment the run answered while it does not (the run stopped: its time stands still). A sync
+ *  that ended (`outcome`): when it ended, what it did, and the time it took. */
+function runningRow(r, asOf, now) {
+  const started = utcText(r.startedAt);
+  const o = r.outcome;
+  if (o) {
+    const end = Date.parse(o.endedAt);
+    return `<tr class="t-ended${o.failed ? " t-failed" : ""}"><th scope="row"><span title="${esc(`${utcText(o.endedAt)} UTC`)}">${esc(agoText(o.endedAt, now))}</span></th>` +
+      `<td><span title="${esc(r.ends[o.failed ? 1 : 0] ?? "")}">${badge(o.failed ? `✗ ${kindWords(r.ends[1] ?? "")}` : r.words, o.failed ? "bad" : "ok")}</span></td><td><code class="name" title="${esc(r.table)}">${esc(r.table)}</code></td>` +
+      `<td>${esc(o.message)}</td><td class="num"><span title="${esc(`started ${started} UTC`)}">${esc(msText(end - Date.parse(r.startedAt)))}</span></td></tr>`;
+  }
+  return `<tr class="t-running"><th scope="row"><span title="${esc(`started ${started} UTC`)}">Now</span></th>` +
+    `<td><span title="running">${badge(r.words, "warn")}</span></td><td><code class="name" title="${esc(r.table)}">${esc(r.table)}</code></td>` +
+    `<td>Syncing…${r.note ? ` <span class="dim">${esc(r.note)}</span>` : ""}</td>` +
+    `<td class="num"><time data-tick datetime="${esc(r.startedAt)}" title="${esc(`started ${started} UTC`)}">${esc(msText(asOf - Date.parse(r.startedAt)))}</time></td></tr>`;
+}
+
 /**
  * The sync's events as a timeline, NEWEST FIRST (`sort.dir` "asc": oldest first, as the command lists them): when (how
  * long ago; the UTC time, as the command prints it, is the title), the kind as a badge, the table, the reason's first line
@@ -60,11 +177,14 @@ export function failureFacts(e) {
  * (the page's filters) keep the events of what was read that pass (`eventsShown`); at most `limit` rows are written.
  * `span` the range's words; `now` the page's clock.
  */
-export function renderEvents(b, { failuresOnly = false, kind = "", table = "", now = Date.now(), sort = { key: "time", dir: "desc" }, limit = EVENTS_SHOWN, span = "" } = {}) {
+export function renderEvents(b, { failuresOnly = false, kind = "", table = "", now = Date.now(), sort = { key: "time", dir: "desc" }, limit = EVENTS_SHOWN, span = "", running = [], runningAsOf = now } = {}) {
   const days = `${b.keptDays} day${b.keptDays === 1 ? "" : "s"}`;
   const within = span ? `in ${span}. Mason keeps ${days} of history` : `in the last ${days}`;
   const passing = eventsShown(b.events, { failuresOnly, kind, table });
   const narrowed = failuresOnly || kind || table;
+  // the syncs running now, newest of all: first while the list reads newest first, else last
+  const live = runningShown(running, { failuresOnly, kind, table });
+  if (live.length) return renderTimeline(passing, b.events.length, { narrowed, now, sort, limit, live, asOf: runningAsOf });
   // a table chosen that had none (every added table is a choice, events or not): said by its name
   if (!passing.length && table && !kind) {
     return empty(table === MASON_TABLE ? `No Mason ${failuresOnly ? "failure" : "event"}s ${within}.` : `No ${failuresOnly ? "failure" : "event"}s for ${table} ${within}.`);
@@ -73,21 +193,34 @@ export function renderEvents(b, { failuresOnly = false, kind = "", table = "", n
   if (!passing.length) {
     return empty(failuresOnly && !kind && !table ? `None of the ${b.events.length} sync event${b.events.length === 1 ? "" : "s"} shown failed.` : `None of the ${n(b.events.length)} sync event${b.events.length === 1 ? "" : "s"} read passes the filters.`);
   }
-  const ordered = sort.dir === "asc" ? passing : [...passing].reverse();
+  return renderTimeline(passing, b.events.length, { narrowed, now, sort, limit, live, asOf: runningAsOf });
+}
+
+/** The table of the events that pass (`passing`, of `read` read) and the syncs running now (`live`). */
+function renderTimeline(passing, read, { narrowed, now, sort, limit, live, asOf }) {
+  // Took sorts the longest first (an event with none last, whatever the order), newest first among equals
+  const ordered = sort.key === "took" ? sortedBy([...passing].reverse(), (e) => typeof e.tookMs === "number" ? e.tookMs : null, sort.dir)
+    : sort.dir === "asc" ? passing : [...passing].reverse();
   const rows = ordered.slice(0, limit).map((e) => {
     const c = eventCells(e);
+    const t = tookCells(e, c.message);
     const more = (e.message.includes("\n") ? `<pre>${esc(e.message.split("\n").slice(1).join("\n"))}</pre>` : "") + failureFacts(e);
     return `<tr${e.failed ? ` class="t-failed"` : ""}><th scope="row"><time data-tick datetime="${esc(e.at)}" title="${esc(c.time)} UTC">${esc(agoText(e.at, now))}</time></th><td>${kindBadge(e)}</td>` +
-      `<td>${e.table == null ? `<span class="dim">${esc(c.table)}</span>` : `<code class="name" title="${esc(c.table)}">${esc(c.table)}</code>`}</td><td>${esc(c.message)}${more}</td></tr>`;
+      `<td>${e.table == null ? `<span class="dim">${esc(c.table)}</span>` : `<code class="name" title="${esc(c.table)}">${esc(c.table)}</code>`}</td><td>${esc(t.message)}${more}</td><td class="num">${esc(t.took)}</td></tr>`;
   }).join("");
-  const count = narrowed ? `<p class="dim">${n(passing.length)} of the ${n(b.events.length)} events read.</p>` : "";
-  return count + panel(`<table class="events"><thead><tr>${sortTh("events", "time", "When", sort)}${th(["Kind", "Table", "Message"])}</tr></thead><tbody>${rows}</tbody></table>`) +
+  // the running rows newest first too (the one started last at the top), and the other way round when the list is
+  const oldestFirst = sort.key === "time" && sort.dir === "asc";
+  const started = [...live].sort((x, y) => Date.parse(y.startedAt) - Date.parse(x.startedAt));
+  const liveRows = (oldestFirst ? started.reverse() : started).map((r) => runningRow(r, asOf, now)).join("");
+  const body = oldestFirst ? rows + liveRows : liveRows + rows;
+  const count = narrowed && read > 0 ? `<p class="dim">${n(passing.length)} of the ${n(read)} events read.</p>` : "";
+  return count + panel(`<table class="events"><thead><tr>${sortTh("events", "time", "When", sort)}${th(["Kind", "Table", "Message"])}${sortTh("events", "took", "Took", sort, "num")}</tr></thead><tbody>${body}</tbody></table>`) +
     moreRows("events", Math.min(limit, passing.length), passing.length, EVENTS_SHOWN);
 }
 
 /** EVERY KIND OF SYNC EVENT, in its order (src/duck/events.ts `EVENT_KINDS`, held equal by the tests): the Kind filter
  *  offers each, whether the range has one or not. */
-export const EVENT_KINDS = ["full_sync_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "restart", "full_sync", "recovered", "synced", "sync_changed", "polled", "streamed", "ui_error"];
+export const EVENT_KINDS = ["full_sync_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "sync_failed", "restart", "full_sync", "recovered", "synced", "sync_changed", "columns_changed", "polled", "streamed", "ui_error"];
 
 /** The kind and table filters' controls: EVERY kind (EVENT_KINDS), and EVERY added table (`/api/state` `tables`, `s`) —
  *  Mason's own events first ("Mason events", MASON_TABLE) — whether the range has an event of it or not, so the choices never depend on what
@@ -124,13 +257,27 @@ export const page = {
   parent: "observability",
   title: "Sync events",
   create(ctx) {
-    const m = { rawOpen: false, failuresOnly: false, scheduled: false, kind: "", table: "", sort: { key: "time", dir: "desc" }, limit: EVENTS_SHOWN };
+    const m = { rawOpen: false, failuresOnly: false, scheduled: false, kind: "", table: "", sort: { key: "time", dir: "desc" }, limit: EVENTS_SHOWN,
+      // the syncs running now, by key, and those just ended whose event is not read yet (`settleRunning`)
+      running: new Map() };
     // the scheduled syncs are read when the box is ticked, or one of their kinds is chosen (else that kind lists none)
     const scheduledRead = () => m.scheduled || SCHEDULED_KINDS.includes(m.kind);
     // FAILURES ONLY IS ASKED OF THE RUN (`failed=1`), never filtered from the newest EVENTS_LIMIT read: the scheduled syncs,
     // one a table a poll, fill 500 rows in minutes, and a failure among them must still be listed
     const events = () => eventsPath(ctx.range(), { scheduled: scheduledRead(), failed: m.failuresOnly });
     const part = (path, render, says) => readPart(ctx, path, render, says);
+    // a sync that ended waits for its event: the events are read again once, a poll after it was seen to end (its event
+    // is written within a second of its end, src/duck/events.ts FLUSH_MS), unless they were read since then already
+    const handOver = () => {
+      const readAt = ctx.read(events())?.readAt ?? 0;
+      return [...m.running.values()].some((r) => r.seen !== undefined && readAt < r.seen + 1000);
+    };
+    // what a running sync's time counts to: the page's clock while the run answers, else the last moment it did (the
+    // run stopped or is starting again: nothing is known to run since, so its time stands still)
+    const runningAsOf = () => {
+      const st = ctx.read(STATE);
+      return st?.failure && typeof st.readAt === "number" ? st.readAt : ctx.now().getTime();
+    };
     const actions = {
       /** The details opened or closed: the log is read from then on, or no longer. */
       async showRawLog(open) {
@@ -139,19 +286,28 @@ export const page = {
       },
       /** Scheduled syncs ticked or cleared (or a kind chosen that changes what is read): the events read now, from the run. */
       async readEvents() { await ctx.refresh([events()]); },
-      sortEvents() { m.sort = nextSort(m.sort, "time"); },
+      /** When or Took pressed: newest first, or the longest first, then the other way at the next press. */
+      sortEvents(key = "time") { m.sort = nextSort(m.sort, key === "took" ? "took" : "time"); },
       showMoreEvents() { m.limit += EVENTS_SHOWN; },
       showAllEvents() { m.limit = Infinity; },
     };
     return {
       model: m,
-      // the state for the Table filter's choices (every added table), as often as tables are added
-      reads: () => [{ path: events(), everyMs: rangeEvery(ctx.range(), 10_000) }, { path: STATE, everyMs: 30_000 }, ...(m.rawOpen ? [{ path: LOGS, everyMs: 5000 }] : [])],
+      // THE STATE AT EVERY POLL: the syncs running now are its (issue 1011), and the Table filter's choices (every added
+      // table). The events at the range's own rate, whatever runs — and ONCE more as soon as a sync ended, after it was
+      // seen to end (`handOver`), so its event as recorded takes its row's place within moments
+      reads: () => [{ path: events(), everyMs: handOver() ? POLL_MS : rangeEvery(ctx.range(), 10_000) }, { path: STATE, everyMs: POLL_MS }, ...(m.rawOpen ? [{ path: LOGS, everyMs: 5000 }] : [])],
       actions,
+      /** After each read: the syncs running now from the state, and each one ended handed over to its event (`settleRunning`). */
+      afterRead() {
+        const s = ctx.read(STATE)?.body;
+        if (s === undefined) return;
+        m.running = settleRunning(m.running, s, ctx.read(events())?.body?.events, ctx.now().getTime());
+      },
       view: () => ({
         "syncs-filters": renderEventFilters(ctx.read(events())?.body, m, ctx.read(STATE)?.body ?? null),
         "syncs-events": part(events(), (b) => renderEvents(b, { failuresOnly: m.failuresOnly, kind: m.kind, table: m.table, now: ctx.now().getTime(), sort: m.sort, limit: m.limit,
-          span: RANGES[ctx.range()]?.span ?? "" }), false),
+          span: RANGES[ctx.range()]?.span ?? "", running: [...m.running.values()], runningAsOf: runningAsOf() }), false),
         "syncs-run": renderRawLog(m.rawOpen, m.rawOpen ? part(LOGS, renderLogs, true) : ""),
       }),
       /** The kind or the table chosen: the events read are filtered in the page alone. "Failures only" and "Scheduled
@@ -179,7 +335,7 @@ export const page = {
         return true;
       },
       click(d) {
-        if (d.sortTable === "events") return actions.sortEvents() ?? true;
+        if (d.sortTable === "events") return actions.sortEvents(d.sortKey) ?? true;
         if (d.showMore === "events") return actions.showMoreEvents() ?? true;
         if (d.showAll === "events") return actions.showAllEvents() ?? true;
         return null;

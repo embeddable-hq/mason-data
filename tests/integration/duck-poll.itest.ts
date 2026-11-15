@@ -964,6 +964,8 @@ test("a failed copy waits before it is tried again, and a change of its columns 
     assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error, s.rows]), [["public.t", "copied", null, 100]]);
     // the events say the failure and then the full sync that ended it, by the kinds a person reads (issue 953)
     assert.deepEqual(events.map((e) => [e.kind, e.table]), [["full_sync_failed", "public.t"], ["full_sync", "public.t"]]);
+    // a whole read adds every row it holds, said as a poll's record says it (issue 1010)
+    assert.match(events[1]!.message, /^synced whole: 100 added, 0 updated, 0 deleted, 100 rows now · [\d.]+ (ms|s)$/, events[1]!.message);
   } finally { await sync.stop(); await store.close(); }
 });
 
@@ -1236,7 +1238,7 @@ test("a mixed project: an `off` table unchanged until mason sync, a `poll 2s` on
     assert.deepEqual(all.map((s) => keptOf(sync, s)?.by === "poll" ? (keptOf(sync, s) as { sync: unknown }).sync : null), [OFF, POLL("2s", 2), POLL("10s", 10)]);
     assert.equal((keptOf(sync, "public.manual") as { nextAt: string | null }).nextAt, null, "an off table has no next poll");
 
-    psql(url, "INSERT INTO manual VALUES (6, 'new'); INSERT INTO fast VALUES (6, 'new'); INSERT INTO slow VALUES (6, 'new')");
+    psql(url, "INSERT INTO manual VALUES (6, 'new'); UPDATE manual SET v = 'edited' WHERE id IN (1, 2); INSERT INTO fast VALUES (6, 'new'); INSERT INTO slow VALUES (6, 'new')");
     const changedAt = Date.now();
     // the 2s table: current within its interval (and a pass's own time)
     // its rows are visible a moment before its pass reads the ledger's polled_at again: both are waited for
@@ -1258,7 +1260,12 @@ test("a mixed project: an `off` table unchanged until mason sync, a `poll 2s` on
 
     // mason sync: an off table polled once, now; and a polled table now too, whatever its interval
     const asked = await sync.pollNow(["public.manual"]);
-    assert.deepEqual(asked.tables.map((t) => [t.table, t.changed, t.rows]), [["public.manual", 1, 6]]);
+    // the new row ADDED, the two edited UPDATED, told apart by whether the synced table held the key (issue 1010). A poll
+    // reads again every row past the server's oldest open transaction, so on a busy server more rows read may be
+    // updated: never fewer, and never another row added
+    const [manual] = asked.tables;
+    assert.deepEqual([manual?.table, manual?.added, manual?.deleted, manual?.rows], ["public.manual", 1, 0, 6], JSON.stringify(asked.tables));
+    assert.ok(manual!.updated >= 2 && manual!.updated <= 5, JSON.stringify(asked.tables));
     assert.equal(await count("manual"), 6);
     assert.ok(syncedAt(sync, "public.manual")! > before["public.manual"]!, "mason sync moves its syncedAt");
     assert.equal((keptOf(sync, "public.manual") as { nextAt: string | null }).nextAt, null, "and leaves it off: no next poll");
@@ -1391,7 +1398,7 @@ test("a table is said kept current only when a poll of it would run: not while i
     assert.equal(now()?.rebuilding, "copy", "still being read again");
     assert.match((now()?.kept as { pending?: string }).pending ?? "", /being read whole/);
     assert.equal(pendingOf("public.u"), "it is queued to be read whole: it joins once synced and caught up by one poll — queued behind public.t's whole read (one rebuild at a time)");
-    await assert.rejects(sync.pollNow(["public.t"]), (e: Error) => e instanceof PollRefused && e.code === "nothing_yet");
+    await assert.rejects(sync.pollNow(["public.t"]), (e: Error) => e instanceof PollRefused && e.code === "busy", "a read of it running: a sync by hand is refused busy, never queued behind it (issue 1007)");
     copyOfT.release();
     await until("both read again with the restored columns, and caught up", settled(sync, ["public.t", "public.u"]));
     assert.deepEqual((await sync.pollNow(["public.t"])).tables.map((t) => t.table), ["public.t"]);
@@ -1465,7 +1472,8 @@ test("a poll of a transaction that changed most of a big table writes it in comm
   const logged: string[] = [];
   const file = path.join(dir, "bulk.db");
   let store: DuckStore = await DuckStore.open(file, (l) => logged.push(l), { memoryLimit: "64MB" });
-  let sync: Sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll");
+  const events: Array<{ kind: string; table: string | null; message: string }> = [];
+  let sync: Sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll", null, { onEvent: (e) => { events.push(e); } });
   const checksum = async (): Promise<void> => assert.equal(
     ((await store.writer.runAndReadAll("SELECT count(*), sum(n), sum(('0x' || substr(md5(id::VARCHAR), 1, 8))::UBIGINT) FROM public.bulk")).getRowsJS() as unknown[][]).map((r) => r.join("\t")).join("\n"),
     psql(url, "SELECT count(*), sum(n), sum(('x' || substr(md5(id::text), 1, 8))::bit(32)::bigint) FROM bulk"), `DuckDB equals the source\n${logged.slice(-4).join("\n")}`);
@@ -1483,6 +1491,10 @@ test("a poll of a transaction that changed most of a big table writes it in comm
     await checksum();
     assert.match(said, /^poll: snapshot \d+ ms; public\.bulk 721000 changed, staged in \d+ ms, 1000 new, counted in \d+ ms, 8000 deleted$/m, said);
     assert.match(said, /^poll: public\.bulk: 721,000 changed row\(s\), written in 15 pieces in \d+ ms$/m, said);
+    // its record: the 1,000 new keys ADDED, the rest of what it read UPDATED, the 8,000 gone DELETED (issue 1010)
+    const polled = events.filter((e) => e.kind === "polled").map((e) => e.message);
+    assert.equal(polled.length, 1, JSON.stringify(events));
+    assert.match(polled[0]!, /^synced on schedule: 1,000 added, 720,000 updated, 8,000 deleted, 793,000 rows now · /, polled[0]);
     // the watermark moved with the last piece: a restart polls nothing again of it
     await sync.stop(); await store.close();
     store = await DuckStore.open(file, (l) => logged.push(l), { memoryLimit: "64MB" });

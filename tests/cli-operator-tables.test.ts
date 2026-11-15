@@ -49,6 +49,9 @@ const source = "source" in parsed ? parsed.source : assert.fail(parsed.problem);
 interface Operator { socket: string; port: number; token: string; root: string; sourceFile: string; logged: string[]; changed: () => number; setCopies: (c: CopyState[]) => void;
   setTables: (t: SourceTable[]) => void; polled: string[] }
 
+/** a sync held running until a test lets it end (`POST /api/sync`'s busy, issue 1007) */
+let syncGate: Promise<void> | null = null;
+
 /** `mason serve`'s run as an operator meets it: a project with a sources file, the server on a Unix socket, the run file. */
 async function operator(o: { pageReadOnly?: boolean; pageReadOnlyAllow?: string[]; runUrl?: string; checkReplication?: RunContext["checkReplication"] } = {}): Promise<Operator> {
   const root = temp();
@@ -74,7 +77,7 @@ async function operator(o: { pageReadOnly?: boolean; pageReadOnlyAllow?: string[
     listener: { openSessions: () => ({ open: 0, byClient: [] }), running: () => [], cancel: (session: number) => ({ unknown: session }) },
     logs: { capacity: 10, recent: () => [] },
     readSource: read, runUrl: o.runUrl ?? URL_, ...(o.checkReplication ? { checkReplication: o.checkReplication } : {}),
-    duck: { copies: () => copies, file: path.join(root, "duck.db"), poll: async (t: string[]) => { polled.push(...t); return { at: "2026-11-08T10:00:00.000Z", tables: [] }; },
+    duck: { copies: () => copies, file: path.join(root, "duck.db"), refused: () => null, poll: async (t: string[]) => { polled.push(...t); await syncGate; return { at: "2026-11-08T10:00:00.000Z", tables: [] }; },
       stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }), restarts: () => [], requests: { days: 7 } },
   } as unknown as RunContext;
   const server = createRunServer(ctx);
@@ -132,6 +135,9 @@ const LEAN_TABLE = ["added", "addedColumns", "bytes", "columnCount", "comment", 
 const ADDED_ENTRY = ["entry", "everyColumnLeavesOut"];
 const PICK_ANSWER = ["addedKey", "already", "bigOff", "columns", "entry", "exclude", "file", "key", "notReplicated", "pollCost", "skippedSecrets", "state", "sync", "table"];
 const REMOVE_ANSWER = ["file", "removed", "state"];
+/** `POST /api/sync`'s answer as the sync starts, and a sync by hand as it and `/api/state` `syncByHand` say it (issue 1007) */
+const SYNC_STARTED = ["sync"];
+const SYNC_BY_HAND = ["endedAt", "id", "startedAt", "state", "tables"];
 const COLUMN = ["comment", "name", "nullable", "references", "type"];
 
 test("the table list: GET /api/state is lean — per table its name, key, rows, whether it is added and why it cannot be — and one table's columns are GET /api/tables/<table>/columns", async () => {
@@ -390,7 +396,9 @@ test("MASON_UI_READ_ONLY_ALLOW=tables: the read-only page adds a table (every co
   const added = fs.readFileSync(op.sourceFile, "utf8");
   for (const t of ["customers:", "orders:", "events:", "key: [tenant_id, id]"]) assert.ok(added.includes(t), `${t} in ${added}`);
   // Sync now
-  assert.deepEqual((await page("/api/sync", { tables: ["public.customers"] })).tables, []);
+  const syncing = await ask(op, "POST", "/api/sync", { body: { tables: ["public.customers"] }, as: "page" });
+  assert.equal(syncing.status, 202, `answered as the sync starts (issue 1007): ${syncing.text}`);
+  assert.deepEqual((json(syncing).sync as { tables: unknown }).tables, ["public.customers"]);
   assert.deepEqual(op.polled, ["public.customers"]);
   // Remove, and a pick undone
   assert.deepEqual((await page("/api/remove", { tables: ["customers", "orders"] })).removed, ["public.customers", "public.orders"]);
@@ -422,8 +430,42 @@ test("MASON_PROJECT_READONLY=1 wins over MASON_UI_READ_ONLY_ALLOW=tables: the pa
       assert.equal(f.message, "the project's files are read-only here (MASON_PROJECT_READONLY=1)", p);
     }
     assert.equal(fs.readFileSync(op.sourceFile, "utf8"), before, "nothing written");
-    assert.equal((await ask(op, "POST", "/api/sync", { body: { tables: ["public.customers"] }, as: "page" })).status, 200, "a sync writes no project file");
+    assert.equal((await ask(op, "POST", "/api/sync", { body: { tables: ["public.customers"] }, as: "page" })).status, 202, "a sync writes no project file");
   } finally { if (was === undefined) delete process.env.MASON_PROJECT_READONLY; else process.env.MASON_PROJECT_READONLY = was; }
+});
+
+test("POST /api/sync: 202 { sync } as the sync starts, then each table's syncByHand in the state; a second while it runs 409 busy; wait: true answers 200 with what it did; a body that names none 400 (issue 1007)", async () => {
+  const op = await operator();
+  assert.equal((await ask(op, "POST", "/api/pick", { body: { table: "public.customers", picked: true } })).status, 200);
+  let release!: () => void;
+  syncGate = new Promise<void>((r) => { release = r; });
+  let r: { sync: Record<string, unknown> };
+  try {
+    const started = await ask(op, "POST", "/api/sync", { body: { tables: ["public.customers"] } });
+    assert.equal(started.status, 202, started.text);
+    r = json(started) as { sync: Record<string, unknown> };
+    assert.deepEqual([keys(r), keys(r.sync), r.sync.tables, r.sync.state, r.sync.endedAt], [SYNC_STARTED, SYNC_BY_HAND, ["public.customers"], "syncing", null]);
+    // a second while it runs, waited for or not: 409 busy at once, the sync running beside it, never a second read
+    for (const body of [{ tables: ["public.customers"] }, { tables: ["public.customers"], wait: true }]) {
+      const busy = await ask(op, "POST", "/api/sync", { body });
+      assert.equal(busy.status, 409, busy.text);
+      const b = json(busy) as { error: string; code: string; sync: { id: unknown }; failure: { code: string; message: string; fix: string; next: unknown } };
+      assert.deepEqual([keys(b), b.code, b.sync.id, b.failure.code, b.failure.message, b.failure.fix, b.failure.next], [["code", "error", "failure", "sync"], "busy", r.sync.id, "busy", b.error,
+        "it ends by itself, and a second sync is never started beside it", [{ command: "mason status", what: "when each table was last synced" }]]);
+      assert.match(b.error, /^public\.customers is already syncing \(started \d+ s ago\)$/);
+    }
+    assert.deepEqual(op.polled, ["public.customers"], "one read");
+  } finally { release(); syncGate = null; }
+  await new Promise((done) => setTimeout(done, 50));
+  const state = json(await ask(op, "GET", "/api/state"));
+  const y = (state.tables as Array<{ table: string; syncByHand?: Record<string, unknown> }>).find((t) => t.table === "public.customers")!.syncByHand!;
+  assert.deepEqual([keys(y), y.id, y.state, y.answer], [[...SYNC_BY_HAND, "answer"].sort(), r.sync.id, "synced", { at: "2026-11-08T10:00:00.000Z", tables: [] }], "the state follows it to its end");
+  const waited = await ask(op, "POST", "/api/sync", { body: { tables: ["public.customers"], wait: true } });
+  assert.deepEqual([waited.status, json(waited)], [200, { at: "2026-11-08T10:00:00.000Z", tables: [] }]);
+  for (const body of [{}, { tables: [] }, { tables: "customers" }, { tables: ["public.customers"], wait: 1 }]) {
+    assert.equal(refusal(await ask(op, "POST", "/api/sync", { body }), 400, "usage").message, "send { tables: [schema.table, …], wait?: true }", JSON.stringify(body));
+  }
+  assert.deepEqual(op.polled, ["public.customers", "public.customers"]);
 });
 
 test("the token reaches no answer and no log line", () => {
@@ -436,8 +478,8 @@ test("the doc names every key of the contract: the lean table, a column, the pic
   const doc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "docs", "WEB-UI.md"), "utf8");
   const section = doc.split("\n## An operator's table edits\n")[1]?.split("\n## ")[0];
   assert.ok(section !== undefined, "docs/WEB-UI.md has the section");
-  for (const k of [...LEAN_TABLE, ...ADDED_ENTRY, ...PICK_ANSWER, ...REMOVE_ANSWER, ...COLUMN, "kept", "sync", "syncRefusal", "sourcesReadOnly", "pageReadOnly", "phase", "rowsCopied", "updatedAt", "progress", "retired", "copying", "done", "failed"]) assert.ok(section.includes(`\`${k}\``), k);
-  for (const route of ["GET /api/state", "GET /api/tables/<table>/columns", "POST /api/pick", "POST /api/remove", "MASON_UI_SOCKET", "MASON_UI_RUN_FILE", "MASON_UI_READ_ONLY"]) {
+  for (const k of [...LEAN_TABLE, ...ADDED_ENTRY, ...PICK_ANSWER, ...REMOVE_ANSWER, ...SYNC_STARTED, ...SYNC_BY_HAND, "syncByHand", "answer", "failure", "wait", "syncing", "synced", "busy", ...COLUMN, "kept", "sync", "syncRefusal", "sourcesReadOnly", "pageReadOnly", "phase", "rowsCopied", "updatedAt", "progress", "retired", "copying", "done", "failed"]) assert.ok(section.includes(`\`${k}\``), k);
+  for (const route of ["GET /api/state", "GET /api/tables/<table>/columns", "POST /api/pick", "POST /api/remove", "POST /api/sync", "MASON_UI_SOCKET", "MASON_UI_RUN_FILE", "MASON_UI_READ_ONLY"]) {
     assert.ok(section.includes(route), route);
   }
 });

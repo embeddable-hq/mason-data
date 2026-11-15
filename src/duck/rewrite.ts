@@ -26,7 +26,7 @@
  * answered differently. The rewritten tree is printed with pgsql-deparser; the server parses the printed text again
  * and refuses the statement unless it reads back as exactly this tree (`sameTree`), so a printing gap can only refuse.
  */
-import { HELD, heldType, isHeldArray, ZONED_HELD } from "./held-types.ts";
+import { HELD, heldType, isHeldArray, PARAM_ARRAYS, ZONED_HELD } from "./held-types.ts";
 import { pgEvalSync } from "./pg-eval.ts";
 import type { GapId, PostgresRefuses } from "./gaps.ts";
 import type { PgAnalysis } from "./analyze.ts";
@@ -293,6 +293,9 @@ class Rewriter {
   scales: ScaleLookup | null = null;
   /** the parameters met as a json read's path, or an element or key of one, of a type read as a constant (`foldParam`) */
   readonly pathParams = new Set<number>();
+  /** the numeric[] parameters read other than by ANY or ALL with a number (`param`): no list of the engine holds every
+   *  element exactly, so the Execute answers a NULL and refuses any other value (`numeric-array-parameter`) */
+  readonly wholeNumericArrays = new Set<number>();
   /** the parameters the read being written folded, and the text each was bound to (`folded`); null outside a json
    *  read's rule, where nothing folds */
   private folds: Map<number, string> | null = null;
@@ -441,7 +444,53 @@ class Rewriter {
     return { base, steps, either, canonical: a0 === JSONB };
   }
 
-  /** a copied table's column (Typed.relation): its jsonb text is the copy's, Postgres's canonical text, each key once */
+  /**
+   * A json(b)_object_keys argument whose keys DuckDB's own `json_keys` reads exactly as Postgres does (issue 461: the
+   * function, one hop to the main thread per vector, was 56 µs a row and held every other session's statement): a
+   * column of a table (Typed.relation, `copiedColumn`), of the function's own type. Every jsonb a table holds is
+   * Postgres's canonical text, a synced table's as the source wrote it and a generated table's as its build wrote it
+   * (src/duck/generated.ts `canonicalJsonb`), so its keys are already in jsonb's order (length first, then bytes), each
+   * held once. A json column's text is the document Postgres reads, and `json_keys` reads its keys as the function does:
+   * in its order, a key held twice included. Anything else (an expression, a cast, a jsonb the statement computes,
+   * which may hold a key twice in the order written) stays the function's.
+   */
+  private keysNative(arg: AstNode, canonical: boolean): boolean {
+    const t = kindOf(arg) === "ColumnRef" ? this.typed(arg) : null;
+    return t !== null && t.node === "VAR" && t.relation !== undefined && t.type === (canonical ? JSONB : JSON_OID) && this.copiedColumn(arg);
+  }
+
+  /**
+   * The keys of `arg` as a list, for `unnest` (json(b)_object_keys in a SELECT list or in FROM): DuckDB's `json_keys`
+   * where keysNative says it is Postgres's answer, the function for every other row. A NULL document is no rows (one
+   * NULL for `orNull`: leftLateral), an empty object none (one NULL for `orNull`). The function answers a non-object
+   * (Postgres's 22023) and a json document that holds a `\u` escape and a key (Postgres refuses `\u0000` and a lone
+   * surrogate, which DuckDB reads). A copied jsonb never holds `\u0000`, and its other escapes are read alike.
+   */
+  private objectKeys(arg: AstNode, canonical: boolean, orNull: boolean): AstNode {
+    const call = fn("__mason_json_keys", [arg, boolConst(canonical), boolConst(orNull)]);
+    if (!this.keysNative(arg, canonical)) return call;
+    const doc = (): AstNode => this.cp(arg);
+    // the keys read ONCE (every json_* call parses the document again); an empty list is an empty object, a NULL
+    // document or a non-object, told apart on those rows alone
+    return bound(fn("json_keys", [doc()]), "__mason_k", (k) => {
+      const some = op(">", fn("len", [k()]), intConst(0));
+      return caseWhen([
+        [canonical ? some : and([some, not(fn("contains", [doc(), strConst("\\u")]))]), k()],
+        [isNull(doc()), orNull ? arrayOf([nullConst()]) : nullConst()],
+        [and([op("=", fn("len", [k()]), intConst(0)), op("=", fn("json_type", [doc()]), strConst("OBJECT"))]), orNull ? arrayOf([nullConst()]) : k()],
+      ], call);
+    });
+  }
+
+  /**
+   * A TABLE'S COLUMN (Typed.relation): its jsonb text is Postgres's canonical text, each key once in jsonb's order. A
+   * synced table's copy holds the source's jsonb_out text; a generated table's build writes every jsonb it stores as
+   * jsonb_out would (src/duck/generated.ts `canonicalJsonb`, issue 461's fourth review), never the engine's text of what
+   * its SELECT computed (`jsonb_build_object('b', 1, 'a', 2, 'b', 3)` holds both b's in the order written). So whether a
+   * relation's jsonb is canonical is no decision: every relation's is. A jsonb a statement computes (no relation) is
+   * not. Every reader of the premise asks here: `->>` and `->` read natively without checking each key is held once
+   * (jsonGet, jsonValueRead), a `->` read's nullness, `@>` (containsRead) and the keys (keysNative).
+   */
   private copiedColumn(n: AstNode): boolean {
     const t = kindOf(n) === "ColumnRef" ? this.typed(n) : null;
     return t !== null && t.node === "VAR" && t.relation !== undefined;
@@ -4050,6 +4099,91 @@ class Rewriter {
     return caseWhen([[guards.length === 1 ? guards[0]! : and(guards), { A_Expr: b }]], keyed);
   }
 
+  /**
+   * A NUMERIC[] PARAMETER UNDER ANY OR ALL, compared with a value the engine holds exactly (issues 583, 983): `x =
+   * ANY($1)`, `x <> ALL($1::numeric[])`, `x < ANY($1)` — never the elements' doubles, which equate and order values
+   * Postgres tells apart past 15 digits. Each side by its exact key, as `numericParamComparison` keys a scalar one: x's
+   * text (or its program's) and each element's text as Postgres's array_in read it (src/duck/analyze.ts readParameters),
+   * `__mason_numeric_key` to equate and `__mason_numeric_order` to order (NaN above every number, a NULL element NULL, so
+   * SQL's three values are ANY's and ALL's). The parameter cast to nothing but numeric[] with no typmod; null for any
+   * other form, left as it was (the elements' doubles).
+   */
+  private numericArrayComparison(b: Body): AstNode | null {
+    const kind = String(b.kind), name = lastName(b.name);
+    if (kind !== "AEXPR_OP_ANY" && kind !== "AEXPR_OP_ALL") return null;
+    const equating = ["=", "<>", "!="].includes(name), ordering = ["<", "<=", ">", ">="].includes(name);
+    const l = b.lexpr, r = b.rexpr;
+    if ((!equating && !ordering) || !isNode(l) || !isNode(r)) return null;
+    // ARRAY[$1::numeric, $2] written out (#598): each element a plain numeric parameter, keyed by its bound text, or a
+    // value the engine holds exactly, by its own; never the parameters' doubles
+    // (only under no cast, or casts to numeric[] of no typmod: another cast of the whole array rounds or retypes each
+    // element first, `::int[]`, `::numeric(30,1)[]`, `::float8[]`, and is the engine's to write, as it was)
+    let written = r;
+    while (kindOf(written) === "TypeCast" && isNode(bodyOf(written).arg)) {
+      const t = bodyOf(written).typeName;
+      if (!["numeric", "decimal"].includes(lastName(t?.names)) || ((t?.typmods ?? []) as unknown[]).length > 0 || !Array.isArray(t?.arrayBounds)) return null;
+      written = bodyOf(written).arg as AstNode;
+    }
+    if (kindOf(written) === "A_ArrayExpr") {
+      const lt = this.typeOf(l);
+      if (lt !== NUMERIC && (lt === null || !INTEGERS.has(lt))) return null;
+      const items = (bodyOf(written).elements ?? []) as AstNode[];
+      const plain = items.map((x) => this.plainNumericParam(x));
+      if (!plain.some((n) => n !== null) || items.some((x, i) => plain[i] === null && !this.duckExact(x))) return null;
+      const left = this.duckExact(l) ? cast(l, ["varchar"]) : this.exactText(l);
+      if (left === null) return null;
+      const f = equating ? "__mason_numeric_key" : "__mason_numeric_order";
+      const keys = items.map((x, i) => fn(f, [cast(plain[i] !== null ? { ParamRef: { number: plain[i] } } : x, ["varchar"])]));
+      return { A_Expr: { ...b, lexpr: fn(f, [left]), rexpr: { A_ArrayExpr: { elements: keys } } } };
+    }
+    let p = r;
+    while (kindOf(p) === "TypeCast" && isNode(bodyOf(p).arg)) {
+      const t = bodyOf(p).typeName;
+      if (!["numeric", "decimal"].includes(lastName(t?.names)) || ((t?.typmods ?? []) as unknown[]).length > 0 || !Array.isArray(t?.arrayBounds)) return null;
+      p = bodyOf(p).arg as AstNode;
+    }
+    if (kindOf(p) !== "ParamRef" || this.params[Number(bodyOf(p).number) - 1] !== NUMERIC_ARRAY) return null;
+    const lt = this.typeOf(l);
+    if (lt !== NUMERIC && (lt === null || !INTEGERS.has(lt))) return null;
+    const left = this.duckExact(l) ? cast(l, ["varchar"]) : this.exactText(l);
+    if (left === null) return null;
+    const f = equating ? "__mason_numeric_key" : "__mason_numeric_order";
+    const e = (): AstNode => ({ ColumnRef: { fields: [S("__mason_e")] } });
+    // (a parameter of the rewrite's own, never the statement's node: that one's rule, `param`, refuses a numeric[])
+    const param = (): AstNode => ({ ParamRef: { number: Number(bodyOf(p).number) } });
+    const elements = fn("from_json", [cast(param(), ["varchar"]), strConst('["VARCHAR"]')]);
+    const compared: AstNode = { A_Expr: { ...b, lexpr: fn(f, [left]), rexpr: fn("list_transform", [elements, op("->", e(), fn(f, [e()]))]) } };
+    // a NULL array is NULL under ANY and ALL, where the engine reads it as an empty list (false, true): the guard every
+    // ANY / ALL of an array that is not written out takes (aExpr), here over the rewrite's own parameter
+    return caseWhen([[isNull(cast(param(), ["varchar"])), nullConst()]], compared);
+  }
+
+  /**
+   * A TIME COMPARED WITH ANY OR ALL OF AN ARRAY OF ANOTHER TIME TYPE, AS POSTGRES COERCED IT (issue 983): `tz =
+   * ANY($1::timestamp[])` is each element read as a timestamptz in the session's zone (Postgres's ArrayCoerceExpr), and
+   * `tz = ANY($1::date[])` each date's midnight there; where the engine compared the two its own way, a zone off UTC
+   * answered other rows. Each side Postgres's analysis coerced is cast here to the type the analysis says, an element
+   * as the scalar's cast is (`typeCast`: the engine's cast, in the session's zone). Changes `b` in place.
+   */
+  private timeArrayCoerced(b: Body): void {
+    if (b.kind !== "AEXPR_OP_ANY" && b.kind !== "AEXPR_OP_ALL") return;
+    const l = b.lexpr, r = b.rexpr;
+    if (!isNode(l) || !isNode(r)) return;
+    // the operator's two sides as Postgres's analysis typed them, a coercion it added included
+    const t = this.typed({ A_Expr: b });
+    const left = t?.args[0]?.type ?? null, array = t?.args[1]?.type ?? null;
+    const RANK: Record<number, number> = { [DATE]: 0, [TIMESTAMP]: 1, [TIMESTAMPTZ]: 2 };
+    const NAME: Record<number, string> = { [DATE]: "date", [TIMESTAMP]: "timestamp", [TIMESTAMPTZ]: "timestamptz" };
+    const ELEMENT: Record<number, number> = { 1182: DATE, 1115: TIMESTAMP, 1185: TIMESTAMPTZ };
+    const element = array === null ? undefined : ELEMENT[array];
+    if (left === null || element === undefined || RANK[left] === undefined || left === element) return;
+    // Postgres's cross-type operators (timestamptz_eq_timestamp, date_lt_timestamptz …) read the narrower side as the
+    // wider one, a timestamp or a date at the session's zone: the engine's cast of it, as a scalar's (`typeCast`)
+    if (RANK[left]! < RANK[element]!) { b.lexpr = cast(l, [NAME[element]!]); return; }
+    const e = (): AstNode => ({ ColumnRef: { fields: [S("__mason_t")] } });
+    b.rexpr = fn("list_transform", [r, op("->", e(), cast(e(), [NAME[left]!]))]);
+  }
+
   /** CASE x WHEN $1 …, x a value the engine holds exactly and a WHEN a numeric parameter (issue 214): each WHEN written
    *  as the comparison it is, x = v, the parameter's by `numericParamComparison` (Postgres resolved each WHEN's `=` as
    *  numeric's: every operand is a numeric or an integer, one a numeric parameter); x read once a WHEN, as CASE reads it */
@@ -5011,6 +5145,11 @@ class Rewriter {
    */
   private compared(n: AstNode, own: number | null | undefined, other: number | null | undefined, comparison: boolean): AstNode {
     if (comparison && own === BPCHAR && other === BPCHAR) { const r = fn("rtrim", [n]); this.typedLike.set(bodyOf(r), n); return r; }
+    // a time beside a wider one (timestamptz_eq_timestamp, date_lt_timestamptz …): read as the wider type at the
+    // session's zone, as Postgres's cross-type operator reads it; a subquery's output compared otherwise in the engine
+    // (issue 983's review: `tz IN (SELECT unnest($1::timestamp[]))` matched the UTC wall clock)
+    const rank = (t: number | null | undefined): number => t === DATE ? 0 : t === TIMESTAMP ? 1 : t === TIMESTAMPTZ ? 2 : -1;
+    if (comparison && rank(own) >= 0 && rank(other) > rank(own)) return cast(n, [other === TIMESTAMPTZ ? "timestamptz" : "timestamp"]);
     return this.widen(n, own) as AstNode;
   }
 
@@ -5219,6 +5358,9 @@ class Rewriter {
     // bound value, else by exact keys — never the parameter's double (issue 214)
     const viaParameter = this.numericParamComparison(b);
     if (viaParameter !== null) return viaParameter;
+    const viaArray = this.numericArrayComparison(b);
+    if (viaArray !== null) return viaArray;
+    this.timeArrayCoerced(b);
     // a numeric decided exactly, compared for equality: by its exact key, the other side by its own (exactKey)
     if (b.kind === "AEXPR_OP" && (name === "=" || name === "<>" || name === "!=") && a0 === NUMERIC && a1 === NUMERIC && l !== undefined && r !== undefined) {
       const sides = this.exactEquality(l, r);
@@ -5882,7 +6024,7 @@ class Rewriter {
       }
       case "jsonb_object_keys": case "json_object_keys":
         if (this.inFrom.has(b)) return null;
-        return fn("unnest", [fn("__mason_json_keys", [args[0]!, boolConst(name.startsWith("jsonb")), boolConst(false)])]);
+        return fn("unnest", [this.objectKeys(args[0]!, name.startsWith("jsonb"), false)]);
       case "jsonb_array_elements": case "json_array_elements": case "jsonb_array_elements_text": case "json_array_elements_text":
       case "jsonb_each": case "json_each": case "jsonb_each_text": case "json_each_text":
         throw new Unrewritable(`${name}() in a SELECT list is not supported by Mason`, `read it in FROM: SELECT … FROM ${name}(…) AS e`, "json-rows-in-select");
@@ -6554,8 +6696,23 @@ class Rewriter {
     // engine's double (a program over its `$n` cell where its digits are printed, `exactOf`); one COMPARED with a value
     // the engine holds exactly never reaches here (`numericParamComparison`, issue 214)
     const oid = this.params[Number(b.number) - 1];
-    // a text array is bound as the JSON Postgres read it to (src/duck/analyze.ts readParameters)
-    if (oid === TEXT_ARRAY || oid === VARCHAR_ARRAY) return fn("from_json", [cast({ ParamRef: b }, ["varchar"]), strConst('["VARCHAR"]')]);
+    // an array is bound as the JSON list of its elements' texts Postgres's array_in read it to (src/duck/analyze.ts
+    // readParameters, issue 983), each element then cast to its type as a scalar parameter is: never DuckDB's cast of
+    // the array's text, which reads no quoted element (node-pg binds `'{"1","3"}'`). A numeric[] compared by ANY or
+    // ALL with a value the engine holds exactly never reaches here (`numericArrayComparison`); read anywhere else it is
+    // refused by name, since no list type of the engine holds every element exactly (its doubles were wrong past 15
+    // digits, and printed at a scale of their own)
+    const element = oid === undefined ? undefined : PARAM_ARRAYS.get(oid);
+    // (a NULL is answered: the Execute refuses any other value, `wholeNumericArrays`, src/api/postgres/server.ts)
+    if (element === NUMERIC) {
+      this.wholeNumericArrays.add(Number(b.number));
+      return arrayCast(cast({ ParamRef: b }, ["varchar"]), "double");
+    }
+    if (element !== undefined) {
+      const texts = fn("from_json", [cast({ ParamRef: b }, ["varchar"]), strConst('["VARCHAR"]')]);
+      const type = duckTypeOf(element);
+      return type === null || type[0] === "varchar" ? texts : arrayCast(texts, type[0]!);
+    }
     const asEnum = oid === undefined || !this.enums.labels.has(oid) ? null : this.enumValue({ ParamRef: b }, oid, null);
     if (asEnum !== null) return asEnum;
     const type = oid === undefined ? null : oid === NUMERIC ? ["double"] : duckTypeOf(oid);
@@ -6945,7 +7102,6 @@ class Rewriter {
    */
   private leftLateral(b: Body): AstNode | null {
     const bounded = this.bounded.has(b);
-    if (!bounded && this.boundedOnWire?.has(b) !== true) return null;
     const quals = b.quals as AstNode | undefined;
     if (b.jointype !== "JOIN_LEFT" || b.isNatural === true || b.usingClause !== undefined || quals === undefined || kindOf(quals) !== "A_Const" || bodyOf(quals).boolval?.boolval !== true) return null;
     const rarg = b.rarg as AstNode | undefined;
@@ -6960,7 +7116,14 @@ class Rewriter {
     const name = lastName(c.funcname);
     if (args.length !== 1 || c.agg_star === true || c.func_variadic === true || kindOf(args[0]!) === "NamedArgExpr") return null;
     if (!LIST_ROWS.has(name) && name !== "unnest") return null;
-    if (!bounded) { this.unboundedLateral = true; return null; }
+    // a copied column's keys are DuckDB's own read (objectKeys), no call a row: streamed, they cost less than the
+    // delimiter join's hash group of every document (issue 461: 63 s and 4.4 GiB over 1 M rows, 53400 at 3 M), so
+    // they are written so bounded or not
+    const native = (name === "jsonb_object_keys" || name === "json_object_keys") && this.keysNative(args[0]!, name.startsWith("jsonb"));
+    if (!bounded && !native) {
+      if (this.boundedOnWire?.has(b) === true) this.unboundedLateral = true;
+      return null;
+    }
     this.nonEmpty.add(r);
     const { quals: _true, ...rest } = b;
     // DuckDB 2.0 streams the INNER lateral only where its list reads ONE column of the row, or an array column
@@ -7123,7 +7286,7 @@ class Rewriter {
       }
       case "jsonb_object_keys": case "json_object_keys": {
         const column = colnames[0] ?? aliasName ?? name;
-        const keys = fn("__mason_json_keys", [args[0]!, boolConst(canonical), boolConst(orNull)]);
+        const keys = this.objectKeys(args[0]!, canonical, orNull);
         if (orNull) return listLateral([{ name: column, list: keys }], aliasName ?? name, this.done);
         const item = bodyOf(items[0]!);
         return { RangeFunction: { ...b, functions: [{ List: { ...item, items: [fn("unnest", [keys]), ...(item.items as unknown[]).slice(1)] } }], alias: { aliasname: aliasName ?? name, colnames: [S(column)] } } };
@@ -8273,7 +8436,7 @@ export interface ScaleLookup {
 
 export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(), citextHeld = new Set(), typeNames = new Map(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
   wireBound = false, keyCounts = new Set(), boundPaths = new Map(), scales = null }: RewriteOptions):
-  { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean; pathParams: number[] } {
+  { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean; pathParams: number[]; wholeNumericArrays: number[] } {
   const r = new Rewriter(analysis, base, collations, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts, citextHeld, typeNames);
   r.boundPaths = boundPaths;
   r.scales = scales;
@@ -8299,7 +8462,8 @@ export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(
   r.markWholeReads(own);
   r.walking = true;
   const tree = guardFilters(flattenBool(r.walk(own))) as AstNode;
-  return { tree, withTies: r.wroteTies, exact, clock: r.clock, jsonReads: [...r.jsonReads.values()], unboundedLateral: r.unboundedLateral, pathParams: [...r.pathParams].sort((a, b) => a - b) };
+  return { tree, withTies: r.wroteTies, exact, clock: r.clock, jsonReads: [...r.jsonReads.values()], unboundedLateral: r.unboundedLateral, pathParams: [...r.pathParams].sort((a, b) => a - b),
+    wholeNumericArrays: [...r.wholeNumericArrays].sort((a, b) => a - b) };
 }
 
 /** the functions whose every call is a new value (Postgres's volatile ones Mason answers) */
