@@ -315,11 +315,16 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   **When** puts the oldest first), read from the state at every poll, so a page opened mid-sync shows it too: a sync
   asked by hand (Manual sync, `syncByHand`), a First sync, a Full sync again (whose columns changed, when they did) and
   the Catch-up after it (`rebuilding`). It says **Syncing…** and, in **Took**, how long it has run so far, ticking.
-  When it ends, its event as recorded takes its place (the row stays until that event is read, 20 s at most). A
-  **Kind** keeps it when it is a kind the sync ends as (Manual sync and Manual sync failed for a sync asked by hand;
-  Full sync and Full sync failed for a first or full sync; Catch-up failed for a catch-up), a **Table** when it is
-  its table, and **Failures only** never. A scheduled sync running is not listed: the state does not say one, and each
-  takes a moment. While a sync runs, the events are read at every poll too.
+  While Mason does not answer, that time stands still. The moment the state says a sync ended, its row stops saying
+  Syncing…. A sync asked by hand then says what it did (Synced., or why it failed), and a first or full sync that
+  synced its table says Synced whole., each with the time it took. Its event as recorded takes the row's place once it
+  is read: the events are read once more right after the end, and the row goes after 20 s if no event comes. A sync
+  that ended with nothing the state can say (a catch-up, which records no event when it succeeds; a whole read that
+  did not finish) loses its row at once. A **Kind** keeps a row when it is a kind the sync ends as (Manual sync and
+  Manual sync failed for a sync asked by hand; Full sync and Full sync failed for a first or full sync; Catch-up failed
+  for a catch-up), a **Table** when it is its table, and **Failures only** never. A scheduled sync running is not
+  listed: the state does not say one, and each takes a moment. The events are read at the range's own rate whatever
+  runs.
 - **Sync events**, the run's raw log: behind a closed details, for debugging (it has internal tags and paths), newest first. Mason
   is asked for it only while the details is open.
 

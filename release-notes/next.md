@@ -83,7 +83,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   keep their time in the message.
 - **The web page's Sync events list shows each sync while it runs.** A sync you start by hand, a first sync, a table
   synced again whole and the catch-up after it each get a row at the top of the list. The row says "Syncing…", and
-  Took counts how long it has run so far. When the sync ends, its event takes the row's place. Scheduled syncs are
+  Took counts how long it has run so far. When the sync ends, the row says what it did, and then its event takes the
+  row's place. Scheduled syncs are
   not shown while they run, as each takes a moment. `mason status --json` gives each table's own sync running now
   as a new field, `rebuilding` (`kind` is `copy` or `catch-up`, and `startedAt`).
 
