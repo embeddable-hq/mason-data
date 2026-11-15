@@ -91,6 +91,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **`mason stop` now ends within seconds when one of Mason's reads waits on your database.** A table's first sync, its
+  catch-up or a scheduled sync can wait on a lock that another session holds on the table. Before, the stop waited
+  until that lock was released, which could be never. Now Mason cancels its own waiting reads on your database, and
+  nothing of Mason's is left running there. A first sync keeps what it had synced and resumes at the next start. If
+  your database refuses the cancel, the log says so once, and the stop waits for the read as before.
+
 - **Removing a table while it syncs now stops its sync at once.** This covers a table's first sync, a table synced
   again whole, the catch-up after it, and a sync you started by hand. Before, the sync ran to its end, which took hours
   for a large table. Every table added beside it waited until then, and your database kept reading the removed table.
