@@ -30,6 +30,7 @@ import { projectFingerprint } from "../lib/project-files.ts";
 import { guard, newTunnel, SECURITY_HEADERS, type PageTunnel } from "./security.ts";
 import type { BackLink } from "./ui-back-link.ts";
 import type { PageAccount } from "./ui-account.ts";
+import { DEPLOY_DOCS_DEFAULT } from "./ui-deploy-docs.ts";
 import type { PageNav } from "./ui-nav.ts";
 import { PAGE_READ_ONLY_WHY, pageAllows, pageReadOnlyRefusal, pageWrite, type PageArea } from "./ui-read-only.ts";
 import { maskedUrl, type Source, type SourceFacts, type SourceTable } from "./preflight.ts";
@@ -117,6 +118,9 @@ export interface RunContext {
   /** MASON_UI_ACCOUNT (src/cli/ui-account.ts): who is signed in to the host, at the sidebar's foot, a label and a URL,
    *  validated at the start, or null */
   pageAccount?: PageAccount | null;
+  /** MASON_UI_DEPLOY_DOCS_URL (src/cli/ui-deploy-docs.ts): where the page sends a person to change a deployed project,
+   *  validated at the start; the README's section when absent */
+  pageDeployDocs?: string;
   /** MASON_UI_OVERVIEW_CARD (src/cli/ui-host-view.ts): the path, relative to the page's address, the Overview reads the
    *  host's card from, validated at the start, or null. The page reads it, never the server */
   pageCard?: string | null;
@@ -326,6 +330,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     pageNav: ctx.pageNav ?? null,
     // who is signed in to the host (MASON_UI_ACCOUNT, src/cli/ui-account.ts): { label, url }, or null
     pageAccount: ctx.pageAccount ?? null,
+    // where the page sends a person to change a deployed project (MASON_UI_DEPLOY_DOCS_URL, src/cli/ui-deploy-docs.ts):
+    // the host's steps, else the README's section
+    pageDeployDocs: ctx.pageDeployDocs ?? DEPLOY_DOCS_DEFAULT,
     // the host's card on the Overview (MASON_UI_OVERVIEW_CARD, src/cli/ui-host-view.ts): its path, or null
     pageCard: ctx.pageCard ?? null,
     // the Unix socket the page is served on too (MASON_UI_SOCKET), or null: mason status says it
