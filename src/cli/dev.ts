@@ -37,6 +37,7 @@ import { backLinkOf, uiBackLinkSetting } from "./ui-back-link.ts";
 import { accountOf, uiAccountSetting } from "./ui-account.ts";
 import { navOf, uiNavSetting } from "./ui-nav.ts";
 import { overviewCardOf, uiOverviewCardSetting } from "./ui-host-view.ts";
+import { DEPLOY_DOCS_DEFAULT, deployDocsOf, uiDeployDocsSetting } from "./ui-deploy-docs.ts";
 import { iconOf, uiIconSetting } from "./ui-icon.ts";
 import { createRunServer, listenOnLoopback, metricsFacts, usageFacts, type RunContext } from "./run-server.ts";
 import { UiErrors } from "./ui-errors.ts";
@@ -797,6 +798,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     pageNav: o.serve !== undefined ? navOf(uiNavSetting(process.env)) : null,
     // MASON_UI_ACCOUNT: a server's sidebar names who is signed in to the host (mason start refuses it above)
     pageAccount: o.serve !== undefined ? accountOf(uiAccountSetting(process.env)) : null,
+    // MASON_UI_DEPLOY_DOCS_URL: where a server's page sends a person to change the deployed project, else the README's
+    // section (mason start refuses the setting above)
+    pageDeployDocs: o.serve !== undefined ? deployDocsOf(uiDeployDocsSetting(process.env)) : DEPLOY_DOCS_DEFAULT,
     // MASON_UI_OVERVIEW_CARD: a server's Overview shows the host's card, read from a path relative to the page (mason
     // start refuses it above)
     pageCard: o.serve !== undefined ? overviewCardOf(uiOverviewCardSetting(process.env)) : null,

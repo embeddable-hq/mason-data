@@ -173,6 +173,9 @@ export interface RunState {
   /** who is signed in to the host (mason serve with MASON_UI_ACCOUNT, src/cli/ui-account.ts), shown at the foot of the
    *  page's sidebar, or null: src/cli/run-server.ts runState; a run from before it has none */
   pageAccount?: { url: string; label: string } | null;
+  /** where the web page sends a person to change a deployed project (mason serve with MASON_UI_DEPLOY_DOCS_URL,
+   *  src/cli/ui-deploy-docs.ts, else the README's section): src/cli/run-server.ts runState; a run from before it has none */
+  pageDeployDocs?: string;
   /** the path, relative to the web page's address, its Overview reads the host's card from (mason serve with
    *  MASON_UI_OVERVIEW_CARD, src/cli/ui-host-view.ts), or null: src/cli/run-server.ts runState; a run from before it has none */
   pageCard?: string | null;
@@ -569,7 +572,8 @@ const STATUS_USAGE = `usage: mason status [--json]
     items that link to the host's own pages instead — items has overview, tables, users, queries, usage or syncEvents,
     each the URL it links to, mason serve with MASON_UI_NAV_<ITEM>_URL — and the host's links, [{ url, label }] or a view
     of the host's the page shows, [{ view, label }], with MASON_UI_NAV_LINKS — or null), pageAccount ({ label, url }: who is signed in to the host, at the foot of
-    the page's sidebar, mason serve with MASON_UI_ACCOUNT — or null), pageCard (the path, relative to
+    the page's sidebar, mason serve with MASON_UI_ACCOUNT — or null), pageDeployDocs (the URL the page's Tables page
+    links to for changing a deployed project: mason serve's MASON_UI_DEPLOY_DOCS_URL, else the README's section), pageCard (the path, relative to
     the page's address, its Overview reads the host's card from: mason serve with MASON_UI_OVERVIEW_CARD — or null), pageSocket (the Unix socket the
     page is served on too: mason serve with MASON_UI_SOCKET — or null), next }.
     Each table's kept is how it is kept current now (absent for a table the sync does not hold):
@@ -613,7 +617,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
   json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "generatedTables", "queries", "slowQueries", "refusedQueries",
-    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "sourcesReadOnlyKind", "pageReadOnly", "pageReadOnlyAllow", "pageBack", "pageNav", "pageAccount", "pageCard", "pageSocket",
+    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "sourcesReadOnlyKind", "pageReadOnly", "pageReadOnlyAllow", "pageBack", "pageNav", "pageAccount", "pageDeployDocs", "pageCard", "pageSocket",
     "users", "roles", "share", "shareEnded", "lastRun", "lastStop", "hung", "next"],
 };
 

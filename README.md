@@ -23,6 +23,7 @@ A drop-in replacement for your Postgres read replica. Same SQL. Same answers. Se
 - [Use it with your database](#use-it-with-your-database)
   - [Set up a project](#set-up-a-project) · [Choose tables and columns](#choose-tables-and-columns) · [Keep them up to date](#keep-them-up-to-date)
   - [Connect a tool](#connect-a-tool) · [Access control](#access-control) · [Check on it](#check-on-it) · [Run it on a server](#run-it-on-a-server)
+  - [Hosted: Mason read-replica](#hosted-mason-read-replica) · [Change a deployed project](#change-a-deployed-project)
 - [Speed and compatibility](#speed-and-compatibility)
   - [Speed](#speed) · [Compatibility](#compatibility)
 - [Agents](#agents) · [Where to read more](#where-to-read-more) · [Community](#community) · [License](#license)
@@ -236,8 +237,48 @@ docker compose exec mason mason user add metabase   # users are kept on the serv
 
 [`deploy/mason-data/README.md`](deploy/mason-data/README.md) walks you through it, with
 [the settings](deploy/mason-data/README.md#settings) to decide. [`deploy/README.md`](deploy/README.md) has guides for
-Fly.io, Kubernetes, Railway and AWS ECS. A hosted Mason service can also run it for you
-([`docs/HOSTED-API.md`](docs/HOSTED-API.md)).
+Fly.io, Kubernetes, Railway and AWS ECS. [Mason read-replica](#hosted-mason-read-replica) can also run it for you.
+
+### Hosted: Mason read-replica
+
+[Mason read-replica](https://masondata.ai) runs Mason for you. It keeps a read replica of your Postgres up to date on a
+machine it manages, and you connect your BI tools to it.
+
+It uses the same project folder and the same `mason` command. Sign in once, then deploy:
+
+```bash
+mason login                           # signs this machine in, in your browser
+mason deploy --replica <org>/<name>   # sends mason/ to the replica, and waits until it runs it
+```
+
+[Change a deployed project](#change-a-deployed-project) has the steps for each change after that. Choose the hosted
+replica when you would rather not run and upgrade the container, the volume and TLS yourself.
+[`docs/HOSTED-API.md`](docs/HOSTED-API.md) documents the API the `mason` command uses.
+
+### Change a deployed project
+
+A deployed project runs exactly what you deployed. So its web page is read-only, and you can't add or remove tables
+there. Changes go through the project folder in your app's repository instead. This holds on your own server and on a
+hosted replica.
+
+1. Edit `mason/`. In its sources file, add or remove a table, or change a table's `sync:` or its columns. On your
+   machine, `mason add` and `mason remove` edit the file for you.
+2. Commit the change.
+3. Deploy it with the Mason version that `mason/mason.yml` names. The `mason` command refuses a project written for
+   another version.
+   - On a hosted replica, run `npx @mason-data/cli@<version> deploy --replica <org>/<name>`. It shows what the
+     deploy changes before it sends it.
+   - On your own server, ship `mason/` with your release and restart the container, which runs
+     `ghcr.io/embeddable-hq/mason-data:<version>`.
+
+A table you add is synced once the deploy runs. A table you remove has its synced data dropped.
+
+To move to a newer Mason:
+
+1. Read that release's "Before you upgrade" in the [release notes](release-notes/README.md), and make the changes it
+   lists.
+2. Set `version:` in `mason/mason.yml` to the new version.
+3. Deploy as in step 3 above, with the new version.
 
 ## Speed and compatibility
 
