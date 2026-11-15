@@ -11,7 +11,7 @@
  *   node scripts/ci-shards.ts verify <kind> <dir>  every file ran in exactly one shard, by the records in <dir>
  *   node scripts/ci-shards.ts needs                every job in NEEDS (`toJSON(needs)`) succeeded, or was skipped by a docs-only run
  *   node scripts/ci-shards.ts weights <run-id | folder>   write tests/fixtures/unit-weights.json from a run's unit shards
- *   node scripts/ci-shards.ts changes              whether the pull request or merge group checked out changes nothing but docs: docs=true
+ *   node scripts/ci-shards.ts changes              whether the pull request checked out changes nothing but docs: docs=true
  *                                                  or docs=false into GITHUB_OUTPUT
  *   node scripts/ci-shards.ts docs                 the docs job: the unit tests that read a doc (DOCS_TESTS)
  *
@@ -352,46 +352,28 @@ export function docsCommands(tests: ReadonlyArray<{ file: string; pattern?: stri
 }
 
 /** `changes`: whether the commit checked out changes nothing but docs, and the lines that say what was classified and
- *  why (`--no-renames`: a rename's both paths; `-z`: a path as is).
- *  - A `pull_request` run checks out GitHub's merge of the head into the base, so the merge's first parent is the base
- *    and `HEAD^1..HEAD` is the pull request's net change.
- *  - A `merge_group` run checks out the group's commit (`head`, MERGE_GROUP_HEAD_SHA), which is main as it will be once
- *    the queue merges the group. Its change is `base..head` (`base`, MERGE_GROUP_BASE_SHA, is main as it stood), which
- *    holds this pull request and every one ahead of it in the group. The base is fetched by its SHA when the checkout
- *    lacks it (a group of more than one pull request is deeper than the checkout's two commits).
- *  Any other event (a push to main runs everything, and is the backstop), any other HEAD, a git failure, or no path at
- *  all is "couldn't tell", which is never docs. */
-export function changesVerdict(root: string, event: string | undefined, group: { base?: string | undefined; head?: string | undefined } = {}): { docs: boolean; lines: string[] } {
+ *  why. A `pull_request` run checks out GitHub's merge of the head into the base, so the merge's first parent is the
+ *  base and `HEAD^1..HEAD` is the pull request's net change (`--no-renames`: a rename's both paths; `-z`: a path as is).
+ *  Any other event is a full run, and is the backstop: a push to main, and a merge group. A merge group's `base_sha` is
+ *  the group's parent commit, which is the head of the group ahead of it in the queue, never main. So `base..head`
+ *  would hold only this pull request's change, and a docs-only one queued behind a code one would skip the code's
+ *  tests. Any other HEAD, a git failure, or no path at all is "couldn't tell", which is never docs. */
+export function changesVerdict(root: string, event: string | undefined): { docs: boolean; lines: string[] } {
   const full = (why: string): { docs: false; lines: string[] } => ({ docs: false, lines: [`changes: cannot tell that only docs changed: ${why}`, "changes: docs=false: every job runs"] });
-  if (event !== "pull_request" && event !== "merge_group") return full(`the event is ${event ?? "not set (GITHUB_EVENT_NAME)"}, not pull_request or merge_group: a run on main always runs everything`);
+  if (event === "merge_group") return full("the event is merge_group: a merge group always runs everything, since its commit holds every pull request ahead of it in the queue");
+  if (event !== "pull_request") return full(`the event is ${event ?? "not set (GITHUB_EVENT_NAME)"}, not pull_request: a run on main always runs everything`);
   const git = (args: string[]): { out: string } | { err: string } => {
     const r = spawnSync("git", args, { cwd: root, encoding: "utf8" });
     return r.status === 0 ? { out: r.stdout } : { err: `\`git ${args.join(" ")}\` exited ${r.status ?? r.signal}: ${(r.stderr || r.error?.message || "").trim()}` };
   };
-  let from: string;
-  if (event === "merge_group") {
-    const sha = /^[0-9a-f]{40}$/;
-    const base = group.base ?? "", head = group.head ?? "";
-    if (!sha.test(base) || !sha.test(head)) return full(`the merge group's base and head (MERGE_GROUP_BASE_SHA, MERGE_GROUP_HEAD_SHA) are ${JSON.stringify(group.base ?? null)} and ${JSON.stringify(group.head ?? null)}, not two commit SHAs`);
-    const at = git(["rev-parse", "HEAD"]);
-    if ("err" in at) return full(at.err);
-    if (at.out.trim() !== head) return full(`HEAD is ${at.out.trim()}, not the merge group's head ${head}`);
-    if ("err" in git(["cat-file", "-e", `${base}^{commit}`])) {
-      const fetched = git(["fetch", "--no-tags", "--depth=1", "origin", base]);
-      if ("err" in fetched) return full(`the merge group's base ${base} is not in the checkout, and fetching it failed: ${fetched.err}`);
-    }
-    from = base;
-  } else {
-    const parents = git(["rev-list", "--parents", "-n", "1", "HEAD"]);
-    if ("err" in parents) return full(parents.err);
-    const n = parents.out.trim().split(/\s+/).length - 1;
-    if (n !== 2) return full(`HEAD has ${n} parent(s), not the two of GitHub's merge of the pull request into its base`);
-    from = "HEAD^1";
-  }
-  const diff = git(["diff", "--name-only", "--no-renames", "-z", from, "HEAD"]);
+  const parents = git(["rev-list", "--parents", "-n", "1", "HEAD"]);
+  if ("err" in parents) return full(parents.err);
+  const n = parents.out.trim().split(/\s+/).length - 1;
+  if (n !== 2) return full(`HEAD has ${n} parent(s), not the two of GitHub's merge of the pull request into its base`);
+  const diff = git(["diff", "--name-only", "--no-renames", "-z", "HEAD^1", "HEAD"]);
   if ("err" in diff) return full(diff.err);
   const paths = diff.out.split("\0").filter((p) => p !== "");
-  if (paths.length === 0) return full(`the ${event === "merge_group" ? "merge group" : "merge"} changes no path`);
+  if (paths.length === 0) return full("the merge changes no path");
   const docs = docsOnly(paths);
   return { docs, lines: [...paths.map((p) => `changes: ${docsPath(p) ? "docs" : "code"}  ${p}`),
     docs ? `changes: docs=true: ${paths.length} path(s), every one docs: the docs job runs in place of ${DOCS_SKIPS.join(", ")}` : `changes: docs=false: ${paths.filter((p) => !docsPath(p)).length} of ${paths.length} path(s) are code: every job runs`] };
@@ -452,7 +434,7 @@ function main(argv: string[]): number {
     if (argv.length > 1) { console.error("usage: scripts/ci-shards.ts changes"); return 2; }
     const out = process.env.GITHUB_OUTPUT;
     if (out === undefined || out === "") { console.error("set GITHUB_OUTPUT: the file the docs=true or docs=false verdict is written to (GitHub Actions sets it)"); return 2; }
-    const v = changesVerdict(root, process.env.GITHUB_EVENT_NAME, { base: process.env.MERGE_GROUP_BASE_SHA, head: process.env.MERGE_GROUP_HEAD_SHA });
+    const v = changesVerdict(root, process.env.GITHUB_EVENT_NAME);
     for (const l of v.lines) console.log(l);
     fs.appendFileSync(out, `docs=${v.docs}\n`);
     return 0;

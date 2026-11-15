@@ -65,8 +65,8 @@ function toolUses(lines: string[]): ToolUse[] {
 /** A message to another session; another connector's `…__send_message` (an email) is no lead at work. */
 const SESSION_SEND = "mcp__ccd_session_mgmt__send_message";
 const QUEUED_MERGE = /\bgh\s+pr\s+merge\b[^;&|\n]*--auto\b/;
-/** A merge that lands later: `gh pr merge --auto`, or a PR put in the merge queue (`PUT …/pulls/<n>/merge-async`). */
-const queuesMerge = (command: string): boolean => QUEUED_MERGE.test(command) || simpleCommands(command).some(({ argv }) => restMerge(argv)?.endpoint === "merge-async");
+/** A merge that lands later: `gh pr merge --auto`, a merge-async request (queued, or merged in the background), or auto-merge (`PUT …/pulls/<n>/ccr/auto_merge`). */
+const queuesMerge = (command: string): boolean => QUEUED_MERGE.test(command) || simpleCommands(command).some(({ argv }) => { const e = restMerge(argv)?.endpoint; return e === "merge-async" || e === "auto_merge"; });
 
 /** What the session waits on with nothing to wake it, or undefined. */
 function unwatched(lines: string[]): string | undefined {

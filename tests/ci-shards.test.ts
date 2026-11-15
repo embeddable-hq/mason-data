@@ -609,9 +609,9 @@ function changes(root: string, event: string | undefined, withOutput = true, gro
       ...(group.base === undefined ? {} : { MERGE_GROUP_BASE_SHA: group.base }), ...(group.head === undefined ? {} : { MERGE_GROUP_HEAD_SHA: group.head }) } });
   return { status: r.status, out: r.stdout + r.stderr, output: fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null };
 }
-/** A merge group as the queue builds it with squash: `base` (main as it stood, holding the shard scripts), then one
- *  single-parent commit per queued pull request, each changing its files (a path to null removes it). HEAD is the group's
- *  head. */
+/** A merge queue as GitHub builds it with squash: `base` (main, holding the shard scripts), then one single-parent
+ *  commit per queued pull request, each the group head of that pull request and the parent of the next one's (a path to
+ *  null removes it). HEAD is the last group's head. */
 function groupRepo(t: { after(f: () => void): void }, prs: Array<Record<string, string | null>>, base: Record<string, string> = {}): { root: string; base: string; head: string } {
   const root = tree(t, {}, null);
   const git = (...args: string[]): string => { const r = spawnSync("git", [...GIT, ...args], { cwd: root, encoding: "utf8" }); assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`); return r.stdout.trim(); };
@@ -652,7 +652,7 @@ test("docs changes: one code path, a rename out of src/, a one-parent HEAD, a pu
   assert.match(single.out, /cannot tell that only docs changed: HEAD has 1 parent\(s\)/);
   const push = changes(mergeRepo(t, { [P("docs", "x.md")]: "x" }, 2), "push");
   assert.equal(push.output, "docs=false\n", push.out);
-  assert.match(push.out, /the event is push, not pull_request or merge_group/);
+  assert.match(push.out, /the event is push, not pull_request/);
   assert.equal(changes(mergeRepo(t, { [P("docs", "x.md")]: "x" }, 2), undefined).output, "docs=false\n", "no event is no pull request");
   const notRepo = changes(tree(t, {}, null), "pull_request");
   assert.equal(notRepo.status, 0, notRepo.out);
@@ -664,57 +664,22 @@ test("docs changes: one code path, a rename out of src/, a one-parent HEAD, a pu
   assert.equal(noOutput.output, null, "nothing guessed");
 });
 
-test("docs changes: a merge group reads base..head, every queued pull request in it, so docs-only only when all are docs", (t) => {
-  const two = groupRepo(t, [{ [P("docs", "x.md")]: "x" }, { "README.md": "y" }]);
-  const got = changes(two.root, "merge_group", true, two);
+test("docs changes: a merge group is always a full run, even a docs-only one queued behind a code one (issue: base_sha is the group ahead)", (t) => {
+  // the queue as GitHub builds it: main, then PR 1's group (code), then PR 2's group (docs) on top of it. GitHub sends PR
+  // 2's group base_sha = its parent commit, PR 1's group head, never main (octokit/webhooks: "The SHA of the merge
+  // group's parent commit"), so base_sha..head_sha would hold PR 2's docs alone
+  const q = groupRepo(t, [{ [P("src", "a.ts")]: "code" }, { [P("docs", "x.md")]: "x" }]);
+  const parent = spawnSync("git", ["rev-parse", "HEAD^1"], { cwd: q.root, encoding: "utf8" }).stdout.trim();
+  const got = changes(q.root, "merge_group", true, { base: parent, head: q.head });
   assert.equal(got.status, 0, got.out);
-  assert.equal(got.output, "docs=true\n", got.out);
-  assert.match(got.out, /docs {2}docs\/x\.md\n/, "the first queued pull request, beyond HEAD^1");
-  assert.match(got.out, /docs {2}README\.md\n/);
-  const mixed = groupRepo(t, [{ [P("src", "y.ts")]: "y" }, { [P("docs", "x.md")]: "x" }]);
-  const m = changes(mixed.root, "merge_group", true, mixed);
-  assert.equal(m.output, "docs=false\n", m.out);
-  assert.match(m.out, /code {2}src\/y\.ts\n/, "a code change ahead of a docs one in the group makes the group code");
-});
-
-test("docs changes: a merge group whose base is not in the checkout fetches it by its SHA, and one it cannot fetch is a full run", (t) => {
-  const g = groupRepo(t, [{ [P("docs", "x.md")]: "x" }, { [P("docs", "y.md")]: "y" }]);
-  // CI's checkout at depth 2: the group's head and its parent, never the base two commits back; origin is the repository
-  const shallow = path.join(path.dirname(g.root), `${path.basename(g.root)}-shallow`);
-  t.after(() => { fs.rmSync(shallow, { recursive: true, force: true }); });
-  const clone = spawnSync("git", [...GIT, "clone", "-q", "--depth=2", `file://${g.root}`, shallow], { encoding: "utf8" });
-  assert.equal(clone.status, 0, clone.stderr);
-  assert.notEqual(spawnSync("git", ["cat-file", "-e", `${g.base}^{commit}`], { cwd: shallow }).status, 0, "the base is not in the shallow checkout");
-  const got = changes(shallow, "merge_group", true, g);
-  assert.equal(got.output, "docs=true\n", got.out);
-  assert.match(got.out, /docs {2}docs\/x\.md\n/);
-  // origin cannot give it: couldn't tell, never docs
-  spawnSync("git", ["remote", "set-url", "origin", `file://${path.join(g.root, "no-such-repository")}`], { cwd: shallow });
-  const fresh = path.join(path.dirname(g.root), `${path.basename(g.root)}-shallow2`);
-  t.after(() => { fs.rmSync(fresh, { recursive: true, force: true }); });
-  assert.equal(spawnSync("git", [...GIT, "clone", "-q", "--depth=2", `file://${g.root}`, fresh], { encoding: "utf8" }).status, 0);
-  spawnSync("git", ["remote", "set-url", "origin", `file://${path.join(g.root, "no-such-repository")}`], { cwd: fresh });
-  const lost = changes(fresh, "merge_group", true, g);
-  assert.equal(lost.status, 0, lost.out);
-  assert.equal(lost.output, "docs=false\n", lost.out);
-  assert.match(lost.out, /cannot tell that only docs changed: the merge group's base [0-9a-f]{40} is not in the checkout, and fetching it failed/);
-});
-
-test("docs changes: a merge group with no SHAs, a malformed one, or a HEAD that is not its head is a full run", (t) => {
-  const g = groupRepo(t, [{ [P("docs", "x.md")]: "x" }]);
-  for (const group of [{}, { base: g.base }, { head: g.head }, { base: "main", head: g.head }, { base: g.base, head: "" }]) {
-    const got = changes(g.root, "merge_group", true, group);
-    assert.equal(got.status, 0, got.out);
-    assert.equal(got.output, "docs=false\n", `${JSON.stringify(group)}: ${got.out}`);
-    assert.match(got.out, /cannot tell that only docs changed: the merge group's base and head \(MERGE_GROUP_BASE_SHA, MERGE_GROUP_HEAD_SHA\)/);
+  assert.equal(got.output, "docs=false\n", got.out);
+  assert.match(got.out, /cannot tell that only docs changed: the event is merge_group: a merge group always runs everything/);
+  // a lone docs-only group too: what a group holds is never read
+  const lone = groupRepo(t, [{ [P("docs", "x.md")]: "x" }]);
+  for (const group of [{ base: lone.base, head: lone.head }, {}]) {
+    const r = changes(lone.root, "merge_group", true, group);
+    assert.equal(r.output, "docs=false\n", `${JSON.stringify(group)}: ${r.out}`);
   }
-  const other = changes(g.root, "merge_group", true, { base: g.base, head: g.base });
-  assert.equal(other.output, "docs=false\n", other.out);
-  assert.match(other.out, /HEAD is [0-9a-f]{40}, not the merge group's head/);
-  // the group's SHAs are read on a merge group alone: a pull request's run still reads its merge's two parents
-  const pr = changes(g.root, "pull_request", true, g);
-  assert.equal(pr.output, "docs=false\n");
-  assert.match(pr.out, /HEAD has 1 parent\(s\)/);
 });
 
 // ── the gates, by the mode in their own NEEDS ──
@@ -869,7 +834,7 @@ test("docs ci.yml: no paths filter, changes is builtins-only on Node 26 at depth
   assert.equal(ch.steps!.find((s) => s.uses?.startsWith("actions/setup-node@"))?.with?.["node-version"], "26");
   const classify = ch.steps!.find((s) => s.run === "node scripts/ci-shards.ts changes") as { id?: string; env?: Record<string, string> } | undefined;
   assert.ok(classify?.id !== undefined, "changes runs the classifier, with an id");
-  assert.deepEqual(classify.env, { MERGE_GROUP_BASE_SHA: "${{ github.event.merge_group.base_sha }}", MERGE_GROUP_HEAD_SHA: "${{ github.event.merge_group.head_sha }}" }, "a merge group's classifier reads its base and head");
+  assert.equal(classify.env, undefined, "the classifier reads the event's name alone, never a merge group's SHAs");
   assert.deepEqual(ch.outputs, { docs: `\${{ steps.${classify.id}.outputs.docs }}` });
   const docs = jobs.docs!;
   assert.deepEqual(docs.needs, ["changes"]);
@@ -883,7 +848,7 @@ test("docs ci.yml: no paths filter, changes is builtins-only on Node 26 at depth
   assert.equal(jobs.image!.if, "${{ !cancelled() }}", "a plain skip of the image for a failed need would report success on a required check");
 });
 
-test("ci.yml runs on a merge group as on a pull request: the trigger, no branch filter, and no job or step that reads the event", () => {
+test("ci.yml runs on a merge group as on a pull request: the trigger, no branch filter, and nothing that reads the event", () => {
   const text = fs.readFileSync(path.join(ROOT, ".github/workflows/ci.yml"), "utf8");
   const on = (YAML.parse(text) as { on: Record<string, unknown> }).on;
   assert.deepEqual(Object.keys(on).sort(), ["merge_group", "pull_request", "push"]);
@@ -891,10 +856,9 @@ test("ci.yml runs on a merge group as on a pull request: the trigger, no branch 
   // never merges; a branch filter on it could leave a group of another base unchecked
   assert.deepEqual(on.merge_group, { types: ["checks_requested"] });
   assert.equal(on.pull_request, null, "every pull request, of every base");
-  // every if is one the simulation knows (above), so none reads github.event_name: each job runs on a merge group as on a
-  // pull request; the event is read in one place alone, the classifier's env
-  assert.deepEqual(text.split("\n").filter((l) => /github\.(event|event_name|head_ref|base_ref)\b/.test(l)).map((l) => l.trim()),
-    ["MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}", "MERGE_GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}"]);
+  // every if is one the simulation knows (above), so none reads the event: each job runs on a merge group as on a pull
+  // request, and a merge group is a full run by GITHUB_EVENT_NAME, read by the classifier
+  assert.deepEqual(text.split("\n").filter((l) => /github\.(event|event_name|head_ref|base_ref)\b/.test(l)).map((l) => l.trim()), []);
   assert.deepEqual((YAML.parse(text) as { permissions: unknown }).permissions, { contents: "read" }, "the token stays read-only");
   assert.ok(!/\bsecrets\./.test(text), "CI reads no secret, so a merge group reaches none");
 });

@@ -83,7 +83,7 @@ every PR and on main. Locally:
   `gh api -X POST repos/embeddable-hq/mason-data/pulls/<n>/ccr/ready_for_review`.
 - **Report the PR number and its head commit** to the coordinator.
 - **Never merge.** `scripts/hooks/merge-head.ts` blocks a sub-agent's `gh pr merge`, and its REST merge or merge-queue
-  request (`PUT …/pulls/<n>/merge`, `…/merge-async`).
+  request (`PUT …/pulls/<n>/merge`, `…/merge-async`, `…/ccr/auto_merge`).
 
 ## A fix round
 
