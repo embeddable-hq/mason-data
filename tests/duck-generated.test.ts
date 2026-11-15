@@ -171,6 +171,7 @@ test("what a table cannot store is refused by name at its key, before anything i
     avg: `${lag}sql: SELECT avg(tenant_id) AS mean FROM events\n`,
     unnamed: `${lag}sql: SELECT id + 1 FROM events\n`,
     twice: `${lag}sql: SELECT id, tenant_id AS id FROM events\n`,
+    cased: `${lag}sql: SELECT id AS "U", tenant_id AS u FROM events\n`,
     arrays: `${lag}sql: SELECT array_agg(id ORDER BY id) AS ids FROM events\n`,
     write: `${lag}sql: DELETE FROM events\n`,
     two: `${lag}sql: SELECT 1 AS a; SELECT 2 AS b\n`,
@@ -190,6 +191,8 @@ test("what a table cannot store is refused by name at its key, before anything i
     assert.ok(r("money").refusals[0]!.options.some((o) => o.includes("AS double precision)")), JSON.stringify(r("money").refusals));
     refusedAt(r("unnamed").refusals, "sql", /has no name/);
     refusedAt(r("twice").refusals, "sql", /names column id twice/);
+    // two names the synced data holds as one (issue 1019): refused by name, never a build that fails at every run
+    refusedAt(r("cased").refusals, "sql", /names columns U and u, whose names differ only in case/);
     refusedAt(r("arrays").refusals, "sql", /of type bigint\[\], which a generated table can't store yet/);
     refusedAt(r("write").refusals, "sql", /is not a SELECT/);
     refusedAt(r("two").refusals, "sql", /holds 2 statements/);

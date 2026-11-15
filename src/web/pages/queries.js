@@ -14,8 +14,7 @@
  * (`renderUserFilter`, from GET /api/users while Queries is shown), a text box when they could not be read.
  */
 import { VIEW_HASHES } from "../routes.js";
-import { statementMsText, agoText, bytesText, esc, firstLine, n, empty, renderFailure, rowsHtml, utcText, utcMsText, details, createOpenSet, status,
-  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, clientText, USERS_HASH, UNLISTED_STATEMENTS, statementCell, rangeEvery, usersReadOnly, reading } from "../shared.js";
+import { statementMsText, agoText, bytesText, esc, firstLine, n, empty, renderFailure, rowsHtml, utcText, utcMsText, details, createOpenSet, status, clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, clientText, USERS_HASH, UNLISTED_STATEMENTS, statementCell, rangeEvery, usersReadOnly, reading, listTable } from "../shared.js";
 
 const STATE = "api/state";
 /** The users, for the User filter's choices: `mason user list --json`'s shape, without the last use (a scan of the log
@@ -111,8 +110,8 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
   }).join("");
   const sortNote = sort.key === "started" && sort.dir === "desc" ? ""
     : `<p class="dim sort-note">Sorted by ${esc(sort.key === "started" ? "start" : sort.key)}, ${sort.dir === "asc" ? "lowest" : "highest"} first, within the ${n(page.requests.length)} rows of this page. Older and Newest go by start time.</p>`;
-  return `<div class="scroll"><table class="requests"><thead><tr>${REQUEST_COLUMNS.map(([c, key, cls]) => key ? sortTh("requests", key, c, sort, cls) : `<th scope="col">${c}</th>`).join("")}</tr></thead>` +
-    `<tbody>${rows}</tbody></table></div>${sortNote}${unlisted}${nav}`;
+  return listTable("requests", `<thead><tr>${REQUEST_COLUMNS.map(([c, key, cls]) => key ? sortTh("requests", key, c, sort, cls) : `<th scope="col">${c}</th>`).join("")}</tr></thead>` +
+    `<tbody>${rows}</tbody>`) + `${sortNote}${unlisted}${nav}`;
 }
 
 /**
