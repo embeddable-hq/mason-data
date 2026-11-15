@@ -60,7 +60,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   once. A poll that meets one writes nothing, and the next poll reads the table again. A rewrite after a transaction
   that is still open on your database began is different. No read can see the table's rows until that transaction
   ends. So Mason waits for it and checks again every 30 seconds. The table's line in `mason status` says so, with the
-  transaction's pid. A `VACUUM FULL` or `CLUSTER` keeps each row as it was, so its sync goes on at once.
+  transaction's pid. A `VACUUM FULL` or `CLUSTER` keeps each row as it was, so its sync goes on at once. To tell
+  these apart, Mason reads a sample of the table's rows, never the whole table. That read takes at most one chunk of a
+  sync's time (`MASON_COPY_CHUNK_SECONDS`). If another session holds a lock on the table, such as a migration's
+  `ALTER TABLE`, the read gives up after a second, so it never makes your application's queries wait behind it. The
+  sync then waits and checks again.
 - **A table with two columns whose names differ only in case is refused by name, never synced for ever in vain.**
   Postgres keeps `"U"` and `u` apart. The synced data holds a name without regard to case, so such a table's first
   sync failed with `Column with name "u" already exists`, again and again. Now `mason add` refuses it with the
