@@ -4886,6 +4886,8 @@ test("Sync events: the page and mason logs --events say what the list leaves out
   assert.ok(desc.includes("The scheduled syncs that succeed are listed only when you tick Scheduled syncs."), `the page's description says it: ${desc}`);
   assert.match(html, /<label class="check" for="syncs-scheduled"><input type="checkbox" id="syncs-scheduled"> Scheduled syncs<\/label>/);
   assert.match(desc, /each sync you started/);
+  // the syncs running now are rows of the list too (issue 1011), and the intro says so (issue 1038)
+  assert.ok(desc.includes("Syncs that are still running are listed too, with how long they have run so far."), `the page's description says the running syncs are listed: ${desc}`);
   const help = commands.LOGS.usage.replace(/\s+/g, " ");
   assert.ok(help.includes(leaveOut!.replace(/\s+/g, " ")), "mason logs --help says the same sentence");
   assert.match(help, /each sync asked by hand \(mason sync, the page's Sync now\) and what it did/);
