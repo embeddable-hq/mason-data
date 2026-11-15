@@ -21,7 +21,7 @@
  * `REFRESH_MIN_S`..`REFRESH_MAX_S`; without it, the view is read once each time it is shown. A read not answered whole
  * within `HOST_READ_MS` is aborted and said as the view's failure.
  */
-import { esc, status, copyable, renderFailure } from "./shared.js";
+import { esc, status, copyable, renderFailure, withDeadline } from "./shared.js";
 
 /** The most bytes of an answer read: a view is a page of facts, never a log. */
 export const HOST_BYTES_MAX = 256 * 1024;
@@ -177,13 +177,8 @@ async function boundedText(res, max, signal) {
  * come, a body that drips): then the request is aborted, and the answer is that failure, whatever the fetch does after.
  */
 export async function readHost(fetchFn, path, { deadlineMs = HOST_READ_MS, timers = globalThis } = {}) {
-  const ctl = typeof AbortController === "function" ? new AbortController() : null;
-  let timer;
-  const late = new Promise((resolve) => {
-    timer = timers.setTimeout(() => { ctl?.abort(); resolve({ failure: hostFailure(path, `it was not answered whole within ${deadlineMs / 1000} s`) }); }, deadlineMs);
-  });
-  try { return await Promise.race([readWhole(fetchFn, path, ctl?.signal), late]); }
-  finally { timers.clearTimeout(timer); }
+  return withDeadline((signal) => readWhole(fetchFn, path, signal), deadlineMs,
+    () => ({ failure: hostFailure(path, `it was not answered whole within ${deadlineMs / 1000} s`) }), timers);
 }
 
 /** `readHost`'s read, under its deadline's signal. */

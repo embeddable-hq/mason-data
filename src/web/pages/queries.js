@@ -15,7 +15,7 @@
  */
 import { VIEW_HASHES } from "../routes.js";
 import { statementMsText, agoText, bytesText, esc, firstLine, n, empty, renderFailure, rowsHtml, utcText, utcMsText, details, createOpenSet, status,
-  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, clientText, USERS_HASH, UNLISTED_STATEMENTS, statementCell, rangeEvery, usersReadOnly } from "../shared.js";
+  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, clientText, USERS_HASH, UNLISTED_STATEMENTS, statementCell, rangeEvery, usersReadOnly, reading } from "../shared.js";
 
 const STATE = "api/state";
 /** The users, for the User filter's choices: `mason user list --json`'s shape, without the last use (a scan of the log
@@ -169,7 +169,8 @@ export const page = {
   create(ctx) {
     // the request rows' details open, by request id (createOpenSet): they stay open across a poll
     const opened = createOpenSet();
-    const m = { filters: { ...NO_FILTERS }, before: null, open: opened.open, sort: NEWEST_FIRST };
+    // shownPath: the view of the log last read whole, kept on the page (greyed) while a new filter or page is read
+    const m = { filters: { ...NO_FILTERS }, before: null, open: opened.open, sort: NEWEST_FIRST, shownPath: null };
     const path = () => requestsPath(m.filters, m.before, ctx.range());
     const filtered = () => Object.values(m.filters).some((v) => v !== "" && v !== false);
     /** The form's controls showing the filters (a route sets them, not a person). */
@@ -209,14 +210,18 @@ export const page = {
       reads: () => [{ path: path(), everyMs: m.before !== null ? Infinity : rangeEvery(ctx.range(), m.filters.search ? SEARCH_EVERY_MS : NEWEST_EVERY_MS) }, { path: STATE, everyMs: 30_000 },
         { path: USERS, everyMs: USERS_EVERY_MS }],
       actions,
+      afterRead() { if (ctx.read(path())?.body !== undefined) m.shownPath = path(); },
       view() {
         const log = ctx.read(path());
         const s = ctx.read(STATE)?.body;
         const users = ctx.read(USERS);
+        const render = (body) => renderRequests(body, { paged: m.before !== null, filtered: filtered(), isOpen: opened.has, now: ctx.now().getTime(), sort: m.sort,
+          span: (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span, firstTool: s != null && usersReadOnly(s) === null });
+        // A NEW FILTER, PAGE OR RANGE NOT READ YET: the list read last stays, greyed and busy, never a blank that moves the page
+        const last = log === undefined && m.shownPath !== null && m.shownPath !== path() ? ctx.read(m.shownPath)?.body : undefined;
         return {
           "rq-user-field": renderUserFilter(users === undefined ? undefined : users.failure ? { failure: users.failure } : users.body, m.filters.user),
-          "request-log": (log?.failure ? renderFailure(log.failure) : "") + (log?.body ? renderRequests(log.body, { paged: m.before !== null, filtered: filtered(), isOpen: opened.has, now: ctx.now().getTime(), sort: m.sort,
-            span: (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span, firstTool: s != null && usersReadOnly(s) === null }) : "") +
+          "request-log": last !== undefined ? reading(render(last)) : (log?.failure ? renderFailure(log.failure) : "") + (log?.body ? render(log.body) : "") +
             (log?.body && m.filters.search && m.before === null ? `<p class="dim refresh-note">${esc(SEARCH_NOTE)}</p>` : ""),
         };
       },

@@ -622,6 +622,13 @@ body { padding-bottom: var(--docked-h, 0px); }
 /* A BUTTON WHOSE LABEL CHANGES KEEPS ITS WIDTH (`room`, src/web/shared.js ROOMS): its longest label laid under it, unseen
    and of no height, so Sync, Syncing… and Synced ✓ (Copy, Copied) are one width */
 button[data-room]::after { content: attr(data-room); display: block; height: 0; overflow: hidden; visibility: hidden; }
+/* a button that sends a change has two rooms, its label and its busy label (`sendButton`): both laid under it, unseen,
+   so Remove and Removing… are one width by construction, whatever the font */
+button[data-room2]::before { content: attr(data-room2); display: block; height: 0; overflow: hidden; visibility: hidden; }
+/* its request in flight: held, and the pointer says it is working (`aria-busy`, src/web/app.js ctx.send) */
+button[aria-busy="true"]:disabled { cursor: progress; }
+/* a list kept while the next one is read (a new filter, an older page: `reading`): greyed, in its place, until it is replaced */
+.reading[aria-busy="true"] { opacity: 0.55; pointer-events: none; }
 td.act, th.act { white-space: nowrap; text-align: right; }
 td.act > * { vertical-align: middle; }
 table.catalog td.act, table.catalog th.act { position: sticky; right: 0; }
@@ -775,10 +782,11 @@ table.users button.from-line:disabled, table.users button.from-line:disabled:hov
 table.users td { white-space: nowrap; }
 /* FIXED COLUMNS, as the tables' catalog's: Disable → "Disabled <when>" widens no column and moves no button */
 table.users { table-layout: fixed; width: 100%; min-width: 960px; }
-table.users th.status { width: 200px; }
+table.users th.status { width: 180px; }
 table.users th.added { width: 188px; }
 table.users th.last { width: 150px; }
-table.users th.act { width: 240px; }
+/* Queries, Disable (in the room of Enabling…, its Enable sent) and Remove, whole */
+table.users th.act { width: 270px; }
 /* where the table scrolls in its card (a narrower window, a phone), a row's actions stay pinned at the card's right */
 table.users td.act, table.users th.act { position: sticky; right: 0; }
 table.users td.act { background: var(--surface); }

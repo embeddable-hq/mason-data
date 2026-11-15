@@ -259,13 +259,15 @@ export const page = {
   create(ctx) {
     const m = { rawOpen: false, failuresOnly: false, scheduled: false, kind: "", table: "", sort: { key: "time", dir: "desc" }, limit: EVENTS_SHOWN,
       // the syncs running now, by key, and those just ended whose event is not read yet (`settleRunning`)
-      running: new Map() };
+      running: new Map(),
+      // the events last read whole (their path), kept on the page (greyed) while a filter's new read is asked
+      shownEvents: null };
     // the scheduled syncs are read when the box is ticked, or one of their kinds is chosen (else that kind lists none)
     const scheduledRead = () => m.scheduled || SCHEDULED_KINDS.includes(m.kind);
     // FAILURES ONLY IS ASKED OF THE RUN (`failed=1`), never filtered from the newest EVENTS_LIMIT read: the scheduled syncs,
     // one a table a poll, fill 500 rows in minutes, and a failure among them must still be listed
     const events = () => eventsPath(ctx.range(), { scheduled: scheduledRead(), failed: m.failuresOnly });
-    const part = (path, render, says) => readPart(ctx, path, render, says);
+    const part = (path, render, says, before = null) => readPart(ctx, path, render, says, before);
     // a sync that ended waits for its event: the events are read again once, a poll after it was seen to end (its event
     // is written within a second of its end, src/duck/events.ts FLUSH_MS), unless they were read since then already
     const handOver = () => {
@@ -300,14 +302,17 @@ export const page = {
       actions,
       /** After each read: the syncs running now from the state, and each one ended handed over to its event (`settleRunning`). */
       afterRead() {
+        if (ctx.read(events())?.body !== undefined) m.shownEvents = events();
         const s = ctx.read(STATE)?.body;
         if (s === undefined) return;
         m.running = settleRunning(m.running, s, ctx.read(events())?.body?.events, ctx.now().getTime());
       },
+      // FAILURES ONLY, SCHEDULED SYNCS OR A KIND JUST CHANGED, ITS EVENTS NOT READ YET: the events read last stay, greyed
+      // and busy (`readPart`'s `before`), and the filters keep their choices, so nothing moves until the answer comes
       view: () => ({
-        "syncs-filters": renderEventFilters(ctx.read(events())?.body, m, ctx.read(STATE)?.body ?? null),
+        "syncs-filters": renderEventFilters(ctx.read(events())?.body ?? (m.shownEvents === null ? undefined : ctx.read(m.shownEvents)?.body), m, ctx.read(STATE)?.body ?? null),
         "syncs-events": part(events(), (b) => renderEvents(b, { failuresOnly: m.failuresOnly, kind: m.kind, table: m.table, now: ctx.now().getTime(), sort: m.sort, limit: m.limit,
-          span: RANGES[ctx.range()]?.span ?? "", running: [...m.running.values()], runningAsOf: runningAsOf() }), false),
+          span: RANGES[ctx.range()]?.span ?? "", running: [...m.running.values()], runningAsOf: runningAsOf() }), false, m.shownEvents),
         "syncs-run": renderRawLog(m.rawOpen, m.rawOpen ? part(LOGS, renderLogs, true) : ""),
       }),
       /** The kind or the table chosen: the events read are filtered in the page alone. "Failures only" and "Scheduled
