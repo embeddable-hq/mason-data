@@ -12,6 +12,7 @@ same JSON; the web page and the managed service read those endpoints, never a se
 | Endpoint | Command | What |
 |---|---|---|
 | `GET /api/state` | `mason status`, `mason wait` (with `?columns=1`) | each synced table's rows, state and last sync (`tables[].sync`), the totals, the readiness; each table's columns only with `?columns=1` |
+| `GET /api/state?storage=1` | `mason upgrade --check` | the state, and `storage`: what the synced data holds of each table as a start reads it (its record of columns, its stored columns and types, its constraint, its watermark), and each added table's columns (`StoredFacts`, `src/duck/reread.ts`) |
 | `GET /api/tables/<table>/columns` | `mason tables <table>` `columns` | one table's columns (`{ table, columns }`): the Tables page's form reads it as it opens |
 | `GET /api/queries` | `mason status` | the last day's and week's statements: outcomes, time (average, p50, p95), rows and bytes sent; read at most once every 30 s, so up to 30 s old |
 | `GET /api/activity?since=` | (the Usage page's) | one time range of the request log: `{ since, window, clients, clientsTotal, slowest, keptDays }` — its statements as the summary counts a day, who sent them (a row per user and client: statements, failed, sessions, last; the 50 with the most statements, `clientsTotal` the count of every client and session), the 10 slowest that completed |

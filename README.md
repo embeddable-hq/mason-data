@@ -277,7 +277,10 @@ A table you add is synced once the deploy runs. A table you remove has its synce
 To move to a newer Mason:
 
 1. Read that release's "Before you upgrade" in its
-   [release notes](https://github.com/embeddable-hq/mason-data/releases), and make the changes it lists.
+   [release notes](https://github.com/embeddable-hq/mason-data/releases), and make the changes it lists. Where Mason
+   runs on your machine or your server, `npx @mason-data/cli@<version> upgrade --check` in the project's folder lists
+   which of your synced tables that release reads again whole, and how large each is. It works when the Mason you run
+   now is a release after 0.22.0.
 2. On a hosted replica, an owner of the organisation runs `mason replica upgrade <org>/<name>` first. It installs the
    newest Mason the service offers. Mason on the replica restarts, and its connections drop. On the same release line,
    it then runs the newest patch. A new release line waits beside the old one until you deploy a project pinned to it.

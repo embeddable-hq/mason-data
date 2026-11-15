@@ -80,20 +80,21 @@ takes minutes to hours, and reads tens of GiB. A person must know before they up
 
 ### Where the code decides it
 
-A table whose first sync finished is read again whole when `needsCopy` (`src/duck/sync.ts`) says so. Mason serves
-its old data until the new sync is done. At the start, these checks can make it say so. Read the release's diff
-from the previous tag for each of them (`git diff v<previous> HEAD -- src/duck/ src/cli/preflight.ts`).
+A table whose first sync finished is read again whole when `wholeRead` (`src/duck/reread.ts`) says so. `needsCopy`
+(`src/duck/sync.ts`) asks it. Mason serves its old data until the new sync is done. At the start, these checks can make
+it say so. Read the release's diff from the previous tag for each of them (`git diff v<previous> HEAD -- src/duck/
+src/cli/preflight.ts`).
 
 | Check | What it finds | Where | Since |
 |---|---|---|---|
-| `RETIRED_LAYOUT` | A synced table stored sorted by its key, with a primary-key or unique constraint on it. | `findRetired`, `src/duck/sync.ts` | 0.7.0 |
-| `HELD_LAYOUT` | A column of a type Mason holds as the source's text (a `point`, a `money`, a range) stored as another type. | `findHeldLayout`, `src/duck/sync.ts` | 0.9.0 |
-| `SCALE_LAYOUT` | A `numeric` column of no precision, synced exactly, without each value's own decimals beside it. | `findHeldLayout`, `src/duck/sync.ts` | 0.21.0 |
-| `MISSING_LAYOUT` | A synced table without a column its record says it syncs. An older Mason dropped such a column. | `findHeldLayout`, `src/duck/sync.ts` | 0.21.0 |
-| `BOM_LAYOUT` | A column whose name begins with a byte-order mark (U+FEFF), stored as text though its type is not a text type. | `findHeldLayout` and `lostType`, `src/duck/sync.ts` | 0.21.0 |
-| The columns' key | The columns a table was synced with no longer match the columns read from the source at the start. | `columnsKey`, `src/duck/sync.ts` | 0.7.0 |
-| No watermark | A synced table with no row in `_mason.poll_state`. | `needsCopy`, `src/duck/sync.ts` | 0.7.0 |
-| No synced table | A table recorded as synced, with no table at its name in the synced data. An older Mason dropped it with a removed table whose name differed only in case. | `forgetMissing`, `src/duck/sync.ts` | 0.22.0 |
+| `RETIRED_LAYOUT` | A synced table stored sorted by its key, with a primary-key or unique constraint on it. | `layoutOf`, `src/duck/reread.ts` | 0.7.0 |
+| `HELD_LAYOUT` | A column of a type Mason holds as the source's text (a `point`, a `money`, a range) stored as another type. | `layoutOf`, `src/duck/reread.ts` | 0.9.0 |
+| `SCALE_LAYOUT` | A `numeric` column of no precision, synced exactly, without each value's own decimals beside it. | `layoutOf`, `src/duck/reread.ts` | 0.21.0 |
+| `MISSING_LAYOUT` | A synced table without a column its record says it syncs. An older Mason dropped such a column. | `layoutOf`, `src/duck/reread.ts` | 0.21.0 |
+| `BOM_LAYOUT` | A column whose name begins with a byte-order mark (U+FEFF), stored as text though its type is not a text type. | `layoutOf` and `lostType`, `src/duck/reread.ts` | 0.21.0 |
+| The columns' key | The columns a table was synced with no longer match the columns read from the source at the start. | `columnsKey`, `src/duck/reread.ts` | 0.7.0 |
+| No watermark | A synced table with no row in `_mason.poll_state`. | `wholeRead`, `src/duck/reread.ts` | 0.7.0 |
+| No synced table | A table recorded as synced, with no table at its name in the synced data. An older Mason dropped it with a removed table whose name differed only in case. | `forgetMissing`, `src/duck/sync.ts`; `readAgain`, `src/duck/reread.ts` | 0.22.0 |
 
 Two of these have no name that says a release changed them. Read the diff for them.
 
@@ -101,10 +102,28 @@ Two of these have no name that says a release changed them. Read the diff for th
   moves a type between held as itself and held as its text changes the key of every table with a column of that type.
   So does a release that changes how a column's type, kind or domain is read from the source (`SourceColumnInfo`,
   `src/cli/preflight.ts`), or how its record is read (`copy_state.columns`). Each such table is read again.
-  `findHeldLayout` completes an older record's enum kind so that an enum column is not read again for nothing. A new
+  `layoutOf` completes an older record's enum kind so that an enum column is not read again for nothing. A new
   fact in the key needs the same care.
 - **The watermark is the ledger's row.** A release that drops or rewrites rows of `_mason.poll_state`, or of
   `_mason.copy_state`, reads every such table again.
+
+### Check the list with `mason upgrade --check`
+
+**Run the release's own command against a Mason of the release before it**, and compare what it lists with the notes
+you wrote. Start the previous release's Mason in a project, then run `node src/cli/main.ts -C <project folder>
+upgrade --check` in the release's checkout. It lists each table the release's first start reads again, why, its size, and whether it keeps
+serving its synced data.
+
+- It applies the release's checks to what the running Mason publishes (`/api/state?storage=1`, `readStored` in
+  `src/duck/reread.ts`). The start reads the same facts through the same functions, so the two agree.
+- It works only when the running Mason is a release after 0.22.0. An older one publishes nothing, and the command says
+  so. The notes are still the only way for a reader upgrading from 0.22.0 or before.
+- It cannot see a release that reads something new about a column from the source (a new field of `SourceColumnInfo`).
+  The running Mason publishes the columns as its own release read them. Say such a table in the notes, as before.
+- A new check that reads a new fact adds the fact to `StoredTable` and `readStored`. The command can check it from the
+  release after the one that publishes it.
+- Name the command in the notes' "Before you upgrade" once readers can use it: "Run `npx @mason-data/cli@<version>
+  upgrade --check` in the project's folder to see which of your tables are read again."
 
 These are not caused by a release, so the notes do not list them: a table's columns changed on the database, a
 `numeric` value that outgrew its synced column, `MASON_DUCK_SYNC=recopy`, and a table removed and added again.
