@@ -1595,7 +1595,9 @@ row: a JavaScript call a row, through the turn.
 `(SELECT __mason_libc_key(x, collate))`. The engine plans a correlated subquery as a join of the distinct values it
 reads: the key is computed once a distinct value and hashed back to the rows. The order still decides only a tie among
 the most frequent values, and the value's bytes stay the second key, so the answer is the one the key a row gave. After
-it, the three took 0.07, 0.38 and 0.23 s.
+it, the three took 0.07, 0.38 and 0.23 s. The join has a cost of its own where the values are many: over 20 M rows of
+500,000 values in the engine alone, with `md5` standing in for the key, the subquery took 14.7 s where a native key a
+row took 9.2 s. The libc key is no native key, though: a JavaScript call of about 2 µs a row is 40 s over those rows.
 
 **What was tried first.** The engine's `histogram(x)` per group, with the key computed only for each group's tied
 leaders: 0.02 s for six values, but 5.6 s for 50,000 values in a group, since the histogram's map grows with the values.
