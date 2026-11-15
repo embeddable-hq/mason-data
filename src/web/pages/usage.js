@@ -15,7 +15,7 @@
 import { VIEW_HASHES } from "../routes.js";
 import { esc, n, statementMsText, bytesText, fileSize, duration, details, createOpenSet, cards, card, empty, panel, skeleton, sortTh, sortedBy, nextSort, readPart, usagePath, utcMinute,
   RANGES, DEFAULT_RANGE, rangeOf, isNow, rangeEvery, firstLine, spanText, agoText, utcText, clientText, clip, TITLE_MAX, unsupportedEntry, renderFailure, json, pop, actId,
-  statementCell, POLL_MS, readOnlyLine } from "../shared.js";
+  statementCell, POLL_MS, readOnlyLine, button, sendButton } from "../shared.js";
 import { spark, seriesChart, seriesOf, drawable } from "../charts.js";
 
 const EVERY_MS = 60_000;
@@ -171,7 +171,7 @@ export function statementCards(day, line = () => "", label = "last 24 hours", hr
  * place), a refusal as an answer.
  * `readOnly`: `/api/state` `pageReadOnly` (MASON_UI_READ_ONLY=1) — no Cancel, and no column for it.
  */
-export function renderRunning(running, asking = null, outcome = null, now = Date.now(), readOnly = null) {
+export function renderRunning(running, asking = null, outcome = null, now = Date.now(), readOnly = null, sending = () => false) {
   const pops = [];
   const said = outcome ?? null;
   let shown = false;
@@ -179,8 +179,10 @@ export function renderRunning(running, asking = null, outcome = null, now = Date
     const key = keyOf(r.session, r.statement);
     const anchor = actId("running", key);
     if (asking === key) {
+      // while it is sent, the question stays: its button says Cancelling… (in the room of both), Keep it running is held
+      const busy = sending(`cancel:${key}`);
       pops.push(pop(anchor, `<p class="confirm" title="SQLSTATE 57014">Cancel query ${r.statement} of session ${r.session}? Its client gets a "canceling statement" error.</p>` +
-        `<p class="pop-actions"><button type="button" class="danger small" data-confirm-cancel="${esc(key)}">Cancel query ${r.statement}</button> <button type="button" class="small" data-dismiss-cancel data-pop-close>Keep it running</button></p>`,
+        `<p class="pop-actions">${sendButton(`Cancel query ${r.statement}`, "Cancelling…", { confirmCancel: key }, "danger small", { busy })} ${button("Keep it running", { dismissCancel: "", popClose: "" }, "small", { disabled: busy })}</p>`,
         { kind: "dialog", label: `Cancel query ${r.statement} of session ${r.session}?` }));
     }
     if (said !== null && said.key === key) { shown = true; pops.push(pop(anchor, outcomeHtml(said))); }
@@ -342,12 +344,16 @@ export const page = {
       dismissCancelled() { m.outcome = null; },
       /** POST /api/cancel { session, statement }: the statement listed, never the one the session runs next (409). */
       async confirmCancelStatement(session, statement) {
-        const r = await ctx.ask("api/cancel", json("POST", { session, statement }));
-        m.asking = null;
-        m.outcome = "failure" in r ? { key: keyOf(session, statement), failure: r.failure } : { key: keyOf(session, statement), cancelled: r.body.cancelled };
+        const key = keyOf(session, statement);
+        // a second press while it is sent sends nothing (its button is held, Cancelling…)
+        const r = await ctx.send(`cancel:${key}`, "api/cancel", json("POST", { session, statement }), { onAnswer: (r) => {
+          m.asking = null;
+          m.outcome = "failure" in r ? { key, failure: r.failure } : { key, cancelled: r.body.cancelled };
+        } });
+        if ("busy" in r) return false;
         // who is connected says its running statements too: both read again, so neither says the cancelled one runs
         await ctx.refresh([RUNNING, STATE]);
-        return !("failure" in r);
+        return "body" in r;
       },
     };
     return {
@@ -395,7 +401,7 @@ export const page = {
           "usage-running-h": live ? "Running now" : `Slowest in ${esc(span)}`,
           "usage-running-lead": live ? `The queries running right now.${readOnly !== null ? "" : " Cancel stops one."}`
             : "The queries that took longest to complete.",
-          "usage-running": live ? (running ? renderRunning(running.running, m.asking, m.outcome, now, readOnly) : "") : part(activity(), (b) => renderSlowest(b.slowest, { range, now }), false),
+          "usage-running": live ? (running ? renderRunning(running.running, m.asking, m.outcome, now, readOnly, ctx.sending) : "") : part(activity(), (b) => renderSlowest(b.slowest, { range, now }), false),
           unsupported: part(unsupportedPath(range), (b) => renderUnsupported(b, span), true),
           "usage-hourly": part(samples(), (b) => renderUsage(b, opened.has, m.sort), true),
           "usage-sizes": part(samples(), (b) => renderCopySizes(b.copySizes), false),
