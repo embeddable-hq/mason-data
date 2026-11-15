@@ -80,7 +80,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A sync you start by hand that fails is now listed under Sync events**, as "Manual sync failed" (`sync_failed` in
   `mason logs --events`).
 - **The web page's Sync events list shows how long each sync took in a column of its own.** The Took column holds
-  it, such as `570 ms` or `7 min 57 s`, and you can sort the list by it. The message no longer ends with it there.
+  it, such as `570 ms` or `7 min 57 s`, and you can sort the list by it. In a narrow window, a long table name is cut
+  short so that Took stays in view. Hover over the name to read it whole. The message no longer ends with it there.
   `mason logs --events --json` gives it as a new field, `tookMs`. A first sync's event now ends with its time as a
   poll's does, such as `synced: 1,000 row(s) · 2.0 s`, where it said `in 2.00 s`. Events recorded before the upgrade
   keep their time in the message.
@@ -93,6 +94,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **`mason stop` now ends within seconds when one of Mason's reads waits on your database.** A table's first sync, its
+  catch-up or a scheduled sync can wait on a lock that another session holds on the table. Before, the stop waited
+  until that lock was released, which could be never. Now Mason cancels its own waiting reads on your database, and
+  nothing of Mason's is left running there. A first sync keeps what it had synced and resumes at the next start. If
+  your database refuses the cancel, the log says so once, and the stop waits for the read as before.
 - **Text that starts with a byte-order mark (U+FEFF) now keeps it.** A CSV import can leave one at the start of a
   value or of a column's name. Mason dropped the mark from every value that began with one, so a value that was only a
   mark read as empty, and two values that differed only by it looked like duplicate rows under `GROUP BY` or
@@ -194,3 +200,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A generated table that computes a `jsonb` column now takes longer to build.** Writing each value in Postgres's form
   costs about 30 to 40 seconds a million rows on a 4-core machine. A `jsonb` column taken as it is from another table costs
   nothing more.
+- **Every button on the web page that changes something now shows that it is working, and can't be sent twice.** Its
+  label says what it is doing, such as Removing…, Disabling… or Opening…, and the button stays the same size. Before,
+  most of them gave no sign until the answer came. A double click on a Remove or a Cancel query sent it twice, and
+  the second, refused, hid that the first had worked. Now one request is sent, and the page says what it did.
+- **A refused Stop of a temporary cloud login is now said, beside Stop.** It says that the login is still open and
+  that its address and password still work. Before, the page said nothing, and the login stayed public.
+- **A change the web page sends that fails is said beside its button, with Dismiss.** Escape dismisses it too. This
+  includes Add a user's error, which could not be dismissed and pushed the rest of the page down, and the cloud
+  login's. Nothing on the page moves when a failure is said, or while a button is working. A request that gets no
+  answer is given up after 60 seconds, and says so. Before, its button could stay busy for ever.
+- **Changing a filter or a page of Queries or Sync events keeps the last list on the page, greyed, until the new one
+  is read.** Before, the list went blank and the page jumped.

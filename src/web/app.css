@@ -622,6 +622,13 @@ body { padding-bottom: var(--docked-h, 0px); }
 /* A BUTTON WHOSE LABEL CHANGES KEEPS ITS WIDTH (`room`, src/web/shared.js ROOMS): its longest label laid under it, unseen
    and of no height, so Sync, Syncing… and Synced ✓ (Copy, Copied) are one width */
 button[data-room]::after { content: attr(data-room); display: block; height: 0; overflow: hidden; visibility: hidden; }
+/* a button that sends a change has two rooms, its label and its busy label (`sendButton`): both laid under it, unseen,
+   so Remove and Removing… are one width by construction, whatever the font */
+button[data-room2]::before { content: attr(data-room2); display: block; height: 0; overflow: hidden; visibility: hidden; }
+/* its request in flight: held, and the pointer says it is working (`aria-busy`, src/web/app.js ctx.send) */
+button[aria-busy="true"]:disabled { cursor: progress; }
+/* a list kept while the next one is read (a new filter, an older page: `reading`): greyed, in its place, until it is replaced */
+.reading[aria-busy="true"] { opacity: 0.55; pointer-events: none; }
 td.act, th.act { white-space: nowrap; text-align: right; }
 td.act > * { vertical-align: middle; }
 table.catalog td.act, table.catalog th.act { position: sticky; right: 0; }
@@ -775,10 +782,11 @@ table.users button.from-line:disabled, table.users button.from-line:disabled:hov
 table.users td { white-space: nowrap; }
 /* FIXED COLUMNS, as the tables' catalog's: Disable → "Disabled <when>" widens no column and moves no button */
 table.users { table-layout: fixed; width: 100%; min-width: 960px; }
-table.users th.status { width: 200px; }
+table.users th.status { width: 180px; }
 table.users th.added { width: 188px; }
 table.users th.last { width: 150px; }
-table.users th.act { width: 240px; }
+/* Queries, Disable (in the room of Enabling…, its Enable sent) and Remove, whole */
+table.users th.act { width: 270px; }
 /* where the table scrolls in its card (a narrower window, a phone), a row's actions stay pinned at the card's right */
 table.users td.act, table.users th.act { position: sticky; right: 0; }
 table.users td.act { background: var(--surface); }
@@ -898,6 +906,17 @@ details.hours > summary { margin-bottom: var(--space-2); }
   #page-syncs table.events tbody tr > :nth-child(4) { grid-area: msg; overflow-wrap: anywhere; }
   #page-syncs table.events tbody tr > :nth-child(5) { grid-area: took; padding-bottom: 0; }
   #page-syncs table.events code.name { max-width: 100%; }
+}
+/* Sync events between the phone and a wide card (issue 1038): a table's name kept its whole 36ch, so the list was
+   wider than its card and Took ran past the card's edge. Where the card is narrower than the list needs, a long name
+   gives way: it is cut with an ellipsis at whatever width its column gets (its whole is the title). A wider card is
+   as before. */
+#page-syncs .panel:has(> table.events) { container: sync-events / inline-size; }
+@media (min-width: 641px) {
+  @container sync-events (max-width: 799px) {
+    #page-syncs table.events code.name { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; line-clamp: 1;
+      white-space: normal; overflow-wrap: anywhere; }
+  }
 }
 .terminal { background: var(--code-bg); color: var(--code-fg); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-3) var(--space-4);
   max-height: 480px; overflow: auto; font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.6; }

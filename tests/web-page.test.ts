@@ -589,7 +589,7 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   assert.equal(typeof syncsHref, "function", "src/web/pages/tables.js exports syncsHref");
   assert.equal(syncsHref!("billing.invoices & co"), "#observability/syncs?table=billing.invoices%20%26%20co&range=7d", "over the week: a table's copy is rarely in Now's 15 minutes");
   assert.ok(!/href="#observability\/syncs\?table=public\.(audit|event_log)"/.test(html), "no View events for a table not added");
-  assert.match(html, /<button type="button" class="primary small" data-add-table="public\.audit">Add<\/button>/);
+  assert.match(html, /<button type="button" class="primary small" data-add-table="public\.audit" data-room="Add" data-room2="Adding…">Add<\/button>/);
   assert.ok(!/data-add-table="public\.(event_log|customers)"/.test(html), "no Add for a table that cannot be added as it is, nor for one added");
   assert.match(html, /<button type="button" class="danger small" data-remove-table="public\.customers">Remove<\/button>/);
   assert.ok(!/duckdb/i.test(html), "never the engine's name");
@@ -600,14 +600,14 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   // its Remove where it was, held down; the question a dialog anchored to the row's actions, written after the table
   assert.match(asking, /<td class="act" id="act-tables-public\.customers"><a class="btn small" href="#observability\/syncs\?table=public\.customers&amp;range=7d">View events<\/a> <button type="button" class="small" data-sync-table="public\.customers" data-room="Syncing…">Sync now<\/button> <button type="button" class="danger small" aria-expanded="true" disabled>Remove<\/button><\/td><\/tr>/);
   assert.match(asking, /<\/table><\/div><div class="pop ask" data-anchor="act-tables-public\.customers" role="dialog" aria-label="Remove customers\?"><button type="button" class="pop-x"[\s\S]*?<\/button><p class="confirm">Remove customers\?/);
-  assert.match(asking, /<button type="button" class="danger small" data-confirm-remove-table="public\.customers">Remove customers<\/button>/);
+  assert.match(asking, /<button type="button" class="danger small" data-confirm-remove-table="public\.customers" data-room="Remove customers" data-room2="Removing…">Remove customers<\/button>/);
   assert.match(asking, /data-confirm-remove-table="public\.customers"/);
   assert.ok(!/data-confirm-remove-table="public\.orders"/.test(asking), "only the one asked");
   // the form: a table with no primary key ticks its key and its columns, one with a key its columns only
   assert.equal(textOf(popOf(renderTables(CATALOG_STATE, { choosing: "public.event_log" }), "act-tables-public.event_log")), "Reading event_log's columns… Cancel", "the form waits for its columns, read when it opens");
   const keyForm = renderTables(CATALOG_STATE, { choosing: "public.event_log", columns: columnsOf("public.event_log") });
   assert.match(keyForm, /<form class="pick" data-pick-form="public\.event_log"/);
-  assert.match(keyForm, /<button type="submit" class="primary small">Add event_log<\/button>/);
+  assert.match(keyForm, /<button type="submit" class="primary small" data-room="Add event_log" data-room2="Adding…">Add event_log<\/button>/);
   assert.match(textOf(keyForm), /Its key: the columns that tell its rows apart tenant_id bigint id bigint payload jsonb The columns to sync All columns, and any added to the table later that do not look like secrets Only these columns tenant_id bigint id bigint payload jsonb Add event_log Cancel/);
   assert.deepEqual([...keyForm.matchAll(/name="(key|columns)" value="([^"]*)"/g)].map((m) => `${m[1]}=${m[2]}`),
     ["key=tenant_id", "key=id", "key=payload", "columns=tenant_id", "columns=id", "columns=payload"]);
@@ -618,12 +618,14 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   assert.ok(!/name="key"/.test(columnsForm) && !/Its key/.test(columnsForm), "a table with a primary key is copied by it: no key to name");
   assert.deepEqual([...columnsForm.matchAll(/name="columns" value="([^"]*)"/g)].map((m) => m[1]), ["id", "email", "password_hash"]);
   assert.ok(!/pattern=|required/.test(keyForm + columnsForm), "the server judges what is sent, never the page");
-  // what an add or a remove answered is said beside its table's actions; a refusal for a table the list lacks, above the list
+  // what an add or a remove answered is said beside its table's actions; a refusal for a table the list lacks, in a
+  // popover under the search box, never a line above the list that pushes it down (issue 1033)
   const said = renderTables(CATALOG_STATE, { outcome: { table: "public.accounts", added: PICKED.secret } });
   assert.match(textOf(popOf(said, "act-tables-public.accounts")), /^Added public\.accounts: every column but password_hash\. .* Dismiss$/);
   assert.equal(textOf(withoutPops(said)), textOf(html), "and nothing inserted into the table");
   const gone = renderTables(CATALOG_STATE, { outcome: { table: "public.gone", failure: { code: "not_found", message: "public.gone is not a table of shop that this user can read" } } });
-  assert.match(textOf(gone), /^✗ public\.gone is not a table of shop that this user can read Added \(\d+\) Table State /);
+  assert.equal(textOf(popOf(gone, "tables-filter")), "✗ public.gone is not a table of shop that this user can read Dismiss");
+  assert.equal(textOf(withoutPops(gone)), textOf(html), "nothing above the list");
   assert.equal(textOf(renderTables({ ...NONE, tables: [] })), "shop has no table this user can read.");
   assert.match(renderTables({ ...NONE, tables: [] }), /^<p class="empty">[^<]* has no table this user can read\.<\/p>$/, "nothing to list is the empty state: one quiet line");
 });
@@ -1719,7 +1721,9 @@ test("the app: an added user's password is written once, gone once dismissed and
   run.answers.set("POST api/users", () => new Response(JSON.stringify({ error: "there is already a user \"grafana\"",
     failure: { code: "refused", message: "there is already a user \"grafana\"", why: "a name names one user", fix: "mason user remove grafana, then mason user add grafana", next: [{ command: "mason user list", what: "the users" }] } }), { status: 409 }));
   assert.equal(await app.addUser("grafana"), false);
-  assert.equal(textOf(app.view().action!), "✗ there is already a user \"grafana\" why a name names one user fix mason user remove grafana, then mason user add grafana Next: mason user list the users");
+  assert.equal(textOf(app.view().action!), "✗ there is already a user \"grafana\" why a name names one user fix mason user remove grafana, then mason user add grafana Next: mason user list the users Dismiss");
+  // beside Add a user, a popover with Dismiss: nothing under the form moves (issue 1033)
+  assert.match(app.view().action!, /^<div class="pop said" data-anchor="add-user-submit" role="status">/);
   assert.equal(onceHtml(app.view()), "");
 });
 
@@ -1850,7 +1854,7 @@ test("the app: the add form's role is sent as role (none for the default, as mas
     failure: { code: "not_found", message: "there is no role gone in mason/roles.yml", why: "a role is a key of mason/roles.yml", fix: "mason user add grafana --role everything", next: [] } }), { status: 404 }));
   assert.equal(await app.addUser("grafana", "gone"), false);
   assert.ok(run.asked.includes(`POST api/users ${JSON.stringify({ name: "grafana", role: "gone" })}`));
-  assert.equal(textOf(app.view().action!), "✗ there is no role gone in mason/roles.yml why a role is a key of mason/roles.yml fix mason user add grafana --role everything");
+  assert.equal(textOf(app.view().action!), "✗ there is no role gone in mason/roles.yml why a role is a key of mason/roles.yml fix mason user add grafana --role everything Dismiss");
   assert.equal(onceHtml(app.view()), "");
 });
 
@@ -1893,13 +1897,13 @@ test("the users: a disabled user says Disabled and when, as mason user list does
   assert.deepEqual([...html.matchAll(/<span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`),
     ["ok Active", "warn Disabled 2026-10-28 09:00 UTC"]);
   assert.ok(!/rotated/.test(html), "a disabled user is said disabled, not as one the key's rotation stopped");
-  assert.match(html, /<td class="act" id="act-users-metabase"><a class="btn small" href="#observability\/queries\?user=metabase&amp;range=24h" title="the queries metabase sent in the last 24 hours">Queries<\/a> <button type="button" class="small" data-disable="metabase" data-room="Disable">Disable<\/button> <button type="button" class="danger small" data-remove="metabase">Remove<\/button><\/td>/);
-  assert.match(html, /<td class="act" id="act-users-grafana"><a class="btn small" href="#observability\/queries\?user=grafana&amp;range=24h" title="the queries grafana sent in the last 24 hours">Queries<\/a> <button type="button" class="small" data-enable="grafana" data-room="Disable">Enable<\/button> <button type="button" class="danger small" data-remove="grafana">Remove<\/button><\/td>/);
+  assert.match(html, /<td class="act" id="act-users-metabase"><a class="btn small" href="#observability\/queries\?user=metabase&amp;range=24h" title="the queries metabase sent in the last 24 hours">Queries<\/a> <button type="button" class="small" data-disable="metabase" data-room="Disable" data-room2="Enabling…">Disable<\/button> <button type="button" class="danger small" data-remove="metabase">Remove<\/button><\/td>/);
+  assert.match(html, /<td class="act" id="act-users-grafana"><a class="btn small" href="#observability\/queries\?user=grafana&amp;range=24h" title="the queries grafana sent in the last 24 hours">Queries<\/a> <button type="button" class="small" data-enable="grafana" data-room="Disable" data-room2="Enabling…">Enable<\/button> <button type="button" class="danger small" data-remove="grafana">Remove<\/button><\/td>/);
   assert.equal(popsOf(html).length, 0, "Enable asks nothing");
   const asking = renderUsers(list, { name: "metabase", verb: "disable" }, NOW_U);
   assert.equal(textOf(popOf(asking, "act-users-metabase")), "Disable metabase? It can't connect until you enable it again, with the same password. Its open sessions end at their next query. Disable metabase Cancel");
   assert.match(asking, /data-confirm-disable="metabase"/);
-  assert.match(asking, /<button type="button" class="small" data-room="Disable" aria-expanded="true" disabled>Disable<\/button>/, "held where it was while it asks");
+  assert.match(asking, /<button type="button" class="small" data-room="Disable" data-room2="Enabling…" aria-expanded="true" disabled>Disable<\/button>/, "held where it was while it asks");
   assert.ok(!/data-confirm-remove/.test(asking), "a Disable's question, not a Remove's");
 });
 
@@ -2094,7 +2098,7 @@ test("the app: the add form sends from only when only these addresses is chosen;
   run.answers.set("POST api/users", () => new Response(JSON.stringify({ error: failure.message, failure }), { status: 400 }));
   const input = { value: "looker" };
   await users.submit({ id: "add-user", elements: { name: input, role: { value: "" }, connects: { value: "only" }, from: { value: "192.0.2.0/33" } } });
-  assert.equal(textOf(app.view().action!), `✗ ${failure.message} fix ${failure.fix}`);
+  assert.equal(textOf(app.view().action!), `✗ ${failure.message} fix ${failure.fix} Dismiss`);
   assert.equal(onceHtml(app.view()), "");
   assert.equal(input.value, "looker", "refused: the name stays to fix");
 });
@@ -3097,7 +3101,7 @@ test("Tables: each added table's state, rows, last sync and its age, how long it
   assert.match(textOf(renderTables(SYNCED, { sizes: { failure: { code: "failed", message: "the samples cannot be read" } } })), /The synced tables' sizes could not be read: the samples cannot be read\./);
   assert.ok(!/own size is measured/.test(textOf(renderTables(NONE, { sizes: USAGE }))), "nothing added: no copies to measure");
   // a sync asked: its button says so, no second one
-  assert.match(renderTables(SYNCED, { sizes: USAGE, syncing: ["public.customers"] }), /<button type="button" class="small" data-room="Syncing…" disabled>Syncing…<\/button>/);
+  assert.match(renderTables(SYNCED, { sizes: USAGE, syncing: ["public.customers"] }), /<button type="button" class="small" data-sync-table="[^"]*" data-room="Syncing…" aria-busy="true" disabled>Syncing…<\/button>/);
 });
 
 test("Tables: Sync now is written disabled, its title why, while the state says mason sync of the table is refused — syncing, waiting, failed, read again — and enabled for a synced one, in the same room (issue 812)", () => {
@@ -3161,7 +3165,7 @@ test("Tables: what a sync did is said as mason sync says it, beside its Sync; a 
   run.asked.length = 0;
   assert.equal(await app.syncTable("public.events"), true);
   assert.deepEqual(run.asked, [`POST api/sync ${JSON.stringify({ tables: ["public.events"] })}`, "GET api/state"], "mason sync events; then the state again");
-  assert.match(app.view().tables!, /<button type="button" class="small" data-room="Syncing…" disabled>Syncing…<\/button>/, "Syncing… while it runs");
+  assert.match(app.view().tables!, /<button type="button" class="small" data-sync-table="[^"]*" data-room="Syncing…" aria-busy="true" disabled>Syncing…<\/button>/, "Syncing… while it runs");
   assert.match(textOf(app.view().tables!), /public\.events Syncing /, "and its State says so");
   assert.equal(popOf(app.view().tables!, "act-tables-public.events"), "", "nothing said beside it until it ends");
   await app.poll();
@@ -3189,7 +3193,7 @@ test("Tables: a page opened while a sync runs (a reload, another tab, mason sync
   const app = fn<[unknown], App>("createApp")(run.fetch) as App & { dismissSynced(): void };
   app.show("tables");
   await app.poll();
-  assert.match(app.view().tables!, /<button type="button" class="small" data-room="Syncing…" disabled>Syncing…<\/button>/, "a page opened mid-sync: Syncing…");
+  assert.match(app.view().tables!, /<button type="button" class="small" data-sync-table="[^"]*" data-room="Syncing…" aria-busy="true" disabled>Syncing…<\/button>/, "a page opened mid-sync: Syncing…");
   const answered = { at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", added: 3, updated: 0, deleted: 1, rows: 1202, ms: 9_000 }] };
   run.answers.set("GET api/state", answer(withSync("public.customers", { ...running, state: "synced", endedAt: "2026-10-27T09:05:31.000Z", answer: answered })));
   await app.poll();
@@ -3229,7 +3233,7 @@ test("Tables: Sync now of a table already syncing (another tab, mason sync) is r
   assert.deepEqual(run.asked, [`POST api/sync ${JSON.stringify({ tables: ["public.customers"] })}`, "GET api/state"], "refused, then the state read again: the row says the sync running");
   const said = popOf(app.view().tables!, "act-tables-public.customers");
   assert.equal(textOf(said), "✗ public.customers is already syncing (started 2 min ago). Its row shows when it ends. Dismiss", "in the page's words: no command named");
-  assert.match(app.view().tables!, /<button type="button" class="small" data-room="Syncing…" disabled>Syncing…<\/button>/);
+  assert.match(app.view().tables!, /<button type="button" class="small" data-sync-table="[^"]*" data-room="Syncing…" aria-busy="true" disabled>Syncing…<\/button>/);
 });
 
 test("Tables: while the page's Sync now of a table runs, its State says Syncing (amber), as Adding… does for an add; the others keep their own word", () => {
@@ -3285,7 +3289,7 @@ test("Tables: the search box narrows both lists and Failed only lists the failed
   run.fetch = async (p, init) => { if (p === "api/sync") await answered; return fetchNow(p, init); };
   const click = on.get("click")!({ target: { closest: () => ({ dataset: { syncTable: "public.customers" } }) } });
   await settle();
-  assert.match(el("tables").html, /<button type="button" class="small" data-room="Syncing…" disabled>Syncing…<\/button>/, "said while it runs");
+  assert.match(el("tables").html, /<button type="button" class="small" data-sync-table="[^"]*" data-room="Syncing…" aria-busy="true" disabled>Syncing…<\/button>/, "said while it runs");
   assert.match(textOf(el("tables").html), /public\.customers Syncing 100% /, "and its State says Syncing meanwhile");
   release();
   await click;
@@ -4294,7 +4298,7 @@ test("Tables and Users: the sections are a page head, the cards' part and a tool
   assert.doesNotMatch(tables, /tables-show/, "no Show select");
   assert.match(users, /<div class="page-head"><h2 id="users-h">Users<\/h2><p class="desc">Create and manage users that you can connect to tools and services\.<\/p><\/div>/, "the Users page's intro, in the owner's words");
   // the form is the page's own once the state is read (renderAddUser: none on a read-only page), in its place
-  assert.match(fn<[unknown], string>("renderAddUser")(CATALOG_STATE), /^<form id="add-user" class="formcard"[^>]*>[\s\S]*<button type="submit" class="primary">Add a user<\/button><p class="dim roles-line">[\s\S]*<\/p><\/form>$/);
+  assert.match(fn<[unknown], string>("renderAddUser")(CATALOG_STATE), /^<form id="add-user" class="formcard"[^>]*>[\s\S]*<button type="submit" id="add-user-submit" class="primary" data-room="Add a user" data-room2="Adding…">Add a user<\/button><p class="dim roles-line">[\s\S]*<\/p><\/form>$/);
   // the users first, right under the title (their read-only line is renderUsers' own); then the form, the password just
   // shown beside it, Connect: a card that appears moves nothing above it
   const order = ["users-h", "users", "add-box", "add-kinds", "add-user-box", "add-share-box", "action", "added", "users-connect"].map((id) => users.indexOf(`id="${id}"`));
@@ -4882,6 +4886,8 @@ test("Sync events: the page and mason logs --events say what the list leaves out
   assert.ok(desc.includes("The scheduled syncs that succeed are listed only when you tick Scheduled syncs."), `the page's description says it: ${desc}`);
   assert.match(html, /<label class="check" for="syncs-scheduled"><input type="checkbox" id="syncs-scheduled"> Scheduled syncs<\/label>/);
   assert.match(desc, /each sync you started/);
+  // the syncs running now are rows of the list too (issue 1011), and the intro says so (issue 1038)
+  assert.ok(desc.includes("Syncs that are still running are listed too, with how long they have run so far."), `the page's description says the running syncs are listed: ${desc}`);
   const help = commands.LOGS.usage.replace(/\s+/g, " ");
   assert.ok(help.includes(leaveOut!.replace(/\s+/g, " ")), "mason logs --help says the same sentence");
   assert.match(help, /each sync asked by hand \(mason sync, the page's Sync now\) and what it did/);
@@ -5351,7 +5357,7 @@ test("the buttons: every one has a visible label; a primary, a destructive one a
     }
   }
   assert.ok(htmls[1]!.includes('aria-label="Close"'), "the confirm's X is named Close");
-  assert.match(htmls[1]!, /<p class="confirm">Remove orders\?.*<\/p><p class="pop-actions"><button type="button" class="danger small" data-confirm-remove-table="public\.orders">Remove orders<\/button>/);
+  assert.match(htmls[1]!, /<p class="confirm">Remove orders\?.*<\/p><p class="pop-actions"><button type="button" class="danger small" data-confirm-remove-table="public\.orders" data-room="Remove orders" data-room2="Removing…">Remove orders<\/button>/);
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
   assert.match(css, /button\.small \{ height: var\(--control-sm\);/);
   assert.match(css, /--control-sm: 28px;/);
@@ -5466,8 +5472,8 @@ test("Add: the row says Adding… from the click, then waiting for its copy, the
   // asked, not yet answered: the row says so and its button is disabled
   let row = accountsRow(app.view().tables!);
   assert.match(textOf(row), /^.*public\.accounts Adding… .* Adding…/);
-  assert.match(row, /<button type="button" class="primary small" disabled>Adding…<\/button>/);
-  assert.ok(!/data-add-table/.test(row), "no second Add while the first is asked");
+  assert.match(row, /<button type="button" class="primary small" data-add-table="public\.accounts" data-room="Add" data-room2="Adding…" aria-busy="true" disabled>Adding…<\/button>/);
+  assert.equal(await app.addTable("public.accounts"), false, "no second Add while the first is asked");
   assert.equal(await app.addTable("public.accounts"), false, "a second click while asking does nothing");
   release();
   assert.equal(await adding, true);
@@ -5579,7 +5585,7 @@ test("Add: several tables in a row each show their own state; a refused add leav
   // refused: no Adding… stays
   run.answers.set("POST api/pick", answer({ error: "no", failure: { code: "refused", message: "no", next: [] } }, 409));
   assert.equal(await app.addTable("public.staging"), false);
-  assert.ok(!/Adding…/.test(app.view().tables!));
+  assert.ok(!/>Adding…</.test(app.view().tables!) && !/aria-busy/.test(app.view().tables!));
 });
 
 // ------------------------------------------------------------------ Connect: how a first-time user gets to a first statement
@@ -5977,8 +5983,8 @@ test("layout guard: a click moves no row and no column — a question, a form an
   // a user's Disable → Enable once disabled: one room, the longer, and no cell or row added
   for (const label of ["Disable", "Enable"]) assert.ok([...label].length <= [...ROOMS.disable!].length, `${label} fits Disable's room`);
   const rowB = (h: string) => /<td class="act" id="act-users-b">(.*?)<\/td>/s.exec(h)![1]!;
-  assert.match(rowB(renderUsers(users, null)), /^<a class="btn small"[^>]*>Queries<\/a> <button type="button" class="small" data-disable="b" data-room="Disable">Disable<\/button> /);
-  assert.match(rowB(renderUsers(disabledUsers, null)), /^<a class="btn small"[^>]*>Queries<\/a> <button type="button" class="small" data-enable="b" data-room="Disable">Enable<\/button> /);
+  assert.match(rowB(renderUsers(users, null)), /^<a class="btn small"[^>]*>Queries<\/a> <button type="button" class="small" data-disable="b" data-room="Disable" data-room2="Enabling…">Disable<\/button> /);
+  assert.match(rowB(renderUsers(disabledUsers, null)), /^<a class="btn small"[^>]*>Queries<\/a> <button type="button" class="small" data-enable="b" data-room="Disable" data-room2="Enabling…">Enable<\/button> /);
   assert.equal(cellsOf(renderUsers(disabledUsers, null)), cellsOf(renderUsers(users, null)), "disabling a user adds no cell");
   assert.equal(rowsOf(renderUsers(disabledUsers, null)).length, rowsOf(renderUsers(users, null)).length, "nor a row");
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
@@ -6357,7 +6363,7 @@ const TWO_ROLES = { body: { choices: [{ role: "sales", reads: "1 synced table: o
 const sharePane = (s: unknown, m: unknown, choices: unknown = ONE_ANSWER) => fn<[unknown, unknown, unknown], string>("renderSharePane")(s, m, choices);
 const shareCard = (s: unknown, m: unknown) => fn<[unknown, unknown, number], string>("renderShareCard")(s, m, SHARE_NOW);
 const shareOnce = (s: unknown, m: unknown) => fn<[unknown, unknown, number], Record<string, string>>("renderShareOnce")(s, m, SHARE_NOW);
-const PANE_WORDS = "For a tool in the cloud that can't reach this machine. Opens a public address with a login of its own, until you stop it.";
+const PANE_WORDS = "For a tool in the cloud that can't reach this machine. Opens a public address with a login of its own, until you stop it. Opening one can take up to 30 s.";
 
 test("Temporary cloud login: the add box's segments, its pane in each state, its one-time dialog once opened and its card in each — none, opening, open, open after a reload, ended, refused, served, read-only — as they WROTE them", () => {
   // the segments: New user and Temporary cloud login, the one chosen pressed
@@ -6367,27 +6373,29 @@ test("Temporary cloud login: the add box's segments, its pane in each state, its
   // the pane: two sentences, then Open a cloud login; a Role only where more than one is offered
   const none = sharePane(sharing([]), shareModel());
   assert.equal(textOf(none), `${PANE_WORDS} Open a cloud login`);
-  assert.match(none, /<button type="button" class="primary" data-share-open="">Open a cloud login<\/button>/, "enabled");
+  assert.match(none, /<button type="button" id="share-open" class="primary" data-share-open="" data-room="Open a cloud login" data-room2="Opening…">Open a cloud login<\/button>/, "enabled, in the room of Opening… too");
   assert.doesNotMatch(none + sharePane(sharing([]), shareModel(), ONE_ROLE), /<select/, "none or one role: no role to choose");
   const two = sharePane(sharing([]), shareModel(), TWO_ROLES);
   assert.match(two, /<label for="share-role">Role<\/label> <select id="share-role"><option value="sales" selected>sales: 1 synced table: orders \(default\)<\/option><option value="ops">ops: every synced table<\/option><\/select><\/span> <button[^>]*data-share-open/, "the roles beside the button, the file's default first chosen");
   assert.match(sharePane(sharing([]), shareModel({ role: "ops" }), TWO_ROLES), /<option value="ops" selected>/, "the role chosen stays chosen across a rewrite");
   const unread = sharePane(sharing([]), shareModel(), null);
   assert.equal(textOf(unread), `${PANE_WORDS} Open a cloud login Reading the roles…`);
-  assert.match(unread, /data-share-open="" disabled>Open a cloud login/, "no button before the roles are read");
+  assert.match(unread, /data-share-open="" data-room="Open a cloud login" data-room2="Opening…" disabled>Open a cloud login/, "no button before the roles are read");
   const rolesFailure = { code: "refused", message: "no role of mason/roles.yml can be shared: the rows of each depend on an attribute, and a share's login has no attributes" };
   const noRole = sharePane(sharing([]), shareModel(), { body: undefined, failure: rolesFailure });
   assert.ok(noRole.includes(fn<[unknown], string>("renderFailure")(rolesFailure)), "the roles refused: the run's Failure");
-  assert.match(noRole, /data-share-open="" disabled>/);
-  // one at a time: while one opens or is open the button is held, the pane's words the same
-  for (const [s, m] of [[sharing([]), shareModel({ phase: "opening" })], [sharing([listed]), shareModel({ phase: "open" })]] as const) {
-    const busy = sharePane(s, m);
-    assert.equal(textOf(busy), `${PANE_WORDS} Open a cloud login`);
-    assert.match(busy, /title="One is open: stop it to open another" disabled>Open a cloud login/);
-  }
-  // nothing before anything was asked
+  assert.match(noRole, /data-share-open=""[^>]* disabled>/);
+  // one at a time: while one opens the button says so (Opening…, busy), and while one is open it is held, the pane's
+  // words the same
+  const opening = sharePane(sharing([]), shareModel({ phase: "opening" }));
+  assert.equal(textOf(opening), `${PANE_WORDS} Opening…`);
+  assert.match(opening, /data-room="Open a cloud login" data-room2="Opening…" aria-busy="true" disabled>Opening…<\/button>/);
+  const held = sharePane(sharing([listed]), shareModel({ phase: "open" }));
+  assert.equal(textOf(held), `${PANE_WORDS} Open a cloud login`);
+  assert.match(held, /title="One is open: stop it to open another" disabled>Open a cloud login/);
+  // nothing before anything was asked, nor while it opens (its button says so): nothing under the box comes and goes
   assert.equal(shareCard(sharing([]), shareModel()), "");
-  assert.equal(textOf(shareCard(sharing([]), shareModel({ phase: "opening" }))), "Temporary cloud login Opening a temporary public address… This can take up to 30 s.");
+  assert.equal(shareCard(sharing([]), shareModel({ phase: "opening" })), "");
 
   // just opened: the one-time dialog's parts, titled Temporary cloud login — URL, Login and Password, what it reads, one line
   const opened = { url: SHARE_URL, user: "share_a1b2c3", password: PASSWORD, database: "shop", host: "relay.example", port: 41234, role: null, reads: "every synced table", openedAt: SHARE_AT };
@@ -6417,19 +6425,22 @@ test("Temporary cloud login: the add box's segments, its pane in each state, its
     assert.equal(textOf(card).replace(/ at .+? \(in /, " at HH:MM (in "), "Temporary cloud login Host relay.example Copy Port 41234 Copy Login share_a1b2c3 Public for 5 min : every synced table " +
       "The password was shown once, when it opened, and is not saved. For a new one, press Stop, then Open a cloud login. " +
       "Live until you stop it. A free one ends sooner, within about an hour, at HH:MM (in about 55 minutes). Then open a new one for a new address and password. It also ends within two minutes of closing this page. Stop");
-    assert.match(card, /<button type="button" id="share-stop" class="danger" data-share-stop="share_a1b2c3">Stop<\/button><\/div>$/, "Stop, where the focus goes once the dialog closes");
+    assert.match(card, /<button type="button" id="share-stop" class="danger" data-share-stop="share_a1b2c3" data-room="Stop" data-room2="Stopping…">Stop<\/button><\/div>$/, "Stop, where the focus goes once the dialog closes");
   }
   assert.match(textOf(shareCard(sharing([{ ...listed, endsAt: null }]), shareModel({ phase: "open", opened }))), /Live until you stop it\. It also ends within two minutes of closing this page\./, "one with no end: until stopped");
   assert.match(textOf(shareCard(sharing([{ ...listed, role: "sales", reads: "1 synced table: orders" }]), shareModel({ phase: "open" }))), /Public for 5 min , as the role sales: 1 synced table: orders/);
 
-  // ended and refused: said in the card's place
-  assert.equal(textOf(shareCard(sharing([]), shareModel({ phase: "ended", ended: { user: "share_a1b2c3", why: "its tunnel closed (ssh exited 255)" } }))),
-    "The temporary cloud login ended: its tunnel closed (ssh exited 255). Its address and password no longer work.");
+  // ended and refused: popovers, with Dismiss — how it ended beside the add box, a refusal beside Open a cloud login —
+  // so nothing under the box comes and goes (issue 1033)
+  const ended = shareCard(sharing([]), shareModel({ phase: "ended", ended: { user: "share_a1b2c3", why: "its tunnel closed (ssh exited 255)" } }));
+  assert.match(ended, /^<div class="pop said" data-anchor="add-box" role="status">/);
+  assert.equal(textOf(ended), "The temporary cloud login ended: its tunnel closed (ssh exited 255). Its address and password no longer work. Dismiss");
   assert.equal(textOf(shareCard(sharing([]), shareModel({ phase: "ended", ended: { user: "share_a1b2c3", why: "you stopped it on this page" } }))),
-    "The temporary cloud login ended: you stopped it on this page. Its address and password no longer work.");
+    "The temporary cloud login ended: you stopped it on this page. Its address and password no longer work. Dismiss");
   const failure = { code: "not_found", message: "ssh is not on this machine", fix: "install the OpenSSH client", next: [{ command: "mason doctor", what: "checks this machine" }] };
   const refused = shareCard(sharing([]), shareModel({ phase: "refused", failure }));
-  assert.equal(refused, fn<[unknown], string>("renderFailure")(failure), "a refusal is the CLI's Failure, rendered by renderFailure");
+  assert.match(refused, /^<div class="pop said" data-anchor="share-open" role="status">/, "a refusal beside Open a cloud login");
+  assert.ok(refused.includes(fn<[unknown], string>("renderFailure")(failure)), "the CLI's Failure, rendered by renderFailure");
 
   for (const m of [shareModel(), shareModel({ phase: "open", opened })]) {
     for (const s of [sharing([listed], { served: true }), sharing([listed], { pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" }), sharing([listed], { pageReadOnly: "x", pageReadOnlyAllow: ["users"] })]) {
@@ -6451,6 +6462,7 @@ test("Temporary cloud login over a fake run: Open a cloud login opens it confirm
   const refreshed: string[][] = [];
   const ctx = {
     ask: async (p: string, init?: { method?: string; body?: string }) => { asked.push([p, init?.method, init?.body === undefined ? undefined : JSON.parse(init.body)]); return answers[`${init?.method ?? "GET"} ${p}`]; },
+    send: async (_key: string, p: string, init?: { method?: string; body?: string }) => ctx.ask(p, init),
     read: (p: string) => p === "api/share/choices" ? TWO_ROLES : { body: state, failure: null }, refresh: async (ps: string[]) => { refreshed.push(ps); }, now: () => new Date(SHARE_NOW),
     timers: { setInterval: (f: () => void, ms: number) => { intervals.push({ fn: f, ms, cleared: false }); return intervals.length - 1; }, clearInterval: (i: number) => { intervals[i]!.cleared = true; } },
   };

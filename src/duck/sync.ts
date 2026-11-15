@@ -1049,8 +1049,15 @@ function storedType(c: SourceColumnInfo, scanned: string): string {
 interface Lane { readonly conn: DuckConnection; inFlight: boolean;
   /** the source's backend its long statement reads on, and its transaction's start (`noteBackend`): what a removal
    *  cancels on the source (`cutShort`), as DuckDB's interrupt does not reach a query that waits there */
-  backend?: SourceBackend | null }
+  backend?: SourceBackend | null;
+  /** a stop's cancel on the source was sent for this statement (`stop`): its failure is the stop's, never the read's */
+  cancelSent?: boolean }
 interface SourceBackend { pid: number; since: string }
+/** one cut or one stop whose reads are cancelled on the source (`cancelBackends`): what it is said as, and whether a
+ *  failed cancel was said already, so it is said once, never at every round */
+interface CancelEpisode { readonly what: string; failureSaid: boolean }
+/** how long one round of cancels on the source may take, its connect included (`cancelBackends`) */
+const CANCEL_DEADLINE_MS = 5_000;
 
 /** a rebuild waiting its turn (`enqueue`): a whole copy, or the one poll that catches a table up before it is kept
  *  current again */
@@ -1261,9 +1268,11 @@ export class Sync {
    *  until the rebuild or the poll ends, which drops what it left (`rebuild`) or kicks the pass that does */
   private readonly cutting = new Set<string>();
   private cutTimer: NodeJS.Timeout | null = null;
-  /** the cut's cancels on the source (`cancelBackends`): the round in flight, and when the last began */
+  /** the cancels on the source of a cut or a stop (`cancelOnSource`): the round in flight, when the last began, and the
+   *  cut's episode (a new one each time the cut's timer starts) */
   private cancelling: Promise<void> | null = null;
   private cancelledAt = 0;
+  private cutEpisode: CancelEpisode = { what: "a removed table's read", failureSaid: false };
   /** how many times each table was removed this run (`setTables`): a rebuild taken from the queue before a removal and
    *  started after it is cut short too, even when the table was added again meanwhile (`rebuild`) */
   private readonly removals = new Map<string, number>();
@@ -1827,8 +1836,11 @@ export class Sync {
     if (!rebuilding && this.writerPolling !== source) return;
     this.cutting.add(source);
     this.log(`${source}: its sync is stopped now, as it is no longer added`);
+    if (this.cutTimer === null) {
+      this.cutEpisode = { what: "a removed table's read", failureSaid: false };
+      this.cutTimer = setInterval(() => this.interruptCut(), 50);
+    }
     this.interruptCut();
-    this.cutTimer ??= setInterval(() => this.interruptCut(), 50);
   }
 
   /** the statements of every sync being cut short (`cutting`) interrupted, each on its own connection; the timer ends
@@ -1844,12 +1856,16 @@ export class Sync {
         if (lane.backend) backends.push(lane.backend);
       }
     }
-    // and on the source, one round at a time, at most every 200 ms: a cancel that lands between two statements of the
-    // read is lost, as an interrupt is
-    if (backends.length > 0 && this.cancelling === null && Date.now() - this.cancelledAt >= 200) {
-      this.cancelledAt = Date.now();
-      this.cancelling = this.cancelBackends(backends).finally(() => { this.cancelling = null; });
-    }
+    this.cancelOnSource(backends, this.cutEpisode);
+  }
+
+  /** the reads of these backends cancelled on the source (`cancelBackends`), one round at a time, at most every 200 ms:
+   *  a cancel that lands between two statements of the read is lost, as an interrupt is, so the caller asks again */
+  private cancelOnSource(backends: readonly SourceBackend[], episode: CancelEpisode): boolean {
+    if (backends.length === 0 || this.cancelling !== null || Date.now() - this.cancelledAt < 200) return false;
+    this.cancelledAt = Date.now();
+    this.cancelling = this.cancelBackends(backends, episode).finally(() => { this.cancelling = null; });
+    return true;
   }
 
   /** the tables the project adds now (its sources file): a new one is copied at the next pass unless its copy is already
@@ -2443,6 +2459,11 @@ export class Sync {
    * reads; `interruptible`) interrupted, rolled back and said as stopped, never failed (`mason
    * stop` waited for a 30 GB table's sort). DuckDB loses an interrupt that arrives before its statement has started
    * (measured: the statement ran to its end), so it is sent again every 50 ms until the pass has ended.
+   * A READ WAITING ON THE SOURCE IS CANCELLED THERE (issue 1037: a chunk, a catch-up or a poll waiting on a lock in the
+   * source never saw the interrupt, and the stop waited until the lock was released, which can be never): every lane
+   * still in flight 200 ms after the stop began has its noted backend's query cancelled (`cancelOnSource`, as a
+   * removal's cut does), again every 200 ms until it ends. A cancel that fails is said once, and the stop then waits
+   * for that query to end, as it did before.
    */
   async stop(): Promise<void> {
     this.stopped = true;
@@ -2454,15 +2475,30 @@ export class Sync {
     // a removed table's sync being cut short (`cutShort`) is now the stop's to interrupt, with everything else
     if (this.cutTimer !== null) { clearInterval(this.cutTimer); this.cutTimer = null; }
     // the stream, the pass and the rebuild end together: a batch waiting for the writer's turn behind a poll must not
-    // wait for that poll, so each connection's long statement is interrupted from the start
-    const interrupt = (): void => { for (const lane of [this.writerLane, this.rebuilderLane, this.generatedLane, ...this.copyLanes]) if (lane?.inFlight) lane.conn.interrupt(); };
+    // wait for that poll, so each connection's long statement is interrupted from the start; a read the interrupt has
+    // not ended within 200 ms is cancelled on the source too (one round at a time)
+    const episode: CancelEpisode = { what: "a read Mason was stopping", failureSaid: false };
+    this.cancelledAt = Math.max(this.cancelledAt, Date.now());
+    const interrupt = (): void => {
+      const reading: Lane[] = [];
+      for (const lane of [this.writerLane, this.rebuilderLane, this.generatedLane, ...this.copyLanes]) {
+        if (!lane?.inFlight) continue;
+        lane.conn.interrupt();
+        if (lane.backend) reading.push(lane);
+      }
+      // each statement a cancel is sent for fails as stopped (`interruptible`), never as a failed read
+      if (this.cancelOnSource(reading.map((l) => l.backend!), episode)) for (const l of reading) l.cancelSent = true;
+    };
     const again = setInterval(interrupt, 50);
     interrupt();
     try {
       // none of them rejects: each says its own failure
-      await Promise.all([this.stream?.stop(), this.running, this.rebuilding, this.kept.stop(), this.generated.stop(), this.checkingCompaction, this.cancelling]);
+      await Promise.all([this.stream?.stop(), this.running, this.rebuilding, this.kept.stop(), this.generated.stop(), this.checkingCompaction]);
       await this.writerTurn;
     } finally { clearInterval(again); }
+    // the round of cancels in flight, if any, ends before the stop does (bounded by `CANCEL_DEADLINE_MS`): no connection
+    // of Mason's is left open on the source
+    await this.cancelling;
     this.stream = null;
     // the last catalog rebuild ended, either way, before its connection closes: a failure of it is said by its caller
     await new Promise<void>((done) => { this.schemaBuild.then(done, done); });
@@ -3511,8 +3547,8 @@ export class Sync {
     if (this.stopped) throw new Stopping();
     lane.inFlight = true;
     try { return await f(); }
-    catch (e) { throw this.stopped && e instanceof Error && /^INTERRUPT Error/.test(e.message) ? new Stopping() : e; }
-    finally { lane.inFlight = false; lane.backend = null; }
+    catch (e) { throw this.stopped && e instanceof Error && (/^INTERRUPT Error/.test(e.message) || lane.cancelSent === true) ? new Stopping() : e; }
+    finally { lane.inFlight = false; lane.backend = null; lane.cancelSent = false; }
   }
 
   /** THE SOURCE'S BACKEND A LANE'S TRANSACTION READS ON, and that transaction's start (`now()`, pg_stat_activity's
@@ -3524,20 +3560,44 @@ export class Sync {
   }
 
   /**
-   * A REMOVED TABLE'S READS CANCELLED ON THE SOURCE (`cutShort`, issue 1034): DuckDB's interrupt stops a statement only
-   * between the rows it fetches, so a chunk whose query waits on the source (a lock, a slow scan before its first row)
-   * ran on, and its backend with it. Each one is cancelled by `pg_cancel_backend`, on a connection of its own, only while
-   * that backend is still in the transaction the lane noted (its `xact_start`): a backend the extension's pool handed to
-   * another read since is never touched. Mason's own query, cancelled — no row and no object on the source changes. Its
-   * failure is said: the read then ends with its query, and the cut waits for it.
+   * MASON'S READS CANCELLED ON THE SOURCE: a removed table's (`cutShort`, issue 1034), or every read still in flight at a
+   * stop (`stop`, issue 1037). DuckDB's interrupt stops a statement only between the rows it fetches, so a chunk, a poll
+   * or a catch-up whose query waits on the source (a lock, a slow scan before its first row) ran on, and its backend
+   * with it. Each one is cancelled by `pg_cancel_backend`, on a connection of its own, only while that backend is still
+   * in the transaction the lane noted (its `xact_start`): a backend the extension's pool handed to another read since is
+   * never touched. Mason's own query, cancelled — no row and no object on the source changes. The round is bounded
+   * (`CANCEL_DEADLINE_MS`, its connect included), so a source that does not answer never holds a stop longer.
+   * A cancel that fails (refused, the source's connection limit reached) is said once a cut or a stop, in the error's
+   * masked words (`errorText`), and changes nothing on the source: that backend reads on until its query ends. Its
+   * lane then ends when DuckDB's interrupt reaches the read (between two rows it fetches) or when the query ends,
+   * whichever is first, and the cut or the stop waits for its lanes, as before cancels were sent. Measured with every
+   * cancel failing (issue 1037): a chunk waiting on a lock held both the cut and the stop for as long as the lock was
+   * held. The cancel is asked again every 200 ms, so a source that refused once can still free it.
    */
-  private async cancelBackends(backends: readonly SourceBackend[]): Promise<void> {
+  private async cancelBackends(backends: readonly SourceBackend[], episode: CancelEpisode): Promise<void> {
+    let pg: PgConnection | null = null;
+    let over = false;
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => { over = true; (pg as PgConnection | null)?.close(); reject(new Error(`no answer from the database within ${CANCEL_DEADLINE_MS / 1000} s`)); }, CANCEL_DEADLINE_MS);
+    });
     try {
-      const pg = await PgConnection.connect(this.pgOptions());
-      try {
-        for (const b of backends) await pg.query(`SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE pid = ${b.pid} AND xact_start = ${pgLiteral(b.since)}::timestamptz`);
-      } finally { pg.close(); }
-    } catch (e) { this.log(`a removed table's read could not be cancelled on the database (it stops when its query ends): ${this.errorText(e)}`); }
+      await Promise.race([late, (async () => {
+        const c = await PgConnection.connect({ ...this.pgOptions(), connectTimeoutMs: CANCEL_DEADLINE_MS });
+        pg = c;
+        // connected only after the deadline: closed at once, nothing sent
+        if (over) { c.close(); return; }
+        for (const b of backends) await c.query(`SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE pid = ${b.pid} AND xact_start = ${pgLiteral(b.since)}::timestamptz`);
+      })()]);
+    } catch (e) {
+      if (!episode.failureSaid) {
+        episode.failureSaid = true;
+        this.log(`${episode.what} could not be cancelled on the database (said once; it ends when its query ends): ${this.errorText(e)}`);
+      }
+    } finally {
+      clearTimeout(timer);
+      (pg as PgConnection | null)?.close();
+    }
   }
 
   /** the source attached for one more user (a pass, a rebuild), on the writer's turn: ATTACHed by the first. A user

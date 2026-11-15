@@ -388,7 +388,7 @@ its card's content (re-measured whenever that width changes) under its title, in
 
 **Buttons say what they do**: every button has a visible label (no icon alone); a primary action is filled brick, a
 destructive one red-lettered and its confirm filled red; each has hover, focus and disabled states and is at least 28 px
-tall; a row's actions sit at its right. **Large data stays bounded**: a list of hundreds writes 100 rows and offers
+tall; a row's actions sit at its right. **A button that changes something shows that it is working** (`ctx.send`, src/web/app.js; `sendButton` and `failurePop`, src/web/shared.js): from the click until the answer, it says what it is doing (Removing…, Saving…, Opening…), held, in a room as wide as either label, so nothing beside it moves. A second press sends nothing. A failure is a popover beside it, with Dismiss and Escape, that covers no other control (on a phone where every place covers one, a bar at the window's bottom). A request has a deadline (`ASK_MS`, 60 s), so nothing stays busy. A page reads with `ctx.ask`, which refuses any method but GET. A new filter or page of a list keeps the last list shown, greyed, until it is read (`reading`). **Large data stays bounded**: a list of hundreds writes 100 rows and offers
 more, a by-client list shows its top 10 and one row for the rest, a long name is cut with its whole the tooltip, a
 statement is two lines at most outside its expanded row and 16 KiB in it. **Charts read at every range**: time ticks in
 minutes, hours or days by the span, at least 72 px apart; y labels compact in the commands' units, ticks on whole
