@@ -26,6 +26,7 @@ import { atTimeZoneOf } from "../lib/timezone.ts";
 import { gapMark } from "./gaps.ts";
 import { beat, cancelTable, isCancelled, slotOf } from "./cancel.ts";
 import type { CaseMapping } from "./collation.ts";
+import { arrayQuotes, recordQuotes } from "./text.ts";
 
 // ------------------------------------------------------------------------------------------------- case mapping
 //
@@ -486,7 +487,7 @@ export function byteaDecode(text: string, format: string): Buffer {
 /** A row's text as record_out writes it: `(1,"a b",,t)`, a column quoted when it is empty or holds a quote, a
  *  backslash, a parenthesis, a comma or white space (a quote and a backslash doubled inside), NULL as nothing. */
 export function recordText(cols: ReadonlyArray<string | null>): string {
-  return `(${cols.map((c) => c === null ? "" : c === "" || /["\\(),\s]/.test(c) ? `"${c.replace(/(["\\])/g, "$1$1")}"` : c).join(",")})`;
+  return `(${cols.map((c) => c === null ? "" : recordQuotes(c) ? `"${c.replace(/(["\\])/g, "$1$1")}"` : c).join(",")})`;
 }
 
 // ------------------------------------------------------------------------------------------------- arrays
@@ -497,7 +498,7 @@ export function arrayText(items: ReadonlyArray<string | null>, bool: boolean): s
   return `{${items.map((x) => {
     if (x === null) return "NULL";
     const t = bool ? (x === "true" ? "t" : x === "false" ? "f" : x) : x;
-    return t === "" || /^null$/i.test(t) || /[{},"\\\s]/.test(t) ? `"${t.replace(/["\\]/g, (c) => `\\${c}`)}"` : t;
+    return arrayQuotes(t) ? `"${t.replace(/["\\]/g, (c) => `\\${c}`)}"` : t;
   }).join(",")}}`;
 }
 

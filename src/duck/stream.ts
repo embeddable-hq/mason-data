@@ -49,6 +49,7 @@ import { errorText, messageOf } from "../lib/secret-mask.ts";
 import { updatedCountText } from "../lib/table-sync.ts";
 import { decode, type RelationColumn, type TupleValue } from "../cdc/pgoutput.ts";
 import { PgConnection, formatLsn, pgIdent, pgLiteral } from "../cdc/pg-wire.ts";
+import { isPgSpace, pgTrim } from "./text.ts";
 
 const lit = (s: string): string => `'${s.replace(/'/g, "''")}'`;
 
@@ -81,7 +82,7 @@ export function pgArrayTree(text: string): PgArray {
   if (s.startsWith("[") && eq > 0) s = s.slice(eq + 1);
   let i = 0;
   const fail = (): never => { throw new Error(`malformed array literal: ${text}`); };
-  const space = (): void => { while (i < s.length && /\s/.test(s[i]!)) i++; };
+  const space = (): void => { while (i < s.length && isPgSpace(s[i]!)) i++; };
   const list = (): PgArray => {
     if (s[i] !== "{") fail();
     i++;
@@ -101,7 +102,7 @@ export function pgArrayTree(text: string): PgArray {
       } else {
         let v = "";
         while (i < s.length && s[i] !== "," && s[i] !== "}") v += s[i++];
-        v = v.trim();
+        v = pgTrim(v);
         out.push(v.toUpperCase() === "NULL" ? null : v);
       }
       space();
