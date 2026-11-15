@@ -201,6 +201,49 @@ test("merge-head: the top session keeps its rules, and only a non-empty string a
   assert.equal(r.stderr.trimEnd(), "gh pr merge needs --match-head-commit, so a push after your read is not merged unread: gh pr merge 12 --auto --merge --match-head-commit $(gh pr view 12 --json headRefOid --jq .headRefOid), once that head has been read");
 });
 
+// the merge queue: a PR is put in it over REST (`PUT /pulls/<n>/merge-async`, merge_action=merge_queue), pinned by `sha`
+const QSHA = "36c6ea8f0123456789abcdef0123456789abcdef";
+test("merge-head: a REST merge or enqueue from a sub-agent is blocked, in every shape of method and field", () => {
+  for (const command of [
+    `gh api -X PUT repos/embeddable-hq/mason-data/pulls/12/merge-async -f merge_action=merge_queue -f sha=${QSHA}`,
+    `gh api --method PUT repos/{owner}/{repo}/pulls/12/merge-async -f sha=${QSHA}`,
+    `gh api --method=PUT /repos/o/r/pulls/12/merge-async --field sha=${QSHA} --raw-field merge_action=merge_queue`,
+    "gh api -XPUT repos/o/r/pulls/12/merge -f merge_method=squash",
+    "gh api repos/o/r/pulls/12/merge-async -f merge_action=merge_queue", // a field and no method: gh sends POST
+    "gh api repos/o/r/pulls/12/merge-async --input body.json",
+  ]) {
+    const r = run("merge-head", as(SUB, command));
+    assert.equal(r.code, 2, `blocked from a sub-agent: ${command}\n${r.stderr}`);
+    assert.match(r.stderr.trimEnd(), SUB_AGENT_SAYS, command);
+    assert.match(r.stderr, /report PR 12 and the head/);
+  }
+});
+
+test("merge-head: the top session's REST merge or enqueue needs the sha it read, and a read of either endpoint is free", () => {
+  for (const command of [
+    `gh api -X PUT repos/embeddable-hq/mason-data/pulls/12/merge-async -f merge_action=merge_queue -f sha=${QSHA}`,
+    `gh api --method PUT repos/{owner}/{repo}/pulls/12/merge-async -F sha=${QSHA} -F merge_action=merge_queue`,
+    `gh api -X PUT repos/o/r/pulls/12/merge-async --raw-field=sha=${QSHA}`,
+    `gh api -X PUT repos/o/r/pulls/12/merge -f merge_method=squash -fsha=${QSHA.slice(0, 12)}`,
+  ]) assertAllowed("merge-head", command);
+  const unpinned = run("merge-head", bash("gh api -X PUT repos/o/r/pulls/12/merge-async -f merge_action=merge_queue"));
+  assert.equal(unpinned.code, 2);
+  assert.equal(unpinned.stderr.trimEnd(), "a REST merge needs the head it was read at, so a push after your read is not merged unread: gh api -X PUT repos/o/r/pulls/12/merge-async -f merge_action=merge_queue -f sha=$(gh api repos/{owner}/{repo}/pulls/12 --jq .head.sha), once that head has been read");
+  for (const command of ["gh api -X PUT repos/o/r/pulls/12/merge -f sha=", "gh api -X PUT repos/o/r/pulls/12/merge -f sha=main", "gh api -X PUT repos/o/r/pulls/12/merge"]) {
+    assert.equal(run("merge-head", bash(command)).code, 2, `no commit pinned: ${command}`);
+  }
+  const input = run("merge-head", bash("gh api -X PUT repos/o/r/pulls/12/merge-async --input body.json"));
+  assert.equal(input.code, 2, "a body the hook cannot read fails closed");
+  assert.match(input.stderr, /--input cannot be checked/);
+  // reads: the merged check, an async merge's result, the PR; from anyone
+  for (const command of ["gh api repos/o/r/pulls/12/merge", "gh api repos/o/r/pulls/12/merge-async/0e1f2a3b-uuid", "gh api -X GET repos/o/r/pulls/12/merge",
+    "gh api repos/o/r/pulls/12 --jq .head.sha", `node scripts/ci-wait.ts 12 570 --queued ${QSHA}`]) {
+    assertAllowed("merge-head", command);
+    const r = run("merge-head", as(SUB, command));
+    assert.deepEqual([r.code, r.stderr], [0, ""], `a read from a sub-agent: ${command}`);
+  }
+});
+
 // ------------------------------------------------------------------ no re-run of an unchanged tree
 
 test("no-rerun: gh run rerun is blocked, with or without --failed or --job", () => {
@@ -419,6 +462,11 @@ test("wake-up: a queued merge or a message to a lead with no background wait aft
   assert.match(stop(t, [assistant(SEND), assistant(WAIT), notification("t2")]).stdout, WARNS);
   // a foreground Bash is no wait
   assert.match(stop(t, [assistant(MERGE), assistant(use("t3", "Bash", { command: "sleep 1" }))]).stdout, WARNS);
+  // a PR put in the merge queue over REST merges later too
+  const enqueue = use("t1", "Bash", { command: "gh api -X PUT repos/o/r/pulls/12/merge-async -f merge_action=merge_queue -f sha=36c6ea8f" });
+  assert.match(stop(t, [assistant(enqueue)]).stdout, /a merge is queued/);
+  assert.equal(stop(t, [assistant(enqueue), assistant(use("t2", "Bash", { command: "node scripts/ci-wait.ts 12 570 --queued 36c6ea8f", run_in_background: true }))]).stdout, "", "its wait in the background");
+  assert.equal(stop(t, [assistant(use("t1", "Bash", { command: "gh api repos/o/r/pulls/12/merge-async/0e1f2a3b" }))]).stdout, "", "reading a request's result queues nothing");
 });
 
 test("wake-up: a background wait still running after the merge or the message, or one Claude Code lists, is silent", (t) => {

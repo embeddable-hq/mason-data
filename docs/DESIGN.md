@@ -3085,6 +3085,31 @@ docs-only, since a job skipped for a failed need reports success on a required c
 tests that read a doc (`DOCS_TESTS`), and `tests/ci-shards.test.ts` holds that list to every unit test whose code reads
 one, simulates the workflow's jobs and gates in each mode, and runs `changes` over real merges.
 
+### The merge queue (the owner, 2026-11-15)
+
+**Decision: a PR merges through GitHub's merge queue**, so CI runs on main as it will be once the PR lands, not on main
+as it stood at the PR's last push. The owner turns the queue on in the `main` ruleset.
+
+- **CI on a merge group.** A queue waits for the required checks on the `merge_group` event, so `ci.yml` runs on it.
+  Every job runs there as on a PR, since no `if` reads the event. The four required checks report on the group's
+  commit by the same names. A merge group's change is `base_sha..head_sha`, which holds every PR ahead of this one in
+  the group. `changes` reads that range, fetching the base by its SHA when the checkout lacks it, so a docs-only group
+  takes the docs path as its PR did.
+- **Putting a PR in the queue over REST.** A cloud session reaches GitHub's REST API but not its GraphQL API. So
+  `gh pr merge` (GraphQL) and the queue's GraphQL mutation are out of reach. `PUT /pulls/{n}/merge` "does not support
+  ... merging with a merge queue". `PUT /pulls/{n}/merge-async` with `merge_action: merge_queue` adds the PR to the
+  queue, and its `sha` pins the request to the reviewed head: "if the PR is pushed in between the merge being requested
+  and being executed, the merge will be cancelled". Its result, `GET /pulls/{n}/merge-async/{uuid}`, is `enqueued` once
+  the PR is in the queue, which "does not mean the pull request has merged". No REST endpoint enables auto-merge. Sources:
+  [Merge a pull request asynchronously](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request-asynchronously),
+  [Merge a pull request](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request) and
+  [Managing a merge queue](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue).
+- **What the docs do not say.** They do not say that a push to a PR already in the queue takes it out of the queue. So
+  `ci-wait.ts --queued <sha>` reads the PR's head on every pass, and says `moved` when it is not `<sha>`. They name the
+  group's branch only by its prefix, `gh-readonly-queue/<base>`. The wait finds a PR's group by
+  `gh-readonly-queue/<base>/pr-<n>`, then `-` or nothing. No REST endpoint takes a PR out of the queue: that is done
+  on the PR's page.
+
 ### Release lines: patch the previous line, breaking changes on a new line (the owner, 2026-11-14)
 
 **Why.** A host that runs Mason for others pins each project to a release line. Before 1.0 a line is `0.<minor>.x`,

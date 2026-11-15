@@ -28,8 +28,8 @@ const GREEN = all("success");
  * last repeated; a step with `hang` never returns) and no pause between passes; returns its output, exit code, time and
  * the stub's call log, each call with the time it started. The stub is a bash script, never a Node one: Node's start
  * under load pushed a call past the deadline the test holds (issue 405). */
-type Waited = { out: string; err: string; status: number | null; ms: number; first: string; pulls: string[]; checks: string[]; starts: number[] };
-function runWait(cmd: string, scenario: { pull: Step[]; runs: Step[] }, bash = true): Waited {
+type Waited = { out: string; err: string; status: number | null; ms: number; first: string; pulls: string[]; checks: string[]; groups: string[]; starts: number[] };
+function runWait(cmd: string, scenario: { pull: Step[]; runs: Step[]; groups?: Step[] }, bash = true): Waited {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-wait-"));
   try {
     for (const [kind, steps] of Object.entries(scenario)) {
@@ -46,6 +46,7 @@ d=${JSON.stringify(dir)}
 case "$1 $2" in
   "api repos/{owner}/{repo}/pulls/"*) kind=pull ;;
   "api repos/{owner}/{repo}/commits/"*"/check-runs"*) kind=runs ;;
+  "api repos/{owner}/{repo}/actions/runs?event=merge_group"*) kind=groups ;;
   *) kind=other ;;
 esac
 if [ -n "\${EPOCHREALTIME:-}" ]; then t=\${EPOCHREALTIME/[.,]/}; t=\${t:0:13}; else t=$(perl -MTime::HiRes=time -e 'printf "%d", time()*1000'); fi
@@ -65,7 +66,8 @@ exit "$(cat "$d/$kind.$n.rc")"
     const calls = fs.readFileSync(path.join(dir, "calls.log"), "utf8").split("\n").filter(Boolean).map((c) => c.split(" "));
     const line = (c: string[]) => [c[0], ...c.slice(2)].join(" ");
     return { out: r.stdout, err: r.stderr, status: r.status, ms, first: r.stdout.split("\n")[0]!, starts: calls.map((c) => Number(c[1])),
-      pulls: calls.filter((c) => c[0] === "pull").map(line), checks: calls.filter((c) => c[0] !== "pull").map(line) };
+      pulls: calls.filter((c) => c[0] === "pull").map(line), checks: calls.filter((c) => c[0] === "runs" || c[0] === "other").map(line),
+      groups: calls.filter((c) => c[0] === "groups").map(line) };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -142,6 +144,79 @@ test("ci-wait: reads the PR and its head's required checks through REST alone, a
   assert.equal(w.status, 4, w.out);
 });
 
+/** `GET /pulls/<n>` of a PR in the merge queue, or merged, or closed: the fields --queued reads. */
+const queuedPull = (o: { sha?: string; merged?: boolean; state?: string; mergeable?: boolean | null; base?: string } = {}): Step => ({ out: JSON.stringify({
+  number: 900, state: o.state ?? "open", merged: o.merged ?? false, mergeable: o.mergeable === undefined ? true : o.mergeable, mergeable_state: "clean",
+  head: { sha: o.sha ?? SHA }, base: { ref: o.base ?? "main" } }), rc: 0 });
+const GROUP_SHA = "fedcba9876543210fedcba9876543210fedcba98";
+type GroupRun = { id: number; branch: string; sha?: string; path?: string; status?: string; conclusion?: string | null };
+/** `GET /actions/runs?event=merge_group`'s answer. */
+const groupRuns = (...rs: GroupRun[]): Step => ({ out: JSON.stringify({ total_count: rs.length, workflow_runs: rs.map((r) => ({
+  id: r.id, head_branch: r.branch, head_sha: r.sha ?? GROUP_SHA, path: r.path ?? ".github/workflows/ci.yml", event: "merge_group",
+  status: r.status ?? "in_progress", conclusion: r.conclusion ?? null, html_url: `https://github.com/o/r/actions/runs/${r.id}` })) }), rc: 0 });
+const OURS = `gh-readonly-queue/main/pr-900-${"a".repeat(40)}`;
+
+test("ci-wait --queued: a PR in the merge queue waits for its merge at the head it was queued at, and its group's red check is failed", () => {
+  const cmd = `node ${ROOT}/scripts/ci-wait.ts 900 540 --queued ${SHA}`;
+  // merged at the queued head: merged, exit 0, in one read; the group is never read
+  let w = runWait(cmd, { pull: [queuedPull({ merged: true, state: "closed", mergeable: null })], runs: [GREEN], groups: [groupRuns()] });
+  assert.match(w.first, new RegExp(`^PR 900: merged at ${SHA}$`), w.out);
+  assert.equal(w.status, 0);
+  assert.deepEqual([w.pulls.length, w.checks.length, w.groups.length], [1, 0, 0]);
+  assert.match(w.out, /\npull \(exit 0\): mergeable null, mergeable_state clean, merged, queued at 0123/);
+  // queued, the group not built, then its checks running, then green (a wait: GitHub merges), then merged
+  w = runWait(cmd, {
+    pull: [queuedPull(), queuedPull(), queuedPull(), queuedPull({ merged: true, state: "closed" })],
+    groups: [groupRuns(), groupRuns({ id: 5, branch: OURS }), groupRuns({ id: 5, branch: OURS, status: "completed", conclusion: "success" })],
+    runs: [runs(["checks", "in_progress", null]), GREEN] });
+  assert.equal(w.status, 0, w.out);
+  assert.equal(w.pulls.length, 4, `four passes: no group, running, green, merged: ${w.out}`);
+  assert.deepEqual(w.groups, Array(3).fill("groups api repos/{owner}/{repo}/actions/runs?event=merge_group&per_page=100"), "the group is found by REST");
+  assert.deepEqual(w.checks, Array(2).fill(`runs api repos/{owner}/{repo}/commits/${GROUP_SHA}/check-runs?filter=latest&per_page=100`), "the group's commit's checks, never the PR head's");
+  // the group's required check red: failed, exit 3, its branch and run printed
+  w = runWait(cmd, { pull: [queuedPull()], groups: [groupRuns({ id: 5, branch: OURS, status: "completed", conclusion: "failure" })], runs: [all("success", ["integration (rest)", "completed", "failure", 999])] });
+  assert.match(w.first, /^PR 900: failed at /, w.out);
+  assert.equal(w.status, 3);
+  assert.match(w.out, new RegExp(`\\nmerge group ${OURS} at ${GROUP_SHA}: CI completed failure https://github\\.com/o/r/actions/runs/5\\ncheck-runs \\(exit 0\\):\\n`));
+  // the newest run of THIS PR's group decides: an older failed one, another PR's, another base's and another workflow's are not it
+  w = runWait(cmd, { pull: [queuedPull(), queuedPull({ merged: true, state: "closed" })],
+    groups: [groupRuns(
+      { id: 9, branch: OURS, sha: GROUP_SHA }, { id: 3, branch: OURS, sha: "1".repeat(40), status: "completed", conclusion: "failure" },
+      { id: 12, branch: `gh-readonly-queue/main/pr-9000-${"b".repeat(40)}`, sha: "2".repeat(40) }, { id: 13, branch: "gh-readonly-queue/release/0.20/pr-900", sha: "3".repeat(40) },
+      { id: 14, branch: OURS, sha: "4".repeat(40), path: ".github/workflows/board.yml" })],
+    runs: [runs(["checks", "in_progress", null])] });
+  assert.equal(w.status, 0, w.out);
+  assert.match(w.checks[0] ?? "", new RegExp(`commits/${GROUP_SHA}/`), "the newest run of this PR's group in ci.yml, over an older one and others'");
+  // a head that moved after the read: moved, exit 7, whether it merged or not
+  for (const p of [queuedPull({ sha: "5".repeat(40) }), queuedPull({ sha: "5".repeat(40), merged: true, state: "closed" })]) {
+    w = runWait(cmd, { pull: [p], groups: [groupRuns()], runs: [GREEN] });
+    assert.match(w.first, new RegExp(`^PR 900: moved at 5{40}$`), w.out);
+    assert.equal(w.status, 7);
+    assert.equal(w.groups.length, 0);
+  }
+  // closed unmerged: closed, 6; a conflict: conflict, 4
+  w = runWait(cmd, { pull: [queuedPull({ state: "closed" })], groups: [groupRuns()], runs: [GREEN] });
+  assert.equal(w.status, 6, w.out);
+  assert.match(w.first, /^PR 900: closed at /);
+  w = runWait(cmd, { pull: [queuedPull({ mergeable: false })], groups: [groupRuns()], runs: [GREEN] });
+  assert.equal(w.status, 4, w.out);
+  // a read that cannot tell is a wait, never a verdict: the PR's merged or base missing, the runs unread or malformed
+  for (const bad of [{ out: JSON.stringify({ head: { sha: SHA }, mergeable: true, base: { ref: "main" }, state: "open" }), rc: 0 }, { out: JSON.stringify({ head: { sha: SHA }, mergeable: true, merged: false, state: "open" }), rc: 0 }]) {
+    w = runWait(cmd, { pull: [bad, queuedPull({ merged: true, state: "closed" })], groups: [groupRuns({ id: 5, branch: OURS })], runs: [all("failure")] });
+    assert.equal(w.status, 0, `${bad.out}: ${w.out}`);
+    assert.equal(w.groups.length, 0, "no group read without the PR's base and state");
+  }
+  for (const bad of [{ out: "gh: HTTP 502", rc: 1 }, { out: "{\"workflow_runs\": [{\"id\": \"x\"}]}", rc: 0 }, { out: "<html>", rc: 0 }]) {
+    w = runWait(cmd, { pull: [queuedPull(), queuedPull({ merged: true, state: "closed" })], groups: [bad], runs: [all("failure")] });
+    assert.equal(w.status, 0, `${bad.out}: ${w.out}`);
+    assert.equal(w.checks.length, 0, `${bad.out}: no check read without the group`);
+  }
+  // pending for ever: exit 8 at the deadline, the group's state printed
+  w = runWait(`900 2 --queued ${SHA}`, { pull: [queuedPull()], groups: [groupRuns()], runs: [GREEN] }, false);
+  assert.equal(w.status, 8, w.out + w.err);
+  assert.match(w.out, /^PR 900: pending at 0123[^\n]*\npull \(exit 0\): mergeable true, mergeable_state clean, open, queued at 0123[^\n]*\nmerge group: none yet for gh-readonly-queue\/main\/pr-900 /);
+});
+
 test("ci-wait: its required checks are the four ci.yml names", () => {
   const src = fs.readFileSync(CI_WAIT_SCRIPT, "utf8");
   const list = /^export const REQUIRED = (\[[^\]]*\]) as const;$/m.exec(src)?.[1];
@@ -170,17 +245,18 @@ test("ci-wait: bounded, a deadline no call starts after, a gh that never returns
   assert.match(w.first, /^PR 900: pending at /);
   assert.match(w.out, /\npull \(exit 0\): [^\n]*\ncheck-runs \(exit 137\): \(gh api repos\/\{owner\}\/\{repo\}\/commits\/[^\n]* killed after \d+ s, past its bound\)\n$/, "its three parts, the kill said");
   // usage: exit 2, one line naming the cap, gh never called
-  for (const args of ["", "abc 10", "900 0", "900 -5", "900 x", "900 571", "900 10 extra"]) {
+  for (const args of ["", "abc 10", "900 0", "900 -5", "900 x", "900 571", "900 10 extra", "900 10 --queued", "900 10 --queued abc123",
+    `900 10 --queued ${SHA} extra`, `900 10 --merged ${SHA}`, `900 0 --queued ${SHA}`]) {
     w = runWait(args, { pull: [pull(true, "clean")], runs: [GREEN] }, false);
     assert.equal(w.status, 2, `"${args}": ${w.err}`);
-    assert.match(w.err, /^usage: node scripts\/ci-wait\.ts <pr> <seconds>: [^\n]*from 1 to 570[^\n]*\n$/, `"${args}": one usage line naming the cap`);
+    assert.match(w.err, /^usage: node scripts\/ci-wait\.ts <pr> <seconds> \[--queued <sha>\]: [^\n]*from 1 to 570[^\n]*\n$/, `"${args}": one usage line naming the cap`);
     assert.equal(w.pulls.length + w.checks.length, 0, `"${args}": gh is never called`);
   }
   // its verdicts' exit codes are its own, never Node's 1 (an uncaught error), and the cap fits the Bash tool's bound
   const src = fs.readFileSync(CI_WAIT_SCRIPT, "utf8");
   const verdicts = /const VERDICT = (\{[^}]*\})/.exec(src)?.[1];
   assert.ok(verdicts, "VERDICT is one object");
-  assert.deepEqual(new Function(`return (${verdicts})`)(), { green: 0, failed: 3, conflict: 4, pending: 8 });
+  assert.deepEqual(new Function(`return (${verdicts})`)(), { green: 0, merged: 0, failed: 3, conflict: 4, closed: 6, moved: 7, pending: 8 });
   assert.match(src, /^export const MAX_SECONDS = 570;$/m);
   assert.ok(570 + 2 * 1 + 10 < 600, "a chunk at the cap, its last call's grace and Node's start end inside 600000 ms");
 });

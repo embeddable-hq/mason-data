@@ -141,9 +141,12 @@ got right; a red CI. Everything else is a note in the review, never a fix round 
   by name in `src/duck/gaps.ts` (docs/DESIGN.md "When a numeric is right").
 
 **Who merges what.**
-- The coordinator merges once nothing blocking is open, CI is green at the head, and it has read the whole diff. It
-  pins the merge to that head (`gh pr merge <n> --squash --delete-branch --match-head-commit <sha>`) and confirms it
-  landed.
+- The coordinator merges once nothing blocking is open, CI is green at the head, and it has read the whole diff. A PR
+  merges through the merge queue, which runs CI again on main as it will be. The coordinator puts the PR in the queue,
+  pinned to that head, over REST:
+  `gh api -X PUT repos/{owner}/{repo}/pulls/<n>/merge-async -f merge_action=merge_queue -f sha=<sha>`. Then it waits
+  with `node scripts/ci-wait.ts <n> 570 --queued <sha>` until the PR has merged at that head (docs/DESIGN.md "The merge
+  queue").
 - An implementer or a reviewer never merges (`scripts/hooks/merge-head.ts`).
 - A release, or a change to this process, merges on the owner's word.
 - The coordinator writes no change itself, however small: not a wording, a conflict, a stale test or a workflow. An
@@ -181,7 +184,9 @@ a sentence, with what it would have caught.
 - **Never end a turn while you wait on something with no background job to wake you.** `scripts/hooks/wake-up.ts`
   warns. Agents run in the background and wake the coordinator when they end.
 - **Wait on CI with `node scripts/ci-wait.ts <pr> <seconds>` in the background**, never `gh pr checks --watch`. Its exit
-  code is the verdict: 0 green, 3 failed, 4 conflict, 8 still pending. One call waits at most 570 s.
+  code is the verdict: 0 green, 3 failed, 4 conflict, 8 still pending. One call waits at most 570 s. With
+  `--queued <sha>` it waits on a PR in the merge queue: 0 merged at `<sha>`, 3 its merge group failed, 4 conflict,
+  6 closed, 7 the head moved, 8 still pending.
 
 ## Local gates
 

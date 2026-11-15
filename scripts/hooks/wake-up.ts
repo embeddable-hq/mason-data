@@ -2,7 +2,8 @@
 /**
  * Stop hook: a coordinator leaves a wake-up for what it waits on (CLAUDE.md "Waiting"). It reads the CURRENT turn of
  * the session's transcript (JSONL), the tool uses after
- * the last prompt a person typed: when the last merge queued (`gh pr merge … --auto`) or message sent to another
+ * the last prompt a person typed: when the last merge queued (`gh pr merge … --auto`, or a PR put in the merge queue by
+ * `PUT …/pulls/<n>/merge-async`) or message sent to another
  * session (`mcp__ccd_session_mgmt__send_message`) has no background job started after it that is still running, it
  * WARNS. A SendMessage to a sub-agent is no trigger: a sub-agent's end wakes the session. A background job is a Bash
  * call with run_in_background or a Monitor; it is still running until a `<task-notification>` names its tool use.
@@ -13,7 +14,7 @@
  * warning hook must never fail a stop.
  */
 import * as fs from "node:fs";
-import { readInput } from "./shell.ts";
+import { readInput, restMerge, simpleCommands } from "./shell.ts";
 
 interface ToolUse { id: string; name: string; input: Record<string, unknown>; line: number }
 
@@ -64,13 +65,15 @@ function toolUses(lines: string[]): ToolUse[] {
 /** A message to another session; another connector's `…__send_message` (an email) is no lead at work. */
 const SESSION_SEND = "mcp__ccd_session_mgmt__send_message";
 const QUEUED_MERGE = /\bgh\s+pr\s+merge\b[^;&|\n]*--auto\b/;
+/** A merge that lands later: `gh pr merge --auto`, or a PR put in the merge queue (`PUT …/pulls/<n>/merge-async`). */
+const queuesMerge = (command: string): boolean => QUEUED_MERGE.test(command) || simpleCommands(command).some(({ argv }) => restMerge(argv)?.endpoint === "merge-async");
 
 /** What the session waits on with nothing to wake it, or undefined. */
 function unwatched(lines: string[]): string | undefined {
   const uses = toolUses(lines);
   let trigger: { use: ToolUse; what: string } | undefined;
   for (const use of uses) {
-    if (use.name === "Bash" && typeof use.input["command"] === "string" && QUEUED_MERGE.test(use.input["command"])) {
+    if (use.name === "Bash" && typeof use.input["command"] === "string" && queuesMerge(use.input["command"])) {
       trigger = { use, what: "a merge is queued" };
     } else if (use.name === SESSION_SEND) {
       trigger = { use, what: "a lead is working" };

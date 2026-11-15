@@ -43,13 +43,27 @@ rest). CLAUDE.md "How work is done here" is the rule, with what blocks and who m
    `POST /repos/{o}/{r}/pulls/{n}/ccr/convert_to_draft`). The implementer comes back in one push and marks the PR
    ready again with the fix. A fresh reviewer re-checks the fix's own diff, once. If something blocking is
    still open after that, ask the owner.
-5. **Merge** once nothing blocking is open, CI is green at the head, and you have read the whole diff, pinned to that
-   head: `gh pr merge <n> --squash --delete-branch --match-head-commit <sha>`, or the GitHub tool's merge with
-   `expectedHeadSha` set to that head, never without it (no hook checks that route). Then confirm it merged.
-   A merge through Bash starts `scripts/worktrees-sweep.ts` in the background (its log `.claude/worktrees-sweep.log`), which removes the worktrees whose work is done and says why it kept each other; after a merge by the GitHub tool, run it by hand.
+5. **Merge through the merge queue** once nothing blocking is open, CI is green at the head (`ci-wait.ts` exit 0), and
+   you have read the whole diff. The queue runs CI again on main as it will be, and merges the PR when it passes.
+   - Put the PR in the queue, pinned to the head you read, over REST (a cloud session reaches no GraphQL):
+     `gh api -X PUT repos/{owner}/{repo}/pulls/<n>/merge-async -f merge_action=merge_queue -f sha=<sha>`.
+     `scripts/hooks/merge-head.ts` refuses it without `sha`. GitHub answers `202` with a `uuid`, or `200` when the PR is
+     already queued or merged. `gh api repos/{owner}/{repo}/pulls/<n>/merge-async/<uuid>` reads the request's result.
+     `enqueued` means the PR is in the queue, not that it merged. `failed` says why in its message.
+   - Then leave `node scripts/ci-wait.ts <n> 570 --queued <sha>` in the background, until it ends with a verdict. 0 is
+     merged at `<sha>`. 3 is a failed merge group: read its run. GitHub takes the PR out of the queue, unless a PR
+     ahead of it caused the failure, and then it groups the PR again. 7 is a head that moved after your read: take the
+     PR out of the queue on its page, and read the new head. 4 and 6 are a conflict and a closed PR.
+   - Never use the GitHub tool's merge, `PUT …/pulls/<n>/merge`, or `gh pr merge` while the queue is on. The first two
+     do not merge through a queue, and the last needs GraphQL. The queue's merge method (squash) and the deletion of
+     the merged branch are the repository's settings.
+   A queued wait that ends merged in the foreground starts `scripts/worktrees-sweep.ts` in the background (its log
+   `.claude/worktrees-sweep.log`). It removes the worktrees whose work is done, and says why it kept each other. After
+   a merge seen any other way, such as the wait run in the background, run the sweep by hand.
 
 **What CI requires.** A ruleset on `main` requires `checks`, `image`, `integration (oracle)` and `integration (rest)` on
-a PR, and takes changes through a PR only.
+a PR and on its merge group, and takes changes through a PR and the merge queue only. `ci.yml` runs on `merge_group`,
+so the four checks report on the group's commit by the same names.
 
 **A release** is `release-notes/v<version>.md` merged, with `cli/package.json` at that version. It merges on the owner's
 word. The merge itself tags, publishes the image and the CLI, and creates the GitHub release
@@ -82,7 +96,8 @@ A release-notes PR's branch is `notes/v<version>`, never under `release/`, which
 ## Waiting
 
 Agents run in the background and wake you when they finish. For CI, leave one background
-`node scripts/ci-wait.ts <pr> <seconds>` (CLAUDE.md "Waiting"), never piped (its exit code is the verdict), or subscribe to the PR's
+`node scripts/ci-wait.ts <pr> <seconds>` (CLAUDE.md "Waiting"), and for a PR in the merge queue
+`node scripts/ci-wait.ts <pr> <seconds> --queued <sha>`, never piped (its exit code is the verdict), or subscribe to the PR's
 activity where the session can. Never end a turn while waiting on something with no background job or subscription
 that will wake you.
 
