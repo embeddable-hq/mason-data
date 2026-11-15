@@ -200,10 +200,24 @@ paths:
   with a unique index the file would take (`AddedTable.entryAt`, `KeyNotHeld`). A polled table's primary key dropped is
   said the same way. **An index's key is its key columns alone, never its INCLUDE columns** (`indexKeyColumnsFrom`,
   read by `TABLES_SQL`'s primary key and unique indexes and by the check; the review of PR 1057: `PRIMARY KEY (id)
-  INCLUDE (v)` was the key [id, v], and the check refused it for ever as v may be NULL). NOT CHECKED: the stream
-  applies a replicated table's changes by its primary key with no such check, so a primary key dropped under
-  replication still lets a duplicate's INSERT replace a synced row. DETECTOR: `tests/integration/duck-poll.itest.ts` "a
-  key: whose unique index is dropped" and "never holds an index's INCLUDE columns", `tests/key-held.test.ts`.
+  INCLUDE (v)` was the key [id, v], and the check refused it for ever as v may be NULL). DETECTOR:
+  `tests/integration/duck-poll.itest.ts` "a key: whose unique index is dropped" and "never holds an index's INCLUDE
+  columns", `tests/key-held.test.ts`.
+- **The stream asks for a table's key before its first change after each of its relation messages** (`keyed`,
+  src/duck/stream.ts; issue 1062: with the primary key dropped, a duplicate's INSERT replaced the synced row it shared a
+  key with, under every replica identity and in the DDL's own transaction). Postgres sends one after any change of the
+  table's definition, before its next change. The message shows the key held when its identity is the default or
+  `USING INDEX` and its flagged columns are all the key's (`keyShown`), with no read. Else (`FULL`, the key gone) the
+  same `keyHeldSql` is asked on a connection of its own (`streamKeyHeld`), never the writer's turn or the attachment,
+  and never per batch or on a timer. A key not held refuses THAT table as a missing column does (`refuseKey`): out of
+  the stream, marked behind before anything past it is acknowledged, its synced data serving as it was, said in the
+  log, a `stream_failed` event and its error, with the way out (restore the primary key, or poll it by a unique index;
+  never `key:` under replication). Its catch-up asks for the key in its own snapshot every `KEY_RETRY_MS`, never a
+  failure's growing back-off, and reads no row until it holds. A read that fails ends the stream, nothing past it
+  acknowledged (fail closed). NOT COVERED: under `FULL` or an identity over other columns, a key dropped and restored
+  with a duplicate written and gone between, all before the stream decodes them (docs/DESIGN.md "Logical
+  replication"). DETECTOR: `tests/integration/duck-stream.itest.ts` "a primary key dropped on the database under the
+  stream", `tests/duck-stream.test.ts`, `tests/key-held.test.ts`.
 - **How a copy is kept current is derived ONCE, by the sync** (`Sync.keptOf`, carried on `Sync.state` as `kept`):
   `mason status` (`kept`: its sync, `syncedAt`, `nextAt`; `streamStatus`'s tables) and EXPLAIN's first line (`keptText`, src/duck/explain.ts) both
   read it, never the poll's ledger (a project switched to replication keeps its last poll there: EXPLAIN said "kept

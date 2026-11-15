@@ -50,3 +50,16 @@ test("the query names the key's columns as literals, so a column of any name is 
   // a catalog read: never a row of the table, never an ORDER BY of it
   assert.doesNotMatch(sql, /FROM\s+"Shop"/);
 });
+
+test("a replicated table's primary key dropped names a poll by a unique index as the way out, never a key: the stream does not apply (issue 1062)", () => {
+  const replicated = { source: "public.orders", key: ["id"], at: "mason/sources/app.yml: tables.orders", own: false, replicated: true };
+  assert.equal(K.keyHeldProblem({ found: true, nullable: "[]", held: false, usable: '[["code"], ["tenant_id", "seq"]]' }, replicated),
+    "mason/sources/app.yml: tables.orders: public.orders no longer has its primary key (id) on the database, so two of its rows can share it. " +
+    "Mason does not apply its changes until that is fixed, so that no synced row is lost, and its synced data serves as it was. " +
+    "Ask the database's owner to restore the primary key, or poll it by one of its unique indexes: set its entry's sync: to poll <interval> and its key: to [code] or [tenant_id, seq].");
+  assert.equal(K.keyHeldProblem({ found: true, nullable: '["id"]', held: false, usable: "[]" }, replicated),
+    "mason/sources/app.yml: tables.orders: public.orders no longer has its primary key (id) on the database, so two of its rows can share it. " +
+    "id can be NULL in public.orders now, and rows with NULL there cannot be told apart. " +
+    "Mason does not apply its changes until that is fixed, so that no synced row is lost, and its synced data serves as it was. Ask the database's owner to restore the primary key.");
+  assert.equal(K.keyHeldProblem({ found: true, nullable: "[]", held: true, usable: "[]" }, replicated), null, "a key still held is no problem");
+});

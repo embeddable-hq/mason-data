@@ -267,6 +267,14 @@ export class Removed extends Error {
  *  refused before it writes by that key, the synced data left as it was, its words the developer's (`keyNotHeld`) */
 export class KeyNotHeld extends Error {}
 
+/**
+ * HOW LONG A CATCH-UP REFUSED FOR ITS KEY WAITS before it asks the database again (issue 1062), never a failure's
+ * growing back-off (up to 6 hours): the key comes back when the database's owner restores it, and the table should be
+ * current soon after. An attempt refused costs the database one connection and one catalog query, no row read, as
+ * the key is asked before the poll reads anything (`poll`'s `keyNotHeld`).
+ */
+export const KEY_RETRY_MS = 60_000;
+
 export interface CopyState {
   source: string;
   phase: CopyPhase;
@@ -1344,6 +1352,9 @@ export class Sync {
   /** the review's check's own connection and its set-up, never the run's (`GeneratedHost.checkConnection`) */
   private generatedCheck: { conn: DuckConnection; setup: SessionSetup } | null = null;
 
+  /** how long a catch-up refused for its key waits before it asks the database again (`keyRetryAt`) */
+  private readonly keyRetryMs: number;
+
   constructor(store: DuckStore, source: Source, database: string, log: (line: string) => void, intervalMs: number, mode: SyncMode = "poll",
     replication: SyncReplication | null = null,
     options: { streamReportMs?: number; copyChunkRows?: number; copyParallel?: number; copyChunkSeconds?: number; onChunk?: (e: ChunkEvent) => void | Promise<void>; diskFree?: (dir: string) => number;
@@ -1353,10 +1364,13 @@ export class Sync {
       /** a table's columns changed on the database: the run reads them again and sets the tables (`onColumnsChanged`) */
       onColumnsChanged?: (sources: string[]) => Promise<void>;
       /** when the synced tables' space is read and when one is compacted (`CompactOptions`): the defaults, but in tests */
-      compact?: CompactOptions } = {}) {
+      compact?: CompactOptions;
+      /** how long a catch-up refused for its key waits before it asks again (`KEY_RETRY_MS`): the default, but in tests */
+      keyRetryMs?: number } = {}) {
     this.compactOptions = { checkMs: COMPACT_CHECK_MS, firstCheckMs: COMPACT_FIRST_CHECK_MS, wasteShare: COMPACT_WASTE_SHARE, minWasteBlocks: COMPACT_MIN_WASTE_BLOCKS, ...options.compact };
     this.store = store; this.source = source; this.log = log; this.intervalMs = intervalMs; this.mode = mode;
     this.streamReportMs = options.streamReportMs ?? 60_000;
+    this.keyRetryMs = options.keyRetryMs ?? KEY_RETRY_MS;
     this.copyChunkRows = options.copyChunkRows ?? COPY_CHUNK_ROWS;
     this.copyParallel = options.copyParallel ?? COPY_PARALLEL;
     if (!Number.isInteger(this.copyParallel) || this.copyParallel < 1 || this.copyParallel > COPY_PARALLEL_MAX) {
@@ -2596,7 +2610,7 @@ export class Sync {
     const r = (await w.runAndReadAll(`SELECT * FROM ${pq(keyHeldSql(t.schema, t.table, t.key))}`)).getRowsJS()[0] as [boolean, string | null, boolean, string | null] | undefined;
     if (r === undefined) return null;
     return keyHeldProblem({ found: r[0], nullable: r[1], held: r[2], usable: r[3] },
-      { source: t.source, key: t.key, at: t.entryAt ?? `the sources file's entry for ${t.source}`, own: t.primaryKey !== undefined });
+      { source: t.source, key: t.key, at: t.entryAt ?? `the sources file's entry for ${t.source}`, own: t.primaryKey !== undefined, replicated: this.replicated(t) });
   }
 
   private async shapesNow(w: DuckConnection, tables: readonly AddedTable[]): Promise<Map<string, string | null>> {
@@ -2992,7 +3006,8 @@ export class Sync {
     const s = new ReplicationStream({
       connect: () => PgConnection.connect({ ...this.pgOptions(), replication: true }), slot: r.slot, publication: r.publication, log: (l) => this.log(l), errorText: (e) => this.errorText(e),
       target: { tables: () => this.streamed, apply: (batch, lsn, committedAt) => this.applyStreamed(batch, lsn, committedAt), applied: () => this.appliedLsn,
-        refuse: (source, missing) => this.refuseStreamed(source, missing), current: () => { if (this.stream === s) this.streamCurrent(); },
+        refuse: (source, missing) => this.refuseStreamed(source, missing), keyHeld: (source) => this.streamKeyHeld(source),
+        current: () => { if (this.stream === s) this.streamCurrent(); },
         relation: (source, columns) => this.relationSeen(source, columns) },
     });
     this.stream = s;
@@ -3081,6 +3096,62 @@ export class Sync {
       this.refreshStreamed();
       if (this.shapeChecks.has(source)) this.kick();
     });
+  }
+
+  /**
+   * WHETHER THE DATABASE STILL KEEPS A STREAMED TABLE'S ROWS APART BY ITS KEY (issue 1062; src/duck/stream.ts
+   * `keyHeld`), asked when its relation message does not show it: a `FULL` replica identity, or a primary key gone. ONE
+   * catalog query (`keyHeldSql`, src/cdc/key-held.ts: `pg_attribute`, `pg_index` and `pg_class` by the table's oid, no
+   * lock, no row read), on a connection of its own as `databasePosition` reads, never the writer's turn: the source is
+   * attached only while a pass reads it, and the stream waits on this answer. A table whose key no longer holds is
+   * refused (`refuseKey`). A read that fails throws: the stream ends with it, nothing past it acknowledged, and asks
+   * again when it starts again (fail closed).
+   */
+  private async streamKeyHeld(source: string): Promise<boolean> {
+    const t = this.tables.get(source);
+    if (t === undefined || !this.streamed.has(source) || t.key.length === 0) return true;
+    const pg = await PgConnection.connect(this.pgOptions());
+    let row: (string | null)[] | undefined;
+    try { row = (await pg.query(keyHeldSql(t.schema, t.table, t.key))).rows[0]; } finally { pg.close(); }
+    if (row === undefined) return true;
+    const problem = keyHeldProblem({ found: row[0] === "t", nullable: row[1] ?? null, held: row[2] === "t", usable: row[3] ?? null },
+      { source: t.source, key: t.key, at: t.entryAt ?? `the sources file's entry for ${t.source}`, own: t.primaryKey !== undefined, replicated: true });
+    if (problem === null) return true;
+    await this.refuseKey(source, problem);
+    return false;
+  }
+
+  /**
+   * A STREAMED TABLE WHOSE KEY NO LONGER KEEPS ITS ROWS APART ON THE DATABASE (issue 1062: a duplicate's INSERT replaced
+   * a synced row): refused by name with the way out, the other tables streaming on, as `refuseStreamed` refuses a
+   * column. It leaves the stream and is marked behind (`_mason.catch_up`, on the writer's turn, so before the stream
+   * acknowledges a change it skipped). Its synced data serves as it was. Its catch-up poll asks for the key in its own
+   * snapshot (`poll`'s `keyNotHeld`) and is refused until it holds again, asked every `keyRetryMs`. Then that one poll
+   * reads what the stream skipped, and the table joins the stream again.
+   */
+  private refuseKey(source: string, problem: string): Promise<void> {
+    return this.onWriter(async () => {
+      if (!this.tables.has(source) || !this.streamed.has(source)) return;
+      const why = "after the database stopped keeping its rows apart by its key";
+      await this.store.writer.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.catch_up VALUES (${literal(source)}, ${literal(why)}, now())`);
+      this.behind.set(source, { why });
+      this.held.delete(source);
+      const at = this.keyRetryAt(source);
+      const m = `replication: ${problem} It is caught up by one poll once the key holds again. Mason asks the database again after ${clock(at)} UTC.`;
+      this.log(`${source}: ${m}`);
+      this.event({ kind: "stream_failed", table: source, message: m });
+      await this.record({ ...this.states.get(source)!, error: m });
+      this.refreshStreamed();
+    });
+  }
+
+  /** a table refused for its key asks again in `keyRetryMs` (`KEY_RETRY_MS`), never a failure's growing back-off: the
+   *  attempts in a row are counted as `backOff` counts them, and a pass is kicked then (`wakeAt`). Answers the time */
+  private keyRetryAt(source: string): number {
+    const at = Date.now() + this.keyRetryMs;
+    this.retries.set(source, { failures: (this.retries.get(source)?.failures ?? 0) + 1, at });
+    this.wakeAt(at);
+    return at;
   }
 
   /**
@@ -3999,7 +4070,9 @@ export class Sync {
     // A FAILED CATCH-UP waits as a failed copy does (`backOff`), said whole with its next attempt — in the log and in
     // mason status — and is caught up again then: what was held is read again by that poll (still behind, nothing lost)
     const failed = (what: string, e: unknown): Promise<void> => {
-      const when = this.backOff(t.source, Date.now() - started);
+      // REFUSED FOR ITS KEY (issue 1027, 1062): asked again in `keyRetryMs`, as the key comes back when the database's
+      // owner restores it, and an attempt reads no row
+      const when = e instanceof KeyNotHeld ? `${clock(this.keyRetryAt(t.source))} UTC, when Mason asks the database for its key again` : this.backOff(t.source, Date.now() - started);
       const m = `${what} (the synced data serves as it was; it is caught up by one poll again after ${when}): ${this.errorText(e)}`;
       this.log(`${t.source}: ${m}`);
       this.event({ kind: "catch_up_failed", table: t.source, message: m, cause: e });

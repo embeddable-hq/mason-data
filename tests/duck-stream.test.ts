@@ -50,3 +50,26 @@ test("a batch holding a big table's change waits 5 s and holds 50,000 changes; o
   assert.deepEqual(applySize!(true, 500, 10_000), { ms: 5_000, rows: 50_000 });
   assert.deepEqual(applySize!(true, 60_000, 100_000), { ms: 60_000, rows: 100_000 }, "never smaller than the stream's own");
 });
+
+// A RELATION MESSAGE SHOWS THE KEY HELD only through the replica identity's index (issue 1062): the default identity's
+// primary key, or the index USING INDEX names, each unique over NOT NULL columns. Anything else asks the database.
+type Col = { name: string; typeOid: number; typmod: number; isKey: boolean };
+test("a relation message shows a key kept apart only by a default or USING INDEX identity whose flagged columns are the key's", () => {
+  const keyShown = (stream as { keyShown?: (r: { replicaIdentity: string; columns: Col[] }, key: readonly string[]) => boolean }).keyShown;
+  assert.equal(typeof keyShown, "function", "the stream reads a relation's replica identity before it writes by key");
+  const cols = (...keys: string[]): Col[] => ["id", "tenant_id", "code", "v"].map((name) => ({ name, typeOid: 25, typmod: -1, isKey: keys.includes(name) }));
+  // the primary key, as the default identity flags it
+  assert.equal(keyShown!({ replicaIdentity: "d", columns: cols("id") }, ["id"]), true);
+  assert.equal(keyShown!({ replicaIdentity: "d", columns: cols("tenant_id", "id") }, ["tenant_id", "id"]), true);
+  // a unique index over fewer of the key's columns keeps the key apart too
+  assert.equal(keyShown!({ replicaIdentity: "i", columns: cols("id") }, ["tenant_id", "id"]), true);
+  // the primary key dropped: nothing flagged, so the database is asked
+  assert.equal(keyShown!({ replicaIdentity: "d", columns: cols() }, ["id"]), false);
+  // an identity over another column says nothing of the key
+  assert.equal(keyShown!({ replicaIdentity: "i", columns: cols("code") }, ["id"]), false);
+  assert.equal(keyShown!({ replicaIdentity: "d", columns: cols("tenant_id", "id") }, ["id"]), false);
+  // FULL flags every column, unique or not, even where every flagged column is the key's
+  assert.equal(keyShown!({ replicaIdentity: "f", columns: cols("id", "tenant_id", "code", "v") }, ["id"]), false);
+  assert.equal(keyShown!({ replicaIdentity: "f", columns: cols("id") }, ["id"]), false);
+  assert.equal(keyShown!({ replicaIdentity: "n", columns: cols() }, ["id"]), false);
+});

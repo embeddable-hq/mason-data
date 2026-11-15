@@ -22,7 +22,17 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   - If none does, Mason does not sync that table, and the synced data stays as it was. `mason status`, `mason sync`
     and the web page say so. They name the sources file and the key, and the unique index to name instead, if the
     table has one.
-  - A polled table whose primary key is dropped is held to the same check. A table under `sync: replication` is not
-    checked yet.
+  - A polled table whose primary key is dropped is held to the same check.
+- **A table under `sync: replication` no longer loses a synced row when its primary key is dropped on your
+  database.** Before, a row inserted with the same key as a synced row replaced that row in the synced data, and
+  nothing reported it. This happened with every replica identity, and when the key was dropped in the same
+  transaction as the insert.
+  - Now the stream checks the table's key after any change to the table's definition, before it applies the table's
+    next change. Most tables need no extra query. A table with `REPLICA IDENTITY FULL`, or one whose key is gone,
+    costs one catalog query on a short connection.
+  - If the key no longer keeps the rows apart, Mason stops applying that table's changes and keeps serving its synced
+    data. The other tables keep streaming. `mason status` and the log say why, and what to do: restore the primary
+    key, or poll the table by one of its unique indexes.
+  - Mason asks again every minute. Once the key is back, one poll catches the table up, and it streams again.
 - **A unique index with INCLUDE columns can be a table's `key:`.** For `UNIQUE (a) INCLUDE (b)`, `key: [a]` is now
   accepted. Before, it was refused as though no unique index covered `a`.

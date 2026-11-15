@@ -1230,6 +1230,96 @@ test("a column dropped on the database while streaming refuses that table by nam
   }
 });
 
+// A PRIMARY KEY DROPPED ON THE DATABASE UNDER THE STREAM (issue 1062): every change is written by key, so a duplicate's
+// INSERT replaced the synced row it shared a key with, and the synced table served one row where the database held two.
+// Each replica identity a table can have, and the key dropped and a duplicate inserted in one transaction: the table
+// leaves the stream with its synced data as it was, says why with the way out, and is caught up by one poll once the key
+// is back. A table whose key a unique index still keeps apart, and a table beside them, stream on.
+test("a primary key dropped on the database under the stream never loses a synced row: that table is refused until the key is back, then caught up; the others stream on", { skip }, async () => {
+  const db = `${tag}_pk`, url = urlOf(db);
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  const tables = ["d", "f", "i", "s", "u", "b"];
+  psql(url, tables.map((t) => `CREATE TABLE ${t} (id int ${t === "u" ? "NOT NULL " : ""}PRIMARY KEY, v text, code text); ` +
+    `INSERT INTO ${t} SELECT g, 'v' || g, 'c' || g FROM generate_series(1, 5) g;`).join(" ") +
+    // f: every column its identity. i: a unique index on another column its identity. u: a unique index on its key too
+    " ALTER TABLE f REPLICA IDENTITY FULL; CREATE UNIQUE INDEX i_code ON i (code); ALTER TABLE i ALTER code SET NOT NULL; ALTER TABLE i REPLICA IDENTITY USING INDEX i_code;" +
+    " CREATE UNIQUE INDEX u_id ON u (id); CREATE PUBLICATION app_pub FOR TABLE " + tables.join(", "));
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const folder = path.join(dir, "pk-project");
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "pk.db"), (l) => logged.push(l));
+  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", { slot: `${tag}_pk`, publication: "app_pub", owned: false }, { keyRetryMs: 1_000 });
+  const reader = await store.instance.connect();
+  const read = async (sql: string): Promise<string> => ((await reader.runAndReadAll(sql)).getRowsJS() as unknown[][]).map((r) => r.map((x) => x === null ? "" : String(x)).join("\t")).join("\n");
+  const same = async (t: string): Promise<boolean> => await read(`SELECT id, v, code FROM public.${t} ORDER BY ALL`) === psql(url, `SELECT id, v, code FROM ${t} ORDER BY 1, 2, 3`);
+  try {
+    await sync.open();
+    void sync.setTables(await pick(parsed.source, folder, tables.map((t) => [`public.${t}`, null] as const)));
+    await sync.once();
+    await sync.caughtUp();
+    const from = logged.length;
+    // each in a transaction of its own: the key dropped, then a row sharing a key with a synced one
+    for (const t of ["d", "f", "i", "u"]) {
+      psql(url, `ALTER TABLE ${t} DROP CONSTRAINT ${t}_pkey`);
+      psql(url, `INSERT INTO ${t} VALUES (${t === "u" ? 6 : 3}, 'twin', 'x3')`);
+    }
+    // in ONE transaction (psql -c runs its statements as one)
+    psql(url, "ALTER TABLE s DROP CONSTRAINT s_pkey; INSERT INTO s VALUES (3, 'twin', 'x3')");
+    psql(url, "INSERT INTO b VALUES (6, 'after the drops', 'c6')");
+    // b's insert came last: once it is applied, the stream has passed every change above
+    await until(async () => await read("SELECT v FROM public.b WHERE id = 6") === "after the drops", "b is current", logged, 30_000);
+    // every case at once: the synced row sharing the duplicate's key is kept (the database holds both), no row lost or added
+    const held: Record<string, string> = {};
+    for (const t of ["d", "f", "i", "s"]) held[t] = `${await read(`SELECT id, v FROM public.${t} WHERE id = 3 ORDER BY v`)} · ${await read(`SELECT count(*) FROM public.${t}`)} rows`;
+    assert.deepEqual(held, { d: "3\tv3 · 5 rows", f: "3\tv3 · 5 rows", i: "3\tv3 · 5 rows", s: "3\tv3 · 5 rows" }, `no synced row is lost\n${logged.slice(from).join("\n")}`);
+    // u's key is still kept apart by its unique index: it streams on, never refused
+    assert.ok(await same("u"), `u streams on\n${logged.slice(from).join("\n")}`);
+    const refused = (t: string): string[] => logged.slice(from).filter((l) => l.startsWith(`public.${t}: replication: `) && l.includes("primary key"));
+    for (const t of ["d", "f", "i", "s"]) assert.equal(refused(t).length, 1, `${t} is refused once, said\n${logged.slice(from).join("\n")}`);
+    assert.deepEqual(refused("u"), []);
+    assert.deepEqual(refused("b"), []);
+    // in the developer's words, with the way out (Postgres 18 drops the NOT NULL the key implied; 16 keeps it)
+    const tail = " Mason does not apply its changes until that is fixed, so that no synced row is lost, and its synced data serves as it was. Ask the database's owner to restore the primary key";
+    const again = " It is caught up by one poll once the key holds again\\. Mason asks the database again after \\d\\d:\\d\\d UTC\\.$";
+    const words = (t: string, way: string): RegExp => new RegExp(`^public\\.${t}: replication: \\S+app\\.yml: tables\\.${t}: public\\.${t} no longer has its primary key \\(id\\) on the database, so two of its rows can share it\\.` +
+      `( id can be NULL in public\\.${t} now, and rows with NULL there cannot be told apart\\.)?${tail.replace(/[.()]/g, "\\$&")}${way}\\.${again}`);
+    for (const t of ["d", "f", "s"]) assert.match(refused(t)[0]!, words(t, ""));
+    assert.match(refused("i")[0]!, words("i", ", or poll it by one of its unique indexes: set its entry's sync: to poll <interval> and its key: to \\[code\\]"));
+    assert.ok(logged.slice(from).some((l) => /^public\.d leaves the stream at /.test(l)), logged.slice(from).join("\n"));
+    // mason status: its error, and its catch-up waiting for the key
+    // (the stream's words, or by now its catch-up's, refused for the same reason: it asks every second here)
+    assert.match(sync.state().find((x) => x.source === "public.d")?.error ?? "", /tables\.d: public\.d no longer has its primary key \(id\) on the database/);
+    const d = (await sync.streamStatus())!.tables.find((x) => x.table === "public.d")!;
+    assert.equal(d.state, "catching-up");
+    assert.match(d.why ?? "", /^caught up by one poll after the database stopped keeping its rows apart by its key/);
+    // its catch-up asks for the key and is refused, reading nothing, until the key is back
+    await until(() => logged.slice(from).some((l) => /^public\.d: its catch-up poll failed \(.*when Mason asks the database for its key again\): .*no longer has its primary key/.test(l)), "d's catch-up is refused for its key", logged, 30_000);
+    assert.equal(await read("SELECT id, v FROM public.d WHERE id = 3"), "3\tv3");
+    // a change while it is refused: its catch-up reads it
+    psql(url, "INSERT INTO d VALUES (7, 'while refused', 'c7')");
+
+    // THE WAY OUT: the duplicate gone and the key restored (a table with no identity takes no DELETE: FULL for it)
+    for (const t of ["d", "f", "i", "s"]) {
+      psql(url, `ALTER TABLE ${t} REPLICA IDENTITY FULL; DELETE FROM ${t} WHERE v = 'twin'; ALTER TABLE ${t} ADD PRIMARY KEY (id); ` +
+        `ALTER TABLE ${t} REPLICA IDENTITY ${t === "f" ? "FULL" : t === "i" ? "USING INDEX i_code" : "DEFAULT"}`);
+    }
+    const caught = (t: string): boolean => logged.slice(from).some((l) => l.startsWith(`caught up public.${t} by one poll after the database stopped keeping its rows apart by its key`));
+    await until(() => ["d", "f", "i", "s"].every(caught), "every refused table caught up, said", logged, 60_000);
+    for (const t of ["d", "f", "i", "s"]) assert.ok(await same(t), `${t} equals the database once caught up`);
+    assert.equal(await read("SELECT v FROM public.d WHERE id = 7"), "while refused", "the change made while it was refused is read by its catch-up");
+    // and streamed again (u, with no replica identity now, takes no UPDATE on the database)
+    psql(url, tables.filter((t) => t !== "u").map((t) => `UPDATE ${t} SET v = 'streamed again' WHERE id = 1;`).join(" "));
+    await sync.caughtUp();
+    await until(async () => (await Promise.all(tables.map(same))).every(Boolean), "every table streamed again", logged, 30_000);
+    for (const t of tables) assert.equal(sync.state().find((x) => x.source === `public.${t}`)?.error, null, t);
+  } finally {
+    reader.closeSync();
+    await sync.stop();
+    await store.close();
+  }
+});
+
 // MASON'S OWN PUBLICATION NAMES EACH TABLE WHOLE (issue 978; docs/DESIGN.md "Mason's own publication names each table
 // whole"): a column list on it made the database refuse the application's own `ALTER TABLE … DROP COLUMN` ("publication …
 // depends on column") and hid every column added later. So it carries every column of every replicated table, an entry
