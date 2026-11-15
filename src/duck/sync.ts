@@ -1300,6 +1300,8 @@ export class Sync {
   private currentSchema: PgSchema;
   /** what the catalog last built from: replaced (a new object) only when it changes */
   private schemaKey = "";
+  /** the tables the catalog could not read, and why (`catalogTypes`): each said once a reason */
+  private readonly unread = new Map<string, string>();
   /** REPLICATION, WHERE THE STREAM IS (`streamStatus`, the stream's log): the changes it applied this run by table, and
    *  since its last periodic line (`reportStream`, every `streamReportMs` when something moved) */
   private readonly appliedCounts = new Map<string, ChangeCounts>();
@@ -1587,6 +1589,9 @@ export class Sync {
       if (columns !== null) { const c = JSON.parse(columns) as SourceColumnInfo[]; this.copiedAs.set(source, columnsKey(c)); this.copiedColumns.set(source, c); }
       this.states.set(source, { source, phase: phase === "copying" ? "waiting" : phase, rows: rows === null ? null : Number(rows), bytes: bytes === null ? null : Number(bytes), seconds, copiedAt, error });
     }
+    // a table the ledger says is synced with no table under it is synced again, whole (issue 1071), before anything serves
+    // it: the stored JSON paths' views, the catalog, the polls
+    await this.forgetMissing();
     await this.readSynced();
     await this.findRetired();
     this.removeStageLeftovers();
@@ -3880,15 +3885,43 @@ export class Sync {
     // there: what it says it serves is let go on this turn, BEFORE the drop, so no rebuild of the catalog (on its own
     // connection, `setTables` starts one) reads it with nothing under it; it is built again at its next review
     await this.generated.dropped(source);
+    // THE TABLE IS THE ONE AT THIS NAME BY `relationKey` (issue 1071): an added entry whose name differs only in case
+    // (`orders` beside a removed `"Orders"`, synced by a Mason before issue 1019) had its synced data in this very table,
+    // so the drop takes it too. Its ledger rows, keyed by its own spelling, would still say it is synced over no table:
+    // they go with the drop, and it is synced again from the source, whole. What the table held may have been either
+    // entry's rows, so it is never kept as the kept entry's
+    const key = relationKey(source);
+    const namesakes = [...this.tables.keys()].filter((s) => s !== source && relationKey(s) === key && this.states.has(s));
     await w.run(`DROP TABLE IF EXISTS ${ident(schema)}.${ident(table)}`);
     // and what a copy of it left beside it (a crash, a stop, a failure, a removal while it was read: `copy`)
     await w.run(`DROP TABLE IF EXISTS ${ident(schema)}.${ident(`${table}${SIDE_SUFFIX}`)}`);
-    for (const ledger of ["copy_state", "poll_state", "catch_up", "copy_progress", "copy_chunks", "compactions", "compact_held"]) await w.run(`DELETE FROM ${MASON_SCHEMA}.${ledger} WHERE source = ${literal(source)}`);
+    await this.forgetSynced(source);
     // its stored JSON paths and its view
     await this.kept.removed(source);
+    for (const s of namesakes) {
+      await this.forgetSynced(s);
+      await this.kept.removed(s);
+      this.queued.delete(s);
+      this.states.set(s, { source: s, phase: "waiting", rows: null, bytes: this.tables.get(s)!.bytes, seconds: null, copiedAt: null, error: null });
+      const m = `its synced data was the same table as ${source}'s (the synced data holds names that differ only in case as one table), so it is dropped with ${source}'s and synced again from the source, whole`;
+      this.log(`${s}: ${m}`);
+      this.event({ kind: "sync_stopped", table: s, message: m });
+    }
+    this.refreshStreamed();
+    const again = this.tables.get(source);
+    if (again === undefined) { this.log(`dropped ${source}'s synced data: it is no longer added (mason add ${source} syncs it again from the source, whole)`); return; }
+    this.states.set(source, { source, phase: "waiting", rows: null, bytes: again.bytes, seconds: null, copiedAt: null, error: null });
+    this.log(`dropped what ${source} held when it was removed: it is added again, so its first sync starts anew from the source, whole`);
+  }
+
+  /** A TABLE'S LEDGER ROWS AND WHAT THE RUN HOLDS OF IT, forgotten on the writer's turn (the caller's), keyed by its
+   *  source's name as written: after it, `needsCopy` syncs it whole from the source. Its table and stored JSON paths are
+   *  the caller's (`dropRemoved`; `open` before the stored paths are read) */
+  private async forgetSynced(source: string): Promise<void> {
+    const w = this.store.writer;
+    for (const ledger of ["copy_state", "poll_state", "catch_up", "copy_progress", "copy_chunks", "compactions", "compact_held"]) await w.run(`DELETE FROM ${MASON_SCHEMA}.${ledger} WHERE source = ${literal(source)}`);
     this.behind.delete(source);
     this.held.delete(source);
-    this.refreshStreamed();
     this.snapshots.delete(source);
     this.retries.delete(source);
     this.due.delete(source);
@@ -3903,10 +3936,29 @@ export class Sync {
     this.compactions.delete(source);
     this.compactRetries.delete(source);
     this.copyLive.delete(source);
-    const again = this.tables.get(source);
-    if (again === undefined) { this.log(`dropped ${source}'s synced data: it is no longer added (mason add ${source} syncs it again from the source, whole)`); return; }
-    this.states.set(source, { source, phase: "waiting", rows: null, bytes: again.bytes, seconds: null, copiedAt: null, error: null });
-    this.log(`dropped what ${source} held when it was removed: it is added again, so its first sync starts anew from the source, whole`);
+  }
+
+  /**
+   * A TABLE THE LEDGER SAYS IS SYNCED, WITH NO TABLE AT ITS NAME IN THE SYNCED DATA (issue 1071: a Mason before it dropped
+   * a table whose name differed only in case from a removed one's, and left the kept entry's rows saying it was synced;
+   * every poll of it failed, and the catalog started with no table at all): its ledger forgotten (`forgetSynced`), so it is
+   * synced again from the source, whole, and said. Checked at the open, over every row, and when the catalog meets one
+   * (`schemaBuilt`), on the writer's turn; never while it is rebuilt (its swap puts the table in). Answers the sources
+   * forgotten.
+   */
+  private async forgetMissing(only?: string): Promise<string[]> {
+    const w = this.store.writer;
+    const there = new Set(((await w.runAndReadAll(`SELECT schema_name || '.' || table_name FROM duckdb_tables() WHERE database_name = current_database()`)).getRowsJS() as [string][])
+      .map(([n]) => relationKey(n)));
+    const gone = [...this.states.values()].filter((s) => s.phase === "copied" && (only === undefined || s.source === only) && this.rebuildingNow?.source !== s.source && !there.has(relationKey(s.source)))
+      .map((s) => s.source);
+    for (const source of gone) {
+      await this.forgetSynced(source);
+      const t = this.tables.get(source);
+      if (t !== undefined) this.states.set(source, { source, phase: "waiting", rows: null, bytes: t.bytes, seconds: null, copiedAt: null, error: null });
+      this.log(`${source}: its synced data is missing (the record says it was synced, and no table is there), so it is synced again from the source, whole`);
+    }
+    return gone;
   }
 
   /** one pass: every removed table dropped, every added table needing it queued for a copy (step 0: whole, again) or
@@ -3914,7 +3966,10 @@ export class Sync {
   private async pass(): Promise<void> {
     // a table no longer added (mason remove) is dropped, and its ledger rows with it — one whose rebuild is running is
     // cut short by its removal (`cutShort`) and dropped as that rebuild ends (`rebuild`)
-    for (const source of [...this.states.keys()].filter((s) => !this.tables.has(s) && this.rebuildingNow?.source !== s)) {
+    // (and one whose name an added table's differs from only in case waits while that table is rebuilt: the drop takes its
+    // table too, issue 1071, and it is synced again once the drop is done)
+    const rebuilding = this.rebuildingNow === null ? null : relationKey(this.rebuildingNow.source);
+    for (const source of [...this.states.keys()].filter((s) => !this.tables.has(s) && relationKey(s) !== rebuilding)) {
       this.queued.delete(source);
       await this.onWriter(() => this.dropRemoved(source));
     }
@@ -5405,6 +5460,33 @@ export class Sync {
     return next;
   }
 
+  /**
+   * ONE TABLE'S COLUMNS AS THE SYNCED DATA HOLDS THEM, for the catalog (`schemaBuilt`), or null when they cannot be read:
+   * that table is left out of the catalog and said, and every other table is served (issue 1071: one synced table with
+   * no table under it failed every rebuild of the catalog, and the run served no table at all). A synced table with no
+   * table under it is synced again whole (`forgetMissing`, on the writer's turn). Said once a reason, until it is read.
+   */
+  private async catalogTypes(c: DuckConnection, name: string, schema: string, table: string): Promise<Awaited<ReturnType<DuckConnection["prepare"]>> | null> {
+    try {
+      const types = await c.prepare(`SELECT * FROM ${ident(schema)}.${ident(table)} LIMIT 0`);
+      this.unread.delete(name);
+      return types;
+    } catch (e) {
+      // once a reason, told by the error's own words (`messageOf`), never by the words Mason repeats
+      const reason = messageOf(e);
+      if (this.unread.get(name) !== reason) {
+        this.unread.set(name, reason);
+        this.log(`${name} is left out of the catalog, as its synced data could not be read (every other table is served): ${this.errorText(e)}`);
+      }
+      if (this.tables.has(name)) {
+        void this.onWriter(() => this.forgetMissing(name)).then((gone) => { if (gone.length > 0) { this.kick(); void this.rebuildSchema().catch((x: unknown) => this.log(`the catalog could not be rebuilt (it is at the next pass): ${this.errorText(x)}`)); } }, (x: unknown) => {
+          this.log(`${name}: whether its synced data is missing could not be checked (checked again at the next rebuild of the catalog): ${this.errorText(x)}`);
+        });
+      }
+      return null;
+    }
+  }
+
   /** the catalog's tables: every copied table as DuckDB holds it, typed as the source spells it where the wire agrees */
   private async schemaBuilt(): Promise<void> {
     // its own connection, which sees what is committed: never the writer, which a copy's transaction may hold for hours
@@ -5415,7 +5497,11 @@ export class Sync {
     for (const t of this.tables.values()) {
       const cols = copied.get(t.source);
       if (cols === undefined) continue;
-      const types = await c.prepare(`SELECT * FROM ${ident(t.schema)}.${ident(t.table)} LIMIT 0`);
+      // a table another synced entry's name shares (by `relationKey`, issue 1071: synced by a Mason before issue 1019) may
+      // hold that entry's rows: never served as this one's, and the pass that drops the other syncs it again whole
+      if ([...copied.keys()].some((s) => s !== t.source && relationKey(s) === relationKey(t.source))) continue;
+      const types = await this.catalogTypes(c, t.source, t.schema, t.table);
+      if (types === null) continue;
       const duckTypes = new Map(Array.from({ length: types.columnCount }, (_, i) => [types.columnName(i), types.columnType(i)] as const));
       types.destroySync();
       // the column's constraints and default — and below the table's keys and unique indexes — as the source had them
@@ -5443,7 +5529,8 @@ export class Sync {
     const synced = new Map(tables.flatMap((t) => t.columns.flatMap((x) => x.enumLabels !== undefined && x.spelled !== undefined ? [[x.spelled.replace(/\[\]$/, ""), x.enumLabels] as const] : [])));
     // each generated table served, as a copy of its output's types: no key, no joins
     for (const g of this.generated.served()) {
-      const types = await c.prepare(`SELECT * FROM ${ident(g.schema)}.${ident(g.table)} LIMIT 0`);
+      const types = await this.catalogTypes(c, `${g.schema}.${g.table}`, g.schema, g.table);
+      if (types === null) continue;
       const duckTypes = new Map(Array.from({ length: types.columnCount }, (_, i) => [types.columnName(i), types.columnType(i)] as const));
       types.destroySync();
       const columns = g.columns.filter((x) => duckTypes.has(x.name)).map((x) => pgColumn({ name: x.name, type: x.type, notNull: false, comment: null }, duckTypes.get(x.name)!, undefined))

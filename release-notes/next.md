@@ -4,7 +4,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 - **A table whose primary key has INCLUDE columns, and whose entry's `columns:` leaves out any one of them, is read
   again whole, once.** Plan for a full read of each such table from your database. It keeps serving its old data
-  until the new sync is done, and the log says so. No other table is read again.
+  until the new sync is done, and the log says so.
   - Why: Mason used to count an index's INCLUDE columns as part of the table's key, and a table's key is always
     synced. So for `PRIMARY KEY (id) INCLUDE (v, w)`, Mason synced `v` and `w` even when `columns:` left them out.
     Now the key is `id` alone, so `v` and `w` are synced only if the entry names them.
@@ -20,11 +20,18 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   - To get its rows back after upgrading, sync it again whole: run `mason remove <table>`, then `mason add <table>`,
     then `mason wait <table>`. The table is not served from the remove until that sync ends, so plan it for a quiet
     time.
+- **A table whose synced data an older Mason lost is read again whole, once.** Only a project that removed one of two
+  tables whose names differ only in case, such as `"Orders"` and `orders`, has one. It is the table it kept. Its first
+  start reads it whole from your database. It is not served until that sync is done, and it was not served before the
+  upgrade either.
+- No other table is read again.
 - **Mason now refuses to start when the sources file names a table it cannot sync for the case of its names.** This
   is a table with two columns whose names differ only in case, such as `"Status"` and `status`. It is also two tables
   whose names differ only in case, such as `"Orders"` and `orders`. Before, the first never synced, and the second
   served one table under both names. The refusal names the entry and the line to write, such as `exclude: [status]`.
-  Only `mason start` names such an entry that the file already holds. `mason tables` does not.
+  Only `mason start` names such an entry that the file already holds. `mason tables` does not. When you remove one
+  of two such tables, the other is read again whole from your database, once. It is not served until that sync is
+  done, as it may hold the removed table's rows.
 
 ## What changes
 
@@ -109,3 +116,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
     characters is now shown whole.
   - On a phone, after Add or Sync now, the answer shown at the bottom of the screen covered the last rows' buttons, and
     the page could not be scrolled far enough to reach them. It now can.
+- **Removing one of two tables whose names differ only in case no longer leaves Mason serving no table at all.** With
+  `"Orders"` and `orders` both synced, removing either dropped the other's synced data too. The kept table then failed
+  every sync, and Mason served no table, the others included, even after a restart. Now the kept table is synced
+  again whole, and every other table is served throughout. A project already in that state recovers at its first start
+  after the upgrade, with nothing to remove or add. One table that cannot be read never stops Mason serving the others.

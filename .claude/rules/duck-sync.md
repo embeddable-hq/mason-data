@@ -90,6 +90,13 @@ paths:
   `dropRemoved`), said as `sync_stopped`, never a failure or a back-off. A rebuild the queue took before a removal and
   started after it is cut short too (`removals`), so a table added again starts anew. DETECTOR:
   `tests/integration/duck-remove.itest.ts`.
+- **Which synced table a removal drops is decided by `relationKey`, never by the name as written** (issue 1071; the
+  ledger is keyed by the source's spelling, the synced data by `relationKey`): an added entry whose name differs from
+  the removed one's only in case shared its table, so `dropRemoved` forgets its ledger too and syncs it again whole,
+  said as `sync_stopped`, never serving rows that may be the other's. A table the ledger says is synced with no table
+  under it is synced again whole (`forgetMissing`: at `open`, and when the catalog meets one), and **one table the
+  catalog cannot read is left out and said, never failing the catalog** (`catalogTypes`; it served no table at all, the
+  others included, through restarts). DETECTOR: `tests/integration/duck-case-remove.itest.ts`.
 - **A stop cancels on the source every read its interrupt has not ended within 200 ms** (`stop`, `cancelOnSource`,
   issue 1037: a chunk, a catch-up or a poll waiting on a lock in the source held `mason stop` until the lock was
   released). It uses the cut's guarded `pg_cancel_backend` (`cancelBackends`), and that statement fails as `Stopping`,
