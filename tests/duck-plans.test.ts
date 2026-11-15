@@ -129,6 +129,8 @@ type On = "C, the key stored" | "libc" | "libc, the key stored";
  *  keeper (the key per row over `SMALL_ORDERS`) */
 type Where = On | "C, nothing stored (the smaller shop)";
 interface Shape { name: string; sql: string; zone?: string; on?: On; values?: string[] }
+/** issue 466's entry, named once: its plan below and what its scans read further down */
+const METABASE_JSON_SAMPLE = "Metabase's JSON sample: the first and last 250 rows by the key, joined back";
 
 /** what PR #13's rewrites were made for, each in the spelling the tool sends (tests/duck-wire.test.ts holds their SQL
  *  and answers over small tables; here, their plans over a million rows) */
@@ -234,6 +236,13 @@ const REWRITTEN: Shape[] = [
   // a table's preview, plain and sorted by its key (late materialization: the winners' columns read after the sort)
   { name: "a table's preview: SELECT * LIMIT 100", sql: "SELECT * FROM orders LIMIT 100" },
   { name: "a table's sorted preview: ORDER BY the key LIMIT 1000", sql: "SELECT * FROM orders ORDER BY id DESC LIMIT 1000" },
+  // issue 466: the sample Metabase's sync reads to describe a table's JSON fields. It is spelled as Metabase v0.64.2.8's
+  // source writes it (describe_table.clj `sample-json-row-honey-sql`, its two limits bound), not traced. It reads the
+  // first and the last rows by the key, joined back to the table. Each top N reads the key alone, pruned by its own
+  // dynamic filter. The join's filter of the kept keys prunes the scan of the wide column. The length guard's text is
+  // computed for the joined rows alone. The test `METABASE_JSON_SAMPLE` below measures all three. The issue measured
+  // the sample at 40–60 s on a wide table
+  { name: METABASE_JSON_SAMPLE, sql: 'SELECT CASE WHEN 50000 < LENGTH(CAST("public"."orders"."meta" AS TEXT)) THEN NULL ELSE "public"."orders"."meta" END AS "meta" FROM "public"."orders" INNER JOIN ((SELECT "public"."orders"."id" FROM "public"."orders" ORDER BY "public"."orders"."id" ASC LIMIT $1) UNION ALL (SELECT "public"."orders"."id" FROM "public"."orders" ORDER BY "public"."orders"."id" DESC LIMIT $2)) AS "result" ON "result"."id" = "public"."orders"."id"', values: ["250", "250"] },
   // a filter an ORM or a BI tool binds (issue 214): a numeric parameter beside a DECIMAL column, the scan's own filter on
   // the column under a guard DuckDB folds at Execute, no Mason function per row (never the parameter's double)
   { name: "a numeric column = a bound parameter: the scan's filter", sql: "SELECT o.id FROM orders o WHERE o.amount = $1", values: ["19.99"] },
@@ -738,14 +747,14 @@ interface Scan {
  * Mason's EXPLAIN ANALYZE says only the rows an operator produced). A late-materialized page scans the table twice:
  * the top N's scan, and the winners' rows read back by row id.
  */
-async function scans(sql: string, table: string, on?: Where): Promise<Scan[]> {
+async function scans(sql: string, table: string, on?: Where, values?: string[]): Promise<Scan[]> {
   const t = await target(on), { c, logged, store } = t;
   await c.query("SET TimeZone = 'UTC'");
   const from = logged.length;
-  await c.query(sql);
+  await c.query(sql, values);
   const sent = logged.slice(from).findLast((l) => l.startsWith("statement: "))?.replace(/^statement: [^—]*— /, "");
   assert.ok(sent !== undefined, `no statement logged for ${sql}:\n${logged.slice(from).join("\n")}`);
-  assert.equal(sent, (await explained(sql, "UTC", t)).sent, "the SQL Mason's EXPLAIN plans is the SQL the statement ran");
+  assert.equal(sent, (await explained(sql, "UTC", t, values)).sent, "the SQL Mason's EXPLAIN plans is the SQL the statement ran");
   // the session's settings, as the session runner settles them (src/duck/store.ts `settle`); this test's writer runs
   // nothing else. A Mason function's session argument is NULL here: a connection without the variable, never cancelled.
   // The writer is NOT a session's connection: it lacks the session's `default_null_order`, which a sort that leaves
@@ -754,7 +763,8 @@ async function scans(sql: string, table: string, on?: Where): Promise<Scan[]> {
   // a session's connection instead.
   await store.writer.run("SET TimeZone = 'UTC'");
   await store.writer.run("SET search_path = 'public'");
-  const r = await store.writer.runAndReadAll(`EXPLAIN (ANALYZE, FORMAT JSON) ${sent}`);
+  // a bound statement's parameters bound again, as their text: the SQL sent casts each where it is read
+  const r = await store.writer.runAndReadAll(`EXPLAIN (ANALYZE, FORMAT JSON) ${sent}`, values);
   const out: Scan[] = [];
   const walk = (n: Record<string, unknown>, topN: boolean): void => {
     const extra = (n.extra_info ?? {}) as Record<string, unknown>;
@@ -835,6 +845,34 @@ for (const name of ["LEFT lateral preview: jsonb_each, LIMIT 100 OFFSET 0", "LEF
     assert.ok(rows <= ORDERS / 10, `a 100-row preview read ${said(ss)} of the base's ${ORDERS} rows: its LIMIT no longer stops the scan`);
   });
 }
+
+// issue 466: Metabase's JSON sample over the million orders. Its two top Ns read the key alone, each pruned by its own
+// bound (a row group or two of the nine); the scan of the wide column reads the rows the join's filter of the kept keys
+// lets through, never every row; and only the joined rows reach the length guard's function. Measured on DuckDB 2.0:
+// 1 row group for each top N, the first and the last (2 of 9) for the scan of the wide column, and 500 rows handed
+// to `__mason_jsonb_text`.
+test(`Metabase's JSON sample reads the first and last rows by the key, never the whole table: ${METABASE_JSON_SAMPLE}`, async (t) => {
+  const shape = SHAPES.find((s) => s.name === METABASE_JSON_SAMPLE)!;
+  const ss = await scans(shape.sql, "orders", undefined, shape.values);
+  t.diagnostic(ss.map((s) => `${s.topN ? "a top N's scan" : "the joined scan"} of ${s.columns.join(", ")}: ${s.rowGroups} of ${s.of} row groups, ${s.rows} rows`).join("; "));
+  const tops = ss.filter((s) => s.topN), joined = ss.filter((s) => !s.topN);
+  assert.equal(tops.length, 2, `two top Ns' scans, the first rows' and the last rows': ${said(ss)}`);
+  for (const s of tops) {
+    assert.deepEqual(s.columns, ["id"], `a top N's scan reads the key alone: ${s.columns.join(", ")}`);
+    // loose on purpose, as the page above: how many row groups a scan reads is how many threads claimed one before
+    // the top N's bound reached it
+    assert.ok(s.rowGroups <= 6, `a top N of 250 keys read ${said([s])}: its bound no longer prunes the scan`);
+  }
+  assert.equal(joined.length, 1, `one scan of the wide column, joined to the keys kept: ${said(ss)}`);
+  // the kept keys' filter is DuckDB's join filter, pushed into this scan and checked against the zone maps: the first
+  // and the last row groups hold the keys, so the seven between are skipped. The join's filter is built before this
+  // scan starts, so no thread races it
+  assert.ok(joined[0]!.rowGroups <= 3, `the scan of the wide column read ${said(joined)} for 500 rows: the join's filter of the kept keys no longer prunes it`);
+  const handed = [...(await rowsOf(shape.sql, undefined, shape.values))].filter(([k, n]) => k !== "__mason_turn" && n > 0);
+  const total = handed.reduce((a, [, n]) => a + n, 0);
+  t.diagnostic(`handed to Mason functions: ${handed.map(([k, n]) => `${k} ${n}`).join(", ") || "none"}`);
+  assert.ok(total <= 500, `the length guard was computed for ${total} rows (${handed.map(([k, n]) => `${k} ${n}`).join(", ")}): more than the 500 rows joined`);
+});
 
 /** how many rows a statement handed each Mason function, run through the listener and counted on the thread the
  *  functions run on (src/duck/executor.ts functionRows): the rows, not the calls, so neither DuckDB's chunking nor
