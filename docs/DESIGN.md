@@ -170,6 +170,20 @@ about ⌈chunks ÷ N⌉ chunk-times, so 11 chunks at N=3 are 4 rounds against 3.
 against 1.7 (20 %), and re-read N times more at a stop. **Where.** `src/duck/sync.ts` (`COPY_PARALLEL`, `readChunks`);
 `tests/duck-copy-order.test.ts`, `duck-poll.itest.ts`.
 
+### A table removed while it syncs (issue 1034, 2026-11-15)
+
+**What happened.** A real deployment removed a ~150 M-row table partway through its first sync. The sync ran on to its
+end, because the pass skipped dropping a table while its rebuild ran, and the copy never checked between chunks. Two
+small tables added beside it waited behind it in the one rebuild queue, and the source kept scanning a table nobody
+wanted. **Decision.** A removal cuts that table's sync short (`cutShort`): its first sync, its whole read again, its
+catch-up, or the writer's poll of it. DuckDB's interrupt alone is not enough. Measured on Postgres 16, a chunk whose
+query waited on the source (a lock) never saw it, as the extension checks it only between the rows it fetches. So each
+lane notes its backend and its transaction's start (`pg_backend_pid()`, `now()`), and the cut cancels exactly that
+backend's query with `pg_cancel_backend`, guarded by `xact_start` so a backend the pool gave to another read is never
+touched. That is Mason's own query cancelled, never a write. What it read is dropped on the writer's turn once nothing
+writes the side table. **Where.** `src/duck/sync.ts` (`cutShort`, `cancelBackends`, `rebuild`, `droppedCut`);
+`tests/integration/duck-remove.itest.ts`.
+
 ### Chunks sized by time, and progress between commits
 
 **Decision.** A copy's first chunks (one per reader) are a tenth of the ceiling, at least 128 pages; every later one is
