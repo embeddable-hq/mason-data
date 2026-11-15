@@ -61,6 +61,67 @@ Not decided yet, so ask the owner before such a change goes in a patch:
   URL. The project is read the same, but a setting under an old name stops the start, so a restart alone no longer
   works.
 
+## Which tables the first start reads again
+
+**Every release's "Before you upgrade" says whether its first start reads any table whole again from the source**
+(the owner, 2026-11-15). A whole read is a full scan of the table on the user's database. For a large table that
+takes minutes to hours, and reads tens of GiB. A person must know before they upgrade.
+
+- **If the release reads no table again, say so** in one line at the start of "Before you upgrade": "No table is read
+  again."
+- **If it reads some, say which, in words a developer can check against their own project.** Name what they can see:
+  a column's type, a column's name, or the Mason version that first synced the table. For example: "A table with a
+  `numeric` column of no precision is read again whole, once." Or: "Tables first synced by Mason 0.17 or earlier are
+  read again whole, once. Plan for a full read of each from your database."
+- **Say whether each such table keeps serving its old data** until its new sync is done. A table that is not served
+  meanwhile makes the release a new line ("What a breaking change is").
+- **List what this release adds.** A check from an earlier release stays in the code. A reader who skips a release
+  reads every release's notes in between ("Before you upgrade" of each), so they meet its list there.
+
+### Where the code decides it
+
+A table whose first sync finished is read again whole when `needsCopy` (`src/duck/sync.ts`) says so. Mason serves
+its old data until the new sync is done. At the start, these checks can make it say so. Read the release's diff
+from the previous tag for each of them (`git diff v<previous> HEAD -- src/duck/ src/cli/preflight.ts`).
+
+| Check | What it finds | Where | Since |
+|---|---|---|---|
+| `RETIRED_LAYOUT` | A synced table stored sorted by its key, with a primary-key or unique constraint on it. | `findRetired`, `src/duck/sync.ts` | 0.7.0 |
+| `HELD_LAYOUT` | A column of a type Mason holds as the source's text (a `point`, a `money`, a range) stored as another type. | `findHeldLayout`, `src/duck/sync.ts` | 0.9.0 |
+| `SCALE_LAYOUT` | A `numeric` column of no precision, synced exactly, without each value's own decimals beside it. | `findHeldLayout`, `src/duck/sync.ts` | 0.21.0 |
+| `MISSING_LAYOUT` | A synced table without a column its record says it syncs. An older Mason dropped such a column. | `findHeldLayout`, `src/duck/sync.ts` | 0.21.0 |
+| `BOM_LAYOUT` | A column whose name begins with a byte-order mark (U+FEFF), stored as text though its type is not a text type. | `findHeldLayout` and `lostType`, `src/duck/sync.ts` | 0.21.0 |
+| The columns' key | The columns a table was synced with no longer match the columns read from the source at the start. | `columnsKey`, `src/duck/sync.ts` | 0.7.0 |
+| No watermark | A synced table with no row in `_mason.poll_state`. | `needsCopy`, `src/duck/sync.ts` | 0.7.0 |
+
+Two of these have no name that says a release changed them. Read the diff for them.
+
+- **The columns' key reads how each type is held.** It holds `holdOf` (`src/duck/held-types.ts`). A release that
+  moves a type between held as itself and held as its text changes the key of every table with a column of that type.
+  So does a release that changes how a column's type, kind or domain is read from the source (`SourceColumnInfo`,
+  `src/cli/preflight.ts`), or how its record is read (`copy_state.columns`). Each such table is read again.
+  `findHeldLayout` completes an older record's enum kind so that an enum column is not read again for nothing. A new
+  fact in the key needs the same care.
+- **The watermark is the ledger's row.** A release that drops or rewrites rows of `_mason.poll_state`, or of
+  `_mason.copy_state`, reads every such table again.
+
+These are not caused by a release, so the notes do not list them: a table's columns changed on the database, a
+`numeric` value that outgrew its synced column, `MASON_DUCK_SYNC=recopy`, and a table removed and added again.
+
+These do work at the first start but read nothing from the source, so they are not "read again". Say them where they
+cost time or availability:
+
+- **A generated table's `jsonb` columns rewritten** (`JSONB_LAYOUT`, `open` in `src/duck/generated.ts`, since 0.21.0).
+  The rewrite works on the synced data in place. Nothing is served until it is done.
+- **A generated table built again** when its ledger row has no table under it (`open` in `src/duck/generated.ts`). It
+  reads the synced data.
+- **A stored JSON path or `jsonb` key filled again** when its id changes (`KEY_VERSION`, `DUCKDB_VERSION`, `orderId`
+  in `src/duck/kept.ts`). It reads the synced data.
+- **A replicated table caught up by one poll** when the replication slot is made again (`prepareReplication` in
+  `src/duck/sync.ts`, `staleReplication` in `src/cli/replication-mode.ts`). This happens when the slot is missing or
+  lost, or when the slot's name or the publication changes. A poll scans the table on the source, but sends only the
+  rows changed since. It is not a whole read.
+
 ## Is the next release a patch or a new line?
 
 Read `release-notes/next.md` before you choose the version. A patch may have a "Before you upgrade" too, so that
