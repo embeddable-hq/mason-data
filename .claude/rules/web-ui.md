@@ -179,7 +179,7 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   chart's mark (`--chart-mark`, checked against both themes' surfaces). The shadow is the quiet stone step alone:
   the reader's eye goes to what changed state, not to decoration.
 - **A component is a helper of src/web/shared.js, not markup copied into a page** (`status`, `card`/`cards`, `badge`,
-  `button`, `panel`, `empty`, `skeleton`, `details`): one place to change how a thing looks, and the tests
+  `button`, `panel`, `listTable`, `empty`, `skeleton`, `details`): one place to change how a thing looks, and the tests
   assert on what the helper wrote. A section's heading is index.html's own (it reads before the script runs).
 - **A number is text first; a chart is an addition** (src/web/charts.js over the vendored uPlot): every value a chart
   draws is also in a card or a table, a holder is hidden until it is drawn, and when uPlot cannot load the page reads
@@ -198,6 +198,15 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   page's own error), never "sync" alone.
 - **Numbers are mono and right-aligned in a column; a table scrolls inside its card on a phone, never the page**: the
   reader compares down a column, and a page that scrolls sideways hides the nav.
+- **Every list is written by `listTable`, and a layout test holds every list on every page** (issue 1049). A list of
+  rows is a table in its `.list` card (`listTable(cls, inner)` of src/web/shared.js), never a bare table, a `panel` or a
+  wrapper of the page's own. The card is as wide as its column. A list with fixed columns sets its least width as
+  `--least` for its class (app.css "Lists"), the width at which every column reads whole. Below it the list scrolls
+  inside its card, never the page, and a row's actions (`td.act`) stay pinned at the card's right. Why: each page's
+  narrow layout was fixed on its own. Sync events squeezed (issue 1038) and then cut its names (issue 1043), while
+  Tables and Users scrolled. Detector: tests/web-lists-layout.test.ts loads every page from 320 to 1600 px, in light
+  and dark, with long names and messages (tests/web-lists-fixtures.ts, where a new list gets its rows). CI runs it,
+  and there it fails rather than skips.
 - **A click moves no other row and no column** — a table that moves under the pointer loses the next click:
   a question (a Remove's, a Cancel's), a form (Columns…, Name its key…) and what an action answered are a POPOVER beside
   the button (`pop` and `placePops` of src/web/shared.js: written after the table, `position: fixed`, anchored to the
@@ -216,7 +225,7 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   we can't see them"): each wraps in its cell, the row growing to fit (detector: tests/web-tables-layout.test.ts). Only an expander the reader opens (a request's
   details, a copy's whole error) pushes rows down — and never widens a column (`.detail-body`). A row's actions never
   wrap (`td.act`) but on a phone, where the Tables and Users lists stack them in a column of their own (a pinned column
-  of buttons in a row covered the Users' Role and its From…, which could not be pressed), a table too wide scrolls in its own box (every table on a phone; `.table-wrap` where a page wraps one), and where the table scrolls a row's
+  of buttons in a row covered the Users' Role and its From…, which could not be pressed), a list too wide scrolls in its own card (`listTable`, above), and where the list scrolls a row's
   actions stay pinned at its card's right. The detector is `tests/web-page.test.ts` "layout guard" (no row, cell or
   question inserted by any click); walk every page at 1280, 1024, 900 and 375 px measuring rows and columns before and
   after each click (getBoundingClientRect) after a change to a row.
