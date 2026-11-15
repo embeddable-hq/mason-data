@@ -1428,26 +1428,58 @@ test("past what may spill is 53400 and a full disk 53100, each with the way out,
   assert.equal(pgErrorOf(new Error("Conversion Error: Could not convert string 'No space left on device' to INT32"), "SELECT 1").fields.code, "22P02");
 });
 
+// ISSUE 221: on the file's shared store, the fixtures' primary keys stay in memory (24 MiB of a 38 MiB limit by #1030,
+// from 36 tables). So this statement's room shrank with each fixture table, and it met 53200. It runs on a store of its
+// own that holds only what it reads, and what is resident before it is held to a small share.
 test("a statement past what may spill fails alone, 53400, and the session goes on", async () => {
-  const memory = String((await store.writer.runAndReadAll("SELECT current_setting('memory_limit')")).getRows()[0]![0]);
-  const spill = String((await store.writer.runAndReadAll("SELECT current_setting('max_temp_directory_size')")).getRows()[0]![0]);
-  const c = await client();
+  const MiB = 2 ** 20, GiB = 2 ** 30;
+  let free = 64 * GiB;
+  const own = await DuckStore.open(path.join(dir, "spill-alone.db"), () => undefined, { memoryLimit: "40MB", diskFree: () => free });
+  let alone: PgApiServer | undefined;
+  const clients: pg.Client[] = [];
   try {
-    await store.writer.run("SET memory_limit = '40MB'");
+    await own.writer.run("CREATE TABLE public.big AS SELECT range::INTEGER AS id, 'v' || range AS v FROM range(150000)");
+    // written to the file, so its blocks can leave memory without taking any of the spill's room
+    await own.writer.run("CHECKPOINT");
+    // the memory a statement cannot spill grows with the engine's threads (measured: about 15 MB at 4, 22 to 24 MB at
+    // 16), so the machine's cores do not decide whether the statement fits
+    await own.writer.run("SET threads = 4");
+    const resident = Number((await own.writer.runAndReadAll("SELECT sum(memory_usage_bytes) FROM duckdb_memory()")).getRowsJS()[0]![0]);
+    assert.ok(resident < own.memoryLimitBytes / 8, `${(resident / MiB).toFixed(1)} MiB resident of ${(own.memoryLimitBytes / MiB).toFixed(1)} MiB before the statement`);
+    const big: PgSchema = { database: "app", tables: [schema.tables.find((t) => t.name === "big")!], views: [] };
+    alone = await startPostgresApi({
+      port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test",
+      authenticate: (password) => { const p = tokenProblem(API_KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
+      schema: () => big, record: () => undefined, log: () => undefined,
+      duck: await own.listener(undefined),
+    });
+    for (let i = 0; i < 2; i++) {
+      const c = new pg.Client({ host: "127.0.0.1", port: alone.port, database: "app", user: "mason", password: mintToken(API_KEY, 600).token });
+      clients.push(c);
+      await c.connect();
+    }
+    const [c, other] = clients as [pg.Client, pg.Client];
     const spills = "SELECT count(*) AS n FROM (SELECT DISTINCT v || repeat('x', 300) AS w FROM big) d";
     assert.equal((await c.query(spills)).rows[0].n, "150000", "with room on disk it completes in 40MB");
-    await store.writer.run("SET GLOBAL max_temp_directory_size = '2MiB'");
+    // the disk all but full: the ceiling follows it, as a run's does every 15 s
+    free = 4 * MiB;
+    await own.keepSpillCeiling();
+    assert.equal(own.spillLimitBytes, 2 * MiB);
     // a DISTINCT that spills and answers one row completes in 40MB with room on disk (above), so only the spill's ceiling
     // can stop it. A sorted result of every row (#221) did not fit in 40MB whatever the disk, so which limit the engine
     // said first followed its threads' timing.
-    await assert.rejects(c.query(spills),
-      (e: pg.DatabaseError) => e.code === "53400" && /room on disk/.test(e.message) && /MASON_SPILL_LIMIT/.test(e.hint ?? "") && !/duckdb|\.tmp/i.test(`${e.message} ${e.detail ?? ""}`));
+    const e = await c.query(spills).then(() => assert.fail("it completed past the ceiling"), (e: pg.DatabaseError) => e);
+    assert.ok(e.code === "53400" && /room on disk/.test(e.message) && /MASON_SPILL_LIMIT/.test(e.hint ?? "") && !/duckdb|\.tmp/i.test(`${e.message} ${e.detail ?? ""}`),
+      `${e.code}: ${e.message}`);
+    // the session goes on, and so does another one open beside it (the spill's room is shared while both run, so a
+    // statement run at the same moment may meet the ceiling too: store.ts "WHAT STATEMENTS MAY SPILL")
+    assert.equal((await c.query("SELECT count(*) AS n FROM big")).rows[0].n, "150000");
+    assert.equal((await other.query("SELECT count(*) AS n FROM big")).rows[0].n, "150000");
   } finally {
-    await store.writer.run(`SET memory_limit = '${memory.replace(" ", "")}'`);
-    await store.writer.run(`SET GLOBAL max_temp_directory_size = '${spill.replace(" ", "")}'`);
+    for (const c of clients) await c.end();
+    await alone?.close();
+    await own.close();
   }
-  try { assert.equal((await c.query("SELECT count(*) AS n FROM big")).rows[0].n, "150000"); }
-  finally { await c.end(); }
 });
 
 // a runaway statement must not hold DuckDB for ever: the session's statement_timeout, or Mason's own, the shorter
