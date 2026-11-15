@@ -45,13 +45,18 @@ These are not breaking changes, so they can go in a patch:
 - A new key, a new setting or a new command that a project does not have to use.
 - A fix for a wrong answer, a crash or lost data.
 - A query that Mason now answers, or now refuses by name because its answer was wrong.
+- A change that makes Mason sync a table again whole after the upgrade, once, such as a new layout of the synced data.
+  The project is read the same, but the restart reads every such table from the source again. It may go in a patch
+  only if each such table keeps serving its old data until its new sync is done. The notes must say so under "Before
+  you upgrade" (the owner, 2026-11-14).
+
+A release that makes a table, or Mason itself, unavailable for an extended period is a new line (`0.21.0`), never a
+patch (the owner, 2026-11-14). Unavailable means refused, not built yet, or nothing served while Mason works.
 
 Not decided yet, so ask the owner before such a change goes in a patch:
 
 - A renamed or removed `--json` key, event kind, metric or log line, such as `copied` becoming `full_sync` in 0.20.0.
   The project is read the same, but a host's script or alert can stop matching.
-- A change that makes Mason sync a table again whole after the upgrade, once, such as a new layout of the synced data.
-  The project is read the same, but the restart reads every such table from the source again.
 - A renamed or removed setting the host sets: a `MASON_*` variable, or the variable the sources file names for the
   URL. The project is read the same, but a setting under an old name stops the start, so a restart alone no longer
   works.
@@ -64,6 +69,7 @@ section alone does not decide it.
 - **It is a new line** when it holds a breaking change, by the definition above. Its "Before you upgrade" then asks
   the reader to change a project's files, or says that a project is read or refused differently. The version is the
   next minor version (`0.21.0`), and the notes tell the reader to move the pin.
+- **It is a new line too** when it makes a table, or Mason itself, unavailable for an extended period (above).
 - **It is a patch** otherwise. Then the version is the next patch on the current line (`0.20.1`). Its "Before you
   upgrade" says that the pin needs no change (`v0.17.1.md` has the wording).
 
