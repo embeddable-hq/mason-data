@@ -254,9 +254,18 @@ test("the copy reads the demo database with three readers in parallel chunks, ev
   const logged: string[] = [];
   const store = await DuckStore.open(path.join(dir, "duck.db"), (l) => logged.push(l), { memoryLimit: "256MB" });
   const readers = new Set<number>();
+  // WHAT THE STATE SAYS OF A TABLE WHILE ITS CHUNKS ARE READ (issue 1011): its whole read running, and since when
+  const during = new Map<string, Set<string>>();
+  const began = Date.now();
   // small chunks (1,200 rows), so each of the larger tables is read by the three readers side by side
-  const sync = new Sync(store, parsed.source, "demo", (l) => logged.push(l), 3_600_000, "poll", null,
-    { copyParallel: 3, copyChunkRows: 1_200, onChunk: (e) => { if (e.phase === "committed") readers.add(e.reader); } });
+  const sync: Sync = new Sync(store, parsed.source, "demo", (l) => logged.push(l), 3_600_000, "poll", null,
+    { copyParallel: 3, copyChunkRows: 1_200, onChunk: (e) => {
+      if (e.phase === "committed") readers.add(e.reader);
+      const st = sync.state().find((x) => x.source === e.source);
+      const seen = during.get(e.source) ?? new Set<string>();
+      seen.add(`${st?.rebuilding}@${st?.rebuildingSince}`);
+      during.set(e.source, seen);
+    } });
   const copied = async (table: string): Promise<number> => Number((await store.writer.runAndReadAll(`SELECT count(*) FROM public.${table}`)).getRowsJS()[0]?.[0]);
   try {
     await sync.open();
@@ -267,6 +276,15 @@ test("the copy reads the demo database with three readers in parallel chunks, ev
       assert.equal(await copied(t), source[t], `${t}: the copy holds the source's rows\n${logged.slice(-8).join("\n")}`);
     }
     assert.deepEqual([...readers].sort(), [0, 1, 2], "three readers each committed chunks");
+    // each table's whole read said as running from one moment, from its start to its end; nothing once all are done
+    for (const [source, seen] of during) {
+      assert.equal(seen.size, 1, `${source}: one start through its chunks: ${[...seen].join(", ")}`);
+      const [kind, since] = [...seen][0]!.split("@");
+      assert.equal(kind, "copy", source);
+      assert.ok(Date.parse(since!) >= began - 1000 && Date.parse(since!) <= Date.now(), `${source}: since ${since}`);
+    }
+    assert.ok(during.size >= 4, "every table's chunks were seen");
+    assert.deepEqual(sync.state().filter((x) => x.rebuilding !== undefined || x.rebuildingSince !== undefined), [], "nothing running once every table is synced");
     assert.ok(sync.state().every((x) => x.phase === "copied"), JSON.stringify(sync.state()));
 
     const said = await s.change();

@@ -383,7 +383,7 @@ test("a table not copied now says so in kept itself — waiting for its copy, it
 type Schedule = {
   nextPassDelay(): number | null; followUp(source: string): void; attach(): Promise<void>;
   stopped: boolean; timer: TimerAt | null; due: Map<string, number>; behind: Map<string, { why: string }>;
-  queued: Map<string, unknown>; rebuildingNow: { source: string; kind: string } | null;
+  queued: Map<string, unknown>; rebuildingNow: { source: string; kind: string; since: number } | null;
 };
 const scheduleOf = (s: SyncClass): Schedule => s as unknown as Schedule;
 /** the sync's timer, read and cleared (null: none set), so no pass it would run ever starts */
@@ -400,7 +400,7 @@ test("a table being caught up, queued or rebuilt is not due to a pass: the loop 
     s.queued.set("public.a", { kind: "catch-up" });
     assert.equal(s.nextPassDelay(), null, "its catch-up queued: that polls it, then times the next pass (counted as due, a pass every few ms polled nothing)");
     s.queued.clear();
-    s.rebuildingNow = { source: "public.a", kind: "catch-up" };
+    s.rebuildingNow = { source: "public.a", kind: "catch-up", since: Date.now() };
     assert.equal(s.nextPassDelay(), null, "its catch-up running: the same");
     s.rebuildingNow = null;
     s.behind.clear();
@@ -425,7 +425,7 @@ test("each table's state says why mason sync of it is refused now, in the words 
   await withSync({ mode: "poll", tables: names.map((n) => table(n)),
     seed: async (run) => { for (const n of ["a", "d", "e", "f", "g", "h", "i"]) { await run(copied(n)); await run(lastPoll(n)); } await run(copied("c", [column("id")], "failed", "could not read the next chunk")); } }, async (sync, _logged, events) => {
     type Inner = { stopped: boolean; attach(): Promise<void>; states: Map<string, CopyState>; copiedAs: Map<string, string>; snapshots: Map<string, unknown>;
-      retired: Map<string, { layout: string; short: string }>; behind: Map<string, { why: string }>; rebuildingNow: { source: string; kind: string } | null };
+      retired: Map<string, { layout: string; short: string }>; behind: Map<string, { why: string }>; rebuildingNow: { source: string; kind: string; since: number } | null };
     const s = sync as unknown as Inner;
     s.stopped = false;
     s.attach = async () => { throw new Error("no source in this test"); };
@@ -437,7 +437,7 @@ test("each table's state says why mason sync of it is refused now, in the words 
       s.snapshots.delete("public.f");
       s.retired.set("public.g", { layout: "stored in key order with its index (an older layout)", short: "in an older layout" });
       s.behind.set("public.h", { why: "after its whole read" });
-      s.rebuildingNow = { source: "public.i", kind: "copy" };
+      s.rebuildingNow = { source: "public.i", kind: "copy", since: Date.now() };
       const refusalOf = async (n: string): Promise<string | null> => {
         try { await sync.pollNow([`public.${n}`]); return null; }
         catch (e) { return e instanceof syncModule.PollRefused ? e.message : null; }

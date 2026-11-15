@@ -89,6 +89,9 @@ export interface TableState extends Omit<CatalogTable, "columns"> {
    *  again whole, being caught up), or null when it would run: the sync's one check (src/duck/sync.ts syncRefusal);
    *  absent from a run before it was said */
   syncRefusal?: string | null;
+  /** the run's own sync of it running now, and since when (issue 1011): `copy` its whole read (its first sync, or read
+   *  again whole), `catch-up` the one poll after it; absent otherwise (a compaction is not said) */
+  rebuilding?: { kind: "copy" | "catch-up"; startedAt: string };
 }
 /** which reason the run cannot write its sources file (`RunState.sourcesReadOnlyKind`) */
 export type SourcesReadOnlyKind = "deployed" | "unwritable" | "unknown";
@@ -524,7 +527,8 @@ const STATUS_USAGE = `usage: mason status [--json]
     addedColumns, copy, error (addedColumns: the columns its synced data holds now; error: why its sync failed: its first sync, or the poll, catch-up, stream or
     publication check keeping a synced table current; null otherwise), kept, syncRefusal (why mason sync <table> is
     refused now, in its words: its first sync not finished or failed, being read again whole, being caught up; null
-    when it would run), sync: { state (synced, syncing, catching-up: served and caught up by one poll
+    when it would run), rebuilding (its own sync running now, its first sync or a read again whole, or the one poll
+    after it: { kind, startedAt }; absent otherwise), sync: { state (synced, syncing, catching-up: served and caught up by one poll
     before it is kept current — after its whole read too,
     behind: served and kept but older than its sync: promises, failed, waiting), syncedAt (when
     it was last brought current), syncSeconds (how long that took), syncedBy (copy, poll, catch-up, stream),

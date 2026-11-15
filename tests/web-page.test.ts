@@ -3843,6 +3843,209 @@ test("Sync events: pressing Took sorts the list by how long each sync took, and 
   assert.match(app.view()["syncs-events"]!, /aria-sort="descending"><button type="button" class="sort on" data-sort-table="events" data-sort-key="time">When/, "When again, newest first");
 });
 
+// A SYNC RUNNING SHOWS ON THE SYNCS LIST WHILE IT RUNS (issue 1011): a sync of a large table took minutes and the list
+// showed nothing until it ended. Every sync running now is a row of its own at the top — its kind (a sync asked by hand,
+// a first sync, a full sync again, its columns changed, a catch-up), its table, "Syncing…" and how long it has run so
+// far in Took, ticking — from `/api/state` (`syncByHand`, `rebuilding`), so a reload mid-sync shows it too; when it ends
+// the row is replaced by its event as recorded.
+const RUN_AT = Date.parse("2026-10-28T09:10:00.000Z");
+/** The state with a sync running on each added table: customers synced by hand 12 s ago, orders' first sync 8 min in
+ *  (`rebuilding` through the server's own runState), events caught up for 5 s. `o.events`: events' run instead (`copy`
+ *  read again whole, null none). */
+function runningState(o: { events?: "copy" | "catch-up" | null; byHand?: Record<string, unknown> | null } = {}): RunState {
+  const events = o.events === undefined ? "catch-up" : o.events;
+  const s = stateOf([copied("public.customers", 1200, "2026-10-28T08:00:00.000Z"),
+    { source: "public.orders", phase: "copying", rows: null, bytes: null, seconds: null, copiedAt: null, error: null, rowsSoFar: 280_000, rowsEstimate: 2_000_000, progress,
+      rebuilding: "copy", rebuildingSince: "2026-10-28T09:02:00.000Z" },
+    { ...copied("public.events", 30_000_000, "2026-10-28T09:00:00.000Z"), ...(events === "catch-up" ? { behind: "after its whole read" } : {}),
+      ...(events !== null ? { rebuilding: events, rebuildingSince: "2026-10-28T09:09:55.000Z" } : {}) }], { now: RUN_AT });
+  const byHand = o.byHand === undefined ? { id: 7, tables: ["public.customers"], state: "syncing", startedAt: "2026-10-28T09:09:48.000Z", endedAt: null } : o.byHand;
+  for (const t of s.tables as unknown as Array<Record<string, unknown>>) if (t.table === "public.customers" && byHand !== null) t.syncByHand = byHand;
+  return s;
+}
+const liveRows = (html: string) => [...html.matchAll(/<tr class="t-running">[\s\S]*?<\/tr>/g)].map((m) => textOf(m[0]));
+
+test("Sync events: every sync running now is a row of its own at the top — its kind, its table, Syncing… and how long it has run in Took (issue 1011)", () => {
+  const renderEvents = fnOf<[unknown, Record<string, unknown>?], string>(syncsPage, "renderEvents");
+  const runningSyncs = fnOf<[unknown], Array<Record<string, unknown>>>(syncsPage, "runningSyncs");
+  const s = runningState();
+  // the server says the run's own sync and since when (src/cli/run-server.ts runState); a compaction is no sync
+  const t = (name: string) => (s.tables as unknown as Array<Record<string, unknown>>).find((x) => x.table === name)!;
+  assert.deepEqual(t("public.orders").rebuilding, { kind: "copy", startedAt: "2026-10-28T09:02:00.000Z" });
+  assert.deepEqual(t("public.events").rebuilding, { kind: "catch-up", startedAt: "2026-10-28T09:09:55.000Z" });
+  assert.equal(t("public.customers").rebuilding, undefined);
+  const compacting = stateOf([{ ...copied("public.customers", 1200, "2026-10-28T08:00:00.000Z"), rebuilding: "compact", rebuildingSince: "2026-10-28T09:09:00.000Z" }], { now: RUN_AT });
+  assert.equal((compacting.tables as unknown as Array<Record<string, unknown>>).find((x) => x.table === "public.customers")!.rebuilding, undefined, "a compaction is not listed");
+  assert.deepEqual(runningSyncs(compacting), []);
+
+  const running = runningSyncs(s);
+  const html = renderEvents(UL_EVENTS, { now: RUN_AT, running });
+  assert.deepEqual(liveRows(html), [
+    "Now Catch-up public.events Syncing… It syncs the rows that changed since its last full sync. 5.0 s",
+    "Now Manual sync public.customers Syncing… 12.0 s",
+    "Now First sync public.orders Syncing… 15% done. 8 min",
+  ]);
+  // at the top, the one started last first, before the events recorded; a badge in the colour of work under way; its time ticks
+  assert.ok(html.indexOf("t-running") < html.indexOf("copied 2,000,000 rows"), "the running rows lead the list");
+  assert.match(html, /<td class="num"><time data-tick datetime="2026-10-28T09:09:48.000Z" title="started 2026-10-28 09:09:48 UTC">12.0 s<\/time><\/td>/);
+  assert.match(html, /<span title="running"><span class="badge warn">Manual sync<\/span><\/span>/);
+  assert.match(textOf(renderEvents(UL_EVENTS, { now: RUN_AT + 60_000, running })), /Manual sync public\.customers Syncing… 1 min 12 s/, "a minute on, it has run a minute longer");
+  // oldest first: the running rows end the list
+  const asc = renderEvents(UL_EVENTS, { now: RUN_AT, running, sort: { key: "time", dir: "asc" } });
+  assert.ok(asc.indexOf("t-running") > asc.indexOf("the run stopped"), "oldest first, they come last");
+  assert.deepEqual(liveRows(asc).map((r) => r.split(" ").find((w) => w.startsWith("public."))), ["public.orders", "public.customers", "public.events"], "the one started first first");
+  // a full sync again of a table already synced: its columns changed, or not
+  const again = runningSyncs(runningState({ byHand: null, events: "copy" }));
+  assert.deepEqual(liveRows(renderEvents(UL_EVENTS, { now: RUN_AT, running: again }))[0], "Now Full sync public.events Syncing… It is synced again whole. 5.0 s");
+  const reshaped = runningState({ byHand: null, events: "copy" });
+  (reshaped.tables as unknown as Array<Record<string, unknown>>).find((x) => x.table === "public.events")!.columnsPending = ["id", "name", "note"];
+  assert.deepEqual(liveRows(renderEvents(UL_EVENTS, { now: RUN_AT, running: runningSyncs(reshaped) }))[0], "Now Full sync public.events Syncing… Its columns changed, so it is synced again whole. 5.0 s");
+  // a sync by hand that ended, or none at all: no row
+  assert.deepEqual(runningSyncs(runningState({ byHand: { id: 7, tables: ["public.customers"], state: "synced", startedAt: "2026-10-28T09:09:48.000Z", endedAt: "2026-10-28T09:09:59.000Z" } })).map((r) => r.table), ["public.orders", "public.events"]);
+  assert.deepEqual(runningSyncs(RUNNING), []);
+  assert.doesNotMatch(renderEvents(UL_EVENTS, { now: RUN_AT }), /t-running/);
+  // a list with no event yet still shows what is running
+  assert.deepEqual(liveRows(renderEvents({ keptDays: 7, events: [] }, { now: RUN_AT, running })).length, 3);
+  assert.doesNotMatch(textOf(renderEvents({ keptDays: 7, events: [] }, { now: RUN_AT, running })), /No sync event/);
+});
+
+test("Sync events: the filters treat a running sync as the kind it ends as, its table, and never a failure (issue 1011)", () => {
+  const renderEvents = fnOf<[unknown, Record<string, unknown>?], string>(syncsPage, "renderEvents");
+  const running = fnOf<[unknown], unknown[]>(syncsPage, "runningSyncs")(runningState());
+  const tables = (o: Record<string, unknown>) => liveRows(renderEvents(UL_EVENTS, { now: RUN_AT, running, ...o })).map((r) => r.split(" ").find((w) => w.startsWith("public.")));
+  assert.deepEqual(tables({}), ["public.events", "public.customers", "public.orders"]);
+  assert.deepEqual(tables({ kind: "synced" }), ["public.customers"], "Manual sync: the sync asked by hand");
+  assert.deepEqual(tables({ kind: "sync_failed" }), ["public.customers"], "Manual sync failed: what it may end as");
+  assert.deepEqual(tables({ kind: "full_sync" }), ["public.orders"], "Full sync: the first sync");
+  assert.deepEqual(tables({ kind: "catch_up_failed" }), ["public.events"]);
+  assert.deepEqual(tables({ kind: "polled" }), [], "a scheduled sync's kind: none of them");
+  assert.deepEqual(tables({ kind: "restart" }), []);
+  assert.deepEqual(tables({ table: "public.orders" }), ["public.orders"]);
+  assert.deepEqual(tables({ table: "Mason" }), [], "Mason events: no table's sync");
+  assert.deepEqual(tables({ failuresOnly: true }), [], "a sync running has not failed");
+  assert.match(textOf(renderEvents({ keptDays: 7, events: [] }, { now: RUN_AT, running, table: "public.audit" })), /^No events for public\.audit in the last 7 days\.$/, "a table with none is said by its name, as before");
+});
+
+/** Every row of a Sync events part that is a sync the state says (running, or ended and waiting for its event). */
+const syncRows = (html: string) => [...html.matchAll(/<tr class="t-(?:running|ended)[^"]*">[\s\S]*?<\/tr>/g)].map((m) => textOf(m[0]));
+const HAND_ENDED = (state: string, more: Record<string, unknown> = {}) => ({ id: 7, tables: ["public.customers"], state, startedAt: "2026-10-28T09:09:48.000Z", endedAt: "2026-10-28T09:10:03.000Z", ...more });
+/** The app on Sync events over a run whose state is `state()`, its clock `t` from RUN_AT. */
+function syncsApp(state: () => unknown, hash = "syncs") {
+  const run = fakeRun(); withUsageAnswers(run);
+  const clock = { t: RUN_AT };
+  run.answers.set("GET api/state", () => answer(state())());
+  const app = fn<[unknown, () => Date], ObsApp>("createApp")(run.fetch, () => new Date(clock.t));
+  app.show(hash);
+  const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
+  const rows = () => syncRows(app.view()["syncs-events"]!);
+  return { run, app, clock, asked, rows };
+}
+
+test("Sync events: a sync running shows from the first read (a reload mid-sync), its time ticks at each poll, and it hands over to its event as recorded (issue 1011)", async () => {
+  let state: unknown = runningState({ events: null });
+  const { run, app, clock, asked, rows } = syncsApp(() => state);
+  // a page opened mid-sync: the first poll reads the state, and the rows are there
+  assert.deepEqual(await asked(), ["GET api/events?limit=500&since=15m", "GET api/state"]);
+  const first = app.view()["syncs-events"]!;
+  assert.deepEqual(rows(), ["Now Manual sync public.customers Syncing… 12.0 s", "Now First sync public.orders Syncing… 15% done. 8 min"]);
+  // the time moves with the clock alone (only `<time data-tick>`)
+  clock.t += 2000; await app.poll();
+  assert.deepEqual(rows(), ["Now Manual sync public.customers Syncing… 14.0 s", "Now First sync public.orders Syncing… 15% done. 8 min 2 s"]);
+  const steady = (h: string) => h.replace(/(<time data-tick[^>]*>)[^<]*(<\/time>)/g, "$1$2");
+  assert.equal(steady(app.view()["syncs-events"]!), steady(first), "only the running times changed");
+  // the sync by hand ends: AT ONCE no longer Syncing…, but what the state says it did, its time its own, until its event
+  clock.t += 2000;
+  state = runningState({ byHand: HAND_ENDED("synced"), events: null });
+  await app.poll();
+  assert.deepEqual(rows(), ["1s ago Manual sync public.customers Synced. 15.0 s", "Now First sync public.orders Syncing… 15% done. 8 min 4 s"]);
+  assert.doesNotMatch(app.view()["syncs-events"]!.split("public.orders")[0]!, /Syncing…/);
+  // its event is read: the row is gone, and the event as recorded is in its place, with its result and Took
+  const synced = { at: "2026-10-28T09:10:03.000Z", kind: "synced", failed: false, table: "public.customers", message: "synced by hand: 1 added, 0 updated, 0 deleted, 1,201 rows now · 14.9 s", code: null, origin: null, tookMs: 14_900 };
+  run.answers.set("GET api/events?limit=500&since=15m", answer({ ...UL_EVENTS, events: [...UL_EVENTS.events, synced] }));
+  clock.t += 2000; await app.poll();
+  assert.deepEqual(rows(), ["Now First sync public.orders Syncing… 15% done. 8 min 6 s"]);
+  assert.match(textOf(app.view()["syncs-events"]!), /3s ago Manual sync public\.customers synced by hand: 1 added, 0 updated, 0 deleted, 1,201 rows now 14\.9 s/);
+});
+
+test("Sync events: a sync the state says ended never says Syncing… — its outcome until its event, or gone at once when the state says nothing of it (issue 1011)", async () => {
+  // (b) a sync by hand that failed with no event of it (refused once it began, Mason stopping): its failure at once,
+  // then let go, since no event will come
+  let state: unknown = runningState({ events: null });
+  let s = syncsApp(() => state);
+  await s.app.poll();
+  s.clock.t += 2000;
+  state = runningState({ byHand: HAND_ENDED("failed", { failure: { code: "busy", message: "public.customers is already syncing (started 1s ago)" } }), events: null });
+  await s.app.poll();
+  assert.deepEqual(s.rows(), ["0s ago ✗ Manual sync failed public.customers public.customers is already syncing (started 1s ago) 15.0 s", "Now First sync public.orders Syncing… 15% done. 8 min 2 s"]);
+  assert.match(s.app.view()["syncs-events"]!, /<tr class="t-ended t-failed">/);
+  s.clock.t += 20_000; await s.app.poll();
+  assert.deepEqual(s.rows(), ["Now First sync public.orders Syncing… 15% done. 8 min 22 s"], "let go: no event of it came");
+
+  // (a) a catch-up that succeeds records no event: its row goes as the state says it ended, never 20 s on
+  state = runningState({ byHand: null });
+  s = syncsApp(() => state);
+  await s.app.poll();
+  assert.deepEqual(s.rows().map((r) => r.split(" ")[1]), ["Catch-up", "First"]);
+  s.clock.t += 2000;
+  state = runningState({ byHand: null, events: null });
+  await s.app.poll();
+  assert.deepEqual(s.rows(), ["Now First sync public.orders Syncing… 15% done. 8 min 2 s"], "the catch-up's row gone at once");
+
+  // (c) a first sync that ended without a sync (its attach failed: source_unreachable, not one of its ends): gone at once
+  state = runningState({ byHand: null, events: null });
+  s = syncsApp(() => state);
+  await s.app.poll();
+  s.clock.t += 2000;
+  state = stateOf([copied("public.customers", 1200, "2026-10-28T08:00:00.000Z"),
+    { source: "public.orders", phase: "failed", rows: null, bytes: null, seconds: null, copiedAt: null, error: "could not attach the database: connection refused" }], { now: s.clock.t });
+  await s.app.poll();
+  assert.deepEqual(s.rows(), [], "no Syncing… for a whole read that is over");
+
+  // a first sync that ended with its synced data: Synced whole, its time its own, until its full_sync is read
+  state = runningState({ byHand: null, events: null });
+  s = syncsApp(() => state);
+  await s.app.poll();
+  s.clock.t += 2000;
+  state = stateOf([copied("public.customers", 1200, "2026-10-28T08:00:00.000Z"),
+    { ...copied("public.orders", 2_000_000, "2026-10-28T09:10:01.000Z"), synced: { at: "2026-10-28T09:10:01.000Z", seconds: 481, by: "copy" } }], { now: s.clock.t });
+  await s.app.poll();
+  assert.deepEqual(s.rows(), ["1s ago First sync public.orders Synced whole. 8 min 1 s"]);
+  s.run.answers.set("GET api/events?limit=500&since=15m", answer({ ...UL_EVENTS, events: [...UL_EVENTS.events,
+    { at: "2026-10-28T09:10:01.000Z", kind: "full_sync", failed: false, table: "public.orders", message: "synced whole: 2,000,000 added, 0 updated, 0 deleted, 2,000,000 rows now · 8 min 1 s", code: null, origin: null, tookMs: 481_000 }] }));
+  s.clock.t += 2000; await s.app.poll();
+  assert.deepEqual(s.rows(), [], "its event in its place");
+});
+
+test("Sync events: while the run does not answer, a running sync's time stands still (issue 1011)", async () => {
+  let state: unknown = runningState({ events: null });
+  const s = syncsApp(() => state);
+  await s.app.poll();
+  s.clock.t += 2000; await s.app.poll();
+  assert.deepEqual(s.rows()[0], "Now Manual sync public.customers Syncing… 14.0 s");
+  // the run stopped: the state's read fails, the page keeps what it had, and the time stops where the run last answered
+  state = undefined;
+  s.run.answers.set("GET api/state", answer({ error: "down", failure: { code: "unreachable", message: "Mason is not running", next: [] } }, 503));
+  s.clock.t += 2000; await s.app.poll();
+  s.clock.t += 60_000; await s.app.poll();
+  assert.deepEqual(s.rows()[0], "Now Manual sync public.customers Syncing… 14.0 s", "frozen at the last answer");
+  // it answers again (a run started again has no sync by hand running): the row goes
+  s.run.answers.set("GET api/state", answer(runningState({ byHand: null, events: null })));
+  s.clock.t += 2000; await s.app.poll();
+  assert.deepEqual(s.rows(), ["Now First sync public.orders Syncing… 15% done. 9 min 6 s"]);
+});
+
+test("Sync events: a sync running reads the events at the range's own rate, and once more right after it ended (issue 1011)", async () => {
+  let state: unknown = runningState({ events: null });
+  const s = syncsApp(() => state, "observability/syncs?range=7d");
+  assert.deepEqual(await s.asked(), ["GET api/events?limit=500&since=7d", "GET api/state"]);
+  // the week's events a minute apart, a sync running or not
+  for (let i = 0; i < 5; i++) { s.clock.t += 2000; assert.deepEqual(await s.asked(), ["GET api/state"], "the state alone while it runs"); }
+  // the sync by hand ends: seen at this poll, its events read at the next, once
+  state = runningState({ byHand: HAND_ENDED("synced"), events: null });
+  s.clock.t += 2000; assert.deepEqual(await s.asked(), ["GET api/state"]);
+  s.clock.t += 2000; assert.deepEqual(await s.asked(), ["GET api/events?limit=500&since=7d", "GET api/state"], "read once for its event");
+  s.clock.t += 2000; assert.deepEqual(await s.asked(), ["GET api/state"], "and not again");
+});
 test("Sync events: the run's entries are rows, NEWEST FIRST, a multi-line entry kept as one preformatted row", () => {
   const renderLogs = fnOf<[unknown], string>(syncsPage, "renderLogs");
   const html = renderLogs(LOG);
@@ -3854,27 +4057,27 @@ test("Sync events: the run's entries are rows, NEWEST FIRST, a multi-line entry 
   assert.match(textOf(renderLogs({ lines: [], kept: 2000 })), /The run has logged nothing yet\./);
 });
 
-test("Sync events: the events every 10 s, a week or more once a minute; the run's raw log sits behind a closed details and is read, every 5 s, only while it is open; a refusal is its Failure under it", async () => {
+test("Sync events: the events every 10 s, a week or more once a minute, the state at every poll; the run's raw log sits behind a closed details and is read, every 5 s, only while it is open; a refusal is its Failure under it", async () => {
   const run = fakeRun(); withUsageAnswers(run);
   let t = Date.UTC(2026, 9, 28, 9, 0, 0);
   const app = fn<[unknown, () => Date], App & { showRawLog(open: boolean): Promise<void> }>("createApp")(run.fetch, () => new Date(t));
   app.show("syncs");
   const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
-  assert.deepEqual(await asked(), ["GET api/events?limit=500&since=15m", "GET api/state"], "closed: the log is not read (the state is the sidebar's)");
+  assert.deepEqual(await asked(), ["GET api/events?limit=500&since=15m", "GET api/state"], "closed: the log is not read");
   assert.match(textOf(app.view()["syncs-events"]!), /✗ Full sync failed/);
   const closed = app.view()["syncs-run"]!;
   assert.equal(closed, `<details id="syncs-raw"><summary>The run's raw log (for debugging)</summary></details>`);
   assert.doesNotMatch(closed, /mason started/, "the entries are not written while it is closed");
-  t += 10_000; assert.deepEqual(await asked(), ["GET api/events?limit=500&since=15m"], "10 s on: still the events alone");
+  t += 10_000; assert.deepEqual(await asked(), ["GET api/events?limit=500&since=15m", "GET api/state"], "10 s on: the events, and the state (the syncs running now) at every poll");
   // opened: the log is read at once, then every 5 s
   run.asked.length = 0;
   await app.showRawLog(true);
   assert.deepEqual(run.asked, ["GET api/logs?lines=200"]);
   assert.match(app.view()["syncs-run"]!, /^<details id="syncs-raw" open><summary>The run's raw log \(for debugging\)<\/summary>/);
   assert.match(textOf(app.view()["syncs-run"]!), /mason started/);
-  t += 2000; assert.deepEqual(await asked(), [], "2 s on: neither is due");
-  t += 3000; assert.deepEqual(await asked(), ["GET api/logs?lines=200"], "5 s on: the log alone");
-  t += 5000; assert.deepEqual(await asked(), ["GET api/events?limit=500&since=15m", "GET api/logs?lines=200"], "10 s on: both");
+  t += 2000; assert.deepEqual(await asked(), ["GET api/state"], "2 s on: neither is due");
+  t += 3000; assert.deepEqual(await asked(), ["GET api/state", "GET api/logs?lines=200"], "5 s on: the log");
+  t += 5000; assert.deepEqual(await asked(), ["GET api/events?limit=500&since=15m", "GET api/state", "GET api/logs?lines=200"], "10 s on: both");
   app.show("usage"); assert.deepEqual((await asked()).some((p) => p.includes("api/logs")), false, "not while another page is shown");
   app.show("syncs");
   run.answers.set("GET api/logs?lines=200", answer({ error: "lines is a whole number of log entries, 1 to 2000", failure: { code: "failed", message: "lines is a whole number of log entries, 1 to 2000", next: [] } }, 400));
@@ -3883,15 +4086,15 @@ test("Sync events: the events every 10 s, a week or more once a minute; the run'
   assert.equal(app.view().poll, "");
   // closed again: no read
   await app.showRawLog(false);
-  t += 10_000; assert.deepEqual(await asked(), ["GET api/events?limit=500&since=15m"]);
+  t += 10_000; assert.deepEqual(await asked(), ["GET api/events?limit=500&since=15m", "GET api/state"]);
   // the last hour: its events at the same rate, live too
   app.show("observability/syncs?range=1h");
   assert.deepEqual(await asked(), ["GET api/events?limit=500&since=1h", "GET api/state"]);
-  t += 10_000; assert.deepEqual(await asked(), ["GET api/events?limit=500&since=1h"], "its events again 10 s on");
+  t += 10_000; assert.deepEqual(await asked(), ["GET api/events?limit=500&since=1h", "GET api/state"], "its events again 10 s on");
   // 7 days: a minute apart (each read scans the week)
   app.show("observability/syncs?range=7d");
   assert.deepEqual(await asked(), ["GET api/events?limit=500&since=7d", "GET api/state"]);
-  t += 30_000; assert.deepEqual(await asked(), ["GET api/state"], "the week's events not again within the minute (the state at its own 30 s)");
+  t += 30_000; assert.deepEqual(await asked(), ["GET api/state"], "the week's events not again within the minute (the state at every poll)");
   t += 30_000; assert.deepEqual(await asked(), ["GET api/events?limit=500&since=7d", "GET api/state"], "a minute on, again");
   app.show("syncs");
   run.answers.set("GET api/events?limit=500&since=15m", answer({ error: "no", failure: { code: "failed", message: "the events cannot be read", next: [] } }, 500));
