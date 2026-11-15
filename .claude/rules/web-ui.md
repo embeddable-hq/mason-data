@@ -207,7 +207,9 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   refusal, stays until it is dismissed — its Dismiss or X, Escape (the page's `dismiss`, when no question is open), or the
   next action's answer or question in its place (two lines a person may act on went mid-read: issue 811). A
   button whose label changes keeps the room of its longest (`ROOMS`: Sync → Syncing… → Synced ✓, Copy → Copied); one
-  held while it asks stays where it was, disabled. The Tables list's columns are FIXED widths (`table-layout: fixed`,
+  held while it asks stays where it was, disabled. A change is sent through `ctx.send` and shows busy in its room; its
+  failure is a `failurePop` beside its control. Issue 1033 found most actions gave no sign until the answer came, and
+  some could be sent twice. The Tables list's columns are FIXED widths (`table-layout: fixed`,
   a width per header class, the name the column that gives, never under 200 px: the less important give way first,
   their facts in the note), every row at least two lines (a table not added keeps its bar's line) and its note under it
   written for every row, empty or not. **A table's name and state are never cut** (issue 884, the owner: "otherwise
