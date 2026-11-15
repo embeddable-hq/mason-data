@@ -44,7 +44,7 @@ test("mason add: tables by name, every column unless --columns names them, --inc
 
 const t = (o: Partial<TableState> & { table: string }): TableState => ({
   rows: 1, bytes: 1, key: ["id"], comment: null, columns: [], reason: null,
-  added: false, addedColumns: null, copyKey: null, copy: null, error: null, ...o,
+  added: false, addedColumns: null, copyKey: null, copy: null, error: null, ...o, estimateBytes: o.estimateBytes ?? null,
 });
 
 test("a table is named as the database names it: by its name alone in public, or when one schema has it; else schema.table", () => {
@@ -589,7 +589,12 @@ test("mason add and mason remove with Mason stopped: the entry written and cut a
   const run = (argv: string[]) => runMason(app, argv, matrixEnv());
   const add = await run(["add", "orders", "--json"]);
   assert.equal(add.code, 0, add.stdout + add.stderr);
-  assert.deepEqual(JSON.parse(add.stdout), { added: [{ table: "public.orders", entry: "orders", columns: null, exclude: [], key: null, addedKey: [], skippedSecrets: [], already: false,
+  const addAnswer = JSON.parse(add.stdout) as { added: Array<{ disk?: { table: string; fits: boolean; resync: boolean; estimateBytes: number; freeBytes: number } }> };
+  // its room on disk, read in .mason/ (this machine's free space: its shape, not its numbers)
+  const d = addAnswer.added[0]!.disk!;
+  assert.deepEqual([d.table, d.fits, d.resync, typeof d.estimateBytes, d.freeBytes > 0], ["public.orders", true, false, "number", true]);
+  delete addAnswer.added[0]!.disk;
+  assert.deepEqual(addAnswer, { added: [{ table: "public.orders", entry: "orders", columns: null, exclude: [], key: null, addedKey: [], skippedSecrets: [], already: false,
     sync: { value: "off", from: "default" }, bigOff: false, pollCost: null, notReplicated: null }],
     file: s.file, next: [{ command: "mason start", what: "Mason in the background, for this project: the first sync of every added table begins" },
       { command: "mason wait", what: "then, until every added table is synced and served" }] });
@@ -833,7 +838,7 @@ test("mason doctor --tables: mason tables --json's tables on the checks' one con
 test("mason add of a table a replicating file cannot replicate says it was written sync: poll 5m, why, and the alternatives", async () => {
   const { addedLines } = await import("../src/cli/commands.ts");
   const b = { table: "public.events", file: "/app/mason/sources/app.yml", entry: "events", columns: null, exclude: [], key: ["tenant_id", "id"], addedKey: [], skippedSecrets: [], already: false,
-    sync: { value: "poll 5m", from: "entry" as const }, bigOff: false, pollCost: null, notReplicated: "it has no primary key, so logical replication cannot apply its changes by its key:" };
+    sync: { value: "poll 5m", from: "entry" as const }, bigOff: false, pollCost: null, disk: null, notReplicated: "it has no primary key, so logical replication cannot apply its changes by its key:" };
   assert.deepEqual(addedLines(b, "mason/sources/app.yml"), { line: "Added public.events to mason/sources/app.yml: every column, keyed by tenant_id, id", notes: [
     "sync: poll 5m written on its entry, not the file's replication: it has no primary key, so logical replication cannot apply its changes by its key: — " +
     "mason add events --sync \"poll 1h\" polls it hourly; mason add events --sync off reads it only by mason sync events"] });

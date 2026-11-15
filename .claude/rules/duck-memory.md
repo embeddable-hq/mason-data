@@ -58,7 +58,13 @@ paths:
   attempt read 1 % of the heap, what the pages left would add (from what its pages added to the file and its log) is
   held to what is free where the file is; past it the copy FAILS with the way out (free disk, `mason remove`, `mason add
   --columns`), its chunks kept, and is tried again as a failed copy is — at the retry, or at once at the next start.
-  Nothing warns before 1 %; a table whose late pages are wider than its early ones is under-projected. What the check
+  It is the BACKSTOP: before a table is added or synced again whole, every entrance asks ONE check
+  (src/duck/disk-fit.ts, from `addEntry`; the deploy's plan), which estimates its synced size from the catalog alone
+  (`pg_table_size` by its columns' share at `STORED_SHARE`, measured: docs/DESIGN.md "What a synced table takes on
+  disk") against the free disk less the spill's ceiling and the first syncs under way, and refuses with the numbers
+  (`disk_short`) unless the person goes ahead anyway. Both carry the shortage as numbers (`DiskShortage`: the event,
+  `/api/state` `tables[].diskShort`), made beside their words by one function. A table whose late pages are wider than
+  its early ones is under-projected. What the check
   last projected is kept on the copy's live state and said, never computed a second way (`diskStatus`: `/api/state`
   `disk`, `mason status`'s Disk line, beside the bytes free by the same `diskFree`).
 

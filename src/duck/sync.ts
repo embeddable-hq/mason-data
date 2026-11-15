@@ -54,6 +54,7 @@
  */
 import type { DuckStore } from "./store.ts";
 import { syncedDataBytes } from "./file-bytes.ts";
+import { DISK_SHORT, DiskShortError, humanBytes, syncShortWords, type DiskShortage } from "./disk-fit.ts";
 import { DEFAULT_MEMORY_RULE, endedTransaction, freeBytesAt, MASON_SCHEMA, NO_ROLE_SESSION, pgErrorOf, SessionSetup } from "./store.ts";
 
 /** the session the generated tables' run passes the Mason functions: no slot of the cancel table (src/duck/cancel.ts
@@ -261,6 +262,9 @@ export class Removed extends Error {
 export interface CopyState {
   source: string;
   phase: CopyPhase;
+  /** its whole read stopped short of disk (src/duck/disk-fit.ts `DiskShortage`, the backstop's numbers), until a whole
+   *  read of it is swapped in; in memory, never the ledger's */
+  diskShort?: DiskShortage;
   rows: number | null;
   /** the source table's size on disk when copied (pg_total_relation_size, from the catalog read) */
   bytes: number | null;
@@ -806,13 +810,8 @@ export function copyDiskProjection(c: { pages: number; done: readonly PageRange[
   return { needed: perPage * left, perPage, left };
 }
 
-/** Bytes for a person: `1 B`, `3.2 MiB`, `49.1 GiB`. */
-export function humanBytes(n: number): string {
-  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-  let i = 0, v = n;
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-  return `${i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
-}
+/** Bytes for a person (src/duck/disk-fit.ts, the one writer of them, kept importable from here). */
+export { humanBytes };
 
 /**
  * THE CHUNKS A COPY HAS STILL TO READ (`readChunks`): every range of the heap no committed chunk (`done`) covers, in
@@ -1284,6 +1283,9 @@ export class Sync {
   private readonly rewriteWaits = new Map<string, { writtenBy: string; message: string }>();
   /** each copy whose chunks are being read, as they are (`CopyLive`): `state` renders it at the moment it is asked */
   private readonly copyLive = new Map<string, CopyLive>();
+  /** each table whose last whole read stopped short of disk, its numbers (`DiskShortError`): said on its state until a
+   *  whole read of it is swapped in */
+  private readonly shortages = new Map<string, DiskShortage>();
   /** a test's: told what each chunk did (`ChunkEvent`), inside the chunk's transaction before it commits ("read") and
    *  once it has ("committed") */
   private readonly onChunk: ((e: ChunkEvent) => void | Promise<void>) | undefined;
@@ -2125,6 +2127,8 @@ export class Sync {
       })
       // why a sync by hand of it would be refused now, from the one check pollNow refuses with (in memory: the page asks every 2 s)
       .map((s) => { const t = this.tables.get(s.source); return t === undefined ? s : { ...s, syncRefusal: this.syncRefusal(t)?.message ?? null }; })
+      // its first sync stopped short of disk, as numbers, until a whole read of it is swapped in (`shortages`)
+      .map((s) => { const d = this.shortages.get(s.source); return d === undefined ? s : { ...s, diskShort: d }; })
       // its space and its last compaction, once read or done (`Compaction`)
       .map((s) => { const c = this.compactions.get(s.source); return c === undefined || s.phase !== "copied" ? s : { ...s, compaction: { ...c } }; })
       // the columns its synced data holds now: what is served while new columns wait for its whole read (issue 977)
@@ -4440,6 +4444,7 @@ export class Sync {
       // (`syncedText`, the words a poll's record says): the copy swapped in replaces the old
       const tookMs = Math.round(seconds * 1000);
       this.event({ kind: "full_sync", table: t.source, message: `synced whole: ${syncedText({ added: p.rows, updated: 0, deleted: 0, rows: p.rows, ms: tookMs }, "exact")}`, tookMs });
+      this.shortages.delete(t.source);
       this.copiedAs.set(t.source, columnsKey(t.columns));
       // in the catalog at once: a pass's other copies may take hours
       await this.rebuildSchema();
@@ -4493,7 +4498,9 @@ export class Sync {
       const when = `tried again after ${new Date(at).toISOString().slice(11, 16)} UTC (failure ${failures} in a row), or at once when Mason starts again or its columns or key change` +
         (where === null ? "" : `; it continues ${where}`);
       this.log(`sync of ${t.source} failed: ${m}; ${when}`);
-      this.event({ kind: "full_sync_failed", table: t.source, message: `${m}; ${when}`, cause: e });
+      // STOPPED SHORT OF DISK: its code and numbers on the event and on the table's state (`shortages`), as numbers
+      if (e instanceof DiskShortError) this.shortages.set(t.source, e.shortage);
+      this.event({ kind: "full_sync_failed", table: t.source, message: `${m}; ${when}`, cause: e, ...(e instanceof DiskShortError ? { code: DISK_SHORT, disk: e.shortage } : {}) });
       // a table that was copied keeps serving its last copy; one never copied is failed
       await this.record({ ...this.states.get(t.source)!, phase: first ? "failed" : "copied", error: `${m} (${when})` }, undefined, w);
       // A COLUMN CHANGED UNDER ITS WHOLE READ (issue 977: a column dropped or renamed while it was read failed it for ever
@@ -4517,15 +4524,17 @@ export class Sync {
 
   /** Why the copy of `t` must stop now — what its pages left would add is more than the disk has free — or null. What
    *  it projects is kept on the copy's `live` (`diskStatus` says it). */
-  private diskShort(t: AddedTable, p: CopyProgress, disk: { bytesAtStart: number; doneAtStart: readonly PageRange[] }, live: CopyLive): string | null {
+  private diskShort(t: AddedTable, p: CopyProgress, disk: { bytesAtStart: number; doneAtStart: readonly PageRange[] }, live: CopyLive): DiskShortError | null {
     const bytesNow = this.fileBytes();
     const projected = copyDiskProjection({ pages: p.pages, done: p.done, doneAtStart: disk.doneAtStart, bytesAtStart: disk.bytesAtStart, bytesNow });
     live.diskNeeded = projected?.needed ?? null;
     if (projected === null) return null;
     const free = this.diskFree(path.dirname(this.store.file));
     if (projected.needed <= free) return null;
-    return `the sync of ${t.source} would need about ${humanBytes(projected.needed)} more on disk than is free (${humanBytes(free)} free where ${this.store.file} is; ` +
-      `${pagesRead(p.done, p.pages)} of ${p.pages} pages read, ${humanBytes(bytesNow - disk.bytesAtStart)} added): free some disk, mason remove ${t.source}, or mason add ${t.source} --columns … with fewer columns`;
+    // its words and its numbers from one function (src/duck/disk-fit.ts), here measured, not estimated; the room kept
+    // for queries is said beside them (the sync stops only past what is free)
+    return syncShortWords(t.source, { neededBytes: projected.needed, freeBytes: free, reserveBytes: this.store.spillLimitBytes, file: this.store.file,
+      pagesRead: pagesRead(p.done, p.pages), pages: p.pages, addedBytes: bytesNow - disk.bytesAtStart });
   }
 
   /**
@@ -4740,7 +4749,7 @@ export class Sync {
           // STOPPED BEFORE THE DISK FILLS: the chunks committed are kept, the copy fails with the way out and is tried
           // again as a failed copy is (freed disk is used at the retry, or at once at the next start)
           const short = recopy ? null : this.diskShort(t, p, disk, live);
-          if (short !== null) { fail(new Error(short)); return; }
+          if (short !== null) { fail(short); return; }
           const at = readThrough(p.done);
           if (Date.now() - lineAt >= 60_000 && at !== null) {
             this.log(`syncing ${t.source}: page ${at} of ${p.pages}${pastPages(p.done)}, ${p.rows.toLocaleString("en-US")} row(s) in; ${chunks} chunk(s) in the last minute on ${readers} reader(s), ` +

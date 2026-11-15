@@ -3705,6 +3705,64 @@ NATURAL of no column in common, which Postgres reads as every pair. It is writte
 (`naturalWritten`), not by the rows a LIMIT chooses alone: written there first, a count, a sort with no LIMIT and a list
 that reads no table still reached DuckDB as NATURAL and were refused (the review of PR 155).
 
+### What a synced table takes on disk, and the room kept beside it (issue 1075, 2026-11-15)
+
+**Decision.** Before a table is added (the web page's Add and Columns…, `mason add`, a deploy's plan), its synced size is
+estimated from the source's catalog alone (src/duck/disk-fit.ts `syncedEstimate`): `pg_table_size` (the heap and its
+TOAST, no indexes), the share the entry's columns hold (by `pg_stats.avg_width` in line, by count among the out-of-line
+columns for the TOAST bytes), times `STORED_SHARE`, 0.4. It is held to the free disk where the synced data is, less a
+reserve: the spill's ceiling as it stands (half of what is free, or `MASON_SPILL_LIMIT`), and what the first syncs under
+way need. Past it the add is refused with the numbers (code `disk_short`) unless the person goes ahead anyway. The
+mid-sync check (`copyDiskProjection`) stays the backstop. Both carry the shortage as numbers (`DiskShortage`).
+
+**Why the base is `pg_table_size`, never `rows × avg_width`.** A value stored out of line has its pointer's width in
+`pg_stats` (18 B for a 2 KB value): `rows × width` was 46 times too small for a table of random text stored
+`EXTERNAL`, where `pg_table_size` held its TOAST bytes. The widths only share the table out among its columns.
+
+**The ratio, measured.** DuckDB 2.0.0 (ZSTD strings forced), Postgres 16, synthetic tables synced by the real sync, the
+synced table's bytes after a checkpoint (file and log, against an empty store's) over `pg_table_size`:
+
+| Shape | 200,000 rows | 400,000 rows | 1,000,000 rows |
+|---|---|---|---|
+| integers, timestamps, dates | 0.249 | 0.201 | |
+| random text (96 hex characters) | 0.435 | 0.412 | 0.397 |
+| repeated words (a title and ~110 characters) | 0.130 | 0.109 | |
+| `jsonb` of six keys | 0.163 | 0.150 | 0.140 |
+| numerics (`numeric(12,2)`, plain, `numeric(10,0)`) | 0.238 | 0.184 | |
+| low-cardinality text | 0.303 | 0.250 | |
+| uuids | 0.593 | 0.546 | 0.518 |
+| a mixed orders table (text, numeric, timestamp, `jsonb`) | 0.206 | 0.180 | 0.159 |
+| text Postgres compressed in line (~4.5 KB, a tenth of the rows) | 0.868 | 0.392 | |
+| random text stored `EXTERNAL` (2 KB, a tenth of the rows) | 0.424 | 0.399 | |
+
+The ratio falls as a table grows: a table's fixed cost weighs less (the compressed text was 3 MB at 0.868). 0.4 is at
+or above every shape at its largest size but the uuids (0.52, under by a quarter): an estimate that errs to warning,
+since the backstop catches one that errs the other way. A real table's ratio is not measured here: its text is likely
+more compressible than random hex, so 0.4 likely overstates it.
+
+**The reserve, measured.** What one query over the whole table spills, under a 100 MB limit and one thread, written to
+`/dev/null` through `COPY` so the sort runs (peak of the spill folder, sampled every 20 ms), at 1,000,000 rows:
+
+| Shape (synced size) | sort of every column | a window over every row |
+|---|---|---|
+| random text (53.5 MiB) | 56.6 MiB (1.06×) | 6.9 MiB |
+| `jsonb` (33.2 MiB) | 85.5 MiB (2.6×) | 32.8 MiB |
+| the mixed orders table (19.2 MiB) | 39.1 MiB (2.0×) | 9.8 MiB |
+| uuids (33.7 MiB) | none (sorted in memory) | none |
+
+A sort of the whole table takes one to 2.6 times its synced size, and a join can take far more (8.6 GiB for a top N
+over 4 M joined rows: "A top N over joined tables"). No fixed reserve keeps every query whole. So the reserve is the
+spill's ceiling as the operator set it, and no more: by default a table may take half of what is free, and at that
+limit the room left is about what one whole-table sort of it needs. An operator who wants more tables lets queries
+spill less (`MASON_SPILL_LIMIT`). A table synced again whole keeps its synced data until its new data is in, so the
+old data is not free space, and the new must fit beside it.
+
+**What the catalog read pays.** The read gains `pg_table_size`, the TOAST's size, and a `pg_stats` subquery a table
+(sizes and statistics, never a row). 400 tables of 20 columns, best of 5, on a machine at a load average of 16:
+3.0–3.9 s without them, 3.3–5.5 s with them, across three runs. One read of `pg_stats` for every table (a materialized
+CTE) was no faster. The read is made only when asked (issue 890), and the estimate is computed with it, never at a
+read of the run's state.
+
 ### A small table's size: not measured until DuckDB's own checkpoint (issue 815; the owner, 2026-11-11)
 
 **What was wrong.** A copy's size is its distinct blocks (`pragma_storage_info`), and a copy whose rows are all in the

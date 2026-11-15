@@ -982,6 +982,9 @@ export interface CatalogTable {
   addedColumns: string[] | null;
   /** the `key:` the sources file copies it by (null: its primary key, or not added) */
   copyKey: string[] | null;
+  /** a table not added: about how many bytes its synced data would take on disk, every column, as estimated when the
+   *  catalog was read (src/duck/disk-fit.ts); null for one added (its synced size is measured), or not estimated */
+  estimateBytes: number | null;
 }
 
 /** The unique index a table with no primary key could be keyed by — its first over NOT NULL columns only — or undefined:
@@ -1042,5 +1045,6 @@ export function catalogTable(t: SourceTable, entry: TableEntry | undefined): Cat
       references: ((f) => f ? { table: f.target, column: f.targetColumn } : null)(t.foreignKeys.find((f) => f.column === c.name)) })),
     reason: entry === undefined ? unaddableReason(t) : null,
     added: entry !== undefined, addedColumns: entry === undefined ? null : copiedColumns(t, entry), copyKey: entry?.key ?? null,
+    estimateBytes: entry === undefined ? t.estimateBytes ?? null : null,
   };
 }

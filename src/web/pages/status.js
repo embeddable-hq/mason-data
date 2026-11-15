@@ -392,7 +392,7 @@ export function factRows(s, now = Date.now()) {
     const adds = d.projectedBytes === null ? "" : ` · the first syncs running need about ${fileSize(d.projectedBytes)} more`;
     const over = d.freeBytes !== null && d.projectedBytes !== null && d.projectedBytes > d.freeBytes;
     rows.push(["Disk", d.freeBytes === null ? `${firstLine(d.error ?? "the free space could not be read")}${uses}${adds}`
-      : `${fileSize(d.freeBytes)} free${uses}${adds}${over ? ". That is more than is free: the sync stops before the disk fills" : ""}`, d.freeBytes === null || over]);
+      : `${fileSize(d.freeBytes)} free${typeof d.reserveBytes === "number" ? ` · ${fileSize(d.reserveBytes)} kept for queries that spill to disk` : ""}${uses}${adds}${over ? ". That is more than is free: the sync stops before the disk fills" : ""}`, d.freeBytes === null || over]);
   }
   if (ss !== undefined) {
     const tools = "error" in ss ? null : ss.byClient.length;

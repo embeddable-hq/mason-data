@@ -144,6 +144,24 @@ export function tableFacts(t) {
  *  to change a table's sync (its Sync button) where `mason add` names `--sync`. */
 /** The columns an entry syncs, from `/api/pick`'s answer: every column, every column but some, or the columns named. */
 const columnsWords = (b) => b.columns === null ? (b.exclude.length ? `every column but ${b.exclude.join(", ")}` : "every column") : `the columns ${b.columns.join(", ")}`;
+/** Bytes as the CLI says them in a disk note (src/duck/disk-fit.ts `humanBytes`: held equal by tests/web-page.test.ts). */
+export function diskBytes(n) {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let i = 0, v = n;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+/** A table added (or saved) anyway though it likely won't fit on disk, or whose disk was not checked: `mason add`'s note
+ *  (src/cli/commands.ts `addedLines`, src/duck/disk-fit.ts `diskFitNote`), as a sentence; null otherwise. */
+export function diskNote(d) {
+  if (d == null) return null;
+  if (typeof d.unknown === "string") return `Its room on disk was not checked: ${d.unknown}.`;
+  if (d.fits !== false) return null;
+  const room = Math.max(0, d.freeBytes - d.reserveBytes - d.pendingBytes);
+  return `Added anyway: it likely won't fit on disk: it needs about ${diskBytes(d.estimateBytes)}, and ${diskBytes(room)} is free for it, beside ${diskBytes(d.reserveBytes)} kept for queries that spill to disk.`;
+}
+
 export function addedLines(b) {
   const copies = columnsWords(b);
   const s = b.skippedSecrets;
@@ -157,6 +175,7 @@ export function addedLines(b) {
   return { line: `Added ${b.table}: ${copies}${b.key ? `, keyed by ${b.key.join(", ")}` : ""}${b.already ? " (it was already added)" : ""}.`, notes: [
     sync,
     ...(b.pollCost !== null ? [b.pollCost] : []),
+    ...(diskNote(b.disk) !== null ? [diskNote(b.disk)] : []),
     ...(b.addedKey.length ? [`Its key ${b.addedKey.join(", ")} was added to its columns: a synced table always keeps its key.`] : []),
     // only the command can add a column left out of a table already added: named
     ...(s.length ? [`Left out ${s.join(", ")}: ${s.length === 1 ? "it looks" : "they look"} like ${s.length === 1 ? "a secret" : "secrets"}, ` +
@@ -176,7 +195,7 @@ export function removedReport(removed) {
  * none is ticked (none: every column, as `mason add <table>` copies; no key: its primary key). What the lists may hold
  * is the server's to judge (src/cli/run-server.ts `pick`), never the page's.
  */
-export const pickBody = (table, columns = [], key = []) => ({ table, picked: true, ...(columns.length ? { columns } : {}), ...(key.length ? { key } : {}) });
+export const pickBody = (table, columns = [], key = [], yes = false) => ({ table, picked: true, ...(columns.length ? { columns } : {}), ...(key.length ? { key } : {}), ...(yes ? { yes } : {}) });
 
 /** A table just added (`/api/pick`'s answer, `mason add --json`'s `added` entry): `addedLines`. `saved`: the answer to a
  *  Sync choice saved (`"sync"`, or true) or a column form saved (`"columns"`), which says what was saved and the notes
@@ -321,13 +340,13 @@ export function columnsChoice(t, columns = null) {
  * ticked — but when they say what its entry says, the entry's own lists in its own order, so the run finds nothing
  * changed (`already`), writes nothing and starts no sync.
  */
-export function columnsBody(t, columns = [], key = []) {
+export function columnsBody(t, columns = [], key = [], yes = false) {
   const c = columnsChoice(t), e = t.entry;
   const keyCols = t.key.length ? t.key : key;
   const withKey = (xs) => [...new Set([...xs, ...keyCols])];
   const sameKey = t.key.length > 0 || sameSet(key, c.key);
   const same = e.columns === null ? columns.length === 0 : sameSet(withKey(columns), withKey(e.columns));
-  return c.exact && sameKey && same ? pickBody(t.table, e.columns ?? [], e.key ?? []) : pickBody(t.table, columns, key);
+  return c.exact && sameKey && same ? pickBody(t.table, e.columns ?? [], e.key ?? []) : pickBody(t.table, columns, key, yes);
 }
 
 /** What saving a column form costs, said before it is saved (issue 884): the table synced again in full, its synced
@@ -631,7 +650,9 @@ export function renderTables(s, ui = {}) {
     // a failed copy's rows so far are none: the copy it serves meanwhile is said by its error and mason status
     const rows = t.added && t.copy && t.copy.phase !== "failed" ? n(t.copy.rowsCopied) : f.size;
     // its size, or why it has none (`sizeCellOf`): an added table's alone
-    const size = t.added ? sizeCell(t) : null;
+    // a table not added: about how much its synced data would take, every column, as the run estimated it when it read
+    // the catalog (`/api/state` `estimateBytes`, mason tables' "synced, about … on disk"), before it is added
+    const size = t.added ? sizeCell(t) : typeof t.estimateBytes === "number" ? estimateCell(t.estimateBytes) : null;
     // EVERY ADDED TABLE HAS ITS BAR, as `mason status` and `mason wait` print one for each (src/cli/commands.ts
     // `tableLines`): full at 100% once copied, red when its copy failed, amber when it is not kept current, moving while
     // it copies, the indeterminate shimmer while it waits — the Overview's renderer (`copyBar`), its words the line's;
@@ -691,13 +712,13 @@ export function renderTables(s, ui = {}) {
     const formAnchor = t.added ? columnsId(t.table) : anchor;
     const refusedHere = outcome?.table === t.table && "failure" in outcome;
     if (formOpen) {
-      pops.push(pop(formAnchor, (refusedHere ? renderFailure(outcome.failure) : "") + (t.added ? columnsForm(t, columns, ticked, busy("columns", t.table)) : pickForm(t, columns, ticked, adding_)),
+      pops.push(pop(formAnchor, (refusedHere ? renderFailure(outcome.failure) + anywayActions(t, outcome, busy, false) : "") + (t.added ? columnsForm(t, columns, ticked, busy("columns", t.table)) : pickForm(t, columns, ticked, adding_)),
         { kind: "dialog", label: t.added ? `The columns ${name} syncs` : `Add ${name}` }));
     }
     if (outcome?.table === t.table && !(formOpen && refusedHere)) {
       // a sync saved (or refused) is said beside the sync it changed; an add or a remove beside the row's actions
       // a column form saved, beside its columns' summary
-      pops.push(pop(outcome.at === "sync" && t.added && readOnly === null ? syncId(t.table) : outcome.at === "columns" && t.added && summary !== null && readOnly === null ? columnsId(t.table) : anchor,"failure" in outcome ? `${renderFailure(outcome.failure)}<p class="pop-actions">${button("Dismiss", { dismissOutcome: "", popClose: "" }, "small")}</p>`
+      pops.push(pop(outcome.at === "sync" && t.added && readOnly === null ? syncId(t.table) : outcome.at === "columns" && t.added && summary !== null && readOnly === null ? columnsId(t.table) : anchor,"failure" in outcome ? `${renderFailure(outcome.failure)}${outcome.anyway ? anywayActions(t, outcome, busy, true) : `<p class="pop-actions">${button("Dismiss", { dismissOutcome: "", popClose: "" }, "small")}</p>`}`
         : "added" in outcome ? renderTableAdded(outcome.added, outcome.at ?? false) : renderTablesRemoved(outcome.removed)));
     }
     if (synced?.table === t.table) {
@@ -747,6 +768,20 @@ export function renderTables(s, ui = {}) {
     (added ? `<p class="dim">A synced table's size is measured every 10 minutes, once its rows are written to disk.</p>` : "");
 }
 
+/**
+ * WHAT A TABLE THAT LIKELY WON'T FIT ON DISK OFFERS (`outcome.anyway`, the run's `disk_short`, src/duck/disk-fit.ts):
+ * the run's words above it, then going ahead anyway with what was sent (Add anyway, or Save anyway after a column
+ * form), choosing fewer columns (Columns…, where no form is open), and Dismiss. Nothing was written until one is pressed.
+ */
+function anywayActions(t, outcome, busy, withDismiss) {
+  if (!outcome.anyway) return "";
+  const saving = outcome.at === "columns";
+  const go = saving ? sendButton("Save anyway", "Saving…", { goAnyway: t.table }, "primary small", { busy: busy("columns", t.table) })
+    : sendButton("Add anyway", "Adding…", { goAnyway: t.table }, "primary small", { busy: busy("add", t.table) });
+  const fewer = withDismiss && !saving && !t.added ? ` ${button("Columns…", { choose: t.table }, "small")}` : "";
+  return `<p class="pop-actions">${go}${fewer}${withDismiss ? ` ${button("Dismiss", { dismissOutcome: "", popClose: "" }, "small")}` : ""}</p>`;
+}
+
 /** The line after the read-only reason, where a deploy is the way out (`/api/state` `sourcesReadOnlyKind`: `deployed`,
  *  `unwritable`), linking to how to change a deployed project (`/api/state` `pageDeployDocs`: the README's section, or
  *  the host's own steps, MASON_UI_DEPLOY_DOCS_URL, src/cli/ui-deploy-docs.ts). None where whether the files are
@@ -755,6 +790,13 @@ export function renderTables(s, ui = {}) {
  *  token, and the same tab, since a host may serve the page in a sandbox with no `allow-popups`. */
 const deployLink = (kind, url) => (kind === "deployed" || kind === "unwritable") && typeof url === "string" && url !== ""
   ? ` <a href="${esc(url)}" rel="noreferrer">Read how to change a deployed project</a>.` : "";
+
+/** The Size cell of a table not added: its estimated synced size (`/api/state` `estimateBytes`), said as an estimate. */
+export const estimateCell = (bytes) => ({ text: `~${bytesText(bytes)}`,
+  title: `About ${bytesText(bytes)} on disk once synced, every column: estimated from your database's catalog` });
+
+/** What a refusal keeps to go ahead anyway: what was sent, when the run said the table likely won't fit on disk. */
+const anyway = (failure, columns, key, sent) => failure?.code === "disk_short" ? { anyway: { columns, key, sent } } : {};
 
 export const page = {
   id: "tables",
@@ -818,15 +860,16 @@ export const page = {
     };
     const actions = {
       /** Add a table (`mason add`): the answer beside its actions, then the state read again — the Overview shows its copy starting. */
-      async addTable(table, columns = [], key = [], sent = { which: columns.length ? "only" : "all", columns, key }) {
+      async addTable(table, columns = [], key = [], sent = { which: columns.length ? "only" : "all", columns, key }, yes = false) {
         // from the click: the row says Adding… (the page paints before the answer), then the state read again shows the copy
         if (ctx.sending(`add:${table}`)) return false;
         if (m.choosing !== table) { m.outcome = null; m.synced = null; }
         // its form, written again while it is sent, keeps the boxes the person ticked
         else m.ticked = sent;
-        const r = await ctx.send(`add:${table}`, "api/pick", json("POST", pickBody(table, columns, key)), { refresh: ["api/state"], onAnswer: (r) => {
-          // refused: said over the form, in its popover, written again with the boxes the person had ticked
-          if ("failure" in r) { m.outcome = { table, failure: r.failure }; if (m.choosing === table) m.ticked = sent; return; }
+        const r = await ctx.send(`add:${table}`, "api/pick", json("POST", pickBody(table, columns, key, yes)), { refresh: ["api/state"], onAnswer: (r) => {
+          // refused: said over the form, in its popover, written again with the boxes the person had ticked; one that
+          // likely won't fit on disk keeps what was sent, for Add anyway
+          if ("failure" in r) { m.outcome = { table, failure: r.failure, ...anyway(r.failure, columns, key, sent) }; if (m.choosing === table) m.ticked = sent; return; }
           m.outcome = { table, added: r.body }; m.choosing = null; m.columns = null; hold();
         } });
         return "body" in r;
@@ -846,13 +889,13 @@ export const page = {
       cancelChoose() { if (m.outcome !== null && m.outcome.table === m.choosing && "failure" in m.outcome) m.outcome = null; m.choosing = null; m.columns = null; hold(); },
       /** Save an added table's column form (`mason add <table> --columns …`, its sync kept): the answer beside its
        *  columns' summary, then the state read again; refused, said over the form, its boxes as they were ticked. */
-      async saveColumns(table, columns = [], key = [], sent = { which: columns.length ? "only" : "all", columns, key }) {
+      async saveColumns(table, columns = [], key = [], sent = { which: columns.length ? "only" : "all", columns, key }, yes = false) {
         const t = (m.held ?? state())?.tables.find((x) => x.table === table);
         if (!t?.added || ctx.sending(`columns:${table}`)) return false;
         // the form, written again while it is sent (Save says Saving…), keeps the boxes the person ticked
         if (m.choosing === table) m.ticked = sent;
-        const r = await ctx.send(`columns:${table}`, "api/pick", json("POST", columnsBody(t, columns, key)), { refresh: ["api/state"], onAnswer: (r) => {
-          if ("failure" in r) { m.outcome = { table, failure: r.failure, at: "columns" }; if (m.choosing === table) m.ticked = sent; return; }
+        const r = await ctx.send(`columns:${table}`, "api/pick", json("POST", columnsBody(t, columns, key, yes)), { refresh: ["api/state"], onAnswer: (r) => {
+          if ("failure" in r) { m.outcome = { table, failure: r.failure, at: "columns", ...anyway(r.failure, columns, key, sent) }; if (m.choosing === table) m.ticked = sent; return; }
           m.outcome = { table, added: r.body, at: "columns" }; m.choosing = null; m.columns = null; hold();
         } });
         return "body" in r;
@@ -899,6 +942,13 @@ export const page = {
           m.outcome = "failure" in r ? { table, failure: r.failure } : { table, removed: r.body };
         } });
         return "body" in r;
+      },
+      /** Add anyway (or Save anyway): what was sent, sent again with yes, though it likely won't fit on disk. */
+      goAnyway(table) {
+        const o = m.outcome;
+        if (o === null || o.table !== table || !o.anyway) return false;
+        const a = o.anyway;
+        return o.at === "columns" ? actions.saveColumns(table, a.columns, a.key, a.sent, true) : actions.addTable(table, a.columns, a.key, a.sent, true);
       },
       dismissOutcome() { m.outcome = null; },
       /** Sync a table now (`mason sync <table>`): the run answers as the sync starts (issue 1007: a big table's sync
@@ -992,6 +1042,7 @@ export const page = {
         if (d.showMore === "tables") return actions.showMoreTables() ?? true;
         if (d.showAll === "tables") return actions.showAllTables() ?? true;
         if (d.addTable !== undefined) return actions.addTable(d.addTable);
+        if (d.goAnyway !== undefined) return actions.goAnyway(d.goAnyway);
         if (d.choose !== undefined) return actions.choose(d.choose);
         if (d.cancelChoose !== undefined) return actions.cancelChoose() ?? true;
         if (d.removeTable !== undefined) return actions.askRemoveTable(d.removeTable) ?? true;
