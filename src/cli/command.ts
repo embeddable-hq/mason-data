@@ -456,7 +456,7 @@ export const FAILURE_CODES = {
   not_found: "a name nothing has: a table, a column, a user",
   nothing_yet: "nothing to work on yet: no table added (the next steps say what adds one)",
   refused: "Mason refused what was asked, with the reason",
-  busy: "Mason is already doing it: a sync of that table is running or waiting to start, and a second is never started (mason status says when it ends)",
+  busy: "in progress, not a fault: a sync of that table is already running or waiting to start, and a second is never started beside it (exit 1, as the sync asked for did not run; mason status says when it ends)",
   failed: "the command tried and could not finish: the reason, and what to do",
   timeout: `ran out of time — ${TIMEOUT_COMMANDS}; nothing stopped (exit 124)`,
 } as const;

@@ -69,10 +69,19 @@ function syncedTips(tables) {
   });
 }
 
-/** A SYNC NOW OF A TABLE ALREADY SYNCING (`busy`, issue 1007): the run's words for what is happening, and the way to
- *  follow it on the page — its row — where the run's failure names `mason status` for the command line. */
+/** A SYNC NOW OF A TABLE ALREADY SYNCING (`busy`, issue 1007): the run's words for what is happening and since when,
+ *  its way out (a second sync is never started beside it), and the way to follow it on the page — its row — where the
+ *  run's refusal names `mason status` for the command line. Said as progress, never as a failure (issue 1039). */
 export function busyHere(f) {
-  return { code: "busy", message: `${f.message}. Its row shows when it ends.`, next: [] };
+  const said = /[.!?]$/.test(f.message) ? f.message : `${f.message}.`;
+  return { headline: said, note: `${f.fix ? `${f.fix} ` : ""}Its row shows when it ends.` };
+}
+
+/** A Sync now of a table already syncing, beside its Sync (`busyHere`'s words): progress, as a sync's answer is said
+ *  (`renderSynced`), never a failure's mark or alert, with Dismiss. */
+function renderBusy(b) {
+  return `<div class="done syncing" role="status"><p class="headline">${nameBreaks(b.headline)}</p><p class="note">${esc(b.note)}</p>` +
+    `${button("Dismiss", { dismissSynced: "", popClose: "" }, "small")}</div>`;
 }
 
 /** A sync's answer said as `mason sync` says it, with Dismiss. `s`: the state, for the tables not kept current;
@@ -596,7 +605,8 @@ export function renderTables(s, ui = {}) {
     const removing_ = busy("remove", t.table);
     const asking = removing === t.table;
     const anchor = actId("tables", t.table);
-    const syncedNow = synced?.table === t.table && !("failure" in synced);
+    // Synced ✓ for what this page's sync did alone: never for a refusal, nor a sync already running (`busy`)
+    const syncedNow = synced?.table === t.table && "synced" in synced;
     // A SYNC BY HAND OF IT RUNNING: asked here and not answered yet, or started (here, in another tab, by mason sync) and
     // not ended — `/api/state` `syncByHand`, so a page opened mid-sync says it too (issue 1007). The run's own sync state
     // says "syncing" only for a first sync or a read again whole, never for a sync by hand (a poll), so its Sync button
@@ -691,7 +701,7 @@ export function renderTables(s, ui = {}) {
         : "added" in outcome ? renderTableAdded(outcome.added, outcome.at ?? false) : renderTablesRemoved(outcome.removed)));
     }
     if (synced?.table === t.table) {
-      pops.push(pop(anchor, "failure" in synced ? `${renderFailure(synced.failure)}${button("Dismiss", { dismissSynced: "", popClose: "" }, "small")}` : renderSynced(synced.synced, t.table, s, synced.picked ?? [t.table])));
+      pops.push(pop(anchor, "failure" in synced ? `${renderFailure(synced.failure)}${button("Dismiss", { dismissSynced: "", popClose: "" }, "small")}` : "busy" in synced ? renderBusy(synced.busy) : renderSynced(synced.synced, t.table, s, synced.picked ?? [t.table])));
     }
     return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}${said_ ? " has-note" : ""}"><th scope="row" class="name"><code class="name" title="${esc(t.table)}">${nameBreaks(t.table)}</code></th>` +
       `<td class="state">${state}${bar}</td>${cell(rows, "num rows")}${cell(f.key, "mono key", f.key)}${last}` +
@@ -902,8 +912,9 @@ export const page = {
         const r = await ctx.send(`sync:${table}`, "api/sync", json("POST", { tables: [table] }), { refresh: ["api/state"], onAnswer: (r) => {
           // followed by its id until the state says it ended
           if ("body" in r && typeof r.body?.sync?.id === "number") m.watching.add(r.body.sync.id);
-          // already syncing (another tab, mason sync, its schedule): the run's words, and how to follow it on the page
-          else if ("failure" in r) m.synced = { table, failure: r.failure.code === "busy" ? busyHere(r.failure) : r.failure };
+          // already syncing (another tab, mason sync, its schedule): in progress, in the run's words, and how to follow it
+          // on the page; any other refusal is the failure it is
+          else if ("failure" in r) m.synced = r.failure.code === "busy" ? { table, busy: busyHere(r.failure) } : { table, failure: r.failure };
         } });
         // already syncing: its row shows when it ends, so the state is read now
         if ("failure" in r && r.failure.code === "busy") await ctx.refresh(["api/state"]);
