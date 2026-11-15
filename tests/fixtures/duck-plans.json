@@ -3257,6 +3257,41 @@
       "full_sort": false
     },
     {
+      "name": "text under libc: mode() of a text by group, the key once a value",
+      "sql": "SELECT o.tenant_id, mode() WITHIN GROUP (ORDER BY o.status) AS top_status FROM orders o GROUP BY 1 ORDER BY 1",
+      "on": "libc",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      PROJECTION calls __mason_libc_key, __mason_turn",
+        "        PROJECTION",
+        "          HASH_GROUP_BY",
+        "            PROJECTION",
+        "              PROJECTION",
+        "                PROJECTION",
+        "                  HASH_GROUP_BY",
+        "                    PROJECTION",
+        "                      PROJECTION",
+        "                        CTE",
+        "                          TABLE_SCAN public.orders",
+        "                          HASH_JOIN",
+        "                            CTE_SCAN",
+        "                            PROJECTION calls __mason_libc_key, __mason_turn",
+        "                              PROJECTION",
+        "                                HASH_GROUP_BY",
+        "                                  PROJECTION",
+        "                                    PROJECTION",
+        "                                      CTE_SCAN"
+      ],
+      "calls": [
+        "__mason_libc_key"
+      ],
+      "sends": [],
+      "delim_join": true,
+      "full_sort": true
+    },
+    {
       "name": "native json keys: jsonb_object_keys grouped, by count then key",
       "sql": "SELECT jsonb_object_keys(\"meta\") AS \"key\", count(*) AS \"count\" FROM \"public\".\"orders\" GROUP BY 1 ORDER BY 2 DESC, 1",
       "plan": [

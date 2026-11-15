@@ -1582,6 +1582,30 @@ column is the same equality.
 `count of distinct keys` BI shapes and the type matrix's `keyed`, `pairs` and `vkeys`; `tests/cli-sources.test.ts`
 (an invalid index).
 
+#### mode() of a text under a libc order (2026-11-15, issue 464)
+
+**The measurement.** The shop of `tests/duck-plans.test.ts` (a million orders) on a local Postgres 16 whose database is
+glibc's `en_US.utf8`. `SELECT o.tenant_id, mode() WITHIN GROUP (ORDER BY o.status) FROM orders o GROUP BY 1` took
+2.2 s against Postgres's 0.36 s. The same over the 50,000 values of `notes` took 3.0 s against 1.9 s, and a status by
+each of 20,000 customers 2.4 s against 0.5 s. Under C the three took 0.03 to 0.12 s. The engine's mode() with an ORDER BY
+counts each (group, value) pair and keeps the least sort key of each, so it computed the ORDER BY's libc key for every
+row: a JavaScript call a row, through the turn.
+
+**The decision.** The key is a function of the value alone, so it is written as a scalar subquery of the value,
+`(SELECT __mason_libc_key(x, collate))`. The engine plans a correlated subquery as a join of the distinct values it
+reads: the key is computed once a distinct value and hashed back to the rows. The order still decides only a tie among
+the most frequent values, and the value's bytes stay the second key, so the answer is the one the key a row gave. After
+it, the three took 0.07, 0.38 and 0.23 s.
+
+**What was tried first.** The engine's `histogram(x)` per group, with the key computed only for each group's tied
+leaders: 0.02 s for six values, but 5.6 s for 50,000 values in a group, since the histogram's map grows with the values.
+
+**What stays the key a row.** A FILTER: Postgres keys only the rows the filter keeps (`guardFilters`), and the join
+would key every value, where a character the order does not cover (`libc-uncovered`) refuses. A char(n), a citext, an
+operator's order, a volatile value, and a value that reads a subquery or an outer query's column.
+**Where.** `src/duck/rewrite.ts` (`modeKeyedOnce`); `tests/duck-wire.test.ts` "issue 464: mode()",
+`tests/duck-plans.test.ts` (`text under libc: mode()`), the oracle's `collation: mode()` and `issue 464: mode()`.
+
 ### A query cannot take the run down
 
 **Decision.** Results stream (the next chunk read once the socket drained), an Execute's row limit pages, a cancel aborts

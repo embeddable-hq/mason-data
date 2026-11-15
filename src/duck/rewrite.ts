@@ -6245,6 +6245,8 @@ class Rewriter {
     const c = key === undefined ? null : this.orderedUnder(key);
     if (c === null || c.kind === "bytes") return null;
     if (name === "mode" && order.length === 1) {
+      const once = c.kind === "libc" ? this.modeKeyedOnce(b, key!, c.collate) : null;
+      if (once !== null) return once;
       return { FuncCall: { ...b, args: [this.clone(key!)], agg_within_group: undefined } };
     }
     // percentile_disc of text takes the value at a position in the collation's order: the position of its KEY, which
@@ -6264,6 +6266,47 @@ class Rewriter {
     }
     // (percentile_disc and mode() are the ordered-set aggregates of text; a hypothetical-set one is refused above)
     return null;
+  }
+
+  /**
+   * MODE() OF A TEXT UNDER A LIBC ORDER KEYS EACH DISTINCT VALUE ONCE, never each row (issue 464: the libc key's
+   * function a row, a mode() of a status by tenant was 6 times Postgres's time over a million rows). The order decides
+   * only which of the most frequent values wins a tie, and the key is a function of the value alone. So the key is a
+   * scalar subquery of the value, `(SELECT __mason_libc_key(x, collate))`, which the engine computes once for each
+   * distinct value and joins back to the rows; the value's bytes stay the second key, as `libcKeys` writes it. The engine
+   * then counts each value and takes the most frequent, of equals the first in that order, as Postgres's mode() does.
+   * Null (the key a row, as before) for any other type (a char(n) orders without its padding, a citext by its lower
+   * case), an operator's order (USING), a volatile value (read twice, it would be two values), a value that reads a
+   * subquery or a column of an outer query (the subquery would nest in another's correlation), and a FILTER: Postgres
+   * keys only the rows it keeps (`guardFilters`), and the join would key every value, where one the order does not
+   * cover (`libc-uncovered`) refuses the statement
+   */
+  private modeKeyedOnce(b: Body, key: AstNode, collate: string): AstNode | null {
+    const sort = bodyOf(((b.agg_order ?? []) as AstNode[])[0]!);
+    const v = strip(key);
+    const type = this.typeOf(v);
+    if (type !== TEXT && type !== VARCHAR) return null;
+    if (sort.useOp !== undefined || !["SORTBY_DEFAULT", "SORTBY_ASC", "SORTBY_DESC"].includes(sort.sortby_dir as string)) return null;
+    if (callsVolatile(v) || !this.readsOwnColumnsOnly(v) || b.agg_filter !== undefined) return null;
+    const keyOnce: AstNode = { SubLink: { subLinkType: "EXPR_SUBLINK", subselect: { SelectStmt: {
+      targetList: [{ ResTarget: { val: fn("__mason_libc_key", [this.clone(v), strConst(collate)]) } }],
+      limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
+    } } } };
+    return { FuncCall: { ...b, args: [this.clone(v)], agg_order: [{ SortBy: { ...sort, node: keyOnce } }, { SortBy: { ...sort, node: this.clone(v) } }], agg_within_group: undefined } };
+  }
+
+  /** whether every column an expression reads is a column of its own query (none of an outer query's) and it holds no
+   *  subquery: read from Postgres's analysis, so a column the analysis did not type is no proof */
+  private readsOwnColumnsOnly(e: unknown): boolean {
+    if (Array.isArray(e)) return e.every((x) => this.readsOwnColumnsOnly(x));
+    if (e === null || typeof e !== "object") return true;
+    if (isNode(e)) {
+      const k = kindOf(e);
+      if (k === "SubLink") return false;
+      if (k === "ColumnRef") { const t = this.typed(e); return t?.node === "VAR" && t.levelsUp === 0; }
+      return Object.values(bodyOf(e)).every((x) => this.readsOwnColumnsOnly(x));
+    }
+    return Object.values(e as Body).every((x) => this.readsOwnColumnsOnly(x));
   }
 
   /** regexp_match: the first match's groups (or the match) as an array, NULL without one; regexp_matches: a row per

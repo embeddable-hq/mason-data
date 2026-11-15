@@ -238,6 +238,16 @@ export const COLLATION_CASES: Array<{ name: string; sql: string }> = [
   { name: "collation: percentile_disc of an array of fractions over a char(n), grouped", sql: "SELECT id % 3, percentile_disc(ARRAY[0.5]) WITHIN GROUP (ORDER BY b) FROM colls GROUP BY 1 ORDER BY 1" },
   { name: "collation: percentile_disc of an array of fractions over a char(n), no row", sql: "SELECT percentile_disc(ARRAY[0.5]) WITHIN GROUP (ORDER BY b) FROM colls WHERE false" },
   { name: "collation: mode() of the database's collation", sql: "SELECT mode() WITHIN GROUP (ORDER BY d) FROM colls" },
+  // issue 464: mode() of a text under a libc order keys each distinct value once (src/duck/rewrite.ts `modeKeyedOnce`).
+  // Every value of colls is held once, so every value ties and the order alone decides; twice as many of half the rows
+  // tie those; under an ICU or a C database en_US is a libc order other than the database's
+  { name: "collation: mode() of an en_US column, ascending and descending", sql: "SELECT mode() WITHIN GROUP (ORDER BY l), mode() WITHIN GROUP (ORDER BY l DESC) FROM colls" },
+  { name: "collation: mode() of the database's collation, grouped, descending", sql: "SELECT id % 3 AS g, mode() WITHIN GROUP (ORDER BY d), mode() WITHIN GROUP (ORDER BY d DESC NULLS FIRST) FROM colls GROUP BY 1 ORDER BY 1" },
+  { name: "collation: mode() under COLLATE en_US", sql: "SELECT mode() WITHIN GROUP (ORDER BY d COLLATE \"en_US\"), mode() WITHIN GROUP (ORDER BY c COLLATE \"en_US\" DESC), mode() WITHIN GROUP (ORDER BY l COLLATE \"C\") FROM colls" },
+  { name: "collation: mode() of tied values, half the rows twice", sql: "SELECT mode() WITHIN GROUP (ORDER BY x), mode() WITHIN GROUP (ORDER BY x DESC), mode() WITHIN GROUP (ORDER BY y) FROM (SELECT d AS x, l AS y FROM colls UNION ALL SELECT d, l FROM colls WHERE id % 2 = 0) s" },
+  { name: "collation: mode() of an expression and a varchar, in HAVING and ORDER BY", sql: "SELECT id % 2 AS g, mode() WITHIN GROUP (ORDER BY lower(d)), mode() WITHIN GROUP (ORDER BY l::varchar(3) DESC) FROM colls GROUP BY 1 HAVING mode() WITHIN GROUP (ORDER BY d) IS NOT NULL ORDER BY mode() WITHIN GROUP (ORDER BY d), 1" },
+  { name: "collation: mode() of no row, of NULLs alone and FILTERed", sql: "SELECT (SELECT mode() WITHIN GROUP (ORDER BY d) FROM colls WHERE id < 0), mode() WITHIN GROUP (ORDER BY l) FILTER (WHERE id > 4), mode() WITHIN GROUP (ORDER BY l) FILTER (WHERE l IS NULL) FROM colls" },
+  { name: "collation: mode() in a correlated subquery", sql: "SELECT g.n, (SELECT mode() WITHIN GROUP (ORDER BY c2.l DESC) FROM colls c2 WHERE c2.id % 3 = g.n) FROM (VALUES (0), (1), (2)) AS g(n) ORDER BY 1" },
   { name: "collation: GREATEST and LEAST of the database's collation", sql: "SELECT id, greatest(d, 'b'), least(d || 'x', 'B') FROM colls ORDER BY id" },
   // refused by name, never another order
   { name: "collation: an ICU keyword (refused)", sql: "SELECT id FROM colls ORDER BY d COLLATE mason_num, id" },
