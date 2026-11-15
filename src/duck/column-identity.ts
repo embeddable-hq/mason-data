@@ -44,7 +44,7 @@ export interface EntryWords {
 /** What the run decides of a table: nothing to go by (no oid or shape: a test's table), taken with this record, or held. */
 export type IdentityVerdict =
   | { kind: "unknown" }
-  | { kind: "taken"; record: ColumnRecord }
+  | { kind: "taken"; record: ColumnRecord; replaced?: true }
   | { kind: "held"; why: string; conflicts: Array<{ name: string; was: string }> };
 
 /** What the verdict reads of a table: its oid, its shape now (every live column), the names the file syncs now, and
@@ -62,13 +62,23 @@ const flow = (xs: readonly string[]): string => `[${xs.map((x) => /^[A-Za-z_][A-
 /**
  * The run's verdict on a table's columns against its record (none: the table is new to this copy, or was synced by a
  * Mason before this record). `confirmed`: the person wrote the entry against the database's columns as they are now.
+ * `readOnly`: the project's files are deployed read-only (src/cli/project.ts `projectWriteRefusal`), so the sources
+ * file is the owner's committed word alone — the run never writes it — and it is how such a project is changed. There a
+ * column left out that the file syncs is taken when nothing moved: the same column, under the name it was last taken
+ * under. A column that moved stays held.
+ * A table of ANOTHER OID (dropped and made again under its name, or another renamed into its place) is another table: its
+ * columns are decided by name, but a name the table it replaced left out stays out — a name is all that can tell them
+ * apart, so a column of such a name that the file syncs is held (fail closed). Taken, it is `replaced`: its synced data
+ * is another table's, read again whole.
  */
-export function identityVerdict(t: IdentityInput, record: ColumnRecord | undefined, confirmed: boolean): IdentityVerdict {
+export function identityVerdict(t: IdentityInput, record: ColumnRecord | undefined, confirmed: boolean, readOnly = false): IdentityVerdict {
   const cols = t.shape === undefined ? [] : shapeTuples(t.shape);
   if (t.oid === undefined || !Number.isInteger(t.oid) || cols.length === 0 || cols.some((c) => !Number.isInteger(c.attnum))) return { kind: "unknown" };
   const synced = new Set(t.synced);
-  // a table dropped and made again is another table: decided by name, as a new one is
-  const was = record !== undefined && record.oid === t.oid && !confirmed ? new Map(record.columns.map((c) => [c.attnum, c])) : new Map<number, RecordedColumn>();
+  const replaced = record !== undefined && record.oid !== t.oid;
+  const was = record !== undefined && !replaced && !confirmed ? new Map(record.columns.map((c) => [c.attnum, c])) : new Map<number, RecordedColumn>();
+  // the names the table this one replaced left out, unless the person confirmed the entry
+  const outBefore = replaced && !confirmed ? new Set(record.columns.filter((c) => !c.synced).map((c) => c.name)) : new Set<string>();
   const conflicts: Array<{ name: string; was: string }> = [];
   // a synced column renamed out of what the entry names (a `columns:` entry): kept in the line a hold says
   const renamedOut: string[] = [];
@@ -76,24 +86,32 @@ export function identityVerdict(t: IdentityInput, record: ColumnRecord | undefin
   for (const c of cols) {
     const r = was.get(c.attnum);
     const syncs = synced.has(c.name);
+    if (r === undefined && outBefore.has(c.name)) {
+      if (syncs) conflicts.push({ name: c.name, was: c.name });
+      columns.push({ attnum: c.attnum, name: c.name, synced: false });
+      continue;
+    }
     if (r === undefined || r.synced) {
       if (r !== undefined && r.name !== c.name && !syncs) renamedOut.push(c.name);
       columns.push({ attnum: c.attnum, name: c.name, synced: syncs });
       continue;
     }
+    // A READ-ONLY PROJECT'S COMMITTED FILE confirms a column that did not move
+    if (readOnly && r.name === c.name) { columns.push({ attnum: c.attnum, name: c.name, synced: syncs }); continue; }
     // LEFT OUT: stays out under any name, its own included; the file syncing it is a conflict, which only a
     // confirmation ends. Recorded under its name now, for the words alone
     if (syncs) conflicts.push({ name: c.name, was: r.name });
     columns.push({ attnum: c.attnum, name: c.name, synced: false });
   }
-  if (conflicts.length === 0) return { kind: "taken", record: { oid: t.oid, columns } };
-  return { kind: "held", why: heldText(t, cols.map((c) => c.name), conflicts, renamedOut), conflicts };
+  if (conflicts.length === 0) return { kind: "taken", record: { oid: t.oid, columns }, ...(replaced ? { replaced: true as const } : {}) };
+  return { kind: "held", why: heldText(t, cols.map((c) => c.name), conflicts, renamedOut, readOnly), conflicts };
 }
 
 /** What a hold says, in the sources file's words: which column is which, that the synced data serves as it was, the
  *  line that keeps each out (a `columns:` entry's keeps a synced column renamed, `renamedOut`, under its new name), and
- *  the command that syncs each — every column named, since `mason add` writes the entry anew. */
-function heldText(t: IdentityInput, names: readonly string[], conflicts: ReadonlyArray<{ name: string; was: string }>, renamedOut: readonly string[]): string {
+ *  the way that syncs each — `mason add` naming every column, since it writes the entry anew; in a read-only project,
+ *  where `mason add` is refused, the entry taken out and put back, each started with. */
+function heldText(t: IdentityInput, names: readonly string[], conflicts: ReadonlyArray<{ name: string; was: string }>, renamedOut: readonly string[], readOnly: boolean): string {
   const one = conflicts.length === 1;
   const renamed = conflicts.some((c) => c.name !== c.was);
   const which = conflicts.map((c) => c.name === c.was ? `${c.name} is a column the sources file left out` : `${c.name} is the column the sources file left out as ${c.was}`).join("; ");
@@ -108,6 +126,11 @@ function heldText(t: IdentityInput, names: readonly string[], conflicts: Readonl
     ? `exclude: ${flow([...e.exclude.filter((x) => names.includes(x)), ...conflicts.map((c) => c.name).filter((x) => !e.exclude.includes(x))])}`
     : `columns: ${flow(names.filter((x) => (t.synced.includes(x) && !gone.has(x)) || listed.includes(x)))}`;
   const all = names.filter((x) => t.synced.includes(x) || listed.includes(x));
+  if (readOnly) {
+    return `${head}. To keep ${one ? "it" : "them"} out, write ${line} on ${at} in the committed sources file, and start Mason with it. ` +
+      `To sync ${one ? "it" : "them"}, take the entry out of the committed file and start Mason with it, then put the entry back and start Mason again: ` +
+      "the table is synced again whole";
+  }
   return `${head}. To keep ${one ? "it" : "them"} out, write ${line} on ${at}, then run mason stop && mason start. ` +
     `To sync ${one ? "it" : "them"}, run mason add ${e.name} --columns ${all.join(",")} while Mason runs`;
 }

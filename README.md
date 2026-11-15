@@ -91,6 +91,10 @@ tables:
   `exclude:`. Name one with `--include` to sync it.
 - While Mason runs, `mason add` and `mason remove` take effect at once. A change you make by hand applies at the next
   `mason start`. If an entry has a mistake, Mason names the key and says how to fix it. You never write column types.
+- A column the file leaves out stays out until you confirm it, even if you rename it on your database. If a hand edit
+  would sync such a column again, Mason holds that table and says why on its line in `mason status`. Run the
+  `mason add <table> --columns …` the line gives to sync it. In a project deployed read-only, the committed file is your
+  word, and the line says what to do there.
 
 ### Keep them up to date
 

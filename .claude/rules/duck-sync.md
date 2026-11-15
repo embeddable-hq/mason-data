@@ -75,13 +75,16 @@ paths:
   out stays out under ANY name, its old one included: no name in the file re-admits it, since the run writes `exclude:`
   itself and takes a gone name out (the review of PR 1078 served a column renamed away and back). When the file would
   sync it, the table is HELD (`unplaced`): it is not copied, polled, caught up or streamed, it serves what it holds, and
-  its line says why with the line to write. Only `mason add` of the table through the run, or its entry removed,
-  confirms it. Every read checks its columns too: the poll and
-  each chunk of a copy ask `pg_identify_object` in their own transaction after the read (`readStillPlaced`). The stream
-  refuses a relation with a name out of its place (`relationMoved`), and checks every other relation message once
-  against the catalog before applying a change of it (`verifyStreamed`): names in place can still be other columns
-  after a drop. The shape carries each column's number, so a swap or a drop and an add of one name changes it. ("Which
-  column is which")
+  its line says why with the line to write. Only `mason add` confirms it (through the run, or recorded in `.mason/` while
+  Mason is stopped, src/cli/confirmed.ts), or its entry removed. In a project deployed read-only the committed file is
+  the owner's word, the run never writing it: a column that did not move is taken as the file says, and a hold's way
+  out is one that works there. Every read checks its columns too: the poll, each chunk of a copy and the stream's read
+  of a row again by key (`sourceRows`, issue 1081) ask `pg_identify_object` in their own transaction after the read
+  (`readStillPlaced`). The stream refuses a relation with a name out of its place (`relationMoved`), and checks every
+  other relation message once against the catalog before applying a change of it (`verifyStreamed`): names in place can
+  still be other columns after a drop. The shape carries the table's oid and each column's number, so a swap, a drop and
+  an add of one name, or a table made again under its name changes it; a table of another oid is decided again by name,
+  a name its predecessor left out kept out, and read again whole. ("Which column is which")
 - **A batch holds a table's changes of ONE STAY in the stream, and only the stay it is in now is applied**
   (`StreamedTable.stay`: a new number when the table enters `streamed` or its copy is swapped, never used twice;
   `streamOnce`, `applyStreamed`): an ended stay's changes committed before the next copy's catch-up, so that copy or

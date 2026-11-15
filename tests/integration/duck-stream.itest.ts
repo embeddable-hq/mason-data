@@ -1547,6 +1547,57 @@ test("Mason's own publication names each table whole: the database's DROP COLUMN
   assert.deepEqual(logged.filter((l) => l.includes(SECRET)), [], "no log line carries an excluded value");
 });
 
+// A ROW READ AGAIN FROM THE DATABASE FOR ITS GENERATED COLUMN (issue 1081): Postgres sends no generated column (before 18,
+// and by default after), so the stream reads such a row again by its key and its columns' names. Columns that swap names
+// after the stream was sent the update, and before it is applied, send no relation message: the read named them, and
+// served the excluded column's values as `a`. The batch is stopped on the writer's turn while the swap commits.
+test("a row read again for its generated column, after its columns swapped names under the stream, never carries the excluded column's values", { skip }, async () => {
+  const db = `${tag}_gen`, url = urlOf(db);
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  psql(url, "CREATE TABLE t (id int PRIMARY KEY, a text, c text, b text, g text GENERATED ALWAYS AS (b || '_g') STORED); " +
+    `INSERT INTO t (id, a, c, b) SELECT g, 'a' || g, '${SECRET}' || g, 'b' || g FROM generate_series(1, 4) g`);
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const folder = path.join(dir, "gen-project");
+  const names = { slot: `${tag}_gen`, publication: `${tag}_gen`, owned: true };
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "gen.db"), (l) => logged.push(l));
+  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", names);
+  const reader = await store.instance.connect();
+  const read = async (sql: string): Promise<string> => ((await reader.runAndReadAll(sql)).getRowsJS() as unknown[][]).map((r) => r.map((x) => x === null ? "" : String(x)).join("\t")).join("\n");
+  // the stream's batch of t stopped on the writer's turn, once, until the test lets it go
+  const hooks = sync as unknown as { applyStreamed: (batch: ReadonlyMap<string, unknown>, ...a: unknown[]) => Promise<void> };
+  const applyStreamed = hooks.applyStreamed.bind(sync);
+  let gate: Promise<void> | null = null, reached = false;
+  hooks.applyStreamed = async (batch, ...a) => {
+    if (gate !== null && batch.has("public.t")) { reached = true; const g = gate; gate = null; await g; }
+    await applyStreamed(batch, ...a);
+  };
+  let go = (): void => undefined;
+  try {
+    await sync.open();
+    void setPicked(sync, await pick(parsed.source, folder, [["public.t", null, ["c"]]]));
+    await sync.once();
+    await sync.caughtUp();
+    assert.equal(await read("SELECT id, a, b, g FROM public.t WHERE id = 1"), "1\ta1\tb1\tb1_g");
+    gate = new Promise<void>((r) => { go = r; });
+    psql(url, "UPDATE t SET b = b || '!'");
+    await until(() => reached, "the stream's batch of t on the writer's turn", logged, 20_000);
+    // sent, and not yet applied: the columns swap names, and no relation message follows
+    psql(url, "BEGIN; ALTER TABLE t RENAME a TO tmp; ALTER TABLE t RENAME c TO a; ALTER TABLE t RENAME tmp TO c; COMMIT");
+    go();
+    for (const end = Date.now() + 8_000; Date.now() < end; await new Promise((r) => setTimeout(r, 250))) {
+      assert.ok(!(await read("SELECT * FROM public.t")).includes(SECRET), `the excluded values never reach the synced data\n${logged.join("\n")}`);
+    }
+    assert.ok(logged.some((l) => /^public\.t: replication: public\.t: its columns were renamed on the database while its changes were applied/.test(l)), `said\n${logged.join("\n")}`);
+  } finally {
+    go();
+    reader.closeSync();
+    await sync.stop();
+    await store.close();
+  }
+});
+
 // A PUBLICATION AN EARLIER MASON MADE WITH COLUMN LISTS is re-pointed to whole tables at the next pass, ONCE: at a
 // restart (the stream resuming over changes made while it was stopped, decoded with the list) and while streaming, with
 // the application writing all along. What the stream sees when the publication's columns change is a new relation

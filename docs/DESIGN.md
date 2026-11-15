@@ -628,11 +628,30 @@ secret, at every look and after a restart. The file is not only the person's wor
 again only once confirmed. The cost: a name taken out of `exclude:`, or added to `columns:`, by hand holds the table
 too, and the person runs `mason add` to sync it.
 
-**How a person confirms.** Running `mason add <table>` while Mason runs writes the entry against the columns as the
-database names them now, so the run takes that entry afresh. Removing the entry and adding it again does the same,
-because the record goes with the synced data. A hand edit of the file alone never confirms a column left out. The file
-cannot say who wrote it, nor whether its author knew of a rename. The line a hold suggests keeps the column out. The command it suggests names every
-column, because `mason add` writes the entry anew and would drop the file's other excludes.
+**How a person confirms.** Running `mason add <table> --columns …` writes the entry against the columns as the
+database names them now, so the run takes that entry afresh. With Mason running the run takes it at once. With Mason
+stopped the command records the confirmation in `.mason/` (src/cli/confirmed.ts), and the next start takes it, as the
+command's next step says. Removing the entry and adding it again does the same, because the record goes with the synced
+data. In a writable project a hand edit of the file alone never confirms a column left out: the file cannot say who
+wrote it (the run writes `exclude:` too), nor whether its author knew of a rename. The line a hold suggests keeps the
+column out. The command it suggests names every column, because `mason add` writes the entry anew and would drop the
+file's other excludes, and a plain `mason add` leaves secret-looking columns out again.
+
+**A read-only project** (the re-check of PR 1078). There `mason add` is refused, and the committed file is how the
+owner changes the project; the run never writes it. So the file confirms a column left out that did not move: the same
+column, under the name it was last taken under. A column that moved stays held, and the hold names a way out that works
+there: the entry taken out and put back, each started with.
+
+**A table made again under its name** (the re-check of PR 1078). A table dropped and created again, or another renamed
+into its place, has another oid. The shape begins with the oid, so the change is seen and the table's columns are read
+again; before, its shape read as the same and every poll failed for ever. The record of another oid cannot tell its
+columns apart by number, so they are decided by name, and a name the old table left out stays out: a file that syncs one
+holds the table. Its synced data is another table's, so its watermark is forgotten and it is read again whole.
+
+**A row read again from the database** (issue 1081). Before Postgres 18, the stream carries no generated column, so
+Mason reads such a row again by key and by column name. The read checks its columns' identity after it, in its own
+transaction, as the poll does. When a column moved, those rows are not written, and the table is caught up by one poll
+once its columns are read again.
 
 **Each read checks too.** The decision is made when the catalog is read, so a rename after it could still reach a read.
 The poll and each chunk of a copy ask `pg_identify_object` for each column after their read, in the same transaction.

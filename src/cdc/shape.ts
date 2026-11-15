@@ -4,7 +4,10 @@
  * JSON array of `[name, oid, typmod, attnum, generated]` — never `format_type`'s words, which name a type by the
  * session's search_path. Read from `pg_attribute` alone: an index lookup of the catalog by the table's oid, no lock
  * taken and no row of the table read. The number is the column's identity (issue 1073: a swap of two names, or a drop
- * and an add of one name, changes no name list), so any change of which column holds which name changes the shape.
+ * and an add of one name, changes no name list), so any change of which column holds which name changes the shape. It
+ * begins with the table's oid and a colon (`16401:[…]`): a table dropped and made again under its name, or another
+ * renamed into its place, is another table, whatever its columns, so its shape is another (the re-check of PR 1078: a
+ * table made again with the same columns failed every poll, its shape read as the same).
  *
  * ONE fragment for both readers, so the two are equal by construction: the catalog's read (src/cli/preflight.ts
  * `TABLES_SQL` `shape`, carried on `SourceTable.shape`) and the sync's check before a poll and after a stream's relation
@@ -15,7 +18,8 @@ import { pgIdent, pgLiteral } from "./pg-wire.ts";
 
 /** The shape of the table whose oid is `rel` (SQL: `c.oid`, or `to_regclass(…)`, which is null for a table gone, and
  *  so is its shape). */
-export const shapeSql = (rel: string): string => "(SELECT coalesce(json_agg(json_build_array(a.attname, a.atttypid, a.atttypmod, a.attnum, a.attgenerated <> '') ORDER BY a.attnum), '[]'::json)::text " +
+export const shapeSql = (rel: string): string => `(SELECT (${rel})::oid::text || ':' || ` +
+  "coalesce(json_agg(json_build_array(a.attname, a.atttypid, a.atttypmod, a.attnum, a.attgenerated <> '') ORDER BY a.attnum), '[]'::json)::text " +
   `FROM pg_attribute a WHERE a.attrelid = ${rel} AND a.attnum > 0 AND NOT a.attisdropped)`;
 
 /** A table's name as `to_regclass` reads it, as an SQL literal: quoted, so a name of any case or character is the table
@@ -41,11 +45,17 @@ export function identitySql(schema: string, table: string, oid: number, columns:
 /** One column of a shape: its name, type oid, type modifier, number (`attnum`) and whether it is generated. */
 export interface ShapeColumn { name: string; typeOid: number; typmod: number; attnum: number; generated: boolean }
 
+/** The table's oid a shape begins with, or null for a shape without one (a test's). */
+export function shapeOid(shape: string): number | null {
+  const m = /^(\d+):/.exec(shape);
+  return m === null ? null : Number(m[1]);
+}
+
 /** A shape's columns, in order, each its name, type oid, type modifier, number and whether it is generated (Postgres's
  *  JSON writes an oid as a string): a shape this module did not write reads as none. */
 export function shapeTuples(shape: string): ShapeColumn[] {
   try {
-    const cols = JSON.parse(shape) as unknown;
+    const cols = JSON.parse(shape.replace(/^\d+:/, "")) as unknown;
     return Array.isArray(cols) ? cols.flatMap((c) => Array.isArray(c) && typeof c[0] === "string"
       ? [{ name: c[0], typeOid: Number(c[1]), typmod: Number(c[2]), attnum: Number(c[3]), generated: c[4] === true }] : []) : [];
   } catch (e) {
