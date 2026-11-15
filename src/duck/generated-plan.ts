@@ -27,6 +27,7 @@ import { treeDifference } from "./rewrite.ts";
 import { StatementError, type DuckPlan } from "./statement.ts";
 import type { NumericProgram } from "../lib/pg-numeric.ts";
 import type { CellConv } from "./types.ts";
+import { relationKey } from "../lib/relation-key.ts";
 import { exprType, tableColumnThrough, type TreeNode, type TreeValue } from "./pgtree.ts";
 
 /** A refusal of a generated table: its key in the file (null: the file itself), what is wrong, why, and the ways out. */
@@ -1021,8 +1022,15 @@ export async function planDefinition(p: Planner, sql: string, orderBy: string | 
   if (plan.clock?.parse !== undefined) refused.push({ key: "sql", message: "it reads a relative literal ('now', 'today')", why: THE_SESSION_WHY, options: ["use now(), as of the run, with the zone named if it reads a day: (now() AT TIME ZONE 'UTC')::date"] });
   if (plan.withTies) refused.push({ key: "sql", message: "it ends in FETCH … WITH TIES", why: "That row count isn't a table's to keep.", options: ["use LIMIT, with an ORDER BY that decides every row"] });
   const fields = plan.fields ?? [];
-  const twice = fields.find((f, i) => f.name !== UNNAMED && fields.findIndex((x) => x.name === f.name) !== i);
-  if (twice !== undefined) refused.push({ key: "sql", message: `it names column ${twice.name} twice`, why: "A table's columns have one name each.", options: ["rename one with AS"] });
+  // one name as the synced data holds it (`relationKey`, issue 1019): `"U"` beside `u` is a column named twice there, and
+  // its build failed at every run with the engine's `Column with name "u" already exists`
+  const named = fields.filter((f) => f.name !== UNNAMED);
+  const twice = named.find((f, i) => named.findIndex((x) => relationKey(x.name) === relationKey(f.name)) !== i);
+  const first = twice === undefined ? undefined : named.find((x) => relationKey(x.name) === relationKey(twice.name));
+  if (twice !== undefined && first !== undefined) {
+    refused.push(first.name === twice.name ? { key: "sql", message: `it names column ${twice.name} twice`, why: "A table's columns have one name each.", options: ["rename one with AS"] }
+      : { key: "sql", message: `it names columns ${first.name} and ${twice.name}, whose names differ only in case`, why: "The synced data cannot hold both in one table.", options: ["rename one with AS"] });
+  }
   const { typeNames, kinds } = await columnTypes(p.rows, fields);
   fields.forEach((f, i) => { const bad = columnProblem(f, typeNames.get(i) ?? String(f.oid), kinds.get(i)); if (bad !== null) refused.push(bad); });
   // a numeric computed after the engine's answer: stored as DECIMAL arithmetic where the types fix its scale, over the
