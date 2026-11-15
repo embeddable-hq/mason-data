@@ -138,6 +138,52 @@ function split(line: string): { words: string[]; text: string }[] {
   return pieces;
 }
 
+/** A `gh api` call that merges a PR, or puts it in the merge queue, over REST. */
+export interface RestMerge {
+  pr: string;
+  /** `merge` merges now (`PUT /pulls/<n>/merge`); `merge-async` merges in the background or queues (`PUT /pulls/<n>/merge-async`);
+   *  `auto_merge` turns on auto-merge (`PUT /pulls/<n>/ccr/auto_merge`, the cloud session's stand-in for GraphQL), which
+   *  with a merge queue on puts the PR in it at whatever head it has then. */
+  endpoint: "merge" | "merge-async" | "auto_merge";
+  /** The body's fields given by `-f`, `-F`, `--field` and `--raw-field`, by key. */
+  fields: Map<string, string>;
+  /** Whether the body comes from `--input`, which a hook cannot read. */
+  input: boolean;
+}
+
+/**
+ * The REST merge a simple command makes, or undefined: `gh api` to `repos/<o>/<r>/pulls/<n>/merge`, `…/merge-async` or
+ * `…/ccr/auto_merge`, however the path is written (a full `https://…/` URL, a leading or trailing slash, a `?query`),
+ * with a method that writes. gh sends GET unless `-X`/`--method` says otherwise, or POST when a field or `--input` is
+ * given, so a read (`GET …/merge`, `GET …/merge-async/<uuid>`) is no merge, and neither is a DELETE (withdrawing
+ * auto-merge). Read by scripts/hooks/merge-head.ts,
+ * worktrees-sweep-after-merge.ts and wake-up.ts.
+ */
+export function restMerge(argv: string[]): RestMerge | undefined {
+  if (argv[0]?.replace(/^.*\//, "") !== "gh" || argv[1] !== "api") return undefined;
+  let method: string | undefined, pr: string | undefined, endpoint: RestMerge["endpoint"] | undefined, input = false;
+  const fields = new Map<string, string>();
+  const field = (kv: string | undefined): void => {
+    const eq = kv?.indexOf("=") ?? -1;
+    if (kv !== undefined && eq > 0) fields.set(kv.slice(0, eq), kv.slice(eq + 1));
+  };
+  for (let i = 2; i < argv.length; i++) {
+    const w = argv[i]!;
+    const m = /^(?:https?:\/\/[^/]+\/(?:api\/v3\/)?|\/)?repos\/[^/]+\/[^/]+\/pulls\/(\d+)\/(merge|merge-async|ccr\/auto_merge)\/?(?:[?#].*)?$/.exec(w);
+    if (m) { pr = m[1]; endpoint = (m[2] === "ccr/auto_merge" ? "auto_merge" : m[2]) as RestMerge["endpoint"]; continue; }
+    if (w === "-X" || w === "--method") { method = argv[++i]; continue; }
+    const inline = /^(?:-X=?|--method=)(.+)$/.exec(w);
+    if (inline) { method = inline[1]; continue; }
+    if (w === "-f" || w === "-F" || w === "--field" || w === "--raw-field") { field(argv[++i]); continue; }
+    const inlineField = /^(?:-[fF]|--field=|--raw-field=)(.+)$/.exec(w);
+    if (inlineField) { field(inlineField[1]); continue; }
+    if (w === "--input" || w.startsWith("--input=")) { input = true; if (w === "--input") i++; }
+  }
+  if (pr === undefined || endpoint === undefined) return undefined;
+  const verb = (method ?? (fields.size > 0 || input ? "POST" : "GET")).toUpperCase();
+  return verb === "GET" || verb === "HEAD" || verb === "DELETE" ? undefined : { pr, endpoint, fields, input };
+}
+
 /** Blocks the tool call: one line, which the model reads as the reason. */
 export function block(message: string): never {
   process.stderr.write(`${message}\n`);

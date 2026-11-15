@@ -352,12 +352,15 @@ export function docsCommands(tests: ReadonlyArray<{ file: string; pattern?: stri
 }
 
 /** `changes`: whether the commit checked out changes nothing but docs, and the lines that say what was classified and
- *  why. A `pull_request` run checks out GitHub's merge of the head into the base, so the merge's first parent is the base
- *  and `HEAD^1..HEAD` is the pull request's net change (`--no-renames`: a rename's both paths; `-z`: a path as is). Any
- *  other event (a push to main runs everything, and is the backstop), any other HEAD, a git failure, or no path at all is
- *  "couldn't tell", which is never docs. */
+ *  why. A `pull_request` run checks out GitHub's merge of the head into the base, so the merge's first parent is the
+ *  base and `HEAD^1..HEAD` is the pull request's net change (`--no-renames`: a rename's both paths; `-z`: a path as is).
+ *  Any other event is a full run, and is the backstop: a push to main, and a merge group. A merge group's `base_sha` is
+ *  the group's parent commit, which is the head of the group ahead of it in the queue, never main. So `base..head`
+ *  would hold only this pull request's change, and a docs-only one queued behind a code one would skip the code's
+ *  tests. Any other HEAD, a git failure, or no path at all is "couldn't tell", which is never docs. */
 export function changesVerdict(root: string, event: string | undefined): { docs: boolean; lines: string[] } {
   const full = (why: string): { docs: false; lines: string[] } => ({ docs: false, lines: [`changes: cannot tell that only docs changed: ${why}`, "changes: docs=false: every job runs"] });
+  if (event === "merge_group") return full("the event is merge_group: a merge group always runs everything, since its commit holds every pull request ahead of it in the queue");
   if (event !== "pull_request") return full(`the event is ${event ?? "not set (GITHUB_EVENT_NAME)"}, not pull_request: a run on main always runs everything`);
   const git = (args: string[]): { out: string } | { err: string } => {
     const r = spawnSync("git", args, { cwd: root, encoding: "utf8" });

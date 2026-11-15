@@ -5,7 +5,9 @@
  * over src/cdc/pg-wire.ts) applied to the copied tables (src/duck/sync.ts `applyChanges`) instead of polling them.
  *
  * WHY REPLAYING IS SAFE. Every change of a table with a primary key is a whole row set at its key, or a key removed,
- * so the changes of a key applied in commit order end at the key's state whatever state they started from. The copy
+ * so the changes of a key applied in commit order end at the key's state whatever state they started from. That holds
+ * only while the database keeps the table's rows apart by its key: a table whose key is dropped leaves the stream before
+ * its next change is applied (`StreamTarget.keyHeld`, issue 1062), and joins again caught up once it holds. The copy
  * and the stream may therefore overlap: a change the copy already holds is applied again, and the row passes back
  * through its older states until the stream reaches the copy's snapshot (a reader may see one of them for that long).
  * What may NOT happen is a gap — and the stream runs WHILE tables are copied (a copy runs beside the
@@ -249,8 +251,36 @@ export function foldInto(held: TableChanges, later: TableChanges): void {
   addCounts(held.counts, later.counts);
 }
 
-/** What a stream's relation (a published table) is to the copy: its source name and columns as they arrive. */
-interface Relation { source: string; columns: RelationColumn[] }
+/** What a stream's relation (a published table) is to the copy: its source name, its replica identity (pgoutput's
+ *  `d`efault, `f`ull, `i`ndex or `n`othing) and its columns as they arrive. */
+interface Relation { source: string; replicaIdentity: string; columns: RelationColumn[] }
+
+/**
+ * WHETHER A RELATION MESSAGE ITSELF SHOWS THAT `key` KEPT THE TABLE'S ROWS APART when the changes after it were written
+ * (issue 1062). Postgres builds a relation message from the catalog as of the change it comes before, and flags the
+ * columns of the replica identity's index. Under the default identity that index is the primary key. Under `USING INDEX`
+ * it is the index named. Either way it is unique, valid, immediate, not partial and over NOT NULL columns. So when the
+ * flagged columns are all among the key's, no two rows shared a key then. A `FULL` identity flags every column and shows
+ * nothing. No flagged column (the primary key dropped, or the identity's index) shows nothing either. Then the database
+ * is asked (`StreamTarget.keyHeld`).
+ */
+export function keyShown(relation: { replicaIdentity: string; columns: readonly RelationColumn[] }, key: readonly string[]): boolean {
+  if (relation.replicaIdentity !== "d" && relation.replicaIdentity !== "i") return false;
+  const flagged = relation.columns.filter((c) => c.isKey).map((c) => c.name);
+  return flagged.length > 0 && flagged.every((name) => key.includes(name));
+}
+
+/**
+ * WHETHER A RELATION MESSAGE SHOWS THE TABLE HAD NO PRIMARY KEY when the changes after it were written (the review of PR
+ * 1068): the default identity with no column flagged. Then a "now" read of the catalog cannot clear it. A key dropped, a
+ * duplicate inserted and the key restored, all before the stream decodes them, finds the key held by then, and the
+ * duplicate's INSERT would replace the synced row it shares a key with. One more table looks the same: one whose
+ * primary key is DEFERRABLE, which Postgres never takes as its identity. The target tells the two apart
+ * (`StreamTarget.keyHeld`).
+ */
+export function keyShownGone(relation: { replicaIdentity: string; columns: readonly RelationColumn[] }): boolean {
+  return relation.replicaIdentity === "d" && !relation.columns.some((c) => c.isKey);
+}
 
 /** A streamed table as the stream decodes it: its STAY, one unbroken time in the stream of one copy (a new number once it
  *  left or its copy was swapped, never used twice), the COPY's columns (never the sources file's of the moment, never the publication's), its key,
@@ -267,6 +297,16 @@ export interface StreamTarget {
    *  the stream, saying why and the way out — recorded before the stream goes on, so nothing past the change is
    *  acknowledged without it. Called once per `tables()` entry */
   refuse(source: string, missing: readonly string[]): Promise<void>;
+  /**
+   * WHETHER THE DATABASE STILL KEEPS THE TABLE'S ROWS APART BY ITS KEY (issue 1062: a primary key dropped on the
+   * database let a duplicate's INSERT replace a synced row, as every change is written by key). Asked before a table's
+   * first change after each of its relation messages, unless the message shows it (`keyShown`). Postgres sends one after
+   * any change of the table's definition, a dropped key included, before its next change, even within the same
+   * transaction. `gone`: the message shows the table had no primary key then (`keyShownGone`), so a key held now is not
+   * enough. False: the target refused the table (out of the stream, marked behind, said with the way out), recorded
+   * before the stream goes on. A read that fails throws, and the stream ends with it, so nothing past it is acknowledged.
+   */
+  keyHeld(source: string, gone: boolean): Promise<boolean>;
   /** told of each relation message, with the columns it carries: Postgres sends one before a table's first change in a
    *  stream, and again after its definition changed (an ALTER TABLE), so the target checks whether the table's columns
    *  changed on the database (issue 977). Never awaited: the check is the target's, beside the stream */
@@ -365,6 +405,10 @@ export class ReplicationStream {
     const relations = new Map<number, Relation>();
     // the streamed tables refused by a relation lacking a copied column, by their `tables()` entry: once each
     const refused = new WeakSet<StreamedTable>();
+    // the STAY each relation's key was last shown or found to hold for: asked again after the relation's next message,
+    // which Postgres sends after any change of the table's definition, and when the table joins the stream again. Never
+    // the `tables()` entry, which is made again at every batch (a catalog query a batch for a FULL table)
+    const keyed = new Map<number, number>();
     let batch = new Map<string, TableChanges>();
     let rows = 0, firstAt = 0;
     // the batch holds a change of a big table: applied by `applySize`'s larger bounds
@@ -435,7 +479,8 @@ export class ReplicationStream {
             else if (rows === 0) { this.acked = lastEnd > this.acked ? lastEnd : this.acked; this.seen = this.acked; }
             break;
           case "relation":
-            relations.set(msg.relid, { source: `${msg.namespace}.${msg.name}`, columns: msg.columns });
+            relations.set(msg.relid, { source: `${msg.namespace}.${msg.name}`, replicaIdentity: msg.replicaIdentity, columns: msg.columns });
+            keyed.delete(msg.relid);
             this.target.relation?.(`${msg.namespace}.${msg.name}`, msg.columns);
             break;
           case "insert": case "update": case "delete": case "truncate": {
@@ -452,6 +497,14 @@ export class ReplicationStream {
               if (missing.length) {
                 if (!refused.has(table)) { refused.add(table); await this.target.refuse(rel.source, missing); }
                 continue;
+              }
+              // ITS KEY STILL KEEPS ITS ROWS APART (issue 1062), asked before its first change since its relation message:
+              // a change of a table two of whose rows share a key is written over the other row. Refused, the table leaves
+              // the stream: this change and what the batch holds of it are dropped, and its catch-up poll reads them
+              if (refused.has(table)) continue;
+              if (keyed.get(relid) !== table.stay) {
+                if (!keyShown(rel, table.key) && !await this.target.keyHeld(rel.source, keyShownGone(rel))) { refused.add(table); continue; }
+                keyed.set(relid, table.stay);
               }
               if (table.big === true) big = true;
               // ONE STAY A BATCH: what an ended stay left in it would be dropped at the apply (`applyStreamed`), and held

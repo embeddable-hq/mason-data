@@ -136,6 +136,28 @@ test("a back-off's wake that fires before its end by the clock waits out the res
   }
 });
 
+// A KEY RETRY IS NOT A FAILURE (the review of PR 1068): a table refused for its key asks again every minute, and counted
+// as failures those asks made its next ordinary failure back off for the full 6 hours after about 7 minutes refused
+test("a table asking every minute for its key never grows its ordinary back-off: its next failure is the first in a row", async () => {
+  const Sync = (syncModule as unknown as { Sync: new (...a: unknown[]) => Record<string, unknown> }).Sync;
+  const sync = new Sync({ writer: {} }, { host: "localhost" }, "x", () => undefined, 5_000, "replication", { slot: "s", publication: "p", owned: true });
+  const keyRetryAt = sync.keyRetryAt as ((source: string) => number) | undefined;
+  assert.equal(typeof keyRetryAt, "function", "a table refused for its key asks again on a schedule of its own");
+  try {
+    const before = Date.now();
+    for (let i = 0; i < 10; i++) keyRetryAt!.call(sync, "public.a");
+    const retry = (sync.retries as Map<string, { failures: number; at: number }>).get("public.a");
+    assert.equal(retry?.failures, 0, "ten asks for the key are no failure");
+    assert.ok(retry!.at >= before + 60_000 && retry!.at <= Date.now() + 60_000, "asked again a minute on");
+    const when = (sync.backOff as (source: string, attemptMs: number) => string).call(sync, "public.a", 0);
+    assert.match(when, /\(failure 1 in a row\)/);
+    const backedOff = (sync.retries as Map<string, { failures: number; at: number }>).get("public.a")!.at - Date.now();
+    assert.ok(backedOff > 4 * 60_000 && backedOff <= 5 * 60_000 + 1_000, `its first failure backs off 5 minutes, not 6 hours (${Math.round(backedOff / 1000)} s)`);
+  } finally {
+    await (sync.stop as () => Promise<void>).call(sync);
+  }
+});
+
 // ISSUE 937, THE CLASS OF 925: EVERY SCHEDULE'S TIMER NEVER FIRES BEFORE ITS TIME BY `Date.now()` (`timerAt`). The next
 // pass's timer fired a millisecond early on machines whose two clocks sit that way. The pass then polled only the
 // tables whose `dueAt` had come by `Date.now()`, found none, and still attached the source: an extra connection to the

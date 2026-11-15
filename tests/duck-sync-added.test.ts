@@ -91,7 +91,10 @@ async function withSync<T>(t: Started, use: (sync: SyncClass, logged: string[], 
   }
 }
 
+/** a table's ledger row as a run left it, and for a copied one its table in the synced data (a row saying copied over no
+ *  table is synced again whole at the open: src/duck/sync.ts `forgetMissing`) */
 const copied = (name: string, columns = [column("id")], phase = "copied", error: string | null = null): string =>
+  (phase === "copied" ? `CREATE TABLE IF NOT EXISTS public."${name}" (${columns.map((c) => `"${c.name}" ${c.type}`).join(", ")}); ` : "") +
   `INSERT INTO ${MASON_SCHEMA}.copy_state VALUES ('public.${name}', '${phase}', 10, 0, 1.0, now(), ${error === null ? "NULL" : `'${error}'`}, '${JSON.stringify(columns)}')`;
 const polled = (name: string): string => `INSERT INTO ${MASON_SCHEMA}.poll_state (source, snapshot, polled_at) VALUES ('public.${name}', '100:100:', now())`;
 /** a table as the sources file adds it, its sync its entry's (or the file's): off, or polled every `every` */
@@ -113,13 +116,13 @@ test("a start names each table synced at the next pass with its reason, from the
     tables: [table("current"), table("never"), table("changed", 10, [column("id"), column("added", "text")]), table("failed"),
       table("caught"), { ...table("big", 2_000_000), sync: OFF }, table("retired"), table("outgrown")],
     seed: async (run) => {
+      // a copy in the older layout carries its primary key (`findRetired`)
+      await run("CREATE TABLE public.retired (id BIGINT PRIMARY KEY)");
       for (const n of ["current", "changed", "caught", "big", "retired"]) { await run(copied(n)); await run(polled(n)); }
       await run(copied("failed", [column("id")], "failed", "the source closed the connection"));
       // copied, but a numeric outgrew its DECIMAL: its watermark is gone until it is copied again, wider
       await run(copied("outgrown"));
       await run(`INSERT INTO ${MASON_SCHEMA}.catch_up VALUES ('public.caught', 'after its whole read', now())`);
-      // a copy in the older layout carries its primary key (`findRetired`)
-      await run("CREATE TABLE public.retired (id BIGINT PRIMARY KEY)");
     },
   });
   // its size decides nothing: a big table is polled unless its sync says off (mason add writes that for one)
@@ -209,12 +212,12 @@ test("a polled copy says its interval and last poll, an `off` one its age and th
     mode: "poll",
     tables: [{ ...table("a"), sync: every("30s", 30) }, { ...table("big", 2_000_000), sync: OFF }, table("changed", 10, [column("id"), column("added", "text")]), table("retired"), table("outgrown"), table("caught")],
     seed: async (run) => {
+      // a copy in the older layout carries its primary key (`findRetired`)
+      await run("CREATE TABLE public.retired (id BIGINT PRIMARY KEY)");
       for (const n of ["a", "big", "changed", "retired", "caught"]) { await run(copied(n)); await run(lastPoll(n)); }
       // copied, but a numeric outgrew its DECIMAL: its watermark is gone until it is copied again, wider
       await run(copied("outgrown"));
       await run(`INSERT INTO ${MASON_SCHEMA}.catch_up VALUES ('public.caught', 'after its whole read', now())`);
-      // a copy in the older layout carries its primary key (`findRetired`)
-      await run("CREATE TABLE public.retired (id BIGINT PRIMARY KEY)");
     },
   });
   const asOf = "2026-10-27T19:58:39.000Z";
@@ -249,6 +252,7 @@ test("a polled copy says its interval and last poll, an `off` one its age and th
 
 test("a recopied copy's last copy is the instant the ledger holds, said in UTC whatever the machine's zone", async () => {
   const { states } = await keptStates({ mode: "recopy", tables: [table("a")], seed: async (run) => {
+    await run("CREATE TABLE public.a (id BIGINT)");
     await run(`INSERT INTO ${MASON_SCHEMA}.copy_state VALUES ('public.a', 'copied', 10, 0, 1.0, '2026-10-27 19:00:00+00', NULL, '${JSON.stringify([column("id")])}')`);
   } });
   assert.deepEqual(bare(at(states, "a").kept), { by: "recopy", copiedAt: "2026-10-27T19:00:00.000Z", syncedAt: null });
@@ -565,6 +569,7 @@ test("a table just copied says its copy's age at once, never 'never synced' unti
   await withSync({ mode: "poll", tables: [{ ...table("a"), sync: every("30s", 30) }], seed: async (run) => {
     // the side table a copy built, ready to be swapped in (src/duck/sync.ts swap)
     await run("CREATE TABLE public.a__mason_copy (id BIGINT)");
+    await run("CREATE TABLE public.a (id BIGINT)");
     await run(`INSERT INTO ${MASON_SCHEMA}.copy_state VALUES ('public.a', 'copied', 0, 0, 1.0, now(), NULL, '${JSON.stringify([column("id")])}')`);
   } }, async (sync) => {
     const swap = (sync as unknown as { swap(t: AddedTable, side: string, o: { snapshot: string | null; behind: string | null }): Promise<void> }).swap.bind(sync);

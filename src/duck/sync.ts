@@ -75,7 +75,7 @@ import type { RelationColumn } from "../cdc/pgoutput.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { PgConnection, formatLsn, parseLsn, pgLiteral, type PgConnectOptions } from "../cdc/pg-wire.ts";
-import { createSlot, currentLsn, dropSlot, readSlot, type SlotState } from "../cdc/source.ts";
+import { createSlot, currentLsn, dropSlot, readSlot, visibleLsn, type SlotState } from "../cdc/source.ts";
 import { holdOf, nativeVarchar } from "./held-types.ts";
 import { scaleColumn, scaleOfText, scaleSql } from "./scale-column.ts";
 import { hiddenColumns } from "./hidden-columns.ts";
@@ -267,6 +267,22 @@ export class Removed extends Error {
 /** a table the database no longer keeps apart by the key it is synced by (src/cdc/key-held.ts, issue 1027): its read is
  *  refused before it writes by that key, the synced data left as it was, its words the developer's (`keyNotHeld`) */
 export class KeyNotHeld extends Error {}
+
+/**
+ * HOW LONG A CATCH-UP REFUSED FOR ITS KEY WAITS before it asks the database again (issue 1062), never a failure's
+ * growing back-off (up to 6 hours): the key comes back when the database's owner restores it, and the table should be
+ * current soon after. An attempt refused costs the database one connection and one catalog query, no row read, as
+ * the key is asked before the poll reads anything (`poll`'s `keyNotHeld`).
+ */
+export const KEY_RETRY_MS = 60_000;
+
+/** the catch-up mark of a streamed table refused for its key (`refuseKey`), in `_mason.catch_up`: how its catch-up knows,
+ *  after a restart too, to wait for the stream to pass where the key came back (`keyBackPassed`) */
+const KEY_REFUSED_WHY = "after the database stopped keeping its rows apart by its key";
+
+/** how long a catch-up of a table refused for its key waits for the stream to pass where the key came back, before it
+ *  is tried again in `keyRetryMs` */
+const KEY_PASS_WAIT_MS = 30_000;
 
 export interface CopyState {
   source: string;
@@ -1283,6 +1299,8 @@ export class Sync {
   private currentSchema: PgSchema;
   /** what the catalog last built from: replaced (a new object) only when it changes */
   private schemaKey = "";
+  /** the tables the catalog could not read, and why (`catalogTypes`): each said once a reason */
+  private readonly unread = new Map<string, string>();
   /** REPLICATION, WHERE THE STREAM IS (`streamStatus`, the stream's log): the changes it applied this run by table, and
    *  since its last periodic line (`reportStream`, every `streamReportMs` when something moved) */
   private readonly appliedCounts = new Map<string, ChangeCounts>();
@@ -1384,6 +1402,14 @@ export class Sync {
   /** the review's check's own connection and its set-up, never the run's (`GeneratedHost.checkConnection`) */
   private generatedCheck: { conn: DuckConnection; setup: SessionSetup } | null = null;
 
+  /** how long a catch-up refused for its key waits before it asks the database again (`keyRetryAt`) */
+  private readonly keyRetryMs: number;
+  /** a test's hold before a key-refused catch-up reads the key (`keyBackPassed`); none in a run */
+  private readonly onKeyBack: (() => Promise<void>) | undefined;
+  /** what each table's catch-up last said of waiting for its key: said again only when its words change, never once a
+   *  minute while the key stays gone (the review of PR 1068: 1,440 log lines and events a day a table) */
+  private readonly keyWaitSaid = new Map<string, string>();
+
   constructor(store: DuckStore, source: Source, database: string, log: (line: string) => void, intervalMs: number, mode: SyncMode = "poll",
     replication: SyncReplication | null = null,
     options: { streamReportMs?: number; copyChunkRows?: number; copyParallel?: number; copyChunkSeconds?: number; rewriteRecheckMs?: number; onChunk?: (e: ChunkEvent) => void | Promise<void>; diskFree?: (dir: string) => number;
@@ -1393,10 +1419,17 @@ export class Sync {
       /** a table's columns changed on the database: the run reads them again and sets the tables (`onColumnsChanged`) */
       onColumnsChanged?: (sources: string[]) => Promise<void>;
       /** when the synced tables' space is read and when one is compacted (`CompactOptions`): the defaults, but in tests */
-      compact?: CompactOptions } = {}) {
+      compact?: CompactOptions;
+      /** how long a catch-up refused for its key waits before it asks again (`KEY_RETRY_MS`): the default, but in tests */
+      keyRetryMs?: number;
+      /** a test's hold in a key-refused table's catch-up, between its connection and its read of the key
+       *  (`keyBackPassed`): what lets a test commit the key's return just before that read */
+      onKeyBack?: () => Promise<void> } = {}) {
+    this.onKeyBack = options.onKeyBack;
     this.compactOptions = { checkMs: COMPACT_CHECK_MS, firstCheckMs: COMPACT_FIRST_CHECK_MS, wasteShare: COMPACT_WASTE_SHARE, minWasteBlocks: COMPACT_MIN_WASTE_BLOCKS, ...options.compact };
     this.store = store; this.source = source; this.log = log; this.intervalMs = intervalMs; this.mode = mode;
     this.streamReportMs = options.streamReportMs ?? 60_000;
+    this.keyRetryMs = options.keyRetryMs ?? KEY_RETRY_MS;
     this.copyChunkRows = options.copyChunkRows ?? COPY_CHUNK_ROWS;
     this.copyParallel = options.copyParallel ?? COPY_PARALLEL;
     if (!Number.isInteger(this.copyParallel) || this.copyParallel < 1 || this.copyParallel > COPY_PARALLEL_MAX) {
@@ -1558,6 +1591,9 @@ export class Sync {
       if (columns !== null) { const c = JSON.parse(columns) as SourceColumnInfo[]; this.copiedAs.set(source, columnsKey(c)); this.copiedColumns.set(source, c); }
       this.states.set(source, { source, phase: phase === "copying" ? "waiting" : phase, rows: rows === null ? null : Number(rows), bytes: bytes === null ? null : Number(bytes), seconds, copiedAt, error });
     }
+    // a table the ledger says is synced with no table under it is synced again, whole (issue 1071), before anything serves
+    // it: the stored JSON paths' views, the catalog, the polls
+    await this.forgetMissing();
     await this.readSynced();
     await this.findRetired();
     this.removeStageLeftovers();
@@ -2639,7 +2675,7 @@ export class Sync {
     const r = (await w.runAndReadAll(`SELECT * FROM ${pq(keyHeldSql(t.schema, t.table, t.key))}`)).getRowsJS()[0] as [boolean, string | null, boolean, string | null] | undefined;
     if (r === undefined) return null;
     return keyHeldProblem({ found: r[0], nullable: r[1], held: r[2], usable: r[3] },
-      { source: t.source, key: t.key, at: t.entryAt ?? `the sources file's entry for ${t.source}`, own: t.primaryKey !== undefined });
+      { source: t.source, key: t.key, at: t.entryAt ?? `the sources file's entry for ${t.source}`, own: t.primaryKey !== undefined, replicated: this.replicated(t) });
   }
 
   private async shapesNow(w: DuckConnection, tables: readonly AddedTable[]): Promise<Map<string, string | null>> {
@@ -3035,7 +3071,8 @@ export class Sync {
     const s = new ReplicationStream({
       connect: () => PgConnection.connect({ ...this.pgOptions(), replication: true }), slot: r.slot, publication: r.publication, log: (l) => this.log(l), errorText: (e) => this.errorText(e),
       target: { tables: () => this.streamed, apply: (batch, lsn, committedAt) => this.applyStreamed(batch, lsn, committedAt), applied: () => this.appliedLsn,
-        refuse: (source, missing) => this.refuseStreamed(source, missing), current: () => { if (this.stream === s) this.streamCurrent(); },
+        refuse: (source, missing) => this.refuseStreamed(source, missing), keyHeld: (source, gone) => this.streamKeyHeld(source, gone),
+        current: () => { if (this.stream === s) this.streamCurrent(); },
         relation: (source, columns) => this.relationSeen(source, columns) },
     });
     this.stream = s;
@@ -3124,6 +3161,132 @@ export class Sync {
       this.refreshStreamed();
       if (this.shapeChecks.has(source)) this.kick();
     });
+  }
+
+  /**
+   * WHETHER THE DATABASE STILL KEEPS A STREAMED TABLE'S ROWS APART BY ITS KEY (issue 1062; src/duck/stream.ts
+   * `keyHeld`), asked when its relation message does not show it: a `FULL` replica identity, or a primary key gone. ONE
+   * catalog query (`keyHeldSql`, src/cdc/key-held.ts: `pg_attribute`, `pg_index` and `pg_class` by the table's oid, no
+   * lock, no row read), on a connection of its own as `databasePosition` reads, never the writer's turn: the source is
+   * attached only while a pass reads it, and the stream waits on this answer. A table whose key no longer holds is
+   * refused (`refuseKey`). A read that fails throws: the stream ends with it, nothing past it acknowledged, and asks
+   * again when it starts again (fail closed).
+   *
+   * `gone`: the relation message shows the table had no primary key when its next changes were written (`keyShownGone`).
+   * A primary key the database has NOW, immediate, was then restored since: dropped and restored before the stream
+   * decoded them, the changes between were written while two rows could share a key, and a key held now does not clear
+   * them. A second catalog read (`pg_index.indisprimary`, `indimmediate`) asks for it. A DEFERRABLE primary key, which
+   * Postgres never takes as the identity, and a key held by another unique index while the primary key stays dropped,
+   * are as the first read says.
+   */
+  private async streamKeyHeld(source: string, gone: boolean): Promise<boolean> {
+    const t = this.tables.get(source);
+    if (t === undefined || !this.streamed.has(source) || t.key.length === 0) return true;
+    const pg = await PgConnection.connect(this.pgOptions());
+    let row: (string | null)[] | undefined;
+    let restored = false;
+    try {
+      row = (await pg.query(keyHeldSql(t.schema, t.table, t.key))).rows[0];
+      // a boolean column reads `t` or `f` over the wire (never `::text`, which reads `true`)
+      if (gone) restored = (await pg.query(`SELECT EXISTS (SELECT FROM pg_index i WHERE i.indrelid = to_regclass(${regclassName(t.schema, t.table)}) AND i.indisprimary AND i.indimmediate)`)).rows[0]?.[0] === "t";
+    } finally { pg.close(); }
+    let problem = this.streamKeyProblem(t, row);
+    if (problem === null && gone && restored) {
+      problem = `${t.entryAt ?? `the sources file's entry for ${t.source}`}: ${t.source} had no primary key (${t.key.join(", ")}) on the database when some of its changes were written, ` +
+        "so two of its rows could share it then, though it is back now. Mason does not apply those changes, so that no synced row is lost, and its synced data serves as it was.";
+    }
+    if (problem === null) return true;
+    await this.refuseKey(source, problem);
+    return false;
+  }
+
+  /** `keyHeldSql`'s row as read over the wire (text: `t` / `f`), in a replicated table's words, or null when it holds */
+  private streamKeyProblem(t: AddedTable, row: (string | null)[] | undefined): string | null {
+    if (row === undefined) return null;
+    return keyHeldProblem({ found: row[0] === "t", nullable: row[1] ?? null, held: row[2] === "t", usable: row[3] ?? null },
+      { source: t.source, key: t.key, at: t.entryAt ?? `the sources file's entry for ${t.source}`, own: t.primaryKey !== undefined, replicated: true });
+  }
+
+  /**
+   * A TABLE REFUSED FOR ITS KEY IS CAUGHT UP ONLY ONCE THE STREAM HAS PASSED WHERE THE KEY CAME BACK (issue 1062). The
+   * way out deletes the duplicate and restores the key, often in one transaction. Held from before the stream decoded
+   * that transaction, the DELETE of the duplicate is a delete of its KEY, and replayed after the poll it removed the
+   * synced row that shared it (seen once in the PR's test). Its relation message cannot tell (a `FULL` identity),
+   * and the catalog says the key holds by then. So the key is asked first, then L, on one short connection: a position
+   * at or past the end of every transaction that read saw committed (`visibleLsn`, never the write position, which an
+   * asynchronous commit is visible before: the review of PR 1068 lost the row so in 2 of 7 aimed tries). Then the stream
+   * must pass L before the table's changes are held (`catchUp`'s J). A change decoded after J committed after the key was
+   * back, and a key dropped again meanwhile sends a relation message first (`keyHeld`). Throws `KeyNotHeld` while the key
+   * is not back or the stream has not passed L within `KEY_PASS_WAIT_MS` (the catch-up asks again in `keyRetryMs`),
+   * `Stopping` at a stop.
+   */
+  private async keyBackPassed(t: AddedTable): Promise<void> {
+    const pg = await PgConnection.connect(this.pgOptions());
+    let row: (string | null)[] | undefined;
+    let at: bigint;
+    try {
+      await this.onKeyBack?.();
+      row = (await pg.query(keyHeldSql(t.schema, t.table, t.key))).rows[0];
+      // read AFTER the key: a position at or past the commit that brought it back
+      at = await visibleLsn(pg);
+    } finally { pg.close(); }
+    const problem = this.streamKeyProblem(t, row);
+    if (problem !== null) throw new KeyNotHeld(problem);
+    for (const until = Date.now() + KEY_PASS_WAIT_MS, poked = { at: 0 }; ;) {
+      if (this.stopped) throw new Stopping();
+      const s = this.stream;
+      if (s !== null && s.position() >= at) return;
+      if (Date.now() > until) {
+        // the same words at every attempt, which `keyWaitSaid` says once: no position in them, as a position moves
+        throw new KeyNotHeld(`its key holds again on the database, and it is caught up once the stream has passed where the key came back, so that no change from before that is applied` +
+          `${s === null ? " (the stream is not running now)" : ""}`);
+      }
+      // an idle stream moves only on the server's keepalive: asked for one
+      if (s !== null && Date.now() - poked.at >= 1_000) { s.poke(); poked.at = Date.now(); }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+
+  /**
+   * A STREAMED TABLE WHOSE KEY NO LONGER KEEPS ITS ROWS APART ON THE DATABASE (issue 1062: a duplicate's INSERT replaced
+   * a synced row): refused by name with the way out, the other tables streaming on, as `refuseStreamed` refuses a
+   * column. It leaves the stream and is marked behind (`_mason.catch_up`, on the writer's turn, so before the stream
+   * acknowledges a change it skipped). Its synced data serves as it was. Its catch-up poll asks for the key in its own
+   * snapshot (`poll`'s `keyNotHeld`) and is refused until it holds again, asked every `keyRetryMs`. Then that one poll
+   * reads what the stream skipped, and the table joins the stream again.
+   */
+  private refuseKey(source: string, problem: string): Promise<void> {
+    return this.onWriter(async () => {
+      if (!this.tables.has(source) || !this.streamed.has(source)) return;
+      const why = KEY_REFUSED_WHY;
+      await this.store.writer.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.catch_up VALUES (${literal(source)}, ${literal(why)}, now())`);
+      this.behind.set(source, { why });
+      this.held.delete(source);
+      this.keyRetryAt(source);
+      // a new refusal: its catch-up's first wait is said again
+      this.keyWaitSaid.delete(source);
+      const m = `replication: ${problem} It is caught up by one poll once the key holds again. Mason asks the database again ${this.keyRetryWords()}.`;
+      this.log(`${source}: ${m}`);
+      this.event({ kind: "stream_failed", table: source, message: m });
+      await this.record({ ...this.states.get(source)!, error: m });
+      this.refreshStreamed();
+    });
+  }
+
+  /** a table refused for its key asks again in `keyRetryMs` (`KEY_RETRY_MS`), never a failure's growing back-off, and a
+   *  pass is kicked then (`wakeAt`). It is not counted as a failure: a key gone for hours must not make the table's next
+   *  ordinary failure back off for 6 hours (the review of PR 1068). Answers the time */
+  private keyRetryAt(source: string): number {
+    const at = Date.now() + this.keyRetryMs;
+    this.retries.set(source, { failures: this.retries.get(source)?.failures ?? 0, at });
+    this.wakeAt(at);
+    return at;
+  }
+
+  /** how often a table refused for its key asks again, in words: `every minute` */
+  private keyRetryWords(): string {
+    const s = Math.round(this.keyRetryMs / 1000);
+    return s === 60 ? "every minute" : s % 60 === 0 ? `every ${s / 60} minutes` : `every ${s} s`;
   }
 
   /**
@@ -3726,15 +3889,43 @@ export class Sync {
     // there: what it says it serves is let go on this turn, BEFORE the drop, so no rebuild of the catalog (on its own
     // connection, `setTables` starts one) reads it with nothing under it; it is built again at its next review
     await this.generated.dropped(source);
+    // THE TABLE IS THE ONE AT THIS NAME BY `relationKey` (issue 1071): an added entry whose name differs only in case
+    // (`orders` beside a removed `"Orders"`, synced by a Mason before issue 1019) had its synced data in this very table,
+    // so the drop takes it too. Its ledger rows, keyed by its own spelling, would still say it is synced over no table:
+    // they go with the drop, and it is synced again from the source, whole. What the table held may have been either
+    // entry's rows, so it is never kept as the kept entry's
+    const key = relationKey(source);
+    const namesakes = [...this.tables.keys()].filter((s) => s !== source && relationKey(s) === key && this.states.has(s));
     await w.run(`DROP TABLE IF EXISTS ${ident(schema)}.${ident(table)}`);
     // and what a copy of it left beside it (a crash, a stop, a failure, a removal while it was read: `copy`)
     await w.run(`DROP TABLE IF EXISTS ${ident(schema)}.${ident(`${table}${SIDE_SUFFIX}`)}`);
-    for (const ledger of ["copy_state", "poll_state", "catch_up", "copy_progress", "copy_chunks", "compactions", "compact_held"]) await w.run(`DELETE FROM ${MASON_SCHEMA}.${ledger} WHERE source = ${literal(source)}`);
+    await this.forgetSynced(source);
     // its stored JSON paths and its view
     await this.kept.removed(source);
+    for (const s of namesakes) {
+      await this.forgetSynced(s);
+      await this.kept.removed(s);
+      this.queued.delete(s);
+      this.states.set(s, { source: s, phase: "waiting", rows: null, bytes: this.tables.get(s)!.bytes, seconds: null, copiedAt: null, error: null });
+      const m = `its synced data was the same table as ${source}'s (the synced data holds names that differ only in case as one table), so it is dropped with ${source}'s and synced again from the source, whole`;
+      this.log(`${s}: ${m}`);
+      this.event({ kind: "sync_stopped", table: s, message: m });
+    }
+    this.refreshStreamed();
+    const again = this.tables.get(source);
+    if (again === undefined) { this.log(`dropped ${source}'s synced data: it is no longer added (mason add ${source} syncs it again from the source, whole)`); return; }
+    this.states.set(source, { source, phase: "waiting", rows: null, bytes: again.bytes, seconds: null, copiedAt: null, error: null });
+    this.log(`dropped what ${source} held when it was removed: it is added again, so its first sync starts anew from the source, whole`);
+  }
+
+  /** A TABLE'S LEDGER ROWS AND WHAT THE RUN HOLDS OF IT, forgotten on the writer's turn (the caller's), keyed by its
+   *  source's name as written: after it, `needsCopy` syncs it whole from the source. Its table and stored JSON paths are
+   *  the caller's (`dropRemoved`; `open` before the stored paths are read) */
+  private async forgetSynced(source: string): Promise<void> {
+    const w = this.store.writer;
+    for (const ledger of ["copy_state", "poll_state", "catch_up", "copy_progress", "copy_chunks", "compactions", "compact_held"]) await w.run(`DELETE FROM ${MASON_SCHEMA}.${ledger} WHERE source = ${literal(source)}`);
     this.behind.delete(source);
     this.held.delete(source);
-    this.refreshStreamed();
     this.snapshots.delete(source);
     this.retries.delete(source);
     this.due.delete(source);
@@ -3749,10 +3940,29 @@ export class Sync {
     this.compactions.delete(source);
     this.compactRetries.delete(source);
     this.copyLive.delete(source);
-    const again = this.tables.get(source);
-    if (again === undefined) { this.log(`dropped ${source}'s synced data: it is no longer added (mason add ${source} syncs it again from the source, whole)`); return; }
-    this.states.set(source, { source, phase: "waiting", rows: null, bytes: again.bytes, seconds: null, copiedAt: null, error: null });
-    this.log(`dropped what ${source} held when it was removed: it is added again, so its first sync starts anew from the source, whole`);
+  }
+
+  /**
+   * A TABLE THE LEDGER SAYS IS SYNCED, WITH NO TABLE AT ITS NAME IN THE SYNCED DATA (issue 1071: a Mason before it dropped
+   * a table whose name differed only in case from a removed one's, and left the kept entry's rows saying it was synced;
+   * every poll of it failed, and the catalog started with no table at all): its ledger forgotten (`forgetSynced`), so it is
+   * synced again from the source, whole, and said. Checked at the open, over every row, and when the catalog meets one
+   * (`schemaBuilt`), on the writer's turn; never while it is rebuilt (its swap puts the table in). Answers the sources
+   * forgotten.
+   */
+  private async forgetMissing(only?: string): Promise<string[]> {
+    const w = this.store.writer;
+    const there = new Set(((await w.runAndReadAll(`SELECT schema_name || '.' || table_name FROM duckdb_tables() WHERE database_name = current_database()`)).getRowsJS() as [string][])
+      .map(([n]) => relationKey(n)));
+    const gone = [...this.states.values()].filter((s) => s.phase === "copied" && (only === undefined || s.source === only) && this.rebuildingNow?.source !== s.source && !there.has(relationKey(s.source)))
+      .map((s) => s.source);
+    for (const source of gone) {
+      await this.forgetSynced(source);
+      const t = this.tables.get(source);
+      if (t !== undefined) this.states.set(source, { source, phase: "waiting", rows: null, bytes: t.bytes, seconds: null, copiedAt: null, error: null });
+      this.log(`${source}: its synced data is missing (the record says it was synced, and no table is there), so it is synced again from the source, whole`);
+    }
+    return gone;
   }
 
   /** one pass: every removed table dropped, every added table needing it queued for a copy (step 0: whole, again) or
@@ -3760,7 +3970,10 @@ export class Sync {
   private async pass(): Promise<void> {
     // a table no longer added (mason remove) is dropped, and its ledger rows with it — one whose rebuild is running is
     // cut short by its removal (`cutShort`) and dropped as that rebuild ends (`rebuild`)
-    for (const source of [...this.states.keys()].filter((s) => !this.tables.has(s) && this.rebuildingNow?.source !== s)) {
+    // (and one whose name an added table's differs from only in case waits while that table is rebuilt: the drop takes its
+    // table too, issue 1071, and it is synced again once the drop is done)
+    const rebuilding = this.rebuildingNow === null ? null : relationKey(this.rebuildingNow.source);
+    for (const source of [...this.states.keys()].filter((s) => !this.tables.has(s) && relationKey(s) !== rebuilding)) {
       this.queued.delete(source);
       await this.onWriter(() => this.dropRemoved(source));
     }
@@ -4034,21 +4247,44 @@ export class Sync {
   private async catchUp(t: AddedTable): Promise<"copy again" | null> {
     const mark = this.behind.get(t.source)!;
     const replication = this.replicated(t);
-    // J: from the writer's turn on, every batch's changes of this table are held (`applyStreamed`)
-    if (replication) await this.onWriter(async () => { if (!this.held.has(t.source)) this.held.set(t.source, noChanges()); this.refreshStreamed(); });
     const release = (): Promise<void> => this.onWriter(async () => { this.held.delete(t.source); this.refreshStreamed(); });
     let found: PolledTable[];
     const started = Date.now();
-    this.catchingUp = { source: t.source, phase: "polling", startedAt: started };
     // A FAILED CATCH-UP waits as a failed copy does (`backOff`), said whole with its next attempt — in the log and in
     // mason status — and is caught up again then: what was held is read again by that poll (still behind, nothing lost)
     const failed = (what: string, e: unknown): Promise<void> => {
+      // REFUSED FOR ITS KEY (issue 1027, 1062): asked again in `keyRetryMs`, as the key comes back when the database's
+      // owner restores it, and an attempt reads no row. Said once, and again only when its words change: no time in
+      // them, as it would change at every attempt (the review of PR 1068)
+      if (e instanceof KeyNotHeld) {
+        this.keyRetryAt(t.source);
+        const m = `${what} (the synced data serves as it was; Mason asks the database again ${this.keyRetryWords()}, and catches it up by one poll once the key holds): ${this.errorText(e)}`;
+        if (this.keyWaitSaid.get(t.source) === m) return Promise.resolve();
+        this.keyWaitSaid.set(t.source, m);
+        this.log(`${t.source}: ${m}`);
+        this.event({ kind: "catch_up_failed", table: t.source, message: m, cause: e });
+        return this.onWriter(() => this.record({ ...this.states.get(t.source)!, error: m }));
+      }
       const when = this.backOff(t.source, Date.now() - started);
       const m = `${what} (the synced data serves as it was; it is caught up by one poll again after ${when}): ${this.errorText(e)}`;
+      this.keyWaitSaid.delete(t.source);
       this.log(`${t.source}: ${m}`);
       this.event({ kind: "catch_up_failed", table: t.source, message: m, cause: e });
       return this.onWriter(() => this.record({ ...this.states.get(t.source)!, error: m }));
     };
+    // REFUSED FOR ITS KEY (issue 1062): its changes are held only from where the stream has passed the key's return
+    // (`keyBackPassed`), never one decoded from before it, written while two rows could share a key
+    if (replication && mark.why === KEY_REFUSED_WHY) {
+      try { await this.keyBackPassed(t); }
+      catch (e) {
+        if (e instanceof Stopping) return null;
+        await failed("its catch-up waits for its key", e);
+        return null;
+      }
+    }
+    // J: from the writer's turn on, every batch's changes of this table are held (`applyStreamed`)
+    if (replication) await this.onWriter(async () => { if (!this.held.has(t.source)) this.held.set(t.source, noChanges()); this.refreshStreamed(); });
+    this.catchingUp = { source: t.source, phase: "polling", startedAt: started };
     // the catch-up's poll reads the columns the copy holds (`asCopied`)
     try { found = await this.poll(this.rebuilder, [this.asCopied(t)]); }
     catch (e) {
@@ -4091,6 +4327,7 @@ export class Sync {
       }
       // caught up: a failure's back-off and its words are the past
       this.retries.delete(t.source);
+      this.keyWaitSaid.delete(t.source);
       const st = this.states.get(t.source);
       if (st !== undefined && st.error !== null) await this.record({ ...st, error: null });
       // a slot made again meanwhile marked it anew: caught up once more. While one is being made, a catch-up ends no
@@ -5232,6 +5469,33 @@ export class Sync {
     return next;
   }
 
+  /**
+   * ONE TABLE'S COLUMNS AS THE SYNCED DATA HOLDS THEM, for the catalog (`schemaBuilt`), or null when they cannot be read:
+   * that table is left out of the catalog and said, and every other table is served (issue 1071: one synced table with
+   * no table under it failed every rebuild of the catalog, and the run served no table at all). A synced table with no
+   * table under it is synced again whole (`forgetMissing`, on the writer's turn). Said once a reason, until it is read.
+   */
+  private async catalogTypes(c: DuckConnection, name: string, schema: string, table: string): Promise<Awaited<ReturnType<DuckConnection["prepare"]>> | null> {
+    try {
+      const types = await c.prepare(`SELECT * FROM ${ident(schema)}.${ident(table)} LIMIT 0`);
+      this.unread.delete(name);
+      return types;
+    } catch (e) {
+      // once a reason, told by the error's own words (`messageOf`), never by the words Mason repeats
+      const reason = messageOf(e);
+      if (this.unread.get(name) !== reason) {
+        this.unread.set(name, reason);
+        this.log(`${name} is left out of the catalog, as its synced data could not be read (every other table is served): ${this.errorText(e)}`);
+      }
+      if (this.tables.has(name)) {
+        void this.onWriter(() => this.forgetMissing(name)).then((gone) => { if (gone.length > 0) { this.kick(); void this.rebuildSchema().catch((x: unknown) => this.log(`the catalog could not be rebuilt (it is at the next pass): ${this.errorText(x)}`)); } }, (x: unknown) => {
+          this.log(`${name}: whether its synced data is missing could not be checked (checked again at the next rebuild of the catalog): ${this.errorText(x)}`);
+        });
+      }
+      return null;
+    }
+  }
+
   /** the catalog's tables: every copied table as DuckDB holds it, typed as the source spells it where the wire agrees */
   private async schemaBuilt(): Promise<void> {
     // its own connection, which sees what is committed: never the writer, which a copy's transaction may hold for hours
@@ -5242,7 +5506,11 @@ export class Sync {
     for (const t of this.tables.values()) {
       const cols = copied.get(t.source);
       if (cols === undefined) continue;
-      const types = await c.prepare(`SELECT * FROM ${ident(t.schema)}.${ident(t.table)} LIMIT 0`);
+      // a table another synced entry's name shares (by `relationKey`, issue 1071: synced by a Mason before issue 1019) may
+      // hold that entry's rows: never served as this one's, and the pass that drops the other syncs it again whole
+      if ([...copied.keys()].some((s) => s !== t.source && relationKey(s) === relationKey(t.source))) continue;
+      const types = await this.catalogTypes(c, t.source, t.schema, t.table);
+      if (types === null) continue;
       const duckTypes = new Map(Array.from({ length: types.columnCount }, (_, i) => [types.columnName(i), types.columnType(i)] as const));
       types.destroySync();
       // the column's constraints and default — and below the table's keys and unique indexes — as the source had them
@@ -5270,7 +5538,8 @@ export class Sync {
     const synced = new Map(tables.flatMap((t) => t.columns.flatMap((x) => x.enumLabels !== undefined && x.spelled !== undefined ? [[x.spelled.replace(/\[\]$/, ""), x.enumLabels] as const] : [])));
     // each generated table served, as a copy of its output's types: no key, no joins
     for (const g of this.generated.served()) {
-      const types = await c.prepare(`SELECT * FROM ${ident(g.schema)}.${ident(g.table)} LIMIT 0`);
+      const types = await this.catalogTypes(c, `${g.schema}.${g.table}`, g.schema, g.table);
+      if (types === null) continue;
       const duckTypes = new Map(Array.from({ length: types.columnCount }, (_, i) => [types.columnName(i), types.columnType(i)] as const));
       types.destroySync();
       const columns = g.columns.filter((x) => duckTypes.has(x.name)).map((x) => pgColumn({ name: x.name, type: x.type, notNull: false, comment: null }, duckTypes.get(x.name)!, undefined))
