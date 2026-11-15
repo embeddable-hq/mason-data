@@ -92,7 +92,8 @@ paths:
   a type change: rows MOVE between pages) happened since the first snapshot and fewer than 2^30 transactions ran: the
   table's `pg_relation_filenode`, read after each chunk under the lock its read still holds, and the snapshot's age are
   checked, and either starts the copy over from page 0, said. The swap asserts as many distinct keys as rows (a failure
-  is a Mason bug: not swapped, copied again).
+  is a Mason bug: not swapped, copied again), unless the database no longer enforces the key, which is said as the
+  key's refusal (duck-sync.md "A key is written by only while the database enforces it"), as it is before the first page.
 - **A copy is held to the file its FIRST SNAPSHOT sees, never one a chunk happens to read, and never reads a rewritten
   table as empty** (issue 1025; `heldFile`, `fileFactsSql`, `RewriteWait`): a rewrite is not MVCC-safe, so a snapshot
   taken before it commits reads the new file once its read gets the lock, and an ALTER's or a TRUNCATE's rows there are
@@ -100,10 +101,17 @@ paths:
   beginning's transaction reads `pg_class.relfilenode` through its snapshot right after taking it, and every chunk's
   file must be that one (else started over); a resumed copy checks its file once (`resumedFileHolds`), and one begun
   with no chunk committed begins again. A file the snapshot sees whose catalog row was written at or after the
-  watermark, by a rewrite (`relfilenode` no longer the oid), is checked for a row the hold keeps (`rowsHeldSql`, a scan
-  only then): none (an ALTER, a TRUNCATE and a load, pg_repack) and the copy WAITS for the open transaction that holds
-  the watermark back, checked every `REWRITE_RECHECK_MS` (30 s), never backed off, said once and on the table's line,
-  the old copy serving; a CLUSTER, VACUUM FULL or SET TABLESPACE keeps each row's xmin and goes on. **A poll is held
+  watermark, by a rewrite (`relfilenode` no longer the oid), is checked for a row the hold keeps: none (an ALTER, a
+  TRUNCATE and a load, pg_repack) and the copy WAITS for the open transaction that holds the watermark back, checked
+  every `REWRITE_RECHECK_MS` (30 s), never backed off, said once and on the table's line, the old copy serving; a
+  CLUSTER, VACUUM FULL or SET TABLESPACE keeps each row's xmin and goes on. **That check reads a SAMPLE, never the
+  whole table** (issue 1066: #1058's read every row of an ALTERed table under AccessShareLock, minutes on a large one,
+  a migration's ALTER queued behind it and the application behind the ALTER): `rowsHeldSql` reads the first
+  `HELD_SAMPLE_ROWS` visible rows of a plain scan (no ctid, no ORDER BY), since a rewrite treats every row alike, under
+  `SET LOCAL lock_timeout` (`REWRITE_CHECK_LOCK_MS`, 1 s) and `statement_timeout` (`MASON_COPY_CHUNK_SECONDS`,
+  `heldReadsNone`). A read they stop could not tell, and the copy waits as for "none", checked again (fail closed). It
+  differs from the whole table's answer only for a table holding both kinds of row with the new ones first, and then
+  waits rather than swap in part of it. **A poll is held
   to its snapshot's file the same way**: a read whose file is not the one the snapshot sees writes nothing and fails
   (its count found 0 and deleted every key). `tests/integration/duck-rewrite.itest.ts` holds each, in both modes.
   Still served late, by design: rows written after the oldest open transaction began, on a table not rewritten, wait

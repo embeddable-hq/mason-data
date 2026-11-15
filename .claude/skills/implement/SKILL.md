@@ -82,7 +82,8 @@ every PR and on main. Locally:
 - **Mark the PR ready when done.** From a cloud session, which reaches no GraphQL, use
   `gh api -X POST repos/embeddable-hq/mason-data/pulls/<n>/ccr/ready_for_review`.
 - **Report the PR number and its head commit** to the coordinator.
-- **Never merge.** `scripts/hooks/merge-head.ts` blocks a sub-agent's `gh pr merge`.
+- **Never merge.** `scripts/hooks/merge-head.ts` blocks a sub-agent's `gh pr merge`, and its REST merge or merge-queue
+  request (`PUT …/pulls/<n>/merge`, `…/merge-async`, `…/ccr/auto_merge`).
 
 ## A fix round
 

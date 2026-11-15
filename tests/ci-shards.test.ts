@@ -598,13 +598,35 @@ function mergeRepo(t: { after(f: () => void): void }, head: Record<string, strin
   if (parents === 2) { git("checkout", "-q", "main"); git("merge", "-q", "--no-ff", "-m", "merge", "pr"); }
   return root;
 }
-/** `node scripts/ci-shards.ts changes` in `root`, with exactly the event and output given (CI's own are dropped) */
-function changes(root: string, event: string | undefined, withOutput = true): { status: number | null; out: string; output: string | null } {
-  const { GITHUB_OUTPUT: _o, GITHUB_EVENT_NAME: _e, ...env } = outsideTests;
+/** `node scripts/ci-shards.ts changes` in `root`, with exactly the event, output and merge group SHAs given (CI's own
+ *  are dropped) */
+function changes(root: string, event: string | undefined, withOutput = true, group: { base?: string; head?: string } = {}): { status: number | null; out: string; output: string | null } {
+  const { GITHUB_OUTPUT: _o, GITHUB_EVENT_NAME: _e, MERGE_GROUP_BASE_SHA: _b, MERGE_GROUP_HEAD_SHA: _h, ...env } = outsideTests;
   const file = path.join(root, "github-output");
+  fs.rmSync(file, { force: true }); // GitHub gives each step a file of its own: a second call here must not read the first's verdict
   const r = spawnSync(process.execPath, ["scripts/ci-shards.ts", "changes"], { encoding: "utf8", cwd: root,
-    env: { ...env, GIT_CEILING_DIRECTORIES: path.dirname(root), ...(event === undefined ? {} : { GITHUB_EVENT_NAME: event }), ...(withOutput ? { GITHUB_OUTPUT: file } : {}) } });
+    env: { ...env, GIT_CEILING_DIRECTORIES: path.dirname(root), ...(event === undefined ? {} : { GITHUB_EVENT_NAME: event }), ...(withOutput ? { GITHUB_OUTPUT: file } : {}),
+      ...(group.base === undefined ? {} : { MERGE_GROUP_BASE_SHA: group.base }), ...(group.head === undefined ? {} : { MERGE_GROUP_HEAD_SHA: group.head }) } });
   return { status: r.status, out: r.stdout + r.stderr, output: fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null };
+}
+/** A merge queue as GitHub builds it with squash: `base` (main, holding the shard scripts), then one single-parent
+ *  commit per queued pull request, each the group head of that pull request and the parent of the next one's (a path to
+ *  null removes it). HEAD is the last group's head. */
+function groupRepo(t: { after(f: () => void): void }, prs: Array<Record<string, string | null>>, base: Record<string, string> = {}): { root: string; base: string; head: string } {
+  const root = tree(t, {}, null);
+  const git = (...args: string[]): string => { const r = spawnSync("git", [...GIT, ...args], { cwd: root, encoding: "utf8" }); assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`); return r.stdout.trim(); };
+  const put = (files: Record<string, string | null>): void => {
+    for (const [f, text] of Object.entries(files)) {
+      if (text === null) { fs.rmSync(path.join(root, f)); continue; }
+      fs.mkdirSync(path.dirname(path.join(root, f)), { recursive: true });
+      fs.writeFileSync(path.join(root, f), text);
+    }
+  };
+  put(base);
+  git("init", "-q"); git("add", "-A"); git("commit", "-qm", "base");
+  const baseSha = git("rev-parse", "HEAD");
+  prs.forEach((pr, i) => { put(pr); git("add", "-A"); git("commit", "-qm", `queued pull request ${i + 1}`); });
+  return { root, base: baseSha, head: git("rev-parse", "HEAD") };
 }
 
 test("docs changes: a pull request's merge adding only docs says docs=true and names what it classified", (t) => {
@@ -640,6 +662,24 @@ test("docs changes: one code path, a rename out of src/, a one-parent HEAD, a pu
   assert.equal(noOutput.status, 2, noOutput.out);
   assert.match(noOutput.out, /GITHUB_OUTPUT/);
   assert.equal(noOutput.output, null, "nothing guessed");
+});
+
+test("docs changes: a merge group is always a full run, even a docs-only one queued behind a code one (issue: base_sha is the group ahead)", (t) => {
+  // the queue as GitHub builds it: main, then PR 1's group (code), then PR 2's group (docs) on top of it. GitHub sends PR
+  // 2's group base_sha = its parent commit, PR 1's group head, never main (octokit/webhooks: "The SHA of the merge
+  // group's parent commit"), so base_sha..head_sha would hold PR 2's docs alone
+  const q = groupRepo(t, [{ [P("src", "a.ts")]: "code" }, { [P("docs", "x.md")]: "x" }]);
+  const parent = spawnSync("git", ["rev-parse", "HEAD^1"], { cwd: q.root, encoding: "utf8" }).stdout.trim();
+  const got = changes(q.root, "merge_group", true, { base: parent, head: q.head });
+  assert.equal(got.status, 0, got.out);
+  assert.equal(got.output, "docs=false\n", got.out);
+  assert.match(got.out, /cannot tell that only docs changed: the event is merge_group: a merge group always runs everything/);
+  // a lone docs-only group too: what a group holds is never read
+  const lone = groupRepo(t, [{ [P("docs", "x.md")]: "x" }]);
+  for (const group of [{ base: lone.base, head: lone.head }, {}]) {
+    const r = changes(lone.root, "merge_group", true, group);
+    assert.equal(r.output, "docs=false\n", `${JSON.stringify(group)}: ${r.out}`);
+  }
 });
 
 // ── the gates, by the mode in their own NEEDS ──
@@ -792,8 +832,9 @@ test("docs ci.yml: no paths filter, changes is builtins-only on Node 26 at depth
   assert.ok(!ch.steps!.some((s) => s.run === "npm ci"), "changes runs no npm ci: it reaches only Node's builtins");
   assert.ok(Number(ch.steps!.find((s) => s.uses?.startsWith("actions/checkout@"))?.with?.["fetch-depth"]) >= 2, "the merge's parents are fetched");
   assert.equal(ch.steps!.find((s) => s.uses?.startsWith("actions/setup-node@"))?.with?.["node-version"], "26");
-  const classify = ch.steps!.find((s) => s.run === "node scripts/ci-shards.ts changes");
+  const classify = ch.steps!.find((s) => s.run === "node scripts/ci-shards.ts changes") as { id?: string; env?: Record<string, string> } | undefined;
   assert.ok(classify?.id !== undefined, "changes runs the classifier, with an id");
+  assert.equal(classify.env, undefined, "the classifier reads the event's name alone, never a merge group's SHAs");
   assert.deepEqual(ch.outputs, { docs: `\${{ steps.${classify.id}.outputs.docs }}` });
   const docs = jobs.docs!;
   assert.deepEqual(docs.needs, ["changes"]);
@@ -805,6 +846,21 @@ test("docs ci.yml: no paths filter, changes is builtins-only on Node 26 at depth
   for (const id of shards.DOCS_SKIPS) assert.deepEqual(jobs[id]!.needs, ["changes"], id);
   for (const id of GATES) assert.ok(jobs[id]!.needs?.includes("changes"), `${id} needs changes`);
   assert.equal(jobs.image!.if, "${{ !cancelled() }}", "a plain skip of the image for a failed need would report success on a required check");
+});
+
+test("ci.yml runs on a merge group as on a pull request: the trigger, no branch filter, and nothing that reads the event", () => {
+  const text = fs.readFileSync(path.join(ROOT, ".github/workflows/ci.yml"), "utf8");
+  const on = (YAML.parse(text) as { on: Record<string, unknown> }).on;
+  assert.deepEqual(Object.keys(on).sort(), ["merge_group", "pull_request", "push"]);
+  // a merge queue waits for the required checks on the merge_group event: without it, no check reports and the queue
+  // never merges; a branch filter on it could leave a group of another base unchecked
+  assert.deepEqual(on.merge_group, { types: ["checks_requested"] });
+  assert.equal(on.pull_request, null, "every pull request, of every base");
+  // every if is one the simulation knows (above), so none reads the event: each job runs on a merge group as on a pull
+  // request, and a merge group is a full run by GITHUB_EVENT_NAME, read by the classifier
+  assert.deepEqual(text.split("\n").filter((l) => /github\.(event|event_name|head_ref|base_ref)\b/.test(l)).map((l) => l.trim()), []);
+  assert.deepEqual((YAML.parse(text) as { permissions: unknown }).permissions, { contents: "read" }, "the token stays read-only");
+  assert.ok(!/\bsecrets\./.test(text), "CI reads no secret, so a merge group reaches none");
 });
 
 test("docs commands: the per-test bound before the files, the unpatterned files in one run, each pattern in a run of its own", () => {

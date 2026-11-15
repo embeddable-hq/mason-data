@@ -28,8 +28,8 @@ const GREEN = all("success");
  * last repeated; a step with `hang` never returns) and no pause between passes; returns its output, exit code, time and
  * the stub's call log, each call with the time it started. The stub is a bash script, never a Node one: Node's start
  * under load pushed a call past the deadline the test holds (issue 405). */
-type Waited = { out: string; err: string; status: number | null; ms: number; first: string; pulls: string[]; checks: string[]; starts: number[] };
-function runWait(cmd: string, scenario: { pull: Step[]; runs: Step[] }, bash = true): Waited {
+type Waited = { out: string; err: string; status: number | null; ms: number; first: string; pulls: string[]; checks: string[]; groups: string[]; refs: string[]; starts: number[] };
+function runWait(cmd: string, scenario: { pull: Step[]; runs: Step[]; groups?: Step[]; refs?: Step[] }, bash = true): Waited {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-wait-"));
   try {
     for (const [kind, steps] of Object.entries(scenario)) {
@@ -46,6 +46,8 @@ d=${JSON.stringify(dir)}
 case "$1 $2" in
   "api repos/{owner}/{repo}/pulls/"*) kind=pull ;;
   "api repos/{owner}/{repo}/commits/"*"/check-runs"*) kind=runs ;;
+  "api repos/{owner}/{repo}/actions/runs?event=merge_group"*) kind=groups ;;
+  "api repos/{owner}/{repo}/git/matching-refs/heads/"*) kind=refs ;;
   *) kind=other ;;
 esac
 if [ -n "\${EPOCHREALTIME:-}" ]; then t=\${EPOCHREALTIME/[.,]/}; t=\${t:0:13}; else t=$(perl -MTime::HiRes=time -e 'printf "%d", time()*1000'); fi
@@ -65,7 +67,8 @@ exit "$(cat "$d/$kind.$n.rc")"
     const calls = fs.readFileSync(path.join(dir, "calls.log"), "utf8").split("\n").filter(Boolean).map((c) => c.split(" "));
     const line = (c: string[]) => [c[0], ...c.slice(2)].join(" ");
     return { out: r.stdout, err: r.stderr, status: r.status, ms, first: r.stdout.split("\n")[0]!, starts: calls.map((c) => Number(c[1])),
-      pulls: calls.filter((c) => c[0] === "pull").map(line), checks: calls.filter((c) => c[0] !== "pull").map(line) };
+      pulls: calls.filter((c) => c[0] === "pull").map(line), checks: calls.filter((c) => c[0] === "runs" || c[0] === "other").map(line),
+      groups: calls.filter((c) => c[0] === "groups").map(line), refs: calls.filter((c) => c[0] === "refs").map(line) };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -85,8 +88,8 @@ test("ci-wait: reads the PR and its head's required checks through REST alone, a
   assert.match(w.out, /\npull \(exit 0\): mergeable true, mergeable_state clean\ncheck-runs \(exit 0\):\nchecks\tcompleted\tsuccess\t\S+\nimage\t/, "both reads printed for the record");
   w = runWait(cmd, { pull: [pull(true, "blocked")], runs: [runs(...REQUIRED_NAMES.map((n): Run => [n, "completed", n === "image" ? "skipped" : "success"]))] });
   assert.equal(w.status, 0, `skipped is a pass, blocked no verdict: ${w.out}`);
-  // red: any required check failed, cancelled or timed out is failed, at once, whatever the others are doing
-  for (const red of ["failure", "cancelled", "timed_out"]) {
+  // red: any required check failed, timed out, needing action or failed to start is failed, at once, whatever the others are doing
+  for (const red of ["failure", "timed_out", "action_required", "startup_failure"]) {
     w = runWait(cmd, { pull: [pull(true, "blocked")], runs: [runs(["checks", "in_progress", null], ["image", "completed", "success"], ["integration (oracle)", "completed", red])] });
     assert.match(w.first, /^PR 900: failed at /, `${red}: ${w.out}`);
     assert.equal(w.status, 3, `${red}: failed exits 3`);
@@ -106,8 +109,9 @@ test("ci-wait: reads the PR and its head's required checks through REST alone, a
   // the head's latest run of a name decides: a re-run's newer success over its first, cancelled, attempt is green
   w = runWait(cmd, { pull: [pull(true, "clean")], runs: [all("success", ["checks", "completed", "cancelled", 1])] });
   assert.equal(w.status, 0, `the older cancelled run of checks is superseded: ${w.out}`);
-  w = runWait(cmd, { pull: [pull(true, "clean")], runs: [all("success", ["checks", "completed", "cancelled", 999])] });
-  assert.equal(w.status, 3, `the newer cancelled run of checks is the verdict: ${w.out}`);
+  w = runWait(cmd, { pull: [pull(true, "clean")], runs: [all("success", ["checks", "completed", "cancelled", 999]), GREEN] });
+  assert.equal(w.status, 0, `a newer cancelled run of checks is a wait, never failed: ${w.out}`);
+  assert.equal(w.checks.length, 2, "it waited a pass");
   // a conclusion not named (stale) is couldn't tell, a wait
   w = runWait(cmd, { pull: [pull(true, "clean")], runs: [all("stale"), GREEN] });
   assert.equal(w.checks.length, 2, `stale waited: ${w.out}`);
@@ -142,6 +146,143 @@ test("ci-wait: reads the PR and its head's required checks through REST alone, a
   assert.equal(w.status, 4, w.out);
 });
 
+/** `GET /pulls/<n>` of a PR in the merge queue, or merged, or closed: the fields --queued reads. */
+const queuedPull = (o: { sha?: string; merged?: boolean; state?: string; mergeable?: boolean | null; base?: string } = {}): Step => ({ out: JSON.stringify({
+  number: 900, state: o.state ?? "open", merged: o.merged ?? false, mergeable: o.mergeable === undefined ? true : o.mergeable, mergeable_state: "clean",
+  head: { sha: o.sha ?? SHA }, base: { ref: o.base ?? "main" } }), rc: 0 });
+const GROUP_SHA = "fedcba9876543210fedcba9876543210fedcba98";
+type GroupRun = { id: number; branch: string; sha?: string; path?: string; status?: string; conclusion?: string | null };
+/** `GET /actions/runs?event=merge_group`'s answer. */
+const groupRuns = (...rs: GroupRun[]): Step => ({ out: JSON.stringify({ total_count: rs.length, workflow_runs: rs.map((r) => ({
+  id: r.id, head_branch: r.branch, head_sha: r.sha ?? GROUP_SHA, path: r.path ?? ".github/workflows/ci.yml", event: "merge_group",
+  status: r.status ?? "in_progress", conclusion: r.conclusion ?? null, html_url: `https://github.com/o/r/actions/runs/${r.id}` })) }), rc: 0 });
+const OURS = `gh-readonly-queue/main/pr-900-${"a".repeat(40)}`;
+
+/** `GET /git/matching-refs/heads/<prefix>`'s answer: the live branches, each at its commit. */
+const liveRefs = (...rs: Array<[branch: string, sha: string]>): Step => ({ out: JSON.stringify(rs.map(([b, sha]) => ({ ref: `refs/heads/${b}`, object: { sha, type: "commit" } }))), rc: 0 });
+const NONE_LIVE = liveRefs();
+const STALE_SHA = "1".repeat(40);
+const REFS_CALL = "refs api repos/{owner}/{repo}/git/matching-refs/heads/gh-readonly-queue/main/pr-900";
+
+test("ci-wait --queued: a PR in the merge queue waits for its merge at the head it was queued at, and a LIVE group's red check is failed", () => {
+  const cmd = `node ${ROOT}/scripts/ci-wait.ts 900 540 --queued ${SHA}`;
+  // merged at the queued head (by the queue, or a direct merge with the queue off): merged, exit 0, in one read
+  let w = runWait(cmd, { pull: [queuedPull({ merged: true, state: "closed", mergeable: null })], runs: [GREEN], groups: [groupRuns()], refs: [NONE_LIVE] });
+  assert.match(w.first, new RegExp(`^PR 900: merged at ${SHA}$`), w.out);
+  assert.equal(w.status, 0);
+  assert.deepEqual([w.pulls.length, w.checks.length, w.groups.length, w.refs.length], [1, 0, 0, 0]);
+  assert.doesNotMatch(w.out, /next: /, "a verdict needs no escalation");
+  // queued: no group yet, then its live branch with checks running, then green (a wait: GitHub merges), then merged
+  w = runWait(cmd, {
+    pull: [queuedPull(), queuedPull(), queuedPull(), queuedPull({ merged: true, state: "closed" })],
+    refs: [NONE_LIVE, liveRefs([OURS, GROUP_SHA])],
+    groups: [groupRuns()],
+    runs: [runs(["checks", "in_progress", null]), GREEN] });
+  assert.equal(w.status, 0, w.out);
+  assert.equal(w.pulls.length, 4, `four passes: no group, running, green, merged: ${w.out}`);
+  assert.deepEqual(w.refs, Array(3).fill(REFS_CALL), "the live group is found by REST, by its branch's prefix");
+  assert.equal(w.groups.length, 1, "the runs are read only while no group is live");
+  assert.deepEqual(w.checks, Array(2).fill(`runs api repos/{owner}/{repo}/commits/${GROUP_SHA}/check-runs?filter=latest&per_page=100`), "the live group's commit's checks, never the PR head's");
+  // the live group's required check red: failed, exit 3, its branch printed
+  w = runWait(cmd, { pull: [queuedPull()], refs: [liveRefs([OURS, GROUP_SHA])], groups: [groupRuns()], runs: [all("success", ["integration (rest)", "completed", "failure", 999])] });
+  assert.match(w.first, /^PR 900: failed at /, w.out);
+  assert.equal(w.status, 3);
+  assert.match(w.out, new RegExp(`\\nmerge group ${OURS} at ${GROUP_SHA} \\(live\\)\\ncheck-runs \\(exit 0\\):\\n`));
+  // a stale red run of a destroyed group, while the PR's new group is live and running: a wait, never failed
+  w = runWait(cmd, { pull: [queuedPull(), queuedPull({ merged: true, state: "closed" })], refs: [liveRefs([OURS, GROUP_SHA])],
+    groups: [groupRuns({ id: 9, branch: OURS, sha: STALE_SHA, status: "completed", conclusion: "failure" })], runs: [runs(["checks", "in_progress", null])] });
+  assert.equal(w.status, 0, `the red run at another commit is not the live group's: ${w.out}`);
+  assert.equal(w.groups.length, 0, "a live group needs no runs");
+  // no live group, and its newest group run red: UNKNOWN (left the queue, or grouped again), a wait that ends 8, said
+  w = runWait(`900 2 --queued ${SHA}`, { pull: [queuedPull()], refs: [NONE_LIVE],
+    groups: [groupRuns({ id: 9, branch: OURS, sha: STALE_SHA, status: "completed", conclusion: "failure" })], runs: [GREEN] }, false);
+  assert.equal(w.status, 8, w.out + w.err);
+  assert.match(w.first, /^PR 900: unknown at /, w.out);
+  assert.match(w.out, /\nmerge group: UNKNOWN\. Its newest group gh-readonly-queue\/main\/pr-900-a+ at 1{40} ended failure \(https:\/\/github\.com\/o\/r\/actions\/runs\/9\) and is gone: the PR has left the queue, or GitHub is grouping it again/);
+  assert.match(w.out, /\nnext: 8 again is a wait, not an answer\. [^\n]*tell the owner if it is not in the queue\.\n$/, "it says when to escalate");
+  assert.equal(w.checks.length, 0, "a gone group's checks are never read as the verdict");
+  // ...and an UNKNOWN that clears (a new live group) is a plain wait again
+  w = runWait(`900 2 --queued ${SHA}`, { pull: [queuedPull()], refs: [NONE_LIVE, liveRefs([OURS, GROUP_SHA])],
+    groups: [groupRuns({ id: 9, branch: OURS, sha: STALE_SHA, status: "completed", conclusion: "failure" })], runs: [runs(["checks", "in_progress", null])] }, false);
+  assert.equal(w.status, 8, w.out);
+  assert.match(w.first, /^PR 900: pending at /, w.out);
+  // the newest run of THIS PR's group in ci.yml decides when none is live: older, other PRs', other bases', other workflows' are not it
+  w = runWait(`900 2 --queued ${SHA}`, { pull: [queuedPull()], refs: [liveRefs([`gh-readonly-queue/main/pr-9000-${"b".repeat(40)}`, "2".repeat(40)])],
+    groups: [groupRuns(
+      { id: 9, branch: OURS, sha: GROUP_SHA }, { id: 3, branch: OURS, sha: STALE_SHA, status: "completed", conclusion: "failure" },
+      { id: 12, branch: `gh-readonly-queue/main/pr-9000-${"b".repeat(40)}`, sha: "2".repeat(40), status: "completed", conclusion: "failure" },
+      { id: 13, branch: "gh-readonly-queue/release/0.20/pr-900", sha: "3".repeat(40), status: "completed", conclusion: "failure" },
+      { id: 14, branch: OURS, sha: "4".repeat(40), path: ".github/workflows/board.yml", status: "completed", conclusion: "failure" })],
+    runs: [GREEN] }, false);
+  assert.match(w.first, /^PR 900: pending at /, `pr-9000's live branch is not pr-900's, and the newest of ours is running: ${w.out}`);
+  assert.match(w.out, /its newest run gh-readonly-queue\/main\/pr-900-a+ at fedcba[^\n]*CI in_progress/);
+  assert.match(w.out, /\nnext: 8 again is a wait/, "pending says when to escalate too");
+  // two live branches for one PR: a wait
+  w = runWait(`900 2 --queued ${SHA}`, { pull: [queuedPull()], refs: [liveRefs([OURS, GROUP_SHA], [`gh-readonly-queue/main/pr-900-${"c".repeat(40)}`, STALE_SHA])], groups: [groupRuns()], runs: [all("failure")] }, false);
+  assert.equal(w.status, 8, w.out);
+  assert.match(w.out, /merge group: 2 live branches/);
+  assert.equal(w.checks.length, 0);
+  // a head that moved after the read: moved, exit 7, whether it merged or not
+  for (const p of [queuedPull({ sha: "5".repeat(40) }), queuedPull({ sha: "5".repeat(40), merged: true, state: "closed" })]) {
+    w = runWait(cmd, { pull: [p], groups: [groupRuns()], refs: [NONE_LIVE], runs: [GREEN] });
+    assert.match(w.first, new RegExp(`^PR 900: moved at 5{40}$`), w.out);
+    assert.equal(w.status, 7);
+    assert.equal(w.groups.length + w.refs.length, 0);
+  }
+  // closed unmerged: closed, 6; a conflict: conflict, 4
+  w = runWait(cmd, { pull: [queuedPull({ state: "closed" })], groups: [groupRuns()], refs: [NONE_LIVE], runs: [GREEN] });
+  assert.equal(w.status, 6, w.out);
+  assert.match(w.first, /^PR 900: closed at /);
+  w = runWait(cmd, { pull: [queuedPull({ mergeable: false })], groups: [groupRuns()], refs: [NONE_LIVE], runs: [GREEN] });
+  assert.equal(w.status, 4, w.out);
+  // a read that cannot tell is a wait, never a verdict: the PR's merged or base missing, the branches or runs unread or malformed
+  for (const bad of [{ out: JSON.stringify({ head: { sha: SHA }, mergeable: true, base: { ref: "main" }, state: "open" }), rc: 0 }, { out: JSON.stringify({ head: { sha: SHA }, mergeable: true, merged: false, state: "open" }), rc: 0 }]) {
+    w = runWait(cmd, { pull: [bad, queuedPull({ merged: true, state: "closed" })], refs: [liveRefs([OURS, GROUP_SHA])], groups: [groupRuns()], runs: [all("failure")] });
+    assert.equal(w.status, 0, `${bad.out}: ${w.out}`);
+    assert.equal(w.refs.length, 0, "no group read without the PR's base and state");
+  }
+  for (const bad of [{ out: "gh: HTTP 502", rc: 1 }, { out: "[{\"ref\": 1}]", rc: 0 }, { out: "{\"message\":\"x\"}", rc: 0 }]) {
+    w = runWait(cmd, { pull: [queuedPull(), queuedPull({ merged: true, state: "closed" })], refs: [bad], groups: [groupRuns({ id: 9, branch: OURS, status: "completed", conclusion: "failure" })], runs: [all("failure")] });
+    assert.equal(w.status, 0, `${bad.out}: ${w.out}`);
+    assert.equal(w.checks.length + w.groups.length, 0, `${bad.out}: nothing read past branches that did not read`);
+  }
+  for (const bad of [{ out: "gh: HTTP 502", rc: 1 }, { out: "{\"workflow_runs\": [{\"id\": \"x\"}]}", rc: 0 }, { out: "<html>", rc: 0 }]) {
+    w = runWait(cmd, { pull: [queuedPull(), queuedPull({ merged: true, state: "closed" })], refs: [NONE_LIVE], groups: [bad], runs: [all("failure")] });
+    assert.equal(w.status, 0, `${bad.out}: ${w.out}`);
+    assert.equal(w.checks.length, 0, `${bad.out}: no check read without the group`);
+  }
+  // pending for ever: exit 8 at the deadline, the group's state and what to do printed
+  w = runWait(`900 2 --queued ${SHA}`, { pull: [queuedPull()], refs: [NONE_LIVE], groups: [groupRuns()], runs: [GREEN] }, false);
+  assert.equal(w.status, 8, w.out + w.err);
+  assert.match(w.out, /^PR 900: pending at 0123[^\n]*\npull \(exit 0\): mergeable true, mergeable_state clean, open, queued at 0123[^\n]*\nmerge group: none yet for gh-readonly-queue\/main\/pr-900 [^\n]*\nnext: 8 again is a wait/);
+});
+
+test("ci-wait: two runs at one commit, the older cancelled by CI's concurrency group, is never failed: the newer run decides", () => {
+  const cmd = `node ${ROOT}/scripts/ci-wait.ts 900 540`;
+  // the older run's gates ran on its cancel (always()) and read `cancelled`, newer ids than the newer run's jobs that
+  // have not started yet; the newer run's gates report later, with higher ids still, and decide
+  const cancelled = REQUIRED_NAMES.map((n, i): Run => [n, "completed", "cancelled", 500 + i]);
+  const newerRunning = REQUIRED_NAMES.map((n, i): Run => [n, "in_progress", null, 100 + i]);
+  const newerGreen = REQUIRED_NAMES.map((n, i): Run => [n, "completed", "success", 900 + i]);
+  const newerRed = REQUIRED_NAMES.map((n, i): Run => [n, "completed", n === "checks" ? "failure" : "success", 900 + i]);
+  let w = runWait(cmd, { pull: [pull(true, "blocked")], runs: [runs(...cancelled), runs(...cancelled, ...newerRunning), runs(...cancelled, ...newerGreen)] });
+  assert.match(w.first, /^PR 900: green at /, `the cancelled run was a wait, twice, then the newer run's green decided: ${w.out}`);
+  assert.equal(w.status, 0);
+  assert.equal(w.checks.length, 3);
+  // and the newer run's real failure is still failed
+  w = runWait(cmd, { pull: [pull(true, "blocked")], runs: [runs(...cancelled, ...newerRed)] });
+  assert.equal(w.status, 3, w.out);
+  // a run that stays cancelled (cancelled by hand, nothing newer) is pending at the deadline, never failed
+  w = runWait("900 2", { pull: [pull(true, "clean")], runs: [runs(...cancelled)] }, false);
+  assert.equal(w.status, 8, w.out + w.err);
+  assert.match(w.first, /^PR 900: pending at /);
+  assert.match(w.out, /\nchecks\tcompleted\tcancelled\t/, "the cancelled run is printed for the record");
+  // the same for a merge group's live checks
+  w = runWait(`900 2 --queued ${SHA}`, { pull: [queuedPull()], refs: [liveRefs([OURS, GROUP_SHA])], groups: [groupRuns()], runs: [runs(...cancelled)] }, false);
+  assert.equal(w.status, 8, w.out + w.err);
+  assert.match(w.first, /^PR 900: pending at /, w.out);
+});
+
 test("ci-wait: its required checks are the four ci.yml names", () => {
   const src = fs.readFileSync(CI_WAIT_SCRIPT, "utf8");
   const list = /^export const REQUIRED = (\[[^\]]*\]) as const;$/m.exec(src)?.[1];
@@ -170,17 +311,18 @@ test("ci-wait: bounded, a deadline no call starts after, a gh that never returns
   assert.match(w.first, /^PR 900: pending at /);
   assert.match(w.out, /\npull \(exit 0\): [^\n]*\ncheck-runs \(exit 137\): \(gh api repos\/\{owner\}\/\{repo\}\/commits\/[^\n]* killed after \d+ s, past its bound\)\n$/, "its three parts, the kill said");
   // usage: exit 2, one line naming the cap, gh never called
-  for (const args of ["", "abc 10", "900 0", "900 -5", "900 x", "900 571", "900 10 extra"]) {
+  for (const args of ["", "abc 10", "900 0", "900 -5", "900 x", "900 571", "900 10 extra", "900 10 --queued", "900 10 --queued abc123",
+    `900 10 --queued ${SHA} extra`, `900 10 --merged ${SHA}`, `900 0 --queued ${SHA}`]) {
     w = runWait(args, { pull: [pull(true, "clean")], runs: [GREEN] }, false);
     assert.equal(w.status, 2, `"${args}": ${w.err}`);
-    assert.match(w.err, /^usage: node scripts\/ci-wait\.ts <pr> <seconds>: [^\n]*from 1 to 570[^\n]*\n$/, `"${args}": one usage line naming the cap`);
+    assert.match(w.err, /^usage: node scripts\/ci-wait\.ts <pr> <seconds> \[--queued <sha>\]: [^\n]*from 1 to 570[^\n]*\n$/, `"${args}": one usage line naming the cap`);
     assert.equal(w.pulls.length + w.checks.length, 0, `"${args}": gh is never called`);
   }
   // its verdicts' exit codes are its own, never Node's 1 (an uncaught error), and the cap fits the Bash tool's bound
   const src = fs.readFileSync(CI_WAIT_SCRIPT, "utf8");
   const verdicts = /const VERDICT = (\{[^}]*\})/.exec(src)?.[1];
   assert.ok(verdicts, "VERDICT is one object");
-  assert.deepEqual(new Function(`return (${verdicts})`)(), { green: 0, failed: 3, conflict: 4, pending: 8 });
+  assert.deepEqual(new Function(`return (${verdicts})`)(), { green: 0, merged: 0, failed: 3, conflict: 4, closed: 6, moved: 7, pending: 8, unknown: 8 });
   assert.match(src, /^export const MAX_SECONDS = 570;$/m);
   assert.ok(570 + 2 * 1 + 10 < 600, "a chunk at the cap, its last call's grace and Node's start end inside 600000 ms");
 });

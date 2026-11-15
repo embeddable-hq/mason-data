@@ -66,11 +66,46 @@ export async function dropSlot(pg: PgConnection, slot: string): Promise<void> {
   await pg.query(`SELECT pg_drop_replication_slot(${pgLiteral(slot)})`);
 }
 
-/** Where the source's WAL is now: the insert position on a primary, the replayed position on a standby (a
- *  logical slot on a standby decodes only what it has replayed). */
+/** Where the source's WAL is now: the WRITE position on a primary (`pg_current_wal_lsn`), the replayed position on a
+ *  standby (a logical slot on a standby decodes only what it has replayed). Not a bound for what another session can
+ *  see: an asynchronous commit is visible before its WAL is written (`visibleLsn`). */
 export async function currentLsn(pg: PgConnection): Promise<bigint> {
   const r = await pg.query("SELECT (CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() ELSE pg_current_wal_lsn() END)::text");
   return parseLsn(r.rows[0]?.[0] ?? "");
+}
+
+/**
+ * A WAL POSITION AT OR PAST THE END OF EVERY TRANSACTION THIS SESSION HAS SEEN COMMITTED, read after it saw them (the
+ * review of PR 1068: `currentLsn`'s write position was before 40 of 40 asynchronous commits another session could
+ * already see, for 2 to 197 ms, so a stream that passed it had not decoded them).
+ *
+ * - On a primary, the INSERT position (`pg_current_wal_insert_lsn`). A commit's record is inserted into the WAL before
+ *   the transaction is made visible (src/backend/access/transam/xact.c `RecordTransactionCommit`, then
+ *   `ProcArrayEndTransaction`), and with `synchronous_commit = off` only its flush waits. So once a commit is visible,
+ *   the insert position is past its record.
+ * - The insert position is where the NEXT record begins. When the last record ended at a page's end, that is after the
+ *   next page's header, a place no record ends and no stream position reaches until more WAL is written. So a position
+ *   just past a page header is taken back to the page's start: nothing ends inside a header, so it is as sound.
+ * - On a standby, the RECEIVED position (`pg_last_wal_receive_lsn`): a commit is visible there once replayed, and it is
+ *   replayed only from WAL already received and flushed, whereas `pg_last_wal_replay_lsn` moves only after the record's
+ *   replay. With no WAL receiver (replay from an archive alone) it is the replayed position.
+ */
+export async function visibleLsn(pg: PgConnection): Promise<bigint> {
+  const r = await pg.query("SELECT (CASE WHEN pg_is_in_recovery() THEN coalesce(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn()) ELSE pg_current_wal_insert_lsn() END)::text, " +
+    "pg_is_in_recovery(), current_setting('wal_block_size'), pg_size_bytes(current_setting('wal_segment_size'))::text");
+  const [lsn, recovery, block, segment] = r.rows[0] ?? [];
+  const at = parseLsn(lsn ?? "");
+  return recovery === "t" ? at : afterPageHeader(at, BigInt(block ?? "8192"), BigInt(segment ?? "16777216"));
+}
+
+/** An insert position just past a page header (a segment's first page has a long one), taken back to the page's start;
+ *  any other position as it is. The headers are 24 and 40 bytes where values align to 8, 20 and 36 where to 4. */
+export function afterPageHeader(at: bigint, block: bigint, segment: bigint): bigint {
+  const inSegment = at % segment;
+  if (inSegment === 40n || inSegment === 36n) return at - inSegment;
+  const inPage = at % block;
+  if (inPage === 24n || inPage === 20n) return at - inPage;
+  return at;
 }
 
 /** Create the slot over a replication connection; returns the WAL position it starts at. */

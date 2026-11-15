@@ -626,6 +626,7 @@ are `.claude/rules/duck-sync.md` "Keeping a copy current". Why each is so:
 | each join and leave is a log line with its position; `mason status` shows position, lag and counts | the first run printed one stream line in 35 minutes; commit → applied then measured 0.2–5.5 s |
 | the database's position: a connection at most every 5 s, never the keepalive | a walsender's keepalive carries its READ position, wrong while it decodes a backlog |
 | any failure but the source going away restarts the stream, back-off doubled, at most 5 minutes | each start decodes the slot's WAL again on the source |
+| a table's key is checked before its first change after each relation message, from the message's replica identity when it shows the key, else by one catalog query; a key not held refuses that table alone until it holds again, then one poll catches it up (`keyShown`, `streamKeyHeld`, issue 1062, 2026-11-15) | every change is written by key, so with the primary key dropped a duplicate's INSERT replaced the synced row it shared a key with, under the default identity, `FULL`, `USING INDEX` and in the DDL's own transaction alike (the four cases of `duck-stream.itest.ts`, each lost at main). Postgres sends a relation message after any change of a table's definition, before its next change, and builds it from the catalog as of that change, so it is the moment to ask. The check is never per batch, and never a timer. A `FULL` identity flags every column and shows nothing, so its tables are asked of the catalog: a connection of its own, as the database's position is read, and the poll's own `keyHeldSql` (issue 1027: 0.5 ms on the database, no lock). The catch-up after a refusal holds the table's changes only once the stream has passed the database's position read just after the key was found back (`keyBackPassed`): the way out deletes the duplicate and restores the key in one transaction, and with the catch-up asking every second while the stream still decoded that transaction (100,000 rows of another table before it), its DELETE of the duplicate was held or streamed and removed the synced row sharing the key, three runs of three with the wait taken out. That position must be past every commit the key's read could see, so it is the INSERT position on a primary (`visibleLsn`; xact.c `RecordTransactionCommit` inserts the commit record, and only then `ProcArrayEndTransaction` makes it visible), never the WRITE position: an asynchronous commit is visible before its WAL is written, 40 of 40 on the review's server for 2 to 197 ms, and the review of PR 1068 lost the row in 2 of 7 aimed tries; the itest aims it 3 times through `onKeyBack`. An insert position just past a page header is taken back to the page's start, where a stream position can land (nothing ends inside a header). On a standby it is the RECEIVED position: a commit is visible once replayed, from WAL already received, and the replay position moves only after the record's replay. The default identity with no column flagged shows the primary key gone when the change was written, so an immediate primary key in the catalog now means it was restored since, and the table is refused (the review: the key dropped, a duplicate inserted, deleted under `FULL` and the key restored, all before the stream decoded them, lost the row at the head and at main). Not covered: the same sequence when the duplicate was written under `FULL` or an identity over other columns, or the key came back as a unique index, not a primary key. The catalog then holds the key, and nothing in the change log says it was gone. Closing it would mean a full read of the table at every `REINDEX CONCURRENTLY` of its key |
 
 **Where.** `src/duck/stream.ts`, `src/duck/publication.ts`; `tests/integration/duck-stream.itest.ts`.
 
@@ -3084,6 +3085,49 @@ every gate rather than passing over skipped shards; `image` runs short of a canc
 docs-only, since a job skipped for a failed need reports success on a required check. The `docs` job runs the unit
 tests that read a doc (`DOCS_TESTS`), and `tests/ci-shards.test.ts` holds that list to every unit test whose code reads
 one, simulates the workflow's jobs and gates in each mode, and runs `changes` over real merges.
+
+### The merge queue (the owner, 2026-11-15)
+
+**Decision: a PR merges through GitHub's merge queue once the owner turns it on**, so CI runs on main as it will be once
+the PR lands, not on main as it stood at the PR's last push. The owner turns the queue on in the `main` ruleset. Until
+then, a PR merges directly. The merge calls and the wait work both ways.
+
+- **CI on a merge group is always a full run.** A queue waits for the required checks on the `merge_group` event, so
+  `ci.yml` runs on it. Every job runs there as on a PR, since no `if` reads the event. The four required checks report
+  on the group's commit by the same names. The docs path is never taken on a merge group. A group's `base_sha` is "the
+  SHA of the merge group's parent commit" (the `merge_group` webhook schema). With more than one PR in the queue, that
+  parent is the head of the group ahead of it, never main. So `base_sha..head_sha` holds only this PR's own change. A
+  docs-only PR queued behind a code PR would then have skipped the code's tests, and with "Only merge non-failing pull
+  requests" off, the code PR could land on that docs-only check. A fresh review found this on a public repository's
+  live queue, whose group branches are `gh-readonly-queue/main/pr-<n>-<the parent's SHA>`, each on the one ahead.
+- **Merging over REST, queue off or on.** A cloud session reaches GitHub's REST API but not its GraphQL API. So
+  `gh pr merge` (GraphQL) and the queue's GraphQL mutation are out of reach. `PUT /pulls/{n}/merge` "does not support
+  ... merging with a merge queue". `PUT /pulls/{n}/merge-async` does both. Its `merge_action` is `direct_merge`,
+  `merge_queue`, or `default` ("uses a merge queue if one is configured for the target branch, or merges directly
+  otherwise"). Its `sha` pins the request to the reviewed head: "if the PR is pushed in between the merge being
+  requested and being executed, the merge will be cancelled". Its `merge_method` is "only supported for direct merges",
+  and the docs do not say whether a queued request ignores it or refuses it. So no one call is documented to squash
+  with no queue and be accepted with one. The coordinator reads the branch's rules first
+  (`GET /rules/branches/main`, where a queue is a rule of type `merge_queue`), then sends `direct_merge` with
+  `merge_method=squash`, or `merge_queue` with no method. The result, `GET /pulls/{n}/merge-async/{uuid}`, is `merged`,
+  or `enqueued` once the PR is in the queue, which "does not mean the pull request has merged". No REST endpoint enables
+  auto-merge. Sources:
+  [Merge a pull request asynchronously](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request-asynchronously),
+  [Merge a pull request](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request),
+  [Get rules for a branch](https://docs.github.com/en/rest/repos/rules#get-rules-for-a-branch) and
+  [Managing a merge queue](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue).
+- **The hook.** `scripts/hooks/merge-head.ts` reads a REST merge however its path is written (a full URL, a query, a
+  trailing slash). It requires the full 40-character `sha`, since the docs do not say what a short one does. It refuses
+  auto-merge (the cloud session's `ccr/auto_merge`), because with a queue on it queues the PR at whatever head it has
+  then. It refuses `bypass_rules=true`, because the ruleset lets the Admin role bypass it always.
+- **What the docs do not say, and how the wait copes.** They do not say that a push to a PR already in the queue takes
+  it out. So `ci-wait.ts --queued <sha>` reads the PR's head on every pass, and says `moved` when it is not `<sha>`. REST
+  has no "in the queue" field, and no REST endpoint takes a PR out of the queue (that is done on the PR's page). The
+  wait reads a PR's live group from its branch (`GET /git/matching-refs/heads/gh-readonly-queue/<base>/pr-<n>`). A red
+  check at the live group's commit is `failed`. When a PR ahead fails, GitHub destroys this PR's group. The old group's
+  run keeps going, and its red checks are at a commit no live branch points at, so they never read `failed`. With no
+  live branch and a red newest run, the wait says `unknown`. A PR removed on its page, or by the queue's check timeout,
+  reads 8 for ever, so the wait's last line says when to look and tell the owner.
 
 ### Release lines: patch the previous line, breaking changes on a new line (the owner, 2026-11-14)
 
