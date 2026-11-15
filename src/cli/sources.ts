@@ -36,6 +36,7 @@ import { isMap, isScalar, parseDocument, type Document, type Pair, type YAMLMap 
 import { databaseNameProblem, DEFAULT_DATABASE } from "../lib/database-name.ts";
 import { appEnvValue, ENV_FILE } from "../lib/dotenv.ts";
 import { closest, didYouMean } from "../lib/did-you-mean.ts";
+import { caseClashes } from "../lib/relation-key.ts";
 import type { Failure, NextStep } from "./command.ts";
 import { maskedUrl, type SourceTable } from "./preflight.ts";
 import { pgIdent } from "../cdc/pg-wire.ts";
@@ -484,6 +485,66 @@ export function copiedColumns(t: SourceTable, e: Pick<TableEntry, "columns" | "e
   return t.columns.map((c) => c.name).filter((c) => keep.has(c));
 }
 
+/**
+ * COLUMNS WHOSE NAMES DIFFER ONLY IN CASE (issue 1019): Postgres keeps `"U"` and `u` apart, and the synced data takes them
+ * for one name (`caseClashes`, src/lib/relation-key.ts), so a table synced with both failed its first sync for ever. Each
+ * group of such columns among those the entry syncs (`copiedColumns`), with the ones to leave out so one is left: a key
+ * column is kept, else the first. `keyed`: two of the group are the table's key, which is always synced, so no entry
+ * can sync it.
+ */
+export function columnClashes(t: SourceTable, e: Pick<TableEntry, "columns" | "exclude" | "key">): Array<{ group: string[]; leaveOut: string[]; keyed: boolean }> {
+  const key = e.key ?? t.key;
+  return caseClashes(copiedColumns(t, e)).map((group) => {
+    const keys = group.filter((c) => key.includes(c));
+    const kept = keys[0] ?? group[0]!;
+    return { group, leaveOut: group.filter((c) => c !== kept), keyed: keys.length > 1 };
+  });
+}
+
+/** names in a sentence: `a`, `a and b`, `a, b and c` */
+const andList = (xs: readonly string[]): string => xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`;
+
+/**
+ * WHY `mason add` CANNOT ADD A TABLE WITH THESE COLUMNS (`chosen`, as `chooseColumns` decided them; `key` the --key
+ * asked) for their case alone (`columnClashes`), in the command's words, with the `--columns` that syncs the others; or
+ * null. ONE wording: `unaddableReason` says it of every column (`mason tables`, the web page), `plannedEntry` of the
+ * columns asked (src/cli/source-edit.ts).
+ */
+export function clashReason(t: SourceTable, chosen: Pick<TableEntry, "columns" | "exclude">, key: readonly string[] | null): string | null {
+  const e = { ...chosen, key: key === null ? null : [...key] };
+  const clashes = columnClashes(t, e);
+  const keyed = clashes.find((c) => c.keyed);
+  if (keyed !== undefined) return `its key columns ${andList(keyed.group)} have names that differ only in case. The synced data cannot hold them all, so Mason cannot sync it`;
+  if (!clashes.length) return null;
+  const leaveOut = clashes.flatMap((c) => c.leaveOut);
+  const rest = copiedColumns(t, e).filter((c) => !leaveOut.includes(c));
+  return `${clashes.map((c) => `its columns ${andList(c.group)}`).join(", and ")} have names that differ only in case. The synced data cannot hold them all. ` +
+    `mason add ${entryName(t.source)} --columns ${rest.join(",")}${key !== null ? ` --key ${key.join(",")}` : ""} syncs the others, without ${andList(leaveOut)}`;
+}
+
+/** What `entryProblems` says of each `columnClashes` group, at the entry's key, with the line that syncs the table. */
+function clashProblems(t: SourceTable, e: TableEntry, at: string): string[] {
+  return columnClashes(t, e).map(({ group, leaveOut, keyed }) => {
+    const what = `${t.source} has columns ${andList(group)}, whose names differ only in case. The synced data cannot hold them all`;
+    if (keyed) return `${at}: ${what}, and they are its key, so Mason cannot sync this table. Remove its entry`;
+    if (e.columns !== null) return `${at}.columns: ${what}. Take ${andList(leaveOut)} out of columns:`;
+    return `${at}: ${what}. Leave ${leaveOut.length === 1 ? "one" : "all but one"} out: exclude: [${[...e.exclude, ...leaveOut].join(", ")}]`;
+  });
+}
+
+/**
+ * TABLES WHOSE NAMES DIFFER ONLY IN CASE (issue 1019): `"Orders"` and `orders` are two tables in Postgres and one in the
+ * synced data, which served one under both names. Each entry after the first of such a group, said at its key.
+ */
+function tableClashProblems(src: Pick<SourceFile, "tables">): string[] {
+  return caseClashes(src.tables.map((e) => e.table)).flatMap((group) => {
+    const entries = group.map((name) => src.tables.find((e) => e.table === name)!);
+    const first = entries[0]!;
+    return entries.slice(1).map((e) => `tables.${e.name}: ${e.table} and ${first.table} (tables.${first.name}) have names that differ only in case. ` +
+      "The synced data cannot hold both. Remove one of the two entries");
+  });
+}
+
 /** Why a table cannot be copied as its entry says, each at its key, against the database's catalog; none when it can. */
 export function entryProblems(t: SourceTable | undefined, e: TableEntry, all: readonly SourceTable[], database: string, sync: TableSync): string[] {
   const at = `tables.${e.name}`;
@@ -516,6 +577,7 @@ export function entryProblems(t: SourceTable | undefined, e: TableEntry, all: re
   const hidden = rowSecurityHides(t);
   if (hidden !== null) out.push(`${at}: ${hidden}, or remove its entry`);
   for (const k of (e.key ?? t.key).filter((k) => e.exclude.includes(k))) out.push(`${at}.exclude: ${k} is ${t.source}'s key, which is always synced — take it out of exclude`);
+  out.push(...clashProblems(t, e, at));
   // a table that identifies no changed row: a publication carrying its updates would make the app's own UPDATEs and
   // DELETEs on it fail (the catalog says so; the file cannot), so it is never replicated
   if (sync.mode === "replication" && t.replicaIdentity === "n" && e.key === null) {
@@ -582,7 +644,7 @@ function keyProblems(t: SourceTable, key: readonly string[], at: string): string
  * one report (`sourceFailure`).
  */
 export function addedTables(src: SourceFile, tables: readonly SourceTable[], database: string, root: string): AddedTable[] | Failure {
-  const problems: string[] = [];
+  const problems: string[] = tableClashProblems(src);
   const out: AddedTable[] = [];
   for (const e of src.tables) {
     const t = tables.find((x) => x.source === e.table);
@@ -591,7 +653,7 @@ export function addedTables(src: SourceFile, tables: readonly SourceTable[], dat
     if (p.length || t === undefined) { problems.push(...p); continue; }
     const keep = new Set(copiedColumns(t, e));
     out.push({ ...t, columns: t.columns.filter((c) => keep.has(c.name)), foreignKeys: t.foreignKeys.filter((f) => keep.has(f.column)),
-      ...(e.key !== null ? { key: e.key, primaryKey: t.key } : {}), sync });
+      ...(e.key !== null ? { key: e.key, primaryKey: t.key } : {}), sync, entryAt: `${shownPath(root, src.file)}: tables.${e.name}` });
   }
   return problems.length ? sourceFailure(src.file, root, problems, [["mason tables", "the database's tables and their columns"]]) : out;
 }
@@ -1023,7 +1085,11 @@ export function unaddableReason(t: SourceTable, key: readonly string[] | null = 
       : " --key <column>,… (no primary key: name the columns that tell its rows apart)";
     return `${hidden}, then mason add ${entryName(t.source)}${then}`;
   }
-  return noKeyReason(t);
+  const noKey = noKeyReason(t);
+  if (noKey !== null) return noKey;
+  // columns whose names differ only in case, as every column would add them (issue 1019)
+  const every = chooseColumns(t, ["*"], key);
+  return "problem" in every ? null : clashReason(t, every, key);
 }
 
 /** Why `mason add <t>` with no `--key` cannot add `t` for its key alone (no primary key: the `--key` to name), or null. */

@@ -401,10 +401,18 @@ ul.checks pre.sql { margin: var(--space-1) 0 0; padding: var(--space-1) var(--sp
 
 /* ---------------------------------------------------------------- tables: dense, hairline, mono numbers */
 /* a box of rows: a hairline frame, its quiet lift, a tinted header row, every other row a shade */
-.panel, .scroll { background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); margin: 0 0 var(--space-5); overflow-x: auto; }
+.panel, .list { background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); margin: 0 0 var(--space-5); overflow-x: auto; }
+/* LISTS (issue 1049): every list on every page is a table in its `.list` card (`listTable`, src/web/shared.js). The card
+   is as wide as its column. The table is at least its least width: `--least`, set for the list's class (the Tables,
+   Users and Sync events lists below), else as narrow as its content allows. Where the card is narrower, the list
+   scrolls sideways inside it, never the page. A row's actions (`td.act`) stay pinned at the card's right while it
+   scrolls, on the row's own shade. Detector: tests/web-lists-layout.test.ts, every page from 320 to 1600 px. */
+.list > table { min-width: var(--least, 0px); }
+.list td.act, .list th.act { position: sticky; right: 0; }
+.list :where(td.act) { background: var(--surface); }
 table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: var(--text-sm); background: var(--surface);
   border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); margin: 0 0 var(--space-5); }
-.panel table, .scroll table { border: 0; margin: 0; border-radius: 0; box-shadow: none; }
+.panel table, .list table { border: 0; margin: 0; border-radius: 0; box-shadow: none; }
 caption { text-align: left; font-size: var(--text-md); font-weight: 700; padding: var(--space-5) 0 var(--space-2); color: var(--fg); }
 caption code { font-weight: 400; color: var(--muted); }
 th, td { text-align: left; vertical-align: top; padding: var(--space-2) var(--space-3); border-top: 1px solid var(--line); font-weight: 400; }
@@ -537,7 +545,7 @@ details.memory, details#syncs-raw { margin: var(--space-4) 0; }
    over its bar, a line kept when it has none) and its note under it, across every column, written for every row (empty
    when it says nothing). A question, a form and an answer are popovers beside the row's actions (`.pop`), never a row.
    The row's actions never wrap and never leave the card: they stay pinned at its right where the table scrolls. */
-table.catalog { table-layout: fixed; width: 100%; min-width: 630px; }
+table.catalog { table-layout: fixed; width: 100%; --least: 630px; }
 table.catalog th.state { width: 146px; }
 table.catalog th.rows { width: 116px; }
 table.catalog th.key { width: 104px; }
@@ -555,7 +563,7 @@ table.catalog th.act { width: 284px; }
    cells unseen: still the table's seven columns, which a note's colspan spans) says its fact in the row's note instead
    (`.fold`, src/web/pages/tables.js), so nothing is lost. On a phone the same, the row's actions stacked (below).
    Detector: tests/web-tables-layout.test.ts, 390 px and every width from 1000 to 1400 px. */
-.panel:has(> table.catalog) { container: catalog / inline-size; }
+.list:has(> table.catalog) { container: catalog / inline-size; }
 table.catalog .fold { display: none; }
 table.catalog .fold::before { content: attr(data-fold); }
 @container catalog (max-width: 1069px) { table.catalog :is(th, td).key { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-key { display: inline; } }
@@ -631,28 +639,24 @@ button[aria-busy="true"]:disabled { cursor: progress; }
 .reading[aria-busy="true"] { opacity: 0.55; pointer-events: none; }
 td.act, th.act { white-space: nowrap; text-align: right; }
 td.act > * { vertical-align: middle; }
-table.catalog td.act, table.catalog th.act { position: sticky; right: 0; }
-@media (max-width: 640px) { table.catalog td.act, .panel td.act, .scroll td.act { box-shadow: -1px 0 0 var(--line); } }
+@media (max-width: 640px) { table.catalog td.act, .list td.act { box-shadow: -1px 0 0 var(--line); } }
 table.catalog td.act { background: var(--surface); }
 table.catalog tbody tr:hover > td.act { background: var(--hover); }
 .what-copy.t-unsynced { color: var(--warn); }
 .what-copy.t-copying, .what-copy.t-catching-up, .what-copy.t-waiting { color: var(--muted); }
 /* a narrower window (the sidebar beside the page): every table's cells closer, so more fit their card */
 @media (max-width: 1100px) { th, td { padding-left: var(--space-2); padding-right: var(--space-2); } }
-/* a bare table too wide for the page (the Overview's statements: eleven numbers) scrolls inside its own box */
-.table-wrap { max-width: 100%; overflow-x: auto; margin: 0 0 var(--space-4); }
-.table-wrap > table { margin: 0; }
-/* a phone, where a table scrolls inside its card: a row's actions stay pinned at its right, in view */
+/* a phone, where a list scrolls inside its card: a row's pinned actions on the card's own surface */
 @media (max-width: 640px) {
-  .panel td.act, .scroll td.act { position: sticky; right: 0; background: var(--surface); }
-  .panel tbody tr:hover > td.act, .scroll tbody tr:hover > td.act { background: var(--hover); }
+  .list td.act { background: var(--surface); }
+  .list tbody tr:hover > td.act { background: var(--hover); }
 }
 /* a phone: the table scrolls inside its card, so a line under a row stays in the card's view, never as wide as the table */
 @media (max-width: 640px) {
   /* the list fits its card, still a table (a block would lose its fixed columns): the columns that give way have (the
      container queries above), the state narrower, and a row's actions stacked in a column of their own, so its name
      and state are read whole beside them (issue 884) */
-  table.catalog { display: table; min-width: 0; }
+  table.catalog { display: table; --least: 322px; }
   table.catalog th.state { width: 108px; }
   table.catalog td.state .copybar { width: 44px; }
   table.catalog th.act { width: 144px; }
@@ -781,14 +785,22 @@ table.users button.from-line:hover:not(:disabled) { color: var(--fg); background
 table.users button.from-line:disabled, table.users button.from-line:disabled:hover { background: none; }
 table.users td { white-space: nowrap; }
 /* FIXED COLUMNS, as the tables' catalog's: Disable → "Disabled <when>" widens no column and moves no button */
-table.users { table-layout: fixed; width: 100%; min-width: 960px; }
+table.users { table-layout: fixed; width: 100%; --least: 960px; }
+/* Role holds "every table" whole at the widest padding (issue 1049: at the least width, User and Role shared 86 px
+   each, and the role was cut). Where the card is narrower than 1012 px, the two would share less than 112 px each, so
+   Role keeps 112 px: its 86 px of words and 2 px to spare, as fonts render a little differently from one machine to
+   another. User gives: its name and id are cut, each with its whole as its title. A wider card shares the room between
+   them as before. */
+.list:has(> table.users) { container: users / inline-size; }
+/* above the phone layout only: on a phone the actions are a narrower column of their own, Role keeps its share, and a
+   narrower Role put its From… under the pinned buttons (the rule below, issue 1049's review) */
+@media (min-width: 641px) { @container users (max-width: 1011px) { table.users th.role { width: 112px; } } }
 table.users th.status { width: 180px; }
 table.users th.added { width: 188px; }
 table.users th.last { width: 150px; }
 /* Queries, Disable (in the room of Enabling…, its Enable sent) and Remove, whole */
 table.users th.act { width: 270px; }
-/* where the table scrolls in its card (a narrower window, a phone), a row's actions stay pinned at the card's right */
-table.users td.act, table.users th.act { position: sticky; right: 0; }
+/* where the table scrolls in its card (a narrower window, a phone), a row's actions stay pinned at the card's right (Lists) */
 table.users td.act { background: var(--surface); }
 table.users tbody tr:hover > td.act { background: var(--hover); }
 table.users td { overflow: hidden; text-overflow: ellipsis; }
@@ -798,6 +810,12 @@ table.users td { overflow: hidden; text-overflow: ellipsis; }
   table.users th.act { width: 112px; }
   table.users td.act { white-space: normal; text-align: center; }
   table.users td.act > :is(button, a) { display: block; width: 100%; margin: 0 0 var(--space-1); }
+  /* and From… is pressed at its middle, never the pinned buttons, from 320 px up (issue 1049's layout test: at 320 to
+     390 px, From… listing address ranges, and at 320 to 350 px any From…, had its middle under them): User is 96 px,
+     its name and id cut with their whole as the title, so Role starts at the card's left, and From… is at most 8em
+     wide, its whole the title */
+  table.users thead th:first-child { width: 96px; }
+  table.users .from-line { max-width: min(100%, 8em); }
 }
 #page-users td.mono { white-space: nowrap; }
 #page-users .user-added { border-left-color: var(--warn); border-radius: var(--radius-lg); padding: var(--space-4) var(--space-5); margin: var(--space-6) 0 var(--space-4); }
@@ -910,9 +928,11 @@ details.hours > summary { margin-bottom: var(--space-2); }
 /* Sync events above the phone (issue 1048): FIXED COLUMNS, as the Tables and Users lists have, and a least width at
    which every column reads whole: When, Kind and Took as wide as their longest words, the table's name a usual
    schema.table whole, and the message the column that gives. Below that width the list scrolls inside its card, never
-   the page. A name longer than its column is cut with "…", its whole the title, as the other lists cut one. */
+   the page. A name longer than its column is cut with "…", its whole the title, as the other lists cut one. 920 px holds a
+   name of 30 characters (222 px) whole in the Table column's 27%, at the wider padding above 1100 px (issue 1049: at
+   880 px, public.locked_for_running_sync was cut by up to 8 px between 1110 and 1190 px). */
 @media (min-width: 641px) {
-  #page-syncs table.events { table-layout: fixed; min-width: 880px; }
+  #page-syncs table.events { table-layout: fixed; --least: 920px; }
   #page-syncs table.events thead th:nth-child(1) { width: 104px; }
   #page-syncs table.events thead th:nth-child(2) { width: 216px; }
   #page-syncs table.events thead th:nth-child(3) { width: 27%; }

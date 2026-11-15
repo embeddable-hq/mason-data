@@ -146,6 +146,20 @@ tables:
 });
 type Sources_AddedTable = import("../src/duck/sync.ts").AddedTable;
 
+// THE KEY A TABLE IS SYNCED BY, CHECKED AGAIN AT EVERY READ (issue 1027): the file is checked against the catalog when it
+// is read, but an index can be dropped while Mason runs, and a poll by a key two rows share lost synced rows. The run
+// asks the database again before every read that writes by key (src/cdc/key-held.ts), and says a refusal at the place
+// the file names the table: each table the file adds carries that place, so the engine's words name the file and the key.
+test("every table the sources file adds carries where the file names it, so the sync's refusal of its key names the file and the key", () => {
+  const f = parse("kind: postgres\nurl: x\ntables:\n  orders: {}\n  events: { key: [tenant_id, id], sync: poll 5m }\n  billing.invoices: {}\n") as Sources.SourceFile;
+  const added = S.addedTables(f, CATALOG, "shop", "/app") as Array<Sources_AddedTable & { entryAt?: string }>;
+  assert.deepEqual(added.map((t) => [t.source, t.key, t.entryAt]), [
+    ["public.orders", ["id"], "mason/sources/app.yml: tables.orders"],
+    ["public.events", ["tenant_id", "id"], "mason/sources/app.yml: tables.events"],
+    ["billing.invoices", ["id"], "mason/sources/app.yml: tables.billing.invoices"],
+  ]);
+});
+
 test("sync: replication at the top and on an entry, mixed with off and poll; a table that cannot be replicated refused at its entry with the line to write", () => {
   const REPL = { mode: "replication" };
   const f = parse("kind: postgres\nurl: x\nsync: replication\ntables:\n  orders: {}\n  customers: { sync: off }\n  billing.invoices: { sync: poll 30s }\n") as Sources.SourceFile;
@@ -890,4 +904,77 @@ test("a column the database dropped that an entry's columns: names is passed ove
     assert.match(JSON.stringify(refused), new RegExp(`tables\\.orders\\.exclude: public\\.orders has no column ${name}.* — if it was renamed on the database, write its new name in exclude:; if it was dropped, take it out of exclude:`));
   }
   assert.deepEqual(S.goneColumns(customers, { columns: ["id", "nme"] }), { columns: [] }, "a near name is never passed over");
+});
+
+test("names the synced data holds as one: columns or tables whose names differ only in ASCII case are refused at the start, at mason add and in mason tables, by name and with the line that syncs the rest (issue 1019)", async () => {
+  const E = await import("../src/cli/source-edit.ts" as string) as typeof import("../src/cli/source-edit.ts");
+  const cased = table({ table: "t", columns: [col("id", "bigint", true), col("U", "integer"), col("u", "integer"), col("note")] });
+  const three = table({ table: "three", columns: [col("id", "bigint", true), col("Status"), col("status"), col("STATUS")] });
+  const keyed = table({ table: "keyed", key: ["K", "k"], columns: [col("K", "bigint", true), col("k", "bigint", true)] });
+  const keyClash = table({ table: "keyclash", key: ["ID"], columns: [col("ID", "bigint", true), col("id", "bigint")] });
+  const accents = table({ table: "accents", columns: [col("id", "bigint", true), col("É"), col("é")] });
+  const upper = table({ table: "Orders", columns: [col("id", "bigint", true), col("a")] });
+  const db = [...CATALOG, cased, three, keyed, keyClash, accents, upper];
+  const start = (entries: string): Failure | Sources_AddedTable[] => S.addedTables(parse(`kind: postgres\nurl: x\ntables:\n${entries}`) as Sources.SourceFile, db, "shop", "/app");
+  const why = (entries: string): string => { const r = start(entries); assert.ok(!Array.isArray(r), entries); return `${(r as Failure).message}\n${(r as Failure).why ?? ""}`; };
+
+  // AT THE START: each way out in the file's own words, at the entry's key
+  assert.match(why("  t: {}\n"), /tables\.t: public\.t has columns U and u, whose names differ only in case\. The synced data cannot hold them all\. Leave one out: exclude: \[u\]/);
+  assert.match(why("  t: { exclude: [note] }\n"), /Leave one out: exclude: \[note, u\]/);
+  assert.match(why("  t: { columns: [id, U, u] }\n"), /tables\.t\.columns: public\.t has columns U and u, whose names differ only in case\. The synced data cannot hold them all\. Take u out of columns:/);
+  assert.match(why("  three: {}\n"), /public\.three has columns Status, status and STATUS, whose names differ only in case\. The synced data cannot hold them all\. Leave all but one out: exclude: \[status, STATUS\]/);
+  assert.match(why("  keyed: {}\n"), /tables\.keyed: public\.keyed has columns K and k, whose names differ only in case\. The synced data cannot hold them all, and they are its key, so Mason cannot sync this table\. Remove its entry/);
+  // the key is always synced, so the other column is the one to leave out
+  assert.match(why("  keyclash: {}\n"), /Leave one out: exclude: \[id\]/);
+  // the ways out it names are taken; one column of the pair, or neither, is fine
+  for (const ok of ["  t: { exclude: [u] }\n", "  t: { columns: [id, U] }\n", "  t: { columns: [id, note] }\n", "  three: { exclude: [status, STATUS] }\n", "  keyclash: { exclude: [id] }\n"]) {
+    assert.ok(Array.isArray(start(ok)), `${ok}: ${JSON.stringify(start(ok))}`);
+  }
+  assert.deepEqual((start("  t: { exclude: [u] }\n") as Sources_AddedTable[])[0]!.columns.map((c) => c.name), ["id", "U", "note"]);
+  // a letter outside ASCII keeps its case in the synced data: É and é are two names there, as in Postgres
+  assert.deepEqual((start("  accents: {}\n") as Sources_AddedTable[])[0]!.columns.map((c) => c.name), ["id", "É", "é"]);
+  // two tables whose names differ only in case: the second entry is refused, naming the first
+  assert.match(why('  orders: {}\n  "Orders": {}\n'), /tables\.Orders: public\.Orders and public\.orders \(tables\.orders\) have names that differ only in case\. The synced data cannot hold both\. Remove one of the two entries/);
+  assert.ok(Array.isArray(start('  "Orders": {}\n')), "alone it syncs");
+  // and two schemas so
+  const billing = table({ schema: "Billing", table: "invoices" });
+  const schemas = S.addedTables(parse('kind: postgres\nurl: x\ntables:\n  billing.invoices: {}\n  "Billing.invoices": {}\n') as Sources.SourceFile, [...db, billing], "shop", "/app") as Failure;
+  assert.match(schemas.message, /tables\.Billing\.invoices: Billing\.invoices and billing\.invoices \(tables\.billing\.invoices\) have names that differ only in case/);
+
+  // AT MASON ADD: in the command's words, the --columns that syncs the rest, and nothing written
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-add-case-"));
+  const folder = path.join(root, "mason");
+  fs.mkdirSync(path.join(folder, "sources"), { recursive: true });
+  const file = path.join(folder, "sources", "app.yml");
+  const edit = (text: string) => { fs.writeFileSync(file, text); return E.sourceToEdit(folder, root, () => S.readSource(folder, root, {})); };
+  const said = (f: () => unknown): string => { try { f(); } catch (e) { return (e as Error).message; } return "taken"; };
+  const top = "kind: postgres\nurl: postgres://me@localhost/shop\ntables:\n  orders: {}\n";
+  const cat = { tables: db, database: "shop" };
+  const tRefusal = "public.t cannot be added: its columns U and u have names that differ only in case. The synced data cannot hold them all. mason add t --columns id,U,note syncs the others, without u";
+  try {
+    assert.equal(said(() => E.addEntry(edit(top), cat, "public.t")), tRefusal);
+    assert.equal(fs.readFileSync(file, "utf8"), top, "nothing written");
+    assert.equal(said(() => E.addEntry(edit(top), cat, "public.t", ["id", "U", "u"])),
+      "public.t cannot be added: its columns U and u have names that differ only in case. The synced data cannot hold them all. mason add t --columns id,U syncs the others, without u");
+    assert.equal(said(() => E.addEntry(edit(top), cat, "public.keyed")),
+      "public.keyed cannot be added: its key columns K and k have names that differ only in case. The synced data cannot hold them all, so Mason cannot sync it");
+    assert.equal(said(() => E.addEntry(edit(top), cat, "public.Orders")),
+      "public.Orders cannot be added: its name differs from public.orders only in case, and the file syncs public.orders already (tables.orders). The synced data cannot hold both. mason remove orders first to sync public.Orders instead");
+    assert.equal(fs.readFileSync(file, "utf8"), top, "nothing written");
+    // MASON TABLES says the same refusal as the table's reason, and offers no entry; so does the run's state, which the
+    // web page reads (`catalogTable`), so the page never offers an Add the run refuses (issue 802)
+    const listed = E.listTables(edit(top).parsed, cat);
+    const of = (name: string) => listed.find((x) => x.table === name)!;
+    const tReason = tRefusal.replace("public.t cannot be added: ", "");
+    assert.deepEqual([of("public.t").entry, of("public.t").reason], [null, tReason]);
+    assert.equal(S.catalogTable(cased, undefined).reason, tReason);
+    assert.equal(S.catalogTable(keyed, undefined).reason, "its key columns K and k have names that differ only in case. The synced data cannot hold them all, so Mason cannot sync it");
+    assert.equal(S.catalogTable(accents, undefined).reason, null);
+    assert.equal(S.catalogTable(cased, { name: "t", table: "public.t", columns: null, exclude: ["u"], key: null, sync: null }).reason, null, "added: the file's entry says it");
+    assert.match(of("public.Orders").reason ?? "", /differs from public\.orders only in case/);
+    assert.equal(of("public.accents").reason, null);
+    // the line it names is taken, and É and é are every column
+    assert.deepEqual(E.addEntry(edit(top), cat, "public.t", ["id", "U", "note"]).columns, ["id", "U", "note"]);
+    assert.equal(E.addEntry(edit(top), cat, "public.accents").columns, null);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

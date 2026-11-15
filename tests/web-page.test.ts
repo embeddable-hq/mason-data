@@ -575,8 +575,8 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   assert.match(text, /public\.customers Synced 100% 1,200 key id View events Sync now Remove Sync… All columns public\.orders /, "every added table has its bar: 100% once copied");
   assert.equal([...html.matchAll(/<span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`).join(", "),
     "ok Synced, ok Synced, ok Synced, unknown Not added, unknown Not added, unknown Not added, unknown Not added", "a state is a dot AND the CLI's word");
-  assert.match(html, /^<h3 class="list-h">Added <span class="dim">\(3\)<\/span><\/h3><div class="panel"><table class="catalog">/, "Added: its heading and count over its card");
-  assert.match(html, /<\/table><\/div><h3 class="list-h">Not added <span class="dim">\(4\)<\/span><\/h3><div class="panel"><table class="catalog">/, "Not added under it, a card of its own");
+  assert.match(html, /^<h3 class="list-h">Added <span class="dim">\(3\)<\/span><\/h3><div class="list"><table class="catalog">/, "Added: its heading and count over its card");
+  assert.match(html, /<\/table><\/div><h3 class="list-h">Not added <span class="dim">\(4\)<\/span><\/h3><div class="list"><table class="catalog">/, "Not added under it, a card of its own");
   assert.match(text, /public\.audit Not added ~50 rows key id Add Columns… public\.accounts /);
   assert.match(text, /public\.event_log Not added ~900 rows no key Name its key… cannot be added as it is: no primary key: name the columns that tell its rows apart, mason add event_log --key tenant_id,id \(its unique index event_log_tenant_id_id_key\) public\.staging /);
   assert.match(html, /<\/tr><tr class="under note"><td colspan="7"><div class="under-body">(?:<span class="fold[^"]*" data-fold="[^"]*"><\/span>)*<span class="dim">cannot be added as it is: no primary key/, "the reason on a line of its own under its row, across every column");
@@ -3164,7 +3164,8 @@ test("Tables: each added table's state, rows, last sync and its age, how long it
   assert.equal([...html.matchAll(/<table /g)].length, 2);
   // the last sync is an age, its UTC time in a title; rows, age, span and size are mono and right-aligned
   assert.match(html, /<td class="num last"><span title="2026-10-27 09:05:00 UTC">30 s ago<\/span><span class="took" title="changes checked">took 0\.4 s<\/span><\/td><td class="num size">512\.0 KiB<\/td>/);
-  assert.match(html, /<td class="num rows">1,200<\/td>/);
+  // its whole is the title, where the column cuts a long one (issue 1049: "~40,000,000 rows" did not fit, and said nothing more)
+  assert.match(html, /<td class="num rows" title="1,200">1,200<\/td>/);
   // a failed copy's error is a red line, its whole error in a details
   assert.match(html, /<span class="err">poll: connection reset<\/span><details data-open="error:public\.orders"><summary>the whole error<\/summary><pre>poll: connection reset\nthe sync tries it again in 5 s<\/pre><\/details>/);
   assert.match(html, /<td class="state"><span class="indicator bad"><span class="dot" aria-hidden="true"><\/span>Failed<\/span><span class="copyline t-failed"><span class="copybar" /, "a failed copy's bar is red (its line's class)");
@@ -4433,7 +4434,7 @@ test("Tables: the cards are the tables added of all, those synced, those failed 
 test("Tables: nothing added is the empty state under Added, over the Not added list that still offers Add; a stream's column is in the same table", () => {
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
   const html = renderTables(NONE);
-  assert.match(html, /^<h3 class="list-h">Added <span class="dim">\(0\)<\/span><\/h3><p class="empty">No table added yet\. Add one from the list below\.<\/p><h3 class="list-h">Not added <span class="dim">\(\d+\)<\/span><\/h3><div class="panel">/, "one quiet line under Added, over the list");
+  assert.match(html, /^<h3 class="list-h">Added <span class="dim">\(0\)<\/span><\/h3><p class="empty">No table added yet\. Add one from the list below\.<\/p><h3 class="list-h">Not added <span class="dim">\(\d+\)<\/span><\/h3><div class="list">/, "one quiet line under Added, over the list");
   assert.match(renderTables({ ...NONE, pageReadOnly: "read-only here" }), /<p class="empty">No table added yet\. The tables to sync are set in the sources file\.<\/p>/);
   assert.match(html, /data-add-table="public\.customers"/, "the list is still there to add from");
   assert.doesNotMatch(renderTables(SYNCED, { sizes: USAGE }), /class="empty"/);
@@ -4538,7 +4539,9 @@ test("the components: a state is a dot AND its word, a card its label, value and
     `<button type="button" class="primary" data-sync-table="public.o&quot;rders">Sync</button>`);
   assert.equal(textOf(fn<[string, string?], string>("empty")("No user yet", "<code>mason user add</code> adds one")), "No user yet mason user add adds one");
   assert.match(fn<[number?], string>("skeleton")(2), /^<div class="loading" aria-busy="true"><p class="dim">Asking Mason…<\/p><span class="skeleton"><\/span><span class="skeleton half"><\/span><\/div>$/);
-  assert.equal(fn<[string], string>("panel")("<table></table>"), `<div class="panel"><table></table></div>`);
+  assert.equal(fn<[string], string>("panel")("<ul></ul>"), `<div class="panel"><ul></ul></div>`);
+  // a list: its table, of its class, in the card every list is written in (issue 1049)
+  assert.equal(fn<[string, string], string>("listTable")("events", "<tbody></tbody>"), `<div class="list"><table class="events"><tbody></tbody></table></div>`);
   const details = fn<[string, string, string, boolean?, string?], string>("details");
   assert.equal(details("request:a\"b", "More", "<p>x</p>"), `<details data-open="request:a&quot;b"><summary>More</summary><p>x</p></details>`);
   assert.equal(details("k", "More", "", true, "memory"), `<details class="memory" data-open="k" open><summary>More</summary></details>`);
@@ -4840,10 +4843,27 @@ test("an answer's popover covers no other control (issue 884): under its anchor,
   assert.equal(crowded.classList.contains("through"), false, "never a way through");
   assert.deepEqual(crowded.style, { left: "", top: "" }, "placed by the stylesheet, not over a row");
   assert.deepEqual(root.style.props, { "--docked-h": "120px" }, "its height given to the page's end");
-  // a place clear again: no longer docked, and the page's end its own again
+  // a place clear again (the page scrolled into the room at its end): no longer docked, but the room is kept while the
+  // answer is shown — given back, it shortened the page under the scroll, the browser pulled the page back, and the
+  // answer docked again over the last rows, so they could never be scrolled clear of it (a phone's Tables list)
   placePops({ ...docOf([crowded], rowControls), documentElement: root }, { innerWidth: 1280, innerHeight: 900 });
   assert.equal(crowded.classList.contains("docked"), false);
   assert.deepEqual(crowded.style, { left: "596px", top: "100px" });
+  assert.deepEqual(root.style.props, { "--docked-h": "120px" }, "the room kept while it is shown");
+  // its page no longer shown (another page opened, its section hidden: no box): no room, so that page does not end in
+  // blank space (issue 1049's review); shown again, it is placed afresh
+  const hiddenPage = { ...crowded, offsetWidth: 0, offsetHeight: 0 };
+  placePops({ ...docOf([hiddenPage], rowControls), documentElement: root }, { innerWidth: 1280, innerHeight: 900 });
+  assert.deepEqual(root.style.props, { "--docked-h": "0px" }, "an answer on a page not shown keeps no room");
+  placePops({ ...docOf([crowded], grid), documentElement: root }, { innerWidth: 1280, innerHeight: 900 });
+  assert.deepEqual(root.style.props, { "--docked-h": "120px" }, "docked again on its page");
+  placePops({ ...docOf([crowded], rowControls), documentElement: root }, { innerWidth: 1280, innerHeight: 900 });
+  assert.deepEqual(root.style.props, { "--docked-h": "120px" }, "and its room kept again");
+  // dismissed: the page's end its own again
+  placePops({ ...docOf([], rowControls), documentElement: root }, { innerWidth: 1280, innerHeight: 900 });
+  assert.deepEqual(root.style.props, { "--docked-h": "0px" }, "given back once it is gone");
+  // a new answer docks afresh: no room is left from the one before
+  placePops({ ...docOf([said()], rowControls), documentElement: root }, { innerWidth: 1280, innerHeight: 900 });
   assert.deepEqual(root.style.props, { "--docked-h": "0px" });
 });
 
@@ -6103,18 +6123,25 @@ test("layout guard: a click moves no row and no column — a question, a form an
   assert.match(rule("button[data-room]::after"), /content: attr\(data-room\); display: block; height: 0;/, "the room is an unseen line of no height: it widens, never heightens");
   assert.match(rule(".pop"), /position: fixed/, "a popover is over the rows, never between them");
   // FIXED COLUMNS: as wide as the header says, whatever a row holds now (Not added → Adding… → Waiting and its bar)
-  assert.match(rule("table.catalog"), /table-layout: fixed; width: 100%; min-width: \d+px/);
+  assert.match(rule("table.catalog"), /table-layout: fixed; width: 100%; --least: \d+px/);
   // the users' too: Disable says "Disabled <when>", wider than Active, and must widen no column (found in the browser)
-  assert.match(rule("table.users"), /table-layout: fixed; width: 100%; min-width: \d+px/);
+  assert.match(rule("table.users"), /table-layout: fixed; width: 100%; --least: \d+px/);
   for (const c of ["status", "added", "last", "act"]) assert.match(rule(`table.users th.${c}`), /width: \d+px/, `the users' ${c} column has its width`);
   // THE USERS FIT THEIR CARD AT A LAPTOP'S WIDTH (PR 820's review: a column and a button more scrolled the table 182 px at
   // 1280, its actions off the card): its least width at most 960 px, and its fixed columns leave User and Role 100 px each
   // in the ~998 px card of a 1280 px window (measured in Chromium: 110 px each)
   const px = (sel: string) => Number(/width: (\d+)px/.exec(rule(sel))![1]);
-  assert.ok(Number(/min-width: (\d+)px/.exec(rule("table.users"))![1]) <= 960, "the users' least width");
-  assert.ok(["status", "added", "last", "act"].reduce((s, c) => s + px(`table.users th.${c}`), 0) + 2 * 100 <= 998, "User and Role keep their room at 1280");
+  assert.ok(Number(/--least: (\d+)px/.exec(rule("table.users"))![1]) <= 960, "the users' least width");
+  const fixed = ["status", "added", "last", "act"].reduce((s, c) => s + px(`table.users th.${c}`), 0);
+  assert.ok(fixed + 2 * 100 <= 998, "User and Role keep their room at 1280");
+  // where the card leaves User and Role under 112 px each, Role keeps 112 px, enough for "every table" (issue 1049),
+  // above the phone layout only: on a phone a narrower Role put its From… under the pinned buttons (the review)
+  // the container query's width is the one where they would share exactly that
+  const narrow = /@media \(min-width: 641px\) \{ @container users \(max-width: (\d+)px\) \{ table\.users th\.role \{ width: (\d+)px; \} \} \}/.exec(css);
+  assert.ok(narrow !== null, "Role's width where the card is narrow");
+  assert.equal(Number(narrow![1]) + 1, fixed + 2 * Number(narrow![2]), "below the width where User and Role would share that each");
   // where it scrolls (a narrower window, a phone), a row's actions stay pinned at the card's right, and a name never runs into its Role
-  assert.match(rule("table.users td.act"), /position: sticky; right: 0/);
+  assert.match(rule(".list td.act"), /position: sticky; right: 0/, "every list pins a row's actions (issue 1049)");
   const phone = css.slice(css.lastIndexOf("@media (max-width: 640px)", css.indexOf("  table.users { display: table; }")));
   assert.ok(css.includes("  table.users { display: table; }") && phone.indexOf("table.users { display: table; }") < phone.indexOf("\n}"), "on a phone the card scrolls, so the actions pin");
   assert.match(rule('table.users th[scope="row"]'), /overflow: hidden/);
@@ -6123,9 +6150,8 @@ test("layout guard: a click moves no row and no column — a question, a form an
   assert.deepEqual(heads, [...COLUMNS, ...COLUMNS], "Added and Not added: the same columns, so they line up one over the other");
   for (const c of heads.filter((x) => x !== "name")) assert.match(rule(`table.catalog th.${c}`), /width: \d+px/, `the ${c} column has its width`);
   assert.match(rule("td.act"), /white-space: nowrap/, "a row's actions never wrap");
-  assert.match(rule(".panel"), /overflow-x: auto/, "a table in a card scrolls inside it");
-  assert.match(rule(".scroll"), /overflow-x: auto/);
-  assert.match(rule(".table-wrap"), /overflow-x: auto/, "a bare table too wide scrolls inside its box");
+  assert.match(rule(".list"), /overflow-x: auto/, "a list in its card scrolls inside it (issue 1049)");
+  assert.match(rule(".panel"), /overflow-x: auto/, "what else is in a card scrolls inside it too");
   assert.match(rule(".pop button"), /max-width: 100%/, "a confirm's button names a long table, cut, never past the popover");
   // AN EXPANDER the reader asked for (a request's details) pushes the rows under it down, but never widens a column: its
   // body adds no width of its own (a 64 KiB statement without a space measured 117 → 576 px for the Statement column)

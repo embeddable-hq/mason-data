@@ -12,7 +12,7 @@
  * `copySizes` and `unsized` every minute; a table's columns once, when its Columns… or Name its key… form opens
  * (`GET /api/tables/<table>/columns`, `columnsPath`).
  */
-import { msText, bytesText, button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, spanText, duration, status, streamRows, updatedCountText, utcText, pop, actId, ROOMS, POLL_MS, readOnlyLine, tablesReadOnly, sendButton, failurePop } from "../shared.js";
+import { msText, bytesText, button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, renderFailure, spanText, duration, status, streamRows, updatedCountText, utcText, pop, actId, ROOMS, POLL_MS, readOnlyLine, tablesReadOnly, sendButton, failurePop, listTable } from "../shared.js";
 import { copyBar, copyingCount, createMonotone, tableLine } from "./status.js";
 
 /** `/api/usage` asked for the copies' own sizes alone: the last minute's samples (none needed), and `copySizes`. */
@@ -725,7 +725,7 @@ export function renderTables(s, ui = {}) {
       pops.push(pop(anchor, "failure" in synced ? `${renderFailure(synced.failure)}${button("Dismiss", { dismissSynced: "", popClose: "" }, "small")}` : "busy" in synced ? renderBusy(synced.busy) : renderSynced(synced.synced, t.table, s, synced.picked ?? [t.table])));
     }
     return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}${said_ ? " has-note" : ""}"><th scope="row" class="name"><code class="name" title="${esc(t.table)}">${nameBreaks(t.table)}</code></th>` +
-      `<td class="state">${state}${bar}</td>${cell(rows, "num rows")}${cell(f.key, "mono key", f.key)}${last}` +
+      `<td class="state">${state}${bar}</td>${cell(rows, "num rows", rows)}${cell(f.key, "mono key", f.key)}${last}` +
       `${size ? cell(size.text, "num size", size.title) : cell("", "num size")}` +
       `<td class="act" id="${esc(anchor)}">${act}</td></tr>` + note;
   };
@@ -751,7 +751,7 @@ export function renderTables(s, ui = {}) {
   const sizesFailed = added && sizes && "failure" in sizes ? `<p class="count">The synced tables' sizes could not be read: ${esc(firstLine(sizes.failure.message))}.</p>` : "";
   const thead = `<thead><tr>${head.map(([h, c]) => `<th scope="col"${c ? ` class="${c}"` : ""}>${h}</th>`).join("")}</tr></thead>`;
   // `line` writes each row's popovers into `pops` as it goes: Added's rows first, in the order they are written
-  const list = (rows) => panel(`<table class="catalog">${thead}<tbody>${rows.map(line).join("")}</tbody></table>`);
+  const list = (rows) => listTable("catalog", `${thead}<tbody>${rows.map(line).join("")}</tbody>`);
   const heading = (title, count) => `<h3 class="list-h">${esc(title)} <span class="dim">(${n(count)})</span></h3>`;
   const addedNone = added === 0 ? empty(readOnly === null ? "No table added yet. Add one from the list below." : "No table added yet. The tables to sync are set in the sources file.")
     : failed ? `<p class="dim">No failed table${term ? `'s name has “${esc(term)}”` : ""}.</p>`
