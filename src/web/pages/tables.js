@@ -12,7 +12,7 @@
  * `copySizes` and `unsized` every minute; a table's columns once, when its Columns… or Name its key… form opens
  * (`GET /api/tables/<table>/columns`, `columnsPath`).
  */
-import { msText, bytesText, button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, spanText, duration, status, streamRows, updatedCountText, utcText, pop, actId, ROOMS, POLL_MS, readOnlyLine, tablesReadOnly, sendButton, failurePop } from "../shared.js";
+import { msText, bytesText, button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, renderFailure, spanText, duration, status, streamRows, updatedCountText, utcText, pop, actId, ROOMS, POLL_MS, readOnlyLine, tablesReadOnly, sendButton, failurePop, listTable } from "../shared.js";
 import { copyBar, copyingCount, createMonotone, tableLine } from "./status.js";
 
 /** `/api/usage` asked for the copies' own sizes alone: the last minute's samples (none needed), and `copySizes`. */
@@ -704,7 +704,7 @@ export function renderTables(s, ui = {}) {
       pops.push(pop(anchor, "failure" in synced ? `${renderFailure(synced.failure)}${button("Dismiss", { dismissSynced: "", popClose: "" }, "small")}` : "busy" in synced ? renderBusy(synced.busy) : renderSynced(synced.synced, t.table, s, synced.picked ?? [t.table])));
     }
     return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}${said_ ? " has-note" : ""}"><th scope="row" class="name"><code class="name" title="${esc(t.table)}">${nameBreaks(t.table)}</code></th>` +
-      `<td class="state">${state}${bar}</td>${cell(rows, "num rows")}${cell(f.key, "mono key", f.key)}${last}` +
+      `<td class="state">${state}${bar}</td>${cell(rows, "num rows", rows)}${cell(f.key, "mono key", f.key)}${last}` +
       `${size ? cell(size.text, "num size", size.title) : cell("", "num size")}` +
       `<td class="act" id="${esc(anchor)}">${act}</td></tr>` + note;
   };
@@ -730,7 +730,7 @@ export function renderTables(s, ui = {}) {
   const sizesFailed = added && sizes && "failure" in sizes ? `<p class="count">The synced tables' sizes could not be read: ${esc(firstLine(sizes.failure.message))}.</p>` : "";
   const thead = `<thead><tr>${head.map(([h, c]) => `<th scope="col"${c ? ` class="${c}"` : ""}>${h}</th>`).join("")}</tr></thead>`;
   // `line` writes each row's popovers into `pops` as it goes: Added's rows first, in the order they are written
-  const list = (rows) => panel(`<table class="catalog">${thead}<tbody>${rows.map(line).join("")}</tbody></table>`);
+  const list = (rows) => listTable("catalog", `${thead}<tbody>${rows.map(line).join("")}</tbody>`);
   const heading = (title, count) => `<h3 class="list-h">${esc(title)} <span class="dim">(${n(count)})</span></h3>`;
   const addedNone = added === 0 ? empty(readOnly === null ? "No table added yet. Add one from the list below." : "No table added yet. The tables to sync are set in the sources file.")
     : failed ? `<p class="dim">No failed table${term ? `'s name has “${esc(term)}”` : ""}.</p>`
@@ -742,21 +742,19 @@ export function renderTables(s, ui = {}) {
   const otherHtml = failed && !otherShown.length || otherShown.length && !otherWritten.length ? ""
     : heading("Not added", otherShown.length) + (otherWritten.length ? list(otherWritten) : otherNone);
   return stray + (viewOnly !== null ? readOnlyLine("Tables are not added, removed or synced", viewOnly)
-    : readOnly === null ? "" : `<p class="count">You can't add or remove tables from this page. ${esc(readOnly)}${deployLink(s.sourcesReadOnlyKind)}</p>`) +
+    : readOnly === null ? "" : `<p class="count">You can't add or remove tables from this page. ${esc(readOnly)}${deployLink(s.sourcesReadOnlyKind, s.pageDeployDocs)}</p>`) +
     matching + addedHtml + otherHtml + pops.join("") + moreRows("tables", Math.min(limit, shown), shown, TABLE_ROWS) + sizesFailed +
     (added ? `<p class="dim">A synced table's size is measured every 10 minutes, once its rows are written to disk.</p>` : "");
 }
 
-/** Where the README says how to deploy a change to a server (its "Run it on a server" section, on the public
- *  repository), for a project deployed read-only. As `ROLES_DOCS_URL` (users.js): no referrer, since the page's address
- *  may carry a host's token, and the same tab, since a host may serve the page in a sandbox with no `allow-popups`. */
-export const DEPLOY_DOCS_URL = "https://github.com/embeddable-hq/mason-data#run-it-on-a-server";
-
-/** The README's line after the read-only reason, where a deploy is the way out (`/api/state` `sourcesReadOnlyKind`:
- *  `deployed`, `unwritable`); none where whether the files are read-only cannot be told (`unknown`: a setting or a
- *  config to repair, which the deploy section does not help with). */
-const deployLink = (kind) => kind === "deployed" || kind === "unwritable"
-  ? ` <a href="${DEPLOY_DOCS_URL}" rel="noreferrer">The README</a> describes how.` : "";
+/** The line after the read-only reason, where a deploy is the way out (`/api/state` `sourcesReadOnlyKind`: `deployed`,
+ *  `unwritable`), linking to how to change a deployed project (`/api/state` `pageDeployDocs`: the README's section, or
+ *  the host's own steps, MASON_UI_DEPLOY_DOCS_URL, src/cli/ui-deploy-docs.ts). None where whether the files are
+ *  read-only cannot be told (`unknown`: a setting or a config to repair, which a deploy does not help with), or where
+ *  the state names no URL. As `ROLES_DOCS_URL` (users.js): no referrer, since the page's address may carry a host's
+ *  token, and the same tab, since a host may serve the page in a sandbox with no `allow-popups`. */
+const deployLink = (kind, url) => (kind === "deployed" || kind === "unwritable") && typeof url === "string" && url !== ""
+  ? ` <a href="${esc(url)}" rel="noreferrer">Read how to change a deployed project</a>.` : "";
 
 export const page = {
   id: "tables",

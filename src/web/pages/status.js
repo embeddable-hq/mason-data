@@ -22,8 +22,7 @@
 const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage?range=24h", queries: "#observability/queries?range=24h",
   slow: "#observability/queries?slow=1&range=24h", failedQueries: "#observability/queries?status=refused-or-failed&range=24h", failedEvents: "#observability/syncs?failures=1&range=24h" };
 import { VIEW_HASHES } from "../routes.js";
-import { statementMsText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, agoText, utcMinute, utcText, staleText, staleWhy,
-  unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, copyClick, readOnlyLine, tablesReadOnly, usersReadOnly } from "../shared.js";
+import { statementMsText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, agoText, utcMinute, utcText, staleText, staleWhy, unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, copyClick, readOnlyLine, tablesReadOnly, usersReadOnly, listTable } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
 import { readHost, hostEvery, hostKey, renderHostCard } from "../host-view.js";
 
@@ -445,10 +444,10 @@ function renderProgress(s, isOpen = () => false, shares = new Map(), before = ne
     .sort((a, b) => rank[a.l.state] - rank[b.l.state] || (a.t.copy?.updatedAt ?? "").localeCompare(b.t.copy?.updatedAt ?? "") || a.t.table.localeCompare(b.t.table));
   if (!lines.length) return "";
   return `<h3>Tables not synced yet (${lines.length} of ${picked.length} added)</h3>` +
-    `<table class="tables"><thead><tr><th scope="col">Table</th><th scope="col">Sync</th><th scope="col"></th></tr></thead><tbody>${lines.map(({ t, l }) =>
+    listTable("tables", `<thead><tr><th scope="col">Table</th><th scope="col">Sync</th><th scope="col"></th></tr></thead><tbody>${lines.map(({ t, l }) =>
       `<tr class="t-${l.state}"><th scope="row"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
       `<td class="bar">${copyBar(t.table, l, shares.get(t.table) ?? l.fraction, before.get(t.table))}</td>` +
-      `<td class="what">${esc(l.what)}${t.error && t.error.includes("\n") ? details(`error:${t.table}`, "the whole error", `<pre>${esc(t.error)}</pre>`, isOpen(`error:${t.table}`)) : ""}</td></tr>`).join("")}</tbody></table>`;
+      `<td class="what">${esc(l.what)}${t.error && t.error.includes("\n") ? details(`error:${t.table}`, "the whole error", `<pre>${esc(t.error)}</pre>`, isOpen(`error:${t.table}`)) : ""}</td></tr>`).join("")}</tbody>`);
 }
 
 /**

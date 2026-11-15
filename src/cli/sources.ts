@@ -653,7 +653,7 @@ export function addedTables(src: SourceFile, tables: readonly SourceTable[], dat
     if (p.length || t === undefined) { problems.push(...p); continue; }
     const keep = new Set(copiedColumns(t, e));
     out.push({ ...t, columns: t.columns.filter((c) => keep.has(c.name)), foreignKeys: t.foreignKeys.filter((f) => keep.has(f.column)),
-      ...(e.key !== null ? { key: e.key, primaryKey: t.key } : {}), sync });
+      ...(e.key !== null ? { key: e.key, primaryKey: t.key } : {}), sync, entryAt: `${shownPath(root, src.file)}: tables.${e.name}` });
   }
   return problems.length ? sourceFailure(src.file, root, problems, [["mason tables", "the database's tables and their columns"]]) : out;
 }

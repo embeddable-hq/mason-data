@@ -29,6 +29,7 @@ import { UI_RUN_FILE_SETTING } from "./ui-run-file.ts";
 import { backLinkSettingsSet, uiBackLinkSetting } from "./ui-back-link.ts";
 import { UI_ACCOUNT_SETTING, uiAccountSetting } from "./ui-account.ts";
 import { UI_OVERVIEW_CARD_SETTING, uiOverviewCardSetting } from "./ui-host-view.ts";
+import { UI_DEPLOY_DOCS_URL_SETTING, uiDeployDocsSetting } from "./ui-deploy-docs.ts";
 import { UI_ICON_SETTING, uiIconSetting } from "./ui-icon.ts";
 import { NAV_SETTINGS, navSettingsSet, notNavSettings, uiNavSetting } from "./ui-nav.ts";
 import { PG_PUBLIC_URL_SETTING, pgPublicUrlSetting } from "./pg-public-url.ts";
@@ -507,6 +508,14 @@ export function startSettingRefusal(p: Project, env: NodeJS.ProcessEnv, o: { ser
   }
   const account = uiAccountSetting(env);
   if (account !== null && "problem" in account) return { message: account.problem, code: "refused", fix: "set it as mason serve --help says, or unset it" };
+  // where the page sends a person to change a deployed project is a server's too (src/cli/ui-deploy-docs.ts): a laptop's
+  // project is changed on the laptop
+  if (!o.serve && env[UI_DEPLOY_DOCS_URL_SETTING]) {
+    return { message: `${UI_DEPLOY_DOCS_URL_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",
+      fix: `unset ${UI_DEPLOY_DOCS_URL_SETTING}: mason start's page is yours alone, opened with mason ui` };
+  }
+  const deployDocs = uiDeployDocsSetting(env);
+  if (deployDocs !== null && typeof deployDocs !== "string") return { message: deployDocs.problem, code: "refused", fix: "set it as mason serve --help says, or unset it" };
   // the host's card on the Overview is a server's too (src/cli/ui-host-view.ts): mason start's page is Mason's alone
   if (!o.serve && env[UI_OVERVIEW_CARD_SETTING]) {
     return { message: `${UI_OVERVIEW_CARD_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",

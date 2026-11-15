@@ -11,6 +11,7 @@
 import * as os from "node:os";
 import { PgConnection, PgError } from "../cdc/pg-wire.ts";
 import { regclassName, shapeSql } from "../cdc/shape.ts";
+import { enforcingIndexSql, indexKeyColumnsFrom } from "../cdc/key-held.ts";
 import { parseDatabaseUrl, queryProblem, type PgConnection as UrlParts } from "../lib/database-url.ts";
 import { closest } from "../lib/did-you-mean.ts";
 import type { SourceCollation } from "../duck/collation.ts";
@@ -347,21 +348,21 @@ const TABLES_SQL_BODY = `SELECT json_agg(t ORDER BY t.schema, t.table)::text FRO
       AND NOT EXISTS (SELECT FROM pg_policy p WHERE p.polrelid = c.oid AND p.polpermissive AND p.polcmd IN ('r', '*')
         AND (0 = ANY (p.polroles) OR EXISTS (SELECT FROM unnest(p.polroles) pr(oid) WHERE pr.oid <> 0 AND pg_has_role(pr.oid, 'USAGE'))))
       THEN current_user END AS row_security_hides_from,
-    -- the primary key: only a valid index enforces it
-    (SELECT coalesce(json_agg(a.attname ORDER BY k.n), '[]'::json)
-      FROM pg_index i CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, n)
-      JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+    -- the primary key: only a valid index enforces it, over its key columns alone, never its INCLUDE columns
+    -- (indexKeyColumnsFrom, src/cdc/key-held.ts; the review of PR 1057)
+    (SELECT coalesce(json_agg(x.attname ORDER BY x.n), '[]'::json)
+      FROM pg_index i CROSS JOIN LATERAL (SELECT a.attname, k.n FROM ${indexKeyColumnsFrom("i")}) x
       WHERE i.indrelid = c.oid AND i.indisprimary AND i.indisvalid) AS key,
     (SELECT coalesce(json_agg(json_build_object('name', ic.relname, 'constraint', EXISTS (SELECT FROM pg_constraint u WHERE u.conindid = i.indexrelid AND u.contype = 'u'),
         -- indnullsnotdistinct is Postgres 15's: read through the row, which an older server's lacks
         'nulls_not_distinct', coalesce((to_jsonb(i) ->> 'indnullsnotdistinct')::boolean, false),
-        'columns', (SELECT json_agg(a.attname ORDER BY k.n) FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, n)
-          JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum)) ORDER BY ic.relname), '[]'::json)
+        'columns', (SELECT json_agg(a.attname ORDER BY k.n) FROM ${indexKeyColumnsFrom("i")})) ORDER BY ic.relname), '[]'::json)
       FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid
       -- an INVALID index (a CREATE UNIQUE INDEX CONCURRENTLY that failed, its duplicates still in the table) enforces
-      -- nothing: never declared to the catalog, never a key: Mason accepts
-      WHERE i.indrelid = c.oid AND i.indisunique AND i.indisvalid AND NOT i.indisprimary AND i.indpred IS NULL AND i.indexprs IS NULL
-        AND i.indnkeyatts = i.indnatts) AS unique_keys,
+      -- nothing: never declared to the catalog, never a key: Mason accepts. The sync asks the same at every read
+      -- (src/cdc/key-held.ts), so a key accepted here and dropped later is refused there. An index's INCLUDE columns
+      -- are no part of it: UNIQUE (b) INCLUDE (c) keeps b apart, so key: [b] is taken
+      WHERE i.indrelid = c.oid AND ${enforcingIndexSql("i")} AND NOT i.indisprimary) AS unique_keys,
     (SELECT coalesce(json_agg(json_build_object('name', a.attname, 'type', format_type(b.oid, b.mod), 'domain', b.oid <> a.atttypid,
         'not_null', a.attnotnull, 'comment', col_description(c.oid, a.attnum), 'type_oid', b.oid,
         'type_array_oid', (SELECT typarray FROM pg_type WHERE oid = b.oid),
