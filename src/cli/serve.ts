@@ -49,6 +49,7 @@ import { BACK_LABEL_MAX, BACK_URL_MAX, uiBackLinkSetting } from "./ui-back-link.
 import { accountOf, uiAccountSetting, UI_ACCOUNT_SETTING } from "./ui-account.ts";
 import { NAV_LINKS_MAX, navLines, navOf, uiNavSetting } from "./ui-nav.ts";
 import { UI_OVERVIEW_CARD_SETTING, overviewCardOf, uiOverviewCardSetting } from "./ui-host-view.ts";
+import { DEPLOY_DOCS_DEFAULT, UI_DEPLOY_DOCS_URL_SETTING, uiDeployDocsSetting } from "./ui-deploy-docs.ts";
 import { ICON_BYTES_MAX, UI_ICON_SETTING, iconOf, uiIconSetting } from "./ui-icon.ts";
 import { pgPublicUrlSetting, PUBLIC_SSLMODES } from "./pg-public-url.ts";
 import { changesRetiredText, pollMsRetiredText, type SourcesTop } from "../lib/table-sync.ts";
@@ -149,6 +150,9 @@ export const SERVE: CommandSpec = {
                             account is managed or signed out of, in the same tab: {"label": …, "url": …}, the label
                             plain text on one line, at most ${BACK_LABEL_MAX} characters, the URL read as MASON_UI_BACK_URL is;
                             any other key, or a value of another type, is refused (default unset: none)
+    MASON_UI_DEPLOY_DOCS_URL  where the web page sends a person to change this deployed project, from its Tables
+                            page while the project's files are read-only: read as MASON_UI_BACK_URL is
+                            (default ${DEPLOY_DOCS_DEFAULT})
     MASON_UI_OVERVIEW_CARD  a card of the host's on the web page's Overview, above Mason's own: the same JSON as a
                             view's, read from a path relative to the page's own address, read as a view's is
                             (default unset: none)
@@ -280,6 +284,9 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   // who is signed in to the host (src/cli/ui-account.ts): a label and a URL read as the link back's, else refused here
   const account = uiAccountSetting(env);
   if (account !== null && "problem" in account) wrong.push(account.problem);
+  // where the page sends a person to change a deployed project (src/cli/ui-deploy-docs.ts): read as the link back's
+  const deployDocs = uiDeployDocsSetting(env);
+  if (deployDocs !== null && typeof deployDocs !== "string") wrong.push(deployDocs.problem);
   // the host's card on the Overview (src/cli/ui-host-view.ts): a path relative to the page's address, else refused here
   const card = uiOverviewCardSetting(env);
   if (card !== null && typeof card !== "string") wrong.push(card.problem);
@@ -599,6 +606,8 @@ export async function serve(argv: string[]): Promise<number> {
   for (const l of navLines(navOf(uiNavSetting(process.env)))) say(`  web page  ${l}`);
   const account = accountOf(uiAccountSetting(process.env));
   if (account !== null) say(`  web page  ${JSON.stringify(account.label)} at the foot of its sidebar (${UI_ACCOUNT_SETTING})`);
+  const deployDocs = uiDeployDocsSetting(process.env);
+  if (typeof deployDocs === "string") say(`  web page  its own link to the deploy steps, on its Tables page (${UI_DEPLOY_DOCS_URL_SETTING})`);
   const card = overviewCardOf(uiOverviewCardSetting(process.env));
   if (card !== null) say(`  web page  the host's card on its Overview, read from the page's address (${UI_OVERVIEW_CARD_SETTING})`);
   const icon = iconOf(uiIconSetting(process.env));
