@@ -130,10 +130,10 @@ function refusal(a: Answer, status: number, code: string): { code: string; messa
 }
 
 /** THE CONTRACT'S KEYS, as the doc lists them: a key added or renamed here is a contract change, said in the doc. */
-const LEAN_TABLE = ["added", "addedColumns", "bytes", "columnCount", "comment", "copy", "copyKey", "error", "key", "reason", "rows", "table"];
+const LEAN_TABLE = ["added", "addedColumns", "bytes", "columnCount", "comment", "copy", "copyKey", "error", "estimateBytes", "key", "reason", "rows", "table"];
 /** An added table's entry as the sources file says it, and the columns every column leaves out (issue 884). */
 const ADDED_ENTRY = ["entry", "everyColumnLeavesOut"];
-const PICK_ANSWER = ["addedKey", "already", "bigOff", "columns", "entry", "exclude", "file", "key", "notReplicated", "pollCost", "skippedSecrets", "state", "sync", "table"];
+const PICK_ANSWER = ["addedKey", "already", "bigOff", "columns", "disk", "entry", "exclude", "file", "key", "notReplicated", "pollCost", "skippedSecrets", "state", "sync", "table"];
 const REMOVE_ANSWER = ["file", "removed", "state"];
 /** `POST /api/sync`'s answer as the sync starts, and a sync by hand as it and `/api/state` `syncByHand` say it (issue 1007) */
 const SYNC_STARTED = ["sync"];
@@ -146,7 +146,7 @@ test("the table list: GET /api/state is lean — per table its name, key, rows, 
   assert.deepEqual(state.tables.map((t) => t.table), ["public.customers", "public.orders", "public.logs", "public.events"]);
   for (const t of state.tables) assert.deepEqual(keys(t), LEAN_TABLE, `${String(t.table)}: no columns, no sync before it is added`);
   const by = new Map(state.tables.map((t) => [t.table, t]));
-  assert.deepEqual(by.get("public.customers"), { table: "public.customers", rows: 3, bytes: 8192, key: ["id"], comment: null, reason: null, added: false, addedColumns: null, copyKey: null, columnCount: 2, copy: null, error: null });
+  assert.deepEqual(by.get("public.customers"), { table: "public.customers", rows: 3, bytes: 8192, key: ["id"], comment: null, reason: null, added: false, addedColumns: null, copyKey: null, estimateBytes: null, columnCount: 2, copy: null, error: null });
   assert.equal(by.get("public.logs")!.reason, "no primary key: name the columns that tell its rows apart, mason add logs --key <column>,…");
   assert.equal(by.get("public.events")!.reason, "no primary key: name the columns that tell its rows apart, mason add events --key tenant_id,id (its unique index events_tenant_id_id_key)");
   assert.equal(state.sourcesReadOnly, null);
@@ -210,7 +210,7 @@ test("POST /api/pick adds a table: 200 with what was written and the state after
   assert.deepEqual(keys(added), PICK_ANSWER);
   const { state, ...r } = added;
   assert.deepEqual(r, { table: "public.events", file: op.sourceFile, entry: "events", columns: ["tenant_id", "id", "body"], exclude: [], key: ["tenant_id", "id"],
-    addedKey: ["tenant_id", "id"], skippedSecrets: [], already: false, sync: { value: "poll 5m", from: "entry" }, bigOff: false, notReplicated: null, pollCost: null });
+    addedKey: ["tenant_id", "id"], skippedSecrets: [], already: false, sync: { value: "poll 5m", from: "entry" }, bigOff: false, notReplicated: null, pollCost: null, disk: null });
   assert.equal((state as { tables: Array<{ table: string; added: boolean }> }).tables.find((t) => t.table === "public.events")!.added, true, "the state after the edit");
   for (const t of (state as { tables: object[] }).tables) assert.ok(!("columns" in t), "the lean state");
   assert.notEqual(fs.readFileSync(op.sourceFile, "utf8"), before);
@@ -238,7 +238,7 @@ test("POST /api/pick's refusals: status, code and sentence in the failure shape,
   const before = fs.readFileSync(op.sourceFile, "utf8");
   const pick = (body: unknown) => ask(op, "POST", "/api/pick", { body });
   const cases: Array<[unknown, number, string, string | RegExp]> = [
-    [{ table: "public.customers" }, 400, "usage", "send { table, picked, columns?, key?, sync?, keep? }"],
+    [{ table: "public.customers" }, 400, "usage", "send { table, picked, columns?, key?, sync?, keep?, yes? }"],
     [{ table: "public.customers", picked: true, sync: "sometimes" }, 400, "usage", /^sync "sometimes": /],
     [{ table: "public.customers", picked: true, columns: "name" }, 400, "usage", 'columns is a list of column names, or ["*"]'],
     [{ table: "public.customers", picked: true, key: [] }, 400, "usage", "key is a list of column names"],
