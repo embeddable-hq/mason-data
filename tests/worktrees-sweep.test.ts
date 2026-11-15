@@ -270,6 +270,13 @@ test("worktrees-sweep-after-merge: a merge that landed starts the sweep in the b
   const gh = hook(f, { tool_input: { command: "cd /x && gh pr merge 7 --squash --delete-branch --match-head-commit abc" }, tool_response: ok() });
   assert.deepEqual([gh.code, gh.stdout], [0, ""], gh.stderr);
   assert.match(waitForSweep(log), /a merge was seen \(cd \/x && gh pr merge 7/);
+
+  // the merge queue merges later: the wait that saw it merged starts the sweep
+  fs.rmSync(log);
+  const queued = hook(f, { tool_input: { command: `node scripts/ci-wait.ts 7 570 --queued ${"a".repeat(40)}` },
+    tool_response: ok(`PR 7: merged at ${"a".repeat(40)}\npull (exit 0): mergeable null, mergeable_state unknown, merged, queued at ${"a".repeat(40)}\nmerge group: not read (the PR merged)\n`) });
+  assert.deepEqual([queued.code, queued.stdout], [0, ""], queued.stderr);
+  assert.match(waitForSweep(log), /a merge was seen \(node scripts\/ci-wait\.ts 7 570 --queued/);
 });
 
 test("worktrees-sweep-after-merge: other commands, a queued merge and a merge that failed start nothing, and exit 0", (t) => {
@@ -287,6 +294,12 @@ test("worktrees-sweep-after-merge: other commands, a queued merge and a merge th
     { tool_input: { command: "gh api -X PUT repos/acme/widgets/pulls/7/merge || true" }, tool_response: ok('{"message":"Pull Request is not mergeable","status":"405"}') },
     { hook_event_name: "PostToolUseFailure", tool_input: { command: "gh pr merge 7 --squash --match-head-commit abc" }, error: "Exit code 1" },
     { tool_name: "Edit", tool_input: { file_path: "x" }, tool_response: ok() },
+    // put in the merge queue: nothing merged yet
+    { tool_input: { command: "gh api -X PUT repos/acme/widgets/pulls/7/merge-async -f merge_action=merge_queue -f sha=abc" }, tool_response: ok('{"status":"pending","details":{"uuid":"u"}}') },
+    // a queued PR's wait that ended any other way than merged
+    ...["pending", "moved", "failed", "closed"].map((v) => ({ tool_input: { command: `node scripts/ci-wait.ts 7 570 --queued ${"a".repeat(40)}` }, tool_response: ok(`PR 7: ${v} at ${"a".repeat(40)}\n`) })),
+    { tool_input: { command: `node scripts/ci-wait.ts 7 570 --queued ${"a".repeat(40)}` }, tool_response: ok(`PR 8: merged at ${"a".repeat(40)}\n`) },
+    { tool_input: { command: "node scripts/ci-wait.ts 7 570" }, tool_response: ok(`PR 7: green at ${"a".repeat(40)}\n`) },
   ]) {
     const r = hook(f, input);
     assert.deepEqual([r.code, r.stdout, r.stderr], [0, "", ""], JSON.stringify(input));

@@ -3086,6 +3086,49 @@ docs-only, since a job skipped for a failed need reports success on a required c
 tests that read a doc (`DOCS_TESTS`), and `tests/ci-shards.test.ts` holds that list to every unit test whose code reads
 one, simulates the workflow's jobs and gates in each mode, and runs `changes` over real merges.
 
+### The merge queue (the owner, 2026-11-15)
+
+**Decision: a PR merges through GitHub's merge queue once the owner turns it on**, so CI runs on main as it will be once
+the PR lands, not on main as it stood at the PR's last push. The owner turns the queue on in the `main` ruleset. Until
+then, a PR merges directly. The merge calls and the wait work both ways.
+
+- **CI on a merge group is always a full run.** A queue waits for the required checks on the `merge_group` event, so
+  `ci.yml` runs on it. Every job runs there as on a PR, since no `if` reads the event. The four required checks report
+  on the group's commit by the same names. The docs path is never taken on a merge group. A group's `base_sha` is "the
+  SHA of the merge group's parent commit" (the `merge_group` webhook schema). With more than one PR in the queue, that
+  parent is the head of the group ahead of it, never main. So `base_sha..head_sha` holds only this PR's own change. A
+  docs-only PR queued behind a code PR would then have skipped the code's tests, and with "Only merge non-failing pull
+  requests" off, the code PR could land on that docs-only check. A fresh review found this on a public repository's
+  live queue, whose group branches are `gh-readonly-queue/main/pr-<n>-<the parent's SHA>`, each on the one ahead.
+- **Merging over REST, queue off or on.** A cloud session reaches GitHub's REST API but not its GraphQL API. So
+  `gh pr merge` (GraphQL) and the queue's GraphQL mutation are out of reach. `PUT /pulls/{n}/merge` "does not support
+  ... merging with a merge queue". `PUT /pulls/{n}/merge-async` does both. Its `merge_action` is `direct_merge`,
+  `merge_queue`, or `default` ("uses a merge queue if one is configured for the target branch, or merges directly
+  otherwise"). Its `sha` pins the request to the reviewed head: "if the PR is pushed in between the merge being
+  requested and being executed, the merge will be cancelled". Its `merge_method` is "only supported for direct merges",
+  and the docs do not say whether a queued request ignores it or refuses it. So no one call is documented to squash
+  with no queue and be accepted with one. The coordinator reads the branch's rules first
+  (`GET /rules/branches/main`, where a queue is a rule of type `merge_queue`), then sends `direct_merge` with
+  `merge_method=squash`, or `merge_queue` with no method. The result, `GET /pulls/{n}/merge-async/{uuid}`, is `merged`,
+  or `enqueued` once the PR is in the queue, which "does not mean the pull request has merged". No REST endpoint enables
+  auto-merge. Sources:
+  [Merge a pull request asynchronously](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request-asynchronously),
+  [Merge a pull request](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request),
+  [Get rules for a branch](https://docs.github.com/en/rest/repos/rules#get-rules-for-a-branch) and
+  [Managing a merge queue](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue).
+- **The hook.** `scripts/hooks/merge-head.ts` reads a REST merge however its path is written (a full URL, a query, a
+  trailing slash). It requires the full 40-character `sha`, since the docs do not say what a short one does. It refuses
+  auto-merge (the cloud session's `ccr/auto_merge`), because with a queue on it queues the PR at whatever head it has
+  then. It refuses `bypass_rules=true`, because the ruleset lets the Admin role bypass it always.
+- **What the docs do not say, and how the wait copes.** They do not say that a push to a PR already in the queue takes
+  it out. So `ci-wait.ts --queued <sha>` reads the PR's head on every pass, and says `moved` when it is not `<sha>`. REST
+  has no "in the queue" field, and no REST endpoint takes a PR out of the queue (that is done on the PR's page). The
+  wait reads a PR's live group from its branch (`GET /git/matching-refs/heads/gh-readonly-queue/<base>/pr-<n>`). A red
+  check at the live group's commit is `failed`. When a PR ahead fails, GitHub destroys this PR's group. The old group's
+  run keeps going, and its red checks are at a commit no live branch points at, so they never read `failed`. With no
+  live branch and a red newest run, the wait says `unknown`. A PR removed on its page, or by the queue's check timeout,
+  reads 8 for ever, so the wait's last line says when to look and tell the owner.
+
 ### Release lines: patch the previous line, breaking changes on a new line (the owner, 2026-11-14)
 
 **Why.** A host that runs Mason for others pins each project to a release line. Before 1.0 a line is `0.<minor>.x`,

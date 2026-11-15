@@ -1,5 +1,8 @@
-# The full gate, on every pull request and on main. A pull request's run checks out GitHub's merge of its head into main
-# as main stood at that push.
+# The full gate, on every pull request, on every merge group of the merge queue, and on main. A pull request's run checks
+# out GitHub's merge of its head into main as main stood at that push. A merge group's run checks out the group's commit:
+# main as it will be once the queue merges the group (its own branch, gh-readonly-queue/main/...). A merge group is
+# always a full run (THE DOCS PATH, below), and no job reads the event otherwise, so the four required checks report there
+# by the same names: a merge queue waits for them, and a check that never reports there blocks the queue.
 #
 # THE FOUR REQUIRED CHECKS ARE `checks`, `image`, `integration (oracle)` and `integration (rest)`: the ruleset on main
 # names them, so those names stay. All but `image` are final jobs that `needs` their shards: each runs `always()`, and
@@ -20,8 +23,9 @@
 # (`scripts/ci-shards.ts changes`). When every path is a doc (a root .md file, or one under docs/, deploy/ or
 # release-notes/; never a CLAUDE.md), build, unit, oracle and rest are skipped and `docs` runs the unit tests that read a
 # doc in their place; the four checks still report, each reading the mode from its own needs, and `image` builds nothing
-# and says so. Whatever `changes` cannot tell (a push to main, a merge it cannot read) is a full run, and a gate that
-# cannot tell the mode (a failed `changes`) fails. No `paths` filter on the workflow: a required check that never reports blocks a pull request for ever.
+# and says so. Whatever `changes` cannot tell (a push to main, a merge it cannot read) is a full run, and so is every
+# merge group: its base_sha is the group ahead of it in the queue, never main, so its own diff can leave out code queued
+# ahead of it. A gate that cannot tell the mode (a failed `changes`) fails. No `paths` filter on the workflow: a required check that never reports blocks a pull request for ever.
 #
 # A shard's files are computed from the tree (`scripts/ci-shards.ts`), so a new file lands in one by itself; the unit
 # shards are balanced by each file's time as a CI run measured it (tests/fixtures/unit-weights.json, rewritten by
@@ -34,6 +38,8 @@ name: CI
 
 on:
   pull_request:
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main]
 
@@ -47,6 +53,7 @@ concurrency:
 jobs:
   # Whether the pull request changes nothing but docs: docs=true or docs=false, read by every job below from
   # needs.changes.outputs.docs (THE DOCS PATH, above). The merge's two parents are its base and the head, hence depth 2.
+  # A merge group is a full run, read from GITHUB_EVENT_NAME alone.
   changes:
     name: changes
     runs-on: ubuntu-latest

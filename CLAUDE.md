@@ -142,8 +142,14 @@ got right; a red CI. Everything else is a note in the review, never a fix round 
 
 **Who merges what.**
 - The coordinator merges once nothing blocking is open, CI is green at the head, and it has read the whole diff. It
-  pins the merge to that head (`gh pr merge <n> --squash --delete-branch --match-head-commit <sha>`) and confirms it
-  landed.
+  merges over REST, pinned to that head with the full 40-character `sha`. Whether `main` has a merge queue decides the
+  call. `gh api repos/{owner}/{repo}/rules/branches/main --jq 'map(.type) | index("merge_queue")'` prints `null` when
+  it has none.
+  - With no queue: `gh api -X PUT repos/{owner}/{repo}/pulls/<n>/merge-async -f merge_action=direct_merge -f merge_method=squash -f sha=<sha>`.
+  - With a queue: `gh api -X PUT repos/{owner}/{repo}/pulls/<n>/merge-async -f merge_action=merge_queue -f sha=<sha>`.
+    The queue runs CI again on `main` as it will be, and merges the PR when that passes.
+  - Either way, it then waits with `node scripts/ci-wait.ts <n> 570 --queued <sha>` until the PR has merged at that
+    head (docs/DESIGN.md "The merge queue").
 - An implementer or a reviewer never merges (`scripts/hooks/merge-head.ts`).
 - A release, or a change to this process, merges on the owner's word.
 - The coordinator writes no change itself, however small: not a wording, a conflict, a stale test or a workflow. An
@@ -181,7 +187,10 @@ a sentence, with what it would have caught.
 - **Never end a turn while you wait on something with no background job to wake you.** `scripts/hooks/wake-up.ts`
   warns. Agents run in the background and wake the coordinator when they end.
 - **Wait on CI with `node scripts/ci-wait.ts <pr> <seconds>` in the background**, never `gh pr checks --watch`. Its exit
-  code is the verdict: 0 green, 3 failed, 4 conflict, 8 still pending. One call waits at most 570 s.
+  code is the verdict: 0 green, 3 failed, 4 conflict, 8 still pending. One call waits at most 570 s. With
+  `--queued <sha>` it waits on a PR being merged: 0 merged at `<sha>`, 3 its live merge group failed, 4 conflict,
+  6 closed, 7 the head moved, 8 still pending or unknown. An 8 that keeps coming back can mean the PR left the queue
+  without closing. Its output says when to look at the PR's page and tell the owner.
 
 ## Local gates
 
