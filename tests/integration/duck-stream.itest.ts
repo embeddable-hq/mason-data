@@ -1376,9 +1376,13 @@ test("a key restored with synchronous_commit = off, or dropped and restored in o
     // THE KEY DROPPED AND RESTORED IN ONE TRANSACTION, under the default identity (the duplicate deleted under FULL)
     psql(url, "ALTER TABLE g DROP CONSTRAINT g_pkey; INSERT INTO g VALUES (3, 'twin'); ALTER TABLE g REPLICA IDENTITY FULL; DELETE FROM g WHERE v = 'twin'; " +
       "ALTER TABLE g ADD PRIMARY KEY (id); ALTER TABLE g REPLICA IDENTITY DEFAULT");
+    // a row of df after it: once it is in, the stream has passed g's transaction
+    psql(url, "INSERT INTO df VALUES (7, 'after g')");
+    await until(async () => await rows("df") === dbRows("df"), "the stream passed g's transaction", logged, 20_000);
+    assert.equal(await rows("g"), dbRows("g"), `g keeps the row its duplicate shared a key with\n${logged.slice(from).join("\n")}`);
     await until(() => caught("g") === 1, "g refused, then caught up", logged, 30_000);
     await sync.caughtUp();
-    assert.equal(await rows("g"), dbRows("g"), `g keeps the row its duplicate shared a key with\n${logged.slice(from).join("\n")}`);
+    assert.equal(await rows("g"), dbRows("g"), `g equals the database once caught up\n${logged.slice(from).join("\n")}`);
     assert.ok(logged.slice(from).some((l) => /^public\.g: replication: \S+app\.yml: tables\.g: public\.g had no primary key \(id\) on the database when some of its changes were written, so two of its rows could share it then, though it is back now\. /.test(l)), logged.slice(from).join("\n"));
     assert.ok(!logged.slice(from).some((l) => l.startsWith("public.df: replication: ")), `df is never refused\n${logged.slice(from).join("\n")}`);
 
