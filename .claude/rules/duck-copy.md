@@ -91,7 +91,8 @@ paths:
   a type change: rows MOVE between pages) happened since the first chunk and fewer than 2^30 transactions ran: the
   table's `pg_relation_filenode`, read after each chunk under the lock its read still holds, and the snapshot's age are
   checked, and either starts the copy over from page 0, said. The swap asserts as many distinct keys as rows (a failure
-  is a Mason bug: not swapped, copied again).
+  is a Mason bug: not swapped, copied again), unless the database no longer enforces the key, which is said as the
+  key's refusal (duck-sync.md "A key is written by only while the database enforces it"), as it is before the first page.
 - **A passthrough read (`pq`) names its columns through `pgColumnSql`**, the copy's chunks and the poll alike: an exact
   numeric as text, and as `text[]` a citext[] / inet[] / json[] (`KEPT_ARRAYS`) and an enum array (`enumLists`, by its
   stored type) — `postgres_query` hands each over as one VARCHAR DuckDB cannot cast to the column (the

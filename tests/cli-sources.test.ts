@@ -146,6 +146,20 @@ tables:
 });
 type Sources_AddedTable = import("../src/duck/sync.ts").AddedTable;
 
+// THE KEY A TABLE IS SYNCED BY, CHECKED AGAIN AT EVERY READ (issue 1027): the file is checked against the catalog when it
+// is read, but an index can be dropped while Mason runs, and a poll by a key two rows share lost synced rows. The run
+// asks the database again before every read that writes by key (src/cdc/key-held.ts), and says a refusal at the place
+// the file names the table: each table the file adds carries that place, so the engine's words name the file and the key.
+test("every table the sources file adds carries where the file names it, so the sync's refusal of its key names the file and the key", () => {
+  const f = parse("kind: postgres\nurl: x\ntables:\n  orders: {}\n  events: { key: [tenant_id, id], sync: poll 5m }\n  billing.invoices: {}\n") as Sources.SourceFile;
+  const added = S.addedTables(f, CATALOG, "shop", "/app") as Array<Sources_AddedTable & { entryAt?: string }>;
+  assert.deepEqual(added.map((t) => [t.source, t.key, t.entryAt]), [
+    ["public.orders", ["id"], "mason/sources/app.yml: tables.orders"],
+    ["public.events", ["tenant_id", "id"], "mason/sources/app.yml: tables.events"],
+    ["billing.invoices", ["id"], "mason/sources/app.yml: tables.billing.invoices"],
+  ]);
+});
+
 test("sync: replication at the top and on an entry, mixed with off and poll; a table that cannot be replicated refused at its entry with the line to write", () => {
   const REPL = { mode: "replication" };
   const f = parse("kind: postgres\nurl: x\nsync: replication\ntables:\n  orders: {}\n  customers: { sync: off }\n  billing.invoices: { sync: poll 30s }\n") as Sources.SourceFile;

@@ -1990,3 +1990,33 @@ test("a key: whose unique index is dropped while Mason runs: the poll is refused
     assert.equal(errorOf("logs"), null, "its error is cleared by the poll that ran");
   } finally { await sync.stop(); await store.close(); }
 });
+
+// WHICH INDEX KEEPS A KEY'S ROWS APART, ASKED OF A REAL POSTGRES (src/cdc/key-held.ts `keyHeldSql`): a valid unique index
+// over columns only, whole-table, whose key columns are all the key's — its INCLUDE columns no part of it, a primary
+// key one too. A partial index, one over an expression, and an INVALID one (a failed CREATE UNIQUE INDEX CONCURRENTLY
+// leaves its duplicates in the table) keep nothing apart. A table gone is no answer: its read fails as it always did.
+test("the database is asked which unique index keeps a key's rows apart: partial, expression and invalid indexes never do", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  // imported when the test runs, not at load: the file loads at a commit without the module (scripts/fails-without.ts)
+  const { keyHeldSql } = await import("../../src/cdc/key-held.ts" as string) as typeof import("../../src/cdc/key-held.ts");
+  const source = ownDatabase("keykinds", "CREATE TABLE pk (id int PRIMARY KEY, v text); CREATE TABLE pk_inc (id int, v text, PRIMARY KEY (id) INCLUDE (v)); " +
+    "CREATE TABLE partial (a int NOT NULL, live bool); CREATE UNIQUE INDEX partial_a ON partial (a) WHERE live; " +
+    "CREATE TABLE expr (code text NOT NULL); CREATE UNIQUE INDEX expr_lower ON expr (lower(code)); " +
+    "CREATE TABLE inc (a int NOT NULL, b int NOT NULL); CREATE UNIQUE INDEX inc_a ON inc (a) INCLUDE (b); " +
+    "CREATE TABLE nul (a int UNIQUE, b int NOT NULL UNIQUE); " +
+    "CREATE TABLE twin (a int NOT NULL, b int NOT NULL); INSERT INTO twin VALUES (1, 1), (1, 2)");
+  const url = `postgres://${source.user}${source.password ? `:${encodeURIComponent(source.password)}` : ""}@${source.host}:${source.port}/${source.database}`;
+  // an INVALID index: its build failed on the duplicates, which stay in the table
+  assert.throws(() => psql(url, "CREATE UNIQUE INDEX CONCURRENTLY twin_a ON twin (a)"), /could not create unique index/);
+  assert.equal(psql(url, "SELECT indisvalid FROM pg_index WHERE indexrelid = 'twin_a'::regclass"), "f");
+  const ask = (table: string, key: string[]): string => psql(url, keyHeldSql("public", table, key));
+  // found, the key's columns that may be NULL, held, the usable indexes' key columns
+  assert.equal(ask("pk", ["id"]), "t\t[]\tt\t[[\"id\"]]");
+  assert.equal(ask("pk_inc", ["id"]), "t\t[]\tt\t[[\"id\"]]", "a primary key's INCLUDE column is no part of its key");
+  assert.equal(ask("partial", ["a"]), "t\t[]\tf\t[]", "a partial index keeps only the rows it covers apart");
+  assert.equal(ask("expr", ["code"]), "t\t[]\tf\t[]", "an index over an expression keeps no column apart");
+  assert.equal(ask("inc", ["a"]), "t\t[]\tt\t[[\"a\"]]");
+  assert.equal(ask("inc", ["a", "b"]), "t\t[]\tt\t[[\"a\"]]", "a key wider than a unique index is kept apart by it");
+  assert.equal(ask("nul", ["a"]), "t\t[\"a\"]\tt\t[[\"b\"]]", "a unique column that may be NULL keeps NULLs together; the NOT NULL one is the way out");
+  assert.equal(ask("twin", ["a"]), "t\t[]\tf\t[]", "an INVALID index keeps nothing apart");
+  assert.equal(ask("gone", ["a"]), "f\t[]\tf\t[]");
+});

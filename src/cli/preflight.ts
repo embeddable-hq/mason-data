@@ -11,6 +11,7 @@
 import * as os from "node:os";
 import { PgConnection, PgError } from "../cdc/pg-wire.ts";
 import { regclassName, shapeSql } from "../cdc/shape.ts";
+import { enforcingIndexSql } from "../cdc/key-held.ts";
 import { parseDatabaseUrl, queryProblem, type PgConnection as UrlParts } from "../lib/database-url.ts";
 import { closest } from "../lib/did-you-mean.ts";
 import type { SourceCollation } from "../duck/collation.ts";
@@ -359,9 +360,9 @@ const TABLES_SQL_BODY = `SELECT json_agg(t ORDER BY t.schema, t.table)::text FRO
           JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum)) ORDER BY ic.relname), '[]'::json)
       FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid
       -- an INVALID index (a CREATE UNIQUE INDEX CONCURRENTLY that failed, its duplicates still in the table) enforces
-      -- nothing: never declared to the catalog, never a key: Mason accepts
-      WHERE i.indrelid = c.oid AND i.indisunique AND i.indisvalid AND NOT i.indisprimary AND i.indpred IS NULL AND i.indexprs IS NULL
-        AND i.indnkeyatts = i.indnatts) AS unique_keys,
+      -- nothing: never declared to the catalog, never a key: Mason accepts. The sync asks the same at every read
+      -- (src/cdc/key-held.ts), so a key accepted here and dropped later is refused there
+      WHERE i.indrelid = c.oid AND ${enforcingIndexSql("i")} AND NOT i.indisprimary AND i.indnkeyatts = i.indnatts) AS unique_keys,
     (SELECT coalesce(json_agg(json_build_object('name', a.attname, 'type', format_type(b.oid, b.mod), 'domain', b.oid <> a.atttypid,
         'not_null', a.attnotnull, 'comment', col_description(c.oid, a.attnum), 'type_oid', b.oid,
         'type_array_oid', (SELECT typarray FROM pg_type WHERE oid = b.oid),
