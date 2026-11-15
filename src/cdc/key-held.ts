@@ -71,9 +71,10 @@ const jsonList = <T>(text: string | null): T[] => {
  * Why the sync must not write a table by its key now, in the developer's words, or null when the key is safe (or the
  * table is gone: its read fails as it always did). `at` is where the sources file names the table
  * (`mason/sources/app.yml: tables.logs`); `own` says whether that entry names the key (`key:`) or the table's primary
- * key is used.
+ * key is used. `replicated` says the table is kept current by the stream (issue 1062), which applies no `key:` entry,
+ * so its way out names a poll by a unique index instead.
  */
-export function keyHeldProblem(row: KeyHeldRow, o: { source: string; key: readonly string[]; at: string; own: boolean }): string | null {
+export function keyHeldProblem(row: KeyHeldRow, o: { source: string; key: readonly string[]; at: string; own: boolean; replicated?: boolean }): string | null {
   if (!row.found) return null;
   const nullable = jsonList<string>(row.nullable);
   if (row.held && nullable.length === 0) return null;
@@ -86,6 +87,11 @@ export function keyHeldProblem(row: KeyHeldRow, o: { source: string; key: readon
   }
   if (nullable.length) what.push(`${nullable.join(", ")} can be NULL in ${o.source} now, and rows with NULL there cannot be told apart.`);
   const usable = jsonList<string[]>(row.usable).filter((c) => Array.isArray(c) && c.length > 0);
+  if (o.replicated === true) {
+    const poll = usable.length ? `, or poll it by one of its unique indexes: set its entry's sync: to poll <interval> and its key: to ${usable.map((c) => `[${c.join(", ")}]`).join(" or ")}` : "";
+    return `${where}: ${what.join(" ")} Mason does not apply its changes until that is fixed, so that no synced row is lost, and its synced data serves as it was. ` +
+      `Ask the database's owner to restore the primary key${poll}.`;
+  }
   const way = usable.length
     ? `Name the columns of one of its unique indexes in key: (${usable.map((c) => `key: [${c.join(", ")}]`).join(" or ")}), or ask the database's owner to ${o.own ? "add a unique index over the key" : "restore the primary key"}.`
     : `Ask the database's owner to ${o.own ? "add a unique index over NOT NULL columns" : "restore the primary key"}.`;

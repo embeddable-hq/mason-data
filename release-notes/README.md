@@ -93,6 +93,7 @@ from the previous tag for each of them (`git diff v<previous> HEAD -- src/duck/ 
 | `BOM_LAYOUT` | A column whose name begins with a byte-order mark (U+FEFF), stored as text though its type is not a text type. | `findHeldLayout` and `lostType`, `src/duck/sync.ts` | 0.21.0 |
 | The columns' key | The columns a table was synced with no longer match the columns read from the source at the start. | `columnsKey`, `src/duck/sync.ts` | 0.7.0 |
 | No watermark | A synced table with no row in `_mason.poll_state`. | `needsCopy`, `src/duck/sync.ts` | 0.7.0 |
+| No synced table | A table recorded as synced, with no table at its name in the synced data. An older Mason dropped it with a removed table whose name differed only in case. | `forgetMissing`, `src/duck/sync.ts` | next |
 
 Two of these have no name that says a release changed them. Read the diff for them.
 

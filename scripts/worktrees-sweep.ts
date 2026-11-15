@@ -21,8 +21,9 @@
  *   in short-lived shells, so between two of them no process is there: a fresh worktree at origin/main, or a branch
  *   whose PR was just closed before the agent opens another, may be in use;
  * - no commit of it is off GitHub: every commit is on a remote ref, or HEAD is the PR's head, which GitHub keeps as
- *   `refs/pull/<n>/head` after the branch is deleted (a squash merge with --delete-branch, then a `fetch --prune`,
- *   leaves the commits on no remote-tracking ref).
+ *   `refs/pull/<n>/head` after the branch is deleted (a squash merge, by the merge queue or by hand, whose branch is
+ *   then deleted, and a `fetch --prune`, leave the commits on no remote-tracking ref). A PR in the merge queue is open,
+ *   so its worktree is kept until the queue merges it.
  * Removing is `git worktree remove` (never --force), then `git branch -D` of its branch, then one `git worktree prune`.
  *
  * LOCKS. Claude Code locks an agent's worktree while the agent runs, with the reason `claude agent <name> (pid <pid>

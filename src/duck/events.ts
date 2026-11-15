@@ -55,7 +55,8 @@ export const EVENTS_TOOK_DDL = `ALTER TABLE ${EVENTS_TABLE} ADD COLUMN IF NOT EX
  * `sync:` in the sources file changed while it is copied: from what, to what, and how its copy is caught up),
  * `columns_changed` (a table's columns changed on the database: what changed, that it is synced again whole with them,
  * and a new column that looks like a secret left out, issue 977), and `sync_stopped` (a table's sync stopped because the
- * table was removed while it ran, and what it had read was dropped: issue 1034, src/duck/sync.ts `cutShort`).
+ * table was removed while it ran, and what it had read was dropped: issue 1034, src/duck/sync.ts `cutShort`; or its synced
+ * data was dropped with a removed table's whose name differs only in case, and it is synced again whole: issue 1071).
  *
  * THE SCHEDULED SYNCS (`SCHEDULED`): `polled` (a poll on the table's schedule that succeeded, and what it did) and
  * `streamed` (a table's changes the stream applied in the last minute, ONE row a table a minute, and only in a minute
