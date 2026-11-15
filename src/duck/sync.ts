@@ -74,7 +74,7 @@ import type { RelationColumn } from "../cdc/pgoutput.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { PgConnection, formatLsn, parseLsn, pgLiteral, type PgConnectOptions } from "../cdc/pg-wire.ts";
-import { createSlot, currentLsn, dropSlot, readSlot, type SlotState } from "../cdc/source.ts";
+import { createSlot, currentLsn, dropSlot, readSlot, visibleLsn, type SlotState } from "../cdc/source.ts";
 import { holdOf, nativeVarchar } from "./held-types.ts";
 import { scaleColumn, scaleOfText, scaleSql } from "./scale-column.ts";
 import { hiddenColumns } from "./hidden-columns.ts";
@@ -1400,6 +1400,11 @@ export class Sync {
 
   /** how long a catch-up refused for its key waits before it asks the database again (`keyRetryAt`) */
   private readonly keyRetryMs: number;
+  /** a test's hold before a key-refused catch-up reads the key (`keyBackPassed`); none in a run */
+  private readonly onKeyBack: (() => Promise<void>) | undefined;
+  /** what each table's catch-up last said of waiting for its key: said again only when its words change, never once a
+   *  minute while the key stays gone (the review of PR 1068: 1,440 log lines and events a day a table) */
+  private readonly keyWaitSaid = new Map<string, string>();
 
   constructor(store: DuckStore, source: Source, database: string, log: (line: string) => void, intervalMs: number, mode: SyncMode = "poll",
     replication: SyncReplication | null = null,
@@ -1412,7 +1417,11 @@ export class Sync {
       /** when the synced tables' space is read and when one is compacted (`CompactOptions`): the defaults, but in tests */
       compact?: CompactOptions;
       /** how long a catch-up refused for its key waits before it asks again (`KEY_RETRY_MS`): the default, but in tests */
-      keyRetryMs?: number } = {}) {
+      keyRetryMs?: number;
+      /** a test's hold in a key-refused table's catch-up, between its connection and its read of the key
+       *  (`keyBackPassed`): what lets a test commit the key's return just before that read */
+      onKeyBack?: () => Promise<void> } = {}) {
+    this.onKeyBack = options.onKeyBack;
     this.compactOptions = { checkMs: COMPACT_CHECK_MS, firstCheckMs: COMPACT_FIRST_CHECK_MS, wasteShare: COMPACT_WASTE_SHARE, minWasteBlocks: COMPACT_MIN_WASTE_BLOCKS, ...options.compact };
     this.store = store; this.source = source; this.log = log; this.intervalMs = intervalMs; this.mode = mode;
     this.streamReportMs = options.streamReportMs ?? 60_000;
@@ -3053,7 +3062,7 @@ export class Sync {
     const s = new ReplicationStream({
       connect: () => PgConnection.connect({ ...this.pgOptions(), replication: true }), slot: r.slot, publication: r.publication, log: (l) => this.log(l), errorText: (e) => this.errorText(e),
       target: { tables: () => this.streamed, apply: (batch, lsn, committedAt) => this.applyStreamed(batch, lsn, committedAt), applied: () => this.appliedLsn,
-        refuse: (source, missing) => this.refuseStreamed(source, missing), keyHeld: (source) => this.streamKeyHeld(source),
+        refuse: (source, missing) => this.refuseStreamed(source, missing), keyHeld: (source, gone) => this.streamKeyHeld(source, gone),
         current: () => { if (this.stream === s) this.streamCurrent(); },
         relation: (source, columns) => this.relationSeen(source, columns) },
     });
@@ -3153,14 +3162,30 @@ export class Sync {
    * attached only while a pass reads it, and the stream waits on this answer. A table whose key no longer holds is
    * refused (`refuseKey`). A read that fails throws: the stream ends with it, nothing past it acknowledged, and asks
    * again when it starts again (fail closed).
+   *
+   * `gone`: the relation message shows the table had no primary key when its next changes were written (`keyShownGone`).
+   * A primary key the database has NOW, immediate, was then restored since: dropped and restored before the stream
+   * decoded them, the changes between were written while two rows could share a key, and a key held now does not clear
+   * them. A second catalog read (`pg_index.indisprimary`, `indimmediate`) asks for it. A DEFERRABLE primary key, which
+   * Postgres never takes as the identity, and a key held by another unique index while the primary key stays dropped,
+   * are as the first read says.
    */
-  private async streamKeyHeld(source: string): Promise<boolean> {
+  private async streamKeyHeld(source: string, gone: boolean): Promise<boolean> {
     const t = this.tables.get(source);
     if (t === undefined || !this.streamed.has(source) || t.key.length === 0) return true;
     const pg = await PgConnection.connect(this.pgOptions());
     let row: (string | null)[] | undefined;
-    try { row = (await pg.query(keyHeldSql(t.schema, t.table, t.key))).rows[0]; } finally { pg.close(); }
-    const problem = this.streamKeyProblem(t, row);
+    let restored = false;
+    try {
+      row = (await pg.query(keyHeldSql(t.schema, t.table, t.key))).rows[0];
+      // a boolean column reads `t` or `f` over the wire (never `::text`, which reads `true`)
+      if (gone) restored = (await pg.query(`SELECT EXISTS (SELECT FROM pg_index i WHERE i.indrelid = to_regclass(${regclassName(t.schema, t.table)}) AND i.indisprimary AND i.indimmediate)`)).rows[0]?.[0] === "t";
+    } finally { pg.close(); }
+    let problem = this.streamKeyProblem(t, row);
+    if (problem === null && gone && restored) {
+      problem = `${t.entryAt ?? `the sources file's entry for ${t.source}`}: ${t.source} had no primary key (${t.key.join(", ")}) on the database when some of its changes were written, ` +
+        "so two of its rows could share it then, though it is back now. Mason does not apply those changes, so that no synced row is lost, and its synced data serves as it was.";
+    }
     if (problem === null) return true;
     await this.refuseKey(source, problem);
     return false;
@@ -3178,20 +3203,23 @@ export class Sync {
    * way out deletes the duplicate and restores the key, often in one transaction. Held from before the stream decoded
    * that transaction, the DELETE of the duplicate is a delete of its KEY, and replayed after the poll it removed the
    * synced row that shared it (seen once in the PR's test). Its relation message cannot tell (a `FULL` identity),
-   * and the catalog says the key holds by then. So the key is asked first, then the database's position L, on one short
-   * connection: whatever came before the key's return committed before L. Then the stream must pass L before the table's
-   * changes are held (`catchUp`'s J). A change decoded after J committed after the key was back, and a key dropped again
-   * meanwhile sends a relation message first (`keyHeld`). Throws `KeyNotHeld` while the key is not back or the stream has
-   * not passed L within `KEY_PASS_WAIT_MS` (the catch-up asks again in `keyRetryMs`), `Stopping` at a stop.
+   * and the catalog says the key holds by then. So the key is asked first, then L, on one short connection: a position
+   * at or past the end of every transaction that read saw committed (`visibleLsn`, never the write position, which an
+   * asynchronous commit is visible before: the review of PR 1068 lost the row so in 2 of 7 aimed tries). Then the stream
+   * must pass L before the table's changes are held (`catchUp`'s J). A change decoded after J committed after the key was
+   * back, and a key dropped again meanwhile sends a relation message first (`keyHeld`). Throws `KeyNotHeld` while the key
+   * is not back or the stream has not passed L within `KEY_PASS_WAIT_MS` (the catch-up asks again in `keyRetryMs`),
+   * `Stopping` at a stop.
    */
   private async keyBackPassed(t: AddedTable): Promise<void> {
     const pg = await PgConnection.connect(this.pgOptions());
     let row: (string | null)[] | undefined;
     let at: bigint;
     try {
+      await this.onKeyBack?.();
       row = (await pg.query(keyHeldSql(t.schema, t.table, t.key))).rows[0];
       // read AFTER the key: a position at or past the commit that brought it back
-      at = await currentLsn(pg);
+      at = await visibleLsn(pg);
     } finally { pg.close(); }
     const problem = this.streamKeyProblem(t, row);
     if (problem !== null) throw new KeyNotHeld(problem);
@@ -3200,8 +3228,9 @@ export class Sync {
       const s = this.stream;
       if (s !== null && s.position() >= at) return;
       if (Date.now() > until) {
-        throw new KeyNotHeld(`its key holds again on the database, and it is caught up once the stream has passed ${formatLsn(at)}, where the key came back, so that no change from before that is applied ` +
-          `(${s === null ? "the stream is not running now" : `the stream is at ${formatLsn(s.position())}`})`);
+        // the same words at every attempt, which `keyWaitSaid` says once: no position in them, as a position moves
+        throw new KeyNotHeld(`its key holds again on the database, and it is caught up once the stream has passed where the key came back, so that no change from before that is applied` +
+          `${s === null ? " (the stream is not running now)" : ""}`);
       }
       // an idle stream moves only on the server's keepalive: asked for one
       if (s !== null && Date.now() - poked.at >= 1_000) { s.poke(); poked.at = Date.now(); }
@@ -3224,8 +3253,10 @@ export class Sync {
       await this.store.writer.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.catch_up VALUES (${literal(source)}, ${literal(why)}, now())`);
       this.behind.set(source, { why });
       this.held.delete(source);
-      const at = this.keyRetryAt(source);
-      const m = `replication: ${problem} It is caught up by one poll once the key holds again. Mason asks the database again after ${clock(at)} UTC.`;
+      this.keyRetryAt(source);
+      // a new refusal: its catch-up's first wait is said again
+      this.keyWaitSaid.delete(source);
+      const m = `replication: ${problem} It is caught up by one poll once the key holds again. Mason asks the database again ${this.keyRetryWords()}.`;
       this.log(`${source}: ${m}`);
       this.event({ kind: "stream_failed", table: source, message: m });
       await this.record({ ...this.states.get(source)!, error: m });
@@ -3233,13 +3264,20 @@ export class Sync {
     });
   }
 
-  /** a table refused for its key asks again in `keyRetryMs` (`KEY_RETRY_MS`), never a failure's growing back-off: the
-   *  attempts in a row are counted as `backOff` counts them, and a pass is kicked then (`wakeAt`). Answers the time */
+  /** a table refused for its key asks again in `keyRetryMs` (`KEY_RETRY_MS`), never a failure's growing back-off, and a
+   *  pass is kicked then (`wakeAt`). It is not counted as a failure: a key gone for hours must not make the table's next
+   *  ordinary failure back off for 6 hours (the review of PR 1068). Answers the time */
   private keyRetryAt(source: string): number {
     const at = Date.now() + this.keyRetryMs;
-    this.retries.set(source, { failures: (this.retries.get(source)?.failures ?? 0) + 1, at });
+    this.retries.set(source, { failures: this.retries.get(source)?.failures ?? 0, at });
     this.wakeAt(at);
     return at;
+  }
+
+  /** how often a table refused for its key asks again, in words: `every minute` */
+  private keyRetryWords(): string {
+    const s = Math.round(this.keyRetryMs / 1000);
+    return s === 60 ? "every minute" : s % 60 === 0 ? `every ${s / 60} minutes` : `every ${s} s`;
   }
 
   /**
@@ -4157,9 +4195,20 @@ export class Sync {
     // mason status — and is caught up again then: what was held is read again by that poll (still behind, nothing lost)
     const failed = (what: string, e: unknown): Promise<void> => {
       // REFUSED FOR ITS KEY (issue 1027, 1062): asked again in `keyRetryMs`, as the key comes back when the database's
-      // owner restores it, and an attempt reads no row
-      const when = e instanceof KeyNotHeld ? `${clock(this.keyRetryAt(t.source))} UTC, when Mason asks the database for its key again` : this.backOff(t.source, Date.now() - started);
+      // owner restores it, and an attempt reads no row. Said once, and again only when its words change: no time in
+      // them, as it would change at every attempt (the review of PR 1068)
+      if (e instanceof KeyNotHeld) {
+        this.keyRetryAt(t.source);
+        const m = `${what} (the synced data serves as it was; Mason asks the database again ${this.keyRetryWords()}, and catches it up by one poll once the key holds): ${this.errorText(e)}`;
+        if (this.keyWaitSaid.get(t.source) === m) return Promise.resolve();
+        this.keyWaitSaid.set(t.source, m);
+        this.log(`${t.source}: ${m}`);
+        this.event({ kind: "catch_up_failed", table: t.source, message: m, cause: e });
+        return this.onWriter(() => this.record({ ...this.states.get(t.source)!, error: m }));
+      }
+      const when = this.backOff(t.source, Date.now() - started);
       const m = `${what} (the synced data serves as it was; it is caught up by one poll again after ${when}): ${this.errorText(e)}`;
+      this.keyWaitSaid.delete(t.source);
       this.log(`${t.source}: ${m}`);
       this.event({ kind: "catch_up_failed", table: t.source, message: m, cause: e });
       return this.onWriter(() => this.record({ ...this.states.get(t.source)!, error: m }));
@@ -4219,6 +4268,7 @@ export class Sync {
       }
       // caught up: a failure's back-off and its words are the past
       this.retries.delete(t.source);
+      this.keyWaitSaid.delete(t.source);
       const st = this.states.get(t.source);
       if (st !== undefined && st.error !== null) await this.record({ ...st, error: null });
       // a slot made again meanwhile marked it anew: caught up once more. While one is being made, a catch-up ends no

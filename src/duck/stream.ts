@@ -270,6 +270,18 @@ export function keyShown(relation: { replicaIdentity: string; columns: readonly 
   return flagged.length > 0 && flagged.every((name) => key.includes(name));
 }
 
+/**
+ * WHETHER A RELATION MESSAGE SHOWS THE TABLE HAD NO PRIMARY KEY when the changes after it were written (the review of PR
+ * 1068): the default identity with no column flagged. Then a "now" read of the catalog cannot clear it. A key dropped, a
+ * duplicate inserted and the key restored, all before the stream decodes them, finds the key held by then, and the
+ * duplicate's INSERT would replace the synced row it shares a key with. One more table looks the same: one whose
+ * primary key is DEFERRABLE, which Postgres never takes as its identity. The target tells the two apart
+ * (`StreamTarget.keyHeld`).
+ */
+export function keyShownGone(relation: { replicaIdentity: string; columns: readonly RelationColumn[] }): boolean {
+  return relation.replicaIdentity === "d" && !relation.columns.some((c) => c.isKey);
+}
+
 /** A streamed table as the stream decodes it: its STAY, one unbroken time in the stream of one copy (a new number once it
  *  left or its copy was swapped, never used twice), the COPY's columns (never the sources file's of the moment, never the publication's), its key,
  *  and the columns the stream may lack because Postgres publishes none (a generated column before 18: read from the
@@ -290,10 +302,11 @@ export interface StreamTarget {
    * database let a duplicate's INSERT replace a synced row, as every change is written by key). Asked before a table's
    * first change after each of its relation messages, unless the message shows it (`keyShown`). Postgres sends one after
    * any change of the table's definition, a dropped key included, before its next change, even within the same
-   * transaction. False: the target refused the table (out of the stream, marked behind, said with the way out), recorded
+   * transaction. `gone`: the message shows the table had no primary key then (`keyShownGone`), so a key held now is not
+   * enough. False: the target refused the table (out of the stream, marked behind, said with the way out), recorded
    * before the stream goes on. A read that fails throws, and the stream ends with it, so nothing past it is acknowledged.
    */
-  keyHeld(source: string): Promise<boolean>;
+  keyHeld(source: string, gone: boolean): Promise<boolean>;
   /** told of each relation message, with the columns it carries: Postgres sends one before a table's first change in a
    *  stream, and again after its definition changed (an ALTER TABLE), so the target checks whether the table's columns
    *  changed on the database (issue 977). Never awaited: the check is the target's, beside the stream */
@@ -490,7 +503,7 @@ export class ReplicationStream {
               // the stream: this change and what the batch holds of it are dropped, and its catch-up poll reads them
               if (refused.has(table)) continue;
               if (keyed.get(relid) !== table.stay) {
-                if (!keyShown(rel, table.key) && !await this.target.keyHeld(rel.source)) { refused.add(table); continue; }
+                if (!keyShown(rel, table.key) && !await this.target.keyHeld(rel.source, keyShownGone(rel))) { refused.add(table); continue; }
                 keyed.set(relid, table.stay);
               }
               if (table.big === true) big = true;

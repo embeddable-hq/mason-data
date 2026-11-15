@@ -63,10 +63,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
     key, or poll the table by one of its unique indexes.
   - Mason asks again every minute, and the log says it once. Once the key is back, one poll catches the table up, and
     it streams again. This holds when the key's return was committed with `synchronous_commit = off` too.
-  - A row can still be lost in one case, as before this release. That is when the key is dropped, a duplicate row is
+  - A row can still be lost in one narrow case, as before this release. The key is dropped, a duplicate row is
     written, that duplicate is deleted, and the key is restored, all before the stream reads the first of these
-    changes. This can happen while Mason is stopped, or when the stream lags behind your database. To avoid it, make
-    these changes while Mason is running and its stream is current. `mason status` shows how far behind it is.
+    changes. This can happen while Mason is stopped, or when the stream lags behind your database. It loses a row only
+    if the duplicate was written while the table's replica identity was `FULL` or `USING INDEX`, or if the key came
+    back as a unique index instead of a primary key. To avoid it, make these changes while Mason is running and its
+    stream is current. `mason status` shows how far behind it is.
 - **A unique index with INCLUDE columns can be a table's `key:`.** For `UNIQUE (a) INCLUDE (b)`, `key: [a]` is now
   accepted. Before, it was refused as though no unique index covered `a`.
 - **A table rewritten on your database while Mason read it is no longer served empty or partial.** A rewrite is a
