@@ -90,6 +90,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **Removing a synced table whose name a generated table also uses no longer stops the sync.** While a synced table
+  holds a name, a generated table of that name is refused, as before. Once you remove the synced table, the generated
+  table is built again and served. Before, if no review of the generated tables ran between the add and the remove,
+  every sync pass failed with "Table with name … does not exist", and queries on the name failed until one of the
+  generated table's bases changed. A project already in that state recovers at its first start after the upgrade.
+- **A generated table whose name differs from a synced table's only in case is refused.** The synced data does not
+  tell such names apart, so `Orders.yml` beside a synced `orders` could replace the synced table's rows. Now it is
+  refused by name, as a generated file of the synced table's own name is. Two generated files whose names differ only
+  in case are refused the same way. Rename the file to fix either.
 - **A list of values passed as one query parameter now works, as node-pg passes it.** node-pg, and the ORMs built on
   it, send a JavaScript array as text such as `{"1","3"}`, and let the database work out its type. Mason answered
   `WHERE id = ANY($1)` and `WHERE id = ANY($1::int[])` with an error for such a value. Now it answers them as Postgres
