@@ -610,19 +610,28 @@ refuses `mason start` too. **Where.** `src/cli/registry.ts`, `src/cli/serve.ts`,
 **Decision.** Mason knows a column by its identity on the database: its table's oid and its `attnum`. A rename keeps
 both, and a dropped column's number is never given to another. The sources file still decides by name. But what the run
 took of each table's columns is recorded by identity (`_mason.column_identity`), so a restart knows it too. A column the
-file left out stays out under any other name. When the file would sync it under a new name, Mason holds the table. It
-keeps serving what it holds, and says why on the table's line, with the line that keeps the column out and the command
-that syncs it.
+file left out stays out under any name, its old name included, until the person confirms it. When the file would sync
+it, Mason holds the table. It keeps serving what it holds, and says why on the table's line, with the line that keeps
+the column out and the command that syncs it.
 
 **Why.** The review of PR 1065 served an excluded column three ways, at main and at that PR's head. Two names swapped in
 one transaction served `SECRET_salary` as `a`. A rename while Mason was stopped, then a start from the file as it was,
 synced the renamed column. A column renamed to a name a `columns:` entry lists was synced under that name. Each time the
 file was written about the old names. Mason cannot tell a rename from a choice, so it fails closed.
 
+**Why no name re-admits a column** (the review of PR 1078, 2026-11-15). The first version let the file decide again by
+name once the column was back under the name it was first left out under. In a writable project that leaked. `c` was
+renamed `d`, and the run wrote `exclude: [d]`. A new `c` was added and synced. Then the new `c` was dropped and `d`
+renamed `c`, in one transaction. The run took the gone `d` out of `exclude:`, so the file read `{}` and synced `c`, the
+secret, at every look and after a restart. The file is not only the person's words: the run writes `exclude:` itself
+(issue 977) and takes a gone name out. So a name proves nothing about which column it is. A column left out is synced
+again only once confirmed. The cost: a name taken out of `exclude:`, or added to `columns:`, by hand holds the table
+too, and the person runs `mason add` to sync it.
+
 **How a person confirms.** Running `mason add <table>` while Mason runs writes the entry against the columns as the
 database names them now, so the run takes that entry afresh. Removing the entry and adding it again does the same,
-because the record goes with the synced data. A hand edit of the file alone never confirms a rename. The file cannot say
-whether its author knew of the rename. The line a hold suggests keeps the column out. The command it suggests names every
+because the record goes with the synced data. A hand edit of the file alone never confirms a column left out. The file
+cannot say who wrote it, nor whether its author knew of a rename. The line a hold suggests keeps the column out. The command it suggests names every
 column, because `mason add` writes the entry anew and would drop the file's other excludes.
 
 **Each read checks too.** The decision is made when the catalog is read, so a rename after it could still reach a read.
@@ -3790,6 +3799,64 @@ columns Postgres merged because a copy's own table has hidden columns a NATURAL 
 NATURAL of no column in common, which Postgres reads as every pair. It is written so in EVERY statement, by the rewrite
 (`naturalWritten`), not by the rows a LIMIT chooses alone: written there first, a count, a sort with no LIMIT and a list
 that reads no table still reached DuckDB as NATURAL and were refused (the review of PR 155).
+
+### What a synced table takes on disk, and the room kept beside it (issue 1075, 2026-11-15)
+
+**Decision.** Before a table is added (the web page's Add and Columns…, `mason add`, a deploy's plan), its synced size is
+estimated from the source's catalog alone (src/duck/disk-fit.ts `syncedEstimate`): `pg_table_size` (the heap and its
+TOAST, no indexes), the share the entry's columns hold (by `pg_stats.avg_width` in line, by count among the out-of-line
+columns for the TOAST bytes), times `STORED_SHARE`, 0.4. It is held to the free disk where the synced data is, less a
+reserve: the spill's ceiling as it stands (half of what is free, or `MASON_SPILL_LIMIT`), and what the first syncs under
+way need. Past it the add is refused with the numbers (code `disk_short`) unless the person goes ahead anyway. The
+mid-sync check (`copyDiskProjection`) stays the backstop. Both carry the shortage as numbers (`DiskShortage`).
+
+**Why the base is `pg_table_size`, never `rows × avg_width`.** A value stored out of line has its pointer's width in
+`pg_stats` (18 B for a 2 KB value): `rows × width` was 46 times too small for a table of random text stored
+`EXTERNAL`, where `pg_table_size` held its TOAST bytes. The widths only share the table out among its columns.
+
+**The ratio, measured.** DuckDB 2.0.0 (ZSTD strings forced), Postgres 16, synthetic tables synced by the real sync, the
+synced table's bytes after a checkpoint (file and log, against an empty store's) over `pg_table_size`:
+
+| Shape | 200,000 rows | 400,000 rows | 1,000,000 rows |
+|---|---|---|---|
+| integers, timestamps, dates | 0.249 | 0.201 | |
+| random text (96 hex characters) | 0.435 | 0.412 | 0.397 |
+| repeated words (a title and ~110 characters) | 0.130 | 0.109 | |
+| `jsonb` of six keys | 0.163 | 0.150 | 0.140 |
+| numerics (`numeric(12,2)`, plain, `numeric(10,0)`) | 0.238 | 0.184 | |
+| low-cardinality text | 0.303 | 0.250 | |
+| uuids | 0.593 | 0.546 | 0.518 |
+| a mixed orders table (text, numeric, timestamp, `jsonb`) | 0.206 | 0.180 | 0.159 |
+| text Postgres compressed in line (~4.5 KB, a tenth of the rows) | 0.868 | 0.392 | |
+| random text stored `EXTERNAL` (2 KB, a tenth of the rows) | 0.424 | 0.399 | |
+
+The ratio falls as a table grows: a table's fixed cost weighs less (the compressed text was 3 MB at 0.868). 0.4 is at
+or above every shape at its largest size but the uuids (0.52, under by a quarter): an estimate that errs to warning,
+since the backstop catches one that errs the other way. A real table's ratio is not measured here: its text is likely
+more compressible than random hex, so 0.4 likely overstates it.
+
+**The reserve, measured.** What one query over the whole table spills, under a 100 MB limit and one thread, written to
+`/dev/null` through `COPY` so the sort runs (peak of the spill folder, sampled every 20 ms), at 1,000,000 rows:
+
+| Shape (synced size) | sort of every column | a window over every row |
+|---|---|---|
+| random text (53.5 MiB) | 56.6 MiB (1.06×) | 6.9 MiB |
+| `jsonb` (33.2 MiB) | 85.5 MiB (2.6×) | 32.8 MiB |
+| the mixed orders table (19.2 MiB) | 39.1 MiB (2.0×) | 9.8 MiB |
+| uuids (33.7 MiB) | none (sorted in memory) | none |
+
+A sort of the whole table takes one to 2.6 times its synced size, and a join can take far more (8.6 GiB for a top N
+over 4 M joined rows: "A top N over joined tables"). No fixed reserve keeps every query whole. So the reserve is the
+spill's ceiling as the operator set it, and no more: by default a table may take half of what is free, and at that
+limit the room left is about what one whole-table sort of it needs. An operator who wants more tables lets queries
+spill less (`MASON_SPILL_LIMIT`). A table synced again whole keeps its synced data until its new data is in, so the
+old data is not free space, and the new must fit beside it.
+
+**What the catalog read pays.** The read gains `pg_table_size`, the TOAST's size, and a `pg_stats` subquery a table
+(sizes and statistics, never a row). 400 tables of 20 columns, best of 5, on a machine at a load average of 16:
+3.0–3.9 s without them, 3.3–5.5 s with them, across three runs. One read of `pg_stats` for every table (a materialized
+CTE) was no faster. The read is made only when asked (issue 890), and the estimate is computed with it, never at a
+read of the run's state.
 
 ### A small table's size: not measured until DuckDB's own checkpoint (issue 815; the owner, 2026-11-11)
 

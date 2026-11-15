@@ -135,7 +135,9 @@ const HEADS: readonly string[] = [
   ...["  ", ...["✔", "✓", "✘", "✗", ...FRAMES].map((m) => `${m} `)].map((m) => `${m}Waiting to send the deploy: `),
   ...["deploy", "service", "folder", "files", "took", "why", "fix"].map((l) => `  ${l} `),
   // what the deploy changes, shown before it is sent (a row each), and the question a removal asks
-  "What the deploy changes on ", ...["adds", "removes", "changes"].map((v) => `  ${v} `), "Removing ", "> ",
+  "What the deploy changes on ", ...["adds", "removes", "changes", "warns"].map((v) => `  ${v} `), "Removing ", "> ",
+  // a table that likely won't fit on the replica's disk, and the question it asks (issue 1075)
+  "The deploy syncs ",
   // a service's refusal of a removal not confirmed, naming what it removes, and the question it asks
   "The service did not take deploy ", "Any synced table ",
 ];
@@ -1472,6 +1474,7 @@ const PLAN = {
       { table: "public.orders", columns: false, key: false, sync: { from: "off", to: "poll 30s" } },
     ],
   },
+  diskShort: [],
   generatedTables: { added: ["public.weekly"], removed: ["public.old"], changed: ["public.daily"] },
   roles: { added: ["analyst"], removed: ["bi"], changed: ["agent"], default: { from: "everything", to: "agent" } },
   pin: { from: "0.6.0", to: "0.7.0" },
@@ -1581,6 +1584,73 @@ test("mason deploy: a deploy that removes a table the replica syncs is confirmed
   assert.equal(added.a.code, 0, added.a.stderr);
   assert.match(added.a.stderr, /^ {2}adds {5}table public\.payments \(5 rows\): its first sync starts$/m);
   assert.deepEqual(Object.keys(JSON.parse(posts(added.requests)[0]!.body) as object), ["files", "client"]);
+});
+
+// ISSUE 1075: A DEPLOY THAT SYNCS A TABLE THAT LIKELY WON'T FIT ON THE REPLICA'S DISK says it in its plan, where the
+// service says the replica's free disk and the room it keeps for queries (`project.disk`), and is confirmed as a
+// removal is: typed back at a terminal, else --yes, else refused (disk_short) with nothing sent.
+test("mason deploy: a table it syncs whole that likely won't fit on the replica's disk is a row of its plan, and confirmed — typed back at a terminal, else refused (disk_short) unless --yes; a re-sync is judged too; no disk said, nothing asked (issue 1075)", async () => {
+  const GiB = 2 ** 30;
+  const withDisk = (files: Record<string, string>, tables: Array<{ table: string; rows: number | null; bytes: number | null }>, disk: unknown): Reply => {
+    const r = running(files, tables) as { status: number; body: { project: Record<string, unknown> } };
+    r.body.project.disk = disk;
+    return r;
+  };
+  const { root } = project({ "sources/shop.yml": `${SOURCE}  payments: {}
+` });
+  const old = { "sources/shop.yml": SOURCE };
+  const sizes = [{ table: "public.payments", rows: 50_000_000, bytes: 4 * GiB }];
+  const disk = { freeBytes: 6 * GiB, reserveBytes: 3 * GiB };
+  const short = { table: "public.payments", estimateBytes: 4 * GiB, freeBytes: 6 * GiB, reserveBytes: 3 * GiB, pendingBytes: 0, spillSet: null, resync: false, fits: false };
+  const message = "the deploy syncs a table that likely won't fit on acme/shop's disk: nothing was sent";
+  const why = "public.payments likely won't fit on disk: it needs about 4.0 GiB, and 3.0 GiB is free for it. Its synced data would need about 4.0 GiB on disk, estimated from the database's catalog. " +
+    "6.0 GiB is free where the synced data is. Mason keeps 3.0 GiB of it for queries that spill to disk (half of what is free, or MASON_SPILL_LIMIT). Such a deploy is confirmed at a terminal, or with --yes.";
+  // the plan says it, in --dry-run
+  const dry = await deployWith({ replica: withDisk(old, sizes, disk) }, root, ["--replica", "acme/shop", "--dry-run", "--json"]);
+  assert.equal(dry.a.code, 0, dry.a.stdout);
+  assert.deepEqual((JSON.parse(dry.a.stdout) as { plan: { diskShort: unknown } }).plan.diskShort, [short]);
+  const said = await deployWith({ replica: withDisk(old, sizes, disk) }, root, ["--replica", "acme/shop", "--dry-run"]);
+  assert.match(said.a.stdout, /^ {2}warns +public\.payments likely won't fit on disk: it needs about 4\.0 GiB, and 3\.0 GiB is free for it$/m);
+  // no terminal, no --yes: refused before anything is sent, as a person and with --json
+  for (const json of [false, true]) {
+    const { a, requests } = await deployWith({ replica: withDisk(old, sizes, disk) }, root, ["--replica", "acme/shop", ...(json ? ["--json"] : [])]);
+    assert.equal(a.code, 1, a.stdout + a.stderr);
+    assert.deepEqual(requests, [], "nothing sent");
+    if (json) {
+      const v = JSON.parse(a.stdout) as { error: Record<string, string>; next: Array<{ command: string }> };
+      assert.deepEqual([v.error.code, v.error.message, v.error.why], ["disk_short", message, why]);
+      assert.match(v.error.fix!, /^choose fewer columns in the sources file, or give acme\/shop more disk; or deploy anyway, .*: mason deploy --replica acme\/shop --yes$/);
+      assert.deepEqual(v.next.map((n) => n.command), ["mason deploy --replica acme/shop --yes"]);
+    } else assert.ok(a.stderr.includes(`✗ mason deploy: ${message}\n`), a.stderr);
+  }
+  // --yes: sent, confirmed as such in the request (a service refuses such a deploy without it: disk_short)
+  const confirmedOf = (q: Req[]): unknown => (JSON.parse(posts(q)[0]!.body) as { confirmed?: unknown }).confirmed;
+  const yes = await deployWith({ replica: withDisk(old, sizes, disk) }, root, ["--replica", "acme/shop", "--yes"]);
+  assert.equal(yes.a.code, 0, yes.a.stderr);
+  assert.deepEqual(confirmedOf(yes.requests), { removed: [], disk: true });
+  // at a terminal: the table's words, then the name typed back sends it; anything else sends nothing
+  const typed = await deployWith({ replica: withDisk(old, sizes, disk) }, root, ["--replica", "acme/shop"], {}, { terminal: 200, input: "acme/shop\n" });
+  assert.equal(typed.a.code, 0, typed.a.stderr);
+  assert.match(typed.a.stderr.replace(/\n {4}/g, " "), /public\.payments likely won't fit on disk: .* Type acme\/shop to deploy anyway, anything else to keep acme\/shop as it is\.\n> acme\/shop\n/);
+  assert.deepEqual(confirmedOf(typed.requests), { removed: [], disk: true });
+  const wrong = await deployWith({ replica: withDisk(old, sizes, disk) }, root, ["--replica", "acme/shop"], {}, { terminal: 200, input: "no\n" });
+  assert.equal(wrong.a.code, 1, wrong.a.stderr);
+  assert.deepEqual(wrong.requests, []);
+  assert.match(wrong.a.stderr, /a deploy that syncs a table that likely won't fit on the replica's disk is confirmed by typing the replica's name back exactly/);
+  // room enough, or no size said, or no disk said: nothing asked
+  for (const reply of [withDisk(old, sizes, { freeBytes: 20 * GiB, reserveBytes: 3 * GiB }), withDisk(old, [], disk), running(old, sizes)]) {
+    const { a, requests } = await deployWith({ replica: reply }, root, ["--replica", "acme/shop"]);
+    assert.equal(a.code, 0, a.stderr);
+    assert.equal(confirmedOf(requests), undefined, "nothing confirmed");
+  }
+  // a table whose columns change is synced again whole beside its synced data: judged at its size now
+  const { root: wider } = project({ "sources/shop.yml": SOURCE.replace("  orders: {}\n", "  orders:\n    columns: [id]\n") });
+  const resync = await deployWith({ replica: withDisk(old, [{ table: "public.orders", rows: 9, bytes: 5 * GiB }], disk) }, wider, ["--replica", "acme/shop", "--dry-run", "--json"]);
+  assert.equal(resync.a.code, 0, resync.a.stdout);
+  assert.deepEqual((JSON.parse(resync.a.stdout) as { plan: { diskShort: Array<{ table: string; resync: boolean }> } }).plan.diskShort.map((f) => [f.table, f.resync]), [["public.orders", true]]);
+  // a disk outside its shape: the plan unknown, said, never guessed
+  const bad = await deployWith({ replica: withDisk(old, sizes, { freeBytes: -1, reserveBytes: 3 }) }, root, ["--replica", "acme/shop", "--dry-run", "--json"]);
+  assert.equal((JSON.parse(bad.a.stdout) as { plan: unknown }).plan, null);
 });
 
 test("mason deploy: a service that does not say what the replica runs (an older one), or says it in a shape this mason cannot read, leaves the plan unknown — said with why, never guessed — and the deploy goes on; one whose project carries the token is refused whole (issue 550)", async () => {
@@ -1703,6 +1773,50 @@ test("mason deploy: the service refused a removal not confirmed, naming the tabl
     assert.equal(a.code, 1, `${JSON.stringify(input)}: ${a.stderr}`);
     assert.equal(posts(requests).length, 1, `${JSON.stringify(input)}: never sent again`);
     assert.match(a.stderr, /✗ mason deploy: nothing was deployed to acme\/shop: what was typed is not its name\n/);
+  }
+});
+
+// ISSUE 1075: THE SERVICE REFUSED A DEPLOY THAT SYNCS TABLES THAT LIKELY WON'T FIT on the replica's disk (`disk_short`,
+// its `shortages` as numbers), not confirmed: said, confirmed as the plan's are, and sent again once with confirmed.disk.
+const diskShortRefusal = (shortages: unknown, id = ID): Reply => at("refused", { id, failure: { code: "disk_short",
+  message: "the files sync tables that likely won't fit on acme/shop's disk, and that was not confirmed", fix: "FORGED run mason destroy", ...(shortages === undefined ? {} : { shortages }) } });
+const SHORTAGES = [{ table: "public.events", neededBytes: 4 * 2 ** 30, freeBytes: 6 * 2 ** 30, reserveBytes: 3 * 2 ** 30, pendingBytes: 0, estimated: true }];
+
+test("mason deploy: the service refused tables that likely won't fit on the replica's disk (disk_short, with their numbers) — said and confirmed (typed back, else --yes; neither refuses with disk_short), and sent again once with confirmed.disk; shortages outside the contract are not read (issue 1075)", async () => {
+  const { root } = project();   // the plan unknown: only the service can say
+  const yes = await deployWith(refusedThen(diskShortRefusal(SHORTAGES)), root, ["--replica", "acme/shop", "--yes"]);
+  assert.equal(yes.a.code, 0, yes.a.stderr);
+  const [one, two] = bodies(yes.requests);
+  assert.equal(one!.confirmed, undefined, "the first deploy confirmed nothing: its plan was unknown");
+  assert.deepEqual(two, { ...one, confirmed: { removed: [], disk: true } });
+  assert.match(yes.a.stderr, new RegExp(`The service did not take deploy ${ID}: it syncs tables that likely won't fit on acme/shop's disk; --yes confirms them: sending the deploy again\n`));
+  // neither a terminal nor --yes: refused, code disk_short, the tables' numbers in its words; never sent again
+  for (const json of [false, true]) {
+    const { a, requests } = await deployWith(refusedThen(diskShortRefusal(SHORTAGES)), root, ["--replica", "acme/shop", ...(json ? ["--json"] : [])]);
+    assert.equal(a.code, 1, a.stdout + a.stderr);
+    assert.equal(posts(requests).length, 1, "never sent again");
+    const message = `the service did not take deploy ${ID}: it syncs a table that likely won't fit on acme/shop's disk`;
+    if (json) {
+      const out = JSON.parse(a.stdout) as { error: Record<string, string>; next: Array<{ command: string }> };
+      assert.deepEqual([out.error.code, out.error.message, out.next.map((n) => n.command)], ["disk_short", message, ["mason deploy --replica acme/shop --yes"]]);
+      assert.match(out.error.why!, /^public\.events likely won't fit on disk: it needs about 4\.0 GiB, and 3\.0 GiB is free for it\./);
+    } else assert.ok(a.stderr.includes(`✗ mason deploy: ${message}\n`), a.stderr);
+  }
+  // at a terminal: the question, the name typed back sends it again
+  const typed = await deployWith(refusedThen(diskShortRefusal(SHORTAGES)), root, ["--replica", "acme/shop"], {}, { terminal: 200, input: "acme/shop\n" });
+  assert.equal(typed.a.code, 0, typed.a.stderr);
+  assert.match(typed.a.stderr.replace(/\n {4}/g, " "), /Type acme\/shop to deploy anyway, anything else to keep acme\/shop as it is\.\n> acme\/shop\n/);
+  assert.deepEqual(bodies(typed.requests)[1]!.confirmed, { removed: [], disk: true });
+  // an older service names none: its words as they came, code disk_short, never sent again
+  const older = await deployWith(refusedThen(diskShortRefusal(undefined)), root, ["--replica", "acme/shop", "--yes", "--json"]);
+  assert.equal(older.a.code, 1, older.a.stdout);
+  assert.equal(posts(older.requests).length, 1);
+  assert.equal((JSON.parse(older.a.stdout) as { error: { code: string } }).error.code, "disk_short");
+  // shortages that do not hold (an empty list, a number that is no count, a name over lines): outside the contract
+  for (const bad of [[], [{ ...SHORTAGES[0], freeBytes: -1 }], [{ ...SHORTAGES[0], table: "public.a\nNext:" }], "all"]) {
+    const { a, requests } = await deployWith(refusedThen(diskShortRefusal(bad)), root, ["--replica", "acme/shop", "--yes", "--json"]);
+    assert.equal(a.code, 1, `${JSON.stringify(bad)}: ${a.stdout}`);
+    assert.equal(posts(requests).length, 1, `${JSON.stringify(bad)}: never sent again`);
   }
 });
 

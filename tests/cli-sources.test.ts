@@ -863,12 +863,12 @@ test("leftOutArrivals fails closed on a name of exclude: gone while the run was 
   // DROPPED: nothing arrived — taken out of exclude:
   const dropped = S.leftOutArrivals(file, staff("name"), before);
   assert.deepEqual(dropped.map((a) => [a.columns, a.gone, S.excludeOf(a)]), [[[], ["salary"], []]]);
-  assert.equal(S.leftOutText(dropped[0]!, "mason/sources/app.yml"), "public.staff: salary, which exclude: names, is gone from the database. Mason wrote exclude: [] on its entry in mason/sources/app.yml");
+  assert.equal(S.leftOutText(dropped[0]!, "mason/sources/app.yml"), "public.staff: salary, which exclude: names, is gone from the database. Mason wrote staff: {} as its entry in mason/sources/app.yml");
   // where the file cannot be written: left out for this run, the line to write said, and the start refuses until then
   assert.equal(S.leftOutText(renamed[0]!, null, "MASON_PROJECT_READONLY=1"),
     "public.staff: salary, which exclude: names, is gone from the database, and annual_pay arrived at the same time (a rename keeps its data), so it is not synced either, " +
     "in this run (MASON_PROJECT_READONLY=1). Write exclude: [annual_pay] on its entry in the sources file: a start refuses the file until then");
-  const taken = S.withLeftOut(file, new Map([["public.staff", ["annual_pay"]]]), new Map([["public.staff", ["salary"]]]));
+  const taken = S.withLeftOut(file, new Map([["public.staff", { left: ["annual_pay"], gone: ["salary"] }]]), staff("name", "annual_pay"));
   assert.deepEqual(taken.tables[0]!.exclude, ["annual_pay"]);
   const added = S.addedTables(taken, staff("name", "annual_pay"), "shop", "/app");
   assert.ok(Array.isArray(added), JSON.stringify(added));
@@ -883,8 +883,236 @@ test("leftOutText says what was left out, where it is written and how to sync it
   assert.equal(S.leftOutText({ ...a, columns: ["deploy_key", "salt"] }, null, "MASON_PROJECT_READONLY=1"),
     "public.orders: the new columns deploy_key, salt look like secrets, so they are not synced, in this run (MASON_PROJECT_READONLY=1). " +
     "Write exclude: [api_token, deploy_key, salt] on its entry in the sources file: a start syncs what the file says");
-  const left = S.withLeftOut(file, new Map([["public.orders", ["deploy_key"]], ["public.customers", ["password"]]]));
+  const left = S.withLeftOut(file, new Map([["public.orders", { left: ["deploy_key"], gone: [] }], ["public.customers", { left: ["password"], gone: [] }]]), CATALOG);
   assert.deepEqual(left.tables.map((e) => [e.table, e.columns, e.exclude]), [["public.orders", null, ["api_token", "deploy_key"]], ["public.customers", ["id", "name"], []]]);
+});
+
+/**
+ * ONE LOOK OF A RUN THAT CANNOT WRITE ITS SOURCES FILE, as src/cli/dev.ts `added` makes it, on the run's own record
+ * (`LeftOutRecord`): what arrived, each kept and said with its line (its ending as the file as it is decides it), and
+ * the file as the run takes it — refused, or the tables it syncs.
+ */
+function readOnlyLook(file: Sources.SourceFile, record: Sources.LeftOutRecord, now: SourceTable[]) {
+  const said = record.look(file, now).map((a) => {
+    record.keep(a);
+    const have = now.find((t) => t.source === a.entry.table)?.columns.map((c) => c.name) ?? [];
+    const refused = file.tables.find((e) => e.table === a.entry.table)!.exclude.some((c) => !have.includes(c));
+    return { a, line: S.excludeOf(a), text: S.leftOutText(a, null, "MASON_PROJECT_READONLY=1", refused) };
+  });
+  return { said, tables: S.addedTables(record.taken(file, now), now, "shop", "/app") };
+}
+const syncedOf = (tables: ReturnType<typeof S.addedTables>, source: string): string[] => {
+  assert.ok(Array.isArray(tables), `the file as the run takes it is refused: ${JSON.stringify(tables)}`);
+  return tables.find((t) => t.source === source)!.columns.map((c) => c.name);
+};
+/** An entry's lines as the line said tells a person to write them: the text a start reads, never a parsed entry. */
+function entryAsSaid(name: string, said: string): string {
+  const list = /Write (exclude: \[[^\]]*\]) on its entry/.exec(said);
+  if (list) return `  ${name}:\n    ${list[1]}\n`;
+  const empty = /Write (\S+: \{\}) as its entry/.exec(said);
+  assert.ok(empty, `no line to write in: ${said}`);
+  return `  ${empty[1]}\n`;
+}
+
+test("issue 1026: in a run that cannot write its sources file, a second rename of an excluded column is left out in its place, the line to write is the whole exclude: now, and every other table's changes are still taken", () => {
+  const file = parse("kind: postgres\nurl: ${DATABASE_URL}\ntables:\n  t:\n    exclude: [salary]\n  t2: {}\n") as Sources.SourceFile;
+  const t = (...cols: string[]) => table({ table: "t", columns: [col("id", "bigint", true), ...cols.map((c) => col(c))] });
+  const t2 = (...cols: string[]) => table({ table: "t2", columns: [col("id", "bigint", true), ...cols.map((c) => col(c))] });
+  const record = new S.LeftOutRecord([t("a", "salary"), t2("v", "w")]);
+
+  const first = readOnlyLook(file, record, [t("a", "annual_pay"), t2("v", "w")]);
+  assert.deepEqual(syncedOf(first.tables, "public.t"), ["id", "a"]);
+  assert.deepEqual(first.said.map((x) => x.line), [["annual_pay"]]);
+  // THE SECOND RENAME: annual_pay, which the file never named, is the name gone; pay3 is left out in its place
+  const second = readOnlyLook(file, record, [t("a", "pay3"), t2("v", "w")]);
+  assert.deepEqual(syncedOf(second.tables, "public.t"), ["id", "a"], "never pay3");
+  assert.equal(second.said.length, 1);
+  assert.equal(second.said[0]!.text,
+    "public.t: annual_pay, which exclude: names, is gone from the database, and pay3 arrived at the same time (a rename keeps its data), so it is not synced either, " +
+    "in this run (MASON_PROJECT_READONLY=1). Write exclude: [pay3] on its entry in the sources file: a start refuses the file until then");
+  // the other table's changes are still taken: a column added, then one renamed
+  assert.deepEqual(syncedOf(readOnlyLook(file, record, [t("a", "pay3"), t2("v", "w", "y")]).tables, "public.t2"), ["id", "v", "w", "y"]);
+  assert.deepEqual(syncedOf(readOnlyLook(file, record, [t("a", "pay3"), t2("v", "w2", "y")]).tables, "public.t2"), ["id", "v", "w2", "y"]);
+  // a third rename, and the line written: a start reads the file as the run took it
+  const third = readOnlyLook(file, record, [t("a", "pay4"), t2("v", "w2", "y")]);
+  assert.deepEqual(syncedOf(third.tables, "public.t"), ["id", "a"]);
+  const written = parse(`kind: postgres\nurl: \${DATABASE_URL}\ntables:\n${entryAsSaid("t", third.said[0]!.text)}  t2: {}\n`) as Sources.SourceFile;
+  assert.deepEqual(syncedOf(S.addedTables(written, [t("a", "pay4"), t2("v", "w2", "y")], "shop", "/app"), "public.t"), ["id", "a"]);
+});
+
+test("the review of PR 1065: the file refused for another reason while an excluded column is renamed twice — once that is fixed, the file as the run takes it names the column now, the line says it, and every later change is taken", () => {
+  const text = (t3: string, t1 = "  t1:\n    exclude: [salary]\n") => `kind: postgres\nurl: \${DATABASE_URL}\ntables:\n${t1}  t2: {}\n  t3:\n    columns: [id, ${t3}]\n`;
+  const file = parse(text("amount_total")) as Sources.SourceFile;
+  const t1 = (c: string) => table({ table: "t1", columns: [col("id", "bigint", true), col("a"), col(c)] });
+  const t2 = (...cols: string[]) => table({ table: "t2", columns: [col("id", "bigint", true), ...cols.map((c) => col(c))] });
+  const t3 = table({ table: "t3", columns: [col("id", "bigint", true), col("amount_total2")] });
+  const record = new S.LeftOutRecord([t1("salary"), t2("v"), table({ table: "t3", columns: [col("id", "bigint", true), col("amount_total")] })]);
+  // t3's listed column renamed to a close name: the file is refused, for t3 alone
+  const refusedFor = (r: ReturnType<typeof readOnlyLook>): string => JSON.stringify(r.tables).match(/tables\.t\d/g)!.join(",");
+  assert.equal(refusedFor(readOnlyLook(file, record, [t1("salary"), t2("v"), t3])), "tables.t3");
+  const p1 = readOnlyLook(file, record, [t1("p1"), t2("v"), t3]);
+  assert.equal(refusedFor(p1), "tables.t3");
+  assert.deepEqual(p1.said.map((x) => x.line), [["p1"]]);
+  const p2 = readOnlyLook(file, record, [t1("p2"), t2("v"), t3]);
+  assert.equal(refusedFor(p2), "tables.t3", "never t1: p1 is the name gone");
+  assert.deepEqual(p2.said.map((x) => x.line), [["p2"]]);
+  // t3 fixed by hand, then t2's changes, then the run's own line written on t1 too
+  const fixed = parse(text("amount_total2")) as Sources.SourceFile;
+  const y = readOnlyLook(fixed, record, [t1("p2"), t2("v", "y"), t3]);
+  assert.deepEqual(syncedOf(y.tables, "public.t1"), ["id", "a"]);
+  assert.deepEqual(syncedOf(y.tables, "public.t2"), ["id", "v", "y"]);
+  const both = parse(text("amount_total2", entryAsSaid("t1", p2.said[0]!.text))) as Sources.SourceFile;
+  assert.deepEqual(syncedOf(readOnlyLook(both, record, [t1("p2"), t2("v", "y", "y2"), t3]).tables, "public.t2"), ["id", "v", "y", "y2"]);
+  const v2 = readOnlyLook(both, record, [t1("p2"), t2("v2", "y", "y2"), t3]);
+  assert.deepEqual(syncedOf(v2.tables, "public.t2"), ["id", "v2", "y", "y2"]);
+  assert.deepEqual(syncedOf(v2.tables, "public.t1"), ["id", "a"]);
+});
+
+test("keptBack: a name of exclude: the run took out as gone, back on the table, is left out again as the file says, and said with the line that names it", () => {
+  const file = parse("kind: postgres\nurl: ${DATABASE_URL}\ntables:\n  t:\n    exclude: [salary]\n") as Sources.SourceFile;
+  const t = (...cols: string[]) => [table({ table: "t", columns: [col("id", "bigint", true), ...cols.map((c) => col(c))] })];
+  const record = new S.LeftOutRecord(t("a", "salary"));
+  const dropped = readOnlyLook(file, record, t("a"));
+  assert.deepEqual(dropped.said.map((x) => x.text), ["public.t: salary, which exclude: names, is gone from the database, in this run (MASON_PROJECT_READONLY=1). " +
+    "Write t: {} as its entry in the sources file: a start refuses the file until then"]);
+  assert.deepEqual(syncedOf(dropped.tables, "public.t"), ["id", "a"]);
+  // the line, written as the text a start reads, is taken
+  const asSaid = parse(`kind: postgres\nurl: \${DATABASE_URL}\ntables:\n${entryAsSaid("t", dropped.said[0]!.text)}`) as Sources.SourceFile;
+  assert.deepEqual(syncedOf(S.addedTables(asSaid, t("a"), "shop", "/app"), "public.t"), ["id", "a"]);
+  const back = readOnlyLook(file, record, t("a", "salary"));
+  assert.deepEqual(syncedOf(back.tables, "public.t"), ["id", "a"], "never the salary added back");
+  assert.deepEqual(back.said.map((x) => x.text), ["public.t: salary, which exclude: names, is back on the database, so it is not synced, in this run (MASON_PROJECT_READONLY=1). " +
+    "Write exclude: [salary] on its entry in the sources file: a start syncs what the file says"]);
+  assert.deepEqual(readOnlyLook(file, record, t("a", "salary")).said, [], "said once");
+});
+
+test("writeLine: the line that writes an exclude: is the list; with nothing left out, the entry {} — or exclude: taken out beside its other keys — never exclude: [], which a start refuses", () => {
+  const file = parse("kind: postgres\nurl: ${DATABASE_URL}\ntables:\n  t:\n    exclude: [salary]\n  billing.invoices:\n    exclude: [salary]\n    sync: poll 1m\n") as Sources.SourceFile;
+  const [t, inv] = file.tables as [Sources.TableEntry, Sources.TableEntry];
+  assert.deepEqual(S.writeLine(t, ["pay"]), { ask: "Write exclude: [pay] on its entry", wrote: "wrote exclude: [pay] on its entry" });
+  assert.deepEqual(S.writeLine(t, []), { ask: "Write t: {} as its entry", wrote: "wrote t: {} as its entry" });
+  assert.deepEqual(S.writeLine(inv, []), { ask: "Take exclude: out of its entry", wrote: "took exclude: out of its entry" });
+  assert.ok("problems" in parse("kind: postgres\nurl: ${DATABASE_URL}\ntables:\n  t:\n    exclude: []\n"), "a start refuses exclude: []");
+  assert.ok(!("problems" in parse("kind: postgres\nurl: ${DATABASE_URL}\ntables:\n  t: {}\n  billing.invoices:\n    sync: poll 1m\n")), "each line, written, is read");
+});
+
+test("issue 1026: any sequence of renames, adds and drops, of excluded and synced columns, across several tables, in a run that cannot write its sources file, with the file refused for another reason and fixed between: an excluded column never synced, refused only for that reason, every other change taken, and the lines said, written as text, read by a start the same", () => {
+  const fileText = (t3: string) => `kind: postgres\nurl: \${DATABASE_URL}\ntables:\n  t1:\n    exclude: [salary]\n  t2: {}\n  t3:\n    columns: [id, ${t3}]\n  t4:\n    exclude: [secret_note, ssn]\n`;
+  const excludeOfFile = new Map([["public.t1", ["salary"]], ["public.t2", []], ["public.t4", ["secret_note", "ssn"]]]);
+  interface Col { name: string; out: boolean }
+  for (let seed = 1; seed <= 40; seed++) {
+    let r = (seed * 2654435761) % 4294967296;
+    const rand = (n: number): number => { r = (r * 1664525 + 1013904223) % 4294967296; return Math.floor((r / 4294967296) * n); };
+    // the model: each table's columns in order, each carried through its renames with whether it is left out; t3's entry
+    // lists amount_total, whatever its column is called now: renamed to a close name, the file is refused until fixed
+    const model = new Map<string, Col[]>([
+      ["public.t1", [{ name: "a", out: false }, { name: "salary", out: true }, { name: "b", out: false }]],
+      ["public.t2", [{ name: "v", out: false }, { name: "w", out: false }]],
+      ["public.t3", [{ name: "amount_total", out: false }, { name: "y", out: false }]],
+      ["public.t4", [{ name: "note", out: false }, { name: "secret_note", out: true }, { name: "ssn", out: true }]],
+    ]);
+    let listed = "amount_total";
+    const used = new Map([...model].map(([k, cs]) => [k, cs.map((c) => c.name)]));
+    const catalog = (): SourceTable[] => [...model].map(([k, cs]) => table({ table: k.slice(7), columns: [col("id", "bigint", true), ...cs.map((c) => col(c.name))] }));
+    const record = new S.LeftOutRecord(catalog());
+    const lines = new Map<string, string>();
+    let fresh = 0, refusals = 0, fixes = 0;
+    const history: string[] = [];
+    for (let round = 0; round < 60; round++) {
+      const start = new Map([...model].map(([k, cs]) => [k, cs.map((c) => c.name)]));
+      const wasOut = new Map([...model].map(([k, cs]) => [k, new Set(cs.filter((x) => x.out).map((x) => x.name))]));
+      const changed = new Map<string, { gone: string[]; arrived: Col[] }>();
+      const taken = new Set<string>();
+      const t3 = model.get("public.t3")!.find((x) => x.name.startsWith("amount_total"));
+      if (t3 !== undefined && t3.name === listed && rand(6) === 0) {
+        // THE FILE REFUSED FOR ANOTHER REASON: t3's listed column renamed to a close name
+        t3.name = `amount_total${fresh++}`;
+        history.push(`t3 rename ${listed} to ${t3.name} (the file refused)`);
+        refusals++;
+      } else if (t3 !== undefined && t3.name !== listed && rand(3) === 0) {
+        // FIXED BY HAND: the entry lists the column's name now
+        listed = t3.name;
+        history.push(`t3 fixed in the file: columns: [id, ${listed}]`);
+        fixes++;
+      } else {
+        // one or two changes on the database before the run looks, on one table or two (t3's listed column left alone)
+        for (let n = 1 + rand(2); n > 0; n--) {
+          const k = [...model.keys()][rand(model.size)]!, cs = model.get(k)!;
+          const c = changed.get(k) ?? { gone: [], arrived: [] };
+          changed.set(k, c);
+          const absent = used.get(k)!.filter((x) => !start.get(k)!.includes(x) && !taken.has(x) && !cs.some((y) => y.name === x) && !x.startsWith("amount_total"));
+          const newName = (): string => {
+            const name = absent.length && rand(3) === 0 ? absent[rand(absent.length)]! : rand(3) === 0 ? `api_token_${fresh++}` : `col_${fresh++}_q`;
+            taken.add(name);
+            used.get(k)!.push(name);
+            return name;
+          };
+          const free = cs.filter((x) => !taken.has(x.name) && !x.name.startsWith("amount_total"));
+          const op = free.length === 0 ? 1 : rand(3);
+          if (op === 0) {
+            const x = free[rand(free.length)]!, old = x.name;
+            c.gone.push(old);
+            x.name = newName();
+            c.arrived.push(x);
+            history.push(`${k} rename ${old} to ${x.name}`);
+          } else if (op === 1) {
+            const x = { name: newName(), out: false };
+            cs.push(x);
+            c.arrived.push(x);
+            history.push(`${k} add ${x.name}`);
+          } else {
+            const x = free[rand(free.length)]!;
+            cs.splice(cs.indexOf(x), 1);
+            c.gone.push(x.name);
+            history.push(`${k} drop ${x.name}`);
+          }
+        }
+      }
+      // in an every-column entry, a column that arrived is left out when it looks like a secret, when the file's exclude:
+      // names it, or when a column left out went in the same look (a rename, or a drop and an add, cannot be told apart:
+      // fail closed); a renamed column left out stays out
+      for (const [k, c] of changed) {
+        if (k === "public.t3") continue;
+        const wentOut = c.gone.some((g) => wasOut.get(k)!.has(g));
+        for (const x of c.arrived) x.out = x.out || wentOut || S.looksSecret(x.name) || excludeOfFile.get(k)!.includes(x.name);
+      }
+      const file = parse(fileText(listed)) as Sources.SourceFile;
+      const now = catalog();
+      const res = readOnlyLook(file, record, now);
+      const at = `seed ${seed}, round ${round}: ${history.slice(-4).join("; ")}`;
+      const t3Now = model.get("public.t3")!.find((x) => x.name.startsWith("amount_total"));
+      const refusedNow = t3Now !== undefined && t3Now.name !== listed;
+      if (refusedNow) {
+        // refused for t3 alone, never for what the run left out
+        assert.ok(!Array.isArray(res.tables), `${at}: not refused`);
+        assert.deepEqual(JSON.stringify(res.tables).match(/tables\.t\d/g), ["tables.t3"], `${at}: ${JSON.stringify(res.tables)}`);
+      } else {
+        assert.ok(Array.isArray(res.tables), `${at}: refused: ${JSON.stringify(res.tables)}`);
+        for (const [k, cs] of model) {
+          const want = ["id", ...cs.filter((x) => k === "public.t3" ? x.name === listed : !x.out).map((x) => x.name)];
+          assert.deepEqual(syncedOf(res.tables, k), want, `${at}: ${k}`);
+        }
+      }
+      for (const s of res.said) {
+        lines.set(s.a.entry.table, s.text);
+        // what the line says a start does with the file as it is: refuses it, for this entry, exactly when it would
+        const p = S.addedTables(file, now, "shop", "/app");
+        const fileRefused = !Array.isArray(p) && new RegExp(`tables\\.${s.a.entry.table.slice(7)}\\.exclude`).test(JSON.stringify(p));
+        assert.equal(/a start refuses the file until then$/.test(s.text), fileRefused, `${at}: ${s.text}`);
+      }
+      if (!refusedNow) {
+        // the lines said, written as a person writes them: a start, which keeps out only what the file says, syncs what
+        // the run syncs
+        const entry = (k: string, text: string): string => lines.has(`public.${k}`) ? entryAsSaid(k, lines.get(`public.${k}`)!) : text;
+        const asSaid = parse(`kind: postgres\nurl: \${DATABASE_URL}\ntables:\n${entry("t1", "  t1:\n    exclude: [salary]\n")}${entry("t2", "  t2: {}\n")}` +
+          `  t3:\n    columns: [id, ${listed}]\n${entry("t4", "  t4:\n    exclude: [secret_note, ssn]\n")}`);
+        assert.ok(!("problems" in asSaid), `${at}: the lines said, written, are refused: ${JSON.stringify(asSaid)}`);
+        const started = S.addedTables(asSaid as Sources.SourceFile, now, "shop", "/app");
+        for (const k of model.keys()) assert.deepEqual(syncedOf(started, k), syncedOf(res.tables, k), `${at}: ${k} once the lines said are written`);
+      }
+    }
+    assert.ok(refusals > 0 && fixes > 0, `seed ${seed}: the file was refused ${refusals} times and fixed ${fixes} times`);
+  }
 });
 
 test("a column the database dropped that an entry's columns: names is passed over and said; a name of exclude: the table lacks is refused, fail closed, with the way out (issue 977)", () => {

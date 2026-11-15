@@ -28,6 +28,7 @@ import type { DuckDBValue } from "@duckdb/node-api";
 import { MASON_SCHEMA, type DuckStore } from "./store.ts";
 import { Batches, History, Streak, cutoff } from "./history.ts";
 import { UNKNOWN_CODE, failureCode, originOf } from "../lib/failure-facts.ts";
+import { DISK_SHORT, type DiskShortage } from "./disk-fit.ts";
 
 /** One restart of the run as its supervisor records it in `.mason/restarts.json` (src/cli/supervise.ts, a process of
  *  its own): when, why the run stopped, how long it had been up. */
@@ -41,6 +42,8 @@ export const EVENTS_CODE_DDL = `ALTER TABLE ${EVENTS_TABLE} ADD COLUMN IF NOT EX
 export const EVENTS_ORIGIN_DDL = `ALTER TABLE ${EVENTS_TABLE} ADD COLUMN IF NOT EXISTS origin VARCHAR`;
 /** HOW LONG A SYNC TOOK (issue 1012): a store made before gains the column, its old rows NULL (read as null) */
 export const EVENTS_TOOK_DDL = `ALTER TABLE ${EVENTS_TABLE} ADD COLUMN IF NOT EXISTS took_ms BIGINT`;
+/** A SHORTAGE OF DISK AS NUMBERS (issue 1075): a store made before gains the column, its old rows NULL (read as none) */
+export const EVENTS_DISK_DDL = `ALTER TABLE ${EVENTS_TABLE} ADD COLUMN IF NOT EXISTS disk VARCHAR`;
 
 /**
  * WHAT AN EVENT IS, one word each: `full_sync_failed`, `poll_failed`, `catch_up_failed` (the one poll that brings a new copy
@@ -98,13 +101,16 @@ export interface SyncEvent {
    *  ` · <msText>` (src/lib/table-sync.ts `withTook`), so the log and `mason logs --events` read as before; the web page
    *  shows it in a column of its own and takes that ending off the message (src/web/pages/syncs.js `withoutTook`) */
   tookMs: number | null;
+  /** A FIRST SYNC STOPPED SHORT OF DISK (code `disk_short`): its numbers as numbers (src/duck/disk-fit.ts `DiskShortage`:
+   *  neededBytes, freeBytes, reserveBytes, pendingBytes, estimated), so nothing parses the message; absent otherwise */
+  disk?: DiskShortage;
 }
 /**
  * What the sync records: the time, `failed` and a restart are the events' own. A failure gives the error it caught
  * (`cause`), which its code and origin are read from (never its words beyond the message); or, where it caught none (a
  * gap it found, the page's report), its `code` and `origin` as it knows them.
  */
-export interface SyncEventInput { kind: Exclude<SyncEventKind, "restart">; table: string | null; message: string; cause?: unknown; code?: string; origin?: string | null; tookMs?: number }
+export interface SyncEventInput { kind: Exclude<SyncEventKind, "restart">; table: string | null; message: string; cause?: unknown; code?: string; origin?: string | null; tookMs?: number; disk?: DiskShortage }
 
 const FLUSH_MS = 1000;
 const BATCH_ROWS = 500;
@@ -144,7 +150,7 @@ export class SyncEvents {
 
   /** The events of a store: their table made, the events past the retention deleted, and a trim every hour. */
   static async open(store: DuckStore, log: (line: string) => void, options: EventsOptions): Promise<SyncEvents> {
-    const history = await History.open(store, [EVENTS_DDL, EVENTS_CODE_DDL, EVENTS_ORIGIN_DDL, EVENTS_TOOK_DDL]);
+    const history = await History.open(store, [EVENTS_DDL, EVENTS_CODE_DDL, EVENTS_ORIGIN_DDL, EVENTS_TOOK_DDL, EVENTS_DISK_DDL]);
     const events = new SyncEvents(history, log, options);
     events.next = Number((await history.reader.runAndReadAll(`SELECT coalesce(max(seq), -1) + 1 FROM ${EVENTS_TABLE}`)).getRowsJS()[0]![0]);
     await history.keepTrimmed(() => events.trim(), (e) => log(`sync events: deleting the events older than ${events.days} days failed: ${e.message}`));
@@ -176,9 +182,10 @@ export class SyncEvents {
   flush(): Promise<void> { return this.batches.flush(); }
 
   private async write(rows: Pending[]): Promise<void> {
-    const sql = `INSERT INTO ${EVENTS_TABLE} (happened_at, seq, kind, table_name, message, code, origin, took_ms) VALUES ` +
-      rows.map((_, i) => `($${i * 8 + 1}::TIMESTAMPTZ, $${i * 8 + 2}, $${i * 8 + 3}, $${i * 8 + 4}, $${i * 8 + 5}, $${i * 8 + 6}, $${i * 8 + 7}, $${i * 8 + 8})`).join(", ");
-    const values = rows.flatMap((r): DuckDBValue[] => [r.at.toISOString(), r.seq, r.e.kind, r.e.table, r.e.message, r.code, r.origin, r.e.tookMs === undefined ? null : Math.round(r.e.tookMs)]);
+    const sql = `INSERT INTO ${EVENTS_TABLE} (happened_at, seq, kind, table_name, message, code, origin, took_ms, disk) VALUES ` +
+      rows.map((_, i) => `($${i * 9 + 1}::TIMESTAMPTZ, $${i * 9 + 2}, $${i * 9 + 3}, $${i * 9 + 4}, $${i * 9 + 5}, $${i * 9 + 6}, $${i * 9 + 7}, $${i * 9 + 8}, $${i * 9 + 9})`).join(", ");
+    const values = rows.flatMap((r): DuckDBValue[] => [r.at.toISOString(), r.seq, r.e.kind, r.e.table, r.e.message, r.code, r.origin, r.e.tookMs === undefined ? null : Math.round(r.e.tookMs),
+      r.e.disk === undefined ? null : JSON.stringify(r.e.disk)]);
     try {
       if (this.options.insert !== undefined) await this.options.insert(sql, values);
       else await this.history.writer.run(sql, values);
@@ -210,9 +217,13 @@ export class SyncEvents {
     if (o.failed) where.push(`kind IN (${[...FAILURES].map((k) => `'${k}'`).join(", ")})`);
     else if (o.scheduled !== true) where.push(`kind NOT IN (${[...SCHEDULED].map((k) => `'${k}'`).join(", ")})`);
     if (o.since !== undefined) { values.push(o.since); where.push(`happened_at >= $${values.length}::TIMESTAMPTZ`); }
-    const rows = (await this.history.reader.runAndReadAll(`SELECT * FROM (SELECT epoch_ms(happened_at) AS ms, seq, kind, table_name, message, code, origin, took_ms FROM ${EVENTS_TABLE}` +
-      `${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY happened_at DESC, seq DESC LIMIT $1) ORDER BY ms, seq`, values)).getRowsJS() as Array<[bigint | number, bigint, string, string | null, string, string | null, string | null, bigint | number | null]>;
-    return rows.map(([ms, , kind, table, message, code, origin, took]) => eventOf(new Date(Number(ms)).toISOString(), kind as SyncEventKind, table, message, code, origin, took === null ? null : Number(took)));
+    const rows = (await this.history.reader.runAndReadAll(`SELECT * FROM (SELECT epoch_ms(happened_at) AS ms, seq, kind, table_name, message, code, origin, took_ms, disk FROM ${EVENTS_TABLE}` +
+      `${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY happened_at DESC, seq DESC LIMIT $1) ORDER BY ms, seq`, values)).getRowsJS() as Array<[bigint | number, bigint, string, string | null, string, string | null, string | null, bigint | number | null, string | null]>;
+    return rows.map(([ms, , kind, table, message, code, origin, took, disk]) => {
+      const e = eventOf(new Date(Number(ms)).toISOString(), kind as SyncEventKind, table, message, code, origin, took === null ? null : Number(took));
+      const d = disk === null ? undefined : shortageOfText(disk);
+      return d === undefined ? e : { ...e, disk: d };
+    });
   }
 
   /** Writes what is waiting and closes the events' connections (mason stop). */
@@ -231,6 +242,20 @@ export interface EventsQuery { limit: number; since?: string; failed?: boolean; 
  *  the exact form an earlier Mason leaked, issue 599: the sync scrubs those rows at open, and this holds should one stay) */
 const eventOf = (at: string, kind: SyncEventKind, table: string | null, message: string, code: string | null = null, origin: string | null = null, tookMs: number | null = null): SyncEvent =>
   ({ at, kind, failed: isFailure(kind), table, message: maskPasswordKeyword(message), code, origin, tookMs });
+
+/** A stored shortage read back: its numbers as they were written, or none when the text does not hold (never a guess). */
+export function shortageOfText(text: string): DiskShortage | undefined {
+  let v: unknown;
+  try { v = JSON.parse(text); }
+  // a row this code did not write: no numbers, the message still says it
+  catch { return undefined; }
+  const o = v as Record<string, unknown> | null;
+  if (typeof o !== "object" || o === null || o.code !== DISK_SHORT || typeof o.estimated !== "boolean") return undefined;
+  const n = (k: string): number | null => typeof o[k] === "number" && Number.isFinite(o[k]) ? o[k] as number : null;
+  const [needed, free, reserve, pending] = [n("neededBytes"), n("freeBytes"), n("reserveBytes"), n("pendingBytes")];
+  return needed === null || free === null || reserve === null || pending === null ? undefined
+    : { code: DISK_SHORT, neededBytes: needed, freeBytes: free, reserveBytes: reserve, pendingBytes: pending, estimated: o.estimated };
+}
 
 /**
  * THE EVENTS WITH THE RUN'S RESTARTS (src/cli/supervise.ts `.mason/restarts.json`), as ONE list newest last, asked as

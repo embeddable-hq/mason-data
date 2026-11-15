@@ -132,7 +132,7 @@ async function swap(mode: Mode): Promise<void> {
   psql(p.dbUrl, "UPDATE t SET b = b || ''; UPDATE u SET v = v || ''");
   // HELD, SAID WITH THE LINE TO WRITE, never serving the salary meanwhile
   const want = new RegExp(`${holds.source}a is the column the sources file left out as salary\\. .*write exclude: \\[salary, a\\] on mason/sources/.*\\.yml: tables\\.t, then run mason stop && mason start\\. ` +
-    "To sync it under its new name, run mason add t --columns id,a,b while Mason runs");
+    "To sync it, run mason add t --columns id,a,b while Mason runs");
   await until(`${mode}: the swap to hold t, said on its line`, () => { p.neverSecret("after the swap", ["t", "u"]); p.bump("t"); return want.test(p.line("t")?.error ?? ""); });
   // the two synced columns swapped: synced again whole, each value under its new name (never the old copy's)
   await until(`${mode}: u to equal the source after its swap`, () => { p.neverSecret("after the swap", ["t", "u"]); p.bump("u"); return JSON.stringify(p.served("u")) === JSON.stringify(p.source("u", ["id", "w", "v"])); });
@@ -182,6 +182,32 @@ async function renameAndAdd(mode: Mode): Promise<void> {
   // said in the log and as an event too, not only on its line
   const events = p.ok(p.mason("logs", "--events", "--json"), "mason logs --events").json.events as Array<{ kind: string; table: string | null; message: string }>;
   assert.ok(events.some((e) => e.kind === "columns_changed" && e.table === "public.t" && want.test(e.message)), JSON.stringify(events));
+  p.ok(p.mason("stop", "--json"), "mason stop");
+}
+
+/** THE EXCLUDED COLUMN RENAMED AWAY AND BACK, IN A WRITABLE PROJECT (the review of PR 1078): `c` renamed `d` (the run
+ *  writes `exclude: [d]`), a new `c` added and synced, then in one transaction the new `c` dropped and `d` renamed `c`.
+ *  The run takes the gone `d` out of `exclude:` (the file becomes `{}`), so by name the file syncs `c`, the secret: it
+ *  was served at every look, and after a restart */
+async function renamedBack(mode: Mode): Promise<void> {
+  const p = await started(mode,
+    "CREATE TABLE t (id int PRIMARY KEY, a text, c text, b text); INSERT INTO t SELECT g, 'p_a' || g, 'SECRET_' || g, 'p_b' || g FROM generate_series(1, 4) g",
+    "  t:\n    exclude: [c]\n");
+  const all = ["t"];
+  psql(p.dbUrl, "ALTER TABLE t RENAME c TO d");
+  await until(`${mode}: exclude: [d] written`, () => { p.neverSecret("after the rename", all); p.bump("t"); return /^ {2}t:\n {4}exclude: \[d\]\n/m.test(fs.readFileSync(p.file, "utf8")); });
+  psql(p.dbUrl, "ALTER TABLE t ADD COLUMN c text DEFAULT 'p_new'");
+  await until(`${mode}: the new c synced`, () => { p.neverSecret("after the add", all); p.bump("t"); return JSON.stringify(p.served("t")) === JSON.stringify(p.source("t", ["id", "a", "b", "c"])); });
+  psql(p.dbUrl, "BEGIN; ALTER TABLE t DROP COLUMN c; ALTER TABLE t RENAME d TO c; COMMIT");
+  psql(p.dbUrl, "UPDATE t SET a = a || ''");
+  const want = new RegExp(`${holds.source}c is the column the sources file left out as d\\. .*write exclude: \\[c\\] on mason/sources/.*\\.yml: tables\\.t`);
+  await until(`${mode}: t held, said on its line`, () => { p.neverSecret("after the drop and the rename back", all); p.bump("t"); return want.test(p.line("t")?.error ?? ""); });
+  for (let i = 0; i < 10; i++) { p.neverSecret("while t is held", all); await sleep(500); }
+  // AND AFTER A RESTART from the file as the run left it: still held, never served
+  p.ok(p.mason("stop", "--json"), "mason stop");
+  p.ok(p.mason("start", "--json"), "mason start");
+  await until(`${mode}: after the restart, t held`, () => { p.neverSecret("after the restart", all); p.bump("t"); return want.test(p.line("t")?.error ?? ""); });
+  for (let i = 0; i < 10; i++) { p.neverSecret("after the restart", all); await sleep(500); }
   p.ok(p.mason("stop", "--json"), "mason stop");
 }
 
@@ -236,5 +262,7 @@ test("sync: poll — an excluded column renamed while Mason is stopped is never 
 test("sync: replication — an excluded column renamed while Mason is stopped is never served after a start from the file as it was", { skip, timeout: 600_000 }, () => renameThenStart("replication"));
 test("sync: poll — the excluded column renamed and a new column of its name added in one transaction: the renamed one is never served, the table held", { skip, timeout: 600_000 }, () => renameAndAdd("poll 1s"));
 test("sync: replication — the excluded column renamed and a new column of its name added in one transaction: the renamed one is never served, the table held", { skip, timeout: 600_000 }, () => renameAndAdd("replication"));
+test("sync: poll — the excluded column renamed away and back over a dropped column of its first name, in a writable project: never served, held, and after a restart", { skip, timeout: 600_000 }, () => renamedBack("poll 1s"));
+test("sync: replication — the excluded column renamed away and back over a dropped column of its first name, in a writable project: never served, held, and after a restart", { skip, timeout: 600_000 }, () => renamedBack("replication"));
 test("sync: poll — a column renamed to a name columns: lists is not synced under it until mason add confirms the entry", { skip, timeout: 600_000 }, () => listedRename("poll 1s"));
 test("sync: replication — a column renamed to a name columns: lists is not synced under it until mason add confirms the entry", { skip, timeout: 600_000 }, () => listedRename("replication"));

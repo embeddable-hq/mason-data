@@ -19,6 +19,7 @@ import { PIN_FILE, versionText } from "../lib/project-version.ts";
 import { parseProjectText } from "../lib/project-file.ts";
 import { syncText } from "../lib/table-sync.ts";
 import { bytesText } from "./commands.ts";
+import { diskFit, diskShortWords, type DiskFit } from "../duck/disk-fit.ts";
 
 /** How many tables' sizes an answer may carry. */
 export const MAX_SIZED_TABLES = 10_000;
@@ -31,11 +32,16 @@ export const MAX_TABLE_NAME = 300;
 export const MAX_DEPLOY_ANSWER = Math.ceil((MAX_SIZED_TABLES * (MAX_TABLE_NAME * 6 + 128) + 64 * 1024) / 1024) * 1024;
 /** A table's size, as the replica counts it: null where it does not know. */
 export interface TableSize { table: string; rows: number | null; bytes: number | null }
-/** The project a replica runs now, as the service says it: its files (as a deploy sends them) and its tables' sizes. */
-export interface ReplicaProject { files: Array<{ path: string; sha256: string; content: string }>; tables: TableSize[] }
+/** The project a replica runs now, as the service says it: its files (as a deploy sends them), its tables' sizes, and
+ *  the room on the disk its synced data is on (`disk`: free there, and what queries may spill into; absent where the
+ *  service does not say). */
+export interface ReplicaProject { files: Array<{ path: string; sha256: string; content: string }>; tables: TableSize[]; disk?: { freeBytes: number; reserveBytes: number } }
 
 export interface Plan {
   tables: { added: TableSize[]; removed: TableSize[]; changed: Array<{ table: string; columns: boolean; key: boolean; sync: { from: string; to: string } | null }> };
+  /** the tables it syncs whole (added, or whose columns or key change) that likely won't fit on the replica's disk
+   *  (src/duck/disk-fit.ts): confirmed before the deploy is sent. Empty where none, or where the service says no disk */
+  diskShort: DiskFit[];
   generatedTables: { added: string[]; removed: string[]; changed: string[] };
   roles: { added: string[]; removed: string[]; changed: string[]; default: { from: string | null; to: string | null } | null };
   pin: { from: string | null; to: string | null } | null;
@@ -69,7 +75,11 @@ export function heldProject(v: unknown): ReplicaProject | null | undefined {
     if (!obj(t) || typeof t.table !== "string" || t.table === "" || t.table.length > MAX_TABLE_NAME || !count(t.rows) || !count(t.bytes)) return null;
     tables.push({ table: t.table, rows: typeof t.rows === "number" ? t.rows : null, bytes: typeof t.bytes === "number" ? t.bytes : null });
   }
-  return { files, tables };
+  // the room on the replica's disk: both counts, or the answer does not hold; absent or null, not said
+  if (v.disk === undefined || v.disk === null) return { files, tables };
+  const d = v.disk;
+  if (!obj(d) || !Number.isSafeInteger(d.freeBytes) || (d.freeBytes as number) < 0 || !Number.isSafeInteger(d.reserveBytes) || (d.reserveBytes as number) < 0) return null;
+  return { files, tables, disk: { freeBytes: d.freeBytes as number, reserveBytes: d.reserveBytes as number } };
 }
 
 /**
@@ -93,6 +103,28 @@ export function heldRemoves(v: unknown, secrets: readonly string[]): TableSize[]
     if (oneLine(t.table) !== t.table || carriesSecret(t.table, secrets)) return null;
     seen.add(t.table);
     out.push({ table: t.table, rows: typeof t.rows === "number" ? t.rows : null, bytes: typeof t.bytes === "number" ? t.bytes : null });
+  }
+  return out;
+}
+
+/**
+ * THE TABLES A SERVICE'S `disk_short` REFUSAL SAYS LIKELY WON'T FIT ON THE REPLICA'S DISK (docs/HOSTED-API.md "What
+ * the deploy changes"): its `shortages`, held — `undefined` when it says none (an older service); the list, each once,
+ * as the plan's own `DiskFit`s (src/duck/disk-fit.ts, so its words are the plan's), when it names them; null when it does
+ * not hold (an empty list, past a bound, a number that is no count, or a name not printable as it came, or one that
+ * carries a secret). Whether the replica's spill setting is set, and whether a table is synced again, are not said.
+ */
+export function heldShortages(v: unknown, secrets: readonly string[]): DiskFit[] | null | undefined {
+  if (v === undefined) return undefined;
+  if (!Array.isArray(v) || v.length === 0 || v.length > MAX_SIZED_TABLES) return null;
+  const out: DiskFit[] = [], seen = new Set<string>();
+  const n = (x: unknown): x is number => Number.isSafeInteger(x) && (x as number) >= 0;
+  for (const t of v) {
+    if (!obj(t) || typeof t.table !== "string" || t.table === "" || t.table.length > MAX_TABLE_NAME || seen.has(t.table)) return null;
+    if (!n(t.neededBytes) || !n(t.freeBytes) || !n(t.reserveBytes) || !n(t.pendingBytes)) return null;
+    if (oneLine(t.table) !== t.table || carriesSecret(t.table, secrets)) return null;
+    seen.add(t.table);
+    out.push({ table: t.table, estimateBytes: t.neededBytes, freeBytes: t.freeBytes, reserveBytes: t.reserveBytes, pendingBytes: t.pendingBytes, spillSet: null, resync: false, fits: false });
   }
   return out;
 }
@@ -186,12 +218,28 @@ export function planOf(sent: ReadonlyArray<{ path: string; sha256: string; conte
     if (a.columns === b.columns && a.key === b.key && a.sync === b.sync) return [];
     return [{ table: shown(k), columns: a.columns !== b.columns, key: a.key !== b.key, sync: a.sync === b.sync ? null : { from: a.sync, to: b.sync } }];
   });
+  // WILL WHAT IT SYNCS WHOLE FIT ON THE REPLICA'S DISK (src/duck/disk-fit.ts, the one decision): each table added, at
+  // the size the service says (for one not synced, an estimate of its synced size, as `mason tables` gives one), then
+  // each whose columns or key change (synced again whole beside its synced data now: estimated as that), in order, each
+  // counting the ones before as first syncs to come. A table whose size is not said is not judged
+  const diskShort: DiskFit[] = [];
+  if (running.disk !== undefined) {
+    let pendingBytes = 0;
+    const whole = [...t.added.map((k) => ({ k, resync: false })), ...[...now.tables.keys()].filter((k) => was.tables.has(k) && (was.tables.get(k)!.columns !== now.tables.get(k)!.columns || was.tables.get(k)!.key !== now.tables.get(k)!.key)).sort().map((k) => ({ k, resync: true }))];
+    for (const { k, resync } of whole) {
+      const estimate = sizes.get(k)?.bytes ?? null;
+      if (estimate === null) continue;
+      const fit = diskFit(shown(k), estimate, { freeBytes: running.disk.freeBytes, reserveBytes: running.disk.reserveBytes, spillSet: null, pendingBytes }, resync);
+      pendingBytes += estimate;
+      if (!fit.fits) diskShort.push(fit);
+    }
+  }
   const g = diff(was.generated, now.generated);
   const r = diff(was.roles ?? new Map<string, string>(), now.roles ?? new Map<string, string>());
   const names = (xs: string[]): string[] => xs.map(shown);
   const def = (v: string | null): string | null => v === null ? null : shown(v);
   return {
-    tables: { added: t.added.map(sized), removed: t.removed.map(sized), changed },
+    tables: { added: t.added.map(sized), removed: t.removed.map(sized), changed }, diskShort,
     generatedTables: { added: names(g.added), removed: names(g.removed), changed: names(g.changed) },
     roles: { added: names(r.added), removed: names(r.removed), changed: names(r.changed),
       default: was.rolesDefault === now.rolesDefault ? null : { from: def(was.rolesDefault), to: def(now.rolesDefault) } },
@@ -234,5 +282,6 @@ export function planRows(plan: Plan): Array<[string, string]> {
   }
   if (plan.roles.default) rows.push(["changes", `the default role: ${plan.roles.default.from ?? "none"} to ${plan.roles.default.to ?? "none"}`]);
   if (plan.pin) rows.push(["changes", `the pin: ${plan.pin.from === null ? "none" : `Mason ${plan.pin.from}`} to ${plan.pin.to === null ? "none" : `Mason ${plan.pin.to}`}`]);
+  for (const f of plan.diskShort) rows.push(["warns", diskShortWords(f).message]);
   return rows;
 }

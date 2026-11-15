@@ -32,8 +32,21 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   Only `mason start` names such an entry that the file already holds. `mason tables` does not. When you remove one
   of two such tables, the other is read again whole from your database, once. It is not served until that sync is
   done, as it may hold the removed table's rows.
+- **A script that adds tables may now stop to ask.** `mason add` and `mason deploy` now stop before a table that likely
+  won't fit on disk, with exit 1 and the code `disk_short`. Where a script or CI must go ahead regardless, add `--yes`.
 
 ## What changes
+
+- **Adding a table now says up front when it likely won't fit on disk.** Before, its first sync started, and stopped
+  only once it was under way and the disk ran short. Now Mason estimates how much disk the table's synced data needs.
+  The estimate reads your database's catalog only, never the table. It is held to the free disk, less the room kept
+  for queries that spill to disk (half of what is free, or `MASON_SPILL_LIMIT`) and what other first syncs still need.
+  When it likely won't fit, nothing is added, and you are told the numbers. Choose fewer columns, give Mason more disk,
+  or go ahead anyway: Add anyway on the web page, `--yes` on `mason add` and `mason deploy`. The estimate is rough. It
+  usually overstates the size, and a sync that runs short of disk still stops before the disk fills. The Tables page
+  shows each table's estimated size before you add it, and `mason tables` says it too. When a sync runs short of disk,
+  its failure event and `mason status --json` now carry the code `disk_short` and the numbers, so a script need not
+  read the message.
 
 - **The web page links to how to change a deployed project.** When a deployed project's Tables page says it is
   read-only, its link now goes to the README's new "Change a deployed project" section. A host that runs Mason for
@@ -51,9 +64,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   matched columns by name alone. If two columns swapped names in one transaction, the left-out column was served under
   the other's name. The same happened after a rename while Mason was stopped, and to a column renamed to a name
   `columns:` lists. Now Mason knows each column by its identity on your database, which a rename keeps. A left-out
-  column stays out under any new name. If your entry would sync it under its new name, Mason stops syncing that table
-  and keeps serving the data it holds. The table's line in `mason status` and on the web page says why. It gives the
-  line that keeps the column out, and the `mason add` command that syncs it under its new name.
+  column stays out under any name, its old name too. Mason syncs it again only once you confirm it. To confirm, run
+  `mason add <table>` while Mason runs, or remove the table's entry and add it back. Until then, if your entry would sync
+  it, Mason stops syncing that table and keeps serving the data it holds. That covers a rename, a swap, a column renamed
+  back under a name Mason took out of `exclude:`, and a name you take out of `exclude:` or add to `columns:` by hand.
+  The table's line in `mason status` and on the web page says why. It gives the line that keeps the column out, and the
+  `mason add` command that syncs it.
 
 - **A table synced by a `key:` no longer loses synced rows when the database stops keeping that key unique.** Mason
   checks a `key:` against your database's unique indexes when it reads the sources file. Before, if that index was
@@ -130,3 +146,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   every sync, and Mason served no table, the others included, even after a restart. Now the kept table is synced
   again whole, and every other table is served throughout. A project already in that state recovers at its first start
   after the upgrade, with nothing to remove or add. One table that cannot be read never stops Mason serving the others.
+- **In a project Mason cannot write, a column `exclude:` names can now be renamed more than once while Mason runs.**
+  This is a project run with `MASON_PROJECT_READONLY=1`, or one whose sources file Mason cannot write. Before, a second
+  rename of such a column made Mason stop taking column changes for the rest of the run, in every table. This also
+  happened when the file was refused for another reason during the renames, and was fixed later. A column added
+  elsewhere was never synced, and a renamed one failed its table's sync again and again until a restart. The excluded
+  column was never served. Now each change is taken, and the renamed column stays out of the synced data. `mason
+  status` shows one line for the table: what to write in the sources file now. When nothing is left out, that line
+  says to write the entry as `{}`, or to take `exclude:` out of it. It used to say `exclude: []`, which a start
+  refuses. While Mason runs, it also keeps out a column the file excludes when a column of that name is added back,
+  and says so.

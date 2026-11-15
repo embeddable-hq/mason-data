@@ -584,8 +584,11 @@ test("a copy projected past the disk's free space fails with the way out, its ch
   {
     const store = await DuckStore.open(file, (l) => logged.push(l), { memoryLimit: "256MB" });
     const reader = await store.instance.connect();
+    // its failure's event, read back as mason logs --events --json reads it (issue 1075: its code and numbers)
+    const { SyncEvents } = await import("../../src/duck/events.ts");
+    const events = await SyncEvents.open(store, (l) => logged.push(l), { days: 7 });
     // one byte free where the file is: the first projection is past it
-    const sync = new Sync(store, source, db, (l) => logged.push(l), 3_600_000, "poll", null, { copyChunkRows: 10_000, copyParallel: 3, diskFree: () => 1 });
+    const sync = new Sync(store, source, db, (l) => logged.push(l), 3_600_000, "poll", null, { copyChunkRows: 10_000, copyParallel: 3, diskFree: () => 1, onEvent: (e) => events.record(e) });
     try {
       await sync.open();
       void sync.setTables([PARALLEL]);
@@ -593,11 +596,18 @@ test("a copy projected past the disk's free space fails with the way out, its ch
       const said = logged.join("\n");
       const [state] = sync.state();
       assert.equal(state?.phase, "failed", said);
-      assert.match(state?.error ?? "", /^the sync of public\.big would need about [\d.]+ [KMG]iB more on disk than is free \(1 B free where .*parallel-disk\.db is; \d+ of \d+ pages read, [\d.]+ [KMG]iB added\): free some disk, mason remove public\.big, or mason add public\.big --columns … with fewer columns \(tried again after \d\d:\d\d UTC \(failure 1 in a row\)/, said);
+      assert.match(state?.error ?? "", /^public\.big no longer fits on disk: its sync needs about [\d.]+ [KMG]iB more, and 1 B is free \(where .*parallel-disk\.db is; \d+ of \d+ pages read, [\d.]+ [KMG]iB added\): free some disk, mason remove public\.big, or mason add public\.big --columns … with fewer columns \(tried again after \d\d:\d\d UTC \(failure 1 in a row\)/, said);
       const kept = Number((await reader.runAndReadAll("SELECT count(*) FROM _mason.copy_chunks")).getRowsJS()[0]![0]);
       assert.ok(kept >= 1, `the chunks committed before the projection are kept: ${kept}\n${said}`);
       assert.ok(kept < Math.ceil(PARALLEL_ROWS / 10_000), `the copy stopped before its end: ${kept} chunk(s)\n${said}`);
-    } finally { reader.closeSync(); await sync.stop(); await store.close(); }
+      // ITS SHORTAGE AS NUMBERS (issue 1075), on its state and on its event, the same numbers its words say
+      const short = (state as { diskShort?: { code: string; neededBytes: number; freeBytes: number; reserveBytes: number; pendingBytes: number; estimated: boolean } }).diskShort;
+      assert.deepEqual(short && [short.code, short.freeBytes, short.reserveBytes, short.pendingBytes, short.estimated], ["disk_short", 1, store.spillLimitBytes, 0, false], said);
+      assert.ok(short!.neededBytes > 1, said);
+      await events.flush();
+      const failedEvent = (await events.recent({ limit: 10, failed: true })).find((e) => e.kind === "full_sync_failed" && e.table === "public.big");
+      assert.deepEqual([failedEvent?.code, failedEvent?.disk], ["disk_short", short], said);
+    } finally { reader.closeSync(); await sync.stop(); await events.close(); await store.close(); }
   }
   // room again at the next start (a start skips the wait): it continues where it was (the default memory: the equality
   // check at the end sorts the table)

@@ -582,13 +582,15 @@ beside `replica`, an optional `project`.
 ```json
 { "replica": { … }, "project": {
   "files": [{ "path": "sources/app.yml", "sha256": "2aab…", "content": "kind: postgres\n…" }],
-  "tables": [{ "table": "public.orders", "rows": 1200000, "bytes": 734003200 }] } }
+  "tables": [{ "table": "public.orders", "rows": 1200000, "bytes": 734003200 }],
+  "disk": { "freeBytes": 19327352832, "reserveBytes": 9663676416 } } }
 ```
 
 | Key | Held to |
 |---|---|
 | `files` | the project the replica runs now, whichever way it got there (a deploy, or the service's own web app), as a deploy sends files: each `path` in the deploy's grammar and once, `sha256` the SHA-256 of `content`'s UTF-8 bytes (checked), within the deploy's bounds (256 KiB a file, 1 MiB in all, 500 files). A replica that runs no project yet answers `[]` |
-| `tables` | at most 10,000 sizes, each `{ table, rows, bytes }`: `table` as the sources file names it in full (`schema.table`, at most 300 characters); `rows` and `bytes` whole numbers of 0 or more, or `null` where not known. For a table the replica syncs, its synced data's; the service may add others of the source's tables (an estimate, as `mason tables` gives one), so a deploy that adds one can say its size. A table missing from the list is said as "size not known" |
+| `tables` | at most 10,000 sizes, each `{ table, rows, bytes }`: `table` as the sources file names it in full (`schema.table`, at most 300 characters); `rows` and `bytes` whole numbers of 0 or more, or `null` where not known. For a table the replica syncs, its synced data's; the service may add others of the source's tables, with `bytes` the estimate of their synced size that Mason gives (`estimateBytes` of a table not added, in the replica's `GET /api/state` and in `mason tables --json`), so a deploy that adds one can say its size and whether it fits. A table missing from the list is said as "size not known" |
+| `disk` | optional: the room on the disk the replica's synced data is on, `{ freeBytes, reserveBytes }`, whole numbers of 0 or more, as the replica's Mason says them (`disk.freeBytes` and `disk.reserveBytes` in its `GET /api/state`: the bytes free there, and what its queries may spill into). Absent or `null`: not said, and no table is judged. Any other shape makes the plan unknown |
 
 - The `?project=1` query asks for `project`; without it (`mason replica status`) the answer is as before. Older
   services ignore the query.
@@ -611,7 +613,7 @@ before it is sent. The CLI names each table with its size (or "size not known"):
   their sizes, its way out `mason deploy --replica <org>/<name> --yes`;
 - `--yes` goes ahead without asking.
 
-Adding a table is never asked about: it costs a first sync, not synced data. A deploy that removes no table goes ahead
+Adding a table is asked about only when it likely won't fit on the replica's disk (below): it costs a first sync, not synced data. A deploy that removes no table goes ahead
 without asking. When the plan cannot be shown, nothing is asked before the deploy is sent: the service's check below is
 the guard, and its refusal, naming the tables, is what the CLI asks about.
 
@@ -670,6 +672,46 @@ the token is refused whole.
 
 This also catches a plan gone stale: the replica's tables changed between the question and the deploy.
 
+**A table that likely won't fit on the replica's disk is confirmed.** Where the service says the replica's `disk`, the
+CLI holds each table the deploy syncs whole to it before it sends, as `mason add` holds a table to the local disk:
+
+- the tables it adds, at the size `tables` gives (for a table not synced yet, the estimate of its synced size), then
+  the tables whose columns or key change, which are synced again whole beside their synced data now (at their synced
+  size), each counting the ones before it as first syncs to come;
+- a table fits when its size, what the ones before it need, and `reserveBytes` together are at most `freeBytes`;
+- a table whose size is not given is not judged.
+
+The plan says each one that likely won't fit (`plan.diskShort` under `--json`), with its estimate, what is free and the
+room kept for queries. Such a deploy is confirmed as a removal is: the replica's name typed back at a terminal, else
+`--yes`; without either it is refused before anything is sent, code `disk_short`, exit 1. A confirmed deploy carries
+`confirmed.disk: true` (below).
+
+**The service refuses a table that likely won't fit, not confirmed.** So that an older CLI, or a direct call to this
+API, cannot skip the question, a service may hold the deploy to the same rule before the replica takes the files,
+with the numbers the replica's Mason gives (the `disk` and the estimates above). Mason itself makes no such check on a
+deploy: a first sync that runs short of disk on the replica stops before the disk fills, and keeps the rows it has. A
+deploy that syncs such a table without `confirmed.disk: true` is `refused`, the replica left running what it ran
+before, with the failure code `disk_short`, its `message` saying so, and one key more for this code alone:
+
+```json
+{ "deploy": { "id": "dep_01HZX…", "status": "refused", "createdAt": "…", "finishedAt": "…", "failure": {
+  "code": "disk_short", "message": "the files sync public.events, which likely won't fit on acme/shop's disk, and that was not confirmed",
+  "shortages": [{ "table": "public.events", "neededBytes": 4294967296, "freeBytes": 6442450944, "reserveBytes": 3221225472, "pendingBytes": 0, "estimated": true }] } } }
+```
+
+| `shortages` | Meaning | Held to |
+|---|---|---|
+| a list | each table the deploy syncs whole that likely won't fit: the bytes it needs, the bytes free on the replica's disk, the room its queries may spill into, and what the tables before it need | 1 to 10,000 entries, each once: `table` (`schema.table`, at most 300 characters, ONE printable line as it is, as `removes`' names are), `neededBytes`, `freeBytes`, `reserveBytes` and `pendingBytes` whole numbers of 0 or more, `estimated` |
+| absent | an older service: it names none | |
+
+`shortages` beside any other code, or one that does not hold, is outside the contract (the CLI fails, naming the
+request and its status).
+
+The CLI recovers from it once, as from `unconfirmed_removal`: with a list, it says each table with its numbers and
+confirms (typed back at a terminal, else `--yes`; without either, refused, code `disk_short`, exit 1, its way out
+`mason deploy --replica <org>/<name> --yes`), then sends the deploy again as a NEW `POST` carrying `confirmed.disk:
+true`, its `--timeout` started again. Absent, the failure's words as they came, code `disk_short`, never sent again.
+
 ### What the database must serve
 
 The CLI never holds the database's URL (the replica's environment does), so what the files ask of the database can
@@ -721,6 +763,11 @@ written. The CLI prints the failure's words as they came, as for any refused dep
   when its plan removes a table, or when it sends a deploy again after an `unconfirmed_removal` refusal. A service
   refuses a deploy that removes a table this list lacks ("What the deploy changes", above); a service that does not
   know the key ignores it.
+- `confirmed.disk` is optional, `true` alone: the deploy syncs tables that likely won't fit on the replica's disk, and
+  a person confirmed it, or `--yes` did (`removed` is then what the CLI's plan named, `[]` when it had none). The CLI
+  sends it when its plan said such a table and it was confirmed, or when it sends a deploy again after a `disk_short`
+  refusal. A service that holds a deploy to the replica's disk refuses one that syncs such a table without it ("What
+  the deploy changes", above); a service that does not know the key ignores it.
 - `confirmed.any` is optional, `true` alone: any synced table the deploy removes may be dropped, whether or not
   `removed` names it (`removed` is then what the CLI's plan named, `[]` when it had none). A service takes it in place
   of the comparison only when it cannot tell what the deploy removes; the CLI sends it only after a refusal whose
@@ -786,7 +833,7 @@ When no answer comes back to the POST, whether the deploy was made is not known:
 | `id` | the id the POST answered |
 | `status` | `queued`, `applying`, `starting`, `running`, `refused` or `failed` (below) |
 | `phase` | optional: what is under way within the status, one of a closed set (below); absent or `null` for none |
-| `failure` | present when, and only when, `status` is `refused` or `failed`: `{ code, message, why?, fix? }`, the failure shape's `error` (a `next` beside them is never read); for `unconfirmed_removal`, `removes` too ("What the deploy changes") |
+| `failure` | present when, and only when, `status` is `refused` or `failed`: `{ code, message, why?, fix? }`, the failure shape's `error` (a `next` beside them is never read); for `unconfirmed_removal`, `removes` too, and for `disk_short`, `shortages` ("What the deploy changes") |
 | `createdAt` | when the POST was taken: ISO 8601 with its zone |
 | `finishedAt` | when it reached `running`, `refused` or `failed`: ISO 8601 with its zone; absent before |
 
@@ -796,7 +843,7 @@ When no answer comes back to the POST, whether the deploy was made is not known:
 | `applying` | Mason on the replica checks the files and takes them | waits |
 | `starting` | Mason on the replica starts on the new files, until it serves | waits |
 | `running` | the replica runs these files: Mason there serves from them | exit 0 |
-| `refused` | Mason on the replica refused the files (a sources file naming a table the database lacks, a database that cannot serve them: "What the database must serve", a pin of another release line), or the service did (a table removed whose removal was not confirmed: `unconfirmed_removal`, above, with its `removes`): `failure` is the refusal. The replica runs what it ran before | prints `failure`'s words as they came, code `refused`, exit 1 (for `unconfirmed_removal`, the CLI asks to confirm what its `removes` names and sends the deploy again once, above; without `removes`, its way out the CLI's own: deploy again, to be asked) |
+| `refused` | Mason on the replica refused the files (a sources file naming a table the database lacks, a database that cannot serve them: "What the database must serve", a pin of another release line), or the service did (a table removed whose removal was not confirmed: `unconfirmed_removal`, above, with its `removes`; a table that likely won't fit on the replica's disk, not confirmed: `disk_short`, with its `shortages`): `failure` is the refusal. The replica runs what it ran before | prints `failure`'s words as they came, code `refused` (`disk_short` for that code), exit 1 (for `unconfirmed_removal`, the CLI asks to confirm what its `removes` names and sends the deploy again once, above; without `removes`, its way out the CLI's own: deploy again, to be asked; for `disk_short` with `shortages`, the same, sent again with `confirmed.disk`) |
 | `failed` | the deploy could not finish for a reason that is not the files' (the machine, the service): `failure` says what happened and what the replica runs now | prints `failure`'s words as they came, code `failed`, exit 1 |
 
 | `phase` | With `status` | The CLI says |

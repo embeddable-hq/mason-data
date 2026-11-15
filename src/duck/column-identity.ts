@@ -9,20 +9,22 @@
  * restart knows it. Each time the run takes the sources file against the catalog (`identityVerdict`):
  * - a column new to the record (an add) is decided by its name, as the file says;
  * - a column the record holds as synced is decided by its name now, as the file says (left out by a rename is no leak);
- * - a column the record holds as LEFT OUT stays out under any other name. Under the name it was left out under, the
- *   file decides by name again: that name still means that column.
- * A column left out that the file would now sync under another name is a CONFLICT: the file was written about the old
- * names, and Mason cannot tell a rename from a choice. Its table is HELD — not synced, its synced data served as it
- * was — and said with the line that keeps it out, and the command that syncs it under its new name. Re-confirmed
- * (`confirmed`: `mason add` of the table through the running Mason, which writes its entry against the columns as the
- * database names them now), or removed from the file (the record goes with its synced data), the file decides afresh.
+ * - a column the record holds as LEFT OUT is never synced again on the file's word, under ANY name, the one it was left
+ *   out under included. The file is not only the person's: the run writes `exclude:` itself (src/cli/dev.ts, issue 977)
+ *   and takes a name out of it when that name is gone, so a column renamed away and back under a name the run took out
+ *   was synced by name (the review of PR 1078: `c` renamed `d`, `exclude: [d]` written, a new `c` added, then the new
+ *   `c` dropped and `d` renamed `c`). A name proves nothing about which column it is.
+ * A column left out that the file would now sync is a CONFLICT. Its table is HELD — not synced, its synced data served
+ * as it was — and said with the line that keeps it out, and the command that syncs it. Only a confirmation syncs it
+ * again: `mason add` of the table through the running Mason (`confirmed`, which writes its entry against the columns as
+ * the database names them now), or its entry removed from the file (the record goes with its synced data).
  *
  * Pure: the sync reads and writes the record (src/duck/sync.ts `setTables`), and says what this decides.
  */
 import { shapeTuples } from "../cdc/shape.ts";
 
-/** One column as the run last took it: its number, the name it was taken under, and whether it is synced. A column left
- *  out keeps the name it was left out under, whatever it is renamed to since. */
+/** One column as the run last took it: its number, its name then (for the words only: nothing is decided by it), and
+ *  whether it is synced. */
 export interface RecordedColumn { attnum: number; name: string; synced: boolean }
 
 /** What the run last took of a table's columns, by identity: the table's oid and every live column of it then. */
@@ -79,10 +81,10 @@ export function identityVerdict(t: IdentityInput, record: ColumnRecord | undefin
       columns.push({ attnum: c.attnum, name: c.name, synced: syncs });
       continue;
     }
-    // LEFT OUT: under the name it was left out under the file decides; under another it stays out
-    if (r.name === c.name) { columns.push({ attnum: c.attnum, name: c.name, synced: syncs }); continue; }
+    // LEFT OUT: stays out under any name, its own included; the file syncing it is a conflict, which only a
+    // confirmation ends. Recorded under its name now, for the words alone
     if (syncs) conflicts.push({ name: c.name, was: r.name });
-    columns.push({ attnum: c.attnum, name: r.name, synced: false });
+    columns.push({ attnum: c.attnum, name: c.name, synced: false });
   }
   if (conflicts.length === 0) return { kind: "taken", record: { oid: t.oid, columns } };
   return { kind: "held", why: heldText(t, cols.map((c) => c.name), conflicts, renamedOut), conflicts };
@@ -90,12 +92,13 @@ export function identityVerdict(t: IdentityInput, record: ColumnRecord | undefin
 
 /** What a hold says, in the sources file's words: which column is which, that the synced data serves as it was, the
  *  line that keeps each out (a `columns:` entry's keeps a synced column renamed, `renamedOut`, under its new name), and
- *  the command that syncs each under its new name — every column named, since `mason add` writes the entry anew. */
+ *  the command that syncs each — every column named, since `mason add` writes the entry anew. */
 function heldText(t: IdentityInput, names: readonly string[], conflicts: ReadonlyArray<{ name: string; was: string }>, renamedOut: readonly string[]): string {
   const one = conflicts.length === 1;
-  const which = conflicts.map((c) => `${c.name} is the column the sources file left out as ${c.was}`).join("; ");
-  const head = `${t.source} is not synced: its columns were renamed on the database, and ${which}. ` +
-    `Its entry would sync ${one ? "it" : "them"} under ${one ? "its new name" : "their new names"}, so Mason holds the table and serves its synced data as it was`;
+  const renamed = conflicts.some((c) => c.name !== c.was);
+  const which = conflicts.map((c) => c.name === c.was ? `${c.name} is a column the sources file left out` : `${c.name} is the column the sources file left out as ${c.was}`).join("; ");
+  const head = `${t.source} is not synced: ${renamed ? "its columns were renamed on the database, and " : ""}${which}. ` +
+    `Its entry would sync ${one ? "it" : "them"}. A column the file left out is synced again only once you confirm it, so Mason holds the table and serves its synced data as it was`;
   const e = t.entry;
   if (e === undefined) return `${head}.`;
   const gone = new Set(conflicts.map((c) => c.name));
@@ -106,7 +109,7 @@ function heldText(t: IdentityInput, names: readonly string[], conflicts: Readonl
     : `columns: ${flow(names.filter((x) => (t.synced.includes(x) && !gone.has(x)) || listed.includes(x)))}`;
   const all = names.filter((x) => t.synced.includes(x) || listed.includes(x));
   return `${head}. To keep ${one ? "it" : "them"} out, write ${line} on ${at}, then run mason stop && mason start. ` +
-    `To sync ${one ? "it" : "them"} under ${one ? "its new name" : "their new names"}, run mason add ${e.name} --columns ${all.join(",")} while Mason runs`;
+    `To sync ${one ? "it" : "them"}, run mason add ${e.name} --columns ${all.join(",")} while Mason runs`;
 }
 
 /** A record as the ledger holds it (`_mason.column_identity.columns`), or null for one this module did not write. */

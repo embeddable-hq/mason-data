@@ -59,16 +59,24 @@ paths:
   `leftOutArrivals`), and said in the log, as a `columns_changed` event and among the run's warnings; a name of
   `exclude:` gone while the run is up FAILS CLOSED: every column that arrived with it is left out in its place (a rename
   keeps its data: the review of PR 995 served a salary renamed annual_pay), and one gone with nothing arrived is taken
-  out. **A whole read that fails checks its table's shape again** (`reshapeAfterFailure`; the same review: a column
+  out. Where the file cannot be written, what the run left out and the columns it last looked at are ONE record
+  (`LeftOutRecord`, src/cli/sources.ts), and the arrivals are found against the file AS THE RUN TAKES IT, never the file
+  alone (issue 1026: two lists that only grew refused the file at an excluded column's second rename, and every column
+  change after it for the run). Both move at every look, whether its re-read is taken or refused (the review of PR 1065:
+  moved apart by a file refused for another reason, they parted for the run). A name of the file's `exclude:` back on
+  the table is left out again (`keptBack`). The table's line to write in `mason status` is replaced by its newest, and is
+  the writer's own (`writeLine`: `{}`, never `exclude: []`, which a start refuses). **A whole read that fails checks its table's shape again** (`reshapeAfterFailure`; the same review: a column
   dropped during a resync, or renamed during a first sync, failed it for ever with the same columns), so a change
   re-plans it. A relation message whose columns, type oids or typmods are not the shape's is checked at once.
 - **A column is known by its identity, its table's oid and its `attnum`, never by its name alone** (issue 1073: a swap
   of two names served an excluded salary as `a`, and so did a rename followed by a start, and a column renamed to a name
   `columns:` lists). What the run took of each table's columns is recorded by identity in `_mason.column_identity`
   (src/duck/column-identity.ts `identityVerdict`, applied by `placeColumns` each time the tables are set). A column left
-  out stays out under any other name. When the file would sync it under a new name, the table is HELD (`unplaced`): it
-  is not copied, polled, caught up or streamed, it serves what it holds, and its line says why with the line to write.
-  `mason add` of the table through the run confirms its entry afresh. Every read checks its columns too: the poll and
+  out stays out under ANY name, its old one included: no name in the file re-admits it, since the run writes `exclude:`
+  itself and takes a gone name out (the review of PR 1078 served a column renamed away and back). When the file would
+  sync it, the table is HELD (`unplaced`): it is not copied, polled, caught up or streamed, it serves what it holds, and
+  its line says why with the line to write. Only `mason add` of the table through the run, or its entry removed,
+  confirms it. Every read checks its columns too: the poll and
   each chunk of a copy ask `pg_identify_object` in their own transaction after the read (`readStillPlaced`). The stream
   refuses a relation with a name out of its place (`relationMoved`), and checks every other relation message once
   against the catalog before applying a change of it (`verifyStreamed`): names in place can still be other columns

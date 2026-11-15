@@ -2271,6 +2271,82 @@ test("the app: a refusal to add renders the server's Failure in its table's form
   assert.match(textOf(popOf(app.view().tables!, "act-tables-public.audit")), /^✗ mason\/sources\/ has 2 source files: one source per project for now Dismiss$/);
 });
 
+// ISSUE 1075: A TABLE THAT LIKELY WON'T FIT ON DISK is said beside its Add in the run's words, nothing written; Add
+// anyway sends what was sent again with yes, and Columns… opens its form to choose fewer; from a form, Add anyway sits
+// over it. A table added anyway says so in mason add's words (held equal below).
+test("the app: a table that likely won't fit is said beside its Add, nothing written; Add anyway sends it again with yes; Columns… is offered; the form's refusal offers it too", async () => {
+  const run = fakeRun();
+  run.answers.set("GET api/state", answer(CATALOG_STATE));
+  const app = fn<[unknown], App & { goAnyway(table: string): Promise<boolean> }>("createApp")(run.fetch);
+  app.show("tables");
+  await app.poll();
+  const GiB = 2 ** 30;
+  const disk = { table: "public.accounts", estimateBytes: 30 * GiB, freeBytes: 18 * GiB, reserveBytes: 9 * GiB, pendingBytes: 0, spillSet: false, resync: false, fits: false };
+  const message = "public.accounts likely won't fit on disk: it needs about 30.0 GiB, and 9.0 GiB is free for it";
+  const why = "Its synced data would need about 30.0 GiB on disk, estimated from the database's catalog. 18.0 GiB is free where the synced data is. Mason keeps 9.0 GiB of it for queries that spill to disk (half of what is free; MASON_SPILL_LIMIT sets it).";
+  const fix = "Choose fewer columns, or give Mason more disk. Or go ahead anyway: a sync that runs short of disk stops before the disk fills, and keeps the rows it has.";
+  run.answers.set("POST api/pick", answer({ error: message, disk, failure: { code: "disk_short", message, why, fix, next: [] } }, 409));
+  run.asked.length = 0;
+  assert.equal(await app.addTable("public.accounts"), false);
+  assert.deepEqual(run.asked, [`POST api/pick ${JSON.stringify({ table: "public.accounts", picked: true })}`], "nothing read again: nothing was written");
+  const pop = popOf(app.view().tables!, "act-tables-public.accounts");
+  assert.equal(textOf(pop), `✗ ${message} why ${why} fix ${fix} Add anyway Columns… Dismiss`);
+  assert.match(pop, /data-go-anyway="public\.accounts"/);
+  // Add anyway: the same add, with yes; then its answer says it went ahead anyway, in mason add's words
+  run.answers.set("POST api/pick", () => { run.answers.set("GET api/state", answer(ACCOUNTS_ADDED)); return answer({ ...PICKED.secret, disk, state: ACCOUNTS_ADDED })(); });
+  run.asked.length = 0;
+  assert.equal(await app.goAnyway("public.accounts"), true);
+  assert.deepEqual(run.asked, [`POST api/pick ${JSON.stringify({ table: "public.accounts", picked: true, yes: true })}`, "GET api/state"]);
+  assert.match(textOf(popOf(app.view().tables!, "act-tables-public.accounts")),
+    / Added anyway: it likely won't fit on disk: it needs about 30\.0 GiB, and 9\.0 GiB is free for it, beside 9\.0 GiB kept for queries that spill to disk\. Left out password_hash/);
+  app.dismissOutcome();
+  // from Columns…: refused over the form, Add anyway beside the refusal sends the boxes ticked, with yes
+  run.answers.set("GET api/state", answer(CATALOG_STATE));
+  await app.poll();
+  run.answers.set("POST api/pick", answer({ error: message, disk, failure: { code: "disk_short", message, why, fix, next: [] } }, 409));
+  await app.choose("public.event_log");
+  assert.equal(await app.addTable("public.event_log", ["payload"], ["tenant_id", "id"]), false);
+  const form = popOf(app.view().tables!, "act-tables-public.event_log");
+  assert.match(form, /<div class="failure" role="alert">.*data-go-anyway="public\.event_log".*data-pick-form="public\.event_log"/s, "Add anyway over the form, the form still open");
+  run.answers.set("POST api/pick", answer({ ...PICKED.keyed, disk: { ...disk, table: "public.event_log" }, state: COPYING }));
+  run.asked.length = 0;
+  await app.goAnyway("public.event_log");
+  assert.equal(run.asked[0], `POST api/pick ${JSON.stringify({ table: "public.event_log", picked: true, columns: ["payload"], key: ["tenant_id", "id"], yes: true })}`);
+  // nothing to go ahead with once the answer is dismissed
+  app.dismissOutcome();
+  assert.equal(await app.goAnyway("public.event_log"), false);
+});
+
+test("a table not added shows its estimated synced size before Add, from /api/state's estimateBytes (computed when the catalog is read); one with none shows none (issue 1075)", () => {
+  const s = JSON.parse(JSON.stringify(CATALOG_STATE)) as { tables: Array<{ table: string; added: boolean; estimateBytes: number | null }> };
+  const other = s.tables.find((t) => !t.added)!;
+  other.estimateBytes = 5 * 2 ** 30;
+  const html = fn<[unknown], string>("renderTables")(s);
+  const row = html.split("<tr").find((r) => r.includes(`<code class="name" title="${other.table}">`))!;
+  assert.match(row, /<td class="num size" title="About 5\.0 GiB on disk once synced, every column: estimated from your database&#39;s catalog">~5\.0 GiB<\/td>/);
+  // the words mason tables says it in: the same bytes
+  assert.equal(fn<[number], { text: string }>("estimateCell")(5 * 2 ** 30).text, `~${commands.bytesText(5 * 2 ** 30)}`);
+  const none = s.tables.find((t) => !t.added && t.table !== other.table);
+  if (none !== undefined) {
+    const plain = html.split("<tr").find((r) => r.includes(`<code class="name" title="${none.table}">`))!;
+    assert.match(plain, /<td class="num size"><\/td>/, "no estimate: nothing said");
+  }
+});
+
+test("a table added anyway, or whose disk was not checked, is said on the page as mason add says it (src/duck/disk-fit.ts diskFitNote)", async () => {
+  const { humanBytes } = await import("../src/duck/disk-fit.ts" as string) as typeof import("../src/duck/disk-fit.ts");
+  const GiB = 2 ** 30;
+  const b = { ...PICKED.secret, disk: { table: "public.accounts", estimateBytes: 30 * GiB + 12345, freeBytes: 18 * GiB, reserveBytes: 9 * GiB, pendingBytes: 2 * GiB, spillSet: false, resync: true, fits: false } };
+  const cli = commands.addedLines(b as never, FILE).notes.find((x) => x.startsWith("added anyway: "))!;
+  const sentence = (x: string) => `${x[0]!.toUpperCase()}${x.slice(1)}.`;
+  assert.equal(fn<[unknown], string | null>("diskNote")(b.disk), sentence(cli));
+  const unknown = { table: "public.accounts", unknown: "the free space could not be read: EACCES" };
+  assert.equal(fn<[unknown], string | null>("diskNote")(unknown), sentence(commands.addedLines({ ...b, disk: unknown } as never, FILE).notes.find((x) => x.startsWith("its room on disk"))!));
+  assert.equal(fn<[unknown], string | null>("diskNote")({ ...b.disk, fits: true }), null, "one that fits says nothing");
+  assert.equal(fn<[unknown], string | null>("diskNote")(undefined), null, "an older run's answer says nothing");
+  for (const n of [0, 512, 1023, 1024, 1536, 5 * 2 ** 20, 7 * GiB, 3 * 1024 * GiB]) assert.equal(fn<[number], string>("diskBytes")(n), humanBytes(n), String(n));
+});
+
 test("the app: Remove asks first, Cancel takes it back, the confirm sends POST api/remove and reads the state again", async () => {
   const run = fakeRun();
   run.answers.set("GET api/state", answer(ACCOUNTS_ADDED));

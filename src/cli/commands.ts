@@ -28,6 +28,7 @@ import { entriesOfLines, logLineText } from "../lib/log-buffer.ts";
 import { LogReader, logPath } from "../lib/log-read.ts";
 import { catalogTable, entryName, findEntry, tableNameProblem, type CatalogColumn, type CatalogTable, type ProjectSource } from "./sources.ts";
 import { addEntry, listTables, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type ListedTable, type PickResult, type RemoveResult } from "./source-edit.ts";
+import { diskFitNote, type DiskFit, type DiskRoom, type DiskShortage } from "../duck/disk-fit.ts";
 import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFacts, type SourceTable } from "./preflight.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
 import { reach } from "./state.ts";
@@ -59,6 +60,9 @@ export interface TableState extends Omit<CatalogTable, "columns"> {
   columns?: ColumnState[];
   /** how many columns it has (the lean state's too: the page's "5 of 12 columns"); absent from a run before it was said */
   columnCount?: number;
+  /** an added table short of disk (src/duck/disk-fit.ts `DiskShortage`): its first sync stopped part way, or the estimate
+   *  it was added anyway with; absent otherwise */
+  diskShort?: DiskShortage;
   /** an added table's entry as the sources file says it: `columns:` (null: every column but `exclude:`), `exclude:`, `key:`
    *  (null: its primary key); absent for a table not added, and from a run before it was said */
   entry?: { columns: string[] | null; exclude: string[]; key: string[] | null };
@@ -136,7 +140,7 @@ export interface RunState {
   stream?: StreamStatus;
   /** the disk under the copy (src/duck/sync.ts diskStatus): free where its file is, the file, what the copies running
    *  are projected to add; a run from before it has none */
-  disk?: { path: string; freeBytes: number | null; copyBytes: number | null; projectedBytes: number | null; error?: string };
+  disk?: { path: string; freeBytes: number | null; copyBytes: number | null; projectedBytes: number | null; reserveBytes?: number; error?: string };
   /** the Postgres API's sessions logged in now, by user and client (src/api/postgres/server.ts openSessions); a run from
    *  before it has none */
   sessions?: SessionsOpen;
@@ -523,7 +527,11 @@ const STATUS_USAGE = `usage: mason status [--json]
     source's: its sources file's), file (the sources file), shownFile (it from the project's root), url, database, remote, version, standby, changes,
     replication, demo (the demo database this run hosts), textOrder (what reading the database's text order left to say), sync: { default (every table's sync unless its entry
     says its own: off, poll 30s), written (the file's top sync: says it; false: the default) } }, warnings, folder, project, tables: [{ table, rows,
-    bytes, key, added, columnCount (how many columns the table has), entry (an added table's entry as the sources file
+    bytes, estimateBytes (a table not added: about how much its synced data would take on disk, every column,
+    estimated from the catalog when it was read; null when added), diskShort (an added table short of disk: { code
+    (disk_short), neededBytes, freeBytes, reserveBytes (kept for queries that spill to disk), pendingBytes (what the
+    first syncs under way need), estimated (true: the catalog's estimate, as it was added anyway; false: its first
+    sync stopped part way, measured) }; absent otherwise), key, added, columnCount (how many columns the table has), entry (an added table's entry as the sources file
     says it: { columns (null: every column but exclude), exclude, key (null: its primary key) }), everyColumnLeavesOut
     (an added table's columns that mason add <table> with no --columns leaves out: they look like secrets),
     columnsPending (its columns changed on the database: the columns its next whole read syncs; absent otherwise),
@@ -545,7 +553,8 @@ const STATUS_USAGE = `usage: mason status [--json]
     syncedAt (the latest sync of any) }, engine: { file, bytes, keptDays (MASON_HISTORY_DAYS), version (the run's), startedAt,
     uptimeSeconds, restarts (the times its supervisor started the run again: { count, last: { at, why, upSeconds }
     or null }, or { error }) }, disk: { path (where the synced data's file is), freeBytes, copyBytes (the file and its write-ahead log),
-    projectedBytes (what the first syncs running are projected to add; null: none, or too early to say), error },
+    projectedBytes (what the first syncs running are projected to add; null: none, or too early to say), reserveBytes
+    (what queries may spill into now, kept beside a table an add syncs: half of what is free, or MASON_SPILL_LIMIT), error },
     sessions: { open (the Postgres API's sessions logged in), byClient: [{ user ('' a token's), client (its
     application_name), open, running }] }, users: { active (the users mason user made, removed ones not counted) } or
     { error }, share: (null, or what mason share has open) { port, fingerprint, sessions,
@@ -953,7 +962,13 @@ export function diskRows(d: RunState["disk"]): Array<[string, string]> {
   if (d === undefined) return [];
   const adds = d.projectedBytes === null ? "" : ` · the first syncs running are projected to add about ${fileSize(d.projectedBytes)} more`;
   if (d.freeBytes === null) return [["Free disk", `${d.error ?? "the free space could not be read"}${adds}`]];
-  return [["Free disk", `${fileSize(d.freeBytes)} free in ${d.path}${adds}${d.projectedBytes !== null && d.projectedBytes > d.freeBytes ? " — more than is free: the sync stops before the disk fills" : ""}`]];
+  return [["Free disk", `${fileSize(d.freeBytes)} free in ${d.path}${reserveText(d)}${adds}${d.projectedBytes !== null && d.projectedBytes > d.freeBytes ? " — more than is free: the sync stops before the disk fills" : ""}`]];
+}
+
+/** What queries may spill into, beside the free disk (mason status's Free disk, the web page's Disk): an add keeps it
+ *  beside a table (src/duck/disk-fit.ts); none for a run from before it */
+export function reserveText(d: { reserveBytes?: number }): string {
+  return typeof d.reserveBytes === "number" ? ` · ${fileSize(d.reserveBytes)} kept for queries that spill to disk` : "";
 }
 
 /** `Restarts` in mason status: how many times the run was started again, and the last one's reason (none: no row) —
@@ -1043,7 +1058,9 @@ const TABLES_USAGE = `usage: mason tables [<table>…] [--all] [--json]
   --json      as data: its shape is at the end
 
   The --json answer: { database, source: { name (the source's: its sources file's), file (the sources file) },
-    tables: [{ table, rows, bytes, primaryKey, comment, addable,
+    tables: [{ table, rows, bytes (its size in the database, its indexes included), estimateBytes (a table not
+    added: about how much its synced data would take on disk, every column, estimated from the catalog; null when
+    added), primaryKey, comment, addable,
     reason, added, addedColumns (the columns it syncs: null when not added), copyKey (the key: the sources
     file keys it by, null: its primary key), entry, columns: [{ name, type, nullable, comment, references,
     secret }] }], next }
@@ -1104,7 +1121,8 @@ export async function tables(argv: string[]): Promise<number> {
   for (const t of shown) {
     const size = t.rows === null ? "rows unknown" : `~${n(t.rows)} rows`;
     const added = t.added ? ` · added (${t.addedColumns!.length === t.columns.length ? "every column" : t.addedColumns!.join(", ")}${t.copyKey ? `; keyed by ${t.copyKey.join(", ")}` : ""})` : "";
-    out(`${t.table} · ${size}${t.key.length ? ` · key ${t.key.join(", ")}` : ""}${added}`);
+    const synced = t.estimateBytes === null ? "" : ` · synced, about ${bytesText(t.estimateBytes)} on disk`;
+    out(`${t.table} · ${size}${t.key.length ? ` · key ${t.key.join(", ")}` : ""}${added}${synced}`);
     if (t.comment) out(`  ${t.comment}`);
     if (t.reason) out(`  cannot be added as it is: ${t.reason}`);
     const w = Math.max(...t.columns.map((c) => c.name.length));
@@ -1127,7 +1145,7 @@ export async function tables(argv: string[]): Promise<number> {
  */
 export function tableJson(t: ListedTable): Record<string, unknown> {
   return {
-    table: t.table, rows: t.rows, bytes: t.bytes, primaryKey: t.key, comment: t.comment,
+    table: t.table, rows: t.rows, bytes: t.bytes, estimateBytes: t.estimateBytes, primaryKey: t.key, comment: t.comment,
     addable: t.reason === null, reason: t.reason, added: t.added, addedColumns: t.addedColumns, copyKey: t.copyKey, entry: t.entry,
     columns: t.columns.map((c) => ({ name: c.name, type: c.type, nullable: c.nullable, comment: c.comment, references: c.references, secret: c.secret })),
   };
@@ -1218,15 +1236,50 @@ async function withoutRun(cmd: string, p: Project, json: boolean): Promise<{ db:
 
 /** What an edit answered, as the run's command server answers it: the result, or the refusal's HTTP status and sentence,
  *  or `failure`: the run could not make the edit at all just now (the database's tables could not be read: a 503), said
- *  whole as the command's failure — what is wrong, why, the way out and next — as the step before it says it. */
-type Edited<T> = { ok: T } | { status: number; error: string; failure?: Failure };
+ *  whole as the command's failure — what is wrong, why, the way out and next — as the step before it says it.
+ *  `refusal`: this one table's refusal whole (its code, why and fix), and `disk` its numbers when it likely won't fit. */
+type Edited<T> = { ok: T } | { status: number; error: string; failure?: Failure; refusal?: Failure; disk?: DiskFit };
 function edited<T>(f: () => T): Edited<T> {
   try { return { ok: f() }; }
   catch (e) {
     // a refusal is the edit's answer, said as the run's is; anything else is a bug, and goes on up
-    if (e instanceof Refusal) return { status: e.status, error: e.message };
+    if (e instanceof Refusal) return { status: e.status, error: e.message, refusal: e.failure, ...(isDiskFit(e.extra.disk) ? { disk: e.extra.disk } : {}) };
     throw e;
   }
+}
+
+/** A table's disk numbers as an answer carries them (`DiskFit`), held to their shape: the run's answer is read here. */
+function isDiskFit(v: unknown): v is DiskFit {
+  const o = v as Record<string, unknown> | null;
+  return typeof o === "object" && o !== null && typeof o.table === "string" && typeof o.fits === "boolean" && typeof o.resync === "boolean" && (typeof o.spillSet === "boolean" || o.spillSet === null) &&
+    ["estimateBytes", "freeBytes", "reserveBytes", "pendingBytes"].every((k) => typeof o[k] === "number");
+}
+
+/**
+ * THE ROOM ON THE DISK A STOPPED PROJECT'S SYNCED DATA WILL BE ON (`mason add` with Mason down): free in `.mason/`,
+ * what queries will spill into (the run's own rule, src/duck/store.ts `spillCeiling`, with MASON_SPILL_LIMIT read by
+ * its own grammar), and the first syncs this command added before (`ahead`, but `table`). Read when asked, never before:
+ * the engine's module is loaded only here.
+ */
+export async function stoppedRoom(dir: string, env: Readonly<Record<string, string | undefined>> = process.env, freeAt?: (dir: string) => number):
+  Promise<(table: string, ahead: ReadonlyMap<string, number>) => DiskRoom | { unknown: string }> {
+  const { freeBytesAt, memoryLimitBytes, spillCeiling } = await import("../duck/store.ts");
+  const freeOf = freeAt ?? freeBytesAt;
+  return (table, ahead) => {
+    let free: number;
+    try { free = freeOf(dir); }
+    // said as unknown (the add goes on, its line says the disk was not checked), never read as room
+    catch (e) { return { unknown: `the free space in ${dir} could not be read: ${(e as Error).message}` }; }
+    const setText = env.MASON_SPILL_LIMIT || undefined;
+    let set: number | null = null;
+    if (setText !== undefined) {
+      try { set = memoryLimitBytes(setText); }
+      // mason start refuses it, naming it: here it is no amount to keep, so the room cannot be told
+      catch (e) { return { unknown: `MASON_SPILL_LIMIT is not an amount (${(e as Error).message})` }; }
+    }
+    const pendingBytes = [...ahead].filter(([t]) => t !== table).reduce((s, [, b]) => s + b, 0);
+    return { freeBytes: free, reserveBytes: spillCeiling(free, 0, set), spillSet: set !== null, pendingBytes };
+  };
 }
 
 /** The run's command server's answer, as an edit's (`Edited`): what `/api/pick` or `/api/remove` answered. */
@@ -1237,12 +1290,14 @@ async function viaRun<T>(run: DevRun, route: "/api/pick" | "/api/remove", body: 
   if (r.status === 200) return { ok: r.body as unknown as T };
   // a 503 is the run's own (src/cli/run-server.ts readNow): the database's tables could not be read just now, whatever
   // the table; every other status refuses this one table, and an add goes on to the next
-  return { status: r.status, error: String(r.body.error), ...(r.status === 503 && r.body.failure !== undefined ? { failure: runFailure(r, runNext(r)) } : {}) };
+  return { status: r.status, error: String(r.body.error), ...(r.status === 503 && r.body.failure !== undefined ? { failure: runFailure(r, runNext(r)) } : {}),
+    // this table's refusal whole, and its disk numbers (a table that likely won't fit: the answer's `disk`)
+    ...(r.status !== 503 && r.body.failure !== undefined ? { refusal: runFailure(r, []) } : {}), ...(isDiskFit(r.body.disk) ? { disk: r.body.disk } : {}) };
 }
 
 // ------------------------------------------------------------------ mason add
 
-const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--include <column>,…] [--key <column>,…] [--sync <sync>] [--json]
+const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--include <column>,…] [--key <column>,…] [--sync <sync>] [--yes] [--json]
 
   Syncs tables into Mason: each one is added to the project's sources file (mason/sources/<name>.yml), under tables:
 
@@ -1259,6 +1314,7 @@ const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--inclu
   --key <a,b,…>       for a table with no primary key: the columns that tell its rows apart, which it is keyed by (one
                       table at a time; polled or off: logical replication cannot apply a change by them)
   --sync <sync>       how it is kept current after its first sync, written on its entry: off, "poll 30s" or replication
+  --yes               add it even when it likely won't fit on disk
   --json              as data: its shape is at the end
 
   A table is its name (orders) or schema.table (billing.invoices). Its primary key is always synced. The rest of the
@@ -1273,6 +1329,13 @@ const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--inclu
   database, and a table replication cannot keep (no primary key: --key; REPLICA IDENTITY NOTHING) under a file whose
   sync: is replication is written sync: poll 5m and said. A table of tens of millions of rows set to poll more often
   than every minute is warned of, with an estimate of what each poll costs your database.
+
+  Before a table is added, its synced size is estimated from the database's catalog (no read of the table), for the
+  columns it syncs. When that likely won't fit on the disk the synced data is on, beside the room kept for queries that
+  spill to disk (half of what is free, or MASON_SPILL_LIMIT) and what the first syncs under way still need, the table
+  is not added, and the numbers are said: choose fewer columns (--columns), give Mason more disk, or add it anyway
+  (--yes). A table added again with other columns is synced again whole, its synced data kept until then, so the new
+  sync must fit beside it. The estimate is rough: a sync that runs short of disk stops before the disk fills.
 
   A column that looks like a secret (password, token, api_key, private_key, …, its words read however the name is
   written: passwordHash, apiKey, API_TOKEN) is left out unless named, and said: it is written as
@@ -1290,8 +1353,12 @@ const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--inclu
     30s), from (entry: its own sync:, file: the file's, default: off, as the file writes none) },
     bigOff (it is over ${BIG_TABLE_ROWS.toLocaleString("en-US")} rows and its entry was written sync: off), notReplicated (why
     its entry was written sync: poll 5m under a file whose sync: is replication, or null), pollCost (an estimate of
-    what a frequent poll of a big table costs your database, or null) } or { table, error }],
-    file (the sources file), error (when a table was not added: { code, message, why }), next };
+    what a frequent poll of a big table costs your database, or null), disk (whether its sync fits on disk:
+    { table, estimateBytes, freeBytes, reserveBytes, pendingBytes, spillSet, resync, fits }, fits false when added
+    with --yes; { table, unknown } when the free disk could not be read; null when nothing is synced whole) } or
+    { table, error, disk (on code disk_short: the numbers) }],
+    file (the sources file), error (when a table was not added: { code (disk_short: it likely won't fit on disk),
+    message, why }), next };
     exit 1 when a table could not be added
 `;
 
@@ -1301,9 +1368,17 @@ export const ADD: CommandSpec & { needs: "project" } = {
   name: "add",
   summary: "sync tables into Mason, adding them to the sources file: mason add orders (--columns id,status: those only)",
   usage: ADD_USAGE,
-  options: { json: { type: "boolean" }, columns: { type: "string", multiple: true }, include: { type: "string", multiple: true }, key: { type: "string", multiple: true }, sync: { type: "string" } },
+  options: { json: { type: "boolean" }, columns: { type: "string", multiple: true }, include: { type: "string", multiple: true }, key: { type: "string", multiple: true }, sync: { type: "string" },
+    yes: { type: "boolean" } },
   json: ["added", "file", "error", "next"],
 };
+
+/** `mason add` of `tables` as the command line named its flags (all but --json), with --yes: what adds them anyway. A
+ *  value with a space is quoted, as a shell reads it. */
+export function addAnywayLine(tables: readonly string[], argv: readonly string[], positionals: readonly string[]): string {
+  const flags = argv.filter((a, i) => (!positionals.includes(a) || ["--columns", "--include", "--key", "--sync"].includes(argv[i - 1] ?? "")) && a !== "--json" && a !== "--yes");
+  return ["mason add", ...tables.map(tableArg), ...flags.map((a) => /[\s"'$`\\]/.test(a) ? JSON.stringify(a) : a), "--yes"].join(" ");
+}
 
 /** `--sync`, read by the sources file's own grammar (src/lib/table-sync.ts parseSync): a sync, or the usage's problem */
 export function addSync(v: string | undefined): TableSync | undefined | string {
@@ -1344,7 +1419,11 @@ export async function add(argv: string[]): Promise<number> {
   if (typeof sync === "string") return failed("add", { message: sync, code: "usage", usage: ADD_USAGE }, { json });
   // --sync alone: a table already added keeps its columns and key, and only its sync: line is written
   const keep = sync !== undefined && f.values.columns === undefined && f.values.include === undefined && f.values.key === undefined;
-  const how = { ...(sync !== undefined ? { sync } : {}), keep };
+  // --yes: added even when it likely won't fit on disk (src/duck/disk-fit.ts)
+  const yes = f.values.yes === true;
+  const how = { ...(sync !== undefined ? { sync } : {}), keep, yes };
+  // the command line that adds them anyway, as it was given, --yes added: a refusal's next step
+  const anyway = (tables: readonly string[]): string => addAnywayLine(tables, argv, f.positionals);
   const where = await reach(ADD, json);
   // (a state with no project never meets the need: reach said it)
   if (where === null || where.project === null) return 1;
@@ -1361,7 +1440,8 @@ export async function add(argv: string[]): Promise<number> {
       // a large catalog's read outlasts one request: a person is told it goes on, a line each time the run says so
       const { state: s, read } = await readStateRead(run, { fresh: true, ...(json ? {} : { progress: (said: string) => err(styleErr().dim(`  ${said} …`)) }) });
       return addTables({ tables: s.tables, file: s.source.file ?? null,
-        pick: (table, columns, key) => viaRun<PickResult>(run, "/api/pick", { table, picked: true, columns, ...(key ? { key } : {}), ...(sync ? { sync: syncText(sync) } : {}), keep }, read),
+        pick: (table, columns, key) => viaRun<PickResult>(run, "/api/pick", { table, picked: true, columns, ...(key ? { key } : {}), ...(sync ? { sync: syncText(sync) } : {}), keep, ...(yes ? { yes } : {}) }, read),
+        anyway,
         // --sync alone on tables already added: no copy starts (each is caught up by one poll), so wait has nothing to wait for
         next: (n, wereAdded) => keep && wereAdded === n
           ? [["mason status", `${n === 1 ? "its sync and when it was last synced: it is" : "their sync and when each was last synced: each is"} caught up by one poll, never synced again whole`], READY_STEPS[0]!]
@@ -1371,8 +1451,17 @@ export async function add(argv: string[]): Promise<number> {
   // Mason down: the command writes the entry itself, checked as the run checks it; the copy begins at mason start
   const down = await withoutRun("add", where.project, json);
   if (down === null) return 1;
-  return addTables({ tables: down.tables, file: down.file,
-    pick: async (table, columns, key) => edited(() => addEntry(down.edit(), down.db, table, columns, key, how)),
+  // THE DISK THE SYNCED DATA WILL BE ON (.mason/), as the run will hold it (src/duck/disk-fit.ts): the tables this
+  // command added before count as first syncs to come
+  const room = await stoppedRoom(where.project.dir);
+  const ahead = new Map<string, number>();
+  const db: EditCatalog = { ...down.db, disk: (table) => room(table, ahead) };
+  return addTables({ tables: down.tables, file: down.file, anyway,
+    pick: async (table, columns, key) => {
+      const r = edited(() => addEntry(down.edit(), db, table, columns, key, how));
+      if ("ok" in r && r.ok.disk !== null && "fits" in r.ok.disk) ahead.set(table, r.ok.disk.estimateBytes);
+      return r;
+    },
     next: () => [["mason start", "Mason in the background, for this project: the first sync of every added table begins"],
       ["mason wait", "then, until every added table is synced and served"]] }, specs, json);
 }
@@ -1383,6 +1472,8 @@ interface AddWay {
   tables: ReadonlyArray<Omit<CatalogTable, "columns">>;
   file: string | null;
   pick: (table: string, columns: string[], key: string[] | null) => Promise<Edited<PickResult>>;
+  /** the command line that adds these tables anyway (--yes): a table that likely won't fit says it */
+  anyway: (tables: readonly string[]) => string;
   /** what to run once `n` tables are added, `wereAdded` of them named by the file before */
   next: (n: number, wereAdded: number) => NextStep[];
 }
@@ -1394,7 +1485,7 @@ async function addTables(way: AddWay, specs: ReadonlyArray<{ table: string; colu
   let wereAdded = 0;
   let file: string | null = way.file;
   // the tables that could not be added, each with its reason and code: the command's failure, in the failure shape
-  const refused: Array<{ table: string; message: string; code: string }> = [];
+  const refused: Array<{ table: string; message: string; code: string; why?: string }> = [];
   // A CHECKLIST, a line per table (it reads best as a list of completed actions): a spinner
   // while it is added, ✔ with what was written, its notes under it; ✘ with the reason when it could not be
   const st = styleOut();
@@ -1417,15 +1508,18 @@ async function addTables(way: AddWay, specs: ReadonlyArray<{ table: string; colu
       return failed("add", f, { json: false });
     }
     if (!("ok" in r)) {
-      refused.push({ table: t.table, message: r.error, code: r.status === 404 ? "not_found" : "refused" });
-      results.push({ table: t.table, error: r.error });
-      if (!json) { steps.fail(`Adding ${t.table}`); note(r.error); }
+      // LIKELY WON'T FIT ON DISK (src/duck/disk-fit.ts): its words whole, its numbers, and the line that adds it anyway
+      const short = r.refusal?.code === "disk_short" && r.disk !== undefined;
+      refused.push({ table: t.table, message: r.error, code: short ? "disk_short" : r.status === 404 ? "not_found" : "refused",
+        ...(short && r.refusal?.why ? { why: r.refusal.why } : {}) });
+      results.push({ table: t.table, error: r.error, ...(short ? { disk: r.disk } : {}) });
+      if (!json) { steps.fail(`Adding ${t.table}`); note(r.error); if (short && r.refusal?.why) note(r.refusal.why); }
       continue;
     }
     const b = r.ok;
     file = b.file;
     results.push({ table: b.table, entry: b.entry, columns: b.columns, exclude: b.exclude, key: b.key, addedKey: b.addedKey, skippedSecrets: b.skippedSecrets, already: b.already,
-      sync: b.sync, bigOff: b.bigOff, notReplicated: b.notReplicated, pollCost: b.pollCost });
+      sync: b.sync, bigOff: b.bigOff, notReplicated: b.notReplicated, pollCost: b.pollCost, disk: b.disk ?? null });
     added.push(b.table);
     if (t.added) wereAdded++;
     if (json) continue;
@@ -1437,11 +1531,14 @@ async function addTables(way: AddWay, specs: ReadonlyArray<{ table: string; colu
   if (refused.length) {
     // A TABLE NOT ADDED IS THE COMMAND'S FAILURE, in the shape every failure has (found by the CLI session test of the private repo:
     // exit 1 with no error, and nothing on stderr): what is wrong, each table's reason, and next — the added ones' too
+    const short = refused.filter((x) => x.code === "disk_short");
     const f: Failure = {
       message: specs.length === 1 ? `${refused[0]!.table} was not added` : `${refused.length} of ${specs.length} tables were not added: ${refused.map((x) => x.table).join(", ")}`,
-      code: refused.every((x) => x.code === "not_found") ? "not_found" : refused.every((x) => x.code === "usage") ? "usage" : "refused",
-      why: refused.map((x) => specs.length === 1 ? x.message : `${x.table}: ${x.message}`).join("; "),
-      next: [...next, ["mason tables", "the database's tables, as this user reads them"]],
+      code: refused.every((x) => x.code === "not_found") ? "not_found" : refused.every((x) => x.code === "usage") ? "usage" : refused.every((x) => x.code === "disk_short") ? "disk_short" : "refused",
+      why: refused.map((x) => `${specs.length === 1 ? "" : `${x.table}: `}${x.message}${x.why ? `. ${x.why}` : ""}`).join("; "),
+      ...(short.length ? { fix: `choose fewer columns (--columns), give Mason more disk, or add ${short.length === 1 ? "it" : "them"} anyway (--yes): a sync that runs short of disk stops before the disk fills, and keeps the rows it has` } : {}),
+      next: [...next, ...(short.length ? [[way.anyway(short.map((x) => x.table)), `add ${short.length === 1 ? "it" : "them"} anyway, though ${short.length === 1 ? "it" : "they"} likely won't fit on disk`] as NextStep] : []),
+        ["mason tables", "the database's tables, as this user reads them"]],
     };
     if (json) { out(jsonText(ADD, { added: results, file, error: errorJson(f) }, f.next!)); return 1; }
     return failed("add", f, { json: false });
@@ -1471,6 +1568,9 @@ export function addedLines(b: PickResult, file: string): { line: string; notes: 
   return { line: `Added ${b.table} to ${file}: ${copies}${b.key ? `, keyed by ${b.key.join(", ")}` : ""}${b.already ? " (already so)" : ""}`, notes: [
     sync,
     ...(b.pollCost !== null ? [b.pollCost] : []),
+    // added anyway though it likely won't fit (--yes, the page's Add anyway), or the disk not checked: said, the same words on the page
+    ...(b.disk != null && "fits" in b.disk && !b.disk.fits ? [`added anyway: ${diskFitNote(b.disk)}`] : []),
+    ...(b.disk != null && "unknown" in b.disk ? [`its room on disk was not checked: ${b.disk.unknown}`] : []),
     ...(b.addedKey.length ? [`key added: ${b.addedKey.join(", ")} (a synced table always has its key)`] : []),
     // a secret is readable by anyone with a user's password: left out, and said, with the way to include one
     ...(s.length ? [`left out ${s.join(", ")}: ${s.length === 1 ? "it looks" : "they look"} like ${s.length === 1 ? "a secret" : "secrets"}, ` +
@@ -1903,10 +2003,11 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     asked by hand), sync_changed (a table's sync: changed), columns_changed (a table's columns changed on the database), sync_stopped (a table's sync stopped because the table was removed), polled (a poll on its schedule, with --scheduled), streamed (a
     minute of the stream's changes to a table, with --scheduled), ui_error (the web page met an error of its own)), failed,
     table (null: the whole sync, the run or the web page),
-    message, code (a failure: its SQLSTATE, its system error such as ECONNREFUSED, its error class, or unknown;
-    null for good news and for an event recorded before Mason kept it), origin (a failure: where it happened in
-    Mason, a file and a line such as src/duck/sync.ts:1234, or null), tookMs (how long a sync took, in ms: full_sync,
-    synced, polled; else null) }], keptDays }; with --running { running: [{ session, user,
+    message, code (a failure: its SQLSTATE, its system error such as ECONNREFUSED, its error class, disk_short (a
+    first sync stopped before the disk filled), or unknown; null for good news and for an event recorded before Mason
+    kept it), origin (a failure: where it happened in Mason, a file and a line such as src/duck/sync.ts:1234, or
+    null), tookMs (how long a sync took, in ms: full_sync, synced, polled; else null), disk (with code disk_short:
+    { code, neededBytes, freeBytes, reserveBytes, pendingBytes, estimated }; absent otherwise) }], keptDays }; with --running { running: [{ session, user,
     applicationName, method, startedAt, runningMs, rows (sent so far), query, queryTruncated }] }; next
 `;
 
