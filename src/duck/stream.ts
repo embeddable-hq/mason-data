@@ -69,26 +69,37 @@ export function projectTuple(relation: readonly RelationColumn[], tuple: readonl
 }
 
 /**
- * WHETHER A RELATION'S COLUMNS ARE STILL THE ONES THE COPY WAS TAKEN FROM (issue 1073), else why not. pgoutput names a
- * relation's columns, never their numbers, in the order of their numbers: so the columns the run took (`relation`, the
- * table's every column as the catalog read it, by number) must open the relation's list, in order, each under its name,
- * the columns added since after them. A column Postgres does not send (`skippable`: a generated one, or one a named
- * publication's column list leaves out) may be missing. Anything else is a column renamed, swapped or dropped: a
- * change sent under a name may then be another column's value (two names swapped in one transaction served a salary as
- * `a`), so the table is refused before it is applied (`StreamTarget.refuse`), and its columns read again. A relation of
- * another oid is another table of the same name.
+ * WHETHER A RELATION'S COLUMNS ARE STILL THE ONES THE COPY WAS TAKEN FROM (issue 1073). pgoutput names a relation's
+ * columns, never their numbers, in the order of their numbers. So the columns the run took (`relation`, the table's
+ * every column as the catalog read it, by number) must appear in the relation's list in the same order, each under its
+ * name, with the columns added since after them all.
+ * - `null`: they do. A column Postgres does not send (`skippable`: a generated one, or one a named publication's column
+ *   list leaves out) may be missing.
+ * - `{ moved }`: a name out of its place, a swap or a rename. A change sent under a name may then be another column's
+ *   value (two names swapped in one transaction served a salary as `a`), so the table is refused before it is applied
+ *   (`StreamTarget.refuse`), and its columns read again. A relation of another oid is another table of the same name.
+ * - `{ narrower }`: some columns are missing, the rest in place. That is a column dropped, or a column dropped with
+ *   another renamed into its name (`a` dropped and `salary` renamed `a` reads as `salary` dropped).
+ * Names cannot tell more. Every name in its place can still be another column (a drop, then renames shifting each name
+ * back into place, then an add), and narrower reads two changes as one. A drop is for good, so the catalog as it is now
+ * tells them apart: unless refused here, a relation message is checked once (`StreamTarget.verify`) before a change of
+ * it is applied.
  */
-export function relationMoved(relid: number, relation: readonly RelationColumn[], table: StreamedTable): string | null {
+export function relationMoved(relid: number, relation: readonly RelationColumn[], table: StreamedTable): { moved: string } | { narrower: true } | null {
   const r = table.relation;
   if (r === undefined) return null;
-  if (relid !== r.oid) return "it is another table on the database now (dropped and made again under its name)";
-  let i = 0;
+  if (relid !== r.oid) return { moved: "it is another table on the database now (dropped and made again under its name)" };
+  let i = 0, narrower = false;
   for (const c of r.columns) {
     if (relation[i]?.name === c.name) { i++; continue; }
-    if (c.skippable) continue;
-    return `its columns changed on the database: the stream sends ${relation.map((x) => x.name).join(", ") || "none"}, and its synced data was taken from ${r.columns.map((x) => x.name).join(", ")}`;
+    if (!c.skippable) narrower = true;
   }
-  return null;
+  // what is left are the columns added since: a name the run took among them is out of its place
+  const taken = new Set(r.columns.map((c) => c.name));
+  if (relation.slice(i).some((x) => taken.has(x.name))) {
+    return { moved: `its columns changed on the database: the stream sends ${relation.map((x) => x.name).join(", ") || "none"}, and its synced data was taken from ${r.columns.map((x) => x.name).join(", ")}` };
+  }
+  return narrower ? { narrower: true } : null;
 }
 
 /** the copy's columns a relation does not carry, but for those Postgres never publishes (`generated`, read from the
@@ -295,6 +306,10 @@ export interface StreamTarget {
    *  and the way out — recorded before the stream goes on, so nothing past the change is acknowledged without it. Called
    *  once per `tables()` entry */
   refuse(source: string, why: { missing: readonly string[] } | { moved: string }): Promise<void>;
+  /** a streamed table's relation message that `relationMoved` does not refuse: whether each column its copy holds is
+   *  still that column on the database now, as the catalog says. Null when it is, else why not (a check that cannot tell
+   *  says so: fail closed). Asked once a relation message, before a change of it is applied */
+  verify(source: string, table: StreamedTable): Promise<string | null>;
   /** told of each relation message, with the columns it carries: Postgres sends one before a table's first change in a
    *  stream, and again after its definition changed (an ALTER TABLE), so the target checks whether the table's columns
    *  changed on the database (issue 977). Never awaited: the check is the target's, beside the stream */
@@ -393,6 +408,8 @@ export class ReplicationStream {
     const relations = new Map<number, Relation>();
     // the streamed tables refused by a relation lacking a copied column, by their `tables()` entry: once each
     const refused = new WeakSet<StreamedTable>();
+    // what the catalog said of a narrower relation, by relation message (each message a new entry): asked once
+    const verified = new WeakMap<Relation, { table: StreamedTable; why: string | null }>();
     let batch = new Map<string, TableChanges>();
     let rows = 0, firstAt = 0;
     // the batch holds a change of a big table: applied by `applySize`'s larger bounds
@@ -477,8 +494,18 @@ export class ReplicationStream {
               // its columns no longer the ones its copy was taken from (a rename, a swap, a drop: issue 1073), or a column
               // the copy holds that the relation does not carry (a narrower publication): its changes cannot be written as
               // they are, so the table is refused and leaves the stream; the others go on
-              const moved = relationMoved(relid, rel.columns, table);
               const missing = missingFrom(rel.columns, table);
+              const fits = missing.length ? null : relationMoved(relid, rel.columns, table);
+              // in place or narrower: the catalog says whether each column the copy holds is still that column, once a
+              // relation message (names in their places can still be other columns: a drop, then renames shifting every
+              // name back into place, then an add; and narrower reads a drop and a rename into its name as one drop)
+              let moved = fits !== null && "moved" in fits ? fits.moved : null;
+              if (missing.length === 0 && moved === null && table.relation !== undefined) {
+                const seen = verified.get(rel);
+                const why = seen?.table === table ? seen.why : await this.target.verify(rel.source, table);
+                verified.set(rel, { table, why });
+                moved = why;
+              }
               if (moved !== null || missing.length) {
                 if (!refused.has(table)) { refused.add(table); await this.target.refuse(rel.source, moved !== null ? { moved } : { missing }); }
                 continue;

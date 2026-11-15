@@ -3181,7 +3181,7 @@ export class Sync {
     const s = new ReplicationStream({
       connect: () => PgConnection.connect({ ...this.pgOptions(), replication: true }), slot: r.slot, publication: r.publication, log: (l) => this.log(l), errorText: (e) => this.errorText(e),
       target: { tables: () => this.streamed, apply: (batch, lsn, committedAt) => this.applyStreamed(batch, lsn, committedAt), applied: () => this.appliedLsn,
-        refuse: (source, why) => this.refuseStreamed(source, why), current: () => { if (this.stream === s) this.streamCurrent(); },
+        refuse: (source, why) => this.refuseStreamed(source, why), verify: (source) => this.verifyStreamed(source), current: () => { if (this.stream === s) this.streamCurrent(); },
         relation: (source, columns) => this.relationSeen(source, columns) },
     });
     this.stream = s;
@@ -3230,6 +3230,30 @@ export class Sync {
       this.streamTimer?.cancel();
       this.streamTimer = timerAt(this.streamAt, () => { this.streamTimer = null; this.kick(); });
     });
+  }
+
+  /**
+   * A STREAMED TABLE'S RELATION MESSAGE, ITS NAMES IN PLACE OR NARROWER (src/duck/stream.ts `relationMoved`, issue 1073):
+   * names alone cannot tell a column dropped from one dropped with another renamed into its name, nor a drop and renames
+   * that shift every name back into place. A drop is for good, so each column its copy holds still being that column NOW,
+   * by number and name (`identitySql`, on a connection of its own), says the relation's names are those columns. Asked
+   * once a relation message: Postgres sends one before a table's first change in a stream and after its definition
+   * changes. Null when they are; else why not, a check that fails included (fail closed: the table is refused and caught
+   * up by one poll, which checks its columns again under its own lock).
+   */
+  private async verifyStreamed(source: string): Promise<string | null> {
+    const t = this.tables.get(source);
+    const id = t === undefined ? null : this.identityOf(this.asCopied(t));
+    if (t === undefined || id === null) return null;
+    let pg: PgConnection | null = null;
+    try {
+      pg = await PgConnection.connect(this.pgOptions());
+      const same = (await pg.query(identitySql(t.schema, t.table, id.oid, id.columns))).rows[0]?.[0];
+      if (same === "t") return null;
+      return "its columns changed on the database: a column its synced data holds is not that column now (dropped, or renamed)";
+    } catch (e) {
+      return `its columns changed on the database, and whether the columns its synced data holds are still those columns could not be checked: ${this.errorText(e)}`;
+    } finally { pg?.close(); }
   }
 
   /**

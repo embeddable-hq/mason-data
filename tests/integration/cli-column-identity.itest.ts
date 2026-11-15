@@ -168,6 +168,23 @@ async function renameThenStart(mode: Mode): Promise<void> {
   p.ok(p.mason("stop", "--json"), "mason stop");
 }
 
+/** WHILE MASON RUNS, ONE TRANSACTION: `salary` renamed `pay` and a new `salary` added (the re-check of PR 1065). The
+ *  excluded name is still there, so nothing by name says the salary moved: Mason synced `pay` at once, and said nothing */
+async function renameAndAdd(mode: Mode): Promise<void> {
+  const p = await started(mode,
+    "CREATE TABLE t (id int PRIMARY KEY, a text, salary text); INSERT INTO t SELECT g, 'p_a' || g, 'SECRET_' || g FROM generate_series(1, 4) g",
+    "  t:\n    exclude: [salary]\n");
+  psql(p.dbUrl, "BEGIN; ALTER TABLE t RENAME salary TO pay; ALTER TABLE t ADD COLUMN salary text DEFAULT 'p_new'; COMMIT");
+  psql(p.dbUrl, "UPDATE t SET a = a || ''");
+  const want = new RegExp(`${holds.source}pay is the column the sources file left out as salary\\. .*write exclude: \\[salary, pay\\] on mason/sources/.*\\.yml: tables\\.t`);
+  await until(`${mode}: t held, said on its line`, () => { p.neverSecret("after the rename and the add", ["t"]); p.bump("t"); return want.test(p.line("t")?.error ?? ""); });
+  for (let i = 0; i < 10; i++) { p.neverSecret("while t is held", ["t"]); await sleep(500); }
+  // said in the log and as an event too, not only on its line
+  const events = p.ok(p.mason("logs", "--events", "--json"), "mason logs --events").json.events as Array<{ kind: string; table: string | null; message: string }>;
+  assert.ok(events.some((e) => e.kind === "columns_changed" && e.table === "public.t" && want.test(e.message)), JSON.stringify(events));
+  p.ok(p.mason("stop", "--json"), "mason stop");
+}
+
 /** A `columns:` ENTRY: a column renamed to a name it lists, the listed one renamed away in the same transaction */
 async function listedRename(mode: Mode): Promise<void> {
   const p = await started(mode,
@@ -186,9 +203,38 @@ async function listedRename(mode: Mode): Promise<void> {
   p.ok(p.mason("stop", "--json"), "mason stop");
 }
 
+/** A SYNCED COLUMN DROPPED AND THE EXCLUDED ONE RENAMED INTO ITS NAME: the stream's relation reads as the excluded one
+ *  dropped (`id, a, b`), so its names alone cannot tell; the catalog does. And a drop, then renames that shift every
+ *  name back into place, then an add (`w`): the relation's names are the old ones in the old order. Beside them, a
+ *  plain drop of an excluded column of another table is applied, the stream going on */
+async function dropRenameInto(mode: Mode): Promise<void> {
+  const p = await started(mode,
+    "CREATE TABLE t (id int PRIMARY KEY, a text, salary text, b text); INSERT INTO t SELECT g, 'p_a' || g, 'SECRET_' || g, 'p_b' || g FROM generate_series(1, 4) g; " +
+    "CREATE TABLE w (id int PRIMARY KEY, a text, salary text, b text); INSERT INTO w SELECT g, 'p_a' || g, 'SECRET_' || g, 'p_b' || g FROM generate_series(1, 4) g; " +
+    "CREATE TABLE u (id int PRIMARY KEY, v text, note text); INSERT INTO u SELECT g, 'p_v' || g, 'p_note' || g FROM generate_series(1, 4) g",
+    "  t:\n    exclude: [salary]\n  w:\n    exclude: [salary]\n  u:\n    exclude: [note]\n");
+  psql(p.dbUrl, "BEGIN; ALTER TABLE t DROP COLUMN a; ALTER TABLE t RENAME salary TO a; COMMIT; " +
+    "BEGIN; ALTER TABLE w DROP COLUMN a; ALTER TABLE w RENAME salary TO a; ALTER TABLE w RENAME b TO salary; ALTER TABLE w ADD COLUMN b text DEFAULT 'p_new'; COMMIT; " +
+    "ALTER TABLE u DROP COLUMN note");
+  psql(p.dbUrl, "UPDATE t SET b = b || ''; UPDATE w SET b = b || ''; UPDATE u SET v = v || '!'");
+  const want = (table: string): RegExp => new RegExp(`^public\\.${table} is not synced: its columns were renamed on the database, and a is the column the sources file left out as salary\\. `);
+  const all = ["t", "w", "u"];
+  for (const table of ["t", "w"]) {
+    await until(`${mode}: ${table} held, said on its line`, () => { p.neverSecret("after the drop and the renames", all); p.bump(table); return want(table).test(p.line(table)?.error ?? ""); });
+  }
+  // the excluded column dropped alone: the table synced on, its changes applied
+  await until(`${mode}: u to equal the source`, () => { p.neverSecret("after the drop", all); p.bump("u"); return JSON.stringify(p.served("u")) === JSON.stringify(p.source("u", ["id", "v"])); });
+  for (let i = 0; i < 10; i++) { p.neverSecret("while t and w are held", all); await sleep(500); }
+  p.ok(p.mason("stop", "--json"), "mason stop");
+}
+
+test("sync: poll — a synced column dropped and the excluded one renamed into its name never serve the excluded column", { skip, timeout: 600_000 }, () => dropRenameInto("poll 1s"));
+test("sync: replication — a synced column dropped and the excluded one renamed into its name never serve the excluded column", { skip, timeout: 600_000 }, () => dropRenameInto("replication"));
 test("sync: poll — two names swapped in one transaction never serve the excluded column: the table is held, said with the line to write", { skip, timeout: 600_000 }, () => swap("poll 1s"));
 test("sync: replication — two names swapped in one transaction never serve the excluded column: the table is held, said with the line to write", { skip, timeout: 600_000 }, () => swap("replication"));
 test("sync: poll — an excluded column renamed while Mason is stopped is never served after a start from the file as it was", { skip, timeout: 600_000 }, () => renameThenStart("poll 1s"));
 test("sync: replication — an excluded column renamed while Mason is stopped is never served after a start from the file as it was", { skip, timeout: 600_000 }, () => renameThenStart("replication"));
+test("sync: poll — the excluded column renamed and a new column of its name added in one transaction: the renamed one is never served, the table held", { skip, timeout: 600_000 }, () => renameAndAdd("poll 1s"));
+test("sync: replication — the excluded column renamed and a new column of its name added in one transaction: the renamed one is never served, the table held", { skip, timeout: 600_000 }, () => renameAndAdd("replication"));
 test("sync: poll — a column renamed to a name columns: lists is not synced under it until mason add confirms the entry", { skip, timeout: 600_000 }, () => listedRename("poll 1s"));
 test("sync: replication — a column renamed to a name columns: lists is not synced under it until mason add confirms the entry", { skip, timeout: 600_000 }, () => listedRename("replication"));

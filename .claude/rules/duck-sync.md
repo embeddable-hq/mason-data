@@ -69,9 +69,11 @@ paths:
   out stays out under any other name. When the file would sync it under a new name, the table is HELD (`unplaced`): it
   is not copied, polled, caught up or streamed, it serves what it holds, and its line says why with the line to write.
   `mason add` of the table through the run confirms its entry afresh. Every read checks its columns too: the poll and
-  each chunk of a copy ask `pg_identify_object` in their own transaction after the read (`readStillPlaced`), and the
-  stream refuses a relation whose columns no longer open with the ones the copy was taken from (`relationMoved`). The
-  shape carries each column's number, so a swap or a drop and an add of one name changes it. ("Which column is which")
+  each chunk of a copy ask `pg_identify_object` in their own transaction after the read (`readStillPlaced`). The stream
+  refuses a relation with a name out of its place (`relationMoved`), and checks every other relation message once
+  against the catalog before applying a change of it (`verifyStreamed`): names in place can still be other columns
+  after a drop. The shape carries each column's number, so a swap or a drop and an add of one name changes it. ("Which
+  column is which")
 - **A batch holds a table's changes of ONE STAY in the stream, and only the stay it is in now is applied**
   (`StreamedTable.stay`: a new number when the table enters `streamed` or its copy is swapped, never used twice;
   `streamOnce`, `applyStreamed`): an ended stay's changes committed before the next copy's catch-up, so that copy or

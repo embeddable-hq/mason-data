@@ -629,17 +629,21 @@ column, because `mason add` writes the entry anew and would drop the file's othe
 The poll and each chunk of a copy ask `pg_identify_object` for each column after their read, in the same transaction.
 The read holds its lock until that transaction ends, so no rename can come between. `pg_attribute` cannot be asked
 instead. Measured on Postgres 16: in a REPEATABLE READ transaction whose snapshot was taken before a swap of `a` and
-`salary`, `SELECT a` read the salary, `pg_attribute` still said `a`, and `pg_identify_object` said `salary`. The stream
-cannot ask, since pgoutput names columns but not their numbers. It holds a relation's columns, in order, to the columns
-the copy was taken from: they must open the relation's list under the same names.
+`salary`, `SELECT a` read the salary, `pg_attribute` still said `a`, and `pg_identify_object` said `salary`.
 
-**What is left.** One stream case is not caught at once. A single transaction could drop a column, rename the columns
-after it to shift every name into place, and add a column at the end, all of one type. The relation's names would then
-be the old names in the old order. The shape check at most a minute later sees the new numbers and places the columns
-again, but the changes streamed meanwhile were applied by name. The first start of this release has no record, so a
-rename made before it is taken by name, as before.
+**The stream checks each relation message.** pgoutput names a relation's columns but not their numbers, in the order
+of their numbers. A name out of its place (a swap, a rename) refuses the table before a change of it is applied. Names
+in their places prove nothing alone. "`a` dropped and `salary` renamed `a`" reads like "`salary` dropped". A drop, then
+renames that shift every name back into place, then an add, reads like no change at all. A drop is for good, though, so
+the catalog as it is now tells these apart. Each relation message that is not refused is checked once against it, on a
+connection of its own, before a change of it is applied: each column the copy holds must still be that column. Postgres
+sends a relation message before a table's first change in a stream, and again after its definition changes (an
+autovacuum's statistics too), so the check is a short connection now and then, never one a change.
 
-**Where.** `src/duck/column-identity.ts`, `src/duck/sync.ts` (`placeColumns`, `readStillPlaced`, `relationOf`),
+**What is left.** The first start of this release has no record, so a rename made before it is taken by name, as
+before.
+
+**Where.** `src/duck/column-identity.ts`, `src/duck/sync.ts` (`placeColumns`, `readStillPlaced`, `relationOf`, `verifyStreamed`),
 `src/duck/stream.ts` (`relationMoved`), `src/cdc/shape.ts` (`identitySql`); `tests/duck-column-identity.test.ts`,
 `tests/integration/cli-column-identity.itest.ts`.
 
