@@ -473,6 +473,11 @@ paths:
 
 ## What a column is
 
+- **A name holding a line break is refused by name, before the parse log is read** (`name-line-break`,
+  src/duck/analyze.ts): the statement's own names, the columns of the tables and functions it reads, and a CR in the
+  log. Postgres writes a name's line break in its wrapped log just as it writes a wrapped space, so no reading of the
+  log can tell them; every other name is read in one pass and one parse (src/duck/pgtree.ts `readParseLog`).
+
 - **A column is the source's type, whatever the copy holds** (`src/duck/held-types.ts`, the only place that says what the
   copy holds, issues 126 and 129): the catalog declares `format_type`'s spelling and the wire sends its OID, so Postgres's
   analysis decides every statement; a type that is not `NATIVE` is held as its text (`c::text`, an array as `c::text[]`),

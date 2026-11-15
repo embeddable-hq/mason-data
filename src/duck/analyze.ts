@@ -22,9 +22,7 @@ import { cstr, decodeBackend, frame, int16, int32, splitFrames } from "../api/po
 import { gapRefusal } from "./statement.ts";
 import { GAPS } from "./gaps.ts";
 
-/** the way out of a name Mason cannot read back, as the registry says it */
-const NAME_UNREADABLE_WAY_OUT = GAPS["name-unreadable"].wayOut;
-import { NamesNeedColumns, outputsByLocation, readParseLog, typesByLocation, UnreadableNames, type QueryOutputs, type Typed, type TreeValue } from "./pgtree.ts";
+import { outputsByLocation, readParseLog, typesByLocation, UnreadableNames, type QueryOutputs, type Typed, type TreeValue } from "./pgtree.ts";
 
 export interface PgField { name: string; oid: number; typmod: number }
 export interface PgAnalysis {
@@ -47,8 +45,8 @@ const NO_SESSION: SessionState = { timeZone: "UTC", searchPath: "public", dateSt
 const query = (sql: string): Buffer => frame("Q", cstr(sql));
 
 /** Asks the catalog Postgres to analyse `sql` (with these declared parameter OIDs, 0 = infer). `written`: every name the
- *  statement writes (`writtenNames` of its raw tree), which tells a name holding a line break apart in the log (pgtree.ts
- *  `readParseLog`); without it, such a name the log cannot tell apart is refused by name. */
+ *  statement writes (`writtenNames` of its raw tree): one holding a line break is refused by name, and the rest tell a
+ *  long name's wrap apart (pgtree.ts `readParseLog`). */
 export async function analyze(run: (bytes: Uint8Array) => Promise<Uint8Array>, sql: string, paramOids: readonly number[], under: SessionState = NO_SESSION,
   written: ReadonlySet<string> = new Set()): Promise<PgAnalysis | PgRefusal> {
   const bytes = Buffer.concat([
@@ -80,21 +78,38 @@ export async function analyze(run: (bytes: Uint8Array) => Promise<Uint8Array>, s
   const frames = splitFrames(reply);
   if (frames.length !== messages.length) throw new Error(`the catalog Postgres's reply split into ${frames.length} frames and ${messages.length} messages: report it`);
   const detail = noticeField(frames[z + 1 + at]!.frame, "D");
+  // A name holding a line break (CR or LF) is refused before the log is read (Mason gap name-line-break): Postgres
+  // writes one in the log just as it writes a wrapped space, so no reading of the log could tell it. Such a name is the
+  // statement's own, a column of a table or a function it reads, or (a CR, which the log leaves as it is) in the log
+  const lineBreak = (name: string | null): never => {
+    throw gapRefusal("name-line-break", name === null ? "Mason does not support a column name with a line break, and this query reads one"
+      : `Mason does not support a column name with a line break: ${JSON.stringify(name)}`, GAPS["name-line-break"].wayOut, sql);
+  };
+  const ownBreak = [...written].find((n) => /[\r\n]/.test(n));
+  if (ownBreak !== undefined) lineBreak(ownBreak);
+  if (detail.includes(0x0d)) lineBreak(null);
+  // a line break after a backslash: a name's escaped space wrapped there, or one inserted inside a long name. The
+  // columns of the tables and functions the statement reads say whether one of them holds a line break, and tell a
+  // long name's two readings apart
+  let told: ReadonlySet<string> = written;
+  if (detail.includes(Buffer.from("\\\n"))) {
+    const text = detail.toString("latin1");
+    const ids = (field: string): string => [...new Set([...text.matchAll(new RegExp(`:${field}\\s+([1-9]\\d*)`, "g"))].map((m) => m[1]!))].join(", ") || "0";
+    const relations = ids("relid"), functions = ids("funcid");
+    const rows = await catalogRows(run, "SELECT a.attname::text FROM pg_catalog.pg_attribute a WHERE a.attnum > 0 AND NOT a.attisdropped AND a.attrelid IN (" + relations + ") " +
+      "UNION ALL SELECT unnest(p.proargnames)::text FROM pg_catalog.pg_proc p WHERE p.oid IN (" + functions + ") " +
+      "UNION ALL SELECT a.attname::text FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_type t ON t.oid = p.prorettype " +
+      "JOIN pg_catalog.pg_attribute a ON a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped WHERE p.oid IN (" + functions + ")");
+    const columns = rows.flatMap(([n]) => typeof n === "string" ? [n] : []);
+    const theirBreak = columns.find((n) => /[\r\n]/.test(n));
+    if (theirBreak !== undefined) lineBreak(theirBreak);
+    told = new Set([...written, ...columns]);
+  }
   let tree: TreeValue;
-  try {
-    try { tree = readParseLog(detail, written); }
-    catch (e) {
-      if (!(e instanceof NamesNeedColumns)) throw e;
-      // a name the statement's own do not tell: the columns of the relations it reads (every relation lists all its
-      // columns' names), asked only then, and the log read once more with them
-      const relations = e.relations.filter((r) => Number.isSafeInteger(r) && r > 0);
-      const columns = relations.length === 0 ? [] : await catalogRows(run, "SELECT attname::text FROM pg_catalog.pg_attribute WHERE attnum > 0 AND NOT attisdropped " +
-        `AND attrelid IN (${relations.join(", ")})`);
-      tree = readParseLog(detail, written, new Set(columns.flatMap(([n]) => typeof n === "string" ? [n] : [])));
-    }
-  } catch (e) {
-    if (!(e instanceof UnreadableNames || e instanceof NamesNeedColumns)) throw e;
-    throw gapRefusal("name-unreadable", "Mason cannot read back a name in this statement from Postgres's analysis of it", NAME_UNREADABLE_WAY_OUT, sql);
+  try { tree = readParseLog(detail, told); }
+  catch (e) {
+    if (!(e instanceof UnreadableNames)) throw e;
+    throw gapRefusal("name-unreadable", "Mason cannot read back a long name in this query from Postgres's analysis of it", GAPS["name-unreadable"].wayOut, sql);
   }
   const pd = mine.find((m) => m.type === "ParameterDescription");
   const rd = mine.find((m) => m.type === "RowDescription");
@@ -107,14 +122,15 @@ export async function analyze(run: (bytes: Uint8Array) => Promise<Uint8Array>, s
   };
 }
 
-/** Every string a raw parse tree (libpg-query's) holds: each name the statement writes, as Postgres read it (an
- *  identifier folded, a U&"…" escape undone), for `analyze` to tell a name with a line break by. */
+/** Every name a raw parse tree (libpg-query's) holds, as Postgres read it (an identifier folded, a U&"…" escape
+ *  undone): every string but a constant's (`A_Const`), for `analyze` to refuse a name with a line break by, and to
+ *  read a long name's wrap by. */
 export function writtenNames(raw: unknown): Set<string> {
   const out = new Set<string>();
   const visit = (v: unknown): void => {
     if (typeof v === "string") out.add(v);
     else if (Array.isArray(v)) v.forEach(visit);
-    else if (v !== null && typeof v === "object") Object.values(v).forEach(visit);
+    else if (v !== null && typeof v === "object") for (const [k, x] of Object.entries(v)) { if (k !== "A_Const") visit(x); }
   };
   visit(raw);
   return out;

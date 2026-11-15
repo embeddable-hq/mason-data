@@ -650,7 +650,11 @@ one reading only the catalog or no table is PGlite's own answer. DuckDB's goes t
 
 1. **Postgres analyses it**: the catalog Postgres (PGlite, the copied tables' definitions, no rows) parses it with
    `debug_print_parse`, typing every expression, and gives the result's names, OIDs and typmods. What it refuses is
-   refused with its error.
+   refused with its error. The log is wrapped at 78 bytes, a name's escaped space (`\ `) included, and Postgres
+   writes a name's own line break just as it writes a wrapped space, so the two cannot be told apart from the text.
+   So a name holding a line break is refused by name before the log is read (`name-line-break`, the owner's decision
+   of 2026-11-15, issue 956: reading such names every way took 558 s for one statement and once picked the wrong
+   column), and the log is then read in one pass (src/duck/pgtree.ts `readParseLog`).
 2. **The tree is rewritten** (`src/duck/rewrite.ts`) wherever DuckDB's meaning differs: collation and case, LIKE and
    regex, json, `to_char`, date/time arithmetic, casts to text, `WITH TIES`, a column the GROUP BY's key decides
    (`any_value`), a date literal as the value Postgres parsed. **The clock is Postgres's**: `'now'` is the transaction's

@@ -370,10 +370,10 @@ async function madeTypeRefusal(catalog: Parameters<typeof catalogRows>[0], code:
  */
 export async function ordersText(o: { catalog: (bytes: Uint8Array) => Promise<Uint8Array>; text: string; paramOids: readonly number[]; under: SessionState; collations: CollationResolver; bindable: boolean }): Promise<"order" | "case" | null> {
   let analysis: Awaited<ReturnType<typeof analyze>>;
-  // a name the log cannot tell apart (Mason gap name-unreadable): the synced data's plan, which reads
-  // the statement's own names, decides it, never the catalog
+  // a name with a line break, or one the log cannot tell apart (Mason gaps name-line-break, name-unreadable): the synced
+  // data's plan, which reads the statement's own names, decides it, never the catalog
   try { analysis = await analyze(o.catalog, o.text, o.paramOids, o.under); }
-  catch (e) { if (e instanceof StatementError && e.gap === "name-unreadable") return "order"; throw e; }
+  catch (e) { if (e instanceof StatementError && (e.gap === "name-unreadable" || e.gap === "name-line-break")) return "order"; throw e; }
   if ("refused" in analysis) return null;
   // the analysis as the session runs the statement: a simple Query binds no parameter, so one naming `$1` is Postgres's
   // 42P02, which the catalog answers (the analysis above is a Parse's, which would infer its type)

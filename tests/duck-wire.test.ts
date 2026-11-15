@@ -8648,20 +8648,25 @@ test("issue 956: a derived table's column whose name holds a space is read by th
     const statements: Array<readonly [string, "ordered"]> = [];
     for (let n = 1; n <= 80; n++) {
       statements.push([WRAPPED_NAMES("p".repeat(n), `"q ${"r ".repeat(n % 7)}s"`), "ordered"]);
-      // a line break that IS the name's (U&"…\000A…"), beside the ones Postgres wraps
-      if (n % 4 === 0) statements.push([WRAPPED_NAMES("p".repeat(n), `U&"line\\000Abreak ${"w".repeat(n % 9)}"`), "ordered"]);
     }
     assert.deepEqual(await unlike(c, statements), []);
+    // a name holding a line break (U&"…\000A…") is refused by name, never read as another: Postgres writes it in the log
+    // just as it writes a wrapped space (Mason gap name-line-break)
+    for (const n of [4, 33, 61]) {
+      const refused = await answer(c, WRAPPED_NAMES("p".repeat(n), `U&"line\\000Abreak ${"w".repeat(n % 9)}"`)).then(() => null, (e: pg.DatabaseError) => e);
+      assert.equal(refused?.code, "0A000");
+      assert.match(refused?.detail ?? "", /Mason gap name-line-break/);
+    }
   } finally { await c.end(); }
 });
 
 /**
  * Issue 956's review: Postgres's pg_strtok ends a token at a space, a line break or a tab only, and outToken writes
  * every other whitespace in a name as it is. Every relation lists its columns' names in the analysed tree, so a column
- * named with a BOM (a CSV header's), a no-break space, an ideographic space (a Japanese name), U+2028, a carriage
- * return, a form feed or a vertical tab once broke every statement over its table.
+ * named with a BOM (a CSV header's), a no-break space, an ideographic space (a Japanese name), U+2028, a form feed or
+ * a vertical tab once broke every statement over its table. (A carriage return is a line break: refused, name-line-break.)
  */
-const ODD_SPACES = ["x\uFEFFcode", "a\u00A0b", "\u58F2\u4E0A\u3000\u91D1\u984D", "l\u2028s", "c\rr", "f\ff", "v\vt"];
+const ODD_SPACES = ["x\uFEFFcode", "a\u00A0b", "\u58F2\u4E0A\u3000\u91D1\u984D", "l\u2028s", "f\ff", "v\vt"];
 /** a BOM that starts a name: held on Mason's side alone, as PGlite's text decoder drops a leading BOM from a field's name */
 const LEAD_BOM = "\uFEFFlead";
 const wsTable: PgSchema["tables"][number] = { name: "wsn", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "j", type: "jsonb" },

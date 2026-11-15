@@ -32,36 +32,31 @@ export interface TreeNode { readonly _node: string; readonly [field: string]: Tr
  * `\` and a line break, which is just how Postgres writes a line break that IS in the name. Read as text, `meta → n`
  * came back as `meta\n→ n`, and the rewrite could not find the column by its name (a numeric's exact value lost).
  *
- * So the log is walked once, line by line, and each line's break is held to Postgres's own rule as soon as the 79 bytes
- * the rule reads are known. A line break no backslash escapes is a break. One that a backslash escapes (a "site") was
- * the name's own line break or a wrapped space, or, at the end of a run of 78 bytes with no space, a wrapped space or
- * one inserted between the backslash and the byte it escapes. The name holding a site is read every way its sites
- * allow, each way held to the rule over the lines that follow. One way left, or one name every way, is the name. Where
- * more are left, the name the statement writes tells it, then the columns of the tables it reads (`columns`, which
- * analyze.ts asks only then). A break inside a run of 78 bytes after no backslash was inserted, unless a space there
- * would end one token and start another the format reads. Anything left undecided, or past a fixed amount of work, is
- * refused by name (`name-unreadable`), never guessed. The text is then parsed once.
+ * Mason does not read a name holding a line break (CR or LF): analyze.ts refuses one by name before the log is read
+ * (Mason gap `name-line-break`), from the statement's own names, the columns of the tables and functions it reads,
+ * and a CR in the log. So every line break of the log is a break, and the log is walked once, each line ending at its
+ * first line break, held to Postgres's own rule as soon as the 79 bytes the rule reads are known, then parsed once.
+ * The break is a space, the escaped space of a name or a space between tokens, except at the end of a run of 78 bytes
+ * with no space, where it may have been inserted. There, after no backslash, it is read as the token's grammar allows
+ * (a space only where it ends one token and starts another the format reads). After a backslash, the break was the
+ * name's escaped space or inserted between the backslash and the byte it escapes: the name the statement writes, or a
+ * column of the tables it reads (`told`), tells which. What none tells, or no reading of the rule gives, is refused
+ * by name (`name-unreadable`), never guessed.
  */
-export function readParseLog(detail: Uint8Array, written: ReadonlySet<string> = new Set(), columns: ReadonlySet<string> | null = null): TreeValue {
-  return parseTree(Buffer.from(unwrapNodeDump(detail, written, columns)).toString("utf8"));
+export function readParseLog(detail: Uint8Array, told: ReadonlySet<string> = new Set()): TreeValue {
+  return parseTree(Buffer.from(unwrapNodeDump(detail, told)).toString("utf8"));
 }
 
-/** a parse tree's log whose names Mason cannot read back: more than one way left, none, or past the fixed work its
- *  reading may take (Mason gap `name-unreadable`) */
+/** a parse tree's log Mason cannot read back: a line no reading of Postgres's rule gives, or a long name of escaped
+ *  characters wrapped where it reads two ways that no name the statement or its tables give tells apart (Mason gap
+ *  `name-unreadable`) */
 export class UnreadableNames extends Error {
   constructor() { super("the catalog Postgres's parse tree holds a name that Mason cannot read back"); }
 }
 
-/** the log's names cannot be told apart by the statement's own: the columns of the relations it reads (pg_class OIDs)
- *  may tell them, and the log is read again with them */
-export class NamesNeedColumns extends Error {
-  readonly relations: number[];
-  constructor(relations: number[]) { super("the catalog Postgres's parse tree needs the columns' names to be read"); this.relations = relations; }
-}
-
 const LINE = 78, LF = 10, SPACE = 32, BACKSLASH = 92, QUOTE = 34;
-/** the most sites one name is read with (each doubles its ways), and the work past one step a line each site may take */
-const MAX_SITES = 6, STEPS_PER_SITE = 400, EXTRA_STEPS = 2000;
+/** the most breaks inside one name that may each have been a space or inserted (each doubles its readings) */
+const MAX_RUN_BREAKS = 4;
 
 /** format_node_dump's choice for the line of `s` starting at `at`: its length and where the next line starts, or null
  *  where the text ends within the line. `length` is the whole text's, or Infinity while more than this line is known. */
@@ -76,22 +71,18 @@ function pgLineEnd(s: Uint8Array, at: number, length: number): { length: number;
 const delimiterByte = (b: number | undefined): boolean => b === SPACE || b === LF || b === 9 || b === 0x28 || b === 0x29 || b === 0x7b || b === 0x7d;
 
 /**
- * The text Postgres wrapped into `wrapped`, its sites decided as `readParseLog` says, in work linear in the log.
+ * The text Postgres wrapped into `wrapped`, read as `readParseLog` says: no name holds a line break (analyze.ts refuses
+ * one before), so every line break of the log is a break, and the walk is one pass.
  */
-export function unwrapNodeDump(wrapped: Uint8Array, written: ReadonlySet<string> = new Set(), columns: ReadonlySet<string> | null = null): Uint8Array {
+export function unwrapNodeDump(wrapped: Uint8Array, told: ReadonlySet<string> = new Set()): Uint8Array {
   // the DETAIL as sent ends in the last line's break; one without it is read as if it had it
   const o = wrapped.length > 0 && wrapped[wrapped.length - 1] === LF ? Buffer.from(wrapped.buffer, wrapped.byteOffset, wrapped.byteLength) : Buffer.concat([wrapped, Buffer.from([LF])]);
   const s = Buffer.alloc(o.length);
   // each line taken, in the text's coordinates: where it starts, how long it is, where the next starts (-1: the end)
   const starts: number[] = [], lengths: number[] = [], nexts: number[] = [];
-  // a site's way, once its name is read: its line break is the name's own ("own"), a wrapped space ("wrap"), or was
-  // inserted inside a run of 78 bytes with no space ("inserted")
-  type Way = "own" | "wrap" | "inserted";
+  // a break inside a run after a backslash, once its name is read: a wrapped space, or inserted
+  type Way = "wrap" | "inserted";
   const decided = new Map<number, Way>();
-  let lines = 0, escapedBreaks = 0;
-  for (let k = o.indexOf(LF); k >= 0; k = o.indexOf(LF, k + 1)) { lines++; if (k > 0 && o[k - 1] === BACKSLASH) escapedBreaks++; }
-  let budget = 4 * lines + STEPS_PER_SITE * escapedBreaks + EXTRA_STEPS;
-  const step = (): void => { if (--budget < 0) throw new UnreadableNames(); };
 
   /** whether the byte at `k` of the line starting at `at` follows an odd run of backslashes: in this line and, where
    *  the line starts with them, at the end of the text read so far (`sLen`) */
@@ -103,25 +94,6 @@ export function unwrapNodeDump(wrapped: Uint8Array, written: ReadonlySet<string>
   };
   /** a line from `at` ending at `e` with no space in bytes 1 to 77 and none after: its break was inserted, or a space */
   const insideRun = (at: number, e: number): boolean => e - at === LINE && o[e + 1] !== SPACE && !o.subarray(at + 1, e).includes(SPACE);
-  /** the ways a line break at `e` of the line starting at `at` can be read */
-  const waysAt = (at: number, e: number, sLen: number): readonly Way[] => {
-    const escaped = escapedO(at, e, sLen), run = insideRun(at, e);
-    return escaped ? (run ? ["wrap", "inserted"] : ["own", "wrap"]) : (run ? ["wrap", "inserted"] : ["wrap"]);
-  };
-  type Candidate = { e: number; escaped: boolean; run: boolean; last: boolean };
-  /** the line breaks that may end the line starting at `at`: each escaped one, up to the first that is not (or the end) */
-  const candidates = (at: number, sLen: number): Candidate[] => {
-    const out: Candidate[] = [];
-    const max = Math.min(at + LINE, o.length - 1);
-    const window = o.subarray(0, max + 1);
-    for (let e = window.indexOf(LF, at + 1); e >= 0; e = window.indexOf(LF, e + 1)) {
-      if (e === o.length - 1) { out.push({ e, escaped: false, run: false, last: true }); break; }
-      const escaped = escapedO(at, e, sLen);
-      out.push({ e, escaped, run: insideRun(at, e), last: false });
-      if (!escaped) break;
-    }
-    return out;
-  };
   /** the lines whose 79 bytes are known, from `from`, held to Postgres's rule */
   const holds = (from: number, sLen: number, complete: boolean): { ok: boolean; checked: number } => {
     let i = from;
@@ -132,25 +104,6 @@ export function unwrapNodeDump(wrapped: Uint8Array, written: ReadonlySet<string>
     }
     return { ok: true, checked: i };
   };
-  /** takes the line from `at` to the break at `e` into the text; null where a line break it keeps is not escaped there */
-  const take = (at: number, e: number, sLen: number, kind: "space" | "inserted" | "end"): number | null => {
-    o.copy(s, sLen, at, e);
-    const start = sLen;
-    let end = sLen + (e - at);
-    const line = s.subarray(start, end);
-    for (let i = line.indexOf(LF); i >= 0; i = line.indexOf(LF, i + 1)) {
-      const k = start + i;
-      let n = 0;
-      for (let j = k - 1; j >= 0 && s[j] === BACKSLASH; j--) n++;
-      if (n % 2 === 0) return null;
-    }
-    if (kind === "space") s[end++] = SPACE;
-    starts.push(start); lengths.push(e - at); nexts.push(kind === "end" ? -1 : end);
-    return end;
-  };
-  const truncate = (n: number): void => { starts.length = lengths.length = nexts.length = n; };
-  const kindOf = (c: Candidate, way: Way | undefined): "space" | "inserted" | "end" => c.last ? "end" : way === "inserted" ? "inserted" : "space";
-
   /** a token's text as a name: a quoted one without its quotes, every escape undone */
   const nameOf = (raw: Buffer): string => {
     let t = raw;
@@ -159,25 +112,25 @@ export function unwrapNodeDump(wrapped: Uint8Array, written: ReadonlySet<string>
     for (let i = 0; i < t.length; i++) { if (t[i] === BACKSLASH && i + 1 < t.length) i++; out.push(t[i]!); }
     return Buffer.from(out).toString("utf8");
   };
+  const escapedS = (m: number): boolean => { let n = 0; for (let x = m - 1; x >= 0 && s[x] === BACKSLASH; x--) n++; return n % 2 === 1; };
 
   /**
-   * The token holding the line break at `e` of the line starting at `at`: where it starts (in the text so far, or in this
-   * line), where it ends in the wrapped log, and each line break inside it with the ways it can be read. Null where its
-   * end cannot be told without reading a site first (a break inside a run, just after a backslash, before a delimiter).
+   * Decides the breaks inside the name holding the break at `e` (the end of a run, after a backslash): each was a
+   * wrapped space or inserted, and the one name the statement or the tables it reads give is the way (one name every
+   * way needs none). Every other break in the name is a wrapped space.
    */
-  const tokenAround = (at: number, e: number, sLen: number): { head: Buffer; startO: number; endO: number; sites: Array<{ k: number; ways: readonly Way[] }> } | null => {
+  const decideName = (at: number, e: number, sLen: number): void => {
     // back: the nearest delimiter no backslash escapes, in this line, then in the text so far
     let startO = at, head = Buffer.alloc(0), k = e - 1;
-    for (; k >= at; k--) if (delimiterByte(o[k]) && o[k] !== LF && !escapedO(at, k, sLen)) { startO = k + 1; break; }
+    for (; k >= at; k--) if (delimiterByte(o[k]) && !escapedO(at, k, sLen)) { startO = k + 1; break; }
     if (k < at) {
       let j = sLen - 1;
-      const escapedS = (m: number): boolean => { let n = 0; for (let x = m - 1; x >= 0 && s[x] === BACKSLASH; x--) n++; return n % 2 === 1; };
       for (; j >= 0; j--) if (delimiterByte(s[j]) && !escapedS(j)) break;
       head = Buffer.from(s.subarray(j + 1, sLen));
     }
-    // forward, line by line: a line break after an odd run of backslashes is a site; one after an even run ends the
-    // token, unless it ends a run of 78 bytes, where it was inserted
-    const sites: Array<{ k: number; ways: readonly Way[] }> = [];
+    // forward, line by line: each break after an odd run of backslashes is in the name (a wrapped escaped space, or at
+    // the end of a run, inserted too); one after an even run ends it, unless it ends a run, where it was inserted
+    const sites: Array<{ k: number; ways: readonly ("wrap" | "inserted" | "space")[] }> = [];
     let odd = escapedO(at, e, sLen), lineStart = at, endO = e;
     for (; endO < o.length; endO++) {
       const b = o[endO]!;
@@ -185,10 +138,9 @@ export function unwrapNodeDump(wrapped: Uint8Array, written: ReadonlySet<string>
         const run = endO - lineStart === LINE && o[endO + 1] !== SPACE && !o.subarray(lineStart + 1, endO).includes(SPACE);
         lineStart = endO + 1;
         if (odd) {
-          sites.push({ k: endO, ways: run ? ["wrap", "inserted"] : ["own", "wrap"] });
-          // inserted, the backslash escapes the next byte, which the token holds; a space, it escaped the space, and the
-          // token may end there: its extent is read as inserted, and a way read as a space is then told by its name
-          if (run) { if (o[endO + 1] === undefined) return null; endO++; }
+          sites.push({ k: endO, ways: run ? ["wrap", "inserted"] : ["space"] });
+          // inserted, the backslash escapes the next byte, which the name holds
+          if (run) { if (o[endO + 1] === undefined) throw new UnreadableNames(); endO++; }
           odd = false;
           continue;
         }
@@ -199,98 +151,26 @@ export function unwrapNodeDump(wrapped: Uint8Array, written: ReadonlySet<string>
       if (delimiterByte(b) && !odd) break;
       odd = false;
     }
-    return { head, startO, endO, sites: sites.filter((x) => !decided.has(x.k)) };
-  };
-
-  /** every way to read the sites of the token holding the line break at `e`, and the name each gives; null where the
-   *  token cannot be read so */
-  const variantsOf = (at: number, e: number, sLen: number): Array<{ map: Map<number, Way>; name: string }> | null => {
-    const tok = tokenAround(at, e, sLen);
-    if (tok === null || tok.sites.length === 0 || tok.sites.length > MAX_SITES) return null;
-    const variants: Array<{ map: Map<number, Way>; name: string }> = [];
-    const total = tok.sites.reduce((n, x) => n * x.ways.length, 1);
-    for (let combo = 0; combo < total; combo++) {
-      const map = new Map<number, Way>();
-      let rest = combo;
-      for (const x of tok.sites) { map.set(x.k, x.ways[rest % x.ways.length]!); rest = Math.floor(rest / x.ways.length); }
-      const parts: Buffer[] = [tok.head];
-      let from = tok.startO;
-      for (const x of tok.sites) {
+    const open = sites.filter((x) => x.ways.length > 1 && !decided.has(x.k));
+    if (open.length > MAX_RUN_BREAKS) throw new UnreadableNames();
+    const ways: Array<{ map: Map<number, Way>; name: string }> = [];
+    for (let combo = 0; combo < 2 ** open.length; combo++) {
+      const map = new Map<number, Way>(open.map((x, i) => [x.k, (combo & (1 << i)) !== 0 ? "inserted" : "wrap"]));
+      const parts: Buffer[] = [head];
+      let from = startO;
+      for (const x of sites) {
         parts.push(o.subarray(from, x.k));
-        const w = map.get(x.k);
-        if (w === "own") parts.push(Buffer.from([LF])); else if (w === "wrap") parts.push(Buffer.from([SPACE]));
+        const w = map.get(x.k) ?? decided.get(x.k) ?? (x.ways[0] === "inserted" ? "inserted" : "wrap");
+        if (w === "wrap") parts.push(Buffer.from([SPACE]));
         from = x.k + 1;
       }
-      parts.push(o.subarray(from, tok.endO));
-      variants.push({ map, name: nameOf(Buffer.concat(parts)) });
+      parts.push(o.subarray(from, endO));
+      ways.push({ map, name: nameOf(Buffer.concat(parts)) });
     }
-    return variants;
-  };
-  const isTold = (v: { name: string }): boolean => written.has(v.name) || (columns?.has(v.name) ?? false);
-
-  /**
-   * Whether the lines from `at` can go on, under the ways `ways` gives some sites, at least until a line starts at
-   * `limit` or past (or the log ends), every line whose 79 bytes are then known held to the rule. Another name's sites
-   * are read as the one name the statement or the tables give it, where there is one, and else tried every way. Leaves
-   * the text and the lines as it found them.
-   */
-  const goesOn = (at: number, sLen: number, checked: number, given: ReadonlyMap<number, Way>, limit: number): boolean => {
-    const mark = starts.length;
-    const cs = candidates(at, sLen);
-    let ways = given;
-    for (const c of cs) {
-      if (c.last || !c.escaped || ways.has(c.e) || decided.has(c.e)) continue;
-      const told = (variantsOf(at, c.e, sLen) ?? []).filter(isTold);
-      if (told.length === 1) ways = new Map([...ways, ...told[0]!.map]);
-    }
-    const way = (e: number): Way | undefined => ways.get(e) ?? decided.get(e);
-    for (let i = 0; i < cs.length; i++) {
-      const c = cs[i]!;
-      // a break here makes every escaped line break before it in the line the name's own
-      if (i > 0) {
-        const p = cs[i - 1]!, pw = way(p.e);
-        if (pw !== undefined ? pw !== "own" : !waysAt(at, p.e, sLen).includes("own")) break;
-      }
-      const fixed = way(c.e);
-      const tries: readonly (Way | undefined)[] = c.last ? [undefined] : fixed !== undefined ? (fixed === "own" ? [] : [fixed]) : waysAt(at, c.e, sLen).filter((w) => w !== "own");
-      for (const w of tries) {
-        step();
-        const kind = kindOf(c, w);
-        const end = take(at, c.e, sLen, kind);
-        let ok = false;
-        if (end !== null) {
-          const held = holds(checked, end, kind === "end");
-          if (held.ok) ok = kind === "end" || c.e + 1 >= limit || goesOn(c.e + 1, end, held.checked, ways, limit);
-        }
-        truncate(mark);
-        if (ok) return true;
-      }
-      if (!c.escaped) break;
-    }
-    return false;
-  };
-
-  /** decides every site of the token holding the line break at `e`, from the lines that follow each way, then its name */
-  const decideToken = (at: number, e: number, sLen: number, checked: number): void => {
-    const variants = variantsOf(at, e, sLen);
-    if (variants === null) throw new UnreadableNames();
-    const tok = tokenAround(at, e, sLen)!;
-    // a way is held to the rule over the line it ends and the next: no further line's break depends on it
-    const limit = tok.endO + LINE + 2;
-    const holdsWay = (v: { map: Map<number, Way> }): boolean => goesOn(at, sLen, checked, v.map, limit);
-    const pick = (w: { map: Map<number, Way> }): void => { for (const [k, v] of w.map) decided.set(k, v); };
-    // the names the statement or the tables give, first: one of them that the rule holds is the name. With none the
-    // statement gives, the tables' columns are asked before any way is held to the rule
-    if (columns === null && !variants.some(isTold) && variants.some((v) => v.name !== variants[0]!.name)) throw new NamesNeedColumns(relationsIn(o));
-    const told = variants.filter(isTold).filter(holdsWay);
-    if (told.length === 1) return pick(told[0]!);
-    if (told.length > 1) throw new UnreadableNames();
-    const held = variants.filter(holdsWay);
-    if (held.length === 1) return pick(held[0]!);
-    if (held.length === 0) throw new UnreadableNames();
-    // the same name every way (a break inside a run between two of its bytes, or beside an escaped space): any of them
-    if (held.every((w) => w.name === held[0]!.name)) return pick(held[0]!);
-    if (columns === null) throw new NamesNeedColumns(relationsIn(o));
+    const pick = (w: { map: Map<number, Way> }): void => { for (const [x, v] of w.map) decided.set(x, v); };
+    const known = ways.filter((w) => told.has(w.name));
+    if (known.length === 1) return pick(known[0]!);
+    if (ways.every((w) => w.name === ways[0]!.name)) return pick(ways[0]!);
     throw new UnreadableNames();
   };
 
@@ -300,8 +180,7 @@ export function unwrapNodeDump(wrapped: Uint8Array, written: ReadonlySet<string>
    * node's name by a field's name, and a list's element is a string, NULL, a number or a boolean. Beside a parenthesis
    * or a brace a space splits nothing. Null where both can be read, or neither.
    */
-  const insertedOrSpace = (at: number, e: number, sLen: number): "inserted" | "wrap" | null => {
-    // the text before the break: the text so far, then this line
+  const insertedOrSpace = (at: number, e: number, sLen: number): Way | null => {
     const before = Buffer.concat([s.subarray(Math.max(0, sLen - 4 * LINE), sLen), o.subarray(at, e)]);
     const escapedB = (m: number): boolean => { let n = 0; for (let x = m - 1; x >= 0 && before[x] === BACKSLASH; x--) n++; return n % 2 === 1; };
     let h = before.length - 1;
@@ -349,42 +228,35 @@ export function unwrapNodeDump(wrapped: Uint8Array, written: ReadonlySet<string>
     return inserted === space ? null : inserted ? "inserted" : "wrap";
   };
 
-  // the walk: each line's break, the first the decided ways allow
+  // the walk: each line ends at its first line break
   let at = 0, sLen = 0, checked = 0;
   for (;;) {
-    step();
-    const cs = candidates(at, sLen);
-    // each escaped line break in order, its name read, until one is a break
-    for (const c of cs) {
-      if (c.last || !c.escaped) break;
-      if (!decided.has(c.e)) decideToken(at, c.e, sLen, checked);
-      if (decided.get(c.e) !== "own") break;
+    const e = o.indexOf(LF, at);
+    if (e < 0 || e - at > LINE || (e === at && e !== o.length - 1)) throw new UnreadableNames();
+    const last = e === o.length - 1;
+    let way: Way = "wrap";
+    if (!last && insideRun(at, e)) {
+      if (escapedO(at, e, sLen)) {
+        if (!decided.has(e)) decideName(at, e, sLen);
+        way = decided.get(e) ?? "wrap";
+      } else {
+        const read = insertedOrSpace(at, e, sLen);
+        if (read === null) throw new UnreadableNames();
+        way = read;
+      }
     }
-    const c = cs.find((x) => x.last || decided.get(x.e) !== "own");
-    if (c === undefined) throw new UnreadableNames();
-    let way = decided.get(c.e);
-    if (way === undefined && !c.last && c.run) {
-      const read = insertedOrSpace(at, c.e, sLen);
-      if (read === null) throw new UnreadableNames();
-      way = read;
-    }
-    const kind = kindOf(c, way);
-    const end = take(at, c.e, sLen, kind);
-    if (end === null) throw new UnreadableNames();
-    const held = holds(checked, end, kind === "end");
+    o.copy(s, sLen, at, e);
+    const start = sLen;
+    let end = sLen + (e - at);
+    if (!last && way === "wrap") s[end++] = SPACE;
+    starts.push(start); lengths.push(e - at); nexts.push(last ? -1 : end);
+    const held = holds(checked, end, last);
     if (!held.ok) throw new UnreadableNames();
     checked = held.checked;
     sLen = end;
-    if (kind === "end") return s.subarray(0, sLen);
-    at = c.e + 1;
+    if (last) return s.subarray(0, sLen);
+    at = e + 1;
   }
-}
-
-/** every relation the log reads (a RANGETBLENTRY's relid), read off its text: a number holds no space, so no break
- *  falls inside one */
-function relationsIn(o: Uint8Array): number[] {
-  const text = Buffer.from(o).toString("latin1");
-  return [...new Set([...text.matchAll(/:relid\s+([1-9]\d*)/g)].map((m) => Number(m[1])))];
 }
 
 /** a text the node format does not read, and the byte where it went wrong */
