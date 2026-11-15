@@ -20,6 +20,13 @@ makes it DuckDB's, and DuckDB runs it (`src/duck/plan.ts`). Each added table is 
 current as its `sync:` says — `off` (the default: read again only at `mason sync`), Mason's xmin poll at its interval,
 or logical replication (`replication`, `src/duck/stream.ts`), mixed in one project.
 
+## Text
+
+- **A string out of DuckDB is read only through `keepLeadingBom`'s decoder, and an array's or a row's text only
+  through Postgres's white space** (`src/duck/text.ts`: `isPgSpace`, `pgTrim`, `arrayQuotes`, `recordQuotes`), never
+  JavaScript's `\s` or `trim()`. Why: a default decoder dropped a leading U+FEFF from every value and name, and `\s`
+  quoted and stripped characters Postgres keeps, such as U+FEFF and U+00A0 (issue 991).
+
 ## What review probes
 
 Run each probe that applies: the implementer before each push, and the fresh reviewer at each review (CLAUDE.md
