@@ -57,6 +57,42 @@ export function xminBeforeSql(watermark: bigint): string {
   return `(age(xmin) > (SELECT age('${low < 3n ? 3n : low}'::xid)) OR age(xmin) < 0)`;
 }
 
+/**
+ * THE TABLE'S FILE, AS THE READING TRANSACTION'S SNAPSHOT SEES IT AND AS IT IS NOW (issue 1025). A rewrite of the table
+ * (TRUNCATE, VACUUM FULL, CLUSTER, an ALTER TABLE that rewrites it, SET TABLESPACE, a pg_repack-style swap) gives it a
+ * new file, and is not MVCC-safe: a snapshot taken before it commits reads the NEW file once its read gets the lock,
+ * and an ALTER's or a TRUNCATE's rows there are invisible to it — a read of 0 rows that is no error. So:
+ *  1. `seen`, pg_class's `relfilenode` read through the transaction's snapshot (a plain SELECT of the catalog is MVCC),
+ *     against 2. `now`, `pg_relation_filenode` (the catalog cache, current once the transaction holds a lock on the
+ *     table): they differ, or `seen` is null (the name is another table now), when the file changed after the snapshot;
+ *  3. `replaced`: the file is not the one the table was created with (`relfilenode` is the oid until a rewrite);
+ *  4. `fresh`: the catalog row the snapshot sees was written at or after `watermark` (`xminBeforeSql`'s complement), so
+ *     a rewrite there may have given every row an xmin a copy held to that watermark leaves out; null with no watermark;
+ *  5. that row's `xmin`, as text: which rewrite it was (a copy that waits for one checks it again by this, unread).
+ * Catalog reads only, one row; `regclass` is a literal such as `'public.t'::regclass`. A table with no file of its own
+ * (partitioned) reads 0 for both.
+ */
+export function fileFactsSql(regclass: string, watermark: bigint | null): string {
+  const fresh = watermark === null ? "NULL::boolean" : `NOT ${xminBeforeSql(watermark)}`;
+  // pg_class alone in the lateral's FROM: `xminBeforeSql` names `xmin` unqualified
+  return `SELECT c.relfilenode::bigint AS seen, COALESCE(pg_relation_filenode(r.rel), 0)::bigint AS now, c.relfilenode <> c.oid AS replaced, c.fresh, ` +
+    `c.xmin::text AS written_by FROM (SELECT ${regclass}::oid AS rel) r LEFT JOIN LATERAL (SELECT oid, relfilenode, xmin, ${fresh} AS fresh FROM pg_class WHERE oid = r.rel) c ON true`;
+}
+
+/**
+ * WHETHER A COPY HELD TO `watermark` WOULD READ ANY ROW OF A TABLE (issue 1025), in the reading transaction's snapshot:
+ * a row it keeps exists (`kept`), any row exists (`any`), and the backend whose transaction is the watermark, when one
+ * is (`pid`: what holds every snapshot's xmin back). Asked only of a table whose file the snapshot sees was made at or
+ * after the watermark (`fileFactsSql` `fresh` and `replaced`): a CLUSTER, a VACUUM FULL or a SET TABLESPACE keeps each
+ * row's xmin, so `kept` finds one at once; a rewrite that writes its rows again (an ALTER TABLE, a TRUNCATE and a load,
+ * pg_repack) leaves none, and the scan reads the table to its end once. Never an ORDER BY on the source.
+ */
+export function rowsHeldSql(pgFrom: string, watermark: bigint): string {
+  const low = watermark & 0xffffffffn;
+  return `SELECT EXISTS (SELECT 1 FROM ${pgFrom} WHERE ${xminBeforeSql(watermark)}) AS kept, EXISTS (SELECT 1 FROM ${pgFrom}) AS any, ` +
+    `(SELECT pid FROM pg_stat_activity WHERE backend_xid = '${low}'::xid LIMIT 1) AS pid`;
+}
+
 /** `xminBeforeSql` is exact while the transaction's latest id is within 2^31 of the watermark: held to a margin of half
  *  that (a billion transactions), `current` being the reading transaction's snapshot xmax (`SNAPSHOT_SQL`) */
 export function xminBeforeHolds(current: bigint, watermark: bigint): boolean {

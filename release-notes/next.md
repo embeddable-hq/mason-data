@@ -7,10 +7,27 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   is a table with two columns whose names differ only in case, such as `"Status"` and `status`. It is also two tables
   whose names differ only in case, such as `"Orders"` and `orders`. Before, the first never synced, and the second
   served one table under both names. The refusal names the entry and the line to write, such as `exclude: [status]`.
-  Run `mason tables` before you upgrade. It names each such table.
+  Only `mason start` names such an entry that the file already holds. `mason tables` does not.
+
+## What changes
+
+- **The web page links to how to change a deployed project.** When a deployed project's Tables page says it is
+  read-only, its link now goes to the README's new "Change a deployed project" section. A host that runs Mason for
+  others can link to its own steps instead. Set `MASON_UI_DEPLOY_DOCS_URL` on `mason serve` to a path on the page's
+  host or an `https://` or `http://` URL. It follows `MASON_UI_BACK_URL`'s rules. A value Mason cannot use stops the
+  start with a message that says what is wrong.
 
 ## What was wrong and is now right
 
+- **A table rewritten on your database while Mason read it is no longer served empty or partial.** A rewrite is a
+  `TRUNCATE`, `VACUUM FULL`, `CLUSTER`, an `ALTER TABLE` that rewrites the table (such as a column's type change), or
+  a tool that swaps its file, such as pg_repack. Before, a first sync or a table synced again whole could read none of
+  the table's rows, and serve them as 0 rows until its catch-up a few seconds later. A poll could also delete every row
+  until the next poll. Now Mason keeps serving the table's previous data. A sync that meets a rewrite starts again at
+  once. A poll that meets one writes nothing, and the next poll reads the table again. A rewrite after a transaction
+  that is still open on your database began is different. No read can see the table's rows until that transaction
+  ends. So Mason waits for it and checks again every 30 seconds. The table's line in `mason status` says so, with the
+  transaction's pid. A `VACUUM FULL` or `CLUSTER` keeps each row as it was, so its sync goes on at once.
 - **A table with two columns whose names differ only in case is refused by name, never synced for ever in vain.**
   Postgres keeps `"U"` and `u` apart. The synced data holds a name without regard to case, so such a table's first
   sync failed with `Column with name "u" already exists`, again and again. Now `mason add` refuses it with the
