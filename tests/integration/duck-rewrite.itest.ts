@@ -263,11 +263,18 @@ for (const mode of ["poll", "replication"] as const) {
     const f = await fixture(`first_${mode[0]}`, mode, { first: false });
     let holder: Awaited<ReturnType<typeof openTransaction>> | null = null;
     try {
+      // and two tables whose first rows are gone after their rewrite (issue 1066: the check reads a sample of the rows a
+      // scan meets first, so it must reach past pages emptied by deletes): rewritten by an ALTER, the sync waits; by a
+      // CLUSTER, it syncs at once, as #1058's check of the whole table decided
       psql(f.url, "CREATE TABLE kept (id int PRIMARY KEY, v int); INSERT INTO kept SELECT g, g FROM generate_series(1, 500) g; " +
-        "CREATE TABLE anchor (id int PRIMARY KEY); INSERT INTO anchor VALUES (1)");
+        "CREATE TABLE anchor (id int PRIMARY KEY); INSERT INTO anchor VALUES (1); " +
+        `CREATE TABLE sparse_alter (id int PRIMARY KEY, v int); INSERT INTO sparse_alter SELECT g, g FROM generate_series(1, ${ROWS}) g; ` +
+        `CREATE TABLE sparse_cluster (id int PRIMARY KEY, v int); INSERT INTO sparse_cluster SELECT g, g FROM generate_series(1, ${ROWS}) g`);
       await rowsOlderThanEverySnapshot(f.url, "kept");
+      await rowsOlderThanEverySnapshot(f.url, "sparse_cluster");
       const source = parseSourceOf(f.url);
       const [kept, anchor] = [await tableOf(source, "public.kept"), await tableOf(source, "public.anchor")];
+      const [sparseAlter, sparseCluster] = [await tableOf(source, "public.sparse_alter"), await tableOf(source, "public.sparse_cluster")];
       // another table synced first: in replication mode its first sync makes the slot, which waits for every
       // transaction with an id to end (the one held open below would hold it)
       await f.sync.setTables([anchor]);
@@ -276,9 +283,19 @@ for (const mode of ["poll", "replication"] as const) {
       psql(f.url, `BEGIN; TRUNCATE t; INSERT INTO t SELECT g, g, g FROM generate_series(1, ${ROWS}) g; COMMIT`);
       psql(f.url, "VACUUM FULL kept");
       psql(f.url, "CLUSTER kept USING kept_pkey");
-      await f.sync.setTables([anchor, f.table, kept]);
+      const front = Math.floor(ROWS * 0.8);
+      psql(f.url, "ALTER TABLE sparse_alter ALTER COLUMN v TYPE int USING v + 0");
+      psql(f.url, "CLUSTER sparse_cluster USING sparse_cluster_pkey");
+      for (const s of ["sparse_alter", "sparse_cluster"]) {
+        psql(f.url, `DELETE FROM ${s} WHERE id <= ${front}`);
+        psql(f.url, `VACUUM ${s}`);
+      }
+      await f.sync.setTables([anchor, f.table, kept, sparseAlter, sparseCluster]);
       await f.sync.once();
       const text = f.logged.join("\n");
+      assert.match(f.sync.state().find((s) => s.source === "public.sparse_alter")?.error ?? "", /^the database rewrote public\.sparse_alter after a transaction that is still open on the database began .*, so a sync now would read none of its rows/,
+        `an ALTER's rows past pages emptied by deletes: it waits\n${text}`);
+      assert.ok(f.logged.some((l) => new RegExp(`^synced public\\.sparse_cluster: ${ROWS - front} row\\(s\\)`).test(l)), `a CLUSTER's rows past pages emptied by deletes: synced at once\n${text}`);
       assert.deepEqual(emptied(f), [], `never swapped in empty\n${text}`);
       assert.equal(f.served().reads, 0, "public.t is not served before its first sync");
       const st = f.sync.state().find((s) => s.source === "public.t")!;
@@ -318,6 +335,116 @@ test("poll: a poll begun while a rewrite waits for its lock writes nothing, and 
     assert.equal(served.least, ROWS, `served with ${served.least} rows at least, never fewer than the source's ${ROWS}\n${f.logged.join("\n")}`);
   } finally {
     rewrite?.end();
+    await f.stop();
+  }
+});
+
+/** the rows the source's sequential scans of `table` have read, from the statistics (`seq_tup_read`) */
+const scanned = (url: string, table: string): number => Number(psql(url, `SELECT coalesce(seq_tup_read, 0) FROM pg_stat_user_tables WHERE relname = '${table}'`));
+
+/** `scanned` once the sync's backends have reported their reads (a backend sends its statistics when it goes idle, at
+ *  most every 10 s): it has moved from `before`, and stayed put for 1.5 s */
+async function scannedSettled(url: string, table: string, before: number): Promise<number> {
+  const deadline = Date.now() + 30_000;
+  let now = scanned(url, table);
+  while (now === before) {
+    if (Date.now() > deadline) throw new Error(`the database never counted a read of ${table} (seq_tup_read stayed at ${before})`);
+    await sleep(200);
+    now = scanned(url, table);
+  }
+  for (;;) {
+    await sleep(1_500);
+    const again = scanned(url, table);
+    if (again === now) return now;
+    now = again;
+  }
+}
+
+/** a first sync of `big` (BIG rows) over a fixture of its own in poll mode, its rows older than every snapshot */
+const BIG = 20_000;
+async function bigTable(name: string): Promise<{ f: Fixture; big: AddedTable }> {
+  const f = await fixture(name, "poll", { first: false });
+  psql(f.url, `CREATE TABLE big (id int PRIMARY KEY, v int); INSERT INTO big SELECT g, g FROM generate_series(1, ${BIG}) g`);
+  await rowsOlderThanEverySnapshot(f.url, "big");
+  // read before any test holds a lock on it (the catalog's read waits for one)
+  return { f, big: await tableOf(parseSourceOf(f.url), "public.big") };
+}
+
+/** a first sync of `big` until it is synced, equal to the source in rows */
+async function bigSynced(f: Fixture): Promise<void> {
+  for (const until = Date.now() + 90_000; ;) {
+    await f.sync.once();
+    const st = f.sync.state().find((s) => s.source === "public.big");
+    if (st?.phase === "copied" && st.error === null) break;
+    if (Date.now() > until) throw new Error(`public.big was not synced\n${f.logged.join("\n")}`);
+    await sleep(350);
+  }
+  assert.equal(Number((await f.store.writer.runAndReadAll("SELECT count(*) FROM public.big")).getRowsJS()[0]![0]), BIG, "synced whole");
+}
+
+// THE CHECK OF A REWRITTEN TABLE READS A SAMPLE, NEVER THE WHOLE TABLE (issue 1066): #1058's check of a table rewritten
+// after an open transaction began read every row in one transaction, under AccessShareLock — minutes on a large table,
+// with a migration's ALTER queued behind it and the application's queries behind the ALTER. It reads a few rows now, and
+// decides as before: an ALTER wrote every row again, so the sync waits for the open transaction.
+test("poll: the check of a table rewritten after a transaction still open began reads a sample of its rows, never the whole table", { skip: skipPoll }, async () => {
+  const { f, big } = await bigTable("sample");
+  let holder: Awaited<ReturnType<typeof openTransaction>> | null = null;
+  try {
+    holder = await openTransaction(f.url, "SELECT txid_current()");
+    psql(f.url, "ALTER TABLE big ALTER COLUMN v TYPE int USING v + 0");
+    // the ALTER's own read of the table, counted before the sync's
+    let before = scanned(f.url, "big");
+    for (;;) {
+      await sleep(1_500);
+      const again = scanned(f.url, "big");
+      if (again === before) break;
+      before = again;
+    }
+    await f.sync.setTables([big]);
+    await f.sync.once();
+    const text = f.logged.join("\n");
+    assert.match(f.sync.state().find((s) => s.source === "public.big")?.error ?? "", /^the database rewrote public\.big after a transaction that is still open on the database began .*, so a sync now would read none of its rows/, `it waits, as before\n${text}`);
+    const read = (await scannedSettled(f.url, "big", before)) - before;
+    assert.ok(read <= 1_000, `the check read ${read} of the table's ${BIG} rows: a sample of at most 1,000, never the whole table\n${text}`);
+    await holder.commit();
+    await bigSynced(f);
+  } finally {
+    holder?.end();
+    await f.stop();
+  }
+});
+
+// A CHECK QUEUED BEHIND ANOTHER SESSION'S LOCK GIVES UP SOON (issue 1066): a migration's ACCESS EXCLUSIVE lock held on
+// the table; #1058's check waited behind it for as long as it was held (its transaction open, every ALTER after it
+// queued behind it in turn). It stops at its lock_timeout now, says it could not tell, holds nothing on the database,
+// and checks again later: once the lock and the open transaction are gone, the table syncs.
+test("poll: the check of a rewritten table gives up soon behind another session's lock, holds nothing there, and syncs once it is gone", { skip: skipPoll }, async () => {
+  const { f, big } = await bigTable("locked");
+  let holder: Awaited<ReturnType<typeof openTransaction>> | null = null;
+  let locker: Awaited<ReturnType<typeof openTransaction>> | null = null;
+  try {
+    holder = await openTransaction(f.url, "SELECT txid_current()");
+    psql(f.url, "ALTER TABLE big ALTER COLUMN v TYPE int USING v + 0");
+    locker = await openTransaction(f.url, "LOCK TABLE big IN ACCESS EXCLUSIVE MODE");
+    await f.sync.setTables([big]);
+    const started = Date.now();
+    const pass = f.sync.once().then(() => "ended" as const);
+    const ended = await Promise.race([pass, sleep(15_000).then(() => "waiting" as const)]);
+    const text = f.logged.join("\n");
+    assert.equal(ended, "ended", `the sync's pass ended while the lock was held, within 15 s (it waited ${Date.now() - started} ms)\n${text}`);
+    assert.match(f.sync.state().find((s) => s.source === "public.big")?.error ?? "", /^the database rewrote public\.big after a transaction that is still open on the database began .*, and a short read of its rows could not tell within \d+ s whether a sync now would read them/,
+      `said on its line\n${text}`);
+    const waiting = psql(f.url, `SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid WHERE a.datname = '${f.db}' AND a.application_name = '${SOURCE_APPLICATION_NAME}' AND l.relation = 'big'::regclass`);
+    assert.equal(waiting, "0", "no backend of the sync holds or waits for a lock on the table");
+    await locker.commit();
+    locker = null;
+    await holder.commit();
+    holder = null;
+    await bigSynced(f);
+  } finally {
+    // the lock first, so a check still queued behind it (a regression) ends, and no ALTER or lock is left behind
+    locker?.end();
+    holder?.end();
     await f.stop();
   }
 });
