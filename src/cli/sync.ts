@@ -13,10 +13,9 @@ import { reach } from "./state.ts";
 import { findTable, guarded, readState, tableArg } from "./commands.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import type { KeptCurrent, PolledTable, StreamedAnswer } from "../duck/sync.ts";
-import { syncedText, syncWords } from "../lib/table-sync.ts";
+import { changesText, syncedText, syncWords } from "../lib/table-sync.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
-const n = (x: number): string => x.toLocaleString("en-US");
 
 export const SYNC_USAGE = `usage: mason sync (<table>… | --all) [--json]
 
@@ -33,8 +32,9 @@ export const SYNC_USAGE = `usage: mason sync (<table>… | --all) [--json]
     mason sync --all               every table the sources file names (each one a scan of its table)
 
   --all    every table the sources file names, instead of naming them
-  --json   as data: { syncedAt, tables: [{ table, added, updated, deleted, rows, ms }] (the tables polled), streamed (the
-           tables whose sync: is replication, not polled: [{ table, position, state, why }]), next }
+  --json   as data: { syncedAt, tables: [{ table, added, updated (an estimate: it may count rows the poll read again,
+           shown as ~N updated), deleted, rows, ms }] (the tables polled), streamed (the tables whose sync: is
+           replication, not polled: [{ table, position, state, why }]), next }
 
   A table whose sync is already running or waiting to start (from the web page, another mason sync, its schedule)
   is refused at once, code busy: mason status says when it ends.
@@ -66,8 +66,8 @@ export function syncedReport(b: { tables: readonly PolledTable[]; streamed?: rea
   const streamedNames = new Set(streamed.map((t) => t.table));
   const polled = picked.filter((t) => !streamedNames.has(t));
   return {
-    headline: `Synced ${polled.join(", ")}: ${n(sum("added"))} added, ${n(sum("updated"))} updated, ${n(sum("deleted"))} deleted${streamedRows.length ? `; logical replication keeps ${streamedRows.map((r) => r[0]).join(", ")} current` : ""}.`,
-    details: [...b.tables.map((t) => [t.table, syncedText(t)] as const), ...streamedRows],
+    headline: `Synced ${polled.join(", ")}: ${changesText({ added: sum("added"), updated: sum("updated"), deleted: sum("deleted") }, "poll")}${streamedRows.length ? `; logical replication keeps ${streamedRows.map((r) => r[0]).join(", ")} current` : ""}.`,
+    details: [...b.tables.map((t) => [t.table, syncedText(t, "poll")] as const), ...streamedRows],
     // what happens next to each: an `off` table stays as of now, a polled one is polled again after its interval
     tips: syncedTips(tables),
   };

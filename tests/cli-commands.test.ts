@@ -20,6 +20,8 @@ import { createRunServer, type RunContext } from "../src/cli/run-server.ts";
 import { connectSource, parseSource, readSourceFacts } from "../src/cli/preflight.ts";
 import { readSource } from "../src/cli/sources.ts";
 import * as tableSync from "../src/lib/table-sync.ts";
+import * as syncCommand from "../src/cli/sync.ts";
+import { countsText as streamCountsText } from "../src/duck/stream.ts";
 // read from the module's namespace: at a commit without timeOf the file loads, and the test fails by name
 const { timeOf } = await import("../src/cli/request-filter.ts") as unknown as { timeOf: (name: string, text: string, now: number) => string | { message: string } };
 import { DemoSource } from "../src/demo/source.ts";
@@ -994,8 +996,8 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
         { table: "public.orders", added: 1_201, updated: 282_770, deleted: 1, rows: 153_292_984, ms: 477_000 }]);
       const said = await runMason(app, ["sync", "customers"], matrixEnv());
       assert.equal(said.code, 0, said.stdout + said.stderr);
-      assert.match(said.stdout, /^Synced public\.customers: 1,200 added, 282,770 updated, 0 deleted\.\n/);
-      assert.match(said.stdout, /\n {2}public\.customers +1,200 added, 282,770 updated, 0 deleted, 153,292,984 rows now · 7 min 57 s\n/);
+      assert.match(said.stdout, /^Synced public\.customers: 1,200 added, ~282,770 updated, 0 deleted\.\n/);
+      assert.match(said.stdout, /\n {2}public\.customers +1,200 added, ~282,770 updated, 0 deleted, 153,292,984 rows now · 7 min 57 s\n/);
       polled.length = 1;
       // MASON SYNC OF A TABLE ALREADY SYNCING (the page's Sync now of it running): refused at once, busy, as a person and
       // with --json, naming mason status; one read of it, never a second queued behind it (the owner, on issue 1007)
@@ -1938,4 +1940,28 @@ test("mason add and mason remove with Mason up: the database's tables not readab
     assert.deepEqual([rv.error, rv.next.map((n) => n.command)], [{ code: lock.code, message: lock.message, why: lock.why, fix: lock.fix }, ["mason doctor"]]);
     assert.equal(fs.readFileSync(file, "utf8"), was);
   } finally { server.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// A POLL'S UPDATED COUNT IS AN ESTIMATE (issue 1040): while a transaction is open on the source, a poll reads again rows
+// it already synced, and they count as updated. Wherever a person reads it, it is `~N updated`; added and deleted are
+// exact, and so is the stream's count and a whole read's. `--json` keeps the plain number, and its shape says so.
+test("mason sync: a poll's updated count is said as an estimate, ~N updated; added, deleted and an exact count keep no ~; --json keeps the number (issue 1040)", () => {
+  const lib = tableSync as unknown as { updatedCountText?: (u: number, by: string) => string };
+  assert.equal(typeof lib.updatedCountText, "function", "src/lib/table-sync.ts exports updatedCountText, the one rule");
+  assert.equal(lib.updatedCountText!(64_383, "poll"), "~64,383 updated");
+  assert.equal(lib.updatedCountText!(64_383, "exact"), "64,383 updated");
+  assert.equal(lib.updatedCountText!(0, "poll"), "0 updated", "a poll's count is only ever too high, so its 0 is exact");
+  const cli = syncCommand;
+  const answer = { at: "2026-11-15T09:00:00.000Z", tables: [
+    { table: "public.orders", added: 60_000, updated: 64_383, deleted: 2, rows: 1_060_000, ms: 1_200 },
+    { table: "public.events", added: 5, updated: 0, deleted: 0, rows: 9, ms: 40 }] };
+  const r = cli.syncedReport(answer, ["public.orders", "public.events"], []);
+  assert.equal(r.headline, "Synced public.orders, public.events: 60,005 added, ~64,383 updated, 2 deleted.");
+  assert.deepEqual(r.details, [
+    ["public.orders", "60,000 added, ~64,383 updated, 2 deleted, 1,060,000 rows now · 1.2 s"],
+    ["public.events", "5 added, 0 updated, 0 deleted, 9 rows now · 40 ms"]]);
+  // the stream's and a whole read's counts are exact
+  assert.equal(streamCountsText({ inserts: 1000, updates: 200, deletes: 4, truncates: 0 }), "1,000 added, 200 updated, 4 deleted");
+  // --json: the plain number, and the declared shape says a poll's updated may count rows read again
+  assert.match(cli.SYNC_USAGE.replace(/\s+/g, " "), /updated \(an estimate: it may count rows the poll read again, shown as ~N updated\)/);
 });

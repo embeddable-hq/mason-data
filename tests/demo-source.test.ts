@@ -401,23 +401,33 @@ test("a sync asked by hand (mason sync, the page's Sync now) is a synced event i
     const tookSaid = (e: { message: string; tookMs?: number }): boolean => typeof e.tookMs === "number" && e.message.endsWith(` · ${msText(e.tookMs)}`);
     const full = events.filter((e) => e.kind === "full_sync");
     assert.ok(full.length > 0 && full.every(tookSaid), `a first sync's event says how long it took: ${JSON.stringify(full)}`);
+    // a whole read's counts are exact: it updates none, and says so with no ~ (issue 1040)
+    for (const e of full) assert.match(e.message, /^synced whole: [\d,]+ added, 0 updated, 0 deleted, /, e.message);
     events.length = 0;
+    // A POLL'S UPDATED COUNT IS AN ESTIMATE (issue 1040): an order updated on the source before each poll, so the poll
+    // counts at least one row updated, and its event says the count as `~N updated`
+    const touch = async (): Promise<void> => {
+      const pc = await connect(s);
+      try { await pc.query("UPDATE orders SET status = status WHERE id = (SELECT min(id) FROM orders)"); } finally { pc.close(); }
+    };
     await s.change();
+    await touch();
     await sync.once();
     assert.deepEqual(events.filter((e) => e.kind === "synced"), [], `a scheduled poll is never a sync by hand: ${JSON.stringify(events)}`);
     // ONE polled event a poll, in the words mason sync prints, after "synced on schedule"
     const polled = events.filter((e) => e.kind === "polled");
     assert.equal(polled.length, 1, `the scheduled poll's event: ${JSON.stringify(events)}\n${logged.slice(-6).join("\n")}`);
     assert.equal(polled[0]!.table, "public.orders");
-    assert.match(polled[0]!.message, /^synced on schedule: [\d,]+ added, [\d,]+ updated, [\d,]+ deleted, [\d,]+ rows now · [\d.]+ (ms|s)$/);
+    assert.match(polled[0]!.message, /^synced on schedule: [\d,]+ added, ~[1-9][\d,]* updated, [\d,]+ deleted, [\d,]+ rows now · [\d.]+ (ms|s)$/);
     assert.ok(tookSaid(polled[0]!), `a scheduled poll's event says how long it took: ${JSON.stringify(polled[0])}`);
     await s.change();
+    await touch();
     const asked = await sync.pollNow(["public.orders"]);
     const synced = events.filter((e) => e.kind === "synced");
     // the words mason sync prints on the table's line (and the page's Sync now, held equal to it), after "synced by hand"
     const said = syncCommand.syncedReport(asked, ["public.orders"], []).details[0]![1];
     assert.deepEqual(synced, [{ kind: "synced", table: "public.orders", message: `synced by hand: ${said}`, tookMs: asked.tables[0]!.ms }], `${JSON.stringify(events)}\n${logged.slice(-6).join("\n")}`);
-    assert.match(synced[0]!.message, /^synced by hand: [\d,]+ added, [\d,]+ updated, [\d,]+ deleted, [\d,]+ rows now · [\d.]+ (ms|s)$/);
+    assert.match(synced[0]!.message, /^synced by hand: [\d,]+ added, ~[1-9][\d,]* updated, [\d,]+ deleted, [\d,]+ rows now · [\d.]+ (ms|s)$/);
   } finally {
     await sync.stop();
     await store.close();
