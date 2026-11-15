@@ -120,7 +120,7 @@ test("read-only: no choice where the project's files are read-only or the page m
   // deploy), or the page read-only (MASON_UI_READ_ONLY=1, which a deploy does not undo)
   const pageNote = "Tables are not added, removed or synced from this page: the web page is read-only here (MASON_UI_READ_ONLY=1).";
   const cases: Array<[Record<string, unknown>, string]> = [
-    [stateOf({ sourcesReadOnly: why }), `You can't add or remove tables from this page. ${why} The README describes how.`],
+    [stateOf({ sourcesReadOnly: why }), `You can't add or remove tables from this page. ${why} Read how to change a deployed project .`],
     [stateOf({ pageReadOnly: true }), pageNote], [stateOf({ pageReadOnly: true, allow: ["users"] }), pageNote]];
   for (const [s, note] of cases) {
     const html = renderTables(s, { syncOpen: "public.customers", syncChoice: choiceOf("public.customers") });
