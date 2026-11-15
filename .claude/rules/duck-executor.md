@@ -100,8 +100,9 @@ paths:
   queue of its own that a thread passes through between two calls (`registerTurn`, src/duck/functions.ts), so the
   running queue empties after one call per DuckDB thread. `giveTurns` (src/duck/rewrite.ts) gives every call that reads
   a column its turn on the finished tree; SQL written by hand with a per-row call does the same (`keptValueSql`,
-  `orderKeySql`, src/duck/kept.ts). DETECTOR: `tests/duck-executor-starve.test.ts` counts small statements answered
-  beside each heavy shape, `tests/duck-functions.test.ts` holds which argument the turn takes. RESPONSE: the loop turns
+  `orderKeySql`, src/duck/kept.ts). DETECTOR: `tests/duck-executor-starve.test.ts` times small statements beside
+  a function-calling shape in that shape's own vectors, and beside a shape the engine computes itself against the same
+  session's idle with the executor's loop timed beside them, never against a fixed time (issue 984), `tests/duck-functions.test.ts` holds which argument the turn takes. RESPONSE: the loop turns
   every few calls. ("The turn")
 - **Libuv's pool is sized before anything uses it, by the entry, in one file** (issue 88: a statement in flight holds a
   libuv thread, and at Node's four a fifth waited 10 to 50 s; the pool is read once, at its first task, and Node 22 has
