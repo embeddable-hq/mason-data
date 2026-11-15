@@ -434,8 +434,17 @@ export function card(label, value, sub = "", chartHtml = "", kind = "", href = "
  *  count out without a card alone on a row: six in one row or two of three, five as three over two. */
 export const cards = (list) => list.length ? `<div class="cards n${list.length}">${list.join("")}</div>` : "";
 
-/** A table (or any wide HTML) in a hairline card that scrolls sideways on a phone, never the page. */
+/** HTML that is not a list (a list of lines, `ul`) in a hairline card that scrolls sideways where it must, never the page. */
 export const panel = (html) => `<div class="panel">${html}</div>`;
+
+/**
+ * A LIST: a table of rows in its card, the one way every list on every page is written (issue 1049). `cls` is the
+ * table's class, which the stylesheet's "Lists" names; `inner` is its thead and tbody. The card is as wide as its
+ * column. The table is at least its least width (`--least`, set for the list's class in app.css, else its content's),
+ * and where the card is narrower the list scrolls sideways inside it, never the page. A row's actions (`td.act`) stay
+ * pinned at the card's right while it scrolls. tests/web-lists-layout.test.ts holds every list on every page to it.
+ */
+export const listTable = (cls, inner) => `<div class="list"><table class="${cls}">${inner}</table></div>`;
 
 /** A button: `button("Sync", { sync: "public.orders" }, "primary")` → data-sync="public.orders"; `variant` primary,
  *  danger or "" (secondary), with " small" for a compact one in a row. `title`: its whole, where the stylesheet cuts it.
@@ -516,6 +525,8 @@ export function placePops(doc, win) {
     .map((c) => c.getBoundingClientRect()).filter((b) => b.width > 0 && b.height > 0 && b.bottom > 0 && b.top < vh && b.right > 0 && b.left < vw);
   // the height of an answer docked at the window's bottom, given to the page's end (0: none is)
   let dockedHeight = 0;
+  // the answers shown now, by `roomKey`: the room of one no longer shown is given back
+  const shownSaid = new Set();
   for (const el of doc.querySelectorAll(".pop[data-anchor]")) {
     const a = doc.getElementById(el.dataset.anchor);
     if (a === null || typeof a.getBoundingClientRect !== "function") { el.hidden = true; continue; }
@@ -567,7 +578,18 @@ export function placePops(doc, win) {
       docked = clear === undefined;
       el.classList.toggle("docked", docked);
       if (!docked) at = clear;
-      else dockedHeight = Math.max(dockedHeight, el.offsetHeight);
+      // THE ROOM AT THE PAGE'S END IS KEPT while the answer is shown: scrolled into that room, an answer finds a place
+      // there that covers nothing and leaves the bar, and the room going with it shortened the page under the scroll,
+      // which the browser pulled back, so the last rows could never be scrolled clear of it (a phone's Tables list)
+      // An answer in a page not shown has no box (its section is hidden): it keeps no room, or every other page ended in
+      // blank space until the reader went back and dismissed it (issue 1049's review). It docks afresh when its page is
+      // shown again.
+      if (el.offsetWidth > 0 || el.offsetHeight > 0) {
+        const room = Math.max(docked ? el.offsetHeight : 0, dockRoom.get(roomKey(el)) ?? 0);
+        if (room > 0) dockRoom.set(roomKey(el), room);
+        dockedHeight = Math.max(dockedHeight, room);
+        shownSaid.add(roomKey(el));
+      }
       // A TAP ON IT IS ITS OWN (the owner's re-check: a finger 2 px inside the docked bar's top pressed the Add above it):
       // a browser moves a tap to the nearest control under the finger, and only a box that answers a click is one — so it
       // answers one (`keepsTap`), and docked, a band above it, unseen, is its own too (app.css)
@@ -582,9 +604,15 @@ export function placePops(doc, win) {
     el.style.top = docked ? "" : `${Math.round(at.top)}px`;
     placed.push(el);
   }
+  for (const key of [...dockRoom.keys()]) if (!shownSaid.has(key)) dockRoom.delete(key);
   doc.documentElement?.style?.setProperty?.("--docked-h", `${Math.ceil(dockedHeight)}px`);
   return placed;
 }
+
+/** The room at the page's end each answer docked at the window's bottom keeps while it is shown (`placePops`), by
+ *  `roomKey`: its anchor and its words. */
+const dockRoom = new Map();
+const roomKey = (el) => `${el.dataset.anchor}|${(el.textContent ?? "").slice(0, 200)}`;
 
 /** What a person clicks or types in: what an answer's popover must not cover (`placePops`). */
 const CONTROLS = "button, a[href], input, select, textarea, summary";

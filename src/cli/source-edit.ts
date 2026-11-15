@@ -15,11 +15,12 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Failure, FailureCode } from "./command.ts";
 import type { SourceTable } from "./preflight.ts";
-import { addedTables, catalogTable, chooseColumns, effectiveSync, entryFields, entryName, entryProblems, everyColumnLeavesOut, findEntry, noKeyReason, parseSourceText, sourceFailure, sourceFileNames, sourcesDir,
+import { addedTables, catalogTable, chooseColumns, clashReason, effectiveSync, entryFields, entryName, entryProblems, everyColumnLeavesOut, findEntry, noKeyReason, parseSourceText, sourceFailure, sourceFileNames, sourcesDir,
   unaddableReason, usableUniqueKey, withEntrySync, withoutTable, withTable, type CatalogColumn, type CatalogTable, type EntryFields, type ProjectSource, type SourceFile,
   type TableEntry, type WrittenEntry } from "./sources.ts";
 import { BIG_TABLE_ROWS, COSTLY_POLL_ROWS, COSTLY_POLL_SECONDS, syncText, type TableSync } from "../lib/table-sync.ts";
 import { projectWriteRefusal } from "./project.ts";
+import { relationKey } from "../lib/relation-key.ts";
 
 /** A refusal the command shows as it is; `failure` is how the web page says it (the CLI's Failure: why, fix, next), by
  *  default the message alone under the status's code. */
@@ -229,6 +230,16 @@ export function plannedEntry(file: SourceFile, db: EditCatalog, t: SourceTable, 
   const chosen = keep ? { columns: was.columns, exclude: was.exclude, addedKey: [], skipped: [] } : chooseColumns(t, columns, key);
   if ("problem" in chosen) throw new Refusal(400, chosen.problem);
   others();
+  // NAMES THE SYNCED DATA TAKES FOR ONE (issue 1019; src/lib/relation-key.ts): said in the command's words, before the
+  // entry's own check says them in the file's. A table beside one the file syncs whose name differs only in case
+  const twin = file.tables.find((e) => e.table !== table && relationKey(e.table) === relationKey(table));
+  if (twin !== undefined) {
+    throw new Refusal(409, `${table} cannot be added: its name differs from ${twin.table} only in case, and the file syncs ${twin.table} already (tables.${twin.name}). ` +
+      `The synced data cannot hold both. mason remove ${twin.name} first to sync ${table} instead`);
+  }
+  // columns whose names differ only in case, with the --columns that syncs the rest
+  const clash = keep ? null : clashReason(t, chosen, key);
+  if (clash !== null) throw new Refusal(409, `${table} cannot be added: ${clash}`);
   // its own sync: asked, else the one its entry has, else none (the file's) — but a new big table under a polling default
   const fileSync = effectiveSync(file, undefined).sync;
   const bigOff = o.sync === undefined && was === undefined && fileSync.mode === "poll" && t.rows !== null && t.rows > BIG_TABLE_ROWS;

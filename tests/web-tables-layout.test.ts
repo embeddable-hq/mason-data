@@ -173,7 +173,7 @@ const unread = (p: Page) => p.evaluate<{ rows: number; out: string[] }>(`(() => 
       if (what === "name" && el.textContent !== name) out.push(said + " is not its name");
       if (el.scrollWidth > el.clientWidth + 0.5 || el.scrollHeight > el.clientHeight + 0.5) out.push(said + " cut inside itself (" + el.scrollWidth + " > " + el.clientWidth + ")");
       if (cell.scrollWidth > cell.clientWidth + 0.5) out.push(said + " cut by its cell (" + cell.scrollWidth + " > " + cell.clientWidth + ")");
-      const b = el.getBoundingClientRect(), card = (el.closest(".panel") ?? document.body).getBoundingClientRect();
+      const b = el.getBoundingClientRect(), card = (el.closest(".list") ?? document.body).getBoundingClientRect();
       if (b.left < card.left - 0.5 || b.right > card.right + 0.5) out.push(said + " outside the list's card");
       if (b.right > window.innerWidth + 0.5) out.push(said + " past the window");
       // read at each of its lines' ends and middle: what is there is it, never a column pinned over it
@@ -387,4 +387,31 @@ test(`on a phone, the answer for a table of a 60-character name keeps its Dismis
   }
   await p.close();
   assert.deepEqual(out, [], "Dismiss in view and dismissing, every time");
+});
+
+// THE ROOM AT THE PAGE'S END IS ONLY FOR AN ANSWER SHOWN (issue 1049's review): an answer docked on Tables and not
+// dismissed kept its room on every other page, which then ended in about 290 px of blank space
+test("on a phone, an answer docked on Tables keeps no room at the end of another page, and has it again back on Tables", { skip: noBrowser }, async () => {
+  const p = await open(390);
+  const room = () => p.evaluate<string>(`getComputedStyle(document.body).paddingBottom`);
+  const settle = () => p.evaluate("new Promise((r) => setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(r)), 300))");
+  await p.evaluate(`document.querySelector('button[data-sync-table="public.${LONG}"]').scrollIntoView({ block: "center" })`);
+  await p.click(`button[data-sync-table="public.${LONG}"]`);
+  await p.waitForSelector(".pop.said.docked:not([hidden])");
+  await settle();
+  const onTables = await room();
+  assert.notEqual(onTables, "0px", "docked on Tables: the page's end gives it room");
+  const found: string[] = [];
+  for (const hash of ["#overview", "#users", "#observability/queries", "#observability/usage", "#observability/syncs"]) {
+    await p.evaluate(`location.hash = ${JSON.stringify(hash)}`);
+    await settle();
+    const r = await room();
+    if (r !== "0px") found.push(`${hash}: the page's end keeps ${r} for an answer it does not show`);
+  }
+  await p.evaluate(`location.hash = "#tables"`);
+  await settle();
+  const back = await room();
+  await p.close();
+  assert.deepEqual(found, [], "no room on another page");
+  assert.notEqual(back, "0px", "back on Tables, the answer still shown has its room again");
 });
