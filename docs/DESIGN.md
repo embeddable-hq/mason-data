@@ -605,6 +605,44 @@ is a mistake, and `publication: null` beside `PG_PUBLICATION` is refused, since 
 refuses `mason start` too. **Where.** `src/cli/registry.ts`, `src/cli/serve.ts`,
 `src/lib/table-sync.ts`; `tests/cli-commands.test.ts`, `tests/serve.test.ts`.
 
+### Which column is which (issue 1073, 2026-11-15)
+
+**Decision.** Mason knows a column by its identity on the database: its table's oid and its `attnum`. A rename keeps
+both, and a dropped column's number is never given to another. The sources file still decides by name. But what the run
+took of each table's columns is recorded by identity (`_mason.column_identity`), so a restart knows it too. A column the
+file left out stays out under any other name. When the file would sync it under a new name, Mason holds the table. It
+keeps serving what it holds, and says why on the table's line, with the line that keeps the column out and the command
+that syncs it.
+
+**Why.** The review of PR 1065 served an excluded column three ways, at main and at that PR's head. Two names swapped in
+one transaction served `SECRET_salary` as `a`. A rename while Mason was stopped, then a start from the file as it was,
+synced the renamed column. A column renamed to a name a `columns:` entry lists was synced under that name. Each time the
+file was written about the old names. Mason cannot tell a rename from a choice, so it fails closed.
+
+**How a person confirms.** Running `mason add <table>` while Mason runs writes the entry against the columns as the
+database names them now, so the run takes that entry afresh. Removing the entry and adding it again does the same,
+because the record goes with the synced data. A hand edit of the file alone never confirms a rename. The file cannot say
+whether its author knew of the rename. The line a hold suggests keeps the column out. The command it suggests names every
+column, because `mason add` writes the entry anew and would drop the file's other excludes.
+
+**Each read checks too.** The decision is made when the catalog is read, so a rename after it could still reach a read.
+The poll and each chunk of a copy ask `pg_identify_object` for each column after their read, in the same transaction.
+The read holds its lock until that transaction ends, so no rename can come between. `pg_attribute` cannot be asked
+instead. Measured on Postgres 16: in a REPEATABLE READ transaction whose snapshot was taken before a swap of `a` and
+`salary`, `SELECT a` read the salary, `pg_attribute` still said `a`, and `pg_identify_object` said `salary`. The stream
+cannot ask, since pgoutput names columns but not their numbers. It holds a relation's columns, in order, to the columns
+the copy was taken from: they must open the relation's list under the same names.
+
+**What is left.** One stream case is not caught at once. A single transaction could drop a column, rename the columns
+after it to shift every name into place, and add a column at the end, all of one type. The relation's names would then
+be the old names in the old order. The shape check at most a minute later sees the new numbers and places the columns
+again, but the changes streamed meanwhile were applied by name. The first start of this release has no record, so a
+rename made before it is taken by name, as before.
+
+**Where.** `src/duck/column-identity.ts`, `src/duck/sync.ts` (`placeColumns`, `readStillPlaced`, `relationOf`),
+`src/duck/stream.ts` (`relationMoved`), `src/cdc/shape.ts` (`identitySql`); `tests/duck-column-identity.test.ts`,
+`tests/integration/cli-column-identity.itest.ts`.
+
 ### Logical replication
 
 **Decision.** A table whose `sync:` is `replication` is kept current from the change log (`src/duck/stream.ts`); the rules

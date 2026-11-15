@@ -68,6 +68,29 @@ export function projectTuple(relation: readonly RelationColumn[], tuple: readonl
   });
 }
 
+/**
+ * WHETHER A RELATION'S COLUMNS ARE STILL THE ONES THE COPY WAS TAKEN FROM (issue 1073), else why not. pgoutput names a
+ * relation's columns, never their numbers, in the order of their numbers: so the columns the run took (`relation`, the
+ * table's every column as the catalog read it, by number) must open the relation's list, in order, each under its name,
+ * the columns added since after them. A column Postgres does not send (`skippable`: a generated one, or one a named
+ * publication's column list leaves out) may be missing. Anything else is a column renamed, swapped or dropped: a
+ * change sent under a name may then be another column's value (two names swapped in one transaction served a salary as
+ * `a`), so the table is refused before it is applied (`StreamTarget.refuse`), and its columns read again. A relation of
+ * another oid is another table of the same name.
+ */
+export function relationMoved(relid: number, relation: readonly RelationColumn[], table: StreamedTable): string | null {
+  const r = table.relation;
+  if (r === undefined) return null;
+  if (relid !== r.oid) return "it is another table on the database now (dropped and made again under its name)";
+  let i = 0;
+  for (const c of r.columns) {
+    if (relation[i]?.name === c.name) { i++; continue; }
+    if (c.skippable) continue;
+    return `its columns changed on the database: the stream sends ${relation.map((x) => x.name).join(", ") || "none"}, and its synced data was taken from ${r.columns.map((x) => x.name).join(", ")}`;
+  }
+  return null;
+}
+
 /** the copy's columns a relation does not carry, but for those Postgres never publishes (`generated`, read from the
  *  source instead): what refuses the table (`StreamTarget.refuse`) */
 export function missingFrom(relation: readonly RelationColumn[], table: StreamedTable): string[] {
@@ -256,17 +279,22 @@ interface Relation { source: string; columns: RelationColumn[] }
  *  left or its copy was swapped, never used twice), the COPY's columns (never the sources file's of the moment, never the publication's), its key,
  *  and the columns the stream may lack because Postgres publishes none (a generated column before 18: read from the
  *  source by key, `refetch`) */
-export interface StreamedTable { stay: number; columns: readonly string[]; key: readonly string[]; generated?: readonly string[]; big?: boolean }
+export interface StreamedTable {
+  stay: number; columns: readonly string[]; key: readonly string[]; generated?: readonly string[]; big?: boolean;
+  /** the table's oid and its every column, by number, as the run took them (`relationMoved`): absent for a test's table */
+  relation?: { oid: number; columns: ReadonlyArray<{ name: string; skippable: boolean }> };
+}
 
 export interface StreamTarget {
   /** the streamed tables, by source (`schema.table`), each in the copy's own columns. Read at EVERY change: a table joins
    *  (caught up) or leaves (copied again) while the stream runs */
   tables(): ReadonlyMap<string, StreamedTable>;
   /** a streamed table whose relation (pgoutput's, after a DDL on the database or a narrower publication) no longer
-   *  carries `missing`, columns its copy holds: its changes are not applied from here on, and the target takes it out of
-   *  the stream, saying why and the way out — recorded before the stream goes on, so nothing past the change is
-   *  acknowledged without it. Called once per `tables()` entry */
-  refuse(source: string, missing: readonly string[]): Promise<void>;
+   *  carries `missing`, columns its copy holds, or whose columns are no longer the ones its copy was taken from (`moved`,
+   *  `relationMoved`): its changes are not applied from here on, and the target takes it out of the stream, saying why
+   *  and the way out — recorded before the stream goes on, so nothing past the change is acknowledged without it. Called
+   *  once per `tables()` entry */
+  refuse(source: string, why: { missing: readonly string[] } | { moved: string }): Promise<void>;
   /** told of each relation message, with the columns it carries: Postgres sends one before a table's first change in a
    *  stream, and again after its definition changed (an ALTER TABLE), so the target checks whether the table's columns
    *  changed on the database (issue 977). Never awaited: the check is the target's, beside the stream */
@@ -446,11 +474,13 @@ export class ReplicationStream {
               // looked up at each change: a table caught up since the stream started is streamed from here on
               const table = rel === undefined ? undefined : this.target.tables().get(rel.source);
               if (rel === undefined || table === undefined) continue;   // a table the copy does not hold, or not yet caught up
-              // a column the copy holds that the relation does not carry (a DDL on the database, a narrower publication):
-              // its changes cannot be written, so the table is refused and leaves the stream; the others go on
+              // its columns no longer the ones its copy was taken from (a rename, a swap, a drop: issue 1073), or a column
+              // the copy holds that the relation does not carry (a narrower publication): its changes cannot be written as
+              // they are, so the table is refused and leaves the stream; the others go on
+              const moved = relationMoved(relid, rel.columns, table);
               const missing = missingFrom(rel.columns, table);
-              if (missing.length) {
-                if (!refused.has(table)) { refused.add(table); await this.target.refuse(rel.source, missing); }
+              if (moved !== null || missing.length) {
+                if (!refused.has(table)) { refused.add(table); await this.target.refuse(rel.source, moved !== null ? { moved } : { missing }); }
                 continue;
               }
               if (table.big === true) big = true;

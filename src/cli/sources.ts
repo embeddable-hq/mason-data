@@ -591,7 +591,9 @@ export function addedTables(src: SourceFile, tables: readonly SourceTable[], dat
     if (p.length || t === undefined) { problems.push(...p); continue; }
     const keep = new Set(copiedColumns(t, e));
     out.push({ ...t, columns: t.columns.filter((c) => keep.has(c.name)), foreignKeys: t.foreignKeys.filter((f) => keep.has(f.column)),
-      ...(e.key !== null ? { key: e.key, primaryKey: t.key } : {}), sync });
+      ...(e.key !== null ? { key: e.key, primaryKey: t.key } : {}), sync,
+      // its entry's words, for the line a hold for its columns says (src/duck/column-identity.ts)
+      entry: { file: shownPath(root, src.file), name: e.name, columns: e.columns, exclude: e.exclude } });
   }
   return problems.length ? sourceFailure(src.file, root, problems, [["mason tables", "the database's tables and their columns"]]) : out;
 }

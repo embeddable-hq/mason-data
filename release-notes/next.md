@@ -14,6 +14,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **A column your sources file leaves out is no longer served under another name.** This covers a column that
+  `exclude:` names, one a `columns:` entry does not list, and a secret-looking column `mason add` left out. Before, Mason
+  matched columns by name alone. If two columns swapped names in one transaction, the left-out column was served under
+  the other's name. The same happened after a rename while Mason was stopped, and to a column renamed to a name
+  `columns:` lists. Now Mason knows each column by its identity on your database, which a rename keeps. A left-out
+  column stays out under any new name. If your entry would sync it under its new name, Mason stops syncing that table
+  and keeps serving the data it holds. The table's line in `mason status` and on the web page says why. It gives the
+  line that keeps the column out, and the `mason add` command that syncs it under its new name.
+
 - **A table rewritten on your database while Mason read it is no longer served empty or partial.** A rewrite is a
   `TRUNCATE`, `VACUUM FULL`, `CLUSTER`, an `ALTER TABLE` that rewrites the table (such as a column's type change), or
   a tool that swaps its file, such as pg_repack. Before, a first sync or a table synced again whole could read none of

@@ -62,6 +62,16 @@ paths:
   out. **A whole read that fails checks its table's shape again** (`reshapeAfterFailure`; the same review: a column
   dropped during a resync, or renamed during a first sync, failed it for ever with the same columns), so a change
   re-plans it. A relation message whose columns, type oids or typmods are not the shape's is checked at once.
+- **A column is known by its identity, its table's oid and its `attnum`, never by its name alone** (issue 1073: a swap
+  of two names served an excluded salary as `a`, and so did a rename followed by a start, and a column renamed to a name
+  `columns:` lists). What the run took of each table's columns is recorded by identity in `_mason.column_identity`
+  (src/duck/column-identity.ts `identityVerdict`, applied by `placeColumns` each time the tables are set). A column left
+  out stays out under any other name. When the file would sync it under a new name, the table is HELD (`unplaced`): it
+  is not copied, polled, caught up or streamed, it serves what it holds, and its line says why with the line to write.
+  `mason add` of the table through the run confirms its entry afresh. Every read checks its columns too: the poll and
+  each chunk of a copy ask `pg_identify_object` in their own transaction after the read (`readStillPlaced`), and the
+  stream refuses a relation whose columns no longer open with the ones the copy was taken from (`relationMoved`). The
+  shape carries each column's number, so a swap or a drop and an add of one name changes it. ("Which column is which")
 - **A batch holds a table's changes of ONE STAY in the stream, and only the stay it is in now is applied**
   (`StreamedTable.stay`: a new number when the table enters `streamed` or its copy is swapped, never used twice;
   `streamOnce`, `applyStreamed`): an ended stay's changes committed before the next copy's catch-up, so that copy or

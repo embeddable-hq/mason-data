@@ -616,7 +616,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     sources = { file: r.file, tables: r.tables, problem: r.problem };
     sync.setViews(now.views ?? []);
     sync.setCollations(now.collations ?? []);
-    return sync.setTables(sources.tables);
+    // the tables an edit just wrote (mason add): their entry written against the columns as they are now, so each is
+    // taken afresh by name, whatever the run took of its columns before (src/duck/column-identity.ts)
+    return sync.setTables(sources.tables, { confirmed: r.problem === null ? edit.edited ?? [] : [] });
   };
 
   if (pg.said) say(`  ${pg.said}`);
