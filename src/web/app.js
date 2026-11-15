@@ -66,7 +66,19 @@
  *                      banner then does not say it again (`app.stale()`)
  *       model?         its state, for the tests
  *     }
- *     ctx = { ask(path, init) → { body } | { failure }, read(path) → { body, failure, readAt } | undefined (body: the last
+ *     ctx = { ask(path) → { body } | { failure }: a READ (GET) only. It throws for any other method, so a change can
+ *               only be sent through `send`,
+ *             send(key, path, init, { refresh?, onAnswer? }) → { body } | { failure } | { busy: true }: THE ONE WAY A PAGE
+ *               SENDS A CHANGE (issue 1033). `key` names the control's action (`remove:public.orders`). A second send of
+ *               it while one is in flight sends nothing and answers { busy: true }. `sending(key)` is true from the click
+ *               until the answer and its `refresh` reads are in, so the page writes that control busy (`sendButton` of
+ *               shared.js: its busy label, disabled, in a room as wide as either label). Anything thrown is turned into
+ *               a failure, and each request has a deadline (`createAsk`), so the page always paints again and nothing
+ *               stays busy. `onAnswer(r)` runs when the answer comes, before the reads of `refresh` (the paths the change
+ *               moved, read again on success). The page says a failure in a popover beside the control (`failurePop`),
+ *               with Dismiss, which Escape presses too,
+ *             sending(key) → whether that action's request is in flight,
+ *             read(path) → { body, failure, readAt } | undefined (body: the last
  *             one read; failure: this read's, else null; readAt: when that body was read, ms), refresh(paths) → Promise (read them now), now() → Date,
  *             range() → a key of RANGES: the time range the Observability pages share (from the hash),
  *             shown() → the id of the page shown }
@@ -324,7 +336,28 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
     paths.forEach((p, i) => put(p, at, rs[i]));
     afterRead();
   };
-  const ctx = { ask, now, refresh, range: () => m.range, shown: () => m.shown, read: (path) => { const e = store.get(path); return e === undefined ? undefined : { body: e.body, failure: e.failure, readAt: e.readAt }; } };
+  // A PAGE READS WITH `ask` AND CHANGES WITH `send` (the contract above): a read by any other method is a page's mistake
+  const read = (path, init) => {
+    const method = String(init?.method ?? "GET").toUpperCase();
+    if (method !== "GET" && method !== "HEAD") throw new Error(`ctx.ask reads; ${method} ${path} is a change, sent through ctx.send`);
+    return ask(path, init);
+  };
+  // THE CHANGES IN FLIGHT, by the key of the control's action: one at a time each
+  const sending = new Set();
+  const send = async (key, path, init, { refresh: paths = [], onAnswer = null } = {}) => {
+    if (sending.has(key)) return { busy: true };
+    sending.add(key);
+    try {
+      let r;
+      // `ask` answers every failure as one; anything still thrown (a page's own bug) is said, never lost
+      try { r = await ask(path, init); }
+      catch (e) { r = { failure: { code: "failed", message: `the page could not send ${path}: ${e?.message ?? String(e)}` } }; }
+      onAnswer?.(r);
+      if (!("failure" in r) && paths.length > 0) await refresh(paths);
+      return r;
+    } finally { sending.delete(key); }
+  };
+  const ctx = { ask: read, send, sending: (key) => sending.has(key), now, refresh, range: () => m.range, shown: () => m.shown, read: (path) => { const e = store.get(path); return e === undefined ? undefined : { body: e.body, failure: e.failure, readAt: e.readAt }; } };
   for (const p of PAGES) pages.set(p.id, p.create(ctx));
   // the page first shown takes its parameters too, as `show` hands them (a host's view, its place)
   pages.get(first.id).route?.(first.params, {});
@@ -692,7 +725,8 @@ export function start(doc, win) {
   app.onLate = () => paint();
   // what a page answered an event with: the page written at once (what the action set before it asked: Syncing…), and
   // again when it is answered
-  const act = async (r) => { paint(); await r; paint(); };
+  // again when it is answered, whatever it threw: the page is always written again, so nothing is left busy on screen
+  const act = async (r) => { paint(); try { await r; } finally { paint(); } };
   // THE PHONE'S MENU: the sidebar's nav as a sheet, opened by its button (shown below 640 px only). Open, the focus is
   // on its first link; Escape, a click outside it, the focus leaving it or a link followed close it, the focus back on
   // the button (but when the focus left by itself, to where it went)

@@ -3,7 +3,7 @@
  * POST /api/users/<name>/from, /disable and /enable, DELETE /api/users/<name>. An added user's password lives in this page's memory while its one-time dialog is open, never in
  * storage, a URL or a log line.
  */
-import { actId, badge, button, code, copyable, copyClick, duration, empty, esc, json, panel, pop, renderFailure, ROOMS, serverHostNote, spanText, status, utcMinute, readOnlyLine, usersReadOnly } from "../shared.js";
+import { actId, badge, button, code, copyable, copyClick, duration, empty, esc, json, panel, pop, renderFailure, ROOMS, serverHostNote, spanText, status, utcMinute, readOnlyLine, usersReadOnly, sendButton, failurePop } from "../shared.js";
 import { VIEW_HASHES } from "../routes.js";
 
 /** The users as the page reads them: with each one's last use (`mason user list` asks the same), then every 30 s. */
@@ -115,7 +115,7 @@ function usersTabs(show, active, removed) {
  * row's actions as Disable does, where it connects from (`confirming` { name, verb: "from" }) — the choice the add form
  * offers, opened at its ranges now — and sends POST /api/users/<name>/from.
  */
-export function renderUsers(list, confirming = null, now = Date.now(), refused = null, roles = null, readOnly = null, show = "active") {
+export function renderUsers(list, confirming = null, now = Date.now(), refused = null, roles = null, readOnly = null, show = "active", { sending = () => false, fromSent = null } = {}) {
   const live = list.users.filter((u) => u.removedAt == null);
   const gone = list.users.filter((u) => u.removedAt != null);
   const why = readOnlyLine("Users are not added, changed, disabled or removed", readOnly);
@@ -139,17 +139,22 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
     const disabled = active && u.disabledAt != null;
     const asking = active && ask?.name === u.name ? ask.verb : null;
     const anchor = actId("users", u.name);
+    // A CHANGE OF IT BEING SENT (`ctx.sending`, `user:<name>`): the question stays, its button saying what it does now
+    // (Removing…, Disabling…, Changing…, in the room of both labels), and its Cancel held until the answer comes
+    const busy = active && sending(`user:${u.name}`);
+    const cancel = button("Cancel", { cancelRemove: "", popClose: "" }, "small", { disabled: busy });
     if (asking === "remove") pops.push(pop(anchor, `<p class="confirm">Remove ${esc(u.name)}? It can no longer connect, and its open sessions end at their next query.</p>` +
-      `<p class="pop-actions">${button(`Remove ${u.name}`, { confirmRemove: u.name }, "danger small")} ${button("Cancel", { cancelRemove: "", popClose: "" }, "small")}</p>`, { kind: "dialog", label: `Remove ${u.name}?` }));
+      `<p class="pop-actions">${sendButton(`Remove ${u.name}`, "Removing…", { confirmRemove: u.name }, "danger small", { busy })} ${cancel}</p>`, { kind: "dialog", label: `Remove ${u.name}?` }));
     else if (asking === "disable") pops.push(pop(anchor, `<p class="confirm">Disable ${esc(u.name)}? ${esc(disableEffect())}</p>` +
-      `<p class="pop-actions">${button(`Disable ${u.name}`, { confirmDisable: u.name }, "danger small")} ${button("Cancel", { cancelRemove: "", popClose: "" }, "small")}</p>`, { kind: "dialog", label: `Disable ${u.name}?` }));
-    // the form's first input is its choice (a dialog's first box takes the focus): the user it changes is last, hidden
+      `<p class="pop-actions">${sendButton(`Disable ${u.name}`, "Disabling…", { confirmDisable: u.name }, "danger small", { busy })} ${cancel}</p>`, { kind: "dialog", label: `Disable ${u.name}?` }));
+    // the form's first input is its choice (a dialog's first box takes the focus): the user it changes is last, hidden.
+    // Written again while it is sent, it keeps the choice the person sent (`fromSent`)
     else if (asking === "from") pops.push(pop(anchor, `<form id="user-from" class="from-form" autocomplete="off">` +
       `<p class="ask-from">Choose where ${esc(u.name)} can connect from. If you limit it, open sessions from other addresses end at their next query.</p>` +
-      connectsChoice("user-from", u.from ?? null) +
-      `<p class="pop-actions"><button type="submit" class="primary small">Change ${esc(u.name)}</button> ${button("Cancel", { cancelRemove: "", popClose: "" }, "small")}</p>` +
+      connectsChoice("user-from", fromSent !== null && busy ? fromSent.from : u.from ?? null) +
+      `<p class="pop-actions">${sendButton(`Change ${u.name}`, "Changing…", {}, "primary small", { busy, submit: true })} ${cancel}</p>` +
       `<input type="hidden" name="user" value="${esc(u.name)}"></form>`, { kind: "dialog", label: `Where ${u.name} connects from` }));
-    else if (refused?.name === u.name) pops.push(pop(anchor, `${renderFailure(refused.failure)}<p class="pop-actions">${button("Dismiss", { dismissRefused: "", popClose: "" }, "small")}</p>`));
+    else if (refused?.name === u.name) pops.push(failurePop(anchor, refused.failure, { dismissRefused: "" }));
     return `<tr${active ? "" : ` class="removed"`}><th scope="row"><code class="name" title="${esc(u.name)}">${esc(u.name)}</code> <span class="dim">id ${esc(u.id)}</span></th>` +
       // the role it reads as (src/cli/roles.ts userRole): its own (mason user add --role) — one the roles file does not name,
       // said — or the file's default; none under a file with no default reads nothing, said; no roles file, every table
@@ -168,7 +173,7 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
       `${active && !disabled && !u.live ? ` <span class="warn">can't connect: the API key changed after it was added</span>` : ""}</td>` +
       `<td class="mono">${esc(stamp(u.addedAt))} UTC</td><td class="num">${lastCell}</td>` +
       // Queries: its statements of the last 24 hours on Observability › Queries (a removed user's too: its past)
-      `<td class="act" id="${esc(anchor)}"><a class="btn small" href="${esc(userQueriesHref(u.name))}" title="the queries ${esc(u.name)} sent in the last 24 hours">Queries</a>${!active || readOnly !== null ? "" : ` ${toggle(u, disabled, asking === "disable")} ${asking === "remove" ? button("Remove", {}, "danger small", { disabled: true, expanded: true })
+      `<td class="act" id="${esc(anchor)}"><a class="btn small" href="${esc(userQueriesHref(u.name))}" title="the queries ${esc(u.name)} sent in the last 24 hours">Queries</a>${!active || readOnly !== null ? "" : ` ${toggle(u, disabled, asking === "disable", busy && asking === null)} ${asking === "remove" ? button("Remove", {}, "danger small", { disabled: true, expanded: true })
         : button("Remove", { remove: u.name }, "danger small")}`}</td></tr>`;
   }).join("")}</tbody></table>`) + pops.join("") + note("Last used", list.lastUsedNote);
 }
@@ -195,7 +200,7 @@ export function renderUsersConnect(pg, served = false, shareTip = false) {
 // ------------------------------------------------------------------ Temporary cloud login (mason share, from the page)
 
 /** The page's share before anything was asked: what the share's renderers and the page's model start from. */
-export const NO_SHARE = Object.freeze({ phase: "none", role: null, opened: null, ended: null, failure: null });
+export const NO_SHARE = Object.freeze({ phase: "none", role: null, opened: null, ended: null, failure: null, stopFailure: null });
 
 /** The share the page holds, as `/api/state` `share` lists it (`from: "page"`), or null. */
 export const pageShareOf = (s) => s?.share?.shares?.find((x) => x.from === "page") ?? null;
@@ -241,10 +246,12 @@ export function renderSharePane(s, m = NO_SHARE, choices = undefined) {
   const list = Array.isArray(body?.choices) ? body.choices : null;
   const role = list === null || list.length < 2 ? "" : `<span class="role-field"><label for="share-role">Role</label> <select id="share-role">${list.map((c) => `<option value="${esc(c.role)}"${c.role === chosenRole(m, list) ? " selected" : ""}>${esc(`${c.role}: ${c.reads}${c.default ? " (default)" : ""}`)}</option>`).join("")}</select></span> `;
   const failure = list === null && choices?.failure ? renderFailure(choices.failure) : "";
-  const busy = m.phase === "opening" || (pageShareOf(s) !== null && m.phase !== "ended");
-  const title = list === null ? "" : busy ? "One is open: stop it to open another" : "";
-  return `<div class="share-pane"><p class="tip">For a tool in the cloud that can't reach this machine. Opens a public address with a login of its own, until you stop it.</p>` +
-    failure + `<p class="share-ask">${role}${button("Open a cloud login", { shareOpen: "" }, "primary", { disabled: list === null || busy, title })}` +
+  const opening = m.phase === "opening";
+  const busy = opening || (pageShareOf(s) !== null && m.phase !== "ended");
+  const title = list === null ? "" : opening ? "" : busy ? "One is open: stop it to open another" : "";
+  // Open a cloud login → Opening… in the room of both, while it opens (up to 30 s, said in the tip, which never changes)
+  return `<div class="share-pane"><p class="tip">For a tool in the cloud that can't reach this machine. Opens a public address with a login of its own, until you stop it. Opening one can take up to 30 s.</p>` +
+    failure + `<p class="share-ask">${role}${sendButton("Open a cloud login", "Opening…", { shareOpen: "" }, "primary", { id: "share-open", busy: opening, disabled: list === null || busy, title })}` +
     `${list === null && !failure ? ` <span class="dim">Reading the roles…</span>` : ""}</p></div>`;
 }
 
@@ -292,11 +299,17 @@ export function renderShareCard(s, m = NO_SHARE, now = Date.now()) {
       publicLine(open, now) +
       `<p class="tip">The password was shown once, when it opened, and is not saved. For a new one, press Stop, then Open a cloud login.</p>` +
       `<p class="tip">Live until you stop it.${esc(endsLine(open.endsAt, now))}</p>` +
-      `${button("Stop", { shareStop: open.user }, "danger", { id: "share-stop" })}</div>`;
+      `${sendButton("Stop", "Stopping…", { shareStop: open.user }, "danger", { id: "share-stop", busy: m.stopping === true })}</div>` +
+      // A STOP REFUSED (issue 1033): said beside Stop, with what still stands — the login is open, and public — until
+      // dismissed, a Stop sent again, or the login seen ended
+      (m.stopFailure ? failurePop("share-stop", m.stopFailure, { dismissShare: "" },
+        `<p class="headline">Stop failed. The temporary cloud login is still open, and its address and password still work.</p>`) : "");
   }
-  if (m.phase === "opening") return `<div class="user-added share-added" role="status">${head}<p class="added-seen" aria-busy="true">Opening a temporary public address… This can take up to 30 s.</p></div>`;
-  if (m.phase === "ended" && m.ended !== null) return `<p class="said">The temporary cloud login ended: ${esc(m.ended.why)}. Its address and password no longer work.</p>`;
-  if (m.phase === "refused" && m.failure !== null) return renderFailure(m.failure);
+  // WHILE IT OPENS, ITS BUTTON SAYS SO (Opening…); A REFUSAL OR ITS END IS A POPOVER: nothing under the add box comes
+  // and goes, so the Connect panel never moves
+  if (m.phase === "ended" && m.ended !== null) return pop("add-box", `<p class="headline">The temporary cloud login ended: ${esc(m.ended.why)}. Its address and password no longer work.</p>` +
+    `<p class="pop-actions">${button("Dismiss", { dismissShare: "", popClose: "" }, "small")}</p>`);
+  if (m.phase === "refused" && m.failure !== null) return failurePop("share-open", m.failure, { dismissShare: "" });
   return "";
 }
 
@@ -318,11 +331,12 @@ export function createShare(ctx) {
   const timers = ctx.timers ?? globalThis;
   let beating = null;
   const stopBeats = () => { if (beating !== null) { timers.clearInterval(beating.id); beating = null; } };
-  const ended = (user, why) => { stopBeats(); m.opened = null; m.phase = "ended"; m.ended = { user, why }; };
+  const ended = (user, why) => { stopBeats(); m.opened = null; m.phase = "ended"; m.ended = { user, why }; m.stopFailure = null; };
   const beat = async () => {
     if (beating === null) return;
     const user = beating.user;
-    const r = await ctx.ask(`api/share/${encodeURIComponent(user)}/beat`, json("POST"));
+    // a beat is no person's action: nothing on the page says it is sent, and its failure is read here alone
+    const r = await ctx.send("share-beat", `api/share/${encodeURIComponent(user)}/beat`, json("POST"));
     if ("failure" in r && r.failure.code === "not_found" && beating?.user === user) { ended(user, r.failure.message.replace(/^.*?; it ended: /, "")); await ctx.refresh([STATE]); }
   };
   const startBeats = (user, everyMs = BEAT_MS) => {
@@ -338,18 +352,29 @@ export function createShare(ctx) {
       const list = roles();
       if (list === null || m.phase === "opening") return;
       const role = list.length > 0 ? chosenRole(m, list) : null;
-      Object.assign(m, { phase: "opening", failure: null, ended: null });
-      const r = await ctx.ask("api/share", json("POST", { from: "page", confirmed: true, ...(role !== null ? { role } : {}) }));
+      Object.assign(m, { phase: "opening", failure: null, ended: null, stopFailure: null });
+      const r = await ctx.send("share-open", "api/share", json("POST", { from: "page", confirmed: true, ...(role !== null ? { role } : {}) }));
+      if ("busy" in r) return;
       if ("failure" in r) { m.phase = "refused"; m.failure = r.failure; await ctx.refresh([SHARE_CHOICES]); return; }
       Object.assign(m, { phase: "open", opened: { ...r.body, seen: false } });
       startBeats(r.body.user, r.body.beatMs);
       await ctx.refresh([STATE]);
     },
+    /** Stop: DELETE /api/share/<user>. Refused, the login is still open: said beside Stop (`stopFailure`), never as the
+     *  card's phase, which the next read of the state would turn back to open, saying nothing (issue 1033) */
     async shareStop(user) {
-      const r = await ctx.ask(`api/share/${encodeURIComponent(user)}`, json("DELETE"));
-      if ("failure" in r && r.failure.code !== "not_found") { m.phase = "refused"; m.failure = r.failure; return; }
+      m.stopFailure = null;
+      const r = await ctx.send("share-stop", `api/share/${encodeURIComponent(user)}`, json("DELETE"));
+      if ("busy" in r) return;
+      if ("failure" in r && r.failure.code !== "not_found") { m.stopFailure = r.failure; return; }
       ended(user, "you stopped it on this page");
       await ctx.refresh([STATE]);
+    },
+    /** Its Dismiss (and Escape): a refusal, a Stop refused or how it ended goes. null when none is shown */
+    dismissShare() {
+      if (m.stopFailure) { m.stopFailure = null; return true; }
+      if (m.phase === "refused" || m.phase === "ended") { Object.assign(m, { phase: "none", failure: null, ended: null }); return true; }
+      return null;
     },
     shareBeat: beat,
   };
@@ -385,8 +410,11 @@ export function createShare(ctx) {
     click(d) {
       if (d.shareOpen !== undefined) return actions.shareOpen();
       if (d.shareStop !== undefined) return actions.shareStop(d.shareStop);
+      if (d.dismissShare !== undefined) return actions.dismissShare() ?? true;
       return null;
     },
+    /** Escape with no question open: what is said of the share goes, as its Dismiss does */
+    dismiss: () => actions.dismissShare(),
   };
 }
 
@@ -405,11 +433,15 @@ export function createShare(ctx) {
  * pane of the add box (`renderAddKinds`), whose box is the card, so it is none of its own. Under it, one line on roles
  * (`ROLES_LINE`), with or without a roles file.
  */
-export function renderAddUser(state, inBox = false) {
+export function renderAddUser(state, inBox = false, { busy = false, sent = null } = {}) {
   if (state === undefined || state === null || usersReadOnly(state) !== null) return "";
+  // `sent`: what its last Add a user sent ({ name, role, from }), written back while it is sent and once it is refused, so
+  // the form is the same whatever writes it; none once a user is added
   return `<form id="add-user"${inBox ? "" : ` class="formcard"`} autocomplete="off"><span class="name-field"><label for="user-name">Name</label> ` +
-    `<input id="user-name" name="name" required placeholder="e.g. metabase" spellcheck="false" autocapitalize="off"></span>` +
-    roleChoice(state.roles) + connectsChoice("add-user") + `<button type="submit" class="primary">Add a user</button>${ROLES_LINE}</form>`;
+    `<input id="user-name" name="name" required placeholder="e.g. metabase" spellcheck="false" autocapitalize="off"${sent?.name ? ` value="${esc(sent.name)}"` : ""}></span>` +
+    roleChoice(state.roles, sent?.role ?? "") + connectsChoice("add-user", sent?.from ?? null) +
+    // Add a user → Adding… in the room of both; its refusal a popover beside it (`renderAddUser`'s page: `action`)
+    `${sendButton("Add a user", "Adding…", {}, "primary", { id: "add-user-submit", busy, submit: true })}${ROLES_LINE}</form>`;
 }
 
 /** Where the README says how to write roles (its "Access control" section, on the public repository): the one site
@@ -425,23 +457,27 @@ export const ROLES_LINE = `<p class="dim roles-line">Roles can limit a user to s
 
 /** The add form's Role choice from `/api/state` `roles`: "" with no roles file, one naming none, or one that cannot be
  *  read now (the roles it names are not known then) */
-function roleChoice(r) {
+function roleChoice(r, chosen = "") {
   if (!r || r.file == null || r.problem != null || !Array.isArray(r.roles) || r.roles.length === 0) return "";
   const dflt = r.default != null && r.roles.includes(r.default) ? r.default : null;
-  const first = dflt !== null ? `<option value="" selected>${esc(dflt)} (default)</option>` : `<option value="" selected>no role (its queries are refused)</option>`;
+  const others = r.roles.filter((n) => n !== dflt);
+  const pick = others.includes(chosen) ? chosen : "";
+  const first = dflt !== null ? `<option value=""${pick === "" ? " selected" : ""}>${esc(dflt)} (default)</option>` : `<option value=""${pick === "" ? " selected" : ""}>no role (its queries are refused)</option>`;
   return ` <span class="role-field"><label for="user-role">Role</label> <select id="user-role" name="role">${first}` +
-    `${r.roles.filter((n) => n !== dflt).map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("")}</select></span> `;
+    `${others.map((n) => `<option value="${esc(n)}"${n === pick ? " selected" : ""}>${esc(n)}</option>`).join("")}</select></span> `;
 }
 
 /** A user's statements: Observability › Queries filtered to it, over the last 24 hours (the default 15 minutes would mostly be empty). */
 export const userQueriesHref = (name) => `#observability/queries?${new URLSearchParams({ user: name, range: "24h" })}`;
 
-/** A user's Disable, or Enable once disabled: one room (ROOMS.disable), so the row's actions keep their width; held
- *  while its question is asked. */
-function toggle(u, disabled, asking) {
-  if (disabled) return button("Enable", { enable: u.name }, "small", { room: ROOMS.disable });
-  return asking ? button("Disable", {}, "small", { room: ROOMS.disable, disabled: true, expanded: true })
-    : button("Disable", { disable: u.name }, "small", { room: ROOMS.disable });
+/** A user's Disable, or Enable once disabled — Enabling… while its Enable is sent (`busy`): one room, Disable's and
+ *  Enabling…'s (ROOMS.disable, ROOMS.enabling), so the row's actions keep their width whichever it says; held while its
+ *  question is asked. */
+function toggle(u, disabled, asking, busy = false) {
+  const room = [ROOMS.disable, ROOMS.enabling];
+  if (disabled) return button(busy ? ROOMS.enabling : "Enable", { enable: u.name }, "small", { room, busy });
+  return asking ? button("Disable", {}, "small", { room, disabled: true, expanded: true })
+    : button("Disable", { disable: u.name }, "small", { room });
 }
 
 /** The one-time dialog's parts (index.html `#once`, opened by the shell while a page's `once()` names it) with nothing in
@@ -497,7 +533,9 @@ export const page = {
     // held: what From… opened over ({ list, now, state }), so a poll never rewrites its form under what is being typed
     // added: the user just added (its password in it, this page's memory alone); addedSeen: whether it has connected
     // show: the list's tab, the hash's (`route`: #users?show=removed)
-    const m = { actionFailure: null, added: null, addedSeen: false, confirming: null, refused: null, held: null, show: "active", addKind: "user" };
+    // addSent: what the last Add a user sent ({ name, role, from }), the form written with it while it is sent and once it
+    // is refused; fromSent: what a From… sent ({ name, from }), its form written with it while it is sent
+    const m = { actionFailure: null, added: null, addedSeen: false, confirming: null, refused: null, held: null, show: "active", addKind: "user", addSent: null, fromSent: null };
     // addKind: what the add box creates, "user" (New user) or "share" (Temporary cloud login): the box's own choice
     const users = () => ctx.read(USERS)?.body ?? null;
     // the temporary cloud login, the add box's second kind: its own model, beats and actions
@@ -507,13 +545,17 @@ export const page = {
       /** `role`: the Role choice's, sent as mason user add --role; "" or none: no role, as with no --role. `from`: the
        *  ranges, as mason user add --from; null or none: none sent, from anywhere */
       async addUser(name, role = "", from = null) {
+        if (ctx.sending("user-add")) return false;
         m.actionFailure = null;
-        const r = await ctx.ask(USERS_POST, json("POST", { name, ...(role ? { role } : {}), ...(from !== null ? { from } : {}) }));
-        if ("failure" in r) { m.actionFailure = r.failure; return false; }
-        m.added = r.body;
-        m.addedSeen = false;
-        await ctx.refresh([USERS]);
-        return true;
+        m.addSent = { name, role, from };
+        // Add a user says Adding… until the answer; refused, said in a popover beside it, the form as it was sent
+        const r = await ctx.send("user-add", USERS_POST, json("POST", { name, ...(role ? { role } : {}), ...(from !== null ? { from } : {}) }), { refresh: [USERS], onAnswer: (r) => {
+          if ("failure" in r) { m.actionFailure = r.failure; return; }
+          m.added = r.body;
+          m.addedSeen = false;
+          m.addSent = null;
+        } });
+        return "body" in r;
       },
       askRemove(name) { m.confirming = name; m.actionFailure = null; m.refused = null; },
       askDisable(name) { m.confirming = { name, verb: "disable" }; m.actionFailure = null; m.refused = null; },
@@ -526,39 +568,47 @@ export const page = {
       /** From… answered: POST /api/users/<name>/from (mason user from's own function) — `from` its ranges, or null for any
        *  address (--any); a refusal, worded by the run, said beside the user's actions as a Disable's is */
       async changeFrom(name, from) {
+        if (ctx.sending(`user:${name}`)) return false;
         m.actionFailure = null;
         m.refused = null;
-        const r = await ctx.ask(`api/users/${encodeURIComponent(name)}/from`, json("POST", { from }));
-        m.confirming = null;
-        m.held = null;
-        if ("failure" in r) { m.refused = { name, failure: r.failure }; return false; }
-        await ctx.refresh([USERS]);
-        return true;
+        m.fromSent = { name, from };
+        // its question stays while it is sent (Changing…), then its refusal is said where it was
+        const r = await ctx.send(`user:${name}`, `api/users/${encodeURIComponent(name)}/from`, json("POST", { from }), { refresh: [USERS], onAnswer: (r) => {
+          m.confirming = null;
+          m.held = null;
+          m.fromSent = null;
+          if ("failure" in r) m.refused = { name, failure: r.failure };
+        } });
+        return "body" in r;
       },
       /** Disable once asked, Enable at once: POST /api/users/<name>/disable|enable (mason user's own functions); a
        *  refusal is said beside the user's actions, as a Remove's is */
       async toggleUser(name, verb) {
+        if (ctx.sending(`user:${name}`)) return false;
         m.actionFailure = null;
         m.refused = null;
-        const r = await ctx.ask(`api/users/${encodeURIComponent(name)}/${verb}`, json("POST"));
-        m.confirming = null;
-        if ("failure" in r) { m.refused = { name, failure: r.failure }; return false; }
-        await ctx.refresh([USERS]);
-        return true;
+        const r = await ctx.send(`user:${name}`, `api/users/${encodeURIComponent(name)}/${verb}`, json("POST"), { refresh: [USERS], onAnswer: (r) => {
+          m.confirming = null;
+          if ("failure" in r) m.refused = { name, failure: r.failure };
+        } });
+        return "body" in r;
       },
       confirmDisable(name) { return actions.toggleUser(name, "disable"); },
       enableUser(name) { return actions.toggleUser(name, "enable"); },
       async confirmRemove(name) {
+        if (ctx.sending(`user:${name}`)) return false;
         m.actionFailure = null;
-        const r = await ctx.ask(`api/users/${encodeURIComponent(name)}`, json("DELETE"));
-        m.confirming = null;
-        // refused: said beside the user's Remove, as its question was (nothing above the table moves it)
-        if ("failure" in r) { m.refused = { name, failure: r.failure }; return false; }
-        await ctx.refresh([USERS]);
-        return true;
+        const r = await ctx.send(`user:${name}`, `api/users/${encodeURIComponent(name)}`, json("DELETE"), { refresh: [USERS], onAnswer: (r) => {
+          m.confirming = null;
+          // refused: said beside the user's Remove, as its question was (nothing above the table moves it)
+          if ("failure" in r) m.refused = { name, failure: r.failure };
+        } });
+        return "body" in r;
       },
       dismissAdded() { m.added = null; m.addedSeen = false; },
       dismissRefused() { m.refused = null; },
+      /** Add a user's refusal dismissed: the form keeps what was sent, for the person to change */
+      dismissAddFailure() { m.actionFailure = null; },
       ...share.actions,
     };
     return {
@@ -606,18 +656,19 @@ export const page = {
         const offer = shareable(s) && renderAddUser(s) !== "";
         return {
           // the roles file's state is the run's (/api/state roles): a file that cannot be read refuses every user held to it
-          users: u ? renderUsers(u, m.confirming, h !== null ? h.now : ctx.now().getTime(), m.refused, state?.roles ?? null, usersReadOnly(state), m.show) : "",
+          users: u ? renderUsers(u, m.confirming, h !== null ? h.now : ctx.now().getTime(), m.refused, state?.roles ?? null, usersReadOnly(state), m.show, { sending: ctx.sending, fromSent: m.fromSent }) : "",
           // the add box: what it creates where the page may open a temporary cloud login (else the plain form), each
           // kind's pane a part of its own, so a choice of kind rewrites neither (a name being typed stays)
           "add-kinds": offer ? renderAddKinds(m.addKind) : "",
-          "add-user-box": renderAddUser(s, offer),
+          "add-user-box": renderAddUser(s, offer, { busy: ctx.sending("user-add"), sent: m.addSent }),
           "add-share-box": offer ? renderSharePane(s, share.m, ctx.read(SHARE_CHOICES)) : "",
           "users-connect": renderUsersConnect(s?.postgres, s?.served === true, offer),
           // a user just added, or a cloud login just opened: the one-time dialog's parts (the shell opens it while `once()` names it)
           ...(m.added ? renderAdded(m.added, { connected: m.addedSeen }) : renderShareOnce(s, share.m, ctx.now().getTime())),
           // what the box made, under it: a temporary cloud login
-          added: renderShareCard(s, share.m, ctx.now().getTime()),
-          action: m.actionFailure ? renderFailure(m.actionFailure) : "",
+          added: renderShareCard(s, { ...share.m, stopping: ctx.sending("share-stop") }, ctx.now().getTime()),
+          // Add a user refused: a popover beside its button, with Dismiss, which moves nothing under the form
+          action: m.actionFailure ? failurePop("add-user-submit", m.actionFailure, { dismissAddFailure: "" }) : "",
         };
       },
       submit(form) {
@@ -639,10 +690,16 @@ export const page = {
         if (d.from !== undefined) return actions.askFrom(d.from) ?? true;
         if (d.enable !== undefined) return actions.enableUser(d.enable);
         if (d.dismissRefused !== undefined) return actions.dismissRefused() ?? true;
+        if (d.dismissAddFailure !== undefined) return actions.dismissAddFailure() ?? true;
         return copyClick(d, button, { doc, win });
       },
-      /** Escape with no question open: a refusal beside a user goes, as its Dismiss does (null: none is shown) */
-      dismiss() { if (m.refused === null) return null; actions.dismissRefused(); return true; },
+      /** Escape with no question open: a refusal beside a user, beside Add a user, or what is said of the cloud login
+       *  goes, as its Dismiss does (null: none is shown) */
+      dismiss() {
+        if (m.refused !== null) { actions.dismissRefused(); return true; }
+        if (m.actionFailure !== null) { actions.dismissAddFailure(); return true; }
+        return share.dismiss();
+      },
     };
   },
 };

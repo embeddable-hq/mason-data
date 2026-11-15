@@ -182,3 +182,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A generated table that computes a `jsonb` column now takes longer to build.** Writing each value in Postgres's form
   costs about 30 to 40 seconds a million rows on a 4-core machine. A `jsonb` column taken as it is from another table costs
   nothing more.
+- **Every button on the web page that changes something now shows that it is working, and can't be sent twice.** Its
+  label says what it is doing, such as Removing…, Disabling… or Opening…, and the button stays the same size. Before,
+  most of them gave no sign until the answer came. A double click on a Remove or a Cancel query sent it twice, and
+  the second, refused, hid that the first had worked. Now one request is sent, and the page says what it did.
+- **A refused Stop of a temporary cloud login is now said, beside Stop.** It says that the login is still open and
+  that its address and password still work. Before, the page said nothing, and the login stayed public.
+- **A change the web page sends that fails is said beside its button, with Dismiss.** Escape dismisses it too. This
+  includes Add a user's error, which could not be dismissed and pushed the rest of the page down, and the cloud
+  login's. Nothing on the page moves when a failure is said, or while a button is working. A request that gets no
+  answer is given up after 60 seconds, and says so. Before, its button could stay busy for ever.
+- **Changing a filter or a page of Queries or Sync events keeps the last list on the page, greyed, until the new one
+  is read.** Before, the list went blank and the page jumped.

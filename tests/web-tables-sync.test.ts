@@ -303,7 +303,7 @@ test("the app: a big table's poll asks first with its cost; Back returns to the 
   assert.deepEqual(run.asked, [], "nothing saved before the person says yes");
   const asking = popOf(app.view().tables!, "sync-tables-public.orders");
   assert.ok(textOf(asking).startsWith(`${LEAD} One connection to your database is busy about 1% of the time. Scan all of orders on your database every hour?`));
-  assert.match(asking, /data-save-sync="public\.orders" data-sync="poll 1h">Poll it every hour</);
+  assert.match(asking, /data-save-sync="public\.orders" data-sync="poll 1h" data-room="Poll it every hour" data-room2="Saving…">Poll it every hour</);
   call("backSync");
   assert.match(popOf(app.view().tables!, "sync-tables-public.orders"), /data-sync-form="public\.orders"/);
   await call("chooseSyncValue", "public.orders", "poll 1h");
@@ -443,7 +443,7 @@ test("an added table's row says which columns it syncs in a few words — All co
   });
   assert.match(textOf(html), /public\.orders Synced .* Remove Sync: Off 2 of 4 columns public\.accounts /, "on its note, beside its sync");
   assert.ok(!html.includes('id="columns-tables-public.audit"'), "a table not added has Columns… in its actions instead");
-  assert.match(html, /data-add-table="public\.audit">Add<\/button> <button type="button" class="small" data-choose="public\.audit">Columns…<\/button>/);
+  assert.match(html, /data-add-table="public\.audit" data-room="Add" data-room2="Adding…">Add<\/button> <button type="button" class="small" data-choose="public\.audit">Columns…<\/button>/);
 });
 
 test("read-only: the columns said, no form — where the project's files are read-only or the page may not edit tables", () => {
@@ -485,7 +485,7 @@ test("the column form on an added table: All columns for every column, else Only
   assert.equal(textOf(popOf(renderTables(COL_STATE, { choosing: "public.orders", columns: null }), "columns-tables-public.orders")), "Reading orders's columns… Cancel");
   // while it is saved: Saving…, disabled
   assert.match(popOf(renderTables(COL_STATE, { choosing: "public.orders", columns: columnsOf("orders"), savingColumns: "public.orders" }), "columns-tables-public.orders"),
-    /<button type="submit" class="primary small" disabled>Saving…<\/button>/);
+    /<button type="submit" class="primary small" data-room="Save" data-room2="Saving…" aria-busy="true" disabled>Saving…<\/button>/);
 });
 
 test("an entry the form cannot show (an exclude: written by hand, a secret-looking column kept) is described, its boxes the columns synced now, and saving replaces it — said first", () => {
@@ -563,7 +563,7 @@ test("the app: opening the column form on an added table reads its columns once;
   const html = app.view().tables!;
   assert.equal(textOf(popOf(html, "columns-tables-public.orders")), "Saved orders's columns: the columns id, name, status. Dismiss", "what was saved; its sync, unchanged, not said again");
   assert.ok(!html.includes("data-pick-form"), "the form closed");
-  assert.ok(!html.includes("Adding…"), "an added table is not said to be added again");
+  assert.ok(!html.includes(">Adding…<"), "an added table is not said to be added again");
 });
 
 test("the app: saving the same choice sends the entry as it is — the run answers already, writes nothing and starts no sync", async () => {
