@@ -787,7 +787,11 @@ reads:
   null when not added), `columnCount` (how many columns the table has), an added table's `entry` (its entry as the
   sources file says it: `{ columns, exclude, key }`, `columns` null for every column but `exclude`, `key` null for its
   primary key) and `everyColumnLeavesOut` (the columns `mason add <table>` with no `--columns` leaves out: they look
-  like secrets), `copy` (its first sync, below, or null) and `error`. An added
+  like secrets), `copy` (its first sync, below, or null) and `error`. A table not added has `estimateBytes`: about
+  how many bytes its synced data would take on disk, every column, estimated from the catalog when the run read it
+  (null for a table added). An added table short of disk has `diskShort`: `{ code: "disk_short", neededBytes,
+  freeBytes, reserveBytes, pendingBytes, estimated }`, its first sync stopped short (`estimated` false), or the
+  estimate it was added anyway with until that sync is in (`estimated` true). An added
   table also has `sync`: `state` (`waiting`, `syncing`, `synced`, `behind`, `failed`), `syncedAt`, `syncSeconds`,
   `syncedBy`, `ageSeconds`, `asOf`, `promisedSeconds`, `behindBySeconds`, `behindWhy`, and `syncRefusal`: why `mason
   sync <table>` (Sync now) is refused now, in the words it refuses with (its first sync not finished or failed, being
@@ -835,12 +839,13 @@ address. A table the catalog lacks is `404` `not_found`.
 
 ### Add a table: `POST /api/pick`
 
-`{ "table": "public.orders", "picked": true, "columns"?: [...], "key"?: [...], "sync"?: "poll 5m", "keep"?: true }`:
+`{ "table": "public.orders", "picked": true, "columns"?: [...], "key"?: [...], "sync"?: "poll 5m", "keep"?: true, "yes"?: true }`:
 
 - `columns`: the columns to sync (the key is always added), or `["*"]` for every one (the default);
 - `key`: for a table with no primary key, the NOT NULL columns of a unique index;
 - `sync`: `off`, `poll <interval>` or `replication`, in the sources file's grammar;
-- `keep: true` changes only the `sync:` of a table already added; its columns and its `key` stay as they are.
+- `keep: true` changes only the `sync:` of a table already added; its columns and its `key` stay as they are;
+- `yes: true` adds it even when it likely won't fit on disk (`mason add --yes`, the page's Add anyway).
 
 `"picked": false` removes the table, as `POST /api/remove` does with a single name.
 
@@ -849,12 +854,16 @@ The answer is `200` with `table`, `file` (the sources file, absolute), `entry` (
 left out), `already` (the file said so already, and nothing was written), `sync` (`{ value, from }`, where `from` is
 `entry`, `file` or `default`), `bigOff` (a big table under a polling default, written `sync: off`), `notReplicated`
 (why a table under a replication default is polled, or null), `pollCost` (what a frequent poll of a big table costs the
-database, or null), and `state`, the lean state after the edit. The table's first sync starts at once.
+database, or null), `disk` (whether its sync fits on disk: `{ table, estimateBytes, freeBytes, reserveBytes,
+pendingBytes, spillSet, resync, fits }`, `fits` false when added with `yes`; `{ table, unknown }` when the free disk
+could not be read; null when nothing is synced whole), and `state`, the lean state after the edit. The table's first
+sync starts at once.
 
 | Status | `code` | When |
 |---|---|---|
-| 400 | `usage` | the body lacks `table` or `picked` (`send { table, picked, columns?, key?, sync?, keep? }`); `sync`, `columns` or `key` malformed; a column the table lacks; a `key` for a table with a primary key; a `key` that does not tell its rows apart; `sync: replication` for a table that cannot be replicated |
+| 400 | `usage` | the body lacks `table` or `picked` (`send { table, picked, columns?, key?, sync?, keep?, yes? }`); `yes` not true or false; `sync`, `columns` or `key` malformed; a column the table lacks; a `key` for a table with a primary key; a `key` that does not tell its rows apart; `sync: replication` for a table that cannot be replicated |
 | 404 | `not_found` | `<table> is not a table of <database> that this user can read` |
+| 409 | `disk_short` | the table likely won't fit on disk, and `yes` was not sent: `<table> likely won't fit on disk: it needs about …`, with `why` and `fix`, and its numbers beside the failure as `disk` (as in the answer); nothing written |
 | 409 | `refused` | no primary key and no `key` (`<table> cannot be added: no primary key: …`); the project's files are read-only (`MASON_PROJECT_READONLY=1`, with `why`, `fix`, `next`); another entry of the file fails against the database (`… fix it first`); the file's `url:` now names another database; a switch to replication the database cannot serve, its checks read again at the save (`<table> cannot be kept current by logical replication from <database>: <checks>`, each with its fix in `why`; nothing written) |
 
 ### Remove tables: `POST /api/remove`

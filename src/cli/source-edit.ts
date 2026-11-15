@@ -20,14 +20,19 @@ import { addedTables, catalogTable, chooseColumns, clashReason, effectiveSync, e
   type TableEntry, type WrittenEntry } from "./sources.ts";
 import { BIG_TABLE_ROWS, COSTLY_POLL_ROWS, COSTLY_POLL_SECONDS, syncText, type TableSync } from "../lib/table-sync.ts";
 import { projectWriteRefusal } from "./project.ts";
+import { DISK_SHORT, diskFit, diskShortWords, syncedEstimate, type DiskFit, type DiskRoom, type DiskUnknown } from "../duck/disk-fit.ts";
 import { relationKey } from "../lib/relation-key.ts";
 
 /** A refusal the command shows as it is; `failure` is how the web page says it (the CLI's Failure: why, fix, next), by
- *  default the message alone under the status's code. */
+ *  default the message alone under the status's code; `extra`, keys its answer carries beside it (a table that likely
+ *  won't fit: its numbers, `disk`). */
 export class Refusal extends Error {
   readonly status: number;
   readonly failure: Failure;
-  constructor(status: number, message: string, failure?: Failure) { super(message); this.status = status; this.failure = failure ?? { message, code: codeOf(status) }; }
+  readonly extra: Record<string, unknown>;
+  constructor(status: number, message: string, failure?: Failure, extra: Record<string, unknown> = {}) {
+    super(message); this.status = status; this.failure = failure ?? { message, code: codeOf(status) }; this.extra = extra;
+  }
 }
 
 /** The FAILURE_CODES code (src/cli/command.ts) of a refusal by its HTTP status. */
@@ -39,7 +44,10 @@ export interface EditTarget { root: string; file: string; text: string; parsed: 
 /** The database an edit is checked against: its catalog (preflight.ts readSourceFacts) and its name; `measured`, with
  *  Mason up, what the run measured of a table (a poll's cost is estimated from it: `pollCost`). Whether a table can be
  *  replicated is its entry's sync and the catalog's (src/cli/sources.ts entryProblems), never the run's. */
-export interface EditCatalog { tables: readonly SourceTable[]; database: string; measured?: (table: string) => PollMeasure | null }
+export interface EditCatalog { tables: readonly SourceTable[]; database: string; measured?: (table: string) => PollMeasure | null;
+  /** the room on the disk the synced data is on, beside `table` (what the first syncs under way OTHER than its own still
+   *  need), or why it cannot be read: what an add is held to before it is written (`diskCheck`). Absent: not checked */
+  disk?: (table: string) => DiskRoom | { unknown: string } }
 
 /** What a run measured of a table, for an estimate of its poll's cost (src/duck/sync.ts `Sync.measured`): its last
  *  poll's time, and one reader's rate at its copy (rows a second, the copy's rows over its time and readers) */
@@ -165,6 +173,29 @@ export interface PickResult {
   notReplicated: string | null;
   /** a poll every so often of a table this big would cost the database this, estimated (`pollCost`); null otherwise */
   pollCost: string | null;
+  /** whether its sync fits on disk (`diskCheck`): the estimate and the room, `fits` false when it was added anyway
+   *  (`--yes`, the page's Add anyway); `unknown` when the free disk could not be read; null when nothing is synced whole
+   *  (the file named it so already, or only its sync changed), or the room is not checked here */
+  disk: DiskFit | DiskUnknown | null;
+}
+
+/**
+ * WILL ITS SYNC FIT ON DISK (src/duck/disk-fit.ts, the one decision): the entry's columns estimated from the catalog,
+ * against the room the entrance reads (`db.disk`). `resync`: the table is synced already and will be synced again
+ * whole. Null when the entrance checks no room.
+ */
+export function diskCheck(db: EditCatalog, t: SourceTable, entry: Pick<WrittenEntry, "columns" | "exclude">, resync: boolean): DiskFit | DiskUnknown | null {
+  if (db.disk === undefined) return null;
+  const room = db.disk(t.source);
+  if ("unknown" in room) return { table: t.source, unknown: room.unknown };
+  return diskFit(t.source, syncedEstimate(t, entry.columns, entry.exclude), room, resync);
+}
+
+/** THE REFUSAL OF A TABLE THAT LIKELY WON'T FIT, nothing written: its words (src/duck/disk-fit.ts `diskShortWords`),
+ *  code `disk_short`, and its numbers as the answer's `disk`. Each entrance says how to go ahead anyway. */
+export function diskRefusal(f: DiskFit): Refusal {
+  const w = diskShortWords(f);
+  return new Refusal(409, w.message, { message: w.message, code: DISK_SHORT, why: w.why, fix: w.fix }, { disk: f });
 }
 
 /**
@@ -182,12 +213,17 @@ export interface PickResult {
  * line is written (`withEntrySync`: its comments too).
  */
 export function addEntry(at: EditTarget, db: EditCatalog, table: string, columns: readonly string[] = ["*"], key: readonly string[] | null = null,
-  o: { sync?: TableSync; keep?: boolean } = {}): PickResult {
+  o: { sync?: TableSync; keep?: boolean; yes?: boolean } = {}): PickResult {
   const t = db.tables.find((x) => x.source === table);
   if (!t) throw new Refusal(404, `${table} is not a table of ${db.database} that this user can read`);
   const p = plannedEntry(at.parsed, db, t, columns, key, o, () => othersHold(at, db, [table], `add ${entryName(table)}`));
   const { entry, was, keep } = p;
   const same = was !== undefined && JSON.stringify([was.columns, was.exclude, was.key, was.sync]) === JSON.stringify([entry.columns, entry.exclude, entry.key, entry.sync]);
+  // WILL IT FIT ON DISK, before anything is written (issue 1075): a new table, or one whose columns or key change, is
+  // synced whole; refused with the numbers unless the person goes ahead anyway (`o.yes`: --yes, the page's Add anyway)
+  const whole = !same && !keep && (was === undefined || JSON.stringify([was.columns, was.exclude, was.key]) !== JSON.stringify([entry.columns, entry.exclude, entry.key]));
+  const disk = whole ? diskCheck(db, t, entry, was !== undefined) : null;
+  if (disk !== null && "fits" in disk && !disk.fits && o.yes !== true) throw diskRefusal(disk);
   if (!same) {
     const r = keep ? withEntrySync(at.text, was!, entry.sync) : withTable(at.text, entry);
     if ("problem" in r) throw new Refusal(409, `${path.relative(at.root, at.file)} cannot be edited: ${r.problem}`);
@@ -195,7 +231,7 @@ export function addEntry(at: EditTarget, db: EditCatalog, table: string, columns
   }
   const eff = effectiveSync(at.parsed, entry);
   return { table, file: at.file, entry: entry.name, columns: entry.columns, exclude: entry.exclude, key: entry.key, addedKey: p.addedKey, skippedSecrets: p.skipped, already: same,
-    sync: { value: syncText(eff.sync), from: eff.from }, bigOff: p.bigOff, notReplicated: p.notReplicated, pollCost: pollCost(t, eff.sync, db.measured?.(table) ?? null) };
+    sync: { value: syncText(eff.sync), from: eff.from }, bigOff: p.bigOff, notReplicated: p.notReplicated, pollCost: pollCost(t, eff.sync, db.measured?.(table) ?? null), disk };
 }
 
 /** The entry `mason add` decides for a table, before anything is written (`plannedEntry`). */

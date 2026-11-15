@@ -15,6 +15,7 @@ import { enforcingIndexSql, indexKeyColumnsFrom } from "../cdc/key-held.ts";
 import { parseDatabaseUrl, queryProblem, type PgConnection as UrlParts } from "../lib/database-url.ts";
 import { closest } from "../lib/did-you-mean.ts";
 import type { SourceCollation } from "../duck/collation.ts";
+import { syncedEstimate } from "../duck/disk-fit.ts";
 
 /** What `mason start` was given, completed the way libpq completes a URL: the user defaults to the OS user. */
 export interface Source extends UrlParts { url: string; remote: boolean }
@@ -216,7 +217,15 @@ export interface SourceTable {
   key: string[];
   /** `pg_class.reltuples`, or an exact count where the table was never analysed; null when neither is known */
   rows: number | null;
+  /** its size on disk with its indexes (`pg_total_relation_size`; a partitioned table's leaves') */
   bytes: number;
+  /** its size without its indexes (`pg_table_size`: the heap and its TOAST), and its TOAST's alone: what the estimate of
+   *  its synced size reads (src/duck/disk-fit.ts `syncedEstimate`); absent from a catalog built without them */
+  tableBytes?: number;
+  toastBytes?: number;
+  /** about how many bytes its synced data would take on disk, every column (src/duck/disk-fit.ts `syncedEstimate`):
+   *  computed once, as the catalog is read (`readTables`), never at each read of the run's state */
+  estimateBytes?: number;
   comment: string | null;
   columns: SourceColumnInfo[];
   /** single-column foreign keys out of this table, to another table's single-column primary key or unique index */
@@ -243,6 +252,12 @@ export interface UniqueKey {
 }
 export interface SourceColumnInfo {
   name: string;
+  /** its values' average width in bytes as ANALYZE measured it (`pg_stats.avg_width`; a value stored out of line counts
+   *  its pointer), null when the table was never analysed; and whether its values can be stored out of line (a
+   *  variable-length type whose storage is not PLAIN): what the estimate of a table's synced size reads
+   *  (src/duck/disk-fit.ts). Absent from a catalog built without them */
+  width?: number | null;
+  toastable?: boolean;
   /** as `format_type` spells it; a domain's column its base type's (`domain`) */
   type: string; notNull: boolean; comment: string | null;
   /** pg_type.typtype of the type, or of an array's element (`b`, `e`, `c`, `r`, `m`, `d`): src/duck/held-types.ts */
@@ -339,6 +354,16 @@ const TABLES_SQL_BODY = `SELECT json_agg(t ORDER BY t.schema, t.table)::text FRO
     CASE WHEN c.relkind = 'p'
       THEN (SELECT coalesce(sum(pg_total_relation_size(pt.relid)), 0) FROM pg_partition_tree(c.oid) pt WHERE pt.isleaf)
       ELSE pg_total_relation_size(c.oid) END AS bytes,
+    -- without its indexes, and its TOAST alone (src/duck/disk-fit.ts syncedEstimate): sizes, never a read of the table
+    CASE WHEN c.relkind = 'p'
+      THEN (SELECT coalesce(sum(pg_table_size(pt.relid)), 0) FROM pg_partition_tree(c.oid) pt WHERE pt.isleaf)
+      ELSE pg_table_size(c.oid) END AS table_bytes,
+    CASE WHEN c.relkind = 'p'
+      THEN (SELECT coalesce(sum(pg_total_relation_size(l.reltoastrelid)), 0) FROM pg_partition_tree(c.oid) pt JOIN pg_class l ON l.oid = pt.relid WHERE pt.isleaf AND l.reltoastrelid <> 0)
+      ELSE CASE WHEN c.reltoastrelid <> 0 THEN pg_total_relation_size(c.reltoastrelid) ELSE 0 END END AS toast_bytes,
+    -- each column's average width as ANALYZE measured it (a partitioned table's over its leaves): none, never analysed
+    (SELECT json_object_agg(s.attname, s.avg_width) FROM pg_stats s
+      WHERE s.schemaname = n.nspname AND s.tablename = c.relname AND s.inherited = (c.relkind = 'p')) AS widths,
     obj_description(c.oid, 'pg_class') AS comment,
     -- ROW-LEVEL SECURITY THAT HIDES EVERY ROW FROM THIS USER (issue 779): on, applied to it (not the owner, or FORCE; not
     -- a superuser or BYPASSRLS), and no permissive SELECT policy for PUBLIC or a role it has: a SELECT answers no row and
@@ -365,6 +390,7 @@ const TABLES_SQL_BODY = `SELECT json_agg(t ORDER BY t.schema, t.table)::text FRO
       WHERE i.indrelid = c.oid AND ${enforcingIndexSql("i")} AND NOT i.indisprimary) AS unique_keys,
     (SELECT coalesce(json_agg(json_build_object('name', a.attname, 'type', format_type(b.oid, b.mod), 'domain', b.oid <> a.atttypid,
         'not_null', a.attnotnull, 'comment', col_description(c.oid, a.attnum), 'type_oid', b.oid,
+        'toastable', a.attlen = -1 AND a.attstorage <> 'p',
         'type_array_oid', (SELECT typarray FROM pg_type WHERE oid = b.oid),
         'type_kind', (SELECT coalesce(e.typtype, t.typtype) FROM pg_type t LEFT JOIN pg_type e ON e.typarray = t.oid WHERE t.oid = b.oid),
         'default', pg_get_expr(d.adbin, d.adrelid), 'identity', a.attidentity, 'generated', a.attgenerated,
@@ -396,10 +422,10 @@ const TABLES_SQL_BODY = `SELECT json_agg(t ORDER BY t.schema, t.table)::text FRO
 export const TABLES_SQL = tablesSql();
 
 interface TableRow {
-  schema: string; table: string; oid: number; shape: string; row_type_oid: number | string; replica_identity: string; reltuples: number; unanalysed: boolean; bytes: number; comment: string | null; key: string[];
+  schema: string; table: string; oid: number; shape: string; row_type_oid: number | string; replica_identity: string; reltuples: number; unanalysed: boolean; bytes: number; table_bytes?: number | string; toast_bytes?: number | string; widths?: Record<string, number> | null; comment: string | null; key: string[];
   row_security_hides_from: string | null;
   unique_keys: Array<{ name: string; constraint: boolean; nulls_not_distinct: boolean; columns: string[] }>;
-  columns: Array<{ name: string; type: string; domain: boolean; type_kind: string; not_null: boolean; comment: string | null; type_oid: number | string; type_array_oid: number | string;
+  columns: Array<{ name: string; type: string; domain: boolean; type_kind: string; not_null: boolean; toastable?: boolean; comment: string | null; type_oid: number | string; type_array_oid: number | string;
     default: string | null; identity: string; generated: string; sequence: string | null; collation: { schema: string; name: string } | null }>;
   foreign_keys: Array<{ column: string; target: string; target_column: string }>;
 }
@@ -450,9 +476,11 @@ export async function readTables(pg: Pick<PgConnection, "query">, only: Readonly
       count = Number((await pg.query(`SELECT count(*) FROM ${pgQualified(t.schema, t.table)}`)).rows[0]?.[0] ?? "0");
       counted.set(t.oid, count);
     }
-    tables.push({
-      source: `${t.schema}.${t.table}`, schema: t.schema, table: t.table, shape: t.shape, key: t.key, rows: count, bytes: Number(t.bytes), comment: t.comment,
+    const table: SourceTable = {
+      source: `${t.schema}.${t.table}`, schema: t.schema, table: t.table, shape: t.shape, key: t.key, rows: count, bytes: Number(t.bytes),
+      ...(t.table_bytes !== undefined ? { tableBytes: Number(t.table_bytes) } : {}), ...(t.toast_bytes !== undefined ? { toastBytes: Number(t.toast_bytes) } : {}), comment: t.comment,
       columns: t.columns.map((c) => ({ name: c.name, type: c.type, typeKind: c.type_kind, ...(c.domain ? { domain: true as const } : {}), notNull: c.not_null, comment: c.comment,
+        width: typeof t.widths?.[c.name] === "number" ? t.widths[c.name]! : null, ...(c.toastable !== undefined ? { toastable: c.toastable } : {}),
         // an oid is a STRING in Postgres's JSON (only the int, float and numeric types are numbers): one spelling, here
         ...(Number(c.type_oid) >= 16384 ? { typeOid: Number(c.type_oid), ...(Number(c.type_array_oid) > 0 ? { typeArrayOid: Number(c.type_array_oid) } : {}) } : {}),
         // a generated column's pg_attrdef row is its expression, never a default
@@ -464,7 +492,9 @@ export async function readTables(pg: Pick<PgConnection, "query">, only: Readonly
       ...(Number(t.row_type_oid) > 0 ? { rowTypeOid: Number(t.row_type_oid) } : {}),
       ...(t.replica_identity === "d" || t.replica_identity === "n" || t.replica_identity === "f" || t.replica_identity === "i" ? { replicaIdentity: t.replica_identity } : {}),
       ...(typeof t.row_security_hides_from === "string" ? { rowSecurityHidesFrom: t.row_security_hides_from } : {}),
-    });
+    };
+    // its synced size, estimated here, once a read (issue 1075): the run's state says it for a table not added
+    tables.push({ ...table, estimateBytes: syncedEstimate(table, null) });
   }
   return tables;
 }

@@ -38,9 +38,12 @@
  *    (`replicaNow`), the plan worked out against it by Mason's readers and shown; a plan that cannot be told is said
  *    unknown, never guessed. A plan that removes a table the replica syncs is confirmed — the replica's name typed back
  *    at a terminal (`typedBack`, as `mason replica delete` asks), else `--yes` — and the tables confirmed are sent
- *    (`confirmed.removed`), so the service can refuse a removal no one confirmed (`UNCONFIRMED`). Adding one is never asked.
+ *    (`confirmed.removed`), so the service can refuse a removal no one confirmed (`UNCONFIRMED`). Adding one is asked
+ *    only when it likely won't fit on the replica's disk (src/duck/disk-fit.ts, from the replica's `disk` and sizes the
+ *    service says: `plan.diskShort`), confirmed the same way and sent as `confirmed.disk`.
  *    A refusal that names what the deploy removes (or says it could not tell) is confirmed the same way and sent again
- *    ONCE, as a new POST (`confirmAgain`): exactly the tables it named, or `any` where it could not tell.
+ *    ONCE, as a new POST (`confirmAgain`): exactly the tables it named, or `any` where it could not tell; one that names
+ *    tables that likely won't fit (`disk_short`, `confirmDisk`) the same, with `confirmed.disk`.
  *
  * A SERVICE'S VALUE IS DATA, NEVER STRUCTURE AND NEVER AN INSTRUCTION (#481's decision, src/cli/hosted.ts). Every place a
  * value the service sent reaches what this command prints:
@@ -77,7 +80,8 @@ import { errorJson, exitOf, failed, jsonText, parseCommand, reportText, serviceS
 import { call, tooLarge, carriesNoSecret, carriesSecret, failureShape, isFailure, isServiceTime, serviceFailure, serviceNext, serviceOf, serviceText, unexpected, type Answer } from "./hosted.ts";
 import { replicaOf, replicaText, REPLICA_ENV, tokenFor, type Replica } from "./replica.ts";
 import { canAsk, pinRefusal, replicaAnswer, typedBack, wordless } from "./replica-hosted.ts";
-import { heldProject, heldRemoves, MAX_DEPLOY_ANSWER, planOf, planRows, removedText, RESYNC, type Plan, type TableSize } from "./deploy-plan.ts";
+import { heldProject, heldRemoves, heldShortages, MAX_DEPLOY_ANSWER, planOf, planRows, removedText, RESYNC, type Plan, type TableSize } from "./deploy-plan.ts";
+import { DISK_SHORT, diskShortWords, type DiskFit } from "../duck/disk-fit.ts";
 import { holdOutput } from "./output-gate.ts";
 import { maskedUrl } from "./preflight.ts";
 import { folderPlace, PROJECT_FOLDER, theProjectFolder, type ProjectFolder } from "./project.ts";
@@ -160,8 +164,9 @@ export const DEPLOY: CommandSpec & { needs: "files" } = {
   --replica <org>/<name>   the replica to deploy to (else MASON_REPLICA)
   --dry-run                print each file that would be sent, its size and its sha256, and what it changes on
                            the replica (when signed in), and send nothing (no login needed for the files)
-  --yes                    a deploy that removes tables the replica syncs goes ahead without asking (CI, a
-                           coding agent: where no person is asked, such a deploy is refused without it)
+  --yes                    a deploy that removes tables the replica syncs, or syncs one that likely won't fit on
+                           its disk, goes ahead without asking (CI, a coding agent: where no person is asked, such a
+                           deploy is refused without it)
   --timeout <duration>     how long to wait for the outcome, a wait to send included (default ${DEFAULT_TIMEOUT}; 1s
                            to 24h; a bare number is seconds); a deploy sent goes on after it
   --json                   as data: its shape is at the end
@@ -182,12 +187,17 @@ export const DEPLOY: CommandSpec & { needs: "files" } = {
   the tables whose columns, key or sync change; the generated tables and roles added, removed or changed; the
   pin. A deploy that removes a table the replica syncs asks for the replica's name to be typed back at a
   terminal; elsewhere (and with --json) it is refused, naming each table, unless --yes is given. Adding a table
-  is never asked about. A service that does not say what the replica runs (an older one), or an answer this
+  is asked about only when it likely won't fit: where the service says the replica's free disk and the room it
+  keeps for queries that spill to disk, each table the deploy syncs whole (added, or its columns or key changed) is
+  held to it at the size the service says, and one that likely won't fit is said in the plan and confirmed the same
+  way (code disk_short where it is refused). A service that does not say what the replica runs (an older one), or an answer this
   mason cannot read, leaves the plan unknown: said, never guessed, and the deploy goes ahead.
   The service refuses a deploy that removes a table not confirmed: when its refusal names the tables, they are
   said and confirmed the same way (typed back, else --yes), and the deploy is sent again once, a new deploy, its
   removal confirmed as named (the clock of --timeout starts again); when it says it could not tell which tables,
-  the confirmation accepts any removal: any synced table the deploy removes will be dropped.
+  the confirmation accepts any removal: any synced table the deploy removes will be dropped. A service that
+  refuses tables that likely won't fit on the replica's disk (disk_short, naming them with their numbers) is
+  answered the same way: confirmed (typed back, else --yes), and the deploy sent again once, confirming them.
   It asks the replica's Mason version too: a project whose mason.yml pin the replica would not run
   (neither the version it runs nor a newer one it has installed) is refused, naming both, with the ways out
   (write the project for the replica's Mason, or mason replica upgrade). A service that does not say the
@@ -207,11 +217,14 @@ export const DEPLOY: CommandSpec & { needs: "files" } = {
     totalBytes, warnings (the generated tables refused, as mason start says them, each one
     line), plan (what the deploy changes on the
     replica: { tables: { added, removed: [{ table, rows, bytes }], changed: [{ table,
-    columns, key, sync: { from, to } | null }] }, generatedTables: { added, removed,
+    columns, key, sync: { from, to } | null }] }, diskShort (the tables it syncs whole that likely
+    won't fit on the replica's disk: [{ table, estimateBytes, freeBytes, reserveBytes, pendingBytes,
+    spillSet, resync, fits }]), generatedTables: { added, removed,
     changed }, roles: { added, removed, changed, default: { from, to } | null }, pin:
     { from, to } | null }; rows and bytes null where not known; null when it cannot be
     shown), planUnknown (why it cannot be shown, else null), confirmed (the removal the deploy
-    sent as confirmed: { removed: [table], any (present, true, when any removal was accepted) };
+    sent as confirmed: { removed: [table], any (present, true, when any removal was accepted), disk (present,
+    true, when tables that likely won't fit on the replica's disk were confirmed) };
     null when none), deploy ({ id, status (queued,
     applying, starting, running, refused, failed), phase (null, checking, writing,
     restarting, syncing), createdAt, finishedAt };
@@ -391,11 +404,16 @@ const PHASES_OF: Partial<Record<Status, readonly Phase[]>> = { applying: ["check
 /** The deploy as the service says it (docs/HOSTED-API.md), its status and phase each one of the contract's closed set.
  *  `removal`: when the service refused it as `unconfirmed_removal`, what its refusal says the deploy removes — the
  *  tables, `"unknown"` (it could not tell), or null (it says neither: an older service); else null. */
-export interface DeployState { id: string; status: Status; phase: Phase | null; createdAt: string; finishedAt: string | null; failure: Failure | null; removal: { removes: TableSize[] | "unknown" | null } | null }
+export interface DeployState { id: string; status: Status; phase: Phase | null; createdAt: string; finishedAt: string | null; failure: Failure | null; removal: { removes: TableSize[] | "unknown" | null } | null;
+  /** when the service refused it as `disk_short`: the tables its refusal says likely won't fit on the replica's disk,
+   *  as numbers (null: it says none, an older service); else null */
+  disk: { shortages: DiskFit[] | null } | null }
 
 /** What a deploy says was confirmed of its removals (`confirmed` in the POST's body): the tables named, and, only on a
- *  service's refusal that could not tell which, `any` — every synced table the deploy removes may be dropped. */
-export interface Confirmed { removed: string[]; any?: true }
+ *  service's refusal that could not tell which, `any` — every synced table the deploy removes may be dropped; and
+ *  `disk`, that it syncs tables that likely won't fit on the replica's disk (its plan said so, or a `disk_short`
+ *  refusal), which a person or --yes confirmed. */
+export interface Confirmed { removed: string[]; any?: true; disk?: true }
 
 const obj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
@@ -425,12 +443,12 @@ export function deployStateOf(json: unknown, id: string | null, secrets: readonl
   }
   if (!isServiceTime(d.createdAt) || (d.finishedAt !== undefined && d.finishedAt !== null && !isServiceTime(d.finishedAt))) return null;
   // a refusal or a failure carries the failure shape (its code, message, why, fix and next in one object), and nothing else does
-  let failure: Failure | null = null, removal: DeployState["removal"] = null;
+  let failure: Failure | null = null, removal: DeployState["removal"] = null, disk: DeployState["disk"] = null;
   if (status === "refused" || status === "failed") {
     if (!obj(d.failure)) return null;
     failure = failureShape(d.failure, secrets, status === "refused"
       // (unconfirmed_removal is the service's refusal, never Mason's: docs/HOSTED-API.md "What the deploy changes")
-      ? { code: "refused", said: (c) => c === UNCONFIRMED ? `the service said ${c}` : `Mason on the replica said ${c}`, next: again }
+      ? { code: "refused", said: (c) => c === UNCONFIRMED || c === DISK_SHORT ? `the service said ${c}` : `Mason on the replica said ${c}`, next: again }
       : { code: "failed", said: (c) => `the service said ${c}`, next: again });
     if (failure === null) return null;
     // the service refused a removal not confirmed (an older CLI's deploy, or what the replica runs changed since the
@@ -443,8 +461,16 @@ export function deployStateOf(json: unknown, id: string | null, secrets: readonl
       if (removes === null) return null;
       removal = { removes: removes ?? null };
     } else if (d.failure.removes !== undefined) return null;
+    // the service refused a table that likely won't fit on the replica's disk, not confirmed: the tables and their
+    // numbers as it names them (one that does not hold is outside the contract), confirmed as the plan's are
+    if (status === "refused" && d.failure.code === DISK_SHORT) {
+      if (again[0] !== undefined) failure = { ...failure, code: DISK_SHORT, fix: `${again[0][0]} again: it shows the tables that likely won't fit and asks for them to be confirmed (or add --yes, where no person is asked)` };
+      const shortages = heldShortages(d.failure.shortages, secrets);
+      if (shortages === null) return null;
+      disk = { shortages: shortages ?? null };
+    } else if (d.failure.shortages !== undefined) return null;
   } else if (d.failure !== undefined && d.failure !== null) return null;
-  return { id: d.id, status, phase, createdAt: d.createdAt, finishedAt: typeof d.finishedAt === "string" ? d.finishedAt : null, failure, removal };
+  return { id: d.id, status, phase, createdAt: d.createdAt, finishedAt: typeof d.finishedAt === "string" ? d.finishedAt : null, failure, removal, disk };
 }
 
 /** A status for a person, its phase beside it. */
@@ -645,6 +671,16 @@ export async function deploy(argv: string[]): Promise<number> {
     say(words.question(removed));
     if (!await typedBack(name)) return fail(words.mistyped, { json });
   }
+  // A TABLE THAT LIKELY WON'T FIT ON THE REPLICA'S DISK (src/duck/disk-fit.ts): said in the plan, and confirmed the same
+  // way before anything is sent — typed back at a terminal, else --yes. The service is not asked to check it: a sync that
+  // runs short of disk stops before the disk fills
+  const short = planned.plan?.diskShort ?? [];
+  const disk = diskWords(name);
+  if (short.length && !yes) {
+    if (!canAsk(json)) return fail(disk.unconfirmed(short), { json });
+    say(disk.question(short));
+    if (!await typedBack(name)) return fail(disk.mistyped, { json });
+  }
 
   // THE DEPLOY, SENT: 201 and its id, else the service's failure as it worded it. A 503 (the replica is being made, or
   // its machine is not connected; or the service is full) or a 429 (too many deploys at once) says NO deploy was made:
@@ -653,6 +689,8 @@ export async function deploy(argv: string[]): Promise<number> {
   // the tables whose removal was confirmed, as the plan named them: a service refuses a deploy that would remove one
   // this list lacks (an older CLI's, or a plan that went stale), so nothing skips the question
   let confirmed: Confirmed | null = removed.length ? { removed: removed.map((x) => x.table) } : null;
+  // and the tables that likely won't fit, confirmed above: a service refuses such a deploy without it (`disk_short`)
+  if (short.length) confirmed = { ...(confirmed ?? { removed: [] }), disk: true };
   // ONE RESEND AT MOST (round 1): a service that refused the deploy as unconfirmed_removal, naming what it removes (or
   // that it could not tell), took nothing — the refused deploy is final, the replica runs what it ran — so a new POST,
   // its removal confirmed as the refusal named it, is a new deploy; a second refusal is said as it came
@@ -776,9 +814,33 @@ export async function deploy(argv: string[]): Promise<number> {
       }
       return any ? { removed: confirmed?.removed ?? [], any: true } : { removed: removes.map((t) => t.table) };
     };
+    /**
+     * THE SERVICE REFUSED TABLES THAT LIKELY WON'T FIT ON THE REPLICA'S DISK (`disk_short`, naming them with their
+     * numbers): said, then confirmed as the plan's are — typed back at a terminal, else --yes — and the one resend
+     * carries `confirmed.disk`. Else the exit, its code disk_short.
+     */
+    const confirmDisk = async (shortages: DiskFit[]): Promise<Confirmed | number> => {
+      if (!yes && !canAsk(json)) return ended({ ...disk.unconfirmed(shortages), message: `the service did not take deploy ${id}: it syncs ${shortages.length === 1 ? "a table" : `${shortages.length} tables`} that likely won't fit on ${name}'s disk` });
+      if (terminal) steps.fail(stateLine(state));
+      else if (!json && stateLine(state) !== said) say(`  ${stateLine(state)}`);
+      if (yes) { if (!json) say(`The service did not take deploy ${id}: it syncs tables that likely won't fit on ${name}'s disk; --yes confirms them: sending the deploy again`); }
+      else {
+        say(`The service did not take deploy ${id}.`);
+        say(disk.question(shortages));
+        if (!await typedBack(name)) return fail(disk.mistyped, { json });
+      }
+      return { ...(confirmed ?? { removed: [] }), disk: true };
+    };
     for (;;) {
       if (FINAL.has(state.status)) {
         if (state.status === "running") return ended(null);
+        if (state.disk !== null && state.disk.shortages !== null && round === 0) {
+          const again = await confirmDisk(state.disk.shortages);
+          if (typeof again === "number") return again;
+          confirmed = again;
+          deadline = Date.now() + timeout.seconds * 1000;
+          continue send;
+        }
         const removal = state.removal;
         if (removal !== null && removal.removes !== null && round === 0) {
           const again = await confirmAgain(removal.removes);
@@ -831,6 +893,24 @@ export async function deploy(argv: string[]): Promise<number> {
 
 /** THE WORDS OF A REMOVAL'S CONFIRMATION, for a plan's removal and for a service's refusal alike: the question, the
  *  refusal where no person is asked, and the answer to a name mistyped. */
+/** What a deploy says of the tables it syncs whole that likely won't fit on the replica's disk: the question, the
+ *  refusal where no person is asked, and a name typed wrong. Each table's own words are src/duck/disk-fit.ts's. */
+function diskWords(name: string) {
+  const each = (short: readonly DiskFit[]): string => short.map((f) => { const w = diskShortWords(f); return `${w.message}. ${w.why}`; }).join(" ");
+  return {
+    // (a line begins with the CLI's own words, never a name the service gave)
+    question: (short: readonly DiskFit[]): string => `The deploy syncs ${short.length === 1 ? "a table" : `${short.length} tables`} that likely won't fit on ${name}'s disk. ${each(short)} Type ${name} to deploy anyway, anything else to keep ${name} as it is.`,
+    unconfirmed: (short: readonly DiskFit[]): Failure => ({
+      message: `the deploy syncs ${short.length === 1 ? "a table" : `${short.length} tables`} that likely won't fit on ${name}'s disk: nothing was sent`, code: DISK_SHORT,
+      why: `${each(short)} Such a deploy is confirmed at a terminal, or with --yes.`,
+      fix: `choose fewer columns in the sources file, or give ${name} more disk; or deploy anyway, since a sync that runs short of disk stops before the disk fills: mason deploy --replica ${name} --yes`,
+      next: [[`mason deploy --replica ${name} --yes`, "deploy anyway"]] }),
+    mistyped: { message: `nothing was deployed to ${name}: what was typed is not its name`, code: "refused",
+      why: "a deploy that syncs a table that likely won't fit on the replica's disk is confirmed by typing the replica's name back exactly (nothing trimmed, nothing re-cased)",
+      fix: `run it again and type ${name}; where no person is asked, mason deploy --replica ${name} --yes`, next: [[`mason deploy --replica ${name}`, "ask again"]] } satisfies Failure,
+  };
+}
+
 function removalWords(name: string) {
   return {
     question: (removed: readonly TableSize[]): string => `Removing ${removed.length === 1 ? "a table" : `${removed.length} tables`} from ${name} drops ${removed.length === 1 ? "its" : "their"} synced data, and syncing ${removed.length === 1 ? "it" : "one"} again is a new first sync, reading every row from the source. Type ${name} to deploy, anything else to keep ${name} as it is.`,

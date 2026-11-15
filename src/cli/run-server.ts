@@ -52,6 +52,7 @@ import type { GeneratedStatus } from "../duck/generated.ts";
 import { catalogTable, copiedColumns, effectiveSync, entryName, everyColumnLeavesOut, parseSourceText, shownPath, type CatalogColumn, type ProjectSource, type SourceFile } from "./sources.ts";
 import { projectWriteState } from "./project.ts";
 import { addEntry, plannedEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type PollMeasure, type RemoveResult } from "./source-edit.ts";
+import { shortageOf, shortageWarning, syncedEstimate, type DiskRoom, type DiskShortage } from "../duck/disk-fit.ts";
 import { notAddedRefusal, PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamedAnswer, type StreamStatus } from "../duck/sync.ts";
 import { SyncsByHand, type SyncByHand } from "./sync-by-hand.ts";
 import { agoText, DEFAULT_SYNC, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
@@ -189,6 +190,9 @@ export interface RunContext {
     stream: (o?: { refresh?: boolean }) => Promise<StreamStatus | null>;
     /** the disk the copy's file is on: free, and what the first syncs running are projected to add (src/duck/sync.ts diskStatus) */
     disk: () => DiskStatus;
+    /** what queries may spill into now (src/duck/store.ts `spillLimitBytes`), and whether MASON_SPILL_LIMIT sets it: the
+     *  room an add keeps beside a table (src/duck/disk-fit.ts). Absent: an add's disk is not checked */
+    spill?: () => { limitBytes: number; set: boolean };
     /** what the run measured of a table, for mason add's estimate of a poll's cost (src/duck/sync.ts measured) */
     measured?: (table: string) => PollMeasure | null;
     /** the Postgres listener's requests (src/duck/requests.ts, `_mason.requests`): mason status and mason logs --requests */
@@ -305,6 +309,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
       // no sync of the database's rows, and is not said here
       ...(c?.rebuilding !== undefined && c.rebuilding !== "compact" && c.rebuildingSince !== undefined
         ? { rebuilding: { kind: c.rebuilding, startedAt: c.rebuildingSince } } : {}),
+      // SHORT OF DISK (issue 1075), as numbers: its first sync stopped short by the backstop, or the estimate it was added
+      // anyway with while that sync is not in (`addedAnyway`)
+      ...(entry !== undefined && addedAnyway(ctx, t.source, c) !== undefined ? { diskShort: addedAnyway(ctx, t.source, c)! } : {}),
     };
   });
   return {
@@ -346,7 +353,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
       sync: { default: syncText(sources.file?.sync ?? DEFAULT_SYNC), written: sources.file?.sync != null },
       ...(repl !== null ? { replication: { slot: repl.slot, publication: repl.publication, owned: repl.owned } } : {}) },
     // a sources file edited into a mistake while the run is up: the run copies what it read last, and says so
-    warnings: [...ctx.warnings, ...(sources.problem ? [`${sources.problem} (Mason syncs the tables it read before; mason start reads the file again)`] : [])],
+    warnings: [...ctx.warnings, ...(sources.problem ? [`${sources.problem} (Mason syncs the tables it read before; mason start reads the file again)`] : []),
+      // a table added anyway though it likely won't fit, until its first sync is in (the backstop's stop is its error)
+      ...tables.flatMap((x) => x.diskShort !== undefined && x.diskShort.estimated && x.error === null ? [shortageWarning(x.table, x.diskShort)] : [])],
     folder, project, tables,
     // where a tool connects (the Postgres API's URL, the credentials' place shown, and its psql line): the web page's
     // Connect panel, as mason status --json says it (src/cli/pg-url.ts postgresFacts)
@@ -367,7 +376,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     // how many users exist (mason user's, not removed): the web page's Getting started is done once one does (the owner,
     // 2026-11-13); a list that cannot be read says why, never 0
     users: usersFact(ctx.users.file),
-    disk: { path: disk.path, freeBytes: disk.freeBytes, copyBytes: bytes, projectedBytes: disk.projectedBytes, ...(disk.error !== undefined ? { error: disk.error } : {}) },
+    // and what queries may spill into now: the room an add keeps beside a table (src/duck/disk-fit.ts)
+    disk: { path: disk.path, freeBytes: disk.freeBytes, copyBytes: bytes, projectedBytes: disk.projectedBytes, ...(ctx.duck.spill ? { reserveBytes: ctx.duck.spill().limitBytes } : {}),
+      ...(disk.error !== undefined ? { error: disk.error } : {}) },
     jsonPaths: ctx.duck.jsonPaths?.() ?? [],
     generatedTables: ctx.duck.generated?.() ?? [],
     // the roles file as the listener reads it now: its roles by name, and what is wrong with it (every statement of a
@@ -676,15 +687,52 @@ function sourceOnDisk(ctx: RunContext): EditTarget {
   return at;
 }
 
-/** The database this run copies, as an edit is checked against it: the catalog it last read, and how it reads changes. */
+/** The database this run copies, as an edit is checked against it: the catalog it last read, how it reads changes, and
+ *  the room on its disk (`diskRoom`). */
 const catalogOf = (ctx: RunContext): EditCatalog => ({ tables: ctx.facts().tables, database: ctx.source.database,
-  ...(ctx.duck.measured ? { measured: ctx.duck.measured } : {}) });
+  ...(ctx.duck.measured ? { measured: ctx.duck.measured } : {}), ...(ctx.duck.spill ? { disk: (table: string) => diskRoom(ctx, table) } : {}) });
+
+/** THE TABLES ADDED THOUGH THEY LIKELY WON'T FIT (`/api/pick` with yes), each its shortage as numbers: said on its
+ *  state and as a warning until its first sync is in (`addedAnyway`). In memory: a restart starts the sync, whose own
+ *  check (the backstop) then says it. */
+const ANYWAY = new WeakMap<RunContext, Map<string, DiskShortage>>();
+const anywayOf = (ctx: RunContext): Map<string, DiskShortage> => { let m = ANYWAY.get(ctx); if (m === undefined) { m = new Map(); ANYWAY.set(ctx, m); } return m; };
+
+/** A table's shortage of disk (`DiskShortage`, code `disk_short`): its first sync's, stopped short by the backstop, else
+ *  the estimate it was added anyway with, while that sync is not in. One reading for the state and its warning. */
+function addedAnyway(ctx: RunContext, table: string, c: CopyState | undefined): DiskShortage | undefined {
+  if (c?.diskShort !== undefined) return c.diskShort;
+  const m = anywayOf(ctx), s = m.get(table);
+  if (s !== undefined && c?.phase === "copied") { m.delete(table); return undefined; }
+  return s;
+}
+
+/**
+ * THE ROOM ON THE DISK THE SYNCED DATA IS ON, beside `table` (src/duck/disk-fit.ts): free there (the sync's own
+ * `diskFree`, `diskStatus`), what queries may spill into now, and what the first syncs queued or under way, but its own,
+ * still need — each estimated whole from the catalog, an upper bound for one already part way. The free space unreadable
+ * is said as unknown, never as room.
+ */
+export function diskRoom(ctx: RunContext, table: string): DiskRoom | { unknown: string } {
+  const d = ctx.duck.disk();
+  if (d.freeBytes === null) return { unknown: d.error ?? "the free space where the synced data is could not be read" };
+  const s = ctx.duck.spill!();
+  const facts = new Map(ctx.facts().tables.map((t) => [t.source, t]));
+  const synced = new Map((ctx.sources().tables ?? []).map((t) => [t.source, t.columns.map((c) => c.name)]));
+  let pendingBytes = 0;
+  for (const c of ctx.duck.copies()) {
+    const t = facts.get(c.source);
+    if (c.source === table || t === undefined || (c.phase !== "waiting" && c.phase !== "copying")) continue;
+    pendingBytes += syncedEstimate(t, synced.get(c.source) ?? null);
+  }
+  return { freeBytes: d.freeBytes, reserveBytes: s.limitBytes, spillSet: s.set, pendingBytes };
+}
 
 /**
  * ADD A TABLE: the check-and-write every entrance shares (src/cli/source-edit.ts addEntry), against the file on disk and
  * this run's catalog; the caller tells the run the file changed, and the sync starts the copy.
  */
-export function pick(ctx: RunContext, table: string, columns: readonly string[] = ["*"], key: readonly string[] | null = null, o: { sync?: TableSync; keep?: boolean } = {},
+export function pick(ctx: RunContext, table: string, columns: readonly string[] = ["*"], key: readonly string[] | null = null, o: { sync?: TableSync; keep?: boolean; yes?: boolean } = {},
   at: EditTarget = sourceOnDisk(ctx)): PickResult {
   return addEntry(at, catalogOf(ctx), table, columns, key, o);
 }
@@ -997,8 +1045,10 @@ export function createRunServer(ctx: RunContext): http.Server {
           // usage over time, a sample a minute (src/duck/usage.ts): mason usage
           sendJson(res, 200, await usage(ctx, url.searchParams));
         } else if (method === "POST" && url.pathname === "/api/pick") {
-          const body = JSON.parse(await readBody(req, 64 * 1024)) as { table?: unknown; picked?: unknown; columns?: unknown; key?: unknown; sync?: unknown; keep?: unknown };
-          if (typeof body.table !== "string" || typeof body.picked !== "boolean") throw new Refusal(400, "send { table, picked, columns?, key?, sync?, keep? }");
+          const body = JSON.parse(await readBody(req, 64 * 1024)) as { table?: unknown; picked?: unknown; columns?: unknown; key?: unknown; sync?: unknown; keep?: unknown; yes?: unknown };
+          if (typeof body.table !== "string" || typeof body.picked !== "boolean") throw new Refusal(400, "send { table, picked, columns?, key?, sync?, keep?, yes? }");
+          // yes: added even when it likely won't fit on disk (mason add --yes, the page's Add anyway)
+          if (body.yes !== undefined && typeof body.yes !== "boolean") throw new Refusal(400, "yes is true or false");
           // a sync by the sources file's own grammar (src/lib/table-sync.ts), as mason add --sync reads it
           const sync = body.sync === undefined ? undefined : parseSync(body.sync);
           if (sync !== undefined && "problem" in sync) throw new Refusal(400, `sync ${JSON.stringify(body.sync)}: ${sync.problem}`);
@@ -1014,7 +1064,7 @@ export function createRunServer(ctx: RunContext): http.Server {
             const liveRefused = sync?.mode === "replication" ? await liveRefusal(ctx, at, body.table, (body.columns as string[] | undefined) ?? ["*"], (body.key as string[] | undefined) ?? null,
               { sync, keep: body.keep === true }, live) : null;
             if (liveRefused !== null) { sendFailure(res, statusOf(liveRefused), liveRefused); return; }
-            const r = pick(ctx, body.table, (body.columns as string[] | undefined) ?? ["*"], (body.key as string[] | undefined) ?? null, { ...(sync !== undefined ? { sync } : {}), keep: body.keep === true }, at);
+            const r = pick(ctx, body.table, (body.columns as string[] | undefined) ?? ["*"], (body.key as string[] | undefined) ?? null, { ...(sync !== undefined ? { sync } : {}), keep: body.keep === true, yes: body.yes === true }, at);
             // A LIVE SWITCH INTO REPLICATION is held to the start's checks (wal_level, the role, a free slot): one the
             // database cannot serve would leave the table, polled until now, NOT kept current for ever — the file is put
             // back as it was, byte for byte, and the refusal says what the database lacks and the line that polls it
@@ -1022,13 +1072,17 @@ export function createRunServer(ctx: RunContext): http.Server {
             const refused = now === null || "problems" in now ? null : await ctx.checkReplication!(now);
             if (refused !== null) { fs.writeFileSync(at.file, at.text); sendFailure(res, statusOf(refused), refused); return; }
             if (!r.already) ctx.log(`added ${r.table} to ${r.file}`);
+            // added anyway though it likely won't fit: said on its state until its first sync is in; synced again whole
+            // with room, no longer said
+            if (r.disk !== null && "fits" in r.disk && !r.disk.fits) anywayOf(ctx).set(r.table, shortageOf(r.disk));
+            else if (r.disk !== null) anywayOf(ctx).delete(r.table);
             // a sync alone asked of a table added (--sync): its columns are not the person's choice now, so what arrived
             // meanwhile is left out as the run leaves it out (src/cli/dev.ts leaveOut)
             ctx.sourcesChanged(body.keep === true ? [] : [r.table]);
             sendJson(res, 200, { ...r, state: await state(ctx, false, false) });
           } else {
             const r = removeTables(ctx, [body.table]);
-            for (const t of r.removed) ctx.log(`removed ${t} from ${r.file}`);
+            for (const t of r.removed) { ctx.log(`removed ${t} from ${r.file}`); anywayOf(ctx).delete(t); }
             ctx.sourcesChanged(r.removed);
             sendJson(res, 200, { ...r, state: await state(ctx, false, false) });
           }
@@ -1183,7 +1237,7 @@ export function createRunServer(ctx: RunContext): http.Server {
           sendFailure(res, 404, { message: `no ${req.method} ${url.pathname}: this is mason start's server for the mason command (mason --help)`, code: "not_found" });
         }
       } catch (e) {
-        if (e instanceof Refusal) { sendFailure(res, e.status, e.failure); return; }
+        if (e instanceof Refusal) { sendFailure(res, e.status, e.failure, e.extra); return; }
         if (e instanceof SyntaxError) { sendFailure(res, 400, { message: `the body is not JSON: ${e.message}`, code: "usage" }); return; }
         // said ONCE per distinct reason: a command may ask every second, and a stack a second buried the terminal
         const why = ((e as Error).message.split("\n---\n").pop() ?? String(e)).split("\n")[0]!;
