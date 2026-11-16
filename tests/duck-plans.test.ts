@@ -296,6 +296,8 @@ const HELD_BI = [
   "Grafana's $__timeGroup: floor(epoch / n) * n",
   "issue 665: Metabase's week of year, the expression repeated",
   "issue 464: to_char of a month grouped",
+  "issue 464: to_char of a quarter grouped",
+  "issue 464: to_char of a padded month's name grouped",
   "issue 665: Metabase's numeric auto-bin",
   "issue 665: the auto-bin of a bare column named as its output",
   "issue 665: the grouped quotient read as text and as a cast",
@@ -961,11 +963,12 @@ test("issue 461: jsonb_object_keys grouped under libc hands the libc key the gro
   assert.ok((rows.get("__mason_libc_key") ?? 0) <= 100, `the libc key was handed more than the groups: ${said}`);
 });
 
-// issue 464: a month grouped by its to_char text is DuckDB's strftime (src/duck/to-char.ts `strftimeTemplate`): the
-// function is handed no row of the million (it was handed each, x8-18 of Postgres over 4.5 M rows); the ORDER BY's
-// libc key is computed per group
-test("issue 464: to_char of a month grouped hands the to_char function no row", async (t) => {
-  const rows = [...(await rowsOf(sqlOf("BI shape: issue 464: to_char of a month grouped")))].filter(([k, n]) => k !== "__mason_turn" && n > 0);
+// issue 464: a month, a quarter and a month's name padded to nine, grouped by their to_char text, are the engine's own
+// strftime, date_part and rpad (src/duck/to-char.ts `nativeTemplate`): the function is handed no row of the million (it
+// was handed each: a month x8-18 of Postgres over 4.5 M rows, a quarter and a padded name x8-9 over a million); the
+// ORDER BY's libc key is computed per group
+for (const shape of ["issue 464: to_char of a month grouped", "issue 464: to_char of a quarter grouped", "issue 464: to_char of a padded month's name grouped"]) test(`${shape} hands the to_char function no row`, async (t) => {
+  const rows = [...(await rowsOf(sqlOf(`BI shape: ${shape}`)))].filter(([k, n]) => k !== "__mason_turn" && n > 0);
   t.diagnostic(rows.map(([k, n]) => `${k} ${n}`).join(", ") || "none");
   assert.equal(rows.find(([k]) => k === "__mason_to_char_time")?.[1] ?? 0, 0, `the to_char function was handed rows: ${rows.map(([k, n]) => `${k} ${n}`).join(", ")}`);
   assert.ok(rows.reduce((a, [, n]) => a + n, 0) <= 10_000, `the Mason functions were handed ${rows.map(([k, n]) => `${k} ${n}`).join(", ")}: per row, not per group`);

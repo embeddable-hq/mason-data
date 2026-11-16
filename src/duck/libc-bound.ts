@@ -82,6 +82,7 @@
 import { uncoveredRefusal, type LibcOrder } from "./libc-order.ts";
 import { functionsCalled, type TreeNode, type TreeValue } from "./pgtree.ts";
 import { BARRIER } from "./row-filter.ts";
+import { OWN_PREFIX } from "./own-names.ts";
 
 type Body = Record<string, unknown>;
 type AstNode = Record<string, unknown>;
@@ -361,11 +362,13 @@ function windowed(v: unknown): boolean {
 
 /** the threshold's subquery over the SELECT's own rows: `SELECT <aggregate> FROM (SELECT <value> AS __mason_bound FROM
  *  <its FROM item> WHERE <its WHERE> AND x IS NOT NULL [ORDER BY 1 [DESC] LIMIT n]) AS __mason_bounds`; a top N's is its
- *  `everyRow` where fewer than n rows have a value (`CASE WHEN count(*) >= n THEN … ELSE <everyRow> END`) */
-function threshold(s: Body, item: AstNode, x: AstNode, value: AstNode, aggregate: "min" | "max", top: { desc: boolean; n: number; everyRow: AstNode } | null): AstNode {
+ *  `everyRow` where fewer than n rows have a value (`CASE WHEN count(*) >= n THEN … ELSE <everyRow> END`). Its two names
+ *  begin with the statement's own prefix (`own`, src/duck/own-names.ts) */
+function threshold(s: Body, item: AstNode, x: AstNode, value: AstNode, aggregate: "min" | "max", top: { desc: boolean; n: number; everyRow: AstNode } | null, own: string): AstNode {
+  const [bound, bounds] = [`${own}bound`, `${own}bounds`];
   const where = and([...(s.whereClause !== undefined ? [structuredClone(s.whereClause as AstNode)] : []), nullTest(structuredClone(x), "IS_NOT_NULL")]);
   const inner: Body = {
-    targetList: [{ ResTarget: { name: "__mason_bound", val: value } }],
+    targetList: [{ ResTarget: { name: bound, val: value } }],
     fromClause: [structuredClone(item)], whereClause: where,
     ...(top === null ? {} : {
       sortClause: [{ SortBy: { node: int(1), sortby_dir: top.desc ? "SORTBY_DESC" : "SORTBY_DEFAULT", sortby_nulls: "SORTBY_NULLS_DEFAULT" } }],
@@ -376,8 +379,8 @@ function threshold(s: Body, item: AstNode, x: AstNode, value: AstNode, aggregate
   const outer: Body = {
     targetList: [{ ResTarget: { val: ((v: AstNode): AstNode => top === null ? v : { CaseExpr: {
       args: [{ CaseWhen: { expr: op(">=", { FuncCall: { funcname: [S("count")], agg_star: true, funcformat: "COERCE_EXPLICIT_CALL" } }, int(top.n)), result: v } }], defresult: top.everyRow } })(
-      call(aggregate, [{ ColumnRef: { fields: [S("__mason_bounds"), S("__mason_bound")] } }])) } }],
-    fromClause: [{ RangeSubselect: { subquery: { SelectStmt: inner }, alias: { aliasname: "__mason_bounds" } } }],
+      call(aggregate, [{ ColumnRef: { fields: [S(bounds), S(bound)] } }])) } }],
+    fromClause: [{ RangeSubselect: { subquery: { SelectStmt: inner }, alias: { aliasname: bounds } } }],
     op: "SETOP_NONE",
   };
   return { SubLink: { subLinkType: "EXPR_SUBLINK", subselect: { SelectStmt: outer } } };
@@ -484,18 +487,23 @@ class Values {
   private readonly groupedMade = new Map<Body, Map<string, GroupedValues>>();
   private readonly counted: (n: AstNode) => AstNode;
   /** every name the statement holds, lower-cased (the engine's identifiers are read without case): a name chosen here
-   *  is none of them, nor one chosen before (`fresh`) */
+   *  is none of them, nor one chosen before (`fresh`). Each begins with the statement's own prefix (src/duck/own-names.ts),
+   *  which no name it can reach holds, a table's column read by a `*` included; the rewrite's own names (a lambda's
+   *  parameter) begin with it too, and are among those the tree holds */
   private readonly taken: Set<string>;
   /** the columns of the values and of their keys, chosen once for the statement */
   private readonly v: string; private readonly w: string; private readonly k: string; private readonly bound: string;
-  constructor(tree: unknown, counted: (n: AstNode) => AstNode) {
+  private readonly own: string;
+  constructor(tree: unknown, counted: (n: AstNode) => AstNode, own: string) {
     this.counted = counted;
+    this.own = own;
     this.taken = namesIn(tree);
-    [this.v, this.w, this.k, this.bound] = [this.fresh("__mason_v"), this.fresh("__mason_w"), this.fresh("__mason_k"), this.fresh("__mason_bound")];
+    [this.v, this.w, this.k, this.bound] = [this.fresh("v"), this.fresh("w"), this.fresh("k"), this.fresh("bound")];
   }
 
-  /** a name no part of the statement holds: `base`, else `base` and the first number that makes it one */
-  private fresh(base: string): string {
+  /** a name no part of the statement holds: the prefix and `word`, else those and the first number that makes it one */
+  private fresh(word: string): string {
+    const base = `${this.own}${word}`;
     let name = base;
     for (let i = 1; this.taken.has(name.toLowerCase()); i++) name = `${base}${i}`;
     this.taken.add(name.toLowerCase());
@@ -510,13 +518,13 @@ class Values {
     this.made.set(s, mine);
     const known = mine.get(shape);
     if (known !== undefined) return known;
-    const name = this.fresh("__mason_values");
+    const name = this.fresh("values");
     const where = and([...(s.whereClause !== undefined ? [structuredClone(s.whereClause as AstNode)] : []), nullTest(structuredClone(x), "IS_NOT_NULL")]);
     const distinct: Body = { distinctClause: [{}], targetList: [{ ResTarget: { name: this.v, val: structuredClone(x) } }],
       fromClause: [this.counted(structuredClone(item))], whereClause: where, limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE" };
     const query: Body = {
       targetList: [{ ResTarget: { val: col(this.v) } }, { ResTarget: { name: this.w, val: weightsOf(bound, col(this.v)) } }],
-      fromClause: [{ RangeSubselect: { subquery: { SelectStmt: distinct }, alias: { aliasname: this.fresh("__mason_distinct") } } }],
+      fromClause: [{ RangeSubselect: { subquery: { SelectStmt: distinct }, alias: { aliasname: this.fresh("distinct") } } }],
       limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
     };
     const w = (s.withClause as Body | undefined) ?? {};
@@ -566,7 +574,7 @@ class Values {
     const { name, keys } = made;
     const [value, unkeyed] = p.min ? [made.min, made.minUnkeyed] : [made.max, made.maxUnkeyed];
     const lookup = (column: string): AstNode => {
-      const alias = this.fresh("__mason_group");
+      const alias = this.fresh("group");
       const same = and(keys.map((k, i) => ({ A_Expr: { kind: "AEXPR_NOT_DISTINCT", name: [S("=")], lexpr: col(alias, k), rexpr: structuredClone(groups[i]!) } })));
       return call("any_value", [Values.scalar({ SelectStmt: { targetList: [{ ResTarget: { val: col(alias, column) } }],
         fromClause: [{ RangeVar: { relname: name, inh: true, relpersistence: "p", alias: { aliasname: alias } } }], whereClause: same, limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE" } })]);
@@ -594,11 +602,11 @@ class Values {
    * The weights are computed a row in each pass (the pairs weighed a distinct value once, but held every pair).
    */
   private groupedQueries(s: Body, item: AstNode, groups: AstNode[], p: Pick): GroupedValues {
-    const name = this.fresh("__mason_groups"), bounds = this.fresh("__mason_thresholds");
-    const keys = groups.map(() => this.fresh("__mason_g"));
-    const [min, max, minUnkeyed, maxUnkeyed] = [this.fresh("__mason_min"), this.fresh("__mason_max"), this.fresh("__mason_min_unkeyed"), this.fresh("__mason_max_unkeyed")];
-    const [tmin, tmax, bmin, bmax, low, high] = [this.fresh("__mason_tmin"), this.fresh("__mason_tmax"), this.fresh("__mason_bmin"), this.fresh("__mason_bmax"), this.fresh("__mason_low"), this.fresh("__mason_high")];
-    const [rows, t, cands, picks] = [this.fresh("__mason_rows"), this.fresh("__mason_threshold"), this.fresh("__mason_candidates"), this.fresh("__mason_picks")];
+    const name = this.fresh("groups"), bounds = this.fresh("thresholds");
+    const keys = groups.map(() => this.fresh("g"));
+    const [min, max, minUnkeyed, maxUnkeyed] = [this.fresh("min"), this.fresh("max"), this.fresh("min_unkeyed"), this.fresh("max_unkeyed")];
+    const [tmin, tmax, bmin, bmax, low, high] = [this.fresh("tmin"), this.fresh("tmax"), this.fresh("bmin"), this.fresh("bmax"), this.fresh("low"), this.fresh("high")];
+    const [rows, t, cands, picks] = [this.fresh("rows"), this.fresh("threshold"), this.fresh("candidates"), this.fresh("picks")];
     const select = (b: Body): Body => ({ ...b, limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE" });
     const from = (relname: string, aliasname?: string): AstNode => ({ RangeVar: { relname, inh: true, relpersistence: "p", ...(aliasname === undefined ? {} : { alias: { aliasname } }) } });
     const derived = (b: Body, aliasname: string): AstNode => ({ RangeSubselect: { subquery: { SelectStmt: b }, alias: { aliasname } } });
@@ -626,7 +634,7 @@ class Values {
     const picked = select({ targetList: [...keys.map((k) => named(col(k), k)),
       named(call("arg_min", [col(this.v), by(true)]), min), named(call("arg_min", [unkeyed(), by(true)]), minUnkeyed),
       named(call("arg_max", [col(this.v), by(false)]), max), named(call("arg_max", [unkeyed(), by(false)]), maxUnkeyed)],
-      fromClause: [derived(keyed, this.fresh("__mason_keyed"))], groupClause: keys.map((k) => col(k)) });
+      fromClause: [derived(keyed, this.fresh("keyed"))], groupClause: keys.map((k) => col(k)) });
     // each group: its one value, or its candidates' pick
     const one = (): AstNode => op("=", col(t, bmin), col(t, bmax));
     const either = (single: string, pick: string): AstNode => ({ CaseExpr: { args: [{ CaseWhen: { expr: one(), result: col(t, single) } }], defresult: col(picks, pick) } });
@@ -643,7 +651,7 @@ class Values {
   /** the top N: its FROM item LEFT JOINed to the keys of the values the bounds keep, sorted by the joined key */
   top(t: Top, item: AstNode, own: string): void {
     const name = this.of(t.s, item, t.x, t.collate, t.bound);
-    const keys = this.fresh("__mason_keys"), bounds = this.fresh("__mason_bounds");
+    const keys = this.fresh("keys"), bounds = this.fresh("bounds");
     // ASC: the n-th smallest value's hi (fewer than n values: `H`, above every lo); DESC: the n-th largest lo ('')
     const threshold: AstNode = { SelectStmt: {
       targetList: [{ ResTarget: { val: { CaseExpr: { args: [{ CaseWhen: { expr: op(">=", { FuncCall: { funcname: [S("count")], agg_star: true, funcformat: "COERCE_EXPLICIT_CALL" } }, int(t.n)),
@@ -685,6 +693,9 @@ export interface BoundContext {
   volatile: (functions: number[]) => Promise<ReadonlySet<number>>;
   /** a role's walled reads (src/duck/row-filter.ts `wallStatistics`): each cloned one counted */
   wall: { alias: string; added: number } | null;
+  /** the prefix of every name the statement's rewrite invents (src/duck/own-names.ts), which the names written here begin
+   *  with too. Absent: `__mason_` */
+  own?: string;
 }
 
 /**
@@ -698,10 +709,11 @@ export interface BoundContext {
  * operation, a lock, a key reading anything but its outputs, and a SELECT that may read the query around it.
  * Returns whether any SELECT was written so.
  */
-function distinctSorted(tree: AstNode): boolean {
+function distinctSorted(tree: AstNode, own: string): boolean {
   const inner = correlatable(tree);
   const taken = namesIn(tree);
-  const fresh = (base: string): string => { let name = base; for (let i = 1; taken.has(name.toLowerCase()); i++) name = `${base}${i}`; taken.add(name.toLowerCase()); return name; };
+  // (each name the statement's own prefix and a word, as `Values` chooses them: src/duck/own-names.ts)
+  const fresh = (word: string): string => { const base = `${own}${word}`; let name = base; for (let i = 1; taken.has(name.toLowerCase()); i++) name = `${base}${i}`; taken.add(name.toLowerCase()); return name; };
   let any = false;
   for (const s of selectsIn(tree)) {
     const distinct = s.distinctClause as unknown[] | undefined;
@@ -712,8 +724,8 @@ function distinctSorted(tree: AstNode): boolean {
     const outputs = targets.map((t) => isNodeOf(t, "ResTarget") && typeof bodyOf(t).name === "string" && isObject(bodyOf(t).val) && !holds(bodyOf(t).val, new Set(["A_Star"]))
       ? { name: String(bodyOf(t).name), val: bodyOf(t).val as AstNode } : null);
     if (outputs.some((o) => o === null)) continue;
-    const alias = fresh("__mason_sorted");
-    const columns = outputs.map(() => fresh("__mason_d"));
+    const alias = fresh("sorted");
+    const columns = outputs.map(() => fresh("d"));
     const shapes = outputs.map((o) => shapeOf(o!.val));
     // each key over the outputs: an output's expression, or its name, is its column; anything else that reads a row stays
     let unread = false;
@@ -768,7 +780,7 @@ const wallsIn = (v: unknown, alias: string): number => selectsIn(v).filter((s) =
 export async function libcBounded(tree: AstNode, analysis: TreeValue, context: BoundContext): Promise<AstNode | null> {
   const tops: Top[] = [], picks: Array<{ s: Body; each: Pick[]; groups: AstNode[] | null }> = [];
   // a SELECT DISTINCT sorted by a libc key sorts its distinct rows (and, under a LIMIT, is a top N as any other below)
-  const sortedAfter = distinctSorted(tree);
+  const sortedAfter = distinctSorted(tree, context.own ?? OWN_PREFIX);
   const ctes = withQueries(tree);
   const boundFor = (collate: string): Bound | null => { const o = context.order(collate); return o === undefined ? null : boundOf(o); };
   for (const s of selectsIn(tree)) {
@@ -826,7 +838,8 @@ export async function libcBounded(tree: AstNode, analysis: TreeValue, context: B
   // a SELECT that may read the query around it is bounded row by row (its threshold a subquery over its own rows); any
   // other reads its DISTINCT values once, a WITH query of its own (`Values`)
   const inner = correlatable(tree);
-  const values = new Values(tree, counted);
+  const prefix = context.own ?? OWN_PREFIX;
+  const values = new Values(tree, counted, prefix);
   for (const t of chosen.tops) {
     const item = oneItem(t.s, ctes)!;
     const named = itemName(item);
@@ -835,7 +848,7 @@ export async function libcBounded(tree: AstNode, analysis: TreeValue, context: B
     // a threshold every bound passes: `H` above every lo, '' below every hi. A NULL row's bound is one every threshold
     // passes where NULL sorts first, and else the one only that threshold passes
     const [everyRow, beforeEvery] = t.desc ? [str(""), chr(H)] : [chr(H), str("")];
-    const limit = counted(threshold(t.s, item, t.x, (t.desc ? lowBound : highBound)(t.bound, t.x), t.desc ? "min" : "max", { desc: t.desc, n: t.n, everyRow }));
+    const limit = counted(threshold(t.s, item, t.x, (t.desc ? lowBound : highBound)(t.bound, t.x), t.desc ? "min" : "max", { desc: t.desc, n: t.n, everyRow }, prefix));
     const own = { CoalesceExpr: { args: [(t.desc ? highBound : lowBound)(t.bound, t.x), t.nullsFirst ? beforeEvery : structuredClone(everyRow)] } };
     const kept = op(t.desc ? ">=" : "<=", own, limit);
     t.s.whereClause = t.s.whereClause === undefined ? kept : and([t.s.whereClause as AstNode, kept]);
@@ -855,7 +868,7 @@ export async function libcBounded(tree: AstNode, analysis: TreeValue, context: B
     }
     for (const p of each) {
       // min: the least hi, rows of lo <= it; max: the greatest lo, rows of hi >= it
-      const limit = counted(threshold(s, item, p.x, (p.min ? highBound : lowBound)(p.bound, p.x), p.min ? "min" : "max", null));
+      const limit = counted(threshold(s, item, p.x, (p.min ? highBound : lowBound)(p.bound, p.x), p.min ? "min" : "max", null, prefix));
       p.case.expr = and([p.case.expr as AstNode, op(p.min ? "<=" : ">=", (p.min ? lowBound : highBound)(p.bound, p.x), limit)]);
     }
   }

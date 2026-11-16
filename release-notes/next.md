@@ -36,6 +36,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   such value it read refused it. These are still slow: a `mode()` of a `char(n)` or
   a `citext`, one ordered with `USING`, and one of a value that calls `random()` or reads a subquery or an outer
   query's column.
+- **`to_char` of a date or a time is faster with a quarter, a padded name and most other patterns.** Over a million
+  rows, a count by `to_char(created_at, 'YYYY "Q"Q')` or by `to_char(created_at, 'Month YYYY')` took about 4 s and
+  now takes 0.1 to 0.15 s, where Postgres takes about 0.4 s. This now holds for every pattern in every case, padded or
+  with `FM`, with `TH` after a number. These are still slow: `TM`, `FX`, a time zone's `TZ`, `TZH`, `TZM` and `OF`,
+  `SP`, a format passed as a parameter, a year before 1 or after 9999, and a date formatted with a time of day.
 
 - **A grouped `min()` or `max()` of a `text` or `varchar`, and a `SELECT DISTINCT` sorted by one, are faster under a
   libc collation**, such as a database whose collation is `en_US.utf8`. Over 4.5 M rows, the min and max of names by
@@ -72,6 +77,20 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
     that make PascalCase tables, such as Prisma, write such names.
   - A whole row of a WITH query with a column list, such as `WITH q(a, b) AS (…) SELECT q FROM q`, now answers.
     Before, it failed with 42703.
+- **A column, table or alias whose name starts with `__mason_` now gives Postgres's answer.** Mason writes names of
+  its own into the queries it runs on the synced data, and they all started with `__mason_`. A name of yours that
+  matched one, in any case, was taken for Mason's:
+  - a table with a column named `__mason_rid` answered NULLs for its columns in the first rows of a join, such as
+    `SELECT t.*, o.v FROM t LEFT JOIN other o ON o.id = t.id ORDER BY t.id LIMIT 10`;
+  - a jsonb column named `__mason_v`, `__mason_x` or `__mason_k` answered NULLs or failed when read with `->`, `@>` or
+    `jsonb_object_keys`;
+  - a table named `__mason_late` or `__mason_ties_bound`, or a FROM alias named `__mason_late`, answered another
+    table's rows or failed;
+  - a subquery with two columns whose names differ only in case, beside a third such as `t__mason_2`, answered one
+    column's values in another.
+
+  Now the names Mason writes are chosen so that no name your query can reach holds them, columns read by a `*`
+  included.
 - **Two generated tables that read each other through a WITH query named like one of them are now refused.** Take a
   table `a` defined as `WITH b AS (SELECT * FROM b) SELECT * FROM b`, and a table `b` that reads `a`. The WITH query's
   own `FROM b` reads the table `b`, as on Postgres. So the two read each other, and each is refused with the cycle,

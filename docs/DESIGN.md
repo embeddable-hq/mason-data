@@ -844,6 +844,35 @@ a function Postgres has, and the rewrite answered the length of its text. A lite
 lc_monetary's. And pgjdbc asks for `timetz`, `point` and `box` in binary once a statement has run five times, which a BI
 tool's repeated query does: those three have their binary form, and any other is refused by name.
 
+### The names Mason invents (issue 1024, 2026-11-16)
+
+The rewrite writes names of its own into the SQL it sends the engine. Each was a fixed `__mason_…` name, and a source
+column, an alias, a table or a WITH query of the same name took its place, or was taken for it:
+
+- a table with a column `__mason_rid` answered NULLs for every one of its columns under a top N over a LEFT JOIN. The
+  side limited first was `SELECT *, t.rowid AS __mason_rid`, whose `*` listed the table's column first, and the join
+  read that as the row number;
+- a jsonb column `__mason_v`, read bare by a native `->`, was the lambda's parameter inside the lambda, and answered
+  NULLs or the engine's type error;
+- a table `__mason_late` was read as the kept rows of a top N, and a table `__mason_ties_bound` as FETCH … WITH TIES's
+  bound;
+- a subquery with columns `"T"`, `t` and `t__mason_2` gave two columns one name when it renamed the twins apart, and
+  the engine read the wrong one.
+
+Three modules had already met the class and fixed their own case: the hidden cells (`cellPrefix`, issue 239), the
+libc bounds (`fresh`, the review of PR 945) and the WITH queries renamed apart (`cteNamesApart`, the review of PR 1093).
+Each picked its names its own way, and the rest picked none. So the decision is ONE prefix per statement, chosen once
+(`ownPrefix`, src/duck/own-names.ts), that every invented name begins with. It is `__mason_` unless a string of the
+statement's parse tree or of Postgres's analysis holds it, in any case, and then `__mason<n>_`. The analysis matters as
+much as the text: its range table names every column of every table read, so a column the statement never writes, which
+reaches the engine through a `*` or a whole row, counts.
+
+The test is a substring of the trees' text, so a literal that holds `__mason_` moves the prefix too. That costs
+nothing: the statement is answered alike, under other names. A statement with no such string is sent exactly as
+before, so no plan changed. A role's filtered reads are written into the statement before it is analysed, and their
+names (`__mason_barrier`, `__mason_parent<n>`) are left out of the test, so a filtered statement keeps `__mason_`.
+Functions keep their names: a function is named in a namespace of its own.
+
 ### What is not supported, and how the list stays true
 
 **Decision.** An allowlist, not a blocklist: DuckDB answers only a statement whose every function, operator, aggregate,

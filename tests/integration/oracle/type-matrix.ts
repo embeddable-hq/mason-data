@@ -265,6 +265,9 @@ export const TYPED = `${MAPPED_TABLE} CREATE EXTENSION IF NOT EXISTS citext; CRE
   `CREATE TABLE public.castable (id int PRIMARY KEY, s text); INSERT INTO public.castable VALUES ${CASTABLE.map(([id, v]) => `(${id}, '${v.replace(/'/g, "''")}')`).join(", ")}; ` +
   // a column named as typed's `t` in another case: DuckDB binds names case-insensitively (the corpus rerun)
   `CREATE TABLE public.cased (id int PRIMARY KEY, "T" text, "Tz" text); INSERT INTO public.cased VALUES (1, 'one', 'Europe/London'), (2, 'a', 'utc'), (4, 'B', 'UT'), (9, NULL, 'asia/kolkata');` +
+  // columns named like names Mason invents (issue 1024): the row number a top N over a join reads rows by, and a native
+  // json read's lambda parameter in another case
+  ` CREATE TABLE public.own_named (id int PRIMARY KEY, "__mason_rid" int, "__MASON_V" jsonb, v text); INSERT INTO public.own_named VALUES (1, 30, '{"a": 1.50}', 'a'), (2, 10, '{"a": [1]}', 'b'), (4, NULL, NULL, 'd'), (5, 40, '{"a": "s"}', 'e');` +
   // JSON COLUMNS NAMED AS typed's j and jb in another case (the review of the native read): a read's column
   // is placed in every arm of its CASE, and each place must be qualified as Postgres resolved the bare name; its
   // documents hold `#>` elements an index reads otherwise than a key (`+1`, ` 1`, `1 `)
@@ -1404,6 +1407,11 @@ function* matrix(): Generator<Matrixed> {
   yield q("a name in another case, joined", `SELECT id, "T", t, "Tz" FROM typed JOIN cased USING (id) ORDER BY id`);
   yield q("a name in another case, correlated", `SELECT id, t FROM typed x WHERE EXISTS (SELECT 1 FROM cased c WHERE c.id = x.id AND "T" = t) ORDER BY id`);
   yield q("GROUP BY an output name in another case", `SELECT upper(t) AS "T", count(*) FROM typed GROUP BY "T" ORDER BY 1`);
+  // ---- issue 1024: a column named like a name Mason invents is the table's (src/duck/own-names.ts) -------------------
+  yield q("issue 1024: a column named like the row number, a top N over a LEFT JOIN", `SELECT o.id, o."__mason_rid", o.v, c."T" FROM own_named o LEFT JOIN cased c ON c.id = o.id ORDER BY o."__mason_rid" DESC NULLS LAST, o.id LIMIT 3`);
+  yield q("issue 1024: a column named like the row number, through a *", "SELECT * FROM own_named o LEFT JOIN cased c ON c.id = o.id ORDER BY o.v DESC LIMIT 3");
+  yield q("issue 1024: a column named like the row number, in a whole row", `SELECT row_to_json(o) AS r, c."T" FROM own_named o LEFT JOIN cased c ON c.id = o.id ORDER BY o.id LIMIT 3`);
+  yield q("issue 1024: a jsonb named like a lambda's parameter in another case", `SELECT id, "__MASON_V" -> 'a' AS a FROM own_named ORDER BY id`);
   // a DISTINCT aggregate's ORDER BY over a division (its zero test was a volatile error() DuckDB refuses there)
   yield q("DISTINCT aggregate ordered by a division", "SELECT array_agg(DISTINCT (t || ': ' || (i4::float8 / 2)::text) ORDER BY (t || ': ' || (i4::float8 / 2)::text)), array_agg(DISTINCT i4::float8 / nullif(i2, 0) ORDER BY i4::float8 / nullif(i2, 0)) FROM typed WHERE id < 100");
   yield q("division by zero, a float", "SELECT id, i4::float8 / i2 FROM typed WHERE id = 1");
@@ -1861,12 +1869,20 @@ function* matrix(): Generator<Matrixed> {
   // Metabase's US week grouped by the engine's integer: each side of a clock change, before 1970, a zone's local mean
   // time, a year's end, a leap day, ±infinity and NULL, in zones of daylight saving and of a quarter hour ---------------
   const FORMATS = ["YYYY-MM", "YYYY-MM-DD", "Mon YYYY", "FMMonth YYYY", "Dy DD Mon", "FMDay, DDD", "YYYY-MM-DD HH24:MI:SS", "YYYY-MM-DD\"T\"HH24:MI:SS.US", "HH24:MI:SS.MS", "IYYY-IW", "YYYY \"100%\" MM", "YYYY-\"Q\"Q", "Month YYYY"];
+  const PATTERNS = ["Day|DAY|day|FMDay|FMDAY|Dy|DY|dy|Mon|MON|mon|Month|MONTH|month|FMMONTH|FMmonth", "Q|Qth|QTH|DDth|FMDDth|ddTH|FMDD|FMMM|J|Jth|W|WW|FMWW|IW|FMIW|IDDD|FMIDDD|ID|D|CC|CCth",
+    "RM|rm|FMRM|Y,YYY|Y,YYYth|YYY|YY|Y|FMYY|IYY|IY|I|FMIYYY|FMYYYY|yyyy-mm-dd|iyyy-iw", "HH12:MI AM|hh p.m.|a.m.|PM|FMHH12|FMHH24:FMMI:FMSS|HH24th|SSSS|SSSSS|FF1|FF2|FF4|FF5|FMMS|FMUS|FMFF3",
+    "AD|ad|BC|b.c.|A.D.", "TMMonth|MonthTH|DyTH"];
   for (const zone of ["UTC", "America/New_York", "Asia/Kathmandu", "Australia/Lord_Howe"]) {
     yield q(`issue 464: to_char of a timestamptz in a strftime format, in ${zone}`, `SELECT id, ${FORMATS.map((f, i) => `to_char(at, '${f.replace(/'/g, "''")}') AS f${i}`).join(", ")} FROM instants ORDER BY id`, zone);
     yield q(`issue 464: to_char of a timestamp and a date in a strftime format, in ${zone}`, `SELECT id, ${FORMATS.map((f, i) => `to_char(at::timestamp, '${f.replace(/'/g, "''")}') AS t${i}, to_char(at::date, '${f.replace(/'/g, "''")}') AS d${i}`).join(", ")} FROM instants WHERE isfinite(at) ORDER BY id`, zone);
     // a template that writes nothing, the empty one and one prefix an item (the review of PR 955)
     yield q(`issue 464: to_char of an empty template or prefixes alone, in ${zone}`, `SELECT id, ${["FM", '""', "", "FMFM", "FMTMMonth", "FXFMDD"].map((f, i) => `to_char(at, '${f}') AS z${i}, to_char(at::timestamp, '${f}') AS t${i}, to_char(at::date, '${f}') AS d${i}`).join(", ")} FROM instants WHERE isfinite(at) OR at IS NULL ORDER BY id`, zone);
     yield q(`issue 464: to_char of a month grouped, in ${zone}`, "SELECT to_char(i.at, 'YYYY-MM') AS m, count(*) FROM instants i GROUP BY 1 ORDER BY 1 NULLS FIRST", zone);
+    // every pattern the engine writes beside strftime (src/duck/to-char.ts nativeTemplate): each name in each case and
+    // padded or not, the quarter and every number with and without FM and its ordinal, the meridiems, the eras, the Roman
+    // month, the fractions, Y,YYY; and the templates that stay the function's (a translated name, an ordinal of a name)
+    yield q(`issue 464: to_char of every pattern the engine writes, in ${zone}`, `SELECT id, ${PATTERNS.map((f, i) => `to_char(at, '${f}') AS z${i}, to_char(at::timestamp, '${f}') AS t${i}, to_char(at::date, '${f}') AS d${i}`).join(", ")} FROM instants ORDER BY id`, zone);
+    yield q(`issue 464: to_char of a quarter and a padded name grouped, in ${zone}`, "SELECT to_char(i.at, 'YYYY \"Q\"Q') AS q, to_char(i.at, 'Month') AS m, to_char(i.at, 'FMDay DDth') AS d, count(*) FROM instants i GROUP BY 1, 2, 3 ORDER BY 1 NULLS FIRST, 2, 3", zone);
     yield q(`issue 464: Metabase's US week grouped, in ${zone}`, "SELECT ceil((CAST(extract(doy from i.at) AS integer) / 7.0)) AS w, count(*) FROM instants i GROUP BY ceil((CAST(extract(doy from i.at) AS integer) / 7.0)) ORDER BY ceil((CAST(extract(doy from i.at) AS integer) / 7.0)) ASC NULLS FIRST", zone);
   }
   // date_trunc is strict and reads its zone before the part: a NULL zone is NULL for every part (an infinite instant's
