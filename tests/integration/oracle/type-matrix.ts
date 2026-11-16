@@ -1794,6 +1794,17 @@ function* matrix(): Generator<Matrixed> {
   yield q("WITH TIES under a DISTINCT of a numeric halved", "SELECT * FROM (SELECT DISTINCT o.id % 2 AS g, o.n / 2.0 AS h FROM star_o o ORDER BY g FETCH FIRST 1 ROWS WITH TIES) s ORDER BY 2");
   yield q("WITH TIES under a DISTINCT ON its ORDER BY lacks", "SELECT * FROM (SELECT DISTINCT ON (1, 2) o.id % 2 AS g, o.n FROM star_o o ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) s ORDER BY 2");
   yield q("top N over joins: a table's whole row stays as it was", "SELECT row_to_json(a), b.id FROM top_a a JOIN top_b b ON a.id = b.a_id ORDER BY b.id LIMIT 3");
+  // A WHOLE ROW AN OUTER JOIN LEAVES UNMATCHED IS NULL (issue 1008), never a row of NULLs: top_a 5, 6 and 7 match no
+  // top_b; a matched top_b row's a_id and seen may be NULL beside its key. Every reader, every outer join, a subquery's
+  // and a WITH query's whole row told by a key, a count or a constant
+  yield q("issue 1008: a LEFT JOIN's unmatched whole row, its text and json", "SELECT a.id, b.id AS bid, row_to_json(b), b::text, to_json(b), to_jsonb(b), b, coalesce(b::text, '-') FROM top_a a LEFT JOIN top_b b ON b.a_id = a.id AND b.id < 9 ORDER BY 1, 2 NULLS FIRST");
+  yield q("issue 1008: a LEFT JOIN's unmatched whole row in json_agg and jsonb_agg", "SELECT a.id, json_agg(b ORDER BY b.id), jsonb_agg(b ORDER BY b.id), count(b.id) FROM top_a a LEFT JOIN top_b b ON b.a_id = a.id AND b.id < 9 GROUP BY a.id ORDER BY 1");
+  yield q("issue 1008: a RIGHT JOIN's unmatched whole row", "SELECT b.id, row_to_json(a), a::text FROM top_a a RIGHT JOIN top_b b ON a.id = b.a_id + 3 WHERE b.id < 9 ORDER BY 1");
+  yield q("issue 1008: a FULL JOIN's unmatched whole rows", "SELECT a.id, b.id AS bid, row_to_json(a), coalesce(b::text, '-') FROM top_a a FULL JOIN top_b b ON b.id = a.id + 25 ORDER BY 1 NULLS FIRST, 2 NULLS FIRST");
+  yield q("issue 1008: a whole row under a nested outer join", "SELECT a.id, b.id AS bid, row_to_json(b), p::text FROM top_a a LEFT JOIN top_b b ON b.a_id = a.id AND b.id < 6 LEFT JOIN top_a p ON p.id = b.id + 2 ORDER BY 1, 2 NULLS FIRST");
+  yield q("issue 1008: a subquery's unmatched whole row, told by its key", "SELECT a.id, d.id AS did, row_to_json(d), d::text FROM top_a a LEFT JOIN (SELECT id, a_id, seen FROM top_b WHERE id < 9) d ON d.a_id = a.id ORDER BY 1, 2 NULLS FIRST");
+  yield q("issue 1008: a lateral subquery of one row ON TRUE, never unmatched", "SELECT a.id, row_to_json(l), l::text FROM top_a a LEFT JOIN LATERAL (SELECT max(b.amount) AS m, max(b.seen) AS s FROM top_b b WHERE b.a_id = a.id) l ON true ORDER BY 1");
+  yield q("issue 1008: a WITH query's unmatched whole row, told by its count","WITH w AS (SELECT a_id, count(*) AS n, max(seen) AS last FROM top_b GROUP BY a_id) SELECT a.id, row_to_json(w), w::text FROM top_a a LEFT JOIN w ON w.a_id = a.id ORDER BY 1");
   yield q("top N over joins: USING of two tables, a *", "SELECT * FROM top_a a JOIN top_b b USING (id) ORDER BY id LIMIT 3");
   yield q("top N over joins: DISTINCT takes another path", `SELECT DISTINCT a.id, b.payload ->> 'k' AS k ${JOINED} ORDER BY a.id, k NULLS FIRST LIMIT 6`);
   yield q("top N over joins: GROUP BY takes another path", `SELECT a.id, count(c.id), max(c.label) ${JOINED} GROUP BY a.id ORDER BY 2 DESC, 1 LIMIT 4`);

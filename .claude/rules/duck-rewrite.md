@@ -296,6 +296,14 @@ paths:
   an expression costs (ICU's date_trunc against the arithmetic) is read from the SQL sent: the skeleton lists the time
   functions it calls. DuckDB 2.0 plans a delimiter join as a CTE (`__duckdb_delim_<n>`) joined back to a hash group by
   of its own scan, no operator named DELIM (`delimiterJoin`). ("The plan fixture")
+- **A whole row an outer join may leave unmatched is NULL there, decided in one place** (`rowPresence`,
+  src/duck/rewrite.ts; issue 1008). Postgres's analysis says which rows may be (`Typed.nulled`, its `varnullingrels`).
+  Mason tells an unmatched row by a column of it that no matched row holds NULL: a table's NOT NULL column (the
+  catalog's attnotnull, `notNullColumns` in src/duck/plan.ts), or a subquery's output that is one read bare, a count
+  or a constant. Every reader of the row (its text, its json, json_agg's element) is NULL where that column is. A
+  subquery of one row joined ON TRUE is never unmatched (`alwaysMatched`). A row nothing tells is refused,
+  `null-extended-row`. Why: the row was written from its columns, so an unmatched row read `(,)` and
+  `{"id":null}` where Postgres reads NULL. `tests/duck-wire.test.ts` "issue 1008", the oracle's `issue 1008:`.
 - **A result's names, types and typmods are Postgres's**, from the analysis, and a numeric Postgres computes exactly is
   computed by `src/lib/pg-numeric.ts`, never DuckDB's double or HUGEINT. ("How a statement is answered")
 - **A whole numeric the rewrite writes is a DECIMAL(19, 0), never a DECIMAL(38, 0)** (`wholeNumeric`, issue 929): an

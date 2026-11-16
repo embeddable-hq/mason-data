@@ -39,6 +39,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **A whole row of a table an outer join leaves unmatched is now NULL, as in Postgres.** In `a LEFT JOIN b`, a row of
+  `a` with no match read `row_to_json(b)` as `{"id":null,…}` and `b::text` as `(,)`. Both are now NULL. So are
+  `to_json(b)`, `to_jsonb(b)`, `b` itself, and the element `json_agg(b)` adds. It holds for a RIGHT and a FULL JOIN, a
+  nested join, and a subquery or a WITH query that selects its table's primary key, a count or a constant. A subquery
+  whose every column may be NULL in a matched row is now refused by name, since Mason cannot tell its unmatched rows.
+  Select its primary key too, or name its columns.
 - **A table synced whole is no longer served with rows missing until its catch-up.** This is a first sync, or a
   table synced again whole, such as after its columns change.
   - Before, the synced table held only the rows written before the oldest open transaction on your database began.

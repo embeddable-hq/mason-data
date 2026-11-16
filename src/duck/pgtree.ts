@@ -153,6 +153,16 @@ export interface Typed {
    *  number in it — what a stored JSON path is found by (src/duck/kept.ts); absent for any other node, and for a column
    *  of a subquery, a CTE, a function or a join */
   relation?: { relid: number; attno: number };
+  /** a VAR an outer join of its query may NULL-extend (Postgres's `varnullingrels` is not empty): a column of a LEFT
+   *  JOIN's right side, a RIGHT JOIN's left, either side of a FULL JOIN, a nested join's. Absent on everything else.
+   *  Of a whole row (`b`, `b.*` of `a LEFT JOIN b`) it says the row may be NULL where nothing matched, never a row of
+   *  NULLs (src/duck/rewrite.ts `rowPresence`, issue 1008) */
+  nulled?: true;
+  /** a whole-row VAR (varattno 0) of a TABLE of its query's FROM: the table's catalog OID. Absent for any other node,
+   *  and for the whole row of a subquery, a CTE, a function or a VALUES list */
+  rowOf?: number;
+  /** a FUNCEXPR of a set-returning function (`funcretset`): in a SELECT list, any number of rows a row, none included */
+  retset?: true;
   /** a VAR read from a FUNCTION of its query's FROM (an RTE_FUNCTION): the function's FROM name and the column's name
    *  there. A function of one column that is no row (`jsonb_array_elements(x) e`, its column `value`) is read whole
    *  by its FROM name alone (`e`), which Postgres analyses as that column (makeWholeRowVar): a one-part name that is
@@ -543,6 +553,10 @@ function typedOf(v: TreeNode, t: { type: number; typmod: number }, rtables: Tree
   if (textArray !== undefined) typed.textArray = textArray;
   const relation = v._node === "VAR" ? relationOf(v, rtables) : null;
   if (relation !== null) typed.relation = relation;
+  if (v._node === "VAR" && nulledVar(v)) typed.nulled = true;
+  const rowOf = v._node === "VAR" ? wholeRowRelation(v, rtables) : null;
+  if (rowOf !== null) typed.rowOf = rowOf;
+  if (v._node === "FUNCEXPR" && v.funcretset === "true") typed.retset = true;
   const column = v._node === "VAR" ? columnOf(v, rtables) : null;
   if (column !== null) typed.column = column;
   const fromFunction = v._node === "VAR" ? functionColumnOf(v, rtables) : null;
@@ -810,6 +824,29 @@ function relationOf(v: TreeNode, rtables: TreeNode[][]): { relid: number; attno:
   const rte = varno === null ? undefined : rtables[rtables.length - 1 - up]?.[varno - 1];
   const relid = rte === undefined ? null : num(rte.relid ?? null);
   return rte === undefined || attno === null || attno < 1 || num(rte.rtekind ?? null) !== RTE_RELATION || relid === null || relid === 0 ? null : { relid, attno };
+}
+/** Typed.nulled: a VAR whose `varnullingrels` names an outer join (`(b 3)`; `(b)` or none, no join) */
+function nulledVar(v: TreeNode): boolean {
+  const rels = v.varnullingrels;
+  return Array.isArray(rels) && rels.length > 1;
+}
+/** Typed.rowOf */
+function wholeRowRelation(v: TreeNode, rtables: TreeNode[][]): number | null {
+  const up = num(v.varlevelsup ?? null) ?? 0, varno = num(v.varno ?? null), attno = num(v.varattno ?? null);
+  const rte = varno === null ? undefined : rtables[rtables.length - 1 - up]?.[varno - 1];
+  const relid = rte === undefined ? null : num(rte.relid ?? null);
+  return rte === undefined || attno !== 0 || num(rte.rtekind ?? null) !== RTE_RELATION || relid === null || relid === 0 ? null : relid;
+}
+/** whether the tree holds a whole row an outer join may NULL-extend (a VAR of varattno 0, `Typed.nulled`): src/duck/plan.ts
+ *  then reads which columns of the tables never hold NULL (`notNullColumns`), which `rowPresence` asks */
+export function nulledWholeRows(tree: TreeValue): boolean {
+  const visit = (v: TreeValue): boolean => {
+    if (Array.isArray(v)) return v.some(visit);
+    if (!isNode(v)) return false;
+    if (v._node === "VAR" && num(v.varattno ?? null) === 0 && nulledVar(v)) return true;
+    return Object.entries(v).some(([k, x]) => k !== "_node" && visit(x));
+  };
+  return visit(tree);
 }
 /** Typed.column */
 function columnOf(v: TreeNode, rtables: TreeNode[][]): NonNullable<Typed["column"]> | null {

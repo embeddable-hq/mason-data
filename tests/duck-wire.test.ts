@@ -230,6 +230,11 @@ const DDL = [
   "CREATE TABLE public.aparams (id INTEGER PRIMARY KEY, s SMALLINT, b BIGINT, x VARCHAR, u UUID, n DECIMAL(30,20), f BOOLEAN, d DATE, ts TIMESTAMPTZ, fl DOUBLE)",
   `INSERT INTO public.aparams (id, s, b, x, u, n, f, d, ts, fl) VALUES ${APARAMS}`,
   `INSERT INTO public.aparams (id, ts, d) VALUES ${AZONES}`,
+  // issue 1008: two tables whose whole rows are the source's (a row type of their own), one LEFT JOINed to the other
+  "CREATE TABLE public.nx_a (id INTEGER PRIMARY KEY, label VARCHAR)",
+  "INSERT INTO public.nx_a VALUES (1, 'one'), (2, 'two'), (3, NULL), (4, 'four')",
+  "CREATE TABLE public.nx_b (id INTEGER PRIMARY KEY, a_id INTEGER, note VARCHAR, amount DECIMAL(10,2))",
+  "INSERT INTO public.nx_b VALUES (1, 1, 'b1', 1.50), (2, 2, NULL, NULL), (3, 9, 'far', 2.00)",
 ];
 // the same rows in Postgres, typed as the source would type them
 const PG_DDL = [
@@ -320,6 +325,10 @@ const PG_DDL = [
   "CREATE TABLE public.aparams (id integer PRIMARY KEY, s smallint, b bigint, x text, u uuid, n numeric(30,20), f boolean, d date, ts timestamptz, fl double precision)",
   `INSERT INTO public.aparams (id, s, b, x, u, n, f, d, ts, fl) VALUES ${APARAMS}`,
   `INSERT INTO public.aparams (id, ts, d) VALUES ${AZONES}`,
+  "CREATE TABLE public.nx_a (id integer PRIMARY KEY, label text)",
+  "INSERT INTO public.nx_a VALUES (1, 'one'), (2, 'two'), (3, NULL), (4, 'four')",
+  "CREATE TABLE public.nx_b (id integer PRIMARY KEY, a_id integer, note text, amount numeric(10,2))",
+  "INSERT INTO public.nx_b VALUES (1, 1, 'b1', 1.50), (2, 2, NULL, NULL), (3, 9, 'far', 2.00)",
 ];
 const schema: PgSchema = {
   database: "app",
@@ -390,6 +399,10 @@ const schema: PgSchema = {
     { name: "aparams", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "s", type: "int2" }, { name: "b", type: "int8" }, { name: "x", type: "text" }, { name: "u", type: "uuid" },
         { name: "n", type: "numeric", spelled: "numeric(30,20)" }, { name: "f", type: "bool" }, { name: "d", type: "date" }, { name: "ts", type: "timestamptz" }, { name: "fl", type: "float8" }] },
+    // issue 1008: whole rows of the source's row types (a source OID of their own)
+    { name: "nx_a", primaryKey: ["id"], joins: [], rowTypeOid: 99101, columns: [{ name: "id", type: "int4" }, { name: "label", type: "text" }] },
+    { name: "nx_b", primaryKey: ["id"], joins: [], rowTypeOid: 99102,
+      columns: [{ name: "id", type: "int4" }, { name: "a_id", type: "int4" }, { name: "note", type: "text" }, { name: "amount", type: "numeric", spelled: "numeric(10,2)" }] },
   ],
   // as the source prints them under a search_path of pg_catalog alone (src/cli/preflight.ts VIEWS_SQL); `lost` reads a
   // table Mason has not copied, so the catalog leaves it out
@@ -576,7 +589,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "aparams"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "bins"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "pnum"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "timetz_runs"], ["public", "timetz_runs3"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["public", "wides"], ["sales", "accounts"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "aparams"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "bins"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "nx_a"], ["public", "nx_b"], ["public", "orders"], ["public", "paid_orders"], ["public", "pnum"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "timetz_runs"], ["public", "timetz_runs3"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["public", "wides"], ["sales", "accounts"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'sales' AND table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -9066,4 +9079,50 @@ test("collation resolver: two libc collations in one session, each by its own or
     assert.deepEqual((await answer(c, "SELECT 'a' < 'B', 'B' < 'a'")).rows, [["t", "f"]]);
     assert.equal(reads, 1, "the second collation's order is read once, then held");
   } finally { await c.end(); await a.close(); }
+});
+
+test("issue 1008: a whole row an outer join leaves unmatched is NULL in every reader, never a row of NULLs; one Mason cannot tell is refused by name", async () => {
+  const c = await client();
+  try {
+    // a 3 and 4 match no b; b 2 matched, its note and amount NULL: a row of NULLs beside its key, never NULL itself
+    const left = "FROM nx_a a LEFT JOIN nx_b b ON b.a_id = a.id";
+    assert.deepEqual(await unlike(c, [
+      [`SELECT a.id, row_to_json(b), b::text, to_json(b), to_jsonb(b), b ${left} ORDER BY 1`, "ordered"],
+      [`SELECT a.id, coalesce(b::text, 'none'), length(b::text), row_to_json(b.*), b.*::text ${left} ORDER BY 1`, "ordered"],
+      [`SELECT json_agg(b ORDER BY a.id), jsonb_agg(b ORDER BY a.id) ${left}`, "ordered"],
+      [`SELECT a.label IS NULL, json_agg(b ORDER BY a.id), jsonb_agg(b ORDER BY a.id), count(*) ${left} GROUP BY 1 ORDER BY 1`, "ordered"],
+      [`SELECT a.id, json_agg(b) FILTER (WHERE a.id > 1) ${left} GROUP BY a.id ORDER BY 1`, "ordered"],
+      [`SELECT a.id, row_to_json(b) ${left} GROUP BY a.id, b.id ORDER BY 1`, "ordered"],
+      [`SELECT a.id, (SELECT row_to_json(b)) ${left} ORDER BY 1`, "ordered"],
+      [`SELECT a.id, row_to_json(b) ${left} WHERE row_to_json(b) IS NULL ORDER BY 1`, "ordered"],
+      [`SELECT a.id, row_to_json(b) ${left} ORDER BY a.id LIMIT 2 OFFSET 1`, "ordered"],
+      // the other outer joins, a join nested on the nullable side, and two LEFT JOINs in a row
+      ["SELECT b.id, row_to_json(a), a::text FROM nx_a a RIGHT JOIN nx_b b ON b.a_id = a.id ORDER BY 1", "ordered"],
+      ["SELECT a.id, b.id, row_to_json(a), row_to_json(b), b::text FROM nx_a a FULL JOIN nx_b b ON b.a_id = a.id ORDER BY 1 NULLS FIRST, 2", "ordered"],
+      ["SELECT a.id, row_to_json(b), row_to_json(a2) FROM nx_a a LEFT JOIN (nx_b b JOIN nx_a a2 ON a2.id = b.id) ON b.a_id = a.id ORDER BY 1", "ordered"],
+      ["SELECT a.id, row_to_json(b), a2::text FROM nx_a a LEFT JOIN nx_b b ON b.a_id = a.id LEFT JOIN nx_a a2 ON a2.id = b.id + 2 ORDER BY 1", "ordered"],
+      // a subquery's and a WITH query's whole row, told by a column that is never NULL: its key, a count, a constant
+      ["SELECT a.id, row_to_json(d), d::text FROM nx_a a LEFT JOIN (SELECT id, note FROM nx_b) d ON d.id = a.id ORDER BY 1", "ordered"],
+      ["SELECT a.id, row_to_json(d), d::text FROM nx_a a LEFT JOIN (SELECT b.a_id AS k, count(*) AS n FROM nx_b b GROUP BY b.a_id) d ON d.k = a.id ORDER BY 1", "ordered"],
+      ["SELECT a.id, row_to_json(d) FROM nx_a a LEFT JOIN (SELECT 1 AS one, note FROM nx_b WHERE id = 2) d ON d.one = a.id ORDER BY 1", "ordered"],
+      ["WITH w AS (SELECT id, note FROM nx_b) SELECT a.id, row_to_json(w), w::text FROM nx_a a LEFT JOIN w ON w.id = a.id ORDER BY 1", "ordered"],
+      // a subquery of one row joined ON TRUE is never left unmatched: its row of NULLs is a row
+      ["SELECT a.id, row_to_json(l), l::text FROM nx_a a LEFT JOIN LATERAL (SELECT max(b.amount) AS m, max(b.note) AS n FROM nx_b b WHERE b.a_id = a.id) l ON true ORDER BY 1", "ordered"],
+      ["SELECT a.id, row_to_json(l), l::text FROM nx_a a LEFT JOIN LATERAL (SELECT a.label AS x, a.id + 1 AS y) l ON true ORDER BY 1", "ordered"],
+      // an inner join's whole row, and a table's own whole row, stay as they were
+      ["SELECT a.id, row_to_json(b), b::text FROM nx_a a JOIN nx_b b ON b.a_id = a.id ORDER BY 1", "ordered"],
+      ["SELECT row_to_json(b), b::text FROM nx_b b ORDER BY b.id", "ordered"],
+    ]), []);
+    // a subquery whose every column may be NULL in a matched row (a nullable column; a key an outer join inside may
+    // NULL-extend; a set operation's): nothing tells an unmatched row from it, so it is refused by name
+    for (const sql of ["SELECT a.id, row_to_json(d) FROM nx_a a LEFT JOIN (SELECT note FROM nx_b) d ON d.note = a.label ORDER BY 1",
+      "SELECT a.id, row_to_json(d) FROM nx_a a LEFT JOIN (SELECT a2.id FROM nx_b b LEFT JOIN nx_a a2 ON a2.id = b.a_id) d ON d.id = a.id ORDER BY 1",
+      "SELECT a.id, d::text FROM nx_a a LEFT JOIN (SELECT id, note FROM nx_b UNION ALL SELECT id, label FROM nx_a) d ON d.id = a.id ORDER BY 1",
+      // one row, but joined on a condition it may fail, or filtered by a HAVING, or a join around it that may leave it unmatched
+      "SELECT a.id, row_to_json(l) FROM nx_a a LEFT JOIN LATERAL (SELECT max(b.amount) AS m FROM nx_b b WHERE b.a_id = a.id) l ON l.m > 1 ORDER BY 1",
+      "SELECT a.id, row_to_json(l) FROM nx_a a LEFT JOIN LATERAL (SELECT max(b.amount) AS m FROM nx_b b WHERE b.a_id = a.id HAVING max(b.amount) > 1) l ON true ORDER BY 1",
+      "SELECT a.id, row_to_json(l) FROM nx_a a LEFT JOIN (nx_b b CROSS JOIN LATERAL (SELECT max(a2.label) AS m FROM nx_a a2 WHERE a2.id = b.id) l) ON b.a_id = a.id ORDER BY 1"]) {
+      await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap null-extended-row/.test(e.detail ?? "") && /json_build_object/.test(e.hint ?? ""), sql);
+    }
+  } finally { await c.end(); }
 });

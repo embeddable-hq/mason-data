@@ -76,7 +76,10 @@ type Fields = ReadonlyArray<{ oid: number; typmod?: number }>;
 type GroupedAs = "engine" | "keyed" | "cells";
 
 /** a column of a table's row type, as the catalog has it (its collation pg_attribute's attcollation) */
-export interface RowColumn { name: string; type: number; typmod: number; collation: number }
+export interface RowColumn { name: string; type: number; typmod: number; collation: number; /** its number in the table (pg_attribute's attnum) */ attno?: number }
+
+/** count(*) and count(any) (pg_proc): never NULL, a subquery's output that tells its matched rows (`rowPresence`) */
+const COUNT_STAR = 2803, COUNT_ANY = 2147;
 
 /** Postgres's DEFAULT_COLLATION_OID: the database's collation, a collatable type's own (typcollation) */
 const DEFAULT_COLLATION_OID = 100;
@@ -292,6 +295,9 @@ class Rewriter {
   boundPaths: ReadonlyMap<number, string> = new Map();
   /** the plain numerics whose copy holds each value's own scale (`scaleOf`) */
   scales: ScaleLookup | null = null;
+  /** the columns that never hold NULL, by `<relid>:<attno>` (src/duck/plan.ts `notNullColumns`): read where a whole row
+   *  may be NULL-extended (`rowPresence`) */
+  notNull: ReadonlySet<string> = new Set();
   /** the parameters met as a json read's path, or an element or key of one, of a type read as a constant (`foldParam`) */
   readonly pathParams = new Set<number>();
   /** the numeric[] parameters read other than by ANY or ALL with a number (`param`): no list of the engine holds every
@@ -1063,6 +1069,95 @@ class Rewriter {
     });
   }
 
+  /**
+   * A WHOLE ROW AN OUTER JOIN MAY NULL-EXTEND IS NULL WHERE NOTHING MATCHED, never a row of NULLs (issue 1008): `b` of
+   * `a LEFT JOIN b`, a RIGHT JOIN's left side, either side of a FULL JOIN, a nested join's, a table's or a subquery's or
+   * a WITH query's alike. Postgres decides which rows may be (`Typed.nulled`, its `varnullingrels`); this is the ONE place
+   * that says how such a row is told from a matched row of NULLs: a column of it that no matched row holds NULL — a
+   * table's column the catalog holds NOT NULL (its primary key's), or a subquery's output that is one of those read bare,
+   * a count or a constant. Every reader of the row (`rowValues`: its text, its json, json_agg's element) is NULL where
+   * that column is. Null where the row is never NULL-extended; a row no such column tells is refused by name.
+   */
+  private rowPresence(n: AstNode, select: Body): AstNode | null {
+    if (kindOf(n) !== "ColumnRef") return null;
+    const t = this.typed(n);
+    if (t === null || t.node !== "VAR" || t.nulled !== true || !this.isRowType(t.type)) return null;
+    const alias = String(bodyOf(((bodyOf(n).fields ?? []) as AstNode[])[0]!).sval);
+    const refuse = (why: string): never => {
+      throw new Unrewritable(`the whole row of ${alias}, which an outer join may leave unmatched, is not supported by Mason: ${why}`,
+        `name its columns (json_build_object('id', ${alias}.id, …), or CASE WHEN ${alias}.id IS NULL THEN NULL ELSE … END over them)`, "null-extended-row");
+    };
+    const table = this.rowTypes.get(t.type);
+    if (table !== undefined) {
+      const c = t.rowOf === undefined ? undefined : table.find((x) => x.attno !== undefined && this.notNull.has(`${t.rowOf}:${x.attno}`));
+      if (c === undefined) return refuse("its table has no column that is never NULL (a primary key)");
+      return this.typedRef([alias, c.name], c.type, c.typmod, c.collation);
+    }
+    const source = this.fromSources(select).filter((q) => q.alias === alias);
+    if (source.length !== 1) return refuse("Mason cannot tell its unmatched rows");
+    const q = bodyOf(source[0]!.query);
+    if (this.alwaysMatched(alias, select, q)) return null;
+    if (q.op !== undefined && q.op !== "SETOP_NONE") return refuse("it is a set operation's");
+    if (((q.groupClause ?? []) as AstNode[]).some((g) => kindOf(g) === "GroupingSet")) return refuse("its query has grouping sets");
+    for (const x of (q.targetList ?? []) as AstNode[]) {
+      const val = bodyOf(x).val as AstNode;
+      if (!isNode(val) || hasStar(val)) continue;
+      const v = this.typed(val);
+      const present = v !== null && (
+        (v.node === "VAR" && v.nulled !== true && v.levelsUp === 0 && v.relation !== undefined && this.notNull.has(`${v.relation.relid}:${v.relation.attno}`))
+        || (v.node === "AGGREF" && (v.oid === COUNT_STAR || v.oid === COUNT_ANY) && bodyOf(val).over === undefined)
+        || (v.node === "CONST" && v.datum !== null));
+      if (present) return this.typedRef([alias, bodyOf(x).name ?? figureColname(val)], v.type, v.typmod, v.collation);
+    }
+    return refuse("none of its subquery's columns is a column that is never NULL (a primary key), a count or a constant");
+  }
+
+  /**
+   * A subquery that always gives one row, joined ON TRUE, is never left unmatched (`LEFT JOIN LATERAL (SELECT max(x) AS m
+   * FROM …) l ON true`, `LEFT JOIN LATERAL (SELECT a.x + 1 AS y) l ON true`): its whole row is its columns, NULLs and all,
+   * though Postgres's analysis marks it as an outer join's. One row: an aggregate with no GROUP BY or HAVING, or no FROM
+   * and no WHERE, with no LIMIT, OFFSET or set-returning function. Every outer join it is on the nullable side of must be
+   * ON TRUE with it alone on that side.
+   */
+  private alwaysMatched(alias: string, select: Body, q: Body): boolean {
+    if (q.op !== undefined && q.op !== "SETOP_NONE") return false;
+    if (((q.groupClause ?? []) as unknown[]).length > 0 || q.havingClause !== undefined || q.limitCount !== undefined || q.limitOffset !== undefined) return false;
+    const targets = (q.targetList ?? []) as AstNode[];
+    const fromless = ((q.fromClause ?? []) as unknown[]).length === 0 && q.whereClause === undefined;
+    if (!fromless && !targets.some((t) => this.hasAggregate(bodyOf(t).val))) return false;
+    const setReturning = (v: unknown): boolean => {
+      if (Array.isArray(v)) return v.some(setReturning);
+      if (!isNode(v)) return v !== null && typeof v === "object" && Object.values(v as Body).some(setReturning);
+      if (kindOf(v) === "SubLink") return false;
+      if (kindOf(v) === "FuncCall" && this.typed(v)?.retset === true) return true;
+      return Object.values(bodyOf(v)).some(setReturning);
+    };
+    if (setReturning(targets)) return false;
+    // the joins down to the item: each that may NULL-extend it is ON TRUE, with the item alone on that side
+    const isItem = (x: AstNode): boolean => kindOf(x) === "RangeSubselect" && bodyOf(x).alias?.aliasname === alias;
+    const holds = (x: AstNode): boolean => isItem(x) || (kindOf(x) === "JoinExpr" && [bodyOf(x).larg, bodyOf(x).rarg].some((s) => isNode(s) && holds(s)));
+    const onTrue = (j: Body): boolean => isNode(j.quals) && kindOf(j.quals) === "A_Const" && bodyOf(j.quals).boolval?.boolval === true && j.isNatural !== true && j.usingClause === undefined;
+    const walk = (x: AstNode): boolean => {
+      if (isItem(x)) return true;
+      if (kindOf(x) !== "JoinExpr") return false;
+      const j = bodyOf(x);
+      for (const [side, nullable] of [[j.larg, j.jointype === "JOIN_RIGHT" || j.jointype === "JOIN_FULL"], [j.rarg, j.jointype === "JOIN_LEFT" || j.jointype === "JOIN_FULL"]] as const) {
+        if (!isNode(side) || !holds(side)) continue;
+        if (nullable && !(isItem(side) && onTrue(j))) return false;
+        return walk(side);
+      }
+      return false;
+    };
+    const top = ((select.fromClause ?? []) as AstNode[]).filter((x) => isNode(x) && holds(x));
+    return top.length === 1 && walk(top[0]!);
+  }
+
+  /** a reader of a whole row (`rowValues`) as Postgres reads a NULL-extended one: `ifNull` (NULL, json_agg's `null`)
+   *  where its presence (`rowPresence`) is NULL */
+  private rowOrNull(present: AstNode | null, value: AstNode, ifNull: AstNode = nullConst()): AstNode {
+    return present === null ? value : caseWhen([[isNull(present), ifNull]], value);
+  }
+
   /** a row's text as record_out writes it: each column's text, quoted where it must be, NULL as nothing */
   private recordText(cols: ReadonlyArray<{ value: AstNode; type: number | null }>): AstNode {
     for (const c of cols) if (c.type !== null && this.isRowType(c.type)) throw new Unrewritable("a row holding a row is not supported by Mason", "name the inner row's columns", "row-value");
@@ -1091,14 +1186,14 @@ class Rewriter {
       if (inList) {
         const cols = this.rowFields(v, b);
         if (cols !== null) {
-          const text = this.recordText(cols);
+          const text = this.rowOrNull(this.rowPresence(v, b), this.recordText(cols));
           this.rowTexts.add(bodyOf(text));
           return text;
         }
       }
       if (k === "TypeCast" && isNode(body.arg) && textTypes.has(lastName(body.typeName?.names))) {
         const cols = this.rowFields(body.arg as AstNode, b);
-        if (cols !== null) return this.recordText(cols);
+        if (cols !== null) return this.rowOrNull(this.rowPresence(body.arg as AstNode, b), this.recordText(cols));
       }
       if (k === "FuncCall" && Array.isArray(body.args) && body.args.length >= 1 && body.over === undefined) {
         const name = lastName(body.funcname);
@@ -1106,11 +1201,13 @@ class Rewriter {
         if (cols !== null) {
           if (body.args.length > 1) throw new Unrewritable(`${name}() of a row with more arguments is not supported by Mason`, `${name}(row)`, "row-value");
           const json = this.rowJson(cols, name);
-          if (name === "to_json" || name === "row_to_json") return json;
-          if (name === "to_jsonb") return cast(fn("__mason_jsonb_text", [json]), ["json"]);
+          const present = this.rowPresence(body.args[0] as AstNode, b);
+          if (name === "to_json" || name === "row_to_json") return this.rowOrNull(present, json);
+          if (name === "to_jsonb") return this.rowOrNull(present, cast(fn("__mason_jsonb_text", [json]), ["json"]));
           if (body.agg_distinct === true) throw new Unrewritable(`${name}(DISTINCT …) is not supported by Mason`, `select the DISTINCT values in a subquery and ${name} them`, "json-agg-distinct");
-          // json_agg puts a line break before each row but the first (json_agg_transfn: a composite's or an array's)
-          const array = linedAgg(body, concat(strConst("\n "), json), this.done);
+          // json_agg puts a line break before each row but the first (json_agg_transfn: a composite's or an array's), and
+          // none before a NULL row, which it writes `null`
+          const array = linedAgg(body, this.rowOrNull(present, concat(strConst("\n "), json), strConst("null")), this.done);
           return name === "jsonb_agg" ? cast(fn("__mason_jsonb_text", [array]), ["json"]) : array;
         }
       }
@@ -8481,6 +8578,8 @@ export interface RewriteOptions {
   boundPaths?: ReadonlyMap<number, string>;
   /** the plain numerics whose copy holds each value's own scale (src/duck/scale-column.ts, src/duck/plan.ts `scaleLookup`) */
   scales?: ScaleLookup | null;
+  /** the columns that never hold NULL, by `<relid>:<attno>` (src/duck/plan.ts `notNullColumns`) */
+  notNull?: ReadonlySet<string>;
 }
 
 /** THE HIDDEN SCALE COLUMN OF A PLAIN NUMERIC (src/duck/scale-column.ts) a VAR reads, by the catalog's OIDs
@@ -8492,11 +8591,12 @@ export interface ScaleLookup {
 }
 
 export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(), citextHeld = new Set(), typeNames = new Map(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
-  wireBound = false, keyCounts = new Set(), boundPaths = new Map(), scales = null }: RewriteOptions):
+  wireBound = false, keyCounts = new Set(), boundPaths = new Map(), scales = null, notNull = new Set() }: RewriteOptions):
   { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean; pathParams: number[]; wholeNumericArrays: number[] } {
   const r = new Rewriter(analysis, base, collations, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts, citextHeld, typeNames);
   r.boundPaths = boundPaths;
   r.scales = scales;
+  r.notNull = notNull;
   if (joinsUsing(analysis.tree, new Set([JSONB, JSONB_ARRAY]))) {
     throw new Unrewritable("a JOIN … USING or a NATURAL JOIN on a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "JOIN … ON a.j = b.j", "jsonb-compare");
   }
