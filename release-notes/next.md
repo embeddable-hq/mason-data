@@ -39,13 +39,17 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What was wrong and is now right
 
+- **A numeric quotient or average written as text by `concat`, `format`, `||`, `to_json` or `json_build_object` now
+  has Postgres's digits.** Before, `concat(amount / 3)` wrote the engine's nearest double, such as `-735159.5` where
+  Postgres writes `-735159.499999999988`. A cast to text, such as `(amount / 3)::text`, was already right.
 - **Every name Postgres takes for a field of `extract` and `date_part` now gives that field's value.** Postgres takes
   `sec`, `secs` and `s` for `second`, `ms` and `msec` for `milliseconds`, `us` for `microseconds`, `mins`, `hrs`,
   `mons`, `yrs`, `jd` and more. Before, `extract(sec FROM ts)` dropped the fraction of a second, so
   `sum(extract(sec FROM ts))` was wrong. On an `interval`, `sec` and `ms` were refused, and names such as `j` and `mm`
   failed with 22P02.
   - `extract(julian FROM …)` is now answered for a date, a timestamp and a timestamptz, with Postgres's digits.
-    Before, it was refused.
+    Before, it was refused. Of a timestamp, it is read as a numeric quotient is: its text, its sum and its average are
+    exact, and what Mason refuses for a quotient it refuses for it too, such as `array_agg` of it.
   - `extract(epoch FROM …)` of a `time with time zone` now counts its offset, as Postgres does. Before, it gave the time
     of day alone.
   - `date_part` of a `date` now answers `hour`, `minute`, `second` and their other names with 0, as Postgres does.

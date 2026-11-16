@@ -900,6 +900,12 @@ function* matrix(): Generator<Matrixed> {
     yield q(`${c} to_char`, `SELECT id, to_char(${c}, 'YYYY-MM-DD HH24:MI:SS.US'), to_char(${c}, 'FMMonth DD, YYYY') FROM typed WHERE ${ORDINARY} ORDER BY id`);
     yield q(`${c} isfinite`, `SELECT id, isfinite(${c}) FROM typed ORDER BY id`);
   }
+  // issue 1006, the review of PR 1106: a timestamp's Julian day (Postgres's text at its row's scale) and a quotient (a
+  // value the engine holds as a double) in every reader that writes their text, and a Julian day summed
+  yield q("issue 1006: a Julian day's text in every reader", "SELECT id, extract('jd' from ts)::text, length(extract('julian' from ts)::text), concat(extract('j' from tz)), " +
+    "format('%s', extract('julian' from ts)), to_json(extract('jd' from tz)), json_build_object('j', extract('julian' from ts)), extract('julian' from ts) || '' FROM typed WHERE id < 100 ORDER BY id");
+  yield q("issue 1006: a Julian day summed", "SELECT avg(extract('jd' from ts)), sum(extract('julian' from tz)), min(extract('j' from ts)), max(extract('julian' from tz)) FROM typed WHERE id < 100");
+  yield q("issue 1006: a quotient's text in concat, format and json", "SELECT id, concat(n / 7), format('%s', n2 / 3), to_json(n / 7), json_build_object('q', n2 / 3), (n / 7) || '' FROM typed WHERE id < 100 ORDER BY id");
   for (const c of TIMES) {
     yield q(`${c} date / ::date / ::timestamptz`, `SELECT id, ${c}::date, ${c}::timestamp, ${c}::timestamptz, date(${c}) FROM typed ORDER BY id`);
     yield q(`${c} AT TIME ZONE`, `SELECT id, ${c} AT TIME ZONE 'America/New_York', ${c} AT TIME ZONE 'UTC', timezone('Asia/Kolkata', ${c}) FROM typed ORDER BY id`);

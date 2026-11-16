@@ -1097,6 +1097,41 @@ test("issue 1006: every name Postgres takes for a field of extract and date_part
   } finally { await c.end(); }
 });
 
+// the review of PR 1106: a timestamp's Julian day (Postgres's text at 28, 24 or 20 decimals, its row's) was written
+// at the engine's 28 in every reader but its print and its cast; a quotient's, the engine holds as a double too, at
+// its double's digits in concat, format and to_json
+test("issue 1006: a timestamp's Julian day, and a quotient, are Postgres's text in every reader that writes one", async () => {
+  const c = await client();
+  try {
+    const alike = async (sql: string): Promise<void> => assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+  // its text in every reader that writes it (the review of PR 1106: each wrote the engine's 28 decimals), and a
+  // quotient's in the same readers (they wrote its double's digits)
+  await alike("SELECT id FROM parts WHERE extract(julian FROM ts)::text LIKE '%0' ORDER BY id");
+  await alike("SELECT id, length(extract(julian FROM ts)::text), extract(julian FROM ts)::text || '', concat(extract(jd FROM tz)), format('%s', extract(j FROM ts)), " +
+    "to_json(extract(julian FROM ts)), json_build_object('j', extract(jd FROM tz)), extract(julian FROM ts) || 'x', concat(extract(julian FROM ts) * 2) FROM parts ORDER BY id");
+  await alike("SELECT string_agg(extract(julian FROM ts)::text, ',' ORDER BY id), string_agg(concat(extract(jd FROM tz)), ';' ORDER BY id) FROM parts");
+  await alike("WITH q AS (SELECT id, extract(jd FROM ts) AS x FROM parts) SELECT id, x, x::text, concat(x), to_json(x) FROM q ORDER BY id");
+  await alike("SELECT id, concat(extract(epoch FROM ts) / 86400), to_json(extract(epoch FROM ts) / 86400), format('%s', extract(epoch FROM ts) / 7) FROM parts ORDER BY id");
+  } finally { await c.end(); }
+});
+
+// the review of PR 1106: a sum and an avg of a Julian day held as a DECIMAL(38,28) overflowed past about 4,000 rows
+test("issue 1006: a sum and an avg of a timestamp's Julian day over 78,125 rows, and its infinity refused by name", async () => {
+  const c = await client();
+  try {
+    const alike = async (sql: string): Promise<void> => assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+  // a sum and an avg of it over 78,125 rows, whole and grouped (the review of PR 1106: a DECIMAL(38,28) overflowed past
+  // about 4,000 rows)
+  const many = "FROM parts a, parts b, parts c, parts d, parts e, parts f, parts g";
+  const at = "a.ts + b.id * interval '1 hour 0.000001 seconds' + c.id * interval '1 day 0.123457 seconds' + d.id * interval '1 month' + e.id * interval '7 minutes' + f.id * interval '1 year' + g.id * interval '0.5 seconds'";
+  await alike(`SELECT avg(extract(jd FROM ${at})), sum(extract(julian FROM ${at})), min(extract(j FROM ${at})), max(extract(julian FROM ${at})), count(*) ${many}`);
+  await alike(`SELECT g.id, avg(extract(jd FROM ${at})), sum(extract(julian FROM ${at})) ${many} GROUP BY g.id ORDER BY g.id`);
+  // of an infinity, refused by name (infinite-extract), never the engine's error of its time
+  await assert.rejects(c.query("SELECT id, extract(julian FROM CASE WHEN id = 1 THEN 'infinity'::timestamp ELSE ts END) FROM parts ORDER BY id"),
+    (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap infinite-extract/.test(e.message + (e.detail ?? "")));
+  } finally { await c.end(); }
+});
+
 test("the rerun at 7957b687: a correlated series of times, a date plus a day count, an outer name in a UNION, a random window", async () => {
   const c = await client();
   try {
