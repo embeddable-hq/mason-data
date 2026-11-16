@@ -53,8 +53,9 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   Where the CLI's line names a command or a file, the page says it in its own words, held by a test of those
   words: what an add or a remove did (`addedLines`, `removedReport`), what follows a sync (`syncedReport`'s tips), a
   table whose sync is off (`keptAge`), a Disable (`disableEffect`), and the Overview's facts card (`factRows`,
-  `factNotes`: the Source, Mason, the disk and the tools connected; `mason status` keeps its fuller rows; the owner,
-  2026-11-13, kept main's card over a table of the CLI's rows). A line the
+  `factNotes`: the Source, Mason and the disk; `mason status` keeps its fuller rows; the owner, 2026-11-13, kept
+  main's card over a table of the CLI's rows; who is connected is the Usage page's, not the card's: the owner, issue
+  1111). A line the
   page splits into a table's cells is held equal cell by cell: its cells, read in order, are the CLI's line (spaces aside).
 - **Nothing on the page that `mason status --json` (or the command whose `--json` it renders) cannot also say.** A page
   that needs a fact gets it by adding it to the JSON first, computed ONCE on the server (`readiness` is the run's, in

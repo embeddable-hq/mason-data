@@ -1,7 +1,7 @@
 /**
  * THE OVERVIEW (#overview; `#status`, its old address, lands here; the module and its section keep the id `status`): what `mason status` prints — the run in one word (`readiness`)
  * and what it means for the synced data in a line with the Source under it, the facts card "Mason" (the Source, the
- * warnings, Mason's version, uptime and restarts, the disk, the tools connected), the changes the stream carries (replication
+ * warnings, Mason's version, uptime and restarts, the disk), the changes the stream carries (replication
  * mode: its position, lag, last batch and the slot's hold on the database's WAL), the copies not finished (a bar each,
  * only while there are any), and the last day's unsupported SQL in a line. The statements, the slow, the refused and the
  * failed ones are the Queries page's; the sync's failures Sync events'. Reads `/api/state` every poll, the request log's
@@ -374,11 +374,12 @@ const sinceText = (iso, now) => `${iso.slice(0, 10) === new Date(now).toISOStrin
  * database or a read replica: issue 935 names it Source, as the box at the top and `mason status` do); the run's
  * warnings (where the database is and whether it is the main one are never among them: issue 888 — the card says both
  * from `source.remote` and `source.standby`, never by reading a warning's words); Mason's version and how long it has
- * been up; its restarts, only when there were any; the free disk beside what the synced data takes; and the tools
- * connected. A fact the run did not say is absent; one it could not read says so, with its reason (never a 0).
+ * been up; its restarts, only when there were any; and the free disk beside what the synced data takes. Who is
+ * connected is not here: it is the Usage page's (issue 1111). A fact the run did not say is absent; one it could not
+ * read says so, with its reason (never a 0).
  */
 export function factRows(s, now = Date.now()) {
-  const src = s.source, e = s.engine, d = s.disk, ss = s.sessions;
+  const src = s.source, e = s.engine, d = s.disk;
   const rows = [["Source", src.demo ? `the demo database Mason runs · Postgres ${pgVersion(src.version)}`
     : `${src.database} on ${src.host} · Postgres ${pgVersion(src.version)} · ${src.standby ? "a read replica" : "your main database"}`, false]];
   rows.push(...s.warnings.map((w) => ["Warning", w, true]));
@@ -392,10 +393,6 @@ export function factRows(s, now = Date.now()) {
     const over = d.freeBytes !== null && d.projectedBytes !== null && d.projectedBytes > d.freeBytes;
     rows.push(["Disk", d.freeBytes === null ? `${firstLine(d.error ?? "the free space could not be read")}${uses}${adds}`
       : `${fileSize(d.freeBytes)} free${typeof d.reserveBytes === "number" ? ` · ${fileSize(d.reserveBytes)} kept for queries that spill to disk` : ""}${uses}${adds}${over ? ". That is more than is free: the sync stops before the disk fills" : ""}`, d.freeBytes === null || over]);
-  }
-  if (ss !== undefined) {
-    const tools = "error" in ss ? null : ss.byClient.length;
-    rows.push(["Connected tools", tools === null ? `unknown: ${firstLine(ss.error)}` : ss.open === 0 ? "none" : `${n(Math.max(1, tools))} connected`, false]);
   }
   return rows;
 }

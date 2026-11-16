@@ -78,9 +78,9 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   with no % beside it), and nothing once every table is synced.
 - **Overview**, the facts: one table, **Mason**, in the page's own words: **Source** (the database's name and host, its
   Postgres version, and whether it is your main database or a read replica), the warnings, Mason (its version and how
-  long it has been up), the restarts when there were any, the disk (free, and what the synced data uses), and the tools
-  connected. Under it, as quiet lines: that the database is on another machine, and how text sorts where it differs from
-  the database. In replication mode, a Changes table shows the stream and the WAL its slot holds.
+  long it has been up), the restarts when there were any, and the disk (free, and what the synced data uses). Who is
+  connected is on the Usage page. Under it, as quiet lines: that the database is on another machine, and how text
+  sorts where it differs from the database. In replication mode, a Changes table shows the stream and the WAL its slot holds.
 - **Overview**, the unsupported SQL: when a statement used SQL Mason does not support in the last day, one line naming
   the most refused entry of `docs/SQL-SUPPORT.md`, with **See all** (Queries).
 - **Tables** (`#tables`): the database's tables, as `mason tables` lists them, in two lists, **Added** over **Not
