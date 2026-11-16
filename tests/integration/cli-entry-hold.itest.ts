@@ -9,6 +9,11 @@
  * `mason add t3 --columns id,amount_total2` takes it at once, and it is synced again with the column as the database
  * names it now.
  *
+ * The same re-read takes two entries written by hand whose tables' names differ only in case from a synced table's, one
+ * above the polled `accents` and one below the streamed `bravo` (the review of PR 1091: the one written first was taken,
+ * and both shared one synced table, which neither served after). Neither new entry is taken, each said with its way out,
+ * and `accents` and `bravo` are kept current throughout.
+ *
  * What it needs: IT_POSTGRES_URL, psql on PATH, and DuckDB's postgres extension. It writes only inside a database it
  * creates, `it_entryhold_<random>`, drops it at the end, and runs `mason destroy` on its project.
  */
@@ -83,19 +88,31 @@ test("a column renamed under a columns: entry holds that table alone: another ta
 
   psql(adminUrl!, `CREATE DATABASE ${tag}`);
   psql(dbUrl, "CREATE TABLE t1 (id int PRIMARY KEY, a text); INSERT INTO t1 SELECT g, 'a' || g FROM generate_series(1, 5) g; " +
-    "CREATE TABLE t3 (id int PRIMARY KEY, amount_total int, note text); INSERT INTO t3 SELECT g, g * 10, 'n' || g FROM generate_series(1, 5) g");
+    "CREATE TABLE t3 (id int PRIMARY KEY, amount_total int, note text); INSERT INTO t3 SELECT g, g * 10, 'n' || g FROM generate_series(1, 5) g; " +
+    // two tables synced, polled and streamed, each beside a table whose name differs only in case and holds a secret
+    "CREATE TABLE accents (id int PRIMARY KEY, v text); INSERT INTO accents SELECT g, 'lower' || g FROM generate_series(1, 4) g; " +
+    "CREATE TABLE \"Accents\" (id int PRIMARY KEY, w text, secret text); INSERT INTO \"Accents\" SELECT g * 100, 'UPPER' || g, 'S' || g FROM generate_series(1, 3) g; " +
+    "CREATE TABLE bravo (id int PRIMARY KEY, v text); INSERT INTO bravo SELECT g, 'lower' || g FROM generate_series(1, 4) g; " +
+    "CREATE TABLE \"Bravo\" (id int PRIMARY KEY, w text, secret text); INSERT INTO \"Bravo\" SELECT g * 100, 'UPPER' || g, 'S' || g FROM generate_series(1, 3) g");
   ok(mason("init", dbUrl, "--json"), "mason init");
   const file = path.join(root, "mason", "sources", `${tag}.yml`);
   fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/^sync: off {3}#.*$/m, "sync: poll 1s"));
   ok(mason("add", "t1", "--json"), "mason add t1 (every column)");
   ok(mason("add", "t3", "--columns", "id,amount_total", "--json"), "mason add t3 --columns id,amount_total");
+  ok(mason("add", "accents", "--json"), "mason add accents");
+  ok(mason("add", "bravo", "--sync", "replication", "--json"), "mason add bravo --sync replication");
   ok(mason("start", "--json"), "mason start");
   ok(mason("wait", "--timeout", "120", "--json"), "mason wait");
   const api = ok(mason("user", "add", "it", "--json"), "mason user add").json.url as string;
-  const line = (table: string): Line | undefined => (mason("status", "--json").json.tables as Line[] | undefined)?.find((x) => x.table === table);
+  const status = (): Record<string, unknown> => mason("status", "--json").json;
+  const line = (table: string): Line | undefined => (status().tables as Line[] | undefined)?.find((x) => x.table === table);
   const t3Before = psqlWithHeader(api, "SELECT * FROM public.t3 ORDER BY id");
   assert.deepEqual(t3Before, { columns: "id\tamount_total", rows: psql(dbUrl, "SELECT id, amount_total FROM t3 ORDER BY id") });
+  const servesAsSource = (tbl: string): boolean => JSON.stringify(psqlWithHeader(api, `SELECT * FROM public.${tbl} ORDER BY id`)) === JSON.stringify({ columns: "id\tv", rows: psql(dbUrl, `SELECT id, v FROM ${tbl} ORDER BY id`) });
 
+  // BY HAND, an entry whose table's name differs only in case from a synced one's: above the polled one, below the
+  // streamed one (the review of PR 1091: one written first was taken, and the two shared one synced table)
+  fs.writeFileSync(file, `${fs.readFileSync(file, "utf8").replace(/^tables:\n/m, "tables:\n  Accents: {}\n")}  Bravo: {}\n`);
   // t3's listed column renamed, and a row of it changed: its entry names a column the table no longer has
   psql(dbUrl, "ALTER TABLE t3 RENAME COLUMN amount_total TO amount_total2; UPDATE t3 SET amount_total2 = amount_total2 + 1000 WHERE id = 1");
   await until("t3's line to say it is not synced", () => (line("public.t3")?.error ?? null) !== null);
@@ -113,9 +130,23 @@ test("a column renamed under a columns: entry holds that table alone: another ta
     "then run mason stop && mason start\\. Or run mason add t3 --columns id,amount_total2 while Mason runs, which takes it at once\\.$"), held.error ?? "");
   assert.equal(line("public.t1")?.error ?? null, null, "t1 is not held");
 
+  // THE SYNCED TABLES OF A CASE CLASH ARE KEPT CURRENT, whichever entry comes first; the new entries never synced, said
+  psql(dbUrl, "INSERT INTO accents VALUES (5, 'lower5'); INSERT INTO bravo VALUES (5, 'lower5')");
+  await until("accents (polled) and bravo (streamed) to stay current", () => servesAsSource("accents") && servesAsSource("bravo"));
+  for (const t of ["Accents", "Bravo"]) assert.equal(psqlWithHeader(api, `SELECT * FROM public."${t}"`), null, `public."${t}" is never served`);
+  const warnings = (status().warnings as string[] | undefined) ?? [];
+  for (const [t, other] of [["Accents", "accents"], ["Bravo", "bravo"]]) {
+    assert.ok(warnings.includes(`public.${t} is not synced: mason/sources/${tag}.yml: tables.${t}: public.${t} and public.${other} (tables.${other}) have names that differ only in case. ` +
+      `The synced data cannot hold both. Remove one of the two entries. Mason does not sync it until that is fixed. Once that is fixed, run mason stop && mason start. Or run mason remove ${t} to take its entry out.`), warnings.join("\n"));
+  }
+  assert.deepEqual([line("public.accents")?.error ?? null, line("public.bravo")?.error ?? null], [null, null], "the synced tables are not held");
+  // the new entries taken out by hand: taken at the next read of the file (mason add below), nothing dropped
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("  Accents: {}\n", "").replace("  Bravo: {}\n", ""));
+
   // THE WAY OUT IT SAYS, TAKEN AT ONCE: synced again whole, the column as the database names it now
   ok(mason("add", "t3", "--columns", "id,amount_total2", "--json"), "mason add t3 --columns id,amount_total2");
   const t3Expected = { columns: "id\tamount_total2", rows: psql(dbUrl, "SELECT id, amount_total2 FROM t3 ORDER BY id") };
   await until("t3 to be synced with amount_total2", () => JSON.stringify(psqlWithHeader(api, "SELECT * FROM public.t3 ORDER BY id")) === JSON.stringify(t3Expected));
   await until("t3's line to say it is synced", () => { const l = line("public.t3"); return l !== undefined && l.error === null && l.sync?.state === "synced"; });
+  assert.ok(servesAsSource("accents") && servesAsSource("bravo"), "accents and bravo still served whole");
 });

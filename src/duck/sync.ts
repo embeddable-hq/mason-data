@@ -3578,6 +3578,12 @@ export class Sync {
   private notStreamedReason(source: string): string {
     const t = this.tables.get(source);
     if (t === undefined) return "it is no longer added (its synced data is dropped)";
+    // HELD (`placeColumns`: its columns, or its entry, issue 1074): never synced meanwhile, whatever else it waits for
+    if (this.unplaced.has(source)) {
+      const st = this.states.get(source);
+      return st?.phase === "copied" ? "it is held, and serves its synced data as it was: its line says why, and what syncs it again"
+        : "it is held, and is not synced: its line says why, and what syncs it";
+    }
     const gap = this.unpublished.get(source);
     if (gap !== undefined) return gapLine(gap);
     const st = this.states.get(source);

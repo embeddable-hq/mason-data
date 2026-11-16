@@ -360,7 +360,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
       sync: { default: syncText(sources.file?.sync ?? DEFAULT_SYNC), written: sources.file?.sync != null },
       ...(repl !== null ? { replication: { slot: repl.slot, publication: repl.publication, owned: repl.owned } } : {}) },
     // a sources file edited into a mistake while the run is up: the run copies what it read last, and says so
-    warnings: [...ctx.warnings, ...(sources.problem ? [`${sources.problem} (Mason syncs the tables it read before. Fix the file, then run mason stop && mason start)`] : []),
+    // (its way out once: a problem that names mason stop && mason start already, such as a url: whose .env changed, is not
+    // told to fix the file)
+    warnings: [...ctx.warnings, ...(sources.problem ? [`${sources.problem} (Mason syncs the tables it read before${sources.problem.includes("mason stop && mason start") ? "" : ". Fix the file, then run mason stop && mason start"})`] : []),
       // a table added anyway though it likely won't fit, until its first sync is in (the backstop's stop is its error)
       ...tables.flatMap((x) => x.diskShort !== undefined && x.diskShort.estimated && x.error === null ? [shortageWarning(x.table, x.diskShort)] : [])],
     folder, project, tables,

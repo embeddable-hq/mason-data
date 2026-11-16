@@ -453,7 +453,38 @@ test("the file read again while the run is up: an entry the catalog refuses hold
   assert.deepEqual(added.tables.map((t) => t.source), ["public.orders", "public.customers"]);
   assert.deepEqual(added.refused!.map((x) => [x.table, x.held]), [["public.orders", true], ["public.invoices", false]]);
   assert.equal(added.refused![1]!.text, "public.invoices is not synced: mason/sources/app.yml: tables.invoices: shop has no table public.invoices this user can read. " +
-    "Mason syncs it once its entry is fixed. Fix its entry, then run mason stop && mason start. Or run mason add invoices --columns … while Mason runs, which takes it at once.");
+    "Mason does not sync it until that is fixed. Once that is fixed, run mason stop && mason start. Or run mason remove invoices to take its entry out.");
+  // a problem a person fixes on the database (a key: with no unique index over it): main's words, and a line that runs
+  const keyed = S.rereadSources(prev, read(text.replace("  customers: {}\n", "  customers: { key: [id] }\n")), RUN, [renamed, { ...grown, key: [] }, events, invoices], "shop", "/app");
+  assert.equal(keyed.refused!.find((x) => x.table === "public.customers")!.text,
+    "public.customers is not synced: mason/sources/app.yml: tables.customers.key: no unique index of public.customers is over (id), so two of its rows may share them and Mason could not tell them apart — " +
+    "it has no unique index over NOT NULL columns, so Mason cannot sync it until its owner adds one (or a primary key). " +
+    "Mason holds the table and serves its synced data as it was. Once that is fixed, run mason stop && mason start. Or run mason remove customers to take its entry out, which drops its synced data.");
+});
+
+test("the file read again while the run is up: entries whose tables are one in the synced data never take the table the run syncs from it, whichever comes first (the review of PR 1091)", () => {
+  const RUN = "postgres://me@localhost:5432/shop";
+  const read = (text: string): Sources.ProjectSource => ({ ...(parse(text) as Sources.SourceFile), resolved: RUN, from: "mason/sources/app.yml", publicationName: null });
+  const Customers = table({ table: "Customers", columns: [col("id", "bigint", true), col("secret")] });
+  const Billing = table({ schema: "Billing", table: "invoices", columns: [col("id", "bigint", true), col("secret")] });
+  const catalog = [...CATALOG, Customers, Billing];
+  const text = "kind: postgres\nurl: x\ntables:\n  customers: {}\n  billing.invoices: {}\n";
+  const prev: Sources.RunSources = { file: parse(text) as Sources.SourceFile, tables: S.addedTables(parse(text) as Sources.SourceFile, catalog, "shop", "/app") as Sources_AddedTable[], problem: null };
+  for (const [what, edited] of [
+    ["the new entries above the synced ones", "kind: postgres\nurl: x\ntables:\n  Customers: {}\n  Billing.invoices: {}\n  customers: {}\n  billing.invoices: {}\n"],
+    ["the new entries below the synced ones", `${text}  Customers: {}\n  Billing.invoices: {}\n`],
+  ] as const) {
+    const r = S.rereadSources(prev, read(edited), RUN, catalog, "shop", "/app");
+    assert.deepEqual(r.tables.map((t) => [t.source, t.columns.map((c) => c.name)]), [["public.customers", ["id", "name"]], ["billing.invoices", ["id", "name"]]],
+      `${what}: the synced tables taken as they are, the new ones never`);
+    assert.deepEqual(r.refused!.map((x) => [x.table, x.held]), [["public.Customers", false], ["Billing.invoices", false]], what);
+    assert.equal(r.refused![0]!.text, "public.Customers is not synced: mason/sources/app.yml: tables.Customers: public.Customers and public.customers (tables.customers) have names that differ only in case. " +
+      "The synced data cannot hold both. Remove one of the two entries. Mason does not sync it until that is fixed. Once that is fixed, run mason stop && mason start. Or run mason remove Customers to take its entry out.", what);
+  }
+  // none of the group synced yet: none taken
+  const fresh: Sources.RunSources = { file: parse("kind: postgres\nurl: x\ntables: {}\n") as Sources.SourceFile, tables: [], problem: null };
+  const none = S.rereadSources(fresh, read("kind: postgres\nurl: x\ntables:\n  Customers: {}\n  customers: {}\n"), RUN, catalog, "shop", "/app");
+  assert.deepEqual([none.tables, none.refused!.map((x) => [x.table, x.held])], [[], [["public.Customers", false], ["public.customers", false]]]);
 });
 
 test("the small mistakes: $NAME without braces, a name YAML reads as a boolean, null or number — each told what to write", () => {

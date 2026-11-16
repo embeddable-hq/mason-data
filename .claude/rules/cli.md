@@ -194,7 +194,10 @@ CLI lacks).
   is that entry's alone** (issue 1074: a column renamed under `columns:` refused the whole re-read, and no table took a
   column change until a restart): each entry is checked on its own (`entryTables`), the others taken, and its table
   HELD as the run took it before (`rereadSources`, `refused`; the sync's `held`), said on its line with the line to write
-  (`refusedEntryText`, `renamedColumns`: a guess offered, never taken), or, never taken, said among the warnings. A start
+  (`refusedEntryText`, `renamedColumns`: a guess offered, never taken; every way out a line that runs), or, never taken,
+  said among the warnings. **A problem across entries (a case clash of tables or schemas) is decided by what the run
+  syncs, never the file's order**: the group's one synced entry decided alone, every other never taken (the review of
+  PR 1091: a new entry written first was taken beside the synced one, and the two shared one synced table). A start
   still refuses the file on any entry.
 - **`mason add` and `mason remove` work before `mason start` as after it** (`needs: "project"`): the sources file is
   the list, and `mason init demo` already writes entries before any run, so `mason init && mason add orders && mason

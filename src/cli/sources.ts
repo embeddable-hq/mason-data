@@ -537,13 +537,18 @@ function clashProblems(t: SourceTable, e: TableEntry, at: string): string[] {
  * synced data, which served one under both names. Each entry after the first of such a group, said at its key.
  */
 function tableClashProblems(src: Pick<SourceFile, "tables">): Array<{ entry: TableEntry; problem: string }> {
-  return caseClashes(src.tables.map((e) => e.table)).flatMap((group) => {
-    const entries = group.map((name) => src.tables.find((e) => e.table === name)!);
-    const first = entries[0]!;
-    return entries.slice(1).map((e) => ({ entry: e, problem: `tables.${e.name}: ${e.table} and ${first.table} (tables.${first.name}) have names that differ only in case. ` +
-      "The synced data cannot hold both. Remove one of the two entries" }));
-  });
+  return clashGroups(src).flatMap((entries) => entries.slice(1).map((e) => ({ entry: e, problem: clashText(e, entries[0]!) })));
 }
+
+/** The entries of `src` whose tables are one in the synced data (`caseClashes`: a table's name or its schema's differ only
+ *  in case), a group each, in the file's order. */
+function clashGroups(src: Pick<SourceFile, "tables">): TableEntry[][] {
+  return caseClashes(src.tables.map((e) => e.table)).map((group) => group.map((name) => src.tables.find((e) => e.table === name)!));
+}
+
+/** What is said at `e`'s key of its clash with `other`'s entry (`clashGroups`). */
+const clashText = (e: TableEntry, other: TableEntry): string => `tables.${e.name}: ${e.table} and ${other.table} (tables.${other.name}) have names that differ only in case. ` +
+  "The synced data cannot hold both. Remove one of the two entries";
 
 /** Why a table cannot be copied as its entry says, each at its key, against the database's catalog; none when it can. */
 export function entryProblems(t: SourceTable | undefined, e: TableEntry, all: readonly SourceTable[], database: string, sync: TableSync): string[] {
@@ -658,26 +663,34 @@ export interface RefusedEntry { entry: TableEntry; problems: string[] }
  * `problems`: all of them, in the order a start says them. One entry's problem is that entry's alone: a start refuses
  * the file on them (`addedTables`), and the run's re-read holds that table alone (`rereadSources`).
  */
-export function entryTables(src: SourceFile, tables: readonly SourceTable[], database: string, root: string): { tables: AddedTable[]; refused: RefusedEntry[]; problems: string[] } {
+export function entryTables(src: SourceFile, tables: readonly SourceTable[], database: string, root: string):
+  { tables: AddedTable[]; refused: RefusedEntry[]; problems: string[]; own: Map<TableEntry, { table: AddedTable | null; problems: string[] }>; clashes: TableEntry[][] } {
   const clashes = tableClashProblems(src);
   const problems: string[] = clashes.map((c) => c.problem);
   const out: AddedTable[] = [];
   const refused: RefusedEntry[] = [];
+  // each entry on its own, a clash with another entry aside: what the run's re-read decides a clash group by
+  const own = new Map<TableEntry, { table: AddedTable | null; problems: string[] }>();
   for (const e of src.tables) {
     const t = tables.find((x) => x.source === e.table);
     const sync = effectiveSync(src, e).sync;
     const p = entryProblems(t, e, tables, database, sync);
     const clash = clashes.filter((c) => c.entry === e).map((c) => c.problem);
     problems.push(...p);
-    if (p.length || clash.length || t === undefined) { refused.push({ entry: e, problems: [...clash, ...p] }); continue; }
-    const keep = new Set(copiedColumns(t, e));
-    const at = `${shownPath(root, src.file)}: tables.${e.name}`;
-    out.push({ ...t, columns: t.columns.filter((c) => keep.has(c.name)), foreignKeys: t.foreignKeys.filter((f) => keep.has(f.column)),
-      ...(e.key !== null ? { key: e.key, primaryKey: t.key } : {}), sync, entryAt: at,
-      // its entry's words, for the line a hold for its columns says (src/duck/column-identity.ts)
-      entry: { at, name: e.name, columns: e.columns, exclude: e.exclude } });
+    let added: AddedTable | null = null;
+    if (!p.length && t !== undefined) {
+      const keep = new Set(copiedColumns(t, e));
+      const at = `${shownPath(root, src.file)}: tables.${e.name}`;
+      added = { ...t, columns: t.columns.filter((c) => keep.has(c.name)), foreignKeys: t.foreignKeys.filter((f) => keep.has(f.column)),
+        ...(e.key !== null ? { key: e.key, primaryKey: t.key } : {}), sync, entryAt: at,
+        // its entry's words, for the line a hold for its columns says (src/duck/column-identity.ts)
+        entry: { at, name: e.name, columns: e.columns, exclude: e.exclude } };
+    }
+    own.set(e, { table: added, problems: p });
+    if (added === null || clash.length) { refused.push({ entry: e, problems: [...clash, ...p] }); continue; }
+    out.push(added);
   }
-  return { tables: out, refused, problems };
+  return { tables: out, refused, problems, own, clashes: clashGroups(src) };
 }
 
 /**
@@ -709,11 +722,16 @@ export function refusedEntryText(o: { entry: TableEntry; problems: readonly stri
   const { entry: e, renamed } = o;
   const what = o.problems.map((p) => `${o.shown}: ${p}`).join("; ");
   const head = `${e.table} is not synced: ${what}${/[.?!]$/.test(what) ? "" : "."} ` +
-    (o.held ? "Mason holds the table and serves its synced data as it was." : "Mason syncs it once its entry is fixed.");
-  const fix = renamed === null ? "Fix its entry" : `To sync its columns as the database names them now, write columns: ${flowList(renamed)} on tables.${e.name}`;
-  if (o.readOnly) return `${head} ${fix} in the committed sources file, and start Mason with it.`;
-  const add = `mason add ${e.name} --columns ${renamed === null ? "…" : renamed.join(",")}${e.key !== null ? ` --key ${e.key.join(",")}` : ""}`;
-  return `${head} ${fix}, then run mason stop && mason start. Or run ${add} while Mason runs, which takes it at once.`;
+    (o.held ? "Mason holds the table and serves its synced data as it was." : "Mason does not sync it until that is fixed.");
+  // the way out is always a line that runs: the columns the rename asks for, or the fix the problem says, then a start
+  if (renamed !== null) {
+    const line = `To sync its columns as the database names them now, write columns: ${flowList(renamed)} on tables.${e.name}`;
+    if (o.readOnly) return `${head} ${line} in the committed sources file, and start Mason with it.`;
+    const add = `mason add ${e.name} --columns ${renamed.join(",")}${e.key !== null ? ` --key ${e.key.join(",")}` : ""}`;
+    return `${head} ${line}, then run mason stop && mason start. Or run ${add} while Mason runs, which takes it at once.`;
+  }
+  if (o.readOnly) return `${head} Once that is fixed, start Mason with the committed sources file.`;
+  return `${head} Once that is fixed, run mason stop && mason start. Or run mason remove ${e.name} to take its entry out${o.held ? ", which drops its synced data" : ""}.`;
 }
 
 /** What the run copies: the sources file as it last read it, its tables, and what is wrong with the file now (null:
@@ -751,22 +769,31 @@ export function rereadSources(prev: RunSources, read: ProjectSource | Failure, r
       "(no table was replicated when it started): mason stop && mason start checks it and streams them";
   } else {
     const e = entryTables(read, catalog, database, root);
-    const taken = new Map(e.tables.map((t) => [t.source, t]));
     const shown = shownPath(root, read.file);
+    const before = (entry: TableEntry): AddedTable | undefined => prev.tables.find((x) => x.source === entry.table);
+    // A CLASH GROUP (entries whose tables are one in the synced data: a table's or its schema's name differs only in case)
+    // is decided by what the run syncs, never by the file's order (the review of PR 1091: a new `Accents` written above
+    // a synced `accents` was taken beside it, and the two shared one synced table, which neither served after). The one
+    // entry of the group the run syncs is decided on its own; every other entry is never taken, said with the clash
+    const clashOf = new Map<TableEntry, string>();
+    for (const group of e.clashes) {
+      const synced = group.filter((x) => before(x) !== undefined);
+      const keeper = synced.length === 1 ? synced[0]! : null;
+      for (const x of group) if (x !== keeper) clashOf.set(x, clashText(x, keeper ?? group.find((y) => y !== x)!));
+    }
     const tables: AddedTable[] = [];
     const refused: EntryRefusal[] = [];
     for (const entry of read.tables) {
-      const t = taken.get(entry.table);
-      if (t !== undefined) { tables.push(t); continue; }
-      const r = e.refused.find((x) => x.entry === entry);
-      if (r === undefined) continue;
+      const own = e.own.get(entry)!;
+      const clash = clashOf.get(entry);
+      if (own.table !== null && clash === undefined) { tables.push(own.table); continue; }
       // HELD as the run took it: it serves what it holds, and is synced again once its entry is fixed
-      const before = prev.tables.find((x) => x.source === entry.table);
-      if (before !== undefined) tables.push(before);
+      const was = before(entry);
+      if (was !== undefined) tables.push(was);
       const now = catalog.find((x) => x.source === entry.table);
-      const renamed = renamedColumns(now, entry, catalog, database, effectiveSync(read, entry).sync);
-      refused.push({ table: entry.table, held: before !== undefined,
-        text: refusedEntryText({ entry, problems: r.problems, shown, held: before !== undefined, readOnly: o.readOnly === true, renamed }) });
+      const renamed = clash === undefined ? renamedColumns(now, entry, catalog, database, effectiveSync(read, entry).sync) : null;
+      refused.push({ table: entry.table, held: was !== undefined,
+        text: refusedEntryText({ entry, problems: [...(clash !== undefined ? [clash] : []), ...own.problems], shown, held: was !== undefined, readOnly: o.readOnly === true, renamed }) });
     }
     return { file: read, tables, problem: null, refused, said: null };
   }

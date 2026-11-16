@@ -612,6 +612,8 @@ test("a table whose entry the run cannot take is held alone: not synced, its syn
     const state = (s: string) => sync.state().find((x) => x.source === s)!;
     assert.deepEqual([state("public.b").phase, state("public.b").error], ["copied", why], "its synced data served, its line saying why");
     assert.equal(state("public.a").error, null, "the other table is not held");
+    // its line's own words: a synced table held, never one waiting for its first sync (the review of PR 1091)
+    assert.equal((state("public.b").kept as { pending?: string } | undefined)?.pending, "it is held, and serves its synced data as it was: its line says why, and what syncs it again");
     assert.equal(sync.pollRefusal(["public.b"])?.message, why, "a sync by hand of it is refused with why");
     assert.equal(sync.pollRefusal(["public.a"]), null, "the other is synced by hand");
     assert.ok(logged.includes(`public.b: ${why}`), logged.join("\n"));

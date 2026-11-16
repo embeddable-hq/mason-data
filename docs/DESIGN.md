@@ -712,6 +712,13 @@ refuse the whole file at the run's re-read, because the name is close to a colum
 table as it took it before, so a column added to another table was never synced, and a column renamed elsewhere made
 that table's polls fail, until a restart. One entry's problem is that entry's.
 
+**A problem across entries is decided by what the run syncs, never by the file's order** (the review of PR 1091). Two
+entries whose tables are one in the synced data (a table's or a schema's name differs only in case) refuse every entry
+after the first at a start. At the run's re-read that order let a new `Accents` written above a synced `accents` be
+taken beside it, and the two shared one synced table, which neither served after: data lost. So in such a group the
+one entry the run syncs is decided on its own, and every other entry is never taken, said with the clash. No entry of
+a group the run syncs none of is taken.
+
 **Fail closed.** A renamed column a `columns:` entry lists is never synced under its new name by a guess. The line the
 hold gives (`renamedColumns`) is checked against `entryProblems`, but only the person writes it: `mason add` through the
 run takes it at once, and a hand edit at the next time the run reads the file (a restart, an add or a remove, or a
