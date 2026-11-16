@@ -46,6 +46,8 @@ export const MATRIX_ARGS: Readonly<Record<string, readonly string[]>> = {
   // a session that is not open: refused by name in every state with a run, and by the state without one
   cancel: ["99999"],
   usage: [],
+  // needs a run: below one it answers the state's code; it changes nothing in any state
+  upgrade: ["--check"],
   stop: [],
   destroy: [],
   serve: [],

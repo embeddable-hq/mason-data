@@ -11,6 +11,16 @@
  */
 import { createHash } from "node:crypto";
 
+/** a source numeric's type as `format_type` spells it: its precision and scale, where it declares them */
+export const NUMERIC_TYPE = /^numeric(?:\((\d+)(?:,\s*(\d+))?\))?$/;
+
+/** a source numeric declared with no precision (a Rails `decimal`): synced exactly, its values' own scales held beside it
+ *  in a hidden column where its copy holds it as a DECIMAL */
+export function plainNumeric(type: string): boolean {
+  const m = NUMERIC_TYPE.exec(type);
+  return m !== null && m[1] === undefined;
+}
+
 /** the hidden column's name prefix */
 export const SCALE_PREFIX = "__mason_scale_";
 /** a hidden scale column's name pattern: what tells its kind among the columns the copy's record does not name

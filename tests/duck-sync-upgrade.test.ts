@@ -1,5 +1,5 @@
 /**
- * A COPY AN OLDER MASON MADE, READ BY THIS ONE (src/duck/sync.ts `HELD_LAYOUT`, `findHeldLayout`): an older Mason stored
+ * A COPY AN OLDER MASON MADE, READ BY THIS ONE (src/duck/reread.ts `HELD_LAYOUT`, `layoutOf`): an older Mason stored
  * a column of a type this one holds as the source's text (src/duck/held-types.ts) as the extension's scan read it (a
  * `point` as a STRUCT), and recorded its columns without their kind (`typeKind`). Its record alone says the copy is as
  * this Mason would make it, so it was never read again: served as a STRUCT under the point's OID, and polled into the
