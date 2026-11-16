@@ -21,6 +21,7 @@ import { INIT, init } from "./init.ts";
 import { SYNC, sync } from "./sync.ts";
 import { USAGE, usage } from "./usage.ts";
 import { CANCEL, cancel } from "./cancel.ts";
+import { UPGRADE, upgrade } from "./upgrade.ts";
 import { SERVE, serve } from "./serve.ts";
 import { LOGIN, LOGOUT, login, logout } from "./login.ts";
 import { DEPLOY, deploy } from "./deploy.ts";
@@ -217,7 +218,7 @@ export const STEPS: ReadonlyArray<[step: string, commands: readonly Command[]]> 
   ["Set up", [{ ...DOCTOR, run: (argv) => doctor(argv) }, { ...INIT, run: (argv) => init(argv) }, { ...DEV, run: runDev }]],
   ["Add your tables", [{ ...TABLES, run: tables }, { ...ADD, run: add }, { ...REMOVE, run: remove }, { ...WAIT, run: wait }]],
   ["Connect", [{ ...USER, run: user }, { ...MCP, run: mcp }, { ...SHARE, run: share }]],
-  ["Run", [{ ...STATUS, run: status }, { ...UI, run: ui }, { ...SYNC, run: sync }, { ...LOGS, run: logs }, { ...CANCEL, run: cancel }, { ...USAGE, run: (argv) => usage(argv) }, { ...STOP, run: stop }, { ...DESTROY, run: (argv) => destroy(argv) }]],
+  ["Run", [{ ...STATUS, run: status }, { ...UI, run: ui }, { ...SYNC, run: sync }, { ...LOGS, run: logs }, { ...CANCEL, run: cancel }, { ...USAGE, run: (argv) => usage(argv) }, { ...UPGRADE, run: upgrade }, { ...STOP, run: stop }, { ...DESTROY, run: (argv) => destroy(argv) }]],
   ["Go to production", [{ ...SERVE, run: serve }, { ...LOGIN, run: login }, { ...LOGOUT, run: logout }, { ...REPLICA, run: replica }, { ...TOKEN, run: token }, { ...DEPLOY, run: deploy }]],
 ];
 

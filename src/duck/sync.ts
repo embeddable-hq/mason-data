@@ -77,8 +77,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { PgConnection, formatLsn, parseLsn, pgLiteral, type PgConnectOptions } from "../cdc/pg-wire.ts";
 import { createSlot, currentLsn, dropSlot, readSlot, visibleLsn, type SlotState } from "../cdc/source.ts";
-import { holdOf, nativeVarchar } from "./held-types.ts";
-import { scaleColumn, scaleOfText, scaleSql } from "./scale-column.ts";
+import { holdOf } from "./held-types.ts";
+import { NUMERIC_TYPE, plainNumeric, scaleColumn, scaleOfText, scaleSql } from "./scale-column.ts";
+import { columnsKey, layoutOf, numberedFrom, readStored, tablesThere, unnumbered, wholeRead, type Retired, type StoredFacts } from "./reread.ts";
 import { hiddenColumns } from "./hidden-columns.ts";
 import { addCounts, countsText, duckValue, fold, foldInto, noChanges, noCounts, ReplicationStream, type ChangeCounts, type StreamedTable, type TableChanges } from "./stream.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
@@ -506,56 +507,9 @@ export async function writeStaged(w: DuckConnection, t: Pick<AddedTable, "key" |
   return held;
 }
 
-/**
- * A COPY IN AN EARLIER LAYOUT (before copies were kept in heap order with no index): sorted by its primary
- * key, with the key's index. Its rows are physically in key order, and only the source has them in its own: it is
- * never converted in place, but copied again through the normal path (`needsCopy`), serving as it was meanwhile. Found
- * by its constraint (`duckdb_constraints()`), which every copy of that layout carries and no copy of this one does.
- */
-export const RETIRED_LAYOUT = "stored in key order with an index, by an older Mason: read again whole, in heap order";
-
-/**
- * A COPY AN OLDER MASON MADE BEFORE A TYPE WAS HELD AS ITS TEXT (src/duck/held-types.ts): a column this Mason holds as the
- * source's text (a `point`, a `money`, a range) stored as the extension's scan read it (a `point` as a STRUCT). Its
- * record (`copy_state.columns`) was written by code that did not know the column's kind, so it cannot say so: found by
- * what the copy physically is (`duckdb_columns()`), copied again through the normal path (`needsCopy`), serving as it
- * was until its swap; never converted in place.
- */
-export const HELD_LAYOUT = "stored by an older Mason with a column not held as the source's text: read again whole, each such column as its text";
-
-/**
- * A COPY AN OLDER MASON MADE BEFORE A PLAIN NUMERIC'S OWN SCALE WAS HELD (issue 946, src/duck/scale-column.ts): a column
- * declared `numeric` with no precision, stored as a DECIMAL with no hidden scale column beside it, so every value prints
- * with the column's most decimals. The scales are the source's alone: found by what the copy physically is, copied
- * again through the normal path (`needsCopy`) once, serving as it was until its swap.
- */
-export const SCALE_LAYOUT = "stored by an older Mason without each numeric value's own decimals: read again whole, once";
-
-/**
- * A COPY MISSING A COLUMN ITS RECORD NAMES (issue 998): an older Mason dropped a source column named like one of its
- * own hidden columns (`__mason_json_…`) at a start, so the copy lacks a column it syncs, and every poll and stream write
- * of it failed. Its values are the source's alone: found by what the copy physically is, copied again through the normal
- * path (`needsCopy`), serving as it was until its swap.
- */
-export const MISSING_LAYOUT = "missing a column it syncs, which an older Mason dropped: read again whole, once";
-
-/**
- * A COPY AN OLDER MASON MADE OF A COLUMN WHOSE NAME STARTS WITH U+FEFF (issue 991, src/duck/text.ts): it looked the
- * column's type up by the name DuckDB handed back, which had lost its byte-order mark, found none, and stored the
- * column as a VARCHAR whatever its type (a numeric served as text). Found by what the copy physically is (`lostType`),
- * copied again through the normal path (`needsCopy`) once, serving as it was until its swap.
- */
-export const BOM_LAYOUT = "stored by an older Mason with a column whose name starts with a byte-order mark as text: read again whole, once";
-
-/** a copied column an older Mason stored as a VARCHAR only because its name starts with U+FEFF (`BOM_LAYOUT`): one the
- *  copy now stores as its own type (a native type that is no text, an array, an enum). A domain is left as it is. */
-export function lostType(c: SourceColumnInfo, stored: string): boolean {
-  return c.name.startsWith("\uFEFF") && stored === "VARCHAR" && c.domain !== true && holdOf(c.type, c.typeKind) === "same" &&
-    !/^jsonb?$/.test(c.type) && !nativeVarchar(c.type);
-}
-
-/** a copy in a layout this Mason no longer keeps: the layout as `mason status` says it, and its short form for a line */
-interface Retired { layout: string; short: string }
+// THE LAYOUTS A START READS AGAIN WHOLE, and the check that finds each: src/duck/reread.ts, the one module the start and
+// `mason upgrade --check` both call (issue 1069)
+export { BOM_LAYOUT, HELD_LAYOUT, lostType, MISSING_LAYOUT, RETIRED_LAYOUT, SCALE_LAYOUT } from "./reread.ts";
 
 /**
  * How long a failed copy waits before it is tried again: four times the attempt, at least 5 minutes, doubled for each
@@ -1057,19 +1011,6 @@ export function sourceSecretSql(s: Pick<Source, "host" | "port" | "database" | "
     `DATABASE ${literal(s.database)}, USER ${literal(s.user)}${s.password ? `, PASSWORD ${literal(s.password)}` : ""})`;
 }
 
-/** a table's columns as a copy is made with them: their names and source types, in order, and each one's number on the
- *  source (`attnum`, its identity: issue 1073) where it is known — two columns whose names were swapped are other
- *  columns, so a copy holding the old ones is read again whole */
-const columnsKey = (columns: readonly SourceColumnInfo[]): string => JSON.stringify(columns.map((c) => {
-  // what the copy holds is part of the shape: a copy made before a column's type was held as its text is read again
-  const hold = holdOf(c.type, c.typeKind);
-  const named = hold === "same" && c.domain !== true ? [c.name, c.type] : [c.name, c.type, hold, ...(c.domain === true ? ["domain"] : [])];
-  return c.attnum === undefined ? named : [...named, `#${c.attnum}`];
-}));
-
-/** the columns without their numbers: how a copy recorded by a Mason before them is held to the columns now */
-const unnumbered = (columns: readonly SourceColumnInfo[]): SourceColumnInfo[] => columns.map(({ attnum: _attnum, ...c }) => c);
-
 /** `postgres_query` over the attached source: a read of Postgres's own SQL in the DuckDB transaction's snapshot */
 const pq = (sql: string): string => `postgres_query(${literal(SRC)}, ${literal(sql)})`;
 
@@ -1085,7 +1026,6 @@ const pq = (sql: string): string => `postgres_query(${literal(SRC)}, ${literal(s
  * differ (`1` beside `1.50`), so beside such a column the copy holds each value's in a hidden column, which every write
  * computes from the source's text (src/duck/scale-column.ts; issue 946) and the rewrite prints each value with.
  */
-const NUMERIC_TYPE = /^numeric(?:\((\d+)(?:,\s*(\d+))?\))?$/;
 const WIDER = "mason: a numeric value wider than its synced column";
 
 /** Whether a ROLLBACK's `e` says the engine had ended the transaction itself: src/duck/store.ts's, which the
@@ -1102,13 +1042,6 @@ export function widerIn(e: unknown, source: string): boolean {
 function readsAsDouble(type: string): boolean {
   const m = NUMERIC_TYPE.exec(type);
   return m !== null && (m[1] === undefined || Number(m[1]) > 38);
-}
-
-/** a source numeric declared with no precision (a Rails `decimal`): synced exactly, its values' own scales held beside it
- *  in a hidden column (src/duck/scale-column.ts) where its copy holds it as a DECIMAL */
-export function plainNumeric(type: string): boolean {
-  const m = NUMERIC_TYPE.exec(type);
-  return m !== null && m[1] === undefined;
 }
 
 /** a DuckDB check on a numeric's text that it fits DECIMAL(38, scale): an error naming the table where it does not */
@@ -2942,9 +2875,11 @@ export class Sync {
         this.snapshots.delete(t.source);
         continue;
       }
+      // A RECORD WITHOUT NUMBERS takes them from its table (src/duck/reread.ts `numberedFrom`, which `mason upgrade --check`
+      // applies too, so it never lists such a table as read again)
       const copied = this.copiedColumns.get(t.source);
-      if (copied !== undefined && copied.some((c) => c.attnum === undefined) && t.columns.every((c) => c.attnum !== undefined) && columnsKey(unnumbered(t.columns)) === columnsKey(unnumbered(copied))) {
-        const numbered = copied.map((c) => ({ ...c, attnum: t.columns.find((x) => x.name === c.name)!.attnum! }));
+      const numbered = copied === undefined ? null : numberedFrom(copied, t.columns);
+      if (numbered !== null) {
         this.copiedColumns.set(t.source, numbered);
         this.copiedAs.set(t.source, columnsKey(numbered));
         adopted.push([t.source, numbered]);
@@ -3064,7 +2999,8 @@ export class Sync {
    *  outgrew its copy, or its copy is in a retired layout, `RETIRED_LAYOUT`). A table a named publication does not carry (`unpublished`) needs one too, but waits for
    *  its owner, never for the interval: its callers skip it */
   private needsCopy(t: AddedTable): boolean {
-    return this.states.get(t.source)?.phase !== "copied" || !this.snapshots.has(t.source) || this.copiedAs.get(t.source) !== columnsKey(t.columns) || this.retired.has(t.source);
+    // the one decision, src/duck/reread.ts's, which `mason upgrade --check` applies to a running Mason's facts too
+    return wholeRead({ phase: this.states.get(t.source)?.phase, watermark: this.snapshots.has(t.source), copiedAs: this.copiedAs.get(t.source), retired: this.retired.get(t.source) }, t.columns) !== null;
   }
 
   /**
@@ -4335,9 +4271,7 @@ export class Sync {
    * forgotten.
    */
   private async forgetMissing(only?: string): Promise<string[]> {
-    const w = this.store.writer;
-    const there = new Set(((await w.runAndReadAll(`SELECT schema_name || '.' || table_name FROM duckdb_tables() WHERE database_name = current_database()`)).getRowsJS() as [string][])
-      .map(([n]) => relationKey(n)));
+    const there = await tablesThere(this.store.writer);
     const gone = [...this.states.values()].filter((s) => s.phase === "copied" && (only === undefined || s.source === only) && this.rebuildingNow?.source !== s.source && !there.has(relationKey(s.source)))
       .map((s) => s.source);
     for (const source of gone) {
@@ -5903,78 +5837,43 @@ export class Sync {
   }
 
   /**
-   * THE COPIES IN A RETIRED LAYOUT (`RETIRED_LAYOUT`), read at `open`: a copied table that carries a primary-key or
-   * unique constraint was stored in key order with that key's index (the earlier layout). Each is said by name and copied
-   * again through the normal path (`needsCopy`), serving as it was until its swap; never converted in place.
+   * THE COPIES IN A LAYOUT THIS MASON NO LONGER KEEPS, read at `open` from what each copy physically is, never from its
+   * record alone (src/duck/reread.ts `layoutOf`: `RETIRED_LAYOUT`, `HELD_LAYOUT`, `SCALE_LAYOUT`, `MISSING_LAYOUT`,
+   * `BOM_LAYOUT`): each is said by name and copied again through the normal path (`needsCopy`), serving as it was until
+   * its swap; never converted in place. A record written before `typeKind` was read is completed (an enum's kind from
+   * its stored ENUM), so its key is the one a fresh read makes and it is not read again for nothing. The facts are
+   * `readStored`'s, the reader `mason upgrade --check` reads through a running Mason, so the two cannot disagree.
    */
   private async findRetired(): Promise<void> {
-    const r = await this.store.writer.runAndReadAll(`SELECT DISTINCT schema_name || '.' || table_name FROM duckdb_constraints() ` +
-      `WHERE database_name = current_database() AND schema_name <> ${literal(MASON_SCHEMA)} AND constraint_type IN ('PRIMARY KEY', 'UNIQUE')`);
-    for (const [source] of r.getRowsJS() as Array<[string]>) {
-      if (this.states.get(source)?.phase !== "copied") continue;
-      this.retired.set(source, { layout: RETIRED_LAYOUT, short: "in an older Mason's layout, key order with an index" });
-      this.log(`${source}: it is ${RETIRED_LAYOUT} — its rows are sorted on disk, and only the source has them in its own order, so it is read again whole; its synced data serves as it was until then`);
+    for (const t of await readStored(this.store.writer)) {
+      if (this.states.get(t.source)?.phase !== "copied") continue;
+      const { retired, columns } = layoutOf(t);
+      if (columns !== null && t.record !== null) {
+        this.copiedColumns.set(t.source, columns);
+        this.copiedAs.set(t.source, columnsKey(columns));
+      }
+      if (retired === null) continue;
+      this.retired.set(t.source, retired);
+      this.log(`${t.source}: ${retired.said}`);
     }
-    await this.findHeldLayout();
   }
 
   /**
-   * THE COPIES AN OLDER MASON MADE BEFORE A TYPE WAS HELD AS ITS TEXT (`HELD_LAYOUT`), read at `open` from what each copy
-   * physically is, never from its record alone: a record written before `typeKind` was read says neither that a column
-   * is an enum nor how a held one was stored. Each copied column is held to what `storedType` makes of it now: an ENUM is
-   * an enum (its record completed, so its key is the one a fresh read makes, and it is not read again for nothing); a
-   * column held as its text that is not a VARCHAR (a `point` as the extension's STRUCT) marks the table, said by name and
-   * copied again through the normal path (`needsCopy`), serving as it was until its swap.
+   * WHAT THE SYNCED DATA HOLDS OF EACH TABLE, as a start reads it (src/duck/reread.ts `readStored`), and the tables the
+   * sources file adds with their columns as read from the source: what `/api/state?storage=1` publishes, so a newer
+   * release's `mason upgrade --check` applies its own checks to them. Read in one transaction of a connection of its
+   * own, never the writer's turn; it changes nothing. No secret and nothing of the source's data: names, types, counts.
    */
-  private async findHeldLayout(): Promise<void> {
-    const r = await this.store.writer.runAndReadAll(`SELECT schema_name || '.' || table_name, column_name, data_type FROM duckdb_columns() ` +
-      `WHERE database_name = current_database() AND schema_name <> ${literal(MASON_SCHEMA)}`);
-    const physical = new Map<string, Map<string, string>>();
-    for (const [source, column, type] of r.getRowsJS() as Array<[string, string, string]>) {
-      const m = physical.get(source) ?? new Map<string, string>();
-      m.set(column, type);
-      physical.set(source, m);
-    }
-    for (const [source, columns] of this.copiedColumns) {
-      const types = physical.get(source);
-      if (this.states.get(source)?.phase !== "copied" || types === undefined || this.retired.has(source)) continue;
-      const mis: string[] = [];
-      const unscaled: string[] = [];
-      const missing: string[] = [];
-      const untyped: string[] = [];
-      const completed = columns.map((c) => {
-        const type = types.get(c.name);
-        if (type === undefined) { missing.push(c.name); return c; }
-        if (c.typeKind === undefined && type.startsWith("ENUM(")) return { ...c, typeKind: "e" };
-        if (lostType(c, type)) untyped.push(c.name);
-        const hold = holdOf(c.type, c.typeKind);
-        const want = hold === "text" ? "VARCHAR" : hold === "text[]" ? "VARCHAR[]" : null;
-        if (want !== null && type !== want) mis.push(`${c.name} (${c.type})`);
-        // a plain numeric synced exactly, its values' own scales not held beside it (`SCALE_LAYOUT`)
-        if (plainNumeric(c.type) && type.startsWith("DECIMAL(38,") && !types.has(scaleColumn(c.name, columns.map((x) => x.name)))) unscaled.push(c.name);
-        return c;
-      });
-      this.copiedColumns.set(source, completed);
-      this.copiedAs.set(source, columnsKey(completed));
-      if (missing.length > 0) {
-        this.retired.set(source, { layout: MISSING_LAYOUT, short: `missing ${missing.join(", ")}, which an older Mason dropped` });
-        this.log(`${source}: it is ${MISSING_LAYOUT} (${missing.join(", ")}) — its synced data serves as it was until then`);
-        continue;
-      }
-      if (mis.length === 0 && untyped.length > 0) {
-        const named = untyped.map((n) => JSON.stringify(n)).join(", ");
-        this.retired.set(source, { layout: BOM_LAYOUT, short: `in an older Mason's layout, ${named} stored as text` });
-        this.log(`${source}: it is ${BOM_LAYOUT} (${named}) — its synced data serves as it was until then`);
-        continue;
-      }
-      if (mis.length === 0 && unscaled.length > 0) {
-        this.retired.set(source, { layout: SCALE_LAYOUT, short: `in an older Mason's layout, ${unscaled.join(", ")} without each value's own decimals` });
-        this.log(`${source}: it is ${SCALE_LAYOUT} (${unscaled.join(", ")}) — its synced data serves as it was until then, each value of those columns printed with the column's most decimals`);
-        continue;
-      }
-      if (mis.length === 0) continue;
-      this.retired.set(source, { layout: HELD_LAYOUT, short: `in an older Mason's layout, ${mis.join(", ")} not held as the source's text` });
-      this.log(`${source}: it is ${HELD_LAYOUT} (${mis.join(", ")}) — it is read again whole; its synced data serves as it was until then`);
+  async storedFacts(): Promise<StoredFacts> {
+    const c = await this.store.instance.connect();
+    try {
+      await c.run("BEGIN TRANSACTION");
+      const tables = await readStored(c);
+      await c.run("COMMIT");
+      return { format: 1, tables, added: [...this.tables.values()].map((t) => ({ table: t.source, columns: [...t.columns] })), held: [...this.unplaced.keys()] };
+    } finally {
+      // closed on every way out: a transaction a failed read left open ends with it
+      c.closeSync();
     }
   }
 
