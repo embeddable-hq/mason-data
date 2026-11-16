@@ -551,10 +551,12 @@ table.catalog th.rows { width: 116px; }
 table.catalog th.key { width: 104px; }
 /* Columns and Sync (issue 1110): the button that opens the column form, and the one that opens the Sync choice. A
    label wider than its column wraps inside its button ("Live (replication)" on two lines), so it is never cut, and the
-   row is already two lines tall */
-table.catalog th.cols { width: 120px; }
-table.catalog th.sync { width: 120px; }
-table.catalog :is(td.cols, td.sync) .syncnow { max-width: 100%; height: auto; min-height: 20px; line-height: 18px; white-space: normal; text-align: left; vertical-align: top; }
+   row is already two lines tall. Sync is as wide as its longest word, "(replication)" (94 px at the buttons' size), with
+   the button's padding and the cell's widest; Columns' longest word is shorter. A read-only page writes the same words
+   without a button, at the same size, wrapped the same way */
+table.catalog th.cols { width: 108px; }
+table.catalog th.sync { width: 132px; }
+table.catalog :is(td.cols, td.sync) .syncnow { max-width: 100%; height: auto; min-height: 20px; line-height: 18px; white-space: normal; text-align: left; vertical-align: top; font-size: var(--text-xs); }
 table.catalog th.last { width: 104px; }
 table.catalog th.size { width: 116px; }   /* "Measuring…" whole (issue 883), as wide as Rows */
 /* the actions' column holds an added table's three — View events, Sync now (in the room of Syncing…) and Remove — whole
@@ -582,9 +584,9 @@ table.catalog .fold::before { content: attr(data-fold); }
 @container catalog (max-width: 1205px) { table.catalog:not(.not-added) :is(th, td).size { width: 0; padding: 0; visibility: hidden; } table.catalog:not(.not-added) .fold.f-size { display: inline; } }
 @container catalog (max-width: 1089px) { table.catalog:not(.not-added) :is(th, td).last { width: 0; padding: 0; visibility: hidden; } table.catalog:not(.not-added) .fold.f-last { display: inline; } }
 @container catalog (max-width: 985px) { table.catalog:not(.not-added) :is(th, td).rows { width: 0; padding: 0; visibility: hidden; } table.catalog:not(.not-added) .fold.f-rows { display: inline; } }
-@container catalog (max-width: 869px) { table.catalog:not(.not-added) :is(th, td).cols { width: 0; padding: 0; visibility: hidden; } table.catalog:not(.not-added) td.cols .syncnow { display: none; } table.catalog:not(.not-added) .fold.f-cols { display: inline; } }
-@container catalog (max-width: 749px) { table.catalog:not(.not-added) :is(th, td).sync { width: 0; padding: 0; visibility: hidden; } table.catalog:not(.not-added) td.sync .syncnow { display: none; } table.catalog:not(.not-added) .fold.f-sync { display: inline; } }
-table.catalog.not-added .fold:is(.f-cols, .f-sync) { display: inline; }
+@container catalog (max-width: 869px) { table.catalog:not(.not-added) :is(th, td).cols { width: 0; padding: 0; visibility: hidden; } table.catalog:not(.not-added) td.cols .syncnow { display: none; } table.catalog:not(.not-added) .fold.f-cols { display: flex; } }
+@container catalog (max-width: 761px) { table.catalog:not(.not-added) :is(th, td).sync { width: 0; padding: 0; visibility: hidden; } table.catalog:not(.not-added) td.sync .syncnow { display: none; } table.catalog:not(.not-added) .fold.f-sync { display: flex; } }
+table.catalog.not-added .fold:is(.f-cols, .f-sync) { display: flex; }
 @container catalog (max-width: 1069px) { table.catalog.not-added :is(th, td).key { width: 0; padding: 0; visibility: hidden; } table.catalog.not-added .fold.f-key { display: inline; } }
 @container catalog (max-width: 965px) { table.catalog.not-added :is(th, td).size { width: 0; padding: 0; visibility: hidden; } table.catalog.not-added .fold.f-size { display: inline; } }
 @container catalog (max-width: 849px) { table.catalog.not-added :is(th, td).last { width: 0; padding: 0; visibility: hidden; } table.catalog.not-added .fold.f-last { display: inline; } }

@@ -78,7 +78,22 @@ const synced = (table: string) => ({ at, tables: [{ table, added: 1, updated: 2,
  *  state read after it says it ended, with what it did */
 const byHand = new Map<string, unknown>();
 let syncs = 0;
-const stateNow = () => ({ ...STATE, tables: (STATE.tables as Array<{ table: string }>).map((t) => byHand.has(t.table) ? { ...t, syncByHand: byHand.get(t.table) } : t) });
+/** With `follows` (a page opened with `{ follows: true }`), the state read after an Add or a Remove says it: the table
+ *  added has a synced table's fields under its name, the one removed a table not added's. Reset at each page opened. */
+let follows = false;
+/** A page opened with `{ live: true }` has payments kept by replication ("Live (replication)", the longest sync label);
+ *  `{ readOnly: true }` is a server's page whose sources file cannot be changed (the words, no buttons). */
+let variant: { live?: boolean; readOnly?: boolean } = {};
+const addedNow = new Set<string>(), removedNow = new Set<string>();
+const like = (name: string) => (STATE.tables as Array<Record<string, unknown>>).find((t) => t.table === name)!;
+const LIVE = { by: "replication", slot: "mason_shop", state: "streamed", why: null, position: "0/1", lastCommit: null, notRunning: null, syncedAt: at };
+const stateNow = () => ({ ...STATE, ...(variant.readOnly ? { sourcesReadOnly: "This server's sources file can't be changed from here.", sourcesReadOnlyKind: "deployed" } : {}),
+  tables: (STATE.tables as Array<{ table: string }>).map((t) => {
+  if (variant.live && t.table === "public.payments") t = { ...t, kept: LIVE } as typeof t;
+  const u = addedNow.has(t.table) ? { ...like("public.customers"), table: t.table, entry: { ...(like("public.customers").entry as object), name: t.table.slice("public.".length) } }
+    : removedNow.has(t.table) ? { ...like("public.visits"), table: t.table } : t;
+  return byHand.has(t.table) ? { ...u, syncByHand: byHand.get(t.table) } : u;
+}) });
 
 // ------------------------------------------------------------------ the page, served as the run serves it
 
@@ -98,12 +113,25 @@ const server = http.createServer((req, res) => {
     return json({ table: t, sync: { value: "off", from: "default" }, rows: 1200, bigRows: false, live: { allowed: true, checks: [] },
       polls: [["poll 5m", 300], ["poll 15m", 900], ["poll 1h", 3600], ["poll 1d", 86_400]].map(([sync, seconds]) => ({ sync, seconds, cost: null })) });
   }
+  if (url.pathname === "/api/remove") {
+    let body = "";
+    req.on("data", (c: Buffer) => { body += c.toString(); });
+    req.on("end", () => {
+      const tables = (JSON.parse(body) as { tables: string[] }).tables;
+      if (follows) for (const t of tables) { removedNow.add(t); addedNow.delete(t); }
+      json({ removed: tables, file: "/app/mason/sources/shop.yml" });
+    });
+    return;
+  }
   if (url.pathname === "/api/pick" || url.pathname === "/api/sync") {
     let body = "";
     req.on("data", (c: Buffer) => { body += c.toString(); });
     req.on("end", () => {
       const asked = JSON.parse(body) as { table?: string; tables?: string[] };
-      if (url.pathname === "/api/pick") return json(added(asked.table!));
+      if (url.pathname === "/api/pick") {
+        if (follows) { addedNow.add(asked.table!); removedNow.delete(asked.table!); }
+        return json(added(asked.table!));
+      }
       const table = asked.tables![0]!;
       const sync = { id: ++syncs, tables: [table], state: "syncing", startedAt: at, endedAt: null };
       byHand.set(table, { ...sync, state: "synced", endedAt: at, answer: synced(table) });
@@ -124,8 +152,12 @@ after(async () => {
   if (ready !== null) await new Promise((r) => server.close(r));
 });
 
-async function open(width: number, o: { touch?: boolean; height?: number } = {}): Promise<Page> {
+async function open(width: number, o: { touch?: boolean; height?: number; follows?: boolean; live?: boolean; readOnly?: boolean } = {}): Promise<Page> {
   browser ??= await playwright!.chromium.launch();
+  follows = o.follows ?? false;
+  variant = { live: o.live ?? false, readOnly: o.readOnly ?? false };
+  addedNow.clear();
+  removedNow.clear();
   // with touch, as a phone or a touch screen taps: the browser moves a tap to the nearest control under the finger
   const p = await browser.newPage({ viewport: { width, height: o.height ?? 900 }, ...(o.touch ? { hasTouch: true, isMobile: width < 641 } : {}) });
   await p.goto(`http://127.0.0.1:${await ready}/#tables`);
@@ -263,6 +295,85 @@ for (const [what, attr, form] of [["the Sync choice", "data-choose-sync", "form[
     }
   });
 }
+
+/** Every Columns and Sync label shown whose words do not fit inside its box: a button's content box, or, for a
+ *  read-only page's words, its cell's. Measured from the words' own boxes (a range), not the element's scroll width. */
+const unfit = (p: Page) => p.evaluate<{ labels: number; out: string[] }>(`(() => {
+  const out = [];
+  const labels = [...document.querySelectorAll("#tables table.catalog .syncnow")].filter((e) => e.getClientRects().length);
+  for (const e of labels) {
+    const box = e.tagName === "BUTTON" ? e : e.closest("td");
+    const cs = getComputedStyle(box), b = box.getBoundingClientRect();
+    const left = b.left + parseFloat(cs.borderLeftWidth) + parseFloat(cs.paddingLeft), right = b.right - parseFloat(cs.borderRightWidth) - parseFloat(cs.paddingRight);
+    const range = document.createRange();
+    range.selectNodeContents(e);
+    const over = Math.max(0, ...[...range.getClientRects()].map((r) => Math.max(r.right - right, left - r.left)));
+    if (over > 0.05) out.push(JSON.stringify(e.textContent) + " (" + e.tagName.toLowerCase() + ") runs " + over.toFixed(1) + " px past its box");
+  }
+  return { labels: labels.length, out };
+})()`);
+
+test(`every Columns and Sync label reads whole inside its box, "Live (replication)" included, editable and read-only: 375, 900, 1024, 1280 and 1600 px (issue 1110)`, { skip: noBrowser }, async () => {
+  const found: string[] = [];
+  for (const readOnly of [false, true]) {
+    for (const width of [375, 900, 1024, 1280, 1600]) {
+      const p = await open(width, { live: true, readOnly });
+      const live = await p.evaluate<number>(`[...document.querySelectorAll("#tables .syncnow")].filter((e) => e.getClientRects().length && /Live \\(replication\\)/.test(e.textContent)).length`);
+      const u = await unfit(p);
+      await p.close();
+      const what = `${width} px${readOnly ? ", read-only" : ""}`;
+      if (live !== 1) found.push(`${what}: "Live (replication)" shown ${live} times`);
+      if (u.labels < 14) found.push(`${what}: ${u.labels} labels shown`);
+      for (const o of u.out) found.push(`${what}: ${o}`);
+    }
+  }
+  assert.deepEqual(found, [], "every label whole");
+});
+
+/** Every row of both lists and each header: where it is and how big, to the hundredth of a pixel, keyed by the row's
+ *  table (a note by its table too), so a row that changed its list is still told apart. */
+const rowBoxes = (p: Page) => p.evaluate<Record<string, string>>(`(() => {
+  const out = {};
+  const b = (e) => { const r = e.getBoundingClientRect(); return [r.left, r.top + window.scrollY, r.width, r.height].map((x) => x.toFixed(2)).join(","); };
+  for (const tr of document.querySelectorAll("#tables table.catalog tr")) {
+    const own = tr.classList.contains("under") ? tr.previousElementSibling : tr;
+    const name = own?.querySelector("code.name")?.getAttribute("title") ?? "header " + tr.closest("table").className;
+    out[name + (tr.classList.contains("under") ? " (its note)" : "")] = b(tr);
+  }
+  return out;
+})()`);
+
+/** What a click changed: each row whose box is not where it was. */
+const movedRows = (before: Record<string, string>, after: Record<string, string>) =>
+  Object.keys({ ...before, ...after }).filter((k) => before[k] !== after[k]).map((k) => `${k}: ${before[k]} -> ${after[k]}`);
+
+// A CLICK MOVES NO OTHER ROW, ONE THAT CHANGES A ROW'S BUTTONS INCLUDED (the review of PR 1113): a table added from Not
+// added gets its Columns and Sync buttons in its note, and a table removed loses them; a note with them is as tall as
+// one without, so no row under it moves by a pixel
+test(`Add from Not added, and Remove then confirm, move no row by a pixel: 1280, 1024 and 900 px (issue 1110)`, { skip: noBrowser }, async () => {
+  const found: string[] = [];
+  for (const width of [1280, 1024, 900]) {
+    for (const [what, table, open_, confirm, done] of [
+      ["Add", "public.audit_trail", 'button[data-add-table="public.audit_trail"]', null, "#sync-note-tables-public\\.audit_trail"],
+      ["Remove", "public.order_items", 'button[data-remove-table="public.order_items"]', 'button[data-confirm-remove-table="public.order_items"]', null],
+    ] as const) {
+      const p = await open(width, { follows: true });
+      await p.evaluate(`document.querySelector('${open_.replace(/'/g, "\\'")}').scrollIntoView({ block: "center" })`);
+      await p.waitForTimeout(100);
+      const before = await rowBoxes(p);
+      await p.click(open_);
+      if (confirm !== null) await p.click(confirm);
+      // the state read after it says it: the row's buttons changed (added: its Sync in its note; removed: Add)
+      if (done !== null) await p.waitForSelector(done);
+      else await p.waitForSelector(`button[data-add-table="${table}"]`);
+      await p.waitForTimeout(300);
+      const after = await rowBoxes(p);
+      await p.close();
+      for (const m of movedRows(before, after)) found.push(`${width} px, ${what} ${table}: ${m}`);
+    }
+  }
+  assert.deepEqual(found, [], "no row moved");
+});
 
 /** Every table's name and state word that a person cannot read whole: cut inside its cell (its text past its box), not
  *  the table's name, outside the list's card, past the window, or under something laid over it (a pinned column). */

@@ -115,7 +115,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   than squeezing the value beside it (`placePops`, src/web/shared.js).
 - **Tables**, **the name keeps its room at every width** (issue 884: it was 2 px at 1024 px): measured against the
   list's card, the name gets at least 200 px, and the less important columns give way first. In Added: Key below about
-  1590 px, then Size (1490), Last sync (1370), Rows (1270), Columns (1150) and Sync (1030) beside the full sidebar.
+  1590 px, then Size (1490), Last sync (1370), Rows (1270), Columns (1150) and Sync (1040) beside the full sidebar.
   Columns and Sync give way last because they are buttons, and a button is easier to find in a column than in a note.
   Not added has no Columns or Sync column, so its other columns have more room: Key gives way below about 1350 px,
   then Size (1250), Last sync (1130) and Rows (1030). A column

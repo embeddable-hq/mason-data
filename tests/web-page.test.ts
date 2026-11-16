@@ -6186,9 +6186,9 @@ test("Tables: an added table's columns and its sync are columns of the list, Col
   }
   for (const c of ["cols", "sync"]) {
     const g = givesOf(":not(.not-added)").find((x) => x.col === c)!;
-    assert.match(g.rest, new RegExp(`table\\.catalog:not\\(\\.not-added\\) td\\.${c} \\.syncnow \\{ display: none; \\} table\\.catalog:not\\(\\.not-added\\) \\.fold\\.f-${c} \\{ display: inline; \\}`), `${c}: its control folds into the note, the cell's not shown`);
+    assert.match(g.rest, new RegExp(`table\\.catalog:not\\(\\.not-added\\) td\\.${c} \\.syncnow \\{ display: none; \\} table\\.catalog:not\\(\\.not-added\\) \\.fold\\.f-${c} \\{ display: flex; \\}`), `${c}: its control folds into the note (a flex box, so the note is as tall as without it: the review of PR 1113), the cell's not shown`);
   }
-  assert.match(css, /table\.catalog\.not-added \.fold:is\(\.f-cols, \.f-sync\) \{ display: inline; \}/, "in Not added, a table added from it has its buttons in its note");
+  assert.match(css, /table\.catalog\.not-added \.fold:is\(\.f-cols, \.f-sync\) \{ display: flex; \}/, "in Not added, a table added from it has its buttons in its note");
 });
 
 /** placePops with a popover's `data-or-anchor` (issue 1110): its anchor when that is shown, else the other. */
