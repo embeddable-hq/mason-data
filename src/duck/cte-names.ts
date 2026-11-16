@@ -21,6 +21,11 @@
  *   written by as its alias, so a qualified column, a whole row and the output's names are as before. After that, a
  *   bare name has one meaning in the statement, whatever rules a later reader applies.
  *
+ * Names are compared WITHOUT CASE here, as DuckDB binds them (the review of PR 1093). Postgres tells `"Small"` from
+ * `small`, and DuckDB does not: `WITH small AS (…) SELECT … FROM "Small"` read the WITH query there. So a WITH query
+ * whose name equals another's or a table's in any case is renamed, and the new name is one the statement holds in no
+ * case (a table `"__MASON_WITH0"` was read as the renamed WITH query).
+ *
  * A statement whose names are already apart is left exactly as it was.
  */
 
@@ -85,9 +90,11 @@ export function cteReads(tree: unknown): Set<object> {
 export function cteNamesApart(tree: unknown): void {
   const { reads, ctes } = bindings(tree);
   if (ctes.length === 0) return;
-  const clashes = ctes.filter((c) => ctes.some((o) => o !== c && o.ctename === c.ctename) || reads.some((r) => r.range.relname === c.ctename && r.to !== c));
+  // (without case, as DuckDB binds a name: see above)
+  const same = (a: unknown, b: unknown): boolean => String(a).toLowerCase() === String(b).toLowerCase();
+  const clashes = ctes.filter((c) => ctes.some((o) => o !== c && same(o.ctename, c.ctename)) || reads.some((r) => same(r.range.relname, c.ctename) && r.to !== c));
   if (clashes.length === 0) return;
-  const written = JSON.stringify(tree);
+  const written = JSON.stringify(tree).toLowerCase();
   let n = 0;
   const fresh = (): string => { let name: string; do name = `__mason_with${n++}`; while (written.includes(name)); return name; };
   for (const c of clashes) {

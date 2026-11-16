@@ -23,6 +23,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   UNION, and when a later WITH query reads an earlier one named like a table. A WITH query in one arm of a UNION,
   named like a synced table, could also read that table instead of itself when the query held a `*`. It now reads
   itself.
+  - A WITH query whose name differs from a table's only in case is now told apart from it, as on Postgres. Before,
+    `WITH small AS (…) SELECT count(*) FROM "Small"` counted the WITH query's rows, not the table `"Small"`'s. Tools
+    that make PascalCase tables, such as Prisma, write such names.
+  - A whole row of a WITH query with a column list, such as `WITH q(a, b) AS (…) SELECT q FROM q`, now answers.
+    Before, it failed with 42703.
 - **A column your sources file leaves out is no longer served under another name.** This covers a column that
   `exclude:` names, one a `columns:` entry does not list, and a secret-looking column `mason add` left out. Before, Mason
   matched columns by name alone. If two columns swapped names in one transaction, the left-out column was served under
