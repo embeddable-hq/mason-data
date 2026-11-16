@@ -299,6 +299,13 @@ export const BI_SHAPES: Array<{ name: string; sql: string }> = [
   // (many small groups, many ties the order decides), the notes by tenant descending, beside another aggregate
   { name: "issue 464: mode() of a status by customer, its ties decided by the order", sql: "SELECT o.customer_id, mode() WITHIN GROUP (ORDER BY o.status) AS top_status, count(*) AS n FROM orders o GROUP BY 1 ORDER BY 1 NULLS FIRST" },
   { name: "issue 464: mode() of the notes by tenant, descending, beside percentile_disc", sql: "SELECT o.tenant_id, mode() WITHIN GROUP (ORDER BY o.notes DESC) AS m, percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount) AS p FROM orders o GROUP BY 1 ORDER BY 1" },
+  // issue 666, the third round: a grouped min / max and a SELECT DISTINCT sorted under the database's libc order, each
+  // group's candidates keyed once (src/duck/libc-bound.ts `pickGrouped`, `distinctSorted`): the statuses and notes by
+  // customer (many small groups, NULL a group and a value), by tenant beside a count, and a field's values listed
+  { name: "issue 666: min and max of a status and the notes by customer", sql: "SELECT o.customer_id, min(o.status) AS lo, max(o.status) AS hi, max(o.notes) AS note FROM orders o GROUP BY 1 ORDER BY 1 NULLS FIRST" },
+  { name: "issue 666: min and max of the notes by tenant, ordered by the max, beside a count", sql: "SELECT o.tenant_id, min(o.notes), max(o.notes), count(*) AS n FROM orders o GROUP BY 1 HAVING count(*) > 0 ORDER BY max(o.notes) DESC, 1" },
+  { name: "issue 666: a field's distinct values, sorted", sql: "SELECT DISTINCT o.status FROM orders o ORDER BY o.status NULLS FIRST" },
+  { name: "issue 666: a page of a field's distinct values, descending", sql: "SELECT DISTINCT o.notes FROM orders o WHERE o.notes IS NOT NULL ORDER BY 1 DESC LIMIT 20 OFFSET 5" },
   { name: "issue 464: DISTINCT ON each customer's latest order, every row, ties by the key", sql: "SELECT DISTINCT ON (o.customer_id) o.customer_id, o.id, o.created_at, o.amount FROM orders o ORDER BY o.customer_id NULLS FIRST, o.created_at DESC, o.id" },
   { name: "issue 464: DISTINCT ON a tied key, every row", sql: "SELECT DISTINCT ON (o.status, o.tenant_id) o.status, o.tenant_id, o.created_at, o.id FROM orders o ORDER BY o.status NULLS FIRST, o.tenant_id, o.amount, o.id DESC" },
   { name: "issue 665: Metabase's numeric auto-bin", sql: "SELECT (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) AS amount, count(*) AS count FROM orders o GROUP BY (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) ORDER BY (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) ASC" },

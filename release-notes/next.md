@@ -23,6 +23,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   a `citext`, one ordered with `USING`, and one of a value that calls `random()` or reads a subquery or an outer
   query's column.
 
+- **A grouped `min()` or `max()` of a `text` or `varchar`, and a `SELECT DISTINCT` sorted by one, are faster under a
+  libc collation**, such as a database whose collation is `en_US.utf8`. Over 4.5 M rows, the min and max of names by
+  region took 32 s and now take about 2 s, against Postgres's 0.5 s. The distinct values of a code column, sorted, took
+  13 s and now take 0.2 s, about Postgres's time. The answers are Postgres's, as before. A grouped min or max now holds
+  the values it picks from while the query runs. For 4.5 M rows of names in 20 groups, that took about 0.6 GB more
+  memory than before. These
+  are still slow: `FETCH FIRST … WITH TIES` sorted by a text, a min or max with `FILTER` or under `ROLLUP`, and a
+  `SELECT DISTINCT` with no `LIMIT` over a column whose values are nearly all different.
+
 ## What was wrong and is now right
 
 - **A column your sources file leaves out is no longer served under another name.** This covers a column that

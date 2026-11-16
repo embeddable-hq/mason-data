@@ -3540,7 +3540,71 @@ aggregate and the bounds over 30 M distinct values). A first letter of no decomp
 (Hangul, Cyrillic) still has no run. A list of distinct values, a grouped min / max and `FETCH FIRST … WITH TIES` still
 key every row (over the 4.5 M sales, `SELECT DISTINCT code … ORDER BY code` 15.4 s at main and 14.0 s here, Postgres
 0.37–0.85 s; a grouped min / max 16.3 and 12.9 s, 0.42–1.13 s; `FETCH FIRST 5 ROWS WITH TIES` 47 and 30 s, 3.7–6.4 s):
-they are written elsewhere in the rewrite, and are issue 666's next step.
+they are written elsewhere in the rewrite, and are issue 666's next step (the next section answers the first two).
+
+### Grouped and listed: each group's candidates (2026-11-16, issue 666)
+
+After the second round, a grouped min / max and a list of distinct values still keyed every row: over the synthetic
+data below, 5 to 32 s against Postgres's 0.1 to 0.5 s. A grouped min / max wrote the key a row inside `arg_min`, and
+`SELECT DISTINCT x … ORDER BY x` computed the ORDER BY's key for every row before the DISTINCT.
+
+**A grouped min / max keys each group's candidates** (`pickGrouped`, src/duck/libc-bound.ts). The bounds work for a
+group as they work for a statement. So the SELECT's DISTINCT (group, value) pairs are a WITH query, each with its
+value's weights, and each group's thresholds and its least and greatest candidate by the key are another. Each pick
+reads its group's row through a lookup inside `any_value`. Three forms were measured first, over the same data:
+- **The key once a distinct value, joined back** (#1089's form for `mode()`): the codes by region went from 12 s to
+  0.7 s, but the names went from 5.4 s to 11.5 s over 0.9 M rows. Every distinct name is keyed (0.84 M of them), and
+  each of min and max planned its own join.
+- **The pairs' bounds, each pair weighed** (3.9 M names by region): 7.7 s of the engine's thread time in the weights.
+  Weighing each distinct value once and joining it to its pairs (0.83 M values) won where the pairs are many. A
+  window for the thresholds cost 1.6 s of thread time; a GROUP BY joined back cost less.
+- **The check of a value the order cannot key.** Inside the lookup, it was computed for every group the rows hold,
+  before a HAVING or an outer query's WHERE dropped one. So it refused a statement main answered (the test's
+  `WHERE q.g = '1'` over a grouped derived table). A call of `__mason_libc_checked` a group, above the aggregate, cost
+  4 M calls over two million groups of one row. So the group's row marks such a pick, and the engine's own `error()`
+  raises the order's refusal above the aggregate, only where the mark is set.
+A group of one value needs no key, and none is computed. The keys of the GROUP BY must be computed again over the same
+rows (`groupKeys`): a grouping set, a key that calls a function of Mason's (a jsonb's or a numeric's key) or reads a
+subquery, and a bare name an output gives another meaning stay as written.
+
+**A SELECT DISTINCT sorted by a libc key sorts its distinct rows** (`distinctSorted`). It becomes a SELECT of its
+outputs over the DISTINCT as a derived table, each key written over those columns. Under a LIMIT, that is a top N of
+one FROM item, which the second round keys for its candidates alone.
+
+**Measured** over the wire on a shared 4-core machine (load 6 to 13), main and the change in turn, three rounds each,
+with the source Postgres 16 (`en_US.utf8`) beside them. A time is the best of three. The data: 0.9 M names in 20
+groups; 4.5 M sales with a status 97 % one value, 16,900 codes, 0.83 M names and 20 regions; 12 M rows of codes.
+
+| statement | rows | main | this change | Postgres |
+|---|---|---|---|---|
+| `grp, min(name), max(name) … GROUP BY grp` | 0.9 M | 7.62 s | 1.32 s | 0.13 s |
+| `region, min(code), max(code) … GROUP BY region` | 4.5 M | 14.3 s | 0.53 s | 0.54 s |
+| `region, min(name), max(name) … GROUP BY region` | 4.5 M | 31.9 s | 2.08 s | 0.45 s |
+| `status, min(name), max(name) … GROUP BY status` | 4.5 M | 26.9 s | 1.10 s | 0.37 s |
+| the same by `id % 100000` (100,000 groups) | 4.5 M | 30.6 s | 5.84 s | 0.55 s |
+| `min(code), max(code)` by `id` (2 M groups of one row), `LIMIT 5` | 12 M | 6.49 s | 1.69 s | 0.00 s |
+| `name, min(status), max(code)` by name (0.83 M groups), `LIMIT 5` | 4.5 M | 39.1 s | 20.8 s | 3.44 s |
+| `SELECT DISTINCT code … ORDER BY code` | 4.5 M | 12.8 s | 0.24 s | 0.28 s |
+| `SELECT DISTINCT name … ORDER BY name LIMIT 100` | 0.9 M | 5.70 s | 0.56 s | 0.68 s |
+| `SELECT DISTINCT status … ORDER BY status` | 4.5 M | 17.1 s | 0.06 s | 0.22 s |
+
+In a quieter hour the first four took 0.5, 0.25, 1.3 and 1.0 s. The ungrouped min / max and the top N were unchanged.
+Grouped by the names themselves, most of the time is the ORDER BY's key of each of the 0.83 M groups, which this change
+does not touch.
+
+**Memory.** The pairs are a materialised WITH query held while the statement runs. Measured as the server's peak
+resident memory above its idle size, one statement in a fresh process, a 3 GiB engine limit: the names by region
+took 1,351 MiB against main's 737 MiB (3.9 M pairs and 0.83 M weighed values); the names by 100,000 groups took
+2,230 MiB against main's 4,304 MiB; the names in 20 groups 884 against 743 MiB; and every distinct name, sorted, 811
+against 1,208 MiB. Over its limit the engine spills the WITH query to disk.
+
+**What is left.** `FETCH FIRST … WITH TIES` still keys every row (15 s against 1.9 s); its first n rows plus their ties
+are the rows a top N's threshold keeps, so the second round's filter would serve it. A grouped top N, a window's ORDER
+BY, a FILTER'd or grouping-set min / max, and a SELECT DISTINCT with no LIMIT over values each their own (every value
+keyed once) are as before or close to it.
+**Where.** `src/duck/libc-bound.ts` (`pickGrouped`, `groupedQueries`, `groupKeys`, `distinctSorted`);
+`tests/duck-wire.test.ts` "libc grouped", `tests/duck-plans.test.ts` (the `text under libc:` entries and the rows
+test), the oracle's `text keyed once a group:`, `collation: a grouped min and max …` and `issue 666:` statements.
 
 ## Measurements
 

@@ -583,10 +583,22 @@ paths:
   É by `strip_accents`; where it does not decompose, a `replace`, which on glibc's en_US writes Ø, ł, ð, Đ, Ħ, ŀ, ſ, ª
   and ¹ ² ³; a mark of no first-level weight dropped), each read from the order and `strip_accents` held to `stripped`
   over every character of `FOLD_BLOCKS`; a head of ASCII alone is read unfolded, since folding every value doubled a
-  unique wide column's time. Anything else is sent as written (GROUP BY, DISTINCT, WITH TIES, a set operation, a
+  unique wide column's time. **A grouped min / max keys each group's candidates alone** (`pickGrouped`, the third round
+  of issue 666: keyed a row, 5 to 28 s against Postgres's 0.1 to 0.5 s): the SELECT's DISTINCT (group, value) pairs,
+  each with its value's weights, are a WITH query, each group's least and greatest candidate by the key another (the
+  key once a candidate pair, and none in a group of one value), and each pick reads its group's row through a lookup
+  inside `any_value`. Only where every key of the GROUP BY can be computed again over the same rows: no grouping set,
+  and no key that reads a subquery, calls a function of Mason's or a window, or is a bare name an output gives another
+  meaning. A value the order cannot key is picked first and marked, and the engine's `error()` raises its refusal above
+  the aggregate, where the statement reads that group: computed inside the lookup, it refused for a group an outer
+  query's WHERE dropped. **A SELECT DISTINCT sorted by a libc key sorts its distinct rows** (`distinctSorted`: 13 to 18 s
+  keyed a row): it is a SELECT of its outputs over the DISTINCT as a derived table, each key written over those columns,
+  and a LIMIT over it is then a top N as above; a DISTINCT ON, a `*`, an output of no name and a key reading anything but
+  the outputs stay as written. Anything else is sent as written (a grouped top N, WITH TIES, a set operation, a
   window, FILTER, and a join as a join; but a top N over joined tables that src/duck/late.ts writes as a SELECT of one
-  FROM item, the preserved side limited first or the row numbers chosen, is bounded there as any other). Detector: `libc top N:` (tests/duck-wire.test.ts) and the `text under libc:` plan
-  entries and rows test (tests/duck-plans.test.ts), the oracle's `text top N:` and `text min/max:`.
+  FROM item, the preserved side limited first or the row numbers chosen, is bounded there as any other). Detector: `libc top N:` and
+  `libc grouped:` (tests/duck-wire.test.ts), the `text under libc:` plan entries and the rows tests (tests/duck-plans.test.ts),
+  the oracle's `text top N:`, `text min/max:` and `text keyed once a group:`.
 - **A tie under ICU is two strings, ordered by their bytes** (U+FE0F is ignorable there): every order under ICU ends in
   the bytes, `sortKeys`, `icuKey`, `textMinMax`.
 - **A refusal raised at a row never quotes the row** (issue 128): it reaches any user, in a tool's error box and the
