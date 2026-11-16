@@ -806,6 +806,25 @@ export function registerLibcOrder(conn: DuckDBConnection, collate: string, order
       if (named === undefined) throw new Error(`the libc collation ${String(c)}'s order was not read (Mason bug: report it)`);
       return libcKey(named, String(s));
     });
+    // THE KEY OR NULL, for a value whose key may never be compared (src/duck/rewrite.ts `modeKeyedOnce`: mode()'s
+    // ORDER BY keys every distinct value of its input, groups a HAVING or an outer WHERE drops included). The order's
+    // own refusal (`libc-uncovered`, `libc-locale-unread`: 0A000) answers NULL instead, and the rewrite raises it again
+    // through `__mason_libc_checked` for the value picked, where the key decided the answer. Anything else still raises
+    scalar(conn, "__mason_libc_key_or_null", [VARCHAR, VARCHAR], VARCHAR, ([s, c]) => {
+      const named = LIBC_ORDERS.get(String(c));
+      if (named === undefined) throw new Error(`the libc collation ${String(c)}'s order was not read (Mason bug: report it)`);
+      try { return libcKey(named, String(s)); } catch (e) {
+        if (e instanceof PgEvalError && e.code === "0A000") return null;
+        throw e;
+      }
+    });
+    // the value itself, once the order keys it: its refusal raised (the value mode() picked, read once)
+    scalar(conn, "__mason_libc_checked", [VARCHAR, VARCHAR], VARCHAR, ([s, c]) => {
+      const named = LIBC_ORDERS.get(String(c));
+      if (named === undefined) throw new Error(`the libc collation ${String(c)}'s order was not read (Mason bug: report it)`);
+      libcKey(named, String(s));
+      return String(s);
+    });
   }
   if (database) keyScalar(conn, JSONB_KEY_FUNCTIONS.libc.key, [VARCHAR], BLOB, ([j]) => new DuckDBBlobValue(jsonbKey(String(j), { kind: "libc", order })));
 }

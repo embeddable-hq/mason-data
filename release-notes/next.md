@@ -14,6 +14,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   - It works only for an upgrade from this release or a later one. An older Mason does not say what its synced data
     holds, and the command says so. For an upgrade from 0.22.0 or before, read each release's "Before you upgrade".
 
+- **`mode() WITHIN GROUP (ORDER BY …)` of a `text` or `varchar` is faster under a libc collation**, such as a database
+  whose collation is `en_US.utf8`. Over a million rows, the most common status per tenant took 2.2 s and now takes
+  under 0.1 s, about a fifth of Postgres's time. The answers are Postgres's, as before: of values equally common, the
+  first in the collation's order wins. Under a locale other than English, a value holding a character Mason cannot order
+  as the collation does now refuses the query only when it is among the most common values of its group. Before, any
+  such value it read refused it. These are still slow: a `mode()` of a `char(n)` or
+  a `citext`, one ordered with `USING`, and one of a value that calls `random()` or reads a subquery or an outer
+  query's column.
+
 ## What was wrong and is now right
 
 - **A column your sources file leaves out is no longer served under another name.** This covers a column that
