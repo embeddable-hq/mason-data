@@ -46,6 +46,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   Sync.** Each is the button that opens its choice, as before. The line under a table now holds only the longer
   words: a first sync's progress, an error and the stream's state. In a narrow window, where these columns have no
   room, their buttons are in the line under the table, as before. The Not added list has neither column.
+- **The web page's Users page now shows how to connect an MCP client.** The Connect box is now titled "Connect a
+  Postgres client or BI tool". Under it, a new box, "Connect an MCP client", gives the line to run for Claude Code and
+  the JSON for Claude Desktop, Cursor and other clients, each with a Copy button. Both run `mason mcp` through `npx`,
+  pinned to the version of Mason you run, so the client's computer needs Node 22.13 or later. The web versions of
+  ChatGPT and claude.ai can't connect this way yet.
+  - When you add a user, its dialog has the same two in a closed section, "Connect an MCP client", with the user's
+    password in them. Like the password, they are shown only once.
 
 ## What was wrong and is now right
 

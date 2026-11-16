@@ -771,6 +771,9 @@ test("the users while the roles file cannot be read: mason user list's tip, word
   assert.doesNotMatch(textOf(renderUsers(list, null, NOW_R, null, null)), /cannot be read/);
 });
 
+/** New user added's MCP section (issue 1114): closed, under the URL, across the rows' width. */
+const MCP_UNDER = /<dd class="under"><details class="once-mcp" data-open="added-mcp"><summary>Connect an MCP client<\/summary>[^]*?<\/details><\/dd>/;
+
 test("a user just added: the one-time dialog's parts, titled New user added; URL, User and Password alone, in that order, held equal to mason user add's rows — the URL and the Password each with a Copy that copies it, the User as plain text; Shown once right of the password's Copy; one line that it is only shown once — no Database, Host, Port or SSL mode (Connect's), no psql line", async () => {
   const password = "mason_0123456789abcdef_" + "a".repeat(32);
   const url = `postgres://metabase:${password}@127.0.0.1:5433/shop`;
@@ -778,7 +781,10 @@ test("a user just added: the one-time dialog's parts, titled New user added; URL
     database: "shop", url, psql: psqlLine(url), host: "127.0.0.1", port: 5433, sslmode: "require", roleFrom: "none" as const };
   const parts = fn<[unknown], Record<string, string>>("renderAdded")(added);
   assert.deepEqual(Object.keys(parts), ["once-head", "once-status", "once-foot"], "the dialog's three parts");
-  const html = onceHtml(parts);
+  // under the URL, a closed section of its own (issue 1114, held by the test of it): the rows are what is around it
+  const full = onceHtml(parts);
+  assert.match(full, new RegExp(`<dt>URL</dt><dd><span class="copyrow">[^]*?</dd>${MCP_UNDER.source}<dt>User</dt>`), "Connect an MCP client right under the URL");
+  const html = full.replace(MCP_UNDER, "");
   const text = textOf(html);
   // the title, then the user's own three fields, in one layout: each a label and its value, a Copy on all but the name
   // (issues 839, 876); Shown once beside the password's Copy; the status line, then one line (the button is the dialog's)
@@ -1785,7 +1791,7 @@ const ADDED = (user: string) => {
 };
 test("the New user added dialog: under its rows a status line, Waiting for its first query… until the user is seen, then Connected; no tool's guide, psql line or cloud line", () => {
   const renderAdded = (a: unknown, o?: unknown) => onceHtml(fn<[unknown, unknown?], Record<string, string>>("renderAdded")(a, o));
-  const between = (html: string) => textOf(html).replace(/^.*? Copy Shown once /, "").replace(/ ?The password is only shown once$/, "");
+  const between = (html: string) => textOf(html.replace(MCP_UNDER, "")).replace(/^.*? Copy Shown once /, "").replace(/ ?The password is only shown once$/, "");
   const waiting = renderAdded(ADDED("metabase"));
   assert.equal(between(waiting), "Waiting for its first query…");
   assert.equal(between(renderAdded(ADDED("metabase"), { connected: true })), "Connected");
@@ -2551,7 +2557,7 @@ function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "", winExtra: Recor
     setInterval: (f: () => void) => { tick = f; return 1; }, setTimeout: (f: () => void, ms: number) => setTimeout(f, ms), ...winExtra });
   /** the reader follows a link of the nav: the hash changes, and the browser says so */
   const go = (to: string) => { location.hash = to; onWin.get("hashchange")!(); };
-  return { el, on, doc, go, replaced, tick: () => tick!(), settle: () => new Promise((r) => setTimeout(r, 20)) };
+  return { el, els, on, doc, go, replaced, tick: () => tick!(), settle: () => new Promise((r) => setTimeout(r, 20)) };
 }
 
 test("arriving on the Users page puts the cursor in the add form's Name — at the start and by a link followed; never at a poll's write, nor from what the person focused since, nor on a touch screen or read-only (issue 887)", async () => {
@@ -2602,7 +2608,7 @@ test("after Add a user, New user added is a modal dialog: its Copy focused; a po
   run.answers.set("GET api/state", answer(CATALOG_STATE));
   run.answers.set("POST api/users", () => new Response(JSON.stringify({ user: "grafana", id: "0123456789abcdef", addedAt: "2026-10-27T09:11:00.000Z", password, database: "shop",
     url: `postgres://grafana:${password}@127.0.0.1:5433/shop` }), { status: 200 }));
-  const { el, on, doc, go, tick, settle } = fakeBrowser(run, "#users");
+  const { el, els, on, doc, go, replaced, tick, settle } = fakeBrowser(run, "#users");
   await settle();
   const d = doc as unknown as { focused: string };
   const once = el("once");
@@ -2615,6 +2621,11 @@ test("after Add a user, New user added is a modal dialog: its Copy focused; a po
   assert.deepEqual([once.open, once.shown], [true, 1], "opened as a modal, once");
   assert.match(el("once-head").html, /^<p class="once-title" id="once-title">New user added<\/p><dl class="facts"><dt>URL<\/dt>[^]*<dt>User<\/dt><dd>grafana<\/dd>[^]*Shown once/);
   assert.ok(el("once-head").html.includes(password));
+  // its MCP section (issue 1114): closed, under the URL, the user's own URL in both lines, as the run's version pins them
+  const userUrl = `postgres://grafana:${password}@127.0.0.1:5433/shop`;
+  assert.match(el("once-head").html, /<dd class="under"><details class="once-mcp" data-open="added-mcp"><summary>Connect an MCP client<\/summary>/);
+  assert.ok(textOf(el("once-head").html).includes(`claude mcp add mason --env MASON_URL="${userUrl}" -- npx -y @mason-data/cli@${CATALOG_STATE.engine.version} mcp`));
+  assert.ok(textOf(el("once-head").html).includes(`"MASON_URL": "${userUrl}"`));
   assert.match(textOf(el("once-status").html), /^Waiting for its first query…$/);
   assert.equal(textOf(el("once-foot").html), "The password is only shown once");
   assert.equal(d.focused, "once [data-copy]", "the focus on its first Copy");
@@ -2644,7 +2655,8 @@ test("after Add a user, New user added is a modal dialog: its Copy focused; a po
   assert.equal(once.open, true, "a hash followed leaves it open");
   go("#users"); await settle();
   // the user connects: its status line alone is written again
-  run.answers.set("GET api/state", answer({ ...CATALOG_STATE, sessions: { open: 1, byClient: [{ user: "grafana", client: "Grafana", open: 1, running: 0 }] } }));
+  // (the run's version moving under it too: the MCP lines keep the one the user was added under)
+  run.answers.set("GET api/state", answer({ ...CATALOG_STATE, engine: { ...CATALOG_STATE.engine, version: "9.9.9" }, sessions: { open: 1, byClient: [{ user: "grafana", client: "Grafana", open: 1, running: 0 }] } }));
   const head = el("once-head").writes;
   go("#users"); await settle();
   assert.match(textOf(el("once-status").html), /^Connected$/);
@@ -2656,6 +2668,9 @@ test("after Add a user, New user added is a modal dialog: its Copy focused; a po
   assert.equal(d.focused, "user-name", "the focus back on Name");
   assert.deepEqual([el("once-head").html, el("once-status").html, el("once-foot").html], ["", "", ""]);
   assert.ok([...["users", "added", "action", "once-head", "once-status", "once-foot"]].every((id) => !el(id).html.includes(password)), "the password nowhere on the page");
+  // nor its MCP lines, in any part of the document, nor in an address the page went to
+  assert.deepEqual([...els.values()].filter((e) => e.html.includes(password) || e.html.includes("MASON_URL") && e.html.includes("grafana")).map((e) => e.id), [], "the password and the user's MCP lines nowhere in the document");
+  assert.ok(replaced.every((u) => !u.includes(password)), "never in an address");
   tick(); await settle();
   assert.equal(once.shown, 2, "and never again");
   // a read-only page adds no user: never a dialog
@@ -4452,8 +4467,8 @@ test("Tables and Users: the sections are a page head, the cards' part and a tool
   assert.match(fn<[unknown], string>("renderAddUser")(CATALOG_STATE), /^<form id="add-user" class="formcard"[^>]*>[\s\S]*<button type="submit" id="add-user-submit" class="primary" data-room="Add a user" data-room2="Adding…">Add a user<\/button><p class="dim roles-line">[\s\S]*<\/p><\/form>$/);
   // the users first, right under the title (their read-only line is renderUsers' own); then the form, the password just
   // shown beside it, Connect: a card that appears moves nothing above it
-  const order = ["users-h", "users", "add-box", "add-kinds", "add-user-box", "add-share-box", "action", "added", "users-connect"].map((id) => users.indexOf(`id="${id}"`));
-  assert.ok(order.every((i, n) => i >= 0 && (n === 0 || i > order[n - 1]!)), "the title, the users, the box (its segments, the form, the temporary cloud login), its failure, the card, Connect");
+  const order = ["users-h", "users", "add-box", "add-kinds", "add-user-box", "add-share-box", "action", "added", "users-connect", "users-mcp"].map((id) => users.indexOf(`id="${id}"`));
+  assert.ok(order.every((i, n) => i >= 0 && (n === 0 || i > order[n - 1]!)), "the title, the users, the box (its segments, the form, the temporary cloud login), its failure, the card, Connect a Postgres client or BI tool, then Connect an MCP client");
   assert.match(users, /<\/div>\s*<div id="users"><\/div>\s*<!--[^>]*-->\s*<div id="add-box" class="add-box"><div id="add-kinds"><\/div><div class="add-panes"><div id="add-user-box"><\/div><div id="add-share-box"><\/div><\/div><\/div>/, "the users list right under the page's head, then the box");
 });
 
@@ -4501,7 +4516,7 @@ test("Users: the add form's password is the one-time dialog, marked shown once; 
     database: "shop", url: "postgres://metabase@127.0.0.1:5433/shop" }));
   assert.match(added, /^<p class="once-title" id="once-title">New user added<\/p>/);
   assert.match(added, /<span class="badge warn">Shown once<\/span>/);
-  assert.equal([...added.matchAll(/data-copy="/g)].length, 2, "the URL and the password each have a Copy; the name is plain, the database is Connect's");
+  assert.equal([...added.replace(MCP_UNDER, "").matchAll(/data-copy="/g)].length, 2, "the URL and the password each have a Copy; the name is plain, the database is Connect's (the MCP section has its own)");
   const run = fakeRun();
   let t = Date.UTC(2026, 9, 28, 9, 0, 0);
   run.answers.set("GET api/users?lastUsed=1", answer({ users: [{ name: "old", id: "aaaaaaaaaaaaaaaa", addedAt: "2026-10-01T10:00:00.000Z", removedAt: "2026-10-02T10:00:00.000Z", live: false, lastUsedAt: null, url: null },
@@ -5837,7 +5852,7 @@ test("Users: ONE Connect panel for the run — host, port, database, sslmode and
   assert.equal(typeof renderUsersConnect, "function", "src/web/pages/users.js exports renderUsersConnect");
   const pg = { url: "postgresql://127.0.0.1:5433/shop", host: "127.0.0.1", port: 5433, database: "shop", shown: "postgresql://<user>:<password>@127.0.0.1:5433/shop", psql: "psql 'postgresql://<user>:<password>@127.0.0.1:5433/shop'" };
   const html = renderUsersConnect!(pg);
-  assert.equal(textOf(html), "Connect Host 127.0.0.1 Copy Port 5433 Copy Database shop Copy SSL mode disable Copy URL postgresql://<user>:<password>@127.0.0.1:5433/shop Copy " +
+  assert.equal(textOf(html), "Connect a Postgres client or BI tool Host 127.0.0.1 Copy Port 5433 Copy Database shop Copy SSL mode disable Copy URL postgresql://<user>:<password>@127.0.0.1:5433/shop Copy " +
     "Put a user's name and password in place of <user> and <password> . The password is shown only once, when you add the user. If it's lost, remove the user and add it again.");
   for (const id of ["host", "port", "database", "sslmode", "url"]) {
     assert.match(html, new RegExp(`<code id="users-connect-${id}">`), id);
@@ -5851,7 +5866,114 @@ test("Users: ONE Connect panel for the run — host, port, database, sslmode and
   const rows = fn<[unknown, string | null, number], string>("renderUsers")({ users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: null,
     url: "postgresql://metabase@127.0.0.1:5433/shop" }], lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, NOW);
   assert.ok(!/postgresql:\/\/|data-copy|>URL</.test(rows), "no URL, and no Copy, in a user's row");
-  assert.match(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), /<div id="users"><\/div>[\s\S]*<div id="users-connect"><\/div>\s*<\/section>/, "the list first, the panel last");
+  assert.match(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), /<div id="users"><\/div>[\s\S]*<div id="users-connect"><\/div>\s*<div id="users-mcp"><\/div>\s*<\/section>/, "the list first, the Postgres client or BI tool's box, then the MCP client's last");
+});
+
+test("Users: Connect an MCP client (issue 1114) — Claude Code's line and the JSON for other clients, each with Copy, from the run's URL and version; the Node they need; not the web ChatGPT or claude.ai", async () => {
+  const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
+  const renderUsersMcp = usersPage.renderUsersMcp as ((pg: unknown, served?: boolean, version?: unknown) => string) | undefined;
+  assert.equal(typeof renderUsersMcp, "function", "src/web/pages/users.js exports renderUsersMcp");
+  // the code a block holds, as its Copy copies it (its text, the lines kept)
+  const codeOf = (html: string, id: string): string => (new RegExp(`<code id="${id}">([\\s\\S]*?)</code>`).exec(html)?.[1] ?? "")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+  const shown = "postgres://<user>:<password>@127.0.0.1:5433/shop";
+  const pg = { url: "postgresql://127.0.0.1:5433/shop", host: "127.0.0.1", port: 5433, database: "shop", shown, psql: `psql '${shown}'` };
+  const html = renderUsersMcp!(pg, false, "0.22.0");
+  // the line to run, with the URL in the server's environment (MASON_URL, src/cli/mcp.ts), never on its command line
+  assert.equal(codeOf(html, "users-mcp-claude-code"), `claude mcp add mason --env MASON_URL="${shown}" -- npx -y @mason-data/cli@0.22.0 mcp`);
+  // the JSON a client's MCP settings take, pretty-printed
+  const json = codeOf(html, "users-mcp-json");
+  assert.deepEqual(JSON.parse(json), { mcpServers: { mason: { command: "npx", args: ["-y", "@mason-data/cli@0.22.0", "mcp"], env: { MASON_URL: shown } } } });
+  assert.equal(json, JSON.stringify(JSON.parse(json), null, 2), "pretty-printed");
+  for (const id of ["claude-code", "json"]) assert.match(html, new RegExp(`<pre><code id="users-mcp-${id}">[\\s\\S]*?</code></pre><span class="copy-side"><button type="button" class="small" data-copy="users-mcp-${id}" data-room="Press ⌘C">Copy</button></span></div>`), `${id}: a block with its Copy`);
+  assert.equal(textOf(html).replace(/<code[\s\S]*$/, ""), "Connect an MCP client Claude Code: run this in a terminal. claude mcp add mason --env MASON_URL=\"postgres://<user>:<password>@127.0.0.1:5433/shop\" -- npx -y @mason-data/cli@0.22.0 mcp Copy " +
+    "Claude Desktop, Cursor and other clients: add this to the client's MCP settings. { \"mcpServers\": { \"mason\": { \"command\": \"npx\", \"args\": [ \"-y\", \"@mason-data/cli@0.22.0\", \"mcp\" ], \"env\": { \"MASON_URL\": \"postgres://<user>:<password>@127.0.0.1:5433/shop\" } } } } Copy " +
+    "Put a user's name and password in place of <user> and <password> . The client's computer needs Node 22.13 or later. " +
+    "The web versions of ChatGPT and claude.ai can't connect this way yet.");
+  // the Node it names is the package's own (cli/package.json engines)
+  const pkg = JSON.parse(fs.readFileSync(path.join(WEB, "..", "..", "cli", "package.json"), "utf8")) as { name: string; engines: { node: string } };
+  assert.equal(`>=${usersPage.MCP_NODE as string}`, pkg.engines.node, "the Node the page names is cli/package.json's engines");
+  assert.equal(usersPage.MCP_PACKAGE, pkg.name, "the package npx runs is the CLI's");
+  // pinned only to a release npm has: a checkout ("dev"), an image of main or a version not said runs the package unpinned
+  for (const v of ["dev", "main-0123abc", "0.23.0-rc.1", null, undefined, 22]) {
+    const h = renderUsersMcp!(pg, false, v);
+    assert.equal(codeOf(h, "users-mcp-claude-code"), `claude mcp add mason --env MASON_URL="${shown}" -- npx -y @mason-data/cli mcp`, String(v));
+    assert.deepEqual((JSON.parse(codeOf(h, "users-mcp-json")) as { mcpServers: { mason: { args: string[] } } }).mcpServers.mason.args, ["-y", "@mason-data/cli", "mcp"], String(v));
+  }
+  // a run that did not say where a tool connects: no box, as the Postgres client's
+  assert.equal(renderUsersMcp!(undefined), "");
+  assert.equal(renderUsersMcp!({ host: "127.0.0.1" }), "");
+  // on a server the URL's host is the server's own view of itself: the same note as the Postgres client or BI tool's box; none where
+  // the URL is the address a client reaches (MASON_PG_PUBLIC_URL), whose sslmode the client's URL keeps
+  const note = /A tool on another machine uses the server's own address in place of 127\.0\.0\.1/;
+  assert.match(textOf(renderUsersMcp!(pg, true, "0.22.0")), note);
+  assert.doesNotMatch(textOf(html), note);
+  const pub = { url: "postgresql://db.example.com:6432/shop?sslmode=verify-full", host: "db.example.com", port: 6432, database: "shop", sslmode: "verify-full", public: true,
+    shown: "postgres://<user>:<password>@db.example.com:6432/shop?sslmode=verify-full" };
+  const ph = renderUsersMcp!(pub, true, "0.22.0");
+  assert.doesNotMatch(textOf(ph), note);
+  assert.equal(codeOf(ph, "users-mcp-claude-code"), `claude mcp add mason --env MASON_URL="${pub.shown}" -- npx -y @mason-data/cli@0.22.0 mcp`);
+});
+
+test("New user added: a closed Connect an MCP client under the URL — the box's two lines with the user's own URL, each Shown once with its Copy, and why the JSON keeps the password out of the shell's history (issue 1114)", async () => {
+  const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
+  const renderUsersMcp = usersPage.renderUsersMcp as (pg: unknown, served?: boolean, version?: unknown) => string;
+  const renderAdded = (a: unknown, o?: unknown) => onceHtml(fn<[unknown, unknown?], Record<string, string>>("renderAdded")(a, o));
+  const codeOf = (html: string, id: string): string => (new RegExp(`<code id="${id}">([\\s\\S]*?)</code>`).exec(html)?.[1] ?? "")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+  const a = ADDED("claude");
+  const html = renderAdded(a, { version: "0.22.0" });
+  const section = MCP_UNDER.exec(html)?.[0] ?? "";
+  assert.notEqual(section, "", "a section of its own, under the URL");
+  assert.doesNotMatch(section, /<details[^>]* open/, "closed at first");
+  // the box's own lines (one builder, mcpSnippets): the box's with the user's URL in place of the placeholders' one
+  const shown = "postgres://<user>:<password>@127.0.0.1:5433/shop";
+  const box = renderUsersMcp({ host: "127.0.0.1", port: 5433, database: "shop", shown }, false, "0.22.0");
+  for (const id of ["claude-code", "json"]) assert.equal(codeOf(section, `added-mcp-${id}`), codeOf(box, `users-mcp-${id}`).replaceAll(shown, a.url), `${id}: the box's, with this user's URL`);
+  assert.equal(codeOf(section, "added-mcp-claude-code"), `claude mcp add mason --env MASON_URL="${a.url}" -- npx -y @mason-data/cli@0.22.0 mcp`);
+  assert.deepEqual(JSON.parse(codeOf(section, "added-mcp-json")), { mcpServers: { mason: { command: "npx", args: ["-y", "@mason-data/cli@0.22.0", "mcp"], env: { MASON_URL: a.url } } } });
+  assert.ok(section.includes(a.password), "the password in both, as the URL carries it");
+  // each line with its Copy, Shown once under it as the password's is beside its own
+  for (const id of ["claude-code", "json"]) {
+    assert.match(section, new RegExp(`<pre><code id="added-mcp-${id}">[^]*?</code></pre><span class="copy-side"><button type="button" class="small" data-copy="added-mcp-${id}" data-room="Press ⌘C">Copy</button><span class="badge warn">Shown once</span></span></div>`), id);
+  }
+  assert.equal(textOf(section), `Connect an MCP client Claude Code: run this in a terminal. ${codeOf(section, "added-mcp-claude-code")} Copy Shown once ` +
+    "Running this line saves the password in your shell history. Pasting the JSON into the client's settings file avoids that. " +
+    `Claude Desktop, Cursor and other clients: add this to the client's MCP settings. ${codeOf(section, "added-mcp-json").replace(/\s+/g, " ")} Copy Shown once`);
+  // a release pins the package; the run's version not said or no release: unpinned, as the box
+  assert.match(codeOf(renderAdded(a), "added-mcp-claude-code"), / npx -y @mason-data\/cli mcp$/);
+  assert.match(codeOf(renderAdded(a, { version: "dev" }), "added-mcp-claude-code"), / npx -y @mason-data\/cli mcp$/);
+  // no URL (Mason not running when it was added): no section, as no URL row
+  const { url: _url, ...noUrl } = a;
+  assert.doesNotMatch(renderAdded(noUrl, { version: "0.22.0" }), /MCP|once-mcp/);
+  // it never widens the dialog, and a long line scrolls inside its own block
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
+  assert.match(css, /\.once \.facts dd\.under \{ grid-column: 1 \/ -1; min-width: 0; contain: inline-size; \}/);
+  assert.match(css, /\.copyblock pre \{ flex: 1 1 auto; min-width: 0; margin: 0; overflow-x: auto; white-space: pre;/);
+});
+
+test("the Users page over a fake run: Connect an MCP client under Connect a Postgres client or BI tool, from /api/state's postgres and version — on a served run and a read-only page too", async () => {
+  for (const [what, state] of [["mason start", RUNNING], ["mason serve", { ...RUNNING, served: true }],
+    ["read-only", { ...RUNNING, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" }]] as const) {
+    const run = fakeRun();
+    run.answers.set("GET api/state", answer(state));
+    run.answers.set("GET api/share/choices", answer(TWO_ROLES.body));
+    const app = fn<[unknown], App>("createApp")(run.fetch);
+    app.show("users");
+    await app.poll();
+    const v = app.view();
+    assert.match(v["users-connect"]!, /^<div class="connect"><p class="connect-title">Connect a Postgres client or BI tool<\/p>/, what);
+    assert.match(v["users-mcp"]!, /^<div class="connect connect-mcp"><p class="connect-title">Connect an MCP client<\/p>/, what);
+    assert.ok(textOf(v["users-mcp"]!).includes(`MASON_URL="${state.postgres!.shown}" -- npx -y @mason-data/cli@${state.engine.version} mcp`), `${what}: the run's URL and version`);
+    assert.equal(/server's own address/.test(v["users-mcp"]!), /server's own address/.test(v["users-connect"]!), `${what}: the server's note where the Postgres client or BI tool's box has it`);
+  }
+  // a stopped run's state, with no postgres: neither box
+  const run = fakeRun();
+  run.answers.set("GET api/state", answer({ ...RUNNING, postgres: undefined }));
+  const app = fn<[unknown], App>("createApp")(run.fetch);
+  app.show("users");
+  await app.poll();
+  assert.deepEqual([app.view()["users-connect"], app.view()["users-mcp"]], ["", ""]);
 });
 
 test("the Overview's first-run checklist: Mason is running, Sync a table, Create a user — the same words done or not, each ○ with its one action; done while a table is synced and a user exists, whatever was queried (the owner, 2026-11-13)", async () => {
@@ -6903,6 +7025,8 @@ test("the Users page over a fake run: the add box offers New user and Temporary 
   const open = app.view();
   assert.match(open["once-head"]!, /<p class="once-title" id="once-title">Temporary cloud login<\/p>/);
   assert.ok(open["once-head"]!.includes(PASSWORD));
+  // no MCP section: it is for a tool in the cloud, which runs no command on a computer of its own (issue 1114)
+  assert.doesNotMatch(onceHtml(open), /MCP|MASON_URL|once-mcp/);
   assert.match(open.added!, /<p class="added-title">Temporary cloud login<\/p>/);
   assert.ok(!open.added!.includes(PASSWORD), "never in the card");
   assert.ok(!open.users!.includes("share_a1b2c3"), "not a user");
