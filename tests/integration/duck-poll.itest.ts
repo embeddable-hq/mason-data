@@ -117,10 +117,10 @@ test("the copy and the xmin poll keep DuckDB equal to the source through every k
 
     psql(dbUrl, "INSERT INTO items VALUES (51, 'new', 9.99, NULL); UPDATE items SET v = 'changed', n = NULL WHERE id = 2; DELETE FROM items WHERE id = 3; " +
       "UPDATE shop.lines SET qty = -1 WHERE order_id = 1; DELETE FROM shop.lines WHERE order_id = 2");
-    // each copy's last sync: after its copy, the one poll that caught it up; once polled, that table's own poll
+    // each copy's last sync: its whole sync, caught up by one poll before it was swapped in (issue 1066); once polled, that table's own poll
     // (src/duck/sync.ts Synced), and its rows the copy's after it
     const lastSync = (): unknown[] => sync.state().map((s) => { const x = (s as { synced?: { by: string; seconds: number | null } }).synced; return [s.source, x?.by, typeof x?.seconds]; });
-    assert.deepEqual(lastSync(), [["public.items", "catch-up", "number"], ["shop.lines", "catch-up", "number"]]);
+    assert.deepEqual(lastSync(), [["public.items", "copy", "number"], ["shop.lines", "copy", "number"]]);
     const syncedBefore = (sync.state()[0] as { synced?: { at: string } }).synced?.at ?? "";
     await same("an insert, an update to NULL, a delete");
     assert.deepEqual(lastSync(), [["public.items", "poll", "number"], ["shop.lines", "poll", "number"]]);
@@ -1341,7 +1341,8 @@ test("what a sync says of a table right after its copy and after each poll is th
     await sync.pollNow(["public.t"]);
     const moments = said.filter((x) => x.syncedAt !== null);
     assert.ok(moments.some((x) => x.moment === "the copy's swap"), JSON.stringify(said));
-    assert.ok(moments.filter((x) => x.moment !== "the copy's swap").length >= 3, `the catch-up and two polls at least: ${JSON.stringify(said)}`);
+    // its catch-up is part of its whole sync, before the swap (issue 1066): the swap carries its time
+    assert.ok(moments.filter((x) => x.moment !== "the copy's swap").length >= 2, `two polls at least: ${JSON.stringify(said)}`);
     for (const m of moments) {
       assert.equal(m.syncedAt, m.ledger, `${m.moment}: what the run says is what the ledger holds`);
       if (m.last?.by === "poll" || m.last?.by === "catch-up") assert.equal(m.last.at, m.ledger, `${m.moment}: and its last sync`);

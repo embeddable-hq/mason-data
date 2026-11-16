@@ -611,6 +611,9 @@ test("a table ADDED and not yet served is refused with where its copy is, never 
     assert.match(await hint("SELECT * FROM public.customers"), /^public\.customers is added and being synced \(its rows are being read\): it is served once its first sync commits/);
     copies = [state({ phase: "waiting" })];
     assert.match(await hint("SELECT * FROM customers"), /^public\.customers is added and waits its turn to be synced: it is served once its first sync commits; mason wait waits for it/);
+    // its first sync waits for an open transaction on the database (issue 1066): a wait, said so, never a failure
+    copies = [state({ phase: "waiting", syncWaits: { why: "its sync waits for transaction 1234 to end. …", checkedAt: "2026-11-15T10:00:00.000Z" } })];
+    assert.match(await hint("SELECT * FROM customers"), /^public\.customers is added, and its first sync waits for an open transaction on the database to end \(mason status says which\): it is served once its first sync commits; mason wait waits for it/);
     copies = [state({ phase: "failed", error: "permission denied for table customers (tried again after 14:05 UTC (failure 1 in a row), …)" })];
     assert.equal(await hint("SELECT * FROM customers"),
       "public.customers is added, but its first sync failed: permission denied for table customers (tried again after 14:05 UTC (failure 1 in a row), …); mason logs says more");
