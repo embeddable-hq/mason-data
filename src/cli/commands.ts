@@ -28,6 +28,7 @@ import { entriesOfLines, logLineText } from "../lib/log-buffer.ts";
 import { LogReader, logPath } from "../lib/log-read.ts";
 import { catalogTable, entryName, findEntry, tableNameProblem, type CatalogColumn, type CatalogTable, type ProjectSource } from "./sources.ts";
 import { addEntry, listTables, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type ListedTable, type PickResult, type RemoveResult } from "./source-edit.ts";
+import { confirmEntries } from "./confirmed.ts";
 import { diskFitNote, type DiskFit, type DiskRoom, type DiskShortage } from "../duck/disk-fit.ts";
 import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFacts, type SourceTable } from "./preflight.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
@@ -1458,7 +1459,13 @@ export async function add(argv: string[]): Promise<number> {
   const db: EditCatalog = { ...down.db, disk: (table) => room(table, ahead) };
   return addTables({ tables: down.tables, file: down.file, anyway,
     pick: async (table, columns, key) => {
-      const r = edited(() => addEntry(down.edit(), db, table, columns, key, how));
+      const r = edited(() => {
+        const ok = addEntry(down.edit(), db, table, columns, key, how);
+        // ITS ENTRY CONFIRMED (src/cli/confirmed.ts): written against the columns as they are now, so the next start takes
+        // it afresh, a column it left out before included — as a run takes an add at once (a sync's own change is no choice of columns)
+        if (how.keep !== true) confirmEntries(where.project.dir, [{ table: ok.table, shape: db.tables.find((t) => t.source === ok.table)?.shape }]);
+        return ok;
+      });
       if ("ok" in r && r.ok.disk !== null && "fits" in r.ok.disk) ahead.set(table, r.ok.disk.estimateBytes);
       return r;
     },

@@ -70,12 +70,29 @@ export function lostType(c: SourceColumnInfo, stored: string): boolean {
     !/^jsonb?$/.test(c.type) && !nativeVarchar(c.type);
 }
 
-/** a table's columns as a copy is made with them: their names and source types, in order */
+/** a table's columns as a copy is made with them: their names and source types, in order, and each one's number on the
+ *  source (`attnum`, its identity: issue 1073) where it is known — two columns whose names were swapped are other
+ *  columns, so a copy holding the old ones is read again whole */
 export const columnsKey = (columns: readonly SourceColumnInfo[]): string => JSON.stringify(columns.map((c) => {
   // what the copy holds is part of the shape: a copy made before a column's type was held as its text is read again
   const hold = holdOf(c.type, c.typeKind);
-  return hold === "same" && c.domain !== true ? [c.name, c.type] : [c.name, c.type, hold, ...(c.domain === true ? ["domain"] : [])];
+  const named = hold === "same" && c.domain !== true ? [c.name, c.type] : [c.name, c.type, hold, ...(c.domain === true ? ["domain"] : [])];
+  return c.attnum === undefined ? named : [...named, `#${c.attnum}`];
 }));
+
+/** the columns without their numbers: how a copy recorded by a Mason before them is held to the columns now */
+export const unnumbered = (columns: readonly SourceColumnInfo[]): SourceColumnInfo[] => columns.map(({ attnum: _attnum, ...c }) => c);
+
+/**
+ * A RECORD WRITTEN BEFORE COLUMNS HAD NUMBERS (issue 1073), given them from the table's columns as the source has them
+ * now, where every column has its number and the names and types are the same: so its columns' key is the one a fresh
+ * read makes, and it is not read again for it. Null where there is nothing to take (every column numbered already, or
+ * the columns differ). The start takes them as it places the columns (`Sync.placeColumns`); `readAgain` does the same.
+ */
+export function numberedFrom(copied: readonly SourceColumnInfo[], now: readonly SourceColumnInfo[]): SourceColumnInfo[] | null {
+  if (!copied.some((c) => c.attnum === undefined) || !now.every((c) => c.attnum !== undefined) || columnsKey(unnumbered(now)) !== columnsKey(unnumbered(copied))) return null;
+  return copied.map((c) => ({ ...c, attnum: now.find((x) => x.name === c.name)!.attnum! }));
+}
 
 /** a copy in a layout this Mason no longer keeps: the layout as `mason status` says it, its short form for a line, and
  *  what the start's log says of it after the table's name */
@@ -117,6 +134,9 @@ export interface StoredFacts {
   /** each table the sources file adds now, with its columns as the run read them from the source: what a start
    *  compares each table's record with (`columnsKey`) */
   added: Array<{ table: string; columns: SourceColumnInfo[] }>;
+  /** the tables the run holds now for their columns (`Sync.unplaced`, src/duck/column-identity.ts): a column the sources
+   *  file left out would be synced under another name. Nothing reads one again while it is held */
+  held: string[];
 }
 
 /** the tables in the synced data, by `relationKey`: whether a recorded table is there (`forgetMissing`, `readStored`) */
@@ -234,24 +254,32 @@ export interface ReadAgain {
   bytes: number | null;
   /** it serves its synced data until its new sync is in */
   serves: boolean;
+  /** held now for its columns (`StoredFacts.held`): read again once it is let go, not at the first start */
+  held: boolean;
 }
 
 /**
  * EVERY SYNCED TABLE THIS RELEASE'S START WOULD READ AGAIN WHOLE, over a running Mason's facts: the start's own steps,
  * in its order — a recorded table with no table under it is forgotten and synced anew (`forgetMissing`), then each
- * table's layout (`layoutOf`), then `wholeRead` against its columns as the source has them. A table not synced yet
+ * table's layout (`layoutOf`), its record numbered as the columns are placed (`numberedFrom`), then `wholeRead` against
+ * its columns as the source has them. A table held for its columns is listed, and said held: it is read again once it
+ * is let go. Which column is which (src/duck/column-identity.ts) is the database's and the sources file's to change,
+ * never a release's, so the check takes the running Mason's holds as they are. A table not synced yet
  * (its first sync) and one the sources file no longer adds (dropped at the start) are not read AGAIN, and not listed.
  */
-export function readAgain(facts: Pick<StoredFacts, "tables" | "added">): ReadAgain[] {
+export function readAgain(facts: Pick<StoredFacts, "tables" | "added" | "held">): ReadAgain[] {
   const added = new Map(facts.added.map((a) => [a.table, a.columns]));
+  const held = new Set(facts.held);
   const out: ReadAgain[] = [];
   for (const t of facts.tables) {
     const columns = added.get(t.source);
     if (columns === undefined || t.phase !== "copied") continue;
-    const base = { table: t.source, rows: t.rows, bytes: t.bytes };
+    const base = { table: t.source, rows: t.rows, bytes: t.bytes, held: held.has(t.source) };
     if (!t.present) { out.push({ ...base, why: "missing", reason: "its synced data is missing", serves: false }); continue; }
     const layout = layoutOf(t);
-    const why = wholeRead({ phase: t.phase, watermark: t.watermark, copiedAs: layout.columns === null ? undefined : columnsKey(layout.columns), retired: layout.retired ?? undefined }, columns);
+    // a record without numbers takes them as the start places the columns (a held table, once it is let go)
+    const copied = layout.columns === null ? null : numberedFrom(layout.columns, columns) ?? layout.columns;
+    const why = wholeRead({ phase: t.phase, watermark: t.watermark, copiedAs: copied === null ? undefined : columnsKey(copied), retired: layout.retired ?? undefined }, columns);
     if (why === null || why.kind === "first") continue;
     if (why.kind === "layout") out.push({ ...base, why: "layout", reason: why.retired.short, layout: why.retired.layout, serves: true });
     else if (why.kind === "columns") out.push({ ...base, why: "columns", reason: "the columns it was synced with are not its columns as this release reads them", serves: true });

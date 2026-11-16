@@ -30,7 +30,7 @@ async function rereadModule(): Promise<Reread | null> {
 }
 
 const source = { url: "postgresql://x@127.0.0.1:1/x", remote: false, host: "127.0.0.1", port: 1, database: "x", user: "x", password: "", sslmode: "disable" } as unknown as Source;
-const col = (name: string, type: string, typeKind?: string): SourceColumnInfo => ({ name, type, notNull: false, comment: null, ...(typeKind !== undefined ? { typeKind } : {}) });
+const col = (name: string, type: string, typeKind?: string, attnum?: number): SourceColumnInfo => ({ name, type, notNull: false, comment: null, ...(typeKind !== undefined ? { typeKind } : {}), ...(attnum !== undefined ? { attnum } : {}) });
 const table = (name: string, columns: SourceColumnInfo[]): AddedTable => ({ source: `public.${name}`, schema: "public", table: name, key: ["id"], columns, foreignKeys: [], bytes: 4096, rows: 3 });
 
 /** each table: as an older Mason left it (its synced table, its record, its ledger), and its columns as the source has them now */
@@ -55,6 +55,11 @@ const CASES: Array<{ name: string; ddl: string | null; record: SourceColumnInfo[
   { name: "vanished", ddl: null, record: [col("id", "integer", "b")], now: [col("id", "integer", "b")] },
   // a first sync not done: not read AGAIN, so not listed
   { name: "pending", ddl: null, record: [col("id", "integer", "b")], now: [col("id", "integer", "b")], phase: "copying", watermark: false },
+  // A RECORD WRITTEN BEFORE COLUMNS HAD NUMBERS (issue 1073), its names and types the source's now: it takes the numbers
+  // from its table as the start places the columns, and is not read again
+  { name: "prenum", ddl: "CREATE TABLE public.prenum (id INTEGER, v VARCHAR)", record: [col("id", "integer", "b"), col("v", "text", "b")], now: [col("id", "integer", "b", 1), col("v", "text", "b", 2)] },
+  // the same, with a type changed on the source: its columns differ, so it is read again
+  { name: "prenumtype", ddl: "CREATE TABLE public.prenumtype (id INTEGER, v INTEGER)", record: [col("id", "integer", "b"), col("v", "integer", "b")], now: [col("id", "integer", "b", 1), col("v", "bigint", "b", 2)] },
   // in the ledger and no longer added: dropped at the start, not listed
   { name: "removed", ddl: "CREATE TABLE public.removed (id INTEGER PRIMARY KEY)", record: [col("id", "integer", "b")], now: [col("id", "integer", "b")], added: false },
 ];
@@ -63,6 +68,7 @@ const CASES: Array<{ name: string; ddl: string | null; record: SourceColumnInfo[
 const EXPECTED: Record<string, { why: string; serves: boolean }> = {
   held: { why: "layout", serves: true }, keyed: { why: "layout", serves: true }, unscaled: { why: "layout", serves: true }, lacking: { why: "layout", serves: true },
   unmarked: { why: "watermark", serves: true }, widened: { why: "columns", serves: true }, vanished: { why: "missing", serves: false },
+  prenumtype: { why: "columns", serves: true },
 };
 
 test("mason upgrade --check names exactly the synced tables this release's start then reads again whole, why, their size, and whether each serves meanwhile (issue 1069)", async () => {
@@ -92,10 +98,13 @@ test("mason upgrade --check names exactly the synced tables this release's start
     // WHAT THE RUNNING MASON PUBLISHES (`/api/state?storage=1`): its own reader's facts, in one transaction, and its tables
     const running = new Sync(store, source, "x", () => undefined, 5_000, "poll", null);
     (running as unknown as { tables: Map<string, AddedTable> }).tables = new Map(added.map((t) => [t.source, t]));
+    // a table the run holds for its columns (src/duck/column-identity.ts): listed, and said held — read again once let go
+    (running as unknown as { unplaced: Map<string, string> }).unplaced.set("public.keyed", "held for its columns");
     const published = await (running as unknown as { storedFacts: () => Promise<unknown> }).storedFacts();
-    assert.deepEqual(published, { format: 1, tables: await reread.readStored(store.writer), added: added.map((t) => ({ table: t.source, columns: t.columns })) });
+    assert.deepEqual(published, { format: 1, tables: await reread.readStored(store.writer), added: added.map((t) => ({ table: t.source, columns: t.columns })), held: ["public.keyed"] });
     const said = reread.readAgain(JSON.parse(JSON.stringify(published)) as Parameters<Reread["readAgain"]>[0]);
     assert.deepEqual(Object.fromEntries(said.map((t) => [t.table.slice("public.".length), { why: t.why, serves: t.serves }])), EXPECTED);
+    assert.deepEqual(said.filter((t) => t.held).map((t) => t.table), ["public.keyed"]);
     for (const t of said) assert.deepEqual([t.rows, t.bytes], [3, 4096], `${t.table}: its size, as the ledger records it`);
 
     // THE COMMAND, against a run that answers with those facts: the same tables, as data and in words
@@ -117,13 +126,15 @@ test("mason upgrade --check names exactly the synced tables this release's start
     assert.deepEqual(answer.tables, said);
     const person = await runMason(app, ["upgrade", "--check"], matrixEnv());
     assert.equal(person.code, 0, person.stderr);
-    assert.match(person.stdout, /^Upgrading from Mason 0\.0\.1 to \S+ reads 7 synced tables again whole from your database, once, at the first start\.\n/);
+    assert.match(person.stdout, /^Upgrading from Mason 0\.0\.1 to \S+ reads 8 synced tables again whole from your database, once, at the first start\.\n/);
     assert.match(person.stdout, /\n {2}public\.vanished +3 rows, 4\.0 KiB on your database · its synced data is missing · not served until its new sync is done\n/);
     assert.match(person.stdout, /\n {2}public\.held +3 rows, 4\.0 KiB on your database · in an older Mason's layout, pt \(point\) not held as the source's text · serves its synced data until then\n/);
+    assert.match(person.stdout, /\n {2}public\.keyed +3 rows, .* · serves its synced data until then · held now for its columns \(mason status says why\): read again once that is fixed\n/);
 
     // WHAT A REAL START OF THIS RELEASE THEN DOES: it reads again exactly those tables
     const upgraded = await opened();
     const needs = (t: AddedTable): boolean => (upgraded as unknown as { needsCopy: (t: AddedTable) => boolean }).needsCopy(t);
+    // (setTables placed the columns: a record without numbers took them, its ledger row written on the writer's turn)
     const readByStart = added.filter((t) => needs(t)).map((t) => t.table).filter((n) => n !== "pending");
     assert.deepEqual(readByStart.sort(), Object.keys(EXPECTED).sort(), "the start reads again what the command said, and nothing else");
     assert.equal(needs(added.find((t) => t.table === "pending")!), true, "a first sync not done is synced, and is not a table read again");
@@ -160,6 +171,9 @@ test("mason upgrade --check against a Mason that does not say what its synced da
     const other = await runMason(dir, ["upgrade", "--check", "--json"], matrixEnv());
     assert.equal(other.code, 1, other.stdout + other.stderr);
     assert.match((JSON.parse(other.stdout) as { error: { message: string } }).error.message, /says what its synced data holds in a form Mason \S+ does not read/);
+    const positional = await runMason(dir, ["upgrade", "--check", "shop", "--json"], matrixEnv());
+    assert.equal(positional.code, 2, positional.stdout);
+    assert.match((JSON.parse(positional.stdout) as { error: { fix: string } }).error.fix, /cd <folder> && mason upgrade --check, or mason -C <folder> upgrade --check/);
     const bare = await runMason(dir, ["upgrade"], matrixEnv());
     assert.equal(bare.code, 2, bare.stderr);
     assert.match(bare.stderr, /mason upgrade: mason upgrade changes nothing by itself: run it with --check/);
@@ -167,4 +181,16 @@ test("mason upgrade --check against a Mason that does not say what its synced da
     await new Promise<void>((r) => server.close(() => r()));
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("mason upgrade --check writes a character that prints as nothing as its escape: a column whose name starts with a byte-order mark is seen to", async () => {
+  let upgrade: typeof import("../src/cli/upgrade.ts") | null = null;
+  try { upgrade = await import("../src/cli/upgrade.ts"); }
+  catch (e) {
+    // absent before issue 1069: the test fails by its assertion, never by the file failing to load
+    if ((e as NodeJS.ErrnoException).code !== "ERR_MODULE_NOT_FOUND") throw e;
+  }
+  assert.ok(upgrade !== null, "src/cli/upgrade.ts");
+  const r = upgrade.checkReport("0.23.0", "0.24.0", [{ table: "public.b", why: "layout", reason: "in an older Mason's layout, \"\uFEFFamount\" stored as text", rows: 1, bytes: null, serves: true, held: false }]);
+  assert.equal(r.details[0]![1], "1 row · in an older Mason's layout, \"\\uFEFFamount\" stored as text · serves its synced data until then");
 });

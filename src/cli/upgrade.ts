@@ -8,7 +8,7 @@
  * The facts are the run's answer, so they are held to their shape before anything reads them (`storedFactsOf`): a
  * shape this release does not read is said, never guessed at.
  */
-import { failed, jsonText, noArguments, parseCommand, reportText, type CommandSpec, type Failure, type NextStep } from "./command.ts";
+import { failed, jsonText, parseCommand, reportText, synopsis, type CommandSpec, type Failure, type NextStep } from "./command.ts";
 import { out as styleOut } from "./style.ts";
 import { callRun } from "./control.ts";
 import { reach } from "./state.ts";
@@ -46,7 +46,8 @@ export const UPGRADE_USAGE = `usage: mason upgrade --check [--json]
 
   The --json answer: { from (the running Mason's version), to (this command's), tables: [{ table, why (layout,
   columns, watermark or missing), reason, layout (for why layout), rows, bytes (the table's size on your database when
-  it was synced), serves (it keeps serving its synced data until its new sync is done) }], next }
+  it was synced), serves (it keeps serving its synced data until its new sync is done), held (held now for its
+  columns: read again once that is fixed, not at the first start) }], next }
 `;
 
 export const UPGRADE: CommandSpec & { needs: "run" } = {
@@ -90,7 +91,7 @@ function tableOf(x: unknown): StoredTable | null {
 
 /** The run's `storage`, held to the shape this release reads: the facts, or null for any other shape. */
 export function storedFactsOf(x: unknown): StoredFacts | null {
-  if (!isObject(x) || x.format !== 1 || !Array.isArray(x.tables) || !Array.isArray(x.added)) return null;
+  if (!isObject(x) || x.format !== 1 || !Array.isArray(x.tables) || !Array.isArray(x.added) || !Array.isArray(x.held) || !x.held.every((h) => typeof h === "string")) return null;
   const tables = x.tables.map(tableOf);
   if (!tables.every((t) => t !== null)) return null;
   const added: StoredFacts["added"] = [];
@@ -99,7 +100,7 @@ export function storedFactsOf(x: unknown): StoredFacts | null {
     if (columns === null) return null;
     added.push({ table: (a as { table: string }).table, columns });
   }
-  return { format: 1, tables: tables as StoredTable[], added };
+  return { format: 1, tables: tables as StoredTable[], added, held: x.held as string[] };
 }
 
 /** `x.y.z` as numbers, or null for any other version (`dev`, `main-<sha>`) */
@@ -115,6 +116,10 @@ export function compareReleases(a: string, b: string): number | null {
   for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i]! < y[i]! ? -1 : 1;
   return 0;
 }
+
+/** a name or a reason as a person reads it: a character that prints as nothing (a byte-order mark, a zero-width space,
+ *  a direction mark) written as its escape, so a column whose name starts with one is seen to */
+const visible = (s: string): string => s.replace(/[\u00AD\u200B-\u200F\u2028-\u202E\u2060-\u2064\uFEFF]/g, (c) => `\\u${c.charCodeAt(0).toString(16).toUpperCase().padStart(4, "0")}`);
 
 /** a table's size as a person reads it: its rows, and its size on the database when it was synced */
 function sizeText(t: ReadAgain): string {
@@ -132,7 +137,8 @@ export function checkReport(from: string, to: string, tables: readonly ReadAgain
   const headline = n === 0
     ? `Upgrading from Mason ${from} to ${to} reads no synced table again whole.`
     : `Upgrading from Mason ${from} to ${to} reads ${n === 1 ? "1 synced table" : `${n} synced tables`} again whole from your database, once, at the first start.`;
-  const details = tables.map((t) => [t.table, `${sizeText(t)} · ${t.reason} · ${t.serves ? "serves its synced data until then" : "not served until its new sync is done"}`] as const);
+  const details = tables.map((t) => [visible(t.table), `${sizeText(t)} · ${visible(t.reason)} · ${t.serves ? "serves its synced data until then" : "not served until its new sync is done"}` +
+    `${t.held ? " · held now for its columns (mason status says why): read again once that is fixed" : ""}`] as const);
   const tips = [
     ...(n > 0 ? ["Each whole read scans its table on your database. Plan for it before you upgrade."] : []),
     ...(compareReleases(from, to) === 0 ? [`This command is the same release as the Mason running now. Run the newer release's command: npx @mason-data/cli@<version> upgrade --check`] : []),
@@ -144,8 +150,11 @@ export async function upgrade(argv: string[]): Promise<number> {
   const f = parseCommand(UPGRADE, argv);
   if (typeof f === "number") return f;
   const json = f.values.json === true;
-  const wrong = noArguments(UPGRADE, f.positionals, json);
-  if (wrong !== null) return wrong;
+  if (f.positionals.length > 0) {
+    return failed("upgrade", { message: `it takes no argument (${f.positionals.join(" ")}): a project is its folder`, code: "usage",
+      fix: "run it in the project's folder: cd <folder> && mason upgrade --check, or mason -C <folder> upgrade --check", usage: synopsis(UPGRADE),
+      next: [["mason upgrade --help", "its usage, with every option"]] }, { json });
+  }
   if (f.values.check !== true) {
     return failed("upgrade", { message: "mason upgrade changes nothing by itself: run it with --check", code: "usage",
       fix: "npx @mason-data/cli@<version> upgrade --check says which tables that release would read again", usage: UPGRADE_USAGE,

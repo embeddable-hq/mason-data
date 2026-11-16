@@ -122,6 +122,11 @@ serving its synced data.
   The running Mason publishes the columns as its own release read them. Say such a table in the notes, as before.
 - A new check that reads a new fact adds the fact to `StoredTable` and `readStored`. The command can check it from the
   release after the one that publishes it.
+- A record written before columns had numbers takes them as the start places the columns (`numberedFrom`), and the
+  command does the same, so such a table is not listed.
+- A table the running Mason holds for its columns (`src/duck/column-identity.ts`) is listed and said held. It is read
+  again once it is let go, not at the first start. Which column is which is the database's and the sources file's to
+  change, never a release's, so the command takes the running Mason's holds as they are.
 - Name the command in the notes' "Before you upgrade" once readers can use it: "Run `npx @mason-data/cli@<version>
   upgrade --check` in the project's folder to see which of your tables are read again."
 
