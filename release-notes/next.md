@@ -58,6 +58,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
     that make PascalCase tables, such as Prisma, write such names.
   - A whole row of a WITH query with a column list, such as `WITH q(a, b) AS (…) SELECT q FROM q`, now answers.
     Before, it failed with 42703.
+- **Two generated tables that read each other through a WITH query named like one of them are now refused.** Take a
+  table `a` defined as `WITH b AS (SELECT * FROM b) SELECT * FROM b`, and a table `b` that reads `a`. The WITH query's
+  own `FROM b` reads the table `b`, as on Postgres. So the two read each other, and each is refused with the cycle,
+  as any cycle is. Before, Mason missed the cycle. Both said they were waiting for the other, for ever, and neither
+  was built.
 - **A column your sources file leaves out is no longer served under another name.** This covers a column that
   `exclude:` names, one a `columns:` entry does not list, and a secret-looking column `mason add` left out. Before, Mason
   matched columns by name alone. If two columns swapped names in one transaction, the left-out column was served under

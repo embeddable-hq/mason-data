@@ -28,6 +28,7 @@ import { StatementError, type DuckPlan } from "./statement.ts";
 import type { NumericProgram } from "../lib/pg-numeric.ts";
 import type { CellConv } from "./types.ts";
 import { relationKey } from "../lib/relation-key.ts";
+import { cteReads } from "./cte-names.ts";
 import { exprType, tableColumnThrough, type TreeNode, type TreeValue } from "./pgtree.ts";
 
 /** A refusal of a generated table: its key in the file (null: the file itself), what is wrong, why, and the ways out. */
@@ -939,24 +940,23 @@ export function storedColumns(d: DefinitionPlan, types: EngineTypes): { columns:
 }
 
 /** the tables a definition's SQL names, by name alone (`schema.table`, a bare name `public`'s): what a cycle is told
- *  from before anything is planned. A bare name some WITH of the statement holds is a CTE's and left out. Nothing,
- *  where the SQL does not parse: that is refused at its check. */
+ *  from before anything is planned. A name Postgres binds to a WITH query is left out, as src/duck/cte-names.ts
+ *  `cteReads` says, the one reader of those rules (issue 1096): `WITH orders AS (SELECT * FROM orders) …` reads the
+ *  table orders inside the WITH query's own body. Nothing, where the SQL does not parse: that is refused at its check. */
 export async function readsByName(sql: string): Promise<string[]> {
   const select = await selectOf(sql);
   if ("refused" in select) return [];
-  const ctes = new Set<string>(), qualified = new Set<string>(), bare = new Set<string>();
+  const bound = cteReads(select.stmt), names = new Set<string>();
   const walk = (v: unknown): void => {
     if (Array.isArray(v)) { v.forEach(walk); return; }
     if (typeof v !== "object" || v === null) return;
     const o = v as Record<string, unknown>;
-    const cte = o.CommonTableExpr as { ctename?: string } | undefined;
-    if (cte?.ctename !== undefined) ctes.add(cte.ctename);
     const r = o.RangeVar as { schemaname?: string; relname: string } | undefined;
-    if (r !== undefined) (r.schemaname === undefined ? bare : qualified).add(r.schemaname === undefined ? r.relname : `${r.schemaname}.${r.relname}`);
+    if (r !== undefined) { if (!bound.has(r)) names.add(`${r.schemaname ?? "public"}.${r.relname}`); return; }
     Object.values(o).forEach(walk);
   };
   walk(select.stmt);
-  return [...new Set([...qualified, ...[...bare].filter((n) => !ctes.has(n)).map((n) => `public.${n}`)])].sort();
+  return [...names].sort();
 }
 
 /** a definition in a cycle of generated tables (`cycle`: the tables, from this one round to it again) */
