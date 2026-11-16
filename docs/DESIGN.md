@@ -629,6 +629,98 @@ is a mistake, and `publication: null` beside `PG_PUBLICATION` is refused, since 
 refuses `mason start` too. **Where.** `src/cli/registry.ts`, `src/cli/serve.ts`,
 `src/lib/table-sync.ts`; `tests/cli-commands.test.ts`, `tests/serve.test.ts`.
 
+### Which column is which (issue 1073, 2026-11-15)
+
+**Decision.** Mason knows a column by its identity on the database: its table's oid and its `attnum`. A rename keeps
+both, and a dropped column's number is never given to another. The sources file still decides by name. But what the run
+took of each table's columns is recorded by identity (`_mason.column_identity`), so a restart knows it too. A column the
+file left out stays out under any name, its old name included, until the person confirms it. When the file would sync
+it, Mason holds the table. It keeps serving what it holds, and says why on the table's line, with the line that keeps
+the column out and the command that syncs it.
+
+**Why.** The review of PR 1065 served an excluded column three ways, at main and at that PR's head. Two names swapped in
+one transaction served `SECRET_salary` as `a`. A rename while Mason was stopped, then a start from the file as it was,
+synced the renamed column. A column renamed to a name a `columns:` entry lists was synced under that name. Each time the
+file was written about the old names. Mason cannot tell a rename from a choice, so it fails closed.
+
+**Why no name re-admits a column** (the review of PR 1078, 2026-11-15). The first version let the file decide again by
+name once the column was back under the name it was first left out under. In a writable project that leaked. `c` was
+renamed `d`, and the run wrote `exclude: [d]`. A new `c` was added and synced. Then the new `c` was dropped and `d`
+renamed `c`, in one transaction. The run took the gone `d` out of `exclude:`, so the file read `{}` and synced `c`, the
+secret, at every look and after a restart. The file is not only the person's words: the run writes `exclude:` itself
+(issue 977) and takes a gone name out. So a name proves nothing about which column it is. A column left out is synced
+again only once confirmed. The cost: a name taken out of `exclude:`, or added to `columns:`, by hand holds the table
+too, and the person runs `mason add` to sync it.
+
+**How a person confirms.** Running `mason add <table> --columns …` writes the entry against the columns as the
+database names them now, so the run takes that entry afresh. With Mason running the run takes it at once. With Mason
+stopped the command records the confirmation in `.mason/` (src/cli/confirmed.ts), and the next start takes it, as the
+command's next step says. Removing the entry and adding it again does the same, because the record goes with the synced
+data. In a writable project a hand edit of the file alone never confirms a column left out: the file cannot say who
+wrote it (the run writes `exclude:` too), nor whether its author knew of a rename. The line a hold suggests keeps the
+column out. The command it suggests names every column, because `mason add` writes the entry anew and would drop the
+file's other excludes, and a plain `mason add` leaves secret-looking columns out again.
+
+**A confirmation is of the table the add read** (the third re-check of PR 1078). An add made while Mason was stopped
+confirmed whatever table its name meant at the next start. `a` and the left-out `c` swapped after the add, and the start
+served the secret as `a`. So each confirmation carries the table's shape as the add read it: its oid, and each column's
+number, name and type. The start, or the run after an add through it, takes the entry afresh only when the table's
+shape is still that one. Otherwise the table is placed as the run took it before, held where it must be, and the log
+says the add was no confirmation.
+
+**A read-only project** (the re-check of PR 1078). There `mason add` is refused, and the committed file is how the
+owner changes the project; the run never writes it. So the file confirms a column left out that did not move: the same
+column, under the name it was last taken under. A column that moved stays held, and the hold names a way out that works
+there: the entry taken out and put back, each started with.
+
+**A table made again under its name** (the re-check of PR 1078). A table dropped and created again, or another renamed
+into its place, has another oid. The shape begins with the oid, so the change is seen and the table's columns are read
+again; before, its shape read as the same and every poll failed for ever. The record of another oid cannot tell its
+columns apart by number, so they are decided by name, and a name the old table left out stays out: a file that syncs one
+holds the table. Its synced data is another table's, so its watermark is forgotten and it is read again whole. Under
+`sync: replication` such a table is not read again by itself: the stream no longer carries it.
+
+**Tables that swap names** (issue 1080, the third re-check of PR 1078). The record was kept by the entry's name. Two
+tables swapped names in one transaction, `t` leaving `c` out and `u` syncing every column. `u` then named `t`'s old
+table, with an oid its own record did not have, so it was decided by name, and it served every old value of `c`. Two
+schemas swapped did the same. So a table is placed against every record of its oid, whichever entry holds it, and a
+column any of them left out stays out. Every record is read before any is written. A table can move between entries in
+two steps, each found by its own read (one table's poll sees the swap before the other's). So the record a table leaves
+behind when it is taken as another relation is kept by its oid (`_mason.column_identity_former`), as is the record a
+table is held by when that record is not its own. A table taken as that oid makes it its own record. The entry that now
+names the secret's table is held, and the hold names the entry that left the column out. The table that moved the other
+way is read again whole, its own entry's columns left out as before. A read-only project's file confirms only a column
+of its entry's own record, so a swap holds there too. Removing the held entry forgets the record that holds it, as a
+removal forgets its own. The cost: two tables swapped back hold the entry that syncs every column, because the other
+entry's record of its table left that column out, until the person confirms.
+
+**A row read again from the database** (issue 1081). Before Postgres 18, the stream carries no generated column, so
+Mason reads such a row again by key and by column name. The read checks its columns' identity after it, in its own
+transaction, as the poll does. When a column moved, those rows are not written, and the table is caught up by one poll
+once its columns are read again.
+
+**Each read checks too.** The decision is made when the catalog is read, so a rename after it could still reach a read.
+The poll and each chunk of a copy ask `pg_identify_object` for each column after their read, in the same transaction.
+The read holds its lock until that transaction ends, so no rename can come between. `pg_attribute` cannot be asked
+instead. Measured on Postgres 16: in a REPEATABLE READ transaction whose snapshot was taken before a swap of `a` and
+`salary`, `SELECT a` read the salary, `pg_attribute` still said `a`, and `pg_identify_object` said `salary`.
+
+**The stream checks each relation message.** pgoutput names a relation's columns but not their numbers, in the order
+of their numbers. A name out of its place (a swap, a rename) refuses the table before a change of it is applied. Names
+in their places prove nothing alone. "`a` dropped and `salary` renamed `a`" reads like "`salary` dropped". A drop, then
+renames that shift every name back into place, then an add, reads like no change at all. A drop is for good, though, so
+the catalog as it is now tells these apart. Each relation message that is not refused is checked once against it, on a
+connection of its own, before a change of it is applied: each column the copy holds must still be that column. Postgres
+sends a relation message before a table's first change in a stream, and again after its definition changes (an
+autovacuum's statistics too), so the check is a short connection now and then, never one a change.
+
+**What is left.** The first start of this release has no record, so a rename made before it is taken by name, as
+before.
+
+**Where.** `src/duck/column-identity.ts`, `src/cli/confirmed.ts`, `src/duck/sync.ts` (`placeColumns`, `readStillPlaced`, `relationOf`, `verifyStreamed`),
+`src/duck/stream.ts` (`relationMoved`), `src/cdc/shape.ts` (`identitySql`); `tests/duck-column-identity.test.ts`,
+`tests/integration/cli-column-identity.itest.ts`.
+
 ### Logical replication
 
 **Decision.** A table whose `sync:` is `replication` is kept current from the change log (`src/duck/stream.ts`); the rules

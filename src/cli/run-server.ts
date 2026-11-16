@@ -159,8 +159,10 @@ export interface RunContext {
   /** the sources file the run copies from as it last read it, and what is wrong with it now (null: nothing); `tables`,
    *  each added table's columns as the run syncs them from its next whole read (absent: a run that does not say) */
   sources: () => { file: SourceFile | null; problem: string | null; tables?: ReadonlyArray<{ source: string; columns: ReadonlyArray<{ name: string }> }> };
-  /** the sources file was edited (`edited`: the tables the edit wrote, `schema.table`): the run reads it again */
-  sourcesChanged: (edited: readonly string[]) => void;
+  /** the sources file was edited (`edited`: the tables the edit wrote, `schema.table`): the run reads it again.
+   *  `confirmed`: the tables an add wrote against the database's columns, each with the shape of the table it read
+   *  (src/cli/preflight.ts `shape`), so a table changed since is no confirmation (src/duck/sync.ts `placeColumns`) */
+  sourcesChanged: (edited: readonly string[], confirmed?: ReadonlyArray<{ table: string; shape: string | undefined }>) => void;
   /** a sources file that replicates a table, held to the database's checks for logical replication when this run never
    *  made them (it replicated nothing when it started): the refusal, or null when it may (absent: never refused) */
   checkReplication?: (file: SourceFile) => Promise<Failure | null>;
@@ -1067,6 +1069,8 @@ export function createRunServer(ctx: RunContext): http.Server {
             const liveRefused = sync?.mode === "replication" ? await liveRefusal(ctx, at, body.table, (body.columns as string[] | undefined) ?? ["*"], (body.key as string[] | undefined) ?? null,
               { sync, keep: body.keep === true }, live) : null;
             if (liveRefused !== null) { sendFailure(res, statusOf(liveRefused), liveRefused); return; }
+            // the catalog the add is checked against: the shape of the table it wrote is what the add confirms
+            const seen = ctx.facts().tables;
             const r = pick(ctx, body.table, (body.columns as string[] | undefined) ?? ["*"], (body.key as string[] | undefined) ?? null, { ...(sync !== undefined ? { sync } : {}), keep: body.keep === true, yes: body.yes === true }, at);
             // A LIVE SWITCH INTO REPLICATION is held to the start's checks (wal_level, the role, a free slot): one the
             // database cannot serve would leave the table, polled until now, NOT kept current for ever — the file is put
@@ -1081,7 +1085,7 @@ export function createRunServer(ctx: RunContext): http.Server {
             else if (r.disk !== null) anywayOf(ctx).delete(r.table);
             // a sync alone asked of a table added (--sync): its columns are not the person's choice now, so what arrived
             // meanwhile is left out as the run leaves it out (src/cli/dev.ts leaveOut)
-            ctx.sourcesChanged(body.keep === true ? [] : [r.table]);
+            ctx.sourcesChanged(body.keep === true ? [] : [r.table], body.keep === true ? [] : [{ table: r.table, shape: seen.find((t) => t.source === r.table)?.shape }]);
             sendJson(res, 200, { ...r, state: await state(ctx, false, false) });
           } else {
             const r = removeTables(ctx, [body.table]);

@@ -51,6 +51,40 @@ test("a batch holding a big table's change waits 5 s and holds 50,000 changes; o
   assert.deepEqual(applySize!(true, 60_000, 100_000), { ms: 60_000, rows: 100_000 }, "never smaller than the stream's own");
 });
 
+// A RELATION'S COLUMNS HELD TO THE ONES THE COPY WAS TAKEN FROM (issue 1073): pgoutput names a relation's columns in the
+// order of their numbers, so a swap, or a drop with a rename into the dropped name, is told by order, never by names
+test("a relation whose columns are no longer the ones the copy was taken from is refused, told by their order and never by names alone", () => {
+  type Fits = { moved: string } | { narrower: true } | null;
+  const relationMoved = (stream as { relationMoved?: (relid: number, r: Array<{ name: string; typeOid: number; typmod: number; isKey: boolean }>, t: object) => Fits }).relationMoved;
+  assert.equal(typeof relationMoved, "function", "the stream holds a relation to the columns its copy was taken from");
+  const moved = relationMoved!;
+  const rel = (...names: string[]) => names.map((name) => ({ name, typeOid: 25, typmod: -1, isKey: name === "id" }));
+  const taken = (...cols: Array<string | [string, true]>): object => ({
+    stay: 1, columns: ["id", "a", "b"], key: ["id"],
+    relation: { oid: 77, columns: cols.map((c) => typeof c === "string" ? { name: c, skippable: false } : { name: c[0], skippable: true }) },
+  });
+  const t = taken("id", "a", "salary", "b");
+  // the same columns, and columns added after them: applied
+  assert.equal(moved(77, rel("id", "a", "salary", "b"), t), null);
+  assert.equal(moved(77, rel("id", "a", "salary", "b", "c"), t), null);
+  // two names swapped in one transaction (the review of PR 1065 served the salary as a): refused, said
+  assert.deepEqual(moved(77, rel("id", "salary", "a", "b"), t), { moved: "its columns changed on the database: the stream sends id, salary, a, b, and its synced data was taken from id, a, salary, b" });
+  // the excluded column renamed alone: a name out of its place, refused, so the table's columns are read again
+  assert.ok(moved(77, rel("id", "a", "pay2", "b"), t) !== null && "moved" in moved(77, rel("id", "a", "pay2", "b"), t)!);
+  // another table under the same name (dropped and made again)
+  assert.deepEqual(moved(78, rel("id", "a", "salary", "b"), t), { moved: "it is another table on the database now (dropped and made again under its name)" });
+  // NARROWER: salary dropped reads as a dropped and salary renamed a, so the catalog is asked (StreamTarget.verify)
+  assert.deepEqual(moved(77, rel("id", "a", "b"), t), { narrower: true });
+  assert.deepEqual(moved(77, rel("id", "a", "b", "c"), t), { narrower: true });
+  // a column Postgres does not send (a generated one, or one a named publication's column list leaves out) may be absent
+  const g = taken("id", "a", ["salary", true], "b");
+  assert.equal(moved(77, rel("id", "a", "b"), g), null);
+  assert.equal(moved(77, rel("id", "a", "salary", "b"), g), null);
+  assert.ok(moved(77, rel("id", "b", "a"), g) !== null && "moved" in moved(77, rel("id", "b", "a"), g)!);
+  // a table built without its oid and shape (a test's): nothing to hold it to
+  assert.equal(moved(77, rel("x"), { stay: 1, columns: ["x"], key: ["x"] }), null);
+});
+
 // A RELATION MESSAGE SHOWS THE KEY HELD only through the replica identity's index (issue 1062): the default identity's
 // primary key, or the index USING INDEX names, each unique over NOT NULL columns. Anything else asks the database.
 type Col = { name: string; typeOid: number; typmod: number; isKey: boolean };

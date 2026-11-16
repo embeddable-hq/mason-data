@@ -241,33 +241,40 @@ test("a read-only run: any number of renames, adds and drops of excluded and syn
     await until(`read-only: ${what}: mason status to say both tables are synced`, () => { never(); return settled(); });
     assert.equal(fs.readFileSync(file, "utf8"), deployed, `${what}: the sources file is never written`);
   };
-  /** mason status's lines to write for t: exactly one, and it names `line` */
-  const saysLine = (line: string): void => {
-    const lines = (ok(mason("status", "--json"), "mason status").json.warnings as string[]).filter((w) => w.startsWith("public.t:") && /Write exclude:/.test(w));
+  /** mason status's lines to write for t: exactly one, and it names `line` — waited for (issue 1087: a change that
+   *  leaves t's served columns as they were passes the step's waits before the run has seen it), then the step's waits
+   *  again, now that the run has */
+  const tLines = (): string[] => (ok(mason("status", "--json"), "mason status").json.warnings as string[]).filter((w) => w.startsWith("public.t:") && /Write exclude:/.test(w));
+  const saysLine = async (line: string): Promise<void> => {
+    const said = new RegExp(`Write exclude: \\[${line}\\] on its entry in the sources file`);
+    await until(`read-only: the line to write names ${line}`, () => { never(); const lines = tLines(); return lines.length === 1 && said.test(lines[0]!); });
+    await until(`read-only: after the line names ${line}: SELECT * to equal the source`, () => { never(); return same(); });
+    await until(`read-only: after the line names ${line}: mason status to say both tables are synced`, () => { never(); return settled(); });
+    const lines = tLines();
     assert.equal(lines.length, 1, JSON.stringify(lines));
-    assert.match(lines[0]!, new RegExp(`Write exclude: \\[${line}\\] on its entry in the sources file`), lines[0]);
+    assert.match(lines[0]!, said, lines[0]);
   };
 
   // THE ISSUE'S STEPS: an excluded column renamed twice, then the other table's changes
   out.t = ["annual_pay"];
   await step("an excluded column renamed", "ALTER TABLE t RENAME COLUMN salary TO annual_pay");
-  saysLine("annual_pay");
+  await saysLine("annual_pay");
   out.t = ["pay3"];
   await step("the excluded column renamed again", "ALTER TABLE t RENAME COLUMN annual_pay TO pay3");
-  saysLine("pay3");
+  await saysLine("pay3");
   await step("a column added to the other table", "ALTER TABLE t2 ADD COLUMN y int DEFAULT 3");
   await step("a column renamed on the other table", "ALTER TABLE t2 RENAME COLUMN w TO w2");
   // A LONGER SEQUENCE: a rename and an add in one transaction (fail closed: both left out), a drop, a name the file
   // excludes back on the table, a synced column renamed, a secret-looking column on the other table
   out.t = ["pay4", "note"];
   await step("an excluded column renamed and a column added at once", "BEGIN; ALTER TABLE t RENAME COLUMN pay3 TO pay4; ALTER TABLE t ADD COLUMN note text DEFAULT 'n'; COMMIT");
-  saysLine("pay4, note");
+  await saysLine("pay4, note");
   out.t = ["note"];
   await step("an excluded column dropped", "ALTER TABLE t DROP COLUMN pay4");
-  saysLine("note");
+  await saysLine("note");
   out.t = ["salary", "note"];
   await step("a column the file excludes added back", "ALTER TABLE t ADD COLUMN salary int DEFAULT 1");
-  saysLine("salary, note");
+  await saysLine("salary, note");
   await step("a synced column renamed", "ALTER TABLE t RENAME COLUMN a TO a2");
   out.t2 = ["api_key"];
   await step("a secret-looking column added to the other table", "ALTER TABLE t2 ADD COLUMN api_key text DEFAULT 'k'");

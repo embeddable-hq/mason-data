@@ -208,6 +208,9 @@ export async function connectSource(s: Source, o: ConnectContext = {}): Promise<
 export interface SourceTable {
   /** `schema.table` */
   source: string;
+  /** the table's oid on the source (pg_class.oid): with a column's `attnum`, the column's identity, which a rename keeps
+   *  (src/duck/column-identity.ts); absent from a catalog built without it */
+  oid?: number;
   /** its columns' names and types as the catalog read them (`shapeSql`): what the sync compares the database's now with,
    *  before a poll and at a stream's relation message (issue 977); absent from a catalog built without it */
   shape?: string;
@@ -252,6 +255,9 @@ export interface UniqueKey {
 }
 export interface SourceColumnInfo {
   name: string;
+  /** its number in its table (pg_attribute.attnum): stable across a rename, never used again once dropped, so with the
+   *  table's oid it is the column's identity (src/duck/column-identity.ts). Absent from a copy recorded before it was read */
+  attnum?: number;
   /** its values' average width in bytes as ANALYZE measured it (`pg_stats.avg_width`; a value stored out of line counts
    *  its pointer), null when the table was never analysed; and whether its values can be stored out of line (a
    *  variable-length type whose storage is not PLAIN): what the estimate of a table's synced size reads
@@ -388,7 +394,7 @@ const TABLES_SQL_BODY = `SELECT json_agg(t ORDER BY t.schema, t.table)::text FRO
       -- (src/cdc/key-held.ts), so a key accepted here and dropped later is refused there. An index's INCLUDE columns
       -- are no part of it: UNIQUE (b) INCLUDE (c) keeps b apart, so key: [b] is taken
       WHERE i.indrelid = c.oid AND ${enforcingIndexSql("i")} AND NOT i.indisprimary) AS unique_keys,
-    (SELECT coalesce(json_agg(json_build_object('name', a.attname, 'type', format_type(b.oid, b.mod), 'domain', b.oid <> a.atttypid,
+    (SELECT coalesce(json_agg(json_build_object('name', a.attname, 'attnum', a.attnum, 'type', format_type(b.oid, b.mod), 'domain', b.oid <> a.atttypid,
         'not_null', a.attnotnull, 'comment', col_description(c.oid, a.attnum), 'type_oid', b.oid,
         'toastable', a.attlen = -1 AND a.attstorage <> 'p',
         'type_array_oid', (SELECT typarray FROM pg_type WHERE oid = b.oid),
@@ -425,7 +431,7 @@ interface TableRow {
   schema: string; table: string; oid: number; shape: string; row_type_oid: number | string; replica_identity: string; reltuples: number; unanalysed: boolean; bytes: number; table_bytes?: number | string; toast_bytes?: number | string; widths?: Record<string, number> | null; comment: string | null; key: string[];
   row_security_hides_from: string | null;
   unique_keys: Array<{ name: string; constraint: boolean; nulls_not_distinct: boolean; columns: string[] }>;
-  columns: Array<{ name: string; type: string; domain: boolean; type_kind: string; not_null: boolean; toastable?: boolean; comment: string | null; type_oid: number | string; type_array_oid: number | string;
+  columns: Array<{ name: string; attnum: number; type: string; domain: boolean; type_kind: string; not_null: boolean; toastable?: boolean; comment: string | null; type_oid: number | string; type_array_oid: number | string;
     default: string | null; identity: string; generated: string; sequence: string | null; collation: { schema: string; name: string } | null }>;
   foreign_keys: Array<{ column: string; target: string; target_column: string }>;
 }
@@ -477,9 +483,9 @@ export async function readTables(pg: Pick<PgConnection, "query">, only: Readonly
       counted.set(t.oid, count);
     }
     const table: SourceTable = {
-      source: `${t.schema}.${t.table}`, schema: t.schema, table: t.table, shape: t.shape, key: t.key, rows: count, bytes: Number(t.bytes),
+      source: `${t.schema}.${t.table}`, oid: Number(t.oid), schema: t.schema, table: t.table, shape: t.shape, key: t.key, rows: count, bytes: Number(t.bytes),
       ...(t.table_bytes !== undefined ? { tableBytes: Number(t.table_bytes) } : {}), ...(t.toast_bytes !== undefined ? { toastBytes: Number(t.toast_bytes) } : {}), comment: t.comment,
-      columns: t.columns.map((c) => ({ name: c.name, type: c.type, typeKind: c.type_kind, ...(c.domain ? { domain: true as const } : {}), notNull: c.not_null, comment: c.comment,
+      columns: t.columns.map((c) => ({ name: c.name, attnum: Number(c.attnum), type: c.type, typeKind: c.type_kind, ...(c.domain ? { domain: true as const } : {}), notNull: c.not_null, comment: c.comment,
         width: typeof t.widths?.[c.name] === "number" ? t.widths[c.name]! : null, ...(c.toastable !== undefined ? { toastable: c.toastable } : {}),
         // an oid is a STRING in Postgres's JSON (only the int, float and numeric types are numbers): one spelling, here
         ...(Number(c.type_oid) >= 16384 ? { typeOid: Number(c.type_oid), ...(Number(c.type_array_oid) > 0 ? { typeArrayOid: Number(c.type_array_oid) } : {}) } : {}),

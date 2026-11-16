@@ -903,6 +903,10 @@ test("the stream says where it is: a table joins and leaves on a line with its p
   }
 });
 
+/** The tables `pick` wrote, set as a run sets them after `mason add`: each entry confirmed, written against the columns
+ *  as they are now, so a column an earlier pick left out is synced again (src/duck/column-identity.ts) */
+const setPicked = (sync: Sync, tables: AddedTable[]): Promise<void> => sync.setTables(tables, { confirmed: tables.map((t) => ({ table: t.source, shape: t.shape })) });
+
 /**
  * THE PROJECT AFTER `mason add <table> --columns …` (null: every column): its sources file written as the CLI writes it
  * (one entry per table, spliced in) and read back as `mason start` reads it (`readSource`, then `addedTables`).
@@ -979,17 +983,17 @@ test("a table's columns changed in the sources file while its table copies: copi
   after(() => { if (trickle.exitCode === null) trickle.kill(); });
   try {
     await sync.open();
-    void sync.setTables(await pick(parsed.source, folder, [["public.t", FULL]]));
+    void setPicked(sync, await pick(parsed.source, folder, [["public.t", FULL]]));
     await sync.once();
     await sync.caughtUp();
 
     // THE TEST SERVER'S SEQUENCE: a column removed from the sources file, and restored while the narrowed copy runs
     let from = logged.length;
     copyOfT.hold();
-    void sync.setTables(await pick(parsed.source, folder, [["public.t", NARROW]]));
+    void setPicked(sync, await pick(parsed.source, folder, [["public.t", NARROW]]));
     await until(copyOfT.held, "the narrowed copy held in its chunks", logged);
     // restored while the narrowed copy is held: it cannot have ended first
-    void sync.setTables(await pick(parsed.source, folder, [["public.t", FULL]]));
+    void setPicked(sync, await pick(parsed.source, folder, [["public.t", FULL]]));
     copyOfT.release();
     await until(() => since(from, /^caught up public\.t by one poll after its whole read/) > 0, "copied again and caught up", logged, 120_000);
     assert.equal(since(from, /^synced public\.t:/), 2, `the narrowed copy, then the restored one at once\n${logged.slice(from).join("\n")}`);
@@ -1001,7 +1005,7 @@ test("a table's columns changed in the sources file while its table copies: copi
     // NARROWED, under a publication that still sends the column: what changes during the copy, and after it
     from = logged.length;
     copyOfT.hold();
-    void sync.setTables(await pick(parsed.source, folder, [["public.t", NARROW]]));
+    void setPicked(sync, await pick(parsed.source, folder, [["public.t", NARROW]]));
     // the narrowed copy's snapshot is pinned and its chunks wait: the changes below are made DURING it
     await until(copyOfT.held, "the narrowed copy held in its chunks", logged);
     const changes = (n: number): string => `INSERT INTO t VALUES (${ROWS + n}, 'new ${n}', NULL, 'dn'); ` +
@@ -1089,7 +1093,7 @@ test("a batch open across a table's copies keeps only what it decoded since the 
     await until(reached, "the batch handed over", logged, 20_000);
     hooks.stream!.flushMs = NEVER;
   };
-  const set = async (columns: readonly string[]): Promise<void> => { void sync.setTables(await pick(parsed.source, folder, [["public.t", columns]])); };
+  const set = async (columns: readonly string[]): Promise<void> => { void setPicked(sync, await pick(parsed.source, folder, [["public.t", columns]])); };
   // the narrowed copy held; its columns restored, so the table is back in the stream until that copy's swap
   const narrowedThenRestored = async (from: number): Promise<void> => {
     copyOfT.hold();
@@ -1195,7 +1199,7 @@ test("a column dropped on the database while streaming refuses that table by nam
   const read = async (sql: string): Promise<string> => ((await reader.runAndReadAll(sql)).getRowsJS() as unknown[][]).map((r) => r.map((x) => x === null ? "" : String(x)).join("\t")).join("\n");
   try {
     await sync.open();
-    void sync.setTables(await pick(parsed.source, folder, [["public.a", null], ["public.b", null]]));
+    void setPicked(sync, await pick(parsed.source, folder, [["public.a", null], ["public.b", null]]));
     await sync.once();
     await sync.caughtUp();
     const from = logged.length;
@@ -1217,7 +1221,7 @@ test("a column dropped on the database while streaming refuses that table by nam
     await until(async () => await read("SELECT v FROM public.b WHERE id = 12") === "b still", "b stays current", logged, 20_000);
 
     // THE WAY OUT: the sources file without x — copied again at once, caught up, streamed
-    void sync.setTables(await pick(parsed.source, folder, [["public.a", ["id", "v"]], ["public.b", null]]));
+    void setPicked(sync, await pick(parsed.source, folder, [["public.a", ["id", "v"]], ["public.b", null]]));
     await until(() => logged.slice(from).some((l) => /^caught up public\.a by one poll after its whole read/.test(l)), "a copied again and caught up", logged, 60_000);
     psql(url, "UPDATE a SET v = 'streamed again' WHERE id = 1");
     await sync.caughtUp();
@@ -1258,7 +1262,7 @@ test("a primary key dropped on the database under the stream never loses a synce
     await read(`SELECT count(*) FROM public.${t}`) === psql(url, `SELECT count(*) FROM ${t}`);
   try {
     await sync.open();
-    void sync.setTables(await pick(parsed.source, folder, tables.map((t) => [`public.${t}`, null] as const)));
+    void setPicked(sync, await pick(parsed.source, folder, tables.map((t) => [`public.${t}`, null] as const)));
     await sync.once();
     await sync.caughtUp();
     const from = logged.length;
@@ -1364,7 +1368,7 @@ test("a key restored with synchronous_commit = off, or dropped and restored in o
   const caught = (t: string): number => logged.filter((l) => l.startsWith(`caught up public.${t} by one poll after the database stopped keeping its rows apart by its key`)).length;
   try {
     await sync.open();
-    void sync.setTables(await pick(parsed.source, folder, [["public.a", null], ["public.g", null], ["public.df", null]]));
+    void setPicked(sync, await pick(parsed.source, folder, [["public.a", null], ["public.g", null], ["public.df", null]]));
     await sync.once();
     await sync.caughtUp();
     const from = logged.length;
@@ -1481,7 +1485,7 @@ test("Mason's own publication names each table whole: the database's DROP COLUMN
   const refusedSince = (from: number, table: string): string[] => logged.slice(from).filter((l) => l.startsWith(`public.${table}: replication: the stream no longer carries`));
   try {
     await sync.open();
-    void sync.setTables(await pick(parsed.source, folder, ALL()));
+    void setPicked(sync, await pick(parsed.source, folder, ALL()));
     await sync.once();
     let from = 0;
     await same("the first sync", from);
@@ -1527,7 +1531,7 @@ test("Mason's own publication names each table whole: the database's DROP COLUMN
     psql(url, "ALTER TABLE whole_t DROP COLUMN gone; ALTER TABLE excl DROP COLUMN b; ALTER TABLE cols DROP COLUMN b, DROP COLUMN a");
     psql(url, "INSERT INTO whole_t VALUES (40, 'after'); INSERT INTO excl VALUES (40, 'after'); INSERT INTO excl_full VALUES (40, 'beside them'); INSERT INTO cols VALUES (40)");
     await until(async () => await read("SELECT a FROM public.excl_full WHERE id = 40") === "beside them", "excl_full streams on beside the dropped columns", logged, 20_000);
-    void sync.setTables(await pick(parsed.source, folder, [["public.whole_t", null], ["public.excl", ["id", "a"]], ["public.excl_full", null], ["public.cols", ["id"]]]));
+    void setPicked(sync, await pick(parsed.source, folder, [["public.whole_t", null], ["public.excl", ["id", "a"]], ["public.excl_full", null], ["public.cols", ["id"]]]));
     synced = { whole_t: ["id", "a"], excl: ["id", "a"], excl_full: ["id", "a"], cols: ["id"] };
     await until(() => sync.state().every((s) => s.phase === "copied" && s.error === null) && ["whole_t", "excl", "cols"].every((t) =>
       logged.slice(from).some((l) => l.startsWith(`caught up public.${t} by one poll after its whole read`))), "each table synced again without its dropped columns", logged, 60_000);
@@ -1541,6 +1545,57 @@ test("Mason's own publication names each table whole: the database's DROP COLUMN
     await store.close();
   }
   assert.deepEqual(logged.filter((l) => l.includes(SECRET)), [], "no log line carries an excluded value");
+});
+
+// A ROW READ AGAIN FROM THE DATABASE FOR ITS GENERATED COLUMN (issue 1081): Postgres sends no generated column (before 18,
+// and by default after), so the stream reads such a row again by its key and its columns' names. Columns that swap names
+// after the stream was sent the update, and before it is applied, send no relation message: the read named them, and
+// served the excluded column's values as `a`. The batch is stopped on the writer's turn while the swap commits.
+test("a row read again for its generated column, after its columns swapped names under the stream, never carries the excluded column's values", { skip }, async () => {
+  const db = `${tag}_gen`, url = urlOf(db);
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  psql(url, "CREATE TABLE t (id int PRIMARY KEY, a text, c text, b text, g text GENERATED ALWAYS AS (b || '_g') STORED); " +
+    `INSERT INTO t (id, a, c, b) SELECT g, 'a' || g, '${SECRET}' || g, 'b' || g FROM generate_series(1, 4) g`);
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const folder = path.join(dir, "gen-project");
+  const names = { slot: `${tag}_gen`, publication: `${tag}_gen`, owned: true };
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "gen.db"), (l) => logged.push(l));
+  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", names);
+  const reader = await store.instance.connect();
+  const read = async (sql: string): Promise<string> => ((await reader.runAndReadAll(sql)).getRowsJS() as unknown[][]).map((r) => r.map((x) => x === null ? "" : String(x)).join("\t")).join("\n");
+  // the stream's batch of t stopped on the writer's turn, once, until the test lets it go
+  const hooks = sync as unknown as { applyStreamed: (batch: ReadonlyMap<string, unknown>, ...a: unknown[]) => Promise<void> };
+  const applyStreamed = hooks.applyStreamed.bind(sync);
+  let gate: Promise<void> | null = null, reached = false;
+  hooks.applyStreamed = async (batch, ...a) => {
+    if (gate !== null && batch.has("public.t")) { reached = true; const g = gate; gate = null; await g; }
+    await applyStreamed(batch, ...a);
+  };
+  let go = (): void => undefined;
+  try {
+    await sync.open();
+    void setPicked(sync, await pick(parsed.source, folder, [["public.t", null, ["c"]]]));
+    await sync.once();
+    await sync.caughtUp();
+    assert.equal(await read("SELECT id, a, b, g FROM public.t WHERE id = 1"), "1\ta1\tb1\tb1_g");
+    gate = new Promise<void>((r) => { go = r; });
+    psql(url, "UPDATE t SET b = b || '!'");
+    await until(() => reached, "the stream's batch of t on the writer's turn", logged, 20_000);
+    // sent, and not yet applied: the columns swap names, and no relation message follows
+    psql(url, "BEGIN; ALTER TABLE t RENAME a TO tmp; ALTER TABLE t RENAME c TO a; ALTER TABLE t RENAME tmp TO c; COMMIT");
+    go();
+    for (const end = Date.now() + 8_000; Date.now() < end; await new Promise((r) => setTimeout(r, 250))) {
+      assert.ok(!(await read("SELECT * FROM public.t")).includes(SECRET), `the excluded values never reach the synced data\n${logged.join("\n")}`);
+    }
+    assert.ok(logged.some((l) => /^public\.t: replication: public\.t: its columns were renamed on the database while its changes were applied/.test(l)), `said\n${logged.join("\n")}`);
+  } finally {
+    go();
+    reader.closeSync();
+    await sync.stop();
+    await store.close();
+  }
 });
 
 // A PUBLICATION AN EARLIER MASON MADE WITH COLUMN LISTS is re-pointed to whole tables at the next pass, ONCE: at a
@@ -1586,7 +1641,7 @@ test("a publication an earlier Mason made with column lists is named whole at th
   };
   try {
     await sync.open();
-    void sync.setTables(await T());
+    void setPicked(sync, await T());
     await sync.once();
     await same("the first sync", 0);
     assert.equal(listed(), "whole");
@@ -1601,7 +1656,7 @@ test("a publication an earlier Mason made with column lists is named whole at th
     store = await DuckStore.open(file, (l) => logged.push(l));
     sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", names);
     await sync.open();
-    void sync.setTables(await T());
+    void setPicked(sync, await T());
     await sync.once();
     assert.equal(listed(), "whole", "named whole at the first pass");
     assert.deepEqual(repointed(from).map((l) => l.replace(/ at public\.t: .*?, each/, " …, each")),

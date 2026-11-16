@@ -72,6 +72,26 @@ paths:
   the writer's own (`writeLine`: `{}`, never `exclude: []`, which a start refuses). **A whole read that fails checks its table's shape again** (`reshapeAfterFailure`; the same review: a column
   dropped during a resync, or renamed during a first sync, failed it for ever with the same columns), so a change
   re-plans it. A relation message whose columns, type oids or typmods are not the shape's is checked at once.
+- **A column is known by its identity, its table's oid and its `attnum`, never by its name alone** (issue 1073: a swap
+  of two names served an excluded salary as `a`, and so did a rename followed by a start, and a column renamed to a name
+  `columns:` lists). What the run took of each table's columns is recorded by identity in `_mason.column_identity`
+  (src/duck/column-identity.ts `identityVerdict`, applied by `placeColumns` each time the tables are set). A column left
+  out stays out under ANY name, its old one included: no name in the file re-admits it, since the run writes `exclude:`
+  itself and takes a gone name out (the review of PR 1078 served a column renamed away and back). When the file would
+  sync it, the table is HELD (`unplaced`): it is not copied, polled, caught up or streamed, it serves what it holds, and
+  its line says why with the line to write. Only `mason add` confirms it (through the run, or recorded in `.mason/` while
+  Mason is stopped, src/cli/confirmed.ts), and only for the table's shape as the add read it, or its entry removed. A
+  table is placed against EVERY record of its oid, every entry's and the ones kept by oid
+  (`_mason.column_identity_former`), all read before any is written (issue 1080: two tables or schemas swapped names and
+  the entry syncing every column served the other's left-out column). In a project deployed read-only the committed file is
+  the owner's word, the run never writing it: a column that did not move is taken as the file says, and a hold's way
+  out is one that works there. Every read checks its columns too: the poll, each chunk of a copy and the stream's read
+  of a row again by key (`sourceRows`, issue 1081) ask `pg_identify_object` in their own transaction after the read
+  (`readStillPlaced`). The stream refuses a relation with a name out of its place (`relationMoved`), and checks every
+  other relation message once against the catalog before applying a change of it (`verifyStreamed`): names in place can
+  still be other columns after a drop. The shape carries the table's oid and each column's number, so a swap, a drop and
+  an add of one name, or a table made again under its name changes it; a table of another oid is decided again by name,
+  a name its predecessor left out kept out, and read again whole. ("Which column is which")
 - **A batch holds a table's changes of ONE STAY in the stream, and only the stay it is in now is applied**
   (`StreamedTable.stay`: a new number when the table enters `streamed` or its copy is swapped, never used twice;
   `streamOnce`, `applyStreamed`): an ended stay's changes committed before the next copy's catch-up, so that copy or

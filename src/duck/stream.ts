@@ -70,6 +70,40 @@ export function projectTuple(relation: readonly RelationColumn[], tuple: readonl
   });
 }
 
+/**
+ * WHETHER A RELATION'S COLUMNS ARE STILL THE ONES THE COPY WAS TAKEN FROM (issue 1073). pgoutput names a relation's
+ * columns, never their numbers, in the order of their numbers. So the columns the run took (`relation`, the table's
+ * every column as the catalog read it, by number) must appear in the relation's list in the same order, each under its
+ * name, with the columns added since after them all.
+ * - `null`: they do. A column Postgres does not send (`skippable`: a generated one, or one a named publication's column
+ *   list leaves out) may be missing.
+ * - `{ moved }`: a name out of its place, a swap or a rename. A change sent under a name may then be another column's
+ *   value (two names swapped in one transaction served a salary as `a`), so the table is refused before it is applied
+ *   (`StreamTarget.refuse`), and its columns read again. A relation of another oid is another table of the same name.
+ * - `{ narrower }`: some columns are missing, the rest in place. That is a column dropped, or a column dropped with
+ *   another renamed into its name (`a` dropped and `salary` renamed `a` reads as `salary` dropped).
+ * Names cannot tell more. Every name in its place can still be another column (a drop, then renames shifting each name
+ * back into place, then an add), and narrower reads two changes as one. A drop is for good, so the catalog as it is now
+ * tells them apart: unless refused here, a relation message is checked once (`StreamTarget.verify`) before a change of
+ * it is applied.
+ */
+export function relationMoved(relid: number, relation: readonly RelationColumn[], table: StreamedTable): { moved: string } | { narrower: true } | null {
+  const r = table.relation;
+  if (r === undefined) return null;
+  if (relid !== r.oid) return { moved: "it is another table on the database now (dropped and made again under its name)" };
+  let i = 0, narrower = false;
+  for (const c of r.columns) {
+    if (relation[i]?.name === c.name) { i++; continue; }
+    if (!c.skippable) narrower = true;
+  }
+  // what is left are the columns added since: a name the run took among them is out of its place
+  const taken = new Set(r.columns.map((c) => c.name));
+  if (relation.slice(i).some((x) => taken.has(x.name))) {
+    return { moved: `its columns changed on the database: the stream sends ${relation.map((x) => x.name).join(", ") || "none"}, and its synced data was taken from ${r.columns.map((x) => x.name).join(", ")}` };
+  }
+  return narrower ? { narrower: true } : null;
+}
+
 /** the copy's columns a relation does not carry, but for those Postgres never publishes (`generated`, read from the
  *  source instead): what refuses the table (`StreamTarget.refuse`) */
 export function missingFrom(relation: readonly RelationColumn[], table: StreamedTable): string[] {
@@ -286,17 +320,26 @@ export function keyShownGone(relation: { replicaIdentity: string; columns: reado
  *  left or its copy was swapped, never used twice), the COPY's columns (never the sources file's of the moment, never the publication's), its key,
  *  and the columns the stream may lack because Postgres publishes none (a generated column before 18: read from the
  *  source by key, `refetch`) */
-export interface StreamedTable { stay: number; columns: readonly string[]; key: readonly string[]; generated?: readonly string[]; big?: boolean }
+export interface StreamedTable {
+  stay: number; columns: readonly string[]; key: readonly string[]; generated?: readonly string[]; big?: boolean;
+  /** the table's oid and its every column, by number, as the run took them (`relationMoved`): absent for a test's table */
+  relation?: { oid: number; columns: ReadonlyArray<{ name: string; skippable: boolean }> };
+}
 
 export interface StreamTarget {
   /** the streamed tables, by source (`schema.table`), each in the copy's own columns. Read at EVERY change: a table joins
    *  (caught up) or leaves (copied again) while the stream runs */
   tables(): ReadonlyMap<string, StreamedTable>;
   /** a streamed table whose relation (pgoutput's, after a DDL on the database or a narrower publication) no longer
-   *  carries `missing`, columns its copy holds: its changes are not applied from here on, and the target takes it out of
-   *  the stream, saying why and the way out — recorded before the stream goes on, so nothing past the change is
-   *  acknowledged without it. Called once per `tables()` entry */
-  refuse(source: string, missing: readonly string[]): Promise<void>;
+   *  carries `missing`, columns its copy holds, or whose columns are no longer the ones its copy was taken from (`moved`,
+   *  `relationMoved`): its changes are not applied from here on, and the target takes it out of the stream, saying why
+   *  and the way out — recorded before the stream goes on, so nothing past the change is acknowledged without it. Called
+   *  once per `tables()` entry */
+  refuse(source: string, why: { missing: readonly string[] } | { moved: string }): Promise<void>;
+  /** a streamed table's relation message that `relationMoved` does not refuse: whether each column its copy holds is
+   *  still that column on the database now, as the catalog says. Null when it is, else why not (a check that cannot tell
+   *  says so: fail closed). Asked once a relation message, before a change of it is applied */
+  verify(source: string, table: StreamedTable): Promise<string | null>;
   /**
    * WHETHER THE DATABASE STILL KEEPS THE TABLE'S ROWS APART BY ITS KEY (issue 1062: a primary key dropped on the
    * database let a duplicate's INSERT replace a synced row, as every change is written by key). Asked before a table's
@@ -405,6 +448,8 @@ export class ReplicationStream {
     const relations = new Map<number, Relation>();
     // the streamed tables refused by a relation lacking a copied column, by their `tables()` entry: once each
     const refused = new WeakSet<StreamedTable>();
+    // what the catalog said of a narrower relation, by relation message (each message a new entry): asked once
+    const verified = new WeakMap<Relation, { stay: number; why: string | null }>();
     // the STAY each relation's key was last shown or found to hold for: asked again after the relation's next message,
     // which Postgres sends after any change of the table's definition, and when the table joins the stream again. Never
     // the `tables()` entry, which is made again at every batch (a catalog query a batch for a FULL table)
@@ -491,11 +536,23 @@ export class ReplicationStream {
               // looked up at each change: a table caught up since the stream started is streamed from here on
               const table = rel === undefined ? undefined : this.target.tables().get(rel.source);
               if (rel === undefined || table === undefined) continue;   // a table the copy does not hold, or not yet caught up
-              // a column the copy holds that the relation does not carry (a DDL on the database, a narrower publication):
-              // its changes cannot be written, so the table is refused and leaves the stream; the others go on
+              // its columns no longer the ones its copy was taken from (a rename, a swap, a drop: issue 1073), or a column
+              // the copy holds that the relation does not carry (a narrower publication): its changes cannot be written as
+              // they are, so the table is refused and leaves the stream; the others go on
               const missing = missingFrom(rel.columns, table);
-              if (missing.length) {
-                if (!refused.has(table)) { refused.add(table); await this.target.refuse(rel.source, missing); }
+              const fits = missing.length ? null : relationMoved(relid, rel.columns, table);
+              // in place or narrower: the catalog says whether each column the copy holds is still that column, once a
+              // relation message (names in their places can still be other columns: a drop, then renames shifting every
+              // name back into place, then an add; and narrower reads a drop and a rename into its name as one drop)
+              let moved = fits !== null && "moved" in fits ? fits.moved : null;
+              if (missing.length === 0 && moved === null && table.relation !== undefined) {
+                const seen = verified.get(rel);
+                const why = seen?.stay === table.stay ? seen.why : await this.target.verify(rel.source, table);
+                verified.set(rel, { stay: table.stay, why });
+                moved = why;
+              }
+              if (moved !== null || missing.length) {
+                if (!refused.has(table)) { refused.add(table); await this.target.refuse(rel.source, moved !== null ? { moved } : { missing }); }
                 continue;
               }
               // ITS KEY STILL KEEPS ITS ROWS APART (issue 1062), asked before its first change since its relation message:
