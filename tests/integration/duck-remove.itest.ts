@@ -242,13 +242,14 @@ test("a table removed during its catch-up stops it at once: rolled back, dropped
   seed(url);
   await rowsOlderThanEverySnapshot(url, "big");
   const lock = sourceLock(url, "big");
-  // ONE reader: once its last chunk (open-ended) committed, the source holds the catch-up's read of big that follows the swap
+  // ONE reader: once its last chunk (open-ended) committed, the source holds the catch-up's read of big, which comes
+  // before its swap (issue 1066: a whole read is served only together with its catch-up)
   const onChunk = async (e: ChunkEvent): Promise<void> => { if (e.source === "public.big" && e.phase === "committed" && e.end === null) await lock.take(); };
   const w = await world(url, "catchup.db", onChunk, 1);
   try {
     void w.sync.setTables([BIG]);
-    await w.until(() => w.logged.some((l) => /^synced public\.big: /.test(l)), "big's whole read swapped in");
     await w.until(() => /Lock/.test(busyBackends(url)), "big's catch-up waits on the source");
+    assert.ok(!w.logged.some((l) => /^synced public\.big: /.test(l)), `never served before its catch-up\n${w.logged.join("\n")}`);
     void w.sync.setTables([BIG, SMALL]);
     const from = w.logged.length;
     void w.sync.setTables([SMALL]);
@@ -258,9 +259,11 @@ test("a table removed during its catch-up stops it at once: rolled back, dropped
     await w.until(() => w.logged.some((l) => l.startsWith("dropped public.big's synced data")), "big dropped", 10_000);
     await nothingOfBig(w);
     assert.equal(busyBackends(url), "", "no backend of Mason's is busy on the source");
-    assert.ok(w.logged.slice(from).some((l) => l === "public.big: its catch-up stopped, as the table was removed: what it had read is dropped"), said);
+    assert.ok(w.logged.slice(from).some((l) => l === "catch-up of public.big stopped: it is no longer added (rolled back)"), said);
+    assert.ok(w.logged.slice(from).some((l) => l === "public.big: its first sync stopped, as the table was removed: what it had read is dropped"), said);
     assert.ok(!/failed|tried again/.test(said), said);
-    assert.deepEqual(w.events.filter((e) => e.table === "public.big").map((e) => e.kind), ["full_sync", "sync_stopped"]);
+    // its catch-up is part of its first sync, which never ended: never swapped in, never said synced
+    assert.deepEqual(w.events.filter((e) => e.table === "public.big").map((e) => e.kind), ["sync_stopped"]);
   } finally { lock.release(); await w.close(); }
 });
 

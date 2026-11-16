@@ -367,6 +367,9 @@ const JSONB_SHAPES: Shape[] = [
   { name: "text under libc: a table's page, ORDER BY a text LIMIT 50, the key for the candidates alone", sql: "SELECT o.id, o.status, o.amount FROM orders o ORDER BY o.status LIMIT 50", on: "libc" },
   { name: "text under libc: SELECT * ORDER BY a text DESC LIMIT 50, the key for the candidates alone", sql: "SELECT * FROM orders ORDER BY status DESC LIMIT 50", on: "libc" },
   { name: "text under libc: min and max of a text, the key for the candidates alone", sql: "SELECT min(status), max(status) FROM orders", on: "libc" },
+  // issue 464: mode() of a text under a libc order keys each distinct value once: a scalar subquery of the value, which
+  // the engine computes over the distinct values and joins back (a delimiter join), never the key's function a row
+  { name: "text under libc: mode() of a text by group, the key once a value", sql: "SELECT o.tenant_id, mode() WITHIN GROUP (ORDER BY o.status) AS top_status FROM orders o GROUP BY 1 ORDER BY 1", on: "libc" },
   // issue 461: a jsonb column's keys, grouped as Metabase sends it, DISTINCT, and in a LEFT lateral with no LIMIT:
   // DuckDB's own json_keys a row (src/duck/rewrite.ts objectKeys), the lateral a streaming UNNEST, never the delimiter
   // join's hash group of every document; under libc the key's function for the grouped output alone
@@ -976,6 +979,22 @@ test("a text's top N and min / max under a libc order hand the libc key each dis
     t.diagnostic(`${sql}: __mason_libc_key handed ${keyed} rows of ${ORDERS}`);
     assert.ok(keyed > 0, `${sql}: the libc key was handed no row — the function counter or the statement changed`);
     assert.ok(keyed <= most, `${sql}: the libc key was handed ${keyed} rows, more than ${most}: keyed per row, not for its candidates`);
+  }
+});
+
+// issue 464: mode() of a text under a libc order hands the libc key each DISTINCT value once (src/duck/rewrite.ts
+// `modeKeyedOnce`), never a row, over the libc shop's orders (`SMALL_ORDERS`): the statuses are six values, the notes
+// at most 50,000 over the three quarters of the rows that hold one. Keyed a row (the ORDER BY's key beside each value),
+// a status by tenant took 2.2 s against Postgres's 0.36 s over a million orders. The tenants' ORDER BY keys the groups
+test("issue 464: mode() of a text under a libc order hands the libc key each distinct value once, never every row", async (t) => {
+  for (const [sql, most] of [[sqlOf("text under libc: mode() of a text by group, the key once a value"), 2 * (6 + 3)],
+    ["SELECT o.customer_id % 7 AS g, mode() WITHIN GROUP (ORDER BY o.notes DESC) AS m FROM orders o GROUP BY 1 ORDER BY 1", 2 * 50_000]] as const) {
+    // (the key of each value, and the value picked keyed again, once a group: src/duck/rewrite.ts `modeKeyedOnce`)
+    const rows = await rowsOf(sql, "libc");
+    const keyed = ["__mason_libc_key", "__mason_libc_key_or_null", "__mason_libc_checked"].reduce((n, k) => n + (rows.get(k) ?? 0), 0);
+    t.diagnostic(`${sql}: the libc key's functions handed ${keyed} rows`);
+    assert.ok(keyed > 0, `${sql}: the libc key was handed no row — the function counter or the statement changed`);
+    assert.ok(keyed <= most, `${sql}: the libc key was handed ${keyed} rows, more than ${most}: keyed per row, not once a value`);
   }
 });
 

@@ -31,8 +31,12 @@ paths:
   whatever transaction is open there, so the stream's batches, the polls, the source's attach/detach (instance-wide,
   counted per user) and every rebuild's SWAP (a DROP under another transaction's write fails its commit) each wait for
   the one before. A turn never queues another and waits for it: it would wait for itself.
-- **A rebuilt table is caught up by ONE poll from its watermark before it is kept current again** (`_mason.catch_up`,
-  written with the swap): skipped by the stream and the polls until then. In replication mode the stream HOLDS its
+- **A rebuilt table is caught up by ONE poll from its watermark before it is kept current again**: a whole read's
+  poll runs into its side table BEFORE the swap (`catchUpSide`; duck-copy.md "A whole read is served only together
+  with its catch-up", issue 1066: swapped in first, a table served what its whole read kept until that poll, 0 rows
+  after a TRUNCATE and a reload around an open transaction), and a table marked behind otherwise (`_mason.catch_up`: a
+  slot new to it, a sync switched to replication, a key refused, a crash between a swap and its held changes) is
+  caught up by `catchUp`, skipped by the stream and the polls until then. In replication mode the stream HOLDS its
   changes from just before that poll and applies them after it — the stream acknowledges what it skips, so a table
   joining late is missing exactly what that poll reads (src/duck/stream.ts "why replaying is safe"). A table whose sync
   is `off` is caught up too: one scan per rebuild, then served as of it.
@@ -326,7 +330,7 @@ paths:
   was kept only as a table's CURRENT error, wiped by the next success, and earlier ones only in the log file): the sync
   says each where it logs it (`Sync.event`: copy, poll, catch-up and stream failures, the database out of reach, a copy
   finished, a table current again — the last detected in `record`, the one place an error is cleared — and a sync asked
-  by hand, `synced`, in the words mason sync answers: without it a person who synced read the list as a sync lost — and its failure, `sync_failed` (`POST /api/sync` answers the page as it starts, issue 1007) —
+  by hand, `synced`, in the words mason sync answers: without it a person who synced read the list as a sync lost — and its failure, `sync_failed` (`POST /api/sync` answers the page as it starts, issue 1007), and a whole sync that waits for an open transaction, `sync_waits`, which is no failure (issue 1066) —
   and the scheduled syncs that succeed, `polled` a poll and `streamed` ONE a table a minute of the stream's changes
   (`reportStream`, never one a batch), which a reader gets only when it asks (`SCHEDULED`, `?scheduled=1`,
   `--scheduled`: in the query, so they never take a failure's place among the newest asked for)), `SyncEvents`

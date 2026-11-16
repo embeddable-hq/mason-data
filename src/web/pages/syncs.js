@@ -35,7 +35,7 @@ const th = (cols) => cols.map((c) => `<th scope="col">${esc(c)}</th>`).join("");
 export const KIND_WORDS = { full_sync_failed: "Full sync failed", poll_failed: "Scheduled sync failed", catch_up_failed: "Catch-up failed",
   stream_failed: "Live sync failed", source_unreachable: "Database unreachable", generated_failed: "Generated table failed",
   compact_failed: "Compaction failed", sync_failed: "Manual sync failed", restart: "Mason restarted", full_sync: "Full sync", recovered: "Working again", synced: "Manual sync",
-  sync_changed: "Sync setting changed", columns_changed: "Columns changed", sync_stopped: "Sync stopped", polled: "Scheduled sync", streamed: "Live sync", ui_error: "Web page error" };
+  sync_changed: "Sync setting changed", columns_changed: "Columns changed", sync_stopped: "Sync stopped", sync_waits: "Sync waits", polled: "Scheduled sync", streamed: "Live sync", ui_error: "Web page error" };
 /** A kind's words; a kind this page does not know, its code. */
 export const kindWords = (kind) => Object.hasOwn(KIND_WORDS, kind) ? KIND_WORDS[kind] : kind;
 
@@ -88,11 +88,11 @@ export function runningSyncs(s) {
         out.push({ key, by, table: t.table, startedAt: r.startedAt, words: "Catch-up", note: "It syncs the rows that changed since its last full sync.", ends: ["catch_up_failed", "sync_stopped"] });
       } else if (t.copy?.phase === "copying") {
         const share = t.copy.progress?.share;
-        out.push({ key, by, table: t.table, startedAt: r.startedAt, words: "First sync", note: typeof share === "number" ? `${Math.floor(share * 100)}% done.` : "", ends: ["full_sync", "full_sync_failed", "sync_stopped"] });
+        out.push({ key, by, table: t.table, startedAt: r.startedAt, words: "First sync", note: typeof share === "number" ? `${Math.floor(share * 100)}% done.` : "", ends: ["full_sync", "full_sync_failed", "sync_waits", "sync_stopped"] });
       } else if (Array.isArray(t.columnsPending)) {
-        out.push({ key, by, table: t.table, startedAt: r.startedAt, words: KIND_WORDS.full_sync, note: "Its columns changed, so it is synced again whole.", ends: ["full_sync", "full_sync_failed", "columns_changed", "sync_stopped"] });
+        out.push({ key, by, table: t.table, startedAt: r.startedAt, words: KIND_WORDS.full_sync, note: "Its columns changed, so it is synced again whole.", ends: ["full_sync", "full_sync_failed", "sync_waits", "columns_changed", "sync_stopped"] });
       } else {
-        out.push({ key, by, table: t.table, startedAt: r.startedAt, words: KIND_WORDS.full_sync, note: "It is synced again whole.", ends: ["full_sync", "full_sync_failed", "sync_stopped"] });
+        out.push({ key, by, table: t.table, startedAt: r.startedAt, words: KIND_WORDS.full_sync, note: "It is synced again whole.", ends: ["full_sync", "full_sync_failed", "sync_waits", "sync_stopped"] });
       }
     }
   }
@@ -220,7 +220,7 @@ function renderTimeline(passing, read, { narrowed, now, sort, limit, live, asOf 
 
 /** EVERY KIND OF SYNC EVENT, in its order (src/duck/events.ts `EVENT_KINDS`, held equal by the tests): the Kind filter
  *  offers each, whether the range has one or not. */
-export const EVENT_KINDS = ["full_sync_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "sync_failed", "restart", "full_sync", "recovered", "synced", "sync_changed", "columns_changed", "sync_stopped", "polled", "streamed", "ui_error"];
+export const EVENT_KINDS = ["full_sync_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "generated_failed", "compact_failed", "sync_failed", "restart", "full_sync", "recovered", "synced", "sync_changed", "columns_changed", "sync_stopped", "sync_waits", "polled", "streamed", "ui_error"];
 
 /** The kind and table filters' controls: EVERY kind (EVENT_KINDS), and EVERY added table (`/api/state` `tables`, `s`) —
  *  Mason's own events first ("Mason events", MASON_TABLE) — whether the range has an event of it or not, so the choices never depend on what

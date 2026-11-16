@@ -81,7 +81,9 @@ export function copyProgress(source: string, copied: number, rowsEstimate: numbe
 /**
  * A TABLE'S SYNC IN ONE WORD, from what the sync has of its copy — the one place it is decided (`/api/state`
  * `tables[].sync.state`, so mason status, the web page and an agent say one thing):
- *  - `waiting`: no copy yet, nor one under way (the sync has not reached it);
+ *  - `waiting`: no copy yet, nor one under way (the sync has not reached it); or its whole sync waits for an open
+ *    transaction on the database to end (`syncWaits`, issue 1066: a wait, never a failure — a table synced before
+ *    serves that copy meanwhile, a first sync is not ready);
  *  - `failed`: its copy failed, or the poll, catch-up or stream keeping it current did (its `error` says why; a table
  *    copied before still serves that copy);
  *  - `syncing`: being copied, or copied again (a table copied before serves that copy meanwhile);
@@ -97,6 +99,7 @@ export type TableSyncState = "synced" | "syncing" | "catching-up" | "failed" | "
 export function syncStateOf(c: CopyState | undefined, now: number = Date.now()): TableSyncState {
   if (c === undefined || c.phase === "waiting") return "waiting";
   if (c.phase === "failed" || c.error !== null) return "failed";
+  if (c.syncWaits !== undefined) return "waiting";
   if (c.phase === "copying" || c.rebuilding === "copy") return "syncing";
   if (inCatchUp(c)) return "catching-up";
   return (behindOf(c.kept, now).behindBySeconds ?? 0) > 0 ? "behind" : "synced";
@@ -174,7 +177,8 @@ export function readiness(s: Pick<RunState, "tables">): Readiness {
     const state = t.sync?.state ?? (t.error ? "failed" : t.copy?.phase === "copying" ? "syncing" : !t.copy ? "waiting" : "synced");
     if (state === "failed") { failed.push(`${t.table}: ${firstLine(t.error ?? "its sync failed (mason status says why)")}`); continue; }
     if (t.copy?.phase === "copying") { waiting.push(copyProgress(t.table, t.copy.rowsCopied, t.rows, t.copy.progress)); continue; }
-    if (!t.copy) { waiting.push(`${t.table}: waiting for its first sync to start`); continue; }
+    // its first sync not begun, or waiting for an open transaction on the database (issue 1066): never a failure
+    if (!t.copy) { waiting.push(`${t.table}: ${t.syncWaits?.why ?? "waiting for its first sync to start"}`); continue; }
     // served, its one catch-up poll not over (issue 834): its synced data is as of before what that poll reads
     if (state === "catching-up") waiting.push(`${t.table}: ${CATCHING_UP}`);
   }
