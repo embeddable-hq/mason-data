@@ -3301,7 +3301,7 @@
         "                          TABLE_SCAN public.orders",
         "                          HASH_JOIN",
         "                            CTE_SCAN",
-        "                            PROJECTION calls __mason_libc_key, __mason_turn",
+        "                            PROJECTION calls __mason_libc_key_or_null, __mason_turn",
         "                              PROJECTION",
         "                                HASH_GROUP_BY",
         "                                  PROJECTION",
@@ -3309,7 +3309,9 @@
         "                                      CTE_SCAN"
       ],
       "calls": [
-        "__mason_libc_key"
+        "__mason_libc_checked",
+        "__mason_libc_key",
+        "__mason_libc_key_or_null"
       ],
       "sends": [],
       "delim_join": true,

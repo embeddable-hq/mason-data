@@ -6,10 +6,14 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
-- **`mode() WITHIN GROUP (ORDER BY …)` of a text is faster on a database whose collation is a libc locale**, such as
-  `en_US.utf8`. Over a million rows, the most common status per tenant took 2.2 s and now takes under 0.1 s, about a
-  fifth of Postgres's time. The answer is the same, ties included. A `mode()` with a `FILTER`, or of a `char(n)`, is
-  still slow.
+- **`mode() WITHIN GROUP (ORDER BY …)` of a `text` or `varchar` is faster under a libc collation**, such as a database
+  whose collation is `en_US.utf8`. Over a million rows, the most common status per tenant took 2.2 s and now takes
+  under 0.1 s, about a fifth of Postgres's time. The answers are Postgres's, as before: of values equally common, the
+  first in the collation's order wins. Under a locale other than English, a value holding a character Mason cannot order
+  as the collation does now refuses the query only when it is among the most common values of its group. Before, any
+  such value it read refused it. These are still slow: a `mode()` of a `char(n)` or
+  a `citext`, one ordered with `USING`, and one of a value that calls `random()` or reads a subquery or an outer
+  query's column.
 
 ## What was wrong and is now right
 

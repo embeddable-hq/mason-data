@@ -985,8 +985,10 @@ test("a text's top N and min / max under a libc order hand the libc key each dis
 test("issue 464: mode() of a text under a libc order hands the libc key each distinct value once, never every row", async (t) => {
   for (const [sql, most] of [[sqlOf("text under libc: mode() of a text by group, the key once a value"), 2 * (6 + 3)],
     ["SELECT o.customer_id % 7 AS g, mode() WITHIN GROUP (ORDER BY o.notes DESC) AS m FROM orders o GROUP BY 1 ORDER BY 1", 2 * 50_000]] as const) {
-    const keyed = (await rowsOf(sql, "libc")).get("__mason_libc_key") ?? 0;
-    t.diagnostic(`${sql}: __mason_libc_key handed ${keyed} rows`);
+    // (the key of each value, and the value picked keyed again, once a group: src/duck/rewrite.ts `modeKeyedOnce`)
+    const rows = await rowsOf(sql, "libc");
+    const keyed = ["__mason_libc_key", "__mason_libc_key_or_null", "__mason_libc_checked"].reduce((n, k) => n + (rows.get(k) ?? 0), 0);
+    t.diagnostic(`${sql}: the libc key's functions handed ${keyed} rows`);
     assert.ok(keyed > 0, `${sql}: the libc key was handed no row — the function counter or the statement changed`);
     assert.ok(keyed <= most, `${sql}: the libc key was handed ${keyed} rows, more than ${most}: keyed per row, not once a value`);
   }

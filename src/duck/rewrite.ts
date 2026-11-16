@@ -6272,14 +6272,21 @@ class Rewriter {
    * MODE() OF A TEXT UNDER A LIBC ORDER KEYS EACH DISTINCT VALUE ONCE, never each row (issue 464: the libc key's
    * function a row, a mode() of a status by tenant was 6 times Postgres's time over a million rows). The order decides
    * only which of the most frequent values wins a tie, and the key is a function of the value alone. So the key is a
-   * scalar subquery of the value, `(SELECT __mason_libc_key(x, collate))`, which the engine computes once for each
-   * distinct value and joins back to the rows; the value's bytes stay the second key, as `libcKeys` writes it. The engine
-   * then counts each value and takes the most frequent, of equals the first in that order, as Postgres's mode() does.
+   * scalar subquery of the value, `(SELECT __mason_libc_key_or_null(x, collate))`, which the engine computes once for
+   * each distinct value and joins back to the rows; the value's bytes stay the second key, as `libcKeys` writes it. The
+   * engine then counts each value and takes the most frequent, of equals the first in that order, as Postgres's mode()
+   * does.
+   * THE KEY REFUSES ONLY WHERE IT DECIDES (the review of PR 1089): the join keys every distinct value of the aggregate's
+   * whole input, before a HAVING or an outer query's WHERE drops a group, where the key a row was computed after the
+   * engine pushed that filter down. So a value the order cannot key (`libc-uncovered`) is NULL there, ordered FIRST among
+   * values of equal count, and the value picked is keyed again, once a group, by `__mason_libc_checked`, which answers
+   * the value itself: it raises where an unkeyable value is among the group's most frequent (where the key could
+   * decide), and answers the pick otherwise. It refuses no statement the key a row answered: that raised for any
+   * unkeyable value of a group it kept. (One aggregate, read once: the engine plans each copy of one aggregate whose
+   * ORDER BY holds a subquery as an aggregate and a join of its own.)
    * Null (the key a row, as before) for any other type (a char(n) orders without its padding, a citext by its lower
-   * case), an operator's order (USING), a volatile value (read twice, it would be two values), a value that reads a
-   * subquery or a column of an outer query (the subquery would nest in another's correlation), and a FILTER: Postgres
-   * keys only the rows it keeps (`guardFilters`), and the join would key every value, where one the order does not
-   * cover (`libc-uncovered`) refuses the statement
+   * case), an operator's order (USING), a volatile value (read twice, it would be two values), and a value that reads
+   * a subquery or a column of an outer query (the subquery would nest in another's correlation)
    */
   private modeKeyedOnce(b: Body, key: AstNode, collate: string): AstNode | null {
     const sort = bodyOf(((b.agg_order ?? []) as AstNode[])[0]!);
@@ -6287,12 +6294,18 @@ class Rewriter {
     const type = this.typeOf(v);
     if (type !== TEXT && type !== VARCHAR) return null;
     if (sort.useOp !== undefined || !["SORTBY_DEFAULT", "SORTBY_ASC", "SORTBY_DESC"].includes(sort.sortby_dir as string)) return null;
-    if (callsVolatile(v) || !this.readsOwnColumnsOnly(v) || b.agg_filter !== undefined) return null;
+    if (callsVolatile(v) || !this.readsOwnColumnsOnly(v)) return null;
     const keyOnce: AstNode = { SubLink: { subLinkType: "EXPR_SUBLINK", subselect: { SelectStmt: {
-      targetList: [{ ResTarget: { val: fn("__mason_libc_key", [this.clone(v), strConst(collate)]) } }],
+      targetList: [{ ResTarget: { val: fn("__mason_libc_key_or_null", [this.clone(v), strConst(collate)]) } }],
       limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
     } } } };
-    return { FuncCall: { ...b, args: [this.clone(v)], agg_order: [{ SortBy: { ...sort, node: keyOnce } }, { SortBy: { ...sort, node: this.clone(v) } }], agg_within_group: undefined } };
+    const modal: AstNode = { FuncCall: { ...b, args: [this.clone(v)], agg_within_group: undefined,
+      agg_order: [{ SortBy: { ...sort, node: keyOnce, sortby_nulls: "SORTBY_NULLS_FIRST" } }, { SortBy: { ...sort, node: this.clone(v) } }] } };
+    // (typed as the call it answers: an aggregate, which a GROUP BY's any_value leaves be)
+    this.typedLike.set(bodyOf(modal), { FuncCall: b });
+    const picked = fn("__mason_libc_checked", [modal, strConst(collate)]);
+    this.typedLike.set(bodyOf(picked), { FuncCall: b });
+    return picked;
   }
 
   /** whether every column an expression reads is a column of its own query (none of an outer query's) and it holds no

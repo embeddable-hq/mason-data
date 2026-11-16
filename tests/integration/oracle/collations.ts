@@ -248,6 +248,7 @@ export const COLLATION_CASES: Array<{ name: string; sql: string }> = [
   { name: "collation: mode() of an expression and a varchar, in HAVING and ORDER BY", sql: "SELECT id % 2 AS g, mode() WITHIN GROUP (ORDER BY lower(d)), mode() WITHIN GROUP (ORDER BY l::varchar(3) DESC) FROM colls GROUP BY 1 HAVING mode() WITHIN GROUP (ORDER BY d) IS NOT NULL ORDER BY mode() WITHIN GROUP (ORDER BY d), 1" },
   { name: "collation: mode() of no row, of NULLs alone and FILTERed", sql: "SELECT (SELECT mode() WITHIN GROUP (ORDER BY d) FROM colls WHERE id < 0), mode() WITHIN GROUP (ORDER BY l) FILTER (WHERE id > 4), mode() WITHIN GROUP (ORDER BY l) FILTER (WHERE l IS NULL) FROM colls" },
   { name: "collation: mode() in a correlated subquery", sql: "SELECT g.n, (SELECT mode() WITHIN GROUP (ORDER BY c2.l DESC) FROM colls c2 WHERE c2.id % 3 = g.n) FROM (VALUES (0), (1), (2)) AS g(n) ORDER BY 1" },
+  { name: "collation: mode() under a HAVING on its group and an outer WHERE", sql: "SELECT q.g, q.m FROM (SELECT id % 3 AS g, mode() WITHIN GROUP (ORDER BY l DESC) AS m, mode() WITHIN GROUP (ORDER BY d) AS n FROM colls GROUP BY 1 HAVING id % 3 <> 1) q WHERE q.g = 2 OR q.n IS NULL ORDER BY 1" },
   { name: "collation: GREATEST and LEAST of the database's collation", sql: "SELECT id, greatest(d, 'b'), least(d || 'x', 'B') FROM colls ORDER BY id" },
   // refused by name, never another order
   { name: "collation: an ICU keyword (refused)", sql: "SELECT id FROM colls ORDER BY d COLLATE mason_num, id" },

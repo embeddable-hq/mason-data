@@ -8984,12 +8984,15 @@ test("issue 464: mode() of a text under a libc order keys each distinct value on
         [["0", modeOf(valuesOf((k) => k === 1), false)], ["2", modeOf(valuesOf((k) => k >= 1), false)]]],
     ];
     for (const [sql, want] of keyedOnce) {
-      assert.match(await sent(sql), /mode\(.* ORDER BY \(SELECT __mason_libc_key\(/, sql);
-      const before = (await store.functionRows()).get("__mason_libc_key") ?? 0;
+      assert.match(await sent(sql), /mode\(.* ORDER BY \(SELECT __mason_libc_key_or_null\(/, sql);
+      // the key's functions: each value's key (the join's), and the value picked keyed again, once a group
+      const keyRows = async (): Promise<number> => { const f = await store.functionRows(); return ["__mason_libc_key", "__mason_libc_key_or_null", "__mason_libc_checked"].reduce((n, k) => n + (f.get(k) ?? 0), 0); };
+      const before = await keyRows();
       assert.deepEqual((await answer(c, sql)).rows, want, sql);
-      const keyed = ((await store.functionRows()).get("__mason_libc_key") ?? 0) - before;
-      // (six distinct values, each keyed once by the engine's join; a few more where a thread's partial join keys one again)
-      assert.ok(keyed <= 4 * 6, `${sql}: the libc key was handed ${keyed} rows of ${rows.length}: once a row, not once a value`);
+      const keyed = await keyRows() - before;
+      // (six distinct values, each keyed once by the engine's join, and three groups; a few more where a thread's
+      // partial join keys one again)
+      assert.ok(keyed > 0 && keyed <= 4 * 9, `${sql}: the libc key was handed ${keyed} rows of ${rows.length}: once a row, not once a value`);
     }
     // the answers hold the tie the order decides: b before B, é before f (and the bytes the other way round)
     assert.deepEqual([modeOf(valuesOf((x) => x === 0), false), modeOf(valuesOf((x) => x === 1), false), modeOf(valuesOf((x) => x === 0), true)], ["b", "é", "B"]);
@@ -8997,11 +9000,46 @@ test("issue 464: mode() of a text under a libc order keys each distinct value on
     assert.doesNotMatch(await sent("SELECT mode() WITHIN GROUP (ORDER BY c) FROM colls WHERE id >= 300"), /__mason_libc_key/);
     assert.deepEqual((await answer(c, "SELECT mode() WITHIN GROUP (ORDER BY c) FROM colls WHERE id >= 300")).rows, [["B"]]);
     assert.deepEqual((await answer(c, "SELECT mode() WITHIN GROUP (ORDER BY d) FROM colls WHERE id >= $1", [300])).rows, [[modeOf(valuesOf(() => true), false)]]);
-    // a FILTER keys the rows it keeps alone, a row at a time, as before (a value it drops is never keyed)
-    const filtered = `SELECT mode() WITHIN GROUP (ORDER BY d) FILTER (WHERE ${groupSql} = '1') FROM colls WHERE id >= 300`;
-    assert.doesNotMatch(await sent(filtered), /\(SELECT __mason_libc_key/);
-    assert.deepEqual((await answer(c, filtered)).rows, [[modeOf(valuesOf((x) => x === 1), false)]]);
   } finally { await store.writer.run("DELETE FROM public.colls WHERE id >= 300"); await c.end(); await a.close(); }
+});
+
+// THE REVIEW OF PR 1089: a value the order cannot key (`libc-uncovered`: the hand order lists no `€`) refuses only where
+// its key could decide, where it is among its group's most frequent values. The join keys every distinct value of the
+// aggregate's input, groups a HAVING or an outer WHERE drops included, so such a value in a dropped group refused the
+// statement, where the key a row, computed after the engine pushed the filter down, answered. Group 0: `B` and `b` tie;
+// group 1: `é` and `f` tie; group 3: `€` five times, `z` once; group 4: `€` once, `y` twice; group 5: `€` and `x` twice
+test("issue 464: mode() under a libc order refuses a value it cannot order only where it ties for the most frequent", async () => {
+  const letters = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({ e: "é" })], [" ", "-\u0001\u0002\u007f"], { collate: "en_US.utf8" });
+  const { api: a, c } = await collsApi(await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, undefined, letters, () => copies, undefined, { collations: PG_COLLATIONS }));
+  const rows: Array<[number, string, string]> = [];
+  for (const [g, counts] of [["0", [["B", 3], ["b", 3]]], ["1", [["é", 2], ["f", 2], ["e", 1]]], ["3", [["€", 5], ["z", 1]]], ["4", [["€", 1], ["y", 2]]], ["5", [["€", 2], ["x", 2]]]] as Array<[string, Array<[string, number]>]>) {
+    for (const [x, k] of counts) for (let n = 0; n < k; n++) rows.push([6000 + rows.length, x, g]);
+  }
+  // (the group is the ICU column's, written as its digit)
+  await store.writer.run(`INSERT INTO public.colls SELECT id, x, x, g FROM (VALUES ${rows.map(([i, x, g]) => `(${i}, '${x}', '${g}')`).join(", ")}) AS s(id, x, g)`);
+  try {
+    const sent = async (sql: string): Promise<string> => String((await answer(c, `EXPLAIN ${sql}`)).rows.map((r) => String(r[0])).find((l) => l.includes("Sent to the engine")) ?? "");
+    for (const [sql, want] of [
+      // a HAVING on the group, and an outer query's WHERE: the groups holding `€` are dropped
+      ["SELECT i, mode() WITHIN GROUP (ORDER BY d) FROM colls WHERE id >= 6000 GROUP BY 1 HAVING i = '1'", [["1", "é"]]],
+      ["SELECT * FROM (SELECT i AS g, mode() WITHIN GROUP (ORDER BY d) AS m FROM colls WHERE id >= 6000 GROUP BY 1) q WHERE q.g = '1'", [["1", "é"]]],
+      ["WITH q AS (SELECT i AS g, mode() WITHIN GROUP (ORDER BY d DESC) AS m FROM colls WHERE id >= 6000 GROUP BY 1) SELECT m FROM q WHERE g = '0'", [["B"]]],
+      ["SELECT i, mode() WITHIN GROUP (ORDER BY d) FROM colls WHERE id >= 6000 GROUP BY 1 HAVING i <= '1' ORDER BY 1", [["0", "b"], ["1", "é"]]],
+      ["SELECT i, mode() WITHIN GROUP (ORDER BY d) FROM colls WHERE id >= 6000 GROUP BY 1 HAVING i = '1' AND mode() WITHIN GROUP (ORDER BY d) IS NOT NULL UNION ALL SELECT 'x', 'y' ORDER BY 1", [["1", "é"], ["x", "y"]]],
+      // a group holding `€` less often than its most frequent value: the key decides nothing there
+      ["SELECT i, mode() WITHIN GROUP (ORDER BY d) FROM colls WHERE id >= 6000 GROUP BY 1 HAVING i IN ('1', '4') ORDER BY 1", [["1", "é"], ["4", "y"]]],
+      // a FILTER that drops it
+      ["SELECT mode() WITHIN GROUP (ORDER BY d) FILTER (WHERE i = '1') FROM colls WHERE id >= 6000", [["é"]]],
+    ] as Array<[string, unknown[][]]>) {
+      assert.deepEqual((await answer(c, sql)).rows, want, sql);
+      assert.match(await sent(sql), /\(SELECT __mason_libc_key_or_null\(/, sql);
+    }
+    // where `€` is among the most frequent, alone or tied, the order would decide: refused by name, as the key a row did
+    for (const sql of ["SELECT mode() WITHIN GROUP (ORDER BY d) FROM colls WHERE id >= 6000 AND i = '3'",
+      "SELECT i, mode() WITHIN GROUP (ORDER BY d DESC) FROM colls WHERE id >= 6000 GROUP BY 1 HAVING i = '5'", "SELECT i, mode() WITHIN GROUP (ORDER BY d) FROM colls WHERE id >= 6000 GROUP BY 1 ORDER BY 1"]) {
+      await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /holds a character Mason cannot order .*libc-uncovered/.test(e.message), sql);
+    }
+  } finally { await store.writer.run("DELETE FROM public.colls WHERE id >= 6000"); await c.end(); await a.close(); }
 });
 
 test("collation resolver: two libc collations in one session, each by its own order, the second read once on its first use", async () => {
