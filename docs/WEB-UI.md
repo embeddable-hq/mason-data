@@ -91,8 +91,8 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   written, then **Show 100 more** and **Show all**; the search is over every table, at once. A long name is never cut: it wraps in its cell.
 - **Tables**, an added table: its state (Synced, Syncing, Failed or Waiting) over its bar — every added table has
   one, as `mason status` draws one for each: full at 100% once synced, red when its first sync failed, amber when it is not kept
-  current, moving while it syncs, a shimmer while it waits — its rows, its last sync over how long it took, and the
-  table's size. What is said at length (the words `mason wait` prints after a bar not yet full, an error, why a table
+  current, moving while it syncs, a shimmer while it waits — its rows, its key, its columns and its sync (each a
+  button, below), its last sync over how long it took, and the table's size. What is said at length (the words `mason wait` prints after a bar not yet full, an error, why a table
   cannot be added, its stream state) is its note, a line of its own under the row, across every column — written for
   every row, empty when it says nothing, so a note that comes or goes moves no row. **View events** opens Sync events narrowed
   to that table; **Sync now** runs `mason sync` for it
@@ -114,14 +114,19 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   person scrolled in it stays put when the page is written again; and a long table name in its facts wraps rather
   than squeezing the value beside it (`placePops`, src/web/shared.js).
 - **Tables**, **the name keeps its room at every width** (issue 884: it was 2 px at 1024 px): measured against the
-  list's card, the name gets at least 200 px, and the less important columns give way first: Key below about 1350 px,
-  then Size (1250), Last sync (1140) and Rows (1040) beside the full sidebar. A column given way says its fact in the
-  row's note instead ("key id", "size 1.2 MiB", "last sync 3 h ago, took 0.2 s", "1,200 rows"). **A table's name and
+  list's card, the name gets at least 200 px, and the less important columns give way first. In Added: Key below about
+  1590 px, then Size (1490), Last sync (1370), Rows (1270), Columns (1150) and Sync (1040) beside the full sidebar.
+  Columns and Sync give way last because they are buttons, and a button is easier to find in a column than in a note.
+  Not added has no Columns or Sync column, so its other columns have more room: Key gives way below about 1350 px,
+  then Size (1250), Last sync (1130) and Rows (1030). A column
+  given way says its fact in the row's note instead ("key id", "size 1.2 MiB", "last sync 3 h ago, took 0.2 s", "1,200
+  rows"). For Columns and Sync, the note shows the button itself ("All columns", "Sync: Off"), so it can be pressed at
+  every width, a phone's too. **A table's name and
   its state are never cut with "…"** (the owner: "otherwise we can't see them"): each wraps in its cell — a name after
   its `.` and `_` where it can, anywhere where it must — and the row grows to fit. On a phone the same columns give way,
   the state is narrower and a row's actions are stacked in a column of their own, so the list fits its card and every
   name and state reads whole. The page never scrolls sideways.
-- **Tables**, an added table's **columns**, on its note beside its sync: which it syncs in a few words — "All columns",
+- **Tables**, an added table's **columns**, in its Columns column: which it syncs in a few words — "All columns",
   "5 of 12 columns" or "All but 1 column", the columns themselves its tooltip (`/api/state` `tables[].entry`,
   `addedColumns`, `columnCount`). It is a button that opens the table's **column form**, a dialog beside it that reads
   `GET /api/tables/<table>/columns` once, as it opens. It has two choices: **All columns, and any added to the table
@@ -139,9 +144,13 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   the entry says send the entry's own lists, so the run answers `already` and writes nothing. **An entry the boxes cannot
   show** — an `exclude:` written by hand, or every column with a secret-looking one kept on purpose — is described at
   the top of the form, its boxes the columns synced now, and the form says that saving replaces the entry with the
-  columns ticked. Where the page may not edit the sources file, the columns are said alone, with no button.
-- **Tables**, an added table's **sync**, first on its note (`Sync: Off`, `Sync: Every 5 minutes`, `Sync: Live
-  (replication)`, as the run keeps it now: `/api/state` `tables[].kept`): a button that opens its **Sync choice**, a
+  columns ticked. Where the page may not edit the sources file, the columns are said alone, with no button. The Not
+  added list has no Columns or Sync column, since a table not added has neither. Its own Columns… is beside its Add
+  (below). A table added from that list keeps its row there until the lists are laid out again, and its columns and
+  its sync are buttons in the line under it.
+- **Tables**, an added table's **sync**, in its Sync column (`Off`, `Every 5 minutes`, `Live (replication)`, as the run
+  keeps it now: `/api/state` `tables[].kept`; `Sync: Off` in the note, where the column gave way): a button that opens
+  its **Sync choice**, a
   dialog beside it that reads `GET /api/tables/<table>/sync` once, as it opens (never on a timer: it opens a connection
   to the database), and saves with `POST /api/pick` `{ table, picked: true, sync, keep: true }`, as `mason add <table>
   --sync …` does, writing the entry's `sync:` line alone:

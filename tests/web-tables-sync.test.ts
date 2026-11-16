@@ -104,13 +104,18 @@ const FAILING = [
 
 // ------------------------------------------------------------------ the list
 
-test("every added table says its sync on its note, in the page's words, and opens its choice there; one not added has none", () => {
+test("every added table says its sync in its Sync column, in the page's words, and opens its choice there; one not added has none (issue 1110)", () => {
   const html = renderTables(STATE);
   const text = textOf(html);
-  assert.match(text, /public\.customers Synced .* Remove Sync: Off All columns public\.orders /);
-  assert.match(text, /public\.orders Synced .* Remove Sync: Every 5 minutes All columns public\.events /);
-  assert.match(text, /public\.events Synced .* Remove Sync: Live \(replication\) All columns/);
-  for (const t of ["public.customers", "public.orders", "public.events"]) assert.match(html, new RegExp(`<button type="button" class="small link syncnow" id="sync-tables-${t.replace(".", "\\.")}" data-choose-sync="${t.replace(".", "\\.")}"`));
+  // in its column, under the header Sync, its words alone; in the note (shown where the column gave way) "Sync: …"
+  assert.match(text, /public\.customers Synced .* All columns Off .* Remove All columns Sync: Off public\.orders /);
+  assert.match(text, /public\.orders Synced .* All columns Every 5 minutes .* Remove All columns Sync: Every 5 minutes public\.events /);
+  assert.match(text, /public\.events Synced .* All columns Live \(replication\) .* Remove All columns Sync: Live \(replication\)/);
+  for (const t of ["public.customers", "public.orders", "public.events"]) {
+    const q = t.replace(".", "\\.");
+    assert.match(html, new RegExp(`<td class="sync"><button type="button" class="small link syncnow" id="sync-tables-${q}" data-choose-sync="${q}"`), `${t}: its Sync cell`);
+    assert.match(html, new RegExp(`<span class="fold f-sync"><button type="button" class="small link syncnow" id="sync-note-tables-${q}" data-choose-sync="${q}"`), `${t}: the same, in its note`);
+  }
   assert.ok(!html.includes('data-choose-sync="public.audit"'), "no choice for a table not added");
 });
 
@@ -126,7 +131,8 @@ test("read-only: no choice where the project's files are read-only or the page m
     const html = renderTables(s, { syncOpen: "public.customers", syncChoice: choiceOf("public.customers") });
     assert.ok(!html.includes("data-choose-sync"), "no button");
     assert.ok(!html.includes("data-sync-form") && !html.includes("data-save-sync"), "no dialog, even one the model says is open");
-    assert.match(html, /<span class="syncnow dim" title="[^"]+">Sync: Off<\/span>/);
+    assert.match(html, /<td class="sync"><span class="syncnow dim" title="[^"]+">Off<\/span><\/td>/);
+    assert.match(html, /<span class="fold f-sync"><span class="syncnow dim" title="[^"]+">Sync: Off<\/span><\/span>/);
     assert.ok(textOf(html).includes(note), `the reason, above the list: ${note}`);
     const other = note === pageNote ? "You can't add or remove tables" : "Tables are not added, removed or synced";
     assert.ok(!textOf(html).includes(other), `only its own note: not "${other}"`);
@@ -441,16 +447,17 @@ test("an added table's row says which columns it syncs in a few words — All co
     sessions: ["Every column, and any column added to the table later that does not look like a secret. Choose which columns Mason syncs", "All columns"],
     raw_log: ["Synced: tenant_id, seq, body. Choose which columns Mason syncs", "3 of 3 columns"],
   });
-  assert.match(textOf(html), /public\.orders Synced .* Remove Sync: Off 2 of 4 columns public\.accounts /, "on its note, beside its sync");
-  assert.ok(!html.includes('id="columns-tables-public.audit"'), "a table not added has Columns… in its actions instead");
+  assert.match(html, /<td class="cols"><button type="button" class="small link syncnow" id="columns-tables-public\.orders" [^>]*>2 of 4 columns<\/button><\/td><td class="sync">/, "in its Columns column, beside its Sync (issue 1110)");
+  assert.match(html, /<span class="fold f-cols"><button type="button" class="small link syncnow" id="columns-note-tables-public\.orders" [^>]*>2 of 4 columns<\/button><\/span>/, "the same, in its note, where the column gave way");
+  assert.ok(!html.includes('id="columns-tables-public.audit"') && !html.includes('id="columns-note-tables-public.audit"'), "a table not added has Columns… in its actions instead");
   assert.match(html, /data-add-table="public\.audit" data-room="Add" data-room2="Adding…">Add<\/button> <button type="button" class="small" data-choose="public\.audit">Columns…<\/button>/);
 });
 
 test("read-only: the columns said, no form — where the project's files are read-only or the page may not edit tables", () => {
   for (const s of [colStateOf({ sourcesReadOnly: "The project's files are read-only here (MASON_PROJECT_READONLY=1). Run mason add or mason remove in your project, commit the change, and deploy it." }), colStateOf({ pageReadOnly: true })]) {
     const html = renderTables(s, { choosing: "public.orders", columns: columnsOf("orders") });
-    assert.match(html, /<span class="syncnow dim" title="Synced: id, status">2 of 4 columns<\/span>/);
-    assert.ok(!html.includes('id="columns-tables-'), "no button");
+    assert.match(html, /<td class="cols"><span class="syncnow dim" title="Synced: id, status">2 of 4 columns<\/span><\/td>/);
+    assert.ok(!html.includes('id="columns-tables-') && !html.includes('id="columns-note-tables-'), "no button");
     assert.ok(!html.includes("data-pick-form"), "no form, even one the model says is open");
   }
 });

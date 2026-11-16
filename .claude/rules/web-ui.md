@@ -222,7 +222,14 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   some could be sent twice. The Tables list's columns are FIXED widths (`table-layout: fixed`,
   a width per header class, the name the column that gives, never under 200 px: the less important give way first,
   their facts in the note), every row at least two lines (a table not added keeps its bar's line) and its note under it
-  written for every row, empty or not. **A table's name and state are never cut** (issue 884, the owner: "otherwise
+  written for every row, empty or not. The note holds only what is long: the progress words, an error, the stream.
+  **An added table's columns and its sync are columns of the Added list**, Columns and Sync, each the button that
+  opens its form (issue 1110, the owner). They give way last. Where one has, the same button is in the note (`.fold`)
+  with an id of its own, the cell's is not displayed, and its popovers are anchored to the one shown (`pop`'s
+  `orAnchor`). Why: a control must stay pressable at every width, and one element can sit in one place only. **The Not
+  added list has neither column** (`table.catalog.not-added`), since they are always empty there and took room from the
+  name. It keeps its own give-way widths. A table added from it keeps its row there until the lists are laid out
+  again, with its two buttons in its note. Detector: tests/web-tables-layout.test.ts, both lists. **A table's name and state are never cut** (issue 884, the owner: "otherwise
   we can't see them"): each wraps in its cell, the row growing to fit (detector: tests/web-tables-layout.test.ts). Only an expander the reader opens (a request's
   details, a copy's whole error) pushes rows down — and never widens a column (`.detail-body`). A row's actions never
   wrap (`td.act`) but on a phone, where the Tables and Users lists stack them in a column of their own (a pinned column

@@ -341,9 +341,9 @@ label.tick code { overflow-wrap: normal; }
    by the radio itself, so choosing writes nothing */
 form.pick .only-cols { margin: var(--space-1) 0 0 calc(13px + var(--space-2)); }
 form.pick:has(input[name="which"][value="all"]:checked) .only-cols { display: none; }
-/* a table's Sync choice (src/web/pages/tables.js renderSyncChoice): its sync on its note, a quiet button of the note's
-   line height (every added row's note has it, so no row moves when it opens); the dialog a radio a line, each choice's
-   words under its label, a check a line with its state's word and the SQL that fixes it */
+/* a table's Sync choice (src/web/pages/tables.js renderSyncChoice): its sync in its Sync column (or its note, where the
+   column gave way), a quiet button of the note's line height, so no row moves when it opens; the dialog a radio a line,
+   each choice's words under its label, a check a line with its state's word and the SQL that fixes it */
 button.link.syncnow { height: 20px; padding: 0 var(--space-1); border-color: var(--line); background: none; box-shadow: none; color: var(--fg); }
 button.link.syncnow:hover { background: var(--hover); border-color: var(--line-strong); }
 span.syncnow { white-space: nowrap; }
@@ -539,16 +539,24 @@ details.memory, details#syncs-raw { margin: var(--space-4) 0; }
 #page-tables h3.list-h { margin: var(--space-6) 0 var(--space-3); }
 #page-tables h3.list-h:first-of-type { margin-top: 0; }
 #page-tables h3.list-h .dim { font-family: var(--font-mono); font-size: var(--text-sm); font-weight: 400; }
-/* THE TABLES LIST FITS ITS CARD AND NOTHING A CLICK DOES MOVES IT (src/web/pages/tables.js renderTables): seven short
+/* THE TABLES LIST FITS ITS CARD AND NOTHING A CLICK DOES MOVES IT (src/web/pages/tables.js renderTables): nine short
    cells a row at FIXED widths (`table-layout: fixed`: a column is as wide as its header says, whatever a row's cells
-   hold now), the name the column that gives (cut with an ellipsis, its whole the title); every row two lines (its state
-   over its bar, a line kept when it has none) and its note under it, across every column, written for every row (empty
-   when it says nothing). A question, a form and an answer are popovers beside the row's actions (`.pop`), never a row.
+   hold now), the name the column that gives (wrapped whole, never cut); every row two lines (its state over its bar, a
+   line kept when it has none) and its note under it, across every column, written for every row (empty when it says
+   nothing). A question, a form and an answer are popovers beside the button that asked (`.pop`), never a row.
    The row's actions never wrap and never leave the card: they stay pinned at its right where the table scrolls. */
 table.catalog { table-layout: fixed; width: 100%; --least: 630px; }
 table.catalog th.state { width: 146px; }
 table.catalog th.rows { width: 116px; }
 table.catalog th.key { width: 104px; }
+/* Columns and Sync (issue 1110): the button that opens the column form, and the one that opens the Sync choice. A
+   label wider than its column wraps inside its button ("Live (replication)" on two lines), so it is never cut, and the
+   row is already two lines tall. Sync is as wide as its longest word, "(replication)" (94 px at the buttons' size), with
+   the button's padding and the cell's widest; Columns' longest word is shorter. A read-only page writes the same words
+   without a button, at the same size, wrapped the same way */
+table.catalog th.cols { width: 108px; }
+table.catalog th.sync { width: 132px; }
+table.catalog :is(td.cols, td.sync) .syncnow { max-width: 100%; height: auto; min-height: 20px; line-height: 18px; white-space: normal; text-align: left; vertical-align: top; font-size: var(--text-xs); }
 table.catalog th.last { width: 104px; }
 table.catalog th.size { width: 116px; }   /* "Measuring…" whole (issue 883), as wide as Rows */
 /* the actions' column holds an added table's three — View events, Sync now (in the room of Syncing…) and Remove — whole
@@ -558,18 +566,31 @@ table.catalog th.size { width: 116px; }   /* "Measuring…" whole (issue 883), a
 table.catalog th.act { width: 284px; }
 /* THE NAME KEEPS ITS ROOM, AT EVERY WIDTH (issue 884: it was 2 px at 1024 px, the fixed columns filling the list's least
    width): measured against the list's own card (a container query, so the sidebar, the rail and the window's width are
-   all counted once), at least 200 px for the name — a typical schema.table, cut with "…" and whole on hover — and the
-   less important columns give way first: Key, then Size, then Last sync, then Rows. A column given way (no width, its
-   cells unseen: still the table's seven columns, which a note's colspan spans) says its fact in the row's note instead
-   (`.fold`, src/web/pages/tables.js), so nothing is lost. On a phone the same, the row's actions stacked (below).
-   Detector: tests/web-tables-layout.test.ts, 390 px and every width from 1000 to 1400 px. */
+   all counted once), at least 200 px for the name — a typical schema.table, wrapped whole — and the less important
+   columns give way first: Key, then Size, Last sync, Rows, Columns and Sync. The two controls give way last, because
+   a control in a column is easier to find than one in the note. A column given way (no width, its cells unseen:
+   still the table's nine columns, which a note's colspan spans) says its fact in the row's note instead (`.fold`,
+   src/web/pages/tables.js), so nothing is lost. For Columns and Sync the fold is the control itself, and the one in
+   the hidden cell is not displayed, so the page has one of each to press. Each width below is the sum of the columns
+   shown and 200 px for the name, less 1. On a phone the same, the row's actions stacked (below).
+   NOT ADDED HAS NO COLUMNS AND NO SYNC (issue 1110, the owner: always empty there), so its own widths, the sums of its
+   seven columns. A table added from it keeps its row there until the lists are laid out again, its two buttons in its
+   note meanwhile.
+   Detector: tests/web-tables-layout.test.ts, 375 px and every width from 1000 to 1600 px, both lists. */
 .list:has(> table.catalog) { container: catalog / inline-size; }
 table.catalog .fold { display: none; }
 table.catalog .fold::before { content: attr(data-fold); }
-@container catalog (max-width: 1069px) { table.catalog :is(th, td).key { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-key { display: inline; } }
-@container catalog (max-width: 965px) { table.catalog :is(th, td).size { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-size { display: inline; } }
-@container catalog (max-width: 849px) { table.catalog :is(th, td).last { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-last { display: inline; } }
-@container catalog (max-width: 745px) { table.catalog :is(th, td).rows { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-rows { display: inline; } }
+@container catalog (max-width: 1309px) { table.catalog:not(.not-added) :is(th, td).key { width: 0; padding: 0; visibility: hidden; } table.catalog:not(.not-added) .fold.f-key { display: inline; } }
+@container catalog (max-width: 1205px) { table.catalog:not(.not-added) :is(th, td).size { width: 0; padding: 0; visibility: hidden; } table.catalog:not(.not-added) .fold.f-size { display: inline; } }
+@container catalog (max-width: 1089px) { table.catalog:not(.not-added) :is(th, td).last { width: 0; padding: 0; visibility: hidden; } table.catalog:not(.not-added) .fold.f-last { display: inline; } }
+@container catalog (max-width: 985px) { table.catalog:not(.not-added) :is(th, td).rows { width: 0; padding: 0; visibility: hidden; } table.catalog:not(.not-added) .fold.f-rows { display: inline; } }
+@container catalog (max-width: 869px) { table.catalog:not(.not-added) :is(th, td).cols { width: 0; padding: 0; visibility: hidden; } table.catalog:not(.not-added) td.cols .syncnow { display: none; } table.catalog:not(.not-added) .fold.f-cols { display: flex; } }
+@container catalog (max-width: 761px) { table.catalog:not(.not-added) :is(th, td).sync { width: 0; padding: 0; visibility: hidden; } table.catalog:not(.not-added) td.sync .syncnow { display: none; } table.catalog:not(.not-added) .fold.f-sync { display: flex; } }
+table.catalog.not-added .fold:is(.f-cols, .f-sync) { display: flex; }
+@container catalog (max-width: 1069px) { table.catalog.not-added :is(th, td).key { width: 0; padding: 0; visibility: hidden; } table.catalog.not-added .fold.f-key { display: inline; } }
+@container catalog (max-width: 965px) { table.catalog.not-added :is(th, td).size { width: 0; padding: 0; visibility: hidden; } table.catalog.not-added .fold.f-size { display: inline; } }
+@container catalog (max-width: 849px) { table.catalog.not-added :is(th, td).last { width: 0; padding: 0; visibility: hidden; } table.catalog.not-added .fold.f-last { display: inline; } }
+@container catalog (max-width: 745px) { table.catalog.not-added :is(th, td).rows { width: 0; padding: 0; visibility: hidden; } table.catalog.not-added .fold.f-rows { display: inline; } }
 table.catalog th, table.catalog td { overflow: hidden; text-overflow: ellipsis; }
 /* A TABLE'S NAME AND ITS STATE ARE NEVER CUT (issue 884, the owner: "otherwise we can't see them"): each wraps in its
    cell, the row growing to fit — a name after its `.` and `_` where it can (`<wbr>`, src/web/pages/tables.js), anywhere

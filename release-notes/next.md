@@ -42,6 +42,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   with `FM`, with `TH` after a number. These are still slow: `TM`, `FX`, a time zone's `TZ`, `TZH`, `TZM` and `OF`,
   `SP`, a format passed as a parameter, a year before 1 or after 9999, and a date formatted with a time of day.
 - **The web page's Overview no longer has a Connected tools row.** The Usage page shows who is connected now.
+- **On the web page's Tables list, an added table's columns and its sync have columns of their own: Columns and
+  Sync.** Each is the button that opens its choice, as before. The line under a table now holds only the longer
+  words: a first sync's progress, an error and the stream's state. In a narrow window, where these columns have no
+  room, their buttons are in the line under the table, as before. The Not added list has neither column.
 
 ## What was wrong and is now right
 
