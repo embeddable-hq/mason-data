@@ -139,31 +139,50 @@ const LAPTOP = [...Array.from({ length: 21 }, (_, i) => 1000 + 20 * i), 1024].so
 
 /** The list's columns as the browser lays them out: each header's width (0: hidden), the page's and the list's
  *  sideways scroll, and, for each hidden column, the rows whose note does not say its fact. */
-const layout = (p: Page) => p.evaluate<{ widths: Record<string, number>; page: number; unsaid: string[] }>(`(() => {
-  const widths = {};
-  for (const th of document.querySelectorAll("#tables table.catalog thead th")) widths[[...th.classList].filter((c) => c !== "num")[0] || "act"] = Math.round(th.getBoundingClientRect().width);
-  const unsaid = [];
-  for (const [cls, w] of Object.entries(widths)) {
-    if (cls === "name" || cls === "act" || cls === "state" || w > 2) continue;
-    for (const tr of document.querySelectorAll("#tables table.catalog tbody tr:not(.under)")) {
-      const note = tr.nextElementSibling;
-      // a cell that says nothing (a table not added has no last sync) has nothing to say in the note either
-      if (!(tr.querySelector("td." + cls)?.textContent ?? "").trim()) continue;
-      const fold = note?.querySelector(".fold.f-" + cls);
-      const name = tr.querySelector("code.name")?.textContent;
-      // a fact's fold says it by its data-fold; a control's (Columns, Sync) is the control itself
-      if (!fold || fold.getBoundingClientRect().width < 1 || !((fold.dataset.fold ?? "") || fold.textContent).trim()) unsaid.push(name + ": " + cls);
+/** Each list's columns as the browser lays them out (Added, then Not added): each header's width (0: hidden), the
+ *  page's sideways scroll, and, for each hidden column, the rows whose note does not say its fact. */
+const layout = (p: Page) => p.evaluate<{ lists: Array<{ cls: string; widths: Record<string, number> }>; page: number; unsaid: string[] }>(`(() => {
+  const lists = [], unsaid = [];
+  for (const table of document.querySelectorAll("#tables table.catalog")) {
+    const widths = {};
+    for (const th of table.querySelectorAll("thead th")) widths[[...th.classList].filter((c) => c !== "num")[0] || "act"] = Math.round(th.getBoundingClientRect().width);
+    lists.push({ cls: table.className, widths });
+    for (const [cls, w] of Object.entries(widths)) {
+      if (cls === "name" || cls === "act" || cls === "state" || w > 2) continue;
+      for (const tr of table.querySelectorAll("tbody tr:not(.under)")) {
+        const note = tr.nextElementSibling;
+        // a cell that says nothing (a table not added has no last sync) has nothing to say in the note either
+        if (!(tr.querySelector("td." + cls)?.textContent ?? "").trim()) continue;
+        const fold = note?.querySelector(".fold.f-" + cls);
+        const name = tr.querySelector("code.name")?.textContent;
+        // a fact's fold says it by its data-fold; a control's (Columns, Sync) is the control itself
+        if (!fold || fold.getBoundingClientRect().width < 1 || !((fold.dataset.fold ?? "") || fold.textContent).trim()) unsaid.push(name + ": " + cls);
+      }
     }
   }
-  return { widths, page: document.documentElement.scrollWidth - window.innerWidth, unsaid };
+  return { lists, page: document.documentElement.scrollWidth - window.innerWidth, unsaid };
 })()`);
 
-test(`the name column keeps a usable width at every width from 1000 to 1400 px; a hidden column's fact is in the row's note`, { skip: noBrowser }, async () => {
-  for (const width of LAPTOP) {
+/** 375 and 390 px, 1000 to 1400 px every 20 px with 1024, and 1440 to 1600 px every 40 px. */
+const EVERY = [375, 390, ...LAPTOP, 1440, 1480, 1520, 1560, 1600];
+
+test(`each list's name column keeps a usable width at 375 px and every width from 1000 to 1600 px; a hidden column's fact is in the row's note; Not added has no Columns and no Sync (issue 1110)`, { skip: noBrowser }, async () => {
+  for (const width of EVERY) {
     const p = await open(width);
     const l = await layout(p);
     await p.close();
-    assert.ok((l.widths.name ?? 0) >= 180, `${width} px: the name column is ${l.widths.name} px wide (${JSON.stringify(l.widths)})`);
+    assert.deepEqual(l.lists.map((x) => x.cls), ["catalog", "catalog not-added"], `${width} px: Added, then Not added`);
+    for (const { cls, widths } of l.lists) {
+      // a phone's least width is the name, the state and the actions, less than 180 px for the name: it scrolls in its card
+      if (width > 640) assert.ok((widths.name ?? 0) >= 180, `${width} px, ${cls}: the name column is ${widths.name} px wide (${JSON.stringify(widths)})`);
+    }
+    const [added, other] = l.lists.map((x) => x.widths);
+    assert.ok("cols" in added! && "sync" in added!, `${width} px: Added has Columns and Sync`);
+    assert.ok(!("cols" in other!) && !("sync" in other!), `${width} px: Not added has neither (${JSON.stringify(other)})`);
+    // Not added's room goes to its name and its other columns: never fewer of them shown than Added, its name never narrower
+    const shown = (w: Record<string, number>) => ["rows", "key", "last", "size"].filter((c) => (w[c] ?? 0) > 2);
+    assert.ok(shown(other!).length >= shown(added!).length, `${width} px: Not added shows ${shown(other!)} where Added shows ${shown(added!)}`);
+    if (width > 640) assert.ok(other!.name! >= added!.name! - 1 || shown(other!).length > shown(added!).length, `${width} px: Not added's name ${other!.name} px, Added's ${added!.name} px`);
     assert.ok(l.page <= 0, `${width} px: the page scrolls ${l.page} px sideways`);
     assert.deepEqual(l.unsaid, [], `${width} px: each hidden column's fact is in every row's note`);
   }

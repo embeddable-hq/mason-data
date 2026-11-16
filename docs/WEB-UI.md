@@ -114,9 +114,11 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   person scrolled in it stays put when the page is written again; and a long table name in its facts wraps rather
   than squeezing the value beside it (`placePops`, src/web/shared.js).
 - **Tables**, **the name keeps its room at every width** (issue 884: it was 2 px at 1024 px): measured against the
-  list's card, the name gets at least 200 px, and the less important columns give way first: Key below about 1590 px,
-  then Size (1490), Last sync (1370), Rows (1270), Columns (1150) and Sync (1030) beside the full sidebar. Columns and
-  Sync give way last because they are buttons, and a button is easier to find in a column than in a note. A column
+  list's card, the name gets at least 200 px, and the less important columns give way first. In Added: Key below about
+  1590 px, then Size (1490), Last sync (1370), Rows (1270), Columns (1150) and Sync (1030) beside the full sidebar.
+  Columns and Sync give way last because they are buttons, and a button is easier to find in a column than in a note.
+  Not added has no Columns or Sync column, so its other columns have more room: Key gives way below about 1350 px,
+  then Size (1250), Last sync (1130) and Rows (1030). A column
   given way says its fact in the row's note instead ("key id", "size 1.2 MiB", "last sync 3 h ago, took 0.2 s", "1,200
   rows"). For Columns and Sync, the note shows the button itself ("All columns", "Sync: Off"), so it can be pressed at
   every width, a phone's too. **A table's name and
@@ -142,8 +144,10 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   the entry says send the entry's own lists, so the run answers `already` and writes nothing. **An entry the boxes cannot
   show** — an `exclude:` written by hand, or every column with a secret-looking one kept on purpose — is described at
   the top of the form, its boxes the columns synced now, and the form says that saving replaces the entry with the
-  columns ticked. Where the page may not edit the sources file, the columns are said alone, with no button. A table
-  not added has nothing in its Columns and Sync cells. Its own Columns… is beside its Add (below).
+  columns ticked. Where the page may not edit the sources file, the columns are said alone, with no button. The Not
+  added list has no Columns or Sync column, since a table not added has neither. Its own Columns… is beside its Add
+  (below). A table added from that list keeps its row there until the lists are laid out again, and its columns and
+  its sync are buttons in the line under it.
 - **Tables**, an added table's **sync**, in its Sync column (`Off`, `Every 5 minutes`, `Live (replication)`, as the run
   keeps it now: `/api/state` `tables[].kept`; `Sync: Off` in the note, where the column gave way): a button that opens
   its **Sync choice**, a

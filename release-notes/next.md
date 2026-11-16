@@ -45,7 +45,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **On the web page's Tables list, an added table's columns and its sync have columns of their own: Columns and
   Sync.** Each is the button that opens its choice, as before. The line under a table now holds only the longer
   words: a first sync's progress, an error and the stream's state. In a narrow window, where these columns have no
-  room, their buttons are in the line under the table, as before.
+  room, their buttons are in the line under the table, as before. The Not added list has neither column.
 
 ## What was wrong and is now right
 

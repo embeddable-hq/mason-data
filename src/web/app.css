@@ -571,16 +571,24 @@ table.catalog th.act { width: 284px; }
    src/web/pages/tables.js), so nothing is lost. For Columns and Sync the fold is the control itself, and the one in
    the hidden cell is not displayed, so the page has one of each to press. Each width below is the sum of the columns
    shown and 200 px for the name, less 1. On a phone the same, the row's actions stacked (below).
-   Detector: tests/web-tables-layout.test.ts, 390 px and every width from 1000 to 1400 px. */
+   NOT ADDED HAS NO COLUMNS AND NO SYNC (issue 1110, the owner: always empty there), so its own widths, the sums of its
+   seven columns. A table added from it keeps its row there until the lists are laid out again, its two buttons in its
+   note meanwhile.
+   Detector: tests/web-tables-layout.test.ts, 375 px and every width from 1000 to 1600 px, both lists. */
 .list:has(> table.catalog) { container: catalog / inline-size; }
 table.catalog .fold { display: none; }
 table.catalog .fold::before { content: attr(data-fold); }
-@container catalog (max-width: 1309px) { table.catalog :is(th, td).key { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-key { display: inline; } }
-@container catalog (max-width: 1205px) { table.catalog :is(th, td).size { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-size { display: inline; } }
-@container catalog (max-width: 1089px) { table.catalog :is(th, td).last { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-last { display: inline; } }
-@container catalog (max-width: 985px) { table.catalog :is(th, td).rows { width: 0; padding: 0; visibility: hidden; } table.catalog .fold.f-rows { display: inline; } }
-@container catalog (max-width: 869px) { table.catalog :is(th, td).cols { width: 0; padding: 0; visibility: hidden; } table.catalog td.cols .syncnow { display: none; } table.catalog .fold.f-cols { display: inline; } }
-@container catalog (max-width: 749px) { table.catalog :is(th, td).sync { width: 0; padding: 0; visibility: hidden; } table.catalog td.sync .syncnow { display: none; } table.catalog .fold.f-sync { display: inline; } }
+@container catalog (max-width: 1309px) { table.catalog:not(.not-added) :is(th, td).key { width: 0; padding: 0; visibility: hidden; } table.catalog:not(.not-added) .fold.f-key { display: inline; } }
+@container catalog (max-width: 1205px) { table.catalog:not(.not-added) :is(th, td).size { width: 0; padding: 0; visibility: hidden; } table.catalog:not(.not-added) .fold.f-size { display: inline; } }
+@container catalog (max-width: 1089px) { table.catalog:not(.not-added) :is(th, td).last { width: 0; padding: 0; visibility: hidden; } table.catalog:not(.not-added) .fold.f-last { display: inline; } }
+@container catalog (max-width: 985px) { table.catalog:not(.not-added) :is(th, td).rows { width: 0; padding: 0; visibility: hidden; } table.catalog:not(.not-added) .fold.f-rows { display: inline; } }
+@container catalog (max-width: 869px) { table.catalog:not(.not-added) :is(th, td).cols { width: 0; padding: 0; visibility: hidden; } table.catalog:not(.not-added) td.cols .syncnow { display: none; } table.catalog:not(.not-added) .fold.f-cols { display: inline; } }
+@container catalog (max-width: 749px) { table.catalog:not(.not-added) :is(th, td).sync { width: 0; padding: 0; visibility: hidden; } table.catalog:not(.not-added) td.sync .syncnow { display: none; } table.catalog:not(.not-added) .fold.f-sync { display: inline; } }
+table.catalog.not-added .fold:is(.f-cols, .f-sync) { display: inline; }
+@container catalog (max-width: 1069px) { table.catalog.not-added :is(th, td).key { width: 0; padding: 0; visibility: hidden; } table.catalog.not-added .fold.f-key { display: inline; } }
+@container catalog (max-width: 965px) { table.catalog.not-added :is(th, td).size { width: 0; padding: 0; visibility: hidden; } table.catalog.not-added .fold.f-size { display: inline; } }
+@container catalog (max-width: 849px) { table.catalog.not-added :is(th, td).last { width: 0; padding: 0; visibility: hidden; } table.catalog.not-added .fold.f-last { display: inline; } }
+@container catalog (max-width: 745px) { table.catalog.not-added :is(th, td).rows { width: 0; padding: 0; visibility: hidden; } table.catalog.not-added .fold.f-rows { display: inline; } }
 table.catalog th, table.catalog td { overflow: hidden; text-overflow: ellipsis; }
 /* A TABLE'S NAME AND ITS STATE ARE NEVER CUT (issue 884, the owner: "otherwise we can't see them"): each wraps in its
    cell, the row growing to fit — a name after its `.` and `_` where it can (`<wbr>`, src/web/pages/tables.js), anywhere

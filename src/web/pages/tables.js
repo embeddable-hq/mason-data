@@ -614,13 +614,17 @@ export function renderTables(s, ui = {}) {
   // comes or goes moves no row. A question (Remove), a form (Columns…) and what an action answered are POPOVERS beside
   // the button that asked (`pop`), written after the table: a click moves no other row and no column
   // (`table-layout: fixed`, the stylesheet's widths by the header's classes; a button whose label changes keeps its room).
-  const head = [["Table", "name"], ["State", "state"], ["Rows", "num rows"], ["Key", "key"], ["Columns", "cols"], ["Sync", "sync"], ["Last sync", "num last"], ["Size", "num size"], ["", "act"]];
+  // NOT ADDED HAS SEVEN: no Columns and no Sync, which are always empty there and took room from the name (the owner,
+  // issue 1110). A table added from it keeps its row there until the lists are laid out again: its two buttons are in its
+  // note meanwhile (`.not-added`, app.css), so they can still be pressed.
+  const HEAD = [["Table", "name"], ["State", "state"], ["Rows", "num rows"], ["Key", "key"], ["Columns", "cols"], ["Sync", "sync"], ["Last sync", "num last"], ["Size", "num size"], ["", "act"]];
+  const headOf = (notAdded) => notAdded ? HEAD.filter(([, c]) => c !== "cols" && c !== "sync") : HEAD;
   const sizeCell = sizeCellOf(sizes);
-  const under = (html, cls = "") => `<tr class="under${cls ? ` ${cls}` : ""}"><td colspan="${head.length}"><div class="under-body">${html}</div></td></tr>`;
+  const under = (html, cls, notAdded) => `<tr class="under${cls ? ` ${cls}` : ""}"><td colspan="${headOf(notAdded).length}"><div class="under-body">${html}</div></td></tr>`;
   const cell = (v, cls = "", title = "") => `<td${cls ? ` class="${cls}"` : ""}${title ? ` title="${esc(title)}"` : ""}>${esc(v)}</td>`;
   // the popovers of the rows written, in their order: after the table, each anchored to its row's actions
   const pops = [];
-  const line = (t) => {
+  const line = (t, notAdded = false) => {
     const f = tableFacts(t);
     const name = entryName(t.table);
     const y = t.sync;
@@ -714,7 +718,7 @@ export function renderTables(s, ui = {}) {
       : t.added && y?.syncSeconds != null ? `took ${tookText(y)}` : "";
     const folds = [["rows", t.added && t.copy && t.copy.phase !== "failed" ? `${rows} rows` : rows], ["key", f.key], ["cols", colsCtl(true), true], ["sync", syncCtl(true), true], ["last", lastText], ["size", sizeText]]
       .filter(([, x]) => x).map(([c, x, html]) => html ? `<span class="fold f-${c}">${x}</span>` : `<span class="fold f-${c}" data-fold="${esc(x)}"></span>`).join("");
-    const note = under(folds + said_, "note");
+    const note = under(folds + said_, "note", notAdded);
     if (asking) {
       pops.push(pop(anchor, `<p class="confirm">Remove ${esc(name)}? Mason will stop syncing it and delete its synced data.</p>` +
         // while it is sent, the question stays: its button says Removing…, and Cancel is held
@@ -741,7 +745,7 @@ export function renderTables(s, ui = {}) {
     }
     return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}${said_ ? " has-note" : ""}"><th scope="row" class="name"><code class="name" title="${esc(t.table)}">${nameBreaks(t.table)}</code></th>` +
       `<td class="state">${state}${bar}</td>${cell(rows, "num rows", rows)}${cell(f.key, "mono key", f.key)}` +
-      `<td class="cols">${colsCtl(false)}</td><td class="sync">${syncCtl(false)}</td>${last}` +
+      `${notAdded ? "" : `<td class="cols">${colsCtl(false)}</td><td class="sync">${syncCtl(false)}</td>`}${last}` +
       `${size ? cell(size.text, "num size", size.title) : cell("", "num size")}` +
       `<td class="act" id="${esc(anchor)}">${act}</td></tr>` + note;
   };
@@ -765,9 +769,9 @@ export function renderTables(s, ui = {}) {
   const otherWritten = otherShown.filter((t, i) => addedShown.length + i < limit || held_(t));
   const matching = term ? `<p class="count dim">${n(shown)} with “${esc(term)}” in the name</p>` : "";
   const sizesFailed = added && sizes && "failure" in sizes ? `<p class="count">The synced tables' sizes could not be read: ${esc(firstLine(sizes.failure.message))}.</p>` : "";
-  const thead = `<thead><tr>${head.map(([h, c]) => `<th scope="col"${c ? ` class="${c}"` : ""}>${h}</th>`).join("")}</tr></thead>`;
+  const thead = (notAdded) => `<thead><tr>${headOf(notAdded).map(([h, c]) => `<th scope="col"${c ? ` class="${c}"` : ""}>${h}</th>`).join("")}</tr></thead>`;
   // `line` writes each row's popovers into `pops` as it goes: Added's rows first, in the order they are written
-  const list = (rows) => listTable("catalog", `${thead}<tbody>${rows.map(line).join("")}</tbody>`);
+  const list = (rows, notAdded = false) => listTable(notAdded ? "catalog not-added" : "catalog", `${thead(notAdded)}<tbody>${rows.map((t) => line(t, notAdded)).join("")}</tbody>`);
   const heading = (title, count) => `<h3 class="list-h">${esc(title)} <span class="dim">(${n(count)})</span></h3>`;
   const addedNone = added === 0 ? empty(readOnly === null ? "No table added yet. Add one from the list below." : "No table added yet. The tables to sync are set in the sources file.")
     : failed ? `<p class="dim">No failed table${term ? `'s name has “${esc(term)}”` : ""}.</p>`
@@ -777,7 +781,7 @@ export function renderTables(s, ui = {}) {
   const otherNone = laid.other.length === 0 ? `<p class="dim">Every table in the database is added.</p>`
     : `<p class="dim">No table that is not added has “${esc(term)}” in its name.</p>`;
   const otherHtml = failed && !otherShown.length || otherShown.length && !otherWritten.length ? ""
-    : heading("Not added", otherShown.length) + (otherWritten.length ? list(otherWritten) : otherNone);
+    : heading("Not added", otherShown.length) + (otherWritten.length ? list(otherWritten, true) : otherNone);
   return stray + (viewOnly !== null ? readOnlyLine("Tables are not added, removed or synced", viewOnly)
     : readOnly === null ? "" : `<p class="count">You can't add or remove tables from this page. ${esc(readOnly)}${deployLink(s.sourcesReadOnlyKind, s.pageDeployDocs)}</p>`) +
     matching + addedHtml + otherHtml + pops.join("") + moreRows("tables", Math.min(limit, shown), shown, TABLE_ROWS) + sizesFailed +
