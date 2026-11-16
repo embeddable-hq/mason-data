@@ -12,6 +12,9 @@
  * - the hidden columns' view (src/duck/kept-route.ts `exposes`, `hideKept`), which reads a copy listed by a `*`
  *   through its view. It missed a set operation's arm's own WITH, and read a name that WITH binds as the copy of that
  *   name.
+ * - the generated tables' reads by name (src/duck/generated-plan.ts `readsByName`), which tell a cycle before anything
+ *   is planned. It left out every bare name any WITH query held, so a cycle through a WITH query's own body went
+ *   unnoticed (issue 1096).
  * - the rewrite (src/duck/rewrite.ts `rewrite`), before anything else reads the statement. Its resolvers, and those of
  *   src/duck/late.ts, src/duck/libc-bound.ts, src/duck/kept-route.ts and the generated tables' swap, each read a name
  *   by rules of their own. Each took the body's `big` for the WITH query, and a pass-through followed it into itself
